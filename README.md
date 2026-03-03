@@ -1,6 +1,6 @@
 <div align="center">
 
-# JiuwenClaw 🦞
+# JiuwenClaw
 
 > 随叫随到的智能管家，让AI触手可及
 
