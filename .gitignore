@@ -1,0 +1,62 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+.Python
+.venv/
+venv/
+env/
+ENV/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+
+# Node.js / Frontend
+node_modules/
+**/node_modules/
+dist/
+build/
+coverage/
+jiuwenclaw/web/logs/
+jiuwenclaw/web/cd
+jiuwenclaw/web/tsc
+jiuwenclaw/web/openjiuwen-web@0.1.0
+*.tsbuildinfo
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# Environment files
+.env
+.env_personal
+!.env.example
+
+# IDE / Editor
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+
+# reference
+reference/
+
+# environment
+venv/
+*.egg-info/
+
+
+# logs
+logs/
+
+# workspace
+workspace/session
+workspace/agent/memory/*.db
+workspace/agent/memory/*.db-shm
+workspace/agent/memory/*.db-wal

@@ -1,0 +1,40 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "jiuwenclaw"
+version = "0.1.0"
+description = "JiuwenClaw"
+requires-python = ">=3.13,<3.14"
+dependencies = [
+    "chromadb>=1.5.0",
+    "ruamel.yaml>=0.18.0",
+    "lark-oapi>=1.5.3",
+    "loguru>=0.7.3",
+    "openjiuwen==0.1.7",
+    "pip==26.0.1",
+    "pgvector>=0.4.2",
+    "websockets>=12.0",
+    "psutil>=7.2.2",
+]
+
+[project.scripts]
+jiuwenclaw-app = "jiuwenclaw.app:main"
+jiuwenclaw-web = "jiuwenclaw.app_web:main"
+jiuwenclaw-start = "jiuwenclaw.start_services:main"
+jiuwenclaw-init = "jiuwenclaw.init_workspace:main"
+
+[tool.setuptools]
+# 入口脚本现在是 jiuwenclaw 包内的一部分，不需要 py-modules
+py-modules = []
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["jiuwenclaw*"]
+
+[tool.setuptools.package-data]
+jiuwenclaw = ["web/dist/**/*", "web/dist/*", "config/**/*", "config/*", "workspace/**/*", "workspace/*", ".env.template"]
+
+[tool.setuptools.exclude-package-data]
+jiuwenclaw = ["web/node_modules/**", "web/node_modules/*"]

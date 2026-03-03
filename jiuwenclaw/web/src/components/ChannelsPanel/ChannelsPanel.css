@@ -1,0 +1,20 @@
+.channels-panel__visibility-toggle {
+  position: absolute;
+  inset-block: 0;
+  right: 0;
+  display: flex;
+  width: 2.25rem;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-muted);
+  transition: color var(--duration-fast) ease;
+}
+
+.channels-panel__visibility-toggle:hover {
+  color: var(--text);
+}
+
+.channels-panel__icon {
+  width: 1rem;
+  height: 1rem;
+}
