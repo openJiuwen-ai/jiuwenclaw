@@ -65,10 +65,10 @@ class XiaoyiChannel(BaseChannel):
     def __init__(self, config: XiaoyiChannelConfig, router: RobotMessageRouter):
         super().__init__(config, router)
         self.config: XiaoyiChannelConfig = config
-        self._ws: Any = None
+        self._ws_connections: dict[str, Any] = {}  # Dual channel connections
         self._running = False
-        self._heartbeat_task: asyncio.Task | None = None
-        self._reconnect_task: asyncio.Task | None = None
+        self._heartbeat_tasks: dict[str, asyncio.Task] = {}  # Heartbeat tasks for each channel
+        self._connect_tasks: dict[str, asyncio.Task] = {}  # Connection tasks for each channel
         self._session_task_map: dict[str, str] = {}
         self._on_message_cb: Callable[[Message], Any] | None = None
 
@@ -95,25 +95,40 @@ class XiaoyiChannel(BaseChannel):
             return
 
         self._running = True
-        self._reconnect_task = asyncio.create_task(self._reconnect_loop())
-        logger.info("XiaoyiChannel 已启动（客户端模式）")
+        # Start dual channel connections
+        for url_key, url in [("ws_url1", self.config.ws_url1), ("ws_url2", self.config.ws_url2)]:
+            if url:
+                self._connect_tasks[url_key] = asyncio.create_task(self._reconnect_loop(url_key, url))
+        logger.info("XiaoyiChannel 已启动（客户端模式，双通道）")
 
     async def stop(self) -> None:
         self._running = False
-        if self._heartbeat_task:
-            self._heartbeat_task.cancel()
-            self._heartbeat_task = None
-        if self._reconnect_task:
-            self._reconnect_task.cancel()
-            self._reconnect_task = None
-        if self._ws:
-            await self._ws.close()
-            self._ws = None
+        # Cancel all heartbeat tasks
+        for url_key in list(self._heartbeat_tasks.keys()):
+            if self._heartbeat_tasks[url_key]:
+                self._heartbeat_tasks[url_key].cancel()
+                self._heartbeat_tasks[url_key] = None
+        # Cancel all connection tasks
+        for url_key in list(self._connect_tasks.keys()):
+            if self._connect_tasks[url_key]:
+                self._connect_tasks[url_key].cancel()
+                self._connect_tasks[url_key] = None
+        # Close all websocket connections
+        for url_key, ws in list(self._ws_connections.items()):
+            if ws:
+                try:
+                    await ws.close()
+                except Exception as e:
+                    logger.warning("关闭 WebSocket 连接失败 ({}): {}", url_key, e)
+                self._ws_connections[url_key] = None
+        self._heartbeat_tasks.clear()
+        self._connect_tasks.clear()
+        self._ws_connections.clear()
         logger.info("XiaoyiChannel 已停止")
 
     async def send(self, msg: Message) -> None:
-        """发送消息到小艺服务端（A2A 格式）."""
-        if not self._ws:
+        """发送消息到小艺服务端（A2A 格式，双通道发送）."""
+        if not self._ws_connections:
             return
         session_id = msg.session_id or ""
         task_id = self._session_task_map.get(session_id, session_id)
@@ -128,7 +143,13 @@ class XiaoyiChannel(BaseChannel):
         elif msg.payload:
             content = str(msg.payload)
 
-        await self._send_text_response(session_id, task_id, content)
+        # Send to all active connections
+        for url_key, ws in self._ws_connections.items():
+            if ws:
+                try:
+                    await self._send_text_response(session_id, task_id, content, url_key)
+                except Exception as e:
+                    logger.warning("XiaoyiChannel 发送消息失败 ({}): {}", url_key, e)
 
     def get_metadata(self) -> ChannelMetadata:
         return ChannelMetadata(
@@ -142,22 +163,17 @@ class XiaoyiChannel(BaseChannel):
             },
         )
 
-    async def _reconnect_loop(self) -> None:
-        """自动重连循环."""
-        urls = [self.config.ws_url1, self.config.ws_url2]
-        url_index = 0
+    async def _reconnect_loop(self, url_key: str, url: str) -> None:
+        """自动重连循环（双通道）."""
         while self._running:
-            url = urls[url_index]
             try:
-                await self._connect(url)
-                url_index = 0
+                await self._connect(url_key, url)
             except Exception as e:
                 logger.warning("XiaoyiChannel 连接失败 ({}): {}", url, e)
-                url_index = (url_index + 1) % len(urls)
                 await asyncio.sleep(5)
 
-    async def _connect(self, url: str) -> None:
-        """连接到小艺服务器."""
+    async def _connect(self, url_key: str, url: str) -> None:
+        """连接到小艺服务器（双通道）."""
         import websockets
 
         headers = _generate_auth_headers(self.config.ak, self.config.sk, self.config.agent_id)
@@ -170,50 +186,53 @@ class XiaoyiChannel(BaseChannel):
             ssl_context.verify_mode = ssl.CERT_NONE
 
         async with websockets.connect(url, additional_headers=headers, ssl=ssl_context) as ws:
-            self._ws = ws
-            logger.info("XiaoyiChannel 已连接: {}", url)
+            self._ws_connections[url_key] = ws
+            logger.info("XiaoyiChannel 已连接 ({}): {}", url_key, url)
 
             # 发送初始化消息（必须在 heartbeat 之前）
-            await self._send_init_message()
+            await self._send_init_message(url_key)
 
             # 启动心跳
-            self._heartbeat_task = asyncio.create_task(self._heartbeat_loop())
+            self._heartbeat_tasks[url_key] = asyncio.create_task(self._heartbeat_loop(url_key))
 
             try:
                 async for raw in ws:
                     await self._handle_raw_message(raw)
             except Exception as e:
-                logger.warning("XiaoyiChannel 连接异常: {}", e)
+                logger.warning("XiaoyiChannel 连接异常 ({}): {}", url_key, e)
             finally:
-                if self._heartbeat_task:
-                    self._heartbeat_task.cancel()
-                    self._heartbeat_task = None
-                self._ws = None
-                logger.info("XiaoyiChannel 连接关闭")
+                if self._heartbeat_tasks.get(url_key):
+                    self._heartbeat_tasks[url_key].cancel()
+                    self._heartbeat_tasks[url_key] = None
+                self._ws_connections[url_key] = None
+                logger.info("XiaoyiChannel 连接关闭 ({}): {}", url_key, url)
 
-    async def _send_init_message(self) -> None:
-        """发送初始化消息 (clawd_bot_init)."""
-        if not self._ws:
+    async def _send_init_message(self, url_key: str) -> None:
+        """发送初始化消息 (clawd_bot_init) 到指定通道."""
+        ws = self._ws_connections.get(url_key)
+        if not ws:
             return
         init_message = {
             "msgType": "clawd_bot_init",
             "agentId": self.config.agent_id,
         }
         try:
-            await self._ws.send(json.dumps(init_message))
-            logger.info("XiaoyiChannel 已发送初始化消息")
+            await ws.send(json.dumps(init_message))
+            logger.info("XiaoyiChannel 已发送初始化消息 ({})", url_key)
         except Exception as e:
-            logger.warning("XiaoyiChannel 发送初始化消息失败: {}", e)
+            logger.warning("XiaoyiChannel 发送初始化消息失败 ({}): {}", url_key, e)
             raise
 
-    async def _heartbeat_loop(self) -> None:
+    async def _heartbeat_loop(self, url_key: str) -> None:
         """应用层心跳循环（20秒间隔）."""
-        while self._running and self._ws:
+        while self._running and self._ws_connections.get(url_key):
             try:
                 heartbeat = {"msgType": "heartbeat", "agentId": self.config.agent_id}
-                await self._ws.send(json.dumps(heartbeat))
+                ws = self._ws_connections.get(url_key)
+                if ws:
+                    await ws.send(json.dumps(heartbeat))
             except Exception as e:
-                logger.warning("XiaoyiChannel 心跳发送失败: {}", e)
+                logger.warning("XiaoyiChannel 心跳发送失败 ({}): {}", url_key, e)
                 break
             await asyncio.sleep(20)
 
@@ -290,7 +309,9 @@ class XiaoyiChannel(BaseChannel):
             "id": message.get("id", ""),
             "result": {"status": {"state": "cleared"}},
         }
-        await self._send_agent_response(session_id, session_id, response)
+        # Send response to all active connections
+        for url_key in list(self._ws_connections.keys()):
+            await self._send_agent_response(session_id, session_id, response, url_key)
 
     async def _handle_tasks_cancel(self, message: dict[str, Any]) -> None:
         """处理取消任务请求."""
@@ -303,10 +324,12 @@ class XiaoyiChannel(BaseChannel):
             "id": message.get("id", ""),
             "result": {"id": message.get("id", ""), "status": {"state": "canceled"}},
         }
-        await self._send_agent_response(session_id, task_id, response)
+        # Send response to all active connections
+        for url_key in list(self._ws_connections.keys()):
+            await self._send_agent_response(session_id, task_id, response, url_key)
 
-    async def _send_text_response(self, session_id: str, task_id: str, text: str) -> None:
-        """发送文本响应（A2A 格式）."""
+    async def _send_text_response(self, session_id: str, task_id: str, text: str, url_key: str) -> None:
+        """发送文本响应（A2A 格式）到指定通道."""
         response = {
             "jsonrpc": "2.0",
             "id": f"msg_{int(time.time() * 1000)}",
@@ -322,11 +345,12 @@ class XiaoyiChannel(BaseChannel):
                 },
             },
         }
-        await self._send_agent_response(session_id, task_id, response)
+        await self._send_agent_response(session_id, task_id, response, url_key)
 
-    async def _send_agent_response(self, session_id: str, task_id: str, response: dict[str, Any]) -> None:
-        """发送 agent_response 包装的消息（A2A 格式）."""
-        if not self._ws:
+    async def _send_agent_response(self, session_id: str, task_id: str, response: dict[str, Any], url_key: str) -> None:
+        """发送 agent_response 包装的消息（A2A 格式）到指定通道."""
+        ws = self._ws_connections.get(url_key)
+        if not ws:
             return
         wrapper = {
             "msgType": "agent_response",
@@ -336,6 +360,6 @@ class XiaoyiChannel(BaseChannel):
             "msgDetail": json.dumps(response),
         }
         try:
-            await self._ws.send(json.dumps(wrapper))
+            await ws.send(json.dumps(wrapper))
         except Exception as e:
-            logger.warning("XiaoyiChannel 发送响应失败: {}", e)
+            logger.warning("XiaoyiChannel 发送响应失败 ({}): {}", url_key, e)

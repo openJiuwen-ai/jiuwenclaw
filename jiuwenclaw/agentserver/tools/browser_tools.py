@@ -12,6 +12,7 @@ import subprocess
 import sys
 import time
 import importlib.util
+from urllib.parse import urlparse
 from pathlib import Path
 from typing import Any
 
@@ -268,7 +269,7 @@ def _pick_available_port(host: str, preferred_port: int, max_attempts: int = 25)
     raise RuntimeError("No available port for browser runtime SSE server.")
 
 
-def _wait_port_open(host: str, port: int, timeout_s: float = 8.0) -> None:
+def _wait_port_open(host: str, port: int, timeout_s: float = 20.0) -> None:
     deadline = time.time() + timeout_s
     while time.time() < deadline:
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
@@ -279,31 +280,20 @@ def _wait_port_open(host: str, port: int, timeout_s: float = 8.0) -> None:
     raise RuntimeError(f"SSE server did not start in time: {host}:{port}")
 
 
-def _ensure_local_server_started(transport: str) -> str:
+def _start_local_server(transport: str, host: str, port: int, path: str) -> str:
     global _BROWSER_RUNTIME_PROCESS
     global _BROWSER_RUNTIME_SERVER_URL
+
     normalized = _normalize_client_type(transport)
     if normalized not in {"sse", "streamable-http"}:
         raise ValueError(f"Unsupported auto-start transport: {transport}")
-    if (
-        _BROWSER_RUNTIME_PROCESS is not None
-        and _BROWSER_RUNTIME_PROCESS.poll() is None
-        and _BROWSER_RUNTIME_SERVER_URL
-    ):
-        return _BROWSER_RUNTIME_SERVER_URL
 
     server_script = _browser_move_server_script()
     if not server_script.exists():
         raise FileNotFoundError(f"browser runtime server script not found: {server_script}")
 
-    host = _runtime_host()
-    preferred_port_raw = _runtime_port()
-    path = _runtime_path(normalized)
-    preferred_port = int(preferred_port_raw)
-    port = _pick_available_port(host, preferred_port)
     command = (os.getenv("BROWSER_RUNTIME_MCP_COMMAND") or sys.executable).strip()
     env = _build_browser_runtime_subprocess_env()
-
     cmd = [
         command,
         str(server_script),
@@ -328,6 +318,88 @@ def _ensure_local_server_started(transport: str) -> str:
     _wait_port_open(host, port)
     _BROWSER_RUNTIME_SERVER_URL = f"http://{host}:{port}{path}"
     return _BROWSER_RUNTIME_SERVER_URL
+
+
+def _parse_local_server_url(server_url: str) -> tuple[str, int, str]:
+    parsed = urlparse(server_url)
+    if parsed.scheme not in {"http", "https"} or not parsed.hostname or parsed.port is None:
+        raise ValueError(f"Invalid browser runtime server URL: {server_url}")
+    return parsed.hostname, int(parsed.port), parsed.path or "/mcp"
+
+
+def stop_local_browser_runtime_server() -> None:
+    global _BROWSER_RUNTIME_PROCESS
+    global _BROWSER_RUNTIME_SERVER_URL
+
+    proc = _BROWSER_RUNTIME_PROCESS
+    _BROWSER_RUNTIME_PROCESS = None
+    _BROWSER_RUNTIME_SERVER_URL = None
+
+    if proc is None or proc.poll() is not None:
+        return
+
+    try:
+        proc.terminate()
+        proc.wait(timeout=5)
+    except Exception:
+        try:
+            proc.kill()
+            proc.wait(timeout=2)
+        except Exception:
+            pass
+
+
+def restart_local_browser_runtime_server() -> str | None:
+    transport = _normalize_client_type(os.getenv("BROWSER_RUNTIME_MCP_CLIENT_TYPE") or "streamable-http")
+    current_url = _BROWSER_RUNTIME_SERVER_URL
+    current_proc = _BROWSER_RUNTIME_PROCESS
+
+    if transport not in {"sse", "streamable-http"}:
+        stop_local_browser_runtime_server()
+        return None
+
+    host = _runtime_host()
+    path = _runtime_path(transport)
+    preferred_port = int(_runtime_port())
+    if current_url:
+        host, preferred_port, path = _parse_local_server_url(current_url)
+
+    had_local_server = current_url is not None or (current_proc is not None and current_proc.poll() is None)
+    stop_local_browser_runtime_server()
+
+    if not had_local_server:
+        return None
+
+    # Port may remain in TIME_WAIT after process exit; retry until released.
+    deadline = time.time() + 10.0
+    while time.time() < deadline:
+        if _is_port_available(host, preferred_port):
+            return _start_local_server(transport, host, preferred_port, path)
+        time.sleep(0.3)
+    raise RuntimeError(
+        f"Browser runtime port is still occupied after shutdown: {host}:{preferred_port}"
+    )
+
+
+def _ensure_local_server_started(transport: str) -> str:
+    global _BROWSER_RUNTIME_PROCESS
+    global _BROWSER_RUNTIME_SERVER_URL
+    normalized = _normalize_client_type(transport)
+    if normalized not in {"sse", "streamable-http"}:
+        raise ValueError(f"Unsupported auto-start transport: {transport}")
+    if (
+        _BROWSER_RUNTIME_PROCESS is not None
+        and _BROWSER_RUNTIME_PROCESS.poll() is None
+        and _BROWSER_RUNTIME_SERVER_URL
+    ):
+        return _BROWSER_RUNTIME_SERVER_URL
+
+    host = _runtime_host()
+    preferred_port_raw = _runtime_port()
+    path = _runtime_path(normalized)
+    preferred_port = int(preferred_port_raw)
+    port = _pick_available_port(host, preferred_port)
+    return _start_local_server(normalized, host, port, path)
 
 
 def _build_sse_fallback_config(base_cfg: McpServerConfig, server_url: str | None = None) -> McpServerConfig:

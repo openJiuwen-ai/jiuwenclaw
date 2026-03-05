@@ -15,7 +15,7 @@ import {
 } from '../types';
 import { useTodoStore } from './todoStore';
 
-const TOOL_TIMEOUT_MS = 300_000;
+const TOOL_TIMEOUT_MS = 12_000_000;
 
 function computeTimeoutAt(baseIso: string): string {
   return new Date(Date.parse(baseIso) + TOOL_TIMEOUT_MS).toISOString();

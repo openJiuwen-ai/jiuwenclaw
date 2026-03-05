@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import logging
 import os
 import secrets
@@ -283,7 +284,10 @@ def _register_web_handlers(
             _persist_env_updates(updates)
             logger.info("[config.set] 已更新: %s", list(updates.keys()))
             if on_config_saved:
-                applied_without_restart = bool(on_config_saved())
+                callback_result = on_config_saved(set(updates.keys()))
+                if inspect.isawaitable(callback_result):
+                    callback_result = await callback_result
+                applied_without_restart = bool(callback_result)
         updated_param_keys = [k for k, e in _CONFIG_SET_ENV_MAP.items() if e in updates]
         await channel.send_response(
             ws, req_id, ok=True,
@@ -728,6 +732,7 @@ async def _run() -> None:
     from jiuwenclaw.gateway.message_handler import MessageHandler
     from jiuwenclaw.schema.message import Message, EventType, ReqMethod
     from jiuwenclaw.agentserver.memory.config import _load_config as _load_agent_config
+    from jiuwenclaw.agentserver.tools.browser_tools import restart_local_browser_runtime_server
 
     agent_port = int(os.getenv("AGENT_PORT", "18092"))
     web_host = os.getenv("WEB_HOST", "127.0.0.1")
@@ -811,10 +816,13 @@ async def _run() -> None:
 
     channel_manager = ChannelManager(message_handler, config=initial_channels_conf)
 
-    def _on_config_saved() -> bool:
+    def _on_config_saved(updated_env_keys: set[str] | None = None) -> bool:
         """先尝试热更新，失败则安排延迟重启。返回 True 表示已热更新未重启，False 表示已安排重启。"""
+        browser_runtime_keys = {"MODEL_PROVIDER", "MODEL_NAME", "API_BASE", "API_KEY"}
         try:
             agent.reload_agent_config()
+            if updated_env_keys and (browser_runtime_keys & set(updated_env_keys)):
+                restart_local_browser_runtime_server()
             return True
         except Exception as e:  # noqa: BLE001
             logger.warning("[App] 配置热更新失败，将延迟重启: %s", e)
@@ -965,8 +973,8 @@ async def _run() -> None:
             ak = str(xiaoyi_conf.get("ak") or "").strip()
             sk = str(xiaoyi_conf.get("sk") or "").strip()
             agent_id = str(xiaoyi_conf.get("agent_id") or "").strip()
-            ws_url1 = str(xiaoyi_conf.get("ws_url1") or "").strip()
-            ws_url2 = str(xiaoyi_conf.get("ws_url2") or "").strip()
+            ws_url1 = str(xiaoyi_conf.get("ws_url1") or "wss://116.63.174.231/openclaw/v1/ws/link").strip()
+            ws_url2 = str(xiaoyi_conf.get("ws_url2") or "wss://hag.cloud.huawei.com/openclaw/v1/ws/link").strip()
             enable_streaming_raw = xiaoyi_conf.get("enable_streaming", True)
             enable_streaming = bool(enable_streaming_raw)
 

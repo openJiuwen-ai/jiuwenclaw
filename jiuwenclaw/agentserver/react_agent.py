@@ -1079,7 +1079,6 @@ class JiuClawReActAgent(ReActAgent):
             return {
                 "output": (
                     f"当前对话未发现明确的演进信号（无工具执行失败、无用户纠正）。\n"
-                    f"如需手动记录经验，可描述具体问题，我会提炼后更新 Skill '{skill_name}'。"
                 ),
                 "result_type": "answer",
             }
@@ -1093,7 +1092,7 @@ class JiuClawReActAgent(ReActAgent):
                     "output": (
                         f"✓ 已记录演进经验到 Skill '{skill_name}'：\n"
                         f"  **[{entry.change.section}]** {entry.change.content[:200]}\n\n"
-                        f"（evolutions.json 已更新，下次对话自动生效；"
+                        f"（evolutions.json 已更新，自动生效；"
                         f"可使用 `/solidify {skill_name}` 将经验固化到 SKILL.md 本体）"
                     ),
                     "result_type": "answer",

@@ -39,8 +39,6 @@ type XiaoyiConfig = {
   ak: string;
   sk: string;
   agent_id: string;
-  ws_url1: string;
-  ws_url2: string;
   enable_streaming: boolean;
 };
 
@@ -49,8 +47,6 @@ type XiaoyiDraft = {
   ak: string;
   sk: string;
   agent_id: string;
-  ws_url1: string;
-  ws_url2: string;
   enable_streaming: boolean;
 };
 
@@ -68,8 +64,6 @@ const DEFAULT_XIAOYI_CONF: XiaoyiConfig = {
   ak: '',
   sk: '',
   agent_id: '',
-  ws_url1: '',
-  ws_url2: '',
   enable_streaming: true,
 };
 
@@ -93,10 +87,6 @@ function isSensitiveField(field: keyof FeishuDraft): boolean {
 
 function isSensitiveXiaoyiField(field: keyof XiaoyiDraft): boolean {
   return field === 'ak' || field === 'sk';
-}
-
-function isReadonlyXiaoyiField(field: keyof XiaoyiDraft): boolean {
-  return field === 'ws_url1' || field === 'ws_url2';
 }
 
 function normalizeEnabledChannels(channels: unknown): Set<string> {
@@ -185,8 +175,6 @@ function normalizeXiaoyiConfig(input: unknown): XiaoyiConfig {
     ak: String(data.ak ?? '').trim(),
     sk: String(data.sk ?? '').trim(),
     agent_id: String(data.agent_id ?? '').trim(),
-    ws_url1: String(data.ws_url1 ?? '').trim(),
-    ws_url2: String(data.ws_url2 ?? '').trim(),
     enable_streaming: data.enable_streaming === undefined ? true : Boolean(data.enable_streaming),
   };
 }
@@ -197,8 +185,6 @@ function draftFromXiaoyiConfig(conf: XiaoyiConfig): XiaoyiDraft {
     ak: conf.ak,
     sk: conf.sk,
     agent_id: conf.agent_id,
-    ws_url1: conf.ws_url1,
-    ws_url2: conf.ws_url2,
     enable_streaming: conf.enable_streaming,
   };
 }
@@ -209,8 +195,6 @@ function buildXiaoyiPayload(draft: XiaoyiDraft): Record<string, unknown> {
     ak: draft.ak.trim(),
     sk: draft.sk.trim(),
     agent_id: draft.agent_id.trim(),
-    ws_url1: draft.ws_url1.trim(),
-    ws_url2: draft.ws_url2.trim(),
     enable_streaming: draft.enable_streaming,
   };
 }
@@ -394,8 +378,6 @@ export function ChannelsPanel({ isConnected }: ChannelsPanelProps) {
       baseDraft.ak !== xiaoyiDraft.ak ||
       baseDraft.sk !== xiaoyiDraft.sk ||
       baseDraft.agent_id !== xiaoyiDraft.agent_id ||
-      baseDraft.ws_url1 !== xiaoyiDraft.ws_url1 ||
-      baseDraft.ws_url2 !== xiaoyiDraft.ws_url2 ||
       baseDraft.enable_streaming !== xiaoyiDraft.enable_streaming
     );
   }, [xiaoyiConfig, xiaoyiDraft]);
@@ -680,7 +662,7 @@ export function ChannelsPanel({ isConnected }: ChannelsPanelProps) {
                                 </button>
                               </td>
                             </tr>
-                            {(['ak', 'sk', 'agent_id', 'ws_url1', 'ws_url2'] as const).map((field) => (
+                            {(['ak', 'sk', 'agent_id'] as const).map((field) => (
                               <tr key={field} className="border-t border-border first:border-t-0 even:bg-secondary/10">
                                 <td className="px-4 py-2.5 align-middle mono text-xs text-text-muted w-[32%]">{field}</td>
                                 <td className="px-4 py-2.5 break-all text-[13px] align-middle">
@@ -692,8 +674,7 @@ export function ChannelsPanel({ isConnected }: ChannelsPanelProps) {
                                       placeholder="请输入配置值"
                                       className={`w-full rounded-md border border-border bg-bg px-3 py-2 text-[13px] outline-none focus:border-accent ${
                                         isSensitiveXiaoyiField(field) ? 'pr-10' : ''
-                                      } ${isReadonlyXiaoyiField(field) ? 'bg-secondary/30 text-text-muted focus:border-border' : ''}`}
-                                      readOnly={isReadonlyXiaoyiField(field)}
+                                      }`}
                                     />
                                     {isSensitiveXiaoyiField(field) ? (
                                       <button

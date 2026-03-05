@@ -147,6 +147,7 @@ class JiuWenClaw:
                 model_client_config["api_base"] = config.pop("api_base", "")
             if "api_key" not in model_client_config:
                 model_client_config["api_key"] = config.pop("api_key", "")
+            model_client_config["timeout"] = config.pop("timeout", 1800)
             config["model_client_config"] = model_client_config
 
         config["model_config_obj"] = {
