@@ -41,16 +41,9 @@ if [[ -d "$NODE_MODULES" ]]; then
     NODE_MODULES_MOVED=true
 fi
 
-# 创建符号链接，让 config 和 workspace 在 jiuwenclaw 包内
+# 创建符号链接，让 workspace 和入口脚本在 jiuwenclaw 包内
 SYMLINKS_REMOVED=()
 JIUWENCLAW_DIR="$PROJECT_ROOT/jiuwenclaw"
-
-CONFIG_LINK="$JIUWENCLAW_DIR/config"
-if [[ ! -e "$CONFIG_LINK" ]]; then
-    echo "[build] 创建 config 符号链接..."
-    ln -s "$PROJECT_ROOT/config" "$CONFIG_LINK"
-    SYMLINKS_REMOVED+=("$CONFIG_LINK")
-fi
 
 WORKSPACE_LINK="$JIUWENCLAW_DIR/workspace"
 if [[ ! -e "$WORKSPACE_LINK" ]]; then

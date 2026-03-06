@@ -44,17 +44,9 @@ if (Test-Path $NodeModules) {
     $NodeModulesMoved = $true
 }
 
-# 创建符号链接，让 config 和 workspace 在 jiuwenclaw 包内
+# 创建符号链接，让 workspace 和入口脚本在 jiuwenclaw 包内
 $SymlinksRemoved = @()
 $JiuwenclawDir = Join-Path $ProjectRoot "jiuwenclaw"
-
-$ConfigLink = Join-Path $JiuwenclawDir "config"
-if (-not (Test-Path $ConfigLink)) {
-    Write-Host "[build] 创建 config 符号链接..." -ForegroundColor Gray
-    $ConfigSource = Join-Path $ProjectRoot "config"
-    New-Item -ItemType SymbolicLink -Path $ConfigLink -Target $ConfigSource | Out-Null
-    $SymlinksRemoved += $ConfigLink
-}
 
 $WorkspaceLink = Join-Path $JiuwenclawDir "workspace"
 if (-not (Test-Path $WorkspaceLink)) {

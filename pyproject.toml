@@ -34,7 +34,16 @@ where = ["."]
 include = ["jiuwenclaw*"]
 
 [tool.setuptools.package-data]
-jiuwenclaw = ["web/dist/**/*", "web/dist/*", "config/**/*", "config/*", "workspace/**/*", "workspace/*", ".env.template"]
+jiuwenclaw = [
+    "web/dist/**/*",
+    "web/dist/*",
+    # config / env 模板放在 resources 目录
+    "resources/**/*",
+    "resources/*",
+    "resources/.env.template",
+    "workspace/**/*",
+    "workspace/*",
+]
 
 [tool.setuptools.exclude-package-data]
 jiuwenclaw = ["web/node_modules/**", "web/node_modules/*"]

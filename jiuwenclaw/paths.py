@@ -3,8 +3,13 @@
 """Path management for JiuWenClaw.
 
 Handles path resolution for both source and package installations:
-- Source: Use project root directory for config and workspace
-- Package (whl): Use user home directory (~/.jiuwenclaw) as runtime data root
+
+- When a user workspace exists (~/.jiuwenclaw), it is always used as the
+  runtime root for config, workspace and .env (for both source and package).
+- Before the user workspace is initialized:
+  - Source: Use project root directory for config and workspace.
+  - Package (whl): Use user home directory (~/.jiuwenclaw) as planned
+    runtime root, but templates are copied from installed package resources.
 """
 
 import importlib.util
@@ -65,61 +70,104 @@ def _find_source_root() -> Path:
 
 
 def _find_package_root() -> Path | None:
-    """Find the package root directory containing config and workspace."""
-    # In package mode (whl), __file__ is at site-packages/jiuwenclaw/paths.py
-    # So parent is site-packages/jiuwenclaw/, which contains config and workspace
+    """Best-effort detection of the jiuwenclaw package root.
+
+    In package mode (whl), __file__ is at site-packages/jiuwenclaw/paths.py,
+    so parent is site-packages/jiuwenclaw/.
+    In editable / source mode, __file__ is at <project>/jiuwenclaw/paths.py,
+    so parent is <project>/jiuwenclaw/.
+    """
     current = Path(__file__).resolve().parent
-
-    # Check if config and workspace exist at this level
-    if (current / "config").exists() and (current / "workspace").exists():
-        return current
-
-    return None
+    return current
 
 
 def init_user_workspace(overwrite: bool = True) -> Path:
-    """Initialize ~/.jiuwenclaw from package resources.
+    """Initialize ~/.jiuwenclaw from package or source resources.
 
-    Args:
-        overwrite: When True, overwrite existing files with package defaults.
+    资源布局（新）:
+    - 模板配置:   <package_root>/resources/config.yaml
+    - 模块实现:   <package_root>/config.py
+    - .env 模板: <package_root>/resources/.env.template
+    - workspace: 优先 <package_root>/workspace，其次 <package_root>/../workspace
 
-    Returns:
-        Path to user workspace root (~/.jiuwenclaw).
+    上述内容会被复制到:
+    - ~/.jiuwenclaw/config/config.yaml
+    - ~/.jiuwenclaw/config/config.py
+    - ~/.jiuwenclaw/.env
+    - ~/.jiuwenclaw/workspace/...
 
-    Raises:
-        RuntimeError: If not in package mode or package resources are missing.
+    无论是通过 pip/whl 安装还是源码目录直接运行，效果保持一致。
     """
-    if not _detect_installation_mode():
-        raise RuntimeError("jiuwenclaw-init is only available in package installation mode")
-
     package_root = _find_package_root()
     if not package_root:
         raise RuntimeError("package root not found")
 
     USER_WORKSPACE_DIR.mkdir(parents=True, exist_ok=True)
 
-    config_src = package_root / "config"
-    config_dest = USER_WORKSPACE_DIR / "config"
-    if not config_src.exists():
-        raise RuntimeError(f"config source not found: {config_src}")
-    if overwrite:
-        shutil.copytree(config_src, config_dest, dirs_exist_ok=True)
-    elif not config_dest.exists():
-        shutil.copytree(config_src, config_dest)
+    # ----- config: copy config.yaml + config.py -----
+    resources_dir = package_root / "resources"
+    config_yaml_src_candidates = [
+        resources_dir / "config.yaml",
+        package_root / "config" / "config.yaml",
+    ]
+    config_py_src_candidates = [
+        package_root / "config.py",
+        package_root / "config" / "config.py",
+    ]
 
-    workspace_src = package_root / "workspace"
+    config_yaml_src = next((p for p in config_yaml_src_candidates if p.exists()), None)
+    config_py_src = next((p for p in config_py_src_candidates if p.exists()), None)
+
+    if not config_yaml_src:
+        raise RuntimeError(
+            "config.yaml template not found; tried: "
+            + ", ".join(str(p) for p in config_yaml_src_candidates)
+        )
+    if not config_py_src:
+        raise RuntimeError(
+            "config.py source not found; tried: "
+            + ", ".join(str(p) for p in config_py_src_candidates)
+        )
+
+    config_dest_dir = USER_WORKSPACE_DIR / "config"
+    config_dest_dir.mkdir(parents=True, exist_ok=True)
+    config_yaml_dest = config_dest_dir / "config.yaml"
+    config_py_dest = config_dest_dir / "config.py"
+
+    if overwrite or not config_yaml_dest.exists():
+        shutil.copy2(config_yaml_src, config_yaml_dest)
+    if overwrite or not config_py_dest.exists():
+        shutil.copy2(config_py_src, config_py_dest)
+
+    # ----- workspace: copy tree -----
+    workspace_src_candidates = [
+        package_root / "workspace",
+        package_root.parent / "workspace",
+    ]
+    workspace_src = next((p for p in workspace_src_candidates if p.exists()), None)
+    if not workspace_src:
+        raise RuntimeError(
+            "workspace source not found; tried: "
+            + ", ".join(str(p) for p in workspace_src_candidates)
+        )
     workspace_dest = USER_WORKSPACE_DIR / "workspace"
-    if not workspace_src.exists():
-        raise RuntimeError(f"workspace source not found: {workspace_src}")
     if overwrite:
         shutil.copytree(workspace_src, workspace_dest, dirs_exist_ok=True)
     elif not workspace_dest.exists():
         shutil.copytree(workspace_src, workspace_dest)
 
-    env_template_src = package_root / ".env.template"
+    # ----- .env: copy from template -----
+    env_template_src_candidates = [
+        resources_dir / ".env.template",
+        package_root / ".env.template",
+    ]
+    env_template_src = next((p for p in env_template_src_candidates if p.exists()), None)
+    if not env_template_src:
+        raise RuntimeError(
+            "env template source not found; tried: "
+            + ", ".join(str(p) for p in env_template_src_candidates)
+        )
     env_dest = USER_WORKSPACE_DIR / ".env"
-    if not env_template_src.exists():
-        raise RuntimeError(f"env template source not found: {env_template_src}")
     if overwrite or not env_dest.exists():
         shutil.copy2(env_template_src, env_dest)
 
@@ -133,25 +181,35 @@ def _resolve_paths() -> None:
     if _initialized:
         return
 
-    if _detect_installation_mode():
-        # Package mode
-        package_root = _find_package_root()
-        if package_root:
-            _root_dir = USER_WORKSPACE_DIR
-            _config_dir = USER_WORKSPACE_DIR / "config"
-            _workspace_dir = USER_WORKSPACE_DIR / "workspace"
+    # 优先使用已初始化的用户工作区 (~/.jiuwenclaw)，
+    # 保证源码运行与安装包运行后的读写路径完全一致。
+    user_config_dir = USER_WORKSPACE_DIR / "config"
+    user_workspace_dir = USER_WORKSPACE_DIR / "workspace"
+    if user_config_dir.exists():
+        _root_dir = USER_WORKSPACE_DIR
+        _config_dir = user_config_dir
+        _workspace_dir = user_workspace_dir
+    else:
+        if _detect_installation_mode():
+            # Package mode（尚未执行 init），计划根目录仍是用户家目录，
+            # 但 config/workspace 可能还不存在。
+            package_root = _find_package_root()
+            if package_root:
+                _root_dir = USER_WORKSPACE_DIR
+                _config_dir = USER_WORKSPACE_DIR / "config"
+                _workspace_dir = USER_WORKSPACE_DIR / "workspace"
+            else:
+                logger.warning("Could not find package root, falling back to source mode")
+                source_root = _find_source_root()
+                _root_dir = source_root
+                _config_dir = source_root / "config"
+                _workspace_dir = source_root / "workspace"
         else:
-            logger.warning("Could not find package root, falling back to source mode")
+            # 纯源码模式且未初始化用户工作区：直接使用工程根目录。
             source_root = _find_source_root()
             _root_dir = source_root
             _config_dir = source_root / "config"
             _workspace_dir = source_root / "workspace"
-    else:
-        # Source mode
-        source_root = _find_source_root()
-        _root_dir = source_root
-        _config_dir = source_root / "config"
-        _workspace_dir = source_root / "workspace"
 
     _initialized = True
 
