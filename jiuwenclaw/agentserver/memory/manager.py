@@ -58,10 +58,10 @@ class MemoryIndexManager:
     """Manages memory indexing and search."""
 
     def __init__(
-        self,
-        agent_id: str,
-        workspace_dir: str,
-        settings: MemorySettings
+            self,
+            agent_id: str,
+            workspace_dir: str,
+            settings: MemorySettings
     ):
         self.agent_id = agent_id
         self.workspace_dir = workspace_dir
@@ -104,10 +104,10 @@ class MemoryIndexManager:
 
     @classmethod
     async def get(
-        cls,
-        agent_id: str,
-        workspace_dir: str,
-        settings: Optional[MemorySettings] = None
+            cls,
+            agent_id: str,
+            workspace_dir: str,
+            settings: Optional[MemorySettings] = None
     ) -> Optional['MemoryIndexManager']:
         """Get or create memory index manager."""
         cache_key = f"{agent_id}:{workspace_dir}"
@@ -152,23 +152,23 @@ class MemoryIndexManager:
 
     def _resolve_db_path(self) -> str:
         """Resolve database path.
-        
+
         确保向量数据库索引文件存放在与 MEMORY.md 同目录 (workspace/agent/memory/)
         """
         store_path = self.settings.store.get("path", "memory.db")
         if os.path.isabs(store_path):
             return store_path
-        
+
         # 如果 store_path 已经包含 workspace_dir 的部分路径，避免重复拼接
         workspace_name = os.path.basename(self.workspace_dir)
         if store_path.startswith(f"{workspace_name}/") or store_path.startswith(f"{workspace_name}\\"):
             # 去除重复的 workspace 目录前缀
-            store_path = store_path[len(workspace_name)+1:]
-        
+            store_path = store_path[len(workspace_name) + 1:]
+
         # 确保使用 memory 子目录，与 MEMORY.md 同目录
         if not store_path.startswith("memory/") and not store_path.startswith("memory\\"):
             store_path = os.path.join("memory", store_path)
-        
+
         return os.path.join(self.workspace_dir, store_path)
 
     def _open_database(self, db_path: str) -> sqlite3.Connection:
@@ -188,36 +188,62 @@ class MemoryIndexManager:
             raise RuntimeError("Database not initialized")
 
         self.db.execute("""
-            CREATE TABLE IF NOT EXISTS meta (
-                key TEXT PRIMARY KEY,
-                value TEXT
-            )
-        """)
+                        CREATE TABLE IF NOT EXISTS meta
+                        (
+                            key
+                            TEXT
+                            PRIMARY
+                            KEY,
+                            value
+                            TEXT
+                        )
+                        """)
 
         self.db.execute("""
-            CREATE TABLE IF NOT EXISTS files (
-                path TEXT PRIMARY KEY,
-                source TEXT,
-                hash TEXT,
-                mtime INTEGER,
-                size INTEGER
-            )
-        """)
+                        CREATE TABLE IF NOT EXISTS files
+                        (
+                            path
+                            TEXT
+                            PRIMARY
+                            KEY,
+                            source
+                            TEXT,
+                            hash
+                            TEXT,
+                            mtime
+                            INTEGER,
+                            size
+                            INTEGER
+                        )
+                        """)
 
         self.db.execute("""
-            CREATE TABLE IF NOT EXISTS chunks (
-                id TEXT PRIMARY KEY,
-                path TEXT,
-                source TEXT,
-                start_line INTEGER,
-                end_line INTEGER,
-                hash TEXT,
-                model TEXT,
-                text TEXT,
-                embedding BLOB,
-                updated_at INTEGER
-            )
-        """)
+                        CREATE TABLE IF NOT EXISTS chunks
+                        (
+                            id
+                            TEXT
+                            PRIMARY
+                            KEY,
+                            path
+                            TEXT,
+                            source
+                            TEXT,
+                            start_line
+                            INTEGER,
+                            end_line
+                            INTEGER,
+                            hash
+                            TEXT,
+                            model
+                            TEXT,
+                            text
+                            TEXT,
+                            embedding
+                            BLOB,
+                            updated_at
+                            INTEGER
+                        )
+                        """)
 
         self.db.execute(f"""
             CREATE TABLE IF NOT EXISTS {EMBEDDING_CACHE_TABLE} (
@@ -444,9 +470,9 @@ class MemoryIndexManager:
         logger.info(f"Interval sync enabled: every {minutes} minutes")
 
     async def sync(
-        self,
-        reason: Optional[str] = None,
-        force: bool = False
+            self,
+            reason: Optional[str] = None,
+            force: bool = False
     ) -> None:
         """Synchronize memory index."""
         if self.closed:
@@ -644,10 +670,10 @@ class MemoryIndexManager:
             self.db.rollback()
 
     async def _index_chunk(
-        self,
-        file_path: str,
-        source: str,
-        chunk: MemoryChunk
+            self,
+            file_path: str,
+            source: str,
+            chunk: MemoryChunk
     ) -> None:
         """Index a single chunk."""
         chunk_id = f"{file_path}:{chunk.startLine}:{chunk.endLine}"
@@ -755,9 +781,9 @@ class MemoryIndexManager:
             return None
 
     async def search(
-        self,
-        query: str,
-        opts: Optional[Dict[str, Any]] = None
+            self,
+            query: str,
+            opts: Optional[Dict[str, Any]] = None
     ) -> List[Dict[str, Any]]:
         """Search memory for relevant content.
 
@@ -777,74 +803,75 @@ class MemoryIndexManager:
             return []
 
         min_score = opts.get("minScore") if opts and "minScore" in opts else self.settings.query.get("minScore", 0.7)
-        max_results = opts.get("maxResults") if opts and "maxResults" in opts else self.settings.query.get("maxResults", 10)
+        max_results = opts.get("maxResults") if opts and "maxResults" in opts else self.settings.query.get("maxResults",
+                                                                                                           10)
         hybrid = self.settings.query.get("hybrid") or {}
 
         candidates = min(200, max(1, int(max_results * (hybrid.get("candidateMultiplier") or 2.0))))
-        
+
         keyword_results = []
         if hybrid.get("enabled", True) and self.fts_available:
             try:
                 keyword_results = await self._search_keyword(cleaned, candidates)
             except Exception as e:
                 logger.debug(f"Keyword search failed: {e}")
-        
+
         query_vec = await self._embed_query_with_timeout(cleaned)
         has_vector = any(v != 0 for v in query_vec)
-        
+
         vector_results = []
         if has_vector:
             try:
                 vector_results = await self._search_vector(query_vec, candidates)
             except Exception as e:
                 logger.debug(f"Vector search failed: {e}")
-        
+
         if not hybrid.get("enabled", True):
             return [
                 r for r in vector_results
                 if r["score"] >= min_score
             ][:max_results]
-        
+
         merged = self._merge_hybrid_results(
             vector_results,
             keyword_results,
             hybrid.get("vectorWeight", 0.7),
             hybrid.get("textWeight", 0.3)
         )
-        
+
         return [r for r in merged if r["score"] >= min_score][:max_results]
-    
+
     async def _search_vector(
-        self,
-        query_vec: List[float],
-        limit: int
+            self,
+            query_vec: List[float],
+            limit: int
     ) -> List[Dict[str, Any]]:
         """Search using vector similarity."""
         if not self.vector_enabled:
             return await self._search_vector_fallback(query_vec, limit)
-        
+
         if not self.vector_dims:
             sample = await self.provider.embed_query("sample")
             self._ensure_vector_table(len(sample))
         else:
             self._ensure_vector_table(self.vector_dims)
-        
+
         if not self.vector_available:
             return await self._search_vector_fallback(query_vec, limit)
-        
+
         try:
             import math
-            
+
             query_blob = vector_to_blob(query_vec)
-            
+
             source_filter = self._build_source_filter()
-            
+
             cursor = self.db.execute(f"""
                 SELECT rowid, id, path, source, start_line, end_line, text
                 FROM chunks
                 WHERE {source_filter}
             """)
-            
+
             chunk_map = {}
             for row in cursor.fetchall():
                 chunk_map[row["rowid"]] = {
@@ -855,10 +882,10 @@ class MemoryIndexManager:
                     "endLine": int(row["end_line"]),
                     "snippet": str(row["text"][:SNIPPET_MAX_CHARS])
                 }
-            
+
             if not chunk_map:
                 return []
-            
+
             rows = self.db.execute(f"""
                 SELECT 
                     rowid,
@@ -868,61 +895,61 @@ class MemoryIndexManager:
                 ORDER BY distance
                 LIMIT ?
             """, (query_blob, *chunk_map.keys(), limit))
-            
+
             results = []
             for row in rows:
                 rowid = row["rowid"]
                 if rowid in chunk_map:
                     distance = row["distance"]
                     score = max(0, 1 - distance / 2)
-                    
+
                     result = chunk_map[rowid].copy()
                     result["score"] = score
                     results.append(result)
-            
+
             return results
-            
+
         except Exception as e:
             logger.debug(f"Vector search with sqlite-vec failed: {e}")
             return await self._search_vector_fallback(query_vec, limit)
-    
+
     async def _search_vector_fallback(
-        self,
-        query_vec: List[float],
-        limit: int
+            self,
+            query_vec: List[float],
+            limit: int
     ) -> List[Dict[str, Any]]:
         """Fallback vector search using in-memory cosine similarity."""
         import math
-        
+
         query_norm = math.sqrt(sum(x * x for x in query_vec))
         if query_norm < 1e-10:
             return []
         query_vec = [x / query_norm for x in query_vec]
-        
+
         source_filter = self._build_source_filter()
-        
+
         cursor = self.db.execute(f"""
             SELECT id, path, source, start_line, end_line, text, embedding
             FROM chunks
             WHERE {source_filter} AND embedding IS NOT NULL
         """)
-        
+
         results = []
         for row in cursor.fetchall():
             if not row["embedding"]:
                 continue
-            
+
             vec = blob_to_vector(row["embedding"])
             if len(vec) != len(query_vec):
                 continue
-            
+
             dot = sum(a * b for a, b in zip(vec, query_vec))
             vec_norm = math.sqrt(sum(x * x for x in vec))
             if vec_norm < 1e-10:
                 continue
-            
+
             similarity = dot / vec_norm
-            
+
             results.append({
                 "id": str(row["id"]),
                 "path": str(row["path"]),
@@ -932,32 +959,32 @@ class MemoryIndexManager:
                 "snippet": str(row["text"][:SNIPPET_MAX_CHARS]),
                 "score": float(max(0, similarity))
             })
-        
+
         results.sort(key=lambda x: x["score"], reverse=True)
         return results[:limit]
-    
+
     async def _search_keyword(
-        self,
-        query: str,
-        limit: int
+            self,
+            query: str,
+            limit: int
     ) -> List[Dict[str, Any]]:
         """Search using keyword matching (FTS5)."""
         if not self.fts_available:
             return []
-        
+
         try:
             fts_query = build_fts_query(query)
             if not fts_query:
                 return []
-            
+
             source_filter = self._build_source_filter()
-            
+
             cursor = self.db.execute(f"""
                 SELECT rowid, id, path, source, start_line, end_line, text
                 FROM chunks
                 WHERE {source_filter}
             """)
-            
+
             chunk_map = {}
             for row in cursor.fetchall():
                 chunk_map[row["rowid"]] = {
@@ -968,10 +995,10 @@ class MemoryIndexManager:
                     "endLine": int(row["end_line"]),
                     "snippet": str(row["text"][:SNIPPET_MAX_CHARS])
                 }
-            
+
             if not chunk_map:
                 return []
-            
+
             rows = self.db.execute(f"""
                 SELECT 
                     rowid,
@@ -981,49 +1008,49 @@ class MemoryIndexManager:
                 ORDER BY rank
                 LIMIT ?
             """, (fts_query, limit))
-            
+
             results = []
             for row in rows:
                 rowid = row["rowid"]
                 if rowid in chunk_map:
                     score = bm25_rank_to_score(float(row["rank"]))
-                    
+
                     result = chunk_map[rowid].copy()
                     result["score"] = float(score)
                     results.append(result)
-            
+
             return results
-            
+
         except Exception as e:
             logger.debug(f"Keyword search failed: {e}")
             return []
-    
+
     def _build_source_filter(self) -> str:
         """Build SQL filter for enabled sources."""
         sources = self.settings.sources
         if not sources:
             return "1=0"
-        
+
         if len(sources) == 1:
             return f"source = '{sources[0]}'"
-        
+
         return f"source IN ({', '.join(repr(s) for s in sources)})"
-    
+
     def _merge_hybrid_results(
-        self,
-        vector_results: List[Dict[str, Any]],
-        keyword_results: List[Dict[str, Any]],
-        vector_weight: float,
-        text_weight: float
+            self,
+            vector_results: List[Dict[str, Any]],
+            keyword_results: List[Dict[str, Any]],
+            vector_weight: float,
+            text_weight: float
     ) -> List[Dict[str, Any]]:
         """Merge and rerank hybrid search results."""
         by_id: Dict[str, Dict[str, Any]] = {}
-        
+
         for r in vector_results:
             r["_vector_score"] = r["score"]
             r["_text_score"] = 0.0
             by_id[r["id"]] = r
-        
+
         for r in keyword_results:
             if r["id"] in by_id:
                 by_id[r["id"]]["_text_score"] = r["score"]
@@ -1031,17 +1058,17 @@ class MemoryIndexManager:
                 r["_vector_score"] = 0.0
                 r["_text_score"] = r["score"]
                 by_id[r["id"]] = r
-        
+
         for r in by_id.values():
             r["score"] = vector_weight * r["_vector_score"] + text_weight * r["_text_score"]
             del r["_vector_score"]
             del r["_text_score"]
-        
+
         results = list(by_id.values())
         results.sort(key=lambda x: x["score"], reverse=True)
-        
+
         return results
-    
+
     async def _embed_query_with_timeout(self, query: str) -> List[float]:
         """Embed query with timeout."""
         try:
@@ -1056,24 +1083,24 @@ class MemoryIndexManager:
         except Exception as e:
             logger.error(f"Embedding query failed: {e}")
             return []
-    
+
     async def read_file(
-        self,
-        rel_path: str,
-        from_line: Optional[int] = None,
-        lines: Optional[int] = None
+            self,
+            rel_path: str,
+            from_line: Optional[int] = None,
+            lines: Optional[int] = None
     ) -> Dict[str, Any]:
         """Read file content."""
         full_path = os.path.join(self.workspace_dir, rel_path)
-        
+
         if not os.path.exists(full_path):
             raise FileNotFoundError(f"File not found: {rel_path}")
-        
+
         with open(full_path, "r", encoding="utf-8", errors="replace") as f:
             all_lines = f.readlines()
-        
+
         total_lines = len(all_lines)
-        
+
         if from_line is not None:
             start = max(0, from_line - 1)
             end = total_lines
@@ -1082,7 +1109,7 @@ class MemoryIndexManager:
             content_lines = all_lines[start:end]
         else:
             content_lines = all_lines
-        
+
         return {
             "path": rel_path,
             "text": "".join(content_lines),
@@ -1090,7 +1117,7 @@ class MemoryIndexManager:
             "fromLine": from_line or 1,
             "toLine": (from_line or 1) + len(content_lines) - 1
         }
-    
+
     def _write_meta(self, meta: Dict[str, Any]) -> None:
         """Write metadata to database."""
         self.db.execute(
@@ -1098,28 +1125,28 @@ class MemoryIndexManager:
             (META_KEY, json.dumps(meta))
         )
         self.db.commit()
-    
+
     def status(self) -> Dict[str, Any]:
         """Get memory system status."""
         if not self.db:
             return {"available": False}
-        
+
         cursor = self.db.execute("SELECT COUNT(*) as count FROM files")
         file_count = cursor.fetchone()["count"]
-        
+
         cursor = self.db.execute("SELECT COUNT(*) as count FROM chunks")
         chunk_count = cursor.fetchone()["count"]
-        
+
         cursor = self.db.execute("""
-            SELECT source, COUNT(*) as files
-            FROM files
-            GROUP BY source
-        """)
+                                 SELECT source, COUNT(*) as files
+                                 FROM files
+                                 GROUP BY source
+                                 """)
         source_counts = [
             {"source": str(row["source"]), "files": int(row["files"])}
             for row in cursor.fetchall()
         ]
-        
+
         return {
             "available": True,
             "provider": self.provider.id if self.provider else None,
@@ -1144,7 +1171,7 @@ class MemoryIndexManager:
                 "entries": int(self._get_cache_entry_count())
             }
         }
-    
+
     def _get_cache_entry_count(self) -> int:
         """Get number of cache entries."""
         try:
@@ -1152,73 +1179,73 @@ class MemoryIndexManager:
             return cursor.fetchone()["count"]
         except:
             return 0
-    
+
     async def compact_memory(
-        self,
-        messages: List[Dict[str, Any]],
-        previous_summary: str = ""
+            self,
+            messages: List[Dict[str, Any]],
+            prior_summary: str = ""
     ) -> str:
         """Compact messages into a summary.
-        
+
         Args:
             messages: List of messages to compact
-            previous_summary: Previous summary to build upon
-            
+            prior_summary: Prior summary to build upon
+
         Returns:
             Compacted summary
         """
-        from .summarizer import MemoryCompactor
-        
-        compactor = MemoryCompactor()
-        return await compactor.compact(messages, previous_summary)
-    
+        from .summarizer import ConversationCompactor
+
+        compactor = ConversationCompactor()
+        return await compactor.compact(messages, prior_summary)
+
     async def summary_memory(
-        self,
-        messages: List[Dict[str, Any]],
-        date: Optional[str] = None
+            self,
+            messages: List[Dict[str, Any]],
+            date: Optional[str] = None
     ) -> str:
         """Generate a session summary.
-        
+
         Args:
             messages: List of messages to summarize
             date: Date string (YYYY-MM-DD)
-            
+
         Returns:
             Session summary
         """
-        from .summarizer import MemorySummarizer
-        
-        summarizer = MemorySummarizer()
+        from .summarizer import SessionSummarizer
+
+        summarizer = SessionSummarizer()
         summary = await summarizer.summarize(messages, date)
-        
+
         if summary:
             today = date or datetime.datetime.now().strftime("%Y-%m-%d")
             summary_file = os.path.join(self.workspace_dir, "memory", f"{today}-summary.md")
-            
+
             os.makedirs(os.path.dirname(summary_file), exist_ok=True)
             with open(summary_file, "w", encoding="utf-8") as f:
                 f.write(f"# Session Summary - {today}\n\n{summary}")
-            
+
             logger.info(f"Session summary saved to: {summary_file}")
-        
+
         return summary
-    
+
     def add_async_summary_task(
-        self,
-        messages: List[Dict[str, Any]],
-        date: Optional[str] = None
+            self,
+            messages: List[Dict[str, Any]],
+            date: Optional[str] = None
     ):
         """Add an async task to generate session summary.
-        
+
         Cleans up completed tasks before adding new one.
         Tracks all tasks for proper lifecycle management.
-        
+
         Args:
             messages: List of messages to summarize
             date: Date string (YYYY-MM-DD)
         """
         self._cleanup_summary_tasks()
-        
+
         async def _run_summary():
             try:
                 result = await self.summary_memory(messages, date)
@@ -1227,14 +1254,14 @@ class MemoryIndexManager:
             except Exception as e:
                 logger.error(f"Async summary task failed: {e}")
                 raise
-        
+
         task = asyncio.create_task(_run_summary())
         self._summary_tasks.append(task)
         logger.debug(f"Added summary task for {date or 'today'}, total tasks: {len(self._summary_tasks)}")
-    
+
     def _cleanup_summary_tasks(self) -> None:
         """Clean up completed summary tasks.
-        
+
         Removes completed tasks from the list and logs any exceptions.
         """
         remaining_tasks = []
@@ -1251,36 +1278,36 @@ class MemoryIndexManager:
                         logger.error(f"Summary task result retrieval failed: {e}")
             else:
                 remaining_tasks.append(task)
-        
+
         if len(remaining_tasks) != len(self._summary_tasks):
             cleaned = len(self._summary_tasks) - len(remaining_tasks)
             logger.debug(f"Cleaned up {cleaned} completed summary tasks")
-        
+
         self._summary_tasks = remaining_tasks
-    
+
     def get_pending_summary_tasks(self) -> int:
         """Get count of pending summary tasks.
-        
+
         Returns:
             Number of pending (not completed) summary tasks
         """
         self._cleanup_summary_tasks()
         return len(self._summary_tasks)
-    
+
     async def close(self) -> None:
         """Close the memory manager."""
         if self.closed:
             return
-        
+
         self.closed = True
-        
+
         if self._interval_timer:
             self._interval_timer.cancel()
         if self._watch_timer:
             self._watch_timer.cancel()
         if self._session_timer:
             self._session_timer.cancel()
-        
+
         self._cleanup_summary_tasks()
         if self._summary_tasks:
             logger.info(f"Waiting for {len(self._summary_tasks)} pending summary tasks...")
@@ -1295,21 +1322,21 @@ class MemoryIndexManager:
                         task.cancel()
             except Exception as e:
                 logger.warning(f"Error waiting for summary tasks: {e}")
-        
+
         if self._file_observer:
             try:
                 self._file_observer.stop()
                 self._file_observer.join()
             except:
                 pass
-        
+
         if self.db:
             self.db.close()
-        
+
         cache_key = f"{self.agent_id}:{self.workspace_dir}"
         if cache_key in INDEX_CACHE:
             del INDEX_CACHE[cache_key]
-        
+
         logger.info("Memory manager closed")
 
 
@@ -1319,9 +1346,9 @@ def clear_memory_manager_cache() -> None:
 
 
 async def get_memory_manager(
-    agent_id: str = "default",
-    workspace_dir: str = ".",
-    settings: Optional[MemorySettings] = None
+        agent_id: str = "default",
+        workspace_dir: str = ".",
+        settings: Optional[MemorySettings] = None
 ) -> Optional[MemoryIndexManager]:
     """Get or create memory manager."""
     settings = settings or MemorySettings()

@@ -24,7 +24,6 @@ def build_system_prompt(
     Args:
         workspace_dir: Workspace directory (default: workspace/agent)
         agent_id: Agent identifier
-        base_prompt: Base prompt to append at the beginning (e.g., SYSTEM_PROMPT from interface.py)
         user_timezone: User's timezone
 
     Returns:
@@ -36,75 +35,75 @@ def build_system_prompt(
     now_str = datetime.now().strftime('%H:%M:%S')
     abs_path = os.path.abspath(workspace_dir)
 
-    memory_prompt = """# 记忆系统
+    memory_prompt = """# 持久化存储体系
 
-每次会话都是全新的。唯一可以跨会话保留的信息来自工作目录中的文件。
+每轮对话均从空白状态启动。跨会话的信息持久化依赖于工作区文件系统。
 
-## 记忆结构
+## 存储层级划分
 
-- daily: `memory/YYYY-MM-DD.md`（当天原始事件与操作轨迹，允许追加）
-- user: `USER.md`（稳定身份信息）
-- long-term: `MEMORY.md`（长期稳定背景，精选的记忆 — 提炼的精华，不是原始日志）
+- **会话日志：** `memory/YYYY-MM-DD.md`（当日交互轨迹的原始记录，支持增量追加）
+- **用户画像：** `USER.md`（稳定的身份属性与偏好信息）
+- **知识沉淀：** `MEMORY.md`（经筛选提炼的长期背景知识，非原始流水账）
 
-## 核心原则
+## 核心操作规范
 
-- 会话不会保留记忆，文件才是唯一记忆载体。想记住什么，必须写入文件
-- 更新 USER.md 或 MEMORY.md 前必须先读取现有内容
-- **每个字段只能出现一次**，已存在用 `edit_memory` 替换，不存在用 `write_memory` append
+- 会话本身不具备记忆能力，文件系统是唯一的信息载体。需持久化的内容务必写入文件
+- 更新 USER.md 或 MEMORY.md 时，必须先读取现有内容再执行修改
+- **字段唯一性约束：** 每个字段仅允许出现一次。已存在字段通过 `edit_memory` 更新，新字段通过 `write_memory` 追加
 
-### 身份记录机制（高优先级）
+### 身份信息采集流程（最高优先级）
 
-#### 明确声明（强制写入）
+#### 显式声明场景（强制写入）
 
-触发词：
+触发模式：
 "我是… / 我叫… / 这是我的… / 请注意我是…"
 
-流程：
-- 立即暂停任务
-- read USER.md
-- 判断字段 → edit 或 write
-- 写入成功后再继续任务
+执行步骤：
+- 立即中断当前任务
+- 读取 USER.md 内容
+- 判断字段状态 → 存在则 `edit_memory`，不存在则 `write_memory`
+- 写入完成后恢复原任务
 
-#### 用户要求记录（双重写入）
+#### 用户请求记录场景（双重持久化）
 
-触发词：
+触发模式：
 "帮我记一下 / 记住这个 / 记一下 / 别忘了"
 
-**强制规则：同时完成两件事！**
-1. 如果涉及时间/任务 → 调用 `todo_create` 创建待办
+**强制执行双写策略：**
+1. 若涉及时间/任务属性 → 调用 `todo_create` 创建待办事项
 2. 调用 `write_memory` 写入 `memory/YYYY-MM-DD.md`
 
 
-### 操作轨迹自动落盘（写入 daily）
+### 操作轨迹自动记录（写入会话日志）
 
-**每次文件操作后，必须调用 `write_memory` 记录到 `memory/YYYY-MM-DD.md`**
+**每次文件操作后，必须调用 `write_memory` 记录至 `memory/YYYY-MM-DD.md`**
 
-记录内容：
+记录要素：
 - 文件路径
 - 操作类型（读取/写入/编辑/删除）
-- 操作目的或上下文
-- 涉及的邮箱、账号、项目名称等关键信息
+- 操作目的或上下文说明
+- 涉及的邮箱、账号、项目名称等关键标识
 
-### 主动记录
+### 主动采集机制
 
-对话中发现有价值的信息时，**先记下来，再回答问题**：
+对话过程中发现有价值信息时，**执行先记录后响应策略**：
 
-- 用户提到的个人信息（名字、偏好、习惯、工作方式）→ 更新 `USER.md`
-- 对话中做出的重要决策或结论 → 记录到 `memory/YYYY-MM-DD.md`
-- 发现的项目上下文、技术细节、工作流程 → 写入相关文件
+- 用户透露的个人信息（姓名、偏好、习惯、工作模式）→ 更新 `USER.md`
+- 对话中形成的重要决策或结论 → 记录至 `memory/YYYY-MM-DD.md`
+- 发现的项目背景、技术细节、工作流程 → 写入相关文件
 - 用户表达的喜好或不满 → 更新 `USER.md`
 - 工具相关的本地配置（SSH、摄像头等）→ 更新 `MEMORY.md`
-- 任何你觉得未来会话可能用到的信息 → 立刻记下来
+- 任何预判未来会话可能需要的信息 → 立即记录
 
-**关键原则：** 不要总是等用户说"记住这个"。如果信息对未来有价值，主动记录。先记录，再回答 — 这样即使会话中断，信息也不会丢失。
+**核心原则：** 不必等待用户明确说"记住这个"。若信息对未来有价值，主动执行记录。先记录，后响应 — 确保会话中断时信息不丢失。
 
-### 检索工具
+### 历史检索机制
 
-**响应任何消息前，必须：**
-1. 读 `USER.md` — 你在帮谁
-2. 读 `memory/YYYY-MM-DD.md`（今天 + 昨天）了解上下文
-3. **仅主会话：** 读 `MEMORY.md`
-4. **回答过往事件前：** 必须先用 `memory_search` 工具搜索历史记忆
+**响应任何消息前，必须执行：**
+1. 读取 `USER.md` — 确认服务对象
+2. 读取 `memory/YYYY-MM-DD.md`（当日 + 前一日）获取上下文
+3. **仅限主会话：** 读取 `MEMORY.md`
+4. **回答历史事件相关问题前：** 必须先调用 `memory_search` 工具检索历史记忆
 """
     sections.append(memory_prompt)
     sections.append("")
@@ -129,17 +128,17 @@ def build_system_prompt(
         sections.append(today_content)
         sections.append("")
 
-    memory_mgmt_prompt = f"""## 记忆管理
+    memory_mgmt_prompt = f"""## 存储管理规范
 
 ### 更新规则
 1. 更新前必须先读取现有内容
-2. 合并新信息，不要全部覆盖
-3. MEMORY.md 条目只写精炼的事实，不含日期/时间戳
-4. **USER.md 字段去重：** 已存在用 `edit_memory` 替换，不存在用 `write_memory` append
+2. 合并新信息，避免全量覆盖
+3. MEMORY.md 条目仅记录精炼事实，不含日期/时间戳
+4. **USER.md 字段去重：** 已存在字段通过 `edit_memory` 更新，不存在字段通过 `write_memory` 追加
 
-### 记忆维护（Heartbeat 期间）
+### 存储维护周期（Heartbeat 期间）
 
-定期浏览最近的 `memory/YYYY-MM-DD.md`，识别值得长期保留的内容，更新到 `MEMORY.md`，删除过时信息。
+定期浏览最近的 `memory/YYYY-MM-DD.md`，筛选值得长期保留的内容，更新至 `MEMORY.md`，移除过时信息。
 """.format(today=today)
     sections.append(memory_mgmt_prompt)
 

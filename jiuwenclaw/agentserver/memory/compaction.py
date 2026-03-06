@@ -1,6 +1,6 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 
-"""Memory Compaction Manager - Automatic message compression and summarization.
+"""Context Compression Manager - Automatic message compression and summarization.
 
 Provides automatic triggering of message compression when token threshold is exceeded.
 """
@@ -18,316 +18,316 @@ from .internal import estimate_tokens
 
 logger = logging.getLogger(__name__)
 
-MEMORY_COMPACT_THRESHOLD = 8000
-MEMORY_COMPACT_KEEP_RECENT = 10
-COMPACTED_SUMMARY_FILE = "compacted_summary.json"
+CONTEXT_COMPACT_THRESHOLD = 8000
+CONTEXT_COMPACT_KEEP_RECENT = 10
+COMPRESSED_SUMMARY_FILE = "compressed_summary.json"
 
 
-class MessageMark(Enum):
+class MessageStatus(Enum):
     """Message compression status marks."""
-    NONE = "none"
-    COMPRESSED = "compressed"
+    PENDING = "pending"
+    ARCHIVED = "archived"
 
 
 @dataclass
-class Message:
+class MessageRecord:
     """Message with compression tracking."""
-    id: str
+    msg_id: str
     role: str
     content: str
-    timestamp: str = ""
-    mark: MessageMark = MessageMark.NONE
-    
+    created_at: str = ""
+    status: MessageStatus = MessageStatus.PENDING
+
     def to_dict(self) -> Dict[str, Any]:
         return {
-            "id": self.id,
+            "msg_id": self.msg_id,
             "role": self.role,
             "content": self.content,
-            "timestamp": self.timestamp,
-            "mark": self.mark.value
+            "created_at": self.created_at,
+            "status": self.status.value
         }
-    
+
     @classmethod
-    def from_dict(cls, data: Dict[str, Any]) -> "Message":
+    def from_dict(cls, data: Dict[str, Any]) -> "MessageRecord":
         return cls(
-            id=data["id"],
+            msg_id=data["msg_id"],
             role=data["role"],
             content=data["content"],
-            timestamp=data.get("timestamp", ""),
-            mark=MessageMark(data.get("mark", "none"))
+            created_at=data.get("created_at", ""),
+            status=MessageStatus(data.get("status", "pending"))
         )
 
 
-class TokenCounter:
-    """Token counter for messages using unified estimate_tokens."""
-    
+class TokenEstimator:
+    """Token estimator for messages using unified estimate_tokens."""
+
     @classmethod
-    def count_text(cls, text: str) -> int:
+    def estimate_text(cls, text: str) -> int:
         return estimate_tokens(text)
-    
+
     @classmethod
-    def count_message(cls, message: Dict[str, Any]) -> int:
+    def estimate_message(cls, message: Dict[str, Any]) -> int:
         content = message.get("content", "")
         if isinstance(content, str):
-            return cls.count_text(content)
+            return cls.estimate_text(content)
         elif isinstance(content, list):
             total = 0
             for block in content:
                 if isinstance(block, dict):
                     if block.get("type") == "text":
-                        total += cls.count_text(block.get("text", ""))
+                        total += cls.estimate_text(block.get("text", ""))
                     elif block.get("type") == "tool_use":
-                        total += cls.count_text(json.dumps(block.get("input", {})))
+                        total += cls.estimate_text(json.dumps(block.get("input", {})))
                     elif block.get("type") == "tool_result":
-                        total += cls.count_text(str(block.get("output", "")))
+                        total += cls.estimate_text(str(block.get("output", "")))
             return total
         return 0
-    
+
     @classmethod
-    def count_messages(cls, messages: List[Dict[str, Any]]) -> int:
-        return sum(cls.count_message(msg) for msg in messages)
+    def estimate_messages(cls, messages: List[Dict[str, Any]]) -> int:
+        return sum(cls.estimate_message(msg) for msg in messages)
 
 
-class MessageStore:
+class MessageRepository:
     """Manages message storage with compression tracking."""
-    
+
     def __init__(self, workspace_dir: str):
         self.workspace_dir = workspace_dir
         self.store_path = os.path.join(workspace_dir, "memory", "messages.json")
-        self.summary_path = os.path.join(workspace_dir, "memory", COMPACTED_SUMMARY_FILE)
-        self._messages: List[Message] = []
-        self._compressed_summary: str = ""
+        self.summary_path = os.path.join(workspace_dir, "memory", COMPRESSED_SUMMARY_FILE)
+        self._records: List[MessageRecord] = []
+        self._archived_summary: str = ""
         self._load()
-    
+
     def _load(self) -> None:
         if os.path.exists(self.store_path):
             try:
                 with open(self.store_path, "r", encoding="utf-8") as f:
                     data = json.load(f)
-                    self._messages = [Message.from_dict(m) for m in data.get("messages", [])]
+                    self._records = [MessageRecord.from_dict(m) for m in data.get("records", [])]
             except Exception as e:
                 logger.warning(f"Failed to load messages: {e}")
-        
+
         if os.path.exists(self.summary_path):
             try:
                 with open(self.summary_path, "r", encoding="utf-8") as f:
                     data = json.load(f)
-                    self._compressed_summary = data.get("summary", "")
+                    self._archived_summary = data.get("summary", "")
             except Exception as e:
                 logger.warning(f"Failed to load compressed summary: {e}")
-    
+
     def _save(self) -> None:
         os.makedirs(os.path.dirname(self.store_path), exist_ok=True)
-        
+
         with open(self.store_path, "w", encoding="utf-8") as f:
             json.dump({
-                "messages": [m.to_dict() for m in self._messages]
+                "records": [r.to_dict() for r in self._records]
             }, f, ensure_ascii=False, indent=2)
-    
+
     def _save_summary(self) -> None:
         os.makedirs(os.path.dirname(self.summary_path), exist_ok=True)
-        
+
         with open(self.summary_path, "w", encoding="utf-8") as f:
             json.dump({
-                "summary": self._compressed_summary,
+                "summary": self._archived_summary,
                 "updated_at": datetime.now().isoformat()
             }, f, ensure_ascii=False, indent=2)
-    
-    def add_message(self, role: str, content: str, msg_id: Optional[str] = None) -> Message:
+
+    def add_record(self, role: str, content: str, msg_id: Optional[str] = None) -> MessageRecord:
         import uuid
-        
-        message = Message(
-            id=msg_id or str(uuid.uuid4()),
+
+        record = MessageRecord(
+            msg_id=msg_id or str(uuid.uuid4()),
             role=role,
             content=content,
-            timestamp=datetime.now().isoformat(),
-            mark=MessageMark.NONE
+            created_at=datetime.now().isoformat(),
+            status=MessageStatus.PENDING
         )
-        self._messages.append(message)
+        self._records.append(record)
         self._save()
-        return message
-    
-    def get_messages(
-        self,
-        exclude_mark: Optional[MessageMark] = None,
-        include_mark: Optional[MessageMark] = None,
-        prepend_summary: bool = True
+        return record
+
+    def get_records(
+            self,
+            exclude_status: Optional[MessageStatus] = None,
+            include_status: Optional[MessageStatus] = None,
+            prepend_summary: bool = True
     ) -> List[Dict[str, Any]]:
         result = []
-        
-        if prepend_summary and self._compressed_summary:
+
+        if prepend_summary and self._archived_summary:
             result.append({
                 "role": "system",
-                "content": self._compressed_summary
+                "content": self._archived_summary
             })
-        
-        for msg in self._messages:
-            if exclude_mark and msg.mark == exclude_mark:
+
+        for rec in self._records:
+            if exclude_status and rec.status == exclude_status:
                 continue
-            if include_mark and msg.mark != include_mark:
+            if include_status and rec.status != include_status:
                 continue
-            
+
             result.append({
-                "id": msg.id,
-                "role": msg.role,
-                "content": msg.content,
-                "timestamp": msg.timestamp
+                "id": rec.msg_id,
+                "role": rec.role,
+                "content": rec.content,
+                "timestamp": rec.created_at
             })
-        
+
         return result
-    
-    def get_uncompressed_messages(self) -> List[Message]:
-        return [m for m in self._messages if m.mark == MessageMark.NONE]
-    
-    def update_compressed_summary(self, summary: str) -> None:
-        self._compressed_summary = summary
+
+    def get_pending_records(self) -> List[MessageRecord]:
+        return [r for r in self._records if r.status == MessageStatus.PENDING]
+
+    def update_archived_summary(self, summary: str) -> None:
+        self._archived_summary = summary
         self._save_summary()
-        logger.info("Updated compressed summary")
-    
-    def get_compressed_summary(self) -> str:
-        return self._compressed_summary
-    
-    def mark_messages(self, msg_ids: List[str], mark: MessageMark) -> int:
+        logger.info("Updated archived summary")
+
+    def get_archived_summary(self) -> str:
+        return self._archived_summary
+
+    def mark_records(self, msg_ids: List[str], status: MessageStatus) -> int:
         count = 0
-        for msg in self._messages:
-            if msg.id in msg_ids:
-                msg.mark = mark
+        for rec in self._records:
+            if rec.msg_id in msg_ids:
+                rec.status = status
                 count += 1
         self._save()
         return count
-    
+
     def clear(self) -> None:
-        self._messages = []
-        self._compressed_summary = ""
+        self._records = []
+        self._archived_summary = ""
         self._save()
         self._save_summary()
-    
+
     @property
-    def message_count(self) -> int:
-        return len(self._messages)
-    
+    def record_count(self) -> int:
+        return len(self._records)
+
     @property
-    def uncompressed_count(self) -> int:
-        return len(self.get_uncompressed_messages())
+    def pending_count(self) -> int:
+        return len(self.get_pending_records())
 
 
-class CompactionManager:
+class ContextCompactionManager:
     """Manages automatic message compression."""
-    
+
     def __init__(
-        self,
-        workspace_dir: str,
-        threshold: int = MEMORY_COMPACT_THRESHOLD,
-        keep_recent: int = MEMORY_COMPACT_KEEP_RECENT
+            self,
+            workspace_dir: str,
+            threshold: int = CONTEXT_COMPACT_THRESHOLD,
+            keep_recent: int = CONTEXT_COMPACT_KEEP_RECENT
     ):
         self.workspace_dir = workspace_dir
         self.threshold = threshold
         self.keep_recent = keep_recent
-        self.message_store = MessageStore(workspace_dir)
+        self.message_repo = MessageRepository(workspace_dir)
         self._compaction_callbacks: List = []
-    
+
     def add_compaction_callback(self, callback) -> None:
         self._compaction_callbacks.append(callback)
-    
-    async def _notify_compaction(self, summary: str, compacted_count: int) -> None:
+
+    async def _notify_compaction(self, summary: str, archived_count: int) -> None:
         for callback in self._compaction_callbacks:
             try:
                 if asyncio.iscoroutinefunction(callback):
-                    await callback(summary, compacted_count)
+                    await callback(summary, archived_count)
                 else:
-                    callback(summary, compacted_count)
+                    callback(summary, archived_count)
             except Exception as e:
                 logger.error(f"Compaction callback failed: {e}")
-    
+
     def should_compact(self, messages: List[Dict[str, Any]]) -> bool:
         if len(messages) <= self.keep_recent:
             return False
-        
-        messages_to_compact = messages[:-self.keep_recent] if self.keep_recent > 0 else messages
-        estimated_tokens = TokenCounter.count_messages(messages_to_compact)
-        
+
+        messages_to_archive = messages[:-self.keep_recent] if self.keep_recent > 0 else messages
+        estimated_tokens = TokenEstimator.estimate_messages(messages_to_archive)
+
         return estimated_tokens > self.threshold
-    
+
     async def check_and_compact(self, memory_manager) -> Optional[str]:
-        messages = self.message_store.get_messages(
-            exclude_mark=MessageMark.COMPRESSED,
+        messages = self.message_repo.get_records(
+            exclude_status=MessageStatus.ARCHIVED,
             prepend_summary=False
         )
-        
+
         if not self.should_compact(messages):
             return None
-        
+
         return await self.do_compact(memory_manager)
-    
+
     async def do_compact(self, memory_manager) -> str:
-        messages = self.message_store.get_uncompressed_messages()
-        
-        if len(messages) <= self.keep_recent:
+        records = self.message_repo.get_pending_records()
+
+        if len(records) <= self.keep_recent:
             logger.debug("Not enough messages to compact")
             return ""
-        
-        messages_to_compact = messages[:-self.keep_recent] if self.keep_recent > 0 else messages
-        messages_to_keep = messages[-self.keep_recent:] if self.keep_recent > 0 else []
-        
-        compact_dicts = [{
-            "role": m.role,
-            "content": m.content,
-            "timestamp": m.timestamp
-        } for m in messages_to_compact]
-        
-        estimated_tokens = TokenCounter.count_messages(compact_dicts)
-        
+
+        records_to_archive = records[:-self.keep_recent] if self.keep_recent > 0 else records
+        records_to_keep = records[-self.keep_recent:] if self.keep_recent > 0 else []
+
+        archive_dicts = [{
+            "role": r.role,
+            "content": r.content,
+            "timestamp": r.created_at
+        } for r in records_to_archive]
+
+        estimated_tokens = TokenEstimator.estimate_messages(archive_dicts)
+
         logger.info(
-            "Memory compaction triggered: estimated %d tokens "
-            "(threshold: %d), compactable_msgs: %d, keep_recent_msgs: %d",
+            "Context compaction triggered: estimated %d tokens "
+            "(threshold: %d), archivable_records: %d, keep_recent_records: %d",
             estimated_tokens,
             self.threshold,
-            len(messages_to_compact),
-            len(messages_to_keep)
+            len(records_to_archive),
+            len(records_to_keep)
         )
-        
-        previous_summary = self.message_store.get_compressed_summary()
-        
+
+        prior_summary = self.message_repo.get_archived_summary()
+
         from .summarizer import compact_memory
-        compacted = await compact_memory(
-            messages=compact_dicts,
-            previous_summary=previous_summary
+        archived = await compact_memory(
+            messages=archive_dicts,
+            prior_summary=prior_summary
         )
-        
-        self.message_store.update_compressed_summary(compacted)
-        
-        compacted_ids = [m.id for m in messages_to_compact]
-        marked_count = self.message_store.mark_messages(compacted_ids, MessageMark.COMPRESSED)
-        
-        logger.info(f"Marked {marked_count} messages as compacted")
-        
+
+        self.message_repo.update_archived_summary(archived)
+
+        archived_ids = [r.msg_id for r in records_to_archive]
+        marked_count = self.message_repo.mark_records(archived_ids, MessageStatus.ARCHIVED)
+
+        logger.info(f"Marked {marked_count} messages as archived")
+
         memory_manager.add_async_summary_task(
-            messages=compact_dicts,
+            messages=archive_dicts,
             date=datetime.now().strftime("%Y-%m-%d")
         )
-        
-        await self._notify_compaction(compacted, len(messages_to_compact))
-        
-        return compacted
-    
-    def add_message(self, role: str, content: str) -> Message:
-        return self.message_store.add_message(role, content)
-    
+
+        await self._notify_compaction(archived, len(records_to_archive))
+
+        return archived
+
+    def add_message(self, role: str, content: str) -> MessageRecord:
+        return self.message_repo.add_record(role, content)
+
     def get_messages_for_context(self) -> List[Dict[str, Any]]:
-        return self.message_store.get_messages(
-            exclude_mark=MessageMark.COMPRESSED,
+        return self.message_repo.get_records(
+            exclude_status=MessageStatus.ARCHIVED,
             prepend_summary=True
         )
-    
-    def get_compressed_summary(self) -> str:
-        return self.message_store.get_compressed_summary()
-    
+
+    def get_archived_summary(self) -> str:
+        return self.message_repo.get_archived_summary()
+
     @property
     def stats(self) -> Dict[str, Any]:
         return {
-            "total_messages": self.message_store.message_count,
-            "uncompressed_messages": self.message_store.uncompressed_count,
+            "total_records": self.message_repo.record_count,
+            "pending_records": self.message_repo.pending_count,
             "threshold": self.threshold,
             "keep_recent": self.keep_recent,
-            "has_compressed_summary": bool(self.message_store.get_compressed_summary())
+            "has_archived_summary": bool(self.message_repo.get_archived_summary())
         }

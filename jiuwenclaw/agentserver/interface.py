@@ -38,7 +38,7 @@ from jiuwenclaw.agentserver.tools.memory_tools import (
     edit_memory,
     read_memory,
 )
-from jiuwenclaw.agentserver.memory.compaction import CompactionManager
+from jiuwenclaw.agentserver.memory.compaction import ContextCompactionManager
 from jiuwenclaw.agentserver.memory.config import clear_config_cache
 from jiuwenclaw.agentserver.memory import clear_memory_manager_cache
 from jiuwenclaw.agentserver.skill_manager import SkillManager, _SKILLS_DIR
@@ -47,7 +47,6 @@ from jiuwenclaw.evolution.skill_optimizer import SkillOptimizer
 from jiuwenclaw.schema.agent import AgentRequest, AgentResponse, AgentResponseChunk
 from jiuwenclaw.schema.message import ReqMethod
 from jiuwenclaw.paths import USER_WORKSPACE_DIR
-
 
 logger = logging.getLogger(__name__)
 load_dotenv(dotenv_path=get_root_dir() / ".env")
@@ -102,7 +101,7 @@ class JiuWenClaw:
         self._running_task: asyncio.Task | None = None
         self._workspace_dir: str = DEFAULT_WORKSPACE_DIR
         self._agent_name: str = "main_agent"
-        self._compaction_manager: CompactionManager | None = None
+        self._compaction_manager: ContextCompactionManager | None = None
         self._browser_mcp_registered: bool = False
         self._memory_tools_registered: bool = False
         self._mcp_tools_registered: bool = False
@@ -120,18 +119,18 @@ class JiuWenClaw:
         """
         _bootstrap_env_aliases()
         config_base = get_config()
-        
+
         # 使用传入的 config 或从文件加载的配置
         if config is None:
             config = config_base.get('react', {}).copy()
-        
+
         # 提取 agent_name，如果不存在则使用默认值
         agent_name = config.pop("agent_name", "main_agent")
         self._agent_name = agent_name
 
         if "workspace_dir" in config:
             self._workspace_dir = config.pop("workspace_dir")
-        
+
         # 处理 model_client_config：确保包含必需字段
         if "model_client_config" in config:
             model_client_config = config["model_client_config"]
@@ -155,7 +154,7 @@ class JiuWenClaw:
         config["model_config_obj"] = {
             "temperature": 0.95
         }
-        
+
         config["prompt_template"] = [
             {"role": "system", "content": SYSTEM_PROMPT}
         ]
@@ -280,7 +279,7 @@ class JiuWenClaw:
                 workspace_dir=self._workspace_dir
             )
             if memory_mgr:
-                self._compaction_manager = CompactionManager(
+                self._compaction_manager = ContextCompactionManager(
                     workspace_dir=self._workspace_dir,
                     threshold=8000,
                     keep_recent=10
@@ -404,7 +403,7 @@ class JiuWenClaw:
                         opt._manager._model = new_model
         logger.info("[JiuWenClaw] 配置已热更新，未重启进程")
 
-    async def _register_runtime_tools(self, session_id: str | None, mode = "plan") -> None:
+    async def _register_runtime_tools(self, session_id: str | None, mode="plan") -> None:
         """Register per-request tools for current agent execution."""
         if self._instance is None:
             raise RuntimeError("JiuWenClaw 未初始化，请先调用 create_instance()")
@@ -767,7 +766,7 @@ class JiuWenClaw:
         query = request.params.get("query", "")
         if self._compaction_manager:
             self._compaction_manager.add_message("user", query)
-            
+
             from jiuwenclaw.agentserver.memory import get_memory_manager
             memory_mgr = await get_memory_manager(
                 agent_id=self._agent_name,
@@ -796,14 +795,14 @@ class JiuWenClaw:
             self._running_task = None
 
         content = result if isinstance(result, (str, dict)) else str(result)
-        
+
         if self._compaction_manager and content:
             if isinstance(content, dict):
                 content_str = content.get("output", str(content))
             else:
                 content_str = str(content)
             self._compaction_manager.add_message("assistant", content_str)
-        
+
         return AgentResponse(
             request_id=request.request_id,
             channel_id=request.channel_id,
@@ -813,7 +812,7 @@ class JiuWenClaw:
         )
 
     async def process_message_stream(
-        self, request: AgentRequest
+            self, request: AgentRequest
     ) -> AsyncIterator[AgentResponseChunk]:
         """流式处理：通过 JiuClawReActAgent.stream() 逐条返回 chunk.
 
@@ -983,12 +982,12 @@ class JiuWenClaw:
                         }
                         if isinstance(result_info, dict):
                             result_payload["tool_name"] = (
-                                result_info.get("tool_name")
-                                or result_info.get("name")
+                                    result_info.get("tool_name")
+                                    or result_info.get("name")
                             )
                             result_payload["tool_call_id"] = (
-                                result_info.get("tool_call_id")
-                                or result_info.get("toolCallId")
+                                    result_info.get("tool_call_id")
+                                    or result_info.get("toolCallId")
                             )
                     else:
                         result_payload = {"result": str(payload)}
