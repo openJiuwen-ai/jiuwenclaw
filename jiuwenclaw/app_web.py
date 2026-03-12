@@ -55,9 +55,9 @@ def _generate_agent_data(project_root: Path) -> None:
     root_folder_key = "__root__"
 
     if not agent_root.exists():
-        raise FileNotFoundError("workspace/agent 目录不存在")
+        raise FileNotFoundError("workspace/agent directory not found")
     if not agent_root.is_dir():
-        raise NotADirectoryError("workspace/agent 不是目录")
+        raise NotADirectoryError("workspace/agent is not a directory")
 
     folder_data: dict[str, list[dict[str, str | bool]]] = {}
     for entry in sorted(agent_root.rglob("*")):
@@ -108,6 +108,14 @@ class _SpaStaticHandler(SimpleHTTPRequestHandler):
         "upgrade",
     }
     _WS_LOG_MAX_CHARS = 2000
+    _HTTP_PROXY_TIMEOUT = 30
+    _WS_CONNECT_TIMEOUT = 10
+    _WS_SELECT_TIMEOUT = 60
+    _WS_RECV_BUFFER = 65536
+    _WS_HANDSHAKE_MAX_SIZE = 65536
+    _WS_HANDSHAKE_RECV_SIZE = 4096
+    _DEFAULT_HTTPS_PORT = 443
+    _DEFAULT_HTTP_PORT = 80
 
     class _WsTextFrameParser:
         """Parse websocket text frames from a byte stream."""
@@ -272,14 +280,14 @@ class _SpaStaticHandler(SimpleHTTPRequestHandler):
         if parsed.scheme == "https":
             conn: http.client.HTTPConnection = http.client.HTTPSConnection(
                 parsed.hostname,
-                parsed.port or 443,
-                timeout=30,
+                parsed.port or self._DEFAULT_HTTPS_PORT,
+                timeout=self._HTTP_PROXY_TIMEOUT,
             )
         else:
             conn = http.client.HTTPConnection(
                 parsed.hostname,
-                parsed.port or 80,
-                timeout=30,
+                parsed.port or self._DEFAULT_HTTP_PORT,
+                timeout=self._HTTP_PROXY_TIMEOUT,
             )
 
         try:
@@ -322,10 +330,12 @@ class _SpaStaticHandler(SimpleHTTPRequestHandler):
             return
 
         upstream_host = parsed.hostname or "127.0.0.1"
-        upstream_port = parsed.port or (443 if parsed.scheme in ("wss", "https") else 80)
+        upstream_port = parsed.port or (
+            self._DEFAULT_HTTPS_PORT if parsed.scheme in ("wss", "https") else self._DEFAULT_HTTP_PORT
+        )
 
         try:
-            upstream = socket.create_connection((upstream_host, upstream_port), timeout=10)
+            upstream = socket.create_connection((upstream_host, upstream_port), timeout=self._WS_CONNECT_TIMEOUT)
             if parsed.scheme in ("wss", "https"):
                 ctx = ssl.create_default_context()
                 upstream = ctx.wrap_socket(upstream, server_hostname=upstream_host)
@@ -352,11 +362,11 @@ class _SpaStaticHandler(SimpleHTTPRequestHandler):
 
             response_head = b""
             while b"\r\n\r\n" not in response_head:
-                chunk = upstream.recv(4096)
+                chunk = upstream.recv(self._WS_HANDSHAKE_RECV_SIZE)
                 if not chunk:
                     break
                 response_head += chunk
-                if len(response_head) > 65536:
+                if len(response_head) > self._WS_HANDSHAKE_MAX_SIZE:
                     break
             if not response_head:
                 self.send_error(502, "proxy ws handshake failed: empty response")
@@ -375,14 +385,14 @@ class _SpaStaticHandler(SimpleHTTPRequestHandler):
             client_parser = self._WsTextFrameParser()
             server_parser = self._WsTextFrameParser()
             while True:
-                readable, _, errored = select.select(sockets, [], sockets, 60)
+                readable, _, errored = select.select(sockets, [], sockets, self._WS_SELECT_TIMEOUT)
                 if errored:
                     break
                 if not readable:
                     continue
                 for sock in readable:
                     try:
-                        data = sock.recv(65536)
+                        data = sock.recv(self._WS_RECV_BUFFER)
                     except OSError:
                         data = b""
                     if not data:
@@ -511,14 +521,14 @@ class _SpaStaticHandler(SimpleHTTPRequestHandler):
         if path == "/file-api/file-content":
             file_arg = query.get("path", "")
             if not file_arg:
-                self._write_json(400, {"error": "缺少文件路径"})
+                self._write_json(400, {"error": "missing_file_path"})
                 return
             full_path = (self.project_root / file_arg).resolve()
             if not self._is_path_under_allowed_root(full_path):
                 self._write_json(403, {"error": "forbidden_path"})
                 return
             if not full_path.exists():
-                self._write_json(404, {"error": "文件不存在", "fullPath": str(full_path)})
+                self._write_json(404, {"error": "file_not_found", "fullPath": str(full_path)})
                 return
             try:
                 data = full_path.read_text(encoding="utf-8")
@@ -568,10 +578,10 @@ class _SpaStaticHandler(SimpleHTTPRequestHandler):
             request_path = payload.get("path")
             request_content = payload.get("content")
             if not isinstance(request_path, str) or not request_path.strip():
-                self._write_json(400, {"error": "缺少文件路径"})
+                self._write_json(400, {"error": "missing_file_path"})
                 return
             if not isinstance(request_content, str):
-                self._write_json(400, {"error": "缺少文件内容"})
+                self._write_json(400, {"error": "missing_file_content"})
                 return
 
             full_path = (self.project_root / request_path).resolve()
@@ -579,10 +589,10 @@ class _SpaStaticHandler(SimpleHTTPRequestHandler):
                 self._write_json(403, {"error": "forbidden_path"})
                 return
             if not self._is_markdown(full_path):
-                self._write_json(400, {"error": "仅支持保存 Markdown 文件"})
+                self._write_json(400, {"error": "only_markdown_supported"})
                 return
             if not full_path.exists():
-                self._write_json(404, {"error": "文件不存在"})
+                self._write_json(404, {"error": "file_not_found"})
                 return
 
             try:
