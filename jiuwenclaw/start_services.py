@@ -11,7 +11,7 @@ import sys
 import time
 from pathlib import Path
 
-from jiuwenclaw.paths import get_root_dir, is_package_installation
+from jiuwenclaw.utils import get_root_dir, is_package_installation
 
 # Runtime data root:
 # - source mode: repository root

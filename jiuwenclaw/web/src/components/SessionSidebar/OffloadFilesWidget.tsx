@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useTranslation } from 'react-i18next';
 import {
   OffloadFileListResponse,
   OffloadFileContentResponse,
@@ -15,6 +16,7 @@ interface SelectedFile {
 }
 
 export function OffloadFilesWidget({ sessionId }: OffloadFilesWidgetProps) {
+  const { t } = useTranslation();
   const [isExpanded, setIsExpanded] = useState(true);
   const [files, setFiles] = useState<string[]>([]);
   const [isLoading, setIsLoading] = useState(false);
@@ -42,12 +44,12 @@ export function OffloadFilesWidget({ sessionId }: OffloadFilesWidgetProps) {
       setFiles(data.files || []);
     } catch (error) {
       console.error('Failed to fetch offload files:', error);
-      setLoadError('获取离线文件失败');
+      setLoadError(t('offloadFiles.errors.loadFiles'));
       setFiles([]);
     } finally {
       setIsLoading(false);
     }
-  }, [isSessionReady, sessionId]);
+  }, [isSessionReady, sessionId, t]);
 
   useEffect(() => {
     if (isExpanded) {
@@ -81,12 +83,12 @@ export function OffloadFilesWidget({ sessionId }: OffloadFilesWidgetProps) {
         setSelectedFile({ filename, content: data.content || '' });
       } catch (error) {
         console.error('Failed to load offload file:', error);
-        setContentError('加载失败');
+        setContentError(t('offloadFiles.errors.loadContent'));
       } finally {
         setIsContentLoading(false);
       }
     },
-    [isSessionReady, sessionId]
+    [isSessionReady, sessionId, t]
   );
 
   const handleCloseModal = useCallback(() => {
@@ -127,10 +129,10 @@ export function OffloadFilesWidget({ sessionId }: OffloadFilesWidgetProps) {
           </div>
           <div>
             <div className="text-xs font-semibold text-text-strong">
-              Offload Files
+              {t('offloadFiles.title')}
             </div>
             <div className="text-[11px] text-text-muted">
-              {isSessionReady ? `${files.length} 个文件` : '未连接会话'}
+              {isSessionReady ? t('offloadFiles.count', { count: files.length }) : t('offloadFiles.notConnected')}
             </div>
           </div>
         </div>
@@ -166,7 +168,7 @@ export function OffloadFilesWidget({ sessionId }: OffloadFilesWidgetProps) {
           <div className="max-h-40 overflow-y-auto">
             {isLoading && (
               <div className="px-3 py-2 text-xs text-text-muted">
-                加载中...
+                {t('common.loading')}
               </div>
             )}
             {!isLoading && loadError && (
@@ -174,7 +176,7 @@ export function OffloadFilesWidget({ sessionId }: OffloadFilesWidgetProps) {
             )}
             {!isLoading && !loadError && files.length === 0 && (
               <div className="px-3 py-2 text-xs text-text-muted">
-                暂无离线文件
+                {t('offloadFiles.empty')}
               </div>
             )}
             {!isLoading &&
@@ -246,6 +248,8 @@ function OffloadFileModal({
   errorMessage,
   onClose,
 }: OffloadFileModalProps) {
+  const { t } = useTranslation();
+
   if (!isOpen) {
     return null;
   }
@@ -292,10 +296,10 @@ function OffloadFileModal({
               className="text-lg font-semibold truncate"
               style={{ color: 'var(--text-strong)' }}
             >
-              {filename || '离线文件内容'}
+              {filename || t('offloadFiles.previewFallback')}
             </h2>
             <p className="text-sm" style={{ color: 'var(--muted)' }}>
-              离线消息文件预览
+              {t('offloadFiles.previewTitle')}
             </p>
           </div>
         </div>
@@ -308,7 +312,7 @@ function OffloadFileModal({
           }}
         >
           {isLoading && (
-            <div className="text-sm text-text-muted">加载中...</div>
+            <div className="text-sm text-text-muted">{t('common.loading')}</div>
           )}
           {!isLoading && errorMessage && (
             <div className="text-sm text-danger">{errorMessage}</div>
@@ -318,7 +322,7 @@ function OffloadFileModal({
               className="text-sm whitespace-pre-wrap break-words"
               style={{ color: 'var(--text)' }}
             >
-              {content || '文件内容为空'}
+              {content || t('offloadFiles.emptyContent')}
             </pre>
           )}
         </div>
@@ -346,7 +350,7 @@ function OffloadFileModal({
               event.currentTarget.style.color = 'var(--muted)';
             }}
           >
-            关闭
+            {t('common.close')}
           </button>
         </div>
       </div>

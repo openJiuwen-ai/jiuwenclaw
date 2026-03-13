@@ -14,12 +14,13 @@ Handles path resolution for both source and package installations:
 
 import importlib.util
 import logging
+import os
 import shutil
 import sys
 from pathlib import Path
 from typing import Any
 
-logger = logging.getLogger(__name__)
+from logging.handlers import RotatingFileHandler
 
 # User home directory
 USER_HOME = Path.home()
@@ -34,10 +35,15 @@ _initialized: bool = False
 
 
 def _detect_installation_mode() -> bool:
-    """Detect if running from a package installation (whl)."""
+    """Detect if running from a package installation (whl) or PyInstaller bundle."""
     global _is_package
     if _is_package is not None:
         return _is_package
+
+    # PyInstaller 打包后使用用户工作区路径
+    if getattr(sys, "frozen", False):
+        _is_package = True
+        return True
 
     # Check if module is in site-packages
     module_file = Path(__file__).resolve()
@@ -81,63 +87,34 @@ def _find_package_root() -> Path | None:
     return current
 
 
-def init_user_workspace(overwrite: bool = True) -> Path:
-    """Initialize ~/.jiuwenclaw from package or source resources.
-
-    资源布局（新）:
-    - 模板配置:   <package_root>/resources/config.yaml
-    - 模块实现:   <package_root>/config.py
-    - .env 模板: <package_root>/resources/.env.template
-    - workspace: 优先 <package_root>/workspace，其次 <package_root>/../workspace
-
-    上述内容会被复制到:
-    - ~/.jiuwenclaw/config/config.yaml
-    - ~/.jiuwenclaw/config/config.py
-    - ~/.jiuwenclaw/.env
-    - ~/.jiuwenclaw/workspace/...
-
-    无论是通过 pip/whl 安装还是源码目录直接运行，效果保持一致。
-    """
+def prepare_workspace(overwrite: bool = True):
     package_root = _find_package_root()
     if not package_root:
         raise RuntimeError("package root not found")
 
     USER_WORKSPACE_DIR.mkdir(parents=True, exist_ok=True)
 
-    # ----- config: copy config.yaml + config.py -----
+    # ----- config: copy config.yaml -----
     resources_dir = package_root / "resources"
     config_yaml_src_candidates = [
         resources_dir / "config.yaml",
         package_root / "config" / "config.yaml",
     ]
-    config_py_src_candidates = [
-        package_root / "config.py",
-        package_root / "config" / "config.py",
-    ]
 
     config_yaml_src = next((p for p in config_yaml_src_candidates if p.exists()), None)
-    config_py_src = next((p for p in config_py_src_candidates if p.exists()), None)
 
     if not config_yaml_src:
         raise RuntimeError(
             "config.yaml template not found; tried: "
             + ", ".join(str(p) for p in config_yaml_src_candidates)
         )
-    if not config_py_src:
-        raise RuntimeError(
-            "config.py source not found; tried: "
-            + ", ".join(str(p) for p in config_py_src_candidates)
-        )
 
     config_dest_dir = USER_WORKSPACE_DIR / "config"
     config_dest_dir.mkdir(parents=True, exist_ok=True)
     config_yaml_dest = config_dest_dir / "config.yaml"
-    config_py_dest = config_dest_dir / "config.py"
 
     if overwrite or not config_yaml_dest.exists():
         shutil.copy2(config_yaml_src, config_yaml_dest)
-    if overwrite or not config_py_dest.exists():
-        shutil.copy2(config_py_src, config_py_dest)
 
     # ----- workspace: copy tree -----
     workspace_src_candidates = [
@@ -152,6 +129,8 @@ def init_user_workspace(overwrite: bool = True) -> Path:
         )
     workspace_dest = USER_WORKSPACE_DIR / "workspace"
     if overwrite:
+        if workspace_dest.exists():
+            shutil.rmtree(workspace_dest)
         shutil.copytree(workspace_src, workspace_dest, dirs_exist_ok=True)
     elif not workspace_dest.exists():
         shutil.copytree(workspace_src, workspace_dest)
@@ -170,6 +149,34 @@ def init_user_workspace(overwrite: bool = True) -> Path:
     env_dest = USER_WORKSPACE_DIR / ".env"
     if overwrite or not env_dest.exists():
         shutil.copy2(env_template_src, env_dest)
+
+
+def init_user_workspace(overwrite: bool = True) -> Path:
+    """Initialize ~/.jiuwenclaw from package or source resources.
+
+    资源布局（新）:
+    - 模板配置:   <package_root>/resources/config.yaml
+    - .env 模板: <package_root>/resources/.env.template
+    - workspace: 优先 <package_root>/workspace，其次 <package_root>/../workspace
+
+    上述内容会被复制到:
+    - ~/.jiuwenclaw/config/config.yaml
+    - ~/.jiuwenclaw/.env
+    - ~/.jiuwenclaw/workspace/...
+
+    无论是通过 pip/whl 安装还是源码目录直接运行，效果保持一致。
+    """
+    if USER_WORKSPACE_DIR.exists():
+        # Warn user about data loss and ask for confirmation
+        print("[jiuwenclaw-init] WARNING: This will delete all historical configuration and memory information.")
+        print("[jiuwenclaw-init] This action cannot be undone.")
+        confirmation = input("[jiuwenclaw-init] Do you want to confirm reinitialization? (yes/no): ").strip().lower()
+
+        if confirmation not in ("yes", "y"):
+            print("[jiuwenclaw-init] Initialization cancelled. Exiting.")
+            return "cancelled"
+
+    prepare_workspace(overwrite)
 
     return USER_WORKSPACE_DIR
 
@@ -199,7 +206,6 @@ def _resolve_paths() -> None:
                 _config_dir = USER_WORKSPACE_DIR / "config"
                 _workspace_dir = USER_WORKSPACE_DIR / "workspace"
             else:
-                logger.warning("Could not find package root, falling back to source mode")
                 source_root = _find_source_root()
                 _root_dir = source_root
                 _config_dir = source_root / "config"
@@ -247,30 +253,35 @@ def is_package_installation() -> bool:
     return _detect_installation_mode()
 
 
-def _get_config_module() -> Any:
-    """Get config module from correct location.
+def setup_logger(log_level: str = "INFO") -> logging.Logger:
+    """Setup logger with console and file handlers."""
+    project_root = get_root_dir()
+    logs_root = project_root / "logs"
+    logs_root.mkdir(parents=True, exist_ok=True)
 
-    This function dynamically loads the config module from either:
-    - User workspace: ~/.jiuwenclaw/config
-    - Source mode: project root config directory
+    logger = logging.getLogger("jiuwenclaw.app")
+    logger.setLevel(getattr(logging, log_level.upper(), logging.INFO))
+    logger.propagate = False
+    logger.handlers.clear()
 
-    Returns:
-        The loaded config module with get_config function
+    formatter = logging.Formatter(
+        fmt="%(asctime)s.%(msecs)03d %(levelname)s %(name)s: %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+    )
 
-    Raises:
-        ImportError: If config module cannot be loaded
-    """
-    # Check for user workspace
-    config_dir = Path.home() / ".jiuwenclaw" / "config"
-    if not config_dir.exists():
-        # Source mode: use relative path
-        config_dir = get_config_dir()
+    stream_handler = logging.StreamHandler()
+    stream_handler.setFormatter(formatter)
 
-    # Import config as a module
-    spec = importlib.util.spec_from_file_location("config_module", str(config_dir / "config.py"))
-    if spec and spec.loader:
-        module = importlib.util.module_from_spec(spec)
-        sys.modules["config_module"] = module
-        spec.loader.exec_module(module)
-        return module
-    raise ImportError(f"Cannot load config module from {config_dir}")
+    file_handler = RotatingFileHandler(
+        filename=logs_root / "app.log",
+        maxBytes=20 * 1024 * 1024,
+        backupCount=20,
+        encoding="utf-8"
+    )
+    file_handler.setFormatter(formatter)
+
+    logger.addHandler(stream_handler)
+    logger.addHandler(file_handler)
+    return logger
+
+logger = setup_logger(os.getenv("LOG_LEVEL", "INFO"))

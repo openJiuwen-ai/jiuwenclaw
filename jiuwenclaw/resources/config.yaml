@@ -1,6 +1,6 @@
 react:
   agent_name: main_agent
-  max_iterations: 50
+  max_iterations: 100
   model_name: ${MODEL_NAME:-deepseek-chat}
   answer_chunk_size: 500
   stream_chunk_threshold: 50
@@ -61,6 +61,12 @@ channels:
     ws_url1: wss://hag.cloud.huawei.com/openclaw/v1/ws/link
     ws_url2: wss://116.63.174.231/openclaw/v1/ws/link
     enable_streaming: true
+    enabled: false
+  dingtalk:
+    # 钉钉应用配置
+    client_id:
+    client_secret:
+    allow_from: []
     enabled: false
 
 browser:

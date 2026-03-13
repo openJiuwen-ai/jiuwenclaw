@@ -13,23 +13,26 @@ import shutil
 import sys
 import time
 import re
-import subprocess
-
 
 from pathlib import Path
 from dotenv import load_dotenv
 from typing import Any
 import psutil
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s.%(msecs)03d %(name)s %(levelname)s: %(message)s",
-    datefmt="%Y-%m-%d %H:%M:%S",
-)
-logger = logging.getLogger(__name__)
+# 减少日志打印
+from openjiuwen.core.common.logging import LogManager
 
-# 项目根目录，用于查找 workspace、agentserver 等目录
-from jiuwenclaw.paths import get_root_dir, get_config_dir, is_package_installation
+from jiuwenclaw.channel import (
+    DingTalkChannel,
+    DingTalkConfig,
+)
+
+for logger in LogManager.get_all_loggers().values():
+    logger.set_level(logging.CRITICAL)
+from openjiuwen.core.foundation.llm import ProviderType
+
+from jiuwenclaw.utils import get_config_file, get_root_dir, is_package_installation, logger
+from jiuwenclaw.config import get_config, update_heartbeat_in_config, update_channel_in_config, update_browser_in_config
 
 _PROJECT_ROOT = get_root_dir()
 _ENV_FILE = _PROJECT_ROOT / ".env"
@@ -46,34 +49,6 @@ def _get_package_dir() -> Path:
         # In source mode, app.py is at project root
         # So parent.parent is project root/jiuwenclaw/
         return Path(__file__).resolve().parent.parent / "jiuwenclaw"
-
-
-# 在导入 config 模块前，将其路径添加到 sys.path
-_config_dir = get_config_dir()
-os.environ["JIUWENCLAW_CONFIG_DIR"] = str(_config_dir)
-if str(_config_dir) not in sys.path:
-    sys.path.insert(0, str(_config_dir))
-
-# 动态导入 config 模块
-def _load_config_module():
-    """Dynamically load config module from correct location."""
-    import importlib.util
-    config_dir = get_config_dir()
-    config_path = config_dir / "config.py"
-    spec = importlib.util.spec_from_file_location("config_module", str(config_path))
-    if spec and spec.loader:
-        module = importlib.util.module_from_spec(spec)
-        sys.modules["config_module"] = module
-        spec.loader.exec_module(module)
-        return module
-    raise ImportError(f"Cannot load config module from {config_path}")
-
-_config_module = _load_config_module()
-get_config = _config_module.get_config
-set_config = _config_module.set_config
-update_heartbeat_in_config = _config_module.update_heartbeat_in_config
-update_channel_in_config = _config_module.update_channel_in_config
-update_browser_in_config = _config_module.update_browser_in_config
 
 
 # 仅满足 Channel 构造所需，不入队、不路由；仅用 channel_manager + message_handler 做入站/出站
@@ -163,6 +138,7 @@ def _register_web_handlers(
         channel_manager=None,
         on_config_saved=None,
         heartbeat_service=None,
+        cron_controller=None,
 ):
     """注册 Web 前端需要的 method 与 on_connect。
     on_config_saved: 可选，config.set 写回 .env 后调用的回调；返回 True 表示已热更新未重启，False 表示已安排进程重启。
@@ -269,10 +245,16 @@ def _register_web_handlers(
             await channel.send_response(ws, req_id, ok=False, error="params must be object", code="BAD_REQUEST")
             return
         updates: dict[str, str] = {}
+        available_model_providers = [provider.value for provider in ProviderType]
         for param_key, env_key in _CONFIG_SET_ENV_MAP.items():
             if param_key not in params:
                 continue
             val = params[param_key]
+            if param_key == "model_provider" and val not in available_model_providers:
+                await channel.send_response(
+                    ws, req_id, ok=False, error=f"Model provider must in: {available_model_providers} ", code="BAD_REQUEST"
+                )
+                return
             if val is None:
                 updates[env_key] = ""
             else:
@@ -415,8 +397,8 @@ def _register_web_handlers(
             return
 
         chrome_path = params.get("chrome_path")
-        if not isinstance(chrome_path, str) or not chrome_path.strip():
-            await channel.send_response(ws, req_id, ok=False, error="chrome_path is required", code="BAD_REQUEST")
+        if not isinstance(chrome_path, str):
+            await channel.send_response(ws, req_id, ok=False, error="chrome_path must be string", code="BAD_REQUEST")
             return
         chrome_path = chrome_path.strip()
 
@@ -431,49 +413,17 @@ def _register_web_handlers(
         await channel.send_response(ws, req_id, ok=True, payload={"chrome_path": chrome_path})
 
     async def _browser_start(ws, req_id, params, session_id):
-        """收到 browser.start 请求时，启动浏览器客户端脚本。"""
+        """收到 browser.start 请求时，通过 import 调用 start_browser 启动浏览器。"""
         try:
-            package_dir = _get_package_dir()
-            script_path = package_dir / "agentserver" / "tools" / "browser_start_client.py"
-            if not script_path.exists():
-                # 可编辑安装时 package_dir 可能在 site-packages，脚本在源码树里
-                script_path = _PROJECT_ROOT / "jiuwenclaw" / "agentserver" / "tools" / "browser_start_client.py"
-            if not script_path.exists():
-                await channel.send_response(
-                    ws,
-                    req_id,
-                    ok=False,
-                    error="browser_start_client.py not found",
-                    code="NOT_FOUND",
-                )
-                return
+            from jiuwenclaw.agentserver.tools.browser_start_client import start_browser
 
-            # 异步启动浏览器
-            # proc = await asyncio.create_subprocess_exec(
-            #     sys.executable,
-            #     str(script_path),
-            #     stdout=asyncio.subprocess.DEVNULL,
-            #     stderr=asyncio.subprocess.DEVNULL,
-            # )
-            # returncode = await proc.wait()
-
-            # await channel.send_response(
-            #     ws,
-            #     req_id,
-            #     ok=True,
-            #     payload={"started": returncode == 0, "returncode": returncode},
-            # )
-
-            result = subprocess.run(
-                [sys.executable, str(script_path)],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-            )
+            config_path = str(get_config_file())
+            returncode = start_browser(dry_run=False, config_file=config_path)
             await channel.send_response(
                 ws,
                 req_id,
-                ok=result.returncode == 0,
-                payload={"returncode": result.returncode},
+                ok=True,
+                payload={"returncode": returncode},
             )
 
         except Exception as e:  # noqa: BLE001
@@ -691,6 +641,207 @@ def _register_web_handlers(
             logger.exception("[channel.xiaoyi.set_conf] %s", e)
             await channel.send_response(ws, req_id, ok=False, error=str(e), code="INTERNAL_ERROR")
 
+    async def _channel_dingtalk_get_conf(ws, req_id, params, session_id):
+        cm = _resolve(channel_manager)
+        if cm is None:
+            await channel.send_response(
+                ws,
+                req_id,
+                ok=False,
+                error="channel manager not available",
+                code="SERVICE_UNAVAILABLE",
+            )
+            return
+        try:
+            conf = cm.get_conf("dingtalk")
+            await channel.send_response(ws, req_id, ok=True, payload={"config": conf})
+        except Exception as e:  # noqa: BLE001
+            logger.exception("[channel.dingtalk.get_conf] %s", e)
+            await channel.send_response(ws, req_id, ok=False, error=str(e), code="INTERNAL_ERROR")
+
+    async def _channel_dingtalk_set_conf(ws, req_id, params, session_id):
+        cm = _resolve(channel_manager)
+        if cm is None:
+            await channel.send_response(
+                ws,
+                req_id,
+                ok=False,
+                error="channel manager not available",
+                code="SERVICE_UNAVAILABLE",
+            )
+            return
+        if not isinstance(params, dict):
+            await channel.send_response(
+                ws,
+                req_id,
+                ok=False,
+                error="params must be object",
+                code="BAD_REQUEST",
+            )
+            return
+        try:
+            await cm.set_conf("dingtalk", params)
+            conf = cm.get_conf("dingtalk")
+            try:
+                update_channel_in_config("dingtalk", conf)
+                _clear_agent_config_cache()
+            except Exception as e:  # noqa: BLE001
+                logger.warning("[channel.dingtalk.set_conf] 写回 config.yaml 失败: %s", e)
+            await channel.send_response(ws, req_id, ok=True, payload={"config": conf})
+        except Exception as e:  # noqa: BLE001
+            logger.exception("[channel.dingtalk.set_conf] %s", e)
+            await channel.send_response(ws, req_id, ok=False, error=str(e), code="INTERNAL_ERROR")
+
+    # ----- cron jobs -----
+
+    def _get_cron():
+        return _resolve(cron_controller)
+
+    async def _cron_job_list(ws, req_id, params, session_id):
+        cc = _get_cron()
+        if cc is None:
+            await channel.send_response(ws, req_id, ok=False, error="cron not available", code="INTERNAL_ERROR")
+            return
+        jobs = await cc.list_jobs()
+        await channel.send_response(ws, req_id, ok=True, payload={"jobs": jobs})
+
+    async def _cron_job_get(ws, req_id, params, session_id):
+        cc = _get_cron()
+        if cc is None:
+            await channel.send_response(ws, req_id, ok=False, error="cron not available", code="INTERNAL_ERROR")
+            return
+        if not isinstance(params, dict):
+            await channel.send_response(ws, req_id, ok=False, error="params must be object", code="BAD_REQUEST")
+            return
+        job_id = str(params.get("id") or "").strip()
+        if not job_id:
+            await channel.send_response(ws, req_id, ok=False, error="id is required", code="BAD_REQUEST")
+            return
+        job = await cc.get_job(job_id)
+        if job is None:
+            await channel.send_response(ws, req_id, ok=False, error="job not found", code="NOT_FOUND")
+            return
+        await channel.send_response(ws, req_id, ok=True, payload={"job": job})
+
+    async def _cron_job_create(ws, req_id, params, session_id):
+        cc = _get_cron()
+        if cc is None:
+            await channel.send_response(ws, req_id, ok=False, error="cron not available", code="INTERNAL_ERROR")
+            return
+        if not isinstance(params, dict):
+            await channel.send_response(ws, req_id, ok=False, error="params must be object", code="BAD_REQUEST")
+            return
+        try:
+            job = await cc.create_job(params)
+            await channel.send_response(ws, req_id, ok=True, payload={"job": job})
+        except Exception as e:  # noqa: BLE001
+            await channel.send_response(ws, req_id, ok=False, error=str(e), code="BAD_REQUEST")
+
+    async def _cron_job_update(ws, req_id, params, session_id):
+        cc = _get_cron()
+        if cc is None:
+            await channel.send_response(ws, req_id, ok=False, error="cron not available", code="INTERNAL_ERROR")
+            return
+        if not isinstance(params, dict):
+            await channel.send_response(ws, req_id, ok=False, error="params must be object", code="BAD_REQUEST")
+            return
+        job_id = str(params.get("id") or "").strip()
+        patch = params.get("patch") or {}
+        if not job_id:
+            await channel.send_response(ws, req_id, ok=False, error="id is required", code="BAD_REQUEST")
+            return
+        if not isinstance(patch, dict):
+            await channel.send_response(ws, req_id, ok=False, error="patch must be object", code="BAD_REQUEST")
+            return
+        try:
+            job = await cc.update_job(job_id, patch)
+            await channel.send_response(ws, req_id, ok=True, payload={"job": job})
+        except KeyError:
+            await channel.send_response(ws, req_id, ok=False, error="job not found", code="NOT_FOUND")
+        except Exception as e:  # noqa: BLE001
+            await channel.send_response(ws, req_id, ok=False, error=str(e), code="BAD_REQUEST")
+
+    async def _cron_job_delete(ws, req_id, params, session_id):
+        cc = _get_cron()
+        if cc is None:
+            await channel.send_response(ws, req_id, ok=False, error="cron not available", code="INTERNAL_ERROR")
+            return
+        if not isinstance(params, dict):
+            await channel.send_response(ws, req_id, ok=False, error="params must be object", code="BAD_REQUEST")
+            return
+        job_id = str(params.get("id") or "").strip()
+        if not job_id:
+            await channel.send_response(ws, req_id, ok=False, error="id is required", code="BAD_REQUEST")
+            return
+        deleted = await cc.delete_job(job_id)
+        if not deleted:
+            await channel.send_response(ws, req_id, ok=False, error="job not found", code="NOT_FOUND")
+            return
+        await channel.send_response(ws, req_id, ok=True, payload={"deleted": True})
+
+    async def _cron_job_toggle(ws, req_id, params, session_id):
+        cc = _get_cron()
+        if cc is None:
+            await channel.send_response(ws, req_id, ok=False, error="cron not available", code="INTERNAL_ERROR")
+            return
+        if not isinstance(params, dict):
+            await channel.send_response(ws, req_id, ok=False, error="params must be object", code="BAD_REQUEST")
+            return
+        job_id = str(params.get("id") or "").strip()
+        enabled = params.get("enabled", None)
+        if not job_id:
+            await channel.send_response(ws, req_id, ok=False, error="id is required", code="BAD_REQUEST")
+            return
+        if enabled is None:
+            await channel.send_response(ws, req_id, ok=False, error="enabled is required", code="BAD_REQUEST")
+            return
+        try:
+            job = await cc.toggle_job(job_id, bool(enabled))
+            await channel.send_response(ws, req_id, ok=True, payload={"job": job})
+        except KeyError:
+            await channel.send_response(ws, req_id, ok=False, error="job not found", code="NOT_FOUND")
+
+    async def _cron_job_preview(ws, req_id, params, session_id):
+        cc = _get_cron()
+        if cc is None:
+            await channel.send_response(ws, req_id, ok=False, error="cron not available", code="INTERNAL_ERROR")
+            return
+        if not isinstance(params, dict):
+            await channel.send_response(ws, req_id, ok=False, error="params must be object", code="BAD_REQUEST")
+            return
+        job_id = str(params.get("id") or "").strip()
+        count = params.get("count", 5)
+        if not job_id:
+            await channel.send_response(ws, req_id, ok=False, error="id is required", code="BAD_REQUEST")
+            return
+        try:
+            next_runs = await cc.preview_job(job_id, int(count) if count is not None else 5)
+            await channel.send_response(ws, req_id, ok=True, payload={"next": next_runs})
+        except KeyError:
+            await channel.send_response(ws, req_id, ok=False, error="job not found", code="NOT_FOUND")
+        except Exception as e:  # noqa: BLE001
+            await channel.send_response(ws, req_id, ok=False, error=str(e), code="BAD_REQUEST")
+
+    async def _cron_job_run_now(ws, req_id, params, session_id):
+        cc = _get_cron()
+        if cc is None:
+            await channel.send_response(ws, req_id, ok=False, error="cron not available", code="INTERNAL_ERROR")
+            return
+        if not isinstance(params, dict):
+            await channel.send_response(ws, req_id, ok=False, error="params must be object", code="BAD_REQUEST")
+            return
+        job_id = str(params.get("id") or "").strip()
+        if not job_id:
+            await channel.send_response(ws, req_id, ok=False, error="id is required", code="BAD_REQUEST")
+            return
+        try:
+            run_id = await cc.run_now(job_id)
+            await channel.send_response(ws, req_id, ok=True, payload={"run_id": run_id})
+        except KeyError:
+            await channel.send_response(ws, req_id, ok=False, error="job not found", code="NOT_FOUND")
+        except Exception as e:  # noqa: BLE001
+            await channel.send_response(ws, req_id, ok=False, error=str(e), code="INTERNAL_ERROR")
+
     channel.register_method("config.get", _config_get)
     channel.register_method("config.set", _config_set)
     channel.register_method("channel.get", _channel_get)
@@ -715,6 +866,16 @@ def _register_web_handlers(
     channel.register_method("channel.feishu.set_conf", _channel_feishu_set_conf)
     channel.register_method("channel.xiaoyi.get_conf", _channel_xiaoyi_get_conf)
     channel.register_method("channel.xiaoyi.set_conf", _channel_xiaoyi_set_conf)
+    channel.register_method("channel.dingtalk.get_conf", _channel_dingtalk_get_conf)
+    channel.register_method("channel.dingtalk.set_conf", _channel_dingtalk_set_conf)
+    channel.register_method("cron.job.list", _cron_job_list)
+    channel.register_method("cron.job.get", _cron_job_get)
+    channel.register_method("cron.job.create", _cron_job_create)
+    channel.register_method("cron.job.update", _cron_job_update)
+    channel.register_method("cron.job.delete", _cron_job_delete)
+    channel.register_method("cron.job.toggle", _cron_job_toggle)
+    channel.register_method("cron.job.preview", _cron_job_preview)
+    channel.register_method("cron.job.run_now", _cron_job_run_now)
 
 
 async def _run() -> None:
@@ -729,15 +890,20 @@ async def _run() -> None:
         WebSocketAgentServerClient,
     )
     from jiuwenclaw.gateway.channel_manager import ChannelManager
+    from jiuwenclaw.gateway.cron import CronController, CronJobStore, CronSchedulerService
     from jiuwenclaw.gateway.message_handler import MessageHandler
     from jiuwenclaw.schema.message import Message, EventType, ReqMethod
     from jiuwenclaw.agentserver.memory.config import _load_config as _load_agent_config
     from jiuwenclaw.agentserver.tools.browser_tools import restart_local_browser_runtime_server
+    from jiuwenclaw.utils import prepare_workspace, USER_WORKSPACE_DIR
 
     agent_port = int(os.getenv("AGENT_PORT", "18092"))
     web_host = os.getenv("WEB_HOST", "127.0.0.1")
     web_port = int(os.getenv("WEB_PORT", "19000"))
     web_path = os.getenv("WEB_PATH", "/ws")
+
+    if not USER_WORKSPACE_DIR.exists():
+        prepare_workspace(overwrite=False)
 
     def _do_restart() -> None:
         """重新执行当前进程以加载新 .env（配置修改后重启服务）。"""
@@ -754,7 +920,7 @@ async def _run() -> None:
 
     # ---------- 一次启动所有服务 ----------
     agent = JiuWenClaw()
-    await agent.create_instance()
+
     server = AgentWebSocketServer(
         agent, host="127.0.0.1", port=agent_port,
         ping_interval=20.0, ping_timeout=20.0,
@@ -767,6 +933,13 @@ async def _run() -> None:
     await client.connect(uri)
     message_handler = MessageHandler(client)
     await message_handler.start_forwarding()
+
+    cron_store = CronJobStore()
+    cron_scheduler = CronSchedulerService(store=cron_store, agent_client=client, message_handler=message_handler)
+    cron_controller = CronController.get_instance(store=cron_store, scheduler=cron_scheduler)
+
+    # agent实例化需要在定时任务后
+    await agent.create_instance()
 
     # 探活：周期性向 AgentServer 发送心跳，便于检测连接与 Agent 可用性
     # 优先从 config/config.yaml 的 heartbeat 段读取配置，其次回退到环境变量/默认值
@@ -840,6 +1013,7 @@ async def _run() -> None:
         channel_manager=channel_manager,
         on_config_saved=_on_config_saved,
         heartbeat_service=heartbeat_service,
+        cron_controller=cron_controller,
     )
 
     def _norm_and_forward(msg: Message) -> bool:
@@ -880,130 +1054,159 @@ async def _run() -> None:
     feishu_task = None
     xiaoyi_channel = None
     xiaoyi_task = None
+    dingtalk_channel = None
+    dingtalk_task = None
+    _last_channels_conf = {}  # Store previous config to detect changes
+
+    def _should_restart_channel(channel_name: str, old_conf: dict, new_conf: dict) -> bool:
+        """Check if a channel configuration changed enough to require restart."""
+        old_channel_conf = old_conf.get(channel_name) if isinstance(old_conf, dict) else None
+        new_channel_conf = new_conf.get(channel_name) if isinstance(new_conf, dict) else None
+
+        # If one exists and the other doesn't, changed
+        if (old_channel_conf is None) != (new_channel_conf is None):
+            return True
+
+        # If both are None, not changed
+        if old_channel_conf is None:
+            return False
+
+        # Compare all config fields (including nested structures)
+        return old_channel_conf != new_channel_conf
+
+    async def _stop_channel(channel, task, channel_name: str, background_wait: bool = False) -> None:
+        """Stop a channel and its task.
+
+        Args:
+            channel: The channel instance to stop
+            task: The async task to cancel
+            channel_name: Name of the channel for logging
+            background_wait: If True, wait for task cancellation in background (like DingtalkChannel)
+        """
+        if task is not None:
+            task.cancel()
+
+            if background_wait:
+                async def wait_cancel():
+                    try:
+                        await task
+                    except (TypeError, asyncio.CancelledError):
+                        logger.info("[App] 取消旧 %sChannel 任务成功", channel_name.capitalize())
+                asyncio.create_task(wait_cancel(), name=f"wait_{channel_name}_cancel")
+            else:
+                try:
+                    await asyncio.wait_for(task, timeout=5.0)
+                except asyncio.TimeoutError:
+                    logger.warning("[App] 等待 %sChannel 任务取消超时", channel_name.capitalize())
+                except asyncio.CancelledError:
+                    pass
+
+        if channel is not None:
+            try:
+                await asyncio.wait_for(channel.stop(), timeout=10.0)
+            except asyncio.TimeoutError:
+                logger.warning("[App] 停止 %sChannel 超时", channel_name.capitalize())
+            except Exception as e:  # noqa: BLE001
+                logger.warning("[App] 停止旧 %sChannel 失败: %s", channel_name.capitalize(), e)
+            channel_manager.unregister_channel(channel.channel_id)
+
+    def _is_channel_enabled(conf: dict | None, required_fields: list[str]) -> tuple[bool, str]:
+        """Check if a channel should be enabled based on config. Returns (enabled, reason_log)."""
+        if conf is None:
+            return False, "未配置或格式错误"
+        enabled_raw = conf.get("enabled", None)
+        if enabled_raw is None:
+            # Auto-enable if all required fields are present
+            all_fields_present = all(conf.get(f) for f in required_fields)
+            return all_fields_present, f"缺少 {','.join(required_fields)}" if not all_fields_present else ""
+        return bool(enabled_raw), "enabled = false" if not enabled_raw else ""
 
     async def _apply_channel_config(conf: dict) -> None:
-        """根据最新 Channel 配置重新实例化各 Channel，目前管理 FeishuChannel 与 XiaoyiChannel.
+        """根据最新 Channel 配置重新实例化各 Channel"""
+        nonlocal feishu_channel, feishu_task, xiaoyi_channel, xiaoyi_task, dingtalk_channel, dingtalk_task, _last_channels_conf
 
-        FeishuChannel 的启用规则：
-        - 若配置中包含 enabled 字段，则以其布尔值为准；
-        - 否则，当 app_id 和 app_secret 均非空时视为启用。
-
-        XiaoyiChannel 的启用规则：
-        - 若配置中包含 enabled 字段，则以其布尔值为准；
-        - 否则，当 ak / sk / agent_id 均非空时视为启用。
-        """
-        nonlocal feishu_channel, feishu_task, xiaoyi_channel, xiaoyi_task
+        # Detect which channels changed
+        changed_channels = [c for c in ["feishu", "xiaoyi", "dingtalk"]
+                           if _should_restart_channel(c, _last_channels_conf, conf)]
+        _last_channels_conf = dict(conf or {})
 
         # ----- FeishuChannel -----
+        if "feishu" in changed_channels:
+            feishu_conf = conf.get("feishu") if isinstance(conf, dict) else None
+            await _stop_channel(feishu_channel, feishu_task, "feishu")
+            feishu_channel, feishu_task = None, None
 
-        feishu_conf = conf.get("feishu") if isinstance(conf, dict) else None
-
-        # 先清理已存在的 FeishuChannel
-        if feishu_task is not None:
-            feishu_task.cancel()
-            try:
-                await feishu_task
-            except asyncio.CancelledError:
-                pass
-            feishu_task = None
-        if feishu_channel is not None:
-            try:
-                await feishu_channel.stop()
-            except Exception as e:  # noqa: BLE001
-                logger.warning("[App] 停止旧 FeishuChannel 失败: %s", e)
-            channel_manager.unregister_channel(feishu_channel.channel_id)
-            feishu_channel = None
-
-        # 再根据新配置决定是否创建新的 FeishuChannel
-        if isinstance(feishu_conf, dict):
-            app_id = str(feishu_conf.get("app_id") or "").strip()
-            app_secret = str(feishu_conf.get("app_secret") or "").strip()
-            encrypt_key = str(feishu_conf.get("encrypt_key") or "").strip()
-            verification_token = str(feishu_conf.get("verification_token") or "").strip()
-            allow_from = feishu_conf.get("allow_from") or []
-
-            enabled_raw = feishu_conf.get("enabled", None)
-            if enabled_raw is None:
-                enabled = bool(app_id and app_secret)
+            if isinstance(feishu_conf, dict):
+                enabled, reason = _is_channel_enabled(feishu_conf, ["app_id", "app_secret"])
+                if not enabled:
+                    logger.info("[App] channels.feishu.%s，FeishuChannel 未启用", reason)
+                else:
+                    feishu_config = FeishuConfig(
+                        enabled=True,
+                        app_id=str(feishu_conf.get("app_id") or "").strip(),
+                        app_secret=str(feishu_conf.get("app_secret") or "").strip(),
+                        encrypt_key=str(feishu_conf.get("encrypt_key") or "").strip(),
+                        verification_token=str(feishu_conf.get("verification_token") or "").strip(),
+                        allow_from=feishu_conf.get("allow_from") or [],
+                        chat_id=str(feishu_conf.get("chat_id") or "").strip(),
+                    )
+                    feishu_channel = FeishuChannel(feishu_config, _DummyBus())
+                    channel_manager.register_channel(feishu_channel)
+                    feishu_task = asyncio.create_task(feishu_channel.start(), name="feishu")
+                    logger.info("[App] 已按 config.yaml.channels.feishu 注册 FeishuChannel")
             else:
-                enabled = bool(enabled_raw)
-
-            if not enabled:
-                logger.info("[App] channels.feishu.enabled = false，FeishuChannel 未启用")
-            elif not (app_id and app_secret):
-                logger.info("[App] channels.feishu 缺少 app_id/app_secret，FeishuChannel 未启用")
-            else:
-                feishu_config = FeishuConfig(
-                    enabled=True,
-                    app_id=app_id,
-                    app_secret=app_secret,
-                    encrypt_key=encrypt_key,
-                    verification_token=verification_token,
-                    allow_from=allow_from,
-                )
-                feishu_channel = FeishuChannel(feishu_config, _DummyBus())
-                channel_manager.register_channel(feishu_channel)
-                feishu_task = asyncio.create_task(feishu_channel.start(), name="feishu")
-                logger.info("[App] 已按 config.yaml.channels.feishu 注册 FeishuChannel")
-        else:
-            logger.info("[App] channels.feishu 未配置或格式错误，FeishuChannel 不启用")
+                logger.info("[App] channels.feishu 未配置或格式错误，FeishuChannel 不启用")
 
         # ----- XiaoyiChannel -----
+        if "xiaoyi" in changed_channels:
+            xiaoyi_conf = conf.get("xiaoyi") if isinstance(conf, dict) else None
+            await _stop_channel(xiaoyi_channel, xiaoyi_task, "xiaoyi")
+            xiaoyi_channel, xiaoyi_task = None, None
 
-        xiaoyi_conf = conf.get("xiaoyi") if isinstance(conf, dict) else None
-
-        # 先清理已存在的 XiaoyiChannel
-        if xiaoyi_task is not None:
-            xiaoyi_task.cancel()
-            try:
-                await xiaoyi_task
-            except asyncio.CancelledError:
-                pass
-            xiaoyi_task = None
-        if xiaoyi_channel is not None:
-            try:
-                await xiaoyi_channel.stop()
-            except Exception as e:  # noqa: BLE001
-                logger.warning("[App] 停止旧 XiaoyiChannel 失败: %s", e)
-            channel_manager.unregister_channel(xiaoyi_channel.channel_id)
-            xiaoyi_channel = None
-
-        # 再根据新配置决定是否创建新的 XiaoyiChannel
-        if isinstance(xiaoyi_conf, dict):
-            ak = str(xiaoyi_conf.get("ak") or "").strip()
-            sk = str(xiaoyi_conf.get("sk") or "").strip()
-            agent_id = str(xiaoyi_conf.get("agent_id") or "").strip()
-            ws_url1 = str(xiaoyi_conf.get("ws_url1") or "wss://116.63.174.231/openclaw/v1/ws/link").strip()
-            ws_url2 = str(xiaoyi_conf.get("ws_url2") or "wss://hag.cloud.huawei.com/openclaw/v1/ws/link").strip()
-            enable_streaming_raw = xiaoyi_conf.get("enable_streaming", True)
-            enable_streaming = bool(enable_streaming_raw)
-
-            enabled_raw = xiaoyi_conf.get("enabled", None)
-            if enabled_raw is None:
-                enabled = bool(ak and sk and agent_id)
+            if isinstance(xiaoyi_conf, dict):
+                enabled, reason = _is_channel_enabled(xiaoyi_conf, ["ak", "sk", "agent_id"])
+                if not enabled:
+                    logger.info("[App] channels.xiaoyi.%s，XiaoyiChannel 未启用", reason)
+                else:
+                    xiaoyi_config = XiaoyiChannelConfig(
+                        enabled=True,
+                        ak=str(xiaoyi_conf.get("ak") or "").strip(),
+                        sk=str(xiaoyi_conf.get("sk") or "").strip(),
+                        agent_id=str(xiaoyi_conf.get("agent_id") or "").strip(),
+                        ws_url1=str(xiaoyi_conf.get("ws_url1") or "wss://116.63.174.231/openclaw/v1/ws/link").strip(),
+                        ws_url2=str(xiaoyi_conf.get("ws_url2") or "wss://hag.cloud.huawei.com/openclaw/v1/ws/link").strip(),
+                        enable_streaming=bool(xiaoyi_conf.get("enable_streaming", True)),
+                    )
+                    xiaoyi_channel = XiaoyiChannel(xiaoyi_config, _DummyBus())
+                    channel_manager.register_channel(xiaoyi_channel)
+                    xiaoyi_task = asyncio.create_task(xiaoyi_channel.start(), name="xiaoyi")
+                    logger.info("[App] 已按 config.yaml.channels.xiaoyi 注册 XiaoyiChannel")
             else:
-                enabled = bool(enabled_raw)
+                logger.info("[App] channels.xiaoyi 未配置或格式错误，XiaoyiChannel 不启用")
 
-            if not enabled:
-                logger.info("[App] channels.xiaoyi.enabled = false，XiaoyiChannel 未启用")
-            elif not (ak and sk and agent_id):
-                logger.info("[App] channels.xiaoyi 缺少 ak/sk/agent_id，XiaoyiChannel 未启用")
+        # ----- DingtalkChannel -----
+        if "dingtalk" in changed_channels:
+            dingtalk_conf = conf.get("dingtalk") if isinstance(conf, dict) else None
+            await _stop_channel(dingtalk_channel, dingtalk_task, "dingtalk", background_wait=True)
+            dingtalk_channel, dingtalk_task = None, None
+
+            if isinstance(dingtalk_conf, dict):
+                enabled, reason = _is_channel_enabled(dingtalk_conf, ["client_id", "client_secret"])
+                if not enabled:
+                    logger.info("[App] channels.dingtalk.%s，DingtalkChannel 未启用", reason)
+                else:
+                    dingtalk_config = DingTalkConfig(
+                        enabled=True,
+                        client_id=str(dingtalk_conf.get("client_id") or "").strip(),
+                        client_secret=str(dingtalk_conf.get("client_secret") or "").strip(),
+                        allow_from=dingtalk_conf.get("allow_from") or [],
+                    )
+                    dingtalk_channel = DingTalkChannel(dingtalk_config, _DummyBus())
+                    channel_manager.register_channel(dingtalk_channel)
+                    dingtalk_task = asyncio.create_task(dingtalk_channel.start(), name="dingtalk")
+                    logger.info("[App] 已按 config.yaml.channels.dingtalk 注册 DingtalkChannel")
             else:
-                xiaoyi_config = XiaoyiChannelConfig(
-                    enabled=True,
-                    ak=ak,
-                    sk=sk,
-                    agent_id=agent_id,
-                    ws_url1=ws_url1,
-                    ws_url2=ws_url2,
-                    enable_streaming=enable_streaming,
-                )
-                xiaoyi_channel = XiaoyiChannel(xiaoyi_config, _DummyBus())
-                channel_manager.register_channel(xiaoyi_channel)
-                xiaoyi_task = asyncio.create_task(xiaoyi_channel.start(), name="xiaoyi")
-                logger.info("[App] 已按 config.yaml.channels.xiaoyi 注册 XiaoyiChannel")
-        else:
-            logger.info("[App] channels.xiaoyi 未配置或格式错误，XiaoyiChannel 不启用")
+                logger.info("[App] channels.dingtalk 未配置或格式错误，DingtalkChannel 不启用")
 
     # 将「配置更新时如何重新实例化 Channel」逻辑注册到 ChannelManager
     channel_manager.set_config_callback(_apply_channel_config)
@@ -1011,19 +1214,18 @@ async def _run() -> None:
     await channel_manager.set_config(initial_channels_conf)
 
     await channel_manager.start_dispatch()
+    await cron_scheduler.start()
     web_task = asyncio.create_task(web_channel.start(), name="web-channel")
     logger.info(
         "[App] 已启动: Web ws://%s:%s%s  修改配置后将自动重启服务。Ctrl+C 退出。",
         web_host, web_port, web_path,
     )
 
+    # 主循环仅以 WebChannel 的生命周期为准：
+    # Feishu/Xiaoyi/Dingtalk 等 Channel 的 start/stop 由 _apply_channel_config 动态管理，
+    # 不再将其任务纳入这里的 gather，以避免在热更新（如关闭 Feishu）时取消任务导致整个 E2E 提前退出。
     try:
-        tasks = [web_task]
-        if feishu_task is not None:
-            tasks.append(feishu_task)
-        if xiaoyi_task is not None:
-            tasks.append(xiaoyi_task)
-        await asyncio.gather(*tasks)
+        await web_task
     except KeyboardInterrupt:
         logger.info("收到 Ctrl+C，正在退出…")
     except asyncio.CancelledError:
@@ -1049,6 +1251,14 @@ async def _run() -> None:
             except asyncio.CancelledError:
                 pass
             await xiaoyi_channel.stop()
+        if dingtalk_channel is not None and dingtalk_task is not None:
+            dingtalk_task.cancel()
+            try:
+                await dingtalk_task
+            except (TypeError, asyncio.CancelledError):
+                pass
+            await dingtalk_channel.stop()
+        await cron_scheduler.stop()
         await channel_manager.stop_dispatch()
         await heartbeat_service.stop()
         await message_handler.stop_forwarding()

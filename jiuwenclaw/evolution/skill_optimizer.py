@@ -4,7 +4,6 @@
 from __future__ import annotations
 
 import asyncio
-import logging
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -13,8 +12,7 @@ from openjiuwen.agent_evolving.trajectory.types import Updates as BaseUpdates
 
 from jiuwenclaw.evolution.manager import SkillEvolutionManager, build_conversation_snippet
 from jiuwenclaw.evolution.schema import EvolutionSignal
-
-logger = logging.getLogger(__name__)
+from jiuwenclaw.utils import logger
 
 # Updates type: {(op_id, target): Dict[skill_name, EvolutionEntry]}
 Updates = Dict[Tuple[str, str], Dict[str, Any]]

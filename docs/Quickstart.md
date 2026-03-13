@@ -12,17 +12,21 @@ JiuwenClaw提供两种安装方式：
 
 环境依赖：
 
-- python：>=3.13,<3.14
+- python：>=3.11,<3.14
 - nodejs：>=18.0.0（仅源码前端构建或 browser-use 功能需要，推荐 20 LTS）
 
 可以使用`uv`或Anaconda新建虚拟环境
 
 ```bash
-# 使用uv新建虚拟环境
-uv venv --python=3.13.11
+# 使用uv新建虚拟环境（支持 3.11、3.12、3.13 任一版本）
+uv venv --python=3.11
+# 或 uv venv --python=3.12
+# 或 uv venv --python=3.13
 
-# 使用Anaconda新建虚拟环境
-conda create -n JiuwenClaw python=3.13
+# 使用Anaconda新建虚拟环境（支持 3.11、3.12、3.13 任一版本）
+conda create -n JiuwenClaw python=3.11
+# 或 conda create -n JiuwenClaw python=3.12
+# 或 conda create -n JiuwenClaw python=3.13
 ```
 
 **方式一：pip安装（推荐）**
@@ -40,13 +44,25 @@ jiuwenclaw\Scripts\activate
 pip install jiuwenclaw
 ```
 
-安装完成后执行命令行运行
+安装完成后执行命令行初始化和启动
 
 ```bash
-  jiuwenclaw-start
+# 初始化 JiuwenClaw (首次启动)
+jiuwenclaw-init
+
+# 启动 JiuwenClaw
+jiuwenclaw-start
 ```
 
-运行完成后即可在网页前端访问JiuwenClaw服务
+运行完成后即可在网页前端访问JiuwenClaw服务（默认网页本地访问 `http://localhost:5173`，如需远程访问可以执行入下命令）
+
+``````
+# 启动web服务
+jiuwenclaw-web --host 0.0.0.0 --port 自定义端口
+
+# 启动后端服务
+jiuwenclaw-app
+``````
 
 
 
@@ -55,7 +71,7 @@ pip install jiuwenclaw
 下载JiuwenClaw代码
 
 ```bash
-  git  clone https://gitcode.com/openjiuwen/jiuwenclaw.git
+  git clone https://gitcode.com/openjiuwen/jiuwenclaw.git
 ```
 
 进入源码目录执行uv同步操作

@@ -4,6 +4,7 @@
  * 工具面板，显示 Todo 列表和状态信息
  */
 
+import { useTranslation } from 'react-i18next';
 import { useSessionStore } from '../../stores';
 import { useEffect, useState } from 'react';
 import { webRequest } from '../../services/webClient';
@@ -12,6 +13,7 @@ import { TodoList } from '../TodoList';
 import './ToolPanel.css';
 
 export function ToolPanel() {
+  const { t } = useTranslation();
   const {
     contextCompressionRate,
     contextCompressionBefore,
@@ -78,14 +80,14 @@ export function ToolPanel() {
         : 'text-text-muted border-border bg-secondary/40';
 
   const heartbeatDetail = heartbeatUpdatedAt
-    ? new Date(heartbeatUpdatedAt).toLocaleTimeString('zh-CN', { hour12: false })
+    ? new Date(heartbeatUpdatedAt).toLocaleTimeString(undefined, { hour12: false })
     : '--:--:--';
   const isHeartbeatOk = heartbeatMessage?.toUpperCase().includes('HEARTBEAT_OK') ?? false;
   const heartbeatDisplayMessage = !heartbeatMessage
     ? 'HEARTBEAT_UNKNOWN'
     : isHeartbeatOk
       ? heartbeatMessage
-      : '心跳消息，点击查看';
+      : t('toolPanel.heartbeatClick');
   const canOpenHeartbeatModal = Boolean(heartbeatMessage) && !isHeartbeatOk;
   const memoryDisplay =
     memoryUsage.rssMb == null
@@ -117,21 +119,21 @@ export function ToolPanel() {
               <rect x="6" y="4" width="3" height="11" rx="0.5" fill="currentColor" opacity="0.7" />
               <rect x="11" y="1" width="3" height="14" rx="0.5" fill="currentColor" />
             </svg>
-            状态
+            {t('toolPanel.status')}
           </h3>
           <div className="space-y-2">
             <div className="toolpanel-status-card__row">
-              <span className="text-text-muted">上下文压缩</span>
+              <span className="text-text-muted">{t('toolPanel.contextCompression')}</span>
               <span className="mono text-text">{compressionDisplay}</span>
             </div>
             <div className="toolpanel-status-card__row">
-              <span className="text-text-muted">内存占用</span>
+              <span className="text-text-muted">{t('toolPanel.memoryUsage')}</span>
               <span className="mono text-text">{memoryDisplay}</span>
             </div>
 
             <div className={`toolpanel-status-card__heartbeat ${heartbeatClassName}`}>
               <div className="toolpanel-status-card__heartbeat-row">
-                <span>消息</span>
+                <span>{t('toolPanel.message')}</span>
                 {canOpenHeartbeatModal ? (
                   <button
                     type="button"
@@ -147,7 +149,7 @@ export function ToolPanel() {
                 )}
               </div>
               <div className="toolpanel-status-card__heartbeat-row">
-                <span>时间</span>
+                <span>{t('toolPanel.time')}</span>
                 <span className="toolpanel-status-card__heartbeat-value mono">
                   {heartbeatDetail}
                 </span>
@@ -162,7 +164,7 @@ export function ToolPanel() {
           style={{ fontSize: 'var(--font-size-xs)' }}
         >
           <div className="px-2.5">
-            <span>Powered by openJiuwen</span>
+            <span>{t('toolPanel.poweredBy')}</span>
           </div>
         </div>
       </div>

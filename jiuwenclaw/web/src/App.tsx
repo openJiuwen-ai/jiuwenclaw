@@ -11,6 +11,7 @@ import { SkillPanel } from './components/SkillPanel';
 import { AgentPanel } from './components/AgentPanel/index';
 import { SessionsPanel } from './components/SessionsPanel';
 import { HeartbeatPanel } from './components/HeartbeatPanel';
+import CronPanel from './components/CronPanel';
 import { ToolPanel } from './components/ToolPanel';
 import { ConfigPanel } from './components/ConfigPanel';
 import { LogsPanel } from './components/LogsPanel';
@@ -21,9 +22,10 @@ import { HeartbeatMessageModal } from './features/HeartbeatMessageModal';
 import { useWebSocket } from './hooks';
 import { AgentMode } from './types';
 import { useSessionStore, useChatStore, useTodoStore } from './stores';
+import { useTranslation } from 'react-i18next';
 import './App.css';
 
-type MainNavKey = 'chat' | 'skills' | 'agents' | 'sessions' | 'heartbeat' | 'channels' | 'configpanel' | 'logspanel' | 'browserpanel';
+type MainNavKey = 'chat' | 'skills' | 'agents' | 'sessions' | 'heartbeat' | 'cron' | 'channels' | 'configpanel' | 'logspanel' | 'browserpanel';
 
 // 错误边界组件
 interface ErrorBoundaryState {
@@ -50,35 +52,64 @@ class ErrorBoundary extends Component<
 
   render() {
     if (this.state.hasError) {
-      return (
-        <div className="flex items-center justify-center h-screen bg-bg text-text p-8">
-          <div className="max-w-2xl card">
-            <h1 className="text-2xl font-bold text-danger mb-4">
-              应用加载出错
-            </h1>
-            <p className="text-text-muted mb-4">
-              {this.state.error?.message || '未知错误'}
-            </p>
-            <pre className="bg-secondary p-4 rounded-lg text-sm overflow-auto max-h-64 font-mono">
-              {this.state.error?.stack}
-            </pre>
-            <button
-              onClick={() => window.location.reload()}
-              className="btn primary mt-4"
-            >
-              刷新页面
-            </button>
-          </div>
-        </div>
-      );
+      return <ErrorFallback error={this.state.error} />;
     }
-
     return this.props.children;
   }
 }
 
+function ErrorFallback({ error }: { error: Error | null }) {
+  const { t } = useTranslation();
+  return (
+    <div className="flex items-center justify-center h-screen bg-bg text-text p-8">
+      <div className="max-w-2xl card">
+        <h1 className="text-2xl font-bold text-danger mb-4">
+          {t('app.errorTitle')}
+        </h1>
+        <p className="text-text-muted mb-4">
+          {error?.message || t('app.unknownError')}
+        </p>
+        <pre className="bg-secondary p-4 rounded-lg text-sm overflow-auto max-h-64 font-mono">
+          {error?.stack}
+        </pre>
+        <button
+          onClick={() => window.location.reload()}
+          className="btn primary mt-4"
+        >
+          {t('app.reload')}
+        </button>
+      </div>
+    </div>
+  );
+}
+
+// 语言切换组件
+function LanguageSwitcher() {
+  const { i18n } = useTranslation();
+  const isZh = i18n.language.startsWith('zh');
+  return (
+    <div className="flex items-center gap-1 rounded-lg bg-secondary/60 px-2 py-1">
+      <button
+        type="button"
+        onClick={() => i18n.changeLanguage('zh')}
+        className={`text-xs px-2 py-1 rounded ${isZh ? 'bg-accent text-white font-medium' : 'text-text-muted hover:text-text'}`}
+      >
+        中
+      </button>
+      <button
+        type="button"
+        onClick={() => i18n.changeLanguage('en')}
+        className={`text-xs px-2 py-1 rounded ${!isZh ? 'bg-accent text-white font-medium' : 'text-text-muted hover:text-text'}`}
+      >
+        En
+      </button>
+    </div>
+  );
+}
+
 // 主题切换组件
 function ThemeToggle() {
+  const { t } = useTranslation();
   const [theme, setTheme] = useState(() => {
     return localStorage.getItem('theme') || 'light';
   });
@@ -102,7 +133,7 @@ function ThemeToggle() {
         <button
           className={`theme-toggle__button ${theme === 'system' ? 'active' : ''}`}
           onClick={() => toggleTheme('system')}
-          title="跟随系统"
+          title={t('app.themeSystem')}
         >
           <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
             <rect x="2" y="3" width="20" height="14" rx="2" ry="2" />
@@ -113,7 +144,7 @@ function ThemeToggle() {
         <button
           className={`theme-toggle__button ${theme === 'dark' ? 'active' : ''}`}
           onClick={() => toggleTheme('dark')}
-          title="深色模式"
+          title={t('app.themeDark')}
         >
           <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
             <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z" />
@@ -122,7 +153,7 @@ function ThemeToggle() {
         <button
           className={`theme-toggle__button ${theme === 'light' ? 'active' : ''}`}
           onClick={() => toggleTheme('light')}
-          title="浅色模式"
+          title={t('app.themeLight')}
         >
           <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
             <circle cx="12" cy="12" r="5" />
@@ -171,6 +202,7 @@ function storeSessionId(sessionId: string | null) {
 }
 
 function AppContent() {
+  const { t } = useTranslation();
   // 优先使用存储的会话 ID，避免每次刷新创建新会话
   const [sessionId, setSessionId] = useState<string>(() => {
     const stored = getStoredSessionId();
@@ -198,7 +230,7 @@ function AppContent() {
   const { clearMessages, isProcessing } = useChatStore();
   const { clearTodos } = useTodoStore();
 
-  // WebSocket 连接 - provider 由后端配置决定，前端默认不在 URL query 传递
+  // WebSocket 连接 - provider 由后端配置决定 - provider 由后端配置决定，前端默认不在 URL query 传递
   const {
     isConnected,
     request,
@@ -262,9 +294,9 @@ function AppContent() {
     } catch (error) {
       console.error('Failed to fetch config:', error);
       setServerConfig(null);
-      setConfigError('无法通过 WebSocket 获取后端配置，已使用默认配置');
+      setConfigError(t('app.configError'));
     }
-  }, [request]);
+  }, [request, t]);
 
   const clearRestartAutoCloseTimer = useCallback(() => {
     if (restartAutoCloseTimerRef.current != null) {
@@ -484,9 +516,12 @@ function AppContent() {
           <div className="pill">
             <span className={`statusDot ${isConnected ? 'ok' : ''}`} />
             <span className="mono text-sm">
-              {isConnected ? '已连接' : '未连接'}
+              {isConnected ? t('connection.connected') : t('connection.disconnected')}
             </span>
           </div>
+
+          {/* 语言切换 */}
+          <LanguageSwitcher />
 
           {/* 主题切换 */}
           <ThemeToggle />
@@ -505,11 +540,11 @@ function AppContent() {
         {configError && (
           <div className="card mb-4">
             <div className="text-sm text-text-muted">
-              {configError}。请先启动 E2E 后端（如
+              {configError}. {t('app.configErrorHint')}
               <span className="mono"> python -m tests.web_gateway_jiuwenclaw_integration </span>
-              ，默认监听 19000）。若后端不在本机或端口不同，可在
+              {t('app.configErrorDefault')}
               <span className="mono"> jiuwenclaw/web/.env.local </span>
-              设置 <span className="mono">VITE_API_BASE</span> 和 <span className="mono">VITE_WS_BASE</span>。
+              {t('app.configErrorEnv')} <span className="mono">VITE_API_BASE</span> {t('common.and')} <span className="mono">VITE_WS_BASE</span>.
             </div>
           </div>
         )}
@@ -558,6 +593,11 @@ function AppContent() {
             <HeartbeatPanel />
           </div>
         )}
+        {activeNav === 'cron' && (
+          <div className="app-section">
+            <CronPanel />
+          </div>
+        )}
         {activeNav === 'configpanel' && (
           <div className="app-section">
             <ConfigPanel
@@ -594,7 +634,7 @@ function AppContent() {
       {!isConnected && (
         <div className="app-toast-wrapper app-toast-wrapper--top">
           <div className="app-connection-toast animate-rise">
-            {serverConfig ? '正在连接服务器...' : '加载配置中...'}
+            {serverConfig ? t('connection.connecting') : t('connection.loadingConfig')}
           </div>
         </div>
       )}
@@ -603,7 +643,7 @@ function AppContent() {
       {newSessionToastVisible && (
         <div className="app-toast-wrapper app-toast-wrapper--top-center">
           <div className="app-session-toast animate-rise">
-            已新建会话
+            {t('chat.sessionCreated')}
           </div>
         </div>
       )}
@@ -615,7 +655,7 @@ function AppContent() {
             <div className="app-heartbeat-toast__header">
               <div className="app-heartbeat-toast__title">
                 <span className="app-heartbeat-toast__dot animate-pulse" />
-                <span className="text-xs font-medium text-text">心跳消息</span>
+                <span className="text-xs font-medium text-text">{t('app.heartbeatTitle')}</span>
               </div>
               <button
                 type="button"
@@ -624,7 +664,7 @@ function AppContent() {
                   clearHeartbeatToastTimer();
                 }}
                 className="app-heartbeat-toast__close"
-                aria-label="关闭"
+                aria-label={t('app.heartbeatClose')}
               >
                 <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2}>
                   <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
@@ -639,7 +679,7 @@ function AppContent() {
                 clearHeartbeatToastTimer();
               }}
               className="app-heartbeat-toast__content text-sm"
-              title="点击查看完整心跳消息"
+              title={t('app.heartbeatViewFull')}
             >
               <span className="app-heartbeat-toast__preview">
                 {heartbeatToastPreview}
@@ -665,14 +705,14 @@ function AppContent() {
                 </div>
               )}
               <h3 className="text-base font-semibold text-text mb-1">
-                {!restartSuccess ? '正在重启服务' : appliedWithoutRestart ? '配置已生效' : '重启成功'}
+                {!restartSuccess ? t('app.restarting') : appliedWithoutRestart ? t('app.configApplied') : t('app.restartSuccess')}
               </h3>
               <p className="text-sm text-text-muted mb-5">
                 {!restartSuccess
-                  ? '正在等待后端重新启动并恢复连接，请稍候...'
+                  ? t('app.restartWaiting')
                   : appliedWithoutRestart
-                    ? '配置已热更新，窗口将在 5 秒后自动关闭。'
-                    : '后端已启动成功，窗口将在 5 秒后自动关闭。'}
+                    ? t('app.configAppliedDesc')
+                    : t('app.restartSuccessDesc')}
               </p>
               {restartSuccess && (
                 <button
@@ -680,7 +720,7 @@ function AppContent() {
                   onClick={closeRestartModal}
                   className="btn primary !px-4 !py-2"
                 >
-                  确定
+                  {t('common.ok')}
                 </button>
               )}
             </div>

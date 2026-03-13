@@ -1,4 +1,5 @@
 import { useState, useEffect } from 'react';
+import { useTranslation } from 'react-i18next';
 import ReactMarkdown from 'react-markdown';
 
 interface FileViewerProps {
@@ -7,6 +8,7 @@ interface FileViewerProps {
 }
 
 export function FileViewer({ filePath, fileName }: FileViewerProps) {
+  const { t } = useTranslation();
   const [content, setContent] = useState<string>('');
   const [draftContent, setDraftContent] = useState<string>('');
   const [loading, setLoading] = useState(false);
@@ -51,8 +53,8 @@ export function FileViewer({ filePath, fileName }: FileViewerProps) {
         setContent(text);
         setDraftContent(text);
       } catch (err) {
-        console.error('文件加载失败:', err);
-        setError(err instanceof Error ? err.message : '未知错误');
+        console.error('Failed to load file:', err);
+        setError(err instanceof Error ? err.message : t('fileViewer.unknownError'));
       } finally {
         setLoading(false);
       }
@@ -96,8 +98,8 @@ export function FileViewer({ filePath, fileName }: FileViewerProps) {
       setContent(draftContent);
       setIsEditing(false);
     } catch (err) {
-      console.error('文件保存失败:', err);
-      setSaveError(err instanceof Error ? err.message : '未知错误');
+      console.error('Failed to save file:', err);
+      setSaveError(err instanceof Error ? err.message : t('fileViewer.unknownError'));
     } finally {
       setSaving(false);
     }
@@ -130,7 +132,7 @@ export function FileViewer({ filePath, fileName }: FileViewerProps) {
                     onClick={handleCancelEdit}
                     disabled={saving}
                   >
-                    取消
+                    {t('common.cancel')}
                   </button>
                   <button
                     type="button"
@@ -138,7 +140,7 @@ export function FileViewer({ filePath, fileName }: FileViewerProps) {
                     onClick={handleSave}
                     disabled={saving}
                   >
-                    {saving ? '保存中...' : '保存'}
+                    {saving ? t('common.saving') : t('common.save')}
                   </button>
                 </>
               ) : (
@@ -147,7 +149,7 @@ export function FileViewer({ filePath, fileName }: FileViewerProps) {
                   className="btn !px-3 !py-1.5"
                   onClick={handleStartEdit}
                 >
-                  编辑
+                  {t('fileViewer.edit')}
                 </button>
               )}
             </div>
@@ -160,7 +162,7 @@ export function FileViewer({ filePath, fileName }: FileViewerProps) {
         ) : null}
         {fileNotFound ? (
           <div className="mt-2 rounded-md border border-warning/30 bg-warning/10 px-2.5 py-1.5 text-xs text-warning">
-            文件不存在。请先在 <span className="mono">{filePath}</span> 创建该 Markdown 文件后再编辑。
+            {t('fileViewer.fileMissingPrefix')} <span className="mono">{filePath}</span> {t('fileViewer.fileMissingSuffix')}
           </div>
         ) : null}
         {saveError ? (
@@ -190,7 +192,7 @@ export function FileViewer({ filePath, fileName }: FileViewerProps) {
           )
         ) : (
           <div className="h-full flex items-center justify-center text-text-muted text-sm">
-            该文件无法预览，仅支持 Markdown（.md/.mdx）文件
+            {t('fileViewer.notPreviewable')}
           </div>
         )}
       </div>

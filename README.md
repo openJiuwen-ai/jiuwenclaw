@@ -2,98 +2,107 @@
 
 # JiuwenClaw
 
-> 随叫随到的智能管家，让AI触手可及
+> Your On-Call AI Butler — Bringing Intelligence to Your Fingertips
 
-[![Python Version](https://img.shields.io/badge/python-3.13-blue)](https://www.python.org/)
+[![Python Version](https://img.shields.io/badge/python-3.11%2C3.12%2C3.13-blue)](https://www.python.org/)
 [![License](https://img.shields.io/badge/license-Apache--2.0-green)](LICENSE)
-[![华为云MaaS](https://img.shields.io/badge/华为云-MaaS-red)](https://www.huaweicloud.com/)
+[![Huawei Cloud MaaS](https://img.shields.io/badge/华为云-MaaS-red)](https://www.huaweicloud.com/)
 
 </div>
 
-## 🌟 项目简介
+## 🌟 Overview
 
-**JiuwenClaw** 是一款基于Python开发的智能AI Agent，正如其名——"Claw"象征着精准的抓取与连接。它能够将大语言模型的强大能力，通过你日常使用的各类通讯应用，直接延伸至你的指尖。
+**JiuwenClaw** is an intelligent AI Agent built in Python. True to its name — "Claw" symbolizes precise reach and connection — it extends the power of large language models directly to your fingertips through the communication apps you already use every day.
 
-### ✨ 核心特色
+### ✨ Key Features
 
-- **生态兼容**：完美支持**华为云MaaS**等主流模型平台
-- **无缝对接**：与**小艺开放平台**无缝接入，华为手机用户可通过小艺直接唤醒
-- **灵活部署**：支持自托管部署，数据完全自主可控
-- **多端接入**：支持Web端、聊天软件等多种交互方式
+- **Ecosystem Compatible**: Full support for **Huawei Cloud MaaS** and other mainstream model platforms
+- **Seamless Integration**: Native integration with the **Xiaoyi Open Platform**, enabling Huawei phone users to invoke JiuwenClaw directly through the Xiaoyi assistant
+- **Flexible Deployment**: Self-hosted deployment with full data sovereignty
+- **Multi-Platform Access**: Interact via web interface, messaging apps, and more
 
-## 🎯 核心理念
+## 🎯 Design Philosophy
 
-> **懂你所想，自主演进**
+> **Understands You. Evolves With You.**
 
-### 🤝 贴身任务管家
-面对复杂的输入场景——任务追加、指令打断、需求修改，JiuwenClaw都能精准理解，为你智能排期，有条不紊地完成任务。
+### 🤝 Your Personal Task Butler
 
-### 🔄 自主演进
-当你表达不满或运行出错时，它会根据你的反馈自动调整相应技能，持续演进，全心全意为你服务。
+Whether dealing with task additions, mid-flow interruptions, or shifting requirements, JiuwenClaw understands your intent precisely — intelligently scheduling and executing tasks in an orderly, stress-free manner.
+
+### 🔄 Autonomous Evolution
+
+When you express dissatisfaction or an error occurs, JiuwenClaw automatically refines the relevant skills based on your feedback — continuously improving, always working in your best interest.
+
 
 <p align="center">
-  <strong>⚡ 一个始终在线、数据自主的专属AI助理 ⚡</strong>
+  <strong>⚡ Your always-on, data-sovereign personal AI assistant ⚡</strong>
 </p>
 
-## 🚀 快速上手
+## 🚀 Getting Started
 
-### 📦 安装
+### 📦 Installation
 
 ```bash
-# 安装 JiuwenClaw
+# Install JiuwenClaw
 pip install jiuwenclaw
 
-# 初始化 JiuwenClaw (首次启动)
+# Initialize JiuwenClaw (first-time setup)
 jiuwenclaw-init
 
-# 启动 JiuwenClaw
+# Start JiuwenClaw
 jiuwenclaw-start
 ```
 
-### 💬 使用方式
+### 💬 How to Use
 
-#### 1️⃣ 对话模式
+#### 1️⃣ Conversation Mode
 
-| 方式 | 说明                                        |
-|------|-------------------------------------------|
-| **Web前端** | 启动服务后访问 `http://localhost:5173`，通过浏览器直接对话 |
-| **小艺频道** | 华为手机用户可直接唤醒小艺，与JiuwenClaw对话               |
-| **飞书频道** | 完成渠道配置后，在飞书中与JiuwenClaw畅聊                 |
+| Method             | Description                                                  |
+| ------------------ | ------------------------------------------------------------ |
+| **Web Frontend**   | After starting the service, visit `http://localhost:5173` to chat directly in your browser |
+| **Xiaoyi Channel** | Huawei phone users can invoke Xiaoyi to talk with JiuwenClaw directly |
+| **Feishu Channel** | Once configured, chat with JiuwenClaw seamlessly inside Feishu |
 
-#### 2️⃣ 定时任务
+#### 2️⃣ Scheduled Tasks
 
-设置心跳任务，填写待办事项，JiuwenClaw即可定时被唤醒，自动执行预设任务。让你的日程管理更加智能高效！
+Set up heartbeat tasks with your to-do items, and JiuwenClaw will wake up on schedule to execute them automatically — making your time management smarter and more effortless.
 
-## 📚 文档导航
+## 📚 Documentation
 
-| 文档                                  | 核心内容                     |
-|:------------------------------------|:-------------------------|
-| [📖 快速开始](docs/快速开始.md)             | 5分钟上手JiuwenClaw          |
-| [⚙️ 配置与工作空间](docs/配置信息.md)          | 环境配置与工作区管理               |
-| [📁 工作区结构](docs/智能体.md)             | workspace 目录说明，预置与动态生成内容 |
-| [🛠️ 技能系统](docs/技能.md)              | 自定义技能开发指南                |
-| [📱 频道配置](docs/频道.md)               | 飞书、小艺等频道接入               |
-| [📋 任务规划](docs/聊天.md)               | 聊天特性                     |
-| [🧠 记忆功能](docs/记忆.md)               | 智能记忆与学习                  |
-| [🌐 浏览器相关](docs/浏览器.md)             | 自动化浏览功能                  |
+| Document                                             | Description                                              |
+| :--------------------------------------------------- | :------------------------------------------------------- |
+| [📖 Quick Start](docs/quickstart.md)                  | Get up and running with JiuwenClaw in 5 minutes          |
+| [⚙️ Configuration & Workspace](docs/配置信息.md) | Environment setup and workspace management               |
+| [📁 Workspace Structure](docs/智能体.md)               | workspace directory layout, presets, and dynamic content |
+| [🛠️ Skill System](docs/技能.md)                     | Guide to developing custom skills                        |
+| [📱 Channel Configuration](docs/频道.md)          | Integrating Feishu, Xiaoyi, and other channels           |
+| [⌨️ CLI Commands](docs/命令行指令.md)                         | Command-line tool usage guide                            |
+| [⏰ Scheduled Tasks](docs/定时任务.md)                 | Scheduled task management                                |
+| [🧠 Memory](docs/记忆.md)                           | Intelligent memory and learning capabilities             |
+| [🌐 Browser Automation](docs/浏览器.md)              | Web browsing and automation features                     |
+| [📋 Task Planning](docs/任务规划.md)                      | Chat behavior and task flow                              |
+| [🔄 Skill Self-Evolution](docs/Skill自演进.md)     | Mechanism for automatic skill evolution                  |
+| [📦 Context Compression](docs/上下文压缩卸载.md)  | Context compression and unloading                        |
+| [🚀 Development Practices](docs/开发实践/)          | Development practices and experience sharing             |
 
-## 🤝 参与贡献
+## 🤝 Contributing
 
-我们热烈欢迎社区贡献！无论是提交Bug、提出新功能建议，还是完善文档，都是对项目的宝贵支持。
+We warmly welcome community contributions — whether it's filing bug reports, suggesting new features, or improving documentation, every bit of support means the world to us.
 
-1. Fork 本仓库
-2. 创建您的特性分支 (`git checkout -b feature/AmazingFeature`)
-3. 提交您的改动 (`git commit -m 'Add some AmazingFeature'`)
-4. 推送到分支 (`git push origin feature/AmazingFeature`)
-5. 打开一个 Pull Request
+1. Fork the repository
+2. Create your feature branch (`git checkout -b feature/AmazingFeature`)
+3. Commit your changes (`git commit -m 'Add some AmazingFeature'`)
+4. Push to the branch (`git push origin feature/AmazingFeature`)
+5. Open a Pull Request
 
-## 📄 开源协议
+## 📄 License
 
-本项目采用 **Apache License 2.0** 开源协议，详情请参阅 [LICENSE](LICENSE) 文件。
+This project is licensed under the **Apache License 2.0**. See the [LICENSE](LICENSE) file for details.
+
 
 ---
 
 <p align="center">
-  <strong>让智能触手可及，让生活更加简单</strong><br>
-  <sub>✨ JiuwenClaw —— 您的专属AI助理 ✨</sub>
+  <strong>Making intelligence accessible. Making life simpler.</strong><br>
+  <sub>✨ JiuwenClaw — Your Personal AI Assistant ✨</sub>
 </p>

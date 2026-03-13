@@ -5,12 +5,12 @@
 from __future__ import annotations
 
 import asyncio
-import logging
 import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
+from jiuwenclaw.utils import logger
 if TYPE_CHECKING:
     from jiuwenclaw.gateway.agent_client import AgentServerClient
     from jiuwenclaw.gateway.message_handler import MessageHandler
@@ -22,8 +22,6 @@ HEARTBEAT_OK = "HEARTBEAT_OK"
 
 # 探活请求发送的 content，AgentServer 可识别为心跳
 HEARTBEAT_PROMPT = "如果你的workspace目录存在HEARBEAT.md文件, 读取文件内容并且根据文件内容执行任务. 如果没有HEARBEAT.md文件, 仅回复HEARTBEAT_OK"
-
-logger = logging.getLogger(__name__)
 
 
 def normalize_active_hours(active_hours: dict[str, str] | None) -> dict[str, str] | None:

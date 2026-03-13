@@ -3,14 +3,12 @@
 """SkillCallOperator — manages all Skills as a single operator."""
 from __future__ import annotations
 
-import logging
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from openjiuwen.core.operator.base import Operator, TunableSpec
 from openjiuwen.core.session.agent import Session
-
-logger = logging.getLogger(__name__)
+from jiuwenclaw.utils import logger
 
 
 class SkillCallOperator(Operator):

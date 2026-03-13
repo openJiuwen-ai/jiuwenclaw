@@ -15,6 +15,9 @@ from typing import Sequence
 
 from openjiuwen.core.foundation.tool import tool
 
+from jiuwenclaw.utils import USER_WORKSPACE_DIR
+
+
 _DANGEROUS_COMMAND_PATTERNS: list[tuple[re.Pattern[str], str]] = [
     (re.compile(r"\brm\s+-rf\b", re.IGNORECASE), "blocked pattern: rm -rf"),
     (re.compile(r"\bdel\s+/[a-z]*[fsq][a-z]*\b", re.IGNORECASE), "blocked pattern: del /f /s /q"),
@@ -72,7 +75,7 @@ def _check_command_safety(command: str) -> str | None:
 
 
 def _resolve_command_workdir(workdir: str) -> Path:
-    project_root = Path(__file__).resolve().parents[3]
+    project_root = USER_WORKSPACE_DIR / "workspace"
     candidate = Path(workdir) if workdir else project_root
     if not candidate.is_absolute():
         candidate = project_root / candidate
@@ -172,12 +175,42 @@ def _run_command_sync(
     return result, resolved_shell
 
 
+def _run_command_background(
+    command: str,
+    workdir: Path,
+    shell_type: str,
+    grace_seconds: float = 5.0,
+) -> tuple[int, str, str | None]:
+    """Start command in background. Returns (pid, resolved_shell, error_msg).
+    error_msg is None on success.
+    """
+    plan, use_shell, resolved_shell = _resolve_execution_plan(command, shell_type)
+    proc = subprocess.Popen(
+        plan,
+        shell=use_shell,
+        cwd=str(workdir),
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        text=True,
+    )
+    try:
+        exit_code = proc.wait(timeout=grace_seconds)
+        if exit_code != 0:
+            return proc.pid, resolved_shell, f"Process exited with code {exit_code}"
+    except subprocess.TimeoutExpired:
+        pass  # Still running after grace period -> success
+    return proc.pid, resolved_shell, None
+
+
 @tool(
     name="mcp_exec_command",
     description=(
         "Execute simple cross-platform command-line command in project workspace. "
         "Supports Windows cmd/PowerShell and macOS/Linux bash/sh. "
-        "Optional shell_type=auto|cmd|powershell|bash|sh. Returns JSON: exit_code/stdout/stderr."
+        "Optional shell_type=auto|cmd|powershell|bash|sh. "
+        "Set background=True to run non-blocking (e.g. start a server); returns immediately on success, error on failure. "
+        "Returns JSON: exit_code/stdout/stderr (blocking) or pid/status (background)."
     ),
 )
 async def mcp_exec_command(
@@ -186,6 +219,7 @@ async def mcp_exec_command(
     workdir: str = ".",
     max_output_chars: int = 8000,
     shell_type: str = "auto",
+    background: bool = False,
 ) -> str:
     command = (command or "").strip()
     if not command:
@@ -203,6 +237,29 @@ async def mcp_exec_command(
     timeout_seconds = max(1, min(timeout_seconds, 60))
     max_output_chars = max(200, min(max_output_chars, 20000))
     normalized_shell_type = _normalize_shell_type(shell_type)
+
+    if background:
+        try:
+            pid, resolved_shell, err = await asyncio.to_thread(
+                _run_command_background,
+                command,
+                resolved_workdir,
+                normalized_shell_type,
+            )
+        except Exception as exc:
+            return f"[ERROR]: command failed to start: {exc}"
+        if err:
+            return f"[ERROR]: background command failed: {err}"
+        payload = {
+            "command": command,
+            "cwd": str(resolved_workdir),
+            "shell_type": normalized_shell_type,
+            "resolved_shell": resolved_shell,
+            "background": True,
+            "pid": pid,
+            "status": "started",
+        }
+        return json.dumps(payload, ensure_ascii=False, indent=2)
 
     try:
         result, resolved_shell = await asyncio.to_thread(

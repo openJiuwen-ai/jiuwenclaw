@@ -6,48 +6,12 @@ from __future__ import annotations
 
 import asyncio
 import json
-import logging
 from abc import ABC, abstractmethod
 from dataclasses import asdict
-from logging.handlers import RotatingFileHandler
-from pathlib import Path
 from typing import Any, AsyncIterator
 
+from jiuwenclaw.utils import logger
 from jiuwenclaw.schema.agent import AgentRequest, AgentResponse, AgentResponseChunk
-
-logger = logging.getLogger(__name__)
-
-
-def _setup_file_logger() -> None:
-    """将本模块日志追加到项目 logs/agent_client.log."""
-    project_root = Path(__file__).resolve().parents[2]
-    log_dir = project_root / "logs"
-    log_file = log_dir / "agent_client.log"
-
-    # 避免在重复导入时添加多个相同 handler
-    for handler in logger.handlers:
-        if getattr(handler, "baseFilename", None) == str(log_file):
-            return
-
-    try:
-        log_dir.mkdir(parents=True, exist_ok=True)
-        file_handler = RotatingFileHandler(
-            log_file,
-            maxBytes=10 * 1024 * 1024,
-            backupCount=5,
-            encoding="utf-8",
-        )
-        file_handler.setLevel(logging.INFO)
-        file_handler.setFormatter(logging.Formatter(
-            "%(asctime)s.%(msecs)03d %(name)s %(levelname)s: %(message)s",
-            datefmt="%Y-%m-%d %H:%M:%S",
-        ))
-        logger.addHandler(file_handler)
-    except Exception:
-        logger.exception("[WebSocketAgentServerClient] 初始化文件日志失败: %s", log_file)
-
-
-_setup_file_logger()
 
 
 def _to_json(data: Any) -> str:

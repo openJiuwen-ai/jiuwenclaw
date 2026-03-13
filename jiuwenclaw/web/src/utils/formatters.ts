@@ -1,13 +1,14 @@
 /**
  * 格式化工具函数
  */
+import i18n from '../i18n';
 
 /**
  * 格式化时间戳
  */
 export function formatTimestamp(timestamp: string): string {
   const date = new Date(timestamp);
-  return date.toLocaleTimeString('zh-CN', {
+  return date.toLocaleTimeString(i18n.language, {
     hour: '2-digit',
     minute: '2-digit',
     second: '2-digit',
@@ -19,7 +20,7 @@ export function formatTimestamp(timestamp: string): string {
  */
 export function formatDate(timestamp: string): string {
   const date = new Date(timestamp);
-  return date.toLocaleDateString('zh-CN', {
+  return date.toLocaleDateString(i18n.language, {
     year: 'numeric',
     month: '2-digit',
     day: '2-digit',
@@ -39,10 +40,10 @@ export function formatRelativeTime(timestamp: string): string {
   const hours = Math.floor(minutes / 60);
   const days = Math.floor(hours / 24);
 
-  if (days > 0) return `${days}天前`;
-  if (hours > 0) return `${hours}小时前`;
-  if (minutes > 0) return `${minutes}分钟前`;
-  return '刚刚';
+  if (days > 0) return i18n.t('time.daysAgo', { count: days });
+  if (hours > 0) return i18n.t('time.hoursAgo', { count: hours });
+  if (minutes > 0) return i18n.t('time.minutesAgo', { count: minutes });
+  return i18n.t('time.justNow');
 }
 
 /**
@@ -69,5 +70,5 @@ export function formatToolArguments(args: Record<string, unknown>): string {
  */
 export function formatToolResult(result: string, maxLength = 500): string {
   if (result.length <= maxLength) return result;
-  return result.slice(0, maxLength) + '\n... (结果已截断)';
+  return result.slice(0, maxLength) + `\n... (${i18n.t('chatUi.toolResult.truncated')})`;
 }

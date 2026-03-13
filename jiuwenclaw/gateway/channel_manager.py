@@ -5,7 +5,6 @@
 from __future__ import annotations
 
 import asyncio
-import logging
 from abc import ABC
 from typing import TYPE_CHECKING, Any, Awaitable, Callable
 
@@ -14,7 +13,7 @@ if TYPE_CHECKING:
     from jiuwenclaw.gateway.message_handler import MessageHandler
     from jiuwenclaw.schema.message import Message
 
-logger = logging.getLogger(__name__)
+from jiuwenclaw.utils import logger
 
 
 class ChannelManager(ABC):
@@ -46,6 +45,10 @@ class ChannelManager(ABC):
             "[ChannelManager] Channel 消息 -> MessageHandler: id=%s channel_id=%s",
             msg.id, msg.channel_id,
         )
+        if not self._channels.get(msg.channel_id, None):
+            logger.info(f"[ChannelManager] Channel: {msg.channel_id} closed, cancel this user message.")
+            return
+
         self._message_handler.handle_message(msg)
 
     def register_channel(self, channel: "BaseChannel") -> None:

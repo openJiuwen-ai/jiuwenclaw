@@ -6,13 +6,11 @@ from __future__ import annotations
 
 import asyncio
 import json
-import logging
 from dataclasses import asdict
 from typing import Any
 
+from jiuwenclaw.utils import logger
 from jiuwenclaw.schema.agent import AgentRequest, AgentResponse, AgentResponseChunk
-
-logger = logging.getLogger(__name__)
 
 
 def _payload_to_request(data: dict[str, Any]) -> AgentRequest:
@@ -306,11 +304,7 @@ async def _run_verification() -> None:
 
 
 def main() -> None:
-    """入口：配置日志并运行自验证."""
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(name)s %(levelname)s: %(message)s",
-    )
+    """入口"""
     asyncio.run(_run_verification())
 
 

@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
+import { useTranslation } from 'react-i18next';
 import { FileViewer } from './FileViewer';
 import { containsIgnoredDirectory } from '../../features/fileTreeFilters';
 
@@ -38,8 +39,8 @@ interface TreeData {
 
 const compareByName = (a: string, b: string) => a.localeCompare(b, 'zh-Hans-CN');
 
-const getFolderDisplayName = (folderKey: string) => {
-  if (folderKey === ROOT_FOLDER_KEY) return '根目录';
+const getFolderDisplayName = (folderKey: string, t: (key: string) => string) => {
+  if (folderKey === ROOT_FOLDER_KEY) return t('agent.root');
   const segments = folderKey.split('/').filter(Boolean);
   return segments[segments.length - 1] || folderKey;
 };
@@ -78,7 +79,7 @@ const filterFolderData = (data: Record<string, FileInfo[]>) =>
       ]),
   );
 
-const buildTreeData = (data: Record<string, FileInfo[]>): TreeData => {
+const buildTreeData = (data: Record<string, FileInfo[]>, t: (key: string) => string): TreeData => {
   const directoryKeys = new Set<string>([ROOT_FOLDER_KEY]);
   const sourceFolderKeys = Object.keys(data);
 
@@ -101,7 +102,7 @@ const buildTreeData = (data: Record<string, FileInfo[]>): TreeData => {
   directoryKeys.forEach((folderKey) => {
     directoryMap.set(folderKey, {
       key: folderKey,
-      label: getFolderDisplayName(folderKey),
+      label: getFolderDisplayName(folderKey, t),
       isSkillFolder: isSkillFolder(folderKey),
       childDirectoryKeys: [],
       files: [],
@@ -128,7 +129,7 @@ const buildTreeData = (data: Record<string, FileInfo[]>): TreeData => {
   });
 
   directoryMap.forEach((node) => {
-    node.childDirectoryKeys.sort((a, b) => compareByName(getFolderDisplayName(a), getFolderDisplayName(b)));
+    node.childDirectoryKeys.sort((a, b) => compareByName(getFolderDisplayName(a, t), getFolderDisplayName(b, t)));
   });
 
   const rootNode = directoryMap.get(ROOT_FOLDER_KEY);
@@ -138,7 +139,7 @@ const buildTreeData = (data: Record<string, FileInfo[]>): TreeData => {
     ...rootChildDirectoryKeys.map((key) => ({
       kind: 'directory' as const,
       key,
-      label: getFolderDisplayName(key),
+      label: getFolderDisplayName(key, t),
     })),
     ...rootFiles.map((file) => ({
       kind: 'file' as const,
@@ -163,6 +164,7 @@ const buildTreeData = (data: Record<string, FileInfo[]>): TreeData => {
 };
 
 export function AgentPanel({ sessionId: _sessionId }: AgentPanelProps) {
+  const { t } = useTranslation();
   const [folderData, setFolderData] = useState<Record<string, FileInfo[]>>({});
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
@@ -195,7 +197,7 @@ export function AgentPanel({ sessionId: _sessionId }: AgentPanelProps) {
       setFolderData(data);
       setLoadError(null);
 
-      const nextTreeData = buildTreeData(data);
+      const nextTreeData = buildTreeData(data, t);
       setSelectedFile((prev) => {
         if (!prev) {
           return null;
@@ -215,12 +217,12 @@ export function AgentPanel({ sessionId: _sessionId }: AgentPanelProps) {
         return next;
       });
     } catch (err) {
-      console.error('读取文件列表失败:', err);
+      console.error('Failed to load agent files:', err);
       setFolderData({});
       if (err instanceof Error && err.message.startsWith('REBUILD_FAILED:')) {
-        setLoadError('刷新失败：无法重建 agent 文件索引，请检查生成脚本日志。');
+        setLoadError(t('agent.errors.refreshFailed'));
       } else {
-        setLoadError('无法读取 agent 文件列表，请检查 workspace/agent-data.json 是否已生成。');
+        setLoadError(t('agent.errors.loadFailed'));
       }
     } finally {
       setLoading(false);
@@ -237,7 +239,7 @@ export function AgentPanel({ sessionId: _sessionId }: AgentPanelProps) {
     void loadFolderData({ rebuildBeforeFetch: true });
   };
 
-  const treeData = useMemo(() => buildTreeData(folderData), [folderData]);
+  const treeData = useMemo(() => buildTreeData(folderData, t), [folderData, t]);
 
   const expandFolderAndAncestors = (folderKey: string) => {
     setExpandedKeys((prev) => {
@@ -356,7 +358,7 @@ export function AgentPanel({ sessionId: _sessionId }: AgentPanelProps) {
                   <span className="flex-1 min-w-0 truncate">{file.name}</span>
                   {!file.isMarkdown ? (
                     <span className="text-[10px] px-1.5 py-0.5 rounded border border-border bg-secondary/40">
-                      不可预览
+                      {t('agent.notPreviewable')}
                     </span>
                   ) : null}
                 </button>
@@ -373,19 +375,19 @@ export function AgentPanel({ sessionId: _sessionId }: AgentPanelProps) {
       <div className="card w-full h-full flex flex-col">
         <div className="flex items-center justify-between mb-3">
           <div>
-            <h2 className="text-lg font-semibold">智能体管理</h2>
-            <p className="text-sm text-text-muted mt-1">查看智能体工作区文件与记忆内容</p>
+            <h2 className="text-lg font-semibold">{t('agent.title')}</h2>
+            <p className="text-sm text-text-muted mt-1">{t('agent.subtitle')}</p>
           </div>
           <div className="flex items-center gap-2">
             <div className="flex items-center gap-2 text-xs text-text-muted">
               <span className="mono px-2.5 py-1 rounded-full border border-border bg-secondary/60">
-                {treeData.directoryCount} 个目录
+                {t('agent.directoryCount', { count: treeData.directoryCount })}
               </span>
               <span className="mono px-2.5 py-1 rounded-full border border-border bg-secondary/60">
-                {treeData.totalFileCount} 个文件
+                {t('agent.fileCount', { count: treeData.totalFileCount })}
               </span>
               <span className="mono px-2.5 py-1 rounded-full border border-border bg-secondary/60">
-                {treeData.markdownFileCount} 个可预览
+                {t('agent.previewableCount', { count: treeData.markdownFileCount })}
               </span>
             </div>
           </div>
@@ -402,9 +404,9 @@ export function AgentPanel({ sessionId: _sessionId }: AgentPanelProps) {
             <div className="px-4 py-3 bg-secondary/30 border-b border-border">
               <div className="flex items-start justify-between gap-4">
                 <div>
-                  <h3 className="text-sm font-medium text-text">工作区</h3>
+                  <h3 className="text-sm font-medium text-text">{t('agent.workspace')}</h3>
                   <p className="text-xs text-text-muted mt-1 mono">
-                    {treeData.directoryCount} 个目录，{treeData.totalFileCount} 个文件
+                    {t('agent.workspaceMeta', { directories: treeData.directoryCount, files: treeData.totalFileCount })}
                   </p>
                 </div>
                 <button
@@ -412,15 +414,15 @@ export function AgentPanel({ sessionId: _sessionId }: AgentPanelProps) {
                   onClick={handleRefresh}
                   disabled={refreshing}
                   className="btn !px-3 !py-1.5 disabled:opacity-50 disabled:cursor-not-allowed"
-                  title="刷新列表"
+                  title={t('agent.refresh')}
                 >
-                  {refreshing ? '刷新中...' : '刷新'}
+                  {refreshing ? t('common.refreshing') : t('common.refresh')}
                 </button>
               </div>
             </div>
             <div className="flex-1 overflow-auto p-2">
               {treeData.rootChildDirectoryKeys.length === 0 && treeData.rootFiles.length === 0 ? (
-                <div className="h-full flex items-center justify-center text-sm text-text-muted">暂无文件</div>
+                <div className="h-full flex items-center justify-center text-sm text-text-muted">{t('agent.empty')}</div>
               ) : (
                 <div className="space-y-0.5">
                   {treeData.rootEntries.map((entry) => {
@@ -455,7 +457,7 @@ export function AgentPanel({ sessionId: _sessionId }: AgentPanelProps) {
                         <span className="flex-1 min-w-0 truncate">{file.name}</span>
                         {!file.isMarkdown ? (
                           <span className="text-[10px] px-1.5 py-0.5 rounded border border-border bg-secondary/40">
-                            不可预览
+                            {t('agent.notPreviewable')}
                           </span>
                         ) : null}
                       </button>
@@ -479,15 +481,15 @@ export function AgentPanel({ sessionId: _sessionId }: AgentPanelProps) {
                       </svg>
                     </span>
                     <div>
-                      <h4 className="text-sm font-medium text-text">内容预览</h4>
-                      <p className="text-xs text-text-muted mt-1">选择左侧 Markdown 文件查看</p>
+                      <h4 className="text-sm font-medium text-text">{t('agent.contentPreview')}</h4>
+                      <p className="text-xs text-text-muted mt-1">{t('agent.selectMarkdown')}</p>
                     </div>
                   </div>
                 </div>
                 <div className="flex-1 min-h-0 flex items-center justify-center">
                   <div className="text-center text-text-muted">
-                    <div className="mb-2 text-sm">请选择左侧 Markdown 文件查看内容</div>
-                    <div className="text-xs mono">仅支持 Markdown（.md/.mdx）预览</div>
+                    <div className="mb-2 text-sm">{t('agent.selectMarkdownContent')}</div>
+                    <div className="text-xs mono">{t('agent.markdownOnly')}</div>
                   </div>
                 </div>
               </>

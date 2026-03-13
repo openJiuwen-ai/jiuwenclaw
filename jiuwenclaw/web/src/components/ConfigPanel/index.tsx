@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
+import { useTranslation } from 'react-i18next';
 
 interface ConfigPanelProps {
   config: Record<string, unknown> | null;
@@ -30,15 +31,6 @@ function classifyKey(key: string): string {
   if (key.startsWith("feishu")) return "feishu";
   return "other";
 }
-
-const GROUP_META: Record<string, { label: string; order: number; hint: string }> = {
-  model: { label: "模型配置", order: 0, hint: "模型服务与鉴权参数" },
-  embed: { label: "Embed配置", order: 1, hint: "Embed 服务与鉴权参数" },
-  third_party_api: { label: "第三方服务配置", order: 2, hint: "API Key 配置" },
-  evolution: { label: "自演进配置", order: 3, hint: "Skills 在线自演进参数" },
-  email: { label: "邮箱配置", order: 4, hint: "邮件账号与令牌参数" },
-  other: { label: "其他配置", order: 5, hint: "未归类的扩展参数" },
-};
 
 function getGroupIcon(tag: string) {
   if (tag === "model") {
@@ -130,6 +122,17 @@ function normalizeConfigValue(value: unknown): string {
   }
 }
 
+function getGroupMeta(t: (key: string) => string): Record<string, { label: string; order: number; hint: string }> {
+  return {
+    model: { label: t('config.groups.model.label'), order: 0, hint: t('config.groups.model.hint') },
+    embed: { label: t('config.groups.embed.label'), order: 1, hint: t('config.groups.embed.hint') },
+    third_party_api: { label: t('config.groups.thirdParty.label'), order: 2, hint: t('config.groups.thirdParty.hint') },
+    evolution: { label: t('config.groups.evolution.label'), order: 3, hint: t('config.groups.evolution.hint') },
+    email: { label: t('config.groups.email.label'), order: 4, hint: t('config.groups.email.hint') },
+    other: { label: t('config.groups.other.label'), order: 5, hint: t('config.groups.other.hint') },
+  };
+}
+
 function isRequiredModelField(key: string): boolean {
   return REQUIRED_MODEL_FIELD_SET.has(key);
 }
@@ -139,16 +142,19 @@ function GroupSection({
   draftValues,
   onChange,
   defaultOpen,
+  t,
 }: {
   group: ConfigGroup;
   draftValues: Record<string, string>;
   onChange: (key: string, value: string) => void;
   defaultOpen: boolean;
+  t: (key: string, options?: Record<string, unknown>) => string;
 }) {
   const [open, setOpen] = useState(defaultOpen);
   const [visibleFields, setVisibleFields] = useState<Record<string, boolean>>({});
   const toneClass = getGroupToneClass(group.tag);
-  const hint = GROUP_META[group.tag]?.hint ?? "参数分组";
+  const groupMeta = getGroupMeta(t);
+  const hint = groupMeta[group.tag]?.hint ?? t('config.groupFallback');
 
   const toggleFieldVisible = (key: string) => {
     setVisibleFields((prev) => ({ ...prev, [key]: !prev[key] }));
@@ -171,7 +177,7 @@ function GroupSection({
         </span>
         <span className="flex items-center gap-2 text-text-muted ml-3">
           <span className="text-[11px] px-2 py-0.5 rounded-full border border-border bg-secondary/60">
-            {group.keys.length} 项
+            {t('config.itemsCount', { count: group.keys.length })}
           </span>
           <svg
             className={`w-4 h-4 transition-transform ${open ? "rotate-180" : ""}`}
@@ -217,6 +223,29 @@ function GroupSection({
                         </button>
                       </div>
                     </div>
+                  ) : key === "model_provider" ? (
+                    <div className="flex items-center gap-2">
+                      <span
+                        className={`inline-flex w-3 justify-center shrink-0 font-semibold leading-none select-none ${
+                          isRequiredModelField(key) ? "text-danger" : "text-transparent"
+                        }`}
+                        aria-hidden="true"
+                      >
+                        *
+                      </span>
+                      <div className="flex-1">
+                        <select
+                          value={draftValues[key] ?? value}
+                          onChange={(e) => onChange(key, e.target.value)}
+                          className="w-full rounded-md border border-border bg-bg px-3 py-2 text-[13px] outline-none focus:border-accent"
+                        >
+                          <option value="" disabled>{t('config.selectModelProvider')}</option>
+                          <option value="OpenAI">OpenAI</option>
+                          <option value="DashScope">DashScope</option>
+                          <option value="SiliconFlow">SiliconFlow</option> 
+                        </select>
+                      </div>
+                    </div>
                   ) : (
                     <div className="flex items-center gap-2">
                       <span
@@ -232,7 +261,7 @@ function GroupSection({
                           type={isSensitiveKey(key) && !visibleFields[key] ? "password" : "text"}
                           value={draftValues[key] ?? value}
                           onChange={(e) => onChange(key, e.target.value)}
-                          placeholder="请输入配置值"
+                          placeholder={t('config.enterValue')}
                           className={`w-full rounded-md border border-border bg-bg px-3 py-2 text-[13px] outline-none focus:border-accent ${isSensitiveKey(key) ? "pr-10" : ""}`}
                         />
                         {isSensitiveKey(key) ? (
@@ -240,8 +269,8 @@ function GroupSection({
                             type="button"
                             onClick={() => toggleFieldVisible(key)}
                             className="absolute inset-y-0 right-0 flex items-center justify-center w-9 text-text-muted hover:text-text transition-colors"
-                            aria-label={visibleFields[key] ? "隐藏明文" : "显示明文"}
-                            title={visibleFields[key] ? "隐藏明文" : "显示明文"}
+                            aria-label={visibleFields[key] ? t('config.hideValue') : t('config.showValue')}
+                            title={visibleFields[key] ? t('config.hideValue') : t('config.showValue')}
                           >
                             {visibleFields[key] ? (
                               <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.8}>
@@ -273,6 +302,7 @@ function GroupSection({
 }
 
 export function ConfigPanel({ config, isConnected, onSaveConfig }: ConfigPanelProps) {
+  const { t } = useTranslation();
   const [draftValues, setDraftValues] = useState<Record<string, string>>({});
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -305,10 +335,11 @@ export function ConfigPanel({ config, isConnected, onSaveConfig }: ConfigPanelPr
     for (const entries of Object.values(buckets)) {
       entries.sort(([a], [b]) => a.localeCompare(b));
     }
+    const groupMeta = getGroupMeta(t);
     return Object.entries(buckets)
-      .map(([tag, keys]) => ({ tag, label: GROUP_META[tag]?.label ?? tag, keys, order: GROUP_META[tag]?.order ?? 99 }))
+      .map(([tag, keys]) => ({ tag, label: groupMeta[tag]?.label ?? tag, keys, order: groupMeta[tag]?.order ?? 99 }))
       .sort((a, b) => a.order - b.order);
-  }, [normalizedConfig]);
+  }, [normalizedConfig, t]);
   const totalItems = useMemo(() => groups.reduce((sum, group) => sum + group.keys.length, 0), [groups]);
   const hasChanges = useMemo(() => {
     const keys = Object.keys(normalizedConfig);
@@ -336,7 +367,7 @@ export function ConfigPanel({ config, isConnected, onSaveConfig }: ConfigPanelPr
   const handleSaveAndRestart = async () => {
     if (!hasChanges || saving) return;
     if (hasMissingRequiredModelFields) {
-      setError(`模型配置为必填：${missingRequiredModelFields.join("、")}。请完整填写后再保存并重启。`);
+      setError(t('config.errors.requiredModelFields', { fields: missingRequiredModelFields.join('、') }));
       return;
     }
     setSaving(true);
@@ -344,7 +375,7 @@ export function ConfigPanel({ config, isConnected, onSaveConfig }: ConfigPanelPr
     try {
       await onSaveConfig(draftValues);
     } catch (saveError) {
-      const message = saveError instanceof Error ? saveError.message : "保存失败，请稍后重试";
+      const message = saveError instanceof Error ? saveError.message : t('config.errors.saveFailed');
       setError(message);
     } finally {
       setSaving(false);
@@ -356,9 +387,9 @@ export function ConfigPanel({ config, isConnected, onSaveConfig }: ConfigPanelPr
       <div className="card w-full h-full flex flex-col">
         <div className="flex items-center justify-between gap-4 mb-4">
           <div>
-            <h2 className="text-lg font-semibold">配置信息</h2>
+            <h2 className="text-lg font-semibold">{t('config.title')}</h2>
             <p className="text-sm text-text-muted mt-1">
-              修改后端服务配置，保存后后端将自动重启以加载最新配置。
+              {t('config.subtitle')}
             </p>
           </div>
           <div className="flex items-center gap-2">
@@ -368,7 +399,7 @@ export function ConfigPanel({ config, isConnected, onSaveConfig }: ConfigPanelPr
               disabled={!hasChanges || saving}
               className="btn !px-3 !py-1.5 disabled:opacity-50 disabled:cursor-not-allowed"
             >
-              取消
+              {t('common.cancel')}
             </button>
             <button
               type="button"
@@ -376,7 +407,7 @@ export function ConfigPanel({ config, isConnected, onSaveConfig }: ConfigPanelPr
               disabled={!hasChanges || saving || !isConnected || hasMissingRequiredModelFields}
               className="btn primary !px-3 !py-1.5 disabled:opacity-50 disabled:cursor-not-allowed"
             >
-              {saving ? "保存中..." : "保存"}
+              {saving ? t('common.saving') : t('common.save')}
             </button>
           </div>
         </div>
@@ -387,19 +418,19 @@ export function ConfigPanel({ config, isConnected, onSaveConfig }: ConfigPanelPr
         ) : null}
         {!error && hasMissingRequiredModelFields ? (
           <div className="mb-4 rounded-md border border-[var(--border-danger)] bg-danger-subtle px-3 py-2 text-sm text-danger">
-            模型配置必填项未完成：{missingRequiredModelFields.join("、")}
+            {t('config.requiredIncomplete')}: {missingRequiredModelFields.join('、')}
           </div>
         ) : null}
 
         {!groups.length ? (
           <div className="text-sm text-text-muted flex-1 min-h-0">
-            暂未获取到配置，请确认后端服务状态。
+            {t('config.empty')}
           </div>
         ) : (
           <div className="space-y-3 flex-1 min-h-0 overflow-auto pr-1">
             <div className="flex items-center justify-between text-xs text-text-muted px-1">
-              <span>共 {groups.length} 个配置组</span>
-              <span className="mono">{totalItems} 项参数</span>
+              <span>{t('config.groupsCount', { count: groups.length })}</span>
+              <span className="mono">{t('config.paramsCount', { count: totalItems })}</span>
             </div>
             {groups.map((group) => (
               <GroupSection
@@ -408,6 +439,7 @@ export function ConfigPanel({ config, isConnected, onSaveConfig }: ConfigPanelPr
                 draftValues={draftValues}
                 onChange={handleFieldChange}
                 defaultOpen={group.tag === "model"}
+                t={t}
               />
             ))}
           </div>

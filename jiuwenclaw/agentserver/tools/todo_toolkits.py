@@ -19,7 +19,7 @@ from pydantic import BaseModel
 
 from openjiuwen.core.foundation.tool import LocalFunction, Tool, ToolCard
 
-from jiuwenclaw.paths import get_workspace_dir
+from jiuwenclaw.utils import get_workspace_dir
 
 
 class TaskStatus(str, Enum):

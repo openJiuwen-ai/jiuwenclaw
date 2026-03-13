@@ -5,6 +5,7 @@
  * 采用 JiuwenClaw 风格
  */
 
+import { useTranslation } from 'react-i18next';
 import { useChatStore } from '../../stores';
 import './StatusBar.css';
 
@@ -15,6 +16,7 @@ interface StatusBarProps {
 }
 
 export function StatusBar({ onPause, onCancel, onResume }: StatusBarProps) {
+  const { t } = useTranslation();
   const { isProcessing, isPaused, pausedTask, interruptResult } = useChatStore();
   const showExec = isProcessing || isPaused;
   /** 有中断结果文案时，统一只显示居中的横条（任务已暂停/恢复/取消/切换/已中断） */
@@ -43,7 +45,7 @@ export function StatusBar({ onPause, onCancel, onResume }: StatusBarProps) {
                 onClick={onCancel}
                 className="statusbar-action-btn statusbar-action-btn--cancel"
               >
-                取消
+                {t('statusBar.cancel')}
               </button>
             )}
 
@@ -51,8 +53,10 @@ export function StatusBar({ onPause, onCancel, onResume }: StatusBarProps) {
               <span className={`statusbar-dot ${isPaused ? '' : 'statusbar-dot--pulse'}`.trim()} />
               <span>
                 {isPaused
-                  ? `已暂停${pausedTask ? `: ${pausedTask.slice(0, 20)}...` : ''}`
-                  : '处理中...'}
+                  ? pausedTask
+                    ? t('statusBar.pausedWithTask', { task: pausedTask.slice(0, 20) })
+                    : t('statusBar.paused')
+                  : t('statusBar.processing')}
               </span>
             </div>
 
@@ -62,7 +66,7 @@ export function StatusBar({ onPause, onCancel, onResume }: StatusBarProps) {
                   onClick={onResume}
                   className="statusbar-action-btn statusbar-action-btn--resume"
                 >
-                  恢复
+                  {t('statusBar.resume')}
                 </button>
               )
             ) : (
@@ -71,7 +75,7 @@ export function StatusBar({ onPause, onCancel, onResume }: StatusBarProps) {
                 onClick={onPause}
                 className="statusbar-action-btn statusbar-action-btn--pause"
               >
-                暂停
+                {t('statusBar.pause')}
               </button>
               )
             )}

@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import asyncio
 import importlib.util
-import logging
 import sys
 import uuid
 from dataclasses import dataclass, field
@@ -35,18 +34,15 @@ from jiuwenclaw.agentserver.tools.todo_toolkits import TodoToolkit
 from jiuwenclaw.agentserver.prompt_builder import build_system_prompt
 from jiuwenclaw.evolution.skill_call_operator import SkillCallOperator
 from jiuwenclaw.evolution.skill_optimizer import SkillOptimizer
-from jiuwenclaw.paths import _get_config_module
+from jiuwenclaw.utils import logger, USER_WORKSPACE_DIR
+from jiuwenclaw.config import get_config
 
-_config_module = _get_config_module()
-get_config = _config_module.get_config
 
 # 加载流式输出配置
 _react_config = get_config().get("react", {})
 ANSWER_CHUNK_SIZE = _react_config.get("answer_chunk_size", 500)
 STREAM_CHUNK_THRESHOLD = _react_config.get("stream_chunk_threshold", 50)
 STREAM_CHARACTER_THRESHOLD = _react_config.get("stream_character_threshold", 2000)
-
-logger = logging.getLogger(__name__)
 
 _TODO_TOOL_NAMES = frozenset(
     ["todo_create", "todo_complete", "todo_insert", "todo_remove", "todo_list"]
@@ -129,7 +125,7 @@ class JiuClawReActAgent(ReActAgent):
         super().__init__(card)
         self._stream_tasks: set[asyncio.Task] = set()
         self._pause_events: dict[str, asyncio.Event] = {}  # task_key -> event
-        self._workspace_dir = Path(__file__).parent.parent.parent / "workspace"
+        self._workspace_dir = USER_WORKSPACE_DIR / "workspace"
         self._memory_dir = self._workspace_dir / "agent"
         self._agent_id: str = "main_agent"
 
@@ -354,7 +350,8 @@ class JiuClawReActAgent(ReActAgent):
                 await _pause_event.wait()
 
             logger.info(
-                "ReAct iteration %d/%d",
+                "session %s, ReAct iteration %d/%d",
+                session_id,
                 iteration + 1,
                 self._config.max_iterations,
             )
@@ -385,11 +382,29 @@ class JiuClawReActAgent(ReActAgent):
                     uncompressed.append(message)
             await self._emit_context_compression(session, compression_to_show, uncompressed)
 
-            ai_message = await self._call_llm(
-                messages,
-                context_window.get_tools() or None,
-                session,  # Pass session for streaming
-            )
+            try:
+                ai_message = await self._call_llm(
+                    messages,
+                    context_window.get_tools() or None,
+                    session,  # Pass session for streaming
+                )
+            except Exception as e:
+                logger.error(f"[JiuwenClaw] 尝试修复上下文")
+                await self._fix_incomplete_tool_context(context)
+                context_window = await context.get_context_window(
+                    system_messages=[],
+                    tools=tools if tools else None,
+                )
+                history_messages = context_window.get_messages()
+                history_snapshot = list(history_messages)
+                # Filter out SystemMessage from history to avoid "System message must be at the beginning" error
+                history_messages = [m for m in history_messages if not isinstance(m, SystemMessage)]
+                messages = [*system_messages, *history_messages]
+                ai_message = await self._call_llm(
+                    messages,
+                    context_window.get_tools() or None,
+                    session,  # Pass session for streaming
+                )
 
             # Pause checkpoint: after LLM returns, before tool execution
             if _pause_event is not None:
@@ -583,6 +598,16 @@ class JiuClawReActAgent(ReActAgent):
                 logger.info("stream_process cancelled")
             except Exception as e:
                 logger.exception("stream error: %s", e)
+                await session.write_stream(
+                            OutputSchema(
+                                type="answer",
+                                index=0,
+                                payload={
+                                    "output": str(e),
+                                    "result_type": "error",
+                                },
+                            )
+                        )
             finally:
                 if session is not None:
                     await self.context_engine.save_contexts(session)
@@ -638,6 +663,7 @@ class JiuClawReActAgent(ReActAgent):
     async def _emit_tool_result(self, session: Session, tool_call: Any, result: Any) -> None:
         """Emit tool_result OutputSchema, notify frontend of tool execution result."""
         try:
+            # todo 工具结果待优化
             await session.write_stream(
                 OutputSchema(
                     type="tool_result",
@@ -646,7 +672,7 @@ class JiuClawReActAgent(ReActAgent):
                         "tool_result": {
                             "tool_name": getattr(tool_call, "name", "") if tool_call else "",
                             "tool_call_id": getattr(tool_call, "id", "") if tool_call else "",
-                            "result": str(result) if result is not None else "",
+                            "result": str(result)[:1000] if result is not None else "",
                         }
                     },
                 )
@@ -749,45 +775,58 @@ class JiuClawReActAgent(ReActAgent):
 
         try:
             messages = context.get_messages()
-            needs_fix = False
-            tool_calls_needing_response: List[Dict[str, Any]] = []
-
-            # Scan for incomplete tool_calls
-            for msg in messages:
-                if isinstance(msg, AssistantMessage):
-                    tool_calls = getattr(msg, "tool_calls", None)
-                    if tool_calls:
-                        for tc in tool_calls:
-                            tool_calls_needing_response.append({
-                                "tool_call_id": getattr(tc, "id", ""),
-                                "tool_name": getattr(tc, "name", ""),
-                            })
-                elif isinstance(msg, ToolMessage):
-                    # This tool message responds to a previous tool_call
-                    tool_call_id = getattr(msg, "tool_call_id", "")
-                    # Remove matching tool_call from pending list
-                    tool_calls_needing_response = [
-                        tc for tc in tool_calls_needing_response
-                        if tc["tool_call_id"] != tool_call_id
-                    ]
-
-            # If there are pending tool_calls without responses, add placeholder messages
-            if tool_calls_needing_response:
-                needs_fix = True
-                logger.warning(
-                    "Found incomplete tool context: %d tool_calls missing tool messages",
-                    len(tool_calls_needing_response)
-                )
-                for tc in tool_calls_needing_response:
-                    tool_call_id = tc["tool_call_id"]
-                    tool_name = tc["tool_name"]
-                    await context.add_messages(ToolMessage(
-                        content=f"[工具执行被中断] 工具 {tool_name} 执行过程中被用户打断，没有执行结果。",
-                        tool_call_id=tool_call_id
-                    ))
-
-            if needs_fix:
-                logger.info("Fixed incomplete tool context with placeholder messages")
+            len_messages = len(messages)
+            messages = context.pop_messages(size=len_messages)
+            tool_message_cache = {}
+            tool_id_cache = []  # 与assistant一致
+            for i in range(len_messages):
+                if isinstance(messages[i], AssistantMessage):
+                    if not tool_id_cache:
+                        await context.add_messages(messages[i])
+                        tool_calls = getattr(messages[i], "tool_calls", None)
+                        if tool_calls:
+                            for tc in tool_calls:
+                                tool_id_cache.append({
+                                    "tool_call_id": getattr(tc, "id", ""),
+                                    "tool_name": getattr(tc, "name", ""),
+                                })
+                    else:
+                        logger.info("Fixed incomplete tool context with placeholder messages")
+                        for tc in tool_id_cache:
+                            tool_name = tc["tool_name"]
+                            tool_call_id = tc["tool_call_id"]
+                            if tool_call_id in tool_message_cache:
+                                await context.add_messages(tool_message_cache[tool_call_id])
+                            else:
+                                await context.add_messages(ToolMessage(
+                                    content=f"[工具执行被中断] 工具 {tool_name} 执行过程中被用户打断，没有执行结果。",
+                                    tool_call_id=tool_call_id
+                                ))
+                        tool_id_cache = []
+                elif isinstance(messages[i], ToolMessage):
+                    if not tool_id_cache:
+                        tool_message_cache[messages[i].tool_call_id] = messages[i]
+                        continue
+                    if messages[i].tool_call_id == tool_id_cache[0]["tool_call_id"]:
+                        await context.add_messages(messages[i])
+                        tool_id_cache.pop(0)
+                    else:
+                        tool_message_cache[messages[i].tool_call_id] = messages[i]
+                        continue
+                else:
+                    logger.info("Fixed incomplete tool context with placeholder messages")
+                    for tc in tool_id_cache:
+                        tool_name = tc["tool_name"]
+                        tool_call_id = tc["tool_call_id"]
+                        if tool_call_id in tool_message_cache:
+                            await context.add_messages(tool_message_cache[tool_call_id])
+                        else:
+                            await context.add_messages(ToolMessage(
+                                content=f"[工具执行被中断] 工具 {tool_name} 执行过程中被用户打断，没有执行结果。",
+                                tool_call_id=tool_call_id
+                            ))
+                    tool_id_cache = []
+                    await context.add_messages(messages[i])
         except Exception as e:
             logger.warning("Failed to fix incomplete tool context: %s", e)
 
@@ -1156,7 +1195,7 @@ class JiuClawReActAgent(ReActAgent):
         content_parts: List[str] = []
 
         # 2. workspace_prompt
-        workspace = self._workspace_dir / "session" / session_id
+        workspace = self._workspace_dir
         content_parts.append(f"# Workspace\nYour temporal working directory is: {workspace}\n"
                              "Write or save all files under this dir.")
 

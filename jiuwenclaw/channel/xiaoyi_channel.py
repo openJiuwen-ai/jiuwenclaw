@@ -16,10 +16,9 @@ from dataclasses import dataclass
 from typing import Any, Callable
 from urllib.parse import urlparse
 
-from loguru import logger
-
+from jiuwenclaw.utils import logger
 from jiuwenclaw.channel.base import BaseChannel, ChannelMetadata, RobotMessageRouter
-from jiuwenclaw.schema.message import Message, ReqMethod
+from jiuwenclaw.schema.message import EventType, Message, ReqMethod
 
 
 @dataclass
@@ -70,6 +69,7 @@ class XiaoyiChannel(BaseChannel):
         self._heartbeat_tasks: dict[str, asyncio.Task] = {}  # Heartbeat tasks for each channel
         self._connect_tasks: dict[str, asyncio.Task] = {}  # Connection tasks for each channel
         self._session_task_map: dict[str, str] = {}
+        self._session_heartbeat_tasks: dict[str, asyncio.Task] = {}  # Response heartbeat tasks for each session
         self._on_message_cb: Callable[[Message], Any] | None = None
 
     @property
@@ -113,26 +113,48 @@ class XiaoyiChannel(BaseChannel):
             if self._connect_tasks[url_key]:
                 self._connect_tasks[url_key].cancel()
                 self._connect_tasks[url_key] = None
+        # Cancel all session heartbeat tasks
+        for session_id in list(self._session_heartbeat_tasks.keys()):
+            if self._session_heartbeat_tasks[session_id]:
+                self._session_heartbeat_tasks[session_id].cancel()
+                self._session_heartbeat_tasks[session_id] = None
         # Close all websocket connections
         for url_key, ws in list(self._ws_connections.items()):
             if ws:
                 try:
                     await ws.close()
                 except Exception as e:
-                    logger.warning("关闭 WebSocket 连接失败 ({}): {}", url_key, e)
+                    logger.warning(f"关闭 WebSocket 连接失败 ({url_key}): {e}")
                 self._ws_connections[url_key] = None
         self._heartbeat_tasks.clear()
         self._connect_tasks.clear()
+        self._session_heartbeat_tasks.clear()
         self._ws_connections.clear()
         logger.info("XiaoyiChannel 已停止")
+
+    def _extract_platform_receive_info(self, msg: Message) -> tuple[str, str]:
+        """
+        从消息中提取小艺平台会话 ID 与任务 ID。
+        优先使用 metadata（避免 \new_session 覆盖 session_id 后无法回发），否则回退到 session_id 与 _session_task_map。
+        """
+        meta = getattr(msg, "metadata", None) or {}
+        platform_session_id = (meta.get("xiaoyi_session_id") or "").strip()
+        platform_task_id = (meta.get("xiaoyi_task_id") or "").strip()
+        if platform_session_id or platform_task_id:
+            return (
+                platform_session_id or (msg.session_id or ""),
+                platform_task_id or platform_session_id,
+            )
+        session_id = msg.session_id or ""
+        task_id = self._session_task_map.get(session_id, session_id)
+        return session_id, task_id
 
     async def send(self, msg: Message) -> None:
         """发送消息到小艺服务端（A2A 格式，双通道发送）."""
         if not self._ws_connections:
             return
-        session_id = msg.session_id or ""
-        task_id = self._session_task_map.get(session_id, session_id)
-        logger.info("XiaoyiChannel 发送消息: {}", msg)
+        session_id, task_id = self._extract_platform_receive_info(msg)
+        logger.info(f"XiaoyiChannel 发送消息: {msg}")
 
         content = ""
         if isinstance(msg.payload, dict):
@@ -147,9 +169,12 @@ class XiaoyiChannel(BaseChannel):
         for url_key, ws in self._ws_connections.items():
             if ws:
                 try:
-                    await self._send_text_response(session_id, task_id, content, url_key)
+                    await self._send_text_response(session_id, task_id, content, url_key, is_final=True)
                 except Exception as e:
-                    logger.warning("XiaoyiChannel 发送消息失败 ({}): {}", url_key, e)
+                    logger.warning(f"XiaoyiChannel 发送消息失败 ({url_key}): {e}")
+
+        if session_id:
+            await self._stop_session_heartbeat(session_id)
 
     def get_metadata(self) -> ChannelMetadata:
         return ChannelMetadata(
@@ -169,7 +194,7 @@ class XiaoyiChannel(BaseChannel):
             try:
                 await self._connect(url_key, url)
             except Exception as e:
-                logger.warning("XiaoyiChannel 连接失败 ({}): {}", url, e)
+                logger.warning(f"XiaoyiChannel 连接失败 ({url}): {e}")
                 await asyncio.sleep(5)
 
     async def _connect(self, url_key: str, url: str) -> None:
@@ -187,7 +212,7 @@ class XiaoyiChannel(BaseChannel):
 
         async with websockets.connect(url, additional_headers=headers, ssl=ssl_context) as ws:
             self._ws_connections[url_key] = ws
-            logger.info("XiaoyiChannel 已连接 ({}): {}", url_key, url)
+            logger.info(f"XiaoyiChannel 已连接 {url_key}: {url}")
 
             # 发送初始化消息（必须在 heartbeat 之前）
             await self._send_init_message(url_key)
@@ -199,14 +224,14 @@ class XiaoyiChannel(BaseChannel):
                 async for raw in ws:
                     await self._handle_raw_message(raw)
             except Exception as e:
-                logger.warning("XiaoyiChannel 连接异常 ({}): {}", url_key, e)
+                logger.warning(f"XiaoyiChannel 连接异常 ({url_key}): {e}")
             finally:
                 if self._heartbeat_tasks.get(url_key):
                     self._heartbeat_tasks[url_key].cancel()
                     self._heartbeat_tasks[url_key] = None
                 self._ws_connections[url_key] = None
-                logger.info("XiaoyiChannel 连接关闭 ({}): {}", url_key, url)
-
+                logger.info(f"XiaoyiChannel 连接关闭 {url_key} : {url}")
+                await asyncio.sleep(8)
     async def _send_init_message(self, url_key: str) -> None:
         """发送初始化消息 (clawd_bot_init) 到指定通道."""
         ws = self._ws_connections.get(url_key)
@@ -218,9 +243,9 @@ class XiaoyiChannel(BaseChannel):
         }
         try:
             await ws.send(json.dumps(init_message))
-            logger.info("XiaoyiChannel 已发送初始化消息 ({})", url_key)
+            logger.info(f"XiaoyiChannel 已发送初始化消息 ({url_key})")
         except Exception as e:
-            logger.warning("XiaoyiChannel 发送初始化消息失败 ({}): {}", url_key, e)
+            logger.warning(f"XiaoyiChannel 发送初始化消息失败 ({url_key}): {e}")
             raise
 
     async def _heartbeat_loop(self, url_key: str) -> None:
@@ -232,7 +257,7 @@ class XiaoyiChannel(BaseChannel):
                 if ws:
                     await ws.send(json.dumps(heartbeat))
             except Exception as e:
-                logger.warning("XiaoyiChannel 心跳发送失败 ({}): {}", url_key, e)
+                logger.warning(f"XiaoyiChannel 心跳发送失败 ({url_key}): {e}")
                 break
             await asyncio.sleep(20)
 
@@ -258,7 +283,7 @@ class XiaoyiChannel(BaseChannel):
         elif method == "tasks/cancel":
             await self._handle_tasks_cancel(message)
         else:
-            logger.warning("XiaoyiChannel 未知方法: {}", method)
+            logger.warning(f"XiaoyiChannel 未知方法: {method}")
 
     async def _handle_message_stream(self, message: dict[str, Any]) -> None:
         """处理 message/stream 消息，转换为 JiuwenClaw Message."""
@@ -275,6 +300,21 @@ class XiaoyiChannel(BaseChannel):
 
         self._session_task_map[session_id] = task_id
 
+        # 将最近一次可回发的小艺身份写入 config.yaml，供 cron 推送时使用
+        try:
+            from jiuwenclaw.config import update_channel_in_config
+
+            update_channel_in_config(
+                "xiaoyi",
+                {
+                    "last_session_id": session_id or "",
+                    "last_task_id": task_id or "",
+                },
+            )
+        except Exception:
+            pass
+
+        # 平台身份写入 metadata，供回发时使用（与 session_id 解耦，\new_session 后仍可正确回发）
         user_message = Message(
             id=message.get("id", ""),
             type="req",
@@ -284,7 +324,11 @@ class XiaoyiChannel(BaseChannel):
             timestamp=time.time(),
             ok=True,
             req_method=ReqMethod.CHAT_SEND,
-            metadata={"method": "message/stream"},
+            metadata={
+                "method": "message/stream",
+                "xiaoyi_session_id": session_id,
+                "xiaoyi_task_id": task_id,
+            },
         )
 
         handled = False
@@ -297,10 +341,50 @@ class XiaoyiChannel(BaseChannel):
         if not handled:
             await self.bus.route_user_message(user_message)
 
+        # Start session heartbeat to prevent xiaoyi client timeout
+        if session_id:
+            await self._start_session_heartbeat(session_id, task_id)
+
+    async def _start_session_heartbeat(self, session_id: str, task_id: str) -> None:
+        """启动会话心跳任务，每隔5秒发送空消息直到final消息发出."""
+        await self._stop_session_heartbeat(session_id)
+
+        async def heartbeat_loop():
+            try:
+                while self._running:
+                    await asyncio.sleep(5)
+                    # Send empty heartbeat message (non-final)
+                    for url_key, ws in self._ws_connections.items():
+                        if ws:
+                            try:
+                                await self._send_text_response(session_id, task_id, "", url_key, is_final=False)
+                            except Exception as e:
+                                logger.warning(f"XiaoyiChannel 发送心跳消息面败 ({url_key}): {e}")
+            except asyncio.CancelledError:
+                logger.info(f"XiaoyiChannel 会话心跳已停止: {session_id}")
+            except Exception as e:
+                logger.warning(f"XiaoyiChannel 会话心跳异常 ({session_id}): {e}")
+
+        self._session_heartbeat_tasks[session_id] = asyncio.create_task(heartbeat_loop())
+        logger.info(f"XiaoyiChannel 会话心跳已启动: {session_id}")
+
+    async def _stop_session_heartbeat(self, session_id: str) -> None:
+        """停止会话心跳任务."""
+        if session_id in self._session_heartbeat_tasks:
+            task = self._session_heartbeat_tasks[session_id]
+            if task and not task.done():
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
+            self._session_heartbeat_tasks.pop(session_id, None)
+            logger.info(f"XiaoyiChannel 会话心跳已停止: {session_id}")
+
     async def _handle_clear_context(self, message: dict[str, Any]) -> None:
         """处理清空上下文请求."""
         session_id = message.get("sessionId", "")
-        logger.info("XiaoyiChannel 清空上下文: {}", session_id)
+        logger.info(f"XiaoyiChannel 清空上下文: {session_id}")
 
         self._session_task_map.pop(session_id, None)
 
@@ -317,7 +401,7 @@ class XiaoyiChannel(BaseChannel):
         """处理取消任务请求."""
         session_id = message.get("sessionId", "")
         task_id = message.get("params", {}).get("id") or message.get("taskId", "")
-        logger.info("XiaoyiChannel 取消任务: {} {}", session_id, task_id)
+        logger.info(f"XiaoyiChannel 取消任务: {session_id} {task_id}")
 
         response = {
             "jsonrpc": "2.0",
@@ -328,7 +412,7 @@ class XiaoyiChannel(BaseChannel):
         for url_key in list(self._ws_connections.keys()):
             await self._send_agent_response(session_id, task_id, response, url_key)
 
-    async def _send_text_response(self, session_id: str, task_id: str, text: str, url_key: str) -> None:
+    async def _send_text_response(self, session_id: str, task_id: str, text: str, url_key: str, is_final: bool = True) -> None:
         """发送文本响应（A2A 格式）到指定通道."""
         response = {
             "jsonrpc": "2.0",
@@ -337,8 +421,8 @@ class XiaoyiChannel(BaseChannel):
                 "taskId": task_id,
                 "kind": "artifact-update",
                 "append": False,
-                "lastChunk": True,
-                "final": True,
+                "lastChunk": is_final,
+                "final": is_final,
                 "artifact": {
                     "artifactId": f"artifact_{int(time.time() * 1000)}",
                     "parts": [{"kind": "text", "text": text}],
@@ -362,4 +446,4 @@ class XiaoyiChannel(BaseChannel):
         try:
             await ws.send(json.dumps(wrapper))
         except Exception as e:
-            logger.warning("XiaoyiChannel 发送响应失败 ({}): {}", url_key, e)
+            logger.warning(f"XiaoyiChannel 发送响应失败 ({url_key}): {e}")

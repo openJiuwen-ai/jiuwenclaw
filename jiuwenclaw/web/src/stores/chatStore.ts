@@ -40,6 +40,12 @@ export interface SubtaskState {
   is_parallel: boolean;
 }
 
+interface TaskItem {
+  id: string;
+  content: string;
+  timestamp: number;
+}
+
 interface ChatState {
   messages: Message[];
   isProcessing: boolean;
@@ -58,6 +64,8 @@ interface ChatState {
     toolCallDedupDropped: number;
     toolResultDedupDropped: number;
   };
+  // 任务队列
+  taskQueue: TaskItem[];
   // 用户问题相关
   pendingQuestion: AskUserQuestionPayload | null;  // 待回答的问题
 
@@ -77,6 +85,10 @@ interface ChatState {
   updateSubtask: (payload: SubtaskUpdatePayload) => void;
   clearSubtasks: () => void;
   clearMessages: () => void;
+  // 任务队列相关
+  addToTaskQueue: (content: string) => void;
+  clearTaskQueue: () => void;
+  removeFromTaskQueue: (id: string) => void;
   // 用户问题相关
   setPendingQuestion: (question: AskUserQuestionPayload | null) => void;
 }
@@ -99,6 +111,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
     toolCallDedupDropped: 0,
     toolResultDedupDropped: 0,
   },
+  taskQueue: [],
   pendingQuestion: null,
 
   addMessage: (message) => {
@@ -446,8 +459,32 @@ export const useChatStore = create<ChatState>((set, get) => ({
         toolCallDedupDropped: 0,
         toolResultDedupDropped: 0,
       },
+      taskQueue: [],
       pendingQuestion: null,
     });
+  },
+
+  addToTaskQueue: (content) => {
+    set((state) => ({
+      taskQueue: [
+        ...state.taskQueue,
+        {
+          id: Date.now().toString() + Math.random().toString(36).substr(2, 9),
+          content,
+          timestamp: Date.now(),
+        },
+      ],
+    }));
+  },
+
+  clearTaskQueue: () => {
+    set({ taskQueue: [] });
+  },
+
+  removeFromTaskQueue: (id) => {
+    set((state) => ({
+      taskQueue: state.taskQueue.filter((task) => task.id !== id),
+    }));
   },
 
   setPendingQuestion: (question) => {

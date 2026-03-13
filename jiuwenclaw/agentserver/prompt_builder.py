@@ -1,13 +1,11 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 
 import os
-import logging
 from datetime import datetime
 from typing import Optional
 
-from jiuwenclaw.paths import get_agent_workspace_dir
+from jiuwenclaw.utils import get_agent_workspace_dir, logger
 
-logger = logging.getLogger(__name__)
 
 SILENT_REPLY_TOKEN = "[[SILENT]]"
 
@@ -48,6 +46,7 @@ def build_system_prompt(
 ## 核心操作规范
 
 - 会话本身不具备记忆能力，文件系统是唯一的信息载体。需持久化的内容务必写入文件
+- **路径限制：** 记忆工具（write_memory/edit_memory/read_memory）仅能操作 memory/ 目录下的文件，其他路径会被拒绝
 - 更新 USER.md 或 MEMORY.md 时，必须先读取现有内容再执行修改
 - **字段唯一性约束：** 每个字段仅允许出现一次。已存在字段通过 `edit_memory` 更新，新字段通过 `write_memory` 追加
 
@@ -90,7 +89,7 @@ def build_system_prompt(
 
 - 用户透露的个人信息（姓名、偏好、习惯、工作模式）→ 更新 `USER.md`
 - 对话中形成的重要决策或结论 → 记录至 `memory/YYYY-MM-DD.md`
-- 发现的项目背景、技术细节、工作流程 → 写入相关文件
+- 发现的项目背景、技术细节、工作流程 → 写入 memory/ 目录下的相关文件
 - 用户表达的喜好或不满 → 更新 `USER.md`
 - 工具相关的本地配置（SSH、摄像头等）→ 更新 `MEMORY.md`
 - 任何预判未来会话可能需要的信息 → 立即记录

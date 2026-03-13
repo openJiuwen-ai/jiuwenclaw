@@ -8,11 +8,11 @@ import time
 from collections import OrderedDict
 from typing import Any, Callable
 
-from loguru import logger
 from pydantic import BaseModel, Field
 
+from jiuwenclaw.utils import logger
 from jiuwenclaw.channel.base import RobotMessageRouter, BaseChannel
-from jiuwenclaw.schema.message import Message, ReqMethod
+from jiuwenclaw.schema.message import Message, ReqMethod, EventType
 
 
 class FeishuConfig(BaseModel):
@@ -24,6 +24,7 @@ class FeishuConfig(BaseModel):
     encrypt_key: str = ""  # 事件订阅的加密密钥（可选）
     verification_token: str = ""  # 事件订阅的验证令牌（可选）
     allow_from: list[str] = Field(default_factory=list)  # 允许的用户的open_id列表
+    chat_id: str = ""  # 可选：固定推送目标 chat_id（群聊 oc_xxx 或个人 open_id）
 
 
 try:
@@ -411,7 +412,17 @@ class FeishuChannel(BaseChannel):
 
         try:
             receive_id, id_type = self._extract_receive_info(msg)
-            content_str = self._extract_message_content(msg)
+
+            # 心跳/系统事件：优先从 payload["heartbeat"] 读取内容
+            payload = getattr(msg, "payload", None) or {}
+            if (
+                msg.event_type == EventType.HEARTBEAT_RELAY
+                and isinstance(payload, dict)
+                and payload.get("heartbeat")
+            ):
+                content_str = str(payload.get("heartbeat"))
+            else:
+                content_str = self._extract_message_content(msg)
 
             if not content_str.strip():
                 logger.warning("飞书发送：消息内容为空，跳过发送")
@@ -426,6 +437,8 @@ class FeishuChannel(BaseChannel):
     def _extract_receive_info(self, msg: Message) -> tuple[str, str]:
         """
         从消息对象中提取接收者ID和ID类型。
+        优先使用 metadata 中的平台身份（feishu_chat_id / feishu_open_id），
+        避免 \new_session 覆盖 session_id 后导致 Invalid ids。
 
         Args:
             msg: 消息对象
@@ -433,14 +446,37 @@ class FeishuChannel(BaseChannel):
         Returns:
             tuple: (接收者ID, ID类型)
         """
-        # 优先使用session_id（回复对象），否则使用id
-        receive_id = getattr(msg, "session_id", None) or msg.id
+        meta = getattr(msg, "metadata", None) or {}
+        receive_id = ""
+        id_type = "open_id"
 
-        # 飞书API：群聊 oc_ 使用 chat_id，用户 ou_ 使用 open_id
-        if receive_id.startswith("oc_"):
-            id_type = "chat_id"
-        else:
+        # 1) 优先用 metadata 中的平台身份
+        feishu_chat_id = (meta.get("feishu_chat_id") or "").strip()
+        feishu_open_id = (meta.get("feishu_open_id") or "").strip()
+        if feishu_chat_id:
+            receive_id = feishu_chat_id
+            id_type = "chat_id" if feishu_chat_id.startswith("oc_") else "open_id"
+        elif feishu_open_id:
+            receive_id = feishu_open_id
             id_type = "open_id"
+
+        # 2) 若 metadata 中没有平台身份，则使用配置中的 chat_id 作为固定推送目标
+        # print('this is in _extract_receive_info')
+        logger.info('this is in _extract_receive_info, chat_id is %s', self.config.chat_id)
+        if not receive_id:
+            cfg_chat_id = getattr(self.config, "chat_id", "") or ""
+            cfg_chat_id = cfg_chat_id.strip()
+            if cfg_chat_id:
+                receive_id = cfg_chat_id
+                id_type = "chat_id" if cfg_chat_id.startswith("oc_") else "open_id"
+
+        # 3) 仍然没有，则回退到 session_id / id（兼容旧逻辑）
+        if not receive_id:
+            receive_id = getattr(msg, "session_id", None) or msg.id or ""
+            if receive_id.startswith("oc_"):
+                id_type = "chat_id"
+            else:
+                id_type = "open_id"
 
         return receive_id, id_type
 
@@ -564,7 +600,23 @@ class FeishuChannel(BaseChannel):
                 getattr(getattr(sender, "sender_id", None), "open_id", None) or ""
             )
 
-            # 处理消息
+            # 将最近一次可回发的飞书身份写入 config.yaml，供 cron 推送时使用
+            try:
+                from jiuwenclaw.config import update_channel_in_config
+
+                update_channel_in_config(
+                    "feishu",
+                    {
+                        "last_chat_id": getattr(message, "chat_id", None) or "",
+                        "last_open_id": open_id or "",
+                        "last_message_id": getattr(message, "message_id", None) or "",
+                    },
+                )
+            except Exception:
+                # 不影响正常收消息
+                pass
+
+            # 处理消息：将平台身份写入 metadata，供回发时使用（与 session_id 解耦，\new_session 后仍可正确回发）
             await self._handle_message(
                 chat_id=message.chat_id,
                 content=content,
@@ -573,6 +625,8 @@ class FeishuChannel(BaseChannel):
                     "chat_type": message.chat_type,
                     "msg_type": message.message_type,
                     "open_id": open_id,
+                    "feishu_open_id": open_id,
+                    "feishu_chat_id": getattr(message, "chat_id", None) or "",
                 },
             )
 

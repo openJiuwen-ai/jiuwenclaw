@@ -16,12 +16,14 @@ class EvolutionChange:
     section: str    # "Instructions" | "Examples" | "Troubleshooting"
     action: str     # Fixed to "append"
     content: str    # Markdown content to append
+    relevant: bool = True  # Whether the signal is relevant to the Skill
 
     def to_dict(self) -> dict:
         return {
             "section": self.section,
             "action": self.action,
             "content": self.content,
+            "relevant": self.relevant,
         }
 
     @classmethod
@@ -30,6 +32,7 @@ class EvolutionChange:
             section=d.get("section", "Troubleshooting"),
             action=d.get("action", "append"),
             content=d.get("content", ""),
+            relevant=d.get("relevant", True),
         )
 
 

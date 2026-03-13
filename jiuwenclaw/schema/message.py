@@ -52,6 +52,9 @@ class ReqMethod(Enum):
     CHANNEL_XIAOYI_GET_CONF = "channel.xiaoyi.get_conf"
     CHANNEL_XIAOYI_SET_CONF = "channel.xiaoyi.set_conf"
 
+    CHANNEL_DINGTALK_GET_CONF = "channel.dingtalk.get_conf"
+    CHANNEL_DINGTALK_SET_CONF = "channel.dingtalk.set_conf"
+
 class EventType(Enum):
     CONNECTION_ACK = "connection.ack"
     HELLO = "hello"

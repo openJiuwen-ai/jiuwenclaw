@@ -17,8 +17,7 @@ from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable
 from urllib.parse import parse_qs, urlparse
 
-from loguru import logger
-
+from jiuwenclaw.utils import logger
 from jiuwenclaw.channel.base import BaseChannel, ChannelMetadata, RobotMessageRouter
 from jiuwenclaw.schema.message import Message, Mode, ReqMethod
 
@@ -176,10 +175,7 @@ class WebChannel(BaseChannel):
         )
         self._running = True
         logger.info(
-            "WebChannel 已启动: ws://{}:{}{}",
-            self.config.host,
-            self.config.port,
-            self.config.path,
+            f"WebChannel 已启动: ws://{self.config.host}:{self.config.port}{self.config.path}"
         )
         await self._server.wait_closed()
 
@@ -309,7 +305,7 @@ class WebChannel(BaseChannel):
         query = parse_qs(parsed.query)
         remote = getattr(ws, "remote_address", None)
         self._clients.add(ws)
-        logger.info("WebChannel 新连接: remote={} query={}", remote, query)
+        logger.info(f"WebChannel 新连接: remote={remote} query={query}")
 
         # 触发连接钩子（如发送 connection.ack）
         for hook in self._connect_hooks:
@@ -327,7 +323,7 @@ class WebChannel(BaseChannel):
             logger.warning("WebChannel 连接异常: {}", e)
         finally:
             self._clients.discard(ws)
-            logger.info("WebChannel 连接关闭: remote={}", remote)
+            logger.info(f"WebChannel 连接关闭: remote={remote}")
 
     async def _handle_raw_message(self, ws: Any, raw: str, query: dict[str, list[str]]) -> None:
         try:

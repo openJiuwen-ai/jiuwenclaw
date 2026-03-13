@@ -8,7 +8,7 @@ THE OPEN SOURCE SOFTWARE IN THIS PRODUCT IS DISTRIBUTED IN THE HOPE THAT IT WILL
 
 ## Copyright Notice and License Texts
 
-### Software: Python 3.11.x
+### Software: Python 3.11.x, 3.12.x, 3.13.x
 
 **License:** Python Software Foundation License V2
 

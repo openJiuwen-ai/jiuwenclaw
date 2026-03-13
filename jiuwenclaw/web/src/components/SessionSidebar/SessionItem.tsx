@@ -5,6 +5,7 @@
  */
 
 import { useState } from 'react';
+import { useTranslation } from 'react-i18next';
 import { Session } from '../../types';
 import clsx from 'clsx';
 
@@ -18,39 +19,39 @@ interface SessionItemProps {
 /**
  * 格式化时间显示
  */
-function formatTime(timestamp: string): string {
+function formatTime(
+  timestamp: string,
+  language: string,
+  t: (key: string, options?: Record<string, unknown>) => string
+): string {
   const date = new Date(timestamp);
   const now = new Date();
   const diff = now.getTime() - date.getTime();
 
-  // 小于1分钟
   if (diff < 60000) {
-    return '刚刚';
+    return t('time.relative.justNow');
   }
 
-  // 小于1小时
   if (diff < 3600000) {
     const minutes = Math.floor(diff / 60000);
-    return `${minutes}分钟前`;
+    return t('time.relative.minutesAgo', { count: minutes });
   }
 
-  // 小于24小时
   if (diff < 86400000) {
     const hours = Math.floor(diff / 3600000);
-    return `${hours}小时前`;
+    return t('time.relative.hoursAgo', { count: hours });
   }
 
-  // 小于7天
   if (diff < 604800000) {
     const days = Math.floor(diff / 86400000);
-    return `${days}天前`;
+    return t('time.relative.daysAgo', { count: days });
   }
 
-  // 超过7天显示日期
-  return date.toLocaleDateString('zh-CN', { month: 'short', day: 'numeric' });
+  return date.toLocaleDateString(language, { month: 'short', day: 'numeric' });
 }
 
 export function SessionItem({ session, isActive, onClick, onDelete }: SessionItemProps) {
+  const { t, i18n } = useTranslation();
   const [showDelete, setShowDelete] = useState(false);
   
   // 优先展示会话标题，缺失时回退到会话 ID 片段
@@ -93,7 +94,9 @@ export function SessionItem({ session, isActive, onClick, onDelete }: SessionIte
             {preview}
           </div>
           <div className="text-xs text-text-muted truncate">
-            {session.updated_at ? formatTime(session.updated_at) : '新会话'}
+            {session.updated_at
+              ? formatTime(session.updated_at, i18n.language, t)
+              : t('sessionSidebar.newSession')}
           </div>
         </div>
 
@@ -113,7 +116,7 @@ export function SessionItem({ session, isActive, onClick, onDelete }: SessionIte
         <button
           onClick={handleDelete}
           className="absolute right-2 top-1/2 -translate-y-1/2 p-1.5 rounded-md text-text-muted hover:text-danger hover:bg-danger-subtle transition-colors"
-          title="删除会话"
+          title={t('sessions.delete')}
         >
           <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={1.5}>
             <path strokeLinecap="round" strokeLinejoin="round" d="M14.74 9l-.346 9m-4.788 0L9.26 9m9.968-3.21c.342.052.682.107 1.022.166m-1.022-.165L18.16 19.673a2.25 2.25 0 01-2.244 2.077H8.084a2.25 2.25 0 01-2.244-2.077L4.772 5.79m14.456 0a48.108 48.108 0 00-3.478-.397m-12 .562c.34-.059.68-.114 1.022-.165m0 0a48.11 48.11 0 013.478-.397m7.5 0v-.916c0-1.18-.91-2.164-2.09-2.201a51.964 51.964 0 00-3.32 0c-1.18.037-2.09 1.022-2.09 2.201v.916m7.5 0a48.667 48.667 0 00-7.5 0" />

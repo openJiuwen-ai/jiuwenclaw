@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
+import { useTranslation } from 'react-i18next';
 import { FileViewer } from '../AgentPanel/FileViewer';
 import { containsIgnoredDirectory } from '../../features/fileTreeFilters';
 import { webRequest } from '../../services/webClient';
@@ -38,31 +39,55 @@ function isPlausibleDate(date: Date): boolean {
   return year >= 2020 && year <= 2100;
 }
 
-function parseSessionDisplayLabel(sessionId: string): string {
-  if (!sessionId) return '未知会话-未知时间';
+function parseSessionDisplayLabel(sessionId: string, t: (key: string, options?: Record<string, unknown>) => string): string {
+  if (!sessionId) return t('sessions.unknownSession');
 
-  if (sessionId.startsWith('sess_')) {
-    const parts = sessionId.split('_');
-    const hexTs = parts[1] ?? '';
-    if (/^[0-9a-fA-F]+$/.test(hexTs)) {
-      const ms = Number.parseInt(hexTs, 16);
-      if (Number.isFinite(ms)) {
-        const date = new Date(ms);
-        if (!Number.isNaN(date.getTime()) && isPlausibleDate(date)) {
-          return `会话-${formatDateTime(date)}`;
+  // 处理以 sess_、cron_、feishu_、xiaoyi_、dingtalk_ 开头的会话ID
+  const prefixes = ['sess_', 'cron_', 'feishu_', 'xiaoyi_', 'dingtalk_'];
+  const prefixMap: Record<string, string> = {
+    'sess_': t('sessions.prefixes.session'),
+    'cron_': t('sessions.prefixes.cron'),
+    'feishu_': t('sessions.prefixes.feishu'),
+    'xiaoyi_': t('sessions.prefixes.xiaoyi'),
+    'dingtalk_': t('sessions.prefixes.dingtalk')
+  };
+  
+  for (const prefix of prefixes) {
+    if (sessionId.startsWith(prefix)) {
+      const parts = sessionId.split('_');
+      const hexTs = parts[1] ?? '';
+      if (/^[0-9a-fA-F]+$/.test(hexTs)) {
+        const ms = Number.parseInt(hexTs, 16);
+        if (Number.isFinite(ms)) {
+          const date = new Date(ms);
+          if (!Number.isNaN(date.getTime()) && isPlausibleDate(date)) {
+            return `${prefixMap[prefix]}-${formatDateTime(date)}`;
+          }
         }
       }
+      return `${prefixMap[prefix]}-${t('sessions.unknownTime')}`;
     }
-    return '会话-未知时间';
   }
 
   if (sessionId.startsWith('heartbeat_')) {
     const rawBody = sessionId.slice('heartbeat_'.length);
-    return rawBody ? `心跳-${rawBody}` : '心跳';
+    return rawBody ? `${t('sessions.prefixes.heartbeat')}-${rawBody}` : t('sessions.prefixes.heartbeat');
   }
 
-  const prefix = sessionId.includes('_') ? sessionId.split('_')[0] : '未知';
-  return `${prefix}-未知时间`;
+  // 解析会话ID中可能包含的时间戳格式，如 YYYYMMDD_HHMMSS_xxxx
+  const timestampRegex = /(\d{4})(\d{2})(\d{2})_(\d{2})(\d{2})(\d{2})/;
+  const match = sessionId.match(timestampRegex);
+  if (match) {
+    const [, year, month, day, hours, minutes, seconds] = match;
+    const date = new Date(`${year}-${month}-${day} ${hours}:${minutes}:${seconds}`);
+    if (!Number.isNaN(date.getTime()) && isPlausibleDate(date)) {
+      const prefix = sessionId.includes('_') ? sessionId.split('_')[0] : t('sessions.prefixes.unknown');
+      return `${prefix}-${formatDateTime(date)}`;
+    }
+  }
+
+  const prefix = sessionId.includes('_') ? sessionId.split('_')[0] : t('sessions.prefixes.unknown');
+  return `${prefix}-${t('sessions.unknownTime')}`;
 }
 
 function toSessionIds(raw: unknown[]): string[] {
@@ -92,6 +117,7 @@ function toSessionFiles(raw: unknown[]): SessionFileItem[] {
 }
 
 export function SessionsPanel({ currentSessionId }: SessionsPanelProps) {
+  const { t } = useTranslation();
   const [sessions, setSessions] = useState<string[]>([]);
   const [loadingSessions, setLoadingSessions] = useState(true);
   const [sessionsError, setSessionsError] = useState<string | null>(null);
@@ -117,7 +143,7 @@ export function SessionsPanel({ currentSessionId }: SessionsPanelProps) {
     } catch (error) {
       console.error('Failed to load sessions:', error);
       setSessions([]);
-      setSessionsError('会话列表加载失败');
+      setSessionsError(t('sessions.errors.loadSessions'));
       setSelectedSessionId(null);
     } finally {
       setLoadingSessions(false);
@@ -127,7 +153,7 @@ export function SessionsPanel({ currentSessionId }: SessionsPanelProps) {
   useEffect(() => {
     void loadSessions();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [t]);
 
   useEffect(() => {
     if (!selectedSessionId) {
@@ -170,17 +196,17 @@ export function SessionsPanel({ currentSessionId }: SessionsPanelProps) {
       } catch (error) {
         console.error('Failed to load session files:', error);
         setFiles([]);
-        setFilesError('会话文件列表加载失败');
+        setFilesError(t('sessions.errors.loadFiles'));
       } finally {
         setLoadingFiles(false);
       }
     };
     void loadFiles();
-  }, [selectedSessionId]);
+  }, [selectedSessionId, t]);
 
   const handleDeleteSession = async (sessionId: string) => {
-    const displayLabel = parseSessionDisplayLabel(sessionId);
-    const confirmed = window.confirm(`确认删除会话 ${displayLabel} ?\n将删除该会话目录下所有文件。`);
+    const displayLabel = parseSessionDisplayLabel(sessionId, t);
+    const confirmed = window.confirm(t('sessions.deleteConfirm', { session: displayLabel }));
     if (!confirmed) return;
 
     setDeletingSessionId(sessionId);
@@ -192,15 +218,15 @@ export function SessionsPanel({ currentSessionId }: SessionsPanelProps) {
       }
     } catch (error) {
       console.error('Failed to delete session:', error);
-      setSessionsError(`删除会话失败：${sessionId}`);
+      setSessionsError(t('sessions.errors.deleteSession', { sessionId }));
     } finally {
       setDeletingSessionId(null);
     }
   };
 
   const selectedSessionLabel = useMemo(
-    () => (selectedSessionId ? parseSessionDisplayLabel(selectedSessionId) : '未选择会话'),
-    [selectedSessionId]
+    () => (selectedSessionId ? parseSessionDisplayLabel(selectedSessionId, t) : t('sessions.noneSelected')),
+    [selectedSessionId, t]
   );
 
   return (
@@ -208,8 +234,8 @@ export function SessionsPanel({ currentSessionId }: SessionsPanelProps) {
       <div className="card w-full h-full flex flex-col">
         <div className="flex items-center justify-between gap-4 mb-4">
           <div>
-            <h2 className="text-lg font-semibold">会话管理</h2>
-            <p className="text-sm text-text-muted mt-1">浏览并管理会话与文件</p>
+            <h2 className="text-lg font-semibold">{t('sessions.title')}</h2>
+            <p className="text-sm text-text-muted mt-1">{t('sessions.subtitle')}</p>
           </div>
           <button
             type="button"
@@ -217,7 +243,7 @@ export function SessionsPanel({ currentSessionId }: SessionsPanelProps) {
             disabled={loadingSessions}
             className="btn !px-3 !py-1.5 disabled:opacity-50 disabled:cursor-not-allowed"
           >
-            {loadingSessions ? '刷新中...' : '刷新'}
+            {loadingSessions ? t('common.refreshing') : t('common.refresh')}
           </button>
         </div>
 
@@ -231,15 +257,15 @@ export function SessionsPanel({ currentSessionId }: SessionsPanelProps) {
           <div className="rounded-xl border border-border bg-card/70 backdrop-blur-sm overflow-hidden shadow-sm flex flex-col min-h-0">
             <div className="px-4 py-3 bg-secondary/30 border-b border-border">
               <div>
-                <h3 className="text-sm font-medium text-text">历史会话</h3>
+                <h3 className="text-sm font-medium text-text">{t('sessions.history')}</h3>
                 <p className="text-xs text-text-muted mt-1 mono">
-                  最多 20 条，当前 {sessions.length} 条
+                  {t('sessions.count', { count: sessions.length })}
                 </p>
               </div>
             </div>
             <div className="flex-1 overflow-auto p-2 space-y-1">
               {!loadingSessions && sessions.length === 0 ? (
-                <div className="h-full flex items-center justify-center text-sm text-text-muted">暂无会话</div>
+                <div className="h-full flex items-center justify-center text-sm text-text-muted">{t('sessions.empty')}</div>
               ) : (
                 sessions.map((sessionId) => (
                   <div key={sessionId} className="group grid grid-cols-[minmax(0,1fr)_auto] items-center gap-2">
@@ -251,13 +277,13 @@ export function SessionsPanel({ currentSessionId }: SessionsPanelProps) {
                           : 'border-transparent hover:bg-secondary/40 text-text-muted hover:text-text'
                       }`}
                       onClick={() => setSelectedSessionId(sessionId)}
-                      title={`${parseSessionDisplayLabel(sessionId)} (${sessionId})`}
+                      title={`${parseSessionDisplayLabel(sessionId, t)} (${sessionId})`}
                     >
-                      <span className="truncate block">{parseSessionDisplayLabel(sessionId)}</span>
+                      <span className="truncate block">{parseSessionDisplayLabel(sessionId, t)}</span>
                     </button>
                     <button
                       type="button"
-                      title="删除会话"
+                      title={t('sessions.delete')}
                       className="shrink-0 p-1.5 rounded-md text-text-muted hover:text-danger hover:bg-danger-subtle transition-colors disabled:opacity-50"
                       disabled={deletingSessionId === sessionId}
                       onClick={() => void handleDeleteSession(sessionId)}
@@ -276,7 +302,7 @@ export function SessionsPanel({ currentSessionId }: SessionsPanelProps) {
             <div className="border-r border-border flex flex-col min-h-0">
               <div className="px-4 py-3 bg-secondary/30 border-b border-border">
                 <div>
-                  <h3 className="text-sm font-medium text-text">会话文件</h3>
+                  <h3 className="text-sm font-medium text-text">{t('sessions.files')}</h3>
                   <p className="text-xs text-text-muted mt-1 truncate" title={selectedSessionLabel}>
                     {selectedSessionLabel}
                   </p>
@@ -284,13 +310,13 @@ export function SessionsPanel({ currentSessionId }: SessionsPanelProps) {
               </div>
               <div className="flex-1 overflow-auto p-2">
                 {!selectedSessionId ? (
-                  <div className="h-full flex items-center justify-center text-sm text-text-muted">请先选择会话</div>
+                  <div className="h-full flex items-center justify-center text-sm text-text-muted">{t('sessions.selectFirst')}</div>
                 ) : loadingFiles ? (
-                  <div className="h-full flex items-center justify-center text-sm text-text-muted">加载文件中...</div>
+                  <div className="h-full flex items-center justify-center text-sm text-text-muted">{t('sessions.loadingFiles')}</div>
                 ) : filesError ? (
                   <div className="rounded-md border border-danger/30 bg-danger/10 px-3 py-2 text-xs text-danger">{filesError}</div>
                 ) : files.length === 0 ? (
-                  <div className="h-full flex items-center justify-center text-sm text-text-muted">暂无文件</div>
+                  <div className="h-full flex items-center justify-center text-sm text-text-muted">{t('sessions.emptyFiles')}</div>
                 ) : (
                   <div className="space-y-1">
                     {files.map((file) => {
@@ -318,11 +344,11 @@ export function SessionsPanel({ currentSessionId }: SessionsPanelProps) {
                             </span>
                             {file.isDirectory ? (
                               <span className="text-[10px] px-1.5 py-0.5 rounded border border-border bg-secondary/50 text-text-muted">
-                                文件夹
+                                {t('sessions.folder')}
                               </span>
                             ) : !file.isMarkdown ? (
                               <span className="text-[10px] px-1.5 py-0.5 rounded border border-border bg-secondary/50 text-text-muted">
-                                不可预览
+                                {t('sessions.notPreviewable')}
                               </span>
                             ) : null}
                           </span>
@@ -338,7 +364,7 @@ export function SessionsPanel({ currentSessionId }: SessionsPanelProps) {
                 <FileViewer filePath={selectedFile.path} fileName={selectedFile.name} />
               ) : (
                 <div className="h-full flex items-center justify-center text-text-muted">
-                  请选择一个文件查看
+                  {t('sessions.selectFile')}
                 </div>
               )}
             </div>

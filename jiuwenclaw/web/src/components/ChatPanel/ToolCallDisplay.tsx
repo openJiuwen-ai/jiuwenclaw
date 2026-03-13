@@ -5,6 +5,7 @@
  */
 
 import { useState } from 'react';
+import { useTranslation } from 'react-i18next';
 import { ToolCall, ToolResult } from '../../types';
 import { formatToolArguments, formatToolResult } from '../../utils';
 import clsx from 'clsx';
@@ -15,6 +16,7 @@ interface ToolCallDisplayProps {
 }
 
 export function ToolCallDisplay({ toolCall, toolResult }: ToolCallDisplayProps) {
+  const { t } = useTranslation();
   const [isExpanded, setIsExpanded] = useState(false);
 
   if (toolCall) {
@@ -64,7 +66,7 @@ export function ToolCallDisplay({ toolCall, toolResult }: ToolCallDisplayProps) 
     // 使用格式化的摘要或默认显示
     const displaySummary = toolResult.summary
       ? toolResult.summary
-      : `${toolResult.toolName} ${toolResult.success ? '完成' : '失败'}`;
+      : `${toolResult.toolName} ${toolResult.success ? t('chatUi.toolResult.success') : t('chatUi.toolResult.failed')}`;
 
     return (
       <div className="chat-tool-card animate-rise">

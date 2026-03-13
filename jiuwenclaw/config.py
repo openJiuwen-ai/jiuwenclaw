@@ -9,8 +9,11 @@ from typing import Any
 import yaml
 from ruamel.yaml import YAML
 
-# Get config directory - check for user workspace or use default
+from jiuwenclaw.utils import get_config_file
+
+
 _CONFIG_MODULE_DIR = Path(__file__).parent
+_CONFIG_YAML_PATH = get_config_file()
 
 # Check if user workspace exists and use it if configured via env
 _user_config = os.getenv("JIUWENCLAW_CONFIG_DIR")
@@ -52,7 +55,7 @@ def resolve_env_vars(value: Any) -> Any:
 
 
 def get_config():
-    with open(_CONFIG_MODULE_DIR / "config.yaml", "r", encoding="utf-8") as f:
+    with open(get_config_file(), "r", encoding="utf-8") as f:
         config_base = yaml.safe_load(f)
     config_base = resolve_env_vars(config_base)
 
@@ -61,12 +64,12 @@ def get_config():
 
 def get_config_raw():
     """读 config.yaml 原始内容（不解析环境变量），供局部更新后写回。"""
-    with open(_CONFIG_MODULE_DIR / "config.yaml", "r", encoding="utf-8") as f:
+    with open(_CONFIG_YAML_PATH, "r", encoding="utf-8") as f:
         return yaml.safe_load(f) or {}
 
 
 def set_config(config):
-    with open(_CONFIG_MODULE_DIR / "config.yaml", "w", encoding="utf-8") as f:
+    with open(_CONFIG_YAML_PATH, "w", encoding="utf-8") as f:
         yaml.safe_dump(config, f, allow_unicode=True, sort_keys=False)
 
 
@@ -92,8 +95,7 @@ def _dump_yaml_round_trip(config_path: Path, data: Any) -> None:
 
 def update_heartbeat_in_config(payload: dict[str, Any]) -> None:
     """只更新 heartbeat 段并写回。"""
-    config_path = _CONFIG_MODULE_DIR / "config.yaml"
-    data = _load_yaml_round_trip(config_path)
+    data = _load_yaml_round_trip(_CONFIG_YAML_PATH)
     if "heartbeat" not in data:
         data["heartbeat"] = {}
     hb = data["heartbeat"]
@@ -103,13 +105,12 @@ def update_heartbeat_in_config(payload: dict[str, Any]) -> None:
         hb["target"] = payload["target"]
     if "active_hours" in payload:
         hb["active_hours"] = payload["active_hours"]
-    _dump_yaml_round_trip(config_path, data)
+    _dump_yaml_round_trip(_CONFIG_YAML_PATH, data)
 
 
 def update_channel_in_config(channel_id: str, conf: dict[str, Any]) -> None:
     """只更新 channels[channel_id] 并写回。"""
-    config_path = _CONFIG_MODULE_DIR / "config.yaml"
-    data = _load_yaml_round_trip(config_path)
+    data = _load_yaml_round_trip(_CONFIG_YAML_PATH)
     if "channels" not in data:
         data["channels"] = {}
     channels = data["channels"]
@@ -118,16 +119,15 @@ def update_channel_in_config(channel_id: str, conf: dict[str, Any]) -> None:
     section = channels[channel_id]
     for k, v in conf.items():
         section[k] = v
-    _dump_yaml_round_trip(config_path, data)
+    _dump_yaml_round_trip(_CONFIG_YAML_PATH, data)
 
 
 def update_browser_in_config(updates: dict[str, Any]) -> None:
     """只更新 browser 段（如 chrome_path）并写回。"""
-    config_path = _CONFIG_MODULE_DIR / "config.yaml"
-    data = _load_yaml_round_trip(config_path)
+    data = _load_yaml_round_trip(_CONFIG_YAML_PATH)
     if "browser" not in data:
         data["browser"] = {}
     section = data["browser"]
     for k, v in updates.items():
         section[k] = v
-    _dump_yaml_round_trip(config_path, data)
+    _dump_yaml_round_trip(_CONFIG_YAML_PATH, data)

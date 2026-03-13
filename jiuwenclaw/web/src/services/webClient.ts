@@ -9,6 +9,7 @@ import {
   WsResponse,
 } from '../types';
 import { getWsBase } from '../utils/env';
+import i18n from '../i18n';
 
 type EventHandler = (event: WsEvent) => void;
 type StateHandler = (state: WebConnectionState) => void;
@@ -151,7 +152,7 @@ class WebClient {
           data: { event: 'error' },
         });
         const error = this.createWebError(
-          'WebSocket 连接异常',
+          i18n.t('network.wsError'),
           'WS_ERROR',
           undefined,
           true
@@ -176,7 +177,7 @@ class WebClient {
         this.connectPromise = null;
         this.rejectAllPending(
           this.createWebError(
-            `连接已关闭 (${closeEvent.code})`,
+            i18n.t('network.connectionClosedWithCode', { code: closeEvent.code }),
             'WS_DISCONNECTED',
             undefined,
             true
@@ -197,7 +198,7 @@ class WebClient {
     this.manualClose = true;
     this.clearReconnectTimer();
     this.rejectAllPending(
-      this.createWebError('连接已关闭', 'WS_CLOSED', undefined, false)
+      this.createWebError(i18n.t('network.connectionClosed'), 'WS_CLOSED', undefined, false)
     );
     const currentWs = this.ws;
     let closedPromise = Promise.resolve();
@@ -239,7 +240,7 @@ class WebClient {
     await this.ensureReady();
 
     if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
-      throw this.createWebError('连接不可用', 'WS_NOT_READY', undefined, true);
+      throw this.createWebError(i18n.t('network.connectionUnavailable'), 'WS_NOT_READY', undefined, true);
     }
 
     const id = this.generateRequestId();
@@ -254,7 +255,7 @@ class WebClient {
     return new Promise<T>((resolve, reject) => {
       const timeoutId = window.setTimeout(() => {
         this.pending.delete(id);
-        reject(this.createWebError('请求超时', 'REQUEST_TIMEOUT', id, true));
+        reject(this.createWebError(i18n.t('network.requestTimeout'), 'REQUEST_TIMEOUT', id, true));
       }, timeoutMs);
 
       const pending: PendingRequest = {
@@ -271,7 +272,7 @@ class WebClient {
           }
           window.clearTimeout(timeoutId);
           this.pending.delete(id);
-          reject(this.createWebError('请求已取消', 'REQUEST_ABORTED', id, false));
+          reject(this.createWebError(i18n.t('network.requestAborted'), 'REQUEST_ABORTED', id, false));
         };
         if (options.signal.aborted) {
           onAbort();
@@ -402,7 +403,7 @@ class WebClient {
 
     pending.reject(
       this.createWebError(
-        message.error ?? '请求失败',
+        message.error ?? i18n.t('network.requestFailed'),
         message.code,
         message.id,
         this.isRetriableCode(message.code)
@@ -422,13 +423,15 @@ class WebClient {
 
   private scheduleReconnect(): void {
     this.clearReconnectTimer();
-    if (this.reconnectAttempts >= MAX_RECONNECT_ATTEMPTS) {
-      this.updateState('closed');
-      return;
-    }
     this.reconnectAttempts += 1;
     this.updateState('reconnecting');
-    const delay = Math.min(1000 * 2 ** (this.reconnectAttempts - 1), 30000);
+
+    // 前 N 次使用指数退避，超过后改为固定间隔持续重试，后端恢复后能自动检测并恢复连接
+    const delay =
+      this.reconnectAttempts <= MAX_RECONNECT_ATTEMPTS
+        ? Math.min(1000 * 2 ** (this.reconnectAttempts - 1), 30000)
+        : 2000; // 每 2 秒持续尝试
+
     this.reconnectTimer = window.setTimeout(() => {
       void this.connect(this.lastConnectOptions);
     }, delay);

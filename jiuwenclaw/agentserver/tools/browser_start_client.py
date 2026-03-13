@@ -27,6 +27,7 @@ import os
 import platform
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -164,19 +165,15 @@ def start_browser(*, dry_run: bool = False, config_file: str = "") -> int:
     if not chrome_cfg:
         chrome_cfg = os.getenv("CHROME_PATH", "").strip()
 
-    candidates = [chrome_cfg] if chrome_cfg else []
-    candidates.extend(_default_chrome_candidates(os_name))
-
-    chrome_exec = ""
-    for candidate in candidates:
-        chrome_exec = _normalize_chrome_executable(candidate, os_name)
-        if chrome_exec:
-            break
-
+    if not chrome_cfg:
+        raise FileNotFoundError(
+            "Chrome path is required. Please set browser.chrome_path in config/config.yaml "
+            "or CHROME_PATH env."
+        )
+    chrome_exec = _normalize_chrome_executable(chrome_cfg, os_name)
     if not chrome_exec:
         raise FileNotFoundError(
-            "Cannot locate Chrome executable. Set browser.chrome_path in config/config.yaml "
-            "or CHROME_PATH env."
+            f"Chrome executable not found for configured path: {chrome_cfg}"
         )
 
     host = str(browser_cfg.get("remote_debugging_address") or "127.0.0.1").strip()
@@ -232,7 +229,7 @@ def main() -> int:
     try:
         return start_browser(dry_run=args.dry_run, config_file=args.config)
     except Exception as exc:
-        print(f"Failed to start Chrome: {exc}")
+        print(f"Failed to start Chrome: {exc}", file=sys.stderr)
         return 1
 
 

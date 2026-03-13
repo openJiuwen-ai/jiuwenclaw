@@ -4,7 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "jiuwenclaw"
-version = "0.1.1"
+optional-dependencies = { dev = ["pyinstaller>=6.0.0"] }
+version = "0.1.5"
 description = "JiuwenClaw"
 requires-python = ">=3.11,<3.14"
 dependencies = [
@@ -17,6 +18,11 @@ dependencies = [
     "pgvector>=0.4.2",
     "websockets>=12.0",
     "psutil>=7.2.2",
+    "aiosqlite>=0.22.1",
+    "croniter>=2.0.0",
+    "dingtalk-stream>=0.24.3",
+    "python-socks>=2.8.1",
+    "greenlet>=3.3.2",
 ]
 
 [project.scripts]

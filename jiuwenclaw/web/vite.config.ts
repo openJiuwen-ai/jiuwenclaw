@@ -11,10 +11,28 @@ interface ErrorWithCode {
   code?: string
 }
 
+/**
+ * file-api 使用的项目根目录，需与后端 get_root_dir() 一致，前端编辑的 HEARTBEAT.md 才会被心跳读到。
+ * 优先级：环境变量 > 已存在的用户工作区 ~/.jiuwenclaw > 仓库根。
+ */
 function resolveProjectRootDir(): string {
-  // Keep project root deterministic in source mode.
-  // <repo>/jiuwenclaw/web -> <repo>
-  return path.resolve(__dirname, '../..')
+  const envRoot = process.env.JIUWENCLAW_ROOT || process.env.JIUWENCLAW_PROJECT_ROOT
+  if (envRoot) {
+    const resolved = path.resolve(envRoot)
+    console.log('[file-api] 使用环境变量根目录:', resolved)
+    return resolved
+  }
+  const home = process.env.USERPROFILE || process.env.HOME || ''
+  if (home) {
+    const userWorkspace = path.join(home, '.jiuwenclaw')
+    if (fs.existsSync(userWorkspace)) {
+      console.log('[file-api] 使用用户工作区:', path.resolve(userWorkspace))
+      return path.resolve(userWorkspace)
+    }
+  }
+  const repoRoot = path.resolve(__dirname, '../..')
+  console.log('[file-api] 使用仓库根目录:', repoRoot)
+  return repoRoot
 }
 
 /** WS proxy 中常见的、可安全忽略的 socket 错误码（跨平台） */

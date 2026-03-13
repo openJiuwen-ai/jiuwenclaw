@@ -8,16 +8,14 @@ Embedding API settings are in the 'embed' section.
 
 import os
 import re
-import logging
 from typing import Any, Optional, Dict, List
 from dataclasses import dataclass, field
 from pathlib import Path
 
 import yaml
 
-from jiuwenclaw.paths import get_config_file, get_agent_workspace_dir
+from jiuwenclaw.utils import get_config_file, get_agent_workspace_dir, logger
 
-logger = logging.getLogger(__name__)
 
 DEFAULT_CONFIG_PATH = str(get_config_file())
 DEFAULT_WORKSPACE_DIR = str(get_agent_workspace_dir())

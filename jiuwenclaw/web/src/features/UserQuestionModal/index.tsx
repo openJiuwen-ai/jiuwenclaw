@@ -5,6 +5,7 @@
  */
 
 import { useState, useCallback } from 'react';
+import { useTranslation } from 'react-i18next';
 import { useChatStore } from '../../stores';
 import { Question, UserAnswer } from '../../types';
 
@@ -13,6 +14,7 @@ interface UserQuestionModalProps {
 }
 
 export function UserQuestionModal({ onSubmit }: UserQuestionModalProps) {
+  const { t } = useTranslation();
   const { pendingQuestion, setPendingQuestion } = useChatStore();
   const [answers, setAnswers] = useState<Map<number, UserAnswer>>(new Map());
 
@@ -147,13 +149,13 @@ export function UserQuestionModal({ onSubmit }: UserQuestionModalProps) {
               className="text-lg font-semibold"
               style={{ color: 'var(--text-strong)' }}
             >
-              需要您的确认
+              {t('userQuestion.title')}
             </h2>
             <p
               className="text-sm"
               style={{ color: 'var(--muted)' }}
             >
-              请回答以下问题以继续任务
+              {t('userQuestion.subtitle')}
             </p>
           </div>
         </div>
@@ -202,7 +204,7 @@ export function UserQuestionModal({ onSubmit }: UserQuestionModalProps) {
               e.currentTarget.style.color = 'var(--muted)';
             }}
           >
-            取消
+            {t('common.cancel')}
           </button>
           <button
             onClick={handleSubmit}
@@ -211,7 +213,7 @@ export function UserQuestionModal({ onSubmit }: UserQuestionModalProps) {
               background: 'linear-gradient(135deg, var(--accent), var(--accent-2))',
             }}
           >
-            确认提交
+            {t('userQuestion.submit')}
           </button>
         </div>
       </div>
@@ -238,6 +240,7 @@ function QuestionItem({
   onOptionSelect,
   onCustomInput,
 }: QuestionItemProps) {
+  const { t } = useTranslation();
   const [showCustomInput, setShowCustomInput] = useState(false);
 
   const selectedOptions = answer?.selected_options || [];
@@ -266,7 +269,7 @@ function QuestionItem({
             className="text-xs mt-1"
             style={{ color: 'var(--muted)' }}
           >
-            （可多选）
+            {t('userQuestion.multiSelect')}
           </p>
         )}
       </div>
@@ -374,7 +377,7 @@ function QuestionItem({
                 </svg>
               )}
             </div>
-            <div className="font-medium">其他（自定义输入）</div>
+            <div className="font-medium">{t('userQuestion.customOption')}</div>
           </div>
         </button>
 
@@ -384,7 +387,7 @@ function QuestionItem({
             <textarea
               value={answer?.custom_input || ''}
               onChange={(e) => onCustomInput(questionIndex, e.target.value)}
-              placeholder="请输入您的回答..."
+              placeholder={t('userQuestion.customPlaceholder')}
               className="w-full px-3 py-2 text-sm rounded-lg resize-none focus:outline-none"
               style={{
                 backgroundColor: 'var(--bg-elevated)',

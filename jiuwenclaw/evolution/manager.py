@@ -4,7 +4,6 @@
 from __future__ import annotations
 
 import json
-import logging
 import re
 from datetime import datetime, timezone
 from pathlib import Path
@@ -18,8 +17,7 @@ from jiuwenclaw.evolution.schema import (
     VALID_SECTIONS,
 )
 from jiuwenclaw.evolution.signal_detector import SignalDetector
-
-logger = logging.getLogger(__name__)
+from jiuwenclaw.utils import logger
 
 _EVOLUTION_FILENAME = "evolutions.json"
 
@@ -46,11 +44,15 @@ _GENERATE_PROMPT = """你是一个 Skill 优化专家。
 7. 分点格式：只使用无序列表（- 或 *），禁止层级（不能有子分点）
 8. 精炼语言：内容简洁，避免冗余描述
 9. 高质量增量：生成的演进内容必须是 Skill 中未提及的新知识，能指导后续使用并提升 Agent 执行效率。
+10. 相关性判断（强制）：判断当前发现的问题是否与 Skill 本身相关
+    - 相关：问题由 Skill 的指令、脚本、示例或排查逻辑导致
+    - 不相关：问题由外部因素导致（如网络、环境、权限、第三方服务等）
 
 只输出以下 JSON，不要其他内容：
 {{
   "section": "Instructions | Examples | Troubleshooting",
   "action": "append",
+  "relevant": true | false,
   "content": "Markdown 内容，1 个标题 + 2-3 个分点，无层级（只生成 1 条记录，禁止重复内容）"
 }}"""
 
@@ -193,7 +195,7 @@ class SkillEvolutionManager:
             return None
 
         change = self._parse_llm_response(raw)
-        if change is None or not change.content.strip():
+        if change is None or not change.content.strip() or not change.relevant:
             logger.info("[EvolutionManager] generate: LLM thinks no changes needed")
             return None
 
@@ -393,8 +395,10 @@ class SkillEvolutionManager:
         if section not in VALID_SECTIONS:
             section = "Troubleshooting"
 
+        relevant = data.get("relevant", True)
         return EvolutionChange(
             section=section,
             action=data.get("action", "append"),
             content=data.get("content", ""),
+            relevant=relevant,
         )

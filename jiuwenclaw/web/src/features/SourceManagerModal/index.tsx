@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { useTranslation } from "react-i18next";
 import { webRequest } from "../../services/webClient";
 
 type MarketplaceItem = {
@@ -24,6 +25,7 @@ export function SourceManagerModal({
   onClose,
   onUpdated,
 }: SourceManagerModalProps) {
+  const { t, i18n } = useTranslation();
   const [marketplaces, setMarketplaces] = useState<MarketplaceItem[]>([]);
   const [listState, setListState] = useState<LoadState>("idle");
   const [message, setMessage] = useState<string | null>(null);
@@ -54,7 +56,7 @@ export function SourceManagerModal({
       setMarketplaces(data.marketplaces || []);
       setListState("success");
     } catch (error) {
-      console.error("获取源列表失败:", error);
+      console.error("Failed to load sources:", error);
       setListState("error");
     }
   }, [withSession]);
@@ -89,7 +91,7 @@ export function SourceManagerModal({
     const name = nameInput.trim();
     const url = urlInput.trim();
     if (!name || !url) {
-      setMessage("请先填写源名称和仓库 URL");
+      setMessage(t("sourceManager.messages.fillRequired"));
       return;
     }
 
@@ -101,23 +103,23 @@ export function SourceManagerModal({
         withSession({ name, url })
       );
       if (!data.success) {
-        throw new Error(data.detail || data.message || "添加源失败");
+        throw new Error(data.detail || data.message || t("sourceManager.messages.addFailed"));
       }
       setNameInput("");
       setUrlInput("");
-      setMessage(`已添加源：${name}（默认禁用）`);
+      setMessage(t("sourceManager.messages.added", { name }));
       await runAfterUpdate();
     } catch (error) {
       console.error(error);
-      setMessage("添加源失败，请检查名称或 URL");
+      setMessage(t("sourceManager.messages.addFailedCheck"));
     } finally {
       setActionTarget(null);
     }
-  }, [nameInput, runAfterUpdate, urlInput, withSession]);
+  }, [nameInput, runAfterUpdate, t, urlInput, withSession]);
 
   const handleRemoveSource = useCallback(
     async (name: string) => {
-      const confirmed = window.confirm(`确认删除源 ${name} ?`);
+      const confirmed = window.confirm(t("sourceManager.messages.confirmDelete", { name }));
       if (!confirmed) return;
 
       setActionTarget(`remove:${name}`);
@@ -128,18 +130,18 @@ export function SourceManagerModal({
           withSession({ name, remove_cache: true })
         );
         if (!data.success) {
-          throw new Error(data.detail || data.message || "删除源失败");
+          throw new Error(data.detail || data.message || t("sourceManager.messages.removeFailed"));
         }
-        setMessage(`已删除源：${name}`);
+        setMessage(t("sourceManager.messages.removed", { name }));
         await runAfterUpdate();
       } catch (error) {
         console.error(error);
-        setMessage("删除源失败，请稍后重试");
+        setMessage(t("sourceManager.messages.removeFailedRetry"));
       } finally {
         setActionTarget(null);
       }
     },
-    [runAfterUpdate, withSession]
+    [runAfterUpdate, t, withSession]
   );
 
   const handleToggleSource = useCallback(
@@ -153,18 +155,26 @@ export function SourceManagerModal({
           withSession({ name: source.name, enabled: targetEnabled })
         );
         if (!data.success) {
-          throw new Error(data.detail || data.message || "切换源状态失败");
+          throw new Error(data.detail || data.message || t("sourceManager.messages.toggleFailed"));
         }
-        setMessage(targetEnabled ? `已启用源：${source.name}` : `已禁用源：${source.name}`);
+        setMessage(
+          targetEnabled
+            ? t("sourceManager.messages.enabled", { name: source.name })
+            : t("sourceManager.messages.disabled", { name: source.name })
+        );
         await runAfterUpdate();
       } catch (error) {
         console.error(error);
-        setMessage(targetEnabled ? "启用源失败，请检查网络或仓库地址" : "禁用源失败，请稍后重试");
+        setMessage(
+          targetEnabled
+            ? t("sourceManager.messages.enableFailed")
+            : t("sourceManager.messages.disableFailed")
+        );
       } finally {
         setActionTarget(null);
       }
     },
-    [runAfterUpdate, withSession]
+    [runAfterUpdate, t, withSession]
   );
 
   if (!open) {
@@ -177,13 +187,13 @@ export function SourceManagerModal({
         type="button"
         className="absolute inset-0 bg-black/60"
         onClick={onClose}
-        aria-label="关闭源管理弹窗"
+        aria-label={t("sourceManager.closeAria")}
       />
       <div className="relative w-full max-w-4xl max-h-[88vh] overflow-hidden rounded-xl border border-border bg-card shadow-2xl animate-rise">
         <div className="flex items-center justify-between gap-3 px-5 py-3 border-b border-border bg-panel">
           <div>
-            <h3 className="text-base font-semibold text-text">源管理</h3>
-            <p className="text-xs text-text-muted">添加、删除或启用/禁用技能源</p>
+            <h3 className="text-base font-semibold text-text">{t("sourceManager.title")}</h3>
+            <p className="text-xs text-text-muted">{t("sourceManager.subtitle")}</p>
           </div>
           <div className="flex items-center gap-2">
             <button
@@ -191,32 +201,32 @@ export function SourceManagerModal({
               onClick={() => void fetchMarketplaces()}
               className="px-3 py-1.5 rounded-md text-sm bg-secondary text-text-muted hover:text-text hover:bg-card border border-border"
             >
-              刷新
+              {t("common.refresh")}
             </button>
             <button
               type="button"
               onClick={onClose}
               className="px-3 py-1.5 rounded-md text-sm bg-secondary text-text-muted hover:text-text hover:bg-card border border-border"
             >
-              关闭
+              {t("common.close")}
             </button>
           </div>
         </div>
 
         <div className="p-5 overflow-auto max-h-[calc(88vh-64px)]">
           <div className="rounded-lg border border-border bg-panel p-4">
-            <div className="text-sm font-medium text-text mb-3">添加源</div>
+            <div className="text-sm font-medium text-text mb-3">{t("sourceManager.addTitle")}</div>
             <div className="grid grid-cols-1 md:grid-cols-[180px_1fr_auto] gap-2">
               <input
                 value={nameInput}
                 onChange={(event) => setNameInput(event.target.value)}
-                placeholder="源名称"
+                placeholder={t("sourceManager.placeholders.name")}
                 className="px-3 py-2 rounded-md bg-card border border-border text-sm text-text placeholder:text-text-muted"
               />
               <input
                 value={urlInput}
                 onChange={(event) => setUrlInput(event.target.value)}
-                placeholder="Git 仓库地址（https://...）"
+                placeholder={t("sourceManager.placeholders.url")}
                 className="px-3 py-2 rounded-md bg-card border border-border text-sm text-text placeholder:text-text-muted"
               />
               <button
@@ -229,7 +239,7 @@ export function SourceManagerModal({
                 }`}
                 disabled={actionTarget === "add"}
               >
-                添加
+                {t("sourceManager.add")}
               </button>
             </div>
           </div>
@@ -242,16 +252,16 @@ export function SourceManagerModal({
 
           <div className="mt-4 rounded-lg border border-border bg-panel p-4">
             <div className="text-sm font-medium text-text mb-2">
-              已配置源（{sortedMarketplaces.length} 个）
+              {t("sourceManager.configuredCount", { count: sortedMarketplaces.length })}
             </div>
             {listState === "loading" && (
-              <div className="text-sm text-text-muted">加载中...</div>
+              <div className="text-sm text-text-muted">{t("common.loading")}</div>
             )}
             {listState === "error" && (
-              <div className="text-sm text-text-muted">源列表加载失败，请重试</div>
+              <div className="text-sm text-text-muted">{t("sourceManager.messages.loadFailed")}</div>
             )}
             {listState === "success" && sortedMarketplaces.length === 0 && (
-              <div className="text-sm text-text-muted">暂无已配置源</div>
+              <div className="text-sm text-text-muted">{t("sourceManager.empty")}</div>
             )}
             {listState === "success" && sortedMarketplaces.length > 0 && (
               <div className="space-y-2">
@@ -269,7 +279,9 @@ export function SourceManagerModal({
                         <div className="text-xs text-text-muted break-all">{source.url}</div>
                         {source.last_updated && (
                           <div className="text-xs text-text-muted mt-1">
-                            更新于 {new Date(source.last_updated).toLocaleString()}
+                            {t("sourceManager.updatedAt", {
+                              time: new Date(source.last_updated).toLocaleString(i18n.language),
+                            })}
                           </div>
                         )}
                       </div>
@@ -281,7 +293,7 @@ export function SourceManagerModal({
                               : "bg-secondary text-text-muted border-border"
                           }`}
                         >
-                          {enabled ? "已启用" : "已禁用"}
+                          {enabled ? t("sourceManager.status.enabled") : t("sourceManager.status.disabled")}
                         </span>
                         <button
                           type="button"
@@ -295,7 +307,7 @@ export function SourceManagerModal({
                           }`}
                           disabled={toggleLoading || removeLoading}
                         >
-                          {enabled ? "禁用" : "启用"}
+                          {enabled ? t("sourceManager.actions.disable") : t("sourceManager.actions.enable")}
                         </button>
                         <button
                           type="button"
@@ -307,7 +319,7 @@ export function SourceManagerModal({
                           }`}
                           disabled={toggleLoading || removeLoading}
                         >
-                          删除
+                          {t("sourceManager.actions.delete")}
                         </button>
                       </div>
                     </div>

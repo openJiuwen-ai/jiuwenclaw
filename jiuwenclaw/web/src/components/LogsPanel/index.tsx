@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useTranslation } from 'react-i18next';
 
 interface LogsPanelProps {
   isConnected: boolean;
@@ -52,6 +53,7 @@ function isDebugLogEntry(entry: unknown): boolean {
 }
 
 export function LogsPanel({ isConnected: _isConnected }: LogsPanelProps) {
+  const { t } = useTranslation();
   const [entries, setEntries] = useState<unknown[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -67,34 +69,34 @@ export function LogsPanel({ isConnected: _isConnected }: LogsPanelProps) {
       const response = await fetch(`/file-api/file-content?path=${filePath}`);
       if (!response.ok) {
         const detail = await response.text();
-        throw new Error(`读取日志失败（HTTP ${response.status}）${detail ? `: ${detail.slice(0, 120)}` : ''}`);
+        throw new Error(`${t('logsPanel.errors.readLogs')} (HTTP ${response.status})${detail ? `: ${detail.slice(0, 120)}` : ''}`);
       }
 
       const raw = await response.text();
       setEntries(parseJsonlTail(raw, 300));
       setError(null);
     } catch (err) {
-      setError(err instanceof Error ? err.message : '读取日志失败');
+      setError(err instanceof Error ? err.message : t('logsPanel.errors.readLogs'));
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [t]);
 
   const fetchWsDebugConfig = useCallback(async () => {
     setWsConfigLoading(true);
     try {
       const response = await fetch('/file-api/ws-debug-config');
       if (!response.ok) {
-        throw new Error(`读取 WS 调试配置失败（HTTP ${response.status}）`);
+        throw new Error(`${t('logsPanel.errors.readDebugConfig')} (HTTP ${response.status})`);
       }
       const payload = (await response.json()) as { wsDisableCompress?: boolean };
       setWsDisableCompress(Boolean(payload.wsDisableCompress));
     } catch (err) {
-      setError(err instanceof Error ? err.message : '读取 WS 调试配置失败');
+      setError(err instanceof Error ? err.message : t('logsPanel.errors.readDebugConfig'));
     } finally {
       setWsConfigLoading(false);
     }
-  }, []);
+  }, [t]);
 
   const toggleWsDisableCompress = useCallback(async () => {
     const nextValue = !wsDisableCompress;
@@ -111,18 +113,18 @@ export function LogsPanel({ isConnected: _isConnected }: LogsPanelProps) {
       });
       if (!response.ok) {
         const detail = await response.text();
-        throw new Error(`更新 WS 调试配置失败（HTTP ${response.status}）${detail ? `: ${detail.slice(0, 120)}` : ''}`);
+        throw new Error(`${t('logsPanel.errors.updateDebugConfig')} (HTTP ${response.status})${detail ? `: ${detail.slice(0, 120)}` : ''}`);
       }
       const payload = (await response.json()) as { wsDisableCompress?: boolean };
       setWsDisableCompress(Boolean(payload.wsDisableCompress));
       setError(null);
       window.dispatchEvent(new CustomEvent(WS_RECONNECT_EVENT));
     } catch (err) {
-      setError(err instanceof Error ? err.message : '更新 WS 调试配置失败');
+      setError(err instanceof Error ? err.message : t('logsPanel.errors.updateDebugConfig'));
     } finally {
       setWsConfigLoading(false);
     }
-  }, [wsDisableCompress]);
+  }, [t, wsDisableCompress]);
 
   useEffect(() => {
     void fetchLogs();
@@ -161,9 +163,9 @@ export function LogsPanel({ isConnected: _isConnected }: LogsPanelProps) {
       <div className="card w-full h-full flex flex-col">
         <div className="flex items-center justify-between gap-4 mb-4">
           <div>
-            <h2 className="text-lg font-semibold">日志</h2>
+            <h2 className="text-lg font-semibold">{t('logsPanel.title')}</h2>
             <p className="text-sm text-text-muted mt-1">
-              数据源：<span className="mono text-xs">logs/ws-dev.log</span>
+              {t('logsPanel.dataSource')}: <span className="mono text-xs">logs/ws-dev.log</span>
             </p>
           </div>
           <div className="flex items-center gap-2">
@@ -173,19 +175,19 @@ export function LogsPanel({ isConnected: _isConnected }: LogsPanelProps) {
               disabled={wsConfigLoading}
             >
               {wsConfigLoading
-                ? '调试模式设置中...'
+                ? t('logsPanel.debugSetting')
                 : wsDisableCompress
-                  ? '调试模式开'
-                  : '调试模式关'}
+                  ? t('logsPanel.debugOn')
+                  : t('logsPanel.debugOff')}
             </button>
             <button
               onClick={() => setAutoRefresh((prev) => !prev)}
               className={`btn ${autoRefresh ? 'primary' : ''} !px-3 !py-1.5`}
             >
-              {autoRefresh ? '自动刷新开' : '自动刷新关'}
+              {autoRefresh ? t('logsPanel.autoRefreshOn') : t('logsPanel.autoRefreshOff')}
             </button>
             <button onClick={() => void fetchLogs()} className="btn !px-3 !py-1.5">
-              刷新
+              {t('common.refresh')}
             </button>
           </div>
         </div>
@@ -195,17 +197,17 @@ export function LogsPanel({ isConnected: _isConnected }: LogsPanelProps) {
         ) : (
           <div className="border border-border rounded-lg bg-secondary/30 flex-1 min-h-0 flex flex-col">
             <div className="px-3 py-2 text-xs text-text-muted border-b border-border flex items-center justify-between">
-              <span>最近日志（最多 300 条）</span>
+              <span>{t('logsPanel.recentLogs')}</span>
               <span>
                 {loading
-                  ? '加载中...'
+                  ? t('common.loading')
                   : wsDisableCompress
-                    ? `${visibleEntries.length} 条`
-                    : `${visibleEntries.length} 条（总 ${entries.length} 条）`}
+                    ? t('logsPanel.countVisible', { count: visibleEntries.length })
+                    : t('logsPanel.countVisibleTotal', { visible: visibleEntries.length, total: entries.length })}
               </span>
             </div>
             <pre ref={preRef} className="m-0 p-3 text-xs mono overflow-auto flex-1 min-h-0 whitespace-pre-wrap break-all">
-              {content || '暂无日志'}
+              {content || t('logsPanel.empty')}
             </pre>
           </div>
         )}
@@ -213,4 +215,3 @@ export function LogsPanel({ isConnected: _isConnected }: LogsPanelProps) {
     </div>
   );
 }
-

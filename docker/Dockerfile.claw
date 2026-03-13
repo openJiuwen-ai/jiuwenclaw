@@ -1,0 +1,31 @@
+ARG BASE_IMAGE
+FROM ${BASE_IMAGE}
+
+# Create app user and set up working directory
+RUN useradd --create-home --shell /bin/bash app
+RUN mkdir -p /app
+
+# Copy project files
+COPY . /app/jiuwenclaw/
+RUN chown -R app:app /app
+
+USER app
+
+# Build web
+WORKDIR /app/jiuwenclaw/jiuwenclaw/web
+RUN npm install
+RUN npm run build
+
+# Install server dependencies
+WORKDIR /app/jiuwenclaw
+RUN sed -i '/--host/ s/default="localhost"/default="0.0.0.0"/' /app/jiuwenclaw/jiuwenclaw/app_web.py
+RUN pip install -e ".[all]" --no-cache-dir
+
+ENV PATH=$PATH:/home/app/.local/bin
+
+# Initialize claw configuration (skip language selection with empty input)
+RUN jiuwenclaw-init
+
+# Start claw app
+EXPOSE 5173
+CMD ["jiuwenclaw-start"]

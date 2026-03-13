@@ -6,15 +6,12 @@ from __future__ import annotations
 
 import asyncio
 import json
-import logging
 import re
 import shutil
 from pathlib import Path
 from typing import Any
 
-from jiuwenclaw.paths import get_workspace_dir
-
-logger = logging.getLogger(__name__)
+from jiuwenclaw.utils import get_workspace_dir, logger
 
 # ---------------------------------------------------------------------------
 # 默认路径

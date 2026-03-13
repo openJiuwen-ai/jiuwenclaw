@@ -5,9 +5,11 @@
  */
 
 import { useChatStore } from '../../stores';
+import { useTranslation } from 'react-i18next';
 import clsx from 'clsx';
 
 export function SubtaskProgress() {
+  const { t } = useTranslation();
   const { activeSubtasks } = useChatStore();
 
   // 将 Map 转换为数组并按 index 排序
@@ -30,7 +32,7 @@ export function SubtaskProgress() {
       <div className="flex items-center gap-2 mb-2">
         <span className="w-2 h-2 rounded-full bg-info animate-pulse" />
         <span className="text-sm font-medium text-text-strong">
-          并行任务执行中 ({completedCount}/{total} 完成)
+          {t('chatUi.parallelProgress', { completedCount, total })}
         </span>
       </div>
       <div className="space-y-2">
@@ -57,6 +59,7 @@ interface SubtaskItemProps {
 }
 
 function SubtaskItem({ subtask }: SubtaskItemProps) {
+  const { t } = useTranslation();
   const getStatusIcon = () => {
     switch (subtask.status) {
       case 'starting':
@@ -81,11 +84,11 @@ function SubtaskItem({ subtask }: SubtaskItemProps) {
   const getStatusText = () => {
     switch (subtask.status) {
       case 'starting':
-        return '启动中...';
+        return t('chatUi.subtask.starting');
       case 'tool_call':
-        return `调用 ${subtask.tool_name || '工具'} (#${subtask.tool_count})`;
+        return t('chatUi.subtask.toolCall', { tool: subtask.tool_name || t('chatUi.subtask.toolFallback'), count: subtask.tool_count });
       case 'tool_result':
-        return subtask.message ? `${subtask.message.slice(0, 50)}...` : '处理结果...';
+        return subtask.message ? `${subtask.message.slice(0, 50)}...` : t('chatUi.subtask.toolResult');
       default:
         return subtask.status;
     }
@@ -102,13 +105,13 @@ function SubtaskItem({ subtask }: SubtaskItemProps) {
       {getStatusIcon()}
       <div className="flex-1 min-w-0">
         <div className="font-medium text-text-strong truncate">
-          任务 {subtask.index + 1}: {subtask.description}
+          {t('chatUi.subtask.taskLabel', { index: subtask.index + 1, description: subtask.description })}
         </div>
         <div className="text-text-muted truncate">{getStatusText()}</div>
       </div>
       {subtask.tool_count > 0 && (
         <span className="text-text-muted text-xs px-1.5 py-0.5 bg-secondary rounded">
-          {subtask.tool_count} 次调用
+          {t('chatUi.subtask.callCount', { count: subtask.tool_count })}
         </span>
       )}
     </div>

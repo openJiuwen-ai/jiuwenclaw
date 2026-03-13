@@ -424,7 +424,7 @@ select {
   .shell {
     height: 100vh;
     display: grid;
-    grid-template-columns: var(--shell-nav-width) minmax(0, 1fr);
+    grid-template-columns: minmax(var(--shell-nav-width), var(--shell-nav-width)) minmax(0, 1fr);
     grid-template-rows: var(--shell-topbar-height) 1fr;
     grid-template-areas:
       "topbar topbar"
@@ -520,6 +520,8 @@ select {
     scrollbar-width: none;
     min-height: 0;
     border-right: 1px solid var(--border);
+    max-width: var(--shell-nav-width);
+    width: 100%;
   }
 
   .nav::-webkit-scrollbar {
@@ -679,6 +681,22 @@ select {
   .btn:disabled {
     opacity: 0.5;
     cursor: not-allowed;
+    pointer-events: none;
+    transform: none;
+    box-shadow: none;
+  }
+
+  .btn:disabled:hover,
+  .btn.primary:disabled:hover {
+    background: var(--bg-elevated);
+    border-color: var(--border);
+    transform: none;
+    box-shadow: none;
+  }
+
+  .btn.primary:disabled {
+    background: color-mix(in oklab, var(--accent) 55%, var(--bg-elevated));
+    border-color: color-mix(in oklab, var(--accent) 55%, var(--border));
   }
 
   /* Form Fields */
@@ -781,6 +799,74 @@ select {
     color: var(--chat-text);
     line-height: 1.5;
     white-space: pre-wrap;
+  }
+
+  /* Chat input task queue */
+  .chat-input-task-queue {
+    margin-bottom: 12px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-md);
+    background: var(--card);
+    box-shadow: var(--shadow-sm);
+    animation: rise 0.3s var(--ease-out);
+  }
+
+  .chat-input-task-queue-header {
+    display: flex;
+    align-items: center;
+    padding: 8px 12px;
+    border-bottom: 1px solid var(--border);
+    background: var(--bg-elevated);
+    font-size: var(--font-size-sm);
+    font-weight: 500;
+    color: var(--text-strong);
+  }
+
+  .chat-input-task-queue-list {
+    max-height: 150px;
+    overflow-y: auto;
+    padding: 4px 0;
+  }
+
+  .chat-input-task-item {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 8px 12px;
+    transition: background var(--duration-fast) ease;
+  }
+
+  .chat-input-task-item:hover {
+    background: var(--bg-hover);
+  }
+
+  .chat-input-task-content {
+    flex: 1;
+    font-size: var(--font-size-sm);
+    color: var(--text);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .chat-input-task-remove {
+    flex-shrink: 0;
+    width: 20px;
+    height: 20px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border: none;
+    border-radius: var(--radius-sm);
+    background: transparent;
+    color: var(--muted);
+    cursor: pointer;
+    transition: all var(--duration-fast) ease;
+  }
+
+  .chat-input-task-remove:hover {
+    background: var(--danger-subtle);
+    color: var(--danger);
   }
 
   .chat-text :where(p) {
@@ -1259,7 +1345,7 @@ select {
    Responsive - Tablet
    =========================================== */
 
-@media (max-width: 1100px) {
+@media (max-width: 499px) {
   .shell {
     --shell-pad: 12px;
     --shell-gap: 12px;

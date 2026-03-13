@@ -5,17 +5,29 @@
 from __future__ import annotations
 
 import asyncio
-import logging
+import secrets
 import time
 from abc import ABC, abstractmethod
-from typing import TYPE_CHECKING
+from dataclasses import dataclass
+from enum import Enum
+from typing import TYPE_CHECKING, Any, Dict
 
+from jiuwenclaw.utils import logger
+
+
+class ChannelMode(str, Enum):
+    PLAN = "plan"
+    AGENT = "agent"
+
+
+@dataclass
+class ChannelControlState:
+    session_id: str | None = None
+    mode: ChannelMode = ChannelMode.PLAN
 if TYPE_CHECKING:
     from jiuwenclaw.gateway.agent_client import AgentServerClient
     from jiuwenclaw.schema.agent import AgentRequest, AgentResponse, AgentResponseChunk
     from jiuwenclaw.schema.message import Message
-
-logger = logging.getLogger(__name__)
 
 
 # ---------- 双队列实现：入队经 AgentServerClient 发往 AgentServer ----------
@@ -36,6 +48,19 @@ class MessageHandler(ABC):
         self._stream_tasks: dict[str, asyncio.Task] = {}  # request_id -> task
         self._stream_sessions: dict[str, str | None] = {}  # request_id -> session_id
 
+        # per-channel 控制状态：支持 \new_session / \mode 指令（feishu/xiaoyi/dingding）
+        self._control_channels = {"feishu", "xiaoyi", "dingtalk"}
+        self._channel_states: Dict[str, ChannelControlState] = {}
+
+        # 直接使用 jiuwenclaw.config 的 get_config_raw/set_config/update_channel_in_config
+        # 避免在此处重复实现 config 模块加载逻辑。
+        from jiuwenclaw.config import get_config_raw, update_channel_in_config
+
+        self._get_config_raw = get_config_raw
+        self._update_channel_in_config = update_channel_in_config
+
+        self._load_channel_states_from_config()
+
     def handle_message(self, msg: "Message") -> None:
         """Channel 同步回调：将消息放入 user_messages 队列，由转发循环发给 AgentServer."""
         self._user_messages.put_nowait(msg)
@@ -43,6 +68,139 @@ class MessageHandler(ABC):
             "[MessageHandler] _user_messages 入队: id=%s channel_id=%s session_id=%s",
             msg.id, msg.channel_id, msg.session_id,
         )
+
+    # ---------- Channel 控制状态：\new_session / \mode ----------
+
+    def _load_channel_states_from_config(self) -> None:
+        """从 config.yaml 初始化各 Channel 的默认 session_id / mode."""
+        try:
+            cfg: Dict[str, Any] = self._get_config_raw()
+        except Exception:  # noqa: BLE001
+            cfg = {}
+        channels_cfg = cfg.get("channels") or {}
+        for ch in self._control_channels:
+            ch_cfg = channels_cfg.get(ch) or {}
+            sid_raw = ch_cfg.get("default_session_id") or ""
+            sid = str(sid_raw).strip() or None
+            # 若未在 config 中指定默认 session_id，则为该 channel 生成一个带时间戳的新 session_id，
+            # 这样 feishu/xiaoyi/dingtalk 在未执行 \new_session 之前，消息的 session_id 也是
+            # `<channel>_<ts_hex>_<rand>` 这种可解析时间戳的格式。
+            if not sid:
+                sid = self._generate_channel_session_id(ch)
+            mode_raw = str(ch_cfg.get("default_mode") or "plan").strip().lower()
+            mode = ChannelMode.AGENT if mode_raw == "agent" else ChannelMode.PLAN
+            self._channel_states[ch] = ChannelControlState(session_id=sid, mode=mode)
+
+    def _save_channel_state_to_config(self, channel_id: str) -> None:
+        """将指定 Channel 的 session_id / mode 写回 config.yaml."""
+        state = self._channel_states.get(channel_id)
+        if state is None:
+            return
+        try:
+            self._update_channel_in_config(
+                channel_id,
+                {
+                    "default_session_id": state.session_id or "",
+                    "default_mode": state.mode.value,
+                },
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("保存 Channel 控制状态到 config 失败: %s", exc)
+
+    def _generate_channel_session_id(self, channel_id: str) -> str:
+        """为指定 channel 生成新的 session_id."""
+        ts = format(int(time.time() * 1000), "x")
+        suffix = secrets.token_hex(3)
+        return f"{channel_id}_{ts}_{suffix}"
+
+    async def _send_channel_notice(self, channel_id: str, session_id: str | None, text: str) -> None:
+        """向指定 channel 发送一条系统提示消息."""
+        from jiuwenclaw.schema.message import Message, EventType
+
+        msg = Message(
+            id=f"sys-{int(time.time() * 1000)}",
+            type="event",
+            channel_id=channel_id,
+            session_id=session_id,
+            params={},
+            timestamp=time.time(),
+            ok=True,
+            payload={"content": text},
+            event_type=EventType.CHAT_FINAL,
+        )
+        await self.publish_robot_messages(msg)
+
+    def _handle_channel_control(self, msg: "Message") -> bool:
+        """处理 \new_session / \mode 指令.
+
+        Returns:
+            True: 该消息是控制指令，已处理完毕，不需要转发给 Agent。
+            False: 非控制指令，继续正常处理。
+        """
+        ch = msg.channel_id
+        if ch not in self._control_channels:
+            return False
+
+        params = msg.params or {}
+        text = str(params.get("query") or params.get("content") or "").strip()
+        if not text:
+            return False
+
+        logger.info('this is in _handle_channel_control, channel id is %s, text is %s, "\\new_session" in text is %s', ch, text, str("\\new_session" in text))
+        # \new_session：重置当前 Channel 的会话 ID
+        if "/new_session" == text:
+            state = self._channel_states.get(ch) or ChannelControlState()
+            new_sid = self._generate_channel_session_id(ch)
+            state.session_id = new_sid
+            self._channel_states[ch] = state
+            self._save_channel_state_to_config(ch)
+            # 给当前会话回复提示（用原有 session_id）
+            asyncio.create_task(
+                self._send_channel_notice(ch, msg.session_id, f"[收到 CLI 指令], session_id 已变更为 {new_sid}")
+            )
+            return True
+        elif "/new_session" in text:
+            asyncio.create_task(
+                self._send_channel_notice(ch, msg.session_id, f"非法指令")
+            )
+            return True
+
+        # \mode plan / \mode agent
+        if text == "/mode plan" or text == "/mode agent": 
+            parts = text.split()
+            if len(parts) >= 2 and parts[1] in ("plan", "agent"):
+                state = self._channel_states.get(ch) or ChannelControlState()
+                state.mode = ChannelMode.AGENT if parts[1] == "agent" else ChannelMode.PLAN
+                self._channel_states[ch] = state
+                self._save_channel_state_to_config(ch)
+                asyncio.create_task(
+                    self._send_channel_notice(ch, msg.session_id, f"[收到 CLI 指令], mode 已变更为 {state.mode.value}")
+                )
+                return True
+        elif "/mode" in text:
+            asyncio.create_task(
+                self._send_channel_notice(ch, msg.session_id, f"非法指令")
+            )
+            return True
+
+        return False
+
+    def _apply_channel_state(self, msg: "Message") -> None:
+        """将当前 Channel 的控制状态应用到消息上（session_id / mode）."""
+        ch = msg.channel_id
+        state = self._channel_states.get(ch)
+        if not state:
+            return
+
+        # 对 feishu/xiaoyi/dingtalk 强制覆盖 session_id；web 等保持原有行为
+        if ch in self._control_channels and state.session_id:
+            msg.session_id = state.session_id
+
+        # 将 mode 写入 params，后续 AgentRequest 会从 params["mode"] 里读取
+        if msg.params is None:
+            msg.params = {}
+        if isinstance(msg.params, dict):
+            msg.params.setdefault("mode", state.mode.value)
 
     # ---------- user_messages ----------
 
@@ -150,8 +308,14 @@ class MessageHandler(ABC):
         )
 
     @staticmethod
-    def _chunk_to_message(chunk: AgentResponseChunk, session_id: str | None) -> Message:
-        """将 AgentResponseChunk 转换为 Message（用于流式处理）."""
+    def _chunk_to_message(
+        chunk: AgentResponseChunk,
+        session_id: str | None,
+        metadata: dict[str, Any] | None = None,
+    ) -> Message:
+        """将 AgentResponseChunk 转换为 Message（用于流式处理）。
+        metadata 传入 request 的 metadata，供 Feishu/Xiaoyi 等通道回发时使用平台身份。
+        """
         from jiuwenclaw.schema.message import Message, EventType
 
         # 从 payload 中提取 event_type（如果存在）
@@ -174,7 +338,7 @@ class MessageHandler(ABC):
             ok=True,
             payload=chunk.payload,
             event_type=event_type,
-            metadata=None,
+            metadata=metadata,
         )
 
     # ---------- 入队 -> AgentServer -> 出队 转发循环 ----------
@@ -193,6 +357,15 @@ class MessageHandler(ABC):
                 msg = await self.consume_user_messages(timeout=None)
                 if msg is None:
                     continue
+                
+         
+                # 先处理 Channel 控制指令（仅 feishu/xiaoyi/dingtalk）
+                if self._handle_channel_control(msg):
+                    # 该消息仅用于修改 session/mode，已给 Channel 回复提示，不再转发给 Agent
+                    continue
+
+                # 将当前 Channel 的控制状态应用到消息上
+                self._apply_channel_state(msg)
 
                 # 检查是否是中断请求
                 if msg.req_method == ReqMethod.CHAT_CANCEL:
@@ -350,7 +523,10 @@ class MessageHandler(ABC):
                         chunk.request_id,
                     )
                     continue
-                out = self._chunk_to_message(chunk, session_id=session_id)
+                # 携带 request metadata，供 Feishu/Xiaoyi 用平台身份回发
+                out = self._chunk_to_message(
+                    chunk, session_id=session_id, metadata=req.metadata
+                )
                 await self.publish_robot_messages(out)
                 logger.debug(
                     "[MessageHandler] Stream chunk 已写入 robot_messages: request_id=%s event_type=%s",

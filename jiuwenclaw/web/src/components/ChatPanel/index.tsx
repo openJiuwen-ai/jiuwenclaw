@@ -5,6 +5,7 @@
  */
 
 import { useRef, useEffect, useCallback } from 'react';
+import { useTranslation } from 'react-i18next';
 import { useChatStore } from '../../stores';
 import { AgentMode, UserAnswer } from '../../types';
 import { MessageList } from './MessageList';
@@ -21,11 +22,6 @@ interface ChatPanelProps {
   onNewSession: () => void;
   onUserAnswer: (requestId: string, answers: UserAnswer[]) => void;
 }
-
-const SUGGESTIONS = [
-  { text: '让我们开启一段新的旅程吧！' },
-  { text: '能告诉我你有哪些技能吗？' },
-];
 
 function ThinkingIndicator() {
   return (
@@ -65,9 +61,13 @@ export function ChatPanel({
   onNewSession,
   onUserAnswer,
 }: ChatPanelProps) {
-
+  const { t } = useTranslation();
   const { messages, isThinking } = useChatStore();
   const messagesEndRef = useRef<HTMLDivElement>(null);
+  const suggestions = [
+    t('chat.welcomeSuggestions.journey'),
+    t('chat.welcomeSuggestions.skills'),
+  ];
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -83,14 +83,14 @@ export function ChatPanel({
       <div className="flex-1 overflow-y-auto px-3 py-4">
         {messages.length === 0 ? (
           <div className="chat-welcome">
-            <img src="/logo.png" alt="JiuwenClaw" className="chat-welcome__logo" />
-            <h2 className="chat-welcome__heading">你好，我是JiuwenClaw，很高兴认识你！</h2>
+            <img src="/logo.png" alt={t('chat.welcomeLogoAlt')} className="chat-welcome__logo" />
+            <h2 className="chat-welcome__heading">{t('chat.welcomeHeading')}</h2>
             <p className="chat-welcome__subtext">
-              我可以帮你回答问题，解决疑惑，还可以帮你完成一些任务。
+              {t('chat.welcomeSubtext')}
             </p>
             <div className="chat-suggestions">
-              {SUGGESTIONS.map((s) => (
-                <SuggestionCard key={s.text} text={s.text} onClick={() => handleSuggestion(s.text)} />
+              {suggestions.map((text) => (
+                <SuggestionCard key={text} text={text} onClick={() => handleSuggestion(text)} />
               ))}
             </div>
           </div>

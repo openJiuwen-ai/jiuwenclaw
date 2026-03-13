@@ -7,7 +7,6 @@ import json
 import sqlite3
 import struct
 import asyncio
-import logging
 import datetime
 from typing import List, Optional, Dict, Any, Set
 from dataclasses import dataclass
@@ -22,8 +21,7 @@ from .internal import (
 )
 from .embeddings import EmbeddingProvider, create_embedding_provider
 from .config import MemorySettings
-
-logger = logging.getLogger(__name__)
+from jiuwenclaw.utils import logger
 
 META_KEY = "memory_index_meta_v1"
 SNIPPET_MAX_CHARS = 700

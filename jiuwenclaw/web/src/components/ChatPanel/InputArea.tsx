@@ -1,4 +1,5 @@
 import { useState, useRef, useCallback, KeyboardEvent, PointerEvent as ReactPointerEvent, useEffect, CSSProperties } from 'react';
+import { useTranslation } from 'react-i18next';
 import { useSpeechRecognition } from '../../hooks';
 import { stopAllTts } from '../../utils';
 import { useChatStore, useSessionStore } from '../../stores';
@@ -27,16 +28,18 @@ export function InputArea({
   const isComposingRef = useRef(false);
   const activePointerIdRef = useRef<number | null>(null);
   const isVoicePressingRef = useRef(false);
-  const { isPaused } = useChatStore();
+  const { t } = useTranslation();
+  const { isPaused, taskQueue, addToTaskQueue, removeFromTaskQueue } = useChatStore();
   const { mode } = useSessionStore();
   const isInterruptible = isProcessing || isPaused;
+  const isAgentMode = mode === 'agent';
   const modes: Array<{ value: AgentMode; label: string; icon: JSX.Element }> = [
-    { value: 'plan', label: '任务规划', icon: (
+    { value: 'plan', label: t('chat.modePlan'), icon: (
       <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2}>
         <path strokeLinecap="round" strokeLinejoin="round" d="M9 12h3.75M9 15h3.75M9 18h3.75m3 .75H18a2.25 2.25 0 002.25-2.25V6.108c0-1.135-.845-2.098-1.976-2.192a48.424 48.424 0 00-1.123-.08m-5.801 0c-.065.21-.1.433-.1.664 0 .414.336.75.75.75h4.5a.75.75 0 00.75-.75 2.25 2.25 0 00-.1-.664m-5.8 0A2.251 2.251 0 0113.5 2.25H15c1.012 0 1.867.668 2.15 1.586m-5.8 0c-.376.023-.75.05-1.124.08C9.095 4.01 8.25 4.973 8.25 6.108V8.25m0 0H4.875c-.621 0-1.125.504-1.125 1.125v11.25c0 .621.504 1.125 1.125 1.125h9.75c.621 0 1.125-.504 1.125-1.125V9.375c0-.621-.504-1.125-1.125-1.125H8.25zM6.75 12h.008v.008H6.75V12zm0 3h.008v.008H6.75V15zm0 3h.008v.008H6.75V18z" />
       </svg>
     )},
-    { value: 'agent', label: '智能执行', icon: (
+    { value: 'agent', label: t('chat.modeAgent'), icon: (
       <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2}>
         <path strokeLinecap="round" strokeLinejoin="round" d="M11.42 15.17L17.25 21A2.652 2.652 0 0021 17.25l-5.877-5.877M11.42 15.17l2.496-3.03c.317-.384.74-.626 1.208-.766M11.42 15.17l-4.655 5.653a2.548 2.548 0 11-3.586-3.586l6.837-5.63m5.108-.233c.55-.164 1.163-.188 1.743-.14a4.5 4.5 0 004.486-6.336l-3.276 3.277a3.004 3.004 0 01-2.25-2.25l3.276-3.276a4.5 4.5 0 00-6.336 4.486c.091 1.076-.071 2.264-.904 2.95l-.102.085m-1.745 1.437L5.909 7.5H4.5L2.25 3.75l1.5-1.5L7.5 4.5v1.409l4.26 4.26m-1.745 1.437l1.745-1.437m6.615 8.206L15.75 15.75M4.867 19.125h.008v.008h-.008v-.008z" />
       </svg>
@@ -107,7 +110,13 @@ export function InputArea({
     }
 
     if (isInterruptible) {
-      onInterrupt(trimmed);
+      if (isAgentMode) {
+        // 智能执行模式下，将任务添加到队列
+        addToTaskQueue(trimmed);
+      } else {
+        // 其他模式下，中断当前任务
+        onInterrupt(trimmed);
+      }
     } else {
       onSubmit(trimmed);
     }
@@ -117,7 +126,7 @@ export function InputArea({
     if (textareaRef.current) {
       textareaRef.current.style.height = 'auto';
     }
-  }, [value, pendingVoiceText, isInterruptible, isListening, onSubmit, onInterrupt, stopListening]);
+  }, [value, pendingVoiceText, isInterruptible, isListening, onSubmit, onInterrupt, stopListening, isAgentMode, addToTaskQueue]);
 
   const handleKeyDown = useCallback(
     (e: KeyboardEvent<HTMLTextAreaElement>) => {
@@ -215,7 +224,36 @@ export function InputArea({
       {isListening && (
         <div className="chat-input-recording-bar">
           <span className="chat-input-recording-dot" />
-          <span>正在录音...（松开按钮自动发送）</span>
+          <span>{t('chat.recording')}</span>
+        </div>
+      )}
+
+      {/* 智能执行模式下的等待任务盒子 */}
+      {isAgentMode && taskQueue.length > 0 && (
+        <div className="chat-input-task-queue">
+          <div className="chat-input-task-queue-header">
+            <svg className="w-4 h-4 mr-2" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2}>
+              <path strokeLinecap="round" strokeLinejoin="round" d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2m-3 7h3m-3 4h3m-6-4h.01M9 16h.01" />
+            </svg>
+            {t('chat.waitingTasksCount', { count: taskQueue.length })}
+          </div>
+          <div className="chat-input-task-queue-list">
+            {taskQueue.map((task) => (
+              <div key={task.id} className="chat-input-task-item">
+                <span className="chat-input-task-content">{task.content}</span>
+                <button
+                  type="button"
+                  onClick={() => removeFromTaskQueue(task.id)}
+                  className="chat-input-task-remove"
+                  title={t('chat.removeTask')}
+                >
+                  <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2}>
+                    <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
+                  </svg>
+                </button>
+              </div>
+            ))}
+          </div>
         </div>
       )}
 
@@ -229,10 +267,12 @@ export function InputArea({
         onInput={handleInput}
         placeholder={
           isListening
-            ? '正在听取语音...'
+            ? t('chat.placeholderVoice')
+            : isAgentMode && isInterruptible
+            ? t('chat.placeholderProcessingQueue')
             : isInterruptible
-            ? '处理中，输入新指令可中断...'
-            : 'Enter 发送，Shift+Enter 换行，按住语音键开始录音'
+            ? t('chat.placeholderProcessing')
+            : t('chat.placeholder')
         }
         className="chat-input-textarea"
         rows={1}
@@ -276,7 +316,7 @@ export function InputArea({
               'chat-input-btn',
               (isListening || isInterruptible) && 'chat-input-btn--disabled',
             )}
-            title={isListening || isInterruptible ? '处理中或录音中不可新建' : '新建会话'}
+            title={isListening || isInterruptible ? t('chat.newSessionDisabled') : t('chat.newSession')}
           >
             <svg className="chat-input-btn-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={1.8}>
               <path strokeLinecap="round" strokeLinejoin="round" d="M12 4.5v15m7.5-7.5h-15" />
@@ -293,7 +333,7 @@ export function InputArea({
                 'chat-input-btn',
                 isListening && 'chat-input-btn--recording',
               )}
-              title="按住说话"
+              title={t('chat.holdToSpeak')}
             >
               {isListening ? (
                 <svg className="chat-input-btn-icon" fill="currentColor" viewBox="0 0 24 24">
@@ -315,7 +355,7 @@ export function InputArea({
               'chat-input-btn chat-input-btn--send',
               canSend ? 'chat-input-btn--send-active' : 'chat-input-btn--disabled',
             )}
-            title="发送 (Enter)"
+            title={t('chat.send')}
           >
             <svg className="chat-input-btn-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2}>
               <path strokeLinecap="round" strokeLinejoin="round" d="M4.5 10.5L12 3m0 0l7.5 7.5M12 3v18" />

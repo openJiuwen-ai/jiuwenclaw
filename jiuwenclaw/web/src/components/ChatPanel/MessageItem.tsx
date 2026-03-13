@@ -5,6 +5,7 @@
  */
 
 import { useState, useCallback, useEffect, useRef } from 'react';
+import { useTranslation } from 'react-i18next';
 import { Message } from '../../types';
 import { StreamingContent } from './StreamingContent';
 import { ToolCallDisplay } from './ToolCallDisplay';
@@ -21,6 +22,7 @@ interface MessageItemProps {
 }
 
 export function MessageItem({ message, autoSpeak = false }: MessageItemProps) {
+  const { t } = useTranslation();
   const {
     role,
     content,
@@ -221,7 +223,7 @@ export function MessageItem({ message, autoSpeak = false }: MessageItemProps) {
             <button
               onClick={handleCopy}
               className="p-1.5 rounded-md transition-colors hover:text-accent hover:bg-secondary"
-              title="复制消息"
+              title={t('chatUi.copyMessage')}
             >
               <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={1.5}>
                 <path strokeLinecap="round" strokeLinejoin="round" d="M8.25 6.75h7.5m-7.5 3h7.5m-7.5 3h4.5M6.75 3h7.5A2.25 2.25 0 0116.5 5.25v13.5A2.25 2.25 0 0114.25 21h-7.5A2.25 2.25 0 014.5 18.75V5.25A2.25 2.25 0 016.75 3z" />
@@ -238,7 +240,7 @@ export function MessageItem({ message, autoSpeak = false }: MessageItemProps) {
                   ? 'text-accent bg-accent/10'
                   : 'hover:text-accent hover:bg-secondary'
               )}
-              title={isPlaying ? '停止朗读' : '朗读消息'}
+              title={isPlaying ? t('chatUi.stopReading') : t('chatUi.readMessage')}
             >
               {isPlaying ? (
                 <svg className="w-4 h-4" fill="currentColor" viewBox="0 0 24 24">

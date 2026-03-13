@@ -5,6 +5,7 @@
  */
 
 import { useState, useCallback, useRef, useEffect } from 'react';
+import i18n from '../i18n';
 
 // ============================================================================
 // 语音识别 (STT)
@@ -111,7 +112,7 @@ export function useSpeechRecognition(
 
   const startListening = useCallback(() => {
     if (!isSupported) {
-      onError?.('浏览器不支持语音识别');
+      onError?.(i18n.t('speech.recognitionUnsupported'));
       return;
     }
 
@@ -123,7 +124,7 @@ export function useSpeechRecognition(
     const SpeechRecognitionCtor =
       window.SpeechRecognition || window.webkitSpeechRecognition;
     if (!SpeechRecognitionCtor) {
-      onError?.('浏览器不支持语音识别');
+      onError?.(i18n.t('speech.recognitionUnsupported'));
       return;
     }
     const recognition = new SpeechRecognitionCtor();
@@ -174,13 +175,13 @@ export function useSpeechRecognition(
       setIsListening(false);
       
       const errorMessages: Record<string, string> = {
-        'no-speech': '未检测到语音',
-        'audio-capture': '未检测到麦克风',
-        'not-allowed': '麦克风权限被拒绝',
-        'network': '网络错误',
+        'no-speech': i18n.t('speech.errors.noSpeech'),
+        'audio-capture': i18n.t('speech.errors.noMic'),
+        'not-allowed': i18n.t('speech.errors.notAllowed'),
+        'network': i18n.t('speech.errors.network'),
       };
       
-      onError?.(errorMessages[event.error] || `语音识别错误: ${event.error}`);
+      onError?.(errorMessages[event.error] || i18n.t('speech.errors.recognitionGeneric', { error: event.error }));
     };
 
     recognition.onend = () => {
@@ -308,7 +309,7 @@ export function useSpeechSynthesis(
   const speak = useCallback(
     (text: string) => {
       if (!isSupported) {
-        onError?.('浏览器不支持语音合成');
+        onError?.(i18n.t('speech.synthesisUnsupported'));
         return;
       }
 
@@ -342,7 +343,7 @@ export function useSpeechSynthesis(
       utterance.onerror = (event) => {
         console.error('Speech synthesis error:', event);
         setIsSpeaking(false);
-        onError?.(`语音合成错误: ${event.error}`);
+        onError?.(i18n.t('speech.errors.synthesisGeneric', { error: event.error }));
       };
 
       utteranceRef.current = utterance;

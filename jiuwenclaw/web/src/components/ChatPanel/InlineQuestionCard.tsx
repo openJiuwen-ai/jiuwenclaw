@@ -7,6 +7,7 @@
  */
 
 import { useState, useCallback } from 'react';
+import { useTranslation } from 'react-i18next';
 import { useChatStore } from '../../stores';
 import { UserAnswer } from '../../types';
 import ReactMarkdown from 'react-markdown';
@@ -17,6 +18,7 @@ interface InlineQuestionCardProps {
 }
 
 export function InlineQuestionCard({ onSubmit }: InlineQuestionCardProps) {
+  const { t } = useTranslation();
   const { pendingQuestion, setPendingQuestion } = useChatStore();
   const [submittedAnswers, setSubmittedAnswers] = useState<Map<string, string>>(new Map());
 
@@ -85,7 +87,7 @@ export function InlineQuestionCard({ onSubmit }: InlineQuestionCardProps) {
             className="text-xs font-semibold"
             style={{ color: 'var(--accent)' }}
           >
-            {pendingQuestion.questions[0]?.header ?? '演进审批'}
+            {pendingQuestion.questions[0]?.header ?? t('chatUi.inlineQuestion.header')}
           </span>
         </div>
 
@@ -122,13 +124,13 @@ export function InlineQuestionCard({ onSubmit }: InlineQuestionCardProps) {
                   >
                     <path strokeLinecap="round" strokeLinejoin="round" d="M4.5 12.75l6 6 9-13.5" />
                   </svg>
-                  已选择：<span style={{ color: 'var(--text-strong)' }}>{submittedLabel}</span>
+                  {t('chatUi.inlineQuestion.selected')}: <span style={{ color: 'var(--text-strong)' }}>{submittedLabel}</span>
                 </div>
               ) : (
                 <div className="px-4 pb-3 flex flex-col gap-2">
                   {question.options.map((option) => {
-                    const isAccept = option.label === '接收';
-                    const isReject = option.label === '拒绝';
+                    const isAccept = option.label === t('chatUi.inlineQuestion.accept');
+                    const isReject = option.label === t('chatUi.inlineQuestion.reject');
                     return (
                       <button
                         key={option.label}

@@ -12,12 +12,12 @@ ENV/
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
+*.egg-info/
 .coverage
 .coverage.*
 htmlcov/
 
 # Node.js / Frontend
-node_modules/
 **/node_modules/
 dist/
 build/
@@ -46,11 +46,6 @@ pnpm-debug.log*
 
 # reference
 reference/
-
-# environment
-venv/
-*.egg-info/
-
 
 # logs
 logs/

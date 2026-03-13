@@ -1,6 +1,7 @@
 import { useEffect } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
+import { useTranslation } from 'react-i18next';
 
 interface HeartbeatMessageModalProps {
   open: boolean;
@@ -9,6 +10,8 @@ interface HeartbeatMessageModalProps {
 }
 
 export function HeartbeatMessageModal({ open, message, onClose }: HeartbeatMessageModalProps) {
+  const { t } = useTranslation();
+
   useEffect(() => {
     if (!open) {
       return;
@@ -36,26 +39,26 @@ export function HeartbeatMessageModal({ open, message, onClose }: HeartbeatMessa
         type="button"
         className="absolute inset-0 bg-black/60"
         onClick={onClose}
-        aria-label="关闭心跳详情弹窗"
+        aria-label={t('heartbeatModal.closeAria')}
       />
       <div className="relative w-full max-w-3xl max-h-[85vh] overflow-hidden rounded-xl border border-border bg-card shadow-2xl animate-rise">
         <div className="flex items-center justify-between gap-3 px-5 py-3 border-b border-border bg-panel">
           <div>
-            <h3 className="text-base font-semibold text-text">心跳消息</h3>
-            <p className="text-xs text-text-muted">消息内容详情</p>
+            <h3 className="text-base font-semibold text-text">{t('heartbeatModal.title')}</h3>
+            <p className="text-xs text-text-muted">{t('heartbeatModal.subtitle')}</p>
           </div>
           <button
             type="button"
             onClick={onClose}
             className="px-2.5 py-1.5 rounded-md border border-border bg-secondary/50 text-text-muted hover:text-text hover:bg-secondary transition-colors"
           >
-            关闭
+            {t('common.close')}
           </button>
         </div>
         <div className="p-5 overflow-auto max-h-[calc(85vh-64px)]">
           <article className="chat-text max-w-none">
             <ReactMarkdown remarkPlugins={[remarkGfm]}>
-              {message || '无详细内容'}
+              {message || t('heartbeatModal.empty')}
             </ReactMarkdown>
           </article>
         </div>

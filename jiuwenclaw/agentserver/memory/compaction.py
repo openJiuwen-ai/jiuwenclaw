@@ -7,16 +7,14 @@ Provides automatic triggering of message compression when token threshold is exc
 
 import asyncio
 import json
-import logging
 import os
 from enum import Enum
 from typing import List, Dict, Any, Optional
 from dataclasses import dataclass, field
 from datetime import datetime
 
+from jiuwenclaw.utils import logger
 from .internal import estimate_tokens
-
-logger = logging.getLogger(__name__)
 
 CONTEXT_COMPACT_THRESHOLD = 8000
 CONTEXT_COMPACT_KEEP_RECENT = 10
