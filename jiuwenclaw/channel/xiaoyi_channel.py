@@ -18,6 +18,7 @@ from urllib.parse import urlparse
 
 from jiuwenclaw.utils import logger
 from jiuwenclaw.channel.base import BaseChannel, ChannelMetadata, RobotMessageRouter
+from jiuwenclaw.channel.xiaoyi_task_ids import build_next_proactive_task_id
 from jiuwenclaw.schema.message import EventType, Message, ReqMethod
 
 
@@ -71,6 +72,8 @@ class XiaoyiChannel(BaseChannel):
         self._session_task_map: dict[str, str] = {}
         self._session_heartbeat_tasks: dict[str, asyncio.Task] = {}  # Response heartbeat tasks for each session
         self._on_message_cb: Callable[[Message], Any] | None = None
+        self._proactive_task_lock = asyncio.Lock()
+        self._proactive_push_task_map: dict[str, str] = {}
 
     @property
     def channel_id(self) -> str:
@@ -154,6 +157,10 @@ class XiaoyiChannel(BaseChannel):
         if not self._ws_connections:
             return
         session_id, task_id = self._extract_platform_receive_info(msg)
+        meta = getattr(msg, "metadata", None) or {}
+        use_task_id_as_is = bool(meta.get("xiaoyi_use_task_id_as_is"))
+        if msg.session_id is None and session_id and not use_task_id_as_is:
+            session_id, task_id = await self._reserve_proactive_receive_info(msg.id, session_id, task_id)
         logger.info(f"XiaoyiChannel 发送消息: {msg}")
 
         content = ""
@@ -165,16 +172,64 @@ class XiaoyiChannel(BaseChannel):
         elif msg.payload:
             content = str(msg.payload)
 
+        is_placeholder = self._is_placeholder_message(msg)
+        is_final = not is_placeholder
+
         # Send to all active connections
         for url_key, ws in self._ws_connections.items():
             if ws:
                 try:
-                    await self._send_text_response(session_id, task_id, content, url_key, is_final=True)
+                    await self._send_text_response(session_id, task_id, content, url_key, is_final=is_final)
                 except Exception as e:
                     logger.warning(f"XiaoyiChannel 发送消息失败 ({url_key}): {e}")
 
-        if session_id:
+        if session_id and is_placeholder:
+            await self._start_session_heartbeat(session_id, task_id)
+        elif session_id:
             await self._stop_session_heartbeat(session_id)
+
+        if msg.session_id is None and not self._should_keep_proactive_task_id(msg):
+            self._proactive_push_task_map.pop(msg.id, None)
+
+    def _is_placeholder_message(self, msg: Message) -> bool:
+        cron_meta = ((msg.payload or {}).get("cron") if isinstance(msg.payload, dict) else None) or {}
+        return bool(cron_meta.get("is_placeholder"))
+
+    def _should_keep_proactive_task_id(self, msg: Message) -> bool:
+        return self._is_placeholder_message(msg)
+
+    async def _reserve_proactive_receive_info(self, message_id: str, session_id: str, task_id: str) -> tuple[str, str]:
+        """Allocate a fresh task id for proactive pushes like cron delivery."""
+        cached_task_id = self._proactive_push_task_map.get(message_id)
+        if cached_task_id:
+            return session_id, cached_task_id
+
+        latest_task_id = task_id
+        async with self._proactive_task_lock:
+            cached_task_id = self._proactive_push_task_map.get(message_id)
+            if cached_task_id:
+                return session_id, cached_task_id
+            try:
+                from jiuwenclaw.config import get_config_raw, update_channel_in_config
+
+                cfg = get_config_raw() or {}
+                ch_cfg = (cfg.get("channels") or {}).get("xiaoyi") or {}
+                if str(ch_cfg.get("last_session_id") or "").strip() == session_id:
+                    latest_task_id = str(ch_cfg.get("last_task_id") or latest_task_id).strip()
+                next_task_id = build_next_proactive_task_id(session_id, latest_task_id)
+                update_channel_in_config(
+                    "xiaoyi",
+                    {
+                        "last_session_id": session_id,
+                        "last_task_id": next_task_id,
+                    },
+                )
+            except Exception:
+                next_task_id = build_next_proactive_task_id(session_id, latest_task_id)
+
+        self._proactive_push_task_map[message_id] = next_task_id
+        self._session_task_map[session_id] = next_task_id
+        return session_id, next_task_id
 
     def get_metadata(self) -> ChannelMetadata:
         return ChannelMetadata(

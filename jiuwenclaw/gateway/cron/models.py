@@ -169,3 +169,4 @@ class CronRunState:
     finished_at: float | None = None
     result_text: str | None = None
     error: str | None = None
+    xiaoyi_task_id: str | None = None

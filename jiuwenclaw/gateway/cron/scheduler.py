@@ -9,6 +9,7 @@ from datetime import datetime, timedelta
 from typing import Any, Callable
 from zoneinfo import ZoneInfo
 
+from jiuwenclaw.channel.xiaoyi_task_ids import build_next_proactive_task_id
 from jiuwenclaw.gateway.agent_client import AgentServerClient
 from jiuwenclaw.gateway.cron.models import CronJob, CronRunState
 from jiuwenclaw.gateway.cron.store import CronJobStore
@@ -284,16 +285,20 @@ class CronSchedulerService:
                 state.error = str(exc)
             finally:
                 state.finished_at = self._now_fn()
-                # if placeholder already sent, push update immediately
+                should_push_update = False
                 if state.placeholder_sent and not state.pushed_final and state.result_text:
-                    self._schedule_event(datetime.fromtimestamp(self._now_fn(), tz=ZoneInfo(job.timezone)), "push_update", job.id, run_id)
-                # if push time already passed, also try to push update
+                    should_push_update = True
                 try:
                     push_dt = datetime.fromisoformat(state.push_at_iso)
                     if push_dt.timestamp() <= self._now_fn() and not state.pushed_final and state.result_text:
-                        self._schedule_event(datetime.fromtimestamp(self._now_fn(), tz=ZoneInfo(job.timezone)), "push_update", job.id, run_id)
+                        should_push_update = True
                 except Exception:
                     pass
+                if should_push_update:
+                    try:
+                        await self._on_push_update(job, run_id)
+                    except Exception as exc:  # noqa: BLE001
+                        logger.warning("[Cron] immediate push_update failed job=%s run=%s: %s", job.id, run_id, exc)
 
         task = asyncio.create_task(_run_agent(), name=f"cron-run-{job.id}")
         self._run_tasks[run_id] = task
@@ -359,7 +364,7 @@ class CronSchedulerService:
         # 这样即使 cron 推送没有 session_id，也能让 Channel.send 正常路由到对应会话。
         metadata: dict | None = None
         try:
-            from jiuwenclaw.config import get_config_raw
+            from jiuwenclaw.config import get_config_raw, update_channel_in_config
 
             cfg = get_config_raw() or {}
             ch_cfg = (cfg.get("channels") or {}).get(channel_id) or {}
@@ -374,10 +379,20 @@ class CronSchedulerService:
             elif channel_id == "xiaoyi":
                 last_session_id = str(ch_cfg.get("last_session_id") or "").strip()
                 last_task_id = str(ch_cfg.get("last_task_id") or "").strip()
-                if last_session_id or last_task_id:
+                if last_session_id:
+                    if not state.xiaoyi_task_id:
+                        state.xiaoyi_task_id = build_next_proactive_task_id(last_session_id, last_task_id)
+                        update_channel_in_config(
+                            "xiaoyi",
+                            {
+                                "last_session_id": last_session_id,
+                                "last_task_id": state.xiaoyi_task_id,
+                            },
+                        )
                     metadata = {
                         "xiaoyi_session_id": last_session_id,
-                        "xiaoyi_task_id": last_task_id,
+                        "xiaoyi_task_id": state.xiaoyi_task_id,
+                        "xiaoyi_use_task_id_as_is": True,
                     }
         except Exception:
             metadata = None
