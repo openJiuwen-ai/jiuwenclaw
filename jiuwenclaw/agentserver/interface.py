@@ -19,7 +19,7 @@ from openjiuwen.core.session.checkpointer import CheckpointerFactory
 from openjiuwen.core.session.checkpointer.checkpointer import CheckpointerConfig
 from openjiuwen.core.session.checkpointer.persistence import PersistenceCheckpointerProvider
 
-from jiuwenclaw.gateway.cron import CronController, CronTargetChannel
+from jiuwenclaw.gateway.cron import CronController, resolve_session_target_channel
 from jiuwenclaw.utils import get_root_dir, logger, USER_WORKSPACE_DIR
 from jiuwenclaw.config import get_config
 from jiuwenclaw.agentserver.react_agent import JiuClawReActAgent
@@ -398,14 +398,12 @@ class JiuWenClaw:
                     self._instance.ability_manager.remove(tool.name)
 
         # 定时工具
-        channel = session_id.split('_')[0]
+        channel = str(session_id or "").split('_')[0]
         if channel not in ["heartbeat", "cron"]:
             cron_controller = CronController.get_instance()
-
-            if channel == "feishu":
-                cron_controller.set_target_channel(CronTargetChannel.FEISHU)
-            if channel == "sess":
-                cron_controller.set_target_channel(CronTargetChannel.WEB)
+            target_channel = resolve_session_target_channel(session_id)
+            if target_channel is not None:
+                cron_controller.set_target_channel(target_channel)
 
             for cron_tool in cron_controller.get_tools():
                 Runner.resource_mgr.add_tool(cron_tool)

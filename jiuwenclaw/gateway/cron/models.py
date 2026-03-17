@@ -10,8 +10,20 @@ class CronTargetChannel(str, Enum):
 
     WEB = "web"
     FEISHU = "feishu"
-    # XIAOYI = "xiaoyi"
+    XIAOYI = "xiaoyi"
     # DINGTALK = "dingtalk"
+
+
+def resolve_session_target_channel(session_id: str | None) -> CronTargetChannel | None:
+    """Map a runtime session id prefix to the cron push target channel."""
+    channel = str(session_id or "").split("_")[0]
+    if channel == "sess":
+        return CronTargetChannel.WEB
+    if channel == "feishu":
+        return CronTargetChannel.FEISHU
+    if channel == "xiaoyi":
+        return CronTargetChannel.XIAOYI
+    return None
 
 
 def _normalize_targets_str(raw: str) -> str:
