@@ -1,0 +1,47 @@
+# Task Memory Services Configuration
+
+# Algorithm Configuration
+# Options: ACE (Agentic Context Engineering) or RB/REASONINGBANK (ReasoningBank) or REME
+RETRIEVAL_ALGO: "REME" # ACE/RB/REME
+SUMMARY_ALGO: "REME" # ACE/RB/REME
+MANAGEMENT_ALGO: "REME" # ACE/RB/REME
+
+USE_GOLDLABEL: true 
+
+# MaTTS Configuration (Memory-aware Test-Time Scaling)
+# Only applicable when ALGO=RB
+MATTS_DEFAULT_K: 3 # Default scaling factor
+MATTS_DEFAULT_TEMPERATURE: 0.9 # Default temperature for parallel scaling
+MATTS_DEFAULT_MODE: "parallel"  # Options: none/parallel/sequential/combined
+
+# ACE
+USE_GROUNDTRUTH: true
+MAX_PLAYBOOK_SIZE: 50
+
+# RB
+TOPK_QUERY: 1
+
+# REME
+# Retrieval
+TOPK_RETRIEVAL: 10
+LLM_RERANK: true
+TOPK_RERANK: 5
+LLM_REWRITE: true
+
+# Extraction
+MEMORY_VALIDATION: true
+EXTRACT_BEST_TRAJ: true
+EXTRACT_WORST_TRAJ: true
+EXTRACT_COMPARATIVE_TRAJ: true
+
+# Management (Pending Implementation)
+MEMORY_DEDUPLICATION: true
+MEMORY_UPDATE: true
+DELETE_USAGE_THRESHOLD: 5
+DELETE_UTILITY_THRESHOLD: 0.5
+
+# Ours (Pending Implementation)
+COMBINED_MATTS_PROMPT: "diversity" # Options : diversity/refine
+
+# Logging
+LOG_LEVEL: "INFO"
