@@ -59,7 +59,7 @@ if sys_operation is None:
 skill_rail = SkillRail(
     skills_dir=str(_SKILLS_DIR),
     operation=sys_operation,
-    skill_mode="auto_list",
+    skill_mode=...,
 )
 ```
 
@@ -119,6 +119,51 @@ def _bind_evolution_service(self, evo_service: EvolutionService) -> bool:
 - 新实例刚创建时读不到 evolution service
 - 模型热更新后 evolution 能力丢失
 
+### 5. `skill_mode` 支持配置
+
+当前 `SkillRail` 支持通过 `react.skill_mode` 配置技能暴露模式，合法值只有：
+
+- `auto_list`
+- `all`
+
+配置示例：
+
+```yaml
+react:
+  skill_mode: auto_list
+```
+
+当前代码在 `create_instance()` 和 `reload_agent_config()` 中都会读取该配置，并传给 `SkillRail`。
+
+行为说明：
+
+- `auto_list`：注册 `list_skill` 工具，让模型按需发现技能，默认使用这个模式
+- `all`：将所有技能描述直接注入 system prompt
+
+### 6. `skill_mode` 非法值回退策略
+
+为了避免配置写错导致整套技能能力失效，`interface.py` 中新增了 `JiuWenClaw._resolve_skill_mode()` 进行校验：
+
+- 如果配置值合法，则按配置生效
+- 如果配置值非法、为空、或类型不正确，则记录 warning，并自动回退到 `auto_list`
+
+这样即使工作区里的 `config.yaml` 被手工改坏，也不会因为 `SkillRail` 构造抛出 `ValueError` 而退化成 `skill_rail = None`。
+
+## 配置说明
+
+模板配置 `jiuwenclaw/resources/config.yaml` 已新增：
+
+```yaml
+react:
+  skill_mode: auto_list
+```
+
+补充说明：
+
+- 这是模板默认值
+- 现有用户工作区中的 `config/config.yaml` 不会因为模板更新而自动补入该字段
+- 对于未显式配置 `skill_mode` 的已有环境，运行时仍会走默认值 `auto_list`
+
 ## 架构说明
 
 当前主链路如下：
@@ -155,13 +200,16 @@ JiuWenClaw
 1. 启动服务，确认 `create_instance()` 不再因 `SkillRail` 参数缺失报错。
 2. 发起一次普通对话，确认 agent 可以正常工作且不影响现有工具链。
 3. 观察日志，确认 `SkillRail` 成功创建，或在缺少 `sys_operation` 时输出明确 warning。
-4. 启用 evolution 配置后，验证 `/evolve`、自动演进或审批回传链路能正确命中内部 agent。
-5. 调用 `reload_agent_config()`，确认模型热更新后技能和 evolution 都没有丢失。
+4. 分别验证 `skill_mode=auto_list` 和 `skill_mode=all` 的行为是否符合预期。
+5. 故意把 `skill_mode` 改成非法值，确认系统记录 warning 并回退到 `auto_list`。
+6. 启用 evolution 配置后，验证 `/evolve`、自动演进或审批回传链路能正确命中内部 agent。
+7. 调用 `reload_agent_config()`，确认模型热更新后技能和 evolution 都没有丢失。
 
 ## 总结
 
 当前迁移已经完成到“主链路可用”状态：
 
 - 技能侧：主链路已切到 `SkillRail`
+- 配置侧：`skill_mode` 已支持配置，且非法值会安全回退
 - evolution 侧：已修正为面向真实运行目标对象绑定
 - 自定义 `react_agent.py`：相关 skill 改动保留，但目前仅作为预留实现
