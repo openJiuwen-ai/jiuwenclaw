@@ -205,21 +205,25 @@ class DialogueCompressor(ContextProcessor):
             self,
             messages_to_compress: List[BaseMessage],
             context: ModelContext
-    ) -> Optional[BaseMessage]:
+    ) -> BaseMessage:
         messages = [SystemMessage(content=self._compressed_prompt)] + messages_to_compress
         response = await self._model.invoke(messages, output_parser=JsonOutputParser())
         summary = response.parser_content
         if summary:
             summary = summary.get("summary", "")
-            offload_message = await self.offload_messages(
-                role="assistant",
-                content=summary,
-                messages=messages,
-                context=context
-            )
-            return offload_message
         else:
-            return None
+            summary = response.content
+            logger.warning(
+                f"JSON parsing failed, using raw LLM output as summary. "
+                f"Output: {summary[:200]}..."
+            )
+        offload_message = await self.offload_messages(
+            role="assistant",
+            content=summary,
+            messages=messages,
+            context=context
+        )
+        return offload_message
 
     def load_state(self, state: Dict[str, Any]) -> None:
         pass

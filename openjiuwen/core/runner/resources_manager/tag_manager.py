@@ -93,6 +93,19 @@ class TagMgr:
                     reason="Resource does not exist"
                 )
 
+            current_tags = self._resource_tags[resource_id]
+            
+            # 检查是否所有要删除的标签都存在
+            if not skip_if_not_exists:
+                non_existent_tags = tags_to_remove - current_tags
+                if non_existent_tags:
+                    raise build_error(
+                        StatusCode.RESOURCE_TAG_REMOVE_RESOURCE_TAG_ERROR,
+                        resource_id=resource_id,
+                        tags=list(non_existent_tags),
+                        reason="Tag does not exist"
+                    )
+
             remaining_tags = self._remove_resource_tags(resource_id, tags_to_remove)
 
             logger.info(

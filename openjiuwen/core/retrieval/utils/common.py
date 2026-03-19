@@ -19,3 +19,17 @@ def deduplicate(data: Iterable[T], key: Callable[[T], Hashable] = lambda x: x) -
             seen.add(k)
             result.append(item)
     return result
+
+
+def create_milvus_alias(alias: str | None, uri: str, user: str = "", token: str | None = None) -> str:
+    """Generate Milvus connection alias if not provided"""
+    import hashlib
+
+    if alias:
+        return alias
+    auth_info = user or "noauth"
+    if token:
+        md5 = hashlib.new("md5", usedforsecurity=False)
+        md5.update(token.encode())
+        auth_info = md5.hexdigest()
+    return "-".join(elem for elem in ["kb", uri, auth_info] if elem)

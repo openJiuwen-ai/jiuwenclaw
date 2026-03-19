@@ -11,6 +11,7 @@ from openjiuwen.core.foundation.tool import ToolCard
 from openjiuwen.core.single_agent.schema.agent_card import (
     AgentCard,
 )
+from openjiuwen.core.sys_operation import SysOperation
 from openjiuwen.deepagents.schema.stop_condition import (
     StopCondition,
 )
@@ -42,6 +43,7 @@ class DeepAgentConfig:
         workspace: Workspace path for file operations.
         skills: Skill definitions (P1).
         backend: Backend protocol instance (P2).
+        sys_operation: System operation.
         completion_timeout: Max seconds to wait for a
             single task-loop iteration to complete.
             Used by the outer loop's wait_completion().
@@ -58,4 +60,5 @@ class DeepAgentConfig:
     workspace: Optional[Workspace] = None
     skills: Optional[Union[str, List[str]]] = None
     backend: Optional[Any] = None
+    sys_operation: Optional[SysOperation] = None
     completion_timeout: float = 600.0

@@ -11,7 +11,6 @@ from openjiuwen.core.runner import Runner
 from openjiuwen.core.single_agent.rail.base import (
     AgentCallbackContext,
 )
-from openjiuwen.core.sys_operation import SysOperation
 from openjiuwen.deepagents.rails.base import DeepAgentRail
 from openjiuwen.deepagents.schema.state import (
     load_state,
@@ -42,14 +41,9 @@ class TaskPlanningRail(DeepAgentRail):
 
     priority = 90
 
-    def __init__(
-        self,
-        operation: SysOperation,
-    ) -> None:
+    def __init__(self) -> None:
         super().__init__()
         self.tools = None
-        self.workspace: Optional[str] = None
-        self.sys_operation = operation
 
     def init(self, agent) -> None:
         """Register todo tools on the agent."""

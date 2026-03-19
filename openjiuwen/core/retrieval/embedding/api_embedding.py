@@ -10,7 +10,7 @@ import asyncio
 import os
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from itertools import chain
-from typing import List, Optional
+from typing import Any, List, Optional
 
 import requests
 
@@ -121,7 +121,7 @@ class APIEmbedding(Embedding):
         return self._executor
 
     @staticmethod
-    def validate_embed_docs(texts: List[str], kwargs: dict) -> list[str]:
+    def validate_embed_docs(texts: List[str | Any], kwargs: dict) -> list[str]:
         """Validate input for batch embedding request and return a list of non-empty documents"""
         if not texts:
             raise build_error(StatusCode.RETRIEVAL_EMBEDDING_INPUT_INVALID, error_msg="Empty texts list provided")

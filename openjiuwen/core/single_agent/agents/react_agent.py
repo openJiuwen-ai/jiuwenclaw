@@ -1,6 +1,7 @@
-# Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
-"""ReActAgent Implementation
+# coding: utf-8
+# Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 
+"""ReActAgent Implementation
 ReAct (Reasoning + Acting) paradigm Agent implementation
 
 Created on: 2025-11-25
@@ -500,6 +501,10 @@ class ReActAgent(BaseAgent):
 
         ai_message = await self._railed_model_call(ctx)
 
+        # @rail returns None when a before hook requested force_finish.
+        if ai_message is None:
+            return None
+
         log_llm_response(logger, ai_message)
 
         return ai_message
@@ -989,6 +994,13 @@ class ReActAgent(BaseAgent):
                         logger.info(f"ReAct iteration {iteration + 1}/{self._config.max_iterations}")
 
                         ai_message = await self._call_model(ctx, context, system_messages, tools)
+
+                        finish = ctx.consume_force_finish()
+                        if finish:
+                            await self.context_engine.save_contexts(session)
+                            invoke_inputs.result = finish.result
+                            break
+
                         await context.add_messages(
                             AssistantMessage(content=ai_message.content, tool_calls=ai_message.tool_calls)
                         )
@@ -1000,6 +1012,13 @@ class ReActAgent(BaseAgent):
                             break
 
                         results = await self._execute_tool_call(ctx, ai_message.tool_calls, session, context)
+
+                        finish = ctx.consume_force_finish()
+                        if finish:
+                            await self.context_engine.save_contexts(session)
+                            invoke_inputs.result = finish.result
+                            break
+
                         interrupt = self._after_execute_tool_call(
                             results, ai_message.tool_calls, ai_message, iteration,
                             original_query=ctx.extra.get("_original_query", ""),

@@ -60,36 +60,71 @@ class BaseResponseDecompressor(ABC):
 
 
 class JsonResponseParser(BaseResponseParser):
-    """JSON response parser"""
+    """JSON response parser.
+    
+    Handles JSON responses with standard content types (application/json, text/json)
+    and RFC 6839 structured syntax suffix types (e.g., application/video+json, application/hal+json).
+    """
 
     def can_parse(self, content_type: str, status_code: int, **kwargs) -> bool:
-        """Check if this is a JSON response"""
+        """Check if this is a JSON response.
+        
+        Supports:
+        - Standard JSON types: application/json, text/json, text/x-json, application/javascript
+        - RFC 6839 +json suffix types: application/video+json, application/hal+json, etc.
+        - No Content-Type with JSON Accept header
+        """
+        if not content_type:
+            # No Content-Type header, check Accept header as fallback
+            if status_code == 200:
+                accept = kwargs.get('Accept', '').lower()
+                if 'application/json' in accept or 'json' in accept:
+                    return True
+            return False
+        
+        # Normalize content type for case-insensitive comparison
+        content_type_lower = content_type.lower()
+        
+        # Standard JSON content types (exact match)
         json_content_types = [
             'application/json',
             'text/json',
             'text/x-json',
             'application/javascript',
         ]
-        if content_type in json_content_types:
+        if content_type_lower in json_content_types:
             return True
-        if 'application/json' in content_type:
+        
+        # RFC 6839 structured syntax suffix: +json (e.g., application/video+json)
+        if content_type_lower.endswith('+json'):
             return True
-        if 'text/json' in content_type:
+        
+        # Legacy check for 'application/json' or 'text/json' as substring
+        if 'application/json' in content_type_lower or 'text/json' in content_type_lower:
             return True
-        if not content_type and status_code == 200:
-            accept = kwargs.get('Accept', '').lower()
-            if 'application/json' in accept or 'json' in accept:
-                return True
+        
         return False
 
     def parse(self, response_data: bytes, encoding: Optional[str] = None, **kwargs) -> Dict[str, Any]:
-        """Parse JSON response data"""
+        """Parse JSON response data.
+        
+        Args:
+            response_data: Raw binary response data (bytes) containing JSON text
+            encoding: Optional encoding hint (charset extracted from Content-Type)
+            **kwargs: Response headers including Content-Type
+            
+        Returns:
+            Parsed JSON as dictionary
+            
+        Raises:
+            ValueError: If JSON parsing fails
+        """
         content_type = kwargs.get('Content-Type', '')
 
         if not response_data:
             return {}
 
-        # Try to decode to text first
+        # Decode bytes to text using charset from Content-Type header
         decoded_text = self._decode_bytes(response_data, content_type)
 
         # Parse JSON

@@ -30,6 +30,7 @@ from openjiuwen.core.runner.runner_config import (
 )
 from openjiuwen.core.session import Config
 from openjiuwen.core.session.checkpointer import CheckpointerFactory
+from openjiuwen.core.session.agent_group import create_agent_group_session
 from openjiuwen.core.session.stream import BaseStreamMode
 from openjiuwen.core.single_agent import (
     BaseAgent,
@@ -249,7 +250,7 @@ class _RunnerImpl:
             context: model context
             envs: Environment variables or configuration overrides
         """
-        agent_instance, agent_session = await self._prepare_agent(agent, inputs)
+        agent_instance, agent_session = await self._prepare_agent(agent, inputs, session)
         if isinstance(agent_instance, RemoteAgent):
             res = await agent_instance.invoke(inputs)
         elif isinstance(agent_instance, LegacyBaseAgent):
@@ -311,7 +312,14 @@ class _RunnerImpl:
             envs: Environment variables or configuration overrides
         """
         agent_group_instance = await self._prepare_agent_group(agent_group)
-        return await agent_group_instance.invoke(inputs)
+        agent_group_session = self._create_agent_group_session(agent_group_instance, session)
+        await agent_group_session.pre_run(inputs=inputs if isinstance(inputs, dict) else None)
+        agent_group_instance.runtime.bind_group_session(agent_group_session)
+        try:
+            return await agent_group_instance.invoke(inputs, session=agent_group_session)
+        finally:
+            agent_group_instance.runtime.unbind_group_session(agent_group_session.get_session_id())
+            await agent_group_session.post_run()
 
     async def run_agent_group_streaming(self,
                                         agent_group: Union[str, 'BaseGroup'],
@@ -334,8 +342,15 @@ class _RunnerImpl:
             envs: Environment variables or configuration overrides
         """
         agent_group_instance = await self._prepare_agent_group(agent_group)
-        async for chunk in agent_group_instance.stream(inputs):
-            yield chunk
+        agent_group_session = self._create_agent_group_session(agent_group_instance, session)
+        await agent_group_session.pre_run(inputs=inputs if isinstance(inputs, dict) else None)
+        agent_group_instance.runtime.bind_group_session(agent_group_session)
+        try:
+            async for chunk in agent_group_instance.stream(inputs, session=agent_group_session):
+                yield chunk
+        finally:
+            agent_group_instance.runtime.unbind_group_session(agent_group_session.get_session_id())
+            await agent_group_session.post_run()
 
     async def release(self, session_id: str):
         """
@@ -365,6 +380,15 @@ class _RunnerImpl:
 
     async def _prepare_agent(self, agent: Union[str, BaseAgent], inputs: Any,
                              session: Optional[str | AgentSession] = None):
+        if isinstance(session, AgentSession):
+            if isinstance(agent, str):
+                agent_instance = await self._resource_manager.get_agent(agent_id=agent)
+                if agent_instance is None:
+                    raise build_error(StatusCode.RUNNER_RUN_AGENT_ERROR, agent_id=agent, reason="agent not exist")
+                await session.pre_run(inputs=inputs)
+                return agent_instance, session
+            await session.pre_run(inputs=inputs)
+            return agent, session
         session_id = inputs.get(self._AGENT_CONVERSATION_ID,
                                 session if isinstance(session, str) else self._DEFAULT_AGENT_SESSION_ID)
         if isinstance(agent, str):
@@ -406,6 +430,21 @@ class _RunnerImpl:
                 group_id=agent_group
             )
         return agent_group
+
+    @staticmethod
+    def _create_agent_group_session(agent_group: BaseGroup, session: Optional[str | AgentGroupSession | AgentSession]):
+        if isinstance(session, AgentGroupSession):
+            return session
+        group_id = getattr(agent_group.card, "id", None) or getattr(agent_group.card, "name", "agent_group")
+        if isinstance(session, AgentSession):
+            return create_agent_group_session(
+                session_id=session.get_session_id(),
+                envs=session.get_envs(),
+                group_id=group_id,
+            )
+        if isinstance(session, str):
+            return create_agent_group_session(session_id=session, group_id=group_id)
+        return create_agent_group_session(group_id=group_id)
 
     @staticmethod
     def _create_agent_session(agent, session_id):

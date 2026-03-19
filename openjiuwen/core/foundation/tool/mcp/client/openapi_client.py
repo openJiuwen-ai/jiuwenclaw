@@ -140,7 +140,7 @@ class OpenApiClient(McpClient):
         generated_name = self._get_unique_name(original_name)
 
         openapi_tool = OpenAPITool(
-            name=self._get_unique_name(original_name),
+            name=generated_name,
             route=http_route,
             client=self._client,
             director=self._director,
@@ -168,6 +168,11 @@ class OpenApiClient(McpClient):
             except Exception as e:
                 logger.error(f"Invalid openapi spec: {e}")
                 return False
+
+            base_url = (self.openapi_spec.get("servers") or [{}])[0].get("url", "")
+            if base_url:
+                await self._client.aclose()
+                self._client = httpx.AsyncClient(base_url=base_url)
 
             http_routes = parse_openapi_to_http_routes(self.openapi_spec)
 
@@ -198,9 +203,12 @@ class OpenApiClient(McpClient):
         return tools_info
 
     async def call_tool(self, tool_name, arguments: dict, *, timeout: float = NO_TIMEOUT) -> Any:
+        from openjiuwen.core.common.exception.errors import ExecutionError
         try:
             tool_result = await self._tool_manager.call_tool(tool_name, arguments)
             return tool_result.to_mcp_result()
+        except ExecutionError:
+            raise
         except Exception as e:
             raise build_error(StatusCode.TOOL_OPENAPI_CLIENT_EXECUTION_ERROR, cause=e, reason=e)
 

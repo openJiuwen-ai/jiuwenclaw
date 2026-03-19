@@ -3,22 +3,19 @@
 
 """Group Configuration Module
 
-This module defines the runtime configuration for agent groups.
+Defines the runtime configuration for agent groups.
 """
 
 from pydantic import BaseModel, Field
 
 
 class GroupConfig(BaseModel):
-    """Group Runtime Configuration
-
-    Mutable runtime parameters for agent group execution.
-    Follows the same pattern as ReActAgentConfig.
+    """Mutable runtime parameters for an agent group.
 
     Attributes:
-        max_agents: Maximum number of agents allowed in group
+        max_agents: Maximum number of agents allowed in the group
         max_concurrent_messages: Maximum concurrent message processing
-        message_timeout: Timeout for message processing (seconds)
+        message_timeout: Message processing timeout in seconds
     """
     max_agents: int = Field(
         default=10,

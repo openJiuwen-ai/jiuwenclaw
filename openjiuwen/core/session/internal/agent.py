@@ -27,11 +27,16 @@ class AgentSession(BaseSession):
             session_id: str,
             config: Config = None,
             checkpointer: Checkpointer | None = None,
-            card=None):
+            card=None,
+            stream_writer_manager: StreamWriterManager | None = None):
         self._session_id = session_id
         self._config = config
         self._state = StateCollection()
-        self._stream_writer_manager = StreamWriterManager(StreamEmitter())
+        self._stream_writer_manager = (
+            stream_writer_manager
+            if stream_writer_manager is not None
+            else StreamWriterManager(StreamEmitter())
+        )
         tracer = Tracer()
         tracer.init(self._stream_writer_manager)
         self._tracer = tracer

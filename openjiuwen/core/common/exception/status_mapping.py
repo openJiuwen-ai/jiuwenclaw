@@ -69,6 +69,9 @@ _MANUAL_OVERRIDES_RAW = {
     "STORE_GRAPH_BACKEND_ALREADY_EXISTS": "ValidationError",
     "STORE_GRAPH_PROTOCOL_NOT_IMPLEMENTED": "ValidationError",
     "STORE_GRAPH_BACKEND_NOT_FOUND": "ValidationError",
+    "AGENT_RL_PROXY_SERVER_START_FAILED": "FrameworkError",
+    "AGENT_RL_PROCESSOR_NOT_FOUND": "ValidationError",
+    "AGENT_RL_REWARD_NOT_FOUND": "ValidationError",
 }
 
 # Build the actual mapping only for StatusCode members that exist in the current enum.

@@ -14,6 +14,7 @@ from openjiuwen.core.single_agent.rail.base import (
     ToolCallInputs,
     TaskIterationInputs,
     EventInputs,
+    ForceFinishRequest,
     rail,
 )
 
@@ -30,5 +31,6 @@ __all__ = [
     "ToolCallInputs",
     "TaskIterationInputs",
     "EventInputs",
+    "ForceFinishRequest",
     "rail",
 ]

@@ -1,0 +1,32 @@
+entity_extraction_conversation_cn:
+  description: "Entity extraction template for conversations (Chinese)"
+
+entity_extraction_document_cn:
+  description: "Entity extraction template for documents (Chinese)"
+
+entity_extraction_dedupe_entity_cn:
+  description: "Entity extraction template for entity de-deplication (Chinese)"
+
+entity_extraction_json_cn:
+  description: "Entity extraction template for JSON input (Chinese)"
+
+entity_extraction_summary_create_cn:
+  description: "Entity extraction template for creating summaries (Chinese)"
+
+entity_extraction_entity_merge_cn:
+  description: "Entity extraction template for merging entities (Chinese)"
+
+entity_extraction_relation_cn:
+  description: "Entity relation extraction template (Chinese)"
+
+entity_extraction_relation_filter_cn:
+  description: "Entity relation filtering template (Chinese)"
+
+entity_extraction_dedupe_relation_cn:
+  description: "Entity extraction template for relation de-deplication (Chinese)"
+
+entity_extraction_timezone_cn:
+  description: "Timezone extraction template (Chinese)"
+
+entity_extraction_check_missing_cn:
+  description: "[Unused] Entity extraction template for finding missing entities (Chinese)"

@@ -15,6 +15,23 @@ model_client_config = ModelClientConfig(
 model_config = ModelRequestConfig(
     model="DeepSeek-V3-UOxkd3",
 )
+"""
+https://dashscope.aliyuncs.com/compatible-mode/v1    
+sk-9e049f37b7ea42a287601fbc2054b566    
+ openai     
+ qwen-plus
+"""
+# model_client_config = ModelClientConfig(
+#     client_id="jk0009",
+#     client_provider="DashScope",
+#     api_key="sk-9e049f37b7ea42a287601fbc2054b566",
+#     api_base="https://dashscope.aliyuncs.com/compatible-mode/v1",
+#     verify_ssl=False
+# )
+#
+# model_config = ModelRequestConfig(
+#     model="qwen3.5-plus",
+# )
 
 model1 = Model(
     model_config=model_config,
@@ -57,7 +74,9 @@ async def async_astream():
     res_tt = None
     async for res in model1.stream(messages="你好", tools=tools):
         print(res, end="", flush=True)
+        res_tt = res_tt + res
         print()  # 换行
+    print(res_tt)
 
     print()  # 换行
 

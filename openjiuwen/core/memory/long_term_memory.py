@@ -86,7 +86,7 @@ class LongTermMemory(metaclass=Singleton):
         self.generator = None
         self.fragment_type = None
         # llm
-        self._base_llm: Tuple[str, Model] | None = None
+        self._base_llm: Model | None = None
         # embedding
         self._base_embed: Embedding | None = None
         # embedding model cache
@@ -215,7 +215,7 @@ class LongTermMemory(metaclass=Singleton):
         if config.default_model_cfg and config.default_model_client_cfg:
             llm = LongTermMemory._get_llm_from_config(model_config=config.default_model_cfg,
                                                     model_client_config=config.default_model_client_cfg)
-            self._base_llm = (config.default_model_cfg.model_name, llm)
+            self._base_llm = llm
 
     async def set_scope_config(self, scope_id: str, memory_scope_config: MemoryScopeConfig) -> bool:
         """
@@ -1152,25 +1152,21 @@ class LongTermMemory(metaclass=Singleton):
         )
         return None
 
-    async def _get_scope_llm(self, scope_id: str) -> Tuple[str, Model]:
+    async def _get_scope_llm(self, scope_id: str) -> Model:
         """
-        Get both LLM and embedding model for the scope with a single kv_store access.
-        Note: Embedding model is now set through _set_semantic_store_embedding_model method,
-        so this method only returns LLM for backward compatibility.
+        Get LLM for the scope.
 
         Args:
             scope_id: scope/scope identifier
 
         Returns:
-            Tuple[str, Model]: LLM model name and instance
+            Model: LLM instance
         """
         try:
             config = await self._get_scope_config(scope_id)
 
             if config and config.model_cfg and config.model_client_cfg:
-                llm = (config.model_cfg.model_name,
-                       LongTermMemory._get_llm_from_config(config.model_cfg, config.model_client_cfg))
-                return llm
+                return LongTermMemory._get_llm_from_config(config.model_cfg, config.model_client_cfg)
 
             # If the LLM fails to be obtained, try to use the system default configuration.
             elif not self._sys_mem_config:
@@ -1188,10 +1184,8 @@ class LongTermMemory(metaclass=Singleton):
                     scope_id=scope_id
                 )
             else:
-                llm = (self._sys_mem_config.default_model_cfg.model_name,
-                       LongTermMemory._get_llm_from_config(self._sys_mem_config.default_model_cfg,
-                                                           self._sys_mem_config.default_model_client_cfg))
-                return llm
+                return LongTermMemory._get_llm_from_config(self._sys_mem_config.default_model_cfg,
+                                                         self._sys_mem_config.default_model_client_cfg)
             return self._base_llm
 
         except Exception as e:

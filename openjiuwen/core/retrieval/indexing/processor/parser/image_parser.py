@@ -10,7 +10,7 @@ from openjiuwen.core.retrieval.indexing.processor.parser.base import Parser
 from openjiuwen.core.retrieval.indexing.processor.parser.captioner import ImageCaptioner
 
 
-@register_parser([".png", ".jpg", ".jpeg", ".webp", ".gif", "jfif"])
+@register_parser([".png", ".jpg", ".jpeg", ".webp", ".gif", ".jfif"])
 class ImageParser(Parser):
     """Parser for image files to generate captions."""
 

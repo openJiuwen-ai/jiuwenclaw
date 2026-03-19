@@ -588,7 +588,26 @@ class OpenAIModelClient(BaseModelClient):
             AssistantMessageChunk or None
         """
         if not chunk.choices:
-            return None
+            # Adaptation of the last-frame data format for the MaaS platform
+            if chunk.usage:
+                usage_metadata = None
+                if hasattr(chunk, 'usage') and chunk.usage:
+                    usage_metadata = UsageMetadata(
+                        model_name=self.model_config.model_name,
+                        input_tokens=chunk.usage.prompt_tokens if hasattr(chunk.usage, 'prompt_tokens') else 0,
+                        output_tokens=chunk.usage.completion_tokens if hasattr(chunk.usage, 'completion_tokens') else 0,
+                        total_tokens=chunk.usage.total_tokens if hasattr(chunk.usage, 'total_tokens') else 0,
+                    )
+
+                return AssistantMessageChunk(
+                    content="",
+                    reasoning_content=None,
+                    tool_calls=None,
+                    usage_metadata=usage_metadata,
+                    finish_reason="stop"
+                )
+            else:
+                return None
 
         choice = chunk.choices[0]
         delta = choice.delta

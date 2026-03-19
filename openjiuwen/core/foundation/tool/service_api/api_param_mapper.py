@@ -59,21 +59,50 @@ class APIParamMapper:
         Returns:
             Dictionary mapping APIParamLocation to dictionary of parameters for that location
         """
+
+        # Initialize result buckets
+        result = {location: {} for location in APIParamLocation}
+
+        # If no schema, everything goes to default location
         if self.schema is None:
-            result = {default_location: inputs}
+            result[default_location] = inputs
         else:
-            result = {location: {} for location in APIParamLocation}
-            for param_name, param_schema in self.schema.get("properties", {}).items():
-                if param_name in inputs:
-                    location_str = param_schema.get(self._LOCATION, default_location)
-                    if location_str:
-                        location = APIParamLocation(location_str.lower()) if isinstance(location_str,
-                                                                                        str) else location_str
-                        result.get(location, {}).update({param_name: inputs.get(param_name)})
+            schema_props = self.schema.get("properties", {})
+
+            for param_name, param_schema in schema_props.items():
+                if param_name not in inputs:
+                    continue
+
+                value = inputs[param_name]
+                location_raw = param_schema.get(self._LOCATION)
+
+                # Normalize location
+                if isinstance(location_raw, str):
+                    # Schema explicitly defines location
+                    location = APIParamLocation(location_raw.lower())
+                elif isinstance(location_raw, APIParamLocation):
+                    location = location_raw
+                else:
+                    # No explicit location → fallback rules
+                    # GET / HEAD / DELETE default to QUERY
+                    if default_location == APIParamLocation.BODY:
+                        location = APIParamLocation.BODY
+                    else:
+                        location = APIParamLocation.QUERY
+
+                result[location][param_name] = value
+
+        # Merge defaults (inputs override defaults, but None/'' preserve defaults)
         for location in [APIParamLocation.PATH, APIParamLocation.QUERY, APIParamLocation.HEADER]:
-            # Input values override default values (dictionary unpacking order matters)
-            if location not in result:
-                result[location] = {}
-            result[location] = {**self.defaults.get(location, {}), **result[location]}
+            merged = {}
+            defaults = self.defaults.get(location, {})
+            mapped = result[location]
+            # Start with defaults
+            merged.update(defaults)
+            # Override with input values only if they are not None or empty string
+            for key, value in mapped.items():
+                if value is not None and value != '':
+                    merged[key] = value
+            result[location] = merged
 
         return result

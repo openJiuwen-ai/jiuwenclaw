@@ -386,6 +386,36 @@ class StatusCode(Enum):
     AGENT_GROUP_ADD_RUNTIME_ERROR = (132000, "agent group_add runtime error, reason: {error_msg}")
     AGENT_GROUP_CREATE_RUNTIME_ERROR = (132001, "agent group_create runtime error, reason: {error_msg}")
     AGENT_GROUP_EXECUTION_ERROR = (132002, "agent group execution error, reason: {error_msg}")
+    AGENT_GROUP_AGENT_NOT_FOUND = (132003, "agent group agent not found error, reason: {error_msg}")
+
+    # =========================
+    # DevTools / AgentBuilder 140000 - 140099
+    # =========================
+
+    # AgentBuilder - Clarifier 140000 - 140029
+    AGENT_BUILDER_RESOURCE_PARSE_ERROR = (
+        140000, "agent builder resource parse error, resource_type='{resource_type}', error='{reason}'")
+    AGENT_BUILDER_LLM_SERVICE_ERROR = (
+        140001, "agent builder llm service error, error='{reason}'")
+
+    # AgentBuilder - Generator 140030 - 140059
+    AGENT_BUILDER_GENERATOR_PARSE_ERROR = (
+        140030, "agent builder generator parse error, error='{reason}'")
+
+    # AgentBuilder - Transformer 140060 - 140099
+    AGENT_BUILDER_TRANSFORMER_ERROR = (
+        140060, "agent builder transformer error, error='{reason}'")
+
+    
+    WORKFLOW_DL_GENERATION_ERROR = (
+        140061,
+        "workflow dl generation error, reason: {error_msg}")
+    WORKFLOW_INTENTION_DETECT_ERROR = (
+        140062,
+        "workflow intention detect error, reason: {error_msg}")
+    LLM_AGENT_STATE_ERROR = (
+        140063,
+        "llm agent state error, reason: {error_msg}")
 
     # =========================
     # ContextEngine 150000 - 154999
@@ -553,6 +583,23 @@ class StatusCode(Enum):
     )
     MEMORY_MIGRATE_MEMORY_EXECUTION_ERROR = (158010, "failed to migrate memory, reason: {error_msg}")
 
+    # Memory Engine - Common Utility 158200 - 158299
+    MEMORY_GRAPH_LANGUAGE_INVALID = (158200, "graph memory language invalid: {error_msg}")
+    MEMORY_GRAPH_EMBEDDING_CALL_FAILED = (158201, "graph memory embedding call failed, reason: {error_msg}")
+    MEMORY_GRAPH_EMBED_MODEL_NOT_FOUND = (158202, "graph memory embedder not configured: {error_msg}")
+    MEMORY_GRAPH_INVOKE_LLM_FAILED = (158203, "graph memory LLM invoke failed, reason: {error_msg}")
+    MEMORY_GRAPH_PROMPT_FILES_MISSING = (158204, "graph memory prompt files not found in directory {prompt_dir}")
+
+    # =========================
+    # DevTools / AgentBuilder 140000 - 140099
+    # =========================
+
+    AGENT_BUILDER_RESOURCE_RETRIEVE_ERROR = (
+        140031, "agent builder resource retrieve failed, error='{reason}'")
+    AGENT_BUILDER_AGENT_TYPE_NOT_SUPPORTED = (
+        140032, "agent builder agent_type is not supported, agent_type='{agent_type}', "
+                "supported_types='{supported_types}'")
+
     # =========================
     # Foundation Tool 160000–169999
     # =========================
@@ -578,6 +625,47 @@ class StatusCode(Enum):
     # Optimization Toolchain - End-to-end Performance Optimization 171000 - 171999
 
     # Optimization Toolchain - AgentRL 172000 - 172999
+    AGENT_RL_PROXY_NOT_INITIALIZED = (
+        172000, "agent_rl proxy has not been initialized, reason: {error_msg}")
+    AGENT_RL_PROXY_SERVER_START_FAILED = (
+        172001, "agent_rl proxy server failed to start, host='{host}', port='{port}'")
+
+    # AgentRL - Executor 172010 - 172019
+    AGENT_RL_EXECUTOR_NOT_INITIALIZED = (
+        172010, "agent_rl executor is not configured, reason: {error_msg}")
+
+    # AgentRL - Processor 172020 - 172029
+    AGENT_RL_PROCESSOR_NOT_FOUND = (
+        172020,
+        "agent_rl {processor_type} processor not found, name='{name}', available='{available}'")
+
+    # AgentRL - Dependency 172030 - 172039
+    AGENT_RL_DEPENDENCY_INIT_FAILED = (
+        172030, "agent_rl required dependency initialization failed, reason: {error_msg}")
+
+    # AgentRL - Rollout 172040 - 172049
+    AGENT_RL_ROLLOUT_BATCH_EXECUTION_ERROR = (
+        172040, "agent_rl rollout batch execution error, reason: {error_msg}")
+
+    # AgentRL - Trainer / Strategy 172050 - 172059
+    AGENT_RL_STRATEGY_NOT_SUPPORTED = (
+        172050, "agent_rl training strategy is not supported, strategy='{strategy}'")
+    AGENT_RL_TRAINER_NOT_INITIALIZED = (
+        172051, "agent_rl trainer not initialized, reason: {error_msg}")
+    AGENT_RL_TASK_RUNNER_NOT_INITIALIZED = (
+        172052, "agent_rl task runner not initialized, reason: {error_msg}")
+
+    # AgentRL - Dataset / Batch 172060 - 172069
+    AGENT_RL_VALIDATION_DATASET_INVALID = (
+        172060, "agent_rl validation dataset is invalid, reason: {error_msg}")
+    AGENT_RL_BATCH_DATA_TYPE_INVALID = (
+        172061, "agent_rl batch data type is invalid, data_type='{data_type}'")
+
+    # AgentRL - Reward 172070 - 172079
+    AGENT_RL_REWARD_NAME_INVALID = (
+        172070, "agent_rl reward name is invalid, reason: {error_msg}")
+    AGENT_RL_REWARD_NOT_FOUND = (
+        172071, "agent_rl reward function not found, name='{name}'")
 
     # Optimization Toolchain - Prompt Builder 173000 - 173999
     TOOLCHAIN_META_TEMPLATE_EXECUTION_ERROR = (

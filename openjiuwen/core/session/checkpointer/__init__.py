@@ -6,6 +6,7 @@ from openjiuwen.core.session.checkpointer.base import (
     build_key_with_namespace,
     Checkpointer,
     SESSION_NAMESPACE_AGENT,
+    SESSION_NAMESPACE_AGENT_GROUP,
     SESSION_NAMESPACE_WORKFLOW,
     Storage,
     WORKFLOW_NAMESPACE_GRAPH,
@@ -23,6 +24,7 @@ __all__ = [
     "build_key",
     "build_key_with_namespace",
     "SESSION_NAMESPACE_AGENT",
+    "SESSION_NAMESPACE_AGENT_GROUP",
     "SESSION_NAMESPACE_WORKFLOW",
     "WORKFLOW_NAMESPACE_GRAPH",
 ]

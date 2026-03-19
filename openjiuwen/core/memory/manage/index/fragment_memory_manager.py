@@ -90,7 +90,7 @@ class FragmentMemoryManager(BaseMemoryManager):
         return process_conflict_info
 
     async def add_memories(self, user_id: str, scope_id: str, memories: dict[str, list[BaseMemoryUnit]],
-                      llm: Tuple[str, Model] | None = None, **kwargs):
+                      llm: Model | None = None, **kwargs):
         semantic_store = self._get_semantic_store("add", **kwargs)
         # Step 1: Prepare new memories dictionary for checker
         new_mem_content: dict[str, str] = {}

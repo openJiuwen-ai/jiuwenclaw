@@ -16,6 +16,8 @@ from openjiuwen.core.single_agent.rail.base import (
     AgentCallbackContext,
     AgentRail,
 )
+from openjiuwen.core.sys_operation import SysOperation
+from openjiuwen.deepagents.schema.workspace import Workspace
 
 DEEP_EVENT_METHOD_MAP: Dict[AgentCallbackEvent, str] = {
     AgentCallbackEvent.BEFORE_TASK_ITERATION: "before_task_iteration",
@@ -42,6 +44,15 @@ class DeepAgentRail(AgentRail):
             async def after_task_iteration(self, ctx):
                 print("iteration done")
     """
+    def __init__(self):
+        self.sys_operation = None
+        self.workspace = None
+
+    def set_workspace(self, workspace: Workspace):
+        self.workspace = workspace
+
+    def set_sys_operation(self, sys_operation: SysOperation):
+        self.sys_operation = sys_operation
 
     # -- 2 additional hook methods --
 

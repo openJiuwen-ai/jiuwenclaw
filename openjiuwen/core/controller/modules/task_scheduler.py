@@ -298,6 +298,11 @@ class TaskScheduler:
         """Get task executor registry"""
         return self._task_executor_registry
 
+    @property
+    def card(self):
+        """Get card """
+        return self._card
+
     def notify_task_submitted(self) -> None:
         """Wake up the schedule loop.
 

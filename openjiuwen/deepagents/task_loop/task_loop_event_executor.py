@@ -180,7 +180,7 @@ class TaskLoopEventExecutor(TaskExecutor):
 
         try:
             result = await agent.react_agent.invoke(
-                effective, session
+                effective, session, _streaming=True
             )
 
             # Mark completed in TaskPlan

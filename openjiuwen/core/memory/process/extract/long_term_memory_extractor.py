@@ -38,11 +38,10 @@ class LongTermMemoryExtractor:
             },
         )
         model_input = [{"role": "user", "content": prompt_content}]
-        model_name, model_client = extract_memory_paras.base_chat_model
         parser = JsonOutputParser()
         for attempt in range(retries):
             try:
-                response = await model_client.invoke(model=model_name, messages=model_input)
+                response = await extract_memory_paras.base_chat_model.invoke(messages=model_input)
                 result = await parser.parse(response.content)
                 if isinstance(result, dict):
                     return result

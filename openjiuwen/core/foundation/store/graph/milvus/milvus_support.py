@@ -10,7 +10,7 @@ import asyncio
 import math
 import time
 from types import MappingProxyType
-from typing import Any, Iterable, Mapping, Optional
+from typing import Any, Iterable, Literal, Mapping, Optional
 
 from pymilvus import AnnSearchRequest, MilvusClient, MilvusException
 
@@ -38,13 +38,15 @@ class MilvusGraphStore(GraphStore):
     """
 
     def __init__(self, config: GraphConfig):
+        extras = config.extras.copy()
         self._config = config
         self._embedder = None
+        self.alias = extras.setdefault("alias", f"graph-store-{id(self)}")
         self.client = MilvusClient(
             uri=config.uri,
             token=config.token,
             timeout=config.timeout,
-            **config.extras,
+            **extras,
         )
         if config.name not in self.client.list_databases(timeout=config.timeout):
             self.client.create_database(config.name, timeout=config.timeout)
@@ -75,6 +77,11 @@ class MilvusGraphStore(GraphStore):
     def embedder(self) -> Optional[Embedding]:
         """Access graph store embedder"""
         return self._embedder
+
+    @property
+    def return_similarity_score(self) -> Literal[True]:
+        """The returned score is gauranteed to be a similarity"""
+        return True
 
     @staticmethod
     async def rerank(query: str, candidates: list[Mapping], reranker: Reranker, language: str, **kwargs):
@@ -108,13 +115,12 @@ class MilvusGraphStore(GraphStore):
         return obj
 
     def attach_embedder(self, embedder: Embedding):
-        if isinstance(embedder, Embedding) and self.embedder is None:
+        if isinstance(embedder, Embedding):
+            if self._embedder is not None:
+                store_logger.warning(
+                    "%s.embedder has been redefined from %s to %s", type(self).__name__, self._embedder, embedder
+                )
             self._embedder = embedder
-        elif self._embedder is not None:
-            raise build_error(
-                StatusCode.STORE_GRAPH_PARAM_INVALID,
-                error_msg=f"Attempt to re-define {type(self).__name__}.embedder.",
-            )
         else:
             raise build_error(
                 StatusCode.STORE_GRAPH_PARAM_INVALID,
@@ -140,8 +146,10 @@ class MilvusGraphStore(GraphStore):
         except Exception as e:
             store_logger.error("Failed to close milvus graph store connection: %r", e)
 
-    async def refresh(self, *args, **kwargs):
-        return await asyncio.gather(*(self._flush_and_compact(col, *args, **kwargs) for col in self.field_def))
+    async def refresh(self, skip_compact: bool = True, **kwargs):
+        return await asyncio.gather(
+            *(self._flush_and_compact(col, skip_compact=skip_compact, **kwargs) for col in self.field_def)
+        )
 
     async def search(
         self,
@@ -387,6 +395,12 @@ class MilvusGraphStore(GraphStore):
     def _build_indices(self):
         """Build indices & collections for database"""
         self.embed_dim = self.config.embed_dim
+        if self.embedder and (self.embed_dim != self.embedder.dimension):
+            raise build_error(
+                StatusCode.STORE_GRAPH_PARAM_INVALID,
+                error_msg="MilvusGraphStore has different config.embed_dim and embedder.dimension "
+                f"({self.embed_dim} != {self.embedder.dimension})",
+            )
 
         for col in [ENTITY_COLLECTION, RELATION_COLLECTION, EPISODE_COLLECTION]:
             if self.client.has_collection(col, timeout=self.config.timeout):
@@ -536,12 +550,13 @@ class MilvusGraphStore(GraphStore):
                 for graph_object in data:
                     embed_task_metadata.extend(graph_object.fetch_embed_task())
 
-            # Perform embedding tasks and set respective attributes
-            embed_result = await self.embedder.embed_documents(
-                [task_tuple[-1] for task_tuple in embed_task_metadata], batch_size=self.config.embed_batch_size
-            )
-            for (obj, attribute, _), embedding in zip(embed_task_metadata, embed_result):
-                setattr(obj, attribute, embedding)
+            if embed_task_metadata:
+                # Perform embedding tasks and set respective attributes
+                embed_result = await self.embedder.embed_documents(
+                    [task_tuple[-1] for task_tuple in embed_task_metadata], batch_size=self.config.embed_batch_size
+                )
+                for (obj, attribute, _), embedding in zip(embed_task_metadata, embed_result):
+                    setattr(obj, attribute, embedding)
 
             data_processed: list[dict] = []
             for item in data:
@@ -617,23 +632,23 @@ class MilvusGraphStore(GraphStore):
             query, candidates=result, reranker=reranker, language=language, min_score=min_score
         )
 
-    async def _flush_and_compact(self, collection: str, *args, **kwargs):
-        self.client.flush(collection, *args, **kwargs)
-        if kwargs.get("skip_compact"):
+    async def _flush_and_compact(self, collection: str, skip_compact: bool = True, **kwargs):
+        self.client.flush(collection, **kwargs)
+        if skip_compact:
             return None
-        return self.client.compact(collection, *args, **kwargs)
+        return self.client.compact(collection, **kwargs)
 
     def _get_ranker_and_reqs(self, ranker_config: BaseRankConfig, collection: str, search_requests: list):
         ranker_config = ranker_config.model_copy()
         if isinstance(ranker_config, WeightedRankConfig):
             if collection == EPISODE_COLLECTION:
-                ranker_config.dense_name = 0
+                ranker_config.name_dense = 0
             elif collection == RELATION_COLLECTION:
-                ranker_config.dense_name = 0
+                ranker_config.name_dense = 0
             weights = [
-                ranker_config.dense_name,
-                ranker_config.dense_content,
-                ranker_config.sparse_content,
+                ranker_config.name_dense,
+                ranker_config.content_dense,
+                ranker_config.content_sparse,
             ]
         else:
             weights = [float(w) for w in ranker_config.is_active]

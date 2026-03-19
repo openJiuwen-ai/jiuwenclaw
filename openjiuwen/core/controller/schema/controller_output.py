@@ -15,12 +15,12 @@ Output Types:
 - processing: Processing
 """
 
-from typing import Optional, Dict, Any, List, Literal
+from typing import Optional, Dict, Any, List, Literal, Union
 from pydantic import BaseModel, Field
 
 from openjiuwen.core.controller.schema.dataframe import DataFrame
 from openjiuwen.core.controller.schema.event import EventType
-from openjiuwen.core.session.stream.base import OutputSchema
+from openjiuwen.core.session.stream.base import OutputSchema, StreamSchemas
 
 TASK_PROCESSING = "processing"
 ALL_TASKS_PROCESSED = "all_tasks_processed"
@@ -74,5 +74,5 @@ class ControllerOutput(BaseModel):
         input_event_id: Associated input event ID, used to track input-output relationships
     """
     type: Literal[EventType.TASK_COMPLETION, EventType.TASK_INTERACTION, EventType.TASK_FAILED, TASK_PROCESSING]
-    data: List[ControllerOutputChunk] | Dict
+    data: List[Union[ControllerOutputChunk, StreamSchemas]] | Dict
     input_event_id: Optional[str] = None

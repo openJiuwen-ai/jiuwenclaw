@@ -6,9 +6,11 @@ import json
 from typing import Any, Dict, List, Optional, Union, Callable
 import time
 
+import anyio
 import chromadb
 
 from openjiuwen.core.common.exception.codes import StatusCode
+from openjiuwen.core.common.task_manager.manager import get_task_manager
 from openjiuwen.core.common.exception.errors import build_error, ValidationError
 from openjiuwen.core.common.logging import store_logger, LogEventType
 from openjiuwen.core.foundation.store.base_vector_store import (
@@ -46,7 +48,7 @@ class ChromaVectorStore(BaseVectorStore):
             persist_directory: Path to persist ChromaDB data. If None, uses in-memory storage.
         """
         self._client = chromadb.PersistentClient(path=persist_directory)
-
+        self._task_manager = get_task_manager()
         # Cache for collections
         self._collections: Dict[str, chromadb.Collection] = {}
 
@@ -90,7 +92,7 @@ class ChromaVectorStore(BaseVectorStore):
         if isinstance(schema, dict):
             schema = CollectionSchema.from_dict(schema)
 
-        def _create():
+        async def _create():
             # Validate: primary key field is required
             primary_field = schema.get_primary_key_field()
             if not primary_field:
@@ -138,11 +140,19 @@ class ChromaVectorStore(BaseVectorStore):
                 "hnsw": {"space": chroma_metric}
             }
 
-            collection = self._client.get_or_create_collection(
-                name=collection_name,
-                metadata=metadata,
-                configuration=configuration,
-            )
+            async def _get_or_create_collection():
+                return await anyio.to_thread.run_sync(
+                    lambda: self._client.get_or_create_collection(
+                        name=collection_name,
+                        metadata=metadata,
+                        configuration=configuration,
+                    )
+                )
+            async with self._task_manager.task_group():
+                task = await self._task_manager.create_task(
+                    _get_or_create_collection(),
+                    name="get_or_create_collection")
+            collection = task.result
             self._collections[collection_name] = collection
             store_logger.info(
                 f"Created collection with {len(schema.fields)} fields",
@@ -150,7 +160,7 @@ class ChromaVectorStore(BaseVectorStore):
                 table_name=collection_name
             )
 
-        await asyncio.to_thread(_create)
+        await _create()
 
     async def delete_collection(
         self,
@@ -164,9 +174,14 @@ class ChromaVectorStore(BaseVectorStore):
             collection_name: Name of the collection to delete
             **kwargs: Additional parameters for collection deletion
         """
-        def _delete():
+        async def _delete():
+            async def _delete_collection():
+                await anyio.to_thread.run_sync(
+                    lambda: self._client.delete_collection(name=collection_name)
+                )
             try:
-                self._client.delete_collection(name=collection_name)
+                async with self._task_manager.task_group():
+                    await self._task_manager.create_task(_delete_collection(), name="delete_collection")
                 if collection_name in self._collections:
                     del self._collections[collection_name]
                 store_logger.info(
@@ -183,7 +198,7 @@ class ChromaVectorStore(BaseVectorStore):
                 )
                 raise
 
-        await asyncio.to_thread(_delete)
+        await _delete()
 
     async def collection_exists(
         self,
@@ -200,14 +215,20 @@ class ChromaVectorStore(BaseVectorStore):
         Returns:
             bool: True if the collection exists, False otherwise
         """
-        def _exists():
-            try:
-                self._client.get_collection(name=collection_name)
+        async def _exists():
+            async def _check():
+                await anyio.to_thread.run_sync(
+                    lambda: self._client.get_collection(name=collection_name)
+                )
                 return True
+            try:
+                async with self._task_manager.task_group():
+                    task = await self._task_manager.create_task(_check(), name="check_collection_exists")
+                return task.result
             except Exception:
                 return False
 
-        return await asyncio.to_thread(_exists)
+        return await _exists()
 
     async def get_schema(
         self,
@@ -229,7 +250,7 @@ class ChromaVectorStore(BaseVectorStore):
         """
         collection = self._get_collection(collection_name)
 
-        def _get_schema():
+        async def _get_schema():
             # Try to get schema from collection metadata
             try:
                 metadata = collection.metadata
@@ -319,7 +340,7 @@ class ChromaVectorStore(BaseVectorStore):
                 )
                 return schema
 
-        return await asyncio.to_thread(_get_schema)
+        return await _get_schema()
 
     async def add_docs(
         self,
@@ -351,13 +372,23 @@ class ChromaVectorStore(BaseVectorStore):
         vector_field = field_mapping.get("vector_field", "embedding")
         text_field = field_mapping.get("text_field", "text")
 
-        def _add_batch(batch: List[Dict[str, Any]]):
+        async def _add_batch(batch: List[Dict[str, Any]]):
             ids = []
             embeddings = []
             documents = []
             metadatas = []
             has_metadata = True
 
+            async def _add(ids: List[str], embeddings: List[List[float]],
+                           documents: List[str], metadatas: List[Dict[str, Any]] | None = None):
+                await anyio.to_thread.run_sync(
+                    lambda: collection.add(
+                        ids=ids,
+                        embeddings=embeddings,
+                        documents=documents,
+                        metadatas=metadatas,
+                    )
+                )
             for doc in batch:
                 # Extract ID from user-defined primary key field
                 doc_id = doc.get(primary_key)
@@ -397,25 +428,24 @@ class ChromaVectorStore(BaseVectorStore):
                 metadatas.append(metadata)
 
             if has_metadata:
-                collection.add(
-                    ids=ids,
-                    embeddings=embeddings,
-                    documents=documents,
-                    metadatas=metadatas,
-                )
+                async with self._task_manager.task_group():
+                    await self._task_manager.create_task(
+                        _add(ids, embeddings, documents, metadatas),
+                        name="add_docs"
+                    )
             else:
-                collection.add(
-                    ids=ids,
-                    embeddings=embeddings,
-                    documents=documents,
-                )
+                async with self._task_manager.task_group():
+                    await self._task_manager.create_task(
+                        _add(ids, embeddings, documents),
+                        name="add_docs"
+                    )
 
         # Process in batches
         total = len(docs)
         processed = 0
         for i in range(0, total, batch_size):
             batch = docs[i: i + batch_size]
-            await asyncio.to_thread(_add_batch, batch)
+            await _add_batch(batch)
             processed += len(batch)
             store_logger.info(
                 f"Added {processed}/{total} documents'",
@@ -457,7 +487,7 @@ class ChromaVectorStore(BaseVectorStore):
         """
         collection = self._get_collection(collection_name)
 
-        def _search():
+        async def _search():
             # Get field mapping from collection metadata
             metadata = collection.metadata or {}
             field_mapping_str = metadata.get("field_mapping", "{}")
@@ -468,12 +498,21 @@ class ChromaVectorStore(BaseVectorStore):
             # Build where filter for ChromaDB (equality filters only)
             where = filters if filters else None
 
-            results = collection.query(
-                query_embeddings=[query_vector],
-                n_results=top_k,
-                where=where,
-                include=["documents", "metadatas", "distances"],
-            )
+            async def _query():
+                return await anyio.to_thread.run_sync(
+                    lambda: collection.query(
+                        query_embeddings=[query_vector],
+                        n_results=top_k,
+                        where=where,
+                        include=["documents", "metadatas", "distances"],
+                    )
+                )
+            async with self._task_manager.task_group():
+                task = await self._task_manager.create_task(
+                    _query(),
+                    name="query"
+                )
+            results = task.result
 
             search_results = []
             if results and results.get("ids") and len(results["ids"]) > 0:
@@ -539,7 +578,7 @@ class ChromaVectorStore(BaseVectorStore):
 
             return search_results
 
-        return await asyncio.to_thread(_search)
+        return await _search()
 
     async def delete_docs_by_ids(
         self,
@@ -557,8 +596,10 @@ class ChromaVectorStore(BaseVectorStore):
         """
         collection = self._get_collection(collection_name)
 
-        def _delete():
-            collection.delete(ids=ids)
+        async def _delete():
+            await anyio.to_thread.run_sync(
+                lambda: collection.delete(ids=ids)
+            )
             store_logger.info(
                 "Deleted documents",
                 event_type=LogEventType.STORE_DELETE,
@@ -566,7 +607,11 @@ class ChromaVectorStore(BaseVectorStore):
                 data_num=len(ids)
             )
 
-        await asyncio.to_thread(_delete)
+        async with self._task_manager.task_group():
+            await self._task_manager.create_task(
+                _delete(),
+                name="delete_docs_by_ids"
+            )
 
     async def delete_docs_by_filters(
         self,
@@ -584,17 +629,23 @@ class ChromaVectorStore(BaseVectorStore):
         """
         collection = self._get_collection(collection_name)
 
-        def _delete():
+        async def _delete():
             # Build where filter for ChromaDB (equality filters only)
             where = filters
-            collection.delete(where=where)
+            await anyio.to_thread.run_sync(
+                lambda: collection.delete(where=where)
+            )
             store_logger.info(
                 "Deleted documents matching filters",
                 event_type=LogEventType.STORE_DELETE,
                 table_name=collection_name
             )
 
-        await asyncio.to_thread(_delete)
+        async with self._task_manager.task_group():
+            await self._task_manager.create_task(
+                _delete(),
+                name="delete_docs_by_filters"
+            )
 
     async def list_collection_names(self) -> List[str]:
         return [c.name for c in self._client.list_collections()]
@@ -618,12 +669,18 @@ class ChromaVectorStore(BaseVectorStore):
         vector_field = field_mapping.get("vector_field", "embedding")
         text_field = field_mapping.get("text_field", "text")
 
-        # Get all documents from the collection
-        results = await asyncio.to_thread(
-            collection.get,
-            include=["documents", "metadatas", "embeddings", "uris"]
-        )
-
+        async def _get_all_documents():
+            return await anyio.to_thread.run_sync(
+                lambda: collection.get(
+                    include=["documents", "metadatas", "embeddings", "uris"]
+                )
+            )
+        async with self._task_manager.task_group():
+            task = await self._task_manager.create_task(
+                _get_all_documents(),
+                name="get_all_documents"
+            )
+        results = task.result
 
         documents = []
         ids = results.get("ids", [])

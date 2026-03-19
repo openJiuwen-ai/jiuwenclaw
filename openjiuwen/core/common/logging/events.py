@@ -591,6 +591,7 @@ class GraphEvent(BaseLogEvent):
     chunk: Optional[Any] = None  # Stream chunk data
 
 
+@dataclass
 class RunnerEvent(BaseLogEvent):
     runner_id: Optional[str] = None,
     inputs: Optional[Any] = None,

@@ -5,7 +5,6 @@ from __future__ import annotations
 
 from openjiuwen.core.runner import Runner
 from openjiuwen.core.single_agent.rail.base import AgentCallbackContext
-from openjiuwen.core.sys_operation import SysOperation
 from openjiuwen.deepagents.rails.base import DeepAgentRail
 from openjiuwen.deepagents.tools.code import CodeTool
 from openjiuwen.deepagents.tools.filesystem import (
@@ -24,10 +23,9 @@ class FileSystemRail(DeepAgentRail):
 
     priority = 100
 
-    def __init__(self, operation: SysOperation):
+    def __init__(self):
         super().__init__()
         self.tools = None
-        self.sys_operation = operation
 
     def init(self, agent):
         read_tool = ReadFileTool(self.sys_operation)

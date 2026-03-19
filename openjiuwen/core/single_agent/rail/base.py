@@ -115,6 +115,13 @@ class RetryRequest:
     delay_seconds: float = 0.0
 
 
+@dataclass
+class ForceFinishRequest:
+    """Signal to terminate the agent loop and return a result immediately."""
+
+    result: Dict[str, Any]
+
+
 #: Union type for all typed event inputs
 EventInputs = Union[
     InvokeInputs,
@@ -190,6 +197,9 @@ class AgentCallbackContext:
     _retry_request: Optional[RetryRequest] = field(
         default=None, init=False, repr=False
     )
+    _force_finish_request: Optional[ForceFinishRequest] = field(
+        default=None, init=False, repr=False
+    )
 
     async def fire(
         self, event: AgentCallbackEvent
@@ -224,6 +234,26 @@ class AgentCallbackContext:
         request = self._retry_request
         self._retry_request = None
         return request
+
+    def request_force_finish(self, result: Dict[str, Any]) -> None:
+        """Request the agent loop to terminate and return *result* immediately.
+
+        Can be called in any hook (e.g. before_model_call, after_tool_call).
+        The agent loop checks this signal after every railed operation.
+        If called in a ``before`` hook, the decorated method body is skipped.
+        """
+        self._force_finish_request = ForceFinishRequest(result=result)
+
+    def consume_force_finish(self) -> Optional[ForceFinishRequest]:
+        """Read and clear a pending force-finish request."""
+        request = self._force_finish_request
+        self._force_finish_request = None
+        return request
+
+    @property
+    def has_force_finish_request(self) -> bool:
+        """Check whether a force-finish request is pending."""
+        return self._force_finish_request is not None
 
     @asynccontextmanager
     async def lifecycle(
@@ -445,6 +475,9 @@ def rail(
                 try:
                     if before:
                         await ctx.fire(before)
+                    # If a before hook requested force_finish, skip the method body.
+                    if ctx.has_force_finish_request:
+                        return None
                     return await fn(self, ctx, *args, **kwargs)
                 except Exception as e:
                     ctx.exception = e

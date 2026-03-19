@@ -31,7 +31,7 @@ class MemoryAnalyzer:
     async def analyze(
             messages: List[BaseMessage],
             history_messages: List[BaseMessage],
-            base_chat_model: Tuple[str, Model],
+            base_chat_model: Model,
             memory_config: AgentMemoryConfig,
             summary_max_token: int,
             *,
@@ -80,14 +80,10 @@ class MemoryAnalyzer:
             },
         )
         model_input = [{"role": "user", "content": prompt_content}]
-        model_name, model_client = base_chat_model
         parser = JsonOutputParser()
         for attempt in range(retries):
             try:
-                response = await model_client.invoke(
-                    model=model_name,
-                    messages=model_input
-                )
+                response = await base_chat_model.invoke(messages=model_input)
                 res = await parser.parse(response.content)
                 analyze_result = MemoryAnalyzerResult.model_validate(res)
                 if not memory_config.enable_long_term_mem or not memory_config.enable_summary_memory:

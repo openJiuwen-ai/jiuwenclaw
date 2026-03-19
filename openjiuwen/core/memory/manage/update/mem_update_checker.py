@@ -126,7 +126,7 @@ class MemUpdateChecker:
         self,
         new_memories: Dict[str, str],
         old_memories: Dict[str, str],
-        base_chat_model: Tuple[str, Model],
+        base_chat_model: Model,
         retries: int = 3,
     ) -> List[MemoryActionItem]:
         """
@@ -135,7 +135,7 @@ class MemUpdateChecker:
         Args:
             new_memories: Dictionary of new memories to check {id: content}
             old_memories: Dictionary of existing memories {id: content}
-            base_chat_model: Tuple of (model_name, model_client) for LLM invocation
+            base_chat_model: Model instance for LLM invocation
             retries: Number of retries for LLM invocation (default: 3)
 
         Returns:
@@ -178,7 +178,6 @@ class MemUpdateChecker:
             },
         )
 
-        model_name, model_client = base_chat_model
         messages = [{"role": "user", "content": user_prompt}]
 
         memory_logger.debug(
@@ -192,7 +191,7 @@ class MemUpdateChecker:
 
         for attempt in range(retries):
             try:
-                response = await model_client.invoke(model=model_name, messages=messages)
+                response = await base_chat_model.invoke(messages=messages)
                 parsed_result = await parser.parse(response.content)
 
                 if isinstance(parsed_result, dict):

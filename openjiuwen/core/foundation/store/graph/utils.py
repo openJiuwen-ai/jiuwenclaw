@@ -14,6 +14,7 @@ from datetime import datetime, timedelta, timezone, tzinfo
 from typing import Any, Awaitable, Callable, Generator, Iterable, Mapping, Optional, TypeVar
 
 from openjiuwen.core.common.logging import store_logger
+from openjiuwen.core.foundation.store.graph.base_graph_store import GraphStore
 
 batched: Callable[[Iterable, int], Generator]
 T = TypeVar("T")  # result type
@@ -82,11 +83,11 @@ def get_uuid() -> str:
     return uuid.uuid4().hex
 
 
-def ensure_unique_uuids(backend: Any, ids: list[Any], collection: str, skip: bool = False) -> list[Any]:
+async def ensure_unique_uuids(backend: GraphStore, ids: list[Any], collection: str, skip: bool = False) -> list[Any]:
     """De-duplicate given uuids in a specific collection of graph memory database.
 
     Args:
-        backend (GraphBackend): graph memory database backend.
+        backend (GraphStore): graph memory database backend.
         ids (list[Any]): list of uuids to de-duplicate.
         collection (str): name of collection (entities/relations/episodes).
         skip (bool): skip de-duplication to avoid certain errors.
@@ -99,13 +100,13 @@ def ensure_unique_uuids(backend: Any, ids: list[Any], collection: str, skip: boo
         return unique_ids
     kwargs = dict(collection=collection, output_fields=["uuid"])
     if not backend.is_empty(collection):
-        dup_list = [dup["uuid"] for dup in backend.query(ids=unique_ids, **kwargs)]
+        dup_list = [dup["uuid"] for dup in await backend.query(ids=unique_ids, **kwargs)]
         while dup_list:
             new_uuids = []
             for dup_uuid in dup_list:
                 unique_ids[unique_ids.index(dup_uuid)] = tmp_uuid = get_uuid()
                 new_uuids.append(tmp_uuid)
-            dup_list = [dup["uuid"] for dup in backend.query(ids=new_uuids, **kwargs)]
+            dup_list = [dup["uuid"] for dup in await backend.query(ids=new_uuids, **kwargs)]
     return unique_ids
 
 
@@ -132,11 +133,18 @@ def format_list_of_messages(
 
 
 def safe_timestamp(datetime_obj: datetime) -> float:
-    """Some Operating System (i.e. Windows) cannot handle negative timestamps natively"""
+    """Safely datetime to timestamp, some OS (i.e. Windows) cannot handle negative timestamps natively"""
     if datetime_obj.year < 1970:
         this_tzinfo = timezone.utc if datetime_obj.tzinfo else None
         return (datetime_obj - datetime(1970, 1, 1, tzinfo=this_tzinfo)).total_seconds()
     return datetime_obj.timestamp()
+
+
+def safe_datetime_from_timestamp(timestamp: int | float, tz: tzinfo = timezone.utc) -> datetime:
+    """Safely construct datetime from timestamp, some OS (i.e. Windows) cannot handle negative timestamps natively"""
+    if timestamp < 0:
+        return datetime(1970, 1, 1, tzinfo=tz) - timedelta(seconds=timestamp)
+    return datetime.fromtimestamp(timestamp, tz=tz)
 
 
 def get_current_utc_timestamp() -> int:
@@ -160,8 +168,7 @@ def format_timestamp(t: int | float, tz: tzinfo = timezone.utc, fmt: str = r"(%a
         str: formatted datetime.
     """
     if t != -1:
-        datetime.fromtimestamp(t, tz).isoformat(timespec="seconds")
-        return datetime.fromtimestamp(t, tz).strftime(fmt)
+        return safe_datetime_from_timestamp(t, tz=tz).strftime(fmt)
     return "Unknown Datetime"
 
 
@@ -177,7 +184,7 @@ def format_timestamp_iso(t: int | float, tz: Optional[tzinfo] = timezone.utc) ->
         str: iso-formatted datetime.
     """
     if t != -1:
-        return datetime.fromtimestamp(t, tz).isoformat(timespec="seconds")
+        return safe_datetime_from_timestamp(t, tz=tz).isoformat(timespec="seconds")
     return "Unknown Datetime"
 
 
@@ -212,7 +219,7 @@ def load_stored_time_from_db(timestamp: int | float, offset: int) -> Optional[da
     """
     if timestamp != -1:
         tz = _load_tz_offset(offset)
-        return datetime.fromtimestamp(timestamp, tz)
+        return safe_datetime_from_timestamp(timestamp, tz=tz)
     return None
 
 

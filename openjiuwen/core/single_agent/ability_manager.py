@@ -494,6 +494,13 @@ class AbilityManager:
 
             final_results.append(result)
 
+        # Propagate force_finish signal from any tool_ctx back to the parent ctx.
+        for tool_ctx in tool_contexts:
+            ff = tool_ctx.consume_force_finish()
+            if ff is not None:
+                ctx.request_force_finish(ff.result)
+                break
+
         return final_results
 
     @rail(

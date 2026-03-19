@@ -24,6 +24,7 @@ from openjiuwen.core.foundation.store.vector.utils import (
 from openjiuwen.core.foundation.store.vector_fields.milvus_fields import MilvusAUTO, MilvusVectorField
 from openjiuwen.core.retrieval.common.config import VectorStoreConfig
 from openjiuwen.core.retrieval.common.retrieval_result import SearchResult
+from openjiuwen.core.retrieval.utils.common import create_milvus_alias
 from openjiuwen.core.retrieval.utils.fusion import rrf_fusion
 from openjiuwen.core.retrieval.vector_store.base import VectorStore
 
@@ -89,7 +90,7 @@ class MilvusVectorStore(VectorStore):
             database_name=self.config.database_name,
             path_or_uri=self.milvus_uri,
             token=self.milvus_token,
-            alias=milvus_alias,
+            alias=create_milvus_alias(milvus_alias, uri=milvus_uri, token=milvus_token),
         )
         self._collection_loaded = False
 

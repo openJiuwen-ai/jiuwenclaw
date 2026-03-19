@@ -21,7 +21,7 @@ _LAZY_MILVUS = [
     "MilvusIndexer",
 ]
 _LAZY_CHROMA = ["ChromaIndexer", "ChromaVectorStore", "ChromaVectorField"]
-_LAZY_OPENAI = ["OpenAIEmbedding", "VLLMEmbedding", "parse_base64_embedding"]
+_LAZY_OPENAI = ["OpenAIEmbedding", "VLLMEmbedding", "DashscopeEmbedding", "parse_base64_embedding"]
 _LAZY_HTTPX = ["StandardReranker", "ChatReranker"]
 _LAZY_PARSER = [
     "AutoFileParser",
@@ -68,6 +68,7 @@ def _load_httpx():
 
 
 def _load_openai():
+    from openjiuwen.core.retrieval.embedding.dashscope_embedding import DashscopeEmbedding
     from openjiuwen.core.retrieval.embedding.openai_embedding import OpenAIEmbedding
     from openjiuwen.core.retrieval.embedding.utils import parse_base64_embedding
     from openjiuwen.core.retrieval.embedding.vllm_embedding import VLLMEmbedding
@@ -75,6 +76,7 @@ def _load_openai():
     _LAZY_IMPORT_CACHE["OpenAIEmbedding"] = OpenAIEmbedding
     _LAZY_IMPORT_CACHE["VLLMEmbedding"] = VLLMEmbedding
     _LAZY_IMPORT_CACHE["parse_base64_embedding"] = parse_base64_embedding
+    _LAZY_IMPORT_CACHE["DashscopeEmbedding"] = DashscopeEmbedding
 
 
 def _load_milvus():

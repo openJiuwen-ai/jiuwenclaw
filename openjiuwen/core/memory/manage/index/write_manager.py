@@ -17,7 +17,7 @@ class WriteManager:
         self.mem_store = mem_store
         
     async def add_memories(self, user_id: str, scope_id: str, memories: dict[str, list[BaseMemoryUnit]],
-                           llm: Tuple[str, Model] | None, semantic_store) -> None:
+                           llm: Model | None, semantic_store) -> None:
         if not memories:
             memory_logger.debug("No memory units to add", event_type=LogEventType.MEMORY_STORE)
             return

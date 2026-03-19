@@ -7,8 +7,15 @@ This module defines configuration-related classes for the controller:
 - ControllerConfig: controller configuration class.
 """
 
-from typing import Optional, List
+from typing import Optional, List, Literal
 from pydantic import BaseModel, Field
+
+
+class DefaultResponse(BaseModel):
+    """Default response configuration for workflow agent."""
+
+    type: Literal["text", "workflow"] = "text"
+    text: str = None
 
 
 class ControllerConfig(BaseModel):
@@ -132,6 +139,7 @@ class ControllerConfig(BaseModel):
                     "create_task, pause_task, resume_task, cancel_task, unknown_task"
                     "create_dependent_task, modify_task, supplement_task"
     )
+    default_response: DefaultResponse = Field(default_factory=DefaultResponse)
 
     # ==================== Completion signal config ====================
     suppress_completion_signal: bool = Field(

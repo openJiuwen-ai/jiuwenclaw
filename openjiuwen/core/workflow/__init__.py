@@ -51,6 +51,20 @@ from openjiuwen.core.workflow.components.resource.knowledge_retrieval_comp impor
     KnowledgeRetrievalCompConfig,
 )
 from openjiuwen.core.workflow.components.tool.tool_comp import ToolComponent, ToolComponentConfig
+from openjiuwen.core.workflow.components.tool.http import (
+    HTTPRequestComponent,
+    HttpComponentConfig,
+    HttpRequestParamConfig,
+    HttpAuthConfig,
+    HttpRequestBodyConfig,
+    HttpResponseHandlingConfig,
+    HttpAdvancedOptionsConfig,
+    HttpRetryConfig,
+    HttpRateLimitConfig,
+    HttpAuthType,
+    HttpContentType,
+    HttpResponseFormat
+)
 from openjiuwen.core.workflow.components.flow.branch_router import BranchRouter, Branch
 from openjiuwen.core.workflow.components.condition.condition import Condition, FuncCondition, AlwaysTrue
 from openjiuwen.core.workflow.components.condition.expression import ExpressionCondition
@@ -118,6 +132,22 @@ _RESOURCE_RELATED_COMPONENTS = [
     "KnowledgeRetrievalCompConfig",
 ]
 
+_HTTP_RELATED_COMPONENTS = [
+    "HTTPRequestComponent",
+    "HttpComponentConfig",
+    "HttpRequestParamConfig",
+    "HttpAuthConfig",
+    "HttpRequestBodyConfig",
+    "HttpResponseHandlingConfig",
+    "HttpAdvancedOptionsConfig",
+    "HttpRetryConfig",
+    "HttpRateLimitConfig",
+    "HttpAuthType",
+    "HttpContentType",
+    "HttpResponseFormat"
+]
+
+
 _CONDITION_CLASSES = [
     "Condition",
     "FuncCondition",
@@ -138,6 +168,7 @@ __all__ = (
         _LLM_RELATED_COMPONENTS +
         _FLOW_RELATED_COMPONENTS +
         _TOOL_RELATED_COMPONENTS +
+        _HTTP_RELATED_COMPONENTS +
         _RESOURCE_RELATED_COMPONENTS +
         _CONDITION_CLASSES +
         _WORKFLOW_METHODS +

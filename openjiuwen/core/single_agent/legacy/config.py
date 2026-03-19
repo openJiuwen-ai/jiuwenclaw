@@ -10,6 +10,7 @@ from openjiuwen.core.workflow import WorkflowCard
 from openjiuwen.core.common.constants.enums import ControllerType
 from openjiuwen.core.foundation.llm import ModelRequestConfig, ModelClientConfig, ModelConfig
 from openjiuwen.core.memory.config.config import MemoryScopeConfig, AgentMemoryConfig
+from openjiuwen.core.controller.config import DefaultResponse
 
 
 class AgentConfig(BaseModel):
@@ -47,12 +48,6 @@ class ConstrainConfig(BaseModel):
     """Constraint configuration for agent behavior"""
     reserved_max_chat_rounds: int = Field(default=10, gt=0)
     max_iteration: int = Field(default=5, gt=0)
-
-
-class DefaultResponse(BaseModel):
-    """Default response configuration for workflow agent"""
-    type: Literal["text", "workflow"] = "text"
-    text: str = None
 
 
 class MemoryConfig(BaseModel):

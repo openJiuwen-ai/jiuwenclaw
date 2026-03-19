@@ -289,7 +289,7 @@ class CurrentRoundCompressor(ContextProcessor):
             self,
             messages_to_compress: List[BaseMessage],
             context: ModelContext
-    ) -> Optional[BaseMessage]:
+    ) -> BaseMessage:
         ai_count = 0
         tool_count = 0
         for msg in messages_to_compress:
@@ -312,13 +312,18 @@ class CurrentRoundCompressor(ContextProcessor):
         summary = response.parser_content
         if summary and isinstance(summary, dict):
             summary = summary.get("summary", "")
-            offload_message = await self.offload_messages(
-                role="user",
-                content=f"[This is the compressed message, and a total of {all_count} messages have been compressed."
-                        f"It includes {ai_count} assistant messages and {tool_count} tool messages.]" + summary,
-                messages=messages_to_compress,
-                context=context
-            )
-            return offload_message
+
         else:
-            return None
+            summary = response.content
+            logger.warning(
+                f"JSON parsing failed, using raw LLM output as summary. "
+                f"Output: {summary[:200]}..."
+            )
+        offload_message = await self.offload_messages(
+            role="user",
+            content=f"[This is the compressed message, and a total of {all_count} messages have been compressed."
+                    f"It includes {ai_count} assistant messages and {tool_count} tool messages.]" + summary,
+            messages=messages_to_compress,
+            context=context
+        )
+        return offload_message

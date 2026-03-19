@@ -1,15 +1,16 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
-import asyncio
 import json
 import time
 from typing import Any, Dict, List, Optional, Union, Callable
 
-from pymilvus import DataType as MilvusDataType, MilvusClient, MilvusException
+import anyio
+from pymilvus import DataType as MilvusDataType, AsyncMilvusClient, MilvusException
 
 from openjiuwen.core.common.logging import store_logger, LogEventType
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import build_error
+from openjiuwen.core.common.task_manager.manager import get_task_manager
 from openjiuwen.core.foundation.store.base_vector_store import (
     BaseVectorStore,
     VectorSearchResult,
@@ -59,9 +60,9 @@ class MilvusVectorStore(BaseVectorStore):
         self.milvus_token = milvus_token
         self.database_name = database_name
         self._kwargs = kwargs
-
+        self._task_manager = get_task_manager()
         # Client will be created lazily on first access
-        self._client: Optional[MilvusClient] = None
+        self._client: Optional[AsyncMilvusClient] = None
 
         # Cache for collections metadata (distance metrics, etc.)
         self._collection_metadata: Dict[str, Dict[str, Any]] = {}
@@ -69,46 +70,49 @@ class MilvusVectorStore(BaseVectorStore):
         # Cache for which collections are loaded
         self._collections_loaded: set[str] = set()
 
-    @property
-    def client(self) -> MilvusClient:
+    async def client(self) -> AsyncMilvusClient:
         """
         Get or create the Milvus client lazily.
 
         The client is created on first access and reused for subsequent operations.
 
         Returns:
-            MilvusClient: The Milvus client instance.
+            AsyncMilvusClient: The Milvus client instance.
 
         Raises:
             MilvusException: If connection to Milvus fails.
         """
         if self._client is None:
-            self._client = self._create_client(
-                database_name=self.database_name,
-                path_or_uri=self.milvus_uri,
-                token=self.milvus_token or "",
-                **self._kwargs,
-            )
+            async with self._task_manager.task_group():
+                task = await self._task_manager.create_task(
+                    self._create_client(
+                        database_name=self.database_name,
+                        path_or_uri=self.milvus_uri,
+                        token=self.milvus_token or "",
+                        **self._kwargs,
+                    ),
+                )
+            self._client = task.result
             store_logger.info(
-                "Successfully connected to Milvus",
+                "Successfully connected to AsyncMilvus",
                 event_type=LogEventType.STORE_RETRIEVE,
                 table_name=self.database_name
             )
         return self._client
 
     @staticmethod
-    def _create_client(
+    async def _create_client(
         database_name: str,
         path_or_uri: str,
         token: str = "",
         **kwargs: Any,
-    ) -> MilvusClient:
+    ) -> AsyncMilvusClient:
         """Create Milvus client and ensure database exists."""
-        client = MilvusClient(uri=path_or_uri, token=token, timeout=3, **kwargs)
+        client = AsyncMilvusClient(uri=path_or_uri, token=token, timeout=3, **kwargs)
         if database_name and database_name != "default":
-            if database_name not in client.list_databases():
-                client.create_database(database_name)
-            client.use_database(database_name)
+            if database_name not in await client.list_databases():
+                await client.create_database(database_name)
+            await client.use_database(database_name)
         return client
 
     def close(self):
@@ -178,9 +182,12 @@ class MilvusVectorStore(BaseVectorStore):
                 - index_type (str): Index type for vector field (default: "AUTOINDEX")
         """
         # Check if collection already exists
-        has_collection = await asyncio.to_thread(
-            self.client.has_collection, collection_name
-        )
+        client = await self.client()
+        async with self._task_manager.task_group():
+            task = await self._task_manager.create_task(
+                client.has_collection(collection_name)
+            )
+        has_collection = task.result
         if has_collection:
             store_logger.info(
                 "Collection already exists, skipping creation",
@@ -196,14 +203,15 @@ class MilvusVectorStore(BaseVectorStore):
         if isinstance(schema, dict):
             schema = CollectionSchema.from_dict(schema)
 
-        def _create():
+        async def _create():
             # Build Milvus schema
-            milvus_schema = self.client.create_schema(
+            client = await self.client()
+            milvus_schema = client.create_schema(
                 enable_dynamic_field=schema.enable_dynamic_field,
                 description=schema.description or "",
             )
-
-            index_params = self.client.prepare_index_params()
+            client = await self.client()
+            index_params = client.prepare_index_params()
 
             vector_field_name = None
             vector_dim = None
@@ -281,13 +289,16 @@ class MilvusVectorStore(BaseVectorStore):
                     StatusCode.STORE_VECTOR_SCHEMA_INVALID,
                     error_msg="schema must contain at least one FLOAT_VECTOR field"
                 )
-
+            client = await self.client()
             # Create collection
-            self.client.create_collection(
-                collection_name=collection_name,
-                schema=milvus_schema,
-                index_params=index_params,
-            )
+            async with self._task_manager.task_group():
+                await self._task_manager.create_task(
+                    client.create_collection(
+                        collection_name=collection_name,
+                        schema=milvus_schema,
+                        index_params=index_params,
+                    )
+                )
 
             # Store collection metadata
             self._collection_metadata[collection_name] = {
@@ -302,7 +313,7 @@ class MilvusVectorStore(BaseVectorStore):
                 table_name=collection_name
             )
 
-        await asyncio.to_thread(_create)
+        await _create()
 
     async def delete_collection(
         self,
@@ -316,16 +327,25 @@ class MilvusVectorStore(BaseVectorStore):
             collection_name: Name of the collection to delete
             **kwargs: Additional parameters for collection deletion
         """
-        def _delete():
+        async def _delete():
             try:
-                if not self.client.has_collection(collection_name=collection_name):
+                client = await self.client()
+                async with self._task_manager.task_group():
+                    task = await self._task_manager.create_task(
+                        client.has_collection(collection_name=collection_name)
+                    )
+                if not task.result:
                     store_logger.warning(
                         "Collection does not exist",
                         event_type=LogEventType.STORE_DELETE,
                         table_name=collection_name
                     )
                     return
-                self.client.drop_collection(collection_name=collection_name)
+                client = await self.client()
+                async with self._task_manager.task_group():
+                    await self._task_manager.create_task(
+                        client.drop_collection(collection_name=collection_name)
+                    )
                 if collection_name in self._collection_metadata:
                     del self._collection_metadata[collection_name]
                 store_logger.info(
@@ -334,15 +354,30 @@ class MilvusVectorStore(BaseVectorStore):
                     table_name=collection_name
                 )
             except MilvusException as e:
+                # Handle both direct MilvusException and MilvusException within ExceptionGroup
+                # e.value contains the actual MilvusException
                 store_logger.error(
                     "Failed to delete collection",
                     event_type=LogEventType.STORE_DELETE,
                     table_name=collection_name,
-                    exception=str(e)
+                    exception=str(e.exceptions)
                 )
                 raise
+            except ExceptionGroup as eg:
+                # Find the MilvusException in the exception group
+                for e in eg.exceptions:
+                    if isinstance(e, MilvusException):
+                        store_logger.error(
+                            "Failed to delete collection",
+                            event_type=LogEventType.STORE_DELETE,
+                            table_name=collection_name,
+                            exception=str(e)
+                        )
+                        raise e from eg
+                # If no MilvusException found, re-raise the entire group
+                raise
 
-        await asyncio.to_thread(_delete)
+        await _delete()
 
     async def collection_exists(
         self,
@@ -359,7 +394,14 @@ class MilvusVectorStore(BaseVectorStore):
         Returns:
             bool: True if the collection exists, False otherwise
         """
-        return await asyncio.to_thread(self.client.has_collection, collection_name)
+        async def _check():
+            client = await self.client()
+            async with self._task_manager.task_group():
+                task = await self._task_manager.create_task(
+                    client.has_collection(collection_name)
+                )
+            return task.result
+        return await _check()
 
     def _map_milvus_type_to_our_type(self, milvus_type: MilvusDataType) -> VectorDataType:
         """Map Milvus DataType to our VectorDataType."""
@@ -401,13 +443,23 @@ class MilvusVectorStore(BaseVectorStore):
             ValueError: If the collection does not exist
             MilvusException: If getting schema fails
         """
-        def _get_schema():
+        async def _get_schema():
+            client = await self.client()
+            async with self._task_manager.task_group():
+                task = await self._task_manager.create_task(
+                    client.has_collection(collection_name)
+                )
             # Check if collection exists
-            if not self.client.has_collection(collection_name):
+            if not task.result:
                 raise build_error(StatusCode.STORE_VECTOR_COLLECTION_NOT_FOUND, collection_name=collection_name)
 
             # Get collection description from Milvus
-            collection_info = self.client.describe_collection(collection_name=collection_name)
+            client = await self.client()
+            async with self._task_manager.task_group():
+                task = await self._task_manager.create_task(
+                    client.describe_collection(collection_name=collection_name)
+                )
+            collection_info = task.result
 
             # Extract schema information
             schema = CollectionSchema(
@@ -450,7 +502,7 @@ class MilvusVectorStore(BaseVectorStore):
 
             return schema
 
-        return await asyncio.to_thread(_get_schema)
+        return await _get_schema()
 
     async def add_docs(
         self,
@@ -467,7 +519,7 @@ class MilvusVectorStore(BaseVectorStore):
             **kwargs: Additional parameters for document insertion
                 - batch_size (int, optional): Batch size for bulk insertion (default: 128)
         """
-        self._ensure_loaded(collection_name)
+        await self._ensure_loaded(collection_name)
         batch_size = kwargs.get("batch_size", 128)
         if batch_size <= 0:
             batch_size = 128
@@ -476,10 +528,12 @@ class MilvusVectorStore(BaseVectorStore):
         if collection_name not in self._collection_metadata:
             # Try to get from existing collection
             try:
-                collection_info = await asyncio.to_thread(
-                    self.client.describe_collection,
-                    collection_name=collection_name,
-                )
+                client = await self.client()
+                async with self._task_manager.task_group():
+                    task = await self._task_manager.create_task(
+                        client.describe_collection(collection_name=collection_name)
+                    )
+                collection_info = task.result
                 # Extract vector field from schema
                 vector_field = None
                 for field in collection_info.get("fields", []):
@@ -498,18 +552,22 @@ class MilvusVectorStore(BaseVectorStore):
                     exception=str(e)
                 )
 
-        def _add_batch(batch: List[Dict[str, Any]]):
-            self.client.insert(
-                collection_name=collection_name,
-                data=batch,
-            )
+        async def _add_batch(batch: List[Dict[str, Any]]):
+            client = await self.client()
+            async with self._task_manager.task_group():
+                task = await self._task_manager.create_task(
+                    client.insert(
+                        collection_name=collection_name,
+                        data=batch,
+                    )
+                )
 
         # Process in batches
         total = len(docs)
         processed = 0
         for i in range(0, total, batch_size):
             batch = docs[i: i + batch_size]
-            await asyncio.to_thread(_add_batch, batch)
+            await _add_batch(batch)
             processed += len(batch)
             if processed % 100 == 0:
                 store_logger.info(
@@ -520,7 +578,11 @@ class MilvusVectorStore(BaseVectorStore):
                 )
 
         # Flush to ensure data is persisted
-        await asyncio.to_thread(self.client.flush, collection_name=collection_name)
+        client = await self.client()
+        async with self._task_manager.task_group():
+            await self._task_manager.create_task(
+                client.flush(collection_name=collection_name)
+            )
         store_logger.info(
             "Successfully added documents collection",
             event_type=LogEventType.STORE_ADD,
@@ -554,7 +616,7 @@ class MilvusVectorStore(BaseVectorStore):
             List of VectorSearchResult objects
         """
         # Get collection metadata
-        self._ensure_loaded(collection_name)
+        await self._ensure_loaded(collection_name)
         collection_meta = self._collection_metadata.get(collection_name, {})
         distance_metric = kwargs.get("metric_type") or collection_meta.get("distance_metric", "COSINE")
         output_fields = kwargs.get("output_fields")
@@ -562,32 +624,44 @@ class MilvusVectorStore(BaseVectorStore):
         # Build filter expression
         filter_expr = self._build_filter_expr(filters) if filters else None
 
-        def _search():
+        async def _search():
             # Determine output fields
             search_output_fields = output_fields
             if not search_output_fields:
                 # Try to get collection schema to determine output fields
                 try:
-                    collection_info = self.client.describe_collection(collection_name=collection_name)
+                    client = await self.client()
+                    async with self._task_manager.task_group():
+                        task = await self._task_manager.create_task(
+                            client.describe_collection(collection_name=collection_name)
+                        )
+                    collection_info = task.result
                     search_output_fields = [field.get("name") for field in collection_info.get("fields", [])]
                 except Exception:
                     # Fallback: use common field names
                     search_output_fields = ["id", "text", "metadata"]
 
             # Execute search
-            results = self.client.search(
-                collection_name=collection_name,
-                data=[query_vector],
-                anns_field=vector_field,
-                limit=top_k,
-                output_fields=search_output_fields or [],
-                search_params={"metric_type": distance_metric},
-                filter=filter_expr,
-            )
+            client = await self.client()
+            async with self._task_manager.task_group():
+                task = await self._task_manager.create_task(
+                    client.search(
+                        collection_name=collection_name,
+                        data=[query_vector],
+                        anns_field=vector_field,
+                        limit=top_k,
+                        output_fields=search_output_fields or [],
+                        search_params={"metric_type": distance_metric},
+                        filter=filter_expr,
+                    )
+                )
+            results = task.result
 
             return results
 
-        results = await asyncio.to_thread(_search)
+        async with self._task_manager.task_group():
+            task = await self._task_manager.create_task(_search())
+        results = task.result
 
         # Convert results to VectorSearchResult
         search_results = []
@@ -670,16 +744,25 @@ class MilvusVectorStore(BaseVectorStore):
                 table_name=collection_name
             )
             return
-        self._ensure_loaded(collection_name)
+        await self._ensure_loaded(collection_name)
 
-        def _delete():
+        async def _delete():
             try:
-                result = self.client.delete(
-                    collection_name=collection_name,
-                    ids=ids,
-                )
+                client = await self.client()
+                async with self._task_manager.task_group():
+                    task = await self._task_manager.create_task(
+                        client.delete(
+                            collection_name=collection_name,
+                            ids=ids,
+                        )
+                    )
+                result = task.result
                 # Flush to ensure deletion is persisted
-                self.client.flush(collection_name=collection_name)
+                client = await self.client()
+                async with self._task_manager.task_group():
+                    await self._task_manager.create_task(
+                        client.flush(collection_name=collection_name)
+                    )
                 deleted_count = result.get("delete_count", 0) if isinstance(result, dict) else len(ids)
                 store_logger.info(
                     "Deleted documents from collection",
@@ -688,15 +771,30 @@ class MilvusVectorStore(BaseVectorStore):
                     data_num=deleted_count
                 )
             except MilvusException as e:
+                # Handle both direct MilvusException and MilvusException within ExceptionGroup
+                # e.value contains the actual MilvusException
                 store_logger.error(
-                    "Failed to delete documents from collection",
+                    "Failed to delete collection",
                     event_type=LogEventType.STORE_DELETE,
                     table_name=collection_name,
-                    exception=str(e)
+                    exception=str(e.value)
                 )
                 raise
+            except ExceptionGroup as eg:
+                # Find the MilvusException in the exception group
+                for e in eg.exceptions:
+                    if isinstance(e, MilvusException):
+                        store_logger.error(
+                            "Failed to delete collection",
+                            event_type=LogEventType.STORE_DELETE,
+                            table_name=collection_name,
+                            exception=str(e)
+                        )
+                        raise e from eg
+                # If no MilvusException found, re-raise the entire group
+                raise
 
-        await asyncio.to_thread(_delete)
+        await _delete()
 
     async def delete_docs_by_filters(
         self,
@@ -719,19 +817,28 @@ class MilvusVectorStore(BaseVectorStore):
                 table_name=collection_name
             )
             return
-        self._ensure_loaded(collection_name)
+        await self._ensure_loaded(collection_name)
 
         # Build filter expression
         filter_expr = self._build_filter_expr(filters)
 
-        def _delete():
+        async def _delete():
             try:
-                result = self.client.delete(
-                    collection_name=collection_name,
-                    filter=filter_expr,
-                )
+                client = await self.client()
+                async with self._task_manager.task_group():
+                    task = await self._task_manager.create_task(
+                        client.delete(
+                            collection_name=collection_name,
+                            filter=filter_expr,
+                        )
+                    )
+                result = task.result
                 # Flush to ensure deletion is persisted
-                self.client.flush(collection_name=collection_name)
+                client = await self.client()
+                async with self._task_manager.task_group():
+                    await self._task_manager.create_task(
+                        client.flush(collection_name=collection_name)
+                    )
                 deleted_count = result.get("delete_count", 0) if isinstance(result, dict) else 0
                 store_logger.info(
                     "Deleted documents matching filters from collection",
@@ -740,25 +847,42 @@ class MilvusVectorStore(BaseVectorStore):
                     data_num=deleted_count
                 )
             except MilvusException as e:
+                # Handle both direct MilvusException and MilvusException within ExceptionGroup
+                # e.value contains the actual MilvusException
                 store_logger.error(
-                    "Failed to delete documents by filters from collection",
+                    "Failed to delete collection",
                     event_type=LogEventType.STORE_DELETE,
                     table_name=collection_name,
-                    exception=str(e)
+                    exception=str(e.exceptions)
                 )
                 raise
+            except ExceptionGroup as eg:
+                # Find the MilvusException in the exception group
+                for e in eg.exceptions:
+                    if isinstance(e, MilvusException):
+                        store_logger.error(
+                            "Failed to delete collection",
+                            event_type=LogEventType.STORE_DELETE,
+                            table_name=collection_name,
+                            exception=str(e)
+                        )
+                        raise e from eg
+                # If no MilvusException found, re-raise the entire group
+                raise
 
-        await asyncio.to_thread(_delete)
+        await _delete()
 
-    def _ensure_loaded(self, collection: str) -> None:
+    async def _ensure_loaded(self, collection: str) -> None:
         """Ensure a collection is loaded"""
         if collection in self._collections_loaded:
             return
-        if self.client.has_collection(collection, timeout=15.0):
+        client = await self.client()
+        if await client.has_collection(collection, timeout=15.0):
             store_logger.info(
                 "MilvusVectorStore: loading collection %s", collection, event_type=LogEventType.STORE_LOAD,
             )
-            self.client.load_collection(collection, timeout=180.0)
+            client = await self.client()
+            await client.load_collection(collection, timeout=180.0)
             store_logger.info(
                 "MilvusVectorStore: %s collection loaded", collection, event_type=LogEventType.STORE_LOAD,
             )
@@ -799,8 +923,13 @@ class MilvusVectorStore(BaseVectorStore):
                            event_type=LogEventType.STORE_RETRIEVE, table_name=collection_name)
         try:
             # This is a sync call, needs to be in a thread
-            def _describe() -> Dict[str, Any]:
-                collection_info = self.client.describe_collection(collection_name)
+            async def _describe() -> Dict[str, Any]:
+                client = await self.client()
+                async with self._task_manager.task_group():
+                    task = await self._task_manager.create_task(
+                        client.describe_collection(collection_name)
+                    )
+                collection_info = task.result
                 vector_field_name = None
                 for f in collection_info.get("fields", []):
                     if f.get("type") == MilvusDataType.FLOAT_VECTOR:
@@ -812,11 +941,16 @@ class MilvusVectorStore(BaseVectorStore):
                     return {"distance_metric": "COSINE"}
 
                 # The default index name is the field name
-                index_info = self.client.describe_index(collection_name, index_name=vector_field_name)
+                client = await self.client()
+                async with self._task_manager.task_group():
+                    task = await self._task_manager.create_task(
+                        client.describe_index(collection_name, index_name=vector_field_name)
+                    )
+                index_info = task.result
                 metric_type = index_info["metric_type"]
                 return {"distance_metric": metric_type, "vector_field": vector_field_name}
 
-            metadata = await asyncio.to_thread(_describe)
+            metadata = await _describe()
 
             # Fetch schema_version from collection properties
             try:
@@ -827,20 +961,37 @@ class MilvusVectorStore(BaseVectorStore):
 
             self._collection_metadata[collection_name] = metadata
             return metadata
-        except MilvusException as e:
-            store_logger.warning(
-                f"Could not describe index for collection '{collection_name}': {e}. Falling back to defaults.",
-                event_type=LogEventType.STORE_RETRIEVE,
-                table_name=collection_name
-            )
-            return {"distance_metric": "COSINE", "schema_version": 0}
+        except (MilvusException, ExceptionGroup) as e:
+            if isinstance(e, ExceptionGroup):
+                # Find MilvusException in the group
+                for exc in e.exceptions:
+                    if isinstance(exc, MilvusException):
+                        store_logger.warning(
+                            f"Could not describe index for collection '{collection_name}': {exc}.\
+                            Falling back to defaults.",
+                            event_type=LogEventType.STORE_RETRIEVE,
+                            table_name=collection_name
+                        )
+                        return {"distance_metric": "COSINE", "schema_version": 0}
+                # If no MilvusException found, re-raise the entire group
+                raise
+            else:
+                # Direct MilvusException
+                store_logger.warning(
+                    f"Could not describe index for collection '{collection_name}': {e}. Falling back to defaults.",
+                    event_type=LogEventType.STORE_RETRIEVE,
+                    table_name=collection_name
+                )
+                return {"distance_metric": "COSINE", "schema_version": 0}
 
     async def _get_schema_version_from_milvus(self, collection_name: str) -> int:
         """Helper method to get schema version from Milvus collection properties."""
-        collection_info = await asyncio.to_thread(
-            self.client.describe_collection,
-            collection_name=collection_name
-        )
+        client = await self.client()
+        async with self._task_manager.task_group():
+            task = await self._task_manager.create_task(
+                client.describe_collection(collection_name)
+            )
+        collection_info = task.result
         properties = collection_info.get("properties", {})
         return int(properties.get("schema_version", 0))
 
@@ -881,19 +1032,31 @@ class MilvusVectorStore(BaseVectorStore):
             # Stream data from the old collection, transform, and insert into the new one
             store_logger.info(f"Starting data copy from '{collection_name}' to '{temp_collection_name}'.",
                               event_type=LogEventType.STORE_UPDATE, table_name=collection_name)
-            await asyncio.to_thread(self.client.load_collection, collection_name)
-            iterator = await asyncio.to_thread(
-                self.client.query_iterator,
-                collection_name=collection_name,
-                filter="",
-                output_fields=["*"]
-            )
+            client = await self.client()
+            async with self._task_manager.task_group():
+                await self._task_manager.create_task(
+                    client.load_collection(collection_name)
+                )
+            client = await self.client()
+            async with self._task_manager.task_group():
+                task = await self._task_manager.create_task(
+                    client.query_iterator(
+                        collection_name=collection_name,
+                        filter="",
+                        output_fields=["*"]
+                    )
+                )
+            iterator = task.result
 
             batch = []
             batch_size = 100  # A reasonable default batch size
             total_docs = 0
             while True:
-                doc_batch = await asyncio.to_thread(iterator.next)
+                async with self._task_manager.task_group():
+                    task = await self._task_manager.create_task(
+                        iterator.next()
+                    )
+                doc_batch = task.result
                 if not doc_batch:
                     break
                 for doc in doc_batch:
@@ -913,7 +1076,11 @@ class MilvusVectorStore(BaseVectorStore):
             store_logger.info(f"Finished copying {total_docs} documents to '{temp_collection_name}'.",
                               event_type=LogEventType.STORE_UPDATE, table_name=collection_name)
             # Release the old collection to free up memory
-            await asyncio.to_thread(self.client.release_collection, collection_name)
+            client = await self.client()
+            async with self._task_manager.task_group():
+                await self._task_manager.create_task(
+                    client.release_collection(collection_name)
+                )
 
             # Drop the old collection
             store_logger.info(f"Dropping old collection '{collection_name}'.",
@@ -923,10 +1090,11 @@ class MilvusVectorStore(BaseVectorStore):
             # Rename the new collection to the original name
             store_logger.info(f"Renaming '{temp_collection_name}' to '{collection_name}'.",
                               event_type=LogEventType.STORE_UPDATE, table_name=collection_name)
-
-            def _rename():
-                self.client.rename_collection(temp_collection_name, collection_name)
-            await asyncio.to_thread(_rename)
+            client = await self.client()
+            async with self._task_manager.task_group():
+                await self._task_manager.create_task(
+                    client.rename_collection(temp_collection_name, collection_name)
+                )
 
             # Clear the old metadata from the cache
             if collection_name in self._collection_metadata:
@@ -948,7 +1116,12 @@ class MilvusVectorStore(BaseVectorStore):
             raise
 
     async def list_collection_names(self) -> List[str]:
-        return self._client.list_collections()
+        client = await self.client()
+        async with self._task_manager.task_group():
+            task = await self._task_manager.create_task(
+                client.list_collections()
+            )
+        return task.result
 
     async def update_schema(self, collection_name: str, operations: List[BaseOperation]):
         """
@@ -1025,16 +1198,30 @@ class MilvusVectorStore(BaseVectorStore):
 
         # Check if collection exists
         try:
-            collection_info = await asyncio.to_thread(
-                self.client.describe_collection,
-                collection_name=collection_name
-            )
+            client = await self.client()
+            async with self._task_manager.task_group():
+                task = await self._task_manager.create_task(
+                    client.describe_collection(collection_name=collection_name)
+                )
         except MilvusException as e:
             raise build_error(
                 StatusCode.STORE_VECTOR_COLLECTION_NOT_FOUND,
                 collection_name=collection_name,
                 error_msg=str(e)
             ) from e
+        except ExceptionGroup as eg:
+            # Find the MilvusException in the exception group
+            for e in eg.exceptions:
+                if isinstance(e, MilvusException):
+                    store_logger.error(
+                        "Failed to delete collection",
+                        event_type=LogEventType.STORE_DELETE,
+                        table_name=collection_name,
+                        exception=str(e)
+                    )
+                    raise e from eg
+            # If no MilvusException found, re-raise the entire group
+            raise
 
         # Convert all metadata values to strings for Milvus properties
         # Milvus only supports string values in properties
@@ -1044,17 +1231,33 @@ class MilvusVectorStore(BaseVectorStore):
 
         # Update properties in Milvus
         try:
-            await asyncio.to_thread(
-                self.client.alter_collection_properties,
-                collection_name=collection_name,
-                properties=properties_to_update,
-            )
+            client = await self.client()
+            async with self._task_manager.task_group():
+                await self._task_manager.create_task(
+                    client.alter_collection_properties(
+                        collection_name=collection_name,
+                        properties=properties_to_update,
+                    )
+                )
         except MilvusException as e:
             raise build_error(
                 StatusCode.STORE_VECTOR_SCHEMA_INVALID,
                 collection_name=collection_name,
                 error_msg=f"failed to update collection metadata: {e}"
             ) from e
+        except ExceptionGroup as eg:
+            # Find the MilvusException in the exception group
+            for e in eg.exceptions:
+                if isinstance(e, MilvusException):
+                    store_logger.error(
+                        "Failed to delete collection",
+                        event_type=LogEventType.STORE_DELETE,
+                        table_name=collection_name,
+                        exception=str(e)
+                    )
+                    raise e from eg
+            # If no MilvusException found, re-raise the entire group
+            raise
 
         # Update local cache if present
         if collection_name in self._collection_metadata:

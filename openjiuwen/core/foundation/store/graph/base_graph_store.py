@@ -37,6 +37,10 @@ class GraphStore(Protocol):
     def embedder(self) -> Optional[Embedding]:
         """Access graph store embedder"""
 
+    @property
+    def return_similarity_score(self) -> bool:
+        """Whether the returned score is guaranteed to be a similarity, not distance"""
+
     # Factory method
     @classmethod
     def from_config(cls, config: GraphConfig, **kwargs) -> "GraphStore":
@@ -54,7 +58,7 @@ class GraphStore(Protocol):
     def rebuild(self):
         """Drop the collections and rebuild indices"""
 
-    async def refresh(self, *args, **kwargs):
+    async def refresh(self, skip_compact: bool = True, **kwargs):
         """Refresh: flush data changes to database and compact segments"""
 
     # Data addition methods

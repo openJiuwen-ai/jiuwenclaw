@@ -3,55 +3,78 @@
 
 """Agent Group Module
 
-This module defines the new Card + Config pattern for agent groups.
+Defines the Card + Config pattern for agent groups.
+BaseGroup delegates all agent management to GroupRuntime and
+exposes send/publish methods for agent communication.
 """
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from typing import Any, Dict, AsyncIterator, Optional, Union, List
+from typing import Any, AsyncIterator, Optional, Union, List, TYPE_CHECKING
 
 from openjiuwen.core.common.exception.errors import build_error
+from openjiuwen.core.multi_agent.group_runtime.communicable_agent import CommunicableAgent
+from openjiuwen.core.multi_agent.group_runtime.message_bus import MessageBusConfig
+from openjiuwen.core.multi_agent.group_runtime.group_runtime import GroupRuntime, RuntimeConfig
 from openjiuwen.core.session.agent_group import Session
 from openjiuwen.core.single_agent.legacy import LegacyBaseAgent as BaseAgent
+from openjiuwen.core.single_agent.schema.agent_card import AgentCard
 from openjiuwen.core.multi_agent.config import GroupConfig
 from openjiuwen.core.multi_agent.schema.group_card import GroupCard
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.logging import logger
 
+if TYPE_CHECKING:
+    from openjiuwen.core.runner.resources_manager.base import AgentProvider
+
 
 class BaseGroup(ABC):
     """Abstract base class for agent groups.
 
-    Design principles (aligned with BaseAgent):
-    - Card is required (defines what the Group is)
-    - Config is optional (defines how the Group runs)
+    - ``card`` is required and defines the group's identity
+    - ``config`` is optional and controls runtime behaviour
+    - All agent registration is delegated to ``self.runtime``
     - All configuration methods support chaining
 
     Attributes:
         card: Group card (required, immutable identity)
         config: Group config (optional, mutable runtime settings)
-        agents: Dictionary of agents {agent_name: agent_instance}
+        runtime: GroupRuntime instance (manages agents)
     """
 
     def __init__(
         self,
         card: GroupCard,
-        config: Optional[GroupConfig] = None
+        config: Optional[GroupConfig] = None,
+        runtime: Optional[GroupRuntime] = None
     ):
         """Initialize the agent group.
 
         Args:
             card: GroupCard defining group identity
             config: Optional GroupConfig for runtime settings
+            runtime: Optional GroupRuntime (created if not provided)
         """
         self.card = card
         self.config = config if config else self._create_default_config()
         self.group_id = card.name
-        self.agents: Dict[str, BaseAgent] = {}
+        self.runtime = runtime or self._create_default_runtime()
 
     def _create_default_config(self) -> GroupConfig:
         """Create default configuration"""
         return GroupConfig()
+
+    def _create_default_runtime(self) -> GroupRuntime:
+        """Create default runtime with group_id"""
+        return GroupRuntime(
+            config=RuntimeConfig(
+                group_id=self.card.id,
+                message_bus=MessageBusConfig(
+                    max_queue_size=self.config.max_concurrent_messages,
+                    process_timeout=self.config.message_timeout
+                )
+            )
+        )
 
     def configure(self, config: GroupConfig) -> 'BaseGroup':
         """Set configuration
@@ -67,121 +90,182 @@ class BaseGroup(ABC):
 
     def add_agent(
         self,
-        agent: 'BaseAgent',
-        agent_id: Optional[str] = None
+        card: AgentCard,
+        provider: AgentProvider,
     ) -> 'BaseGroup':
-        """Register agent to group
+        """Register an agent to the group via Card + Provider.
+
+        Delegates to ``self.runtime.register_agent`` and appends the card
+        to ``self.card.agent_cards``.
 
         Args:
-            agent: Agent instance (must have card.name)
-            agent_id: Optional custom ID (defaults to agent.card.name)
+            card: AgentCard defining agent identity (including id)
+            provider: AgentProvider factory for lazy instance creation
 
         Returns:
             self (supports chaining)
-
-        Raises:
-            BaseError: If agent ID already exists or max reached
-
-        Example:
-            # New pattern (recommended)
-            group.add_agent(agent1).add_agent(agent2)
-
-            # With custom ID
-            group.add_agent(agent1, agent_id="custom_id")
         """
-        if agent_id is None:
-            if hasattr(agent, 'card') and hasattr(agent.card, 'name'):
-                agent_id = agent.card.name
-            else:
-                raise build_error(
-                    StatusCode.AGENT_GROUP_ADD_RUNTIME_ERROR,
-                    error_msg="Agent must have card.name or provide agent_id"
-                )
+        agent_id = card.id
 
-        if agent_id in self.agents:
+        if self.runtime.has_agent(agent_id):
+            logger.warning(f"[{self.__class__.__name__}] Agent ID '{agent_id}' "
+                           f"already exists in group '{self.group_id}', skipping add")
+            return self
+
+        if self.runtime.get_agent_count() >= self.config.max_agents:
             raise build_error(
                 StatusCode.AGENT_GROUP_ADD_RUNTIME_ERROR,
-                error_msg=f"Agent ID '{agent_id}' already exists"
+                error_msg=f"Agent count exceeds max_agents ({self.config.max_agents})"
             )
 
-        if self.get_agent_count() >= self.config.max_agents:
-            raise build_error(
-                StatusCode.AGENT_GROUP_ADD_RUNTIME_ERROR,
-                error_msg=f"Agent count exceeds max_agents "
-                           f"({self.config.max_agents})"
-            )
+        self.runtime.register_agent(card, provider)
+        self.card.agent_cards.append(card)
 
-        self.agents[agent_id] = agent
-
-        if hasattr(agent, 'card'):
-            self.card.agent_cards.append(agent.card)
-
-        if hasattr(agent, 'controller') and agent.controller is not None:
-            if hasattr(agent.controller, 'set_group'):
-                agent.controller.set_group(self)
-                logger.debug(
-                    f"BaseGroup: Auto-injected group reference to "
-                    f"agent '{agent_id}' controller"
-                )
+        logger.debug(f"[{self.__class__.__name__}] Added agent '{agent_id}' to group '{self.group_id}'")
 
         return self
 
     def remove_agent(
         self,
-        agent_id: Union[str, 'BaseAgent']
+        agent: Union[str, AgentCard]
     ) -> 'BaseGroup':
-        """Remove agent from group
+        """Remove an agent from the group.
+
+        Removes from the runtime card registry and GroupCard metadata.
+        Does not unregister from ResourceMgr (agent may be shared).
 
         Args:
-            agent_id: Agent ID string or agent instance
+            agent: Agent ID string or AgentCard instance
 
         Returns:
             self (supports chaining)
         """
-        if isinstance(agent_id, BaseAgent):
-            if hasattr(agent_id, 'card') and hasattr(agent_id.card, 'name'):
-                agent_id = agent_id.card.name
-            else:
-                logger.warning("Cannot determine agent ID from instance")
-                return self
+        if isinstance(agent, AgentCard):
+            agent_id = agent.id
+        else:
+            agent_id = agent
 
-        if agent_id in self.agents:
-            agent = self.agents.pop(agent_id)
-            if hasattr(agent, 'card'):
-                self.card.agent_cards = [
-                    c for c in self.card.agent_cards
-                    if c.name != agent_id
-                ]
-            logger.debug(f"BaseGroup: Removed agent '{agent_id}'")
+        removed_card = self.runtime.unregister_agent(agent_id)
+        if removed_card:
+            self.card.agent_cards = [
+                c for c in self.card.agent_cards
+                if c.id != removed_card.id
+            ]
+            logger.debug(f"[{self.__class__.__name__}] Removed agent '{agent_id}' from group '{self.group_id}'")
 
         return self
 
-    def get_agent(self, agent_id: str) -> Optional['BaseAgent']:
-        """Get agent by ID
+    async def subscribe(self, agent_id: str, topic: str) -> None:
+        """Add topic subscription (delegates to runtime)
+
+        Args:
+            agent_id: Agent ID string
+            topic: Topic pattern string
+        """
+        await self.runtime.subscribe(agent_id, topic)
+
+    async def unsubscribe(self, agent_id: str, topic: str) -> None:
+        """Remove topic subscription (delegates to runtime)
+
+        Args:
+            agent_id: Agent ID string
+            topic: Topic pattern string
+        """
+        await self.runtime.unsubscribe(agent_id, topic)
+
+    def get_agent_card(self, agent_id: str) -> Optional[AgentCard]:
+        """Get agent card by ID (delegates to runtime)
 
         Args:
             agent_id: Agent ID
 
         Returns:
-            Agent instance or None if not found
+            AgentCard or None if not found
         """
-        return self.agents.get(agent_id)
+        return self.runtime.get_agent_card(agent_id)
 
     def get_agent_count(self) -> int:
-        """Get the number of agents in the group
+        """Get the number of agents in the group (delegates to runtime)
 
         Returns:
             Number of agents
         """
-        return len(self.agents)
+        return self.runtime.get_agent_count()
 
     def list_agents(self) -> List[str]:
-        """List all agent IDs
+        """List all agent IDs (delegates to runtime)
 
         Returns:
             List of agent IDs
         """
-        return list(self.agents.keys())
+        return self.runtime.list_agents()
+
+    async def send(
+        self,
+        message: Any,
+        recipient: str,
+        sender: str,
+        session_id: Optional[str] = None,
+        timeout: Optional[float] = None
+    ) -> Any:
+        """Send a P2P message between agents in this group.
+
+        Args:
+            message: Message payload
+            recipient: Recipient agent ID (must be registered in group)
+            sender: Sender agent ID (must be registered in group)
+            session_id: session ID
+            timeout: Response timeout in seconds
+
+        Returns:
+            Response from recipient agent
+        """
+        if not self.runtime.has_agent(sender):
+            raise build_error(
+                StatusCode.AGENT_GROUP_AGENT_NOT_FOUND,
+                error_msg=f"Sender '{sender}' not found in group '{self.group_id}'"
+            )
+        if not self.runtime.has_agent(recipient):
+            raise build_error(
+                StatusCode.AGENT_GROUP_AGENT_NOT_FOUND,
+                error_msg=f"Recipient '{recipient}' not found in group '{self.group_id}'"
+            )
+
+        return await self.runtime.send(
+            message=message,
+            recipient=recipient,
+            sender=sender,
+            session_id=session_id,
+            timeout=timeout
+        )
+
+    async def publish(
+        self,
+        message: Any,
+        topic_id: str,
+        sender: str,
+        session_id: Optional[str] = None
+    ) -> None:
+        """Publish a message to a topic within this group.
+
+        Args:
+            message: Message payload
+            topic_id: Topic ID (e.g., "code_events", "task_updates")
+            sender: Sender agent ID (must be registered in group)
+            session_id: session ID
+        """
+        if not self.runtime.has_agent(sender):
+            raise build_error(
+                StatusCode.AGENT_GROUP_AGENT_NOT_FOUND,
+                error_msg=f"Sender '{sender}' not found in group '{self.group_id}'"
+            )
+
+        await self.runtime.publish(
+            message=message,
+            topic_id=topic_id,
+            sender=sender,
+            session_id=session_id
+        )
 
     @abstractmethod
     async def invoke(
@@ -220,5 +304,3 @@ class BaseGroup(ABC):
         raise NotImplementedError(
             f"stream method must be implemented by {self.__class__.__name__}"
         )
-
-

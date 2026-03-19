@@ -1007,7 +1007,9 @@ class ResourceMgr:
                 if not ignore_exception:
                     raise e
             if tool_names is None:
-                results.extend(self._resource_registry.tool().get_mcp_tools(mcp_server_id, session))
+                tools = self._resource_registry.tool().get_mcp_tools(mcp_server_id, session)
+                if tools:
+                    results.extend(tools)
                 continue
             for tool_name in tool_names:
                 tool = self._resource_registry.tool().get_mcp_tool(tool_name, mcp_server_id, session)
@@ -1056,10 +1058,14 @@ class ResourceMgr:
                     raise e
             tool_ids = []
             if tool_names is None:
-                tool_ids = self._resource_registry.tool().get_mcp_tool_id(mcp_server_id)
+                server_tool_ids = self._resource_registry.tool().get_mcp_tool_id(mcp_server_id)
+                if server_tool_ids:
+                    tool_ids = server_tool_ids
             else:
                 for tool_name in tool_names:
-                    tool_ids.append(self._resource_registry.tool().get_mcp_tool_id(mcp_server_id, tool_name))
+                    tool_id = self._resource_registry.tool().get_mcp_tool_id(mcp_server_id, tool_name)
+                    if tool_id:
+                        tool_ids.append(tool_id)
             for tool_id in tool_ids:
                 tool_card = self._id_to_card.get(tool_id) if tool_id else None
                 if exact_match:
@@ -1084,7 +1090,12 @@ class ResourceMgr:
         resource_ids = self._tag_mgr.get_tag_resources(tag)
         if not resource_ids:
             return [] if resource_ids is not None else None
-        return [self._id_to_card.get(resource_id) for resource_id in resource_ids]
+        resources = []
+        for resource_id in resource_ids:
+            card = self._id_to_card.get(resource_id)
+            if card is not None:
+                resources.append(card)
+        return resources
 
     def list_tags(self) -> list[Tag]:
         """
@@ -1204,7 +1215,7 @@ class ResourceMgr:
         self._inner_validate_resource_id(resource_id)
         self._inner_validate_tag(tag)
         try:
-            remain_tags = self._tag_mgr.remove_resource_tags(resource_id, tags=tag,
+            remain_tags = self._tag_mgr.remove_resource_tags(resource_id, tag,
                                                              skip_if_not_exists=skip_if_tag_not_exists)
             return Ok(remain_tags)
         except Exception as e:
@@ -1373,13 +1384,12 @@ class ResourceMgr:
                 if removed_card or not remove_by_tag:
                     results.append(Ok(removed_card))
             if not error:
-                logger.error(f"remove resource failed",
-                             event_type=LogEventType.RESOURCE_MGR_REMOVE_RESOURCE,
-                             resource_id=remove_id,
-                             resource_type=resource_type,
-                             exception=error,
-                             tag=tag if tag else GLOBAL,
-                             card=removed_card.str() if removed_card else None)
+                logger.info("remove resource succeed",
+                            event_type=LogEventType.RESOURCE_MGR_REMOVE_RESOURCE,
+                            resource_id=remove_id,
+                            resource_type=resource_type,
+                            tag=tag if tag else GLOBAL,
+                            card=removed_card.str() if removed_card else None)
         return results if not isinstance(resource_id, str) else results[0]
 
     def _inner_find_resource_ids(self, *, resource_id: Optional[str | list[str]], tag: Tag | list[Tag],

@@ -15,7 +15,6 @@ from openjiuwen.core.foundation.llm.schema.message import SystemMessage
 from openjiuwen.core.runner.runner import Runner
 from openjiuwen.core.single_agent.rail.base import AgentCallbackContext
 from openjiuwen.core.single_agent.skills.skill_manager import Skill
-from openjiuwen.core.sys_operation import SysOperation
 from openjiuwen.deepagents.prompts.skill_rail_prompt import (
     build_all_mode_skill_prompt,
     build_auto_list_mode_skill_prompt,
@@ -39,7 +38,6 @@ class SkillRail(DeepAgentRail):
     def __init__(
         self,
         skills_dir: Union[str, List[str]],
-        operation: SysOperation,
         *,
         skill_mode: str = SKILL_MODE_AUTO_LIST,
         list_skill_model: Optional[Model] = None,
@@ -52,7 +50,6 @@ class SkillRail(DeepAgentRail):
 
         Args:
             skills_dir: Skill root directory or directories.
-            operation: SysOperation used for reading SKILL.md and runtime tools.
             skill_mode: Skill expose mode, supports:
                 - "all": inject all enabled skills into system prompt
                 - "auto_list": add list_skill tool and let model decide when to inspect skills
@@ -71,7 +68,6 @@ class SkillRail(DeepAgentRail):
             )
 
         self.skills_dir = skills_dir
-        self.sys_operation = operation
         self.skill_mode = skill_mode
         self.list_skill_model = list_skill_model
         self.enable_cache = enable_cache
@@ -440,7 +436,6 @@ class SkillRail(DeepAgentRail):
     async def load_skills_from_dir(
         cls,
         skills_dir: Union[str, List[str]],
-        operation: SysOperation,
     ) -> List[Skill]:
         """Load skills from one or more skills directories."""
         roots = cls._normalize_skill_dirs(skills_dir)
@@ -451,7 +446,6 @@ class SkillRail(DeepAgentRail):
 
         loader = cls(
             skills_dir=skills_dir,
-            operation=operation,
             skill_mode=cls.SKILL_MODE_ALL,
             include_tools=False,
         )

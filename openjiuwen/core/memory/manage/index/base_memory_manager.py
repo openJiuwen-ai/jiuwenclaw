@@ -23,7 +23,7 @@ class BaseMemoryManager(ABC):
 
     @abstractmethod
     async def add_memories(self, user_id: str, scope_id: str, memories: dict[str, list[BaseMemoryUnit]],
-                           llm: Tuple[str, Model] | None = None, **kwargs):
+                           llm: Model | None = None, **kwargs):
         """add memories in batch."""
         pass
 

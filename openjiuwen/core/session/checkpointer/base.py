@@ -29,11 +29,19 @@ class Checkpointer(ABC):
         ...
 
     @abstractmethod
+    async def pre_agent_group_execute(self, session: BaseSession, inputs):
+        ...
+
+    @abstractmethod
     async def interrupt_agent_execute(self, session: BaseSession):
         ...
 
     @abstractmethod
     async def post_agent_execute(self, session: BaseSession):
+        ...
+
+    @abstractmethod
+    async def post_agent_group_execute(self, session: BaseSession):
         ...
 
     @abstractmethod
@@ -70,6 +78,8 @@ class Storage(ABC):
 # Key namespace constants
 # Namespace for agent state under session
 SESSION_NAMESPACE_AGENT = "agent"
+# Namespace for agent group state under session
+SESSION_NAMESPACE_AGENT_GROUP = "agent-group"
 # Namespace for workflow state under session (workflow's own state)
 SESSION_NAMESPACE_WORKFLOW = "workflow"
 # Namespace for graph state under workflow (separated from workflow's own state)

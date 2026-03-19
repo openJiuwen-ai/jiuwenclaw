@@ -1,0 +1,32 @@
+entity_extraction_conversation_en:
+  description: "Entity extraction template for conversations (English)"
+
+entity_extraction_document_en:
+  description: "Entity extraction template for documents (English)"
+
+entity_extraction_dedupe_entity_en:
+  description: "Entity extraction template for entity de-deplication (English)"
+
+entity_extraction_json_en:
+  description: "Entity extraction template for JSON input (English)"
+
+entity_extraction_summary_create_en:
+  description: "Entity extraction template for creating summaries (English)"
+
+entity_extraction_entity_merge_en:
+  description: "Entity extraction template for merging entities (English)"
+
+entity_extraction_relation_en:
+  description: "Entity relation extraction template (English)"
+
+entity_extraction_relation_filter_en:
+  description: "Entity relation filtering template (English)"
+
+entity_extraction_dedupe_relation_en:
+  description: "Entity extraction template for relation de-deplication (English)"
+
+entity_extraction_timezone_en:
+  description: "Timezone extraction template (English)"
+
+entity_extraction_check_missing_en:
+  description: "[Unused] Entity extraction template for finding missing entities (English)"

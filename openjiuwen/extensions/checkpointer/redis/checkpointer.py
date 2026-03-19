@@ -34,6 +34,7 @@ from openjiuwen.core.session.checkpointer import (
 from openjiuwen.core.session.constants import FORCE_DEL_WORKFLOW_STATE_KEY
 from openjiuwen.extensions.checkpointer.redis.storage import (
     AgentStorage,
+    AgentGroupStorage,
     GraphStore,
     WorkflowStorage,
 )
@@ -357,6 +358,7 @@ class RedisCheckpointer(Checkpointer):
         self._redis_store = redis_store
         # All storage classes now use RedisStore instead of direct Redis client
         self._agent_storage = AgentStorage(redis_store, ttl)
+        self._agent_group_storage = AgentGroupStorage(redis_store, ttl)
         self._workflow_storage = WorkflowStorage(redis_store, ttl)
         self._graph_state = GraphStore(redis_store, ttl)
 
@@ -368,6 +370,14 @@ class RedisCheckpointer(Checkpointer):
         if inputs is not None:
             session.state().update({INTERACTIVE_INPUT: [inputs]})
 
+    async def pre_agent_group_execute(self, session: BaseSession, inputs):
+        logger.info(
+            f"agent group: {session.group_id()} create or restore checkpoint from session: {session.session_id()}"
+        )
+        await self._agent_group_storage.recover(session)
+        if inputs is not None:
+            session.state().update_global({INTERACTIVE_INPUT: [inputs]})
+
     async def interrupt_agent_execute(self, session: BaseSession):
         logger.info(f"interaction required, save checkpoint for "
                     f"agent: {session.agent_id()} in session: {session.session_id()}")  # type: ignore[attr-defined]
@@ -377,6 +387,13 @@ class RedisCheckpointer(Checkpointer):
         logger.info(f"agent finished, save checkpoint for "
                     f"agent: {session.agent_id()} in session: {session.session_id()}")  # type: ignore[attr-defined]
         await self._agent_storage.save(session)
+
+    async def post_agent_group_execute(self, session: BaseSession):
+        logger.info(
+            f"agent group finished, save checkpoint for group: {session.group_id()} "
+            f"in session: {session.session_id()}"
+        )
+        await self._agent_group_storage.save(session)
 
     async def pre_workflow_execute(self, session: BaseSession, inputs: InteractiveInput):
         """
