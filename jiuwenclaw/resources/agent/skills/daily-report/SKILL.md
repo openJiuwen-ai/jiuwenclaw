@@ -3,7 +3,7 @@ name: advanced-daily-report
 version: 2.0.0
 description: 进阶版日报生成器，支持多数据源采集、工作分析、趋势对比、周报月报聚合
 tags: [report, automation, productivity, daily, weekly, monthly, advanced]
-allowed_tools: [read_memory, write_memory, mcp_exec_command, read_file, write_file]
+allowed_tools: [read_memory, write_memory, bash, read_file, write_file]
 ---
 
 # 进阶版日报生成器
@@ -71,7 +71,7 @@ daily-report/
 ### ⚠️ 重要：执行方式
 
 本技能通过执行 Python 脚本来采集数据（Git提交、邮箱邮件、记忆、待办）。
-**必须使用 `mcp_exec_command` 工具执行脚本**，而不是直接回复用户。
+**必须使用 `bash` 工具执行脚本**，而不是直接回复用户。
 
 **脚本会自动采集以下数据**：
 - **Git 提交记录**：通过 `git log` 命令读取 `D:/Download/jiuwenclaw` 仓库的提交历史
@@ -103,7 +103,7 @@ python ~/.jiuwenclaw/agent/skills/daily-report/run_report.py monthly --year 2026
 ### 执行步骤
 
 1. 用户发送 "生成日报" / "生成周报" / "生成月报" 等指令
-2. **使用 mcp_exec_command 执行上述命令**
+2. **使用 bash 执行上述命令**
 3. 脚本自动采集数据：
    - Git: 执行 `git log` 获取提交记录、代码变更统计
    - 邮箱: 通过 IMAP 连接获取邮件统计（如果配置了邮箱）

@@ -1,5 +1,5 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
-"""以 detached 方式启动 delayed_restart_app，供 mcp_exec_command 通过 skill 调用。
+"""以 detached 方式启动 delayed_restart_app，供 bash 通过 skill 调用。
 
 本脚本会立即 spawn 子进程并退出，子进程与当前进程树脱离，因此当 app 被终止时
 子进程不会随之结束，可以正常完成延迟重启。

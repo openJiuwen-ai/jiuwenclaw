@@ -272,7 +272,7 @@ name: code-review
 version: 2.0.1
 description: 多语言代码审查助手，支持 Python/JavaScript/Java/Go/Rust，检测质量/安全/复杂度问题
 tags: [code, review, python, javascript, typescript, java, go, rust, quality, security]
-allowed_tools: [mcp_exec_command, read_file, write_file]
+allowed_tools: [bash, read_file, write_file]
 ---
 
 # 多语言代码审查助手
