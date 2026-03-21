@@ -41,9 +41,10 @@ class TaskPlanningRail(DeepAgentRail):
 
     priority = 90
 
-    def __init__(self) -> None:
+    def __init__(self, language: str = "cn") -> None:
         super().__init__()
         self.tools = None
+        self.language = language
 
     def init(self, agent) -> None:
         """Register todo tools on the agent."""
@@ -71,6 +72,7 @@ class TaskPlanningRail(DeepAgentRail):
         tools = create_todos_tool(
             self.sys_operation,
             workspace_path,
+            self.language,
         )
         self.tools = tools
         Runner.resource_mgr.add_tool(list(tools))

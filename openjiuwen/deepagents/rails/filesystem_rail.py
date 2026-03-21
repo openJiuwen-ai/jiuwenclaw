@@ -16,6 +16,10 @@ from openjiuwen.deepagents.tools.filesystem import (
     WriteFileTool,
 )
 from openjiuwen.deepagents.tools.shell import BashTool
+from openjiuwen.deepagents.tools.vision import (
+    ImageOCRTool,
+    VisualQuestionAnsweringTool,
+)
 
 
 class FileSystemRail(DeepAgentRail):
@@ -23,19 +27,33 @@ class FileSystemRail(DeepAgentRail):
 
     priority = 100
 
-    def __init__(self):
+    def __init__(self, language: str = "cn") -> None:
         super().__init__()
         self.tools = None
+        self.language = language
 
-    def init(self, agent):
-        read_tool = ReadFileTool(self.sys_operation)
-        write_tool = WriteFileTool(self.sys_operation)
-        edit_tool = EditFileTool(self.sys_operation)
-        glob_tool = GlobTool(self.sys_operation)
-        list_dir_tool = ListDirTool(self.sys_operation)
-        grep_tool = GrepTool(self.sys_operation)
-        bash_tool = BashTool(self.sys_operation)
-        code_tool = CodeTool(self.sys_operation)
+    def init(self, agent) -> None:
+        lang = self.language
+        vision_model_config = None
+        if hasattr(agent, "deep_config") and agent.deep_config is not None:
+            vision_model_config = getattr(
+                agent.deep_config,
+                "vision_model_config",
+                None,
+            )
+        read_tool = ReadFileTool(self.sys_operation, lang)
+        write_tool = WriteFileTool(self.sys_operation, lang)
+        edit_tool = EditFileTool(self.sys_operation, lang)
+        glob_tool = GlobTool(self.sys_operation, lang)
+        list_dir_tool = ListDirTool(self.sys_operation, lang)
+        grep_tool = GrepTool(self.sys_operation, lang)
+        bash_tool = BashTool(self.sys_operation, lang)
+        code_tool = CodeTool(self.sys_operation, lang)
+        image_ocr_tool = ImageOCRTool(lang, vision_model_config)
+        visual_question_answering_tool = VisualQuestionAnsweringTool(
+            lang,
+            vision_model_config,
+        )
 
         self.tools = [
             read_tool,
@@ -46,6 +64,8 @@ class FileSystemRail(DeepAgentRail):
             grep_tool,
             bash_tool,
             code_tool,
+            image_ocr_tool,
+            visual_question_answering_tool,
         ]
 
         Runner.resource_mgr.add_tool(self.tools)

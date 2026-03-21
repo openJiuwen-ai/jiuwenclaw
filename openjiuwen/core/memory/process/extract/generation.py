@@ -28,6 +28,7 @@ class Generator:
         user_id = kwargs.get("user_id")
         scope_id = kwargs.get("scope_id")
         history_messages = kwargs.get("history_messages")
+        forbidden_variables = kwargs.get("forbidden_variables")
         message_mem_id = kwargs.get("message_mem_id")
         timestamp = kwargs.get("timestamp")
         summary_max_token = kwargs.get("summary_max_token")
@@ -54,7 +55,8 @@ class Generator:
             history_messages=history_messages,
             base_chat_model=model,
             memory_config=config,
-            summary_max_token=summary_max_token
+            summary_max_token=summary_max_token,
+            forbidden_variables=forbidden_variables
         )
         variable_units = self._process_extracted_data(
             variable_results=memory_analyze_res.variables,

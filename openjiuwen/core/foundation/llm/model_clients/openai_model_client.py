@@ -211,6 +211,9 @@ class OpenAIModelClient(BaseModelClient):
             )
             assistant_message = await self._parse_response(response, output_parser)
 
+            if tracer_record_data:
+                await tracer_record_data(llm_response=assistant_message)
+
             await trigger(
                 LLMCallEvents.LLM_OUTPUT,
                 model_name=params.get("model"),
@@ -315,6 +318,7 @@ class OpenAIModelClient(BaseModelClient):
             # Call API with streaming
             response_stream = await async_client.chat.completions.create(**params)
 
+            final_message = None
             if output_parser:
                 # Use streaming parser
                 async for parsed_result in self._astream_with_parser(response_stream, output_parser):
@@ -322,6 +326,10 @@ class OpenAIModelClient(BaseModelClient):
                         LLMCallEvents.LLM_RESPONSE_RECEIVED,
                         model_name=params.get("model"),
                         model_provider=self.model_client_config.client_provider)
+                    if final_message:
+                        final_message = final_message + parsed_result
+                    else:
+                        final_message = parsed_result
                     yield parsed_result
             else:
                 async for chunk in response_stream:
@@ -331,7 +339,14 @@ class OpenAIModelClient(BaseModelClient):
                             LLMCallEvents.LLM_RESPONSE_RECEIVED,
                             model_name=params.get("model"),
                             model_provider=self.model_client_config.client_provider)
+                        if final_message:
+                            final_message = final_message + parsed_chunk
+                        else:
+                            final_message = parsed_chunk
                         yield parsed_chunk
+
+            if tracer_record_data:
+                await tracer_record_data(llm_response=final_message)
 
             await trigger(
                 LLMCallEvents.LLM_OUTPUT,
@@ -588,26 +603,7 @@ class OpenAIModelClient(BaseModelClient):
             AssistantMessageChunk or None
         """
         if not chunk.choices:
-            # Adaptation of the last-frame data format for the MaaS platform
-            if chunk.usage:
-                usage_metadata = None
-                if hasattr(chunk, 'usage') and chunk.usage:
-                    usage_metadata = UsageMetadata(
-                        model_name=self.model_config.model_name,
-                        input_tokens=chunk.usage.prompt_tokens if hasattr(chunk.usage, 'prompt_tokens') else 0,
-                        output_tokens=chunk.usage.completion_tokens if hasattr(chunk.usage, 'completion_tokens') else 0,
-                        total_tokens=chunk.usage.total_tokens if hasattr(chunk.usage, 'total_tokens') else 0,
-                    )
-
-                return AssistantMessageChunk(
-                    content="",
-                    reasoning_content=None,
-                    tool_calls=None,
-                    usage_metadata=usage_metadata,
-                    finish_reason="stop"
-                )
-            else:
-                return None
+            return None
 
         choice = chunk.choices[0]
         delta = choice.delta

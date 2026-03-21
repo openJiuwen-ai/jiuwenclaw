@@ -826,6 +826,11 @@ class StatusCode(Enum):
     TOOL_TODOS_CLEAR_FAILED = (182502, "todo tool clears failed, error='{reason}'")
     TOOL_TODOS_VALIDATION_INVALID = (182503, "todo tool validation invalid, error='{reason}'")
     TOOL_TODOS_INVOKE_FAILED = (182504, "todo tool invoke failed, error='{reason}'")
+    TOOL_TASK_TOOL_INVOKED = (182505, "task tool invoked, error='{reason}'")
+
+    TOOL_WEB_SEARCH_ENGINE_ERROR = (182506, "web search engine error, engine='{engine}', reason='{reason}'")
+    TOOL_WEB_SEARCH_ALL_ENGINES_FAILED = (182507, "all web search engines failed, errors='{errors}'")
+    TOOL_WEB_API_KEY_NOT_SET = (182508, "web tool api key is not set, key_name='{key_name}'")
 
     # Foundation - Logger 183000 - 183999
     COMMON_LOG_PATH_INVALID = (183000, "common log_path is invalid, reason: {error_msg}")

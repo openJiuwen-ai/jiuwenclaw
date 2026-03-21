@@ -16,9 +16,7 @@ from openjiuwen.core.common.logging import tool_logger, LogEventType
 from openjiuwen.core.foundation.tool import Tool, ToolCard, Input, Output
 from openjiuwen.core.session.agent import Session
 from openjiuwen.core.sys_operation import SysOperation
-from openjiuwen.deepagents.prompts.todo import (
-    TODO_CREATE_DESCRIPTION_ZH, TODO_LIST_DESCRIPTION_ZH, TODO_MODIFY_DESCRIPTION_ZH
-)
+from openjiuwen.deepagents.prompts.sections.tools import build_tool_card
 
 
 class TodoStatus(str, Enum):
@@ -950,142 +948,64 @@ class TodoModifyTool(TodoTool):
         return result_msg
 
 
-def create_todo_create_tool(operation: SysOperation, workspace: Optional[str] = None) -> TodoCreateTool:
+def create_todo_create_tool(
+    operation: SysOperation,
+    workspace: Optional[str] = None,
+    language: str = "cn",
+) -> TodoCreateTool:
     """Create a configured instance of the TodoWriteTool
 
     Args:
         operation: Implement persistence for the todo list
         workspace: Path for file system operations
+        language: Prompt language ("cn" or "en")
 
     Returns:
         Configured TodoWriteTool instance
     """
-    card = ToolCard(
-        name=f"todo_write",
-        description=TODO_CREATE_DESCRIPTION_ZH,
-        input_params={
-            "type": "object",
-            "properties": {
-                "tasks": {
-                    "type": "string",
-                    "description": ("Simplified task list (delimited by newlines/semicolons). "
-                                    "Example: 'Create login form;Implement form validation;Add error handling'"
-                                    )
-                }
-            },
-            "required": ["tasks"]
-        }
-    )
-
+    card = build_tool_card("todo_write", "TodoCreateTool", language)
     return TodoCreateTool(card, operation, workspace)
 
 
-def create_todo_list_tool(operation: SysOperation, workspace: Optional[str] = None) -> TodoListTool:
+def create_todo_list_tool(
+    operation: SysOperation,
+    workspace: Optional[str] = None,
+    language: str = "cn",
+) -> TodoListTool:
     """Create a configured instance of the TodoReadTool
 
     Args:
         operation: Implement persistence for the todo list
         workspace: Path for file system operations
+        language: Prompt language ("cn" or "en")
 
     Returns:
         Configured TodoReadTool instance
     """
-    card = ToolCard(
-        name=f"todo_read",
-        description=TODO_LIST_DESCRIPTION_ZH,
-        input_params={
-            "type": "object",
-            "properties": {},
-            "required": []
-        }
-    )
+    card = build_tool_card("todo_read", "TodoListTool", language)
     return TodoListTool(card, operation, workspace)
 
 
-def create_todo_modify_tool(operation: SysOperation, workspace: Optional[str] = None) -> TodoModifyTool:
+def create_todo_modify_tool(
+    operation: SysOperation,
+    workspace: Optional[str] = None,
+    language: str = "cn",
+) -> TodoModifyTool:
     """Create a configured instance of the TodoModifyTool
 
     Args:
         operation: Implement persistence for the todo list
         workspace: Path for file system operations
+        language: Prompt language ("cn" or "en")
 
     Returns:
         Configured TodoModifyTool instance
     """
-    card = ToolCard(
-        name=f"todo_modify",
-        description=TODO_MODIFY_DESCRIPTION_ZH,
-        input_params={
-            "type": "object",
-            "properties": {
-                "action": {
-                    "type": "string",
-                    "description": "Operation type to perform",
-                    "enum": ["update", "delete", "append", "insert_after", "insert_before"]
-                },
-                "ids": {
-                    "type": "array",
-                    "description": "List of task IDs to delete",
-                    "items": {
-                        "type": "string",
-                        "description": "Unique task identifier"
-                    }
-                },
-                "todos": {
-                    "type": "array",
-                    "description": "Array of todo items to process based on the action field",
-                    "items": {
-                        "type": "object",
-                        "properties": {
-                            "id": {"type": "string", "description": "Unique task identifier"},
-                            "content": {"type": "string", "description": "detailed task description"},
-                            "activeForm": {"type": "string", "description": "present-tense task description"},
-                            "status": {
-                                "type": "string",
-                                "description": "task status",
-                                "enum": ["pending", "in_progress", "completed"]
-                            }
-                        },
-                        "required": ["id", "content", "activeForm", "status"]
-                    }
-                },
-                "todo_data": {
-                    "type": "array",
-                    "description": "Array for insert_after/insert_before actions",
-                    "items": [
-                        {
-                            "type": "string",
-                            "description": "Target task ID"
-                        },
-                        {
-                            "type": "array",
-                            "description": "List of todo objects to insert",
-                            "items": {
-                                "type": "object",
-                                "properties": {
-                                    "id": {"type": "string", "description": "Unique task identifier"},
-                                    "content": {"type": "string", "description": "detailed task description"},
-                                    "activeForm": {"type": "string", "description": "present-tense task description"},
-                                    "status": {
-                                        "type": "string",
-                                        "description": "task status",
-                                        "enum": ["pending", "in_progress", "completed"]
-                                    }
-                                },
-                                "required": ["id", "content", "activeForm", "status"]
-                            }
-                        }
-                    ],
-                }
-            },
-            "required": ["action"]
-        }
-    )
-
+    card = build_tool_card("todo_modify", "TodoModifyTool", language)
     return TodoModifyTool(card, operation, workspace)
 
 
-def create_todos_tool(operation: SysOperation, workspace: Optional[str] = None) -> List[TodoTool]:
-    return [create_todo_create_tool(operation, workspace),
-            create_todo_list_tool(operation, workspace),
-            create_todo_modify_tool(operation, workspace)]
+def create_todos_tool(operation: SysOperation, workspace: Optional[str] = None, language: str = "cn") -> List[TodoTool]:
+    return [create_todo_create_tool(operation, workspace, language),
+            create_todo_list_tool(operation, workspace, language),
+            create_todo_modify_tool(operation, workspace, language)]

@@ -9,11 +9,12 @@ from typing import Any, AsyncIterator, Callable, Dict, List, Optional
 
 from openjiuwen.core.foundation.llm.model import Model
 from openjiuwen.core.foundation.llm.schema.message import SystemMessage, UserMessage
-from openjiuwen.core.foundation.tool.base import Tool, ToolCard
+from openjiuwen.core.foundation.tool.base import Tool
 from openjiuwen.core.single_agent.skills.skill_manager import Skill
-from openjiuwen.deepagents.prompts.skill_rail_prompt import (
-    SKILL_RAIL_LIST_SKILL_SYSTEM_PROMPT,
+from openjiuwen.deepagents.prompts.sections.skills import (
+    get_list_skill_system_prompt,
 )
+from openjiuwen.deepagents.prompts.sections.tools import build_tool_card
 from openjiuwen.deepagents.tools.base_tool import ToolOutput
 
 
@@ -24,6 +25,7 @@ class ListSkillTool(Tool):
         self,
         get_skills: Callable[[], List[Skill]],
         list_skill_model: Optional[Model] = None,
+        language: str = "cn",
     ):
         """Initialize ListSkillTool.
 
@@ -32,24 +34,11 @@ class ListSkillTool(Tool):
             list_skill_model: Optional model used for skill routing.
         """
         super().__init__(
-            ToolCard(
-                id="ListSkillTool",
-                name="list_skill",
-                description="List available skills or select relevant skills for the current task.",
-            )
+            build_tool_card("list_skill", "ListSkillTool", language)
         )
         self.get_skills = get_skills
         self.list_skill_model = list_skill_model
-        self.card.input_params = {
-            "type": "object",
-            "properties": {
-                "query": {
-                    "type": "string",
-                    "description": "Optional. Current user task. If empty, return all available skills.",
-                }
-            },
-            "required": []
-        }
+        self.language = language
 
     async def invoke(self, inputs: Dict[str, Any], **kwargs) -> ToolOutput:
         """Invoke list_skill tool."""
@@ -120,7 +109,7 @@ class ListSkillTool(Tool):
 
         response = await self.list_skill_model.invoke(
             messages=[
-                SystemMessage(content=SKILL_RAIL_LIST_SKILL_SYSTEM_PROMPT),
+                SystemMessage(content=get_list_skill_system_prompt(self.language)),
                 UserMessage(
                     content=(
                         f"User task:\n{query}\n\n"

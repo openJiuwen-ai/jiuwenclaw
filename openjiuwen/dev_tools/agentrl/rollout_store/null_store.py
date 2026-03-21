@@ -11,8 +11,8 @@ All methods silently succeed without performing any I/O.
 
 from typing import Any, Dict, List
 
-from openjiuwen.extensions.agentrl.coordinator.schemas import RolloutMessage
-from openjiuwen.extensions.agentrl.rollout_store.base import RolloutPersistence
+from openjiuwen.dev_tools.agentrl.coordinator.schemas import RolloutMessage
+from openjiuwen.dev_tools.agentrl.rollout_store.base import RolloutPersistence
 
 
 class NullRolloutStore(RolloutPersistence):

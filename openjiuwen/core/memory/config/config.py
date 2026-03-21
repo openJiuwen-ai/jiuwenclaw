@@ -13,6 +13,7 @@ from openjiuwen.core.common.exception.errors import build_error
 class MemoryEngineConfig(BaseModel):
     default_model_cfg: ModelRequestConfig = Field(default=None)
     default_model_client_cfg: ModelClientConfig = Field(default=None)
+    forbidden_variables: str = Field(default="")  # forbidden variables config, split by comma
     input_msg_max_len: int = Field(default=8192)  # max length of input message
     crypto_key: bytes = Field(default=b'')  # aes key, length must be 32, not enable encrypt memory if empty
     single_turn_history_summary_max_token: int = Field(default=128, gt=0)

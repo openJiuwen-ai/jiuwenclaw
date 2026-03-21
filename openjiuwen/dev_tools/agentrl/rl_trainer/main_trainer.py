@@ -97,16 +97,14 @@ class MainTrainer:
 
         # -- DataLoaders ----------------------------------------------------
         num_workers = self.config.data.get("dataloader_num_workers", 0)
-        gen_batch_size = self.config.data.get(
-            "gen_batch_size", self.config.data.get("train_batch_size", 32)
-        )
+        train_batch_size = self.config.data.get("train_batch_size", 32)
 
         if train_sampler is None:
             train_sampler = _create_rl_sampler(self.config.data, self.train_dataset)
 
         self.train_dataloader = StatefulDataLoader(
             dataset=self.train_dataset,
-            batch_size=gen_batch_size,
+            batch_size=train_batch_size,
             num_workers=num_workers,
             drop_last=True,
             collate_fn=collate_fn,

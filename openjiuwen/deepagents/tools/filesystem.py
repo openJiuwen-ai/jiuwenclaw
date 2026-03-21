@@ -6,26 +6,18 @@ import shutil
 from typing import Dict, Any, AsyncIterator
 
 from openjiuwen.core.common.exception.codes import StatusCode
-from openjiuwen.core.foundation.tool.base import Tool, ToolCard
+from openjiuwen.core.foundation.tool.base import Tool
 from openjiuwen.core.sys_operation import SysOperation
+from openjiuwen.deepagents.prompts.sections.tools import build_tool_card
 from openjiuwen.deepagents.tools.base_tool import ToolOutput
 
 
 class ReadFileTool(Tool):
 
-    def __init__(self, operation: SysOperation):
+    def __init__(self, operation: SysOperation, language: str = "cn"):
         super().__init__(
-            ToolCard(id="ReadFileTool", name="read_file", description="读取文件内容。这是查看文件的主要工具。"))
+            build_tool_card("read_file", "ReadFileTool", language))
         self.operation = operation
-        self.card.input_params = {
-            "type": "object",
-            "properties": {
-                "file_path": {"type": "string", "description": "要读取的文件路径"},
-                "offset": {"type": "integer", "description": "开始读取的行号（默认1）"},
-                "limit": {"type": "integer", "description": "读取的最大行数"},
-            },
-            "required": ["file_path"]
-        }
 
     async def invoke(self, inputs: Dict[str, Any], **kwargs) -> ToolOutput:
         path = inputs.get("file_path")
@@ -61,18 +53,10 @@ class ReadFileTool(Tool):
 
 class WriteFileTool(Tool):
 
-    def __init__(self, operation: SysOperation):
+    def __init__(self, operation: SysOperation, language: str = "cn"):
         super().__init__(
-            ToolCard(id="WriteFileTool", name="write_file", description="写入文件内容。如果文件已存在，将完全覆盖。"))
+            build_tool_card("write_file", "WriteFileTool", language))
         self.operation = operation
-        self.card.input_params = {
-            "type": "object",
-            "properties": {
-                "file_path": {"type": "string", "description": "要写入的文件路径"},
-                "content": {"type": "string", "description": "要写入的内容"},
-            },
-            "required": ["file_path", "content"]
-        }
 
     async def invoke(self, inputs: Dict[str, Any], **kwargs) -> ToolOutput:
         path = inputs.get("file_path")
@@ -96,20 +80,10 @@ class WriteFileTool(Tool):
 
 class EditFileTool(Tool):
 
-    def __init__(self, operation: SysOperation):
+    def __init__(self, operation: SysOperation, language: str = "cn"):
         super().__init__(
-            ToolCard(id="EditFileTool", name="edit_file", description="编辑文件的指定部分。使用字符串替换方式修改文件。"))
+            build_tool_card("edit_file", "EditFileTool", language))
         self.operation = operation
-        self.card.input_params = {
-            "type": "object",
-            "properties": {
-                "file_path": {"type": "string", "description": "要编辑的文件路径"},
-                "old_string": {"type": "string", "description": "要替换的原始字符串"},
-                "new_string": {"type": "string", "description": "替换后的新字符串"},
-                "replace_all": {"type": "boolean", "description": "是否替换所有匹配项"},
-            },
-            "required": ["file_path", "old_string", "new_string"]
-        }
 
     async def invoke(self, inputs: Dict[str, Any], **kwargs) -> ToolOutput:
         path = inputs.get("file_path")
@@ -151,17 +125,10 @@ class EditFileTool(Tool):
 
 class GlobTool(Tool):
 
-    def __init__(self, operation: SysOperation):
-        super().__init__(ToolCard(id="GlobTool", name="glob", description="使用 glob 模式查找文件。"))
+    def __init__(self, operation: SysOperation, language: str = "cn"):
+        super().__init__(
+            build_tool_card("glob", "GlobTool", language))
         self.operation = operation
-        self.card.input_params = {
-            "type": "object",
-            "properties": {
-                "pattern": {"type": "string", "description": "glob 模式（如 *.py, **/*.js）"},
-                "path": {"type": "string", "description": "搜索根目录"},
-            },
-            "required": ["pattern"]
-        }
 
     async def invoke(self, inputs: Dict[str, Any], **kwargs) -> ToolOutput:
         pattern = inputs.get("pattern")
@@ -185,17 +152,10 @@ class GlobTool(Tool):
 
 class ListDirTool(Tool):
 
-    def __init__(self, operation: SysOperation):
-        super().__init__(ToolCard(id="ListDirTool", name="list_files", description="列出目录内容。"))
+    def __init__(self, operation: SysOperation, language: str = "cn"):
+        super().__init__(
+            build_tool_card("list_files", "ListDirTool", language))
         self.operation = operation
-        self.card.input_params = {
-            "type": "object",
-            "properties": {
-                "path": {"type": "string", "description": "目录路径"},
-                "show_hidden": {"type": "boolean", "description": "显示隐藏文件"},
-            },
-            "required": []
-        }
 
     async def invoke(self, inputs: Dict[str, Any], **kwargs) -> ToolOutput:
         path = inputs.get("path", ".")
@@ -233,18 +193,10 @@ class ListDirTool(Tool):
 
 class GrepTool(Tool):
 
-    def __init__(self, operation: SysOperation):
-        super().__init__(ToolCard(id="GrepTool", name="grep", description="在文件中搜索内容。支持正则表达式。"))
+    def __init__(self, operation: SysOperation, language: str = "cn"):
+        super().__init__(
+            build_tool_card("grep", "GrepTool", language))
         self.operation = operation
-        self.card.input_params = {
-            "type": "object",
-            "properties": {
-                "pattern": {"type": "string", "description": "搜索模式（正则表达式）"},
-                "path": {"type": "string", "description": "搜索路径（文件或目录）"},
-                "ignore_case": {"type": "boolean", "description": "忽略大小写"},
-            },
-            "required": ["pattern", "path"]
-        }
 
     async def invoke(self, inputs: Dict[str, Any], **kwargs) -> ToolOutput:
         pattern = inputs.get("pattern")

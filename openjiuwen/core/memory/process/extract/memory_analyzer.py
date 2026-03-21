@@ -35,6 +35,7 @@ class MemoryAnalyzer:
             memory_config: AgentMemoryConfig,
             summary_max_token: int,
             *,
+            forbidden_variables: str = "",
             retries: int = 3
     ) -> MemoryAnalyzerResult | None:
         if len(messages) == 0:
@@ -67,7 +68,7 @@ class MemoryAnalyzer:
         variables_description_json = json.dumps(variables_description, ensure_ascii=False)
         variables_output_format_json = json.dumps(variables_output_format, ensure_ascii=False)
         has_variable = (len(memory_config.mem_variables) > 0)
-
+        forbidden_variables = "None" if forbidden_variables == "" else forbidden_variables
         prompt_content = PromptApplier().apply(
             "memory_analysis_prompt",
             {
@@ -76,6 +77,7 @@ class MemoryAnalyzer:
                 "has_variable": has_variable,
                 "variables_define_template": variables_description_json,
                 "variables_output_template": variables_output_format_json,
+                "forbidden_variables": forbidden_variables,
                 "max_message_token": summary_max_token,
             },
         )

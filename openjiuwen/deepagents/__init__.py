@@ -16,6 +16,7 @@ if TYPE_CHECKING:
     from openjiuwen.deepagents.factory import create_deep_agent
     from openjiuwen.deepagents.schema.config import (
         DeepAgentConfig,
+        VisionModelConfig,
     )
     from openjiuwen.deepagents.schema.stop_condition import (
         StopCondition,
@@ -27,6 +28,7 @@ __all__ = [
     "TaskLoopEventHandler",
     "TaskLoopEventExecutor",
     "DeepAgentConfig",
+    "VisionModelConfig",
     "StopCondition",
     "create_deep_agent",
     "Workspace",
@@ -55,6 +57,11 @@ def __getattr__(name: str) -> Any:
             DeepAgentConfig,
         )
         return DeepAgentConfig
+    if name == "VisionModelConfig":
+        from openjiuwen.deepagents.schema.config import (
+            VisionModelConfig,
+        )
+        return VisionModelConfig
     if name == "StopCondition":
         from openjiuwen.deepagents.schema.stop_condition import (
             StopCondition,

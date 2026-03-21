@@ -58,10 +58,8 @@ if TYPE_CHECKING:
         EventQueue,
     )
 
-_DEFAULT_SYSTEM_PROMPT = (
-    "你是一个通用 AI 助手。请根据用户的需求，合理使用可用工具完成任务。\n"
-    "在执行过程中保持目标聚焦，遇到问题时尝试不同策略。"
-)
+from openjiuwen.deepagents.prompts import resolve_language, resolve_mode, SystemPromptBuilder
+from openjiuwen.deepagents.prompts.sections.identity import build_identity_section
 
 # Events bridged to the inner ReActAgent.
 _BRIDGE_EVENTS = frozenset(
@@ -176,7 +174,14 @@ class DeepAgent(BaseAgent):
         react_config = ReActAgentConfig()
         react_config.max_iterations = cfg.max_iterations
 
-        prompt = cfg.system_prompt or _DEFAULT_SYSTEM_PROMPT
+        if cfg.system_prompt:
+            prompt = cfg.system_prompt
+        else:
+            language = resolve_language(cfg.language)
+            mode = resolve_mode(cfg.prompt_mode)
+            builder = SystemPromptBuilder(language=language, mode=mode)
+            builder.add_section(build_identity_section(language))
+            prompt = builder.build()
         react_config.prompt_template = [{"role": "system", "content": prompt}]
 
         if cfg.model is not None:

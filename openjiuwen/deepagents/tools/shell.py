@@ -3,24 +3,17 @@
 from typing import Dict, Any, AsyncIterator
 
 from openjiuwen.core.common.exception.codes import StatusCode
-from openjiuwen.core.foundation.tool.base import Tool, ToolCard
+from openjiuwen.core.foundation.tool.base import Tool
 from openjiuwen.core.sys_operation import SysOperation
+from openjiuwen.deepagents.prompts.sections.tools import build_tool_card
 from openjiuwen.deepagents.tools.base_tool import ToolOutput
 
 
 class BashTool(Tool):
 
-    def __init__(self, operation: SysOperation):
-        super().__init__(ToolCard(id="BashTool", name="bash", description="执行 Shell 命令。"))
+    def __init__(self, operation: SysOperation, language: str = "cn"):
+        super().__init__(build_tool_card("bash", "BashTool", language))
         self.operation = operation
-        self.card.input_params = {
-            "type": "object",
-            "properties": {
-                "command": {"type": "string", "description": "要执行的 Shell 命令"},
-                "timeout": {"type": "integer", "description": "超时时间（秒），默认 30"},
-            },
-            "required": ["command"]
-        }
 
     async def invoke(self, inputs: Dict[str, Any], **kwargs) -> ToolOutput:
         command = inputs.get("command")

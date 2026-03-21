@@ -336,8 +336,8 @@ class Vertex(AsyncAtomicNode, StreamConsumer):
                      **self._log_message)
         self._clear_interactive()
 
-        from openjiuwen.core.workflow.components.llm.llm_comp import LLMExecutable
-        if isinstance(self._executable, LLMExecutable) and hasattr(self._executable, "get_stream_output"):
+        # Support get_stream_output for any component (e.g., LLM, SubWorkflowComponent)
+        if hasattr(self._executable, "get_stream_output"):
             result = self._executable.get_stream_output()
             if result is not None:
                 self._session.state().set_outputs(result)

@@ -9,7 +9,6 @@ hydra:
 # -- data ------------------------------------------------------------------
 data:
   filter_overlong_prompts: false
-  gen_batch_size: null
 
 # -- algorithm -------------------------------------------------------------
 algorithm:
@@ -45,10 +44,6 @@ actor_rollout_ref:
         enable_auto_tool_choice: true
         tool_call_parser: hermes
         served_model_name: agentrl
-    agent:
-      custom_async_server:
-        path: openjiuwen/extensions/agentrl/proxy/async_server.py
-        name: PatchedvLLMServer
 
 # -- trainer ---------------------------------------------------------------
 trainer:

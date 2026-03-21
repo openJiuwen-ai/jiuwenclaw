@@ -15,11 +15,12 @@ from openjiuwen.core.foundation.llm.schema.message import SystemMessage
 from openjiuwen.core.runner.runner import Runner
 from openjiuwen.core.single_agent.rail.base import AgentCallbackContext
 from openjiuwen.core.single_agent.skills.skill_manager import Skill
-from openjiuwen.deepagents.prompts.skill_rail_prompt import (
+from openjiuwen.deepagents.prompts.sections.skills import (
     build_all_mode_skill_prompt,
     build_auto_list_mode_skill_prompt,
     build_skill_line,
     build_skill_lines,
+    build_skills_section,
 )
 from openjiuwen.deepagents.rails.base import DeepAgentRail
 from openjiuwen.deepagents.tools import BashTool, CodeTool, ReadFileTool
@@ -45,6 +46,7 @@ class SkillRail(DeepAgentRail):
         include_tools: bool = True,
         enabled_skills: Optional[Union[str, List[str]]] = None,
         disabled_skills: Optional[Union[str, List[str]]] = None,
+        language: str = "cn",
     ):
         """Initialize SkillRail.
 
@@ -74,8 +76,10 @@ class SkillRail(DeepAgentRail):
         self.include_tools = include_tools
         self.enabled_skills = self._normalize_name_set(enabled_skills)
         self.disabled_skills = self._normalize_name_set(disabled_skills)
+        self.language = language
 
         self.skills: List[Skill] = []
+        self._builder = None
 
         # Cache loaded skills across invokes.
         self._skill_cache: Dict[str, Skill] = {}
@@ -204,14 +208,16 @@ class SkillRail(DeepAgentRail):
 
     def init(self, agent):
         """Register tool cards into agent and concrete tools into resource manager."""
+        self._builder = getattr(agent, '_prompt_builder', None)
+
         tools = []
 
         if self.include_tools:
             tools.extend(
                 [
-                    ReadFileTool(self.sys_operation),
-                    CodeTool(self.sys_operation),
-                    BashTool(self.sys_operation),
+                    ReadFileTool(self.sys_operation, language=self.language),
+                    CodeTool(self.sys_operation, language=self.language),
+                    BashTool(self.sys_operation, language=self.language),
                 ]
             )
 
@@ -220,6 +226,7 @@ class SkillRail(DeepAgentRail):
                 ListSkillTool(
                     get_skills=lambda: self.skills,
                     list_skill_model=self.list_skill_model,
+                    language=self.language,
                 )
             )
 
@@ -272,12 +279,62 @@ class SkillRail(DeepAgentRail):
 
     async def before_model_call(self, ctx: AgentCallbackContext) -> None:
         """Inject skill prompt before model call."""
-        if self.skill_mode == self.SKILL_MODE_ALL:
-            skill_prompt = self._build_all_mode_prompt()
+        if self._builder is not None:
+            skills_section = self._build_skills_section()
+            if skills_section is not None:
+                self._builder.add_section(skills_section)
+            else:
+                self._builder.remove_section("skills")
+            prompt = self._builder.build()
+            self._replace_system_message(ctx, prompt)
         else:
-            skill_prompt = build_auto_list_mode_skill_prompt()
+            if self.skill_mode == self.SKILL_MODE_ALL:
+                skill_prompt = self._build_all_mode_prompt()
+            else:
+                skill_prompt = build_auto_list_mode_skill_prompt(language=self.language)
+            self._inject_prompt(ctx, skill_prompt)
 
-        self._inject_prompt(ctx, skill_prompt)
+    def _build_skills_section(self):
+        """Build PromptSection from current skills."""
+        if self.skill_mode == self.SKILL_MODE_ALL:
+            body_lines: List[str] = []
+            for idx, skill in enumerate(self.skills):
+                body_lines.append(
+                    build_skill_line(
+                        index=idx,
+                        skill_name=skill.name,
+                        description=skill.description,
+                        skill_md_path=str(self._skill_md_path(skill)),
+                    )
+                )
+            return build_skills_section(
+                skill_lines=build_skill_lines(body_lines),
+                language=self.language,
+                mode="all",
+            )
+        else:
+            return build_skills_section(
+                skill_lines="",
+                language=self.language,
+                mode="auto_list",
+            )
+
+    def _replace_system_message(self, ctx: AgentCallbackContext, prompt: str) -> None:
+        """Replace (not append) the system message."""
+        inputs = getattr(ctx, "inputs", None)
+        messages = getattr(inputs, "messages", None)
+        if not isinstance(messages, list):
+            return
+
+        for msg in messages:
+            if isinstance(msg, dict) and msg.get("role") == "system":
+                msg["content"] = prompt
+                return
+            if isinstance(msg, SystemMessage):
+                msg.content = prompt
+                return
+
+        messages.insert(0, SystemMessage(content=prompt))
 
     def _build_all_mode_prompt(self) -> str:
         """Build skill prompt for all mode."""
@@ -293,7 +350,7 @@ class SkillRail(DeepAgentRail):
                 )
             )
 
-        return build_all_mode_skill_prompt(build_skill_lines(body_lines))
+        return build_all_mode_skill_prompt(build_skill_lines(body_lines), language=self.language)
 
     def _inject_prompt(self, ctx: AgentCallbackContext, skill_prompt: str) -> None:
         """Inject skill prompt into the current system message."""

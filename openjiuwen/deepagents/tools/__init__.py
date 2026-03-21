@@ -12,6 +12,16 @@ from openjiuwen.deepagents.tools.filesystem import (
     GrepTool,
 )
 from openjiuwen.deepagents.tools.shell import BashTool
+from openjiuwen.deepagents.tools.vision import (
+    ImageOCRTool,
+    VisualQuestionAnsweringTool,
+    create_vision_tools,
+)
+from openjiuwen.deepagents.tools.web_tools import (
+    WebFreeSearchTool,
+    WebPaidSearchTool,
+    WebFetchWebpageTool,
+)
 
 __all__ = [
     "ToolOutput",
@@ -23,4 +33,10 @@ __all__ = [
     "ListDirTool",
     "GrepTool",
     "BashTool",
+    "ImageOCRTool",
+    "VisualQuestionAnsweringTool",
+    "create_vision_tools",
+    "WebFreeSearchTool",
+    "WebPaidSearchTool",
+    "WebFetchWebpageTool",
 ]

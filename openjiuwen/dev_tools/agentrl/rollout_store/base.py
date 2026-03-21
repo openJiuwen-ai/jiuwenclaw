@@ -12,7 +12,7 @@ and per-step summaries to local file storage.
 from abc import ABC, abstractmethod
 from typing import Any, Dict, List
 
-from openjiuwen.extensions.agentrl.coordinator.schemas import RolloutMessage
+from openjiuwen.dev_tools.agentrl.coordinator.schemas import RolloutMessage
 
 
 class RolloutPersistence(ABC):

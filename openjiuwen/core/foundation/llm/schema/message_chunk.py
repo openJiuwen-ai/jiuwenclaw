@@ -6,6 +6,7 @@ from typing import Any
 from pydantic import ConfigDict
 
 from openjiuwen.core.foundation.llm.schema.message import BaseMessage, AssistantMessage, ToolMessage
+from openjiuwen.core.foundation.llm.schema.tool_call import ToolCall
 
 
 def merge_parser_content(left: Any, right: Any) -> Any:
@@ -163,7 +164,14 @@ class AssistantMessageChunk(AssistantMessage, BaseMessageChunk):
         # merge tool_calls by concatenating fragments of the same call instead of appending new elements
         merged_tool_calls = []
         if self.tool_calls:
-            merged_tool_calls.extend(self.tool_calls)
+            for tc in self.tool_calls:
+                merged_tool_calls.append(ToolCall(
+                    id=tc.id,
+                    type=tc.type,
+                    name=tc.name,
+                    arguments=tc.arguments,
+                    index=tc.index
+                ))
 
         if other.tool_calls:
             for incoming in other.tool_calls:
@@ -172,13 +180,22 @@ class AssistantMessageChunk(AssistantMessage, BaseMessageChunk):
                     same_id = (last.id and incoming.id and last.id == incoming.id) or (not last.id or not incoming.id)
                     if (same_id and hasattr(last, 'type') and last.type == 'function'
                             and hasattr(incoming, 'type') and incoming.type == 'function'):
-                        last.id = last.id or incoming.id
-                        last.type = last.type or incoming.type
-                        last.name = (last.name or "") + (incoming.name or "")
-                        last.arguments = (last.arguments or "") + (incoming.arguments or "")
+                        merged_tool_calls[-1] = ToolCall(
+                            id=last.id or incoming.id,
+                            type=last.type or incoming.type,
+                            name=(last.name or "") + (incoming.name or ""),
+                            arguments=(last.arguments or "") + (incoming.arguments or ""),
+                            index=last.index
+                        )
                         continue
                 # otherwise, push as a new tool_call
-                merged_tool_calls.append(incoming)
+                merged_tool_calls.append(ToolCall(
+                    id=incoming.id,
+                    type=incoming.type,
+                    name=incoming.name,
+                    arguments=incoming.arguments,
+                    index=incoming.index
+                ))
 
         merged_finish_reason = other.finish_reason if other.finish_reason != "null" else self.finish_reason
 
@@ -189,7 +206,7 @@ class AssistantMessageChunk(AssistantMessage, BaseMessageChunk):
             usage_metadata=other.usage_metadata or self.usage_metadata,
             finish_reason=merged_finish_reason,
             parser_content=other.parser_content or self.parser_content,
-            reasoning_content=other.reasoning_content or self.reasoning_content
+            reasoning_content=(self.reasoning_content or '') + (other.reasoning_content or '')
         )
 
 

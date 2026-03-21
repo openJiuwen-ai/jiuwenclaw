@@ -4,25 +4,17 @@
 from typing import Dict, Any, AsyncIterator
 
 from openjiuwen.core.common.exception.codes import StatusCode
-from openjiuwen.core.foundation.tool.base import Tool, ToolCard
+from openjiuwen.core.foundation.tool.base import Tool
 from openjiuwen.core.sys_operation import SysOperation
+from openjiuwen.deepagents.prompts.sections.tools import build_tool_card
 from openjiuwen.deepagents.tools.base_tool import ToolOutput
 
 
 class CodeTool(Tool):
 
-    def __init__(self, operation: SysOperation):
-        super().__init__(ToolCard(id="CodeTool", name="code", description="执行代码（Python 或 JavaScript）。"))
+    def __init__(self, operation: SysOperation, language: str = "cn"):
+        super().__init__(build_tool_card("code", "CodeTool", language))
         self.operation = operation
-        self.card.input_params = {
-            "type": "object",
-            "properties": {
-                "code": {"type": "string", "description": "要执行的代码"},
-                "language": {"type": "string", "description": "编程语言，支持 python 或 javascript，默认 python"},
-                "timeout": {"type": "integer", "description": "超时时间（秒），默认 300"},
-            },
-            "required": ["code"]
-        }
 
     async def invoke(self, inputs: Dict[str, Any], **kwargs) -> ToolOutput:
         code = inputs.get("code")

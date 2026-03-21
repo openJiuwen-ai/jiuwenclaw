@@ -212,6 +212,9 @@ class SiliconFlowModelClient(BaseModelClient):
                 )
                 assistant_message = await self._parse_response(data, output_parser)
 
+                if tracer_record_data:
+                    await tracer_record_data(llm_response=assistant_message)
+
                 await trigger(
                     LLMCallEvents.LLM_OUTPUT,
                     model_name=params.get("model"),
@@ -307,6 +310,7 @@ class SiliconFlowModelClient(BaseModelClient):
                 max_tokens=params.get("max_tokens"),
                 is_stream=True)
 
+            final_message = None
             async with self._apost(params, timeout=timeout) as response:
                 if output_parser:
                     # Use streaming parser
@@ -317,6 +321,10 @@ class SiliconFlowModelClient(BaseModelClient):
                             model_provider=self.model_client_config.client_provider,
                             result=parsed_result,
                             is_stream=True)
+                        if final_message:
+                            final_message = final_message + parsed_result
+                        else:
+                            final_message = parsed_result
                         yield parsed_result
                 else:
                     # Direct return without parser
@@ -330,7 +338,13 @@ class SiliconFlowModelClient(BaseModelClient):
                                     model_provider=self.model_client_config.client_provider,
                                     result=parsed_chunk,
                                     is_stream=True)
+                                if final_message:
+                                    final_message = final_message + parsed_chunk
+                                else:
+                                    final_message = parsed_chunk
                                 yield parsed_chunk
+            if tracer_record_data:
+                await tracer_record_data(llm_response=final_message)
 
         except Exception as e:
             await trigger(

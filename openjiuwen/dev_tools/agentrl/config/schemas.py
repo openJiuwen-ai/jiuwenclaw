@@ -52,7 +52,6 @@ class TrainingConfig(BaseModel):
     save_freq: int = 20
     test_freq: int = 20
     train_batch_size: int = 32
-    gen_batch_size: int = 32
     rollout_concurrency: int = 40
 
     # --- hardware ---
@@ -101,7 +100,6 @@ class RolloutConfig(BaseModel):
     actor_clip_ratio_high: float = 0.3
     actor_loss_agg_mode: str = "seq-mean-token-mean"
     rollout_n: int = 8
-    rollout_max_round: int = 1
 
 
 class AgentRuntimeConfig(BaseModel):
@@ -116,11 +114,11 @@ class AgentRuntimeConfig(BaseModel):
 
 
 class AdaConfig(BaseModel):
-    """Extra parameters for the Ada rollout variant.
+    """Parameters for the Ada rollout variant.
 
-    When ``RLConfig.ada`` is provided (not None), Ada is enabled and these override:
-    - Uses ``validate_stop_balanced`` as the stop-condition validator.
-    - Uses ``sampling_ada`` as the rollout sampler.
+    When ``RLConfig.ada`` is set, Ada is enabled: ``trainer.rollout_max_round`` is taken
+    from ``rollout_max_round`` below, and the custom classifier / validator / sampler
+    (including ``validate_stop_balanced`` and ``sampling_ada``) are wired in.
     """
 
     rollout_max_round: int = 2

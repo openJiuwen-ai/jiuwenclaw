@@ -325,6 +325,8 @@ class TaskManager:
             cancelled_by_task = self.registry.get(task.cancelled_by)
             cancelled_by_name = cancelled_by_task.display_name if cancelled_by_task else task.cancelled_by[:8]
             status_info += f" (cancelled by: {cancelled_by_name}, reason: {task.cancel_reason})"
+        elif task.cancel_reason:
+            status_info += f" (reason: {task.cancel_reason})"
 
         lines.append(f"{prefix}{task.display_name} {status_info}")
 

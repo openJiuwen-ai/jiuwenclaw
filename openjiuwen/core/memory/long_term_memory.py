@@ -470,6 +470,7 @@ class LongTermMemory(metaclass=Singleton):
                 base_chat_model=llm,
                 message_mem_id=msg_id,
                 timestamp=timestamp_str,
+                forbidden_variables=self._sys_mem_config.forbidden_variables,
                 summary_max_token=self._sys_mem_config.single_turn_history_summary_max_token
             )
             try:

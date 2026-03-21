@@ -163,7 +163,6 @@ class RLOptimizer:
                 "train_files": train_cfg.resolved_train_files,
                 "val_files": train_cfg.resolved_val_files,
                 "train_batch_size": train_cfg.train_batch_size,
-                "gen_batch_size": train_cfg.gen_batch_size,
                 "max_prompt_length": train_cfg.max_prompt_length,
                 "max_response_length": train_cfg.max_response_length,
                 "truncation": train_cfg.truncation,
@@ -203,7 +202,6 @@ class RLOptimizer:
                 "total_epochs": train_cfg.total_epochs,
                 "n_gpus_per_node": train_cfg.n_gpus_per_node,
                 "runtime_parallel_num": train_cfg.rollout_concurrency,
-                "rollout_max_round": rollout_cfg.rollout_max_round,
             },
             "JiuwenRL": {
                 "whole_trajectory": train_cfg.whole_trajectory,

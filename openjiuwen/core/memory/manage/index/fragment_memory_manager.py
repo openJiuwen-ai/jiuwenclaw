@@ -113,6 +113,14 @@ class FragmentMemoryManager(BaseMemoryManager):
                 if mem_content:
                     new_mem_content[mem_id] = mem_content
                     new_mem_units[mem_id] = mem_unit
+        if not new_mem_units:
+            memory_logger.warning(
+                "No new memory units to add",
+                event_type=LogEventType.MEMORY_STORE,
+                user_id=user_id,
+                scope_id=scope_id
+            )
+            return
 
         # Step 2: Query existing memories for context using search
         old_memories: dict[str, str] = {}

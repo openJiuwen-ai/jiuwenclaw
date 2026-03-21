@@ -73,12 +73,14 @@ class Task:
     def get_cancel_scope(self) -> Optional[anyio.CancelScope]:
         return self._cancel_scope
 
-    async def cancel(self, cascade: bool = False, reason: Optional[str] = None) -> bool:
+    async def cancel(self, cascade: bool = False, reason: Optional[str] = None,
+                     cancelled_by: Optional[str] = None) -> bool:
         """Cancel this task
 
         Args:
             cascade: Whether to also cancel child tasks
             reason: Optional reason for cancellation
+            cancelled_by: Optional task ID that initiated the cancellation
 
         Returns:
             True if cancellation was triggered, False otherwise
@@ -88,6 +90,8 @@ class Task:
 
         self._cancel_scope.cancel()
         self.cancel_reason = reason or "manual_cancel"
+        if cancelled_by:
+            self.cancelled_by = cancelled_by
 
         if cascade:
             # Import here to avoid circular imports
@@ -153,6 +157,19 @@ class Task:
                     else:
                         result = await coro
 
+                if cancel_scope.cancel_called:
+                    if not self.cancel_reason:
+                        self.cancel_reason = "manual_cancel"
+                    if not self.cancelled_by and self.cancel_reason:
+                        current_task_id = _current_task_id.get()
+                        if current_task_id and current_task_id != self.task_id:
+                            self.cancelled_by = current_task_id
+
+                    self.status = TaskStatus.CANCELLED
+                    self.finished_at = datetime.now(timezone.utc)
+                    if callback_trigger:
+                        await callback_trigger(self, "cancelled")
+                    return None
                 self.result = result
                 self.status = TaskStatus.COMPLETED
                 self.finished_at = datetime.now(timezone.utc)
@@ -163,6 +180,16 @@ class Task:
                 return result
 
             except asyncio.CancelledError:
+                if not self.cancel_reason:
+                    self.cancel_reason = "manual_cancel"
+
+                if not self.cancelled_by and self.parent_task_id:
+                    self.cancelled_by = self.parent_task_id
+                elif not self.cancelled_by:
+                    current_task_id = _current_task_id.get()
+                    if current_task_id and current_task_id != self.task_id:
+                        self.cancelled_by = current_task_id
+
                 self.status = TaskStatus.CANCELLED
                 self.finished_at = datetime.now(timezone.utc)
                 if callback_trigger:

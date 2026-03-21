@@ -4,6 +4,5 @@
 """
 Inference proxy layer.
 
-Provides BackendProxy (stable inference URL for agents) and
-PatchedvLLMServer (async vLLM inference server).
+Provides BackendProxy (stable inference URL for agents).
 """

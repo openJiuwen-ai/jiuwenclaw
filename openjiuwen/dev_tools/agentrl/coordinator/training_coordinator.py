@@ -348,7 +348,9 @@ class TrainingCoordinator:
 
     async def _run_rounds(self, tasks_dic: Dict[str, RLTask]) -> None:
         """Run rollout rounds until all tasks are finished or max rounds reached."""
-        max_round = self.config["trainer"]["rollout_max_round"]
+        max_round = self.config["trainer"].get("rollout_max_round")
+        if max_round is None:
+            max_round = 1
 
         for round_id in range(max_round):
             if not tasks_dic:
