@@ -40,6 +40,8 @@ jiuwenclaw-app = "jiuwenclaw.app:main"
 jiuwenclaw-web = "jiuwenclaw.app_web:main"
 jiuwenclaw-start = "jiuwenclaw.start_services:main"
 jiuwenclaw-init = "jiuwenclaw.init_workspace:main"
+jiuwenclaw-agentserver = "jiuwenclaw.app_agentserver:main"
+jiuwenclaw-gateway = "jiuwenclaw.app_gateway:main"
 
 [tool.setuptools]
 # 入口脚本现在是 jiuwenclaw 包内的一部分，不需要 py-modules
