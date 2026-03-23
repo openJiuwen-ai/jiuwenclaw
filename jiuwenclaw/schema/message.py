@@ -98,6 +98,10 @@ class Message:
     params: dict
     timestamp: float
     ok: bool
+    provider: str | None = None
+    chat_id: str | None = None
+    user_id: str | None = None
+    bot_id: str | None = None
     payload: dict | None = None
     req_method: ReqMethod | None = None
     event_type: EventType | None = None

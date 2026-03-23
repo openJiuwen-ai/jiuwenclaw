@@ -128,6 +128,10 @@ class FeishuChannel(BaseChannel):
             metadata: 额外的元数据
         """
         msg = Message(id=chat_id, type="req", channel_id=self.name, session_id=str(chat_id),
+            provider="feishu",
+            chat_id=str(chat_id),
+            user_id=str((metadata or {}).get("feishu_open_id") or (metadata or {}).get("open_id") or ""),
+            bot_id=str((metadata or {}).get("feishu_app_id") or ""),
             params={"content": content, "query": content}, timestamp=time.time(), ok=True,
             req_method=ReqMethod.CHAT_SEND, is_stream=True, metadata=metadata)
         if self._message_callback:
@@ -1007,6 +1011,7 @@ class FeishuChannel(BaseChannel):
                     "open_id": open_id,
                     "feishu_open_id": open_id,
                     "feishu_chat_id": getattr(message, "chat_id", None) or "",
+                    "feishu_app_id": getattr(self.config, "app_id", "") or "",
                 },
             )
 
