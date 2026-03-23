@@ -42,7 +42,7 @@ class PatchOpenAIModelClient(OpenAIModelClient):
         )
         default_headers = os.getenv("default_headers", None)
         try:
-            default_headers = json.loads(default_headers)
+            default_headers = json.loads(default_headers) if default_headers else None
         except json.decoder.JSONDecodeError as error:
             llm_logger.warning(f"Model default headers parse failed: {error}")
             default_headers = None

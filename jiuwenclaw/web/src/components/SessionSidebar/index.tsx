@@ -141,7 +141,7 @@ export function SessionSidebar({
 
       <div className="pt-4 mt-4 border-t border-border text-xs text-text-muted">
         <div className="px-2.5">
-          <span>{t('version', { version: '0.1.6' })}</span>
+          <span>{t('version', { version: '0.1.7' })}</span>
         </div>
       </div>
     </aside>

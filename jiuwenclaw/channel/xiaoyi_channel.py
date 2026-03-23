@@ -308,6 +308,7 @@ class XiaoyiChannel(BaseChannel):
         """发送消息到小艺服务端（A2A 格式，双通道发送）."""
         if not self._ws_connections:
             return
+        logger.info(f"XiaoyiChannel 发送消息: {msg}")
         session_id, task_id = self._extract_platform_receive_info(msg)
         # Handle chat.file event
         if self.config.mode == "xiaoyi_claw" and msg.event_type == EventType.CHAT_FILE:
@@ -332,7 +333,6 @@ class XiaoyiChannel(BaseChannel):
                             except Exception as e:
                                 logger.warning(f"XiaoyiChannel 发送文件响应失败 ({url_key}): {e}")
             return
-        logger.info(f"XiaoyiChannel 发送消息: {msg}")
 
         content = ""
         cron_job_name = ""
