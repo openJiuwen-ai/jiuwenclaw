@@ -4,12 +4,17 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from typing import Optional
+from typing import Optional, List
 
 from openjiuwen.core.common.logging import logger
+from openjiuwen.core.foundation.llm.schema.message import UserMessage
 from openjiuwen.core.runner import Runner
 from openjiuwen.core.single_agent.rail.base import (
     AgentCallbackContext,
+)
+from openjiuwen.deepagents.prompts.sections.todo import (
+    build_progress_reminder_user_prompt,
+    build_todo_section,
 )
 from openjiuwen.deepagents.rails.base import DeepAgentRail
 from openjiuwen.deepagents.schema.state import (
@@ -22,6 +27,7 @@ from openjiuwen.deepagents.schema.task import (
     TaskStatus,
 )
 from openjiuwen.deepagents.tools.todo import (
+    TodoItem,
     TodoStatus,
     TodoTool,
     create_todos_tool,
@@ -41,10 +47,26 @@ class TaskPlanningRail(DeepAgentRail):
 
     priority = 90
 
-    def __init__(self, language: str = "cn") -> None:
+    def __init__(
+        self,
+        language: str = "cn",
+        enable_progress_repeat: bool = False,
+        list_tool_call_interval: int = 20,
+    ) -> None:
+        """Initialize TaskPlanningRail.
+
+        Args:
+            language: Language for prompts ('cn' or 'en').
+            enable_progress_repeat: Check if progress repeat is enabled.
+            list_tool_call_interval: Interval for progress reminder prompts (default: 20).
+        """
         super().__init__()
         self.tools = None
         self.language = language
+        self.enable_progress_repeat = enable_progress_repeat
+        self.list_tool_call_interval = list_tool_call_interval
+        self._tool_call_counts = {}
+        self.system_prompt_builder = None
 
     def init(self, agent) -> None:
         """Register todo tools on the agent."""
@@ -59,38 +81,111 @@ class TaskPlanningRail(DeepAgentRail):
         ):
             return
 
-        self.workspace = getattr(
-            agent.deep_config, "workspace", None
-        )
-        workspace_path = None
-        if self.workspace is not None:
-            workspace_path = (
-                self.workspace.root_path
-                if hasattr(self.workspace, "root_path")
-                else str(self.workspace)
-            )
+        self.system_prompt_builder = getattr(agent, "system_prompt_builder", None)
+
+        if not self.sys_operation:
+            self.set_sys_operation(agent.deep_config.sys_operation)
+        if not self.workspace:
+            self.set_workspace(agent.deep_config.workspace)
+
         tools = create_todos_tool(
             self.sys_operation,
-            workspace_path,
+            self.workspace.root_path,
             self.language,
         )
         self.tools = tools
-        Runner.resource_mgr.add_tool(list(tools))
-        for tool in tools:
-            agent.ability_manager.add(tool.card)
+        try:
+            Runner.resource_mgr.add_tool(list(tools))
+            for tool in tools:
+                agent.ability_manager.add(tool.card)
+        except Exception as exc:
+            logger.warning("TaskPlanningRail: failed to add tool, error: %s", exc)
 
     def uninit(self, agent) -> None:
         """Remove todo tools from the agent."""
-        if self.tools and hasattr(agent, "ability_manager"):
-            for tool in self.tools:
-                name = getattr(tool, "name", None)
-                if name:
-                    agent.ability_manager.remove(name)
-                tool_id = tool.card.id
-                if tool_id:
-                    Runner.resource_mgr.remove_tool(tool_id)
+        try:
+            if self.tools and hasattr(agent, "ability_manager"):
+                for tool in self.tools:
+                    name = getattr(tool, "name", None)
+                    if name:
+                        agent.ability_manager.remove(name)
+                    tool_id = tool.card.id
+                    if tool_id:
+                        Runner.resource_mgr.remove_tool(tool_id)
+        except Exception as exc:
+            logger.warning("TaskPlanningRail: failed to remove tool, error: %s", exc)
 
-    # -- task-loop hook --
+    # -- hook methods --
+    async def before_model_call(
+        self, ctx: AgentCallbackContext
+    ) -> None:
+        """Inject task planning system prompt before model call."""
+        if self.system_prompt_builder is None:
+            return
+
+        task_planning_section = build_todo_section(language=self.language)
+        if task_planning_section is not None:
+            self.system_prompt_builder.add_section(task_planning_section)
+        else:
+            self.system_prompt_builder.remove_section("todo")
+
+    async def after_tool_call(
+        self, ctx: AgentCallbackContext
+    ) -> None:
+        """Add progress reminder prompt after tool call.
+
+        Every N tool calls (configurable via tool_call_interval), adds a user
+        message prompting the model to review current task progress using
+        todo_list tool.
+
+        Args:
+            ctx: Agent callback context containing inputs and messages.
+        """
+        if not self.enable_progress_repeat or not ctx.session or not ctx.context:
+            return
+
+        tool = self._find_todo_tool()
+        if tool is None:
+            return
+
+        session_id = ctx.session.get_session_id()
+        if session_id not in self._tool_call_counts:
+            self._tool_call_counts[session_id] = 0
+
+        self._tool_call_counts[session_id] += 1
+        if self._tool_call_counts[session_id] % self.list_tool_call_interval != 0:
+            return
+
+        tool.set_file(session_id)
+
+        try:
+            todos = await tool.load_todos()
+        except Exception:
+            logger.debug("TaskPlanningRail: after tool call load todos failed")
+            return
+
+        if not todos:
+            return
+
+        tasks, in_progress_task = self._format_task_content(todos)
+        prompt = build_progress_reminder_user_prompt(
+            language=self.language,
+            tasks=tasks,
+            in_progress_task=in_progress_task,
+        )
+        messages = ctx.context.get_messages()
+        messages.append(UserMessage(content=prompt))
+        ctx.context.set_messages(messages)
+
+    async def after_invoke(
+        self, ctx: AgentCallbackContext
+    ) -> None:
+        """Clean up tool call count after agent invoke"""
+        if ctx.session is None:
+            return
+        session_id = ctx.session.get_session_id()
+        if session_id in self._tool_call_counts:
+            del self._tool_call_counts[session_id]
 
     async def after_task_iteration(
         self, ctx: AgentCallbackContext
@@ -154,6 +249,8 @@ class TaskPlanningRail(DeepAgentRail):
                 TodoStatus.COMPLETED,
             ):
                 task_status = TaskStatus.COMPLETED
+            elif todo.status == TodoStatus.CANCELLED:
+                task_status = TaskStatus.FAILED
             else:
                 task_status = TaskStatus.PENDING
 
@@ -242,7 +339,8 @@ class TaskPlanningRail(DeepAgentRail):
             return TodoStatus.PENDING
         if status == TaskStatus.IN_PROGRESS:
             return TodoStatus.IN_PROGRESS
-        # TodoStatus lacks FAILED; map terminal states to COMPLETED.
+        if status == TaskStatus.FAILED:
+            return TodoStatus.CANCELLED
         return TodoStatus.COMPLETED
 
     def _find_todo_tool(self) -> Optional[TodoTool]:
@@ -253,6 +351,27 @@ class TaskPlanningRail(DeepAgentRail):
             if isinstance(tool, TodoTool):
                 return tool
         return None
+
+    def _format_task_content(self, todos: List[TodoItem]):
+        """Format todos into a readable task content string.
+
+        Args:
+            todos: List of TodoItem objects to format.
+
+        Returns:
+            A tuple of (tasks, in_progress_task) where:
+            - tasks: String showing all tasks with id, status, and content
+            - in_progress_task: String content of the currently executing task (empty if none)
+        """
+        todos_str = []
+        in_progress_str = ""
+        for todo in todos:
+            if todo.status == TodoStatus.IN_PROGRESS:
+                in_progress_str = todo.content
+            line = f"id: {todo.id} |status: {todo.status} |content: {todo.content}"
+            todos_str.append(line)
+
+        return "\n".join(todos_str), in_progress_str
 
 
 __all__ = [

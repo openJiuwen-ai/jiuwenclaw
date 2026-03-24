@@ -898,6 +898,18 @@ class StatusCode(Enum):
     SYS_OPERATION_REGISTRY_ERROR = (
         199006,
         "sys operation registry error, process: {process}, reason: {error_msg}")
+    SYS_OPERATION_SANDBOX_GATEWAY_ERROR = (
+        199007,
+        "sandbox gateway error, operation: {operation}, reason: {error_msg}")
+    SYS_OPERATION_SANDBOX_LAUNCHER_ERROR = (
+        199008,
+        "sandbox launcher error, operation: {operation}, reason: {error_msg}")
+    SYS_OPERATION_SANDBOX_PROVIDER_ERROR = (
+        199009,
+        "sandbox provider error, operation: {operation}, reason: {error_msg}")
+    SYS_OPERATION_SANDBOX_ISOLATION_KEY_ERROR = (
+        199010,
+        "sandbox isolation key error, operation: {operation}, reason: {error_msg}")
 
     def __init__(self, code: int, msg: str):
         """Validate and initialize enum member values.

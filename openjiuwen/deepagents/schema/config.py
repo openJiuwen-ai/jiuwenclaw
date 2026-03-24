@@ -10,7 +10,7 @@ from dataclasses import dataclass, field
 from typing import Any, List, Optional, Union
 
 from openjiuwen.core.foundation.llm.model import Model
-from openjiuwen.core.foundation.tool import ToolCard
+from openjiuwen.core.foundation.tool import Tool, ToolCard, McpServerConfig
 from openjiuwen.core.single_agent.schema.agent_card import (
     AgentCard,
 )
@@ -87,6 +87,7 @@ class DeepAgentConfig:
             single invoke.
         subagents: Sub-agent specifications or Sub-agent instance.
         tools: Tool cards mounted on the agent.
+        mcps: MCP server configs mounted on the agent.
         workspace: Workspace path for file operations.
         skills: Skill definitions (P1).
         backend: Backend protocol instance (P2).
@@ -105,6 +106,7 @@ class DeepAgentConfig:
     max_iterations: int = 15
     subagents: Optional[List[SubAgentConfig | "DeepAgent"]] = None
     tools: Optional[List[ToolCard]] = None
+    mcps: Optional[List[McpServerConfig]] = None
     workspace: Optional[Workspace] = None
     skills: Optional[Union[str, List[str]]] = None
     backend: Optional[Any] = None
@@ -127,7 +129,8 @@ class SubAgentConfig:
 
     agent_card: AgentCard
     system_prompt: str
-    tools: List[ToolCard] = field(default_factory=list)
+    tools: List[Tool | ToolCard] = field(default_factory=list)
+    mcps: List[McpServerConfig] = field(default_factory=list)
     model: Optional[Model] = None
     rails: Optional[List[AgentRail]] = None
     skills: Optional[List[str]] = None

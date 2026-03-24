@@ -390,7 +390,8 @@ class AbilityManager:
                     mcp_tool_name = mcp_tool.name
                     mcp_tool_id = f'{mcp_server_id}.{mcp_server_name}.{mcp_tool_name}'
                     self._tools[mcp_tool.name] = ToolCard(id=mcp_tool_id, name=mcp_tool_name,
-                                                          description=mcp_tool.description)
+                                                          description=mcp_tool.description,
+                                                          input_params=mcp_tool.parameters or {})
                     tool_infos.append(mcp_tool)
 
         return tool_infos

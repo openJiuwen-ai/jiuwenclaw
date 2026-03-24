@@ -114,6 +114,14 @@ class ToolMgr:
     def get_mcp_server_ids(self, server_name: str):
         return self._mcp_server_name_to_ids.get(server_name, [])
 
+    def get_mcp_server_config(self, server_id: str) -> Optional[McpServerConfig]:
+        resource = self._mcp_server_resources.get(server_id)
+        return deepcopy(resource.config) if resource else None
+
+    def get_mcp_tool_ids(self, server_id: str) -> list[str]:
+        resource = self._mcp_server_resources.get(server_id)
+        return deepcopy(resource.tool_ids) if resource else []
+
     async def remove_tool_server(self, server_id: str, ignore_not_exist: bool = True) -> list[str]:
         mcp_server_resource = self._mcp_server_resources.pop(server_id, None)
         if not mcp_server_resource:

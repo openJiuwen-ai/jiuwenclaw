@@ -162,6 +162,7 @@ class TaskTool(Tool):
             card=spec_or_agent.agent_card,
             system_prompt=spec_or_agent.system_prompt,
             tools=spec_or_agent.tools or [],
+            mcps=spec_or_agent.mcps or [],
             rails=spec_or_agent.rails,
             max_iterations=parent_config.max_iterations,
             workspace=parent_config.workspace,
@@ -181,13 +182,13 @@ class TaskTool(Tool):
             Matching SubAgentConfig or None.
         """
         parent_config = self.parent_agent.deep_config
-        if not parent_config or not parent_config.subagents:
-            logger.warning("[TaskTool] No subagents found, skipping")
+        if not parent_config:
+            logger.warning("[TaskTool] Parent agent has no deep_config, skipping")
             return None
 
         from openjiuwen.deepagents.deep_agent import DeepAgent
 
-        for spec in parent_config.subagents:
+        for spec in parent_config.subagents or []:
             if isinstance(spec, SubAgentConfig) and spec.agent_card.name == subagent_type:
                 return spec
             if isinstance(spec, DeepAgent):
@@ -205,9 +206,13 @@ class TaskTool(Tool):
                 ),
                 system_prompt=parent_config.system_prompt,
                 tools=parent_config.tools,
+                mcps=parent_config.mcps or [],
                 model=parent_config.model,
                 skills=parent_config.skills,
             )
+
+        if not parent_config.subagents:
+            logger.warning("[TaskTool] No subagents found, skipping")
 
         return None
 

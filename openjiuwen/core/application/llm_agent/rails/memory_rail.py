@@ -29,7 +29,6 @@ class MemoryRail(AgentRail):
 
     Hooks:
       before_invoke      - load memory variables from long-term memory into ctx.extra
-      before_model_call  - render memory variables into system message placeholders (first call only)
       after_invoke       - async write conversation to long-term memory (answer only)
     """
 
@@ -114,36 +113,6 @@ class MemoryRail(AgentRail):
 
         ctx.extra["memory_variables"] = result
         ctx.extra["_original_query"] = query
-
-    # ------------------------------------------------------------------
-    # BEFORE_MODEL_CALL: render memory variables into system messages
-    # ------------------------------------------------------------------
-
-    async def before_model_call(self, ctx: AgentCallbackContext) -> None:
-        # Only render once per invoke
-        if ctx.extra.get("_memory_rendered"):
-            return
-        # NOTED: 你之前的分析是对的，这里应该只能填充长期记忆相关的变量sys_long_term_memory、sys_memory_variables
-        # 其他的变量应该在ReActAgent中提前填充
-        render_vars = ctx.extra.get("memory_variables")
-        if not render_vars:
-            return
-
-        messages = getattr(ctx.inputs, "messages", None)
-        if not messages:
-            return
-
-        from openjiuwen.core.foundation.prompt import PromptTemplate
-        for i, msg in enumerate(messages):
-            if getattr(msg, "role", None) == "system" and isinstance(getattr(msg, "content", None), str):
-                try:
-                    msg.content = PromptTemplate(content=msg.content).format(render_vars).content
-                except KeyError:
-                    pass
-                except Exception as e:
-                    logger.warning("MemoryRail: failed to render system message placeholder: %s", e)
-
-        ctx.extra["_memory_rendered"] = True
 
     # ------------------------------------------------------------------
     # AFTER_INVOKE: write conversation to long-term memory

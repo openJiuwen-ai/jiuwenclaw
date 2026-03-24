@@ -12,6 +12,7 @@ from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import build_error
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.common.security.user_config import UserConfig
+from openjiuwen.core.runner import Runner
 from openjiuwen.core.session.agent import Session
 from openjiuwen.core.session.stream.base import StreamMode
 from openjiuwen.core.single_agent.agents.react_agent import ReActAgent, ReActAgentConfig
@@ -59,7 +60,12 @@ if TYPE_CHECKING:
         EventQueue,
     )
 
-from openjiuwen.deepagents.prompts import resolve_language, resolve_mode, SystemPromptBuilder
+from openjiuwen.deepagents.prompts import (
+    resolve_language,
+    resolve_mode,
+    PromptSection,
+    SystemPromptBuilder,
+)
 from openjiuwen.deepagents.prompts.sections.identity import build_identity_section
 
 # Events bridged to the inner ReActAgent.
@@ -102,6 +108,8 @@ class DeepAgent(BaseAgent):
         self._loop_controller: Optional[TaskLoopController] = None
         self._loop_session: Optional[Session] = None
         self._initialized = False
+        self.prompt_builder: Optional[SystemPromptBuilder] = None
+        self.system_prompt_builder: Optional[SystemPromptBuilder] = None
         super().__init__(card)
 
     def configure(self, config: DeepAgentConfig) -> "DeepAgent":
@@ -182,14 +190,19 @@ class DeepAgent(BaseAgent):
         react_config = ReActAgentConfig()
         react_config.max_iterations = cfg.max_iterations
 
+        language = resolve_language(cfg.language)
+        mode = resolve_mode(cfg.prompt_mode)
+        prompt_builder = SystemPromptBuilder(language=language, mode=mode)
         if cfg.system_prompt:
-            prompt = cfg.system_prompt
+            # Wrap the provided prompt as the identity section so all
+            # rails can consistently operate on prompt_builder.
+            prompt_builder.add_section(PromptSection(
+                name="identity",
+                content={"cn": cfg.system_prompt, "en": cfg.system_prompt},
+            ))
         else:
-            language = resolve_language(cfg.language)
-            mode = resolve_mode(cfg.prompt_mode)
-            builder = SystemPromptBuilder(language=language, mode=mode)
-            builder.add_section(build_identity_section(language))
-            prompt = builder.build()
+            prompt_builder.add_section(build_identity_section(language))
+        prompt = prompt_builder.build()
         react_config.prompt_template = [{"role": "system", "content": prompt}]
 
         if cfg.model is not None:
@@ -204,6 +217,16 @@ class DeepAgent(BaseAgent):
         agent = ReActAgent(inner_card)
         agent.configure(react_config)
 
+        # Store builder on both agents (same object):
+        #   - DeepAgent.system_prompt_builder: rails initialized on the outer
+        #     agent pick it up as the public contract.
+        #   - ReActAgent.system_prompt_builder: bridged BEFORE_MODEL_CALL rails
+        #     mutate the same builder object before _railed_model_call builds it.
+        self.prompt_builder = prompt_builder
+        self.system_prompt_builder = prompt_builder
+        agent.prompt_builder = prompt_builder
+        agent.system_prompt_builder = prompt_builder
+
         # Share ability manager so tools registered on DeepAgent are visible inside.
         agent.ability_manager = self.ability_manager
 
@@ -213,10 +236,52 @@ class DeepAgent(BaseAgent):
 
         return agent
 
+    async def _register_pending_mcps(self) -> None:
+        """Register configured MCP servers before rails initialize."""
+        cfg = self._deep_config
+        if cfg is None or not cfg.mcps:
+            return
+
+        for mcp_config in cfg.mcps:
+            existing_config = Runner.resource_mgr.get_mcp_server_config(mcp_config.server_id)
+            if existing_config is None:
+                result = await Runner.resource_mgr.add_mcp_server(
+                    mcp_config,
+                    tag=self.card.id,
+                )
+                if result.is_err():
+                    raise result.msg()
+            else:
+                if existing_config.model_dump() != mcp_config.model_dump():
+                    raise build_error(
+                        StatusCode.RESOURCE_MCP_SERVER_ADD_ERROR,
+                        server_config=mcp_config,
+                        reason=(
+                            f"server_id '{mcp_config.server_id}' is already registered "
+                            "with a different config"
+                        ),
+                    )
+
+                tag_result = Runner.resource_mgr.add_resource_tag(
+                    mcp_config.server_id,
+                    self.card.id,
+                )
+                if tag_result.is_err():
+                    raise tag_result.msg()
+
+                for tool_id in Runner.resource_mgr.get_mcp_tool_ids(mcp_config.server_id):
+                    tag_result = Runner.resource_mgr.add_resource_tag(tool_id, self.card.id)
+                    if tag_result.is_err():
+                        raise tag_result.msg()
+
+            self.ability_manager.add(mcp_config)
+
     async def _ensure_initialized(self) -> None:
         """Perform lazy async initialization."""
         if self._initialized:
             return
+
+        await self._register_pending_mcps()
 
         for rail_inst in self._pending_rails:
             if isinstance(rail_inst, DeepAgentRail):

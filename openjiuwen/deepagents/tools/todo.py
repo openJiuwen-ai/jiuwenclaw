@@ -162,7 +162,7 @@ class TodoTool(Tool):
         super().__init__(card)
         self.workspace = workspace if workspace else "./"
         self.fs = operation.fs()
-        self._file = f"./todos/{str(uuid.uuid4())}.json"
+        self._file = f"./todos/session_id/todo.json"
 
     async def load_todos(self) -> List[TodoItem]:
         """Load todo items from session-specific JSON file
@@ -254,7 +254,7 @@ class TodoTool(Tool):
             session_id: Unique identifier of the session id, used as the JSON file name
         """
         if session_id:
-            self._file = f"./todos/{session_id}.json"
+            self._file = f"./todos/{session_id}/todo.json"
 
 
 class TodoCreateTool(TodoTool):

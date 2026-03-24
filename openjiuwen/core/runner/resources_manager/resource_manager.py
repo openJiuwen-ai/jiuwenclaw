@@ -30,7 +30,8 @@ from openjiuwen.core.runner.resources_manager.resource_registry import ResourceR
 from openjiuwen.core.runner.resources_manager.tag_manager import TagMgr
 from openjiuwen.core.single_agent.schema.agent_card import AgentCard
 from openjiuwen.core.single_agent.legacy import LegacyBaseAgent as BaseAgent
-from openjiuwen.core.sys_operation import SysOperationCard, SysOperation
+from openjiuwen.core.sys_operation import (SysOperationCard, SysOperation, SysOperationMgr,
+                                           generate_isolation_key_template, OperationMode)
 from openjiuwen.core.sys_operation.tool_adapter import SysOperationToolAdapter
 from openjiuwen.core.sys_operation.registry import OperationRegistry
 from openjiuwen.core.workflow.workflow import Workflow
@@ -635,6 +636,28 @@ class ResourceMgr:
             self._inner_validate_resource_card(single_card, "sys_operation", SysOperationCard)
             if tag is not None:
                 self._inner_validate_tag(tag)
+
+            # Check isolation key conflict for sandbox mode
+            if single_card.mode == OperationMode.SANDBOX and single_card.gateway_config:
+                gateway_config = single_card.gateway_config
+                if gateway_config.launcher_config:
+                    isolation_key_template = generate_isolation_key_template(
+                        isolation_prefix=gateway_config.isolation.prefix,
+                        container_scope=gateway_config.isolation.container_scope,
+                        custom_id=gateway_config.isolation.custom_id,
+                        launcher_type=gateway_config.launcher_config.launcher_type,
+                        sandbox_type=gateway_config.launcher_config.sandbox_type,
+                    )
+                    # Register with SysOperationMgr for conflict detection
+                    try:
+                        SysOperationMgr.get_instance().register_sandbox_key(
+                            isolation_key_template, single_card.id
+                        )
+                    except ValueError as e:
+                        logger.warning(f"Isolation key conflict detected for operation '{single_card.id}': {e}")
+                        results.append(Error(error=Exception(str(e))))
+                        continue
+
             instance = SysOperation(single_card)
             res = self._inner_add_resource(resource_id=single_card.id,
                                            resource=instance,
@@ -666,12 +689,16 @@ class ResourceMgr:
         Returns:
             Result/Result list: Removed card(s) or error
         """
+        # Unregister sandbox keys before removing resources
+        sys_op_ids = [sys_operation_id] if isinstance(sys_operation_id, str) else (sys_operation_id or [])
+        for op_id in sys_op_ids:
+            SysOperationMgr.get_instance().unregister_by_operation_id(op_id)
+
         results = self._inner_remove_resources(resource_id=sys_operation_id,
                                                tag=tag,
                                                tag_match_strategy=tag_match_strategy,
                                                skip_if_tag_not_exists=skip_if_tag_not_exists,
                                                resource_type="sys_operation")
-        sys_op_ids = [sys_operation_id] if isinstance(sys_operation_id, str) else (sys_operation_id or [])
 
         tool_ids_to_remove = []
         for op_id in sys_op_ids:
@@ -1073,6 +1100,16 @@ class ResourceMgr:
                 elif tool_card:
                     results.append(tool_card.tool_info())
         return results
+
+    def get_mcp_server_config(self, server_id: str) -> Optional[McpServerConfig]:
+        """Get MCP server configuration by server_id if it is already registered."""
+        self._inner_validate_resource_id(server_id, "mcp server")
+        return self._resource_registry.tool().get_mcp_server_config(server_id)
+
+    def get_mcp_tool_ids(self, server_id: str) -> list[str]:
+        """Get registered MCP tool ids for a server_id."""
+        self._inner_validate_resource_id(server_id, "mcp server")
+        return self._resource_registry.tool().get_mcp_tool_ids(server_id)
 
     def get_resource_by_tag(self,
                             tag: Tag) -> Optional[list[BaseCard]]:

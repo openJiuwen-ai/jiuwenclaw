@@ -7,7 +7,7 @@ from __future__ import annotations
 from typing import Any, List, Optional, Dict
 
 from openjiuwen.core.foundation.llm.model import Model
-from openjiuwen.core.foundation.tool import ToolCard
+from openjiuwen.core.foundation.tool import Tool, ToolCard, McpServerConfig
 from openjiuwen.core.single_agent.rail.base import AgentRail
 from openjiuwen.core.single_agent.schema.agent_card import AgentCard
 from openjiuwen.core.sys_operation import SysOperation
@@ -53,7 +53,8 @@ def create_code_agent(
     *,
     card: Optional[AgentCard] = None,
     system_prompt: Optional[str] = None,
-    tools: Optional[List[ToolCard]] = None,
+    tools: Optional[List[Tool | ToolCard]] = None,
+    mcps: Optional[List[McpServerConfig]] = None,
     subagents: Optional[List[SubAgentConfig | DeepAgent]] = None,
     rails: Optional[List[AgentRail]] = None,
     stop_condition: Optional[StopCondition] = None,
@@ -77,7 +78,8 @@ def create_code_agent(
             card is created.
         system_prompt: System prompt for the inner
             ReActAgent.
-        tools: Tool cards to register on the agent.
+        tools: Tool instances or tool cards to register on the agent.
+        mcps: MCP server configs to register on the agent.
         subagents: Sub-agent specification, supports subagent using different model, tools and prompt.
         rails: AgentRail instances to register.
         stop_condition: Task-loop stop conditions.
@@ -114,6 +116,7 @@ def create_code_agent(
         card=final_card,
         system_prompt=final_prompt,
         tools=final_tools,
+        mcps=mcps,
         subagents=subagents,
         rails=final_rails,
         stop_condition=stop_condition,

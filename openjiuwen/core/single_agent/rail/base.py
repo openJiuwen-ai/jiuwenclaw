@@ -62,12 +62,14 @@ class ModelCallInputs:
     """Input data for BEFORE/AFTER_MODEL_CALL events.
 
     Attributes:
-        messages: Message list for LLM
+        messages: Preview message list before the final LLM window is rebuilt
         tools: Optional tool definitions
+        model_context: Current ModelContext used to build the final LLM window
         response: LLM response (filled after call)
     """
     messages: List[Any] = field(default_factory=list)
     tools: Optional[List[Any]] = None
+    model_context: Optional[ModelContext] = None
     response: Optional[Any] = None
 
 
@@ -361,7 +363,7 @@ class AgentRail(ABC):
     async def before_model_call(
         self, ctx: AgentCallbackContext
     ) -> None:
-        """Called before LLM is invoked."""
+        """Called before LLM is invoked with preview messages and model_context."""
         pass
 
     async def after_model_call(

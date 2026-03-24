@@ -1,308 +1,148 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
-from typing import Optional, Tuple, Dict, Any, Literal, List, AsyncIterator
+from typing import Any, Dict, List, Optional, Tuple, Literal, AsyncIterator
 
-from openjiuwen.core.sys_operation.fs import BaseFsOperation, DEFAULT_READ_STREAM_CHUNK_SIZE, DEFAULT_READ_CHUNK_SIZE, \
-    DEFAULT_UPLOAD_CHUNK_SIZE, DEFAULT_UPLOAD_STREAM_CHUNK_SIZE, DEFAULT_DOWNLOAD_CHUNK_SIZE, \
-    DEFAULT_DOWNLOAD_STREAM_CHUNK_SIZE
-from openjiuwen.core.sys_operation.base import OperationMode
+from openjiuwen.core.sys_operation.fs import (
+    BaseFsOperation, DEFAULT_READ_CHUNK_SIZE, DEFAULT_READ_STREAM_CHUNK_SIZE,
+    DEFAULT_UPLOAD_CHUNK_SIZE, DEFAULT_UPLOAD_STREAM_CHUNK_SIZE,
+    DEFAULT_DOWNLOAD_CHUNK_SIZE, DEFAULT_DOWNLOAD_STREAM_CHUNK_SIZE
+)
 from openjiuwen.core.sys_operation.registry import operation
+from openjiuwen.core.sys_operation.base import OperationMode
+from openjiuwen.core.sys_operation.sandbox.run_config import SandboxRunConfig
+from openjiuwen.core.sys_operation.sandbox.sandbox_mixin import BaseSandboxMixin
 from openjiuwen.core.sys_operation.result import (
-    ReadFileResult, WriteFileResult, \
-    UploadFileResult, DownloadFileResult, ListFilesResult, ListDirsResult, SearchFilesResult, \
-    ReadFileStreamResult, DownloadFileStreamResult, UploadFileStreamResult
+    ReadFileResult, ReadFileStreamResult, WriteFileResult,
+    UploadFileResult, UploadFileStreamResult, DownloadFileResult,
+    DownloadFileStreamResult, ListFilesResult, ListDirsResult, SearchFilesResult
 )
 
 
-@operation(name="fs", mode=OperationMode.SANDBOX, description="sandbox fs operation")
-class FsOperation(BaseFsOperation):
-    """File system operation"""
+@operation(name="fs", mode=OperationMode.SANDBOX, description="Sandbox file system operation")
+class FsOperation(BaseFsOperation, BaseSandboxMixin):
+    """Sandbox mode file system operation
+
+    Registered via @operation. All methods delegate to Gateway full-chain routing.
+    """
+
+    def __init__(self, name: str, mode: OperationMode, description: str, run_config: SandboxRunConfig):
+        super().__init__(name, mode, description, run_config)
+        self._init_sandbox_context(run_config, op_type="fs")
 
     async def read_file(
-            self,
-            path: str,
-            *,
-            mode: Literal['text', 'bytes'] = "text",
-            head: Optional[int] = None,
-            tail: Optional[int] = None,
-            line_range: Optional[Tuple[int, int]] = None,
-            encoding: str = "utf-8",
-            chunk_size: int = DEFAULT_READ_CHUNK_SIZE,
-            options: Optional[Dict[str, Any]] = None
+            self, path: str, *, mode: Literal['text', 'bytes'] = "text",
+            head: Optional[int] = None, tail: Optional[int] = None,
+            line_range: Optional[Tuple[int, int]] = None, encoding: str = "utf-8",
+            chunk_size: int = DEFAULT_READ_CHUNK_SIZE, options: Optional[Dict[str, Any]] = None
     ) -> ReadFileResult:
-        """
-        Asynchronously read file with specified mode and parameters.
-        Mutually exclusive parameters: Only one of head, tail, or line_range can be specified.
-
-        Args:
-            path: Full or relative path to the file to read (required).
-            mode: Reading mode - "text" (line-based, default) or "bytes" (raw bytes).
-            head: Number of lines to read from the start (text mode only).0 is equivalent to None.
-            tail: Number of lines to read from the end (text mode only).0 is equivalent to None.
-            line_range: Specific line range to read (start, end) - 1-indexed, inclusive (text mode only).
-                  If start <= 0 or end <= 0 or start > end, returns empty content.
-            encoding: Character encoding for text mode (default: utf-8).
-            chunk_size: Maximum number of bytes to read at once (default: 0, unlimited)
-            options: Extended configuration options (dict, optional).
-
-        Returns:
-            ReadFileResult: Structured result.
-        """
-        raise NotImplementedError("Fs operation sandbox mode is not implemented yet.")
+        raw = await self.invoke(
+            "read_file", path=path, mode=mode, head=head, tail=tail,
+            line_range=line_range, encoding=encoding, chunk_size=chunk_size, options=options
+        )
+        return raw if isinstance(raw, ReadFileResult) else ReadFileResult(**raw)
 
     async def read_file_stream(
-            self,
-            path: str,
-            *,
-            mode: Literal['text', 'bytes'] = "text",
-            head: Optional[int] = None,
-            tail: Optional[int] = None,
-            line_range: Optional[Tuple[int, int]] = None,
-            encoding: str = "utf-8",
-            chunk_size: int = DEFAULT_READ_STREAM_CHUNK_SIZE,
-            options: Optional[Dict[str, Any]] = None
+            self, path: str, *, mode: Literal['text', 'bytes'] = "text",
+            head: Optional[int] = None, tail: Optional[int] = None,
+            line_range: Optional[Tuple[int, int]] = None, encoding: str = "utf-8",
+            chunk_size: int = DEFAULT_READ_STREAM_CHUNK_SIZE, options: Optional[Dict[str, Any]] = None
     ) -> AsyncIterator[ReadFileStreamResult]:
-        """
-        Asynchronously read file streaming with specified mode and parameters.
-        Mutually exclusive parameters: Only one of head, tail, or line_range can be specified.
-
-        Args:
-            path: Full or relative path to the file to read (required).
-            mode: Reading mode - "text" (line-based, default) or "bytes" (raw bytes).
-            head: Number of lines to read from the start (text mode only).
-                  0 is equivalent to None.
-            tail: Number of lines to read from the end (text mode only).
-                  0 is equivalent to None.
-            line_range: Specific line range to read (start, end) - 1-indexed, inclusive (text mode only).
-                  If start <= 0 or end <= 0 or start > end, returns empty content.
-            encoding: Character encoding for text mode (default: utf-8).
-            chunk_size: Buffer size for bytes mode reading (default: 8192 bytes).
-            options: Extended configuration options (dict, optional).
-
-        Returns:
-            AsyncIterator[ReadFileStreamResult]: Streaming structured results, line-by-line or chunk-by-chunk.
-        """
-        raise NotImplementedError("Fs operation sandbox mode is not implemented yet.")
+        async for item in self.invoke_stream(
+            "read_file_stream", path=path, mode=mode, head=head, tail=tail,
+            line_range=line_range, encoding=encoding, chunk_size=chunk_size, options=options
+        ):
+            yield ReadFileStreamResult(**item) if isinstance(item, dict) else item
 
     async def write_file(
-            self,
-            path: str,
-            content: str | bytes,
-            *,
-            mode: Literal['text', 'bytes'] = "text",
-            prepend_newline: bool = True,
-            append_newline: bool = False,
-            create_if_not_exist: bool = True,
-            permissions: str = "644",
-            encoding: str = "utf-8",
-            options: Optional[Dict[str, Any]] = None
+            self, path: str, content: str | bytes, *, mode: Literal['text', 'bytes'] = "text",
+            prepend_newline: bool = True, append_newline: bool = False,
+            create_if_not_exist: bool = True, permissions: str = "644",
+            encoding: str = "utf-8", options: Optional[Dict[str, Any]] = None
     ) -> WriteFileResult:
-        """
-        Asynchronously writes content to a file with flexible configuration.
-
-        Args:
-            path: Full or relative path to the file to write (required).
-            content: Data to write to the file (string for text mode, bytes for binary mode).
-            mode: Writing mode: "text" (for string content) or "bytes" (for binary data) (default: "text").
-            prepend_newline: Add a newline character (`\n`) before the content (text mode only; default: True).
-            append_newline: Add a newline character (`\n`) after the content (text mode only; default: False).
-            create_if_not_exist: Auto-create the file if it doesn't exist (default: True).
-            permissions: Octal file permissions (Unix/Linux only; ignored on Windows) (default: "644").
-            encoding: Character encoding for text mode (default: utf-8).
-            options: Extended configuration options (dict, optional).
-
-        Returns:
-            WriteFileResult: Structured result.
-        """
-        raise NotImplementedError("Fs operation sandbox mode is not implemented yet.")
+        raw = await self.invoke(
+            "write_file", path=path, content=content, mode=mode,
+            prepend_newline=prepend_newline, append_newline=append_newline,
+            create_if_not_exist=create_if_not_exist, permissions=permissions,
+            encoding=encoding, options=options
+        )
+        return raw if isinstance(raw, WriteFileResult) else WriteFileResult(**raw)
 
     async def upload_file(
-            self,
-            local_path: str,
-            target_path: str,
-            *,
-            overwrite: bool = False,
-            create_parent_dirs: bool = True,
-            preserve_permissions: bool = True,
-            chunk_size: int = DEFAULT_UPLOAD_CHUNK_SIZE,
-            options: Optional[Dict[str, Any]] = None
+            self, local_path: str, target_path: str, *, overwrite: bool = False,
+            create_parent_dirs: bool = True, preserve_permissions: bool = True,
+            chunk_size: int = DEFAULT_UPLOAD_CHUNK_SIZE, options: Optional[Dict[str, Any]] = None
     ) -> UploadFileResult:
-        """
-        Asynchronous file upload (semantics: local file → target path).
-
-        Args:
-            local_path: Local source file path (required, e.g. /tmp/local_file.txt).
-            target_path: Upload destination path (required, e.g. /mnt/storage/file.txt or sandbox:/opt/bucket/file.txt).
-            overwrite: Whether to overwrite existing target file (default: False).
-            create_parent_dirs: Whether to auto-create target parent directories (default: True).
-            preserve_permissions: Whether to preserve file permissions (default: True, Unix/Linux only).
-            chunk_size: Maximum number of bytes to upload at once (default: 0, unlimited)
-            options: Extended configuration options (dict, optional).
-
-        Returns:
-            UploadFileResult: Structured result.
-        """
-        raise NotImplementedError("Fs operation sandbox mode is not implemented yet.")
+        raw = await self.invoke(
+            "upload_file", local_path=local_path, target_path=target_path,
+            overwrite=overwrite, create_parent_dirs=create_parent_dirs,
+            preserve_permissions=preserve_permissions, chunk_size=chunk_size, options=options
+        )
+        return raw if isinstance(raw, UploadFileResult) else UploadFileResult(**raw)
 
     async def upload_file_stream(
-            self,
-            local_path: str,
-            target_path: str,
-            *,
-            overwrite: bool = False,
-            create_parent_dirs: bool = True,
-            preserve_permissions: bool = True,
-            chunk_size: int = DEFAULT_UPLOAD_STREAM_CHUNK_SIZE,
-            options: Optional[Dict[str, Any]] = None
+            self, local_path: str, target_path: str, *, overwrite: bool = False,
+            create_parent_dirs: bool = True, preserve_permissions: bool = True,
+            chunk_size: int = DEFAULT_UPLOAD_STREAM_CHUNK_SIZE, options: Optional[Dict[str, Any]] = None
     ) -> AsyncIterator[UploadFileStreamResult]:
-        """
-        Asynchronous file upload streaming(semantics: local file → target path).
-
-        Args:
-            local_path: Local source file path (required, e.g. /tmp/local_file.txt).
-            target_path: Upload destination path (required, e.g. /mnt/storage/file.txt or sandbox:/opt/bucket/file.txt).
-            overwrite: Whether to overwrite existing target file (default: False).
-            create_parent_dirs: Whether to auto-create target parent directories (default: True).
-            preserve_permissions: Whether to preserve file permissions (default: True, Unix/Linux only).
-            chunk_size: Maximum number of bytes to download at once (default: 0, unlimited)
-            options: Extended configuration options (dict, optional).
-
-        Returns:
-            AsyncIterator[UploadFileStreamResult]: Streaming structured results, chunk-by-chunk.
-        """
-        raise NotImplementedError("Fs operation sandbox mode is not implemented yet.")
+        async for item in self.invoke_stream(
+            "upload_file_stream", local_path=local_path, target_path=target_path,
+            overwrite=overwrite, create_parent_dirs=create_parent_dirs,
+            preserve_permissions=preserve_permissions, chunk_size=chunk_size, options=options
+        ):
+            yield UploadFileStreamResult(**item) if isinstance(item, dict) else item
 
     async def download_file(
-            self,
-            source_path: str,
-            local_path: str,
-            *,
-            overwrite: bool = False,
-            create_parent_dirs: bool = True,
-            preserve_permissions: bool = True,
-            chunk_size: int = DEFAULT_DOWNLOAD_CHUNK_SIZE,
-            options: Optional[Dict[str, Any]] = None
+            self, source_path: str, local_path: str, *, overwrite: bool = False,
+            create_parent_dirs: bool = True, preserve_permissions: bool = True,
+            chunk_size: int = DEFAULT_DOWNLOAD_CHUNK_SIZE, options: Optional[Dict[str, Any]] = None
     ) -> DownloadFileResult:
-        """
-        Asynchronous file download (semantics: source file → local destination path).
-
-        Args:
-            source_path: Source file path (required, e.g. /mnt/storage/file.txt or sandbox:/opt/bucket/file.txt).
-            local_path: Local destination file path (required, e.g. /home/user/downloads/file.txt).
-            overwrite: Whether to overwrite existing target file (default: False).
-            create_parent_dirs: Whether to auto-create target parent directories (default: True).
-            preserve_permissions: Whether to preserve file permissions (default: True, Unix/Linux only).
-            chunk_size: Maximum number of bytes to download at once (default: 0, unlimited)
-            options: Extended configuration options (dict, optional).
-
-        Returns:
-            DownloadFileResult: Structured result.
-        """
-        raise NotImplementedError("Fs operation sandbox mode is not implemented yet.")
+        raw = await self.invoke(
+            "download_file", source_path=source_path, local_path=local_path,
+            overwrite=overwrite, create_parent_dirs=create_parent_dirs,
+            preserve_permissions=preserve_permissions, chunk_size=chunk_size, options=options
+        )
+        return raw if isinstance(raw, DownloadFileResult) else DownloadFileResult(**raw)
 
     async def download_file_stream(
-            self,
-            source_path: str,
-            local_path: str,
-            *,
-            overwrite: bool = False,
-            create_parent_dirs: bool = True,
-            preserve_permissions: bool = True,
-            chunk_size: int = DEFAULT_DOWNLOAD_STREAM_CHUNK_SIZE,
-            options: Optional[Dict[str, Any]] = None
+            self, source_path: str, local_path: str, *, overwrite: bool = False,
+            create_parent_dirs: bool = True, preserve_permissions: bool = True,
+            chunk_size: int = DEFAULT_DOWNLOAD_STREAM_CHUNK_SIZE, options: Optional[Dict[str, Any]] = None
     ) -> AsyncIterator[DownloadFileStreamResult]:
-        """
-        Asynchronous file download streaming(semantics: source file → local destination path).
-
-        Args:
-            source_path: Source file path (required, e.g. /mnt/storage/file.txt or sandbox:/opt/bucket/file.txt).
-            local_path: Local destination file path (required, e.g. /home/user/downloads/file.txt).
-            overwrite: Whether to overwrite existing target file (default: False).
-            create_parent_dirs: Whether to auto-create target parent directories (default: True).
-            preserve_permissions: Whether to preserve file permissions (default: True, Unix/Linux only).
-            chunk_size: Chunk size for cross-filesystem transfers (default: 1MB, bytes).
-            options: Extended configuration options (dict, optional).
-
-        Returns:
-            AsyncIterator[DownloadFileStreamResult]: Streaming structured results, chunk-by-chunk.
-        """
-        raise NotImplementedError("Fs operation sandbox mode is not implemented yet.")
+        async for item in self.invoke_stream(
+            "download_file_stream", source_path=source_path, local_path=local_path,
+            overwrite=overwrite, create_parent_dirs=create_parent_dirs,
+            preserve_permissions=preserve_permissions, chunk_size=chunk_size, options=options
+        ):
+            yield DownloadFileStreamResult(**item) if isinstance(item, dict) else item
 
     async def list_files(
-            self,
-            path: str,
-            *,
-            recursive: bool = False,
-            max_depth: Optional[int] = None,
+            self, path: str, *, recursive: bool = False, max_depth: Optional[int] = None,
             sort_by: Literal['name', 'modified_time', 'size'] = "name",
-            sort_descending: bool = False,
-            file_types: Optional[List[str]] = None,
+            sort_descending: bool = False, file_types: Optional[List[str]] = None,
             options: Optional[Dict[str, Any]] = None
     ) -> ListFilesResult:
-        """
-        Asynchronously list files under the specified path.
-
-        Args:
-            path: Target parent directory path (required).
-            recursive: Whether to list files in subdirectories recursively. Defaults to False.
-            max_depth: Maximum recursion depth limit, only effective when recursive=True.
-            sort_by: Sorting field, supports three options:
-                'name' (sort by filename, default),
-                'modified_time' (sort by last modification time),
-                'size' (sort by file size in bytes).
-            sort_descending: Whether to sort in descending order. Defaults to False (ascending order).
-            file_types: Filter files by extension (list of extensions), e.g. ['.txt', '.pdf'].
-            options: Extended configuration options (dict, optional).
-
-        Returns:
-            ListFilesResult: Structured result.
-        """
-        raise NotImplementedError("Fs operation sandbox mode is not implemented yet.")
+        raw = await self.invoke(
+            "list_files", path=path, recursive=recursive, max_depth=max_depth,
+            sort_by=sort_by, sort_descending=sort_descending,
+            file_types=file_types, options=options
+        )
+        return raw if isinstance(raw, ListFilesResult) else ListFilesResult(**raw)
 
     async def list_directories(
-            self,
-            path: str,
-            *,
-            recursive: bool = False,
-            max_depth: Optional[int] = None,
+            self, path: str, *, recursive: bool = False, max_depth: Optional[int] = None,
             sort_by: Literal['name', 'modified_time', 'size'] = "name",
-            sort_descending: bool = False,
-            options: Optional[Dict[str, Any]] = None
+            sort_descending: bool = False, options: Optional[Dict[str, Any]] = None
     ) -> ListDirsResult:
-        """
-        Asynchronously list directories under the specified path.
-
-        Args:
-            path: Target parent directory path (required).
-            recursive: Whether to list subdirectories recursively. Defaults to False.
-            max_depth: Maximum recursion depth limit, only effective when recursive=True.
-            sort_by: Sorting field, supports three options:
-                'name' (sort by filename, default),
-                'modified_time' (sort by last modification time),
-                'size' (sort by file size in bytes).
-            sort_descending: Whether to sort in descending order. Defaults to False (ascending order).
-            options: Extended configuration options (dict, optional).
-
-        Returns:
-            ListDirsResult: Structured result.
-        """
-        raise NotImplementedError("Fs operation sandbox mode is not implemented yet.")
+        raw = await self.invoke(
+            "list_directories", path=path, recursive=recursive, max_depth=max_depth,
+            sort_by=sort_by, sort_descending=sort_descending, options=options
+        )
+        return raw if isinstance(raw, ListDirsResult) else ListDirsResult(**raw)
 
     async def search_files(
-            self,
-            path: str,
-            pattern: str,
-            exclude_patterns: Optional[List[str]] = None
+            self, path: str, pattern: str, exclude_patterns: Optional[List[str]] = None
     ) -> SearchFilesResult:
-        """
-        Asynchronously search files under the specified path.
-
-        Args:
-            path: Base directory path to start the search (required).
-            pattern: Search pattern to match file names.
-            exclude_patterns: Optional list of patterns to exclude from results.
-
-        Returns:
-            SearchFilesResult: Structured result.
-        """
-        raise NotImplementedError("Fs operation sandbox mode is not implemented yet.")
+        raw = await self.invoke(
+            "search_files", path=path, pattern=pattern, exclude_patterns=exclude_patterns
+        )
+        return raw if isinstance(raw, SearchFilesResult) else SearchFilesResult(**raw)

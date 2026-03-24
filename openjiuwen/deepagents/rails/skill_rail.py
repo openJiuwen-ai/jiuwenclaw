@@ -11,7 +11,6 @@ import yaml
 
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.foundation.llm.model import Model
-from openjiuwen.core.foundation.llm.schema.message import SystemMessage
 from openjiuwen.core.runner.runner import Runner
 from openjiuwen.core.single_agent.rail.base import AgentCallbackContext
 from openjiuwen.core.single_agent.skills.skill_manager import Skill
@@ -79,7 +78,7 @@ class SkillRail(DeepAgentRail):
         self.language = language
 
         self.skills: List[Skill] = []
-        self._builder = None
+        self.system_prompt_builder = None
 
         # Cache loaded skills across invokes.
         self._skill_cache: Dict[str, Skill] = {}
@@ -211,7 +210,7 @@ class SkillRail(DeepAgentRail):
 
     def init(self, agent):
         """Register tool cards into agent and concrete tools into resource manager."""
-        self._builder = getattr(agent, '_prompt_builder', None)
+        self.system_prompt_builder = getattr(agent, "system_prompt_builder", None)
 
         tools = []
 
@@ -281,21 +280,19 @@ class SkillRail(DeepAgentRail):
         _ = ctx
 
     async def before_model_call(self, ctx: AgentCallbackContext) -> None:
-        """Inject skill prompt before model call."""
-        if self._builder is not None:
-            skills_section = self._build_skills_section()
-            if skills_section is not None:
-                self._builder.add_section(skills_section)
-            else:
-                self._builder.remove_section("skills")
-            prompt = self._builder.build()
-            self._replace_system_message(ctx, prompt)
+        """Update system_prompt_builder with current skills before model call.
+
+        build() and get_context_window are deferred to _railed_model_call
+        so that ContextProcessor has the accurate final token budget.
+        """
+        if self.system_prompt_builder is None:
+            return
+
+        skills_section = self._build_skills_section()
+        if skills_section is not None:
+            self.system_prompt_builder.add_section(skills_section)
         else:
-            if self.skill_mode == self.SKILL_MODE_ALL:
-                skill_prompt = self._build_all_mode_prompt()
-            else:
-                skill_prompt = build_auto_list_mode_skill_prompt(language=self.language)
-            self._inject_prompt(ctx, skill_prompt)
+            self.system_prompt_builder.remove_section("skills")
 
     def _build_skills_section(self):
         """Build PromptSection from current skills."""
@@ -322,23 +319,6 @@ class SkillRail(DeepAgentRail):
                 mode="auto_list",
             )
 
-    def _replace_system_message(self, ctx: AgentCallbackContext, prompt: str) -> None:
-        """Replace (not append) the system message."""
-        inputs = getattr(ctx, "inputs", None)
-        messages = getattr(inputs, "messages", None)
-        if not isinstance(messages, list):
-            return
-
-        for msg in messages:
-            if isinstance(msg, dict) and msg.get("role") == "system":
-                msg["content"] = prompt
-                return
-            if isinstance(msg, SystemMessage):
-                msg.content = prompt
-                return
-
-        messages.insert(0, SystemMessage(content=prompt))
-
     def _build_all_mode_prompt(self) -> str:
         """Build skill prompt for all mode."""
         body_lines: List[str] = []
@@ -354,30 +334,6 @@ class SkillRail(DeepAgentRail):
             )
 
         return build_all_mode_skill_prompt(build_skill_lines(body_lines), language=self.language)
-
-    def _inject_prompt(self, ctx: AgentCallbackContext, skill_prompt: str) -> None:
-        """Inject skill prompt into the current system message, without duplicate append."""
-        inputs = getattr(ctx, "inputs", None)
-        messages = getattr(inputs, "messages", None)
-        if not isinstance(messages, list):
-            return
-
-        for msg in messages:
-            if isinstance(msg, dict) and msg.get("role") == "system":
-                original = msg.get("content", "") or ""
-                if skill_prompt in original:
-                    return
-                msg["content"] = (original.rstrip() + "\n\n" + skill_prompt).strip()
-                return
-
-            if isinstance(msg, SystemMessage):
-                original = msg.content or ""
-                if skill_prompt in original:
-                    return
-                msg.content = (original.rstrip() + "\n\n" + skill_prompt).strip()
-                return
-
-        messages.insert(0, SystemMessage(content=skill_prompt))
 
     @staticmethod
     def _normalize_name_list(raw: Optional[Union[str, List[str]]]) -> List[str]:

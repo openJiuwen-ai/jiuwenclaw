@@ -1,124 +1,72 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
-"""Section-based system prompt builder for DeepAgent."""
+"""DeepAgent-specific prompt builder extensions."""
 from __future__ import annotations
 
 from enum import Enum
-from typing import Dict, List, Optional
+from typing import List
 
-
-SUPPORTED_LANGUAGES: tuple[str, ...] = ("cn", "en")
-"""All languages the prompt system supports.
-
-Add new language codes here to extend multilingual coverage.
-Every ToolMetadataProvider, PromptSection, and i18n dict
-must provide content for each language in this tuple.
-"""
-
-DEFAULT_LANGUAGE: str = "cn"
-"""Fallback language when no explicit choice is made."""
+from openjiuwen.core.single_agent.prompts.builder import (
+    DEFAULT_LANGUAGE,
+    SUPPORTED_LANGUAGES,
+    PromptSection,
+    SystemPromptBuilder as BaseSystemPromptBuilder,
+)
 
 
 class PromptMode(str, Enum):
-    """Prompt assembly mode."""
+    """Prompt assembly mode for DeepAgent."""
     FULL = "full"
     MINIMAL = "minimal"
     NONE = "none"
 
 
-class PromptSection:
-    """A single prompt section with multilingual content."""
-
-    def __init__(
-        self,
-        name: str,
-        content: Dict[str, str],
-        priority: int = 100,
-    ):
-        self.name = name
-        self.content: Dict[str, str] = dict(content)
-        self.priority = priority
-
-    def render(self, language: str = "cn") -> str:
-        return self.content.get(
-            language,
-            self.content.get(DEFAULT_LANGUAGE, ""),
-        )
-
-    def char_count(self, language: str = "cn") -> int:
-        return len(self.render(language))
-
-
-class SystemPromptBuilder:
-    """Section-based system prompt builder.
-
-    Designed to be a persistent instance on DeepAgent.
-    Static sections are registered once at init,
-    dynamic sections are updated before each build().
-    """
+class SystemPromptBuilder(BaseSystemPromptBuilder):
+    """DeepAgent prompt builder with mode filtering and diagnostics."""
 
     _MINIMAL_SECTIONS = frozenset({
         "identity",
         "safety",
         "skills",
         "tools",
+        "task_tool",
         "runtime",
     })
 
     def __init__(
         self,
-        language: str = "cn",
+        language: str = DEFAULT_LANGUAGE,
         mode: PromptMode = PromptMode.FULL,
     ):
-        self.language = language
+        super().__init__(language=language)
         self.mode = mode
-        self._sections: Dict[str, PromptSection] = {}
-
-    def add_section(self, section: PromptSection) -> "SystemPromptBuilder":
-        """Add or replace a section (same name overwrites)."""
-        self._sections[section.name] = section
-        return self
-
-    def remove_section(self, name: str) -> "SystemPromptBuilder":
-        """Remove a section by name."""
-        self._sections.pop(name, None)
-        return self
-
-    def get_all_sections(self) -> Dict[str, "PromptSection"]:
-        """Return a copy of all registered sections."""
-        return dict(self._sections)
-
-    def has_section(self, name: str) -> bool:
-        return name in self._sections
-
-    def get_section(self, name: str) -> Optional[PromptSection]:
-        return self._sections.get(name)
 
     def build(self) -> str:
-        """Full rebuild: sort all sections by priority and join.
-
-        Safe to call multiple times. Each call produces a complete
-        prompt from the current state of all registered sections.
-        """
+        """Build prompt according to the current DeepAgent prompt mode."""
         if self.mode == PromptMode.NONE:
-            identity = self._sections.get("identity")
+            identity = self.get_section("identity")
             return identity.render(self.language) if identity else ""
+        return super().build()
 
-        sections = self._get_mode_sections()
-        sorted_sections = sorted(sections, key=lambda s: s.priority)
-        parts = [s.render(self.language) for s in sorted_sections]
-        return "\n\n".join(part for part in parts if part.strip())
-
-    def build_report(self) -> "PromptReport":
+    def build_report(self) -> "PromptReport":  # type: ignore[name-defined]
         """Return a diagnostic report for the current builder state."""
         from openjiuwen.deepagents.prompts.report import PromptReport
         return PromptReport.from_builder(self)
 
-    def _get_mode_sections(self) -> List[PromptSection]:
-        """Filter sections based on current mode."""
+    def _get_sections_for_build(self) -> List[PromptSection]:
+        """Filter sections based on the configured DeepAgent prompt mode."""
         if self.mode == PromptMode.FULL:
-            return list(self._sections.values())
+            return super()._get_sections_for_build()
         return [
-            s for s in self._sections.values()
-            if s.name in self._MINIMAL_SECTIONS
+            section for section in super()._get_sections_for_build()
+            if section.name in self._MINIMAL_SECTIONS
         ]
+
+
+__all__ = [
+    "DEFAULT_LANGUAGE",
+    "PromptMode",
+    "PromptSection",
+    "SUPPORTED_LANGUAGES",
+    "SystemPromptBuilder",
+]

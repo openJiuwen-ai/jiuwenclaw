@@ -18,7 +18,6 @@ from openjiuwen.deepagents.prompts.sections.tools.task_tool import (
 from openjiuwen.deepagents.rails.base import DeepAgentRail
 from openjiuwen.deepagents.schema.config import SubAgentConfig
 from openjiuwen.deepagents.tools.task_tool import create_task_tool
-from openjiuwen.core.foundation.llm.schema.message import SystemMessage
 
 if TYPE_CHECKING:
     from openjiuwen.deepagents.deep_agent import DeepAgent
@@ -42,7 +41,7 @@ class SubagentRail(DeepAgentRail):
         super().__init__()
         self.tools = None
         self.language = language
-        self._builder = None
+        self.system_prompt_builder = None
 
     def init(self, agent) -> None:
         """Register task tool on the agent.
@@ -50,7 +49,7 @@ class SubagentRail(DeepAgentRail):
         Args:
             agent: DeepAgent instance to register tools on.
         """
-        self._builder = getattr(agent, "_prompt_builder", None)
+        self.system_prompt_builder = getattr(agent, "system_prompt_builder", None)
 
         # Skip registration if no subagents are configured
         if not agent.deep_config.subagents:
@@ -93,34 +92,15 @@ class SubagentRail(DeepAgentRail):
             logger.info("[SubagentRail] Unregistered task tool")
 
     async def before_model_call(self, ctx: AgentCallbackContext) -> None:
-        """Inject task tool system prompt before model call.
-
-        Args:
-            ctx: Agent callback context containing inputs and messages.
-        """
-        # Skip prompt injection if no tools registered
-        if not self.tools:
+        """Update system_prompt_builder with task-tool section before model call."""
+        if not self.tools or self.system_prompt_builder is None:
             return
 
-        # Use builder mode if available
-        if self._builder is not None:
-            task_section = build_task_section(language=self.language)
-            if task_section is not None:
-                self._builder.add_section(task_section)
-            else:
-                self._builder.remove_section("task_tool")
-            prompt = self._builder.build()
-            self._replace_system_message(ctx, prompt)
+        task_section = build_task_section(language=self.language)
+        if task_section is not None:
+            self.system_prompt_builder.add_section(task_section)
         else:
-            # Fallback: direct injection, use _task_tool_prompt_injected to avoid repetition
-            if ctx.extra.get("_task_tool_prompt_injected"):
-                return
-            logger.info("[SubagentRail] Using fallback prompt injection without builder")
-            from openjiuwen.deepagents.prompts.sections.task_tool import build_task_system_prompt
-
-            task_prompt = build_task_system_prompt(language=self.language)
-            self._inject_prompt(ctx, task_prompt)
-            ctx.extra["_task_tool_prompt_injected"] = True
+            self.system_prompt_builder.remove_section("task_tool")
 
     def _build_available_agents_description(self, subagents: List[SubAgentConfig | "DeepAgent"]) -> str:
         """Build description of available subagents for tool registration.
@@ -157,59 +137,6 @@ class SubagentRail(DeepAgentRail):
         name = getattr(card, "name", None) or "general-purpose"
         description = getattr(card, "description", None) or "DeepAgent instance"
         return name, description
-
-    def _replace_system_message(self, ctx: AgentCallbackContext, prompt: str) -> None:
-        """Replace (not append) the system message.
-
-        Args:
-            ctx: Agent callback context.
-            prompt: Complete system prompt to set.
-        """
-        inputs = getattr(ctx, "inputs", None)
-        messages = getattr(inputs, "messages", None)
-        if not isinstance(messages, list):
-            return
-
-        for msg in messages:
-            if isinstance(msg, dict) and msg.get("role") == "system":
-                msg["content"] = prompt
-                return
-            if isinstance(msg, SystemMessage):
-                msg.content = prompt
-                return
-
-        messages.insert(0, SystemMessage(content=prompt))
-
-    def _inject_prompt(self, ctx: AgentCallbackContext, prompt: str) -> None:
-        """Inject prompt into the current system message.
-
-        Args:
-            ctx: Agent callback context.
-            prompt: Prompt text to inject.
-        """
-        inputs = getattr(ctx, "inputs", None)
-        messages = getattr(inputs, "messages", None)
-        if not isinstance(messages, list):
-            return
-
-        # Try to append to existing system message
-        for msg in messages:
-            if isinstance(msg, dict) and msg.get("role") == "system":
-                original = msg.get("content", "") or ""
-                if prompt in original:
-                    return
-                msg["content"] = (original.rstrip() + "\n\n" + prompt).strip()
-                return
-            if isinstance(msg, SystemMessage):
-                original = msg.content or ""
-                if prompt in original:
-                    return
-                msg.content = (original.rstrip() + "\n\n" + prompt).strip()
-                return
-
-        # No system message found, insert new one
-        messages.insert(0, SystemMessage(content=prompt))
-
 
 __all__ = [
     "SubagentRail",

@@ -9,6 +9,7 @@ Author: huenrui1@huawei.com
 """
 from __future__ import annotations
 
+import copy
 import asyncio
 from dataclasses import dataclass, field
 from typing import Any, AsyncIterator, Dict, List, Optional, Tuple
@@ -18,6 +19,7 @@ from pydantic import Field, BaseModel
 from openjiuwen.core.common.exception.errors import BaseError
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.common.security.user_config import UserConfig
+from openjiuwen.core.foundation.prompt import PromptTemplate
 from openjiuwen.core.foundation.llm.schema.config import (
     ModelClientConfig,
     ModelRequestConfig
@@ -46,7 +48,17 @@ from openjiuwen.core.single_agent.rail.base import (
     ModelCallInputs,
     rail,
 )
+from openjiuwen.core.single_agent.prompts.builder import (
+    PromptSection,
+    SystemPromptBuilder,
+)
 from openjiuwen.core.single_agent.schema.agent_card import AgentCard
+
+
+_IDENTITY_SECTION = "identity"
+_SKILLS_SECTION = "skills"
+_IDENTITY_SECTION_PRIORITY = 10
+_SKILLS_SECTION_PRIORITY = 90
 
 
 def _summarize_tool_call(tc: Any) -> str:
@@ -400,6 +412,8 @@ class ReActAgent(BaseAgent):
             self._config.context_engine_config
         )
         self._llm = None
+        self.prompt_builder: SystemPromptBuilder = SystemPromptBuilder()
+        self.system_prompt_builder: SystemPromptBuilder = self.prompt_builder
         super().__init__(card)
         self._ability_manager.set_context_engine(self.context_engine)
 
@@ -439,6 +453,22 @@ class ReActAgent(BaseAgent):
         if old_config.sys_operation_id != config.sys_operation_id:
             self.lazy_init_skill()
 
+        # Always rebuild prompt_builder from prompt_template so it reflects the
+        # new config. DeepAgent will replace this with the shared builder after
+        # calling configure().
+        system_content = "\n\n".join(
+            msg["content"]
+            for msg in config.prompt_template
+            if msg.get("role") == "system" and msg.get("content")
+        )
+        self.prompt_builder = SystemPromptBuilder()
+        self.system_prompt_builder = self.prompt_builder
+        self.add_prompt_builder_section(
+            _IDENTITY_SECTION,
+            system_content,
+            priority=_IDENTITY_SECTION_PRIORITY,
+        )
+
         return self
 
     def set_llm(self, llm: Model) -> None:
@@ -470,38 +500,98 @@ class ReActAgent(BaseAgent):
             )
         return self._llm
 
+    def add_prompt_builder_section(
+            self,
+            name: str,
+            content: Optional[str],
+            *,
+            priority: int,
+    ) -> None:
+        """Add/update one text section, or remove it when content is empty."""
+        text = (content or "").strip()
+        if not text:
+            self.prompt_builder.remove_section(name)
+            return
+
+        self.prompt_builder.add_section(PromptSection(
+            name=name,
+            content={"cn": text, "en": text},
+            priority=priority,
+        ))
+
+    def _build_rendered_system_prompt(
+            self,
+            inputs: Any,
+            extra_render_fields: Optional[Dict[str, str]] = None,
+    ) -> str:
+        """Render system prompt_template messages and join them into one string."""
+        system_messages = [
+            SystemMessage(role=msg["role"], content=msg["content"])
+            for msg in self._config.prompt_template
+            if msg.get("role") == "system" and isinstance(msg.get("content"), str)
+        ]
+        self._render_system_messages(
+            system_messages,
+            inputs,
+            extra_render_fields=extra_render_fields,
+        )
+        return "\n\n".join(
+            msg.content for msg in system_messages
+            if isinstance(msg.content, str) and msg.content
+        )
+
+    async def _update_skill_prompt_builder_section(
+            self,
+            rendered_system_prompt: str,
+    ) -> None:
+        """Update skills section on prompt_builder in the invoke-stage flow."""
+        if not rendered_system_prompt or self._skill_util is None or not self._skill_util.has_skill():
+            self.prompt_builder.remove_section(_SKILLS_SECTION)
+            return
+
+        await self._warn_missing_skill_read_file_tool()
+        self.add_prompt_builder_section(
+            _SKILLS_SECTION,
+            self._skill_util.get_skill_prompt(),
+            priority=_SKILLS_SECTION_PRIORITY,
+        )
+
+    def _build_preview_messages(self, context: ModelContext) -> List[Any]:
+        """Build a lightweight preview of the current model input messages."""
+        preview_messages = copy.deepcopy(context.get_messages())
+        preview_system_prompt = self.prompt_builder.build()
+        if preview_system_prompt:
+            preview_messages.insert(0, SystemMessage(content=preview_system_prompt))
+        return preview_messages
+
     async def _call_model(
             self,
             ctx: AgentCallbackContext,
             context: ModelContext,
-            system_messages: List,
             tools: Optional[List[ToolInfo]],
     ) -> AssistantMessage:
-        """Prepare ctx.inputs for model call, then invoke @railed method.
+        """Fire before_model_call rails then invoke the LLM.
+
+        get_context_window is deferred to _railed_model_call so that
+        ContextProcessor sees the final system message after all
+        BEFORE_MODEL_CALL rails have updated self.prompt_builder.
 
         Args:
             ctx: Shared AgentCallbackContext for this invoke
             context: Current ModelContext
-            system_messages: System messages for context window
             tools: Tool definitions
 
         Returns:
             AssistantMessage from LLM
         """
-        context_window = await context.get_context_window(
-            system_messages=system_messages,
-            tools=tools if tools else None,
-        )
         ctx.inputs = ModelCallInputs(
-            messages=context_window.get_messages(),
-            tools=context_window.get_tools(),
+            messages=self._build_preview_messages(context),
+            tools=list(tools) if tools else None,
+            model_context=context,
         )
-
-        log_llm_request(logger, ctx.inputs.messages, ctx.inputs.tools)
 
         ai_message = await self._railed_model_call(ctx)
 
-        # @rail returns None when a before hook requested force_finish.
         if ai_message is None:
             return None
 
@@ -517,10 +607,33 @@ class ReActAgent(BaseAgent):
     async def _railed_model_call(self, ctx: AgentCallbackContext) -> AssistantMessage:
         """Execute LLM call with @rail before/after/on_exception hooks.
 
+        All BEFORE_MODEL_CALL rails have run at this point and may have
+        added/removed sections on self.prompt_builder. build() is called
+        once here so ContextProcessor receives the accurate final token
+        budget.
+
+        ctx.inputs.messages and ctx.inputs.tools are updated after
+        get_context_window so after_model_call hooks can inspect what was
+        actually sent to the LLM.
+
         Uses llm.stream() when ctx.extra["_streaming"] is True,
         falls back to llm.invoke() otherwise.
-        Rail hooks may have modified ctx.inputs.messages / ctx.inputs.tools.
         """
+        # --- Finalize system message and context window (post-rails) ---
+        final_system = [SystemMessage(content=self.prompt_builder.build())]
+        context_window = await ctx.context.get_context_window(
+            system_messages=final_system,
+            tools=ctx.inputs.tools if ctx.inputs.tools else None,
+        )
+        # Update ctx.inputs: after_model_call hooks inspect these to see
+        # what was actually sent. (LLM call uses them too, but could
+        # equally pass context_window.get_*() directly.)
+        ctx.inputs.messages = context_window.get_messages()
+        ctx.inputs.tools = context_window.get_tools()
+
+        log_llm_request(logger, ctx.inputs.messages, ctx.inputs.tools)
+        # --- End context window finalization ---
+
         llm = self._get_llm()
         session = ctx.session
 
@@ -573,6 +686,36 @@ class ReActAgent(BaseAgent):
             )
         ctx.inputs.response = ai_message
         return ai_message
+
+    @staticmethod
+    def _render_system_messages(
+            system_messages: List,
+            inputs: Any,
+            *,
+            extra_render_fields: Optional[Dict[str, str]] = None,
+    ) -> None:
+        """Render inputs fields into system message placeholders in-place."""
+        from openjiuwen.core.session import InteractiveInput
+
+        render_fields: Dict[str, str] = {}
+        if isinstance(inputs, dict):
+            render_fields.update({k: v for k, v in inputs.items() if isinstance(v, str)})
+        elif not isinstance(inputs, InteractiveInput):
+            render_fields["query"] = str(inputs)
+        if extra_render_fields:
+            render_fields.update({
+                key: value for key, value in extra_render_fields.items()
+                if isinstance(value, str)
+            })
+        if not render_fields:
+            return
+        for msg in system_messages:
+            if not isinstance(msg.content, str):
+                continue
+            try:
+                msg.content = PromptTemplate(content=msg.content).format(render_fields).content
+            except BaseError as e:
+                logger.warning("Failed to render system message placeholder: %s", e)
 
     async def _execute_tool_call(
             self,
@@ -744,8 +887,6 @@ class ReActAgent(BaseAgent):
 
         Returns interrupt result dict if still waiting, or None to continue ReAct loop.
         """
-        import copy
-
         resume_iteration = interruption_state.iteration
         logger.info(f"Resuming ReAct from iteration {resume_iteration + 1}")
 
@@ -821,31 +962,6 @@ class ReActAgent(BaseAgent):
                 interactive_input.update(comp_id, str(user_query))
             return interactive_input
         return InteractiveInput(raw_inputs=str(user_query))
-
-    @staticmethod
-    def _render_system_messages(system_messages: List, inputs: Any) -> None:
-        """Render inputs fields into system message placeholders in-place.
-
-        Aligns with MessageHandlerUtils.format_llm_inputs: InteractiveInput skips rendering.
-        Only str-valued fields from inputs dict are used as render variables.
-        """
-        from openjiuwen.core.session import InteractiveInput
-        from openjiuwen.core.foundation.prompt import PromptTemplate
-        if isinstance(inputs, InteractiveInput):
-            return
-        if isinstance(inputs, dict):
-            render_fields = {k: v for k, v in inputs.items() if isinstance(v, str)}
-        else:
-            render_fields = {"query": str(inputs)}
-        if not render_fields:
-            return
-        for msg in system_messages:
-            if not isinstance(msg.content, str):
-                continue
-            try:
-                msg.content = PromptTemplate(content=msg.content).format(render_fields).content
-            except BaseError as e:
-                logger.warning("Failed to render system message placeholder: %s", e)
 
     async def _warn_missing_skill_read_file_tool(self) -> None:
         """
@@ -964,17 +1080,16 @@ class ReActAgent(BaseAgent):
                 context = await self._init_context(session)
                 ctx.context = context
 
-                system_messages = [
-                    SystemMessage(role=msg["role"], content=msg["content"])
-                    for msg in self._config.prompt_template
-                    if msg.get("role") == "system"
-                ]
-                self._render_system_messages(system_messages, inputs)
-
-                if system_messages and self._skill_util is not None and self._skill_util.has_skill():
-                    await self._warn_missing_skill_read_file_tool()
-                    skill_prompt = self._skill_util.get_skill_prompt()
-                    system_messages[-1].content = (system_messages[-1].content or "") + "\n" + skill_prompt
+                rendered_system_prompt = self._build_rendered_system_prompt(
+                    inputs,
+                    extra_render_fields=ctx.extra.get("memory_variables"),
+                )
+                self.add_prompt_builder_section(
+                    _IDENTITY_SECTION,
+                    rendered_system_prompt,
+                    priority=_IDENTITY_SECTION_PRIORITY,
+                )
+                await self._update_skill_prompt_builder_section(rendered_system_prompt)
 
                 tools = await self.ability_manager.list_tool_info()
                 await context.add_messages(UserMessage(content=self._extract_user_text(user_input)))
@@ -993,7 +1108,11 @@ class ReActAgent(BaseAgent):
                     for iteration in range(start_iteration, self._config.max_iterations):
                         logger.info(f"ReAct iteration {iteration + 1}/{self._config.max_iterations}")
 
-                        ai_message = await self._call_model(ctx, context, system_messages, tools)
+                        ai_message = await self._call_model(
+                            ctx,
+                            context,
+                            tools,
+                        )
 
                         finish = ctx.consume_force_finish()
                         if finish:

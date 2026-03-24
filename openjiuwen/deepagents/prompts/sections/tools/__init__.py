@@ -45,6 +45,9 @@ from openjiuwen.deepagents.prompts.sections.tools.todo import (
     TodoListMetadataProvider,
     TodoModifyMetadataProvider,
 )
+from openjiuwen.deepagents.prompts.sections.tools.video_understanding import (
+    VideoUnderstandingMetadataProvider,
+)
 from openjiuwen.deepagents.prompts.sections.tools.vision import (
     ImageOCRMetadataProvider,
     VisualQuestionAnsweringMetadataProvider,
@@ -78,6 +81,7 @@ _PROVIDERS: List[ToolMetadataProvider] = [
     TodoModifyMetadataProvider(),
     ImageOCRMetadataProvider(),
     VisualQuestionAnsweringMetadataProvider(),
+    VideoUnderstandingMetadataProvider(),
     TaskMetadataProvider(),
     FreeSearchMetadataProvider(),
     PaidSearchMetadataProvider(),

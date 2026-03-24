@@ -10,7 +10,6 @@ from typing import Any, Dict, List, Optional, Set
 from pydantic import BaseModel
 
 from openjiuwen.core.common.logging import logger
-from openjiuwen.core.foundation.llm.schema.message import SystemMessage
 from openjiuwen.core.foundation.tool import ToolInfo
 from openjiuwen.core.runner.runner import Runner
 from openjiuwen.core.single_agent.rail.base import AgentCallbackContext
@@ -124,7 +123,7 @@ class ProgressiveToolRail(DeepAgentRail):
         _ = ctx
 
     async def before_model_call(self, ctx: AgentCallbackContext) -> None:
-        """Inject prompt sections and filter callable tools for the current turn."""
+        """Update builder sections and filter callable tools for the current turn."""
         session = getattr(ctx, "session", None)
 
         # --------------------------------------------------
@@ -143,9 +142,6 @@ class ProgressiveToolRail(DeepAgentRail):
 
         builder.add_section(navigation_section)
         builder.add_section(rules_section)
-
-        rebuilt_prompt = builder.build()
-        self._replace_system_prompt(ctx, rebuilt_prompt)
 
         inputs = getattr(ctx, "inputs", None)
         tools = getattr(inputs, "tools", None)
@@ -630,26 +626,6 @@ class ProgressiveToolRail(DeepAgentRail):
                 "to be an instance of SystemPromptBuilder."
             )
         return builder
-
-    @staticmethod
-    def _replace_system_prompt(ctx: AgentCallbackContext, new_system_prompt: str) -> None:
-        """Replace the current system message content with rebuilt prompt."""
-        inputs = getattr(ctx, "inputs", None)
-        messages = getattr(inputs, "messages", None)
-        if not isinstance(messages, list):
-            return
-
-        for msg in messages:
-            if isinstance(msg, dict) and msg.get("role") == "system":
-                msg["content"] = new_system_prompt
-                return
-
-            if isinstance(msg, SystemMessage):
-                msg.content = new_system_prompt
-                return
-
-        messages.insert(0, SystemMessage(content=new_system_prompt))
-
 
 __all__ = [
     "ProgressiveToolRail",
