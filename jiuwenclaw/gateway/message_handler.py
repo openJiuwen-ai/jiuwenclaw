@@ -185,7 +185,8 @@ class MessageHandler(ABC):
             False: 非控制指令，继续正常处理。
         """
         ch = msg.channel_id
-        if ch not in self._control_channels:
+        is_feishu_family = ch == "feishu" or ch.startswith("feishu_")
+        if (ch not in self._control_channels) and (not is_feishu_family):
             return False
 
         params = msg.params or {}
@@ -241,10 +242,19 @@ class MessageHandler(ABC):
         ch = msg.channel_id
         state = self._channel_states.get(ch)
         if not state:
-            return
+            # 动态通道（如 feishu_1 / feishu_sales）首次出现时创建默认控制状态。
+            if ch.startswith("feishu_"):
+                state = ChannelControlState(
+                    session_id=self._generate_channel_session_id(ch),
+                    mode=ChannelMode.PLAN,
+                )
+                self._channel_states[ch] = state
+            else:
+                return
 
         # 仅受控通道优先使用三元组映射；其它通道保持原有行为。
-        if ch in self._control_channels:
+        is_controlled = ch in self._control_channels or ch.startswith("feishu_")
+        if is_controlled:
             identity_key = self._extract_identity_tuple(msg)
             if identity_key:
                 sid = self._get_session_map(ch).get_or_create(*identity_key)

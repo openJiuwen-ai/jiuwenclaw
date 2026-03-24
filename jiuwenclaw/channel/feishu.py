@@ -74,7 +74,13 @@ class FeishuChannel(BaseChannel):
 
     name = "feishu"
 
-    def __init__(self, config: FeishuConfig, router: RobotMessageRouter):
+    def __init__(
+        self,
+        config: FeishuConfig,
+        router: RobotMessageRouter,
+        *,
+        channel_id: str | None = None,
+    ):
         """
         初始化飞书通道实例。
 
@@ -84,6 +90,7 @@ class FeishuChannel(BaseChannel):
         """
         super().__init__(config, router)
         self.config: FeishuConfig = config
+        self._channel_id = (channel_id or self.name).strip() or self.name
         self._api_client: Any = None  # 飞书API客户端（用于发送消息）
         self._websocket_client: Any = None  # WebSocket客户端（用于接收消息）
         self._websocket_thread: threading.Thread | None = None  # WebSocket运行线程
@@ -98,7 +105,7 @@ class FeishuChannel(BaseChannel):
     @property
     def channel_id(self) -> str:
         """返回通道唯一标识符，用于ChannelManager注册与消息派发。"""
-        return self.name
+        return self._channel_id
 
     def on_message(self, callback: Callable[[Message], None]) -> None:
         """
@@ -127,7 +134,7 @@ class FeishuChannel(BaseChannel):
             content: 消息内容
             metadata: 额外的元数据
         """
-        msg = Message(id=chat_id, type="req", channel_id=self.name, session_id=str(chat_id),
+        msg = Message(id=chat_id, type="req", channel_id=self.channel_id, session_id=str(chat_id),
             provider="feishu",
             chat_id=str(chat_id),
             user_id=str((metadata or {}).get("feishu_open_id") or (metadata or {}).get("open_id") or ""),
@@ -231,6 +238,7 @@ class FeishuChannel(BaseChannel):
                 event_handler=event_handler,
                 log_level=lark.LogLevel.INFO,
             )
+            self._bind_ws_client_loop(ws_client, loop)
             self._patch_ws_client_shutdown(ws_client)
             self._websocket_client = ws_client
             ws_client.start()
@@ -241,6 +249,78 @@ class FeishuChannel(BaseChannel):
                 logger.error("飞书WebSocket连接建立失败: {}", e)
         finally:
             self._cleanup_websocket_thread(_saved_loop, ws_client, loop)
+
+    @staticmethod
+    def _bind_ws_client_loop(ws_client: Any, loop: asyncio.AbstractEventLoop) -> None:
+        """为单个 ws_client 绑定独立 loop，避免 lark_oapi 全局 loop 在多实例间互相覆盖。"""
+        import lark_oapi.ws.client as _ws_client_mod
+
+        if getattr(ws_client, "_jc_loop_bound", False):
+            return
+
+        ws_client._jc_loop = loop
+
+        async def _connect_bound(self):
+            await self._lock.acquire()
+            if self._conn is not None:
+                return
+            try:
+                conn_url = self._get_conn_url()
+                u = _ws_client_mod.urlparse(conn_url)
+                q = _ws_client_mod.parse_qs(u.query)
+                conn_id = q[_ws_client_mod.DEVICE_ID][0]
+                service_id = q[_ws_client_mod.SERVICE_ID][0]
+
+                conn = await _ws_client_mod.websockets.connect(conn_url)
+                self._conn = conn
+                self._conn_url = conn_url
+                self._conn_id = conn_id
+                self._service_id = service_id
+
+                _ws_client_mod.logger.info(self._fmt_log("connected to {}", conn_url))
+                self._jc_loop.create_task(self._receive_message_loop())
+            except _ws_client_mod.websockets.InvalidStatusCode as e:
+                _ws_client_mod._parse_ws_conn_exception(e)
+            finally:
+                self._lock.release()
+
+        async def _receive_loop_bound(self):
+            try:
+                while True:
+                    if self._conn is None:
+                        raise _ws_client_mod.ConnectionClosedException("connection is closed")
+                    msg = await self._conn.recv()
+                    self._jc_loop.create_task(self._handle_message(msg))
+            except Exception as e:
+                _ws_client_mod.logger.error(self._fmt_log("receive message loop exit, err: {}", e))
+                await self._disconnect()
+                if self._auto_reconnect:
+                    await self._reconnect()
+                else:
+                    raise e
+
+        def _start_bound(self):
+            lp = self._jc_loop
+            try:
+                lp.run_until_complete(self._connect())
+            except _ws_client_mod.ClientException as e:
+                _ws_client_mod.logger.error(self._fmt_log("connect failed, err: {}", e))
+                raise e
+            except Exception as e:
+                _ws_client_mod.logger.error(self._fmt_log("connect failed, err: {}", e))
+                lp.run_until_complete(self._disconnect())
+                if self._auto_reconnect:
+                    lp.run_until_complete(self._reconnect())
+                else:
+                    raise e
+
+            lp.create_task(self._ping_loop())
+            lp.run_until_complete(_ws_client_mod._select())
+
+        ws_client._connect = types.MethodType(_connect_bound, ws_client)
+        ws_client._receive_message_loop = types.MethodType(_receive_loop_bound, ws_client)
+        ws_client.start = types.MethodType(_start_bound, ws_client)
+        ws_client._jc_loop_bound = True
 
     def _cleanup_websocket_thread(
         self,
@@ -986,15 +1066,16 @@ class FeishuChannel(BaseChannel):
 
             # 将最近一次可回发的飞书身份写入 config.yaml，供 cron 推送时使用
             try:
-                from jiuwenclaw.config import update_channel_in_config
+                from jiuwenclaw.config import update_feishu_bot_in_config
 
-                update_channel_in_config(
-                    "feishu",
-                    {
+                update_feishu_bot_in_config(
+                    channel_id=self.channel_id,
+                    conf={
                         "last_chat_id": getattr(message, "chat_id", None) or "",
                         "last_open_id": open_id or "",
                         "last_message_id": getattr(message, "message_id", None) or "",
                     },
+                    app_id=str(getattr(self.config, "app_id", "") or ""),
                 )
             except Exception:
                 # 不影响正常收消息

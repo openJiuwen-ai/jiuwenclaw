@@ -129,6 +129,77 @@ def update_channel_in_config(channel_id: str, conf: dict[str, Any]) -> None:
     _dump_yaml_round_trip(_CONFIG_YAML_PATH, data)
 
 
+def _find_feishu_bot_entry(feishu_section: Any, channel_id: str, app_id: str = "") -> Any | None:
+    """在 channels.feishu.bots 中查找匹配 bot 条目。"""
+    if not isinstance(feishu_section, dict):
+        return None
+    bots = feishu_section.get("bots")
+    cid = str(channel_id or "").strip()
+    app = str(app_id or "").strip()
+    if isinstance(bots, list):
+        for item in bots:
+            if not isinstance(item, dict):
+                continue
+            if cid and str(item.get("channel_id") or "").strip() == cid:
+                return item
+        for item in bots:
+            if not isinstance(item, dict):
+                continue
+            if app and str(item.get("app_id") or "").strip() == app:
+                return item
+        return bots[0] if bots else None
+    if isinstance(bots, dict):
+        for key, item in bots.items():
+            if not isinstance(item, dict):
+                continue
+            key_cid = f"feishu_{str(key).strip()}" if str(key).strip() else "feishu"
+            item_cid = str(item.get("channel_id") or key_cid).strip() or key_cid
+            if cid and item_cid == cid:
+                return item
+        for item in bots.values():
+            if not isinstance(item, dict):
+                continue
+            if app and str(item.get("app_id") or "").strip() == app:
+                return item
+        values = [v for v in bots.values() if isinstance(v, dict)]
+        return values[0] if values else None
+    return None
+
+
+def update_feishu_bot_in_config(channel_id: str, conf: dict[str, Any], app_id: str = "") -> None:
+    """更新 channels.feishu.bots 中指定 bot 的配置（多 bot），兼容单 bot 回退。"""
+    data = _load_yaml_round_trip(_CONFIG_YAML_PATH)
+    if "channels" not in data:
+        data["channels"] = {}
+    channels = data["channels"]
+    if "feishu" not in channels:
+        channels["feishu"] = {}
+    feishu = channels["feishu"]
+
+    target = _find_feishu_bot_entry(feishu, channel_id=channel_id, app_id=app_id)
+    if isinstance(target, dict):
+        for k, v in conf.items():
+            target[k] = v
+    else:
+        # 兼容旧结构：直接写 channels.feishu.*
+        for k, v in conf.items():
+            feishu[k] = v
+    _dump_yaml_round_trip(_CONFIG_YAML_PATH, data)
+
+
+def get_feishu_bot_runtime_identity(channel_id: str, app_id: str = "") -> dict[str, str]:
+    """读取指定飞书 bot 的最近回发身份，返回 {'last_chat_id','last_open_id'}。"""
+    data = _load_yaml_round_trip(_CONFIG_YAML_PATH) or {}
+    channels = data.get("channels") or {}
+    feishu = channels.get("feishu") or {}
+    target = _find_feishu_bot_entry(feishu, channel_id=channel_id, app_id=app_id)
+    source = target if isinstance(target, dict) else feishu
+    return {
+        "last_chat_id": str(source.get("last_chat_id") or "").strip(),
+        "last_open_id": str(source.get("last_open_id") or "").strip(),
+    }
+
+
 def update_preferred_language_in_config(lang: str) -> None:
     """只更新顶层 preferred_language 并写回。"""
     data = _load_yaml_round_trip(_CONFIG_YAML_PATH)

@@ -97,14 +97,29 @@ heartbeat:
 
 channels:
   feishu:
-    # 飞书应用配置
-    app_id:
-    app_secret:
-    encrypt_key:
-    verification_token:
-    allow_from:
-    enable_streaming: false
-    enabled: false
+    # 飞书应用配置（支持多 bot）
+    # 说明：
+    # 1) 每个 bot 一条配置，按 channel_id 区分（例如 feishu_1 / feishu_sales）。
+    # 2) 消息会按 channel_id 路由：从哪个 bot 进来，就由哪个 bot 回复。
+    # 3) 启用某个 bot：填写 app_id/app_secret，并将 enabled 设为 true。
+    # 4) 可继续添加更多 bot 条目。
+    bots:
+      - channel_id: feishu_1
+        app_id:
+        app_secret:
+        encrypt_key:
+        verification_token:
+        allow_from: []
+        enable_streaming: false
+        enabled: false
+      - channel_id: feishu_2
+        app_id:
+        app_secret:
+        encrypt_key:
+        verification_token:
+        allow_from: []
+        enable_streaming: false
+        enabled: false
   xiaoyi:
     # 华为小艺 A2A 配置
     mode: xiaoyi_channel

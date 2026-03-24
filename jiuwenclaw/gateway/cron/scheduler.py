@@ -397,13 +397,14 @@ class CronSchedulerService:
         # 这样即使 cron 推送没有 session_id，也能让 Channel.send 正常路由到对应会话。
         metadata: dict | None = None
         try:
-            from jiuwenclaw.config import get_config_raw
+            from jiuwenclaw.config import get_config_raw, get_feishu_bot_runtime_identity
 
             cfg = get_config_raw() or {}
             ch_cfg = (cfg.get("channels") or {}).get(channel_id) or {}
-            if channel_id == "feishu":
-                last_chat_id = str(ch_cfg.get("last_chat_id") or "").strip()
-                last_open_id = str(ch_cfg.get("last_open_id") or "").strip()
+            if channel_id == "feishu" or channel_id.startswith("feishu_"):
+                feishu_identity = get_feishu_bot_runtime_identity(channel_id=channel_id)
+                last_chat_id = str(feishu_identity.get("last_chat_id") or "").strip()
+                last_open_id = str(feishu_identity.get("last_open_id") or "").strip()
                 if last_chat_id or last_open_id:
                     metadata = {
                         "feishu_chat_id": last_chat_id,

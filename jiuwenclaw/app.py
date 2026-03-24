@@ -691,6 +691,36 @@ def _register_web_handlers(
             return
         try:
             conf = cm.get_conf("feishu")
+            # 兼容多 bot：允许通过 params.channel_id 获取指定 bot 配置
+            channel_id = ""
+            if isinstance(params, dict):
+                channel_id = str(params.get("channel_id") or "").strip()
+            if channel_id and isinstance(conf, dict):
+                bots = conf.get("bots")
+                if isinstance(bots, list):
+                    selected = next(
+                        (
+                            item
+                            for item in bots
+                            if isinstance(item, dict)
+                            and str(item.get("channel_id") or "").strip() == channel_id
+                        ),
+                        None,
+                    )
+                    if isinstance(selected, dict):
+                        conf = dict(selected)
+                elif isinstance(bots, dict):
+                    selected = None
+                    for key, item in bots.items():
+                        if not isinstance(item, dict):
+                            continue
+                        default_cid = f"feishu_{str(key).strip()}" if str(key).strip() else "feishu"
+                        item_cid = str(item.get("channel_id") or default_cid).strip() or default_cid
+                        if item_cid == channel_id:
+                            selected = item
+                            break
+                    if isinstance(selected, dict):
+                        conf = dict(selected)
             await channel.send_response(ws, req_id, ok=True, payload={"config": conf})
         except Exception as e:  # noqa: BLE001
             logger.exception("[channel.feishu.get_conf] %s", e)
@@ -718,7 +748,41 @@ def _register_web_handlers(
             )
             return
         try:
-            await cm.set_conf("feishu", params)
+            current = cm.get_conf("feishu")
+            next_conf: dict[str, Any]
+            channel_id = str(params.get("channel_id") or "").strip()
+
+            # 多 bot 模式：携带 channel_id 时，只更新对应 bot 条目
+            if (
+                channel_id
+                and isinstance(current, dict)
+                and isinstance(current.get("bots"), list)
+            ):
+                bots_raw = current.get("bots") or []
+                bots: list[dict[str, Any]] = [dict(x) for x in bots_raw if isinstance(x, dict)]
+                updated = False
+                for idx, item in enumerate(bots):
+                    item_cid = str(item.get("channel_id") or "").strip()
+                    if item_cid == channel_id:
+                        new_item = dict(item)
+                        for k, v in params.items():
+                            if k != "channel_id":
+                                new_item[k] = v
+                        new_item["channel_id"] = channel_id
+                        bots[idx] = new_item
+                        updated = True
+                        break
+                if not updated:
+                    new_item = {k: v for k, v in params.items() if k != "channel_id"}
+                    new_item["channel_id"] = channel_id
+                    bots.append(new_item)
+                next_conf = dict(current)
+                next_conf["bots"] = bots
+            else:
+                # 兼容旧逻辑：整体替换 channels.feishu
+                next_conf = params
+
+            await cm.set_conf("feishu", next_conf)
             conf = cm.get_conf("feishu")
             try:
                 update_channel_in_config("feishu", conf)
@@ -1413,8 +1477,8 @@ async def _run() -> None:
     channel_manager._channels[web_channel.channel_id] = web_channel
 
     # ---------- 按配置管理各 Channel（配置来源：config/config.yaml -> channels.*） ----------
-    feishu_channel = None
-    feishu_task = None
+    feishu_channels: dict[str, Any] = {}
+    feishu_tasks: dict[str, asyncio.Task] = {}
     xiaoyi_channel = None
     xiaoyi_task = None
     dingtalk_channel = None
@@ -1479,9 +1543,37 @@ async def _run() -> None:
             return all_fields_present, f"缺少 {','.join(required_fields)}" if not all_fields_present else ""
         return bool(enabled_raw), "enabled = false" if not enabled_raw else ""
 
+    def _iter_feishu_channel_entries(feishu_conf: dict | None) -> list[tuple[str, dict]]:
+        """展开飞书配置，支持单实例和多实例写法。"""
+        if not isinstance(feishu_conf, dict):
+            return []
+
+        # 多实例：channels.feishu.bots 可为 list/dict
+        bots = feishu_conf.get("bots")
+        if isinstance(bots, list):
+            entries: list[tuple[str, dict]] = []
+            for idx, item in enumerate(bots):
+                if not isinstance(item, dict):
+                    continue
+                cid = str(item.get("channel_id") or "").strip() or f"feishu_{idx + 1}"
+                entries.append((cid, item))
+            return entries
+        if isinstance(bots, dict):
+            entries = []
+            for key, item in bots.items():
+                if not isinstance(item, dict):
+                    continue
+                default_cid = f"feishu_{str(key).strip()}" if str(key).strip() else "feishu"
+                cid = str(item.get("channel_id") or default_cid).strip() or default_cid
+                entries.append((cid, item))
+            return entries
+
+        # 单实例（兼容老配置）
+        return [("feishu", feishu_conf)]
+
     async def _apply_channel_config(conf: dict) -> None:
         """根据最新 Channel 配置重新实例化各 Channel。"""
-        nonlocal feishu_channel, feishu_task, xiaoyi_channel, xiaoyi_task
+        nonlocal feishu_channels, feishu_tasks, xiaoyi_channel, xiaoyi_task
         nonlocal dingtalk_channel, dingtalk_task, telegram_channel, telegram_task
         nonlocal discord_channel, discord_task
         nonlocal whatsapp_channel, whatsapp_task
@@ -1495,31 +1587,37 @@ async def _run() -> None:
         _last_channels_conf = dict(conf or {})
 
         if "feishu" in changed_channels:
-            feishu_conf = conf.get("feishu") if isinstance(conf, dict) else None
-            await _stop_channel(feishu_channel, feishu_task, "feishu")
-            feishu_channel, feishu_task = None, None
+            for existing in list(feishu_channels.values()):
+                task = feishu_tasks.get(existing.channel_id)
+                await _stop_channel(existing, task, "feishu")
+            feishu_channels = {}
+            feishu_tasks = {}
 
-            if isinstance(feishu_conf, dict):
-                enabled, reason = _is_channel_enabled(feishu_conf, ["app_id", "app_secret"])
-                if not enabled:
-                    logger.info("[App] channels.feishu.%s，FeishuChannel 未启用", reason)
-                else:
-                    feishu_config = FeishuConfig(
-                        enabled=True,
-                        app_id=str(feishu_conf.get("app_id") or "").strip(),
-                        app_secret=str(feishu_conf.get("app_secret") or "").strip(),
-                        encrypt_key=str(feishu_conf.get("encrypt_key") or "").strip(),
-                        verification_token=str(feishu_conf.get("verification_token") or "").strip(),
-                        allow_from=feishu_conf.get("allow_from") or [],
-                        enable_streaming=bool(feishu_conf.get("enable_streaming", True)),
-                        chat_id=str(feishu_conf.get("chat_id") or "").strip(),
-                    )
-                    feishu_channel = FeishuChannel(feishu_config, _DummyBus())
-                    channel_manager.register_channel(feishu_channel)
-                    feishu_task = asyncio.create_task(feishu_channel.start(), name="feishu")
-                    logger.info("[App] 已按 config.yaml.channels.feishu 注册 FeishuChannel")
-            else:
+            feishu_conf = conf.get("feishu") if isinstance(conf, dict) else None
+            entries = _iter_feishu_channel_entries(feishu_conf)
+            if not entries:
                 logger.info("[App] channels.feishu 未配置或格式错误，FeishuChannel 不启用")
+            for channel_id, entry_conf in entries:
+                enabled, reason = _is_channel_enabled(entry_conf, ["app_id", "app_secret"])
+                if not enabled:
+                    logger.info("[App] channels.feishu(%s).%s，FeishuChannel 未启用", channel_id, reason)
+                    continue
+                feishu_config = FeishuConfig(
+                    enabled=True,
+                    app_id=str(entry_conf.get("app_id") or "").strip(),
+                    app_secret=str(entry_conf.get("app_secret") or "").strip(),
+                    encrypt_key=str(entry_conf.get("encrypt_key") or "").strip(),
+                    verification_token=str(entry_conf.get("verification_token") or "").strip(),
+                    allow_from=entry_conf.get("allow_from") or [],
+                    enable_streaming=bool(entry_conf.get("enable_streaming", True)),
+                    chat_id=str(entry_conf.get("chat_id") or "").strip(),
+                )
+                feishu_channel = FeishuChannel(feishu_config, _DummyBus(), channel_id=channel_id)
+                channel_manager.register_channel(feishu_channel)
+                feishu_task = asyncio.create_task(feishu_channel.start(), name=channel_id)
+                feishu_channels[channel_id] = feishu_channel
+                feishu_tasks[channel_id] = feishu_task
+                logger.info("[App] 已注册 FeishuChannel: %s", channel_id)
 
         if "xiaoyi" in changed_channels:
             xiaoyi_conf = conf.get("xiaoyi") if isinstance(conf, dict) else None
@@ -1745,12 +1843,14 @@ async def _run() -> None:
         except asyncio.CancelledError:
             pass
         await web_channel.stop()
-        if feishu_channel is not None and feishu_task is not None:
-            feishu_task.cancel()
-            try:
-                await feishu_task
-            except asyncio.CancelledError:
-                pass
+        for feishu_channel in list(feishu_channels.values()):
+            feishu_task = feishu_tasks.get(feishu_channel.channel_id)
+            if feishu_task is not None:
+                feishu_task.cancel()
+                try:
+                    await feishu_task
+                except asyncio.CancelledError:
+                    pass
             await feishu_channel.stop()
         if xiaoyi_channel is not None and xiaoyi_task is not None:
             xiaoyi_task.cancel()
