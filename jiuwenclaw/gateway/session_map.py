@@ -8,41 +8,14 @@ from pathlib import Path
 from jiuwenclaw.utils import get_checkpoint_dir, logger
 
 
-def _normalize_chat_type(chat_type: str | None) -> str:
-    return str(chat_type or "").strip().lower()
-
-
-def _make_key(
-    provider: str,
-    chat_id: str,
-    bot_id: str,
-    user_id: str,
-    chat_type: str | None = None,
-) -> str:
-    normalized = _normalize_chat_type(chat_type)
-    if normalized == "p2p":
-        return f"{provider}::p2p::{bot_id}::{user_id}"
-    elif normalized == "group":
-        return f"{provider}::{chat_id}::{bot_id}::{user_id}"
+def _make_key(provider: str, chat_id: str, bot_id: str, user_id: str) -> str:
+    return f"{provider}::{chat_id}::{bot_id}::{user_id}"
 
 
 def _make_base_session_id(channel_id: str) -> str:
     ts = format(int(time.time() * 1000), "x")
     suffix = secrets.token_hex(3)
     return f"{channel_id}_{ts}_{suffix}"
-
-
-def _build_session_id(
-    base: str,
-    provider: str,
-    chat_id: str,
-    bot_id: str,
-    user_id: str,
-    chat_type: str | None = None,
-) -> str:
-    if _normalize_chat_type(chat_type) == "p2p":
-        return f"{base}_{provider}_{bot_id}_{user_id}"
-    return f"{base}_{provider}_{chat_id}_{bot_id}_{user_id}"
 
 
 class SessionMap:
@@ -73,36 +46,22 @@ class SessionMap:
         except Exception as exc:  # noqa: BLE001
             logger.warning("SessionMap save failed for %s: %s", self._channel_id, exc)
 
-    def get_or_create(
-        self,
-        provider: str,
-        chat_id: str,
-        bot_id: str,
-        user_id: str,
-        chat_type: str | None = None,
-    ) -> str:
-        key = _make_key(provider, chat_id, bot_id, user_id, chat_type=chat_type)
+    def get_or_create(self, provider: str, chat_id: str, bot_id: str, user_id: str) -> str:
+        key = _make_key(provider, chat_id, bot_id, user_id)
         sid = self._mapping.get(key)
         if sid:
             return sid
         # Keep original session format prefix while appending tuple markers for observability.
         base = _make_base_session_id(self._channel_id)
-        sid = _build_session_id(base, provider, chat_id, bot_id, user_id, chat_type=chat_type)
+        sid = f"{base}_{provider}_{chat_id}_{bot_id}_{user_id}"
         self._mapping[key] = sid
         self._save()
         return sid
 
-    def rotate(
-        self,
-        provider: str,
-        chat_id: str,
-        bot_id: str,
-        user_id: str,
-        chat_type: str | None = None,
-    ) -> str:
-        key = _make_key(provider, chat_id, bot_id, user_id, chat_type=chat_type)
+    def rotate(self, provider: str, chat_id: str, bot_id: str, user_id: str) -> str:
+        key = _make_key(provider, chat_id, bot_id, user_id)
         base = _make_base_session_id(self._channel_id)
-        sid = _build_session_id(base, provider, chat_id, bot_id, user_id, chat_type=chat_type)
+        sid = f"{base}_{provider}_{chat_id}_{bot_id}_{user_id}"
         self._mapping[key] = sid
         self._save()
         return sid

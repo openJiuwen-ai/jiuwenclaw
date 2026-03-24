@@ -153,17 +153,6 @@ class MessageHandler(ABC):
             return (provider, chat_id, bot_id, user_id)
         return None
 
-    @staticmethod
-    def _extract_chat_type(msg: "Message") -> str | None:
-        metadata = getattr(msg, "metadata", None)
-        if not isinstance(metadata, dict):
-            return None
-        chat_type = metadata.get("chat_type")
-        if chat_type is None:
-            return None
-        text = str(chat_type).strip()
-        return text or None
-
     def _get_session_map(self, channel_id: str) -> SessionMap:
         sm = self._session_maps.get(channel_id)
         if sm is None:
@@ -211,10 +200,7 @@ class MessageHandler(ABC):
             state = self._channel_states.get(ch) or ChannelControlState()
             identity_key = self._extract_identity_tuple(msg)
             if identity_key:
-                new_sid = self._get_session_map(ch).rotate(
-                    *identity_key,
-                    chat_type=self._extract_chat_type(msg),
-                )
+                new_sid = self._get_session_map(ch).rotate(*identity_key)
             else:
                 new_sid = self._generate_channel_session_id(ch)
             state.session_id = new_sid
@@ -271,10 +257,7 @@ class MessageHandler(ABC):
         if is_controlled:
             identity_key = self._extract_identity_tuple(msg)
             if identity_key:
-                sid = self._get_session_map(ch).get_or_create(
-                    *identity_key,
-                    chat_type=self._extract_chat_type(msg),
-                )
+                sid = self._get_session_map(ch).get_or_create(*identity_key)
                 msg.session_id = sid
                 if state.session_id != sid:
                     # Keep channel default aligned for observability and compatibility.
