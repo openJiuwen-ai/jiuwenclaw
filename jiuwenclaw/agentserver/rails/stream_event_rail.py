@@ -16,7 +16,6 @@ import tiktoken
 from openjiuwen.core.context_engine.schema.messages import OffloadMixin
 from openjiuwen.core.foundation.llm import (
     AssistantMessage,
-    SystemMessage,
     ToolMessage,
 )
 from openjiuwen.core.session.agent import Session
@@ -27,12 +26,13 @@ from openjiuwen.core.single_agent.rail.base import (
     ToolCallInputs,
 )
 from openjiuwen.deepagents.rails.base import DeepAgentRail
+from openjiuwen.deepagents.tools.todo import TodoStatus, TodoListTool
 
-from jiuwenclaw.agentserver.tools.todo_toolkits import TodoToolkit
 from jiuwenclaw.utils import logger
+from openjiuwen.deepagents.prompts import resolve_language
 
 _TODO_TOOL_NAMES = frozenset(
-    ["todo_create", "todo_complete", "todo_insert", "todo_remove", "todo_list"]
+    ["todo_create", "todo_list", "todo_modify"]
 )
 
 
@@ -177,32 +177,43 @@ class JiuClawStreamEventRail(DeepAgentRail):
         except Exception:
             logger.debug("tool_result emit failed", exc_info=True)
 
-    @staticmethod
-    async def _emit_todo_updated(session: Session, session_id: str) -> None:
+    async def _emit_todo_updated(self, session: Session, session_id: str) -> None:
+        """Emit todo list update event using TodoListTool.
+
+        Args:
+            session: Session object for writing stream
+            session_id: Session ID used to locate the todo JSON file
+        """
         try:
-            from datetime import datetime, timezone
+            # 按需创建 TodoListTool
+            todo_tool = TodoListTool(
+                operation=self.sys_operation,
+                workspace=str(getattr(self.workspace, "workspace_root", "")),
+                language=resolve_language(),
+            )
+            todo_tool.set_file(session_id)
 
-            todo_toolkit = TodoToolkit(session_id=session_id)
-            tasks = todo_toolkit._load_tasks()
+            todos_data = await todo_tool.load_todos()
 
+            # Map status: cancelled is mapped to pending for frontend compatibility
             status_mapping = {
-                "waiting": "pending",
-                "running": "in_progress",
-                "completed": "completed",
-                "cancelled": "pending",
+                TodoStatus.PENDING: "pending",
+                TodoStatus.IN_PROGRESS: "in_progress",
+                TodoStatus.COMPLETED: "completed",
+                TodoStatus.CANCELLED: "pending",
             }
 
-            now = datetime.now(timezone.utc).isoformat()
-
             todos = []
-            for t in tasks:
+            for todo_item in todos_data:
                 todos.append({
-                    "id": str(t.idx),
-                    "content": t.tasks,
-                    "activeForm": t.tasks,
-                    "status": status_mapping.get(t.status.value, "pending"),
-                    "createdAt": now,
-                    "updatedAt": now,
+                    "id": todo_item.id,
+                    "content": todo_item.content,
+                    "activeForm": todo_item.activeForm,
+                    "status": status_mapping.get(
+                        todo_item.status, todo_item.status.value
+                    ),
+                    "createdAt": todo_item.createdAt,
+                    "updatedAt": todo_item.updatedAt,
                 })
 
             await session.write_stream(
