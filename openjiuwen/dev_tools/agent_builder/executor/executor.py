@@ -18,7 +18,7 @@ from openjiuwen.dev_tools.agent_builder.utils.progress import ProgressReporter, 
 logger = LogManager.get_logger("agent_builder")
 
 
-def _create_core_model(model_info: Optional[Dict[str, Any]]) -> Model:
+def create_core_model(model_info: Optional[Dict[str, Any]]) -> Model:
     """Map model_info(dict) to core `Model` (no additional service layer wrapper)."""
     info = model_info or {}
     provider = info.get("model_provider") or info.get("client_provider")
@@ -103,9 +103,9 @@ class AgentBuilderExecutor:
         self.session_id: str = session_id
         self.agent_type: str = agent_type
 
-        self.llm: Model = _create_core_model(model_info)
+        self.llm: Model = create_core_model(model_info)
 
-        self.history_manager: HistoryManager = self._get_history_manager(
+        self.history_manager: HistoryManager = self.get_history_manager(
             session_id,
             history_manager_map,
         )
@@ -126,7 +126,7 @@ class AgentBuilderExecutor:
         )
 
     @staticmethod
-    def _get_history_manager(
+    def get_history_manager(
         session_id: str,
         history_manager_map: Dict[str, HistoryManager],
     ) -> HistoryManager:
@@ -173,7 +173,7 @@ class AgentBuilderExecutor:
             )
 
             if self.progress_reporter:
-                setattr(builder, "_progress_reporter", self.progress_reporter)
+                builder.progress_reporter = self.progress_reporter
 
             agent_builder_map[session_id] = builder
             logger.debug(

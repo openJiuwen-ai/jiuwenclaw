@@ -2,7 +2,7 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 
 """
-RL training extension for openjiuwen (v2).
+RL training extension for openjiuwen.
 
 This package provides:
 - Data structures & config schemas for RL training
@@ -12,42 +12,9 @@ This package provides:
 - ParallelRuntimeExecutor for concurrent rollout generation
 - A high-level `RLOptimizer` user entrypoint
 
-Service-oriented logic (Flask proxy, FastAPI server) has been removed.
-The system directly uses Verl's RayPPOTrainer with Ray actors.
 """
 
 from openjiuwen.core.common.logging import logger
-
-# ---------------------------------------------------------------------------
-# Compatibility patch: core's BaseAgent.add_workflows(None) calls len(None)
-# and crashes.  We monkey-patch add_workflows on the class so it tolerates
-# None / empty lists, regardless of import order or which caller triggers it.
-# ---------------------------------------------------------------------------
-
-
-def _patch_add_workflows():
-    """Make BaseAgent.add_workflows tolerant of workflows=None."""
-    try:
-        from openjiuwen.core.single_agent.legacy.agent import BaseAgent
-
-        _original = BaseAgent.add_workflows
-
-        # Avoid double-patching
-        if getattr(_original, "agent_rl_patched", False):
-            return
-
-        def _safe_add_workflows(self, workflows):
-            if not workflows:
-                return None
-            return _original(self, workflows)
-
-        _safe_add_workflows.agent_rl_patched = True
-        BaseAgent.add_workflows = _safe_add_workflows
-    except Exception as e:
-        logger.info("agentrl: skip add_workflows patch (core not available): %s", e)
-
-
-_patch_add_workflows()
 
 # ---------------------------------------------------------------------------
 # Compatibility patch: LazyLogger.__getattr__ uses ``self._logger`` which
@@ -88,77 +55,6 @@ def _patch_lazy_logger():
 
 
 _patch_lazy_logger()
-
-# ---------------------------------------------------------------------------
-# Compatibility patch: MessageHandlerUtils.add_tool_result only checks for a
-# single OutputSchema instance, but _post_task_completion passes a *list* of
-# OutputSchema.  When tool_result is a list, str(list) produces ugly repr
-# like ``[OutputSchema(type='plugin_final', ...)]`` instead of the clean
-# tool output text.  We monkey-patch add_tool_result to properly extract the
-# output text from lists of OutputSchema.
-# ---------------------------------------------------------------------------
-
-
-def _patch_add_tool_result():
-    """Make add_tool_result handle list[OutputSchema] properly."""
-    try:
-        from openjiuwen.core.controller.legacy.utils import MessageHandlerUtils
-        from openjiuwen.core.session.stream.base import OutputSchema
-        from openjiuwen.core.workflow.base import WorkflowOutput
-
-        _original = MessageHandlerUtils.add_tool_result
-
-        if getattr(_original, "agent_rl_patched", False):
-            return
-
-        @staticmethod
-        async def _safe_add_tool_result(event, context_engine, session):
-            if not event:
-                return
-            from openjiuwen.core.foundation.llm.schema.message import ToolMessage
-            from openjiuwen.core.common.security.json_utils import JsonUtils
-
-            agent_context = context_engine.get_context(
-                session_id=session.session_id()
-            )
-            tool_result = event.content.task_result.output
-
-            # --- patched: handle list of OutputSchema ---
-            if isinstance(tool_result, list):
-                parts = []
-                for item in tool_result:
-                    if isinstance(item, OutputSchema):
-                        payload = item.payload
-                        if isinstance(payload, dict):
-                            parts.append(str(payload.get("output", "")))
-                        else:
-                            parts.append(str(payload))
-                    else:
-                        parts.append(str(item))
-                tool_result = "\n".join(parts) if parts else ""
-            elif isinstance(tool_result, OutputSchema):
-                payload = tool_result.payload
-                if isinstance(payload, dict):
-                    tool_result = payload.get("output", "")
-            elif isinstance(tool_result, WorkflowOutput):
-                tool_result = tool_result.result
-            # --- end patch ---
-
-            content = JsonUtils.safe_json_dumps(
-                tool_result, str(tool_result), ensure_ascii=False
-            )
-            tool_message = ToolMessage(
-                content=content, tool_call_id=event.context.task_id
-            )
-            await agent_context.add_messages(tool_message)
-
-        _safe_add_tool_result.agent_rl_patched = True
-        MessageHandlerUtils.add_tool_result = _safe_add_tool_result
-    except Exception as e:
-        logger.info("agentrl: skip add_tool_result patch (core not available): %s", e)
-
-
-_patch_add_tool_result()
 
 # ---------------------------------------------------------------------------
 # Lazy import for RLOptimizer to avoid pulling in heavy dependencies (ray,

@@ -114,6 +114,12 @@ class DeepAgentConfig:
     prompt_mode: Optional[str] = None
     vision_model_config: Optional[VisionModelConfig] = None
 
+    # Progressive tool exposure config
+    progressive_tool_enabled: bool = False
+    progressive_tool_always_visible_tools: List[str] = field(default_factory=list)
+    progressive_tool_default_visible_tools: List[str] = field(default_factory=list)
+    progressive_tool_max_loaded_tools: int = 12
+
 
 @dataclass
 class SubAgentConfig:

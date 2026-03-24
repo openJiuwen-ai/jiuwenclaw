@@ -78,6 +78,10 @@ class HistoryManager:
     def __init__(self, max_history_size: int = DEFAULT_MAX_HISTORY_SIZE) -> None:
         self._dialogue_history: HistoryCache = HistoryCache(max_history_size)
 
+    @property
+    def dialogue_history(self) -> HistoryCache:
+        return self._dialogue_history
+
     def get_latest_k_messages(self, k: int) -> List[Dict[str, Any]]:
         return self._dialogue_history.get_messages(k)
 

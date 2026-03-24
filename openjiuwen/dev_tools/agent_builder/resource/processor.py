@@ -3,6 +3,33 @@
 from typing import List, Dict, Any, Tuple
 
 
+TYPE_MAP = {
+    1: "string",
+    2: "integer",
+    3: "number",
+    4: "boolean",
+    5: "array",
+    6: "object",
+}
+
+
+def convert_type(param_type: Any) -> str:
+    """
+    Convert parameter type to string format
+    
+    Args:
+        param_type: Parameter type (could be int or str)
+        
+    Returns:
+        String type name
+    """
+    if isinstance(param_type, int):
+        return TYPE_MAP.get(param_type, "string")
+    if isinstance(param_type, str):
+        return param_type
+    return "string"
+
+
 class PluginProcessor:
     """Plugin Processor
 
@@ -38,7 +65,8 @@ class PluginProcessor:
             return [
                 {
                     "name": p.get("name", ""),
-                    "description": p.get("description", "")
+                    "description": p.get("description") or p.get("desc", ""),
+                    "type": convert_type(p.get("type", 1))
                 }
                 for p in (params or [])
             ]
@@ -65,6 +93,10 @@ class PluginProcessor:
                     "tool_id": tool_id,
                     "tool_name": tool.get("tool_name", ""),
                     "tool_desc": tool.get("desc", ""),
+                    "code": tool.get("code", ""),
+                    "language": tool.get("language", ""),
+                    "input_parameters": input_params,
+                    "output_parameters": output_params,
                     "ori_inputs": input_params,
                     "ori_outputs": output_params,
                     "inputs_for_dl_gen": format_params(input_params),
@@ -76,6 +108,7 @@ class PluginProcessor:
                 "plugin_id": plugin_id,
                 "plugin_name": plugin.get("plugin_name", ""),
                 "plugin_desc": plugin.get("plugin_desc", ""),
+                "plugin_version": plugin.get("plugin_version", "draft"),
                 "tools": formatted_tools,
             }
 
@@ -92,13 +125,28 @@ class PluginProcessor:
         Returns:
             Formatted plugin list (simplified version for LLM prompt)
         """
+        def convert_params(params: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+            """Convert parameters with type mapping"""
+            return [
+                {
+                    "name": p.get("name", ""),
+                    "desc": p.get("desc", p.get("description", "")),
+                    "type": convert_type(p.get("type", 1))
+                }
+                for p in (params or [])
+            ]
+
         result: List[Dict[str, Any]] = []
         for plugin in plugin_dict.values():
             tools_brief = [
                 {
                     "tool_id": t["tool_id"],
                     "tool_name": t["tool_name"],
-                    "tool_desc": t["tool_desc"]
+                    "tool_desc": t["tool_desc"],
+                    "code": t.get("code", ""),
+                    "language": t.get("language", ""),
+                    "input_parameters": convert_params(t.get("input_parameters", [])),
+                    "output_parameters": convert_params(t.get("output_parameters", []))
                 }
                 for t in plugin.get("tools", {}).values()
             ]

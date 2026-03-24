@@ -89,6 +89,18 @@ class BaseAgentBuilder(ABC):
         """
         return self._resource
 
+    @resource.setter
+    def resource(self, value: Dict[str, Any]) -> None:
+        self._resource = value
+
+    @property
+    def progress_reporter(self) -> Optional[ProgressReporter]:
+        return self._progress_reporter
+
+    @progress_reporter.setter
+    def progress_reporter(self, value: Optional[ProgressReporter]) -> None:
+        self._progress_reporter = value
+
     def execute(self, query: str) -> Union[str, Dict[str, Any]]:
         """
         Execute build flow (template method).
@@ -353,3 +365,7 @@ class BaseAgentBuilder(ABC):
             True if workflow builder, False if LLM Agent builder
         """
         pass
+
+    def is_workflow_builder(self) -> bool:
+        """Return True if this builder targets workflow agents."""
+        return self._is_workflow_builder()

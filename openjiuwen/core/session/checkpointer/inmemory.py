@@ -23,7 +23,7 @@ from openjiuwen.core.session.session import BaseSession
 class InMemoryCheckpointer(Checkpointer):
     def __init__(self):
         self._agent_stores = {}
-        self._agent_group_stores = {}
+        self._agent_team_stores = {}
         self._workflow_stores = {}
         from openjiuwen.core.graph import InMemoryStore
         self._graph_store = InMemoryStore()
@@ -187,26 +187,26 @@ class InMemoryCheckpointer(Checkpointer):
         if inputs is not None:
             session.state().set_state({INTERACTIVE_INPUT: [inputs]})
 
-    async def pre_agent_group_execute(self, session: BaseSession, inputs):
-        group_id = session.group_id() if hasattr(session, "group_id") else "Na"
+    async def pre_agent_team_execute(self, session: BaseSession, inputs):
+        team_id = session.team_id() if hasattr(session, "team_id") else "Na"
         session_id = session.session_id()
-        is_new_group_store = session_id not in self._agent_group_stores
-        group_store = self._agent_group_stores.setdefault(session_id, AgentGroupStorage())
+        is_new_team_store = session_id not in self._agent_team_stores
+        team_store = self._agent_team_stores.setdefault(session_id, AgentTeamStorage())
         log_message = dict(
             session_id=session_id,
-            workflow_id=group_id,
+            workflow_id=team_id,
             metadata={"storage_type": "inmemory"}
         )
-        if is_new_group_store:
-            session_logger.info("Create a new agent group checkpointer store before group execute",
+        if is_new_team_store:
+            session_logger.info("Create a new agent team checkpointer store before team execute",
                                 event_type=LogEventType.CHECKPOINTER_STORE_ADD, **log_message)
         session_logger.info(
-            "Begin to restore agent group session before execute",
+            "Begin to restore agent team session before execute",
             event_type=LogEventType.CHECKPOINT_RESTORE, **log_message
         )
-        await group_store.recover(session)
+        await team_store.recover(session)
         session_logger.info(
-            "Succeed to restore agent group session before execute",
+            "Succeed to restore agent team session before execute",
             event_type=LogEventType.CHECKPOINT_RESTORE, **log_message
         )
         if inputs is not None:
@@ -271,31 +271,31 @@ class InMemoryCheckpointer(Checkpointer):
             )
             raise
 
-    async def post_agent_group_execute(self, session: BaseSession):
-        group_id = session.group_id()
+    async def post_agent_team_execute(self, session: BaseSession):
+        team_id = session.team_id()
         session_id = session.session_id()
-        group_store = self._agent_group_stores.get(session_id)
-        if group_store is None:
+        team_store = self._agent_team_stores.get(session_id)
+        if team_store is None:
             raise build_error(StatusCode.CHECKPOINTER_POST_AGENT_EXECUTION_ERROR,
-                              agent=group_id, reason="agent group store not found")
+                              agent=team_id, reason="agent team store not found")
         log_message = dict(
             session_id=session_id,
-            workflow_id=group_id,
+            workflow_id=team_id,
             metadata={"storage_type": "inmemory"}
         )
         session_logger.info(
-            "Begin to save agent group checkpoint on group execute completion",
+            "Begin to save agent team checkpoint on team execute completion",
             event_type=LogEventType.CHECKPOINT_SAVE, **log_message
         )
         try:
-            await group_store.save(session)
+            await team_store.save(session)
             session_logger.info(
-                "Succeed to save agent group checkpoint on group execute completion",
+                "Succeed to save agent team checkpoint on team execute completion",
                 event_type=LogEventType.CHECKPOINT_SAVE, **log_message
             )
         except Exception as e:
             session_logger.error(
-                "Failed to save agent group checkpoint on group execute completion",
+                "Failed to save agent team checkpoint on team execute completion",
                 exception=e,
                 event_type=LogEventType.CHECKPOINT_SAVE, **log_message
             )
@@ -304,7 +304,7 @@ class InMemoryCheckpointer(Checkpointer):
     async def session_exists(self, session_id: str) -> bool:
         return (
             session_id in self._agent_stores
-            or session_id in self._agent_group_stores
+            or session_id in self._agent_team_stores
             or session_id in self._workflow_stores
         )
 
@@ -373,10 +373,10 @@ class InMemoryCheckpointer(Checkpointer):
                     metadata={"storage_type": "inmemory"}
                 )
 
-            removed = self._agent_group_stores.pop(session_id, None)
+            removed = self._agent_team_stores.pop(session_id, None)
             if removed:
                 session_logger.info(
-                    f"Remove agent group checkpoint store on manually release",
+                    f"Remove agent team checkpoint store on manually release",
                     event_type=LogEventType.CHECKPOINTER_STORE_REMOVE,
                     session_id=session_id,
                     metadata={"storage_type": "inmemory"}
@@ -502,9 +502,9 @@ class WorkflowStorage(Storage):
         return False
 
 
-class AgentGroupStorage(BaseSingleStateStorage):
+class AgentTeamStorage(BaseSingleStateStorage):
     def _get_entity_id(self, session: BaseSession) -> str:
-        return session.group_id()
+        return session.team_id()
 
     def _get_state_to_save(self, session: BaseSession):
         return session.state().get_global(None)

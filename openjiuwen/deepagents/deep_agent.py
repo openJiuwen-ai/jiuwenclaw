@@ -52,6 +52,7 @@ from openjiuwen.deepagents.task_loop.loop_queues import (
 from openjiuwen.deepagents.task_loop.task_loop_controller import (
     TaskLoopController,
 )
+from openjiuwen.deepagents.rails.progressive_tool_rail import ProgressiveToolRail
 
 if TYPE_CHECKING:
     from openjiuwen.core.controller.modules.event_queue import (
@@ -107,6 +108,13 @@ class DeepAgent(BaseAgent):
         """Apply configuration and rebuild the internal ReActAgent."""
         self._deep_config = config
         self._react_agent = self._create_react_agent()
+        self._pending_rails.clear()
+
+        if config.progressive_tool_enabled:
+            self._pending_rails.append(
+                ProgressiveToolRail(config=config)
+            )
+
         self._initialized = False
         return self
 

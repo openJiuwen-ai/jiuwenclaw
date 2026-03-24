@@ -5,7 +5,8 @@ from typing import Awaitable, Callable, Generic, TypeAlias, TypeVar
 
 from pydantic import BaseModel
 
-from openjiuwen.core.multi_agent import BaseGroup, GroupCard
+from openjiuwen.core.multi_agent import BaseTeam, TeamCard
+from openjiuwen.core.session.internal.agent_team import AgentTeamSession
 from openjiuwen.core.single_agent.schema.agent_card import AgentCard
 from openjiuwen.core.single_agent.legacy import LegacyBaseAgent as BaseAgent
 from openjiuwen.core.workflow import Workflow
@@ -24,12 +25,12 @@ Used for lazy loading of Agent resources to avoid immediate creation upon regist
 Enables deferred initialization until the agent is actually needed.
 """
 
-AgentGroupProvider = Callable[['GroupCard'], Awaitable['BaseGroup']] | Callable[['GroupCard'], 'BaseGroup']
+AgentTeamProvider = Callable[['TeamCard'], Awaitable['BaseTeam']] | Callable[['TeamCard'], 'BaseTeam']
 """
-Agent group provider type definition.
+Agent team provider type definition.
 
-A callable that takes a GroupCard and returns an asynchronous BaseGroup instance.
-Used for lazy loading of agent group resources, suitable for complex agent groups 
+A callable that takes a TeamCard and returns an asynchronous BaseTeam instance.
+Used for lazy loading of agent team resources, suitable for complex agent teams 
 that require on-demand initialization with specific configurations.
 """
 

@@ -1,3 +1,64 @@
 {
-  "plugins": []
+  "plugins": [
+    {
+      "plugin_id": "f0ab5ca0-0d9c-4a05-a7cb-1f4dceff2ec1",
+      "plugin_name": "本地代码计算插件",
+      "plugin_desc": "本地Python代码执行插件",
+      "plugin_version": "draft",
+      "tools": [
+        {
+          "tool_id": "4aebb55e-1571-4a98-b353-41793b4434e3",
+          "tool_name": "加法",
+          "desc": "加法工具",
+          "language": "python",
+          "code": "def add_test(a: int, b: int):\n  return a + b\n\ndef main(args: Args):\n  a = args.params['add1']\n  b = args.params['add2']\n  c = add_test(a, b)\n\n  return {'res': c}",
+          "input_parameters": [
+            {
+              "name": "add1",
+              "desc": "加数1",
+              "type": 2,
+              "is_required": false
+            },
+            {
+              "name": "add2",
+              "desc": "加数2",
+              "type": 2,
+              "is_required": false
+            }
+          ],
+          "output_parameters": [
+            {
+              "name": "res",
+              "desc": "结果",
+              "type": 2
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "plugin_id": "77490e6d-c61b-4bb3-8a44-6b298a7e0d32",
+      "plugin_name": "云端API插件",
+      "plugin_desc": "云端API调用插件",
+      "plugin_version": "draft",
+      "tools": [
+        {
+          "tool_id": "f6448b6e-860b-4a67-98bc-ec10de05832a",
+          "tool_name": "run demo",
+          "desc": "tool description",
+          "path": "/demo/run",
+          "method": 1,
+          "input_parameters": [
+            {
+              "name": "query",
+              "desc": "param description",
+              "type": 1,
+              "is_required": false
+            }
+          ],
+          "output_parameters": []
+        }
+      ]
+    }
+  ]
 }

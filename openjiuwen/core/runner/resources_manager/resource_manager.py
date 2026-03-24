@@ -11,10 +11,10 @@ from openjiuwen.core.common.logging import LogEventType, runner_logger as logger
 from openjiuwen.core.foundation.tool import McpServerConfig
 from openjiuwen.core.foundation.prompt import PromptTemplate
 from openjiuwen.core.foundation.tool import Tool, ToolInfo, ToolCard
-from openjiuwen.core.multi_agent import BaseGroup, GroupCard
+from openjiuwen.core.multi_agent import BaseTeam, TeamCard
 from openjiuwen.core.runner.drunner.remote_client.remote_agent import RemoteAgent
 from openjiuwen.core.runner.resources_manager.base import (
-    AgentGroupProvider,
+    AgentTeamProvider,
     Error,
     Ok,
     Tag,
@@ -39,7 +39,7 @@ from openjiuwen.core.workflow import WorkflowCard
 
 class ResourceMgr:
     """
-    Resource Manager for Model, Workflow, Prompt, Tool, Agent, AgentGroup
+    Resource Manager for Model, Workflow, Prompt, Tool, Agent, AgentTeam
     """
 
     def __init__(self, ) -> None:
@@ -47,94 +47,94 @@ class ResourceMgr:
         self._tag_mgr = TagMgr()
         self._id_to_card: dict[str, BaseCard] = {}
 
-    async def add_agent_group(self,
-                              card: GroupCard,
-                              agent_group: AgentGroupProvider,
-                              *,
-                              tag: Optional[Tag | list[Tag]] = None,
-                              ) -> Result[GroupCard, Exception]:
+    async def add_agent_team(self,
+                             card: TeamCard,
+                             agent_team: AgentTeamProvider,
+                             *,
+                             tag: Optional[Tag | list[Tag]] = None,
+                             ) -> Result[TeamCard, Exception]:
         """
-        Add a single agent group to the resource manager.
+        Add a single agent team to the resource manager.
 
         Args:
-            card: The agent group's metadata card containing configuration and identification.
-            agent_group: Callable provider that creates or returns the agent group instance.
-            tag: Optional tag(s) for categorizing and filtering the agent group.
+            card: The agent team's metadata card containing configuration and identification.
+            agent_team: Callable provider that creates or returns the agent team instance.
+            tag: Optional tag(s) for categorizing and filtering the agent team.
                  If None, no tags will be added or updated.
 
         Returns:
-            Result[GroupCard, Exception]: Result object containing the added group card or an exception.
+            Result[TeamCard, Exception]: Result object containing the added team card or an exception.
         """
-        self._inner_validate_resource_card(card, "group", GroupCard)
-        self._inner_validate_resource_id(card.id, "group")
-        self._inner_validate_provider(agent_group, "group")
+        self._inner_validate_resource_card(card, "team", TeamCard)
+        self._inner_validate_resource_id(card.id, "team")
+        self._inner_validate_provider(agent_team, "team")
         if tag is not None:
             self._inner_validate_tag(tag)
         return self._inner_add_resource(resource_id=card.id,
-                                        resource=agent_group,
+                                        resource=agent_team,
                                         resource_card=card,
                                         tag=tag,
-                                        resource_type="group")
+                                        resource_type="team")
 
-    async def remove_agent_group(self,
-                                 *,
-                                 group_id: Optional[str | list[str]] = None,
-                                 tag: Optional[Tag | list[Tag]] = None,
-                                 tag_match_strategy: TagMatchStrategy = TagMatchStrategy.ALL,
-                                 skip_if_tag_not_exists: bool = False,
-                                 ) -> Result[Optional[GroupCard], Exception] | list[
-        Result[Optional[GroupCard], Exception]]:
+    async def remove_agent_team(self,
+                                *,
+                                team_id: Optional[str | list[str]] = None,
+                                tag: Optional[Tag | list[Tag]] = None,
+                                tag_match_strategy: TagMatchStrategy = TagMatchStrategy.ALL,
+                                skip_if_tag_not_exists: bool = False,
+                                ) -> Result[Optional[TeamCard], Exception] | list[
+        Result[Optional[TeamCard], Exception]]:
         """
-        Remove agent group(s) by ID or tag.
+        Remove agent team(s) by ID or tag.
 
         Args:
-            group_id: Single ID or list of IDs of agent groups to remove.
+            team_id: Single ID or list of IDs of agent teams to remove.
                 Cannot be used together with tag parameter.
-            tag: Single tag or list of tags; removes all agent groups with matching tags.
+            tag: Single tag or list of tags; removes all agent teams with matching tags.
                 Cannot be used together with id parameter.
             tag_match_strategy: Strategy for matching tags when using tag parameter.
                 ALL - Resource must have all specified tags.
                 ANY - Resource must have at least one of the specified tags.
             skip_if_tag_not_exists: If True, silently skip non-existent resources.
         Returns:
-            Result[Optional[GroupCard], Exception] or list[Result[Optional[GroupCard], Exception]]:
-                Result object(s) containing the removed group card(s) or exception.
+            Result[Optional[TeamCard], Exception] or list[Result[Optional[TeamCard], Exception]]:
+                Result object(s) containing the removed team card(s) or exception.
         """
-        return self._inner_remove_resources(resource_id=group_id,
+        return self._inner_remove_resources(resource_id=team_id,
                                             tag=tag,
                                             tag_match_strategy=tag_match_strategy,
                                             skip_if_tag_not_exists=skip_if_tag_not_exists,
-                                            resource_type="group")
+                                            resource_type="team")
 
-    async def get_agent_group(self,
-                              group_id: str = None,
-                              *,
-                              tag: Optional[Tag | list[Tag]] = None,
-                              tag_match_strategy: TagMatchStrategy = TagMatchStrategy.ALL,
-                              session: Optional["Session"] = None
-                              ) -> Optional[BaseGroup] | list[Optional[BaseGroup]]:
+    async def get_agent_team(self,
+                             team_id: str = None,
+                             *,
+                             tag: Optional[Tag | list[Tag]] = None,
+                             tag_match_strategy: TagMatchStrategy = TagMatchStrategy.ALL,
+                             session: Optional["Session"] = None
+                             ) -> Optional[BaseTeam] | list[Optional[BaseTeam]]:
         """
-        Get an agent group instance by ID or tag.
+        Get an agent team instance by ID or tag.
 
         Args:
-            group_id: Unique identifier of the agent group. Either id or tag must be provided.
+            team_id: Unique identifier of the agent team. Either id or tag must be provided.
             tag: Optional tag for filtering when id is provided,
                  or main lookup criteria when id is not provided.
             tag_match_strategy: Strategy for matching tags when using tag parameter.
-            session: Optional session context for the agent group.
-                If provided, the agent group will be initialized with this session.
+            session: Optional session context for the agent team.
+                If provided, the agent team will be initialized with this session.
 
         Returns:
-            BaseGroup instance if found, None otherwise.
+            BaseTeam instance if found, None otherwise.
 
         Raises:
             ValueError: When neither id nor tag is provided.
         """
-        return await self._inner_get_resources_by_provider(resource_id=group_id,
+        return await self._inner_get_resources_by_provider(resource_id=team_id,
                                                            tag=tag,
                                                            tag_match_strategy=tag_match_strategy,
                                                            session=session,
-                                                           resource_type="group")
+                                                           resource_type="team")
 
     def add_agent(self,
                   card: AgentCard,
@@ -813,7 +813,7 @@ class ResourceMgr:
         Args:
             tool_id: Single ID or list of IDs of tools to get info for.
             type: Single type or list of types to filter tools by.
-                Common types: ["function", "mcp", "workflow", "agent", "group"].
+                Common types: ["function", "mcp", "workflow", "agent", "team"].
             tag: Single tag or list of tags; returns info for all tools with matching tags.
             tag_match_strategy: Strategy for matching tags when using tag parameter.
             ignore_exception: If True, ignore exceptions and return None for failing items.
@@ -1264,7 +1264,7 @@ class ResourceMgr:
 
         Args:
             resource_id: Resource identifier.
-            resource_type: Type of resource ("agent", "group", "workflow", "tool", "prompt", "model").
+            resource_type: Type of resource ("agent", "team", "workflow", "tool", "prompt", "model").
             resource: Resource instance or provider.
             resource_card: Optional card associated with the resource.
             tag: Optional tag(s) for the resource.
@@ -1281,8 +1281,8 @@ class ResourceMgr:
                 self._resource_registry.workflow().add_workflow(resource_id, resource)
             elif resource_type == "agent":
                 self._resource_registry.agent().add_agent(resource_id, resource)
-            elif resource_type == "group":
-                self._resource_registry.agent_group().add_agent_group(resource_id, resource)
+            elif resource_type == "team":
+                self._resource_registry.agent_team().add_agent_team(resource_id, resource)
             elif resource_type == "tool":
                 self._resource_registry.tool().add_tool(resource_id, resource)
             elif resource_type == "prompt":
@@ -1353,8 +1353,8 @@ class ResourceMgr:
                     self._resource_registry.workflow().remove_workflow(remove_id)
                 elif resource_type == "agent":
                     self._resource_registry.agent().remove_agent(remove_id)
-                elif resource_type == "group":
-                    self._resource_registry.agent_group().remove_agent_group(remove_id)
+                elif resource_type == "team":
+                    self._resource_registry.agent_team().remove_agent_team(remove_id)
                 elif resource_type == "model":
                     self._resource_registry.model().remove_model(remove_id)
                 elif resource_type == "tool":
@@ -1486,8 +1486,8 @@ class ResourceMgr:
                         resource = await self._resource_registry.workflow().get_workflow(get_id, session=session)
                     elif resource_type == "agent":
                         resource = await self._resource_registry.agent().get_agent(get_id)
-                    elif resource_type == "group":
-                        resource = await self._resource_registry.agent_group().get_agent_group(get_id)
+                    elif resource_type == "team":
+                        resource = await self._resource_registry.agent_team().get_agent_team(get_id)
                     elif resource_type == "model":
                         resource = await self._resource_registry.model().get_model(get_id, session=session)
                     else:
@@ -1993,8 +1993,8 @@ class ResourceMgr:
         Returns:
             Card type as string, or None if unknown.
         """
-        if type(card).__name__(card) == "GroupCard":
-            return "group"
+        if type(card).__name__(card) == "TeamCard":
+            return "team"
         elif type(card).__name__(card) == "WorkflowCard":
             return "workflow"
         elif type(card).__name__(card) == "AgentCard":

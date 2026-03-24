@@ -35,6 +35,13 @@ class HttpXConnectorPoolConfig(ConnectorPoolConfig):
         description="Proxy server URL to route HTTP requests through"
     )
 
+    need_async: bool = Field(
+        default=True,
+        description="Enable asynchronous mode for the connector pool. When set to True, "
+                    "the pool will use async HTTPX client methods, allowing for concurrent "
+                    "request handling with asyncio."
+    )
+
 
 @get_connector_pool_manager().register('httpx')
 class HttpXConnectorPool(ConnectorPool):
@@ -56,7 +63,7 @@ class HttpXConnectorPool(ConnectorPool):
         """
         super().__init__(config)
         import httpx
-        from httpcore import AsyncConnectionPool
+        from httpcore import ConnectionPool, AsyncConnectionPool
 
         # Build connection pool arguments from configuration
         pool_kwargs = {
@@ -70,8 +77,10 @@ class HttpXConnectorPool(ConnectorPool):
         }
         # Remove None values to avoid passing invalid arguments
         pool_kwargs = {k: v for k, v in pool_kwargs.items() if v is not None}
-
-        self._conn = AsyncConnectionPool(**pool_kwargs)
+        if config.need_async:
+            self._conn = AsyncConnectionPool(**pool_kwargs)
+        else:
+            self._conn = ConnectionPool(**pool_kwargs)
 
     async def _do_close(self) -> None:
         """
@@ -120,15 +129,20 @@ async def create_httpx_client(config: Union[HttpXConnectorPoolConfig, Dict[str, 
     """
     import httpx
     if not isinstance(config, HttpXConnectorPoolConfig):
+        config["need_async"] = need_async
         config = HttpXConnectorPoolConfig(**config)
+    if config.need_async != need_async:
+        config = config.model_copy(update={"need_async": need_async})
     connector_pool = await get_connector_pool_manager().get_connector_pool("httpx", config=config)
 
     if need_async:
-        return httpx.AsyncClient(transport=connector_pool.conn())
-    return httpx.Client(transport=connector_pool.conn())
+        return httpx.AsyncClient(transport=connector_pool.conn(), verify=config.create_ssl_context(),
+                                 proxy=config.proxy)
+    else:
+        return httpx.Client(transport=connector_pool.conn(), verify=config.create_ssl_context(), proxy=config.proxy)
 
 
-@get_client_registry().register_client("async_open_ai")
+@get_client_registry().register_client("async_openai")
 async def create_async_openai_client(config: Union["ModelClientConfig", Dict[str, Any]],
                                      **kwargs) -> 'AsyncOpenAI':
     """
@@ -226,7 +240,8 @@ async def create_openai_client(config: Union["ModelClientConfig", Dict[str, Any]
             ssl_verify=config.verify_ssl,
             ssl_cert=config.ssl_cert,
             **kwargs
-        )
+        ),
+        need_async=False
     )
 
     return OpenAI(

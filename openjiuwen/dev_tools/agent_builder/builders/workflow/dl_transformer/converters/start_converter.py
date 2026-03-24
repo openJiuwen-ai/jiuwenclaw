@@ -8,7 +8,10 @@ class StartConverter(BaseConverter):
 
     def _convert_specific_config(self) -> None:
         """Convert Start node specific configuration."""
-        self.node.data.outputs = self._convert_outputs_field(
+        outputs = self._convert_outputs_field(
             self.node_data["parameters"]["outputs"]
         )
+        self.node.data.outputs = outputs
+        if outputs.properties:
+            self.node.data.outputs.required = list(outputs.properties.keys())
         

@@ -149,7 +149,6 @@ class GraphKnowledgeBase(KnowledgeBase):
                         metadata={
                             **triple.metadata,
                             "triple": json.dumps([triple.subject, triple.predicate, triple.object]),
-                            "confidence": triple.confidence or 0,
                             "chunk_index": i,
                             "chunk_id": triple.metadata.get("chunk_id", ""),
                         },

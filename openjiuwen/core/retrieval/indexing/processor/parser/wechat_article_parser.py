@@ -8,10 +8,11 @@ into Document objects for indexing. Uses BeautifulSoup for HTML parsing.
 """
 
 import re
+import ssl
 import uuid
 from typing import List, Optional
 
-import aiohttp
+import httpx
 from bs4 import BeautifulSoup
 
 from openjiuwen.core.common.exception.codes import StatusCode
@@ -83,7 +84,8 @@ async def parse_wechat_article_url(
     *,
     timeout: float = DEFAULT_TIMEOUT,
     user_agent: str = DEFAULT_USER_AGENT,
-    session: Optional[aiohttp.ClientSession] = None,
+    verify: bool | str | ssl.SSLContext = True,
+    client: Optional[httpx.AsyncClient] = None,
 ) -> List[Document]:
     """
     Fetch a WeChat article URL and parse it into one or more Document objects.
@@ -91,9 +93,13 @@ async def parse_wechat_article_url(
     Args:
         url: WeChat article URL (e.g. https://mp.weixin.qq.com/s/...).
         doc_id: Optional document ID; defaults to URL or generated UUID.
-        timeout: Request timeout in seconds.
+        timeout: Request timeout in seconds (used only when ``client`` is not provided).
         user_agent: HTTP User-Agent header.
-        session: Optional shared aiohttp.ClientSession; one is created and closed if not provided.
+        verify: SSL verification for the httpx client: ``True`` (default CA bundle),
+            ``False`` to disable, a path to a CA bundle, or a custom
+            ``ssl.SSLContext`` — same semantics as :class:`httpx.AsyncClient`.
+        client: Optional shared :class:`httpx.AsyncClient`; if omitted, a client is created with
+            ``verify``, ``timeout``, and ``User-Agent`` and closed after the request.
 
     Returns:
         List of Document instances (typically one) with text and metadata (source_url, title).
@@ -108,21 +114,34 @@ async def parse_wechat_article_url(
             error_msg=f"Not a WeChat article URL: {url!r}",
         )
 
-    own_session = session is None
-    if session is None:
-        session = aiohttp.ClientSession(
-            headers={"User-Agent": user_agent},
-            timeout=aiohttp.ClientTimeout(total=timeout),
-        )
+    request_headers = {"User-Agent": user_agent}
+
+    async def _do_get(c: httpx.AsyncClient, *, headers_for_request: Optional[dict] = None) -> str:
+        response = await c.get(url, headers=headers_for_request)
+        response.raise_for_status()
+        return response.text
 
     try:
-        async with session.get(url) as response:
-            response.raise_for_status()
-            html = await response.text()
-    except aiohttp.ClientResponseError as e:
+        if client is not None:
+            html = await _do_get(client, headers_for_request=request_headers)
+        else:
+            async with httpx.AsyncClient(
+                verify=verify,
+                timeout=httpx.Timeout(timeout),
+                headers=request_headers,
+            ) as http_client:
+                html = await _do_get(http_client, headers_for_request=None)
+    except httpx.HTTPStatusError as e:
+        status = e.response.status_code if e.response is not None else "?"
         raise build_error(
             StatusCode.RETRIEVAL_INDEXING_FETCH_ERROR,
-            error_msg=f"WeChat article request failed: {e.status} for {url}",
+            error_msg=f"WeChat article request failed: {status} for {url}",
+            cause=e,
+        ) from e
+    except httpx.RequestError as e:
+        raise build_error(
+            StatusCode.RETRIEVAL_INDEXING_FETCH_ERROR,
+            error_msg=f"WeChat article fetch failed for {url}: {e}",
             cause=e,
         ) from e
     except Exception as e:
@@ -131,9 +150,6 @@ async def parse_wechat_article_url(
             error_msg=f"WeChat article fetch failed for {url}: {e}",
             cause=e,
         ) from e
-    finally:
-        if own_session:
-            await session.close()
 
     soup = _parse_html(html)
     title = _extract_title(soup)
@@ -174,23 +190,27 @@ class WeChatArticleParser(Parser):
         self,
         timeout: float = DEFAULT_TIMEOUT,
         user_agent: str = DEFAULT_USER_AGENT,
+        verify: bool | str | ssl.SSLContext = True,
         **kwargs,
     ):
         super().__init__(**kwargs)
         self.timeout = timeout
         self.user_agent = user_agent
+        self.verify = verify
 
     async def parse(self, doc: str, doc_id: str = "", **kwargs) -> List[Document]:
         """Parse a WeChat article URL into a list of Document (doc = URL string)."""
         timeout = kwargs.get("timeout", self.timeout)
         user_agent = kwargs.get("user_agent", self.user_agent)
-        session = kwargs.get("session")
+        verify = kwargs.get("verify", self.verify)
+        client = kwargs.get("client")
         return await parse_wechat_article_url(
             doc,
             doc_id=doc_id or doc,
             timeout=timeout,
             user_agent=user_agent,
-            session=session,
+            verify=verify,
+            client=client,
         )
 
     def supports(self, doc: str) -> bool:

@@ -51,7 +51,7 @@ from openjiuwen.core.session.checkpointer import (
     CheckpointerFactory,
     CheckpointerProvider,
     SESSION_NAMESPACE_AGENT,
-    SESSION_NAMESPACE_AGENT_GROUP,
+    SESSION_NAMESPACE_AGENT_TEAM,
     SESSION_NAMESPACE_WORKFLOW,
     Storage,
     WORKFLOW_NAMESPACE_GRAPH,
@@ -303,16 +303,16 @@ class AgentStorage(BaseSingleStateStorage):
         session.state().set_state(state)
 
 
-class AgentGroupStorage(BaseSingleStateStorage):
-    """Agent group global state storage using BaseKVStore."""
+class AgentTeamStorage(BaseSingleStateStorage):
+    """Agent team global state storage using BaseKVStore."""
 
-    _namespace = SESSION_NAMESPACE_AGENT_GROUP
-    _entity_label = "agent_group"
-    _state_blobs_key = "agent_group_state_blobs"
-    _state_dump_type_key = "agent_group_state_blobs_dump_type"
+    _namespace = SESSION_NAMESPACE_AGENT_TEAM
+    _entity_label = "agent_team"
+    _state_blobs_key = "agent_team_state_blobs"
+    _state_dump_type_key = "agent_team_state_blobs_dump_type"
 
     def _get_entity_id(self, session: BaseSession) -> str:
-        return session.group_id()
+        return session.team_id()
 
     def _get_state_to_save(self, session: BaseSession) -> Any:
         return session.state().get_global(None)
@@ -739,7 +739,7 @@ class PersistenceCheckpointer(Checkpointer):
         """
         self._kv_store = kv_store
         self._agent_storage = AgentStorage(kv_store)
-        self._agent_group_storage = AgentGroupStorage(kv_store)
+        self._agent_team_storage = AgentTeamStorage(kv_store)
         self._workflow_storage = WorkflowStorage(kv_store)
         self._graph_state = GraphStore(kv_store)
 
@@ -756,15 +756,15 @@ class PersistenceCheckpointer(Checkpointer):
         if inputs is not None:
             session.state().update({INTERACTIVE_INPUT: [inputs]})
 
-    async def pre_agent_group_execute(self, session: BaseSession, inputs):
+    async def pre_agent_team_execute(self, session: BaseSession, inputs):
         session_logger.info(
-            "Agent group checkpoint restore initiated",
+            "Agent team checkpoint restore initiated",
             event_type=LogEventType.CHECKPOINT_RESTORE,
             session_id=session.session_id(),
-            workflow_id=session.group_id(),
+            workflow_id=session.team_id(),
             metadata={"operation": "pre_execute", "storage_type": "persistence"}
         )
-        await self._agent_group_storage.recover(session)
+        await self._agent_team_storage.recover(session)
         if inputs is not None:
             session.state().update_global({INTERACTIVE_INPUT: [inputs]})
 
@@ -790,15 +790,15 @@ class PersistenceCheckpointer(Checkpointer):
         )
         await self._agent_storage.save(session)
 
-    async def post_agent_group_execute(self, session: BaseSession):
+    async def post_agent_team_execute(self, session: BaseSession):
         session_logger.info(
-            "Agent group checkpoint save on completion",
+            "Agent team checkpoint save on completion",
             event_type=LogEventType.CHECKPOINT_SAVE,
             session_id=session.session_id(),
-            workflow_id=session.group_id(),
-            metadata={"reason": "group_finished", "storage_type": "persistence"}
+            workflow_id=session.team_id(),
+            metadata={"reason": "team_finished", "storage_type": "persistence"}
         )
-        await self._agent_group_storage.save(session)
+        await self._agent_team_storage.save(session)
 
     async def pre_workflow_execute(self, session: BaseSession, inputs: InteractiveInput):
         """

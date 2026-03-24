@@ -1,5 +1,6 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
+import asyncio
 from typing import List, Dict, Any, Final
 
 from openjiuwen.core.common.exception.codes import StatusCode
@@ -50,7 +51,8 @@ class IntentionDetector:
         """
         self.llm: Model = llm
 
-    def _format_dialog_history(self, dialog_history: List[Dict[str, Any]]) -> str:
+    @classmethod
+    def format_dialog_history(cls, dialog_history: List[Dict[str, Any]]) -> str:
         """
         Format dialog history.
 
@@ -62,14 +64,14 @@ class IntentionDetector:
         """
         formatted_lines: List[str] = []
         for msg in dialog_history:
-            role = msg.get(self.ROLE)
-            content = msg.get(self.CONTENT)
-            role_display = self.ROLE_MAP.get(role, 'User')
+            role = msg.get(cls.ROLE)
+            content = msg.get(cls.CONTENT)
+            role_display = cls.ROLE_MAP.get(role, 'User')
             formatted_lines.append(f"{role_display}: {content}")
         return "\n".join(formatted_lines)
 
     @staticmethod
-    def _extract_intent(inputs: str) -> Dict[str, Any]:
+    def extract_intent(inputs: str) -> Dict[str, Any]:
         """
         Extract intent judgment result.
 
@@ -102,7 +104,7 @@ class IntentionDetector:
             if not messages:
                 return False
 
-            formatted_history = self._format_dialog_history(messages)
+            formatted_history = self.format_dialog_history(messages)
             system_msg = SystemMessage(content=INITIAL_INTENTION_SYSTEM_PROMPT)
             user_messages = INITIAL_INTENTION_USER_TEMPLATE.format({
                 "dialog_history": formatted_history
@@ -110,7 +112,7 @@ class IntentionDetector:
 
             model_response = asyncio.run(self.llm.invoke([system_msg] + user_messages)).content
 
-            operation_result = self._extract_intent(model_response)
+            operation_result = self.extract_intent(model_response)
             return operation_result.get("provide_process", False)
 
         except Exception as e:
@@ -143,7 +145,7 @@ class IntentionDetector:
             if not messages:
                 return False
 
-            formatted_history = self._format_dialog_history(messages)
+            formatted_history = self.format_dialog_history(messages)
             system_msg = SystemMessage(content=REFINE_INTENTION_SYSTEM_PROMPT)
             user_messages = REFINE_INTENTION_USER_TEMPLATE.format({
                 "mermaid_code": flowchart_code,
@@ -152,7 +154,7 @@ class IntentionDetector:
 
             model_response = asyncio.run(self.llm.invoke([system_msg] + user_messages)).content
 
-            operation_result = self._extract_intent(model_response)
+            operation_result = self.extract_intent(model_response)
             return operation_result.get("need_refined", False)
 
         except Exception as e:

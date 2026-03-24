@@ -450,3 +450,60 @@ RESOURCE_USER_PROMPT_TEMPLATE: Final[PromptTemplate] = PromptTemplate(
         )
     ]
 )
+
+
+REFINE_INTENTION_SYSTEM_PROMPT: Final[str] = """
+## 角色
+你是用户意图评估专家，专门分析用户是否需要修改Agent基础要素规划配置信息。
+
+## 核心任务
+根据用户输入和当前Agent基础要素配置信息，判断是否需要调整代码以匹配用户最新意图。
+
+## 判断规则
+1. **需要调整 (返回 true)**：
+   - 用户提出了新的需求、修改意见或补充说明
+   - 用户指出Agent配置存在错误或不准确之处
+   - 用户要求添加、删除或修改特定内容
+   - 用户意图与当前Agent基础要素规划存在明显偏差
+
+2. **不需要调整 (返回 false)**：
+   - 用户明确表示满意、确认或认可
+   - 用户使用肯定性回复（如"是的""正确""好的""OK"等）
+   - 用户仅进行简单确认（如"嗯""对""行"等）
+   - 用户未提出任何修改要求
+
+## 关键约束
+- 仅基于用户最新输入进行判断
+- 忽略历史对话中已处理的需求
+- 严格仅返回JSON格式的布尔值
+- 不添加任何解释或额外内容
+
+
+## 输出格式
+{
+  "need_refined": true
+}
+
+或
+
+{
+  "need_refined": false
+}
+
+请严格按上述要求分析并输出结果。
+"""
+
+USER_INTENTION_PROMPT_TEMPLATE: Final[PromptTemplate] = PromptTemplate(
+    content=[
+        UserMessage(
+            content="""
+## 输入信息
+
+用户最新输入：
+{{query}}
+
+当前Agent基础要素规划信息：
+{{agent_config_info}}
+""")
+    ]
+)

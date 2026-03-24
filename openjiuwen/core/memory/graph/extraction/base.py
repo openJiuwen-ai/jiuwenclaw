@@ -29,9 +29,19 @@ class MultilingualBaseModel(BaseModel):
         cls._recursive_replace(result, lookup=desc_lookup, from_key="description", to_key="description")
         # Adhere to OpenAI's standard for structured output format
         if strict:
-            result["additionalProperties"] = False
-            for ref_cls in result.get("$defs", {}).values():
-                ref_cls["additionalProperties"] = False
+            # Perform BFS to ensure additionalProperties = False is set for all json objects
+            to_visit = deque([result])
+            while to_visit:
+                node = to_visit.popleft()
+                if isinstance(node, dict):
+                    if node.get("type") == "object":
+                        node["additionalProperties"] = False
+                        property_field = node.get("properties")
+                        if isinstance(property_field, dict):
+                            node.setdefault("required", list(property_field.keys()))
+                    to_visit.extend(node.values())
+                elif isinstance(node, list):
+                    to_visit.extend(node)
         return result
 
     @classmethod

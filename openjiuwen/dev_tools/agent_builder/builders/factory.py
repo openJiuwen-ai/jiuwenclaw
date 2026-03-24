@@ -89,3 +89,13 @@ class AgentBuilderFactory:
         Get list of supported agent types.
         """
         return list(cls._builders.keys())
+
+    @classmethod
+    def clear_registry(cls) -> None:
+        """Clear all registered builder classes (e.g. for tests or reset)."""
+        cls._builders = {}
+
+    @classmethod
+    def get_registered_builders(cls) -> Dict[AgentType, Type[BaseAgentBuilder]]:
+        """Return a shallow copy of the agent-type to builder-class mapping."""
+        return dict(cls._builders)

@@ -26,6 +26,7 @@ class ClientRegistry:
         Returns:
             Decorator function that registers the factory.
 
+
         Raises:
             ValueError: If the client name is already registered.
 
@@ -89,7 +90,7 @@ class ClientRegistry:
 
         self._factories[full_name] = factory
 
-    def get_client(self, name: str, client_type: Optional[str] = None, **kwargs) -> Any:
+    def get_client(self, name: str, client_type: Optional[str] = "common", **kwargs) -> Any:
         """Get a client instance.
 
         Args:

@@ -129,16 +129,110 @@ class TripleExtractor(Extractor):
 
     def _build_prompt(self, passage: str, title: str = "") -> str:
         """Build prompt for triple extraction"""
-        prompt_template = """Extract entities and relationships from the following passage. 
-Return the results in JSON format with a list of triples, where each triple is represented as [subject, predicate, object].
+        prompt_template = """# Instruction
+
+Your task is to construct an RDF-style graph from the given title and passage.
+Extract named entities and relationships, then return the result as exactly one valid JSON object.
+
+Each triple should represent a meaningful relationship in the graph.
+Each triple should contain at least one, and preferably two, named entities from the title or passage.
+Clearly resolve pronouns to specific names whenever possible.
+
+Return only one valid JSON object in this format:
+{{
+  "named_entities": ["entity1", "entity2"],
+  "triples": [
+    ["subject1", "predicate1", "object1"],
+    ["subject2", "predicate2", "object2"]
+  ]
+}}
+
+Requirements:
+- Output valid JSON only. Do not use markdown, comments, or extra text.
+- Return exactly one top-level JSON object.
+- The top-level object must contain exactly two keys: "named_entities" and "triples".
+- "named_entities" must be a JSON array of strings.
+- "triples" must be a JSON array.
+- Each item in "triples" must be a JSON array of exactly three strings.
+- Do not output tuples, objects, or arrays with more than three elements inside "triples".
+- Use double quotes for all JSON strings.
+- If no triples are found, return {{"named_entities": [...], "triples": []}}.
+- Resolve pronouns to specific names when possible.
+- Prefer triples that use at least one, and preferably two, named entities from the title or passage.
+- Keep entity and predicate wording consistent with the source language.
+- Do not include duplicate triples.
+
+# Demonstration 1
+
+Title:
+Magic Johnson
+
+Passage:
+After winning a national championship with Michigan State in 1979, Johnson was selected first overall in the 1979 NBA draft by the Lakers, leading the team to five NBA championships during their "Showtime" era.
+
+Output:
+{{
+  "named_entities": [
+    "Michigan State",
+    "national championship",
+    "1979",
+    "Magic Johnson",
+    "National Basketball Association",
+    "Los Angeles Lakers",
+    "NBA Championship"
+  ],
+  "triples": [
+    ["Magic Johnson", "member of sports team", "Michigan State"],
+    ["Michigan State", "award", "national championship"],
+    ["Michigan State", "award date", "1979"],
+    ["Magic Johnson", "draft pick number", "1"],
+    ["Magic Johnson", "drafted in", "1979"],
+    ["Magic Johnson", "drafted by", "Los Angeles Lakers"],
+    ["Magic Johnson", "member of sports team", "Los Angeles Lakers"],
+    ["Magic Johnson", "league", "National Basketball Association"],
+    ["Los Angeles Lakers", "league", "National Basketball Association"],
+    ["Los Angeles Lakers", "award received", "NBA Championship"]
+  ]
+}}
+
+# Demonstration 2
+
+Title:
+Elden Ring
+
+Passage:
+Elden Ring is a 2022 action role-playing game developed by FromSoftware. It was directed by Hidetaka Miyazaki with worldbuilding provided by American fantasy writer George R. R. Martin.
+
+Output:
+{{
+  "named_entities": [
+    "Elden Ring",
+    "2022",
+    "action role-playing game",
+    "FromSoftware",
+    "Hidetaka Miyazaki",
+    "United States of America",
+    "fantasy",
+    "George R. R. Martin"
+  ],
+  "triples": [
+    ["Elden Ring", "publication", "2022"],
+    ["Elden Ring", "genre", "action role-playing game"],
+    ["Elden Ring", "publisher", "FromSoftware"],
+    ["Elden Ring", "director", "Hidetaka Miyazaki"],
+    ["Elden Ring", "screenwriter", "George R. R. Martin"],
+    ["George R. R. Martin", "country of citizenship", "United States of America"],
+    ["George R. R. Martin", "genre", "fantasy"]
+  ]
+}}
+
+# Input
+
+Title:
+{title}
 
 Passage:
 {passage}
-
-Title: {title}
-
-Please extract all meaningful triples from the passage. Return only the JSON array, no additional text.
-Format: [["subject1", "predicate1", "object1"], ["subject2", "predicate2", "object2"], ...]
 """
         return prompt_template.format(passage=passage, title=title or "Untitled")
 
@@ -154,39 +248,61 @@ Format: [["subject1", "predicate1", "object1"], ["subject2", "predicate2", "obje
         triples = []
 
         try:
-            # Try to parse JSON
-            # Remove possible markdown code block markers
             content = content.strip()
             if content.startswith("```"):
-                # Remove code block markers
                 lines = content.split("\n")
                 content = "\n".join(lines[1:-1]) if len(lines) > 2 else content
 
-            # Parse JSON
             try:
-                triple_list = repair_json(content, return_objects=True)
+                parsed = repair_json(content, return_objects=True)
             except Exception as e:
                 logger.error("Failed to parse triples from content: %s. Content: %s", e, content[:200])
                 return [], False
 
-            # Convert to Triple objects
-            # Note: If triple_list is an empty array [], this is valid (no triples found)
-            # and parse_success should be True
+            if isinstance(parsed, dict):
+                if "triples" not in parsed or not isinstance(parsed.get("triples"), list):
+                    return [], False
+                triple_list = parsed["triples"]
+            elif isinstance(parsed, list):
+                triple_list = parsed
+            else:
+                return [], False
+
+            if not triple_list:
+                return [], True
+
+            invalid_count = 0
             for triple_data in triple_list:
-                if isinstance(triple_data, list) and len(triple_data) >= 3:
-                    triple = Triple(
-                        subject=str(triple_data[0]),
-                        predicate=str(triple_data[1]),
-                        object=str(triple_data[2]),
-                        confidence=float(triple_data[3]) if len(triple_data) > 3 else None,
+                if not isinstance(triple_data, (list, tuple)):
+                    invalid_count += 1
+                    continue
+                if len(triple_data) < 3:
+                    invalid_count += 1
+                    continue
+
+                head = triple_data[:3]
+                if any(isinstance(x, (list, tuple, dict)) or x is None for x in head):
+                    invalid_count += 1
+                    continue
+
+                triples.append(
+                    Triple(
+                        subject=str(head[0]).strip(),
+                        predicate=str(head[1]).strip(),
+                        object=str(head[2]).strip(),
                         metadata={"doc_id": doc_id, "chunk_id": chunk_id},
                     )
-                    triples.append(triple)
+                )
 
-            # If we successfully parsed JSON (even if it's an empty array), return success=True
-            return triples, True
+            if invalid_count:
+                logger.warning(
+                    "Ignored %d invalid triples for chunk %s during parsing",
+                    invalid_count,
+                    chunk_id,
+                )
+
+            return triples, bool(triples)
 
         except Exception as e:
-            # Any other exception during parsing is a failure
             logger.error("Failed to parse triples: %s", e)
             return [], False

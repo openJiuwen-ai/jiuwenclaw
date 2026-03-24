@@ -21,7 +21,7 @@ class SimpleIrToMermaid:
     """
 
     @staticmethod
-    def _edge_transform(nodes: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    def edge_transform(nodes: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """Transform edge information.
 
         Args:
@@ -54,7 +54,7 @@ class SimpleIrToMermaid:
         return edges
 
     @staticmethod
-    def _trans_to_mermaid(data: Dict[str, Any]) -> str:
+    def trans_to_mermaid(data: Dict[str, Any]) -> str:
         """Transform to Mermaid format.
 
         Args:
@@ -102,8 +102,8 @@ class SimpleIrToMermaid:
         Returns:
             Mermaid code string
         """
-        edges = SimpleIrToMermaid._edge_transform(json_data)
-        return SimpleIrToMermaid._trans_to_mermaid({
+        edges = SimpleIrToMermaid.edge_transform(json_data)
+        return SimpleIrToMermaid.trans_to_mermaid({
             "nodes": json_data,
             "edges": edges
         })

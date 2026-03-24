@@ -166,9 +166,12 @@ class SkillRail(DeepAgentRail):
         )
         try:
             setattr(skill, "update_at", update_at)
-        except Exception:
-            # Compatible with Skill models that do not yet declare update_at.
-            pass
+        except (AttributeError, TypeError, ValueError) as exc:
+            logger.debug(
+                "[SkillRail] skip setting update_at for skill '%s': %s",
+                skill.name,
+                exc,
+            )
         return skill
 
     def _collect_skills_in_order(self) -> List[Skill]:
@@ -353,7 +356,7 @@ class SkillRail(DeepAgentRail):
         return build_all_mode_skill_prompt(build_skill_lines(body_lines), language=self.language)
 
     def _inject_prompt(self, ctx: AgentCallbackContext, skill_prompt: str) -> None:
-        """Inject skill prompt into the current system message."""
+        """Inject skill prompt into the current system message, without duplicate append."""
         inputs = getattr(ctx, "inputs", None)
         messages = getattr(inputs, "messages", None)
         if not isinstance(messages, list):
@@ -362,11 +365,16 @@ class SkillRail(DeepAgentRail):
         for msg in messages:
             if isinstance(msg, dict) and msg.get("role") == "system":
                 original = msg.get("content", "") or ""
+                if skill_prompt in original:
+                    return
                 msg["content"] = (original.rstrip() + "\n\n" + skill_prompt).strip()
                 return
 
             if isinstance(msg, SystemMessage):
-                msg.content = ((msg.content or "").rstrip() + "\n\n" + skill_prompt).strip()
+                original = msg.content or ""
+                if skill_prompt in original:
+                    return
+                msg.content = (original.rstrip() + "\n\n" + skill_prompt).strip()
                 return
 
         messages.insert(0, SystemMessage(content=skill_prompt))
@@ -443,16 +451,7 @@ class SkillRail(DeepAgentRail):
 
     @staticmethod
     def _parse_skill_dirs(raw: str) -> List[str]:
-        """Parse env-style multi-skill-dir string.
-
-        Supports:
-        - ';' as primary separator
-        - ',' as secondary separator
-
-        Example:
-            "D:\\skills\\a;D:\\skills\\b"
-            "D:\\skills\\a,D:\\skills\\b"
-        """
+        """Parse env-style multi-skill-dir string."""
         if not raw or not raw.strip():
             return []
         normalized = raw.replace(",", ";")
@@ -460,13 +459,7 @@ class SkillRail(DeepAgentRail):
 
     @classmethod
     def _normalize_skill_dirs(cls, skills_dir: Union[str, List[str]]) -> List[Path]:
-        """Normalize one or more skill directories.
-
-        Supports:
-        - single path string
-        - env-style multi-path string (split by ';' or ',')
-        - list of path strings
-        """
+        """Normalize one or more skill directories."""
         if isinstance(skills_dir, str):
             raw_dirs = cls._parse_skill_dirs(skills_dir)
             if not raw_dirs and skills_dir.strip():

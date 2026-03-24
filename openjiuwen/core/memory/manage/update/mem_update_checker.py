@@ -91,6 +91,7 @@ def _format_input(new_memories: Dict[str, str], old_memories: Dict[str, str]) ->
     new_info_lines = []
     for mem_id, content in new_memories.items():
         new_info_lines.append(f"{mem_id}: {content}")
+    new_info_lines = new_info_lines[::-1]
     new_info_str = "\n".join(new_info_lines)
 
     # Format old memories

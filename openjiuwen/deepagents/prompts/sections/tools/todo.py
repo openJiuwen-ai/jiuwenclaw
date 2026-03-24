@@ -62,10 +62,10 @@ TODO_LIST_DESCRIPTION: Dict[str, str] = {
 # ---------------------------------------------------------------------------
 TODO_MODIFY_DESCRIPTION_CN = """
 用于给智能体的待办事项修改的工具
-核心用途：修改待办事项，执行动作包含：更新（update）、删除（delete）、追加（append）、在其后插入（insert_after）、在其前插入（insert_before）
+核心用途：修改待办事项，执行动作包含：更新（update）、删除（delete）、取消（cancel）、追加（append）、在其后插入（insert_after）、在其前插入（insert_before）
 重要说明：
     - 本工具支持通过 'action' 与对应字段组合来修改待办事项
-    - 若需重新规划待办事项列表，请调用 todo_write 工具
+    - 若需重新规划待办事项列表，请调用 todo_create 工具
     - action 字段决定操作类型及对应的必填字段
 action 支持的操作类型：
 update：修改现有待办任务属性（任务 id 不可修改）：
@@ -83,6 +83,14 @@ update：修改现有待办任务属性（任务 id 不可修改）：
 delete：根据任务 id 删除指定待办任务：
     {
         "action": "delete",
+        "ids": [
+            "123e4567-e89b-12d3-a456-426614174000",
+            "890e4567-e89b-12d3-a456-426614174001"
+        ]
+    }
+cancel：根据任务 id 取消指定待办任务：
+    {
+        "action": "cancel",
         "ids": [
             "123e4567-e89b-12d3-a456-426614174000",
             "890e4567-e89b-12d3-a456-426614174001"
@@ -133,16 +141,18 @@ insert_before：在指定任务 id 之前插入任务（按传入顺序）：
 核心规则：
     - 同一时间只能有一个任务处于 'in_progress' 状态
     - 'update' 操作：id 字段不可修改
+    - 'delete' 操作：id对应的目标任务从待办事项中删除
+    - 'cancel' 操作： id对应的目标任务的状态将被设置成 'cancel', 该任务之后将被忽略，不会被执行
     - 'insert_after' 操作：id对应的目标任务状态必须为 'in_progress' 或 'pending'
     - 'insert_before' 操作：id对应的目标任务状态必须为 'pending'
 """
 
 TODO_MODIFY_DESCRIPTION_EN = """
 Tool for modifying the agent's todo items.
-Core purpose: Modify todo items. Supported actions: update, delete, append, insert_after, insert_before.
+Core purpose: Modify todo items. Supported actions: update, delete, cancel, append, insert_after, insert_before.
 Important notes:
     - This tool supports modifying todo items by combining 'action' with corresponding fields
-    - To re-plan the todo list, call the todo_write tool
+    - To re-plan the todo list, call the todo_create tool
     - The action field determines the operation type and required fields
 Supported action types:
 update: Modify existing todo item attributes (task id cannot be changed):
@@ -160,6 +170,14 @@ update: Modify existing todo item attributes (task id cannot be changed):
 delete: Delete specified todo items by task id:
     {
         "action": "delete",
+        "ids": [
+            "123e4567-e89b-12d3-a456-426614174000",
+            "890e4567-e89b-12d3-a456-426614174001"
+        ]
+    }
+cancel: Cancel specified todo items by task id:
+    {
+        "action": "cancel",
         "ids": [
             "123e4567-e89b-12d3-a456-426614174000",
             "890e4567-e89b-12d3-a456-426614174001"
@@ -210,6 +228,8 @@ insert_before: Insert tasks before the specified task id (in order):
 Core rules:
     - Only one task can be 'in_progress' at a time
     - 'update' action: id field cannot be modified
+    - 'delete' action: delete target tasks corresponding to the ID from the to-do list
+    - 'cancel' action: target tasks will be set to 'cancel', and tasks will be ignored and will not be executed.
     - 'insert_after' action: target task status must be 'in_progress' or 'pending'
     - 'insert_before' action: target task status must be 'pending'
 """
@@ -239,7 +259,7 @@ _TODO_ITEM_PARAMS: Dict[str, Dict[str, str]] = {
 
 TODO_MODIFY_PARAMS: Dict[str, Dict[str, str]] = {
     "action": {"cn": "要执行的操作类型", "en": "Operation type to perform"},
-    "ids": {"cn": "要删除的任务 ID 列表", "en": "List of task IDs to delete"},
+    "ids": {"cn": "要操作的任务 ID 列表", "en": "List of task IDs to operate on"},
     "ids_item": {"cn": "任务唯一标识符", "en": "Unique task identifier"},
     "todos": {"cn": "根据 action 字段处理的待办事项数组", "en": "Array of todo items to process based on the action field"},
     "todo_data": {"cn": "用于 insert_after/insert_before 操作的数组", "en": "Array for insert_after/insert_before actions"},
@@ -262,7 +282,7 @@ def _todo_item_properties(language: str = "cn") -> Dict[str, Any]:
         "status": {
             "type": "string",
             "description": _d("status"),
-            "enum": ["pending", "in_progress", "completed"],
+            "enum": ["pending", "in_progress", "completed", "cancelled"],
         },
     }
 
@@ -301,7 +321,7 @@ def get_todo_modify_input_params(language: str = "cn") -> Dict[str, Any]:
             "action": {
                 "type": "string",
                 "description": _d("action"),
-                "enum": ["update", "delete", "append", "insert_after", "insert_before"],
+                "enum": ["update", "delete", "cancel", "append", "insert_after", "insert_before"],
             },
             "ids": {
                 "type": "array",
@@ -342,7 +362,7 @@ class TodoCreateMetadataProvider(ToolMetadataProvider):
     """TodoCreate 工具的元数据 provider。"""
 
     def get_name(self) -> str:
-        return "todo_write"
+        return "todo_create"
 
     def get_description(self, language: str = "cn") -> str:
         return TODO_CREATE_DESCRIPTION.get(
@@ -357,7 +377,7 @@ class TodoListMetadataProvider(ToolMetadataProvider):
     """TodoList 工具的元数据 provider。"""
 
     def get_name(self) -> str:
-        return "todo_read"
+        return "todo_list"
 
     def get_description(self, language: str = "cn") -> str:
         return TODO_LIST_DESCRIPTION.get(

@@ -16,13 +16,16 @@ COMPONENTS_INFO: str = """\
 SCHEMA_INFO: str = "\n".join([
     """\
   开始节点：工作流的起始节点，支持多个输出
-  限制：outputs必须包含用户输入参数，即存在 {"name": "query", "description": "用户输入"} 元素
+  限制：
+  1. outputs必须包含用户输入参数，即存在 {"name": "query", "description": "用户输入"} 元素
+  2. 输出参数的type必须与后续节点（如插件、代码节点）的输入参数类型保持一致
+  3. type可选值：string、integer、number、boolean、array、object
   {
     "id": "node_start",
     "type": "Start",
     "description": "工作流开始",
     "parameters": {
-      "outputs": [{"name": "query", "description": "用户输入"}]
+      "outputs": [{"name": "query", "description": "用户输入", "type": "string"}]
     },
     "next": "node_end"
   }""",
@@ -41,8 +44,12 @@ SCHEMA_INFO: str = "\n".join([
     }
   }""",
     """\
-  大模型节点：通过配置system_prompt和user_prompt调用大模型生成回复
-  限制：system_prompt和user_prompt中引用inputs的参数需要使用双括号的形式{{}}
+    大模型节点：通过配置system_prompt和user_prompt调用大模型生成回复
+  限制：
+  1. system_prompt和user_prompt中引用inputs的参数需要使用双括号的形式{{}}
+  2. output_format可选值为text、markdown或json，默认为text
+  3. 当output_format为text或markdown时，outputs只能配置一个输出参数
+  4. 当output_format为json时，outputs可配置多个输出参数
   {
     "id": "node_llm",
     "type": "LLM",
@@ -52,7 +59,8 @@ SCHEMA_INFO: str = "\n".join([
       "outputs": [{"name": "output", "description": "大模型输出"}],
       "configs": {
         "system_prompt": "## 人设\\n你是一个xxx。\\n\\n## 任务描述\\nxxx",
-        "user_prompt": "{{query}}"
+        "user_prompt": "{{query}}",
+        "output_format": "text"
       }
     },
     "next": "node_end"
@@ -110,7 +118,20 @@ SCHEMA_INFO: str = "\n".join([
   }""",
     """\
   代码节点：配置code自定义代码逻辑，保障代码正常运行，需要在代码区域使用转义字符
-  限制：inputs参数按照`name: value`的键值对放入args.params中，代码返回结果时同样需要按照`名称: 值`的形式返回字典，且名称需要和outputs配置的参数保持一致
+  限制：
+  1. inputs参数按照`name: value`的键值对放入args.params中，代码返回结果时同样需要按照`名称: 值`的形式返回字典，且名称需要和outputs配置的参数保持一致
+  2. outputs中的每个元素必须包含type字段，type可选值为：
+     - string: 字符串类型
+     - integer: 整数类型
+     - number: 数字类型（整数或浮点数）
+     - boolean: 布尔类型
+     - array: 数组类型，需要额外添加items字段指定元素类型
+     - object: 对象类型，需要额外添加properties和required字段
+     - date-time: 日期时间类型
+  3. 当type为array时，必须添加items字段，如：{"name": "list", "description": "数字列表", "type": "array", "items": {"type": "string"}}
+  4. 当type为object时，必须添加properties和required字段，
+     如：{"name": "config", "description": "配置对象", "type": "object", "properties": {}, "required": []}
+  5. 输入参数的type必须与前置节点的输出参数类型保持一致
   {
     "id": "node_code",
     "type": "Code",
@@ -120,19 +141,22 @@ SCHEMA_INFO: str = "\n".join([
       {"name": "height", "value": "${node_questioner.height}"}, 
       {"name": "weight", "value": "${node_questioner.weight}"}
       ],
-      "outputs": [{"name": "bmi", "description": "计算的BMI结果"}],
+      "outputs": [
+        {"name": "bmi", "description": "计算的BMI结果", "type": "number"},
+        {"name": "status", "description": "状态标记", "type": "boolean"},
+        {"name": "history", "description": "历史记录列表", "type": "array", "items": {"type": "string"}}
+      ],
       "configs": {
       "code": (
-        "def main(args: dict):\\n"
+        "def main(args: Args):\\n"
         "    '''运行代码会调用此函数\\n"
-        "    :param args: 输入固定为args字典类型，kv为输入参数键值对在args.params中\\n"
+        "    :param args: 输入固定为Args对象类型，输入参数在args.params中\\n"
         "    :return: 输出参数为字典类型，kv为输出参数键值对\\n"
         "    '''\\n"
-        "    params = args.get('params')\\n"
-        "    h = params.get('height')\\n"
-        "    w = params.get('weight')\\n"
+        "    h = args.params['height']\\n"
+        "    w = args.params['weight']\\n"
         "    bmi = w / h / h\\n"
-        "    result = {'bmi': bmi}\\n"
+        "    result = {'bmi': bmi, 'status': bmi < 25, 'history': ['init']}\\n"
         "    return result"
       )}
     },
@@ -140,7 +164,11 @@ SCHEMA_INFO: str = "\n".join([
   }""",
     """\
   插件节点：通过配置tool_id选取插件
-  限制：tool_id需要从提供的工具资源列表中选取，并保持输入输出参数与对应资源的输入输出相同
+  限制：
+  1. tool_id需要从提供的工具资源列表中选取，并保持输入输出参数与对应资源的输入输出相同
+  2. 插件节点固定输出error_code、error_message、data三个参数，后续节点只能引用data参数
+  3. 插件节点的outputs配置的是工具原本的输出参数，会包含在data中返回
+  4. 输入参数的type必须与工具资源的input_parameters类型保持一致
   {
     "id": "node_plugin",
     "type": "Plugin",

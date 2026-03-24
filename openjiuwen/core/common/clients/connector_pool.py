@@ -67,10 +67,10 @@ class ConnectorPoolConfig(BaseModel):
         """Create SSL context based on configuration.
 
         Returns:
-            SSL context object or None if SSL verification is disabled.
+            SSL context object or False if SSL verification is disabled.
         """
         if not self.ssl_verify:
-            return None
+            return False
         from openjiuwen.core.common.security.ssl_utils import SslUtils
         return SslUtils.create_strict_ssl_context(self.ssl_cert)
 

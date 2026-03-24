@@ -13,7 +13,8 @@ from openjiuwen.dev_tools.agent_builder.builders.workflow.dl_transformer.models 
     Edge,
     Position,
     InputVariable,
-    OutputsField
+    OutputPropertySpec,
+    OutputsField,
 )
 
 logger = LogManager.get_logger("agent_builder")
@@ -73,11 +74,11 @@ class BaseConverter(ABC):
         2. Convert specific configuration
         3. Convert edges
         """
-        self._convert_common_config()
+        self.convert_common_config()
         self._convert_specific_config()
-        self._convert_edges()
+        self.convert_edges()
 
-    def _convert_common_config(self) -> None:
+    def convert_common_config(self) -> None:
         """Convert common configuration."""
         self.node.id = self.node_data["id"]
         self.node.meta = {
@@ -85,7 +86,7 @@ class BaseConverter(ABC):
         }
         self.node.data.title = self.node_data["description"]
 
-    def _convert_edges(self) -> None:
+    def convert_edges(self) -> None:
         """Convert edges."""
         if "next" in self.node_data and self.node_data["next"]:
             self.edges.append(Edge(
@@ -141,11 +142,14 @@ class BaseConverter(ABC):
         result = OutputsField(type="object", properties={}, required=[])
         for item in outputs:
             variable_name_list = item["name"].split("_of_")[::-1]
-            result.add_property(
-                variable_name_list,
-                item["description"],
-                self._variable_index,
-                item.get("type")
-            )
+            result.add_property(OutputPropertySpec(
+                variable_names=variable_name_list,
+                description=item["description"],
+                index=self._variable_index,
+                var_type=item.get("type"),
+                items=item.get("items"),
+                properties=item.get("properties"),
+                required=item.get("required"),
+            ))
             self._variable_index += 1
         return result

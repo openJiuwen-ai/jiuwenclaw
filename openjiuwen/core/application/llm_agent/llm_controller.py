@@ -150,6 +150,16 @@ class LLMController(BaseController):
                     f"saved_iteration: {saved_iteration}"
                 )
 
+                # Check if max iteration will be exceeded
+                initial_iteration = (saved_iteration + 1) if saved_iteration is not None else 1
+                if initial_iteration > self.config.constrain.max_iteration:
+                    logger.warning(
+                        f"Max iteration {self.config.constrain.max_iteration} will be exceeded, "
+                        f"stopping with final response"
+                    )
+                    await self._send_final_stream("Maximum iteration reached", session)
+                    return {"output": "Maximum iteration reached", "result_type": "answer"}
+
                 # Directly use saved ai_message (no need to manually construct)
                 await MessageUtils.add_ai_message(ai_message, self._context_engine, session)
 
@@ -509,6 +519,8 @@ class LLMController(BaseController):
         logger.warning(
             f"Exceeded max iteration {self.config.constrain.max_iteration}, stopping ReAct loop"
         )
+        # Send final stream data before returning
+        await self._send_final_stream("Maximum iteration reached", session)
         return {"output": "Maximum iteration reached", "result_type": "answer"}
 
     async def _execute_task(self, task: Task, session: Session) -> TaskResult:

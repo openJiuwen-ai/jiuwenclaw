@@ -52,6 +52,11 @@ class DLTransformer:
         NodeType.Branch.dl_type: BranchConverter,
     }
 
+    @classmethod
+    def get_dsl_converter_registry(cls) -> Dict[str, type]:
+        """Return a copy of the node-type to converter-class registry."""
+        return dict(cls._dsl_converter_registry)
+
     @staticmethod
     def collect_plugin(
             tool_id_list: List[str],
@@ -78,14 +83,25 @@ class DLTransformer:
             plugin = plugin_dict.get(plugin_id, {})
             tool = plugin.get("tools", {}).get(tool_id, {})
 
-            collected.append({
+            plugin_info = {
                 "plugin_id": plugin_id,
                 "plugin_name": plugin.get("plugin_name", ""),
+                "plugin_version": plugin.get("plugin_version", ""),
                 "tool_id": tool_id,
                 "tool_name": tool.get("tool_name", ""),
                 "inputs": tool.get("ori_inputs", []),
                 "outputs": tool.get("ori_outputs", []),
-            })
+            }
+            if tool.get("language"):
+                plugin_info["language"] = tool.get("language")
+            if tool.get("code"):
+                plugin_info["code"] = tool.get("code")
+            if tool.get("path"):
+                plugin_info["path"] = tool.get("path")
+            if tool.get("method"):
+                plugin_info["method"] = tool.get("method")
+            
+            collected.append(plugin_info)
 
         return collected
 

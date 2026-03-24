@@ -654,6 +654,15 @@ class Workflow(metaclass=_WorkflowMeta):
                 exception=e
             )
             raise build_error(StatusCode.WORKFLOW_EXECUTION_TIMEOUT, cause=e, timeout=timeout, card=self._card)
+        except RecursionError as e:
+            logger.error(
+                "Workflow execution recursion limit reached",
+                event_type=LogEventType.WORKFLOW_EXECUTE_ERROR,
+                workflow_id=self._card.id,
+                workflow_name=self._card.name,
+                exception=e
+            )
+            raise build_error(StatusCode.WORKFLOW_EXECUTION_ERROR, cause=e, reason=e, workflow=self._card.str()) from e
         except BaseError as e:
             raise e
         finally:

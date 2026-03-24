@@ -148,6 +148,11 @@ class HttpSession(RefCountedResource):
         """
         super().__init__()
         self._session = session
+        self._config = config
+
+    @property
+    def config(self):
+        return self._config
 
     def session(self) -> ClientSession:
         """
@@ -390,7 +395,7 @@ class HttpClient(BaseClient):
             pass
         else:
             # For one-time sessions, release immediately
-            await self._session_manager.release(session)
+            await self._session_manager.release(session.config)
 
     async def close(self):
         """Close the HTTP client and release any held sessions."""
@@ -400,7 +405,7 @@ class HttpClient(BaseClient):
         if self._reuse_session and self._session:
             async with self._lock:
                 if self._session:
-                    await self._session_manager.release(self._session)
+                    await self._session_manager.release(self._session.config)
                     self._session = None
 
         self._closed = True

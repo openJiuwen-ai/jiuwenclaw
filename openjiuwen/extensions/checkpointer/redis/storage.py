@@ -26,7 +26,7 @@ from openjiuwen.core.session.checkpointer import (
     build_key,
     build_key_with_namespace,
     SESSION_NAMESPACE_AGENT,
-    SESSION_NAMESPACE_AGENT_GROUP,
+    SESSION_NAMESPACE_AGENT_TEAM,
     SESSION_NAMESPACE_WORKFLOW,
     Storage,
     WORKFLOW_NAMESPACE_GRAPH,
@@ -240,8 +240,8 @@ class AgentStorage(BaseSingleStateStorage):
 
 
 class AgentGroupStorage(BaseSingleStateStorage):
-    _namespace = SESSION_NAMESPACE_AGENT_GROUP
-    _entity_name = "agent_group"
+    _namespace = SESSION_NAMESPACE_AGENT_TEAM
+    _entity_name = "agent_team"
     _state_blobs_key = "agent_group_state_blobs"
     _state_dump_type_key = "agent_group_state_blobs_dump_type"
 

@@ -90,7 +90,7 @@ class AgentBuilder:
         state = status_info.get("state", "unknown")
 
         response: Dict[str, Any] = {
-            "status": self._map_state_to_status(state, agent_type),
+            "status": AgentBuilder.map_state_to_status(state, agent_type),
             "session_id": session_id,
             "agent_type": agent_type
         }
@@ -229,9 +229,9 @@ class AgentBuilder:
         return None
 
     @staticmethod
-    def _map_state_to_status(state: str, agent_type: str) -> str:
+    def map_state_to_status(state: str, agent_type: str) -> str:
         """
-        Map internal state to external status
+        Map internal state to external status.
 
         Args:
             state: Internal state

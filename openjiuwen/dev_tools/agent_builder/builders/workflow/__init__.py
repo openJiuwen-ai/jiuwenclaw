@@ -6,6 +6,7 @@ from openjiuwen.dev_tools.agent_builder.builders.workflow.workflow_designer impo
 from openjiuwen.dev_tools.agent_builder.builders.workflow.dl_generator import DLGenerator
 from openjiuwen.dev_tools.agent_builder.builders.workflow.dl_reflector import Reflector
 from openjiuwen.dev_tools.agent_builder.builders.workflow.dl_transformer.dl_transformer import DLTransformer
+from openjiuwen.dev_tools.agent_builder.builders.workflow.cycle_checker import CycleChecker
 
 __all__ = [
     "WorkflowBuilder",
@@ -14,4 +15,5 @@ __all__ = [
     "DLGenerator",
     "Reflector",
     "DLTransformer",
+    "CycleChecker",
 ]

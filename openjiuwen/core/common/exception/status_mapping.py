@@ -65,7 +65,7 @@ _MANUAL_OVERRIDES_RAW = {
     "CONTROLLER_INVOKE_LLM_FAILED": "FrameworkError",
     "TOOL_EXECUTION_ERROR": "ToolError",
     "TOOL_NOT_FOUND_ERROR": "ValidationError",
-    "AGENT_GROUP_EXECUTION_ERROR": "AgentError",
+    "AGENT_TEAM_EXECUTION_ERROR": "AgentError",
     "STORE_GRAPH_BACKEND_ALREADY_EXISTS": "ValidationError",
     "STORE_GRAPH_PROTOCOL_NOT_IMPLEMENTED": "ValidationError",
     "STORE_GRAPH_BACKEND_NOT_FOUND": "ValidationError",

@@ -370,7 +370,7 @@ class RedisCheckpointer(Checkpointer):
         if inputs is not None:
             session.state().update({INTERACTIVE_INPUT: [inputs]})
 
-    async def pre_agent_group_execute(self, session: BaseSession, inputs):
+    async def pre_agent_team_execute(self, session: BaseSession, inputs):
         logger.info(
             f"agent group: {session.group_id()} create or restore checkpoint from session: {session.session_id()}"
         )
@@ -388,7 +388,7 @@ class RedisCheckpointer(Checkpointer):
                     f"agent: {session.agent_id()} in session: {session.session_id()}")  # type: ignore[attr-defined]
         await self._agent_storage.save(session)
 
-    async def post_agent_group_execute(self, session: BaseSession):
+    async def post_agent_team_execute(self, session: BaseSession):
         logger.info(
             f"agent group finished, save checkpoint for group: {session.group_id()} "
             f"in session: {session.session_id()}"

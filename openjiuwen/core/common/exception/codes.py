@@ -383,10 +383,10 @@ class StatusCode(Enum):
     # Multi-Agent 130000 - 130999
     # =========================
 
-    AGENT_GROUP_ADD_RUNTIME_ERROR = (132000, "agent group_add runtime error, reason: {error_msg}")
-    AGENT_GROUP_CREATE_RUNTIME_ERROR = (132001, "agent group_create runtime error, reason: {error_msg}")
-    AGENT_GROUP_EXECUTION_ERROR = (132002, "agent group execution error, reason: {error_msg}")
-    AGENT_GROUP_AGENT_NOT_FOUND = (132003, "agent group agent not found error, reason: {error_msg}")
+    AGENT_TEAM_ADD_RUNTIME_ERROR = (132000, "agent team_add runtime error, reason: {error_msg}")
+    AGENT_TEAM_CREATE_RUNTIME_ERROR = (132001, "agent team_create runtime error, reason: {error_msg}")
+    AGENT_TEAM_EXECUTION_ERROR = (132002, "agent team execution error, reason: {error_msg}")
+    AGENT_TEAM_AGENT_NOT_FOUND = (132003, "agent team agent not found error, reason: {error_msg}")
 
     # =========================
     # DevTools / AgentBuilder 140000 - 140099

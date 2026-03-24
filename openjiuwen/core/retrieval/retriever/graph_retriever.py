@@ -187,11 +187,15 @@ class TripleBeamSearch:
         entities = {triple[0], triple[-1]}
         query_str = " ".join(entities)
 
+        mode = getattr(self.retriever, "index_type")
+        if mode == "bm25":
+            mode = "sparse"
+            
         # Use retrieve method instead of SearchQuery
         nodes = await self.retriever.retrieve(
             query=query_str,
             top_k=self.num_candidates_per_beam,
-            mode="vector",
+            mode=mode,
         )
 
         ret = []

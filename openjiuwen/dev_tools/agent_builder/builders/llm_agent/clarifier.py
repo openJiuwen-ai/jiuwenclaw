@@ -23,19 +23,19 @@ logger = LogManager.get_logger("agent_builder")
 
 RESOURCE_CONFIG = {
     "plugin": {
-        "label": "Plugin",
+        "label": "插件",
         "id_key": "tool_id",
         "name_key": "tool_name",
         "desc_key": "tool_desc"
     },
     "knowledge": {
-        "label": "Knowledge Base",
+        "label": "知识库",
         "id_key": "knowledge_id",
         "name_key": "knowledge_name",
         "desc_key": "knowledge_desc"
     },
     "workflow": {
-        "label": "Workflow",
+        "label": "工作流",
         "id_key": "workflow_id",
         "name_key": "workflow_name",
         "desc_key": "workflow_desc"
@@ -69,7 +69,7 @@ class Clarifier:
         self.llm = llm
 
     @staticmethod
-    def _parse_resource_output(
+    def parse_resource_output(
             resource_output: str,
             available_resources: Dict[Any, Any]
     ) -> Tuple[str, Dict[str, List[str]]]:
@@ -135,7 +135,7 @@ class Clarifier:
                          resource_type=resource_type)
 
                 if valid_resources:
-                    display_content.append(f"【Selected {config['label']}】\n" + "\n".join(valid_resources))
+                    display_content.append(f"【选择的{config['label']}】\n" + "\n".join(valid_resources))
                     if id_list:
                         id_dict[resource_type] = id_list
 
@@ -184,6 +184,6 @@ class Clarifier:
             self.llm.invoke([SystemMessage(content=RESOURCE_SYSTEM_PROMPT)] + resource_user_messages)
         ).content
 
-        display_resource, resource_id_dict = self._parse_resource_output(resource_output, resource)
+        display_resource, resource_id_dict = self.parse_resource_output(resource_output, resource)
 
         return factor_output, display_resource, resource_id_dict

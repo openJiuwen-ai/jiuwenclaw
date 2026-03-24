@@ -126,7 +126,7 @@ class PregelLoop:
 
         if self.step > self.max_step:
             raise RecursionError(
-                f"Recursion limit of {self.max_step} reached at step {self.step} ns: {self.config[NS]}."
+                f"Recursion limit of {self.max_step} reached at step {self.step}"
             )
 
         for name in self.active_nodes:

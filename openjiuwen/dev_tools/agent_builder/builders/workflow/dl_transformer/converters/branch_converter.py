@@ -11,20 +11,20 @@ class BranchConverter(BaseConverter):
     """Branch node converter."""
 
     BRANCH_OPERATOR_MAP: Dict[str, str] = {
-        "eq": "1",
-        "not_eq": "2",
-        "len_longer_than": "3",
-        "len_longer_than_or_eq": "4",
-        "len_shorter_than": "5",
-        "len_shorter_than_or_eq": "6",
-        "contain": "7",
-        "not_contain": "8",
-        "is_empty": "9",
-        "is_not_empty": "10",
-        "longer_than": "11",
-        "longer_than_or_eq": "12",
-        "short_than": "13",
-        "short_than_or_eq": "14",
+        "eq": "eq",
+        "not_eq": "neq",
+        "contain": "contains",
+        "not_contain": "not_contains",
+        "is_empty": "is_empty",
+        "is_not_empty": "is_not_empty",
+        "longer_than": "gt",
+        "longer_than_or_eq": "gte",
+        "short_than": "lt",
+        "short_than_or_eq": "lte",
+        "len_longer_than": "len_longer_than",
+        "len_longer_than_or_eq": "len_longer_than_or_eq",
+        "len_shorter_than": "len_shorter_than",
+        "len_shorter_than_or_eq": "len_shorter_than_or_eq",
     }
     BRANCH_LOGIC_MAP: Dict[str, int] = {
         "or": 1,
@@ -135,7 +135,7 @@ class BranchConverter(BaseConverter):
             self.node_data["parameters"]["conditions"]
         )
 
-    def _convert_edges(self) -> None:
+    def convert_edges(self) -> None:
         """Convert edges (Branch node has multiple branches)."""
         for cond in self.node_data["parameters"]["conditions"]:
             self.edges.append(

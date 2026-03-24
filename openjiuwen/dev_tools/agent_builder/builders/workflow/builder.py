@@ -14,6 +14,7 @@ from openjiuwen.dev_tools.agent_builder.builders.workflow.workflow_designer impo
 from openjiuwen.dev_tools.agent_builder.builders.workflow.dl_generator import DLGenerator
 from openjiuwen.dev_tools.agent_builder.builders.workflow.dl_reflector import Reflector
 from openjiuwen.dev_tools.agent_builder.builders.workflow.dl_transformer import DLTransformer
+from openjiuwen.dev_tools.agent_builder.builders.workflow.cycle_checker import CycleChecker
 from openjiuwen.dev_tools.agent_builder.executor.history_manager import HistoryManager
 from openjiuwen.dev_tools.agent_builder.utils.enums import BuildState, ProgressStage
 from openjiuwen.dev_tools.agent_builder.utils.constants import (
@@ -66,6 +67,27 @@ class WorkflowBuilder(BaseAgentBuilder):
         self._dl_generator: DLGenerator = DLGenerator(llm)
         self._dl_reflector: Reflector = Reflector()
         self._dl_transformer: DLTransformer = DLTransformer()
+        self._cycle_checker: CycleChecker = CycleChecker(llm)
+
+    @property
+    def workflow_name(self) -> Optional[str]:
+        return self._workflow_name
+
+    @property
+    def workflow_name_en(self) -> Optional[str]:
+        return self._workflow_name_en
+
+    @property
+    def workflow_desc(self) -> Optional[str]:
+        return self._workflow_desc
+
+    @property
+    def dl(self) -> Optional[str]:
+        return self._dl
+
+    @property
+    def mermaid_code(self) -> Optional[str]:
+        return self._mermaid_code
 
     def _handle_initial(
             self,
@@ -104,7 +126,7 @@ class WorkflowBuilder(BaseAgentBuilder):
             )
 
         tool_list = self._format_tool_list()
-        design_str, mermaid_code = self._workflow_designer.design(query, tool_list)
+        design_str = self._workflow_designer.design(query, tool_list)
 
         design_info: Dict[str, Any] = {
             "name": query[:100] if query else "Workflow",
@@ -128,16 +150,7 @@ class WorkflowBuilder(BaseAgentBuilder):
             resource=self._resource
         )
 
-        if self._progress_reporter:
-            self._progress_reporter.start_stage(
-                ProgressStage.TRANSFORMING_MERMAID,
-                "Generating flowchart..."
-            )
-
-        self._mermaid_code = mermaid_code
-
-        if self._progress_reporter:
-            self._progress_reporter.complete_stage("Flowchart generation completed")
+        self._mermaid_code = self._generate_mermaid_with_cycle_check(self._dl)
 
         self.state = BuildState.PROCESSING
         return self._mermaid_code
@@ -165,9 +178,7 @@ class WorkflowBuilder(BaseAgentBuilder):
                     for m in dialog_history
                 )
             tool_list = self._format_tool_list()
-            design_str, mermaid_code = self._workflow_designer.design(
-                user_input, tool_list
-            )
+            design_str = self._workflow_designer.design(user_input, tool_list)
             design_info = {
                 "name": user_input[:100] if user_input else "Workflow",
                 "name_en": "workflow",
@@ -183,7 +194,7 @@ class WorkflowBuilder(BaseAgentBuilder):
                 query=GENERATE_DL_FROM_DESIGN_CONTENT + (design_str or ""),
                 resource=self._resource
             )
-            self._mermaid_code = mermaid_code
+            self._mermaid_code = self._generate_mermaid_with_cycle_check(self._dl)
             return self._mermaid_code
         else:
             if self._intention_detector.detect_refine_intent(
@@ -197,9 +208,7 @@ class WorkflowBuilder(BaseAgentBuilder):
                     exist_dl=self._dl,
                     exist_mermaid=self._mermaid_code or ""
                 )
-                self._mermaid_code = self._dl_transformer.transform_to_mermaid(
-                    self._dl
-                )
+                self._mermaid_code = self._generate_mermaid_with_cycle_check(self._dl)
                 return self._mermaid_code
             else:
                 if self._progress_reporter:
@@ -273,6 +282,12 @@ class WorkflowBuilder(BaseAgentBuilder):
         """
         max_retries = max_retries or DEFAULT_MAX_RETRIES
 
+        logger.debug(
+            "Starting DL generation",
+            max_retries=max_retries,
+            operation_name=dl_operation.__name__ if hasattr(dl_operation, '__name__') else 'unknown'
+        )
+
         if self._progress_reporter:
             self._progress_reporter.start_stage(
                 ProgressStage.GENERATING_DL,
@@ -291,6 +306,13 @@ class WorkflowBuilder(BaseAgentBuilder):
                 generated_dl = dl_operation(*args, **kwargs)
                 generated_dl = extract_json_from_text(generated_dl)
 
+                logger.debug(
+                    "DL generation completed",
+                    attempt=attempt + 1,
+                    dl_length=len(generated_dl) if generated_dl else 0,
+                    dl_preview=(generated_dl[:200] if generated_dl else "None")
+                )
+
                 if self._progress_reporter:
                     self._progress_reporter.start_stage(
                         ProgressStage.VALIDATING_DL,
@@ -299,6 +321,13 @@ class WorkflowBuilder(BaseAgentBuilder):
                     )
 
                 self._dl_reflector.check_format(generated_dl)
+
+                logger.debug(
+                    "DL format check completed",
+                    attempt=attempt + 1,
+                    error_count=len(self._dl_reflector.errors),
+                    errors=self._dl_reflector.errors
+                )
 
                 if not self._dl_reflector.errors:
                     self.history_manager.add_assistant_message(generated_dl)
@@ -342,7 +371,8 @@ class WorkflowBuilder(BaseAgentBuilder):
                         content=MODIFY_DL_CONTENT + error_messages
                     ),
                 ]
-                self._dl_reflector.reset()
+                if attempt < max_retries - 1:
+                    self._dl_reflector.reset()
 
             except Exception as e:
                 logger.error(
@@ -374,6 +404,70 @@ class WorkflowBuilder(BaseAgentBuilder):
         raise ApplicationError(
             StatusCode.WORKFLOW_DL_GENERATION_ERROR,
             msg=f"Process definition language (DL) generation failed, errors: {error_messages}",
+        )
+
+    def _generate_mermaid_with_cycle_check(self, dl_content: str, max_retries: int = 3) -> str:
+        attempts = 0
+        need_refined = True
+        loop_desc = ""
+        temp_dl = dl_content
+
+        while attempts < max_retries and need_refined:
+            attempts += 1
+
+            if self._progress_reporter:
+                self._progress_reporter.start_stage(
+                    ProgressStage.TRANSFORMING_MERMAID,
+                    f"正在从 DL 转换生成流程图（第 {attempts} 次）..."
+                )
+
+            mermaid_code = self._dl_transformer.transform_to_mermaid(temp_dl)
+
+            need_refined, cycle_info = self._cycle_checker.check_and_parse(mermaid_code)
+
+            if need_refined:
+                if attempts < max_retries:
+                    loop_desc = (
+                        f"当前工作流设计方案可能包含环的结构：{cycle_info}\n"
+                        "需严格遵循有向无环图(DAG)原则，可对设计方案进行改造，"
+                        "确保工作流不包含任何闭环或循环结构！！！"
+                    )
+
+                    if self._progress_reporter:
+                        self._progress_reporter.warn_stage(
+                            f"检测到环结构：{cycle_info}",
+                            f"正在优化 DL（第 {attempts + 1} 次尝试）..."
+                        )
+
+                    temp_dl = self._generate_and_reflect_dl(
+                        dl_operation=self._dl_generator.refine,
+                        query=f"请修复以下流程图中的环结构：{loop_desc}",
+                        resource=self._resource,
+                        exist_dl=temp_dl,
+                        exist_mermaid=mermaid_code
+                    )
+                else:
+                    raise ApplicationError(
+                        StatusCode.WORKFLOW_EXECUTE_INPUT_INVALID,
+                        msg="已达到最大重试次数，无法生成无环流程图",
+                        details={
+                            "max_retries": max_retries,
+                            "error_code": StatusCode.WORKFLOW_DL_GENERATION_ERROR.code,
+                        },
+                    )
+            else:
+                logger.info("成功生成无环流程图")
+                if self._progress_reporter:
+                    self._progress_reporter.complete_stage("流程图生成完成")
+                return mermaid_code
+
+        raise ApplicationError(
+            StatusCode.WORKFLOW_EXECUTE_INPUT_INVALID,
+            msg="无法生成无环流程图",
+            details={
+                "max_retries": max_retries,
+                "error_code": StatusCode.WORKFLOW_DL_GENERATION_ERROR.code,
+            },
         )
 
     def _reset_internal_state(self) -> None:

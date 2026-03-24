@@ -28,7 +28,7 @@ mimetypes.add_type("image/jpeg", ".jfif", strict=True)
 
 
 class ImageCaptioner:
-    _supported_llm_client = ["gpt-4o", "gpt-5", "qwen3-vl"]
+    _supported_llm_client = ["gpt-4o", "gpt-5", "qwen3-vl", "qwen-vl"]
 
     def __init__(self, llm_client: Optional[Model] = None):
         self.llm_client = llm_client
@@ -74,8 +74,8 @@ class ImageCaptioner:
                 ]
             ):
                 logger.warning(
-                    f"The provided {self.llm_client=} may not be fully supported for imaging captioning.",
-                    "Please ensure an appropriate VLM is used.",
+                    f"{self.llm_client.model_config.model_name=} may not be supported for imaging captioning. "
+                    + "Please ensure an appropriate VLM is used."
                 )
 
     async def _llm_call_async(self, image_loc: str) -> str:

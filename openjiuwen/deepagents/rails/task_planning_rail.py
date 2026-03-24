@@ -128,7 +128,7 @@ class TaskPlanningRail(DeepAgentRail):
             return
 
         session_id = ctx.session.get_session_id()
-        tool.file = f"{session_id}.json"
+        tool.set_file(session_id)
 
         try:
             todos = await tool.load_todos()
@@ -197,7 +197,7 @@ class TaskPlanningRail(DeepAgentRail):
             return
 
         session_id = ctx.session.get_session_id()
-        tool.file = f"{session_id}.json"
+        tool.set_file(session_id)
 
         try:
             todos = await tool.load_todos()

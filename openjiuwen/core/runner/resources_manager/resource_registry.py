@@ -1,7 +1,7 @@
 # -*- coding: UTF-8 -*-
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 
-from openjiuwen.core.runner.resources_manager.agent_group_manager import AgentGroupMgr
+from openjiuwen.core.runner.resources_manager.agent_team_manager import AgentTeamMgr
 from openjiuwen.core.runner.resources_manager.agent_manager import AgentMgr
 from openjiuwen.core.runner.resources_manager.model_manager import ModelMgr
 from openjiuwen.core.runner.resources_manager.prompt_manager import PromptMgr
@@ -17,7 +17,7 @@ class ResourceRegistry:
         self._prompt_mgr = PromptMgr()
         self._model_mgr = ModelMgr()
         self._agent_mgr: AgentMgr = AgentMgr()
-        self._agent_group_mgr: AgentGroupMgr = AgentGroupMgr()
+        self._agent_team_mgr: AgentTeamMgr = AgentTeamMgr()
         self._sys_operation_mgr: SysOperationMgr = SysOperationMgr()
 
     def remove_by_id(self, resource_id: str):
@@ -27,7 +27,7 @@ class ResourceRegistry:
             return
         if self.agent().remove_agent(resource_id):
             return
-        if self.agent_group().remove_agent_group(resource_id):
+        if self.agent_team().remove_agent_team(resource_id):
             return
         if self.prompt().remove_prompt(resource_id):
             return
@@ -51,8 +51,8 @@ class ResourceRegistry:
     def agent(self) -> AgentMgr:
         return self._agent_mgr
 
-    def agent_group(self) -> AgentGroupMgr:
-        return self._agent_group_mgr
+    def agent_team(self) -> AgentTeamMgr:
+        return self._agent_team_mgr
 
     def sys_operation(self) -> SysOperationMgr:
         return self._sys_operation_mgr

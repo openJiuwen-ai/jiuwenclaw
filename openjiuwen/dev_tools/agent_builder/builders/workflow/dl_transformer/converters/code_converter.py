@@ -3,16 +3,20 @@
 from typing import Dict, Any
 
 from openjiuwen.dev_tools.agent_builder.builders.workflow.dl_transformer.converters.base import BaseConverter
-from openjiuwen.dev_tools.agent_builder.builders.workflow.dl_transformer.models import InputsField
+from openjiuwen.dev_tools.agent_builder.builders.workflow.dl_transformer.models import InputsField, Edge
 
 
 class CodeConverter(BaseConverter):
     """Code node converter."""
 
-    CODE_EXCEPTION_CONFIG: Dict[str, Any] = {
+    CODE_EXCEPTION_CONFIG = {
         "retryTimes": 3,
         "timeoutSeconds": 30,
-        "processType": "break"
+        "processType": "break",
+        "executeStep": {
+            "defaultStep": "0",
+            "errorStep": "1"
+        }
     }
 
     def _convert_specific_config(self) -> None:
@@ -24,8 +28,19 @@ class CodeConverter(BaseConverter):
             language="python",
             code=self.node_data["parameters"]["configs"]["code"],
         )
-        self.node.data.outputs = self._convert_outputs_field(
+        outputs = self._convert_outputs_field(
             self.node_data["parameters"]["outputs"]
         )
+        self.node.data.outputs = outputs
+        if outputs.properties:
+            self.node.data.outputs.required = list(outputs.properties.keys())
         self.node.data.exception_config = CodeConverter.CODE_EXCEPTION_CONFIG
+
+    def convert_edges(self):
+        if "next" in self.node_data:
+            self.edges.append(Edge(
+                source_node_id=self.node_data["id"],
+                target_node_id=self.node_data["next"],
+                source_port_id="0"
+            ))
         

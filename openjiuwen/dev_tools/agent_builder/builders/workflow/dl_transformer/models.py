@@ -1,7 +1,7 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 from enum import Enum
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Dict, List, Optional, Any
 
 
@@ -39,7 +39,7 @@ class Position:
 class InputVariable:
     """Input variable."""
     type: str
-    content: str
+    content: Any
     extra: Dict[str, str]
     schema: Optional[Dict[str, str]] = None
 
@@ -55,6 +55,21 @@ class InputsField:
     code: Optional[str] = None
     plugin_param: Optional[Dict[str, str]] = None
     content: Optional[Dict[str, str]] = None
+    history_enable: Optional[bool] = None
+    max_response: Optional[int] = None
+
+
+@dataclass
+class OutputPropertySpec:
+    """Named parameters for adding a nested property to an OutputsField."""
+
+    variable_names: List[str]
+    description: str
+    index: int
+    var_type: Optional[str] = None
+    items: Optional[Dict[str, Any]] = None
+    properties: Optional[Dict[str, Any]] = None
+    required: Optional[List[str]] = None
 
 
 @dataclass
@@ -66,15 +81,11 @@ class OutputsField:
     description: Optional[str] = None
     default: Optional[str] = None
     extra: Optional[Dict[str, int]] = None
+    items: Optional[Dict[str, Any]] = None
 
-    def add_property(
-            self,
-            variable_names: List[str],
-            desc: str,
-            index: int,
-            var_type: Optional[str] = None
-    ) -> None:
-        """Add property."""
+    def add_property(self, spec: OutputPropertySpec) -> None:
+        """Add property according to ``spec``."""
+        variable_names = spec.variable_names
         if not variable_names:
             return
 
@@ -86,11 +97,21 @@ class OutputsField:
 
         if key not in self.properties:
             if is_leaf:
-                self.properties[key] = OutputsField(
-                    type=var_type or "string",
-                    description=desc,
-                    extra={"index": index}
-                )
+                if spec.var_type == "object":
+                    self.properties[key] = OutputsField(
+                        type="object",
+                        description=spec.description,
+                        extra={"index": spec.index},
+                        properties=spec.properties or {},
+                        required=spec.required or []
+                    )
+                else:
+                    self.properties[key] = OutputsField(
+                        type=spec.var_type or "string",
+                        description=spec.description,
+                        extra={"index": spec.index},
+                        items=spec.items
+                    )
             else:
                 self.properties[key] = OutputsField(
                     type="object",
@@ -99,7 +120,7 @@ class OutputsField:
                 )
 
         output_field = self.properties[key]
-        output_field.add_property(variable_names[1:], desc, index, var_type)
+        output_field.add_property(replace(spec, variable_names=variable_names[1:]))
 
 
 @dataclass

@@ -33,12 +33,12 @@ class Generator:
         ```
     """
 
-    _EXTRACT_ELEMENTS = {
-        "name": "Role Name",
-        "description": "Role Description",
-        "prompt": "Prompt",
-        "opening_remarks": "Agent Opening Remarks",
-        "question": "Preset Questions",
+    EXTRACT_ELEMENTS = {
+        "name": "角色名称",
+        "description": "角色描述",
+        "prompt": "提示词",
+        "opening_remarks": "智能体开场白",
+        "question": "预置问题",
     }
 
     def __init__(self, llm: Model) -> None:
@@ -51,7 +51,7 @@ class Generator:
         self.llm = llm
 
     @staticmethod
-    def _parse_info(content: str) -> Dict[str, Any]:
+    def parse_info(content: str) -> Dict[str, Any]:
         """
         Parse generated configuration info
 
@@ -64,16 +64,21 @@ class Generator:
         def _parse_element(content: str, key: str) -> str:
             pattern = rf'<{key}>(.*?)</{key}>'
             match = re.search(pattern, content, re.DOTALL)
-            return match.group(1).strip() if match else ""
+            if not match:
+                return ""
+            result = match.group(1).strip()
+            if len(result) >= 2 and result[0] == '"' and result[-1] == '"':
+                result = result[1:-1]
+            return result
 
         info_dict = {}
-        for key, value in Generator._EXTRACT_ELEMENTS.items():
+        for key, value in Generator.EXTRACT_ELEMENTS.items():
             extracted_content = _parse_element(content, value)
             info_dict[key] = extracted_content
 
-        plugin_list = _parse_element(content, "Selected Plugin List")
-        knowledge_list = _parse_element(content, "Selected Knowledge Base List")
-        workflow_list = _parse_element(content, "Selected Workflow List")
+        plugin_list = _parse_element(content, "选择的插件列表")
+        knowledge_list = _parse_element(content, "选择的知识库列表")
+        workflow_list = _parse_element(content, "选择的工作流列表")
 
         info_dict["plugin"] = plugin_list
         info_dict["knowledge"] = knowledge_list
@@ -111,7 +116,7 @@ class Generator:
         ).content
         logger.debug("Generated Agent configuration", output_length=len(generated_content))
 
-        content_parse = self._parse_info(generated_content)
+        content_parse = self.parse_info(generated_content)
 
         if resource_id_dict:
             content_parse.update({

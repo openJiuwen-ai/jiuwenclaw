@@ -13,8 +13,8 @@ from openjiuwen.core.common.exception.errors import build_error
 from openjiuwen.core.common.logging import LogEventType, runner_logger as logger
 from openjiuwen.core.context_engine import ModelContext
 from openjiuwen.core.multi_agent import (
-    BaseGroup,
-    Session as AgentGroupSession,
+    BaseTeam,
+    Session as AgentTeamSession,
 )
 from openjiuwen.core.runner.callback import AsyncCallbackFramework
 from openjiuwen.core.runner.drunner.dmessage_queue.dsubscription.reply_topic_subscription import ReplyTopicSubscription
@@ -30,7 +30,7 @@ from openjiuwen.core.runner.runner_config import (
 )
 from openjiuwen.core.session import Config
 from openjiuwen.core.session.checkpointer import CheckpointerFactory
-from openjiuwen.core.session.agent_group import create_agent_group_session
+from openjiuwen.core.session.agent_team import create_agent_team_session
 from openjiuwen.core.session.stream import BaseStreamMode
 from openjiuwen.core.single_agent import (
     BaseAgent,
@@ -79,7 +79,7 @@ class _RunnerImpl:
 
     @property
     def resource_mgr(self) -> ResourceMgr:
-        """Get the resource manager for workflow, agent, agent_group, tool, model, prompt..."""
+        """Get the resource manager for workflow, agent, agent_team, tool, model, prompt..."""
         return self._resource_manager
 
     @property
@@ -293,64 +293,64 @@ class _RunnerImpl:
                 yield chunk
             await agent_session.post_run()
 
-    async def run_agent_group(self,
-                              agent_group: Union[str, 'BaseGroup'],
-                              inputs: Any,
-                              *,
-                              session: Optional[str | AgentGroupSession] = None,
-                              context: ModelContext = None,
-                              envs: Optional[dict[str, Any]] = None
-                              ):
+    async def run_agent_team(self,
+                             agent_team: Union[str, 'BaseTeam'],
+                             inputs: Any,
+                             *,
+                             session: Optional[str | AgentTeamSession] = None,
+                             context: ModelContext = None,
+                             envs: Optional[dict[str, Any]] = None
+                             ):
         """
-        Execute a group of agents with given inputs.
+        Execute a team of agents with given inputs.
 
         Args:
-            agent_group: AgentGroup name or instance to execute
-            inputs: Input data for the agent group
+            agent_team: AgentTeam name or instance to execute
+            inputs: Input data for the agent team
             session: Existing session ID or Session instance for context persistence
             context: model contex
             envs: Environment variables or configuration overrides
         """
-        agent_group_instance = await self._prepare_agent_group(agent_group)
-        agent_group_session = self._create_agent_group_session(agent_group_instance, session)
-        await agent_group_session.pre_run(inputs=inputs if isinstance(inputs, dict) else None)
-        agent_group_instance.runtime.bind_group_session(agent_group_session)
+        agent_team_instance = await self._prepare_agent_team(agent_team)
+        agent_team_session = self._create_agent_team_session(agent_team_instance, session)
+        await agent_team_session.pre_run(inputs=inputs if isinstance(inputs, dict) else None)
+        agent_team_instance.runtime.bind_team_session(agent_team_session)
         try:
-            return await agent_group_instance.invoke(inputs, session=agent_group_session)
+            return await agent_team_instance.invoke(inputs, session=agent_team_session)
         finally:
-            agent_group_instance.runtime.unbind_group_session(agent_group_session.get_session_id())
-            await agent_group_session.post_run()
+            agent_team_instance.runtime.unbind_team_session(agent_team_session.get_session_id())
+            await agent_team_session.post_run()
 
-    async def run_agent_group_streaming(self,
-                                        agent_group: Union[str, 'BaseGroup'],
-                                        inputs: Any,
-                                        *,
-                                        session: Optional[str | AgentGroupSession] = None,
-                                        context: ModelContext = None,
-                                        stream_modes: list[BaseStreamMode] = None,
-                                        envs: Optional[dict[str, Any]] = None,
-                                        ):
+    async def run_agent_team_streaming(self,
+                                       agent_team: Union[str, 'BaseTeam'],
+                                       inputs: Any,
+                                       *,
+                                       session: Optional[str | AgentTeamSession] = None,
+                                       context: ModelContext = None,
+                                       stream_modes: list[BaseStreamMode] = None,
+                                       envs: Optional[dict[str, Any]] = None,
+                                       ):
         """
-        Execute a group of agents with streaming output support.
+        Execute a team of agents with streaming output support.
 
         Args:
-            agent_group: AgentGroup name or instance to execute
-            inputs: Input data for the agent group
+            agent_team: AgentTeam name or instance to execute
+            inputs: Input data for the agent team
             session: Existing session ID or Session instance for context persistence
             context: model context
             stream_modes: Types of streaming data to output
             envs: Environment variables or configuration overrides
         """
-        agent_group_instance = await self._prepare_agent_group(agent_group)
-        agent_group_session = self._create_agent_group_session(agent_group_instance, session)
-        await agent_group_session.pre_run(inputs=inputs if isinstance(inputs, dict) else None)
-        agent_group_instance.runtime.bind_group_session(agent_group_session)
+        agent_team_instance = await self._prepare_agent_team(agent_team)
+        agent_team_session = self._create_agent_team_session(agent_team_instance, session)
+        await agent_team_session.pre_run(inputs=inputs if isinstance(inputs, dict) else None)
+        agent_team_instance.runtime.bind_team_session(agent_team_session)
         try:
-            async for chunk in agent_group_instance.stream(inputs, session=agent_group_session):
+            async for chunk in agent_team_instance.stream(inputs, session=agent_team_session):
                 yield chunk
         finally:
-            agent_group_instance.runtime.unbind_group_session(agent_group_session.get_session_id())
-            await agent_group_session.post_run()
+            agent_team_instance.runtime.unbind_team_session(agent_team_session.get_session_id())
+            await agent_team_session.post_run()
 
     async def release(self, session_id: str):
         """
@@ -424,27 +424,27 @@ class _RunnerImpl:
             workflow_instance = workflow
         return workflow_instance, workflow_session
 
-    async def _prepare_agent_group(self, agent_group: Union[str, BaseGroup]):
-        if isinstance(agent_group, str):
-            return await self._resource_manager.get_agent_group(
-                group_id=agent_group
+    async def _prepare_agent_team(self, agent_team: Union[str, BaseTeam]):
+        if isinstance(agent_team, str):
+            return await self._resource_manager.get_agent_team(
+                team_id=agent_team
             )
-        return agent_group
+        return agent_team
 
     @staticmethod
-    def _create_agent_group_session(agent_group: BaseGroup, session: Optional[str | AgentGroupSession | AgentSession]):
-        if isinstance(session, AgentGroupSession):
+    def _create_agent_team_session(agent_team: BaseTeam, session: Optional[str | AgentTeamSession | AgentSession]):
+        if isinstance(session, AgentTeamSession):
             return session
-        group_id = getattr(agent_group.card, "id", None) or getattr(agent_group.card, "name", "agent_group")
+        team_id = getattr(agent_team.card, "id", None) or getattr(agent_team.card, "name", "agent_team")
         if isinstance(session, AgentSession):
-            return create_agent_group_session(
+            return create_agent_team_session(
                 session_id=session.get_session_id(),
                 envs=session.get_envs(),
-                group_id=group_id,
+                team_id=team_id,
             )
         if isinstance(session, str):
-            return create_agent_group_session(session_id=session, group_id=group_id)
-        return create_agent_group_session(group_id=group_id)
+            return create_agent_team_session(session_id=session, team_id=team_id)
+        return create_agent_team_session(team_id=team_id)
 
     @staticmethod
     def _create_agent_session(agent, session_id):
@@ -492,7 +492,7 @@ class Runner:
     
     # Properties
     resource_mgr: ResourceMgr = _ClassProperty("resource_mgr")  # type: ignore[assignment]
-    """Get the resource manager for workflow, agent, agent_group, tool, model, prompt..."""
+    """Get the resource manager for workflow, agent, agent_team, tool, model, prompt..."""
     
     pubsub = _ClassProperty("pubsub")
     """Get the local message queue for publish/subscribe communication."""
@@ -656,27 +656,27 @@ class Runner:
             yield chunk
     
     @classmethod
-    async def run_agent_group(
+    async def run_agent_team(
         cls,
-        agent_group: Union[str, 'BaseGroup'],
+        agent_team: Union[str, 'BaseTeam'],
         inputs: Any,
         *,
-            session: Optional[str | AgentGroupSession] = None,
+            session: Optional[str | AgentTeamSession] = None,
         context: Optional[ModelContext] = None,
         envs: Optional[dict[str, Any]] = None
     ) -> Any:
         """
-        Execute a group of agents with given inputs.
+        Execute a team of agents with given inputs.
 
         Args:
-            agent_group: AgentGroup name or instance to execute
-            inputs: Input data for the agent group
+            agent_team: AgentTeam name or instance to execute
+            inputs: Input data for the agent team
             session: Existing session ID or Session instance for context persistence
             context: model context
             envs: Environment variables or configuration overrides
         """
-        return await GLOBAL_RUNNER.run_agent_group(
-            agent_group=agent_group,
+        return await GLOBAL_RUNNER.run_agent_team(
+            agent_team=agent_team,
             inputs=inputs,
             session=session,
             context=context,
@@ -684,29 +684,29 @@ class Runner:
         )
     
     @classmethod
-    async def run_agent_group_streaming(
+    async def run_agent_team_streaming(
         cls,
-        agent_group: Union[str, 'BaseGroup'],
+        agent_team: Union[str, 'BaseTeam'],
         inputs: Any,
         *,
-            session: Optional[str | AgentGroupSession] = None,
+            session: Optional[str | AgentTeamSession] = None,
         context: Optional[ModelContext] = None,
         stream_modes: Optional[list[BaseStreamMode]] = None,
         envs: Optional[dict[str, Any]] = None,
     ) -> AsyncIterator[Any]:
         """
-        Execute a group of agents with streaming output support.
+        Execute a team of agents with streaming output support.
 
         Args:
-            agent_group: AgentGroup name or instance to execute
-            inputs: Input data for the agent group
+            agent_team: AgentTeam name or instance to execute
+            inputs: Input data for the agent team
             session: Existing session ID or Session instance for context persistence
             context: model context
             stream_modes: Types of streaming data to output
             envs: Environment variables or configuration overrides
         """
-        async for chunk in GLOBAL_RUNNER.run_agent_group_streaming(
-            agent_group=agent_group,
+        async for chunk in GLOBAL_RUNNER.run_agent_team_streaming(
+            agent_team=agent_team,
             inputs=inputs,
             session=session,
             context=context,
