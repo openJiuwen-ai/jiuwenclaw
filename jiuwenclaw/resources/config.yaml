@@ -111,6 +111,15 @@ channels:
         verification_token:
         allow_from: []
         enable_streaming: false
+        # 飞书 P2P/群聊 白名单安全策略（all=不过滤，whitelist=缺失/空拒绝）
+        group_allow_policy: 'all'
+        p2p_allow_policy: 'all'
+        # 群聊允许的 chat_id 列表（仅当 group_allow_policy='whitelist' 时生效）
+        group_whitelist_chat_ids: []
+        # 群聊内允许的用户（chat_id -> user_id 列表；chat_id 未出现在映射中表示该群不限制用户）
+        group_whitelist_user_ids: {}
+        # 单聊允许的用户 user_id 列表（仅当 p2p_allow_policy='whitelist' 时生效）
+        single_whitelist_user_ids: []
         enabled: false
       - channel_id: feishu_2
         app_id:
@@ -119,6 +128,15 @@ channels:
         verification_token:
         allow_from: []
         enable_streaming: false
+        # 飞书 P2P/群聊 白名单安全策略（all=不过滤，whitelist=缺失/空拒绝）
+        group_allow_policy: 'all'
+        p2p_allow_policy: 'all'
+        # 群聊允许的 chat_id 列表（仅当 group_allow_policy='whitelist' 时生效）
+        group_whitelist_chat_ids: []
+        # 群聊内允许的用户（chat_id -> user_id 列表；chat_id 未出现在映射中表示该群不限制用户）
+        group_whitelist_user_ids: {}
+        # 单聊允许的用户 user_id 列表（仅当 p2p_allow_policy='whitelist' 时生效）
+        single_whitelist_user_ids: []
         enabled: false
   xiaoyi:
     # 华为小艺 A2A 配置

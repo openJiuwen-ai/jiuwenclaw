@@ -8,7 +8,7 @@ import re
 import threading
 import time
 from collections import OrderedDict
-from typing import Any, Callable
+from typing import Any, Callable, Literal
 
 from pydantic import BaseModel, Field
 
@@ -28,6 +28,18 @@ class FeishuConfig(BaseModel):
     allow_from: list[str] = Field(default_factory=list)  # 允许的用户的open_id列表
     enable_streaming: bool = True  # 是否开启流式/过程消息下发
     chat_id: str = ""  # 可选：固定推送目标 chat_id（群聊 oc_xxx 或个人 open_id）
+
+    # 白名单安全策略：all=不过滤；whitelist=仅允许命中允许列表（缺失/空则拒绝）
+    group_allow_policy: Literal["all", "whitelist"] = "all"
+    p2p_allow_policy: Literal["all", "whitelist"] = "all"
+
+    # 群聊允许规则（按 chat_id 决定）
+    group_whitelist_chat_ids: list[str] | None = None
+    # 群聊内用户允许规则：chat_id -> user_id 列表
+    group_whitelist_user_ids: dict[str, list[str]] | None = None
+
+    # 单聊允许规则（按 user_id 决定）
+    single_whitelist_user_ids: list[str] | None = None
 
 
 try:
@@ -145,6 +157,40 @@ class FeishuChannel(BaseChannel):
             self._message_callback(msg)
         else:
             await self.bus.route_user_message(msg)
+
+    def _is_allowed(self, *, chat_id: str, user_id: str) -> bool:
+        """Feishu 入站白名单过滤（按 bot/app_id 隔离由实例天然完成）。"""
+        chat_id = str(chat_id or "").strip()
+        user_id = str(user_id or "").strip()
+
+        is_group = chat_id.startswith("oc_")
+        if is_group:
+            if self.config.group_allow_policy == "all":
+                return True
+
+            allowed_chat_ids = self.config.group_whitelist_chat_ids or []
+            if not allowed_chat_ids or chat_id not in allowed_chat_ids:
+                return False
+
+            mapping = self.config.group_whitelist_user_ids or {}
+            # 未配置该群的 user 映射时：允许该群内任何用户（更少配置、便于管理）
+            if chat_id not in mapping:
+                return True
+
+            allowed_user_ids = mapping.get(chat_id) or []
+            # 显式配置空列表：表示该群无人允许（更安全）
+            if not allowed_user_ids:
+                return False
+            return user_id in allowed_user_ids
+
+        # p2p
+        if self.config.p2p_allow_policy == "all":
+            return True
+
+        allowed_user_ids = self.config.single_whitelist_user_ids or []
+        if not allowed_user_ids:
+            return False
+        return user_id in allowed_user_ids
 
     async def start(self) -> None:
         """启动飞书机器人，使用WebSocket长连接接收消息。"""
@@ -1064,6 +1110,14 @@ class FeishuChannel(BaseChannel):
                 getattr(getattr(sender, "sender_id", None), "open_id", None) or ""
             )
 
+            chat_id = getattr(message, "chat_id", None) or ""
+            if not self._is_allowed(chat_id=str(chat_id), user_id=open_id):
+                logger.debug(
+                    "Feishu whitelist deny: chat_id=%s user_id=%s app_id=%s",
+                    chat_id, open_id, self.config.app_id,
+                )
+                return
+
             # 将最近一次可回发的飞书身份写入 config.yaml，供 cron 推送时使用
             try:
                 from jiuwenclaw.config import update_feishu_bot_in_config
@@ -1083,7 +1137,7 @@ class FeishuChannel(BaseChannel):
 
             # 处理消息：将平台身份写入 metadata，供回发时使用（与 session_id 解耦，\new_session 后仍可正确回发）
             await self._handle_message(
-                chat_id=message.chat_id,
+                chat_id=str(chat_id),
                 content=content,
                 metadata={
                     "message_id": message.message_id,

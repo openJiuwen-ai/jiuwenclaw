@@ -1611,6 +1611,11 @@ async def _run() -> None:
                     allow_from=entry_conf.get("allow_from") or [],
                     enable_streaming=bool(entry_conf.get("enable_streaming", True)),
                     chat_id=str(entry_conf.get("chat_id") or "").strip(),
+                    group_allow_policy=str(entry_conf.get("group_allow_policy") or "all").strip().lower(),
+                    p2p_allow_policy=str(entry_conf.get("p2p_allow_policy") or "all").strip().lower(),
+                    group_whitelist_chat_ids=entry_conf.get("group_whitelist_chat_ids"),
+                    group_whitelist_user_ids=entry_conf.get("group_whitelist_user_ids"),
+                    single_whitelist_user_ids=entry_conf.get("single_whitelist_user_ids"),
                 )
                 feishu_channel = FeishuChannel(feishu_config, _DummyBus(), channel_id=channel_id)
                 channel_manager.register_channel(feishu_channel)
