@@ -193,6 +193,7 @@ class WecomChannel(BaseChannel):
             id=req_id_final,
             type="req",
             channel_id=self.name,
+            provider=self.name,
             session_id=chatid,
             params={"content": content, "query": content},
             timestamp=time.time(),

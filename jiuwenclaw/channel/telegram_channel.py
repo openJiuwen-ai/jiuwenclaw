@@ -359,6 +359,7 @@ class TelegramChannel(BaseChannel):
                 id=str(message_id),
                 type="req",
                 channel_id=self.channel_id,
+                provider=self.name,
                 session_id=session_id,
                 params={"content": text, "query": text},
                 timestamp=time.time(),

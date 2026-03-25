@@ -65,7 +65,7 @@ class MessageHandler(ABC):
         # per-channel 控制状态：支持 \new_session / \mode 指令（feishu/xiaoyi/dingding/whatsapp/wecom）
         self._control_channels = {"feishu", "xiaoyi", "dingtalk", "whatsapp", "wecom"}
         self._channel_states: Dict[str, ChannelControlState] = {}
-        self._session_maps: dict[str, SessionMap] = {}
+        self._session_map = SessionMap()
 
         # 直接使用 jiuwenclaw.config 的 get_config_raw/set_config/update_channel_in_config
         # 避免在此处重复实现 config 模块加载逻辑。
@@ -153,13 +153,6 @@ class MessageHandler(ABC):
             return (provider, chat_id, bot_id, user_id)
         return None
 
-    def _get_session_map(self, channel_id: str) -> SessionMap:
-        sm = self._session_maps.get(channel_id)
-        if sm is None:
-            sm = SessionMap(channel_id)
-            self._session_maps[channel_id] = sm
-        return sm
-
     async def _send_channel_notice(self, channel_id: str, session_id: str | None, text: str) -> None:
         """向指定 channel 发送一条系统提示消息."""
         from jiuwenclaw.schema.message import Message, EventType
@@ -200,7 +193,7 @@ class MessageHandler(ABC):
             state = self._channel_states.get(ch) or ChannelControlState()
             identity_key = self._extract_identity_tuple(msg)
             if identity_key:
-                new_sid = self._get_session_map(ch).rotate(*identity_key)
+                new_sid = self._session_map.get_session_id(*identity_key, rotate=True)
             else:
                 new_sid = self._generate_channel_session_id(ch)
             state.session_id = new_sid
@@ -257,7 +250,7 @@ class MessageHandler(ABC):
         if is_controlled:
             identity_key = self._extract_identity_tuple(msg)
             if identity_key:
-                sid = self._get_session_map(ch).get_or_create(*identity_key)
+                sid = self._session_map.get_session_id(*identity_key)
                 msg.session_id = sid
                 if state.session_id != sid:
                     # Keep channel default aligned for observability and compatibility.

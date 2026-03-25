@@ -174,6 +174,7 @@ class BaseChannel(ABC):
             id=chat_id,
             type="req",
             channel_id=self.name,
+            provider=self.name,
             session_id=str(chat_id),
             params={'content': content},
             timestamp=time.time(),

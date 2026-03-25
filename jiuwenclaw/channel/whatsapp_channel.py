@@ -286,6 +286,7 @@ class WhatsAppChannel(BaseChannel):
             id=message_id,
             type="req",
             channel_id=self.channel_id,
+            provider=self.name,
             session_id=jid or sender,
             params={"content": text, "query": text},
             timestamp=time.time(),

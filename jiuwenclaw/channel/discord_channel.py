@@ -172,6 +172,7 @@ class DiscordChannel(BaseChannel):
             id=str(getattr(message, "id", f"discord-{int(time.time() * 1000)}")),
             type="req",
             channel_id=self.channel_id,
+            provider=self.name,
             session_id=session_id,
             params={"content": text, "query": text},
             timestamp=time.time(),

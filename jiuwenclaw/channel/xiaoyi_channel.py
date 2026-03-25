@@ -658,6 +658,7 @@ class XiaoyiChannel(BaseChannel):
             id=message.get("id", ""),
             type="req",
             channel_id=self.channel_id,
+            provider=self.name,
             session_id=session_id,
             params=params,
             timestamp=time.time(),
