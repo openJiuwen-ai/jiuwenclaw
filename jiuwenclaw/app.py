@@ -1311,6 +1311,7 @@ async def _run() -> None:
         GatewayHeartbeatService,
         HeartbeatConfig,
         WebSocketAgentServerClient,
+        YuanrongFrontendAgentClient,
     )
     from jiuwenclaw.gateway.channel_manager import ChannelManager
     from jiuwenclaw.gateway.cron import CronController, CronJobStore, CronSchedulerService
@@ -1339,20 +1340,53 @@ async def _run() -> None:
 
     # ---------- 一次启动所有服务 ----------
     agent = JiuWenClaw()
+    gateway_cfg = {}
+    try:
+        full_cfg = _load_agent_config()
+        if isinstance(full_cfg, dict):
+            gateway_cfg = full_cfg.get("gateway") if isinstance(full_cfg.get("gateway"), dict) else {}
+    except Exception as e:  # noqa: BLE001
+        logger.warning("[App] 读取 gateway 配置失败，将回退 websocket 模式: %s", e)
+        gateway_cfg = {}
 
-    server = AgentWebSocketServer.get_instance(
-        agent=agent,
-        host="127.0.0.1",
-        port=agent_port,
-        ping_interval=20.0,
-        ping_timeout=20.0,
-    )
-    await server.start()
-    await asyncio.sleep(0.3)
-    uri = f"ws://127.0.0.1:{agent_port}"
+    agent_client_cfg = gateway_cfg.get("agent_client") if isinstance(gateway_cfg, dict) else {}
+    if not isinstance(agent_client_cfg, dict):
+        agent_client_cfg = {}
 
-    client = WebSocketAgentServerClient(ping_interval=20.0, ping_timeout=20.0)
-    await client.connect(uri)
+    client_type = str(agent_client_cfg.get("type") or "websocket").strip().lower()
+    server = None
+    if client_type == "yuanrong_frontend":
+        frontend_endpoint = str(agent_client_cfg.get("frontend_endpoint") or "").strip()
+        function_version_urn = str(agent_client_cfg.get("function_version_urn") or "").strip()
+        if not frontend_endpoint:
+            raise ValueError("gateway.agent_client.frontend_endpoint 不能为空（yuanrong_frontend 模式）")
+        if not function_version_urn:
+            raise ValueError("gateway.agent_client.function_version_urn 不能为空（yuanrong_frontend 模式）")
+
+        client = YuanrongFrontendAgentClient(
+            frontend_endpoint=frontend_endpoint,
+            function_version_urn=function_version_urn,
+            expect_num=int(agent_client_cfg.get("expect_num") or 10),
+            stream_timeout_ms=int(agent_client_cfg.get("stream_timeout_ms") or 5000),
+            invoke_timeout_s=float(agent_client_cfg.get("invoke_timeout_s") or 60.0),
+        )
+        await client.connect(frontend_endpoint)
+        logger.info("[App] Agent client 已启用元戎 Frontend 模式: %s", frontend_endpoint)
+    else:
+        server = AgentWebSocketServer.get_instance(
+            agent=agent,
+            host="127.0.0.1",
+            port=agent_port,
+            ping_interval=20.0,
+            ping_timeout=20.0,
+        )
+        await server.start()
+        await asyncio.sleep(0.3)
+        uri = f"ws://127.0.0.1:{agent_port}"
+
+        client = WebSocketAgentServerClient(ping_interval=20.0, ping_timeout=20.0)
+        await client.connect(uri)
+        logger.info("[App] Agent client 已启用 WebSocket 模式: %s", uri)
     message_handler = MessageHandler(client)
     await message_handler.start_forwarding()
 
@@ -1904,7 +1938,8 @@ async def _run() -> None:
         await heartbeat_service.stop()
         await message_handler.stop_forwarding()
         await client.disconnect()
-        await server.stop()
+        if server is not None:
+            await server.stop()
         logger.info("[App] E2E 已停止")
 
 

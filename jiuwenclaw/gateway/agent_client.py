@@ -6,6 +6,11 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
+import urllib.error
+import urllib.parse
+import urllib.request
+import uuid
 from abc import ABC, abstractmethod
 from dataclasses import asdict
 from typing import Any, AsyncIterator
@@ -271,6 +276,213 @@ class WebSocketAgentServerClient(AgentServerClient):
             # 清理队列
             if request.request_id in self._message_queues:
                 del self._message_queues[request.request_id]
+
+
+class YuanrongFrontendAgentClient(AgentServerClient):
+    """基于元戎 Frontend 的 HTTP 客户端实现（invocations）。"""
+
+    def __init__(
+        self,
+        *,
+        frontend_endpoint: str,
+        function_version_urn: str,
+        expect_num: int = 10,
+        stream_timeout_ms: int = 5000,
+        invoke_timeout_s: float = 60.0,
+    ) -> None:
+        self._frontend_endpoint = frontend_endpoint.rstrip("/")
+        self._function_version_urn = function_version_urn
+        self._expect_num = expect_num
+        self._stream_timeout_ms = stream_timeout_ms
+        self._invoke_timeout_s = invoke_timeout_s
+        self._connected = False
+        self._server_ready = False
+
+    @property
+    def server_ready(self) -> bool:
+        return self._server_ready
+
+    async def connect(self, uri: str) -> None:
+        endpoint = (uri or "").strip()
+        if endpoint:
+            self._frontend_endpoint = endpoint.rstrip("/")
+        if not self._frontend_endpoint:
+            raise ValueError("frontend_endpoint 不能为空")
+        if not self._function_version_urn:
+            raise ValueError("function_version_urn 不能为空")
+        self._connected = True
+        self._server_ready = True
+        logger.info("[YuanrongFrontendAgentClient] 已就绪: endpoint=%s", self._frontend_endpoint)
+
+    async def disconnect(self) -> None:
+        self._connected = False
+        self._server_ready = False
+        logger.info("[YuanrongFrontendAgentClient] 已断开")
+
+    def _ensure_connected(self) -> None:
+        if not self._connected:
+            raise RuntimeError("未连接 Yuanrong Frontend，请先调用 connect(uri)")
+
+    def _normalize_session_id(self, session_id: str | None) -> str:
+        raw = (session_id or "").strip()
+        if not raw:
+            raw = f"sess-{uuid.uuid4().hex[:16]}"
+        if len(raw) > 63:
+            logger.warning(
+                "[YuanrongFrontendAgentClient] session_id 长度超限(%s)，已截断",
+                len(raw),
+            )
+            raw = raw[:63]
+        return raw
+
+    def _invoke_url(self) -> str:
+        urn = urllib.parse.quote(self._function_version_urn, safe="")
+        return f"{self._frontend_endpoint}/serverless/v1/functions/{urn}/invocations"
+
+    def _do_invoke(self, payload: dict[str, Any], session_id: str) -> tuple[int, str]:
+        headers = {
+            "Content-Type": "application/json",
+            "X-Instance-Session": json.dumps({"sessionID": session_id}, ensure_ascii=False),
+        }
+        data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        req = urllib.request.Request(
+            self._invoke_url(),
+            data=data,
+            headers=headers,
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=self._invoke_timeout_s) as resp:
+                status = int(getattr(resp, "status", 200))
+                body = resp.read().decode("utf-8", errors="replace")
+                return status, body
+        except urllib.error.HTTPError as e:
+            body = e.read().decode("utf-8", errors="replace") if e.fp else str(e)
+            return int(getattr(e, "code", 500) or 500), body
+
+    def _do_invoke_stream(
+        self,
+        payload: dict[str, Any],
+        session_id: str,
+        out_queue: "asyncio.Queue[tuple[str, str | None]]",
+        loop: asyncio.AbstractEventLoop,
+    ) -> None:
+        headers = {
+            "Content-Type": "application/json",
+            "Accept": "text/event-stream",
+            "X-Instance-Session": json.dumps({"sessionID": session_id}, ensure_ascii=False),
+        }
+        data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        req = urllib.request.Request(
+            self._invoke_url(),
+            data=data,
+            headers=headers,
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=self._invoke_timeout_s) as resp:
+                status = int(getattr(resp, "status", 200))
+                if not (200 <= status < 300):
+                    body = resp.read().decode("utf-8", errors="replace")
+                    loop.call_soon_threadsafe(out_queue.put_nowait, ("error", json.dumps({
+                        "http_status": status,
+                        "body": body,
+                    }, ensure_ascii=False)))
+                    return
+                while True:
+                    chunk = resp.read(1024)
+                    if not chunk:
+                        break
+                    text = chunk.decode("utf-8", errors="replace")
+                    loop.call_soon_threadsafe(out_queue.put_nowait, ("chunk", text))
+        except urllib.error.HTTPError as e:
+            body = e.read().decode("utf-8", errors="replace") if e.fp else str(e)
+            loop.call_soon_threadsafe(out_queue.put_nowait, ("error", json.dumps({
+                "http_status": int(getattr(e, "code", 500) or 500),
+                "body": body,
+            }, ensure_ascii=False)))
+        except Exception as e:  # noqa: BLE001
+            loop.call_soon_threadsafe(out_queue.put_nowait, ("exception", str(e)))
+        finally:
+            loop.call_soon_threadsafe(out_queue.put_nowait, ("done", None))
+
+    @staticmethod
+    def _contains_sse_done_marker(text: str) -> bool:
+        """识别常见 SSE 结束标记"""
+        t = text.strip()
+        return "[DONE]" in t or "data: [DONE]" in t
+
+    async def send_request(self, request: AgentRequest) -> AgentResponse:
+        self._ensure_connected()
+        payload = dict(request.params or {})
+        session_id = self._normalize_session_id(request.session_id)
+        status, body = await asyncio.to_thread(self._do_invoke, payload, session_id)
+        parsed: Any
+        try:
+            parsed = json.loads(body) if body else {}
+        except Exception:
+            parsed = body
+        return AgentResponse(
+            request_id=request.request_id,
+            channel_id=request.channel_id,
+            ok=200 <= status < 300,
+            payload={"content": parsed},
+            metadata={"http_status": status},
+        )
+
+    async def send_request_stream(
+        self, request: AgentRequest
+    ) -> AsyncIterator[AgentResponseChunk]:
+        self._ensure_connected()
+        session_id = self._normalize_session_id(request.session_id)
+        payload = dict(request.params or {})
+
+        loop = asyncio.get_running_loop()
+        queue: asyncio.Queue[tuple[str, str | None]] = asyncio.Queue()
+        reader_task = asyncio.create_task(
+            asyncio.to_thread(self._do_invoke_stream, payload, session_id, queue, loop)
+        )
+        try:
+            while True:
+                item_type, text = await queue.get()
+                if item_type == "chunk" and text is not None:
+                    if text:
+                        if self._contains_sse_done_marker(text):
+                            break
+                        yield AgentResponseChunk(
+                            request_id=request.request_id,
+                            channel_id=request.channel_id,
+                            payload={"content": text},
+                            is_complete=False,
+                        )
+                elif item_type == "error":
+                    err_payload: Any
+                    try:
+                        err_payload = json.loads(text) if text else {}
+                    except Exception:
+                        err_payload = {"error": text or "invoke stream failed"}
+                    yield AgentResponseChunk(
+                        request_id=request.request_id,
+                        channel_id=request.channel_id,
+                        payload={"error": err_payload},
+                        is_complete=False,
+                    )
+                    break
+                elif item_type == "exception":
+                    raise RuntimeError(f"invoke_stream failed: {text}")
+                elif item_type == "done":
+                    break
+            yield AgentResponseChunk(
+                request_id=request.request_id,
+                channel_id=request.channel_id,
+                payload=None,
+                is_complete=True,
+            )
+        finally:
+            try:
+                await reader_task
+            except Exception:
+                pass
 
 
 # ---------------------------------------------------------------------------

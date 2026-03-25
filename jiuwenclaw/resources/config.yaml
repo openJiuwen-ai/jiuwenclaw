@@ -95,6 +95,20 @@ heartbeat:
     start: 08:00
     end: 22:00
 
+gateway:
+  agent_client:
+    type: websocket # websocket | yuanrong_frontend
+    # websocket: 启动本地 AgentWebSocketServer 并通过 ws 连接（默认）
+    # yuanrong_frontend: 直连元戎 frontend 的 serverless API
+   
+    # --- yuanrong_frontend 模式配置 ---
+    frontend_endpoint:
+    function_version_urn:
+    # 可选：流式参数
+    expect_num: 10
+    stream_timeout_ms: 5000
+    invoke_timeout_s: 60
+
 channels:
   feishu:
     # 飞书应用配置（支持多 bot）
