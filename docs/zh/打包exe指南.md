@@ -49,8 +49,10 @@
 cd e:\Projects\jiuwenclaw_9980
 
 # 安装项目依赖（含 PyInstaller 开发依赖）
-uv sync --extra dev
+uv sync --extra dev --upgrade-package openjiuwen
 ```
+
+其中 `openjiuwen` 会按 `pyproject.toml` 中的配置，从 `agent-core` 的 `develop` 分支同步，不需要再把 `openjiuwen/` 源码目录放进联调仓。
 
 #### 2. 构建前端
 
