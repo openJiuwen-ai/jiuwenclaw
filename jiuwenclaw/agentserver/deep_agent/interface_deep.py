@@ -14,6 +14,7 @@ from dataclasses import dataclass
 import logging
 import os
 from typing import Any, AsyncIterator
+import uuid
 
 from dotenv import load_dotenv
 from openjiuwen.core.foundation.llm import ModelRequestConfig, ModelClientConfig, Model
@@ -29,8 +30,14 @@ from openjiuwen.deepagents import DeepAgent, DeepAgentConfig
 from openjiuwen.deepagents.factory import create_deep_agent
 from openjiuwen.deepagents.prompts import resolve_language
 from openjiuwen.deepagents.workspace.workspace import Workspace
-from openjiuwen.deepagents.rails import SkillUseRail, TaskPlanningRail, ToolPromptRail, SecurityRail
+from openjiuwen.deepagents.rails import SkillUseRail, TaskPlanningRail, ToolPromptRail, SecurityRail, SkillEvolutionRail
 from openjiuwen.deepagents.rails.filesystem_rail import FileSystemRail
+from openjiuwen.agent_evolving.online.schema import (
+    EvolutionContext,
+    EvolutionRecord,
+    EvolutionTarget,
+)
+from openjiuwen.agent_evolving.online.signal_detector import SignalDetector
 
 from jiuwenclaw.agentserver.deep_agent.cron_runtime import CronRuntimeBridge
 from jiuwenclaw.agentserver.deep_agent.rails import (
@@ -53,7 +60,6 @@ from jiuwenclaw.agentserver.memory.config import clear_config_cache
 from jiuwenclaw.agentserver.memory import clear_memory_manager_cache
 from jiuwenclaw.agentserver.deep_agent.prompt_builder import build_identity_prompt
 from jiuwenclaw.agentserver.skill_manager import _SKILLS_DIR
-from jiuwenclaw.evolution.service import EvolutionService
 from jiuwenclaw.schema.agent import AgentRequest, AgentResponse, AgentResponseChunk
 from jiuwenclaw.agentserver.memory import get_memory_manager
 from openjiuwen.deepagents.tools import WebFreeSearchTool, WebPaidSearchTool, WebFetchWebpageTool
@@ -139,7 +145,8 @@ class JiuWenClawDeepAdapter:
         self._task_planning_rail: TaskPlanningRail | None = None
         self._security_rail: SecurityRail | None = None
         self._tool_prompt_rail: ToolPromptRail | None = None
-        self._evolution_service: EvolutionService | None = None
+        self._skill_evolution_rail: SkillEvolutionRail | None = None
+        self._pending_evolution_data: dict[str, dict] = {}
         self._tool_cards = None
         self._sys_operation = None
         self._cron_runtime = CronRuntimeBridge()
@@ -216,27 +223,6 @@ class JiuWenClawDeepAdapter:
         )
         return self._model
 
-    def _get_evolution_target(self) -> Any | None:
-        """Return the runtime object that actually owns evolution hooks."""
-        if self._instance is None:
-            return None
-
-        react_agent = getattr(self._instance, "react_agent", None)
-        if react_agent is not None:
-            return react_agent
-
-        return self._instance
-
-    def _bind_evolution_service(self, evo_service: EvolutionService) -> bool:
-        """Attach EvolutionService to the active runtime agent when supported."""
-        target = self._get_evolution_target()
-        if target is None or not hasattr(target, "set_evolution_service"):
-            return False
-
-        target.set_evolution_service(evo_service)
-        self._evolution_service = evo_service
-        return True
-
     @staticmethod
     def _resolve_skill_mode(config: dict[str, Any]) -> str:
         """Validate configured skill mode and fallback safely on invalid values."""
@@ -299,6 +285,28 @@ class JiuWenClawDeepAdapter:
             skill_rail = None
         return skill_rail
 
+    def _build_skill_evolution_rail(self, config: dict[str, Any]) -> SkillEvolutionRail | None:
+        """Build SkillEvolutionRail."""
+        try:
+            _env_auto_scan = os.getenv("EVOLUTION_AUTO_SCAN")
+            if _env_auto_scan is not None:
+                evolution_auto_scan: bool = _env_auto_scan.lower() in ("true", "1", "yes")
+            else:
+                evolution_auto_scan = config.get("evolution", {}).get("auto_scan", False)
+            skill_evolution_rail = SkillEvolutionRail(
+                skills_dir=str(_SKILLS_DIR),
+                llm=self._model,
+                model=config.get("model_name", "gpt-4"),
+                auto_scan=evolution_auto_scan,
+                auto_save=False
+            )
+            self._skill_evolution_rail = skill_evolution_rail
+            logger.info("[JiuWenClaw] SkillEvolutionRail create success")
+        except Exception as exc:
+            logger.warning("[JiuWenClaw] SkillEvolutionRail create failed: %s", exc)
+            skill_evolution_rail = None
+        return skill_evolution_rail
+    
     def _build_stream_event_rail(self) -> JiuClawStreamEventRail | None:
         """Build JiuClawStreamEventRail."""
         try:
@@ -362,9 +370,12 @@ class JiuWenClawDeepAdapter:
             _RailBuildInfo("_skill_rail", self._build_skill_rail,
                            {"config": config, "include_tools": self._filesystem_rail is None}),
             _RailBuildInfo("_stream_event_rail", self._build_stream_event_rail),
+            _RailBuildInfo("_task_planning_rail", self._build_task_planning_rail),
             _RailBuildInfo("_tool_prompt_rail", self._build_tool_prompt_rail),
             _RailBuildInfo("_security_rail", self._build_security_rail),
         ]
+        if config.get("evolution", {}).get("enabled", False):
+            rail_infos.append(_RailBuildInfo("_skill_evolution_rail", self._build_skill_evolution_rail,{"config": config}))
 
         rails_list = []
         for info in rail_infos:
@@ -377,7 +388,7 @@ class JiuWenClawDeepAdapter:
     def _rails_snapshot_for_unregister(self) -> list[Any]:
         """与 _build_agent_rails 顺序一致，用于热更新前 unregister."""
         rails = []
-        for attr in ("_filesystem_rail", "_skill_rail", "_stream_event_rail", "_tool_prompt_rail", "_security_rail"):
+        for attr in ("_filesystem_rail", "_skill_rail", "_stream_event_rail", "_tool_prompt_rail", "_security_rail", "_skill_evolution_rail"):
             r = getattr(self, attr, None)
             if r is not None:
                 rails.append(r)
@@ -441,6 +452,13 @@ class JiuWenClawDeepAdapter:
         if self._security_rail is not None:
             rails_list.append(self._security_rail)
 
+        if self._skill_evolution_rail is not None:
+            self._skill_evolution_rail.update_llm(self._model, config.get("model_name", "gpt-4"))
+            _env_auto_scan = os.getenv("EVOLUTION_AUTO_SCAN")
+            if _env_auto_scan is not None:
+                self._skill_evolution_rail.auto_scan = _env_auto_scan.lower() in ("true", "1", "yes")
+            rails_list.append(self._skill_evolution_rail)
+
         return rails_list
 
     def _proc_memory_compression_config(self, agent_config: ReActAgentConfig):
@@ -478,42 +496,6 @@ class JiuWenClawDeepAdapter:
                 )
             ]
             agent_config.configure_context_processors(processors)
-
-    def _create_evolution_service(self, config: dict[str, Any]):
-        """Create evolution service"""
-        evolution_cfg: dict = config.get("evolution", {})
-        evolution_enabled: bool = evolution_cfg.get("enabled", False)
-
-        has_valid_model_config = False
-        if isinstance(config.get("model_client_config"), dict):
-            mcc = config["model_client_config"]
-            api_key = mcc.get("api_key", "")
-            if api_key or os.getenv("API_KEY"):
-                has_valid_model_config = True
-        if not has_valid_model_config:
-            if os.getenv("API_KEY"):
-                has_valid_model_config = True
-
-        if evolution_enabled and has_valid_model_config:
-            _env_auto_scan = os.getenv("EVOLUTION_AUTO_SCAN")
-            if _env_auto_scan is not None:
-                evolution_auto_scan: bool = _env_auto_scan.lower() in ("true", "1", "yes")
-            else:
-                evolution_auto_scan = evolution_cfg.get("auto_scan", False)
-            evo_service = EvolutionService(
-                llm=self._model,
-                model=config.get("model_name", "gpt-4"),
-                skills_base_dir=str(_SKILLS_DIR),
-                auto_scan=evolution_auto_scan,
-            )
-            if self._bind_evolution_service(evo_service):
-                logger.info("[JiuWenClawDeepAdapter] Evolution has been enabled: auto_scan=%s", evolution_auto_scan)
-            else:
-                logger.warning(
-                    "[JiuWenClawDeepAdapter] Evolution service created but no compatible agent hook was found")
-        elif evolution_enabled and not has_valid_model_config:
-            logger.warning(
-                "[JiuWenClawDeepAdapter] Evolution is enabled but skipped: no valid model API key configured")
 
     async def _proc_context_compaction(self):
         """Process context compaction config."""
@@ -630,7 +612,7 @@ class JiuWenClawDeepAdapter:
             sys_operation=sys_operation
         )
         await self._proc_context_compaction()
-        self._create_evolution_service(config)
+        # self._create_evolution_service(config)
         await self._register_mcp_server()
         logger.info("[JiuWenClawDeepAdapter] 初始化完成: agent_name=%s", self._agent_name)
 
@@ -667,15 +649,6 @@ class JiuWenClawDeepAdapter:
         for rail in rails_list:
             self._instance.add_rail(rail)
 
-        evo_svc = self._evolution_service
-        if evo_svc is not None:
-            self._bind_evolution_service(evo_svc)
-        if evo_svc is not None and self._model is not None:
-            new_model = config.get("model_name", "gpt-4")
-            evo_svc.update_llm(self._model, new_model)
-            _env_auto_scan = os.getenv("EVOLUTION_AUTO_SCAN")
-            if _env_auto_scan is not None:
-                evo_svc.auto_scan = _env_auto_scan.lower() in ("true", "1", "yes")
         logger.info("[JiuWenClawDeepAdapter] 配置已热更新（configure），未重启进程")
 
     def _bind_runtime_cron_context(
@@ -873,11 +846,9 @@ class JiuWenClawDeepAdapter:
         request_id = request.params.get("request_id", "") if isinstance(request.params, dict) else ""
         answers = request.params.get("answers", []) if isinstance(request.params, dict) else []
         resolved = False
-        target = self._get_evolution_target()
-        if target is not None:
-            resolve_fn = getattr(target, 'resolve_evolution_approval', None)
-            if resolve_fn is not None:
-                resolved = resolve_fn(request_id, answers)
+        if request_id.startswith("skill_evolve_approve_"):
+            resolved = await self._handle_evolution_approval(request_id, answers)
+
         return AgentResponse(
             request_id=request.request_id,
             channel_id=request.channel_id,
@@ -886,24 +857,234 @@ class JiuWenClawDeepAdapter:
             metadata=request.metadata,
         )
 
-    async def _handle_slash_command(self, query: str) -> dict[str, Any] | None:
+    async def _handle_evolution_approval(self, request_id: str, answers: list) -> bool:
+        """Persist approved evolution records from the cached _evolution_data."""
+        evo_data = self._pending_evolution_data.pop(request_id, None)
+        if evo_data is None or self._skill_evolution_rail is None:
+            return False
+
+        skill_name = evo_data.get("skill_name", "")
+        raw_records = evo_data.get("records", [])
+        kept = 0
+        for i, raw in enumerate(raw_records):
+            accept = (
+                i < len(answers)
+                and isinstance(answers[i], dict)
+                and "接收" in answers[i].get("selected_options", [])
+            )
+            if accept:
+                record = EvolutionRecord.from_dict(raw)
+                await self._skill_evolution_rail.store.append_record(skill_name, record)
+                kept += 1
+
+        logger.info(
+            "[JiuWenClaw] evolution approval resolved: request_id=%s kept=%d/%d skill=%s",
+            request_id, kept, len(raw_records), skill_name,
+        )
+        return True    
+
+    # ------------------------------------------------------------------
+    # /evolve & /solidify command handlers (new online module)
+    # ------------------------------------------------------------------
+
+    async def _handle_evolve_command(self, query: str, session_id: str) -> dict[str, Any]:
+        """/evolve [list | <skill_name>] handler using the new online evolution module.
+
+        Returns a result dict.  When evolution records are generated the dict
+        includes an ``approval_chunks`` list so the caller can forward the
+        approval event to the frontend.
+        """
+        rail = self._skill_evolution_rail
+        assert rail is not None
+        store = rail.store
+
+        skill_names = store.list_skill_names()
+
+        parts = query.split(maxsplit=1)
+        skill_arg = parts[1].strip() if len(parts) > 1 else ""
+
+        # --- /evolve list (or bare /evolve) ---
+        if not skill_arg or skill_arg == "list":
+            if not skill_names:
+                return {
+                    "output": "当前 skills_base_dir 下未找到任何 Skill 目录。",
+                    "result_type": "answer",
+                }
+            summary = await store.list_pending_summary(skill_names)
+            return {
+                "output": f"**Skills 演进记录：**\n\n{summary}",
+                "result_type": "answer",
+            }
+
+        # --- /evolve <skill_name> ---
+        skill_name = skill_arg
+        if skill_name not in skill_names:
+            available = "、".join(skill_names) or "（无可用 Skill）"
+            return {
+                "output": (
+                    f"在 skills_base_dir 下未找到 Skill '{skill_name}'。\n"
+                    f"当前可用 Skill：{available}\n"
+                    f"可使用 /evolve list 查看所有记录。"
+                ),
+                "result_type": "error",
+            }
+
+        # 1) Collect conversation messages from the context engine cache
+        parsed_messages = self._collect_messages_for_evolve(session_id)
+        if not parsed_messages:
+            return {
+                "output": "当前对话无可用消息，无法检测演进信号。请先与 Agent 进行对话后再执行 /evolve。",
+                "result_type": "answer",
+            }
+
+        # 2) Detect signals (reuse rail's dedup set)
+        existing_skills = {n for n in skill_names if store.skill_exists(n)}
+        detector = SignalDetector(existing_skills=existing_skills)
+        detected = detector.detect(parsed_messages)
+
+        new_signals = [
+            sig for sig in detected
+            if (sig.signal_type, sig.excerpt[:100]) not in rail.processed_signal_keys
+        ]
+        for sig in new_signals:
+            rail.processed_signal_keys.add((sig.signal_type, sig.excerpt[:100]))
+
+        attributed = [s for s in new_signals if s.skill_name == skill_name]
+        if not attributed:
+            return {
+                "output": "当前对话未发现明确的演进信号（无工具执行失败、无用户纠正）。\n",
+                "result_type": "answer",
+            }
+
+        # 3) Generate experience records
+        context = EvolutionContext(
+            skill_name=skill_name,
+            signals=attributed,
+            skill_content=await store.read_skill_content(skill_name),
+            messages=parsed_messages,
+            existing_desc_records=await store.get_pending_records(skill_name, EvolutionTarget.DESCRIPTION),
+            existing_body_records=await store.get_pending_records(skill_name, EvolutionTarget.BODY),
+        )
+        try:
+            records = await rail.evolver.generate_skill_experience(context)
+        except Exception as exc:
+            logger.warning("[JiuWenClaw] evolve generate failed (skill=%s): %s", skill_name, exc)
+            return {
+                "output": f"演进经验生成失败：{exc}",
+                "result_type": "error",
+            }
+
+        if not records:
+            return {
+                "output": "当前对话未发现明确的演进信号（无工具执行失败、无用户纠正）。\n",
+                "result_type": "answer",
+            }
+
+        # 4) Build approval event (do NOT persist yet)
+        request_id = f"skill_evolve_approve_{uuid.uuid4().hex[:8]}"
+        questions = []
+        for record in records:
+            content_preview = record.change.content[:1000]
+            section = record.change.section
+            target_tag = record.change.target.value
+            questions.append({
+                "question": (
+                    f"**Skill '{skill_name}' 演进生成了新经验：**\n\n"
+                    f"- **目标**: {target_tag}\n"
+                    f"- **章节**: {section}\n\n"
+                    f"{content_preview}"
+                ),
+                "header": "技能演进审批",
+                "options": [
+                    {"label": "接收", "description": "保留此演进经验"},
+                    {"label": "拒绝", "description": "丢弃此演进经验"},
+                ],
+                "multi_select": False,
+            })
+
+        self._pending_evolution_data[request_id] = {
+            "skill_name": skill_name,
+            "records": [r.to_dict() for r in records],
+        }
+
+        summaries = "\n".join(
+            f"  {i + 1}. **[{r.change.section}]** {r.change.content[:200]}"
+            for i, r in enumerate(records)
+        )
+        return {
+            "output": (
+                f"已为 Skill '{skill_name}' 生成 {len(records)} 条演进经验，请审批：\n"
+                f"{summaries}"
+            ),
+            "result_type": "answer",
+            "approval_chunks": [
+                {
+                    "event_type": "chat.ask_user_question",
+                    "request_id": request_id,
+                    "questions": questions,
+                }
+            ],
+        }
+
+    def _collect_messages_for_evolve(self, session_id: str) -> list[dict]:
+        """Retrieve and normalize cached conversation messages for /evolve."""
+        if self._instance is None or self._instance.react_agent is None:
+            return []
+
+        context_engine = self._instance.react_agent.context_engine
+        context = context_engine.get_context(session_id=session_id)
+        if context is None:
+            return []
+
+        try:
+            raw_messages = list(context.get_messages())
+        except Exception as exc:
+            logger.debug("[JiuWenClaw] _collect_messages_for_evolve failed: %s", exc)
+            return []
+
+        return SkillEvolutionRail._parse_messages(raw_messages)
+
+    async def _handle_solidify_command(self, query: str) -> dict[str, Any]:
+        """/solidify <skill_name> handler using the new online EvolutionStore."""
+        rail = self._skill_evolution_rail
+        assert rail is not None
+        store = rail.store
+
+        parts = query.split(maxsplit=1)
+        skill_name = parts[1].strip() if len(parts) > 1 else ""
+        if not skill_name:
+            return {
+                "output": "请指定 Skill 名称：`/solidify <skill_name>`",
+                "result_type": "error",
+            }
+
+        count = await store.solidify(skill_name)
+        if count == 0:
+            msg = f"Skill '{skill_name}' 没有待固化的演进经验。"
+        else:
+            msg = f"已将 {count} 条演进经验固化到 Skill '{skill_name}' 的 SKILL.md。"
+        return {"output": msg, "result_type": "answer"}
+
+    async def _handle_slash_command(
+        self, query: str, session_id: str = "default",
+    ) -> dict[str, Any] | None:
         """Intercept /evolve and /solidify before agent invocation.
 
         Returns result dict if handled, None to proceed normally.
+        The dict may contain an ``approval_chunks`` list that the caller
+        should forward to the frontend as separate stream events.
         """
         stripped = query.strip()
 
         if stripped.startswith("/solidify"):
-            if self._evolution_service is None:
+            if self._skill_evolution_rail is None:
                 return {"output": "演进功能未启用。", "result_type": "error"}
-            return self._evolution_service.handle_solidify_command(stripped)
+            return await self._handle_solidify_command(stripped)
 
         if stripped.startswith("/evolve"):
-            if self._evolution_service is None:
+            if self._skill_evolution_rail is None:
                 return {"output": "演进功能未启用。", "result_type": "error"}
-            return await self._evolution_service.handle_evolve_command(
-                stripped, None, []
-            )
+            return await self._handle_evolve_command(stripped, session_id)
 
         return None
 
@@ -971,14 +1152,19 @@ class JiuWenClawDeepAdapter:
         session_id = request.session_id or "default"
         query = request.params.get("query", "")
 
-        slash_result = await self._handle_slash_command(query)
+        slash_result = await self._handle_slash_command(query, session_id)
         if slash_result is not None:
-            content = slash_result.get("output", str(slash_result))
+            approval_chunks = slash_result.get("approval_chunks")
+            if approval_chunks:
+                payload: dict[str, Any] = {"approval_chunks": approval_chunks}
+            else:
+                content = slash_result.get("output", str(slash_result))
+                payload = {"content": content}
             return AgentResponse(
                 request_id=request.request_id,
                 channel_id=request.channel_id,
                 ok=slash_result.get("result_type") != "error",
-                payload={"content": content},
+                payload=payload,
                 metadata=request.metadata,
             )
 
@@ -1056,15 +1242,32 @@ class JiuWenClawDeepAdapter:
         cid = request.channel_id
         query = request.params.get("query", "")
 
-        slash_result = await self._handle_slash_command(query)
+        # 拦截斜杠命令
+        slash_result = await self._handle_slash_command(query, session_id)
         if slash_result is not None:
-            content = slash_result.get("output", str(slash_result))
-            yield AgentResponseChunk(
-                request_id=rid,
-                channel_id=cid,
-                payload={"event_type": "chat.final", "content": content},
-                is_complete=True,
-            )
+            approval_chunks = slash_result.get("approval_chunks", [])
+            if approval_chunks:
+                for chunk in approval_chunks:
+                    yield AgentResponseChunk(
+                        request_id=request.request_id,
+                        channel_id=request.channel_id,
+                        payload=chunk,
+                        is_complete=False,
+                    )
+                yield AgentResponseChunk(
+                    request_id=request.request_id,
+                    channel_id=request.channel_id,
+                    payload={"event_type": "chat.done"},
+                    is_complete=True,
+                )
+            else:
+                content = slash_result.get("output", str(slash_result))
+                yield AgentResponseChunk(
+                    request_id=request.request_id,
+                    channel_id=request.channel_id,
+                    payload={"event_type": "chat.final", "content": content},
+                    is_complete=True,
+                )
             return
 
         if self._compaction_manager:
@@ -1244,6 +1447,13 @@ class JiuWenClawDeepAdapter:
                     accumulated_reasoning = ""
                 parsed = self._parse_stream_chunk(chunk)
                 if parsed is not None:
+                    if (
+                            parsed.get("event_type") == "chat.ask_user_question"
+                            and isinstance(parsed.get("_evolution_data"), dict)
+                    ):
+                        evo_req_id = parsed.get("request_id", "")
+                        if evo_req_id.startswith("skill_evolve_approve_"):
+                            self._pending_evolution_data[evo_req_id] = parsed.pop("_evolution_data")
                     yield AgentResponseChunk(
                         request_id=rid,
                         channel_id=cid,
@@ -1265,6 +1475,26 @@ class JiuWenClawDeepAdapter:
                     payload={"event_type": "chat.reasoning", "content": accumulated_reasoning},
                     is_complete=False,
                 )
+
+            # after_invoke 在流关闭后触发，其中缓存的审批事件无法通过
+            # session.write_stream 传递，需手动注入到 stream 输出
+            if self._skill_evolution_rail is not None:
+                for evt in self._skill_evolution_rail.drain_pending_approval_events():
+                    parsed = self._parse_stream_chunk(evt)
+                    if parsed is not None:
+                        if (
+                                parsed.get("event_type") == "chat.ask_user_question"
+                                and isinstance(parsed.get("_evolution_data"), dict)
+                        ):
+                            evo_req_id = parsed.get("request_id", "")
+                            if evo_req_id.startswith("skill_evolve_approve_"):
+                                self._pending_evolution_data[evo_req_id] = parsed.pop("_evolution_data")
+                        yield AgentResponseChunk(
+                            request_id=rid,
+                            channel_id=cid,
+                            payload=parsed,
+                            is_complete=False,
+                        )
         except asyncio.CancelledError:
             logger.info("[JiuWenClawDeepAdapter] 流式任务被取消: request_id=%s session_id=%s", rid, session_id)
             raise
