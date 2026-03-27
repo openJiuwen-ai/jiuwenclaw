@@ -29,13 +29,12 @@ from openjiuwen.deepagents import DeepAgent, DeepAgentConfig
 from openjiuwen.deepagents.factory import create_deep_agent
 from openjiuwen.deepagents.prompts import resolve_language
 from openjiuwen.deepagents.workspace.workspace import Workspace
-from openjiuwen.deepagents.rails import SkillUseRail, TaskPlanningRail
+from openjiuwen.deepagents.rails import SkillUseRail, TaskPlanningRail, ToolPromptRail
 from openjiuwen.deepagents.rails.filesystem_rail import FileSystemRail
 
 from jiuwenclaw.agentserver.deep_agent.cron_runtime import CronRuntimeBridge
 from jiuwenclaw.agentserver.deep_agent.rails import (
-    JiuClawStreamEventRail,
-    ToolPromptRail,
+    JiuClawStreamEventRail
 )
 from jiuwenclaw.gateway.cron import CronTargetChannel
 from jiuwenclaw.utils import logger, USER_WORKSPACE_DIR, get_env_file, get_agent_root_dir
@@ -325,7 +324,6 @@ class JiuWenClawDeepAdapter:
         """Build ToolPromptRail."""
         try:
             tool_prompt_rail = ToolPromptRail(
-                mode="plan",
                 language=self._resolve_runtime_language(),
             )
             logger.info("[JiuWenClawDeepAdapter] ToolPromptRail create success")
@@ -420,6 +418,10 @@ class JiuWenClawDeepAdapter:
 
         if self._stream_event_rail is not None:
             rails_list.append(self._stream_event_rail)
+
+        self._tool_prompt_rail = self._build_tool_prompt_rail()
+        if self._tool_prompt_rail is not None:
+            rails_list.append(self._tool_prompt_rail)
 
         return rails_list
 
@@ -685,9 +687,6 @@ class JiuWenClawDeepAdapter:
         """Register per-request tools for current agent execution."""
         if self._instance is None:
             raise RuntimeError("JiuWenClawDeepAdapter 未初始化，请先调用 create_instance()")
-
-        if self._tool_prompt_rail is not None:
-            self._tool_prompt_rail.set_mode(mode)
 
         tool_list = self._instance.ability_manager.list()
         for tool in tool_list:

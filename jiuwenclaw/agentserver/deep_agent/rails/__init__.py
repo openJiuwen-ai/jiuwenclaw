@@ -3,9 +3,7 @@
 """JiuWenClaw Rails for DeepAgent integration."""
 
 from jiuwenclaw.agentserver.deep_agent.rails.stream_event_rail import JiuClawStreamEventRail
-from jiuwenclaw.agentserver.deep_agent.rails.tool_prompt_rail import ToolPromptRail
 
 __all__ = [
     "JiuClawStreamEventRail",
-    "ToolPromptRail",
 ]

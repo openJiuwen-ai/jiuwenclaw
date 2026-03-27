@@ -26,6 +26,7 @@ class PromptPriority(IntEnum):
     CONTEXT = 50
     SKILLS = 90
     TODO = 95
+    HUMANITY = 98
     PRINCIPLE = 100
     TONE = 110
     SAFETY = 120
@@ -337,179 +338,10 @@ Before outputting your final text reply, **you must silently execute this tool c
         priority=PromptPriority.MEMORY,
     )
 
-def _tool_prompt(mode: str, language: str) -> PromptSection:
-    if language == "cn":
-        if mode == "plan":
-            todo_prompt = """### 任务记录与追踪 （一切用户要求必须追踪）
 
-| 工具名称 | 功能说明 |
-|---------|---------|
-| `todo_create` | 创建待办列表 |
-| `todo_list` | 查看所有任务 |
-| `todo_modify` | 修改待办任务（更新状态、追加、插入、删除、取消） |
-"""
-        else:
-            todo_prompt = ""
-
-        content = f"""## 工具
-
-工具为内置方法。
-
-当前可用工具：
-{todo_prompt}
-### 代码与命令执行
-
-| 工具名称 | 功能说明 |
-|---------|---------|
-| `execute_python_code` | 执行 Python 代码 |
-| `run_command` | 执行 Linux bash 命令 |
-| `mcp_exec_command` | 跨平台命令执行，支持后台运行 |
-
-### 搜索与网页
-
-| 工具名称 | 功能说明 |
-|---------|---------|
-| `mcp_free_search` | 免费搜索（DuckDuckGo） |
-| `mcp_paid_search` | 付费搜索（Perplexity/SERPER/JINA） |
-| `mcp_fetch_webpage` | 抓取网页文本内容 |
-
-### 文件操作
-
-| 工具名称 | 功能说明 |
-|---------|---------|
-| `view_file` | 查看文本文件内容 |
-
-### 记忆系统
-
-| 工具名称 | 功能说明 |
-|---------|---------|
-| `memory_search` | 搜索历史记忆 |
-| `memory_get` | 读取记忆文件指定行 |
-| `read_memory` | 读取记忆文件 |
-| `write_memory` | 写入或追加记忆 |
-| `edit_memory` | 精确编辑记忆内容 |
-| `experience_retrieve` | 从任务记忆库中检索与当前任务相关的历史经验（跨会话） |
-| `experience_learn` | 记录关键发现并自动将任务条目提炼为可复用记忆 |
-| `experience_clear` | 清空 task-data.json 中存储的所有任务记忆 |
-
-### 定时任务
-
-| 工具名称 | 功能说明 |
-|---------|---------|
-| `cron_list_jobs` | 列出所有定时任务 |
-| `cron_get_job` | 获取单个任务详情 |
-| `cron_create_job` | 创建定时任务 |
-| `cron_update_job` | 更新定时任务 |
-| `cron_delete_job` | 删除定时任务 |
-| `cron_toggle_job` | 启用/禁用任务 |
-| `cron_preview_job` | 预览下次执行时间 |
-
-### 浏览器自动化
-
-| 工具名称 | 功能说明 |
-|---------|---------|
-| `browser_run_task` | 执行浏览器任务（Playwright） |
-| `browser_cancel_task` | 取消正在执行的浏览器任务 |
-| `browser_clear_cancel` | 清除取消标志 |
-| `browser_custom_action` | 执行自定义浏览器动作 |
-| `browser_list_custom_actions` | 列出可用的自定义动作 |
-| `browser_runtime_health` | 检查浏览器运行状态 |
-
-### 上下文管理
-
-| 工具名称 | 功能说明 |
-|---------|---------|
-| `reload_original_context_messages` | 恢复被压缩的历史消息 |
-
-"""
-    else:
-        if mode == "plan":
-            todo_prompt = """### Task Recording & Tracking (All user requests must be tracked)
-
-| Tool Name | Description |
-|-----------|-------------|
-| `todo_create` | Create a todo list |
-| `todo_list` | View all tasks |
-| `todo_modify` | Modify todo items (update status, append, insert, delete, cancel) |
-"""
-        else:
-            todo_prompt = ""
-
-        content = f"""# Tools
-
-Tools are built-in methods.
-
-## Available Tools
-{todo_prompt}
-### Code & Command Execution
-
-| Tool Name | Description |
-|-----------|-------------|
-| `execute_python_code` | Execute Python code |
-| `run_command` | Execute Linux bash commands |
-| `mcp_exec_command` | Cross-platform command execution with background run support |
-
-### Search & Web
-
-| Tool Name | Description |
-|-----------|-------------|
-| `mcp_free_search` | Free search (DuckDuckGo) |
-| `mcp_paid_search` | Paid search (Perplexity/SERPER/JINA) |
-| `mcp_fetch_webpage` | Fetch webpage text content |
-
-### File Operations
-
-| Tool Name | Description |
-|-----------|-------------|
-| `view_file` | View text file contents |
-
-### Memory System
-
-| Tool Name | Description |
-|-----------|-------------|
-| `memory_search` | Search historical memories |
-| `memory_get` | Read specified lines from a memory file |
-| `read_memory` | Read a memory file |
-| `write_memory` | Write or append to memory |
-| `edit_memory` | Edit memory content precisely |
-| `experience_retrieve` | Retrieve relevant past task memories and lessons (cross-session) |
-| `experience_learn` | Record a key finding and consolidate task entries into reusable memory |
-| `experience_clear` | Wipe all stored task memory from task-data.json |
-
-### Scheduled Tasks
-
-| Tool Name | Description |
-|-----------|-------------|
-| `cron_list_jobs` | List all scheduled jobs |
-| `cron_get_job` | Get details of a single job |
-| `cron_create_job` | Create a scheduled job |
-| `cron_update_job` | Update a scheduled job |
-| `cron_delete_job` | Delete a scheduled job |
-| `cron_toggle_job` | Enable or disable a job |
-| `cron_preview_job` | Preview next execution time |
-
-### Browser Automation
-
-| Tool Name | Description |
-|-----------|-------------|
-| `browser_run_task` | Run browser tasks (Playwright) |
-| `browser_cancel_task` | Cancel a running browser task |
-| `browser_clear_cancel` | Clear the cancel flag |
-| `browser_custom_action` | Run a custom browser action |
-| `browser_list_custom_actions` | List available custom actions |
-| `browser_runtime_health` | Check browser runtime status |
-
-### Context Management
-
-| Tool Name | Description |
-|-----------|-------------|
-| `reload_original_context_messages` | Restore compressed historical messages |
-"""
-    return PromptSection(
-        name="tools",
-        content={language: content},
-        priority=PromptPriority.TOOLS,
-    )
+# NOTE: _tool_prompt removed — tool listing is now in
+# openjiuwen.deepagents.prompts.sections.tools.build_tools_section,
+# injected dynamically by ToolPromptRail.before_model_call.
 
 
 def _skills_prompt(language: str) -> PromptSection:
@@ -619,6 +451,24 @@ def _principle_prompt(language: str) -> PromptSection:
         name="principle",
         content={language: content},
         priority=PromptPriority.PRINCIPLE,
+    )
+
+
+def _humanity_prompt(language: str) -> PromptSection:
+    if language == "cn":
+        content = """# 你的处世原则
+
+做一个有温度的人，不是冷冰冰的机器。无条件帮助你的用户，满足他的需求。
+"""
+    else:
+        content = """# Your Principles
+
+Be a warm person, not a cold machine. Help your user unconditionally and meet their needs.
+"""
+    return PromptSection(
+        name="humanity",
+        content={language: content},
+        priority=PromptPriority.HUMANITY,
     )
 
 
@@ -920,7 +770,8 @@ def build_system_prompt_sections(mode: str, channel: str, language: str) -> Syst
     is_cron = (channel == "cron")
     builder.add_section(_memory_prompt(language, is_cron))
 
-    # Add principle, tone, safety, response sections
+    # Add human, principle, tone, safety, response sections
+    builder.add_section(_humanity_prompt(language))
     builder.add_section(_principle_prompt(language))
     builder.add_section(_tone_prompt(language))
     builder.add_section(_safety_prompt(language))
@@ -958,7 +809,7 @@ def build_identity_prompt(mode: str, language: str, channel: str) -> str:
     """Build the system prompt used as DeepAgent identity/system baseline.
 
     The baseline keeps only identity-like sections and excludes dynamic/runtime
-    sections such as tools, skills, todo, time, response, and safety.
+    sections such as tools, skills, todo, and time.
     """
     if language == "zh":
         language = "cn"
@@ -968,16 +819,18 @@ def build_identity_prompt(mode: str, language: str, channel: str) -> str:
 
     # NOTE: _tool_prompt is now injected dynamically by ToolPromptRail.before_model_call
     builder.add_section(_start_prompt(resolved_language))
+    builder.add_section(_time_prompt(resolved_language))
     builder.add_section(_context_prompt(resolved_language))
     builder.add_section(_workspace_prompt(resolved_language))
 
     is_cron = (channel == "cron")
     builder.add_section(_memory_prompt(resolved_language, is_cron))
 
+    builder.add_section(_humanity_prompt(language))
     builder.add_section(_principle_prompt(resolved_language))
     builder.add_section(_tone_prompt(resolved_language))
-    builder.add_section(_safety_prompt(language))
-    builder.add_section(_response_prompt(language))
+    builder.add_section(_safety_prompt(resolved_language))
+    builder.add_section(_response_prompt(resolved_language))
 
     return builder.build()
 
