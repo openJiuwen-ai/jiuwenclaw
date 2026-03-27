@@ -589,7 +589,7 @@ self._web_tools_registered = True
    - 搜索工具
    - 等等
 
-2. **创建自定义工具**：在 `deep_agent/tools/` 目录下创建新的工具类，继承 `openjiuwen.deepagents.tools.Tool` 基类，实现 `execute()` 方法。
+2. **创建自定义工具**：在 `deep_agent/tools/` 目录下创建新的工具类，继承 `openjiuwen.core.foundation.tool.base.Tool` 基类，实现 `invoke()/stream()` 方法。
 
 工具注册方式：在 `interface_deep.py` 中通过 `Runner.resource_mgr.add_tool()` 注册工具实例。
 
@@ -692,7 +692,7 @@ uv run python -m jiuwenclaw.start_services dev
 
 **解决方案**:
 
-1. 检查 `~/.jiuwenclaw/.env` 文件
+1. 检查 `~/.jiuwenclaw/config/.env` 文件
 2. 确保配置了 `API_KEY` 和 `MODEL_PROVIDER`
 3. 查看日志中的错误信息
 
