@@ -43,6 +43,7 @@ from jiuwenclaw.agentserver.tools.todo_toolkits import TodoToolkit
 from jiuwenclaw.evolution.service import EvolutionService
 from jiuwenclaw.utils import get_agent_memory_dir, get_workspace_dir
 from jiuwenclaw.config import get_config
+from openjiuwen.core.single_agent.rail import InvokeInputs, AgentCallbackContext
 
 logger = logging.getLogger(__name__)
 
@@ -333,6 +334,10 @@ class JiuClawReActAgent(ReActAgent):
                 return {"output": "演进功能未启用。", "result_type": "error"}
             return self._evolution_service.handle_solidify_command(stripped)
 
+        # Build callback context for ability_manager.execute()
+        invoke_inputs = InvokeInputs(query=user_input, conversation_id=session_id)
+        ctx = AgentCallbackContext(agent=self, inputs=invoke_inputs, session=session)
+
         # Initialize context
         context = await self._init_context(session)
         await context.add_messages(UserMessage(content=user_input))
@@ -453,7 +458,7 @@ class JiuClawReActAgent(ReActAgent):
                     # 执行被允许的工具调用
                     if allowed_tool_calls:
                         results = await self.ability_manager.execute(
-                            allowed_tool_calls, session
+                            ctx=ctx, tool_call=allowed_tool_calls, session=session
                         )
 
                         for i, (_result, tool_msg) in enumerate(results):

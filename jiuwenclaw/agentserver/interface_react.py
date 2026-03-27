@@ -1,13 +1,16 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 
-"""JiuWenClaw - 基于 openjiuwen ReActAgent 的 IAgentServer 实现."""
+"""JiuWenClaw ReAct Adapter - 基于 openjiuwen ReActAgent 的适配器实现.
+
+此模块实现 AgentAdapter 协议，封装 ReAct SDK 的所有专属逻辑。
+公共编排逻辑（session 队列、Skills 路由、heartbeat 等）由 Facade 层处理。
+"""
 
 from __future__ import annotations
 
 import asyncio
-import json
+import logging
 import os
-import time
 from typing import Any, AsyncIterator
 
 from dotenv import load_dotenv
@@ -24,18 +27,16 @@ from openjiuwen.core.session.checkpointer.persistence import PersistenceCheckpoi
 from jiuwenclaw.agentserver.prompt_builder import build_system_prompt
 from jiuwenclaw.agentserver.tools.multi_session_toolkits import MultiSessionToolkit
 from jiuwenclaw.agentserver.tools import SendFileToolkit
-from jiuwenclaw.agentserver.prompt_builder import build_system_prompt, build_user_prompt
 from jiuwenclaw.gateway.cron import CronController, CronTargetChannel
+
 from jiuwenclaw.utils import (
     get_agent_root_dir,
-    get_agent_home_dir,
     get_checkpoint_dir,
     get_env_file,
-    get_workspace_dir,
-    logger,
 )
 from jiuwenclaw.config import get_config
 from jiuwenclaw.agentserver.react_agent import JiuClawReActAgent
+from jiuwenclaw.agentserver.permissions.checker import TOOL_PERMISSION_CHANNEL_ID
 from jiuwenclaw.agentserver.tools.browser_tools import register_browser_runtime_mcp_server
 from jiuwenclaw.agentserver.tools.audio_tools import (
     audio_question_answering,
@@ -80,80 +81,30 @@ from jiuwenclaw.agentserver.memory import clear_memory_manager_cache
 from jiuwenclaw.agentserver.permissions import (
     init_permission_engine,
     get_permission_engine,
-    PermissionLevel,
 )
-from jiuwenclaw.agentserver.skill_manager import SkillManager, _SKILLS_DIR
+from jiuwenclaw.agentserver.skill_manager import _SKILLS_DIR
 from jiuwenclaw.evolution.service import EvolutionService
 from jiuwenclaw.schema.agent import AgentRequest, AgentResponse, AgentResponseChunk
 from jiuwenclaw.agentserver.memory import get_memory_manager
-from jiuwenclaw.agentserver.session_history import append_history_record
-from jiuwenclaw.schema.message import ReqMethod
 
 load_dotenv(dotenv_path=get_env_file())
 
-
-SYSTEM_PROMPT = """# 角色
-你是一个能够帮助用户执行任务的小助手。
-
-在完成任务的同时，你应该充分利用记忆系统，记录用户背景、任务上下文、项目信息、偏好、路径或环境信息等长期有价值的内容，以保持与用户的长期上下文连续性。
-
-你的上下文在过长时会被自动压缩，当你看到已卸载内容标记并认为获取该内容有助于回答问题时，可随时调用reload_original_context_messages函数：
-
-调用reload_original_context_messages(offload_handle="<id>", offload_type="<type>")，并使用标记中的确切值
-
-请勿猜测或编造缺失的内容
-
-存储类型："in_memory"（会话缓存）
-"""
-
-TODO_PROMPT = """
-# 任务执行规则
-1. 所有任务必须通过 todo 工具进行记录和追踪。
-2. 首先，你应该尝试使用 todo_create 创建新任务。
-3. 但如果遇到"错误：待办列表已存在"的提示，则必须使用 todo_insert 函数添加任务。
-4. 如果用户有新的需求，请分析当前已有任务，并结合当前执行情况，对当前的 todo 任务实现最小改动，以满足用户的需求。
-5. **完成任务强制规则**：
-   - 任务的每个子项执行完毕后，**必须调用 todo_complete 工具**将其标记为已完成
-   - todo_complete 工具需要传入对应的任务ID（从当前待办列表中获取）
-   - 只有成功调用 todo_complete 工具后，才能向用户报告任务已完成
-6. 严禁仅用语言表示任务完成，必须实际调用工具。
-
-处理用户请求时，请检查你的技能是否适用，阅读对应的技能描述，使用合理的技能。
-"""
-
-# Skills 请求路由表
-_SKILL_ROUTES: dict[ReqMethod, str] = {
-    ReqMethod.SKILLS_LIST: "handle_skills_list",
-    ReqMethod.SKILLS_INSTALLED: "handle_skills_installed",
-    ReqMethod.SKILLS_GET: "handle_skills_get",
-    ReqMethod.SKILLS_MARKETPLACE_LIST: "handle_skills_marketplace_list",
-    ReqMethod.SKILLS_INSTALL: "handle_skills_install",
-    ReqMethod.SKILLS_UNINSTALL: "handle_skills_uninstall",
-    ReqMethod.SKILLS_IMPORT_LOCAL: "handle_skills_import_local",
-    ReqMethod.SKILLS_MARKETPLACE_ADD: "handle_skills_marketplace_add",
-    ReqMethod.SKILLS_MARKETPLACE_REMOVE: "handle_skills_marketplace_remove",
-    ReqMethod.SKILLS_MARKETPLACE_TOGGLE: "handle_skills_marketplace_toggle",
-    ReqMethod.SKILLS_SKILLNET_SEARCH: "handle_skills_skillnet_search",
-    ReqMethod.SKILLS_SKILLNET_INSTALL: "handle_skills_skillnet_install",
-    ReqMethod.SKILLS_SKILLNET_INSTALL_STATUS: "handle_skills_skillnet_install_status",
-}
+logger = logging.getLogger(__name__)
 
 
-class JiuWenClaw:
-    """基于 openJiuwen ReActAgent 的 AgentServer 实现."""
+class JiuWenClawReactAdapter:
+    """ReAct SDK 适配器，实现 AgentAdapter 协议.
+
+    封装所有 ReAct 专属逻辑：
+    - ReActAgent 实例生命周期管理
+    - ReAct runtime tools 注册
+    - ReAct stream event 解析
+    - ReAct evolution 绑定
+    - ReAct interrupt / user_answer 处理
+    """
 
     def __init__(self) -> None:
         self._instance: JiuClawReActAgent | None = None
-        self._skill_manager = SkillManager()
-        self._skill_manager.set_skillnet_install_complete_hook(self.create_instance)
-        self._session_tasks: dict[str, asyncio.Task] = {}  # session_id -> running_task
-        self._session_priorities: dict[str, int] = {}  # session_id -> 优先级计数器（用于先进后出）
-        self._session_queues: dict[str, asyncio.PriorityQueue] = {}  # session_id -> 优先队列
-        self._session_processors: dict[str, asyncio.Task] = {}  # session_id -> processor_task
-        # Memory system expects workspace_dir/layout:
-        # - workspace_dir/memory/MEMORY.md + USER.md
-        # - workspace_dir/memory/memory.db (SQLite vector index)
-        # Therefore we set workspace_dir to agent root, not agent/workspace.
         self._workspace_dir: str = str(get_agent_root_dir())
         self._agent_name: str = "main_agent"
         self._compaction_manager: ContextCompactionManager | None = None
@@ -164,11 +115,9 @@ class JiuWenClaw:
         self._task_memory_tools_registered: bool = False
         self._mcp_tools_registered: bool = False
         self._video_tool_registered: bool = False
-        self._send_file_tool_registered: bool = False
         self._xiaoyi_phone_tools_registered: bool = False
         self._todo_tool_sessions_registered: set[str] = set()
         self._sysop_card_id: str | None = None
-
         self._session_tool = None
 
     @staticmethod
@@ -184,16 +133,18 @@ class JiuWenClaw:
             )
             CheckpointerFactory.set_default_checkpointer(checkpointer)
         except Exception as e:
-            logger.error(("[JiuWenClaw] fail to setup checkpoint due to: %s", e))
+            logger.error("[JiuWenClawReactAdapter] fail to setup checkpoint due to: %s", e)
 
     def _load_react_config(self, config):
-        # 提取 agent_name，如果不存在则使用默认值
         react_config = config.get("react", {}).copy()
         agent_name = react_config.pop("agent_name", "main_agent")
         self._agent_name = agent_name
 
-        # 处理 model_client_config：确保包含必需字段
-        model_configs = config.get("models", []).copy()	 
+        model_configs = config.get("models", {})
+        if not isinstance(model_configs, dict):
+            model_configs = {}
+        else:
+            model_configs = model_configs.copy()
         react_config = {**react_config, **model_configs.get("default", {}).copy(), "prompt_template": [
             {"role": "system", "content": build_system_prompt(
                 mode="plan",
@@ -202,7 +153,6 @@ class JiuWenClaw:
             )}
         ]}
 
-        # 创建 ReActAgentConfig
         agent_config = ReActAgentConfig(**react_config)
 
         context_engine_config = react_config.get('context_engine_config', {}).copy()
@@ -210,7 +160,6 @@ class JiuWenClaw:
         if context_engine_config.get("enabled", False):
             message_offloader_config = context_engine_config.get("message_offloader_config", {}).copy()
             dialogue_compressor_config = context_engine_config.get("dialogue_compressor_config", {}).copy()
-            # 上下文压缩卸载
             model_name = (model_configs
                           .get("default", {})
                           .get("model_client_config", {})
@@ -264,13 +213,12 @@ class JiuWenClaw:
         try:
             sysop_card = SysOperationCard(
                 mode=OperationMode.LOCAL,
-                # Scope sys_operation to agent root so skills/memory/home/workspace are all accessible.
                 work_config=LocalWorkConfig(work_dir=str(get_agent_root_dir())),
             )
             Runner.resource_mgr.add_sys_operation(sysop_card)
             sysop_card_id = sysop_card.id
         except Exception as exc:
-            logger.warning("[JiuWenClaw] add sys_operation failed, fallback without it: %s", exc)
+            logger.warning("[JiuWenClawReactAdapter] add sys_operation failed, fallback without it: %s", exc)
         self._sysop_card_id = sysop_card_id
 
         agent_card = AgentCard(name=self._agent_name, id='jiuwenclaw')
@@ -279,36 +227,36 @@ class JiuWenClaw:
         if sysop_card_id and hasattr(self._instance, "_skill_util"):
             agent_config.sys_operation_id = sysop_card_id
         elif sysop_card_id:
-            logger.warning("[JiuWenClaw] ReActAgent has no _skill_util; skip sys_operation_id binding.")
+            logger.warning("[JiuWenClawReactAdapter] ReActAgent has no _skill_util; skip sys_operation_id binding.")
 
         self._instance.configure(agent_config)
 
-        # register installed skills (compatible with openjiuwen variants).
         if hasattr(self._instance, "_skill_util"):
             try:
                 await self._instance.register_skill(str(_SKILLS_DIR))
             except Exception as exc:
-                logger.warning("[JiuWenClaw] register_skill failed, continue without skills: %s", exc)
+                logger.warning("[JiuWenClawReactAdapter] register_skill failed, continue without skills: %s", exc)
 
-            # Register EvolutionService (enable evolution feature)
             evolution_cfg: dict = config_base.get("react", {}).pop("evolution", {})
             evolution_enabled: bool = evolution_cfg.get("enabled", False)
 
-            # 检查是否有有效的模型配置（api_key 或 client_provider）
             has_valid_model_config = False
-            if isinstance(config_base.get("models", dict).get("default", dict).get("model_client_config"), dict):	 
-                mcc = config_base.get("models", dict).get("default", dict)["model_client_config"]
-                # 检查是否有 api_key（非空）或通过环境变量配置
+            models_config = config_base.get("models")
+            if not isinstance(models_config, dict):
+                models_config = {}
+            default_models_config = models_config.get("default")
+            if not isinstance(default_models_config, dict):
+                default_models_config = {}
+            if isinstance(default_models_config.get("model_client_config"), dict):
+                mcc = default_models_config.get("model_client_config")
                 api_key = mcc.get("api_key", "")
                 if api_key or os.getenv("API_KEY"):
                     has_valid_model_config = True
-            # 如果没有 api_key，检查是否通过其他方式配置（如从环境变量获取）
             if not has_valid_model_config:
                 if os.getenv("API_KEY"):
                     has_valid_model_config = True
 
             if evolution_enabled and has_valid_model_config:
-                # 优先从环境变量读取（前端配置）回退到 config.yaml
                 _env_auto_scan = os.getenv("EVOLUTION_AUTO_SCAN")
                 if _env_auto_scan is not None:
                     evolution_auto_scan: bool = _env_auto_scan.lower() in ("true", "1", "yes")
@@ -321,13 +269,13 @@ class JiuWenClaw:
                     auto_scan=evolution_auto_scan,
                 )
                 self._instance.set_evolution_service(evo_service)
-                logger.info("[JiuWenClaw] Evolution has been enabled: auto_scan=%s", evolution_auto_scan)
+                logger.info("[JiuWenClawReactAdapter] Evolution has been enabled: auto_scan=%s", evolution_auto_scan)
             elif evolution_enabled and not has_valid_model_config:
-                logger.warning("[JiuWenClaw] Evolution is enabled but skipped: no valid model API key configured")
+                logger.warning(
+                    "[JiuWenClawReactAdapter] Evolution is enabled but skipped: no valid model API key configured")
         else:
-            logger.warning("[JiuWenClaw] ReActAgent has no _skill_util; skip skill registration.")
+            logger.warning("[JiuWenClawReactAdapter] ReActAgent has no _skill_util; skip skill registration.")
 
-        # add memory tools
         await init_memory_manager_async(
             workspace_dir=self._workspace_dir,
             agent_id=self._agent_name,
@@ -337,18 +285,16 @@ class JiuWenClaw:
             self._instance.ability_manager.add(tool.card)
         self._memory_tools_registered = True
 
-        # add task memory tools (TaskMemoryService skill)
         if _is_task_memory_enabled():
             try:
                 for tool in get_task_tools():
                     Runner.resource_mgr.add_tool(tool)
                     self._instance.ability_manager.add(tool.card)
                 self._task_memory_tools_registered = True
-                logger.info("[JiuWenClaw] task memory tools registered")
+                logger.info("[JiuWenClawReactAdapter] task memory tools registered")
             except Exception as exc:
-                logger.warning("[JiuWenClaw] task memory tools registration failed: %s", exc)
+                logger.warning("[JiuWenClawReactAdapter] task memory tools registration failed: %s", exc)
 
-        # add video_understanding tool
         try:
             if not Runner.resource_mgr.get_tool(video_understanding.card.id):
                 Runner.resource_mgr.add_tool(video_understanding)
@@ -356,7 +302,7 @@ class JiuWenClaw:
             self._video_tool_registered = True
         except Exception as exc:
             self._video_tool_registered = False
-            logger.warning("[JiuWenClaw] video_understanding tool registration failed: %s", exc)
+            logger.warning("[JiuWenClawReactAdapter] video_understanding tool registration failed: %s", exc)
 
         for mcp_tool in get_mcp_tools():
             Runner.resource_mgr.add_tool(mcp_tool)
@@ -381,29 +327,26 @@ class JiuWenClaw:
                 tag=f"agent.{self._agent_name}",
             )
         except Exception as exc:
-            logger.warning("[JiuWenClaw] browser MCP registration skipped: %s", exc)
+            logger.warning("[JiuWenClawReactAdapter] browser MCP registration skipped: %s", exc)
 
-        # add vision tools (直接注册方式)
         try:
             for tool in [visual_question_answering]:
                 Runner.resource_mgr.add_tool(tool)
                 self._instance.ability_manager.add(tool.card)
             self._vision_mcp_registered = True
-            logger.info("[JiuWenClaw] vision tools registered successfully")
+            logger.info("[JiuWenClawReactAdapter] vision tools registered successfully")
         except Exception as exc:
-            logger.warning("[JiuWenClaw] vision tools registration skipped: %s", exc)
+            logger.warning("[JiuWenClawReactAdapter] vision tools registration skipped: %s", exc)
 
-        # add audio tools (直接注册方式)
         try:
             for tool in [audio_question_answering, audio_metadata]:
                 Runner.resource_mgr.add_tool(tool)
                 self._instance.ability_manager.add(tool.card)
             self._audio_mcp_registered = True
-            logger.info("[JiuWenClaw] audio tools registered successfully")
+            logger.info("[JiuWenClawReactAdapter] audio tools registered successfully")
         except Exception as exc:
-            logger.warning("[JiuWenClaw] audio tools registration skipped: %s", exc)
+            logger.warning("[JiuWenClawReactAdapter] audio tools registration skipped: %s", exc)
 
-        # add device-side plugins (xiaoyi phone tools)
         config_base = get_config()
         channels_cfg = config_base.get("channels", {})
         xiaoyi_cfg = channels_cfg.get("xiaoyi", {})
@@ -411,7 +354,6 @@ class JiuWenClaw:
 
         if xiaoyi_phone_tools_enabled:
             try:
-                # 批量注册所有设备侧工具
                 phone_tools = [
                     get_user_location,
                     create_note, search_notes, modify_note,
@@ -430,36 +372,35 @@ class JiuWenClaw:
                         Runner.resource_mgr.add_tool(tool)
                         self._instance.ability_manager.add(tool.card)
                     except Exception as tool_exc:
-                        logger.warning(f"[JiuWenClaw] Failed to register tool {tool.card.name}: {tool_exc}")
+                        logger.warning(f"[JiuWenClawReactAdapter] Failed to register tool {tool.card.name}: {tool_exc}")
 
                 self._xiaoyi_phone_tools_registered = True
-                logger.info(f"[JiuWenClaw] {len(phone_tools)} xiaoyi phone tools registered successfully")
+                logger.info(f"[JiuWenClawReactAdapter] {len(phone_tools)} xiaoyi phone tools registered successfully")
             except Exception as exc:
-                logger.warning("[JiuWenClaw] xiaoyi phone tools registration skipped: %s", exc)
+                logger.warning("[JiuWenClawReactAdapter] xiaoyi phone tools registration skipped: %s", exc)
         else:
-            logger.info("[JiuWenClaw] xiaoyi channel not enabled, skipping phone tools")
+            logger.info("[JiuWenClawReactAdapter] xiaoyi channel not enabled, skipping phone tools")
 
-        # add cron tools
         try:
             cron_controller = CronController.get_instance()
             for cron_tool in cron_controller.get_tools():
                 Runner.resource_mgr.add_tool(cron_tool)
                 self._instance.ability_manager.add(cron_tool.card)
         except Exception as exc:
-            logger.error("[JiuWenClaw] 定时工具加载失败， reason=%s", exc)
-        # ---- 权限引擎初始化 ----
+            logger.error("[JiuWenClawReactAdapter] 定时工具加载失败， reason=%s", exc)
+
         permissions_cfg = config_base.get("permissions", {})
         init_permission_engine(permissions_cfg)
         logger.info(
-            "[JiuWenClaw] Permission engine initialized: enabled=%s",
+            "[JiuWenClawReactAdapter] Permission engine initialized: enabled=%s",
             permissions_cfg.get("enabled", True),
         )
-        logger.info("[JiuWenClaw] 初始化完成: agent_name=%s", self._agent_name)
+        logger.info("[JiuWenClawReactAdapter] 初始化完成: agent_name=%s", self._agent_name)
 
-    def reload_agent_config(self) -> None:
+    async def reload_agent_config(self) -> None:
         """从 config.yaml 重新加载配置并 reconfigure 当前实例，使模型/API 等配置生效且不重启进程。"""
         if self._instance is None:
-            raise RuntimeError("JiuWenClaw 未初始化，请先调用 create_instance()")
+            raise RuntimeError("JiuWenClawReactAdapter 未初始化，请先调用 create_instance()")
         clear_config_cache()
         clear_memory_manager_cache()
 
@@ -475,7 +416,7 @@ class JiuWenClaw:
         if hasattr(self._instance, "_llm"):
             self._instance._llm = None
         self._instance.configure(agent_config)
-        # Hot-update evolution service
+
         evo_svc = getattr(self._instance, "_evolution_service", None)
         if evo_svc is not None:
             new_llm = self._instance._get_llm()
@@ -484,15 +425,16 @@ class JiuWenClaw:
             _env_auto_scan = os.getenv("EVOLUTION_AUTO_SCAN")
             if _env_auto_scan is not None:
                 evo_svc.auto_scan = _env_auto_scan.lower() in ("true", "1", "yes")
-        # 权限配置热更新
+
         permissions_cfg = config_base.get("permissions", {})
         try:
             engine = get_permission_engine()
             engine.update_config(permissions_cfg)
-            logger.info("[JiuWenClaw] Permission config reloaded: enabled=%s", permissions_cfg.get("enabled", True))
+            logger.info("[JiuWenClawReactAdapter] Permission config reloaded: enabled=%s",
+                        permissions_cfg.get("enabled", True))
         except Exception as exc:
-            logger.warning("[JiuWenClaw] Permission config reload failed: %s", exc)
-        logger.info("[JiuWenClaw] 配置已热更新，未重启进程")
+            logger.warning("[JiuWenClawReactAdapter] Permission config reload failed: %s", exc)
+        logger.info("[JiuWenClawReactAdapter] 配置已热更新，未重启进程")
 
     async def _register_runtime_tools(
             self, session_id: str | None,
@@ -502,7 +444,7 @@ class JiuWenClaw:
     ) -> None:
         """Register per-request tools for current agent execution."""
         if self._instance is None:
-            raise RuntimeError("JiuWenClaw 未初始化，请先调用 create_instance()")
+            raise RuntimeError("JiuWenClawReactAdapter 未初始化，请先调用 create_instance()")
 
         self._session_tool = None
 
@@ -515,12 +457,13 @@ class JiuWenClaw:
                     self._instance.ability_manager.remove(tool.name)
                 elif tool.name.startswith("session_"):
                     self._instance.ability_manager.remove(tool.name)
+                elif tool.name.startswith("send_file_to_user"):
+                    self._instance.ability_manager.remove(tool.name)
 
-        # 定时工具：按 channel 注册；优先用 channel_id，否则从 session_id 前缀推断
         channel = (channel_id or "").strip() or (
             (session_id or "").split("_")[0] if session_id else ""
         )
-        logger.info(f"[JiuwenClaw] update tool and prompt for channel {channel}")
+        logger.info(f"[JiuWenClawReactAdapter] update tool and prompt for channel {channel}")
         if channel not in ["heartbeat", "cron"]:
             cron_controller = CronController.get_instance()
             if channel == "feishu":
@@ -537,8 +480,18 @@ class JiuWenClaw:
                     Runner.resource_mgr.add_tool(cron_tool)
                 self._instance.ability_manager.add(cron_tool.card)
 
-        # 小艺手机端插件(xiaoyi phone tools)未生效时重新加载
         config_base = get_config()
+        send_file_tool_enabled = config_base.get("channels", {}).get(channel, {}).get("send_file_allowed", False)
+        if send_file_tool_enabled:
+            send_file_toolkit = SendFileToolkit(
+                request_id=request_id,
+                session_id=session_id,
+                channel_id=channel_id,
+            )
+            for tool in send_file_toolkit.get_tools():
+                Runner.resource_mgr.add_tool(tool)
+                self._instance.ability_manager.add(tool.card)
+
         channels_cfg = config_base.get("channels", {})
         xiaoyi_cfg = channels_cfg.get("xiaoyi", {})
         xiaoyi_phone_tools_enabled = xiaoyi_cfg.get("phone_tools_enabled", False)
@@ -564,10 +517,10 @@ class JiuWenClaw:
                             Runner.resource_mgr.add_tool(tool)
                             self._instance.ability_manager.add(tool.card)
                     except Exception as tool_exc:
-                        logger.debug(f"[JiuWenClaw] Tool {tool.card.name} may already exist: {tool_exc}")
+                        logger.error(f"[JiuWenClawReactAdapter] Tool {tool.card.name} may already exist: {tool_exc}")
 
             except Exception as exc:
-                logger.warning(f"[JiuWenClaw] xiaoyi phone tools runtime registration skipped: {exc}")
+                logger.warning(f"[JiuWenClawReactAdapter] xiaoyi phone tools runtime registration skipped: {exc}")
 
         effective_session_id = session_id or "default"
         if mode == "plan":
@@ -589,23 +542,6 @@ class JiuWenClaw:
                 Runner.resource_mgr.add_tool(tool)
                 self._instance.ability_manager.add(tool.card)
 
-        # Register send file toolkit
-        if not self._send_file_tool_registered:
-            send_file_toolkit = SendFileToolkit(
-                request_id=request_id,
-                session_id=effective_session_id,
-                channel_id=channel_id,
-            )
-            for tool in send_file_toolkit.get_tools():
-                Runner.resource_mgr.add_tool(tool)
-                self._instance.ability_manager.add(tool.card)
-            self._send_file_tool_registered = True
-            # tool_list = self._instance.ability_manager.list()
-            # for tool in tool_list:
-            #     if isinstance(tool, ToolCard):
-            #         if tool.name.startswith("todo_"):
-            #             self._instance.ability_manager.remove(tool.name)
-
         if not self._memory_tools_registered:
             await init_memory_manager_async(
                 workspace_dir=self._workspace_dir,
@@ -624,7 +560,7 @@ class JiuWenClaw:
                     self._instance.ability_manager.add(tool.card)
                 self._task_memory_tools_registered = True
             except Exception as exc:
-                logger.warning("[JiuWenClaw] ensure task memory tools failed: %s", exc)
+                logger.warning("[JiuWenClawReactAdapter] ensure task memory tools failed: %s", exc)
 
         if not self._video_tool_registered:
             try:
@@ -633,7 +569,7 @@ class JiuWenClaw:
                 self._instance.ability_manager.add(video_understanding.card)
                 self._video_tool_registered = True
             except Exception as exc:
-                logger.warning("[JiuWenClaw] ensure video_understanding tool failed: %s", exc)
+                logger.warning("[JiuWenClawReactAdapter] ensure video_understanding tool failed: %s", exc)
 
         if not self._vision_mcp_registered:
             try:
@@ -643,7 +579,7 @@ class JiuWenClaw:
                     self._instance.ability_manager.add(tool.card)
                 self._vision_mcp_registered = True
             except Exception as exc:
-                logger.warning("[JiuWenClaw] ensure vision tools failed: %s", exc)
+                logger.warning("[JiuWenClawReactAdapter] ensure vision tools failed: %s", exc)
 
         if not self._audio_mcp_registered:
             try:
@@ -653,7 +589,7 @@ class JiuWenClaw:
                     self._instance.ability_manager.add(tool.card)
                 self._audio_mcp_registered = True
             except Exception as exc:
-                logger.warning("[JiuWenClaw] ensure audio tools failed: %s", exc)
+                logger.warning("[JiuWenClawReactAdapter] ensure audio tools failed: %s", exc)
 
         if not self._mcp_tools_registered:
             for mcp_tool in get_mcp_tools():
@@ -678,10 +614,11 @@ class JiuWenClaw:
         - pause: 暂停 ReAct 循环（不取消任务）
         - resume: 恢复已暂停的 ReAct 循环
         - cancel: 取消所有运行中的任务
+        - supplement: 取消当前任务但保留 todo
 
         Args:
             request: AgentRequest，params 中可包含：
-                - intent: 中断意图 ('pause' | 'cancel' | 'resume')
+                - intent: 中断意图 ('pause' | 'cancel' | 'resume' | 'supplement')
                 - new_input: 新的用户输入（用于切换任务）
 
         Returns:
@@ -693,72 +630,32 @@ class JiuWenClaw:
         success = True
 
         if intent == "pause":
-            # 暂停：不取消任务，只暂停 ReAct 循环
             if self._instance is not None and hasattr(self._instance, 'pause'):
                 self._instance.pause()
                 logger.info(
-                    "[JiuWenClaw] interrupt: 已暂停 ReAct 循环 request_id=%s",
+                    "[JiuWenClawReactAdapter] interrupt: 已暂停 ReAct 循环 request_id=%s",
                     request.request_id,
                 )
             message = "任务已暂停"
 
         elif intent == "resume":
-            # 恢复：恢复 ReAct 循环
             if self._instance is not None and hasattr(self._instance, 'resume'):
                 self._instance.resume()
                 logger.info(
-                    "[JiuWenClaw] interrupt: 已恢复 ReAct 循环 request_id=%s",
+                    "[JiuWenClawReactAdapter] interrupt: 已恢复 ReAct 循环 request_id=%s",
                     request.request_id,
                 )
             message = "任务已恢复"
 
         elif intent == "supplement":
-            # supplement: 取消当前任务，但保留 todo（新任务会根据 todo 待办继续执行）
-            # 先解除暂停，防止 task 阻塞在 pause_event.wait 上
             if self._instance is not None and hasattr(self._instance, 'resume'):
                 self._instance.resume()
-
-            # 取消当前 session 的非流式任务
-            session_id = self._get_session_id(request)
-            await self._cancel_session_task(session_id, "interrupt(supplement): ")
-
-            # 取消流式任务
-            if self._instance is not None:
-                stream_tasks = getattr(self._instance, '_stream_tasks', set())
-                active = [t for t in stream_tasks if not t.done()]
-                if active:
-                    logger.info(
-                        "[JiuWenClaw] interrupt(supplement): 取消 %d 个流式任务 request_id=%s",
-                        len(active), request.request_id,
-                    )
-                    for t in active:
-                        t.cancel()
-
-            # 不清理 todo！保留所有待办项，新任务会根据 todo 中的待办继续执行
             message = "任务已切换"
 
         else:
-            # cancel / 其他：取消所有运行中的任务
-            # 先恢复暂停（防止 cancel 时 task 阻塞在 pause_event.wait 上）
             if self._instance is not None and hasattr(self._instance, 'resume'):
                 self._instance.resume()
 
-            # 取消所有 session 的非流式任务
-            await self._cancel_all_session_tasks(f"interrupt(intent={intent}): ")
-
-            # 取消流式任务
-            if self._instance is not None:
-                stream_tasks = getattr(self._instance, '_stream_tasks', set())
-                active = [t for t in stream_tasks if not t.done()]
-                if active:
-                    logger.info(
-                        "[JiuWenClaw] interrupt: 取消 %d 个流式任务 request_id=%s",
-                        len(active), request.request_id,
-                    )
-                    for t in active:
-                        t.cancel()
-
-            # 将未完成的 todo 项标记为 cancelled（保留在列表中，agent 不会执行）
             if request.session_id:
                 try:
                     todo_toolkit = TodoToolkit(session_id=request.session_id)
@@ -771,18 +668,17 @@ class JiuWenClaw:
                     if cancel_count:
                         todo_toolkit._save_tasks(tasks)
                         logger.info(
-                            "[JiuWenClaw] interrupt: 已将 %d 个未完成 todo 项标记为 cancelled session_id=%s",
+                            "[JiuWenClawReactAdapter] interrupt: 已将 %d 个未完成 todo 项标记为 cancelled session_id=%s",
                             cancel_count, request.session_id,
                         )
                 except Exception as exc:
-                    logger.warning("[JiuWenClaw] 标记 todo cancelled 失败: %s", exc)
+                    logger.warning("[JiuWenClawReactAdapter] 标记 todo cancelled 失败: %s", exc)
 
             if new_input:
                 message = "已切换到新任务"
             else:
                 message = "任务已取消"
 
-        # 返回 interrupt_result 事件
         payload = {
             "event_type": "chat.interrupt_result",
             "intent": intent,
@@ -803,11 +699,9 @@ class JiuWenClaw:
 
     def _has_valid_model_config(self) -> bool:
         """检查是否有有效的模型配置."""
-        # 检查环境变量中是否有 API_KEY
         if os.getenv("API_KEY"):
             return True
 
-        # 检查实例的配置
         if self._instance is not None and hasattr(self._instance, "_config"):
             config = self._instance._config
             if hasattr(config, "model_client_config") and isinstance(config.model_client_config, dict):
@@ -818,7 +712,7 @@ class JiuWenClaw:
 
         return False
 
-    async def _handle_user_answer(self, request: AgentRequest) -> AgentResponse:
+    async def handle_user_answer(self, request: AgentRequest) -> AgentResponse:
         """Handle chat.user_answer request, route user answer to evolution approval Future."""
         request_id = request.params.get("request_id", "") if isinstance(request.params, dict) else ""
         answers = request.params.get("answers", []) if isinstance(request.params, dict) else []
@@ -833,176 +727,21 @@ class JiuWenClaw:
             metadata=request.metadata,
         )
 
-    def _get_session_id(self, request: AgentRequest) -> str:
-        """获取 session_id，默认为 'default'."""
-        return request.session_id or "default"
+    async def process_message_impl(
+            self, request: AgentRequest, inputs: dict[str, Any]
+    ) -> AgentResponse:
+        """Execute a single non-streaming request and return the response.
 
-    async def _cancel_session_task(self, session_id: str, log_msg_prefix: str = "") -> None:
-        """取消指定 session 的非流式任务."""
-        task = self._session_tasks.get(session_id)
-        if task is not None and not task.done():
-            logger.info(
-                "[JiuWenClaw] %s取消 session 非流式任务: session_id=%s",
-                log_msg_prefix, session_id,
-            )
-            task.cancel()
-            try:
-                await task
-            except (asyncio.CancelledError, Exception):
-                pass
-            self._session_tasks[session_id] = None
+        Args:
+            request: AgentRequest 对象
+            inputs: 已构建好的输入字典，包含 conversation_id 和 query
 
-    async def _cancel_all_session_tasks(self, log_msg_prefix: str = "") -> None:
-        """取消所有 session 的非流式任务."""
-        for session_id in list(self._session_tasks.keys()):
-            await self._cancel_session_task(session_id, log_msg_prefix)
-
-    async def _ensure_session_processor(self, session_id: str) -> None:
-        """确保 session 的任务处理器在运行."""
-        if session_id not in self._session_processors or self._session_processors[session_id].done():
-            # 创建新的优先级队列和计数器
-            self._session_queues[session_id] = asyncio.PriorityQueue()
-            self._session_priorities[session_id] = 0
-
-            # 创建任务处理器
-            async def process_session_queue():
-                """处理 session 任务队列（先进后出执行，新任务优先）."""
-                queue = self._session_queues[session_id]
-                while True:
-                    try:
-                        # 从队列获取任务（优先级高的先执行）
-                        priority, task_func = await queue.get()
-                        if task_func is None:  # 信号：关闭队列
-                            break
-
-                        # 执行任务
-                        self._session_tasks[session_id] = asyncio.create_task(task_func())
-                        try:
-                            await self._session_tasks[session_id]
-                        finally:
-                            self._session_tasks[session_id] = None
-                            queue.task_done()
-
-                    except asyncio.CancelledError:
-                        logger.info("[JiuWenClaw] Session 任务处理器被取消: session_id=%s", session_id)
-                        break
-                    except Exception as e:
-                        logger.error("[JiuWenClaw] Session 任务处理器异常: %s", e)
-
-                # 清理
-                self._session_queues.pop(session_id, None)
-                self._session_priorities.pop(session_id, None)
-                self._session_tasks.pop(session_id, None)
-                self._session_processors.pop(session_id, None)
-                logger.info("[JiuWenClaw] Session 任务处理器已关闭: session_id=%s", session_id)
-
-            self._session_processors[session_id] = asyncio.create_task(process_session_queue())
-
-    async def process_message(self, request: AgentRequest) -> AgentResponse:
-        """调用 Runner.run_agent 处理请求，返回完整响应.
-
-        支持多 session 并发执行，同 session 内任务按先进先出顺序执行.
+        Returns:
+            AgentResponse 包含执行结果
         """
-        # Interrupt 请求路由
-        if request.req_method == ReqMethod.CHAT_CANCEL:
-            return await self.process_interrupt(request)
-
-        # User answer routing (evolution approval & permission approval)
-        if request.req_method == ReqMethod.CHAT_ANSWER:
-            return await self._handle_user_answer(request)
-
-        # Heartbeat 处理
-        if "heartbeat" in request.params:
-            # todo 修复目录
-            heartbeat_md = get_agent_home_dir() / "HEARTBEAT.md"
-            if not os.path.isfile(heartbeat_md):
-                # 无自定义任务，短路返回
-                logger.debug("[JiuWenClaw] heartbeat OK (no HEARTBEAT.md): request_id=%s", request.request_id)
-                return AgentResponse(
-                    request_id=request.request_id,
-                    channel_id=request.channel_id,
-                    ok=True,
-                    payload={"heartbeat": "HEARTBEAT_OK"},
-                    metadata=request.metadata,
-                )
-            # 读取 HEARTBEAT.md，拼接为任务提示词，走正常 chat 流程
-            task_list = []
-            try:
-                with open(heartbeat_md, "r", encoding="utf-8") as f:
-                    lines = f.readlines()
-                    for line in lines:
-                        line = line.strip()
-                        if line != "":
-                            if not line.startswith("<!--"):
-                                task_list.append(line)
-
-            except Exception as exc:
-                logger.warning("[JiuWenClaw] 读取 HEARTBEAT.md 失败: %s", exc)
-                return AgentResponse(
-                    request_id=request.request_id,
-                    channel_id=request.channel_id,
-                    ok=True,
-                    payload={"heartbeat": "HEARTBEAT_OK"},
-                    metadata=request.metadata,
-                )
-            if not task_list:
-                logger.debug("[JiuWenClaw] HEARTBEAT.md 为空，短路返回")
-                return AgentResponse(
-                    request_id=request.request_id,
-                    channel_id=request.channel_id,
-                    ok=True,
-                    payload={"heartbeat": "HEARTBEAT_OK"},
-                    metadata=request.metadata,
-                )
-            task_list = "\n".join(task_list)
-            query = f"请检查下面用户遗留给你的任务项，并按照顺序完成所有待办事项，并将结果以markdown文件保存在你的工作目录下：\n{task_list}"
-            request.params["query"] = query
-            logger.info(
-                "[JiuWenClaw] heartbeat 触发 HEARTBEAT.md 任务: request_id=%s session_id=%s",
-                request.request_id, request.session_id,
-            )
-
-        # Skills 请求委托给 SkillManager
-        if request.req_method in _SKILL_ROUTES:
-            handler_name = _SKILL_ROUTES[request.req_method]
-            handler = getattr(self._skill_manager, handler_name)
-            try:
-                payload = await handler(request.params)
-                _reload_after_skills = handler_name in [
-                    "handle_skills_install",
-                    "handle_skills_uninstall",
-                    "handle_skills_import_local",
-                    "handle_skills_skillnet_install",
-                ]
-                if (
-                    handler_name == "handle_skills_skillnet_install"
-                    and payload.get("pending")
-                ):
-                    _reload_after_skills = False
-                if _reload_after_skills:
-                    await self.create_instance()
-            except Exception as exc:
-                logger.error("[JiuWenClaw] skills 请求处理失败: %s", exc)
-                return AgentResponse(
-                    request_id=request.request_id,
-                    channel_id=request.channel_id,
-                    ok=False,
-                    payload={"error": str(exc)},
-                    metadata=request.metadata,
-                )
-            return AgentResponse(
-                request_id=request.request_id,
-                channel_id=request.channel_id,
-                ok=True,
-                payload=payload,
-                metadata=request.metadata,
-            )
-
-        # 原有 chat 逻辑
         if self._instance is None:
-            raise RuntimeError("JiuWenClaw 未初始化，请先调用 create_instance()")
+            raise RuntimeError("JiuWenClawReactAdapter 未初始化，请先调用 create_instance()")
 
-        # 检查模型配置
         if not self._has_valid_model_config():
             return AgentResponse(
                 request_id=request.request_id,
@@ -1012,38 +751,11 @@ class JiuWenClaw:
                 metadata=request.metadata,
             )
 
-        session_id = self._get_session_id(request)
-        query = request.params.get("query", "")
-        append_history_record(
-            session_id=session_id,
-            request_id=request.request_id,
-            channel_id=request.channel_id,
-            role="user",
-            content=query,
-            timestamp=time.time(),
-        )
-
-        # 确保 session 的任务处理器在运行
-        await self._ensure_session_processor(session_id)
-
-        logger.info(
-            "[JiuWenClaw] 处理请求: request_id=%s channel_id=%s session_id=%s",
-            request.request_id, request.channel_id, session_id,
-        )
-        config_base = get_config()
-        inputs = {
-            "conversation_id": request.session_id,
-            "query": build_user_prompt(
-                request.params.get("query", ""),
-                files=request.params.get("files", {}),
-                channel=request.session_id.split('_')[0],
-                language=config_base.get("preferred_language", "zh")
-            ),
-        }
+        session_id = request.session_id or "default"
 
         if self._compaction_manager:
+            query = request.params.get("query", "")
             self._compaction_manager.add_message("user", query)
-
             memory_mgr = await get_memory_manager(
                 agent_id=self._agent_name,
                 workspace_dir=self._workspace_dir
@@ -1051,49 +763,24 @@ class JiuWenClaw:
             if memory_mgr:
                 await self._compaction_manager.check_and_compact(memory_mgr)
 
-        # 创建任务函数并放入队列（先进后出：新任务优先）
-        # 使用 Future 来获取结果
-        result_future = asyncio.get_event_loop().create_future()
-
-        async def run_agent_task():
-            try:
-                await self._register_runtime_tools(
-                    request.session_id,
-                    request.channel_id,
-                    request.request_id,
-                    request.params.get("mode", "plan")
-                )
-                return await Runner.run_agent(agent=self._instance, inputs=inputs)
-            except asyncio.CancelledError:
-                logger.info("[JiuWenClaw] Agent 任务被取消: request_id=%s session_id=%s", request.request_id, session_id)
-                raise
-            except Exception as e:
-                logger.error("[JiuWenClaw] Agent 任务执行异常: %s", e)
-                raise
-
-        # 包装任务，完成后将结果放入 future
-        async def task_wrapper():
-            try:
-                result = await run_agent_task()
-                result_future.set_result(result)
-            except Exception as e:
-                result_future.set_exception(e)
-
-        # 使用负数优先级实现先进后出（新请求优先级更高）
-        # 每次递减，新请求的优先级更高
-        self._session_priorities[session_id] -= 1
-        priority = self._session_priorities[session_id]
-        await self._session_queues[session_id].put((priority, task_wrapper))
-
-        # 等待任务完成
+        token_cid = TOOL_PERMISSION_CHANNEL_ID.set((request.channel_id or "").strip())
         try:
-            result = await result_future
+            await self._register_runtime_tools(
+                request.session_id,
+                request.channel_id,
+                request.request_id,
+                request.params.get("mode", "plan")
+            )
+            result = await Runner.run_agent(agent=self._instance, inputs=inputs)
         except asyncio.CancelledError:
-            # 当前请求被取消，但队列中的任务会继续执行
+            logger.info("[JiuWenClawReactAdapter] Agent 任务被取消: request_id=%s session_id=%s", request.request_id,
+                        session_id)
             raise
         except Exception as e:
-            logger.error("[JiuWenClaw] 任务执行失败: %s", e)
+            logger.error("[JiuWenClawReactAdapter] Agent 任务执行异常: %s", e)
             raise
+        finally:
+            TOOL_PERMISSION_CHANNEL_ID.reset(token_cid)
 
         content = result if isinstance(result, (str, dict)) else str(result)
 
@@ -1104,17 +791,6 @@ class JiuWenClaw:
                 content_str = str(content)
             self._compaction_manager.add_message("assistant", content_str)
 
-        assistant_content = content if isinstance(content, str) else str(content)
-        append_history_record(
-            session_id=session_id,
-            request_id=request.request_id,
-            channel_id=request.channel_id,
-            role="assistant",
-            event_type="chat.final",
-            content=assistant_content,
-            timestamp=time.time(),
-        )
-
         return AgentResponse(
             request_id=request.request_id,
             channel_id=request.channel_id,
@@ -1123,26 +799,21 @@ class JiuWenClaw:
             metadata=request.metadata,
         )
 
-    async def process_message_stream(
-            self, request: AgentRequest
+    async def process_message_stream_impl(
+            self, request: AgentRequest, inputs: dict[str, Any]
     ) -> AsyncIterator[AgentResponseChunk]:
-        """流式处理：通过 JiuClawReActAgent.stream() 逐条返回 chunk.
+        """Execute a streaming request; yield response chunks.
 
-        支持多 session 并发执行，同 session 内任务按先进后出顺序执行.
+        Args:
+            request: AgentRequest 对象
+            inputs: 已构建好的输入字典，包含 conversation_id 和 query
 
-        OutputSchema 事件类型映射:
-            content_chunk → chat.delta   (逐字流式文本)
-            answer        → chat.final   (最终完整回答)
-            tool_call     → chat.tool_call
-            tool_result   → chat.tool_result
-            error         → chat.error
-            thinking      → chat.processing_status
-            todo.updated  → todo.updated  (todo 列表变更通知)
+        Yields:
+            AgentResponseChunk 流式响应块
         """
         if self._instance is None:
-            raise RuntimeError("JiuWenClaw 未初始化，请先调用 create_instance()")
+            raise RuntimeError("JiuWenClawReactAdapter 未初始化，请先调用 create_instance()")
 
-        # 检查模型配置
         if not self._has_valid_model_config():
             yield AgentResponseChunk(
                 request_id=request.request_id,
@@ -1152,35 +823,12 @@ class JiuWenClaw:
             )
             return
 
-        session_id = self._get_session_id(request)
-        query = request.params.get("query", "")
-        append_history_record(
-            session_id=session_id,
-            request_id=request.request_id,
-            channel_id=request.channel_id,
-            role="user",
-            content=query,
-            timestamp=time.time(),
-        )
-        await self._ensure_session_processor(session_id)
+        session_id = request.session_id or "default"
+        rid = request.request_id
+        cid = request.channel_id
 
-        logger.info(
-            "[JiuWenClaw] 处理流式请求: request_id=%s channel_id=%s session_id=%s",
-            request.request_id, request.channel_id, session_id,
-        )
-        config_base = get_config()
-        inputs = {
-            "conversation_id": request.session_id,
-            "query": build_user_prompt(
-                request.params.get("query", ""),
-                files=request.params.get("files", {}),
-                channel=request.session_id.split('_')[0],
-                language=config_base.get("preferred_language", "zh")
-            ),
-        }
-
-        # supplement 任务：读取现有 todo 待办，拼入 query 让 agent 知道有未完成的任务
         if self._compaction_manager:
+            query = request.params.get("query", "")
             self._compaction_manager.add_message("user", query)
             memory_mgr = await get_memory_manager(
                 agent_id=self._agent_name,
@@ -1189,100 +837,39 @@ class JiuWenClaw:
             if memory_mgr:
                 await self._compaction_manager.check_and_compact(memory_mgr)
 
-        rid = request.request_id
-        cid = request.channel_id
-
-        # 创建流式输出队列
-        stream_queue = asyncio.Queue()
-        stream_done = asyncio.Event()
-
-        # 创建流式任务函数
-        async def run_stream_task():
-            """执行流式任务，将产生的 chunk 放入队列."""
-            try:
-                await self._register_runtime_tools(
-                    request.session_id,
-                    request.channel_id,
-                    request.request_id,
-                    request.params.get("mode", "plan")
-                )
-                async for chunk in Runner.run_agent_streaming(self._instance, inputs):
-                    parsed = self._parse_stream_chunk(chunk)
-                    if parsed is None:
-                        continue
-                    await stream_queue.put(("chunk", parsed))
-            except asyncio.CancelledError:
-                logger.info("[JiuWenClaw] 流式任务被取消: request_id=%s session_id=%s", rid, session_id)
-                await stream_queue.put(("error", asyncio.CancelledError()))
-            except Exception as exc:
-                logger.exception("[JiuWenClaw] 流式任务异常: %s", exc)
-                await stream_queue.put(("error", exc))
-            finally:
-                stream_done.set()
-
-        # 包装任务
-        async def task_wrapper():
-            await run_stream_task()
-
-        # 使用负数优先级实现先进后出（新请求优先级更高）
-        self._session_priorities[session_id] -= 1
-        priority = self._session_priorities[session_id]
-        await self._session_queues[session_id].put((priority, task_wrapper))
-
-        # 从流式队列中读取并 yield 结果
+        token_cid = TOOL_PERMISSION_CHANNEL_ID.set((request.channel_id or "").strip())
         try:
-            while not stream_done.is_set() or not stream_queue.empty():
-                try:
-                    # 使用 timeout 避免永久阻塞
-                    item = await asyncio.wait_for(stream_queue.get(), timeout=0.1)
-                except asyncio.TimeoutError:
+            await self._register_runtime_tools(
+                request.session_id,
+                request.channel_id,
+                request.request_id,
+                request.params.get("mode", "plan")
+            )
+            async for chunk in Runner.run_agent_streaming(self._instance, inputs):
+                parsed = self._parse_stream_chunk(chunk)
+                if parsed is None:
                     continue
-
-                event_type, data = item
-
-                if event_type == "error":
-                    if isinstance(data, asyncio.CancelledError):
-                        logger.info("[JiuWenClaw] 流式处理被中断: request_id=%s", rid)
-                        raise data
-                    append_history_record(
-                        session_id=session_id,
-                        request_id=rid,
-                        channel_id=cid,
-                        role="assistant",
-                        event_type="chat.error",
-                        content=str(data),
-                        timestamp=time.time(),
-                    )
-                    yield AgentResponseChunk(
-                        request_id=rid,
-                        channel_id=cid,
-                        payload={"event_type": "chat.error", "error": str(data)},
-                        is_complete=False,
-                    )
-                else:
-                    if isinstance(data, dict) and isinstance(data.get("event_type"), str):
-                        append_history_record(
-                            session_id=session_id,
-                            request_id=rid,
-                            channel_id=cid,
-                            role="assistant",
-                            event_type=str(data.get("event_type")),
-                            content=data.get("content") or data.get("error") or "",
-                            timestamp=time.time(),
-                            extra={"event_payload": dict(data)},
-                        )
-                    yield AgentResponseChunk(
-                        request_id=rid,
-                        channel_id=cid,
-                        payload=data,
-                        is_complete=False,
-                    )
+                yield AgentResponseChunk(
+                    request_id=rid,
+                    channel_id=cid,
+                    payload=parsed,
+                    is_complete=False,
+                )
         except asyncio.CancelledError:
-            logger.info("[JiuWenClaw] 流式处理被中断: request_id=%s", rid)
+            logger.info("[JiuWenClawReactAdapter] 流式任务被取消: request_id=%s session_id=%s", rid, session_id)
             raise
+        except Exception as exc:
+            logger.exception("[JiuWenClawReactAdapter] 流式任务异常: %s", exc)
+            yield AgentResponseChunk(
+                request_id=rid,
+                channel_id=cid,
+                payload={"event_type": "chat.error", "error": str(exc)},
+                is_complete=False,
+            )
+        finally:
+            TOOL_PERMISSION_CHANNEL_ID.reset(token_cid)
 
         if request.params.get("mode", "plan") == "plan":
-            # 终止 chunk
             yield AgentResponseChunk(
                 request_id=rid,
                 channel_id=cid,
@@ -1294,12 +881,8 @@ class JiuWenClaw:
                 request_id=rid,
                 channel_id=cid,
                 payload={"is_complete": True},
-                is_complete=True and self._session_tool.all_tasks_done(),
+                is_complete=True and self._session_tool.all_tasks_done() if self._session_tool else True,
             )
-
-    # ------------------------------------------------------------------
-    # OutputSchema 解析
-    # ------------------------------------------------------------------
 
     @staticmethod
     def _parse_stream_chunk(chunk) -> dict | None:
@@ -1312,7 +895,6 @@ class JiuWenClaw:
             dict  – 含 event_type 的 payload，或 None（需跳过的帧）。
         """
         try:
-            # OutputSchema 对象：有 type + payload
             if hasattr(chunk, "type") and hasattr(chunk, "payload"):
                 chunk_type = chunk.type
                 payload = chunk.payload
@@ -1344,7 +926,6 @@ class JiuWenClaw:
                             if isinstance(output, dict)
                             else str(output)
                         )
-                        # Check if this is a chunked/partial answer (streaming)
                         is_chunked = (
                             output.get("chunked", False)
                             if isinstance(output, dict)
@@ -1355,8 +936,6 @@ class JiuWenClaw:
                         is_chunked = False
                     if not content:
                         return None
-                    # For chunked answers, return as delta (will be accumulated)
-                    # For non-chunked, return as final
                     if is_chunked:
                         return {
                             "event_type": "chat.delta",
@@ -1445,7 +1024,6 @@ class JiuWenClaw:
                         **(payload if isinstance(payload, dict) else {}),
                     }
 
-                # 未知 type：过滤调试帧，保留有内容的
                 if isinstance(payload, dict):
                     if "traceId" in payload or "invokeId" in payload:
                         return None
@@ -1460,7 +1038,6 @@ class JiuWenClaw:
                     "source_chunk_type": chunk_type,
                 }
 
-            # 普通 dict
             if isinstance(chunk, dict):
                 if "traceId" in chunk or "invokeId" in chunk:
                     return None
@@ -1482,6 +1059,3 @@ class JiuWenClaw:
             logger.debug("[_parse_stream_chunk] 解析异常", exc_info=True)
 
         return None
-
-    def _prepare_instance_by_session(self):
-        pass

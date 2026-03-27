@@ -3,6 +3,7 @@
 """ToolPromptRail — dynamically injects the tool prompt section before each model call."""
 from __future__ import annotations
 
+from core.single_agent.prompts.builder import PromptSection
 from openjiuwen.core.single_agent.rail.base import AgentCallbackContext
 from openjiuwen.deepagents.rails.base import DeepAgentRail
 
@@ -34,7 +35,7 @@ class ToolPromptRail(DeepAgentRail):
             return
 
         tool_section = _tool_prompt(self.mode, self.language)
-        self.system_prompt_builder.add_section(tool_section)
+        self.system_prompt_builder.add_section(PromptSection(name="tools", content={f"{self.language}": tool_section}))
 
     def set_mode(self, mode: str) -> None:
         """Update the prompt mode (e.g. 'plan' or 'agent')."""
