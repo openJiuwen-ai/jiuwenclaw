@@ -25,15 +25,15 @@ from openjiuwen.core.single_agent.rail.base import (
     InvokeInputs,
     ToolCallInputs,
 )
+from openjiuwen.core.runner import Runner
+from openjiuwen.core.single_agent import BaseAgent
 from openjiuwen.deepagents.rails.base import DeepAgentRail
 from openjiuwen.deepagents.tools.todo import TodoStatus, TodoListTool
+from openjiuwen.deepagents.workspace.workspace import WorkspaceNode
 
 from jiuwenclaw.utils import logger
-from openjiuwen.deepagents.prompts import resolve_language
 
-_TODO_TOOL_NAMES = frozenset(
-    ["todo_create", "todo_list", "todo_modify"]
-)
+_TODO_TOOL_NAMES = frozenset(["todo_create", "todo_list", "todo_modify"])
 
 
 class JiuClawStreamEventRail(DeepAgentRail):
@@ -46,7 +46,7 @@ class JiuClawStreamEventRail(DeepAgentRail):
 
     priority = 80
 
-    def __init__(self) -> None:
+    def __init__(self, language: str = "cn") -> None:
         super().__init__()
         self._deep_agent: Optional[Any] = None
         self._pause_event = asyncio.Event()
@@ -54,6 +54,7 @@ class JiuClawStreamEventRail(DeepAgentRail):
         self._abort_requested = False
         self._conversation_id: str = ""
         self._stream_tasks: set[asyncio.Task] = set()
+        self.language = language
 
     def init(self, agent: Any) -> None:
         self._deep_agent = agent
@@ -124,7 +125,7 @@ class JiuClawStreamEventRail(DeepAgentRail):
 
         tool_name = ctx.inputs.tool_name
         if tool_name in _TODO_TOOL_NAMES and self._conversation_id:
-            await self._emit_todo_updated(session, self._conversation_id)
+            await self._emit_todo_updated(ctx.agent, session, self._conversation_id)
 
     # ------------------------------------------------------------------
     # on_model_exception: attempt context repair
@@ -177,45 +178,39 @@ class JiuClawStreamEventRail(DeepAgentRail):
         except Exception:
             logger.debug("tool_result emit failed", exc_info=True)
 
-    async def _emit_todo_updated(self, session: Session, session_id: str) -> None:
-        """Emit todo list update event using TodoListTool.
+    async def _emit_todo_updated(
+        self, agent: BaseAgent, session: Session, session_id: str
+    ) -> None:
+        """Emit todo list update event to frontend.
+
+        Loads current todos using TodoListTool, maps internal status to
+        frontend-compatible values, and emits a 'todo.updated' stream event.
 
         Args:
-            session: Session object for writing stream
-            session_id: Session ID used to locate the todo JSON file
+            agent: The agent instance to access ability_manager for tool lookup.
+            session: Session object for writing stream events.
+            session_id: Session ID used to locate the todo JSON file.
         """
+        todo_tool = self._get_todo_tool(agent)
+        if todo_tool is None:
+            logger.debug("[StreamEventRail] TodoListTool not available")
+            return
+
         try:
-            # 按需创建 TodoListTool
-            todo_tool = TodoListTool(
-                operation=self.sys_operation,
-                workspace=str(getattr(self.workspace, "workspace_root", "")),
-                language=resolve_language(),
-            )
             todo_tool.set_file(session_id)
-
             todos_data = await todo_tool.load_todos()
+        except Exception as exc:
+            logger.debug(
+                "[StreamEventRail] Failed to load todos: %s", exc
+            )
+            return
 
-            # Map status: cancelled is mapped to pending for frontend compatibility
-            status_mapping = {
-                TodoStatus.PENDING: "pending",
-                TodoStatus.IN_PROGRESS: "in_progress",
-                TodoStatus.COMPLETED: "completed",
-                TodoStatus.CANCELLED: "pending",
-            }
+        if not todos_data:
+            return
 
-            todos = []
-            for todo_item in todos_data:
-                todos.append({
-                    "id": todo_item.id,
-                    "content": todo_item.content,
-                    "activeForm": todo_item.activeForm,
-                    "status": status_mapping.get(
-                        todo_item.status, todo_item.status.value
-                    ),
-                    "createdAt": todo_item.createdAt,
-                    "updatedAt": todo_item.updatedAt,
-                })
+        todos = self._format_todos_for_frontend(todos_data)
 
+        try:
             await session.write_stream(
                 OutputSchema(
                     type="todo.updated",
@@ -225,6 +220,75 @@ class JiuClawStreamEventRail(DeepAgentRail):
             )
         except Exception:
             logger.debug("todo.updated emit failed", exc_info=True)
+
+    def _get_todo_tool(self, agent: BaseAgent) -> TodoListTool | None:
+        """Get TodoListTool from agent's ability_manager or create new instance.
+
+        First attempts to retrieve the registered tool from the agent's
+        ability_manager and Runner's resource_mgr. If not found, falls back
+        to creating a new TodoListTool instance with rail's workspace config.
+
+        Args:
+            agent: The agent instance to access ability_manager.
+
+        Returns:
+            TodoListTool instance or None if unavailable.
+        """
+        # Try to get registered tool from agent's ability_manager
+        try:
+            tool_card = agent.ability_manager.get("todo_list")
+            registered_tool = Runner.resource_mgr.get_tool(tool_card.id)
+            if isinstance(registered_tool, TodoListTool):
+                return registered_tool
+        except Exception:
+            pass
+
+        # Fallback: create new tool instance
+        try:
+            return TodoListTool(
+                operation=self.sys_operation,
+                workspace=str(self.workspace.get_node_path(WorkspaceNode.TODO)),
+                language=self.language,
+            )
+        except Exception as exc:
+            logger.debug(
+                "[StreamEventRail] Failed to create TodoListTool: %s", exc
+            )
+            return None
+
+    @staticmethod
+    def _format_todos_for_frontend(
+        todos_data: List[Any],
+    ) -> List[dict[str, Any]]:
+        """Format todo items for frontend compatibility.
+
+        Maps internal TodoStatus values to frontend-compatible status strings.
+        Cancelled status is mapped to 'pending' for frontend compatibility.
+
+        Args:
+            todos_data: List of TodoItem objects from TodoListTool.
+
+        Returns:
+            List of formatted todo dictionaries.
+        """
+        status_mapping = {
+            TodoStatus.PENDING: "pending",
+            TodoStatus.IN_PROGRESS: "in_progress",
+            TodoStatus.COMPLETED: "completed",
+            TodoStatus.CANCELLED: "pending",
+        }
+
+        return [
+            {
+                "id": item.id,
+                "content": item.content,
+                "activeForm": item.activeForm,
+                "status": status_mapping.get(item.status, item.status.value),
+                "createdAt": item.createdAt,
+                "updatedAt": item.updatedAt,
+            }
+            for item in todos_data
+        ]
 
     @staticmethod
     async def _emit_context_compression(ctx: AgentCallbackContext) -> None:
@@ -320,8 +384,8 @@ class JiuClawStreamEventRail(DeepAgentRail):
                         if tool_calls:
                             for tc in tool_calls:
                                 tool_id_cache.append({
-                                    "tool_call_id": getattr(tc, "id", ""),
-                                    "tool_name": getattr(tc, "name", ""),
+                                        "tool_call_id": getattr(tc, "id", ""),
+                                        "tool_name": getattr(tc, "name", ""),
                                 })
                     else:
                         logger.info("Fixed incomplete tool context with placeholder messages")
@@ -332,8 +396,8 @@ class JiuClawStreamEventRail(DeepAgentRail):
                                 await context.add_messages(tool_message_cache[tool_call_id])
                             else:
                                 await context.add_messages(ToolMessage(
-                                    content=f"[工具执行被中断] 工具 {tool_name} 执行过程中被用户打断，没有执行结果。",
-                                    tool_call_id=tool_call_id,
+                                        content=f"[工具执行被中断] 工具 {tool_name} 执行过程中被用户打断，没有执行结果。",
+                                        tool_call_id=tool_call_id,
                                 ))
                         tool_id_cache = []
                         await context.add_messages(messages[i])
@@ -341,8 +405,8 @@ class JiuClawStreamEventRail(DeepAgentRail):
                         if tool_calls:
                             for tc in tool_calls:
                                 tool_id_cache.append({
-                                    "tool_call_id": getattr(tc, "id", ""),
-                                    "tool_name": getattr(tc, "name", ""),
+                                        "tool_call_id": getattr(tc, "id", ""),
+                                        "tool_name": getattr(tc, "name", ""),
                                 })
                 elif isinstance(messages[i], ToolMessage):
                     if not tool_id_cache:
@@ -363,8 +427,8 @@ class JiuClawStreamEventRail(DeepAgentRail):
                             await context.add_messages(tool_message_cache[tool_call_id])
                         else:
                             await context.add_messages(ToolMessage(
-                                content=f"[工具执行被中断] 工具 {tool_name} 执行过程中被用户打断，没有执行结果。",
-                                tool_call_id=tool_call_id,
+                                    content=f"[工具执行被中断] 工具 {tool_name} 执行过程中被用户打断，没有执行结果。",
+                                    tool_call_id=tool_call_id,
                             ))
                     tool_id_cache = []
                     await context.add_messages(messages[i])
@@ -377,8 +441,8 @@ class JiuClawStreamEventRail(DeepAgentRail):
                         await context.add_messages(tool_message_cache[tool_call_id])
                     else:
                         await context.add_messages(ToolMessage(
-                            content=f"[工具执行被中断] 工具 {tool_name} 执行过程中被用户打断，没有执行结果。",
-                            tool_call_id=tool_call_id,
+                                content=f"[工具执行被中断] 工具 {tool_name} 执行过程中被用户打断，没有执行结果。",
+                                tool_call_id=tool_call_id,
                         ))
         except Exception as e:
             logger.warning("Failed to fix incomplete tool context: %s", e)

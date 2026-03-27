@@ -30,7 +30,7 @@ from openjiuwen.core.session.checkpointer.persistence import PersistenceCheckpoi
 from openjiuwen.deepagents import DeepAgent, DeepAgentConfig
 from openjiuwen.deepagents.factory import create_deep_agent
 from openjiuwen.deepagents.prompts import resolve_language
-from openjiuwen.deepagents.workspace.workspace import Workspace
+from openjiuwen.deepagents.workspace.workspace import Workspace, WorkspaceNode
 from openjiuwen.deepagents.rails import SkillUseRail, TaskPlanningRail, SecurityRail, SkillEvolutionRail
 from openjiuwen.deepagents.rails.filesystem_rail import FileSystemRail
 from openjiuwen.deepagents.rails.memory_rail import MemoryRail
@@ -47,7 +47,7 @@ from jiuwenclaw.agentserver.deep_agent.rails import (
     JiuClawStreamEventRail
 )
 from jiuwenclaw.gateway.cron import CronTargetChannel
-from jiuwenclaw.utils import logger, USER_WORKSPACE_DIR, get_env_file, get_agent_root_dir
+from jiuwenclaw.utils import USER_WORKSPACE_DIR, get_env_file, get_agent_root_dir
 from jiuwenclaw.config import get_config
 from jiuwenclaw.agentserver.tools.browser_tools import register_browser_runtime_mcp_server
 from jiuwenclaw.agentserver.memory.compaction import ContextCompactionManager
@@ -58,7 +58,8 @@ from jiuwenclaw.agentserver.skill_manager import _SKILLS_DIR
 from jiuwenclaw.schema.agent import AgentRequest, AgentResponse, AgentResponseChunk
 from jiuwenclaw.agentserver.memory import get_memory_manager
 from openjiuwen.deepagents.tools import WebFreeSearchTool, WebPaidSearchTool, WebFetchWebpageTool
-from openjiuwen.deepagents.tools.todo import create_todos_tool, TodoStatus, TodoModifyTool
+from openjiuwen.deepagents.tools.todo import TodoStatus, TodoModifyTool
+
 
 load_dotenv(dotenv_path=get_env_file())
 
@@ -131,7 +132,6 @@ class JiuWenClawDeepAdapter:
         self._browser_mcp_registered: bool = False
         self._memory_tools_registered: bool = False
         self._web_tools_registered: bool = False
-        self._todo_tool_sessions_registered: set[str] = set()
         self._model: Model | None = None
         self._config_cache: dict[str, Any] = {}
         self._filesystem_rail: FileSystemRail | None = None
@@ -198,9 +198,9 @@ class JiuWenClawDeepAdapter:
             model_client_config = react_model_client_config
 
         model_name = (
-                model_client_config.get("model_name")
-                or react_config.get("model_name")
-                or "gpt-4"
+            model_client_config.get("model_name")
+            or react_config.get("model_name")
+            or "gpt-4"
         )
         model_config_obj = default_model_config.get("model_config_obj") or {}
         if not model_config_obj:
@@ -305,7 +305,9 @@ class JiuWenClawDeepAdapter:
     def _build_stream_event_rail(self) -> JiuClawStreamEventRail | None:
         """Build JiuClawStreamEventRail."""
         try:
-            stream_event_rail = JiuClawStreamEventRail()
+            stream_event_rail = JiuClawStreamEventRail(
+                language=self._resolve_runtime_language(),
+            )
             logger.info("[JiuWenClawDeepAdapter] JiuClawStreamEventRail create success")
         except Exception as exc:
             logger.warning("[JiuWenClawDeepAdapter] JiuClawStreamEventRail create failed: %s", exc)
@@ -419,16 +421,19 @@ class JiuWenClawDeepAdapter:
         return rails
 
     def _make_deep_agent_config(
-            self,
-            *,
-            model: Model,
-            config: dict[str, Any],
-            agent_card: AgentCard,
-            tool_cards: list[Any],
+        self,
+        *,
+        model: Model,
+        config: dict[str, Any],
+        agent_card: AgentCard,
+        tool_cards: list[Any],
     ) -> DeepAgentConfig:
         """与 create_deep_agent() 中 DeepAgentConfig 构造保持一致."""
-        workspace_obj = Workspace(root_path="./")
         resolved_language = self._resolve_runtime_language()
+        workspace_obj = Workspace(
+            root_path=self._workspace_dir or "./",
+            language=resolved_language
+        )
         normalized_tool_cards = [
             tool.card if hasattr(tool, "card") else tool
             for tool in (tool_cards or [])
@@ -624,6 +629,10 @@ class JiuWenClawDeepAdapter:
             rails=rails_list if rails_list else [],
             enable_task_loop=config.get("enable_task_loop", True),
             max_iterations=config.get("max_iterations", 15),
+            workspace=Workspace(
+                root_path=self._workspace_dir or "./",
+                language=self._resolve_runtime_language(),
+            ),
             sys_operation=sys_operation
         )
         await self._proc_context_compaction()
@@ -667,12 +676,12 @@ class JiuWenClawDeepAdapter:
         logger.info("[JiuWenClawDeepAdapter] 配置已热更新（configure），未重启进程")
 
     def _bind_runtime_cron_context(
-            self,
-            *,
-            channel_id: str | None,
-            session_id: str | None,
-            metadata: dict[str, Any] | None,
-            mode: str | None,
+        self,
+        *,
+        channel_id: str | None,
+        session_id: str | None,
+        metadata: dict[str, Any] | None,
+        mode: str | None,
     ) -> tuple[Token[str], Token[str | None], Token[dict[str, Any] | None], Token[str | None]]:
         normalized_channel = str(channel_id or "").strip() or CronTargetChannel.WEB.value
         normalized_mode = str(mode).strip() if isinstance(mode, str) and mode.strip() else None
@@ -695,38 +704,21 @@ class JiuWenClawDeepAdapter:
         _CRON_TOOL_CHANNEL_ID.reset(channel_token)
 
     async def _register_runtime_tools(
-            self,
-            session_id: str | None,
-            mode="plan",
+        self,
+        session_id: str | None,
+        mode="plan",
     ) -> None:
         """Register per-request tools for current agent execution."""
         if self._instance is None:
             raise RuntimeError("JiuWenClawDeepAdapter 未初始化，请先调用 create_instance()")
 
-        tool_list = self._instance.ability_manager.list()
-        for tool in tool_list:
-            if isinstance(tool, ToolCard):
-                if tool.name.startswith("todo_"):
-                    self._instance.ability_manager.remove(tool.name)
-
-        effective_session_id = session_id or "default"
-
         if mode == "plan":
             self._instance.react_agent.config.prompt_template = \
                 [{"role": "system", "content": build_identity_prompt(
-                    mode="plan",
-                    language=self._resolve_prompt_language(),
-                    channel=self._resolve_prompt_channel(session_id),
+                        mode="plan",
+                        language=self._resolve_prompt_language(),
+                        channel=self._resolve_prompt_channel(session_id),
                 )}]
-            todo_tools = create_todos_tool(
-                operation=self._instance._deep_config.sys_operation,
-                workspace=str(getattr(self._instance._deep_config.workspace, 'workspace_root', '')),
-                language=self._resolve_runtime_language()
-            )
-            for tool in todo_tools:
-                Runner.resource_mgr.add_tool(tool)
-                self._instance.ability_manager.add(tool.card)
-            self._todo_tool_sessions_registered.add(effective_session_id)
 
             if self._task_planning_rail is None:
                 self._task_planning_rail = self._build_task_planning_rail()
@@ -736,15 +728,10 @@ class JiuWenClawDeepAdapter:
         else:
             self._instance.react_agent.config.prompt_template = \
                 [{"role": "system", "content": build_identity_prompt(
-                    mode="agent",
-                    language=self._resolve_prompt_language(),
-                    channel=self._resolve_prompt_channel(session_id),
+                        mode="agent",
+                        language=self._resolve_prompt_language(),
+                        channel=self._resolve_prompt_channel(session_id),
                 )}]
-            tool_list = self._instance.ability_manager.list()
-            for tool in tool_list:
-                if isinstance(tool, ToolCard):
-                    if tool.name.startswith("todo_"):
-                        self._instance.ability_manager.remove(tool.name)
 
             if self._task_planning_rail is not None:
                 await self._instance.unregister_rail(self._task_planning_rail)
@@ -1099,12 +1086,23 @@ class JiuWenClawDeepAdapter:
         if self._instance is None:
             return
 
-        deep_config = self._instance._deep_config
-        modify_tool = TodoModifyTool(
-            operation=deep_config.sys_operation,
-            workspace=str(getattr(deep_config.workspace, "workspace_root", "")),
-            language=resolve_language(),
-        )
+        modify_tool = None
+        try:
+            tool_card = self._instance.ability_manager.get("todo_modify")
+            registered_tool = Runner.resource_mgr.get_tool(tool_card.id)
+            if registered_tool is not None:
+                modify_tool = registered_tool
+        except Exception:
+            pass
+
+        if modify_tool is None:
+            deep_config = self._instance._deep_config
+            modify_tool = TodoModifyTool(
+                operation=deep_config.sys_operation,
+                workspace=str(deep_config.workspace.get_node_path(WorkspaceNode.TODO)),
+                language=self._resolve_runtime_language(),
+            )
+            
         modify_tool.set_file(session_id)
 
         try:
@@ -1220,7 +1218,7 @@ class JiuWenClawDeepAdapter:
         )
 
     async def process_message_stream_impl(
-            self, request: AgentRequest, inputs: dict[str, Any]
+        self, request: AgentRequest, inputs: dict[str, Any]
     ) -> AsyncIterator[AgentResponseChunk]:
         """Execute a streaming request; yield response chunks.
 
