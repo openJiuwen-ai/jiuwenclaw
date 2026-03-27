@@ -3,7 +3,7 @@
 """ToolPromptRail — dynamically injects the tool prompt section before each model call."""
 from __future__ import annotations
 
-from core.single_agent.prompts.builder import PromptSection
+from openjiuwen.core.single_agent.prompts.builder import PromptSection
 from openjiuwen.core.single_agent.rail.base import AgentCallbackContext
 from openjiuwen.deepagents.rails.base import DeepAgentRail
 

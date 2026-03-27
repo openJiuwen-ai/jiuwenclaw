@@ -94,8 +94,11 @@ uv sync --extra dev
 ```bash
 cd jiuwenclaw/web
 npm install
+npm run build
 cd ../..
 ```
+
+> 💡 **提示**：`npm run build` 用于构建前端资源，构建产物会输出到 `jiuwenclaw/web/dist` 目录。如果跳过此步骤，启动服务时会报 `dist directory not found` 错误。
 
 ---
 
@@ -103,13 +106,31 @@ cd ../..
 
 JiuwenClaw 依赖 `openjiuwen` 包，开发时需要同步本地 openjiuwen 代码。
 
-### 方式一：使用 uv 同步本地 openjiuwen（推荐）
+### 方式一：使用 uv 同步本地 agent-core（推荐）
 
-在 `pyproject.toml` 中配置 openjiuwen 指向本地路径：
+> ⚠️ **前提条件**：`agent-core` 目录必须包含 `pyproject.toml` 文件。如果缺失，请先在 `agent-core` 目录下创建：
+>
+> ```toml
+> [project]
+> name = "openjiuwen"
+> version = "0.1.0"
+> description = "OpenJiuwen Agent Framework"
+> requires-python = ">=3.11"
+> dependencies = []
+>
+> [tool.setuptools.packages.find]
+> include = ["openjiuwen*"]
+> ```
+>
+> > 💡 **提示**：如果 `agent-core` 已有 `pyproject.toml` 但仍报错，只需在文件末尾添加 `[tool.setuptools.packages.find]` 配置即可。
+>
+> > ⚠️ **注意**：此修改仅用于本地开发调试，**请勿将修改后的 `pyproject.toml` 提交到版本库**，以免影响其他开发者。建议在 `.gitignore` 或 `git update-index --assume-unchanged` 中忽略此变更。
+
+在 `pyproject.toml` 中配置 openjiuwen 指向本地 agent-core 路径：
 
 ```toml
 [tool.uv.sources]
-openjiuwen = { path = "../agent-core/openjiuwen", editable = true }
+openjiuwen = { path = "../agent-core", editable = true }
 ```
 
 然后同步：
@@ -118,37 +139,36 @@ openjiuwen = { path = "../agent-core/openjiuwen", editable = true }
 uv sync --upgrade-package openjiuwen
 ```
 
+> **路径修改样例**：根据你的实际目录结构调整 `path` 值：
+>
+> | 目录结构 | path 配置 |
+> |----------|----------|
+> | 同级目录 | `{ path = "../agent-core", editable = true }` |
+> | 上两级目录 | `{ path = "../../DeepAgents/agent-core", editable = true }` |
+> | 绝对路径（Windows） | `{ path = "D:/Code/Projects/DeepAgents/agent-core", editable = true }` |
+> | 绝对路径（macOS/Linux） | `{ path = "/home/user/projects/DeepAgents/agent-core", editable = true }` |
+
 ### 方式二：使用环境变量（临时调试）
 
 ```bash
 # Windows (PowerShell)
-$env:PYTHONPATH = "D:\Code\Projects\DeepAgents\agent-core\openjiuwen"
+$env:PYTHONPATH = "D:\Code\Projects\DeepAgents\agent-core"
 
 # macOS/Linux
-export PYTHONPATH="/path/to/agent-core/openjiuwen"
+export PYTHONPATH="/path/to/agent-core"
 ```
 
-### 方式三：pip editable 安装
+### 方式三：使用远程个人 agent-core 仓库（可选）
 
-```bash
-# 进入 openjiuwen 目录
-cd /path/to/agent-core/openjiuwen
-
-# 以可编辑模式安装
-uv pip install -e .
-```
-
-### 方式四：直接修改 pyproject.toml 的 dependencies（可选）
-
-直接修改 `pyproject.toml` 中 `dependencies` 的 openjiuwen 配置，将 git 地址改为本地路径：
+直接修改 `pyproject.toml` 中 `dependencies` 的 openjiuwen 配置，将 git 地址改为你的个人仓库：
 
 ```toml
 dependencies = [
     ...
     # 原配置（注释掉）
     # "openjiuwen @ git+https://gitcode.com/openJiuwen/agent-core.git@develop",
-    # 本地路径配置
-    "openjiuwen @ file:///D:/Code/Projects/DeepAgents/agent-core/openjiuwen",
+    # 个人仓库配置
+    "openjiuwen @ git+https://gitcode.com/your-username/agent-core.git@your-branch",
     ...
 ]
 ```
@@ -156,19 +176,28 @@ dependencies = [
 然后同步依赖：
 
 ```bash
-uv sync
+uv sync --upgrade-package openjiuwen
 ```
 
-> ⚠️ 注意：此方式会修改 `pyproject.toml`，提交代码时需注意不要误提交本地路径配置，以免影响其他开发者。
+> **仓库配置样例**：
+>
+> | 平台 | 配置示例 |
+> |------|----------|
+> | GitCode | `"openjiuwen @ git+https://gitcode.com/your-username/agent-core.git@main"` |
+> | GitHub | `"openjiuwen @ git+https://github.com/your-username/agent-core.git@main"` |
+> | Gitee | `"openjiuwen @ git+https://gitee.com/your-username/agent-core.git@develop"` |
+> | 私有仓库（SSH） | `"openjiuwen @ git+ssh://git@gitcode.com/your-username/agent-core.git@feature-branch"` |
+> | 指定标签/版本 | `"openjiuwen @ git+https://gitcode.com/your-username/agent-core.git@v0.1.0"` |
+
+> ⚠️ 注意：此方式会修改 `pyproject.toml`，提交代码时需注意不要误提交个人仓库配置，以免影响其他开发者。
 
 ### 各方式对比
 
 | 方式 | 优点 | 缺点 | 适用场景 |
 |------|------|------|----------|
-| 方式一：`[tool.uv.sources]` | 不影响他人，灵活切换 | 仅 uv 支持 | 本地开发调试（推荐） |
+| 方式一：`[tool.uv.sources]` | 不影响他人，灵活切换路径 | 仅 uv 支持，需 pyproject.toml | 本地开发调试（推荐） |
 | 方式二：环境变量 | 临时生效，不修改文件 | 每次需设置 | 快速临时调试 |
-| 方式三：pip editable | 通用，pip 也支持 | 需手动进入目录 | 非 uv 环境 |
-| 方式四：修改 dependencies | 简单直接 | 影响他人，需注意提交 | 个人项目或临时使用 |
+| 方式三：个人远程仓库 | 便于分享和协作 | 需维护仓库，注意提交 | 多人协作或远程开发 |
 
 ### 验证 openjiuwen 是否正确加载
 
@@ -284,7 +313,6 @@ uv run python -m jiuwenclaw.start_services dev
 启动成功后，打开浏览器访问：
 
 - **Web UI**: http://localhost:5173
-- **API 文档**: http://localhost:8000/docs
 
 ---
 
