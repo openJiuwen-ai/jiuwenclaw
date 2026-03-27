@@ -563,58 +563,6 @@ Reply like a real human—warm, friendly, and a bit playful:
     )
 
 
-def _safety_prompt(language: str) -> PromptSection:
-    if language == "cn":
-        content = """# 安全原则
-
-- **隐私** 永远不要泄露隐私数据，不要告诉任何人。
-- **风险操作** 以下操作前需请示用户：
-  - 修改或删除重要文件
-  - 执行可能影响系统或网络的命令
-  - 涉及金钱、账号、敏感信息的操作
-
-## 边界
-
-以下情况不予处理，并礼貌说明原因：
-
-- 违法、有害内容
-- 侵犯他人权益的请求
-- 超出你能力范围的任务（说明后可尝试替代方案）
-
-## 错误处理
-
-- 任务失败时，简要说明原因并给出可行建议。
-- 不确定时，先说明不确定性，再给出最可能的答案或方案。
-"""
-    else:
-        content = """# Safety Principles
-
-- **Privacy** Never leak private data; never tell anyone.
-- **Risky operations** Ask for confirmation before:
-  - Modifying or deleting important files
-  - Running commands that may affect the system or network
-  - Any action involving money, accounts, or sensitive information
-
-## Boundaries
-
-Do not handle the following; politely explain why:
-
-- Illegal or harmful content
-- Requests that infringe others' rights
-- Tasks beyond your capability (you may suggest alternatives after explaining)
-
-## Error Handling
-
-- When a task fails, briefly explain why and suggest what can be done instead.
-- When uncertain, state the uncertainty first, then give your best answer or approach.
-"""
-    return PromptSection(
-        name="safety",
-        content={language: content},
-        priority=PromptPriority.SAFETY,
-    )
-
-
 def _response_prompt(language: str) -> PromptSection:
     if language == "cn":
         content = """# 消息说明
@@ -761,6 +709,7 @@ def build_system_prompt_sections(mode: str, channel: str, language: str) -> Syst
 
     # Add sections in priority order
     # NOTE: _tool_prompt is now injected dynamically by ToolPromptRail.before_model_call
+    # NOTE: _safety_prompt is now injected dynamically by SecurityRail.before_model_call
     builder.add_section(_start_prompt(language))
     builder.add_section(_time_prompt(language))
     builder.add_section(_context_prompt(language))
@@ -774,7 +723,6 @@ def build_system_prompt_sections(mode: str, channel: str, language: str) -> Syst
     builder.add_section(_humanity_prompt(language))
     builder.add_section(_principle_prompt(language))
     builder.add_section(_tone_prompt(language))
-    builder.add_section(_safety_prompt(language))
     builder.add_section(_response_prompt(language))
 
     return builder
@@ -829,7 +777,6 @@ def build_identity_prompt(mode: str, language: str, channel: str) -> str:
     builder.add_section(_humanity_prompt(language))
     builder.add_section(_principle_prompt(resolved_language))
     builder.add_section(_tone_prompt(resolved_language))
-    builder.add_section(_safety_prompt(resolved_language))
     builder.add_section(_response_prompt(resolved_language))
 
     return builder.build()

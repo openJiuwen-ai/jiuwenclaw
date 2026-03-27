@@ -29,7 +29,7 @@ from openjiuwen.deepagents import DeepAgent, DeepAgentConfig
 from openjiuwen.deepagents.factory import create_deep_agent
 from openjiuwen.deepagents.prompts import resolve_language
 from openjiuwen.deepagents.workspace.workspace import Workspace
-from openjiuwen.deepagents.rails import SkillUseRail, TaskPlanningRail, ToolPromptRail
+from openjiuwen.deepagents.rails import SkillUseRail, TaskPlanningRail, ToolPromptRail, SecurityRail
 from openjiuwen.deepagents.rails.filesystem_rail import FileSystemRail
 
 from jiuwenclaw.agentserver.deep_agent.cron_runtime import CronRuntimeBridge
@@ -137,6 +137,7 @@ class JiuWenClawDeepAdapter:
         self._skill_rail: SkillUseRail | None = None
         self._stream_event_rail: JiuClawStreamEventRail | None = None
         self._task_planning_rail: TaskPlanningRail | None = None
+        self._security_rail: SecurityRail | None = None
         self._tool_prompt_rail: ToolPromptRail | None = None
         self._evolution_service: EvolutionService | None = None
         self._tool_cards = None
@@ -320,6 +321,18 @@ class JiuWenClawDeepAdapter:
             task_planning_rail = None
         return task_planning_rail
 
+    def _build_security_rail(self) -> SecurityRail | None:
+        """Build SecurityPromptRail."""
+        try:
+            security_prompt_rail = SecurityRail(
+                language=self._resolve_runtime_language(),
+            )
+            logger.info("[JiuWenClawDeepAdapter] SecurityPromptRail create success")
+        except Exception as exc:
+            logger.warning("[JiuWenClawDeepAdapter] SecurityPromptRail create failed: %s", exc)
+            security_prompt_rail = None
+        return security_prompt_rail
+
     def _build_tool_prompt_rail(self) -> ToolPromptRail | None:
         """Build ToolPromptRail."""
         try:
@@ -350,6 +363,7 @@ class JiuWenClawDeepAdapter:
                            {"config": config, "include_tools": self._filesystem_rail is None}),
             _RailBuildInfo("_stream_event_rail", self._build_stream_event_rail),
             _RailBuildInfo("_tool_prompt_rail", self._build_tool_prompt_rail),
+            _RailBuildInfo("_security_rail", self._build_security_rail),
         ]
 
         rails_list = []
@@ -363,7 +377,7 @@ class JiuWenClawDeepAdapter:
     def _rails_snapshot_for_unregister(self) -> list[Any]:
         """与 _build_agent_rails 顺序一致，用于热更新前 unregister."""
         rails = []
-        for attr in ("_filesystem_rail", "_skill_rail", "_stream_event_rail", "_tool_prompt_rail"):
+        for attr in ("_filesystem_rail", "_skill_rail", "_stream_event_rail", "_tool_prompt_rail", "_security_rail"):
             r = getattr(self, attr, None)
             if r is not None:
                 rails.append(r)
@@ -422,6 +436,10 @@ class JiuWenClawDeepAdapter:
         self._tool_prompt_rail = self._build_tool_prompt_rail()
         if self._tool_prompt_rail is not None:
             rails_list.append(self._tool_prompt_rail)
+
+        self._security_rail = self._build_security_rail()
+        if self._security_rail is not None:
+            rails_list.append(self._security_rail)
 
         return rails_list
 
@@ -502,6 +520,15 @@ class JiuWenClawDeepAdapter:
         agent_config = self._instance.react_agent.config
         self._proc_memory_compression_config(agent_config)
         self._instance.react_agent.configure(agent_config)
+
+        # react_agent.configure() rebuilds prompt_builder, breaking the shared
+        # reference set by DeepAgent._create_react_agent().  Restore it so that
+        # rails (SecurityRail, ToolPromptRail, etc.) and build() operate
+        # on the same object.
+        shared_builder = self._instance.system_prompt_builder
+        if shared_builder is not None:
+            self._instance.react_agent.prompt_builder = shared_builder
+            self._instance.react_agent.system_prompt_builder = shared_builder
 
         if self._compaction_manager is None:
             memory_mgr = await get_memory_manager(
