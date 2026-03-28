@@ -1001,6 +1001,7 @@ class JiuWenClawDeepAdapter:
         if self._instance is None:
             raise RuntimeError("JiuWenClawDeepAdapter 未初始化，请先调用 create_instance()")
 
+        resolved_language = self._resolve_runtime_language()
         if mode == "plan":
             self._instance.react_agent.config.prompt_template = \
                 [{"role": "system", "content": build_identity_prompt(
@@ -1027,6 +1028,12 @@ class JiuWenClawDeepAdapter:
                 self._task_planning_rail = None
                 logger.info("[JiuWenClawDeepAdapter] TaskPlanningRail unregistered for agent mode")
 
+        # Sync language onto shared builder and deep config so rails
+        # (SecurityRail, MemoryRail, etc.) see the updated language in before_model_call.
+        if self._instance.system_prompt_builder is not None:
+            self._instance.system_prompt_builder.language = resolved_language
+        if self._instance._deep_config is not None:
+            self._instance._deep_config.language = resolved_language
 
         if not self._web_tools_registered:
             for tool_cls in [WebFreeSearchTool, WebPaidSearchTool, WebFetchWebpageTool]:

@@ -761,7 +761,7 @@ def build_identity_prompt(mode: str, language: str, channel: str) -> str:
     builder.add_section(_context_prompt(resolved_language))
 
 
-    builder.add_section(_humanity_prompt(language))
+    builder.add_section(_humanity_prompt(resolved_language))
     builder.add_section(_principle_prompt(resolved_language))
     builder.add_section(_tone_prompt(resolved_language))
     builder.add_section(_response_prompt(resolved_language))
