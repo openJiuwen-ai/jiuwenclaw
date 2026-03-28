@@ -339,9 +339,6 @@ Before outputting your final text reply, **you must silently execute this tool c
     )
 
 
-# NOTE: _tool_prompt removed — tool listing is now in
-# openjiuwen.deepagents.prompts.sections.tools.build_tools_section,
-# injected dynamically by ToolPromptRail.before_model_call.
 
 
 def _skills_prompt(language: str) -> PromptSection:
@@ -708,7 +705,6 @@ def build_system_prompt_sections(mode: str, channel: str, language: str) -> Syst
     builder = SystemPromptBuilder(language=language)
 
     # Add sections in priority order
-    # NOTE: _tool_prompt is now injected dynamically by ToolPromptRail.before_model_call
     # NOTE: _safety_prompt is now injected dynamically by SecurityRail.before_model_call
     builder.add_section(_start_prompt(language))
     builder.add_section(_time_prompt(language))
@@ -765,7 +761,6 @@ def build_identity_prompt(mode: str, language: str, channel: str) -> str:
     resolved_language = resolve_language(language)
     builder = SystemPromptBuilder(language=resolved_language)
 
-    # NOTE: _tool_prompt is now injected dynamically by ToolPromptRail.before_model_call
     builder.add_section(_start_prompt(resolved_language))
     builder.add_section(_time_prompt(resolved_language))
     builder.add_section(_context_prompt(resolved_language))
