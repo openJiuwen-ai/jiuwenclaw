@@ -540,7 +540,6 @@ class JiuWenClawDeepAdapter:
                 skills_dir=str(_SKILLS_DIR),
                 skill_mode=skill_mode,
                 include_tools=include_tools,
-                language=self._resolve_runtime_language(),
             )
             logger.info("[JiuWenClawDeepAdapter] SkillUseRail create success")
         except Exception as exc:
@@ -599,9 +598,7 @@ class JiuWenClawDeepAdapter:
     def _build_task_planning_rail(self) -> TaskPlanningRail | None:
         """Build TaskPlanningRail."""
         try:
-            task_planning_rail = TaskPlanningRail(
-                language=self._resolve_runtime_language(),
-            )
+            task_planning_rail = TaskPlanningRail()
             logger.info("[JiuWenClawDeepAdapter] TaskPlanningRail create success")
         except Exception as exc:
             logger.warning("[JiuWenClawDeepAdapter] TaskPlanningRail create failed: %s", exc)
@@ -611,9 +608,7 @@ class JiuWenClawDeepAdapter:
     def _build_security_rail(self) -> SecurityRail | None:
         """Build SecurityPromptRail."""
         try:
-            security_prompt_rail = SecurityRail(
-                language=self._resolve_runtime_language(),
-            )
+            security_prompt_rail = SecurityRail()
             logger.info("[JiuWenClawDeepAdapter] SecurityPromptRail create success")
         except Exception as exc:
             logger.warning("[JiuWenClawDeepAdapter] SecurityPromptRail create failed: %s", exc)
