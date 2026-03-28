@@ -7,7 +7,6 @@ from jiuwenclaw.agentserver.agent_ws_server import AgentWebSocketServer
 from jiuwenclaw.gateway.channel_manager import ChannelManager
 from jiuwenclaw.gateway.heartbeat import (
     HEARTBEAT_CHANNEL_ID,
-    HEARTBEAT_PROMPT,
     GatewayHeartbeatService,
     HeartbeatConfig,
     IHeartbeat,
@@ -21,7 +20,6 @@ __all__ = [
     "ChannelManager",
     "GatewayHeartbeatService",
     "HEARTBEAT_CHANNEL_ID",
-    "HEARTBEAT_PROMPT",
     "HeartbeatConfig",
     "IHeartbeat",
     "MessageHandler",

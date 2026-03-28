@@ -34,6 +34,7 @@ from openjiuwen.deepagents.workspace.workspace import Workspace
 from openjiuwen.deepagents.rails import SkillUseRail, TaskPlanningRail, SecurityRail, SkillEvolutionRail
 from openjiuwen.deepagents.rails.filesystem_rail import FileSystemRail
 from openjiuwen.deepagents.rails.memory_rail import MemoryRail
+from openjiuwen.deepagents.rails.heartbeat_rail import HeartbeatRail
 from openjiuwen.agent_evolving.online.schema import (
     EvolutionContext,
     EvolutionRecord,
@@ -138,6 +139,7 @@ class JiuWenClawDeepAdapter:
         self._stream_event_rail: JiuClawStreamEventRail | None = None
         self._task_planning_rail: TaskPlanningRail | None = None
         self._security_rail: SecurityRail | None = None
+        self._heartbeat_rail: HeartbeatRail | None = None
         self._skill_evolution_rail: SkillEvolutionRail | None = None
         self._pending_evolution_data: dict[str, dict] = {}
         self._tool_cards = None
@@ -355,6 +357,18 @@ class JiuWenClawDeepAdapter:
             memory_rail = None
         return memory_rail
 
+    def _build_heartbeat_rail(self) -> HeartbeatRail | None:
+        """Build HeartbeatRail."""
+        try:
+            heartbeat_rail = HeartbeatRail(
+                language=self._resolve_runtime_language(),
+            )
+            logger.info("[JiuWenClawDeepAdapter] HeartbeatRail create success")
+        except Exception as exc:
+            logger.warning("[JiuWenClawDeepAdapter] HeartbeatRail create failed: %s", exc)
+            heartbeat_rail = None
+        return heartbeat_rail
+
     def _build_agent_rails(self, config: dict[str, Any]) -> list[Any]:
         """Build DeepAgent rails consistently for cold start and hot reload."""
 
@@ -375,6 +389,7 @@ class JiuWenClawDeepAdapter:
             _RailBuildInfo("_task_planning_rail", self._build_task_planning_rail),
             _RailBuildInfo("_security_rail", self._build_security_rail),
             _RailBuildInfo("_memory_rail", self._build_memory_rail),
+            _RailBuildInfo("_heartbeat_rail", self._build_heartbeat_rail),
         ]
         if config.get("evolution", {}).get("enabled", False):
             rail_infos.append(_RailBuildInfo("_skill_evolution_rail", self._build_skill_evolution_rail,{"config": config}))
@@ -390,7 +405,14 @@ class JiuWenClawDeepAdapter:
     def _rails_snapshot_for_unregister(self) -> list[Any]:
         """与 _build_agent_rails 顺序一致，用于热更新前 unregister."""
         rails = []
-        for attr in ("_filesystem_rail", "_skill_rail", "_stream_event_rail", "_security_rail", "_skill_evolution_rail"):
+        for attr in (
+            "_filesystem_rail",
+            "_skill_rail",
+            "_stream_event_rail",
+            "_security_rail",
+            "_skill_evolution_rail",
+            "_heartbeat_rail",
+        ):
             r = getattr(self, attr, None)
             if r is not None:
                 rails.append(r)
@@ -449,6 +471,9 @@ class JiuWenClawDeepAdapter:
         self._security_rail = self._build_security_rail()
         if self._security_rail is not None:
             rails_list.append(self._security_rail)
+
+        if self._heartbeat_rail is not None:
+            rails_list.append(self._heartbeat_rail)
 
         if self._skill_evolution_rail is not None:
             self._skill_evolution_rail.update_llm(self._model, config.get("model_name", "gpt-4"))
