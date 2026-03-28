@@ -538,6 +538,7 @@ class AgentWebSocketServer:
             params = request.params or {}
             config_payload = params.get("config")
             env_overrides = params.get("env")
+            # TODO： 待适配
             self._agent.reload_agent_config(
                 config_base=config_payload,
                 env_overrides=env_overrides,
