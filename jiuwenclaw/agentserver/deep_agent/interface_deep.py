@@ -1276,6 +1276,14 @@ class JiuWenClawDeepAdapter:
                 chunk_type = chunk.type
                 payload = chunk.payload
 
+                if chunk_type == "controller_output" and payload is not None:
+                    inner_t = getattr(payload, "type", None)
+                    inner_val = (
+                        getattr(inner_t, "value", inner_t) if inner_t is not None else None
+                    )
+                    if inner_val == "task_completion":
+                        return None
+
                 if chunk_type == "llm_output":
                     content = (
                         payload.get("content", "")
