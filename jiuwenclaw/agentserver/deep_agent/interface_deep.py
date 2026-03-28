@@ -18,6 +18,7 @@ import uuid
 
 from dotenv import load_dotenv
 from openjiuwen.core.foundation.llm import ModelRequestConfig, ModelClientConfig, Model
+from openjiuwen.core.foundation.store.base_embedding import EmbeddingConfig
 from openjiuwen.core.foundation.tool import ToolCard
 from openjiuwen.core.context_engine import MessageOffloaderConfig, DialogueCompressorConfig
 from openjiuwen.core.runner import Runner
@@ -32,6 +33,7 @@ from openjiuwen.deepagents.prompts import resolve_language
 from openjiuwen.deepagents.workspace.workspace import Workspace
 from openjiuwen.deepagents.rails import SkillUseRail, TaskPlanningRail, SecurityRail, SkillEvolutionRail
 from openjiuwen.deepagents.rails.filesystem_rail import FileSystemRail
+from openjiuwen.deepagents.rails.memory_rail import MemoryRail
 from openjiuwen.agent_evolving.online.schema import (
     EvolutionContext,
     EvolutionRecord,
@@ -47,14 +49,6 @@ from jiuwenclaw.gateway.cron import CronTargetChannel
 from jiuwenclaw.utils import logger, USER_WORKSPACE_DIR, get_env_file, get_agent_root_dir
 from jiuwenclaw.config import get_config
 from jiuwenclaw.agentserver.tools.browser_tools import register_browser_runtime_mcp_server
-from jiuwenclaw.agentserver.tools.memory_tools import (
-    init_memory_manager_async,
-    memory_search,
-    memory_get,
-    write_memory,
-    edit_memory,
-    read_memory,
-)
 from jiuwenclaw.agentserver.memory.compaction import ContextCompactionManager
 from jiuwenclaw.agentserver.memory.config import clear_config_cache
 from jiuwenclaw.agentserver.memory import clear_memory_manager_cache
@@ -305,7 +299,7 @@ class JiuWenClawDeepAdapter:
             logger.warning("[JiuWenClaw] SkillEvolutionRail create failed: %s", exc)
             skill_evolution_rail = None
         return skill_evolution_rail
-    
+
     def _build_stream_event_rail(self) -> JiuClawStreamEventRail | None:
         """Build JiuClawStreamEventRail."""
         try:
@@ -340,6 +334,27 @@ class JiuWenClawDeepAdapter:
             security_prompt_rail = None
         return security_prompt_rail
 
+    def _build_memory_rail(self) -> MemoryRail | None:
+        try:
+            config = get_config()
+            embed_config = config.get("embed") if isinstance(config, dict) else None
+            if (not isinstance(embed_config, dict) or not embed_config.get("embed_api_key")
+                    or not embed_config.get("embed_base_url") or not embed_config.get("embed_model")):
+                logger.warning("[JiuWenClawDeepAdapter] MemoryRail create failed: No available embedding config" )
+            memory_rail = MemoryRail(
+                embedding_config=EmbeddingConfig(
+                    model_name=embed_config.get("embed_model"),
+                    base_url=embed_config.get("embed_base_url"),
+                    api_key=embed_config.get("embed_api_key")
+                ),
+                language=self._resolve_runtime_language(),
+            )
+            logger.info("[JiuWenClawDeepAdapter] MemoryRail create success")
+        except Exception as exc:
+            logger.warning("[JiuWenClawDeepAdapter] MemoryRail create failed: %s", exc)
+            memory_rail = None
+        return memory_rail
+
     def _build_agent_rails(self, config: dict[str, Any]) -> list[Any]:
         """Build DeepAgent rails consistently for cold start and hot reload."""
 
@@ -359,6 +374,7 @@ class JiuWenClawDeepAdapter:
             _RailBuildInfo("_stream_event_rail", self._build_stream_event_rail),
             _RailBuildInfo("_task_planning_rail", self._build_task_planning_rail),
             _RailBuildInfo("_security_rail", self._build_security_rail),
+            _RailBuildInfo("_memory_rail", self._build_memory_rail),
         ]
         if config.get("evolution", {}).get("enabled", False):
             rail_infos.append(_RailBuildInfo("_skill_evolution_rail", self._build_skill_evolution_rail,{"config": config}))
@@ -509,14 +525,6 @@ class JiuWenClawDeepAdapter:
     async def _get_tool_cards(self):
         """Get tool cards."""
         tool_cards = []
-        await init_memory_manager_async(
-            workspace_dir=self._workspace_dir,
-            agent_id=self._agent_name,
-        )
-        for tool in [memory_search, memory_get, write_memory, edit_memory, read_memory]:
-            Runner.resource_mgr.add_tool(tool)
-            tool_cards.append(tool.card)
-        self._memory_tools_registered = True
 
         for tool_cls in [WebFreeSearchTool, WebPaidSearchTool, WebFetchWebpageTool]:
             tool_instance = tool_cls()
@@ -718,15 +726,6 @@ class JiuWenClawDeepAdapter:
                 self._task_planning_rail = None
                 logger.info("[JiuWenClawDeepAdapter] TaskPlanningRail unregistered for agent mode")
 
-        if not self._memory_tools_registered:
-            await init_memory_manager_async(
-                workspace_dir=self._workspace_dir,
-                agent_id=self._agent_name,
-            )
-            for tool in [memory_search, memory_get, write_memory, edit_memory, read_memory]:
-                Runner.resource_mgr.add_tool(tool)
-                self._instance.ability_manager.add(tool.card)
-            self._memory_tools_registered = True
 
         if not self._web_tools_registered:
             for tool_cls in [WebFreeSearchTool, WebPaidSearchTool, WebFetchWebpageTool]:
@@ -863,7 +862,7 @@ class JiuWenClawDeepAdapter:
             "[JiuWenClaw] evolution approval resolved: request_id=%s kept=%d/%d skill=%s",
             request_id, kept, len(raw_records), skill_name,
         )
-        return True    
+        return True
 
     # ------------------------------------------------------------------
     # /evolve & /solidify command handlers (new online module)

@@ -45,14 +45,6 @@ from jiuwenclaw.agentserver.tools.audio_tools import (
 from jiuwenclaw.agentserver.tools.image_tools import visual_question_answering
 from jiuwenclaw.agentserver.tools.mcp_toolkits import get_mcp_tools
 from jiuwenclaw.agentserver.tools.todo_toolkits import TaskStatus, TodoToolkit
-from jiuwenclaw.agentserver.tools.memory_tools import (
-    init_memory_manager_async,
-    memory_search,
-    memory_get,
-    write_memory,
-    edit_memory,
-    read_memory,
-)
 from jiuwenclaw.agentserver.tools.task_tools import (
     get_task_tools,
     _is_task_memory_enabled,
@@ -275,15 +267,6 @@ class JiuWenClawReactAdapter:
                     "[JiuWenClawReactAdapter] Evolution is enabled but skipped: no valid model API key configured")
         else:
             logger.warning("[JiuWenClawReactAdapter] ReActAgent has no _skill_util; skip skill registration.")
-
-        await init_memory_manager_async(
-            workspace_dir=self._workspace_dir,
-            agent_id=self._agent_name,
-        )
-        for tool in [memory_search, memory_get, write_memory, edit_memory, read_memory]:
-            Runner.resource_mgr.add_tool(tool)
-            self._instance.ability_manager.add(tool.card)
-        self._memory_tools_registered = True
 
         if _is_task_memory_enabled():
             try:
@@ -541,16 +524,6 @@ class JiuWenClawReactAdapter:
             for tool in session_toolkits.get_tools():
                 Runner.resource_mgr.add_tool(tool)
                 self._instance.ability_manager.add(tool.card)
-
-        if not self._memory_tools_registered:
-            await init_memory_manager_async(
-                workspace_dir=self._workspace_dir,
-                agent_id=self._agent_name,
-            )
-            for tool in [memory_search, memory_get, write_memory, edit_memory, read_memory]:
-                Runner.resource_mgr.add_tool(tool)
-                self._instance.ability_manager.add(tool.card)
-            self._memory_tools_registered = True
 
         if not self._task_memory_tools_registered and _is_task_memory_enabled():
             try:

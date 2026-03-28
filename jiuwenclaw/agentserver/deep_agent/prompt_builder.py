@@ -711,10 +711,6 @@ def build_system_prompt_sections(mode: str, channel: str, language: str) -> Syst
     builder.add_section(_context_prompt(language))
     builder.add_section(_workspace_prompt(language))
 
-    # Memory section depends on channel
-    is_cron = (channel == "cron")
-    builder.add_section(_memory_prompt(language, is_cron))
-
     # Add human, principle, tone, safety, response sections
     builder.add_section(_humanity_prompt(language))
     builder.add_section(_principle_prompt(language))
@@ -765,9 +761,6 @@ def build_identity_prompt(mode: str, language: str, channel: str) -> str:
     builder.add_section(_time_prompt(resolved_language))
     builder.add_section(_context_prompt(resolved_language))
     builder.add_section(_workspace_prompt(resolved_language))
-
-    is_cron = (channel == "cron")
-    builder.add_section(_memory_prompt(resolved_language, is_cron))
 
     builder.add_section(_humanity_prompt(language))
     builder.add_section(_principle_prompt(resolved_language))
