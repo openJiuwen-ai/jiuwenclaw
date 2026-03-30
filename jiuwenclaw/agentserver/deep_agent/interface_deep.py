@@ -38,6 +38,7 @@ from openjiuwen.deepagents.prompts import resolve_language
 from openjiuwen.deepagents.workspace.workspace import Workspace, WorkspaceNode
 from openjiuwen.deepagents.rails import SkillUseRail, TaskPlanningRail, SecurityRail, SkillEvolutionRail
 from openjiuwen.deepagents.rails.filesystem_rail import FileSystemRail
+from openjiuwen.deepagents.rails.context_engineering_rail import ContextEngineeringRail
 from openjiuwen.deepagents.rails.memory_rail import MemoryRail
 from openjiuwen.deepagents.rails.heartbeat_rail import HeartbeatRail
 from openjiuwen.agent_evolving.online.schema import (
@@ -165,6 +166,7 @@ class JiuWenClawDeepAdapter:
         self._skill_rail: SkillUseRail | None = None
         self._stream_event_rail: JiuClawStreamEventRail | None = None
         self._task_planning_rail: TaskPlanningRail | None = None
+        self._context_engineering_rail: ContextEngineeringRail | None = None
         self._security_rail: SecurityRail | None = None
         self._heartbeat_rail: HeartbeatRail | None = None
         self._skill_evolution_rail: SkillEvolutionRail | None = None
@@ -546,6 +548,20 @@ class JiuWenClawDeepAdapter:
             skill_rail = None
         return skill_rail
 
+    def _build_context_engineering_rail(self) -> ContextEngineeringRail | None:
+        """Build ContextEngineeringRail."""
+        try:
+            context_rail = ContextEngineeringRail(
+                processors=None,  # 使用预置配置
+                language=self._resolve_runtime_language(),
+                preset=True,
+            )
+            logger.info("[JiuWenClawDeepAdapter] ContextEngineeringRail create success")
+            return context_rail
+        except Exception as exc:
+            logger.warning("[JiuWenClawDeepAdapter] ContextEngineeringRail create failed: %s", exc)
+            return None
+
     def _build_skill_evolution_rail(self, config: dict[str, Any]) -> SkillEvolutionRail | None:
         """Build SkillEvolutionRail."""
         try:
@@ -654,6 +670,7 @@ class JiuWenClawDeepAdapter:
             _RailBuildInfo("_skill_rail", self._build_skill_rail,
                            {"config": config, "include_tools": self._filesystem_rail is None}),
             _RailBuildInfo("_stream_event_rail", self._build_stream_event_rail),
+            _RailBuildInfo("_context_engineering_rail", self._build_context_engineering_rail),
             _RailBuildInfo("_task_planning_rail", self._build_task_planning_rail),
             _RailBuildInfo("_security_rail", self._build_security_rail),
             _RailBuildInfo("_memory_rail", self._build_memory_rail),
@@ -683,6 +700,7 @@ class JiuWenClawDeepAdapter:
             "_filesystem_rail",
             "_skill_rail",
             "_stream_event_rail",
+            "_context_engineering_rail",
             "_security_rail",
             "_skill_evolution_rail",
             "_heartbeat_rail",
@@ -746,6 +764,10 @@ class JiuWenClawDeepAdapter:
         if self._stream_event_rail is not None:
             rails_list.append(self._stream_event_rail)
 
+        self._context_engineering_rail = self._build_context_engineering_rail()
+        if self._context_engineering_rail is not None:
+            rails_list.append(self._context_engineering_rail)
+
         self._security_rail = self._build_security_rail()
         if self._security_rail is not None:
             rails_list.append(self._security_rail)
@@ -762,47 +784,11 @@ class JiuWenClawDeepAdapter:
 
         return rails_list
 
-    def _proc_memory_compression_config(self, agent_config: ReActAgentConfig):
-        """Process memory compress config."""
-        config_base = get_config()
-        memory_compression_config = config_base.get('memory_compression', {}).copy()
-        model_name = self._model.model_config.model_name
-        model_client_config = self._model.model_client_config
-        if memory_compression_config.get("enabled", False):
-            message_offloader_config = memory_compression_config.get("message_offloader_config", {}).copy()
-            dialogue_compressor_config = memory_compression_config.get("dialogue_compressor_config", {}).copy()
-            processors = [
-                (
-                    "MessageOffloader",
-                    MessageOffloaderConfig(
-                        messages_threshold=message_offloader_config.get("messages_threshold", 40),
-                        tokens_threshold=message_offloader_config.get("tokens_threshold", 20000),
-                        large_message_threshold=message_offloader_config.get("large_message_threshold", 1000),
-                        trim_size=message_offloader_config.get("trim_size", 500),
-                        offload_message_type=["tool"],
-                        keep_last_round=message_offloader_config.get("keep_last_round", False),
-                    )
-                ),
-                (
-                    "DialogueCompressor",
-                    DialogueCompressorConfig(
-                        messages_threshold=dialogue_compressor_config.get("messages_threshold", 40),
-                        tokens_threshold=dialogue_compressor_config.get("tokens_threshold", 50000),
-                        model=ModelRequestConfig(
-                            model=model_name
-                        ),
-                        model_client_config=model_client_config,
-                        keep_last_round=dialogue_compressor_config.get("keep_last_round", False),
-                    )
-                )
-            ]
-            agent_config.configure_context_processors(processors)
 
     async def _proc_context_compaction(self):
         """Process context compaction config."""
-        agent_config = self._instance.react_agent.config
-        self._proc_memory_compression_config(agent_config)
-        self._instance.react_agent.configure(agent_config)
+        # Context processors are now configured via ContextEngineeringRail.init()
+        # The rail's init() is called automatically when registered
 
         # react_agent.configure() rebuilds prompt_builder, breaking the shared
         # reference set by DeepAgent._create_react_agent().  Restore it so that
@@ -1410,7 +1396,7 @@ class JiuWenClawDeepAdapter:
                 workspace=str(deep_config.workspace.get_node_path(WorkspaceNode.TODO)),
                 language=self._resolve_runtime_language(),
             )
-            
+
         modify_tool.set_file(session_id)
 
         try:
