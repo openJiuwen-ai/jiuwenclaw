@@ -770,15 +770,6 @@ class JiuWenClawDeepAdapter:
         # Context processors are now configured via ContextEngineeringRail.init()
         # The rail's init() is called automatically when registered
 
-        # react_agent.configure() rebuilds prompt_builder, breaking the shared
-        # reference set by DeepAgent._create_react_agent().  Restore it so that
-        # rails (SecurityRail, etc.) and build() operate
-        # on the same object.
-        shared_builder = self._instance.system_prompt_builder
-        if shared_builder is not None:
-            self._instance.react_agent.prompt_builder = shared_builder
-            self._instance.react_agent.system_prompt_builder = shared_builder
-
         if self._compaction_manager is None:
             memory_mgr = await get_memory_manager(
                 agent_id=self._agent_name,
