@@ -690,23 +690,6 @@ class JiuWenClawDeepAdapter:
                 rails_list.append(rail_instance)
         return rails_list
 
-    def _rails_snapshot_for_unregister(self) -> list[Any]:
-        """与 _build_agent_rails 顺序一致，用于热更新前 unregister."""
-        rails = []
-        for attr in (
-            "_filesystem_rail",
-            "_skill_rail",
-            "_stream_event_rail",
-            "_context_engineering_rail",
-            "_security_rail",
-            "_skill_evolution_rail",
-            "_heartbeat_rail",
-        ):
-            r = getattr(self, attr, None)
-            if r is not None:
-                rails.append(r)
-        return rails
-
     def _make_deep_agent_config(
         self,
         *,
