@@ -27,7 +27,12 @@ from openjiuwen.core.sys_operation import SysOperation, SysOperationCard, Operat
 from openjiuwen.core.session.checkpointer import CheckpointerFactory
 from openjiuwen.core.session.checkpointer.checkpointer import CheckpointerConfig
 from openjiuwen.core.session.checkpointer.persistence import PersistenceCheckpointerProvider
-from openjiuwen.deepagents import DeepAgent, DeepAgentConfig
+from openjiuwen.deepagents import (
+    AudioModelConfig,
+    DeepAgent,
+    DeepAgentConfig,
+    VisionModelConfig,
+)
 from openjiuwen.deepagents.factory import create_deep_agent
 from openjiuwen.deepagents.prompts import resolve_language
 from openjiuwen.deepagents.workspace.workspace import Workspace, WorkspaceNode
@@ -49,7 +54,7 @@ from jiuwenclaw.agentserver.deep_agent.rails import (
 from jiuwenclaw.gateway.cron import CronTargetChannel
 from jiuwenclaw.utils import USER_WORKSPACE_DIR, get_env_file, get_agent_root_dir
 from jiuwenclaw.config import get_config
-from jiuwenclaw.agentserver.tools.browser_tools import register_browser_runtime_mcp_server
+from openjiuwen.deepagents.subagents.browser_agent import build_browser_agent_config
 from jiuwenclaw.agentserver.memory.compaction import ContextCompactionManager
 from jiuwenclaw.agentserver.memory.config import clear_config_cache
 from jiuwenclaw.agentserver.memory import clear_memory_manager_cache
@@ -57,8 +62,18 @@ from jiuwenclaw.agentserver.deep_agent.prompt_builder import build_identity_prom
 from jiuwenclaw.agentserver.skill_manager import _SKILLS_DIR
 from jiuwenclaw.schema.agent import AgentRequest, AgentResponse, AgentResponseChunk
 from jiuwenclaw.agentserver.memory import get_memory_manager
-from openjiuwen.deepagents.tools import WebFreeSearchTool, WebPaidSearchTool, WebFetchWebpageTool
+from openjiuwen.deepagents.tools import (
+    WebFetchWebpageTool,
+    WebFreeSearchTool,
+    WebPaidSearchTool,
+    create_audio_tools,
+    create_vision_tools,
+)
 from openjiuwen.deepagents.tools.todo import TodoStatus, TodoModifyTool
+from jiuwenclaw.agentserver.tools.multimodal_config import (
+    apply_audio_model_config_from_yaml,
+    apply_vision_model_config_from_yaml,
+)
 
 
 load_dotenv(dotenv_path=get_env_file())
@@ -84,6 +99,16 @@ _CRON_TOOL_MODE: ContextVar[str | None] = ContextVar(
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _parse_int(value: Any, default: int) -> int:
+    """Parse integer-like values safely."""
+    try:
+        if value is None or value == "":
+            return default
+        return int(value)
+    except (TypeError, ValueError):
+        return default
 
 
 class _RuntimeCronToolContext:
@@ -132,6 +157,8 @@ class JiuWenClawDeepAdapter:
         self._browser_mcp_registered: bool = False
         self._memory_tools_registered: bool = False
         self._web_tools_registered: bool = False
+        self._vision_tools_registered: bool = False
+        self._audio_tools_registered: bool = False
         self._model: Model | None = None
         self._config_cache: dict[str, Any] = {}
         self._filesystem_rail: FileSystemRail | None = None
@@ -144,6 +171,10 @@ class JiuWenClawDeepAdapter:
         self._pending_evolution_data: dict[str, dict] = {}
         self._tool_cards = None
         self._sys_operation = None
+        self._vision_model_config: VisionModelConfig | None = None
+        self._audio_model_config: AudioModelConfig | None = None
+        self._vision_tools: list[Any] = []
+        self._audio_tools: list[Any] = []
         self._cron_runtime = CronRuntimeBridge()
         self._runtime_cron_tool_context = _RuntimeCronToolContext(
             tool_scope=f"runtime_{id(self):x}",
@@ -171,6 +202,241 @@ class JiuWenClawDeepAdapter:
     def _resolve_runtime_language(self) -> str:
         """Resolve normalized runtime language shared by rails and tools."""
         return resolve_language(self._resolve_prompt_language())
+
+    @staticmethod
+    def _browser_runtime_enabled() -> bool:
+        """Whether browser runtime support is enabled for DeepAgent subagent wiring."""
+        value = str(
+            os.getenv("PLAYWRIGHT_RUNTIME_MCP_ENABLED")
+            or os.getenv("BROWSER_RUNTIME_MCP_ENABLED")
+            or ""
+        ).strip().lower()
+        return value in {"1", "true", "yes", "on"}
+
+    def _build_browser_subagents(
+        self,
+        model: Model,
+        config: dict[str, Any],
+    ) -> list[Any] | None:
+        """Build browser subagent config when browser runtime is enabled."""
+        if not self._browser_runtime_enabled():
+            return None
+
+        return [
+            build_browser_agent_config(
+                model,
+                workspace=self._workspace_dir or "./",
+                language=self._resolve_runtime_language(),
+                max_iterations=_parse_int(
+                    os.getenv("BROWSER_AGENT_MAX_ITERATIONS"),
+                    config.get("max_iterations", 15),
+                ),
+            )
+        ]
+
+    def _build_vision_model_config(
+        self,
+        config_base: dict[str, Any],
+    ) -> VisionModelConfig | None:
+        """Build DeepAgent vision config from service config/env mapping."""
+        apply_vision_model_config_from_yaml(config_base)
+        api_key = str(os.getenv("VISION_API_KEY", "")).strip()
+        base_url = str(
+            os.getenv("VISION_BASE_URL")
+            or os.getenv("VISION_API_BASE")
+            or ""
+        ).strip()
+        model_name = str(
+            os.getenv("VISION_MODEL")
+            or os.getenv("VISION_MODEL_NAME")
+            or ""
+        ).strip()
+        if not api_key or not base_url or not model_name:
+            logger.info(
+                "[JiuWenClawDeepAdapter] vision tools skipped: incomplete config"
+            )
+            return None
+        return VisionModelConfig(
+            api_key=api_key,
+            base_url=base_url,
+            model=model_name,
+            max_retries=_parse_int(os.getenv("VISION_MAX_RETRIES"), 3),
+        )
+
+    def _build_audio_model_config(
+        self,
+        config_base: dict[str, Any],
+    ) -> AudioModelConfig | None:
+        """Build DeepAgent audio config from service config/env mapping."""
+        apply_audio_model_config_from_yaml(config_base)
+        api_key = str(os.getenv("AUDIO_API_KEY", "")).strip()
+        base_url = str(
+            os.getenv("AUDIO_BASE_URL")
+            or os.getenv("AUDIO_API_BASE")
+            or ""
+        ).strip()
+        if not api_key or not base_url:
+            logger.info(
+                "[JiuWenClawDeepAdapter] audio tools skipped: incomplete config"
+            )
+            return None
+        transcription_model = str(
+            os.getenv("AUDIO_TRANSCRIPTION_MODEL")
+            or os.getenv("AUDIO_MODEL_NAME")
+            or ""
+        ).strip()
+        question_answering_model = str(
+            os.getenv("AUDIO_QUESTION_ANSWERING_MODEL")
+            or os.getenv("AUDIO_MODEL_NAME")
+            or ""
+        ).strip()
+        config_kwargs: dict[str, Any] = {
+            "api_key": api_key,
+            "base_url": base_url,
+            "max_retries": _parse_int(os.getenv("AUDIO_MAX_RETRIES"), 3),
+            "http_timeout": _parse_int(os.getenv("AUDIO_HTTP_TIMEOUT"), 20),
+            "max_audio_bytes": _parse_int(
+                os.getenv("AUDIO_MAX_AUDIO_BYTES"),
+                25 * 1024 * 1024,
+            ),
+        }
+        acr_access_key = str(os.getenv("ACR_ACCESS_KEY", "")).strip()
+        acr_access_secret = str(os.getenv("ACR_ACCESS_SECRET", "")).strip()
+        acr_base_url = str(os.getenv("ACR_BASE_URL", "")).strip()
+        if acr_access_key:
+            config_kwargs["acr_access_key"] = acr_access_key
+        if acr_access_secret:
+            config_kwargs["acr_access_secret"] = acr_access_secret
+        if acr_base_url:
+            config_kwargs["acr_base_url"] = acr_base_url
+        if transcription_model:
+            config_kwargs["transcription_model"] = transcription_model
+        if question_answering_model:
+            config_kwargs[
+                "question_answering_model"
+            ] = question_answering_model
+        return AudioModelConfig(**config_kwargs)
+
+    def _refresh_multimodal_configs(
+        self,
+        config_base: dict[str, Any],
+    ) -> None:
+        """Refresh cached multimodal configs and live tool instances."""
+        self._vision_model_config = self._build_vision_model_config(config_base)
+        self._audio_model_config = self._build_audio_model_config(config_base)
+
+        for tool in self._vision_tools:
+            tool.vision_model_config = self._vision_model_config
+        for tool in self._audio_tools:
+            tool.audio_model_config = self._audio_model_config
+
+    def _remove_registered_tools(self, tools: list[Any]) -> None:
+        """Remove tool instances from ability manager and resource manager."""
+        if not tools:
+            return
+        for tool in tools:
+            try:
+                Runner.resource_mgr.remove_tool(tool.card.id)
+            except Exception as exc:
+                logger.warning(
+                    "[JiuWenClawDeepAdapter] remove tool failed: %s",
+                    exc,
+                )
+            if self._instance is not None and hasattr(
+                self._instance,
+                "ability_manager",
+            ):
+                try:
+                    self._instance.ability_manager.remove(tool.card.name)
+                except Exception:
+                    logger.debug(
+                        "[JiuWenClawDeepAdapter] ability remove skipped for %s",
+                        tool.card.name,
+                        exc_info=True,
+                    )
+
+    def _append_tool_card(self, card: ToolCard) -> None:
+        """Append tool card if it is not already tracked."""
+        if self._tool_cards is None:
+            self._tool_cards = []
+        existing_names = {
+            item.card.name if hasattr(item, "card") else item.name
+            for item in self._tool_cards
+        }
+        if card.name not in existing_names:
+            self._tool_cards.append(card)
+
+    def _prune_tool_cards(self, tool_names: set[str]) -> None:
+        """Remove tracked tool cards by tool name."""
+        if not self._tool_cards:
+            return
+        self._tool_cards = [
+            item
+            for item in self._tool_cards
+            if (
+                item.card.name if hasattr(item, "card") else item.name
+            ) not in tool_names
+        ]
+
+    def _sync_multimodal_tools_for_runtime(self) -> None:
+        """Sync multimodal tool registration after config reload."""
+        vision_names = {tool.card.name for tool in self._vision_tools}
+        if self._vision_model_config is None:
+            self._remove_registered_tools(self._vision_tools)
+            self._prune_tool_cards(vision_names)
+            self._vision_tools = []
+            self._vision_tools_registered = False
+        elif not self._vision_tools:
+            try:
+                self._vision_tools = create_vision_tools(
+                    language=self._resolve_runtime_language(),
+                    vision_model_config=self._vision_model_config,
+                )
+                for tool in self._vision_tools:
+                    Runner.resource_mgr.add_tool(tool)
+                    self._append_tool_card(tool.card)
+                    if self._instance is not None and hasattr(
+                        self._instance,
+                        "ability_manager",
+                    ):
+                        self._instance.ability_manager.add(tool.card)
+                self._vision_tools_registered = bool(self._vision_tools)
+            except Exception as exc:
+                self._vision_tools = []
+                self._vision_tools_registered = False
+                logger.warning(
+                    "[JiuWenClawDeepAdapter] vision tools reload failed: %s",
+                    exc,
+                )
+
+        audio_names = {tool.card.name for tool in self._audio_tools}
+        if self._audio_model_config is None:
+            self._remove_registered_tools(self._audio_tools)
+            self._prune_tool_cards(audio_names)
+            self._audio_tools = []
+            self._audio_tools_registered = False
+        elif not self._audio_tools:
+            try:
+                self._audio_tools = create_audio_tools(
+                    language=self._resolve_runtime_language(),
+                    audio_model_config=self._audio_model_config,
+                )
+                for tool in self._audio_tools:
+                    Runner.resource_mgr.add_tool(tool)
+                    self._append_tool_card(tool.card)
+                    if self._instance is not None and hasattr(
+                        self._instance,
+                        "ability_manager",
+                    ):
+                        self._instance.ability_manager.add(tool.card)
+                self._audio_tools_registered = bool(self._audio_tools)
+            except Exception as exc:
+                self._audio_tools = []
+                self._audio_tools_registered = False
+                logger.warning(
+                    "[JiuWenClawDeepAdapter] audio tools reload failed: %s",
+                    exc,
+                )
 
     @staticmethod
     async def set_checkpoint():
@@ -394,7 +660,13 @@ class JiuWenClawDeepAdapter:
             _RailBuildInfo("_heartbeat_rail", self._build_heartbeat_rail),
         ]
         if config.get("evolution", {}).get("enabled", False):
-            rail_infos.append(_RailBuildInfo("_skill_evolution_rail", self._build_skill_evolution_rail,{"config": config}))
+            rail_infos.append(
+                _RailBuildInfo(
+                    "_skill_evolution_rail",
+                    self._build_skill_evolution_rail,
+                    {"config": config},
+                )
+            )
 
         rails_list = []
         for info in rail_infos:
@@ -449,7 +721,7 @@ class JiuWenClawDeepAdapter:
             stop_condition=None,
             enable_task_loop=config.get("enable_task_loop", True),
             max_iterations=config.get("max_iterations", 15),
-            subagents=None,
+            subagents=self._build_browser_subagents(model, config),
             tools=normalized_tool_cards,
             workspace=workspace_obj,
             skills=None,
@@ -457,7 +729,8 @@ class JiuWenClawDeepAdapter:
             sys_operation=self._sys_operation,
             language=resolved_language,
             prompt_mode=None,
-            vision_model_config=None,
+            vision_model_config=self._vision_model_config,
+            audio_model_config=self._audio_model_config,
         )
 
     def _get_current_agent_rails(self, config: dict[str, Any]) -> list[Any]:
@@ -567,6 +840,43 @@ class JiuWenClawDeepAdapter:
                 tool_cards.append(cron_tool)
         except Exception as exc:
             logger.error("[JiuWenClawDeepAdapter] 定时工具初始化失败， reason=%s", exc)
+        self._vision_tools = []
+        self._vision_tools_registered = False
+        if self._vision_model_config is not None:
+            try:
+                for tool in create_vision_tools(
+                    language=self._resolve_runtime_language(),
+                    vision_model_config=self._vision_model_config,
+                ):
+                    Runner.resource_mgr.add_tool(tool)
+                    tool_cards.append(tool.card)
+                    self._vision_tools.append(tool)
+                self._vision_tools_registered = bool(self._vision_tools)
+            except Exception as exc:
+                self._vision_tools = []
+                logger.warning(
+                    "[JiuWenClawDeepAdapter] vision tools registration failed: %s",
+                    exc,
+                )
+
+        self._audio_tools = []
+        self._audio_tools_registered = False
+        if self._audio_model_config is not None:
+            try:
+                for tool in create_audio_tools(
+                    language=self._resolve_runtime_language(),
+                    audio_model_config=self._audio_model_config,
+                ):
+                    Runner.resource_mgr.add_tool(tool)
+                    tool_cards.append(tool.card)
+                    self._audio_tools.append(tool)
+                self._audio_tools_registered = bool(self._audio_tools)
+            except Exception as exc:
+                self._audio_tools = []
+                logger.warning(
+                    "[JiuWenClawDeepAdapter] audio tools registration failed: %s",
+                    exc,
+                )
         return tool_cards
 
     def _build_cron_tools(self) -> list[Any]:
@@ -574,21 +884,12 @@ class JiuWenClawDeepAdapter:
         return self._cron_runtime.build_tools(context=self._runtime_cron_tool_context)
 
     async def _register_mcp_server(self):
-        """Register MCP server."""
-        if self._instance is None:
-            logger.warning("[JiuWenClawDeepAdapter] browser MCP registration skipped: instance is None")
+        """Compatibility shim: browser runtime is now owned by browser subagent."""
+        if not self._browser_runtime_enabled():
             return
-
-        if self._browser_mcp_registered:
-            return
-
-        try:
-            self._browser_mcp_registered = await register_browser_runtime_mcp_server(
-                self._instance,
-                tag=f"agent.{self._agent_name}",
-            )
-        except Exception as exc:
-            logger.warning("[JiuWenClawDeepAdapter] browser MCP registration skipped: %s", exc)
+        logger.info(
+            "[JiuWenClawDeepAdapter] browser runtime direct MCP registration skipped: browser_agent subagent owns runtime startup"
+        )
 
     async def create_instance(self, config: dict[str, Any] | None = None) -> None:
         """初始化 DeepAgent 实例.
@@ -602,6 +903,7 @@ class JiuWenClawDeepAdapter:
         await self.set_checkpoint()
 
         config_base = get_config()
+        self._refresh_multimodal_configs(config_base)
         config = config_base.get('react', {}).copy()
         self._config_cache = config.copy()
         self._agent_name = config.get("agent_name", "main_agent")
@@ -617,6 +919,7 @@ class JiuWenClawDeepAdapter:
             raise RuntimeError("sys_operation is not available, maybe task is not running")
 
         self._sys_operation = sys_operation
+        browser_subagents = self._build_browser_subagents(model, config)
         self._instance = create_deep_agent(
             model=model,
             card=agent_card,
@@ -626,6 +929,7 @@ class JiuWenClawDeepAdapter:
                 channel=self._resolve_prompt_channel(),
             ),
             tools=tool_cards if tool_cards else [],
+            subagents=browser_subagents,
             rails=rails_list if rails_list else [],
             enable_task_loop=config.get("enable_task_loop", True),
             max_iterations=config.get("max_iterations", 15),
@@ -633,7 +937,9 @@ class JiuWenClawDeepAdapter:
                 root_path=self._workspace_dir or "./",
                 language=self._resolve_runtime_language(),
             ),
-            sys_operation=sys_operation
+            sys_operation=sys_operation,
+            vision_model_config=self._vision_model_config,
+            audio_model_config=self._audio_model_config,
         )
         await self._proc_context_compaction()
         # self._create_evolution_service(config)
@@ -648,12 +954,14 @@ class JiuWenClawDeepAdapter:
         clear_memory_manager_cache()
 
         config_base = get_config()
+        self._refresh_multimodal_configs(config_base)
         config = config_base.get('react', {}).copy()
         self._config_cache = config.copy()
 
         model = self._create_model(config_base)
         self._agent_name = config.get("agent_name", "main_agent")
         agent_card = AgentCard(name=self._agent_name, id='jiuwenclaw')
+        self._sync_multimodal_tools_for_runtime()
 
         old_rails = self._rails_snapshot_for_unregister()
         for rail in old_rails:
