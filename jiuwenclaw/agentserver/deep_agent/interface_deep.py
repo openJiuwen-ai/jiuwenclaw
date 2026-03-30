@@ -552,7 +552,6 @@ class JiuWenClawDeepAdapter:
         try:
             context_rail = ContextEngineeringRail(
                 processors=None,  # 使用预置配置
-                language=self._resolve_runtime_language(),
                 preset=True,
             )
             logger.info("[JiuWenClawDeepAdapter] ContextEngineeringRail create success")
@@ -586,9 +585,7 @@ class JiuWenClawDeepAdapter:
     def _build_stream_event_rail(self) -> JiuClawStreamEventRail | None:
         """Build JiuClawStreamEventRail."""
         try:
-            stream_event_rail = JiuClawStreamEventRail(
-                language=self._resolve_runtime_language(),
-            )
+            stream_event_rail = JiuClawStreamEventRail()
             logger.info("[JiuWenClawDeepAdapter] JiuClawStreamEventRail create success")
         except Exception as exc:
             logger.warning("[JiuWenClawDeepAdapter] JiuClawStreamEventRail create failed: %s", exc)
@@ -628,7 +625,6 @@ class JiuWenClawDeepAdapter:
                     base_url=embed_config.get("embed_base_url"),
                     api_key=embed_config.get("embed_api_key")
                 ),
-                language=self._resolve_runtime_language(),
             )
             logger.info("[JiuWenClawDeepAdapter] MemoryRail create success")
         except Exception as exc:
@@ -639,9 +635,7 @@ class JiuWenClawDeepAdapter:
     def _build_heartbeat_rail(self) -> HeartbeatRail | None:
         """Build HeartbeatRail."""
         try:
-            heartbeat_rail = HeartbeatRail(
-                language=self._resolve_runtime_language(),
-            )
+            heartbeat_rail = HeartbeatRail()
             logger.info("[JiuWenClawDeepAdapter] HeartbeatRail create success")
         except Exception as exc:
             logger.warning("[JiuWenClawDeepAdapter] HeartbeatRail create failed: %s", exc)

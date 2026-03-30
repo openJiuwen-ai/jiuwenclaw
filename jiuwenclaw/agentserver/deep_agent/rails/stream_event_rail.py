@@ -46,7 +46,7 @@ class JiuClawStreamEventRail(DeepAgentRail):
 
     priority = 80
 
-    def __init__(self, language: str = "cn") -> None:
+    def __init__(self) -> None:
         super().__init__()
         self._deep_agent: Optional[Any] = None
         self._pause_event = asyncio.Event()
@@ -54,7 +54,6 @@ class JiuClawStreamEventRail(DeepAgentRail):
         self._abort_requested = False
         self._conversation_id: str = ""
         self._stream_tasks: set[asyncio.Task] = set()
-        self.language = language
 
     def init(self, agent: Any) -> None:
         self._deep_agent = agent
@@ -245,10 +244,14 @@ class JiuClawStreamEventRail(DeepAgentRail):
 
         # Fallback: create new tool instance
         try:
+            language = getattr(
+                getattr(self._deep_agent, "system_prompt_builder", None),
+                "language", "cn",
+            ) or "cn"
             return TodoListTool(
                 operation=self.sys_operation,
                 workspace=str(self.workspace.get_node_path(WorkspaceNode.TODO)),
-                language=self.language,
+                language=language,
             )
         except Exception as exc:
             logger.debug(
