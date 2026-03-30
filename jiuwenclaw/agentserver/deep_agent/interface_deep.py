@@ -54,6 +54,12 @@ from jiuwenclaw.agentserver.deep_agent.cron_runtime import CronRuntimeBridge
 from jiuwenclaw.agentserver.deep_agent.rails import (
     JiuClawStreamEventRail
 )
+from jiuwenclaw.agentserver.deep_agent.interrupt.interrupt_helpers import (
+    build_permission_rail,
+    build_ask_user_rail,
+    convert_interactions_to_ask_user_question,
+)
+from jiuwenclaw.agentserver.permissions.checker import TOOL_PERMISSION_CHANNEL_ID
 from jiuwenclaw.gateway.cron import CronTargetChannel
 from jiuwenclaw.utils import USER_WORKSPACE_DIR, get_env_file, get_agent_root_dir, get_agent_home_dir
 from jiuwenclaw.config import get_config
@@ -172,6 +178,8 @@ class JiuWenClawDeepAdapter:
         self._heartbeat_rail: HeartbeatRail | None = None
         self._skill_evolution_rail: SkillEvolutionRail | None = None
         self._pending_evolution_data: dict[str, dict] = {}
+        self._permission_rail: Any = None
+        self._ask_user_rail: Any = None
         self._tool_cards = None
         self._sys_operation = None
         self._vision_model_config: VisionModelConfig | None = None
@@ -519,7 +527,7 @@ class JiuWenClawDeepAdapter:
         try:
             sysop_card = SysOperationCard(
                 mode=OperationMode.LOCAL,
-                work_config=LocalWorkConfig(),
+                work_config=LocalWorkConfig(shell_allowlist=None),
             )
             result = Runner.resource_mgr.add_sys_operation(sysop_card)
             if result.is_err():
@@ -696,7 +704,7 @@ class JiuWenClawDeepAdapter:
             heartbeat_rail = None
         return heartbeat_rail
 
-    def _build_agent_rails(self, config: dict[str, Any]) -> list[Any]:
+    def _build_agent_rails(self, config: dict[str, Any], config_base: dict[str, Any]) -> list[Any]:
         """Build DeepAgent rails consistently for cold start and hot reload."""
 
         @dataclass
@@ -718,6 +726,8 @@ class JiuWenClawDeepAdapter:
             _RailBuildInfo("_security_rail", self._build_security_rail),
             _RailBuildInfo("_memory_rail", self._build_memory_rail),
             _RailBuildInfo("_heartbeat_rail", self._build_heartbeat_rail),
+            _RailBuildInfo("_ask_user_rail", build_ask_user_rail),
+            _RailBuildInfo("_permission_rail", build_permission_rail, {"config": config_base, "llm": self._model, "model_name": config_base.get("models", {}).get("default", {}).get("model_client_config", {}).get("model_name", "gpt-4")}),
         ]
         if config.get("evolution", {}).get("enabled", False):
             rail_infos.append(
@@ -730,10 +740,15 @@ class JiuWenClawDeepAdapter:
 
         rails_list = []
         for info in rail_infos:
+            logger.info("[JiuWenClawDeepAdapter] Building rail: %s with params: %s", info.attr_name, info.params)
             rail_instance = info.build_func(**info.params)
             if rail_instance is not None:
                 setattr(self, info.attr_name, rail_instance)
                 rails_list.append(rail_instance)
+                logger.info("[JiuWenClawDeepAdapter] Rail %s built successfully and added to rails_list", info.attr_name)
+            else:
+                logger.warning("[JiuWenClawDeepAdapter] Rail %s build returned None", info.attr_name)
+        logger.info("[JiuWenClawDeepAdapter] Total rails built: %d, rail names: %s", len(rails_list), [type(r).__name__ for r in rails_list])
         return rails_list
 
     def _make_deep_agent_config(
@@ -743,6 +758,7 @@ class JiuWenClawDeepAdapter:
         config: dict[str, Any],
         agent_card: AgentCard,
         tool_cards: list[Any],
+        rails: list[Any] | None = None,
     ) -> DeepAgentConfig:
         """与 create_deep_agent() 中 DeepAgentConfig 构造保持一致."""
         resolved_language = self._resolve_runtime_language()
@@ -773,43 +789,36 @@ class JiuWenClawDeepAdapter:
             sys_operation=self._sys_operation,
             language=resolved_language,
             prompt_mode=None,
+            rails=rails,
             vision_model_config=self._vision_model_config,
             audio_model_config=self._audio_model_config,
         )
 
     def _get_current_agent_rails(self, config: dict[str, Any]) -> list[Any]:
-        """Return the currently managed rail instances in stable order."""
-        rails_list: list[Any] = []
-        if self._filesystem_rail is not None:
-            rails_list.append(self._filesystem_rail)
+        """Return rail instances that need to be re-initialized on hot reload.
 
-        self._skill_rail = self._build_skill_rail(config, include_tools=self._filesystem_rail is None)
-        if self._skill_rail is not None:
-            rails_list.append(self._skill_rail)
-
-        if self._stream_event_rail is not None:
-            rails_list.append(self._stream_event_rail)
-
-        self._context_engineering_rail = self._build_context_engineering_rail()
-        if self._context_engineering_rail is not None:
-            rails_list.append(self._context_engineering_rail)
-
-        self._security_rail = self._build_security_rail()
-        if self._security_rail is not None:
-            rails_list.append(self._security_rail)
-
-        if self._heartbeat_rail is not None:
-            rails_list.append(self._heartbeat_rail)
-
+        Only SkillUseRail and ContextEngineeringRail are rebuilt (skills dir / skill_mode may change).
+        All other rails read language dynamically from system_prompt_builder.language
+        and are updated in-place where needed — they are NOT passed to configure()
+        so their existing registered state is preserved without an uninit/init cycle.
+        """
+        # Apply in-place updates to skill_evolution_rail (no re-init needed).
         if self._skill_evolution_rail is not None:
             self._skill_evolution_rail.update_llm(self._model, config.get("model_name", "gpt-4"))
             _env_auto_scan = os.getenv("EVOLUTION_AUTO_SCAN")
             if _env_auto_scan is not None:
                 self._skill_evolution_rail.auto_scan = _env_auto_scan.lower() in ("true", "1", "yes")
-            rails_list.append(self._skill_evolution_rail)
 
+        # Only SkillUseRail and ContextEngineeringRail require a full rebuild on config reload.
+        self._skill_rail = self._build_skill_rail(config, include_tools=self._filesystem_rail is None)
+        self._context_engineering_rail = self._build_context_engineering_rail()
+
+        rails_list = []
+        if self._skill_rail is not None:
+            rails_list.append(self._skill_rail)
+        if self._context_engineering_rail is not None:
+            rails_list.append(self._context_engineering_rail)
         return rails_list
-
 
     async def _proc_context_compaction(self):
         """Process context compaction config."""
@@ -915,7 +924,7 @@ class JiuWenClawDeepAdapter:
         agent_card = AgentCard(name=self._agent_name, id='jiuwenclaw')
         tool_cards = await self._get_tool_cards()
         self._tool_cards = tool_cards
-        rails_list = self._build_agent_rails(config)
+        rails_list = self._build_agent_rails(config, config_base)
 
         sys_operation = self._create_sys_operation()
         if sys_operation is None:
@@ -951,7 +960,11 @@ class JiuWenClawDeepAdapter:
         logger.info("[JiuWenClawDeepAdapter] 初始化完成: agent_name=%s", self._agent_name)
 
     async def reload_agent_config(self) -> None:
-        """从 config.yaml 重新加载配置，通过 DeepAgent.configure() 热更新当前实例（不新建 DeepAgent）。"""
+        """从 config.yaml 重新加载配置，通过 DeepAgent.configure() 热更新当前实例（不新建 DeepAgent）。
+
+        DeepAgent.configure() 现在自动处理 rail 生命周期：保留旧已注册 rails 的注销上下文，
+        并在下次 _ensure_initialized() 时先卸载旧回调，再注册新的 rails。
+        """
         if self._instance is None:
             raise RuntimeError("JiuWenClawDeepAdapter 未初始化，请先调用 create_instance()")
         clear_config_cache()
@@ -967,23 +980,22 @@ class JiuWenClawDeepAdapter:
         agent_card = AgentCard(name=self._agent_name, id='jiuwenclaw')
         self._sync_multimodal_tools_for_runtime()
 
-        old_rails = self._rails_snapshot_for_unregister()
-        for rail in old_rails:
-            await self._instance.unregister_rail(rail)
-
         rails_list = self._get_current_agent_rails(config)
+
+        # Apply in-place updates to permission_rail (no re-init needed).
+        if self._permission_rail is not None:
+            permission_config = config_base.get("permission", {})
+            self._permission_rail.update_config(permission_config)
+            logger.info("[JiuWenClawDeepAdapter] _permission_rail config hot-updated")
 
         deep_cfg = self._make_deep_agent_config(
             model=model,
             config=config,
             agent_card=agent_card,
             tool_cards=self._tool_cards if self._tool_cards else [],
+            rails=rails_list,
         )
         self._instance.configure(deep_cfg)
-        self._instance.card = agent_card
-
-        for rail in rails_list:
-            self._instance.add_rail(rail)
 
         self._sync_heartbeat_file()
         logger.info("[JiuWenClawDeepAdapter] 配置已热更新（configure），未重启进程")
@@ -1546,6 +1558,7 @@ class JiuWenClawDeepAdapter:
             metadata=request.metadata,
             mode=request.params.get("mode", "plan"),
         )
+        token_cid = TOOL_PERMISSION_CHANNEL_ID.set((request.channel_id or "").strip())
         try:
             run_meta = inputs.get("run") or {}
             if isinstance(run_meta, dict) and run_meta.get("kind") == "heartbeat":
@@ -1560,6 +1573,7 @@ class JiuWenClawDeepAdapter:
             logger.error("[JiuWenClawDeepAdapter] Agent 任务执行异常: %s", e)
             raise
         finally:
+            TOOL_PERMISSION_CHANNEL_ID.reset(token_cid)
             self._reset_runtime_cron_context(cron_context_tokens)
 
         content = result if isinstance(result, (str, dict)) else str(result)
@@ -1679,6 +1693,7 @@ class JiuWenClawDeepAdapter:
             metadata=request.metadata,
             mode=request.params.get("mode", "plan"),
         )
+        token_cid = TOOL_PERMISSION_CHANNEL_ID.set((request.channel_id or "").strip())
         try:
             await self._register_runtime_tools(request.session_id, request.params.get("mode", "plan"))
             if self._stream_event_rail is not None:
@@ -1873,6 +1888,7 @@ class JiuWenClawDeepAdapter:
                 is_complete=False,
             )
         finally:
+            TOOL_PERMISSION_CHANNEL_ID.reset(token_cid)
             self._reset_runtime_cron_context(cron_context_tokens)
 
         yield AgentResponseChunk(
@@ -2037,6 +2053,9 @@ class JiuWenClawDeepAdapter:
                         "event_type": "chat.ask_user_question",
                         **(payload if isinstance(payload, dict) else {}),
                     }
+
+                if chunk_type == "__interaction__":
+                    return convert_interactions_to_ask_user_question([payload])
 
                 if isinstance(payload, dict):
                     if "traceId" in payload or "invokeId" in payload:

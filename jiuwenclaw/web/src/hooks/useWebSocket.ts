@@ -74,7 +74,8 @@ interface UseWebSocketReturn {
   sendUserAnswer: (
     sessionId: string,
     requestId: string,
-    answers: UserAnswer[]
+    answers: UserAnswer[],
+    source?: string
   ) => Promise<void>;
   getInflightCount: () => number;
 }
@@ -408,13 +409,24 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
 
   // 发送用户回答
   const sendUserAnswer = useCallback(
-    async (sessionId: string, requestId: string, answers: UserAnswer[]) => {
+    async (sessionId: string, requestId: string, answers: UserAnswer[], source?: string) => {
       try {
-        await request('chat.user_answer', {
-          session_id: sessionId,
-          request_id: requestId,
-          answers,
-        });
+        // 如果是工具权限确认，发送 chat.send
+        if (source === 'permission_interrupt') {
+          await request('chat.send', {
+            session_id: sessionId,
+            query: '',
+            request_id: requestId,
+            answers: answers,
+          });
+        } else {
+          // 否则发送 chat.user_answer（自进化确认）
+          await request('chat.user_answer', {
+            session_id: sessionId,
+            request_id: requestId,
+            answers,
+          });
+        }
         setPendingQuestion(null);
       } catch (error) {
         const webError = error as WebError;

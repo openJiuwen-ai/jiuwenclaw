@@ -280,7 +280,35 @@ permissions:
     "*": "allow"
 
   # 按具体工具名设置权限 (支持 patterns 子规则)
+  # tools 的 keys 即为需要权限控制的工具列表
   tools:
+    bash:
+      "*": "ask"
+      patterns:
+        "dir *": "allow"
+        "ls *": "allow"
+        "pwd": "allow"
+        "cd *": "allow"
+        "echo *": "allow"
+        "cat *": "allow"
+        "type *": "allow"
+        "head *": "allow"
+        "tail *": "allow"
+        "git status *": "allow"
+        "git log *": "allow"
+        "git diff *": "allow"
+        "git branch *": "allow"
+        "rm *": "ask"
+        "del *": "ask"
+        "rd *": "deny"
+        "format *": "deny"
+        "shutdown *": "deny"
+        "reboot *": "deny"
+        "mkfs *": "deny"
+        "diskpart *": "deny"
+        "sudo *": "deny"
+    write:
+      "*": "ask"
     mcp_exec_command:
       "*": "ask"           # 命令默认需确认
       patterns:

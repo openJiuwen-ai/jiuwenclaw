@@ -10,7 +10,7 @@ import { useChatStore } from '../../stores';
 import { Question, UserAnswer } from '../../types';
 
 interface UserQuestionModalProps {
-  onSubmit: (requestId: string, answers: UserAnswer[]) => void;
+  onSubmit: (requestId: string, answers: UserAnswer[], source?: string) => void;
 }
 
 export function UserQuestionModal({ onSubmit }: UserQuestionModalProps) {
@@ -86,7 +86,7 @@ export function UserQuestionModal({ onSubmit }: UserQuestionModalProps) {
       }
     );
 
-    onSubmit(pendingQuestion.request_id, finalAnswers);
+    onSubmit(pendingQuestion.request_id, finalAnswers, pendingQuestion.source);
     setAnswers(new Map());
   }, [pendingQuestion, answers, onSubmit]);
 

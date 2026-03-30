@@ -16,7 +16,7 @@ import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 
 interface InlineQuestionCardProps {
-  onSubmit: (requestId: string, answers: UserAnswer[]) => void;
+  onSubmit: (requestId: string, answers: UserAnswer[], source?: string) => void;
 }
 
 export function InlineQuestionCard({ onSubmit }: InlineQuestionCardProps) {
@@ -53,7 +53,7 @@ export function InlineQuestionCard({ onSubmit }: InlineQuestionCardProps) {
     (selMap: Map<number, string>) => {
       if (!pendingQuestion) return;
       setSubmitted(true);
-      onSubmit(pendingQuestion.request_id, buildAnswers(selMap));
+      onSubmit(pendingQuestion.request_id, buildAnswers(selMap), pendingQuestion.source);
       setPendingQuestion(null);
     },
     [pendingQuestion, buildAnswers, onSubmit, setPendingQuestion]

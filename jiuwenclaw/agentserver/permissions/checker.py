@@ -313,7 +313,7 @@ class ExternalDirectoryChecker:
         tool_args: dict[str, Any],
     ) -> PermissionResult | None:
         """若访问了 workspace 外路径，根据 external_directory 配置返回 DENY/ASK；否则返回 None."""
-        if tool_name != "mcp_exec_command":
+        if tool_name not in ("mcp_exec_command", "bash"):
             return None
         workspace = self._workspace_root
         if workspace is None:

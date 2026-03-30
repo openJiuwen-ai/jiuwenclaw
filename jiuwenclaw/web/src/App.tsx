@@ -33,7 +33,7 @@ import {
 } from './features/tool-events/toolEventNormalizer';
 import { useWebSocket } from './hooks';
 import { webRequest } from './services/webClient';
-import { AgentMode } from './types';
+import { AgentMode, UserAnswer } from './types';
 import { useSessionStore, useChatStore, useTodoStore } from './stores';
 import { useTranslation } from 'react-i18next';
 import i18n from './i18n';
@@ -725,9 +725,9 @@ function AppContent() {
     void resume(sessionId);
   }, [resume, sessionId]);
 
-  const handleUserAnswer = useCallback((requestId: string, answers: Parameters<typeof sendUserAnswer>[2]) => {
+  const handleUserAnswer = useCallback((requestId: string, answers: UserAnswer[], source?: string) => {
     if (!sessionId || sessionId === 'new') return;
-    void sendUserAnswer(sessionId, requestId, answers);
+    void sendUserAnswer(sessionId, requestId, answers, source);
   }, [sendUserAnswer, sessionId]);
 
   const handleLoadMoreHistory = useCallback(async () => {
