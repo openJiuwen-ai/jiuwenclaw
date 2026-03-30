@@ -1061,40 +1061,63 @@ class JiuWenClawDeepAdapter:
         new_input = request.params.get("new_input")
 
         success = True
+        updated_todos = None
 
         if intent == "pause":
-            if self._instance is not None and hasattr(self._instance, 'pause'):
-                self._instance.pause()
+            # 暂停：通过 StreamEventRail 在下一个 model_call/tool_call checkpoint 阻塞
+            if self._stream_event_rail is not None:
+                self._stream_event_rail.pause()
                 logger.info(
-                    "[JiuWenClawDeepAdapter] interrupt: 已暂停 ReAct 循环 request_id=%s",
+                    "[JiuWenClawDeepAdapter] interrupt: 已暂停执行 request_id=%s",
                     request.request_id,
                 )
             message = "任务已暂停"
 
         elif intent == "resume":
-            if self._instance is not None and hasattr(self._instance, 'resume'):
-                self._instance.resume()
+            # 恢复：解除 StreamEventRail 的 pause 阻塞 + 清除 abort 标志
+            if self._stream_event_rail is not None:
+                self._stream_event_rail.resume()
                 logger.info(
-                    "[JiuWenClawDeepAdapter] interrupt: 已恢复 ReAct 循环 request_id=%s",
+                    "[JiuWenClawDeepAdapter] interrupt: 已恢复执行 request_id=%s",
                     request.request_id,
                 )
             message = "任务已恢复"
 
         elif intent == "supplement":
-            if self._instance is not None and hasattr(self._instance, 'resume'):
-                self._instance.resume()
+            # supplement: 停止当前执行，但保留 todo（新任务会根据 todo 待办继续执行）
+            # 1. 通过 rail abort 在 checkpoint 抛 CancelledError，打断当前内层执行
+            if self._stream_event_rail is not None:
+                self._stream_event_rail.abort()
+            # 2. 终止 DeepAgent 外层 task loop
+            if self._instance is not None:
+                await self._instance.abort()
+            # 3. 不清理 todo — 保留给新任务继续
+            logger.info(
+                "[JiuWenClawDeepAdapter] interrupt(supplement): 已停止执行 request_id=%s",
+                request.request_id,
+            )
             message = "任务已切换"
 
         else:
-            if self._instance is not None and hasattr(self._instance, 'resume'):
-                self._instance.resume()
-
+            # cancel（默认）：停止所有执行 + 清理 todo
+            # 1. 通过 rail abort 在 checkpoint 抛 CancelledError，打断当前内层执行
+            if self._stream_event_rail is not None:
+                self._stream_event_rail.abort()
+            # 2. 终止 DeepAgent 外层 task loop
+            if self._instance is not None:
+                await self._instance.abort()
+            # 3. 将未完成的 todo 项标记为 cancelled，并获取更新后的 todo 列表
+            updated_todos = None
             if request.session_id:
                 try:
-                    await self._cancel_pending_todos(request.session_id)
+                    updated_todos = await self._cancel_pending_todos(request.session_id)
                 except Exception as exc:
                     logger.warning("[JiuWenClawDeepAdapter] 标记 todo cancelled 失败: %s", exc)
 
+            logger.info(
+                "[JiuWenClawDeepAdapter] interrupt(cancel): 已停止执行 request_id=%s",
+                request.request_id,
+            )
             if new_input:
                 message = "已切换到新任务"
             else:
@@ -1109,6 +1132,10 @@ class JiuWenClawDeepAdapter:
 
         if new_input:
             payload["new_input"] = new_input
+
+        # cancel 后附带更新的 todo 列表，通知前端刷新
+        if intent not in ("pause", "resume", "supplement") and updated_todos is not None:
+            payload["todos"] = updated_todos
 
         return AgentResponse(
             request_id=request.request_id,
@@ -1375,10 +1402,15 @@ class JiuWenClawDeepAdapter:
 
         return None
 
-    async def _cancel_pending_todos(self, session_id: str) -> None:
-        """将未完成的 todo 项标记为 cancelled."""
+    async def _cancel_pending_todos(self, session_id: str) -> list[dict] | None:
+        """将未完成的 todo 项标记为 cancelled.
+
+        Returns:
+            更新后的 todo 列表（前端格式），用于附加到 interrupt_result 事件通知前端刷新。
+            如果没有 todo 或操作失败，返回 None。
+        """
         if self._instance is None:
-            return
+            return None
 
         modify_tool = None
         try:
@@ -1402,7 +1434,7 @@ class JiuWenClawDeepAdapter:
         try:
             todos = await modify_tool.load_todos()
             if not todos:
-                return
+                return None
 
             _DONE_STATUSES = {
                 TodoStatus.COMPLETED.value,
@@ -1420,8 +1452,15 @@ class JiuWenClawDeepAdapter:
                     "[JiuWenClawDeepAdapter] 已将 session %s 的未完成任务标记为 cancelled",
                     session_id,
                 )
+
+            # 重新加载并返回前端格式的 todo 列表
+            updated_todos = await modify_tool.load_todos()
+            if updated_todos and self._stream_event_rail is not None:
+                return self._stream_event_rail._format_todos_for_frontend(updated_todos)
+            return None
         except Exception as exc:
             logger.warning("[JiuWenClawDeepAdapter] 标记 todo cancelled 失败: %s", exc)
+            return None
 
     async def process_message_impl(
             self, request: AgentRequest, inputs: dict[str, Any]
