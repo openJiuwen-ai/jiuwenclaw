@@ -13,6 +13,7 @@ from contextvars import ContextVar, Token
 from dataclasses import dataclass
 import logging
 import os
+from pathlib import Path
 from typing import Any, AsyncIterator
 import uuid
 
@@ -60,7 +61,6 @@ from jiuwenclaw.agentserver.memory.compaction import ContextCompactionManager
 from jiuwenclaw.agentserver.memory.config import clear_config_cache
 from jiuwenclaw.agentserver.memory import clear_memory_manager_cache
 from jiuwenclaw.agentserver.deep_agent.prompt_builder import build_identity_prompt
-from jiuwenclaw.agentserver.skill_manager import _SKILLS_DIR
 from jiuwenclaw.schema.agent import AgentRequest, AgentResponse, AgentResponseChunk
 from jiuwenclaw.agentserver.memory import get_memory_manager
 from openjiuwen.deepagents.tools import (
@@ -204,6 +204,14 @@ class JiuWenClawDeepAdapter:
     def _resolve_runtime_language(self) -> str:
         """Resolve normalized runtime language shared by rails and tools."""
         return resolve_language(self._resolve_prompt_language())
+
+    def _get_skills_dir(self) -> str:
+        """Return the skills directory path via workspace node resolution."""
+        workspace = Workspace(root_path=self._workspace_dir or "./")
+        path = workspace.get_node_path(WorkspaceNode.SKILLS)
+        if path is not None:
+            return str(path)
+        return str(Path(self._workspace_dir) / WorkspaceNode.SKILLS.value)
 
     @staticmethod
     def _browser_runtime_enabled() -> bool:
@@ -537,7 +545,7 @@ class JiuWenClawDeepAdapter:
             skill_mode = self._resolve_skill_mode(config)
             logger.info("[JiuWenClawDeepAdapter] current skill_mode: %s", skill_mode)
             skill_rail = SkillUseRail(
-                skills_dir=str(_SKILLS_DIR),
+                skills_dir=self._get_skills_dir(),
                 skill_mode=skill_mode,
                 include_tools=include_tools,
             )
@@ -569,7 +577,7 @@ class JiuWenClawDeepAdapter:
             else:
                 evolution_auto_scan = config.get("evolution", {}).get("auto_scan", False)
             skill_evolution_rail = SkillEvolutionRail(
-                skills_dir=str(_SKILLS_DIR),
+                skills_dir=self._get_skills_dir(),
                 llm=self._model,
                 model=config.get("model_name", "gpt-4"),
                 auto_scan=evolution_auto_scan,
