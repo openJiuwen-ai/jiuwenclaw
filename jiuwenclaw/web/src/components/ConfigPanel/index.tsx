@@ -486,6 +486,7 @@ export function ConfigPanel({
     }
     const groupMeta = getGroupMeta(t);
     return Object.entries(buckets)
+      .filter(([tag]) => tag !== 'other')
       .map(([tag, keys]) => ({ tag, label: groupMeta[tag]?.label ?? tag, keys, order: groupMeta[tag]?.order ?? 99 }))
       .sort((a, b) => a.order - b.order);
   }, [normalizedConfig, t]);

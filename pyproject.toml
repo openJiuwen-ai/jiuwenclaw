@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "jiuwenclaw"
-version = "0.1.7.post1"
+version = "0.1.8"
 description = "JiuwenClaw"
 requires-python = ">=3.11,<3.14"
 license = { text = "Apache-2.0" }
@@ -36,6 +36,8 @@ dependencies = [
     "opentelemetry-sdk>=1.25.0",
     "opentelemetry-exporter-otlp-proto-grpc>=1.25.0",
     "opentelemetry-exporter-otlp-proto-http>=1.25.0",
+    "sqlite-vec==0.1.6",
+    "pytest"
 ]
 
 [project.optional-dependencies]
