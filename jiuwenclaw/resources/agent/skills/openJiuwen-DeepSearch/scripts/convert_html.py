@@ -607,8 +607,6 @@ def convert_md_to_html(input_md: str | Path, output_html: str | Path) -> None:
     if not input_path.exists():
         raise FileNotFoundError(f"Markdown 文件不存在: {input_path}")
 
-    if input_path.suffix.lower() != ".md":
-
     md_content = read_text_with_fallback(input_path)
     md_content = preprocess_markdown(md_content)
 
@@ -629,7 +627,4 @@ def convert_md_to_html(input_md: str | Path, output_html: str | Path) -> None:
 
 
 if __name__ == "__main__":
-    try:
-        convert_md_to_html("input.md", "output.html")
-    except Exception as e:
-        raise
+    convert_md_to_html("input.md", "output.html")
