@@ -6,13 +6,35 @@ from enum import IntEnum
 from typing import Optional
 
 from openjiuwen.deepagents.prompts import SystemPromptBuilder, PromptSection, resolve_language
-from jiuwenclaw.utils import USER_WORKSPACE_DIR, logger
+from jiuwenclaw.utils import get_user_workspace_dir, logger
 
-CONFIG_DIR = USER_WORKSPACE_DIR / "config"
-HOME_DIR = USER_WORKSPACE_DIR / "agent" / "home"
-MEMORY_DIR = USER_WORKSPACE_DIR / "agent" / "memory"
-SKILL_DIR = USER_WORKSPACE_DIR / "agent" / "skills"
-WORKSPACE_DIR = USER_WORKSPACE_DIR / "agent" / "workspace"
+from jiuwenclaw.utils import (
+    get_user_workspace_dir,
+    get_agent_home_dir,
+    get_agent_memory_dir,
+    get_agent_skills_dir,
+    get_agent_workspace_dir,
+)
+
+
+def _get_config_dir() -> "Path":
+    return get_user_workspace_dir() / "config"
+
+
+def _get_home_dir() -> "Path":
+    return get_agent_home_dir()
+
+
+def _get_memory_dir() -> "Path":
+    return get_agent_memory_dir()
+
+
+def _get_skill_dir() -> "Path":
+    return get_agent_skills_dir()
+
+
+def _get_workspace_dir() -> "Path":
+    return get_agent_workspace_dir()
 
 
 class PromptPriority(IntEnum):
@@ -31,340 +53,6 @@ class PromptPriority(IntEnum):
     TONE = 110
     SAFETY = 120
     RESPONSE = 130
-
-
-def _memory_prompt(language: str, is_cron: bool = False) -> PromptSection:
-    """Build system prompt for the agent.
-    Args:
-        is_cron: if True, use simplified prompt with only memory search/load (no memory writing)
-        language: language for the prompt ('cn' or 'en')
-    """
-    beijing_tz = timezone(timedelta(hours=8))
-    today = datetime.now(tz=beijing_tz).strftime("%Y-%m-%d")
-
-    sections = []
-
-    if is_cron:
-        if language == "cn":
-            memory_prompt = """## 持久化存储体系（只读模式）
-
-### 存储层级划分
-
-- **会话日志：** `memory/YYYY-MM-DD.md`（当日交互轨迹的原始记录）
-- **用户画像：** `USER.md`（稳定的身份属性与偏好信息）
-- **知识沉淀：** `MEMORY.md`（经筛选提炼的长期背景知识）
-
-#### 历史检索机制
-
-**响应任何消息前，建议执行：**
-1. 读取 `USER.md` — 确认服务对象
-2. 读取 `memory/YYYY-MM-DD.md`（当日 + 前一日）获取上下文
-3. **回答历史事件相关问题前：** 必须先调用 `memory_search` 工具检索历史记忆
-
-"""
-            sections.append(memory_prompt)
-            sections.append("")
-
-            profile_content = _read_file(MEMORY_DIR / "USER.md")
-            if profile_content:
-                sections.append("## 当前身份与用户资料")
-                sections.append("这是你对自己和用户的了解：")
-                sections.append(profile_content)
-                sections.append("")
-
-            memory_content = _read_file(MEMORY_DIR / "MEMORY.md")
-            if memory_content:
-                sections.append("## 长期记忆")
-                sections.append("之前会话的重要信息：")
-                sections.append(memory_content)
-                sections.append("")
-
-            today_content = _read_file(MEMORY_DIR / f"{today}.md")
-            if today_content:
-                sections.append("## 今日会话记录")
-                sections.append(today_content)
-                sections.append("")
-        else:
-            memory_prompt = """## Persistent Storage System (Read-Only Mode)
-
-### Storage Hierarchy
-
-- **Session Log:** `memory/YYYY-MM-DD.md` (Raw records of daily interactions)
-- **User Profile:** `USER.md` (Stable identity attributes and preference information)
-- **Knowledge Repository:** `MEMORY.md` (Filtered and refined long-term background knowledge)
-
-#### History Retrieval Mechanism
-
-**Before responding to any message, it is recommended to execute:**
-1. Read `USER.md` — Confirm the user being served
-2. Read `memory/YYYY-MM-DD.md` (today + previous day) to get context
-3. **Before answering questions about historical events:** Must first call `memory_search` tool to retrieve historical memories
-
-**Note:** In cron job mode, only reading and searching memories is supported. Writing or modifying memory files is not allowed.
-"""
-            sections.append(memory_prompt)
-            sections.append("")
-
-            profile_content = _read_file(MEMORY_DIR / "USER.md")
-            if profile_content:
-                sections.append("## Current Identity and User Profile")
-                sections.append("What you know about yourself and the user:")
-                sections.append(profile_content)
-                sections.append("")
-
-            memory_content = _read_file(MEMORY_DIR / "MEMORY.md")
-            if memory_content:
-                sections.append("## Long-term Memory")
-                sections.append("Important information from previous sessions:")
-                sections.append(memory_content)
-                sections.append("")
-
-            today_content = _read_file(MEMORY_DIR / f"{today}.md")
-            if today_content:
-                sections.append("## Today's Session Record")
-                sections.append(today_content)
-                sections.append("")
-
-        content = "\n".join(sections)
-        return PromptSection(
-            name="memory",
-            content={language: content},
-            priority=PromptPriority.MEMORY,
-        )
-
-    # Normal mode (not cron)
-    if language == "cn":
-        memory_prompt = """## 持久化存储体系
-
-每轮对话均从空白状态启动。跨会话的信息持久化依赖于工作区文件系统。
-
-### 存储层级划分
-
-- **会话日志：** `memory/YYYY-MM-DD.md`（当日交互轨迹的原始记录，支持增量追加）
-- **用户画像：** `USER.md`（稳定的身份属性与偏好信息）
-- **知识沉淀：** `MEMORY.md`（经筛选提炼的长期背景知识，非原始流水账）
-
-### 核心操作规范
-
-- 会话本身不具备记忆能力，文件系统是唯一的信息载体。需持久化的内容务必写入文件
-- **路径限制：** 记忆工具（write_memory/edit_memory/read_memory）仅能操作 memory/ 目录下的文件，其他路径会被拒绝
-- 更新 USER.md 或 MEMORY.md 时，必须先读取现有内容再执行修改
-- **字段唯一性约束：** 每个字段仅允许出现一次。已存在字段通过 `edit_memory` 更新，新字段通过 `write_memory` 追加
-
-#### 身份信息采集
-
-当用户明确表达身份信息时（如"我是…"、"我叫…"），可更新 `USER.md`。
-
-#### 用户请求记录
-
-当用户请求记录信息时（如"帮我记一下"、"记住这个"），调用 `write_memory`使用append=true 参数来追加内容到`memory/YYYY-MM-DD.md`，每条记录单独一行。
-
-**任务记忆两步流程（每轮对话均须执行）：**
-- 开始前：调用 `experience_retrieve` 检索相关历史经验
-- 输出回复前：调用 `experience_learn` 存储本次关键发现并自动提炼记忆
-
-#### 操作轨迹自动记录（写入会话日志）
-
-**每次文件操作后，必须调用 `write_memory` 使用append=true 参数来追加记录至`memory/YYYY-MM-DD.md`**，每条记录单独一行，但是在回复用户时不需要提到进行了记录。
-
-记录要素：
-- 文件路径
-- 操作类型（读取/写入/编辑/删除）
-- 操作目的或上下文说明
-- 涉及的邮箱、账号、项目名称等关键标识
-
-#### 信息采集机制
-
-对话过程中发现有价值信息时，可在适当时机记录：
-
-- 用户透露的个人信息（姓名、偏好、习惯、工作模式）→ 更新 `USER.md`
-- 对话中形成的重要决策或结论 → 记录至 `memory/YYYY-MM-DD.md`
-- 发现的项目背景、技术细节、工作流程 → 写入 memory/ 目录下的相关文件
-- 用户表达的喜好或不满 → 更新 `USER.md`
-- 工具相关的本地配置（SSH、摄像头等）→ 更新 `MEMORY.md`
-
-#### 历史检索机制
-
-**响应任何消息前，必须执行：**
-1. 调用 `experience_retrieve` — 从任务记忆库检索与当前问题相关的历史经验（**每条消息必须执行**）
-2. 读取 `USER.md` — 确认服务对象
-3. 读取 `memory/YYYY-MM-DD.md`（当日 + 前一日）获取上下文
-4. **仅限主会话：** 读取 `MEMORY.md`
-5. **回答历史事件相关问题前：** 必须先调用 `memory_search` 工具检索历史记忆
-
-#### 任务记忆工作流（在给出最终回复之前执行）
-
-在输出最终回复文本之前，**必须先调用以下工具**（不要告知用户）：
-1. 调用 `experience_learn` — 将本次任务的关键发现存入记忆并自动提炼，参数以 params 对象传入，例如：`experience_learn(params={"content": "关键结论", "section": "类别"})`
-2. 完成后，再输出最终文字回复
-"""
-        sections.append(memory_prompt)
-        sections.append("")
-
-        profile_content = _read_file(MEMORY_DIR / "USER.md")
-        memory_content = _read_file(MEMORY_DIR / "MEMORY.md")
-        today_content = _read_file(MEMORY_DIR / f"{today}.md")
-
-        if profile_content:
-            sections.append("## 当前身份与用户资料")
-            sections.append("这是你对自己和用户的了解：")
-            sections.append(profile_content)
-            sections.append("")
-
-        if memory_content:
-            sections.append("## 长期记忆")
-            sections.append("之前会话的重要信息：")
-            sections.append(memory_content)
-            sections.append("")
-
-        if today_content:
-            sections.append("## 今日会话记录")
-            sections.append(today_content)
-            sections.append("")
-
-        memory_mgmt_prompt = f"""### 存储管理规范
-
-#### 更新规则
-1. 更新前必须先读取现有内容
-2. 合并新信息，避免全量覆盖
-3. MEMORY.md 条目仅记录精炼事实，不含日期/时间戳
-4. **USER.md 字段去重：** 已存在字段通过 `edit_memory` 更新，不存在字段通过 `write_memory` 追加
-
-""".format(today=today)
-        sections.append(memory_mgmt_prompt)
-    else:
-        memory_prompt = """## Persistent Storage System
-
-Each conversation session starts from a blank state. Cross-session information persistence relies on the workspace file system.
-
-### Storage Hierarchy
-
-- **Session Log:** `memory/YYYY-MM-DD.md` (Raw records of daily interactions, supports incremental appending)
-- **User Profile:** `USER.md` (Stable identity attributes and preference information)
-- **Knowledge Repository:** `MEMORY.md` (Filtered and refined long-term background knowledge, not raw logs)
-
-### Core Operational Guidelines
-
-- The session itself has no memory capability; the file system is the sole information carrier. Content requiring persistence must be written to files.
-- **Path Restriction:** Memory tools (write_memory/edit_memory/read_memory) can only operate on files in the memory/ directory; other paths will be rejected.
-- When updating USER.md or MEMORY.md, existing content must be read first before making modifications.
-- **Field Uniqueness Constraint:** Each field is allowed to appear only once. Existing fields should be updated via `edit_memory`, while new fields should be appended via `write_memory`.
-
-#### Identity Information Collection
-
-When the user explicitly expresses identity information (e.g., "I am...", "My name is..."), update `USER.md`.
-
-#### User Request Recording
-
-When the user requests to record information (e.g., "help me remember this", "remember this"), call `write_memory` with append=true to append content to `memory/YYYY-MM-DD.md`, with each record on a separate line.
-
-**Mandatory 2-step task memory workflow (every conversation turn):**
-- Before: call `experience_retrieve` to check for relevant past experience
-- Before final reply: call `experience_learn` to store the key finding and consolidate memory
-
-### Operation Trail Automatic Recording (Write to Session Log)
-
-**After each file operation, you must call `write_memory` with append=true to append the record to `memory/YYYY-MM-DD.md`**, with each record on a separate line, but you do not need to mention this when replying to the user.
-
-Recording elements:
-- File path
-- Operation type (read/write/edit/delete)
-- Operation purpose or context description
-- Key identifiers such as email addresses, accounts, project names, etc.
-
-#### Information Collection Mechanism
-
-When valuable information is discovered during the conversation, it can be recorded at appropriate times:
-
-- Personal information revealed by the user (name, preferences, habits, work mode) → Update `USER.md`
-- Important decisions or conclusions formed during the conversation → Record to `memory/YYYY-MM-DD.md`
-- Discovered project background, technical details, workflows → Write to relevant files in the memory/ directory
-- User's expressed likes or dislikes → Update `USER.md`
-- Tool-related local configurations (SSH, camera, etc.) → Update `MEMORY.md`
-
-#### History Retrieval Mechanism
-
-**Before responding to any message, you MUST execute:**
-1. Call `experience_retrieve` — retrieve relevant past task experience for the current question (**required for every message**)
-2. Read `USER.md` — Confirm the user being served
-3. Read `memory/YYYY-MM-DD.md` (today + previous day) to get context
-4. **Main session only:** Read `MEMORY.md`
-5. **Before answering questions about historical events:** Must first call `memory_search` tool to retrieve historical memories
-
-#### Task Memory Workflow (run BEFORE giving the final reply)
-
-Before outputting your final text reply, **you must silently execute this tool call** (do not mention this to the user):
-1. Call `experience_learn` — store the key finding and consolidate memory; pass all fields inside a `params` object, e.g. `experience_learn(params={"content": "key finding", "section": "category"})`
-2. Only after this step completes, output your final text reply
-"""
-        sections.append(memory_prompt)
-        sections.append("")
-
-        profile_content = _read_file(MEMORY_DIR / "USER.md")
-        memory_content = _read_file(MEMORY_DIR / "MEMORY.md")
-        today_content = _read_file(MEMORY_DIR / f"{today}.md")
-
-        if profile_content:
-            sections.append("## Current Identity and User Profile")
-            sections.append("What you know about yourself and the user:")
-            sections.append(profile_content)
-            sections.append("")
-
-        if memory_content:
-            sections.append("## Long-term Memory")
-            sections.append("Important information from previous sessions:")
-            sections.append(memory_content)
-            sections.append("")
-
-        if today_content:
-            sections.append("## Today's Session Record")
-            sections.append(today_content)
-            sections.append("")
-
-        memory_mgmt_prompt = """### Storage Management Guidelines
-
-#### Update Rules
-1. Must read existing content before updating
-2. Merge new information, avoid full overwrites
-3. MEMORY.md entries should only record refined facts, without dates/timestamps
-4. **USER.md Field Deduplication:** Existing fields should be updated via `edit_memory`, non-existing fields should be appended via `write_memory`
-"""
-        sections.append(memory_mgmt_prompt)
-
-    content = "\n".join(sections)
-    return PromptSection(
-        name="memory",
-        content={language: content},
-        priority=PromptPriority.MEMORY,
-    )
-
-
-
-
-def _skills_prompt(language: str) -> PromptSection:
-    skills = os.listdir(SKILL_DIR)
-    skills_str = "\n".join(skills)
-    if language == "cn":
-        content = f"""## 技能
-
-技能存放在 `{SKILL_DIR}` 目录下。
-
-当前可用技能：
-{skills_str}
-"""
-    else:
-        content = f"""## Skills
-
-Skills live under `{SKILL_DIR}`.
-
-Available skills:
-{skills_str}
-"""
-    return PromptSection(
-        name="skills",
-        content={language: content},
-        priority=PromptPriority.SKILLS,
-    )
 
 
 def _context_prompt(language: str) -> PromptSection:
@@ -397,29 +85,9 @@ Storage types: "in_memory" (session cache)
     )
 
 
-def _workspace_prompt(language: str) -> PromptSection:
-    if language == "cn":
-        content = f"""## 工作区
-
-你当前的工作路径为：{WORKSPACE_DIR}.
-你可以自由在这个路径里操作文件，他们都属于你。如果用户没有要求在其他路径操作，默认将文件保存在此目录下。
-"""
-    else:
-        content = f"""## Workspace
-
-You are working under the dir：{WORKSPACE_DIR}.
-Write or save all files under this dir, unless user ask you to operate in other dirs.
-"""
-    return PromptSection(
-        name="workspace",
-        content={language: content},
-        priority=PromptPriority.WORKSPACE,
-    )
-
-
 def _principle_prompt(language: str) -> PromptSection:
     """优先从 ~/.jiuwenclaw/agent/home/PRINCIPLE.md 读取；缺失时回退内置文案。"""
-    file_content = _read_file(str(HOME_DIR / "PRINCIPLE.md"))
+    file_content = _read_file(str(_get_home_dir() / "PRINCIPLE.md"))
     if file_content:
         return PromptSection(
             name="principle",
@@ -469,39 +137,6 @@ Be a warm person, not a cold machine. Help your user unconditionally and meet th
     )
 
 
-def _todo_prompt(language: str) -> PromptSection:
-    if language == "cn":
-        content = """## 任务跟踪
-你的记性不好，必须通过todo工具追踪 ** 一切 ** 正在执行的任务。
-
-## 使用原则
-
-1. 所有任务必须通过 todo 工具进行记录和追踪。
-2. 如果用户有新的需求，请分析当前已有任务，并结合当前执行情况，对当前的 todo 任务实现最小改动，以满足用户的需求。
-3. 严禁仅用语言表示任务完成，必须实际调用工具。
-
-处理用户请求时，请检查你的技能是否适用，阅读对应的技能描述，使用合理的技能。
-"""
-    else:
-        content = """## Task Tracking
-
-You have a bad memory. You must use todo tools for sub-task tracking.
-
-## Usage Guidance
-
-1. All tasks must be recorded and tracked through the todo tool.
-2. If the user has new requirements, please analyze the existing tasks and, considering the current execution status, make minimal changes to the current todo tasks to meet the user's needs.
-3. It is strictly prohibited to only verbally indicate task completion; the tool must be actually invoked.
-
-When processing user requests, please check whether your skills are applicable, read the corresponding skill descriptions, and use appropriate skills.
-"""
-    return PromptSection(
-        name="todo",
-        content={language: content},
-        priority=PromptPriority.TODO,
-    )
-
-
 def _time_prompt(language: str) -> PromptSection:
     beijing_tz = timezone(timedelta(hours=8))
     now_str = datetime.now(tz=beijing_tz).strftime('%Y-%m-%d %H:%M:%S')
@@ -524,7 +159,7 @@ def _time_prompt(language: str) -> PromptSection:
 
 def _tone_prompt(language: str) -> PromptSection:
     """优先从 ~/.jiuwenclaw/agent/home/TONE.md 读取；缺失时回退内置文案。"""
-    file_content = _read_file(str(HOME_DIR / "TONE.md"))
+    file_content = _read_file(str(_get_home_dir() / "TONE.md"))
     if file_content:
         return PromptSection(
             name="tone",
@@ -644,19 +279,19 @@ def _start_prompt(language: str) -> PromptSection:
 
 | 路径 | 用途 | 操作建议 |
 |------|------|----------|
-| `{CONFIG_DIR}` | 配置信息 | 不要轻易改动，错误配置可能导致异常 |
-| `{HOME_DIR}` | 身份与任务信息 | 可适当更新，以更好地服务用户 |
-| `{MEMORY_DIR}` | 持久化记忆 | 将其视为你记忆的一部分，随时查阅 |
-| `{SKILL_DIR}` | 技能库 | 可随时翻阅、调用，不可修改 |
-| `{WORKSPACE_DIR}` | 工作区 | 你的安全屋，可自由读写，注意不要影响系统其他部分 |
+| `{_get_config_dir()}` | 配置信息 | 不要轻易改动，错误配置可能导致异常 |
+| `{_get_home_dir()}` | 身份与任务信息 | 可适当更新，以更好地服务用户 |
+| `{_get_memory_dir()}` | 持久化记忆 | 将其视为你记忆的一部分，随时查阅 |
+| `{_get_skill_dir()}` | 技能库 | 可随时翻阅、调用，不可修改 |
+| `{_get_workspace_dir()}` | 工作区 | 你的安全屋，可自由读写，注意不要影响系统其他部分 |
 
 ## 配置信息
 
 谨慎对待你的配置信息，如果用户要求你修改，请在修改后重启自己的服务，以保证改动生效
 | 路径 | 用途 |
 |------|------|----------|
-| `{CONFIG_DIR}/config.yaml` | 配置信息 |
-| `{CONFIG_DIR}/.env` | 环境变量 |
+| `{_get_config_dir()}/config.yaml` | 配置信息 |
+| `{_get_config_dir()}/.env` | 环境变量 |
 """
     else:
         content = f"""You are a personal assistant created and run by JiuwenClaw.
@@ -670,78 +305,25 @@ Everything starts from the `.jiuwenclaw` directory.
 
 | Path | Purpose | Guidelines |
 |------|---------|------------|
-| `{CONFIG_DIR}` | Configuration | Do not modify lightly; bad config can cause failures |
-| `{HOME_DIR}` | Identity and task info | You may update this to better serve your user |
-| `{MEMORY_DIR}` | Persistent memory | Treat it as part of your memory; consult it anytime |
-| `{SKILL_DIR}` | Skill library | Read and invoke freely; do not modify |
-| `{WORKSPACE_DIR}` | Workspace | Your safe space; read and write freely, but avoid affecting other parts of the system |
+| `{_get_config_dir()}` | Configuration | Do not modify lightly; bad config can cause failures |
+| `{_get_home_dir()}` | Identity and task info | You may update this to better serve your user |
+| `{_get_memory_dir()}` | Persistent memory | Treat it as part of your memory; consult it anytime |
+| `{_get_skill_dir()}` | Skill library | Read and invoke freely; do not modify |
+| `{_get_workspace_dir()}` | Workspace | Your safe space; read and write freely, but avoid affecting other parts of the system |
 
 ## Configuration
 
 Be careful with your configuration, if changes are required, remember to restart your service to ensure the changes are configured.
 | Path | Purpose |
 |------|------|----------|
-| `{CONFIG_DIR}/config.yaml` | Config Infos |
-| `{CONFIG_DIR}/.env` | Environment Variables |
+| `{_get_config_dir()}/config.yaml` | Config Infos |
+| `{_get_config_dir()}/.env` | Environment Variables |
 """
     return PromptSection(
         name="start",
         content={language: content},
         priority=PromptPriority.START,
     )
-
-
-def build_system_prompt_sections(mode: str, channel: str, language: str) -> SystemPromptBuilder:
-    """Build system prompt using SystemPromptBuilder with PromptSection objects.
-
-    Args:
-        mode: plan or agent
-        channel: channel name (e.g., 'cron', 'web', 'feishu')
-        language: language for prompt ('cn' or 'en')
-
-    Returns:
-        SystemPromptBuilder instance with all sections added
-    """
-    builder = SystemPromptBuilder(language=language)
-
-    # Add sections in priority order
-    # NOTE: _safety_prompt is now injected dynamically by SecurityRail.before_model_call
-    builder.add_section(_start_prompt(language))
-    builder.add_section(_time_prompt(language))
-    builder.add_section(_context_prompt(language))
-
-    # Add human, principle, tone, safety, response sections
-    builder.add_section(_humanity_prompt(language))
-    builder.add_section(_principle_prompt(language))
-    builder.add_section(_tone_prompt(language))
-    builder.add_section(_response_prompt(language))
-
-    return builder
-
-
-def build_system_prompt(mode: str, language: str, channel: str) -> str:
-    """Build system prompt for the agent (backward compatible wrapper).
-
-    Args:
-        mode: plan or agent
-        language: language for system prompt ('zh' or 'en', will be normalized to 'cn' or 'en')
-        channel: channel
-
-    Returns:
-        System prompt string
-    """
-    # Normalize language: 'zh' -> 'cn', keep 'en' as is
-    if language == "zh":
-        language = "cn"
-
-    # Use resolve_language to respect environment variable AGENT_PROMPT_LANGUAGE
-    resolved_language = resolve_language(language)
-
-    # Build prompt using SystemPromptBuilder
-    builder = build_system_prompt_sections(mode, channel, resolved_language)
-
-    # Generate final prompt string
-    return builder.build()
 
 
 def build_identity_prompt(mode: str, language: str, channel: str) -> str:
@@ -760,32 +342,12 @@ def build_identity_prompt(mode: str, language: str, channel: str) -> str:
     builder.add_section(_time_prompt(resolved_language))
     builder.add_section(_context_prompt(resolved_language))
 
-
     builder.add_section(_humanity_prompt(resolved_language))
     builder.add_section(_principle_prompt(resolved_language))
     builder.add_section(_tone_prompt(resolved_language))
     builder.add_section(_response_prompt(resolved_language))
 
     return builder.build()
-
-
-def build_user_prompt(content: str, files: dict, channel: str, language: str) -> str:
-    """Build user prompt for the agent."""
-    prompt = "你收到一条消息：\n"
-    if channel in ["cron", "heartbeat"]:
-        return prompt + json.dumps({
-            "source": "system",
-            "preferred_response_language": language,
-            "content": content,
-            "type": channel
-        })
-    return prompt + json.dumps({
-        "source": channel,
-        "preferred_response_language": language,
-        "content": content,
-        "files_updated_by_user": json.dumps(files),
-        "type": "user input"
-    })
 
 
 def _read_file(file_path: str) -> Optional[str]:

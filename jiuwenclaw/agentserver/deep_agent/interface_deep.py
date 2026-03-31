@@ -51,7 +51,6 @@ from openjiuwen.deepagents.subagents.browser_agent import build_browser_agent_co
 from openjiuwen.deepagents.tools import (
     WebFetchWebpageTool,
     WebFreeSearchTool,
-    WebPaidSearchTool,
     create_audio_tools,
     create_vision_tools,
 )
@@ -71,7 +70,7 @@ from jiuwenclaw.agentserver.deep_agent.rails import (
 from jiuwenclaw.agentserver.memory import clear_memory_manager_cache
 from jiuwenclaw.agentserver.memory import get_memory_manager
 from jiuwenclaw.agentserver.memory.compaction import ContextCompactionManager
-from jiuwenclaw.agentserver.memory.config import clear_config_cache
+from jiuwenclaw.agentserver.memory.config import clear_config_cache, get_memory_mode
 from jiuwenclaw.agentserver.deep_agent.permissions.checker import TOOL_PERMISSION_CHANNEL_ID
 from jiuwenclaw.agentserver.tools.multimodal_config import (
     apply_audio_model_config_from_yaml,
@@ -80,10 +79,10 @@ from jiuwenclaw.agentserver.tools.multimodal_config import (
 )
 from jiuwenclaw.agentserver.tools.video_tools import video_understanding
 
-from jiuwenclaw.config import get_config
+from jiuwenclaw.config import get_config, resolve_env_vars
 from jiuwenclaw.gateway.cron import CronTargetChannel
 from jiuwenclaw.schema.agent import AgentRequest, AgentResponse, AgentResponseChunk
-from jiuwenclaw.utils import USER_WORKSPACE_DIR, get_env_file, get_agent_root_dir, get_agent_home_dir
+from jiuwenclaw.utils import get_env_file, get_agent_root_dir, get_agent_home_dir, get_checkpoint_dir
 
 load_dotenv(dotenv_path=get_env_file())
 
@@ -497,7 +496,7 @@ class JiuWenClawDeepAdapter:
     async def set_checkpoint():
         try:
             PersistenceCheckpointerProvider()
-            checkpoint_path = USER_WORKSPACE_DIR / "checkpoint"
+            checkpoint_path = get_checkpoint_dir()
             checkpointer = await CheckpointerFactory.create(
                 CheckpointerConfig(
                     type="persistence",
@@ -760,7 +759,6 @@ class JiuWenClawDeepAdapter:
             _RailBuildInfo("_context_engineering_rail", self._build_context_engineering_rail),
             _RailBuildInfo("_task_planning_rail", self._build_task_planning_rail),
             _RailBuildInfo("_security_rail", self._build_security_rail),
-            _RailBuildInfo("_memory_rail", self._build_memory_rail),
             _RailBuildInfo("_heartbeat_rail", self._build_heartbeat_rail),
             _RailBuildInfo("_ask_user_rail", build_ask_user_rail),
             _RailBuildInfo("_permission_rail", build_permission_rail, {"config": config_base, "llm": self._model,
@@ -777,6 +775,9 @@ class JiuWenClawDeepAdapter:
                     {"config": config},
                 )
             )
+
+        if get_memory_mode(config_base) == "local":
+            rail_infos.append(_RailBuildInfo("_memory_rail", self._build_memory_rail))
 
         rails_list = []
         for info in rail_infos:
@@ -820,7 +821,6 @@ class JiuWenClawDeepAdapter:
                 language=self._resolve_prompt_language(),
                 channel=self._resolve_prompt_channel(),
             ),
-            stop_condition=None,
             enable_task_loop=config.get("enable_task_loop", True),
             max_iterations=config.get("max_iterations", 15),
             subagents=self._build_browser_subagents(model, config),
@@ -864,10 +864,9 @@ class JiuWenClawDeepAdapter:
 
     async def _proc_context_compaction(self):
         """Process context compaction config."""
-        # Context processors are now configured via ContextEngineeringRail.init()
-        # The rail's init() is called automatically when registered
-
-        if self._compaction_manager is None:
+        config_base = get_config()
+        memory_mode = get_memory_mode(config_base)
+        if memory_mode == "local" and self._compaction_manager is None:
             memory_mgr = await get_memory_manager(
                 agent_id=self._agent_name,
                 workspace_dir=self._workspace_dir
@@ -878,12 +877,14 @@ class JiuWenClawDeepAdapter:
                     threshold=8000,
                     keep_recent=10
                 )
+        elif memory_mode != "local":
+            self._compaction_manager = None
 
     async def _get_tool_cards(self):
         """Get tool cards."""
         tool_cards = []
 
-        for tool_cls in [WebFreeSearchTool, WebPaidSearchTool, WebFetchWebpageTool]:
+        for tool_cls in [WebFreeSearchTool, WebFetchWebpageTool]:
             tool_instance = tool_cls()
             Runner.resource_mgr.add_tool(tool_instance)
             tool_cards.append(tool_instance.card)
@@ -943,19 +944,15 @@ class JiuWenClawDeepAdapter:
                     "[JiuWenClawDeepAdapter] video tool registration failed: %s",
                     exc,
                 )
+
+        # TODO: experience_retrieve/experience_learn/experience_clear工具待添加
+
+        # TODO: 小艺工具待添加
         return tool_cards
 
     def _build_cron_tools(self) -> list[Any]:
         """Build cron tools from the shared runtime bridge."""
         return self._cron_runtime.build_tools(context=self._runtime_cron_tool_context)
-
-    async def _register_mcp_server(self):
-        """Compatibility shim: browser runtime is now owned by browser subagent."""
-        if not self._browser_runtime_enabled():
-            return
-        logger.info(
-            "[JiuWenClawDeepAdapter] browser runtime direct MCP registration skipped: browser_agent subagent owns runtime startup"
-        )
 
     async def create_instance(self, config: dict[str, Any] | None = None) -> None:
         """初始化 DeepAgent 实例.
@@ -1009,22 +1006,43 @@ class JiuWenClawDeepAdapter:
         )
         self._sync_heartbeat_file()
         await self._proc_context_compaction()
-        # self._create_evolution_service(config)
-        await self._register_mcp_server()
         logger.info("[JiuWenClawDeepAdapter] 初始化完成: agent_name=%s", self._agent_name)
 
-    async def reload_agent_config(self) -> None:
+    async def reload_agent_config(
+            self,
+            config_base: dict[str, Any] | None = None,
+            env_overrides: dict[str, Any] | None = None,
+    ) -> None:
         """从 config.yaml 重新加载配置，通过 DeepAgent.configure() 热更新当前实例（不新建 DeepAgent）。
 
         DeepAgent.configure() 现在自动处理 rail 生命周期：保留旧已注册 rails 的注销上下文，
         并在下次 _ensure_initialized() 时先卸载旧回调，再注册新的 rails。
+
+        Args:
+            config_base: 可选的完整配置快照；传入时优先使用它而不是读取本地 config.yaml。
+            env_overrides: 可选的环境变量增量；仅覆盖请求中出现的 key。
         """
         if self._instance is None:
             raise RuntimeError("JiuWenClawDeepAdapter 未初始化，请先调用 create_instance()")
         clear_config_cache()
         clear_memory_manager_cache()
 
-        config_base = get_config()
+        if env_overrides is not None:
+            if not isinstance(env_overrides, dict):
+                raise TypeError("env_overrides must be a dict when provided")
+            for env_key, env_value in env_overrides.items():
+                if env_value is None:
+                    os.environ.pop(str(env_key), None)
+                else:
+                    os.environ[str(env_key)] = str(env_value)
+
+        if config_base is None:
+            config_base = get_config()
+        elif not isinstance(config_base, dict):
+            raise TypeError("config_base must be a dict when provided")
+        else:
+            config_base = resolve_env_vars(config_base)
+
         self._refresh_multimodal_configs(config_base)
         config = config_base.get('react', {}).copy()
         self._config_cache = config.copy()
@@ -1093,26 +1111,12 @@ class JiuWenClawDeepAdapter:
 
         resolved_language = self._resolve_runtime_language()
         if mode == "plan":
-            self._instance.react_agent.config.prompt_template = \
-                [{"role": "system", "content": build_identity_prompt(
-                    mode="plan",
-                    language=self._resolve_prompt_language(),
-                    channel=self._resolve_prompt_channel(session_id),
-                )}]
-
             if self._task_planning_rail is None:
                 self._task_planning_rail = self._build_task_planning_rail()
                 if self._task_planning_rail is not None:
                     await self._instance.register_rail(self._task_planning_rail)
                     logger.info("[JiuWenClawDeepAdapter] TaskPlanningRail registered for plan mode")
         else:
-            self._instance.react_agent.config.prompt_template = \
-                [{"role": "system", "content": build_identity_prompt(
-                    mode="agent",
-                    language=self._resolve_prompt_language(),
-                    channel=self._resolve_prompt_channel(session_id),
-                )}]
-
             if self._task_planning_rail is not None:
                 await self._instance.unregister_rail(self._task_planning_rail)
                 self._task_planning_rail = None
@@ -1125,8 +1129,10 @@ class JiuWenClawDeepAdapter:
         if self._instance._deep_config is not None:
             self._instance._deep_config.language = resolved_language
 
+        # TODO: 各类工具更新，待适配，见interface_react.py _register_runtime_tools函数
+
         if not self._web_tools_registered:
-            for tool_cls in [WebFreeSearchTool, WebPaidSearchTool, WebFetchWebpageTool]:
+            for tool_cls in [WebFreeSearchTool, WebFetchWebpageTool]:
                 tool_instance = tool_cls()
                 Runner.resource_mgr.add_tool(tool_instance)
                 self._instance.ability_manager.add(tool_instance.card)
@@ -1239,11 +1245,20 @@ class JiuWenClawDeepAdapter:
 
     def _has_valid_model_config(self) -> bool:
         """检查是否有有效的模型配置."""
+        # 检查环境变量中是否有 API_KEY
         if os.getenv("API_KEY"):
             return True
 
-        if self._model is not None:
-            return True
+        # 检查实例的配置
+        if self._instance is not None and hasattr(self._instance, "_react_agent"):
+            react_agent = self._instance.react_agent
+            if react_agent is not None and hasattr(react_agent, "_config"):
+                config = react_agent._config
+                if hasattr(config, "model_client_config") and isinstance(config.model_client_config, dict):
+                    mcc = config.model_client_config
+                    api_key = mcc.get("api_key", "")
+                    if api_key:
+                        return True
 
         return False
 
@@ -1262,6 +1277,10 @@ class JiuWenClawDeepAdapter:
             payload={"accepted": True, "resolved": resolved},
             metadata=request.metadata,
         )
+
+    async def handle_heartbeat(self, request: AgentRequest) -> AgentResponse | None:
+        """处理 heartbeat 请求，返回 None 表示继续正常流程."""
+        return None
 
     async def _handle_evolution_approval(self, request_id: str, answers: list) -> bool:
         """Persist approved evolution records from the cached _evolution_data."""
@@ -1597,8 +1616,11 @@ class JiuWenClawDeepAdapter:
                 metadata=request.metadata,
             )
 
-        if self._compaction_manager:
+        config_base = get_config()
+        memory_mode = get_memory_mode(config_base)
+        if memory_mode == "local" and self._compaction_manager:
             self._compaction_manager.add_message("user", query)
+
             memory_mgr = await get_memory_manager(
                 agent_id=self._agent_name,
                 workspace_dir=self._workspace_dir
@@ -1632,7 +1654,7 @@ class JiuWenClawDeepAdapter:
 
         content = result if isinstance(result, (str, dict)) else str(result)
 
-        if self._compaction_manager and content:
+        if memory_mode == "local" and self._compaction_manager and content:
             if isinstance(content, dict):
                 content_str = content.get("output", str(content))
             else:
@@ -1704,7 +1726,9 @@ class JiuWenClawDeepAdapter:
                 )
             return
 
-        if self._compaction_manager:
+        config_base = get_config()
+        memory_mode = get_memory_mode(config_base)
+        if memory_mode == "local" and self._compaction_manager:
             self._compaction_manager.add_message("user", query)
             memory_mgr = await get_memory_manager(
                 agent_id=self._agent_name,

@@ -22,6 +22,8 @@ HEARTBEAT_CHANNEL_ID = "__heartbeat__"
 
 HEARTBEAT_OK = "HEARTBEAT_OK"
 
+# 探活请求发送的 content，AgentServer 可识别为心跳
+HEARTBEAT_PROMPT = "如果你的workspace目录存在HEARTBEAT.md文件, 读取文件内容并且根据文件内容执行任务. 如果没有HEARTBEAT.md文件, 仅回复HEARTBEAT_OK"
 
 def normalize_active_hours(active_hours: dict[str, str] | None) -> dict[str, str] | None:
     """将 active_hours 的 start/end 规范为 "HH:MM" 字符串。
@@ -44,6 +46,7 @@ def normalize_active_hours(active_hours: dict[str, str] | None) -> dict[str, str
 
 __all__ = [
     "HEARTBEAT_CHANNEL_ID",
+    "HEARTBEAT_PROMPT",
     "HeartbeatConfig",
     "IHeartbeat",
     "GatewayHeartbeatService",
@@ -178,6 +181,7 @@ class GatewayHeartbeatService(IHeartbeat):
             channel_id=self._config.channel_id,
             session_id=session_id,
             params={
+                "heartbeat": HEARTBEAT_PROMPT,
                 "run": {
                     "kind": "heartbeat",
                     "context": {

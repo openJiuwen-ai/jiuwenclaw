@@ -36,8 +36,17 @@ class AgentAdapter(Protocol):
         """
         ...
 
-    async def reload_agent_config(self) -> None:
-        """Hot-reload configuration without restarting the process."""
+    async def reload_agent_config(
+        self,
+        config_base: dict[str, Any] | None = None,
+        env_overrides: dict[str, Any] | None = None,
+    ) -> None:
+        """Hot-reload configuration without restarting the process.
+
+        Args:
+            config_base: Optional complete config snapshot; if provided, use it instead of reading local config.yaml.
+            env_overrides: Optional environment variable overrides; only override keys present in the request.
+        """
         ...
 
     async def process_message_impl(
@@ -69,6 +78,9 @@ class AgentAdapter(Protocol):
     async def handle_user_answer(self, request: AgentRequest) -> AgentResponse:
         """Handle user answer for evolution approval or permission approval."""
         ...
+
+    async def handle_heartbeat(self, request: AgentRequest) -> AgentResponse:
+        """Handle heartbeat requests."""
 
 
 def resolve_sdk_choice() -> str:
