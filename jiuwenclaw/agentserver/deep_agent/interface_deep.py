@@ -80,8 +80,10 @@ from openjiuwen.deepagents.tools import (
 from openjiuwen.deepagents.tools.todo import TodoStatus, TodoModifyTool
 from jiuwenclaw.agentserver.tools.multimodal_config import (
     apply_audio_model_config_from_yaml,
+    apply_video_model_config_from_yaml,
     apply_vision_model_config_from_yaml,
 )
+from jiuwenclaw.agentserver.tools.video_tools import video_understanding
 
 
 load_dotenv(dotenv_path=get_env_file())
@@ -167,6 +169,7 @@ class JiuWenClawDeepAdapter:
         self._web_tools_registered: bool = False
         self._vision_tools_registered: bool = False
         self._audio_tools_registered: bool = False
+        self._video_tool_registered: bool = False
         self._model: Model | None = None
         self._config_cache: dict[str, Any] = {}
         self._filesystem_rail: FileSystemRail | None = None
@@ -184,6 +187,7 @@ class JiuWenClawDeepAdapter:
         self._sys_operation = None
         self._vision_model_config: VisionModelConfig | None = None
         self._audio_model_config: AudioModelConfig | None = None
+        self._video_model_config: bool = False
         self._vision_tools: list[Any] = []
         self._audio_tools: list[Any] = []
         self._cron_runtime = CronRuntimeBridge()
@@ -336,6 +340,19 @@ class JiuWenClawDeepAdapter:
             ] = question_answering_model
         return AudioModelConfig(**config_kwargs)
 
+    def _build_video_model_config(
+        self,
+        config_base: dict[str, Any],
+    ) -> bool:
+        """Build DeepAgent video config from service config/env mapping."""
+        apply_video_model_config_from_yaml(config_base)
+        if not os.getenv("VIDEO_API_KEY"):
+            logger.info(
+                "[JiuWenClawDeepAdapter] video tools skipped: incomplete config"
+            )
+            return False
+        return True
+
     def _refresh_multimodal_configs(
         self,
         config_base: dict[str, Any],
@@ -343,6 +360,7 @@ class JiuWenClawDeepAdapter:
         """Refresh cached multimodal configs and live tool instances."""
         self._vision_model_config = self._build_vision_model_config(config_base)
         self._audio_model_config = self._build_audio_model_config(config_base)
+        self._video_model_config = self._build_video_model_config(config_base)
 
         for tool in self._vision_tools:
             tool.vision_model_config = self._vision_model_config
@@ -454,6 +472,25 @@ class JiuWenClawDeepAdapter:
                 self._audio_tools_registered = False
                 logger.warning(
                     "[JiuWenClawDeepAdapter] audio tools reload failed: %s",
+                    exc,
+                )
+
+        if not self._video_model_config:
+            if self._video_tool_registered:
+                self._remove_registered_tools([video_understanding])
+                self._prune_tool_cards({video_understanding.card.name})
+                self._video_tool_registered = False
+        elif not self._video_tool_registered:
+            try:
+                Runner.resource_mgr.add_tool(video_understanding)
+                self._append_tool_card(video_understanding.card)
+                if self._instance is not None and hasattr(self._instance, "ability_manager"):
+                    self._instance.ability_manager.add(video_understanding.card)
+                self._video_tool_registered = True
+            except Exception as exc:
+                self._video_tool_registered = False
+                logger.warning(
+                    "[JiuWenClawDeepAdapter] video tool reload failed: %s",
                     exc,
                 )
 
@@ -887,6 +924,18 @@ class JiuWenClawDeepAdapter:
                 self._audio_tools = []
                 logger.warning(
                     "[JiuWenClawDeepAdapter] audio tools registration failed: %s",
+                    exc,
+                )
+
+        self._video_tool_registered = False
+        if self._video_model_config:
+            try:
+                Runner.resource_mgr.add_tool(video_understanding)
+                tool_cards.append(video_understanding.card)
+                self._video_tool_registered = True
+            except Exception as exc:
+                logger.warning(
+                    "[JiuWenClawDeepAdapter] video tool registration failed: %s",
                     exc,
                 )
         return tool_cards
