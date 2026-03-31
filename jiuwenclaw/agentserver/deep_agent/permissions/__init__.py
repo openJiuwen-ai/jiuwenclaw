@@ -18,7 +18,7 @@ JiuwenClaw 细粒度权限管控系统.
 
 使用示例::
 
-    from jiuwenclaw.agentserver.permissionsv2 import (
+    from jiuwenclaw.agentserver.permissions import (
         get_permission_engine,
         PermissionLevel,
     )
@@ -36,23 +36,23 @@ JiuwenClaw 细粒度权限管控系统.
         ...
 """
 
-from jiuwenclaw.agentserver.permissionsv2.core import (
+from jiuwenclaw.agentserver.deep_agent.permissions.core import (
     PermissionEngine,
     get_permission_engine,
     init_permission_engine,
     set_permission_engine,
 )
-from jiuwenclaw.agentserver.permissionsv2.checker import (
+from jiuwenclaw.agentserver.deep_agent.permissions.checker import (
     assess_command_risk_static,
     assess_command_risk_with_llm,
     check_tool_permissions,
 )
-from jiuwenclaw.agentserver.permissionsv2.patterns import (
+from jiuwenclaw.agentserver.deep_agent.permissions.patterns import (
     build_command_allow_pattern,
     persist_external_directory_allow,
     persist_permission_allow_rule,
 )
-from jiuwenclaw.agentserver.permissionsv2.models import (
+from jiuwenclaw.agentserver.deep_agent.permissions.models import (
     PermissionLevel,
     PermissionResult,
 )

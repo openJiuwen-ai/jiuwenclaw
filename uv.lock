@@ -1441,7 +1441,7 @@ wheels = [
 
 [[package]]
 name = "jiuwenclaw"
-version = "0.1.7.post1"
+version = "0.1.8"
 source = { editable = "." }
 dependencies = [
     { name = "aiosqlite" },
@@ -1462,10 +1462,12 @@ dependencies = [
     { name = "pgvector" },
     { name = "pip" },
     { name = "psutil" },
+    { name = "pytest" },
     { name = "python-socks" },
     { name = "python-telegram-bot" },
     { name = "ruamel-yaml" },
     { name = "skillnet-ai" },
+    { name = "sqlite-vec" },
     { name = "websockets" },
     { name = "wecom-aibot-sdk" },
 ]
@@ -1500,12 +1502,14 @@ requires-dist = [
     { name = "pip", specifier = "==26.0.1" },
     { name = "psutil", specifier = ">=7.2.2" },
     { name = "pyinstaller", marker = "extra == 'dev'", specifier = ">=6.0.0" },
+    { name = "pytest" },
     { name = "python-socks", specifier = ">=2.8.1" },
     { name = "python-telegram-bot", specifier = ">=20.0" },
     { name = "pywebview", marker = "extra == 'desktop'", specifier = ">=5.4" },
     { name = "pywebview", marker = "extra == 'dev'", specifier = ">=5.4" },
     { name = "ruamel-yaml", specifier = ">=0.18.0" },
     { name = "skillnet-ai", specifier = "==0.0.16" },
+    { name = "sqlite-vec", specifier = "==0.1.6" },
     { name = "websockets", specifier = ">=12.0" },
     { name = "wecom-aibot-sdk", specifier = ">=1.0.5" },
 ]
@@ -2193,7 +2197,7 @@ wheels = [
 [[package]]
 name = "openjiuwen"
 version = "0.1.9"
-source = { git = "https://gitcode.com/openJiuwen/agent-core.git?rev=develop#10d09d7eb6e7a6d0f3f5b4ed359cc69c1f2f7b6b" }
+source = { git = "https://gitcode.com/openJiuwen/agent-core.git?rev=develop#8d9612e52ce0c0a4a6b505874ea5a1890c7ae7eb" }
 dependencies = [
     { name = "aiofiles" },
     { name = "aiohttp" },
@@ -4024,6 +4028,18 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/ae/ae/29b87775fadc43e627cf582fe3bda4d02e300f6b8f2747c764950d13784c/sqlalchemy-2.0.48-cp313-cp313t-win32.whl", hash = "sha256:9764014ef5e58aab76220c5664abb5d47d5bc858d9debf821e55cfdd0f128485", size = 2141335, upload-time = "2026-03-02T15:52:51.518Z" },
     { url = "https://files.pythonhosted.org/packages/91/44/f39d063c90f2443e5b46ec4819abd3d8de653893aae92df42a5c4f5843de/sqlalchemy-2.0.48-cp313-cp313t-win_amd64.whl", hash = "sha256:e2f35b4cccd9ed286ad62e0a3c3ac21e06c02abc60e20aa51a3e305a30f5fa79", size = 2173095, upload-time = "2026-03-02T15:52:52.79Z" },
     { url = "https://files.pythonhosted.org/packages/46/2c/9664130905f03db57961b8980b05cab624afd114bf2be2576628a9f22da4/sqlalchemy-2.0.48-py3-none-any.whl", hash = "sha256:a66fe406437dd65cacd96a72689a3aaaecaebbcd62d81c5ac1c0fdbeac835096", size = 1940202, upload-time = "2026-03-02T15:52:43.285Z" },
+]
+
+[[package]]
+name = "sqlite-vec"
+version = "0.1.6"
+source = { registry = "https://pypi.org/simple" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/88/ed/aabc328f29ee6814033d008ec43e44f2c595447d9cccd5f2aabe60df2933/sqlite_vec-0.1.6-py3-none-macosx_10_6_x86_64.whl", hash = "sha256:77491bcaa6d496f2acb5cc0d0ff0b8964434f141523c121e313f9a7d8088dee3", size = 164075, upload-time = "2024-11-20T16:40:29.847Z" },
+    { url = "https://files.pythonhosted.org/packages/a7/57/05604e509a129b22e303758bfa062c19afb020557d5e19b008c64016704e/sqlite_vec-0.1.6-py3-none-macosx_11_0_arm64.whl", hash = "sha256:fdca35f7ee3243668a055255d4dee4dea7eed5a06da8cad409f89facf4595361", size = 165242, upload-time = "2024-11-20T16:40:31.206Z" },
+    { url = "https://files.pythonhosted.org/packages/f2/48/dbb2cc4e5bad88c89c7bb296e2d0a8df58aab9edc75853728c361eefc24f/sqlite_vec-0.1.6-py3-none-manylinux_2_17_aarch64.manylinux2014_aarch64.whl", hash = "sha256:7b0519d9cd96164cd2e08e8eed225197f9cd2f0be82cb04567692a0a4be02da3", size = 103704, upload-time = "2024-11-20T16:40:33.729Z" },
+    { url = "https://files.pythonhosted.org/packages/80/76/97f33b1a2446f6ae55e59b33869bed4eafaf59b7f4c662c8d9491b6a714a/sqlite_vec-0.1.6-py3-none-manylinux_2_17_x86_64.manylinux2014_x86_64.manylinux1_x86_64.whl", hash = "sha256:823b0493add80d7fe82ab0fe25df7c0703f4752941aee1c7b2b02cec9656cb24", size = 151556, upload-time = "2024-11-20T16:40:35.387Z" },
+    { url = "https://files.pythonhosted.org/packages/6a/98/e8bc58b178266eae2fcf4c9c7a8303a8d41164d781b32d71097924a6bebe/sqlite_vec-0.1.6-py3-none-win_amd64.whl", hash = "sha256:c65bcfd90fa2f41f9000052bcb8bb75d38240b2dae49225389eca6c3136d3f0c", size = 281540, upload-time = "2024-11-20T16:40:37.296Z" },
 ]
 
 [[package]]

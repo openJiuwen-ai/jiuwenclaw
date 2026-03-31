@@ -20,9 +20,9 @@ from openjiuwen.deepagents.rails.interrupt.confirm_rail import (
 )
 from openjiuwen.deepagents.rails.interrupt.interrupt_base import InterruptDecision
 
-from jiuwenclaw.agentserver.permissionsv2.core import PermissionEngine
-from jiuwenclaw.agentserver.permissionsv2.checker import TOOL_PERMISSION_CHANNEL_ID
-from jiuwenclaw.agentserver.permissionsv2.models import PermissionLevel, PermissionResult
+from jiuwenclaw.agentserver.deep_agent.permissions.core import PermissionEngine
+from jiuwenclaw.agentserver.deep_agent.permissions.checker import TOOL_PERMISSION_CHANNEL_ID
+from jiuwenclaw.agentserver.deep_agent.permissions.models import PermissionLevel, PermissionResult
 from jiuwenclaw.utils import logger
 
 

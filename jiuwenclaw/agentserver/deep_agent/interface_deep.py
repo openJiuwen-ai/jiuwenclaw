@@ -72,7 +72,7 @@ from jiuwenclaw.agentserver.memory import clear_memory_manager_cache
 from jiuwenclaw.agentserver.memory import get_memory_manager
 from jiuwenclaw.agentserver.memory.compaction import ContextCompactionManager
 from jiuwenclaw.agentserver.memory.config import clear_config_cache
-from jiuwenclaw.agentserver.permissionsv2.checker import TOOL_PERMISSION_CHANNEL_ID
+from jiuwenclaw.agentserver.deep_agent.permissions.checker import TOOL_PERMISSION_CHANNEL_ID
 from jiuwenclaw.agentserver.tools.multimodal_config import (
     apply_audio_model_config_from_yaml,
     apply_video_model_config_from_yaml,
@@ -236,9 +236,9 @@ class JiuWenClawDeepAdapter:
         return value in {"1", "true", "yes", "on"}
 
     def _build_browser_subagents(
-        self,
-        model: Model,
-        config: dict[str, Any],
+            self,
+            model: Model,
+            config: dict[str, Any],
     ) -> list[Any] | None:
         """Build browser subagent config when browser runtime is enabled."""
         if not self._browser_runtime_enabled():
@@ -257,8 +257,8 @@ class JiuWenClawDeepAdapter:
         ]
 
     def _build_vision_model_config(
-        self,
-        config_base: dict[str, Any],
+            self,
+            config_base: dict[str, Any],
     ) -> VisionModelConfig | None:
         """Build DeepAgent vision config from service config/env mapping."""
         apply_vision_model_config_from_yaml(config_base)
@@ -286,8 +286,8 @@ class JiuWenClawDeepAdapter:
         )
 
     def _build_audio_model_config(
-        self,
-        config_base: dict[str, Any],
+            self,
+            config_base: dict[str, Any],
     ) -> AudioModelConfig | None:
         """Build DeepAgent audio config from service config/env mapping."""
         apply_audio_model_config_from_yaml(config_base)
@@ -340,8 +340,8 @@ class JiuWenClawDeepAdapter:
         return AudioModelConfig(**config_kwargs)
 
     def _build_video_model_config(
-        self,
-        config_base: dict[str, Any],
+            self,
+            config_base: dict[str, Any],
     ) -> bool:
         """Build DeepAgent video config from service config/env mapping."""
         apply_video_model_config_from_yaml(config_base)
@@ -353,8 +353,8 @@ class JiuWenClawDeepAdapter:
         return True
 
     def _refresh_multimodal_configs(
-        self,
-        config_base: dict[str, Any],
+            self,
+            config_base: dict[str, Any],
     ) -> None:
         """Refresh cached multimodal configs and live tool instances."""
         self._vision_model_config = self._build_vision_model_config(config_base)
@@ -379,8 +379,8 @@ class JiuWenClawDeepAdapter:
                     exc,
                 )
             if self._instance is not None and hasattr(
-                self._instance,
-                "ability_manager",
+                    self._instance,
+                    "ability_manager",
             ):
                 try:
                     self._instance.ability_manager.remove(tool.card.name)
@@ -432,8 +432,8 @@ class JiuWenClawDeepAdapter:
                     Runner.resource_mgr.add_tool(tool)
                     self._append_tool_card(tool.card)
                     if self._instance is not None and hasattr(
-                        self._instance,
-                        "ability_manager",
+                            self._instance,
+                            "ability_manager",
                     ):
                         self._instance.ability_manager.add(tool.card)
                 self._vision_tools_registered = bool(self._vision_tools)
@@ -461,8 +461,8 @@ class JiuWenClawDeepAdapter:
                     Runner.resource_mgr.add_tool(tool)
                     self._append_tool_card(tool.card)
                     if self._instance is not None and hasattr(
-                        self._instance,
-                        "ability_manager",
+                            self._instance,
+                            "ability_manager",
                     ):
                         self._instance.ability_manager.add(tool.card)
                 self._audio_tools_registered = bool(self._audio_tools)
@@ -519,9 +519,9 @@ class JiuWenClawDeepAdapter:
             model_client_config = react_model_client_config
 
         model_name = (
-            model_client_config.get("model_name")
-            or react_config.get("model_name")
-            or "gpt-4"
+                model_client_config.get("model_name")
+                or react_config.get("model_name")
+                or "gpt-4"
         )
         model_config_obj = default_model_config.get("model_config_obj") or {}
         if not model_config_obj:
@@ -671,7 +671,7 @@ class JiuWenClawDeepAdapter:
             embed_config = config.get("embed") if isinstance(config, dict) else None
             if (not isinstance(embed_config, dict) or not embed_config.get("embed_api_key")
                     or not embed_config.get("embed_base_url") or not embed_config.get("embed_model")):
-                logger.warning("[JiuWenClawDeepAdapter] MemoryRail create failed: No available embedding config" )
+                logger.warning("[JiuWenClawDeepAdapter] MemoryRail create failed: No available embedding config")
             memory_rail = MemoryRail(
                 embedding_config=EmbeddingConfig(
                     model_name=embed_config.get("embed_model"),
@@ -763,7 +763,11 @@ class JiuWenClawDeepAdapter:
             _RailBuildInfo("_memory_rail", self._build_memory_rail),
             _RailBuildInfo("_heartbeat_rail", self._build_heartbeat_rail),
             _RailBuildInfo("_ask_user_rail", build_ask_user_rail),
-            _RailBuildInfo("_permission_rail", build_permission_rail, {"config": config_base, "llm": self._model, "model_name": config_base.get("models", {}).get("default", {}).get("model_client_config", {}).get("model_name", "gpt-4")}),
+            _RailBuildInfo("_permission_rail", build_permission_rail, {"config": config_base, "llm": self._model,
+                                                                       "model_name": config_base.get("models", {}).get(
+                                                                           "default", {}).get("model_client_config",
+                                                                                              {}).get("model_name",
+                                                                                                      "gpt-4")}),
         ]
         if config.get("evolution", {}).get("enabled", False):
             rail_infos.append(
@@ -781,20 +785,22 @@ class JiuWenClawDeepAdapter:
             if rail_instance is not None:
                 setattr(self, info.attr_name, rail_instance)
                 rails_list.append(rail_instance)
-                logger.info("[JiuWenClawDeepAdapter] Rail %s built successfully and added to rails_list", info.attr_name)
+                logger.info("[JiuWenClawDeepAdapter] Rail %s built successfully and added to rails_list",
+                            info.attr_name)
             else:
                 logger.warning("[JiuWenClawDeepAdapter] Rail %s build returned None", info.attr_name)
-        logger.info("[JiuWenClawDeepAdapter] Total rails built: %d, rail names: %s", len(rails_list), [type(r).__name__ for r in rails_list])
+        logger.info("[JiuWenClawDeepAdapter] Total rails built: %d, rail names: %s", len(rails_list),
+                    [type(r).__name__ for r in rails_list])
         return rails_list
 
     def _make_deep_agent_config(
-        self,
-        *,
-        model: Model,
-        config: dict[str, Any],
-        agent_card: AgentCard,
-        tool_cards: list[Any],
-        rails: list[Any] | None = None,
+            self,
+            *,
+            model: Model,
+            config: dict[str, Any],
+            agent_card: AgentCard,
+            tool_cards: list[Any],
+            rails: list[Any] | None = None,
     ) -> DeepAgentConfig:
         """与 create_deep_agent() 中 DeepAgentConfig 构造保持一致."""
         resolved_language = self._resolve_runtime_language()
@@ -893,8 +899,8 @@ class JiuWenClawDeepAdapter:
         if self._vision_model_config is not None:
             try:
                 for tool in create_vision_tools(
-                    language=self._resolve_runtime_language(),
-                    vision_model_config=self._vision_model_config,
+                        language=self._resolve_runtime_language(),
+                        vision_model_config=self._vision_model_config,
                 ):
                     Runner.resource_mgr.add_tool(tool)
                     tool_cards.append(tool.card)
@@ -912,8 +918,8 @@ class JiuWenClawDeepAdapter:
         if self._audio_model_config is not None:
             try:
                 for tool in create_audio_tools(
-                    language=self._resolve_runtime_language(),
-                    audio_model_config=self._audio_model_config,
+                        language=self._resolve_runtime_language(),
+                        audio_model_config=self._audio_model_config,
                 ):
                     Runner.resource_mgr.add_tool(tool)
                     tool_cards.append(tool.card)
@@ -1049,12 +1055,12 @@ class JiuWenClawDeepAdapter:
         logger.info("[JiuWenClawDeepAdapter] 配置已热更新（configure），未重启进程")
 
     def _bind_runtime_cron_context(
-        self,
-        *,
-        channel_id: str | None,
-        session_id: str | None,
-        metadata: dict[str, Any] | None,
-        mode: str | None,
+            self,
+            *,
+            channel_id: str | None,
+            session_id: str | None,
+            metadata: dict[str, Any] | None,
+            mode: str | None,
     ) -> tuple[Token[str], Token[str | None], Token[dict[str, Any] | None], Token[str | None]]:
         normalized_channel = str(channel_id or "").strip() or CronTargetChannel.WEB.value
         normalized_mode = str(mode).strip() if isinstance(mode, str) and mode.strip() else None
@@ -1077,9 +1083,9 @@ class JiuWenClawDeepAdapter:
         _CRON_TOOL_CHANNEL_ID.reset(channel_token)
 
     async def _register_runtime_tools(
-        self,
-        session_id: str | None,
-        mode="plan",
+            self,
+            session_id: str | None,
+            mode="plan",
     ) -> None:
         """Register per-request tools for current agent execution."""
         if self._instance is None:
@@ -1089,9 +1095,9 @@ class JiuWenClawDeepAdapter:
         if mode == "plan":
             self._instance.react_agent.config.prompt_template = \
                 [{"role": "system", "content": build_identity_prompt(
-                        mode="plan",
-                        language=self._resolve_prompt_language(),
-                        channel=self._resolve_prompt_channel(session_id),
+                    mode="plan",
+                    language=self._resolve_prompt_language(),
+                    channel=self._resolve_prompt_channel(session_id),
                 )}]
 
             if self._task_planning_rail is None:
@@ -1102,9 +1108,9 @@ class JiuWenClawDeepAdapter:
         else:
             self._instance.react_agent.config.prompt_template = \
                 [{"role": "system", "content": build_identity_prompt(
-                        mode="agent",
-                        language=self._resolve_prompt_language(),
-                        channel=self._resolve_prompt_channel(session_id),
+                    mode="agent",
+                    language=self._resolve_prompt_language(),
+                    channel=self._resolve_prompt_channel(session_id),
                 )}]
 
             if self._task_planning_rail is not None:
@@ -1268,9 +1274,9 @@ class JiuWenClawDeepAdapter:
         kept = 0
         for i, raw in enumerate(raw_records):
             accept = (
-                i < len(answers)
-                and isinstance(answers[i], dict)
-                and "接收" in answers[i].get("selected_options", [])
+                    i < len(answers)
+                    and isinstance(answers[i], dict)
+                    and "接收" in answers[i].get("selected_options", [])
             )
             if accept:
                 record = EvolutionRecord.from_dict(raw)
@@ -1466,7 +1472,7 @@ class JiuWenClawDeepAdapter:
         return {"output": msg, "result_type": "answer"}
 
     async def _handle_slash_command(
-        self, query: str, session_id: str = "default",
+            self, query: str, session_id: str = "default",
     ) -> dict[str, Any] | None:
         """Intercept /evolve and /solidify before agent invocation.
 
@@ -1642,7 +1648,7 @@ class JiuWenClawDeepAdapter:
         )
 
     async def process_message_stream_impl(
-        self, request: AgentRequest, inputs: dict[str, Any]
+            self, request: AgentRequest, inputs: dict[str, Any]
     ) -> AsyncIterator[AgentResponseChunk]:
         """Execute a streaming request; yield response chunks.
 

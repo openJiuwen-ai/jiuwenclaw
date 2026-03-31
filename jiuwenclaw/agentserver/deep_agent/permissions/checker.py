@@ -24,11 +24,11 @@ import shlex
 from pathlib import Path
 from typing import Any, Awaitable, Callable, List
 
-from jiuwenclaw.agentserver.permissionsv2.models import (
+from jiuwenclaw.agentserver.deep_agent.permissions.models import (
     PermissionLevel,
     PermissionResult,
 )
-from jiuwenclaw.agentserver.permissionsv2.patterns import (
+from jiuwenclaw.agentserver.deep_agent.permissions.patterns import (
     contains_path,
     match_command,
     match_path,
@@ -74,7 +74,7 @@ async def check_tool_permissions(
         - allowed_tool_calls: 通过权限检查的工具调用
         - denied_results: [(tool_call, denial_message), ...] 被拒绝的调用
     """
-    from jiuwenclaw.agentserver.permissionsv2.core import get_permission_engine
+    from jiuwenclaw.agentserver.deep_agent.permissions.core import get_permission_engine
     engine = get_permission_engine()
     if not engine.enabled:
         return list(tool_calls), []
@@ -343,7 +343,7 @@ class ExternalDirectoryChecker:
                 return None
         else:
             logger.info("[ExternalDirectoryChecker] workspace from _workspace_root: %s", workspace)
-        workdir = tool_args.get("workdir", ".")
+        workdir = tool_args.get("workdir", "")
         try:
             workdir_resolved = (workspace / workdir).resolve()
         except (OSError, RuntimeError):

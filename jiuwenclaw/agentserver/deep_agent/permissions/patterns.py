@@ -224,7 +224,7 @@ def persist_permission_allow_rule(tool_name: str, tool_args: dict | str) -> None
     )
 
     try:
-        from jiuwenclaw.agentserver.permissionsv2.core import get_permission_engine
+        from jiuwenclaw.agentserver.deep_agent.permissions.core import get_permission_engine
         from jiuwenclaw.config import (
             _CONFIG_YAML_PATH,
             _load_yaml_round_trip,
@@ -296,7 +296,7 @@ def persist_external_directory_allow(paths: list[str]) -> None:
         return
     logger.info("[Persist] external_directory allow: paths=%s", paths[:3])
     try:
-        from jiuwenclaw.agentserver.permissionsv2.core import get_permission_engine
+        from jiuwenclaw.agentserver.deep_agent.permissions.core import get_permission_engine
         from jiuwenclaw.config import (
             _CONFIG_YAML_PATH,
             _load_yaml_round_trip,

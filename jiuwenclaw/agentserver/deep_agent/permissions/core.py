@@ -14,13 +14,13 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from jiuwenclaw.agentserver.permissionsv2.checker import (
+from jiuwenclaw.agentserver.deep_agent.permissions.checker import (
     ExternalDirectoryChecker,
     ToolPermissionChecker,
     assess_command_risk_static,
     assess_command_risk_with_llm,
 )
-from jiuwenclaw.agentserver.permissionsv2.models import (
+from jiuwenclaw.agentserver.deep_agent.permissions.models import (
     PermissionLevel,
     PermissionResult,
 )
