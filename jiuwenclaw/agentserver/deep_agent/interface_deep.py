@@ -9,26 +9,25 @@
 from __future__ import annotations
 
 import asyncio
-from contextvars import ContextVar, Token
-from dataclasses import dataclass
 import logging
 import os
-from pathlib import Path
 import shutil
-from typing import Any, AsyncIterator
 import uuid
+from contextvars import ContextVar, Token
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any, AsyncIterator
 
 from dotenv import load_dotenv
 from openjiuwen.core.foundation.llm import ModelRequestConfig, ModelClientConfig, Model
 from openjiuwen.core.foundation.store.base_embedding import EmbeddingConfig
 from openjiuwen.core.foundation.tool import ToolCard
-from openjiuwen.core.context_engine import MessageOffloaderConfig, DialogueCompressorConfig
 from openjiuwen.core.runner import Runner
-from openjiuwen.core.single_agent import AgentCard, ReActAgentConfig
-from openjiuwen.core.sys_operation import SysOperation, SysOperationCard, OperationMode, LocalWorkConfig
 from openjiuwen.core.session.checkpointer import CheckpointerFactory
 from openjiuwen.core.session.checkpointer.checkpointer import CheckpointerConfig
 from openjiuwen.core.session.checkpointer.persistence import PersistenceCheckpointerProvider
+from openjiuwen.core.single_agent import AgentCard
+from openjiuwen.core.sys_operation import SysOperation, SysOperationCard, OperationMode, LocalWorkConfig
 from openjiuwen.deepagents import (
     AudioModelConfig,
     DeepAgent,
@@ -37,11 +36,9 @@ from openjiuwen.deepagents import (
 )
 from openjiuwen.deepagents.factory import create_deep_agent
 from openjiuwen.deepagents.prompts import resolve_language
-from openjiuwen.deepagents.workspace.workspace import Workspace, WorkspaceNode
 from openjiuwen.deepagents.rails import SkillUseRail, TaskPlanningRail, SecurityRail, SkillEvolutionRail
-from openjiuwen.deepagents.rails.filesystem_rail import FileSystemRail
 from openjiuwen.deepagents.rails.context_engineering_rail import ContextEngineeringRail
-from openjiuwen.deepagents.rails.memory_rail import MemoryRail
+from openjiuwen.deepagents.rails.filesystem_rail import FileSystemRail
 from openjiuwen.deepagents.rails.heartbeat_rail import HeartbeatRail
 from openjiuwen.agent_evolving.online.schema import (
     EvolutionContext,
@@ -49,27 +46,8 @@ from openjiuwen.agent_evolving.online.schema import (
     EvolutionTarget,
 )
 from openjiuwen.agent_evolving.online.signal_detector import SignalDetector
-
-from jiuwenclaw.agentserver.deep_agent.cron_runtime import CronRuntimeBridge
-from jiuwenclaw.agentserver.deep_agent.rails import (
-    JiuClawStreamEventRail
-)
-from jiuwenclaw.agentserver.deep_agent.interrupt.interrupt_helpers import (
-    build_permission_rail,
-    build_ask_user_rail,
-    convert_interactions_to_ask_user_question,
-)
-from jiuwenclaw.agentserver.permissions.checker import TOOL_PERMISSION_CHANNEL_ID
-from jiuwenclaw.gateway.cron import CronTargetChannel
-from jiuwenclaw.utils import USER_WORKSPACE_DIR, get_env_file, get_agent_root_dir, get_agent_home_dir
-from jiuwenclaw.config import get_config
+from openjiuwen.deepagents.rails.memory_rail import MemoryRail
 from openjiuwen.deepagents.subagents.browser_agent import build_browser_agent_config
-from jiuwenclaw.agentserver.memory.compaction import ContextCompactionManager
-from jiuwenclaw.agentserver.memory.config import clear_config_cache
-from jiuwenclaw.agentserver.memory import clear_memory_manager_cache
-from jiuwenclaw.agentserver.deep_agent.prompt_builder import build_identity_prompt
-from jiuwenclaw.schema.agent import AgentRequest, AgentResponse, AgentResponseChunk
-from jiuwenclaw.agentserver.memory import get_memory_manager
 from openjiuwen.deepagents.tools import (
     WebFetchWebpageTool,
     WebFreeSearchTool,
@@ -78,6 +56,23 @@ from openjiuwen.deepagents.tools import (
     create_vision_tools,
 )
 from openjiuwen.deepagents.tools.todo import TodoStatus, TodoModifyTool
+from openjiuwen.deepagents.workspace.workspace import Workspace, WorkspaceNode
+
+from jiuwenclaw.agentserver.deep_agent.cron_runtime import CronRuntimeBridge
+from jiuwenclaw.agentserver.deep_agent.interrupt.interrupt_helpers import (
+    build_permission_rail,
+    build_ask_user_rail,
+    convert_interactions_to_ask_user_question,
+)
+from jiuwenclaw.agentserver.deep_agent.prompt_builder import build_identity_prompt
+from jiuwenclaw.agentserver.deep_agent.rails import (
+    JiuClawStreamEventRail
+)
+from jiuwenclaw.agentserver.memory import clear_memory_manager_cache
+from jiuwenclaw.agentserver.memory import get_memory_manager
+from jiuwenclaw.agentserver.memory.compaction import ContextCompactionManager
+from jiuwenclaw.agentserver.memory.config import clear_config_cache
+from jiuwenclaw.agentserver.permissionsv2.checker import TOOL_PERMISSION_CHANNEL_ID
 from jiuwenclaw.agentserver.tools.multimodal_config import (
     apply_audio_model_config_from_yaml,
     apply_video_model_config_from_yaml,
@@ -85,6 +80,10 @@ from jiuwenclaw.agentserver.tools.multimodal_config import (
 )
 from jiuwenclaw.agentserver.tools.video_tools import video_understanding
 
+from jiuwenclaw.config import get_config
+from jiuwenclaw.gateway.cron import CronTargetChannel
+from jiuwenclaw.schema.agent import AgentRequest, AgentResponse, AgentResponseChunk
+from jiuwenclaw.utils import USER_WORKSPACE_DIR, get_env_file, get_agent_root_dir, get_agent_home_dir
 
 load_dotenv(dotenv_path=get_env_file())
 
@@ -411,8 +410,8 @@ class JiuWenClawDeepAdapter:
             item
             for item in self._tool_cards
             if (
-                item.card.name if hasattr(item, "card") else item.name
-            ) not in tool_names
+                   item.card.name if hasattr(item, "card") else item.name
+               ) not in tool_names
         ]
 
     def _sync_multimodal_tools_for_runtime(self) -> None:

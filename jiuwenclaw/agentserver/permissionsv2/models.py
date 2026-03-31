@@ -22,11 +22,11 @@ class PermissionLevel(str, Enum):
 
 @dataclass
 class PermissionResult:
-    """权限检查结果."""
     permission: PermissionLevel
     matched_rule: str | None = None
     reason: str | None = None
-    external_paths: list[str] | None = None  # 外部路径审批时填充，供「总是允许」持久化
+    external_paths: list[str] | None = None
+    risk: dict | None = None
 
     @property
     def is_allowed(self) -> bool:

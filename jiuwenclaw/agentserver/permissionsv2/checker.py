@@ -20,14 +20,15 @@ import contextvars
 import json
 import logging
 import re
+import shlex
 from pathlib import Path
 from typing import Any, Awaitable, Callable, List
 
-from jiuwenclaw.agentserver.permissions.models import (
+from jiuwenclaw.agentserver.permissionsv2.models import (
     PermissionLevel,
     PermissionResult,
 )
-from jiuwenclaw.agentserver.permissions.patterns import (
+from jiuwenclaw.agentserver.permissionsv2.patterns import (
     contains_path,
     match_command,
     match_path,
@@ -73,7 +74,7 @@ async def check_tool_permissions(
         - allowed_tool_calls: 通过权限检查的工具调用
         - denied_results: [(tool_call, denial_message), ...] 被拒绝的调用
     """
-    from jiuwenclaw.agentserver.permissions.core import get_permission_engine
+    from jiuwenclaw.agentserver.permissionsv2.core import get_permission_engine
     engine = get_permission_engine()
     if not engine.enabled:
         return list(tool_calls), []
@@ -270,6 +271,7 @@ _COMMAND_EXEC_TOOLS = frozenset({"mcp_exec_command"})
 _PATH_AWARE_COMMANDS = frozenset({
     "cd", "rm", "cp", "mv", "mkdir", "touch", "chmod", "chown", "cat",
     "ls", "dir", "type", "del", "rd", "copy", "move", "md", "rd",
+    "head", "tail", "more", "less", "vim", "nano", "gedit", "notepad",
 })
 
 
@@ -277,24 +279,39 @@ def _extract_paths_from_command(command: str, workdir: str | Path) -> list[Path]
     """从命令字符串中提取可能为路径的参数，并解析为绝对路径."""
     if not command or not isinstance(command, str):
         return []
-    tokens = command.strip().split()
+    try:
+        tokens = shlex.split(command.strip(), posix=False)
+    except ValueError:
+        tokens = command.strip().split()
     if not tokens:
         return []
     cmd = tokens[0].lower()
+    logger.info("[_extract_paths_from_command] command=%s cmd=%s _PATH_AWARE_COMMANDS=%s", command, cmd, cmd in _PATH_AWARE_COMMANDS)
     if cmd not in _PATH_AWARE_COMMANDS:
         return []
     base = Path(workdir).resolve()
+    logger.info("[_extract_paths_from_command] base=%s", base)
     paths: list[Path] = []
     for tok in tokens[1:]:
-        if tok.startswith("-") or tok.startswith("/"):
+        tok = tok.strip().strip('"').strip("'")
+        if not tok or tok.startswith("-"):
             continue
-        try:
-            p = (base / tok).resolve()
-            if p.exists():
-                paths.append(p)
-        except (OSError, RuntimeError):
-            pass
+        if not _looks_like_path(tok):
+            continue
+        p = Path(tok)
+        if not p.is_absolute():
+            p = base / tok
+        paths.append(p.resolve())
+    logger.info("[_extract_paths_from_command] extracted paths=%s", paths)
     return paths
+
+
+def _looks_like_path(token: str) -> bool:
+    if token.startswith(("\\\\", "./", "../")):
+        return True
+    if re.match(r"^[A-Za-z]:[\\/]", token):
+        return True
+    return "\\" in token or "/" in token
 
 
 # ---------- 外部目录检查器 ----------
@@ -313,23 +330,30 @@ class ExternalDirectoryChecker:
         tool_args: dict[str, Any],
     ) -> PermissionResult | None:
         """若访问了 workspace 外路径，根据 external_directory 配置返回 DENY/ASK；否则返回 None."""
-        if tool_name != "mcp_exec_command":
+        if tool_name not in ("mcp_exec_command", "bash"):
             return None
         workspace = self._workspace_root
         if workspace is None:
             try:
                 from jiuwenclaw.utils import get_workspace_dir
                 workspace = get_workspace_dir()
+                logger.info("[ExternalDirectoryChecker] workspace from get_workspace_dir: %s", workspace)
             except ImportError:
+                logger.error("[ExternalDirectoryChecker] Failed to import get_workspace_dir")
                 return None
+        else:
+            logger.info("[ExternalDirectoryChecker] workspace from _workspace_root: %s", workspace)
         workdir = tool_args.get("workdir", ".")
         try:
             workdir_resolved = (workspace / workdir).resolve()
         except (OSError, RuntimeError):
             workdir_resolved = workspace
         cmd = str(tool_args.get("command", "") or tool_args.get("cmd", ""))
+        logger.info("[ExternalDirectoryChecker] tool_name=%s cmd=%s workdir=%s", tool_name, cmd, workdir_resolved)
         paths = _extract_paths_from_command(cmd, workdir_resolved)
+        logger.info("[ExternalDirectoryChecker] extracted paths: %s", paths)
         external = [p for p in paths if not contains_path(workspace, p)]
+        logger.info("[ExternalDirectoryChecker] external paths: %s", external)
         if not external:
             return None
         ext_paths_str = [str(p).replace("\\", "/") for p in external]
