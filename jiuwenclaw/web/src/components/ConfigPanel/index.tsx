@@ -1,5 +1,6 @@
 import { useEffect, useLayoutEffect, useMemo, useState } from "react";
 import { useTranslation } from 'react-i18next';
+import { useChatStore } from '../../stores';
 
 interface ConfigPanelProps {
   config: Record<string, unknown> | null;
@@ -452,6 +453,7 @@ export function ConfigPanel({
   initialExpandGroupTag = null,
 }: ConfigPanelProps) {
   const { t } = useTranslation();
+  const isProcessing = useChatStore((s) => s.isProcessing);
   const [draftValues, setDraftValues] = useState<Record<string, string>>({});
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -563,6 +565,9 @@ export function ConfigPanel({
             </p>
           </div>
           <div className="flex items-center gap-2">
+            {isProcessing ? (
+              <span className="text-xs text-amber-600 dark:text-amber-400">{t('config.errors.processingDisabled')}</span>
+            ) : null}
             <button
               type="button"
               onClick={handleCancel}
@@ -574,7 +579,7 @@ export function ConfigPanel({
             <button
               type="button"
               onClick={() => void handleSaveAndRestart()}
-              disabled={!hasChanges || saving || !isConnected || hasMissingRequiredModelFields}
+              disabled={!hasChanges || saving || !isConnected || hasMissingRequiredModelFields || isProcessing}
               className="btn primary !px-3 !py-1.5 disabled:opacity-50 disabled:cursor-not-allowed"
             >
               {saving ? t('common.saving') : t('common.save')}

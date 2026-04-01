@@ -380,7 +380,8 @@
     },
     "errors": {
       "requiredModelFields": "These model fields are required: {{fields}}. Complete them before saving and restarting.",
-      "saveFailed": "Save failed, please try again later"
+      "saveFailed": "Save failed, please try again later",
+      "processingDisabled": "A task is running. Please wait for it to finish before saving config."
     }
   },
   "cron": {
