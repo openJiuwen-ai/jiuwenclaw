@@ -99,6 +99,7 @@ class EventType(Enum):
     CHAT_PROCESSING_STATUS = "chat.processing_status"
     CHAT_ERROR = "chat.error"
     CHAT_INTERRUPT_RESULT = "chat.interrupt_result"
+    CHAT_EVOLUTION_STATUS = "chat.evolution_status"
     CHAT_SUBTASK_UPDATE = "chat.subtask_update"
     CHAT_ASK_USER_QUESTION = "chat.ask_user_question"
     CHAT_SESSION_RESULT = "chat.session_result"

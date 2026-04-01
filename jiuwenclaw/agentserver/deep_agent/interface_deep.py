@@ -16,7 +16,7 @@ import uuid
 from contextvars import ContextVar, Token
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, AsyncIterator, Callable
+from typing import Any, AsyncIterator, Callable, List, Tuple
 
 from dotenv import load_dotenv
 from openjiuwen.core.foundation.llm import ModelRequestConfig, ModelClientConfig, Model
@@ -67,8 +67,6 @@ from jiuwenclaw.agentserver.deep_agent.rails import (
     JiuClawStreamEventRail
 )
 from jiuwenclaw.agentserver.memory import clear_memory_manager_cache
-from jiuwenclaw.agentserver.memory import get_memory_manager
-from jiuwenclaw.agentserver.memory.compaction import ContextCompactionManager
 from jiuwenclaw.agentserver.memory.config import clear_config_cache, get_memory_mode
 from jiuwenclaw.agentserver.deep_agent.permissions.checker import TOOL_PERMISSION_CHANNEL_ID
 from jiuwenclaw.agentserver.tools.multimodal_config import (
@@ -186,7 +184,6 @@ class JiuWenClawDeepAdapter:
         self._instance: DeepAgent | None = None
         self._workspace_dir: str = str(get_agent_root_dir())
         self._agent_name: str = "main_agent"
-        self._compaction_manager: ContextCompactionManager | None = None
         self._browser_mcp_registered: bool = False
         self._memory_tools_registered: bool = False
         self._web_tools_registered: bool = False
@@ -633,14 +630,34 @@ class JiuWenClawDeepAdapter:
             skill_rail = None
         return skill_rail
 
-    def _build_context_engineering_rail(self) -> ContextEngineeringRail | None:
-        """Build ContextEngineeringRail."""
+    def _build_context_engineering_rail(self, config: dict[str, Any]) -> ContextEngineeringRail | None:
+        """Build ContextEngineeringRail with user config merged into presets.
+
+        用户提供的 processor 配置（dict 格式）会与预置配置做字段级别合并，
+        只覆盖用户指定的字段，其他使用预置默认值。
+        """
         try:
+            user_processors: List[Tuple[str, dict]] = []
+            context_engine_cfg = config.get("context_engine_config", {})
+
+            offloader_cfg = context_engine_cfg.get("message_offloader_config", {})
+            if isinstance(offloader_cfg, dict) and offloader_cfg:
+                user_processors.append(("MessageOffloader", offloader_cfg))
+
+            compressor_cfg = context_engine_cfg.get("dialogue_compressor_config", {})
+            if isinstance(compressor_cfg, dict) and compressor_cfg:
+                user_processors.append(("DialogueCompressor", compressor_cfg))
+
+            # 构建 ContextEngineeringRail
             context_rail = ContextEngineeringRail(
-                processors=None,  # 使用预置配置
+                processors=user_processors if user_processors else None,
                 preset=True,
             )
-            logger.info("[JiuWenClawDeepAdapter] ContextEngineeringRail create success")
+            logger.info(
+                "[JiuWenClawDeepAdapter] ContextEngineeringRail create success, "
+                "user_processors=%s",
+                [p[0] for p in user_processors] if user_processors else "none"
+            )
             return context_rail
         except Exception as exc:
             logger.warning("[JiuWenClawDeepAdapter] ContextEngineeringRail create failed: %s", exc)
@@ -790,7 +807,6 @@ class JiuWenClawDeepAdapter:
             _RailBuildInfo("_skill_rail", self._build_skill_rail,
                            {"config": config, "include_tools": self._filesystem_rail is None}),
             _RailBuildInfo("_stream_event_rail", self._build_stream_event_rail),
-            _RailBuildInfo("_context_engineering_rail", self._build_context_engineering_rail),
             _RailBuildInfo("_task_planning_rail", self._build_task_planning_rail),
             _RailBuildInfo("_security_rail", self._build_security_rail),
             _RailBuildInfo("_heartbeat_rail", self._build_heartbeat_rail),
@@ -800,6 +816,14 @@ class JiuWenClawDeepAdapter:
                                                                                               {}).get("model_name",
                                                                                                       "gpt-4")}),
         ]
+        if config.get("context_engine_config", {}).get("enabled", False):
+            rail_infos.append(
+                _RailBuildInfo(
+                    "_context_engineering_rail",
+                    self._build_context_engineering_rail,
+                    {"config": config},
+                )
+            )
         if config.get("evolution", {}).get("enabled", False):
             rail_infos.append(
                 _RailBuildInfo(
@@ -886,7 +910,11 @@ class JiuWenClawDeepAdapter:
 
         # Only SkillUseRail and ContextEngineeringRail require a full rebuild on config reload.
         self._skill_rail = self._build_skill_rail(config, include_tools=self._filesystem_rail is None)
-        self._context_engineering_rail = self._build_context_engineering_rail()
+
+        if config.get("context_engine_config", {}).get("enabled", False):
+            self._context_engineering_rail = self._build_context_engineering_rail(config)
+        else:
+            self._context_engineering_rail = None
 
         rails_list = []
         if self._skill_rail is not None:
@@ -894,24 +922,6 @@ class JiuWenClawDeepAdapter:
         if self._context_engineering_rail is not None:
             rails_list.append(self._context_engineering_rail)
         return rails_list
-
-    async def _proc_context_compaction(self):
-        """Process context compaction config."""
-        config_base = get_config()
-        memory_mode = get_memory_mode(config_base)
-        if memory_mode == "local" and self._compaction_manager is None:
-            memory_mgr = await get_memory_manager(
-                agent_id=self._agent_name,
-                workspace_dir=self._workspace_dir
-            )
-            if memory_mgr:
-                self._compaction_manager = ContextCompactionManager(
-                    workspace_dir=self._workspace_dir,
-                    threshold=8000,
-                    keep_recent=10
-                )
-        elif memory_mode != "local":
-            self._compaction_manager = None
 
     async def _get_tool_cards(self):
         """Get tool cards."""
@@ -1077,7 +1087,6 @@ class JiuWenClawDeepAdapter:
             audio_model_config=self._audio_model_config,
         )
         self._sync_heartbeat_file()
-        await self._proc_context_compaction()
         logger.info("[JiuWenClawDeepAdapter] 初始化完成: agent_name=%s", self._agent_name)
 
     async def reload_agent_config(
@@ -1739,18 +1748,6 @@ class JiuWenClawDeepAdapter:
                 metadata=request.metadata,
             )
 
-        config_base = get_config()
-        memory_mode = get_memory_mode(config_base)
-        if memory_mode == "local" and self._compaction_manager:
-            self._compaction_manager.add_message("user", query)
-
-            memory_mgr = await get_memory_manager(
-                agent_id=self._agent_name,
-                workspace_dir=self._workspace_dir
-            )
-            if memory_mgr:
-                await self._compaction_manager.check_and_compact(memory_mgr)
-
         cron_context_tokens = self._bind_runtime_cron_context(
             channel_id=request.channel_id,
             session_id=request.session_id,
@@ -1776,13 +1773,6 @@ class JiuWenClawDeepAdapter:
             self._reset_runtime_cron_context(cron_context_tokens)
 
         content = result if isinstance(result, (str, dict)) else str(result)
-
-        if memory_mode == "local" and self._compaction_manager and content:
-            if isinstance(content, dict):
-                content_str = content.get("output", str(content))
-            else:
-                content_str = str(content)
-            self._compaction_manager.add_message("assistant", content_str)
 
         return AgentResponse(
             request_id=request.request_id,
@@ -1849,44 +1839,11 @@ class JiuWenClawDeepAdapter:
                 )
             return
 
-        config_base = get_config()
-        memory_mode = get_memory_mode(config_base)
-        if memory_mode == "local" and self._compaction_manager:
-            self._compaction_manager.add_message("user", query)
-            memory_mgr = await get_memory_manager(
-                agent_id=self._agent_name,
-                workspace_dir=self._workspace_dir
-            )
-            if memory_mgr:
-                await self._compaction_manager.check_and_compact(memory_mgr)
-
         has_streamed_content = False
         accumulated_text = ""
         accumulated_reasoning = ""
-
-        async def _flush_text():
-            nonlocal accumulated_text
-            if not accumulated_text:
-                return
-            yield AgentResponseChunk(
-                request_id=rid,
-                channel_id=cid,
-                payload={"event_type": "chat.final", "content": accumulated_text},
-                is_complete=False,
-            )
-            accumulated_text = ""
-
-        async def _flush_reasoning():
-            nonlocal accumulated_reasoning
-            if not accumulated_reasoning:
-                return
-            yield AgentResponseChunk(
-                request_id=rid,
-                channel_id=cid,
-                payload={"event_type": "chat.reasoning", "content": accumulated_reasoning},
-                is_complete=False,
-            )
-            accumulated_reasoning = ""
+        evolution_status_started = False
+        evolution_status_ended = False
 
         cron_context_tokens = self._bind_runtime_cron_context(
             channel_id=request.channel_id,
@@ -1983,6 +1940,19 @@ class JiuWenClawDeepAdapter:
                     continue
 
                 if chunk_type == "answer":
+                    if (
+                            not evolution_status_started
+                            and self._skill_evolution_rail is not None
+                            and request.params.get("mode", "plan") == "plan"
+                    ):
+                        # Mark evolution phase start before after_invoke auto-evolution runs.
+                        yield AgentResponseChunk(
+                            request_id=rid,
+                            channel_id=cid,
+                            payload={"event_type": "chat.evolution_status", "status": "start"},
+                            is_complete=False,
+                        )
+                        evolution_status_started = True
                     if accumulated_text:
                         yield AgentResponseChunk(
                             request_id=rid,
@@ -2077,11 +2047,28 @@ class JiuWenClawDeepAdapter:
                             payload=parsed,
                             is_complete=False,
                         )
+
+            if evolution_status_started and not evolution_status_ended:
+                yield AgentResponseChunk(
+                    request_id=rid,
+                    channel_id=cid,
+                    payload={"event_type": "chat.evolution_status", "status": "end"},
+                    is_complete=False,
+                )
+                evolution_status_ended = True
         except asyncio.CancelledError:
             logger.info("[JiuWenClawDeepAdapter] 流式任务被取消: request_id=%s session_id=%s", rid, session_id)
             raise
         except Exception as exc:
             logger.exception("[JiuWenClawDeepAdapter] 流式任务异常: %s", exc)
+            if evolution_status_started and not evolution_status_ended:
+                yield AgentResponseChunk(
+                    request_id=rid,
+                    channel_id=cid,
+                    payload={"event_type": "chat.evolution_status", "status": "end"},
+                    is_complete=False,
+                )
+                evolution_status_ended = True
             yield AgentResponseChunk(
                 request_id=rid,
                 channel_id=cid,
