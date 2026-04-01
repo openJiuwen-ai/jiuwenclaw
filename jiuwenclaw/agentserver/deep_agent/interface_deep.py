@@ -16,7 +16,7 @@ import uuid
 from contextvars import ContextVar, Token
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, AsyncIterator
+from typing import Any, AsyncIterator, List, Tuple
 
 from dotenv import load_dotenv
 from openjiuwen.core.foundation.llm import ModelRequestConfig, ModelClientConfig, Model
@@ -602,14 +602,34 @@ class JiuWenClawDeepAdapter:
             skill_rail = None
         return skill_rail
 
-    def _build_context_engineering_rail(self) -> ContextEngineeringRail | None:
-        """Build ContextEngineeringRail."""
+    def _build_context_engineering_rail(self, config: dict[str, Any]) -> ContextEngineeringRail | None:
+        """Build ContextEngineeringRail with user config merged into presets.
+
+        用户提供的 processor 配置（dict 格式）会与预置配置做字段级别合并，
+        只覆盖用户指定的字段，其他使用预置默认值。
+        """
         try:
+            user_processors: List[Tuple[str, dict]] = []
+            context_engine_cfg = config.get("context_engine_config", {})
+
+            offloader_cfg = context_engine_cfg.get("message_offloader_config", {})
+            if isinstance(offloader_cfg, dict) and offloader_cfg:
+                user_processors.append(("MessageOffloader", offloader_cfg))
+
+            compressor_cfg = context_engine_cfg.get("dialogue_compressor_config", {})
+            if isinstance(compressor_cfg, dict) and compressor_cfg:
+                user_processors.append(("DialogueCompressor", compressor_cfg))
+
+            # 构建 ContextEngineeringRail
             context_rail = ContextEngineeringRail(
-                processors=None,  # 使用预置配置
+                processors=user_processors if user_processors else None,
                 preset=True,
             )
-            logger.info("[JiuWenClawDeepAdapter] ContextEngineeringRail create success")
+            logger.info(
+                "[JiuWenClawDeepAdapter] ContextEngineeringRail create success, "
+                "user_processors=%s",
+                [p[0] for p in user_processors] if user_processors else "none"
+            )
             return context_rail
         except Exception as exc:
             logger.warning("[JiuWenClawDeepAdapter] ContextEngineeringRail create failed: %s", exc)
@@ -759,7 +779,6 @@ class JiuWenClawDeepAdapter:
             _RailBuildInfo("_skill_rail", self._build_skill_rail,
                            {"config": config, "include_tools": self._filesystem_rail is None}),
             _RailBuildInfo("_stream_event_rail", self._build_stream_event_rail),
-            _RailBuildInfo("_context_engineering_rail", self._build_context_engineering_rail),
             _RailBuildInfo("_task_planning_rail", self._build_task_planning_rail),
             _RailBuildInfo("_security_rail", self._build_security_rail),
             _RailBuildInfo("_heartbeat_rail", self._build_heartbeat_rail),
@@ -770,6 +789,14 @@ class JiuWenClawDeepAdapter:
                                                                                               {}).get("model_name",
                                                                                                       "gpt-4")}),
         ]
+        if config.get("context_engine_config", {}).get("enabled", False):
+            rail_infos.append(
+                _RailBuildInfo(
+                    "_context_engineering_rail",
+                    self._build_context_engineering_rail,
+                    {"config": config},
+                )
+            )
         if config.get("evolution", {}).get("enabled", False):
             rail_infos.append(
                 _RailBuildInfo(
@@ -856,7 +883,11 @@ class JiuWenClawDeepAdapter:
 
         # Only SkillUseRail and ContextEngineeringRail require a full rebuild on config reload.
         self._skill_rail = self._build_skill_rail(config, include_tools=self._filesystem_rail is None)
-        self._context_engineering_rail = self._build_context_engineering_rail()
+
+        if config.get("context_engine_config", {}).get("enabled", False):
+            self._context_engineering_rail = self._build_context_engineering_rail(config)
+        else:
+            self._context_engineering_rail = None
 
         rails_list = []
         if self._skill_rail is not None:
