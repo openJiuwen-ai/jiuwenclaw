@@ -380,7 +380,8 @@
     },
     "errors": {
       "requiredModelFields": "模型配置为必填：{{fields}}。请完整填写后再保存并重启。",
-      "saveFailed": "保存失败，请稍后重试"
+      "saveFailed": "保存失败，请稍后重试",
+      "processingDisabled": "任务执行中，请等待任务完成后再保存配置。"
     }
   },
   "cron": {
