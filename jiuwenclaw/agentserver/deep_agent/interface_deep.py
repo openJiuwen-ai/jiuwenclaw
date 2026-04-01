@@ -102,7 +102,7 @@ from jiuwenclaw.agentserver.tools.xiaoyi_phone_tools import (
     image_reading,
 )
 from jiuwenclaw.config import get_config, resolve_env_vars
-from jiuwenclaw.gateway.cron import CronTargetChannel
+from jiuwenclaw.gateway.cron import CronController, CronTargetChannel
 from jiuwenclaw.schema.agent import AgentRequest, AgentResponse, AgentResponseChunk
 from jiuwenclaw.utils import get_env_file, get_agent_root_dir, get_checkpoint_dir
 
@@ -1193,6 +1193,16 @@ class JiuWenClawDeepAdapter:
         # 定时工具：按当前 session 的 channel 注册（contextvar 已由 _bind_runtime_cron_context 设置）
         if session_id not in ("heartbeat", "cron"):
             try:
+                channel = self._resolve_prompt_channel(session_id)
+                _CHANNEL_TO_CRON_TARGET = {
+                    "feishu": CronTargetChannel.FEISHU,
+                    "wecom": CronTargetChannel.WECOM,
+                    "xiaoyi": CronTargetChannel.XIAOYI,
+                    "web": CronTargetChannel.WEB,
+                    "sess": CronTargetChannel.WEB,
+                }
+                cron_target = _CHANNEL_TO_CRON_TARGET.get(channel, CronTargetChannel.WEB)
+                CronController.get_instance().set_target_channel(cron_target)
                 for cron_tool in self._build_cron_tools():
                     if not Runner.resource_mgr.get_tool(cron_tool.card.id):
                         Runner.resource_mgr.add_tool(cron_tool)
