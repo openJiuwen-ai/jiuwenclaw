@@ -29,7 +29,7 @@ from jiuwenclaw.config import get_config
 from jiuwenclaw.schema.agent import AgentRequest, AgentResponse, AgentResponseChunk
 from jiuwenclaw.agentserver.session_history import append_history_record
 from jiuwenclaw.schema.message import ReqMethod
-from jiuwenclaw.utils import get_agent_home_dir, get_agent_root_dir, get_env_file
+from jiuwenclaw.utils import get_agent_home_dir, get_agent_workspace_dir, get_env_file
 from jiuwenclaw.agentserver.memory.config import get_memory_mode
 from jiuwenclaw.schema.hook_event import AgentServerHookEvents
 from jiuwenclaw.extensions.registry import ExtensionRegistry
@@ -76,7 +76,7 @@ class JiuWenClaw:
     def __init__(self) -> None:
         self._adapter: AgentAdapter | None = None
         self._sdk_name: str | None = None
-        self._skill_manager = SkillManager(workspace_dir=str(get_agent_root_dir()))
+        self._skill_manager = SkillManager(workspace_dir=str(get_agent_workspace_dir()))
         self._session_manager = SessionManager()
 
     def _ensure_adapter(self) -> AgentAdapter:

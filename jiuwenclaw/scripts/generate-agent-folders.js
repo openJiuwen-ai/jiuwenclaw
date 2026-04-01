@@ -15,7 +15,7 @@ if (!agentRoot) {
   process.exit(1);
 }
 
-const outputPath = path.join(agentRoot, 'workspace', 'agent-data.json');
+const outputPath = path.join(agentRoot, 'jiuwenclaw_workspace', 'agent-data.json');
 
 console.log('扫描目录:', agentRoot);
 
@@ -44,15 +44,19 @@ try {
 
   const upsertFileToFolder = (folderKey, relativeFilePath) => {
     const rawName = path.basename(relativeFilePath);
-    const displayName = normalizeLangSuffix(rawName);
+    let displayName = normalizeLangSuffix(rawName);
     const relativeFolderPath = path.dirname(relativeFilePath);
     let displayPath = relativeFolderPath === '.'
       ? `agent/${displayName}`
       : `agent/${relativeFolderPath.replace(/\\/g, '/')}/${displayName}`;
-    // 模板中 HEARTBEAT/PRINCIPLE/TONE 在 agent 根目录，运行时在 agent/home/，统一映射到 home
-    if (folderKey === ROOT_FOLDER_KEY && ['heartbeat.md', 'principle.md', 'tone.md'].includes(displayName.toLowerCase())) {
+    // PRINCIPLE/TONE 运行时在 agent/home/；HEARTBEAT 运行时在 agent/jiuwenclaw_workspace/
+    if (folderKey === ROOT_FOLDER_KEY && ['principle.md', 'tone.md'].includes(displayName.toLowerCase())) {
       folderKey = 'home';
       displayPath = `agent/home/${displayName}`;
+    } else if (folderKey === ROOT_FOLDER_KEY && displayName.toLowerCase() === 'heartbeat.md') {
+      folderKey = 'jiuwenclaw_workspace';
+      displayName = 'HeartBeat.md';
+      displayPath = `agent/jiuwenclaw_workspace/${displayName}`;
     }
 
     if (!seenPaths[folderKey]) seenPaths[folderKey] = new Set();
@@ -72,6 +76,9 @@ try {
   const walkDirectory = (absoluteDirPath, relativeDirPath = '') => {
     const entries = fs.readdirSync(absoluteDirPath, { withFileTypes: true });
     entries.forEach((entry) => {
+      if (entry.name.startsWith('.')) {
+        return;
+      }
       const absoluteEntryPath = path.join(absoluteDirPath, entry.name);
       const relativeEntryPath = relativeDirPath
         ? path.join(relativeDirPath, entry.name)
