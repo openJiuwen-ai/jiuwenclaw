@@ -746,6 +746,26 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             logger.exception("[heartbeat.set_conf] %s", e)
             await channel.send_response(ws, req_id, ok=False, error=str(e), code="INTERNAL_ERROR")
 
+    async def _heartbeat_get_path(ws, req_id, params, session_id):
+        """返回 HEARTBEAT.md 文件路径。"""
+        from jiuwenclaw.utils import get_agent_home_dir, get_agent_root_dir
+
+        try:
+            heartbeat_path = get_agent_home_dir() / "HEARTBEAT.md"
+            # 返回相对于 agent 根目录的路径，与 file-api 格式一致
+            agent_root = get_agent_root_dir()
+            relative_path = heartbeat_path.relative_to(agent_root.parent)
+            await channel.send_response(
+                ws, req_id, ok=True,
+                payload={"path": str(relative_path)}
+            )
+        except Exception as e:
+            logger.exception("[heartbeat.get_path] %s", e)
+            await channel.send_response(
+                ws, req_id, ok=False,
+                error=str(e), code="INTERNAL_ERROR"
+            )
+
     async def _channel_feishu_get_conf(ws, req_id, params, session_id):
         """返回 FeishuChannel 的当前配置（由 ChannelManager 管理）。"""
         cm = _resolve(channel_manager)
@@ -1349,6 +1369,7 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
     channel.register_method("updater.set_conf", _updater_set_conf)
     channel.register_method("heartbeat.get_conf", _heartbeat_get_conf)
     channel.register_method("heartbeat.set_conf", _heartbeat_set_conf)
+    channel.register_method("heartbeat.get_path", _heartbeat_get_path)
     channel.register_method("channel.feishu.get_conf", _channel_feishu_get_conf)
     channel.register_method("channel.feishu.set_conf", _channel_feishu_set_conf)
     channel.register_method("channel.xiaoyi.get_conf", _channel_xiaoyi_get_conf)

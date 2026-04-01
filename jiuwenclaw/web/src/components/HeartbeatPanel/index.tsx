@@ -5,7 +5,6 @@ import { HeartbeatMessageModal } from '../../features/HeartbeatMessageModal';
 import { webRequest } from '../../services/webClient';
 import { useSessionStore } from '../../stores';
 
-const HEARTBEAT_FILE_PATH = 'agent/home/HEARTBEAT.md';
 const HEARTBEAT_FILE_NAME = 'HEARTBEAT.md';
 
 interface ActiveHours {
@@ -73,7 +72,7 @@ export function HeartbeatPanel() {
   const [activeHoursEnabled, setActiveHoursEnabled] = useState(false);
   const [startInput, setStartInput] = useState('08:00');
   const [endInput, setEndInput] = useState('22:00');
-  
+  const [filePath, setFilePath] = useState<string>('');
 
   const loadConf = useCallback(async () => {
     setLoading(true);
@@ -100,9 +99,19 @@ export function HeartbeatPanel() {
     }
   }, [t]);
 
+  const loadFilePath = useCallback(async () => {
+    try {
+      const payload = await webRequest<{ path: string }>('heartbeat.get_path');
+      setFilePath(payload.path);
+    } catch (err) {
+      console.error('Failed to load heartbeat file path:', err);
+    }
+  }, []);
+
   useEffect(() => {
     void loadConf();
-  }, [loadConf]);
+    void loadFilePath();
+  }, [loadConf, loadFilePath]);
 
   useEffect(() => {
     if (!success) {
@@ -446,7 +455,7 @@ export function HeartbeatPanel() {
           </div>
 
           <div className="rounded-xl border border-border bg-card/70 backdrop-blur-sm overflow-hidden shadow-sm min-h-0">
-            <FileViewer filePath={HEARTBEAT_FILE_PATH} fileName={HEARTBEAT_FILE_NAME} />
+            <FileViewer filePath={filePath} fileName={HEARTBEAT_FILE_NAME} />
           </div>
         </div>
       </div>
