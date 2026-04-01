@@ -1750,6 +1750,8 @@ class JiuWenClawDeepAdapter:
         has_streamed_content = False
         accumulated_text = ""
         accumulated_reasoning = ""
+        evolution_status_started = False
+        evolution_status_ended = False
 
         async def _flush_text():
             nonlocal accumulated_text
@@ -1870,6 +1872,19 @@ class JiuWenClawDeepAdapter:
                     continue
 
                 if chunk_type == "answer":
+                    if (
+                        not evolution_status_started
+                        and self._skill_evolution_rail is not None
+                        and request.params.get("mode", "plan") == "plan"
+                    ):
+                        # Mark evolution phase start before after_invoke auto-evolution runs.
+                        yield AgentResponseChunk(
+                            request_id=rid,
+                            channel_id=cid,
+                            payload={"event_type": "chat.evolution_status", "status": "start"},
+                            is_complete=False,
+                        )
+                        evolution_status_started = True
                     if accumulated_text:
                         yield AgentResponseChunk(
                             request_id=rid,
@@ -1964,11 +1979,28 @@ class JiuWenClawDeepAdapter:
                             payload=parsed,
                             is_complete=False,
                         )
+
+            if evolution_status_started and not evolution_status_ended:
+                yield AgentResponseChunk(
+                    request_id=rid,
+                    channel_id=cid,
+                    payload={"event_type": "chat.evolution_status", "status": "end"},
+                    is_complete=False,
+                )
+                evolution_status_ended = True
         except asyncio.CancelledError:
             logger.info("[JiuWenClawDeepAdapter] 流式任务被取消: request_id=%s session_id=%s", rid, session_id)
             raise
         except Exception as exc:
             logger.exception("[JiuWenClawDeepAdapter] 流式任务异常: %s", exc)
+            if evolution_status_started and not evolution_status_ended:
+                yield AgentResponseChunk(
+                    request_id=rid,
+                    channel_id=cid,
+                    payload={"event_type": "chat.evolution_status", "status": "end"},
+                    is_complete=False,
+                )
+                evolution_status_ended = True
             yield AgentResponseChunk(
                 request_id=rid,
                 channel_id=cid,

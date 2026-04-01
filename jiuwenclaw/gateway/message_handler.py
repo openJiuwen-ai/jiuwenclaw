@@ -73,6 +73,9 @@ class MessageHandler(ABC):
         self._forward_task: asyncio.Task | None = None
         self._stream_tasks: dict[str, asyncio.Task] = {}  # request_id -> task
         self._stream_sessions: dict[str, str | None] = {}  # request_id -> session_id
+        self._pending_evolution_approval: dict[str, str] = {}  # session_id -> approval_request_id
+        self._queued_supplement_input: dict[str, str] = {}  # session_id -> queued_new_input
+        self._session_evolution_in_progress: set[str] = set()
 
         # per-channel 控制状态：支持 \new_session / \mode 指令。
         # 使用 ChannelType 的 value 作为标准键，避免散落的硬编码字符串。
@@ -587,6 +590,70 @@ class MessageHandler(ABC):
 
         await ExtensionRegistry.get_instance().trigger(GatewayHookEvents.BEFORE_CHAT_REQUEST, ctx)
 
+    @staticmethod
+    def _is_evolution_approval_request_id(request_id: Any) -> bool:
+        return isinstance(request_id, str) and request_id.startswith("skill_evolve_approve_")
+
+    def _queue_supplement_input(self, session_id: str | None, new_input: str) -> None:
+        if not session_id:
+            return
+        self._queued_supplement_input[session_id] = new_input
+
+    def _pop_queued_supplement_input(self, session_id: str | None) -> str | None:
+        if not session_id:
+            return None
+        return self._queued_supplement_input.pop(session_id, None)
+
+    def _mark_pending_evolution_approval(self, session_id: str | None, request_id: Any) -> None:
+        if not session_id:
+            return
+        if self._is_evolution_approval_request_id(request_id):
+            self._pending_evolution_approval[session_id] = str(request_id)
+
+    def _clear_pending_evolution_approval(self, session_id: str | None) -> None:
+        if not session_id:
+            return
+        self._pending_evolution_approval.pop(session_id, None)
+
+    def _mark_session_evolution_in_progress(self, session_id: str | None) -> None:
+        if not session_id:
+            return
+        self._session_evolution_in_progress.add(session_id)
+
+    def _clear_session_evolution_in_progress(self, session_id: str | None) -> None:
+        if not session_id:
+            return
+        self._session_evolution_in_progress.discard(session_id)
+
+    def _is_session_evolution_in_progress(self, session_id: str | None) -> bool:
+        return isinstance(session_id, str) and session_id in self._session_evolution_in_progress
+
+    def _clear_session_evolution_states(self, session_id: str | None) -> None:
+        self._clear_session_evolution_in_progress(session_id)
+        self._clear_pending_evolution_approval(session_id)
+        self._pop_queued_supplement_input(session_id)
+
+    @staticmethod
+    def _build_queued_chat_send_message(msg: "Message", new_input: str) -> "Message":
+        from jiuwenclaw.schema.message import Message, ReqMethod
+
+        new_req_id = f"req_{int(time.time() * 1000):x}_{msg.id}"
+        return Message(
+            id=new_req_id,
+            type="req",
+            channel_id=msg.channel_id,
+            session_id=msg.session_id,
+            params={
+                "query": new_input,
+                "session_id": msg.session_id,
+                "is_supplement": True,
+            },
+            timestamp=time.time(),
+            ok=True,
+            req_method=ReqMethod.CHAT_SEND,
+            is_stream=True,
+        )
+
     async def _process_non_stream_request(self, msg: "Message", env: "E2AEnvelope") -> None:
         """执行单次非流式 Agent 请求并将结果写入 robot_messages（供串行或后台任务复用）。"""
         try:
@@ -637,6 +704,25 @@ class MessageHandler(ABC):
                 self._apply_channel_state(msg)
 
                 # 检查是否是中断请求
+                if msg.req_method == ReqMethod.CHAT_ANSWER:
+                    # 先正常转发用户审批答案，再按会话自动派发排队的新输入
+                    env = self.message_to_e2a(msg)
+                    await self._process_non_stream_request(msg, env)
+                    answer_request_id = (msg.params or {}).get("request_id")
+                    if self._is_evolution_approval_request_id(answer_request_id):
+                        self._clear_pending_evolution_approval(msg.session_id)
+                        self._clear_session_evolution_in_progress(msg.session_id)
+                        queued_input = self._pop_queued_supplement_input(msg.session_id)
+                        if isinstance(queued_input, str) and queued_input.strip():
+                            queued_msg = self._build_queued_chat_send_message(msg, queued_input.strip())
+                            self._user_messages.put_nowait(queued_msg)
+                            logger.info(
+                                "[MessageHandler] evolution approval answered, queued supplement dispatched: id=%s session_id=%s",
+                                queued_msg.id,
+                                msg.session_id,
+                            )
+                    continue
+
                 if msg.req_method == ReqMethod.CHAT_CANCEL:
                     logger.info(
                         "[MessageHandler] 收到中断请求: id=%s channel_id=%s",
@@ -647,6 +733,28 @@ class MessageHandler(ABC):
                     intent = (msg.params or {}).get("intent", "cancel")
 
                     if has_new_input:
+                        if (
+                            self._is_session_evolution_in_progress(msg.session_id)
+                            or (
+                                isinstance(msg.session_id, str)
+                                and msg.session_id in self._pending_evolution_approval
+                            )
+                        ):
+                            queued_input = new_input.strip()
+                            self._queue_supplement_input(msg.session_id, queued_input)
+                            logger.info(
+                                "[MessageHandler] evolution phase pending, queue supplement input: session_id=%s",
+                                msg.session_id,
+                            )
+                            await self._send_interrupt_result_notification(
+                                msg.id,
+                                msg.channel_id,
+                                msg.session_id,
+                                "supplement",
+                                message="已加入队列，等待演进完成",
+                            )
+                            continue
+
                         # 有新输入：取消旧任务 → 保留 todo → 启动新任务（非并发）
 
                         # 1. 取消 gateway 侧所有运行中的流式任务
@@ -716,6 +824,7 @@ class MessageHandler(ABC):
                         )
 
                     elif intent == "cancel":
+                        self._clear_session_evolution_states(msg.session_id)
                         # 取消所有运行中的流式任务
                         for rid, task in list(self._stream_tasks.items()):
                             if not task.done():
@@ -815,6 +924,35 @@ class MessageHandler(ABC):
                         chunk.request_id,
                     )
                     continue
+                if isinstance(chunk.payload, dict):
+                    event_type = chunk.payload.get("event_type")
+                    if event_type == "chat.evolution_status":
+                        status = str(chunk.payload.get("status", "")).strip().lower()
+                        if status == "start":
+                            self._mark_session_evolution_in_progress(session_id)
+                            logger.info(
+                                "[MessageHandler] evolution status start: session_id=%s request_id=%s",
+                                session_id,
+                                rid,
+                            )
+                        elif status == "end":
+                            self._clear_session_evolution_in_progress(session_id)
+                            logger.info(
+                                "[MessageHandler] evolution status end: session_id=%s request_id=%s",
+                                session_id,
+                                rid,
+                            )
+                    approval_request_id = chunk.payload.get("request_id")
+                    if (
+                        event_type == "chat.ask_user_question"
+                        and self._is_evolution_approval_request_id(approval_request_id)
+                    ):
+                        self._mark_pending_evolution_approval(session_id, approval_request_id)
+                        logger.info(
+                            "[MessageHandler] evolution approval detected: session_id=%s request_id=%s",
+                            session_id,
+                            approval_request_id,
+                        )
                 # 携带 request metadata，供 Feishu/Xiaoyi 用平台身份回发
                 # 检查是否是 processing_status=false 事件
                 payload = chunk.payload or {}
@@ -846,6 +984,9 @@ class MessageHandler(ABC):
             # 清理状态
             self._stream_tasks.pop(rid, None)
             self._stream_sessions.pop(rid, None)
+            if session_id is not None and session_id not in self._stream_sessions.values():
+                # Fallback cleanup when stream exits unexpectedly without evolution end signal.
+                self._clear_session_evolution_in_progress(session_id)
             logger.debug(
                 "[MessageHandler] Stream 任务状态已清理: request_id=%s",
                 rid,
@@ -905,7 +1046,12 @@ class MessageHandler(ABC):
             logger.warning("[MessageHandler] AgentServer 中断请求失败(忽略): %s", e)
 
     async def _send_interrupt_result_notification(
-        self, request_id: str, channel_id: str, session_id: str | None, intent: str,
+        self,
+        request_id: str,
+        channel_id: str,
+        session_id: str | None,
+        intent: str,
+        message: str | None = None,
     ) -> None:
         """发送 interrupt_result 事件到前端（pause / resume 等）."""
         from jiuwenclaw.schema.message import Message, EventType
@@ -928,7 +1074,7 @@ class MessageHandler(ABC):
                 "event_type": "chat.interrupt_result",
                 "intent": intent,
                 "success": True,
-                "message": messages_map.get(intent, "任务已中断"),
+                "message": message or messages_map.get(intent, "任务已中断"),
             },
             event_type=EventType.CHAT_INTERRUPT_RESULT,
             metadata=None,
@@ -1001,6 +1147,9 @@ class MessageHandler(ABC):
                     pass
         self._stream_tasks.clear()
         self._stream_sessions.clear()
+        self._session_evolution_in_progress.clear()
+        self._pending_evolution_approval.clear()
+        self._queued_supplement_input.clear()
 
         # 取消转发循环
         if self._forward_task is not None:
