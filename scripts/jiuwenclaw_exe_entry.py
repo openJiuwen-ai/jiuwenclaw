@@ -20,6 +20,11 @@ def main() -> None:
         from jiuwenclaw.init_workspace import main as init_main
         init_main()
         return
+    # 子命令：CLI 命令分发
+    if len(sys.argv) >= 2 and sys.argv[1].lower() == "acp":
+        from jiuwenclaw.app_cli import main as cli_main
+        cli_main()
+        return
     if _pop_flag("--desktop-run-app"):
         from jiuwenclaw.app import main as app_main
         app_main()

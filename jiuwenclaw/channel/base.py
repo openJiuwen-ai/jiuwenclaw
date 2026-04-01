@@ -18,6 +18,7 @@ if TYPE_CHECKING:
 
 class ChannelType(str, Enum):
     """Channel 类型枚举."""
+    ACP = "acp"
     WEB = "web"
     FEISHU = "feishu"
     XIAOYI = "xiaoyi"
