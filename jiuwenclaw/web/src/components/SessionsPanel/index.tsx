@@ -108,8 +108,19 @@ function parseSessionDisplayLabel(sessionId: string, t: (key: string, options?: 
   }
 
   if (sessionId.startsWith('heartbeat_')) {
-    const rawBody = sessionId.slice('heartbeat_'.length);
-    return rawBody ? `${t('sessions.prefixes.heartbeat')}-${rawBody}` : t('sessions.prefixes.heartbeat');
+    // heartbeat_{hex_ms}_{suffix}
+    const parts = sessionId.split('_');
+    const hexTs = parts[1] ?? '';
+    if (/^[0-9a-fA-F]+$/.test(hexTs)) {
+      const ms = Number.parseInt(hexTs, 16);
+      if (Number.isFinite(ms)) {
+        const date = new Date(ms);
+        if (!Number.isNaN(date.getTime()) && isPlausibleDate(date)) {
+          return `${t('sessions.prefixes.heartbeat')}-${formatDateTime(date)}`;
+        }
+      }
+    }
+    return `${t('sessions.prefixes.heartbeat')}-${t('sessions.unknownTime')}`;
   }
 
   // discord_{channel_id}_{user_id} from Discord Channel (not hex timestamps)

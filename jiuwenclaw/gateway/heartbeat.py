@@ -10,6 +10,7 @@ import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
+import secrets
 
 logger = logging.getLogger(__name__)
 
@@ -174,8 +175,10 @@ class GatewayHeartbeatService(IHeartbeat):
             )
             return
 
-        request_id = f"heartbeat-{time.monotonic_ns()}"
-        session_id = f"heartbeat_{time.monotonic_ns()}"
+        ts = format(int(time.time() * 1000), "x")
+        suffix = secrets.token_hex(3)
+        request_id = f"heartbeat-{ts}_{suffix}"
+        session_id = f"heartbeat_{ts}_{suffix}"
         envelope = e2a_from_agent_fields(
             request_id=request_id,
             channel_id=self._config.channel_id,
