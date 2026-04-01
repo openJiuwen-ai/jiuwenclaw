@@ -218,7 +218,10 @@ class JiuWenClawDeepAdapter:
 
     def _get_skills_dir(self) -> str:
         """Return the skills directory path via workspace node resolution."""
-        workspace = Workspace(root_path=self._workspace_dir or "./")
+        if self._instance is not None:
+            workspace = self._instance._deep_config.workspace
+        else:
+            workspace = Workspace(root_path=self._workspace_dir or "./")
         path = workspace.get_node_path(WorkspaceNode.SKILLS)
         if path is not None:
             return str(path)
