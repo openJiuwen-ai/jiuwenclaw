@@ -199,6 +199,7 @@ class JiuWenClawDeepAdapter:
         self._task_planning_rail: TaskPlanningRail | None = None
         self._context_engineering_rail: ContextEngineeringRail | None = None
         self._security_rail: SecurityRail | None = None
+        self._memory_rail: MemoryRail | None = None
         self._heartbeat_rail: HeartbeatRail | None = None
         self._skill_evolution_rail: SkillEvolutionRail | None = None
         self._pending_evolution_data: dict[str, dict] = {}
@@ -848,10 +849,10 @@ class JiuWenClawDeepAdapter:
             audio_model_config=self._audio_model_config,
         )
 
-    def _get_current_agent_rails(self, config: dict[str, Any]) -> list[Any]:
+    def _get_current_agent_rails(self, config: dict[str, Any], config_base: dict[str, Any] | None = None) -> list[Any]:
         """Return rail instances that need to be re-initialized on hot reload.
 
-        Only SkillUseRail and ContextEngineeringRail are rebuilt (skills dir / skill_mode may change).
+        SkillUseRail, ContextEngineeringRail, and MemoryRail are rebuilt on config reload.
         All other rails read language dynamically from system_prompt_builder.language
         and are updated in-place where needed — they are NOT passed to configure()
         so their existing registered state is preserved without an uninit/init cycle.
@@ -863,7 +864,6 @@ class JiuWenClawDeepAdapter:
             if _env_auto_scan is not None:
                 self._skill_evolution_rail.auto_scan = _env_auto_scan.lower() in ("true", "1", "yes")
 
-        # Only SkillUseRail and ContextEngineeringRail require a full rebuild on config reload.
         self._skill_rail = self._build_skill_rail(config, include_tools=self._filesystem_rail is None)
 
         if config.get("context_engine_config", {}).get("enabled", False):
@@ -871,11 +871,19 @@ class JiuWenClawDeepAdapter:
         else:
             self._context_engineering_rail = None
 
+        # MemoryRail 持有 EmbeddingConfig，embed 配置变更时需要整体重建。
+        if config_base is not None and get_memory_mode(config_base) == "local":
+            self._memory_rail = self._build_memory_rail()
+        else:
+            self._memory_rail = None
+
         rails_list = []
         if self._skill_rail is not None:
             rails_list.append(self._skill_rail)
         if self._context_engineering_rail is not None:
             rails_list.append(self._context_engineering_rail)
+        if self._memory_rail is not None:
+            rails_list.append(self._memory_rail)
         return rails_list
 
     async def _get_tool_cards(self):
@@ -1084,7 +1092,7 @@ class JiuWenClawDeepAdapter:
         self._sync_multimodal_tools_for_runtime()
         self._sync_paid_search_tool_for_runtime()
 
-        rails_list = self._get_current_agent_rails(config)
+        rails_list = self._get_current_agent_rails(config, config_base)
 
         # Apply in-place updates to permission_rail (no re-init needed).
         if self._permission_rail is not None:
