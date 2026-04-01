@@ -1581,9 +1581,9 @@ class SkillManager:
 
     @staticmethod
     def _generate_agent_data_for_workspace(workspace_root: Path) -> None:
-        """Generate agent/workspace/agent-data.json from agent tree."""
+        """Generate agent/jiuwenclaw_workspace/agent-data.json from agent tree."""
         agent_root = workspace_root.resolve()
-        output_path = (agent_root / "workspace" / "agent-data.json").resolve()
+        output_path = (agent_root / "jiuwenclaw_workspace" / "agent-data.json").resolve()
         root_folder_key = "__root__"
 
         if not agent_root.exists() or not agent_root.is_dir():
@@ -1604,8 +1604,8 @@ class SkillManager:
                 if relative_folder_path != "."
                 else f"agent/{display_name}"
             )
-            # 模板中 HEARTBEAT/PRINCIPLE/TONE 在 agent 根目录，运行时在 agent/home/，统一映射到 home
-            if folder_key == root_folder_key and display_name.lower() in ("heartbeat.md", "principle.md", "tone.md"):
+            # PRINCIPLE/TONE 模板在 agent 根目录，运行时在 agent/home/
+            if folder_key == root_folder_key and display_name.lower() in ("principle.md", "tone.md"):
                 folder_key = "home"
                 display_path = f"agent/home/{display_name}"
 

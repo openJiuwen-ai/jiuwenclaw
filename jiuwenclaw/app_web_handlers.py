@@ -748,10 +748,10 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
 
     async def _heartbeat_get_path(ws, req_id, params, session_id):
         """返回 HEARTBEAT.md 文件路径。"""
-        from jiuwenclaw.utils import get_agent_home_dir, get_agent_root_dir
+        from jiuwenclaw.utils import get_deepagent_heartbeat_path, get_agent_root_dir
 
         try:
-            heartbeat_path = get_agent_home_dir() / "HEARTBEAT.md"
+            heartbeat_path = get_deepagent_heartbeat_path()
             # 返回相对于 agent 根目录的路径，与 file-api 格式一致
             agent_root = get_agent_root_dir()
             relative_path = heartbeat_path.relative_to(agent_root.parent)
