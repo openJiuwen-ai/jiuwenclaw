@@ -50,6 +50,7 @@ from openjiuwen.deepagents.subagents.browser_agent import build_browser_agent_co
 from openjiuwen.deepagents.tools import (
     WebFetchWebpageTool,
     WebFreeSearchTool,
+    WebPaidSearchTool,
     create_audio_tools,
     create_vision_tools,
 )
@@ -75,7 +76,6 @@ from jiuwenclaw.agentserver.tools.multimodal_config import (
 )
 from jiuwenclaw.agentserver.tools.video_tools import video_understanding
 
-from jiuwenclaw.agentserver.tools.search_tools import mcp_paid_search
 from jiuwenclaw.agentserver.tools import SendFileToolkit
 from jiuwenclaw.agentserver.tools.multi_session_toolkits import MultiSessionToolkit
 from jiuwenclaw.agentserver.tools.xiaoyi_phone_tools import (
@@ -510,16 +510,17 @@ class JiuWenClawDeepAdapter:
 
     def _sync_paid_search_tool_for_runtime(self) -> None:
         """Sync paid-search tool registration after config reload."""
-        _, self._paid_search_registered = self._sync_tool_group(
-            current_tools=[mcp_paid_search],
+        tools, self._paid_search_registered = self._sync_tool_group(
+            current_tools=[self._paid_search_tool] if self._paid_search_tool else [],
             registered=self._paid_search_registered,
             enabled=any(
                 os.environ.get(key)
                 for key in ("PERPLEXITY_API_KEY", "SERPER_API_KEY", "JINA_API_KEY")
             ),
-            create_fn=lambda: [mcp_paid_search],
+            create_fn=lambda: [WebPaidSearchTool(language=self._resolve_runtime_language())],
             warn_label="paid search tool",
         )
+        self._paid_search_tool = tools[0] if tools else None
 
     @staticmethod
     async def set_checkpoint():
@@ -901,8 +902,9 @@ class JiuWenClawDeepAdapter:
             os.environ.get(key)
             for key in ("PERPLEXITY_API_KEY", "SERPER_API_KEY", "JINA_API_KEY")
         ):
-            Runner.resource_mgr.add_tool(mcp_paid_search)
-            tool_cards.append(mcp_paid_search.card)
+            self._paid_search_tool = WebPaidSearchTool(language=self._resolve_runtime_language())
+            Runner.resource_mgr.add_tool(self._paid_search_tool)
+            tool_cards.append(self._paid_search_tool.card)
             self._paid_search_registered = True
 
         self._vision_tools = []
