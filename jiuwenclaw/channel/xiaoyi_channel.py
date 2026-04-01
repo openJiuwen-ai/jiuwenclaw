@@ -381,17 +381,22 @@ class XiaoyiChannel(BaseChannel):
         session_id, task_id = self._extract_platform_receive_info(msg)
         # Handle chat.file event
         if self.config.mode == "xiaoyi_claw" and msg.event_type == EventType.CHAT_FILE:
-            files = msg.payload.get("files", []) if isinstance(msg.payload, dict) else []
+            files = msg.payload.get("files", {}) if isinstance(msg.payload, dict) else {}
             if files:
                 for file_info in files:
                     # Convert file path to file info dict if it's a string
-                    if isinstance(file_info, str):
-                        file_info = {
-                            "success": True,
-                            "result_type": "file_created",
-                            "fullPath": file_info,
-                            "fileName": os.path.basename(file_info)
-                        }
+                    if isinstance(file_info, dict):
+                        file_path = file_info.get("path", "")
+                        file_name = file_info.get("name", os.path.basename(file_path))
+                    else:
+                        file_path = str(file_info)
+                        file_name = os.path.basename(file_path)
+                    file_info = {
+                        "success": True,
+                        "result_type": "file_created",
+                        "fullPath": file_path,
+                        "fileName": file_name
+                    }
                     
                     # Send file response
                     for url_key, ws in self._ws_connections.items():
