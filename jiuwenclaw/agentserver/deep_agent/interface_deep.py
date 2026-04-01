@@ -885,19 +885,25 @@ class JiuWenClawDeepAdapter:
 
     async def _get_tool_cards(self):
         """Get tool cards."""
+        # TODO: 静态配置工具：小艺工具（todo)、发送文件工具(todo)
+        # TODO：重启服务后，要加入的之前动态配置工具：音频（done)、视频(done)、图像(done)、三方服务付费搜索(todo)
+
         tool_cards = []
 
+        # TODO: 根据配置，是否加入三方服务付费搜索工具
         for tool_cls in [WebFreeSearchTool, WebFetchWebpageTool]:
             tool_instance = tool_cls()
             Runner.resource_mgr.add_tool(tool_instance)
             tool_cards.append(tool_instance.card)
         self._web_tools_registered = True
 
+        # TODO: 删掉定时工具，属于runtime时候工具
         try:
             for cron_tool in self._build_cron_tools():
                 tool_cards.append(cron_tool)
         except Exception as exc:
             logger.error("[JiuWenClawDeepAdapter] 定时工具初始化失败， reason=%s", exc)
+
         self._vision_tools = []
         self._vision_tools_registered = False
         if self._vision_model_config is not None:
@@ -950,7 +956,6 @@ class JiuWenClawDeepAdapter:
 
         # TODO: experience_retrieve/experience_learn/experience_clear工具待添加
 
-        # TODO: 小艺工具待添加
         return tool_cards
 
     def _build_cron_tools(self) -> list[Any]:
@@ -976,6 +981,7 @@ class JiuWenClawDeepAdapter:
 
         model = self._create_model(config_base)
         agent_card = AgentCard(name=self._agent_name, id='jiuwenclaw')
+
         tool_cards = await self._get_tool_cards()
         self._tool_cards = tool_cards
         rails_list = self._build_agent_rails(config, config_base)
@@ -1063,6 +1069,10 @@ class JiuWenClawDeepAdapter:
             self._permission_rail.update_config(permission_config)
             logger.info("[JiuWenClawDeepAdapter] _permission_rail config hot-updated")
 
+        # TODO：动态配置有关工具：音频（done)、视频(done)、图像(done)、三方服务付费搜索(todo)
+        # TODO：前端增加一个按钮置灰，运行任务时要禁用修改配置
+        # TODO：增加一个函数，用来更新付费工具的（"PERPLEXITY_API_KEY"/"SERPER_API_KEY"/"JINA_API_KEY"）
+
         deep_cfg = self._make_deep_agent_config(
             model=model,
             config=config,
@@ -1112,8 +1122,11 @@ class JiuWenClawDeepAdapter:
         if self._instance is None:
             raise RuntimeError("JiuWenClawDeepAdapter 未初始化，请先调用 create_instance()")
 
+        # TODO: Session有关工具：todo工具（done)、语言切换(done，不走reload_agent_config)、channel定时工具(todo, session_id解析出channel)、Session工具(todo、mode="agent"智能执行模式)更新, runtime中更新
+
         resolved_language = self._resolve_runtime_language()
         if mode == "plan":
+            # TODO: 卸载session工具
             if self._task_planning_rail is None:
                 self._task_planning_rail = self._build_task_planning_rail()
                 if self._task_planning_rail is not None:
@@ -1124,6 +1137,9 @@ class JiuWenClawDeepAdapter:
                 await self._instance.unregister_rail(self._task_planning_rail)
                 self._task_planning_rail = None
                 logger.info("[JiuWenClawDeepAdapter] TaskPlanningRail unregistered for agent mode")
+            # TODO：注册session工具
+
+        # TODO: 从session_id解析出channel，卸载掉原有的定时工具，增加新的定时工具，增加一个函数
 
         # Sync language onto shared builder and deep config so rails
         # (SecurityRail, MemoryRail, etc.) see the updated language in before_model_call.
@@ -1131,15 +1147,6 @@ class JiuWenClawDeepAdapter:
             self._instance.system_prompt_builder.language = resolved_language
         if self._instance._deep_config is not None:
             self._instance._deep_config.language = resolved_language
-
-        # TODO: 各类工具更新，待适配，见interface_react.py _register_runtime_tools函数
-
-        if not self._web_tools_registered:
-            for tool_cls in [WebFreeSearchTool, WebFetchWebpageTool]:
-                tool_instance = tool_cls()
-                Runner.resource_mgr.add_tool(tool_instance)
-                self._instance.ability_manager.add(tool_instance.card)
-            self._web_tools_registered = True
 
     async def process_interrupt(self, request: AgentRequest) -> AgentResponse:
         """处理 interrupt 请求.
