@@ -26,7 +26,7 @@ from openjiuwen.core.runner import Runner
 from openjiuwen.core.session.checkpointer import CheckpointerFactory
 from openjiuwen.core.session.checkpointer.checkpointer import CheckpointerConfig
 from openjiuwen.core.session.checkpointer.persistence import PersistenceCheckpointerProvider
-from openjiuwen.core.single_agent import AgentCard
+from openjiuwen.core.single_agent import AgentCard, ReActAgentConfig
 from openjiuwen.core.sys_operation import SysOperation, SysOperationCard, OperationMode, LocalWorkConfig
 from openjiuwen.deepagents import (
     AudioModelConfig,
@@ -81,6 +81,7 @@ from jiuwenclaw.agentserver.tools.video_tools import video_understanding
 
 from jiuwenclaw.agentserver.tools.search_tools import mcp_paid_search
 from jiuwenclaw.agentserver.tools import SendFileToolkit
+from jiuwenclaw.agentserver.tools.multi_session_toolkits import MultiSessionToolkit
 from jiuwenclaw.agentserver.tools.xiaoyi_phone_tools import (
     get_user_location,
     create_note,
@@ -194,6 +195,8 @@ class JiuWenClawDeepAdapter:
         self._audio_tools_registered: bool = False
         self._video_tool_registered: bool = False
         self._model: Model | None = None
+        self._model_client_config: ModelClientConfig | None = None
+        self._model_request_config: ModelRequestConfig | None = None
         self._config_cache: dict[str, Any] = {}
         self._filesystem_rail: FileSystemRail | None = None
         self._skill_rail: SkillUseRail | None = None
@@ -563,6 +566,8 @@ class JiuWenClawDeepAdapter:
             temperature=model_config_obj.get("temperature", 0.95)
         )
         client_config = ModelClientConfig(**model_client_config)
+        self._model_client_config = client_config
+        self._model_request_config = model_config
         self._model = Model(
             model_client_config=client_config,
             model_config=model_config,
@@ -1190,11 +1195,37 @@ class JiuWenClawDeepAdapter:
                 if self._task_planning_rail is not None:
                     await self._instance.register_rail(self._task_planning_rail)
                     logger.info("[JiuWenClawDeepAdapter] TaskPlanningRail registered for plan mode")
+            # plan 模式：卸载 multi-session 工具
+            for existing in list(self._instance.ability_manager.list() or []):
+                if getattr(existing, "name", "").startswith(("session_new", "session_cancel", "session_list")):
+                    self._instance.ability_manager.remove(existing.name)
         else:
             if self._task_planning_rail is not None:
                 await self._instance.unregister_rail(self._task_planning_rail)
                 self._task_planning_rail = None
                 logger.info("[JiuWenClawDeepAdapter] TaskPlanningRail unregistered for agent mode")
+            # agent 模式：注册 multi-session 工具（每次请求用新的 request_id 重建）
+            if request_id and session_id and self._model_client_config is not None:
+                try:
+                    for existing in list(self._instance.ability_manager.list() or []):
+                        if getattr(existing, "name", "").startswith(("session_new", "session_cancel", "session_list")):
+                            self._instance.ability_manager.remove(existing.name)
+                    sub_agent_config = ReActAgentConfig(
+                        model_client_config=self._model_client_config,
+                        model_config_obj=self._model_request_config,
+                    )
+                    multi_session_toolkit = MultiSessionToolkit(
+                        session_id=session_id,
+                        channel_id=_CRON_TOOL_CHANNEL_ID.get(),
+                        request_id=request_id,
+                        sub_agent_config=sub_agent_config,
+                    )
+                    for ms_tool in multi_session_toolkit.get_tools():
+                        Runner.resource_mgr.add_tool(ms_tool)
+                        self._instance.ability_manager.add(ms_tool.card)
+                    logger.info("[JiuWenClawDeepAdapter] MultiSessionToolkit registered for agent mode")
+                except Exception as exc:
+                    logger.error("[JiuWenClawDeepAdapter] MultiSessionToolkit 注册失败: %s", exc)
 
         # 定时工具：按当前 session 的 channel 注册（contextvar 已由 _bind_runtime_cron_context 设置）
         if session_id not in ("heartbeat", "cron"):
