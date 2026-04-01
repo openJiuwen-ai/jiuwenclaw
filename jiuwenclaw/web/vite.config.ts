@@ -377,7 +377,7 @@ function devFileContentApi(): Plugin {
               return
             }
             if (!fs.existsSync(fullPath)) {
-              if (filePath.replace(/\\/g, '/') === 'agent/workspace/agent-data.json') {
+              if (filePath.replace(/\\/g, '/') === 'agent/jiuwenclaw_workspace/agent-data.json') {
                 try {
                   const runResult = spawnSync(process.execPath, [generateAgentFoldersScriptPath], {
                     encoding: 'utf-8',

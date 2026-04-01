@@ -33,7 +33,7 @@ from jiuwenclaw.gateway.cron import CronController, CronTargetChannel
 from jiuwenclaw.utils import (
     get_agent_root_dir,
     get_checkpoint_dir,
-    get_env_file, get_agent_home_dir,
+    get_env_file, get_deepagent_heartbeat_path,
 )
 from jiuwenclaw.config import get_config
 from jiuwenclaw.agentserver.react_agent import JiuClawReActAgent
@@ -989,10 +989,10 @@ class JiuWenClawReactAdapter:
 
     async def handle_heartbeat(self, request: AgentRequest) -> AgentResponse | None:
         """处理 heartbeat 请求，返回 None 表示继续正常流程."""
-        if not "heartbeat" in request.params:
+        if "heartbeat" not in request.params:
             return None
 
-        heartbeat_md = get_agent_home_dir() / "HEARTBEAT.md"
+        heartbeat_md = get_deepagent_heartbeat_path()
         if not os.path.isfile(heartbeat_md):
             logger.debug("[JiuWenClawReactAdapter] heartbeat OK (no HEARTBEAT.md): request_id=%s", request.request_id)
             return AgentResponse(

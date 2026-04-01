@@ -11,7 +11,6 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
-import shutil
 import uuid
 from contextvars import ContextVar, Token
 from dataclasses import dataclass
@@ -105,7 +104,7 @@ from jiuwenclaw.agentserver.tools.xiaoyi_phone_tools import (
 from jiuwenclaw.config import get_config, resolve_env_vars
 from jiuwenclaw.gateway.cron import CronTargetChannel
 from jiuwenclaw.schema.agent import AgentRequest, AgentResponse, AgentResponseChunk
-from jiuwenclaw.utils import get_env_file, get_agent_root_dir, get_agent_home_dir, get_checkpoint_dir
+from jiuwenclaw.utils import get_env_file, get_agent_root_dir, get_checkpoint_dir
 
 load_dotenv(dotenv_path=get_env_file())
 
@@ -735,50 +734,6 @@ class JiuWenClawDeepAdapter:
             memory_rail = None
         return memory_rail
 
-    def _sync_heartbeat_file(self) -> None:
-        """将旧路径心跳文件单向同步到 HeartbeatRail 读取的新路径.
-
-        旧路径（react adapter / jiuwenclaw-init）：agent/home/HEARTBEAT.md
-        新路径（HeartbeatRail / openjiuwen workspace）：由 workspace.get_node_path 决定
-
-        以旧路径为准，始终覆盖新路径，保证两者内容完全一致。
-        旧路径不存在时跳过。
-
-        TODO: 心跳模块两套机制统一后可去除此方法
-        """
-        if self._instance is None:
-            return
-
-        src = get_agent_home_dir() / "HEARTBEAT.md"
-        if not src.exists():
-            return
-
-        try:
-            dst = self._instance._deep_config.workspace.get_node_path(
-                WorkspaceNode.HEARTBEAT_MD
-            )
-        except Exception as exc:
-            logger.warning(
-                "[JiuWenClawDeepAdapter] heartbeat sync: failed to resolve new path: %s", exc,
-            )
-            return
-
-        if dst is None:
-            logger.warning(
-                "[JiuWenClawDeepAdapter] heartbeat sync: HEARTBEAT_MD node not found in workspace",
-            )
-            return
-
-        try:
-            dst.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(src, dst)
-            logger.info(
-                "[JiuWenClawDeepAdapter] heartbeat file synced: %s -> %s", src, dst,
-            )
-        except Exception as exc:
-            logger.warning(
-                "[JiuWenClawDeepAdapter] heartbeat file sync failed: %s", exc,
-            )
 
     def _build_heartbeat_rail(self) -> HeartbeatRail | None:
         """Build HeartbeatRail."""
@@ -1086,7 +1041,6 @@ class JiuWenClawDeepAdapter:
             vision_model_config=self._vision_model_config,
             audio_model_config=self._audio_model_config,
         )
-        self._sync_heartbeat_file()
         logger.info("[JiuWenClawDeepAdapter] 初始化完成: agent_name=%s", self._agent_name)
 
     async def reload_agent_config(
@@ -1153,7 +1107,6 @@ class JiuWenClawDeepAdapter:
         )
         self._instance.configure(deep_cfg)
 
-        self._sync_heartbeat_file()
         logger.info("[JiuWenClawDeepAdapter] 配置已热更新（configure），未重启进程")
 
     def _bind_runtime_cron_context(
@@ -1756,9 +1709,6 @@ class JiuWenClawDeepAdapter:
         )
         token_cid = TOOL_PERMISSION_CHANNEL_ID.set((request.channel_id or "").strip())
         try:
-            run_meta = inputs.get("run") or {}
-            if isinstance(run_meta, dict) and run_meta.get("kind") == "heartbeat":
-                self._sync_heartbeat_file()
             await self._register_runtime_tools(request.session_id, request.params.get("mode", "plan"), request_id=request.request_id)
             result = await Runner.run_agent(agent=self._instance, inputs=inputs)
         except asyncio.CancelledError:

@@ -62,9 +62,9 @@ def _normalize_lang_suffix(name: str) -> str:
 
 
 def _generate_agent_data(project_root: Path) -> None:
-    """Generate agent/workspace/agent-data.json from agent tree."""
+    """Generate agent/jiuwenclaw_workspace/agent-data.json from agent tree."""
     agent_root = (project_root / "agent").resolve()
-    output_path = (agent_root / "workspace" / "agent-data.json").resolve()
+    output_path = (agent_root / "jiuwenclaw_workspace" / "agent-data.json").resolve()
     root_folder_key = "__root__"
 
     if not agent_root.exists():
@@ -75,9 +75,8 @@ def _generate_agent_data(project_root: Path) -> None:
     folder_data: dict[str, list[dict[str, str | bool]]] = {}
     seen_paths: dict[str, set[str]] = {}  # folder_key -> normalized paths，用于去重
     for entry in sorted(agent_root.rglob("*")):
-        if not entry.is_file():
+        if not entry.is_file() or entry.name.startswith("."):
             continue
-        relative_file_path = entry.relative_to(agent_root).as_posix()
         relative_folder_path = entry.parent.relative_to(agent_root).as_posix()
         folder_key = root_folder_key if relative_folder_path == "." else relative_folder_path
 
@@ -87,10 +86,15 @@ def _generate_agent_data(project_root: Path) -> None:
             if relative_folder_path != "."
             else f"agent/{display_name}"
         )
-        # 模板中 HEARTBEAT/PRINCIPLE/TONE 在 agent 根目录，运行时在 agent/home/，统一映射到 home
-        if folder_key == root_folder_key and display_name.lower() in ("heartbeat.md", "principle.md", "tone.md"):
+        # PRINCIPLE/TONE 模板在 agent 根目录，运行时在 agent/home/
+        if folder_key == root_folder_key and display_name.lower() in ("principle.md", "tone.md"):
             folder_key = "home"
             display_path = f"agent/home/{display_name}"
+        # HEARTBEAT 模板在 agent 根目录，运行时在 agent/jiuwenclaw_workspace/
+        elif folder_key == root_folder_key and display_name.lower() == "heartbeat.md":
+            folder_key = "jiuwenclaw_workspace"
+            display_name = "HeartBeat.md"
+            display_path = f"agent/jiuwenclaw_workspace/{display_name}"
 
         seen = seen_paths.setdefault(folder_key, set())
         if display_path in seen:
@@ -580,7 +584,7 @@ class _SpaStaticHandler(SimpleHTTPRequestHandler):
                 self._write_json(403, {"error": "forbidden_path"})
                 return
             if not full_path.exists():
-                if file_arg.replace("\\", "/") == "agent/workspace/agent-data.json":
+                if file_arg.replace("\\", "/") == "agent/jiuwenclaw_workspace/agent-data.json":
                     try:
                         _generate_agent_data(self.project_root)
                     except Exception as exc:  # noqa: BLE001

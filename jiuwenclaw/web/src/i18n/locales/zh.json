@@ -696,7 +696,7 @@
     "markdownOnly": "仅支持 Markdown/JSON（.md/.mdx/.json）预览",
     "errors": {
       "refreshFailed": "刷新失败：无法重建 agent 文件索引，请检查生成脚本日志。",
-      "loadFailed": "无法读取 agent 文件列表，请检查 agent/workspace/agent-data.json 是否已生成。"
+      "loadFailed": "无法读取 agent 文件列表，请检查 agent/jiuwenclaw_workspace/agent-data.json 是否已生成。"
     }
   },
   "fileViewer": {

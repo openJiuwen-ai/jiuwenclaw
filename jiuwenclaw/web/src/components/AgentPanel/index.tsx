@@ -46,7 +46,10 @@ const getFolderDisplayName = (folderKey: string, t: (key: string) => string) => 
 };
 
 const isSkillFolder = (folderKey: string) =>
-  folderKey === 'skills' || folderKey.startsWith('skills/');
+  folderKey === 'skills' ||
+  folderKey.startsWith('skills/') ||
+  folderKey === 'jiuwenclaw_workspace/skills' ||
+  folderKey.startsWith('jiuwenclaw_workspace/skills/');
 
 const normalizeFolderKey = (folderKey: string) => (folderKey ? folderKey : ROOT_FOLDER_KEY);
 
@@ -192,7 +195,7 @@ export function AgentPanel({ sessionId: _sessionId }: AgentPanelProps) {
         }
       }
 
-      const res = await fetch('/file-api/file-content?path=agent/workspace/agent-data.json');
+      const res = await fetch('/file-api/file-content?path=agent/jiuwenclaw_workspace/agent-data.json');
       if (!res.ok) {
         throw new Error('FETCH_FAILED');
       }
