@@ -880,12 +880,8 @@ class JiuWenClawDeepAdapter:
 
     async def _get_tool_cards(self):
         """Get tool cards."""
-        # TODO: 静态配置工具：小艺工具（todo)
-        # TODO：重启服务后，要加入的之前动态配置工具：音频（done)、视频(done)、图像(done)、三方服务付费搜索(todo)、发送文件工具(todo)
-
         tool_cards = []
 
-        # TODO: 根据配置，是否加入三方服务付费搜索工具
         for tool_cls in [WebFreeSearchTool, WebFetchWebpageTool]:
             tool_instance = tool_cls()
             Runner.resource_mgr.add_tool(tool_instance)
@@ -1095,8 +1091,6 @@ class JiuWenClawDeepAdapter:
             permission_config = config_base.get("permission", {})
             self._permission_rail.update_config(permission_config)
             logger.info("[JiuWenClawDeepAdapter] _permission_rail config hot-updated")
-
-        # TODO：前端增加一个按钮置灰，运行任务时要禁用修改配置
 
         deep_cfg = self._make_deep_agent_config(
             model=model,
