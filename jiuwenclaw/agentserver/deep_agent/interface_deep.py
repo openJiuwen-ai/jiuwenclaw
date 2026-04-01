@@ -60,7 +60,6 @@ from openjiuwen.deepagents.workspace.workspace import Workspace, WorkspaceNode
 from jiuwenclaw.agentserver.deep_agent.cron_runtime import CronRuntimeBridge
 from jiuwenclaw.agentserver.deep_agent.interrupt.interrupt_helpers import (
     build_permission_rail,
-    build_ask_user_rail,
     convert_interactions_to_ask_user_question,
 )
 from jiuwenclaw.agentserver.deep_agent.prompt_builder import build_identity_prompt
@@ -208,7 +207,6 @@ class JiuWenClawDeepAdapter:
         self._skill_evolution_rail: SkillEvolutionRail | None = None
         self._pending_evolution_data: dict[str, dict] = {}
         self._permission_rail: Any = None
-        self._ask_user_rail: Any = None
         self._tool_cards = None
         self._sys_operation = None
         self._vision_model_config: VisionModelConfig | None = None
@@ -796,7 +794,6 @@ class JiuWenClawDeepAdapter:
             _RailBuildInfo("_task_planning_rail", self._build_task_planning_rail),
             _RailBuildInfo("_security_rail", self._build_security_rail),
             _RailBuildInfo("_heartbeat_rail", self._build_heartbeat_rail),
-            _RailBuildInfo("_ask_user_rail", build_ask_user_rail),
             _RailBuildInfo("_permission_rail", build_permission_rail, {"config": config_base, "llm": self._model,
                                                                        "model_name": config_base.get("models", {}).get(
                                                                            "default", {}).get("model_client_config",
