@@ -31,7 +31,7 @@ from jiuwenclaw.e2a.wire_codec import (
 )
 from jiuwenclaw.schema.agent import AgentRequest, AgentResponse, AgentResponseChunk
 from jiuwenclaw.schema.hook_event import AgentServerHookEvents
-from jiuwenclaw.schema.hooks_context import AgentServerChatHookContext
+from jiuwenclaw.schema.hooks_context import AgentServerChatHookContext, AgentWsServerStartHookContext
 
 
 logger = logging.getLogger(__name__)
@@ -131,7 +131,7 @@ class AgentWebSocketServer:
 
     async def start(self) -> None:
         """启动 WebSocket 服务端，开始监听连接。优先使用 legacy.server.serve 以与 Gateway 的 legacy client 握手兼容."""
-
+        await self._trigger_before_ws_server_start_hook()
         await self._agent_manager.initialize()
         logger.info("[AgentWebSocketServer] 已初始化 AgentManager")
 
@@ -306,6 +306,15 @@ class AgentWebSocketServer:
             )
             async with send_lock:
                 await ws.send(json.dumps(wire, ensure_ascii=False))
+
+    @staticmethod
+    async def _trigger_before_ws_server_start_hook() -> None:
+        """在首次 create_instance（register_skill）之前触发扩展；未初始化 ExtensionRegistry 时跳过。"""
+        from jiuwenclaw.extensions.registry import ExtensionRegistry
+        from jiuwenclaw.utils import get_agent_skills_dir
+
+        ctx = AgentWsServerStartHookContext(skills_dir=str(get_agent_skills_dir()))
+        await ExtensionRegistry.get_instance().trigger(AgentServerHookEvents.BEFORE_WS_SERVER_START, ctx)
 
     @staticmethod
     async def _trigger_before_chat_request_hook(request: AgentRequest) -> None:

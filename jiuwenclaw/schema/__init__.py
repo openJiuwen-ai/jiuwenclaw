@@ -6,6 +6,7 @@ from jiuwenclaw.schema.agent import AgentRequest, AgentResponse, AgentResponseCh
 from jiuwenclaw.schema.hook_event import AgentServerHookEvents, GatewayHookEvents
 from jiuwenclaw.schema.hooks_context import (
     AgentServerChatHookContext,
+    AgentWsServerStartHookContext,
     GatewayChatHookContext,
     MemoryHookContext,
 )
@@ -18,6 +19,7 @@ __all__ = [
     "AgentResponseChunk",
     "AgentServerHookEvents",
     "AgentServerChatHookContext",
+    "AgentWsServerStartHookContext",
     "GatewayHookEvents",
     "GatewayChatHookContext",
     "MemoryHookContext",
