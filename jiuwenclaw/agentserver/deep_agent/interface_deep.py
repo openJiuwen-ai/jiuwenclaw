@@ -16,7 +16,7 @@ import uuid
 from contextvars import ContextVar, Token
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, AsyncIterator
+from typing import Any, AsyncIterator, Callable
 
 from dotenv import load_dotenv
 from openjiuwen.core.foundation.llm import ModelRequestConfig, ModelClientConfig, Model
@@ -214,6 +214,7 @@ class JiuWenClawDeepAdapter:
         self._vision_tools: list[Any] = []
         self._audio_tools: list[Any] = []
         self._xiaoyi_phone_tools_registered: bool = False
+        self._paid_search_registered: bool = False
         self._cron_runtime = CronRuntimeBridge()
         self._runtime_cron_tool_context = _RuntimeCronToolContext(
             tool_scope=f"runtime_{id(self):x}",
@@ -394,6 +395,41 @@ class JiuWenClawDeepAdapter:
         for tool in self._audio_tools:
             tool.audio_model_config = self._audio_model_config
 
+    def _sync_tool_group(
+            self,
+            *,
+            current_tools: list[Any],
+            registered: bool,
+            enabled: bool,
+            create_fn: Callable[[], list[Any]],
+            warn_label: str,
+    ) -> tuple[list[Any], bool]:
+        """统一处理一组工具的热更新：启用时注册，禁用时移除。
+
+        Returns:
+            (updated_tools, updated_registered)
+        """
+        if not enabled:
+            if registered:
+                self._remove_registered_tools(current_tools)
+                self._prune_tool_cards({t.card.name for t in current_tools})
+            return [], False
+        if not registered:
+            try:
+                new_tools = create_fn()
+                for tool in new_tools:
+                    Runner.resource_mgr.add_tool(tool)
+                    self._append_tool_card(tool.card)
+                    if self._instance is not None and hasattr(self._instance, "ability_manager"):
+                        self._instance.ability_manager.add(tool.card)
+                return new_tools, bool(new_tools)
+            except Exception as exc:
+                logger.warning(
+                    "[JiuWenClawDeepAdapter] %s reload failed: %s", warn_label, exc
+                )
+                return [], False
+        return current_tools, registered
+
     def _remove_registered_tools(self, tools: list[Any]) -> None:
         """Remove tool instances from ability manager and resource manager."""
         if not tools:
@@ -444,82 +480,48 @@ class JiuWenClawDeepAdapter:
 
     def _sync_multimodal_tools_for_runtime(self) -> None:
         """Sync multimodal tool registration after config reload."""
-        vision_names = {tool.card.name for tool in self._vision_tools}
-        if self._vision_model_config is None:
-            self._remove_registered_tools(self._vision_tools)
-            self._prune_tool_cards(vision_names)
-            self._vision_tools = []
-            self._vision_tools_registered = False
-        elif not self._vision_tools:
-            try:
-                self._vision_tools = create_vision_tools(
-                    language=self._resolve_runtime_language(),
-                    vision_model_config=self._vision_model_config,
-                )
-                for tool in self._vision_tools:
-                    Runner.resource_mgr.add_tool(tool)
-                    self._append_tool_card(tool.card)
-                    if self._instance is not None and hasattr(
-                            self._instance,
-                            "ability_manager",
-                    ):
-                        self._instance.ability_manager.add(tool.card)
-                self._vision_tools_registered = bool(self._vision_tools)
-            except Exception as exc:
-                self._vision_tools = []
-                self._vision_tools_registered = False
-                logger.warning(
-                    "[JiuWenClawDeepAdapter] vision tools reload failed: %s",
-                    exc,
-                )
+        self._vision_tools, self._vision_tools_registered = self._sync_tool_group(
+            current_tools=self._vision_tools,
+            registered=self._vision_tools_registered,
+            enabled=self._vision_model_config is not None,
+            create_fn=lambda: create_vision_tools(
+                language=self._resolve_runtime_language(),
+                vision_model_config=self._vision_model_config,
+            ),
+            warn_label="vision tools",
+        )
 
-        audio_names = {tool.card.name for tool in self._audio_tools}
-        if self._audio_model_config is None:
-            self._remove_registered_tools(self._audio_tools)
-            self._prune_tool_cards(audio_names)
-            self._audio_tools = []
-            self._audio_tools_registered = False
-        elif not self._audio_tools:
-            try:
-                self._audio_tools = create_audio_tools(
-                    language=self._resolve_runtime_language(),
-                    audio_model_config=self._audio_model_config,
-                )
-                for tool in self._audio_tools:
-                    Runner.resource_mgr.add_tool(tool)
-                    self._append_tool_card(tool.card)
-                    if self._instance is not None and hasattr(
-                            self._instance,
-                            "ability_manager",
-                    ):
-                        self._instance.ability_manager.add(tool.card)
-                self._audio_tools_registered = bool(self._audio_tools)
-            except Exception as exc:
-                self._audio_tools = []
-                self._audio_tools_registered = False
-                logger.warning(
-                    "[JiuWenClawDeepAdapter] audio tools reload failed: %s",
-                    exc,
-                )
+        self._audio_tools, self._audio_tools_registered = self._sync_tool_group(
+            current_tools=self._audio_tools,
+            registered=self._audio_tools_registered,
+            enabled=self._audio_model_config is not None,
+            create_fn=lambda: create_audio_tools(
+                language=self._resolve_runtime_language(),
+                audio_model_config=self._audio_model_config,
+            ),
+            warn_label="audio tools",
+        )
 
-        if not self._video_model_config:
-            if self._video_tool_registered:
-                self._remove_registered_tools([video_understanding])
-                self._prune_tool_cards({video_understanding.card.name})
-                self._video_tool_registered = False
-        elif not self._video_tool_registered:
-            try:
-                Runner.resource_mgr.add_tool(video_understanding)
-                self._append_tool_card(video_understanding.card)
-                if self._instance is not None and hasattr(self._instance, "ability_manager"):
-                    self._instance.ability_manager.add(video_understanding.card)
-                self._video_tool_registered = True
-            except Exception as exc:
-                self._video_tool_registered = False
-                logger.warning(
-                    "[JiuWenClawDeepAdapter] video tool reload failed: %s",
-                    exc,
-                )
+        _, self._video_tool_registered = self._sync_tool_group(
+            current_tools=[video_understanding],
+            registered=self._video_tool_registered,
+            enabled=bool(self._video_model_config),
+            create_fn=lambda: [video_understanding],
+            warn_label="video tool",
+        )
+
+    def _sync_paid_search_tool_for_runtime(self) -> None:
+        """Sync paid-search tool registration after config reload."""
+        _, self._paid_search_registered = self._sync_tool_group(
+            current_tools=[mcp_paid_search],
+            registered=self._paid_search_registered,
+            enabled=any(
+                os.environ.get(key)
+                for key in ("PERPLEXITY_API_KEY", "SERPER_API_KEY", "JINA_API_KEY")
+            ),
+            create_fn=lambda: [mcp_paid_search],
+            warn_label="paid search tool",
+        )
 
     @staticmethod
     async def set_checkpoint():
@@ -930,6 +932,7 @@ class JiuWenClawDeepAdapter:
         ):
             Runner.resource_mgr.add_tool(mcp_paid_search)
             tool_cards.append(mcp_paid_search.card)
+            self._paid_search_registered = True
 
         self._vision_tools = []
         self._vision_tools_registered = False
@@ -1118,6 +1121,7 @@ class JiuWenClawDeepAdapter:
         self._agent_name = config.get("agent_name", "main_agent")
         agent_card = AgentCard(name=self._agent_name, id='jiuwenclaw')
         self._sync_multimodal_tools_for_runtime()
+        self._sync_paid_search_tool_for_runtime()
 
         rails_list = self._get_current_agent_rails(config)
 
@@ -1127,9 +1131,7 @@ class JiuWenClawDeepAdapter:
             self._permission_rail.update_config(permission_config)
             logger.info("[JiuWenClawDeepAdapter] _permission_rail config hot-updated")
 
-        # TODO：动态配置有关工具：音频（done)、视频(done)、图像(done)、三方服务付费搜索(todo)
         # TODO：前端增加一个按钮置灰，运行任务时要禁用修改配置
-        # TODO：增加一个函数，用来更新付费工具的（"PERPLEXITY_API_KEY"/"SERPER_API_KEY"/"JINA_API_KEY"）
 
         deep_cfg = self._make_deep_agent_config(
             model=model,
