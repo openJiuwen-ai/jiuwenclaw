@@ -79,6 +79,31 @@ from jiuwenclaw.agentserver.tools.multimodal_config import (
 )
 from jiuwenclaw.agentserver.tools.video_tools import video_understanding
 
+from jiuwenclaw.agentserver.tools.search_tools import mcp_paid_search
+from jiuwenclaw.agentserver.tools import SendFileToolkit
+from jiuwenclaw.agentserver.tools.xiaoyi_phone_tools import (
+    get_user_location,
+    create_note,
+    search_notes,
+    modify_note,
+    create_calendar_event,
+    search_calendar_event,
+    search_contact,
+    search_photo_gallery,
+    upload_photo,
+    search_file,
+    upload_file,
+    call_phone,
+    send_message,
+    search_message,
+    create_alarm,
+    search_alarms,
+    modify_alarm,
+    delete_alarm,
+    xiaoyi_collection,
+    xiaoyi_gui_agent,
+    image_reading,
+)
 from jiuwenclaw.config import get_config, resolve_env_vars
 from jiuwenclaw.gateway.cron import CronTargetChannel
 from jiuwenclaw.schema.agent import AgentRequest, AgentResponse, AgentResponseChunk
@@ -188,6 +213,7 @@ class JiuWenClawDeepAdapter:
         self._video_model_config: bool = False
         self._vision_tools: list[Any] = []
         self._audio_tools: list[Any] = []
+        self._xiaoyi_phone_tools_registered: bool = False
         self._cron_runtime = CronRuntimeBridge()
         self._runtime_cron_tool_context = _RuntimeCronToolContext(
             tool_scope=f"runtime_{id(self):x}",
@@ -885,8 +911,8 @@ class JiuWenClawDeepAdapter:
 
     async def _get_tool_cards(self):
         """Get tool cards."""
-        # TODO: 静态配置工具：小艺工具（todo)、发送文件工具(todo)
-        # TODO：重启服务后，要加入的之前动态配置工具：音频（done)、视频(done)、图像(done)、三方服务付费搜索(todo)
+        # TODO: 静态配置工具：小艺工具（todo)
+        # TODO：重启服务后，要加入的之前动态配置工具：音频（done)、视频(done)、图像(done)、三方服务付费搜索(todo)、发送文件工具(todo)
 
         tool_cards = []
 
@@ -897,12 +923,13 @@ class JiuWenClawDeepAdapter:
             tool_cards.append(tool_instance.card)
         self._web_tools_registered = True
 
-        # TODO: 删掉定时工具，属于runtime时候工具
-        try:
-            for cron_tool in self._build_cron_tools():
-                tool_cards.append(cron_tool)
-        except Exception as exc:
-            logger.error("[JiuWenClawDeepAdapter] 定时工具初始化失败， reason=%s", exc)
+        # 付费搜索工具：有任意一个付费 key 就注册
+        if any(
+            os.environ.get(key)
+            for key in ("PERPLEXITY_API_KEY", "SERPER_API_KEY", "JINA_API_KEY")
+        ):
+            Runner.resource_mgr.add_tool(mcp_paid_search)
+            tool_cards.append(mcp_paid_search.card)
 
         self._vision_tools = []
         self._vision_tools_registered = False
@@ -954,7 +981,38 @@ class JiuWenClawDeepAdapter:
                     exc,
                 )
 
-        # TODO: experience_retrieve/experience_learn/experience_clear工具待添加
+        # 小艺手机端工具：由 channels.xiaoyi.phone_tools_enabled 控制
+        config_base = get_config()
+        xiaoyi_phone_tools_enabled = (
+            config_base.get("channels", {}).get("xiaoyi", {}).get("phone_tools_enabled", False)
+        )
+        if xiaoyi_phone_tools_enabled and not self._xiaoyi_phone_tools_registered:
+            _xiaoyi_tools = [
+                get_user_location,
+                create_note, search_notes, modify_note,
+                create_calendar_event, search_calendar_event,
+                search_contact,
+                search_photo_gallery, upload_photo,
+                search_file, upload_file,
+                call_phone,
+                send_message, search_message,
+                create_alarm, search_alarms, modify_alarm, delete_alarm,
+                xiaoyi_collection,
+                image_reading,
+                xiaoyi_gui_agent,
+            ]
+            try:
+                for xt in _xiaoyi_tools:
+                    Runner.resource_mgr.add_tool(xt)
+                    tool_cards.append(xt.card)
+                self._xiaoyi_phone_tools_registered = True
+                logger.info(
+                    "[JiuWenClawDeepAdapter] %d xiaoyi phone tools registered", len(_xiaoyi_tools)
+                )
+            except Exception as exc:
+                logger.warning(
+                    "[JiuWenClawDeepAdapter] xiaoyi phone tools registration failed: %s", exc
+                )
 
         return tool_cards
 
@@ -1116,17 +1174,15 @@ class JiuWenClawDeepAdapter:
     async def _register_runtime_tools(
             self,
             session_id: str | None,
-            mode="plan",
+            mode: str = "plan",
+            request_id: str | None = None,
     ) -> None:
         """Register per-request tools for current agent execution."""
         if self._instance is None:
             raise RuntimeError("JiuWenClawDeepAdapter 未初始化，请先调用 create_instance()")
 
-        # TODO: Session有关工具：todo工具（done)、语言切换(done，不走reload_agent_config)、channel定时工具(todo, session_id解析出channel)、Session工具(todo、mode="agent"智能执行模式)更新, runtime中更新
-
         resolved_language = self._resolve_runtime_language()
         if mode == "plan":
-            # TODO: 卸载session工具
             if self._task_planning_rail is None:
                 self._task_planning_rail = self._build_task_planning_rail()
                 if self._task_planning_rail is not None:
@@ -1137,9 +1193,36 @@ class JiuWenClawDeepAdapter:
                 await self._instance.unregister_rail(self._task_planning_rail)
                 self._task_planning_rail = None
                 logger.info("[JiuWenClawDeepAdapter] TaskPlanningRail unregistered for agent mode")
-            # TODO：注册session工具
 
-        # TODO: 从session_id解析出channel，卸载掉原有的定时工具，增加新的定时工具，增加一个函数
+        # 定时工具：按当前 session 的 channel 注册（contextvar 已由 _bind_runtime_cron_context 设置）
+        if session_id not in ("heartbeat", "cron"):
+            try:
+                for cron_tool in self._build_cron_tools():
+                    if not Runner.resource_mgr.get_tool(cron_tool.card.id):
+                        Runner.resource_mgr.add_tool(cron_tool)
+                    self._instance.ability_manager.add(cron_tool.card)
+            except Exception as exc:
+                logger.error("[JiuWenClawDeepAdapter] 定时工具注册失败: %s", exc)
+
+        # send_file 工具：由 channels.<channel>.send_file_allowed 控制，每次请求重新注册
+        # channel_id/metadata 由调用前的 _bind_runtime_cron_context 已写入 contextvar
+        config_base = get_config()
+        channel = self._resolve_prompt_channel(session_id)
+        send_file_enabled = config_base.get("channels", {}).get(channel, {}).get("send_file_allowed", False)
+        if send_file_enabled and request_id and session_id:
+            # 先卸载上一次请求遗留的 send_file 工具
+            for existing in list(self._instance.ability_manager.list() or []):
+                if getattr(existing, "name", "").startswith("send_file_to_user"):
+                    self._instance.ability_manager.remove(existing.name)
+            send_file_toolkit = SendFileToolkit(
+                request_id=request_id,
+                session_id=session_id,
+                channel_id=_CRON_TOOL_CHANNEL_ID.get(),
+                metadata=_CRON_TOOL_METADATA.get(),
+            )
+            for sf_tool in send_file_toolkit.get_tools():
+                Runner.resource_mgr.add_tool(sf_tool)
+                self._instance.ability_manager.add(sf_tool.card)
 
         # Sync language onto shared builder and deep config so rails
         # (SecurityRail, MemoryRail, etc.) see the updated language in before_model_call.
@@ -1649,7 +1732,7 @@ class JiuWenClawDeepAdapter:
             run_meta = inputs.get("run") or {}
             if isinstance(run_meta, dict) and run_meta.get("kind") == "heartbeat":
                 self._sync_heartbeat_file()
-            await self._register_runtime_tools(request.session_id, request.params.get("mode", "plan"))
+            await self._register_runtime_tools(request.session_id, request.params.get("mode", "plan"), request_id=request.request_id)
             result = await Runner.run_agent(agent=self._instance, inputs=inputs)
         except asyncio.CancelledError:
             logger.info("[JiuWenClawDeepAdapter] Agent 任务被取消: request_id=%s session_id=%s", request.request_id,
@@ -1783,7 +1866,7 @@ class JiuWenClawDeepAdapter:
         )
         token_cid = TOOL_PERMISSION_CHANNEL_ID.set((request.channel_id or "").strip())
         try:
-            await self._register_runtime_tools(request.session_id, request.params.get("mode", "plan"))
+            await self._register_runtime_tools(request.session_id, request.params.get("mode", "plan"), request_id=request.request_id)
             if self._stream_event_rail is not None:
                 self._stream_event_rail.reset_abort()
             async for chunk in Runner.run_agent_streaming(self._instance, inputs):
