@@ -68,8 +68,6 @@ from jiuwenclaw.agentserver.deep_agent.rails import (
     JiuClawStreamEventRail
 )
 from jiuwenclaw.agentserver.memory import clear_memory_manager_cache
-from jiuwenclaw.agentserver.memory import get_memory_manager
-from jiuwenclaw.agentserver.memory.compaction import ContextCompactionManager
 from jiuwenclaw.agentserver.memory.config import clear_config_cache, get_memory_mode
 from jiuwenclaw.agentserver.deep_agent.permissions.checker import TOOL_PERMISSION_CHANNEL_ID
 from jiuwenclaw.agentserver.tools.multimodal_config import (
@@ -161,7 +159,6 @@ class JiuWenClawDeepAdapter:
         self._instance: DeepAgent | None = None
         self._workspace_dir: str = str(get_agent_root_dir())
         self._agent_name: str = "main_agent"
-        self._compaction_manager: ContextCompactionManager | None = None
         self._browser_mcp_registered: bool = False
         self._memory_tools_registered: bool = False
         self._web_tools_registered: bool = False
@@ -896,24 +893,6 @@ class JiuWenClawDeepAdapter:
             rails_list.append(self._context_engineering_rail)
         return rails_list
 
-    async def _proc_context_compaction(self):
-        """Process context compaction config."""
-        config_base = get_config()
-        memory_mode = get_memory_mode(config_base)
-        if memory_mode == "local" and self._compaction_manager is None:
-            memory_mgr = await get_memory_manager(
-                agent_id=self._agent_name,
-                workspace_dir=self._workspace_dir
-            )
-            if memory_mgr:
-                self._compaction_manager = ContextCompactionManager(
-                    workspace_dir=self._workspace_dir,
-                    threshold=8000,
-                    keep_recent=10
-                )
-        elif memory_mode != "local":
-            self._compaction_manager = None
-
     async def _get_tool_cards(self):
         """Get tool cards."""
         # TODO: 静态配置工具：小艺工具（todo)、发送文件工具(todo)
@@ -1045,7 +1024,6 @@ class JiuWenClawDeepAdapter:
             audio_model_config=self._audio_model_config,
         )
         self._sync_heartbeat_file()
-        await self._proc_context_compaction()
         logger.info("[JiuWenClawDeepAdapter] 初始化完成: agent_name=%s", self._agent_name)
 
     async def reload_agent_config(
@@ -1657,18 +1635,6 @@ class JiuWenClawDeepAdapter:
                 metadata=request.metadata,
             )
 
-        config_base = get_config()
-        memory_mode = get_memory_mode(config_base)
-        if memory_mode == "local" and self._compaction_manager:
-            self._compaction_manager.add_message("user", query)
-
-            memory_mgr = await get_memory_manager(
-                agent_id=self._agent_name,
-                workspace_dir=self._workspace_dir
-            )
-            if memory_mgr:
-                await self._compaction_manager.check_and_compact(memory_mgr)
-
         cron_context_tokens = self._bind_runtime_cron_context(
             channel_id=request.channel_id,
             session_id=request.session_id,
@@ -1694,13 +1660,6 @@ class JiuWenClawDeepAdapter:
             self._reset_runtime_cron_context(cron_context_tokens)
 
         content = result if isinstance(result, (str, dict)) else str(result)
-
-        if memory_mode == "local" and self._compaction_manager and content:
-            if isinstance(content, dict):
-                content_str = content.get("output", str(content))
-            else:
-                content_str = str(content)
-            self._compaction_manager.add_message("assistant", content_str)
 
         return AgentResponse(
             request_id=request.request_id,
@@ -1767,46 +1726,11 @@ class JiuWenClawDeepAdapter:
                 )
             return
 
-        config_base = get_config()
-        memory_mode = get_memory_mode(config_base)
-        if memory_mode == "local" and self._compaction_manager:
-            self._compaction_manager.add_message("user", query)
-            memory_mgr = await get_memory_manager(
-                agent_id=self._agent_name,
-                workspace_dir=self._workspace_dir
-            )
-            if memory_mgr:
-                await self._compaction_manager.check_and_compact(memory_mgr)
-
         has_streamed_content = False
         accumulated_text = ""
         accumulated_reasoning = ""
         evolution_status_started = False
         evolution_status_ended = False
-
-        async def _flush_text():
-            nonlocal accumulated_text
-            if not accumulated_text:
-                return
-            yield AgentResponseChunk(
-                request_id=rid,
-                channel_id=cid,
-                payload={"event_type": "chat.final", "content": accumulated_text},
-                is_complete=False,
-            )
-            accumulated_text = ""
-
-        async def _flush_reasoning():
-            nonlocal accumulated_reasoning
-            if not accumulated_reasoning:
-                return
-            yield AgentResponseChunk(
-                request_id=rid,
-                channel_id=cid,
-                payload={"event_type": "chat.reasoning", "content": accumulated_reasoning},
-                is_complete=False,
-            )
-            accumulated_reasoning = ""
 
         cron_context_tokens = self._bind_runtime_cron_context(
             channel_id=request.channel_id,
@@ -1904,9 +1828,9 @@ class JiuWenClawDeepAdapter:
 
                 if chunk_type == "answer":
                     if (
-                        not evolution_status_started
-                        and self._skill_evolution_rail is not None
-                        and request.params.get("mode", "plan") == "plan"
+                            not evolution_status_started
+                            and self._skill_evolution_rail is not None
+                            and request.params.get("mode", "plan") == "plan"
                     ):
                         # Mark evolution phase start before after_invoke auto-evolution runs.
                         yield AgentResponseChunk(
