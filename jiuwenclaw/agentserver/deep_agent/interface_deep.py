@@ -865,6 +865,20 @@ class JiuWenClawDeepAdapter:
         else:
             self._memory_rail = None
 
+        # PermissionRail: in-place 更新已有 rail，或首次启用时新建。
+        permission_config = config_base.get("permissions", {}) if config_base else {}
+        if self._permission_rail is not None:
+            self._permission_rail.update_config(permission_config)
+            logger.info("[JiuWenClawDeepAdapter] _permission_rail config hot-updated")
+        elif permission_config.get("enabled", False):
+            self._permission_rail = build_permission_rail(
+                config=config_base, llm=self._model,
+                model_name=config_base.get("models", {}).get(
+                    "default", {}).get("model_client_config", {}).get("model_name", "gpt-4"),
+            )
+            if self._permission_rail is not None:
+                logger.info("[JiuWenClawDeepAdapter] _permission_rail newly created on hot-reload")
+
         rails_list = []
         if self._skill_rail is not None:
             rails_list.append(self._skill_rail)
@@ -872,6 +886,8 @@ class JiuWenClawDeepAdapter:
             rails_list.append(self._context_engineering_rail)
         if self._memory_rail is not None:
             rails_list.append(self._memory_rail)
+        if self._permission_rail is not None:
+            rails_list.append(self._permission_rail)
         return rails_list
 
     async def _get_tool_cards(self):
@@ -1081,12 +1097,6 @@ class JiuWenClawDeepAdapter:
         self._sync_paid_search_tool_for_runtime()
 
         rails_list = self._get_current_agent_rails(config, config_base)
-
-        # Apply in-place updates to permission_rail (no re-init needed).
-        if self._permission_rail is not None:
-            permission_config = config_base.get("permission", {})
-            self._permission_rail.update_config(permission_config)
-            logger.info("[JiuWenClawDeepAdapter] _permission_rail config hot-updated")
 
         deep_cfg = self._make_deep_agent_config(
             model=model,
