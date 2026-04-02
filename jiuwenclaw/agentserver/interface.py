@@ -388,8 +388,15 @@ class JiuWenClaw:
                 logger.warning("[JiuWenClaw] video_understanding tool registration failed: %s", exc)
 
         for mcp_tool in get_mcp_tools():
-            Runner.resource_mgr.add_tool(mcp_tool)
-            self._instance.ability_manager.add(mcp_tool.card)
+            if mcp_tool.card.name == "mcp_paid_search":
+                if os.environ.get("PERPLEXITY_API_KEY") \
+                    or os.environ.get("SERPER_API_KEY") \
+                    or os.environ.get("JINA_API_KEY"):
+                    Runner.resource_mgr.add_tool(mcp_tool)
+                    self._instance.ability_manager.add(mcp_tool.card)
+            else:
+                Runner.resource_mgr.add_tool(mcp_tool)
+                self._instance.ability_manager.add(mcp_tool.card)
         self._mcp_tools_registered = True
 
         if memory_mode == "local" and self._compaction_manager is None:
@@ -571,8 +578,21 @@ class JiuWenClaw:
                     self._instance.ability_manager.remove(tool.name)
                 elif tool.name.startswith("session_"):
                     self._instance.ability_manager.remove(tool.name)
+                elif tool.name.startswith("mcp_"):
+                    self._instance.ability_manager.remove(tool.name)
                 elif tool.name.startswith("send_file_to_user"):
                     self._instance.ability_manager.remove(tool.name)
+
+        for mcp_tool in get_mcp_tools():
+            if mcp_tool.card.name == "mcp_paid_search":
+                if os.environ.get("PERPLEXITY_API_KEY") \
+                    or os.environ.get("SERPER_API_KEY") \
+                    or os.environ.get("JINA_API_KEY"):
+                    Runner.resource_mgr.add_tool(mcp_tool)
+                    self._instance.ability_manager.add(mcp_tool.card)
+            else:
+                Runner.resource_mgr.add_tool(mcp_tool)
+                self._instance.ability_manager.add(mcp_tool.card)
 
         # 定时工具：按 channel 注册；优先用 channel_id，否则从 session_id 前缀推断
         channel = (channel_id or "").strip() or (
@@ -814,25 +834,6 @@ class JiuWenClaw:
                     self._instance.ability_manager.remove(tool.card.name)
             except Exception as exc:
                 logger.debug("[JiuWenClaw] unregister audio tools failed (tools may not exist): %s", exc)
-
-        current_mcp_tools = get_mcp_tools()
-        current_mcp_tool_names = {tool.card.name for tool in current_mcp_tools}
-        
-        for mcp_tool in current_mcp_tools:
-            try:
-                if not Runner.resource_mgr.get_tool(mcp_tool.card.id):
-                    Runner.resource_mgr.add_tool(mcp_tool)
-                self._instance.ability_manager.add(mcp_tool.card)
-            except Exception as exc:
-                logger.warning("[JiuWenClaw] register MCP tool failed: %s", exc)
-        
-        all_mcp_tool_names = {"mcp_free_search", "mcp_paid_search", "mcp_fetch_webpage", "mcp_exec_command"}
-        tools_to_remove = all_mcp_tool_names - current_mcp_tool_names
-        for tool_name in tools_to_remove:
-            try:
-                self._instance.ability_manager.remove(tool_name)
-            except Exception as exc:
-                logger.debug("[JiuWenClaw] unregister MCP tool %s failed (tool may not exist): %s", tool_name, exc)
 
         system_prompt = build_system_prompt(
             mode=mode,
