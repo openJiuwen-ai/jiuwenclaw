@@ -14,7 +14,6 @@ import os
 import uuid
 from contextvars import ContextVar, Token
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Any, AsyncIterator, Callable, List, Tuple
 
 from dotenv import load_dotenv
@@ -183,9 +182,6 @@ class JiuWenClawDeepAdapter:
         self._instance: DeepAgent | None = None
         self._workspace_dir: str = str(get_agent_root_dir())
         self._agent_name: str = "main_agent"
-        self._browser_mcp_registered: bool = False
-        self._memory_tools_registered: bool = False
-        self._web_tools_registered: bool = False
         self._vision_tools_registered: bool = False
         self._audio_tools_registered: bool = False
         self._video_tool_registered: bool = False
@@ -213,6 +209,7 @@ class JiuWenClawDeepAdapter:
         self._audio_tools: list[Any] = []
         self._xiaoyi_phone_tools_registered: bool = False
         self._paid_search_registered: bool = False
+        self._paid_search_tool: WebPaidSearchTool | None = None
         self._cron_runtime = CronRuntimeBridge()
         self._runtime_cron_tool_context = _RuntimeCronToolContext(
             tool_scope=f"runtime_{id(self):x}",
@@ -885,7 +882,6 @@ class JiuWenClawDeepAdapter:
             tool_instance = tool_cls()
             Runner.resource_mgr.add_tool(tool_instance)
             tool_cards.append(tool_instance.card)
-        self._web_tools_registered = True
 
         # 付费搜索工具：有任意一个付费 key 就注册
         if any(
