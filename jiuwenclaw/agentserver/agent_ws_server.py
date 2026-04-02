@@ -192,6 +192,8 @@ class AgentWebSocketServer:
     async def _connection_handler(self, ws: Any) -> None:
         """处理单个 Gateway WebSocket 连接，同一连接可并发处理多个请求."""
         import websockets
+        # 和客户端连接成功后, 触发agentserver启动成功的回调事件
+        await self._trigger_agent_server_started_hook()
 
         remote = ws.remote_address
         logger.info("[AgentWebSocketServer] 新连接: %s", remote)
@@ -348,6 +350,15 @@ class AgentWebSocketServer:
             )
             async with send_lock:
                 await ws.send(json.dumps(wire, ensure_ascii=False))
+
+    @staticmethod
+    async def _trigger_agent_server_started_hook() -> None:
+        """在agentserver启动成功触发扩展；未初始化 ExtensionRegistry 时跳过。"""
+        from jiuwenclaw.extensions.registry import ExtensionRegistry
+        from jiuwenclaw.utils import get_agent_skills_dir
+
+        ctx = AgentWsServerStartHookContext(skills_dir=str(get_agent_skills_dir()))
+        await ExtensionRegistry.get_instance().trigger(AgentServerHookEvents.AGENT_SERVER_STARTED, ctx)
 
     @staticmethod
     async def _trigger_before_ws_server_start_hook() -> None:
