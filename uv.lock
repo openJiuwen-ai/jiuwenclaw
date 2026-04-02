@@ -1462,7 +1462,6 @@ dependencies = [
     { name = "pgvector" },
     { name = "pip" },
     { name = "psutil" },
-    { name = "pytest" },
     { name = "python-socks" },
     { name = "python-telegram-bot" },
     { name = "ruamel-yaml" },
@@ -1502,7 +1501,6 @@ requires-dist = [
     { name = "pip", specifier = "==26.0.1" },
     { name = "psutil", specifier = ">=7.2.2" },
     { name = "pyinstaller", marker = "extra == 'dev'", specifier = ">=6.0.0" },
-    { name = "pytest" },
     { name = "python-socks", specifier = ">=2.8.1" },
     { name = "python-telegram-bot", specifier = ">=20.0" },
     { name = "pywebview", marker = "extra == 'desktop'", specifier = ">=5.4" },
@@ -2197,7 +2195,7 @@ wheels = [
 [[package]]
 name = "openjiuwen"
 version = "0.1.9"
-source = { git = "https://gitcode.com/openJiuwen/agent-core.git?rev=develop#e1f47b501e0cf5cb0bd285cd4b923101a7f2160e" }
+source = { git = "https://gitcode.com/openJiuwen/agent-core.git?rev=develop#48f7009c1ffda25b5e35f04cbf5a48633a5bd02d" }
 dependencies = [
     { name = "aiofiles" },
     { name = "aiohttp" },
