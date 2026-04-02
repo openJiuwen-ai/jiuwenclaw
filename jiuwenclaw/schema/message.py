@@ -85,6 +85,11 @@ class ReqMethod(Enum):
     UPDATER_GET_CONF = "updater.get_conf"
     UPDATER_SET_CONF = "updater.set_conf"
 
+    # 文件传输方法（分布式部署）
+    FILE_TRANSFER_START = "file.transfer.start"
+    FILE_TRANSFER_CHUNK = "file.transfer.chunk"
+    FILE_TRANSFER_COMPLETE = "file.transfer.complete"
+
 class EventType(Enum):
     CONNECTION_ACK = "connection.ack"
     HELLO = "hello"

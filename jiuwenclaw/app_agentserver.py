@@ -57,13 +57,13 @@ class _NopCronScheduler:
         return False
 
 
-async def _run(port: int) -> None:
+async def _run(host: str, port: int) -> None:
     from openjiuwen.core.runner import Runner
     from jiuwenclaw.gateway import AgentWebSocketServer
     from jiuwenclaw.gateway.cron import CronController, CronJobStore
     from jiuwenclaw.extensions import ExtensionManager, ExtensionRegistry
 
-    logger.info("[AgentServer] starting: ws://127.0.0.1:%s", port)
+    logger.info("[AgentServer] starting: ws://%s:%s", host, port)
 
     cron_store = CronJobStore()
     CronController.get_instance(store=cron_store, scheduler=_NopCronScheduler())
@@ -82,14 +82,14 @@ async def _run(port: int) -> None:
     logger.info("[AgentServer] 扩展加载完成，共 %d 个", len(extension_manager.list_extensions()))
 
     server = AgentWebSocketServer.get_instance(
-        host="127.0.0.1",
+        host=host,
         port=port,
         ping_interval=20.0,
         ping_timeout=20.0,
     )
     await server.start()
 
-    logger.info("[AgentServer] ready: ws://127.0.0.1:%s  Ctrl+C to stop", port)
+    logger.info("[AgentServer] ready: ws://%s:%s  Ctrl+C to stop", host, port)
 
     stop_event = asyncio.Event()
 
@@ -134,6 +134,7 @@ def main() -> None:
     )
     args = parser.parse_args()
 
+    host = os.getenv("AGENT_SERVER_HOST", "0.0.0.0")
     port = args.port
     if port is None:
         for key in ("AGENT_SERVER_PORT", "AGENT_PORT"):
@@ -144,7 +145,7 @@ def main() -> None:
         else:
             port = 18092
 
-    asyncio.run(_run(port=port))
+    asyncio.run(_run(host=host, port=port))
 
 
 if __name__ == "__main__":

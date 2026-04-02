@@ -8,6 +8,10 @@
 1. 创建 SendFileToolkit 实例
 2. 调用 get_tools() 获取工具列表
 3. 工具会自动注册到 Runner 中
+
+分布式模式：
+- 当 file_transfer.enabled=true 时，使用分片传输将文件发送到 Gateway
+- Gateway 接收后调用 Channel API 发送给用户
 """
 
 from __future__ import annotations
@@ -19,6 +23,9 @@ from typing import Any, List, Union
 
 from openjiuwen.core.foundation.tool import LocalFunction, Tool, ToolCard
 
+from jiuwenclaw.agentserver.agent_ws_server import AgentWebSocketServer
+from jiuwenclaw.config import get_file_transfer_config
+from jiuwenclaw.agentserver.file_transfer_manager import get_file_transfer_manager
 
 logger = logging.getLogger(__name__)
 
@@ -103,9 +110,28 @@ class SendFileToolkit:
             len(missing_files),
         )
 
-        try:
-            from jiuwenclaw.agentserver.agent_ws_server import AgentWebSocketServer
+        # 检查是否启用分布式文件传输
+        ft_config = get_file_transfer_config()
+        if ft_config.enabled:
+            return await self._send_file_distributed(valid_files, missing_files)
+        else:
+            return await self._send_file_local(valid_files, missing_files)
 
+    async def _send_file_local(
+        self,
+        valid_files: List[str],
+        missing_files: List[str],
+    ) -> str:
+        """本地模式：直接传递文件路径（原有逻辑）.
+
+        Args:
+            valid_files: 有效文件路径列表
+            missing_files: 缺失文件路径列表
+
+        Returns:
+            结果消息
+        """
+        try:
             server = AgentWebSocketServer.get_instance()
             files_payload = [
                 {
@@ -135,11 +161,100 @@ class SendFileToolkit:
             return "\n".join(result_parts)
         except Exception as e:
             logger.exception(
-                "[SendFileToolkit] send_file 失败 session_id=%s error=%s",
+                "[SendFileToolkit] _send_file_local 失败 session_id=%s error=%s",
                 self.session_id,
                 str(e),
             )
             return f"提交文件失败: {str(e)}"
+
+    async def _send_file_distributed(
+        self,
+        valid_files: List[str],
+        missing_files: List[str],
+    ) -> str:
+        """分布式模式：通过分片传输发送文件到 Gateway.
+
+        Args:
+            valid_files: 有效文件路径列表
+            missing_files: 缺失文件路径列表
+
+        Returns:
+            结果消息
+        """
+        ft_manager = get_file_transfer_manager()
+        results = []
+        success_count = 0
+        failed_files = []
+
+        for file_path in valid_files:
+            try:
+                # 定义发送回调函数
+                async def send_callback(event_type: str, params: dict) -> None:
+                    """发送文件传输事件到 Gateway."""
+                    server = AgentWebSocketServer.get_instance()
+                    msg = {
+                        "request_id": self.request_id,
+                        "channel_id": self.channel_id,
+                        "session_id": self.session_id,
+                        "payload": {
+                            "event_type": event_type,
+                            **params,
+                        },
+                        "is_complete": False,
+                    }
+                    await server.send_push(msg)
+
+                # 使用 FileTransferManager 发送文件
+                result = await ft_manager.send_file(
+                    file_path=file_path,
+                    send_callback=send_callback,
+                    session_id=self.session_id,
+                    channel_id=self.channel_id,
+                    request_id=self.request_id,
+                )
+
+                if result.get("success"):
+                    success_count += 1
+                    logger.info(
+                        "[SendFileToolkit] 分布式发送成功: file=%s transfer_id=%s",
+                        file_path,
+                        result.get("transfer_id"),
+                    )
+                else:
+                    failed_files.append({
+                        "file": file_path,
+                        "error": result.get("error", "unknown error"),
+                    })
+                    logger.warning(
+                        "[SendFileToolkit] 分布式发送失败: file=%s error=%s",
+                        file_path,
+                        result.get("error"),
+                    )
+
+            except Exception as e:
+                failed_files.append({
+                    "file": file_path,
+                    "error": str(e),
+                })
+                logger.exception(
+                    "[SendFileToolkit] 分布式发送异常: file=%s",
+                    file_path,
+                )
+
+        # 构建结果消息
+        result_parts = []
+        if success_count > 0:
+            result_parts.append(f"成功发送 {success_count} 个文件")
+        if failed_files:
+            result_parts.append(f"发送失败 {len(failed_files)} 个文件：")
+            for ff in failed_files:
+                result_parts.append(f"  - {ff['file']}: {ff['error']}")
+        if missing_files:
+            result_parts.append("以下文件不存在，未发送：")
+            for mf in missing_files:
+                result_parts.append(f"  - {mf}")
+
+        return "\n".join(result_parts) if result_parts else "发送完成"
 
     def get_tools(self) -> List[Tool]:
         """Return tools for registration in Runner.

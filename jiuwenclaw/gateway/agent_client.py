@@ -12,13 +12,19 @@ from collections.abc import Awaitable, Callable
 from dataclasses import asdict
 from typing import Any, AsyncIterator
 
-from jiuwenclaw.e2a.constants import E2A_WIRE_SERVER_PUSH_KEY
+from jiuwenclaw.e2a.constants import (
+    E2A_WIRE_SERVER_PUSH_KEY,
+    FILE_TRANSFER_START,
+    FILE_TRANSFER_CHUNK,
+    FILE_TRANSFER_COMPLETE,
+)
 from jiuwenclaw.e2a.models import E2AEnvelope
 from jiuwenclaw.e2a.wire_codec import (
     parse_agent_server_wire_chunk,
     parse_agent_server_wire_unary,
 )
 from jiuwenclaw.schema.agent import AgentResponse, AgentResponseChunk
+from jiuwenclaw.utils import FileTransferStartParams
 
 
 logger = logging.getLogger(__name__)
@@ -337,6 +343,240 @@ class WebSocketAgentServerClient(AgentServerClient):
             # 清理队列
             if rid in self._message_queues:
                 del self._message_queues[rid]
+
+    # =========================================================================
+    # 文件传输方法
+    # =========================================================================
+
+    async def file_transfer_start(
+        self,
+        params: FileTransferStartParams,
+    ) -> dict[str, Any]:
+        """发送 FILE_TRANSFER_START 消息.
+
+        Args:
+            params: 文件传输开始参数
+
+        Returns:
+            AgentServer 的响应
+        """
+        self._ensure_connected()
+        request_id = f"ft_start_{params.transfer_id}"
+
+        envelope = E2AEnvelope(
+            request_id=request_id,
+            channel=params.channel_id,
+            method=FILE_TRANSFER_START,
+            params={
+                "event_type": FILE_TRANSFER_START,
+                "transfer_id": params.transfer_id,
+                "filename": params.filename,
+                "file_size": params.file_size,
+                "sha256": params.sha256,
+                "total_chunks": params.total_chunks,
+                "chunk_size": params.chunk_size,
+                "mime_type": params.mime_type,
+            },
+            session_id=params.session_id,
+            is_stream=False,
+        )
+
+        logger.info(
+            "[WebSocketAgentServerClient] 发送 FILE_TRANSFER_START: transfer_id=%s filename=%s",
+            params.transfer_id,
+            params.filename,
+        )
+
+        resp = await self.send_request(envelope)
+        result = resp.payload or {}
+        result["success"] = resp.ok
+        return result
+
+    async def file_transfer_chunk(
+        self,
+        transfer_id: str,
+        chunk_index: int,
+        base64_data: str,
+        chunk_size: int,
+        channel_id: str = "",
+    ) -> dict[str, Any]:
+        """发送 FILE_TRANSFER_CHUNK 消息.
+
+        Args:
+            transfer_id: 传输ID
+            chunk_index: 分片索引
+            base64_data: Base64 编码的分片数据
+            chunk_size: 分片大小
+            channel_id: 频道ID
+
+        Returns:
+            AgentServer 的响应
+        """
+        self._ensure_connected()
+        request_id = f"ft_chunk_{transfer_id}_{chunk_index}"
+
+        envelope = E2AEnvelope(
+            request_id=request_id,
+            channel=channel_id,
+            method=FILE_TRANSFER_CHUNK,
+            params={
+                "event_type": FILE_TRANSFER_CHUNK,
+                "transfer_id": transfer_id,
+                "chunk_index": chunk_index,
+                "base64_data": base64_data,
+                "chunk_size": chunk_size,
+            },
+            is_stream=False,
+        )
+
+        logger.debug(
+            "[WebSocketAgentServerClient] 发送 FILE_TRANSFER_CHUNK: transfer_id=%s chunk=%d",
+            transfer_id,
+            chunk_index,
+        )
+
+        resp = await self.send_request(envelope)
+        result = resp.payload or {}
+        result["success"] = resp.ok
+        return result
+
+    async def file_transfer_complete(
+        self,
+        transfer_id: str,
+        sha256: str,
+        channel_id: str = "",
+    ) -> dict[str, Any]:
+        """发送 FILE_TRANSFER_COMPLETE 消息.
+
+        Args:
+            transfer_id: 传输ID
+            sha256: 文件 SHA256 校验值
+            channel_id: 频道ID
+
+        Returns:
+            AgentServer 的响应，包含最终文件路径
+        """
+        self._ensure_connected()
+        request_id = f"ft_complete_{transfer_id}"
+
+        envelope = E2AEnvelope(
+            request_id=request_id,
+            channel=channel_id,
+            method=FILE_TRANSFER_COMPLETE,
+            params={
+                "event_type": FILE_TRANSFER_COMPLETE,
+                "transfer_id": transfer_id,
+                "sha256": sha256,
+            },
+            is_stream=False,
+        )
+
+        logger.info(
+            "[WebSocketAgentServerClient] 发送 FILE_TRANSFER_COMPLETE: transfer_id=%s",
+            transfer_id,
+        )
+
+        resp = await self.send_request(envelope)
+        result = resp.payload or {}
+        result["success"] = resp.ok
+        return result
+
+    async def send_file(
+        self,
+        file_path: str,
+        session_id: str = "",
+        channel_id: str = "",
+    ) -> dict[str, Any]:
+        """发送文件到 AgentServer（分片发送）.
+
+        这是高级方法，封装了 start -> chunks -> complete 的完整流程。
+
+        Args:
+            file_path: 文件路径
+            session_id: 会话ID
+            channel_id: 频道ID
+
+        Returns:
+            发送结果，包含 AgentServer 返回的最终文件路径
+        """
+        from pathlib import Path
+        import hashlib
+        import base64
+        import time
+
+        path = Path(file_path)
+        if not path.exists():
+            return {
+                "success": False,
+                "error": f"file not found: {file_path}",
+            }
+
+        # 读取文件
+        try:
+            file_data = path.read_bytes()
+        except Exception as e:
+            return {
+                "success": False,
+                "error": f"read file failed: {e}",
+            }
+
+        file_size = len(file_data)
+        filename = path.name
+        sha256 = hashlib.sha256(file_data).hexdigest()
+        chunk_size = 65536  # 64KB
+        total_chunks = (file_size + chunk_size - 1) // chunk_size
+
+        transfer_id = f"up_{int(time.time() * 1000)}_{hashlib.md5(filename.encode()).hexdigest()[:8]}"
+
+        # 1. 发送 START
+        start_params = FileTransferStartParams(
+            transfer_id=transfer_id,
+            filename=filename,
+            file_size=file_size,
+            sha256=sha256,
+            total_chunks=total_chunks,
+            chunk_size=chunk_size,
+            session_id=session_id,
+            channel_id=channel_id,
+        )
+        start_resp = await self.file_transfer_start(start_params)
+
+        if not start_resp.get("accepted"):
+            return {
+                "success": False,
+                "error": start_resp.get("error", "transfer start rejected"),
+            }
+
+        # 2. 发送分片
+        for i in range(total_chunks):
+            start = i * chunk_size
+            end = min(start + chunk_size, file_size)
+            chunk_data = file_data[start:end]
+            b64_data = base64.b64encode(chunk_data).decode("utf-8")
+
+            chunk_resp = await self.file_transfer_chunk(
+                transfer_id=transfer_id,
+                chunk_index=i,
+                base64_data=b64_data,
+                chunk_size=len(chunk_data),
+                channel_id=channel_id,
+            )
+
+            if not chunk_resp.get("accepted"):
+                logger.warning(
+                    "[WebSocketAgentServerClient] 分片发送失败: chunk=%d error=%s",
+                    i,
+                    chunk_resp.get("error"),
+                )
+
+        # 3. 发送 COMPLETE
+        complete_resp = await self.file_transfer_complete(
+            transfer_id=transfer_id,
+            sha256=sha256,
+            channel_id=channel_id,
+        )
+
+        return complete_resp
 
 
 # ---------------------------------------------------------------------------

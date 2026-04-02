@@ -3,6 +3,7 @@
 import os
 import re
 import sys
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -219,3 +220,97 @@ def update_updater_in_config(updates: dict[str, Any]) -> None:
     for key, value in updates.items():
         section[key] = value
     _dump_yaml_round_trip(_CONFIG_YAML_PATH, data)
+
+
+# ===========================================================================
+# 文件传输配置
+# ===========================================================================
+
+@dataclass
+class FileTransferConfig:
+    """文件传输配置模型.
+
+    Attributes:
+        enabled: 是否启用分布式模式（false=本地模式，true=分布式模式）
+        chunk_size: 分片大小（字节），默认 64KB
+        max_file_size: 最大文件大小（字节），默认 100MB，0=不限制
+        transfer_timeout: 传输超时时间（秒），默认 300 秒
+        max_retries: 单分片最大重试次数，默认 3 次
+        received_files_dir: 接收文件存储目录，默认 "agent/workspace/received_files"
+        cleanup_interval: 临时文件清理间隔（秒），默认 3600 秒
+        cleanup_age: 清理超过 N 秒的临时文件，默认 86400 秒（24小时）
+        max_concurrent_transfers: 最大并发传输数，默认 5
+    """
+    enabled: bool = False
+    chunk_size: int = 65536  # 64KB
+    max_file_size: int = 104857600  # 100MB
+    transfer_timeout: int = 300
+    max_retries: int = 3
+    received_files_dir: str = "agent/workspace/received_files"
+    cleanup_interval: int = 3600
+    cleanup_age: int = 86400
+    max_concurrent_transfers: int = 5
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any] | None) -> "FileTransferConfig":
+        """从字典创建配置实例."""
+        if not data:
+            return cls()
+        return cls(
+            enabled=bool(data.get("enabled", False)),
+            chunk_size=int(data.get("chunk_size", 65536)),
+            max_file_size=int(data.get("max_file_size", 104857600)),
+            transfer_timeout=int(data.get("transfer_timeout", 300)),
+            max_retries=int(data.get("max_retries", 3)),
+            received_files_dir=str(data.get("received_files_dir", "agent/workspace/received_files")),
+            cleanup_interval=int(data.get("cleanup_interval", 3600)),
+            cleanup_age=int(data.get("cleanup_age", 86400)),
+            max_concurrent_transfers=int(data.get("max_concurrent_transfers", 5)),
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        """转换为字典."""
+        return {
+            "enabled": self.enabled,
+            "chunk_size": self.chunk_size,
+            "max_file_size": self.max_file_size,
+            "transfer_timeout": self.transfer_timeout,
+            "max_retries": self.max_retries,
+            "received_files_dir": self.received_files_dir,
+            "cleanup_interval": self.cleanup_interval,
+            "cleanup_age": self.cleanup_age,
+            "max_concurrent_transfers": self.max_concurrent_transfers,
+        }
+
+
+# 文件传输配置缓存
+_file_transfer_config: FileTransferConfig | None = None
+
+
+def get_file_transfer_config() -> FileTransferConfig:
+    """获取文件传输配置（带缓存）."""
+    global _file_transfer_config
+    if _file_transfer_config is not None:
+        return _file_transfer_config
+    config = get_config()
+    ft_config = config.get("file_transfer", {}) if isinstance(config, dict) else {}
+    _file_transfer_config = FileTransferConfig.from_dict(ft_config)
+    return _file_transfer_config
+
+
+def clear_file_transfer_config_cache() -> None:
+    """清除文件传输配置缓存."""
+    global _file_transfer_config
+    _file_transfer_config = None
+
+
+def update_file_transfer_in_config(updates: dict[str, Any]) -> None:
+    """更新 file_transfer 段并写回."""
+    data = _load_yaml_round_trip(_CONFIG_YAML_PATH)
+    if "file_transfer" not in data:
+        data["file_transfer"] = {}
+    section = data["file_transfer"]
+    for key, value in updates.items():
+        section[key] = value
+    _dump_yaml_round_trip(_CONFIG_YAML_PATH, data)
+    clear_file_transfer_config_cache()
