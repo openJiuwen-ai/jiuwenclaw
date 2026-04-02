@@ -546,6 +546,10 @@ def get_agent_skills_dir() -> Path:
     return get_agent_root_dir() / "skills"
 
 
+def get_agent_tools_dir() -> Path:
+    return get_agent_root_dir() / "tools"
+
+
 def get_builtin_skills_dir() -> Path:
     """Get the built-in skills directory from package resources."""
     package_root = _find_package_root()

@@ -56,6 +56,8 @@ class ReqMethod(Enum):
     SKILLS_CLAWHUB_SEARCH = "skills.clawhub.search"
     SKILLS_CLAWHUB_DOWNLOAD = "skills.clawhub.download"
 
+    TOOLS_ADD = "tools.add"
+
     HEARTBEAT_GET_CONF = "heartbeat.get_conf"
     HEARTBEAT_SET_CONF = "heartbeat.set_conf"
 

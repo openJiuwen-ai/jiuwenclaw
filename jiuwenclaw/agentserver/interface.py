@@ -88,6 +88,7 @@ from jiuwenclaw.agentserver.permissions import (
     PermissionLevel,
 )
 from jiuwenclaw.agentserver.skill_manager import SkillManager, _SKILLS_DIR
+from jiuwenclaw.agentserver.tool_manager import ToolManager
 from jiuwenclaw.evolution.service import EvolutionService
 from jiuwenclaw.schema.agent import AgentRequest, AgentResponse, AgentResponseChunk
 from jiuwenclaw.agentserver.memory import get_memory_manager
@@ -150,6 +151,11 @@ _SKILL_ROUTES: dict[ReqMethod, str] = {
     ReqMethod.SKILLS_CLAWHUB_DOWNLOAD: "handle_skills_clawhub_download",
 }
 
+# Tools 管理请求路由表（与 _SKILL_ROUTES 相同模式，具体逻辑在 ToolManager）
+_TOOL_ROUTES: dict[ReqMethod, str] = {
+    ReqMethod.TOOLS_ADD: "handle_tools_add",
+}
+
 
 class JiuWenClaw:
     """基于 openJiuwen ReActAgent 的 AgentServer 实现."""
@@ -158,6 +164,7 @@ class JiuWenClaw:
         self._instance: JiuClawReActAgent | None = None
         self._skill_manager = SkillManager()
         self._skill_manager.set_skillnet_install_complete_hook(self.create_instance)
+        self._tool_manager = ToolManager(get_agent=lambda: self._instance)
         self._session_tasks: dict[str, asyncio.Task] = {}  # session_id -> running_task
         self._session_priorities: dict[str, int] = {}  # session_id -> 优先级计数器（用于先进后出）
         self._session_queues: dict[str, asyncio.PriorityQueue] = {}  # session_id -> 优先队列
@@ -1164,6 +1171,28 @@ class JiuWenClaw:
                     await self.create_instance()
             except Exception as exc:
                 logger.error("[JiuWenClaw] skills 请求处理失败: %s", exc)
+                return AgentResponse(
+                    request_id=request.request_id,
+                    channel_id=request.channel_id,
+                    ok=False,
+                    payload={"error": str(exc)},
+                    metadata=request.metadata,
+                )
+            return AgentResponse(
+                request_id=request.request_id,
+                channel_id=request.channel_id,
+                ok=True,
+                payload=payload,
+                metadata=request.metadata,
+            )
+
+        if request.req_method in _TOOL_ROUTES:
+            handler_name = _TOOL_ROUTES[request.req_method]
+            handler = getattr(self._tool_manager, handler_name)
+            try:
+                payload = await handler(request.params)
+            except Exception as exc:
+                logger.error("[JiuWenClaw] tools 请求处理失败: %s", exc)
                 return AgentResponse(
                     request_id=request.request_id,
                     channel_id=request.channel_id,
