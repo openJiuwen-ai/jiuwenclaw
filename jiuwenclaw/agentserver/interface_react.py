@@ -686,15 +686,6 @@ class JiuWenClawReactAdapter:
             video_api_key,
             zhipu_api_key,
         ])
-        logger.info(
-            "[JiuWenClawReactAdapter] Video API key check: VIDEO_API_KEY=%s (valid=%s), ZHIPU_API_KEY=%s (valid=%s), "
-            "has_video_key=%s",
-            video_api_key[:20] + "..." if video_api_key else None,
-            bool(video_api_key),
-            zhipu_api_key[:20] + "..." if zhipu_api_key else None,
-            bool(zhipu_api_key),
-            has_video_key,
-        )
 
         if has_video_key:
             try:
@@ -720,17 +711,6 @@ class JiuWenClawReactAdapter:
             api_key,
             gemini_api_key,
         ])
-        logger.info(
-            "[JiuWenClawReactAdapter] Vision API key check: VISION_API_KEY=%s (valid=%s), API_KEY=%s (valid=%s), "
-            "GEMINI_API_KEY=%s (valid=%s), has_vision_key=%s",
-            vision_api_key[:20] + "..." if vision_api_key else None,
-            bool(vision_api_key),
-            api_key[:20] + "..." if api_key else None,
-            bool(api_key),
-            gemini_api_key[:20] + "..." if gemini_api_key else None,
-            bool(gemini_api_key),
-            has_vision_key,
-        )
 
         if has_vision_key:
             try:
@@ -761,20 +741,7 @@ class JiuWenClawReactAdapter:
             acr_access_key,
             acr_access_secret,
         ])
-        logger.info(
-            "[JiuWenClawReactAdapter] Audio API key check: AUDIO_API_KEY=%s (valid=%s), API_KEY=%s (valid=%s), "
-            "ACR_ACCESS_KEY=%s (valid=%s), ACR_ACCESS_SECRET=%s (valid=%s), has_audio_key=%s, has_acr_key=%s",
-            audio_api_key[:20] + "..." if audio_api_key else None,
-            bool(audio_api_key),
-            api_key_for_audio[:20] + "..." if api_key_for_audio else None,
-            bool(api_key_for_audio),
-            acr_access_key[:20] + "..." if acr_access_key else None,
-            bool(acr_access_key),
-            acr_access_secret[:20] + "..." if acr_access_secret else None,
-            bool(acr_access_secret),
-            has_audio_key,
-            has_acr_key,
-        )
+
         audio_tools_to_register = []
         if has_audio_key:
             audio_tools_to_register.append(audio_question_answering)
