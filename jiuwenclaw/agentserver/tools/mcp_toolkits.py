@@ -7,16 +7,14 @@ import json
 import os
 
 from openjiuwen.core.foundation.tool import Tool, McpServerConfig
-from openjiuwen.core.foundation.tool.mcp.base import MCPTool, McpToolCard
-from openjiuwen.core.foundation.tool.mcp.client.stdio_client import StdioClient
 
 from jiuwenclaw.agentserver.tools.command_tools import mcp_exec_command
 from jiuwenclaw.agentserver.tools.search_tools import mcp_free_search, mcp_paid_search
 from jiuwenclaw.agentserver.tools.web_fetch_tools import mcp_fetch_webpage
 
 
-async def create_mcp_tool(config_str: str) -> Tool:
-    """从 JSON 字符串创建 MCPTool 实例。
+def create_mcp_tool(config_str: str) -> McpServerConfig:
+    """从 JSON 字符串解析并构造 ``McpServerConfig``（stdio MCP）。
 
     Args:
         config_str: JSON 格式配置字符串，格式为：
@@ -25,10 +23,9 @@ async def create_mcp_tool(config_str: str) -> Tool:
                 "command": "node" | "python",
                 "args": ["xxx.js"] | ["xxx.py"]
             }
-            其中 command 支持 "node" 和 "python" 类型，对应使用 StdioClient。
 
     Returns:
-        Tool 实例
+        ``McpServerConfig``，由调用方通过 ``Runner.resource_mgr.add_mcp_server(..., tag=...)`` 注册。
 
     Raises:
         ValueError: JSON 解析失败或配置不合法时
@@ -68,8 +65,7 @@ async def create_mcp_tool(config_str: str) -> Tool:
     if not isinstance(args, list):
         raise ValueError(f"工具 '{tool_name}' 的 args 必须是列表类型")
 
-    # 构造 McpServerConfig
-    mcp_config = McpServerConfig(
+    return McpServerConfig(
         server_id=tool_name,
         server_name=tool_name,
         server_path=f"stdio://{tool_name}",
@@ -79,24 +75,6 @@ async def create_mcp_tool(config_str: str) -> Tool:
             "args": args,
         },
     )
-
-    # 创建 StdioClient 实例
-    stdio_client = StdioClient(
-        server_path=mcp_config.server_path,
-        name=mcp_config.server_name,
-        params=mcp_config.params,
-    )
-
-    # 创建一个临时的 McpToolCard（实际使用时需要连接服务器获取真实信息）
-    temp_card = McpToolCard(
-        name=tool_name,
-        server_name=tool_name,
-        description=f"MCP tool from {command} with args {args}",
-        input_params={},
-    )
-
-    # 创建 MCPTool 实例
-    return MCPTool(mcp_client=stdio_client, tool_info=temp_card)
 
 
 def _has_paid_search_api_key() -> bool:

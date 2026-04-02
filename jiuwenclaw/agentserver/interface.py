@@ -399,6 +399,11 @@ class JiuWenClaw:
             self._instance.ability_manager.add(mcp_tool.card)
         self._mcp_tools_registered = True
 
+        try:
+            await self._tool_manager.load_tools_from_disk()
+        except Exception as exc:
+            logger.warning("[JiuWenClaw] 从 agent/tools 加载落盘 MCP 工具失败: %s", exc)
+
         if memory_mode == "local" and self._compaction_manager is None:
             memory_mgr = await get_memory_manager(
                 agent_id=self._agent_name,

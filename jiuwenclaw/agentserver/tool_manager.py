@@ -1,6 +1,6 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 
-"""ToolManager - tools.add 等 RPC：落盘用户 MCP 工具配置并交给 mcp_toolkits 生成 Tool。"""
+"""ToolManager - tools.add 等 RPC：落盘用户 MCP 工具配置并交给 mcp_toolkits 生成 McpServerConfig。"""
 
 from __future__ import annotations
 
@@ -17,6 +17,53 @@ from jiuwenclaw.utils import get_agent_tools_dir
 from jiuwenclaw.agentserver.tools.mcp_toolkits import create_mcp_tool
 
 logger = logging.getLogger(__name__)
+
+
+def _mcp_add_result_is_ok(result: Any) -> bool:
+    """解析 ``add_mcp_server`` 返回值。"""
+    if result is None:
+        return True
+    is_ok = getattr(result, "is_ok", None)
+    if callable(is_ok):
+        try:
+            return bool(is_ok())
+        except Exception:
+            return False
+    return False
+
+
+def _mcp_add_result_error_text(result: Any) -> str:
+    """与 ``browser_tools._result_error_text`` 一致。"""
+    if result is None:
+        return ""
+    for attr in ("error", "msg"):
+        fn = getattr(result, attr, None)
+        if callable(fn):
+            try:
+                value = fn()
+                if value is not None:
+                    return str(value)
+            except Exception:
+                pass
+    value = getattr(result, "_error", None)
+    if value is not None:
+        return str(value)
+    return str(result)
+
+
+async def _add_mcp_server_and_ability(agent: Any, mcp_cfg: Any, *, tag: str) -> None:
+    """调用 ``add_mcp_server``，按返回值决定是否 ``ability_manager.add``；失败抛 ``RuntimeError``。"""
+    result = await Runner.resource_mgr.add_mcp_server(mcp_cfg, tag=tag)
+    if _mcp_add_result_is_ok(result):
+        agent.ability_manager.add(mcp_cfg)
+        return
+    err = _mcp_add_result_error_text(result)
+    if "already exist" in err.lower():
+        agent.ability_manager.add(mcp_cfg)
+        logger.info("[ToolManager] add_mcp_server 已存在，仍加入 ability_manager: %s", err)
+        return
+    raise RuntimeError(f"add_mcp_server 失败: {err}" if err else "add_mcp_server 失败")
+
 
 # ---------------------------------------------------------------------------
 # 落盘 JSON 模板：列表顺序即写入顺序；每项为 (disk_key, default, kind)。
@@ -125,7 +172,7 @@ class ToolManager:
         self._get_agent = get_agent
 
     async def handle_tools_add(self, params: dict) -> dict[str, Any]:
-        """按工具名拆分落盘到 ``agent/tools/``；对每个工具以与落盘一致的 JSON 调用 ``create_mcp_tool`` 并注册到 Agent。
+        """按工具名拆分落盘到 ``agent/tools/``；对每个工具以与落盘一致的 JSON 调用 ``create_mcp_tool`` 得到 ``McpServerConfig`` 并注册。
 
         params:
             mcp_json: str，整段 JSON 字符串；根对象须含 ``mcpServers``，
@@ -169,19 +216,68 @@ class ToolManager:
             logger.info("[ToolManager] 已写入工具配置 name=%s path=%s", tool_name, out_path)
 
             single_json = json.dumps(record, ensure_ascii=False)
-            tool = await create_mcp_tool(single_json)
+            mcp_cfg = create_mcp_tool(single_json)
             try:
-                if not Runner.resource_mgr.get_tool(tool.card.id):
-                    Runner.resource_mgr.add_tool(tool)
-                agent.ability_manager.add(tool.card)
+                await _add_mcp_server_and_ability(agent, mcp_cfg, tag=mcp_cfg.server_name)
             except Exception as exc:
                 logger.error("[ToolManager] 注册工具失败 name=%s: %s", tool_name, exc)
                 raise
-            registered.append({"name": tool.card.name, "id": tool.card.id})
-            logger.info("[ToolManager] 已注册工具 name=%s id=%s", tool.card.name, tool.card.id)
+            registered.append({"name": mcp_cfg.server_name, "id": mcp_cfg.server_id})
+            logger.info("[ToolManager] 已注册工具 name=%s id=%s", mcp_cfg.server_name, mcp_cfg.server_id)
 
         return {
             "saved": saved,
             "tools_dir": str(tools_dir.resolve()),
             "registered_tools": registered,
+        }
+
+    async def load_tools_from_disk(self) -> dict[str, Any]:
+        """启动时扫描 ``agent/tools/*.json``，按落盘记录注册 MCP 工具。
+
+        与 ``handle_tools_add`` 中单条落盘结构一致；单个文件解析或注册失败仅记录日志并继续。
+        """
+        agent = self._get_agent() if self._get_agent else None
+        if agent is None:
+            raise RuntimeError("JiuWenClaw 未初始化，请先调用 create_instance()")
+
+        tools_dir = get_agent_tools_dir()
+        tools_dir.mkdir(parents=True, exist_ok=True)
+        registered: list[dict[str, str]] = []
+        errors: list[dict[str, str]] = []
+
+        for path in sorted(tools_dir.glob("*.json")):
+            try:
+                with open(path, encoding="utf-8") as f:
+                    record = json.load(f)
+            except (OSError, json.JSONDecodeError) as exc:
+                logger.warning("[ToolManager] 跳过无效工具配置 %s: %s", path, exc)
+                errors.append({"path": str(path), "error": str(exc)})
+                continue
+            if not isinstance(record, dict):
+                logger.warning("[ToolManager] 跳过非对象 JSON: %s", path)
+                errors.append({"path": str(path), "error": "根节点须为 JSON 对象"})
+                continue
+
+            name_hint = record.get("name") if isinstance(record.get("name"), str) else path.stem
+            try:
+                single_json = json.dumps(record, ensure_ascii=False)
+                mcp_cfg = create_mcp_tool(single_json)
+                await _add_mcp_server_and_ability(agent, mcp_cfg, tag=mcp_cfg.server_name)
+            except Exception as exc:
+                logger.error("[ToolManager] 启动加载工具失败 %s (%s): %s", path, name_hint, exc)
+                errors.append({"path": str(path), "error": str(exc)})
+                continue
+
+            registered.append({"name": mcp_cfg.server_name, "id": mcp_cfg.server_id})
+            logger.info(
+                "[ToolManager] 启动已加载工具 name=%s id=%s path=%s",
+                mcp_cfg.server_name,
+                mcp_cfg.server_id,
+                path,
+            )
+
+        return {
+            "tools_dir": str(tools_dir.resolve()),
+            "registered_tools": registered,
+            "errors": errors,
         }
