@@ -2059,6 +2059,9 @@ class JiuWenClawDeepAdapter:
                     )
                     if inner_val == "task_completion":
                         return None
+                    if inner_val == "task_failed":
+                        error = next((item.text for item in payload.data if hasattr(item, "text")), "任务执行失败")
+                        return {"event_type": "chat.error", "error": error}
 
                 if chunk_type == "llm_output":
                     content = (
