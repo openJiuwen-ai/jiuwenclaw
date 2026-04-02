@@ -12,14 +12,17 @@ Runtime layout:
   - todo/
   - messages/
   - agents/
+  - AGENT.md
+  - IDENTITY.md
+  - SOUL.md
+  - HEARTBEAT.md
+  - USER.md
 - ~/.jiuwenclaw/agent/sessions
 - ~/.jiuwenclaw/agent/jiuwenclaw_workspace/agent-data.json
 - ~/.jiuwenclaw/.checkpoint
 - ~/.jiuwenclaw/.logs（gateway.log / channel.log / agent_server.log / full.log）
 
 内置模板位于包内 ``jiuwenclaw/resources/``（含 ``agent/`` 下各技能模板以及 ``skills_state.json``）。
-注意：PRINCIPLE.md、TONE.md、HEARTBEAT.md 已被 SOUL.md 和新的心跳机制替代，
-不再由 JiuwenClaw 复制到用户工作区。这些文件仅在旧版中用于初始化，新版由 DeepAgents SDK 自行管理。
 """
 
 import os
@@ -408,7 +411,6 @@ def prepare_workspace(overwrite: bool = True, preferred_language: Optional[str] 
 
     # ----- copy runtime dirs (new layout) -----
     agent_root = workspace_dir / "agent"
-    agent_home = agent_root / "home"
     agent_sessions = agent_root / "sessions"
     (workspace_dir / ".checkpoint").mkdir(parents=True, exist_ok=True)
     (workspace_dir / ".logs").mkdir(parents=True, exist_ok=True)
@@ -422,25 +424,53 @@ def prepare_workspace(overwrite: bool = True, preferred_language: Optional[str] 
     template_agent_memory = template_agent_dir / "jiuwenclaw_workspace" / "memory"
     template_agent_skills = template_agent_dir / "jiuwenclaw_workspace" / "skills"
 
-    def _copy_dir(src_dir: Path, dst_dir: Path) -> None:
+    def _copy_dir(
+        src_dir: Path,
+        dst_dir: Path,
+        ignore_patterns: tuple[str, ...] | None = None,
+    ) -> None:
         if not src_dir.exists():
             return
         if overwrite and dst_dir.exists():
             shutil.rmtree(dst_dir)
         dst_dir.parent.mkdir(parents=True, exist_ok=True)
-        if not dst_dir.exists():
-            shutil.copytree(src_dir, dst_dir)
+
+        if ignore_patterns:
+            ignore = shutil.ignore_patterns(*ignore_patterns)
         else:
-            shutil.copytree(src_dir, dst_dir, dirs_exist_ok=True)
+            ignore = None
+
+        if not dst_dir.exists():
+            shutil.copytree(src_dir, dst_dir, ignore=ignore)
+        else:
+            shutil.copytree(src_dir, dst_dir, dirs_exist_ok=True, ignore=ignore)
 
     # Copy DeepAgent workspace template (includes agent-data.json, memory, skills)
+    # Ignore _ZH.md and _EN.md files - they are handled separately
     if template_agent_workspace.exists():
-        _copy_dir(template_agent_workspace, deepagent_workspace)
+        _copy_dir(
+            template_agent_workspace,
+            deepagent_workspace,
+            ignore_patterns=("*_ZH.md", "*_EN.md"),
+        )
     else:
         deepagent_workspace.mkdir(parents=True, exist_ok=True)
     _copy_dir(template_agent_memory, agent_memory)
     _copy_dir(template_agent_skills, agent_skills)
 
+    # Copy multi-language files based on resolved language
+    # Files with _ZH/_EN suffix are copied to the workspace without suffix
+    suffix = "_ZH" if resolved_lang == "zh" else "_EN"
+    multilang_files = [
+        (f"AGENT{suffix}.md", "AGENT.md"),
+        (f"HEARTBEAT{suffix}.md", "HEARTBEAT.md"),
+        (f"IDENTITY{suffix}.md", "IDENTITY.md"),
+        (f"SOUL{suffix}.md", "SOUL.md"),
+    ]
+    for src_name, dst_name in multilang_files:
+        src_path = template_agent_workspace / src_name
+        if src_path.exists():
+            shutil.copy2(src_path, deepagent_workspace / dst_name)
 
     # skills state: shipped under resources/
     skills_state_src = template_root / "skills_state.json"

@@ -4,6 +4,31 @@
       "name": "agent-data.json",
       "path": "agent/jiuwenclaw_workspace/agent-data.json",
       "isMarkdown": false
+    },
+    {
+      "name": "AGENT.md",
+      "path": "agent/jiuwenclaw_workspace/AGENT.md",
+      "isMarkdown": true
+    },
+    {
+      "name": "HEARTBEAT.md",
+      "path": "agent/jiuwenclaw_workspace/HEARTBEAT.md",
+      "isMarkdown": true
+    },
+    {
+      "name": "IDENTITY.md",
+      "path": "agent/jiuwenclaw_workspace/IDENTITY.md",
+      "isMarkdown": true
+    },
+    {
+      "name": "SOUL.md",
+      "path": "agent/jiuwenclaw_workspace/SOUL.md",
+      "isMarkdown": true
+    },
+    {
+      "name": "USER.md",
+      "path": "agent/jiuwenclaw_workspace/USER.md",
+      "isMarkdown": true
     }
   ],
   "jiuwenclaw_workspace/memory": [
