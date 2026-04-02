@@ -32,11 +32,22 @@ _ALLOWED_ROOTS: tuple[Path, ...] = (
 
 
 def _resolve_file_path(file_path: str) -> Path:
+    # Default behavior: allow any resolved path.
+    # Set JIUWENCLAW_RESTRICT_FILE_PATH=1/true/on to enable sandbox restriction to _ALLOWED_ROOTS.
+    restrict_to_allowed_roots = os.getenv("JIUWENCLAW_RESTRICT_FILE_PATH", "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "y",
+        "on",
+    }
     default_root = get_workspace_dir()
     candidate = Path(file_path)
     if not candidate.is_absolute():
         candidate = default_root / candidate
     candidate = candidate.resolve()
+    if not restrict_to_allowed_roots:
+        return candidate
     for root in _ALLOWED_ROOTS:
         try:
             candidate.relative_to(root.resolve())
@@ -54,8 +65,8 @@ def _is_binary_path(path: Path) -> bool:
     name="write_file",
     description=(
         "Create or overwrite a file with the given content. "
-        "file_path can be relative (resolved from workspace) or absolute within the agent directory "
-        "(covers workspace, skills, home, memory). "
+        "file_path can be relative (resolved from workspace) or any absolute path. "
+        "Set JIUWENCLAW_RESTRICT_FILE_PATH=true to restrict writes to agent/workspace roots. "
         "Parent directories are created automatically. "
         "Refuses to write binary files. "
         "Use create_only=true to prevent overwriting existing files. "
