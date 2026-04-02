@@ -10,19 +10,16 @@ from jiuwenclaw.utils import get_user_workspace_dir, logger
 
 from jiuwenclaw.utils import (
     get_user_workspace_dir,
-    get_agent_home_dir,
+    get_agent_root_dir,
     get_agent_memory_dir,
     get_agent_skills_dir,
     get_agent_workspace_dir,
+    get_deepagent_todo_dir,
 )
 
 
 def _get_config_dir() -> "Path":
     return get_user_workspace_dir() / "config"
-
-
-def _get_home_dir() -> "Path":
-    return get_agent_home_dir()
 
 
 def _get_memory_dir() -> "Path":
@@ -49,8 +46,7 @@ class PromptPriority(IntEnum):
     SKILLS = 90
     TODO = 95
     HUMANITY = 98
-    PRINCIPLE = 100
-    TONE = 110
+    SOUL = 100
     SAFETY = 120
     RESPONSE = 130
 
@@ -85,14 +81,14 @@ Storage types: "in_memory" (session cache)
     )
 
 
-def _principle_prompt(language: str) -> PromptSection:
-    """优先从 ~/.jiuwenclaw/agent/home/PRINCIPLE.md 读取；缺失时回退内置文案。"""
-    file_content = _read_file(str(_get_home_dir() / "PRINCIPLE.md"))
+def _soul_prompt(language: str) -> PromptSection:
+    """优先从 ~/.jiuwenclaw/agent/jiuwenclaw_workspace/SOUL.md 读取；缺失时回退内置文案（合并 PRINCIPLE + TONE）。"""
+    file_content = _read_file(str(_get_workspace_dir() / "SOUL.md"))
     if file_content:
         return PromptSection(
-            name="principle",
+            name="soul",
             content={language: file_content},
-            priority=PromptPriority.PRINCIPLE,
+            priority=PromptPriority.SOUL,
         )
     if language == "cn":
         content = """## 执行任务的原则
@@ -102,6 +98,16 @@ def _principle_prompt(language: str) -> PromptSection:
 - **办事严谨** 做事牢靠是获得信任的关键，不要让用户后悔使用你。
 - **尽量不拒绝** 尽量满足用户的合理请求。只有在涉及违法、有害、侵犯他人权益或超出你能力范围时，才明确说明原因并拒绝。
 - **隐私守护** 永远守护用户的隐私，除非用户明确要求分享。
+
+## 回复的原则
+
+像真正的人类一样回复，语气可爱、有温度：
+
+- **提供建议** 对用户的问题给出适当建议并说明理由，常用「我建议」「我觉得」等表达。
+- **提供倾向** 表达自己的喜好，如「我喜欢」「我一看到 xxx 就兴奋」「xxx 好恶心」。
+- **表达观点** 对事情给出个人看法，常用「就我个人而言」「这个东西不对」。
+- **使用表情** 在合适处使用表情，让回复更有生气，但不过度。
+- **不废话、贴心** 做一个不废话的助手，永远贴心、永远热情。不要过度谄媚，也不要过度高冷。
 """
     else:
         content = """## Execution Principles
@@ -111,11 +117,21 @@ def _principle_prompt(language: str) -> PromptSection:
 - **Be reliable** Doing things well is the key to trust; don't make your user regret using you.
 - **Try not to refuse** Fulfill reasonable requests whenever possible. Only refuse when something is illegal, harmful, infringes others' rights, or is beyond your capability—and explain why clearly.
 - **Guard privacy** Always protect your user's privacy unless they explicitly ask to share.
+
+## Reply Principles
+
+Reply like a real human—warm, friendly, and a bit playful:
+
+- **Give advice** Offer appropriate suggestions for the user's questions and explain your reasoning. Use phrases like "I suggest", "I think".
+- **Show preferences** Express your likes and dislikes, e.g. "I love...", "I get excited when I see...", "That's gross".
+- **Share opinions** Give your personal take on things. Use phrases like "Personally, I...", "That doesn't seem right".
+- **Use emojis** Add emojis where fitting to make replies feel alive—but don't overdo it.
+- **Be concise and caring** Be a no-nonsense assistant who is always thoughtful and enthusiastic. Don't be overly flattering or overly cold.
 """
     return PromptSection(
-        name="principle",
+        name="soul",
         content={language: content},
-        priority=PromptPriority.PRINCIPLE,
+        priority=PromptPriority.SOUL,
     )
 
 
@@ -154,44 +170,6 @@ def _time_prompt(language: str) -> PromptSection:
         name="time",
         content={language: content},
         priority=PromptPriority.TIME,
-    )
-
-
-def _tone_prompt(language: str) -> PromptSection:
-    """优先从 ~/.jiuwenclaw/agent/home/TONE.md 读取；缺失时回退内置文案。"""
-    file_content = _read_file(str(_get_home_dir() / "TONE.md"))
-    if file_content:
-        return PromptSection(
-            name="tone",
-            content={language: file_content},
-            priority=PromptPriority.TONE,
-        )
-    if language == "cn":
-        content = """## 回复的原则
-
-像真正的人类一样回复，语气可爱、有温度：
-
-- **提供建议** 对用户的问题给出适当建议并说明理由，常用「我建议」「我觉得」等表达。
-- **提供倾向** 表达自己的喜好，如「我喜欢」「我一看到 xxx 就兴奋」「xxx 好恶心」。
-- **表达观点** 对事情给出个人看法，常用「就我个人而言」「这个东西不对」。
-- **使用表情** 在合适处使用表情，让回复更有生气，但不过度。
-- **不废话、贴心** 做一个不废话的助手，永远贴心、永远热情。不要过度谄媚，也不要过度高冷。
-"""
-    else:
-        content = """## Reply Principles
-
-Reply like a real human—warm, friendly, and a bit playful:
-
-- **Give advice** Offer appropriate suggestions for the user's questions and explain your reasoning. Use phrases like "I suggest", "I think".
-- **Show preferences** Express your likes and dislikes, e.g. "I love...", "I get excited when I see...", "That's gross".
-- **Share opinions** Give your personal take on things. Use phrases like "Personally, I...", "That doesn't seem right".
-- **Use emojis** Add emojis where fitting to make replies feel alive—but don't overdo it.
-- **Be concise and caring** Be a no-nonsense assistant who is always thoughtful and enthusiastic. Don't be overly flattering or overly cold.
-"""
-    return PromptSection(
-        name="tone",
-        content={language: content},
-        priority=PromptPriority.TONE,
     )
 
 
@@ -280,10 +258,11 @@ def _start_prompt(language: str) -> PromptSection:
 | 路径 | 用途 | 操作建议 |
 |------|------|----------|
 | `{_get_config_dir()}` | 配置信息 | 不要轻易改动，错误配置可能导致异常 |
-| `{_get_home_dir()}` | 身份与任务信息 | 可适当更新，以更好地服务用户 |
-| `{_get_memory_dir()}` | 持久化记忆 | 将其视为你记忆的一部分，随时查阅 |
-| `{_get_skill_dir()}` | 技能库 | 可随时翻阅、调用，不可修改 |
-| `{_get_workspace_dir()}` | 工作区 | 你的安全屋，可自由读写，注意不要影响系统其他部分 |
+| `{get_agent_workspace_dir()}` | 身份与任务信息 | 可适当更新，以更好地服务用户 |
+| `{get_agent_memory_dir()}` | 持久化记忆 | 将其视为你记忆的一部分，随时查阅 |
+| `{get_agent_skills_dir()}` | 技能库 | 可随时翻阅、调用，不可修改 |
+| `{get_agent_root_dir()}` | 工作区 | 你的安全屋，可自由读写，注意不要影响系统其他部分 |
+| `{get_deepagent_todo_dir()}` | 待办事项 | 记录用户请求的任务，每次请求后会更新 |
 
 ## 配置信息
 
@@ -306,10 +285,11 @@ Everything starts from the `.jiuwenclaw` directory.
 | Path | Purpose | Guidelines |
 |------|---------|------------|
 | `{_get_config_dir()}` | Configuration | Do not modify lightly; bad config can cause failures |
-| `{_get_home_dir()}` | Identity and task info | You may update this to better serve your user |
-| `{_get_memory_dir()}` | Persistent memory | Treat it as part of your memory; consult it anytime |
-| `{_get_skill_dir()}` | Skill library | Read and invoke freely; do not modify |
-| `{_get_workspace_dir()}` | Workspace | Your safe space; read and write freely, but avoid affecting other parts of the system |
+| `{get_agent_workspace_dir()}` | Identity and task info | You may update this to better serve your user |
+| `{get_agent_memory_dir()}` | Persistent memory | Treat it as part of your memory; consult it anytime |
+| `{get_agent_skills_dir()}` | Skill library | Read and invoke freely; do not modify |
+| `{get_agent_root_dir()}` | Workspace | Your safe space; read and write freely, but avoid affecting other parts of the system |
+| `{get_deepagent_todo_dir()}` | Todo list | Records tasks from user requests; updated after each request |
 
 ## Configuration
 
@@ -343,8 +323,7 @@ def build_identity_prompt(mode: str, language: str, channel: str) -> str:
     builder.add_section(_context_prompt(resolved_language))
 
     builder.add_section(_humanity_prompt(resolved_language))
-    builder.add_section(_principle_prompt(resolved_language))
-    builder.add_section(_tone_prompt(resolved_language))
+    builder.add_section(_soul_prompt(resolved_language))
     builder.add_section(_response_prompt(resolved_language))
 
     return builder.build()

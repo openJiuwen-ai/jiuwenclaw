@@ -104,7 +104,7 @@ from jiuwenclaw.agentserver.tools.xiaoyi_phone_tools import (
 from jiuwenclaw.config import get_config, resolve_env_vars
 from jiuwenclaw.gateway.cron import CronController, CronTargetChannel
 from jiuwenclaw.schema.agent import AgentRequest, AgentResponse, AgentResponseChunk
-from jiuwenclaw.utils import get_env_file, get_agent_root_dir, get_checkpoint_dir
+from jiuwenclaw.utils import get_env_file, get_agent_root_dir, get_checkpoint_dir, get_agent_skills_dir
 
 load_dotenv(dotenv_path=get_env_file())
 
@@ -241,16 +241,6 @@ class JiuWenClawDeepAdapter:
         """Resolve normalized runtime language shared by rails and tools."""
         return resolve_language(self._resolve_prompt_language())
 
-    def _get_skills_dir(self) -> str:
-        """Return the skills directory path via workspace node resolution."""
-        if self._instance is not None:
-            workspace = self._instance._deep_config.workspace
-        else:
-            workspace = Workspace(root_path=self._workspace_dir or "./")
-        path = workspace.get_node_path(WorkspaceNode.SKILLS)
-        if path is not None:
-            return str(path)
-        return str(Path(self._workspace_dir) / WorkspaceNode.SKILLS.value)
 
     @staticmethod
     def _browser_runtime_enabled() -> bool:
@@ -621,7 +611,7 @@ class JiuWenClawDeepAdapter:
             skill_mode = self._resolve_skill_mode(config)
             logger.info("[JiuWenClawDeepAdapter] current skill_mode: %s", skill_mode)
             skill_rail = SkillUseRail(
-                skills_dir=self._get_skills_dir(),
+                skills_dir=get_agent_skills_dir(),
                 skill_mode=skill_mode,
                 include_tools=include_tools,
             )
@@ -673,7 +663,7 @@ class JiuWenClawDeepAdapter:
             else:
                 evolution_auto_scan = config.get("evolution", {}).get("auto_scan", False)
             skill_evolution_rail = SkillEvolutionRail(
-                skills_dir=self._get_skills_dir(),
+                skills_dir=get_agent_skills_dir(),
                 llm=self._model,
                 model=config.get("model_name", "gpt-4"),
                 auto_scan=evolution_auto_scan,
