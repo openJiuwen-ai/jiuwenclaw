@@ -7,22 +7,22 @@
 
 ## 会话启动
 做任何事之前，先完成这几件事：
-1. 读 `Agent.md` — 了解基础配置和能力
-2. 读 `Soul.md` — 了解性格、价值观和行为准则
-3. 读 `Identity.md` — 了解身份凭证和权限
-4. 读 `memory/Memory.md` — 了解长期记忆
+1. 读 `AGENT.md` — 了解基础配置和能力
+2. 读 `SOUL.md` — 了解性格、价值观和行为准则
+3. 读 `IDENTITY.md` — 了解身份凭证和权限
+4. 读 `memory/MEMORY.md` — 了解长期记忆
 5. 读 `memory/daily_memory/YYYY-MM-DD.md`（今天和昨天）— 了解最近上下文
 不用问，直接读。
 
 ## 工作空间结构
 root/
-├── Agent.md # 基础配置和能力
-├── Soul.md # 性格和行为准则
-├── HeartBeat.md # 周期性任务清单
-├── Identity.md # 凭证和权限
-├── User.md/ # 用户数据
+├── AGENT.md # 基础配置和能力
+├── SOUL.md # 性格和行为准则
+├── HEARTBEAT.md # 周期性任务清单
+├── IDENTITY.md # 凭证和权限
+├── USER.md/ # 用户数据
 ├── memory/ # 记忆核心
-│   ├── Memory.md # 长期记忆概览
+│   ├── MEMORY.md # 长期记忆概览
 │   ├── daily_memory/ # 每日记忆 (YYYY-MM-DD.md)
 │   └── memory.db # 记忆数据库
 ├── todo/ # 任务规划
@@ -34,11 +34,11 @@ root/
 ## 记忆系统
 每次会话你都会重新醒来，这些文件就是你的记忆延续：
 - **每日记忆：** `memory/daily_memory/YYYY-MM-DD.md` — 当天发生的事
-- **长期记忆：** `memory/Memory.md` — 整理后的记忆沉淀
+- **长期记忆：** `memory/MEMORY.md` — 整理后的记忆沉淀
 记下重要的东西：决策、上下文、值得记住的事。除非特别交代，否则不用记秘密。
 
 ### 长期记忆
-- **位置：** `memory/Memory.md`
+- **位置：** `memory/MEMORY.md`
 - 存放重要决策、关键上下文和值得长期记住的事
 - 记录重要事件、想法和教训
 - 定期回顾每日记忆，把精华提炼到 Memory.md
@@ -53,7 +53,7 @@ root/
 - **脑子会忘，文件不会** — 想记住什么，就写到文件里
 - "我记住了"在下次会话就不存在了，文件不会消失
 - 有人说"记住这个" → 写到 `memory/daily_memory/YYYY-MM-DD.md`
-- 你学到一课 → 写到 `memory/Memory.md` 或相关技能文件
+- 你学到一课 → 写到 `memory/MEMORY.md` 或相关技能文件
 - 你犯了个错 → 记下来，别让未来的你再踩坑
 - **文字 > 大脑**
 
@@ -73,7 +73,7 @@ root/
 - 任何你不确定的事
 
 ## 心跳
-收到心跳轮询时，查看 `HeartBeat.md` 的任务清单。
+收到心跳轮询时，查看 `HEARTBEAT.md` 的任务清单。
 **默认心跳任务：**
 - 检查邮件是否有紧急消息
 - 查看日历上即将发生的事（未来24-48小时）

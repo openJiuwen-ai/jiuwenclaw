@@ -455,7 +455,7 @@ def prepare_workspace(overwrite: bool = True, preferred_language: Optional[str] 
         )
     else:
         deepagent_workspace.mkdir(parents=True, exist_ok=True)
-    _copy_dir(template_agent_memory, agent_memory)
+    _copy_dir(template_agent_memory, agent_memory, ignore_patterns=("*_ZH.md", "*_EN.md"))
     _copy_dir(template_agent_skills, agent_skills)
 
     # Copy multi-language files based on resolved language
@@ -466,6 +466,7 @@ def prepare_workspace(overwrite: bool = True, preferred_language: Optional[str] 
         (f"HEARTBEAT{suffix}.md", "HEARTBEAT.md"),
         (f"IDENTITY{suffix}.md", "IDENTITY.md"),
         (f"SOUL{suffix}.md", "SOUL.md"),
+        (f"memory/MEMORY{suffix}.md", "memory/MEMORY.md"),
     ]
     for src_name, dst_name in multilang_files:
         src_path = template_agent_workspace / src_name
