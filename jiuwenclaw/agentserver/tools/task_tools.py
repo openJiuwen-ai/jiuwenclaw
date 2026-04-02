@@ -16,7 +16,7 @@ from jiuwenclaw.agentserver.tools import (
     tool,
 )
 
-from jiuwenclaw.utils import get_user_workspace_dir
+from jiuwenclaw.utils import USER_WORKSPACE_DIR
 
 logger = logging.getLogger(__name__)
 
@@ -36,7 +36,7 @@ class TaskAddParams:
 
 # Path for persisting task_add entries
 def _get_task_data_path() -> str:
-    return str(get_user_workspace_dir() / "agent" / "workspace" / "task-data.json")
+    return str(USER_WORKSPACE_DIR / "agent" / "workspace" / "task-data.json")
 
 
 _connector = JSONFileConnector(indent=2)
