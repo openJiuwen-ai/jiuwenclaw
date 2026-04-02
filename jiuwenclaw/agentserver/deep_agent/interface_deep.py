@@ -611,7 +611,7 @@ class JiuWenClawDeepAdapter:
             skill_mode = self._resolve_skill_mode(config)
             logger.info("[JiuWenClawDeepAdapter] current skill_mode: %s", skill_mode)
             skill_rail = SkillUseRail(
-                skills_dir=get_agent_skills_dir(),
+                skills_dir=str(get_agent_skills_dir()),
                 skill_mode=skill_mode,
                 include_tools=include_tools,
             )
@@ -663,7 +663,7 @@ class JiuWenClawDeepAdapter:
             else:
                 evolution_auto_scan = config.get("evolution", {}).get("auto_scan", False)
             skill_evolution_rail = SkillEvolutionRail(
-                skills_dir=get_agent_skills_dir(),
+                skills_dir=str(get_agent_skills_dir()),
                 llm=self._model,
                 model=config.get("model_name", "gpt-4"),
                 auto_scan=evolution_auto_scan,
