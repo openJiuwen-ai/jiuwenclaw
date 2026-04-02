@@ -1,37 +1,15 @@
 {
-  "home": [
-    {
-      "name": "PRINCIPLE.md",
-      "path": "agent/home/PRINCIPLE.md",
-      "isMarkdown": true
-    },
-    {
-      "name": "TONE.md",
-      "path": "agent/home/TONE.md",
-      "isMarkdown": true
-    }
-  ],
   "jiuwenclaw_workspace": [
     {
       "name": "agent-data.json",
       "path": "agent/jiuwenclaw_workspace/agent-data.json",
       "isMarkdown": false
-    },
-    {
-      "name": "HeartBeat.md",
-      "path": "agent/jiuwenclaw_workspace/HeartBeat.md",
-      "isMarkdown": true
     }
   ],
   "jiuwenclaw_workspace/memory": [
     {
       "name": "MEMORY.md",
       "path": "agent/jiuwenclaw_workspace/memory/MEMORY.md",
-      "isMarkdown": true
-    },
-    {
-      "name": "USER.md",
-      "path": "agent/jiuwenclaw_workspace/memory/USER.md",
       "isMarkdown": true
     }
   ],

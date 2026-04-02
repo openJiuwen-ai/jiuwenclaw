@@ -5,11 +5,10 @@
 Runtime layout:
 - ~/.jiuwenclaw/config/config.yaml
 - ~/.jiuwenclaw/config/.env
-- ~/.jiuwenclaw/agent/home（PRINCIPLE.md / TONE.md）
+- ~/.jiuwenclaw/agent/home
 - ~/.jiuwenclaw/agent/jiuwenclaw_workspace（DeepAgent 标准工作空间）
   - memory/
   - skills/
-  - HeartBeat.md
   - todo/
   - messages/
   - agents/
@@ -18,7 +17,9 @@ Runtime layout:
 - ~/.jiuwenclaw/.checkpoint
 - ~/.jiuwenclaw/.logs（gateway.log / channel.log / agent_server.log / full.log）
 
-内置模板位于包内 ``jiuwenclaw/resources/``（含 ``agent/`` 下 HEARTBEAT_ZH/EN、PRINCIPLE、TONE 等，以及 ``skills_state.json``）。
+内置模板位于包内 ``jiuwenclaw/resources/``（含 ``agent/`` 下各技能模板以及 ``skills_state.json``）。
+注意：PRINCIPLE.md、TONE.md、HEARTBEAT.md 已被 SOUL.md 和新的心跳机制替代，
+不再由 JiuwenClaw 复制到用户工作区。这些文件仅在旧版中用于初始化，新版由 DeepAgents SDK 自行管理。
 """
 
 import os
@@ -332,11 +333,9 @@ def prompt_preferred_language() -> Optional[Literal["zh", "en"]]:
     print("[jiuwenclaw-init] ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
     print("[jiuwenclaw-init]   [1] 中文（简体）")
     print("[jiuwenclaw-init]       → config: preferred_language: zh")
-    print("[jiuwenclaw-init]       → 复制 PRINCIPLE_ZH.md / TONE_ZH.md 为 home/PRINCIPLE.md、TONE.md")
     print("[jiuwenclaw-init]   ────────────────────────────────────────────")
     print("[jiuwenclaw-init]   [2] English")
     print("[jiuwenclaw-init]       → config: preferred_language: en")
-    print("[jiuwenclaw-init]       → copy PRINCIPLE_EN.md / TONE_EN.md → home/PRINCIPLE.md, TONE.md")
     print("[jiuwenclaw-init] ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
     print("[jiuwenclaw-init]  须明确选择：1 / 2 / zh / en（无默认语言）")
     print("[jiuwenclaw-init]  取消：no / n / q / cancel / 取消")
@@ -442,22 +441,6 @@ def prepare_workspace(overwrite: bool = True, preferred_language: Optional[str] 
     _copy_dir(template_agent_memory, agent_memory)
     _copy_dir(template_agent_skills, agent_skills)
 
-    # home: 按语言将 PRINCIPLE/TONE/HEARTBEAT 模板复制为无后缀的 .md
-    if overwrite and agent_home.exists():
-        shutil.rmtree(agent_home)
-    agent_home.mkdir(parents=True, exist_ok=True)
-    suffix = "_ZH" if resolved_lang == "zh" else "_EN"
-    _principle_src = template_agent_dir / f"PRINCIPLE{suffix}.md"
-    _tone_src = template_agent_dir / f"TONE{suffix}.md"
-    _heartbeat_src = template_agent_dir / f"HEARTBEAT{suffix}.md"
-    if _principle_src.exists():
-        shutil.copy2(_principle_src, agent_home / "PRINCIPLE.md")
-    if _tone_src.exists():
-        shutil.copy2(_tone_src, agent_home / "TONE.md")
-    if _heartbeat_src.exists():
-        # Copy to DeepAgent standard location (unified workspace)
-        deepagent_workspace.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(_heartbeat_src, deepagent_workspace / "HeartBeat.md")
 
     # skills state: shipped under resources/
     skills_state_src = template_root / "skills_state.json"
@@ -480,12 +463,15 @@ def init_user_workspace(overwrite: bool = True) -> Path | Literal["cancelled"]:
     资源布局:
     - 模板配置:   <package_root>/resources/config.yaml
     - .env 模板: <package_root>/resources/.env.template
-    - 数据模板:   <package_root>/resources/agent（含 HEARTBEAT_ZH/EN 等）、skills_state.json
+    - 数据模板:   <package_root>/resources/agent（含各技能模板）、skills_state.json
 
     上述内容会被复制到:
     - ~/.jiuwenclaw/config/config.yaml（含 preferred_language）
     - ~/.jiuwenclaw/config/.env
-    - ~/.jiuwenclaw/agent/...（home 下 PRINCIPLE.md / TONE.md 由所选语言决定）
+    - ~/.jiuwenclaw/agent/...
+
+    注意：PRINCIPLE.md、TONE.md、HEARTBEAT.md 已被 SOUL.md 和新的心跳机制替代，
+    不再由 JiuwenClaw 复制到用户工作区。
 
     交互式 init 会先询问语言；首次启动 app 时非交互 prepare_workspace 则沿用模板 config 中的语言。
     """
@@ -635,12 +621,12 @@ def get_deepagent_agents_dir() -> Path:
 
 
 def get_deepagent_heartbeat_path() -> Path:
-    """Get the DeepAgent HeartBeat.md file path.
+    """Get the DeepAgent HEARTBEAT.md file path.
 
     Returns:
-        Path to HeartBeat.md: ~/.jiuwenclaw/agent/jiuwenclaw_workspace/HeartBeat.md
+        Path to HEARTBEAT.md: ~/.jiuwenclaw/agent/jiuwenclaw_workspace/HEARTBEAT.md
     """
-    return get_agent_workspace_dir() / "HeartBeat.md"
+    return get_agent_workspace_dir() / "HEARTBEAT.md"
 
 
 def get_deepagent_agent_md_path() -> Path:
@@ -653,12 +639,12 @@ def get_deepagent_agent_md_path() -> Path:
 
 
 def get_deepagent_soul_md_path() -> Path:
-    """Get the DeepAgent Soul.md file path.
+    """Get the DeepAgent SOUL.md file path.
 
     Returns:
-        Path to Soul.md: ~/.jiuwenclaw/agent/jiuwenclaw_workspace/Soul.md
+        Path to SOUL.md: ~/.jiuwenclaw/agent/jiuwenclaw_workspace/SOUL.md
     """
-    return get_agent_workspace_dir() / "Soul.md"
+    return get_agent_workspace_dir() / "SOUL.md"
 
 
 def get_deepagent_identity_md_path() -> Path:
@@ -671,12 +657,12 @@ def get_deepagent_identity_md_path() -> Path:
 
 
 def get_deepagent_user_md_path() -> Path:
-    """Get the DeepAgent User.md file path.
+    """Get the DeepAgent USER.md file path.
 
     Returns:
-        Path to User.md: ~/.jiuwenclaw/agent/jiuwenclaw_workspace/User.md
+        Path to USER.md: ~/.jiuwenclaw/agent/jiuwenclaw_workspace/USER.md
     """
-    return get_agent_workspace_dir() / "User.md"
+    return get_agent_workspace_dir() / "USER.md"
 
 
 def get_builtin_skills_dir() -> Path:

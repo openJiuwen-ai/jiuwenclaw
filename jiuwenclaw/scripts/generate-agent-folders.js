@@ -49,15 +49,6 @@ try {
     let displayPath = relativeFolderPath === '.'
       ? `agent/${displayName}`
       : `agent/${relativeFolderPath.replace(/\\/g, '/')}/${displayName}`;
-    // PRINCIPLE/TONE 运行时在 agent/home/；HEARTBEAT 运行时在 agent/jiuwenclaw_workspace/
-    if (folderKey === ROOT_FOLDER_KEY && ['principle.md', 'tone.md'].includes(displayName.toLowerCase())) {
-      folderKey = 'home';
-      displayPath = `agent/home/${displayName}`;
-    } else if (folderKey === ROOT_FOLDER_KEY && displayName.toLowerCase() === 'heartbeat.md') {
-      folderKey = 'jiuwenclaw_workspace';
-      displayName = 'HeartBeat.md';
-      displayPath = `agent/jiuwenclaw_workspace/${displayName}`;
-    }
 
     if (!seenPaths[folderKey]) seenPaths[folderKey] = new Set();
     if (seenPaths[folderKey].has(displayPath)) return;

@@ -1604,10 +1604,6 @@ class SkillManager:
                 if relative_folder_path != "."
                 else f"agent/{display_name}"
             )
-            # PRINCIPLE/TONE 模板在 agent 根目录，运行时在 agent/home/
-            if folder_key == root_folder_key and display_name.lower() in ("principle.md", "tone.md"):
-                folder_key = "home"
-                display_path = f"agent/home/{display_name}"
 
             seen = seen_paths.setdefault(folder_key, set())
             if display_path in seen:

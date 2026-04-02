@@ -86,16 +86,6 @@ def _generate_agent_data(project_root: Path) -> None:
             if relative_folder_path != "."
             else f"agent/{display_name}"
         )
-        # PRINCIPLE/TONE 模板在 agent 根目录，运行时在 agent/home/
-        if folder_key == root_folder_key and display_name.lower() in ("principle.md", "tone.md"):
-            folder_key = "home"
-            display_path = f"agent/home/{display_name}"
-        # HEARTBEAT 模板在 agent 根目录，运行时在 agent/jiuwenclaw_workspace/
-        elif folder_key == root_folder_key and display_name.lower() == "heartbeat.md":
-            folder_key = "jiuwenclaw_workspace"
-            display_name = "HeartBeat.md"
-            display_path = f"agent/jiuwenclaw_workspace/{display_name}"
-
         seen = seen_paths.setdefault(folder_key, set())
         if display_path in seen:
             continue  # 同一文件夹内 _zh 与 _en 并存时只保留先出现的
