@@ -185,7 +185,7 @@ async def test_interface_deep_browser_subagent_task_tool_chain(
         patch.object(interface_module.JiuWenClawDeepAdapter, "_register_runtime_tools", AsyncMock()),
         patch.object(interface_module.JiuWenClawDeepAdapter, "_refresh_multimodal_configs", return_value=None),
         patch(
-            "openjiuwen.deepagents.subagents.browser_agent.BrowserAgentRuntime",
+            "openjiuwen.harness.subagents.browser_agent.BrowserAgentRuntime",
             return_value=runtime,
         ),
         patch("openjiuwen.core.foundation.llm.model.Model.invoke", side_effect=mock_llm.invoke),

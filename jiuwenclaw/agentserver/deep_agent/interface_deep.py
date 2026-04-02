@@ -27,35 +27,35 @@ from openjiuwen.core.session.checkpointer.checkpointer import CheckpointerConfig
 from openjiuwen.core.session.checkpointer.persistence import PersistenceCheckpointerProvider
 from openjiuwen.core.single_agent import AgentCard, ReActAgentConfig
 from openjiuwen.core.sys_operation import SysOperation, SysOperationCard, OperationMode, LocalWorkConfig
-from openjiuwen.deepagents import (
+from openjiuwen.harness import (
     AudioModelConfig,
     DeepAgent,
     DeepAgentConfig,
     VisionModelConfig,
 )
-from openjiuwen.deepagents.factory import create_deep_agent
-from openjiuwen.deepagents.prompts import resolve_language
-from openjiuwen.deepagents.rails import SkillUseRail, TaskPlanningRail, SecurityRail, SkillEvolutionRail
-from openjiuwen.deepagents.rails.context_engineering_rail import ContextEngineeringRail
-from openjiuwen.deepagents.rails.filesystem_rail import FileSystemRail
-from openjiuwen.deepagents.rails.heartbeat_rail import HeartbeatRail
+from openjiuwen.harness.factory import create_deep_agent
+from openjiuwen.harness.prompts import resolve_language
+from openjiuwen.harness.rails import SkillUseRail, TaskPlanningRail, SecurityRail, SkillEvolutionRail
+from openjiuwen.harness.rails.context_engineering_rail import ContextEngineeringRail
+from openjiuwen.harness.rails.filesystem_rail import FileSystemRail
+from openjiuwen.harness.rails.heartbeat_rail import HeartbeatRail
 from openjiuwen.agent_evolving.online.schema import (
     EvolutionContext,
     EvolutionRecord,
     EvolutionTarget,
 )
 from openjiuwen.agent_evolving.online.signal_detector import SignalDetector
-from openjiuwen.deepagents.rails.memory_rail import MemoryRail
-from openjiuwen.deepagents.subagents.browser_agent import build_browser_agent_config
-from openjiuwen.deepagents.tools import (
+from openjiuwen.harness.rails.memory_rail import MemoryRail
+from openjiuwen.harness.subagents.browser_agent import build_browser_agent_config
+from openjiuwen.harness.tools import (
     WebFetchWebpageTool,
     WebFreeSearchTool,
     WebPaidSearchTool,
     create_audio_tools,
     create_vision_tools,
 )
-from openjiuwen.deepagents.tools.todo import TodoStatus, TodoModifyTool
-from openjiuwen.deepagents.workspace.workspace import Workspace, WorkspaceNode
+from openjiuwen.harness.tools.todo import TodoStatus, TodoModifyTool
+from openjiuwen.harness.workspace.workspace import Workspace, WorkspaceNode
 
 from jiuwenclaw.agentserver.deep_agent.cron_runtime import CronRuntimeBridge
 from jiuwenclaw.agentserver.deep_agent.interrupt.interrupt_helpers import (

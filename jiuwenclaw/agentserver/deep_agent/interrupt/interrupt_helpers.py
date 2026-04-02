@@ -72,7 +72,7 @@ def build_ask_user_rail() -> Any | None:
     Returns:
         AskUserRail instance or None if creation failed
     """
-    from openjiuwen.deepagents.rails.interrupt.ask_user_rail import AskUserRail
+    from openjiuwen.harness.rails.interrupt.ask_user_rail import AskUserRail
 
     try:
         ask_user_rail = AskUserRail()

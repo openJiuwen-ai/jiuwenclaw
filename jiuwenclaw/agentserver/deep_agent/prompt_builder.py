@@ -5,7 +5,7 @@ from datetime import datetime, timezone, timedelta
 from enum import IntEnum
 from typing import Optional
 
-from openjiuwen.deepagents.prompts import SystemPromptBuilder, PromptSection, resolve_language
+from openjiuwen.harness.prompts import SystemPromptBuilder, PromptSection, resolve_language
 from jiuwenclaw.utils import get_user_workspace_dir, logger
 
 from jiuwenclaw.utils import (

@@ -140,11 +140,11 @@ class SkillManager:
     """Skill 管理器，对应 skills.* 请求方法."""
 
     def __init__(self, workspace_dir: str | None = None) -> None:
-        # 若传入 workspace_dir（deepagents adapter 使用），优先通过 Workspace/WorkspaceNode
+        # 若传入 workspace_dir（harness adapter 使用），优先通过 Workspace/WorkspaceNode
         # 解析 skills 路径；否则使用全局默认路径（react adapter 或无参数时）。
         if workspace_dir is not None:
             try:
-                from openjiuwen.deepagents.workspace.workspace import Workspace, WorkspaceNode
+                from openjiuwen.harness.workspace.workspace import Workspace, WorkspaceNode
                 workspace = Workspace(root_path=workspace_dir)
                 skills_path = workspace.get_node_path(WorkspaceNode.SKILLS)
                 self._skills_dir: Path = (

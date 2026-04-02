@@ -18,7 +18,7 @@ from jiuwenclaw.schema.agent import AgentRequest, AgentResponse, AgentResponseCh
 logger = logging.getLogger(__name__)
 
 _SDK_ENV_VAR = "JIUWENCLAW_AGENT_SDK"
-_DEFAULT_SDK = "deepagents"
+_DEFAULT_SDK = "harness"
 
 
 @runtime_checkable
@@ -87,20 +87,20 @@ def resolve_sdk_choice() -> str:
     """Resolve SDK choice from environment variable.
 
     Returns:
-        SDK name: 'deepagents', 'react', or 'pi' (reserved).
+        SDK name: 'harness', 'react', or 'pi' (reserved).
 
     Behavior:
-        - If env var is unset or empty: return 'deepagents' (default).
-        - If env var is 'deepagents' or 'react': return as-is.
+        - If env var is unset or empty: return 'harness' (default).
+        - If env var is 'harness' or 'react': return as-is.
         - If env var is 'pi': return 'pi' (not yet implemented).
-        - If env var is unknown: log warning and fallback to 'deepagents'.
+        - If env var is unknown: log warning and fallback to 'harness'.
     """
     raw = os.getenv(_SDK_ENV_VAR, "").strip().lower()
     if not raw:
         logger.debug("[SDK] %s not set, using default: %s", _SDK_ENV_VAR, _DEFAULT_SDK)
         return _DEFAULT_SDK
 
-    valid_sdks = {"deepagents", "react", "pi"}
+    valid_sdks = {"harness", "react", "pi"}
     if raw in valid_sdks:
         logger.info("[SDK] Resolved SDK: %s", raw)
         return raw
@@ -128,7 +128,7 @@ def create_adapter(sdk: str | None = None) -> AgentAdapter:
     """
     sdk_name = sdk or resolve_sdk_choice()
 
-    if sdk_name == "deepagents":
+    if sdk_name == "harness":
         from jiuwenclaw.agentserver.deep_agent.interface_deep import JiuWenClawDeepAdapter
         return JiuWenClawDeepAdapter()
 
@@ -139,9 +139,9 @@ def create_adapter(sdk: str | None = None) -> AgentAdapter:
     if sdk_name == "pi":
         raise NotImplementedError(
             f"SDK '{sdk_name}' is not yet implemented. "
-            f"Currently supported: deepagents, react"
+            f"Currently supported: harness, react"
         )
 
     raise RuntimeError(
-        f"Unknown SDK '{sdk_name}'. Supported: deepagents, react, pi (reserved)"
+        f"Unknown SDK '{sdk_name}'. Supported: harness, react, pi (reserved)"
     )

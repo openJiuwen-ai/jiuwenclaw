@@ -14,11 +14,11 @@ from openjiuwen.core.foundation.llm.schema.tool_call import ToolCall
 from openjiuwen.core.single_agent.interrupt.response import InterruptRequest
 from openjiuwen.core.single_agent.interrupt.state import INTERRUPT_AUTO_CONFIRM_KEY
 from openjiuwen.core.single_agent.rail.base import AgentCallbackContext
-from openjiuwen.deepagents.rails.interrupt.confirm_rail import (
+from openjiuwen.harness.rails.interrupt.confirm_rail import (
     ConfirmInterruptRail,
     ConfirmPayload,
 )
-from openjiuwen.deepagents.rails.interrupt.interrupt_base import InterruptDecision
+from openjiuwen.harness.rails.interrupt.interrupt_base import InterruptDecision
 
 from jiuwenclaw.agentserver.deep_agent.permissions.core import PermissionEngine
 from jiuwenclaw.agentserver.deep_agent.permissions.checker import TOOL_PERMISSION_CHANNEL_ID
