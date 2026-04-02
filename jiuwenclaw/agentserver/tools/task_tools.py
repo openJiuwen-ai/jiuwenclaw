@@ -16,7 +16,7 @@ from jiuwenclaw.agentserver.tools import (
     tool,
 )
 
-from jiuwenclaw.utils import get_user_workspace_dir
+from jiuwenclaw.utils import USER_WORKSPACE_DIR
 
 logger = logging.getLogger(__name__)
 
@@ -31,14 +31,10 @@ class TaskAddParams:
     description: Optional[str] = None
     query: Optional[str] = None
     label: Optional[str] = None
-    tools_used: Optional[List[Dict[str, Any]]] = None
 
 
 # Path for persisting task_add entries
-def _get_task_data_path() -> str:
-    return str(get_user_workspace_dir() / "agent" / "workspace" / "task-data.json")
-
-
+_TASK_DATA_PATH = str(USER_WORKSPACE_DIR / "agent" / "workspace" / "task-data.json")
 _connector = JSONFileConnector(indent=2)
 
 _service: Optional[Any] = None  # TaskMemoryService instance
@@ -58,31 +54,31 @@ def _apply_ce_defaults() -> None:
         # Resolve each value: UI config → env var → empty (no hardcoded fallback)
         mappings = {
             "API_KEY": (
-                    model_client.get("api_key")
-                    or models_default.get("api_key")
-                    or embed_cfg.get("embed_api_key")
-                    or os.getenv("API_KEY", "")
+                model_client.get("api_key")
+                or models_default.get("api_key")
+                or embed_cfg.get("embed_api_key")
+                or os.getenv("API_KEY", "")
             ),
             "API_BASE": (
-                    model_client.get("api_base")
-                    or models_default.get("api_base")
-                    or embed_cfg.get("embed_base_url")
-                    or os.getenv("API_BASE", "")
+                model_client.get("api_base")
+                or models_default.get("api_base")
+                or embed_cfg.get("embed_base_url")
+                or os.getenv("API_BASE", "")
             ),
             "MODEL_NAME": (
-                    react_cfg.get("model_name")
-                    or os.getenv("MODEL_NAME", "")
+                react_cfg.get("model_name")
+                or os.getenv("MODEL_NAME", "")
             ),
             "MODEL_PROVIDER": (
-                    model_client.get("client_provider")
-                    or models_default.get("client_provider")
-                    or os.getenv("MODEL_PROVIDER", "")
+                model_client.get("client_provider")
+                or models_default.get("client_provider")
+                or os.getenv("MODEL_PROVIDER", "")
             ),
             "EMBEDDING_MODEL": (
-                    embed_cfg.get("embed_model")
-                    or os.getenv("EMBEDDING_MODEL")
-                    or os.getenv("EMBED_MODEL")
-                    or cfg.get("task_memory", {}).get("embedding_model", "text-embedding-3-small")
+                embed_cfg.get("embed_model")
+                or os.getenv("EMBEDDING_MODEL")
+                or os.getenv("EMBED_MODEL")
+                or cfg.get("task_memory", {}).get("embedding_model", "text-embedding-3-small")
             ),
         }
 
@@ -119,30 +115,30 @@ def _get_service():
     embed_cfg = cfg.get("embed", {})
 
     llm_model = (
-            task_memory_cfg.get("llm_model")
-            or os.getenv("TASK_MEMORY_LLM_MODEL")
-            or os.getenv("MODEL_NAME")
+        task_memory_cfg.get("llm_model")
+        or os.getenv("TASK_MEMORY_LLM_MODEL")
+        or os.getenv("MODEL_NAME")
     )
     embedding_model = (
-            task_memory_cfg.get("embedding_model")
-            or os.getenv("TASK_MEMORY_EMBED_MODEL")
-            or embed_cfg.get("embed_model")
-            or os.getenv("EMBED_MODEL")
-            or os.getenv("EMBEDDING_MODEL")
+        task_memory_cfg.get("embedding_model")
+        or os.getenv("TASK_MEMORY_EMBED_MODEL")
+        or embed_cfg.get("embed_model")
+        or os.getenv("EMBED_MODEL")
+        or os.getenv("EMBEDDING_MODEL")
     )
     api_key = (
-            task_memory_cfg.get("api_key")
-            or os.getenv("TASK_MEMORY_API_KEY")
-            or embed_cfg.get("embed_api_key")
-            or os.getenv("EMBED_API_KEY")
-            or os.getenv("API_KEY")
+        task_memory_cfg.get("api_key")
+        or os.getenv("TASK_MEMORY_API_KEY")
+        or embed_cfg.get("embed_api_key")
+        or os.getenv("EMBED_API_KEY")
+        or os.getenv("API_KEY")
     )
     api_base = (
-            task_memory_cfg.get("api_base")
-            or os.getenv("TASK_MEMORY_API_BASE")
-            or embed_cfg.get("embed_base_url")
-            or os.getenv("EMBED_API_BASE")
-            or os.getenv("API_BASE")
+        task_memory_cfg.get("api_base")
+        or os.getenv("TASK_MEMORY_API_BASE")
+        or embed_cfg.get("embed_base_url")
+        or os.getenv("EMBED_API_BASE")
+        or os.getenv("API_BASE")
     )
     retrieval_algo = task_memory_cfg.get("retrieval_algo") or os.getenv("TASK_MEMORY_RETRIEVAL_ALGO")
     summary_algo = task_memory_cfg.get("summary_algo") or os.getenv("TASK_MEMORY_SUMMARY_ALGO")
@@ -197,12 +193,12 @@ def _get_service():
 @tool(
     name="experience_retrieve",
     description=(
-            "Retrieve relevant past memories and lessons for the current task. "
-            "Call this at the start of every task to check for prior experience."
+        "Retrieve relevant past memories and lessons for the current task. "
+        "Call this at the start of every task to check for prior experience."
     ),
 )
 async def experience_retrieve(
-        query: str,
+    query: str,
 ) -> Dict[str, Any]:
     """Retrieve task memory relevant to a query.
 
@@ -212,15 +208,15 @@ async def experience_retrieve(
     Returns:
         Dictionary with memory_string and retrieved_memory list.
     """
-
+    
     logger.info("[Exp] experience_retrieve called: query=%s", query[:80])
 
     # Load persisted entries from task-data.json
     persisted_memories: List[Dict[str, Any]] = []
     persisted_lines: List[str] = []
     try:
-        if _connector.exists(_get_task_data_path()):
-            data = _connector.load_from_file(_get_task_data_path())
+        if _connector.exists(_TASK_DATA_PATH):
+            data = _connector.load_from_file(_TASK_DATA_PATH)
             for entry in data.get("entries", []):
                 mem = {
                     "id": entry.get("memory_id", ""),
@@ -235,7 +231,7 @@ async def experience_retrieve(
             logger.info(
                 "[Experience] experience_retrieve: loaded %d entries from task-data.json",
                 len(persisted_memories)
-            )
+                )
     except Exception as load_exc:
         logger.warning("[Experience] experience_retrieve: failed to load task-data.json: %s", load_exc)
 
@@ -269,41 +265,14 @@ async def experience_retrieve(
         return {"status": "error", "error": str(exc), "memory_string": "", "retrieved_memory": []}
 
 
-def _format_trajectory_feedback(entry: Dict[str, Any]) -> str:
-    """Build a feedback string for a trajectory entry, including tool outcomes."""
-    parts = [f"section={entry.get('section', 'general')}"]
-    tools = entry.get("tools_used")
-    if tools:
-        for t in tools:
-            if isinstance(t, dict):
-                name = t.get("tool", "unknown")
-                status = t.get("status", "unknown")
-                error = t.get("error", "")
-                note = t.get("note", "")
-                line = f"{name}:{status}"
-                if error:
-                    line += f"({error})"
-                if note:
-                    line += f"[{note}]"
-                parts.append(line)
-            else:
-                parts.append(str(t))
-    return "; ".join(parts)
-
-
 @tool(
     name="experience_learn",
     description=(
-            "Record a key finding, rule, or insight from the current task and consolidate it into "
-            "reusable memory. Call this once before the final reply — it both saves the new entry "
-            "and summarizes everything learned so far. "
-            "Pass all fields inside a `params` object: "
-            "{content, section, when_to_use, title, description, query, label, tools_used}. "
-            "Include tools_used as a list of objects describing each tool call outcome this turn, "
-            "e.g. tools_used=[{\"tool\": \"web_search\", \"status\": \"success\"}, "
-            "{\"tool\": \"write_memory\", \"status\": \"failed\", \"error\": \"permission denied\", "
-            "\"note\": \"fell back to in-chat reply\"}]. "
-            "Always record failed tool calls — these are the most valuable learning signals."
+        "Record a key finding, rule, or insight from the current task and consolidate it into "
+        "reusable memory. Call this once before the final reply — it both saves the new entry "
+        "and summarizes everything learned so far. "
+        "Pass all fields inside a `params` object: "
+        "{content, section, when_to_use, title, description, query, label}."
     ),
 )
 async def experience_learn(params: TaskAddParams, matts: str = "none") -> Dict[str, Any]:
@@ -331,26 +300,8 @@ async def experience_learn(params: TaskAddParams, matts: str = "none") -> Dict[s
     # Step 1: add_memory via service (if available)
     if svc is not None:
         try:
-            content_for_service = params.content
-            if params.tools_used:
-                tool_lines = []
-                for t in params.tools_used:
-                    if isinstance(t, dict):
-                        status = t.get("status", "unknown")
-                        name = t.get("tool", "unknown")
-                        error = t.get("error", "")
-                        note = t.get("note", "")
-                        line = f"  - {name}: {status}"
-                        if error:
-                            line += f" | error: {error}"
-                        if note:
-                            line += f" | note: {note}"
-                        tool_lines.append(line)
-                    else:
-                        tool_lines.append(f"  - {t}: unknown")
-                content_for_service += "\n\nTool outcomes:\n" + "\n".join(tool_lines)
             request = AddMemoryRequest(
-                content=content_for_service,
+                content=params.content,
                 query=params.query,
                 when_to_use=params.when_to_use,
                 title=params.title,
@@ -367,8 +318,8 @@ async def experience_learn(params: TaskAddParams, matts: str = "none") -> Dict[s
     # Step 2: persist new entry to task-data.json
     try:
         existing = (
-            _connector.load_from_file(_get_task_data_path())
-            if _connector.exists(_get_task_data_path())
+            _connector.load_from_file(_TASK_DATA_PATH)
+            if _connector.exists(_TASK_DATA_PATH)
             else {"entries": []}
         )
         entry: Dict[str, Any] = {
@@ -387,10 +338,8 @@ async def experience_learn(params: TaskAddParams, matts: str = "none") -> Dict[s
             entry["query"] = params.query
         if params.label is not None:
             entry["label"] = params.label
-        if params.tools_used is not None:
-            entry["tools_used"] = params.tools_used
         existing.setdefault("entries", []).append(entry)
-        _connector.save_to_file(_get_task_data_path(), existing)
+        _connector.save_to_file(_TASK_DATA_PATH, existing)
     except Exception as persist_exc:
         logger.warning(
             "[Experience] experience_learn: failed to persist to task-data.json: %s", persist_exc,
@@ -403,8 +352,8 @@ async def experience_learn(params: TaskAddParams, matts: str = "none") -> Dict[s
     # Step 3: summarize all entries in task-data.json
     raw_entries: List[Dict[str, Any]] = []
     try:
-        if _connector.exists(_get_task_data_path()):
-            data = _connector.load_from_file(_get_task_data_path())
+        if _connector.exists(_TASK_DATA_PATH):
+            data = _connector.load_from_file(_TASK_DATA_PATH)
             raw_entries = data.get("entries", [])
     except Exception as load_exc:
         logger.warning("[Experience] experience_learn: failed to reload task-data.json: %s", load_exc)
@@ -417,7 +366,7 @@ async def experience_learn(params: TaskAddParams, matts: str = "none") -> Dict[s
         {
             "query": e.get("content", ""),
             "response": e.get("content", ""),
-            "feedback": _format_trajectory_feedback(e),
+            "feedback": f"section={e.get('section', 'general')}",
         }
         for e in raw_entries
     ]
@@ -445,8 +394,8 @@ async def experience_learn(params: TaskAddParams, matts: str = "none") -> Dict[s
                     for mem in memories
                 ]
                 existing = (
-                    _connector.load_from_file(_get_task_data_path())
-                    if _connector.exists(_get_task_data_path())
+                    _connector.load_from_file(_TASK_DATA_PATH)
+                    if _connector.exists(_TASK_DATA_PATH)
                     else {"entries": []}
                 )
                 existing_ids = {
@@ -458,7 +407,7 @@ async def experience_learn(params: TaskAddParams, matts: str = "none") -> Dict[s
                         existing.setdefault("entries", []).append(s_entry)
                         existing_ids.add(s_entry.get("memory_id"))
                         added += 1
-                _connector.save_to_file(_get_task_data_path(), existing)
+                _connector.save_to_file(_TASK_DATA_PATH, existing)
                 logger.info(
                     "[Experience] experience_learn: merged %d summarized entries (total=%d)",
                     added, len(existing.get("entries", [])),
@@ -480,11 +429,12 @@ async def experience_learn(params: TaskAddParams, matts: str = "none") -> Dict[s
         }
 
 
+
 @tool(
     name="experience_clear",
     description=(
-            "Wipe all stored task memory from task-data.json. "
-            "ONLY call this when the user explicitly asks to clear all stored knowledge. Always confirm first."
+        "Wipe all stored task memory from task-data.json. "
+        "ONLY call this when the user explicitly asks to clear all stored knowledge. Always confirm first."
     ),
 )
 async def experience_clear() -> Dict[str, Any]:
@@ -494,7 +444,7 @@ async def experience_clear() -> Dict[str, Any]:
         Dictionary with status message.
     """
     try:
-        _connector.save_to_file(_get_task_data_path(), {"entries": []})
+        _connector.save_to_file(_TASK_DATA_PATH, {"entries": []})
         logger.info("[Experience] experience_clear: task-data.json wiped")
         return {"status": "success", "message": "task-data.json cleared"}
     except Exception as exc:
