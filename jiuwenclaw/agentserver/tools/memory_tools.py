@@ -291,7 +291,7 @@ async def write_memory(
             f.write(content)
             f.write("\n")
         
-        logger.info(f"{'Appended to' if append else 'Wrote'} file: {resolved_path}")
+        logger.info(f"{'Appended to' if append else 'Wrote'} file: {resolved_path}", extra={'user_visible': 'critical'})
 
         return {
             "success": True,
@@ -370,7 +370,7 @@ async def edit_memory(
             f.write(new_content)
             f.write("\n")
         
-        logger.info(f"Edited file: {resolved_path}")
+        logger.info(f"Edited file: {resolved_path}", extra={'user_visible': 'critical'})
 
         return {
             "success": True,

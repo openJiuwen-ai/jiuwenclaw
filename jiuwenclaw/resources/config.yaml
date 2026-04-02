@@ -12,6 +12,9 @@ logging:
   channel: INFO
   agent_server: INFO
   full: INFO
+  tags:
+    user_visible: true           # 启用 [USER] Tag
+    user_progress_visible: true  # 启用 [USER_PROGRESS] Tag
 
 memory:
   mode: ${MEMORY_MODE:-local}

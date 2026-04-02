@@ -291,7 +291,7 @@ async def visual_question_answering(image_path_or_url: str, question: str) -> st
     ocr_out = await _invoke_openai_vision(image_path_or_url, _OCR_INSTRUCTIONS)
     vqa_out = await _invoke_openai_vision(image_path_or_url, _build_vqa_prompt(ocr_out, question))
     logger.info("Visual Question Answering tool called via OpenRouter (Gemini model)")
-    logger.info(f"OCR results: {ocr_out}")
-    logger.info(f"VQA results: {vqa_out}")
+    logger.info(f"OCR results: {ocr_out}", extra={'user_visible': 'critical'})
+    logger.info(f"VQA results: {vqa_out}", extra={'user_visible': 'critical'})
     return f"OCR results:\n{ocr_out}\n\nVQA result:\n{vqa_out}"
 

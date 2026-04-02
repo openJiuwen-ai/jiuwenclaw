@@ -55,6 +55,9 @@ docs/ai/
 # logs
 logs/
 
+# local test temp info
+coverage.xml 
+
 # workspace
 workspace/session
 workspace/agent/memory/*.db

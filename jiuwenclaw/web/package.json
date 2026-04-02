@@ -4,7 +4,6 @@
   "version": "0.1.0",
   "type": "module",
   "scripts": {
-    "predev": "cd .. && node scripts/generate-agent-folders.js",
     "prebuild": "cd .. && node scripts/generate-agent-folders.js",
     "dev": "vite",
     "build": "tsc && vite build",

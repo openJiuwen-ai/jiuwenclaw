@@ -166,7 +166,8 @@ async def audio_question_answering(audio_path_or_url: str, question: str) -> str
         return _build_missing_key_msg("audio question answering")
 
     audio_model = os.environ.get("AUDIO_MODEL_NAME", "gpt-4o-audio-preview")
-    logger.info("[audio_question_answering] using model: %s (api_base: %s)", audio_model, api_base)
+    logger.info("[audio_question_answering] using model: %s (api_base: %s)", audio_model, api_base, 
+                extra={'user_visible': 'critical'})
 
     try:
         prompt_text = f"Answer the following question based on the given audio information:\n\n{question}"

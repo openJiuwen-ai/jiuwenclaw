@@ -43,7 +43,7 @@ async def create_note(title: str, content: str) -> Dict[str, Any]:
         设备返回的完整 outputs，经 format_success_response 包装
     """
     try:
-        logger.info(f"[CREATE_NOTE_TOOL] Creating note - title: {title}")
+        logger.info(f"[CREATE_NOTE_TOOL] Creating note - title: {title}", extra={'user_visible': 'critical'})
 
         if not title or not isinstance(title, str):
             raise ToolInputError("缺少必填参数 title（备忘录标题）")
@@ -86,14 +86,14 @@ async def create_note(title: str, content: str) -> Dict[str, Any]:
 
         raise_if_device_error(outputs, "创建备忘录失败")
 
-        logger.info("[CREATE_NOTE_TOOL] Note create completed")
+        logger.info("[CREATE_NOTE_TOOL] Note create completed", extra={'user_visible': 'critical'})
 
         return format_success_response(dict(outputs), f"备忘录 '{title}' 创建成功")
 
     except ToolInputError:
         raise
     except Exception as e:
-        logger.error(f"[CREATE_NOTE_TOOL] Failed to create note: {e}")
+        logger.error(f"[CREATE_NOTE_TOOL] Failed to create note: {e}", extra={'user_visible': 'critical'})
         raise RuntimeError(f"创建备忘录失败: {str(e)}") from e
 
 
@@ -114,7 +114,7 @@ async def search_notes(query: str) -> Dict[str, Any]:
         设备返回的完整 outputs，经 format_success_response 包装
     """
     try:
-        logger.info(f"[SEARCH_NOTE_TOOL] Searching notes - query: {query}")
+        logger.info(f"[SEARCH_NOTE_TOOL] Searching notes - query: {query}", extra={'user_visible': 'critical'})
 
         if not query or not isinstance(query, str):
             raise ToolInputError("缺少必填参数 query（搜索关键词）")
@@ -162,7 +162,7 @@ async def search_notes(query: str) -> Dict[str, Any]:
         if not isinstance(result, dict):
             result = {}
         n = len(result.get("items", []))
-        logger.info(f"[SEARCH_NOTE_TOOL] Search completed, items={n}")
+        logger.info(f"[SEARCH_NOTE_TOOL] Search completed, items={n}", extra={'user_visible': 'critical'})
 
         return format_success_response(dict(outputs), f"搜索到 {n} 条备忘录")
 
@@ -196,7 +196,7 @@ async def modify_note(
         设备返回的完整 outputs，经 format_success_response 包装
     """
     try:
-        logger.info(f"[MODIFY_NOTE_TOOL] Modifying note - entity_id: {entity_id}")
+        logger.info(f"[MODIFY_NOTE_TOOL] Modifying note - entity_id: {entity_id}", extra={'user_visible': 'critical'})
 
         if not entity_id or not isinstance(entity_id, str):
             raise ToolInputError("缺少必填参数 entity_id（设备侧 entityId）")
@@ -240,7 +240,7 @@ async def modify_note(
 
         raise_if_device_error(outputs, "修改备忘录失败")
 
-        logger.info("[MODIFY_NOTE_TOOL] Note modified successfully")
+        logger.info("[MODIFY_NOTE_TOOL] Note modified successfully", extra={'user_visible': 'critical'})
 
         return format_success_response(dict(outputs), "备忘录修改成功")
 

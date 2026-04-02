@@ -282,6 +282,7 @@ class MultiSessionToolkit:
             "[MultiSessionToolkit] create_new_sessions 开始 parent_session_id=%s 任务数=%d",
             self.session_id,
             len(task_descriptions),
+            extra={'user_visible': 'critical'}
         )
         created = []
         for i, task_description in enumerate(task_descriptions):
@@ -306,6 +307,7 @@ class MultiSessionToolkit:
             "[MultiSessionToolkit] create_new_sessions 完成 已创建 %d 个协程: %s",
             len(created),
             ", ".join(created),
+            extra={'user_visible': 'critical'}
         )
         return f"已创建 {len(created)} 个协程: {', '.join(created)}"
 
@@ -315,6 +317,7 @@ class MultiSessionToolkit:
             "[MultiSessionToolkit] cancel_session 请求 parent_session_id=%s target_session_id=%s",
             self.session_id,
             session_id,
+            extra={'user_visible': 'critical'}
         )
         task = self._tasks.get(session_id)
         if task is None:
@@ -332,7 +335,8 @@ class MultiSessionToolkit:
             await asyncio.gather(task, return_exceptions=True)
         except asyncio.CancelledError:
             pass
-        logger.info("[MultiSessionToolkit] cancel_session 已取消 session_id=%s", session_id)
+        logger.info("[MultiSessionToolkit] cancel_session 已取消 session_id=%s", session_id, 
+                    extra={'user_visible': 'critical'})
         return f"已取消 session_id={session_id}"
 
     async def list_all_sessions(self) -> str:

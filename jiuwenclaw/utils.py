@@ -18,191 +18,11 @@ Runtime layout:
 
 import os
 import sys
-import datetime
-import shutil
 from pathlib import Path
-from dataclasses import dataclass
 from typing import Any, Literal, Optional
 import logging
-from logging.handlers import BaseRotatingHandler
+import shutil
 from ruamel.yaml import YAML
-
-_LOG_FILE_MAX_BYTES = 20 * 1024 * 1024
-_LOG_FILE_BACKUP_COUNT = 20
-
-
-@dataclass
-class LoggingLevels:
-    """Container for logging level configuration."""
-    logger: int
-    console: int
-    gateway: int
-    channel: int
-    agent_server: int
-    full: int
-
-
-class SafeRotatingFileHandler(BaseRotatingHandler):
-    """Safe rotating file handler"""
-
-    def __init__(self, filename, maxBytes=0, backupCount=0, encoding=None,
-                 delay=False, errors=None):
-        """Initialize the handler."""
-        super().__init__(filename, 'a', encoding, errors)
-        self.max_bytes = maxBytes
-        self.backup_count = backupCount
-        self._current_filename = filename
-
-        if delay:
-            self.stream = None
-
-    def shouldRollover(self, record):
-        """
-        Determine if rollover should occur.
-
-        Returns True if the log file size exceeds maxBytes.
-        """
-        if self.stream is None:
-            return False
-        if self.max_bytes > 0:
-            msg = "%s\n" % self.format(record)
-            self.stream.seek(0, 2)  # Seek to end of file
-            if self.stream.tell() + len(msg) >= self.max_bytes:
-                return True
-        return False
-
-    def doRollover(self):
-        """
-        Perform log rotation to keep app.log as the active log file.
-        """
-        base_path = Path(self.baseFilename)
-
-        timestamp = datetime.datetime.now(tz=datetime.timezone.utc).strftime("%Y%m%d_%H%M%S")
-        backup_filename = base_path.parent / f"{base_path.stem}_{timestamp}{base_path.suffix}"
-
-        try:
-            if base_path.exists():
-                shutil.copy2(base_path, backup_filename)
-        except OSError as e:
-            print(f"WARNING: Could not copy log file to backup: {e}", file=sys.stderr)
-
-        # Clean up old backup files
-        self._cleanup_old_backups()
-
-        try:
-            if self.stream:
-                self.stream.seek(0)  # Seek to beginning
-                self.stream.truncate(0)  # Truncate to 0 bytes
-        except OSError as e:
-            print(f"WARNING: Could not truncate log file: {e}", file=sys.stderr)
-
-    def _cleanup_old_backups(self):
-        """
-        Remove old backup files if they exceed backupCount.
-
-        Backup files are sorted by modification time (oldest first).
-        """
-        if self.backup_count <= 0:
-            return
-
-        try:
-            base_path = Path(self.baseFilename)
-            log_dir = base_path.parent
-
-            backup_files = []
-            for f in log_dir.glob(f"{base_path.stem}_*{base_path.suffix}"):
-                if f.is_file() and f != base_path:
-                    backup_files.append(f)
-
-            # Sort by modification time (oldest first)
-            backup_files.sort(key=lambda x: x.stat().st_mtime)
-
-            # Remove excess files
-            files_to_delete = len(backup_files) - self.backup_count
-            if files_to_delete > 0:
-                for f in backup_files[:files_to_delete]:
-                    try:
-                        f.unlink()
-                    except OSError as e:
-                        print(f"WARNING: Could not delete old log file {f}: {e}", file=sys.stderr)
-        except Exception as e:
-            print(f"WARNING: Error during backup cleanup: {e}", file=sys.stderr)
-
-
-def _parse_log_level(name: str, default: int = logging.INFO) -> int:
-    """Parse level name to logging module constant."""
-    if not name or not isinstance(name, str):
-        return default
-    return getattr(logging, name.strip().upper(), default)
-
-
-def _log_component_from_logger_name(name: str) -> str:
-    """按 ``logging.getLogger(__name__)`` 的 logger 名划分 gateway / channel / agent_server。"""
-    if name.startswith("jiuwenclaw.channel"):
-        return "channel"
-    if name.startswith("jiuwenclaw.agentserver"):
-        return "agent_server"
-    return "gateway"
-
-
-class _ComponentNameFilter(logging.Filter):
-    """仅放行指定组件（由 logger 名判定）的日志记录。"""
-
-    def __init__(self, component: str) -> None:
-        super().__init__()
-        self.component = component
-
-    def filter(self, record: logging.LogRecord) -> bool:
-        return _log_component_from_logger_name(record.name) == self.component
-
-
-def _load_logging_config_from_yaml() -> dict[str, Any]:
-    """读取 ~/.jiuwenclaw/config/config.yaml 中的 logging 段（无则空）。"""
-    try:
-        cf = get_config_file()
-        if not cf.exists():
-            return {}
-        rt = YAML()
-        with open(cf, "r", encoding="utf-8") as f:
-            data = rt.load(f) or {}
-        raw = data.get("logging")
-        if isinstance(raw, dict):
-            return raw
-    except Exception as e:
-        logger.error(f"load logging config failed, caused by={e}")
-    return {}
-
-
-def _resolve_logging_levels(
-    log_level_override: Optional[str],
-) -> LoggingLevels:
-    """返回日志级别配置。"""
-    cfg = _load_logging_config_from_yaml()
-    base = _parse_log_level(str(cfg.get("level", "INFO")))
-
-    def _coerce(key: str) -> int:
-        if key in cfg and cfg[key] is not None:
-            return _parse_log_level(str(cfg[key]), base)
-        return base
-
-    console = _coerce("console_level")
-    env_console = os.getenv("LOG_LEVEL")
-    if env_console:
-        console = _parse_log_level(env_console, console)
-
-    gateway = _coerce("gateway")
-    channel = _coerce("channel")
-    agent_server = _coerce("agent_server")
-    full = _coerce("full")
-
-    if log_level_override is not None:
-        v = _parse_log_level(log_level_override)
-        console = gateway = channel = agent_server = full = v
-        logger_level = v
-    else:
-        logger_level = min(gateway, channel, agent_server, full)
-
-    return LoggingLevels(logger_level, console, gateway, channel, agent_server, full)
 
 
 
@@ -631,51 +451,12 @@ def setup_logger(log_level: Optional[str] = None) -> logging.Logger:
 
     级别由 ``config.yaml`` 的 ``logging`` 段控制；环境变量 ``LOG_LEVEL`` 仅覆盖**控制台**级别
     （``log_level`` 参数为 ``None`` 时）。若传入 ``log_level``（如单测），则控制台与各文件级别均为该值。
+
+    Note: 此函数从 jiuwenclaw.logging.setup 迁移，保持向后兼容。
     """
-    logs_root = get_logs_dir()
-    logs_root.mkdir(parents=True, exist_ok=True)
-
-    levels = _resolve_logging_levels(log_level)
-
-    root = logging.getLogger("jiuwenclaw")
-    root.setLevel(levels.logger)
-    root.propagate = False
-    for handler in root.handlers[:]:
-        handler.close()
-        root.removeHandler(handler)
-
-    formatter = logging.Formatter(
-        fmt="%(asctime)s.%(msecs)03d %(levelname)s %(name)s: %(message)s",
-        datefmt="%Y-%m-%d %H:%M:%S",
-    )
-
-    def _add_rotating(
-        filename: str,
-        level: int,
-        name_filter: Optional[_ComponentNameFilter] = None,
-    ) -> None:
-        h = SafeRotatingFileHandler(
-            filename=logs_root / filename,
-            maxBytes=_LOG_FILE_MAX_BYTES,
-            backupCount=_LOG_FILE_BACKUP_COUNT,
-            encoding="utf-8",
-        )
-        h.setLevel(level)
-        h.setFormatter(formatter)
-        if name_filter is not None:
-            h.addFilter(name_filter)
-        root.addHandler(h)
-
-    _add_rotating("gateway.log", levels.gateway, _ComponentNameFilter("gateway"))
-    _add_rotating("channel.log", levels.channel, _ComponentNameFilter("channel"))
-    _add_rotating("agent_server.log", levels.agent_server, _ComponentNameFilter("agent_server"))
-    _add_rotating("full.log", levels.full, None)
-
-    stream_handler = logging.StreamHandler()
-    stream_handler.setLevel(levels.console)
-    stream_handler.setFormatter(formatter)
-    root.addHandler(stream_handler)
-    return root
+    # 延迟导入避免循环依赖
+    from jiuwenclaw.logging.setup import setup_logger as _setup_logger
+    return _setup_logger(log_level)
 
 
 setup_logger()

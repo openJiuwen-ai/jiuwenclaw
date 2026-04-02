@@ -376,7 +376,7 @@ class WebChannel(BaseChannel):
         query = parse_qs(parsed.query)
         remote = getattr(ws, "remote_address", None)
         self._clients.add(ws)
-        logger.info(f"WebChannel 新连接: remote={remote} query={query}")
+        logger.info(f"WebChannel 新连接: remote={remote} query={query}", extra={'user_visible': 'critical'})
 
         # 触发连接钩子（如发送 connection.ack）
         for hook in self._connect_hooks:
@@ -391,7 +391,7 @@ class WebChannel(BaseChannel):
             async for raw in ws:
                 await self._handle_raw_message(ws, raw, query)
         except Exception as e:  # pragma: no cover - 连接生命周期容错
-            logger.warning("WebChannel 连接异常: %s", e)
+            logger.warning("WebChannel 连接异常: %s", e, extra={'user_visible': 'critical'})
         finally:
             self._clients.discard(ws)
             logger.info(f"WebChannel 连接关闭: remote={remote}")

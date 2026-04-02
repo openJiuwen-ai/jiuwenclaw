@@ -171,7 +171,7 @@ class WecomChannel(BaseChannel):
             logger.warning("WecomChannel 发送者 %s 未被允许", chatid)
             return
 
-        logger.info("WecomChannel 收到消息: chatid=%s content=%s", chatid, content[:50])
+        logger.info("WecomChannel 收到消息: chatid=%s content=%s", chatid, content[:50], extra={'user_visible': 'critical'})
 
         # 写入 last_chat_id 供 cron/心跳推送使用
         if chatid and not self._looks_like_msgid(chatid):
@@ -399,7 +399,7 @@ class WecomChannel(BaseChannel):
                         if is_final:
                             self._pending_streams.pop(req_id, None)
                     except Exception as e:
-                        logger.error("WecomChannel 流式发送失败: %s", e)
+                        logger.error("WecomChannel 流式发送失败: %s", e, extra={'user_visible': 'critical'})
                         if msg.event_type == EventType.CHAT_FINAL:
                             self._pending_streams.pop(req_id, None)
                 return

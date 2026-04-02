@@ -123,6 +123,7 @@ class MessageHandler(ABC):
         logger.info(
             "[MessageHandler] _user_messages 入队: id=%s channel_id=%s session_id=%s",
             msg.id, msg.channel_id, msg.session_id,
+            extra={'user_visible': 'critical'},
         )
 
     # ---------- Channel 控制状态：\new_session / \mode ----------
@@ -599,6 +600,7 @@ class MessageHandler(ABC):
                 "[MessageHandler] Agent 响应已写入 robot_messages: request_id=%s channel_id=%s",
                 resp.request_id,
                 resp.channel_id,
+                extra={'user_visible': 'critical'},
             )
         except Exception as e:
             logger.exception("AgentServer send_request failed for %s: %s", msg.id, e)
@@ -641,6 +643,7 @@ class MessageHandler(ABC):
                     logger.info(
                         "[MessageHandler] 收到中断请求: id=%s channel_id=%s",
                         msg.id, msg.channel_id,
+                        extra={'user_visible': 'critical'},
                     )
                     new_input = (msg.params or {}).get("new_input")
                     has_new_input = isinstance(new_input, str) and new_input.strip()
@@ -713,6 +716,7 @@ class MessageHandler(ABC):
                         logger.info(
                             "[MessageHandler] supplement: 旧任务已取消，新任务已入队: id=%s session_id=%s",
                             new_msg.id, msg.session_id,
+                            extra={'user_visible': 'critical'},
                         )
 
                     elif intent == "cancel":
@@ -745,6 +749,7 @@ class MessageHandler(ABC):
                 logger.info(
                     "[MessageHandler] 从 user_messages 取出，发往 AgentServer: id=%s channel_id=%s is_stream=%s",
                     msg.id, msg.channel_id, msg.is_stream,
+                    extra={'user_visible': 'critical'},
                 )
                 await self._trigger_before_chat_request_hook(msg)
                 env = self.message_to_e2a(msg)
@@ -763,7 +768,7 @@ class MessageHandler(ABC):
                         self._stream_sessions[stream_rid] = msg.session_id
                         logger.info(
                             "[MessageHandler] Stream 任务已启动（后台运行）: request_id=%s channel_id=%s 当前并发=%d",
-                            stream_rid, msg.channel_id, len(self._stream_tasks),
+                            stream_rid, msg.channel_id, len(self._stream_tasks), extra={'user_visible': 'critical'}
                         )
                         # 不 await，让流式任务在后台运行，_forward_loop 继续处理下一个消息
                     elif self._non_stream_rpc_may_run_parallel(env):
@@ -833,13 +838,13 @@ class MessageHandler(ABC):
                 )
             logger.info(
                 "[MessageHandler] Stream 正常完成: request_id=%s",
-                rid,
+                rid, extra={'user_visible': 'critical'}
             )
         except asyncio.CancelledError:
             cancelled = True
             logger.info(
                 "[MessageHandler] Stream 被取消: request_id=%s",
-                rid,
+                rid, extra={'user_visible': 'critical'}
             )
             raise  # 重新抛出，让调用者知道任务被取消
         finally:

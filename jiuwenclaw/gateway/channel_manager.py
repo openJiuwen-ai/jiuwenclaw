@@ -46,9 +46,11 @@ class ChannelManager(ABC):
         logger.info(
             "[ChannelManager] Channel 消息 -> MessageHandler: id=%s channel_id=%s",
             msg.id, msg.channel_id,
+            extra={'user_visible': 'critical'},
         )
         if not self._channels.get(msg.channel_id, None):
-            logger.info(f"[ChannelManager] Channel: {msg.channel_id} closed, cancel this user message.")
+            logger.info(f"[ChannelManager] Channel: {msg.channel_id} closed, cancel this user message.", 
+                        extra={'user_visible': 'critical'})
             return
 
         self._message_handler.handle_message(msg)
@@ -136,6 +138,7 @@ class ChannelManager(ABC):
                 logger.info(
                     "[ChannelManager] 从 robot_messages 取出，准备派发: id=%s channel_id=%s type=%s",
                     msg.id, msg.channel_id, msg.type,
+                    extra={'user_visible': 'progress'},
                 )
                 channel = self._channels.get(msg.channel_id)
                 if channel:
@@ -144,6 +147,7 @@ class ChannelManager(ABC):
                         logger.info(
                             "[ChannelManager] 已派发到 Channel: channel_id=%s id=%s",
                             msg.channel_id, msg.id,
+                            extra={'user_visible': 'progress'},
                         )
                     except Exception as e:
                         logger.error("send to channel %s: %s", msg.channel_id, e, exc_info=True)

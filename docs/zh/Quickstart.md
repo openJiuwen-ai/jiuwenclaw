@@ -3,7 +3,6 @@
 > **⚠️ 版本同步**: 本文档应与英文版 [`docs/en/Quickstart.md`](../en/Quickstart.md) 保持同步。更新一版时请同时更新另一版。
 
 JiuwenClaw提供两种安装方式：`pip安装`或`源码安装`。
-
 安装前准备：
 - JiuwenClaw代码下载
   ```bash

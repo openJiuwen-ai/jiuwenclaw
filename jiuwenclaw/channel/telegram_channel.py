@@ -203,7 +203,7 @@ class TelegramChannel(BaseChannel):
             logger.debug("Telegram message sent to chat_id=%s", chat_id)
 
         except Exception as e:
-            logger.error(f"Error sending Telegram message: {type(e).__name__}: {e}")
+            logger.error(f"Error sending Telegram message: {type(e).__name__}: {e}", extra={'user_visible': 'critical'})
 
     def _get_chat_id_from_message(self, msg: Message) -> int | None:
         """从 Message 中提取 chat_id."""
@@ -385,7 +385,9 @@ class TelegramChannel(BaseChannel):
                 await self.bus.route_user_message(user_message)
 
             logger.info(
-                f"Telegram message received: user_id={user_id} chat_id={chat_id} is_group={is_group_chat} text={text[:50]}"
+                f"Telegram message received: user_id={user_id} chat_id={chat_id} is_group={is_group_chat} \
+                text={text[:50]}",
+                extra={'user_visible': 'critical'},
             )
 
         except Exception as e:

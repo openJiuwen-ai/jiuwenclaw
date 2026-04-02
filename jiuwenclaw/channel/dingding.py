@@ -549,11 +549,11 @@ class DingTalkChannel(BaseChannel):
         try:
             resp = await self._http.post(url, json=data, headers=headers)
             if resp.status_code != 200:
-                logger.error(f"钉钉消息发送失败: {resp.text}")
+                logger.error(f"钉钉消息发送失败: {resp.text}", extra={'user_visible': 'critical'})
             else:
                 logger.debug("钉钉消息已发送至 %s", chat_id)
         except Exception as e:
-            logger.error(f"发送钉钉消息时出错: {e}")
+            logger.error(f"发送钉钉消息时出错: {e}", extra={'user_visible': 'critical'})
 
     async def send(self, msg: Message) -> None:
         """通过钉钉发送消息"""
@@ -712,7 +712,7 @@ class DingTalkChannel(BaseChannel):
         权限检查。
         """
         try:
-            logger.info(f"钉钉入站消息: {message.content} 来自 {message.sender_name}")
+            logger.info(f"钉钉入站消息: {message.content} 来自 {message.sender_name}", extra={'user_visible': 'critical'})
             await self._process_incoming_message(
                 chat_id=message.sender_id,
                 sender_id=message.sender_id,

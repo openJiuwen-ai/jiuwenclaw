@@ -377,7 +377,7 @@ class XiaoyiChannel(BaseChannel):
         """发送消息到小艺服务端（A2A 格式，双通道发送）."""
         if not self._ws_connections:
             return
-        logger.info(f"XiaoyiChannel 发送消息: {msg}")
+        logger.info(f"XiaoyiChannel 发送消息: {msg}", extra={'user_visible': 'critical'})
         session_id, task_id = self._extract_platform_receive_info(msg)
         # Handle chat.file event
         if self.config.mode == "xiaoyi_claw" and msg.event_type == EventType.CHAT_FILE:
@@ -644,7 +644,8 @@ class XiaoyiChannel(BaseChannel):
         # 检查是否是 data-only 消息（工具执行结果）
         data_event = self._extract_data_event(message)
         if data_event:
-            logger.info(f"XiaoyiChannel 收到 data-event: {data_event.intent_name}, status={data_event.status}")
+            logger.info(f"XiaoyiChannel 收到 data-event: {data_event.intent_name}, status={data_event.status}", 
+                        extra={'user_visible': 'critical'})
             await self._handle_data_event(data_event)
             return
 
@@ -1058,7 +1059,7 @@ class XiaoyiChannel(BaseChannel):
         try:
             await self._safe_ws_send(url_key, wrapper)
         except Exception as e:
-            logger.warning(f"XiaoyiChannel 发送响应失败 ({url_key}): {e}")
+            logger.warning(f"XiaoyiChannel 发送响应失败 ({url_key}): {e}", extra={'user_visible': 'critical'})
 
     async def _send_file_response_base64(self, session_id: str, task_id: str, file_info: dict, url_key: str) -> None:
         """发送文件响应（Base64 格式）到指定通道."""
@@ -1122,7 +1123,7 @@ class XiaoyiChannel(BaseChannel):
                     await self._safe_ws_send(url_key, response)
             return object_id
         except Exception as e:
-            logger.error(f"XiaoyiChannel 发送文件响应失败: {e}")
+            logger.error(f"XiaoyiChannel 发送文件响应失败: {e}", extra={'user_visible': 'critical'})
 
     async def _send_file_response(self, session_id: str, task_id: str, file_info: dict, url_key: str) -> None:
         """发送文件响应到指定通道."""
@@ -1132,7 +1133,7 @@ class XiaoyiChannel(BaseChannel):
                 await self._send_file_response_base64(session_id, task_id, file_info, url_key)
                 return
         except Exception as e:
-            logger.error(f"XiaoyiChannel 发送文件响应失败: {e}")
+            logger.error(f"XiaoyiChannel 发送文件响应失败: {e}", extra={'user_visible': 'critical'})
 
     async def _safe_ws_send(self, url_key: str, payload: dict[str, Any]) -> None:
         ws = self._ws_connections.get(url_key)

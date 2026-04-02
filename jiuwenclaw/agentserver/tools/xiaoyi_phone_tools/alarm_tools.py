@@ -262,7 +262,7 @@ async def create_alarm(
         if wake_t == 3 and week_list:
             intent_param["daysOfWeek"] = week_list
 
-        logger.info("[ALARM_TOOL] Creating alarm, alarmTime(ms)=%s", alarm_ms)
+        logger.info("[ALARM_TOOL] Creating alarm, alarmTime(ms)=%s", alarm_ms, extra={'user_visible': 'critical'})
 
         command = {
             "header": {"namespace": "Common", "name": "Action"},
@@ -293,7 +293,7 @@ async def create_alarm(
 
         result = outputs.get("result", {})
         code = outputs.get("code")
-        logger.info("[ALARM_TOOL] Alarm created successfully")
+        logger.info("[ALARM_TOOL] Alarm created successfully", extra={'user_visible': 'critical'})
 
         return format_success_response(
             {
@@ -380,7 +380,8 @@ async def search_alarms(
                 raise ToolInputError("start_time 须早于 end_time")
             intent_param["timeInterval"] = [sm, em]
 
-        logger.info("[ALARM_TOOL] Searching alarms, intent keys=%s", list(intent_param.keys()))
+        logger.info("[ALARM_TOOL] Searching alarms, intent keys=%s", list(intent_param.keys()), 
+                    extra={'user_visible': 'critical'})
 
         command = {
             "header": {"namespace": "Common", "name": "Action"},
@@ -426,7 +427,7 @@ async def search_alarms(
             elif isinstance(item, dict):
                 parsed_alarms.append(item)
 
-        logger.info(f"[ALARM_TOOL] Found {len(parsed_alarms)} alarms")
+        logger.info(f"[ALARM_TOOL] Found {len(parsed_alarms)} alarms", extra={'user_visible': 'critical'})
 
         return format_success_response(
             {"alarms": parsed_alarms, "count": len(parsed_alarms)},

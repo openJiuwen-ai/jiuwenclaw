@@ -212,7 +212,7 @@ async def experience_retrieve(
         Dictionary with memory_string and retrieved_memory list.
     """
     
-    logger.info("[Exp] experience_retrieve called: query=%s", query[:80])
+    logger.info("[Exp] experience_retrieve called: query=%s", query[:80], extra={'user_visible': 'critical'})
 
     # Load persisted entries from task-data.json
     persisted_memories: List[Dict[str, Any]] = []
@@ -233,14 +233,16 @@ async def experience_retrieve(
                 )
             logger.info(
                 "[Experience] experience_retrieve: loaded %d entries from task-data.json",
-                len(persisted_memories)
+                len(persisted_memories),
+                extra={'user_visible': 'critical'}
                 )
     except Exception as load_exc:
         logger.warning("[Experience] experience_retrieve: failed to load task-data.json: %s", load_exc)
 
     svc = _get_service()
     if svc is None:
-        logger.info("[Experience] experience_retrieve: service disabled — returning persisted only")
+        logger.info("[Experience] experience_retrieve: service disabled — returning persisted only", 
+                    extra={'user_visible': 'critical'})
         memory_string = "\n\n".join(persisted_lines)
         return {
             "status": "persisted_only",
@@ -258,13 +260,14 @@ async def experience_retrieve(
         logger.info(
             "[Experience] experience_retrieve done: %d memories (%d persisted + %d from service)",
             count, len(persisted_memories), len(svc_memories),
+            extra={'user_visible': 'critical'}
         )
         result["retrieved_memory"] = merged_memories
         result["memory_string"] = merged_string
         return result
     except Exception as exc:
         logger.error("[Experience] experience_retrieve failed: %s", exc)
-        logger.info("[Experience] experience_retrieve error: %s", exc)
+        logger.info("[Experience] experience_retrieve error: %s", exc, extra={'user_visible': 'critical'})
         return {"status": "error", "error": str(exc), "memory_string": "", "retrieved_memory": []}
 
 
@@ -296,6 +299,7 @@ async def experience_learn(params: TaskAddParams, matts: str = "none") -> Dict[s
     logger.info(
         "[Exp] experience_learn called: section=%s, content=%s",
         params.section, params.content[:120],
+        extra={'user_visible': 'critical'}
     )
     svc = _get_service()
     memory_id: Optional[str] = None
@@ -314,7 +318,8 @@ async def experience_learn(params: TaskAddParams, matts: str = "none") -> Dict[s
             )
             add_result = await svc.add_memory(user_id="main", request=request)
             memory_id = add_result.get("memory_id")
-            logger.info("[Experience] experience_learn: add_memory done: memory_id=%s", memory_id)
+            logger.info("[Experience] experience_learn: add_memory done: memory_id=%s", memory_id, 
+                        extra={'user_visible': 'critical'})
         except Exception as exc:
             logger.error("[Experience] experience_learn: add_memory failed: %s", exc)
 
@@ -349,7 +354,8 @@ async def experience_learn(params: TaskAddParams, matts: str = "none") -> Dict[s
         )
 
     if svc is None:
-        logger.info("[Experience] experience_learn: service disabled — entry persisted only")
+        logger.info("[Experience] experience_learn: service disabled — entry persisted only", 
+                    extra={'user_visible': 'critical'})
         return {"status": "persisted_only", "memory_id": None}
 
     # Step 3: summarize all entries in task-data.json
@@ -381,7 +387,8 @@ async def experience_learn(params: TaskAddParams, matts: str = "none") -> Dict[s
         result = await svc.summarize(
             user_id="main", matts=matts, query=query, trajectories=trajectories,
         )
-        logger.info("[Experience] experience_learn: summarize done: status=%s", result.get("status"))
+        logger.info("[Experience] experience_learn: summarize done: status=%s", result.get("status"), 
+                    extra={'user_visible': 'critical'})
         memories = result.get("memory", [])
         if memories:
             try:
@@ -414,11 +421,13 @@ async def experience_learn(params: TaskAddParams, matts: str = "none") -> Dict[s
                 logger.info(
                     "[Experience] experience_learn: merged %d summarized entries (total=%d)",
                     added, len(existing.get("entries", [])),
+                    extra={'user_visible': 'critical'}
                 )
             except Exception as persist_exc:
                 logger.warning(
                     "[Experience] experience_learn: failed to persist summarized entries: %s",
                     persist_exc,
+                    extra={'user_visible': 'critical'}
                 )
         result["memory_id"] = memory_id
         return result
@@ -448,7 +457,7 @@ async def experience_clear() -> Dict[str, Any]:
     """
     try:
         _connector.save_to_file(_get_task_data_path(), {"entries": []})
-        logger.info("[Experience] experience_clear: task-data.json wiped")
+        logger.info("[Experience] experience_clear: task-data.json wiped", extra={'user_visible': 'critical'})
         return {"status": "success", "message": "task-data.json cleared"}
     except Exception as exc:
         logger.error("[Experience] experience_clear failed: %s", exc)

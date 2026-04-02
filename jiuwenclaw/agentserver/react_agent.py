@@ -783,6 +783,7 @@ class JiuClawReActAgent(ReActAgent):
             logger.info(
                 "[ReActAgent] Permission approval timeout (tool=%s, id=%s), auto-rejecting",
                 tool_name, request_id,
+                extra={'user_visible': 'critical'}
             )
             return "deny"
         finally:
@@ -1015,13 +1016,16 @@ class JiuClawReActAgent(ReActAgent):
                         meta.get("tool_args", {}),
                     )
             future.set_result("allow_always")
-            logger.info("[ReActAgent] Permission approval: request_id=%s decision=allow_always", request_id)
+            logger.info("[ReActAgent] Permission approval: request_id=%s decision=allow_always", request_id, 
+                        extra={'user_visible': 'critical'})
         elif "本次允许" in selected:
             future.set_result("allow_once")
-            logger.info("[ReActAgent] Permission approval: request_id=%s decision=allow_once", request_id)
+            logger.info("[ReActAgent] Permission approval: request_id=%s decision=allow_once", request_id, 
+                        extra={'user_visible': 'critical'})
         else:
             future.set_result("deny")
-            logger.info("[ReActAgent] Permission approval: request_id=%s decision=deny", request_id)
+            logger.info("[ReActAgent] Permission approval: request_id=%s decision=deny", request_id, 
+                        extra={'user_visible': 'critical'})
         return True
 
     def _get_skill_messages(self) -> List[SystemMessage]:

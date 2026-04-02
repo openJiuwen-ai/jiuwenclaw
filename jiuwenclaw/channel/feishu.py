@@ -795,7 +795,7 @@ class FeishuChannel(BaseChannel):
             await self._send_feishu_message(receive_id, id_type, card_content, msg.id)
 
         except Exception as e:
-            logger.error(f"发送飞书消息时发生异常: {e}")
+            logger.error(f"发送飞书消息时发生异常: {e}", extra={'user_visible': 'critical'})
 
     def _detect_workspace_files(self, text: str) -> list[str]:
         """从文本中提取 workspace 下实际存在的文件路径。
