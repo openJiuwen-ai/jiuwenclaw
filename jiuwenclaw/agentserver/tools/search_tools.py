@@ -179,6 +179,27 @@ def _search_bing_sync(query: str, max_results: int, timeout_seconds: int) -> lis
     rows: list[dict[str, str]] = []
     seen: set[str] = set()
 
+    def _extract_bing_snippet(block_html: str, title_text: str) -> str:
+        snippet_patterns = [
+            r'<div[^>]+class="[^"]*\bb_caption\b[^"]*"[^>]*>.*?<p[^>]*>(.*?)</p>',
+            r'<div[^>]+class="[^"]*\bb_snippet\b[^"]*"[^>]*>(.*?)</div>',
+            r"<p[^>]*>(.*?)</p>",
+        ]
+        for pattern in snippet_patterns:
+            matched = re.search(pattern, block_html, flags=re.IGNORECASE | re.DOTALL)
+            if matched:
+                value = _strip_tags(matched.group(1))
+                if value:
+                    return value
+
+        # Final fallback: collapse the block text and remove title/url echoes.
+        text = _strip_tags(block_html)
+        if title_text:
+            text = text.replace(title_text, " ")
+        text = re.sub(r"https?://\S+", " ", text, flags=re.IGNORECASE)
+        text = re.sub(r"\s+", " ", text).strip(" -|")
+        return text[:220].strip()
+
     for block in blocks:
         title_match = re.search(
             r'<h2[^>]*>\s*<a[^>]+href="([^"]+)"[^>]*>(.*?)</a>',
@@ -193,8 +214,7 @@ def _search_bing_sync(query: str, max_results: int, timeout_seconds: int) -> lis
         if not href or href in seen:
             continue
         seen.add(href)
-        snippet_match = re.search(r"<p>(.*?)</p>", block, flags=re.IGNORECASE | re.DOTALL)
-        snippet = _strip_tags(snippet_match.group(1)) if snippet_match else ""
+        snippet = _extract_bing_snippet(block, title)
         rows.append({"title": title or f"Result {len(rows) + 1}", "url": href, "snippet": snippet})
         if len(rows) >= max_results:
             break
@@ -209,7 +229,7 @@ def _search_free_sync(
     engines = [
         ("duckduckgo", _search_duckduckgo_sync),
         ("duckduckgo-jina", _search_duckduckgo_via_jina_sync),
-        ("bing", _search_bing_sync),
+        # ("bing", _search_bing_sync),
     ]
     for engine_name, runner in engines:
         try:
@@ -250,6 +270,62 @@ def _parse_perplexity_citations(data: dict[str, Any]) -> list[str]:
     return []
 
 
+def _parse_perplexity_results(data: dict[str, Any], max_results: int) -> list[dict[str, str]]:
+    rows: list[dict[str, str]] = []
+    seen: set[str] = set()
+    for key in ("citations", "search_results", "web_search_results", "sources"):
+        entries = data.get(key)
+        if not isinstance(entries, list):
+            continue
+        for item in entries:
+            url = ""
+            title = ""
+            snippet = ""
+            if isinstance(item, str):
+                url = item
+            elif isinstance(item, dict):
+                maybe_url = item.get("url") or item.get("link") or item.get("source_url")
+                if maybe_url:
+                    url = str(maybe_url)
+                title = str(item.get("title") or item.get("name") or "").strip()
+                snippet = str(item.get("snippet") or item.get("description") or item.get("text") or "").strip()
+            if not url:
+                continue
+            if url in seen:
+                continue
+            seen.add(url)
+            rows.append({"title": title, "url": url, "snippet": snippet})
+            if len(rows) >= max_results:
+                return rows
+    return rows
+
+
+def _extract_markdown_and_plain_urls(text: str) -> list[dict[str, str]]:
+    rows: list[dict[str, str]] = []
+    seen: set[str] = set()
+    content = text or ""
+
+    # Prefer markdown links first so we can preserve a meaningful title/snippet.
+    for title_raw, url_raw in re.findall(
+        r"\[([^\]\n]+)\]\((https?://[^\s)]+)\)", content, flags=re.IGNORECASE
+    ):
+        url = url_raw.strip()
+        if not url or url in seen:
+            continue
+        seen.add(url)
+        title = _strip_tags(title_raw).strip()
+        rows.append({"title": title, "url": url, "snippet": title})
+
+    # Also capture bare URLs, and strip common trailing punctuation.
+    for url_raw in re.findall(r"https?://[^\s<>\"]+", content, flags=re.IGNORECASE):
+        url = url_raw.rstrip(").,;:!?]}'\"")
+        if not url or url in seen:
+            continue
+        seen.add(url)
+        rows.append({"title": "", "url": url, "snippet": ""})
+    return rows
+
+
 def _perplexity_search_sync(query: str, max_results: int, timeout_seconds: int) -> dict[str, Any]:
     perplexity_key = os.environ.get("PERPLEXITY_API_KEY", "")
     if not perplexity_key:
@@ -284,6 +360,7 @@ def _perplexity_search_sync(query: str, max_results: int, timeout_seconds: int) 
         "provider": "perplexity",
         "answer": (answer or "").strip(),
         "urls": _parse_perplexity_citations(data)[:max_results],
+        "results": _parse_perplexity_results(data, max_results),
     }
 
 
@@ -302,12 +379,21 @@ def _serper_search_sync(query: str, max_results: int, timeout_seconds: int) -> d
     response.raise_for_status()
     data = response.json()
     urls: list[str] = []
+    rows: list[dict[str, str]] = []
     organic = data.get("organic", [])
     if isinstance(organic, list):
         for item in organic[:max_results]:
             if isinstance(item, dict) and item.get("link"):
-                urls.append(str(item["link"]))
-    return {"provider": "serper", "answer": "", "urls": urls}
+                link = str(item["link"])
+                urls.append(link)
+                rows.append(
+                    {
+                        "title": str(item.get("title") or "").strip(),
+                        "url": link,
+                        "snippet": str(item.get("snippet") or "").strip(),
+                    }
+                )
+    return {"provider": "serper", "answer": "", "urls": urls, "results": rows}
 
 
 def _jina_search_sync(query: str, timeout_seconds: int) -> dict[str, Any]:
@@ -335,8 +421,9 @@ def _jina_search_sync(query: str, timeout_seconds: int) -> dict[str, Any]:
     choices = data.get("choices")
     if isinstance(choices, list) and choices and isinstance(choices[0], dict):
         answer = choices[0].get("message", {}).get("content", "")
-    urls = re.findall(r"https?://[^\s)\]>\"']+", answer or "")
-    return {"provider": "jina", "answer": (answer or "").strip(), "urls": urls}
+    rows = _extract_markdown_and_plain_urls(answer or "")
+    urls = [row["url"] for row in rows]
+    return {"provider": "jina", "answer": (answer or "").strip(), "urls": urls, "results": rows}
 
 
 @tool(
@@ -428,11 +515,30 @@ async def mcp_paid_search(
 
         answer = str(result.get("answer", "") or "").strip()
         urls = [str(u) for u in (result.get("urls", []) or []) if u][:max_results]
+        raw_rows = result.get("results", []) or []
+        rows: list[dict[str, str]] = []
+        if isinstance(raw_rows, list):
+            for item in raw_rows[:max_results]:
+                if isinstance(item, dict) and item.get("url"):
+                    rows.append(
+                        {
+                            "title": str(item.get("title") or "").strip(),
+                            "url": str(item.get("url") or "").strip(),
+                            "snippet": str(item.get("snippet") or "").strip(),
+                        }
+                    )
         lines = [f"Paid search provider: {name}"]
         if answer:
             lines.append("Answer:")
             lines.append(answer)
-        if urls:
+        if rows:
+            lines.append("Results:")
+            for idx, row in enumerate(rows, 1):
+                lines.append(f"{idx}. {row['title'] or f'Result {idx}'}")
+                lines.append(f"   URL: {row['url']}")
+                if row.get("snippet"):
+                    lines.append(f"   Snippet: {row['snippet']}")
+        elif urls:
             lines.append("URLs:")
             for idx, url in enumerate(urls, 1):
                 lines.append(f"{idx}. {url}")
