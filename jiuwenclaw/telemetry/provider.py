@@ -18,6 +18,7 @@ from opentelemetry.sdk.metrics.export import (
     PeriodicExportingMetricReader,
 )
 
+from jiuwenclaw.telemetry.attributes import JIUWENCLAW_CLAW_ID
 from jiuwenclaw.telemetry.config import TelemetryConfig
 
 
@@ -43,10 +44,14 @@ def init_providers(cfg: TelemetryConfig) -> ProviderBundle:
 
 def build_default_providers(cfg: TelemetryConfig) -> ProviderBundle:
     """Build the default OTel TracerProvider + MeterProvider bundle."""
-    resource = Resource.create({
+    resource_attrs = {
         SERVICE_NAME: cfg.service_name,
         "service.version": "0.1.5",
-    })
+    }
+    if cfg.claw_id is not None:
+        resource_attrs[JIUWENCLAW_CLAW_ID] = cfg.claw_id
+
+    resource = Resource.create(resource_attrs)
 
     tracer_provider = _build_tracer_provider(cfg, resource)
     meter_provider = _build_meter_provider(cfg, resource)

@@ -16,7 +16,9 @@ JiuWenClaw 内置了基于 OpenTelemetry 协议的可观测性能力，遵循 [O
 同时记录以下运行指标：
 - 请求端到端时延、Agent 处理时延、LLM 调用时延、工具执行时延
 - 请求总数、错误数、LLM 调用次数、工具调用次数、工具错误次数
+- 当前活跃会话数、累计创建会话数
 - Token 消耗（按 input/output/cache 类型统计）
+- 模型调用失败数可通过 `gen_ai.client.operation.count{status="error"}` 统计
 
 ## 2. 快速启用
 
@@ -26,7 +28,7 @@ JiuWenClaw 内置了基于 OpenTelemetry 协议的可观测性能力，遵循 [O
 # 启用 telemetry，使用 console 输出（开发调试）
 OTEL_ENABLED=true OTEL_EXPORTER_TYPE=console jiuwenclaw-app
 
-# 启用 telemetry，使用 OTLP 导出到 Jaeger/Tempo 等后端
+# 启用 telemetry，使用 OTLP 导出到 Jaeger/Tempo 等后端（注意本地使用端口4317启动Jaeger/Tempo）
 OTEL_ENABLED=true OTEL_EXPORTER_TYPE=otlp OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4317 jiuwenclaw-app
 ```
 
@@ -37,21 +39,23 @@ OTEL_ENABLED=true OTEL_EXPORTER_TYPE=otlp OTEL_EXPORTER_OTLP_ENDPOINT=http://loc
 ```yaml
 telemetry:
   enabled: true                     # 总开关
-  exporter: otlp                    # otlp / console / none
+  exporter: none                    # 默认采集开启，但不导出到后端
   endpoint: http://localhost:4317   # OTLP endpoint
   protocol: grpc                    # grpc / http
   log_messages: true                # 是否记录完整消息内容
   service_name: jiuwenclaw
 ```
 
-> 环境变量优先级高于 config.yaml。
+> 环境变量优先级高于 config.yaml。若需要实际导出，请将 `exporter`、`OTEL_TRACES_EXPORTER` 或 `OTEL_METRICS_EXPORTER` 改为 `console` 或 `otlp`。
 
 ## 3. 配置参数
 
 | 环境变量 | config.yaml 字段 | 默认值 | 说明 |
 |----------|------------------|--------|------|
-| `OTEL_ENABLED` | `telemetry.enabled` | `false` | 总开关 |
-| `OTEL_EXPORTER_TYPE` | `telemetry.exporter` | `otlp` | 导出方式：otlp / console / none |
+| `OTEL_ENABLED` | `telemetry.enabled` | `true` | 总开关 |
+| `OTEL_EXPORTER_TYPE` | `telemetry.exporter` | `none` | 公共 exporter fallback：otlp / console / none |
+| `OTEL_TRACES_EXPORTER` | `telemetry.traces.exporter` | `none` | trace 导出方式：otlp / console / none |
+| `OTEL_METRICS_EXPORTER` | `telemetry.metrics.exporter` | `none` | metrics 导出方式：otlp / console / none |
 | `OTEL_EXPORTER_OTLP_ENDPOINT` | `telemetry.endpoint` | `http://localhost:4317` | OTLP 后端地址 |
 | `OTEL_EXPORTER_OTLP_PROTOCOL` | `telemetry.protocol` | `grpc` | OTLP 协议：grpc / http |
 | `OTEL_LOG_MESSAGES` | `telemetry.log_messages` | `true` | 是否在 Span Event 中记录完整消息内容 |
@@ -112,18 +116,100 @@ telemetry:
 
 ## 5. Metric 指标
 
-| 指标名称 | 类型 | 说明 |
-|----------|------|------|
-| `jiuwenclaw.request.duration` | Histogram | 请求端到端时延（秒） |
-| `jiuwenclaw.request.count` | Counter | 请求总数 |
-| `jiuwenclaw.request.error.count` | Counter | 请求错误数 |
-| `jiuwenclaw.agent.duration` | Histogram | Agent 处理时延（秒） |
-| `gen_ai.client.operation.duration` | Histogram | LLM 调用时延（秒） |
-| `gen_ai.client.token.usage` | Counter | Token 消耗（按 gen_ai.token.type 区分） |
-| `gen_ai.client.operation.count` | Counter | LLM 调用次数 |
-| `gen_ai.tool.duration` | Histogram | 工具执行时延（秒） |
-| `gen_ai.tool.call.count` | Counter | 工具调用次数 |
-| `gen_ai.tool.error.count` | Counter | 工具错误次数 |
+本章基于当前代码实现整理指标清单，而不是仅依据前文摘要说明。当前代码实际定义了 20 个指标，定义位于 `jiuwenclaw/telemetry/metrics.py`，埋点入口位于：
+
+- `jiuwenclaw/telemetry/instrumentors/entry.py`
+- `jiuwenclaw/telemetry/instrumentors/agent.py`
+- `jiuwenclaw/telemetry/instrumentors/llm.py`
+- `jiuwenclaw/telemetry/instrumentors/tool.py`
+- `jiuwenclaw/telemetry/instrumentors/session.py`
+- `jiuwenclaw/telemetry/instrumentors/queue.py`
+
+### 5.1 指标总览
+
+| 指标名 | 类型 | 单位 | 触发时机 | Labels | 指标来源 | 说明 |
+|---|---|---|---|---|---|---|
+| `jiuwenclaw.request.duration` | Histogram | `s` | 每次入口请求结束时记录 | `jiuwenclaw.channel.id` | `gateway` | 请求端到端时延 |
+| `jiuwenclaw.request.count` | Counter | `{request}` | 每次入口请求开始时累加 | `jiuwenclaw.channel.id` | `gateway` | 请求总数 |
+| `jiuwenclaw.request.error.count` | Counter | `{request}` | 入口请求抛异常时累加 | `jiuwenclaw.channel.id` | `gateway` | 请求错误数 |
+| `jiuwenclaw.agent.duration` | Histogram | `s` | Agent 处理完成时记录，流式和非流式都会记录 | `jiuwenclaw.agent.name`, `jiuwenclaw.channel.id` | `agentserver` | Agent 处理时延 |
+| `gen_ai.client.operation.duration` | Histogram | `s` | 每次 LLM 调用结束时记录 | `gen_ai.request.model`, `gen_ai.system`, `jiuwenclaw.channel.id` | `agentserver` | LLM 调用时延 |
+| `gen_ai.client.operation.count` | Counter | `{call}` | 每次 LLM 调用结束时累加 | `gen_ai.request.model`, `status`, `jiuwenclaw.channel.id` | `agentserver` | LLM 调用次数 |
+| `gen_ai.client.token.usage` | Counter | `{token}` | LLM 返回 `usage_metadata` 时累加 | `gen_ai.request.model`, `gen_ai.system`, `gen_ai.token.type`, `jiuwenclaw.channel.id` | `agentserver` | Token 消耗 |
+| `gen_ai.tool.duration` | Histogram | `s` | 每次工具执行完成时记录 | `gen_ai.tool.name`, `jiuwenclaw.channel.id` | `agentserver` | 工具执行时延 |
+| `gen_ai.tool.call.count` | Counter | `{call}` | 每次发起工具调用时累加 | `gen_ai.tool.name`, `jiuwenclaw.channel.id` | `agentserver` | 工具调用次数 |
+| `gen_ai.tool.error.count` | Counter | `{call}` | 工具结果被判定为错误时累加 | `gen_ai.tool.name`, `jiuwenclaw.channel.id` | `agentserver` | 工具错误次数 |
+| `jiuwenclaw.session.active` | ObservableGauge | `{session}` | 导出时实时采样 | 无 | `agentserver` | 当前活跃会话数 |
+| `jiuwenclaw.session.created.count` | Counter | `{session}` | 首次创建 session processor 时累加 | 无 | `agentserver` | 累计创建会话数 |
+| `jiuwenclaw.session.state` | Counter | `{transition}` | Session 状态迁移时累加 | `jiuwenclaw.session.id`, `jiuwenclaw.session.state`, `jiuwenclaw.session.state.reason` | `agentserver` | Session 状态迁移次数 |
+| `jiuwenclaw.session.stuck` | Counter | `{occurrence}` | Session 首次被判定卡住时累加 | `jiuwenclaw.session.id` | `agentserver` | Session 卡住次数 |
+| `jiuwenclaw.session.stuck_age_ms` | Histogram | `ms` | Session 被判定卡住时记录 | `jiuwenclaw.session.id` | `agentserver` | Session 卡住时长 |
+| `jiuwenclaw.queue.depth` | ObservableGauge | `{message}` | 每次 metrics 采集时读取 | `queue` | `gateway` | 队列当前深度 |
+| `jiuwenclaw.queue.enqueued` | Counter | `{message}` | 消息入队时累加 | `queue`, `jiuwenclaw.channel.id` | `gateway` | 入队消息总数 |
+| `jiuwenclaw.queue.dequeued` | Counter | `{message}` | 消息出队时累加 | `queue`, `jiuwenclaw.channel.id` | `gateway` | 出队消息总数 |
+| `jiuwenclaw.queue.wait_duration` | Histogram | `ms` | 消息出队时记录 | `queue`, `jiuwenclaw.channel.id` | `gateway` | 队列等待时间 |
+| `jiuwenclaw.message.processed` | Counter | `{message}` | 消息出队时累加 | `queue`, `jiuwenclaw.channel.id`, `status` | `gateway` | 处理消息计数 |
+
+### 5.2 Labels 说明
+
+| Label | 所属指标 | 取值说明 |
+|---|---|---|
+| `jiuwenclaw.channel.id` | `jiuwenclaw.request.duration` `jiuwenclaw.request.count` `jiuwenclaw.request.error.count` `jiuwenclaw.agent.duration` `gen_ai.client.operation.duration` `gen_ai.client.operation.count` `gen_ai.client.token.usage` `gen_ai.tool.duration` `gen_ai.tool.call.count` `gen_ai.tool.error.count` `jiuwenclaw.queue.enqueued` `jiuwenclaw.queue.dequeued` `jiuwenclaw.queue.wait_duration` `jiuwenclaw.message.processed` | 渠道 ID，如 `web`、`feishu`、`wecom`；缺失时为空串 |
+| `jiuwenclaw.agent.name` | `jiuwenclaw.agent.duration` | Agent 名称；缺失时为空串 |
+| `gen_ai.request.model` | `gen_ai.client.operation.duration` `gen_ai.client.operation.count` `gen_ai.client.token.usage` | LLM 模型名，如配置中的 `model_name` |
+| `gen_ai.system` | `gen_ai.client.operation.duration` `gen_ai.client.token.usage` | 模型提供商，由 `model_client_config.client_provider` 推断；推断失败时为 `unknown` |
+| `status` | `gen_ai.client.operation.count` `jiuwenclaw.message.processed` | 当前实现只有 `success` 和 `error` |
+| `gen_ai.token.type` | `gen_ai.client.token.usage` | 当前实现只有 `input`、`output`、`cache_read` |
+| `gen_ai.tool.name` | `gen_ai.tool.duration` `gen_ai.tool.call.count` `gen_ai.tool.error.count` | 工具名；缺失时为空串 |
+| `jiuwenclaw.session.id` | `jiuwenclaw.session.state` `jiuwenclaw.session.stuck` `jiuwenclaw.session.stuck_age_ms` | Session ID |
+| `jiuwenclaw.session.state` | `jiuwenclaw.session.state` | 当前实现有 `created`、`active`、`idle`、`cancelled`、`destroyed` |
+| `jiuwenclaw.session.state.reason` | `jiuwenclaw.session.state` | 当前实现有 `new_request`、`task_started`、`task_completed`、`task_error`、`user_cancel`、`queue_closed` |
+| `queue` | `jiuwenclaw.queue.depth` `jiuwenclaw.queue.enqueued` `jiuwenclaw.queue.dequeued` `jiuwenclaw.queue.wait_duration` `jiuwenclaw.message.processed` | 队列名称，取值 `user`（用户消息队列）或 `robot`（机器人消息队列） |
+
+### 5.3 指标判定细节
+
+| 指标名 | 判定逻辑 |
+|---|---|
+| `gen_ai.tool.error.count` | 当前通过工具结果字符串是否包含 `error`、`exception`、`traceback` 来判定错误 |
+| `gen_ai.client.operation.count` | 模型调用失败数通过 `status="error"` 统计，不单独新增失败 metric |
+| `gen_ai.client.token.usage` | 仅在 LLM 返回 `usage_metadata` 时上报；没有 usage 时不记录 |
+| `jiuwenclaw.session.active` | 当前实现统计所有 agent 实例中仍未结束的 session processor 数量 |
+| `jiuwenclaw.session.created.count` | 仅在首次创建 session processor 时累加，同一 session 重用 processor 不重复计数 |
+| `jiuwenclaw.session.stuck` | 仅首次检测到卡住时计数一次 |
+| `jiuwenclaw.session.stuck_age_ms` | 每次检查到卡住都会记录一次当前卡住时长 |
+
+### 5.4 资源属性
+
+除上表中的 point labels 外，默认 Provider 还会为所有 metrics 附带以下资源属性：
+
+| 属性 | 值来源 |
+|---|---|
+| `service.name` | `OTEL_SERVICE_NAME` 或 `telemetry.service_name`，默认 `jiuwenclaw` |
+| `service.version` | 当前默认写死为 `0.1.5` |
+
+### 5.5 代码来源
+
+| 文件 | 作用 |
+|---|---|
+| `jiuwenclaw/telemetry/metrics.py` | 指标定义 |
+| `jiuwenclaw/telemetry/instrumentors/entry.py` | 请求入口指标 |
+| `jiuwenclaw/telemetry/instrumentors/agent.py` | Agent 指标 |
+| `jiuwenclaw/telemetry/instrumentors/llm.py` | LLM 指标 |
+| `jiuwenclaw/telemetry/instrumentors/tool.py` | 工具指标 |
+| `jiuwenclaw/telemetry/instrumentors/session.py` | Session 生命周期与 stuck 指标 |
+| `jiuwenclaw/telemetry/instrumentors/queue.py` | 消息队列监控指标 |
+| `jiuwenclaw/telemetry/provider.py` | `service.name` / `service.version` 等资源属性 |
+
+### 5.6 Span 属性覆盖
+
+除 metrics labels 外，各 span 还携带以下属性，可在 trace 后端用于过滤和查询：
+
+| Span | 携带的关键属性 |
+|---|---|
+| Entry (`jiuwenclaw.request`) | `jiuwenclaw.channel.id`, `jiuwenclaw.session.id` |
+| Agent (`jiuwenclaw.agent.invoke`) | `jiuwenclaw.agent.name`, `jiuwenclaw.session.id`, `jiuwenclaw.channel.id`, `jiuwenclaw.request.id` |
+| LLM (`gen_ai.chat`) | `gen_ai.system`, `gen_ai.request.model`, `jiuwenclaw.session.id` |
+| Tool (`gen_ai.tool.execute: *`) | `gen_ai.tool.name`, `gen_ai.tool.call.id`, `jiuwenclaw.session.id` |
 
 ## 6. 对接 Jaeger 示例
 
@@ -171,6 +257,7 @@ OTEL_ENABLED=true OTEL_EXPORTER_TYPE=otlp jiuwenclaw-app
 - `OTEL_ENABLED=true` 时，现有埋点逻辑继续执行
 - trace 是否真正上报，由 `OTEL_TRACES_EXPORTER` 控制
 - metrics 是否真正上报，由 `OTEL_METRICS_EXPORTER` 控制
+- 默认值为 `OTEL_ENABLED=true`、`OTEL_TRACES_EXPORTER=none`、`OTEL_METRICS_EXPORTER=none`
 
 例如：
 

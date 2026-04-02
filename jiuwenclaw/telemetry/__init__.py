@@ -47,3 +47,12 @@ def init_telemetry() -> None:
 
     _initialized = True
     logger.info("[Telemetry] Initialization complete")
+
+
+def is_telemetry_initialized() -> bool:
+    """Check if telemetry has been initialized.
+
+    Returns:
+        True if telemetry has been initialized, False otherwise.
+    """
+    return _initialized

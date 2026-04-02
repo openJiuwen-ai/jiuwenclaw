@@ -9,6 +9,8 @@ These tests verify that enabling telemetry preserves core business behavior:
 - session queue processing still works after cancellation
 """
 
+# pylint: disable=protected-access
+
 from __future__ import annotations
 
 import asyncio
@@ -19,6 +21,8 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
+
+import pytest
 
 
 def _run(coro):
@@ -73,6 +77,9 @@ def _build_fake_gateway_modules() -> dict[str, types.ModuleType]:
     message_handler_module = types.ModuleType("jiuwenclaw.gateway.message_handler")
 
     class MessageHandler:
+        def __init__(self, agent=None):
+            self._agent = agent
+
         @staticmethod
         def message_to_e2a(msg):
             from jiuwenclaw.e2a.gateway_normalize import message_to_e2a_or_fallback
@@ -80,6 +87,9 @@ def _build_fake_gateway_modules() -> dict[str, types.ModuleType]:
             return message_to_e2a_or_fallback(msg)
 
         async def process_stream(self, env, session_id, request_metadata=None):
+            agent = getattr(self, "_agent", None)
+            if agent is not None:
+                await agent._ensure_session_processor(session_id)
             return None
 
     message_handler_module.MessageHandler = MessageHandler
@@ -242,6 +252,31 @@ def _patched_regression_modules():
     }
     with patch.dict(sys.modules, modules):
         yield
+
+
+async def _dispatch_stream_message(
+    handler,
+    request_id: str,
+    session_id: str,
+    channel_id: str = "web",
+):
+    from jiuwenclaw.schema.message import Message, ReqMethod
+
+    msg = Message(
+        id=request_id,
+        type="req",
+        channel_id=channel_id,
+        session_id=session_id,
+        params={"content": request_id, "mode": "agent"},
+        timestamp=time.time(),
+        ok=True,
+        req_method=ReqMethod.CHAT_SEND,
+        is_stream=True,
+        metadata={"source": "test"},
+    )
+    env = handler.message_to_e2a(msg)
+    await handler.process_stream(env, session_id)
+    return env
 
 
 class TestTelemetryRegression:
@@ -445,3 +480,254 @@ class TestTelemetryRegression:
                 JiuWenClaw.__init__ = original_init
                 JiuWenClaw._ensure_session_processor = original_ensure
                 JiuWenClaw._cancel_session_task = original_cancel
+
+    @staticmethod
+    def test_session_metrics_track_created_and_active_sessions():
+        with _patched_regression_modules():
+            from jiuwenclaw.agentserver.interface import JiuWenClaw
+            import jiuwenclaw.telemetry.instrumentors.session as session_mod
+            import jiuwenclaw.telemetry.metrics as metrics_mod
+
+            original_init = JiuWenClaw.__init__
+            original_ensure = JiuWenClaw._ensure_session_processor
+            original_cancel = JiuWenClaw._cancel_session_task
+
+            async def scenario():
+                session_mod._tracked_agent_servers.clear()
+                metrics_mod.set_session_active_observer(None)
+
+                with patch(
+                    "jiuwenclaw.telemetry.instrumentors.session._ensure_stuck_checker",
+                    side_effect=lambda agent_server: None,
+                ):
+                    with patch.object(session_mod.session_created_count, "add") as mock_created:
+                        session_mod.instrument_session(
+                            stuck_threshold_ms=1000,
+                            stuck_check_interval_s=60,
+                        )
+
+                        agent = JiuWenClaw()
+                        assert session_mod._count_active_sessions() == 0
+                        assert list(metrics_mod._observe_session_active(MagicMock()))[0].value == 0
+
+                        try:
+                            await agent._ensure_session_processor("sess_created_1")
+                            assert mock_created.call_count == 1
+                            assert session_mod._count_active_sessions() == 1
+                            assert list(metrics_mod._observe_session_active(MagicMock()))[0].value == 1
+
+                            # Reusing the same session must not increment the created counter again.
+                            await agent._ensure_session_processor("sess_created_1")
+                            assert mock_created.call_count == 1
+
+                            await agent._ensure_session_processor("sess_created_2")
+                            assert mock_created.call_count == 2
+                            assert session_mod._count_active_sessions() == 2
+                            assert list(metrics_mod._observe_session_active(MagicMock()))[0].value == 2
+                        finally:
+                            await _shutdown_session_tasks(agent)
+
+                        assert session_mod._count_active_sessions() == 0
+                        assert list(metrics_mod._observe_session_active(MagicMock()))[0].value == 0
+
+            try:
+                _run(scenario())
+            finally:
+                session_mod._tracked_agent_servers.clear()
+                metrics_mod.set_session_active_observer(None)
+                JiuWenClaw.__init__ = original_init
+                JiuWenClaw._ensure_session_processor = original_ensure
+                JiuWenClaw._cancel_session_task = original_cancel
+
+    @staticmethod
+    def test_same_session_two_messages_record_one_created_and_two_requests():
+        with _patched_regression_modules():
+            from jiuwenclaw.agentserver.interface import JiuWenClaw
+            from jiuwenclaw.gateway.message_handler import MessageHandler
+            import jiuwenclaw.telemetry.instrumentors.entry as entry_mod
+            import jiuwenclaw.telemetry.instrumentors.session as session_mod
+            import jiuwenclaw.telemetry.metrics as metrics_mod
+
+            original_init = JiuWenClaw.__init__
+            original_ensure = JiuWenClaw._ensure_session_processor
+            original_cancel = JiuWenClaw._cancel_session_task
+            original_process_stream = MessageHandler.process_stream
+            original_message_to_e2a = MessageHandler.message_to_e2a
+
+            async def scenario():
+                session_mod._tracked_agent_servers.clear()
+                metrics_mod.set_session_active_observer(None)
+
+                with patch(
+                    "jiuwenclaw.telemetry.instrumentors.session._ensure_stuck_checker",
+                    side_effect=lambda agent_server: None,
+                ):
+                    with patch(
+                        "jiuwenclaw.telemetry.instrumentors.entry.inject_trace_context",
+                        side_effect=lambda carrier: carrier.setdefault("traceparent", "test-traceparent"),
+                    ):
+                        session_mod.instrument_session(
+                            stuck_threshold_ms=1000,
+                            stuck_check_interval_s=60,
+                        )
+                        entry_mod.instrument_entry()
+
+                        agent = JiuWenClaw()
+                        handler = MessageHandler(agent)
+
+                        try:
+                            with patch.object(session_mod.session_created_count, "add") as mock_created:
+                                with patch.object(entry_mod.request_count, "add") as mock_request:
+                                    req_1 = await _dispatch_stream_message(
+                                        handler,
+                                        "req_same_1",
+                                        "sess_same_twice",
+                                    )
+                                    req_2 = await _dispatch_stream_message(
+                                        handler,
+                                        "req_same_2",
+                                        "sess_same_twice",
+                                    )
+
+                                    assert req_1.channel_context["source"] == "test"
+                                    assert req_1.channel_context["traceparent"] == "test-traceparent"
+                                    assert req_2.channel_context["source"] == "test"
+                                    assert req_2.channel_context["traceparent"] == "test-traceparent"
+
+                                    assert mock_created.call_count == 1
+                                    assert mock_request.call_count == 2
+                                    assert all(
+                                        call.args == (1, {"jiuwenclaw.channel.id": "web"})
+                                        for call in mock_request.call_args_list
+                                    )
+                                    assert len(agent._session_processors) == 1
+                                    assert session_mod._count_active_sessions() == 1
+                                    assert list(metrics_mod._observe_session_active(MagicMock()))[0].value == 1
+                        finally:
+                            await _shutdown_session_tasks(agent)
+
+                        assert session_mod._count_active_sessions() == 0
+                        assert list(metrics_mod._observe_session_active(MagicMock()))[0].value == 0
+
+            try:
+                _run(scenario())
+            finally:
+                session_mod._tracked_agent_servers.clear()
+                metrics_mod.set_session_active_observer(None)
+                JiuWenClaw.__init__ = original_init
+                JiuWenClaw._ensure_session_processor = original_ensure
+                JiuWenClaw._cancel_session_task = original_cancel
+                MessageHandler.process_stream = original_process_stream
+                MessageHandler.message_to_e2a = original_message_to_e2a
+
+    @staticmethod
+    def test_three_sessions_two_messages_each_record_three_created_and_six_requests():
+        with _patched_regression_modules():
+            from jiuwenclaw.agentserver.interface import JiuWenClaw
+            from jiuwenclaw.gateway.message_handler import MessageHandler
+            import jiuwenclaw.telemetry.instrumentors.entry as entry_mod
+            import jiuwenclaw.telemetry.instrumentors.session as session_mod
+            import jiuwenclaw.telemetry.metrics as metrics_mod
+
+            original_init = JiuWenClaw.__init__
+            original_ensure = JiuWenClaw._ensure_session_processor
+            original_cancel = JiuWenClaw._cancel_session_task
+            original_process_stream = MessageHandler.process_stream
+            original_message_to_e2a = MessageHandler.message_to_e2a
+
+            async def scenario():
+                session_mod._tracked_agent_servers.clear()
+                metrics_mod.set_session_active_observer(None)
+
+                with patch(
+                    "jiuwenclaw.telemetry.instrumentors.session._ensure_stuck_checker",
+                    side_effect=lambda agent_server: None,
+                ):
+                    with patch(
+                        "jiuwenclaw.telemetry.instrumentors.entry.inject_trace_context",
+                        side_effect=lambda carrier: carrier.setdefault("traceparent", "test-traceparent"),
+                    ):
+                        session_mod.instrument_session(
+                            stuck_threshold_ms=1000,
+                            stuck_check_interval_s=60,
+                        )
+                        entry_mod.instrument_entry()
+
+                        agent = JiuWenClaw()
+                        handler = MessageHandler(agent)
+                        session_ids = ("sess_multi_1", "sess_multi_2", "sess_multi_3")
+
+                        try:
+                            with patch.object(session_mod.session_created_count, "add") as mock_created:
+                                with patch.object(entry_mod.request_count, "add") as mock_request:
+                                    for session_id in session_ids:
+                                        for index in range(1, 3):
+                                            req = await _dispatch_stream_message(
+                                                handler,
+                                                f"{session_id}_req_{index}",
+                                                session_id,
+                                            )
+                                            assert req.channel_context["source"] == "test"
+                                            assert req.channel_context["traceparent"] == "test-traceparent"
+
+                                    assert mock_created.call_count == 3
+                                    assert mock_request.call_count == 6
+                                    assert all(
+                                        call.args == (1, {"jiuwenclaw.channel.id": "web"})
+                                        for call in mock_request.call_args_list
+                                    )
+                                    assert set(agent._session_processors.keys()) == set(session_ids)
+                                    assert session_mod._count_active_sessions() == 3
+                                    assert list(metrics_mod._observe_session_active(MagicMock()))[0].value == 3
+                        finally:
+                            await _shutdown_session_tasks(agent)
+
+                        assert session_mod._count_active_sessions() == 0
+                        assert list(metrics_mod._observe_session_active(MagicMock()))[0].value == 0
+
+            try:
+                _run(scenario())
+            finally:
+                session_mod._tracked_agent_servers.clear()
+                metrics_mod.set_session_active_observer(None)
+                JiuWenClaw.__init__ = original_init
+                JiuWenClaw._ensure_session_processor = original_ensure
+                JiuWenClaw._cancel_session_task = original_cancel
+                MessageHandler.process_stream = original_process_stream
+                MessageHandler.message_to_e2a = original_message_to_e2a
+
+    @staticmethod
+    def test_llm_error_uses_existing_status_dimension_counter():
+        with _patched_regression_modules():
+            from jiuwenclaw.agentserver.react_agent import JiuClawReActAgent
+            import jiuwenclaw.telemetry.instrumentors.llm as llm_mod
+
+            original_call_llm = getattr(JiuClawReActAgent, "_call_llm", None)
+
+            async def failing_call_llm(self, messages, tools=None, session=None, chunk_threshold=10):
+                raise RuntimeError("LLM timeout")
+
+            try:
+                JiuClawReActAgent._call_llm = failing_call_llm
+                llm_mod.instrument_llm()
+
+                agent = JiuClawReActAgent()
+                agent._config = SimpleNamespace(
+                    model_name="deepseek-chat",
+                    model_client_config={"client_provider": "openai"},
+                    model_config_obj=SimpleNamespace(temperature=None, top_p=None),
+                )
+
+                with patch.object(llm_mod.llm_call_count, "add") as mock_metric_add:
+                    with pytest.raises(RuntimeError, match="LLM timeout"):
+                        _run(agent._call_llm([], None, None, 10))
+
+                mock_metric_add.assert_called_once_with(
+                    1,
+                    {"gen_ai.request.model": "deepseek-chat", "status": "error", "jiuwenclaw.channel.id": ""},
+                )
+            finally:
+                if original_call_llm is None:
+                    delattr(JiuClawReActAgent, "_call_llm")
+                else:
+                    JiuClawReActAgent._call_llm = original_call_llm

@@ -10,7 +10,8 @@ from __future__ import annotations
 
 import asyncio
 import time
-from typing import Dict
+import weakref
+from typing import Any, Dict
 
 from jiuwenclaw.utils import logger
 from jiuwenclaw.telemetry.attributes import (
@@ -19,14 +20,17 @@ from jiuwenclaw.telemetry.attributes import (
     JIUWENCLAW_SESSION_STATE_REASON,
 )
 from jiuwenclaw.telemetry.metrics import (
+    session_created_count,
     session_state_count,
     session_stuck_count,
     session_stuck_age,
+    set_session_active_observer,
 )
 
 # Module-level config — set by instrument_session()
 _stuck_threshold_ms: float = 300000.0
 _stuck_check_interval_s: float = 30.0
+_tracked_agent_servers: weakref.WeakSet[Any] = weakref.WeakSet()
 
 
 def _emit_state(session_id: str, state: str, reason: str) -> None:
@@ -38,6 +42,19 @@ def _emit_state(session_id: str, state: str, reason: str) -> None:
     })
 
 
+def _count_active_sessions() -> int:
+    """Count active session processors across tracked agent instances."""
+    active_sessions = 0
+    for agent_server in list(_tracked_agent_servers):
+        processors = getattr(agent_server, "_session_processors", {}) or {}
+        active_sessions += sum(
+            1
+            for task in processors.values()
+            if task is not None and not task.done()
+        )
+    return active_sessions
+
+
 def instrument_session(
     stuck_threshold_ms: float = 300000.0,
     stuck_check_interval_s: float = 30.0,
@@ -46,6 +63,7 @@ def instrument_session(
     global _stuck_threshold_ms, _stuck_check_interval_s
     _stuck_threshold_ms = float(stuck_threshold_ms)
     _stuck_check_interval_s = float(stuck_check_interval_s)
+    set_session_active_observer(_count_active_sessions)
 
     try:
         from jiuwenclaw.agentserver.interface import JiuWenClaw
@@ -63,6 +81,7 @@ def instrument_session(
         self._session_task_start_times: Dict[str, float] = {}
         self._stuck_reported: Dict[str, bool] = {}
         self._stuck_checker_task: asyncio.Task | None = None
+        _tracked_agent_servers.add(self)
 
     # --- Patch _ensure_session_processor: replace with instrumented version ---
     async def _patched_ensure_session_processor(self, session_id: str) -> None:
@@ -72,6 +91,7 @@ def instrument_session(
             self._session_priorities[session_id] = 0
 
             # >>> 埋点: state=created
+            session_created_count.add(1)
             _emit_state(session_id, "created", "new_request")
 
             # 创建任务处理器

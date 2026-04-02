@@ -17,7 +17,9 @@ The following runtime metrics are also recorded:
 
 - End-to-end request latency, agent processing latency, LLM call latency, tool execution latency
 - Total requests, error count, LLM call count, tool call count, tool error count
+- Current active session count and total created session count
 - Token usage (broken down by input/output/cache)
+- Model call failures can be derived from `gen_ai.client.operation.count{status="error"}`
 
 ## 2. Quick enable
 
@@ -38,21 +40,23 @@ Add or edit the `telemetry` section in `config.yaml`:
 ```yaml
 telemetry:
   enabled: true                     # Master switch
-  exporter: otlp                    # otlp / console / none
+  exporter: none                    # Collection stays on, but nothing is exported by default
   endpoint: http://localhost:4317   # OTLP endpoint
   protocol: grpc                    # grpc / http
   log_messages: true                # Whether to record full message content
   service_name: jiuwenclaw
 ```
 
-> Environment variables take precedence over `config.yaml`.
+> Environment variables take precedence over `config.yaml`. To actually export data, set `exporter`, `OTEL_TRACES_EXPORTER`, or `OTEL_METRICS_EXPORTER` to `console` or `otlp`.
 
 ## 3. Configuration parameters
 
 | Environment variable | config.yaml field | Default | Description |
 |----------------------|-------------------|---------|-------------|
-| `OTEL_ENABLED` | `telemetry.enabled` | `false` | Master switch |
-| `OTEL_EXPORTER_TYPE` | `telemetry.exporter` | `otlp` | Exporter: otlp / console / none |
+| `OTEL_ENABLED` | `telemetry.enabled` | `true` | Master switch |
+| `OTEL_EXPORTER_TYPE` | `telemetry.exporter` | `none` | Shared exporter fallback: otlp / console / none |
+| `OTEL_TRACES_EXPORTER` | `telemetry.traces.exporter` | `none` | Trace exporter: otlp / console / none |
+| `OTEL_METRICS_EXPORTER` | `telemetry.metrics.exporter` | `none` | Metrics exporter: otlp / console / none |
 | `OTEL_EXPORTER_OTLP_ENDPOINT` | `telemetry.endpoint` | `http://localhost:4317` | OTLP backend URL |
 | `OTEL_EXPORTER_OTLP_PROTOCOL` | `telemetry.protocol` | `grpc` | OTLP protocol: grpc / http |
 | `OTEL_LOG_MESSAGES` | `telemetry.log_messages` | `true` | Whether to record full message content in span events |
@@ -117,18 +121,89 @@ A full request trace looks like this:
 
 ## 5. Metrics
 
-| Metric name | Type | Description |
-|-------------|------|-------------|
-| `jiuwenclaw.request.duration` | Histogram | End-to-end request latency (seconds) |
-| `jiuwenclaw.request.count` | Counter | Total requests |
-| `jiuwenclaw.request.error.count` | Counter | Request errors |
-| `jiuwenclaw.agent.duration` | Histogram | Agent processing latency (seconds) |
-| `gen_ai.client.operation.duration` | Histogram | LLM call latency (seconds) |
-| `gen_ai.client.token.usage` | Counter | Token usage (by `gen_ai.token.type`) |
-| `gen_ai.client.operation.count` | Counter | LLM call count |
-| `gen_ai.tool.duration` | Histogram | Tool execution latency (seconds) |
-| `gen_ai.tool.call.count` | Counter | Tool call count |
-| `gen_ai.tool.error.count` | Counter | Tool errors |
+This section is based on the current code implementation rather than only the high-level summary above. The code currently defines 20 metrics in `jiuwenclaw/telemetry/metrics.py`, with instrumentation entry points in:
+
+- `jiuwenclaw/telemetry/instrumentors/entry.py`
+- `jiuwenclaw/telemetry/instrumentors/agent.py`
+- `jiuwenclaw/telemetry/instrumentors/llm.py`
+- `jiuwenclaw/telemetry/instrumentors/tool.py`
+- `jiuwenclaw/telemetry/instrumentors/session.py`
+- `jiuwenclaw/telemetry/instrumentors/queue.py`
+
+### 5.1 Metric Overview
+
+| Metric name | Type | Unit | Trigger | Labels | Source | Description |
+|---|---|---|---|---|---|---|
+| `jiuwenclaw.request.duration` | Histogram | `s` | Recorded when an entry request finishes | `jiuwenclaw.channel.id` | `gateway` | End-to-end request latency |
+| `jiuwenclaw.request.count` | Counter | `{request}` | Incremented when an entry request starts | `jiuwenclaw.channel.id` | `gateway` | Total request count |
+| `jiuwenclaw.request.error.count` | Counter | `{request}` | Incremented when an entry request raises an exception | `jiuwenclaw.channel.id` | `gateway` | Request error count |
+| `jiuwenclaw.agent.duration` | Histogram | `s` | Recorded when agent processing completes, for both streaming and non-streaming flows | `jiuwenclaw.agent.name`, `jiuwenclaw.channel.id` | `agentserver` | Agent processing latency |
+| `gen_ai.client.operation.duration` | Histogram | `s` | Recorded when an LLM call finishes | `gen_ai.request.model`, `gen_ai.system`, `jiuwenclaw.channel.id` | `agentserver` | LLM call latency |
+| `gen_ai.client.operation.count` | Counter | `{call}` | Incremented when an LLM call finishes | `gen_ai.request.model`, `status`, `jiuwenclaw.channel.id` | `agentserver` | LLM call count |
+| `gen_ai.client.token.usage` | Counter | `{token}` | Incremented when the LLM returns `usage_metadata` | `gen_ai.request.model`, `gen_ai.system`, `gen_ai.token.type`, `jiuwenclaw.channel.id` | `agentserver` | Token usage |
+| `gen_ai.tool.duration` | Histogram | `s` | Recorded when a tool execution finishes | `gen_ai.tool.name`, `jiuwenclaw.channel.id` | `agentserver` | Tool execution latency |
+| `gen_ai.tool.call.count` | Counter | `{call}` | Incremented when a tool call is initiated | `gen_ai.tool.name`, `jiuwenclaw.channel.id` | `agentserver` | Tool call count |
+| `gen_ai.tool.error.count` | Counter | `{call}` | Incremented when a tool result is classified as an error | `gen_ai.tool.name`, `jiuwenclaw.channel.id` | `agentserver` | Tool error count |
+| `jiuwenclaw.session.active` | ObservableGauge | `{session}` | Sampled in real time during export | None | `agentserver` | Current active session count |
+| `jiuwenclaw.session.created.count` | Counter | `{session}` | Incremented when a session processor is created for the first time | None | `agentserver` | Total created session count |
+| `jiuwenclaw.session.state` | Counter | `{transition}` | Incremented on session state transition | `jiuwenclaw.session.id`, `jiuwenclaw.session.state`, `jiuwenclaw.session.state.reason` | `agentserver` | Session state transition count |
+| `jiuwenclaw.session.stuck` | Counter | `{occurrence}` | Incremented on first stuck detection for a session | `jiuwenclaw.session.id` | `agentserver` | Session stuck occurrence count |
+| `jiuwenclaw.session.stuck_age_ms` | Histogram | `ms` | Recorded when a session is detected as stuck | `jiuwenclaw.session.id` | `agentserver` | Session stuck duration |
+| `jiuwenclaw.queue.depth` | ObservableGauge | `{message}` | Sampled on each metrics collection | `queue` | `gateway` | Current queue depth |
+| `jiuwenclaw.queue.enqueued` | Counter | `{message}` | Incremented on message enqueue | `queue`, `jiuwenclaw.channel.id` | `gateway` | Total enqueued messages |
+| `jiuwenclaw.queue.dequeued` | Counter | `{message}` | Incremented on message dequeue | `queue`, `jiuwenclaw.channel.id` | `gateway` | Total dequeued messages |
+| `jiuwenclaw.queue.wait_duration` | Histogram | `ms` | Recorded on message dequeue | `queue`, `jiuwenclaw.channel.id` | `gateway` | Queue wait duration |
+| `jiuwenclaw.message.processed` | Counter | `{message}` | Incremented on message dequeue | `queue`, `jiuwenclaw.channel.id`, `status` | `gateway` | Processed message count |
+
+### 5.2 Label Reference
+
+| Label | Metrics | Value description |
+|---|---|---|
+| `jiuwenclaw.channel.id` | `jiuwenclaw.request.duration` `jiuwenclaw.request.count` `jiuwenclaw.request.error.count` `jiuwenclaw.agent.duration` `gen_ai.client.operation.duration` `gen_ai.client.operation.count` `gen_ai.client.token.usage` `gen_ai.tool.duration` `gen_ai.tool.call.count` `gen_ai.tool.error.count` `jiuwenclaw.queue.enqueued` `jiuwenclaw.queue.dequeued` `jiuwenclaw.queue.wait_duration` `jiuwenclaw.message.processed` | Channel ID such as `web`, `feishu`, or `wecom`; empty string when missing |
+| `jiuwenclaw.agent.name` | `jiuwenclaw.agent.duration` | Agent name; empty string when missing |
+| `gen_ai.request.model` | `gen_ai.client.operation.duration` `gen_ai.client.operation.count` `gen_ai.client.token.usage` | LLM model name, for example the configured `model_name` |
+| `gen_ai.system` | `gen_ai.client.operation.duration` `gen_ai.client.token.usage` | Model provider inferred from `model_client_config.client_provider`; `unknown` on inference failure |
+| `status` | `gen_ai.client.operation.count` `jiuwenclaw.message.processed` | Current implementation uses only `success` and `error` |
+| `gen_ai.token.type` | `gen_ai.client.token.usage` | Current implementation uses `input`, `output`, and `cache_read` |
+| `gen_ai.tool.name` | `gen_ai.tool.duration` `gen_ai.tool.call.count` `gen_ai.tool.error.count` | Tool name; empty string when missing |
+| `jiuwenclaw.session.id` | `jiuwenclaw.session.state` `jiuwenclaw.session.stuck` `jiuwenclaw.session.stuck_age_ms` | Session ID |
+| `jiuwenclaw.session.state` | `jiuwenclaw.session.state` | Current implementation uses `created`, `active`, `idle`, `cancelled`, and `destroyed` |
+| `jiuwenclaw.session.state.reason` | `jiuwenclaw.session.state` | Current implementation uses `new_request`, `task_started`, `task_completed`, `task_error`, `user_cancel`, and `queue_closed` |
+| `queue` | `jiuwenclaw.queue.depth` `jiuwenclaw.queue.enqueued` `jiuwenclaw.queue.dequeued` `jiuwenclaw.queue.wait_duration` `jiuwenclaw.message.processed` | Queue name: `user` (user message queue) or `robot` (robot message queue) |
+
+### 5.3 Metric Interpretation Details
+
+| Metric name | Interpretation logic |
+|---|---|
+| `gen_ai.tool.error.count` | Errors are currently inferred by checking whether the tool result string contains `error`, `exception`, or `traceback` |
+| `gen_ai.client.operation.count` | Model call failures are derived with `status="error"` rather than a separate failure metric |
+| `gen_ai.client.token.usage` | Reported only when the LLM returns `usage_metadata`; nothing is emitted when usage is absent |
+| `jiuwenclaw.session.active` | The current implementation counts session processors across all tracked agent instances that have not finished yet |
+| `jiuwenclaw.session.created.count` | Incremented only when a session processor is created for the first time; reusing the same session does not increment again |
+| `jiuwenclaw.session.stuck` | Counted only once on the first stuck detection |
+| `jiuwenclaw.session.stuck_age_ms` | Recorded every time a stuck session is observed, using the current stuck duration |
+
+### 5.4 Resource Attributes
+
+In addition to the point labels above, the default provider attaches the following resource attributes to all metrics:
+
+| Attribute | Value source |
+|---|---|
+| `service.name` | `OTEL_SERVICE_NAME` or `telemetry.service_name`, default `jiuwenclaw` |
+| `service.version` | Currently hard-coded to `0.1.5` |
+
+### 5.5 Code Sources
+
+| File | Responsibility |
+|---|---|
+| `jiuwenclaw/telemetry/metrics.py` | Metric definitions |
+| `jiuwenclaw/telemetry/instrumentors/entry.py` | Request entry metrics |
+| `jiuwenclaw/telemetry/instrumentors/agent.py` | Agent metrics |
+| `jiuwenclaw/telemetry/instrumentors/llm.py` | LLM metrics |
+| `jiuwenclaw/telemetry/instrumentors/tool.py` | Tool metrics |
+| `jiuwenclaw/telemetry/instrumentors/session.py` | Session lifecycle and stuck metrics |
+| `jiuwenclaw/telemetry/instrumentors/queue.py` | Message queue monitoring metrics |
+| `jiuwenclaw/telemetry/provider.py` | Resource attributes such as `service.name` and `service.version` |
 
 ## 6. Jaeger example
 
@@ -176,6 +251,7 @@ This design separates “collection” from “export”:
 - When `OTEL_ENABLED=true`, existing instrumentation continues to run
 - Whether traces are actually exported is controlled by `OTEL_TRACES_EXPORTER`
 - Whether metrics are actually exported is controlled by `OTEL_METRICS_EXPORTER`
+- The defaults are `OTEL_ENABLED=true`, `OTEL_TRACES_EXPORTER=none`, and `OTEL_METRICS_EXPORTER=none`
 
 Example:
 

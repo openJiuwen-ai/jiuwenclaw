@@ -29,6 +29,9 @@ from jiuwenclaw.telemetry.attributes import (
     GEN_AI_USAGE_INPUT_TOKENS,
     GEN_AI_USAGE_OUTPUT_TOKENS,
     GEN_AI_USAGE_TOTAL_TOKENS,
+    JIUWENCLAW_CHANNEL_ID,
+    JIUWENCLAW_REQUEST_ID,
+    JIUWENCLAW_SESSION_ID,
 )
 from jiuwenclaw.telemetry.metrics import llm_call_count, llm_duration, token_usage
 
@@ -56,6 +59,9 @@ def instrument_llm() -> None:
     async def _traced_call_llm(self, messages, tools=None, session=None, chunk_threshold=10):
         model_name = getattr(self._config, "model_name", "unknown")
         system = _infer_gen_ai_system(self)
+        channel_id = getattr(self, "otel_channel_id", "")
+        session_id = getattr(self, "otel_session_id", "")
+        request_id = getattr(self, "otel_request_id", "")
         model_cfg = getattr(self._config, "model_config_obj", None)
         temperature = getattr(model_cfg, "temperature", None)
         top_p = getattr(model_cfg, "top_p", None)
@@ -66,6 +72,9 @@ def instrument_llm() -> None:
             GEN_AI_RESPONSE_MODEL: model_name,
             GEN_AI_OPERATION_NAME: "chat",
             GEN_AI_SPAN_TYPE: "model",
+            JIUWENCLAW_SESSION_ID: session_id,
+            JIUWENCLAW_CHANNEL_ID: channel_id,
+            JIUWENCLAW_REQUEST_ID: request_id,
         }
         if temperature is not None:
             span_attrs[GEN_AI_REQUEST_TEMPERATURE] = float(temperature)
@@ -89,7 +98,7 @@ def instrument_llm() -> None:
                 )
 
                 # Token usage from AssistantMessage.usage_metadata
-                _record_token_usage(span, result, model_name, system)
+                _record_token_usage(span, result, model_name, system, channel_id)
 
                 # Finish reason
                 finish_reason = getattr(result, "finish_reason", None)
@@ -102,19 +111,34 @@ def instrument_llm() -> None:
                     _record_output_message(span, result)
 
                 span.set_status(StatusCode.OK)
-                llm_call_count.add(1, {GEN_AI_REQUEST_MODEL: model_name, "status": "success"})
+                llm_call_count.add(
+                    1,
+                    {
+                        GEN_AI_REQUEST_MODEL: model_name,
+                        "status": "success",
+                        JIUWENCLAW_CHANNEL_ID: channel_id,
+                    },
+                )
                 return result
 
             except Exception as exc:
                 span.set_status(StatusCode.ERROR, str(exc)[:256])
                 span.record_exception(exc)
-                llm_call_count.add(1, {GEN_AI_REQUEST_MODEL: model_name, "status": "error"})
+                llm_call_count.add(
+                    1,
+                    {
+                        GEN_AI_REQUEST_MODEL: model_name,
+                        "status": "error",
+                        JIUWENCLAW_CHANNEL_ID: channel_id,
+                    },
+                )
                 raise
             finally:
                 duration = time.monotonic() - start
                 llm_duration.record(duration, {
                     GEN_AI_REQUEST_MODEL: model_name,
                     GEN_AI_SYSTEM: system,
+                    JIUWENCLAW_CHANNEL_ID: channel_id,
                 })
 
     JiuClawReActAgent._call_llm = _traced_call_llm
@@ -172,7 +196,7 @@ def _record_output_message(span, result) -> None:
     span.add_event("gen_ai.assistant.message", attrs)
 
 
-def _record_token_usage(span, result, model_name: str, system: str) -> None:
+def _record_token_usage(span, result, model_name: str, system: str, channel_id: str = "") -> None:
     """Extract token usage from AssistantMessage.usage_metadata and record."""
     usage = getattr(result, "usage_metadata", None)
     if not usage:
@@ -190,7 +214,7 @@ def _record_token_usage(span, result, model_name: str, system: str) -> None:
         span.set_attribute(GEN_AI_USAGE_CACHE_READ_TOKENS, cache_read)
 
     # Metric counters
-    base_attrs = {GEN_AI_REQUEST_MODEL: model_name, GEN_AI_SYSTEM: system}
+    base_attrs = {GEN_AI_REQUEST_MODEL: model_name, GEN_AI_SYSTEM: system, JIUWENCLAW_CHANNEL_ID: channel_id}
     if input_tokens:
         token_usage.add(input_tokens, {**base_attrs, "gen_ai.token.type": "input"})
     if output_tokens:

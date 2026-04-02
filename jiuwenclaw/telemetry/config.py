@@ -20,21 +20,22 @@ def _normalize_protocol(value: str, default: str) -> str:
 
 @dataclass(frozen=True)
 class TelemetryConfig:
-    enabled: bool = False
-    exporter: str = "otlp"          # otlp / console / none
+    enabled: bool = True
+    exporter: str = "none"          # otlp / console / none
     endpoint: str = "http://localhost:4317"
     protocol: str = "grpc"          # grpc / http
     headers: dict[str, str] = field(default_factory=dict)
-    traces_exporter: str = "otlp"   # otlp / console / none
+    traces_exporter: str = "none"   # otlp / console / none
     traces_endpoint: str = "http://localhost:4317"
     traces_protocol: str = "grpc"   # grpc / http
     traces_headers: dict[str, str] = field(default_factory=dict)
-    metrics_exporter: str = "otlp"  # otlp / console / none
+    metrics_exporter: str = "none"  # otlp / console / none
     metrics_endpoint: str = "http://localhost:4317"
     metrics_protocol: str = "grpc"  # grpc / http
     metrics_headers: dict[str, str] = field(default_factory=dict)
     log_messages: bool = True       # record full message content in span events
     service_name: str = "jiuwenclaw"
+    claw_id: str | None = None
     provider_factory: str | None = None
     session_stuck_threshold_ms: float = 300000.0     # 5 min
     session_stuck_check_interval_s: float = 30.0     # check every 30s
@@ -134,8 +135,8 @@ def load_telemetry_config() -> TelemetryConfig:
 
     session_cfg = yaml_cfg.get("session", {}) or {}
     common_exporter = _normalize_exporter(
-        _str_env("OTEL_EXPORTER_TYPE", str(yaml_cfg.get("exporter", "otlp"))),
-        "otlp",
+        _str_env("OTEL_EXPORTER_TYPE", str(yaml_cfg.get("exporter", "none"))),
+        "none",
     )
     common_endpoint = _str_env(
         "OTEL_EXPORTER_OTLP_ENDPOINT",
@@ -195,7 +196,7 @@ def load_telemetry_config() -> TelemetryConfig:
     )
 
     return TelemetryConfig(
-        enabled=_bool_env("OTEL_ENABLED", yaml_cfg.get("enabled", False)),
+        enabled=_bool_env("OTEL_ENABLED", yaml_cfg.get("enabled", True)),
         exporter=common_exporter,
         endpoint=common_endpoint,
         protocol=common_protocol,
@@ -213,6 +214,10 @@ def load_telemetry_config() -> TelemetryConfig:
             "OTEL_SERVICE_NAME",
             yaml_cfg.get("service_name", "jiuwenclaw"),
         ).strip(),
+        claw_id=_optional_str_env(
+            "OTEL_CLAW_ID",
+            yaml_cfg.get("claw_id"),
+        ),
         provider_factory=_optional_str_env(
             "OTEL_PROVIDER_FACTORY",
             yaml_cfg.get("provider_factory"),

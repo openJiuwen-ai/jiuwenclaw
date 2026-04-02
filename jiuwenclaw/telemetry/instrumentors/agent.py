@@ -8,7 +8,7 @@ import time
 from typing import Any
 
 from opentelemetry import context, trace
-from opentelemetry.trace import StatusCode
+from opentelemetry.trace import SpanKind, StatusCode
 
 from jiuwenclaw.utils import logger
 from jiuwenclaw.telemetry.attributes import (
@@ -42,9 +42,13 @@ def instrument_agent() -> None:
         with _tracer.start_as_current_span(
             "jiuwenclaw.agent.invoke",
             context=parent_ctx,
+            kind=SpanKind.SERVER,
             attributes=_build_attrs(self, request),
         ) as span:
-            _store_agent_ctx(self, trace.set_span_in_context(span))
+            _store_agent_ctx(
+                self, trace.set_span_in_context(span),
+                request.channel_id or "", request.session_id or "", request.request_id or "",
+            )
             start = time.monotonic()
             try:
                 result = await _original_process_message(self, request)
@@ -66,10 +70,11 @@ def instrument_agent() -> None:
         span = _tracer.start_span(
             "jiuwenclaw.agent.invoke.stream",
             context=parent_ctx,
+            kind=SpanKind.SERVER,
             attributes=_build_attrs(self, request),
         )
         ctx = trace.set_span_in_context(span)
-        _store_agent_ctx(self, ctx)
+        _store_agent_ctx(self, ctx, request.channel_id or "", request.session_id or "", request.request_id or "")
         token = context.attach(ctx)
         start = time.monotonic()
         try:
@@ -93,15 +98,21 @@ def instrument_agent() -> None:
     JiuWenClaw.process_message_stream = _traced_process_message_stream
 
 
-def _store_agent_ctx(jiuwenclaw_server, ctx) -> None:
-    """Store agent span context on the JiuClawReActAgent instance.
+def _store_agent_ctx(
+    jiuwenclaw_server, ctx, channel_id: str = "", session_id: str = "", request_id: str = "",
+) -> None:
+    """Store agent span context, channel_id, session_id and request_id on the JiuClawReActAgent instance.
 
     JiuWenClaw._instance is JiuClawReActAgent — LLM/tool instrumentors
-    read self.otel_agent_ctx from that same instance.
+    read self.otel_agent_ctx, self.otel_channel_id, self.otel_session_id
+    and self.otel_request_id from that same instance.
     """
     instance = getattr(jiuwenclaw_server, "_instance", None)
     if instance is not None:
         instance.otel_agent_ctx = ctx
+        instance.otel_channel_id = channel_id
+        instance.otel_session_id = session_id
+        instance.otel_request_id = request_id
 
 
 def _build_attrs(agent_server, request) -> dict[str, Any]:

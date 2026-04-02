@@ -14,15 +14,20 @@ def apply_instrumentors(
 ) -> None:
     """Apply all monkey-patch instrumentors. Called once at startup."""
     from jiuwenclaw.telemetry.instrumentors.entry import instrument_entry
+    from jiuwenclaw.telemetry.instrumentors.gateway_agent_client import instrument_gateway_agent_client
     from jiuwenclaw.telemetry.instrumentors.agent import instrument_agent
     from jiuwenclaw.telemetry.instrumentors.llm import instrument_llm, set_log_messages
     from jiuwenclaw.telemetry.instrumentors.tool import instrument_tools
     from jiuwenclaw.telemetry.instrumentors.session import instrument_session
+    from jiuwenclaw.telemetry.instrumentors.queue import instrument_queue
 
     set_log_messages(log_messages)
 
     instrument_entry()
     logger.info("[Telemetry] entry instrumentor applied")
+
+    instrument_gateway_agent_client()
+    logger.info("[Telemetry] gateway agent client instrumentor applied")
 
     instrument_agent()
     logger.info("[Telemetry] agent instrumentor applied")
@@ -38,3 +43,6 @@ def apply_instrumentors(
         stuck_check_interval_s=session_stuck_check_interval_s,
     )
     logger.info("[Telemetry] session instrumentor applied")
+
+    instrument_queue()
+    logger.info("[Telemetry] queue instrumentor applied")

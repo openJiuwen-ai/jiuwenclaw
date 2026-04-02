@@ -18,8 +18,8 @@
   - [Skill 自演进](Skill自演进.md)
   - [智能体与工作区](智能体.md)
   - [浏览器工具](浏览器.md)
+  - [OpenTelemetry 可观测性](OpenTelemetry可观测性.md)
   - [打包 exe 指南](打包exe指南.md)
 - [开发实践](开发实践/README.md)
   - [日报生成器开发实践](开发实践/JiuwenClaw日报生成器开发实践.md)
   - [代码审查助手开发实践](开发实践/JiuwenClaw代码审查助手开发实践.md)
-
