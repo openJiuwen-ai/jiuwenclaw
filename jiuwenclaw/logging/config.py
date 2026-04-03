@@ -52,10 +52,17 @@ class LoggingTagConfig:
         1. 环境变量（最高优先级）
         2. config.yaml
         3. 默认值（最低优先级）
+
+        注意：最低优先级必须使用类/schema 默认值（True），不能用当前实例字段。
+        否则 reload() 在环境变量未设置时会沿用内存中被改过的值，无法从文件重新加载。
         """
         # 1. 从环境变量加载（优先级最高）
-        user_visible = self._load_from_env("USER_VISIBLE", self.user_visible)
-        user_progress_visible = self._load_from_env("USER_PROGRESS_VISIBLE", self.user_progress_visible)
+        base_user_visible = True
+        base_user_progress_visible = True
+        user_visible = self._load_from_env("USER_VISIBLE", base_user_visible)
+        user_progress_visible = self._load_from_env(
+            "USER_PROGRESS_VISIBLE", base_user_progress_visible
+        )
 
         # 2. 如果环境变量未设置(None)，从config.yaml加载
         env_user_visible = os.getenv(f"{self._env_prefix}USER_VISIBLE")

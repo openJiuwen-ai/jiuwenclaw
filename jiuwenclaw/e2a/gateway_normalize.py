@@ -9,6 +9,7 @@ import logging
 from typing import TYPE_CHECKING, Any
 
 from jiuwenclaw.e2a.constants import (
+    E2A_RESPONSE_KIND_CRON,
     E2A_RESPONSE_KIND_E2A_CHUNK,
     E2A_RESPONSE_KIND_E2A_COMPLETE,
     E2A_RESPONSE_KIND_E2A_ERROR,
@@ -498,6 +499,21 @@ def e2a_response_to_agent_chunk(e2a: E2AResponse) -> "AgentResponseChunk":
             channel_id=ch,
             payload=pl2,
             is_complete=False,
+        )
+
+    if kind == E2A_RESPONSE_KIND_CRON:
+        body_payload = {
+            "event_type": "cron.response",
+            "action": body.get("action"),
+            "status": body.get("status"),
+            "data": body.get("data"),
+            "message": body.get("message"),
+        }
+        return AgentResponseChunk(
+            request_id=rid,
+            channel_id=ch,
+            payload=body_payload,
+            is_complete=True,
         )
 
     raise ValueError(

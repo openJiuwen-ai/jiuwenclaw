@@ -16,14 +16,46 @@ class CronTargetChannel(str, Enum):
     # DINGTALK = "dingtalk"
 
 
+def _feishu_enterprise_app_id(s: str) -> str:
+    """feishu_enterprise 通道键仅为 feishu_enterprise:<app_id>；忽略 :chat: 等后续后缀。"""
+    parts = str(s or "").strip().split(":")
+    if len(parts) < 2 or parts[0].strip().lower() != "feishu_enterprise":
+        return ""
+    return parts[1].strip()
+
+
+def is_valid_target_channel_id(raw: str) -> bool:
+    s = str(raw or "").strip()
+    if not s:
+        return False
+    if s.startswith("feishu_enterprise:"):
+        return bool(_feishu_enterprise_app_id(s))
+    try:
+        CronTargetChannel(s.lower())
+        return True
+    except ValueError:
+        return False
+
+
+def normalize_target_channel_id(raw: str, *, default: str = CronTargetChannel.WEB.value) -> str:
+    s = str(raw or "").strip()
+    if not s:
+        return default
+    if s.startswith("feishu_enterprise:"):
+        app_id = _feishu_enterprise_app_id(s)
+        if app_id:
+            return f"feishu_enterprise:{app_id}"
+        return default
+    low = s.lower()
+    try:
+        return CronTargetChannel(low).value
+    except ValueError:
+        return default
+
+
 def _normalize_targets_str(raw: str) -> str:
     """将 targets 字符串规范为 CronTargetChannel 枚举值，非法则默认 web。"""
-    s = (raw or "").strip() or "web"
-    try:
-        CronTargetChannel(s)
-        return s
-    except ValueError:
-        return CronTargetChannel.WEB.value
+    return normalize_target_channel_id(raw, default=CronTargetChannel.WEB.value)
 
 
 @dataclass(frozen=True)
@@ -65,11 +97,13 @@ class CronJob:
     # Target channel ID to push results to (e.g. "web").
     # JSON 字段名仍然叫 targets，用字符串保存频道 ID，兼容旧数据。
     targets: str = ""
+    # SessionMap 形态（如 feishu::chat_id::bot_id::...），仅 feishu_enterprise 投递用；由 AgentServer 上下文写入。
+    session_id: str | None = None
     created_at: float | None = None
     updated_at: float | None = None
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        d: dict[str, Any] = {
             "id": self.id,
             "name": self.name,
             "enabled": bool(self.enabled),
@@ -82,6 +116,9 @@ class CronJob:
             "created_at": self.created_at,
             "updated_at": self.updated_at,
         }
+        if self.session_id:
+            d["session_id"] = self.session_id
+        return d
 
     @staticmethod
     def from_dict(data: dict[str, Any]) -> "CronJob":
@@ -134,6 +171,9 @@ class CronJob:
 
         targets_str = _normalize_targets_str(targets_str)
 
+        sid_raw = data.get("session_id", None)
+        job_session_id = str(sid_raw).strip() if isinstance(sid_raw, str) and str(sid_raw).strip() else None
+
         return CronJob(
             id=job_id,
             name=name,
@@ -144,6 +184,7 @@ class CronJob:
             wake_offset_seconds=wake_offset_seconds,
             description=description,
             targets=targets_str,
+            session_id=job_session_id,
             created_at=created_at_f,
             updated_at=updated_at_f,
         )

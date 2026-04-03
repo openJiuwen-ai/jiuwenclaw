@@ -6,7 +6,11 @@ from typing import Any, ClassVar, List
 from openjiuwen.core.foundation.tool import LocalFunction, Tool, ToolCard
 from zoneinfo import ZoneInfo
 
-from jiuwenclaw.gateway.cron.models import CronTargetChannel
+from jiuwenclaw.gateway.cron.models import (
+    CronTargetChannel,
+    is_valid_target_channel_id,
+    normalize_target_channel_id,
+)
 from jiuwenclaw.gateway.cron.scheduler import CronSchedulerService, _cron_next_push_dt
 from jiuwenclaw.gateway.cron.store import CronJobStore
 
@@ -70,11 +74,14 @@ class CronController:
 
     def _normalize_targets(self, raw: Any) -> str:
         """将 targets 规范为 CronTargetChannel 枚举值。"""
-        if self._target_channel is None and not str(raw or "").strip():
+        raw_s = str(raw or "").strip()
+        if self._target_channel is None and not raw_s:
             raise ValueError("targets is required when target_channel is not set")
-        s = str(raw or "").strip() or self._target_channel.value
-        CronTargetChannel(s)  # validate
-        return s
+        if not raw_s:
+            return normalize_target_channel_id(self._target_channel.value)
+        if not is_valid_target_channel_id(raw_s):
+            raise ValueError("targets must be one of web/feishu/whatsapp/wecom/xiaoyi or feishu_enterprise:<app_id>")
+        return normalize_target_channel_id(raw_s)
 
     @classmethod
     def _normalize_description(cls, description: str, name: str) -> str:
@@ -89,6 +96,20 @@ class CronController:
             return name
         return description
 
+    @staticmethod
+    def _routing_session_id_for_enterprise(targets: str, raw: Any) -> str | None:
+        """Only accept SessionMap-style ids (feishu::...) for feishu_enterprise targets."""
+        if not str(targets or "").strip().startswith("feishu_enterprise:"):
+            return None
+        if not isinstance(raw, str):
+            return None
+        s = raw.strip()
+        if not s or "::" not in s:
+            return None
+        parts = s.split("::")
+        if len(parts) < 3 or parts[0] != "feishu":
+            return None
+        return s
 
     async def list_jobs(self) -> list[dict[str, Any]]:
         jobs = await self._store.list_jobs()
@@ -111,7 +132,9 @@ class CronController:
         self._validate_schedule(cron_expr=cron_expr, timezone=timezone)
         description = self._normalize_description(description, name)
 
+        routing_sid = self._routing_session_id_for_enterprise(targets, params.get("session_id"))
         job = await self._store.create_job(
+            job_id=str(params.get("id") or "").strip() or None,
             name=name,
             cron_expr=cron_expr,
             timezone=timezone,
@@ -119,6 +142,7 @@ class CronController:
             wake_offset_seconds=int(wake_offset_seconds) if wake_offset_seconds is not None else None,
             description=description,
             targets=targets,
+            session_id=routing_sid,
         )
         await self._scheduler.reload()
         return job.to_dict()
@@ -137,6 +161,17 @@ class CronController:
         if "description" in patch:
             name = str(patch.get("name") or existing.name or "").strip()
             patch["description"] = self._normalize_description(str(patch.get("description") or ""), name)
+
+        final_targets = str(patch.get("targets") or existing.targets).strip()
+        if "session_id" in patch:
+            if final_targets.startswith("feishu_enterprise:"):
+                patch["session_id"] = self._routing_session_id_for_enterprise(
+                    final_targets, patch.get("session_id")
+                )
+            else:
+                patch["session_id"] = None
+        elif "targets" in patch and not final_targets.startswith("feishu_enterprise:"):
+            patch["session_id"] = None
 
         job = await self._store.update_job(job_id, patch)
         await self._scheduler.reload()

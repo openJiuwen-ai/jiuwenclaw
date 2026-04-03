@@ -427,69 +427,86 @@ class CronSchedulerService:
         if not channel_id:
             return
 
+        # 企业飞书：优先用作业里绑定的 SessionMap session_id（feishu::chat_id::bot_id::...），
+        # 避免多群共用 bot 时误用 config 中的 last_*（最近一条消息的会话）。
+        metadata: dict | None = None
+        msg_session_id: str | None = None
+        routing_sid = str(getattr(job, "session_id", None) or "").strip()
+        if channel_id.startswith("feishu_enterprise:") and routing_sid and "::" in routing_sid:
+            parts = routing_sid.split("::")
+            if len(parts) >= 3 and parts[0] == "feishu":
+                chat_part = str(parts[1] or "").strip()
+                if chat_part:
+                    metadata = {"feishu_chat_id": chat_part}
+                    if len(parts) >= 6:
+                        open_part = str(parts[3] or "").strip()
+                        if open_part:
+                            metadata["feishu_open_id"] = open_part
+                    msg_session_id = chat_part
+
         # 针对 feishu/xiaoyi/whatsapp：从 config.yaml 取最近一次可回发的平台身份，写入 metadata
         # 这样即使 cron 推送没有 session_id，也能让 Channel.send 正常路由到对应会话。
-        metadata: dict | None = None
-        try:
-            from jiuwenclaw.config import get_config_raw
+        if metadata is None:
+            try:
+                from jiuwenclaw.config import get_config_raw
 
-            cfg = get_config_raw() or {}
-            channels_cfg = cfg.get("channels") or {}
-            ch_cfg = channels_cfg.get(channel_id) or {}
-            if channel_id == "feishu":
-                last_chat_id = str(ch_cfg.get("last_chat_id") or "").strip()
-                last_open_id = str(ch_cfg.get("last_open_id") or "").strip()
-                if last_chat_id or last_open_id:
-                    metadata = {
-                        "feishu_chat_id": last_chat_id,
-                        "feishu_open_id": last_open_id,
-                    }
-            elif channel_id.startswith("feishu_enterprise:"):
-                app_id = channel_id.split(":", 1)[1].strip()
-                enterprise_cfg = channels_cfg.get("feishu_enterprise") or {}
-                if isinstance(enterprise_cfg, dict) and app_id:
-                    for _, bot_cfg in enterprise_cfg.items():
-                        if not isinstance(bot_cfg, dict):
-                            continue
-                        bot_app_id = str(bot_cfg.get("app_id") or "").strip()
-                        if bot_app_id != app_id:
-                            continue
-                        last_chat_id = str(bot_cfg.get("last_chat_id") or "").strip()
-                        last_open_id = str(bot_cfg.get("last_open_id") or "").strip()
-                        if last_chat_id or last_open_id:
-                            metadata = {
-                                "feishu_chat_id": last_chat_id,
-                                "feishu_open_id": last_open_id,
-                            }
-                        break
-            elif channel_id == "xiaoyi":
-                last_session_id = str(ch_cfg.get("last_session_id") or "").strip()
-                last_task_id = str(ch_cfg.get("last_task_id") or "").strip()
-                if last_session_id or last_task_id:
-                    metadata = {
-                        "xiaoyi_session_id": last_session_id,
-                        "xiaoyi_task_id": last_task_id,
-                    }
-            elif channel_id == "whatsapp":
-                last_jid = str(ch_cfg.get("last_jid") or "").strip()
-                if last_jid:
-                    metadata = {
-                        "whatsapp_jid": last_jid,
-                    }
-            elif channel_id == "wecom":
-                last_chat_id = str(ch_cfg.get("last_chat_id") or "").strip()
-                if last_chat_id:
-                    metadata = {
-                        "wecom_chat_id": last_chat_id,
-                    }
-        except Exception:
-            metadata = None
+                cfg = get_config_raw() or {}
+                channels_cfg = cfg.get("channels") or {}
+                ch_cfg = channels_cfg.get(channel_id) or {}
+                if channel_id == "feishu":
+                    last_chat_id = str(ch_cfg.get("last_chat_id") or "").strip()
+                    last_open_id = str(ch_cfg.get("last_open_id") or "").strip()
+                    if last_chat_id or last_open_id:
+                        metadata = {
+                            "feishu_chat_id": last_chat_id,
+                            "feishu_open_id": last_open_id,
+                        }
+                elif channel_id.startswith("feishu_enterprise:"):
+                    app_id = channel_id.split(":", 1)[1].strip()
+                    enterprise_cfg = channels_cfg.get("feishu_enterprise") or {}
+                    if isinstance(enterprise_cfg, dict) and app_id:
+                        for _, bot_cfg in enterprise_cfg.items():
+                            if not isinstance(bot_cfg, dict):
+                                continue
+                            bot_app_id = str(bot_cfg.get("app_id") or "").strip()
+                            if bot_app_id != app_id:
+                                continue
+                            last_chat_id = str(bot_cfg.get("last_chat_id") or "").strip()
+                            last_open_id = str(bot_cfg.get("last_open_id") or "").strip()
+                            if last_chat_id or last_open_id:
+                                metadata = {
+                                    "feishu_chat_id": last_chat_id,
+                                    "feishu_open_id": last_open_id,
+                                }
+                            break
+                elif channel_id == "xiaoyi":
+                    last_session_id = str(ch_cfg.get("last_session_id") or "").strip()
+                    last_task_id = str(ch_cfg.get("last_task_id") or "").strip()
+                    if last_session_id or last_task_id:
+                        metadata = {
+                            "xiaoyi_session_id": last_session_id,
+                            "xiaoyi_task_id": last_task_id,
+                        }
+                elif channel_id == "whatsapp":
+                    last_jid = str(ch_cfg.get("last_jid") or "").strip()
+                    if last_jid:
+                        metadata = {
+                            "whatsapp_jid": last_jid,
+                        }
+                elif channel_id == "wecom":
+                    last_chat_id = str(ch_cfg.get("last_chat_id") or "").strip()
+                    if last_chat_id:
+                        metadata = {
+                            "wecom_chat_id": last_chat_id,
+                        }
+            except Exception:
+                metadata = None
 
         msg = Message(
             id=f"cron-push-{state.run_id}-{channel_id}",
             type="event",
             channel_id=channel_id,
-            session_id=None,
+            session_id=msg_session_id,
             params={},
             timestamp=self._now_fn(),
             ok=True,

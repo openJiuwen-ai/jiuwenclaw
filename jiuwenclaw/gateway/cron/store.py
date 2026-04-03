@@ -52,6 +52,7 @@ class CronJobStore:
     async def create_job(
         self,
         *,
+        job_id: str | None = None,
         name: str,
         cron_expr: str,
         timezone: str,
@@ -59,10 +60,12 @@ class CronJobStore:
         targets: str,
         enabled: bool = True,
         wake_offset_seconds: int | None = None,
+        session_id: str | None = None,
     ) -> CronJob:
         now = time.time()
+        sid = str(session_id).strip() if isinstance(session_id, str) and session_id.strip() else None
         job = CronJob(
-            id=uuid.uuid4().hex,
+            id=str(job_id or "").strip() or uuid.uuid4().hex,
             name=str(name or "").strip(),
             enabled=bool(enabled),
             cron_expr=str(cron_expr or "").strip(),
@@ -70,6 +73,7 @@ class CronJobStore:
             wake_offset_seconds=int(wake_offset_seconds) if wake_offset_seconds is not None else 60,
             description=str(description or ""),
             targets=str(targets or "").strip(),
+            session_id=sid,
             created_at=now,
             updated_at=now,
         )
@@ -114,6 +118,10 @@ class CronJobStore:
             updated = replace(updated, description=str(patch.get("description") or ""))
         if "targets" in patch:
             updated = replace(updated, targets=str(patch.get("targets") or "").strip())
+        if "session_id" in patch:
+            raw_sid = patch.get("session_id")
+            new_sid = str(raw_sid).strip() if isinstance(raw_sid, str) and str(raw_sid).strip() else None
+            updated = replace(updated, session_id=new_sid)
         if "expired" in patch:
             updated = replace(updated, expired=bool(patch.get("expired")))
 

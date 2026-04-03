@@ -159,13 +159,14 @@ async def _run(agent_server_url: str, web_host: str, web_port: int, web_path: st
     message_handler = MessageHandler(client)
     await message_handler.start_forwarding()
 
-    cron_store = CronJobStore()
+    cron_store = CronJobStore(path=get_user_workspace_dir() / "gateway" / "cron_jobs.json")
     cron_scheduler = CronSchedulerService(
         store=cron_store,
         agent_client=client,
         message_handler=message_handler,
     )
     cron_controller = CronController.get_instance(store=cron_store, scheduler=cron_scheduler)
+    message_handler.set_cron_controller(cron_controller)
 
     full_cfg: dict[str, Any] = {}
     heartbeat_cfg: dict | None = None

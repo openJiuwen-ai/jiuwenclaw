@@ -26,7 +26,7 @@ from openjiuwen.core.session.checkpointer.persistence import PersistenceCheckpoi
 from jiuwenclaw.agentserver.tools.multi_session_toolkits import MultiSessionToolkit
 from jiuwenclaw.agentserver.tools.send_file_to_user import SendFileToolkit
 from jiuwenclaw.agentserver.prompt_builder import build_system_prompt, build_user_prompt
-from jiuwenclaw.gateway.cron import CronController, CronTargetChannel
+from jiuwenclaw.agentserver.tools.cron_tools import CronToolRoute, CronTools
 
 from jiuwenclaw.utils import (
     get_agent_root_dir,
@@ -197,6 +197,7 @@ class JiuWenClaw:
         self._sysop_card_id: str | None = None
 
         self._session_tool = None
+        self._cron_tools = CronTools()
 
     @staticmethod
     async def set_checkpoint():
@@ -509,10 +510,9 @@ class JiuWenClaw:
         else:
             logger.info("[JiuWenClaw] xiaoyi channel not enabled, skipping phone tools")
 
-        # add cron tools
+        # add cron tools（路由由 push_cron_route 在每轮 run_* 任务内设置，见 ContextVar）
         try:
-            cron_controller = CronController.get_instance()
-            for cron_tool in cron_controller.get_tools():
+            for cron_tool in self._cron_tools.get_tools():
                 Runner.resource_mgr.add_tool(cron_tool)
                 self._instance.ability_manager.add(cron_tool.card)
         except Exception as exc:
@@ -586,6 +586,37 @@ class JiuWenClaw:
             logger.warning("[JiuWenClaw] Permission config reload failed: %s", exc)
         logger.info("[JiuWenClaw] 配置已热更新，未重启进程")
 
+    @staticmethod
+    def _cron_tool_route_for_ctx(ctx: RuntimeToolContext) -> CronToolRoute:
+        """与 _register_runtime_tools 中 channel / cron_context_channel 规则一致，供 push_cron_route 使用。"""
+        channel = (ctx.channel_id or "").strip() or (
+            (ctx.session_id or "").split("_")[0] if ctx.session_id else ""
+        )
+        try:
+            from jiuwenclaw.gateway.cron.models import CronTargetChannel
+
+            normalized_channel = channel.strip().lower()
+            if normalized_channel.startswith("feishu_enterprise:"):
+                cron_context_channel = normalized_channel
+            else:
+                allowed = {e.value for e in CronTargetChannel}
+                if normalized_channel in allowed:
+                    cron_context_channel = normalized_channel
+                else:
+                    cron_context_channel = CronTargetChannel.WEB.value
+        except Exception:
+            from jiuwenclaw.gateway.cron.models import CronTargetChannel
+
+            cron_context_channel = CronTargetChannel.WEB.value
+
+        if channel in ("heartbeat", "cron"):
+            return CronToolRoute()
+        return CronToolRoute(
+            request_id=ctx.request_id or "",
+            channel_id=cron_context_channel,
+            session_id=ctx.session_id,
+        )
+
     async def _register_runtime_tools(self, ctx: RuntimeToolContext) -> None:
         """Register per-request tools for current agent execution.
         
@@ -603,32 +634,19 @@ class JiuWenClaw:
                 if tool.name.startswith("todo_"):
                     self._instance.ability_manager.remove(tool.name)
                 elif tool.name.startswith("cron_"):
-                    self._instance.ability_manager.remove(tool.name)
+                    # 不在此移除：cron 工具固定注册在 ResourceMgr，路由由 ContextVar（push_cron_route）按 Task 隔离
+                    continue
                 elif tool.name.startswith("session_"):
                     self._instance.ability_manager.remove(tool.name)
                 elif tool.name.startswith("send_file_to_user"):
                     self._instance.ability_manager.remove(tool.name)
 
-        # 定时工具：按 channel 注册；优先用 channel_id，否则从 session_id 前缀推断
+        # channel：与 _cron_tool_route_for_ctx 一致（用于 prompt / send_file 等）；cron 路由本身已用 ContextVar 绑定
         channel = (ctx.channel_id or "").strip() or (
             (ctx.session_id or "").split("_")[0] if ctx.session_id else ""
         )
-        logger.info(f"[JiuwenClaw] update tool and prompt for channel {channel}")
-        if channel not in ["heartbeat", "cron"]:
-            cron_controller = CronController.get_instance()
-            if channel == "feishu":
-                cron_controller.set_target_channel(CronTargetChannel.FEISHU)
-            elif channel == "wecom":
-                cron_controller.set_target_channel(CronTargetChannel.WECOM)
-            elif channel == "xiaoyi":
-                cron_controller.set_target_channel(CronTargetChannel.XIAOYI)
-            elif channel in ("web", "sess"):
-                cron_controller.set_target_channel(CronTargetChannel.WEB)
 
-            for cron_tool in cron_controller.get_tools():
-                if not Runner.resource_mgr.get_tool(cron_tool.card.id):
-                    Runner.resource_mgr.add_tool(cron_tool)
-                self._instance.ability_manager.add(cron_tool.card)
+        logger.info(f"[JiuwenClaw] update tool and prompt for channel {channel}")
 
         config_base = get_config()
         send_file_tool_enabled = config_base.get("channels", {}).get(channel, {}).get("send_file_allowed", False)
@@ -1254,7 +1272,7 @@ class JiuWenClaw:
             "query": build_user_prompt(
                 request.params.get("query", ""),
                 files=request.params.get("files", {}),
-                channel=request.session_id.split('_')[0],
+                channel=str(request.channel_id or ""),
                 language=config_base.get("preferred_language", "zh")
             ),
         }
@@ -1275,15 +1293,16 @@ class JiuWenClaw:
 
         async def run_agent_task():
             token_cid = TOOL_PERMISSION_CHANNEL_ID.set((request.channel_id or "").strip())
+            ctx = RuntimeToolContext(
+                session_id=request.session_id,
+                channel_id=request.channel_id,
+                request_id=request.request_id,
+                mode=request.params.get("mode", "plan"),
+                request_params=request.params,
+                metadata=request.metadata,
+            )
+            cron_route_tok = self._cron_tools.push_cron_route(self._cron_tool_route_for_ctx(ctx))
             try:
-                ctx = RuntimeToolContext(
-                    session_id=request.session_id,
-                    channel_id=request.channel_id,
-                    request_id=request.request_id,
-                    mode=request.params.get("mode", "plan"),
-                    request_params=request.params,
-                    metadata=request.metadata,
-                )
                 await self._register_runtime_tools(ctx)
                 return await Runner.run_agent(agent=self._instance, inputs=inputs)
             except asyncio.CancelledError:
@@ -1293,6 +1312,7 @@ class JiuWenClaw:
                 logger.error("[JiuWenClaw] Agent 任务执行异常: %s", e)
                 raise
             finally:
+                self._cron_tools.reset_cron_route(cron_route_tok)
                 TOOL_PERMISSION_CHANNEL_ID.reset(token_cid)
 
         # 包装任务，完成后将结果放入 future
@@ -1415,7 +1435,7 @@ class JiuWenClaw:
             "query": build_user_prompt(
                 request.params.get("query", ""),
                 files=request.params.get("files", {}),
-                channel=request.session_id.split('_')[0],
+                channel=str(request.channel_id or ""),
                 language=config_base.get("preferred_language", "zh")
             ),
         }
@@ -1443,15 +1463,16 @@ class JiuWenClaw:
         async def run_stream_task():
             """执行流式任务，将产生的 chunk 放入队列."""
             token_cid = TOOL_PERMISSION_CHANNEL_ID.set((request.channel_id or "").strip())
+            ctx = RuntimeToolContext(
+                session_id=request.session_id,
+                channel_id=request.channel_id,
+                request_id=request.request_id,
+                mode=request.params.get("mode", "plan"),
+                request_params=request.params,
+                metadata=request.metadata,
+            )
+            cron_route_tok = self._cron_tools.push_cron_route(self._cron_tool_route_for_ctx(ctx))
             try:
-                ctx = RuntimeToolContext(
-                    session_id=request.session_id,
-                    channel_id=request.channel_id,
-                    request_id=request.request_id,
-                    mode=request.params.get("mode", "plan"),
-                    request_params=request.params,
-                    metadata=request.metadata,
-                )
                 await self._register_runtime_tools(ctx)
                 async for chunk in Runner.run_agent_streaming(self._instance, inputs):
                     parsed = self._parse_stream_chunk(chunk)
@@ -1465,6 +1486,7 @@ class JiuWenClaw:
                 logger.exception("[JiuWenClaw] 流式任务异常: %s", exc)
                 await stream_queue.put(("error", exc))
             finally:
+                self._cron_tools.reset_cron_route(cron_route_tok)
                 TOOL_PERMISSION_CHANNEL_ID.reset(token_cid)
                 stream_done.set()
 

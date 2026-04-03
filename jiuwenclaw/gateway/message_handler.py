@@ -89,6 +89,7 @@ class MessageHandler(ABC):
         })
         self._channel_states: Dict[str, ChannelControlState] = {}
         self._session_map = SessionMap()
+        self._cron_controller = None
 
         # 直接使用 jiuwenclaw.config 的 get_config_raw/set_config/update_channel_in_config
         # 避免在此处重复实现 config 模块加载逻辑。
@@ -505,6 +506,15 @@ class MessageHandler(ABC):
             bus_metadata: dict[str, Any] | None = bus_md if bus_md else None
         else:
             bus_metadata = None
+        if isinstance(chunk.payload, dict) and chunk.payload.get("event_type") == "cron.response":
+            await self._handle_cron_push_payload(
+                payload=dict(chunk.payload),
+                request_id=rid,
+                channel_id=chunk.channel_id,
+                session_id=session_id,
+                metadata=bus_metadata,
+            )
+            return
 
         # 检查是否是文件下载事件（AgentServer -> Gateway 的文件传输）
         payload = chunk.payload or {}
@@ -530,6 +540,66 @@ class MessageHandler(ABC):
             rid,
             chunk.channel_id,
         )
+
+    def set_cron_controller(self, controller: Any) -> None:
+        self._cron_controller = controller
+
+    async def _handle_cron_push_payload(
+        self,
+        *,
+        payload: dict[str, Any],
+        request_id: str,
+        channel_id: str,
+        session_id: str | None,
+        metadata: dict[str, Any] | None,
+    ) -> None:
+        cc = self._cron_controller
+        if cc is None:
+            return
+        action = str(payload.get("action") or "").strip()
+        params = payload.get("data") or {}
+        if not isinstance(params, dict):
+            params = {}
+        try:
+            if action == "list":
+                data = await cc.list_jobs()
+            elif action == "get":
+                data = await cc.get_job(str(params.get("job_id") or ""))
+            elif action == "create":
+                data = await cc.create_job(params)
+            elif action == "update":
+                data = await cc.update_job(str(params.get("job_id") or ""), dict(params.get("patch") or {}))
+            elif action == "delete":
+                data = {"deleted": await cc.delete_job(str(params.get("job_id") or ""))}
+            elif action == "toggle":
+                data = await cc.toggle_job(str(params.get("job_id") or ""), bool(params.get("enabled")))
+            elif action == "preview":
+                data = await cc.preview_job(str(params.get("job_id") or ""), int(params.get("count", 5)))
+            elif action == "run_now":
+                data = {"run_id": await cc.run_now(str(params.get("job_id") or ""))}
+            else:
+                data = {"error": f"unknown cron action: {action}"}
+        except Exception as exc:  # noqa: BLE001
+            data = {"error": str(exc)}
+
+        from jiuwenclaw.schema.message import EventType, Message
+        out = Message(
+            id=request_id,
+            type="event",
+            channel_id=channel_id,
+            session_id=session_id,
+            params={},
+            timestamp=time.time(),
+            ok=True,
+            payload={
+                "event_type": "chat.tool_result",
+                "tool_name": "cron",
+                "result": data,
+            },
+            event_type=EventType.CHAT_TOOL_RESULT,
+            metadata=metadata,
+        )
+        await self.publish_robot_messages(out)
 
     @staticmethod
     def _chunk_to_message(
