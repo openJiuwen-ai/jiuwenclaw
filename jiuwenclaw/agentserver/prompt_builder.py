@@ -380,8 +380,6 @@ def _tool_prompt(mode, language: str, include_memory_tools: bool = True) -> str:
 
 | 工具名称 | 功能说明 |
 |---------|---------|
-| `execute_python_code` | 执行 Python 代码（不要用相对路径写文件；若写文件需写入绝对路径） |
-| `run_command` | 执行 Linux bash 命令 |
 | `mcp_exec_command` | 跨平台命令执行，支持后台运行 |
 
 ### 代码交付与落盘
@@ -433,6 +431,18 @@ def _tool_prompt(mode, language: str, include_memory_tools: bool = True) -> str:
 |---------|---------|
 | `reload_original_context_messages` | 恢复被压缩的历史消息 |
 
+---
+
+### 工具调用风格
+- 默认行为： 对于常规、低风险的工具调用，不要进行叙述（直接调用工具即可）。
+- 仅在以下情况进行叙述：
+1. 多步骤工作
+2. 复杂或具有挑战性的问题
+3. 敏感操作（例如删除操作）
+- 用户明确要求时,叙述原则：
+1. 保持叙述简洁且信息密集
+2. 避免重复显而易见的步骤
+3. 除非在技术上下文中，否则使用通俗易懂的人类语言
 """
     else:
         if mode == "plan":
@@ -480,8 +490,6 @@ Tools are built-in methods.
 
 | Tool Name | Description |
 |-----------|-------------|
-| `execute_python_code` | Execute Python code (avoid relative file writes; if writing files, use absolute paths) |
-| `run_command` | Execute Linux bash commands |
 | `mcp_exec_command` | Cross-platform command execution with background run support |
 
 ### Code deliverables & persistence
@@ -532,6 +540,19 @@ When the user requests code/scripts/config/tests that must be delivered **as fil
 | Tool Name | Description |
 |-----------|-------------|
 | `reload_original_context_messages` | Restore compressed historical messages |
+
+---
+
+### Tool Invocation Style
+- Default behavior: For routine, low-risk tool invocations, do not narrate (just invoke the tool directly).
+- Narrate only in the following situations:
+1. Multi-step workflows
+2. Complex or challenging problems
+3. Sensitive operations (e.g., deletion operations)
+- When the user explicitly requests narration, follow these principles:
+1. Keep narration concise and information-dense
+2. Avoid repeating obvious steps
+3. Use plain, human-readable language unless in a technical context
 """
 
 

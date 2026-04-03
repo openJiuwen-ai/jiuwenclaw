@@ -574,6 +574,10 @@ class JiuWenClaw:
             if isinstance(tool, ToolCard):
                 if tool.name.startswith("todo_"):
                     self._instance.ability_manager.remove(tool.name)
+                elif tool.name.startswith("execute_python_code"):
+                    self._instance.ability_manager.remove(tool.name)
+                elif tool.name.startswith("run_command"):
+                    self._instance.ability_manager.remove(tool.name)
                 elif tool.name.startswith("cron_"):
                     self._instance.ability_manager.remove(tool.name)
                 elif tool.name.startswith("session_"):

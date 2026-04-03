@@ -68,6 +68,79 @@ def _clip_text(value: str, max_chars: int) -> str:
     return f"{value[:max_chars]}\n...[truncated]"
 
 
+def _decode_subprocess_stream(data: bytes | None) -> str:
+    """Decode captured stdout/stderr bytes robustly for mixed EN/ZH and cross-OS.
+
+    Child processes often emit UTF-8 (e.g. Python 3, Node/npm) while the
+    parent locale may still be a legacy Windows code page. Decoding with only
+    ``locale.getpreferredencoding()`` then mangles Chinese (e.g. UTF-8 bytes
+    read as GBK). On English Windows, ``cp1252`` accepts every byte and must
+    not run before CJK attempts, or GBK streams decode to wrong text.
+
+    On Windows, **mixed** encodings in one stream are common: e.g. ``npm`` /
+    Node prints UTF-8 while ``cmd.exe`` ``echo`` uses the active ANSI code
+    page (often GBK). A single whole-buffer decode then either fails UTF-8 or
+    wrongly applies GB18030 to UTF-8 lines. If strict UTF-8 fails for the
+    whole buffer, fall back to **per-line** decode (UTF-8 first, then CJK /
+    console / locale on that line).
+    """
+    if not data:
+        return ""
+
+    def _try_decode_blob(blob: bytes, name: str) -> str | None:
+        try:
+            return blob.decode(name)
+        except (UnicodeDecodeError, LookupError):
+            return None
+
+    def _decode_one_line_or_blob(blob: bytes) -> str:
+        """Try encodings in order for a single line or contiguous chunk."""
+        if not blob:
+            return ""
+        for enc in ("utf-8-sig", "utf-8"):
+            out = _try_decode_blob(blob, enc)
+            if out is not None:
+                return out
+        if os.name == "nt":
+            for enc in ("gb18030", "gbk", "cp936"):
+                out = _try_decode_blob(blob, enc)
+                if out is not None:
+                    return out
+            try:
+                import ctypes
+
+                cp = int(ctypes.windll.kernel32.GetConsoleOutputCP())
+                if cp and cp != 65001:
+                    out = _try_decode_blob(blob, f"cp{cp}")
+                    if out is not None:
+                        return out
+            except Exception:
+                pass
+            out = _try_decode_blob(blob, "mbcs")
+            if out is not None:
+                return out
+        enc = locale.getpreferredencoding(False)
+        if enc:
+            out = _try_decode_blob(blob, enc)
+            if out is not None:
+                return out
+        return blob.decode("utf-8", errors="replace")
+
+    # Whole buffer valid UTF-8: fast path (Linux/macOS; pure UTF-8 Windows tools).
+    for enc in ("utf-8-sig", "utf-8"):
+        out = _try_decode_blob(data, enc)
+        if out is not None:
+            return out
+
+    # Mixed UTF-8 + system code page (e.g. npm UTF-8 + cmd echo GBK): per line.
+    parts = data.split(b"\n")
+    decoded_lines: list[str] = []
+    for raw in parts:
+        line = raw.rstrip(b"\r")
+        decoded_lines.append(_decode_one_line_or_blob(line))
+    return "\n".join(decoded_lines)
+
+
 def _check_command_safety(command: str) -> str | None:
     for pattern, message in _DANGEROUS_COMMAND_PATTERNS:
         if pattern.search(command):
@@ -165,18 +238,23 @@ def _run_command_sync(
     shell_type: str,
 ) -> tuple[subprocess.CompletedProcess[str], str]:
     plan, use_shell, resolved_shell = _resolve_execution_plan(command, shell_type)
-    # Windows 下 cmd 的输出通常是系统代码页（常见 CP936/GBK），
-    # 这里不要强行按 UTF-8 解码，否则会出现中文乱码（如 .lnk 名称）。
-    encoding = locale.getpreferredencoding(False) or "utf-8"
-    result = subprocess.run(
+    # 使用字节捕获再解码：子进程可能是 UTF-8（如 Python 3）而本机 locale 为 GBK，
+    # 单一 encoding=locale 会导致中文乱码；见 _decode_subprocess_stream。
+    raw = subprocess.run(
         plan,
         shell=use_shell,
         cwd=str(workdir),
-        text=True,
-        encoding=encoding,
-        errors='replace',
+        text=False,
         capture_output=True,
         timeout=timeout_seconds,
+    )
+    stdout_s = _decode_subprocess_stream(raw.stdout)
+    stderr_s = _decode_subprocess_stream(raw.stderr)
+    result = subprocess.CompletedProcess(
+        raw.args,
+        raw.returncode,
+        stdout=stdout_s,
+        stderr=stderr_s,
     )
     return result, resolved_shell
 
