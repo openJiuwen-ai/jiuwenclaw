@@ -364,11 +364,10 @@ def _tool_prompt(mode, language: str, include_memory_tools: bool = True) -> str:
 
 """ if include_memory_tools else ""
 
-        search_tools_section = """| `mcp_free_search` | 免费搜索（DuckDuckGo） |
-"""
-        if has_paid_search:
-            search_tools_section += """| `mcp_paid_search` | 付费搜索（Perplexity/SERPER/JINA） |
-"""
+        search_tools_section = """"""
+#         if has_paid_search:
+#             search_tools_section += """| `mcp_paid_search` | 付费搜索（Perplexity/SERPER/JINA） |
+# """
         search_tools_section += """| `mcp_fetch_webpage` | 抓取网页文本内容 |"""
 
         return f"""## 工具
@@ -465,11 +464,10 @@ def _tool_prompt(mode, language: str, include_memory_tools: bool = True) -> str:
 
 """ if include_memory_tools else ""
 
-        search_tools_section = """| `mcp_free_search` | Free search (DuckDuckGo) |
-"""
-        if has_paid_search:
-            search_tools_section += """| `mcp_paid_search` | Paid search (Perplexity/SERPER/JINA) |
-"""
+        search_tools_section = """"""
+#         if has_paid_search:
+#             search_tools_section += """| `mcp_paid_search` | Paid search (Perplexity/SERPER/JINA) |
+# """
         search_tools_section += """| `mcp_fetch_webpage` | Fetch webpage text content |"""
 
         return f"""# Tools

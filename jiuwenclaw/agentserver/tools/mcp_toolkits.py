@@ -14,7 +14,7 @@ from jiuwenclaw.agentserver.tools.web_fetch_tools import mcp_fetch_webpage
 
 def get_mcp_tools() -> list[Tool]:
     """Return all MCP toolkit tools for registration in Runner."""
-    return [mcp_free_search, mcp_paid_search, mcp_fetch_webpage, mcp_exec_command, write_file]
+    return [mcp_fetch_webpage, mcp_exec_command, write_file]
 
 
 __all__ = [

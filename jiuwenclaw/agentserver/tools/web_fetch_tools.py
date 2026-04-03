@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import re
 from html import unescape
 from urllib.parse import parse_qs, unquote, urlparse
@@ -94,7 +95,7 @@ def _http_get(url: str, **kwargs) -> requests.Response:
 
 
 def _clip_text(value: str, max_chars: int) -> str:
-    if len(value) <= max_chars:
+    if max_chars <= 0 or len(value) <= max_chars:
         return value
     return f"{value[:max_chars]}\n...[truncated]"
 
@@ -165,15 +166,34 @@ def _fetch_webpage_sync(url: str, timeout_seconds: int) -> dict[str, str | int]:
 
 @tool(
     name="mcp_fetch_webpage",
-    description="Fetch webpage text content from URL. Returns status/title/plain text content.",
+    description=(
+        "Fetch webpage text content from URL. Returns status/title/plain text content. "
+        "Set max_chars=0 to disable output clipping. "
+        "Use a larger timeout_seconds for slow websites."
+    ),
 )
-async def mcp_fetch_webpage(url: str, max_chars: int = 12000, timeout_seconds: int = 30) -> str:
+async def mcp_fetch_webpage(url: str, max_chars: int = 0, timeout_seconds: int = 30) -> str:
     url = _normalize_url(url)
     if not url:
         return "[ERROR]: url cannot be empty."
 
-    max_chars = max(500, min(max_chars, 50000))
-    timeout_seconds = max(5, min(timeout_seconds, 120))
+    try:
+        max_chars = int(max_chars)
+    except (TypeError, ValueError):
+        max_chars = 0
+    if max_chars < 0:
+        max_chars = 0
+
+    try:
+        timeout_seconds = int(timeout_seconds)
+    except (TypeError, ValueError):
+        timeout_seconds = 30
+    try:
+        max_timeout_seconds = int(os.getenv("MCP_FETCH_WEBPAGE_MAX_TIMEOUT_SECONDS") or "3600")
+    except ValueError:
+        max_timeout_seconds = 3600
+    max_timeout_seconds = max(1, max_timeout_seconds)
+    timeout_seconds = max(1, min(timeout_seconds, max_timeout_seconds))
 
     try:
         data = await asyncio.to_thread(_fetch_webpage_sync, url, timeout_seconds)
