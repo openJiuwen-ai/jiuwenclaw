@@ -37,13 +37,8 @@ from jiuwenclaw.utils import (
     get_agent_sessions_dir,
     get_env_file,
     get_root_dir,
-    prepare_workspace,
 )
 from jiuwenclaw.version import __version__
-
-_config_file = get_user_workspace_dir() / "config" / "config.yaml"
-if not _config_file.exists():
-    prepare_workspace(overwrite=False)
 
 apply_openai_model_client_patch()
 

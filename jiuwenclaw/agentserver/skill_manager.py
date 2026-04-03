@@ -21,6 +21,7 @@ from jiuwenclaw.utils import (
     get_agent_root_dir,
     get_agent_skills_dir,
     get_builtin_skills_dir,
+    is_package_installation,
 )
 from jiuwenclaw.evolution.schema import EvolutionEntry, EvolutionFile
 
@@ -1549,6 +1550,8 @@ class SkillManager:
         skill被复制到源码目录，重启后被误判为内置skill。
         """
         mirrors: list[Path] = []
+        if is_package_installation():
+            return []
         try:
             source_repo_root = Path(__file__).resolve().parents[2]
             source_resources_skills_dir = (
@@ -1591,7 +1594,7 @@ class SkillManager:
 
         folder_data: dict[str, list[dict[str, str | bool]]] = {}
         seen_paths: dict[str, set[str]] = {}
-        for entry in sorted(agent_root.rglob("*")):
+        for entry in sorted((agent_root / "jiuwenclaw_workspace").rglob("*")):
             if not entry.is_file():
                 continue
             relative_file_path = entry.relative_to(agent_root).as_posix()

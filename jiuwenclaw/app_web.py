@@ -74,7 +74,7 @@ def _generate_agent_data(project_root: Path) -> None:
 
     folder_data: dict[str, list[dict[str, str | bool]]] = {}
     seen_paths: dict[str, set[str]] = {}  # folder_key -> normalized paths，用于去重
-    for entry in sorted(agent_root.rglob("*")):
+    for entry in sorted((agent_root / "jiuwenclaw_workspace").rglob("*")):
         if not entry.is_file() or entry.name.startswith("."):
             continue
         relative_folder_path = entry.parent.relative_to(agent_root).as_posix()

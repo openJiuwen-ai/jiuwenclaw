@@ -264,8 +264,8 @@ class FeishuChannel(BaseChannel):
             .build()
         )
         # 初始化文件服务
-        from jiuwenclaw.utils import get_workspace_dir
-        workspace_dir = self.config.temp_file_dir or str(get_workspace_dir())
+        from jiuwenclaw.utils import get_agent_workspace_dir
+        workspace_dir = self.config.temp_file_dir or str(get_agent_workspace_dir())
         self._file_service = FeishuFileService(
             api_client=self._api_client,
             config=self.config,
@@ -805,8 +805,8 @@ class FeishuChannel(BaseChannel):
         1. 完整绝对路径：/home/xxx/.jiuwenclaw/agent/workspace/xxx.docx
         2. 仅文件名：'xxx.docx' 或 "xxx.docx"——在 workspace 目录下查找
         """
-        from jiuwenclaw.utils import get_workspace_dir
-        workspace_dir = str(get_workspace_dir())
+        from jiuwenclaw.utils import get_agent_workspace_dir
+        workspace_dir = str(get_agent_workspace_dir())
 
         seen: set[str] = set()
         result: list[str] = []

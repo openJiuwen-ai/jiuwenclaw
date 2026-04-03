@@ -15,12 +15,12 @@ from pathlib import Path
 
 import yaml
 
-from jiuwenclaw.utils import get_config_file, get_agent_root_dir
+from jiuwenclaw.utils import get_config_file, get_agent_workspace_dir
 
 logger = logging.getLogger(__name__)
 
 DEFAULT_CONFIG_PATH = str(get_config_file())
-DEFAULT_WORKSPACE_DIR = str(get_agent_root_dir())
+DEFAULT_WORKSPACE_DIR = str(get_agent_workspace_dir())
 
 _config_cache: Optional[Dict[str, Any]] = None
 

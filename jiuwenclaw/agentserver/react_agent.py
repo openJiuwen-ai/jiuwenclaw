@@ -41,7 +41,7 @@ from jiuwenclaw.agentserver.permissions.checker import TOOL_PERMISSION_CHANNEL_I
 from jiuwenclaw.agentserver.permissions.models import PermissionLevel
 from jiuwenclaw.agentserver.tools.todo_toolkits import TodoToolkit
 from jiuwenclaw.evolution.service import EvolutionService
-from jiuwenclaw.utils import get_agent_memory_dir, get_workspace_dir
+from jiuwenclaw.utils import get_agent_memory_dir, get_agent_workspace_dir
 from jiuwenclaw.config import get_config
 from openjiuwen.core.single_agent.rail import InvokeInputs, AgentCallbackContext
 
@@ -129,7 +129,7 @@ class JiuClawReActAgent(ReActAgent):
         super().__init__(card)
         self._stream_tasks: set[asyncio.Task] = set()
         self._pause_events: dict[str, asyncio.Event] = {}  # task_key -> event
-        self._workspace_dir = get_workspace_dir()
+        self._workspace_dir = get_agent_workspace_dir()
         self._memory_dir = get_agent_memory_dir()
         self._agent_id: str = "main_agent"
 

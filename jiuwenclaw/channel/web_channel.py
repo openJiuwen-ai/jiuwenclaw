@@ -21,7 +21,7 @@ from urllib.parse import parse_qs, urlparse
 
 import aiohttp
 
-from jiuwenclaw.utils import get_workspace_dir
+from jiuwenclaw.utils import get_agent_workspace_dir
 from jiuwenclaw.channel.base import BaseChannel, ChannelMetadata, RobotMessageRouter
 from jiuwenclaw.schema.message import Message, Mode, ReqMethod
 
@@ -185,7 +185,7 @@ class WebChannel(BaseChannel):
             return params
 
         downloaded_files = []
-        workspace_dir = str(get_workspace_dir())
+        workspace_dir = str(get_agent_workspace_dir())
 
         for file_info in files:
             if not isinstance(file_info, dict):

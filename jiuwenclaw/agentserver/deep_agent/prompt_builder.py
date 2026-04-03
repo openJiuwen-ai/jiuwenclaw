@@ -261,7 +261,7 @@ def _start_prompt(language: str) -> PromptSection:
 | `{get_agent_workspace_dir()}` | 身份与任务信息 | 可适当更新，以更好地服务用户 |
 | `{get_agent_memory_dir()}` | 持久化记忆 | 将其视为你记忆的一部分，随时查阅 |
 | `{get_agent_skills_dir()}` | 技能库 | 可随时翻阅、调用，不可修改 |
-| `{get_agent_root_dir()}` | 工作区 | 你的安全屋，可自由读写，注意不要影响系统其他部分 |
+| `{get_agent_workspace_dir()}` | 工作区 | 你的安全屋，可自由读写，注意不要影响系统其他部分 |
 | `{get_deepagent_todo_dir()}` | 待办事项 | 记录用户请求的任务，每次请求后会更新 |
 
 ## 配置信息
@@ -288,7 +288,7 @@ Everything starts from the `.jiuwenclaw` directory.
 | `{get_agent_workspace_dir()}` | Identity and task info | You may update this to better serve your user |
 | `{get_agent_memory_dir()}` | Persistent memory | Treat it as part of your memory; consult it anytime |
 | `{get_agent_skills_dir()}` | Skill library | Read and invoke freely; do not modify |
-| `{get_agent_root_dir()}` | Workspace | Your safe space; read and write freely, but avoid affecting other parts of the system |
+| `{get_agent_workspace_dir()}` | Workspace | Your safe space; read and write freely, but avoid affecting other parts of the system |
 | `{get_deepagent_todo_dir()}` | Todo list | Records tasks from user requests; updated after each request |
 
 ## Configuration

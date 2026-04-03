@@ -335,11 +335,11 @@ class ExternalDirectoryChecker:
         workspace = self._workspace_root
         if workspace is None:
             try:
-                from jiuwenclaw.utils import get_workspace_dir
-                workspace = get_workspace_dir()
-                logger.info("[ExternalDirectoryChecker] workspace from get_workspace_dir: %s", workspace)
+                from jiuwenclaw.utils import get_agent_workspace_dir
+                workspace = get_agent_workspace_dir()
+                logger.info("[ExternalDirectoryChecker] workspace from get_agent_workspace_dir: %s", workspace)
             except ImportError:
-                logger.error("[ExternalDirectoryChecker] Failed to import get_workspace_dir")
+                logger.error("[ExternalDirectoryChecker] Failed to import get_agent_workspace_dir")
                 return None
         else:
             logger.info("[ExternalDirectoryChecker] workspace from _workspace_root: %s", workspace)

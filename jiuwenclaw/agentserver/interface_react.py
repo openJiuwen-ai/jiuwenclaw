@@ -32,6 +32,7 @@ from jiuwenclaw.gateway.cron import CronController, CronTargetChannel
 
 from jiuwenclaw.utils import (
     get_agent_root_dir,
+    get_agent_workspace_dir,
     get_checkpoint_dir,
     get_env_file, get_deepagent_heartbeat_path,
 )
@@ -125,7 +126,7 @@ class JiuWenClawReactAdapter:
 
     def __init__(self) -> None:
         self._instance: JiuClawReActAgent | None = None
-        self._workspace_dir: str = str(get_agent_root_dir())
+        self._workspace_dir: str = str(get_agent_workspace_dir())
         self._agent_name: str = "main_agent"
         self._compaction_manager: ContextCompactionManager | None = None
         self._browser_mcp_registered: bool = False
@@ -236,7 +237,7 @@ class JiuWenClawReactAdapter:
             sysop_card = SysOperationCard(
                 mode=OperationMode.LOCAL,
                 # Scope sys_operation to agent root so skills/memory/home/workspace are all accessible.
-                work_config=LocalWorkConfig(work_dir=str(get_agent_root_dir())),
+                work_config=LocalWorkConfig(work_dir=str(get_agent_workspace_dir())),
             )
             Runner.resource_mgr.add_sys_operation(sysop_card)
             sysop_card_id = sysop_card.id

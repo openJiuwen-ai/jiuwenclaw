@@ -538,7 +538,7 @@ def _resolve_paths() -> None:
     # 优先使用已初始化的用户工作区 (~/.jiuwenclaw)，
     # 保证源码运行与安装包运行后的读写路径完全一致。
     user_config_dir = workspace_dir / "config"
-    user_workspace_dir = workspace_dir / "agent" / "workspace"
+    user_workspace_dir = workspace_dir / "agent" / "jiuwenclaw_workspace"
     if user_config_dir.exists():
         _root_dir = workspace_dir
         _config_dir = user_config_dir

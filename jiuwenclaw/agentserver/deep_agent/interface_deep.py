@@ -103,7 +103,7 @@ from jiuwenclaw.agentserver.tools.xiaoyi_phone_tools import (
 from jiuwenclaw.config import get_config, resolve_env_vars
 from jiuwenclaw.gateway.cron import CronController, CronTargetChannel
 from jiuwenclaw.schema.agent import AgentRequest, AgentResponse, AgentResponseChunk
-from jiuwenclaw.utils import get_env_file, get_agent_root_dir, get_checkpoint_dir, get_agent_skills_dir
+from jiuwenclaw.utils import get_env_file, get_agent_root_dir, get_agent_workspace_dir, get_checkpoint_dir, get_agent_skills_dir
 
 load_dotenv(dotenv_path=get_env_file())
 
@@ -180,7 +180,7 @@ class JiuWenClawDeepAdapter:
 
     def __init__(self) -> None:
         self._instance: DeepAgent | None = None
-        self._workspace_dir: str = str(get_agent_root_dir())
+        self._workspace_dir: str = str(get_agent_workspace_dir())
         self._agent_name: str = "main_agent"
         self._vision_tools_registered: bool = False
         self._audio_tools_registered: bool = False
