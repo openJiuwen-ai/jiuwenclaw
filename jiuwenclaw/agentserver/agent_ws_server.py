@@ -30,6 +30,7 @@ from jiuwenclaw.e2a.wire_codec import (
 )
 from jiuwenclaw.schema.agent import AgentRequest, AgentResponse, AgentResponseChunk
 from jiuwenclaw.schema.hook_event import AgentServerHookEvents
+from jiuwenclaw.agentserver.extensions import get_rail_manager
 from jiuwenclaw.schema.hooks_context import AgentServerChatHookContext
 
 
@@ -287,6 +288,18 @@ class AgentWebSocketServer:
                 return
             if request.req_method == ReqMethod.AGENT_RELOAD_CONFIG:
                 await self._handle_agent_reload_config(ws, request, send_lock)
+                return
+            if request.req_method == ReqMethod.EXTENSIONS_LIST:
+                await self._handle_extensions_list(ws, request, send_lock)
+                return
+            if request.req_method == ReqMethod.EXTENSIONS_IMPORT:
+                await self._handle_extensions_import(ws, request, send_lock)
+                return
+            if request.req_method == ReqMethod.EXTENSIONS_DELETE:
+                await self._handle_extensions_delete(ws, request, send_lock)
+                return
+            if request.req_method == ReqMethod.EXTENSIONS_TOGGLE:
+                await self._handle_extensions_toggle(ws, request, send_lock)
                 return
             if request.is_stream:
                 await self._handle_stream(ws, request, send_lock)
@@ -550,6 +563,136 @@ class AgentWebSocketServer:
             )
         except Exception as e:  # noqa: BLE001
             logger.exception("[AgentWebSocketServer] agent.reload_config failed: %s", e)
+            resp = AgentResponse(
+                request_id=request.request_id,
+                channel_id=request.channel_id,
+                ok=False,
+                payload={"error": str(e)},
+            )
+
+        wire = encode_agent_response_for_wire(resp, response_id=request.request_id)
+        async with send_lock:
+            await ws.send(json.dumps(wire, ensure_ascii=False))
+
+    async def _handle_extensions_list(self, ws: Any, request: AgentRequest, send_lock: asyncio.Lock) -> None:
+        """获取所有 Rail 扩展列表."""
+        try:
+            manager = get_rail_manager()
+            extensions = manager.list_extensions()
+
+            resp = AgentResponse(
+                request_id=request.request_id,
+                channel_id=request.channel_id,
+                ok=True,
+                payload={"extensions": extensions},
+            )
+        except Exception as e:  # noqa: BLE001
+            logger.exception("[AgentWebSocketServer] extensions.list failed: %s", e)
+            resp = AgentResponse(
+                request_id=request.request_id,
+                channel_id=request.channel_id,
+                ok=False,
+                payload={"error": str(e)},
+            )
+
+        wire = encode_agent_response_for_wire(resp, response_id=request.request_id)
+        async with send_lock:
+            await ws.send(json.dumps(wire, ensure_ascii=False))
+
+    async def _handle_extensions_import(self, ws: Any, request: AgentRequest, send_lock: asyncio.Lock) -> None:
+        """导入新的 Rail 扩展（文件夹结构）."""
+        try:
+            params = request.params or {}
+            folder_path = params.get("folder_path")
+
+            if not folder_path:
+                raise ValueError("缺少 folder_path 参数")
+
+            source_path = Path(folder_path)
+            if not source_path.exists() or not source_path.is_dir():
+                raise ValueError(f"文件夹不存在或不是目录: {folder_path}")
+
+            manager = get_rail_manager()
+            extension = manager.import_extension(folder_path)
+
+            resp = AgentResponse(
+                request_id=request.request_id,
+                channel_id=request.channel_id,
+                ok=True,
+                payload=extension,
+            )
+        except Exception as e:  # noqa: BLE001
+            logger.exception("[AgentWebSocketServer] extensions.import failed: %s", e)
+            resp = AgentResponse(
+                request_id=request.request_id,
+                channel_id=request.channel_id,
+                ok=False,
+                payload={"error": str(e)},
+            )
+
+        wire = encode_agent_response_for_wire(resp, response_id=request.request_id)
+        async with send_lock:
+            await ws.send(json.dumps(wire, ensure_ascii=False))
+
+    async def _handle_extensions_delete(self, ws: Any, request: AgentRequest, send_lock: asyncio.Lock) -> None:
+        """删除 Rail 扩展."""
+        try:
+            params = request.params or {}
+            name = params.get("name")
+
+            if not name:
+                raise ValueError("缺少 name 参数")
+
+            manager = get_rail_manager()
+            manager.delete_extension(name)
+
+            resp = AgentResponse(
+                request_id=request.request_id,
+                channel_id=request.channel_id,
+                ok=True,
+                payload={"deleted": True, "name": name},
+            )
+        except Exception as e:  # noqa: BLE001
+            logger.exception("[AgentWebSocketServer] extensions.delete failed: %s", e)
+            resp = AgentResponse(
+                request_id=request.request_id,
+                channel_id=request.channel_id,
+                ok=False,
+                payload={"error": str(e)},
+            )
+
+        wire = encode_agent_response_for_wire(resp, response_id=request.request_id)
+        async with send_lock:
+            await ws.send(json.dumps(wire, ensure_ascii=False))
+
+    async def _handle_extensions_toggle(self, ws: Any, request: AgentRequest, send_lock: asyncio.Lock) -> None:
+        """切换 Rail 扩展的启用状态，并触发热更新."""
+        try:
+            params = request.params or {}
+            name = params.get("name")
+            enabled = params.get("enabled", False)
+
+            if name is None:
+                raise ValueError("缺少 name 参数")
+            if enabled is None:
+                raise ValueError("缺少 enabled 参数")
+
+            manager = get_rail_manager()
+
+            # 1. 更新配置文件中的启用状态
+            extension = manager.toggle_extension(name, enabled)
+
+            # 2. 触发热更新：根据 enabled 状态注册或注销 rail
+            await manager.hot_reload_rail(name, enabled)
+
+            resp = AgentResponse(
+                request_id=request.request_id,
+                channel_id=request.channel_id,
+                ok=True,
+                payload=extension,
+            )
+        except Exception as e:  # noqa: BLE001
+            logger.exception("[AgentWebSocketServer] extensions.toggle failed: %s", e)
             resp = AgentResponse(
                 request_id=request.request_id,
                 channel_id=request.channel_id,

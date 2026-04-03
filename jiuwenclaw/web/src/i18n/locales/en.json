@@ -21,6 +21,7 @@
     "cron": "Scheduled Tasks",
     "skills": "Skills",
     "channels": "Channels",
+    "extensions": "Extensions",
     "settings": "Settings",
     "config": "Configuration",
     "browser": "Browser Service",
@@ -860,5 +861,19 @@
     "restartWaiting": "Waiting for backend to restart and reconnect...",
     "configAppliedDesc": "Config hot-reloaded, this dialog will close in 5 seconds.",
     "restartSuccessDesc": "Backend started successfully, this dialog will close in 5 seconds."
+  },
+  "extensions": {
+    "title": "Extensions",
+    "description": "Manage custom Rail extensions",
+    "importTitle": "Import Extension",
+    "importButton": "Import",
+    "importHint": "Folder requirements: 1) English name 2) Contains rail.py entry file",
+    "noExtensions": "No extensions",
+    "deleteButton": "Delete",
+    "helpTitle": "Usage Guide",
+    "help0": "Extension folder must contain rail.py as the entry file",
+    "help1": "Rail extension files must inherit from DeepAgentRail or AgentRail base class",
+    "help2": "Changes to extension status require reloading Agent configuration to take effect",
+    "help3": "Extension files are saved to ~/.jiuwenclaw/agent/jiuwenclaw_workspace/extensions/ directory"
   }
 }

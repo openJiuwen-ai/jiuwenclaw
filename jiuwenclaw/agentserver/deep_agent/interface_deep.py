@@ -101,6 +101,7 @@ from jiuwenclaw.agentserver.tools.xiaoyi_phone_tools import (
     image_reading,
 )
 from jiuwenclaw.config import get_config, resolve_env_vars
+from jiuwenclaw.agentserver.extensions import get_rail_manager
 from jiuwenclaw.gateway.cron import CronController, CronTargetChannel
 from jiuwenclaw.schema.agent import AgentRequest, AgentResponse, AgentResponseChunk
 from jiuwenclaw.utils import get_env_file, get_agent_root_dir, get_agent_workspace_dir, get_checkpoint_dir, get_agent_skills_dir
@@ -1051,6 +1052,33 @@ class JiuWenClawDeepAdapter:
         )
         logger.info("[JiuWenClawDeepAdapter] 初始化完成: agent_name=%s", self._agent_name)
 
+        # 动态加载用户自定义的 Rail 扩展
+        await self.load_user_rails()
+
+    async def load_user_rails(self) -> None:
+        """动态加载用户自定义的 Rail 扩展."""
+        try:
+            manager = get_rail_manager()
+
+            # 设置 agent 实例到 rail_manager，用于热更新
+            manager.set_agent_instance(self._instance)
+
+            extensions = manager.get_extensions()
+
+            # 只加载配置中启用的 rail 扩展
+            for ext in extensions:
+                if ext["enabled"]:
+                    try:
+                        await manager.hot_reload_rail(ext["name"], True)
+                    except Exception as e:
+                        logger.error(
+                            "[JiuWenClawDeepAdapter] 用户 Rail 扩展加载失败: %s, 错误: %s",
+                            ext["name"],
+                            e,
+                        )
+        except Exception as e:
+            logger.error("[JiuWenClawDeepAdapter] 加载用户 Rail 扩展时发生错误: %s", e)
+
     async def reload_agent_config(
             self,
             config_base: dict[str, Any] | None = None,
@@ -1097,6 +1125,9 @@ class JiuWenClawDeepAdapter:
         self._sync_paid_search_tool_for_runtime()
 
         rails_list = self._get_current_agent_rails(config, config_base)
+
+        # 加载用户自定义的 Rail 扩展
+        await self.load_user_rails()
 
         deep_cfg = self._make_deep_agent_config(
             model=model,

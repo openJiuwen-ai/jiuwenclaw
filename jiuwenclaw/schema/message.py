@@ -59,6 +59,11 @@ class ReqMethod(Enum):
     SKILLS_EVOLUTION_GET = "skills.evolution.get"
     SKILLS_EVOLUTION_SAVE = "skills.evolution.save"
 
+    EXTENSIONS_LIST = "extensions.list"
+    EXTENSIONS_IMPORT = "extensions.import"
+    EXTENSIONS_DELETE = "extensions.delete"
+    EXTENSIONS_TOGGLE = "extensions.toggle"
+
     HEARTBEAT_GET_CONF = "heartbeat.get_conf"
     HEARTBEAT_SET_CONF = "heartbeat.set_conf"
 

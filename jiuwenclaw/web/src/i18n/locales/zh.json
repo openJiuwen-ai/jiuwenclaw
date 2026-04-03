@@ -21,6 +21,7 @@
     "cron": "定时任务",
     "skills": "技能",
     "channels": "频道",
+    "extensions": "内置插件",
     "settings": "设置",
     "config": "配置信息",
     "browser": "浏览器服务",
@@ -860,5 +861,19 @@
     "restartWaiting": "正在等待后端重新启动并恢复连接，请稍候...",
     "configAppliedDesc": "配置已热更新，窗口将在 5 秒后自动关闭。",
     "restartSuccessDesc": "后端已启动成功，窗口将在 5 秒后自动关闭。"
+  },
+  "extensions": {
+    "title": "内置插件",
+    "description": "管理自定义 Rail 扩展",
+    "importTitle": "导入内置插件",
+    "importButton": "导入",
+    "importHint": "文件夹要求：1) 英文名称 2) 包含 rail.py 入口文件",
+    "noExtensions": "暂无内置插件",
+    "deleteButton": "删除",
+    "helpTitle": "使用说明",
+    "help0": "扩展文件夹必须包含 rail.py 作为入口文件",
+    "help1": "Rail 扩展文件必须继承 DeepAgentRail 或 AgentRail 基类",
+    "help2": "修改扩展状态后需要重新加载 Agent 配置才能生效",
+    "help3": "扩展文件会被保存到 ~/.jiuwenclaw/agent/jiuwenclaw_workspace/extensions/ 目录"
   }
 }

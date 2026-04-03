@@ -19,6 +19,7 @@ import { ChannelsPanel } from './components/ChannelsPanel';
 import { BrowserPanel } from './components/BrowserPanel';
 import { UpdatePanel } from './components/UpdatePanel';
 import { StatusBar } from './components/StatusBar';
+import { ExtensionsPanel } from './components/ExtensionsPanel';
 import { FEATURE_APP_UPDATER_UI } from './featureFlags';
 import { HeartbeatMessageModal } from './features/HeartbeatMessageModal';
 import {
@@ -39,7 +40,7 @@ import { useTranslation } from 'react-i18next';
 import i18n from './i18n';
 import './App.css';
 
-type MainNavKey = 'chat' | 'skills' | 'agents' | 'sessions' | 'heartbeat' | 'cron' | 'channels' | 'configpanel' | 'logspanel' | 'browserpanel' | 'updatepanel';
+type MainNavKey = 'chat' | 'skills' | 'agents' | 'sessions' | 'heartbeat' | 'cron' | 'channels' | 'extensions' | 'configpanel' | 'logspanel' | 'browserpanel' | 'updatepanel';
 
 // 错误边界组件
 interface ErrorBoundaryState {
@@ -1029,6 +1030,11 @@ function AppContent() {
         {hasVisitedChannels && (
           <div className={`app-section ${activeNav === 'channels' ? '' : 'is-hidden'}`}>
             <ChannelsPanel isConnected={isConnected} />
+          </div>
+        )}
+        {activeNav === 'extensions' && (
+          <div className="app-section">
+            <ExtensionsPanel isConnected={isConnected} />
           </div>
         )}
       </main>
