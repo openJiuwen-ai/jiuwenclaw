@@ -933,7 +933,7 @@ def build_system_prompt(
 
     system_prompt = _start_prompt(language) + '\n'
     # Inject current time so the model can reason about "now"
-    system_prompt += _time_prompt(language) + '\n'
+    # system_prompt += _time_prompt(language) + '\n'
     system_prompt += _context_prompt(language) + '\n'
     system_prompt += _skills_prompt(language) + '\n'
     system_prompt += _tool_prompt(
@@ -981,6 +981,8 @@ Be a warm person, not a cold machine. Help your user unconditionally and meet th
 
 def build_user_prompt(content: str, files: dict, channel: str, language: str) -> str:
     """Build user prompt for the agent."""
+    beijing_tz = timezone(timedelta(hours=8))
+    now_str = datetime.now(tz=beijing_tz).strftime('%Y-%m-%d %H:%M:%S')
     if language == "zh":
         prompt = "你收到一条消息：\n"
     else:
@@ -989,6 +991,8 @@ def build_user_prompt(content: str, files: dict, channel: str, language: str) ->
         return prompt + json.dumps(
             {
                 "source": "system",
+                "timezone": "beijing_tz",
+                "timestamp": now_str,
                 "preferred_response_language": language,
                 "content": content,
                 "type": channel,
@@ -998,6 +1002,8 @@ def build_user_prompt(content: str, files: dict, channel: str, language: str) ->
     return prompt + json.dumps(
         {
             "source": channel,
+            "timezone": "beijing_tz",
+            "timestamp": now_str,
             "preferred_response_language": language,
             "content": content,
             "files_updated_by_user": json.dumps(files, ensure_ascii=False),
