@@ -6,17 +6,19 @@ from __future__ import annotations
 
 import logging
 import asyncio
+import re
 import secrets
 import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from enum import Enum
-from typing import TYPE_CHECKING, Any, Dict
+from typing import TYPE_CHECKING, Any, Dict, Optional, Tuple
 from jiuwenclaw.channel.base import ChannelType
 from jiuwenclaw.e2a.constants import E2A_WIRE_INTERNAL_METADATA_KEYS, FILE_TRANSFER_EVENT_TYPES
 from jiuwenclaw.gateway.session_map import SessionMap
 from jiuwenclaw.schema.hook_event import GatewayHookEvents
 from jiuwenclaw.schema.hooks_context import GatewayChatHookContext
+from jiuwenclaw.schema.message import ReqMethod
 from jiuwenclaw.utils import FileTransferStartParams
 
 logger = logging.getLogger(__name__)
@@ -32,6 +34,16 @@ class ChannelMode(str, Enum):
 class ChannelControlState:
     session_id: str | None = None
     mode: ChannelMode = ChannelMode.PLAN
+
+
+@dataclass(frozen=True)
+class CLIFileCommandContext:
+    msg: "Message"
+    command: str
+    path: str
+    params: dict
+    user_infos: dict
+    channel_id: str
 if TYPE_CHECKING:
     from jiuwenclaw.e2a.models import E2AEnvelope
     from jiuwenclaw.gateway.agent_client import AgentServerClient
@@ -332,6 +344,117 @@ class MessageHandler(ABC):
             return True
 
         return False
+
+    def _handle_cli_file_command(self, msg: "Message") -> bool:
+        """处理 /view、/cat、/ls 等 CLI 文件命令（适用于所有 channel 类型）.
+
+        Returns:
+            True: 已识别为 CLI 文件命令并已异步转发处理，不再转发给 Agent。
+            False: 非此类命令，继续正常处理。
+        """
+        params = msg.params or {}
+        text = str(params.get("query") or params.get("content") or "").strip()
+        if not text:
+            return False
+        cli_result = self._parse_cli_file_command(text)
+        if not cli_result:
+            return False
+        command, path, cmd_params = cli_result
+        asyncio.create_task(
+            self._forward_cli_file_command(
+                CLIFileCommandContext(
+                    msg=msg,
+                    command=command,
+                    path=path,
+                    params=cmd_params,
+                    user_infos={"id": msg.id, "meta_data": msg.metadata},
+                    channel_id=msg.channel_id,
+                )
+            )
+        )
+        return True
+
+    def _parse_cli_file_command(self, text: str) -> Optional[Tuple[str, str, dict]]:
+        """解析 CLI 文件命令
+        
+        支持格式:
+        - /view path/to/file.md
+        - /view path/to/file.md -n 50
+        - /view path/to/file.md -f 100 -l 50
+        - /ls [path]
+        
+        Returns:
+            (command, path, params) 或 None
+        """
+        text = text.strip()
+        
+        view_match = re.match(
+            r'^/(?:view|cat)\s+(.+?)(?:\s+-f\s+(\d+))?(?:\s+-l\s+(\d+))?(?:\s+-n\s+(\d+))?$',
+            text
+        )
+        if view_match:
+            path = view_match.group(1).strip()
+            params = {
+                'from_line': int(view_match.group(2) or 1),
+                'lines': int(view_match.group(3) or view_match.group(4) or 0) or None
+            }
+            return ('view', path, params)
+        
+        ls_match = re.match(r'^/ls(?:\s+(.+))?$', text)
+        if ls_match:
+            path = ls_match.group(1) or '.'
+            return ('ls', path.strip(), {})
+        
+        return None
+
+    async def _forward_cli_file_command(self, ctx: CLIFileCommandContext):
+        """将 CLI 文件命令转发到 AgentService"""
+        try:
+            from jiuwenclaw.e2a.models import E2AEnvelope
+            req_method = ReqMethod.CLI_FILE_VIEW if ctx.command == 'view' else ReqMethod.CLI_FILE_LIST
+            
+            envelope = E2AEnvelope(
+                request_id=ctx.msg.id,
+                session_id=ctx.msg.session_id,
+                channel=ctx.channel_id,
+                method=req_method.value,
+                params={
+                    "path": ctx.path,
+                    "params": ctx.params
+                },
+                is_stream=False
+            )
+            
+            response = await self._agent_client.send_request(envelope)
+            
+            if response.ok:
+                payload = response.payload or {}
+                content = payload.get("content", "")
+                if not content:
+                    content = payload.get("error", "无内容")
+            else:
+                payload = response.payload or {}
+                err = payload.get("error") or payload.get("message") or ""
+                content = f"❌ 命令执行失败: {err}" if err else "❌ 命令执行失败"
+            
+            await self._send_channel_notice(
+                ctx.user_infos,
+                ctx.channel_id,
+                ctx.msg.session_id,
+                content
+            )
+            await self._send_processing_status(
+                ctx.msg.id, ctx.msg.session_id, ctx.channel_id, is_processing=False
+            )
+            
+        except Exception as e:
+            logger.error("[MessageHandler] CLI 文件命令转发失败: %s", e)
+            await self._send_channel_notice(
+                ctx.user_infos,
+                ctx.channel_id,
+                ctx.msg.session_id,
+                f"❌ 命令执行失败: {e}"
+            )
 
     def _apply_channel_state(self, msg: "Message") -> None:
         """将当前 Channel 的控制状态应用到消息上（session_id / mode）."""
@@ -642,7 +765,6 @@ class MessageHandler(ABC):
         网关队列否则串行 await Agent，慢请求（如 SkillNet 搜索）会堵住后续的 skills.list 刷新。
         聊天相关必须按入队顺序与流式任务协调，不得后台并发。
         """
-        from jiuwenclaw.schema.message import ReqMethod
 
         m = env.method
         if not m:
@@ -656,8 +778,6 @@ class MessageHandler(ABC):
 
     @staticmethod
     def _should_trigger_before_chat_request_hook(msg: "Message") -> bool:
-        from jiuwenclaw.schema.message import ReqMethod
-
         return msg.req_method in (
             ReqMethod.CHAT_SEND,
             ReqMethod.CHAT_RESUME,
@@ -716,15 +836,15 @@ class MessageHandler(ABC):
 
         支持中断机制：当收到 CHAT_CANCEL 请求时，会立即取消正在执行的流式任务。
         """
-        from jiuwenclaw.schema.message import ReqMethod
-
         while self._running:
             try:
                 msg = await self.consume_user_messages(timeout=None)
                 if msg is None:
                     continue
-                
-         
+                if self._handle_cli_file_command(msg):
+                    # 该消息为 CLI 文件命令，已异步转发 Agent 侧处理并会通过 notice 回复，不再走聊天转发
+                    continue
+
                 # 先处理 Channel 控制指令（仅 feishu/xiaoyi/dingtalk/whatsapp）
                 if self._handle_channel_control(msg):
                     # 该消息仅用于修改 session/mode，已给 Channel 回复提示，不再转发给 Agent

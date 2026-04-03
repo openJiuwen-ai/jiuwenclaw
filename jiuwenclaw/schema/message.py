@@ -90,6 +90,9 @@ class ReqMethod(Enum):
     FILE_TRANSFER_CHUNK = "file.transfer.chunk"
     FILE_TRANSFER_COMPLETE = "file.transfer.complete"
 
+    CLI_FILE_VIEW = "cli.file.view"
+    CLI_FILE_LIST = "cli.file.list"
+
 class EventType(Enum):
     CONNECTION_ACK = "connection.ack"
     HELLO = "hello"

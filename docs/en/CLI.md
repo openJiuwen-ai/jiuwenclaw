@@ -73,3 +73,126 @@ The Gateway will:
 - Stored **per channel** (`channel_id` → `mode`). All later messages on that channel use the current mode.
 - Initial value can come from `default_mode` in config; `MessageHandler` reads it on startup.
 
+---
+
+### 3. `/view` and `/ls` — file viewer & directory listing (CLI file commands)
+
+**Purpose**
+
+- View a file inside the Agent workspace (`/view`, alias `/cat`)
+- List a directory (`/ls`)
+
+Unlike `/new_session` and `/mode` (Gateway-only controls), these commands are **parsed by the Gateway and forwarded to AgentServer for execution**.
+
+---
+
+#### 3.1 Syntax
+
+**View a file**
+
+```text
+/view <path>
+/cat <path>
+```
+
+Optional line range parameters:
+
+```text
+/view <path> -n <lines>
+/view <path> -f <from_line> -l <lines>
+```
+
+- `-f`: starting line number (1-based), default `1`
+- `-l`: number of lines to display
+- `-n`: number of lines to display (alias of `-l`)
+- Precedence: if both `-l` and `-n` are present, `-l` wins (parser uses `lines = -l or -n`)
+
+**List a directory**
+
+```text
+/ls
+/ls <path>
+```
+
+- If `<path>` is omitted, it defaults to `.`.
+
+---
+
+#### 3.2 End-to-end flow (message → result)
+
+**1) Gateway: parse + forward**
+
+- Parser: `jiuwenclaw/gateway/message_handler.py::_parse_cli_file_command()`
+  - Recognizes `/view`, `/cat`, `/ls` and extracts parameters
+- Forwarder: `jiuwenclaw/gateway/message_handler.py::_forward_cli_file_command()`
+  - `/view` → `ReqMethod.CLI_FILE_VIEW` (`cli.file.view`)
+  - `/ls` → `ReqMethod.CLI_FILE_LIST` (`cli.file.list`)
+  - Passes via `E2AEnvelope.params`:
+    - `"path"`: the raw path string
+    - `"params"`: line params for `/view` (`from_line`, `lines`); empty dict for `/ls`
+
+**2) AgentServer: route to file service**
+
+- Entry: `jiuwenclaw/agentserver/interface.py::_handle_cli_file_command()`
+  - Calls:
+    - `CLIFileService.handle_view_command(path, cmd_params)`
+    - `CLIFileService.handle_ls_command(path)`
+
+**3) File service: resolve + validate + read + format**
+
+- Implementation: `jiuwenclaw/agentserver/cli_file_service.py`
+- Key steps:
+  - `resolve_path(path)` → absolute path
+  - `is_path_allowed(full_path)` → security boundary check (agent_root only)
+  - Existence / type checks
+  - Size limit: max 1MB (`MAX_FILE_SIZE`)
+  - Extension allowlist: `ALLOWED_EXTENSIONS`
+  - Read and format output (default max 500 lines, `MAX_DISPLAY_LINES`)
+
+**4) Gateway: send back to channel**
+
+- Gateway sends `payload["content"]` back to the channel; if empty it falls back to `payload["error"]`.
+
+---
+
+#### 3.3 Path semantics & security boundary
+
+**Path semantics**
+
+- Current convention: **all relative paths are resolved against `agent_root`**
+- Windows paths are normalized (`\` → `/`) before resolution
+- Absolute paths are accepted by the resolver, but will still be blocked by the security boundary below
+
+**Security boundary (hard constraint)**
+
+- `CLIFileService.is_path_allowed()` only allows paths under `agent_root`
+- Any path outside that tree (even if absolute) is rejected
+
+---
+
+#### 3.4 Output format
+
+**`/view`**
+
+- Returns a Markdown text containing:
+  - a fenced code block with line numbers
+  - a short summary (file path, total lines, displayed range)
+
+**`/ls`**
+
+- Returns a Markdown text containing:
+  - directory header
+  - sub-directories and files (with formatted sizes)
+  - totals (dir/file counts)
+
+---
+
+#### 3.5 Common error cases
+
+- Path resolution failed: `Path resolution failed: ...`
+- Out-of-scope access: `Path is outside the allowed access scope`
+- Not found: `File not found: ...` / `Directory not found: ...`
+- Type mismatch: `Not a file: ...` / `Not a directory: ...`
+- File too large: over 1MB
+- Unsupported extension: not in allowlist
+

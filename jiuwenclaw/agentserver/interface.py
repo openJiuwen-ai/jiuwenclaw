@@ -89,6 +89,7 @@ from jiuwenclaw.agentserver.permissions import (
     PermissionLevel,
 )
 from jiuwenclaw.agentserver.skill_manager import SkillManager, _get_skills_dir
+from jiuwenclaw.agentserver.cli_file_service import CLIFileService
 from jiuwenclaw.evolution.service import EvolutionService
 from jiuwenclaw.schema.agent import AgentRequest, AgentResponse, AgentResponseChunk
 from jiuwenclaw.agentserver.memory import get_memory_manager
@@ -166,6 +167,11 @@ _SKILL_ROUTES: dict[ReqMethod, str] = {
     ReqMethod.SKILLS_EVOLUTION_SAVE: "handle_skills_evolution_save",
 }
 
+_CLI_FILE_ROUTES: dict[ReqMethod, str] = {
+    ReqMethod.CLI_FILE_VIEW: "handle_cli_file_view",
+    ReqMethod.CLI_FILE_LIST: "handle_cli_file_list",
+}
+
 
 class JiuWenClaw:
     """基于 openJiuwen ReActAgent 的 AgentServer 实现."""
@@ -198,6 +204,7 @@ class JiuWenClaw:
 
         self._session_tool = None
         self._cron_tools = CronTools()
+        self._cli_file_service = CLIFileService()
 
     @staticmethod
     async def set_checkpoint():
@@ -1188,6 +1195,39 @@ class JiuWenClaw:
 
             self._session_processors[session_id] = asyncio.create_task(process_session_queue())
 
+    async def _handle_cli_file_command(self, request: AgentRequest) -> AgentResponse:
+        """处理 CLI 文件命令 (/view, /ls)"""
+        self._cli_file_service.session_id = request.session_id
+        
+        params = request.params or {}
+        path = params.get("path", "")
+        cmd_params = params.get("params", {})
+        
+        if request.req_method == ReqMethod.CLI_FILE_VIEW:
+            result = self._cli_file_service.handle_view_command(path, cmd_params)
+        elif request.req_method == ReqMethod.CLI_FILE_LIST:
+            result = self._cli_file_service.handle_ls_command(path)
+        else:
+            return AgentResponse(
+                request_id=request.request_id,
+                channel_id=request.channel_id,
+                ok=False,
+                payload={"error": f"未知的 CLI 文件命令: {request.req_method}"},
+                metadata=request.metadata,
+            )
+        
+        return AgentResponse(
+            request_id=request.request_id,
+            channel_id=request.channel_id,
+            ok=result.success,
+            payload={
+                "content": result.content,
+                "error": result.error,
+                "metadata": result.metadata,
+            },
+            metadata=request.metadata,
+        )
+
     async def process_message(self, request: AgentRequest) -> AgentResponse:
         """调用 Runner.run_agent 处理请求，返回完整响应.
 
@@ -1287,6 +1327,10 @@ class JiuWenClaw:
                 payload=payload,
                 metadata=request.metadata,
             )
+
+        # CLI 文件命令处理
+        if request.req_method in _CLI_FILE_ROUTES:
+            return await self._handle_cli_file_command(request)
 
         # 原有 chat 逻辑
         if self._instance is None:
