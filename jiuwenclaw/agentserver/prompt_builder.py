@@ -7,7 +7,6 @@ from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from typing import Optional
 
-from jiuwenclaw.extensions import ExtensionRegistry
 from jiuwenclaw.schema import AgentServerHookEvents
 from jiuwenclaw.schema.hooks_context import SystemPromptHookContext
 from jiuwenclaw.utils import (
@@ -983,6 +982,8 @@ async def build_system_prompt(
 
     # Create context for extension hooks
     context = SystemPromptHookContext()
+    # 插件需要延迟引用
+    from jiuwenclaw.extensions import ExtensionRegistry
     await ExtensionRegistry.get_instance().trigger(AgentServerHookEvents.BEFORE_SYSTEM_PROMPT_BUILD, context)
 
     # Get custom directories from context

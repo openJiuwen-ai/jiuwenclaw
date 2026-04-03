@@ -115,7 +115,9 @@ logging:
 
     def test_reload(self):
         """测试配置重新加载"""
-        config = LoggingTagConfig()
+        config = LoggingTagConfig(
+            _skip_env_load=True
+        )
         self.assertTrue(config.is_user_visible_enabled())
 
         # 修改配置

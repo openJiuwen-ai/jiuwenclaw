@@ -39,7 +39,6 @@ from jiuwenclaw.config import get_config, resolve_env_vars
 from jiuwenclaw.agentserver.react_agent import JiuClawReActAgent
 from jiuwenclaw.agentserver.permissions.checker import TOOL_PERMISSION_CHANNEL_ID
 from jiuwenclaw.schema.hook_event import AgentServerHookEvents
-from jiuwenclaw.extensions.registry import ExtensionRegistry
 from jiuwenclaw.schema.hooks_context import MemoryHookContext
 from jiuwenclaw.agentserver.tools.browser_tools import register_browser_runtime_mcp_server
 from jiuwenclaw.agentserver.tools.audio_tools import (
@@ -95,6 +94,7 @@ from jiuwenclaw.schema.agent import AgentRequest, AgentResponse, AgentResponseCh
 from jiuwenclaw.agentserver.memory import get_memory_manager
 from jiuwenclaw.agentserver.session_history import append_history_record
 from jiuwenclaw.schema.message import ReqMethod
+from jiuwenclaw.local_env_config import set_local_config
 
 load_dotenv(dotenv_path=get_env_file())
 
@@ -547,10 +547,7 @@ class JiuWenClaw:
             if not isinstance(env_overrides, dict):
                 raise TypeError("env_overrides must be a dict when provided")
             for env_key, env_value in env_overrides.items():
-                if env_value is None:
-                    os.environ.pop(str(env_key), None)
-                else:
-                    os.environ[str(env_key)] = str(env_value)
+                set_local_config(env_key, env_value)
 
         if config_base is None:
             config_base = get_config()
@@ -722,7 +719,8 @@ class JiuWenClaw:
                 workspace_dir=self._workspace_dir,
                 extra=ctx.request_params if ctx.request_params is not None else {},
             )
-
+            # 插件需要延迟引用
+            from jiuwenclaw.extensions.registry import ExtensionRegistry
             await ExtensionRegistry.get_instance().trigger(AgentServerHookEvents.MEMORY_BEFORE_CHAT, mem_ctx)
             memory_block = "\n\n".join(b for b in mem_ctx.memory_blocks if b)
 

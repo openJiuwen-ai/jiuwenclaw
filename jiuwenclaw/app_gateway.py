@@ -17,7 +17,7 @@ import asyncio
 import logging
 import os
 import sys
-import time
+import inspect
 from typing import Any
 
 from dotenv import load_dotenv
@@ -25,6 +25,7 @@ from openjiuwen.core.common.logging import LogManager
 
 from jiuwenclaw.jiuwen_core_patch import apply_openai_model_client_patch
 from jiuwenclaw.utils import get_user_workspace_dir, get_env_file, prepare_workspace
+from jiuwenclaw.local_env_config import decrypt
 
 apply_openai_model_client_patch()
 
@@ -73,7 +74,24 @@ async def _connect_with_retry(
             await asyncio.sleep(interval)
 
 
+async def load_all_extensions():
+    from openjiuwen.core.runner import Runner
+    from jiuwenclaw.extensions import ExtensionManager, ExtensionRegistry
+    callback_framework = Runner.callback_framework
+    extension_registry = ExtensionRegistry.create_instance(
+        callback_framework=callback_framework,
+        config={},
+        logger=logger,
+    )
+    extension_manager = ExtensionManager(registry=extension_registry)
+    await extension_manager.load_all_extensions()
+    logger.info("[App] 扩展加载完成，共 %d 个", len(extension_manager.list_extensions()))
+    return extension_registry
+
+
 async def _run(agent_server_url: str, web_host: str, web_port: int, web_path: str) -> None:
+    # 插件必须提前加载, 否则会影响配置的加解密解析
+    extension_registry = await load_all_extensions()
     from jiuwenclaw.channel import (
         DingTalkChannel,
         DingTalkConfig,
@@ -101,14 +119,13 @@ async def _run(agent_server_url: str, web_host: str, web_port: int, web_path: st
         WebHandlersBindParams,
         _DummyBus,
         _CONFIG_SET_ENV_MAP,
+        _CONFIG_YAML_KEYS,
         _FORWARD_NO_LOCAL_HANDLER_METHODS,
         _FORWARD_REQ_METHODS,
         _register_web_handlers,
     )
-    from jiuwenclaw.extensions import ExtensionManager, ExtensionRegistry
     from jiuwenclaw.schema.message import Message, ReqMethod
     from jiuwenclaw.updater import WindowsUpdaterService
-    from openjiuwen.core.runner import Runner
 
     def _do_restart() -> None:
         logger.info("[App] 配置已写回 .env，正在重启 Gateway 服务…")
@@ -122,16 +139,6 @@ async def _run(agent_server_url: str, web_host: str, web_port: int, web_path: st
             _do_restart()
 
     logger.info("[App] Gateway starting, connecting AgentServer: %s", agent_server_url)
-
-    callback_framework = Runner.callback_framework
-    extension_registry = ExtensionRegistry.create_instance(
-        callback_framework=callback_framework,
-        config={},
-        logger=logger,
-    )
-    extension_manager = ExtensionManager(registry=extension_registry)
-    await extension_manager.load_all_extensions()
-    logger.info("[App] 扩展加载完成，共 %d 个", len(extension_manager.list_extensions()))
 
     max_retries = int(os.getenv("AGENT_CONNECT_RETRY", "20"))
     retry_interval = float(os.getenv("AGENT_CONNECT_RETRY_INTERVAL", "3"))
@@ -172,9 +179,13 @@ async def _run(agent_server_url: str, web_host: str, web_port: int, web_path: st
         heartbeat_cfg = None
         channels_cfg = None
 
+    # 配置解密后存储在内存中
+    env_dict = {}
+    for env_key in _CONFIG_SET_ENV_MAP.values():
+        env_dict[env_key] = decrypt(env_key, os.getenv(env_key))
     client.set_or_update_server_config(
         config=dict(full_cfg or {}),
-        env={env_key: (os.getenv(env_key) or "") for env_key in _CONFIG_SET_ENV_MAP.values()},
+        env=env_dict,
     )
 
     if isinstance(heartbeat_cfg, dict):
@@ -271,7 +282,14 @@ async def _run(agent_server_url: str, web_host: str, web_port: int, web_path: st
             logger.warning("[App] 配置热更新失败，将延迟重启: %s", e)
             _schedule_restart()
             return False
-
+    # 启动时将配置同步给agentserver
+    callback_result = _on_config_saved(
+        set(_CONFIG_SET_ENV_MAP.values()) | _CONFIG_YAML_KEYS,
+        env_updates=dict(env_dict),
+        config_payload=dict(full_cfg or {})
+    )
+    if inspect.isawaitable(callback_result):
+        await callback_result
     web_config = WebChannelConfig(enabled=True, host=web_host, port=web_port, path=web_path)
     web_channel = WebChannel(web_config, _DummyBus())
     _register_web_handlers(

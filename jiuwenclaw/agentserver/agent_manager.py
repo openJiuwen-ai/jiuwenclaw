@@ -13,14 +13,18 @@ class AgentManager:
         self.agents = {}
 
     async def initialize(self):
-        return
-
-    async def prepare_agent(self, session_id, *args):
+        # 需要提前初始化agent, 否则在get_agent获取的agent可能为空
         from jiuwenclaw.agentserver.interface import JiuWenClaw
-
         agent = JiuWenClaw()
         await agent.create_instance()
         self.agents["default_session"] = agent
+
+    async def prepare_agent(self, session_id, *args):
+        if self.agents.get("default_session") is None:
+            from jiuwenclaw.agentserver.interface import JiuWenClaw
+            agent = JiuWenClaw()
+            await agent.create_instance()
+            self.agents["default_session"] = agent
 
     def get_agent(self, session_id, *args) -> "JiuWenClaw":
         return self.agents["default_session"]

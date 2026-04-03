@@ -17,7 +17,6 @@ from jiuwenclaw.e2a.constants import E2A_WIRE_INTERNAL_METADATA_KEYS, FILE_TRANS
 from jiuwenclaw.gateway.session_map import SessionMap
 from jiuwenclaw.schema.hook_event import GatewayHookEvents
 from jiuwenclaw.schema.hooks_context import GatewayChatHookContext
-from jiuwenclaw.extensions.registry import ExtensionRegistry
 from jiuwenclaw.utils import FileTransferStartParams
 
 logger = logging.getLogger(__name__)
@@ -610,7 +609,8 @@ class MessageHandler(ABC):
             req_method=msg.req_method.value if msg.req_method is not None else None,
             params=params,
         )
-
+        # 插件必须延迟引用
+        from jiuwenclaw.extensions.registry import ExtensionRegistry
         await ExtensionRegistry.get_instance().trigger(GatewayHookEvents.BEFORE_CHAT_REQUEST, ctx)
 
     async def _process_non_stream_request(self, msg: "Message", env: "E2AEnvelope") -> None:
