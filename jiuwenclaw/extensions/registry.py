@@ -3,6 +3,7 @@ from typing import Any, Callable
 from openjiuwen.core.runner.callback.framework import AsyncCallbackFramework
 
 from jiuwenclaw.extensions.callback_compat import unregister_callback_sync
+from jiuwenclaw.extensions.extension_tool_entry import ExtensionLocalToolEntry
 from jiuwenclaw.gateway.agent_client import AgentServerClient
 from jiuwenclaw.extensions.sdk.agent_server_client import AgentServerClientExtension
 from jiuwenclaw.extensions.sdk.crypto_utility import CryptoUtility
@@ -23,6 +24,7 @@ class ExtensionRegistry:
         self._crypto_tool: CryptoUtility | None = None
         self.callback_framework = callback_framework
         self._config = ExtensionConfig(config=config, logger=logger)
+        self._extension_local_tool_entries: list[ExtensionLocalToolEntry] = []
 
     @classmethod
     def get_instance(cls) -> "ExtensionRegistry":
@@ -69,6 +71,46 @@ class ExtensionRegistry:
     def get_crypto_provider(self) -> CryptoProvider | None:
         ext = self._crypto_tool
         return ext.get_crypto() if ext is not None else None
+
+    @property
+    def extension_local_tool_entries(self) -> list[ExtensionLocalToolEntry]:
+        return self._extension_local_tool_entries
+
+    def register_tool(
+        self,
+        name: str,
+        description: str,
+        input_params: dict[str, Any],
+        func: Callable[..., Any],
+        *,
+        source_id: str = "extension",
+    ) -> None:
+        """登记扩展本地工具
+
+        Args:
+            name: 工具名（与内置工具冲突时将在 create_instance 合并阶段跳过并打日志）。
+            description: 工具说明。
+            input_params: 与 ToolCard 一致的入参 schema 字典。
+            func: 同步调用实现；返回值需可被框架序列化为工具结果。
+            source_id: 扩展标识，用于生成稳定 ToolCard.id 与日志。
+        """
+        n = (name or "").strip()
+        if not n:
+            raise ValueError("register_tool: name must be non-empty")
+        sid = (source_id or "").strip() or "extension"
+        if not isinstance(input_params, dict):
+            raise TypeError("register_tool: input_params must be a dict")
+        if not callable(func):
+            raise TypeError("register_tool: func must be callable")
+        self._extension_local_tool_entries.append(
+            ExtensionLocalToolEntry(
+                name=n,
+                description=description or "",
+                input_params=input_params,
+                func=func,
+                source_id=sid,
+            )
+        )
 
     def register(
         self,

@@ -21,3 +21,4 @@ class ExtensionMetadata:
 class ExtensionConfig:
     config: dict[str, Any]
     logger: Any
+

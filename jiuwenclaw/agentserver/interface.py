@@ -517,6 +517,9 @@ class JiuWenClaw:
                 self._instance.ability_manager.add(cron_tool.card)
         except Exception as exc:
             logger.error("[JiuWenClaw] 定时工具加载失败， reason=%s", exc)
+
+        self._register_extension_tools()
+
         # ---- 权限引擎初始化 ----
         permissions_cfg = config_base.get("permissions", {})
         init_permission_engine(permissions_cfg)
@@ -616,6 +619,58 @@ class JiuWenClaw:
             channel_id=cron_context_channel,
             session_id=ctx.session_id,
         )
+
+    def _register_extension_tools(self) -> None:
+        """将 ExtensionRegistry 登记的扩展本地工具挂到 Runner 与 ability_manager。"""
+        if self._instance is None:
+            return
+        try:
+            from jiuwenclaw.extensions.registry import ExtensionRegistry
+            from jiuwenclaw.extensions.sdk.local_tool_builder import make_extension_tools
+
+            ext_reg = ExtensionRegistry.get_instance()
+            existing_ext_tool_names: set[str] = {
+                ab.name
+                for ab in self._instance.ability_manager.list()
+                if isinstance(ab, ToolCard)
+            }
+            for ext_tool in make_extension_tools(ext_reg.extension_local_tool_entries):
+                tname = ext_tool.card.name
+                tid = ext_tool.card.id
+                if tname in existing_ext_tool_names:
+                    logger.warning(
+                        "[JiuWenClaw] extension tool name conflicts with existing tool, skip: %s",
+                        tname,
+                    )
+                    continue
+                try:
+                    if Runner.resource_mgr.get_tool(tid):
+                        logger.warning(
+                            "[JiuWenClaw] extension tool id already in resource_mgr, skip: %s",
+                            tid,
+                        )
+                        continue
+                except Exception as exc:
+                    logger.debug(
+                        "[JiuWenClaw] extension tool get_tool probe failed for %s, will try add: %s",
+                        tid,
+                        exc,
+                    )
+                try:
+                    Runner.resource_mgr.add_tool(ext_tool)
+                    self._instance.ability_manager.add(ext_tool.card)
+                    existing_ext_tool_names.add(tname)
+                    logger.info(
+                        "[JiuWenClaw] extension tool add success, name : %s", tname,
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        "[JiuWenClaw] extension tool register failed (%s): %s",
+                        tname,
+                        exc,
+                    )
+        except RuntimeError:
+            logger.warning("[JiuWenClaw] ExtensionRegistry unavailable, skip extension tools")
 
     async def _register_runtime_tools(self, ctx: RuntimeToolContext) -> None:
         """Register per-request tools for current agent execution.
