@@ -40,11 +40,11 @@ from jiuwenclaw.agentserver.permissions.checker import TOOL_PERMISSION_CHANNEL_I
 from jiuwenclaw.schema.events import AgentServerEvents
 from jiuwenclaw.schema.hooks_context import MemoryHookContext
 from jiuwenclaw.agentserver.tools.browser_tools import register_browser_runtime_mcp_server
-from jiuwenclaw.agentserver.tools.audio_tools import (
-    audio_question_answering,
-    audio_metadata,
-)
-from jiuwenclaw.agentserver.tools.image_tools import visual_question_answering
+# from jiuwenclaw.agentserver.tools.audio_tools import (
+#     audio_question_answering,
+#     audio_metadata,
+# )
+# from jiuwenclaw.agentserver.tools.image_tools import visual_question_answering
 from jiuwenclaw.agentserver.tools.mcp_toolkits import get_mcp_tools
 from jiuwenclaw.agentserver.tools.todo_toolkits import TaskStatus, TodoToolkit
 from jiuwenclaw.agentserver.tools.memory_tools import (
@@ -59,7 +59,7 @@ from jiuwenclaw.agentserver.tools.task_tools import (
     get_task_tools,
     _is_task_memory_enabled,
 )
-from jiuwenclaw.agentserver.tools.video_tools import video_understanding
+# from jiuwenclaw.agentserver.tools.video_tools import video_understanding
 from jiuwenclaw.agentserver.tools.xiaoyi_phone_tools import (
     get_user_location,
     create_note, search_notes, modify_note,
@@ -378,19 +378,19 @@ class JiuWenClaw:
                 logger.warning("[JiuWenClaw] task memory tools registration failed: %s", exc)
 
         # add video_understanding tool
-        has_video_key = any([
-            os.environ.get("VIDEO_API_KEY"),
-            os.environ.get("ZHIPU_API_KEY"),
-        ])
-        if has_video_key:
-            try:
-                if not Runner.resource_mgr.get_tool(video_understanding.card.id):
-                    Runner.resource_mgr.add_tool(video_understanding)
-                self._instance.ability_manager.add(video_understanding.card)
-                self._video_tool_registered = True
-            except Exception as exc:
-                self._video_tool_registered = False
-                logger.warning("[JiuWenClaw] video_understanding tool registration failed: %s", exc)
+        # has_video_key = any([
+        #     os.environ.get("VIDEO_API_KEY"),
+        #     os.environ.get("ZHIPU_API_KEY"),
+        # ])
+        # if has_video_key:
+        #     try:
+                # if not Runner.resource_mgr.get_tool(video_understanding.card.id):
+                #     Runner.resource_mgr.add_tool(video_understanding)
+                # self._instance.ability_manager.add(video_understanding.card)
+                # self._video_tool_registered = True
+            # except Exception as exc:
+            #     self._video_tool_registered = False
+            #     logger.warning("[JiuWenClaw] video_understanding tool registration failed: %s", exc)
 
         for mcp_tool in get_mcp_tools():
             if mcp_tool.card.name == "mcp_paid_search":
@@ -427,45 +427,45 @@ class JiuWenClaw:
             logger.warning("[JiuWenClaw] browser MCP registration skipped: %s", exc)
 
         # add vision tools (直接注册方式)
-        has_vision_key = any([
-            os.environ.get("VISION_API_KEY"),
-            os.environ.get("API_KEY"),
-            os.environ.get("GEMINI_API_KEY"),
-        ])
-        if has_vision_key:
-            try:
-                for tool in [visual_question_answering]:
-                    Runner.resource_mgr.add_tool(tool)
-                    self._instance.ability_manager.add(tool.card)
-                self._vision_mcp_registered = True
-                logger.info("[JiuWenClaw] vision tools registered successfully")
-            except Exception as exc:
-                logger.warning("[JiuWenClaw] vision tools registration skipped: %s", exc)
-
-        # add audio tools (直接注册方式)
-        has_audio_key = any([
-            os.environ.get("AUDIO_API_KEY"),
-            os.environ.get("API_KEY"),
-        ])
-        has_acr_key = all([
-            os.environ.get("ACR_ACCESS_KEY"),
-            os.environ.get("ACR_ACCESS_SECRET"),
-        ])
-        audio_tools_to_register = []
-        if has_audio_key:
-            audio_tools_to_register.append(audio_question_answering)
-        if has_acr_key:
-            audio_tools_to_register.append(audio_metadata)
+        # has_vision_key = any([
+        #     os.environ.get("VISION_API_KEY"),
+        #     os.environ.get("API_KEY"),
+        #     os.environ.get("GEMINI_API_KEY"),
+        # ])
+        # if has_vision_key:
+        #     try:
+        #         for tool in [visual_question_answering]:
+        #             Runner.resource_mgr.add_tool(tool)
+        #             self._instance.ability_manager.add(tool.card)
+        #         self._vision_mcp_registered = True
+        #         logger.info("[JiuWenClaw] vision tools registered successfully")
+        #     except Exception as exc:
+        #         logger.warning("[JiuWenClaw] vision tools registration skipped: %s", exc)
+        #
+        # # add audio tools (直接注册方式)
+        # has_audio_key = any([
+        #     os.environ.get("AUDIO_API_KEY"),
+        #     os.environ.get("API_KEY"),
+        # ])
+        # has_acr_key = all([
+        #     os.environ.get("ACR_ACCESS_KEY"),
+        #     os.environ.get("ACR_ACCESS_SECRET"),
+        # ])
+        # audio_tools_to_register = []
+        # if has_audio_key:
+        #     audio_tools_to_register.append(audio_question_answering)
+        # if has_acr_key:
+        #     audio_tools_to_register.append(audio_metadata)
         
-        if audio_tools_to_register:
-            try:
-                for tool in audio_tools_to_register:
-                    Runner.resource_mgr.add_tool(tool)
-                    self._instance.ability_manager.add_tool(tool.card)
-                self._audio_mcp_registered = True
-                logger.info("[JiuWenClaw] audio tools registered successfully")
-            except Exception as exc:
-                logger.warning("[JiuWenClaw] audio tools registration skipped: %s", exc)
+        # if audio_tools_to_register:
+        #     try:
+        #         for tool in audio_tools_to_register:
+        #             Runner.resource_mgr.add_tool(tool)
+        #             self._instance.ability_manager.add_tool(tool.card)
+        #         self._audio_mcp_registered = True
+        #         logger.info("[JiuWenClaw] audio tools registered successfully")
+        #     except Exception as exc:
+        #         logger.warning("[JiuWenClaw] audio tools registration skipped: %s", exc)
 
         # add device-side plugins (xiaoyi phone tools)
         config_base = get_config()
@@ -615,6 +615,7 @@ class JiuWenClaw:
             elif channel == "wecom":
                 cron_controller.set_target_channel(CronTargetChannel.WECOM)
             elif channel == "xiaoyi":
+                mode = "agent"
                 cron_controller.set_target_channel(CronTargetChannel.XIAOYI)
             elif channel in ("web", "sess"):
                 cron_controller.set_target_channel(CronTargetChannel.WEB)
@@ -739,120 +740,120 @@ class JiuWenClaw:
 
         logger.info("[JiuWenClaw] Checking multimodal API keys...")
         
-        video_api_key = os.environ.get("VIDEO_API_KEY")
-        zhipu_api_key = os.environ.get("ZHIPU_API_KEY")
-        has_video_key = any([
-            video_api_key,
-            zhipu_api_key,
-        ])
-        logger.info(
-            "[JiuWenClaw] Video API key check: VIDEO_API_KEY=%s (valid=%s), ZHIPU_API_KEY=%s (valid=%s), "
-            "has_video_key=%s",
-            video_api_key[:20] + "..." if video_api_key else None,
-            bool(video_api_key),
-            zhipu_api_key[:20] + "..." if zhipu_api_key else None,
-            bool(zhipu_api_key),
-            has_video_key,
-        )
+        # video_api_key = os.environ.get("VIDEO_API_KEY")
+        # zhipu_api_key = os.environ.get("ZHIPU_API_KEY")
+        # has_video_key = any([
+        #     video_api_key,
+        #     zhipu_api_key,
+        # ])
+        # logger.info(
+        #     "[JiuWenClaw] Video API key check: VIDEO_API_KEY=%s (valid=%s), ZHIPU_API_KEY=%s (valid=%s), "
+        #     "has_video_key=%s",
+        #     video_api_key[:20] + "..." if video_api_key else None,
+        #     bool(video_api_key),
+        #     zhipu_api_key[:20] + "..." if zhipu_api_key else None,
+        #     bool(zhipu_api_key),
+        #     has_video_key,
+        # )
         
-        if has_video_key:
-            try:
-                if not Runner.resource_mgr.get_tool(video_understanding.card.id):
-                    Runner.resource_mgr.add_tool(video_understanding)
-                self._instance.ability_manager.add(video_understanding.card)
-                logger.info("[JiuWenClaw] Registered video_understanding tool")
-            except Exception as exc:
-                logger.warning("[JiuWenClaw] ensure video_understanding tool failed: %s", exc)
-        else:
-            try:
-                self._instance.ability_manager.remove(video_understanding.card.name)
-                logger.info("[JiuWenClaw] Unregistered video_understanding tool")
-            except Exception as exc:
-                logger.debug("[JiuWenClaw] unregister video_understanding tool failed (tool may not exist): %s", exc)
+        # if has_video_key:
+        #     try:
+        #         if not Runner.resource_mgr.get_tool(video_understanding.card.id):
+        #             Runner.resource_mgr.add_tool(video_understanding)
+        #         self._instance.ability_manager.add(video_understanding.card)
+        #         logger.info("[JiuWenClaw] Registered video_understanding tool")
+        #     except Exception as exc:
+        #         logger.warning("[JiuWenClaw] ensure video_understanding tool failed: %s", exc)
+        # else:
+        #     try:
+        #         self._instance.ability_manager.remove(video_understanding.card.name)
+        #         logger.info("[JiuWenClaw] Unregistered video_understanding tool")
+        #     except Exception as exc:
+        #         logger.debug("[JiuWenClaw] unregister video_understanding tool failed (tool may not exist): %s", exc)
 
-        vision_api_key = os.environ.get("VISION_API_KEY")
-        api_key = os.environ.get("API_KEY")
-        gemini_api_key = os.environ.get("GEMINI_API_KEY")
-        has_vision_key = any([
-            vision_api_key,
-            api_key,
-            gemini_api_key,
-        ])
-        logger.info(
-            "[JiuWenClaw] Vision API key check: VISION_API_KEY=%s (valid=%s), API_KEY=%s (valid=%s), "
-            "GEMINI_API_KEY=%s (valid=%s), has_vision_key=%s",
-            vision_api_key[:20] + "..." if vision_api_key else None,
-            bool(vision_api_key),
-            api_key[:20] + "..." if api_key else None,
-            bool(api_key),
-            gemini_api_key[:20] + "..." if gemini_api_key else None,
-            bool(gemini_api_key),
-            has_vision_key,
-        )
+        # vision_api_key = os.environ.get("VISION_API_KEY")
+        # api_key = os.environ.get("API_KEY")
+        # gemini_api_key = os.environ.get("GEMINI_API_KEY")
+        # has_vision_key = any([
+        #     vision_api_key,
+        #     api_key,
+        #     gemini_api_key,
+        # ])
+        # logger.info(
+        #     "[JiuWenClaw] Vision API key check: VISION_API_KEY=%s (valid=%s), API_KEY=%s (valid=%s), "
+        #     "GEMINI_API_KEY=%s (valid=%s), has_vision_key=%s",
+        #     vision_api_key[:20] + "..." if vision_api_key else None,
+        #     bool(vision_api_key),
+        #     api_key[:20] + "..." if api_key else None,
+        #     bool(api_key),
+        #     gemini_api_key[:20] + "..." if gemini_api_key else None,
+        #     bool(gemini_api_key),
+        #     has_vision_key,
+        # )
         
-        if has_vision_key:
-            try:
-                for tool in [visual_question_answering]:
-                    if not Runner.resource_mgr.get_tool(tool.card.id):
-                        Runner.resource_mgr.add_tool(tool)
-                    self._instance.ability_manager.add(tool.card)
-                logger.info("[JiuWenClaw] Registered vision tools")
-            except Exception as exc:
-                logger.warning("[JiuWenClaw] ensure vision tools failed: %s", exc)
-        else:
-            try:
-                for tool in [visual_question_answering]:
-                    self._instance.ability_manager.remove(tool.card.name)
-                logger.info("[JiuWenClaw] Unregistered vision tools")
-            except Exception as exc:
-                logger.debug("[JiuWenClaw] unregister vision tools failed (tools may not exist): %s", exc)
+        # if has_vision_key:
+        #     try:
+        #         for tool in [visual_question_answering]:
+        #             if not Runner.resource_mgr.get_tool(tool.card.id):
+        #                 Runner.resource_mgr.add_tool(tool)
+        #             self._instance.ability_manager.add(tool.card)
+        #         logger.info("[JiuWenClaw] Registered vision tools")
+        #     except Exception as exc:
+        #         logger.warning("[JiuWenClaw] ensure vision tools failed: %s", exc)
+        # else:
+        #     try:
+        #         for tool in [visual_question_answering]:
+        #             self._instance.ability_manager.remove(tool.card.name)
+        #         logger.info("[JiuWenClaw] Unregistered vision tools")
+        #     except Exception as exc:
+        #         logger.debug("[JiuWenClaw] unregister vision tools failed (tools may not exist): %s", exc)
 
-        audio_api_key = os.environ.get("AUDIO_API_KEY")
-        api_key_for_audio = os.environ.get("API_KEY")
-        acr_access_key = os.environ.get("ACR_ACCESS_KEY")
-        acr_access_secret = os.environ.get("ACR_ACCESS_SECRET")
-        has_audio_key = any([
-            audio_api_key,
-            api_key_for_audio,
-        ])
-        has_acr_key = all([
-            acr_access_key,
-            acr_access_secret,
-        ])
-        logger.info(
-            "[JiuWenClaw] Audio API key check: AUDIO_API_KEY=%s (valid=%s), API_KEY=%s (valid=%s), "
-            "ACR_ACCESS_KEY=%s (valid=%s), ACR_ACCESS_SECRET=%s (valid=%s), has_audio_key=%s, has_acr_key=%s",
-            audio_api_key[:20] + "..." if audio_api_key else None,
-            bool(audio_api_key),
-            api_key_for_audio[:20] + "..." if api_key_for_audio else None,
-            bool(api_key_for_audio),
-            acr_access_key[:20] + "..." if acr_access_key else None,
-            bool(acr_access_key),
-            acr_access_secret[:20] + "..." if acr_access_secret else None,
-            bool(acr_access_secret),
-            has_audio_key,
-            has_acr_key,
-        )
-        audio_tools_to_register = []
-        if has_audio_key:
-            audio_tools_to_register.append(audio_question_answering)
-        if has_acr_key:
-            audio_tools_to_register.append(audio_metadata)
-        
-        if audio_tools_to_register:
-            try:
-                for tool in audio_tools_to_register:
-                    if not Runner.resource_mgr.get_tool(tool.card.id):
-                        Runner.resource_mgr.add_tool(tool)
-                    self._instance.ability_manager.add(tool.card)
-            except Exception as exc:
-                logger.warning("[JiuWenClaw] ensure audio tools failed: %s", exc)
-        else:
-            try:
-                for tool in [audio_question_answering, audio_metadata]:
-                    self._instance.ability_manager.remove(tool.card.name)
-            except Exception as exc:
-                logger.debug("[JiuWenClaw] unregister audio tools failed (tools may not exist): %s", exc)
+        # audio_api_key = os.environ.get("AUDIO_API_KEY")
+        # api_key_for_audio = os.environ.get("API_KEY")
+        # acr_access_key = os.environ.get("ACR_ACCESS_KEY")
+        # acr_access_secret = os.environ.get("ACR_ACCESS_SECRET")
+        # has_audio_key = any([
+        #     audio_api_key,
+        #     api_key_for_audio,
+        # ])
+        # has_acr_key = all([
+        #     acr_access_key,
+        #     acr_access_secret,
+        # ])
+        # logger.info(
+        #     "[JiuWenClaw] Audio API key check: AUDIO_API_KEY=%s (valid=%s), API_KEY=%s (valid=%s), "
+        #     "ACR_ACCESS_KEY=%s (valid=%s), ACR_ACCESS_SECRET=%s (valid=%s), has_audio_key=%s, has_acr_key=%s",
+        #     audio_api_key[:20] + "..." if audio_api_key else None,
+        #     bool(audio_api_key),
+        #     api_key_for_audio[:20] + "..." if api_key_for_audio else None,
+        #     bool(api_key_for_audio),
+        #     acr_access_key[:20] + "..." if acr_access_key else None,
+        #     bool(acr_access_key),
+        #     acr_access_secret[:20] + "..." if acr_access_secret else None,
+        #     bool(acr_access_secret),
+        #     has_audio_key,
+        #     has_acr_key,
+        # )
+        # audio_tools_to_register = []
+        # if has_audio_key:
+        #     audio_tools_to_register.append(audio_question_answering)
+        # if has_acr_key:
+        #     audio_tools_to_register.append(audio_metadata)
+        #
+        # if audio_tools_to_register:
+        #     try:
+        #         for tool in audio_tools_to_register:
+        #             if not Runner.resource_mgr.get_tool(tool.card.id):
+        #                 Runner.resource_mgr.add_tool(tool)
+        #             self._instance.ability_manager.add(tool.card)
+        #     except Exception as exc:
+        #         logger.warning("[JiuWenClaw] ensure audio tools failed: %s", exc)
+        # else:
+        #     try:
+        #         for tool in [audio_question_answering, audio_metadata]:
+        #             self._instance.ability_manager.remove(tool.card.name)
+        #     except Exception as exc:
+        #         logger.debug("[JiuWenClaw] unregister audio tools failed (tools may not exist): %s", exc)
 
         system_prompt = build_system_prompt(
             mode=mode,

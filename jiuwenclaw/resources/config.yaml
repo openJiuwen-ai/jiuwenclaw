@@ -14,7 +14,7 @@ logging:
   full: INFO
 
 memory:
-  enabled: true
+  enabled: false
   mode: local
 
 models:
