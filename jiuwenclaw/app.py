@@ -64,6 +64,7 @@ from jiuwenclaw.config import (
     update_browser_in_config,
     update_preferred_language_in_config,
     update_context_engine_enabled_in_config,
+    update_memory_enabled_in_config,
     update_permissions_enabled_in_config,
     update_updater_in_config,
 )
@@ -179,7 +180,7 @@ _CONFIG_SET_ENV_MAP = {
 CONFIG_KEYS = tuple(_CONFIG_SET_ENV_MAP.keys())
 
 # 来自 config.yaml 的配置项（前端 param 名 -> config.yaml 路径）
-_CONFIG_YAML_KEYS = frozenset({"context_engine_enabled", "permissions_enabled"})
+_CONFIG_YAML_KEYS = frozenset({"context_engine_enabled", "memory_enabled", "permissions_enabled"})
 
 
 async def _clear_agent_config_cache(agent_client=None) -> None:
@@ -293,10 +294,13 @@ def _register_web_handlers(
                     payload[key] = get_crypto_provider().decrypt(val)
             ctx_cfg = (raw.get("react") or {}).get("context_engine_config") or {}
             payload["context_engine_enabled"] = "true" if ctx_cfg.get("enabled", False) else "false"
+            mem_cfg = raw.get("memory") or {}
+            payload["memory_enabled"] = "true" if mem_cfg.get("enabled", True) else "false"
             perm_cfg = raw.get("permissions") or {}
             payload["permissions_enabled"] = "true" if perm_cfg.get("enabled", False) else "false"
         except Exception:  # noqa: BLE001
             payload.setdefault("context_engine_enabled", "false")
+            payload.setdefault("memory_enabled", "true")
             payload.setdefault("permissions_enabled", "false")
         await channel.send_response(ws, req_id, ok=True, payload=payload)
 
@@ -367,6 +371,8 @@ def _register_web_handlers(
             try:
                 if param_key == "context_engine_enabled":
                     update_context_engine_enabled_in_config(parsed)
+                elif param_key == "memory_enabled":
+                    update_memory_enabled_in_config(parsed)
                 elif param_key == "permissions_enabled":
                     update_permissions_enabled_in_config(parsed)
                 yaml_updated.append(param_key)

@@ -204,6 +204,15 @@ def update_permissions_enabled_in_config(value: bool) -> None:
     _dump_yaml_round_trip(_CONFIG_YAML_PATH, data)
 
 
+def update_memory_enabled_in_config(value: bool) -> None:
+    """更新 memory.enabled（记忆系统开关）并写回。"""
+    data = _load_yaml_round_trip(_CONFIG_YAML_PATH)
+    if "memory" not in data:
+        data["memory"] = {}
+    data["memory"]["enabled"] = value
+    _dump_yaml_round_trip(_CONFIG_YAML_PATH, data)
+
+
 def update_updater_in_config(updates: dict[str, Any]) -> None:
     """只更新 updater 段并写回。"""
     data = _load_yaml_round_trip(_CONFIG_YAML_PATH)

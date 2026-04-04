@@ -31,6 +31,7 @@ class TaskAddParams:
     description: Optional[str] = None
     query: Optional[str] = None
     label: Optional[str] = None
+    tools_used: Optional[List[Dict[str, Any]]] = None
 
 
 # Path for persisting task_add entries
@@ -265,6 +266,28 @@ async def experience_retrieve(
         return {"status": "error", "error": str(exc), "memory_string": "", "retrieved_memory": []}
 
 
+def _format_trajectory_feedback(entry: Dict[str, Any]) -> str:
+    """Build a feedback string for a trajectory entry, including tool outcomes."""
+    parts = [f"section={entry.get('section', 'general')}"]
+    tools = entry.get("tools_used")
+    if tools:
+        for t in tools:
+            if isinstance(t, dict):
+                name = t.get("tool", "unknown")
+                status = t.get("status", "unknown")
+                error = t.get("error", "")
+                note = t.get("note", "")
+                line = f"{name}:{status}"
+                if error:
+                    line += f"({error})"
+                if note:
+                    line += f"[{note}]"
+                parts.append(line)
+            else:
+                parts.append(str(t))
+    return "; ".join(parts)
+
+
 @tool(
     name="experience_learn",
     description=(
@@ -272,7 +295,12 @@ async def experience_retrieve(
         "reusable memory. Call this once before the final reply — it both saves the new entry "
         "and summarizes everything learned so far. "
         "Pass all fields inside a `params` object: "
-        "{content, section, when_to_use, title, description, query, label}."
+        "{content, section, when_to_use, title, description, query, label, tools_used}. "
+        "Include tools_used as a list of objects describing each tool call outcome this turn, "
+        "e.g. tools_used=[{\"tool\": \"web_search\", \"status\": \"success\"}, "
+        "{\"tool\": \"write_memory\", \"status\": \"failed\", \"error\": \"permission denied\", "
+        "\"note\": \"fell back to in-chat reply\"}]. "
+        "Always record failed tool calls — these are the most valuable learning signals."
     ),
 )
 async def experience_learn(params: TaskAddParams, matts: str = "none") -> Dict[str, Any]:
@@ -300,8 +328,26 @@ async def experience_learn(params: TaskAddParams, matts: str = "none") -> Dict[s
     # Step 1: add_memory via service (if available)
     if svc is not None:
         try:
+            content_for_service = params.content
+            if params.tools_used:
+                tool_lines = []
+                for t in params.tools_used:
+                    if isinstance(t, dict):
+                        status = t.get("status", "unknown")
+                        name = t.get("tool", "unknown")
+                        error = t.get("error", "")
+                        note = t.get("note", "")
+                        line = f"  - {name}: {status}"
+                        if error:
+                            line += f" | error: {error}"
+                        if note:
+                            line += f" | note: {note}"
+                        tool_lines.append(line)
+                    else:
+                        tool_lines.append(f"  - {t}: unknown")
+                content_for_service += "\n\nTool outcomes:\n" + "\n".join(tool_lines)
             request = AddMemoryRequest(
-                content=params.content,
+                content=content_for_service,
                 query=params.query,
                 when_to_use=params.when_to_use,
                 title=params.title,
@@ -338,6 +384,8 @@ async def experience_learn(params: TaskAddParams, matts: str = "none") -> Dict[s
             entry["query"] = params.query
         if params.label is not None:
             entry["label"] = params.label
+        if params.tools_used is not None:
+            entry["tools_used"] = params.tools_used
         existing.setdefault("entries", []).append(entry)
         _connector.save_to_file(_TASK_DATA_PATH, existing)
     except Exception as persist_exc:
@@ -366,7 +414,7 @@ async def experience_learn(params: TaskAddParams, matts: str = "none") -> Dict[s
         {
             "query": e.get("content", ""),
             "response": e.get("content", ""),
-            "feedback": f"section={e.get('section', 'general')}",
+            "feedback": _format_trajectory_feedback(e),
         }
         for e in raw_entries
     ]

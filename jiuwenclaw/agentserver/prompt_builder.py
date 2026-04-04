@@ -5,6 +5,7 @@ import os
 from datetime import datetime, timezone, timedelta
 from typing import Optional
 
+from jiuwenclaw.agentserver.tools.task_tools import _is_task_memory_enabled
 from jiuwenclaw.utils import USER_WORKSPACE_DIR
 
 
@@ -121,6 +122,15 @@ def _memory_prompt(language: str, is_cron: bool = False) -> str:
     if language == "zh":
         sections = []
 
+        _zh_exp_workflow = (
+            "\n**任务记忆两步流程：**\n"
+            "- 开始前：调用 `experience_retrieve` 检索相关历史经验\n"
+            "- 输出回复前：调用 `experience_learn` 存储本次关键发现并自动提炼记忆\n"
+        ) if _is_task_memory_enabled() else ""
+        _zh_exp_retrieve_item = (
+            "5. 调用 `experience_retrieve` — 从任务记忆库检索与当前问题相关的历史经验\n"
+        ) if _is_task_memory_enabled() else ""
+
         memory_prompt = """## 持久化存储体系
 
 每轮对话均从空白状态启动。跨会话的信息持久化依赖于工作区文件系统。记录悄悄进行就好，不需要让用户感知到。
@@ -160,12 +170,7 @@ def _memory_prompt(language: str, is_cron: bool = False) -> str:
 6. **其他信息（others）**：当用户提到任何细节或信息时，或每次文件操作后，自动调用 write_memory 使用 append=true 参数追加记录至 memory/YYYY-MM-DD.md。即便信息不完全明确或确定，也要立即记录下来。
     包括但不限于：用户提供的联系人信息、项目细节、任务指令、偏好、文件路径、存储位置、任何可提高效率的信息等。发现的项目背景、技术细节、工作流程等也要写入 memory/ 目录下的相关文件。）
 
-
-**任务记忆两步流程（每轮对话均须执行）：**
-- 开始前：调用 `experience_retrieve` 检索相关历史经验
-- 输出回复前：调用 `experience_learn` 存储本次关键发现并自动提炼记忆
-
-
+""" + _zh_exp_workflow + """
 
 #### 历史检索机制
 
@@ -177,13 +182,8 @@ def _memory_prompt(language: str, is_cron: bool = False) -> str:
    - 搜索查询应包含问题中的关键信息（人名、日期、事件关键词）
    - 如果搜索结果不足，尝试用不同的关键词再次搜索
    - 基于检索到的记忆信息回答问题，不要依赖预训练知识
-
-#### 任务记忆工作流（在给出最终回复之前执行）
-
-在输出最终回复文本之前，**必须先调用以下工具**（不要告知用户）：
-1. 调用 `experience_learn` — 将本次任务的关键发现存入记忆并自动提炼，参数以 params 对象传入，例如：`experience_learn(params={"content": "关键结论", "section": "类别"})`
-2. 完成后，再输出最终文字回复
 """
+        memory_prompt += _zh_exp_retrieve_item
         sections.append(memory_prompt)
         sections.append("")
 
@@ -223,6 +223,24 @@ def _memory_prompt(language: str, is_cron: bool = False) -> str:
         return "\n".join(sections)
     else:
         sections = []
+        _en_exp_workflow = (
+            "\n**Two-step task memory flow:**\n"
+            "- Before starting: call `experience_retrieve` to retrieve relevant historical experience\n"
+            "- Before outputting the reply: call `experience_learn` to store key findings"
+            " from this turn and automatically refine memory\n"
+        ) if _is_task_memory_enabled() else ""
+        _en_exp_retrieve_item = (
+            "1. Call `experience_retrieve` — retrieve relevant past task experience"
+            " for the current question\n"
+        ) if _is_task_memory_enabled() else ""
+        _en_exp_learn_item = (
+            "1. Call `experience_learn` to store key findings from this task and auto-refine"
+            " memory, passing arguments via params object, for example:"
+            " `experience_learn(params={\"content\": \"key conclusion\","
+            " \"section\": \"category\", \"tools_used\": [{\"tool\": \"web_search\","
+            " \"status\": \"success\"}, {\"tool\": \"write_memory\", \"status\": \"failed\","
+            " \"error\": \"reason\", \"note\": \"fallback taken\"}]})`\n"
+        ) if _is_task_memory_enabled() else ""
 
         memory_prompt = """## Persistent Storage System
 
@@ -251,6 +269,7 @@ When valuable information appears during the conversation, classify it and store
 2. **Episodic Memory (`episodic_memory`)**: Specific events or important decisions, such as assigned tasks, project progress, or notable incidents.
    - **Storage**: Write to `memory/YYYY-MM-DD.md`.
 
+### Operation Trail Automatic Recording (Write to Session Log)
 3. **Semantic Memory (`semantic_memory`)**: Long-term background knowledge, technical details, and tool-related local configs (SSH, camera, etc.).
    - **Storage**: Write to `MEMORY.md`.
 
@@ -263,17 +282,15 @@ When valuable information appears during the conversation, classify it and store
 6. **Other Information (`others`)**: Whenever the user mentions any detail, or after each file operation, automatically call `write_memory` with `append=true` to append to `memory/YYYY-MM-DD.md` immediately, even if information is not fully clear yet.
    This includes but is not limited to contact info, project details, task instructions, preferences, file paths, storage locations, and any efficiency-improving details. Discovered project background, technical details, and workflows should also be written to relevant files under `memory/`.
 
-**Two-step task memory flow (must run every turn):**
-- Before starting: call `experience_retrieve` to retrieve relevant historical experience
-- Before outputting the reply: call `experience_learn` to store key findings from this turn and automatically refine memory
+""" + _en_exp_workflow + """
 
 #### History Retrieval Mechanism
 
 **Before responding to any message, it is recommended to execute:**
-1. Read `USER.md` — Confirm the user being served
-2. Read `memory/YYYY-MM-DD.md` (today + previous day) to get context
-3. **Main session only:** Read `MEMORY.md`
-4. **Historical information retrieval (mandatory):** Before answering any question about historical events, dates, people, or past conversations, you must call `memory_search` first
+""" + _en_exp_retrieve_item + """2. Read `USER.md` — Confirm the user being served
+3. Read `memory/YYYY-MM-DD.md` (today + previous day) to get context
+4. **Main session only:** Read `MEMORY.md`
+5. **Historical information retrieval (mandatory):** Before answering any question about historical events, dates, people, or past conversations, you must call `memory_search` first
    - Search query should include key information from the question (names, dates, event keywords)
    - If results are insufficient, retry with different keywords
    - Answer based on retrieved memory results, not pretraining knowledge
@@ -281,8 +298,7 @@ When valuable information appears during the conversation, classify it and store
 #### Task Memory Workflow (execute before final reply)
 
 Before outputting final response text, **you must call the following tools first** (do not tell the user):
-1. Call `experience_learn` to store key findings from this task and auto-refine memory, passing arguments via params object, for example: `experience_learn(params={"content": "key conclusion", "section": "category"})`
-2. Only after completion, output the final text reply
+""" + _en_exp_learn_item + """2. Only after completion, output the final text reply
 """
         sections.append(memory_prompt)
         sections.append("")
@@ -349,7 +365,12 @@ def _tool_prompt(mode, language: str, include_memory_tools: bool = True) -> str:
         else:
             todo_prompt = ""
 
-        memory_tools_prompt = """### 记忆系统
+        _exp_rows_zh = (
+            "| `experience_retrieve` | 从任务记忆库中检索与当前任务相关的历史经验（跨会话） |\n"
+            "| `experience_learn` | 记录关键发现并自动将任务条目提炼为可复用记忆 |\n"
+            "| `experience_clear` | 清空 task-data.json 中存储的所有任务记忆 |\n"
+        ) if _is_task_memory_enabled() else ""
+        memory_tools_prompt = ("""### 记忆系统
 
 | 工具名称 | 功能说明 |
 |---------|---------|
@@ -358,17 +379,12 @@ def _tool_prompt(mode, language: str, include_memory_tools: bool = True) -> str:
 | `read_memory` | 读取记忆文件 |
 | `write_memory` | 写入或追加记忆 |
 | `edit_memory` | 精确编辑记忆内容 |
-| `experience_retrieve` | 从任务记忆库中检索与当前任务相关的历史经验（跨会话） |
-| `experience_learn` | 记录关键发现并自动将任务条目提炼为可复用记忆 |
-| `experience_clear` | 清空 task-data.json 中存储的所有任务记忆 |
+ """ + _exp_rows_zh + "\n") if include_memory_tools else ""
 
-""" if include_memory_tools else ""
-
-        search_tools_section = """| `mcp_free_search` | 免费搜索（DuckDuckGo） |
-"""
-        if has_paid_search:
-            search_tools_section += """| `mcp_paid_search` | 付费搜索（Perplexity/SERPER/JINA） |
-"""
+        search_tools_section = """"""
+#         if has_paid_search:
+#             search_tools_section += """| `mcp_paid_search` | 付费搜索（Perplexity/SERPER/JINA） |
+# """
         search_tools_section += """| `mcp_fetch_webpage` | 抓取网页文本内容 |"""
 
         return f"""## 工具
@@ -459,8 +475,12 @@ def _tool_prompt(mode, language: str, include_memory_tools: bool = True) -> str:
 """
         else:
             todo_prompt = ""
-
-        memory_tools_prompt = """### Memory System
+        _exp_rows_en = (
+            "| `experience_retrieve` | Retrieve relevant past task memories and lessons (cross-session) |\n"
+            "| `experience_learn` | Record a key finding and consolidate task entries into reusable memory |\n"
+            "| `experience_clear` | Wipe all stored task memory from task-data.json |\n"
+        ) if _is_task_memory_enabled() else ""
+        memory_tools_prompt = ("""### Memory System
 
 | Tool Name | Description |
 |-----------|-------------|
@@ -469,17 +489,12 @@ def _tool_prompt(mode, language: str, include_memory_tools: bool = True) -> str:
 | `read_memory` | Read a memory file |
 | `write_memory` | Write or append to memory |
 | `edit_memory` | Edit memory content precisely |
-| `experience_retrieve` | Retrieve relevant past task memories and lessons (cross-session) |
-| `experience_learn` | Record a key finding and consolidate task entries into reusable memory |
-| `experience_clear` | Wipe all stored task memory from task-data.json |
+""" + _exp_rows_en + "\n") if include_memory_tools else ""
 
-""" if include_memory_tools else ""
-
-        search_tools_section = """| `mcp_free_search` | Free search (DuckDuckGo) |
-"""
-        if has_paid_search:
-            search_tools_section += """| `mcp_paid_search` | Paid search (Perplexity/SERPER/JINA) |
-"""
+        search_tools_section = """"""
+#         if has_paid_search:
+#             search_tools_section += """| `mcp_paid_search` | Paid search (Perplexity/SERPER/JINA) |
+# """
         search_tools_section += """| `mcp_fetch_webpage` | Fetch webpage text content |"""
 
         return f"""# Tools
@@ -857,7 +872,10 @@ After completing a system task, notify the user via a reply.
 """
 
 
-def _start_prompt(language: str) -> str:
+def _start_prompt(language: str, memory_enabled: bool = True) -> str:
+    _memory_row_zh = f"\n| `{MEMORY_DIR}` | 持久化记忆 | 将其视为你记忆的一部分，随时查阅 |" if memory_enabled else ""
+    _memory_row_en = f"\n| `{MEMORY_DIR}` | Persistent memory | Treat it as part of your memory; consult it anytime |" if memory_enabled else ""
+
     if language == "zh":
         return f"""你是一个私人小助手，由 JiuwenClaw 创建并在 JiuwenClaw 项目下运行。你的任务是像一个有温度的人类助手一样与用户互动，让用户感到自然、舒适。
 
@@ -870,8 +888,7 @@ def _start_prompt(language: str) -> str:
 | 路径 | 用途 | 操作建议 |
 |------|------|----------|
 | `{CONFIG_DIR}` | 配置信息 | 不要轻易改动，错误配置可能导致异常 |
-| `{HOME_DIR}` | 身份与任务信息 | 可适当更新，以更好地服务用户 |
-| `{MEMORY_DIR}` | 持久化记忆 | 将其视为你记忆的一部分，随时查阅 |
+| `{HOME_DIR}` | 身份与任务信息 | 可适当更新，以更好地服务用户 |{_memory_row_zh}
 | `{SKILL_DIR}` | 技能库 | 可随时翻阅、调用，不可修改 |
 | `{WORKSPACE_DIR}` | 工作区 | 你的安全屋，可自由读写，注意不要影响系统其他部分 |
 
@@ -896,8 +913,7 @@ Everything starts from the `.jiuwenclaw` directory.
 | Path | Purpose | Guidelines |
 |------|---------|------------|
 | `{CONFIG_DIR}` | Configuration | Do not modify lightly; bad config can cause failures |
-| `{HOME_DIR}` | Identity and task info | You may update this to better serve your user |
-| `{MEMORY_DIR}` | Persistent memory | Treat it as part of your memory; consult it anytime |
+| `{HOME_DIR}` | Identity and task info | You may update this to better serve your user |{_memory_row_en}
 | `{SKILL_DIR}` | Skill library | Read and invoke freely; do not modify |
 | `{WORKSPACE_DIR}` | Workspace | Your safe space; read and write freely, but avoid affecting other parts of the system |
 
@@ -917,6 +933,7 @@ def build_system_prompt(
     channel: str,
     memory_block: Optional[str] = None,
     memory_mode: str = "local",
+    memory_enabled: bool = True,
 ) -> str:
     """Build system prompt for the agent.
 
@@ -926,12 +943,13 @@ def build_system_prompt(
         channel: channel
         memory_block: externally injected memory content for cloud mode
         memory_mode: local or cloud
+        memory_enabled: whether memory system is enabled
 
     Returns:
         System prompt string
     """
 
-    system_prompt = _start_prompt(language) + '\n'
+    system_prompt = _start_prompt(language, memory_enabled=memory_enabled) + '\n'
     # Inject current time so the model can reason about "now"
     # system_prompt += _time_prompt(language) + '\n'
     system_prompt += _context_prompt(language) + '\n'
@@ -939,15 +957,15 @@ def build_system_prompt(
     system_prompt += _tool_prompt(
         mode,
         language,
-        include_memory_tools=(memory_mode != "cloud"),
+        include_memory_tools=(memory_enabled and memory_mode != "cloud"),
     ) + '\n'
     system_prompt += _workspace_prompt(language) + '\n'
-    if memory_mode == "local":
+    if memory_enabled and memory_mode == "local":
         if channel == "corn":
             system_prompt += _memory_prompt(language, is_cron=True) + '\n'
         else:
             system_prompt += _memory_prompt(language, is_cron=False) + '\n'
-    elif memory_block:
+    elif memory_enabled and memory_block:
         title = "## 记忆内容:" if language == "zh" else "## Memory content:"
         system_prompt += f"{title}\n\n{memory_block.strip()}\n"
 
