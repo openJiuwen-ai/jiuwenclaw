@@ -213,6 +213,16 @@ def update_memory_enabled_in_config(value: bool) -> None:
     _dump_yaml_round_trip(_CONFIG_YAML_PATH, data)
 
 
+def update_proactive_memory_in_config(value: bool) -> None:
+    """更新 memory.proactive_memory（主动记忆开关）并写回。"""
+    data = _load_yaml_round_trip(_CONFIG_YAML_PATH)
+    if "memory" not in data:
+        data["memory"] = {}
+    data["memory"]["proactive_memory"] = value
+    _dump_yaml_round_trip(_CONFIG_YAML_PATH, data)
+
+
+
 def update_updater_in_config(updates: dict[str, Any]) -> None:
     """只更新 updater 段并写回。"""
     data = _load_yaml_round_trip(_CONFIG_YAML_PATH)

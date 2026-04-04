@@ -204,6 +204,20 @@ def is_memory_enabled(config: Optional[Dict[str, Any]] = None) -> bool:
     return memory_config.get("enabled", True)
 
 
+def is_proactive_memory(config: Optional[Dict[str, Any]] = None) -> bool:
+    """Check if proactive memory is enabled.
+
+    When True (default): agent auto-records everything and searches before every response.
+    When False: agent only records/searches when user explicitly asks.
+    """
+    if config is not None:
+        memory_config = config.get("memory", {})
+    else:
+        cfg = _load_config()
+        memory_config = cfg.get("memory", {})
+    return memory_config.get("proactive_memory", True)
+
+
 def get_memory_mode(config: Optional[Dict[str, Any]] = None) -> str:
     """读取 ``memory.mode``：``cloud`` 或 ``local``（默认）。"""
     memory_cfg = (config or {}).get("memory", {})

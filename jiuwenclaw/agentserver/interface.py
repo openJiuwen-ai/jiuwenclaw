@@ -80,7 +80,7 @@ from jiuwenclaw.agentserver.tools.multimodal_config import (
     apply_video_model_config_from_yaml,
 )
 from jiuwenclaw.agentserver.memory.compaction import ContextCompactionManager
-from jiuwenclaw.agentserver.memory.config import clear_config_cache, get_memory_mode, is_memory_enabled
+from jiuwenclaw.agentserver.memory.config import clear_config_cache, get_memory_mode, is_memory_enabled, is_proactive_memory
 from jiuwenclaw.agentserver.memory import clear_memory_manager_cache
 from jiuwenclaw.agentserver.permissions import (
     init_permission_engine,
@@ -211,6 +211,7 @@ class JiuWenClaw:
             model_configs = model_configs.copy()
         memory_mode = get_memory_mode(config)
         memory_enabled = is_memory_enabled(config)
+        proactive_memory = is_proactive_memory(config)
         react_config = {**react_config, **model_configs.get("default", {}).copy(), "prompt_template": [
             {"role": "system", "content": build_system_prompt(
                 mode="plan",
@@ -218,6 +219,7 @@ class JiuWenClaw:
                 channel="web",
                 memory_mode=memory_mode,
                 memory_enabled=memory_enabled,
+                proactive_memory=proactive_memory,
             )}
         ]}
 
@@ -855,6 +857,7 @@ class JiuWenClaw:
         #     except Exception as exc:
         #         logger.debug("[JiuWenClaw] unregister audio tools failed (tools may not exist): %s", exc)
 
+        proactive_memory = is_proactive_memory(config_base)
         system_prompt = build_system_prompt(
             mode=mode,
             language=config_base.get("preferred_language", "zh"),
@@ -862,6 +865,7 @@ class JiuWenClaw:
             memory_block=memory_block,
             memory_mode=memory_mode,
             memory_enabled=memory_enabled,
+            proactive_memory=proactive_memory,
         )
         logger.debug(
             "[JiuWenClaw] system prompt built: memory_mode=%s channel=%s\n%s",
