@@ -189,13 +189,18 @@ def create_memory_settings(
     return settings
 
 
-def is_memory_enabled() -> bool:
+def is_memory_enabled(config: Optional[Dict[str, Any]] = None) -> bool:
     """Check if memory is enabled.
-    
-    Reads from config.yaml memory.enabled setting.
+
+    Args:
+        config: Optional config dict. If provided, reads from it directly
+                (avoids stale cache). Otherwise reads from config.yaml.
     """
-    config = _load_config()
-    memory_config = config.get("memory", {})
+    if config is not None:
+        memory_config = config.get("memory", {})
+    else:
+        cfg = _load_config()
+        memory_config = cfg.get("memory", {})
     return memory_config.get("enabled", True)
 
 

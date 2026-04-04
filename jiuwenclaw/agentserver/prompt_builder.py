@@ -418,16 +418,6 @@ def _tool_prompt(mode, language: str, include_memory_tools: bool = True) -> str:
 |---------|---------|
 | `view_file` | 查看文本文件内容 |
 
-### 记忆系统
- 	 
-| 工具名称 | 功能说明 |
-|---------|---------|
-| `memory_search` | 搜索历史记忆 |
-| `memory_get` | 读取记忆文件指定行 |
-| `read_memory` | 读取记忆文件 |
-| `write_memory` | 写入或追加记忆 |
-| `edit_memory` | 精确编辑记忆内容 |
-{_exp_rows_zh}
 {memory_tools_prompt}\
 ### 定时任务
 
@@ -537,17 +527,6 @@ When the user requests code/scripts/config/tests that must be delivered **as fil
 | Tool Name | Description |
 |-----------|-------------|
 | `view_file` | View text file contents |
-
-### Memory System
- 	 
-| Tool Name | Description |
-|-----------|-------------|
-| `memory_search` | Search historical memories |
-| `memory_get` | Read specified lines from a memory file |
-| `read_memory` | Read a memory file |
-| `write_memory` | Write or append to memory |
-| `edit_memory` | Edit memory content precisely |
-{_exp_rows_en}
 
 {memory_tools_prompt}\
 ### Scheduled Tasks
@@ -893,7 +872,10 @@ After completing a system task, notify the user via a reply.
 """
 
 
-def _start_prompt(language: str) -> str:
+def _start_prompt(language: str, memory_enabled: bool = True) -> str:
+    _memory_row_zh = f"\n| `{MEMORY_DIR}` | 持久化记忆 | 将其视为你记忆的一部分，随时查阅 |" if memory_enabled else ""
+    _memory_row_en = f"\n| `{MEMORY_DIR}` | Persistent memory | Treat it as part of your memory; consult it anytime |" if memory_enabled else ""
+
     if language == "zh":
         return f"""你是一个私人小助手，由 JiuwenClaw 创建并在 JiuwenClaw 项目下运行。你的任务是像一个有温度的人类助手一样与用户互动，让用户感到自然、舒适。
 
@@ -906,8 +888,7 @@ def _start_prompt(language: str) -> str:
 | 路径 | 用途 | 操作建议 |
 |------|------|----------|
 | `{CONFIG_DIR}` | 配置信息 | 不要轻易改动，错误配置可能导致异常 |
-| `{HOME_DIR}` | 身份与任务信息 | 可适当更新，以更好地服务用户 |
-| `{MEMORY_DIR}` | 持久化记忆 | 将其视为你记忆的一部分，随时查阅 |
+| `{HOME_DIR}` | 身份与任务信息 | 可适当更新，以更好地服务用户 |{_memory_row_zh}
 | `{SKILL_DIR}` | 技能库 | 可随时翻阅、调用，不可修改 |
 | `{WORKSPACE_DIR}` | 工作区 | 你的安全屋，可自由读写，注意不要影响系统其他部分 |
 
@@ -932,8 +913,7 @@ Everything starts from the `.jiuwenclaw` directory.
 | Path | Purpose | Guidelines |
 |------|---------|------------|
 | `{CONFIG_DIR}` | Configuration | Do not modify lightly; bad config can cause failures |
-| `{HOME_DIR}` | Identity and task info | You may update this to better serve your user |
-| `{MEMORY_DIR}` | Persistent memory | Treat it as part of your memory; consult it anytime |
+| `{HOME_DIR}` | Identity and task info | You may update this to better serve your user |{_memory_row_en}
 | `{SKILL_DIR}` | Skill library | Read and invoke freely; do not modify |
 | `{WORKSPACE_DIR}` | Workspace | Your safe space; read and write freely, but avoid affecting other parts of the system |
 
@@ -953,6 +933,7 @@ def build_system_prompt(
     channel: str,
     memory_block: Optional[str] = None,
     memory_mode: str = "local",
+    memory_enabled: bool = True,
 ) -> str:
     """Build system prompt for the agent.
 
@@ -962,12 +943,13 @@ def build_system_prompt(
         channel: channel
         memory_block: externally injected memory content for cloud mode
         memory_mode: local or cloud
+        memory_enabled: whether memory system is enabled
 
     Returns:
         System prompt string
     """
 
-    system_prompt = _start_prompt(language) + '\n'
+    system_prompt = _start_prompt(language, memory_enabled=memory_enabled) + '\n'
     # Inject current time so the model can reason about "now"
     # system_prompt += _time_prompt(language) + '\n'
     system_prompt += _context_prompt(language) + '\n'
@@ -975,15 +957,15 @@ def build_system_prompt(
     system_prompt += _tool_prompt(
         mode,
         language,
-        include_memory_tools=(memory_mode != "cloud"),
+        include_memory_tools=(memory_enabled and memory_mode != "cloud"),
     ) + '\n'
     system_prompt += _workspace_prompt(language) + '\n'
-    if memory_mode == "local":
+    if memory_enabled and memory_mode == "local":
         if channel == "corn":
             system_prompt += _memory_prompt(language, is_cron=True) + '\n'
         else:
             system_prompt += _memory_prompt(language, is_cron=False) + '\n'
-    elif memory_block:
+    elif memory_enabled and memory_block:
         title = "## 记忆内容:" if language == "zh" else "## Memory content:"
         system_prompt += f"{title}\n\n{memory_block.strip()}\n"
 

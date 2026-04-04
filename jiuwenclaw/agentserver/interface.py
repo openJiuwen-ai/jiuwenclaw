@@ -80,7 +80,7 @@ from jiuwenclaw.agentserver.tools.multimodal_config import (
     apply_video_model_config_from_yaml,
 )
 from jiuwenclaw.agentserver.memory.compaction import ContextCompactionManager
-from jiuwenclaw.agentserver.memory.config import clear_config_cache, get_memory_mode
+from jiuwenclaw.agentserver.memory.config import clear_config_cache, get_memory_mode, is_memory_enabled
 from jiuwenclaw.agentserver.memory import clear_memory_manager_cache
 from jiuwenclaw.agentserver.permissions import (
     init_permission_engine,
@@ -210,12 +210,14 @@ class JiuWenClaw:
         else:
             model_configs = model_configs.copy()
         memory_mode = get_memory_mode(config)
+        memory_enabled = is_memory_enabled(config)
         react_config = {**react_config, **model_configs.get("default", {}).copy(), "prompt_template": [
             {"role": "system", "content": build_system_prompt(
                 mode="plan",
                 language=config.get("preferred_language", "en"),
                 channel="web",
                 memory_mode=memory_mode,
+                memory_enabled=memory_enabled,
             )}
         ]}
 
@@ -349,7 +351,8 @@ class JiuWenClaw:
             logger.warning("[JiuWenClaw] ReActAgent has no _skill_util; skip skill registration.")
 
         memory_mode = get_memory_mode(config_base)
-        if memory_mode == "local":
+        memory_enabled = is_memory_enabled(config_base)
+        if memory_enabled and memory_mode == "local":
             await init_memory_manager_async(
                 workspace_dir=self._workspace_dir,
                 agent_id=self._agent_name,
@@ -360,9 +363,11 @@ class JiuWenClaw:
             self._memory_tools_registered = True
         else:
             self._memory_tools_registered = False
+            if not memory_enabled:
+                logger.info("[JiuWenClaw] Memory system is disabled via config")
 
         # add task memory tools (TaskMemoryService skill)
-        if _is_task_memory_enabled():
+        if memory_enabled and _is_task_memory_enabled():
             try:
                 for tool in get_task_tools():
                     Runner.resource_mgr.add_tool(tool)
@@ -399,7 +404,7 @@ class JiuWenClaw:
                 self._instance.ability_manager.add(mcp_tool.card)
         self._mcp_tools_registered = True
 
-        if memory_mode == "local" and self._compaction_manager is None:
+        if memory_enabled and memory_mode == "local" and self._compaction_manager is None:
             memory_mgr = await get_memory_manager(
                 agent_id=self._agent_name,
                 workspace_dir=self._workspace_dir
@@ -410,7 +415,7 @@ class JiuWenClaw:
                     threshold=8000,
                     keep_recent=10
                 )
-        elif memory_mode != "local":
+        elif not memory_enabled or memory_mode != "local":
             self._compaction_manager = None
 
         try:
@@ -686,8 +691,9 @@ class JiuWenClaw:
                 self._instance.ability_manager.add(tool.card)
 
         memory_mode = get_memory_mode(config_base)
+        memory_enabled = is_memory_enabled(config_base)
         memory_block = ""
-        if memory_mode == "local":
+        if memory_enabled and memory_mode == "local":
             if not self._memory_tools_registered:
                 await init_memory_manager_async(
                     workspace_dir=self._workspace_dir,
@@ -697,7 +703,7 @@ class JiuWenClaw:
                     Runner.resource_mgr.add_tool(tool)
                     self._instance.ability_manager.add(tool.card)
                 self._memory_tools_registered = True
-        else:
+        elif memory_enabled and memory_mode != "local":
             self._memory_tools_registered = False
             mem_ctx = MemoryHookContext(
                 session_id=session_id or "default",
@@ -711,8 +717,17 @@ class JiuWenClaw:
 
             await ExtensionRegistry.get_instance().trigger(AgentServerEvents.MEMORY_BEFORE_CHAT, mem_ctx)
             memory_block = "\n\n".join(b for b in mem_ctx.memory_blocks if b)
+        else:
+            # memory disabled: remove any previously registered memory tools
+            if self._memory_tools_registered:
+                for tool in [memory_search, memory_get, write_memory, edit_memory, read_memory]:
+                    try:
+                        self._instance.ability_manager.remove(tool.card.name)
+                    except Exception:
+                        pass
+            self._memory_tools_registered = False
 
-        if not self._task_memory_tools_registered and _is_task_memory_enabled():
+        if not self._task_memory_tools_registered and memory_enabled and _is_task_memory_enabled():
             try:
                 for tool in get_task_tools():
                     if not Runner.resource_mgr.get_tool(tool.card.id):
@@ -845,6 +860,7 @@ class JiuWenClaw:
             channel=channel,
             memory_block=memory_block,
             memory_mode=memory_mode,
+            memory_enabled=memory_enabled,
         )
         logger.debug(
             "[JiuWenClaw] system prompt built: memory_mode=%s channel=%s\n%s",
@@ -1218,6 +1234,7 @@ class JiuWenClaw:
         )
         config_base = get_config()
         memory_mode = get_memory_mode(config_base)
+        memory_enabled = is_memory_enabled(config_base)
         inputs = {
             "conversation_id": request.session_id,
             "query": build_user_prompt(
@@ -1228,7 +1245,7 @@ class JiuWenClaw:
             ),
         }
 
-        if memory_mode == "local" and self._compaction_manager:
+        if memory_enabled and memory_mode == "local" and self._compaction_manager:
             self._compaction_manager.add_message("user", query)
 
             memory_mgr = await get_memory_manager(
@@ -1288,7 +1305,7 @@ class JiuWenClaw:
 
         content = result if isinstance(result, (str, dict)) else str(result)
 
-        if memory_mode == "local" and self._compaction_manager and content:
+        if memory_enabled and memory_mode == "local" and self._compaction_manager and content:
             if isinstance(content, dict):
                 content_str = content.get("output", str(content))
             else:
@@ -1305,7 +1322,7 @@ class JiuWenClaw:
             content=assistant_content,
             timestamp=time.time(),
         )
-        if memory_mode == "cloud":
+        if memory_enabled and memory_mode == "cloud":
             if isinstance(content, dict):
                 content_str = content.get("output", str(content))
             else:
@@ -1378,6 +1395,7 @@ class JiuWenClaw:
         )
         config_base = get_config()
         memory_mode = get_memory_mode(config_base)
+        memory_enabled = is_memory_enabled(config_base)
         inputs = {
             "conversation_id": request.session_id,
             "query": build_user_prompt(
@@ -1389,7 +1407,7 @@ class JiuWenClaw:
         }
 
         # supplement 任务：读取现有 todo 待办，拼入 query 让 agent 知道有未完成的任务
-        if memory_mode == "local" and self._compaction_manager:
+        if memory_enabled and memory_mode == "local" and self._compaction_manager:
             self._compaction_manager.add_message("user", query)
             memory_mgr = await get_memory_manager(
                 agent_id=self._agent_name,
@@ -1501,7 +1519,7 @@ class JiuWenClaw:
             logger.info("[JiuWenClaw] 流式处理被中断: request_id=%s", rid)
             raise
 
-        if memory_mode == "cloud":
+        if memory_enabled and memory_mode == "cloud":
             assistant_message = final_answer_content or "".join(final_answer_chunks)
             after_ctx = MemoryHookContext(
                 session_id=request.session_id or "default",
