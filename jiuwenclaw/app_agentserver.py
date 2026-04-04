@@ -40,6 +40,7 @@ async def _run(host: str, port: int) -> None:
     from openjiuwen.core.runner import Runner
     from jiuwenclaw.gateway import AgentWebSocketServer
     from jiuwenclaw.extensions import ExtensionManager, ExtensionRegistry
+    from jiuwenclaw.telemetry import init_telemetry
 
     logger.info("[AgentServer] starting: ws://%s:%s", host, port)
 
@@ -55,6 +56,8 @@ async def _run(host: str, port: int) -> None:
     )
     await extension_manager.load_all_extensions()
     logger.info("[AgentServer] 扩展加载完成，共 %d 个", len(extension_manager.list_extensions()))
+
+    init_telemetry()
 
     server = AgentWebSocketServer.get_instance(
         host=host,
@@ -91,10 +94,6 @@ async def _run(host: str, port: int) -> None:
 
 
 def main() -> None:
-    from jiuwenclaw.telemetry import init_telemetry
-
-    init_telemetry()
-
     parser = argparse.ArgumentParser(
         prog="jiuwenclaw-agentserver",
         description="Start JiuwenClaw AgentServer (standalone process for Gateway to connect).",

@@ -90,8 +90,12 @@ async def load_all_extensions():
 
 
 async def _run(agent_server_url: str, web_host: str, web_port: int, web_path: str) -> None:
+    from jiuwenclaw.telemetry import init_telemetry
+
     # 插件必须提前加载, 否则会影响配置的加解密解析
     extension_registry = await load_all_extensions()
+
+    init_telemetry()
     from jiuwenclaw.channel import (
         DingTalkChannel,
         DingTalkConfig,
@@ -864,10 +868,6 @@ async def _run(agent_server_url: str, web_host: str, web_port: int, web_path: st
 
 
 def main() -> None:
-    from jiuwenclaw.telemetry import init_telemetry
-
-    init_telemetry()
-
     parser = argparse.ArgumentParser(
         prog="jiuwenclaw-gateway",
         description="Start JiuwenClaw Gateway + Channels (split deployment; connects to jiuwenclaw-agentserver).",

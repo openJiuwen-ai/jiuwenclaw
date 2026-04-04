@@ -24,10 +24,6 @@ load_dotenv(dotenv_path=get_env_file())
 
 
 def main() -> None:
-    from jiuwenclaw.telemetry import init_telemetry
-
-    init_telemetry()
-
     python = sys.executable
 
     agent = subprocess.Popen([python, "-m", "jiuwenclaw.app_agentserver"])

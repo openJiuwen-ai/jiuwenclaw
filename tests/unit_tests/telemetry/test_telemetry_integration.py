@@ -556,81 +556,89 @@ class TestInitTelemetryE2E:
     @staticmethod
     def test_init_with_console_exporter():
         import jiuwenclaw.telemetry as tel_mod
-        tel_mod._initialized = False
 
-        with patch.dict("os.environ", {
-            "OTEL_ENABLED": "true",
-            "OTEL_EXPORTER_TYPE": "console",
-            "OTEL_SERVICE_NAME": "test-jiuwenclaw",
-            "OTEL_SESSION_STUCK_THRESHOLD_MS": "1234",
-            "OTEL_SESSION_STUCK_CHECK_INTERVAL_S": "9",
-        }, clear=True):
-            with patch("jiuwenclaw.config.get_config", side_effect=Exception("no config")):
-                # Patch apply_instrumentors to avoid touching real classes
-                with patch("jiuwenclaw.telemetry.instrumentors.apply_instrumentors") as mock_instr:
-                    tel_mod.init_telemetry()
+        with patch.object(tel_mod, "_initialized", False):
+            with patch.dict("os.environ", {
+                "OTEL_ENABLED": "true",
+                "OTEL_EXPORTER_TYPE": "console",
+                "OTEL_SERVICE_NAME": "test-jiuwenclaw",
+                "OTEL_SESSION_STUCK_THRESHOLD_MS": "1234",
+                "OTEL_SESSION_STUCK_CHECK_INTERVAL_S": "9",
+            }, clear=True):
+                with patch("jiuwenclaw.config.get_config", side_effect=Exception("no config")):
+                    with patch(
+                        "jiuwenclaw.telemetry.provider._build_extension_provider_bundle",
+                        return_value=None,
+                    ):
+                        # Patch apply_instrumentors to avoid touching real classes
+                        with patch("jiuwenclaw.telemetry.instrumentors.apply_instrumentors") as mock_instr:
+                            tel_mod.init_telemetry()
 
-                    assert tel_mod._initialized is True
-                    mock_instr.assert_called_once_with(
-                        log_messages=True,
-                        session_stuck_threshold_ms=1234.0,
-                        session_stuck_check_interval_s=9.0,
-                    )
-
-        tel_mod._initialized = False
+                            assert tel_mod.is_telemetry_initialized() is True
+                            mock_instr.assert_called_once_with(
+                                log_messages=True,
+                                session_stuck_threshold_ms=1234.0,
+                                session_stuck_check_interval_s=9.0,
+                            )
 
     @staticmethod
     def test_init_disabled_has_zero_overhead():
         import jiuwenclaw.telemetry as tel_mod
-        tel_mod._initialized = False
 
-        with patch.dict("os.environ", {"OTEL_ENABLED": "false"}, clear=True):
-            with patch("jiuwenclaw.config.get_config", side_effect=Exception("no config")):
-                with patch("jiuwenclaw.telemetry.provider.init_providers") as mock_prov:
-                    with patch("jiuwenclaw.telemetry.instrumentors.apply_instrumentors") as mock_instr:
-                        tel_mod.init_telemetry()
-
-                        mock_prov.assert_not_called()
-                        mock_instr.assert_not_called()
-                        assert tel_mod._initialized is False
-
-        tel_mod._initialized = False
-
-    @staticmethod
-    def test_init_with_custom_provider_factory():
-        import jiuwenclaw.telemetry as tel_mod
-        from jiuwenclaw.telemetry.provider import ProviderBundle
-
-        tel_mod._initialized = False
-
-        fake_module = types.ModuleType("fake_provider_factory")
-
-        def build_providers():
-            return ProviderBundle(
-                tracer_provider=MagicMock(name="custom_tracer_provider"),
-                meter_provider=MagicMock(name="custom_meter_provider"),
-            )
-
-        fake_module.build_providers = build_providers
-
-        with patch.dict(sys.modules, {"fake_provider_factory": fake_module}):
-            with patch.dict("os.environ", {
-                "OTEL_ENABLED": "true",
-                "OTEL_PROVIDER_FACTORY": "fake_provider_factory:build_providers",
-            }, clear=True):
+        with patch.object(tel_mod, "_initialized", False):
+            with patch.dict("os.environ", {"OTEL_ENABLED": "false"}, clear=True):
                 with patch("jiuwenclaw.config.get_config", side_effect=Exception("no config")):
-                    with patch("jiuwenclaw.telemetry.provider.install_providers") as mock_install:
+                    with patch("jiuwenclaw.telemetry.provider.init_providers") as mock_prov:
                         with patch("jiuwenclaw.telemetry.instrumentors.apply_instrumentors") as mock_instr:
                             tel_mod.init_telemetry()
 
-                            mock_install.assert_called_once()
-                            mock_instr.assert_called_once_with(
-                                log_messages=True,
-                                session_stuck_threshold_ms=300000,
-                                session_stuck_check_interval_s=30,
-                            )
+                            mock_prov.assert_not_called()
+                            mock_instr.assert_not_called()
+                            assert tel_mod.is_telemetry_initialized() is False
 
-        tel_mod._initialized = False
+    @staticmethod
+    def test_init_with_registered_telemetry_provider_extension():
+        import jiuwenclaw.telemetry as tel_mod
+        from jiuwenclaw.extensions.registry import ExtensionRegistry
+        from jiuwenclaw.extensions.sdk.telemetry_provider import TelemetryProviderExtension
+        from jiuwenclaw.telemetry.provider import ProviderBundle
+
+        ExtensionRegistry.reset_instance()
+        try:
+            custom_tp = TracerProvider()
+            custom_mp = MeterProvider()
+
+            class FakeExt(TelemetryProviderExtension):
+                async def initialize(self, config):
+                    pass
+
+                def build_providers(self, cfg):
+                    return ProviderBundle(tracer_provider=custom_tp, meter_provider=custom_mp)
+
+                async def shutdown(self):
+                    return None
+
+            registry = ExtensionRegistry.create_instance(
+                callback_framework=MagicMock(),
+                config={},
+                logger=MagicMock(),
+            )
+            registry.register_telemetry_provider(FakeExt())
+
+            with patch.object(tel_mod, "_initialized", False):
+                with patch.dict("os.environ", {"OTEL_ENABLED": "true"}, clear=True):
+                    with patch("jiuwenclaw.config.get_config", side_effect=Exception("no config")):
+                        with patch("jiuwenclaw.telemetry.provider.install_providers") as mock_install:
+                            with patch("jiuwenclaw.telemetry.instrumentors.apply_instrumentors") as mock_instr:
+                                tel_mod.init_telemetry()
+
+                                mock_install.assert_called_once()
+                                bundle = mock_install.call_args[0][0]
+                                assert bundle.tracer_provider is custom_tp
+                                assert bundle.meter_provider is custom_mp
+                                mock_instr.assert_called_once()
+        finally:
+            ExtensionRegistry.reset_instance()
 
 
 # ---------------------------------------------------------------------------

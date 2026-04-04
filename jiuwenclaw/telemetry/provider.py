@@ -4,7 +4,6 @@
 
 from __future__ import annotations
 
-import importlib
 from dataclasses import dataclass
 from typing import Any
 
@@ -29,14 +28,8 @@ class ProviderBundle:
 
 
 def init_providers(cfg: TelemetryConfig) -> ProviderBundle:
-    """Initialize OTel providers using default config or a custom provider factory."""
-    if cfg.provider_factory:
-        factory = load_provider_factory(cfg.provider_factory)
-        bundle = _coerce_provider_bundle(factory())
-        if bundle.tracer_provider is None and bundle.meter_provider is None:
-            raise ValueError("Custom provider factory must return at least one provider")
-    else:
-        bundle = build_default_providers(cfg)
+    """Initialize OTel providers using default config or a registered extension."""
+    bundle = _build_extension_provider_bundle(cfg) or build_default_providers(cfg)
 
     install_providers(bundle)
     return bundle
@@ -69,21 +62,6 @@ def install_providers(bundle: ProviderBundle) -> None:
         metrics.set_meter_provider(bundle.meter_provider)
 
 
-def load_provider_factory(path: str):
-    """Load a custom provider factory from `module:function` path."""
-    module_name, sep, attr_name = path.rpartition(":")
-    if not sep or not module_name or not attr_name:
-        raise ValueError(
-            f"Invalid OTEL_PROVIDER_FACTORY '{path}', expected format 'module:function'"
-        )
-
-    module = importlib.import_module(module_name)
-    factory = getattr(module, attr_name, None)
-    if not callable(factory):
-        raise TypeError(f"Provider factory '{path}' is not callable")
-    return factory
-
-
 def _coerce_provider_bundle(value: Any) -> ProviderBundle:
     if isinstance(value, ProviderBundle):
         return value
@@ -91,11 +69,47 @@ def _coerce_provider_bundle(value: Any) -> ProviderBundle:
     tracer_provider = getattr(value, "tracer_provider", None)
     meter_provider = getattr(value, "meter_provider", None)
     if tracer_provider is None and meter_provider is None:
-        raise TypeError("Provider factory must return a ProviderBundle-like object")
+        raise TypeError("Telemetry provider extension must return a ProviderBundle-like object")
+
+    if tracer_provider is not None and not isinstance(tracer_provider, TracerProvider):
+        raise TypeError(
+            f"tracer_provider must be a TracerProvider instance, got {type(tracer_provider).__name__}"
+        )
+    if meter_provider is not None and not isinstance(meter_provider, MeterProvider):
+        raise TypeError(
+            f"meter_provider must be a MeterProvider instance, got {type(meter_provider).__name__}"
+        )
+
     return ProviderBundle(
         tracer_provider=tracer_provider,
         meter_provider=meter_provider,
     )
+
+
+def _build_extension_provider_bundle(cfg: TelemetryConfig) -> ProviderBundle | None:
+    try:
+        from jiuwenclaw.extensions.registry import ExtensionRegistry
+
+        registry = ExtensionRegistry.get_instance()
+    except RuntimeError:
+        return None
+
+    extension = registry.get_telemetry_provider_extension()
+    if extension is None:
+        return None
+
+    bundle = _coerce_provider_bundle(extension.build_providers(cfg))
+    if bundle.tracer_provider is None and bundle.meter_provider is None:
+        raise ValueError("TelemetryProviderExtension must return at least one provider")
+
+    from jiuwenclaw.utils import logger
+
+    try:
+        extension_name = extension.metadata.name or type(extension).__name__
+    except Exception:
+        extension_name = type(extension).__name__
+    logger.info("[Telemetry] 使用扩展 TelemetryProviderExtension: %s", extension_name)
+    return bundle
 
 
 def _build_tracer_provider(cfg: TelemetryConfig, resource: Resource) -> TracerProvider:

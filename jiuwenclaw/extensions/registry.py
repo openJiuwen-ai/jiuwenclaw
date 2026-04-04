@@ -1,14 +1,17 @@
-from typing import Any, Callable
+from typing import TYPE_CHECKING, Any, Callable
 
 from openjiuwen.core.runner.callback.framework import AsyncCallbackFramework
 
 from jiuwenclaw.extensions.callback_compat import unregister_callback_sync
 from jiuwenclaw.extensions.extension_tool_entry import ExtensionLocalToolEntry
-from jiuwenclaw.gateway.agent_client import AgentServerClient
 from jiuwenclaw.extensions.sdk.agent_server_client import AgentServerClientExtension
 from jiuwenclaw.extensions.sdk.crypto_utility import CryptoUtility
+from jiuwenclaw.extensions.sdk.telemetry_provider import TelemetryProviderExtension
 from jiuwenclaw.extensions.types import ExtensionConfig
-from jiuwenclaw.security.base_crypto import CryptoProvider
+
+if TYPE_CHECKING:
+    from jiuwenclaw.gateway.agent_client import AgentServerClient
+    from jiuwenclaw.security.base_crypto import CryptoProvider
 
 
 class ExtensionRegistry:
@@ -22,6 +25,7 @@ class ExtensionRegistry:
     ):
         self._agent_server_client: AgentServerClientExtension | None = None
         self._crypto_tool: CryptoUtility | None = None
+        self._telemetry_provider: TelemetryProviderExtension | None = None
         self.callback_framework = callback_framework
         self._config = ExtensionConfig(config=config, logger=logger)
         self._extension_local_tool_entries: list[ExtensionLocalToolEntry] = []
@@ -58,17 +62,23 @@ class ExtensionRegistry:
     def register_crypto_utility(self, extension: CryptoUtility) -> None:
         self._crypto_tool = extension
 
+    def register_telemetry_provider(self, extension: TelemetryProviderExtension) -> None:
+        self._telemetry_provider = extension
+
     def get_agent_server_client_extension(self) -> AgentServerClientExtension | None:
         return self._agent_server_client
 
-    def get_agent_server_client(self) -> AgentServerClient | None:
+    def get_agent_server_client(self) -> "AgentServerClient | None":
         ext = self._agent_server_client
         return ext.get_client() if ext is not None else None
 
     def get_crypto_utility_extension(self) -> CryptoUtility | None:
         return self._crypto_tool
 
-    def get_crypto_provider(self) -> CryptoProvider | None:
+    def get_telemetry_provider_extension(self) -> TelemetryProviderExtension | None:
+        return self._telemetry_provider
+
+    def get_crypto_provider(self) -> "CryptoProvider | None":
         ext = self._crypto_tool
         return ext.get_crypto() if ext is not None else None
 

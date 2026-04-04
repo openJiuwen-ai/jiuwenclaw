@@ -36,7 +36,6 @@ class TelemetryConfig:
     log_messages: bool = True       # record full message content in span events
     service_name: str = "jiuwenclaw"
     claw_id: str | None = None
-    provider_factory: str | None = None
     session_stuck_threshold_ms: float = 300000.0     # 5 min
     session_stuck_check_interval_s: float = 30.0     # check every 30s
 
@@ -217,10 +216,6 @@ def load_telemetry_config() -> TelemetryConfig:
         claw_id=_optional_str_env(
             "OTEL_CLAW_ID",
             yaml_cfg.get("claw_id"),
-        ),
-        provider_factory=_optional_str_env(
-            "OTEL_PROVIDER_FACTORY",
-            yaml_cfg.get("provider_factory"),
         ),
         session_stuck_threshold_ms=_float_env(
             "OTEL_SESSION_STUCK_THRESHOLD_MS",

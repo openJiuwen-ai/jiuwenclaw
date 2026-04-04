@@ -69,7 +69,6 @@ telemetry:
   headers: {}                       # 公共 OTLP headers，可被 traces/metrics 覆盖
   log_messages: true                # 是否在 span event 中记录完整消息内容
   service_name: jiuwenclaw
-  provider_factory:                 # 自定义 provider factory，格式：module:function
   traces:
     exporter:                       # trace exporter，默认回退到 telemetry.exporter
     endpoint:                       # trace endpoint，默认回退到 telemetry.endpoint

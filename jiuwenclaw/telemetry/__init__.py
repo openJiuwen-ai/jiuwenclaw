@@ -29,12 +29,11 @@ def init_telemetry() -> None:
 
     logger.info(
         "[Telemetry] Initializing: traces_exporter=%s, metrics_exporter=%s, "
-        "traces_endpoint=%s, metrics_endpoint=%s, provider_factory=%s, log_messages=%s",
+        "traces_endpoint=%s, metrics_endpoint=%s, log_messages=%s",
         cfg.traces_exporter,
         cfg.metrics_exporter,
         cfg.traces_endpoint,
         cfg.metrics_endpoint,
-        cfg.provider_factory or "-",
         cfg.log_messages,
     )
 

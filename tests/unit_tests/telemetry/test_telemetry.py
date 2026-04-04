@@ -104,7 +104,6 @@ class TestTelemetryConfig:
                 assert cfg.log_messages is True
                 assert cfg.service_name == "jiuwenclaw"
                 assert cfg.claw_id is None
-                assert cfg.provider_factory is None
 
     @staticmethod
     def test_env_vars_override():
@@ -121,7 +120,6 @@ class TestTelemetryConfig:
             "OTEL_LOG_MESSAGES": "false",
             "OTEL_SERVICE_NAME": "test-service",
             "OTEL_CLAW_ID": "gateway-sh-01",
-            "OTEL_PROVIDER_FACTORY": "custom.factory:build_providers",
         }
         with patch.dict("os.environ", env, clear=True):
             with patch("jiuwenclaw.config.get_config", side_effect=Exception("no config")):
@@ -141,7 +139,6 @@ class TestTelemetryConfig:
                 assert cfg.log_messages is False
                 assert cfg.service_name == "test-service"
                 assert cfg.claw_id == "gateway-sh-01"
-                assert cfg.provider_factory == "custom.factory:build_providers"
 
     @staticmethod
     def test_yaml_config_fallback():
@@ -155,7 +152,6 @@ class TestTelemetryConfig:
                 "log_messages": False,
                 "service_name": "yaml-service",
                 "claw_id": "agentserver-sh-01",
-                "provider_factory": "yaml.factory:build",
                 "traces": {
                     "exporter": "otlp",
                     "endpoint": "http://trace-yaml:4318",
@@ -182,7 +178,6 @@ class TestTelemetryConfig:
                 assert cfg.metrics_endpoint == "http://yaml:4317"
                 assert cfg.service_name == "yaml-service"
                 assert cfg.claw_id == "agentserver-sh-01"
-                assert cfg.provider_factory == "yaml.factory:build"
 
     @staticmethod
     def test_empty_claw_id_env_disables_yaml_fallback():
@@ -2106,37 +2101,45 @@ class TestProviderInitialization:
         assert metric_exporter._headers == {"Authorization": "Bearer metric"}
 
     @staticmethod
-    def test_init_providers_uses_custom_provider_factory():
+    def test_init_providers_uses_registered_telemetry_provider_extension():
+        from jiuwenclaw.extensions.registry import ExtensionRegistry
+        from jiuwenclaw.extensions.sdk.telemetry_provider import TelemetryProviderExtension
         from jiuwenclaw.telemetry.config import TelemetryConfig
         from jiuwenclaw.telemetry.provider import ProviderBundle, init_providers
+
+        ExtensionRegistry.reset_instance()
 
         tracer_provider = TracerProvider()
         meter_provider = MeterProvider()
 
-        fake_module = types.ModuleType("fake_provider_factory")
+        class FakeExt(TelemetryProviderExtension):
+            async def initialize(self, config):
+                pass
 
-        def build_providers():
-            return ProviderBundle(
-                tracer_provider=tracer_provider,
-                meter_provider=meter_provider,
-            )
-
-        fake_module.build_providers = build_providers
-
-        with patch.dict(sys.modules, {"fake_provider_factory": fake_module}):
-            with patch("jiuwenclaw.telemetry.provider.install_providers") as mock_install:
-                bundle = init_providers(
-                    TelemetryConfig(
-                        enabled=True,
-                        claw_id="custom-claw",
-                        provider_factory="fake_provider_factory:build_providers",
-                    )
+            def build_providers(self, cfg):
+                return ProviderBundle(
+                    tracer_provider=tracer_provider,
+                    meter_provider=meter_provider,
                 )
+
+            async def shutdown(self):
+                return None
+
+        registry = ExtensionRegistry.create_instance(
+            callback_framework=MagicMock(),
+            config={},
+            logger=MagicMock(),
+        )
+        registry.register_telemetry_provider(FakeExt())
+
+        with patch("jiuwenclaw.telemetry.provider.install_providers") as mock_install:
+            bundle = init_providers(TelemetryConfig(enabled=True))
 
         assert bundle.tracer_provider is tracer_provider
         assert bundle.meter_provider is meter_provider
-        assert bundle.tracer_provider.resource.attributes.get("jiuwenclaw.claw.id") != "custom-claw"
         mock_install.assert_called_once_with(bundle)
+
+        ExtensionRegistry.reset_instance()
 
 
 # ---------------------------------------------------------------------------
