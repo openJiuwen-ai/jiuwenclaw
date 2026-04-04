@@ -17,11 +17,12 @@ SKILL_DIR = USER_WORKSPACE_DIR / "agent" / "skills"
 WORKSPACE_DIR = USER_WORKSPACE_DIR / "agent" / "workspace"
 
 
-def _memory_prompt(language: str, is_cron: bool = False) -> str:
+def _memory_prompt(language: str, is_cron: bool = False, proactive_memory: bool = True) -> str:
     """Build system prompt for the agent.
     Args:
         language: language for the prompt
         is_cron: if True, use simplified prompt with only memory search/load (no memory writing)
+        proactive_memory: if False, only record/search when user explicitly asks
     """
     if is_cron:
         if language == "zh":
@@ -119,6 +120,68 @@ def _memory_prompt(language: str, is_cron: bool = False) -> str:
 
             return "\n".join(sections)
 
+    # ── passive memory mode (proactive_memory=False) ──
+    if not proactive_memory:
+        if language == "zh":
+            sections = []
+            memory_prompt = """## 持久化存储体系（被动模式）
+
+### 存储层级划分
+
+- **会话日志：** `memory/YYYY-MM-DD.md`
+- **用户画像：** `USER.md`
+- **知识沉淀：** `MEMORY.md`
+
+### 核心操作规范
+
+- 记忆工具（write_memory/edit_memory/read_memory）仅能操作 memory/ 目录下的文件
+- 更新 USER.md 或 MEMORY.md 时，必须先读取现有内容再执行修改
+- 已存在字段通过 `edit_memory` 更新，新字段通过 `write_memory` 追加
+
+### 使用原则
+
+- **仅在用户明确要求时记录**：当用户说"记住"、"记录"、"保存"时，调用 write_memory 或 edit_memory 完成存储
+- **仅在用户询问历史时搜索**：当用户要求"回忆"、"查找"以前的内容，或明确询问历史信息时，调用 memory_search 检索
+- **仅在需要时读取记忆文件**：当回答确实依赖历史上下文时才读取 USER.md、MEMORY.md 等文件
+- 记录信息时，根据内容类型选择存储位置：
+  - 用户身份/偏好 → `USER.md`
+  - 长期知识/配置 → `MEMORY.md`
+  - 事件/日常记录 → `memory/YYYY-MM-DD.md`
+
+"""
+            sections.append(memory_prompt)
+            return "\n".join(sections)
+        else:
+            sections = []
+            memory_prompt = """## Persistent Storage System (Passive Mode)
+
+### Storage Hierarchy
+
+- **Session Log:** `memory/YYYY-MM-DD.md`
+- **User Profile:** `USER.md`
+- **Knowledge Repository:** `MEMORY.md`
+
+### Core Operation Guidelines
+
+- Memory tools (write_memory/edit_memory/read_memory) can only operate on files in the `memory/` directory
+- When updating USER.md or MEMORY.md, existing content must be read first before making modifications
+- Existing fields should be updated via `edit_memory`, new fields via `write_memory`
+
+### Usage Principles
+
+- **Record only when the user explicitly asks**: When the user says "remember", "record", or "save", call write_memory or edit_memory to persist the information
+- **Search only when the user asks about history**: When the user requests to "recall" or "find" past content, or explicitly asks about historical information, call memory_search to retrieve it
+- **Read memory files only when needed**: Read USER.md, MEMORY.md, etc. only when the answer genuinely depends on historical context
+- When recording information, choose storage by content type:
+  - User identity/preferences → `USER.md`
+  - Long-term knowledge/config → `MEMORY.md`
+  - Events/daily records → `memory/YYYY-MM-DD.md`
+
+"""
+            sections.append(memory_prompt)
+            return "\n".join(sections)
+
+    # ── proactive memory mode (default) ──
     if language == "zh":
         sections = []
 
@@ -418,6 +481,8 @@ def _tool_prompt(mode, language: str, include_memory_tools: bool = True) -> str:
 |---------|---------|
 | `view_file` | 查看文本文件内容 |
 
+{_exp_rows_zh}
+
 {memory_tools_prompt}\
 ### 定时任务
 
@@ -527,6 +592,9 @@ When the user requests code/scripts/config/tests that must be delivered **as fil
 | Tool Name | Description |
 |-----------|-------------|
 | `view_file` | View text file contents |
+
+
+{_exp_rows_en}
 
 {memory_tools_prompt}\
 ### Scheduled Tasks
@@ -934,6 +1002,7 @@ def build_system_prompt(
     memory_block: Optional[str] = None,
     memory_mode: str = "local",
     memory_enabled: bool = True,
+    proactive_memory: bool = True,
 ) -> str:
     """Build system prompt for the agent.
 
@@ -944,6 +1013,7 @@ def build_system_prompt(
         memory_block: externally injected memory content for cloud mode
         memory_mode: local or cloud
         memory_enabled: whether memory system is enabled
+        proactive_memory: whether to proactively record/search memory
 
     Returns:
         System prompt string
@@ -964,7 +1034,7 @@ def build_system_prompt(
         if channel == "corn":
             system_prompt += _memory_prompt(language, is_cron=True) + '\n'
         else:
-            system_prompt += _memory_prompt(language, is_cron=False) + '\n'
+            system_prompt += _memory_prompt(language, is_cron=False, proactive_memory=proactive_memory) + '\n'
     elif memory_enabled and memory_block:
         title = "## 记忆内容:" if language == "zh" else "## Memory content:"
         system_prompt += f"{title}\n\n{memory_block.strip()}\n"

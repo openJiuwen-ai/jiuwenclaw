@@ -15,6 +15,7 @@ logging:
 
 memory:
   enabled: false
+  proactive_memory: false
   mode: local
 
 models:
