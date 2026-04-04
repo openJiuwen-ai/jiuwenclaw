@@ -418,6 +418,16 @@ def _tool_prompt(mode, language: str, include_memory_tools: bool = True) -> str:
 |---------|---------|
 | `view_file` | 查看文本文件内容 |
 
+### 记忆系统
+ 	 
+| 工具名称 | 功能说明 |
+|---------|---------|
+| `memory_search` | 搜索历史记忆 |
+| `memory_get` | 读取记忆文件指定行 |
+| `read_memory` | 读取记忆文件 |
+| `write_memory` | 写入或追加记忆 |
+| `edit_memory` | 精确编辑记忆内容 |
+{_exp_rows_zh}
 {memory_tools_prompt}\
 ### 定时任务
 
@@ -527,6 +537,17 @@ When the user requests code/scripts/config/tests that must be delivered **as fil
 | Tool Name | Description |
 |-----------|-------------|
 | `view_file` | View text file contents |
+
+### Memory System
+ 	 
+| Tool Name | Description |
+|-----------|-------------|
+| `memory_search` | Search historical memories |
+| `memory_get` | Read specified lines from a memory file |
+| `read_memory` | Read a memory file |
+| `write_memory` | Write or append to memory |
+| `edit_memory` | Edit memory content precisely |
+{_exp_rows_en}
 
 {memory_tools_prompt}\
 ### Scheduled Tasks
