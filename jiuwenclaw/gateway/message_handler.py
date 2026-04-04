@@ -233,7 +233,7 @@ class MessageHandler(ABC):
             params={},
             timestamp=time.time(),
             ok=True,
-            payload={"content": text},
+            payload={"content": text, "is_complete": True},
             event_type=EventType.CHAT_FINAL,
             metadata=user_infos['meta_data']
         )
