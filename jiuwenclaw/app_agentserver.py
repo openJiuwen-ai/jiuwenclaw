@@ -20,7 +20,12 @@ from dotenv import load_dotenv
 from openjiuwen.core.common.logging import LogManager
 
 from jiuwenclaw.jiuwen_core_patch import apply_openai_model_client_patch
-from jiuwenclaw.utils import get_user_workspace_dir, get_env_file, prepare_workspace, logger
+from jiuwenclaw.utils import (
+    get_user_workspace_dir,
+    get_env_file,
+    prepare_workspace,
+    logger,
+)
 
 apply_openai_model_client_patch()
 
@@ -37,26 +42,13 @@ load_dotenv(dotenv_path=get_env_file())
 
 
 async def _run(host: str, port: int) -> None:
-    from openjiuwen.core.runner import Runner
     from jiuwenclaw.gateway import AgentWebSocketServer
-    from jiuwenclaw.extensions import ExtensionManager, ExtensionRegistry
+    from jiuwenclaw.extensions.loader import load_all_extensions
     from jiuwenclaw.telemetry import init_telemetry
 
     logger.info("[AgentServer] starting: ws://%s:%s", host, port)
 
-    # ---------- 扩展系统初始化 ----------
-    callback_framework = Runner.callback_framework
-    extension_registry = ExtensionRegistry.create_instance(
-        callback_framework=callback_framework,
-        config={},
-        logger=logger,
-    )
-    extension_manager = ExtensionManager(
-        registry=extension_registry,
-    )
-    await extension_manager.load_all_extensions()
-    logger.info("[AgentServer] 扩展加载完成，共 %d 个", len(extension_manager.list_extensions()))
-
+    await load_all_extensions()
     init_telemetry()
 
     server = AgentWebSocketServer.get_instance(
@@ -124,4 +116,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

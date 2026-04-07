@@ -40,11 +40,13 @@ pnpm-debug.log*
 # IDE / Editor
 .vscode/
 .idea/
+*.iml
 *.swp
 *.swo
 .DS_Store
 .claude
 CLAUDE.md
+AGENTS.md
 workspace/agent-data.json
 
 # reference

@@ -91,7 +91,9 @@ class ExtensionLoader:
             except importlib.metadata.PackageNotFoundError:
                 pass
 
-            logger.info(f"[ExtensionLoader] 正在安装扩展 {root.name} 的依赖: {package_name}")
+            logger.info(
+                f"[ExtensionLoader] 正在安装扩展 {root.name} 的依赖: {package_name}"
+            )
             try:
                 if use_uv:
                     subprocess.check_call(
@@ -107,11 +109,17 @@ class ExtensionLoader:
                         stderr=subprocess.PIPE,
                         timeout=120,
                     )
-                logger.info(f"[ExtensionLoader] 扩展 {root.name} 依赖 {package} 安装成功")
+                logger.info(
+                    f"[ExtensionLoader] 扩展 {root.name} 依赖 {package} 安装成功"
+                )
             except subprocess.TimeoutExpired:
-                logger.error(f"[ExtensionLoader] 扩展 {root.name} 依赖 {package} 安装超时 (120秒)")
+                logger.error(
+                    f"[ExtensionLoader] 扩展 {root.name} 依赖 {package} 安装超时 (120秒)"
+                )
             except subprocess.CalledProcessError as e:
-                logger.error(f"[ExtensionLoader] 扩展 {root.name} 依赖 {package} 安装失败: {e}")
+                logger.error(
+                    f"[ExtensionLoader] 扩展 {root.name} 依赖 {package} 安装失败: {e}"
+                )
 
     @staticmethod
     def _import_module(root: Path) -> Any:
@@ -144,3 +152,26 @@ def _load_manifest_dict(root: Path) -> dict:
         return yaml.safe_load(manifest_path.read_text(encoding="utf-8")) or {}
     except ImportError:
         return {}
+
+
+async def load_all_extensions():
+    """加载所有扩展.
+
+    Returns:
+        ExtensionRegistry 实例
+    """
+    from openjiuwen.core.runner import Runner
+    from jiuwenclaw.extensions import ExtensionManager
+
+    callback_framework = Runner.callback_framework
+    extension_registry = ExtensionRegistry.create_instance(
+        callback_framework=callback_framework,
+        config={},
+        logger=logger,
+    )
+    extension_manager = ExtensionManager(registry=extension_registry)
+    await extension_manager.load_all_extensions()
+    logger.info(
+        "[App] 扩展加载完成，共 %d 个", len(extension_manager.list_extensions())
+    )
+    return extension_registry

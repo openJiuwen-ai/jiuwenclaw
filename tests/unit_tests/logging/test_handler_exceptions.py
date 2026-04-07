@@ -27,7 +27,10 @@ class TestDoRolloverExceptionPropagation:
             handler = SafeRotatingFileHandler(str(log_file), maxBytes=100)
 
             try:
-                with patch('jiuwenclaw.logging.handler.shutil.copy2', side_effect=OSError("No space left on device")):
+                with patch(
+                    "jiuwenclaw.logging.handler.shutil.copy2",
+                    side_effect=OSError("No space left on device"),
+                ):
                     with pytest.raises(OSError, match="No space left on device"):
                         handler.doRollover()
             finally:
@@ -41,11 +44,15 @@ class TestDoRolloverExceptionPropagation:
             handler = SafeRotatingFileHandler(str(log_file), maxBytes=100)
             try:
                 # 创建文件以便有流可操作
-                handler.emit(logging.LogRecord(
-                    "test", logging.INFO, "test.py", 1, "test message", (), None
-                ))
+                handler.emit(
+                    logging.LogRecord(
+                        "test", logging.INFO, "test.py", 1, "test message", (), None
+                    )
+                )
 
-                with patch.object(handler.stream, 'truncate', side_effect=OSError("Permission denied")):
+                with patch.object(
+                    handler.stream, "truncate", side_effect=OSError("Permission denied")
+                ):
                     with pytest.raises(OSError, match="Permission denied"):
                         handler.doRollover()
             finally:
@@ -60,18 +67,20 @@ class TestCleanupExceptionPropagation:
         """验证 cleanup 传播 stat 失败的异常（通过 doRollover）"""
         with tempfile.TemporaryDirectory() as tmpdir:
             log_file = Path(tmpdir) / "test.log"
-            handler = SafeRotatingFileHandler(str(log_file), maxBytes=100, backupCount=2)
+            handler = SafeRotatingFileHandler(
+                str(log_file), maxBytes=100, backupCount=2
+            )
 
             try:
                 # 创建真实的备份文件
                 backup_file = Path(tmpdir) / "test_20250101_120000.log"
                 backup_file.write_text("backup content")
 
-                # mock stat() 方法
-                def mock_stat(self):
+                # mock stat() 方法（需要接受 follow_symlinks 参数）
+                def mock_stat(self, *, follow_symlinks=True):
                     raise OSError("I/O error")
 
-                with patch.object(Path, 'stat', mock_stat):
+                with patch.object(Path, "stat", mock_stat):
                     # doRollover 会调用 _cleanup_old_backups
                     # 异常应该传播出来
                     with pytest.raises(OSError, match="I/O error"):
@@ -84,7 +93,9 @@ class TestCleanupExceptionPropagation:
         """验证 cleanup 排序时传播 stat 异常（通过 doRollover）"""
         with tempfile.TemporaryDirectory() as tmpdir:
             log_file = Path(tmpdir) / "test.log"
-            handler = SafeRotatingFileHandler(str(log_file), maxBytes=100, backupCount=2)
+            handler = SafeRotatingFileHandler(
+                str(log_file), maxBytes=100, backupCount=2
+            )
 
             try:
                 # 创建多个备份文件
@@ -92,16 +103,19 @@ class TestCleanupExceptionPropagation:
                     backup_file = Path(tmpdir) / f"test_{i:010d}.log"
                     backup_file.write_text(f"backup {i}")
 
-                # mock stat() 使其在排序时失败
+                # mock stat() 使其在排序时失败（需要接受 follow_symlinks 参数）
                 call_count = [0]
 
-                def mock_stat(self):
+                def mock_stat(self, *, follow_symlinks=True):
                     call_count[0] += 1
                     if call_count[0] > 2:  # 让第三次调用失败
                         raise OSError("I/O error during sort")
-                    return self.stat.__get__(self, type(self))()
+                    # 调用原始方法
+                    return Path.stat.__get__(self, type(self))(
+                        follow_symlinks=follow_symlinks
+                    )
 
-                with patch.object(Path, 'stat', mock_stat):
+                with patch.object(Path, "stat", mock_stat):
                     # doRollover 会调用 _cleanup_old_backups
                     # 异常应该传播出来
                     with pytest.raises(OSError, match="I/O error during sort"):
@@ -118,21 +132,26 @@ class TestEmitCatchesException:
         """验证 emit 捕获 doRollover 的异常并调用 handleError"""
         with tempfile.TemporaryDirectory() as tmpdir:
             log_file = Path(tmpdir) / "test.log"
-            handler = SafeRotatingFileHandler(str(log_file), maxBytes=1)  # 触发轮转
+            handler = SafeRotatingFileHandler(str(log_file), maxBytes=1)
             handler.backup_count = 2
 
-            # 模拟 doRollover 抛出异常
-            with patch.object(handler, 'doRollover', side_effect=OSError("Test error")):
-                # 模拟 handleError 被调用
-                with patch.object(handler, 'handleError') as mock_handle:
-                    # 创建一个日志记录
-                    record = logging.LogRecord(
-                        "test", logging.INFO, "test.py", 1, "test message", (), None
-                    )
-                    # emit 应该不抛异常
-                    handler.emit(record)
-                    # 验证 handleError 被调用
-                    mock_handle.assert_called_once()
+            try:
+                # 模拟 doRollover 抛出异常
+                with patch.object(
+                    handler, "doRollover", side_effect=OSError("Test error")
+                ):
+                    # 模拟 handleError 被调用
+                    with patch.object(handler, "handleError") as mock_handle:
+                        # 创建一个日志记录
+                        record = logging.LogRecord(
+                            "test", logging.INFO, "test.py", 1, "test message", (), None
+                        )
+                        # emit 应该不抛异常
+                        handler.emit(record)
+                        # 验证 handleError 被调用
+                        mock_handle.assert_called_once()
+            finally:
+                handler.close()
 
     @staticmethod
     @pytest.mark.filterwarnings("ignore::ResourceWarning")
@@ -149,7 +168,9 @@ class TestEmitCatchesException:
 
             try:
                 # 模拟 doRollover 抛出异常
-                with patch.object(handler, 'doRollover', side_effect=OSError("No space")):
+                with patch.object(
+                    handler, "doRollover", side_effect=OSError("No space")
+                ):
                     record = logging.LogRecord(
                         "test", logging.INFO, "test.py", 1, "test message", (), None
                     )
@@ -201,13 +222,17 @@ class TestNormalOperation:
         """验证成功的轮转操作"""
         with tempfile.TemporaryDirectory() as tmpdir:
             log_file = Path(tmpdir) / "test.log"
-            handler = SafeRotatingFileHandler(str(log_file), maxBytes=100, backupCount=2)
+            handler = SafeRotatingFileHandler(
+                str(log_file), maxBytes=100, backupCount=2
+            )
 
             try:
                 # 写入一些内容
-                handler.emit(logging.LogRecord(
-                    "test", logging.INFO, "test.py", 1, "x" * 50, (), None
-                ))
+                handler.emit(
+                    logging.LogRecord(
+                        "test", logging.INFO, "test.py", 1, "x" * 50, (), None
+                    )
+                )
                 handler.flush()
 
                 # 执行轮转
@@ -225,7 +250,9 @@ class TestNormalOperation:
         with tempfile.TemporaryDirectory() as tmpdir:
             log_file = Path(tmpdir) / "test.log"
             # backupCount=2，最多保留 2 个备份
-            handler = SafeRotatingFileHandler(str(log_file), maxBytes=100, backupCount=2)
+            handler = SafeRotatingFileHandler(
+                str(log_file), maxBytes=100, backupCount=2
+            )
 
             try:
                 log_path = Path(tmpdir)

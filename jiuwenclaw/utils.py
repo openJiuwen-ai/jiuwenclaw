@@ -20,8 +20,6 @@ import os
 import sys
 
 import time
-import datetime
-import shutil
 import mimetypes
 from pathlib import Path
 from dataclasses import dataclass, field
@@ -30,7 +28,6 @@ from typing import Any, Literal, Optional
 import logging
 import shutil
 from ruamel.yaml import YAML
-
 
 
 _user_home: Path | None = None
@@ -48,7 +45,7 @@ def set_user_home(path: Path, initialized: bool = False) -> None:
     """Set a custom user home directory.
 
     After calling this function, all path getters will return paths based on the new home directory.
-    
+
     Args:
         path: The new user home directory path.
         initialized: If True, skip cache reset (use when paths are already initialized elsewhere).
@@ -93,7 +90,10 @@ def _detect_installation_mode() -> bool:
     # Check if module file is in any site-packages directory
     for path in sys.path:
         site_packages = Path(path)
-        if "site-packages" in str(site_packages) and site_packages in module_file.parents:
+        if (
+            "site-packages" in str(site_packages)
+            and site_packages in module_file.parents
+        ):
             _is_package = True
             return True
 
@@ -126,9 +126,7 @@ def _find_package_root() -> Path | None:
     return current
 
 
-def _resolve_preferred_language(
-    config_yaml_dest: Path, explicit: Optional[str]
-) -> str:
+def _resolve_preferred_language(config_yaml_dest: Path, explicit: Optional[str]) -> str:
     """确定初始化使用的语言：显式参数优先，否则读已复制的 config，默认 zh。"""
     if explicit is not None:
         lang = str(explicit).strip().lower()
@@ -154,25 +152,33 @@ def prompt_preferred_language() -> Optional[Literal["zh", "en"]]:
     print("[jiuwenclaw-init] ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
     print("[jiuwenclaw-init]   [1] 中文（简体）")
     print("[jiuwenclaw-init]       → config: preferred_language: zh")
-    print("[jiuwenclaw-init]       → 复制 PRINCIPLE_ZH.md / TONE_ZH.md 为 home/PRINCIPLE.md、TONE.md")
+    print(
+        "[jiuwenclaw-init]       → 复制 PRINCIPLE_ZH.md / TONE_ZH.md 为 home/PRINCIPLE.md、TONE.md"
+    )
     print("[jiuwenclaw-init]   ────────────────────────────────────────────")
     print("[jiuwenclaw-init]   [2] English")
     print("[jiuwenclaw-init]       → config: preferred_language: en")
-    print("[jiuwenclaw-init]       → copy PRINCIPLE_EN.md / TONE_EN.md → home/PRINCIPLE.md, TONE.md")
+    print(
+        "[jiuwenclaw-init]       → copy PRINCIPLE_EN.md / TONE_EN.md → home/PRINCIPLE.md, TONE.md"
+    )
     print("[jiuwenclaw-init] ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
     print("[jiuwenclaw-init]  须明确选择：1 / 2 / zh / en（无默认语言）")
     print("[jiuwenclaw-init]  取消：no / n / q / cancel / 取消")
     print("[jiuwenclaw-init] ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-    raw = input(
-        "[jiuwenclaw-init] 请输入选项 (1, 2, zh, en) 或 no 取消: "
-    ).strip().lower()
+    raw = (
+        input("[jiuwenclaw-init] 请输入选项 (1, 2, zh, en) 或 no 取消: ")
+        .strip()
+        .lower()
+    )
     if raw in ("no", "n", "q", "quit", "cancel", "取消"):
         return None
     if raw in ("1", "zh", "中文", "chinese"):
         return "zh"
     if raw in ("2", "en", "english", "e", "英文"):
         return "en"
-    print("[jiuwenclaw-init] 无效选项；未选择有效语言，初始化已取消（与拒绝 yes/no 相同）。")
+    print(
+        "[jiuwenclaw-init] 无效选项；未选择有效语言，初始化已取消（与拒绝 yes/no 相同）。"
+    )
     return None
 
 
@@ -212,14 +218,18 @@ def prepare_workspace(overwrite: bool = True, preferred_language: Optional[str] 
     template_root = resources_dir
     template_agent_dir = template_root / "agent"
     if not template_agent_dir.is_dir():
-        raise RuntimeError(f"resources template missing agent dir: {template_agent_dir}")
+        raise RuntimeError(
+            f"resources template missing agent dir: {template_agent_dir}"
+        )
 
     # ----- .env: copy from template to config/.env -----
     env_template_src_candidates = [
         resources_dir / ".env.template",
         package_root / ".env.template",
     ]
-    env_template_src = next((p for p in env_template_src_candidates if p.exists()), None)
+    env_template_src = next(
+        (p for p in env_template_src_candidates if p.exists()), None
+    )
     if not env_template_src:
         raise RuntimeError(
             "env template source not found; tried: "
@@ -313,9 +323,17 @@ def init_user_workspace(overwrite: bool = True) -> Path | Literal["cancelled"]:
     workspace_dir = get_user_workspace_dir()
     if workspace_dir.exists():
         # Warn user about data loss and ask for confirmation
-        print("[jiuwenclaw-init] WARNING: This will delete all historical configuration and memory information.")
+        print(
+            "[jiuwenclaw-init] WARNING: This will delete all historical configuration and memory information."
+        )
         print("[jiuwenclaw-init] This action cannot be undone.")
-        confirmation = input("[jiuwenclaw-init] Do you want to confirm reinitialization? (yes/no): ").strip().lower()
+        confirmation = (
+            input(
+                "[jiuwenclaw-init] Do you want to confirm reinitialization? (yes/no): "
+            )
+            .strip()
+            .lower()
+        )
 
         if confirmation not in ("yes", "y"):
             print("[jiuwenclaw-init] Initialization cancelled. Exiting.")
@@ -361,7 +379,9 @@ def _resolve_paths() -> None:
             pkg = source_root / "jiuwenclaw"
             res = pkg / "resources"
             _root_dir = source_root
-            _config_dir = res if (res / "config.yaml").exists() else source_root / "config"
+            _config_dir = (
+                res if (res / "config.yaml").exists() else source_root / "config"
+            )
             _workspace_dir = res / "agent" / "workspace"
             _workspace_dir.mkdir(parents=True, exist_ok=True)
 
@@ -463,6 +483,7 @@ def setup_logger(log_level: Optional[str] = None) -> logging.Logger:
     """
     # 延迟导入避免循环依赖
     from jiuwenclaw.logging.setup import setup_logger as _setup_logger
+
     return _setup_logger(log_level)
 
 
@@ -478,6 +499,7 @@ logger = logging.getLogger(__name__)
 @dataclass
 class FileTransferStartParams:
     """文件传输开始参数（用于封装多参数方法调用）."""
+
     transfer_id: str
     filename: str
     file_size: int
@@ -492,6 +514,7 @@ class FileTransferStartParams:
 @dataclass
 class TransferProgress:
     """文件传输进度状态（Gateway 和 AgentServer 共用）."""
+
     transfer_id: str
     filename: str
     file_size: int
@@ -525,3 +548,70 @@ def guess_mime_type(filename: str) -> str:
     """
     mime_type, _ = mimetypes.guess_type(filename)
     return mime_type or "application/octet-stream"
+
+
+
+def restart_process(delay: float = 0.0) -> None:
+    """重启当前进程.
+
+    Args:
+        delay: 延迟重启的秒数，默认 0 立即重启
+    """
+
+    def _do_restart() -> None:
+        logger.info("[App] 配置已写回，正在重启服务…")
+        os.execv(sys.executable, [sys.executable, *sys.argv])
+
+    if delay <= 0:
+        _do_restart()
+        return
+
+    import asyncio
+
+    try:
+        loop = asyncio.get_running_loop()
+        loop.call_later(delay, _do_restart)
+    except RuntimeError:
+        _do_restart()
+
+
+
+async def connect_with_retry(
+    client,
+    uri: str,
+    *,
+    max_retries: int = 20,
+    interval: float = 3.0,
+) -> None:
+    """带重试机制的异步连接.
+
+    Args:
+        client: WebSocket 客户端实例
+        uri: 连接地址
+        max_retries: 最大重试次数
+        interval: 重试间隔秒数
+    """
+    import asyncio
+
+    for attempt in range(1, max_retries + 1):
+        try:
+            await client.connect(uri)
+            logger.info("[App] connected to AgentServer: %s", uri)
+            return
+        except Exception as exc:
+            if attempt >= max_retries:
+                logger.error(
+                    "[App] connect AgentServer failed after %d tries: %s  last=%s",
+                    attempt,
+                    uri,
+                    exc,
+                )
+                raise
+            logger.warning(
+                "[App] connect AgentServer failed (%d/%d): %s  retry in %s s…",
+                attempt,
+                max_retries,
+                exc,
+                interval,
+            )
+            await asyncio.sleep(interval)

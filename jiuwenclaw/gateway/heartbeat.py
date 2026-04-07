@@ -27,7 +27,9 @@ HEARTBEAT_OK = "HEARTBEAT_OK"
 HEARTBEAT_PROMPT = "如果你的workspace目录存在HEARTBEAT.md文件, 读取文件内容并且根据文件内容执行任务. 如果没有HEARTBEAT.md文件, 仅回复HEARTBEAT_OK"
 
 
-def normalize_active_hours(active_hours: dict[str, str] | None) -> dict[str, str] | None:
+def normalize_active_hours(
+    active_hours: dict[str, str] | None,
+) -> dict[str, str] | None:
     """将 active_hours 的 start/end 规范为 "HH:MM" 字符串。
 
     YAML 中未加引号的 22:00 会被解析为 1320（60 进制），此处将数字转回 "HH:MM"。
@@ -46,6 +48,7 @@ def normalize_active_hours(active_hours: dict[str, str] | None) -> dict[str, str
             result[k] = str(v) if v is not None else ""
     return result
 
+
 __all__ = [
     "HEARTBEAT_CHANNEL_ID",
     "HEARTBEAT_PROMPT",
@@ -53,6 +56,7 @@ __all__ = [
     "IHeartbeat",
     "GatewayHeartbeatService",
     "normalize_active_hours",
+    "build_heartbeat_config",
 ]
 
 
@@ -74,6 +78,47 @@ class HeartbeatConfig:
     relay_channel_id: str | None = None
     # 心跳生效时间段，格式为 {"start": "HH:MM", "end": "HH:MM"}；为 None 表示始终生效
     active_hours: dict[str, str] | None = None
+
+
+def build_heartbeat_config(heartbeat_cfg: dict | None) -> HeartbeatConfig:
+    """从配置字典构建 HeartbeatConfig.
+
+    Args:
+        heartbeat_cfg: config.yaml 中的 heartbeat 配置段
+
+    Returns:
+        HeartbeatConfig 实例
+    """
+    import os
+
+    if isinstance(heartbeat_cfg, dict):
+        cfg_every = heartbeat_cfg.get("every")
+        cfg_target = heartbeat_cfg.get("target")
+        cfg_active_hours = heartbeat_cfg.get("active_hours")
+    else:
+        cfg_every = None
+        cfg_target = None
+        cfg_active_hours = None
+
+    heartbeat_interval = float(
+        os.getenv("HEARTBEAT_INTERVAL")
+        or (str(cfg_every) if cfg_every is not None else "60")
+    )
+    heartbeat_timeout = (
+        float(os.getenv("HEARTBEAT_TIMEOUT", "30"))
+        if os.getenv("HEARTBEAT_TIMEOUT")
+        else None
+    )
+    heartbeat_relay_channel = os.getenv("HEARTBEAT_RELAY_CHANNEL_ID") or (
+        str(cfg_target) if cfg_target is not None else "web"
+    )
+
+    return HeartbeatConfig(
+        interval_seconds=heartbeat_interval,
+        timeout_seconds=heartbeat_timeout,
+        relay_channel_id=heartbeat_relay_channel,
+        active_hours=cfg_active_hours if isinstance(cfg_active_hours, dict) else None,
+    )
 
 
 class IHeartbeat(ABC):
@@ -187,7 +232,10 @@ class GatewayHeartbeatService(IHeartbeat):
             params={"heartbeat": HEARTBEAT_PROMPT},
         )
         try:
-            if self._config.timeout_seconds is not None and self._config.timeout_seconds > 0:
+            if (
+                self._config.timeout_seconds is not None
+                and self._config.timeout_seconds > 0
+            ):
                 resp = await asyncio.wait_for(
                     self._agent_client.send_request(envelope),
                     timeout=self._config.timeout_seconds,
@@ -210,14 +258,28 @@ class GatewayHeartbeatService(IHeartbeat):
                 elif isinstance(content, str):
                     heartbeat_content = content
             logger.info("Gateway heartbeat content: %s", heartbeat_content)
-            if HEARTBEAT_OK in (heartbeat_content if isinstance(heartbeat_content, str) else "").upper():
-                logger.info("Gateway heartbeat OK: request_id=%s (last_tick_at=%.0f)", request_id, self._last_tick_at)
+            if (
+                HEARTBEAT_OK
+                in (
+                    heartbeat_content if isinstance(heartbeat_content, str) else ""
+                ).upper()
+            ):
+                logger.info(
+                    "Gateway heartbeat OK: request_id=%s (last_tick_at=%.0f)",
+                    request_id,
+                    self._last_tick_at,
+                )
             else:
-                logger.info("Gateway heartbeat complete: request_id=%s (last_tick_at=%.0f)", request_id, self._last_tick_at)
+                logger.info(
+                    "Gateway heartbeat complete: request_id=%s (last_tick_at=%.0f)",
+                    request_id,
+                    self._last_tick_at,
+                )
 
             # 将 resp.payload["heartbeat"] 作为 event 类型 Message 回传到配置的 channel（如 WebChannel）
             if self._config.relay_channel_id and self._message_handler:
                 from jiuwenclaw.schema.message import Message, EventType
+
                 relay_msg = Message(
                     id=f"heartbeat-relay-{request_id}",
                     type="event",
@@ -230,7 +292,10 @@ class GatewayHeartbeatService(IHeartbeat):
                     event_type=EventType.HEARTBEAT_RELAY,
                 )
                 await self._message_handler.publish_robot_messages(relay_msg)
-                logger.debug("Gateway heartbeat relay to channel %s", self._config.relay_channel_id)
+                logger.debug(
+                    "Gateway heartbeat relay to channel %s",
+                    self._config.relay_channel_id,
+                )
 
         except asyncio.TimeoutError:
             self._last_tick_ok = False
@@ -286,7 +351,9 @@ class GatewayHeartbeatService(IHeartbeat):
             # 跨午夜区间：如 22:00-06:00
             return now_minutes >= start_minutes or now_minutes < end_minutes
         except Exception as e:  # noqa: BLE001
-            logger.warning("Invalid heartbeat active_hours config %r: %s", active_hours, e)
+            logger.warning(
+                "Invalid heartbeat active_hours config %r: %s", active_hours, e
+            )
             # 配置非法时，为避免误停心跳，按“始终生效”处理
             return True
 
