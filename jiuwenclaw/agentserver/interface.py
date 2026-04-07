@@ -26,6 +26,7 @@ from openjiuwen.core.session.checkpointer.persistence import PersistenceCheckpoi
 from jiuwenclaw.agentserver.tools.multi_session_toolkits import MultiSessionToolkit
 from jiuwenclaw.agentserver.tools.send_file_to_user import SendFileToolkit
 from jiuwenclaw.agentserver.prompt_builder import build_system_prompt, build_user_prompt
+from jiuwenclaw.agentserver.gateway_push import GatewayPushTransport
 from jiuwenclaw.agentserver.tools.cron_tools import CronToolRoute, CronTools
 
 from jiuwenclaw.utils import (
@@ -176,7 +177,7 @@ _CLI_FILE_ROUTES: dict[ReqMethod, str] = {
 class JiuWenClaw:
     """基于 openJiuwen ReActAgent 的 AgentServer 实现."""
 
-    def __init__(self) -> None:
+    def __init__(self, gateway_push: GatewayPushTransport | None = None) -> None:
         self._instance: JiuClawReActAgent | None = None
         self._skill_manager = SkillManager()
         self._skill_manager.set_skillnet_install_complete_hook(self.create_instance)
@@ -203,7 +204,7 @@ class JiuWenClaw:
         self._sysop_card_id: str | None = None
 
         self._session_tool = None
-        self._cron_tools = CronTools()
+        self._cron_tools = CronTools(gateway_push=gateway_push)
         self._cli_file_service = CLIFileService()
 
     @staticmethod

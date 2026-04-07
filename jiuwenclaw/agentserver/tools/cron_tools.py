@@ -15,6 +15,10 @@ from jiuwenclaw.gateway.cron.models import (
     is_valid_target_channel_id,
     normalize_target_channel_id,
 )
+from jiuwenclaw.agentserver.gateway_push import (
+    GatewayPushTransport,
+    WebSocketGatewayPushTransport,
+)
 from jiuwenclaw.utils import get_user_workspace_dir
 
 logger = logging.getLogger(__name__)
@@ -41,7 +45,8 @@ class CronTools:
     同进程一套 LocalFunction，并发安全依赖当前 asyncio 任务的上下文而非单例可变字段。
     """
 
-    def __init__(self) -> None:
+    def __init__(self, gateway_push: GatewayPushTransport | None = None) -> None:
+        self._gateway_push: GatewayPushTransport = gateway_push or WebSocketGatewayPushTransport()
         self._local_store = CronJobStore(
             path=get_user_workspace_dir() / "agent" / "home" / "cron_jobs.json"
         )
@@ -61,7 +66,6 @@ class CronTools:
         return r if r is not None else CronToolRoute()
 
     async def _send_split(self, action: str, params: dict[str, Any]) -> dict[str, Any]:
-        from jiuwenclaw.agentserver.agent_ws_server import AgentWebSocketServer
         from jiuwenclaw.e2a.constants import E2A_RESPONSE_KIND_CRON
 
         r = self._route()
@@ -77,7 +81,7 @@ class CronTools:
                 "message": "",
             },
         }
-        await AgentWebSocketServer.get_instance().send_push(payload)
+        await self._gateway_push.send_push(payload)
         return {"action": action, "status": "forwarded", "data": None, "message": "cron request forwarded to gateway"}
 
     async def _send(self, action: str, params: dict[str, Any]) -> dict[str, Any]:

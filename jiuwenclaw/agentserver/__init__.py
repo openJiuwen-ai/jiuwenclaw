@@ -2,7 +2,24 @@
 
 """AgentServer 模块."""
 
-from jiuwenclaw.agentserver.interface import JiuWenClaw
-from jiuwenclaw.agentserver.skill_manager import SkillManager
+from __future__ import annotations
+
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from jiuwenclaw.agentserver.interface import JiuWenClaw
+    from jiuwenclaw.agentserver.skill_manager import SkillManager
 
 __all__ = ["JiuWenClaw", "SkillManager"]
+
+
+def __getattr__(name: str) -> Any:
+    if name == "JiuWenClaw":
+        from jiuwenclaw.agentserver.interface import JiuWenClaw
+
+        return JiuWenClaw
+    if name == "SkillManager":
+        from jiuwenclaw.agentserver.skill_manager import SkillManager
+
+        return SkillManager
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
