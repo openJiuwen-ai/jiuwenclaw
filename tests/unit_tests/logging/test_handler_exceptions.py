@@ -13,7 +13,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from jiuwenclaw.logging.handler import SafeRotatingFileHandler
+from jiuwenclaw.jiuwenclaw_logging.handler import SafeRotatingFileHandler
 
 
 class TestDoRolloverExceptionPropagation:
@@ -28,8 +28,8 @@ class TestDoRolloverExceptionPropagation:
 
             try:
                 with patch(
-                    "jiuwenclaw.logging.handler.shutil.copy2",
-                    side_effect=OSError("No space left on device"),
+                    'jiuwenclaw.jiuwenclaw_logging.handler.shutil.copy2',
+                    side_effect=OSError("No space left on device")
                 ):
                     with pytest.raises(OSError, match="No space left on device"):
                         handler.doRollover()

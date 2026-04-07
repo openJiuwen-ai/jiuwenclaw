@@ -103,6 +103,15 @@ _CONFIG_SET_ENV_MAP = {
     "vision_api_key": "VISION_API_KEY",
     "vision_model": "VISION_MODEL_NAME",
     "vision_provider": "VISION_PROVIDER",
+    # DeepSearch 配置
+    "deepsearch_llm_model_name": "DEEPSEARCH_LLM_MODEL_NAME",
+    "deepsearch_llm_model_type": "DEEPSEARCH_LLM_MODEL_TYPE",
+    "deepsearch_llm_base_url": "DEEPSEARCH_LLM_BASE_URL",
+    "deepsearch_llm_api_key": "DEEPSEARCH_LLM_API_KEY",
+    "deepsearch_web_search_engine_name": "DEEPSEARCH_WEB_SEARCH_ENGINE_NAME",
+    "deepsearch_web_search_api_key": "DEEPSEARCH_WEB_SEARCH_API_KEY",
+    "deepsearch_web_search_url": "DEEPSEARCH_WEB_SEARCH_URL",
+    "deepsearch_execution_method": "DEEPSEARCH_EXECUTION_METHOD",
     # 其他
     "email_address": "EMAIL_ADDRESS",
     "email_token": "EMAIL_TOKEN",

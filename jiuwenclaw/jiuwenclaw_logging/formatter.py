@@ -9,7 +9,7 @@ import logging
 import re
 from typing import Optional
 
-from jiuwenclaw.logging.config import LoggingTagConfig, get_logging_tag_config
+from jiuwenclaw.jiuwenclaw_logging.config import LoggingTagConfig, get_logging_tag_config
 
 
 class UserVisibleFormatter(logging.Formatter):

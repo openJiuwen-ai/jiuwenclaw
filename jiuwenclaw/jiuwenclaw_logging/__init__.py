@@ -12,10 +12,10 @@
 - setup: 日志系统配置（setup_logger）
 """
 
-from jiuwenclaw.logging.config import LoggingTagConfig, get_logging_tag_config
-from jiuwenclaw.logging.formatter import UserVisibleFormatter
-from jiuwenclaw.logging.handler import SafeRotatingFileHandler
-from jiuwenclaw.logging.levels import (
+from jiuwenclaw.jiuwenclaw_logging.config import LoggingTagConfig, get_logging_tag_config
+from jiuwenclaw.jiuwenclaw_logging.formatter import UserVisibleFormatter
+from jiuwenclaw.jiuwenclaw_logging.handler import SafeRotatingFileHandler
+from jiuwenclaw.jiuwenclaw_logging.levels import (
     LoggingLevels,
     _ComponentNameFilter,
     _load_logging_config_from_yaml,
@@ -47,6 +47,6 @@ __all__ = [
 def __getattr__(name: str):
     """延迟导入 setup_logger 以避免循环依赖。"""
     if name == "setup_logger":
-        from jiuwenclaw.logging.setup import setup_logger
+        from jiuwenclaw.jiuwenclaw_logging.setup import setup_logger
         return setup_logger
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

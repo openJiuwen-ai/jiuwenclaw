@@ -62,6 +62,8 @@ from jiuwenclaw.agentserver.tools.task_tools import (
     _is_task_memory_enabled,
 )
 from jiuwenclaw.agentserver.tools.video_tools import video_understanding
+from jiuwenclaw.agentserver.tools.deepresearch_tools import get_deepresearch_tools
+from jiuwenclaw.agentserver.tools.deepresearch_task_manager import DeepResearchTaskManager
 from jiuwenclaw.agentserver.tools.xiaoyi_phone_tools import (
     get_user_location,
     create_note, search_notes, modify_note,
@@ -200,6 +202,8 @@ class JiuWenClaw:
         self._mcp_tools_registered: bool = False
         self._video_tool_registered: bool = False
         self._xiaoyi_phone_tools_registered: bool = False
+        self._deepresearch_tools_registered: bool = False
+        self._deepresearch_task_manager: DeepResearchTaskManager | None = None
         self._todo_tool_sessions_registered: set[str] = set()
         self._sysop_card_id: str | None = None
 
@@ -517,6 +521,17 @@ class JiuWenClaw:
                 logger.warning("[JiuWenClaw] xiaoyi phone tools registration skipped: %s", exc)
         else:
             logger.info("[JiuWenClaw] xiaoyi channel not enabled, skipping phone tools")
+
+        # add deepresearch tools
+        try:
+            for tool in get_deepresearch_tools():
+                Runner.resource_mgr.add_tool(tool)
+                self._instance.ability_manager.add(tool.card)
+            self._deepresearch_tools_registered = True
+            logger.info("[JiuWenClaw] deepresearch tools registered successfully")
+        except Exception as exc:
+            self._deepresearch_tools_registered = False
+            logger.warning("[JiuWenClaw] deepresearch tools registration failed: %s", exc)
 
         # add cron tools（路由由 push_cron_route 在每轮 run_* 任务内设置，见 ContextVar）
         try:
@@ -931,6 +946,23 @@ class JiuWenClaw:
                     self._instance.ability_manager.remove(tool.card.name)
             except Exception as exc:
                 logger.debug("[JiuWenClaw] unregister audio tools failed (tools may not exist): %s", exc)
+
+        # register deepresearch tools
+        if not self._deepresearch_tools_registered:
+            try:
+                # 初始化 DeepResearchTaskManager（全局单例）
+                if self._deepresearch_task_manager is None:
+                    self._deepresearch_task_manager = await DeepResearchTaskManager.get_instance()
+                    logger.info("[JiuWenClaw] Initialized DeepResearchTaskManager")
+
+                for tool in get_deepresearch_tools():
+                    if not Runner.resource_mgr.get_tool(tool.card.id):
+                        Runner.resource_mgr.add_tool(tool)
+                    self._instance.ability_manager.add(tool.card)
+                self._deepresearch_tools_registered = True
+                logger.info("[JiuWenClaw] Registered deepresearch tools")
+            except Exception as exc:
+                logger.warning("[JiuWenClaw] ensure deepresearch tools failed: %s", exc)
 
         current_mcp_tools = get_mcp_tools()
         current_mcp_tool_names = {tool.card.name for tool in current_mcp_tools}

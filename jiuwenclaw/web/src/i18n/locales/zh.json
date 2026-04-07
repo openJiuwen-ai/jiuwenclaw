@@ -373,6 +373,7 @@
       "embed": { "label": "Embed配置", "hint": "Embed 服务与鉴权参数" },
       "thirdParty": { "label": "第三方服务配置", "hint": "API Key 配置" },
       "evolution": { "label": "自演进配置", "hint": "Skills 在线自演进参数" },
+      "deepsearch": { "label": "深度研究工具配置", "hint": "针对专业或高风险决策等场景中需要多步骤、多源验证、逻辑严谨、结构化输出的任务进行处理和报告输出。" },
       "contextEngine": { "label": "上下文压缩", "hint": "控制对话上下文是否启用压缩" },
       "permissions": { "label": "工具安全护栏", "hint": "控制工具调用时的权限检查" },
       "email": { "label": "邮箱配置", "hint": "邮件账号与令牌参数" },
@@ -381,7 +382,11 @@
     "errors": {
       "requiredModelFields": "模型配置为必填：{{fields}}。请完整填写后再保存并重启。",
       "saveFailed": "保存失败，请稍后重试"
-    }
+    },
+    "selectExecutionMethod": "请选择执行方法",
+    "selectSearchEngine": "请选择搜索引擎",
+    "executionMethodParallel": "parallel（速度优先）",
+    "executionMethodDependencyDriving": "dependency_driving（效果优先）"
   },
   "cron": {
     "title": "定时任务管理",

@@ -165,7 +165,7 @@ class LoggingTagConfig:
         Note:
             这是一个静态方法，不需要实例化 LoggingTagConfig 即可使用：
 
-            >>> from jiuwenclaw.logging.config import LoggingTagConfig
+            >>> from jiuwenclaw.jiuwenclaw_logging.config import LoggingTagConfig
             >>> enabled = LoggingTagConfig.parse_bool_string("on", False)
         """
         if not isinstance(value, str):

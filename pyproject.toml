@@ -40,6 +40,9 @@ dependencies = [
     "pytest==9.0.2",
     "pytest-asyncio==1.3.0",
     "pytest-cov==7.0.0",
+    "openjiuwen_deepsearch==0.1.2.post1",
+    "pypandoc",
+    "markdown",
 ]
 
 [project.optional-dependencies]

@@ -10,8 +10,8 @@ from tempfile import TemporaryDirectory
 
 import pytest
 
-from jiuwenclaw.logging.config import LoggingTagConfig, get_logging_tag_config
-from jiuwenclaw.logging.formatter import UserVisibleFormatter
+from jiuwenclaw.jiuwenclaw_logging.config import LoggingTagConfig, get_logging_tag_config
+from jiuwenclaw.jiuwenclaw_logging.formatter import UserVisibleFormatter
 
 
 class TestLoggingTagConfig(unittest.TestCase):

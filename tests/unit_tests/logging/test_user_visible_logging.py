@@ -3,7 +3,7 @@
 import logging
 import re
 import pytest
-from jiuwenclaw.logging import UserVisibleFormatter
+from jiuwenclaw.jiuwenclaw_logging.formatter import UserVisibleFormatter
 
 
 # 生产环境格式配置

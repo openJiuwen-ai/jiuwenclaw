@@ -399,6 +399,16 @@ def _tool_prompt(mode, language: str, include_memory_tools: bool = True) -> str:
 """
         search_tools_section += """| `mcp_fetch_webpage` | 抓取网页文本内容 |"""
 
+        deepresearch_tools_section = """### 深度研究与报告生成
+| 工具名称 | 功能说明 |
+|---------|---------|
+| `deepresearch_create_task` | 创建任务，启动深度研究和报告生成的流程 |
+| `deepresearch_get_task_status` | 获取研究任务的当前执行状态 |
+| `deepresearch_list_tasks` | 列出所有深度研究任务及其状态 |
+| `deepresearch_cancel_task` | 取消正在执行的研究任务 |
+| `deepresearch_get_result` | 获取研究任务的执行结果和结果报告 |
+"""
+
         return f"""## 工具
 
 工具为内置方法。
@@ -425,6 +435,8 @@ def _tool_prompt(mode, language: str, include_memory_tools: bool = True) -> str:
 | 工具名称 | 功能说明 |
 |---------|---------|
 {search_tools_section}
+
+{deepresearch_tools_section}
 
 ### 文件操作
 
@@ -461,6 +473,8 @@ def _tool_prompt(mode, language: str, include_memory_tools: bool = True) -> str:
 | 工具名称 | 功能说明 |
 |---------|---------|
 | `reload_original_context_messages` | 恢复被压缩的历史消息 |
+
+{deepresearch_tools_section}
 
 """
     else:
@@ -500,6 +514,17 @@ def _tool_prompt(mode, language: str, include_memory_tools: bool = True) -> str:
 """
         search_tools_section += """| `mcp_fetch_webpage` | Fetch webpage text content |"""
 
+        deepresearch_tools_section = """### Deep Research & Report Generation
+
+| Tool Name | Description |
+|-----------|-------------|
+| `deepresearch_create_task` | Create a task to initiate deep research and report generation |
+| `deepresearch_get_task_status` | Get the current execution status of a research task |
+| `deepresearch_list_tasks` | List all deep research tasks and their statuses |
+| `deepresearch_cancel_task` | Cancel a running research task |
+| `deepresearch_get_result` | Get the execution results and report from a research task |
+"""
+
         return f"""# Tools
 
 Tools are built-in methods.
@@ -526,6 +551,8 @@ When the user requests code/scripts/config/tests that must be delivered **as fil
 | Tool Name | Description |
 |-----------|-------------|
 {search_tools_section}
+
+{deepresearch_tools_section}
 
 ### File Operations
 

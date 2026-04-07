@@ -374,6 +374,7 @@
       "embed": { "label": "Embed Configuration", "hint": "Embed service and authentication settings" },
       "thirdParty": { "label": "Third-Party Services", "hint": "API key settings" },
       "evolution": { "label": "Evolution Settings", "hint": "Online skill evolution settings" },
+      "deepsearch": { "label": "Deep Research Tool Settings", "hint": "Process and generate structured reports for tasks that require multi-step, multi-source verification, rigorous logic, and structured output in professional or high-risk decision-making scenarios." },
       "contextEngine": { "label": "Context Compression", "hint": "Enable or disable dialogue context compression" },
       "permissions": { "label": "Tool Safety Guardrail", "hint": "Enable or disable permission checks for tool calls" },
       "email": { "label": "Email Settings", "hint": "Email account and token settings" },
@@ -382,7 +383,11 @@
     "errors": {
       "requiredModelFields": "These model fields are required: {{fields}}. Complete them before saving and restarting.",
       "saveFailed": "Save failed, please try again later"
-    }
+    },
+    "selectExecutionMethod": "Please select execution method",
+    "selectSearchEngine": "Please select search engine",
+    "executionMethodParallel": "parallel (Speed Priority)",
+    "executionMethodDependencyDriving": "dependency_driving (Quality Priority)"
   },
   "cron": {
     "title": "Scheduled Task Management",

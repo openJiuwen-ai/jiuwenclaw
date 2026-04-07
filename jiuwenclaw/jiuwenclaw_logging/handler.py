@@ -48,6 +48,26 @@ class SafeRotatingFileHandler(BaseRotatingHandler):
         if delay:
             self.stream = None
 
+    def emit(self, record):
+        """Emit a record and release the current stream if rollover fails.
+
+        On Windows, an unclosed stream will keep the log file locked and break
+        temporary-directory cleanup in tests. Closing only the current stream
+        keeps the handler reusable because FileHandler.emit() will reopen it on
+        the next successful write.
+        """
+        try:
+            if self.shouldRollover(record):
+                self.doRollover()
+            logging.FileHandler.emit(self, record)
+        except Exception:
+            if self.stream is not None:
+                try:
+                    self.stream.close()
+                finally:
+                    self.stream = None
+            self.handleError(record)
+
     def shouldRollover(self, record):
         """
         确定是否需要轮转日志文件。

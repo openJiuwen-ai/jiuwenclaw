@@ -36,6 +36,7 @@ from pydantic import BaseModel
 from openjiuwen.core.foundation.tool import LocalFunction, Tool, ToolCard
 
 from jiuwenclaw.agentserver.tools.mcp_toolkits import get_mcp_tools
+from jiuwenclaw.agentserver.tools.deepresearch_tools import get_deepresearch_tools
 from jiuwenclaw.gateway.message_handler import MessageHandler
 from jiuwenclaw.schema import AgentResponseChunk
 from jiuwenclaw.schema.message import EventType, Message
@@ -89,18 +90,25 @@ class MultiSessionToolkit:
         agent = ReActAgent(agent_card)
         agent.configure(self._sub_agent_config)
         mcp_tools = get_mcp_tools()
+        deepresearch_tools = get_deepresearch_tools()
+
         for mcp_tool in mcp_tools:
             Runner.resource_mgr.add_tool(mcp_tool)
             agent.ability_manager.add(mcp_tool.card)
+
+        for deepresearch_tool in deepresearch_tools:
+            Runner.resource_mgr.add_tool(deepresearch_tool)
+            agent.ability_manager.add(deepresearch_tool.card)
+
         logger.debug("[MultiSessionToolkit] get_sub_agent 完成 mcp_tools_count=%d", len(mcp_tools))
         return agent
 
     async def _run_and_notify(
-        self,
-        session_id: str,
-        description: str,
-        agent: ReActAgent,
-        inputs: dict,
+            self,
+            session_id: str,
+            description: str,
+            agent: ReActAgent,
+            inputs: dict,
     ) -> None:
         """Run agent and call notify on completion (success/cancel/error)."""
         logger.debug(
@@ -162,11 +170,11 @@ class MultiSessionToolkit:
                 break
 
     async def notify(
-        self,
-        session_id: str,
-        status: Status,
-        result: str = "",
-        error: str = "",
+            self,
+            session_id: str,
+            status: Status,
+            result: str = "",
+            error: str = "",
     ) -> None:
         """Send subtask update to MessageHandler. Called on completion (success/cancel/error)."""
         try:
@@ -238,8 +246,8 @@ class MultiSessionToolkit:
             accumulated: list[str] = []
             final_output: str | None = None
             async for chunk in Runner.run_agent_streaming(
-                server.get_agent(),
-                inputs=inputs,
+                    server.get_agent(),
+                    inputs=inputs,
             ):
                 if not hasattr(chunk, "type") or not hasattr(chunk, "payload"):
                     continue
@@ -335,7 +343,7 @@ class MultiSessionToolkit:
             await asyncio.gather(task, return_exceptions=True)
         except asyncio.CancelledError:
             pass
-        logger.info("[MultiSessionToolkit] cancel_session 已取消 session_id=%s", session_id, 
+        logger.info("[MultiSessionToolkit] cancel_session 已取消 session_id=%s", session_id,
                     extra={'user_visible': 'critical'})
         return f"已取消 session_id={session_id}"
 
@@ -358,10 +366,10 @@ class MultiSessionToolkit:
         session_id = self.session_id
 
         def make_tool(
-            name: str,
-            description: str,
-            input_params: dict,
-            func,
+                name: str,
+                description: str,
+                input_params: dict,
+                func,
         ) -> Tool:
             card = ToolCard(
                 id=f"{name}_{session_id}_{self.request_id}",

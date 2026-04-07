@@ -31,6 +31,7 @@ const THIRD_PARTY_API_KEYS = new Set([
 const REQUIRED_MODEL_FIELDS = ["api_base", "api_key", "model", "model_provider"] as const;
 const REQUIRED_MODEL_FIELD_SET = new Set<string>(REQUIRED_MODEL_FIELDS);
 const EVOLUTION_KEYS = new Set(["evolution_auto_scan"]);
+const DEEPSEARCH_KEYS = new Set(["deepsearch_llm_model_name", "deepsearch_llm_model_type", "deepsearch_llm_base_url", "deepsearch_llm_api_key", "deepsearch_web_search_engine_name", "deepsearch_web_search_api_key", "deepsearch_web_search_url", "deepsearch_max_web_search_results", "deepsearch_execution_method"]);
 
 function classifyKey(key: string): string {
   if (MODEL_DEFAULT_KEYS.has(key)) return "model_default";
@@ -41,6 +42,7 @@ function classifyKey(key: string): string {
   if (THIRD_PARTY_API_KEYS.has(key)) return "third_party_api";
   if (EMAIL_KEYS.has(key)) return "email";
   if (EVOLUTION_KEYS.has(key)) return "evolution";
+  if (DEEPSEARCH_KEYS.has(key)) return "deepsearch";
   if (key === "context_engine_enabled") return "context_engine";
   if (key === "permissions_enabled") return "permissions";
   if (key.startsWith("feishu")) return "feishu";
@@ -103,6 +105,13 @@ function getGroupIcon(tag: string) {
       </svg>
     );
   }
+  if (tag === "deepsearch") {
+    return (
+      <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={1.8}>
+        <path strokeLinecap="round" strokeLinejoin="round" d="M9 20l-5.447-2.724A1 1 0 013 16.382V5.618a1 1 0 011.447-.894L9 7m0 13l6-3m-6 3V7m6 10l4.553 2.276A1 1 0 0021 18.382V7.618a1 1 0 00-.553-.894L15 4m0 13V4m0 0L9 7" />
+      </svg>
+    );
+  }
   return (
     <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={1.8}>
       <path strokeLinecap="round" strokeLinejoin="round" d="M11.25 6h9m-9 6h9m-9 6h9M3.75 6h.008v.008H3.75V6zm0 6h.008v.008H3.75V12zm0 6h.008v.008H3.75V18z" />
@@ -121,6 +130,7 @@ function getGroupToneClass(tag: string): string {
   if (tag === "context_engine") return "text-sky-500 bg-sky-500/10 border-sky-500/20";
   if (tag === "permissions") return "text-rose-500 bg-rose-500/10 border-rose-500/20";
   if (tag === "email") return "text-emerald-500 bg-emerald-500/10 border-emerald-500/20";
+  if (tag === "deepsearch") return "text-purple-500 bg-purple-500/10 border-purple-500/20";
   return "text-text-muted bg-secondary/70 border-border";
 }
 
@@ -180,10 +190,11 @@ function getGroupMeta(t: (key: string) => string): Record<string, { label: strin
     embed: { label: t('config.groups.embed.label'), order: 4, hint: t('config.groups.embed.hint') },
     third_party_api: { label: t('config.groups.thirdParty.label'), order: 5, hint: t('config.groups.thirdParty.hint') },
     evolution: { label: t('config.groups.evolution.label'), order: 6, hint: t('config.groups.evolution.hint') },
-    context_engine: { label: t('config.groups.contextEngine.label'), order: 7, hint: t('config.groups.contextEngine.hint') },
-    permissions: { label: t('config.groups.permissions.label'), order: 8, hint: t('config.groups.permissions.hint') },
-    email: { label: t('config.groups.email.label'), order: 9, hint: t('config.groups.email.hint') },
-    other: { label: t('config.groups.other.label'), order: 10, hint: t('config.groups.other.hint') },
+    deepsearch: { label: t('config.groups.deepsearch.label'), order: 7, hint: t('config.groups.deepsearch.hint') },
+    context_engine: { label: t('config.groups.contextEngine.label'), order: 8, hint: t('config.groups.contextEngine.hint') },
+    permissions: { label: t('config.groups.permissions.label'), order: 9, hint: t('config.groups.permissions.hint') },
+    email: { label: t('config.groups.email.label'), order: 10, hint: t('config.groups.email.hint') },
+    other: { label: t('config.groups.other.label'), order: 11, hint: t('config.groups.other.hint') },
   };
 }
 
@@ -192,13 +203,28 @@ function isRequiredModelField(key: string): boolean {
 }
 
 function isProviderKey(key: string): boolean {
-  return key.endsWith("_provider");
+  return key.endsWith("_provider") || key === "deepsearch_llm_model_type" || key === "deepsearch_execution_method" || key === "deepsearch_web_search_engine_name";
 }
 
 /** 表格列显示用：video_api_base -> api_base，避免与分组标题重复 */
 function getKeyDisplayLabel(key: string): string {
+  const deepSearchLabels: Record<string, string> = {
+    deepsearch_llm_model_name: "llm_model_name",
+    deepsearch_llm_model_type: "llm_model_type",
+    deepsearch_llm_base_url: "llm_base_url",
+    deepsearch_llm_api_key: "llm_api_key",
+    deepsearch_web_search_engine_name: "web_search_engine_name",
+    deepsearch_web_search_api_key: "web_search_api_key",
+    deepsearch_web_search_url: "web_search_url",
+    deepsearch_max_web_search_results: "max_web_search_results",
+    deepsearch_execution_method: "execution_method",
+  };
+  
+  if (deepSearchLabels[key]) return deepSearchLabels[key];
+  
   const m = key.match(/^(video|audio|vision)_(.+)$/);
   if (m) return m[2];
+
   return BOOL_KEY_LABELS[key] ?? key;
 }
 
@@ -316,12 +342,31 @@ function GroupSection({
                           onChange={(e) => onChange(key, e.target.value)}
                           className="w-full rounded-md border border-border bg-bg px-3 py-2 text-[13px] outline-none focus:border-accent"
                         >
-                          <option value="" disabled>{t('config.selectModelProvider')}</option>
-                          <option value="OpenAI">OpenAI</option>
-                          {!key.includes('video_') && !key.includes('audio_') && !key.includes('vision_') && (
+                          {key === "deepsearch_execution_method" ? (
                             <>
-                              <option value="DashScope">DashScope</option>
-                              <option value="SiliconFlow">SiliconFlow</option>
+                              <option value="" disabled>{t('config.selectExecutionMethod')}</option>
+                              <option value="parallel">{t('config.executionMethodParallel')}</option>
+                              <option value="dependency_driving" selected>{t('config.executionMethodDependencyDriving')}</option>
+                            </>
+                          ) : key === "deepsearch_web_search_engine_name" ? (
+                            <>
+                              <option value="" disabled>{t('config.selectSearchEngine')}</option>
+                              <option value="tavily" selected>tavily</option>
+                              <option value="google">google</option>
+                              <option value="xunfei">xunfei</option>
+                              <option value="petal">petal</option>
+                              <option value="custom">custom</option>
+                            </>
+                          ) : (
+                            <>
+                              <option value="" disabled>{t('config.selectModelProvider')}</option>
+                              <option value="OpenAI">OpenAI</option>
+                              {!key.includes('video_') && !key.includes('audio_') && !key.includes('vision_') && (
+                                <>
+                                  <option value="DashScope">DashScope</option>
+                                  <option value="SiliconFlow">SiliconFlow</option>
+                                </>
+                              )}
                             </>
                           )}
                         </select>
@@ -481,12 +526,33 @@ export function ConfigPanel({
       if (tag === "feishu") continue;
       (buckets[tag] ??= []).push([key, value]);
     }
-    for (const entries of Object.values(buckets)) {
-      entries.sort(([a], [b]) => a.localeCompare(b));
+    // 定义 DeepSearch 配置项的期望顺序（按照 .env 文件中的顺序）
+    const deepsearchOrder: Record<string, number> = {
+      "deepsearch_llm_model_name": 0,
+      "deepsearch_llm_model_type": 1,
+      "deepsearch_llm_base_url": 2,
+      "deepsearch_llm_api_key": 3,
+      "deepsearch_web_search_engine_name": 4,
+      "deepsearch_web_search_api_key": 5,
+      "deepsearch_web_search_url": 6,
+      "deepsearch_max_web_search_results": 7,
+      "deepsearch_execution_method": 8
+    };
+    for (const [tag, entries] of Object.entries(buckets)) {
+      if (tag === "deepsearch") {
+        // 对 DeepSearch 组使用自定义顺序（按照 .env 文件中的顺序）
+        entries.sort(([a], [b]) => {
+          const orderA = deepsearchOrder[a] ?? 999;
+          const orderB = deepsearchOrder[b] ?? 999;
+          return orderA - orderB;
+        });
+      } else {
+        // 其他组保持字母顺序
+        entries.sort(([a], [b]) => a.localeCompare(b));
+      }
     }
     const groupMeta = getGroupMeta(t);
     return Object.entries(buckets)
-      .filter(([tag]) => tag !== 'other')
       .map(([tag, keys]) => ({ tag, label: groupMeta[tag]?.label ?? tag, keys, order: groupMeta[tag]?.order ?? 99 }))
       .sort((a, b) => a.order - b.order);
   }, [normalizedConfig, t]);

@@ -502,10 +502,10 @@ def setup_logger(log_level: Optional[str] = None) -> logging.Logger:
     级别由 ``config.yaml`` 的 ``logging`` 段控制；环境变量 ``LOG_LEVEL`` 仅覆盖**控制台**级别
     （``log_level`` 参数为 ``None`` 时）。若传入 ``log_level``（如单测），则控制台与各文件级别均为该值。
 
-    Note: 此函数从 jiuwenclaw.logging.setup 迁移，保持向后兼容。
+    Note: 此函数从 jiuwenclaw.jiuwenclaw_logging.setup 迁移，保持向后兼容。
     """
     # 延迟导入避免循环依赖
-    from jiuwenclaw.logging.setup import setup_logger as _setup_logger
+    from jiuwenclaw.jiuwenclaw_logging.setup import setup_logger as _setup_logger
 
     return _setup_logger(log_level)
 
