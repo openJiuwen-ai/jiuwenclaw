@@ -106,14 +106,18 @@ class DeepResearchTaskManager:
         # 加载环境变量，确保读取最新的配置
         env_file = get_env_file()
         if env_file.exists():
-            load_dotenv(dotenv_path=env_file)
+            # Reload the env file for each task so updated values take effect immediately.
+            load_dotenv(dotenv_path=env_file, override=True)
         else:
             logger.warning(f"[DeepResearchTaskManager] 环境变量文件不存在: {env_file}")
-        
+
+        llm_model_type = (os.getenv("DEEPSEARCH_LLM_MODEL_TYPE") or "").strip().lower()
+        if not llm_model_type:
+            llm_model_type = (os.getenv("MODEL_PROVIDER") or "openai").strip().lower()
+
         config = {
             "LLM_MODEL_NAME": os.getenv("DEEPSEARCH_LLM_MODEL_NAME") or os.getenv("MODEL_NAME", "gpt-4o"),
-            "LLM_MODEL_TYPE": (os.getenv("DEEPSEARCH_LLM_MODEL_TYPE").strip().lower() or
-                               os.getenv("MODEL_PROVIDER", "openai").strip().lower()),
+            "LLM_MODEL_TYPE": llm_model_type,
             "LLM_BASE_URL": os.getenv("DEEPSEARCH_LLM_BASE_URL") or os.getenv("API_BASE", "https://api.openai.com/v1"),
             "LLM_API_KEY": os.getenv("DEEPSEARCH_LLM_API_KEY") or os.getenv("API_KEY", ""),
             "WEB_SEARCH_ENGINE_NAME": os.getenv("DEEPSEARCH_WEB_SEARCH_ENGINE_NAME", "tavily"),
@@ -126,7 +130,7 @@ class DeepResearchTaskManager:
             "OUTLINE_INTERACTION_ENABLED": os.getenv("DEEPSEARCH_OUTLINE_INTERACTION_ENABLED", "False"),
             "SOURCE_TRACER_INFER_SWITCHES": os.getenv("DEEPSEARCH_SOURCE_TRACER_INFER_SWITCHES", "False"),
         }
-        logger.info("[DeepResearchTaskManager] 加载 DeepResearch 配置: %s", config)
+        # logger.info("[DeepResearchTaskManager] 加载 DeepResearch 配置: %s", config)
         return config
 
     @staticmethod
