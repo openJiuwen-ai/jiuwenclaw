@@ -582,6 +582,16 @@ class JiuWenClaw:
         else:
             config_base = resolve_env_vars(config_base)
 
+        # 同步扩展配置到 ExtensionRegistry
+        # Gateway 已解密 extension_security_configs，AgentServer 直接使用明文
+        try:
+            from jiuwenclaw.extensions.registry import ExtensionRegistry
+            registry = ExtensionRegistry.get_instance()
+            registry.update_config(config_base)
+            logger.info("[JiuWenClaw] Extension config synced to Registry")
+        except Exception as exc:
+            logger.warning("[JiuWenClaw] ExtensionRegistry update failed: %s", exc)
+
         apply_video_model_config_from_yaml(config_base)
         apply_audio_model_config_from_yaml(config_base)
         apply_vision_model_config_from_yaml(config_base)

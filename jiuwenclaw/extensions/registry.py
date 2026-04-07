@@ -36,6 +36,9 @@ class ExtensionRegistry:
             raise RuntimeError("ExtensionRegistry 尚未初始化，请先调用 create_instance()")
         return cls._instance
 
+    def update_config(self, full_config) -> None:
+        self._config.config = full_config
+
     @classmethod
     def create_instance(
         cls,
@@ -44,7 +47,8 @@ class ExtensionRegistry:
         logger: Any,
     ) -> "ExtensionRegistry":
         if cls._instance is not None:
-            raise RuntimeError("ExtensionRegistry 已初始化，请勿重复调用 create_instance()")
+            logger.warning("ExtensionRegistry 已初始化，将返回已存在实例")
+            return cls._instance
         cls._instance = cls(
             callback_framework=callback_framework,
             config=config,

@@ -14,6 +14,7 @@ if TYPE_CHECKING:
 from jiuwenclaw.e2a.gateway_normalize import e2a_from_agent_fields
 from jiuwenclaw.schema.message import ReqMethod
 from jiuwenclaw.utils import restart_process
+from jiuwenclaw.extensions.extension_config_sync import decrypt_extensions_sensitive_for_agent
 
 logger = logging.getLogger(__name__)
 
@@ -62,12 +63,14 @@ async def handle_config_hot_reload(
             env=dict(env_updates or {}),
         )
 
+        # 发送给 AgentServer 前解密扩展敏感配置
+        decrypted_config = decrypt_extensions_sensitive_for_agent(config_payload or {})
         reload_env = e2a_from_agent_fields(
             request_id=f"agent-reload-{uuid.uuid4().hex[:8]}",
             channel_id="",
             req_method=ReqMethod.AGENT_RELOAD_CONFIG,
             params={
-                "config": dict(config_payload or {}),
+                "config": dict(decrypted_config or {}),
                 "env": dict(env_updates or {}),
             },
         )

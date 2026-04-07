@@ -30,6 +30,7 @@ from jiuwenclaw.config import (
     update_permissions_enabled_in_config,
     update_updater_in_config,
 )
+from jiuwenclaw.extensions.extension_config_sync import update_extensions_in_config
 from jiuwenclaw.jiuwen_core_patch import apply_openai_model_client_patch
 from jiuwenclaw.updater import WindowsUpdaterService
 from jiuwenclaw.utils import (
@@ -357,6 +358,25 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
                 logger.warning(
                     "[config.set] 写回 config.yaml 失败 %s: %s", param_key, e
                 )
+
+        ext_configs = params.get("extension_configs", None)
+        ext_security = params.get("extension_security_configs", None)
+        if not isinstance(ext_configs, str) and ext_configs is not None:
+            raise ValueError("extension_configs must be strings")
+        if not isinstance(ext_security, str) and ext_security is not None:
+            raise ValueError("extension_security_configs must be strings")
+        if ext_configs is not None or ext_security is not None:
+            try:
+                update_extensions_in_config(ext_configs, ext_security)
+                if ext_configs is not None:
+                    yaml_updated.append("extension_configs")
+                if ext_security is not None:
+                    yaml_updated.append("extension_security_configs")
+            except RuntimeError as e:
+                await channel.send_response(
+                    ws, req_id, ok=False, error=str(e), code="BAD_REQUEST",
+                )
+                return
 
         for env_key, value in env_updates.items():
             os.environ[env_key] = value
