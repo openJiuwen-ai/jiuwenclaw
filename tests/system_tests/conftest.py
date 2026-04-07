@@ -169,8 +169,8 @@ def verify_workspace_structure():
             workspace_dir / "agent" / "memory",
             workspace_dir / "agent" / "sessions",
             workspace_dir / "agent" / "workspace",
-            workspace_dir / ".checkpoint",
-            workspace_dir / ".logs",
+            workspace_dir / "agent" / ".checkpoint",
+            workspace_dir / "agent" / ".logs",
         ]
 
         for dir_path in expected_dirs:

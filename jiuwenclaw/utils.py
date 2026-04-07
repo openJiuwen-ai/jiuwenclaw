@@ -10,8 +10,8 @@ Runtime layout:
 - ~/.jiuwenclaw/agent/skills
 - ~/.jiuwenclaw/agent/sessions
 - ~/.jiuwenclaw/agent/workspace（运行时文件与 agent-data.json）
-- ~/.jiuwenclaw/.checkpoint
-- ~/.jiuwenclaw/.logs（gateway.log / channel.log / agent_server.log / full.log）
+- ~/.jiuwenclaw/agent/.checkpoint
+- ~/.jiuwenclaw/agent/.logs（gateway.log / channel.log / agent_server.log / full.log）
 
 内置模板位于包内 ``jiuwenclaw/resources/``（含 ``agent/`` 下 HEARTBEAT_ZH/EN、PRINCIPLE、TONE 等，以及 ``skills_state.json``）。
 """
@@ -245,8 +245,8 @@ def prepare_workspace(overwrite: bool = True, preferred_language: Optional[str] 
     agent_skills = agent_root / "skills"
     agent_memory = agent_root / "memory"
     agent_sessions = agent_root / "sessions"
-    (workspace_dir / ".checkpoint").mkdir(parents=True, exist_ok=True)
-    (workspace_dir / ".logs").mkdir(parents=True, exist_ok=True)
+    (agent_root / ".checkpoint").mkdir(parents=True, exist_ok=True)
+    (agent_root / ".logs").mkdir(parents=True, exist_ok=True)
 
     template_agent_workspace = template_agent_dir / "workspace"
     template_agent_memory = template_agent_dir / "memory"
@@ -437,12 +437,35 @@ def get_agent_sessions_dir() -> Path:
     return get_agent_root_dir() / "sessions"
 
 
+_legacy_migration_done: bool = False
+
+
+def _migrate_legacy_checkpoint_and_logs() -> None:
+    """One-time migration: move ~/.jiuwenclaw/.checkpoint and .logs to ~/.jiuwenclaw/agent/."""
+    global _legacy_migration_done
+    if _legacy_migration_done:
+        return
+    _legacy_migration_done = True
+
+    workspace = get_user_workspace_dir()
+    agent_root = workspace / "agent"
+
+    for name in (".checkpoint", ".logs"):
+        legacy = workspace / name
+        new_path = agent_root / name
+        if legacy.exists() and not new_path.exists():
+            agent_root.mkdir(parents=True, exist_ok=True)
+            shutil.move(str(legacy), str(new_path))
+
+
 def get_checkpoint_dir() -> Path:
-    return get_user_workspace_dir() / ".checkpoint"
+    _migrate_legacy_checkpoint_and_logs()
+    return get_agent_root_dir() / ".checkpoint"
 
 
 def get_logs_dir() -> Path:
-    return get_user_workspace_dir() / ".logs"
+    _migrate_legacy_checkpoint_and_logs()
+    return get_agent_root_dir() / ".logs"
 
 
 def get_xy_tmp_dir() -> Path:
@@ -474,7 +497,7 @@ def setup_logger(log_level: Optional[str] = None) -> logging.Logger:
     - ``jiuwenclaw.agentserver.*`` → agent_server.log
     - 其余 ``jiuwenclaw.*``（含 ``jiuwenclaw.app``、gateway、evolution、utils 等）→ gateway.log
 
-    所有分类日志同时写入 ``full.log``。输出目录：``~/.jiuwenclaw/.logs/``。
+    所有分类日志同时写入 ``full.log``。输出目录：``~/.jiuwenclaw/agent/.logs/``。
 
     级别由 ``config.yaml`` 的 ``logging`` 段控制；环境变量 ``LOG_LEVEL`` 仅覆盖**控制台**级别
     （``log_level`` 参数为 ``None`` 时）。若传入 ``log_level``（如单测），则控制台与各文件级别均为该值。
