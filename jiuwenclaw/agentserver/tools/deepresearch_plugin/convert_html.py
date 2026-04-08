@@ -319,6 +319,10 @@ EXTERNAL_LINK_RE = re.compile(
     r'<a\s+([^>]*?)href="(https?://[^"]+)"(?![^>]*\btarget=)([^>]*)>',
     flags=re.IGNORECASE,
 )
+CITATION_ANCHOR_RE = re.compile(
+    r'(?<!<sup class="citation">)(<a\b[^>]*href="https?://[^"]+"[^>]*>\[(\d+)\]</a>)',
+    flags=re.IGNORECASE,
+)
 
 
 @dataclass(slots=True)
@@ -738,12 +742,18 @@ def preprocess_markdown(text: str, options: ConvertOptions) -> str:
 def postprocess_html(html_text: str) -> str:
     def _repl(match: re.Match[str]) -> str:
         before = match.group(1).rstrip()
-        href = match.group(2)
+        href = re.sub(r"\s+", "", match.group(2))
         after = match.group(3).rstrip()
         attrs = " ".join(part for part in [before, f'href="{href}"', after] if part)
         return f'<a {attrs} target="_blank" rel="noopener noreferrer">'
 
-    return EXTERNAL_LINK_RE.sub(_repl, html_text)
+    def _wrap_citation(match: re.Match[str]) -> str:
+        return f'<sup class="citation">{match.group(1)}</sup>'
+
+    html_text = EXTERNAL_LINK_RE.sub(_repl, html_text)
+    html_text = CITATION_ANCHOR_RE.sub(_wrap_citation, html_text)
+    html_text = re.sub(r'[ \t]+(<sup class="citation">)', r"\1", html_text)
+    return re.sub(r'(</sup>)[ \t]+(<sup class="citation">)', r"\1\2", html_text)
 
 
 def convert_md_to_html(
