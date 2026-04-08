@@ -268,45 +268,72 @@ def replace_mermaid_blocks(
 ) -> str:
     block_counter = 0
 
+    def _build_fallback_block(code: str, supplement_markdown: str = "") -> str:
+        supplement_html = ""
+        if supplement_markdown.strip():
+            try:
+                supplement_html = render_mermaid_supplement(supplement_markdown)
+            except Exception as exc:
+                logger.warning(
+                    "Mermaid supplement rendering failed in offline HTML conversion; "
+                    "keeping only the source block. error=%s",
+                    exc,
+                )
+        escaped = html.escape(code)
+        return f'\n<pre><code class="language-mermaid">{escaped}</code></pre>{supplement_html}\n'
+
     def _repl(match: re.Match[str]) -> str:
         nonlocal block_counter
         raw_mermaid_code = match.group(1).strip()
-        mermaid_code, supplement_markdown = preprocess_mermaid_code(
-            raw_mermaid_code,
-            MermaidRenderOptions(
-                timeline_max_label_len=options.timeline_max_label_len,
-                scale_xychart=options.scale_xychart,
-                warn_on_invalid_number=options.warn_on_invalid_number,
-                show_xychart_value_labels=options.show_xychart_value_labels,
-            ),
-        )
-        supplement_html = render_mermaid_supplement(supplement_markdown)
-        xychart_metadata = None
-        if options.show_xychart_value_labels and looks_like_mermaid_xychart(mermaid_code.splitlines()):
-            xychart_metadata = extract_xychart_metadata(mermaid_code, warn_on_invalid=False)
-
-        svg_path = asset_dir / f"{asset_prefix}_mermaid_{block_counter}.svg"
-        debug_base_path = debug_dir / f"{debug_stem}_mermaid_{block_counter}"
+        block_id = block_counter
         block_counter += 1
+        debug_base_path = debug_dir / f"{debug_stem}_mermaid_{block_id}"
+        fallback_code = raw_mermaid_code
+        supplement_markdown = ""
 
-        if render_mermaid_offline(
-            mermaid_code,
-            svg_path,
-            output_format="svg",
-            debug_base_path=debug_base_path,
-        ):
-            cleanup_paths.append(svg_path)
-            svg_markup = load_svg_markup(svg_path)
-            if xychart_metadata and xychart_metadata.series:
-                svg_markup = annotate_xychart_svg(svg_markup, xychart_metadata)
-            return (
-                '\n<div class="mermaid-wrap"><div class="mermaid-rendered">'
-                f"{svg_markup}</div></div>{supplement_html}\n"
+        try:
+            mermaid_code, supplement_markdown = preprocess_mermaid_code(
+                raw_mermaid_code,
+                MermaidRenderOptions(
+                    timeline_max_label_len=options.timeline_max_label_len,
+                    scale_xychart=options.scale_xychart,
+                    warn_on_invalid_number=options.warn_on_invalid_number,
+                    show_xychart_value_labels=options.show_xychart_value_labels,
+                ),
+            )
+            fallback_code = mermaid_code
+
+            xychart_metadata = None
+            if options.show_xychart_value_labels and looks_like_mermaid_xychart(mermaid_code.splitlines()):
+                xychart_metadata = extract_xychart_metadata(mermaid_code, warn_on_invalid=False)
+
+            svg_path = asset_dir / f"{asset_prefix}_mermaid_{block_id}.svg"
+            if render_mermaid_offline(
+                mermaid_code,
+                svg_path,
+                output_format="svg",
+                debug_base_path=debug_base_path,
+            ):
+                cleanup_paths.append(svg_path)
+                svg_markup = load_svg_markup(svg_path)
+                if xychart_metadata and xychart_metadata.series:
+                    svg_markup = annotate_xychart_svg(svg_markup, xychart_metadata)
+                supplement_html = render_mermaid_supplement(supplement_markdown)
+                return (
+                    '\n<div class="mermaid-wrap"><div class="mermaid-rendered">'
+                    f"{svg_markup}</div></div>{supplement_html}\n"
+                )
+
+            logger.warning("Offline Mermaid rendering failed; keeping the source block in HTML output.")
+        except Exception as exc:
+            logger.warning(
+                "Mermaid block processing failed in offline HTML conversion; "
+                "keeping the source block. block=%s error=%s",
+                block_id,
+                exc,
             )
 
-        logger.warning("Offline Mermaid rendering failed; keeping the source block in HTML output.")
-        escaped = html.escape(mermaid_code)
-        return f'\n<pre><code class="language-mermaid">{escaped}</code></pre>{supplement_html}\n'
+        return _build_fallback_block(fallback_code, supplement_markdown)
 
     return MERMAID_BLOCK_RE.sub(_repl, text)
 

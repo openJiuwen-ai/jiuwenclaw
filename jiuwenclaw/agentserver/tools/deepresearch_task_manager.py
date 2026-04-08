@@ -9,9 +9,11 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import logging
 import os
+import re
 import secrets
 import time
 from dataclasses import dataclass
@@ -32,6 +34,7 @@ from jiuwenclaw.utils import get_env_file
 
 logger = logging.getLogger(__name__)
 SAVE_REPORT_PATH = "workspace/reports"
+INFERENCE_LINK_RE = re.compile(r"\[([^\]]+)\]\(#inference:(\d+)\)")
 
 
 class TaskStatus(str, Enum):
@@ -128,7 +131,7 @@ class DeepResearchTaskManager:
             "OUTLINER_MAX_SECTION_NUM": os.getenv("DEEPSEARCH_OUTLINER_MAX_SECTION_NUM", "10"),
             "WORKFLOW_HUMAN_IN_THE_LOOP": os.getenv("DEEPSEARCH_WORKFLOW_HUMAN_IN_THE_LOOP", "False"),
             "OUTLINE_INTERACTION_ENABLED": os.getenv("DEEPSEARCH_OUTLINE_INTERACTION_ENABLED", "False"),
-            "SOURCE_TRACER_INFER_SWITCHES": os.getenv("DEEPSEARCH_SOURCE_TRACER_INFER_SWITCHES", "False"),
+            "SOURCE_TRACER_INFER_SWITCHES": os.getenv("DEEPSEARCH_SOURCE_TRACER_INFER_SWITCHES", "True"),
         }
         # logger.info("[DeepResearchTaskManager] 加载 DeepResearch 配置: %s", config)
         return config
@@ -151,6 +154,175 @@ class DeepResearchTaskManager:
             )
 
         return True, "配置验证通过"
+
+    @staticmethod
+    def _strip_known_suffix(file_name: str) -> str:
+        """移除已知后缀，避免重复拼接扩展名."""
+        base_name = file_name
+        for suffix in [".md", ".html", ".docx", ".txt"]:
+            if base_name.lower().endswith(suffix.lower()):
+                return base_name[:-len(suffix)]
+        return base_name
+
+    @staticmethod
+    def _collect_inference_html(infer_messages: Any) -> dict[str, str]:
+        """解析 infer_messages，返回可写入文件的 HTML 映射."""
+        if not isinstance(infer_messages, list):
+            return {}
+
+        html_map: dict[str, str] = {}
+        for item in infer_messages:
+            if not isinstance(item, dict):
+                continue
+
+            infer_id = str(item.get("id", "")).strip()
+            html_base64 = item.get("html_base64", "")
+            if not infer_id or not html_base64:
+                continue
+
+            try:
+                html_content = base64.b64decode(html_base64).decode("utf-8")
+            except Exception as exc:
+                logger.warning(
+                    "[DeepResearchTaskManager] Failed to decode inference html. infer_id=%s error=%s",
+                    infer_id,
+                    exc,
+                )
+                continue
+
+            if html_content.strip():
+                html_map[infer_id] = html_content
+        return html_map
+
+    @staticmethod
+    def _write_inference_html_files(report_file: str, infer_messages: Any) -> str | None:
+        """将溯源推理图写入独立 HTML 文件，返回目录路径."""
+        html_map = DeepResearchTaskManager._collect_inference_html(infer_messages)
+        if not html_map:
+            return None
+
+        infer_dir = f"{report_file}_infer"
+        os.makedirs(infer_dir, exist_ok=True)
+        for infer_id, html_content in html_map.items():
+            infer_file = os.path.join(infer_dir, f"inference_{infer_id}.html")
+            with open(infer_file, "w", encoding="utf-8") as f:
+                f.write(html_content)
+        return infer_dir
+
+    @staticmethod
+    def _replace_inference_links(report_content: str, infer_dir: str | None) -> str:
+        """将 #inference:N 链接替换为本地 HTML 超链接."""
+        infer_dir_name = os.path.basename(infer_dir) if infer_dir else ""
+
+        def repl(match: re.Match[str]) -> str:
+            label = match.group(1)
+            infer_id = match.group(2)
+            if not infer_dir_name or not infer_dir:
+                return label
+
+            infer_path = os.path.join(infer_dir, f"inference_{infer_id}.html")
+            if not os.path.exists(infer_path):
+                return label
+
+            relative_link = os.path.join(infer_dir_name, f"inference_{infer_id}.html").replace("\\", "/")
+            return f"[{label}]({relative_link})"
+
+        return INFERENCE_LINK_RE.sub(repl, report_content)
+
+    @staticmethod
+    def _build_report_content(data: Any, report_file: str) -> tuple[str, str | None]:
+        """根据 DeepResearch 结果构建最终落盘的报告内容."""
+        infer_dir = None
+        if isinstance(data, dict) and "response_content" in data:
+            report_content = data.get("response_content", "")
+            if report_content == "":
+                raise ValueError("response_content is empty")
+
+            try:
+                infer_dir = DeepResearchTaskManager._write_inference_html_files(
+                    report_file,
+                    data.get("infer_messages", []),
+                )
+            except Exception as exc:
+                logger.warning(
+                    "[DeepResearchTaskManager] Failed to write inference html files. "
+                    "report_file=%s error=%s",
+                    report_file,
+                    exc,
+                )
+                infer_dir = None
+            report_content = DeepResearchTaskManager._replace_inference_links(report_content, infer_dir)
+            return report_content, infer_dir
+
+        if isinstance(data, dict):
+            return json.dumps(data, ensure_ascii=False, indent=2), infer_dir
+        return str(data), infer_dir
+
+    @staticmethod
+    def _write_report_artifacts(
+        data: Any,
+        file_name: str,
+        output_dir: str = SAVE_REPORT_PATH,
+        *,
+        task_id: str = "",
+    ) -> dict[str, str]:
+        """写出 markdown/html/docx 报告及推理图目录."""
+        os.makedirs(output_dir, exist_ok=True)
+
+        base_name = DeepResearchTaskManager._strip_known_suffix(file_name)
+        report_file = os.path.join(output_dir, f"report_{base_name}")
+        report_file_md = f"{report_file}.md"
+        report_file_html = f"{report_file}.html"
+        report_file_docx = f"{report_file}.docx"
+
+        report_content, infer_dir = DeepResearchTaskManager._build_report_content(data, report_file)
+
+        with open(report_file_md, "w", encoding="utf-8") as f:
+            f.write(report_content)
+
+        artifacts = {"md": report_file_md}
+        if infer_dir:
+            artifacts["infer_dir"] = infer_dir
+
+        try:
+            convert_md_to_html(report_file_md, report_file_html)
+        except Exception as exc:
+            logger.warning(
+                "[DeepResearchTaskManager] Optional html report generation failed. "
+                "task_id=%s output=%s error=%s",
+                task_id,
+                report_file_html,
+                exc,
+            )
+        else:
+            artifacts["html"] = report_file_html
+
+        try:
+            convert_md_to_docx(report_file_md, report_file_docx)
+        except Exception as exc:
+            logger.warning(
+                "[DeepResearchTaskManager] Optional docx report generation failed. "
+                "task_id=%s output=%s error=%s",
+                task_id,
+                report_file_docx,
+                exc,
+            )
+        else:
+            artifacts["docx"] = report_file_docx
+
+        return artifacts
+
+    @staticmethod
+    def _format_report_result(report_paths: dict[str, str]) -> str:
+        """鏍规嵁鎴愬姛鐢熸垚鐨勪骇鐗╃粍瑁呯粨鏋滄枃妗?"""
+        parts = [f"markdown报告已保存到{report_paths['md']}"]
+        if report_paths.get("html"):
+            parts.append(f"html报告已保存到{report_paths['html']}")
+        if report_paths.get("docx"):
+            parts.append(f"docx报告已保存到{report_paths['docx']}")
+        if report_paths.get("infer_dir"):
+            parts.append(f"溯源推理图已保存到{report_paths['infer_dir']}")
+        return "; ".join(parts)
 
     async def _run_jiuwen_workflow(self, query: str, agent_config: Dict, report_template: str) -> Any:
         """运行 openJiuwen-DeepResearch 工作流."""
@@ -239,42 +411,25 @@ class DeepResearchTaskManager:
             data = await self._run_jiuwen_workflow(query, current_agent_config, "")
 
             if data:
-                output_dir = SAVE_REPORT_PATH
-                os.makedirs(output_dir, exist_ok=True)
-                
-                # 移除 file_name 中已有的后缀（如 .md），避免重复添加
-                base_name = file_name
-                for suffix in ['.md', '.html', '.docx', '.txt']:
-                    if base_name.lower().endswith(suffix.lower()):
-                        base_name = base_name[:-len(suffix)]
-                        break
-                
-                report_file = os.path.join(output_dir, f"report_{base_name}")
-                report_file_md = f"{report_file}.md"
-                report_file_html = f"{report_file}.html"
-                report_file_docx = f"{report_file}.docx"
-
-                if isinstance(data, dict) and "response_content" in data:
-                    if data.get("response_content", "") != "":
-                        report_content = data["response_content"]
-                    else:
-                        raise ValueError("response_content is empty")
-                elif isinstance(data, dict):
-                    report_content = json.dumps(data, ensure_ascii=False, indent=2)
-                else:
-                    report_content = str(data)
-
-                with open(report_file_md, "w", encoding="utf-8") as f:
-                    f.write(report_content)
-                convert_md_to_html(report_file_md, report_file_html)
-                convert_md_to_docx(report_file_md, report_file_docx)
-
-                result = (
-                    f"markdown报告已保存到{report_file_md}; "
-                    f"html报告已保存到{report_file_html}; "
-                    f"docx报告已保存到{report_file_docx}"
+                report_paths = await asyncio.to_thread(
+                    self._write_report_artifacts,
+                    data,
+                    file_name,
+                    SAVE_REPORT_PATH,
+                    task_id=task_id,
                 )
+                result = self._format_report_result(report_paths)
 
+                """
+                    result = (
+                    f"markdown报告已保存到{report_paths['md']}; "
+                    f"html报告已保存到{report_paths['html']}; "
+                    f"docx报告已保存到{report_paths['docx']}"
+                )
+                    if report_paths["infer_dir"]:
+                    result += f"; 溯源推理图已保存到{report_paths['infer_dir']}"
+
+                """
                 task.status = TaskStatus.COMPLETED
                 task.result = result
                 logger.info(
@@ -540,6 +695,32 @@ class DeepResearchTaskManager:
             return None
 
         return task.result
+
+    async def run_task_and_wait(
+        self,
+        query: str,
+        file_name: str,
+        session_id: str = "",
+        channel_id: str = "",
+        request_id: str = "",
+    ) -> Dict[str, Any]:
+        """创建任务并等待执行结束，适合 CLI 或脚本入口直接调用."""
+        task_id = await self.create_task(
+            query=query,
+            file_name=file_name,
+            session_id=session_id,
+            channel_id=channel_id,
+            request_id=request_id,
+        )
+
+        task_handle = self._task_handles.get(task_id)
+        if task_handle is not None:
+            await asyncio.gather(task_handle, return_exceptions=True)
+
+        task_info = await self.get_task_status(task_id)
+        if task_info is None:
+            raise RuntimeError(f"DeepResearch task not found after execution: {task_id}")
+        return task_info
 
 
 

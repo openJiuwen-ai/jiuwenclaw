@@ -48,31 +48,39 @@ def replace_mermaid_blocks(
     def repl(match: re.Match[str]) -> str:
         stats.total += 1
         block_index = stats.total - 1
-        raw_mermaid_code = match.group(1).strip()
-        mermaid_code, supplement_markdown = preprocess_mermaid_code(
-            raw_mermaid_code,
-            MermaidRenderOptions(),
-        )
-        xychart_metadata = None
-        if looks_like_mermaid_xychart(mermaid_code.splitlines()):
-            xychart_metadata = extract_xychart_metadata(mermaid_code, warn_on_invalid=False)
+        try:
+            raw_mermaid_code = match.group(1).strip()
+            mermaid_code, supplement_markdown = preprocess_mermaid_code(
+                raw_mermaid_code,
+                MermaidRenderOptions(),
+            )
+            xychart_metadata = None
+            if looks_like_mermaid_xychart(mermaid_code.splitlines()):
+                xychart_metadata = extract_xychart_metadata(mermaid_code, warn_on_invalid=False)
 
-        img_name = f"{asset_prefix}_mermaid_{block_index}.png"
-        img_path = tmp_dir / img_name
-        debug_base_path = debug_dir / f"{debug_stem}_mermaid_{block_index}"
+            img_name = f"{asset_prefix}_mermaid_{block_index}.png"
+            img_path = tmp_dir / img_name
+            debug_base_path = debug_dir / f"{debug_stem}_mermaid_{block_index}"
 
-        if render_mermaid_png(
-            mermaid_code,
-            str(img_path),
-            debug_base_path=debug_base_path,
-            xychart_metadata=xychart_metadata,
-        ):
-            cleanup_paths.append(img_path)
-            stats.success += 1
-            supplement = f"\n\n{supplement_markdown}\n" if supplement_markdown.strip() else ""
-            return f"\n\n![diagram](<{img_name}>)\n{supplement}\n"
+            if render_mermaid_png(
+                mermaid_code,
+                str(img_path),
+                debug_base_path=debug_base_path,
+                xychart_metadata=xychart_metadata,
+            ):
+                cleanup_paths.append(img_path)
+                stats.success += 1
+                supplement = f"\n\n{supplement_markdown}\n" if supplement_markdown.strip() else ""
+                return f"\n\n![diagram](<{img_name}>)\n{supplement}\n"
 
-        logger.warning("Mermaid render failed; keeping the original code block.")
+            logger.warning("Mermaid render failed; keeping the original code block.")
+        except Exception as exc:
+            logger.warning(
+                "Mermaid block processing failed in DOCX conversion; "
+                "keeping the original code block. block=%s error=%s",
+                block_index,
+                exc,
+            )
         stats.failed += 1
         return match.group(0)
 

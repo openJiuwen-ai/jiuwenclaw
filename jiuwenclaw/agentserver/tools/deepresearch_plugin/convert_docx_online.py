@@ -27,36 +27,63 @@ def render_mermaid_png(
     xychart_metadata=None,
 ) -> bool:
     output_file = Path(output_path)
-    success = render_mermaid_online(
-        code,
-        output_file,
-        output_format="png",
-        debug_base_path=debug_base_path,
-    )
+    try:
+        success = render_mermaid_online(
+            code,
+            output_file,
+            output_format="png",
+            debug_base_path=debug_base_path,
+        )
+    except Exception as exc:
+        logger.warning(
+            "Mermaid PNG rendering raised; keeping the original Mermaid block. error=%s",
+            exc,
+        )
+        return False
     if not success:
         return False
 
-    enhance_image(str(output_file))
+    try:
+        enhance_image(str(output_file))
+    except Exception as exc:
+        logger.warning(
+            "Mermaid PNG post-processing failed; using the raw rendered image. error=%s",
+            exc,
+        )
 
     if not xychart_metadata or not xychart_metadata.series:
         return True
 
     svg_path = output_file.parent / f".tmp_{output_file.stem}_{uuid.uuid4().hex}.svg"
     try:
-        if not render_mermaid_online(
-            code,
-            svg_path,
-            output_format="svg",
-            debug_base_path=debug_base_path,
-        ):
+        try:
+            rendered_svg = render_mermaid_online(
+                code,
+                svg_path,
+                output_format="svg",
+                debug_base_path=debug_base_path,
+            )
+        except Exception as exc:
+            logger.warning(
+                "Mermaid SVG overlay rendering failed; using the PNG without labels. error=%s",
+                exc,
+            )
+            return True
+        if not rendered_svg:
             return True
 
-        svg_markup = load_svg_markup(svg_path)
-        overlay_xychart_value_labels_on_png(
-            str(output_file),
-            svg_markup,
-            xychart_metadata,
-        )
+        try:
+            svg_markup = load_svg_markup(svg_path)
+            overlay_xychart_value_labels_on_png(
+                str(output_file),
+                svg_markup,
+                xychart_metadata,
+            )
+        except Exception as exc:
+            logger.warning(
+                "Mermaid PNG label overlay failed; using the PNG without labels. error=%s",
+                exc,
+            )
     finally:
         svg_path.unlink(missing_ok=True)
 
