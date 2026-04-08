@@ -639,6 +639,16 @@ class MessageHandler(ABC):
             )
             return
 
+        if isinstance(chunk.payload, dict) and chunk.payload.get("event_type") == "deepresearch.task_completed":
+            await self._handle_deepresearch_task_push_payload(
+                payload=dict(chunk.payload),
+                request_id=rid,
+                channel_id=chunk.channel_id,
+                session_id=session_id,
+                metadata=bus_metadata,
+            )
+            return
+
         # 检查是否是文件下载事件（AgentServer -> Gateway 的文件传输）
         payload = chunk.payload or {}
         if isinstance(payload, dict):
@@ -723,6 +733,60 @@ class MessageHandler(ABC):
             metadata=metadata,
         )
         await self.publish_robot_messages(out)
+
+    async def _handle_deepresearch_task_push_payload(
+        self,
+        *,
+        payload: dict[str, Any],
+        request_id: str,
+        channel_id: str,
+        session_id: str | None,
+        metadata: dict[str, Any] | None,
+    ) -> None:
+        """处理 DeepResearch 任务完成推送。
+        
+        将 DeepResearch 任务完成事件转换为 Message 并推送到 robot_messages 队列。
+        """
+        from jiuwenclaw.schema.message import EventType, Message
+        
+        task_id = payload.get("task_id", "")
+        query = payload.get("query", "")
+        status = payload.get("status", "")
+        result = payload.get("result", "")
+        created_at = payload.get("created_at")
+        started_at = payload.get("started_at")
+        completed_at = payload.get("completed_at")
+        
+        out = Message(
+            id=request_id,
+            type="event",
+            channel_id=channel_id,
+            session_id=session_id,
+            params={},
+            timestamp=time.time(),
+            ok=True,
+            payload={
+                "event_type": "chat.tool_result",
+                "tool_name": "deepresearch",
+                "result": {
+                    "task_id": task_id,
+                    "query": query,
+                    "status": status,
+                    "result": result,
+                    "created_at": created_at,
+                    "started_at": started_at,
+                    "completed_at": completed_at,
+                },
+            },
+            event_type=EventType.CHAT_TOOL_RESULT,
+            metadata=metadata,
+        )
+        await self.publish_robot_messages(out)
+        logger.info(
+            "[MessageHandler] DeepResearch 任务完成推送已处理：task_id=%s status=%s",
+            task_id,
+            status,
+        )
 
     @staticmethod
     def _chunk_to_message(

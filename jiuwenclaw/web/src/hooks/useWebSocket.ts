@@ -35,6 +35,7 @@ import {
 import {
   normalizeToolCallPayload,
   normalizeToolResultPayload,
+  tryDeepResearchStandaloneAssistantTurn,
 } from '../features/tool-events/toolEventNormalizer';
 
 const WS_RECONNECT_EVENT = 'jiuwenclaw:ws-reconnect-request';
@@ -625,6 +626,21 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
       webClient.on('chat.tool_result', ({ payload }) => {
         if (!shouldHandleSessionEvent(payload)) return;
         if (shouldDropDuplicatedEvent('chat.tool_result', payload)) return;
+        const standalone = tryDeepResearchStandaloneAssistantTurn(
+          payload as Record<string, unknown>,
+        );
+        if (standalone) {
+          const { messages } = useChatStore.getState();
+          if (!messages.some((m) => m.id === standalone.messageId)) {
+            addMessage({
+              id: standalone.messageId,
+              role: 'assistant',
+              content: standalone.content,
+              timestamp: new Date().toISOString(),
+            });
+          }
+          return;
+        }
         addToolResult(normalizeToolResultPayload(payload));
       }),
       webClient.on('todo.updated', ({ payload }) => {

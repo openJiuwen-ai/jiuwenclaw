@@ -492,7 +492,18 @@ class WebChannel(BaseChannel):
         data = json.dumps(frame, ensure_ascii=False)
         if not self._clients:
             return
-        await asyncio.gather(*[client.send(data) for client in list(self._clients)], return_exceptions=True)
+        results = await asyncio.gather(
+            *[client.send(data) for client in list(self._clients)],
+            return_exceptions=True,
+        )
+        for idx, res in enumerate(results):
+            if isinstance(res, BaseException):
+                logger.warning(
+                    "WebChannel _broadcast 发送失败 client_index=%s error=%s",
+                    idx,
+                    res,
+                    exc_info=isinstance(res, Exception),
+                )
 
     @staticmethod
     def _parse_req_method(method: str) -> ReqMethod | None:

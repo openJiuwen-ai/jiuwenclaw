@@ -30,6 +30,7 @@ import {
 import {
   normalizeToolCallPayload,
   normalizeToolResultPayload,
+  tryDeepResearchStandaloneAssistantTurn,
 } from './features/tool-events/toolEventNormalizer';
 import { useWebSocket } from './hooks';
 import { webRequest } from './services/webClient';
@@ -576,17 +577,27 @@ function AppContent() {
               { startedAt: item.at }
             );
           } else {
-            const n = normalizeToolResultPayload(item.payload);
-            addToolResult(
-              {
-                toolName: n.toolName,
-                result: n.result,
-                success: n.success,
-                toolCallId: n.toolCallId,
-                summary: n.summary,
-              },
-              { updatedAt: item.at }
-            );
+            const standalone = tryDeepResearchStandaloneAssistantTurn(item.payload);
+            if (standalone) {
+              addMessage({
+                id: standalone.messageId,
+                role: 'assistant',
+                content: standalone.content,
+                timestamp: item.at,
+              });
+            } else {
+              const n = normalizeToolResultPayload(item.payload);
+              addToolResult(
+                {
+                  toolName: n.toolName,
+                  result: n.result,
+                  success: n.success,
+                  toolCallId: n.toolCallId,
+                  summary: n.summary,
+                },
+                { updatedAt: item.at }
+              );
+            }
           }
         }
       },
@@ -762,17 +773,27 @@ function AppContent() {
               { startedAt: item.at }
             );
           } else {
-            const n = normalizeToolResultPayload(item.payload);
-            addToolResult(
-              {
-                toolName: n.toolName,
-                result: n.result,
-                success: n.success,
-                toolCallId: n.toolCallId,
-                summary: n.summary,
-              },
-              { updatedAt: item.at }
-            );
+            const standalone = tryDeepResearchStandaloneAssistantTurn(item.payload);
+            if (standalone) {
+              addMessage({
+                id: standalone.messageId,
+                role: 'assistant',
+                content: standalone.content,
+                timestamp: item.at,
+              });
+            } else {
+              const n = normalizeToolResultPayload(item.payload);
+              addToolResult(
+                {
+                  toolName: n.toolName,
+                  result: n.result,
+                  success: n.success,
+                  toolCallId: n.toolCallId,
+                  summary: n.summary,
+                },
+                { updatedAt: item.at }
+              );
+            }
           }
         }
         setHistoryPagerMeta({
@@ -813,6 +834,7 @@ function AppContent() {
       setHistoryLoadingMore(false);
     }
   }, [
+    addMessage,
     addToolCall,
     addToolResult,
     historyLoadingMore,

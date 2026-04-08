@@ -3,10 +3,53 @@
 """DeepResearch tools implemented with openjiuwen @tool style."""
 
 from __future__ import annotations
+import contextvars
 import json
 
 from openjiuwen.core.foundation.tool import tool
 from jiuwenclaw.agentserver.tools.deepresearch_task_manager import DeepResearchTaskManager
+
+# 使用 contextvars
+_deepresearch_route_ctx: contextvars.ContextVar[dict[str, str] | None] = contextvars.ContextVar(
+    "jiuwenclaw_deepresearch_route", default=None
+)
+
+
+def push_deepresearch_route(request_id: str, channel_id: str, session_id: str) -> contextvars.Token:
+    """设置 DeepResearch 路由上下文。
+    
+    Args:
+        request_id: 请求 ID
+        channel_id: 渠道 ID
+        session_id: 会话 ID
+        
+    Returns:
+        contextvars.Token，用于恢复上下文
+    """
+    return _deepresearch_route_ctx.set({
+        "request_id": request_id,
+        "channel_id": channel_id,
+        "session_id": session_id,
+    })
+
+
+def reset_deepresearch_route(token: contextvars.Token) -> None:
+    """恢复 DeepResearch 路由上下文。
+    
+    Args:
+        token: contextvars.Token
+    """
+    _deepresearch_route_ctx.reset(token)
+
+
+def _get_route() -> dict[str, str]:
+    """获取当前路由上下文。
+    
+    Returns:
+        包含 request_id、channel_id、session_id 的字典
+    """
+    route = _deepresearch_route_ctx.get()
+    return route if route is not None else {"request_id": "", "channel_id": "", "session_id": ""}
 
 
 @tool(
@@ -31,12 +74,13 @@ async def deepresearch_create_task(
         任务 ID
     """
     manager = await DeepResearchTaskManager.get_instance()
+    route = _get_route()
     task_id = await manager.create_task(
         query=query,
         file_name=file_name,
-        session_id="",
-        channel_id="",
-        request_id="",
+        session_id=route.get("session_id", ""),
+        channel_id=route.get("channel_id", ""),
+        request_id=route.get("request_id", ""),
     )
     return f"已创建 DeepResearch 任务，任务 ID: {task_id}"
 

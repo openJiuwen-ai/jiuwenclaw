@@ -31,6 +31,8 @@ from openjiuwen_deepsearch.framework.openjiuwen.agent.workflow import parse_endn
 from jiuwenclaw.agentserver.tools.deepresearch_plugin.convert_docx_online import convert_md_to_docx
 from jiuwenclaw.agentserver.tools.deepresearch_plugin.convert_html_online import convert_md_to_html
 from jiuwenclaw.utils import get_env_file
+from jiuwenclaw.agentserver.gateway_push import GatewayPushTransport, WebSocketGatewayPushTransport
+
 
 logger = logging.getLogger(__name__)
 SAVE_REPORT_PATH = "workspace/reports"
@@ -93,6 +95,7 @@ class DeepResearchTaskManager:
         self._tasks: Dict[str, DeepResearchTask] = {}
         self._task_handles: Dict[str, asyncio.Task] = {}
         self._initialized = True
+        self._gateway_push: GatewayPushTransport = WebSocketGatewayPushTransport()
         logger.info("[DeepResearchTaskManager] 初始化完成（全局单例）")
 
     @classmethod
@@ -270,7 +273,7 @@ class DeepResearchTaskManager:
         os.makedirs(output_dir, exist_ok=True)
 
         base_name = DeepResearchTaskManager._strip_known_suffix(file_name)
-        report_file = os.path.join(output_dir, f"report_{base_name}")
+        report_file = os.path.join(output_dir, f"report_{base_name}").replace("\\", "/")
         report_file_md = f"{report_file}.md"
         report_file_html = f"{report_file}.html"
         report_file_docx = f"{report_file}.docx"
@@ -314,15 +317,15 @@ class DeepResearchTaskManager:
 
     @staticmethod
     def _format_report_result(report_paths: dict[str, str]) -> str:
-        """鏍规嵁鎴愬姛鐢熸垚鐨勪骇鐗╃粍瑁呯粨鏋滄枃妗?"""
-        parts = [f"markdown报告已保存到{report_paths['md']}"]
+        """生成格式化后的报告结果路径字符串."""
+        parts = [f"markdown报告已保存到{report_paths['md']}\n"]
         if report_paths.get("html"):
-            parts.append(f"html报告已保存到{report_paths['html']}")
+            parts.append(f"html报告已保存到{report_paths['html']}\n")
         if report_paths.get("docx"):
-            parts.append(f"docx报告已保存到{report_paths['docx']}")
+            parts.append(f"docx报告已保存到{report_paths['docx']}\n")
         if report_paths.get("infer_dir"):
-            parts.append(f"溯源推理图已保存到{report_paths['infer_dir']}")
-        return "; ".join(parts)
+            parts.append(f"溯源推理图已保存到{report_paths['infer_dir']}\n")
+        return "".join(parts)
 
     async def _run_jiuwen_workflow(self, query: str, agent_config: Dict, report_template: str) -> Any:
         """运行 openJiuwen-DeepResearch 工作流."""
@@ -349,12 +352,19 @@ class DeepResearchTaskManager:
         task_id: str,
         query: str,
         file_name: str,
-        **kwargs,
     ) -> None:
         """执行 DeepResearch 任务（后台协程）."""
         task = self._tasks[task_id]
         task.started_at = time.time()
         task.status = TaskStatus.RUNNING
+
+        logger.debug(
+            "[DeepResearchTaskManager] 任务路由信息 task_id=%s channel_id=%s session_id=%s request_id=%s",
+            task_id,
+            task.channel_id,
+            task.session_id,
+            task.request_id,
+        )
 
         logger.info(
             "[DeepResearchTaskManager] 开始执行任务 task_id=%s query=%s",
@@ -366,7 +376,7 @@ class DeepResearchTaskManager:
         try:
             # 1. 加载配置
             config = DeepResearchTaskManager._load_config()
-            
+
             # 2. 验证配置
             config_valid, config_msg = DeepResearchTaskManager._validate_config(config)
             if not config_valid:
@@ -470,16 +480,6 @@ class DeepResearchTaskManager:
 
     async def _notify_completion(self, task: DeepResearchTask) -> None:
         """通过 WebSocket 发送任务完成通知."""
-        try:
-            from jiuwenclaw.agentserver.agent_ws_server import AgentWebSocketServer
-            server = AgentWebSocketServer.get_instance()
-        except RuntimeError as e:
-            logger.warning(
-                "[DeepResearchTaskManager] WebSocketServer 未初始化，跳过通知: %s",
-                e,
-            )
-            return
-
         if task.status == TaskStatus.COMPLETED:
             payload_status = "completed"
             message = task.result
@@ -516,7 +516,7 @@ class DeepResearchTaskManager:
         )
 
         try:
-            await server.send_push(msg)
+            await self._gateway_push.send_push(msg)
         except Exception as exc:
             logger.warning(
                 "[DeepResearchTaskManager] 发送 WebSocket 通知失败 task_id=%s error=%s",
@@ -559,23 +559,22 @@ class DeepResearchTaskManager:
 
         self._tasks[task_id] = task
 
-        # 创建后台协程
+        # 创建后台协程，显式传递路由参数
         coro = self._execute_task(
             task_id=task_id,
             query=query,
             file_name=file_name,
-            session_id=session_id,
-            channel_id=channel_id,
-            request_id=request_id,
         )
         task_handle = asyncio.create_task(coro)
         self._task_handles[task_id] = task_handle
 
         logger.info(
-            "[DeepResearchTaskManager] 创建深度研究任务：%s task_id=%s query=%s",
+            "[DeepResearchTaskManager] 创建深度研究任务：%s task_id=%s query=%s channel_id=%s session_id=%s",
             file_name,
             task_id,
             query[:80] + "..." if len(query) > 80 else query,
+            channel_id,
+            session_id,
             extra={'user_visible': 'critical'}
         )
 

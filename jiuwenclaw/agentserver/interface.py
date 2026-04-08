@@ -1444,6 +1444,13 @@ class JiuWenClaw:
                 metadata=request.metadata,
             )
             cron_route_tok = self._cron_tools.push_cron_route(self._cron_tool_route_for_ctx(ctx))
+            from jiuwenclaw.agentserver.tools.deepresearch_tools import (push_deepresearch_route,
+                                                                         reset_deepresearch_route)
+            deepresearch_route_tok = push_deepresearch_route(
+                request_id=request.request_id or "",
+                channel_id=request.channel_id or "",
+                session_id=request.session_id or "",
+            )
             try:
                 await self._register_runtime_tools(ctx)
                 return await Runner.run_agent(agent=self._instance, inputs=inputs)
@@ -1455,6 +1462,7 @@ class JiuWenClaw:
                 raise
             finally:
                 self._cron_tools.reset_cron_route(cron_route_tok)
+                reset_deepresearch_route(deepresearch_route_tok)
                 TOOL_PERMISSION_CHANNEL_ID.reset(token_cid)
 
         # 包装任务，完成后将结果放入 future
@@ -1614,6 +1622,13 @@ class JiuWenClaw:
                 metadata=request.metadata,
             )
             cron_route_tok = self._cron_tools.push_cron_route(self._cron_tool_route_for_ctx(ctx))
+            from jiuwenclaw.agentserver.tools.deepresearch_tools import (push_deepresearch_route,
+                                                                          reset_deepresearch_route)
+            deepresearch_route_tok = push_deepresearch_route(
+                request_id=request.request_id or "",
+                channel_id=request.channel_id or "",
+                session_id=request.session_id or "",
+            )
             try:
                 await self._register_runtime_tools(ctx)
                 async for chunk in Runner.run_agent_streaming(self._instance, inputs):
@@ -1629,6 +1644,7 @@ class JiuWenClaw:
                 await stream_queue.put(("error", exc))
             finally:
                 self._cron_tools.reset_cron_route(cron_route_tok)
+                reset_deepresearch_route(deepresearch_route_tok)
                 TOOL_PERMISSION_CHANNEL_ID.reset(token_cid)
                 stream_done.set()
 
