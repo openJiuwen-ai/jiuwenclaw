@@ -60,7 +60,7 @@ async def test_runtime_time_section_participates_in_priority_order():
     ]
     positions = [prompt.index(marker) for marker in ordered_markers]
     assert positions == sorted(positions)
-    assert "频道: web" in prompt
+    assert "运行时：agent=main_agent | model=test-model | channel=web | language=cn" in prompt
 
 
 def test_resolve_skill_mode_accepts_all_and_auto_list():
