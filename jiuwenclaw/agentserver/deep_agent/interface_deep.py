@@ -443,6 +443,82 @@ class JiuWenClawDeepAdapter:
 
         return subagents or None
 
+    @staticmethod
+    def _is_subagent_enabled(subagent_cfg: Any) -> bool:
+        """Treat only explicit `enabled: true` as enabled."""
+        return isinstance(subagent_cfg, dict) and bool(subagent_cfg.get("enabled", False))
+
+    def _build_configured_subagents(
+            self,
+            model: Model,
+            config: dict[str, Any],
+            config_base: dict[str, Any] | None = None,
+    ) -> list[Any] | None:
+        """Build configured code/research subagents plus default browser subagent."""
+        react_cfg = config if isinstance(config, dict) else {}
+        subagents_cfg = react_cfg.get("subagents")
+
+        resolved_language = self._resolve_runtime_language()
+        workspace = self._workspace_dir or "./"
+        subagents: list[Any] = []
+
+        if isinstance(subagents_cfg, dict):
+            code_agent_cfg = subagents_cfg.get("code_agent")
+            if self._is_subagent_enabled(code_agent_cfg):
+                subagents.append(
+                    build_code_agent_config(
+                        model,
+                        workspace=workspace,
+                        language=resolved_language,
+                        max_iterations=_parse_int(
+                            code_agent_cfg.get("max_iterations"),
+                            react_cfg.get("max_iterations", 15),
+                        ),
+                    )
+                )
+
+            research_agent_cfg = subagents_cfg.get("research_agent")
+            if self._is_subagent_enabled(research_agent_cfg):
+                subagents.append(
+                    build_research_agent_config(
+                        model,
+                        workspace=workspace,
+                        language=resolved_language,
+                        max_iterations=_parse_int(
+                            research_agent_cfg.get("max_iterations"),
+                            react_cfg.get("max_iterations", 15),
+                        ),
+                    )
+                )
+
+        browser_agent_cfg = subagents_cfg.get("browser_agent") if isinstance(subagents_cfg, dict) else {}
+        browser_enabled = self._browser_runtime_enabled()
+        if browser_enabled:
+            if not str(os.getenv("BROWSER_DRIVER") or "").strip():
+                os.environ["BROWSER_DRIVER"] = "managed"
+                logger.info(
+                    "[JiuWenClawDeepAdapter] browser subagent enabled without BROWSER_DRIVER; "
+                    "defaulting to managed mode"
+                )
+            subagents.append(
+                build_browser_agent_config(
+                    model,
+                    workspace=workspace,
+                    language=resolved_language,
+                    max_iterations=_parse_int(
+                        browser_agent_cfg.get("max_iterations") if isinstance(browser_agent_cfg, dict) else None,
+                        react_cfg.get("max_iterations", 15),
+                    )
+                )
+            )
+        elif isinstance(subagents_cfg, dict) and isinstance(browser_agent_cfg, dict) and browser_agent_cfg:
+            logger.info(
+                "[JiuWenClawDeepAdapter] browser_agent config detected but browser runtime is not enabled; "
+                "skipping browser subagent registration"
+            )
+
+        return subagents or None
+
     def _build_vision_model_config(
             self,
             config_base: dict[str, Any],
