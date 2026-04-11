@@ -28,7 +28,7 @@ def _build_parser() -> argparse.ArgumentParser:
 
 def _run_acp(args: argparse.Namespace) -> int:
     argv = list(args.args or [])
-    logger.info("[CLI] acp 子命令收到参数: %s", argv)
+    logger.info("[CLI] acp 子命令收到参数，参数数量: %d", len(argv))
     channel = AcpChannel(AcpChannelConfig(), RobotMessageRouter())
     output = channel.intercept_cli_output(argv)
     print(output)

@@ -38,8 +38,8 @@ def decrypt(name, cipher):
             is_need_decrypt = "api_key" in name.lower() or "token" in name.lower()
             if is_need_decrypt and crypto:
                 return crypto.decrypt(cipher)
-        except Exception as e:
-            logger.warning(f"Decryption failed exception: {e}")
+        except Exception:
+            logger.warning("Decryption failed.")
     return cipher
 
 
@@ -51,6 +51,6 @@ def encrypt(name, text):
             is_need_decrypt = "api_key" in name.lower() or "token" in name.lower()
             if is_need_decrypt and crypto:
                 return crypto.encrypt(text)
-        except Exception as e:
-            logger.warning(f"Encryption failed exception: {e}")
+        except Exception:
+            logger.warning("Encryption failed.")
     return text

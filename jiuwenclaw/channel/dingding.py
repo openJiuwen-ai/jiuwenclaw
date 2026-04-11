@@ -334,9 +334,7 @@ class DingTalkChannel(BaseChannel):
 
     def _initialize_stream_client(self) -> None:
         """初始化钉钉Stream客户端"""
-        logger.info(
-            f"正在初始化钉钉Stream客户端，客户端ID: {self.config.client_id}..."
-        )
+        logger.info("正在初始化钉钉Stream客户端")
         credential = Credential(self.config.client_id, self.config.client_secret)
         self._client = DingTalkStreamClient(credential)
 

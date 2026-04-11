@@ -72,7 +72,7 @@ export function ClawHubSearchModal({
         setShowTokenConfig(!hasToken);
       }
     } catch (error) {
-      console.error("Failed to fetch token:", error);
+      console.error("Failed to fetch token.");
       // 获取失败时，默认显示token配置
       setShowTokenConfig(true);
     }
@@ -149,7 +149,7 @@ export function ClawHubSearchModal({
         }
       }
     } catch (error) {
-      console.error("Failed to save token:", error);
+      console.error("Failed to save token.");
       showMessage("error", t("skills.clawhub.errors.saveTokenFailed"));
     } finally {
       setLoading(false);

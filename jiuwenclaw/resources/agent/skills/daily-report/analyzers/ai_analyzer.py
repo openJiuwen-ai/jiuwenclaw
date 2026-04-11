@@ -132,8 +132,8 @@ class AIAnalyzer:
                                 client_config = react_config["model_client_config"]
                                 config["api_base"] = client_config.get("api_base", config["api_base"])
                                 config["api_key"] = client_config.get("api_key", config["api_key"])
-            except Exception as e:
-                print(f"[AIAnalyzer] 加载配置文件失败: {e}")
+            except Exception:
+                print("[AIAnalyzer] 加载配置文件失败")
 
         return config
 
@@ -185,8 +185,8 @@ class AIAnalyzer:
         try:
             response = await model.invoke(messages=messages)
             return response.content if hasattr(response, "content") else str(response)
-        except Exception as e:
-            print(f"[AIAnalyzer] LLM 调用失败: {e}")
+        except Exception:
+            print("[AIAnalyzer] LLM 调用失败")
             return ""
 
     def generate_summary_sync(self, data: dict) -> str:

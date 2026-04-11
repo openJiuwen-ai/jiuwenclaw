@@ -209,8 +209,8 @@ python ~/.jiuwenclaw/agent/skills/daily-report/run_report.py monthly --year 2026
 在 `.env` 文件中配置（本项目实际配置）：
 
 ```env
-EMAIL_ADDRESS=zxworkem@163.com
-EMAIL_TOKEN=UFvBrE7ZDAsT2xdP
+EMAIL_ADDRESS=
+EMAIL_TOKEN=
 EMAIL_PROVIDER=163
 ```
 
