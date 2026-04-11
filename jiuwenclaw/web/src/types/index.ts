@@ -20,6 +20,10 @@ export interface Session {
   is_processing?: boolean;
   current_task?: string;
   tools?: string[];
+  // ---- session.list 扩展字段 ----
+  channel_id?: string;         // 渠道ID
+  user_id?: string;            // 创建人ID
+  last_message_at?: number;    // 最近对话时间(Unix时间戳)
 }
 
 export type AgentMode = 'agent' | 'plan';

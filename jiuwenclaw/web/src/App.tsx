@@ -351,7 +351,17 @@ function AppContent() {
         limit: 20,
       });
       if (payload?.sessions && Array.isArray(payload.sessions)) {
-        setSessions(payload.sessions as Parameters<typeof setSessions>[0]);
+        // 兼容新格式(对象数组)和旧格式(字符串数组)
+        const normalized = payload.sessions.map((item) => {
+          if (typeof item === 'string') {
+            return { session_id: item } as Parameters<typeof setSessions>[0][number];
+          }
+          if (item && typeof item === 'object') {
+            return item as Parameters<typeof setSessions>[0][number];
+          }
+          return null;
+        }).filter(Boolean) as Parameters<typeof setSessions>[0];
+        setSessions(normalized);
       }
     } catch (error) {
       console.error('Failed to fetch sessions:', error);
@@ -494,6 +504,15 @@ function AppContent() {
       setInitialDataLoaded(true);
     })();
   }, [fetchConfig, fetchSessions, initialDataLoaded, isConnected]);
+
+  // 聊天处理完成后刷新会话列表，以便拾取自动生成的标题等元数据更新
+  const prevProcessingRef = useRef(false);
+  useEffect(() => {
+    if (prevProcessingRef.current && !isProcessing) {
+      void fetchSessions();
+    }
+    prevProcessingRef.current = isProcessing;
+  }, [isProcessing, fetchSessions]);
 
   // 连接成功后从 config.yaml 同步 preferred_language 到前端显示
   useEffect(() => {

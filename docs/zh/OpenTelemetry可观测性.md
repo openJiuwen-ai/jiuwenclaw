@@ -38,21 +38,21 @@ OTEL_ENABLED=true OTEL_EXPORTER_TYPE=otlp OTEL_EXPORTER_OTLP_ENDPOINT=http://loc
 
 ```yaml
 telemetry:
-  enabled: true                     # 总开关
-  exporter: none                    # 默认采集开启，但不导出到后端
+  enabled: true                     # 设为 true 才会启用 telemetry（默认 false）
+  exporter: none                    # 即使启用 telemetry，默认也仍不导出到后端
   endpoint: http://localhost:4317   # OTLP endpoint
   protocol: grpc                    # grpc / http
   log_messages: true                # 是否记录完整消息内容
   service_name: jiuwenclaw
 ```
 
-> 环境变量优先级高于 config.yaml。若需要实际导出，请将 `exporter`、`OTEL_TRACES_EXPORTER` 或 `OTEL_METRICS_EXPORTER` 改为 `console` 或 `otlp`。
+> 环境变量优先级高于 config.yaml。telemetry 默认关闭；若需要实际导出，请先开启 telemetry，再将 `exporter`、`OTEL_TRACES_EXPORTER` 或 `OTEL_METRICS_EXPORTER` 改为 `console` 或 `otlp`。
 
 ## 3. 配置参数
 
 | 环境变量 | config.yaml 字段 | 默认值 | 说明 |
 |----------|------------------|--------|------|
-| `OTEL_ENABLED` | `telemetry.enabled` | `true` | 总开关 |
+| `OTEL_ENABLED` | `telemetry.enabled` | `false` | 总开关 |
 | `OTEL_EXPORTER_TYPE` | `telemetry.exporter` | `none` | 公共 exporter fallback：otlp / console / none |
 | `OTEL_TRACES_EXPORTER` | `telemetry.traces.exporter` | `none` | trace 导出方式：otlp / console / none |
 | `OTEL_METRICS_EXPORTER` | `telemetry.metrics.exporter` | `none` | metrics 导出方式：otlp / console / none |
@@ -254,10 +254,11 @@ OTEL_ENABLED=true OTEL_EXPORTER_TYPE=otlp jiuwenclaw-app
 
 本方案区分“采集”和“上报”：
 
+- 默认 `OTEL_ENABLED=false`，所以在显式开启 telemetry 之前不会进行采集或上报
 - `OTEL_ENABLED=true` 时，现有埋点逻辑继续执行
 - trace 是否真正上报，由 `OTEL_TRACES_EXPORTER` 控制
 - metrics 是否真正上报，由 `OTEL_METRICS_EXPORTER` 控制
-- 默认值为 `OTEL_ENABLED=true`、`OTEL_TRACES_EXPORTER=none`、`OTEL_METRICS_EXPORTER=none`
+- 默认值为 `OTEL_ENABLED=false`、`OTEL_TRACES_EXPORTER=none`、`OTEL_METRICS_EXPORTER=none`
 
 例如：
 

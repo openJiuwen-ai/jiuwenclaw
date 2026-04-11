@@ -495,26 +495,35 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
         )
 
     async def _session_list(ws, req_id, params, session_id):
-        """返回 agent/sessions 下的 session_id 列表（子目录名）。"""
+        """返回会话列表,包含完整的会话管理信息。"""
         limit = 20
+        offset = 0
         if isinstance(params, dict):
             raw_limit = params.get("limit")
             if isinstance(raw_limit, int):
                 limit = raw_limit
             elif isinstance(raw_limit, str) and raw_limit.strip().isdigit():
                 limit = int(raw_limit.strip())
-        limit = max(1, min(limit, 200))
 
-        workspace_session_dir = get_agent_sessions_dir()
-        if not workspace_session_dir.exists() or not workspace_session_dir.is_dir():
-            sessions = []
-        else:
-            sessions = sorted(
-                [d.name for d in workspace_session_dir.iterdir() if d.is_dir()],
-                reverse=True,
-            )
-            sessions = sessions[:limit]
-        await channel.send_response(ws, req_id, ok=True, payload={"sessions": sessions})
+            raw_offset = params.get("offset")
+            if isinstance(raw_offset, int):
+                offset = raw_offset
+            elif isinstance(raw_offset, str) and raw_offset.strip().isdigit():
+                offset = int(raw_offset.strip())
+
+        limit = max(1, min(limit, 200))
+        offset = max(0, offset)
+
+        from jiuwenclaw.agentserver.session_metadata import get_all_sessions_metadata
+
+        sessions, total = get_all_sessions_metadata(limit=limit, offset=offset)
+
+        await channel.send_response(ws, req_id, ok=True, payload={
+            "sessions": sessions,
+            "total": total,
+            "limit": limit,
+            "offset": offset,
+        })
 
     async def _session_create(ws, req_id, params, session_id):
         """创建一个新 session（在 agent/sessions 下创建一个新目录）。"""
@@ -556,6 +565,16 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             )
             return
         session_dir.mkdir()
+
+        # 初始化会话元数据
+        from jiuwenclaw.agentserver.session_metadata import init_session_metadata
+        init_session_metadata(
+            session_id=session_id_to_create,
+            channel_id=params.get("channel_id", ""),
+            user_id=params.get("user_id", ""),
+            title=params.get("title", ""),
+        )
+
         await channel.send_response(
             ws, req_id, ok=True, payload={"session_id": session_id_to_create}
         )

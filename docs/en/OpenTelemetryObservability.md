@@ -39,21 +39,21 @@ Add or edit the `telemetry` section in `config.yaml`:
 
 ```yaml
 telemetry:
-  enabled: true                     # Master switch
-  exporter: none                    # Collection stays on, but nothing is exported by default
+  enabled: true                     # Set to true to enable telemetry (default: false)
+  exporter: none                    # Export remains off by default even after telemetry is enabled
   endpoint: http://localhost:4317   # OTLP endpoint
   protocol: grpc                    # grpc / http
   log_messages: true                # Whether to record full message content
   service_name: jiuwenclaw
 ```
 
-> Environment variables take precedence over `config.yaml`. To actually export data, set `exporter`, `OTEL_TRACES_EXPORTER`, or `OTEL_METRICS_EXPORTER` to `console` or `otlp`.
+> Environment variables take precedence over `config.yaml`. Telemetry is disabled by default; enable it first, then set `exporter`, `OTEL_TRACES_EXPORTER`, or `OTEL_METRICS_EXPORTER` to `console` or `otlp` if you want actual export.
 
 ## 3. Configuration parameters
 
 | Environment variable | config.yaml field | Default | Description |
 |----------------------|-------------------|---------|-------------|
-| `OTEL_ENABLED` | `telemetry.enabled` | `true` | Master switch |
+| `OTEL_ENABLED` | `telemetry.enabled` | `false` | Master switch |
 | `OTEL_EXPORTER_TYPE` | `telemetry.exporter` | `none` | Shared exporter fallback: otlp / console / none |
 | `OTEL_TRACES_EXPORTER` | `telemetry.traces.exporter` | `none` | Trace exporter: otlp / console / none |
 | `OTEL_METRICS_EXPORTER` | `telemetry.metrics.exporter` | `none` | Metrics exporter: otlp / console / none |
@@ -248,10 +248,11 @@ This behavior follows these principles:
 
 This design separates “collection” from “export”:
 
+- By default, `OTEL_ENABLED=false`, so neither collection nor export runs until telemetry is explicitly enabled
 - When `OTEL_ENABLED=true`, existing instrumentation continues to run
 - Whether traces are actually exported is controlled by `OTEL_TRACES_EXPORTER`
 - Whether metrics are actually exported is controlled by `OTEL_METRICS_EXPORTER`
-- The defaults are `OTEL_ENABLED=true`, `OTEL_TRACES_EXPORTER=none`, and `OTEL_METRICS_EXPORTER=none`
+- The defaults are `OTEL_ENABLED=false`, `OTEL_TRACES_EXPORTER=none`, and `OTEL_METRICS_EXPORTER=none`
 
 Example:
 

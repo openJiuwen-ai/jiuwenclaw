@@ -62,8 +62,8 @@ models:
         temperature: 0.95
 
 telemetry:
-  enabled: true                     # 总开关（环境变量 OTEL_ENABLED 优先）
-  exporter: none                    # otlp / console / none；默认采集开启但不导出
+  enabled: false                    # 总开关默认关闭（环境变量 OTEL_ENABLED 优先）
+  exporter: none                    # otlp / console / none；开启 telemetry 后默认仍不导出
   endpoint: http://localhost:4317   # OTLP endpoint
   protocol: grpc                    # grpc / http
   headers: {}                       # 公共 OTLP headers，可被 traces/metrics 覆盖

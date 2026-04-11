@@ -1398,6 +1398,7 @@ class JiuWenClaw:
             role="user",
             content=query,
             timestamp=time.time(),
+            channel_metadata=request.metadata,
         )
 
         # 确保 session 的任务处理器在运行
@@ -1571,6 +1572,7 @@ class JiuWenClaw:
             role="user",
             content=query,
             timestamp=time.time(),
+            channel_metadata=request.metadata,
         )
         await self._ensure_session_processor(session_id)
 

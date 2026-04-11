@@ -93,7 +93,7 @@ class TestTelemetryConfig:
             with patch("jiuwenclaw.config.get_config", side_effect=Exception("no config")):
                 from jiuwenclaw.telemetry.config import load_telemetry_config
                 cfg = load_telemetry_config()
-                assert cfg.enabled is True
+                assert cfg.enabled is False
                 assert cfg.exporter == "none"
                 assert cfg.headers == {}
                 assert cfg.protocol == "grpc"
@@ -1926,7 +1926,7 @@ class TestApplyInstrumentors:
 
 class TestInitTelemetry:
     @staticmethod
-    def test_initializes_by_default_with_none_exporters():
+    def test_noop_by_default_when_disabled():
         import jiuwenclaw.telemetry as tel_mod
         tel_mod._initialized = False
 
@@ -1935,8 +1935,9 @@ class TestInitTelemetry:
                 with patch("jiuwenclaw.telemetry.provider.init_providers") as mock_providers:
                     with patch("jiuwenclaw.telemetry.instrumentors.apply_instrumentors") as mock_instr:
                         tel_mod.init_telemetry()
-                        mock_providers.assert_called_once()
-                        mock_instr.assert_called_once()
+                        mock_providers.assert_not_called()
+                        mock_instr.assert_not_called()
+                        assert tel_mod.is_telemetry_initialized() is False
         tel_mod._initialized = False
 
     @staticmethod

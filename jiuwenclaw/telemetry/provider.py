@@ -13,9 +13,27 @@ from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import BatchSpanProcessor, ConsoleSpanExporter
 from opentelemetry.sdk.metrics import MeterProvider
 from opentelemetry.sdk.metrics.export import (
+    AggregationTemporality,
     ConsoleMetricExporter,
     PeriodicExportingMetricReader,
 )
+from opentelemetry.sdk.metrics._internal.instrument import (
+    Counter,
+    Histogram,
+    ObservableCounter,
+    ObservableGauge,
+    ObservableUpDownCounter,
+    UpDownCounter,
+)
+
+_CUMULATIVE_TEMPORALITY = {
+    Counter: AggregationTemporality.CUMULATIVE,
+    UpDownCounter: AggregationTemporality.CUMULATIVE,
+    Histogram: AggregationTemporality.CUMULATIVE,
+    ObservableCounter: AggregationTemporality.CUMULATIVE,
+    ObservableUpDownCounter: AggregationTemporality.CUMULATIVE,
+    ObservableGauge: AggregationTemporality.CUMULATIVE,
+}
 
 from jiuwenclaw.telemetry.attributes import JIUWENCLAW_CLAW_ID
 from jiuwenclaw.telemetry.config import TelemetryConfig
@@ -98,11 +116,29 @@ def _build_extension_provider_bundle(cfg: TelemetryConfig) -> ProviderBundle | N
     if extension is None:
         return None
 
-    bundle = _coerce_provider_bundle(extension.build_providers(cfg))
-    if bundle.tracer_provider is None and bundle.meter_provider is None:
-        raise ValueError("TelemetryProviderExtension must return at least one provider")
-
     from jiuwenclaw.utils import logger
+
+    result = extension.build_providers(cfg)
+    if result is None:
+        logger.warning("[Telemetry] TelemetryProviderExtension.build_providers returned None, falling back to defaults")
+        return None
+
+    try:
+        bundle = _coerce_provider_bundle(result)
+    except TypeError:
+        logger.warning(
+            "[Telemetry] TelemetryProviderExtension.build_providers returned invalid object: %s, "
+            "falling back to defaults",
+            type(result).__name__,
+        )
+        return None
+
+    if bundle.tracer_provider is None and bundle.meter_provider is None:
+        logger.warning(
+            "[Telemetry] TelemetryProviderExtension.build_providers returned empty bundle, "
+            "falling back to defaults"
+        )
+        return None
 
     try:
         extension_name = extension.metadata.name or type(extension).__name__
@@ -166,7 +202,15 @@ def _create_otlp_metric_exporter(cfg: TelemetryConfig, signal: str = "metrics"):
     headers = getattr(cfg, f"{signal}_headers")
     if protocol == "http":
         from opentelemetry.exporter.otlp.proto.http.metric_exporter import OTLPMetricExporter
-        return OTLPMetricExporter(endpoint=f"{endpoint}/v1/metrics", headers=headers)
+        return OTLPMetricExporter(
+            endpoint=f"{endpoint}/v1/metrics",
+            headers=headers,
+            preferred_temporality=_CUMULATIVE_TEMPORALITY,
+        )
     else:
         from opentelemetry.exporter.otlp.proto.grpc.metric_exporter import OTLPMetricExporter
-        return OTLPMetricExporter(endpoint=endpoint, headers=headers)
+        return OTLPMetricExporter(
+            endpoint=endpoint,
+            headers=headers,
+            preferred_temporality=_CUMULATIVE_TEMPORALITY,
+        )

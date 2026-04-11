@@ -20,7 +20,7 @@ def _normalize_protocol(value: str, default: str) -> str:
 
 @dataclass(frozen=True)
 class TelemetryConfig:
-    enabled: bool = True
+    enabled: bool = False
     exporter: str = "none"          # otlp / console / none
     endpoint: str = "http://localhost:4317"
     protocol: str = "grpc"          # grpc / http
@@ -195,7 +195,7 @@ def load_telemetry_config() -> TelemetryConfig:
     )
 
     return TelemetryConfig(
-        enabled=_bool_env("OTEL_ENABLED", yaml_cfg.get("enabled", True)),
+        enabled=_bool_env("OTEL_ENABLED", yaml_cfg.get("enabled", False)),
         exporter=common_exporter,
         endpoint=common_endpoint,
         protocol=common_protocol,

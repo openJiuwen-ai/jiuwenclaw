@@ -80,6 +80,7 @@ def append_history_record(
     timestamp: float,
     event_type: str | None = None,
     extra: dict[str, Any] | None = None,
+    channel_metadata: dict[str, Any] | None = None,
 ) -> None:
     """向指定 session 的 history.json 异步追加一条记录."""
     sid = (session_id or "default").strip() or "default"
@@ -107,3 +108,18 @@ def append_history_record(
     except queue.Full:
         # 队列满时退化为同步写，避免丢历史记录。
         _write_item(sid, item)
+
+    # 更新会话元数据
+    try:
+        from jiuwenclaw.agentserver.session_metadata import update_session_metadata
+        update_session_metadata(
+            session_id=sid,
+            channel_id=cid,
+            increment_message_count=True,
+            # 传入用户消息内容,用于自动生成标题
+            user_content=content_text if role_norm == "user" else None,
+            # 传入渠道元数据,首次写入时持久化
+            channel_metadata=channel_metadata,
+        )
+    except Exception as exc:
+        logger.warning("更新会话元数据失败: %s", exc)

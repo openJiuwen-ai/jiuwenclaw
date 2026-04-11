@@ -11,7 +11,8 @@ def init_telemetry() -> None:
     """Initialize OpenTelemetry tracing and metrics.
 
     Reads config from env vars / config.yaml. If telemetry is disabled,
-    this is a no-op with zero overhead.
+    this is a no-op with zero overhead. Initialization failures are logged
+    and silently ignored so they never block the main application.
     """
     global _initialized
     if _initialized:
@@ -24,28 +25,32 @@ def init_telemetry() -> None:
         return
 
     from jiuwenclaw.utils import logger
-    from jiuwenclaw.telemetry.provider import init_providers
-    from jiuwenclaw.telemetry.instrumentors import apply_instrumentors
 
-    logger.info(
-        "[Telemetry] Initializing: traces_exporter=%s, metrics_exporter=%s, "
-        "traces_endpoint=%s, metrics_endpoint=%s, log_messages=%s",
-        cfg.traces_exporter,
-        cfg.metrics_exporter,
-        cfg.traces_endpoint,
-        cfg.metrics_endpoint,
-        cfg.log_messages,
-    )
+    try:
+        from jiuwenclaw.telemetry.provider import init_providers
+        from jiuwenclaw.telemetry.instrumentors import apply_instrumentors
 
-    init_providers(cfg)
-    apply_instrumentors(
-        log_messages=cfg.log_messages,
-        session_stuck_threshold_ms=cfg.session_stuck_threshold_ms,
-        session_stuck_check_interval_s=cfg.session_stuck_check_interval_s,
-    )
+        logger.info(
+            "[Telemetry] Initializing: traces_exporter=%s, metrics_exporter=%s, "
+            "traces_endpoint=%s, metrics_endpoint=%s, log_messages=%s",
+            cfg.traces_exporter,
+            cfg.metrics_exporter,
+            cfg.traces_endpoint,
+            cfg.metrics_endpoint,
+            cfg.log_messages,
+        )
 
-    _initialized = True
-    logger.info("[Telemetry] Initialization complete")
+        init_providers(cfg)
+        apply_instrumentors(
+            log_messages=cfg.log_messages,
+            session_stuck_threshold_ms=cfg.session_stuck_threshold_ms,
+            session_stuck_check_interval_s=cfg.session_stuck_check_interval_s,
+        )
+
+        _initialized = True
+        logger.info("[Telemetry] Initialization complete")
+    except Exception:
+        logger.warning("[Telemetry] Initialization failed, continuing without telemetry", exc_info=True)
 
 
 def is_telemetry_initialized() -> bool:

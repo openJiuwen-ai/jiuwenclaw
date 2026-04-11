@@ -13,6 +13,9 @@ interface SessionsPanelProps {
 
 interface SessionListResponse {
   sessions?: unknown[];
+  total?: number;
+  limit?: number;
+  offset?: number;
 }
 
 interface SessionFileItem {
@@ -34,12 +37,13 @@ function normalizeWorkspacePath(p: string): string {
 
 function pickNextSelectedSessionId(
   prev: string | null,
-  sessionRows: string[],
+  sessionRows: SessionItem[],
   currentChatSessionId: string
 ): string | null {
-  if (prev && sessionRows.includes(prev)) return prev;
-  if (currentChatSessionId && sessionRows.includes(currentChatSessionId)) return currentChatSessionId;
-  return sessionRows[0] ?? null;
+  const ids = sessionRows.map(s => s.session_id);
+  if (prev && ids.includes(prev)) return prev;
+  if (currentChatSessionId && ids.includes(currentChatSessionId)) return currentChatSessionId;
+  return sessionRows[0]?.session_id ?? null;
 }
 
 function formatDateTime(date: Date): string {
@@ -150,8 +154,42 @@ function parseSessionDisplayLabel(sessionId: string, t: (key: string, options?: 
   return `${prefix}-${t('sessions.unknownTime')}`;
 }
 
-function toSessionIds(raw: unknown[]): string[] {
-  return raw.filter((item): item is string => typeof item === 'string' && item.trim().length > 0);
+interface SessionItem {
+  session_id: string;
+  title?: string;
+  channel_id?: string;
+  user_id?: string;
+  last_message_at?: number;
+  created_at?: number;
+  message_count?: number;
+}
+
+function toSessionItems(raw: unknown[]): SessionItem[] {
+  return raw
+    .map((item) => {
+      // 兼容新格式(对象 {session_id: "..."})和旧格式(纯字符串)
+      if (typeof item === 'string') {
+        return { session_id: item.trim() } as SessionItem;
+      }
+      if (item && typeof item === 'object' && 'session_id' in item) {
+        const rec = item as Record<string, unknown>;
+        const sid = rec.session_id;
+        if (typeof sid !== 'string' || sid.trim().length === 0) {
+          return null;
+        }
+        return {
+          session_id: sid.trim(),
+          title: typeof rec.title === 'string' ? rec.title : undefined,
+          channel_id: typeof rec.channel_id === 'string' ? rec.channel_id : undefined,
+          user_id: typeof rec.user_id === 'string' ? rec.user_id : undefined,
+          last_message_at: typeof rec.last_message_at === 'number' ? rec.last_message_at : undefined,
+          created_at: typeof rec.created_at === 'number' ? rec.created_at : undefined,
+          message_count: typeof rec.message_count === 'number' ? rec.message_count : undefined,
+        } as SessionItem;
+      }
+      return null;
+    })
+    .filter((item): item is SessionItem => item !== null);
 }
 
 function toSessionFiles(raw: unknown[]): SessionFileItem[] {
@@ -188,7 +226,7 @@ export function SessionsPanel({
   onRestoreSession,
 }: SessionsPanelProps) {
   const { t } = useTranslation();
-  const [sessions, setSessions] = useState<string[]>([]);
+  const [sessions, setSessions] = useState<SessionItem[]>([]);
   const [loadingSessions, setLoadingSessions] = useState(true);
   const [sessionsError, setSessionsError] = useState<string | null>(null);
   const [selectedSessionId, setSelectedSessionId] = useState<string | null>(null);
@@ -294,7 +332,7 @@ export function SessionsPanel({
     setLoadingSessions(true);
     try {
       const payload = await webRequest<SessionListResponse>('session.list', { limit: 20 });
-      const rows = Array.isArray(payload?.sessions) ? toSessionIds(payload.sessions) : [];
+      const rows = Array.isArray(payload?.sessions) ? toSessionItems(payload.sessions) : [];
       setSessions(rows);
       setSessionsError(null);
       // 必须在 setState 之外同步算出 nextSelected：await 之后的函数式 setState 在 React 18+ 可能延后执行，
@@ -330,6 +368,15 @@ export function SessionsPanel({
     // loadSessions 随 currentSessionId / t 更新；此处仅希望在语言切换时与首屏拉列表，避免把 loadSessions 放进 deps 引发多余轮询
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [t]);
+
+  // 聊天处理完成后刷新会话列表，拾取自动生成的标题
+  const prevProcessingRef = useRef(false);
+  useEffect(() => {
+    if (prevProcessingRef.current && !isProcessing) {
+      void loadSessions();
+    }
+    prevProcessingRef.current = isProcessing;
+  }, [isProcessing, loadSessions]);
 
   const handleDeleteSession = async (sessionId: string) => {
     const displayLabel = parseSessionDisplayLabel(sessionId, t);
@@ -417,30 +464,30 @@ export function SessionsPanel({
               {!loadingSessions && sessions.length === 0 ? (
                 <div className="h-full flex items-center justify-center text-sm text-text-muted">{t('sessions.empty')}</div>
               ) : (
-                sessions.map((sessionId) => (
-                  <div key={sessionId} className="group grid grid-cols-[minmax(0,1fr)_auto] items-center gap-2">
+                sessions.map((session) => (
+                  <div key={session.session_id} className="group grid grid-cols-[minmax(0,1fr)_auto] items-center gap-2">
                     <button
                       type="button"
                       className={`w-full min-w-0 text-left px-3 py-2 rounded-lg border text-sm transition-colors ${
-                        selectedSessionId === sessionId
+                        selectedSessionId === session.session_id
                           ? 'border-[var(--border-accent)] bg-accent-subtle text-text'
                           : 'border-transparent hover:bg-secondary/40 text-text-muted hover:text-text'
                       }`}
                       onClick={() => {
-                        if (selectedSessionId === sessionId) return;
-                        setSelectedSessionId(sessionId);
-                        void loadSessionFilesForSession(sessionId);
+                        if (selectedSessionId === session.session_id) return;
+                        setSelectedSessionId(session.session_id);
+                        void loadSessionFilesForSession(session.session_id);
                       }}
-                      title={`${parseSessionDisplayLabel(sessionId, t)} (${sessionId})`}
+                      title={session.title || parseSessionDisplayLabel(session.session_id, t)}
                     >
-                      <span className="truncate block">{parseSessionDisplayLabel(sessionId, t)}</span>
+                      <span className="truncate block">{session.title || parseSessionDisplayLabel(session.session_id, t)}</span>
                     </button>
                     <button
                       type="button"
                       title={t('sessions.delete')}
                       className="shrink-0 p-1.5 rounded-md text-text-muted hover:text-danger hover:bg-danger-subtle transition-colors disabled:opacity-50"
-                      disabled={deletingSessionId === sessionId}
-                      onClick={() => void handleDeleteSession(sessionId)}
+                      disabled={deletingSessionId === session.session_id}
+                      onClick={() => void handleDeleteSession(session.session_id)}
                     >
                       <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={1.5}>
                         <path strokeLinecap="round" strokeLinejoin="round" d="M14.74 9l-.346 9m-4.788 0L9.26 9m9.968-3.21c.342.052.682.107 1.022.166m-1.022-.165L18.16 19.673a2.25 2.25 0 01-2.244 2.077H8.084a2.25 2.25 0 01-2.244-2.077L4.772 5.79m14.456 0a48.108 48.108 0 00-3.478-.397m-12 .562c.34-.059.68-.114 1.022-.165m0 0a48.11 48.11 0 013.478-.397m7.5 0v-.916c0-1.18-.91-2.164-2.09-2.201a51.964 51.964 0 00-3.32 0c-1.18.037-2.09 1.022-2.09 2.201v.916m7.5 0a48.667 48.667 0 00-7.5 0" />
