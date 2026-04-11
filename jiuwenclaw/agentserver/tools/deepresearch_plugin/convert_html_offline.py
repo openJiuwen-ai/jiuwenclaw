@@ -18,6 +18,7 @@ from jiuwenclaw.agentserver.tools.deepresearch_plugin.conversion_utils import (
     render_mermaid_supplement,
 )
 from jiuwenclaw.agentserver.tools.deepresearch_plugin.mermaid_offline import (
+    ensure_mermaid_cli,
     load_svg_markup,
     render_mermaid_offline,
 )
@@ -244,6 +245,15 @@ HTML_TEMPLATE = """<!DOCTYPE html>
 MERMAID_BLOCK_RE = re.compile(
     r"(?ms)^```[ \t]*mermaid[ \t]*\r?\n(.*?)\r?\n```[ \t]*$"
 )
+MERMAID_BLOCK_WITH_ADJACENT_CAPTION_RE = re.compile(
+    r'(?ms)^```[ \t]*mermaid[ \t]*\r?\n(.*?)\r?\n```[ \t]*'
+    r'(?:'
+    r'(?:\r?\n[ \t]*)+'
+    r'<div\b(?=[^>]*\b(?:style="text-align:\s*center;?"|class="figure-caption"))[^>]*>'
+    r'.*?'
+    r'</div>[ \t]*'
+    r')?'
+)
 
 
 @dataclass(slots=True)
@@ -267,6 +277,14 @@ def replace_mermaid_blocks(
     debug_stem: str,
 ) -> str:
     block_counter = 0
+    cli_status = ensure_mermaid_cli()
+
+    if not cli_status.available:
+        logger.warning(
+            "Mermaid CLI is unavailable in offline HTML conversion; Mermaid source blocks will be removed. %s",
+            cli_status.message,
+        )
+        return MERMAID_BLOCK_WITH_ADJACENT_CAPTION_RE.sub("\n", text)
 
     def _build_fallback_block(code: str, supplement_markdown: str = "") -> str:
         supplement_html = ""

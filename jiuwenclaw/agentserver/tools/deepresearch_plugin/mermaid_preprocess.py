@@ -5,7 +5,6 @@ import re
 import unicodedata
 import warnings
 
-
 LATIN_UNITS = [
     "TB/s", "GB/s", "MB/s", "KB/s",
     "TB", "GB", "MB", "KB",
@@ -14,16 +13,16 @@ LATIN_UNITS = [
     "FP16", "FP8", "FP4", "NVFP4",
     "W", "kW", "MW", "GW", "V", "A",
     "Hz", "kHz", "MHz", "GHz",
-    "nm", "渭m", "mm",
+    "nm", "μm", "mm",
     "GPU", "CPU", "DPU", "LPU",
     "Token", "token",
 ]
 
 CHINESE_UNITS = [
-    "涓囦嚎缇庡厓", "浜跨編鍏?", "缇庡厓", "浜垮厓",
-    "澶摝鏃?", "鐡︽椂",
-    "鍚夌摝", "鍏嗙摝", "鍗冪摝",
-    "涓囦汉", "涓囧彴", "鍊?", "%",
+    "万亿美元", "亿美元", "美元", "亿元",
+    "太瓦时", "瓦时",
+    "吉瓦", "兆瓦", "千瓦",
+    "万人", "万台", "倍", "%",
 ]
 
 TIMELINE_NOTES_TITLE = "时间轴说明"

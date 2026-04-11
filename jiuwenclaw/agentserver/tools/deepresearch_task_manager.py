@@ -28,8 +28,8 @@ from openjiuwen_deepsearch.config.method import ExecutionMethod
 from openjiuwen_deepsearch.framework.openjiuwen.agent.agent_factory import AgentFactory
 from openjiuwen_deepsearch.framework.openjiuwen.agent.workflow import parse_endnode_content
 
-from jiuwenclaw.agentserver.tools.deepresearch_plugin.convert_docx_online import convert_md_to_docx
-from jiuwenclaw.agentserver.tools.deepresearch_plugin.convert_html_online import convert_md_to_html
+from jiuwenclaw.agentserver.tools.deepresearch_plugin.convert_docx_offline import convert_md_to_docx
+from jiuwenclaw.agentserver.tools.deepresearch_plugin.convert_html_offline import convert_md_to_html
 from jiuwenclaw.utils import get_env_file
 from jiuwenclaw.agentserver.gateway_push import GatewayPushTransport, WebSocketGatewayPushTransport
 

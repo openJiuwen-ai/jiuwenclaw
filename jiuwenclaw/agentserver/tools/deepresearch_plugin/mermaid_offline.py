@@ -19,6 +19,11 @@ from jiuwenclaw.agentserver.tools.deepresearch_plugin.mermaid_common import (
 logger = logging.getLogger(__name__)
 
 
+def _env_flag_enabled(name: str) -> bool:
+    value = os.getenv(name, "")
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
 @dataclass(slots=True)
 class MermaidCliStatus:
     path: str | None
@@ -31,6 +36,9 @@ class MermaidCliStatus:
 
 
 def resolve_mmdc_path() -> str | None:
+    if _env_flag_enabled("MERMAID_DISABLE_CLI"):
+        return None
+
     candidates: list[str] = []
     checked: set[str] = set()
 
@@ -73,6 +81,13 @@ def resolve_mmdc_path() -> str | None:
 
 
 def ensure_mermaid_cli() -> MermaidCliStatus:
+    if _env_flag_enabled("MERMAID_DISABLE_CLI"):
+        return MermaidCliStatus(
+            path=None,
+            checked_paths=tuple(),
+            message="Mermaid CLI is disabled by MERMAID_DISABLE_CLI.",
+        )
+
     checked_paths: list[str] = []
 
     env_path = os.getenv("MERMAID_MMDC_PATH")

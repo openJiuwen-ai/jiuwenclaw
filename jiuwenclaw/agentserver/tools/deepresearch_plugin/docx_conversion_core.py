@@ -25,6 +25,15 @@ from jiuwenclaw.agentserver.tools.deepresearch_plugin.mermaid_preprocess import 
 
 
 MERMAID_BLOCK_RE = re.compile(r"```mermaid\s*\n(.*?)```", re.DOTALL | re.IGNORECASE)
+MERMAID_BLOCK_WITH_ADJACENT_CAPTION_RE = re.compile(
+    r'(?is)```[ \t]*mermaid[ \t]*\r?\n(.*?)\r?\n```[ \t]*'
+    r'(?:'
+    r'(?:\r?\n[ \t]*)+'
+    r'<div\b(?=[^>]*\b(?:style="text-align:\s*center;?"|class="figure-caption"))[^>]*>'
+    r'.*?'
+    r'</div>[ \t]*'
+    r')?'
+)
 
 RenderMermaidPng = Callable[
     [str, str],
@@ -42,8 +51,15 @@ def replace_mermaid_blocks(
     debug_stem: str,
     render_mermaid_png,
     logger: logging.Logger,
+    drop_mermaid_blocks: bool = False,
 ) -> tuple[str, MermaidRenderStats]:
     stats = MermaidRenderStats()
+
+    if drop_mermaid_blocks:
+        matches = list(MERMAID_BLOCK_WITH_ADJACENT_CAPTION_RE.finditer(content))
+        stats.total = len(matches)
+        stats.failed = len(matches)
+        return MERMAID_BLOCK_WITH_ADJACENT_CAPTION_RE.sub("\n", content), stats
 
     def repl(match: re.Match[str]) -> str:
         stats.total += 1
@@ -93,6 +109,7 @@ def convert_md_to_docx(
     *,
     render_mermaid_png,
     logger: logging.Logger,
+    drop_mermaid_blocks: bool = False,
 ) -> None:
     ensure_pandoc()
 
@@ -121,6 +138,7 @@ def convert_md_to_docx(
             debug_stem=docx_file.stem,
             render_mermaid_png=render_mermaid_png,
             logger=logger,
+            drop_mermaid_blocks=drop_mermaid_blocks,
         )
         temp_md.write_text(content, encoding="utf-8")
 

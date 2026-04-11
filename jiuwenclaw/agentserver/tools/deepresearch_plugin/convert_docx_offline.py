@@ -7,10 +7,12 @@ from pathlib import Path
 from jiuwenclaw.agentserver.tools.deepresearch_plugin.conversion_utils import enhance_image
 from jiuwenclaw.agentserver.tools.deepresearch_plugin.docx_conversion_core import (
     convert_md_to_docx as convert_md_to_docx_core,
-    replace_mermaid_blocks,
 )
 from jiuwenclaw.agentserver.tools.deepresearch_plugin.mermaid_common import load_svg_markup
-from jiuwenclaw.agentserver.tools.deepresearch_plugin.mermaid_offline import render_mermaid_offline
+from jiuwenclaw.agentserver.tools.deepresearch_plugin.mermaid_offline import (
+    ensure_mermaid_cli,
+    render_mermaid_offline,
+)
 from jiuwenclaw.agentserver.tools.deepresearch_plugin.xychart_value_labels import (
     overlay_xychart_value_labels_on_png,
 )
@@ -91,11 +93,18 @@ def render_mermaid_png(
 
 
 def convert_md_to_docx(md_path: str | Path, docx_path: str | Path) -> None:
+    cli_status = ensure_mermaid_cli()
+    if not cli_status.available:
+        logger.warning(
+            "Mermaid CLI is unavailable in offline DOCX conversion; Mermaid source blocks will be removed. %s",
+            cli_status.message,
+        )
     convert_md_to_docx_core(
         md_path,
         docx_path,
         render_mermaid_png=render_mermaid_png,
         logger=logger,
+        drop_mermaid_blocks=not cli_status.available,
     )
 
 
