@@ -15,6 +15,7 @@ from dataclasses import replace
 import inspect
 import json
 import logging
+import os
 import re
 import time
 from pathlib import Path
@@ -838,10 +839,15 @@ class JiuWenSwarm:
     - 公共编排（session 队列、Skills 路由、heartbeat、流式包装）
     """
 
-    def __init__(self) -> None:
+    def __init__(self, workspace_dir: str | None = None) -> None:
         self._adapter: AgentAdapter | None = None
         self._sdk_name: str | None = None
-        self._skill_manager = SkillManager(workspace_dir=str(get_agent_workspace_dir()))
+        # 企业多租户：AGENT_RUNTIME 下使用传入的隔离 workspace
+        if workspace_dir and os.getenv("AGENT_RUNTIME", "").strip():
+            self._workspace_dir = workspace_dir
+        else:
+            self._workspace_dir = str(get_agent_workspace_dir())
+        self._skill_manager = SkillManager(workspace_dir=self._workspace_dir)
         self._session_manager = SessionManager()
         # SkillDev 模式：懒初始化，首次 skilldev.* 请求时构造
         self._skilldev_service = None
@@ -884,13 +890,22 @@ class JiuWenSwarm:
         """确保 adapter 已初始化，如果未初始化则根据环境变量和 mode 创建."""
         if self._adapter is None:
             self._sdk_name = resolve_sdk_choice()
-            self._adapter = create_adapter(self._sdk_name, mode=mode)
+            self._adapter = create_adapter(
+                self._sdk_name,
+                mode=mode,
+                workspace_dir=self._workspace_dir,
+            )
             if hasattr(self._adapter, "set_skill_manager"):
                 self._adapter.set_skill_manager(self._skill_manager)
             self._skill_manager.set_skillnet_install_complete_hook(
                 self._on_skillnet_install_complete
             )
-            logger.info("[JiuWenSwarm] Initialized adapter: sdk=%s, mode=%s", self._sdk_name, mode)
+            logger.info(
+                "[JiuWenSwarm] Initialized adapter: sdk=%s, mode=%s, workspace_dir=%s",
+                self._sdk_name,
+                mode,
+                self._workspace_dir,
+            )
         return self._adapter
 
     @staticmethod

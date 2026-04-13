@@ -10,6 +10,7 @@ import logging
 import os
 import time
 import uuid
+from pathlib import Path
 from typing import Any, TYPE_CHECKING
 from weakref import WeakValueDictionary
 
@@ -81,9 +82,17 @@ class AgentManager:
     支持多种通道:
     - "acp": ACP 协议通道
     - "default": 默认通道
+
+    企业多租户（AGENT_RUNTIME）下可带 agent_id/service_id/workspace_dir 构造，
+    用于按租户隔离 workspace。
     """
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        agent_id: str = "default",
+        service_id: str = "default",
+        workspace_dir: Path | str | None = None,
+    ) -> None:
         self.agents: dict[str, dict[str, "JiuWenSwarm"]] = {}
         # 记录每个 (channel_id, mode) 的创建参数, 便于 recreate_agent 立刻重建
         self._agent_create_params: dict[str, dict[str, dict[str, Any]]] = {}
@@ -111,6 +120,16 @@ class AgentManager:
         from jiuwenswarm.server.runtime.agent_warm_pool import AgentWarmPool
 
         self.warm_pool = AgentWarmPool(self)
+        self.agent_id = agent_id
+        self.service_id = service_id
+        self.workspace_dir = Path(workspace_dir) if workspace_dir else None
+        if self.workspace_dir is not None and os.getenv("AGENT_RUNTIME", "").strip():
+            logger.info(
+                "[AgentManager] enterprise init: agent_id=%s service_id=%s workspace=%s",
+                agent_id,
+                service_id,
+                self.workspace_dir,
+            )
 
     def _get_agent_create_lock(
         self,
@@ -402,7 +421,10 @@ class AgentManager:
             sub_mode_key or None,
             project_dir or None,
         )
-        agent = JiuWenSwarm()
+        workspace_dir = None
+        if self.workspace_dir is not None and os.getenv("AGENT_RUNTIME", "").strip():
+            workspace_dir = str(self.workspace_dir)
+        agent = JiuWenSwarm(workspace_dir=workspace_dir)
         await agent.create_instance(config, mode=mode_key, sub_mode=sub_mode_key or None)
         setattr(agent, "_jiuwenswarm_agent_cache_key", agent_cache_key)
         setattr(agent, "_jiuwenswarm_agent_mode", mode_key)

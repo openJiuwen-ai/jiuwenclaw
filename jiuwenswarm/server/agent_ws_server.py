@@ -834,7 +834,7 @@ class AgentWebSocketServer:
         self._current_ws: Any = None
         self._current_send_lock: asyncio.Lock | None = None
         self._acp_client_capabilities_by_ws: dict[int, dict[str, Any]] = {}
-        # AgentManager 实例
+        # AgentManager 实例（企业多租户入口见 TenantAgentPool，按 AGENT_RUNTIME 使用）
         self._agent_manager = AgentManager()
         # skills.* 等无状态 RPC：AgentManager 未缓存 agent 时复用的轻量 JiuWenSwarm，
         # 避免每次 cache miss 都 new 导致 SkillNet 异步安装等实例态断裂。

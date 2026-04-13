@@ -75,11 +75,11 @@ def get_forbidden_memory_prompt(language: str) -> str:
                 prompt_parts.append(f"{i}. `{pattern}`")
             prompt_parts.append("")
         prompt_parts.append("**Requirements:**")
-        prompt_parts.append("- Before calling `experience_learn` or `write_memory` to store memories, \
-            you must check if the content contains the above sensitive information")
-        prompt_parts.append("- If sensitive information is detected, it must be desensitized \
-            (e.g., replaced with ***) or storage must be refused")
-        prompt_parts.append("- Sensitive information such as passwords and keys explicitly provided by the user \
-            must not be stored in the memory system")
+        prompt_parts.append("- Before calling `experience_learn` or `write_memory` to store memories, "
+                            "you must check if the content contains the above sensitive information")
+        prompt_parts.append("- If sensitive information is detected, it must be desensitized "
+                            "(e.g., replaced with ***) or storage must be refused")
+        prompt_parts.append("- Sensitive information such as passwords and keys explicitly provided by the user "
+                            "must not be stored in the memory system")
         prompt_parts.append("")
         return "\n".join(prompt_parts)

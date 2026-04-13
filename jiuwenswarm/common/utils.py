@@ -37,6 +37,8 @@ import datetime
 import shutil
 import socket
 import time
+import asyncio
+from collections import OrderedDict
 from pathlib import Path
 from dataclasses import dataclass
 from typing import Any, Literal, Optional
@@ -2118,6 +2120,64 @@ def wait_for_pid_exit(pid: int, timeout: float = 60.0) -> None:
                 return
             time.sleep(0.5)
     logger.warning("process %d did not exit within %.1f seconds", pid, timeout)
+
+
+class AsyncLRUCache:
+    """带过期时间的 LRU 缓存（异步并发安全）."""
+
+    def __init__(self, max_size: int = 100, ttl_seconds: int = 600) -> None:
+        self._cache: OrderedDict[str, tuple[Any, float]] = OrderedDict()
+        self._max_size = max_size
+        self._ttl = ttl_seconds
+        self._lock = asyncio.Lock()
+
+    async def get(self, key: str) -> Any | None:
+        """获取缓存值，如果不存在或已过期则返回 None."""
+        async with self._lock:
+            if key not in self._cache:
+                return None
+
+            value, timestamp = self._cache[key]
+            if time.time() - timestamp > self._ttl:
+                self._cache.pop(key, None)
+                return None
+
+            self._cache.move_to_end(key)
+            return value
+
+    async def put(self, key: str, value: Any) -> None:
+        """存入缓存值，如果超过容量则淘汰最久未使用的."""
+        async with self._lock:
+            if key in self._cache:
+                self._cache.pop(key)
+            elif len(self._cache) >= self._max_size:
+                self._cache.popitem(last=False)
+
+            self._cache[key] = (value, time.time())
+
+    async def remove(self, key: str) -> None:
+        """删除缓存项."""
+        async with self._lock:
+            self._cache.pop(key, None)
+
+    async def clear(self) -> None:
+        """清空缓存."""
+        async with self._lock:
+            self._cache.clear()
+
+    def __len__(self) -> int:
+        return len(self._cache)
+
+    async def keys(self) -> list[str]:
+        async with self._lock:
+            now = time.time()
+            expired_keys = [
+                key for key, (_, timestamp) in self._cache.items()
+                if now - timestamp > self._ttl
+            ]
+            for key in expired_keys:
+                del self._cache[key]
+            return list(self._cache.keys())
 
 
 logger = logging.getLogger(__name__)

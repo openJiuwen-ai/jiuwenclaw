@@ -123,12 +123,18 @@ def resolve_sdk_choice() -> str:
     return _DEFAULT_SDK
 
 
-def create_adapter(sdk: str | None = None, *, mode: str = "agent") -> AgentAdapter:
+def create_adapter(
+    sdk: str | None = None,
+    *,
+    mode: str = "agent",
+    workspace_dir: str | None = None,
+) -> AgentAdapter:
     """Factory function to create SDK adapter instance.
 
     Args:
         sdk: SDK name, if None will resolve from environment.
         mode: Instance mode, "agent" (default) or "code".
+        workspace_dir: Optional workspace directory (enterprise multi-tenant).
 
     Returns:
         AgentAdapter instance for the specified SDK and mode.
@@ -138,13 +144,17 @@ def create_adapter(sdk: str | None = None, *, mode: str = "agent") -> AgentAdapt
         RuntimeError: If SDK is unknown.
     """
     sdk_name = sdk or resolve_sdk_choice()
+    # 企业多租户：仅在 AGENT_RUNTIME 下把 workspace_dir 传给 adapter
+    enterprise_workspace = (
+        workspace_dir if os.getenv("AGENT_RUNTIME", "").strip() else None
+    )
 
     if sdk_name == "harness":
         if mode == "code":
             from jiuwenswarm.server.runtime.agent_adapter.interface_code import JiuwenSwarmCodeAdapter
             return JiuwenSwarmCodeAdapter()
         from jiuwenswarm.server.runtime.agent_adapter.interface_deep import JiuWenSwarmDeepAdapter
-        return JiuWenSwarmDeepAdapter()
+        return JiuWenSwarmDeepAdapter(workspace_dir=enterprise_workspace)
 
     if sdk_name == "pi":
         raise NotImplementedError(
