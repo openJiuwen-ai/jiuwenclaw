@@ -139,6 +139,7 @@ from jiuwenclaw.utils import (
     get_agent_workspace_dir,
     get_checkpoint_dir,
     get_env_file,
+    get_agent_root_dir,
 )
 
 load_dotenv(dotenv_path=get_env_file())
@@ -295,9 +296,9 @@ class JiuWenClawDeepAdapter:
     - Deep interrupt / user_answer 处理
     """
 
-    def __init__(self) -> None:
+    def __init__(self, workspace_dir: str | None = None) -> None:
         self._instance: DeepAgent | None = None
-        self._workspace_dir: str = str(get_agent_workspace_dir())
+        self._workspace_dir: str = workspace_dir or str(get_agent_root_dir())
         self._agent_name: str = "main_agent"
         self._vision_tools_registered: bool = False
         self._audio_tools_registered: bool = False

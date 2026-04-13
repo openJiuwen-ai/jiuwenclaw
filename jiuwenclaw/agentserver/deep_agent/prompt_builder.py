@@ -155,7 +155,7 @@ def _identity_prompt(language: str) -> PromptSection:
 | 删除目录 | `rmdir folder` 或 PowerShell `Remove-Item -Recurse folder` | `rm -rf folder` |
 | 查找文件 | `dir /s pattern` 或 PowerShell `Get-ChildItem -Recurse -Filter pattern` | `find . -name pattern` |
 
-**特别注意**：Windows 的 `mkdir` 不支持 `-p` 参数！在 Windows 上使用 `mkdir -p folder` 会错误创建名为 `-p` 的目录。如需创建嵌套目录，请使用 PowerShell `New-Item -ItemType Directory -Path "parent/child" -Force`，或使用 cmd 分步创建 `mkdir parent && mkdir parent\child`。
+**特别注意**：Windows 的 `mkdir` 不支持 `-p` 参数！在 Windows 上使用 `mkdir -p folder` 会错误创建名为 `-p` 的目录。如需创建嵌套目录，请使用 PowerShell `New-Item -ItemType Directory -Path "parent/child" -Force`，或使用 cmd 分步创建 `mkdir parent && mkdir parent\\child`。
 
 ## 输出文件放置规范
 执行用户任务时产生的生成产物（如代码文件、文档、数据文件等），若用户未指定存放位置，请遵循以下规则：
@@ -215,7 +215,7 @@ Common command differences:
 | Delete directory | `rmdir folder` or PowerShell `Remove-Item -Recurse folder` | `rm -rf folder` |
 | Find file | `dir /s pattern` or PowerShell `Get-ChildItem -Recurse -Filter pattern` | `find . -name pattern` |
 
-**WARNING**: Windows `mkdir` does NOT support the `-p` flag! Using `mkdir -p folder` on Windows will incorrectly create a directory named `-p`. To create nested directories on Windows, use either PowerShell `New-Item -ItemType Directory -Path "parent/child" -Force` or cmd with step-by-step creation `mkdir parent && mkdir parent\child`.
+**WARNING**: Windows `mkdir` does NOT support the `-p` flag! Using `mkdir -p folder` on Windows will incorrectly create a directory named `-p`. To create nested directories on Windows, use either PowerShell `New-Item -ItemType Directory -Path "parent/child" -Force` or cmd with step-by-step creation `mkdir parent && mkdir parent\\child`.
 
 ## Output File Placement
 Generated artifacts (code files, documents, data files, etc.) produced during user task execution should follow these placement rules unless the user specifies otherwise:

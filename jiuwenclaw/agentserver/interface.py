@@ -106,10 +106,11 @@ class JiuWenClaw:
     - 公共编排（session 队列、Skills 路由、heartbeat、流式包装）
     """
 
-    def __init__(self) -> None:
+    def __init__(self, workspace_dir: str | None = None) -> None:
         self._adapter: AgentAdapter | None = None
         self._sdk_name: str | None = None
-        self._skill_manager = SkillManager(workspace_dir=str(get_agent_workspace_dir()))
+        self._workspace_dir = workspace_dir or str(get_agent_workspace_dir())
+        self._skill_manager = SkillManager(workspace_dir=self._workspace_dir)
         self._session_manager = SessionManager()
         # SkillDev 模式：懒初始化，首次 skilldev.* 请求时构造
         self._skilldev_service = None
@@ -151,13 +152,14 @@ class JiuWenClaw:
         """确保 adapter 已初始化，如果未初始化则根据环境变量创建."""
         if self._adapter is None:
             self._sdk_name = resolve_sdk_choice()
-            self._adapter = create_adapter(self._sdk_name)
+            self._adapter = create_adapter(self._sdk_name, workspace_dir=self._workspace_dir)
             if hasattr(self._adapter, "set_skill_manager"):
                 self._adapter.set_skill_manager(self._skill_manager)
             self._skill_manager.set_skillnet_install_complete_hook(
                 self.create_instance
             )
-            logger.info("[JiuWenClaw] Initialized adapter: sdk=%s", self._sdk_name)
+            logger.info("[JiuWenClaw] Initialized adapter: sdk=%s, workspace_dir=%s",
+                        self._sdk_name, self._workspace_dir)
         return self._adapter
 
     async def create_instance(self, config: dict[str, Any] | None = None, *, mode: str = "agent") -> None:

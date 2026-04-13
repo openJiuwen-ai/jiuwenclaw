@@ -1,0 +1,308 @@
+from __future__ import annotations
+
+import asyncio
+import logging
+from pathlib import Path
+from typing import Any, ClassVar
+
+from jiuwenclaw.schema.agent import AgentRequest, AgentResponse, AgentResponseChunk
+from jiuwenclaw.utils import AsyncLRUCache
+
+logger = logging.getLogger(__name__)
+
+
+class TenantAgentPool:
+    """多租户 AgentManager 管理器（单例）.
+
+    根据 agent_id + service_id 维护多个 AgentManager 实例，实现租户隔离。
+    每个 AgentManager 管理该租户内的多个 Agent 实例（按 channel_id 区分）。
+
+    service_id 由 chat_id + bot_app_id 组合而成。
+    """
+
+    _instance: ClassVar[TenantAgentPool | None] = None
+
+    def __init__(self, cache_max_size: int = 100, cache_ttl: int = 600) -> None:
+        # LRU 缓存: key=agent_id+service_id, value=AgentManager 实例
+        self._agent_wrappers = AsyncLRUCache(max_size=cache_max_size, ttl_seconds=cache_ttl)
+        self._locks: dict[str, asyncio.Lock] = {}
+        self._global_lock = asyncio.Lock()
+
+    @classmethod
+    def get_instance(cls) -> "TenantAgentPool":
+        """获取单例实例."""
+        if cls._instance is None:
+            cls._instance = cls()
+        return cls._instance
+
+    # pylint: disable=protected-access
+    @classmethod
+    def reset_instance(cls) -> None:
+        """重置单例（仅用于测试）."""
+        if cls._instance:
+            try:
+                loop = asyncio.get_running_loop()
+                loop.create_task(cls._instance._agent_wrappers.clear())
+            except RuntimeError:
+                asyncio.run(cls._instance._agent_wrappers.clear())
+            cls._instance._locks.clear()
+        cls._instance = None
+
+    def _get_lock(self, cache_key: str) -> asyncio.Lock:
+        """获取或创建 cache_key 对应的锁."""
+        if cache_key not in self._locks:
+            self._locks[cache_key] = asyncio.Lock()
+        return self._locks[cache_key]
+
+    @staticmethod
+    def build_service_id(chat_id: str | None, bot_app_id: str | None) -> str:
+        """根据 chat_id 和 bot_app_id 构建 service_id.
+
+        Args:
+            chat_id: 聊天ID
+            bot_app_id: Bot应用ID
+
+        Returns:
+            组合后的 service_id，格式: "{chat_id}_{bot_app_id}"
+            如果任一参数为空，使用 "unknown" 替代
+        """
+        chat = chat_id or "unknown_chat_id"
+        bot = bot_app_id or "unknown_bot_app_id"
+        return f"{chat}_{bot}"
+
+    async def initialize(self, channel_id: str = "", extra_config: dict[str, Any] | None = None) \
+            -> dict[str, Any] | None:
+        """初始化默认租户的 AgentManager.
+
+        主要用于 ACP 通道的初始化。
+
+        Args:
+            channel_id: 通道 ID
+            extra_config: 额外配置
+
+        Returns:
+            对于 ACP 通道，返回 capabilities；否则返回 None
+        """
+        agent_id, service_id = "acp", "global_acp"
+        agent_manager = await self._ensure_agent_manager(agent_id, service_id)
+        return await agent_manager.initialize(channel_id, extra_config)
+
+    def get_client_capabilities(self, channel_id: str = "") -> dict[str, Any]:
+        """获取默认租户的客户端能力.
+
+        Args:
+            channel_id: 通道 ID
+
+        Returns:
+            客户端能力字典
+        """
+        agent_manager = self._get_agent_manager_nowait("acp", "global_acp")
+        if agent_manager is None:
+            return {}
+        return agent_manager.get_client_capabilities(channel_id)
+
+    async def create_session(self, channel_id: str = "", session_id: str | None = None) -> str:
+        """创建会话.
+
+        Args:
+            channel_id: 通道 ID
+            session_id: 可选的会话 ID
+
+        Returns:
+            会话 ID
+        """
+        agent_id, service_id = "acp", "global_acp"
+        agent_manager = await self._ensure_agent_manager(agent_id, service_id)
+        return await agent_manager.create_session(channel_id, session_id)
+
+    async def cleanup(self) -> None:
+        """清理所有缓存的 AgentManager 实例（用于 shutdown 或重置）."""
+        keys = await self._agent_wrappers.keys()
+        for key in keys:
+            agent_manager = await self._agent_wrappers.get(key)
+            if agent_manager is not None:
+                try:
+                    await agent_manager.cleanup()
+                except Exception as e:
+                    logger.warning("[TenantAgentPool] AgentManager cleanup failed for %s: %s", key, e)
+
+        await self._agent_wrappers.clear()
+        self._locks.clear()
+        logger.info("[TenantAgentPool] All agent managers and states cleaned up")
+
+    async def _ensure_agent_manager(
+            self,
+            agent_id: str,
+            service_id: str | None = None,
+    ) -> Any:
+        """确保 agent_id + service_id 对应的 AgentManager 实例已创建（线程安全）.
+
+        Args:
+            agent_id: agent名称/路径
+            service_id: 服务ID（chat_id + bot_app_id 组合）
+
+        Returns:
+            AgentManager 实例
+        """
+        cache_key = f"{agent_id}_{service_id}"
+        lock = self._get_lock(cache_key)
+
+        async with lock:
+            agent_manager = await self._agent_wrappers.get(cache_key)
+            if agent_manager is not None:
+                return agent_manager
+
+            logger.info(
+                "[TenantAgentPool] 创建新 AgentManager 实例: agent_id=%s, service_id=%s",
+                agent_id,
+                service_id,
+            )
+
+            try:
+                # 设置工作目录隔离
+                agent_dir_path = self._build_workspace_path(service_id, agent_id)
+
+                from jiuwenclaw.agentserver.agent_manager import AgentManager
+
+                # 创建新的 AgentManager 实例
+                agent_manager = AgentManager(
+                    agent_id=agent_id,
+                    service_id=service_id,
+                    workspace_dir=agent_dir_path,
+                )
+
+                # 存入 LRU 缓存
+                await self._agent_wrappers.put(cache_key, agent_manager)
+
+                # 清理无用的锁（防止内存泄漏）
+                active_keys = await self._agent_wrappers.keys()
+                stale_locks = [k for k in self._locks if k not in active_keys]
+                for stale_key in stale_locks:
+                    del self._locks[stale_key]
+
+                logger.info(
+                    "[TenantAgentPool] AgentManager 实例创建完成: agent_id=%s, service_id=%s",
+                    agent_id,
+                    service_id,
+                )
+                return agent_manager
+            except Exception as e:
+                logger.error("[TenantAgentPool] 创建 AgentManager 失败: %s", e)
+                raise
+
+    def _get_agent_manager_nowait(self, agent_id: str, service_id: str) -> Any | None:
+        """同步获取 AgentManager 实例（不自动创建）.
+
+        Args:
+            agent_id: agent名称/路径
+            service_id: 服务ID
+
+        Returns:
+            AgentManager 实例或 None
+        """
+        cache_key = f"{agent_id}_{service_id}"
+        try:
+            loop = asyncio.get_running_loop()
+            future = asyncio.run_coroutine_threadsafe(
+                self._agent_wrappers.get(cache_key),
+                loop
+            )
+            return future.result(timeout=1)
+        except Exception:
+            return None
+
+    @staticmethod
+    def _build_workspace_path(service_id: str, agent_id: str) -> Path:
+        """设置工作目录隔离.
+
+        路径格式: ~/.jiuwenclaw/service_{service_id}/agent_{agent_id}
+        例如: ~/.jiuwenclaw/service_chat123_bot456/agent_tenant_a
+
+        Args:
+            service_id: 服务ID
+            agent_id: agent名称/路径
+
+        Returns:
+            工作目录路径
+        """
+        if not service_id and not agent_id:
+            return None
+        agent_dir_path = Path.home() / ".jiuwenclaw"
+        agent_dir_path = agent_dir_path / f"service_{service_id}" if service_id else agent_dir_path / "service"
+        agent_dir_path = agent_dir_path / f"agent_{agent_id}" if agent_id else agent_dir_path / "agents"
+        logger.debug("[TenantAgentPool] 设置工作目录: %s", agent_dir_path)
+        return agent_dir_path
+
+    async def process_message(self, request: AgentRequest) -> AgentResponse:
+        """处理非流式请求."""
+        agent_id, service_id = self._extract_ids(request)
+        agent_manager = await self._ensure_agent_manager(agent_id, service_id)
+        return await agent_manager.process_message(request)
+
+    async def process_message_stream(
+            self, request: AgentRequest
+    ):
+        """处理流式请求."""
+        agent_id, service_id = self._extract_ids(request)
+        agent_manager = await self._ensure_agent_manager(agent_id, service_id)
+        async for chunk in agent_manager.process_message_stream(request):
+            yield chunk
+
+    @staticmethod
+    def _extract_ids(request: AgentRequest):
+        """从请求中提取 agent_id 和 service_id."""
+        agent_id = getattr(request, 'agent_id', None)
+        service_id = getattr(request, 'service_id', None)
+        # ACP 通道使用固定租户
+        if request.channel_id == "acp":
+            agent_id = "acp"
+            service_id = "global_acp"
+        else:
+            agent_id = agent_id or "default_agent_id"
+            service_id = service_id or "default_service_id"
+
+        return agent_id, service_id
+
+    async def reload_agent_config(
+            self,
+            agent_id: str,
+            config_base: Any = None,
+            env_overrides: dict | None = None
+    ) -> None:
+        """重新加载指定租户的 Agent 配置."""
+        service_id = "global_acp" if agent_id == "acp" else "default_service_id"
+        agent_manager = await self._ensure_agent_manager(agent_id, service_id)
+        channel_id = "acp" if agent_id == "acp" else "default"
+        await agent_manager.reload_agent_config(
+            channel_id=channel_id,
+            config_base=config_base,
+            env_overrides=env_overrides
+        )
+
+    async def get_agent_count(self) -> int:
+        """获取当前活跃的 AgentManager 实例数量."""
+        return self._agent_wrappers.__len__()
+
+    async def get_agent_manager(self, agent_id: str, service_id: str) -> Any:
+        """获取指定租户的 AgentManager 实例.
+
+        Args:
+            agent_id: agent名称/路径
+            service_id: 服务ID
+
+        Returns:
+            AgentManager 实例
+        """
+        return await self._ensure_agent_manager(agent_id, service_id)
+
+    def get_agent_manager_nowait(self, agent_id: str, service_id: str) -> Any | None:
+        """同步获取 AgentManager 实例（不自动创建）.
+
+        Args:
+            agent_id: agent名称/路径
+            service_id: 服务ID
+
+        Returns:
+            AgentManager 实例或 None
+        """
+        return self._get_agent_manager_nowait(agent_id, service_id)

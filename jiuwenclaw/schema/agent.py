@@ -71,6 +71,8 @@ class AgentRequest:
     request_id: str
     channel_id: str = ""
     session_id: str | None = None
+    service_id: str | None = None
+    agent_id: str | None = None
     req_method: ReqMethod | None = None
     params: dict = field(default_factory=dict)
     is_stream: bool = False
