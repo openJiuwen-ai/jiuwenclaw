@@ -7,6 +7,9 @@ static identity prompt and refreshed on every model call via before_model_call()
 """
 from __future__ import annotations
 
+import os
+import platform
+import subprocess
 from datetime import datetime, timedelta, timezone
 
 from openjiuwen.core.single_agent.rail.base import AgentCallbackContext
@@ -54,6 +57,20 @@ class RuntimePromptRail(DeepAgentRail):
         """per-request 更新频道。"""
         self._channel = channel
 
+    @staticmethod
+    def _get_git_branch() -> str:
+        """获取当前 git 分支名，失败时返回 N/A。"""
+        try:
+            result = subprocess.run(
+                ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+                capture_output=True, text=True, timeout=5,
+            )
+            if result.returncode == 0:
+                return result.stdout.strip()
+        except Exception:
+            pass
+        return "N/A"
+
     async def before_model_call(self, ctx: AgentCallbackContext) -> None:
         """每次 model call 注入最新的时间和运行时信息。"""
         if not self.system_prompt_builder:
@@ -72,17 +89,34 @@ class RuntimePromptRail(DeepAgentRail):
             priority=92,
         ))
 
+        cwd = os.getcwd()
+        plat = f"{platform.system()} {platform.machine()}"
+        python_ver = platform.python_version()
+        git_branch = self._get_git_branch()
+
         if self._language == "cn":
             runtime_content = (
                 "# 运行时\n\n"
-                f"运行时：agent={self._agent_name} | model={self._model_name} "
-                f"| channel={self._channel} | language={self._language}"
+                f"- 工作目录：{cwd}\n"
+                f"- 平台：{plat}\n"
+                f"- Python：{python_ver}\n"
+                f"- 模型：{self._model_name}\n"
+                f"- Git 分支：{git_branch}\n"
+                f"- Agent：{self._agent_name}\n"
+                f"- 频道：{self._channel}\n"
+                f"- 语言：{self._language}"
             )
         else:
             runtime_content = (
                 "# Runtime\n\n"
-                f"Runtime: agent={self._agent_name} | model={self._model_name} "
-                f"| channel={self._channel} | language={self._language}"
+                f"- CWD: {cwd}\n"
+                f"- Platform: {plat}\n"
+                f"- Python: {python_ver}\n"
+                f"- Model: {self._model_name}\n"
+                f"- Git branch: {git_branch}\n"
+                f"- Agent: {self._agent_name}\n"
+                f"- Channel: {self._channel}\n"
+                f"- Language: {self._language}"
             )
 
         self.system_prompt_builder.add_section(PromptSection(
