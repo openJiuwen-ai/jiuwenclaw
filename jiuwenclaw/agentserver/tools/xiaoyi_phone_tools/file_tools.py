@@ -5,24 +5,30 @@
 包含：
 - search_file: 搜索手机文件
 - upload_file: 上传手机文件获取公网 URL
-- send_file_to_user: 通过手机端 SendFileToUser 协议发文件给用户
-
-send_file_to_user 与「本机路径/公网 URL → 上传服务 → 会话回传」类实现不同，此处仅封装设备 Intent。
+- send_file_to_user: 将本地文件或公网文件传到用户手机
 """
 
 from __future__ import annotations
 
+import asyncio
 import json
-from typing import Any, Dict, List, Union
+import os
+import tempfile
+import time
+import uuid
+from typing import Any, Dict, List, Optional, Union
+from urllib.parse import urlparse
+
+import aiohttp
 
 from openjiuwen.core.foundation.tool import tool
 
 from jiuwenclaw.utils import logger
 from .utils import (
+    ToolInputError,
     execute_device_command,
     format_success_response,
     raise_if_device_error,
-    ToolInputError,
 )
 
 
@@ -141,12 +147,12 @@ async def search_file(
     name="upload_file",
     description="""工具能力描述：将手机本地文件上传并获取可公网访问的 URL。
 
-  前置工具调用：此工具使用前必须先调用 search_file 工具获取文件的 uri
+  前置工具调用：此工具使用前必须先调用 search_file 或者 query_collection 工具获取文件的 uri
 
   工具参数说明：
-  a. 入参中的file_Infos数组，每个元素必须包含mediaUri字段（对应于search_file工具返回结果中的uri），必须与search_file结果中对应的uri完全保持一致，不要自行修改。
+  a. 入参中的file_Infos数组，每个元素必须包含mediaUri字段（对应于search_file工具或者query_collection返回结果中的uri），必须与search_file结果中对应的uri完全保持一致，不要自行修改。
   b. file_infos 中的timeout字段是可选的，表示上传文件超时时间，单位是毫秒，默认是20000（20秒）。
-  c. file_infos 是文件在手机本地的信息数组（从 search_file 工具响应中获取）。限制：每次最多支持传入 5 条文件信息。
+  c. file_infos 是文件在手机本地的信息数组（从 search_file 工具或者 query_collection 响应中获取）。限制：每次最多支持传入 5 条文件信息。
 
   注意事项：
   a. 操作超时时间为60秒,请勿重复调用此工具,如果超时或失败,最多重试一次。
@@ -267,3 +273,263 @@ async def upload_file(file_infos: Union[str, List[Dict[str, Any]]]) -> Dict[str,
     except Exception as e:
         logger.error(f"[UPLOAD_FILE_TOOL] Failed to upload files: {e}")
         raise RuntimeError(f"上传文件失败: {str(e)}") from e
+
+
+# ---------------------------------------------------------------------------
+# send_file_to_user - 将本地文件或公网文件传到用户手机
+# ---------------------------------------------------------------------------
+
+_FILE_TYPE_TO_MIME_TYPE: Dict[str, str] = {
+    "txt": "text/plain",
+    "html": "text/html",
+    "css": "text/css",
+    "js": "application/javascript",
+    "json": "application/json",
+    "png": "image/png",
+    "jpeg": "image/jpeg",
+    "jpg": "image/jpeg",
+    "gif": "image/gif",
+    "svg": "image/svg+xml",
+    "pdf": "application/pdf",
+    "zip": "application/zip",
+    "doc": "application/msword",
+    "docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    "xls": "application/vnd.ms-excel",
+    "xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    "ppt": "application/vnd.ms-powerpoint",
+    "pptx": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+    "mp3": "audio/mpeg",
+    "mp4": "video/mp4",
+}
+
+
+def _get_mime_type(filename: str) -> str:
+    """根据文件扩展名获取 MIME 类型."""
+    ext = filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
+    return _FILE_TYPE_TO_MIME_TYPE.get(ext, "text/plain")
+
+
+async def _download_remote_file(url: str) -> str:
+    """下载远程文件到临时文件，返回本地路径.
+
+    Raises:
+        RuntimeError: 下载失败
+    """
+    async with aiohttp.ClientSession() as session:
+        async with session.get(url, timeout=aiohttp.ClientTimeout(total=120)) as resp:
+            if not resp.ok:
+                raise RuntimeError(f"HTTP {resp.status}: {resp.reason}")
+            data = await resp.read()
+
+    # 从 URL 提取文件名
+    parsed = urlparse(url)
+    raw_name = os.path.basename(parsed.path) or "downloaded_file"
+    raw_name = raw_name.split("?")[0]
+
+    suffix = os.path.splitext(raw_name)[1] or ""
+    base_name = os.path.splitext(raw_name)[0] or "downloaded_file"
+    unique_name = f"{base_name}_{int(time.time())}{suffix}"
+
+    tmp_dir = tempfile.gettempdir()
+    local_path = os.path.join(tmp_dir, unique_name)
+
+    with open(local_path, "wb") as f:
+        f.write(data)
+
+    logger.info("[SEND_FILE_TO_USER] Downloaded remote file: %s -> %s", url, local_path)
+    return local_path
+
+
+@tool(
+    name="send_file_to_user",
+    description="""工具能力描述：帮助用户把本地的文件或者公网地址的文件传到手机。
+
+工具参数说明：
+a. file_local_urls：本地文件路径数组，包含用户需要回传的文件在本地的地址
+b. file_remote_urls：公网地址数组，包含用户需要回传的文件的公网地址（会先下载到本地再发送）
+c. file_local_urls 与 file_remote_urls 任意一个不为空即可，两者都提供时都会处理
+
+注意事项：
+a. 支持传入数组或 JSON 字符串格式
+b. 操作超时时间为2分钟（120秒），请勿重复调用此工具，如果超时或失败，最多重试一次""",
+)
+async def send_file_to_user(
+    file_local_urls: Optional[Union[str, List[str]]] = None,
+    file_remote_urls: Optional[Union[str, List[str]]] = None,
+) -> Dict[str, Any]:
+    """将本地文件或公网文件传到用户手机（与 xy_channel send-file-to-user-tool.ts 对齐）.
+
+    Args:
+        file_local_urls: 本地文件路径数组或 JSON 数组字符串
+        file_remote_urls: 公网地址数组或 JSON 数组字符串
+
+    Returns:
+        content[0].text: JSON 字符串（sentFiles, count, message）
+    """
+    try:
+        if file_local_urls is None and file_remote_urls is None:
+            raise ToolInputError("至少需要提供 file_local_urls 或 file_remote_urls 之一")
+
+        # 规范化参数为数组
+        local_urls: List[str] = []
+        if file_local_urls is not None:
+            if isinstance(file_local_urls, str):
+                try:
+                    parsed = json.loads(file_local_urls)
+                    if not isinstance(parsed, list):
+                        raise ToolInputError("file_local_urls 必须是数组或 JSON 数组字符串")
+                    local_urls = parsed
+                except json.JSONDecodeError as e:
+                    raise ToolInputError(f"file_local_urls JSON 解析失败: {e}") from e
+            elif isinstance(file_local_urls, list):
+                local_urls = file_local_urls
+            else:
+                raise ToolInputError(
+                    f"file_local_urls 须为数组或 JSON 字符串，当前类型: {type(file_local_urls).__name__}"
+                )
+
+        remote_urls: List[str] = []
+        if file_remote_urls is not None:
+            if isinstance(file_remote_urls, str):
+                try:
+                    parsed = json.loads(file_remote_urls)
+                    if not isinstance(parsed, list):
+                        raise ToolInputError("file_remote_urls 必须是数组或 JSON 数组字符串")
+                    remote_urls = parsed
+                except json.JSONDecodeError as e:
+                    raise ToolInputError(f"file_remote_urls JSON 解析失败: {e}") from e
+            elif isinstance(file_remote_urls, list):
+                remote_urls = file_remote_urls
+            else:
+                raise ToolInputError(
+                    f"file_remote_urls 须为数组或 JSON 字符串，当前类型: {type(file_remote_urls).__name__}"
+                )
+
+        if not local_urls and not remote_urls:
+            raise ToolInputError("file_local_urls 和 file_remote_urls 均为空")
+
+        # 获取 channel 实例和会话信息
+        from jiuwenclaw.channel.xiaoyi_channel import get_xiaoyi_channel
+        from jiuwenclaw.config import get_config
+
+        channel = get_xiaoyi_channel()
+        if channel is None:
+            raise RuntimeError("无活跃小艺会话，send_file_to_user 仅能在小艺会话活跃时使用")
+
+        config = get_config()
+        xiaoyi_conf = config.get("channels", {}).get("xiaoyi", {})
+        session_id = (xiaoyi_conf.get("last_session_id") or "").strip()
+        task_id = (xiaoyi_conf.get("last_task_id") or "").strip()
+
+        if not session_id:
+            raise RuntimeError("无活跃小艺会话，send_file_to_user 仅能在小艺会话活跃时使用")
+
+        # 获取文件上传配置
+        base_url = (xiaoyi_conf.get("file_upload_url") or "").strip()
+        api_key = (xiaoyi_conf.get("api_key") or "").strip()
+        uid = (xiaoyi_conf.get("uid") or "").strip()
+
+        if not all([base_url, api_key, uid]):
+            raise ToolInputError("缺少 channels.xiaoyi 的 file_upload_url / api_key / uid 配置")
+
+        # 下载远程文件到本地
+        all_local_paths: List[str] = list(local_urls)
+        downloaded_files: List[str] = []
+
+        for remote_url in remote_urls:
+            try:
+                local_path = await _download_remote_file(remote_url)
+                all_local_paths.append(local_path)
+                downloaded_files.append(local_path)
+            except Exception as e:
+                raise RuntimeError(f"下载远程文件失败 {remote_url}: {e}") from e
+
+        # 上传文件并发送 artifact-update 消息
+        from jiuwenclaw.channel.xiaoyi_channel import XYFileUploadService
+
+        sent_files: List[Dict[str, str]] = []
+
+        async with XYFileUploadService(base_url, api_key, uid) as upload_service:
+            for local_path in all_local_paths:
+                if not os.path.isfile(local_path):
+                    logger.warning("[SEND_FILE_TO_USER] File not found: %s", local_path)
+                    continue
+
+                try:
+                    file_id = await upload_service.upload_file(local_path)
+                    if not file_id:
+                        raise RuntimeError(f"上传文件失败: {local_path}")
+
+                    file_name = os.path.basename(local_path)
+                    mime_type = _get_mime_type(file_name)
+
+                    # 构建 artifact-update 消息并通过 WebSocket 发送
+                    payload = {
+                        "jsonrpc": "2.0",
+                        "id": task_id,
+                        "result": {
+                            "kind": "artifact-update",
+                            "append": True,
+                            "lastChunk": False,
+                            "final": False,
+                            "artifact": {
+                                "artifactId": task_id,
+                                "parts": [
+                                    {
+                                        "kind": "file",
+                                        "file": {
+                                            "name": file_name,
+                                            "mimeType": mime_type,
+                                            "fileId": file_id,
+                                        },
+                                    }
+                                ],
+                            },
+                        },
+                        "error": {"code": 0},
+                    }
+
+                    response = {
+                        "msgType": "agent_response",
+                        "agentId": xiaoyi_conf.get("agent_id", ""),
+                        "sessionId": session_id,
+                        "taskId": task_id,
+                        "msgDetail": json.dumps(payload, ensure_ascii=False),
+                    }
+
+                    await channel.send_agent_response_to_all(session_id, task_id, response)
+
+                    sent_files.append({"fileName": file_name, "fileId": file_id})
+                    logger.info("[SEND_FILE_TO_USER] Sent %s to user", file_name)
+
+                except Exception as e:
+                    raise RuntimeError(f"发送文件失败 {local_path}: {e}") from e
+
+        # 清理下载的临时文件
+        for downloaded in downloaded_files:
+            try:
+                os.unlink(downloaded)
+            except OSError:
+                pass
+
+        return {
+            "content": [
+                {
+                    "type": "text",
+                    "text": json.dumps(
+                        {
+                            "sentFiles": sent_files,
+                            "count": len(sent_files),
+                            "message": f"成功发送 {len(sent_files)} 个文件到用户设备",
+                        },
+                        ensure_ascii=False,
+                    ),
+                }
+            ]
+        }
+
+    except ToolInputError:
+        raise
+    except Exception as e:
+        logger.error(f"[SEND_FILE_TO_USER] Failed: {e}")
+        raise RuntimeError(f"发送文件到用户设备失败: {str(e)}") from e

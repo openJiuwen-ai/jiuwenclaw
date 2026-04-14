@@ -1146,6 +1146,30 @@ class XiaoyiChannel(BaseChannel):
         async with lock:
             await ws.send(data)
 
+    async def send_agent_response_to_all(
+        self, session_id: str, task_id: str, response: dict[str, Any]
+    ) -> None:
+        """向所有活跃 WebSocket 连接发送预构建的 agent_response 消息.
+
+        Args:
+            session_id: 会话 ID
+            task_id: 任务 ID
+            response: 已包含 msgType、agentId 等字段的完整消息体
+        """
+        sent = False
+        for url_key in list(self._ws_connections.keys()):
+            try:
+                await self._safe_ws_send(url_key, response)
+                sent = True
+            except Exception as e:
+                logger.warning(
+                    "XiaoyiChannel send_agent_response_to_all 失败 (%s): %s",
+                    url_key,
+                    e,
+                )
+        if not sent:
+            raise RuntimeError("发送文件消息失败，WebSocket 未连接")
+
     def _clear_task_timeout(self, session_id: str) -> None:
         """清除任务超时任务."""
         if session_id in self._task_timeout_tasks:

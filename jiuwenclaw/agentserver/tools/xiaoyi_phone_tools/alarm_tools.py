@@ -36,7 +36,7 @@ _ALARM_SNOOZE_DURATION = frozenset({5, 10, 15, 20, 25, 30})
 _ALARM_SNOOZE_TOTAL = frozenset({0, 1, 3, 5, 10})
 _ALARM_RING_DURATION = frozenset({1, 5, 10, 15, 20, 30})
 _DAYS_OF_WAKE_TYPE = frozenset({0, 1, 2, 3, 4})
-_DAYS_OF_WEEK = ("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun")
+_DAYS_OF_WEEK = ("Mon", "Tues", "Wed", "Thur", "Fri", "Sat", "Sun")
 _ALARM_STATE = frozenset({0, 1})
 _RANGE_TYPE = frozenset({"all", "next", "current"})
 
@@ -108,7 +108,7 @@ def _alarm_time_ms_from_hour_minute(hour: int, minute: int) -> int:
 def _normalize_days_of_week(
     raw: Union[str, Sequence[str], None],
 ) -> List[str]:
-    """daysOfWeek：仅 daysOfWakeType=3 时有效；支持 JSON 字符串或单元素列表."""
+    """daysOfWeek：仅 daysOfWakeType=3 时有效；支持 JSON 字符串或列表."""
     if raw is None:
         return []
     if isinstance(raw, str):
@@ -121,10 +121,6 @@ def _normalize_days_of_week(
         days = parsed
     else:
         days = list(raw)
-    if len(days) != 1:
-        raise ToolInputError(
-            "days_of_week 仅支持长度为 1 的数组；需多天请多次调用创建/修改"
-        )
     out: List[str] = []
     for d in days:
         if not isinstance(d, str) or d not in _DAYS_OF_WEEK:
@@ -185,7 +181,7 @@ def _normalize_delete_items(
 - alarm_title / label: 标题，默认「闹钟」（label 为 alarm_title 的别名）
 - alarm_snooze_duration: 小睡间隔（分钟），5/10/15/20/25/30，默认 10
 - alarm_snooze_total: 再响次数，0/1/3/5/10，默认 0
-- alarm_ring_duration: 响铃时长（分钟），1/5/10/15/20/30，默认 20
+- alarm_ring_duration: 响铃时长（分钟），1/5/10/15/20/30，默认 5
 - days_of_wake_type: 0 单次 1 法定节假日 2 每天 3 自定义 4 法定工作日，默认 0
 - days_of_week: 仅当 days_of_wake_type=3 时必填；JSON 字符串或单元素列表，值 Mon..Sun
 
@@ -212,7 +208,7 @@ async def create_alarm(
 
         snooze_d = 10 if alarm_snooze_duration is None else alarm_snooze_duration
         snooze_t = 0 if alarm_snooze_total is None else alarm_snooze_total
-        ring_d = 20 if alarm_ring_duration is None else alarm_ring_duration
+        ring_d = 5 if alarm_ring_duration is None else alarm_ring_duration
         wake_t = 0 if days_of_wake_type is None else days_of_wake_type
 
         if snooze_d not in _ALARM_SNOOZE_DURATION:

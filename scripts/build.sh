@@ -53,7 +53,7 @@ trap cleanup EXIT
 # 2. 构建 wheel
 echo "[build] 正在构建 wheel 包..."
 pip install -q --upgrade build wheel
-python -m build --wheel
+python -m build --wheel --no-isolation
 
 # 确保 dist 目录存在
 DIST_OUTPUT="$PROJECT_ROOT/dist"

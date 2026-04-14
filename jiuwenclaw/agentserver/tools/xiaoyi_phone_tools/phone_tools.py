@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+import json
 from typing import Any, Dict, Optional
 
 from openjiuwen.core.foundation.tool import tool
@@ -15,7 +16,6 @@ from openjiuwen.core.foundation.tool import tool
 from jiuwenclaw.utils import logger
 from .utils import (
     execute_device_command,
-    format_success_response,
     raise_if_device_error,
     ToolInputError,
 )
@@ -79,7 +79,6 @@ async def call_phone(
                         "phoneNumber": phone_number,
                         "slotId": slot_id,
                     },
-                    "permissionId": [],
                     "achieveType": "INTENT",
                 },
                 "responses": [{"resultCode": "", "displayText": "", "ttsText": ""}],
@@ -96,20 +95,16 @@ async def call_phone(
 
         raise_if_device_error(outputs, "拨打电话失败")
 
-        code = outputs.get("code")
-        sim_name = "主卡" if slot_id == 0 else "副卡"
-        logger.info(f"[CALL_PHONE_TOOL] Call initiated successfully via {sim_name}")
+        logger.info("[CALL_PHONE_TOOL] Call initiated successfully")
 
-        return format_success_response(
-            {
-                "success": True,
-                "code": code,
-                "phoneNumber": phone_number,
-                "slotId": slot_id,
-                "message": "电话拨打成功",
-            },
-            f"正在使用{sim_name}拨打 {phone_number}...",
-        )
+        return {
+            "content": [
+                {
+                    "type": "text",
+                    "text": json.dumps(outputs, ensure_ascii=False),
+                }
+            ]
+        }
 
     except ToolInputError:
         raise

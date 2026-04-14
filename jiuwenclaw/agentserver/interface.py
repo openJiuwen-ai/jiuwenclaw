@@ -70,9 +70,12 @@ from jiuwenclaw.agentserver.tools.xiaoyi_phone_tools import (
     call_phone,
     send_message, search_message,
     create_alarm, search_alarms, modify_alarm, delete_alarm,
-    xiaoyi_collection,
+    query_collection, add_collection, delete_collection,
+    save_media_to_gallery, save_file_to_file_manager,
+    convert_timestamp_to_utc8_time,
     image_reading,
     xiaoyi_gui_agent,
+    view_push_result,
 )
 from jiuwenclaw.agentserver.tools.multimodal_config import (
     apply_audio_model_config_from_yaml,
@@ -488,9 +491,12 @@ class JiuWenClaw:
                     call_phone,
                     send_message, search_message,
                     create_alarm, search_alarms, modify_alarm, delete_alarm,
-                    xiaoyi_collection,
+                    query_collection, add_collection, delete_collection,
+                    save_media_to_gallery, save_file_to_file_manager,
+                    convert_timestamp_to_utc8_time,
                     image_reading,
                     xiaoyi_gui_agent,
+                    view_push_result,
                 ]
 
                 for tool in phone_tools:
@@ -657,9 +663,12 @@ class JiuWenClaw:
                     call_phone,
                     send_message, search_message,
                     create_alarm, search_alarms, modify_alarm, delete_alarm,
-                    xiaoyi_collection,
+                    query_collection, add_collection, delete_collection,
+                    save_media_to_gallery, save_file_to_file_manager,
+                    convert_timestamp_to_utc8_time,
                     image_reading,
                     xiaoyi_gui_agent,
+                    view_push_result,
                 ]
 
                 for tool in phone_tools:

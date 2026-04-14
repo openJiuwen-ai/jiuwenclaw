@@ -70,10 +70,10 @@ async def _download_remote_to_temp(url: str) -> str:
 
 
 async def _call_image_understanding_api(
-    image_url: str, text: str, api_key: str, uid: str
+    image_url: str, text: str, api_key: str, uid: str, file_upload_url: str
 ) -> str:
     api_url = (
-        "https://hag-drcn.op.dbankcloud.com/celia-claw/v1/sse-api/skill/execute"
+        f"{file_upload_url}/celia-claw/v1/sse-api/skill/execute"
     )
     trace_id = str(uuid.uuid4())
     headers = {
@@ -224,9 +224,9 @@ async def image_reading(
 
     cfg = get_config()
     xc = cfg.get("channels", {}).get("xiaoyi", {})
-    base = (xc.get("file_upload_url") or "").strip()
-    api_key = (xc.get("api_key") or "").strip()
-    uid = (xc.get("uid") or "").strip()
+    base = xc.get("file_upload_url")
+    api_key = xc.get("api_key")
+    uid = str(xc.get("uid"))
     if not base or not api_key or not uid:
         raise ToolInputError(
             "缺少 channels.xiaoyi 的 file_upload_url / api_key / uid 配置，无法上传图片"
@@ -262,7 +262,7 @@ async def image_reading(
             raise RuntimeError("图片上传失败：无法获取图片访问地址")
 
         caption = await _call_image_understanding_api(
-            image_obs_url, text, api_key, uid
+            image_obs_url, text, api_key, uid, base
         )
         return _content_payload(
             {
