@@ -28,7 +28,7 @@ from .note_tools import create_note, search_notes, modify_note
 from .calendar_tools import create_calendar_event, search_calendar_event
 from .contact_tools import search_contact
 from .photo_tools import search_photo_gallery, upload_photo
-from .file_tools import search_file, upload_file, send_file_to_user
+from .file_tools import search_file, upload_file
 from .phone_tools import call_phone
 from .message_tools import send_message, search_message
 from .alarm_tools import create_alarm, search_alarms, modify_alarm, delete_alarm
@@ -51,7 +51,6 @@ __all__ = [
     "upload_photo",
     "search_file",
     "upload_file",
-    "send_file_to_user",
     "call_phone",
     "send_message",
     "search_message",
