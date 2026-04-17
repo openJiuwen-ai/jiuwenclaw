@@ -8,12 +8,9 @@ Sends evolution approval requests to user via chat.ask_user_question (keep/undo)
 from __future__ import annotations
 
 import asyncio
-import importlib.util
 import logging
 import re
-import sys
 import uuid
-from pathlib import Path
 from typing import Any, AsyncIterator, Dict, List, Optional
 
 import tiktoken
@@ -22,7 +19,6 @@ from openjiuwen.core.foundation.llm import (
     AssistantMessage,
     SystemMessage,
     UserMessage,
-    BaseMessage,
     Model
 )
 from openjiuwen.core.foundation.tool import ToolInfo
@@ -31,6 +27,7 @@ from openjiuwen.core.session.stream import OutputSchema
 from openjiuwen.core.session.stream.base import StreamMode
 from openjiuwen.core.single_agent import AgentCard, ReActAgent
 
+from jiuwenclaw.agentserver.llm_model import LlmModel
 from jiuwenclaw.agentserver.permissions import (
     assess_command_risk_with_llm,
     check_tool_permissions,
@@ -38,7 +35,6 @@ from jiuwenclaw.agentserver.permissions import (
     persist_permission_allow_rule,
 )
 from jiuwenclaw.agentserver.permissions.checker import TOOL_PERMISSION_CHANNEL_ID
-from jiuwenclaw.agentserver.permissions.models import PermissionLevel
 from jiuwenclaw.agentserver.tools.todo_toolkits import TodoToolkit
 from jiuwenclaw.evolution.service import EvolutionService
 from jiuwenclaw.utils import get_agent_memory_dir, get_workspace_dir
@@ -136,6 +132,20 @@ class JiuClawReActAgent(ReActAgent):
         """Set workspace directory and Agent ID."""
         self._workspace_dir = workspace_dir
         self._agent_id = agent_id
+
+    def _get_llm(self) -> Model:
+        if self._llm is None:
+            if self._config.model_client_config is None:
+                raise ValueError(
+                    "model_client_config is required. "
+                    "Use configure_model_client() to set it."
+                )
+            # 重写_get_llm方法, 支持model_client进行插件注册
+            self._llm = LlmModel(
+                model_client_config=self._config.model_client_config,
+                model_config=self._config.model_config_obj
+            )
+        return self._llm
 
     async def _call_llm(
         self,

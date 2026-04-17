@@ -1,11 +1,13 @@
-from typing import TYPE_CHECKING, Any, Callable
+from typing import TYPE_CHECKING, Any, Callable, Type
 
+from openjiuwen.core.foundation.llm import OpenAIModelClient
 from openjiuwen.core.runner.callback.framework import AsyncCallbackFramework
 
 from jiuwenclaw.extensions.callback_compat import unregister_callback_sync
 from jiuwenclaw.extensions.extension_tool_entry import ExtensionLocalToolEntry
 from jiuwenclaw.extensions.sdk.agent_server_client import AgentServerClientExtension
 from jiuwenclaw.extensions.sdk.crypto_utility import CryptoUtility
+from jiuwenclaw.extensions.sdk.llm_base_model_client import LlmBaseModelClient
 from jiuwenclaw.extensions.sdk.telemetry_provider import TelemetryProviderExtension
 from jiuwenclaw.extensions.types import ExtensionConfig
 
@@ -38,6 +40,9 @@ class ExtensionRegistry:
 
     def update_config(self, full_config) -> None:
         self._config.config = full_config
+
+    def get_config(self):
+        return self._config.config
 
     @classmethod
     def create_instance(
@@ -124,6 +129,20 @@ class ExtensionRegistry:
                 func=func,
                 source_id=sid,
             )
+        )
+
+    def register_model(self, name: str, model_cls: Type[LlmBaseModelClient]) -> None:
+        if not name:
+            self._config.logger.warning("register model failed: name must be non-empty")
+            return
+
+        from jiuwenclaw.agentserver.llm_model import _CLIENT_TYPE_REGISTRY as _jw_registry
+        _jw_registry[name] = model_cls
+        # core中的_CLIENT_TYPE_REGISTRY用于校验和注册, 并不实际使用
+        from openjiuwen.core.foundation.llm.model import _CLIENT_TYPE_REGISTRY as _oj_registry
+        _oj_registry[name] = OpenAIModelClient
+        self._config.logger.info(
+            "register model success: %s -> %s", name, model_cls
         )
 
     def register(
