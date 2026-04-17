@@ -189,6 +189,18 @@ async def _run(
         )
     )
 
+    # remote 模式：session 操作经队列与 session.list 顺序一致；create/delete 转发到 Agent，list 在网关读索引
+    from jiuwenclaw.gateway.session_index import is_remote_storage
+    from jiuwenclaw.gateway.web_normalize import register_forward_method
+    if is_remote_storage():
+        register_forward_method("session.create", skip_local=True)
+        register_forward_method("session.delete", skip_local=True)
+        register_forward_method("session.list", skip_local=True)
+        logger.info(
+            "[App] remote session storage 已启用：session.create/delete 转发到 Agent，"
+            "session.list 由 MessageHandler 读网关索引",
+        )
+
     channel_manager.register_channel_with_inbound(
         web_channel, create_web_forward_handler(channel_manager)
     )

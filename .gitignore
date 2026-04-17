@@ -47,6 +47,7 @@ pnpm-debug.log*
 .claude
 CLAUDE.md
 AGENTS.md
+.cursorrules
 workspace/agent-data.json
 
 # reference

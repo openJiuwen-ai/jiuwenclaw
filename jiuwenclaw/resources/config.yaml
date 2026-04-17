@@ -137,6 +137,11 @@ gateway:
   # SessionMap 仅用于企业claw场景，如 feishu_enterprise 等通道：将平台身份映射为 Agent 的 session_id。
   # 取值：per_chat_bot（默认，同 chat+bot 共享会话）, per_chat_bot_user（按 user 分会话）
   session_map_scope: per_chat_bot
+  # 会话列表存储模式：local（默认）或 remote。
+  # local：session.list 直接扫描本机 sessions 目录（适用于同机部署）。
+  # remote：Gateway 在本地维护最多 10 条会话索引，适用于 Gateway 与 Agent 分机部署时。
+  # 分机部署时请设置为 remote，否则 session.list 将读取网关本机目录（通常为空）。
+  web_session_storage: local
 
 heartbeat:
   # 心跳间隔（秒），默认 60

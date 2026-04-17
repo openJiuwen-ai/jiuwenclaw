@@ -321,6 +321,12 @@ class AgentWebSocketServer:
             if request.req_method == ReqMethod.AGENT_RELOAD_CONFIG:
                 await self._handle_agent_reload_config(ws, request, send_lock)
                 return
+            if request.req_method == ReqMethod.SESSION_CREATE:
+                await self._handle_session_create(ws, request, send_lock)
+                return
+            if request.req_method == ReqMethod.SESSION_DELETE:
+                await self._handle_session_delete(ws, request, send_lock)
+                return
             # 文件传输处理
             event_type = request.params.get("event_type") if isinstance(request.params, dict) else None
             if event_type in FILE_TRANSFER_EVENT_TYPES:
@@ -600,6 +606,157 @@ class AgentWebSocketServer:
             )
         except Exception as e:  # noqa: BLE001
             logger.exception("[AgentWebSocketServer] agent.reload_config failed: %s", e)
+            resp = AgentResponse(
+                request_id=request.request_id,
+                channel_id=request.channel_id,
+                ok=False,
+                payload={"error": str(e)},
+            )
+
+        wire = encode_agent_response_for_wire(resp, response_id=request.request_id)
+        async with send_lock:
+            await ws.send(json.dumps(wire, ensure_ascii=False))
+
+    async def _handle_session_create(self, ws: Any, request: AgentRequest, send_lock: asyncio.Lock) -> None:
+        """处理 session.create 请求：在 Agent 本机 sessions 目录下创建会话目录并初始化元数据。"""
+        import shutil
+
+        from jiuwenclaw.agentserver.session_id_safe import (
+            normalize_safe_session_id,
+            resolve_session_dir_under_root,
+        )
+        from jiuwenclaw.agentserver.session_metadata import init_session_metadata
+
+        try:
+            params = request.params if isinstance(request.params, dict) else {}
+            raw_sid = str(params.get("session_id") or "").strip()
+            if not raw_sid:
+                resp = AgentResponse(
+                    request_id=request.request_id,
+                    channel_id=request.channel_id,
+                    ok=False,
+                    payload={"error": "session_id is required", "code": "BAD_REQUEST"},
+                )
+            else:
+                safe_sid = normalize_safe_session_id(raw_sid)
+                if safe_sid is None:
+                    resp = AgentResponse(
+                        request_id=request.request_id,
+                        channel_id=request.channel_id,
+                        ok=False,
+                        payload={"error": "invalid session_id", "code": "BAD_REQUEST"},
+                    )
+                else:
+                    workspace_session_dir = get_agent_sessions_dir()
+                    workspace_session_dir.mkdir(parents=True, exist_ok=True)
+                    session_dir = resolve_session_dir_under_root(workspace_session_dir, safe_sid)
+                    if session_dir is None:
+                        resp = AgentResponse(
+                            request_id=request.request_id,
+                            channel_id=request.channel_id,
+                            ok=False,
+                            payload={"error": "invalid session_id", "code": "BAD_REQUEST"},
+                        )
+                    elif session_dir.exists():
+                        resp = AgentResponse(
+                            request_id=request.request_id,
+                            channel_id=request.channel_id,
+                            ok=False,
+                            payload={"error": "session already exists", "code": "ALREADY_EXISTS"},
+                        )
+                    else:
+                        session_dir.mkdir()
+                        try:
+                            init_session_metadata(
+                                session_id=safe_sid,
+                                channel_id=params.get("channel_id", ""),
+                                user_id=params.get("user_id", ""),
+                                title=params.get("title", ""),
+                            )
+                        except Exception:
+                            shutil.rmtree(session_dir, ignore_errors=True)
+                            raise
+                        resp = AgentResponse(
+                            request_id=request.request_id,
+                            channel_id=request.channel_id,
+                            ok=True,
+                            payload={"session_id": safe_sid},
+                        )
+        except Exception as e:  # noqa: BLE001
+            logger.exception("[AgentWebSocketServer] session.create failed: %s", e)
+            resp = AgentResponse(
+                request_id=request.request_id,
+                channel_id=request.channel_id,
+                ok=False,
+                payload={"error": str(e)},
+            )
+
+        wire = encode_agent_response_for_wire(resp, response_id=request.request_id)
+        async with send_lock:
+            await ws.send(json.dumps(wire, ensure_ascii=False))
+
+    async def _handle_session_delete(self, ws: Any, request: AgentRequest, send_lock: asyncio.Lock) -> None:
+        """处理 session.delete 请求：删除 Agent 本机 sessions 目录中的会话。"""
+        import shutil
+
+        from jiuwenclaw.agentserver.session_id_safe import (
+            normalize_safe_session_id,
+            resolve_session_dir_under_root,
+        )
+
+        try:
+            params = request.params if isinstance(request.params, dict) else {}
+            raw_sid = str(params.get("session_id") or "").strip()
+            if not raw_sid:
+                resp = AgentResponse(
+                    request_id=request.request_id,
+                    channel_id=request.channel_id,
+                    ok=False,
+                    payload={"error": "session_id is required", "code": "BAD_REQUEST"},
+                )
+            else:
+                safe_sid = normalize_safe_session_id(raw_sid)
+                if safe_sid is None:
+                    resp = AgentResponse(
+                        request_id=request.request_id,
+                        channel_id=request.channel_id,
+                        ok=False,
+                        payload={"error": "invalid session_id", "code": "BAD_REQUEST"},
+                    )
+                else:
+                    workspace_session_dir = get_agent_sessions_dir()
+                    session_dir = resolve_session_dir_under_root(workspace_session_dir, safe_sid)
+                    if session_dir is None:
+                        resp = AgentResponse(
+                            request_id=request.request_id,
+                            channel_id=request.channel_id,
+                            ok=False,
+                            payload={"error": "invalid session_id", "code": "BAD_REQUEST"},
+                        )
+                    elif not session_dir.exists():
+                        resp = AgentResponse(
+                            request_id=request.request_id,
+                            channel_id=request.channel_id,
+                            ok=False,
+                            payload={"error": "session not found", "code": "NOT_FOUND"},
+                        )
+                    elif not session_dir.is_dir():
+                        resp = AgentResponse(
+                            request_id=request.request_id,
+                            channel_id=request.channel_id,
+                            ok=False,
+                            payload={"error": "session is not a directory", "code": "BAD_REQUEST"},
+                        )
+                    else:
+                        shutil.rmtree(session_dir)
+                        resp = AgentResponse(
+                            request_id=request.request_id,
+                            channel_id=request.channel_id,
+                            ok=True,
+                            payload={"session_id": safe_sid},
+                        )
+        except Exception as e:  # noqa: BLE001
+            logger.exception("[AgentWebSocketServer] session.delete failed: %s", e)
             resp = AgentResponse(
                 request_id=request.request_id,
                 channel_id=request.channel_id,

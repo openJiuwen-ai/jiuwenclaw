@@ -1017,6 +1017,10 @@ function AppContent() {
               isConnected={isConnected}
               isProcessing={isProcessing}
               onRestoreSession={handleRestoreSession}
+              isRemoteSessionStorage={
+                typeof serverConfig?.gateway_web_session_storage === 'string' &&
+                serverConfig.gateway_web_session_storage.trim().toLowerCase() === 'remote'
+              }
             />
           </div>
         )}

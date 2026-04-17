@@ -50,7 +50,7 @@ Write-Host "[build] 正在构建 wheel 包..." -ForegroundColor Yellow
 Push-Location $ProjectRoot
 try {
     python -m pip install --upgrade build wheel 2>$null
-    python -m build --wheel
+    python -m build --wheel --no-isolation
     if ($LASTEXITCODE -ne 0) {
         throw "wheel 构建失败"
     }

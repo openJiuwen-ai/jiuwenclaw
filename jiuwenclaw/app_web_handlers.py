@@ -33,6 +33,10 @@ from jiuwenclaw.config import (
 from jiuwenclaw.extensions.extension_config_sync import update_extensions_in_config
 from jiuwenclaw.jiuwen_core_patch import apply_openai_model_client_patch
 from jiuwenclaw.updater import WindowsUpdaterService
+from jiuwenclaw.agentserver.session_id_safe import (
+    normalize_safe_session_id,
+    resolve_session_dir_under_root,
+)
 from jiuwenclaw.utils import (
     get_user_workspace_dir,
     get_agent_sessions_dir,
@@ -267,9 +271,14 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             payload["permissions_enabled"] = (
                 "true" if perm_cfg.get("enabled", False) else "false"
             )
+            gateway_cfg = raw.get("gateway") or {}
+            payload["gateway_web_session_storage"] = str(
+                gateway_cfg.get("web_session_storage") or "local"
+            ).strip().lower()
         except Exception:  # noqa: BLE001
             payload.setdefault("context_engine_enabled", "false")
             payload.setdefault("permissions_enabled", "false")
+            payload.setdefault("gateway_web_session_storage", "local")
         await channel.send_response(ws, req_id, ok=True, payload=payload)
 
     def _persist_env_updates(updates: dict[str, str]) -> None:
@@ -496,6 +505,29 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
 
     async def _session_list(ws, req_id, params, session_id):
         """返回会话列表,包含完整的会话管理信息。"""
+        from jiuwenclaw.gateway.session_index import is_remote_storage
+
+        if is_remote_storage():
+            # 正常由 Web 入站转发至 MessageHandler 队列（与 session.create/delete 顺序一致）。
+            # 若未注册转发则兜底读索引，避免误返回空列表且打日志便于排查配置/启动顺序问题。
+            logger.warning(
+                "[session.list] remote 模式执行了 WebChannel 本地 handler（缺少入站转发时）；"
+                "将就地读网关索引。",
+            )
+            from jiuwenclaw.gateway.session_index import list_sessions_page
+
+            sessions, total, limit, offset = list_sessions_page(
+                params if isinstance(params, dict) else {},
+            )
+            await channel.send_response(ws, req_id, ok=True, payload={
+                "sessions": sessions,
+                "total": total,
+                "limit": limit,
+                "offset": offset,
+            })
+            return
+
+        # local 模式：保持现有扫盘逻辑
         limit = 20
         offset = 0
         if isinstance(params, dict):
@@ -550,11 +582,46 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             )
             return
         session_id_to_create = session_id_to_create.strip()
+        safe_sid = normalize_safe_session_id(session_id_to_create)
+        if safe_sid is None:
+            await channel.send_response(
+                ws,
+                req_id,
+                ok=False,
+                error="invalid session_id",
+                code="BAD_REQUEST",
+            )
+            return
 
+        from jiuwenclaw.gateway.session_index import is_remote_storage
+        if is_remote_storage():
+            logger.error(
+                "[session.create] remote 模式但执行了本地 handler（转发未生效？）session_id=%s",
+                safe_sid,
+            )
+            await channel.send_response(
+                ws,
+                req_id,
+                ok=False,
+                error="remote session storage is enabled but request was not forwarded to agent",
+                code="INTERNAL_CONFIGURATION_ERROR",
+            )
+            return
+
+        # local 模式：保持现有逻辑
         workspace_session_dir = get_agent_sessions_dir()
         if not workspace_session_dir.exists():
             workspace_session_dir.mkdir(parents=True)
-        session_dir = workspace_session_dir / session_id_to_create
+        session_dir = resolve_session_dir_under_root(workspace_session_dir, safe_sid)
+        if session_dir is None:
+            await channel.send_response(
+                ws,
+                req_id,
+                ok=False,
+                error="invalid session_id",
+                code="BAD_REQUEST",
+            )
+            return
         if session_dir.exists():
             await channel.send_response(
                 ws,
@@ -568,15 +635,27 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
 
         # 初始化会话元数据
         from jiuwenclaw.agentserver.session_metadata import init_session_metadata
-        init_session_metadata(
-            session_id=session_id_to_create,
-            channel_id=params.get("channel_id", ""),
-            user_id=params.get("user_id", ""),
-            title=params.get("title", ""),
-        )
+        try:
+            init_session_metadata(
+                session_id=safe_sid,
+                channel_id=params.get("channel_id", ""),
+                user_id=params.get("user_id", ""),
+                title=params.get("title", ""),
+            )
+        except Exception as exc:  # noqa: BLE001
+            shutil.rmtree(session_dir, ignore_errors=True)
+            logger.warning("[session.create] init_session_metadata 失败，已清理目录: %s", exc)
+            await channel.send_response(
+                ws,
+                req_id,
+                ok=False,
+                error=str(exc),
+                code="INTERNAL_ERROR",
+            )
+            return
 
         await channel.send_response(
-            ws, req_id, ok=True, payload={"session_id": session_id_to_create}
+            ws, req_id, ok=True, payload={"session_id": safe_sid}
         )
 
     async def _session_delete(ws, req_id, params, session_id):
@@ -604,9 +683,44 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             )
             return
         session_id_to_delete = session_id_to_delete.strip()
+        safe_sid = normalize_safe_session_id(session_id_to_delete)
+        if safe_sid is None:
+            await channel.send_response(
+                ws,
+                req_id,
+                ok=False,
+                error="invalid session_id",
+                code="BAD_REQUEST",
+            )
+            return
 
+        from jiuwenclaw.gateway.session_index import is_remote_storage
+        if is_remote_storage():
+            logger.error(
+                "[session.delete] remote 模式但执行了本地 handler（转发未生效？）session_id=%s",
+                safe_sid,
+            )
+            await channel.send_response(
+                ws,
+                req_id,
+                ok=False,
+                error="remote session storage is enabled but request was not forwarded to agent",
+                code="INTERNAL_CONFIGURATION_ERROR",
+            )
+            return
+
+        # local 模式：保持现有逻辑
         workspace_session_dir = get_agent_sessions_dir()
-        session_dir = workspace_session_dir / session_id_to_delete
+        session_dir = resolve_session_dir_under_root(workspace_session_dir, safe_sid)
+        if session_dir is None:
+            await channel.send_response(
+                ws,
+                req_id,
+                ok=False,
+                error="invalid session_id",
+                code="BAD_REQUEST",
+            )
+            return
         if not session_dir.exists():
             await channel.send_response(
                 ws,
@@ -627,7 +741,7 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             return
         shutil.rmtree(session_dir)
         await channel.send_response(
-            ws, req_id, ok=True, payload={"session_id": session_id_to_delete}
+            ws, req_id, ok=True, payload={"session_id": safe_sid}
         )
 
     async def _path_get(ws, req_id, params, session_id):

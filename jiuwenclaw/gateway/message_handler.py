@@ -507,6 +507,8 @@ class MessageHandler(ABC):
 
     async def publish_robot_messages(self, msg: "Message") -> None:
         """将 Agent 响应放入 robot_messages 队列."""
+        # remote 模式：chat.final 事件写入网关会话索引（助手预览；同步 JSON 读写，高流量时可能成为瓶颈）
+        self._maybe_update_session_index_on_robot_msg(msg)
         await self._robot_messages.put(msg)
 
     def publish_robot_messages_nowait(self, msg: "Message") -> None:
@@ -838,6 +840,9 @@ class MessageHandler(ABC):
             ReqMethod.CHAT_RESUME.value,
             ReqMethod.CHAT_CANCEL.value,
             ReqMethod.CHAT_ANSWER.value,
+            # session.create/delete 需 await，避免与后续入队消息（含 remote 下 session.list）竞态
+            ReqMethod.SESSION_CREATE.value,
+            ReqMethod.SESSION_DELETE.value,
         )
 
     @staticmethod
@@ -867,6 +872,47 @@ class MessageHandler(ABC):
         from jiuwenclaw.extensions.registry import ExtensionRegistry
         await ExtensionRegistry.get_instance().trigger(GatewayHookEvents.BEFORE_CHAT_REQUEST, ctx)
 
+    @staticmethod
+    def _maybe_update_session_index_on_user_msg(msg: "Message") -> None:
+        """remote 模式下，用户 chat.send 时将用户消息预览写入网关会话索引。"""
+        try:
+            from jiuwenclaw.gateway.session_index import is_remote_storage, upsert
+            if not is_remote_storage():
+                return
+            if str(msg.channel_id or "").strip() != "web":
+                return
+            if msg.req_method not in (ReqMethod.CHAT_SEND, ReqMethod.CHAT_RESUME):
+                return
+            sid = str(msg.session_id or "").strip()
+            if not sid:
+                return
+            params = msg.params or {}
+            content = str(params.get("query") or params.get("content") or "").strip()
+            upsert(sid, role="user", content=content, timestamp=msg.timestamp or time.time())
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[session_index] _maybe_update_session_index_on_user_msg 异常: %s", exc)
+
+    @staticmethod
+    def _maybe_update_session_index_on_robot_msg(msg: "Message") -> None:
+        """remote 模式下，chat.final 事件时将助手回复预览写入网关会话索引。"""
+        try:
+            from jiuwenclaw.schema.message import EventType
+            from jiuwenclaw.gateway.session_index import is_remote_storage, upsert
+            if not is_remote_storage():
+                return
+            if str(msg.channel_id or "").strip() != "web":
+                return
+            if msg.event_type != EventType.CHAT_FINAL:
+                return
+            sid = str(msg.session_id or "").strip()
+            if not sid:
+                return
+            payload = msg.payload or {}
+            content = str(payload.get("content") or "").strip()
+            upsert(sid, role="assistant", content=content, timestamp=msg.timestamp or time.time())
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[session_index] _maybe_update_session_index_on_robot_msg 异常: %s", exc)
+
     async def _process_non_stream_request(self, msg: "Message", env: "E2AEnvelope") -> None:
         """执行单次非流式 Agent 请求并将结果写入 robot_messages（供串行或后台任务复用）。"""
         try:
@@ -874,6 +920,8 @@ class MessageHandler(ABC):
             out = self._response_to_message(
                 resp, session_id=msg.session_id, request_metadata=msg.metadata
             )
+            # remote 模式：session.create/delete 成功后同步更新网关索引
+            self._maybe_sync_session_index_on_response(msg, resp)
             await self.publish_robot_messages(out)
             logger.info(
                 "[MessageHandler] Agent 响应已写入 robot_messages: request_id=%s channel_id=%s",
@@ -890,6 +938,67 @@ class MessageHandler(ABC):
                 msg.id,
                 msg.channel_id,
             )
+
+    @staticmethod
+    def _maybe_sync_session_index_on_response(msg: "Message", resp: "AgentResponse") -> None:
+        """remote 模式下，根据 session.create/delete 的成功响应更新网关会话索引。"""
+        try:
+            from jiuwenclaw.gateway.session_index import is_remote_storage, upsert, remove
+            if not is_remote_storage():
+                return
+            if str(msg.channel_id or "").strip() != "web":
+                return
+            req_method = msg.req_method
+            if req_method is None:
+                return
+            if not resp.ok:
+                return
+            payload = resp.payload or {}
+            if req_method == ReqMethod.SESSION_CREATE:
+                sid = str(payload.get("session_id") or msg.session_id or "").strip()
+                if sid:
+                    upsert(sid, role="", content="", timestamp=time.time())
+                    logger.debug("[session_index] session.create 已加入索引: %s", sid)
+            elif req_method == ReqMethod.SESSION_DELETE:
+                sid = str(payload.get("session_id") or "").strip()
+                if not sid and isinstance(msg.params, dict):
+                    sid = str(msg.params.get("session_id") or "").strip()
+                if sid:
+                    remove(sid)
+                    logger.debug("[session_index] session.delete 已从索引移除: %s", sid)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[session_index] _maybe_sync_session_index_on_response 异常: %s", exc)
+
+    async def _process_remote_session_list_request(self, msg: "Message") -> None:
+        """remote 模式：在网关读会话索引并写回 robot_messages（不经 Agent）。"""
+        from jiuwenclaw.gateway.session_index import list_sessions_page
+        from jiuwenclaw.schema.agent import AgentResponse
+
+        params = msg.params if isinstance(msg.params, dict) else {}
+        sessions, total, limit, offset = list_sessions_page(params)
+        resp = AgentResponse(
+            request_id=msg.id,
+            channel_id=msg.channel_id,
+            ok=True,
+            payload={
+                "sessions": sessions,
+                "total": total,
+                "limit": limit,
+                "offset": offset,
+            },
+            metadata=msg.metadata,
+        )
+        out = self._response_to_message(
+            resp, session_id=msg.session_id, request_metadata=msg.metadata
+        )
+        await self.publish_robot_messages(out)
+        logger.info(
+            "[MessageHandler] remote session.list 已响应: id=%s total=%s limit=%s offset=%s",
+            msg.id,
+            total,
+            limit,
+            offset,
+        )
 
     # ---------- 入队 -> AgentServer -> 出队 转发循环 ----------
 
@@ -916,6 +1025,14 @@ class MessageHandler(ABC):
 
                 # 将当前 Channel 的控制状态应用到消息上
                 self._apply_channel_state(msg)
+
+                # remote：session.list 在网关读索引并响应，纳入本队列以便与 session.create/delete 顺序一致
+                if msg.req_method == ReqMethod.SESSION_LIST:
+                    from jiuwenclaw.gateway.session_index import is_remote_storage
+
+                    if is_remote_storage() and str(msg.channel_id or "").strip() == "web":
+                        await self._process_remote_session_list_request(msg)
+                        continue
 
                 # 检查是否是中断请求
                 if msg.req_method == ReqMethod.CHAT_CANCEL:
@@ -1030,6 +1147,8 @@ class MessageHandler(ABC):
                     msg.id, msg.channel_id, msg.is_stream,
                     extra={'user_visible': 'critical'},
                 )
+                # remote 模式：用户 chat.send 时在网关索引记录 role=user 预览
+                self._maybe_update_session_index_on_user_msg(msg)
                 await self._trigger_before_chat_request_hook(msg)
                 env = self.message_to_e2a(msg)
 
