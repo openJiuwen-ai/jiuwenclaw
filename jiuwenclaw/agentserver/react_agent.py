@@ -42,6 +42,66 @@ from jiuwenclaw.config import get_config
 
 logger = logging.getLogger(__name__)
 
+_DEFAULT_CONTEXT_WINDOW_LIMIT_TOKENS = 128000
+
+
+def _coerce_context_window_limit_tokens(raw: Any) -> int:
+    """Parse react.context_window_limit_tokens; invalid values fall back to default."""
+    if raw is None:
+        return _DEFAULT_CONTEXT_WINDOW_LIMIT_TOKENS
+    if isinstance(raw, bool):
+        logger.warning(
+            "Invalid context_window_limit_tokens=%r (boolean); using default %s",
+            raw,
+            _DEFAULT_CONTEXT_WINDOW_LIMIT_TOKENS,
+        )
+        return _DEFAULT_CONTEXT_WINDOW_LIMIT_TOKENS
+    try:
+        n = int(raw)
+    except (TypeError, ValueError):
+        try:
+            n = int(float(raw))
+        except (TypeError, ValueError):
+            logger.warning(
+                "Invalid context_window_limit_tokens=%r; using default %s",
+                raw,
+                _DEFAULT_CONTEXT_WINDOW_LIMIT_TOKENS,
+            )
+            return _DEFAULT_CONTEXT_WINDOW_LIMIT_TOKENS
+    if n <= 0:
+        logger.warning(
+            "Invalid context_window_limit_tokens=%s (non-positive); using default %s",
+            n,
+            _DEFAULT_CONTEXT_WINDOW_LIMIT_TOKENS,
+        )
+        return _DEFAULT_CONTEXT_WINDOW_LIMIT_TOKENS
+    return n
+
+
+def _read_nonneg_usage_int(usage: Any, *names: str) -> Optional[int]:
+    """Read first usable non-negative int from a usage object or dict (provider field aliases)."""
+    if usage is None:
+        return None
+    for name in names:
+        raw: Any
+        if isinstance(usage, dict):
+            raw = usage.get(name)
+        else:
+            raw = getattr(usage, name, None)
+        if raw is None:
+            continue
+        try:
+            n = int(raw)
+        except (TypeError, ValueError):
+            try:
+                n = int(float(raw))
+            except (TypeError, ValueError):
+                continue
+        if n < 0:
+            continue
+        return n
+    return None
+
 
 # 加载流式输出配置
 _react_config = get_config().get("react", {})
@@ -402,6 +462,8 @@ class JiuClawReActAgent(ReActAgent):
                     context_window.get_tools() or None,
                     session,  # Pass session for streaming
                 )
+                if session is not None:
+                    await self._emit_context_usage(session, ai_message)
             except Exception as e:
                 logger.error(f"[JiuwenClaw] 尝试修复上下文")
                 await self._fix_incomplete_tool_context(context)
@@ -419,6 +481,8 @@ class JiuClawReActAgent(ReActAgent):
                     context_window.get_tools() or None,
                     session,  # Pass session for streaming
                 )
+                if session is not None:
+                    await self._emit_context_usage(session, ai_message)
 
             # Pause checkpoint: after LLM returns, before tool execution
             if _pause_event is not None:
@@ -930,6 +994,56 @@ class JiuClawReActAgent(ReActAgent):
             )
         except Exception:
             logger.debug("context_compression emit failed", exc_info=True)
+
+    async def _emit_context_usage(self, session: Session, ai_message: Any) -> None:
+        """Emit context window usage derived from LLM usage_metadata."""
+        try:
+            raw_limit = get_config().get("react", {}).get(
+                "context_window_limit_tokens", _DEFAULT_CONTEXT_WINDOW_LIMIT_TOKENS
+            )
+            limit_tokens = _coerce_context_window_limit_tokens(raw_limit)
+            usage = getattr(ai_message, "usage_metadata", None)
+            input_tokens = _read_nonneg_usage_int(usage, "input_tokens", "prompt_tokens")
+            output_tokens = _read_nonneg_usage_int(usage, "output_tokens", "completion_tokens")
+            total_tokens = _read_nonneg_usage_int(usage, "total_tokens")
+            cache_tokens = _read_nonneg_usage_int(
+                usage, "cache_tokens", "cache_read_input_tokens"
+            )
+
+            pair_sum = (input_tokens or 0) + (output_tokens or 0)
+            if total_tokens is not None:
+                used_tokens = max(pair_sum, total_tokens)
+            else:
+                used_tokens = pair_sum
+
+            has_usage_signal = usage is not None and (
+                input_tokens is not None
+                or output_tokens is not None
+                or total_tokens is not None
+                or cache_tokens is not None
+            )
+            usage_percent = (
+                round(min(100.0, used_tokens / limit_tokens * 100), 1)
+                if has_usage_signal and limit_tokens > 0
+                else None
+            )
+            await session.write_stream(
+                OutputSchema(
+                    type="context.usage",
+                    index=0,
+                    payload={
+                        "input_tokens": input_tokens,
+                        "output_tokens": output_tokens,
+                        "total_tokens": total_tokens,
+                        "cache_tokens": cache_tokens,
+                        "used_tokens": used_tokens if has_usage_signal else None,
+                        "limit_tokens": limit_tokens,
+                        "usage_percent": usage_percent,
+                    },
+                )
+            )
+        except Exception:
+            logger.debug("context_usage emit failed", exc_info=True)
 
     async def _fix_incomplete_tool_context(self, context: Any) -> None:
         """Validate and fix incomplete context messages before entering ReAct loop.

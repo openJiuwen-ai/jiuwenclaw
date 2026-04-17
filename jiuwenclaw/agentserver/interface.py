@@ -230,6 +230,7 @@ class JiuWenClaw:
         # 提取 agent_name，如果不存在则使用默认值
         react_config = config.get("react", {}).copy()
         agent_name = react_config.pop("agent_name", "main_agent")
+        react_config.pop("context_window_limit_tokens", None)
         self._agent_name = agent_name
 
         # 处理 model_client_config：确保包含必需字段
@@ -1879,6 +1880,16 @@ class JiuWenClaw:
                             "after_compressed": payload.get("after_compressed"),
                         }
                     return {"event_type": "context.compressed", "rate": 0}
+
+                if chunk_type == "context.usage":
+                    if isinstance(payload, dict):
+                        return {
+                            "event_type": "context.usage",
+                            "input_tokens": payload.get("input_tokens"),
+                            "limit_tokens": payload.get("limit_tokens"),
+                            "usage_percent": payload.get("usage_percent"),
+                        }
+                    return None
 
                 if chunk_type == "chat.ask_user_question":
                     return {

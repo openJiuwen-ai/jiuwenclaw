@@ -74,6 +74,8 @@
   "toolPanel": {
     "status": "状态",
     "contextCompression": "上下文压缩",
+    "contextWindow": "上下文窗口",
+    "contextWindowHint": "分子：单次调用的输入+输出 token（并与 total 取较大）；分母：配置项 react.context_window_limit_tokens（需自行与模型官方窗口对齐，非自动检测）。",
     "memoryUsage": "内存占用",
     "message": "消息",
     "time": "时间",

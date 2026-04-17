@@ -74,6 +74,8 @@
   "toolPanel": {
     "status": "Status",
     "contextCompression": "Context compression",
+    "contextWindow": "Context window",
+    "contextWindowHint": "Numerator: input+output tokens per call (max with total when reported). Denominator: react.context_window_limit_tokens — align with your model; not auto-detected.",
     "memoryUsage": "Memory usage",
     "message": "Message",
     "time": "Time",

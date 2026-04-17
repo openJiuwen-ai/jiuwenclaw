@@ -32,6 +32,7 @@ import {
   stopAllTts,
   normalizeFinalContent,
 } from '../utils';
+import { prepareUserTurn } from './userTurn';
 import {
   normalizeToolCallPayload,
   normalizeToolResultPayload,
@@ -162,6 +163,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
     setConnectionStats,
     updateSession,
     setContextCompressionStats,
+    setContextWindowUsage,
     setHeartbeatStatus,
   } =
     useSessionStore();
@@ -259,19 +261,16 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
     async (content: string, sessionId: string) => {
       if (!content.trim()) return;
 
-      userInputVersionRef.current += 1;
-      stopAllTts();
-
-      // 添加用户消息
-      addMessage({
-        id: `user-${Date.now()}`,
-        role: 'user',
-        content,
-        timestamp: new Date().toISOString(),
+      prepareUserTurn(content, {
+        bumpUserInputVersion: () => {
+          userInputVersionRef.current += 1;
+        },
+        stopAudio: stopAllTts,
+        clearContextWindowUsage: () => {
+          setContextWindowUsage(null);
+        },
+        addMessage,
       });
-
-      // 不再预先创建助手消息，而是在收到第一个 content_chunk 时创建
-      // 这样工具调用会先显示，然后才是助手的回复
 
       setProcessing(true);
       setThinking(true);
@@ -297,7 +296,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
         });
       }
     },
-    [addMessage, request, setProcessing, setThinking]
+    [addMessage, request, setContextWindowUsage, setProcessing, setThinking]
   );
 
   // 存储sendMessage函数到ref
@@ -314,13 +313,15 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
     ) => {
       const newInput = options?.newInput;
       if (intent === 'supplement' && newInput) {
-        userInputVersionRef.current += 1;
-        stopAllTts();
-        addMessage({
-          id: `user-${Date.now()}`,
-          role: 'user',
-          content: newInput,
-          timestamp: new Date().toISOString(),
+        prepareUserTurn(newInput, {
+          bumpUserInputVersion: () => {
+            userInputVersionRef.current += 1;
+          },
+          stopAudio: stopAllTts,
+          clearContextWindowUsage: () => {
+            setContextWindowUsage(null);
+          },
+          addMessage,
         });
       }
       try {
@@ -338,7 +339,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
         onErrorRef.current?.(webError.message || i18n.t('network.interruptFailed'));
       }
     },
-    [addMessage, request, setConnectionStats]
+    [addMessage, request, setConnectionStats, setContextWindowUsage]
   );
 
   // 暂停 - 显式暂停当前任务
@@ -432,7 +433,8 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
 
   useEffect(() => {
     setContextCompressionStats(null);
-  }, [activeSessionId, setContextCompressionStats]);
+    setContextWindowUsage(null);
+  }, [activeSessionId, setContextCompressionStats, setContextWindowUsage]);
 
   useEffect(() => {
     onConnectRef.current = onConnect;
@@ -669,6 +671,30 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
           after_compressed: afterCompressed,
         });
       }),
+      webClient.on('context.usage', ({ payload }) => {
+        if (!shouldHandleSessionEvent(payload)) return;
+        const inputTokens =
+          typeof payload.input_tokens === 'number' && Number.isFinite(payload.input_tokens)
+            ? payload.input_tokens
+            : null;
+        const outputTokens =
+          typeof payload.output_tokens === 'number' && Number.isFinite(payload.output_tokens)
+            ? payload.output_tokens
+            : null;
+        const usedTokens =
+          typeof payload.used_tokens === 'number' && Number.isFinite(payload.used_tokens)
+            ? payload.used_tokens
+            : null;
+        const limitTokens =
+          typeof payload.limit_tokens === 'number' && Number.isFinite(payload.limit_tokens)
+            ? payload.limit_tokens
+            : 128000;
+        const percent =
+          typeof payload.usage_percent === 'number' && Number.isFinite(payload.usage_percent)
+            ? payload.usage_percent
+            : null;
+        setContextWindowUsage({ inputTokens, outputTokens, usedTokens, limitTokens, percent });
+      }),
       webClient.on('heartbeat.relay', ({ payload }) => {
         const heartbeatText =
           typeof payload.heartbeat === 'string' ? payload.heartbeat : '';
@@ -852,6 +878,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
     setInterruptResult,
     setTodos,
     setContextCompressionStats,
+    setContextWindowUsage,
     setHeartbeatStatus,
     updateSession,
     shouldHandleSessionEvent,
@@ -883,6 +910,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
       clearSubtasks();
       setConnected(false);
       setContextCompressionStats(null);
+      setContextWindowUsage(null);
       setHeartbeatStatus('unknown', null, null);
       setConnectionStats({ state: 'closed', inflight: 0 });
     };
@@ -896,6 +924,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
     projectPath,
     provider,
     setContextCompressionStats,
+    setContextWindowUsage,
     setConnectionStats,
     setConnected,
     setHeartbeatStatus,

@@ -87,6 +87,8 @@ react:
   answer_chunk_size: 500
   stream_chunk_threshold: 50
   stream_character_threshold: 2000
+  # 上下文窗口展示用上限（token）：前端占用条的分母，需与所用模型官方窗口对齐填写；百分比分子为单次调用的输入+输出（并与 total 取较大值）
+  context_window_limit_tokens: 128000
   context_engine_config:
     enable_reload: true
     enabled: true
