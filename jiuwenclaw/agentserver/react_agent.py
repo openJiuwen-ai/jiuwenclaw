@@ -28,6 +28,7 @@ from openjiuwen.core.session.stream.base import StreamMode
 from openjiuwen.core.single_agent import AgentCard, ReActAgent
 
 from jiuwenclaw.agentserver.llm_model import LlmModel
+from jiuwenclaw.agentserver.stream_content_sanitize import StreamProtocolBuffer
 from jiuwenclaw.agentserver.permissions import (
     assess_command_risk_with_llm,
     check_tool_permissions,
@@ -262,17 +263,22 @@ class JiuClawReActAgent(ReActAgent):
         """
         accumulated_chunk = None
         chunk_count = 0
-        last_sent_length = 0  # Track last sent content length
+
+        # Display buffer: accumulates sanitized content for streaming to frontend.
+        # Keeps raw content separate from accumulated_chunk which is used by ReAct loop.
+        display_buf = StreamProtocolBuffer()
+        display_content = ""       # total sanitized content already safe to show
+        display_total_sent = 0     # how many chars of display_content already written to stream
 
         try:
             async for chunk in llm.stream(messages, tools=tools, model=self._config.model_name):
-                # Accumulate chunks using AssistantMessageChunk's __add__ method
+                # Accumulate raw chunks (unchanged); tool_calls live here
                 if accumulated_chunk is None:
                     accumulated_chunk = chunk
                 else:
                     accumulated_chunk = accumulated_chunk + chunk
 
-                # Stream output for reasoning content (always send)
+                # Stream reasoning content as-is (not user-visible text, no strip needed)
                 if chunk.reasoning_content:
                     stream_output = OutputSchema(
                         type="llm_reasoning",
@@ -285,52 +291,55 @@ class JiuClawReActAgent(ReActAgent):
                     await session.write_stream(stream_output)
                     chunk_count += 1
 
-                # Check if accumulated content exceeds threshold
-                if accumulated_chunk is not None and accumulated_chunk.content:
-                    current_length = len(accumulated_chunk.content)
-                    # Send partial answer only when threshold exceeded
-                    if current_length - last_sent_length >= STREAM_CHARACTER_THRESHOLD:
-                        # Send new content since last send
-                        new_content = accumulated_chunk.content[last_sent_length:]
-                        if new_content:
-                            await session.write_stream(
-                                OutputSchema(
-                                    type="answer",
-                                    index=chunk_count,
-                                    payload={
-                                        "output": {
-                                            "output": new_content,
-                                            "result_type": "answer",
-                                            "partial": True,  # Mark as partial response
-                                        },
-                                        "result_type": "answer",
-                                    },
-                                )
-                            )
-                            chunk_count += 1
-                            last_sent_length = current_length
+                # Feed raw chunk content through protocol-stripping buffer
+                raw_chunk_content = chunk.content or ""
+                safe = display_buf.feed(raw_chunk_content)
+                display_content += safe
 
-            # Send any remaining content that didn't reach threshold
-            if accumulated_chunk is not None and accumulated_chunk.content:
-                current_length = len(accumulated_chunk.content)
-                if current_length > last_sent_length:
-                    remaining_content = accumulated_chunk.content[last_sent_length:]
-                    if remaining_content:
+                # Send when display threshold exceeded
+                if len(display_content) - display_total_sent >= STREAM_CHARACTER_THRESHOLD:
+                    new_content = display_content[display_total_sent:]
+                    if new_content:
                         await session.write_stream(
                             OutputSchema(
                                 type="answer",
                                 index=chunk_count,
                                 payload={
                                     "output": {
-                                        "output": remaining_content,
+                                        "output": new_content,
                                         "result_type": "answer",
-                                        "partial": True,  # Mark as partial response
+                                        "partial": True,
                                     },
                                     "result_type": "answer",
                                 },
                             )
                         )
                         chunk_count += 1
+                        display_total_sent = len(display_content)
+
+            # Flush any buffered protocol tail (drops incomplete protocol, keeps safe text)
+            remainder = display_buf.flush()
+            display_content += remainder
+
+            # Send remaining display content
+            if len(display_content) > display_total_sent:
+                remaining_content = display_content[display_total_sent:]
+                if remaining_content:
+                    await session.write_stream(
+                        OutputSchema(
+                            type="answer",
+                            index=chunk_count,
+                            payload={
+                                "output": {
+                                    "output": remaining_content,
+                                    "result_type": "answer",
+                                    "partial": True,
+                                },
+                                "result_type": "answer",
+                            },
+                        )
+                    )
+                    chunk_count += 1
 
             # Check for empty response
             if accumulated_chunk is None:
@@ -864,20 +873,58 @@ class JiuClawReActAgent(ReActAgent):
             self._pending_approvals.pop(request_id, None)
             self._pending_permission_meta.pop(request_id, None)
 
+    @staticmethod
+    def _build_todo_formatted_args(name: str, arguments: Any) -> str:
+        """生成 todo_* 工具的一行摘要，用于折叠卡片副标题。"""
+        import json as _json
+        if isinstance(arguments, str):
+            try:
+                arguments = _json.loads(arguments)
+            except Exception:
+                arguments = {}
+        if not isinstance(arguments, dict):
+            arguments = {}
+
+        if name == "todo_create":
+            tasks = arguments.get("tasks", [])
+            if isinstance(tasks, list):
+                return f"创建 {len(tasks)} 项任务"
+            return "创建待办列表"
+        if name == "todo_insert":
+            tasks = arguments.get("tasks", [])
+            idx = arguments.get("idx", "?")
+            count = len(tasks) if isinstance(tasks, list) else "?"
+            return f"在位置 {idx} 插入 {count} 项"
+        if name == "todo_complete":
+            idx = arguments.get("idx", "?")
+            return f"完成任务 #{idx}"
+        if name == "todo_remove":
+            idx = arguments.get("idx", "?")
+            return f"移除任务 #{idx}"
+        if name == "todo_list":
+            return "查看待办列表"
+        return ""
+
     async def _emit_tool_call(self, session: Session, tool_call: Any) -> None:
         """Emit tool_call OutputSchema, notify frontend of tool call start."""
         try:
+            name = getattr(tool_call, "name", "")
+            arguments = getattr(tool_call, "arguments", {})
+            payload_tool_call: dict = {
+                "name": name,
+                "arguments": arguments,
+                "tool_call_id": getattr(tool_call, "id", ""),
+            }
+            if name in _TODO_TOOL_NAMES:
+                summary = self._build_todo_formatted_args(name, arguments)
+                if summary:
+                    payload_tool_call["formatted_args"] = summary
+
             await session.write_stream(
                 OutputSchema(
                     type="tool_call",
                     index=0,
-                    payload={
-                        "tool_call": {
-                            "name": getattr(tool_call, "name", ""),
-                            "arguments": getattr(tool_call, "arguments", {}),
-                            "tool_call_id": getattr(tool_call, "id", ""),
-                        }
-                    },
+                    payload={"tool_call": payload_tool_call},
                 )
             )
         except Exception:

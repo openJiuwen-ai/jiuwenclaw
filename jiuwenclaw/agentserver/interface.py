@@ -38,6 +38,7 @@ from jiuwenclaw.utils import (
 )
 from jiuwenclaw.config import get_config, resolve_env_vars
 from jiuwenclaw.agentserver.react_agent import JiuClawReActAgent
+from jiuwenclaw.agentserver.stream_content_sanitize import strip_inline_tool_protocol
 from jiuwenclaw.agentserver.permissions.checker import TOOL_PERMISSION_CHANNEL_ID
 from jiuwenclaw.schema.hook_event import AgentServerHookEvents
 from jiuwenclaw.schema.hooks_context import MemoryHookContext
@@ -1795,6 +1796,8 @@ class JiuWenClaw:
                     else:
                         content = str(payload)
                         is_chunked = False
+                    # Belt-and-suspenders: strip any residual inline tool protocol
+                    content = strip_inline_tool_protocol(content)
                     if not content:
                         return None
                     # For chunked answers, return as delta (will be accumulated)
