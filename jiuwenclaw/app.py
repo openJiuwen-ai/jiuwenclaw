@@ -34,6 +34,10 @@ from jiuwenclaw.channel import (
     WhatsAppChannelConfig,
     WechatChannel,
     WechatConfig,
+    QQChannel,
+    QQChannelConfig,
+    WeiboChannel,
+    WeiboChannelConfig,
 )
 
 for logger in LogManager.get_all_loggers().values():
@@ -1178,6 +1182,112 @@ def _register_web_handlers(
             logger.exception("[channel.wechat.get_login_ui] %s", e)
             await channel.send_response(ws, req_id, ok=False, error=str(e), code="INTERNAL_ERROR")
 
+    async def _channel_qq_get_conf(ws, req_id, params, session_id):
+        """返回 QQChannel 的当前配置（由 ChannelManager 管理）。"""
+        cm = _resolve(channel_manager)
+        if cm is None:
+            await channel.send_response(
+                ws,
+                req_id,
+                ok=False,
+                error="channel manager not available",
+                code="SERVICE_UNAVAILABLE",
+            )
+            return
+        try:
+            conf = cm.get_conf("qq")
+            await channel.send_response(ws, req_id, ok=True, payload={"config": conf})
+        except Exception as e:  # noqa: BLE001
+            logger.exception("[channel.qq.get_conf] %s", e)
+            await channel.send_response(ws, req_id, ok=False, error=str(e), code="INTERNAL_ERROR")
+
+    async def _channel_qq_set_conf(ws, req_id, params, session_id):
+        """更新 QQChannel 的配置，并按新配置重新实例化通道。"""
+        cm = _resolve(channel_manager)
+        if cm is None:
+            await channel.send_response(
+                ws,
+                req_id,
+                ok=False,
+                error="channel manager not available",
+                code="SERVICE_UNAVAILABLE",
+            )
+            return
+        if not isinstance(params, dict):
+            await channel.send_response(
+                ws,
+                req_id,
+                ok=False,
+                error="params must be object",
+                code="BAD_REQUEST",
+            )
+            return
+        try:
+            await cm.set_conf("qq", params)
+            conf = cm.get_conf("qq")
+            try:
+                update_channel_in_config("qq", conf)
+                await _clear_agent_config_cache(_resolve(agent_client))
+            except Exception as e:  # noqa: BLE001
+                logger.warning("[channel.qq.set_conf] 写回 config.yaml 失败: %s", e)
+            await channel.send_response(ws, req_id, ok=True, payload={"config": conf})
+        except Exception as e:  # noqa: BLE001
+            logger.exception("[channel.qq.set_conf] %s", e)
+            await channel.send_response(ws, req_id, ok=False, error=str(e), code="INTERNAL_ERROR")
+
+    async def _channel_weibo_get_conf(ws, req_id, params, session_id):
+        """返回 WeiboChannel 的当前配置（由 ChannelManager 管理）。"""
+        cm = _resolve(channel_manager)
+        if cm is None:
+            await channel.send_response(
+                ws,
+                req_id,
+                ok=False,
+                error="channel manager not available",
+                code="SERVICE_UNAVAILABLE",
+            )
+            return
+        try:
+            conf = cm.get_conf("weibo")
+            await channel.send_response(ws, req_id, ok=True, payload={"config": conf})
+        except Exception as e:  # noqa: BLE001
+            logger.exception("[channel.weibo.get_conf] %s", e)
+            await channel.send_response(ws, req_id, ok=False, error=str(e), code="INTERNAL_ERROR")
+
+    async def _channel_weibo_set_conf(ws, req_id, params, session_id):
+        """更新 WeiboChannel 的配置，并按新配置重新实例化通道。"""
+        cm = _resolve(channel_manager)
+        if cm is None:
+            await channel.send_response(
+                ws,
+                req_id,
+                ok=False,
+                error="channel manager not available",
+                code="SERVICE_UNAVAILABLE",
+            )
+            return
+        if not isinstance(params, dict):
+            await channel.send_response(
+                ws,
+                req_id,
+                ok=False,
+                error="params must be object",
+                code="BAD_REQUEST",
+            )
+            return
+        try:
+            await cm.set_conf("weibo", params)
+            conf = cm.get_conf("weibo")
+            try:
+                update_channel_in_config("weibo", conf)
+                await _clear_agent_config_cache(_resolve(agent_client))
+            except Exception as e:  # noqa: BLE001
+                logger.warning("[channel.weibo.set_conf] 写回 config.yaml 失败: %s", e)
+            await channel.send_response(ws, req_id, ok=True, payload={"config": conf})
+        except Exception as e:  # noqa: BLE001
+            logger.exception("[channel.weibo.set_conf] %s", e)
+            await channel.send_response(ws, req_id, ok=False, error=str(e), code="INTERNAL_ERROR")
+
     # ----- cron jobs -----
 
     def _get_cron():
@@ -1372,6 +1482,10 @@ def _register_web_handlers(
     channel.register_method("channel.wechat.get_conf", _channel_wechat_get_conf)
     channel.register_method("channel.wechat.set_conf", _channel_wechat_set_conf)
     channel.register_method("channel.wechat.get_login_ui", _channel_wechat_get_login_ui)
+    channel.register_method("channel.qq.get_conf", _channel_qq_get_conf)
+    channel.register_method("channel.qq.set_conf", _channel_qq_set_conf)
+    channel.register_method("channel.weibo.get_conf", _channel_weibo_get_conf)
+    channel.register_method("channel.weibo.set_conf", _channel_weibo_set_conf)
     channel.register_method("cron.job.list", _cron_job_list)
     channel.register_method("cron.job.get", _cron_job_get)
     channel.register_method("cron.job.create", _cron_job_create)
@@ -1389,6 +1503,9 @@ async def _run() -> None:
     from jiuwenclaw.channel.telegram_channel import TelegramChannel, TelegramChannelConfig
     from jiuwenclaw.channel.discord_channel import DiscordChannel, DiscordChannelConfig
     from jiuwenclaw.channel.wecom_channel import WecomChannel, WecomConfig
+    from jiuwenclaw.channel.weibo_channel import (
+        _DEFAULT_WS_ENDPOINT, _DEFAULT_TOKEN_ENDPOINT,
+    )
     from jiuwenclaw.gateway import (
         AgentWebSocketServer,
         GatewayHeartbeatService,
@@ -1613,6 +1730,10 @@ async def _run() -> None:
     wecom_task = None
     wechat_channel = None
     wechat_task = None
+    qq_channel = None
+    qq_task = None
+    weibo_channel = None
+    weibo_task = None
     feishu_enterprise_channels: dict[str, FeishuChannel] = {}
     feishu_enterprise_tasks: dict[str, asyncio.Task] = {}
 
@@ -1675,6 +1796,8 @@ async def _run() -> None:
         nonlocal whatsapp_channel, whatsapp_task
         nonlocal wecom_channel, wecom_task
         nonlocal wechat_channel, wechat_task
+        nonlocal qq_channel, qq_task
+        nonlocal weibo_channel, weibo_task
         nonlocal _last_channels_conf
         nonlocal feishu_enterprise_channels, feishu_enterprise_tasks
 
@@ -1689,6 +1812,8 @@ async def _run() -> None:
             "discord",
             "wecom",
             "wechat",
+            "qq",
+            "weibo",
         ]:
             if _should_restart_channel(channel_name, _last_channels_conf, conf):
                 changed_channels.append(channel_name)
@@ -2006,6 +2131,61 @@ async def _run() -> None:
             else:
                 logger.info("[App] channels.wechat 未配置或格式错误，WechatChannel 不启用")
 
+        # ----- QQChannel -----
+        if "qq" in changed_channels:
+            qq_conf = conf.get("qq") if isinstance(conf, dict) else None
+            await _stop_channel(qq_channel, qq_task, "qq")
+            qq_channel, qq_task = None, None
+
+            if isinstance(qq_conf, dict):
+                enabled, reason = _is_channel_enabled(qq_conf, ["app_id", "app_secret"])
+                if not enabled:
+                    logger.info("[App] channels.qq.%s，QQChannel 未启用", reason)
+                else:
+                    qq_config = QQChannelConfig(
+                        enabled=True,
+                        app_id=str(qq_conf.get("app_id") or "").strip(),
+                        app_secret=str(qq_conf.get("app_secret") or "").strip(),
+                        allow_from=qq_conf.get("allow_from") or [],
+                        enable_streaming=bool(qq_conf.get("enable_streaming", True)),
+                        enable_guild=bool(qq_conf.get("enable_guild", True)),
+                        enable_group=bool(qq_conf.get("enable_group", True)),
+                        enable_c2c=bool(qq_conf.get("enable_c2c", True)),
+                    )
+                    qq_channel = QQChannel(qq_config, _DummyBus())
+                    channel_manager.register_channel(qq_channel)
+                    qq_task = asyncio.create_task(qq_channel.start(), name="qq")
+                    logger.info("[App] 已按 config.yaml.channels.qq 注册 QQChannel")
+            else:
+                logger.info("[App] channels.qq 未配置或格式错误，QQChannel 不启用")
+
+        # ----- WeiboChannel -----
+        if "weibo" in changed_channels:
+            weibo_conf = conf.get("weibo") if isinstance(conf, dict) else None
+            await _stop_channel(weibo_channel, weibo_task, "weibo")
+            weibo_channel, weibo_task = None, None
+
+            if isinstance(weibo_conf, dict):
+                enabled, reason = _is_channel_enabled(weibo_conf, ["app_id", "app_secret"])
+                if not enabled:
+                    logger.info("[App] channels.weibo.%s，WeiboChannel 未启用", reason)
+                else:
+                    weibo_config = WeiboChannelConfig(
+                        enabled=True,
+                        app_id=str(weibo_conf.get("app_id") or "").strip(),
+                        app_secret=str(weibo_conf.get("app_secret") or "").strip(),
+                        allow_from=weibo_conf.get("allow_from") or [],
+                        enable_streaming=bool(weibo_conf.get("enable_streaming", True)),
+                        ws_endpoint=str(weibo_conf.get("ws_endpoint") or _DEFAULT_WS_ENDPOINT).strip(),
+                        token_endpoint=str(weibo_conf.get("token_endpoint") or _DEFAULT_TOKEN_ENDPOINT).strip(),
+                    )
+                    weibo_channel = WeiboChannel(weibo_config, _DummyBus())
+                    channel_manager.register_channel(weibo_channel)
+                    weibo_task = asyncio.create_task(weibo_channel.start(), name="weibo")
+                    logger.info("[App] 已按 config.yaml.channels.weibo 注册 WeiboChannel")
+            else:
+                logger.info("[App] channels.weibo 未配置或格式错误，WeiboChannel 不启用")
+
     # 将「配置更新时如何重新实例化 Channel」逻辑注册到 ChannelManager
     channel_manager.set_config_callback(_apply_channel_config)
     # 使用初始配置实例化一次（启动时，针对动态管理的各 Channel）
@@ -2102,6 +2282,20 @@ async def _run() -> None:
             except asyncio.CancelledError:
                 pass
             await wechat_channel.stop()
+        if qq_channel is not None and qq_task is not None:
+            qq_task.cancel()
+            try:
+                await qq_task
+            except asyncio.CancelledError:
+                pass
+            await qq_channel.stop()
+        if weibo_channel is not None and weibo_task is not None:
+            weibo_task.cancel()
+            try:
+                await weibo_task
+            except asyncio.CancelledError:
+                pass
+            await weibo_channel.stop()
         await cron_scheduler.stop()
         await channel_manager.stop_dispatch()
         await heartbeat_service.stop()

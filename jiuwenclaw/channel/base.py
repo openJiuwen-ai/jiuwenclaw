@@ -27,6 +27,8 @@ class ChannelType(str, Enum):
     WHATSAPP = "whatsapp"
     WECOM = "wecom"
     WECHAT = "wechat"
+    QQ = "qq"
+    WEIBO = "weibo"
 
 
 @dataclass

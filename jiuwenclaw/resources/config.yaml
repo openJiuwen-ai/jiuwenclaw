@@ -254,6 +254,25 @@ channels:
     send_thinking_message: false
     enabled: false
     send_file_allowed: true
+  qq:
+    # QQ 官方机器人配置（支持频道/群聊/单聊）
+    # 从 QQ 开放平台 (https://bot.q.qq.com) 获取 AppID 和 AppSecret
+    app_id:
+    app_secret:
+    allow_from: []
+    enable_streaming: true
+    enable_guild: true
+    enable_group: true
+    enable_c2c: true
+    enabled: false
+  weibo:
+    # 微博私信机器人配置
+    # 获取凭证：微博客户端私信 @微博龙虾助手 发送 "连接龙虾"
+    app_id:
+    app_secret:
+    allow_from: []
+    enable_streaming: true
+    enabled: false
 
 # ========== 细粒度权限管控 ==========
 #

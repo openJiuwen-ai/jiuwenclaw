@@ -11,6 +11,8 @@ from jiuwenclaw.channel.dingding import DingTalkChannel, DingTalkConfig
 from jiuwenclaw.channel.whatsapp_channel import WhatsAppChannel, WhatsAppChannelConfig
 from jiuwenclaw.channel.wecom_channel import WecomChannel, WecomConfig
 from jiuwenclaw.channel.wechat_channel import WechatChannel, WechatConfig
+from jiuwenclaw.channel.qq_channel import QQChannel, QQChannelConfig
+from jiuwenclaw.channel.weibo_channel import WeiboChannel, WeiboChannelConfig
 
 __all__ = [
     "BaseChannel",
@@ -30,4 +32,8 @@ __all__ = [
     "WecomConfig",
     "WechatChannel",
     "WechatConfig",
+    "QQChannel",
+    "QQChannelConfig",
+    "WeiboChannel",
+    "WeiboChannelConfig",
 ]
