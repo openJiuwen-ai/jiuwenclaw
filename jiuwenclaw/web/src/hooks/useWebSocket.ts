@@ -20,7 +20,8 @@ import {
   AgentMode,
   Session,
   ToolResult,
- 	ToolCall,
+  ToolCall,
+  WsEvent,
 } from '../types';
 import { useChatStore, useTodoStore, useSessionStore } from '../stores';
 import { webClient } from '../services/webClient';
@@ -38,6 +39,10 @@ import {
   normalizeToolResultPayload,
   tryDeepResearchStandaloneAssistantTurn,
 } from '../features/tool-events/toolEventNormalizer';
+import {
+  shouldHandleRequestEvent,
+  type ShouldHandleRequestEventOptions,
+} from './requestEventFilter';
 
 const WS_RECONNECT_EVENT = 'jiuwenclaw:ws-reconnect-request';
 
@@ -110,6 +115,8 @@ function makeEventDedupKey(eventName: string, payload: Record<string, unknown>):
   return `${eventName}::${payloadSessionId}::${payloadEventType}::${payloadSnapshot}`;
 }
 
+export { shouldHandleRequestEvent, type ShouldHandleRequestEventOptions };
+
 export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
   const {
     activeSessionId,
@@ -134,6 +141,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
   const sendMessageRef = useRef<typeof sendMessage>();
   const recentEventRef = useRef<Map<string, number>>(new Map());
   const eventDedupDroppedRef = useRef<Record<string, number>>({});
+  const activeRequestIdRef = useRef<string | null>(null);
 
   // Stores
   const {
@@ -225,6 +233,12 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
     []
   );
 
+  const shouldHandleCurrentRequestEvent = useCallback((event: WsEvent): boolean => {
+    return shouldHandleRequestEvent(event, {
+      activeRequestId: activeRequestIdRef.current,
+    });
+  }, []);
+
   const handleConnectionAck = useCallback(
     (payload: Record<string, unknown>) => {
       const ackPayload = payload as unknown as ConnectionAckPayload;
@@ -274,13 +288,18 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
 
       setProcessing(true);
       setThinking(true);
+      
+      // 生成并记录 request_id 用于过滤事件
+      const requestId = `chat-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
+      activeRequestIdRef.current = requestId;
+      
       try {
         const currentMode = useSessionStore.getState().mode;
         await request('chat.send', {
           session_id: sessionId,
           content,
           mode: currentMode,
-        });
+        }, { requestId });
       } catch (error) {
         const webError = error as WebError;
         setConnectionStats({ lastError: webError.message });
@@ -483,9 +502,10 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
       webClient.on('hello', ({ payload }) => {
         handleConnectionAck(payload);
       }),
-      webClient.on('chat.delta', ({ payload }) => {
-        if (!shouldHandleSessionEvent(payload)) return;
-        const content = typeof payload.content === 'string' ? payload.content : '';
+      webClient.on('chat.delta', (event: WsEvent) => {
+        if (!shouldHandleSessionEvent(event.payload)) return;
+        if (!shouldHandleCurrentRequestEvent(event)) return;
+        const content = typeof event.payload.content === 'string' ? event.payload.content : '';
         const { currentStreamId } = useChatStore.getState();
         setThinking(false);
         if (!currentStreamId && content) {
@@ -502,12 +522,13 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
         }
         appendStreamContent(content);
       }),
-      webClient.on('chat.final', ({ payload }) => {
-        if (!shouldHandleSessionEvent(payload)) return;
-        const content = normalizeFinalContent(payload);
+      webClient.on('chat.final', (event: WsEvent) => {
+        if (!shouldHandleSessionEvent(event.payload)) return;
+        if (!shouldHandleCurrentRequestEvent(event)) return;
+        const content = normalizeFinalContent(event.payload);
         const { currentStreamId, messages } = useChatStore.getState();
         const payloadSessionId =
-          typeof payload.session_id === 'string' ? payload.session_id.trim() : '';
+          typeof event.payload.session_id === 'string' ? event.payload.session_id.trim() : '';
         // 仅当有明确会话绑定时才把 final 合并进当前流式气泡。
         // 定时任务等广播的 session_id 为空/null，若仍走 currentStreamId 会写到错误气泡甚至“无可见更新”。
         const streamId = currentStreamId;
@@ -520,7 +541,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
           return;
         }
         if (content) {
-          const cronMeta = payload.cron as Record<string, unknown> | undefined;
+          const cronMeta = event.payload.cron as Record<string, unknown> | undefined;
           const cronRunId =
             typeof cronMeta?.run_id === 'string' ? cronMeta.run_id.trim() : '';
           const isCronPlaceholderContent = /^\[cron\].*正在执行中/.test(content);
@@ -586,9 +607,10 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
           }
         }
       }),
-      webClient.on('chat.media', ({ payload }) => {
-        if (!shouldHandleSessionEvent(payload)) return;
-        const mediaPayload = payload as {
+      webClient.on('chat.media', (event: WsEvent) => {
+        if (!shouldHandleSessionEvent(event.payload)) return;
+        if (!shouldHandleCurrentRequestEvent(event)) return;
+        const mediaPayload = event.payload as {
           content?: string;
           media_items?: MediaItem[];
         };
@@ -613,9 +635,10 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
           handleTtsPlayback(targetId, mediaPayload.content);
         }
       }),
-      webClient.on('chat.tool_call', ({ payload }) => {
-        if (!shouldHandleSessionEvent(payload)) return;
-        if (shouldDropDuplicatedEvent('chat.tool_call', payload)) return;
+      webClient.on('chat.tool_call', (event: WsEvent) => {
+        if (!shouldHandleSessionEvent(event.payload)) return;
+        if (!shouldHandleCurrentRequestEvent(event)) return;
+        if (shouldDropDuplicatedEvent('chat.tool_call', event.payload)) return;
         setThinking(false);
         const { currentStreamId, currentStreamContent } = useChatStore.getState();
         if (currentStreamId && currentStreamContent) {
@@ -623,13 +646,14 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
           stopStreaming();
           handleTtsPlayback(currentStreamId, currentStreamContent);
         }
-        addToolCall(normalizeToolCallPayload(payload));
+        addToolCall(normalizeToolCallPayload(event.payload));
       }),
-      webClient.on('chat.tool_result', ({ payload }) => {
-        if (!shouldHandleSessionEvent(payload)) return;
-        if (shouldDropDuplicatedEvent('chat.tool_result', payload)) return;
+      webClient.on('chat.tool_result', (event: WsEvent) => {
+        if (!shouldHandleSessionEvent(event.payload)) return;
+        if (!shouldHandleCurrentRequestEvent(event)) return;
+        if (shouldDropDuplicatedEvent('chat.tool_result', event.payload)) return;
         const standalone = tryDeepResearchStandaloneAssistantTurn(
-          payload as Record<string, unknown>,
+          event.payload as Record<string, unknown>,
         );
         if (standalone) {
           const { messages } = useChatStore.getState();
@@ -643,32 +667,34 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
           }
           return;
         }
-        addToolResult(normalizeToolResultPayload(payload));
+        addToolResult(normalizeToolResultPayload(event.payload));
       }),
-      webClient.on('todo.updated', ({ payload }) => {
-        if (!shouldHandleSessionEvent(payload)) return;
-        if (shouldDropDuplicatedEvent('todo.updated', payload)) return;
-        const todos = Array.isArray(payload.todos) ? payload.todos : [];
+      webClient.on('todo.updated', (event: WsEvent) => {
+        if (!shouldHandleSessionEvent(event.payload)) return;
+        if (!shouldHandleCurrentRequestEvent(event)) return;
+        if (shouldDropDuplicatedEvent('todo.updated', event.payload)) return;
+        const todos = Array.isArray(event.payload.todos) ? event.payload.todos : [];
         setTodos(todos as Parameters<typeof setTodos>[0]);
       }),
-      webClient.on('context.compressed', ({ payload }) => {
-        if (!shouldHandleSessionEvent(payload)) return;
+      webClient.on('context.compressed', (event: WsEvent) => {
+        if (!shouldHandleSessionEvent(event.payload)) return;
+        if (!shouldHandleCurrentRequestEvent(event)) return;
         const rate =
-          typeof payload.rate === 'number' ? payload.rate : 0;
+          typeof event.payload.rate === 'number' ? event.payload.rate : 0;
         const beforeCompressed =
-          typeof payload.before_compressed === 'number' && Number.isFinite(payload.before_compressed)
-            ? payload.before_compressed
+          typeof event.payload.before_compressed === 'number' && Number.isFinite(event.payload.before_compressed)
+            ? event.payload.before_compressed
             : null;
         const afterCompressed =
-          typeof payload.after_compressed === 'number' && Number.isFinite(payload.after_compressed)
-            ? payload.after_compressed
+          typeof event.payload.after_compressed === 'number' && Number.isFinite(event.payload.after_compressed)
+            ? event.payload.after_compressed
             : null;
         setContextCompressionStats({ rate, beforeCompressed, afterCompressed });
         console.debug('[ws] context.compressed', {
-          session_id: payload.session_id,
+          session_id: event.payload.session_id,
           rate,
-          before_compressed: beforeCompressed,
-          after_compressed: afterCompressed,
+          beforeCompressed: beforeCompressed,
+          afterCompressed: afterCompressed,
         });
       }),
       webClient.on('context.usage', ({ payload }) => {
@@ -695,9 +721,9 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
             : null;
         setContextWindowUsage({ inputTokens, outputTokens, usedTokens, limitTokens, percent });
       }),
-      webClient.on('heartbeat.relay', ({ payload }) => {
+      webClient.on('heartbeat.relay', (event: WsEvent) => {
         const heartbeatText =
-          typeof payload.heartbeat === 'string' ? payload.heartbeat : '';
+          typeof event.payload.heartbeat === 'string' ? event.payload.heartbeat : '';
         // 只要成功收到 relay 即表示已成功发到前端，始终为 ok，不存在 alert
         setHeartbeatStatus(
           'ok',
@@ -705,23 +731,25 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
           new Date().toISOString()
         );
       }),
-      webClient.on('session.updated', ({ payload }) => {
+      webClient.on('session.updated', (event: WsEvent) => {
         const sessionId =
-          typeof payload.session_id === 'string' ? payload.session_id : '';
+          typeof event.payload.session_id === 'string' ? event.payload.session_id : '';
         if (!sessionId) return;
-        updateSession(sessionId, payload as Partial<Session>);
-        if (sessionId === activeSessionIdRef.current && typeof payload.mode === 'string') {
-          setMode(normalizeAgentMode(payload.mode));
+        updateSession(sessionId, event.payload as Partial<Session>);
+        if (sessionId === activeSessionIdRef.current && typeof event.payload.mode === 'string') {
+          setMode(normalizeAgentMode(event.payload.mode));
         }
       }),
-      webClient.on('chat.processing_status', ({ payload }) => {
-        if (!shouldHandleSessionEvent(payload)) return;
-        if (shouldDropDuplicatedEvent('chat.processing_status', payload)) return;
-        const isProcessingNow = Boolean(payload.is_processing);
+      webClient.on('chat.processing_status', (event: WsEvent) => {
+        if (!shouldHandleSessionEvent(event.payload)) return;
+        if (!shouldHandleCurrentRequestEvent(event)) return;
+        if (shouldDropDuplicatedEvent('chat.processing_status', event.payload)) return;
+        const isProcessingNow = Boolean(event.payload.is_processing);
         setProcessing(isProcessingNow);
         if (!isProcessingNow) {
           setThinking(false);
           clearSubtasks();
+          activeRequestIdRef.current = null;
           
           // 检查是否有等待的任务队列
           const currentMode = useSessionStore.getState().mode;
@@ -738,12 +766,14 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
           }
         }
       }),
-      webClient.on('chat.error', ({ payload }) => {
-        if (!shouldHandleSessionEvent(payload)) return;
-        if (shouldDropDuplicatedEvent('chat.error', payload)) return;
+      webClient.on('chat.error', (event: WsEvent) => {
+        if (!shouldHandleSessionEvent(event.payload)) return;
+        if (!shouldHandleCurrentRequestEvent(event)) return;
+        if (shouldDropDuplicatedEvent('chat.error', event.payload)) return;
         setThinking(false);
+        activeRequestIdRef.current = null;
         const errorMsg =
-          typeof payload.error === 'string' ? payload.error : i18n.t('network.unknownError');
+          typeof event.payload.error === 'string' ? event.payload.error : i18n.t('network.unknownError');
         // 忽略 "invalid page_idx or session history not found" 错误，因为这是新会话的正常情况
         if (errorMsg.includes('invalid page_idx or session history not found')) {
           return;
@@ -756,10 +786,11 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
           timestamp: new Date().toISOString(),
         });
       }),
-      webClient.on('chat.interrupt_result', ({ payload }) => {
-        if (!shouldHandleSessionEvent(payload)) return;
-        if (shouldDropDuplicatedEvent('chat.interrupt_result', payload)) return;
-        const resultPayload = payload as unknown as InterruptResultPayload;
+      webClient.on('chat.interrupt_result', (event: WsEvent) => {
+        if (!shouldHandleSessionEvent(event.payload)) return;
+        if (!shouldHandleCurrentRequestEvent(event)) return;
+        if (shouldDropDuplicatedEvent('chat.interrupt_result', event.payload)) return;
+        const resultPayload = event.payload as unknown as InterruptResultPayload;
         setInterruptResult(resultPayload);
         if (resultPayload.intent === 'pause') {
           if (resultPayload.success) {
@@ -767,6 +798,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
           }
           setProcessing(false);
           setThinking(false);
+          activeRequestIdRef.current = null;
         } else if (resultPayload.intent === 'resume') {
           if (resultPayload.success) {
             setPaused(false);
@@ -775,26 +807,29 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
           setPaused(false);
           setProcessing(false);
           setThinking(false);
+          activeRequestIdRef.current = null;
         } else if (resultPayload.intent === 'supplement') {
           setPaused(false);
         }
       }),
-      webClient.on('chat.subtask_update', ({ payload }) => {
-        if (!shouldHandleSessionEvent(payload)) return;
-        updateSubtask(payload as unknown as SubtaskUpdatePayload);
+      webClient.on('chat.subtask_update', (event: WsEvent) => {
+        if (!shouldHandleSessionEvent(event.payload)) return;
+        if (!shouldHandleCurrentRequestEvent(event)) return;
+        updateSubtask(event.payload as unknown as SubtaskUpdatePayload);
       }),
-      webClient.on('chat.ask_user_question', ({ payload }) => {
-        if (!shouldHandleSessionEvent(payload)) return;
-        setPendingQuestion(payload as unknown as AskUserQuestionPayload);
+      webClient.on('chat.ask_user_question', (event: WsEvent) => {
+        if (!shouldHandleSessionEvent(event.payload)) return;
+        if (!shouldHandleCurrentRequestEvent(event)) return;
+        setPendingQuestion(event.payload as unknown as AskUserQuestionPayload);
       }),
       // 同时监听 session_result 事件，以处理后端可能发送的不同格式
-      webClient.on('session_result', ({ payload }) => {
+      webClient.on('session_result', (event: WsEvent) => {
         setThinking(false);
         const sessionId =
-          typeof payload.session_id === 'string' ? payload.session_id : '';
+          typeof event.payload.session_id === 'string' ? event.payload.session_id : '';
         const description =
-          typeof payload.description === 'string' ? payload.description : '';
-        const result = typeof payload.result === 'string' ? payload.result : '';
+          typeof event.payload.description === 'string' ? event.payload.description : '';
+        const result = typeof event.payload.result === 'string' ? event.payload.result : '';
         // 创建工具调用对象
         const toolCallId = `session-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
         const sessionToolCall: ToolCall = {
@@ -821,16 +856,16 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
         };
         addToolResult(sessionResult);
       }),
-      webClient.on('chat.session_result', ({ payload }) => {
-        if (shouldDropDuplicatedEvent('chat.session_result', payload)) {
+      webClient.on('chat.session_result', (event: WsEvent) => {
+        if (shouldDropDuplicatedEvent('chat.session_result', event.payload)) {
           return;
         }
         setThinking(false);
         const sessionId =
-          typeof payload.session_id === 'string' ? payload.session_id : '';
+          typeof event.payload.session_id === 'string' ? event.payload.session_id : '';
         const description =
-          typeof payload.description === 'string' ? payload.description : '';
-        const result = typeof payload.result === 'string' ? payload.result : '';
+          typeof event.payload.description === 'string' ? event.payload.description : '';
+        const result = typeof event.payload.result === 'string' ? event.payload.result : '';
         // 创建工具调用对象
         const toolCallId = `session-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
         const sessionToolCall: ToolCall = {
@@ -882,6 +917,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
     setHeartbeatStatus,
     updateSession,
     shouldHandleSessionEvent,
+    shouldHandleCurrentRequestEvent,
     shouldDropDuplicatedEvent,
     startStreaming,
     stopStreaming,

@@ -1,6 +1,7 @@
 import { Message, MessageRole, WsEvent } from '../types';
 import { webClient } from '../services/webClient';
 import { normalizeFinalContent } from '../utils/finalContent';
+import { shouldProcessHistoryPayload } from './historyRestoreFilter';
 
 export const HISTORY_GET_METHOD = 'history.get';
 export const HISTORY_MESSAGE_EVENT = 'history.message';
@@ -30,6 +31,7 @@ type HistoryTimelineEntry =
 
 interface BeginHistoryRestoreOptions {
   sessionId: string;
+  requestId?: string;
   onReady: (messages: Message[], totalPages: number | null) => void;
   /** 与消息同一时间线顺序，用于恢复 ToolGroupDisplay */
   onToolReplay?: (items: HistoryToolReplayItem[]) => void;
@@ -264,21 +266,6 @@ function isHistoryBatchEnd(payload: Record<string, unknown>): boolean {
   return markers.some((marker) => marker === true);
 }
 
-/**
- * 仅处理属于当前 `history.get` 会话的帧，避免多标签/乱序下的串台。
- * 无 `session_id` 时：丢弃数据行；仍接受明确的结束帧（兼容未注入 id 的旧链路）。
- */
-function shouldProcessHistoryPayload(payload: Record<string, unknown>, expectedSessionId: string): boolean {
-  const sid = typeof payload.session_id === 'string' ? payload.session_id.trim() : '';
-  if (sid && sid !== expectedSessionId) {
-    return false;
-  }
-  if (!sid) {
-    return isHistoryRestoreDonePayload(payload) || isHistoryBatchEnd(payload);
-  }
-  return true;
-}
-
 export function beginHistoryRestore(options: BeginHistoryRestoreOptions): HistoryRestoreHandle {
   disposeActivePageFetch();
   activeRestore?.dispose();
@@ -303,8 +290,11 @@ export function beginHistoryRestore(options: BeginHistoryRestoreOptions): Histor
       return;
     }
 
-    const payload = event.payload;
-    if (!shouldProcessHistoryPayload(payload, options.sessionId)) {
+    const payload = { ...event.payload };
+    if (event.request_id) {
+      payload.request_id = event.request_id;
+    }
+    if (!shouldProcessHistoryPayload(payload, options.sessionId, options.requestId)) {
       return;
     }
 
@@ -387,6 +377,7 @@ export interface FetchHistoryPageResult {
 
 export interface FetchHistoryPageOptions {
   sessionId: string;
+  requestId?: string;
   onReady: (result: FetchHistoryPageResult) => void;
   onEmpty?: (totalPages: number | null) => void;
   onError?: (message: string) => void;
@@ -420,8 +411,11 @@ export function fetchHistoryPage(options: FetchHistoryPageOptions): HistoryResto
       return;
     }
 
-    const payload = event.payload;
-    if (!shouldProcessHistoryPayload(payload, options.sessionId)) {
+    const payload = { ...event.payload };
+    if (event.request_id) {
+      payload.request_id = event.request_id;
+    }
+    if (!shouldProcessHistoryPayload(payload, options.sessionId, options.requestId)) {
       return;
     }
 

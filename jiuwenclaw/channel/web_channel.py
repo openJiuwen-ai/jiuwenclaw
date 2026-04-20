@@ -343,6 +343,8 @@ class WebChannel(BaseChannel):
             "event": event_name,
             "payload": payload,
         }
+        if msg.id:
+            frame["request_id"] = msg.id
         await self._broadcast(frame)
 
         # interrupt_result 根据 intent 决定 is_processing 状态

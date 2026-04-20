@@ -539,9 +539,13 @@ function AppContent() {
     setHistoryPagerMeta(null);
     setHistoryLoadingMore(false);
     
+    // 生成 request_id 用于匹配 history.message 响应
+    const historyRequestId = `history-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
+    
     // 开始历史会话加载
     const restoreHandle = beginHistoryRestore({
       sessionId: sessionId,
+      requestId: historyRequestId,
       onReady: (messages, totalPages) => {
         if (sessionIdRef.current !== sessionId) {
           return;
@@ -632,7 +636,7 @@ function AppContent() {
         await request(HISTORY_GET_METHOD, {
           session_id: sessionId,
           page_idx: 1,
-        });
+        }, { requestId: historyRequestId });
       } catch (error) {
         historyRestoreFromPanelHintRef.current = false;
         restoreHandle.dispose();
@@ -768,9 +772,13 @@ function AppContent() {
     const nextPage = historyPagerMeta.loadedPages + 1;
     const fallbackTotal = historyPagerMeta.totalPages;
 
+    // 生成 request_id 用于匹配 history.message 响应
+    const historyPageRequestId = `history-page-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
+
     setHistoryLoadingMore(true);
     const pageHandle = fetchHistoryPage({
       sessionId: sid,
+      requestId: historyPageRequestId,
       onReady: ({ messages, toolReplay, totalPages }) => {
         if (sessionIdRef.current !== sid) {
           setHistoryLoadingMore(false);
@@ -845,7 +853,7 @@ function AppContent() {
       await request(HISTORY_GET_METHOD, {
         session_id: sid,
         page_idx: nextPage,
-      });
+      }, { requestId: historyPageRequestId });
     } catch (error) {
       pageHandle.dispose();
       historyPageHandleRef.current = null;
