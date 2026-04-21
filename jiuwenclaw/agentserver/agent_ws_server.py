@@ -4,9 +4,9 @@
 
 from __future__ import annotations
 
-import logging
 import asyncio
 import json
+import logging
 import math
 import os
 from pathlib import Path
@@ -35,6 +35,12 @@ from jiuwenclaw.schema.hooks_context import AgentServerChatHookContext
 from jiuwenclaw.agentserver.agent_manager import AgentManager, ACP_DEFAULT_CAPABILITIES
 from jiuwenclaw.agentserver.permissions.config_rpc import get_permissions_config_req_methods
 from jiuwenclaw.agentserver.tenant_agent_pool import TenantAgentPool
+from jiuwenclaw.security.ws_origin import (
+    extract_handshake_request,
+    forbidden_origin_response,
+    get_header_value,
+    is_allowed_browser_origin,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -174,6 +180,7 @@ class AgentWebSocketServer:
                 self._connection_handler,
                 self._host,
                 self._port,
+                process_request=self._process_request,
                 ping_interval=self._ping_interval,
                 ping_timeout=self._ping_timeout,
             )
@@ -183,12 +190,34 @@ class AgentWebSocketServer:
                 self._connection_handler,
                 self._host,
                 self._port,
+                process_request=self._process_request,
                 ping_interval=self._ping_interval,
                 ping_timeout=self._ping_timeout,
             )
         logger.info(
             "[AgentWebSocketServer] 已启动: ws://%s:%s", self._host, self._port
         )
+
+    async def _process_request(self, *args: Any) -> Any:
+        """在握手阶段执行 Origin 校验，兼容 legacy/new websockets APIs。"""
+        path, request_headers = extract_handshake_request(args)
+        origin = get_header_value(request_headers, "Origin")
+        allowed = is_allowed_browser_origin(origin)
+        logger.info(
+            "[AgentWebSocketServer] 握手检查 path=%s origin=%s allowed=%s",
+            path,
+            origin,
+            allowed,
+        )
+        if allowed:
+            return None
+
+        logger.warning(
+            "[AgentWebSocketServer] 握手拒绝 path=%s origin=%s reason=origin_not_allowed",
+            path,
+            origin,
+        )
+        return forbidden_origin_response(args)
 
     async def stop(self) -> None:
         """停止 WebSocket 服务端."""

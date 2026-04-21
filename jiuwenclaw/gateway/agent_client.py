@@ -11,6 +11,7 @@ from abc import ABC, abstractmethod
 from collections.abc import Awaitable, Callable
 from dataclasses import asdict
 from typing import Any, AsyncIterator
+from urllib.parse import urlsplit
 
 from jiuwenclaw.e2a.constants import E2A_WIRE_SERVER_PUSH_KEY
 from jiuwenclaw.e2a.models import E2AEnvelope
@@ -40,6 +41,20 @@ def _to_json(data: Any) -> str:
         return json.dumps(data, ensure_ascii=False, sort_keys=True, default=str)
     except Exception:
         return repr(data)
+
+
+def _build_ws_origin(uri: str) -> str | None:
+    """将 ws/wss URI 转为标准浏览器 Origin。"""
+    try:
+        parsed = urlsplit(uri)
+    except ValueError:
+        return None
+
+    if not parsed.netloc:
+        return None
+
+    scheme = "https" if parsed.scheme == "wss" else "http"
+    return f"{scheme}://{parsed.netloc}"
 
 
 class AgentServerClient(ABC):
@@ -135,6 +150,7 @@ class WebSocketAgentServerClient(AgentServerClient):
         logger.info("[WebSocketAgentServerClient] 正在连接: %s", uri)
         self._uri = uri
         self._server_ready = False
+        origin = _build_ws_origin(uri)
         try:
             from websockets.legacy.client import connect as legacy_connect
             connect_fn = legacy_connect
@@ -143,6 +159,7 @@ class WebSocketAgentServerClient(AgentServerClient):
             connect_fn = websockets.connect
         self._ws = await connect_fn(
             uri,
+            origin=origin,
             ping_interval=self._ping_interval,
             ping_timeout=self._ping_timeout,
             close_timeout=5.0,

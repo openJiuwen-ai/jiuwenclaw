@@ -4,7 +4,6 @@
 ReAct (Reasoning + Acting) paradigm Agent implementation
 
 Created on: 2025-11-25
-Author: huenrui1@huawei.com
 """
 from __future__ import annotations
 

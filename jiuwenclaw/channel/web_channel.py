@@ -23,6 +23,12 @@ import aiohttp
 
 from jiuwenclaw.utils import get_agent_workspace_dir
 from jiuwenclaw.channel.base import BaseChannel, ChannelMetadata, RobotMessageRouter
+from jiuwenclaw.security.ws_origin import (
+    extract_handshake_request,
+    forbidden_origin_response,
+    get_header_value,
+    is_allowed_browser_origin,
+)
 from jiuwenclaw.schema.message import Message, Mode, ReqMethod
 
 logger = logging.getLogger(__name__)
@@ -234,6 +240,7 @@ class WebChannel(BaseChannel):
             self._connection_handler,
             self.config.host,
             self.config.port,
+            process_request=self._process_request,
             ping_interval=20,
             ping_timeout=20,
         )
@@ -265,6 +272,27 @@ class WebChannel(BaseChannel):
     async def disconnect(self) -> None:
         """兼容方法：调用 stop."""
         await self.stop()
+
+    async def _process_request(self, *args: Any) -> Any:
+        """在握手阶段执行 Origin 校验，兼容 legacy/new websockets APIs。"""
+        path, request_headers = extract_handshake_request(args)
+        origin = get_header_value(request_headers, "Origin")
+        allowed = is_allowed_browser_origin(origin)
+        logger.info(
+            "WebChannel 握手检查 path=%s origin=%s allowed=%s",
+            path,
+            origin,
+            allowed,
+        )
+        if allowed:
+            return None
+
+        logger.warning(
+            "WebChannel 握手拒绝 path=%s origin=%s reason=origin_not_allowed",
+            path,
+            origin,
+        )
+        return forbidden_origin_response(args)
 
     async def send(self, msg: Message) -> None:
         """向客户端发送消息（默认封装为 event 帧广播）."""
