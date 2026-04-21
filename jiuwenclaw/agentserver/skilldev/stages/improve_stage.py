@@ -18,8 +18,9 @@ Agent 工具白名单：["file_read", "file_write"]
 """
 
 from __future__ import annotations
-
+import json
 import logging
+from pathlib import Path
 
 from jiuwenclaw.agentserver.skilldev.context import SkillDevContext
 from jiuwenclaw.agentserver.skilldev.schema import SkillDevEventType, SkillDevStage
@@ -37,8 +38,15 @@ IMPROVE_SYSTEM_PROMPT = """你是一个 Skill 优化专家。根据用户反馈�
 评测报告：
 {report}
 
-当前 Skill 内容：
-{skill_content}
+## 首要任务：读取当前 Skill 文件
+
+工作区路径：{workspace}
+Skill 文件存储于工作区的 `skill/` 子目录下。
+
+**请在开始改进之前，先使用文件工具读取 skill/ 目录下的全部内容：**
+1. 用 `list_directory` 或 `glob` 列出 `skill/` 目录下所有文件
+2. 用 `read_file` 依次读取各文件（从 `skill/SKILL.md` 开始）
+3. 在充分理解现有内容后，再根据反馈做出有针对性的改进
 
 ## 改进哲学（对齐官方 skill-creator 指导）
 
@@ -73,6 +81,22 @@ IMPROVE_SYSTEM_PROMPT = """你是一个 Skill 优化专家。根据用户反馈�
 尝试成本低，或许能找到突破口。
 
 请输出改进后的完整文件内容。
+
+## 文件范围约束
+你只能生成与 Skill 本身直接相关的文件（例如 SKILL.md、scripts/、references/、assets/）。
+禁止生成与 Skill 交付无关的文件，例如实现总结、README、CHANGELOG、开发说明、复盘文档等。
+
+## 原则性要求
+请务必将文件写入 skill/ 目录下（如 skill/SKILL.md），并确保 YAML frontmatter 格式正确（name 为 kebab-case, description 不含 < >）。
+
+## 工作区
+当前工作区路径为：{workspace}
+Skill 的所有文件存储于其中的 skill/ 子目录下。
+根据用户的需求自行判断是否需要查看工作区中的已有文件，
+在已有内容基础上进行修改或补全，避免覆盖不需要变更的部分。
+如果当前任务是优化已有 skill，且已有 skill 位于 skill/ 目录下，
+请先将原始 skill/ 目录重命名为 skill-vx/（x 表示递增版本号），
+再新建一个全新的 skill/ 目录，并将本次生成的完整 Skill 文件保存到新的 skill/ 目录下。
 """
 
 
@@ -107,32 +131,18 @@ class ImproveStageHandler(StageHandler):
     async def _run_improve_agent(
         self, ctx: SkillDevContext, feedback: dict, report: str
     ) -> None:
-        """调用 Agent 分析反馈并修改 skill 文件.
-
-        待实现: 接入 create_stage_agent + Runner.run_agent，实现文件级改进
-        """
-        # 待实现:
-        # skill_content = self._read_skill_files(ctx.workspace / "skill")
-        # agent = ctx.create_stage_agent(
-        #     stage_name="improve",
-        #     system_prompt=IMPROVE_SYSTEM_PROMPT.format(
-        #         iteration=ctx.state.iteration,
-        #         feedback=json.dumps(feedback, ensure_ascii=False),
-        #         report=report,
-        #         skill_content=skill_content,
-        #     ),
-        #     tools=["file_read", "file_write"],
-        #     max_iterations=25,
-        # )
-        # await Runner.run_agent(agent, {"task": "根据反馈改进 Skill"})
-        logger.warning("[ImproveStage] _run_improve_agent 尚未实现，跳过改进")
-
-    def _read_skill_files(self, skill_dir) -> str:
-        """读取当前 skill 目录下所有文件内容."""
-        parts = []
-        for file_path in sorted(skill_dir.rglob("*")):
-            if file_path.is_file():
-                rel = file_path.relative_to(skill_dir)
-                content = file_path.read_text(encoding="utf-8", errors="ignore")
-                parts.append(f"=== {rel} ===\n{content}")
-        return "\n\n".join(parts)
+        """调用 Agent 分析反馈并修改 skill 文件（流式，实时推送 LLM 推理过程）."""
+        agent = ctx.create_stage_agent(
+            stage_name="improve",
+            system_prompt=IMPROVE_SYSTEM_PROMPT.format(
+                iteration=ctx.state.iteration,
+                feedback=json.dumps(feedback, ensure_ascii=False),
+                report=report,
+                workspace=ctx.workspace,
+            ),
+            tools=["file_read", "file_write", "file_edit", "file_glob", "file_grep", "shell"],
+            max_iterations=50,
+        )
+        await ctx.run_stage_agent_streaming(
+            agent, stage_name="improve", query="根据反馈改进 Skill"
+        )

@@ -25,16 +25,17 @@ from typing import Any, Callable
 class SkillDevStage(str, Enum):
     """SkillDev Pipeline 的所有阶段.
 
-    流程：INIT → PLAN → PLAN_CONFIRM(挂起) → GENERATE → VALIDATE
+    流程：INIT → CLARIFY → QUESTION_CLARIFY(挂起) → PLAN → GENERATE → VALIDATE
         → TEST_DESIGN → TEST_RUN → EVALUATE → REVIEW(挂起)
         → IMPROVE → (回到 TEST_RUN 迭代)
-        → PACKAGE → DESC_OPTIMIZE_CONFIRM(挂起) → DESC_OPTIMIZE → COMPLETED
+        → DESC_OPTIMIZE_CONFIRM(挂起) → DESC_OPTIMIZE(可选) → PACKAGE → COMPLETED
     """
 
     # 主流程
     INIT = "init"
-    PLAN = "plan"
-    PLAN_CONFIRM = "plan_confirm"  # 挂起点：等待用户确认 plan
+    CLARIFY = "clarify"                    # AI 分析需求，生成澄清问题
+    QUESTION_CLARIFY = "question_clarify"  # 挂起点：等待用户回答澄清问题
+    PLAN = "plan"                          # 综合 QA 答案生成开发计划，直接进入 GENERATE
     GENERATE = "generate"
     VALIDATE = "validate"  # 校验生成的 SKILL.md 格式（YAML frontmatter + 命名规范）
     TEST_DESIGN = "test_design"
@@ -81,8 +82,11 @@ class SkillDevEventType(str, Enum):
     ERROR = "skilldev.error"  # 不可恢复错误
 
     # --- 对话流交互 ---
-    AGENT_THINKING = "skilldev.agent_thinking"  # Agent 推理流（delta + model_name + elapsed_ms + status）
+    AGENT_THINKING = "skilldev.agent_thinking"  # Agent 推理流（delta）
+    AGENT_OUTPUT = "skilldev.agent_output"  # Agent 正文输出流（delta，区别于推理，对应前端 assistant 气泡）
     TEST_PROGRESS = "skilldev.test_progress"  # 测试执行进度
+    TOOL_CALL = "skilldev.tool_call"  # 结构化工具调用事件
+    TOOL_RESULT = "skilldev.tool_result"  # 结构化工具结果事件
 
     # --- 结构化 UI 驱动 ---
     CONFIRM_REQUEST = "skilldev.confirm_request"  # 挂起点：驱动前端弹出确认框
@@ -121,14 +125,26 @@ class SkillDevState:
     # 输入
     input: dict[str, Any] = field(default_factory=dict)
 
+    # 工作区目录状态
+    skill_dir_empty: bool = True       # skill/ 目录是否为空（INIT 阶段写入后更新）
+    ref_files_dir_empty: bool = True   # resources/ref-files 目录是否为空
+    ref_skills_dir_empty: bool = True  # resources/ref-skills 目录是否为空
+    tool_specs_dir_empty: bool = True  # resources/tool_specs 目录是否为空
+
     # 中间产物
     reference_texts: list[str] = field(default_factory=list)  # 资源文件解析后的文本
     existing_skill_md: str | None = None  # 已有 SKILL.md 内容
+    clarification_questions: list[dict] = field(default_factory=list)  # CLARIFY 阶段产出的问题列表
+    clarification_answers: list[dict] = field(default_factory=list)    # 用户在 QUESTION_CLARIFY 阶段回答的答案
     plan: dict[str, Any] | None = None  # PLAN 阶段产出
-    plan_confirmed_at: str | None = None
+    generate_retries: int = 0  # GENERATE ↔ VALIDATE 重试计数
+    last_validate_error: str | None = None  # VALIDATE 失败原因（供 GENERATE 重试时参考）
     evals: dict[str, Any] | None = None  # TEST_DESIGN 阶段产出
     eval_results: dict[str, Any] | None = None  # EVALUATE 阶段产出
     feedback_history: list[dict] = field(default_factory=list)  # 每轮改进的用户反馈
+
+    # 外部工具（用户上传的工具定义列表，每项为一个 tool dict）
+    external_tools: list[dict] = field(default_factory=list)
 
     # 描述优化
     desc_optimize_result: dict[str, Any] | None = (
@@ -156,13 +172,21 @@ class SkillDevState:
             "mode": self.mode.value,
             "iteration": self.iteration,
             "input": self.input,
+            "skill_dir_empty": self.skill_dir_empty,
+            "ref_files_dir_empty": self.ref_files_dir_empty,
+            "ref_skills_dir_empty": self.ref_skills_dir_empty,
+            "tool_specs_dir_empty": self.tool_specs_dir_empty,
             "reference_texts": self.reference_texts,
             "existing_skill_md": self.existing_skill_md,
+            "clarification_questions": self.clarification_questions,
+            "clarification_answers": self.clarification_answers,
             "plan": self.plan,
-            "plan_confirmed_at": self.plan_confirmed_at,
+            "generate_retries": self.generate_retries,
+            "last_validate_error": self.last_validate_error,
             "evals": self.evals,
             "eval_results": self.eval_results,
             "feedback_history": self.feedback_history,
+            "external_tools": self.external_tools,
             "desc_optimize_result": self.desc_optimize_result,
             "zip_path": self.zip_path,
             "zip_size": self.zip_size,
@@ -179,13 +203,21 @@ class SkillDevState:
         state.mode = SkillDevTaskMode(data.get("mode", "create"))
         state.iteration = data.get("iteration", 0)
         state.input = data.get("input", {})
+        state.skill_dir_empty = data.get("skill_dir_empty", True)
+        state.ref_files_dir_empty = data.get("ref_files_dir_empty", True)
+        state.ref_skills_dir_empty = data.get("ref_skills_dir_empty", True)
+        state.tool_specs_dir_empty = data.get("tool_specs_dir_empty", True)
         state.reference_texts = data.get("reference_texts", [])
         state.existing_skill_md = data.get("existing_skill_md")
+        state.clarification_questions = data.get("clarification_questions", [])
+        state.clarification_answers = data.get("clarification_answers", [])
         state.plan = data.get("plan")
-        state.plan_confirmed_at = data.get("plan_confirmed_at")
+        state.generate_retries = data.get("generate_retries", 0)
+        state.last_validate_error = data.get("last_validate_error")
         state.evals = data.get("evals")
         state.eval_results = data.get("eval_results")
         state.feedback_history = data.get("feedback_history", [])
+        state.external_tools = data.get("external_tools", [])
         state.desc_optimize_result = data.get("desc_optimize_result")
         state.zip_path = data.get("zip_path")
         state.zip_size = data.get("zip_size", 0)
@@ -243,14 +275,12 @@ class SuspensionConfig:
 # ---------------------------------------------------------------------------
 
 
-def _plan_extract_data(state: SkillDevState) -> dict:
-    return {"plan": state.plan}
+def _question_clarify_extract_data(state: SkillDevState) -> dict:
+    return {"questions": state.clarification_questions}
 
 
-def _plan_confirm_on_resume(state: SkillDevState, data: dict) -> None:
-    if "plan" in data:
-        state.plan = data["plan"]
-    state.plan_confirmed_at = _now_iso()
+def _question_clarify_on_resume(state: SkillDevState, data: dict) -> None:
+    state.clarification_answers = data.get("answers", [])
 
 
 def _review_extract_data(state: SkillDevState) -> dict:
@@ -273,7 +303,11 @@ def _review_on_resume(state: SkillDevState, data: dict) -> None:
 
 def _review_next_stage(data: dict) -> SkillDevStage:
     action = data.get("action", "improve")
-    return SkillDevStage.IMPROVE if action == "improve" else SkillDevStage.PACKAGE
+    return (
+        SkillDevStage.IMPROVE
+        if action == "improve"
+        else SkillDevStage.DESC_OPTIMIZE_CONFIRM
+    )
 
 
 def _desc_opt_extract_data(state: SkillDevState) -> dict:
@@ -288,29 +322,30 @@ def _desc_optimize_confirm_on_resume(state: SkillDevState, data: dict) -> None:
 def _desc_optimize_confirm_next_stage(data: dict) -> SkillDevStage:
     action = data.get("action", "skip")
     return (
-        SkillDevStage.DESC_OPTIMIZE if action == "optimize" else SkillDevStage.COMPLETED
+        SkillDevStage.DESC_OPTIMIZE
+        if action == "optimize"
+        else SkillDevStage.PACKAGE
     )
 
 
 SUSPENSION_POINTS: dict[SkillDevStage, SuspensionConfig] = {
-    SkillDevStage.PLAN_CONFIRM: SuspensionConfig(
-        confirm_type="plan_confirm",
-        title="请审阅开发计划",
-        message="以下是生成的开发计划，请确认或修改",
+    SkillDevStage.QUESTION_CLARIFY: SuspensionConfig(
+        confirm_type="question_clarify",
+        title="请回答以下问题",
+        message="AI 需要了解更多信息以生成精准的开发计划",
         actions=[
-            {"id": "confirm", "label": "确认", "style": "primary"},
-            {"id": "modify", "label": "修改", "style": "secondary"},
+            {"id": "submit", "label": "提交回答", "style": "primary"},
         ],
-        extract_data=_plan_extract_data,
-        on_resume=_plan_confirm_on_resume,
-        next_stage=SkillDevStage.GENERATE,
+        extract_data=_question_clarify_extract_data,
+        on_resume=_question_clarify_on_resume,
+        next_stage=SkillDevStage.PLAN,
     ),
     SkillDevStage.REVIEW: SuspensionConfig(
         confirm_type="review",
         title="评测结果审阅",
-        message="请审阅评测结果并决定下一步",
+        message="请审阅评测结果并决定下一步。选择「通过，继续」后，可先选择是否优化触发描述，再打包为 .skill。",
         actions=[
-            {"id": "accept", "label": "通过，进入打包", "style": "primary"},
+            {"id": "accept", "label": "通过，继续", "style": "primary"},
             {"id": "improve", "label": "继续改进", "style": "secondary"},
         ],
         extract_data=_review_extract_data,
@@ -320,7 +355,7 @@ SUSPENSION_POINTS: dict[SkillDevStage, SuspensionConfig] = {
     SkillDevStage.DESC_OPTIMIZE_CONFIRM: SuspensionConfig(
         confirm_type="desc_optimize_confirm",
         title="描述优化",
-        message="Skill 已打包完成。是否需要优化触发描述以提高触发准确率？",
+        message="打包前可选择是否优化 SKILL.md 中的 description，以提高触发准确率；跳过将直接进入打包。",
         actions=[
             {"id": "optimize", "label": "优化", "style": "primary"},
             {"id": "skip", "label": "跳过", "style": "secondary"},
@@ -457,6 +492,7 @@ class BenchmarkRun:
     time_seconds: float = 0.0
     tokens: int = 0
     expectations: list[dict] = field(default_factory=list)
+    prompt: str = ""
 
     def to_dict(self) -> dict:
         return {
@@ -470,6 +506,7 @@ class BenchmarkRun:
                 "tokens": self.tokens,
             },
             "expectations": self.expectations,
+            "prompt": self.prompt,
         }
 
 
@@ -543,13 +580,18 @@ class _StageGroup:
 
 
 # 后端定义的阶段分组。前端只负责渲染，不决定内容。
-# 挂起点（PLAN_CONFIRM / REVIEW / DESC_OPTIMIZE_CONFIRM）归入其所属的逻辑阶段。
+# 挂起点（QUESTION_CLARIFY / REVIEW / DESC_OPTIMIZE_CONFIRM）归入其所属的逻辑阶段。
 _STAGE_GROUPS: list[_StageGroup] = [
     _StageGroup(
         id="plan",
-        label="需求分析与规划",
+        label="需求澄清与规划",
         stages=frozenset(
-            {SkillDevStage.INIT, SkillDevStage.PLAN, SkillDevStage.PLAN_CONFIRM}
+            {
+                SkillDevStage.INIT,
+                SkillDevStage.CLARIFY,
+                SkillDevStage.QUESTION_CLARIFY,
+                SkillDevStage.PLAN,
+            }
         ),
     ),
     _StageGroup(
@@ -565,9 +607,13 @@ _STAGE_GROUPS: list[_StageGroup] = [
                 SkillDevStage.TEST_DESIGN,
                 SkillDevStage.TEST_RUN,
                 SkillDevStage.EVALUATE,
-                SkillDevStage.REVIEW,
             }
         ),
+    ),
+    _StageGroup(
+        id="review",
+        label="评测审阅",
+        stages=frozenset({SkillDevStage.REVIEW}),
     ),
     _StageGroup(
         id="improve",
@@ -575,16 +621,16 @@ _STAGE_GROUPS: list[_StageGroup] = [
         stages=frozenset({SkillDevStage.IMPROVE}),
     ),
     _StageGroup(
-        id="package",
-        label="打包",
-        stages=frozenset({SkillDevStage.PACKAGE}),
-    ),
-    _StageGroup(
         id="desc_optimize",
         label="描述优化",
         stages=frozenset(
             {SkillDevStage.DESC_OPTIMIZE_CONFIRM, SkillDevStage.DESC_OPTIMIZE}
         ),
+    ),
+    _StageGroup(
+        id="package",
+        label="打包",
+        stages=frozenset({SkillDevStage.PACKAGE}),
     ),
 ]
 
@@ -637,6 +683,7 @@ ALLOWED_FRONTMATTER_KEYS = frozenset(
 
 SKILL_NAME_MAX_LEN = 64
 SKILL_DESC_MAX_LEN = 1024
+MAX_GENERATE_RETRIES = 3  # GENERATE ↔ VALIDATE 最大重试次数
 
 
 # ---------------------------------------------------------------------------
@@ -660,10 +707,12 @@ def generate_task_id() -> str:
     return f"sd_{ts}_{rand}"
 
 
-def determine_task_mode(params: dict) -> SkillDevTaskMode:
-    """根据请求参数自动判断任务模式."""
-    if params.get("existing_skill"):
-        return SkillDevTaskMode.MODIFY
-    if params.get("resources"):
-        return SkillDevTaskMode.CREATE_WITH_RESOURCES
-    return SkillDevTaskMode.CREATE
+# def determine_task_mode(params: dict) -> SkillDevTaskMode:
+#     """根据请求参数自动判断任务模式."""
+#     resources = params.get("resources", [])
+#     has_existing = any(r.get("type") == "existing_skill" for r in resources)
+#     if has_existing:
+#         return SkillDevTaskMode.MODIFY
+#     if resources:
+#         return SkillDevTaskMode.CREATE_WITH_RESOURCES
+#     return SkillDevTaskMode.CREATE

@@ -7,7 +7,10 @@
 目录结构（单机本地模式）：
     ~/.jiuwenclaw/agent/workspace/skilldev/{task_id}/
     ├── state.json          ← StateStore checkpoint
-    ├── resources/          ← 上传的资源文件（解压后）
+    ├── resources/
+    │   ├── ref-files/      ← 上传的普通参考文件（解压后）
+    │   ├── ref-skills/     ← 上传的参考 Skill 包（解压后）
+    │   └── tool_specs/     ← 上传的工具/API 说明文件
     ├── skill/              ← 生成的 skill 目录
     │   ├── SKILL.md
     │   └── ...
@@ -50,7 +53,7 @@ class WorkspaceProvider:
     async def ensure_local(self, task_id: str) -> Path:
         """确保工作区目录及其标准子目录存在，返回工作区根路径."""
         workspace = self._base_dir / task_id
-        for sub in ("resources", "skill", "evals", "output"):
+        for sub in ("resources", "evals", "skill", "output"):
             (workspace / sub).mkdir(parents=True, exist_ok=True)
         logger.debug("[WorkspaceProvider] workspace ready: %s", workspace)
         return workspace

@@ -9,10 +9,11 @@
 
 对外只暴露一个入口：handle(request) → AsyncIterator[AgentResponseChunk]
 
-前端只需 5 个 method：
+前端只需以下 method：
 - skilldev.start     → 发起新任务
 - skilldev.respond   → 统一确认（后端根据 task_id 当前阶段自动路由）
 - skilldev.status    → 查状态 / 列任务
+- skilldev.parse_skill → 导入本地 skill 压缩包并解压到工作区 skill/
 - skilldev.download  → 下载产物
 - skilldev.cancel    → 取消任务
 - skilldev.file.list → 获取文件树
@@ -21,6 +22,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import logging
 from pathlib import Path
@@ -35,8 +37,8 @@ from jiuwenclaw.agentserver.skilldev.schema import (
     SkillDevEvent,
     SkillDevState,
     SkillDevStage,
-    generate_task_id,
 )
+from jiuwenclaw.agentserver.skilldev.zip_extract import safe_extract_zip
 
 logger = logging.getLogger(__name__)
 
@@ -45,6 +47,7 @@ _METHOD_DISPATCH = {
     ReqMethod.SKILLDEV_START: "_handle_start",
     ReqMethod.SKILLDEV_RESPOND: "_handle_respond",
     ReqMethod.SKILLDEV_STATUS: "_handle_status",
+    ReqMethod.SKILLDEV_PARSE_SKILL: "_handle_parse_skill",
     ReqMethod.SKILLDEV_DOWNLOAD: "_handle_download",
     ReqMethod.SKILLDEV_CANCEL: "_handle_cancel",
     ReqMethod.SKILLDEV_FILE_LIST: "_handle_file_list",
@@ -74,7 +77,7 @@ class SkillDevService:
             return
 
         handler = getattr(self, handler_name)
-        result = handler(request.params, request.request_id, request.channel_id)
+        result = handler(request.params, request.request_id, request.channel_id, request.session_id)
 
         if hasattr(result, "__aiter__"):
             async for chunk in result:
@@ -87,37 +90,118 @@ class SkillDevService:
     # ------------------------------------------------------------------
 
     async def _handle_start(
-        self, params: dict, request_id: str, channel_id: str
+        self, params: dict, request_id: str, channel_id: str, session_id: str
     ) -> AsyncIterator[AgentResponseChunk]:
-        task_id = generate_task_id()
+        task_id = str(params.get("task_id") or session_id or "").strip()
+        if not task_id:
+            yield self._error_chunk(request_id, channel_id, "缺少 task_id 或 session_id 参数")
+            return
         state = SkillDevState(
             task_id=task_id,
             input={
                 "query": params.get("query", ""),
-                "tools": params.get("tools", []),
-                "resources": params.get("resources", []),
-                "existing_skill": params.get("existing_skill"),
+                "files": params.get("files", []),
+                "skill_packages": params.get("skill_packages", []),
+                "tool_spec_files": params.get("tool_spec_files", []),
             },
         )
         pipeline = SkillDevPipeline(task_id=task_id, state=state, deps=self._deps)
 
-        yield AgentResponseChunk(
-            request_id=request_id,
-            channel_id=channel_id,
-            payload={"event_type": "skilldev.started", "task_id": task_id},
-            is_complete=False,
+        # 注册取消事件，供 _handle_cancel 在运行期间设置
+        cancel_event = asyncio.Event()
+        self._deps.cancel_events[task_id] = cancel_event
+
+        try:
+            yield AgentResponseChunk(
+                request_id=request_id,
+                channel_id=channel_id,
+                payload={"event_type": "skilldev.started", "task_id": task_id},
+                is_complete=False,
+            )
+
+            async for event in pipeline.run():
+                yield self._event_to_chunk(event, request_id, channel_id)
+
+            is_done = state.stage == SkillDevStage.COMPLETED
+            yield AgentResponseChunk(
+                request_id=request_id,
+                channel_id=channel_id,
+                payload={
+                    "event_type": "skilldev.completed" if is_done else "skilldev.suspended",
+                    "task_id": task_id,
+                    "stage": state.stage.value,
+                },
+                is_complete=True,
+            )
+        finally:
+            self._deps.cancel_events.pop(task_id, None)
+
+    # ------------------------------------------------------------------
+    # skilldev.parse_skill — 导入并解压本地 skill 包到工作区
+    # 仅允许在任务开始前调用（存在 state.json 时拒绝）
+    # ------------------------------------------------------------------
+    def _handle_parse_skill(
+        self, params: dict, request_id: str, channel_id: str, session_id: str
+    ) -> AgentResponseChunk:
+        task_id = str(
+            params.get("task_id") or params.get("session_id") or session_id or ""
+        ).strip()
+        logger.info(
+            "[SkillDevService] _handle_parse_skill called: request_id=%s task_id=%s channel_id=%s",
+            request_id,
+            task_id,
+            channel_id,
         )
+        if not task_id:
+            return self._error_chunk(request_id, channel_id, "缺少 task_id 或 session_id 参数")
 
-        async for event in pipeline.run():
-            yield self._event_to_chunk(event, request_id, channel_id)
+        if self._deps.state_store.load_state_sync(task_id) is not None:
+            return self._error_chunk(
+                request_id,
+                channel_id,
+                f"任务 {task_id} 已开始，禁止导入新的 skill 包",
+            )
 
-        yield AgentResponseChunk(
+        file_obj = params.get("skill_package")
+        if not isinstance(file_obj, dict):
+            return self._error_chunk(request_id, channel_id, "缺少 skill_package 参数")
+
+        filename = str(file_obj.get("filename") or "").strip()
+        content_b64 = str(file_obj.get("base64Data") or "").strip()
+        if not filename or not content_b64:
+            return self._error_chunk(
+                request_id,
+                channel_id,
+                "skill_package 参数缺少 filename 或 base64Data",
+            )
+
+        suffix = Path(filename).suffix.lower()
+        if suffix not in (".zip", ".skill"):
+            return self._error_chunk(request_id, channel_id, "仅支持 .zip 或 .skill 格式")
+
+        workspace = self._deps.workspace_provider.ensure_local(task_id)
+
+        skill_dir = workspace / "skill"
+        upload_path = workspace / f"imported{suffix}"
+
+        try:
+            raw = base64.b64decode(content_b64)
+            upload_path.write_bytes(raw)
+            safe_extract_zip(upload_path, skill_dir, extract_to_stem_dir=False)
+        except Exception as exc:
+            logger.warning("[SkillDevService] skill 包导入失败: task_id=%s err=%s", task_id, exc)
+            return self._error_chunk(request_id, channel_id, f"导入失败: {exc}")
+        finally:
+            if upload_path.exists():
+                upload_path.unlink(missing_ok=True)
+
+        return AgentResponseChunk(
             request_id=request_id,
             channel_id=channel_id,
             payload={
-                "event_type": "skilldev.suspended",
+                "ok": True,
                 "task_id": task_id,
-                "stage": state.stage.value,
+                "message": f"Skill 包导入成功: {filename}",
             },
             is_complete=True,
         )
@@ -128,7 +212,7 @@ class SkillDevService:
     # ------------------------------------------------------------------
 
     async def _handle_respond(
-        self, params: dict, request_id: str, channel_id: str
+        self, params: dict, request_id: str, channel_id: str, session_id: str
     ) -> AsyncIterator[AgentResponseChunk]:
         task_id = params.get("task_id")
         if not task_id:
@@ -150,20 +234,27 @@ class SkillDevService:
 
         pipeline = SkillDevPipeline(task_id=task_id, state=state, deps=self._deps)
 
-        async for event in pipeline.resume(data=params):
-            yield self._event_to_chunk(event, request_id, channel_id)
+        # 注册取消事件，供 _handle_cancel 在运行期间设置
+        cancel_event = asyncio.Event()
+        self._deps.cancel_events[task_id] = cancel_event
 
-        is_done = state.stage == SkillDevStage.COMPLETED
-        yield AgentResponseChunk(
-            request_id=request_id,
-            channel_id=channel_id,
-            payload={
-                "event_type": "skilldev.completed" if is_done else "skilldev.suspended",
-                "task_id": task_id,
-                "stage": state.stage.value,
-            },
-            is_complete=True,
-        )
+        try:
+            async for event in pipeline.resume(data=params):
+                yield self._event_to_chunk(event, request_id, channel_id)
+
+            is_done = state.stage == SkillDevStage.COMPLETED
+            yield AgentResponseChunk(
+                request_id=request_id,
+                channel_id=channel_id,
+                payload={
+                    "event_type": "skilldev.completed" if is_done else "skilldev.suspended",
+                    "task_id": task_id,
+                    "stage": state.stage.value,
+                },
+                is_complete=True,
+            )
+        finally:
+            self._deps.cancel_events.pop(task_id, None)
 
     # ------------------------------------------------------------------
     # skilldev.status — 查状态 / 列任务
@@ -171,7 +262,7 @@ class SkillDevService:
     # ------------------------------------------------------------------
 
     def _handle_status(
-        self, params: dict, request_id: str, channel_id: str
+        self, params: dict, request_id: str, channel_id: str, session_id: str
     ) -> AgentResponseChunk:
         task_id = params.get("task_id")
         if not task_id:
@@ -199,7 +290,7 @@ class SkillDevService:
     # ------------------------------------------------------------------
 
     def _handle_download(
-        self, params: dict, request_id: str, channel_id: str
+        self, params: dict, request_id: str, channel_id: str, session_id: str
     ) -> AgentResponseChunk:
         task_id = params.get("task_id")
         if not task_id:
@@ -231,23 +322,31 @@ class SkillDevService:
     # ------------------------------------------------------------------
     # skilldev.cancel — 取消任务
     # ------------------------------------------------------------------
-    @staticmethod
-    async def _handle_cancel(params: dict, request_id: str, channel_id: str) -> AgentResponseChunk:
+    def _handle_cancel(
+        self, params: dict, request_id: str, channel_id: str, session_id: str
+    ) -> AgentResponseChunk:
         task_id = params.get("task_id", "")
-        # 待实现: 实现取消逻辑（中断正在运行的 Pipeline）
-        logger.warning("[SkillDevService] cancel 尚未实现: task_id=%s", task_id)
-        return await AgentResponseChunk(
+        event = self._deps.cancel_events.get(task_id)
+        if event:
+            event.set()
+            msg = "取消信号已发送，pipeline 将在下一阶段边界终止"
+            logger.info("[SkillDevService] 取消信号已发送: task_id=%s", task_id)
+        else:
+            msg = "任务未在运行中，无需取消"
+            logger.info("[SkillDevService] 取消请求：任务未在运行: task_id=%s", task_id)
+        return AgentResponseChunk(
             request_id=request_id,
             channel_id=channel_id,
-            payload={"ok": True, "message": "取消请求已接收（实现待完善）"},
-            is_complete=True,)
+            payload={"ok": True, "message": msg},
+            is_complete=True,
+        )
 
     # ------------------------------------------------------------------
     # skilldev.file.list — 获取工作区文件树（供产物弹窗浏览）
     # ------------------------------------------------------------------
 
     def _handle_file_list(
-        self, params: dict, request_id: str, channel_id: str
+        self, params: dict, request_id: str, channel_id: str, session_id: str
     ) -> AgentResponseChunk:
         task_id = params.get("task_id")
         if not task_id:
@@ -274,9 +373,8 @@ class SkillDevService:
     # ------------------------------------------------------------------
     # skilldev.file.read — 读取工作区文件内容
     # ------------------------------------------------------------------
-
     def _handle_file_read(
-        self, params: dict, request_id: str, channel_id: str
+        self, params: dict, request_id: str, channel_id: str, session_id: str
     ) -> AgentResponseChunk:
         task_id = params.get("task_id")
         file_path = params.get("path", "")

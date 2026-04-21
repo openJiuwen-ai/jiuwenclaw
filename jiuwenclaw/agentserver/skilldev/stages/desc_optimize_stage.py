@@ -13,6 +13,7 @@
    d. 如果 train 全部通过则提前退出
 4. 选 test score 最高的 description（防过拟合）
 5. 将 best_description 写回 SKILL.md frontmatter
+6. 下一阶段为 PACKAGE（在打包前完成描述优化）
 
 官方实现用 `claude -p` CLI subprocess 做触发测试和描述改进。
 我们的实现通过 ctx.create_stage_agent 直接调用模型 API，不依赖 CLI。
@@ -98,6 +99,25 @@ description 出现在模型的 available_skills 列表中，模型仅凭 descrip
 <new_description>新描述内容</new_description>
 """
 
+TRIGGER_EVAL_PROMPT = """\
+你是一个 Skill 触发判定器。请根据用户查询与 skill description，判断该 skill 是否应该被触发。
+
+Skill description:
+"{description}"
+
+用户查询:
+"{query}"
+
+输出要求：
+- 仅输出一个 JSON 对象
+- 不要 Markdown，不要解释文本
+- JSON 结构必须是：
+{{
+  "triggered": true/false,
+  "reason": "一句话原因，简短即可"
+}}
+"""
+
 
 @dataclass
 class _OptimizationLoopInput:
@@ -132,7 +152,7 @@ class DescOptimizeStageHandler(StageHandler):
             await ctx.emit(
                 SkillDevEventType.PROGRESS, {"message": "未找到 SKILL.md，跳过描述优化"}
             )
-            return StageResult(next_stage=SkillDevStage.COMPLETED)
+            return StageResult(next_stage=SkillDevStage.PACKAGE)
 
         skill_name, current_desc, body = parse_skill_frontmatter(skill_md)
 
@@ -188,7 +208,7 @@ class DescOptimizeStageHandler(StageHandler):
         ctx.state.desc_optimize_result = result
 
         await ctx.emit(SkillDevEventType.DESC_OPT_READY, result)
-        return StageResult(next_stage=SkillDevStage.COMPLETED)
+        return StageResult(next_stage=SkillDevStage.PACKAGE)
 
     # ------------------------------------------------------------------
     # 生成触发测试查询
@@ -200,23 +220,34 @@ class DescOptimizeStageHandler(StageHandler):
         skill_name: str,
         description: str,
     ) -> list[TriggerEvalQuery]:
-        """调用 Agent 生成 ~20 个触发测试查询.
-
-        待实现: 接入 create_stage_agent
-        """
-        # 待实现:
-        # agent = ctx.create_stage_agent("desc_opt_gen", prompt, ...)
-        # output = await agent.run(...)
-        # parsed = json.loads(output)
-        # return [TriggerEvalQuery(**q) for q in parsed]
-
-        logger.warning("[DescOptimize] _generate_trigger_queries 待接入 Agent")
-        return [
-            TriggerEvalQuery(
-                query=f"帮我用 {skill_name} 完成一个任务", should_trigger=True
+        """调用 Agent 生成 ~20 个触发测试查询."""
+        prompt = TRIGGER_QUERY_GEN_PROMPT.format(
+            skill_name=skill_name,
+            description=description,
+        )
+        agent = ctx.create_stage_agent(
+            stage_name="desc_optimize_query_gen",
+            system_prompt=(
+                "你是严谨的 JSON 生成器。只输出符合要求的 JSON，"
+                "不要输出任何额外文本。"
             ),
-            TriggerEvalQuery(query="帮我写一个排序算法", should_trigger=False),
-        ]
+            tools=["file_read"],
+            max_iterations=20,
+        )
+        output = await ctx.run_stage_agent_streaming(
+            agent,
+            stage_name="desc_optimize",
+            query=prompt,
+        )
+        parsed = self._parse_json_candidate(output)
+        queries = self._normalize_trigger_queries(parsed, skill_name)
+        if len(queries) < 4:
+            logger.warning(
+                "[DescOptimize] generated query set too small, fallback to defaults. size=%d",
+                len(queries),
+            )
+            queries = self._default_trigger_queries(skill_name)
+        return queries
 
     # ------------------------------------------------------------------
     # Train/test split（内化自官方 run_loop.py 的 split_eval_set）
@@ -324,26 +355,22 @@ class DescOptimizeStageHandler(StageHandler):
         description: str,
         queries: list[TriggerEvalQuery],
     ) -> list[dict]:
-        """对每个 query，调用模型判断当前 description 是否会触发.
-
-        待实现: 接入 create_stage_agent 实际评估
-              核心问题是模拟"模型看到 skill description 后是否会读取该 skill"
-        """
-        # 待实现:
-        # for query in queries:
-        #     triggered = await self._test_single_trigger(ctx, description, query.query)
-        #     ...
-
-        logger.warning("[DescOptimize] _eval_description 待接入 Agent")
-        return [
-            {
-                "query": q.query,
-                "should_trigger": q.should_trigger,
-                "triggered": q.should_trigger,  # 占位：假设全部正确
-                "pass": True,
-            }
-            for q in queries
-        ]
+        """对每个 query，调用模型判断当前 description 是否会触发."""
+        if not queries:
+            return []
+        results: list[dict] = []
+        for q in queries:
+            triggered = await self._test_single_trigger(ctx, description, q.query)
+            passed = triggered == q.should_trigger
+            results.append(
+                {
+                    "query": q.query,
+                    "should_trigger": q.should_trigger,
+                    "triggered": triggered,
+                    "pass": passed,
+                }
+            )
+        return results
 
     # ------------------------------------------------------------------
     # 改进 description（内化自官方 improve_description.py 的 prompt 结构）
@@ -354,20 +381,54 @@ class DescOptimizeStageHandler(StageHandler):
         ctx: SkillDevContext,
         improve_input: _ImproveDescriptionInput,
     ) -> str:
-        """调用模型基于失败案例改进 description.
+        """调用模型基于失败案例改进 description."""
+        failed_cases = [r for r in improve_input.train_results if not r["pass"]]
+        if not failed_cases:
+            return improve_input.current_desc
 
-        待实现: 接入 create_stage_agent
-        """
-        # 待实现:
-        # failed_triggers = [r for r in train_results if r["should_trigger"] and not r["pass"]]
-        # false_triggers = [r for r in train_results if not r["should_trigger"] and not r["pass"]]
-        # prompt = IMPROVE_DESC_PROMPT.format(...)
-        # agent = ctx.create_stage_agent("desc_improver", prompt, ...)
-        # output = await agent.run(...)
-        # return _extract_new_description(output)
+        should_count = sum(1 for r in improve_input.train_results if r["should_trigger"])
+        scores_summary = (
+            f"train pass {sum(1 for r in improve_input.train_results if r['pass'])}"
+            f"/{len(improve_input.train_results)}; "
+            f"should_trigger samples: {should_count}, "
+            f"should_not_trigger samples: {len(improve_input.train_results) - should_count}"
+        )
 
-        logger.warning("[DescOptimize] _improve_description 待接入 Agent")
-        return improve_input.current_desc
+        failure_details = self._build_failure_details(failed_cases)
+        history_section = self._build_history_section(improve_input.history)
+
+        prompt = IMPROVE_DESC_PROMPT.format(
+            skill_name=improve_input.skill_name,
+            current_description=improve_input.current_desc,
+            scores_summary=scores_summary,
+            failure_details=failure_details,
+            history_section=history_section,
+            max_len=SKILL_DESC_MAX_LEN,
+        )
+        agent = ctx.create_stage_agent(
+            stage_name="desc_optimize_improve",
+            system_prompt=(
+                "你是严格遵循输出格式的 description 优化器。"
+                "必须在 <new_description> 标签中输出结果。"
+            ),
+            tools=["file_read"],
+            max_iterations=20,
+        )
+        output = await ctx.run_stage_agent_streaming(
+            agent,
+            stage_name="desc_optimize",
+            query=prompt,
+        )
+        new_desc = self._extract_tag_content(output, "new_description")
+        if not new_desc:
+            logger.warning("[DescOptimize] improve output missing <new_description>")
+            return improve_input.current_desc
+        new_desc = self._normalize_description_text(new_desc)
+        if not new_desc:
+            return improve_input.current_desc
+        if len(new_desc) > SKILL_DESC_MAX_LEN:
+            new_desc = new_desc[:SKILL_DESC_MAX_LEN].rstrip()
+        return new_desc
 
     # ------------------------------------------------------------------
     # 将优化后的 description 写回 SKILL.md
@@ -392,3 +453,194 @@ class DescOptimizeStageHandler(StageHandler):
         )
         new_content = match.group(1) + new_fm + match.group(3) + content[match.end():]
         skill_md.write_text(new_content, encoding="utf-8")
+
+    async def _test_single_trigger(
+        self,
+        ctx: SkillDevContext,
+        description: str,
+        query: str,
+    ) -> bool:
+        """对单条 query 进行是否触发判定."""
+        eval_prompt = TRIGGER_EVAL_PROMPT.format(
+            description=description,
+            query=query,
+        )
+        agent = ctx.create_stage_agent(
+            stage_name="desc_optimize_eval",
+            system_prompt=(
+                "你是 JSON 判定器。只输出 JSON 对象。"
+                '字段: {"triggered": boolean, "reason": string}'
+            ),
+            tools=["file_read"],
+            max_iterations=8,
+        )
+        output = await ctx.run_stage_agent_streaming(
+            agent,
+            stage_name="desc_optimize",
+            query=eval_prompt,
+        )
+        parsed = self._parse_json_candidate(output)
+        if isinstance(parsed, dict):
+            triggered = parsed.get("triggered")
+            if isinstance(triggered, bool):
+                return triggered
+        logger.warning(
+            "[DescOptimize] trigger eval parse failed, fallback false. query=%s output=%s",
+            query[:60],
+            output[:200],
+        )
+        return False
+
+    @staticmethod
+    def _parse_json_candidate(text: str):
+        """从文本中提取 JSON（代码块优先，其次平衡大括号）。"""
+        if not text:
+            return None
+        code_block = re.search(r"```(?:json)?\s*(\[.*]|\{.*})\s*```", text, re.DOTALL)
+        if code_block:
+            try:
+                return json.loads(code_block.group(1))
+            except json.JSONDecodeError:
+                pass
+
+        start_obj = text.find("{")
+        start_arr = text.find("[")
+        starts = [i for i in (start_obj, start_arr) if i != -1]
+        if not starts:
+            return None
+        start = min(starts)
+        stack: list[str] = []
+        in_string = False
+        escape = False
+        for i in range(start, len(text)):
+            ch = text[i]
+            if escape:
+                escape = False
+                continue
+            if ch == "\\":
+                escape = True
+                continue
+            if ch == '"':
+                in_string = not in_string
+                continue
+            if in_string:
+                continue
+            if ch in "{[":
+                stack.append(ch)
+            elif ch in "}]":
+                if not stack:
+                    continue
+                left = stack.pop()
+                expected_right = "}" if left == "{" else "]"
+                is_mismatch = ch != expected_right
+                if is_mismatch:
+                    continue
+                if not stack:
+                    candidate = text[start: i + 1]
+                    try:
+                        return json.loads(candidate)
+                    except json.JSONDecodeError:
+                        break
+        return None
+
+    @staticmethod
+    def _default_trigger_queries(skill_name: str) -> list[TriggerEvalQuery]:
+        return [
+            TriggerEvalQuery(
+                query=f"请帮我用 {skill_name} 完成一个复杂任务，并给出可执行步骤。",
+                should_trigger=True,
+            ),
+            TriggerEvalQuery(
+                query=f"我需要一个和 {skill_name} 相关的完整解决方案，包含输入输出约束。",
+                should_trigger=True,
+            ),
+            TriggerEvalQuery(
+                query="帮我写一个快速排序的 Python 实现并解释时间复杂度。",
+                should_trigger=False,
+            ),
+            TriggerEvalQuery(
+                query="给我一段正则表达式，用来提取邮箱地址。",
+                should_trigger=False,
+            ),
+        ]
+
+    def _normalize_trigger_queries(
+        self,
+        raw,
+        skill_name: str,
+    ) -> list[TriggerEvalQuery]:
+        """清洗并规范化 query 列表，确保正负样本都存在。"""
+        items = raw if isinstance(raw, list) else []
+        normalized: list[TriggerEvalQuery] = []
+        seen: set[str] = set()
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            query = str(item.get("query", "")).strip()
+            should_trigger = item.get("should_trigger")
+            if not query or not isinstance(should_trigger, bool):
+                continue
+            dedupe_key = f"{int(should_trigger)}::{query}"
+            if dedupe_key in seen:
+                continue
+            seen.add(dedupe_key)
+            normalized.append(
+                TriggerEvalQuery(query=query, should_trigger=should_trigger)
+            )
+
+        has_true = any(q.should_trigger for q in normalized)
+        has_false = any(not q.should_trigger for q in normalized)
+        if not has_true or not has_false:
+            defaults = self._default_trigger_queries(skill_name)
+            for d in defaults:
+                if d.should_trigger and has_true:
+                    continue
+                if (not d.should_trigger) and has_false:
+                    continue
+                normalized.append(d)
+                has_true = has_true or d.should_trigger
+                has_false = has_false or (not d.should_trigger)
+                if has_true and has_false:
+                    break
+        return normalized
+
+    @staticmethod
+    def _build_failure_details(failed_cases: list[dict]) -> str:
+        lines = ["失败样本（仅列出前 10 条）："]
+        for idx, case in enumerate(failed_cases[:10], start=1):
+            lines.append(
+                f"{idx}. should_trigger={case.get('should_trigger')} "
+                f"triggered={case.get('triggered')} "
+                f"query={case.get('query')}"
+            )
+        return "\n".join(lines)
+
+    @staticmethod
+    def _build_history_section(history: list[DescOptimizeIteration]) -> str:
+        if not history:
+            return "历史迭代：无。"
+        lines = ["历史迭代摘要："]
+        for h in history[-3:]:
+            if h.test_passed is None:
+                score = f"train={h.train_passed}/{h.train_total}"
+            else:
+                score = (
+                    f"train={h.train_passed}/{h.train_total}, "
+                    f"test={h.test_passed}/{h.test_total}"
+                )
+            lines.append(f"- iter {h.iteration}: {score}")
+        return "\n".join(lines)
+
+    @staticmethod
+    def _extract_tag_content(text: str, tag: str) -> str:
+        pattern = rf"<{tag}>(.*?)</{tag}>"
+        match = re.search(pattern, text, re.DOTALL | re.IGNORECASE)
+        if not match:
+            return ""
+        return match.group(1).strip()
+
+    @staticmethod
+    def _normalize_description_text(text: str) -> str:
+        """清洗 description 文本，压缩多余空白并保持单行。"""
+        cleaned = re.sub(r"\s+", " ", text or "").strip()
+        return cleaned

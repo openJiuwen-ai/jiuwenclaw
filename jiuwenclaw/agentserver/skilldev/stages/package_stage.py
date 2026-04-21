@@ -4,7 +4,7 @@
 
 - 将 skill/ 目录打包为 {skill_name}.skill（zip 格式，与官方 .skill 格式一致）
 - 排除 evals/（根目录级）、__pycache__、node_modules、.DS_Store、*.pyc 等
-- 推送 ARTIFACT_READY 事件 → 跳转到 DESC_OPTIMIZE_CONFIRM
+- 推送 ARTIFACT_READY 事件 → 进入 COMPLETED（描述优化已在打包前完成）
 """
 
 from __future__ import annotations
@@ -36,7 +36,7 @@ class PackageStageHandler(StageHandler):
 
         skill_name = (ctx.state.plan or {}).get("skill_name", "skill")
         # 官方格式为 .skill（本质是 zip）
-        skill_filename = f"{skill_name}.skill"
+        skill_filename = f"{skill_name}.zip"
         skill_path = output_dir / skill_filename
 
         await ctx.emit(
@@ -61,7 +61,7 @@ class PackageStageHandler(StageHandler):
                 },
             },
         )
-        return StageResult(next_stage=SkillDevStage.DESC_OPTIMIZE_CONFIRM)
+        return StageResult(next_stage=SkillDevStage.COMPLETED)
 
     def _zip_skill_dir(self, skill_dir: Path, zip_path: Path) -> None:
         """将 skill_dir 打包为 zip，排除无关文件."""

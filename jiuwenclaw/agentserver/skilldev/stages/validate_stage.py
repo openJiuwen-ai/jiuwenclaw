@@ -21,6 +21,7 @@ from pathlib import Path
 from jiuwenclaw.agentserver.skilldev.context import SkillDevContext
 from jiuwenclaw.agentserver.skilldev.schema import (
     ALLOWED_FRONTMATTER_KEYS,
+    MAX_GENERATE_RETRIES,
     SKILL_DESC_MAX_LEN,
     SKILL_NAME_MAX_LEN,
     SkillDevEventType,
@@ -38,14 +39,9 @@ class ValidateStageHandler(StageHandler):
         skill_md_path = ctx.workspace / "skill" / "SKILL.md"
 
         if not skill_md_path.exists():
-            await ctx.emit(
-                SkillDevEventType.VALIDATE_RESULT,
-                {
-                    "valid": False,
-                    "message": "SKILL.md 未生成",
-                },
+            return await self._handle_failure(
+                ctx, "SKILL.md 未生成"
             )
-            return StageResult(next_stage=SkillDevStage.GENERATE)
 
         valid, message = validate_skill_md(skill_md_path)
         await ctx.emit(
@@ -53,10 +49,35 @@ class ValidateStageHandler(StageHandler):
         )
 
         if not valid:
-            logger.warning("[ValidateStage] 校验失败: %s，回退到 GENERATE", message)
-            return StageResult(next_stage=SkillDevStage.GENERATE)
+            return await self._handle_failure(ctx, message)
 
+        ctx.state.generate_retries = 0
+        ctx.state.last_validate_error = None
         return StageResult(next_stage=SkillDevStage.TEST_DESIGN)
+
+    async def _handle_failure(
+        self, ctx: SkillDevContext, message: str
+    ) -> StageResult:
+        ctx.state.generate_retries += 1
+        ctx.state.last_validate_error = message
+
+        await ctx.emit(
+            SkillDevEventType.VALIDATE_RESULT,
+            {"valid": False, "message": message},
+        )
+
+        if ctx.state.generate_retries >= MAX_GENERATE_RETRIES:
+            logger.error(
+                "[ValidateStage] 校验失败且已达最大重试次数 (%d): %s",
+                MAX_GENERATE_RETRIES, message,
+            )
+            return StageResult(next_stage=SkillDevStage.ERROR)
+
+        logger.warning(
+            "[ValidateStage] 校验失败 (第 %d 次): %s，回退到 GENERATE",
+            ctx.state.generate_retries, message,
+        )
+        return StageResult(next_stage=SkillDevStage.GENERATE)
 
 
 # ---------------------------------------------------------------------------

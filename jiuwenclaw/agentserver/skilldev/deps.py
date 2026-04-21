@@ -11,8 +11,8 @@ JiuWenClaw 内部的 SkillManager、EvolutionService、对话历史等
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import Callable
+import asyncio
+from dataclasses import dataclass, field
 
 from jiuwenclaw.agentserver.skilldev.store import StateStore
 from jiuwenclaw.agentserver.skilldev.workspace import WorkspaceProvider
@@ -25,13 +25,15 @@ class SkillDevDeps:
     # 模型配置：为每个阶段创建独立 ReActAgent 的基础
     model_name: str
     model_client_config: dict
+    model_config_obj: dict
 
-    # 工具能力：按需给 Agent 配工具
-    # mcp_tools_factory: 返回当前可用 MCP 工具列表的工厂函数
-    mcp_tools_factory: Callable[[], list]
     # sysop_config: 文件系统访问配置（SysOperationCard）；None 表示禁止文件操作
     sysop_config: object | None
 
     # 基础设施
     state_store: StateStore
     workspace_provider: WorkspaceProvider
+
+    # 取消信号：task_id → asyncio.Event；由 _handle_start/_handle_respond 注册，
+    # _handle_cancel 通过 event.set() 通知 pipeline 在下一阶段边界终止。
+    cancel_events: dict[str, asyncio.Event] = field(default_factory=dict)

@@ -46,11 +46,6 @@ load_dotenv(dotenv_path=get_env_file())
 
 logger = logging.getLogger(__name__)
 
-# SkillDev 请求方法集合（统一委托给 SkillDevService）
-_SKILLDEV_METHODS: frozenset[ReqMethod] = frozenset(
-    m for m in ReqMethod if m.value.startswith("skilldev.")
-)
-
 _SKILL_ROUTES: dict[ReqMethod, str] = {
     ReqMethod.SKILLS_LIST: "handle_skills_list",
     ReqMethod.SKILLS_INSTALLED: "handle_skills_installed",
@@ -74,6 +69,11 @@ _SKILL_ROUTES: dict[ReqMethod, str] = {
     ReqMethod.SKILLS_EVOLUTION_GET: "handle_skills_evolution_get",
     ReqMethod.SKILLS_EVOLUTION_SAVE: "handle_skills_evolution_save",
 }
+
+# SkillDev 请求方法集合（统一委托给 SkillDevService）
+_SKILLDEV_METHODS: frozenset[ReqMethod] = frozenset(
+    m for m in ReqMethod if m.value.startswith("skilldev.")
+)
 
 
 def build_user_prompt(content: str, files: dict, channel: str, language: str) -> str:
@@ -135,7 +135,6 @@ class JiuWenClaw:
 
         from jiuwenclaw.agentserver.skilldev import SkillDevDeps, SkillDevService, StateStore, WorkspaceProvider
         from jiuwenclaw.utils import get_workspace_dir
-        from jiuwenclaw.agentserver.tools.mcp_toolkits import get_mcp_tools
 
         skilldev_base = get_workspace_dir() / "skilldev"
         state_store = StateStore(skilldev_base)
@@ -146,9 +145,9 @@ class JiuWenClaw:
         default_model = model_configs.get("default", {})
 
         deps = SkillDevDeps(
-            model_name=default_model.get("model_name", ""),
+            model_name=default_model.get("model_client_config", {}).get("model_name", ""),
             model_client_config=default_model.get("model_client_config", {}),
-            mcp_tools_factory=get_mcp_tools,  # 直接复用已加载的 MCP 工具工厂
+            model_config_obj=default_model.get("model_config_obj", {}),
             sysop_config=None,
             state_store=state_store,
             workspace_provider=workspace_provider,

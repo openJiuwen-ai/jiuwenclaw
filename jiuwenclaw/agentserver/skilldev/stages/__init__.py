@@ -4,6 +4,7 @@
 
 from jiuwenclaw.agentserver.skilldev.stages.base import StageHandler, StageResult
 from jiuwenclaw.agentserver.skilldev.stages.init_stage import InitStageHandler
+from jiuwenclaw.agentserver.skilldev.stages.clarify_stage import ClarifyStageHandler
 from jiuwenclaw.agentserver.skilldev.stages.plan_stage import PlanStageHandler
 from jiuwenclaw.agentserver.skilldev.stages.generate_stage import GenerateStageHandler
 from jiuwenclaw.agentserver.skilldev.stages.test_design_stage import (
@@ -22,6 +23,7 @@ __all__ = [
     "StageHandler",
     "StageResult",
     "InitStageHandler",
+    "ClarifyStageHandler",
     "PlanStageHandler",
     "GenerateStageHandler",
     "ValidateStageHandler",

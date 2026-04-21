@@ -4,8 +4,7 @@
 
 职责：
 - 创建 GENERATE 专属 ReActAgent（配备文件读写工具 + 生成 Prompt）
-- 按确认后的 plan 的 directory_structure 创建目录
-- Agent 按依赖顺序逐文件生成（SKILL.md 优先，其次 scripts/，最后 assets/）
+- Agent 自主完成完整 Skill 文件集生成
 - 推送 ARTIFACT_READY 事件通知前端产物就绪（驱动右侧附件列表）
 
 Agent 工具白名单：["file_read", "file_write"]
@@ -22,7 +21,7 @@ from jiuwenclaw.agentserver.skilldev.stages.base import StageHandler, StageResul
 
 logger = logging.getLogger(__name__)
 
-GENERATE_SYSTEM_PROMPT = """你是一个 Skill 开发专家。根据已确认的开发计划，生成完整的 Skill 文件集。
+GENERATE_SYSTEM_PROMPT_TEMPLATE = """你是一个 Skill 开发专家。根据已确认的开发计划，生成完整的 Skill 文件集。
 
 ## SKILL.md 格式要求（必须严格遵守）
 
@@ -37,19 +36,22 @@ description: 用祈使句描述何时触发、做什么。描述应聚焦用户�
 规则：
 - name 必须是 kebab-case（小写字母、数字、连字符），≤64 字符
 - description 不能包含 < 或 >
+- description 长度 ≤1024 字符
 - 仅允许的 frontmatter key: name, description, license, allowed-tools, metadata, compatibility
+- frontmatter 必须是 YAML 对象，且 key 不可重复；若存在未知 key，必须移除后再提交
+- 若包含 allowed-tools，必须是字符串数组
 
 ## Skill 目录结构
 
 ```
-skill-name/
+skill/
 ├── SKILL.md (必需)
 ├── scripts/    - 确定性/重复性任务的可执行脚本
 ├── references/ - 按需加载的领域文档
 └── assets/     - 输出中使用的模板、图标、字体等
 ```
 
-## 写作原则（对齐官方 Skill Writing Guide）
+## 写作原则
 
 ### 渐进式信息展示 (Progressive Disclosure)
 1. **元数据**（name + description）— 始终在上下文中（~100 词）
@@ -66,7 +68,154 @@ skill-name/
 明确定义预期输出结构，使用模板或示例：
 ```markdown
 ## 报告结构
-ALWAYS use this exact template:
+请严格使用以下模板：
+# [Title]
+## Executive summary
+## Key findings
+## Recommendations
+```
+
+### 发现重复工作 -> 捆绑脚本
+如果测试中发现模型反复独立编写类似的辅助脚本，应将其捆绑到 scripts/ 中。
+
+### description 的触发性
+当前模型倾向于"不够主动触发"skill。description 应略微"推进式"——
+除了说明 skill 做什么，还要列举具体触发场景，即使用户没有明确提到 skill 名称。
+
+## 参考技能检索（必须先执行，再开始生成）
+
+### Step 1: 提炼检索关键词
+- 从用户需求中提炼 1-2 个语义准确的英文关键词（不是中文，不是逐字翻译）
+- 示例：
+  - "我想创建一个 PR review 技能" -> `code review`
+  - "帮我写一个根据 git 历史生成 changelog 的技能" -> `changelog git`
+
+### Step 2: 检索社区技能
+- 在 Windows 环境下，必须使用以下命令格式检索（否则可能出现空结果）：
+```bash
+powershell -Command "npx skills find '<keywords>'"
+```
+- 在 macOS/Linux 环境下可使用：
+```bash
+npx skills find '<keywords>'
+```
+- Windows 关键注意事项：不要直接运行 `npx skills find`（不加 `powershell -Command`），否则可能出现“静默空结果”
+- 若错误地使用了命令格式导致空结果，必须先用正确命令重试，再判断是否无结果
+- 按安装量从高到低选择前 2 个结果作为参考；若不足 2 个，则按实际数量使用
+- 若确认命令格式正确后仍无结果，可跳过参考检索并继续生成
+
+### Step 3: 拉取完整参考目录（不安装）
+- 对每个入选结果（格式通常为 `owner/repo@skill-name`），拉取完整技能目录（不仅是 `SKILL.md`）
+- 禁止使用 `npx skills add`（会引入软链接并污染技能环境）
+- 仅将参考内容放入当前工作区临时目录，建议放在：`<skill-name>-workspace/_borrowed_refs`
+- 可采用 sparse clone 思路仅拉取目标技能子目录；若技能在仓库根目录，则复制根目录作为参考
+- 参考读取目标是结构借鉴，不是复刻内容
+
+### Step 4: 先分析参考，再生成新技能
+- 先输出检索到的技能列表（包含安装量）
+- 再说明每个参考技能的结构特征（是否包含 `SKILL.md`、`scripts/`、`references/`、`assets/`、`agents/`）
+- 分层吸收（Progressive Disclosure）：
+  - Layer 1（必须）：目录巡检，列出目录树并识别分层设计意图
+  - Layer 2（必须）：阅读 `SKILL.md`，提取 Scope、Structure、Instruction style、Pointers、Edge cases
+  - Layer 3（按需）：仅在相关时阅读 `scripts/`、`references/`、`assets/`、`agents/`
+- Layer 3 的读取决策：
+  - 若新技能需要自动化/确定性步骤 -> 优先读 `scripts/`
+  - 若新技能需要大体量领域知识 -> 优先读 `references/`
+  - 若新技能需要模板化产物 -> 优先读 `assets/`
+  - 若新技能需要子代理协作 -> 优先读 `agents/`
+- 不要一次性读完全部参考文件，优先读取能回答“他们如何解决与当前需求相同问题”的文件
+- 仅借鉴结构与方法，不得照抄内容；必须基于当前用户需求重新设计并生成
+- 若参考中存在可复用的重复性流程，优先在新技能中落地为 `scripts/`（而不是每次临时编写）
+- 用户确认技能最终完成后，删除临时参考目录：`<skill-name>-workspace/_borrowed_refs`
+
+## 文件范围约束
+你只能生成与 Skill 本身直接相关的文件（例如 SKILL.md、scripts/、references/、assets/）。
+禁止生成与 Skill 交付无关的文件，例如 `README.md`、`implement_report.md`、实现总结、CHANGELOG、开发说明、复盘文档等。
+仅允许写入以下路径：
+- skill/SKILL.md
+- skill/scripts/**
+- skill/references/**
+- skill/assets/**
+
+## 原则性要求
+请务必将文件写入 skill/ 目录下（如 skill/SKILL.md），并确保 YAML frontmatter 格式正确（name 为 kebab-case, description 不含 < >）。
+
+## 生成流程要求
+1. 先输出“参考技能检索与分析结果”
+2. 再给出“计划写入的文件清单”
+3. 再执行文件写入
+4. 完成后进行自检并输出结果
+5. 若本次创建了 `_borrowed_refs`，在用户确认完成后清理该目录
+
+## 自检清单（必须逐项输出通过/失败）
+- `skill/SKILL.md` 存在
+- frontmatter 中 `name` 为 kebab-case 且长度 ≤64
+- `description` 不含 `<` 或 `>` 且长度 ≤1024
+- frontmatter 仅包含允许 key
+- 所有输出文件均在 `skill/` 目录下
+- 未生成任何与 Skill 无关文件（如 `README.md`、`implement_report.md`）
+
+## 最终输出格式（固定）
+请按以下结构输出：
+1. 参考技能检索与分析结果（关键词、命中技能、安装量、结构特征、借鉴点）
+2. 本次写入文件列表（逐行路径）
+3. 每个文件一句用途说明
+4. 自检结果（对应“自检清单”逐项列出）
+
+## 工作区
+工作区路径：{workspace}。
+禁止在工作区外进行操作。
+"""
+
+
+GENERATE_SYSTEM_PROMPT_TEMPLATE_WITH_REF = """你是一个 Skill 开发专家。根据已确认的开发计划，生成完整的 Skill 文件集。
+
+## SKILL.md 格式要求（必须严格遵守）
+
+**YAML Frontmatter（必填）：**
+```
+---
+name: skill-name-here
+description: 用祈使句描述何时触发、做什么。描述应聚焦用户意图而非实现细节。≤1024 字符。
+---
+```
+
+规则：
+- name 必须是 kebab-case（小写字母、数字、连字符），≤64 字符
+- description 不能包含 < 或 >
+- description 长度 ≤1024 字符
+- 仅允许的 frontmatter key: name, description, license, allowed-tools, metadata, compatibility
+- frontmatter 必须是 YAML 对象，且 key 不可重复；若存在未知 key，必须移除后再提交
+- 若包含 allowed-tools，必须是字符串数组
+
+## Skill 目录结构
+
+```
+skill/
+├── SKILL.md (必需)
+├── scripts/    - 确定性/重复性任务的可执行脚本
+├── references/ - 按需加载的领域文档
+└── assets/     - 输出中使用的模板、图标、字体等
+```
+
+## 写作原则
+
+### 渐进式信息展示 (Progressive Disclosure)
+1. **元数据**（name + description）— 始终在上下文中（~100 词）
+2. **SKILL.md 正文** — 触发时加载（<500 行为佳）
+3. **捆绑资源** — 按需加载（无大小限制，脚本可不加载直接执行）
+
+### 写作风格
+- 使用祈使句式（"执行 X" 而非 "这个 skill 会执行 X"）
+- 解释 **为什么** 而非堆砌规则；避免过度使用 MUST/NEVER/ALWAYS
+- 使用心理模型让模型理解意图，比死板指令更有效
+- 保持 SKILL.md ≤500 行；超过时拆分到 references/ 并标明何时查阅
+
+### 输出格式定义
+明确定义预期输出结构，使用模板或示例：
+```markdown
+## 报告结构
+请严格使用以下模板：
 # [Title]
 ## Executive summary
 ## Key findings
@@ -79,6 +228,41 @@ ALWAYS use this exact template:
 ### description 的触发性
 当前模型倾向于"不够主动触发"skill。description 应略微"推进式"——
 除了说明 skill 做什么，还要列举具体触发场景，即使用户没有明确提到 skill 名称。
+
+## 文件范围约束
+你只能生成与 Skill 本身直接相关的文件（例如 SKILL.md、scripts/、references/、assets/）。
+禁止生成与 Skill 交付无关的文件，例如 `README.md`、`implement_report.md`、实现总结、CHANGELOG、开发说明、复盘文档等。
+仅允许写入以下路径：
+- skill/SKILL.md
+- skill/scripts/**
+- skill/references/**
+- skill/assets/**
+
+## 原则性要求
+请务必将文件写入 skill/ 目录下（如 skill/SKILL.md），并确保 YAML frontmatter 格式正确（name 为 kebab-case, description 不含 < >）。
+
+## 生成流程要求
+1. 先给出“计划写入的文件清单”
+2. 再执行文件写入
+3. 完成后进行自检并输出结果
+
+## 自检清单（必须逐项输出通过/失败）
+- `skill/SKILL.md` 存在
+- frontmatter 中 `name` 为 kebab-case 且长度 ≤64
+- `description` 不含 `<` 或 `>` 且长度 ≤1024
+- frontmatter 仅包含允许 key
+- 所有输出文件均在 `skill/` 目录下
+- 未生成任何与 Skill 无关文件（如 `README.md`、`implement_report.md`）
+
+## 最终输出格式（固定）
+请按以下结构输出：
+1. 本次写入文件列表（逐行路径）
+2. 每个文件一句用途说明
+3. 自检结果（对应“自检清单”逐项列出）
+
+## 工作区
+工作区路径：{workspace}。
+禁止在工作区外进行操作。
 """
 
 
@@ -91,20 +275,7 @@ class GenerateStageHandler(StageHandler):
             raise ValueError("GENERATE 阶段缺少 plan，请先完成 PLAN 阶段")
 
         skill_dir = ctx.workspace / "skill"
-        generation_order = self._resolve_generation_order(plan)
-
-        await ctx.emit(
-            SkillDevEventType.PROGRESS,
-            {
-                "message": f"正在生成 {len(generation_order)} 个文件...",
-                "files_total": len(generation_order),
-                "files_done": 0,
-            },
-        )
-
-        generated_files = await self._generate_all_files(
-            ctx, skill_dir, generation_order
-        )
+        generated_files = await self._generate_all_files(ctx, skill_dir)
 
         await ctx.emit(
             SkillDevEventType.ARTIFACT_READY,
@@ -121,88 +292,86 @@ class GenerateStageHandler(StageHandler):
         )
         return StageResult(next_stage=SkillDevStage.VALIDATE)
 
-    def _resolve_generation_order(self, plan: dict) -> list[tuple[str, str]]:
-        """确定文件生成顺序：SKILL.md 优先，scripts/ 其次，其余最后.
-
-        Returns:
-            [(filepath, role_description), ...]，按生成顺序排列
-        """
-        directory_structure: dict = plan.get("directory_structure", {})
-        order: list[tuple[str, str]] = []
-
-        # SKILL.md 必须最先生成（其他文件生成时需参考它）
-        if "SKILL.md" in directory_structure:
-            order.append(("SKILL.md", directory_structure["SKILL.md"]))
-
-        # scripts/ 次之
-        for path, role in directory_structure.items():
-            if path != "SKILL.md" and path.startswith("scripts/"):
-                order.append((path, role))
-
-        # 其余文件
-        for path, role in directory_structure.items():
-            if path != "SKILL.md" and not path.startswith("scripts/"):
-                order.append((path, role))
-
-        return order
-
     async def _generate_all_files(
         self,
         ctx: SkillDevContext,
         skill_dir: Path,
-        generation_order: list[tuple[str, str]],
     ) -> list[str]:
-        """逐文件调用 Agent 生成内容.
+        """调用 Agent 生成完整 Skill 文件集，并回收实际产物列表."""
 
-        待实现: 接入 create_stage_agent + 逐文件生成逻辑
-        """
-        # 待实现:
-        # agent = ctx.create_stage_agent(
-        #     stage_name="generate",
-        #     system_prompt=GENERATE_SYSTEM_PROMPT,
-        #     tools=["file_read", "file_write"],
-        #     max_iterations=30,
-        # )
-        # for idx, (filepath, role) in enumerate(generation_order):
-        #     (skill_dir / filepath).parent.mkdir(parents=True, exist_ok=True)
-        #     content = await self._generate_single_file(agent, ctx, filepath, role)
-        #     (skill_dir / filepath).write_text(content, encoding="utf-8")
-        #     await ctx.emit(SkillDevEventType.PROGRESS, {
-        #         "message": f"已生成: {filepath}",
-        #         "files_done": idx + 1,
-        #         "files_total": len(generation_order),
-        #     })
-
-        logger.warning("[GenerateStage] _generate_all_files 尚未实现，创建占位文件")
-        generated = []
-        for filepath, role in generation_order:
-            full_path = skill_dir / filepath
-            full_path.parent.mkdir(parents=True, exist_ok=True)
-            full_path.write_text(
-                f"# {filepath}\n\n<!-- 待实现: 由 Agent 生成，职责：{role} -->\n",
-                encoding="utf-8",
+        if ctx.state.skill_dir_empty and ctx.state.ref_skills_dir_empty:
+            system_prompt = GENERATE_SYSTEM_PROMPT_TEMPLATE.format(
+                workspace=ctx.workspace
             )
-            generated.append(filepath)
-        return generated
+        else:
+            system_prompt = GENERATE_SYSTEM_PROMPT_TEMPLATE_WITH_REF.format(
+                workspace=ctx.workspace
+            )
+        agent = ctx.create_stage_agent(
+            stage_name="generate",
+            system_prompt=system_prompt,
+            tools=["file_read", "file_write", "file_edit", "file_glob", "file_grep", 
+            "file_listdir", "web_search_free", "web_fetch", "shell", "code_execute"],
+            max_iterations=50,
+        )
+        query = self._build_user_query(ctx)
+        await ctx.run_stage_agent_streaming(agent, stage_name="generate", query=query)
+        if not skill_dir.exists():
+            return []
+        generated_files = [
+            str(path.relative_to(skill_dir)).replace("\\", "/")
+            for path in skill_dir.rglob("*")
+            if path.is_file()
+        ]
+        return sorted(generated_files)
 
-    async def _generate_single_file(
-        self, agent, ctx: SkillDevContext, filepath: str, role: str
-    ) -> str:
-        """为单个文件生成内容.
+    def _build_user_query(self, ctx: SkillDevContext) -> str:
+        """构建传给 ReActAgent 的 query 字符串."""
+        query = ctx.state.input.get("query", "")
+        parts = [f"用户需求：{query}"]
 
-        待实现: 构造 per-file prompt，调用 Agent，返回文件内容
-        """
-        raise NotImplementedError
+        # 将 QA 问答内容以可读形式注入
+        if ctx.state.clarification_questions and ctx.state.clarification_answers:
+            q_map = {q["id"]: q["question"] for q in ctx.state.clarification_questions}
+            qa_lines = [
+                f"- {q_map.get(a['question_id'], a['question_id'])}: {a['answer']}"
+                for a in ctx.state.clarification_answers
+            ]
+            parts.append("用户补充信息（澄清问答）：\n" + "\n".join(qa_lines))
+        elif ctx.state.clarification_answers:
+            qa_lines = [
+                f"- {a['question_id']}: {a['answer']}"
+                for a in ctx.state.clarification_answers
+            ]
+            parts.append("用户补充信息：\n" + "\n".join(qa_lines))
 
-    async def _validate_scripts(self, skill_dir: Path) -> None:
-        """验证生成的 Python 脚本语法正确性.
+        if not ctx.state.skill_dir_empty:
+            if ctx.state.generate_retries == 0:
+                parts.append(
+                    f"工作区 {ctx.workspace} 中的skill文件夹下存放了最近一轮生成的skill内容，请你阅读后，根据用户需求，生成新的skill。"
+                    "在生成新的skill时，请先将原始 skill/ 目录重命名为 skill-vx/（x 表示递增版本号），再新建一个全新的 skill/ 目录，"
+                    "并将本次生成的完整 Skill 文件保存到新的 skill/ 目录下。"
+                )
+            if not (ctx.state.ref_files_dir_empty and ctx.state.ref_skills_dir_empty):
+                parts.append(f"工作区 {ctx.workspace} 中的resources/文件夹下存放了用户原始上传的参考资料，请根据需求自行判断是否需要查看。")
+            if not ctx.state.tool_specs_dir_empty:
+                parts.append(f"用户提供了以下工具，可以在生成的skill中使用：\n{ctx.state.external_tools}")
+        else:
+            if not (ctx.state.ref_files_dir_empty and ctx.state.ref_skills_dir_empty):
+                parts.append(f"用户已上传参考资料，存放于工作区 {ctx.workspace} 中的resources/目录，请确保**先查看resources目录**中的内容")
+            if not ctx.state.tool_specs_dir_empty:
+                parts.append(f"用户提供了以下工具，可以在生成的skill中使用：\n{ctx.state.external_tools}")
+            
+        plan = ctx.state.plan
+        if plan:
+            parts.append(f"## skill开发计划：\n{plan}")
 
-        待实现: 使用 py_compile 或 ast.parse 检查语法
-        """
-        # for py_file in skill_dir.rglob("*.py"):
-        #     import ast
-        #     try:
-        #         ast.parse(py_file.read_text(encoding="utf-8"))
-        #     except SyntaxError as e:
-        #         raise ValueError(f"脚本语法错误 {py_file}: {e}") from e
-        pass
+        if ctx.state.last_validate_error:
+            parts.append(
+                f"⚠️ 上次生成的 SKILL.md 校验失败（第 {ctx.state.generate_retries} 次重试）：\n"
+                f"失败原因：{ctx.state.last_validate_error}\n"
+                f"请务必将文件写入 {ctx.workspace} 中的 skill/ 目录下（如 skill/SKILL.md），"
+                f"并确保 YAML frontmatter 格式正确（name 为 kebab-case, description 不含 < >）。"
+            )
+
+        return "\n\n".join(parts)

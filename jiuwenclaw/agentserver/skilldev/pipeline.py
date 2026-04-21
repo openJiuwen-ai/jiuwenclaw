@@ -4,7 +4,7 @@
 
 Pipeline 是整个 SkillDev 流程的骨架：
 - 维护阶段跳转顺序（STAGE_HANDLERS 注册表）
-- 在挂起点（PLAN_CONFIRM / REVIEW）checkpoint 并暂停
+- 在挂起点（QUESTION_CLARIFY / REVIEW / DESC_OPTIMIZE_CONFIRM）checkpoint 并暂停
 - 提供 run() 和 resume() 两个执行入口
 - 每次请求创建、执行到挂起点/完成后释放（不长驻内存）
 
@@ -29,6 +29,7 @@ from jiuwenclaw.agentserver.skilldev.schema import (
     compute_todos,
 )
 from jiuwenclaw.agentserver.skilldev.stages import (
+    ClarifyStageHandler,
     DescOptimizeStageHandler,
     EvaluateStageHandler,
     GenerateStageHandler,
@@ -51,9 +52,10 @@ class SkillDevPipeline:
     不长驻内存，不持有 JiuWenClaw 实例。
     """
 
-    # PLAN_CONFIRM / REVIEW / DESC_OPTIMIZE_CONFIRM 是挂起点，由 SUSPENSION_POINTS 处理
+    # QUESTION_CLARIFY / REVIEW / DESC_OPTIMIZE_CONFIRM 是挂起点，由 SUSPENSION_POINTS 处理
     STAGE_HANDLERS = {
         SkillDevStage.INIT: InitStageHandler,
+        SkillDevStage.CLARIFY: ClarifyStageHandler,
         SkillDevStage.PLAN: PlanStageHandler,
         SkillDevStage.GENERATE: GenerateStageHandler,
         SkillDevStage.VALIDATE: ValidateStageHandler,
@@ -61,8 +63,8 @@ class SkillDevPipeline:
         SkillDevStage.TEST_RUN: TestRunStageHandler,
         SkillDevStage.EVALUATE: EvaluateStageHandler,
         SkillDevStage.IMPROVE: ImproveStageHandler,
-        SkillDevStage.PACKAGE: PackageStageHandler,
         SkillDevStage.DESC_OPTIMIZE: DescOptimizeStageHandler,
+        SkillDevStage.PACKAGE: PackageStageHandler,
     }
 
     def __init__(self, task_id: str, state: SkillDevState, deps: SkillDevDeps) -> None:
@@ -70,14 +72,29 @@ class SkillDevPipeline:
         self.state = state
         self._deps = deps
         self._event_queue: asyncio.Queue = asyncio.Queue()
+        self._last_handler_result = None
 
     async def run(self) -> AsyncIterator[SkillDevEvent]:
         """从当前阶段开始执行，直到遇到挂起点或终态.
 
+        事件实时流式推送：handler 在后台 Task 中执行，主生成器并发消费
+        事件队列并立即 yield，使前端能实时收到每个阶段的中间事件。
+
         Yields:
             SkillDevEvent：各阶段产生的事件，由 Service 转换为 AgentResponseChunk
         """
+        cancel_event = self._deps.cancel_events.get(self.task_id)
         while self.state.stage not in (SkillDevStage.COMPLETED, SkillDevStage.ERROR):
+            # 检测外部取消信号（由 skilldev.cancel 请求触发）
+            if cancel_event and cancel_event.is_set():
+                logger.info("[Pipeline] 收到取消信号，终止任务: task_id=%s", self.task_id)
+                self.state.stage = SkillDevStage.ERROR
+                self.state.error = "任务已取消"
+                await self._emit(SkillDevEventType.ERROR, {"message": "任务已取消"})
+                await self._checkpoint()
+                async for evt in self._drain_events():
+                    yield evt
+                break
             # 命中挂起点：推送确认请求 → checkpoint → 暂停
             if self.state.stage in SUSPENSION_POINTS:
                 suspension = SUSPENSION_POINTS[self.state.stage]
@@ -98,6 +115,8 @@ class SkillDevPipeline:
                     },
                 )
                 await self._checkpoint()
+                async for evt in self._drain_events():
+                    yield evt
                 break
 
             # 执行当前阶段
@@ -127,10 +146,17 @@ class SkillDevPipeline:
                     "todos": compute_todos(self.state.stage, self.state.mode),
                 },
             )
+            # 立即推送 STAGE_CHANGED / TODOS_UPDATE，不等 handler 执行完
+            async for evt in self._drain_events():
+                yield evt
 
             try:
                 handler = handler_cls()
-                result = await handler.execute(ctx)
+                # handler 放入后台 Task，主循环并发消费队列实时 yield
+                async for evt in self._run_handler_streaming(handler, ctx):
+                    yield evt
+                result = self._last_handler_result
+                logger.info(f"阶段 {self.state.stage.value} 执行完成，即将进入阶段 {result.next_stage}")
                 self.state.stage = result.next_stage
                 await self._checkpoint()
             except Exception as exc:
@@ -141,11 +167,13 @@ class SkillDevPipeline:
                 self.state.error = str(exc)
                 await self._emit(SkillDevEventType.ERROR, {"message": str(exc)})
                 await self._checkpoint()
+                async for evt in self._drain_events():
+                    yield evt
                 break
 
-        # 排空事件队列，yield 给调用方
-        while not self._event_queue.empty():
-            yield self._event_queue.get_nowait()
+        # 安全兜底：排空残留事件
+        async for evt in self._drain_events():
+            yield evt
 
     async def resume(self, data: dict) -> AsyncIterator[SkillDevEvent]:
         """从挂起点恢复执行.
@@ -173,6 +201,44 @@ class SkillDevPipeline:
 
         async for event in self.run():
             yield event
+
+    async def _run_handler_streaming(
+        self, handler, ctx: SkillDevContext,
+    ) -> AsyncIterator[SkillDevEvent]:
+        """后台执行 handler.execute()，前台并发消费事件队列.
+
+        将 handler 放入 asyncio.Task，主协程在 handler 运行期间不断从
+        事件队列取出事件并 yield，实现实时流式推送。handler 完成后将
+        StageResult 存入 self._last_handler_result。
+        """
+        task = asyncio.create_task(handler.execute(ctx))
+        try:
+            while not task.done():
+                try:
+                    event = await asyncio.wait_for(
+                        self._event_queue.get(), timeout=0.1,
+                    )
+                    yield event
+                except asyncio.TimeoutError:
+                    continue
+            # handler 已完成，获取结果（若 handler 抛异常则此处重新抛出）
+            self._last_handler_result = task.result()
+        except BaseException:
+            if not task.done():
+                task.cancel()
+                try:
+                    await task
+                except (asyncio.CancelledError, Exception):
+                    pass
+            raise
+        # 排空 handler 完成瞬间的残留事件
+        async for evt in self._drain_events():
+            yield evt
+
+    async def _drain_events(self) -> AsyncIterator[SkillDevEvent]:
+        """非阻塞排空队列中所有已有事件."""
+        while not self._event_queue.empty():
+            yield self._event_queue.get_nowait()
 
     async def _emit(self, event_type: SkillDevEventType, payload: dict) -> None:
         """向事件队列写入一个事件."""

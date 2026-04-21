@@ -114,6 +114,17 @@ class ReqMethod(Enum):
     UPDATER_GET_CONF = "updater.get_conf"
     UPDATER_SET_CONF = "updater.set_conf"
 
+    # SkillDev 模式请求方法
+    SKILLDEV_START = "skilldev.start"  # 发起新任务（create/upgrade 由 params 自动判断）
+    SKILLDEV_RESPOND = "skilldev.respond"  # 统一确认入口（后端根据 task_id 当前阶段自动路由）
+    SKILLDEV_STATUS = "skilldev.status"  # 查询状态（不传 task_id → 返回任务列表）
+    SKILLDEV_PARSE_SKILL = "skilldev.parse_skill"  # 导入本地 skill 压缩包到任务工作区
+    SKILLDEV_DOWNLOAD = "skilldev.download"  # 下载产物
+    SKILLDEV_CANCEL = "skilldev.cancel"  # 取消任务
+    SKILLDEV_FILE_LIST = "skilldev.file.list"  # 获取工作区文件树（产物弹窗浏览）
+    SKILLDEV_FILE_READ = "skilldev.file.read"  # 读取工作区文件内容
+
+
 class EventType(Enum):
     CONNECTION_ACK = "connection.ack"
     HELLO = "hello"
@@ -141,6 +152,24 @@ class EventType(Enum):
     TEAM_MESSAGE = "team.message"
     HEARTBEAT_RELAY = "heartbeat.relay"
     HISTORY_GET = "history.message"
+    # SkillDev 事件类型
+    SKILLDEV_STARTED = "skilldev.started"
+    SKILLDEV_STAGE_CHANGED = "skilldev.stage_changed"
+    SKILLDEV_PROGRESS = "skilldev.progress"
+    SKILLDEV_AGENT_THINKING = "skilldev.agent_thinking"
+    SKILLDEV_AGENT_OUTPUT = "skilldev.agent_output"
+    SKILLDEV_TEST_PROGRESS = "skilldev.test_progress"
+    SKILLDEV_TODOS_UPDATE = "skilldev.todos_update"
+    SKILLDEV_CONFIRM_REQUEST = "skilldev.confirm_request"
+    SKILLDEV_ARTIFACT_READY = "skilldev.artifact_ready"
+    SKILLDEV_EVAL_READY = "skilldev.eval_ready"
+    SKILLDEV_VALIDATE_RESULT = "skilldev.validate_result"
+    SKILLDEV_DESC_OPT_READY = "skilldev.desc_opt_ready"
+    SKILLDEV_ERROR = "skilldev.error"
+    SKILLDEV_SUSPENDED = "skilldev.suspended"
+    SKILLDEV_COMPLETED = "skilldev.completed"
+    SKILLDEV_TOOL_CALL = "skilldev.tool_call"
+    SKILLDEV_TOOL_RESULT = "skilldev.tool_result"
 
 
 class Mode(Enum):
@@ -149,6 +178,7 @@ class Mode(Enum):
     CODE_PLAN = "code.plan"
     CODE_NORMAL = "code.normal"
     TEAM = "team"
+    SKILLDEV = "skilldev"
 
     @classmethod
     def from_raw(cls, raw_mode: Any, default: "Mode | None" = None) -> "Mode":

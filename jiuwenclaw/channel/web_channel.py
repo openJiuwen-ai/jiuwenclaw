@@ -311,12 +311,12 @@ class WebChannel(BaseChannel):
         if isinstance(msg.payload, dict):
             # 对于需要传递完整结构化数据的事件类型
             if event_name in ("connection.ack", "todo.updated", "chat.tool_call", "chat.tool_result",
-                              "chat.processing_status", "chat.interrupt_result", "chat.evolution_status",
-                              "chat.error", "heartbeat.relay",
-                              "context.compressed", "chat.ask_user_question", "chat.subtask_update",
-                              "history.message",
-                              "chat.session_result", "chat.usage_metadata",
-                              "chat.usage_summary") or event_name.startswith("team."):
+                    "chat.processing_status", "chat.interrupt_result", "chat.evolution_status",
+                    "chat.error", "heartbeat.relay",
+                    "context.compressed", "chat.ask_user_question", "chat.subtask_update",
+                    "history.message",
+                    "chat.session_result", "chat.usage_metadata",
+                    "chat.usage_summary") or event_name.startswith("skilldev.") or event_name.startswith("team."):
                 # 传递完整 payload，保留所有字段
                 payload = {**msg.payload}
                 # 确保包含 session_id
@@ -436,6 +436,10 @@ class WebChannel(BaseChannel):
 
         params = await self._process_files(params)
 
+        # skilldev.start / skilldev.respond 需走流式路径才能实时推送事件
+        stream_methods = ("skilldev.start", "skilldev.respond")
+        is_stream = method in stream_methods
+
         user_message = Message(
             id=req_id,
             type="req",
@@ -446,6 +450,7 @@ class WebChannel(BaseChannel):
             ok=True,
             req_method=self._parse_req_method(method),
             mode=self._parse_mode(params.get("mode")),
+            is_stream=is_stream,
             metadata={"query": query, "method": method},
         )
 

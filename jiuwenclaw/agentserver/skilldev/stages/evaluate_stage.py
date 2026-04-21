@@ -18,10 +18,14 @@
 
 from __future__ import annotations
 
+import asyncio
+from dataclasses import dataclass, field
 import json
 import logging
 import math
+import re
 from pathlib import Path
+from typing import Any, Dict
 
 from jiuwenclaw.agentserver.skilldev.context import SkillDevContext
 from jiuwenclaw.agentserver.skilldev.schema import (
@@ -38,36 +42,79 @@ from jiuwenclaw.agentserver.skilldev.stages.base import StageHandler, StageResul
 
 logger = logging.getLogger(__name__)
 
+
+@dataclass
+class GradingAgentRequest:
+    """Agent 评分请求上下文."""
+
+    expectations: list
+    output: str
+    stage_name: str
+    trace: str = ""
+    run_dir: Path | None = None
+    input_files: list = field(default_factory=list)
+    files_created: list = field(default_factory=list)
+
 # ---------------------------------------------------------------------------
 # Grader Agent 系统 Prompt
 # 核心规则吸收自官方 agents/grader.md，不是外部文件引用
 # ---------------------------------------------------------------------------
 
 GRADER_SYSTEM_PROMPT = """\
-你是一个评测 Grader。读取执行 transcript 和 output 文件，评估每条 expectation 是否通过。
+你是一个严格的评测 Grader。根据 Agent 的实际执行结果逐条判断每个 expectation 是否被真实满足。
 
-## 评分标准
+## 评分工作流（必须按此顺序执行）
 
-**PASS**：
-- transcript / outputs 中有明确证据证明 expectation 为真
-- 证据反映的是真实完成，不是表面合规（文件存在 ≠ 内容正确）
+### Step 1 — 识别 expectation 类型
+对每条 expectation，先判断类型：
 
-**FAIL**：
-- 找不到证据，或证据与 expectation 矛盾
-- 证据是表面的（文件名对但内容错/空）
-- 无法从可用信息中验证
+- **FILE 类**：涉及文件存在性、文件内容、目录结构、文件数量等
+  示例：“生成了 report.pdf”，“文件包含正确标题”，“在 output/ 下创建了 3 个文件”
+- **OUTPUT 类**：可从 Agent 最终文本输出或执行轨迹直接判断
+  示例：“返回了正确数字”，“输出中包含摘要”
 
-**不确定时**：按 FAIL 处理（举证责任在 expectation 一方）。
+### Step 2 — 收集证据（不可跳过）
 
-## 输出要求
+**FILE 类 expectation：**
+- **必须使用文件工具实际读取后再评分（例如：`file_read` / `file_glob` / `file_listdir`）**
+- 禁止仅凭文本输出推断文件是否存在或内容是否正确
+- 若文件不存在，直接判 FAIL
 
-对每条 expectation 输出：
-- text: expectation 原文
-- passed: true/false
-- evidence: 引用的具体文本/描述
+**OUTPUT 类 expectation：**
+- 优先看最终输出内容
+- 若涉及执行过程或轨迹，结合执行轨迹（trace.txt）判断
 
-还需输出：
-- summary: {{passed, failed, total, pass_rate}}
+**工具调用失败时的降级规则（重要）：**
+- 若工具调用尝试后无响应，**不得重复尝试同一工具，不得无限循环等待**
+- 立即根据已有信息（文本输出 + 执行轨迹）做出最佳判断
+- 在 reason 中注明："无法调用文件工具，依据文本/轨迹推断"
+- 宁可给出一个有据可查的推断结果，也不能因为等待工具而不输出任何评分
+
+### Step 3 — 评分
+
+**PASS**：有具体、可验证的证据表明 expectation 被完整满足
+**FAIL**：证据缺失、与 expectation 矛盾、无法确认、或 Agent 执行未完成
+
+## 输出格式 — 必须严格遵守
+
+确保最终输出为 JSON 数组，每个元素对应一条 expectation：
+
+[
+  {
+    "expectation": "原始 expectation 文本（逐字复制，不得改动）",
+    "passed": true,
+    "reason": "简要说明证据（1-2 句；FILE 类须注明调用了哪个工具及结果）"
+  },
+  ...
+]
+
+**要求：**
+1. 必须是一个 JSON 数组 [...]
+2. 数组中的每个对象必须有三个字段：expectation, passed, reason
+3. passed 字段只能是 true 或 false（布尔值，不是字符串）
+4. expectation 字段必须是原始的 expectation 文本
+5. reason 字段需要简明扼要（1-2 句）
+6. 数组长度必须等于输入的 expectation 数量，顺序与输入一致
 """
 
 # ---------------------------------------------------------------------------
@@ -76,17 +123,42 @@ GRADER_SYSTEM_PROMPT = """\
 # ---------------------------------------------------------------------------
 
 ANALYST_SYSTEM_PROMPT = """\
-你是一个 Benchmark 分析师。分析所有评测运行结果，发现 aggregate 统计隐藏的模式。
-
-关注维度：
-- 某 expectation 在 with_skill 和 baseline 都 100% pass → 不具区分力
-- 某 expectation 在两者都 fail → 超出能力或 expectation 本身有问题
-- 某 eval 高方差 → 可能是 flaky 测试
-- with_skill 反而劣于 baseline 的指标 → skill 可能在某方面产生负面影响
-- 时间/token 开销 vs 通过率的权衡
-
-输出一个 JSON 字符串数组，每条是一句简洁的观察（用中文）：
-["观察1", "观察2", ...]
+你是一个 Skill 改进顾问。分析评测结果，生成**具体的、可执行的改进建议**。
+ 
+## 分析维度
+ 
+1. **失败原因分析**：
+   - 哪些 expectations 反复失败？
+   - 失败背后的根本原因是什么？
+   - 是 skill 设计问题还是实现问题？
+ 
+2. **性能瓶颈**：
+   - 时间开销是否过大？原因是什么？
+   - Token 消耗是否过多？可以如何优化？
+   - 是否有明显的性能下降趋势？
+ 
+3. **改进方向**：
+   - 为了提升通过率，应该如何改进 skill？
+   - 具体需要改动哪些部分？
+   - 优先级是什么？
+ 
+4. **风险警告**：
+   - 是否存在与 baseline 相比劣化的指标？
+   - 是否存在 flaky 测试（高方差）？
+   - 是否有隐藏的问题？
+ 
+## 输出格式
+ 
+输出一个 JSON 数组，每项是一个改进建议：
+[
+  {
+    "category": "失败原因",
+    "issue": "具体问题描述",
+    "suggestion": "建议的改进方案",
+    "priority": "high/medium/low"
+  },
+  ...
+]
 """
 
 
@@ -138,43 +210,286 @@ class EvaluateStageHandler(StageHandler):
     # Step 1: Grader
     # ------------------------------------------------------------------
 
-    async def _grade_all_evals(self, ctx: SkillDevContext, iter_dir: Path) -> None:
-        """为每个 eval 的 with_skill / baseline 结果执行评分.
+    # 并发 grading 任务数上限，避免同时发起过多 LLM 调用
+    _GRADE_CONCURRENCY = 4
+    # 单次 grading 失败后的最大重试次数（不含首次）
+    _MAX_GRADE_RETRIES = 3
 
-        待实现: 接入 create_stage_agent，用 GRADER_SYSTEM_PROMPT 调用 Agent
-              逐 run 评分，把 transcript + outputs 作为上下文输入。
+    async def _grade_all_evals(self, ctx: SkillDevContext, iter_dir: Path) -> None:
+        """为每个 eval 的 with_skill / baseline 结果并行执行评分.
+
+        每个 (case, variant) 对独立创建 agent 实例，避免共享 conversation_id 导致的
+        历史污染。通过 Semaphore 控制并发数，防止同时发起过多 LLM 请求。
         """
         evals = (ctx.state.evals or {}).get("evals", [])
+
+        # 收集所有需要评分的 (case, variant, run_dir) 三元组
+        tasks: list[tuple[dict, str, Path]] = []
         for case in evals:
             eval_name = case.get("name", f"eval-{case.get('id', 0)}")
             case_dir = iter_dir / eval_name
-            expectations = case.get("expectations", [])
+            if not case_dir.exists():
+                continue
+            for variant in ("with_skill", "baseline"):
+                run_dir = case_dir / variant
+                result_file = run_dir / "result.json"
+                tasks.append((case, variant, run_dir))
 
-            for config in ("with_skill", "baseline"):
-                run_dir = case_dir / config
-                if not run_dir.exists():
-                    continue
+        if not tasks:
+            logger.warning("[EvaluateStage] 没有可评分的 run，跳过 grading")
+            return
 
-                # 待实现: 实际调用 Agent 评分
-                # agent = ctx.create_stage_agent("grader", GRADER_SYSTEM_PROMPT, ...)
-                # transcript = (run_dir / "transcript.md").read_text(...)
-                # grading = await agent.grade(expectations, transcript, run_dir / "outputs")
+        semaphore = asyncio.Semaphore(self._GRADE_CONCURRENCY)
 
-                grading = GradingResult(
-                    expectations=[
-                        GradingExpectation(
-                            text=exp, passed=False, evidence="待 Agent 实现"
-                        )
-                        for exp in expectations
-                    ],
-                    pass_rate=0.0,
-                    passed_count=0,
-                    failed_count=len(expectations),
+        completed = 0
+
+        async def _bounded(case: dict, variant: str, run_dir: Path) -> None:
+            nonlocal completed
+            async with semaphore:
+                await self._grade_one(ctx, case, variant, run_dir)
+                completed += 1
+                await ctx.emit(
+                    SkillDevEventType.PROGRESS,
+                    {"message": f"已评分 {completed}/{len(tasks)} 个测试结果"},
                 )
-                (run_dir / "grading.json").write_text(
-                    json.dumps(grading.to_dict(), ensure_ascii=False, indent=2),
-                    encoding="utf-8",
+
+        await asyncio.gather(*[_bounded(c, v, d) for c, v, d in tasks])
+
+    async def _grade_one(
+        self, ctx: SkillDevContext, case: dict, variant: str, run_dir: Path
+    ) -> None:
+        """为单个 (case, variant) 执行评分并写入 grading.json."""
+        eval_name = case.get("name", f"eval-{case.get('id', 0)}")
+        expectations = case.get("expectations", [])
+
+        result_data = json.loads((run_dir / "result.json").read_text(encoding="utf-8"))
+        output = result_data.get("output", "")
+        files_created = result_data.get("files_created", [])
+        trace_file = run_dir / "trace.txt"
+        trace = trace_file.read_text(encoding="utf-8") if trace_file.exists() else ""
+
+        input_files = case.get("files", [])
+
+        # 清洗输出：去除泄漏的 <think> 推理块和未执行的 <tool_call> 文本标签
+        output = _clean_agent_output(output)
+
+        # 带重试的 grading：每次重试创建新 agent（新 stage_name → 新 conversation_id）
+        # 避免复用失败会话导致模型沿着错误路径继续
+        agent_results: dict | None = None
+        base_stage_key = f"evaluate_grader_{eval_name}_{variant}"
+
+        for attempt in range(1, self._MAX_GRADE_RETRIES + 1):
+            stage_key = base_stage_key if attempt == 1 else f"{base_stage_key}_retry{attempt}"
+            agent = ctx.create_stage_agent(
+                stage_name=stage_key,
+                whitelist_key="evaluate",
+                system_prompt=GRADER_SYSTEM_PROMPT,
+                tools=["file_read", "file_grep", "file_listdir", "file_glob", "shell"],
+                max_iterations=15,
+            )
+            grading_request = GradingAgentRequest(
+                expectations=expectations,
+                output=output,
+                trace=trace,
+                stage_name=stage_key,
+                run_dir=run_dir,
+                input_files=input_files,
+                files_created=files_created,
+            )
+            agent_results = await self._grade_expectations_with_agent(
+                ctx, agent, grading_request
+            )
+
+            if not _is_grading_failure(agent_results, expectations):
+                break  # 有效结果，不再重试
+
+            if attempt < self._MAX_GRADE_RETRIES:
+                wait = 2 ** (attempt - 1)  # 指数退避：1s, 2s
+                logger.warning(
+                    "[EvaluateStage] grading 结果无效，%ds 后重试 (%d/%d): %s/%s",
+                    wait, attempt, self._MAX_GRADE_RETRIES, eval_name, variant,
                 )
+                await asyncio.sleep(wait)
+            else:
+                logger.error(
+                    "[EvaluateStage] grading %d 次重试后仍失败: %s/%s",
+                    self._MAX_GRADE_RETRIES, eval_name, variant,
+                )
+
+        grading = self._convert_agent_results_to_grading_result(agent_results)
+        grading_dict = grading.to_dict() if hasattr(grading, "to_dict") else grading
+        (run_dir / "grading.json").write_text(
+            json.dumps(grading_dict, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        logger.info("[EvaluateStage] grading 完成: %s/%s", eval_name, variant)
+
+    async def _grade_expectations_with_agent(
+        self,
+        ctx: SkillDevContext,
+        agent,
+        request: GradingAgentRequest,
+    ) -> Dict[str, Any]:
+        """使用 Agent 验证 expectations（流式，实时推送推理过程）."""
+        prompt = "请根据以下执行结果，逐条判断 expectations 是否满足：\n\n"
+        prompt += "待评估的 Expectations：\n"
+        for i, exp in enumerate(request.expectations, 1):
+            prompt += f"{i}. {exp}\n"
+        if request.input_files:
+            prompt += "\n本次测试的输入文件：\n"
+            prompt += "\n".join(f"- {f}" for f in request.input_files) + "\n"
+        prompt += f"\n最终输出内容：\n{request.output}\n"
+        if request.trace:
+            prompt += f"\n执行轨迹（工具调用记录前3000字）：\n{request.trace}\n"
+        if request.run_dir is not None:
+            prompt += f"\n本次运行的工作目录：{request.run_dir}\n"
+            if request.files_created:
+                prompt += (
+                    f"Agent 在该目录中创建的文件："
+                    f"{', '.join(request.files_created)}\n"
+                )
+            else:
+                prompt += "Agent 未在该目录创建任何额外文件。\n"
+            prompt += (
+                "完整输出见 result.json，完整执行轨迹见 trace.txt。\n"
+                "如上方信息不足以判断某条 expectation，请用文件工具读取对应文件后再下结论。\n"
+            )
+        prompt += "\n请按照 JSON 格式逐条输出评分结果。"
+
+        try:
+            response = await ctx.run_stage_agent_streaming(
+                agent,
+                stage_name=request.stage_name,
+                query=prompt,
+                emit_thinking=False, # 防止前端消息混杂
+                capture_trace=True
+            )
+            response, trace = response if isinstance(response, tuple) else (response, "")
+
+            if trace and request.run_dir is not None:
+                (request.run_dir / "eval_trace.txt").write_text(trace, encoding="utf-8")
+
+            logger.info(f"[EvaluateStage] Agent 评分响应: {response[:200]}...")
+            agent_results = self._parse_agent_grading_response(response, request.expectations)
+            return agent_results
+        except Exception as e:
+            logger.error(f"[EvaluateStage] Agent 评分失败: {e}")
+            return {
+                "expectations": [
+                    {"expectation": exp, "passed": False, "reason": "Agent 评分失败"}
+                    for exp in request.expectations
+                ],
+                "summary": {"passed": 0, "total": len(request.expectations)}
+            }
+
+    def _parse_agent_grading_response(self, response: str, expectations: list) -> Dict[str, Any]:
+        """解析 Agent 的评分响应"""
+        results = {
+            "expectations": [],
+            "summary": {"passed": 0, "total": len(expectations)}
+        }
+
+        # 尝试从响应中提取 JSON
+        parsed = self._parse_evals_json(response)
+
+        if isinstance(parsed, list):
+            passed_count = 0
+            for item in parsed:
+                if isinstance(item, dict):
+                    passed = item.get("passed", False)
+                    results["expectations"].append({
+                        "expectation": item.get("expectation", ""),
+                        "passed": passed,
+                        "reason": item.get("reason", "")
+                    })
+                    if passed:
+                        passed_count += 1
+
+            results["summary"]["passed"] = passed_count
+            return results
+
+        # Fallback：简单解析
+        for exp in expectations:
+            results["expectations"].append({
+                "expectation": exp,
+                "passed": False,
+                "reason": "无法解析 Agent 响应"
+            })
+
+        return results
+
+    def _parse_evals_json(self, raw: str | object) -> dict:
+        """从 Agent 返回值中健壮地提取 evals JSON.
+
+        兼容四种返回形态：
+          1. 已经是 dict/list（Agent 直接返回结构化对象）
+          2. 纯 JSON 字符串
+          3. ```json ... ``` 包裹的字符串
+          4. 夹杂文本的响应（用括号计数法提取第一个完整 JSON 结构）
+        """
+        if isinstance(raw, (dict, list)):
+            return raw
+
+        if not isinstance(raw, str):
+            raise ValueError(f"Agent.invoke() 返回了未预期的类型: {type(raw)}")
+
+        # 尝试直接解析
+        try:
+            return json.loads(raw)
+        except json.JSONDecodeError:
+            pass
+
+        # 提取 ```json ... ``` / ``` ... ``` 代码块
+        code_block = re.search(r"```(?:json)?\s*([\s\S]*?)\s*```", raw)
+        if code_block:
+            try:
+                return json.loads(code_block.group(1).strip())
+            except json.JSONDecodeError:
+                pass
+
+        # 用括号计数法提取第一个完整 JSON 数组
+        candidate = _extract_outermost_json(raw, "[", "]")
+        if candidate is not None:
+            try:
+                return json.loads(candidate)
+            except json.JSONDecodeError:
+                pass
+
+        # 用括号计数法提取第一个完整 JSON 对象
+        candidate = _extract_outermost_json(raw, "{", "}")
+        if candidate is not None:
+            try:
+                return json.loads(candidate)
+            except json.JSONDecodeError:
+                pass
+        raise ValueError(f"无法从 Agent 输出中解析 JSON：{raw[:300]}")
+
+    def _convert_agent_results_to_grading_result(self, agent_results: Dict) -> GradingResult:
+        """将 Agent 的评分结果转换为 GradingResult schema"""
+        expectations = []
+        passed_count = 0
+
+        for exp_result in agent_results.get("expectations", []):
+            passed = exp_result.get("passed", False)
+            if passed:
+                passed_count += 1
+
+            expectation = GradingExpectation(
+                text=exp_result.get("expectation", ""),
+                passed=passed,
+                evidence=exp_result.get("reason", "")
+            )
+            expectations.append(expectation)
+
+        total = len(expectations)
+        pass_rate = passed_count / total if total > 0 else 0
+
+        return GradingResult(
+            expectations=expectations,
+            pass_rate=round(pass_rate, 4),
+            passed_count=passed_count,
+            failed_count=total - passed_count,
+        )
 
     # ------------------------------------------------------------------
     # Step 2: Benchmark 聚合
@@ -186,68 +501,134 @@ class EvaluateStageHandler(StageHandler):
         evals = (ctx.state.evals or {}).get("evals", [])
         skill_name = (ctx.state.plan or {}).get("skill_name", "")
 
-        configs: dict[str, list[BenchmarkRun]] = {}
-
+        variant_runs: dict[str, list[BenchmarkRun]] = {
+            "with_skill": [],
+            "baseline": []
+        }
         for case in evals:
             eval_name = case.get("name", f"eval-{case.get('id', 0)}")
             case_dir = iter_dir / eval_name
             if not case_dir.exists():
+                logger.info(f"Case directory not found: {case_dir}")
                 continue
 
-            for config_dir in sorted(case_dir.iterdir()):
-                if not config_dir.is_dir():
-                    continue
-                config = config_dir.name
+            for variant in ["with_skill", "baseline"]:
+                variant_dir = case_dir / variant
+                grading_file = variant_dir / "grading.json"
+                timing_file = variant_dir / "timing.json"
 
-                grading_file = config_dir / "grading.json"
-                timing_file = config_dir / "timing.json"
                 if not grading_file.exists():
+                    logger.info(f"Grading file not found: {grading_file}")
                     continue
 
-                grading = json.loads(grading_file.read_text(encoding="utf-8"))
-                timing = (
-                    json.loads(timing_file.read_text(encoding="utf-8"))
-                    if timing_file.exists()
-                    else {}
-                )
+                try:
+                    grading = json.loads(grading_file.read_text(encoding="utf-8"))
+                    timing = (
+                        json.loads(timing_file.read_text(encoding="utf-8"))
+                        if timing_file.exists()
+                        else {}
+                    )
 
-                run = BenchmarkRun(
-                    eval_id=case.get("id", 0),
-                    eval_name=eval_name,
-                    configuration=config,
-                    pass_rate=grading.get("summary", {}).get("pass_rate", 0.0),
-                    time_seconds=timing.get("total_duration_seconds", 0.0),
-                    tokens=timing.get("total_tokens", 0),
-                    expectations=grading.get("expectations", []),
-                )
-                configs.setdefault(config, []).append(run)
+                    run = BenchmarkRun(
+                        eval_id=case.get("id", 0),
+                        eval_name=eval_name,
+                        configuration=variant,
+                        pass_rate=grading.get("summary", {}).get("pass_rate", 0.0),
+                        time_seconds=timing.get("total_duration_seconds", 0.0),
+                        tokens=timing.get("total_tokens", 0),
+                        expectations=grading.get("expectations", []),
+                        prompt=case.get("prompt", ""),
+                    )
+                    variant_runs[variant].append(run)
+                    logger.info(
+                        f"Loaded {variant}/{eval_name}: "
+                        f"pass_rate={run.pass_rate}, time={run.time_seconds}s"
+                    )
+                except Exception as e:
+                    logger.error(f"Failed to parse {variant_dir}: {e}")
+                    continue
 
         # 聚合统计
-        run_summary: dict[str, Any] = {}
-        for config, runs in configs.items():
-            run_summary[config] = {
+        variant_stats = {}
+        for variant in ["with_skill", "baseline"]:
+            runs = variant_runs[variant]
+            if not runs:
+                logger.warning(f"No runs found for variant: {variant}")
+                continue
+
+            fully_passed_count = sum(
+                1 for r in runs
+                if r.expectations and all(e.get("passed") for e in r.expectations)
+            )
+            variant_stats[variant] = {
                 "pass_rate": _calc_stats([r.pass_rate for r in runs]).to_dict(),
                 "time_seconds": _calc_stats([r.time_seconds for r in runs]).to_dict(),
                 "tokens": _calc_stats([float(r.tokens) for r in runs]).to_dict(),
+                "run_count": len(runs),
+                "fully_passed_count": fully_passed_count
             }
+
+            logger.info(
+                f"{variant}: "
+                f"pass_rate={variant_stats[variant]['pass_rate']['mean']:.1%} ± "
+                f"{variant_stats[variant]['pass_rate']['stddev']:.1%}, "
+                f"runs={len(runs)}"
+            )
 
         # 计算 delta
-        config_names = list(configs.keys())
-        if len(config_names) >= 2:
-            a, b = run_summary[config_names[0]], run_summary[config_names[1]]
-            run_summary["delta"] = {
-                "pass_rate": f"{a['pass_rate']['mean'] - b['pass_rate']['mean']:+.2f}",
-                "time_seconds": f"{a['time_seconds']['mean'] - b['time_seconds']['mean']:+.1f}",
-                "tokens": f"{a['tokens']['mean'] - b['tokens']['mean']:+.0f}",
-            }
+        delta = self._calculate_delta(variant_stats)
+        # 打印 delta 摘要
+        if delta:
+            logger.info(f"Delta: {delta}")
+            variant_stats["delta"] = delta
 
-        all_runs = [run for runs in configs.values() for run in runs]
+        # 合并所有 runs 并返回
+        all_runs = variant_runs["with_skill"] + variant_runs["baseline"]
         return Benchmark(
             skill_name=skill_name,
             runs=all_runs,
-            run_summary=run_summary,
+            run_summary=variant_stats,
             timestamp=_now_iso(),
         )
+
+    def _calculate_delta(self, variant_stats: dict) -> dict:
+        """计算 with_skill vs baseline 的改进指标.
+        
+        Args:
+            variant_stats: {
+                "with_skill": {"pass_rate": {...}, "time_seconds": {...}, "tokens": {...}},
+                "baseline": {...}
+            }
+        
+        Returns:
+            delta: {
+                "pass_rate": "+6.7%",
+                "time_seconds": "+0.50s",
+                "tokens": "+1500"
+            }
+        """
+        delta = {}
+
+        if "with_skill" not in variant_stats or "baseline" not in variant_stats:
+            logger.warning("Missing with_skill or baseline in variant_stats")
+            return delta
+
+        ws = variant_stats["with_skill"]
+        bs = variant_stats["baseline"]
+
+        # Pass Rate 对比
+        pass_rate_delta = (ws["pass_rate"]["mean"] - bs["pass_rate"]["mean"]) * 100
+        delta["pass_rate"] = f"{pass_rate_delta:+.1f}%"
+
+        # Time Seconds 对比
+        time_delta = ws["time_seconds"]["mean"] - bs["time_seconds"]["mean"]
+        delta["time_seconds"] = f"{time_delta:+.2f}s"
+
+        # Tokens 对比
+        tokens_delta = ws["tokens"]["mean"] - bs["tokens"]["mean"]
+        delta["tokens"] = f"{tokens_delta:+.0f}"
+
+        return delta
 
     # ------------------------------------------------------------------
     # Step 3: Analyst
@@ -261,13 +642,118 @@ class EvaluateStageHandler(StageHandler):
         待实现: 接入 create_stage_agent，用 ANALYST_SYSTEM_PROMPT 调用 Agent
               把 benchmark JSON 作为上下文，输出 notes 列表。
         """
-        # 待实现: 实际调用 Agent
-        # agent = ctx.create_stage_agent("analyst", ANALYST_SYSTEM_PROMPT, ...)
-        # notes = await agent.analyze(json.dumps(benchmark.to_dict()))
-        # return json.loads(notes)
+        # 创建分析 agent
+        analyst_agent = ctx.create_stage_agent(
+            stage_name="evaluate_analyst",
+            whitelist_key="evaluate",
+            system_prompt=ANALYST_SYSTEM_PROMPT,
+            tools=["file_read", "file_grep", "file_listdir", "file_glob", "shell"],
+            max_iterations=30,
+        )
 
-        logger.warning("[EvaluateStage] _analyze_patterns 待接入 Agent")
-        return ["评测分析 Agent 尚未接入"]
+        # 收集失败的 expectations 和统计信息
+        failed_expectations = []
+        success_rates = {}
+
+        for run in benchmark.runs:
+            for exp in run.expectations:
+                if isinstance(exp, dict):
+                    if not exp.get("passed", False):
+                        failed_expectations.append(exp.get("text", ""))
+                    exp_text = exp.get("text", "")
+                    if exp_text not in success_rates:
+                        success_rates[exp_text] = {"pass": 0, "fail": 0}
+                    if exp.get("passed", False):
+                        success_rates[exp_text]["pass"] += 1
+                    else:
+                        success_rates[exp_text]["fail"] += 1
+
+        # 构造分析 prompt
+        prompt = (
+            f"请分析以下评测结果，生成改进建议：\n\n"
+            f"Skill 名称：{benchmark.skill_name}\n\n"
+            f"整体统计：\n{json.dumps(benchmark.run_summary, ensure_ascii=False, indent=2)}\n\n"
+            f"各 Expectation 的通过情况：\n"
+        )
+
+        for exp_text, counts in sorted(success_rates.items(), key=lambda x: x[1]["fail"], reverse=True):
+            total = counts["pass"] + counts["fail"]
+            rate = counts["pass"] / total * 100 if total > 0 else 0
+            prompt += f"- {exp_text}: 通过率 {rate:.0f}% ({counts['pass']}/{total})\n"
+
+        prompt += (
+            f"\n请分析：\n"
+            f"1. 为什么这些 expectations 失败了？\n"
+            f"2. 如何改进 skill 来提升通过率？\n"
+            f"3. 性能指标是否存在问题？\n"
+            f"4. 优先级是什么？\n\n"
+            f"请输出具体的、可执行的改进建议。"
+        )
+
+        try:
+            response = await ctx.run_stage_agent_streaming(
+                analyst_agent, stage_name="evaluate_analyst", query=prompt
+            )
+            logger.info(f"[EvaluateStage] Analyst 响应: {response[:200]}...")
+            suggestions = self._parse_analyst_suggestions(response)
+            return suggestions
+        except Exception as e:
+            logger.error(f"[EvaluateStage] Analyst 分析失败: {e}")
+            return [{"category": "分析失败", "suggestion": str(e), "priority": "low"}]
+
+    def _parse_analyst_suggestions(self, response: str) -> list[Dict[str, str]]:
+        """解析 Analyst 的建议"""
+        suggestions = []
+
+        # 尝试提取 JSON（括号计数法，避免 rfind 越界）
+        try:
+            json_str = _extract_outermost_json(response, "[", "]")
+            if json_str:
+                parsed = json.loads(json_str)
+
+                if isinstance(parsed, list):
+                    for item in parsed:
+                        if isinstance(item, dict):
+                            suggestions.append({
+                                "category": item.get("category", "其他"),
+                                "issue": item.get("issue", ""),
+                                "suggestion": item.get("suggestion", ""),
+                                "priority": item.get("priority", "medium")
+                            })
+
+                    if suggestions:
+                        return suggestions
+        except json.JSONDecodeError:
+            pass
+
+        # Fallback：按行解析
+        lines = response.split("\n")
+        current_suggestion = {"category": "", "suggestion": "", "priority": "medium"}
+
+        for line in lines:
+            line = line.strip()
+            if not line:
+                continue
+
+            # 简单的启发式解析
+            if any(keyword in line for keyword in ["问题", "失败", "Issue", "问题"]):
+                if current_suggestion.get("suggestion"):
+                    suggestions.append(current_suggestion)
+                current_suggestion = {
+                    "category": "问题分析",
+                    "issue": line,
+                    "suggestion": "",
+                    "priority": "medium"
+                }
+            elif any(keyword in line for keyword in ["建议", "改进", "Suggestion", "优化"]):
+                current_suggestion["suggestion"] = line
+
+        if current_suggestion.get("suggestion"):
+            suggestions.append(current_suggestion)
+
+        return suggestions if suggestions else [
+            {"category": "待分析", "suggestion": response[:200], "priority": "low"}
+        ]
 
     # ------------------------------------------------------------------
     # Markdown 报告（给人看，也存入 workspace）
@@ -295,17 +781,105 @@ class EvaluateStageHandler(StageHandler):
             lines.append(f"| Metric | {a_name} | {b_name} | Delta |")
             lines.append("|--------|---------|---------|-------|")
             lines.append(
-                f"| Pass Rate | {a['pass_rate']['mean'] * 100:.0f}% ± {a['pass_rate']['stddev'] * 100:.0f}% "
+                f"| 平均完成度 | {a['pass_rate']['mean'] * 100:.0f}% ± {a['pass_rate']['stddev'] * 100:.0f}% "
                 f"| {b['pass_rate']['mean'] * 100:.0f}% ± {b['pass_rate']['stddev'] * 100:.0f}% "
                 f"| {delta.get('pass_rate', '—')} |"
             )
+            lines.append(
+                f"| 用时 (s)  | {a['time_seconds']['mean']:.1f}s ± {a['time_seconds']['stddev']:.1f}s "
+                f"| {b['time_seconds']['mean']:.1f}s ± {b['time_seconds']['stddev']:.1f}s "
+                f"| {delta.get('time_seconds', '—')} |"
+            )
+            lines.append(
+                f"| 完全通过率 | {a.get('fully_passed_count', 0)} / {a['run_count']} 完全通过 "
+                f"| {b.get('fully_passed_count', 0)} / {b['run_count']} 完全通过 "
+                f"| {a.get('fully_passed_count', 0)-b.get('fully_passed_count', 0)} |"
+            )
 
         if benchmark.notes:
+            priority_labels = {"high": "🔴 高", "medium": "🟡 中", "low": "🔵 低"}
             lines.extend(["", "## Analyst Notes", ""])
             for note in benchmark.notes:
-                lines.append(f"- {note}")
+                if not isinstance(note, dict):
+                    lines.append(f"- {note}")
+                    continue
+                category = note.get("category", "")
+                issue = note.get("issue", "")
+                suggestion = note.get("suggestion", "")
+                priority = note.get("priority", "low")
+                priority_label = priority_labels.get(priority, priority)
+
+                header = f"**[{priority_label}]** " + (f"**{category}**" if category else "")
+                lines.append(f"### {header}")
+                if issue:
+                    lines.append(f"> **问题**：{issue}")
+                    lines.append("")
+                if suggestion:
+                    lines.append(f"💡 **建议**：{suggestion}")
+                lines.append("")
 
         return "\n".join(lines)
+
+
+def _extract_outermost_json(text: str, open_char: str, close_char: str) -> str | None:
+    """用括号计数法从文本中提取第一个完整的 JSON 结构（数组或对象）.
+
+    比贪婪正则更健壮：能正确处理嵌套括号，且不会把第一个 `[` 和最后一个 `]`
+    之间的无关内容全部纳入，避免 json.loads 解析失败。
+
+    Args:
+        text:       待搜索的原始字符串
+        open_char:  开括号（'[' 或 '{'）
+        close_char: 闭括号（']' 或 '}'）
+
+    Returns:
+        找到的完整 JSON 子串；未找到则返回 None
+    """
+    start = text.find(open_char)
+    if start == -1:
+        return None
+
+    depth = 0
+    in_string = False
+    escape_next = False
+
+    for i in range(start, len(text)):
+        ch = text[i]
+        if escape_next:
+            escape_next = False
+            continue
+        if ch == "\\" and in_string:
+            escape_next = True
+            continue
+        if ch == '"':
+            in_string = not in_string
+            continue
+        if in_string:
+            continue
+        if ch == open_char:
+            depth += 1
+        elif ch == close_char:
+            depth -= 1
+            if depth == 0:
+                return text[start: i + 1]
+
+    return None
+
+
+def _is_grading_failure(agent_results: dict, expectations: list) -> bool:
+    """判断 grading 结果是否为兜底失败值，用于决定是否需要重试.
+
+    以下两种情况视为失败：
+    1. 没有 expectations 列表（agent 未返回任何评分）
+    2. 所有 expectations 的 reason 均为已知的失败占位文本
+    """
+    failure_reasons = {"Agent 评分失败", "无法解析 Agent 响应"}
+    result_exps = agent_results.get("expectations", [])
+    if not result_exps and expectations:
+        return True
+    return bool(result_exps) and all(
+        e.get("reason", "") in failure_reasons for e in result_exps
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -325,3 +899,26 @@ def _calc_stats(values: list[float]) -> MetricStats:
         min=round(min(values), 4),
         max=round(max(values), 4),
     )
+
+
+def _clean_agent_output(text: str) -> str:
+    """清洗 agent 输出，去除泄漏的推理块和未执行的文本格式工具调用.
+
+    处理三类噪音：
+    1. 完整的 <think>…</think> 块 — reasoning 内容意外流入 llm_output 事件
+    2. 孤立的 </think> — opening tag 在捕获窗口之前，closing tag 漏入
+    3. <tool_call>…</tool_call> 或未闭合的 <tool_call>… — 模型以文本格式
+       输出工具调用但框架未执行，保留这些内容会误导 grader
+
+    Returns:
+        清洗后的文本（strip 前后空白）；若清洗结果为空则返回空字符串
+    """
+    # 去除完整 <think>…</think> 块（含跨行内容）
+    text = re.sub(r"<think>[\s\S]*?</think>", "", text)
+    # 去除孤立的 </think>
+    text = re.sub(r"</think>", "", text)
+    # 去除完整 <tool_call>…</tool_call> 块
+    text = re.sub(r"<tool_call>[\s\S]*?</tool_call>", "", text)
+    # 去除未闭合的 <tool_call>…（直到字符串末尾）
+    text = re.sub(r"<tool_call>[\s\S]*$", "", text)
+    return text.strip()

@@ -1,0 +1,280 @@
+# Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
+
+"""CLARIFY 阶段处理器.
+
+职责：
+- 分析用户创建 Skill 的需求
+- 生成 3-5 个结构化澄清问题，每题附带选项（允许自由输入）
+- 将问题列表写入 state.clarification_questions
+- 跳转到 QUESTION_CLARIFY 挂起点，等待用户回答
+
+Agent 工具白名单：["file_read", "file_glob", "file_listdir"]
+"""
+
+from __future__ import annotations
+
+import json
+import logging
+import re
+
+from jiuwenclaw.agentserver.skilldev.context import SkillDevContext
+from jiuwenclaw.agentserver.skilldev.schema import SkillDevEventType, SkillDevStage
+from jiuwenclaw.agentserver.skilldev.stages.base import StageHandler, StageResult
+
+logger = logging.getLogger(__name__)
+
+CLARIFY_SYSTEM_PROMPT = """你是 Skill 需求澄清专家。目标是在进入实现前，用最少但关键的问题补齐信息缺口，为后续计划与实现降低返工风险。
+
+## 工作方式（先判断再提问）
+
+1. 先阅读用户需求与可用上下文，列出“已明确”与“仍不明确”信息。
+2. 只对“不明确且会影响实现方案”的点提问；已明确内容禁止重复询问。
+3. 按“对实现影响从高到低”排序问题，优先问会改变架构/工具/验收标准的决策点。
+
+## 优先澄清维度（按需选择，不必全问）
+
+**意图与触发**
+- Skill 的核心任务是什么（输入 -> 输出）？
+- 在什么场景或用户措辞下触发？
+
+**输出与验收**
+- 期望输出形态（自然语言 / 结构化 / 文件）？
+- 成功标准是否可客观验证（格式、准确性、覆盖率、约束）？
+
+**能力边界与依赖**
+- 是否依赖工具、MCP 或外部数据源？
+- 是否有明确限制（时延、成本、安全、合规、权限）？
+
+**知识与复杂度**
+- 是否需要打包领域知识或参考资料？
+- 复杂度预期（轻量单场景 vs 多场景/多步骤）？
+
+## 出题规则
+
+1. **最小必要**：输出 2-5 题，宁少勿多；每题都必须“有用且可决定实现方向”。
+2. **单题单决策**：一个问题只聚焦一个决策点，避免把多个问题混在一起。
+3. **选项可执行**：每题 2-4 个选项；选项应尽量互斥、覆盖主流路径、表达具体可落地。
+4. **避免空泛**：不问“还有什么补充吗”这类泛问题。
+5. **允许补充**：`allow_custom` 默认设为 `true`，除非该题确实不需要自定义输入。
+6. **语言要求**：问题与选项使用中文，措辞简洁、无歧义。
+
+## 输出格式（严格遵守）
+仅输出 JSON 数组，不要输出任何解释、标题、代码块或其他 Markdown。
+
+示例（仅示例结构，不要输出示例文字）：
+[
+  {
+    "id": "q1",
+    "question": "问题文本",
+    "options": [
+      {"id": "o1", "label": "选项1"},
+      {"id": "o2", "label": "选项2"}
+    ],
+    "allow_custom": true
+  }
+]
+
+格式约束：
+- 问题 id：`q1`、`q2`、`q3`...
+- 选项 id：每题内使用 `o1`、`o2`、`o3`...
+- `question` 必须是完整问句
+- 选项标签不超过 20 字
+"""
+
+
+class ClarifyStageHandler(StageHandler):
+    """CLARIFY 阶段：生成澄清问题列表，跳转 QUESTION_CLARIFY 挂起点."""
+
+    MAX_PARSE_RETRIES = 2
+
+    async def execute(self, ctx: SkillDevContext) -> StageResult:
+        await ctx.emit(
+            SkillDevEventType.PROGRESS, {"message": "正在分析需求，生成澄清问题..."}
+        )
+
+        questions = await self._generate_questions(ctx)
+        ctx.state.clarification_questions = questions
+
+        await ctx.emit(
+            SkillDevEventType.PROGRESS,
+            {"message": f"已生成 {len(questions)} 个问题，等待用户回答"},
+        )
+        return StageResult(next_stage=SkillDevStage.QUESTION_CLARIFY)
+
+    async def _generate_questions(self, ctx: SkillDevContext) -> list[dict]:
+        """调用 Agent 生成问题列表 JSON."""
+        agent = ctx.create_stage_agent(
+            stage_name="clarify",
+            system_prompt=CLARIFY_SYSTEM_PROMPT,
+            tools=["file_read", "file_glob", "file_listdir"],
+            max_iterations=30,
+        )
+        base_query = self._build_query(ctx)
+        total_attempts = self.MAX_PARSE_RETRIES + 1
+
+        for attempt in range(1, total_attempts + 1):
+            query = base_query
+            if attempt > 1:
+                query = (
+                    f"{base_query}\n\n"
+                    "上一次输出未能解析为有效问题 JSON。请仅输出严格 JSON 数组，"
+                    "不要输出解释、标题或 Markdown 代码块。"
+                )
+
+            raw_text = await ctx.run_stage_agent_streaming(
+                agent, stage_name="clarify", query=query
+            )
+            logger.info(
+                "[ClarifyStage] attempt=%s/%s raw output: %s",
+                attempt,
+                total_attempts,
+                raw_text[:500],
+            )
+            questions = self._parse_questions_json(raw_text)
+            if questions is not None:
+                logger.info(
+                    "[ClarifyStage] attempt=%s/%s parse success, questions=%s",
+                    attempt,
+                    total_attempts,
+                    len(questions),
+                )
+                return questions
+
+            logger.warning(
+                "[ClarifyStage] attempt=%s/%s parse failed",
+                attempt,
+                total_attempts,
+            )
+
+        logger.warning(
+            "[ClarifyStage] all attempts failed, fallback to default questions. total_attempts=%s",
+            total_attempts,
+        )
+        return self._default_questions()
+
+    def _build_query(self, ctx: SkillDevContext) -> str:
+        """构建传给 Agent 的 query."""
+        user_query = ctx.state.input.get("query", "")
+        parts = [f"用户需求：{user_query}"]
+
+        if not ctx.state.skill_dir_empty:
+            parts.append(f"工作区 {ctx.workspace} 中的skill文件夹下存放了已经生成的 SKILL.md， 请**先读取SKILL**后再提问。")
+            if not (ctx.state.ref_files_dir_empty and ctx.state.ref_skills_dir_empty):
+                parts.append(f"工作区 {ctx.workspace} 中的resources/文件夹下存放了用户原始上传的参考资料，请根据需求自行判断是否需要查看。")
+            if not ctx.state.tool_specs_dir_empty:
+                parts.append(f"用户提供了以下工具，可以在生成的skill中使用：\n{ctx.state.external_tools}")
+        else:
+            if not (ctx.state.ref_files_dir_empty and ctx.state.ref_skills_dir_empty):
+                parts.append(f"用户已上传参考资料，存放于工作区 {ctx.workspace} 中的resources/目录，请确保**先查看resources目录**后再提问。")
+            if not ctx.state.tool_specs_dir_empty:
+                parts.append(f"用户提供了以下工具，可以在生成的skill中使用：\n{ctx.state.external_tools}")
+
+        parts.append("请根据用户需求，生成必要的关键澄清问题（JSON 数组格式）。")
+        return "\n\n".join(parts)
+
+    def _parse_questions_json(self, text: str) -> list[dict] | None:
+        """从 Agent 输出中提取问题列表 JSON.
+
+        优先提取 ```json ... ``` 代码块，否则用平衡括号匹配 JSON 数组。
+        """
+        # 先尝试提取代码块
+        code_block = re.search(r"```(?:json)?\s*(\[.*?])\s*```", text, re.DOTALL)
+        if code_block:
+            try:
+                questions = json.loads(code_block.group(1))
+                if isinstance(questions, list):
+                    return self._validate_questions(questions)
+            except json.JSONDecodeError:
+                pass
+
+        # 平衡括号匹配 JSON 数组
+        start = text.find("[")
+        if start == -1:
+            logger.warning("[ClarifyStage] Agent 未输出有效的问题 JSON 数组")
+            return None
+
+        depth = 0
+        in_string = False
+        escape = False
+        for i in range(start, len(text)):
+            ch = text[i]
+            if escape:
+                escape = False
+                continue
+            if ch == "\\":
+                escape = True
+                continue
+            if ch == '"':
+                in_string = not in_string
+                continue
+            if in_string:
+                continue
+            if ch == "[":
+                depth += 1
+            elif ch == "]":
+                depth -= 1
+                if depth == 0:
+                    try:
+                        questions = json.loads(text[start: i + 1])
+                        if isinstance(questions, list):
+                            return self._validate_questions(questions)
+                    except json.JSONDecodeError:
+                        break
+
+        logger.warning("[ClarifyStage] JSON 解析失败")
+        return None
+
+    def _validate_questions(self, questions: list) -> list[dict] | None:
+        """校验并修复问题列表格式，确保字段完整."""
+        validated = []
+        for i, q in enumerate(questions):
+            if not isinstance(q, dict):
+                continue
+            validated.append(
+                {
+                    "id": q.get("id", f"q{i + 1}"),
+                    "question": q.get("question", ""),
+                    "options": q.get("options", []),
+                    "allow_custom": q.get("allow_custom", True),
+                }
+            )
+        return validated if validated else None
+
+    @staticmethod
+    def _default_questions() -> list[dict]:
+        """Agent 解析失败时的兜底问题列表."""
+        return [
+            {
+                "id": "q1",
+                "question": "这个 Skill 的核心任务与触发场景最接近哪种模式？",
+                "options": [
+                    {"id": "o1", "label": "编程辅助（代码类输入）"},
+                    {"id": "o2", "label": "文档写作（文本类输入）"},
+                    {"id": "o3", "label": "信息问答（检索类输入）"},
+                    {"id": "o4", "label": "流程执行（多步任务）"},
+                ],
+                "allow_custom": True,
+            },
+            {
+                "id": "q2",
+                "question": "你期望 Skill 输出什么形式，并按什么标准算成功？",
+                "options": [
+                    {"id": "o1", "label": "结构化结果（可校验）"},
+                    {"id": "o2", "label": "自然语言答案（可读性优先）"},
+                    {"id": "o3", "label": "文件产物（代码/文档）"},
+                    {"id": "o4", "label": "混合输出（文本+文件）"},
+                ],
+                "allow_custom": True,
+            },
+            {
+                "id": "q3",
+                "question": "这个 Skill 在能力边界与依赖上有哪些要求？",
+                "options": [
+                    {"id": "o1", "label": "纯推理，无外部依赖"},
+                    {"id": "o2", "label": "需要工具/MCP 能力"},
+                    {"id": "o3", "label": "依赖 resources 资料"},
+                    {"id": "o4", "label": "有时延/成本/合规限制"},
+                ],
+                "allow_custom": True,
+            },
+        ]

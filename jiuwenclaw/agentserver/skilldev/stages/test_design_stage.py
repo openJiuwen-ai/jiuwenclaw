@@ -14,6 +14,8 @@ evals.json 格式对齐官方 references/schemas.md：
   "evals": [
     {
       "id": 1,
+      "name": "smoke_test_example",
+      "case_category": "smoke_test",
       "prompt": "User's task prompt",
       "expected_output": "Description of expected result",
       "files": [],
@@ -25,6 +27,7 @@ evals.json 格式对齐官方 references/schemas.md：
 
 from __future__ import annotations
 
+import re
 import json
 import logging
 
@@ -34,107 +37,332 @@ from jiuwenclaw.agentserver.skilldev.stages.base import StageHandler, StageResul
 
 logger = logging.getLogger(__name__)
 
-TEST_DESIGN_SYSTEM_PROMPT = """根据以下 Skill 内容，设计 {count} 个测试用例。
+_EVAL_COUNT = 2
 
-## 测试用例设计原则
+TEST_DESIGN_SYSTEM_PROMPT = """你是一名专业的 Agent Skill 测试工程师。
+你的工作区路径为：{workspace}
 
-### prompt 要求（对齐官方标准）
+## 首要任务：读取 Skill 文件
+
+Skill 文件位于工作区的 `skill/` 子目录下。**在设计测试用例之前，请先使用文件工具读取 Skill 内容：**
+1. 用 `list_directory` 或 `glob` 列出 `skill/` 目录下所有文件
+2. 用 `read_file` 读取 `skill/SKILL.md`（以及其他相关文件，如 `references/`）
+3. 充分理解 Skill 的功能、输入输出、限制后，再设计测试用例
+
+根据读取到的 Skill 文件内容，设计测试用例集。
+
+用户上传的资料储存在`resources`文件夹下，需要时请使用read_file工具参考。
+
+## 测试用例类别（按覆盖度选取，不强制每类都有）
+
+| 类别             | case_category      | 目的                           | 示例                             |
+| ---------------- | ------------------ | ------------------------------ | -------------------------------- |
+| 基础可用性       | smoke_test         | 最简输入验证 skill 能跑通      | 创建最简单的输出                 |
+| 标准场景         | happy_path         | 真实用户的完整功能请求         | 含具体细节的功能完整请求         |
+| 边界/异常输入    | edge_case          | 空输入、超大输入、非常规格式   | 空文件、极长文本、特殊字符       |
+| 错误恢复         | error_handling     | 无效输入、缺失文件、格式错误   | 传入不支持的文件类型             |
+| 端到端工作流     | integration        | 多步骤、跨功能的完整流程       | 使用 skill 多个能力的复合请求    |
+
+只选适用的类别，不适用的直接跳过。总数控制在 {_EVAL_COUNT}。
+
+## prompt 设计规范
+
 - 模拟真实用户输入：包含文件路径、个人背景、具体数据名称等细节
-- 混合不同长度和表达风格（正式/随意/简短/详细）
-- 覆盖不同复杂度和边缘场景
+- 混合不同表达风格（正式 / 随意 / 简短 / 详细）
 - 有些用户不会明确提到 skill 名称，但确实需要这个 skill 的功能
+- smoke_test 的 prompt 要尽量简短，integration 的 prompt 应体现完整业务场景
 
-### expectations（assertions）要求
-- 每条 expectation 是一个可客观验证的声明（字符串）
-- 使用描述性名称，让阅读者一眼理解检查的内容
-- 好的 expectation 是 *区分性的*：使用 skill 时通过，不使用时大概率失败
-- 避免太容易通过的检查（如只检查文件名存在，不检查内容）
-- 主观性输出（写作风格、设计质量）更适合人工评审，不强加 expectations
+## expectations 设计规范
 
-### 输出 JSON 格式（对齐官方 evals.json schema）
+- 每条是一个**可客观验证**的声明（字符串），评测者看到真实输出后能判断 pass/fail
+- expectations字符串需按以下两类设计：
+
+### 第一类：核心任务完成度验证（必填，每个用例至少 1 条）
+
+验证 skill **是否完成了 prompt 要求的核心任务**。这类 expectation 的 pass/fail 直接反映 skill 能力。
+
+**写法要求：**
+- 必须与当前用例的 prompt 内容绑定——换一个 prompt 这条就不适用
+- 通用 LLM 在不使用本 skill 的情况下，完成同一 prompt 大概率无法通过此条
+
+
+**好的示例（与 prompt 绑定，可验证文件内容）：**
+- prompt 要求从 sales_2024.csv 提取月度趋势 → "输出文件或回复中包含 1–12 月各月的具体销售数值"
+- prompt 要求将会议纪要翻译成英文并保存 → "输出的文本文件内容为英文，且保留了原始会议的主要议题"
+- prompt 要求对代码仓库做安全扫描 → "回复中明确列出了至少一个具体漏洞类型或风险点（如 SQL 注入、硬编码密钥）"
+- prompt 要求生成数据可视化图表 → "生成了图片文件（.png/.svg/.html），而非仅输出纯文字描述"
+- prompt 要求将 JSON 数据转为 Excel → "输出的 .xlsx 文件中包含与输入 JSON 字段名一致的列标题"
+
+### 第二类：质量/格式细节（可选，补充验证，每个用例 0–2 条）
+
+在第一类已覆盖核心任务的基础上，验证输出的附加质量要求。
+
+**写法要求：**
+- 必须与当前 prompt 的具体要求有关，不写通用格式检查
+- 可以验证文件内部内容，但断言需具体且可判定（指明字段名、关键词、结构特征）
+
+**可接受的示例：**
+- prompt 明确指定了章节 → "输出的 Markdown 文件包含与 prompt 中提到的三个章节对应的二级标题"
+- prompt 要求脚本接受路径参数 → "生成的 Python 脚本中包含对 input_path 参数的处理逻辑"
+- prompt 要求提取特定实体 → "输出 JSON 中的 summary 字段包含原文中的公司名称"
+
+**反模式（禁止写入）：**
+- 存在性检查："生成了文件"、"输出了内容"（不验证正确性）
+- 任意数量阈值："包含至少 1 条记录"（几乎必然 pass，无区分性）
+- 与 prompt 无关的通用格式："文件是合法的 JSON 格式"（不验证任务完成度）
+- 工具调用过程检查："使用了 scripts/ 目录下的 parse.py"（评测者看不到执行过程）
+- 主观判断："输出质量较高"、"翻译流畅自然"
+- 泛化断言："skill 成功运行"、"任务已完成"
+
+## 输入文件说明
+
+如果某个测试用例需要真实输入文件（如待处理的 PDF、CSV），在 files 字段中列出路径并在对应地址写入文件：
+- 路径格式：`evals/skill-tests/{skill_name}/files/<filename>`
+- 在 expected_output 中说明该文件应如何被处理
+
+## 输出格式（严格 JSON，不包含任何解释文字或 markdown 代码块）
+
 {{
   "skill_name": "{skill_name}",
   "evals": [
     {{
       "id": 1,
-      "prompt": "模拟用户的真实输入...",
+      "name": "smoke_test",
+      "case_category": "smoke_test",
+      "prompt": "最简可用性验证的用户输入...",
       "expected_output": "预期结果的人类可读描述",
       "files": [],
       "expectations": [
-        "输出中包含 X 的结构化数据",
-        "使用了 scripts/ 中的 Y 脚本"
+        "可客观验证的声明 1",
+        "可客观验证的声明 2"
       ]
+    }},
+    {{
+      "id": 2,
+      "name": "happy_path_with_details",
+      "case_category": "happy_path",
+      "prompt": "包含具体细节的完整功能请求...",
+      "expected_output": "预期结果描述...",
+      "files": [],
+      "expectations": [...]
     }}
   ]
-}}
-"""
+}}"""
 
 
 class TestDesignStageHandler(StageHandler):
     """TEST_DESIGN 阶段：Agent 设计测试用例，输出 evals.json."""
 
     async def execute(self, ctx: SkillDevContext) -> StageResult:
+        """主流程：设计测试用例并保存 evals.json."""
         await ctx.emit(SkillDevEventType.PROGRESS, {"message": "正在设计测试用例..."})
 
-        skill_content = self._read_skill_files(ctx.workspace / "skill")
-        evals = await self._design_evals(ctx, skill_content)
+        skill_name = self._get_skill_name(ctx)
 
+        # 生成测试案例
+        evals = await self._design_evals(ctx, skill_name)
+
+        # 验证 evals schema，确保每个 case 都有 name 字段
+        evals = self._validate_and_normalize_evals(evals, skill_name)
+
+        # 更新state，储存生成的测试案例
         ctx.state.evals = evals
-        evals_file = ctx.workspace / "evals" / "evals.json"
-        evals_file.write_text(
-            json.dumps(evals, ensure_ascii=False, indent=2), encoding="utf-8"
-        )
+        # 测试案例写入本地
+        self._write_evals_file(ctx, skill_name, evals)
 
         count = len(evals.get("evals", []))
-        await ctx.emit(
-            SkillDevEventType.PROGRESS, {"message": f"已设计 {count} 个测试用例"}
-        )
+        await ctx.emit(SkillDevEventType.PROGRESS, {"message": f"已设计 {count} 个测试用例"})
+
         return StageResult(next_stage=SkillDevStage.TEST_RUN)
+    
+    def _get_skill_name(self, ctx: SkillDevContext) -> str:
+        """解析skill名称"""
+        if ctx.state.plan and isinstance(ctx.state.plan, dict):
+            return ctx.state.plan.get("skill_name", "skill")
+        return "skill"
+    
+    def _write_evals_file(self, ctx: SkillDevContext, skill_name: str, evals: dict) -> None:
+        """写入 evals/<skill_name>/evals.json."""
+        evals_dir = ctx.workspace / "evals" / skill_name
+        evals_dir.mkdir(parents=True, exist_ok=True)
 
-    def _read_skill_files(self, skill_dir) -> str:
-        """读取 skill 目录下所有文件，拼接为字符串供 Agent 分析."""
-        parts = []
-        for file_path in sorted(skill_dir.rglob("*")):
-            if file_path.is_file():
-                rel = file_path.relative_to(skill_dir)
-                try:
-                    content = file_path.read_text(encoding="utf-8", errors="ignore")
-                    parts.append(f"=== {rel} ===\n{content}")
-                except Exception as exc:
-                    logger.warning(
-                        "[TestDesignStage] 读取文件失败: %s (%s)", file_path, exc
-                    )
-        return "\n\n".join(parts)
+        content = json.dumps(evals, ensure_ascii=False, indent=2)
+        (evals_dir / "evals.json").write_text(content, encoding="utf-8")
 
-    async def _design_evals(self, ctx: SkillDevContext, skill_content: str) -> dict:
-        """调用 Agent 设计测试用例.
+        logger.info(f"[TestDesignStage] evals.json 写入: {evals_dir}")
 
-        待实现: 接入 create_stage_agent + Runner.run_agent，解析输出 JSON
+    def _validate_and_normalize_evals(self, evals: dict, skill_name: str) -> dict:
+        """验证和规范化 evals，确保符合 schema.
+        
+        - 确保每个 eval case 都有 "name" 字段
+        - 修复缺失的字段或类型错误
+        - 记录任何异常
+        
+        Args:
+            evals: Agent 生成的原始 evals dict
+            skill_name: skill 名称
+            
+        Returns:
+            规范化后的 evals dict
         """
-        # 待实现:
-        # agent = ctx.create_stage_agent(
-        #     stage_name="test_design",
-        #     system_prompt=TEST_DESIGN_SYSTEM_PROMPT.format(count=3),
-        #     tools=[],  # 只需模型推理，无需工具
-        #     max_iterations=10,
-        # )
-        # result = await Runner.run_agent(agent, {"skill_content": skill_content})
-        # return json.loads(result["output"])
+        if not isinstance(evals, dict):
+            logger.error(f"[TestDesignStage] evals 不是 dict，而是 {type(evals)}")
+            return {"skill_name": skill_name, "evals": []}
+        
+        evals_list = evals.get("evals", [])
+        if not isinstance(evals_list, list):
+            logger.error(f"[TestDesignStage] evals['evals'] 不是 list")
+            return {"skill_name": skill_name, "evals": []}
+        
+        normalized = {"skill_name": skill_name, "evals": []}
+        
+        for idx, case in enumerate(evals_list, start=1):
+            if not isinstance(case, dict):
+                logger.warning(f"[TestDesignStage] eval case #{idx} 不是 dict，跳过")
+                continue
+            
+            # 确保 name 字段存在
+            if "name" not in case or not case["name"]:
+                # 尝试从 case_category 或 id 生成 name
+                case_id = case.get("id", idx)
+                category = case.get("case_category", "test")
+                case["name"] = f"{category}_{case_id}"
+                logger.warning(
+                    f"[TestDesignStage] eval case #{idx} 缺少 'name' 字段，"
+                    f"已自动生成: {case['name']}"
+                )
+            
+            # 验证必需字段
+            required_fields = ["id", "name", "case_category", "prompt", "expectations"]
+            for field in required_fields:
+                if field not in case:
+                    logger.warning(f"[TestDesignStage] eval '{case['name']}' 缺少字段 '{field}'")
+                    # 提供默认值
+                    if field == "id":
+                        case["id"] = idx
+                    elif field == "case_category":
+                        case["case_category"] = "custom"
+                    elif field == "prompt":
+                        case["prompt"] = ""
+                    elif field == "expectations":
+                        case["expectations"] = []
+            
+            # 确保 expectations 是列表
+            if not isinstance(case.get("expectations"), list):
+                logger.warning(f"[TestDesignStage] eval '{case['name']}' 的 expectations 不是 list")
+                case["expectations"] = []
+            
+            # 确保 files 字段存在（可以是空列表）
+            if "files" not in case:
+                case["files"] = []
+            
+            # 确保 expected_output 字段存在
+            if "expected_output" not in case:
+                case["expected_output"] = ""
+            
+            normalized["evals"].append(case)
+        
+        if len(normalized["evals"]) == 0:
+            logger.error("[TestDesignStage] 规范化后没有有效的 eval case")
+        else:
+            logger.info(f"[TestDesignStage] 规范化完成，共 {len(normalized['evals'])} 个 eval case")
+        
+        return normalized
 
-        logger.warning("[TestDesignStage] _design_evals 尚未实现，返回占位测试用例")
-        skill_name = (
-            ctx.state.plan.get("skill_name", "skill") if ctx.state.plan else "skill"
-        )
-        return {
-            "skill_name": skill_name,
-            "evals": [
-                {
-                    "id": 1,
-                    "name": "basic-usage",
-                    "prompt": f"请使用 {skill_name} 完成基础功能测试",
-                    "expected_output": "待实现: 预期结果",
-                    "files": [],
-                    "expectations": ["待实现: 可验证的预期声明"],
-                }
-            ],
-        }
+    async def _design_evals(self, ctx: SkillDevContext, skill_name: str) -> dict:
+        """调用 Agent 设计测试用例（流式，实时推送 LLM 推理过程）."""
+        try:
+            system_prompt = TEST_DESIGN_SYSTEM_PROMPT.format(
+                _EVAL_COUNT=_EVAL_COUNT,
+                skill_name=skill_name,
+                workspace=ctx.workspace,
+            )
+            system_prompt += self._build_external_tools_hint(ctx)
+            agent = ctx.create_stage_agent(
+                stage_name="test_design",
+                system_prompt=system_prompt,
+                tools=["file_read", "file_glob", "file_listdir", "web_search_free", 
+                    "web_search_paid", "shell", "file_write"],
+                max_iterations=30,
+            )
+            prompt = (
+                f"请先读取工作区 skill/ 目录下的 Skill 文件，"
+                f"然后为 skill_name='{skill_name}' 设计测试用例，直接输出 JSON，不要包含任何解释文字。"
+            )
+            raw = await ctx.run_stage_agent_streaming(
+                agent, stage_name="test_design", query=prompt
+            )
+            return self._parse_evals_json(raw)
+
+        except ValueError as e:
+            logger.error(f"[TestDesignStage] evals JSON 解析失败，使用占位数据: {e}")
+            raise
+        except Exception as e:
+            logger.exception(f"[TestDesignStage] 未预期的错误: {e}")
+            raise
+    
+    def _parse_evals_json(self, raw: str | object) -> dict:
+        """从 Agent 返回值中健壮地提取 evals JSON.
+
+        兼容三种返回形态：
+          1. 已经是 dict（Agent 直接返回结构化对象）
+          2. 纯 JSON 字符串
+          3. ```json ... ``` 包裹的字符串
+        """
+        if isinstance(raw, dict):
+            return raw
+
+        if not isinstance(raw, str):
+            raise ValueError(f"Agent.invoke() 返回了未预期的类型: {type(raw)}")
+
+        # 尝试直接解析
+        try:
+            return json.loads(raw)
+        except json.JSONDecodeError:
+            pass
+
+        # 提取 ```json ... ``` 块
+        match = re.search(r"```(?:json)?\s*(\{.*?})\s*```", raw, re.DOTALL)
+        if match:
+            return json.loads(match.group(1))
+
+        # 提取裸 JSON 对象（最后兜底）
+        match = re.search(r"\{.*}", raw, re.DOTALL)
+        if match:
+            return json.loads(match.group(0))
+
+        raise ValueError(f"无法从 Agent 输出中解析 evals JSON，输出片段：{raw[:300]}")
+
+    def _build_external_tools_hint(self, ctx: SkillDevContext) -> str:
+        """若存在外部工具，追加一段提示帮助 agent 设计出能验证工具调用的测试用例.
+
+        无外部工具时返回空字符串，不影响原有 prompt。
+        """
+        tools = ctx.state.external_tools
+        if not tools:
+            return ""
+
+        lines = [
+            "\n\n## 可用的外部工具（设计测试用例时请参考）\n",
+            "当 Skill 涉及调用以下外部工具时。设计测试用例时请注意：",
+            "- prompt 应包含能触发工具调用的真实用户场景",
+            "- expectations 应能区分“调用了工具并使用其返回数据”与“未调用工具、仅凭通用知识回答”两种情况\n",
+        ]
+        for tool in tools:
+            name = tool.get("name", "未命名工具")
+            lines.append(f"### {name}")
+            desc = tool.get("description")
+            if desc:
+                lines.append(f"描述：{desc}")
+            url = tool.get("url")
+            if url:
+                method = tool.get("method", "GET").upper()
+                lines.append(f"请求：{method} {url}")
+            params = tool.get("parameters")
+            if params:
+                props = params.get("properties", {})
+                if props:
+                    lines.append(f"主要参数：{', '.join(props.keys())}")
+            lines.append("")
+
+        return "\n".join(lines)
