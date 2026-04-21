@@ -31,7 +31,7 @@ from openjiuwen.harness.rails.base import DeepAgentRail
 from openjiuwen.harness.tools.todo import TodoStatus, TodoListTool
 from openjiuwen.harness.workspace.workspace import WorkspaceNode
 
-from jiuwenclaw.utils import logger
+from jiuwenclaw.utils import fix_json_arguments, logger
 
 _TODO_TOOL_NAMES = frozenset(["todo_create", "todo_list", "todo_modify"])
 
@@ -374,16 +374,16 @@ class JiuClawStreamEventRail(DeepAgentRail):
         Returns:
             Valid JSON string (e.g., '{"key": "value"}').
         """
-        import json
         if isinstance(arguments, dict):
+            import json
             return json.dumps(arguments)
         if isinstance(arguments, str):
-            try:
-                json.loads(arguments)
-                return arguments
-            except (json.JSONDecodeError, TypeError):
-                logger.warning(f"Illegal Tool call arguments: {arguments}")
-                return "{}"
+            repaired = fix_json_arguments(arguments)
+            if isinstance(repaired, dict):
+                import json
+                return json.dumps(repaired, ensure_ascii=False)
+            logger.warning("Illegal Tool call arguments after repair: %s", arguments)
+            return "{}"
         return "{}"
 
     async def _fix_incomplete_tool_context(self, context: Any) -> None:

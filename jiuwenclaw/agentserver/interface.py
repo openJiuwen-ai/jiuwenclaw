@@ -75,6 +75,20 @@ _SKILLDEV_METHODS: frozenset[ReqMethod] = frozenset(
     m for m in ReqMethod if m.value.startswith("skilldev.")
 )
 
+# Preserve cross-service context-size hints if they are present in request.params.
+_CONTEXT_SIZE_HINT_KEYS: tuple[str, ...] = (
+    "context_size",
+    "context_window_size",
+    "context_window",
+    "max_context",
+    "max_context_size",
+    "max_context_message_num",
+    "max_input_tokens",
+    "max_prompt_tokens",
+    "n_ctx",
+    "ctx_len",
+)
+
 
 def build_user_prompt(content: str, files: dict, channel: str, language: str) -> str:
     """Build user prompt for the agent."""
@@ -241,6 +255,11 @@ class JiuWenClaw:
         run = request.params.get("run")
         if run:
             inputs["run"] = run
+
+        for key in _CONTEXT_SIZE_HINT_KEYS:
+            value = request.params.get(key)
+            if value is not None:
+                inputs[key] = value
 
         # 返回原始 query（未经 build_user_prompt 包装）
         # Team 模式需要使用原始 query，而不是 JSON 包装后的 prompt

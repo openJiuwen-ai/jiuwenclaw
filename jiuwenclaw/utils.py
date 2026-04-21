@@ -1235,3 +1235,146 @@ class AsyncLRUCache:
 
 setup_logger()
 logger = logging.getLogger(__name__)
+
+_TOOL_ARGS_LOG_MAX_DEFAULT = 480
+
+
+def _truncate_tool_args_log_fragment(text: str, *, full_detail: bool) -> str:
+    if full_detail or len(text) <= _TOOL_ARGS_LOG_MAX_DEFAULT:
+        return text
+    return text[:_TOOL_ARGS_LOG_MAX_DEFAULT] + "..."
+
+
+def _log_tool_args_repair_stage(
+    *,
+    stage: str,
+    before_raw: str,
+    outcome: Literal["success", "failed"],
+    after_dict: Optional[dict] = None,
+    error: Optional[str] = None,
+) -> None:
+    full_detail = logger.isEnabledFor(logging.DEBUG)
+    before_shown = _truncate_tool_args_log_fragment(before_raw, full_detail=full_detail)
+    if outcome == "success":
+        after_raw = (
+            json.dumps(after_dict, ensure_ascii=False)
+            if isinstance(after_dict, dict)
+            else ""
+        )
+        after_shown = _truncate_tool_args_log_fragment(after_raw, full_detail=full_detail)
+        logger.info(
+            "[fix_json_arguments] stage=%s outcome=success before=%s after=%s",
+            stage,
+            before_shown,
+            after_shown,
+        )
+    else:
+        err_shown = _truncate_tool_args_log_fragment(error or "", full_detail=full_detail)
+        logger.warning(
+            "[fix_json_arguments] stage=%s outcome=failed before=%s error=%s",
+            stage,
+            before_shown,
+            err_shown,
+        )
+
+
+def _fix_missing_quotes(json_str: str) -> str:
+    s = json_str.strip()
+
+    s = re.sub(
+        r':\s+([A-Za-z]:/[^\{\[]*?)(?=\s*[,\}\]])',
+        lambda m: f': "{m.group(1)}"',
+        s
+    )
+
+    s = re.sub(
+        r':\s+(?!"|true|false|null|\d+|{|\[|:|"|[A-Za-z]:/)([^\s,\}\[\]""]+?)(?=\s*[,}\]])',
+        lambda m: f': "{m.group(1)}"',
+        s
+    )
+
+    s = re.sub(
+        r'{\s+([a-zA-Z_][a-zA-Z0-9_]*)\s*:',
+        r'{"\1":',
+        s
+    )
+
+    return s
+
+
+def fix_json_arguments(arguments: str | dict) -> str | dict:
+    if not isinstance(arguments, str):
+        return arguments
+
+    s = arguments.strip()
+
+    if not s:
+        return {}
+
+    try:
+        return json.loads(s)
+    except json.JSONDecodeError:
+        pass
+
+    full_detail = logger.isEnabledFor(logging.DEBUG)
+
+    try:
+        import json_repair
+
+        repaired = json_repair.loads(s)
+    except Exception as exc:
+        _log_tool_args_repair_stage(
+            stage="json_repair",
+            before_raw=s,
+            outcome="failed",
+            error=str(exc),
+        )
+    else:
+        if isinstance(repaired, dict):
+            _log_tool_args_repair_stage(
+                stage="json_repair",
+                before_raw=s,
+                outcome="success",
+                after_dict=repaired,
+            )
+            return repaired
+        _log_tool_args_repair_stage(
+            stage="json_repair",
+            before_raw=s,
+            outcome="failed",
+            error=f"repaired_not_object:{type(repaired).__name__}",
+        )
+
+    fixed = _fix_missing_quotes(s)
+    if fixed != s:
+        try:
+            result = json.loads(fixed)
+        except json.JSONDecodeError as exc:
+            _log_tool_args_repair_stage(
+                stage="rule_fix",
+                before_raw=s,
+                outcome="failed",
+                error=str(exc),
+            )
+        else:
+            _log_tool_args_repair_stage(
+                stage="rule_fix",
+                before_raw=s,
+                outcome="success",
+                after_dict=result,
+            )
+            return result
+    else:
+        _log_tool_args_repair_stage(
+            stage="rule_fix",
+            before_raw=s,
+            outcome="failed",
+            error="no_structural_change_from_rules",
+        )
+
+    before_final = _truncate_tool_args_log_fragment(s, full_detail=full_detail)
+    logger.warning(
+        "[fix_json_arguments] outcome=failed_all_stages before=%s error=all_repair_attempts_exhausted",
+        before_final,
+    )
+    return {}

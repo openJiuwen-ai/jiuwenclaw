@@ -4,7 +4,10 @@
 
 from __future__ import annotations
 
+import logging
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 
 def parse_stream_chunk(chunk: Any, *, _has_streamed_content: bool = False) -> dict[str, Any] | None:
@@ -81,6 +84,16 @@ def _parse_dict_chunk(chunk: dict[str, Any], _has_streamed_content: bool) -> dic
                 "event_type": "chat.error",
                 "error": chunk.get("output", ""),
             }
+        output = chunk.get("output")
+        if isinstance(output, dict) and output.get("result_type") == "error":
+            logger.warning(
+                "[stream_utils] nested_error_chunk_detected output.result_type=error output=%s",
+                output.get("output", ""),
+            )
+            return {
+                "event_type": "chat.error",
+                "error": output.get("output", ""),
+            }
         return {
             "event_type": "chat.delta" if not _has_streamed_content else "chat.final",
             "content": chunk.get("output", ""),
@@ -155,6 +168,15 @@ def _parse_typed_chunk(chunk: Any, _has_streamed_content: bool) -> dict[str, Any
                     "error": payload.get("output", "未知错误"),
                 }
             output = payload.get("output", {})
+            if isinstance(output, dict) and output.get("result_type") == "error":
+                logger.warning(
+                    "[stream_utils] nested_answer_error_detected output.result_type=error output=%s",
+                    output.get("output", "未知错误"),
+                )
+                return {
+                    "event_type": "chat.error",
+                    "error": output.get("output", "未知错误"),
+                }
             content = (
                 output.get("output", "")
                 if isinstance(output, dict)
@@ -331,6 +353,16 @@ def _parse_response_chunk(chunk: Any, _has_streamed_content: bool) -> dict[str, 
                 return {
                     "event_type": "chat.error",
                     "error": payload.get("output", ""),
+                }
+            output = payload.get("output")
+            if isinstance(output, dict) and output.get("result_type") == "error":
+                logger.warning(
+                    "[stream_utils] nested_response_error_detected output.result_type=error output=%s",
+                    output.get("output", ""),
+                )
+                return {
+                    "event_type": "chat.error",
+                    "error": output.get("output", ""),
                 }
             return {
                 "event_type": "chat.delta" if not _has_streamed_content else "chat.final",

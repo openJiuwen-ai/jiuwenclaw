@@ -4,6 +4,8 @@ import json
 from pathlib import PurePath
 from typing import Any, Iterable
 
+from jiuwenclaw.utils import fix_json_arguments
+
 
 _TOOL_NAME_ALIASES = {
     "free_search": "mcp_free_search",
@@ -301,11 +303,12 @@ def _normalize_arguments(arguments: Any) -> dict[str, Any]:
     if isinstance(arguments, dict):
         return dict(arguments)
     if isinstance(arguments, str):
-        try:
-            parsed = json.loads(arguments)
-        except json.JSONDecodeError:
-            return {"input": arguments} if arguments.strip() else {}
-        return dict(parsed) if isinstance(parsed, dict) else {"input": arguments}
+        parsed = fix_json_arguments(arguments)
+        if isinstance(parsed, dict):
+            return dict(parsed)
+        if arguments.strip():
+            return {"input": arguments}
+        return {}
     return {}
 
 

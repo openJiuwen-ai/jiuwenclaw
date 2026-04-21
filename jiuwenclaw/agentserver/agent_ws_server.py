@@ -12,6 +12,7 @@ import os
 from pathlib import Path
 from typing import Any, ClassVar
 
+from jiuwenclaw.agentserver.session_history import enrich_history_messages_session_id
 from jiuwenclaw.agentserver.gateway_push.wire import build_server_push_wire
 from jiuwenclaw.agentserver.tools.acp_output_tools import get_acp_output_manager
 from jiuwenclaw.utils import get_agent_sessions_dir, get_config_file
@@ -1280,8 +1281,11 @@ class AgentWebSocketServer:
         ordered = list(reversed(raw))
         start = (page_idx - 1) * page_size
         end = start + page_size
+        resolved_sid = session_id.strip()
+        page_slice = ordered[start:end]
+        messages_out = enrich_history_messages_session_id(page_slice, resolved_sid)
         return {
-            "messages": ordered[start:end],
+            "messages": messages_out,
             "total_pages": total_pages,
             "page_idx": page_idx,
         }
