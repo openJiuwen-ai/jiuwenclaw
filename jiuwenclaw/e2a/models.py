@@ -142,6 +142,10 @@ class E2AEnvelope:
     a2a_metadata: dict[str, Any] = field(default_factory=dict)
     acp_meta: dict[str, Any] = field(default_factory=dict)
 
+    # --- 多实例多租户 ---
+    service_id: str | None = None
+    agent_id: str | None = None
+
     def ensure_timestamp(self) -> None:
         """若未设置 timestamp，则填当前 UTC ISO8601。"""
         if self.timestamp is None:

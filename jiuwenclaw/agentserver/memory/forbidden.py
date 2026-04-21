@@ -18,7 +18,7 @@ def _get_memory_forbidden_config() -> Dict[str, Any]:
             "patterns": forbidden_config.get("patterns", []),
             "description": forbidden_config.get("description", {
                 "zh": "以下内容禁止记忆：密码、API密钥、Secret、Token、信用卡号、身份证号、手机号等敏感信息",
-                "en": "The following content is forbidden to remember: passwords, \API keys, secrets, tokens, \
+                "en": "The following content is forbidden to remember: passwords, API keys, secrets, tokens, \
                     credit card numbers, ID numbers, phone numbers and other sensitive information",
             }),
         }
@@ -75,11 +75,11 @@ def get_forbidden_memory_prompt(language: str) -> str:
                 prompt_parts.append(f"{i}. `{pattern}`")
             prompt_parts.append("")
         prompt_parts.append("**Requirements:**")
-        prompt_parts.append("- Before calling `experience_learn` or `write_memory` to store memories, \
-            you must check if the content contains the above sensitive information")
-        prompt_parts.append("- If sensitive information is detected, it must be desensitized \
-            (e.g., replaced with ***) or storage must be refused")
-        prompt_parts.append("- Sensitive information such as passwords and keys explicitly provided by the user \
-            must not be stored in the memory system")
+        prompt_parts.append("- Before calling `experience_learn` or `write_memory` to store memories, "
+                            "you must check if the content contains the above sensitive information")
+        prompt_parts.append("- If sensitive information is detected, it must be desensitized "
+                            "(e.g., replaced with ***) or storage must be refused")
+        prompt_parts.append("- Sensitive information such as passwords and keys explicitly provided by the user "
+                            "must not be stored in the memory system")
         prompt_parts.append("")
         return "\n".join(prompt_parts)

@@ -13,7 +13,7 @@ from jiuwenclaw.utils import get_agent_sessions_dir
 
 logger = logging.getLogger(__name__)
 _FILE_LOCK = threading.Lock()
-_WRITE_QUEUE: queue.Queue[tuple[str, dict[str, Any]]] = queue.Queue(maxsize=20000)
+_WRITE_QUEUE: queue.Queue[tuple[str, dict[str, Any], str | None]] = queue.Queue(maxsize=20000)
 _WORKER_STARTED = False
 _WORKER_LOCK = threading.Lock()
 
@@ -31,8 +31,9 @@ def _serialize_value(obj: Any) -> Any:
     return obj
 
 
-def _history_file(session_id: str) -> Path:
-    session_dir = get_agent_sessions_dir() / session_id
+def _history_file(session_id: str, sessions_root: str | None = None) -> Path:
+    root = Path(sessions_root) if sessions_root else get_agent_sessions_dir()
+    session_dir = root / session_id
     session_dir.mkdir(parents=True, exist_ok=True)
     return session_dir / "history.json"
 
@@ -50,8 +51,8 @@ def _read_history(path: Path) -> list[dict[str, Any]]:
     return []
 
 
-def _write_item(session_id: str, item: dict[str, Any]) -> None:
-    fpath = _history_file(session_id)
+def _write_item(session_id: str, item: dict[str, Any], sessions_root: str | None = None) -> None:
+    fpath = _history_file(session_id, sessions_root)
     with _FILE_LOCK:
         history = _read_history(fpath)
         history.append(item)
@@ -71,9 +72,9 @@ def _ensure_worker_started() -> None:
 
         def _worker() -> None:
             while True:
-                sid, item = _WRITE_QUEUE.get()
+                sid, item, sessions_root = _WRITE_QUEUE.get()
                 try:
-                    _write_item(sid, item)
+                    _write_item(sid, item, sessions_root)
                 except Exception as exc:  # noqa: BLE001
                     logger.warning("history 异步写入失败: %s", exc)
                 finally:
@@ -96,6 +97,7 @@ def append_history_record(
     extra: dict[str, Any] | None = None,
     channel_metadata: dict[str, Any] | None = None,
     mode: str | None = None,
+    sessions_root: str | Path | None = None,
 ) -> None:
     """向指定 session 的 history.json 异步追加一条记录."""
     sid = (session_id or "default").strip() or "default"
@@ -120,11 +122,12 @@ def append_history_record(
             item.update(serialized_extra)
 
     _ensure_worker_started()
+    sessions_root_s = str(sessions_root) if sessions_root else None
     try:
-        _WRITE_QUEUE.put_nowait((sid, item))
+        _WRITE_QUEUE.put_nowait((sid, item, sessions_root_s))
     except queue.Full:
         # 队列满时退化为同步写，避免丢历史记录。
-        _write_item(sid, item)
+        _write_item(sid, item, sessions_root_s)
 
     # 更新会话元数据
     try:
@@ -138,6 +141,7 @@ def append_history_record(
             # 传入渠道元数据,首次写入时持久化
             channel_metadata=channel_metadata,
             mode=mode,
+            sessions_root=sessions_root_s,
         )
     except Exception as exc:
         logger.warning("更新会话元数据失败: %s", exc)

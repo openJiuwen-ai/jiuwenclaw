@@ -34,6 +34,7 @@ from jiuwenclaw.agentserver.permissions.patterns import persist_cli_trusted_dire
 from jiuwenclaw.schema.hooks_context import AgentServerChatHookContext
 from jiuwenclaw.agentserver.agent_manager import AgentManager, ACP_DEFAULT_CAPABILITIES
 from jiuwenclaw.agentserver.permissions.config_rpc import get_permissions_config_req_methods
+from jiuwenclaw.agentserver.tenant_agent_pool import TenantAgentPool
 
 
 logger = logging.getLogger(__name__)
@@ -64,7 +65,7 @@ def _payload_to_request(data: dict[str, Any]) -> AgentRequest:
 
 
 class AgentWebSocketServer:
-    """Gateway 与 AgentServer 之间的 WebSocket 服务端（单例）.
+    """Gateway 与 AgentServer 之间的 WebSocket 服务端（多例）.
 
     监听来自 Gateway (WebSocketAgentServerClient) 的连接，按协议约定处理请求：
     - 收到 JSON：E2AEnvelope（或过渡期 legacy + 兜底信封）
@@ -94,8 +95,7 @@ class AgentWebSocketServer:
         self._current_ws: Any = None
         self._current_send_lock: asyncio.Lock | None = None
         self._acp_client_capabilities_by_ws: dict[int, dict[str, Any]] = {}
-        # AgentManager 实例
-        self._agent_manager = AgentManager()
+        self._agent_manager = None # TenantAgentPool 实例
         get_acp_output_manager().set_send_push_callback(
             lambda msg: asyncio.create_task(self.send_push(msg))
         )
@@ -128,7 +128,7 @@ class AgentWebSocketServer:
         ping_interval: float | None = 30.0,
         ping_timeout: float | None = 300.0,
     ) -> "AgentWebSocketServer":
-        """返回单例实例。
+        """返回多例实例。
 
         首次调用时创建实例，后续调用返回已存在的实例。
         """
@@ -159,6 +159,11 @@ class AgentWebSocketServer:
 
     async def start(self) -> None:
         """启动 WebSocket 服务端，开始监听连接。优先使用 legacy.server.serve 以与 Gateway 的 legacy client 握手兼容."""
+        # 初始化 TenantAgentPool
+        if self._agent_manager is None:
+            self._agent_manager = TenantAgentPool.get_instance()
+            logger.info("[AgentWebSocketServer] 已初始化 TenantAgentPool")
+
         if self._server is not None:
             logger.warning("[AgentWebSocketServer] 服务端已在运行")
             return
@@ -449,28 +454,7 @@ class AgentWebSocketServer:
             await self._handle_acp_tool_response(ws, request, send_lock)
             return
 
-        mode = request.params.get("mode", "agent.plan").split(".")[0]
-        agent = await self._agent_manager.get_agent(
-            channel_id=channel_id,
-            mode=mode,
-            workspace_dir=request.params.get("workspace_dir", None)
-        )
-        if agent is None:
-            raise ValueError("Failed to get agent")
-
-        # code 模式：在真实 session 上执行 switch_mode，确保 state 持久化
-        if mode == "code":
-            from openjiuwen.core.single_agent import create_agent_session
-            sub_mode = request.params.get("mode", "agent.plan").split(".")[1]
-            session = create_agent_session(session_id=request.session_id, card=agent.get_instance().card)
-            await session.pre_run(inputs=None)  # 从 checkpointer 加载历史 state
-            agent.get_instance().switch_mode(session=session, mode=sub_mode)
-            # 持久化 switch_mode 修改后的 state
-            state = agent.get_instance().load_state(session)
-            session.update_state({"deep_agent_state": state.to_session_dict()})
-            await session.post_run()  # 写入 checkpointer
-
-        resp = await agent.process_message(request)
+        resp = await self._agent_manager.process_message(request)
 
         wire = encode_agent_response_for_wire(resp, response_id=request.request_id)
         async with send_lock:
@@ -483,26 +467,6 @@ class AgentWebSocketServer:
     async def _handle_stream(self, ws: Any, request: AgentRequest, send_lock: asyncio.Lock) -> None:
         """流式处理：调用 process_message_stream，逐条发送 E2AResponse 线 JSON。"""
         channel_id = request.channel_id or "default"
-        mode = request.params.get("mode", "agent.plan").split(".")[0]
-        agent = await self._agent_manager.get_agent(
-            channel_id=channel_id,
-            mode=mode,
-            workspace_dir=request.params.get("workspace_dir", None)
-        )
-        if agent is None:
-            raise ValueError("Failed to get agent")
-
-        # code 模式：在真实 session 上执行 switch_mode，确保 state 持久化
-        if mode == "code":
-            from openjiuwen.core.single_agent import create_agent_session
-            sub_mode = request.params.get("mode", "agent.plan").split(".")[1]
-            session = create_agent_session(session_id=request.session_id, card=agent.get_instance().card)
-            await session.pre_run(inputs=None)  # 从 checkpointer 加载历史 state
-            agent.get_instance().switch_mode(session=session, mode=sub_mode)
-            # 持久化 switch_mode 修改后的 state
-            state = agent.get_instance().load_state(session)
-            session.update_state({"deep_agent_state": state.to_session_dict()})
-            await session.post_run()  # 写入 checkpointer
 
         chunk_count = 0
         # 心跳控制：当有真实 chunk 发送时重置，空闲时发送心跳
@@ -547,7 +511,7 @@ class AgentWebSocketServer:
         heartbeat_task = asyncio.create_task(_heartbeat_loop())
 
         try:
-            async for chunk in agent.process_message_stream(request):
+            async for chunk in self._agent_manager.process_message_stream(request):
                 chunk_count += 1
                 # 通知心跳任务有真实 chunk 发送，重置心跳计时
                 heartbeat_event.set()
@@ -1068,7 +1032,10 @@ class AgentWebSocketServer:
             config_payload = params.get("config")
             env_overrides = params.get("env")
 
-            await self._agent_manager.reload_agents_config(config_payload, env_overrides)
+            await self._agent_manager.reload_agents_config(
+                config_base=config_payload,
+                env_overrides=env_overrides,
+            )
             resp = AgentResponse(
                 request_id=request.request_id,
                 channel_id=request.channel_id,
@@ -1253,7 +1220,7 @@ class AgentWebSocketServer:
         """获取 default agent 实例（向后兼容）."""
         return self._agent_manager.get_agent_nowait()
 
-    def get_agent_manager(self) -> AgentManager:
+    def get_agent_manager(self) -> TenantAgentPool:
         """获取 AgentManager 实例."""
         return self._agent_manager
     

@@ -139,6 +139,7 @@ from jiuwenclaw.utils import (
     get_agent_workspace_dir,
     get_checkpoint_dir,
     get_env_file,
+    get_agent_root_dir,
 )
 
 load_dotenv(dotenv_path=get_env_file())
@@ -295,9 +296,9 @@ class JiuWenClawDeepAdapter:
     - Deep interrupt / user_answer 处理
     """
 
-    def __init__(self) -> None:
+    def __init__(self, workspace_dir: str | None = None) -> None:
         self._instance: DeepAgent | None = None
-        self._workspace_dir: str = str(get_agent_workspace_dir())
+        self._workspace_dir: str = workspace_dir or str(get_agent_root_dir())
         self._agent_name: str = "main_agent"
         self._vision_tools_registered: bool = False
         self._audio_tools_registered: bool = False
@@ -1445,7 +1446,11 @@ class JiuWenClawDeepAdapter:
         config = config_base.get('react', {}).copy()
         self._config_cache = config.copy()
         self._agent_name = self._instance_overrides.get("agent_name", config.get("agent_name", "main_agent"))
-        self._workspace_dir = self._instance_overrides.get("workspace_dir", config.get("workspace_dir", "workspace"))
+        # Keep constructor-injected tenant workspace by default.
+        # Only override when request explicitly provides workspace_dir.
+        configured_workspace = self._instance_overrides.get("workspace_dir")
+        if configured_workspace is not None:
+            self._workspace_dir = configured_workspace
 
         model = self._create_model(config_base)
         agent_card = AgentCard(name=self._agent_name, id='jiuwenclaw')

@@ -14,6 +14,7 @@ import asyncio
 import json
 import logging
 import time
+from pathlib import Path
 from typing import Any, AsyncIterator, Tuple
 
 from dotenv import load_dotenv
@@ -33,7 +34,13 @@ from jiuwenclaw.schema.agent import AgentRequest, AgentResponse, AgentResponseCh
 from jiuwenclaw.schema.hook_event import AgentServerHookEvents
 from jiuwenclaw.schema.hooks_context import MemoryHookContext
 from jiuwenclaw.schema.message import EventType, ReqMethod
-from jiuwenclaw.utils import get_agent_home_dir, get_agent_workspace_dir, get_env_file
+from jiuwenclaw.utils import (
+    get_agent_home_dir,
+    get_agent_sessions_relative_dir,
+    get_agent_workspace_relative_dir,
+    get_env_file,
+    get_user_workspace_dir,
+)
 
 load_dotenv(dotenv_path=get_env_file())
 
@@ -106,10 +113,13 @@ class JiuWenClaw:
     - 公共编排（session 队列、Skills 路由、heartbeat、流式包装）
     """
 
-    def __init__(self) -> None:
+    def __init__(self, user_workspace_dir: str | None = None) -> None:
         self._adapter: AgentAdapter | None = None
         self._sdk_name: str | None = None
-        self._skill_manager = SkillManager(workspace_dir=str(get_agent_workspace_dir()))
+        user_workspace_path = Path(user_workspace_dir) if user_workspace_dir else get_user_workspace_dir()
+        self._workspace_dir = str(user_workspace_path / get_agent_workspace_relative_dir())
+        self._sessions_dir = user_workspace_path / get_agent_sessions_relative_dir()
+        self._skill_manager = SkillManager(workspace_dir=self._workspace_dir)
         self._session_manager = SessionManager()
         # SkillDev 模式：懒初始化，首次 skilldev.* 请求时构造
         self._skilldev_service = None
@@ -151,13 +161,14 @@ class JiuWenClaw:
         """确保 adapter 已初始化，如果未初始化则根据环境变量创建."""
         if self._adapter is None:
             self._sdk_name = resolve_sdk_choice()
-            self._adapter = create_adapter(self._sdk_name)
+            self._adapter = create_adapter(self._sdk_name, workspace_dir=self._workspace_dir)
             if hasattr(self._adapter, "set_skill_manager"):
                 self._adapter.set_skill_manager(self._skill_manager)
             self._skill_manager.set_skillnet_install_complete_hook(
                 self.create_instance
             )
-            logger.info("[JiuWenClaw] Initialized adapter: sdk=%s", self._sdk_name)
+            logger.info("[JiuWenClaw] Initialized adapter: sdk=%s, workspace_dir=%s",
+                        self._sdk_name, self._workspace_dir)
         return self._adapter
 
     async def create_instance(self, config: dict[str, Any] | None = None, *, mode: str = "agent") -> None:
@@ -420,6 +431,7 @@ class JiuWenClaw:
             timestamp=time.time(),
             channel_metadata=request.metadata,
             mode=request.params.get("mode", "unknown"),
+            sessions_root=self._sessions_dir,
         )
 
         logger.info(
@@ -460,6 +472,7 @@ class JiuWenClaw:
                 content=content_str,
                 timestamp=time.time(),
                 mode=request.params.get("mode", "unknown"),
+                sessions_root=self._sessions_dir,
             )
 
             # cloud memory: after chat hook
@@ -518,6 +531,7 @@ class JiuWenClaw:
             timestamp=time.time(),
             channel_metadata=request.metadata,
             mode=request.params.get("mode", "unknown"),
+            sessions_root=self._sessions_dir,
         )
 
         logger.info(
@@ -614,6 +628,7 @@ class JiuWenClaw:
                         content=str(data),
                         timestamp=time.time(),
                         mode=request.params.get("mode", "unknown"),
+                        sessions_root=self._sessions_dir,
                     )
                     yield AgentResponseChunk(
                         request_id=rid,
@@ -649,6 +664,7 @@ class JiuWenClaw:
                                     timestamp=time.time(),
                                     extra=extra_fields if extra_fields else None,
                                     mode=request.params.get("mode", "unknown"),
+                                    sessions_root=self._sessions_dir,
                                 )
                             if et == "chat.final":
                                 final_answer_content = str(data.payload.get("content", ""))
@@ -679,6 +695,7 @@ class JiuWenClaw:
                                 timestamp=time.time(),
                                 extra=extra_fields if extra_fields else None,
                                 mode=request.params.get("mode", "unknown"),
+                                sessions_root=self._sessions_dir,
                             )
                         if et == "chat.final":
                             final_answer_content = str(data.get("content", ""))
