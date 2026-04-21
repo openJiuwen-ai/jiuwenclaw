@@ -34,6 +34,7 @@ class TenantAgentPool:
     def __init__(self, cache_max_size: int = 100, cache_ttl: int = 600) -> None:
         self._enterprise = _is_enterprise_runtime()
         self._locks: dict[str, asyncio.Lock] = {}
+        self._lock_loop_ids: dict[str, int] = {}
         self._global_lock = asyncio.Lock()
         if self._enterprise:
             self._agent_wrappers = AsyncLRUCache(max_size=cache_max_size, ttl_seconds=cache_ttl)
@@ -66,6 +67,7 @@ class TenantAgentPool:
                 except RuntimeError:
                     asyncio.run(inst._agent_wrappers.clear())
                 inst._locks.clear()
+                inst._lock_loop_ids.clear()
             logger.info("[TenantAgentPool] Resetting singleton instance")
         cls._instance = None
 
@@ -86,8 +88,25 @@ class TenantAgentPool:
         return f"{chat}_{bot}"
 
     def _get_lock(self, cache_key: str) -> asyncio.Lock:
+        """获取或创建 cache_key 对应的锁；事件循环变化时重建，避免跨 loop 复用。"""
+        current_loop_id = id(asyncio.get_running_loop())
+
         if cache_key not in self._locks:
             self._locks[cache_key] = asyncio.Lock()
+            self._lock_loop_ids[cache_key] = current_loop_id
+        else:
+            stored_loop_id = self._lock_loop_ids.get(cache_key)
+            if stored_loop_id != current_loop_id:
+                old_lock = self._locks[cache_key]
+                if old_lock.locked() or getattr(old_lock, "_waiters", None):
+                    logger.error(
+                        "[TenantAgentPool] Lock for %s has waiters during loop change! "
+                        "This may cause data inconsistency.",
+                        cache_key,
+                    )
+                self._locks[cache_key] = asyncio.Lock()
+                self._lock_loop_ids[cache_key] = current_loop_id
+
         return self._locks[cache_key]
 
     @staticmethod
@@ -135,6 +154,7 @@ class TenantAgentPool:
             active = await self._agent_wrappers.keys()
             for stale in [k for k in self._locks if k not in active]:
                 del self._locks[stale]
+                self._lock_loop_ids.pop(stale, None)
             return manager
 
     async def process_message(self, request: AgentRequest) -> AgentResponse:
@@ -175,6 +195,7 @@ class TenantAgentPool:
                         )
             await self._agent_wrappers.clear()
             self._locks.clear()
+            self._lock_loop_ids.clear()
         elif self._agent_manager is not None:
             await self._agent_manager.cleanup()
         logger.info("[TenantAgentPool] Cleanup complete")
