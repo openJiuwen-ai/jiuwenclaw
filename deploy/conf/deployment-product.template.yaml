@@ -1,0 +1,54 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: <<GATEWAY_DEPLOYMENT_NAME>>
+  labels:
+    app: <<GATEWAY_DEPLOYMENT_NAME>>
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: <<GATEWAY_DEPLOYMENT_NAME>>
+  template:
+    metadata:
+      labels:
+        app: <<GATEWAY_DEPLOYMENT_NAME>>
+    spec:
+      # Match Dockerfile USER app (Debian first UID is typically 1000)
+      securityContext:
+        fsGroup: 1000
+      containers:
+        - name: gateway
+          image: <<CLAW_GATEWAY_IMAGE>>
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 19000
+              protocol: TCP
+          volumeMounts:
+            - name: gateway-config
+              mountPath: /home/app/.jiuwenclaw/config/config.yaml
+              subPath: config.yaml
+              readOnly: true
+          securityContext:
+            allowPrivilegeEscalation: false
+            runAsNonRoot: true
+            runAsUser: 1000
+            runAsGroup: 1000
+          resources:
+            requests:
+              cpu: 2
+              memory: 8Gi
+            limits:
+              cpu: 2
+              memory: 8Gi
+      # Uncomment if SWR registry needs pull secret:
+      # imagePullSecrets:
+      #   - name: swr-registry-secret
+      volumes:
+        - name: gateway-config
+          configMap:
+            name: <<GATEWAY_CONFIG_MAP_NAME>>
+            items:
+              - key: config.yaml
+                path: config.yaml

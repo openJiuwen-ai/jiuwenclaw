@@ -1,0 +1,23 @@
+{
+  "pools": [
+    {
+      "id": "<<POOL_ID>>",
+      "size": 1,
+      "group": "jiuwen",
+      "reuse": false,
+      "resources": {
+        "limits": {
+          "cpu": "<<CLAW_MGR_CPU>>m",
+          "memory": "<<CLAW_MGR_MEMORY>>Mi"
+        },
+        "requests": {
+          "cpu": "<<CLAW_MGR_CPU>>m",
+          "memory": "<<CLAW_MGR_MEMORY>>Mi"
+        }
+      },
+      "image": "<<CLAW_MGR_IMAGE>>",
+      "volumes": "[{\"name\":\"jiuwenclaw\",\"hostPath\":{\"path\":\"<<REG_FUNC_DIR>>\",\"type\":\"Directory\"}}]",
+      "volume_mounts": "[{\"name\":\"jiuwenclaw\",\"mountPath\":\"/home/sn/jiuwenclaw\"}]"
+    }
+  ]
+}

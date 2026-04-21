@@ -1,0 +1,64 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: <<GATEWAY_DEPLOYMENT_NAME>>
+  labels:
+    app: <<GATEWAY_DEPLOYMENT_NAME>>
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: <<GATEWAY_DEPLOYMENT_NAME>>
+  template:
+    metadata:
+      labels:
+        app: <<GATEWAY_DEPLOYMENT_NAME>>
+    spec:
+      # 强制调度到 master节点
+      nodeSelector:
+        node-role.kubernetes.io/master: ""
+      tolerations:
+        - key: node-role.kubernetes.io/master
+          operator: Exists
+          effect: NoSchedule
+      securityContext:
+        fsGroup: 0 # 修改为 root 组，解决挂载目录权限
+      containers:
+        - name: gateway
+          image: <<CLAW_GATEWAY_IMAGE>>
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 19000
+              protocol: TCP
+          volumeMounts:
+            - name: gateway-config
+              mountPath: /root/.jiuwenclaw/config/config.yaml
+              subPath: config.yaml
+              readOnly: true
+            - name: host-code
+              mountPath: /app/jiuwenclaw # 覆盖容器内代码目录
+          securityContext:
+            allowPrivilegeEscalation: true
+            runAsNonRoot: false
+            runAsUser: 0
+            runAsGroup: 0
+          resources:
+            requests:
+              cpu: 2
+              memory: 8Gi
+            limits:
+              cpu: 2
+              memory: 8Gi
+      volumes:
+        - name: gateway-config
+          configMap:
+            name: <<GATEWAY_CONFIG_MAP_NAME>>
+            items:
+              - key: config.yaml
+                path: config.yaml
+
+        - name: host-code
+          hostPath:
+            path: <<HOST_CODE_PATH>> # 宿主机目录
+            type: Directory
