@@ -83,7 +83,7 @@ class AgentManager:
     - "acp": ACP 协议通道
     - "default": 默认通道
 
-    企业多租户（AGENT_RUNTIME）下可带 agent_id/service_id/workspace_dir 构造，
+    企业多租户（AGENT_RUNTIME）下可带 agent_id/service_id/user_workspace_dir 构造，
     用于按租户隔离 workspace。
     """
 
@@ -91,6 +91,7 @@ class AgentManager:
         self,
         agent_id: str = "default",
         service_id: str = "default",
+        user_workspace_dir: Path | str | None = None,
         workspace_dir: Path | str | None = None,
     ) -> None:
         self.agents: dict[str, dict[str, "JiuWenSwarm"]] = {}
@@ -122,13 +123,16 @@ class AgentManager:
         self.warm_pool = AgentWarmPool(self)
         self.agent_id = agent_id
         self.service_id = service_id
-        self.workspace_dir = Path(workspace_dir) if workspace_dir else None
-        if self.workspace_dir is not None and os.getenv("AGENT_RUNTIME", "").strip():
+        # user_workspace_dir 为租户根目录；workspace_dir 作为兼容别名
+        raw_uwd = user_workspace_dir if user_workspace_dir is not None else workspace_dir
+        self.user_workspace_dir = Path(raw_uwd) if raw_uwd else None
+        self.workspace_dir = self.user_workspace_dir
+        if self.user_workspace_dir is not None and os.getenv("AGENT_RUNTIME", "").strip():
             logger.info(
-                "[AgentManager] enterprise init: agent_id=%s service_id=%s workspace=%s",
+                "[AgentManager] enterprise init: agent_id=%s service_id=%s user_workspace=%s",
                 agent_id,
                 service_id,
-                self.workspace_dir,
+                self.user_workspace_dir,
             )
 
     def _get_agent_create_lock(
@@ -422,9 +426,10 @@ class AgentManager:
             project_dir or None,
         )
         workspace_dir = None
-        if self.workspace_dir is not None and os.getenv("AGENT_RUNTIME", "").strip():
-            workspace_dir = str(self.workspace_dir)
-        agent = JiuWenSwarm(workspace_dir=workspace_dir)
+        user_workspace_dir = None
+        if self.user_workspace_dir is not None and os.getenv("AGENT_RUNTIME", "").strip():
+            user_workspace_dir = str(self.user_workspace_dir)
+        agent = JiuWenSwarm(user_workspace_dir=user_workspace_dir)
         await agent.create_instance(config, mode=mode_key, sub_mode=sub_mode_key or None)
         setattr(agent, "_jiuwenswarm_agent_cache_key", agent_cache_key)
         setattr(agent, "_jiuwenswarm_agent_mode", mode_key)

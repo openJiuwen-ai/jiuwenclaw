@@ -85,7 +85,7 @@ class TestTenantAgentPool(TestCase):
                 self.assertIsNot(mgr1, mgr3)
                 self.assertEqual(mgr1.agent_id, "a1")
                 self.assertEqual(mgr1.service_id, "s1")
-                self.assertIsNotNone(mgr1.workspace_dir)
+                self.assertIsNotNone(mgr1.user_workspace_dir)
 
             asyncio.run(_run())
 

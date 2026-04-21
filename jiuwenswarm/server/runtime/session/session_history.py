@@ -15,7 +15,7 @@ from jiuwenswarm.common.utils import get_agent_sessions_dir
 
 logger = logging.getLogger(__name__)
 _FILE_LOCK = threading.Lock()
-_WRITE_QUEUE: queue.Queue[tuple[str, dict[str, Any]]] = queue.Queue(maxsize=20000)
+_WRITE_QUEUE: queue.Queue[tuple[str, dict[str, Any], str | None]] = queue.Queue(maxsize=20000)
 _WORKER_STARTED = False
 _WORKER_LOCK = threading.Lock()
 _LEGACY_HISTORY_FILENAME = "history.json"
@@ -101,8 +101,11 @@ def _serialize_value(obj: Any) -> Any:
     return _serialize_value_with_flag(obj)[0]
 
 
-def _session_dir(session_id: str, *, create: bool = True) -> Path:
-    session_dir = get_agent_sessions_dir() / session_id
+def _session_dir(
+    session_id: str, *, create: bool = True, sessions_root: str | None = None
+) -> Path:
+    root = Path(sessions_root) if sessions_root else get_agent_sessions_dir()
+    session_dir = root / session_id
     if create:
         session_dir.mkdir(parents=True, exist_ok=True)
     return session_dir
@@ -150,12 +153,16 @@ def resolve_session_dir(
     return resolved, None
 
 
-def _history_file(session_id: str, *, create: bool = True) -> Path:
-    return _session_dir(session_id, create=create) / _LEGACY_HISTORY_FILENAME
+def _history_file(
+    session_id: str, *, create: bool = True, sessions_root: str | None = None
+) -> Path:
+    return _session_dir(session_id, create=create, sessions_root=sessions_root) / _LEGACY_HISTORY_FILENAME
 
 
-def _history_jsonl_file(session_id: str, *, create: bool = True) -> Path:
-    return _session_dir(session_id, create=create) / _JSONL_HISTORY_FILENAME
+def _history_jsonl_file(
+    session_id: str, *, create: bool = True, sessions_root: str | None = None
+) -> Path:
+    return _session_dir(session_id, create=create, sessions_root=sessions_root) / _JSONL_HISTORY_FILENAME
 
 
 def use_legacy_history_json() -> bool:
@@ -163,28 +170,28 @@ def use_legacy_history_json() -> bool:
     return raw in {"1", "true", "yes", "on"}
 
 
-def get_write_history_path(session_id: str) -> Path:
+def get_write_history_path(session_id: str, sessions_root: str | None = None) -> Path:
     """Return the preferred durable history write target for a session."""
     if use_legacy_history_json():
-        return _history_file(session_id)
-    return _history_jsonl_file(session_id)
+        return _history_file(session_id, sessions_root=sessions_root)
+    return _history_jsonl_file(session_id, sessions_root=sessions_root)
 
 
-def get_read_history_path(session_id: str) -> Path:
+def get_read_history_path(session_id: str, sessions_root: str | None = None) -> Path:
     """Return the preferred history source, falling back to legacy json."""
     if use_legacy_history_json():
-        legacy_path = _history_file(session_id, create=False)
+        legacy_path = _history_file(session_id, create=False, sessions_root=sessions_root)
         if legacy_path.exists():
             return legacy_path
-        jsonl_path = _history_jsonl_file(session_id, create=False)
+        jsonl_path = _history_jsonl_file(session_id, create=False, sessions_root=sessions_root)
         if jsonl_path.exists():
             return jsonl_path
         return legacy_path
 
-    jsonl_path = _history_jsonl_file(session_id, create=False)
+    jsonl_path = _history_jsonl_file(session_id, create=False, sessions_root=sessions_root)
     if jsonl_path.exists():
         return jsonl_path
-    legacy_path = _history_file(session_id, create=False)
+    legacy_path = _history_file(session_id, create=False, sessions_root=sessions_root)
     if legacy_path.exists():
         return legacy_path
     return jsonl_path
@@ -277,12 +284,12 @@ def _append_record_jsonl(path: Path, record: dict[str, Any]) -> None:
         fh.write("\n")
 
 
-def _ensure_jsonl_bootstrap(session_id: str) -> Path:
-    jsonl_path = _history_jsonl_file(session_id)
+def _ensure_jsonl_bootstrap(session_id: str, sessions_root: str | None = None) -> Path:
+    jsonl_path = _history_jsonl_file(session_id, sessions_root=sessions_root)
     if jsonl_path.exists():
         return jsonl_path
 
-    legacy_path = _history_file(session_id)
+    legacy_path = _history_file(session_id, sessions_root=sessions_root)
     if legacy_path.exists():
         legacy_records = _read_history(legacy_path)
         _write_records_to_path(jsonl_path, legacy_records)
@@ -291,12 +298,12 @@ def _ensure_jsonl_bootstrap(session_id: str) -> Path:
     return jsonl_path
 
 
-def _ensure_legacy_json_bootstrap(session_id: str) -> Path:
-    legacy_path = _history_file(session_id)
+def _ensure_legacy_json_bootstrap(session_id: str, sessions_root: str | None = None) -> Path:
+    legacy_path = _history_file(session_id, sessions_root=sessions_root)
     if legacy_path.exists():
         return legacy_path
 
-    jsonl_path = _history_jsonl_file(session_id)
+    jsonl_path = _history_jsonl_file(session_id, sessions_root=sessions_root)
     if jsonl_path.exists():
         jsonl_records = _read_history_jsonl(jsonl_path)
         _write_records_to_path(legacy_path, jsonl_records)
@@ -465,16 +472,16 @@ def read_session_history_records(session_id: str) -> list[dict[str, Any]]:
     return [item for item in all_records if isinstance(item, dict)]
 
 
-def _write_item(session_id: str, item: dict[str, Any]) -> None:
+def _write_item(session_id: str, item: dict[str, Any], sessions_root: str | None = None) -> None:
     with _FILE_LOCK:
         if use_legacy_history_json():
-            target_path = _ensure_legacy_json_bootstrap(session_id)
+            target_path = _ensure_legacy_json_bootstrap(session_id, sessions_root=sessions_root)
             records = _read_history(target_path)
             records.append(item)
             _write_records_to_path(target_path, records)
             return
 
-        target_path = _ensure_jsonl_bootstrap(session_id)
+        target_path = _ensure_jsonl_bootstrap(session_id, sessions_root=sessions_root)
         _append_record_jsonl(target_path, item)
 
 
@@ -488,9 +495,9 @@ def _ensure_worker_started() -> None:
 
         def _worker() -> None:
             while True:
-                sid, item = _WRITE_QUEUE.get()
+                sid, item, sessions_root = _WRITE_QUEUE.get()
                 try:
-                    _write_item(sid, item)
+                    _write_item(sid, item, sessions_root)
                 except Exception as exc:  # noqa: BLE001
                     logger.warning("history 异步写入失败: %s", exc)
                 finally:
@@ -513,6 +520,7 @@ def append_history_record(
     extra: dict[str, Any] | None = None,
     channel_metadata: dict[str, Any] | None = None,
     mode: str | None = None,
+    sessions_root: str | Path | None = None,
 ) -> None:
     """向指定 session 的当前激活历史文件异步追加一条记录."""
     sid = (session_id or "default").strip() or "default"
@@ -561,11 +569,12 @@ def append_history_record(
         item["mode"] = str(mode)
 
     _ensure_worker_started()
+    sessions_root_s = str(sessions_root) if sessions_root else None
     try:
-        _WRITE_QUEUE.put_nowait((sid, item))
+        _WRITE_QUEUE.put_nowait((sid, item, sessions_root_s))
     except queue.Full:
         # 队列满时退化为同步写，避免丢历史记录。
-        _write_item(sid, item)
+        _write_item(sid, item, sessions_root_s)
 
     # 更新会话元数据
     try:
@@ -585,6 +594,7 @@ def append_history_record(
             # 用户消息时刷新 last_user_message_at(用消息时间戳,比请求到达时刻更精确;
             # 与 AgentServer 的 _sync_chat_request_metadata 互补,覆盖所有记录用户消息的路径)
             last_user_message_at=float(timestamp) if role_norm == "user" else None,
+            sessions_root=sessions_root_s,
         )
         if role_norm == "user":
             set_session_delivery_context(

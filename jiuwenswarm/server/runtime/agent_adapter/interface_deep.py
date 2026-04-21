@@ -5245,7 +5245,11 @@ class JiuWenSwarmDeepAdapter:
         self._project_dir = self._instance_overrides.get(
             "project_dir", config.get("project_dir")
         )
-        self._workspace_dir = config.get("workspace_dir", str(get_agent_workspace_dir()))
+        # Keep constructor-injected tenant workspace by default.
+        # Only override when request explicitly provides workspace_dir.
+        configured_workspace = self._instance_overrides.get("workspace_dir")
+        if configured_workspace is not None:
+            self._workspace_dir = configured_workspace
         self._prompt_attachment_loader = PromptAttachmentLoader(self._prompt_attachment_root())
         self._prompt_attachment_loader.ensure_layout()
 

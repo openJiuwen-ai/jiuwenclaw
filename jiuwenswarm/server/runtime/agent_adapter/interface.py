@@ -46,7 +46,9 @@ from jiuwenswarm.extensions.hooks_context import MemoryHookContext
 from jiuwenswarm.common.schema.message import EventType, ReqMethod
 from jiuwenswarm.common.utils import (
     get_agent_home_dir,
+    get_agent_sessions_relative_dir,
     get_agent_workspace_dir,
+    get_agent_workspace_relative_dir,
     get_env_file,
     reset_free_search_runtime_flags,
 )
@@ -839,18 +841,37 @@ class JiuWenSwarm:
     - 公共编排（session 队列、Skills 路由、heartbeat、流式包装）
     """
 
-    def __init__(self, workspace_dir: str | None = None) -> None:
+    def __init__(
+        self,
+        workspace_dir: str | None = None,
+        user_workspace_dir: str | None = None,
+    ) -> None:
         self._adapter: AgentAdapter | None = None
         self._sdk_name: str | None = None
-        # 企业多租户：AGENT_RUNTIME 下使用传入的隔离 workspace
-        if workspace_dir and os.getenv("AGENT_RUNTIME", "").strip():
-            self._workspace_dir = workspace_dir
+        # 企业多租户：AGENT_RUNTIME 下 user_workspace_dir 为租户根，再拼相对 workspace/sessions
+        enterprise = bool(os.getenv("AGENT_RUNTIME", "").strip())
+        tenant_root = user_workspace_dir or (workspace_dir if enterprise else None)
+        if enterprise and tenant_root:
+            user_ws = Path(tenant_root)
+            self._workspace_dir = str(user_ws / get_agent_workspace_relative_dir())
+            self._sessions_dir: Path | None = user_ws / get_agent_sessions_relative_dir()
         else:
             self._workspace_dir = str(get_agent_workspace_dir())
+            self._sessions_dir = None
         self._skill_manager = SkillManager(workspace_dir=self._workspace_dir)
         self._session_manager = SessionManager()
         # SkillDev 模式：懒初始化，首次 skilldev.* 请求时构造
         self._skilldev_service = None
+
+    def _history_kwargs(self) -> dict[str, Any]:
+        """企业版 history/metadata 写入时附带 sessions_root."""
+        if self._sessions_dir is not None and os.getenv("AGENT_RUNTIME", "").strip():
+            return {"sessions_root": self._sessions_dir}
+        return {}
+
+    def _append_history_record(self, **kwargs: Any) -> None:
+        kwargs.update(self._history_kwargs())
+        append_history_record(**kwargs)
 
     def _get_skilldev_service(self):
         """懒初始化并返回 SkillDevService 实例.
@@ -1896,7 +1917,7 @@ class JiuWenSwarm:
                                 if isinstance(goal_obj, dict)
                                 else None
                             )
-                            append_history_record(
+                            self._append_history_record(
                                 session_id=session_id,
                                 request_id=request.request_id,
                                 channel_id=request.channel_id,
@@ -1986,7 +2007,7 @@ class JiuWenSwarm:
         # proactive_recommendation 是系统触发的推荐指令（不是用户说的话），不写 user
         # history——否则刷新页面会显示"[主动推荐指令] xxx"这种用户没说过的消息。
         if _should_record_user_history(request.params):
-            append_history_record(
+            self._append_history_record(
                 session_id=session_id,
                 request_id=request.request_id,
                 channel_id=request.channel_id,
@@ -2051,7 +2072,7 @@ class JiuWenSwarm:
             )
             if isinstance(content, str):
                 result.payload["content"] = content_str
-            append_history_record(
+            self._append_history_record(
                 session_id=session_id,
                 request_id=request.request_id,
                 channel_id=request.channel_id,
@@ -2227,7 +2248,7 @@ class JiuWenSwarm:
             request.req_method != ReqMethod.COMMAND_GOAL
             and _should_record_user_history(params_for_history)
         ):
-            append_history_record(
+            self._append_history_record(
                 session_id=session_id,
                 request_id=request.request_id,
                 channel_id=request.channel_id,
@@ -2341,7 +2362,7 @@ class JiuWenSwarm:
             durable_pending_final_chunks = []
             if not pending_text or pending_text == durable_final_content:
                 return
-            append_history_record(
+            self._append_history_record(
                 session_id=session_id,
                 request_id=rid,
                 channel_id=cid,
@@ -2449,7 +2470,7 @@ class JiuWenSwarm:
                     }
                     if error_type:
                         error_payload["error_type"] = error_type
-                    append_history_record(
+                    self._append_history_record(
                         session_id=session_id,
                         request_id=rid,
                         channel_id=cid,
@@ -2569,7 +2590,7 @@ class JiuWenSwarm:
                                 for pk in ("source", "proactive_type", "proactive_target"):
                                     if pk not in extra_fields and pk in request.params:
                                         extra_fields[pk] = request.params[pk]
-                                append_history_record(
+                                self._append_history_record(
                                     session_id=session_id,
                                     request_id=rid,
                                     channel_id=cid,
@@ -2680,7 +2701,7 @@ class JiuWenSwarm:
                             for pk in ("source", "proactive_type", "proactive_target"):
                                 if pk not in extra_fields and pk in request.params:
                                     extra_fields[pk] = request.params[pk]
-                            append_history_record(
+                            self._append_history_record(
                                 session_id=session_id,
                                 request_id=rid,
                                 channel_id=cid,
@@ -2741,7 +2762,7 @@ class JiuWenSwarm:
         if finalized_assistant_message and (
                 finalized_assistant_message != assistant_message or suppress_a2ui_stream
         ):
-            append_history_record(
+            self._append_history_record(
                 session_id=session_id,
                 request_id=rid,
                 channel_id=cid,

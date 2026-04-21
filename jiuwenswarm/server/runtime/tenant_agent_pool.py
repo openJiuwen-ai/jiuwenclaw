@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any, ClassVar
 
 from jiuwenswarm.common.schema.agent import AgentRequest, AgentResponse
-from jiuwenswarm.common.utils import AsyncLRUCache, get_user_home
+from jiuwenswarm.common.utils import AsyncLRUCache, get_multi_tenant_user_workspace_dir
 from jiuwenswarm.server.runtime.agent_manager import AgentManager
 
 logger = logging.getLogger(__name__)
@@ -92,14 +92,8 @@ class TenantAgentPool:
 
     @staticmethod
     def _build_workspace_path(service_id: str | None, agent_id: str | None) -> Path | None:
-        """企业租户工作目录: ~/.jiuwenswarm/service_{service_id}/agent_{agent_id}."""
-        if not service_id and not agent_id:
-            return None
-        root = get_user_home() / ".jiuwenswarm"
-        path = root / (f"service_{service_id}" if service_id else "service")
-        path = path / (f"agent_{agent_id}" if agent_id else "agents")
-        logger.debug("[TenantAgentPool] workspace=%s", path)
-        return path
+        """企业租户用户工作目录根路径."""
+        return get_multi_tenant_user_workspace_dir(service_id, agent_id)
 
     @staticmethod
     def _extract_ids(request: AgentRequest) -> tuple[str, str]:
@@ -135,7 +129,7 @@ class TenantAgentPool:
             manager = AgentManager(
                 agent_id=agent_id,
                 service_id=service_id or "",
-                workspace_dir=workspace,
+                user_workspace_dir=workspace,
             )
             await self._agent_wrappers.put(cache_key, manager)
             active = await self._agent_wrappers.keys()
