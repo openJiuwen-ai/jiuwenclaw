@@ -48,25 +48,25 @@ class AgentManager:
     - "default": 默认通道
     """
 
-    def __init__(self, agent_id: str, service_id: str, workspace_dir: Path | None = None) -> None:
+    def __init__(self, agent_id: str, service_id: str, user_workspace_dir: Path | None = None) -> None:
         """初始化 AgentManager.
 
         Args:
             agent_id: agent名称/路径
             service_id: 服务ID（chat_id + bot_app_id 组合）
-            workspace_dir: 工作目录路径
+            user_workspace_dir: 用户工作目录路径
         """
         self.agents: dict[str, dict[str, "JiuWenClaw"]] = {}
         self._client_capabilities_by_channel: dict[str, dict[str, Any]] = {}
         self._latest_env_overrides: dict[str, Any] = {}
         self.agent_id = agent_id
         self.service_id = service_id
-        self.workspace_dir = workspace_dir
+        self.user_workspace_dir = user_workspace_dir
         logger.info(
             "[AgentManager] 初始化: agent_id=%s, service_id=%s, workspace=%s",
             agent_id,
             service_id,
-            workspace_dir,
+            user_workspace_dir,
         )
 
     # pylint: disable=protected-access
@@ -92,10 +92,8 @@ class AgentManager:
                 os.environ[key] = str(env_value)
         logger.info("[AgentManager] Creating %s agent (mode=%s)", agent_key, mode)
 
-        agent_dir_path = str(self.workspace_dir) if self.workspace_dir else None
-        agent = JiuWenClaw(workspace_dir=agent_dir_path)
+        agent = JiuWenClaw(user_workspace_dir=str(self.user_workspace_dir) if self.user_workspace_dir else None)
         agent._agent_name = f"agent_{self.agent_id}_{self.service_id}_{agent_key}"
-        agent.workspace_dir = agent_dir_path
         await agent.create_instance(config, mode=mode)
         self.agents.setdefault(agent_key, {})[mode] = agent
         logger.info("[AgentManager] %s agent created for tenant %s", agent_key, self.agent_id)

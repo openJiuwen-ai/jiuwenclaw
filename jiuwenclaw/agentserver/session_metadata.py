@@ -15,7 +15,7 @@ from jiuwenclaw.utils import get_agent_sessions_dir
 logger = logging.getLogger(__name__)
 
 # ---------- 异步写入队列(与 session_history 保持一致的模式) ----------
-_METADATA_QUEUE: queue.Queue[tuple[str, dict[str, Any]]] = queue.Queue(maxsize=5000)
+_METADATA_QUEUE: queue.Queue[tuple[str, dict[str, Any], str | None]] = queue.Queue(maxsize=5000)
 _WORKER_STARTED = False
 _WORKER_LOCK = threading.Lock()
 _FILE_LOCK = threading.Lock()
@@ -33,14 +33,15 @@ def _current_timestamp() -> float:
     return datetime.now(timezone.utc).timestamp()
 
 
-def _metadata_file(session_id: str) -> Path:
+def _metadata_file(session_id: str, sessions_root: str | None = None) -> Path:
     """获取会话元数据文件路径"""
-    session_dir = get_agent_sessions_dir() / session_id
+    root = Path(sessions_root) if sessions_root else get_agent_sessions_dir()
+    session_dir = root / session_id
     session_dir.mkdir(parents=True, exist_ok=True)
     return session_dir / "metadata.json"
 
 
-def _read_metadata(session_id: str) -> dict[str, Any]:
+def _read_metadata(session_id: str, sessions_root: str | None = None) -> dict[str, Any]:
     """读取会话元数据(优先从内存缓存读取,避免异步写入未落盘时读到陈旧数据)
 
     读路径不应产生副作用：即便 session 目录不存在，也不触发 mkdir，
@@ -51,7 +52,8 @@ def _read_metadata(session_id: str) -> dict[str, Any]:
         cached = _METADATA_CACHE.get(session_id)
         if cached is not None:
             return cached.copy()
-    fpath = get_agent_sessions_dir() / session_id / "metadata.json"
+    root = Path(sessions_root) if sessions_root else get_agent_sessions_dir()
+    fpath = root / session_id / "metadata.json"
     if not fpath.exists():
         return {}
     try:
@@ -63,14 +65,14 @@ def _read_metadata(session_id: str) -> dict[str, Any]:
     return {}
 
 
-def _write_metadata_sync(session_id: str, metadata: dict[str, Any]) -> None:
+def _write_metadata_sync(session_id: str, metadata: dict[str, Any], sessions_root: str | None = None) -> None:
     """同步写入会话元数据(由后台 worker 或 fallback 调用)
 
     注意: 不更新 _METADATA_CACHE。缓存仅由 _enqueue_write 维护,
     避免 gateway 进程的 init_session_metadata 污染缓存导致后续
     读取不到 agentserver 进程写入的最新数据。
     """
-    fpath = _metadata_file(session_id)
+    fpath = _metadata_file(session_id, sessions_root)
     with _FILE_LOCK:
         fpath.write_text(
             json.dumps(metadata, ensure_ascii=False, indent=2),
@@ -88,9 +90,9 @@ def _ensure_worker_started() -> None:
 
         def _worker() -> None:
             while True:
-                sid, metadata = _METADATA_QUEUE.get()
+                sid, metadata, sessions_root = _METADATA_QUEUE.get()
                 try:
-                    _write_metadata_sync(sid, metadata)
+                    _write_metadata_sync(sid, metadata, sessions_root)
                 except Exception as exc:  # noqa: BLE001
                     logger.warning("metadata 异步写入失败: %s", exc)
                 finally:
@@ -101,16 +103,16 @@ def _ensure_worker_started() -> None:
         _WORKER_STARTED = True
 
 
-def _enqueue_write(session_id: str, metadata: dict[str, Any]) -> None:
+def _enqueue_write(session_id: str, metadata: dict[str, Any], sessions_root: str | None = None) -> None:
     """将写入操作放入异步队列,队列满时退化为同步写"""
     # 立即更新缓存,确保后续读取能看到最新状态
     with _CACHE_LOCK:
         _METADATA_CACHE[session_id] = metadata.copy()
     _ensure_worker_started()
     try:
-        _METADATA_QUEUE.put_nowait((session_id, metadata))
+        _METADATA_QUEUE.put_nowait((session_id, metadata, sessions_root))
     except queue.Full:
-        _write_metadata_sync(session_id, metadata)
+        _write_metadata_sync(session_id, metadata, sessions_root)
 
 
 def _auto_title(content: str) -> str:
@@ -128,6 +130,7 @@ def init_session_metadata(
     user_id: str = "",
     title: str = "",
     mode: str = "unknown",
+    sessions_root: str | Path | None = None,
 ) -> None:
     """初始化会话元数据(同步写,确保创建后立即可读)"""
     metadata = {
@@ -140,7 +143,8 @@ def init_session_metadata(
         "message_count": 0,
         "mode": mode,
     }
-    _write_metadata_sync(session_id, metadata)
+    sessions_root_s = str(sessions_root) if sessions_root else None
+    _write_metadata_sync(session_id, metadata, sessions_root_s)
 
 
 def update_session_metadata(
@@ -154,6 +158,7 @@ def update_session_metadata(
     user_content: str | None = None,
     channel_metadata: dict[str, Any] | None = None,
     mode: str | None = None,
+    sessions_root: str | Path | None = None,
 ) -> None:
     """更新会话元数据(异步写入,不阻塞调用方)
 
@@ -163,7 +168,8 @@ def update_session_metadata(
       - title=""    → 忽略（防御意外空值覆盖已有标题）
       - 若需显式清除标题，请设置 clear_title=True
     """
-    metadata = _read_metadata(session_id)
+    sessions_root_s = str(sessions_root) if sessions_root else None
+    metadata = _read_metadata(session_id, sessions_root_s)
 
     if not metadata:
         # 如果元数据不存在,创建新的(外部渠道隐式创建 session 的兜底)
@@ -211,7 +217,7 @@ def update_session_metadata(
         # 总是更新最后消息时间
         metadata["last_message_at"] = _current_timestamp()
 
-    _enqueue_write(session_id, metadata)
+    _enqueue_write(session_id, metadata, sessions_root_s)
 
 
 def get_session_metadata(session_id: str) -> dict[str, Any]:

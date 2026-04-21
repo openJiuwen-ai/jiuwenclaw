@@ -2,11 +2,10 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from pathlib import Path
 from typing import Any, ClassVar
 
 from jiuwenclaw.schema.agent import AgentRequest, AgentResponse, AgentResponseChunk
-from jiuwenclaw.utils import AsyncLRUCache
+from jiuwenclaw.utils import AsyncLRUCache, get_multi_tenant_user_workspace_dir
 
 logger = logging.getLogger(__name__)
 
@@ -160,7 +159,7 @@ class TenantAgentPool:
 
             try:
                 # 设置工作目录隔离
-                agent_dir_path = self._build_workspace_path(service_id, agent_id)
+                agent_dir_path = get_multi_tenant_user_workspace_dir(service_id, agent_id)
 
                 from jiuwenclaw.agentserver.agent_manager import AgentManager
 
@@ -168,7 +167,7 @@ class TenantAgentPool:
                 agent_manager = AgentManager(
                     agent_id=agent_id,
                     service_id=service_id,
-                    workspace_dir=agent_dir_path,
+                    user_workspace_dir=agent_dir_path,
                 )
 
                 # 存入 LRU 缓存
@@ -210,28 +209,6 @@ class TenantAgentPool:
             return future.result(timeout=1)
         except Exception:
             return None
-
-    @staticmethod
-    def _build_workspace_path(service_id: str, agent_id: str) -> Path:
-        """设置工作目录隔离.
-
-        路径格式: ~/.jiuwenclaw/service_{service_id}/agent_{agent_id}
-        例如: ~/.jiuwenclaw/service_chat123_bot456/agent_tenant_a
-
-        Args:
-            service_id: 服务ID
-            agent_id: agent名称/路径
-
-        Returns:
-            工作目录路径
-        """
-        if not service_id and not agent_id:
-            return None
-        agent_dir_path = Path.home() / ".jiuwenclaw"
-        agent_dir_path = agent_dir_path / f"service_{service_id}" if service_id else agent_dir_path / "service"
-        agent_dir_path = agent_dir_path / f"agent_{agent_id}" if agent_id else agent_dir_path / "agents"
-        logger.debug("[TenantAgentPool] 设置工作目录: %s", agent_dir_path)
-        return agent_dir_path
 
     async def process_message(self, request: AgentRequest) -> AgentResponse:
         """处理非流式请求."""

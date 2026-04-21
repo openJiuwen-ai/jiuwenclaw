@@ -929,6 +929,34 @@ def get_agent_root_dir() -> Path:
     return get_user_workspace_dir() / "agent"
 
 
+def get_agent_root_relative_dir() -> Path:
+    """Get the agent root relative path under user workspace."""
+    return Path("agent")
+
+
+def get_agent_workspace_relative_dir() -> Path:
+    """Get the agent workspace relative path under user workspace."""
+    return get_agent_root_relative_dir() / "jiuwenclaw_workspace"
+
+
+def get_agent_sessions_relative_dir() -> Path:
+    """Get the agent sessions relative path under user workspace."""
+    return get_agent_root_relative_dir() / "sessions"
+
+
+def get_multi_tenant_user_workspace_dir(service_id: str | None, agent_id: str | None) -> Path | None:
+    """Get multi-tenant user workspace directory path.
+
+    Path format: ~/.jiuwenclaw/service_{service_id}/agent_{agent_id}
+    """
+    if not service_id and not agent_id:
+        return None
+    workspace_dir = get_user_workspace_dir()
+    workspace_dir = workspace_dir / f"service_{service_id}" if service_id else workspace_dir / "service"
+    workspace_dir = workspace_dir / f"agent_{agent_id}" if agent_id else workspace_dir / "agents"
+    return workspace_dir
+
+
 def get_agent_home_dir() -> Path:
     return get_agent_root_dir() / "home"
 
