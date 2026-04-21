@@ -20,6 +20,7 @@ from jiuwenclaw.agentserver.deep_agent.permissions.owner_scopes import (
     TOOL_PERMISSION_CONTEXT,
     PermissionContext,
 )
+from jiuwenclaw.agentserver.cron_config import should_register_cron_tools
 from jiuwenclaw.utils import logger
 
 _MEMORY_WRITE_TOOLS = frozenset({"write_memory", "edit_memory"})
@@ -187,6 +188,11 @@ def _build_avatar_prompt(principal_user_id: str | None, language: str) -> str:
             identity = "你当前正在群聊场景中作为用户本人的数字分身发言。"
             perspective = "1. **第一人称视角**：始终以用户本人的身份和口吻回复，使用\"我\"而非\"他/她\"。"
             boundary = "2. **承诺边界**：不要代替用户做出超出已知信息范围的承诺或决定。如果上下文不足，坦诚说明需要确认，而非编造事实。"
+        cron_capability = (
+            "- **定时任务**：可以正常创建并执行 cron 任务和 heartbeat 任务\n"
+            if should_register_cron_tools()
+            else ""
+        )
         return f"""---
 
 # 数字分身模式
@@ -205,7 +211,7 @@ def _build_avatar_prompt(principal_user_id: str | None, language: str) -> str:
 数字分身模式**不限制**你的任何 agent 能力，以下功能照常执行：
 - **工具调用**：所有工具（文件操作、搜索、代码执行等）正常使用
 - **待办管理**：todo_create / todo_complete / todo_insert 等正常使用
-- **定时任务**：可以正常创建并执行 cron 任务和 heartbeat 任务
+{cron_capability.rstrip()}
 - **技能调用**：所有已注册技能正常使用
 """
     if principal_user_id:

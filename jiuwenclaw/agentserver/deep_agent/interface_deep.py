@@ -90,6 +90,7 @@ from jiuwenclaw.agentserver.memory import clear_memory_manager_cache
 from jiuwenclaw.agentserver.memory.config import (clear_config_cache, get_memory_mode, is_memory_enabled,
                                                   is_proactive_memory)
 from jiuwenclaw.agentserver.permissions.checker import TOOL_PERMISSION_CHANNEL_ID
+from jiuwenclaw.agentserver.cron_config import should_register_cron_tools
 from jiuwenclaw.agentserver.skill_manager import SkillManager
 from jiuwenclaw.agentserver.tools.multimodal_config import (
     apply_audio_model_config_from_yaml,
@@ -1421,6 +1422,9 @@ class JiuWenClawDeepAdapter:
 
     def _build_cron_tools(self) -> list[Any]:
         """Build cron tools from the shared runtime bridge."""
+        if not should_register_cron_tools():
+            logger.info("[JiuWenClawDeepAdapter] skip cron tool build: disabled by env")
+            return []
         agent_id = self._instance.card.id if self._instance else None
         return self._cron_runtime.build_tools(context=self._runtime_cron_tool_context, agent_id=agent_id)
 
@@ -1787,7 +1791,11 @@ class JiuWenClawDeepAdapter:
     ) -> None:
         """注册 cron 和 send_file 工具（与 mode 无关，每次请求刷新）。"""
         # 定时工具：按当前 session 的 channel 注册（contextvar 已由 _bind_runtime_cron_context 设置）
-        if not (session_id.startswith("heartbeat") or session_id.startswith("cron")):
+        normalized_session_id = session_id or ""
+        if (
+                should_register_cron_tools()
+                and not (normalized_session_id.startswith("heartbeat") or normalized_session_id.startswith("cron"))
+        ):
             try:
                 cron_tools = self._build_cron_tools()
                 if cron_tools:
@@ -1799,6 +1807,11 @@ class JiuWenClawDeepAdapter:
                     logger.info("[JiuWenClawDeepAdapter] Cron tools registered successfully")
             except Exception as exc:
                 logger.error("[JiuWenClawDeepAdapter] 定时工具注册失败: %s", exc)
+        elif not (normalized_session_id.startswith("heartbeat") or normalized_session_id.startswith("cron")):
+            logger.info("[JiuWenClawDeepAdapter] skip cron tools registration: disabled by env")
+            for existing in list(self._instance.ability_manager.list() or []):
+                if getattr(existing, "name", "").startswith("cron_"):
+                    self._instance.ability_manager.remove(existing.name)
 
         # send_file 工具：由 channels.<channel>.send_file_allowed 控制，每次请求重新注册
         # channel_id/metadata 由调用前的 _bind_runtime_cron_context 已写入 contextvar

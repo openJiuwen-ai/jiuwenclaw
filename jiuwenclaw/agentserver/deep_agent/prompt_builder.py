@@ -4,6 +4,7 @@ from typing import Optional
 import sys
 
 from openjiuwen.harness.prompts import SystemPromptBuilder, PromptSection, resolve_language
+from jiuwenclaw.agentserver.cron_config import should_register_cron_tools
 from jiuwenclaw.utils import logger
 
 from jiuwenclaw.utils import (
@@ -17,6 +18,10 @@ from jiuwenclaw.utils import (
 
 def _get_config_dir() -> "Path":
     return get_user_workspace_dir() / "config"
+
+
+def _should_show_cron_tools() -> bool:
+    return should_register_cron_tools()
 
 
 class PromptPriority(IntEnum):
@@ -33,67 +38,76 @@ class PromptPriority(IntEnum):
 
 
 def _response_prompt(language: str) -> PromptSection:
+    if _should_show_cron_tools():
+        zh_system_type = "【cron 或 heartbeat 或 notify】"
+        zh_cron_note = "- **cron**：定时任务，如「每日提醒」「周报汇总」。\n"
+        en_system_type = "【cron or heartbeat or notify】"
+        en_cron_note = '- **cron**: Scheduled tasks, e.g. "daily reminder", "weekly summary".\n'
+    else:
+        zh_system_type = "【heartbeat 或 notify】"
+        zh_cron_note = ""
+        en_system_type = "【heartbeat or notify】"
+        en_cron_note = ""
+
     if language == "cn":
-        content = """# 消息说明
+        content = f"""# 消息说明
 
 你会收到用户消息和系统消息，需按来源和类型分别处理。
 
 ## 用户消息
 
 ```json
-{
+{{
   "channel": "【频道来源，如 feishu / telegram / web】",
   "preferred_response_language": "【en 或 zh】",
   "content": "【用户消息内容】",
   "source": "user"
-}
+}}
 ```
 
 ## 系统消息
 
 ```json
-{
-  "type": "【cron 或 heartbeat 或 notify】",
+{{
+  "type": "{zh_system_type}",
   "preferred_response_language": "【en 或 zh】",
   "content": "【任务信息】",
   "source": "system"
-}
+}}
 ```
 
-- **cron**：定时任务，如「每日提醒」「周报汇总」。
-- **heartbeat**：心跳任务，如「检查待办」「同步状态」。
+{zh_cron_note}- **heartbeat**：心跳任务，如「检查待办」「同步状态」。
 
 系统任务完成后，以回复形式通知用户。
 """
     else:
-        content = """# Message Format
+        content = f"""# Message Format
 
 You receive user messages and system messages; handle each by source and type.
 
 ## User Message
 
 ```json
-{
+{{
   "channel": "【channel source, e.g. feishu / telegram / web】",
   "preferred_response_language": "【en or zh】",
   "content": "【user message content】",
   "source": "user"
-}
+}}
 ```
 
 ## System Message
 
 ```json
-{
-  "type": "【cron or heartbeat or notify】",
+{{
+  "type": "{en_system_type}",
   "preferred_response_language": "【en or zh】",
   "content": "【task info】",
   "source": "system"
-}
+}}
 ```
 
-- **cron**: Scheduled tasks, e.g. "daily reminder", "weekly summary".
-- **heartbeat**: Heartbeat tasks, e.g. "check todos", "sync status".
+{en_cron_note}- **heartbeat**: Heartbeat tasks, e.g. "check todos", "sync status".
 
 After completing a system task, notify the user via a reply.
 """

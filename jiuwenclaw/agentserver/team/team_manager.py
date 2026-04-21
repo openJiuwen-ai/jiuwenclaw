@@ -82,29 +82,33 @@ class TeamManager:
         request_metadata: dict[str, Any] | None,
     ) -> None:
         from jiuwenclaw.config import get_config
+        from jiuwenclaw.agentserver.cron_config import should_register_cron_tools
         from jiuwenclaw.agentserver.deep_agent.cron_runtime import CronRuntimeBridge
         from jiuwenclaw.agentserver.tools.send_file_to_user import SendFileToolkit
         from openjiuwen.core.runner import Runner
 
         agent_id = getattr(getattr(agent, "card", None), "id", None)
-        cron_runtime = CronRuntimeBridge()
-        cron_context = SimpleNamespace(
-            tool_scope=f"team_member_{agent_id or 'unknown'}",
-            channel_id=channel_id or "web",
-            session_id=session_id,
-            metadata=request_metadata,
-            mode="team",
-        )
+        if should_register_cron_tools():
+            cron_runtime = CronRuntimeBridge()
+            cron_context = SimpleNamespace(
+                tool_scope=f"team_member_{agent_id or 'unknown'}",
+                channel_id=channel_id or "web",
+                session_id=session_id,
+                metadata=request_metadata,
+                mode="team",
+            )
 
-        try:
-            cron_tools = cron_runtime.build_tools(context=cron_context, agent_id=agent_id)
-            for cron_tool in cron_tools:
-                if not Runner.resource_mgr.get_tool(cron_tool.card.id):
-                    Runner.resource_mgr.add_tool(cron_tool)
-                agent.ability_manager.add(cron_tool.card)
-            logger.info("[TeamManager] Registered %d cron tools for member agent=%s", len(cron_tools), agent_id)
-        except Exception as exc:
-            logger.warning("[TeamManager] cron tool registration failed for member agent=%s: %s", agent_id, exc)
+            try:
+                cron_tools = cron_runtime.build_tools(context=cron_context, agent_id=agent_id)
+                for cron_tool in cron_tools:
+                    if not Runner.resource_mgr.get_tool(cron_tool.card.id):
+                        Runner.resource_mgr.add_tool(cron_tool)
+                    agent.ability_manager.add(cron_tool.card)
+                logger.info("[TeamManager] Registered %d cron tools for member agent=%s", len(cron_tools), agent_id)
+            except Exception as exc:
+                logger.warning("[TeamManager] cron tool registration failed for member agent=%s: %s", agent_id, exc)
+        else:
+            logger.info("[TeamManager] skip cron tool registration for member agent=%s: disabled by env", agent_id)
 
         if not request_id or not channel_id:
             logger.info("[TeamManager] SendFileToolkit skipped: missing request_id or channel_id")
