@@ -127,11 +127,7 @@ class TelegramChannel(BaseChannel):
                 allowed_updates=Update.ALL_TYPES, drop_pending_updates=True
             )
 
-            logger.info(
-                "Telegram Bot 已启动 (token: {}...{})".format(
-                    self.config.bot_token[:10], self.config.bot_token[-5:]
-                )
-            )
+            logger.info("Telegram Bot 已启动")
 
             # 持续运行直到停止
             while self._running:
@@ -397,7 +393,9 @@ class TelegramChannel(BaseChannel):
             channel_id=self.channel_id,
             source="telegram",
             extra={
-                "bot_token": f"{self.config.bot_token[:10]}...{self.config.bot_token[-5:]}",
+                "bot_token_configured": bool(
+                    self.config.bot_token and self.config.bot_token.strip()
+                ),
                 "parse_mode": self.config.parse_mode,
             },
         )

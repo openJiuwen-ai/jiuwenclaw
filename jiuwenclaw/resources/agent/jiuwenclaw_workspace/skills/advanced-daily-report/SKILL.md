@@ -75,7 +75,7 @@ daily-report/
 
 **脚本会自动采集以下数据**：
 - **Git 提交记录**：通过 `git log` 命令读取 `D:/Download/jiuwenclaw` 仓库的提交历史
-- **邮箱邮件统计**：通过 IMAP 协议连接 `zxworkem@163.com` 读取邮件统计（需要邮箱授权码）
+- **邮箱邮件统计**：通过 IMAP 协议连接 `.env` 中配置的邮箱账户读取邮件统计（需要邮箱授权码）
 - **记忆系统**：读取 `~/.jiuwenclaw/agent/memory/` 目录下的每日记忆文件
 - **待办事项**：读取 `~/.jiuwenclaw/agent/sessions/` 下各会话的 `todo.md` 文件
 
@@ -209,8 +209,8 @@ python ~/.jiuwenclaw/agent/skills/daily-report/run_report.py monthly --year 2026
 在 `.env` 文件中配置（本项目实际配置）：
 
 ```env
-EMAIL_ADDRESS=zxworkem@163.com
-EMAIL_TOKEN=UFvBrE7ZDAsT2xdP
+EMAIL_ADDRESS=
+EMAIL_TOKEN=
 EMAIL_PROVIDER=163
 ```
 
