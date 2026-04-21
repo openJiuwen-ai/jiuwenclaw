@@ -38,9 +38,11 @@ class LoggingTagConfig:
         if self._skip_env_load:
             return
 
-        # 如果配置文件路径未指定，使用默认路径
+        # 如果配置文件路径未指定，使用默认路径（与 utils.get_user_workspace_dir 一致）
         if self._config_file_path is None:
-            self._config_file_path = Path.home() / ".jiuwenclaw" / "config" / "config.yaml"
+            from jiuwenclaw.utils import get_user_workspace_dir
+
+            self._config_file_path = get_user_workspace_dir() / "config" / "config.yaml"
 
         # 加载配置（优先级：环境变量 > config.yaml > 默认值）
         self._load_config()

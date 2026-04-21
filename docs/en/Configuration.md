@@ -69,6 +69,7 @@ Edit **`config/config.yaml`** or **`.env`** directly; there is no UI for these.
 | `PLAYWRIGHT_TOOL_TIMEOUT_S` | Playwright tool timeout (seconds) |
 | `BROWSER_TIMEOUT_S` | Browser task timeout (seconds) |
 | `JIUWENCLAW_CONFIG_DIR` | Custom config directory |
+| `JIUWENCLAW_DATA_DIR` | Absolute path to the user data root (`config/`, `agent/`, `.logs`, etc.). If unset, defaults to `~/.jiuwenclaw`. Set in the shell or service environment **before** starting the process so workspace paths resolve from the first import; defining it only in `config/.env` is often too late for that bootstrap. |
 
 See `.env.template` for more variables.
 

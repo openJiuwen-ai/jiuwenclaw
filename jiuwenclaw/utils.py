@@ -2,16 +2,17 @@
 
 """Path management for JiuWenClaw.
 
-Runtime layout:
-- ~/.jiuwenclaw/config/config.yaml
-- ~/.jiuwenclaw/config/.env
-- ~/.jiuwenclaw/agent/home
-- ~/.jiuwenclaw/agent/memory
-- ~/.jiuwenclaw/agent/skills
-- ~/.jiuwenclaw/agent/sessions
-- ~/.jiuwenclaw/agent/workspace（运行时文件与 agent-data.json）
-- ~/.jiuwenclaw/agent/.checkpoint
-- ~/.jiuwenclaw/agent/.logs（gateway.log / channel.log / agent_server.log / full.log）
+Runtime layout（根目录见 ``USER_WORKSPACE_DIR``：默认 ``~/.jiuwenclaw``；若设置环境变量
+``JIUWENCLAW_DATA_DIR`` 则为该路径本身，须为可直接使用的绝对路径，由宿主负责拼出 ``…/.jiuwenclaw`` 等布局）:
+- <workspace>/config/config.yaml
+- <workspace>/config/.env
+- <workspace>/agent/home
+- <workspace>/agent/memory
+- <workspace>/agent/skills
+- <workspace>/agent/sessions
+- <workspace>/agent/workspace（运行时文件与 agent-data.json）
+- <workspace>/agent/.checkpoint
+- <workspace>/agent/.logs（gateway.log / channel.log / agent_server.log / full.log）
 
 内置模板位于包内 ``jiuwenclaw/resources/``（含 ``agent/`` 下 HEARTBEAT_ZH/EN、PRINCIPLE、TONE 等，以及 ``skills_state.json``）。
 """
@@ -29,6 +30,11 @@ import logging
 import shutil
 from ruamel.yaml import YAML
 
+# 用户数据根（config、agent、.logs 等）。供 config 模块在 import 时读取；仅依赖 os/path，不引用本包其它模块。
+_raw_data_dir = os.environ.get("JIUWENCLAW_DATA_DIR", "").strip()
+USER_WORKSPACE_DIR = (
+    Path(_raw_data_dir).expanduser().resolve() if _raw_data_dir else Path.home() / ".jiuwenclaw"
+)
 
 _user_home: Path | None = None
 
@@ -61,7 +67,9 @@ def set_user_home(path: Path, initialized: bool = False) -> None:
 
 
 def get_user_workspace_dir() -> Path:
-    """Get the user workspace directory path (~/.jiuwenclaw or custom path)."""
+    """用户数据根目录：若设置 ``JIUWENCLAW_DATA_DIR`` 则为其解析路径，否则为 ``<user home>/.jiuwenclaw``。"""
+    if _raw_data_dir:
+        return USER_WORKSPACE_DIR
     return get_user_home() / ".jiuwenclaw"
 
 
