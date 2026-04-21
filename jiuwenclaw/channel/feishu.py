@@ -102,7 +102,15 @@ class _ThreadLocalLoopProxy:
     @staticmethod
     def _get_loop() -> asyncio.AbstractEventLoop:
         try:
-            return asyncio.get_event_loop()
+            return asyncio.get_running_loop()
+        except RuntimeError:
+            pass
+
+        try:
+            loop = asyncio.get_event_loop()
+            if loop.is_closed():
+                raise RuntimeError("event loop is closed")
+            return loop
         except RuntimeError:
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
@@ -322,6 +330,8 @@ class FeishuChannel(BaseChannel):
 
     def _start_websocket_in_thread(self) -> None:
         """在独立线程中启动WebSocket客户端，避免事件循环冲突。"""
+        self._websocket_client = None
+        self._ws_thread_loop = None
         config = {
             "app_id": self.config.app_id,
             "app_secret": self.config.app_secret,
@@ -395,7 +405,7 @@ class FeishuChannel(BaseChannel):
     def _cleanup_websocket_thread(self, ws_client: Any, loop: asyncio.AbstractEventLoop) -> None:
         """清理WebSocket线程资源。"""
 
-        if ws_client is None:
+        if self._websocket_client is ws_client:
             self._websocket_client = None
 
         try:
@@ -413,7 +423,8 @@ class FeishuChannel(BaseChannel):
         except Exception:
             pass
 
-        self._ws_thread_loop = None
+        if self._ws_thread_loop is loop:
+            self._ws_thread_loop = None
 
     def _wait_for_websocket_client_ready(self) -> None:
         """等待WebSocket客户端创建完成。"""
@@ -440,6 +451,8 @@ class FeishuChannel(BaseChannel):
         if self._websocket_thread and self._websocket_thread.is_alive():
             self._websocket_thread.join(timeout=2.0)
 
+        self._websocket_client = None
+        self._ws_thread_loop = None
         logger.info("飞书机器人已停止")
         self._stopping = False
 

@@ -185,6 +185,16 @@ task_memory:
   summary_algo: ACE
 
 gateway:
+  # AgentServer client mode.
+  # websocket: default ws client
+  # yuanrong_frontend: provided by AgentServerClientExtension
+  agent_client:
+    type: websocket # websocket | yuanrong_frontend
+    frontend_endpoint:
+    function_version_urn:
+    concurrency: 1
+    invoke_timeout_s: 60
+
   # SessionMap 仅用于企业claw场景，如 feishu_enterprise 等通道：将平台身份映射为 Agent 的 session_id。
   # 取值：per_chat_bot（默认，同 chat+bot 共享会话）, per_chat_bot_user（按 user 分会话）
   session_map_scope: per_chat_bot
@@ -497,10 +507,9 @@ updater:
   timeout_seconds: 20
 
 extensions:
-  # 扩展包搜索目录（字符串），用 ';' 分割多个目录：
-  # EXTENSION_DIRS="E:/a;D:/b"
-  extension_dirs: ${EXTENSION_DIRS:-}
-
+   # 扩展包搜索目录（字符串），用 ';' 分割多个目录：
+   # EXTENSION_DIRS="E:/a;D:/b"; 默认会加载仓库根目录 extensions
+   extension_dirs: ${EXTENSION_DIRS:-extensions}
 
 team:
   team_name: jiuwen_team

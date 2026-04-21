@@ -54,6 +54,21 @@ class LoggingLevels:
     full: int
 
 
+@dataclass
+class FileTransferStartParams:
+    """文件传输开始参数（用于封装多参数方法调用）."""
+
+    transfer_id: str
+    filename: str
+    file_size: int
+    sha256: str
+    total_chunks: int
+    chunk_size: int
+    mime_type: str = ""
+    session_id: str = ""
+    channel_id: str = ""
+
+
 class SafeRotatingFileHandler(BaseRotatingHandler):
     """Safe rotating file handler"""
 

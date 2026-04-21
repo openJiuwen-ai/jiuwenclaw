@@ -117,3 +117,44 @@ ACP_SESSION_UPDATE_KINDS: tuple[str, ...] = (
     "session_info_update",
     "usage_update",
 )
+
+# ===========================================================================
+# 文件传输协议常量
+# ===========================================================================
+
+# Gateway → AgentServer（RPC 请求）
+FILE_TRANSFER_START = "file.transfer.start"
+FILE_TRANSFER_CHUNK = "file.transfer.chunk"
+FILE_TRANSFER_COMPLETE = "file.transfer.complete"
+
+# AgentServer → Gateway（事件推送）
+FILE_DOWNLOAD_START = "file.download.start"
+FILE_DOWNLOAD_CHUNK = "file.download.chunk"
+FILE_DOWNLOAD_COMPLETE = "file.download.complete"
+
+# 文件传输错误类型
+FILE_TRANSFER_ERROR_TIMEOUT = "file.transfer.timeout"
+FILE_TRANSFER_ERROR_CHECKSUM_MISMATCH = "file.transfer.checksum_mismatch"
+FILE_TRANSFER_ERROR_CHUNK_MISSING = "file.transfer.chunk_missing"
+FILE_TRANSFER_ERROR_SIZE_EXCEEDED = "file.transfer.size_exceeded"
+FILE_TRANSFER_ERROR_INVALID_FILE = "file.transfer.invalid_file"
+
+# 文件传输事件类型集合
+FILE_TRANSFER_EVENT_TYPES: tuple[str, ...] = (
+    FILE_TRANSFER_START,
+    FILE_TRANSFER_CHUNK,
+    FILE_TRANSFER_COMPLETE,
+    FILE_DOWNLOAD_START,
+    FILE_DOWNLOAD_CHUNK,
+    FILE_DOWNLOAD_COMPLETE,
+)
+
+# 文件传输错误类型集合
+FILE_TRANSFER_ERROR_TYPES: tuple[str, ...] = (
+    FILE_TRANSFER_ERROR_TIMEOUT,
+    FILE_TRANSFER_ERROR_CHECKSUM_MISMATCH,
+    FILE_TRANSFER_ERROR_CHUNK_MISSING,
+    FILE_TRANSFER_ERROR_SIZE_EXCEEDED,
+    FILE_TRANSFER_ERROR_INVALID_FILE,
+)
+
