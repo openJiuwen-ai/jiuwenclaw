@@ -50,6 +50,16 @@ class AgentServerChatHookContext:
 
 
 @dataclass
+class AgentWsServerStartHookContext:
+    """AgentWebSocketServer.start 入口、create_instance 之前"""
+
+    skills_dir: str
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass
 class SystemPromptHookContext:
     # 扩展可设置此目录，用于覆盖默认的 home_dir
     home_dir: str | None = None

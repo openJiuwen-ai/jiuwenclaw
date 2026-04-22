@@ -32,7 +32,7 @@ from jiuwenclaw.schema.agent import AgentRequest, AgentResponse, AgentResponseCh
 from jiuwenclaw.schema.hook_event import AgentServerHookEvents
 from jiuwenclaw.agentserver.extensions import get_rail_manager
 from jiuwenclaw.agentserver.permissions.patterns import persist_cli_trusted_directory
-from jiuwenclaw.schema.hooks_context import AgentServerChatHookContext
+from jiuwenclaw.schema.hooks_context import AgentServerChatHookContext, AgentWsServerStartHookContext
 from jiuwenclaw.agentserver.agent_manager import AgentManager, ACP_DEFAULT_CAPABILITIES
 from jiuwenclaw.agentserver.permissions.config_rpc import get_permissions_config_req_methods
 from jiuwenclaw.agentserver.tenant_agent_pool import TenantAgentPool
@@ -166,6 +166,7 @@ class AgentWebSocketServer:
 
     async def start(self) -> None:
         """启动 WebSocket 服务端，开始监听连接。优先使用 legacy.server.serve 以与 Gateway 的 legacy client 握手兼容."""
+        await self._trigger_before_ws_server_start_hook()
         # 初始化 TenantAgentPool
         if self._agent_manager is None:
             self._agent_manager = TenantAgentPool.get_instance()
@@ -436,6 +437,15 @@ class AgentWebSocketServer:
             )
             async with send_lock:
                 await ws.send(json.dumps(wire, ensure_ascii=False))
+
+    @staticmethod
+    async def _trigger_before_ws_server_start_hook() -> None:
+        """在首次启动之前触发扩展；未初始化 ExtensionRegistry 时跳过。"""
+        from jiuwenclaw.extensions.registry import ExtensionRegistry
+        from jiuwenclaw.utils import get_agent_skills_dir
+
+        ctx = AgentWsServerStartHookContext(skills_dir=str(get_agent_skills_dir()))
+        await ExtensionRegistry.get_instance().trigger(AgentServerHookEvents.BEFORE_WS_SERVER_START, ctx)
 
     @staticmethod
     def _should_trigger_before_chat_request_hook(request: AgentRequest) -> bool:
