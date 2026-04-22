@@ -167,9 +167,11 @@ def _parse_log_level(name: str, default: int = logging.INFO) -> int:
 
 
 def _log_component_from_logger_name(name: str) -> str:
-    """按 ``logging.getLogger(__name__)`` 的 logger 名划分 gateway / channel / agent_server。"""
+    """按 ``logging.getLogger(__name__)`` 的 logger 名划分 gateway / channel / agent_server / permissions。"""
     if name.startswith("jiuwenclaw.channel"):
         return "channel"
+    if name.startswith("jiuwenclaw.agentserver.permissions.checker"):
+        return "permissions"
     if name.startswith("jiuwenclaw.agentserver"):
         return "agent_server"
     return "gateway"
@@ -184,6 +186,17 @@ class _ComponentNameFilter(logging.Filter):
 
     def filter(self, record: logging.LogRecord) -> bool:
         return _log_component_from_logger_name(record.name) == self.component
+
+
+class _CompositeFilter(logging.Filter):
+    """组合多个过滤器，任一通过即放行"""
+
+    def __init__(self, filters: list[logging.Filter]) -> None:
+        super().__init__()
+        self.filters = filters
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        return any(f.filter(record) for f in self.filters)
 
 
 def _load_logging_config_from_yaml() -> dict[str, Any]:
@@ -1199,6 +1212,13 @@ class SensitiveDataFilter(logging.Filter):
         return True
 
 
+class JsonOnlyFormatter(logging.Formatter):
+    """只输出message内容，不添加任何前缀（时间戳、级别、logger名）"""
+
+    def format(self, record: logging.LogRecord) -> str:
+        return record.getMessage()
+
+
 def setup_logger(log_level: Optional[str] = None) -> logging.Logger:
     """配置 ``jiuwenclaw`` 根日志：控制台 + 分组件文件 + 汇总 full.log。
 
@@ -1234,6 +1254,7 @@ def setup_logger(log_level: Optional[str] = None) -> logging.Logger:
         filename: str,
         level: int,
         name_filter: Optional[_ComponentNameFilter] = None,
+        custom_formatter: Optional[logging.Formatter] = None,
     ) -> None:
         h = SafeRotatingFileHandler(
             filename=logs_root / filename,
@@ -1242,7 +1263,7 @@ def setup_logger(log_level: Optional[str] = None) -> logging.Logger:
             encoding="utf-8",
         )
         h.setLevel(level)
-        h.setFormatter(formatter)
+        h.setFormatter(custom_formatter if custom_formatter is not None else formatter)
         h.addFilter(privacy_filter)
         if name_filter is not None:
             h.addFilter(name_filter)
@@ -1250,8 +1271,11 @@ def setup_logger(log_level: Optional[str] = None) -> logging.Logger:
 
     _add_rotating("gateway.log", levels.gateway, _ComponentNameFilter("gateway"))
     _add_rotating("channel.log", levels.channel, _ComponentNameFilter("channel"))
-    _add_rotating("agent_server.log", levels.agent_server, _ComponentNameFilter("agent_server"))
+    _add_rotating("agent_server.log", levels.agent_server,
+        _CompositeFilter([_ComponentNameFilter("agent_server"), _ComponentNameFilter("permissions")]))
     _add_rotating("full.log", levels.full, None)
+    json_formatter = JsonOnlyFormatter()
+    _add_rotating("permissions.log", levels.agent_server, _ComponentNameFilter("permissions"), json_formatter)
 
     stream_handler = logging.StreamHandler()
     stream_handler.setLevel(levels.console)

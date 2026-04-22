@@ -21,6 +21,8 @@ import json
 import logging
 import re
 import shlex
+from datetime import datetime, timezone
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Awaitable, Callable, List
 
@@ -42,6 +44,37 @@ from jiuwenclaw.agentserver.permissions.patterns import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass
+class ToolPermissionLog:
+    """工具权限审批日志"""
+    tool: str
+    decision: str  # ALLOW / DENY / ASK / SKIP
+    source: str    # system / user
+    rule: str
+    tag: str = "TOOL_PERMISSION"
+    user_decision: str | None = None  # allow_always / allow_once / deny / timeout
+    timestamp: str | None = None
+    channel: str | None = None
+    session_id: str | None = None
+
+    def to_json(self) -> str:
+        _ts = self.timestamp or datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
+        data = {
+            "timestamp": _ts,
+            "tag": self.tag,
+            "tool": self.tool,
+            "decision": self.decision,
+            "source": self.source,
+            "rule": self.rule,
+        }
+        if self.user_decision:
+            data["user_decision"] = self.user_decision
+        data["channel"] = self.channel or "empty"
+        data["session_id"] = self.session_id or "empty"
+        return json.dumps(data, ensure_ascii=False)
+
 
 # 当前 asyncio Task 的 channel_id（供工具权限判断）；由 interface 在 run_agent 前 set、结束后 reset。
 # 不放入 Runner inputs，避免扩展对外契约。
@@ -118,10 +151,14 @@ async def check_tool_permissions(
 
     normalized_channel_id = (channel_id or "").strip()
     if normalized_channel_id not in PERMISSION_ENABLED_CHANNELS:
-        logger.info(
-            "[PermissionEngine] permission.batch.skip channel=%s",
-            normalized_channel_id or "(empty)",
-        )
+        logger.info(ToolPermissionLog(
+            tool="N/A",
+            decision="SKIP",
+            source="system",
+            rule="channel_filter",
+            channel=normalized_channel_id,
+            session_id=session_id,
+        ).to_json())
         return list(tool_calls), []
 
     allowed: List[Any] = []
@@ -147,48 +184,84 @@ async def check_tool_permissions(
 
         if result.is_allowed:
             allowed.append(tc)
-            logger.info(
-                "[PermissionEngine] permission.batch.result tool=%s decision=allow matched_rule=%s",
-                tool_name, result.matched_rule,
-            )
+            logger.info(ToolPermissionLog(
+                tool=tool_name,
+                decision="ALLOW",
+                source="system",
+                rule=result.matched_rule or "N/A",
+                channel=normalized_channel_id,
+                session_id=session_id,
+            ).to_json())
         elif result.is_denied:
             deny_msg = f"[PERMISSION_DENIED] {result.reason or 'Operation not allowed'}"
             denied.append((tc, deny_msg))
-            logger.warning(
-                "[PermissionEngine] permission.batch.result tool=%s decision=deny matched_rule=%s",
-                tool_name, result.matched_rule,
-            )
+            logger.warning(ToolPermissionLog(
+                tool=tool_name,
+                decision="DENY",
+                source="system",
+                rule=result.matched_rule or "N/A",
+                channel=normalized_channel_id,
+                session_id=session_id,
+            ).to_json())
         elif result.needs_approval:
-            logger.info(
-                "[PermissionEngine] permission.batch.result tool=%s decision=ask matched_rule=%s",
-                tool_name, result.matched_rule,
-            )
+            logger.info(ToolPermissionLog(
+                tool=tool_name,
+                decision="ASK",
+                source="system",
+                rule=result.matched_rule or "N/A",
+                channel=normalized_channel_id,
+                session_id=session_id,
+            ).to_json())
             if session is not None and request_approval_callback is not None:
                 decision = await request_approval_callback(session, tc, result)
                 if decision == "allow_always":
                     allowed.append(tc)
-                    logger.info(
-                        "[PermissionEngine] permission.batch.user_decision tool=%s decision=allow_always",
-                        tool_name,
-                    )
+                    logger.info(ToolPermissionLog(
+                        tool=tool_name,
+                        decision="ALLOW",
+                        source="user",
+                        rule=result.matched_rule or "N/A",
+                        user_decision=decision,
+                        channel=normalized_channel_id,
+                        session_id=session_id,
+                    ).to_json())
                 elif decision == "allow_once":
                     allowed.append(tc)
-                    logger.info(
-                        "[PermissionEngine] permission.batch.user_decision tool=%s decision=allow_once",
-                        tool_name,
-                    )
+                    logger.info(ToolPermissionLog(
+                        tool=tool_name,
+                        decision="ALLOW",
+                        source="user",
+                        rule=result.matched_rule or "N/A",
+                        user_decision=decision,
+                        channel=normalized_channel_id,
+                        session_id=session_id,
+                    ).to_json())
                 else:
-                    logger.info(
-                        "[PermissionEngine] permission.batch.user_decision tool=%s decision=deny",
-                        tool_name,
-                    )
                     denied.append(
                         (tc, "[PERMISSION_REJECTED] User rejected the request.")
                     )
+                    logger.info(ToolPermissionLog(
+                        tool=tool_name,
+                        decision="DENY",
+                        source="user",
+                        rule=result.matched_rule or "N/A",
+                        user_decision=decision,
+                        channel=normalized_channel_id,
+                        session_id=session_id,
+                    ).to_json())
             else:
                 denied.append(
                     (tc, f"[APPROVAL_REQUIRED] {result.reason}")
                 )
+                logger.info(ToolPermissionLog(
+                    tool=tool_name,
+                    decision="DENY",
+                    source="user",
+                    rule=result.matched_rule or "N/A",
+                    user_decision="approval_unavailable",
+                    channel=normalized_channel_id,
+                    session_id=session_id,
+                ).to_json())
 
     return allowed, denied
 

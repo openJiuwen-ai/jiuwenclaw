@@ -93,11 +93,11 @@ class TestLoggerSetup:
 
     @staticmethod
     def test_logger_handlers():
-        """Test that logger has console and four rotating log files."""
+        """Test that logger has console and five rotating log files."""
         logger = utils.setup_logger("INFO")
         handler_types = [type(h).__name__ for h in logger.handlers]
         assert "StreamHandler" in handler_types
-        assert handler_types.count("SafeRotatingFileHandler") == 4
+        assert handler_types.count("SafeRotatingFileHandler") == 5
 
 
 class TestUserWorkspace:
