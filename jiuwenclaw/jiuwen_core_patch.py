@@ -86,6 +86,52 @@ class PatchOpenAIModelClient(OpenAIModelClient):
         Returns:
             AssistantMessageChunk or None
         """
+
+        # Detect Huawei MaaS by api_base (workaround for malformed tool_calls delta)
+        # Only apply workaround for glm-5.1 model on MaaS endpoint
+        _is_huawei_maas = False
+        _has_mcc = hasattr(self, "model_client_config")
+        _mcc_is_none = self.model_client_config is None if _has_mcc else True
+        _has_mc = hasattr(self, "model_config")
+        _mc_is_none = self.model_config is None if _has_mc else True
+        _api_base = ""
+        _model_name = ""
+        if _has_mcc and not _mcc_is_none:
+            _api_base = getattr(self.model_client_config, "api_base", "") or ""
+            _model_name = getattr(self.model_client_config, "model_name", "") or ""
+        if _has_mc and not _mc_is_none and not _model_name:
+            _model_name = getattr(self.model_config, "model_name", "") or ""
+        # Check if it's Huawei MaaS AND model is glm-5.1 (the affected model)
+        _is_maas_endpoint = (
+            "modelarts-maas.com" in _api_base
+            or "modelarts" in _api_base.lower()
+            or "huaweiapaas.com" in _api_base
+            or "agentarts" in _api_base.lower()
+        )
+        _is_glm51 = _model_name.lower() in ("glm-5.1", "glm5.1")
+        _is_huawei_maas = _is_maas_endpoint and _is_glm51
+
+        # Check for usage-only chunk (empty choices with usage data - final chunk with stream_options)
+        _has_usage = hasattr(chunk, 'usage') and chunk.usage
+        _has_choices = bool(chunk.choices) if hasattr(chunk, 'choices') else False
+        if _has_usage and not _has_choices:
+            # This is the final usage chunk - parse it even if choices is empty
+            usage_metadata = UsageMetadata(
+                model_name=self.model_config.model_name,
+                input_tokens=getattr(chunk.usage, 'prompt_tokens', 0) or 0,
+                output_tokens=getattr(chunk.usage, 'completion_tokens', 0) or 0,
+                total_tokens=getattr(chunk.usage, 'total_tokens', 0) or 0,
+            )
+            # Return a chunk with only usage metadata (no content)
+            return AssistantMessageChunk(
+                content="",
+                reasoning_content=None,
+                tool_calls=None,
+                usage_metadata=usage_metadata,
+                finish_reason="stop",  # Usage chunk always indicates completion
+            )
+
+
         # When stream_options={"include_usage": true}, OpenAI sends a final
         # usage-only chunk with ``choices=[]`` and ``usage`` populated. Emit a
         # usage-only AssistantMessageChunk so downstream aggregation picks it up.
@@ -132,9 +178,32 @@ class PatchOpenAIModelClient(OpenAIModelClient):
                         type="function",
                         name=function_name,
                         arguments=function_arguments,
-                        index=index
+                        index=index if index is not None else 0,
                     )
                     tool_calls.append(tool_call)
+
+        # Huawei MaaS workaround: merge tool_calls with same index
+        # MaaS sometimes returns multiple tool_calls deltas with identical index,
+        # where the second one only contains arguments increment.
+        if _is_huawei_maas and len(tool_calls) > 1:
+            merged_by_index: dict[int, ToolCall] = {}
+            for tc in tool_calls:
+                idx = tc.index if tc.index is not None else 0
+                if idx not in merged_by_index:
+                    merged_by_index[idx] = tc
+                else:
+                    existing = merged_by_index[idx]
+                    new_id = tc.id or existing.id
+                    new_name = tc.name or existing.name
+                    new_args = existing.arguments + tc.arguments
+                    merged_by_index[idx] = ToolCall(
+                        id=new_id,
+                        type="function",
+                        name=new_name,
+                        arguments=new_args,
+                        index=idx,
+                    )
+            tool_calls = list(merged_by_index.values())
 
         # Build usage_metadata (usually only in the last chunk)
         usage_metadata = None
