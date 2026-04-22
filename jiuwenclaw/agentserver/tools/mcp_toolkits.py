@@ -89,9 +89,10 @@ def _has_paid_search_api_key() -> bool:
 
 def get_mcp_tools() -> list[Tool]:
     """Return all MCP toolkit tools for registration in Runner."""
-    tools = [mcp_free_search, mcp_fetch_webpage, mcp_exec_command]
+    tools: list[Tool] = [mcp_free_search]
     if _has_paid_search_api_key():
         tools.append(mcp_paid_search)
+    tools.extend([mcp_fetch_webpage, mcp_exec_command])
     return tools
 
 

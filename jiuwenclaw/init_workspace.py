@@ -1,13 +1,16 @@
-"""CLI for initializing runtime data into ~/.jiuwenclaw.
+"""CLI：将运行时数据初始化到用户数据根目录（与 ``get_user_workspace_dir()`` 一致）。
+
+默认根目录为 ``~/.jiuwenclaw``；若进程环境中已设置 ``JIUWENCLAW_DATA_DIR``（须为可用绝对路径，
+且应在启动本脚本前注入，见 ``jiuwenclaw.utils`` 中的 ``USER_WORKSPACE_DIR``），则初始化到该路径下。
 
 无论是通过 pip/whl 安装，还是在源码目录里直接运行：
 - 运行本脚本会先询问语言偏好（zh/en），写入 config 的 preferred_language；
-- 同时复制 config.yaml、builtin_rules.yaml、.env.template、agent 模板等到 ~/.jiuwenclaw；
+- 同时复制 config.yaml、builtin_rules.yaml、将 ``.env.template`` 复制为 ``<用户数据根>/config/.env``、agent 模板等到 ``<用户数据根>``；
 - 根据语言偏好复制多语言文件（AGENT.md、HEARTBEAT.md、IDENTITY.md、SOUL.md 等），
   源文件使用 _ZH/_EN 后缀，目标文件不带后缀。
 
 使用方式:
-- jiuwenclaw-init -f: 强制清理，删除整个 ~/.jiuwenclaw 后重新初始化
+- jiuwenclaw-init -f: 强制清理，删除整个用户数据根目录后重新初始化
 - jiuwenclaw-init: 保留原有数据，执行迁移合并
 """
 

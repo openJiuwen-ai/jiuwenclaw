@@ -2,11 +2,13 @@
 
 """Path management for JiuWenClaw.
 
+根目录见 ``USER_WORKSPACE_DIR``（默认 ``~/.jiuwenclaw``；可由环境变量 ``JIUWENCLAW_DATA_DIR`` 指定绝对路径）。
+
 Runtime layout:
-- ~/.jiuwenclaw/config/config.yaml
-- ~/.jiuwenclaw/config/.env
-- ~/.jiuwenclaw/agent/home
-- ~/.jiuwenclaw/agent/jiuwenclaw_workspace（DeepAgent 标准工作空间）
+- <root>/config/config.yaml
+- <root>/config/.env
+- <root>/agent/home
+- <root>/agent/jiuwenclaw_workspace（DeepAgent 标准工作空间）
   - memory/
   - skills/
   - todo/
@@ -17,10 +19,10 @@ Runtime layout:
   - SOUL.md
   - HEARTBEAT.md
   - USER.md
-- ~/.jiuwenclaw/agent/sessions
-- ~/.jiuwenclaw/agent/jiuwenclaw_workspace/agent-data.json
-- ~/.jiuwenclaw/.checkpoint
-- ~/.jiuwenclaw/.logs（gateway.log / channel.log / agent_server.log / full.log）
+- <root>/agent/sessions
+- <root>/agent/jiuwenclaw_workspace/agent-data.json
+- <root>/.checkpoint
+- <root>/.logs（gateway.log / channel.log / agent_server.log / full.log）
 
 内置模板位于包内 ``jiuwenclaw/resources/``（含 ``agent/`` 下各技能模板以及 ``skills_state.json``）。
 """
@@ -248,6 +250,11 @@ def _resolve_logging_levels(
     return LoggingLevels(logger_level, console, gateway, channel, agent_server, full)
 
 
+# 用户数据根（config、agent、.logs 等）。供 config 模块在 import 时读取；仅依赖 os/path，不引用本包其它模块。
+_raw_data_dir = os.environ.get("JIUWENCLAW_DATA_DIR", "").strip()
+USER_WORKSPACE_DIR = (
+    Path(_raw_data_dir).expanduser().resolve() if _raw_data_dir else Path.home() / ".jiuwenclaw"
+)
 
 _user_home: Path | None = None
 
@@ -280,7 +287,9 @@ def set_user_home(path: Path, initialized: bool = False) -> None:
 
 
 def get_user_workspace_dir() -> Path:
-    """Get the user workspace directory path (~/.jiuwenclaw or custom path)."""
+    """用户数据根目录：若设置 ``JIUWENCLAW_DATA_DIR`` 则为其解析路径，否则为 ``<user home>/.jiuwenclaw``。"""
+    if _raw_data_dir:
+        return USER_WORKSPACE_DIR
     return get_user_home() / ".jiuwenclaw"
 
 
