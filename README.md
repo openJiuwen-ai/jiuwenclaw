@@ -87,7 +87,19 @@ pip install jiuwenclaw-tui
 # Start JiuwenClaw-tui
 jiuwenclaw-tui
 ```
+### 📦 Running in Docker mode
 
+```bash
+git clone https://gitcode.com/openJiuwen/jiuwenclaw.git
+cd jiuwenclaw/docker
+chmod +x build.sh
+./build.sh 0.1.10    # The version number of jiuwenclaw to be installed is indicated after
+
+# Start the container. Please query the IMAGE_NAME using the docker images command. Below is an example.
+IMAGE_NAME=jiuwen:0.1.10-py311-ubuntu22.04-x86_64
+docker run --name jiuwenclaw -it -d --net=host ${IMAGE_NAME}
+```
+Note: This container has enabled local area network access, which means other devices can directly access the web front end by visiting `http://ip:5173` through a browser. If this feature is not required, you can modify the `/app/start.sh` script within the container.
 ### 💬 How to Use
 
 #### 1️⃣ Conversation Mode

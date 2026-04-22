@@ -78,6 +78,20 @@ pip install jiuwenclaw-tui
 jiuwenclaw-tui
 ```
 
+### 📦 docker方式运行
+
+```bash
+git clone https://gitcode.com/openJiuwen/jiuwenclaw.git
+cd jiuwenclaw/docker
+chmod +x build.sh
+./build.sh 0.1.10    # 后面一个是要安装的jiuwenclaw的版本号
+
+# 启动容器，IMAGE_NAME请通过docker images命令查询，以下为示例。
+IMAGE_NAME=jiuwen:0.1.10-py311-ubuntu22.04-x86_64
+docker run --name jiuwenclaw -it -d --net=host ${IMAGE_NAME}
+```
+> 注：这个容器开启了局域网访问，也就是其他设备通过浏览器访问 `http://ip:5173`就可以直接进入web前端。若不需要此功能，可以修改容器内的`/app/start.sh`脚本。
+
 ### 💬 使用方式
 
 #### 1️⃣ 对话模式
