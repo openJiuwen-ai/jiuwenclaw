@@ -16,8 +16,9 @@
         }
       },
       "image": "<<CLAW_MGR_IMAGE>>",
-      "volumes": "[{\"name\":\"jiuwenclaw\",\"hostPath\":{\"path\":\"<<REG_FUNC_DIR>>\",\"type\":\"Directory\"}}]",
-      "volume_mounts": "[{\"name\":\"jiuwenclaw\",\"mountPath\":\"/home/sn/jiuwenclaw\"}]"
+      "volumes": "[{\"name\":\"jiuwenclaw\",\"hostPath\":{\"path\":\"<<REG_FUNC_DIR>>\",\"type\":\"Directory\"}},{\"name\": \"pv-function\",\"persistentVolumeClaim\": {\"claimName\": \"<<PVC_NAME>>\"}}]",
+      "volume_mounts": "[{\"name\":\"jiuwenclaw\",\"mountPath\":\"/home/sn/jiuwenclaw\"},{\"name\": \"pv-function\",\"mountPath\": \"/home/snuser/.jiuwenclaw\"}]"
     }
   ]
 }
+

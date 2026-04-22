@@ -2,6 +2,7 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: <<GATEWAY_DEPLOYMENT_NAME>>
+  namespace: <<NAMESPACE>>
   labels:
     app: <<GATEWAY_DEPLOYMENT_NAME>>
 spec:

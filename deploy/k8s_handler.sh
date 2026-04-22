@@ -45,13 +45,18 @@ wait_pod_terminated() {
 
 collect_k8s_cluster_info() {
     DEPLOY_VARS["MASTER_NODE_IP"]=$(kubectl get nodes \
-        -o jsonpath='{.items[?(.metadata.labels.node-role\.kubernetes\.io/master)].status.addresses[?(@.type=="InternalIP")].address}')
+        --selector='node-role.kubernetes.io/master' \
+        -o jsonpath='{.items[*].status.addresses[?(@.type=="InternalIP")].address}')
     info "MASTER_NODE_IP: ${DEPLOY_VARS["MASTER_NODE_IP"]}"
+
+    MASTER_NODE_NAME=$(kubectl get nodes \
+        --selector='node-role.kubernetes.io/master' \
+        -o jsonpath='{.items[*].metadata.name}')
+    info "MASTER_NODE_NAME: ${MASTER_NODE_NAME}"
 
     WORKER_NODE_IPS=($(kubectl get nodes -o jsonpath='{.items[*].status.addresses[?(@.type=="InternalIP")].address}' \
         | tr ' ' '\n' \
         | grep -v "${DEPLOY_VARS["MASTER_NODE_IP"]}"))
     info "WORKER_NODE_IPS: ${WORKER_NODE_IPS[*]}"
 }
-
 

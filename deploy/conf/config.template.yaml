@@ -192,8 +192,8 @@ gateway:
     type: yuanrong_frontend # websocket | yuanrong_frontend
     frontend_endpoint: http://<<MASTER_NODE_IP>>:<<FRONTEND_PORT>>
     function_version_urn: <<FUNCTION_ID>>
-    concurrency: 1
-    invoke_timeout_s: 60
+    concurrency: <<CLAW_GATEWAY_CONCURRENCY>>
+    invoke_timeout_s: <<CLAW_GATEWAY_INVOKE_TIMEOUT>>
 
   # SessionMap 仅用于企业claw场景，如 feishu_enterprise 等通道：将平台身份映射为 Agent 的 session_id。
   # 取值：per_chat_bot（默认，同 chat+bot 共享会话）, per_chat_bot_user（按 user 分会话）
@@ -499,7 +499,7 @@ updater:
 extensions:
    # 扩展包搜索目录（字符串），用 ';' 分割多个目录：
    # EXTENSION_DIRS="E:/a;D:/b"; 默认会加载仓库根目录 extensions
-   extension_dirs: "<<CLAW_GATWAY_EXTENSION_DIRS>>"
+   extension_dirs: "<<CLAW_GATEWAY_EXTENSION_DIRS>>"
 
 team:
   team_name: jiuwen_team

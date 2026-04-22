@@ -36,18 +36,18 @@ kubectl get nodes
 ssh-copy-id <Worker节点IP>
 ```
 
-### 安装jiuwenclaw
+### 部署jiuwenclaw
 
 - 下载openjiuwen官网提供的企业级安装包：
 
 ```
-https://openjiuwen.com/jiuwenclaw#quick-start （TODO链接待刷新）
+https://openjiuwen-ci.obs.cn-north-4.myhuaweicloud.com/oyrclaw/JiuwenClawXopenYuanrong_deployTool_<版本号>_amd64.zip
 ```
 
 - 解压缩：
 
 ```
-unzip xxx.zip
+unzip JiuwenClawXopenYuanrong_deployTool_<版本号>_amd64.zip
 ```
 
 - 配置选项
@@ -57,11 +57,28 @@ unzip xxx.zip
 - 一键部署
 
 ```
+# 第一次，需要部署全部： nfs + openyuanrong + claw
+./deploy all up
+
+# 单独部署nfs
+./deploy nfs up
+
+# 单独部署 openyuanrong + claw
 ./deploy up
+./deploy claw up
 ```
 
 - 一键卸载
 
 ```
-./deploy.sh down
+# 单独卸载 openyuanrong + claw
+./deploy down
+./deploy claw down
+
+# 单独卸载 nfs
+./deploy nfs down
+
+# 一次卸载全部： nfs + openyuanrong + claw
+./deploy all down
+
 ```

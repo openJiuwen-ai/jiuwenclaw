@@ -1,7 +1,8 @@
 apiVersion: v1
 kind: PersistentVolume
 metadata:
-  name: pv-nfs-shared
+  name: <<PV_NAME>>
+  namespace: <<NAMESPACE>>
   labels:
     type: nfs-storage
     app: openjiuwen
@@ -13,10 +14,10 @@ spec:
   persistentVolumeReclaimPolicy: Retain   # 删除 PVC 时保留数据
   storageClassName: ""                    # 不使用 StorageClass
   nfs:
-    server: nfs-server.default.svc.cluster.local    # 使用集群内nfs-service域名
-    path: /exports                                  # NFS 共享路径
+    server: <<MASTER_NODE_IP>>            # NFS 服务器地址
+    path: /                               # NFS 共享路径
     readOnly: false
   mountOptions:
+    - nfsvers=4
     - hard
-    - nfsvers=3
     - noatime

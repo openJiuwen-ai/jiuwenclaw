@@ -78,11 +78,20 @@ check_if_oyr_exist()
 }
 
 check_dependency(){
+    check_if_master
+}
+
+check_claw_up_dependency(){
     check_if_root
     detect_os
     check_cmds
-    check_if_master
     check_cluster_has_enough_nodes
     check_ssh_connectivity
     check_if_oyr_exist
+}
+
+check_nfs_up_dependency(){
+    detect_os
+    check_cmds
+    check_cluster_has_enough_nodes
 }
