@@ -26,7 +26,8 @@ from jiuwenclaw.utils import init_user_workspace
 def run_init(force: bool = False) -> int:
     logging.basicConfig(
         level=logging.INFO,
-        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+        format="%(asctime)s.%(msecs)03d [%(process)d] %(levelname)s %(name)s %(filename)s:%(lineno)d: %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
     )
 
     target = init_user_workspace(overwrite=force)

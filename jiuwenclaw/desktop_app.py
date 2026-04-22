@@ -226,7 +226,7 @@ def _setup_logger() -> logging.Logger:
         desktop_logger.removeHandler(handler)
 
     formatter = logging.Formatter(
-        fmt="%(asctime)s.%(msecs)03d %(levelname)s %(name)s: %(message)s",
+        fmt="%(asctime)s.%(msecs)03d [%(process)d] %(levelname)s %(name)s %(filename)s:%(lineno)d: %(message)s",
         datefmt="%Y-%m-%d %H:%M:%S",
     )
 

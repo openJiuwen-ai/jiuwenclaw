@@ -336,7 +336,8 @@ class DefaultLogger(LoggerProtocol):
         """
         log_format = (
                 self.config.get("format")
-                or "%(asctime)s.%(msecs)03d | %(log_type)s | %(trace_id)s | %(levelname)s | %(message)s"
+                or "%(asctime)s.%(msecs)03d | [%(process)d] | %(log_type)s | %(trace_id)s | %(levelname)s |"
+                " %(filename)s:%(lineno)d | %(message)s"
         )
         return logging.Formatter(log_format, datefmt="%Y-%m-%d %H:%M:%S")
 

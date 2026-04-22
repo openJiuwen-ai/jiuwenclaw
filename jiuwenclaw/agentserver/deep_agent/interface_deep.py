@@ -1836,6 +1836,16 @@ class JiuWenClawDeepAdapter:
         else:
             config_base = resolve_env_vars(config_base)
 
+        # 同步扩展配置到 ExtensionRegistry
+         # Gateway 已解密 extension_security_configs，AgentServer 直接使用明文
+        try:
+            from jiuwenclaw.extensions.registry import ExtensionRegistry
+            registry = ExtensionRegistry.get_instance()
+            registry.update_config(config_base)
+            logger.info("[JiuWenClaw] Extension config synced to Registry")
+        except Exception as exc:
+            logger.warning("[JiuWenClaw] ExtensionRegistry update failed: %s", exc)
+
         self._refresh_multimodal_configs(config_base)
         config = config_base.get('react', {}).copy()
         self._config_cache = config.copy()
@@ -3671,3 +3681,63 @@ class JiuWenClawDeepAdapter:
                 await self._instance.unregister_rail(self._memory_rail)
                 self._memory_rail = None
                 logger.info(f"[JiuWenClawDeepAdapter] MemoryRail unregistered for {mode} mode")
+
+    def is_working(self, session_tasks: dict[str, asyncio.Task], session_queues: dict[str, asyncio.PriorityQueue]):
+        """返回 Agent 是否正在工作的状态.
+
+        用于沙箱保活校验，检查当前服务是否有正在处理或待处理的消息任务.
+
+        判断维度：
+        1. 非流式任务：_session_tasks 中正在执行的 Task
+        2. 待处理消息：_session_queues 中队列的消息数
+        3. 流式任务：_instance._stream_tasks 中正在执行的流式 Task
+
+        Returns:
+            dict 包含以下字段:
+                - working: bool, 是否正在工作（有活跃任务或待处理消息）
+                - initialized: bool, Agent 实例是否已初始化
+                - model_configured: bool, 模型是否已配置
+                - active_tasks: int, 当前正在执行的非流式任务数
+                - stream_tasks: int, 当前正在执行的流式任务数
+                - pending_messages: int, 队列中待处理的消息数
+                - active_sessions: list[str], 有活跃任务或待处理消息的 session 列表
+        """
+        initialized = self._instance is not None
+        model_configured = self._has_valid_model_config() if initialized else False
+
+        active_sessions = set()
+        active_tasks = 0
+        stream_tasks = 0
+        pending_messages = 0
+
+        # 检查正在执行的非流式任务
+        for session_id, task in session_tasks.items():
+            if task is not None and not task.done():
+                active_sessions.add(session_id)
+                active_tasks += 1
+
+        # 检查队列中待处理的消息
+        for session_id, queue in session_queues.items():
+            queue_size = queue.qsize()
+            if queue_size > 0:
+                active_sessions.add(session_id)
+                pending_messages += queue_size
+
+        # 检查流式任务
+        if initialized:
+            stream_task_set = getattr(self._instance, '_stream_tasks', set())
+            for task in stream_task_set:
+                if not task.done():
+                    stream_tasks += 1
+
+        working = initialized and (active_tasks > 0 or pending_messages > 0 or stream_tasks > 0)
+
+        return {
+            "working": working,
+            "initialized": initialized,
+            "model_configured": model_configured,
+            "active_tasks": active_tasks,
+            "stream_tasks": stream_tasks,
+            "pending_messages": pending_messages,
+            "active_sessions": list(active_sessions),
+        }

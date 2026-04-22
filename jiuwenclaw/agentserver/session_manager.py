@@ -33,6 +33,12 @@ class SessionManager:
         """获取 session_id，默认为 'default'."""
         return session_id or "default"
 
+    def get_session_queues(self):
+        return self._session_queues
+
+    def get_session_tasks(self):
+        return self._session_tasks
+
     async def cancel_session_task(self, session_id: str, log_msg_prefix: str = "") -> None:
         """取消指定 session 的非流式任务."""
         task = self._session_tasks.get(session_id)

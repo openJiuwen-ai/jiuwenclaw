@@ -32,6 +32,7 @@ from jiuwenclaw.channel.acp_channel import AcpGatewayBridge
 from jiuwenclaw.gateway.route_binding import GatewayRouteBinding
 from jiuwenclaw.jiuwen_core_patch import apply_openai_model_client_patch
 from jiuwenclaw.utils import get_user_workspace_dir, get_env_file, prepare_workspace
+from jiuwenclaw.extensions.extension_config_sync import decrypt_extensions_sensitive_for_agent
 
 apply_openai_model_client_patch()
 
@@ -889,13 +890,15 @@ async def _run(
             from jiuwenclaw.e2a.gateway_normalize import e2a_from_agent_fields
             from jiuwenclaw.schema.message import ReqMethod
 
+            # 发送给 AgentServer 前解密扩展敏感配置
+            decrypted_config = decrypt_extensions_sensitive_for_agent(config_payload or {})
             reload_env = e2a_from_agent_fields(
                 request_id=f"agent-reload-{uuid_module.uuid4().hex[:8]}",
                 channel_id="",
                 req_method=ReqMethod.AGENT_RELOAD_CONFIG,
                 params={
                     # config: full config snapshot after save; Agent should prefer this over local yaml.
-                    "config": dict(config_payload or {}),
+                    "config": dict(decrypted_config or {}),
                     # env: incremental environment updates; missing keys mean unchanged.
                     "env": dict(env_updates or {}),
                 },

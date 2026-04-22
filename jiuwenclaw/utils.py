@@ -43,6 +43,7 @@ from collections import OrderedDict
 import logging
 from logging.handlers import BaseRotatingHandler
 from ruamel.yaml import YAML
+from ruamel.yaml.comments import CommentedMap
 
 _LOG_FILE_MAX_BYTES = 20 * 1024 * 1024
 _LOG_FILE_BACKUP_COUNT = 20
@@ -650,6 +651,98 @@ def cleanup_team_files(workspace_dir: Path) -> None:
                 logger.warning(f"[Cleanup] Failed to remove legacy team database file: {e}")
 
 
+def _deep_merge_from_source(source, user):
+    """将 source（源码模板）中的新增字段合并到 user（用户配置）。
+
+    规则（以源码模板的 key 顺序为准，确保新增字段插入在正确位置）：
+    - source 有、user 没有 → 新增到源码中该 key 所在的位置
+    - 两边都有且都是 dict/CommentedMap → 递归合并
+    - 两边都有但类型不同或 user 有值 → 保留 user 的值
+
+    返回值类型与 source 一致（保持 ruamel CommentedMap 的顺序）。
+    """
+    result = CommentedMap()
+    src_keys = list(source.keys())
+    user_keys = [k for k in user.keys() if k not in src_keys]  # 用户独有但源码已删的 key
+
+    for key in src_keys:
+        src_val = source[key]
+        if key not in user:
+            # 新增字段：按源码位置插入
+            result[key] = src_val
+        elif isinstance(src_val, dict) and isinstance(user[key], dict):
+            # 两边都是 dict → 递归
+            merged_sub = _deep_merge_from_source(src_val, user[key])
+            result[key] = merged_sub
+        else:
+            # 保留用户值
+            result[key] = user[key]
+
+    # 用户独有 key（源码没有的），追加到末尾
+    for key in user_keys:
+        result[key] = user[key]
+
+    return result
+
+
+def _merge_config_from_source(src: Path, dest: Path) -> None:
+    """将源码 config.yaml 的新增字段同步到用户 config.yaml（不覆盖用户值）。"""
+    try:
+        rt = YAML()
+        rt.preserve_quotes = True
+        rt.default_flow_style = False
+        rt.indent(mapping=2, sequence=4, offset=2)
+        rt.width = 4096
+
+        with open(src, "r", encoding="utf-8") as f:
+            src_data = rt.load(f)
+        with open(dest, "r", encoding="utf-8") as f:
+            user_data = rt.load(f)
+
+        if src_data is None or user_data is None:
+            return
+
+        merged = _deep_merge_from_source(src_data, user_data)
+
+        with open(dest, "w", encoding="utf-8") as f:
+            rt.dump(merged, f)
+    except Exception as e:
+        # 合并失败不影响正常启动，记录日志即可
+        logging.getLogger(__name__).warning(
+            "Failed to merge config from source %s -> %s: %s", src, dest, e
+        )
+
+
+def update_config():
+    package_root = _find_package_root()
+    if not package_root:
+        raise RuntimeError("package root not found")
+
+    workspace_dir = get_user_workspace_dir()
+    workspace_dir.mkdir(parents=True, exist_ok=True)
+
+    # ----- config: copy config.yaml -----
+    resources_dir = package_root / "resources"
+    config_yaml_src_candidates = [
+        resources_dir / "config.yaml",
+        package_root / "config" / "config.yaml",
+    ]
+
+    config_yaml_src = next((p for p in config_yaml_src_candidates if p.exists()), None)
+
+    if not config_yaml_src:
+        raise RuntimeError(
+            "config.yaml template not found; tried: "
+            + ", ".join(str(p) for p in config_yaml_src_candidates)
+        )
+
+    config_dest_dir = workspace_dir / "config"
+    config_dest_dir.mkdir(parents=True, exist_ok=True)
+    config_yaml_dest = config_dest_dir / "config.yaml"
+    # 将源码 config.yaml 的新增字段合并到用户 config.yaml，保留用户已有值
+    _merge_config_from_source(config_yaml_src, config_yaml_dest)
+
+
 def prepare_workspace(
     overwrite: bool = True,
     preferred_language: Optional[str] = None,
@@ -1254,7 +1347,7 @@ def setup_logger(log_level: Optional[str] = None) -> logging.Logger:
         root.removeHandler(handler)
 
     formatter = logging.Formatter(
-        fmt="%(asctime)s.%(msecs)03d %(levelname)s %(name)s: %(message)s",
+        fmt="%(asctime)s.%(msecs)03d [%(process)d] %(levelname)s %(name)s %(filename)s:%(lineno)d: %(message)s",
         datefmt="%Y-%m-%d %H:%M:%S",
     )
     privacy_filter = SensitiveDataFilter()

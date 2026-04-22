@@ -32,6 +32,9 @@ class ExtensionRegistry:
             raise RuntimeError("ExtensionRegistry 尚未初始化，请先调用 create_instance()")
         return cls._instance
 
+    def update_config(self, full_config) -> None:
+        self._config.config = full_config
+
     @classmethod
     def create_instance(
         cls,

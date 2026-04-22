@@ -13,7 +13,7 @@ import time
 
 from dotenv import load_dotenv
 
-from jiuwenclaw.utils import get_user_workspace_dir, get_env_file, prepare_workspace, cleanup_team_files
+from jiuwenclaw.utils import get_user_workspace_dir, get_env_file, prepare_workspace, cleanup_team_files, update_config
 
 
 _workspace_dir = get_user_workspace_dir()
@@ -27,6 +27,8 @@ cleanup_team_files(_workspace_dir)
 # Initialize if config doesn't exist, or if legacy workspace exists but new doesn't (migration)
 if not _config_file.exists() or (_old_workspace.exists() and not _new_workspace.exists()):
     prepare_workspace(overwrite=False)
+else:
+    update_config()
 
 load_dotenv(dotenv_path=get_env_file())
 

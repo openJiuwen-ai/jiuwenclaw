@@ -898,3 +898,8 @@ class JiuWenClaw:
         self._tool_manager = None
 
         logger.info("[JiuWenClaw] cleanup: 完成")
+
+    def is_working(self) -> dict:
+        task = self._session_manager.get_session_tasks()
+        queue = self._session_manager.get_session_queues()
+        return self._adapter.is_working(task, queue)
