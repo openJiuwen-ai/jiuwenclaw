@@ -30,6 +30,14 @@ _CHARSET_META_RE = re.compile(
 )
 
 
+def _env_bool(name: str, default: bool = False) -> bool:
+    """Parse boolean environment variable (1/true/yes/on = True)."""
+    value = (os.environ.get(name) or "").strip().lower()
+    if not value:
+        return default
+    return value in {"1", "true", "yes", "on"}
+
+
 def _extract_declared_charset(response: requests.Response) -> str:
     content_type = response.headers.get("Content-Type", "") or ""
     header_match = _CHARSET_HEADER_RE.search(content_type)
@@ -181,8 +189,11 @@ def _fetch_via_jina_reader_sync(url: str, timeout_seconds: int) -> dict[str, str
 
 def _fetch_webpage_sync(url: str, timeout_seconds: int) -> dict[str, str | int]:
     response = _http_get(url, headers=_REQUEST_HEADERS, timeout=timeout_seconds)
+    # 只在显式启用时才使用 Jina Reader fallback
     if response.status_code in {401, 403, 429}:
-        return _fetch_via_jina_reader_sync(url, timeout_seconds)
+        if _env_bool("JIUWENCLAW_ENABLE_JINA_FETCH", default=False):
+            return _fetch_via_jina_reader_sync(url, timeout_seconds)
+        response.raise_for_status()
     response.raise_for_status()
 
     text = _decode_response_text(response)

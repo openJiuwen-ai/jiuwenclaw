@@ -28,6 +28,14 @@ _FREE_SEARCH_DEFAULT_NO_PROXY = (
 )
 
 
+def _env_bool(name: str, default: bool = False) -> bool:
+    """Parse boolean environment variable (1/true/yes/on = True)."""
+    value = (os.environ.get(name) or "").strip().lower()
+    if not value:
+        return default
+    return value in {"1", "true", "yes", "on"}
+
+
 def _get_free_search_proxy_url() -> str:
     return str(os.environ.get(_FREE_SEARCH_PROXY_URL_ENV, "") or "").strip()
 
@@ -248,11 +256,19 @@ def _search_free_sync(
     query: str, max_results: int, timeout_seconds: int
 ) -> tuple[str, list[dict[str, str]]]:
     errors: list[str] = []
-    engines = [
-        ("duckduckgo", _search_duckduckgo_sync),
-        ("duckduckgo-jina", _search_duckduckgo_via_jina_sync),
-        ("bing", _search_bing_sync),
-    ]
+    engines: list[tuple[str, callable]] = []
+
+    # Bing 作为默认可用引擎
+    engines.append(("bing", _search_bing_sync))
+
+    # DuckDuckGo 直接搜索 - 需要显式启用
+    if _env_bool("JIUWENCLAW_ENABLE_DDG_SEARCH", default=False):
+        engines.append(("duckduckgo", _search_duckduckgo_sync))
+
+    # DuckDuckGo via Jina 代理 - 需要显式启用
+    if _env_bool("JIUWENCLAW_ENABLE_JINA_SEARCH", default=False):
+        engines.append(("duckduckgo-jina", _search_duckduckgo_via_jina_sync))
+
     for engine_name, runner in engines:
         try:
             rows = runner(query, max_results, timeout_seconds)
