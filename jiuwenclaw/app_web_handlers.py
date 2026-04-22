@@ -985,12 +985,15 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
 
         # 初始化会话元数据
         from jiuwenclaw.agentserver.session_metadata import init_session_metadata
+        pd_raw = params.get("project_dir")
+        init_project_dir = pd_raw.strip() if isinstance(pd_raw, str) else None
         init_session_metadata(
             session_id=session_id_to_create,
             channel_id=params.get("channel_id", ""),
             user_id=params.get("user_id", ""),
             title=params.get("title", ""),
             mode=params.get("mode", "unknown"),
+            project_dir=init_project_dir,
         )
 
         await channel.send_response(ws, req_id, ok=True, payload={"session_id": session_id_to_create})

@@ -1412,8 +1412,9 @@ class FeishuChannel(BaseChannel):
             ):
                 req_id = str(getattr(msg, "id", "") or "")
                 already_sent = self._sent_file_paths_by_req.get(req_id, set())
+                fs_sid = str(getattr(msg, "session_id", None) or "").strip() or "default"
                 detected_files = [
-                    fp for fp in self._detect_workspace_files(content_str)
+                    fp for fp in self._detect_workspace_files(content_str, fs_sid)
                     if os.path.abspath(fp) not in already_sent
                 ]
                 if detected_files:
@@ -1487,7 +1488,7 @@ class FeishuChannel(BaseChannel):
         except Exception as e:
             logger.error(f"发送飞书消息时发生异常: {e}")
 
-    def _detect_workspace_files(self, text: str) -> list[str]:
+    def _detect_workspace_files(self, text: str, session_id: str | None = None) -> list[str]:
         """从文本中提取 workspace 下实际存在的文件路径。
 
         用于兜底检测 LLM 提到但未通过 send_file_to_user 发送的文件。
@@ -1495,8 +1496,11 @@ class FeishuChannel(BaseChannel):
         1. 完整绝对路径：/home/xxx/.jiuwenclaw/agent/workspace/xxx.docx
         2. 仅文件名：'xxx.docx' 或 "xxx.docx"——在 workspace 目录下查找
         """
-        from jiuwenclaw.utils import get_agent_workspace_dir
-        workspace_dir = str(get_agent_workspace_dir())
+        from jiuwenclaw.agentserver.session_metadata import get_resolved_project_dir
+        from jiuwenclaw.utils import get_agent_sessions_dir
+
+        sid = (session_id or "").strip() or "default"
+        workspace_dir = get_resolved_project_dir(sid, str(get_agent_sessions_dir()))
 
         seen: set[str] = set()
         result: list[str] = []

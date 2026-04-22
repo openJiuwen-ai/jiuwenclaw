@@ -1397,6 +1397,7 @@ class JiuWenClawDeepAdapter:
                 channel=default_channel,
                 agent_name=self._agent_name,
                 model_name=self._resolve_model_name(),
+                workspace_dir=self._workspace_dir,
             )
             logger.info("[JiuWenClawDeepAdapter] RuntimePromptRail create success")
         except Exception as exc:
@@ -2212,6 +2213,14 @@ class JiuWenClawDeepAdapter:
             self._runtime_prompt_rail.set_language(resolved_language)
             resolved_channel = str(channel_id or self._resolve_prompt_channel(session_id) or "web").strip() or "web"
             self._runtime_prompt_rail.set_channel(resolved_channel)
+
+            md = request_metadata or {}
+            v = md.get("effective_project_dir")
+            if isinstance(v, str) and v.strip():
+                resolved_workspace_dir = v.strip()
+            else:
+                resolved_workspace_dir = self._workspace_dir
+            self._runtime_prompt_rail.set_workspace_dir(resolved_workspace_dir)
 
         await self._update_rails_for_mode(mode)
         await self._update_tools_for_mode(mode, session_id, request_id)

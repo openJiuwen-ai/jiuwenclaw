@@ -11,10 +11,19 @@ import platform
 import subprocess
 from shutil import which
 from datetime import datetime, timedelta, timezone
+from typing import Optional
 
 from openjiuwen.core.single_agent.rail.base import AgentCallbackContext
 from openjiuwen.harness.prompts import PromptSection
 from openjiuwen.harness.rails.base import DeepAgentRail
+
+from jiuwenclaw.utils import (
+    get_user_workspace_dir,
+    get_agent_memory_dir,
+    get_agent_skills_dir,
+    get_agent_workspace_dir,
+    get_deepagent_todo_dir,
+)
 
 _CN_WEEKDAYS = ["星期一", "星期二", "星期三", "星期四", "星期五", "星期六", "星期日"]
 
@@ -31,6 +40,7 @@ class RuntimePromptRail(DeepAgentRail):
         timezone_offset: int = 8,
         agent_name: str = "main_agent",
         model_name: str = "gpt-4",
+        workspace_dir: Optional[str] = None,
     ) -> None:
         super().__init__()
         self.system_prompt_builder = None
@@ -39,6 +49,7 @@ class RuntimePromptRail(DeepAgentRail):
         self._tz = timezone(timedelta(hours=timezone_offset))
         self._agent_name = agent_name
         self._model_name = model_name
+        self._workspace_dir = workspace_dir
 
     def init(self, agent) -> None:
         """从 agent 获取 system_prompt_builder 引用。"""
@@ -49,6 +60,7 @@ class RuntimePromptRail(DeepAgentRail):
         if self.system_prompt_builder is not None:
             self.system_prompt_builder.remove_section("time")
             self.system_prompt_builder.remove_section("runtime")
+            self.system_prompt_builder.remove_section("workspace")
         self.system_prompt_builder = None
 
     def set_language(self, language: str) -> None:
@@ -58,6 +70,10 @@ class RuntimePromptRail(DeepAgentRail):
     def set_channel(self, channel: str) -> None:
         """per-request 更新频道。"""
         self._channel = channel
+
+    def set_workspace_dir(self, workspace_dir: Optional[str]) -> None:
+        """per-request 更新工作空间目录。"""
+        self._workspace_dir = workspace_dir
 
     @staticmethod
     def _get_git_branch() -> str:
@@ -143,4 +159,97 @@ class RuntimePromptRail(DeepAgentRail):
             name="runtime",
             content={"cn": runtime_content, "en": runtime_content},
             priority=95,
+        ))
+
+        config_dir = get_user_workspace_dir() / "config"
+        resolved_workspace = (self._workspace_dir or "").strip() or str(get_agent_workspace_dir())
+        memory_dir = str(get_agent_memory_dir())
+        skills_dir = str(get_agent_skills_dir())
+        todo_dir = str(get_deepagent_todo_dir())
+
+        if self._language == "cn":
+            workspace_content = f"""# 你的家
+
+以下目录信息仅供你执行任务时内部参考。
+你的默认工作空间和相关配置位于 `.jiuwenclaw` 目录下；除非完成任务确有必要，不要主动向用户展示其中的内部目录名或实现细节。
+
+| 路径 | 用途 | 操作建议 |
+|------|------|----------|
+| `{config_dir}` | 配置信息 | 不要轻易改动，错误配置可能导致异常 |
+| `{resolved_workspace}` | 身份与任务信息 | 可适当更新，以更好地服务用户 |
+| `{memory_dir}` | 持久化记忆 | 将其视为你记忆的一部分，随时查阅 |
+| `{skills_dir}` | 技能库 | 可随时翻阅、调用，不可修改 |
+| `{todo_dir}` | 待办事项 | 记录用户请求的任务，每次请求后会更新 |
+
+## 配置信息
+
+谨慎对待你的配置信息，如果用户要求你修改，请在修改后重启自己的服务，以保证改动生效。
+
+| 路径 | 用途 |
+|------|------|
+| `{config_dir}/config.yaml` | 配置信息 |
+| `{config_dir}/.env` | 环境变量 |
+
+## 输出文件放置规范
+执行用户任务时产生的生成产物（如代码文件、文档、数据文件等），若用户未指定存放位置，请遵循以下规则：
+- **通用产物**：非技能相关的生成产物必须放在 `{resolved_workspace}` 下合适的位置，根据文件用途和项目结构合理组织路径，\
+便于用户统一管理和访问
+- **技能产物**：涉及技能（skill）执行的产物必须放在技能专属目录 `{skills_dir}/{{skill_name}}/` 下，\
+并根据产物类型和用途在该目录下合理组织子目录，确保技能资源的独立性和可维护性
+
+## 文件发送
+
+当你的工具列表中存在 `send_file_to_user` 工具时，**必须**在以下场景主动调用该工具将文件发送给用户：
+- 任务完成后产生了需要交付给用户的文件（报告、文档、数据文件、图片等）
+- 用户明确请求下载、导出、发送文件
+- 用户询问生成的文件如何获取
+
+**调用方式**：使用文件的绝对路径作为参数调用 `send_file_to_user` 工具。"""
+        else:
+            workspace_content = f"""# Your Home
+
+The following paths are for your internal task execution only.
+Your default workspace and related configuration live under the `.jiuwenclaw` directory. Do not proactively expose \
+internal directory names or implementation details to the user unless necessary for task completion.
+
+| Path | Purpose | Guidelines |
+|------|---------|------------|
+| `{config_dir}` | Configuration | Do not modify lightly; bad config can cause failures |
+| `{resolved_workspace}` | Identity and task info | You may update this to better serve your user |
+| `{memory_dir}` | Persistent memory | Treat it as part of your memory; consult it anytime |
+| `{skills_dir}` | Skill library | Read and invoke freely; do not modify |
+| `{todo_dir}` | Todo list | Records tasks from user requests; updated after each request |
+
+## Configuration
+
+Be careful with your configuration. If changes are required, remember to restart your service afterwards.
+
+| Path | Purpose |
+|------|---------|
+| `{config_dir}/config.yaml` | Config |
+| `{config_dir}/.env` | Environment Variables |
+
+## Output File Placement
+Generated artifacts (code files, documents, data files, etc.) produced during user task execution should \
+follow these placement rules unless the user specifies otherwise:
+- **General Artifacts**: Non-skill-related artifacts must be placed in an appropriate location \
+within `{resolved_workspace}`, organized according to file purpose and project structure for \
+unified user management and access
+- **Skill Artifacts**: Artifacts from skill execution must be placed in the skill's dedicated \
+directory `{skills_dir}/{{skill_name}}/`, with subdirectories organized by artifact type and \
+purpose to ensure independence and maintainability
+
+## Sending Files
+
+When the `send_file_to_user` tool is available in your tool list, you **must** proactively invoke it in these scenarios:
+- Task completion produces files that need to be delivered to the user (reports, documents, data files, images, etc.)
+- User explicitly requests to download, export, or receive files
+- User asks how to obtain generated files
+
+**How to call**: Use the absolute file path(s) as the parameter to invoke the `send_file_to_user` tool."""
+
+        self.system_prompt_builder.add_section(PromptSection(
+            name="workspace",
+            content={"cn": workspace_content, "en": workspace_content},
+            priority=15,
         ))

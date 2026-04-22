@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any
 from datetime import datetime, timezone
 
-from jiuwenclaw.utils import get_agent_sessions_dir
+from jiuwenclaw.utils import get_agent_sessions_dir, get_agent_workspace_dir, get_user_workspace_dir
 
 logger = logging.getLogger(__name__)
 
@@ -31,6 +31,72 @@ _TITLE_MAX_LEN = 50
 def _current_timestamp() -> float:
     """返回显式使用 UTC 时区的当前时间戳"""
     return datetime.now(timezone.utc).timestamp()
+
+
+def _is_relative_to(path: Path, base: Path) -> bool:
+    try:
+        path.relative_to(base)
+        return True
+    except ValueError:
+        return False
+
+
+def _safe_session_subdir(session_id: str, sessions_root: str | Path | None = None) -> Path | None:
+    """解析 sessions 根下安全子目录；非法 session_id 返回 None（不 mkdir）。"""
+    stripped = (session_id or "").strip()
+    if not stripped or stripped in {".", ".."}:
+        return None
+    if ".." in stripped or "/" in stripped or "\\" in stripped:
+        return None
+    root = Path(sessions_root) if sessions_root else get_agent_sessions_dir()
+    base = root.resolve()
+    target = (base / stripped).resolve()
+    if target == base or not _is_relative_to(target, base):
+        return None
+    return target
+
+
+def validate_project_dir(path: str, *, default: Path | None = None) -> Path:
+    """将路径解析为绝对路径并限制在 ~/.jiuwenclaw 下；非法则记录日志并返回 default。"""
+    fallback = default if default is not None else get_agent_workspace_dir().resolve()
+    raw = (path or "").strip()
+    if not raw:
+        return fallback
+    allow = get_user_workspace_dir().resolve()
+    try:
+        candidate = Path(raw).expanduser()
+        if not candidate.is_absolute():
+            candidate = (allow / candidate).resolve()
+        else:
+            candidate = candidate.resolve()
+        candidate.relative_to(allow)
+        return candidate
+    except (OSError, ValueError) as exc:
+        logger.warning(
+            "[session_metadata] project_dir 校验失败 path=%r: %s，使用默认 %s",
+            path,
+            exc,
+            fallback,
+        )
+        return fallback
+
+
+def get_resolved_project_dir(
+    session_id: str,
+    sessions_root: str | Path | None = None,
+) -> str:
+    """从 metadata 读取 project_dir，无效或未设置时返回全局 agent workspace。"""
+    default_s = str(get_agent_workspace_dir().resolve())
+    if _safe_session_subdir(session_id, sessions_root) is None:
+        return default_s
+    sessions_root_s = str(sessions_root) if sessions_root else None
+    meta = _read_metadata(session_id, sessions_root_s)
+    pd = meta.get("project_dir")
+    if not isinstance(pd, str) or not pd.strip():
+        meta["project_dir"] = default_s
+        _enqueue_write(session_id, meta, sessions_root_s)
+        return default_s
+    return str(validate_project_dir(pd.strip(), default=Path(default_s)))
 
 
 def _metadata_file(session_id: str, sessions_root: str | None = None) -> Path:
@@ -131,6 +197,7 @@ def init_session_metadata(
     title: str = "",
     mode: str = "unknown",
     sessions_root: str | Path | None = None,
+    project_dir: str | None = None,
 ) -> None:
     """初始化会话元数据(同步写,确保创建后立即可读)"""
     metadata = {
@@ -143,6 +210,8 @@ def init_session_metadata(
         "message_count": 0,
         "mode": mode,
     }
+    if isinstance(project_dir, str) and project_dir.strip():
+        metadata["project_dir"] = str(validate_project_dir(project_dir.strip()))
     sessions_root_s = str(sessions_root) if sessions_root else None
     _write_metadata_sync(session_id, metadata, sessions_root_s)
 
@@ -159,6 +228,7 @@ def update_session_metadata(
     channel_metadata: dict[str, Any] | None = None,
     mode: str | None = None,
     sessions_root: str | Path | None = None,
+    project_dir: str | None = None,
 ) -> None:
     """更新会话元数据(异步写入,不阻塞调用方)
 
@@ -190,6 +260,8 @@ def update_session_metadata(
         # 首次创建时写入 channel_metadata
         if channel_metadata:
             metadata["channel_metadata"] = channel_metadata
+        if isinstance(project_dir, str) and project_dir.strip():
+            metadata["project_dir"] = str(validate_project_dir(project_dir.strip()))
     else:
         # 更新现有元数据
         if channel_id is not None:
@@ -216,6 +288,9 @@ def update_session_metadata(
 
         # 总是更新最后消息时间
         metadata["last_message_at"] = _current_timestamp()
+
+        if isinstance(project_dir, str) and project_dir.strip():
+            metadata["project_dir"] = str(validate_project_dir(project_dir.strip()))
 
     _enqueue_write(session_id, metadata, sessions_root_s)
 

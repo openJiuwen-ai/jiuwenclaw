@@ -21,7 +21,8 @@ from urllib.parse import parse_qs, urlparse
 
 import aiohttp
 
-from jiuwenclaw.utils import get_agent_workspace_dir
+from jiuwenclaw.agentserver.session_metadata import get_resolved_project_dir
+from jiuwenclaw.utils import get_agent_sessions_dir
 from jiuwenclaw.channel.base import BaseChannel, ChannelMetadata, RobotMessageRouter
 from jiuwenclaw.security.ws_origin import (
     extract_handshake_request,
@@ -185,13 +186,13 @@ class WebChannel(BaseChannel):
             logger.warning("WebChannel 文件下载异常: {}, 错误: {}", url, e)
             return None
 
-    async def _process_files(self, params: dict[str, Any]) -> dict[str, Any]:
+    async def _process_files(self, params: dict[str, Any], session_id: str) -> dict[str, Any]:
         files = params.get("files")
         if not files or not isinstance(files, list):
             return params
 
         downloaded_files = []
-        workspace_dir = str(get_agent_workspace_dir())
+        workspace_dir = get_resolved_project_dir(session_id, str(get_agent_sessions_dir()))
 
         for file_info in files:
             if not isinstance(file_info, dict):
@@ -462,7 +463,7 @@ class WebChannel(BaseChannel):
         if not isinstance(session_id, str) or not session_id:
             session_id = self._make_session_id()
 
-        params = await self._process_files(params)
+        params = await self._process_files(params, session_id)
 
         # skilldev.start / skilldev.respond 需走流式路径才能实时推送事件
         stream_methods = ("skilldev.start", "skilldev.respond")

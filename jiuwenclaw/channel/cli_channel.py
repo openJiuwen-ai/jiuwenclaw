@@ -687,11 +687,14 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
             return
         session_dir.mkdir()
         # 初始化元数据（与 web channel 对齐）
+        pd_raw = params.get("project_dir")
+        init_project_dir = pd_raw.strip() if isinstance(pd_raw, str) else None
         init_session_metadata(
             session_id=target,
             channel_id="tui",
             title=str(params.get("title") or "").strip(),
             mode=params.get("mode", "unknown"),
+            project_dir=init_project_dir,
         )
         await channel.send_response(ws, req_id, ok=True, payload={"session_id": target})
 

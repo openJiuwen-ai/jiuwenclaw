@@ -14,6 +14,7 @@ import asyncio
 import json
 import logging
 import time
+from collections import OrderedDict
 from pathlib import Path
 from typing import Any, AsyncIterator, Tuple
 
@@ -27,6 +28,12 @@ from jiuwenclaw.agentserver.agent_adapters import (
 from jiuwenclaw.agentserver.memory.config import get_memory_mode
 from jiuwenclaw.agentserver.session_history import append_history_record
 from jiuwenclaw.agentserver.session_manager import SessionManager
+from jiuwenclaw.agentserver.session_metadata import (
+    _safe_session_subdir,
+    get_resolved_project_dir,
+    update_session_metadata,
+    validate_project_dir,
+)
 from jiuwenclaw.agentserver.skill_manager import SkillManager
 from jiuwenclaw.config import get_config
 from jiuwenclaw.extensions.registry import ExtensionRegistry
@@ -37,6 +44,7 @@ from jiuwenclaw.schema.message import EventType, ReqMethod
 from jiuwenclaw.utils import (
     get_agent_home_dir,
     get_agent_sessions_relative_dir,
+    get_agent_workspace_dir,
     get_agent_workspace_relative_dir,
     get_env_file,
     get_user_workspace_dir,
@@ -45,6 +53,9 @@ from jiuwenclaw.utils import (
 load_dotenv(dotenv_path=get_env_file())
 
 logger = logging.getLogger(__name__)
+
+# _session_project_dir 进程内缓存上限（超出则淘汰最久未访问；磁盘 metadata 仍为权威来源）
+_SESSION_PROJECT_DIR_CACHE_MAX = 4096
 
 _SKILL_ROUTES: dict[ReqMethod, str] = {
     ReqMethod.SKILLS_LIST: "handle_skills_list",
@@ -140,6 +151,8 @@ class JiuWenClaw:
         self._sessions_dir = user_workspace_path / get_agent_sessions_relative_dir()
         self._skill_manager = SkillManager(workspace_dir=self._workspace_dir)
         self._session_manager = SessionManager()
+        # session_id -> 已解析的 project_dir（与 metadata 绑定，见 _effective_project_dir_for_session）
+        self._session_project_dir: OrderedDict[str, str] = OrderedDict()
         # SkillDev 模式：懒初始化，首次 skilldev.* 请求时构造
         self._skilldev_service = None
         self._tool_manager = None
@@ -200,6 +213,94 @@ class JiuWenClaw:
                 get_tools_dir=lambda: Path(self._workspace_dir) / "tools",
             )
         return self._tool_manager
+
+    def _session_project_dir_get(self, session_id: str) -> str | None:
+        d = self._session_project_dir
+        if session_id not in d:
+            return None
+        d.move_to_end(session_id)
+        return d[session_id]
+
+    def _session_project_dir_set(self, session_id: str, value: str) -> None:
+        d = self._session_project_dir
+        d.pop(session_id, None)
+        d[session_id] = value
+        while len(d) > _SESSION_PROJECT_DIR_CACHE_MAX:
+            d.popitem(last=False)
+
+    def _effective_project_dir_for_session(
+        self,
+        session_id: str,
+        param_project_dir: str | None,
+    ) -> str:
+        """解析本会话工程目录：首次非空 params.project_dir 绑定并落 metadata；冲突保留首次。"""
+        raw = (param_project_dir or "").strip()
+        sessions_root = str(self._sessions_dir)
+        default = str(get_agent_workspace_dir().resolve())
+        can_persist = _safe_session_subdir(session_id, sessions_root) is not None
+        if not raw:
+            existing = self._session_project_dir_get(session_id)
+            if existing is not None:
+                return existing
+            if not can_persist:
+                logger.warning(
+                    "[JiuWenClaw] 跳过 metadata 读取 project_dir：非法 session_id=%r",
+                    session_id,
+                )
+                return default
+            loaded = get_resolved_project_dir(session_id, sessions_root)
+            self._session_project_dir_set(session_id, loaded)
+            return loaded
+
+        resolved = str(validate_project_dir(raw, default=Path(default)))
+        existing = self._session_project_dir_get(session_id)
+        if existing is None:
+            self._session_project_dir_set(session_id, resolved)
+            if can_persist:
+                update_session_metadata(
+                    session_id=session_id,
+                    project_dir=resolved,
+                    sessions_root=self._sessions_dir,
+                )
+            else:
+                logger.warning(
+                    "[JiuWenClaw] 跳过 metadata 写入 project_dir：非法 session_id=%r",
+                    session_id,
+                )
+            return resolved
+        if existing == resolved:
+            if can_persist:
+                update_session_metadata(
+                    session_id=session_id,
+                    project_dir=existing,
+                    sessions_root=self._sessions_dir,
+                )
+            return existing
+        logger.warning(
+            "[JiuWenClaw] 忽略冲突的 project_dir：session_id=%s 保留 %r，收到 %r",
+            session_id,
+            existing,
+            resolved,
+        )
+        return existing
+
+    def _apply_effective_project_dir_to_request(
+        self,
+        request: AgentRequest,
+        session_id: str,
+        inputs: dict[str, Any],
+    ) -> None:
+        """写入 effective_project_dir 到 request.metadata 与 inputs。"""
+        param = None
+        if isinstance(request.params, dict):
+            pd = request.params.get("project_dir")
+            if isinstance(pd, str):
+                param = pd
+        effective = self._effective_project_dir_for_session(session_id, param)
+        md = dict(request.metadata) if isinstance(request.metadata, dict) else {}
+        md["effective_project_dir"] = effective
+        request.metadata = md
+        inputs["effective_project_dir"] = effective
 
     async def create_instance(self, config: dict[str, Any] | None = None, *, mode: str = "agent") -> None:
         """初始化 Agent 实例.
@@ -566,6 +667,7 @@ class JiuWenClaw:
         )
 
         inputs, memory_mode, raw_query = self._build_inputs(request)
+        self._apply_effective_project_dir_to_request(request, session_id, inputs)
 
         # cloud memory: before chat hook
         if memory_mode == "cloud":
@@ -666,6 +768,7 @@ class JiuWenClaw:
         )
 
         inputs, memory_mode, raw_query = self._build_inputs(request)
+        self._apply_effective_project_dir_to_request(request, session_id, inputs)
         rid = request.request_id
         cid = request.channel_id
 
