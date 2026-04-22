@@ -17,3 +17,4 @@ class GatewayRouteBinding:
     cleanup_handler: Callable[..., Any] | None = None
     disconnect_handler: Callable[..., Any] | None = None
     install: Callable[[Any], None] | None = None
+    http_handler: Callable[..., Any] | None = None

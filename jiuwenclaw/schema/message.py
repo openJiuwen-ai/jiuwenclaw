@@ -43,7 +43,7 @@ class ReqMethod(Enum):
     AGENT_RELOAD_CONFIG = "agent.reload_config"
 
     MEMORY_COMPUTE = "memory.compute"
-    
+
     FILES_LIST = "files.list"
     FILES_GET = "files.get"
     TTS_SYNTHESIZE = "tts.synthesize"

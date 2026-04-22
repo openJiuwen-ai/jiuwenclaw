@@ -175,7 +175,11 @@ async def _connect_with_retry(
 
 @dataclass
 class RouteConfig:
-    """单条路由的配置（/acp, /cli 等）。"""
+    """单条路由的配置（/acp, /cli 等）。
+
+    http_handler: HTTP 请求处理器，签名为 (method: str, path: str, headers: dict, body: bytes) -> bytes。
+    如果为 None，则该路由不支持 HTTP 请求。
+    """
 
     path: str
     channel_id: str
@@ -186,6 +190,7 @@ class RouteConfig:
     outbound_interceptor: Callable[..., Awaitable[bool]] | None = None
     cleanup_handler: Callable[..., Any] | None = None
     disconnect_handler: Callable[..., Any] | None = None
+    http_handler: Callable[..., bytes] | None = None
 
 
 @dataclass
@@ -334,17 +339,41 @@ class GatewayServer:
     async def start(self) -> None:
         if self._running or not self.config.enabled:
             return
+        logger.info("[GatewayServer] starting on %s:%s", self.config.host, self.config.port)
         try:
             from websockets.legacy.server import serve as ws_serve
+            from websockets.legacy.server import WebSocketServerProtocol
         except Exception:  # pragma: no cover
             from websockets import serve as ws_serve
+            from websockets.server import WebSocketServerProtocol
 
+        # Create unified protocol class that handles both HTTP and WebSocket
+        gateway_server = self
+
+        class _UnifiedServerProtocol(WebSocketServerProtocol):  # type: ignore[attr-defined]
+            """WebSocket protocol that also handles HTTP requests on the same endpoint."""
+
+            async def process_request(self, path, headers):
+                # Check if it's a WebSocket upgrade request
+                upgrade = str(headers.get("Upgrade", "")).lower()
+                connection = str(headers.get("Connection", "")).lower()
+
+                if "websocket" in upgrade and "upgrade" in connection:
+                    # It's a WebSocket upgrade - proceed with normal WS handling
+                    return await super().process_request(path, headers)
+
+                # It's an HTTP request - websockets 16.0 doesn't support non-GET methods
+                # VibeSkill HTTP is handled by VibeSkillChannel's own HTTP server on a separate port
+                return (404, {"Content-Type": "application/json"}, b'{"error": "Not found"}')
+
+        logger.info("[GatewayServer] calling ws_serve on %s:%s", self.config.host, self.config.port)
         self._server = await ws_serve(
             self._connection_handler,
             self.config.host,
             self.config.port,
             ping_interval=20,
             ping_timeout=600,
+            create_protocol=_UnifiedServerProtocol,
         )
         self._running = True
         paths = ", ".join(self.config.routes.keys())
@@ -670,6 +699,7 @@ def _build_route_config_map(bindings: list[GatewayRouteBinding]) -> dict[str, Ro
             outbound_interceptor=binding.outbound_interceptor,
             cleanup_handler=binding.cleanup_handler,
             disconnect_handler=binding.disconnect_handler,
+            http_handler=binding.http_handler,
         )
         for binding in bindings
     }
@@ -690,6 +720,7 @@ async def _run(
     from jiuwenclaw.channel.telegram_channel import TelegramChannel, TelegramChannelConfig
     from jiuwenclaw.channel.discord_channel import DiscordChannel, DiscordChannelConfig
     from jiuwenclaw.channel.wecom_channel import WecomChannel, WecomConfig
+    from jiuwenclaw.channel.vibeskill_channel import VibeSkillChannel, VibeSkillConfig
     from jiuwenclaw.config import get_config
     from jiuwenclaw.gateway.agent_client import WebSocketAgentServerClient
     from jiuwenclaw.gateway.channel_manager import ChannelManager
@@ -938,6 +969,20 @@ async def _run(
     )
     await acp_inbound_server.start()
 
+    # VibeSkill 有自己独立的 inbound server（与 acp 隔离）
+    vibeskill_inbound_server = _InboundGatewayServer(
+        lambda msg: _normalize_and_forward_message(msg, channel_manager)
+    )
+    await vibeskill_inbound_server.start()
+
+    # VibeSkill 有自己的 HTTP Server 和 WebSocket Server，不再走 GatewayServer
+    vibeskill_channel = VibeSkillChannel(
+        config=VibeSkillConfig(channel_id="vibeskill"),
+        router=channel_manager,
+        agent_client=client,
+    )
+    vibeskill_channel.on_message(vibeskill_inbound_server.handle_message)
+
     route_bindings = [
         _build_acp_route_binding(
             path="/acp",
@@ -970,6 +1015,9 @@ async def _run(
         if binding.install is not None:
             binding.install(gateway_server)
     gateway_server.on_message(acp_inbound_server.handle_message)
+
+    channel_manager.register_channel(vibeskill_channel)
+    await vibeskill_channel.start()
 
     feishu_channel = None
     feishu_task = None
@@ -1459,7 +1507,13 @@ async def _run(
     await channel_manager.start_dispatch()
     await cron_scheduler.start()
     # 先同步完成监听绑定，避免 IDE/ACP 子进程在端口尚未就绪时连接导致多次重试。
-    await gateway_server.start()
+    logger.info("[App] about to call gateway_server.start()")
+    try:
+        await gateway_server.start()
+        logger.info("[App] gateway_server.start() returned")
+    except Exception:
+        logger.exception("[App] gateway_server.start() failed")
+        raise
     gateway_server_task = asyncio.create_task(
         gateway_server.wait_until_closed(),
         name="acp-gateway-server",

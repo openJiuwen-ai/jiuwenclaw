@@ -30,6 +30,8 @@ logger = logging.getLogger(__name__)
 _ACP_CHANNEL_ID = "acp"
 _ACP_ORIGINAL_SESSION_ID_KEY = "acp_original_session_id"
 _DEFAULT_INLINE_FILE_SIZE_LIMIT = 128 * 1024
+_VIBESKILL_CHANNEL_ID = "vibeskill"
+_VIBESKILL_ORIGINAL_SESSION_ID_KEY = "vibeskill_original_session_id"
 _KNOWN_JIUWENCLAW_SESSION_PREFIXES = (
     "sess_",
     "acp_",
@@ -42,6 +44,7 @@ _KNOWN_JIUWENCLAW_SESSION_PREFIXES = (
     "telegram_",
     "discord_",
     "whatsapp_",
+    "vibeskill_",
 )
 
 
@@ -130,6 +133,8 @@ class MessageHandler(ABC):
         self._session_evolution_in_progress: set[str] = set()
         self._acp_session_aliases: dict[str, str] = {}  # external_session_id -> internal_session_id
         self._acp_session_alias_lock = asyncio.Lock()
+        self._vibeskill_session_aliases: dict[str, str] = {}  # external_session_id -> internal_session_id
+        self._vibeskill_session_alias_lock = asyncio.Lock()
 
         # per-channel 控制状态：支持 \new_session / \mode 指令。
         # 使用 ChannelType 的 value 作为标准键，避免散落的硬编码字符串。
@@ -857,28 +862,43 @@ class MessageHandler(ABC):
     async def _prepare_agent_dispatch_message(self, msg: "Message") -> "Message":
         from jiuwenclaw.schema.message import ReqMethod
 
-        if msg.channel_id != _ACP_CHANNEL_ID:
-            return msg
-        if msg.req_method in (ReqMethod.INITIALIZE, ReqMethod.SESSION_CREATE):
-            return msg
+        if msg.channel_id == _ACP_CHANNEL_ID:
+            if msg.req_method in (ReqMethod.INITIALIZE, ReqMethod.SESSION_CREATE):
+                return msg
+            internal_session_id, aliased = await self._resolve_acp_internal_session_id(msg.session_id)
+            if not internal_session_id:
+                return msg
+            params = dict(msg.params or {})
+            params["session_id"] = internal_session_id
+            metadata = dict(msg.metadata or {})
+            if aliased:
+                metadata.setdefault(_ACP_ORIGINAL_SESSION_ID_KEY, str(msg.session_id or ""))
+            return replace(
+                msg,
+                session_id=internal_session_id,
+                params=params,
+                metadata=metadata or None,
+            )
 
-        internal_session_id, aliased = await self._resolve_acp_internal_session_id(msg.session_id)
-        if not internal_session_id:
-            return msg
+        if msg.channel_id == _VIBESKILL_CHANNEL_ID:
+            if msg.req_method in (ReqMethod.INITIALIZE, ReqMethod.SESSION_CREATE):
+                return msg
+            internal_session_id, aliased = await self._resolve_vibeskill_internal_session_id(msg.session_id)
+            if not internal_session_id:
+                return msg
+            params = dict(msg.params or {})
+            params["session_id"] = internal_session_id
+            metadata = dict(msg.metadata or {})
+            if aliased:
+                metadata.setdefault(_VIBESKILL_ORIGINAL_SESSION_ID_KEY, str(msg.session_id or ""))
+            return replace(
+                msg,
+                session_id=internal_session_id,
+                params=params,
+                metadata=metadata or None,
+            )
 
-        params = dict(msg.params or {})
-        params["session_id"] = internal_session_id
-
-        metadata = dict(msg.metadata or {})
-        if aliased:
-            metadata.setdefault(_ACP_ORIGINAL_SESSION_ID_KEY, str(msg.session_id or ""))
-
-        return replace(
-            msg,
-            session_id=internal_session_id,
-            params=params,
-            metadata=metadata or None,
-        )
+        return msg
 
     def _resolve_acp_external_session_id(
         self,
@@ -1058,6 +1078,76 @@ class MessageHandler(ABC):
         cleaned_content = cls._strip_attached_mentions(content, normalized, cwd)
         merged_content = f"{prefix} {cleaned_content}".strip()
         return cls._resolve_at_file_references(merged_content, cwd=cwd)
+
+    async def _ensure_vibeskill_agent_session(self, session_id: str) -> str:
+        from jiuwenclaw.e2a.gateway_normalize import e2a_from_agent_fields
+        from jiuwenclaw.schema.message import ReqMethod
+
+        env = e2a_from_agent_fields(
+            request_id=f"vibeskill-session-create-{int(time.time() * 1000):x}-{secrets.token_hex(3)}",
+            channel_id=_VIBESKILL_CHANNEL_ID,
+            session_id=session_id,
+            req_method=ReqMethod.SESSION_CREATE,
+            params={"session_id": session_id},
+            is_stream=False,
+            timestamp=time.time(),
+        )
+        resp = await self._agent_client.send_request(env)
+        if not resp.ok:
+            payload = dict(resp.payload or {}) if isinstance(resp.payload, dict) else {}
+            raise RuntimeError(str(payload.get("error") or "vibeskill session.create failed"))
+        payload = dict(resp.payload or {}) if isinstance(resp.payload, dict) else {}
+        resolved = payload.get("sessionId") or payload.get("session_id") or session_id
+        resolved_str = str(resolved or "").strip()
+        if not resolved_str:
+            raise RuntimeError("vibeskill session.create returned empty session_id")
+        return resolved_str
+
+    async def _resolve_vibeskill_internal_session_id(
+        self,
+        external_session_id: str | None,
+    ) -> tuple[str | None, bool]:
+        external = str(external_session_id or "").strip()
+        if not external:
+            return None, False
+
+        cached = self._vibeskill_session_aliases.get(external)
+        if cached:
+            return cached, cached != external
+
+        async with self._vibeskill_session_alias_lock:
+            cached = self._vibeskill_session_aliases.get(external)
+            if cached:
+                return cached, cached != external
+
+            desired = (
+                external
+                if self._is_known_jiuwenclaw_session_id(external)
+                else self._generate_channel_session_id(_VIBESKILL_CHANNEL_ID)
+            )
+            ensured = await self._ensure_vibeskill_agent_session(desired)
+            self._vibeskill_session_aliases[external] = ensured
+            return ensured, ensured != external
+
+    def _resolve_vibeskill_external_session_id(
+        self,
+        session_id: str | None,
+        metadata: dict[str, Any] | None = None,
+    ) -> str | None:
+        sid = str(session_id or "").strip()
+        if not sid:
+            return None
+
+        original = ""
+        if isinstance(metadata, dict):
+            original = str(metadata.get(_VIBESKILL_ORIGINAL_SESSION_ID_KEY) or "").strip()
+        if original:
+            return original
+
+        for external, internal in self._vibeskill_session_aliases.items():
+            if internal == sid:
+                return external
+        return sid
 
     @staticmethod
     def message_to_e2a(msg: "Message") -> "E2AEnvelope":
