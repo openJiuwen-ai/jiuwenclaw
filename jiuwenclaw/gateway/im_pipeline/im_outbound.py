@@ -22,6 +22,7 @@ logger = logging.getLogger(__name__)
 _SKIP_EVENT_TYPES = frozenset({
     "chat.delta",
     "chat.tool_call",
+    "chat.tool_calls.delta",
     "chat.tool_result",
     "todo.updated",
 })

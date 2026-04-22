@@ -55,6 +55,7 @@ class TestEventType:
         assert EventType.CHAT_DELTA.value == "chat.delta"
         assert EventType.CHAT_FINAL.value == "chat.final"
         assert EventType.CHAT_TOOL_CALL.value == "chat.tool_call"
+        assert EventType.CHAT_TOOL_CALLS_DELTA.value == "chat.tool_calls.delta"
         assert EventType.CHAT_ERROR.value == "chat.error"
 
 

@@ -10,6 +10,17 @@ from typing import Any
 logger = logging.getLogger(__name__)
 
 
+def tool_calls_payload_to_json_list(raw: Any) -> list[Any]:
+    """将流式 payload 中的 tool_calls 规范为 list（OpenJiuwen 已产出 dict，此处只做形状收敛）。"""
+    if raw is None:
+        return []
+    if isinstance(raw, dict):
+        return [raw]
+    if isinstance(raw, (list, tuple)):
+        return list(raw)
+    return []
+
+
 def parse_stream_chunk(chunk: Any, *, _has_streamed_content: bool = False) -> dict[str, Any] | None:
     """Parse agent output chunk to frontend-consumable payload dict.
 
@@ -199,6 +210,20 @@ def _parse_typed_chunk(chunk: Any, _has_streamed_content: bool) -> dict[str, Any
         if is_chunked:
             return {"event_type": "chat.delta", "content": content}
         return {"event_type": "chat.final", "content": content}
+
+    if chunk_type == "tool_calls.delta":
+        if isinstance(payload, dict):
+            result: dict[str, Any] = {
+                "event_type": "chat.tool_calls.delta",
+                "tool_calls": tool_calls_payload_to_json_list(payload.get("tool_calls", [])),
+            }
+            if "source" in payload:
+                result["source"] = payload.get("source")
+            return result
+        return {
+            "event_type": "chat.tool_calls.delta",
+            "tool_calls": tool_calls_payload_to_json_list(payload),
+        }
 
     if chunk_type == "tool_call":
         tool_info = (

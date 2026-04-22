@@ -339,7 +339,7 @@ class WebChannel(BaseChannel):
         if isinstance(msg.payload, dict):
             # 对于需要传递完整结构化数据的事件类型
             if event_name in ("connection.ack", "todo.updated", "chat.tool_call", "chat.tool_result",
-                    "chat.processing_status", "chat.interrupt_result", "chat.evolution_status",
+                    "chat.processing_status", "chat.interrupt_result", "chat.evolution_status", "chat.tool_calls.delta",
                     "chat.error", "heartbeat.relay",
                     "context.compressed", "chat.ask_user_question", "chat.subtask_update",
                     "history.message",

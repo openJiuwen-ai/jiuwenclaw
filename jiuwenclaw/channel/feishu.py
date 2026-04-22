@@ -1335,7 +1335,12 @@ class FeishuChannel(BaseChannel):
                 return
 
             # 非 streaming 模式下仅下发最终结果，屏蔽执行过程类事件。
-            if (not streaming_enabled) and event_name in {"chat.tool_call", "chat.tool_result", "todo.updated"}:
+            if (not streaming_enabled) and event_name in {
+                "chat.tool_call",
+                "chat.tool_calls.delta",
+                "chat.tool_result",
+                "todo.updated",
+            }:
                 return
 
             # 流式结束兜底：有些场景不会携带非空 chat.final，使用 processing_status=false 冲刷缓存。
