@@ -1266,7 +1266,8 @@ class AgentWebSocketServer:
         if not history_path.exists():
             return None
         try:
-            raw = json.loads(history_path.read_text(encoding="utf-8"))
+            from jiuwenclaw.agentserver.session_history import read_history_records
+            raw = read_history_records(history_path)
         except Exception:
             return None
         if not isinstance(raw, list):
