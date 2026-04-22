@@ -36,7 +36,8 @@ class ExtensionLoader:
             self._search_paths.append(path)
 
     def discover_extension_roots(self) -> list[Path]:
-        roots: list[Path] = []
+        """发现所有扩展根目录，按 priority 排序（数值越小越先加载）"""
+        roots_with_priority: list[tuple[Path, int]] = []
         logger.info("[ExtensionLoader] 开始搜索扩展路径: %s", self._search_paths)
         for base_path in self._search_paths:
             if not base_path.exists():
@@ -45,8 +46,18 @@ class ExtensionLoader:
                 if not subdir.is_dir():
                     continue
                 if _is_extension_root(subdir):
-                    roots.append(subdir)
-        return roots
+                    # 读取 priority 字段，默认为 10
+                    manifest = _load_manifest_dict(subdir)
+                    priority = manifest.get("priority", 10)
+                    roots_with_priority.append((subdir, priority))
+
+        # 按 priority 排序（数值越小越先加载）
+        sorted_roots = sorted(roots_with_priority, key=lambda x: x[1])
+        logger.info(
+            "[ExtensionLoader] 扩展加载顺序: %s",
+            [(r.name, p) for r, p in sorted_roots]
+        )
+        return [root for root, _ in sorted_roots]
 
     async def load_extension(self, root: Path) -> Any:
         manifest = _load_manifest_dict(root)

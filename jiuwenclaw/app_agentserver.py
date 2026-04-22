@@ -46,6 +46,7 @@ async def _run(host: str, port: int) -> None:
     from jiuwenclaw.agentserver.agent_ws_server import AgentWebSocketServer
     from jiuwenclaw.extensions.manager import ExtensionManager
     from jiuwenclaw.extensions.registry import ExtensionRegistry
+    from jiuwenclaw.telemetry import init_telemetry
 
     logger.info("[AgentServer] starting: ws://%s:%s", host, port)
 
@@ -65,6 +66,9 @@ async def _run(host: str, port: int) -> None:
     )
     await extension_manager.load_all_extensions()
     logger.info("[AgentServer] 扩展加载完成，共 %d 个", len(extension_manager.list_extensions()))
+
+    # ---------- Telemetry 初始化 ----------
+    init_telemetry()
 
     server = AgentWebSocketServer.get_instance(
         host=host,

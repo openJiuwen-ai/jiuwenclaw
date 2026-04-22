@@ -744,6 +744,7 @@ async def _run(
     from jiuwenclaw.extensions.registry import ExtensionRegistry
     from jiuwenclaw.schema.message import Message
     from jiuwenclaw.updater import WindowsUpdaterService
+    from jiuwenclaw.telemetry import init_telemetry
     from openjiuwen.core.runner import Runner
 
     def _do_restart() -> None:
@@ -768,6 +769,9 @@ async def _run(
     extension_manager = ExtensionManager(registry=extension_registry)
     await extension_manager.load_all_extensions()
     logger.info("[App] extensions loaded: %d", len(extension_manager.list_extensions()))
+
+    # ---------- Telemetry 初始化 ----------
+    init_telemetry()
 
     max_retries = int(os.getenv("AGENT_CONNECT_RETRY", "20"))
     retry_interval = float(os.getenv("AGENT_CONNECT_RETRY_INTERVAL", "3"))

@@ -25,7 +25,7 @@ class TenantAgentPool:
         # LRU 缓存: key=agent_id+service_id, value=AgentManager 实例
         self._agent_wrappers = AsyncLRUCache(max_size=cache_max_size, ttl_seconds=cache_ttl)
         self._locks: dict[str, asyncio.Lock] = {}
-        self._lock_loop_ids: dict[str, int] = {}
+        self._lock_loops: dict[str, asyncio.AbstractEventLoop] = {}
         self._global_lock = asyncio.Lock()
 
     @classmethod
@@ -46,19 +46,19 @@ class TenantAgentPool:
             except RuntimeError:
                 asyncio.run(cls._instance._agent_wrappers.clear())
             cls._instance._locks.clear()
-            cls._instance._lock_loop_ids.clear()
+            cls._instance._lock_loops.clear()
         cls._instance = None
 
     def _get_lock(self, cache_key: str) -> asyncio.Lock:
-        current_loop_id = id(asyncio.get_running_loop())
+        current_loop = asyncio.get_running_loop()
 
         if cache_key not in self._locks:
             self._locks[cache_key] = asyncio.Lock()
-            self._lock_loop_ids[cache_key] = current_loop_id
+            self._lock_loops[cache_key] = current_loop
         else:
-            stored_loop_id = self._lock_loop_ids.get(cache_key)
-            if stored_loop_id != current_loop_id:
-                # 检查是否有等待者
+            stored_loop = self._lock_loops.get(cache_key)
+            if stored_loop is not current_loop:
+                # 事件循环发生变化，需要重建锁
                 old_lock = self._locks[cache_key]
                 if old_lock.locked() or getattr(old_lock, '_waiters', None):
                     logger.error(
@@ -66,9 +66,8 @@ class TenantAgentPool:
                         "This may cause data inconsistency.",
                         cache_key
                     )
-                # 强制重建
                 self._locks[cache_key] = asyncio.Lock()
-                self._lock_loop_ids[cache_key] = current_loop_id
+                self._lock_loops[cache_key] = current_loop
 
         return self._locks[cache_key]
 
@@ -146,7 +145,7 @@ class TenantAgentPool:
 
         await self._agent_wrappers.clear()
         self._locks.clear()
-        self._lock_loop_ids.clear()
+        self._lock_loops.clear()
         logger.info("[TenantAgentPool] All agent managers and states cleaned up")
 
     async def _ensure_agent_manager(
@@ -198,7 +197,7 @@ class TenantAgentPool:
                 stale_locks = [k for k in self._locks if k not in active_keys]
                 for stale_key in stale_locks:
                     del self._locks[stale_key]
-                    self._lock_loop_ids.pop(stale_key, None)
+                    self._lock_loops.pop(stale_key, None)
 
                 logger.info(
                     "[TenantAgentPool] AgentManager 实例创建完成: agent_id=%s, service_id=%s",

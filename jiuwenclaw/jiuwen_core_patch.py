@@ -13,6 +13,28 @@ from openjiuwen.core.foundation.llm.model_clients.openai_model_client import \
     AssistantMessageChunk, OpenAIModelClient, ToolCall, UsageMetadata
 
 
+_ORIGINAL_BUILD_REQUEST_PARAMS = None
+
+
+def _patched_build_request_params(self, *, stream: bool, **kwargs) -> dict:
+    """Patched version: ensure streaming requests carry ``stream_options={"include_usage": true}``.
+
+    Required for OpenAI-compatible streaming APIs to return the usage payload in
+    the final chunk; without it ``chunk.usage`` is always ``None`` and the
+    ``gen_ai.client.token.usage`` metric never gets recorded.
+
+    Respects a user-provided ``stream_options`` override.
+    """
+    params = _ORIGINAL_BUILD_REQUEST_PARAMS(self, stream=stream, **kwargs)
+    if stream:
+        existing = params.get("stream_options")
+        if existing is None:
+            params["stream_options"] = {"include_usage": True}
+        elif isinstance(existing, dict) and "include_usage" not in existing:
+            existing["include_usage"] = True
+    return params
+
+
 class PatchOpenAIModelClient(OpenAIModelClient):
 
     def _create_async_openai_client(self, timeout: Optional[float] = None) -> "openai.AsyncOpenAI":
@@ -57,14 +79,36 @@ class PatchOpenAIModelClient(OpenAIModelClient):
     
     def _parse_stream_chunk(self, chunk: Any) -> Optional[AssistantMessageChunk]:
         """Parse OpenAI streaming response chunk
-        
+
         Args:
             chunk: OpenAI streaming response chunk
-            
+
         Returns:
             AssistantMessageChunk or None
         """
+        # When stream_options={"include_usage": true}, OpenAI sends a final
+        # usage-only chunk with ``choices=[]`` and ``usage`` populated. Emit a
+        # usage-only AssistantMessageChunk so downstream aggregation picks it up.
         if not chunk.choices:
+            chunk_usage = getattr(chunk, 'usage', None)
+            if chunk_usage:
+                input_cost, output_cost, total_cost = self._extract_cost_info(chunk_usage)
+                usage_metadata = UsageMetadata(
+                    model_name=self.model_config.model_name,
+                    input_tokens=getattr(chunk_usage, 'prompt_tokens', 0) or 0,
+                    output_tokens=getattr(chunk_usage, 'completion_tokens', 0) or 0,
+                    total_tokens=getattr(chunk_usage, 'total_tokens', 0) or 0,
+                    input_cost=input_cost,
+                    output_cost=output_cost,
+                    total_cost=total_cost,
+                )
+                return AssistantMessageChunk(
+                    content="",
+                    reasoning_content=None,
+                    tool_calls=None,
+                    usage_metadata=usage_metadata,
+                    finish_reason="null",
+                )
             return None
 
         choice = chunk.choices[0]
@@ -119,6 +163,11 @@ class PatchOpenAIModelClient(OpenAIModelClient):
 
 def apply_openai_model_client_patch() -> None:
     """Monkey-patch upstream OpenAIModelClient with JiuwenClaw SSL/headers/stream behavior."""
+    global _ORIGINAL_BUILD_REQUEST_PARAMS
+    if _ORIGINAL_BUILD_REQUEST_PARAMS is None:
+        _ORIGINAL_BUILD_REQUEST_PARAMS = OpenAIModelClient._build_request_params
+
     _impl = PatchOpenAIModelClient.__dict__
     setattr(OpenAIModelClient, "_create_async_openai_client", _impl["_create_async_openai_client"])
     setattr(OpenAIModelClient, "_parse_stream_chunk", _impl["_parse_stream_chunk"])
+    setattr(OpenAIModelClient, "_build_request_params", _patched_build_request_params)

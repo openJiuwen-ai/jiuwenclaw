@@ -1243,6 +1243,18 @@ class JiuWenClawDeepAdapter:
             stream_event_rail = None
         return stream_event_rail
 
+    @staticmethod
+    def _build_telemetry_rail() -> Any | None:
+        """Build TelemetryRail for OpenTelemetry instrumentation."""
+        try:
+            from jiuwenclaw.telemetry.instrumentors.telemetry_rail import TelemetryRail
+            rail = TelemetryRail()
+            logger.info("[JiuWenClawDeepAdapter] TelemetryRail create success")
+        except Exception as exc:
+            logger.warning("[JiuWenClawDeepAdapter] TelemetryRail create failed: %s", exc)
+            rail = None
+        return rail
+
     def _build_task_planning_rail(self) -> TaskPlanningRail | None:
         """Build TaskPlanningRail."""
         try:
@@ -1406,6 +1418,8 @@ class JiuWenClawDeepAdapter:
                 self.params = self.params or {}
 
         rail_infos = [
+            # TelemetryRail - lowest priority, runs first for full coverage
+            _RailBuildInfo("_telemetry_rail", self._build_telemetry_rail),
             _RailBuildInfo("_runtime_prompt_rail", self._build_runtime_prompt_rail),
             _RailBuildInfo("_response_prompt_rail", self._build_response_prompt_rail),
             _RailBuildInfo("_stream_event_rail", self._build_stream_event_rail),
@@ -2999,6 +3013,16 @@ class JiuWenClawDeepAdapter:
         )
         token_cid = TOOL_PERMISSION_CHANNEL_ID.set((request.channel_id or "").strip())
         token_perm = setup_permission_context(request)
+
+        # Set telemetry context for OpenTelemetry span creation
+        if self._telemetry_rail is not None:
+            self._telemetry_rail.set_telemetry_context(
+                channel_id=request.channel_id or "",
+                session_id=request.session_id or "",
+                request_id=request.request_id or "",
+                metadata=request.metadata,
+            )
+
         # 按请求选择模型
         resolved_model = self._resolve_model_for_request(request)
         self._apply_model_to_react_agent(resolved_model)
@@ -3135,6 +3159,15 @@ class JiuWenClawDeepAdapter:
             request_id=request.request_id,
             mode=mode,
         )
+
+        # Set telemetry context for OpenTelemetry span creation
+        if self._telemetry_rail is not None:
+            self._telemetry_rail.set_telemetry_context(
+                channel_id=request.channel_id or "",
+                session_id=request.session_id or "",
+                request_id=request.request_id or "",
+                metadata=request.metadata,
+            )
         token_cid = TOOL_PERMISSION_CHANNEL_ID.set((request.channel_id or "").strip())
         token_perm = setup_permission_context(request)
         # 按请求选择模型

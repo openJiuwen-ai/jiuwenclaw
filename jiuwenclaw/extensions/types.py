@@ -14,7 +14,8 @@ class ExtensionMetadata:
     author: str                  # 扩展作者
     min_jiuwenclaw_version: str  # 最小兼容版本
     dependencies: dict[str, str]  # 扩展依赖 {"extension_id": ">=1.0.0"}
-    config_schema: dict | None   # 配置模式 (JSON Schema)
+    config_schema: dict | None = None  # 配置模式 (JSON Schema)
+    priority: int = 10           # 加载优先级（数值越小越先加载，默认 10）
 
 
 @dataclass
