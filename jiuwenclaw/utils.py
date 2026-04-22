@@ -998,6 +998,14 @@ def get_agent_skills_dir() -> Path:
     return get_agent_workspace_dir() / "skills"
 
 
+def get_agent_tools_dir() -> Path:
+    """落盘 MCP 工具配置目录（全局 ``~/.jiuwenclaw/agent/jiuwenclaw_workspace/tools``）。
+
+    多租户 AgentServer 场景下由 ``ToolManager(get_tools_dir=...)`` 覆盖为当前租户工作区下的 ``tools``。
+    """
+    return get_agent_workspace_dir() / "tools"
+
+
 def get_deepagent_todo_dir() -> Path:
     """Get the DeepAgent todo directory path.
 

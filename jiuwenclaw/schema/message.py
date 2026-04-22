@@ -124,6 +124,8 @@ class ReqMethod(Enum):
     SKILLDEV_FILE_LIST = "skilldev.file.list"  # 获取工作区文件树（产物弹窗浏览）
     SKILLDEV_FILE_READ = "skilldev.file.read"  # 读取工作区文件内容
 
+    TOOLS_ADD = "tools.add"
+
 
 class EventType(Enum):
     CONNECTION_ACK = "connection.ack"

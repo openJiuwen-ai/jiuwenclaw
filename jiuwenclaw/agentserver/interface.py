@@ -70,6 +70,11 @@ _SKILL_ROUTES: dict[ReqMethod, str] = {
     ReqMethod.SKILLS_EVOLUTION_SAVE: "handle_skills_evolution_save",
 }
 
+# Tools 管理请求路由表
+_TOOL_ROUTES: dict[ReqMethod, str] = {
+    ReqMethod.TOOLS_ADD: "handle_tools_add",
+}
+
 # SkillDev 请求方法集合（统一委托给 SkillDevService）
 _SKILLDEV_METHODS: frozenset[ReqMethod] = frozenset(
     m for m in ReqMethod if m.value.startswith("skilldev.")
@@ -124,7 +129,7 @@ class JiuWenClaw:
     提供：
     - SDK 工厂路由
     - 统一对外 API（create_instance, reload_agent_config, process_message, process_message_stream）
-    - 公共编排（session 队列、Skills 路由、heartbeat、流式包装）
+    - 公共编排（session 队列、Skills / Tools 路由、heartbeat、流式包装）
     """
 
     def __init__(self, user_workspace_dir: str | None = None) -> None:
@@ -137,6 +142,7 @@ class JiuWenClaw:
         self._session_manager = SessionManager()
         # SkillDev 模式：懒初始化，首次 skilldev.* 请求时构造
         self._skilldev_service = None
+        self._tool_manager = None
 
     def _get_skilldev_service(self):
         """懒初始化并返回 SkillDevService 实例.
@@ -184,6 +190,17 @@ class JiuWenClaw:
                         self._sdk_name, self._workspace_dir)
         return self._adapter
 
+    def _get_tool_manager(self):
+        """懒初始化 ``ToolManager``（依赖 ``get_instance`` 上的底层 Agent）。"""
+        from jiuwenclaw.agentserver.tool_manager import ToolManager
+
+        if self._tool_manager is None:
+            self._tool_manager = ToolManager(
+                get_agent=lambda: self.get_instance(),
+                get_tools_dir=lambda: Path(self._workspace_dir) / "tools",
+            )
+        return self._tool_manager
+
     async def create_instance(self, config: dict[str, Any] | None = None, *, mode: str = "agent") -> None:
         """初始化 Agent 实例.
 
@@ -194,6 +211,8 @@ class JiuWenClaw:
         adapter = self._ensure_adapter()
         await adapter.create_instance(config, mode=mode)
         logger.info("[JiuWenClaw] Agent instance created: sdk=%s", self._sdk_name)
+        # relay vendor：宿主 .mcp.json + agent/tools/*.json（逻辑见 ToolManager.bootstrap_persistent_mcp_tools）
+        await self._get_tool_manager().bootstrap_persistent_mcp_tools()
 
     async def reload_agent_config(
             self,
@@ -373,6 +392,33 @@ class JiuWenClaw:
             metadata=request.metadata,
         )
 
+    async def _handle_tools_request(self, request: AgentRequest) -> AgentResponse | None:
+        """处理 tools.* 相关请求，返回 None 表示不是 Tools 管理请求."""
+        if request.req_method not in _TOOL_ROUTES:
+            return None
+
+        handler_name = _TOOL_ROUTES[request.req_method]
+        tm = self._get_tool_manager()
+        handler = getattr(tm, handler_name)
+        try:
+            payload = await handler(request.params)
+        except Exception as exc:
+            logger.error("[JiuWenClaw] tools 请求处理失败: %s", exc)
+            return AgentResponse(
+                request_id=request.request_id,
+                channel_id=request.channel_id,
+                ok=False,
+                payload={"error": str(exc)},
+                metadata=request.metadata,
+            )
+        return AgentResponse(
+            request_id=request.request_id,
+            channel_id=request.channel_id,
+            ok=True,
+            payload=payload,
+            metadata=request.metadata,
+        )
+
     async def _process_interrupt(self, request: AgentRequest) -> AgentResponse:
         """处理 interrupt 请求.
 
@@ -437,6 +483,10 @@ class JiuWenClaw:
         skills_response = await self._handle_skills_request(request)
         if skills_response is not None:
             return skills_response
+
+        tools_response = await self._handle_tools_request(request)
+        if tools_response is not None:
+            return tools_response
 
         session_id = self._session_manager.get_session_id(request.session_id)
         query = request.params.get("query", "")
@@ -786,5 +836,7 @@ class JiuWenClaw:
             except Exception as e:
                 logger.warning("[JiuWenClaw] Adapter cleanup failed: %s", e)
             self._adapter = None
+
+        self._tool_manager = None
 
         logger.info("[JiuWenClaw] cleanup: 完成")
