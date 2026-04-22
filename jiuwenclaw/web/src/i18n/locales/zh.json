@@ -400,7 +400,9 @@
       "freeSearchProxyUrlPlaceholder": "http://username:password@proxyhk.huawei.com:8080",
       "memoryForbiddenEnabled": "启用",
       "memoryForbiddenDescription": "禁止记忆内容描述",
-      "memoryForbiddenDescriptionPlaceholder": "例如：密码、API密钥、Secret、Token、信用卡号、身份证号、手机号等敏感信息"
+      "memoryForbiddenDescriptionPlaceholder": "例如：密码、API密钥、Secret、Token、信用卡号、身份证号、手机号等敏感信息",
+      "executionMethodDependencyDriving": "dependency_driving（效果优先）",
+      "executionMethodParallel": "parallel（速度优先）"
     },
     "hideValue": "隐藏明文",
     "showValue": "显示明文",
@@ -432,6 +434,7 @@
       "thirdParty": { "label": "第三方服务配置", "hint": "API Key 配置" },
       "freeSearch": { "label": "免费搜索引擎配置", "hint": "控制搜索引擎启用和企业内网代理" },
       "evolution": { "label": "自演进配置", "hint": "Skills 在线自演进参数" },
+      "deepResearch": { "label": "深度研究工具配置", "hint": "针对专业或高风险决策等场景中需要多步骤、多源验证、逻辑严谨、结构化输出的任务进行处理和报告输出。" },
       "contextEngine": { "label": "上下文压缩", "hint": "控制对话上下文是否启用压缩" },
       "permissions": { "label": "工具安全护栏", "hint": "控制工具调用时的权限检查" },
       "memory": { "label": "记忆系统敏感信息过滤", "hint": "配置禁止写入记忆的敏感信息类型" },

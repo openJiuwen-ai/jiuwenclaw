@@ -48,6 +48,16 @@ const THIRD_PARTY_API_KEYS = new Set([
 const REQUIRED_MODEL_FIELDS = ["api_base", "api_key", "model", "model_provider"] as const;
 const REQUIRED_MODEL_FIELD_SET = new Set<string>(REQUIRED_MODEL_FIELDS);
 const EVOLUTION_KEYS = new Set(["evolution_auto_scan"]);
+const DEEPSEARCH_KEYS = new Set([
+  "deepsearch_llm_model_name",
+  "deepsearch_llm_model_type",
+  "deepsearch_llm_base_url",
+  "deepsearch_llm_api_key",
+  "deepsearch_web_search_engine_name",
+  "deepsearch_web_search_api_key",
+  "deepsearch_web_search_url",
+  "deepsearch_execution_method",
+]);
 const FREE_SEARCH_BOOLEAN_KEYS = new Set(["free_search_ddg_enabled", "free_search_bing_enabled"]);
 const FREE_SEARCH_KEYS = new Set([...FREE_SEARCH_BOOLEAN_KEYS, "free_search_proxy_url"]);
 const MEMORY_KEYS = new Set(["memory_forbidden_enabled", "memory_forbidden_description"]);
@@ -61,6 +71,7 @@ function classifyKey(key: string): string {
   if (THIRD_PARTY_API_KEYS.has(key)) return "third_party_api";
   if (EMAIL_KEYS.has(key)) return "email";
   if (EVOLUTION_KEYS.has(key)) return "evolution";
+  if (DEEPSEARCH_KEYS.has(key)) return "deepsearch";
   if (FREE_SEARCH_KEYS.has(key)) return "free_search";
   if (MEMORY_KEYS.has(key)) return "memory";
   if (key === "context_engine_enabled" || key === "kv_cache_affinity_enabled") return "context_engine";
@@ -111,6 +122,16 @@ function getGroupIcon(tag: string) {
       </svg>
     );
   }
+  if (tag === "deepsearch") {
+    return (
+      <svg className="w-3.5 h-3.5 text-teal-500" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={1.8}>
+        <path strokeLinecap="round" strokeLinejoin="round" d="M21 21l-4.35-4.35M9.5 4a5.5 5.5 0 0 1 5.5 5.5 5.5 5.5 0 0 1-5.5 5.5 5.5 5.5 0 0 1-5.5-5.5A5.5 5.5 0 0 1 9.5 4z" />
+        <path strokeLinecap="round" strokeLinejoin="round" d="M14.5 14.5L17 17" />
+        <path strokeLinecap="round" strokeLinejoin="round" d="M9.5 7v3M9.5 14v-1" />
+        <path strokeLinecap="round" strokeLinejoin="round" d="M12 9.5h-3M14 9.5h-0.5" />
+      </svg>
+    );
+  }
   if (tag === "memory") {
     return (
       <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={1.8}>
@@ -148,6 +169,7 @@ function getGroupToneClass(tag: string): string {
   if (tag === "third_party_api") return "text-indigo-500 bg-indigo-500/10 border-indigo-500/20";
   if (tag === "free_search") return "text-lime-500 bg-lime-500/10 border-lime-500/20";
   if (tag === "evolution") return "text-amber-500 bg-amber-500/10 border-amber-500/20";
+  if (tag === "deepsearch") return "text-teal-500 bg-teal-500/10 border-teal-500/20";
   if (tag === "memory") return "text-purple-500 bg-purple-500/10 border-purple-500/20";
   if (tag === "context_engine") return "text-sky-500 bg-sky-500/10 border-sky-500/20";
   if (tag === "permissions") return "text-rose-500 bg-rose-500/10 border-rose-500/20";
@@ -227,11 +249,12 @@ function getGroupMeta(t: (key: string) => string): Record<string, { label: strin
     third_party_api: { label: t('config.groups.thirdParty.label'), order: 5, hint: t('config.groups.thirdParty.hint') },
     free_search: { label: t('config.groups.freeSearch.label'), order: 6, hint: t('config.groups.freeSearch.hint') },
     evolution: { label: t('config.groups.evolution.label'), order: 7, hint: t('config.groups.evolution.hint') },
-    context_engine: { label: t('config.groups.contextEngine.label'), order: 8, hint: t('config.groups.contextEngine.hint') },
-    permissions: { label: t('config.groups.permissions.label'), order: 9, hint: t('config.groups.permissions.hint') },
-    memory: { label: t('config.groups.memory.label'), order: 10, hint: t('config.groups.memory.hint') },
-    email: { label: t('config.groups.email.label'), order: 11, hint: t('config.groups.email.hint') },
-    other: { label: t('config.groups.other.label'), order: 12, hint: t('config.groups.other.hint') },
+    deepsearch: { label: t('config.groups.deepResearch.label'), order: 8, hint: t('config.groups.deepResearch.hint') },
+    context_engine: { label: t('config.groups.contextEngine.label'), order: 9, hint: t('config.groups.contextEngine.hint') },
+    permissions: { label: t('config.groups.permissions.label'), order: 10, hint: t('config.groups.permissions.hint') },
+    memory: { label: t('config.groups.memory.label'), order: 11, hint: t('config.groups.memory.hint') },
+    email: { label: t('config.groups.email.label'), order: 12, hint: t('config.groups.email.hint') },
+    other: { label: t('config.groups.other.label'), order: 13, hint: t('config.groups.other.hint') },
   };
 }
 
@@ -243,12 +266,28 @@ function isProviderKey(key: string): boolean {
   return key.endsWith("_provider");
 }
 
+function isExecutionMethodKey(key: string): boolean {
+  return key === "deepsearch_execution_method";
+}
+
+function isSearchEngineKey(key: string): boolean {
+  return key === "deepsearch_web_search_engine_name";
+}
+
 /** 表格列显示用：video_api_base -> api_base，避免与分组标题重复 */
 /** i18n 键名映射：字段名 -> 翻译 key（显示名 / placeholder） */
 const KEY_DISPLAY_I18N: Record<string, string> = {
   free_search_proxy_url: "config.keys.freeSearchProxyUrl",
   memory_forbidden_enabled: "config.keys.memoryForbiddenEnabled",
   memory_forbidden_description: "config.keys.memoryForbiddenDescription",
+  deepsearch_llm_model_name: "llm_model_name",
+  deepsearch_llm_model_type: "llm_model_type",
+  deepsearch_llm_base_url: "llm_base_url",
+  deepsearch_llm_api_key: "llm_api_key",
+  deepsearch_web_search_engine_name: "web_search_engine_name",
+  deepsearch_web_search_api_key: "web_search_api_key",
+  deepsearch_web_search_url: "web_search_url",
+  deepsearch_execution_method: "execution_method",
 };
 const KEY_PLACEHOLDER_I18N: Record<string, string> = {
   free_search_proxy_url: "config.keys.freeSearchProxyUrlPlaceholder",
@@ -262,6 +301,14 @@ const KEY_SORT_PRIORITY: Record<string, number> = {
   free_search_proxy_url: 2,
   memory_forbidden_enabled: 0,
   memory_forbidden_description: 1,
+  deepsearch_llm_model_name: 0,
+  deepsearch_llm_model_type: 1,
+  deepsearch_llm_base_url: 2,
+  deepsearch_llm_api_key: 3,
+  deepsearch_web_search_engine_name: 4,
+  deepsearch_web_search_api_key: 5,
+  deepsearch_web_search_url: 6,
+  deepsearch_execution_method: 7,
 };
 
 function getKeyDisplayLabel(key: string, t: (key: string) => string): string {
@@ -398,6 +445,37 @@ function GroupSection({
                               <option value="InferenceAffinity">InferenceAffinity</option>
                             </>
                           )}
+                        </select>
+                      </div>
+                    </div>
+                  ) : isExecutionMethodKey(key) ? (
+                    <div className="flex items-center gap-2">
+                      <span className="inline-flex w-3 justify-center shrink-0 font-semibold leading-none select-none text-transparent" aria-hidden="true">*</span>
+                      <div className="flex-1">
+                        <select
+                          value={draftValues[key] ?? value}
+                          onChange={(e) => onChange(key, e.target.value)}
+                          className="w-full rounded-md border border-border bg-bg px-3 py-2 text-[13px] outline-none focus:border-accent"
+                        >
+                          <option value="dependency_driving">{t('config.keys.executionMethodDependencyDriving')}</option>
+                          <option value="parallel">{t('config.keys.executionMethodParallel')}</option>
+                        </select>
+                      </div>
+                    </div>
+                  ) : isSearchEngineKey(key) ? (
+                    <div className="flex items-center gap-2">
+                      <span className="inline-flex w-3 justify-center shrink-0 font-semibold leading-none select-none text-transparent" aria-hidden="true">*</span>
+                      <div className="flex-1">
+                        <select
+                          value={draftValues[key] ?? value}
+                          onChange={(e) => onChange(key, e.target.value)}
+                          className="w-full rounded-md border border-border bg-bg px-3 py-2 text-[13px] outline-none focus:border-accent"
+                        >
+                          <option value="tavily">tavily</option>
+                          <option value="google">google</option>
+                          <option value="xunfei">xunfei</option>
+                          <option value="petal">petal</option>
+                          <option value="custom">custom</option>
                         </select>
                       </div>
                     </div>

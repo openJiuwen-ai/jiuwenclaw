@@ -401,7 +401,9 @@
       "freeSearchProxyUrlPlaceholder": "http://username:password@proxyhk.huawei.com:8080",
       "memoryForbiddenEnabled": "Enable",
       "memoryForbiddenDescription": "Forbidden memory content description",
-      "memoryForbiddenDescriptionPlaceholder": "e.g. passwords, API keys, secrets, tokens, credit card numbers, ID numbers, phone numbers"
+      "memoryForbiddenDescriptionPlaceholder": "e.g. passwords, API keys, secrets, tokens, credit card numbers, ID numbers, phone numbers",
+      "executionMethodDependencyDriving": "dependency_driving (Effect First)",
+      "executionMethodParallel": "parallel (Speed First)"
     },
     "hideValue": "Hide value",
     "showValue": "Show value",
@@ -433,6 +435,7 @@
       "thirdParty": { "label": "Third-Party Services", "hint": "API key settings" },
       "freeSearch": { "label": "Free Search Engines", "hint": "Enable engines and optional proxy for enterprise intranet" },
       "evolution": { "label": "Evolution Settings", "hint": "Online skill evolution settings" },
+      "deepResearch": { "label": "Deep Research Tool", "hint": "Process and report tasks requiring multi-step, multi-source verification, rigorous logic, and structured output for professional or high-risk decision-making scenarios." },
       "contextEngine": { "label": "Context Compression", "hint": "Enable or disable dialogue context compression" },
       "permissions": { "label": "Tool Safety Guardrail", "hint": "Enable or disable permission checks for tool calls" },
       "memory": { "label": "Memory Sensitive Info Filter", "hint": "Configure sensitive content types forbidden from memory" },

@@ -212,6 +212,14 @@ _CONFIG_SET_ENV_MAP = {
     "free_search_ddg_enabled": "FREE_SEARCH_DDG_ENABLED",
     "free_search_bing_enabled": "FREE_SEARCH_BING_ENABLED",
     "free_search_proxy_url": "FREE_SEARCH_PROXY_URL",
+    "deepsearch_llm_model_name": "LLM_MODEL_NAME",
+    "deepsearch_llm_model_type": "LLM_MODEL_TYPE",
+    "deepsearch_llm_base_url": "LLM_BASE_URL",
+    "deepsearch_llm_api_key": "LLM_API_KEY",
+    "deepsearch_web_search_engine_name": "WEB_SEARCH_ENGINE_NAME",
+    "deepsearch_web_search_api_key": "WEB_SEARCH_API_KEY",
+    "deepsearch_web_search_url": "WEB_SEARCH_URL",
+    "deepsearch_execution_method": "EXECUTION_METHOD",
 }
 # 配置项键名列表，用于日志等说明
 CONFIG_KEYS = tuple(_CONFIG_SET_ENV_MAP.keys())
@@ -373,6 +381,13 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
                 payload["free_search_ddg_enabled"] = "true"
             if not payload.get("free_search_bing_enabled"):
                 payload["free_search_bing_enabled"] = "true"
+            deepsearch_defaults = [
+                ("deepsearch_web_search_engine_name", "tavily"),
+                ("deepsearch_execution_method", "dependency_driving"),
+            ]
+            for key, val in deepsearch_defaults:
+                if not payload.get(key):
+                    payload[key] = val
         except Exception:  # noqa: BLE001
             payload.setdefault("context_engine_enabled", "false")
             payload.setdefault("kv_cache_affinity_enabled", "false")
@@ -381,6 +396,8 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             payload.setdefault("memory_forbidden_description", "")
             payload.setdefault("free_search_ddg_enabled", "true")
             payload.setdefault("free_search_bing_enabled", "true")
+            payload.setdefault("deepsearch_web_search_engine_name", "tavily")
+            payload.setdefault("deepsearch_execution_method", "dependency_driving")
         await channel.send_response(ws, req_id, ok=True, payload=payload)
 
     def _persist_env_updates(updates: dict[str, str]) -> None:

@@ -175,7 +175,7 @@ def load_agent_config() -> dict:
 
     # 搜索引擎配置
     config["web_search_engine_config"] = {
-        "search_engine_name": os.getenv("WEB_SEARCH_ENGINE_NAME"),
+        "search_engine_name": os.getenv("WEB_SEARCH_ENGINE_NAME", "tavily"),
         "search_api_key": bytearray(os.getenv("WEB_SEARCH_API_KEY", ""), encoding="utf-8"),
         "search_url": os.getenv("WEB_SEARCH_URL"),
         "max_web_search_results": int(os.getenv("MAX_WEB_SEARCH_RESULTS", "5")),
@@ -187,7 +187,7 @@ def load_agent_config() -> dict:
     config["outliner_max_section_num"] = 5
 
     # 执行方式
-    execution_method = os.getenv("EXECUTION_METHOD", "parallel")
+    execution_method = os.getenv("EXECUTION_METHOD", "dependency_driving")
     if execution_method == ExecutionMethod.DEPENDENCY_DRIVING.value:
         config["execution_method"] = ExecutionMethod.DEPENDENCY_DRIVING.value
     else:
