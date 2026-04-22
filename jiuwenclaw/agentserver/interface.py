@@ -211,8 +211,10 @@ class JiuWenClaw:
         adapter = self._ensure_adapter()
         await adapter.create_instance(config, mode=mode)
         logger.info("[JiuWenClaw] Agent instance created: sdk=%s", self._sdk_name)
-        # relay vendor：宿主 .mcp.json + agent/tools/*.json（逻辑见 ToolManager.bootstrap_persistent_mcp_tools）
-        await self._get_tool_manager().bootstrap_persistent_mcp_tools()
+        try:
+            await self._get_tool_manager().load_tools_from_disk()
+        except Exception as exc:
+            logger.warning("[JiuWenClaw] 从 agent/tools 加载落盘 MCP 工具失败: %s", exc)
 
     async def reload_agent_config(
             self,

@@ -6,44 +6,15 @@
 from __future__ import annotations
 
 import json
-import logging
-import os
 import re
-from contextvars import ContextVar
 from pathlib import Path
 from typing import Any, Callable
 
-from openjiuwen.core.foundation.tool import ToolCard
 from openjiuwen.core.runner import Runner
 
 from jiuwenclaw.utils import get_agent_tools_dir, logger
 
-from jiuwenclaw.agentserver.tools.ephemeral_stdio_mcp_tool import (
-    EphemeralStdioMcpTool,
-    list_stdio_mcp_tool_defs,
-    stdio_params_from_mcp_config,
-)
 from jiuwenclaw.agentserver.tools.mcp_toolkits import create_mcp_tool
-
-_CAT_CAFE_SERVER_NAME_PREFIX = "cat-cafe"
-_REQUEST_SCOPED_CAT_CAFE_SERVER_ID = "cat-cafe-request"
-
-
-def _is_static_cat_cafe_mcp_server_name(name: Any) -> bool:
-    """宿主 ``.mcp.json`` 导入的 cat-cafe 静态 MCP 名称（与请求级回调注册的区分）。"""
-    prefix = _CAT_CAFE_SERVER_NAME_PREFIX
-    if not isinstance(name, str):
-        return False
-    return name == prefix or name.startswith(f"{prefix}-")
-
-
-# 请求级 stdio 参数：每个异步上下文独立，避免并发请求间配置串台
-_CAT_CAFE_STDIO_PARAMS: ContextVar[dict[str, Any]] = ContextVar("_CAT_CAFE_STDIO_PARAMS", default={})
-
-
-def _get_cat_cafe_stdio_params() -> dict[str, Any]:
-    """回调函数：供 EphemeralStdioMcpTool 在 invoke 时获取当前请求级的 stdio 参数。"""
-    return _CAT_CAFE_STDIO_PARAMS.get()
 
 
 def _mcp_add_result_is_ok(result: Any) -> bool:
@@ -105,11 +76,6 @@ async def _add_mcp_server_and_ability(agent: Any, mcp_cfg: Any, *, tag: str) -> 
 TOOL_DISK_SCHEMA: list[tuple[str, Any, str]] = [
     ("name", "", "tool_name"),
     ("description", "", "text"),
-    ("type", "", "text"),
-    ("url", "", "text"),
-    ("env", {}, "any"),
-    ("auth_headers", {}, "any"),
-    ("auth_query_params", {}, "any"),
     ("command", "", "text"),
     ("args", [], "list"),
 ]
@@ -127,11 +93,11 @@ def _mutable_default_copy(value: Any) -> Any:
 
 
 def _coerce_tool_disk_value(
-    disk_key: str,
-    default: Any,
-    kind: str,
-    tool_name: str,
-    cfg: dict[str, Any],
+        disk_key: str,
+        default: Any,
+        kind: str,
+        tool_name: str,
+        cfg: dict[str, Any],
 ) -> Any:
     src = TOOL_DISK_SOURCE_MAP.get(disk_key, disk_key)
     if kind == "tool_name":
@@ -201,157 +167,29 @@ class ToolManager:
     """管理 tools 相关 RPC（与 SkillManager 的 handler 命名风格一致）。"""
 
     def __init__(
-        self,
-        get_agent: Callable[[], Any] | None = None,
-        *,
-        get_tools_dir: Callable[[], Path] | None = None,
+            self,
+            get_agent: Callable[[], Any] | None = None,
+            *,
+            get_tools_dir: Callable[[], Path] | None = None,
     ) -> None:
-        """get_agent: 返回当前底层 Agent（DeepAgent），用于 ``Runner.resource_mgr`` / ``ability_manager``。
+        """get_agent: 返回当前底层 Agent，用于 ``Runner.resource_mgr`` / ``ability_manager``。
 
-        get_tools_dir: 可选；返回 MCP 配置落盘目录（通常为 ``jiuwenclaw_workspace/tools``）。
-        多租户下应由 ``JiuWenClaw`` 传入当前租户工作区下的 ``tools``；缺省时回退 ``utils.get_agent_tools_dir()``。
+        get_tools_dir: 可选；返回 MCP 配置落盘目录。多租户下由 ``JiuWenClaw`` 传入
+        ``jiuwenclaw_workspace/tools``；缺省回退 ``utils.get_agent_tools_dir()``。
         """
         self._get_agent = get_agent
         self._get_tools_dir = get_tools_dir
-        # (tool_id, tool_name)，请求级 Cat Cafe stdio 走 ephemeral 注册时用于下次替换前卸载
-        self._cat_cafe_ephemeral_tools: list[tuple[str, str]] = []
 
     def _resolve_tools_dir(self) -> Path:
         if self._get_tools_dir is not None:
             return self._get_tools_dir()
         return get_agent_tools_dir()
 
-    @staticmethod
-    def find_host_project_mcp_json() -> Path | None:
-        """固定从宿主 Clowder AI 根目录查找 ``.mcp.json``。"""
-        host_root = (os.getenv("CAT_CAFE_MCP_CWD") or "").strip()
-        if not host_root:
-            return None
-        candidate = Path(host_root).resolve() / ".mcp.json"
-        if candidate.is_file():
-            return candidate
-        return None
-
-    async def load_project_mcp_json(self, mcp_json_path: str | Path) -> dict[str, Any]:
-        """从项目根目录的 ``.mcp.json`` 导入工具，并复用 ``tools.add`` 的注册逻辑。"""
-        path = Path(mcp_json_path)
-        if not path.exists():
-            return {
-                "source": str(path),
-                "saved": [],
-                "registered_tools": [],
-                "skipped": True,
-                "reason": "not_found",
-            }
-
-        try:
-            mcp_json = path.read_text(encoding="utf-8")
-        except OSError as exc:
-            raise RuntimeError(f"读取项目 MCP 配置失败: {exc}") from exc
-
-        payload = await self.handle_tools_add({"mcp_json": mcp_json})
-        payload["source"] = str(path.resolve())
-        payload["skipped"] = False
-        return payload
-
-    async def register_request_scoped_cat_cafe_mcp(self, cfg: dict[str, Any]) -> dict[str, Any]:
-        """Register request-scoped Cat Cafe MCP from Clowder callback payload.
-
-        Replaces any static ``cat-cafe*`` entries imported from the host ``.mcp.json`` so
-        the current request's callback env wins over stale startup-time configuration.
-
-        ``cfg`` 即 ``params.cat_cafe_mcp``：其中 ``env``（如 ``CAT_CAFE_API_URL``、``CAT_CAFE_USER_ID``）
-        会经 ``create_mcp_tool`` 写入 ``McpServerConfig.params.env``，stdio 场景下在 **注册时 list_tools**
-        与 **每次工具 invoke** 启动子进程时一并传入。
-        """
-        if not isinstance(cfg, dict):
-            raise ValueError("cat_cafe_mcp 必须是对象")
-
-        agent = self._get_agent() if self._get_agent else None
-        if agent is None:
-            raise RuntimeError("JiuWenClaw 未初始化，请先调用 create_instance()")
-
-        names_to_remove = [
-            name
-            for name in getattr(agent.ability_manager, "_mcp_servers", {}).keys()
-            if _is_static_cat_cafe_mcp_server_name(name)
-        ]
-        for server_name in names_to_remove:
-            get_server_ids = getattr(Runner.resource_mgr, "get_mcp_server_ids", None)
-            server_ids = list(get_server_ids(server_name) or []) if callable(get_server_ids) else []
-            for server_id in server_ids:
-                try:
-                    await Runner.resource_mgr.remove_tool_server(server_id, ignore_not_exist=True)
-                except Exception as exc:
-                    logger.warning("[ToolManager] 移除旧的 Cat Cafe MCP 失败 name=%s id=%s: %s", server_name, server_id, exc)
-            agent.ability_manager.remove(server_name)
-
-        record = {
-            "name": _CAT_CAFE_SERVER_NAME_PREFIX,
-            "server_id": _REQUEST_SCOPED_CAT_CAFE_SERVER_ID,
-            **cfg,
-        }
-        single_json = json.dumps(record, ensure_ascii=False)
-        mcp_cfg = create_mcp_tool(single_json)
-
-        # stdio：不经过 add_mcp_server，每工具每次 invoke 单独起停子进程，避免会话间状态串台
-        if getattr(mcp_cfg, "client_type", "") == "stdio":
-            stdio_sp = stdio_params_from_mcp_config(mcp_cfg.params or {})
-            _CAT_CAFE_STDIO_PARAMS.set(stdio_sp)
-
-            if not self._cat_cafe_ephemeral_tools:
-                try:
-                    tool_defs = await list_stdio_mcp_tool_defs(mcp_cfg.params or {})
-                except Exception as exc:
-                    raise RuntimeError(f"列举 Cat Cafe stdio MCP 工具失败: {exc}") from exc
-                for td in tool_defs:
-                    tname = td["name"]
-                    tool_id = f"{mcp_cfg.server_id}.{mcp_cfg.server_name}.{tname}"
-                    card = ToolCard(
-                        id=tool_id,
-                        name=tname,
-                        description=td.get("description") or "",
-                        input_params=td.get("input_params") or {},
-                    )
-                    ephemeral = EphemeralStdioMcpTool(card, _get_cat_cafe_stdio_params)
-                    add_res = Runner.resource_mgr.add_tool(ephemeral, tag=mcp_cfg.server_name)
-                    if add_res is not None and hasattr(add_res, "is_ok") and not add_res.is_ok():
-                        err = _mcp_add_result_error_text(add_res)
-                        raise RuntimeError(f"注册 ephemeral Cat Cafe 工具失败 {tname}: {err}")
-                    agent.ability_manager.add(card)
-                    self._cat_cafe_ephemeral_tools.append((tool_id, tname))
-                logger.info(
-                    "[ToolManager] 已注册请求级 Cat Cafe MCP（stdio 每调用隔离）name=%s id=%s tools=%s",
-                    mcp_cfg.server_name,
-                    mcp_cfg.server_id,
-                    [t[1] for t in self._cat_cafe_ephemeral_tools],
-                )
-            else:
-                logger.info(
-                    "[ToolManager] 已有 ephemeral Cat Cafe 工具，仅更新 stdio 参数 tools=%s",
-                    [t[1] for t in self._cat_cafe_ephemeral_tools],
-                )
-            return {
-                "registered": True,
-                "name": mcp_cfg.server_name,
-                "server_id": mcp_cfg.server_id,
-            }
-
-        await _add_mcp_server_and_ability(agent, mcp_cfg, tag=mcp_cfg.server_name)
-        logger.info("[ToolManager] 已注册请求级 Cat Cafe MCP name=%s id=%s", mcp_cfg.server_name, mcp_cfg.server_id)
-        return {
-            "registered": True,
-            "name": mcp_cfg.server_name,
-            "server_id": mcp_cfg.server_id,
-        }
-
     async def handle_tools_add(self, params: dict) -> dict[str, Any]:
-        """按工具名拆分落盘到 ``agent/tools/``；对每个工具以与落盘一致的 JSON 调用 ``create_mcp_tool`` 得到 ``McpServerConfig`` 并注册。
+        """按工具名拆分落盘；对每个工具调用 ``create_mcp_tool`` 注册。
 
         params:
-            mcp_json: str，整段 JSON 字符串；根对象须含 ``mcpServers``，
-                每个 key 为工具名；落盘结构由 ``TOOL_DISK_SCHEMA`` / ``TOOL_DISK_SOURCE_MAP`` 定义，
-                cfg 中未参与映射的键会追加在模板字段之后。
+            mcp_json: str，根对象须含 ``mcpServers``，每个 key 为工具名。
         """
         mcp_json = params.get("mcp_json")
         if not isinstance(mcp_json, str) or not mcp_json.strip():
@@ -405,54 +243,8 @@ class ToolManager:
             "registered_tools": registered,
         }
 
-    async def bootstrap_persistent_mcp_tools(self) -> dict[str, Any]:
-        """
-        - ``skip_server_names`` 使用 ``load_project_mcp_json`` 返回的 ``saved`` 项里的 ``name``（即
-          ``mcpServers`` 的 key / 与落盘文件名对应的工具名），**不是** ``registered_tools``。
-        - 未找到宿主 ``.mcp.json`` 时打 info；项目导入与落盘加载各用独立 ``try/except``，仅 warning。
-        """
-        project_mcp_names: set[str] = set()
-        project_mcp_payload: dict[str, Any] = {}
-        disk_payload: dict[str, Any] = {}
-        host_project_mcp_path = self.find_host_project_mcp_json()
-        try:
-            if host_project_mcp_path is None:
-                logger.info(
-                    "[JiuWenClaw] 未找到宿主项目 .mcp.json，跳过 MCP 工具导入: CAT_CAFE_MCP_CWD=%s",
-                    os.getenv("CAT_CAFE_MCP_CWD", ""),
-                )
-            else:
-                project_mcp_payload = await self.load_project_mcp_json(host_project_mcp_path)
-                project_mcp_names = {
-                    item["name"]
-                    for item in project_mcp_payload.get("saved", [])
-                    if isinstance(item, dict) and isinstance(item.get("name"), str) and item["name"]
-                }
-                if not project_mcp_payload.get("skipped"):
-                    logger.info(
-                        "[JiuWenClaw] 已从宿主项目 .mcp.json 导入 MCP 工具: count=%s source=%s",
-                        len(project_mcp_names),
-                        project_mcp_payload.get("source", str(host_project_mcp_path)),
-                    )
-        except Exception as exc:
-            logger.warning("[JiuWenClaw] 从宿主项目 .mcp.json 导入 MCP 工具失败: %s", exc)
-
-        try:
-            disk_payload = await self.load_tools_from_disk(skip_server_names=project_mcp_names)
-        except Exception as exc:
-            logger.warning("[JiuWenClaw] 从 agent/tools 加载落盘 MCP 工具失败: %s", exc)
-
-        return {
-            "host_mcp_json": str(host_project_mcp_path) if host_project_mcp_path else None,
-            "project": project_mcp_payload,
-            "disk": disk_payload,
-        }
-
-    async def load_tools_from_disk(self, skip_server_names: set[str] | None = None) -> dict[str, Any]:
-        """启动时扫描 ``agent/tools/*.json``，按落盘记录注册 MCP 工具。
-
-        与 ``handle_tools_add`` 中单条落盘结构一致；单个文件解析或注册失败仅记录日志并继续。
-        """
+    async def load_tools_from_disk(self) -> dict[str, Any]:
+        """启动时扫描 ``tools/*.json``，按落盘记录注册 MCP 工具（MR !379）。"""
         agent = self._get_agent() if self._get_agent else None
         if agent is None:
             raise RuntimeError("JiuWenClaw 未初始化，请先调用 create_instance()")
@@ -461,7 +253,6 @@ class ToolManager:
         tools_dir.mkdir(parents=True, exist_ok=True)
         registered: list[dict[str, str]] = []
         errors: list[dict[str, str]] = []
-        skipped_names = {name for name in (skip_server_names or set()) if isinstance(name, str) and name}
 
         for path in sorted(tools_dir.glob("*.json")):
             try:
@@ -477,9 +268,6 @@ class ToolManager:
                 continue
 
             name_hint = record.get("name") if isinstance(record.get("name"), str) else path.stem
-            if name_hint in skipped_names:
-                logger.info("[ToolManager] 跳过已从项目 .mcp.json 同步的工具 name=%s path=%s", name_hint, path)
-                continue
             try:
                 single_json = json.dumps(record, ensure_ascii=False)
                 mcp_cfg = create_mcp_tool(single_json)

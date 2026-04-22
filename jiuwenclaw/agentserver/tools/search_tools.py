@@ -454,35 +454,6 @@ def _jina_search_sync(query: str, timeout_seconds: int) -> dict[str, Any]:
     return {"provider": "jina", "answer": (answer or "").strip(), "urls": urls}
 
 
-def enable_petal_search() -> bool:
-    """True when Petal web-search can run: config switch enabled AND 
-    same API base + default_headers as the LLM client.
-    """
-    try:
-        from jiuwenclaw.config import get_config_raw
-
-        if not (get_config_raw().get("enable_petal_search") or False):
-            return False
-    except Exception:
-        return False
-    api_base = (
-        os.environ.get("API_BASE")
-        or os.environ.get("OPENAI_BASE_URL")
-        or os.environ.get("OPENAI_API_BASE")
-        or ""
-    ).strip()
-    if not api_base:
-        return False
-    raw = os.environ.get("default_headers", "").strip()
-    if not raw:
-        return False
-    try:
-        parsed = json.loads(raw)
-    except json.JSONDecodeError:
-        return False
-    return isinstance(parsed, dict)
-
-
 @tool(
     name="mcp_free_search",
     description="Free search via DuckDuckGo. Input query and return ranked URLs with snippets.",
