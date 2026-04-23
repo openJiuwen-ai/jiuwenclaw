@@ -2,7 +2,8 @@
   "pools": [
     {
       "id": "<<POOL_ID>>",
-      "size": 1,
+      "size": <<POOL_SIZE>>,
+      "max_size": <<POOL_MAX_SIZE>>,
       "group": "jiuwen",
       "reuse": false,
       "resources": {

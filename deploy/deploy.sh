@@ -1,16 +1,26 @@
 #!/usr/bin/env bash
 set -euo >/dev/null 2>&1
 
-source "./global_vars.sh"
-source "./common.sh"
-source "./cmd_handler.sh"
+source "global_vars.sh"
+source "common.sh"
+source "cmd_handler.sh"
 source "args_handler.sh"
 source "oyr_handler.sh"    
 source "check_handler.sh"
 source "envfile_handler.sh"
 source "k8s_handler.sh"
 source "template_handler.sh"
-source "nfs_handler.sh"
+source "storage_handler.sh"
+
+
+process_vars() {
+    if [ -z "${DEPLOY_VARS["NFS_SERVER_ADDR"]:-}" ]; then
+        info "Use built-in NFS server"
+        DEPLOY_VARS["NFS_SERVER_ADDR"]=${DEPLOY_VARS["MASTER_NODE_IP"]}
+    else
+        info "Use external NFS server"
+    fi
+}
 
 process_up() {
     # MODULES是ALL_MODULES的子集，启动顺序正着来
@@ -31,8 +41,9 @@ process_up() {
                 ;;
             CLAW)
                 check_claw_up_dependency
-                read_env_from_file "${CUSTOM_ENV_FILE}" "DEPLOY_VARS"
                 collect_k8s_cluster_info
+                read_env_from_file "${CUSTOM_ENV_FILE}" "DEPLOY_VARS"
+                process_vars
                 deploy_oyr
                 ;;
         esac

@@ -225,7 +225,8 @@ deploy_claw_gateway(){
 
 }
 
-deploy_oyr() {  
+deploy_oyr() {
+    install_pv_pvc
     install_oyr
     create_func_pool
     register_oyr_func
@@ -258,6 +259,9 @@ uninstall_oyr() {
     wait_pod_terminated "${DEPLOY_VARS["GATEWAY_DEPLOYMENT_NAME"]}"
 
     delete_k8s_resource "configmap" "${DEPLOY_VARS["GATEWAY_CONFIG_MAP_NAME"]}"
+
+    delete_k8s_resource "pvc" "${DEPLOY_VARS["PVC_NAME"]}"
+    delete_k8s_resource "pv" "${DEPLOY_VARS["PV_NAME"]}"
 
     success "Uninstall ${OYL_CHART_NAME} completed successfully."
 }

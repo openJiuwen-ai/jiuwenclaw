@@ -45,17 +45,10 @@ deploy_nfs() {
     exec_cmd kubectl apply -f ${NFS_SERVER_FILE}
     wait_k8s_resource_ready "deployment" "${DEPLOY_VARS["NFS_NAME"]}"
     check_nfs_pod_node
-    
-    install_pv_pvc
 }
 
 uninstall_nfs() {
     local nfs_name=${DEPLOY_VARS["NFS_NAME"]}
-
-    delete_k8s_resource "pvc" "${DEPLOY_VARS["PVC_NAME"]}"
-    delete_k8s_resource "pv" "${DEPLOY_VARS["PV_NAME"]}"
-    
-    delete_k8s_resource "service" "${nfs_name}"
     delete_k8s_resource "deployment" "${nfs_name}"
     wait_pod_terminated "${nfs_name}"
 }

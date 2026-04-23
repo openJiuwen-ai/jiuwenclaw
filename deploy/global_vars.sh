@@ -59,6 +59,7 @@ declare -A DEPLOY_VARS=(
     ["NFS_HOST_PATH"]="/data/nfs"
     ["PVC_NAME"]="pvc-nfs-shared"
     ["PV_NAME"]="pv-nfs-shared"
+    ["NFS_SHARE_PATH"]="/"
 )
 
 declare -A OYR_COMPONENTS=(

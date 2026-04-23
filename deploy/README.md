@@ -41,13 +41,14 @@ ssh-copy-id <Worker节点IP>
 - 下载openjiuwen官网提供的企业级安装包：
 
 ```
-https://openjiuwen-ci.obs.cn-north-4.myhuaweicloud.com/oyrclaw/JiuwenClawXopenYuanrong_deployTool_<版本号>_amd64.zip
+
+https://openjiuwen-ci.obs.cn-north-4.myhuaweicloud.com/jiuwenclaw/JiuwenClawXopenYuanrong/JiuwenClawXopenYuanrong_deployTool_<VERSION>_<ARCH>.zip
 ```
 
 - 解压缩：
 
 ```
-unzip JiuwenClawXopenYuanrong_deployTool_<版本号>_amd64.zip
+unzip JiuwenClawXopenYuanrong_deployTool_<VERSION>_<ARCH>.zip
 ```
 
 - 配置选项
@@ -58,27 +59,26 @@ unzip JiuwenClawXopenYuanrong_deployTool_<版本号>_amd64.zip
 
 ```
 # 第一次，需要部署全部： nfs + openyuanrong + claw
-./deploy all up
+./deploy.sh all up
 
 # 单独部署nfs
-./deploy nfs up
+./deploy.sh nfs up
 
 # 单独部署 openyuanrong + claw
-./deploy up
-./deploy claw up
+./deploy.sh up
+./deploy.sh claw up
 ```
 
 - 一键卸载
 
 ```
 # 单独卸载 openyuanrong + claw
-./deploy down
-./deploy claw down
+./deploy.sh down
+./deploy.sh claw down
 
 # 单独卸载 nfs
-./deploy nfs down
+./deploy.sh nfs down
 
 # 一次卸载全部： nfs + openyuanrong + claw
-./deploy all down
-
+./deploy.sh all down
 ```

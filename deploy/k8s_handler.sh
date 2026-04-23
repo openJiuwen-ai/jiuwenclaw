@@ -16,14 +16,22 @@ delete_k8s_resource() {
     local name="$2"
     local namespace="${3:-default}"
 
+    local cmd_args=""
+    if [[ "${kind}" == "pv" || "${kind}" == "PersistentVolume" ]]; then
+        cmd_args="${kind} ${name}"
+        namespace=""
+    else
+        cmd_args="${kind} ${name} -n ${namespace}"
+    fi
+
     # Check if resource exists before deletion
-    if ! kubectl get ${kind} ${name} -n ${namespace} >/dev/null 2>&1; then
-        info "${kind}/${name} not found in namespace ${namespace}, skipping deletion."
+    if ! kubectl get ${cmd_args} >/dev/null 2>&1; then
+        info "${kind}/${namespace}/${name} not found, skipping deletion."
         return
     fi
 
     info "Deleting k8s resource:  ${kind}/${namespace}/${name}"
-    exec_cmd kubectl delete ${kind} ${name} -n ${namespace}
+    exec_cmd kubectl delete ${cmd_args}
     success "${kind}/${namespace}/${name} is deleted now"
 }
 
