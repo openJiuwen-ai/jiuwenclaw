@@ -7,6 +7,7 @@ import secrets
 import time
 from dataclasses import dataclass, field
 from typing import Any, Callable
+from urllib.parse import parse_qs, urlparse
 
 from jiuwenclaw.channel.base import BaseChannel
 from jiuwenclaw.e2a.gateway_normalize import e2a_from_agent_fields
@@ -59,6 +60,9 @@ class VibeSkillChannel(BaseChannel):
         self._on_message_cb: Callable[[Message], Any] | None = None
         self._http_server: asyncio.Server | None = None
         self._ws_server: Any | None = None
+        self._ws_heartbeat_tasks: dict[Any, asyncio.Task] = {}
+        self._message_ctx: dict[str, dict[str, Any]] = {}
+        self._pending_confirms: dict[str, dict[str, Any]] = {}
 
     def on_message(self, callback: Callable[[Message], Any]) -> None:
         self._on_message_cb = callback
@@ -114,13 +118,12 @@ class VibeSkillChannel(BaseChannel):
             return
 
         # aiohttp: request.path 是路径, request.query_string 是 query string
-        from urllib.parse import urlparse, parse_qs
         path = getattr(request, 'path', '/')
         query_string = getattr(request, 'query_string', '')
         full_path = f"{path}?{query_string}" if query_string else path
         parsed = urlparse(full_path)
         request_path = parsed.path
-        query_string = parsed.query
+        query_params = parse_qs(parsed.query or "")
 
         remote = getattr(ws, 'remote_address', 'unknown')
         logger.info(
@@ -134,21 +137,25 @@ class VibeSkillChannel(BaseChannel):
                 await ws.close(code=1008, reason="unsupported path")
                 return
 
-            # 从 query string 中提取 sessionID
-            from urllib.parse import parse_qs
-            query_params = parse_qs(query_string)
-            session_ids = query_params.get("sessionID", [])
-            external_session_id = session_ids[0] if session_ids else None
-
             self._clients.add(ws)
             logger.info(f"[VibeSkillChannel] Clients: {len(self._clients)}")
 
-            # 发送 server.connected
-            await ws.send(json.dumps({
-                "type": "server.connected",
-                "properties": {},
-            }, ensure_ascii=False))
+            session_ids = [str(s).strip() for s in query_params.get("sessionID", []) if str(s).strip()]
+            if session_ids:
+                session_id = session_ids[0]
+                internal_id = await self._store.resolve_internal(session_id)
+                if not internal_id:
+                    session = await self._store.get_or_create(external_id=session_id)
+                    internal_id = session.internal_id
+                async with self._ws_sessions_lock:
+                    if ws not in self._ws_sessions:
+                        self._ws_sessions[ws] = set()
+                    self._ws_sessions[ws].add(internal_id)
+                    self._session_to_ws[internal_id] = ws
+
+            await self._emit_ws_event(ws, "server.connected", {})
             logger.info("[VibeSkillChannel] server.connected sent")
+            self._start_heartbeat_task(ws)
 
             async for raw in ws:
                 try:
@@ -169,7 +176,7 @@ class VibeSkillChannel(BaseChannel):
             logger.exception(f"[VibeSkillChannel] WS error: {e}")
         finally:
             self._clients.discard(ws)
-            self.cleanup(ws)
+            await self.cleanup(ws)
             logger.info(f"[VibeSkillChannel] WS disconnected, clients: {len(self._clients)}")
 
     async def _handle_http_connection(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
@@ -265,19 +272,36 @@ class VibeSkillChannel(BaseChannel):
                     text = str(msg.payload.get("content") or "")
                     if text:
                         external_sid = await self._resolve_external_session_id(session_id, msg.metadata)
+                        ctx = self._ensure_message_context(session_id)
+                        part = self._ensure_text_part(session_id, "text")
+                        part["text"] = str(part.get("text") or "") + text
                         response = {
                             "type": "message.part.delta",
-                            "sessionId": external_sid,
-                            "part": {"type": "text", "text": text},
+                            "properties": {
+                                "sessionID": external_sid,
+                                "messageID": ctx["message_id"],
+                                "partID": part["id"],
+                                "field": "text",
+                                "delta": text,
+                            },
                         }
                         await ws.send(json.dumps(response, ensure_ascii=False))
                 elif event_type == "chat.final":
                     text = str(msg.payload.get("content") or "")
                     external_sid = await self._resolve_external_session_id(session_id, msg.metadata)
+                    ctx = self._ensure_message_context(session_id)
+                    part = self._ensure_text_part(session_id, "text")
+                    part["text"] = str(part.get("text") or "") + text
                     response = {
                         "type": "message.updated",
-                        "sessionId": external_sid,
-                        "message": {"role": "assistant", "content": text},
+                        "properties": {
+                            "info": {
+                                "id": ctx["message_id"],
+                                "sessionID": external_sid,
+                                "role": "assistant",
+                                "parts": self._serialize_parts(ctx["parts"], external_sid),
+                            }
+                        },
                     }
                     await ws.send(json.dumps(response, ensure_ascii=False))
 
@@ -293,6 +317,12 @@ class VibeSkillChannel(BaseChannel):
 
         if msg_type == "message.send":
             return await self._handle_message_send(ws, data)
+        if msg_type == "question.replied":
+            return await self._handle_question_replied(data)
+        if msg_type == "review.replied":
+            return await self._handle_review_replied(data)
+        if msg_type == "desc_optimize.replied":
+            return await self._handle_desc_optimize_replied(data)
 
         return False
 
@@ -351,6 +381,15 @@ class VibeSkillChannel(BaseChannel):
             external_session_id = session.external_id
 
         await self._store.set_state(session.internal_id, VibeSkillSessionState.BUSY)
+        await self._emit_session_status(
+            ws=ws,
+            external_sid=(
+                external_session_id
+                or await self._resolve_external_session_id(session.internal_id)
+                or session.internal_id
+            ),
+            status_type=VibeSkillSessionState.BUSY.value,
+        )
 
         async with self._ws_sessions_lock:
             if ws not in self._ws_sessions:
@@ -415,6 +454,106 @@ class VibeSkillChannel(BaseChannel):
 
         return True
 
+    async def _handle_question_replied(self, data: dict[str, Any]) -> bool:
+        """处理 question.replied，封装为 skilldev.respond。"""
+        properties = data.get("properties") if isinstance(data.get("properties"), dict) else data
+        session_id = str(properties.get("sessionID") or "").strip()
+        request_id = str(properties.get("requestID") or "").strip()
+        raw_answers = properties.get("answers", [])
+        if not request_id:
+            return False
+
+        internal_id = await self._store.resolve_internal(session_id) if session_id else None
+        if not internal_id and session_id:
+            internal_id = session_id
+        if not internal_id:
+            return False
+
+        pending = self._pending_confirms.get(request_id, {})
+        task_id = (
+            str(pending.get("task_id") or "").strip()
+            or str(pending.get("session_id") or "").strip()
+            or internal_id
+        )
+        questions = pending.get("questions", [])
+        answers = self._convert_question_answers(questions, raw_answers)
+        self._pending_confirms.pop(request_id, None)
+
+        return self._dispatch_skilldev_respond(
+            internal_id=internal_id,
+            external_session_id=session_id,
+            params={
+                "task_id": task_id,
+                "action": "submit",
+                "answers": answers,
+            },
+        )
+
+    async def _handle_review_replied(self, data: dict[str, Any]) -> bool:
+        """处理 review.replied，封装为 skilldev.respond。"""
+        properties = data.get("properties") if isinstance(data.get("properties"), dict) else data
+        session_id = str(properties.get("sessionID") or "").strip()
+        request_id = str(properties.get("id") or "").strip()
+        if not request_id:
+            return False
+
+        internal_id = await self._store.resolve_internal(session_id) if session_id else None
+        if not internal_id and session_id:
+            internal_id = session_id
+        if not internal_id:
+            return False
+
+        pending = self._pending_confirms.get(request_id, {})
+        task_id = (
+            str(pending.get("task_id") or "").strip()
+            or str(pending.get("session_id") or "").strip()
+            or internal_id
+        )
+        accept = bool(properties.get("accept", False))
+        action = "accept" if accept else "improve"
+
+        params: dict[str, Any] = {"task_id": task_id, "action": action}
+        if action == "improve":
+            feedback = str(properties.get("feedback") or "").strip()
+            if feedback:
+                params["feedback"] = feedback
+
+        self._pending_confirms.pop(request_id, None)
+        return self._dispatch_skilldev_respond(
+            internal_id=internal_id,
+            external_session_id=session_id,
+            params=params,
+        )
+
+    async def _handle_desc_optimize_replied(self, data: dict[str, Any]) -> bool:
+        """处理 desc_optimize.replied，封装为 skilldev.respond。"""
+        properties = data.get("properties") if isinstance(data.get("properties"), dict) else data
+        session_id = str(properties.get("sessionID") or "").strip()
+        request_id = str(properties.get("id") or "").strip()
+        if not request_id:
+            return False
+
+        internal_id = await self._store.resolve_internal(session_id) if session_id else None
+        if not internal_id and session_id:
+            internal_id = session_id
+        if not internal_id:
+            return False
+
+        pending = self._pending_confirms.get(request_id, {})
+        task_id = (
+            str(pending.get("task_id") or "").strip()
+            or str(pending.get("session_id") or "").strip()
+            or internal_id
+        )
+        accept = bool(properties.get("accept", False))
+        action = "optimize" if accept else "skip"
+        self._pending_confirms.pop(request_id, None)
+        return self._dispatch_skilldev_respond(
+            internal_id=internal_id,
+            external_session_id=session_id,
+            params={"task_id": task_id, "action": action},
+        )
+
     async def outbound_intercept(self, msg: Message, ws: Any) -> bool:
         """拦截 AgentServer 出站消息，转换为 VibeSkill 流式事件。"""
         if msg.type != "event":
@@ -432,6 +571,7 @@ class VibeSkillChannel(BaseChannel):
             "skilldev.started": self._handle_skilldev_started,
             "skilldev.stage_changed": self._handle_skilldev_stage_changed,
             "skilldev.progress": self._handle_skilldev_progress,
+            "skilldev.skill_name_ready": self._handle_skilldev_skill_name_ready,
             "skilldev.agent_thinking": self._handle_skilldev_agent_thinking,
             "skilldev.agent_output": self._handle_skilldev_agent_output,
             "skilldev.tool_call": self._handle_skilldev_tool_call,
@@ -450,9 +590,10 @@ class VibeSkillChannel(BaseChannel):
 
         handler = skilldev_events.get(event_type)
         if handler:
-            response = await handler(payload, external_sid, msg.session_id)
-            if response:
+            responses = await handler(payload, external_sid, msg.session_id)
+            for response in responses:
                 await ws.send(json.dumps(response, ensure_ascii=False))
+            if responses:
                 return True
             return False
 
@@ -467,28 +608,32 @@ class VibeSkillChannel(BaseChannel):
                 return False
             response = {
                 "type": "message.part.delta",
-                "sessionId": external_sid,
-                "part": {"type": "text", "text": text},
+                "properties": {
+                    "sessionID": external_sid,
+                    "messageID": self._ensure_message_context(msg.session_id).get("message_id"),
+                    "partID": self._ensure_text_part(msg.session_id, "text").get("id"),
+                    "field": "text",
+                    "delta": text,
+                },
             }
             await ws.send(json.dumps(response, ensure_ascii=False))
             return True
 
         if event_type == "chat.final":
             text = str(payload.get("content") or "")
+            ctx = self._ensure_message_context(msg.session_id)
+            text_part = self._ensure_text_part(msg.session_id, "text")
+            text_part["text"] = str(text_part.get("text") or "") + text
             response = {
                 "type": "message.updated",
-                "sessionId": external_sid,
-                "message": {"role": "assistant", "content": text},
-            }
-            await ws.send(json.dumps(response, ensure_ascii=False))
-            return True
-
-        if event_type == "chat.processing_status":
-            is_processing = bool(payload.get("is_processing", False))
-            response = {
-                "type": "message.processing",
-                "sessionId": external_sid,
-                "processing": is_processing,
+                "properties": {
+                    "info": {
+                        "id": ctx["message_id"],
+                        "sessionID": external_sid,
+                        "role": "assistant",
+                        "parts": self._serialize_parts(ctx["parts"], external_sid),
+                    }
+                },
             }
             await ws.send(json.dumps(response, ensure_ascii=False))
             return True
@@ -497,255 +642,397 @@ class VibeSkillChannel(BaseChannel):
 
     async def _handle_skilldev_started(
         self,
-        payload: dict[str, Any],
+        payload: dict,
         external_sid: str | None,
         session_id: str | None,
-    ) -> dict | None:
+    ) -> list[dict]:
         """skilldev.started - 任务已开始"""
-        return {
-            "type": "skilldev.started",
-            "sessionId": external_sid,
-            "payload": payload,
-        }
+        return []
 
     async def _handle_skilldev_stage_changed(
         self,
-        payload: dict[str, Any],
+        payload: dict,
         external_sid: str | None,
         session_id: str | None,
-    ) -> dict | None:
+    ) -> list[dict]:
         """skilldev.stage_changed - 阶段变化"""
-        return {
-            "type": "skilldev.stage_changed",
-            "sessionId": external_sid,
-            "stage": payload.get("stage", ""),
-            "payload": payload,
-        }
+        return []
 
     async def _handle_skilldev_progress(
         self,
-        payload: dict[str, Any],
+        payload: dict,
         external_sid: str | None,
         session_id: str | None,
-    ) -> dict | None:
+    ) -> list[dict]:
         """skilldev.progress - 进度更新"""
-        return {
-            "type": "skilldev.progress",
-            "sessionId": external_sid,
-            "progress": payload.get("progress", 0),
-            "payload": payload,
-        }
+        return []
+
+    async def _handle_skilldev_skill_name_ready(
+        self,
+        payload: dict,
+        external_sid: str | None
+    ) -> list[dict]:
+        """skilldev.skill_name_ready - 技能名就绪"""
+        skill_name = str(payload.get("skill_name") or "").strip()
+        if not skill_name:
+            return []
+        return [{
+            "type": "session.updated",
+            "properties": {
+                "sessionID": external_sid,
+                "title": skill_name,
+            },
+        }]
 
     async def _handle_skilldev_agent_thinking(
         self,
-        payload: dict[str, Any],
+        payload: dict,
         external_sid: str | None,
         session_id: str | None,
-    ) -> dict | None:
+    ) -> list[dict]:
         """skilldev.agent_thinking - Agent 思考中"""
-        return {
-            "type": "skilldev.agent_thinking",
-            "sessionId": external_sid,
-            "thinking": payload.get("thinking", ""),
-            "payload": payload,
-        }
+        return self._build_text_stream_events(
+            session_id=session_id,
+            external_sid=external_sid,
+            payload=payload,
+            part_type="reasoning",
+            text_field="thinking",
+        )
 
     async def _handle_skilldev_agent_output(
         self,
-        payload: dict[str, Any],
+        payload: dict,
         external_sid: str | None,
         session_id: str | None,
-    ) -> dict | None:
+    ) -> list[dict]:
         """skilldev.agent_output - Agent 输出"""
-        return {
-            "type": "skilldev.agent_output",
-            "sessionId": external_sid,
-            "output": payload.get("output", ""),
-            "payload": payload,
-        }
+        return self._build_text_stream_events(
+            session_id=session_id,
+            external_sid=external_sid,
+            payload=payload,
+            part_type="text",
+            text_field="output",
+        )
 
     async def _handle_skilldev_tool_call(
         self,
-        payload: dict[str, Any],
+        payload: dict,
         external_sid: str | None,
         session_id: str | None,
-    ) -> dict | None:
+    ) -> list[dict]:
         """skilldev.tool_call - 工具调用"""
-        return {
-            "type": "skilldev.tool_call",
-            "sessionId": external_sid,
-            "tool": payload.get("tool", ""),
-            "params": payload.get("params", {}),
-            "payload": payload,
+        if not session_id:
+            return []
+        ctx = self._ensure_message_context(session_id)
+        call_id = str(
+            payload.get("tool_call_id")
+            or payload.get("toolCallId")
+            or payload.get("callID")
+            or f"call_{secrets.token_hex(4)}"
+        ).strip()
+        tool_name = str(payload.get("tool_name") or payload.get("tool") or "").strip()
+        tool_input = payload.get("arguments") or payload.get("params") or payload.get("input") or {}
+        now_ms = int(time.time() * 1000)
+        part = self._ensure_tool_part(session_id, call_id, tool_name)
+        part["state"] = {
+            "status": "running",
+            "input": tool_input,
+            "title": payload.get("title") or f"执行 {tool_name or call_id}",
+            "metadata": payload.get("metadata", {}),
+            "time": {"start": now_ms, "end": None},
         }
+        responses = self._ensure_message_announced(ctx, external_sid)
+        responses.append(
+            {
+                "type": "message.part.updated",
+                "properties": self._serialize_part(part, external_sid),
+            }
+        )
+        return responses
 
     async def _handle_skilldev_tool_result(
         self,
-        payload: dict[str, Any],
+        payload: dict,
         external_sid: str | None,
         session_id: str | None,
-    ) -> dict | None:
+    ) -> list[dict]:
         """skilldev.tool_result - 工具结果"""
-        return {
-            "type": "skilldev.tool_result",
-            "sessionId": external_sid,
-            "tool": payload.get("tool", ""),
-            "result": payload.get("result", ""),
-            "payload": payload,
+        if not session_id:
+            return []
+        ctx = self._ensure_message_context(session_id)
+        call_id = str(
+            payload.get("tool_call_id")
+            or payload.get("toolCallId")
+            or payload.get("callID")
+            or payload.get("task_id")
+            or f"call_{secrets.token_hex(4)}"
+        ).strip()
+        tool_name = str(payload.get("tool_name") or payload.get("tool") or "").strip()
+        success = bool(payload.get("success", True))
+        result = payload.get("result") or payload.get("output") or ""
+        part = self._ensure_tool_part(session_id, call_id, tool_name)
+        start = part.get("state", {}).get("time", {}).get("start") or int(time.time() * 1000)
+        part["state"] = {
+            "status": "completed" if success else "error",
+            "output": result,
+            "title": payload.get("title") or f"{tool_name or call_id} 执行结果",
+            "metadata": payload.get("metadata", {}),
+            "time": {"start": start, "end": int(time.time() * 1000)},
         }
+        responses = self._ensure_message_announced(ctx, external_sid)
+        responses.append(
+            {
+                "type": "message.part.updated",
+                "properties": self._serialize_part(part, external_sid),
+            }
+        )
+        return responses
 
     async def _handle_skilldev_test_progress(
         self,
-        payload: dict[str, Any],
+        payload: dict,
         external_sid: str | None,
         session_id: str | None,
-    ) -> dict | None:
+    ) -> list[dict]:
         """skilldev.test_progress - 测试进度"""
-        return {
-            "type": "skilldev.test_progress",
-            "sessionId": external_sid,
-            "progress": payload.get("progress", 0),
-            "payload": payload,
-        }
+        return []
 
     async def _handle_skilldev_todos_update(
         self,
-        payload: dict[str, Any],
+        payload: dict,
         external_sid: str | None,
         session_id: str | None,
-    ) -> dict | None:
+    ) -> list[dict]:
         """skilldev.todos_update - Todo 更新"""
-        return {
-            "type": "skilldev.todos_update",
-            "sessionId": external_sid,
-            "todos": payload.get("todos", []),
-            "payload": payload,
-        }
+        return [{
+            "type": "todo.updated",
+            "properties": {
+                "sessionID": external_sid,
+                "todos": payload.get("todos", []),
+            },
+        }]
 
     async def _handle_skilldev_confirm_request(
         self,
-        payload: dict[str, Any],
+        payload: dict,
         external_sid: str | None,
         session_id: str | None,
-    ) -> dict | None:
+    ) -> list[dict]:
         """skilldev.confirm_request - 确认请求"""
-        return {
-            "type": "skilldev.confirm_request",
-            "sessionId": external_sid,
-            "message": payload.get("message", ""),
-            "options": payload.get("options", []),
-            "payload": payload,
+        confirm_type = str(payload.get("confirm_type") or "").strip()
+        request_id = str(payload.get("request_id") or f"req_{secrets.token_hex(4)}")
+        task_id = str(payload.get("task_id") or "")
+        if confirm_type == "review":
+            self._pending_confirms[request_id] = {
+                "task_id": task_id,
+                "session_id": session_id or "",
+                "confirm_type": confirm_type,
+            }
+            data = payload.get("data", {}) if isinstance(payload.get("data"), dict) else {}
+            return [{
+                "type": "review.asked",
+                "properties": {
+                    "id": request_id,
+                    "sessionID": external_sid or session_id,
+                    "benchmark": data.get("benchmark"),
+                    "report": str(data.get("report") or ""),
+                    "iteration": data.get("iteration"),
+                },
+            }]
+        if confirm_type == "desc_optimize_confirm":
+            self._pending_confirms[request_id] = {
+                "task_id": task_id,
+                "session_id": session_id or "",
+                "confirm_type": confirm_type,
+            }
+            data = payload.get("data", {}) if isinstance(payload.get("data"), dict) else {}
+            return [{
+                "type": "desc_optimize.asked",
+                "properties": {
+                    "id": request_id,
+                    "sessionID": external_sid or session_id,
+                    "current_description": str(data.get("current_description") or ""),
+                },
+            }]
+
+        raw_questions = payload.get("data", {}).get("questions", [])
+        questions = []
+        for idx, item in enumerate(raw_questions):
+            if not isinstance(item, dict):
+                continue
+            options = []
+            for option in item.get("options", []) or []:
+                if not isinstance(option, dict):
+                    continue
+                options.append({
+                    "id": str(option.get("id") or f"opt_{idx}_{len(options)}"),
+                    "label": str(option.get("label") or ""),
+                    "description": str(option.get("description") or ""),
+                })
+            questions.append({
+                "id": str(item.get("id") or f"q_{idx + 1}"),
+                "question": str(item.get("question") or ""),
+                "header": str(item.get("header") or payload.get("title") or ""),
+                "options": options,
+                "multiple": bool(item.get("multiple") or item.get("allow_multiple") or False),
+            })
+        self._pending_confirms[request_id] = {
+            "task_id": task_id,
+            "session_id": session_id or "",
+            "confirm_type": confirm_type or "question_clarify",
+            "questions": questions,
         }
+        return [{
+            "type": "question.asked",
+            "properties": {
+                "id": request_id,
+                "sessionID": external_sid or session_id,
+                "questions": [
+                    {
+                        "question": q["question"],
+                        "header": q["header"],
+                        "options": [
+                            {"label": opt["label"], "description": opt.get("description", "")}
+                            for opt in q["options"]
+                        ],
+                        "multiple": q["multiple"],
+                    }
+                    for q in questions
+                ],
+                "tool": payload.get("tool") or confirm_type or "",
+            },
+        }]
+
+    def _dispatch_skilldev_respond(
+        self,
+        internal_id: str,
+        external_session_id: str,
+        params: dict[str, Any],
+    ) -> bool:
+        msg = Message(
+            id=f"vibeskill-respond-{int(time.time() * 1000):x}-{secrets.token_hex(3)}",
+            type="req",
+            channel_id=VIBESKILL_CHANNEL_ID,
+            session_id=internal_id,
+            params=params,
+            timestamp=time.time(),
+            ok=True,
+            req_method=ReqMethod.SKILLDEV_RESPOND,
+            is_stream=True,
+            metadata={_VIBESKILL_ORIGINAL_SESSION_ID_KEY: external_session_id} if external_session_id else None,
+        )
+        self.bus.deliver_to_message_handler(msg)
+        return True
 
     async def _handle_skilldev_artifact_ready(
         self,
-        payload: dict[str, Any],
+        payload: dict,
         external_sid: str | None,
         session_id: str | None,
-    ) -> dict | None:
+    ) -> list[dict]:
         """skilldev.artifact_ready - 产物就绪"""
-        return {
-            "type": "skilldev.artifact_ready",
-            "sessionId": external_sid,
-            "artifact": payload.get("artifact", {}),
-            "payload": payload,
-        }
+        return []
 
     async def _handle_skilldev_eval_ready(
         self,
-        payload: dict[str, Any],
+        payload: dict,
         external_sid: str | None,
         session_id: str | None,
-    ) -> dict | None:
+    ) -> list[dict]:
         """skilldev.eval_ready - 评估就绪"""
-        return {
-            "type": "skilldev.eval_ready",
-            "sessionId": external_sid,
-            "eval": payload.get("eval", {}),
-            "payload": payload,
-        }
+        return []
 
     async def _handle_skilldev_validate_result(
         self,
-        payload: dict[str, Any],
+        payload: dict,
         external_sid: str | None,
         session_id: str | None,
-    ) -> dict | None:
+    ) -> list[dict]:
         """skilldev.validate_result - 验证结果"""
-        return {
-            "type": "skilldev.validate_result",
-            "sessionId": external_sid,
-            "result": payload.get("result", {}),
-            "payload": payload,
-        }
+        return []
 
     async def _handle_skilldev_desc_opt_ready(
         self,
-        payload: dict[str, Any],
+        payload: dict,
         external_sid: str | None,
         session_id: str | None,
-    ) -> dict | None:
+    ) -> list[dict]:
         """skilldev.desc_opt_ready - 描述优化就绪"""
-        return {
-            "type": "skilldev.desc_opt_ready",
-            "sessionId": external_sid,
-            "description": payload.get("description", ""),
-            "payload": payload,
-        }
+        return []
 
     async def _handle_skilldev_error(
         self,
-        payload: dict[str, Any],
+        payload: dict,
         external_sid: str | None,
         session_id: str | None,
-    ) -> dict | None:
+    ) -> list[dict]:
         """skilldev.error - 错误"""
+        responses: list[dict] = []
         if session_id:
-            await self._store.set_state(session_id, VibeSkillSessionState.IDLE)
-        return {
-            "type": "skilldev.error",
-            "sessionId": external_sid,
-            "error": payload.get("error", ""),
-            "payload": payload,
-        }
+            await self._store.set_state(session_id, VibeSkillSessionState.RETRY)
+        responses.append({
+            "type": "session.status",
+            "properties": {
+                "sessionID": external_sid,
+                "status": {
+                    "type": "retry",
+                    "attempt": int(payload.get("retry_count") or 1),
+                    "message": str(payload.get("error") or "skilldev error"),
+                    "next": int(payload.get("retry_next") or (int(time.time() * 1000) + 10000)),
+                },
+            },
+        })
+        return responses
 
     async def _handle_skilldev_suspended(
         self,
-        payload: dict[str, Any],
+        payload: dict,
         external_sid: str | None,
         session_id: str | None,
-    ) -> dict | None:
+    ) -> list[dict]:
         """skilldev.suspended - 暂停"""
         if session_id:
             await self._store.set_state(session_id, VibeSkillSessionState.IDLE)
-        return {
-            "type": "skilldev.suspended",
-            "sessionId": external_sid,
-            "reason": payload.get("reason", ""),
-            "payload": payload,
-        }
+        return [{
+            "type": "session.status",
+            "properties": {
+                "sessionID": external_sid,
+                "status": {"type": "idle"},
+            },
+        }]
 
     async def _handle_skilldev_completed(
         self,
-        payload: dict[str, Any],
+        payload: dict,
         external_sid: str | None,
         session_id: str | None,
-    ) -> dict | None:
+    ) -> list[dict]:
         """skilldev.completed - 完成"""
         if session_id:
             await self._store.set_state(session_id, VibeSkillSessionState.IDLE)
-        return {
-            "type": "skilldev.completed",
-            "sessionId": external_sid,
-            "result": payload.get("result", {}),
-            "payload": payload,
-        }
+        return [{
+            "type": "session.status",
+            "properties": {
+                "sessionID": external_sid,
+                "status": {"type": "idle"},
+            },
+        }]
 
-    def cleanup(self, ws: Any) -> None:
+    async def cleanup(self, ws: Any) -> None:
         """ws 断开时清理关联的会话映射。"""
+        heartbeat = self._ws_heartbeat_tasks.pop(ws, None)
+        if heartbeat and not heartbeat.done():
+            heartbeat.cancel()
+            try:
+                await heartbeat
+            except asyncio.CancelledError:
+                pass
+            except Exception as exc:
+                logger.debug("[VibeSkillChannel] cleanup heartbeat wait failed: %s", exc)
         internal_ids = self._ws_sessions.pop(ws, set())
         for sid in internal_ids:
             self._session_to_ws.pop(sid, None)
+            self._message_ctx.pop(sid, None)
 
     async def _resolve_external_session_id(
         self,
@@ -764,6 +1051,175 @@ class VibeSkillChannel(BaseChannel):
             return original
 
         return await self._store.resolve_external(sid)
+
+    async def _emit_ws_event(self, ws: Any, event_type: str, properties: dict[str, Any]) -> None:
+        await ws.send(json.dumps({"type": event_type, "properties": properties}, ensure_ascii=False))
+
+    def _start_heartbeat_task(self, ws: Any) -> None:
+        task = asyncio.create_task(self._heartbeat_loop(ws))
+        self._ws_heartbeat_tasks[ws] = task
+
+    async def _heartbeat_loop(self, ws: Any) -> None:
+        try:
+            while True:
+                await asyncio.sleep(10)
+                if ws not in self._clients or bool(getattr(ws, "closed", False)):
+                    return
+                try:
+                    await self._emit_ws_event(ws, "server.heartbeat", {"timestamp": int(time.time() * 1000)})
+                except Exception:
+                    # ws 可能在检查后立刻关闭；结束 heartbeat 循环即可。
+                    return
+        except asyncio.CancelledError:
+            return
+        except Exception as exc:
+            logger.debug("[VibeSkillChannel] heartbeat loop stopped: %s", exc)
+
+    async def _emit_session_status(
+        self,
+        ws: Any,
+        external_sid: str | None,
+        status_type: str,
+        extra: dict[str, Any] | None = None,
+    ) -> None:
+        if not external_sid:
+            return
+        status: dict[str, Any] = {"type": status_type}
+        if extra:
+            status.update(extra)
+        await self._emit_ws_event(ws, "session.status", {"sessionID": external_sid, "status": status})
+
+    def _ensure_message_context(self, session_id: str | None) -> dict[str, Any]:
+        sid = str(session_id or "").strip()
+        if not sid:
+            sid = "_default"
+        ctx = self._message_ctx.get(sid)
+        if ctx is None:
+            ctx = {
+                "message_id": f"msg_{secrets.token_hex(6)}",
+                "parts": [],
+                "part_by_type": {},
+                "tool_parts": {},
+                "message_announced": False,
+            }
+            self._message_ctx[sid] = ctx
+        return ctx
+
+    def _ensure_text_part(self, session_id: str | None, part_type: str) -> dict[str, Any]:
+        ctx = self._ensure_message_context(session_id)
+        part = ctx["part_by_type"].get(part_type)
+        if part is None:
+            part = {
+                "id": f"prt_{secrets.token_hex(6)}",
+                "sessionID": session_id,
+                "messageID": ctx["message_id"],
+                "type": part_type,
+                "text": "",
+            }
+            ctx["part_by_type"][part_type] = part
+            ctx["parts"].append(part)
+        return part
+
+    def _ensure_tool_part(self, session_id: str | None, call_id: str, tool_name: str) -> dict[str, Any]:
+        ctx = self._ensure_message_context(session_id)
+        part = ctx["tool_parts"].get(call_id)
+        if part is None:
+            part = {
+                "id": f"prt_{secrets.token_hex(6)}",
+                "sessionID": session_id,
+                "messageID": ctx["message_id"],
+                "type": "tool",
+                "callID": call_id,
+                "tool": tool_name,
+                "state": {},
+            }
+            ctx["tool_parts"][call_id] = part
+            ctx["parts"].append(part)
+        return part
+
+    def _ensure_message_announced(self, ctx: dict[str, Any], external_sid: str | None) -> list[dict]:
+        if ctx.get("message_announced"):
+            return []
+        ctx["message_announced"] = True
+        return [{
+            "type": "message.updated",
+            "properties": {
+                "info": {
+                    "id": ctx["message_id"],
+                    "sessionID": external_sid,
+                    "role": "assistant",
+                    "parts": self._serialize_parts(ctx["parts"], external_sid),
+                }
+            },
+        }]
+
+    def _build_text_stream_events(
+        self,
+        session_id: str | None,
+        external_sid: str | None,
+        payload: dict[str, Any],
+        part_type: str,
+        text_field: str,
+    ) -> list[dict]:
+        delta = str(payload.get(text_field) or payload.get("text") or "")
+        if not delta:
+            return []
+        ctx = self._ensure_message_context(session_id)
+        part = self._ensure_text_part(session_id, part_type)
+        part["text"] = str(part.get("text") or "") + delta
+        responses = self._ensure_message_announced(ctx, external_sid)
+        responses.append(
+            {
+                "type": "message.part.updated",
+                "properties": self._serialize_part(part, external_sid),
+            }
+        )
+        responses.append({
+            "type": "message.part.delta",
+            "properties": {
+                "sessionID": external_sid,
+                "messageID": ctx["message_id"],
+                "partID": part["id"],
+                "type": part_type,
+                "delta": delta,
+            },
+        })
+        return responses
+
+    def _serialize_parts(self, parts: list[dict[str, Any]], external_sid: str | None) -> list[dict[str, Any]]:
+        return [self._serialize_part(part, external_sid) for part in parts]
+
+    def _serialize_part(self, part: dict[str, Any], external_sid: str | None) -> dict[str, Any]:
+        serialized = dict(part)
+        part_id = serialized.pop("id", None)
+        if part_id is not None:
+            serialized["partID"] = part_id
+        serialized["sessionID"] = external_sid
+        return serialized
+
+    def _convert_question_answers(self, questions: list[dict[str, Any]], raw_answers: Any) -> list[dict[str, Any]]:
+        if not isinstance(raw_answers, list):
+            return []
+        mapped: list[dict[str, Any]] = []
+        for idx, answer_item in enumerate(raw_answers):
+            question = questions[idx] if idx < len(questions) else {}
+            question_id = str(question.get("id") or f"q_{idx + 1}")
+            options = question.get("options") if isinstance(question.get("options"), list) else []
+            label_to_id = {
+                str(opt.get("label")): str(opt.get("id"))
+                for opt in options if isinstance(opt, dict)
+            }
+            values = answer_item if isinstance(answer_item, list) else [answer_item]
+            normalized_values: list[str] = []
+            for value in values:
+                text = str(value)
+                normalized_values.append(label_to_id.get(text, text))
+            answer: Any = normalized_values
+            multiple = bool(question.get("multiple"))
+            if not multiple:
+                answer = normalized_values[0] if normalized_values else ""
+            mapped.append({"question_id": question_id, "answer": answer})
+        return mapped
 
     async def http_handler(
         self,
@@ -1003,13 +1459,31 @@ class VibeSkillChannel(BaseChannel):
     async def _handle_http_export(self, session_id: str, body: bytes) -> tuple[int, dict, bytes]:
         """POST /api/v1/session/{id}/export - 导出 Skill 产物。"""
         try:
-            data = json.loads(body) if body else {}
+            json.loads(body) if body else {}
         except json.JSONDecodeError:
             return self._json_response(400, {"error": "Invalid JSON"})
-        commit_hash = data.get("commitHash", "")
-        return self._json_response(200, {
-            "exportId": f"exp_{secrets.token_hex(4)}",
-            "url": f"https://obs.internal/skill-exports/exp_{secrets.token_hex(4)}.tar.gz",
-            "mimeType": "application/gzip",
-            "exportedAt": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-        })
+        request_id = f"vibeskill-export-{int(time.time() * 1000):x}-{secrets.token_hex(3)}"
+        env = e2a_from_agent_fields(
+            request_id=request_id,
+            channel_id=VIBESKILL_CHANNEL_ID,
+            session_id=session_id,
+            req_method=ReqMethod.SKILLDEV_DOWNLOAD,
+            params={"sessionID": session_id},
+            is_stream=False,
+            timestamp=time.time(),
+        )
+        resp = await self._send_agent_request(env)
+        payload = resp.payload if isinstance(resp.payload, dict) else {}
+        if not resp.ok or not bool(payload.get("ok", True)):
+            err = str(payload.get("error") or "skilldev.download failed")
+            return self._json_response(502, {"error": err})
+
+        result = {
+            "exportId": payload.get("exportId"),
+            "url": payload.get("url"),
+            "mimeType": payload.get("mimeType"),
+            "exportedAt": payload.get("exportedAt"),
+        }
+        if not result["exportId"] or not result["url"] or not result["mimeType"]:
+            return self._json_response(502, {"error": "Invalid response from skilldev.download"})
+        return self._json_response(200, result)
