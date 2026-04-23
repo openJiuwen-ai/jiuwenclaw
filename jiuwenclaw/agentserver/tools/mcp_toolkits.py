@@ -15,6 +15,10 @@ from jiuwenclaw.agentserver.tools.web_fetch_tools import mcp_fetch_webpage
 
 
 def _normalize_stdio_command_kind(command: str) -> str:
+    """将 command 归一化为 'node' 或 'python'。
+
+    支持绝对路径如 /usr/local/bin/node、C:\\Program Files\\node.exe 等。
+    """
     raw = str(command or "").strip()
     if not raw:
         raise ValueError("工具配置缺少 'command' 字段")
