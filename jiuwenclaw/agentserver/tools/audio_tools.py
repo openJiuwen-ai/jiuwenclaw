@@ -22,6 +22,7 @@ from openjiuwen.core.runner import Runner
 import requests
 
 from jiuwenclaw.agentserver.tools.multimodal_config import apply_audio_model_config_from_yaml
+from jiuwenclaw.agentserver.tools.ssl_config import get_requests_verify
 
 
 logger = logging.getLogger(__name__)
@@ -101,7 +102,7 @@ def _load_audio_as_base64(file_path: str) -> tuple[str, str]:
 
 def _download_audio_to_tempfile(url: str) -> str:
     hdrs = {"User-Agent": DEFAULT_USER_AGENT}
-    resp = requests.get(url, headers=hdrs, timeout=HTTP_TIMEOUT, stream=True)
+    resp = requests.get(url, headers=hdrs, timeout=HTTP_TIMEOUT, stream=True, verify=get_requests_verify())
     resp.raise_for_status()
     ct = resp.headers.get("content-type", "")
     ext = _resolve_audio_extension(url, ct)
@@ -291,7 +292,13 @@ async def audio_metadata(audio_path_or_url: str) -> str:
             "signature_version": "1",
         }
 
-        r = requests.post(ACR_BASE_URL, files=files_payload, data=form_data, timeout=HTTP_TIMEOUT)
+        r = requests.post(
+            ACR_BASE_URL,
+            files=files_payload,
+            data=form_data,
+            timeout=HTTP_TIMEOUT,
+            verify=get_requests_verify(),
+        )
         r.encoding = "utf-8"
         parsed = json.loads(r.text)
 

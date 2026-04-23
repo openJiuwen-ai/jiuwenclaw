@@ -18,6 +18,7 @@ from openjiuwen.core.foundation.tool import tool
 from jiuwenclaw.config import get_config
 from jiuwenclaw.utils import get_config_file
 from jiuwenclaw.agentserver.tools.multimodal_config import apply_video_model_config_from_yaml
+from jiuwenclaw.agentserver.tools.ssl_config import get_requests_verify
 
 
 logger = logging.getLogger(__name__)
@@ -67,6 +68,7 @@ class VideoUnderstandingRequest:
 
 
 def _http_post(url: str, **kwargs) -> requests.Response:
+    kwargs.setdefault("verify", get_requests_verify())
     try:
         return requests.post(url, **kwargs)
     except requests.exceptions.ProxyError:

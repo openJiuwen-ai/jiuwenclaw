@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import unquote, urlparse
 
+from jiuwenclaw.agentserver.tools.ssl_config import get_insecure_ssl_context, get_ssl_verify
 from jiuwenclaw.utils import get_agent_root_dir, get_logs_dir, \
     get_root_dir, get_user_workspace_dir, is_package_installation
 
@@ -326,10 +327,12 @@ class _SpaStaticHandler(SimpleHTTPRequestHandler):
     def _proxy_http(self) -> None:
         parsed = urlparse(self.api_target)
         if parsed.scheme == "https":
+            ssl_ctx = None if get_ssl_verify() else get_insecure_ssl_context()
             conn: http.client.HTTPConnection = http.client.HTTPSConnection(
                 parsed.hostname,
                 parsed.port or self._DEFAULT_HTTPS_PORT,
                 timeout=self._HTTP_PROXY_TIMEOUT,
+                context=ssl_ctx,
             )
         else:
             conn = http.client.HTTPConnection(
@@ -385,7 +388,7 @@ class _SpaStaticHandler(SimpleHTTPRequestHandler):
         try:
             upstream = socket.create_connection((upstream_host, upstream_port), timeout=self._WS_CONNECT_TIMEOUT)
             if parsed.scheme in ("wss", "https"):
-                ctx = ssl.create_default_context()
+                ctx = ssl.create_default_context() if get_ssl_verify() else get_insecure_ssl_context()
                 upstream = ctx.wrap_socket(upstream, server_hostname=upstream_host)
         except OSError as exc:
             self.log_error("proxy ws connect failed: %s", exc)

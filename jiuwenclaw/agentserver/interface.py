@@ -452,6 +452,12 @@ class JiuWenClaw:
             "language": language,
         }
 
+        system_prompt_append = request.params.get("system_prompt")
+        if isinstance(system_prompt_append, str):
+            system_prompt_append = system_prompt_append.strip()
+            if system_prompt_append:
+                inputs["system_prompt_append"] = system_prompt_append
+
         # 传递 enable_memory 参数
         enable_memory = request.metadata.get("enable_memory", True) if request.metadata else True
         inputs["enable_memory"] = enable_memory

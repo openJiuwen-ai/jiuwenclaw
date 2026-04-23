@@ -86,6 +86,7 @@ from jiuwenclaw.agentserver.deep_agent.prompt_builder import build_identity_prom
 from jiuwenclaw.agentserver.deep_agent.rails import (
     JiuClawContextEngineeringRail,
     JiuClawStreamEventRail,
+    RequestSystemPromptRail,
     ResponsePromptRail,
     RuntimePromptRail,
 )
@@ -536,6 +537,7 @@ class JiuWenClawDeepAdapter:
         self._task_planning_rail: TaskPlanningRail | None = None
         self._context_engineering_rail: ContextEngineeringRail | None = None
         self._context_engineering_rail_mode: str | None = None
+        self._request_system_prompt_rail: RequestSystemPromptRail | None = None
         self._runtime_prompt_rail: RuntimePromptRail | None = None
         self._response_prompt_rail: ResponsePromptRail | None = None
         self._security_rail: SecurityRail | None = None
@@ -1175,6 +1177,17 @@ class JiuWenClawDeepAdapter:
         return SkillUseRail.SKILL_MODE_ALL
 
     @staticmethod
+    def _build_request_system_prompt_rail() -> RequestSystemPromptRail | None:
+        """Build per-request system prompt rail."""
+        try:
+            rail = RequestSystemPromptRail()
+            logger.info("[JiuWenClawDeepAdapter] RequestSystemPromptRail create success")
+        except Exception as exc:
+            logger.warning("[JiuWenClawDeepAdapter] RequestSystemPromptRail create failed: %s", exc)
+            rail = None
+        return rail
+
+    @staticmethod
     def _build_response_prompt_rail() -> ResponsePromptRail | None:
         """Build ResponsePromptRail so message rules keep priority ordering."""
         try:
@@ -1456,6 +1469,7 @@ class JiuWenClawDeepAdapter:
         rail_infos = [
             # TelemetryRail - lowest priority, runs first for full coverage
             _RailBuildInfo("_telemetry_rail", self._build_telemetry_rail),
+            _RailBuildInfo("_request_system_prompt_rail", self._build_request_system_prompt_rail),
             _RailBuildInfo("_runtime_prompt_rail", self._build_runtime_prompt_rail),
             _RailBuildInfo("_response_prompt_rail", self._build_response_prompt_rail),
             _RailBuildInfo("_stream_event_rail", self._build_stream_event_rail),
