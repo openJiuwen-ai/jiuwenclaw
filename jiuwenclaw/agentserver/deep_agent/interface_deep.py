@@ -1055,6 +1055,7 @@ class JiuWenClawDeepAdapter:
         except Exception as e:
             logger.error("[JiuWenClawDeepAdapter] fail to setup checkpoint due to: %s", e)
 
+
     @staticmethod
     def _normalize_model_client_config_dict(mcc: dict) -> dict:
         """YAML / 环境变量替换可能把 dict 字段写成空串，避免 ModelClientConfig 校验失败。"""

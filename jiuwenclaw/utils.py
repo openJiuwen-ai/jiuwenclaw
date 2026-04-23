@@ -914,6 +914,8 @@ def prepare_workspace(
 
     migrate_config_from_template(config_yaml_src, config_yaml_dest)
     set_preferred_language_in_config_file(config_yaml_dest, resolved_lang)
+    # 由于日志初始化在前, 调用过_resolve_paths。workspace完成后务必要再调用一次_resolve_paths
+    _resolve_paths(force=True)
 
 
 def init_user_workspace(overwrite: bool = True) -> Path | Literal["cancelled"]:
@@ -988,11 +990,11 @@ def init_user_workspace(overwrite: bool = True) -> Path | Literal["cancelled"]:
     return workspace_dir
 
 
-def _resolve_paths() -> None:
+def _resolve_paths(force=False) -> None:
     """Resolve and cache all paths."""
     global _initialized, _config_dir, _workspace_dir, _root_dir
 
-    if _initialized:
+    if not force and _initialized:
         return
 
     workspace_dir = get_user_workspace_dir()

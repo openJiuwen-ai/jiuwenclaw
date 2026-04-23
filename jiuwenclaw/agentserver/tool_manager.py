@@ -76,6 +76,11 @@ async def _add_mcp_server_and_ability(agent: Any, mcp_cfg: Any, *, tag: str) -> 
 TOOL_DISK_SCHEMA: list[tuple[str, Any, str]] = [
     ("name", "", "tool_name"),
     ("description", "", "text"),
+    ("type", "", "text"),
+    ("url", "", "text"),
+    ("env", {}, "any"),
+    ("auth_headers", {}, "any"),
+    ("auth_query_params", {}, "any"),
     ("command", "", "text"),
     ("args", [], "list"),
 ]
