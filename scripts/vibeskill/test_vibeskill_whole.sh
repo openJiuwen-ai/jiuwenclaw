@@ -60,7 +60,22 @@ if [[ "$FILE_LIST_HTTP_STATUS" != "200" ]]; then
   exit 1
 fi
 
-FIRST_FILE_PATH=$(python3 -c "import sys, json; data=json.load(sys.stdin); print(next((n.get('path','') for n in data if isinstance(n, dict) and n.get('type')=='file' and n.get('path')), ''))" <<< "$FILE_LIST_RESPONSE" 2>/dev/null || true)
+FIRST_FILE_PATH=$(python3 -c "
+import json, sys
+def first_file_path(nodes):
+    for n in nodes or []:
+        if not isinstance(n, dict):
+            continue
+        if n.get('type') == 'file' and n.get('path'):
+            return n['path']
+        got = first_file_path(n.get('children') or [])
+        if got:
+            return got
+    return ''
+data = json.loads(sys.stdin.read())
+roots = data if isinstance(data, list) else (data.get('tree') or [])
+print(first_file_path(roots))
+" <<< "$FILE_LIST_RESPONSE" 2>/dev/null || true)
 if [[ -z "${FIRST_FILE_PATH:-}" ]]; then
   echo "ERROR: 未找到可读取的文件 path"
   exit 1

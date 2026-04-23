@@ -17,7 +17,7 @@ from jiuwenclaw.channel.vibeskill_session import (
     VibeSkillSessionStore,
     _VIBESKILL_ORIGINAL_SESSION_ID_KEY,
 )
-from jiuwenclaw.channel.vibeskill_file_utils import skilldev_tree_to_opencode_file_nodes
+from jiuwenclaw.channel.vibeskill_file_utils import skilldev_tree_to_file_tree_nodes
 from jiuwenclaw.schema.message import Message, ReqMethod
 
 logger = logging.getLogger(__name__)
@@ -1400,7 +1400,7 @@ class VibeSkillChannel(BaseChannel):
         return self._json_response(200, {"deleted": True})
 
     async def _handle_http_file_list(self, session_id: str, headers: dict) -> tuple[int, dict, bytes]:
-        """GET /api/v1/.../file — 列目录（skilldev.file.list → FileNode[]）。"""
+        """GET /api/v1/.../file — 列目录（skilldev.file.list → FileTreeNode[] 嵌套树）。"""
         internal_id = await self._store.resolve_internal(session_id) or session_id
         request_id = f"vibeskill-file-list-{int(time.time() * 1000):x}-{secrets.token_hex(3)}"
         env = e2a_from_agent_fields(
@@ -1424,8 +1424,8 @@ class VibeSkillChannel(BaseChannel):
         tree = payload.get("tree")
         if not isinstance(tree, list):
             tree = []
-        file_nodes = skilldev_tree_to_opencode_file_nodes(tree, task_id=session_id)
-        return self._json_response(200, file_nodes)
+        file_tree = skilldev_tree_to_file_tree_nodes(tree, task_id=session_id)
+        return self._json_response(200, file_tree)
 
     async def _handle_http_file_content(
         self, session_id: str, headers: dict, raw_request_path: str
