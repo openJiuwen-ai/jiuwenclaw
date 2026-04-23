@@ -145,7 +145,7 @@ from jiuwenclaw.agentserver.extensions import get_rail_manager
 from jiuwenclaw.gateway.cron import CronTargetChannel
 from jiuwenclaw.schema.agent import AgentRequest, AgentResponse, AgentResponseChunk
 from jiuwenclaw.utils import (
-    get_agent_skills_dir,
+    get_agent_registered_skill_dirs,
     get_agent_workspace_dir,
     get_checkpoint_dir,
     get_env_file,
@@ -1223,7 +1223,7 @@ class JiuWenClawDeepAdapter:
             skill_mode = self._resolve_skill_mode(config)
             logger.info("[JiuWenClawDeepAdapter] current skill_mode: %s", skill_mode)
             skill_rail = SkillUseRail(
-                skills_dir=str(get_agent_skills_dir()),
+                skills_dir=str(get_agent_registered_skill_dirs()),
                 skill_mode=skill_mode,
                 include_tools=include_tools,
             )
@@ -1242,7 +1242,7 @@ class JiuWenClawDeepAdapter:
             else:
                 evolution_auto_scan = config.get("evolution", {}).get("auto_scan", False)
             skill_evolution_rail = SkillEvolutionRail(
-                skills_dir=str(get_agent_skills_dir()),
+                skills_dir=str(get_agent_registered_skill_dirs()),
                 llm=self._model,
                 model=config.get("model_name", "gpt-4"),
                 auto_scan=evolution_auto_scan,

@@ -1115,6 +1115,29 @@ def get_agent_skills_dir() -> Path:
     return get_agent_workspace_dir() / "skills"
 
 
+def get_shared_agent_skills_dirs() -> list[Path]:
+    raw = (os.getenv("JIUWENCLAW_SHARED_SKILLS_DIRS") or "").strip()
+    if not raw:
+        return []
+
+    dirs: list[Path] = []
+    seen: set[str] = set()
+    for part in [part.strip() for part in raw.split(os.pathsep) if part.strip()]:
+        path = Path(part).expanduser().resolve()
+        key = str(path)
+        if key in seen:
+            continue
+        seen.add(key)
+        dirs.append(path)
+    return dirs
+
+
+def get_agent_registered_skill_dirs() -> list[Path]:
+    if get_shared_agent_skills_dirs():
+        return get_shared_agent_skills_dirs()
+    return [get_agent_skills_dir()]
+
+
 def get_agent_tools_dir() -> Path:
     """落盘 MCP 工具配置目录（全局 ``~/.jiuwenclaw/agent/jiuwenclaw_workspace/tools``）。
 
