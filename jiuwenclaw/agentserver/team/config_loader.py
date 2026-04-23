@@ -114,6 +114,7 @@ def _build_agent_spec_dict(
     merged.setdefault("workspace", deepcopy(default_workspace))
     merged.setdefault("max_iterations", max_iterations)
     merged.setdefault("completion_timeout", completion_timeout)
+    merged["enable_task_loop"] = True
     return merged
 
 

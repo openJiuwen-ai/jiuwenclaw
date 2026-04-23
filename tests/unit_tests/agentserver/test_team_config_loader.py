@@ -142,6 +142,91 @@ def test_load_team_spec_dict_keeps_role_defaults_when_member_alias_is_added(monk
     assert spec["agents"]["teammate"]["skills"] == ["shared-skill"]
 
 
+def test_load_team_spec_dict_sets_agent_spec_defaults(monkeypatch, tmp_path):
+    """Agent spec should have default values for enable_task_loop, max_iterations, etc."""
+    config = {
+        "models": {
+            "default": {
+                "model_client_config": {
+                    "model_name": "gpt-defaults",
+                    "client_provider": "openai",
+                },
+                "model_config_obj": {},
+            }
+        },
+        "team": {
+            "agents": {
+                "leader": {},
+                "worker": {},
+            }
+        },
+    }
+
+    monkeypatch.setattr(
+        "jiuwenclaw.agentserver.team.config_loader.get_config",
+        lambda: config,
+    )
+    monkeypatch.setattr(
+        "jiuwenclaw.agentserver.team.config_loader.get_agent_teams_home",
+        lambda: tmp_path / ".agent_teams",
+    )
+
+    spec = load_team_spec_dict("session-defaults")
+
+    # Check default values for all agents
+    for agent_name in ["leader", "worker"]:
+        assert spec["agents"][agent_name]["enable_task_loop"] is True
+        assert spec["agents"][agent_name]["max_iterations"] == 200
+        assert spec["agents"][agent_name]["completion_timeout"] == 600.0
+        assert spec["agents"][agent_name]["workspace"] == {"stable_base": True}
+
+
+def test_load_team_spec_dict_preserves_explicit_agent_spec_values(monkeypatch, tmp_path):
+    """Explicit agent spec values should override defaults."""
+    config = {
+        "models": {
+            "default": {
+                "model_client_config": {
+                    "model_name": "gpt-explicit",
+                    "client_provider": "openai",
+                },
+                "model_config_obj": {},
+            }
+        },
+        "team": {
+            "agents": {
+                "leader": {},
+                "custom_agent": {
+                    "enable_task_loop": False,
+                    "max_iterations": 50,
+                    "completion_timeout": 300.0,
+                },
+            }
+        },
+    }
+
+    monkeypatch.setattr(
+        "jiuwenclaw.agentserver.team.config_loader.get_config",
+        lambda: config,
+    )
+    monkeypatch.setattr(
+        "jiuwenclaw.agentserver.team.config_loader.get_agent_teams_home",
+        lambda: tmp_path / ".agent_teams",
+    )
+
+    spec = load_team_spec_dict("session-explicit")
+
+    # leader uses defaults
+    assert spec["agents"]["leader"]["enable_task_loop"] is True
+    assert spec["agents"]["leader"]["max_iterations"] == 200
+    assert spec["agents"]["leader"]["completion_timeout"] == 600.0
+
+    # custom_agent uses explicit values
+    assert spec["agents"]["custom_agent"]["enable_task_loop"] is True
+    assert spec["agents"]["custom_agent"]["max_iterations"] == 50
+    assert spec["agents"]["custom_agent"]["completion_timeout"] == 300.0
+
+
 def test_load_team_spec_dict_preserves_explicit_empty_skills(monkeypatch, tmp_path):
     """Explicit empty skill lists should not be treated as missing config."""
     config = {
