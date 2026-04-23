@@ -845,11 +845,15 @@ class JiuWenSwarm:
         self,
         workspace_dir: str | None = None,
         user_workspace_dir: str | None = None,
+        agent_id: str | None = None,
+        service_id: str | None = None,
     ) -> None:
         self._adapter: AgentAdapter | None = None
         self._sdk_name: str | None = None
         # 企业多租户：AGENT_RUNTIME 下 user_workspace_dir 为租户根，再拼相对 workspace/sessions
         enterprise = bool(os.getenv("AGENT_RUNTIME", "").strip())
+        self._agent_id = agent_id if enterprise else None
+        self._service_id = service_id if enterprise else None
         tenant_root = user_workspace_dir or (workspace_dir if enterprise else None)
         if enterprise and tenant_root:
             user_ws = Path(tenant_root)
@@ -915,6 +919,8 @@ class JiuWenSwarm:
                 self._sdk_name,
                 mode=mode,
                 workspace_dir=self._workspace_dir,
+                agent_id=self._agent_id,
+                service_id=self._service_id,
             )
             if hasattr(self._adapter, "set_skill_manager"):
                 self._adapter.set_skill_manager(self._skill_manager)

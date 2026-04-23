@@ -983,7 +983,12 @@ class JiuWenSwarmDeepAdapter:
     - Deep interrupt / user_answer 处理
     """
 
-    def __init__(self, workspace_dir: str | None = None) -> None:
+    def __init__(
+        self,
+        workspace_dir: str | None = None,
+        agent_id: str | None = None,
+        service_id: str | None = None,
+    ) -> None:
         # Apply the MCP per-call timeout patch once per process: wraps
         # StreamableHttpClient/SseClient.call_tool & list_tools in
         # asyncio.wait_for and honors config ``timeout_s`` (--timeout_s), so a
@@ -992,11 +997,14 @@ class JiuWenSwarmDeepAdapter:
         apply_mcp_call_timeout_patch()
         self._instance: DeepAgent | None = None
         self._project_dir: str | None = None
-        # 企业多租户：AGENT_RUNTIME 下可用外部传入的隔离 workspace
-        if workspace_dir and os.getenv("AGENT_RUNTIME", "").strip():
+        # 企业多租户：AGENT_RUNTIME 下可用外部传入的隔离 workspace / 租户 ID
+        enterprise = bool(os.getenv("AGENT_RUNTIME", "").strip())
+        if workspace_dir and enterprise:
             self._workspace_dir: str = workspace_dir
         else:
             self._workspace_dir: str = str(get_agent_workspace_dir())
+        self._agent_id = agent_id if enterprise else None
+        self._service_id = service_id if enterprise else None
         self._agent_name: str = "main_agent"
         # 是否是 code-agent 形态. 基类 (deep adapter) 默认 False, 由子类
         # JiuwenSwarmCodeAdapter 在 __init__ 里改成 True. 该字段透传给
@@ -4496,6 +4504,8 @@ class JiuWenSwarmDeepAdapter:
             rail = RuntimePromptRail(
                 language=self._resolve_runtime_language(),
                 channel=default_channel,
+                agent_id=self._agent_id,
+                service_id=self._service_id,
             )
             logger.info("[JiuWenSwarmDeepAdapter] RuntimePromptRail create success")
         except Exception as exc:

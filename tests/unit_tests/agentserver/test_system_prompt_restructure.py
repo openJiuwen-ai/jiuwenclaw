@@ -1,4 +1,5 @@
 from types import SimpleNamespace
+from pathlib import Path
 from unittest.mock import patch
 
 import pytest
@@ -1204,3 +1205,67 @@ def test_deep_adapter_subagents_omits_research_without_explicit_enable():
     assert subagents == ["browser_spec"]
     mock_research.assert_not_called()
     mock_browser.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_runtime_rail_multi_tenant_workspace_dirs(monkeypatch):
+    """企业版多租户：AGENT_RUNTIME 下 prompt 使用租户隔离的 workspace/config 路径。"""
+    monkeypatch.setenv("AGENT_RUNTIME", "1")
+
+    builder = SystemPromptBuilder(language="cn")
+    runtime_rail = RuntimePromptRail(
+        language="cn",
+        channel="web",
+        agent_id="test_agent_001",
+        service_id="test_service_001",
+    )
+    runtime_rail.init(SimpleNamespace(system_prompt_builder=builder))
+
+    expected_base = Path("/tmp/test_jiuwenswarm/service_test_service_001/agent_test_agent_001")
+    with patch(
+        "jiuwenswarm.agents.harness.common.rails.runtime_prompt_rail.get_multi_tenant_user_workspace_dir",
+        return_value=expected_base,
+    ):
+        ctx = AgentCallbackContext(agent=None, inputs=None, session=None)
+        await runtime_rail.before_model_call(ctx)
+
+    prompt = builder.build()
+
+    assert "config" in prompt
+    assert "workspace" in prompt
+    assert "service_test_service_001" in prompt
+    assert "agent_test_agent_001" in prompt
+    assert "Agent 内部数据目录" in prompt
+
+
+@pytest.mark.asyncio
+async def test_runtime_rail_single_tenant_workspace_dirs():
+    """社区版：未设置租户 ID 时回退到默认 workspace/config 路径。"""
+    builder = SystemPromptBuilder(language="cn")
+    runtime_rail = RuntimePromptRail(
+        language="cn",
+        channel="web",
+        # 不传 agent_id 和 service_id，触发单租户模式
+    )
+    runtime_rail.init(SimpleNamespace(system_prompt_builder=builder))
+
+    with (
+        patch(
+            "jiuwenswarm.agents.harness.common.rails.runtime_prompt_rail.get_user_workspace_dir"
+        ) as mock_user_ws,
+        patch(
+            "jiuwenswarm.agents.harness.common.rails.runtime_prompt_rail.get_agent_workspace_dir"
+        ) as mock_agent_ws,
+    ):
+        mock_user_ws.return_value = Path("/home/user/.jiuwenswarm")
+        mock_agent_ws.return_value = Path("/home/user/.jiuwenswarm/agent/workspace")
+
+        ctx = AgentCallbackContext(agent=None, inputs=None, session=None)
+        await runtime_rail.before_model_call(ctx)
+
+    prompt = builder.build()
+
+    assert "config" in prompt
+    assert "workspace" in prompt
+    assert ".jiuwenswarm" in prompt
+    assert "Agent 内部数据目录" in prompt

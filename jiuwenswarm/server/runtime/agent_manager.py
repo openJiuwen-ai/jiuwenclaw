@@ -425,11 +425,19 @@ class AgentManager:
             sub_mode_key or None,
             project_dir or None,
         )
-        workspace_dir = None
         user_workspace_dir = None
-        if self.user_workspace_dir is not None and os.getenv("AGENT_RUNTIME", "").strip():
-            user_workspace_dir = str(self.user_workspace_dir)
-        agent = JiuWenSwarm(user_workspace_dir=user_workspace_dir)
+        agent_id = None
+        service_id = None
+        if os.getenv("AGENT_RUNTIME", "").strip():
+            if self.user_workspace_dir is not None:
+                user_workspace_dir = str(self.user_workspace_dir)
+            agent_id = self.agent_id
+            service_id = self.service_id
+        agent = JiuWenSwarm(
+            user_workspace_dir=user_workspace_dir,
+            agent_id=agent_id,
+            service_id=service_id,
+        )
         await agent.create_instance(config, mode=mode_key, sub_mode=sub_mode_key or None)
         setattr(agent, "_jiuwenswarm_agent_cache_key", agent_cache_key)
         setattr(agent, "_jiuwenswarm_agent_mode", mode_key)
