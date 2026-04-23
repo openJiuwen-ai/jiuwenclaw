@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 from pathlib import Path
 from typing import Any, Callable
@@ -194,6 +195,39 @@ class ToolManager:
             return self._get_tools_dir()
         return get_agent_tools_dir()
 
+    @staticmethod
+    def find_host_project_mcp_json() -> Path | None:
+        """固定从宿主 Clowder AI 根目录查找 ``.mcp.json``。"""
+        host_root = (os.getenv("CAT_CAFE_MCP_CWD") or "").strip()
+        if not host_root:
+            return None
+        candidate = Path(host_root).resolve() / ".mcp.json"
+        if candidate.is_file():
+            return candidate
+        return None
+
+    async def load_project_mcp_json(self, mcp_json_path: str | Path) -> dict[str, Any]:
+        """从项目根目录的 ``.mcp.json`` 导入工具，并复用 ``tools.add`` 的注册逻辑。"""
+        path = Path(mcp_json_path)
+        if not path.exists():
+            return {
+                "source": str(path),
+                "saved": [],
+                "registered_tools": [],
+                "skipped": True,
+                "reason": "not_found",
+            }
+
+        try:
+            mcp_json = path.read_text(encoding="utf-8")
+        except OSError as exc:
+            raise RuntimeError(f"读取项目 MCP 配置失败: {exc}") from exc
+
+        payload = await self.handle_tools_add({"mcp_json": mcp_json})
+        payload["source"] = str(path.resolve())
+        payload["skipped"] = False
+        return payload
+
     async def handle_tools_add(self, params: dict) -> dict[str, Any]:
         """按工具名拆分落盘；对每个工具调用 ``create_mcp_tool`` 注册。
 
@@ -252,7 +286,7 @@ class ToolManager:
             "registered_tools": registered,
         }
 
-    async def load_tools_from_disk(self) -> dict[str, Any]:
+    async def load_tools_from_disk(self, skip_server_names: set[str] | None = None) -> dict[str, Any]:
         """启动时扫描 ``tools/*.json``，按落盘记录注册 MCP 工具（MR !379）。"""
         agent = self._get_agent() if self._get_agent else None
         if agent is None:
@@ -262,6 +296,7 @@ class ToolManager:
         tools_dir.mkdir(parents=True, exist_ok=True)
         registered: list[dict[str, str]] = []
         errors: list[dict[str, str]] = []
+        skipped_names = {name for name in (skip_server_names or set()) if isinstance(name, str) and name}
 
         for path in sorted(tools_dir.glob("*.json")):
             try:
@@ -277,6 +312,9 @@ class ToolManager:
                 continue
 
             name_hint = record.get("name") if isinstance(record.get("name"), str) else path.stem
+            if name_hint in skipped_names:
+                logger.info("[ToolManager] 跳过已从项目 .mcp.json 同步的工具 name=%s path=%s", name_hint, path)
+                continue
             try:
                 single_json = json.dumps(record, ensure_ascii=False)
                 mcp_cfg = create_mcp_tool(single_json)
