@@ -17,6 +17,7 @@ from jiuwenclaw.channel.vibeskill_session import (
     VibeSkillSessionStore,
     _VIBESKILL_ORIGINAL_SESSION_ID_KEY,
 )
+from jiuwenclaw.channel.vibeskill_file_utils import skilldev_tree_to_opencode_file_nodes
 from jiuwenclaw.schema.message import Message, ReqMethod
 
 logger = logging.getLogger(__name__)
@@ -1233,74 +1234,77 @@ class VibeSkillChannel(BaseChannel):
         统一入口：HTTP 和 WebSocket 共用同一端口 /api/v1。
         """
         path_str = str(path or "").strip()
+        request_path = urlparse(path_str).path
 
         # Session 路由
         if path_str == "/api/v1/session" and method == "POST":
             return await self._handle_http_session_create(headers, body)
-        if path_str.startswith("/api/v1/session/") and method == "GET":
-            session_id = path_str.split("/api/v1/session/", 1)[-1]
-            return await self._handle_http_session_get(session_id)
-        if path_str.startswith("/api/v1/session/") and path_str.endswith("/abort") and method == "POST":
-            session_id = path_str.replace("/api/v1/session/", "").replace("/abort", "")
+        if request_path.startswith("/api/v1/session/") and request_path.endswith("/file/content") and method == "GET":
+            session_id = request_path.split("/api/v1/session/", 1)[-1].replace("/file/content", "")
+            return await self._handle_http_file_content(session_id, headers, path_str)
+        if request_path.startswith("/api/v1/session/") and request_path.endswith("/abort") and method == "POST":
+            session_id = request_path.replace("/api/v1/session/", "").replace("/abort", "")
             return await self._handle_http_session_abort(session_id)
-        if path_str.startswith("/api/v1/session/") and path_str.endswith("/message") and method == "GET":
-            session_id = path_str.replace("/api/v1/session/", "").replace("/message", "")
+        if request_path.startswith("/api/v1/session/") and request_path.endswith("/message") and method == "GET":
+            session_id = request_path.replace("/api/v1/session/", "").replace("/message", "")
             return await self._handle_http_session_message(session_id, headers)
-        if path_str.startswith("/api/v1/session/") and path_str.endswith("/summarize") and method == "POST":
-            session_id = path_str.replace("/api/v1/session/", "").replace("/summarize", "")
+        if request_path.startswith("/api/v1/session/") and request_path.endswith("/summarize") and method == "POST":
+            session_id = request_path.replace("/api/v1/session/", "").replace("/summarize", "")
             return await self._handle_http_session_summarize(session_id)
-        if path_str.startswith("/api/v1/session/") and method == "DELETE":
-            session_id = path_str.split("/api/v1/session/", 1)[-1]
+        if request_path.startswith("/api/v1/session/") and method == "DELETE":
+            session_id = request_path.split("/api/v1/session/", 1)[-1]
             return await self._handle_http_session_delete(session_id)
 
         # 文件路由
-        if path_str.startswith("/api/v1/session/") and path_str.endswith("/file") and method == "GET":
-            session_id = path_str.split("/api/v1/session/", 1)[-1].replace("/file", "")
+        if request_path.startswith("/api/v1/session/") and request_path.endswith("/file") and method == "GET":
+            session_id = request_path.split("/api/v1/session/", 1)[-1].replace("/file", "")
             return await self._handle_http_file_list(session_id, headers)
-        if path_str.startswith("/api/v1/session/") and path_str.endswith("/file/content") and method == "GET":
-            session_id = path_str.split("/api/v1/session/", 1)[-1].replace("/file/content", "")
-            return await self._handle_http_file_content(session_id, headers)
-        if path_str.startswith("/api/v1/session/") and path_str.endswith("/file/status") and method == "GET":
-            session_id = path_str.split("/api/v1/session/", 1)[-1].replace("/file/status", "")
+        if request_path.startswith("/api/v1/session/") and request_path.endswith("/file/status") and method == "GET":
+            session_id = request_path.split("/api/v1/session/", 1)[-1].replace("/file/status", "")
             return await self._handle_http_file_status(session_id, headers)
 
         # 搜索路由
-        if path_str.startswith("/api/v1/session/") and path_str.endswith("/find") and method == "GET":
-            session_id = path_str.split("/api/v1/session/", 1)[-1].replace("/find", "")
+        if request_path.startswith("/api/v1/session/") and request_path.endswith("/find") and method == "GET":
+            session_id = request_path.split("/api/v1/session/", 1)[-1].replace("/find", "")
             return await self._handle_http_find(session_id, headers)
-        if path_str.startswith("/api/v1/session/") and path_str.endswith("/find/file") and method == "GET":
-            session_id = path_str.split("/api/v1/session/", 1)[-1].replace("/find/file", "")
+        if request_path.startswith("/api/v1/session/") and request_path.endswith("/find/file") and method == "GET":
+            session_id = request_path.split("/api/v1/session/", 1)[-1].replace("/find/file", "")
             return await self._handle_http_find_file(session_id, headers)
 
         # VCS 路由
-        if path_str.startswith("/api/v1/session/") and path_str.endswith("/vcs") and method == "GET":
-            session_id = path_str.split("/api/v1/session/", 1)[-1].replace("/vcs", "")
+        if request_path.startswith("/api/v1/session/") and request_path.endswith("/vcs") and method == "GET":
+            session_id = request_path.split("/api/v1/session/", 1)[-1].replace("/vcs", "")
             return await self._handle_http_vcs(session_id)
 
         # 版本路由
-        if path_str.startswith("/api/v1/session/") and path_str.endswith("/version") and method == "POST":
-            session_id = path_str.split("/api/v1/session/", 1)[-1].replace("/version", "")
+        if request_path.startswith("/api/v1/session/") and request_path.endswith("/version") and method == "POST":
+            session_id = request_path.split("/api/v1/session/", 1)[-1].replace("/version", "")
             return await self._handle_http_version_create(session_id, body)
-        if path_str.startswith("/api/v1/session/") and path_str.endswith("/version") and method == "GET":
-            session_id = path_str.split("/api/v1/session/", 1)[-1].replace("/version", "")
+        if request_path.startswith("/api/v1/session/") and request_path.endswith("/version") and method == "GET":
+            session_id = request_path.split("/api/v1/session/", 1)[-1].replace("/version", "")
             return await self._handle_http_version_list(session_id, headers)
-        if path_str.startswith("/api/v1/session/") and path_str.endswith("/rollback") and method == "POST":
+        if request_path.startswith("/api/v1/session/") and request_path.endswith("/rollback") and method == "POST":
             # /api/v1/session/{sessionID}/version/{commitHash}/rollback
-            parts = path_str.replace("/api/v1/session/", "").replace("/rollback", "").split("/version/")
+            parts = request_path.replace("/api/v1/session/", "").replace("/rollback", "").split("/version/")
             session_id = parts[0]
             commit_hash = parts[1] if len(parts) > 1 else ""
             return await self._handle_http_version_rollback(session_id, commit_hash)
-        if path_str.startswith("/api/v1/session/") and path_str.endswith("/diff") and method == "GET":
+        if request_path.startswith("/api/v1/session/") and request_path.endswith("/diff") and method == "GET":
             # /api/v1/session/{sessionID}/version/{commitHash}/diff
-            parts = path_str.replace("/api/v1/session/", "").replace("/diff", "").split("/version/")
+            parts = request_path.replace("/api/v1/session/", "").replace("/diff", "").split("/version/")
             session_id = parts[0]
             commit_hash = parts[1] if len(parts) > 1 else ""
             return await self._handle_http_version_diff(session_id, commit_hash, headers)
 
         # 导出路由
-        if path_str.startswith("/api/v1/session/") and path_str.endswith("/export") and method == "POST":
-            session_id = path_str.split("/api/v1/session/", 1)[-1].replace("/export", "")
+        if request_path.startswith("/api/v1/session/") and request_path.endswith("/export") and method == "POST":
+            session_id = request_path.split("/api/v1/session/", 1)[-1].replace("/export", "")
             return await self._handle_http_export(session_id, body)
+
+        # Session GET 兜底必须放在最后，避免覆盖更具体的子路由（如 /file）。
+        if request_path.startswith("/api/v1/session/") and method == "GET":
+            session_id = request_path.split("/api/v1/session/", 1)[-1]
+            return await self._handle_http_session_get(session_id)
 
         return (404, {"Content-Type": "application/json"}, b'{"error": "Not found"}')
 
@@ -1396,12 +1400,77 @@ class VibeSkillChannel(BaseChannel):
         return self._json_response(200, {"deleted": True})
 
     async def _handle_http_file_list(self, session_id: str, headers: dict) -> tuple[int, dict, bytes]:
-        """GET /api/v1/session/{id}/file - 列目录。"""
-        return self._json_response(200, [])
+        """GET /api/v1/.../file — 列目录（skilldev.file.list → FileNode[]）。"""
+        internal_id = await self._store.resolve_internal(session_id) or session_id
+        request_id = f"vibeskill-file-list-{int(time.time() * 1000):x}-{secrets.token_hex(3)}"
+        env = e2a_from_agent_fields(
+            request_id=request_id,
+            channel_id=VIBESKILL_CHANNEL_ID,
+            session_id=internal_id,
+            req_method=ReqMethod.SKILLDEV_FILE_LIST,
+            params={"task_id": session_id, "session_id": internal_id},
+            is_stream=False,
+            timestamp=time.time(),
+        )
+        resp = await self._send_agent_request(env)
+        if not resp.ok:
+            pl = dict(resp.payload) if isinstance(resp.payload, dict) else {}
+            return self._json_response(502, {"error": str(pl.get("error") or "request failed")})
+        payload = dict(resp.payload) if isinstance(resp.payload, dict) else {}
+        if payload.get("event_type") == "skilldev.error":
+            return self._json_response(400, {"error": str(payload.get("error") or "skilldev.error")})
+        if not payload.get("ok", True):
+            return self._json_response(400, {"error": str(payload.get("error") or "failed")})
+        tree = payload.get("tree")
+        if not isinstance(tree, list):
+            tree = []
+        file_nodes = skilldev_tree_to_opencode_file_nodes(tree, task_id=session_id)
+        return self._json_response(200, file_nodes)
 
-    async def _handle_http_file_content(self, session_id: str, headers: dict) -> tuple[int, dict, bytes]:
-        """GET /api/v1/session/{id}/file/content - 读取文件。"""
-        return self._json_response(200, {"type": "text", "content": "", "encoding": "utf8", "mimeType": "text/plain"})
+    async def _handle_http_file_content(
+        self, session_id: str, headers: dict, raw_request_path: str
+    ) -> tuple[int, dict, bytes]:
+        """GET .../file/content?path= — skilldev.file.read。"""
+        parsed = urlparse(raw_request_path)
+        qs = parse_qs(parsed.query)
+
+        def _q(name: str, default: str) -> str:
+            vals = qs.get(name)
+            if vals and str(vals[0]).strip():
+                return str(vals[0]).strip()
+            return default
+
+        file_path = _q("path", "")
+        if not file_path:
+            return self._json_response(400, {"error": "path query parameter is required"})
+
+        internal_id = await self._store.resolve_internal(session_id) or session_id
+        request_id = f"vibeskill-file-read-{int(time.time() * 1000):x}-{secrets.token_hex(3)}"
+        env = e2a_from_agent_fields(
+            request_id=request_id,
+            channel_id=VIBESKILL_CHANNEL_ID,
+            session_id=internal_id,
+            req_method=ReqMethod.SKILLDEV_FILE_READ,
+            params={"task_id": session_id, "path": file_path, "session_id": internal_id},
+            is_stream=False,
+            timestamp=time.time(),
+        )
+        resp = await self._send_agent_request(env)
+        if not resp.ok:
+            pl = dict(resp.payload) if isinstance(resp.payload, dict) else {}
+            return self._json_response(502, {"error": str(pl.get("error") or "request failed")})
+        payload = dict(resp.payload) if isinstance(resp.payload, dict) else {}
+        if payload.get("event_type") == "skilldev.error":
+            return self._json_response(400, {"error": str(payload.get("error") or "skilldev.error")})
+        if not payload.get("ok", True):
+            return self._json_response(400, {"error": str(payload.get("error") or "failed")})
+        out = {
+            "type": "text",
+            "content": str(payload.get("content") or ""),
+            "encoding": "utf8",
+            "mimeType": "text/plain",
+        }
+        return self._json_response(200, out)
 
     async def _handle_http_file_status(self, session_id: str, headers: dict) -> tuple[int, dict, bytes]:
         """GET /api/v1/session/{id}/file/status - Git 状态。"""

@@ -48,4 +48,37 @@ curl -sS -X POST "$API_BASE/api/v1/session/$SESSION_ID/export" \
 echo ""
 
 echo ""
+echo "========== 4. 列出文件和读取文件 =========="
+FILE_LIST_HTTP_STATUS=$(curl -sS -o /tmp/vibeskill_file_list_resp.json -w "%{http_code}" \
+  -X GET "$API_BASE/api/v1/session/$SESSION_ID/file")
+FILE_LIST_RESPONSE=$(cat /tmp/vibeskill_file_list_resp.json)
+echo "file list HTTP: $FILE_LIST_HTTP_STATUS"
+echo "file list response: $FILE_LIST_RESPONSE"
+
+if [[ "$FILE_LIST_HTTP_STATUS" != "200" ]]; then
+  echo "ERROR: 列出文件失败"
+  exit 1
+fi
+
+FIRST_FILE_PATH=$(python3 -c "import sys, json; data=json.load(sys.stdin); print(next((n.get('path','') for n in data if isinstance(n, dict) and n.get('type')=='file' and n.get('path')), ''))" <<< "$FILE_LIST_RESPONSE" 2>/dev/null || true)
+if [[ -z "${FIRST_FILE_PATH:-}" ]]; then
+  echo "ERROR: 未找到可读取的文件 path"
+  exit 1
+fi
+
+echo "读取文件: $FIRST_FILE_PATH"
+FILE_READ_HTTP_STATUS=$(curl -sS -o /tmp/vibeskill_file_read_resp.json -w "%{http_code}" \
+  -G "$API_BASE/api/v1/session/$SESSION_ID/file/content" \
+  --data-urlencode "path=$FIRST_FILE_PATH")
+FILE_READ_RESPONSE=$(cat /tmp/vibeskill_file_read_resp.json)
+echo "file read HTTP: $FILE_READ_HTTP_STATUS"
+echo "file read response: $FILE_READ_RESPONSE"
+
+if [[ "$FILE_READ_HTTP_STATUS" != "200" ]]; then
+  echo "ERROR: 读取文件失败"
+  exit 1
+fi
+
+echo ""
+echo ""
 echo "========== 测试完成 =========="
