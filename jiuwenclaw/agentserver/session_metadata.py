@@ -57,23 +57,36 @@ def _safe_session_subdir(session_id: str, sessions_root: str | Path | None = Non
 
 
 def validate_project_dir(path: str, *, default: Path | None = None) -> Path:
-    """将路径解析为绝对路径并限制在 ~/.jiuwenclaw 下；非法则记录日志并返回 default。"""
+    """
+    路径处理逻辑：
+    1. 解析为绝对路径，展开 ~
+    2. 检查是否存在，不存在则自动创建
+    3. 创建失败/路径非法 → 安全使用默认路径
+    4. 无任何路径限制
+    """
+    # 回退默认路径
     fallback = default if default is not None else get_agent_workspace_dir().resolve()
     raw = (path or "").strip()
     if not raw:
         return fallback
-    allow = get_user_workspace_dir().resolve()
     try:
-        candidate = Path(raw).expanduser()
-        if not candidate.is_absolute():
-            candidate = (allow / candidate).resolve()
-        else:
-            candidate = candidate.resolve()
-        candidate.relative_to(allow)
+        # 1. 解析为绝对路径
+        candidate = Path(raw).expanduser().resolve()
+
+        # 2. 路径不存在 → 自动创建（多级目录也支持）
+        if not candidate.exists():
+            logger.info(f"[session_metadata] 目录不存在，正在创建: {candidate}")
+            candidate.mkdir(parents=True, exist_ok=True)
+
+        # 3. 必须是目录（不是文件）
+        if not candidate.is_dir():
+            raise NotADirectoryError(f"[session_metadata] 路径不是目录: {candidate}")
+
         return candidate
+    # 所有异常 → 都用默认路径
     except (OSError, ValueError) as exc:
         logger.warning(
-            "[session_metadata] project_dir 校验失败 path=%r: %s，使用默认 %s",
+            "[session_metadata] project_dir 处理失败 path=%r: %s，自动使用默认路径 %s",
             path,
             exc,
             fallback,
