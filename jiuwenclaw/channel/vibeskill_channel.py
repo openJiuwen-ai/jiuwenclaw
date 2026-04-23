@@ -970,16 +970,17 @@ class VibeSkillChannel(BaseChannel):
         """skilldev.error - 错误"""
         responses: list[dict] = []
         if session_id:
-            await self._store.set_state(session_id, VibeSkillSessionState.RETRY)
+            try:
+                await self._store.set_state(session_id, VibeSkillSessionState.IDLE)
+            except Exception:
+                logger.exception("[VibeSkillChannel] set_state error for skilldev.error, session_id=%s", session_id)
         responses.append({
             "type": "session.status",
             "properties": {
                 "sessionID": external_sid,
                 "status": {
-                    "type": "retry",
-                    "attempt": int(payload.get("retry_count") or 1),
+                    "type": "idle",
                     "message": str(payload.get("error") or "skilldev error"),
-                    "next": int(payload.get("retry_next") or (int(time.time() * 1000) + 10000)),
                 },
             },
         })
@@ -991,16 +992,9 @@ class VibeSkillChannel(BaseChannel):
         external_sid: str | None,
         session_id: str | None,
     ) -> list[dict]:
-        """skilldev.suspended - 暂停"""
-        if session_id:
-            await self._store.set_state(session_id, VibeSkillSessionState.IDLE)
-        return [{
-            "type": "session.status",
-            "properties": {
-                "sessionID": external_sid,
-                "status": {"type": "idle"},
-            },
-        }]
+        """skilldev.suspended - 暂停（不动）"""
+        logger.info("[VibeSkillChannel] skilldev.suspended received, session_id=%s", session_id)
+        return []
 
     async def _handle_skilldev_completed(
         self,
@@ -1010,7 +1004,10 @@ class VibeSkillChannel(BaseChannel):
     ) -> list[dict]:
         """skilldev.completed - 完成"""
         if session_id:
-            await self._store.set_state(session_id, VibeSkillSessionState.IDLE)
+            try:
+                await self._store.set_state(session_id, VibeSkillSessionState.IDLE)
+            except Exception:
+                logger.exception("[VibeSkillChannel] set_state error for skilldev.completed, session_id=%s", session_id)
         return [{
             "type": "session.status",
             "properties": {
