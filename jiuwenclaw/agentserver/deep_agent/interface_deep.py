@@ -562,6 +562,10 @@ class JiuWenClawDeepAdapter:
         self._is_proactive_memory: bool | None = None
         self._model_cache: dict[str, Model] = {}
         self._default_model_name: str = ""
+        self._multi_session_toolkit: MultiSessionToolkit | None = None
+        # request_id -> toolkit；session_id -> 关联的 request_id 集合（interrupt 时按会话精确取消）
+        self._request_session_toolkits: dict[str, MultiSessionToolkit] = {}
+        self._session_toolkit_requests: dict[str, set[str]] = {}
 
     def set_skill_manager(self, skill_manager: SkillManager) -> None:
         """Inject shared SkillManager from facade for tool reuse."""
@@ -2056,13 +2060,15 @@ class JiuWenClawDeepAdapter:
                 model_client_config=self._model_client_config,
                 model_config_obj=self._model_request_config,
             )
-            multi_session_toolkit = MultiSessionToolkit(
+            self._multi_session_toolkit = MultiSessionToolkit(
                 session_id=session_id,
                 channel_id=_CRON_TOOL_CHANNEL_ID.get(),
                 request_id=request_id,
                 sub_agent_config=sub_agent_config,
             )
-            for ms_tool in multi_session_toolkit.get_tools():
+            if request_id:
+                self._track_session_toolkit(request_id, session_id, self._multi_session_toolkit)
+            for ms_tool in self._multi_session_toolkit.get_tools():
                 Runner.resource_mgr.add_tool(ms_tool)
                 self._instance.ability_manager.add(ms_tool.card)
             logger.info("[JiuWenClawDeepAdapter] MultiSessionToolkit registered for agent mode")
@@ -2373,7 +2379,9 @@ class JiuWenClawDeepAdapter:
             # 2. 终止 DeepAgent 外层 task loop
             if self._instance is not None:
                 await self._instance.abort()
-            # 3. 不清理 todo — 保留给新任务继续
+            # 3. 取消当前会话关联的 MultiSessionToolkit 子任务（按 request 跟踪，避免误停其它会话）
+            await self._cancel_session_toolkits(request.session_id, "interrupt(supplement): ")
+            # 4. 不清理 todo — 保留给新任务继续
             logger.info(
                 "[JiuWenClawDeepAdapter] interrupt(supplement): 已停止执行 request_id=%s",
                 request.request_id,
@@ -2388,7 +2396,12 @@ class JiuWenClawDeepAdapter:
             # 2. 终止 DeepAgent 外层 task loop
             if self._instance is not None:
                 await self._instance.abort()
-            # 3. 将未完成的 todo 项标记为 cancelled，并获取更新后的 todo 列表
+            # 3. 取消当前会话关联的 MultiSessionToolkit 子任务（与其它 session 隔离）
+            await self._cancel_session_toolkits(
+                request.session_id,
+                f"interrupt(cancel) request_id={request.request_id}: ",
+            )
+            # 4. 将未完成的 todo 项标记为 cancelled，并获取更新后的 todo 列表
             updated_todos = None
             if request.session_id:
                 try:
@@ -2439,6 +2452,63 @@ class JiuWenClawDeepAdapter:
                     "[JiuWenClawDeepAdapter] abort_on_gateway_disconnect instance.abort failed: %s",
                     exc,
                 )
+        for sid in list(self._session_toolkit_requests.keys()):
+            await self._cancel_session_toolkits(sid, "gateway_disconnect: ")
+
+    def _track_session_toolkit(
+        self,
+        request_id: str,
+        session_id: str | None,
+        toolkit: MultiSessionToolkit,
+    ) -> None:
+        """登记本请求使用的 MultiSessionToolkit，供 interrupt / 结束时取消或解除跟踪。"""
+        self._request_session_toolkits[request_id] = toolkit
+        request_ids = self._session_toolkit_requests.setdefault(session_id, set())
+        request_ids.add(request_id)
+
+    def _untrack_session_toolkit(self, request_id: str) -> None:
+        """请求结束后从跟踪表移除（不取消子协程；取消逻辑由 interrupt 或 toolkit 自身完成）。"""
+        if not request_id:
+            return
+        toolkit = self._request_session_toolkits.pop(request_id, None)
+        if toolkit is None:
+            return
+        sid = toolkit.session_id
+        bucket = self._session_toolkit_requests.get(sid)
+        if bucket is None:
+            return
+        bucket.discard(request_id)
+        if not bucket:
+            self._session_toolkit_requests.pop(sid, None)
+
+    async def _cancel_session_toolkits(self, session_id: str | None, log_msg_prefix: str = "") -> None:
+        """取消指定会话关联的各 request 下 MultiSessionToolkit 子协程，并解除跟踪。"""
+        request_ids = list(self._session_toolkit_requests.get(session_id, set()))
+        if not request_ids:
+            return
+        logger.info(
+            "[JiuWenClawDeepAdapter] %s取消 session 子协程工具包: session_id=%s request_count=%d",
+            log_msg_prefix,
+            session_id,
+            len(request_ids),
+        )
+        for rid in request_ids:
+            toolkit = self._request_session_toolkits.get(rid)
+            if toolkit is None:
+                self._untrack_session_toolkit(rid)
+                continue
+            try:
+                await toolkit.cancel_all_sessions()
+            except Exception as exc:
+                logger.warning(
+                    "[JiuWenClawDeepAdapter] %s取消 MultiSessionToolkit 失败: session_id=%s request_id=%s error=%s",
+                    log_msg_prefix,
+                    session_id,
+                    rid,
+                    exc,
+                )
+            finally:
+                self._untrack_session_toolkit(rid)
 
     def _has_valid_model_config(self) -> bool:
         """检查是否有有效的模型配置."""
@@ -3059,6 +3129,8 @@ class JiuWenClawDeepAdapter:
             _LLM_TRACE_REQUEST_ID.reset(token_trace_rid)
             _LLM_TRACE_ITERATION.reset(token_trace_iter)
             _LLM_TRACE_MODEL_NAME.reset(token_trace_model)
+            if request.request_id:
+                self._untrack_session_toolkit(request.request_id)
 
         content = result if isinstance(result, (str, dict)) else str(result)
 
@@ -3416,6 +3488,8 @@ class JiuWenClawDeepAdapter:
             _LLM_TRACE_REQUEST_ID.reset(token_trace_rid)
             _LLM_TRACE_ITERATION.reset(token_trace_iter)
             _LLM_TRACE_MODEL_NAME.reset(token_trace_model)
+            if rid:
+                self._untrack_session_toolkit(rid)
 
         summary = {
             "input_tokens": usage_accumulator["input_tokens"],
