@@ -385,6 +385,12 @@ class AgentWebSocketServer:
             if request.req_method == ReqMethod.COMMAND_DIFF:
                 await self._handle_command_diff(ws, request, send_lock)
                 return
+            if request.req_method == ReqMethod.COMMAND_LS:
+                await self._handle_command_ls(ws, request, send_lock)
+                return
+            if request.req_method == ReqMethod.COMMAND_VIEW:
+                await self._handle_command_view(ws, request, send_lock)
+                return
             if request.req_method == ReqMethod.COMMAND_MODEL:
                 await self._handle_command_model(ws, request, send_lock)
                 return
@@ -803,6 +809,186 @@ class AgentWebSocketServer:
             )
         except Exception as e:  # noqa: BLE001
             logger.exception("[AgentWebSocketServer] command.chrome failed: %s", e)
+            resp = AgentResponse(
+                request_id=request.request_id,
+                channel_id=request.channel_id,
+                ok=False,
+                payload={"error": str(e)},
+            )
+        wire = encode_agent_response_for_wire(resp, response_id=request.request_id)
+        async with send_lock:
+            await ws.send(json.dumps(wire, ensure_ascii=False))
+
+    async def _handle_command_ls(self, ws: Any, request: AgentRequest, send_lock: asyncio.Lock) -> None:
+        from datetime import datetime
+        from jiuwenclaw.agentserver.session_metadata import get_resolved_project_dir
+        from jiuwenclaw.utils import get_agent_sessions_dir
+        logger.info("[AgentWebSocketServer] command.ls %s", request.params)
+        try:
+            params = request.params or {}
+            relative_path = str(params.get("path", ".")).strip()
+
+            session_id = request.session_id or "default"
+            workspace_dir = Path(get_resolved_project_dir(session_id, get_agent_sessions_dir()))
+            logger.info("[AgentWebSocketServer] command.ls workspace_dir: %s", workspace_dir)
+            target_path = (workspace_dir / relative_path).resolve()
+            logger.info("[AgentWebSocketServer] command.ls target_path: %s", target_path)
+
+            try:
+                target_path.relative_to(workspace_dir.resolve())
+            except ValueError:
+                resp = AgentResponse(
+                    request_id=request.request_id,
+                    channel_id=request.channel_id,
+                    ok=False,
+                    payload={"error": "Path outside workspace"},
+                )
+                wire = encode_agent_response_for_wire(resp, response_id=request.request_id)
+                async with send_lock:
+                    await ws.send(json.dumps(wire, ensure_ascii=False))
+                return
+
+            entries = []
+            if target_path.is_dir():
+                for item in sorted(target_path.iterdir(), key=lambda x: (not x.is_dir(), x.name.lower())):
+                    try:
+                        stat = item.stat()
+                        entries.append({
+                            "name": item.name,
+                            "is_dir": item.is_dir(),
+                            "size": stat.st_size if item.is_file() else None,
+                            "modified": datetime.fromtimestamp(stat.st_mtime).isoformat(),
+                        })
+                    except OSError as e:
+                        entries.append({
+                            "name": item.name,
+                            "is_dir": item.is_dir(),
+                            "error": str(e),
+                        })
+            logger.info("[AgentWebSocketServer] command.ls entries: %s", entries)
+            resp = AgentResponse(
+                request_id=request.request_id,
+                channel_id=request.channel_id,
+                ok=True,
+                payload={
+                    "path": str(target_path),
+                    "relative_path": relative_path,
+                    "entries": entries,
+                },
+            )
+        except Exception as e:
+            logger.exception("[AgentWebSocketServer] command.ls failed: %s", e)
+            resp = AgentResponse(
+                request_id=request.request_id,
+                channel_id=request.channel_id,
+                ok=False,
+                payload={"error": str(e)},
+            )
+        wire = encode_agent_response_for_wire(resp, response_id=request.request_id)
+        async with send_lock:
+            await ws.send(json.dumps(wire, ensure_ascii=False))
+
+    async def _handle_command_view(self, ws: Any, request: AgentRequest, send_lock: asyncio.Lock) -> None:
+        from jiuwenclaw.agentserver.session_metadata import get_resolved_project_dir
+        from jiuwenclaw.utils import get_agent_sessions_dir
+        logger.info("[AgentWebSocketServer] command.view %s", request.params)
+        try:
+            params = request.params or {}
+            relative_path = str(params.get("path", "")).strip()
+            from_line = int(params.get("from_line", 1))
+            lines = params.get("lines")
+
+            if not relative_path:
+                resp = AgentResponse(
+                    request_id=request.request_id,
+                    channel_id=request.channel_id,
+                    ok=False,
+                    payload={"error": "Missing path parameter"},
+                )
+                wire = encode_agent_response_for_wire(resp, response_id=request.request_id)
+                async with send_lock:
+                    await ws.send(json.dumps(wire, ensure_ascii=False))
+                return
+
+            session_id = request.session_id or "default"
+            workspace_dir = Path(get_resolved_project_dir(session_id, get_agent_sessions_dir()))
+            target_path = (workspace_dir / relative_path).resolve()
+
+            try:
+                target_path.relative_to(workspace_dir.resolve())
+            except ValueError:
+                resp = AgentResponse(
+                    request_id=request.request_id,
+                    channel_id=request.channel_id,
+                    ok=False,
+                    payload={"error": "Path outside workspace"},
+                )
+                wire = encode_agent_response_for_wire(resp, response_id=request.request_id)
+                async with send_lock:
+                    await ws.send(json.dumps(wire, ensure_ascii=False))
+                return
+
+            if not target_path.is_file():
+                resp = AgentResponse(
+                    request_id=request.request_id,
+                    channel_id=request.channel_id,
+                    ok=False,
+                    payload={"error": f"Not a file: {relative_path}"},
+                )
+                wire = encode_agent_response_for_wire(resp, response_id=request.request_id)
+                async with send_lock:
+                    await ws.send(json.dumps(wire, ensure_ascii=False))
+                return
+
+            try:
+                with open(target_path, "r", encoding="utf-8") as f:
+                    all_lines = f.readlines()
+            except UnicodeDecodeError:
+                resp = AgentResponse(
+                    request_id=request.request_id,
+                    channel_id=request.channel_id,
+                    ok=False,
+                    payload={"error": "Binary file, cannot display"},
+                )
+                wire = encode_agent_response_for_wire(resp, response_id=request.request_id)
+                async with send_lock:
+                    await ws.send(json.dumps(wire, ensure_ascii=False))
+                return
+
+            start_idx = max(0, from_line - 1)
+            if lines is not None and lines > 0:
+                end_idx = min(len(all_lines), start_idx + lines)
+            else:
+                end_idx = len(all_lines)
+
+            selected_lines = all_lines[start_idx:end_idx]
+
+            numbered = []
+            for i, line in enumerate(selected_lines, start=start_idx + 1):
+                numbered.append(f"{i:4d} | {line.rstrip()}")
+            numbered_content = '\n'.join(numbered)
+            summary = (
+                f"\n\n---\n"
+                f"📄 文件: `{relative_path}`\n"
+                f"📊 总行数: {len(all_lines)}, 显示: {len(selected_lines)} 行 "
+                f"(第 {start_idx + 1}-{end_idx} 行)"
+            )
+            
+            content = f"```\n{numbered_content}\n```{summary}"
+            resp = AgentResponse(
+                request_id=request.request_id,
+                channel_id=request.channel_id,
+                ok=True,
+                payload={
+                    "path": str(target_path),
+                    "relative_path": relative_path,
+                    "content": content,
+                    "from_line": from_line,
+                    "total_lines": len(all_lines),
+                },
+            )
+        except Exception as e:
+            logger.exception("[AgentWebSocketServer] command.view failed: %s", e)
             resp = AgentResponse(
                 request_id=request.request_id,
                 channel_id=request.channel_id,

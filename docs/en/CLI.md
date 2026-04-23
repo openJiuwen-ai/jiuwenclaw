@@ -4,6 +4,8 @@ JiuwenClaw supports **special prefix commands** to control sessions and modes. C
 
 - `/new_session`: start a new `session_id` for the current channel
 - `/mode plan`, `/mode fast`, or `/mode team`: switch the channel’s working mode
+- `/ls [path]`: list files/directories under the current session workspace
+- `/view <path> [-f N] [-l N|-n N]`: view file content in the current session workspace (with line range support)
 
 These are handled in the Gateway **`MessageHandler`** and **are not** sent to the agent.
 
@@ -76,7 +78,79 @@ The Gateway will:
 
 ---
 
-### 3. TUI: `/workspace_dir` — workspace path for outbound requests
+### 3. `/ls` — list current session workspace directory
+
+**Behavior**
+
+- Lists files/subdirectories under the workspace root resolved for the current session (`session_id`).
+- Useful for quickly checking session artifacts in IM controlled channels (generated outputs, logs, drafts, etc.).
+
+**Usage**
+
+- List current directory:
+
+  ```text
+  /ls
+  ```
+
+- List a subdirectory:
+
+  ```text
+  /ls outputs
+  ```
+
+**Response**
+
+- On success, returns directory entries (directories first, then files).
+- On failure, returns an explicit error message (e.g., invalid path, out-of-workspace access).
+
+**Security boundary**
+
+- Access is restricted to the current `session_id` workspace.
+- Path traversal outside workspace (for example `../`) is rejected with `Path outside workspace`.
+
+---
+
+### 4. `/view` — view current session workspace file content
+
+**Behavior**
+
+- Displays file content as text from the current session workspace.
+- Designed for quick debugging/verification in channel without switching tools.
+
+**Usage**
+
+- View full file:
+
+  ```text
+  /view output/result.md
+  ```
+
+- Start from a specific line:
+
+  ```text
+  /view output/result.md -f 120
+  ```
+
+- Limit number of lines (`-l` and `-n` are equivalent):
+
+  ```text
+  /view output/result.md -f 120 -l 80
+  ```
+
+**Arguments**
+
+- `-f N`: starting line number (default `1`).
+- `-l N` / `-n N`: number of lines to read; if omitted, reads to EOF.
+
+**Limits and errors**
+
+- Only text files inside workspace are supported.
+- Directories, binary files, and out-of-workspace paths return explicit errors.
+
+---
+
+### 5. TUI: `/workspace_dir` — workspace path for outbound requests
 
 **Scope:** terminal UI (`jiuwenclaw-cli`) only; parsed locally, not by the Gateway control pipeline.
 

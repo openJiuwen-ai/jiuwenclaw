@@ -25,6 +25,8 @@ class GatewaySlashCommand(str, Enum):
     SWITCH = "/switch"
     SKILLS = "/skills"
     SKILLS_LIST = "/skills list"
+    LS = "/ls"
+    VIEW = "/view"
 
 
 class ModeSubcommand(str, Enum):
@@ -77,6 +79,8 @@ class ParsedControlAction(str, Enum):
     SWITCH_OK = "switch_ok"
     SWITCH_BAD = "switch_bad"
     SKILLS_OK = "skills_ok"
+    LS_OK = "ls_ok"
+    VIEW_OK = "view_ok"
 
 
 @dataclass(frozen=True)
@@ -91,13 +95,15 @@ class ParsedChannelControl:
 
 
 def parse_channel_control_text(text: str) -> ParsedChannelControl:
-    """解析单条用户文本是否为 /new_session、/mode、/switch、/skills list 控制指令。
+    """解析单条用户文本是否为 /new_session、/mode、/switch、/skills list、/ls、/view 控制指令。
 
     - 含换行则视为非控制（与原 _handle_channel_control 一致）。
     - /new_session 仅整行精确匹配为合法；带后缀为非法但仍为控制指令。
     - /mode 仅白名单整行合法；支持 agent|code|team 及四个直达模式值；其它以 /mode 开头且单行非法。
     - /switch 仅白名单整行合法；其它以 /switch 开头且单行非法。
     - /skills list 仅整行精确匹配（/skills 本身不再触发）。
+    - /ls 以 /ls 开头的单行文本。
+    - /view 以 /view 开头的单行文本。
     """
     if not text:
         return ParsedChannelControl(ParsedControlAction.NONE)
@@ -119,6 +125,10 @@ def parse_channel_control_text(text: str) -> ParsedChannelControl:
         parts = t.split()
         sub = parts[1] if len(parts) >= 2 else ""
         return ParsedChannelControl(ParsedControlAction.SWITCH_OK, switch_subcommand=sub)
+    if t.startswith(GatewaySlashCommand.LS.value):
+        return ParsedChannelControl(ParsedControlAction.LS_OK)
+    if t.startswith(GatewaySlashCommand.VIEW.value):
+        return ParsedChannelControl(ParsedControlAction.VIEW_OK)
     if t.startswith(GatewaySlashCommand.MODE.value):
         return ParsedChannelControl(ParsedControlAction.MODE_BAD)
     if t.startswith(GatewaySlashCommand.SWITCH.value):

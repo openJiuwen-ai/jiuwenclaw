@@ -320,6 +320,13 @@ class MessageHandler(ABC):
         else:
             payload = {"content": text_or_payload, "is_complete": True}
 
+        # 如果 payload 包含 error 字段，设置 ok=False 并将错误信息放到 content
+        msg_ok = True
+        if isinstance(payload, dict) and "error" in payload:
+            msg_ok = False
+            if "content" not in payload:
+                payload["content"] = str(payload.get("error", ""))
+
         msg = Message(
             id=user_infos['id'],
             type="event",
@@ -327,12 +334,33 @@ class MessageHandler(ABC):
             session_id=session_id,
             params={},
             timestamp=time.time(),
-            ok=True,
+            ok=msg_ok,
             payload=payload,
             event_type=EventType.CHAT_FINAL,
             metadata=user_infos['meta_data']
         )
         await self.publish_robot_messages(msg)
+
+        # 只对 web channel 发送 processing_status，避免 feishu 等渠道显示多余的 "[状态]已完成" 消息框
+        if channel_id == "web":
+            status_msg = Message(
+                id=user_infos['id'],
+                type="event",
+                channel_id=channel_id,
+                session_id=session_id,
+                params={},
+                timestamp=time.time(),
+                ok=True,
+                payload={
+                    "event_type": "chat.processing_status",
+                    "session_id": session_id,
+                    "is_processing": False,
+                    "is_complete": True,
+                },
+                event_type=EventType.CHAT_PROCESSING_STATUS,
+                metadata=None,
+            )
+            await self.publish_robot_messages(status_msg)
 
     async def _cancel_agent_work_for_session(self, msg: "Message", old_sid: str | None) -> None:
         """取消指定 session 的网关流式任务，并向 AgentServer 发送 CHAT_CANCEL（与 Web chat.interrupt intent=cancel 对齐）。
@@ -662,6 +690,57 @@ class MessageHandler(ABC):
 
         return False
 
+    def _handle_all_channel_control(self, msg: "Message") -> bool:
+        """处理所有通道的 Channel 控制指令（如 /ls、/view）
+        Returns:
+            True: 该消息是控制指令，已处理完毕，不需要转发给 Agent。
+            False: 非控制指令，继续正常处理。
+        """
+        user_infos = {"id": msg.id, "meta_data": msg.metadata}
+
+        ch = msg.channel_id
+        channel_type = self._resolve_control_channel_type(msg)
+
+        params = msg.params or {}
+        metadata = msg.metadata or {}
+        text = str(
+            params.get("query") or
+            params.get("content") or
+            metadata.get("query") or
+            ""
+        ).strip()
+        if not text:
+            return False
+
+        parsed = parse_channel_control_text(text)
+        if parsed.action is ParsedControlAction.NONE:
+            return False
+
+        logger.info(
+            "[MessageHandler] _handle_all_channel_control channel=%s text=%s action=%s",
+            channel_type,
+            text,
+            parsed.action.value,
+        )
+        if parsed.action is ParsedControlAction.LS_OK:
+            ls_path = text[len("/ls"):].strip() or "."
+            asyncio.create_task(
+                self._ls_slash_notice(user_infos, ch, msg.session_id, msg, ls_path)
+            )
+            return True
+
+        if parsed.action is ParsedControlAction.VIEW_OK:
+            asyncio.create_task(
+                self._view_slash_notice(
+                    user_infos, ch, msg.session_id, msg,
+                    text,
+                )
+            )
+            return True
+
+        return False
+
+
     async def _skills_slash_notice(
         self,
         user_infos: dict[str, Any],
@@ -714,6 +793,146 @@ class MessageHandler(ABC):
                 channel_id,
                 reply_session_id,
                 {"error": f"获取技能列表失败：{exc}"},
+            )
+
+    async def _ls_slash_notice(
+        self,
+        user_infos: dict[str, Any],
+        channel_id: str,
+        reply_session_id: str | None,
+        msg: "Message",
+        path: str,
+    ) -> None:
+        """/ls [path]：请求 command.ls 并以 CHAT_FINAL 通知透传。"""
+        from jiuwenclaw.schema.message import Message, ReqMethod
+
+        req_id = f"ls_slash_{int(time.time() * 1000):x}_{secrets.token_hex(3)}"
+        ls_req = Message(
+            id=req_id,
+            type="req",
+            channel_id=msg.channel_id,
+            session_id=msg.session_id,
+            params={"path": path},
+            timestamp=time.time(),
+            ok=True,
+            req_method=ReqMethod.COMMAND_LS,
+            is_stream=False,
+            metadata=msg.metadata,
+            provider=getattr(msg, "provider", None),
+            chat_id=getattr(msg, "chat_id", None),
+            user_id=getattr(msg, "user_id", None),
+            bot_id=getattr(msg, "bot_id", None),
+        )
+        try:
+            env = self.message_to_e2a(ls_req)
+            resp = await self._agent_client.send_request(env)
+            if resp.ok:
+                if isinstance(resp.payload, dict):
+                    entries = resp.payload.get("entries", [])
+                    if entries:
+                        lines = [f"📁 {resp.payload.get('path', path)}:"]
+                        for entry in entries:
+                            name = entry.get("name", "?")
+                            is_dir = entry.get("is_dir", False)
+                            icon = "📁" if is_dir else "📄"
+                            lines.append(f"  {icon} {name}")
+                        notice_payload: dict[str, Any] = {"content": "\n".join(lines)}
+                    else:
+                        notice_payload = {"error": resp.payload.get("error", "目录为空或不存在")}
+                else:
+                    notice_payload = {"data": str(resp.payload)}
+            else:
+                err = ""
+                if isinstance(resp.payload, dict):
+                    err = str(resp.payload.get("error") or resp.payload.get("message") or "").strip()
+                notice_payload = {
+                    "error": f"列出目录失败{(': ' + err) if err else ''}",
+                }
+            await self._send_channel_notice(
+                user_infos, channel_id, reply_session_id, notice_payload
+            )
+        except Exception as exc:
+            logger.exception("[MessageHandler] /ls 请求失败: %s", exc)
+            await self._send_channel_notice(
+                user_infos,
+                channel_id,
+                reply_session_id,
+                {"error": f"列出目录失败：{exc}"},
+            )
+
+    async def _view_slash_notice(
+        self,
+        user_infos: dict[str, Any],
+        channel_id: str,
+        reply_session_id: str | None,
+        msg: "Message",
+        text: str,
+    ) -> None:
+        """/view <path>：请求 command.view 并以 CHAT_FINAL 通知透传。"""
+        import re
+        from jiuwenclaw.schema.message import Message, ReqMethod
+
+        view_match = re.match(
+            r'^/(?:view|cat)\s+(.+?)(?:\s+-f\s+(\d+))?(?:\s+-l\s+(\d+))?(?:\s+-n\s+(\d+))?$',
+            text.strip()
+        )
+        if not view_match:
+            await self._send_channel_notice(
+                user_infos,
+                channel_id,
+                reply_session_id,
+                {"error": "用法: /view <path> [-f N] [-l N]"},
+            )
+            return
+
+        path = view_match.group(1).strip()
+        from_line = int(view_match.group(2) or 1)
+        lines = int(view_match.group(3) or view_match.group(4) or 0) or None
+
+        req_id = f"view_slash_{int(time.time() * 1000):x}_{secrets.token_hex(3)}"
+        view_req = Message(
+            id=req_id,
+            type="req",
+            channel_id=msg.channel_id,
+            session_id=msg.session_id,
+            params={"path": path, "from_line": from_line, "lines": lines},
+            timestamp=time.time(),
+            ok=True,
+            req_method=ReqMethod.COMMAND_VIEW,
+            is_stream=False,
+            metadata=msg.metadata,
+            provider=getattr(msg, "provider", None),
+            chat_id=getattr(msg, "chat_id", None),
+            user_id=getattr(msg, "user_id", None),
+            bot_id=getattr(msg, "bot_id", None),
+        )
+        try:
+            env = self.message_to_e2a(view_req)
+            resp = await self._agent_client.send_request(env)
+            if resp.ok:
+                if isinstance(resp.payload, dict):
+                    notice_payload: dict[str, Any] = {
+                        "content": resp.payload.get("content", "")
+                    }
+                else:
+                    notice_payload = {"data": str(resp.payload)}
+            else:
+                err = ""
+                if isinstance(resp.payload, dict):
+                    err = str(resp.payload.get("error") or resp.payload.get("message") or "").strip()
+                notice_payload = {
+                    "error": f"查看文件失败{(': ' + err) if err else ''}",
+                }
+            await self._send_channel_notice(
+                user_infos, channel_id, reply_session_id, notice_payload
+            )
+        except Exception as exc:
+            logger.exception("[MessageHandler] /view 请求失败: %s", exc)
+            await self._send_channel_notice(
+                user_infos,
+                channel_id,
+                reply_session_id,
+                {"error": f"查看文件失败：{exc}"},
             )
 
     def _apply_channel_state(self, msg: "Message") -> None:
@@ -1626,9 +1845,11 @@ class MessageHandler(ABC):
                 msg = await self.consume_user_messages(timeout=None)
                 if msg is None:
                     continue
-                
-         
-                # 先处理受控通道的 Channel 控制指令（如 /new_session、/mode、/skills list）
+
+                # 处理所有通道的 Channel 控制指令（如 /ls、/view）
+                if self._handle_all_channel_control(msg):
+                    continue
+                # 处理受控通道的 Channel 控制指令（如 /new_session、/mode、/skills list）
                 if self._handle_channel_control(msg):
                     # 该消息仅用于修改 session/mode，已给 Channel 回复提示，不再转发给 Agent
                     continue

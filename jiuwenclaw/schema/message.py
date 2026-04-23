@@ -20,6 +20,8 @@ class ReqMethod(Enum):
     COMMAND_CHROME = "command.chrome"
     COMMAND_COMPACT = "command.compact"
     COMMAND_DIFF = "command.diff"
+    COMMAND_LS = "command.ls"
+    COMMAND_VIEW = "command.view"
     COMMAND_MODEL = "command.model"
     COMMAND_RESUME = "command.resume"
     COMMAND_SESSION = "command.session"
