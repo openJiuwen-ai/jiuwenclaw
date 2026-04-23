@@ -197,7 +197,7 @@ def is_memory_enabled(mode: str, config: Optional[Dict[str, Any]] = None) -> boo
                 (avoids stale cache). Otherwise reads from config.yaml.
     """
     try:
-        memory_config = (config or {}).get("modes", {}).get("claw", {}).get(mode, {}).get("memory", {})
+        memory_config = (config or {}).get("modes", {}).get("agent", {}).get(mode, {}).get("memory", {})
         return memory_config.get("enabled", False)
     except Exception as e:
         logger.warning(f"Invalid memory config, disable memory, error: {e}")
@@ -211,7 +211,7 @@ def is_proactive_memory(mode: str, config: Optional[Dict[str, Any]] = None) -> b
     When False: agent only records/searches when user explicitly asks.
     """
     try:
-        memory_config = (config or {}).get("modes", {}).get("claw", {}).get(mode, {}).get("memory", {})
+        memory_config = (config or {}).get("modes", {}).get("agent", {}).get(mode, {}).get("memory", {})
         return memory_config.get("is_proactive", False)
     except Exception as e:
         logger.warning(f"Invalid memory config, disable proactive memory, error: {e}")

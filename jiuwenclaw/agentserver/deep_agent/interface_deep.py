@@ -1965,7 +1965,7 @@ class JiuWenClawDeepAdapter:
             if getattr(existing, "name", "").startswith(("session_new", "session_cancel", "session_list")):
                 self._instance.ability_manager.remove(existing.name)
         # plan 模式，根据config选择是否注册或者卸载memory rail
-        await self._handle_memory_rail_by_config("agent.plan")
+        await self._handle_memory_rail_by_config("plan")
         # 恢复上下文 rail（仅配置启用时）
         if self._config_cache.get("context_engine_config", {}).get("enabled", False):
             if self._context_engineering_rail is not None and self._context_engineering_rail_mode != "agent.plan":
