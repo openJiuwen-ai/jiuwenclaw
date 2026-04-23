@@ -225,6 +225,7 @@ class SuspensionConfig:
 | `skilldev.todos_update` | 阶段切换或挂起点 | **更新 Todo 列表**（内容由 `compute_todos` 决定） |
 | `skilldev.confirm_request` | 命中挂起点 | **弹出确认框** |
 | `skilldev.artifact_ready` | 产物就绪 | **更新产物列表** |
+| `skilldev.skill_name_ready` | INIT 完成命名 | 展示并缓存 `skill_name` |
 | `skilldev.eval_ready` | EVALUATE 完成 | 展示 benchmark 等 |
 | `skilldev.validate_result` | VALIDATE 完成 | 展示校验结果 |
 | `skilldev.desc_opt_ready` | DESC_OPTIMIZE 完成 | 展示描述前后对比等 |
@@ -295,13 +296,16 @@ class SuspensionConfig:
 
 **Todo 列表的计算完全由后端控制**，前端只做渲染。`compute_todos()`（`schema.py`）根据 `current_stage` 和可选 `mode` 过滤分组，并为各组计算 `completed` / `in_progress` / `pending`（错误终态为 `cancelled`）。当前 `_STAGE_GROUPS` 为：
 
-- `plan`：`INIT`, `CLARIFY`, `QUESTION_CLARIFY`, `PLAN`
-- `generate`：`GENERATE`, `VALIDATE`
-- `test`：`TEST_DESIGN`, `TEST_RUN`, `EVALUATE`
-- `review`：`REVIEW`
-- `improve`：`IMPROVE`
-- `desc_optimize`：`DESC_OPTIMIZE_CONFIRM`, `DESC_OPTIMIZE`
-- `package`：`PACKAGE`
+```python
+_STAGE_GROUPS = [
+    _StageGroup(id="plan",         stages={INIT, PLAN, PLAN_CONFIRM}),
+    _StageGroup(id="generate",     stages={GENERATE, VALIDATE}),
+    _StageGroup(id="test",         stages={TEST_DESIGN, TEST_RUN, EVALUATE, REVIEW}),
+    _StageGroup(id="improve",      stages={IMPROVE}),
+    _StageGroup(id="desc_optimize",stages={DESC_OPTIMIZE_CONFIRM, DESC_OPTIMIZE}),
+    _StageGroup(id="package",      stages={PACKAGE}),
+]
+```
 
 ---
 
@@ -738,4 +742,4 @@ class MyStageHandler(StageHandler):
 | `sysop_config` 注入 | `interface.py:_get_skilldev_service()` | 当前为 `None`；若需严格文件权限，可从全局 Agent 配置构造 `SysOperationCard` |
 | 远程存储同步 | `workspace.py:sync_to_remote()` | 多实例时在工作区与对象存储/NFS 间同步 |
 | StateStore 替换 | `store.py` | 本地 JSON 之外可实现 Redis 等，保持接口不变 |
-| 前端 params 对齐 | `web_skilldev` 等 | 启动请求宜与 §6.2 键名一致，避免仅发送 `tools`/`resources` 字符串而后端未消费 |
+| 前端 params 对齐 | `web` SkillDev 相关请求 | 启动请求宜与 §6.2 键名一致，避免仅发送 `tools`/`resources` 字符串而后端未消费 |

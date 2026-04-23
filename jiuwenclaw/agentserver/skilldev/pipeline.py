@@ -159,6 +159,15 @@ class SkillDevPipeline:
                 logger.info(f"阶段 {self.state.stage.value} 执行完成，即将进入阶段 {result.next_stage}")
                 self.state.stage = result.next_stage
                 await self._checkpoint()
+
+                if self.state.stage == SkillDevStage.COMPLETED:
+                    await self._emit(
+                        SkillDevEventType.TODOS_UPDATE,
+                        {
+                            "todos": compute_todos(self.state.stage, self.state.mode),
+                        },
+                    )
+
             except Exception as exc:
                 logger.exception(
                     "[Pipeline] 阶段 %s 执行失败: %s", self.state.stage.value, exc

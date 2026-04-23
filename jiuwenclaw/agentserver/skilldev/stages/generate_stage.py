@@ -107,7 +107,7 @@ npx skills find '<keywords>'
 ### Step 3: 拉取完整参考目录（不安装）
 - 对每个入选结果（格式通常为 `owner/repo@skill-name`），拉取完整技能目录（不仅是 `SKILL.md`）
 - 禁止使用 `npx skills add`（会引入软链接并污染技能环境）
-- 仅将参考内容放入当前工作区临时目录，建议放在：`<skill-name>-workspace/_borrowed_refs`
+- 仅将参考内容放入当前工作区 {workspace} 中的 retrieved_skills 目录，禁止放到其他目录。
 - 可采用 sparse clone 思路仅拉取目标技能子目录；若技能在仓库根目录，则复制根目录作为参考
 - 参考读取目标是结构借鉴，不是复刻内容
 
@@ -126,7 +126,7 @@ npx skills find '<keywords>'
 - 不要一次性读完全部参考文件，优先读取能回答“他们如何解决与当前需求相同问题”的文件
 - 仅借鉴结构与方法，不得照抄内容；必须基于当前用户需求重新设计并生成
 - 若参考中存在可复用的重复性流程，优先在新技能中落地为 `scripts/`（而不是每次临时编写）
-- 用户确认技能最终完成后，删除临时参考目录：`<skill-name>-workspace/_borrowed_refs`
+- 用户确认技能最终完成后，删除 retrieved_skills 目录：`{workspace}/retrieved_skills`
 
 ## 文件范围约束
 你只能生成与 Skill 本身直接相关的文件（例如 SKILL.md、scripts/、references/、assets/）。
@@ -300,6 +300,8 @@ class GenerateStageHandler(StageHandler):
         """调用 Agent 生成完整 Skill 文件集，并回收实际产物列表."""
 
         if ctx.state.skill_dir_empty and ctx.state.ref_skills_dir_empty:
+            retrieved_skills_dir = ctx.workspace / "retrieved_skills"
+            retrieved_skills_dir.mkdir(parents=True, exist_ok=True)
             system_prompt = GENERATE_SYSTEM_PROMPT_TEMPLATE.format(
                 workspace=ctx.workspace
             )

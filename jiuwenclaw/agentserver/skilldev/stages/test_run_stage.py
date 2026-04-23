@@ -59,12 +59,22 @@ class TestRunStageHandler(StageHandler):
     async def execute(self, ctx: SkillDevContext) -> StageResult:
         """执行 TEST_RUN 阶段"""
         # 验证前置条件
-        self._validate_prerequisites(ctx)
+        try:
+            self._validate_prerequisites(ctx)
+        except ValueError as e:
+            msg = f"TEST_RUN 前置条件验证失败：{e}"
+            await ctx.emit(SkillDevEventType.ERROR, {"message": msg, "stage": "test_run"})
+            raise RuntimeError(msg) from e
 
         eval_cases = ctx.state.evals.get("evals", [])
         iteration = ctx.state.iteration
         iter_dir = ctx.workspace / "evals" / f"iteration-{iteration}"
-        iter_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            iter_dir.mkdir(parents=True, exist_ok=True)
+        except OSError as e:
+            msg = f"TEST_RUN 无法创建迭代目录 {iter_dir}：{e}"
+            await ctx.emit(SkillDevEventType.ERROR, {"message": msg, "stage": "test_run"})
+            raise RuntimeError(msg) from e
 
         total_tasks = len(eval_cases) * 2  # with_skill + baseline
         await ctx.emit(
@@ -76,14 +86,24 @@ class TestRunStageHandler(StageHandler):
             },
         )
 
-        results = await self._run_all_evals(ctx, eval_cases, iter_dir)
+        try:
+            results = await self._run_all_evals(ctx, eval_cases, iter_dir)
+        except Exception as e:
+            msg = f"TEST_RUN 测试执行失败：{e}"
+            await ctx.emit(SkillDevEventType.ERROR, {"message": msg, "stage": "test_run"})
+            raise RuntimeError(msg) from e
 
         summary = self._generate_summary(results, len(eval_cases))
         summary_file = iter_dir / "iteration_summary.json"
-        summary_file.write_text(
-            json.dumps(summary, ensure_ascii=False, indent=2),
-            encoding="utf-8"
-        )
+        try:
+            summary_file.write_text(
+                json.dumps(summary, ensure_ascii=False, indent=2),
+                encoding="utf-8"
+            )
+        except OSError as e:
+            msg = f"TEST_RUN 汇总文件写入失败：{e}"
+            await ctx.emit(SkillDevEventType.ERROR, {"message": msg, "stage": "test_run"})
+            raise RuntimeError(msg) from e
 
         await ctx.emit(SkillDevEventType.TEST_PROGRESS, {
             "total": total_tasks,
@@ -208,6 +228,9 @@ class TestRunStageHandler(StageHandler):
                 {
                     "completed": completed_count,
                     "total": total_tasks,
+                    "case_name": case_name,
+                    "variant": variant,
+                    "case_status": processed_result.get("status", "error"),
                     "message": (
                         f"已完成: {case_name}/{variant} "
                         f"({'成功' if processed_result.get('status') == 'success' else '失败'})，"
@@ -230,11 +253,14 @@ class TestRunStageHandler(StageHandler):
 
     async def _bounded_task(self, semaphore, ctx, case_name: str, variant: str, func, *args):
         """限制并发的任务执行，在获得信号量（实际开始执行）时推送进度事件."""
+        # args[0] 是 case dict，从中取 prompt 附加到 start 信号，供前端在卡片顶部展示
+        prompt = args[0].get("prompt", "") if args and isinstance(args[0], dict) else ""
         async with semaphore:
             await ctx.emit(SkillDevEventType.TEST_PROGRESS, {
                 "message": f"开始执行: {case_name}/{variant}",
                 "case_name": case_name,
                 "variant": variant,
+                "prompt": prompt,
             })
             return await func(*args)
 

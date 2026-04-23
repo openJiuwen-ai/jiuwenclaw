@@ -38,7 +38,7 @@ from jiuwenclaw.agentserver.skilldev.schema import (
     SkillDevState,
     SkillDevStage,
 )
-from jiuwenclaw.agentserver.skilldev.zip_extract import safe_extract_zip
+from jiuwenclaw.agentserver.skilldev.utils import safe_extract_zip
 
 logger = logging.getLogger(__name__)
 
@@ -120,6 +120,9 @@ class SkillDevService:
             )
 
             async for event in pipeline.run():
+                if state.stage == SkillDevStage.ERROR:
+                    yield self._error_chunk(request_id, channel_id, state.error or "未知错误")
+                    return
                 yield self._event_to_chunk(event, request_id, channel_id)
 
             is_done = state.stage == SkillDevStage.COMPLETED
@@ -240,6 +243,9 @@ class SkillDevService:
 
         try:
             async for event in pipeline.resume(data=params):
+                if state.stage == SkillDevStage.ERROR:
+                    yield self._error_chunk(request_id, channel_id, state.error or "未知错误")
+                    return
                 yield self._event_to_chunk(event, request_id, channel_id)
 
             is_done = state.stage == SkillDevStage.COMPLETED

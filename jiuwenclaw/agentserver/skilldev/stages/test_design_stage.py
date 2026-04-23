@@ -121,7 +121,7 @@ Skill 文件位于工作区的 `skill/` 子目录下。**在设计测试用例�
 - 在 expected_output 中说明该文件应如何被处理
 
 ## 输出格式（严格 JSON，不包含任何解释文字或 markdown 代码块）
-
+```json
 {{
   "skill_name": "{skill_name}",
   "evals": [
@@ -147,7 +147,8 @@ Skill 文件位于工作区的 `skill/` 子目录下。**在设计测试用例�
       "expectations": [...]
     }}
   ]
-}}"""
+}}
+```"""
 
 
 class TestDesignStageHandler(StageHandler):
@@ -165,12 +166,23 @@ class TestDesignStageHandler(StageHandler):
         # 验证 evals schema，确保每个 case 都有 name 字段
         evals = self._validate_and_normalize_evals(evals, skill_name)
 
+        # 生成结果为空时不继续推进，避免 TEST_RUN 空跑
+        count = len(evals.get("evals", []))
+        if count == 0:
+            msg = "测试用例设计失败：未能生成任何有效的测试用例，请检查 Skill 文件是否完整"
+            await ctx.emit(SkillDevEventType.ERROR, {"message": msg, "stage": "test_design"})
+            raise RuntimeError(msg)
+
         # 更新state，储存生成的测试案例
         ctx.state.evals = evals
         # 测试案例写入本地
-        self._write_evals_file(ctx, skill_name, evals)
+        try:
+            self._write_evals_file(ctx, skill_name, evals)
+        except Exception as e:
+            msg = f"测试用例文件写入失败：{e}"
+            await ctx.emit(SkillDevEventType.ERROR, {"message": msg, "stage": "test_design"})
+            raise RuntimeError(msg) from e
 
-        count = len(evals.get("evals", []))
         await ctx.emit(SkillDevEventType.PROGRESS, {"message": f"已设计 {count} 个测试用例"})
 
         return StageResult(next_stage=SkillDevStage.TEST_RUN)
@@ -292,14 +304,19 @@ class TestDesignStageHandler(StageHandler):
             raw = await ctx.run_stage_agent_streaming(
                 agent, stage_name="test_design", query=prompt
             )
-            return self._parse_evals_json(raw)
+            output = self._parse_evals_json(raw)
+            return output
 
         except ValueError as e:
             logger.error(f"[TestDesignStage] evals JSON 解析失败，使用占位数据: {e}")
-            raise
+            msg = f"测试用例初始化失败：Agent 运行错误或输出无法解析为合法 JSON 格式（{e}）"
+            await ctx.emit(SkillDevEventType.ERROR, {"message": msg, "stage": "test_design"})
+            raise RuntimeError(msg) from e
         except Exception as e:
             logger.exception(f"[TestDesignStage] 未预期的错误: {e}")
-            raise
+            msg = f"测试设计 Agent 执行失败：{e}"
+            await ctx.emit(SkillDevEventType.ERROR, {"message": msg, "stage": "test_design"})
+            raise RuntimeError(msg) from e
     
     def _parse_evals_json(self, raw: str | object) -> dict:
         """从 Agent 返回值中健壮地提取 evals JSON.

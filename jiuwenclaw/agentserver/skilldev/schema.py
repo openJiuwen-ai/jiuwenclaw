@@ -94,6 +94,7 @@ class SkillDevEventType(str, Enum):
     ARTIFACT_READY = "skilldev.artifact_ready"  # 驱动右侧产物/附件列表
 
     # --- 数据载体（对话流中展示详情） ---
+    SKILL_NAME_READY = "skilldev.skill_name_ready"  # 生成 skill_name
     EVAL_READY = "skilldev.eval_ready"  # 评测结果（benchmark JSON）
     VALIDATE_RESULT = "skilldev.validate_result"  # SKILL.md 校验结果
     DESC_OPT_READY = "skilldev.desc_opt_ready"  # 描述优化 before/after
@@ -124,6 +125,7 @@ class SkillDevState:
 
     # 输入
     input: dict[str, Any] = field(default_factory=dict)
+    skill_name: str = ""
 
     # 工作区目录状态
     skill_dir_empty: bool = True       # skill/ 目录是否为空（INIT 阶段写入后更新）
@@ -172,6 +174,7 @@ class SkillDevState:
             "mode": self.mode.value,
             "iteration": self.iteration,
             "input": self.input,
+            "skill_name": self.skill_name,
             "skill_dir_empty": self.skill_dir_empty,
             "ref_files_dir_empty": self.ref_files_dir_empty,
             "ref_skills_dir_empty": self.ref_skills_dir_empty,
@@ -203,6 +206,7 @@ class SkillDevState:
         state.mode = SkillDevTaskMode(data.get("mode", "create"))
         state.iteration = data.get("iteration", 0)
         state.input = data.get("input", {})
+        state.skill_name = data.get("skill_name", "")
         state.skill_dir_empty = data.get("skill_dir_empty", True)
         state.ref_files_dir_empty = data.get("ref_files_dir_empty", True)
         state.ref_skills_dir_empty = data.get("ref_skills_dir_empty", True)
@@ -233,6 +237,7 @@ class SkillDevState:
             "stage": self.stage.value,
             "mode": self.mode.value,
             "iteration": self.iteration,
+            "skill_name": self.skill_name,
             "plan": self.plan,
             "eval_results": self.eval_results,
             "created_at": self.created_at,

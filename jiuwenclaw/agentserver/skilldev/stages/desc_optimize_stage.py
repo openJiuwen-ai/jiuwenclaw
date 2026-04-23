@@ -232,6 +232,7 @@ class DescOptimizeStageHandler(StageHandler):
                 "不要输出任何额外文本。"
             ),
             tools=["file_read"],
+            whitelist_key="desc_optimize",
             max_iterations=20,
         )
         output = await ctx.run_stage_agent_streaming(
@@ -412,6 +413,7 @@ class DescOptimizeStageHandler(StageHandler):
                 "必须在 <new_description> 标签中输出结果。"
             ),
             tools=["file_read"],
+            whitelist_key="desc_optimize",
             max_iterations=20,
         )
         output = await ctx.run_stage_agent_streaming(
@@ -472,6 +474,7 @@ class DescOptimizeStageHandler(StageHandler):
                 '字段: {"triggered": boolean, "reason": string}'
             ),
             tools=["file_read"],
+            whitelist_key="desc_optimize",
             max_iterations=8,
         )
         output = await ctx.run_stage_agent_streaming(

@@ -166,6 +166,7 @@ class EventType(Enum):
     SKILLDEV_CONFIRM_REQUEST = "skilldev.confirm_request"
     SKILLDEV_ARTIFACT_READY = "skilldev.artifact_ready"
     SKILLDEV_EVAL_READY = "skilldev.eval_ready"
+    SKILLDEV_SKILL_NAME_READY = "skilldev.skill_name_ready"
     SKILLDEV_VALIDATE_RESULT = "skilldev.validate_result"
     SKILLDEV_DESC_OPT_READY = "skilldev.desc_opt_ready"
     SKILLDEV_ERROR = "skilldev.error"

@@ -97,8 +97,8 @@ GRADER_SYSTEM_PROMPT = """\
 
 ## 输出格式 — 必须严格遵守
 
-确保最终输出为 JSON 数组，每个元素对应一条 expectation：
-
+确保最终输出为 **JSON** 列表，每个元素对应一条 expectation：
+```json
 [
   {
     "expectation": "原始 expectation 文本（逐字复制，不得改动）",
@@ -107,13 +107,14 @@ GRADER_SYSTEM_PROMPT = """\
   },
   ...
 ]
+```
 
 **要求：**
-1. 必须是一个 JSON 数组 [...]
-2. 数组中的每个对象必须有三个字段：expectation, passed, reason
+1. 最终输出必须是一个合法的 JSON 列表
+2. 列表中的每个元素必须为字典且有三个字段：expectation, passed, reason
 3. passed 字段只能是 true 或 false（布尔值，不是字符串）
 4. expectation 字段必须是原始的 expectation 文本
-5. reason 字段需要简明扼要（1-2 句）
+5. reason 字段需要简明扼要（1-2 句），禁止出现markdown、双引号等无法被json.loads解析的内容
 6. 数组长度必须等于输入的 expectation 数量，顺序与输入一致
 """
 
@@ -173,7 +174,12 @@ class EvaluateStageHandler(StageHandler):
         await ctx.emit(
             SkillDevEventType.PROGRESS, {"message": "正在对测试结果进行评分..."}
         )
-        await self._grade_all_evals(ctx, iter_dir)
+        try:
+            await self._grade_all_evals(ctx, iter_dir)
+        except Exception as e:
+            msg = f"EVALUATE 评分执行失败：{e}"
+            await ctx.emit(SkillDevEventType.ERROR, {"message": msg, "stage": "evaluate"})
+            raise RuntimeError(msg) from e
 
         # --- Step 2: Benchmark 聚合 ---
         await ctx.emit(
@@ -188,11 +194,16 @@ class EvaluateStageHandler(StageHandler):
 
         # 持久化
         benchmark_dict = benchmark.to_dict()
-        (iter_dir / "benchmark.json").write_text(
-            json.dumps(benchmark_dict, ensure_ascii=False, indent=2), encoding="utf-8"
-        )
         report_md = self._render_benchmark_md(benchmark)
-        (iter_dir / "benchmark.md").write_text(report_md, encoding="utf-8")
+        try:
+            (iter_dir / "benchmark.json").write_text(
+                json.dumps(benchmark_dict, ensure_ascii=False, indent=2), encoding="utf-8"
+            )
+            (iter_dir / "benchmark.md").write_text(report_md, encoding="utf-8")
+        except OSError as e:
+            msg = f"EVALUATE benchmark 文件写入失败：{e}"
+            await ctx.emit(SkillDevEventType.ERROR, {"message": msg, "stage": "evaluate"})
+            raise RuntimeError(msg) from e
 
         ctx.state.eval_results = {"benchmark": benchmark_dict, "report": report_md}
 
@@ -245,12 +256,30 @@ class EvaluateStageHandler(StageHandler):
 
         async def _bounded(case: dict, variant: str, run_dir: Path) -> None:
             nonlocal completed
+            eval_name = case.get("name", f"eval-{case.get('id', 0)}")
             async with semaphore:
-                await self._grade_one(ctx, case, variant, run_dir)
-                completed += 1
+                # 开始信号：前端据此创建 per-case 评分卡片
                 await ctx.emit(
                     SkillDevEventType.PROGRESS,
-                    {"message": f"已评分 {completed}/{len(tasks)} 个测试结果"},
+                    {
+                        "message": f"开始评分: {eval_name}/{variant}",
+                        "eval_name": eval_name,
+                        "variant": variant,
+                    },
+                )
+                await self._grade_one(ctx, case, variant, run_dir)
+                completed += 1
+                # 完成信号：前端据此结束卡片流式状态
+                await ctx.emit(
+                    SkillDevEventType.PROGRESS,
+                    {
+                        "message": f"已评分 {completed}/{len(tasks)} 个测试结果",
+                        "eval_name": eval_name,
+                        "variant": variant,
+                        "case_done": True,
+                        "completed": completed,
+                        "total": len(tasks),
+                    },
                 )
 
         await asyncio.gather(*[_bounded(c, v, d) for c, v, d in tasks])
@@ -276,10 +305,10 @@ class EvaluateStageHandler(StageHandler):
         # 带重试的 grading：每次重试创建新 agent（新 stage_name → 新 conversation_id）
         # 避免复用失败会话导致模型沿着错误路径继续
         agent_results: dict | None = None
-        base_stage_key = f"evaluate_grader_{eval_name}_{variant}"
+        base_stage_key = f"evaluate_grader/{eval_name}/{variant}"
 
         for attempt in range(1, self._MAX_GRADE_RETRIES + 1):
-            stage_key = base_stage_key if attempt == 1 else f"{base_stage_key}_retry{attempt}"
+            stage_key = base_stage_key if attempt == 1 else f"{base_stage_key}/retry{attempt}"
             agent = ctx.create_stage_agent(
                 stage_name=stage_key,
                 whitelist_key="evaluate",

@@ -1,4 +1,4 @@
-"""Shared zip extraction helpers for SkillDev."""
+"""Shared utility helpers for SkillDev."""
 
 from __future__ import annotations
 

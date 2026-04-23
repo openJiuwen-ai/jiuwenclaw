@@ -95,6 +95,7 @@ class PlanStageHandler(StageHandler):
         )
 
         plan = await self._generate_plan(ctx)
+        plan["skill_name"] = ctx.state.skill_name
         ctx.state.plan = plan
 
         await ctx.emit(
@@ -245,7 +246,7 @@ class PlanStageHandler(StageHandler):
     def _default_plan(self, ctx: SkillDevContext) -> dict:
         """Plan 解析连续失败时的兜底计划，确保后续阶段可执行."""
         return {
-            "skill_name": "generated-skill",
+            "skill_name": ctx.state.skill_name or "generated-skill",
             "display_name": "Generated Skill",
             "description": "根据用户需求生成并完善 Skill 文件。",
             "purpose": ctx.state.input.get("query", "基于需求生成可执行 Skill"),

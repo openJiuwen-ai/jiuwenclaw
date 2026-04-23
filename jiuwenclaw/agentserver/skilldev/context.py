@@ -70,6 +70,7 @@ HARNESS_TOOL_CLASSES: Dict[str, Type] = {
 
 # Stage-level tool isolation: stage_name -> allowed tool names
 STAGE_TOOL_WHITELIST: Dict[str, list[str]] = {
+    "INIT": ["file_read", "file_glob", "file_listdir"],
     # Clarification phase: read-only workspace awareness
     "CLARIFY": ["file_read", "file_glob", "file_listdir"],
     # Planning phase: read-only search tools only
