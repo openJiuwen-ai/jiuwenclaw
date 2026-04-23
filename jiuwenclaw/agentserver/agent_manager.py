@@ -92,7 +92,11 @@ class AgentManager:
                 os.environ[key] = str(env_value)
         logger.info("[AgentManager] Creating %s agent (mode=%s)", agent_key, mode)
 
-        agent = JiuWenClaw(user_workspace_dir=str(self.user_workspace_dir) if self.user_workspace_dir else None)
+        agent = JiuWenClaw(
+            user_workspace_dir=str(self.user_workspace_dir) if self.user_workspace_dir else None,
+            agent_id=self.agent_id,
+            service_id=self.service_id,
+        )
         agent._agent_name = f"agent_{self.agent_id}_{self.service_id}_{agent_key}"
         await agent.create_instance(config, mode=mode)
         self.agents.setdefault(agent_key, {})[mode] = agent

@@ -331,3 +331,23 @@ class TenantAgentPool:
             AgentManager 实例或 None
         """
         return self._get_agent_manager_nowait(agent_id, service_id)
+
+    async def cancel_all_inflight_work(self, reason: str = "[gateway ws disconnect] ") -> None:
+        """Gateway 与 AgentServer 的 WebSocket 断开时：取消所有租户的在途任务。
+
+        遍历所有缓存的 AgentManager 实例，逐个调用其 cancel_all_inflight_work 方法。
+        单个租户失败不影响其他租户的取消操作，记录异常日志
+
+        Args:
+            reason: 取消原因描述
+        """
+        keys = await self._agent_wrappers.keys()
+        for key in keys:
+            agent_manager = await self._agent_wrappers.get(key)
+            if agent_manager is not None:
+                try:
+                    await agent_manager.cancel_all_inflight_work(reason)
+                except Exception:
+                    logger.exception(
+                        "[TenantAgentPool] cancel_all_inflight_work failed for %s", key
+                    )

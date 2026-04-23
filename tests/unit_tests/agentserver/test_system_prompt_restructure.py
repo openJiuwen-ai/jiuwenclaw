@@ -1,4 +1,5 @@
 from types import SimpleNamespace
+from pathlib import Path
 from unittest.mock import patch
 
 import pytest
@@ -150,3 +151,81 @@ def test_build_configured_subagents_omits_code_research_without_explicit_enable(
     mock_code.assert_not_called()
     mock_research.assert_not_called()
     mock_browser.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_runtime_rail_multi_tenant_workspace_dirs():
+    """测试多租户模式下 _get_workspace_dirs 返回正确路径。"""
+    
+    builder = SystemPromptBuilder(language="cn")
+    runtime_rail = RuntimePromptRail(
+        language="cn",
+        channel="web",
+        agent_name="main_agent",
+        model_name="test-model",
+        agent_id="test_agent_001",
+        service_id="test_service_001",
+    )
+    runtime_rail.init(SimpleNamespace(system_prompt_builder=builder))
+
+    # Mock get_multi_tenant_user_workspace_dir 返回测试路径
+    expected_base = Path("/tmp/test_jiuwenclaw/service_test_service_001/agent_test_agent_001")
+    with patch(
+        "jiuwenclaw.agentserver.deep_agent.rails.runtime_prompt_rail.get_multi_tenant_user_workspace_dir",
+        return_value=expected_base,
+    ):
+        ctx = AgentCallbackContext(agent=None, inputs=None, session=None)
+        await runtime_rail.before_model_call(ctx)
+
+    prompt = builder.build()
+    
+    # 验证多租户路径出现在 prompt 中（兼容 Windows 路径分隔符）
+    assert "config" in prompt
+    assert "jiuwenclaw_workspace" in prompt
+    assert "memory" in prompt
+    assert "skills" in prompt
+    assert "todo" in prompt
+    # 验证多租户路径特征
+    assert "service_test_service_001" in prompt
+    assert "agent_test_agent_001" in prompt
+
+
+@pytest.mark.asyncio
+async def test_runtime_rail_single_tenant_workspace_dirs():
+    """测试单租户模式下 _get_workspace_dirs 回退到默认路径。"""
+    builder = SystemPromptBuilder(language="cn")
+    runtime_rail = RuntimePromptRail(
+        language="cn",
+        channel="web",
+        agent_name="main_agent",
+        model_name="test-model",
+        # 不传 agent_id 和 service_id，触发单租户模式
+    )
+    runtime_rail.init(SimpleNamespace(system_prompt_builder=builder))
+
+    with (
+        patch("jiuwenclaw.agentserver.deep_agent.rails.runtime_prompt_rail.get_user_workspace_dir") as mock_user_ws,
+        patch("jiuwenclaw.agentserver.deep_agent.rails.runtime_prompt_rail.get_agent_workspace_dir") as mock_agent_ws,
+        patch("jiuwenclaw.agentserver.deep_agent.rails.runtime_prompt_rail.get_agent_memory_dir") as mock_memory,
+        patch("jiuwenclaw.agentserver.deep_agent.rails.runtime_prompt_rail.get_agent_skills_dir") as mock_skills,
+        patch("jiuwenclaw.agentserver.deep_agent.rails.runtime_prompt_rail.get_deepagent_todo_dir") as mock_todo,
+    ):
+        mock_user_ws.return_value = Path("/home/user/.jiuwenclaw")
+        mock_agent_ws.return_value = Path("/home/user/.jiuwenclaw/workspace")
+        mock_memory.return_value = Path("/home/user/.jiuwenclaw/memory")
+        mock_skills.return_value = Path("/home/user/.jiuwenclaw/skills")
+        mock_todo.return_value = Path("/home/user/.jiuwenclaw/todo")
+        
+        ctx = AgentCallbackContext(agent=None, inputs=None, session=None)
+        await runtime_rail.before_model_call(ctx)
+
+    prompt = builder.build()
+    
+    # 验证单租户路径出现在 prompt 中（兼容 Windows 路径分隔符）
+    assert "config" in prompt
+    assert "workspace" in prompt
+    assert "memory" in prompt
+    assert "skills" in prompt
+    assert "todo" in prompt
+    # 验证路径格式（Windows 使用 \，Linux 使用 /）
+    assert (".jiuwenclaw" in prompt)

@@ -520,10 +520,17 @@ class JiuWenClawDeepAdapter:
     - Deep interrupt / user_answer 处理
     """
 
-    def __init__(self, workspace_dir: str | None = None) -> None:
+    def __init__(
+        self,
+        workspace_dir: str | None = None,
+        agent_id: str | None = None,
+        service_id: str | None = None,
+    ) -> None:
         self._instance: DeepAgent | None = None
         self._workspace_dir: str = workspace_dir or str(get_agent_root_dir())
         self._agent_name: str = "main_agent"
+        self._agent_id = agent_id
+        self._service_id = service_id
         self._vision_tools_registered: bool = False
         self._audio_tools_registered: bool = False
         self._video_tool_registered: bool = False
@@ -1448,6 +1455,8 @@ class JiuWenClawDeepAdapter:
                 agent_name=self._agent_name,
                 model_name=self._resolve_model_name(),
                 workspace_dir=self._workspace_dir,
+                agent_id=self._agent_id,
+                service_id=self._service_id,
             )
             logger.info("[JiuWenClawDeepAdapter] RuntimePromptRail create success")
         except Exception as exc:

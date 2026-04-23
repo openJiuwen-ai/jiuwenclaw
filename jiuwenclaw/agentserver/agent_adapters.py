@@ -112,12 +112,19 @@ def resolve_sdk_choice() -> str:
     return _DEFAULT_SDK
 
 
-def create_adapter(sdk: str | None = None, workspace_dir: str | None = None) -> AgentAdapter:
+def create_adapter(
+    sdk: str | None = None,
+    workspace_dir: str | None = None,
+    agent_id: str | None = None,
+    service_id: str | None = None,
+) -> AgentAdapter:
     """Factory function to create SDK adapter instance.
 
     Args:
         sdk: SDK name, if None will resolve from environment.
         workspace_dir: Workspace directory path to pass to adapter.
+        agent_id: Agent ID for multi-tenant isolation.
+        service_id: Service ID for multi-tenant isolation.
 
     Returns:
         AgentAdapter instance for the specified SDK.
@@ -130,7 +137,11 @@ def create_adapter(sdk: str | None = None, workspace_dir: str | None = None) -> 
 
     if sdk_name == "harness":
         from jiuwenclaw.agentserver.deep_agent.interface_deep import JiuWenClawDeepAdapter
-        return JiuWenClawDeepAdapter(workspace_dir=workspace_dir)
+        return JiuWenClawDeepAdapter(
+            workspace_dir=workspace_dir,
+            agent_id=agent_id,
+            service_id=service_id,
+        )
 
     if sdk_name == "pi":
         raise NotImplementedError(

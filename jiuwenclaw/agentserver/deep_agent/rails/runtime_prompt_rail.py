@@ -23,6 +23,7 @@ from jiuwenclaw.utils import (
     get_agent_skills_dir,
     get_agent_workspace_dir,
     get_deepagent_todo_dir,
+    get_multi_tenant_user_workspace_dir,
 )
 
 _CN_WEEKDAYS = ["星期一", "星期二", "星期三", "星期四", "星期五", "星期六", "星期日"]
@@ -41,6 +42,8 @@ class RuntimePromptRail(DeepAgentRail):
         agent_name: str = "main_agent",
         model_name: str = "gpt-4",
         workspace_dir: Optional[str] = None,
+        agent_id: Optional[str] = None,
+        service_id: Optional[str] = None,
     ) -> None:
         super().__init__()
         self.system_prompt_builder = None
@@ -50,6 +53,8 @@ class RuntimePromptRail(DeepAgentRail):
         self._agent_name = agent_name
         self._model_name = model_name
         self._workspace_dir = workspace_dir
+        self._agent_id = agent_id
+        self._service_id = service_id
 
     def init(self, agent) -> None:
         """从 agent 获取 system_prompt_builder 引用。"""
@@ -95,6 +100,30 @@ class RuntimePromptRail(DeepAgentRail):
         if result.returncode == 0 and result.stdout.strip():
             return result.stdout.strip()
         return "N/A"
+
+    def _get_workspace_dirs(self) -> dict[str, str]:
+        """获取工作空间目录路径，支持多租户。"""
+        if self._agent_id and self._service_id:
+            # 多租户模式
+            base_workspace = get_multi_tenant_user_workspace_dir(self._service_id, self._agent_id)
+            if base_workspace:
+                workspace_root = base_workspace / "jiuwenclaw_workspace"
+                return {
+                    "config": str(base_workspace / "config"),
+                    "workspace": str(workspace_root),
+                    "memory": str(workspace_root / "memory"),
+                    "skills": str(workspace_root / "skills"),
+                    "todo": str(workspace_root / "todo"),
+                }
+        
+        # 单租户模式
+        return {
+            "config": str(get_user_workspace_dir() / "config"),
+            "workspace": self._workspace_dir or str(get_agent_workspace_dir()),
+            "memory": str(get_agent_memory_dir()),
+            "skills": str(get_agent_skills_dir()),
+            "todo": str(get_deepagent_todo_dir()),
+        }
 
     async def before_model_call(self, ctx: AgentCallbackContext) -> None:
         """每次 model call 注入最新的时间和运行时信息。"""
@@ -161,11 +190,13 @@ class RuntimePromptRail(DeepAgentRail):
             priority=95,
         ))
 
-        config_dir = get_user_workspace_dir() / "config"
-        resolved_workspace = (self._workspace_dir or "").strip() or str(get_agent_workspace_dir())
-        memory_dir = str(get_agent_memory_dir())
-        skills_dir = str(get_agent_skills_dir())
-        todo_dir = str(get_deepagent_todo_dir())
+        # 使用多租户感知的方法获取路径
+        dirs = self._get_workspace_dirs()
+        config_dir = dirs["config"]
+        resolved_workspace = dirs["workspace"]
+        memory_dir = dirs["memory"]
+        skills_dir = dirs["skills"]
+        todo_dir = dirs["todo"]
 
         if self._language == "cn":
             workspace_content = f"""# 你的家

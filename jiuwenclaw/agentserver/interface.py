@@ -144,9 +144,16 @@ class JiuWenClaw:
     - 公共编排（session 队列、Skills / Tools 路由、heartbeat、流式包装）
     """
 
-    def __init__(self, user_workspace_dir: str | None = None) -> None:
+    def __init__(
+        self,
+        user_workspace_dir: str | None = None,
+        agent_id: str | None = None,
+        service_id: str | None = None,
+    ) -> None:
         self._adapter: AgentAdapter | None = None
         self._sdk_name: str | None = None
+        self._agent_id = agent_id
+        self._service_id = service_id
         user_workspace_path = Path(user_workspace_dir) if user_workspace_dir else get_user_workspace_dir()
         self._workspace_dir = str(user_workspace_path / get_agent_workspace_relative_dir())
         self._sessions_dir = user_workspace_path / get_agent_sessions_relative_dir()
@@ -194,7 +201,12 @@ class JiuWenClaw:
         """确保 adapter 已初始化，如果未初始化则根据环境变量创建."""
         if self._adapter is None:
             self._sdk_name = resolve_sdk_choice()
-            self._adapter = create_adapter(self._sdk_name, workspace_dir=self._workspace_dir)
+            self._adapter = create_adapter(
+                self._sdk_name,
+                workspace_dir=self._workspace_dir,
+                agent_id=self._agent_id,
+                service_id=self._service_id,
+            )
             if hasattr(self._adapter, "set_skill_manager"):
                 self._adapter.set_skill_manager(self._skill_manager)
             self._skill_manager.set_skillnet_install_complete_hook(
