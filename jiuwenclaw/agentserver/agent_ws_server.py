@@ -1073,8 +1073,8 @@ class AgentWebSocketServer:
             env_overrides = params.get("env")
 
             await self._agent_manager.reload_agents_config(
-                config_base=config_payload,
-                env_overrides=env_overrides,
+                config=config_payload,
+                env=env_overrides,
             )
             resp = AgentResponse(
                 request_id=request.request_id,

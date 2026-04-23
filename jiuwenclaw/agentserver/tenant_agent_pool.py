@@ -148,6 +148,34 @@ class TenantAgentPool:
         self._lock_loops.clear()
         logger.info("[TenantAgentPool] All agent managers and states cleaned up")
 
+    async def cancel_all_inflight_work(self, reason: str = "[gateway ws disconnect] ") -> None:
+        """WebSocket 断开时：对每个已缓存 ``AgentManager`` 取消在途任务。"""
+        keys = await self._agent_wrappers.keys()
+        for key in keys:
+            agent_manager = await self._agent_wrappers.get(key)
+            if agent_manager is None:
+                continue
+            try:
+                await agent_manager.cancel_all_inflight_work(reason)
+            except Exception:
+                logger.exception(
+                    "[TenantAgentPool] cancel_all_inflight_work failed for key=%s", key
+                )
+
+    async def reload_agents_config(self, config: Any, env: Any) -> None:
+        """与 ``AgentManager.reload_agents_config`` 一致：对每个已缓存租户热重载配置。"""
+        keys = await self._agent_wrappers.keys()
+        for key in keys:
+            agent_manager = await self._agent_wrappers.get(key)
+            if agent_manager is None:
+                continue
+            try:
+                await agent_manager.reload_agents_config(config, env)
+            except Exception:
+                logger.exception(
+                    "[TenantAgentPool] reload_agents_config failed for key=%s", key
+                )
+
     async def _ensure_agent_manager(
             self,
             agent_id: str,

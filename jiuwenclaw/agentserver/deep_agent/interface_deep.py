@@ -151,6 +151,7 @@ from jiuwenclaw.utils import (
     get_env_file,
     get_agent_root_dir,
 )
+from jiuwenclaw.local_env_config import set_local_config
 
 load_dotenv(dotenv_path=get_env_file())
 
@@ -1055,8 +1056,24 @@ class JiuWenClawDeepAdapter:
             logger.error("[JiuWenClawDeepAdapter] fail to setup checkpoint due to: %s", e)
 
     @staticmethod
+    def _normalize_model_client_config_dict(mcc: dict) -> dict:
+        """YAML / 环境变量替换可能把 dict 字段写成空串，避免 ModelClientConfig 校验失败。"""
+        out = dict(mcc)
+        ch = out.get("custom_headers")
+        if ch == "":
+            out["custom_headers"] = None
+        elif ch is not None and not isinstance(ch, dict):
+            logger.warning(
+                "[JiuWenClawDeepAdapter] model_client_config.custom_headers 须为 dict 或省略，当前为 %r，已按 None 处理",
+                ch,
+            )
+            out["custom_headers"] = None
+        return out
+
+    @staticmethod
     def _build_model_from_entry(mcc: dict, mco: dict) -> Model:
         """根据单个模型条目的 model_client_config / model_config_obj 构建 Model 实例。"""
+        mcc = JiuWenClawDeepAdapter._normalize_model_client_config_dict(mcc)
         name = mcc.get("model_name", "")
         m_config = ModelRequestConfig(
             model=name,
@@ -1843,10 +1860,7 @@ class JiuWenClawDeepAdapter:
             if not isinstance(env_overrides, dict):
                 raise TypeError("env_overrides must be a dict when provided")
             for env_key, env_value in env_overrides.items():
-                if env_value is None:
-                    os.environ.pop(str(env_key), None)
-                else:
-                    os.environ[str(env_key)] = str(env_value)
+                set_local_config(env_key, env_value)
 
         if config_base is None:
             config_base = get_config()

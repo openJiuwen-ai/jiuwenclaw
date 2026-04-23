@@ -40,12 +40,12 @@ from jiuwenclaw.config import (
 from jiuwenclaw.jiuwen_core_patch import apply_openai_model_client_patch
 from jiuwenclaw.updater import WindowsUpdaterService
 from jiuwenclaw.utils import (
-    get_user_workspace_dir,
     get_agent_sessions_dir,
     get_env_file,
     get_root_dir,
 )
 from jiuwenclaw.version import __version__
+from jiuwenclaw.local_env_config import decrypt, encrypt
 
 apply_openai_model_client_patch()
 
@@ -362,10 +362,7 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
         try:
             raw = get_config_raw()
             for key, val in payload.items():
-                from jiuwenclaw.extensions.registry import ExtensionRegistry
-                if (("api_key" in key.lower() or "token" in key.lower())
-                        and ExtensionRegistry.get_instance().get_crypto_provider()):
-                    payload[key] = ExtensionRegistry.get_instance().get_crypto_provider().decrypt(val)
+                payload[key] = decrypt(key, val)
             ctx_cfg = (raw.get("react") or {}).get("context_engine_config") or {}
             payload["context_engine_enabled"] = "true" if ctx_cfg.get("enabled", False) else "false"
             payload["kv_cache_affinity_enabled"] = (
@@ -411,13 +408,14 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             if env_path.is_file():
                 with open(env_path, "r", encoding="utf-8") as f:
                     lines = f.readlines()
-            updated_keys = set(updates.keys())
             new_lines: list[str] = []
             for line in lines:
                 stripped = line.strip()
                 found = False
                 for env_key, value in updates.items():
                     if stripped.startswith(env_key + "="):
+                        # 对持久化到.env的敏感数据进行加密
+                        value = encrypt(env_key, value)
                         new_lines.append(f'{env_key}="{value}"\n' if value else f"{env_key}=\n")
                         found = True
                         break
@@ -425,6 +423,7 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
                     new_lines.append(line)
             for env_key, value in updates.items():
                 if not any(s.strip().startswith(env_key + "=") for s in new_lines):
+                    value = encrypt(env_key, value)
                     new_lines.append(f'{env_key}="{value}"\n' if value else f"{env_key}=\n")
             env_path.parent.mkdir(parents=True, exist_ok=True)
             with open(env_path, "w", encoding="utf-8") as f:
@@ -437,11 +436,6 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
         if not isinstance(params, dict):
             await channel.send_response(ws, req_id, ok=False, error="params must be object", code="BAD_REQUEST")
             return
-        for key, val in params.items():
-            from jiuwenclaw.extensions.registry import ExtensionRegistry
-            if (("api_key" in key.lower() or "token" in key.lower())
-                    and ExtensionRegistry.get_instance().get_crypto_provider()):
-                params[key] = ExtensionRegistry.get_instance().get_crypto_provider().encrypt(val)
         env_updates: dict[str, str] = {}
         yaml_updated: list[str] = []
         available_model_providers = [provider.value for provider in ProviderType]
@@ -458,7 +452,8 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
                 )
                 return
             if val is None:
-                env_updates[env_key] = ""
+                # 改为全量更新, 将env配置全部同步到agentserver
+                env_updates[env_key] = os.getenv(env_key)
             else:
                 env_updates[env_key] = str(val).strip()
 

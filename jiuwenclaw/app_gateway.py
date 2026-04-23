@@ -18,6 +18,7 @@ import json
 import logging
 import os
 import sys
+import inspect
 import time
 import uuid as uuid_module
 from dataclasses import dataclass, field
@@ -33,6 +34,7 @@ from jiuwenclaw.gateway.route_binding import GatewayRouteBinding
 from jiuwenclaw.jiuwen_core_patch import apply_openai_model_client_patch
 from jiuwenclaw.utils import get_user_workspace_dir, get_env_file, prepare_workspace
 from jiuwenclaw.extensions.extension_config_sync import decrypt_extensions_sensitive_for_agent
+from jiuwenclaw.local_env_config import decrypt
 
 apply_openai_model_client_patch()
 
@@ -732,6 +734,7 @@ async def _run(
         WebHandlersBindParams,
         _DummyBus,
         _CONFIG_SET_ENV_MAP,
+        _CONFIG_YAML_KEYS,
         _FORWARD_NO_LOCAL_HANDLER_METHODS,
         _FORWARD_REQ_METHODS,
         _register_web_handlers,
@@ -821,9 +824,13 @@ async def _run(
         heartbeat_cfg = None
         channels_cfg = None
 
+    # 配置解密后存储在内存中
+    env_dict = {}
+    for env_key in _CONFIG_SET_ENV_MAP.values():
+        env_dict[env_key] = decrypt(env_key, os.getenv(env_key))
     client.set_or_update_server_config(
         config=dict(full_cfg or {}),
-        env={env_key: (os.getenv(env_key) or "") for env_key in _CONFIG_SET_ENV_MAP.values()},
+        env=env_dict
     )
 
     if isinstance(heartbeat_cfg, dict):
@@ -929,7 +936,14 @@ async def _run(
             logger.warning("[App] hot config reload failed, scheduling restart: %s", e)
             _schedule_restart()
             return False
-
+    # 启动时将配置同步给agentserver
+    callback_result = _on_config_saved(
+        set(_CONFIG_SET_ENV_MAP.values()) | _CONFIG_YAML_KEYS,
+        env_updates=dict(env_dict),
+        config_payload=dict(full_cfg or {})
+    )
+    if inspect.isawaitable(callback_result):
+        await callback_result
     web_channel = None
     web_config = WebChannelConfig(enabled=True, host=web_host, port=web_port, path=web_path)
     web_channel = WebChannel(web_config, _DummyBus())
