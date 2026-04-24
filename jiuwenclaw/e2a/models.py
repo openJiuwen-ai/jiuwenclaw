@@ -397,6 +397,8 @@ def _envelope_from_dict(data: dict[str, Any]) -> E2AEnvelope:
         channel_context=channel_context,
         a2a_metadata=dict(data.get("a2a_metadata") or {}),
         acp_meta=dict(data.get("acp_meta") or {}),
+        service_id=data.get("service_id"),
+        agent_id=data.get("agent_id"),
     )
 
 

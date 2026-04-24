@@ -148,6 +148,11 @@ def message_to_e2a(msg: "Message") -> E2AEnvelope:
         metadata["group_digital_avatar"] = msg.group_digital_avatar
     if metadata:
         d["metadata"] = metadata
+    
+    data = msg.params if isinstance(msg.params, dict) else {}
+    agent_id = str(data.get("agent_id") or "").strip()
+    if agent_id:
+        d["agent_id"] = agent_id
     return E2AEnvelope.from_dict(d)
 
 
@@ -205,6 +210,11 @@ def e2a_from_agent_fields(
             d["method"] = str(req_method)
     if metadata:
         d["metadata"] = dict(metadata)
+
+    data = params if isinstance(params, dict) else {}
+    agent_id = str(data.get("agent_id") or "").strip()
+    if agent_id:
+        d["agent_id"] = agent_id
     return E2AEnvelope.from_dict(d)
 
 

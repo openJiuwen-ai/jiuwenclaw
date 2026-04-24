@@ -461,6 +461,9 @@ class VibeSkillChannel(BaseChannel):
         task_id = data.get("taskId") or data.get("task_id")
         if task_id:
             params["task_id"] = task_id
+        inbound_agent_id = str(data.get("agent_id") or data.get("agentId") or "").strip()
+        if inbound_agent_id:
+            params["agent_id"] = inbound_agent_id
 
         # model
         if msg_model and isinstance(msg_model, dict):
