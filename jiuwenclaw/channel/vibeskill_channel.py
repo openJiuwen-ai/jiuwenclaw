@@ -4,6 +4,7 @@ import asyncio
 import json
 import logging
 import secrets
+import socket
 import time
 from dataclasses import dataclass, field
 from typing import Any, Callable
@@ -64,6 +65,7 @@ class VibeSkillChannel(BaseChannel):
         self._ws_heartbeat_tasks: dict[Any, asyncio.Task] = {}
         self._message_ctx: dict[str, dict[str, Any]] = {}
         self._pending_confirms: dict[str, dict[str, Any]] = {}
+        self._listen_host = self._get_local_ip()
 
     def on_message(self, callback: Callable[[Message], Any]) -> None:
         self._on_message_cb = callback
@@ -80,24 +82,38 @@ class VibeSkillChannel(BaseChannel):
         # 启动独立 HTTP 服务器处理 VibeSkill REST 请求
         self._http_server = await asyncio.start_server(
             self._handle_http_connection,
-            "127.0.0.1",
+            self._listen_host,
             self.config.http_port,
         )
-        logger.info("[VibeSkillChannel] HTTP server started: http://127.0.0.1:%d/api/v1", self.config.http_port)
+        logger.info(
+            "[VibeSkillChannel] HTTP server started: http://%s:%d/api/v1",
+            self._listen_host,
+            self.config.http_port,
+        )
 
         # 启动独立 WebSocket 服务器
         import websockets
         self._ws_server = await websockets.serve(
             self._handle_ws_connection,
-            "127.0.0.1",
+            self._listen_host,
             self.config.ws_port,
             ping_interval=20,
             ping_timeout=60,
         )
         logger.info(
-            "[VibeSkillChannel] WebSocket server started: ws://127.0.0.1:%d/api/v1/messages",
+            "[VibeSkillChannel] WebSocket server started: ws://%s:%d/api/v1/messages",
+            self._listen_host,
             self.config.ws_port,
         )
+
+    @staticmethod
+    def _get_local_ip() -> str:
+        try:
+            with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+                sock.connect(("8.8.8.8", 80))
+                return str(sock.getsockname()[0] or "127.0.0.1")
+        except OSError:
+            return "127.0.0.1"
 
     async def stop(self) -> None:
         self._running = False
@@ -162,19 +178,42 @@ class VibeSkillChannel(BaseChannel):
                 try:
                     data = json.loads(raw)
                 except json.JSONDecodeError:
-                    await ws.send(json.dumps({
+                    raw_text = str(raw)
+                    max_raw_length = 1000
+                    if len(raw_text) > max_raw_length:
+                        raw_for_log = f"{raw_text[:max_raw_length]}...<truncated>"
+                    else:
+                        raw_for_log = raw_text
+                    logger.warning(
+                        "[VibeSkillChannel] invalid inbound json, remote=%s, ws_close_code=%s, "
+                        "ws_close_reason=%s, raw=%s",
+                        remote,
+                        getattr(ws, "close_code", None),
+                        getattr(ws, "close_reason", None),
+                        raw_for_log,
+                    )
+                    await self._send_ws_json(ws, {
                         "type": "res", "id": "", "ok": False, "error": "invalid json"
-                    }, ensure_ascii=False))
+                    }, source="inbound.invalid_json")
                     continue
 
                 # 调用 inbound_intercept 处理入站消息
                 handled = await self.inbound_intercept(ws, data)
                 if not handled:
-                    await ws.send(json.dumps({
+                    await self._send_ws_json(ws, {
                         "type": "res", "id": "", "ok": False, "error": "unhandled"
-                    }, ensure_ascii=False))
+                    }, source="inbound.unhandled")
         except Exception as e:
-            logger.exception(f"[VibeSkillChannel] WS error: {e}")
+            logger.exception(
+                "[VibeSkillChannel] WS error: %s, type=%s, remote=%s, sessions=%s, "
+                "ws_close_code=%s, ws_close_reason=%s",
+                e,
+                type(e).__name__,
+                remote,
+                sorted(self._ws_sessions.get(ws, set())),
+                getattr(ws, "close_code", None),
+                getattr(ws, "close_reason", None),
+            )
         finally:
             self._clients.discard(ws)
             await self.cleanup(ws)
@@ -286,7 +325,7 @@ class VibeSkillChannel(BaseChannel):
                                 "delta": text,
                             },
                         }
-                        await ws.send(json.dumps(response, ensure_ascii=False))
+                        await self._send_ws_json(ws, response, source="fallback.chat.delta")
                 elif event_type == "chat.final":
                     text = str(msg.payload.get("content") or "")
                     external_sid = await self._resolve_external_session_id(session_id, msg.metadata)
@@ -304,7 +343,7 @@ class VibeSkillChannel(BaseChannel):
                             }
                         },
                     }
-                    await ws.send(json.dumps(response, ensure_ascii=False))
+                    await self._send_ws_json(ws, response, source="fallback.chat.final")
 
     async def inbound_intercept(self, ws: Any, data: dict[str, Any]) -> bool:
         """拦截 VibeSkill WebSocket 消息。
@@ -593,7 +632,7 @@ class VibeSkillChannel(BaseChannel):
         if handler:
             responses = await handler(payload, external_sid, msg.session_id)
             for response in responses:
-                await ws.send(json.dumps(response, ensure_ascii=False))
+                await self._send_ws_json(ws, response, source=f"skilldev.{event_type}")
             if responses:
                 return True
             return False
@@ -617,7 +656,7 @@ class VibeSkillChannel(BaseChannel):
                     "delta": text,
                 },
             }
-            await ws.send(json.dumps(response, ensure_ascii=False))
+            await self._send_ws_json(ws, response, source="chat.delta")
             return True
 
         if event_type == "chat.final":
@@ -636,7 +675,7 @@ class VibeSkillChannel(BaseChannel):
                     }
                 },
             }
-            await ws.send(json.dumps(response, ensure_ascii=False))
+            await self._send_ws_json(ws, response, source="chat.final")
             return True
 
         return False
@@ -1050,8 +1089,34 @@ class VibeSkillChannel(BaseChannel):
 
         return await self._store.resolve_external(sid)
 
+    async def _send_ws_json(self, ws: Any, payload: dict[str, Any], source: str) -> None:
+        payload_str = json.dumps(payload, ensure_ascii=False)
+        max_log_length = 2000
+        if len(payload_str) > max_log_length:
+            payload_for_log = f"{payload_str[:max_log_length]}...<truncated>"
+        else:
+            payload_for_log = payload_str
+        logger.info("[VibeSkillChannel] WS send (%s): %s", source, payload_for_log)
+        try:
+            await ws.send(payload_str)
+        except Exception as exc:
+            logger.exception(
+                "[VibeSkillChannel] WS send failed (%s): %s, type=%s, ws_close_code=%s, "
+                "ws_close_reason=%s",
+                source,
+                exc,
+                type(exc).__name__,
+                getattr(ws, "close_code", None),
+                getattr(ws, "close_reason", None),
+            )
+            raise
+
     async def _emit_ws_event(self, ws: Any, event_type: str, properties: dict[str, Any]) -> None:
-        await ws.send(json.dumps({"type": event_type, "properties": properties}, ensure_ascii=False))
+        await self._send_ws_json(
+            ws,
+            {"type": event_type, "properties": properties},
+            source=f"event.{event_type}",
+        )
 
     def _start_heartbeat_task(self, ws: Any) -> None:
         task = asyncio.create_task(self._heartbeat_loop(ws))
