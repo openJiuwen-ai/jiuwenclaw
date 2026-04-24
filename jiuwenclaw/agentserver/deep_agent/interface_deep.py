@@ -13,7 +13,6 @@ import logging
 import os
 from contextvars import ContextVar, Token
 from dataclasses import dataclass
-from pathlib import Path
 
 from typing import Any, AsyncIterator, Callable, List, Tuple
 
@@ -567,7 +566,6 @@ class JiuWenClawDeepAdapter:
         self._paid_search_registered: bool = False
         self._paid_search_tool: WebPaidSearchTool | None = None
         self._skill_manager: SkillManager | None = None
-        self._tool_manager: Any = None
         self._cron_runtime = CronRuntimeBridge()
         self._runtime_cron_tool_context = _RuntimeCronToolContext(
             tool_scope=f"runtime_{id(self):x}",
@@ -583,16 +581,6 @@ class JiuWenClawDeepAdapter:
     def set_skill_manager(self, skill_manager: SkillManager) -> None:
         """Inject shared SkillManager from facade for tool reuse."""
         self._skill_manager = skill_manager
-
-    def _get_tool_manager(self) -> Any:
-        """懒初始化 ToolManager（依赖 JiuWenClaw 传入的底层 Agent）。"""
-        if self._tool_manager is None:
-            from jiuwenclaw.agentserver.tool_manager import ToolManager
-            self._tool_manager = ToolManager(
-                get_agent=lambda: self._instance,
-                get_tools_dir=lambda: Path(self._workspace_dir) / "tools",
-            )
-        return self._tool_manager
 
     @staticmethod
     def _is_acp_tool_profile(config: dict[str, Any] | None = None) -> bool:
@@ -3167,14 +3155,6 @@ class JiuWenClawDeepAdapter:
                 request_metadata=request.metadata,
             )
 
-            # 注册 Cat Cafe MCP（请求级环境变量）
-            cat_cafe_mcp = request.params.get("cat_cafe_mcp")
-            if isinstance(cat_cafe_mcp, dict):
-                try:
-                    await self._get_tool_manager().register_request_scoped_cat_cafe_mcp(cat_cafe_mcp)
-                except Exception as exc:
-                    logger.warning("[JiuWenClawDeepAdapter] cat_cafe_mcp 注册失败: %s", exc)
-
             result = await Runner.run_agent(agent=self._instance, inputs=inputs)
         except asyncio.CancelledError:
             logger.info("[JiuWenClawDeepAdapter] Agent 任务被取消: request_id=%s session_id=%s", request.request_id,
@@ -3324,14 +3304,6 @@ class JiuWenClawDeepAdapter:
                 channel_id=request.channel_id,
                 request_metadata=request.metadata,
             )
-
-            # 注册 Cat Cafe MCP（请求级环境变量）
-            cat_cafe_mcp = request.params.get("cat_cafe_mcp")
-            if isinstance(cat_cafe_mcp, dict):
-                try:
-                    await self._get_tool_manager().register_request_scoped_cat_cafe_mcp(cat_cafe_mcp)
-                except Exception as exc:
-                    logger.warning("[JiuWenClawDeepAdapter] cat_cafe_mcp 注册失败: %s", exc)
 
             if self._stream_event_rail is not None:
                 self._stream_event_rail.reset_abort()
