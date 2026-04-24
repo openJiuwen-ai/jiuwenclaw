@@ -6,17 +6,29 @@ from __future__ import annotations
 
 import logging
 import asyncio
+import hashlib
+import io
 import json
 import os
 import re
 import shutil
+import ssl
+import tarfile
 import tempfile
 import uuid
+from contextlib import contextmanager
+import zipfile
 from datetime import datetime, timezone
-from pathlib import Path, PureWindowsPath
+from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any, Awaitable, Callable
 from urllib.parse import urlparse
 import yaml
+import urllib3
+import httpx
+import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util.ssl_ import create_urllib3_context
+
 from jiuwenclaw.utils import (
     get_agent_root_dir,
     get_agent_skills_dir,
@@ -29,13 +41,43 @@ logger = logging.getLogger(__name__)
 
 _SKILLNET_DOWNLOAD_TIMEOUT: int = int(os.environ.get("SKILLNET_DOWNLOAD_TIMEOUT", "60"))
 _SKILLNET_MAX_RETRIES: int = int(os.environ.get("SKILLNET_MAX_RETRIES", "3"))
+_FREE_SEARCH_PROXY_URL_ENV = "FREE_SEARCH_PROXY_URL"
+_FREE_SEARCH_SSL_VERIFY_ENV = "FREE_SEARCH_SSL_VERIFY"
+_SKILLNET_PROXY_ENV_KEYS = (
+    "HTTP_PROXY",
+    "HTTPS_PROXY",
+    "ALL_PROXY",
+    "http_proxy",
+    "https_proxy",
+    "all_proxy",
+)
+_SKILLNET_NO_PROXY_ENV_KEYS = ("NO_PROXY", "no_proxy")
+_FREE_SEARCH_DEFAULT_NO_PROXY = "127.0.0.1,.huawei.com,localhost,local,.local,10.155.97.247,.myhuaweicloud.com"
+
+_OPENJIUWEN_MARKET_TIMEOUT: float = float(os.environ.get("OPENJIUWEN_MARKET_TIMEOUT", "60"))
+_OPENJIUWEN_MARKET_BASE_URL_DEFAULT = "https://teamskills.openjiuwen.com"
+_OPENJIUWEN_DEFAULT_ALLOWED_DOWNLOAD_HOSTS: tuple[str, ...] = ("openjiuwen-market.obs.*.myhuaweicloud.com",)
+_IMPORT_LOCAL_REMOTE_TIMEOUT: float = float(os.environ.get("IMPORT_LOCAL_REMOTE_TIMEOUT", "60"))
+_IMPORT_LOCAL_DEFAULT_ALLOWED_DOWNLOAD_HOSTS: tuple[str, ...] = ("*.obs.*.myhuaweicloud.com",)
+
+
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
+
+class _ImportLocalTLSAdapter(HTTPAdapter):
+    def init_poolmanager(self, *args, **kwargs):
+        ctx = create_urllib3_context(ssl_version=ssl.PROTOCOL_TLS_CLIENT)
+        ctx.minimum_version = ssl.TLSVersion.TLSv1_2
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl.CERT_NONE
+        kwargs["ssl_context"] = ctx
+        return super().init_poolmanager(*args, **kwargs)
 
 
 # ---------------------------------------------------------------------------
 # 默认路径
 # ---------------------------------------------------------------------------
 _EVOLUTION_FILENAME = "evolutions.json"
-
 
 
 def _get_agent_root_dir() -> "Path":
@@ -72,6 +114,66 @@ def _is_valid_http_mirror_url(url: str) -> bool:
     if not parsed.netloc:
         return False
     return True
+
+
+def _env_bool(name: str, default: bool = True) -> bool:
+    raw = str(os.environ.get(name, "") or "").strip().lower()
+    if not raw:
+        return default
+    return raw in {"1", "true", "yes", "on", "enabled"}
+
+
+def _get_free_search_proxy_url() -> str:
+    return str(os.environ.get(_FREE_SEARCH_PROXY_URL_ENV, "") or "").strip()
+
+
+def _free_search_ssl_verify() -> bool:
+    return _env_bool(_FREE_SEARCH_SSL_VERIFY_ENV, default=False)
+
+
+def _disable_insecure_request_warning() -> None:
+    urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
+
+def _skillnet_proxy_mapping() -> dict[str, str]:
+    proxy_url = _get_free_search_proxy_url()
+    if not proxy_url:
+        return {}
+    return {"http": proxy_url, "https": proxy_url}
+
+
+def _configure_skillnet_requests_session(session: Any) -> None:
+    proxies = _skillnet_proxy_mapping()
+    if proxies:
+        session.proxies.update(proxies)
+    verify = _free_search_ssl_verify()
+    session.verify = verify
+    if verify is False:
+        _disable_insecure_request_warning()
+
+
+@contextmanager
+def _skillnet_network_context():
+    """Expose the configured proxy to third-party SkillNet clients during one call."""
+    proxy_url = _get_free_search_proxy_url()
+    env_keys = (*_SKILLNET_PROXY_ENV_KEYS, *_SKILLNET_NO_PROXY_ENV_KEYS)
+    previous = {key: os.environ.get(key) for key in env_keys}
+    try:
+        if proxy_url:
+            for key in _SKILLNET_PROXY_ENV_KEYS:
+                os.environ[key] = proxy_url
+            if not os.environ.get("NO_PROXY") and not os.environ.get("no_proxy"):
+                for key in _SKILLNET_NO_PROXY_ENV_KEYS:
+                    os.environ[key] = _FREE_SEARCH_DEFAULT_NO_PROXY
+        if _free_search_ssl_verify() is False:
+            _disable_insecure_request_warning()
+        yield
+    finally:
+        for key, value in previous.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
 
 
 def _safe_path_name(value: Any, label: str) -> str:
@@ -113,8 +215,7 @@ def _log_rejected_name(operation: str, label: str, value: Any, exc: ValueError) 
 
 
 def _safe_rmtree(path: Path) -> bool:
-    """安全地删除目录树，处理 Windows 上的 git 文件锁定问题.
-    """
+    """安全地删除目录树，处理 Windows 上的 git 文件锁定问题."""
     if not path.exists():
         return True
 
@@ -138,7 +239,7 @@ def _safe_rmtree(path: Path) -> bool:
 
             # 检查是否是 Windows 上的权限问题
             # 尝试修改文件权限
-            if os.name == 'nt':
+            if os.name == "nt":
                 try:
                     # 尝试递归修改权限
                     for root, dirs, files in os.walk(path):
@@ -146,9 +247,9 @@ def _safe_rmtree(path: Path) -> bool:
                             filepath = Path(root) / name
                             try:
                                 # 移除只读属性
-                                if os.name == 'nt':
+                                if os.name == "nt":
                                     os.chmod(filepath, stat.S_IWRITE)
-                                elif os.name == 'posix':
+                                elif os.name == "posix":
                                     os.chmod(filepath, 0o777)
                                 # 对目录，尝试删除其中的文件
                                 if filepath.is_dir():
@@ -184,11 +285,11 @@ class SkillManager:
         if workspace_dir is not None:
             try:
                 from openjiuwen.harness.workspace.workspace import Workspace, WorkspaceNode
+
                 workspace = Workspace(root_path=workspace_dir)
                 skills_path = workspace.get_node_path(WorkspaceNode.SKILLS)
                 self._skills_dir: Path = (
-                    skills_path if skills_path is not None
-                    else Path(workspace_dir) / WorkspaceNode.SKILLS.value
+                    skills_path if skills_path is not None else Path(workspace_dir) / WorkspaceNode.SKILLS.value
                 )
             except ImportError:
                 self._skills_dir = Path(workspace_dir) / "skills"
@@ -206,9 +307,7 @@ class SkillManager:
         self._skillnet_install_jobs: dict[str, dict[str, Any]] = {}
         self._skillnet_install_complete_hook: Callable[[], Awaitable[None]] | None = None
 
-    def set_skillnet_install_complete_hook(
-            self, hook: Callable[[], Awaitable[None]] | None
-    ) -> None:
+    def set_skillnet_install_complete_hook(self, hook: Callable[[], Awaitable[None]] | None) -> None:
         """安装成功落盘后回调（通常为重载 Agent 实例）."""
         self._skillnet_install_complete_hook = hook
 
@@ -531,16 +630,19 @@ class SkillManager:
 
         # 解析元数据并记录（添加 installed_at 时间戳）
         from datetime import datetime, timezone
+
         meta = self._parse_skill_md(self._try_find_skill_file(dest)) or {}
         commit_hash = await self._git_get_commit(repo_dir)
-        self._add_installed_plugin({
-            "name": plugin_name,
-            "marketplace": marketplace_name,
-            "version": meta.get("version", ""),
-            "commit": commit_hash or "",
-            "source": marketplace_name,
-            "installed_at": datetime.now(timezone.utc).isoformat(),
-        })
+        self._add_installed_plugin(
+            {
+                "name": plugin_name,
+                "marketplace": marketplace_name,
+                "version": meta.get("version", ""),
+                "commit": commit_hash or "",
+                "source": marketplace_name,
+                "installed_at": datetime.now(timezone.utc).isoformat(),
+            }
+        )
         self._refresh_agent_data_indexes()
 
         return {"success": True}
@@ -582,14 +684,16 @@ class SkillManager:
 
         # 记录安装信息到状态文件
         meta = self._parse_skill_md(self._try_find_skill_file(dest)) or {}
-        self._add_installed_plugin({
-            "name": name,
-            "marketplace": "builtin",
-            "version": meta.get("version", ""),
-            "commit": "",
-            "source": "builtin",
-            "installed_at": datetime.now(timezone.utc).isoformat(),
-        })
+        self._add_installed_plugin(
+            {
+                "name": name,
+                "marketplace": "builtin",
+                "version": meta.get("version", ""),
+                "commit": "",
+                "source": "builtin",
+                "installed_at": datetime.now(timezone.utc).isoformat(),
+            }
+        )
 
         # 刷新索引
         self._refresh_agent_data_indexes()
@@ -654,14 +758,16 @@ class SkillManager:
             elif not isinstance(item, dict):
                 item = vars(item)
 
-            normalized.append({
-                "skill_name": item.get("skill_name", item.get("name", "")),
-                "skill_description": item.get("skill_description", item.get("description", "")),
-                "author": item.get("author", ""),
-                "stars": item.get("stars", 0),
-                "skill_url": item.get("skill_url", item.get("url", "")),
-                "category": item.get("category", ""),
-            })
+            normalized.append(
+                {
+                    "skill_name": item.get("skill_name", item.get("name", "")),
+                    "skill_description": item.get("skill_description", item.get("description", "")),
+                    "author": item.get("author", ""),
+                    "stars": item.get("stars", 0),
+                    "skill_url": item.get("skill_url", item.get("url", "")),
+                    "category": item.get("category", ""),
+                }
+            )
 
         return {
             "success": True,
@@ -696,9 +802,7 @@ class SkillManager:
         install_id = uuid.uuid4().hex
         self._skillnet_install_jobs[install_id] = {"status": "pending"}
         asyncio.create_task(
-            self._skillnet_install_background(
-                install_id, skill_url, force, mirror_url
-            ),
+            self._skillnet_install_background(install_id, skill_url, force, mirror_url),
             name=f"skillnet_install_{install_id[:8]}",
         )
         return {
@@ -812,7 +916,6 @@ class SkillManager:
                 return {"success": False, "detail": "参数 limit 必须是整数"}
 
         try:
-            import httpx
             base_url = "https://clawhub.ai"
             search_url = f"{base_url}/api/v1/search"
 
@@ -836,13 +939,15 @@ class SkillManager:
                 results = data.get("results", [])
                 normalized = []
                 for item in results:
-                    normalized.append({
-                        "slug": item.get("slug", ""),
-                        "display_name": item.get("displayName", ""),
-                        "summary": item.get("summary", ""),
-                        "version": item.get("version", ""),
-                        "updated_at": item.get("updatedAt", 0),
-                    })
+                    normalized.append(
+                        {
+                            "slug": item.get("slug", ""),
+                            "display_name": item.get("displayName", ""),
+                            "summary": item.get("summary", ""),
+                            "version": item.get("version", ""),
+                            "updated_at": item.get("updatedAt", 0),
+                        }
+                    )
 
                 return {
                     "success": True,
@@ -906,10 +1011,6 @@ class SkillManager:
             }
 
         try:
-            import httpx
-            import zipfile
-            import io
-
             base_url = "https://clawhub.ai"
             download_url = f"{base_url}/api/v1/download"
 
@@ -982,20 +1083,24 @@ class SkillManager:
 
                     # 记录安装信息
                     skill_name = meta.get("name", slug)
-                    self._add_local_skill({
-                        "name": skill_name,
-                        "origin": f"clawhub:{slug}",
-                        "source": "clawhub",
-                        "installed_at": datetime.now(timezone.utc).isoformat(),
-                    })
-                    self._add_installed_plugin({
-                        "name": skill_name,
-                        "marketplace": "clawhub",
-                        "version": meta.get("version", ""),
-                        "commit": "",
-                        "source": "clawhub",
-                        "installed_at": datetime.now(timezone.utc).isoformat(),
-                    })
+                    self._add_local_skill(
+                        {
+                            "name": skill_name,
+                            "origin": f"clawhub:{slug}",
+                            "source": "clawhub",
+                            "installed_at": datetime.now(timezone.utc).isoformat(),
+                        }
+                    )
+                    self._add_installed_plugin(
+                        {
+                            "name": skill_name,
+                            "marketplace": "clawhub",
+                            "version": meta.get("version", ""),
+                            "commit": "",
+                            "source": "clawhub",
+                            "installed_at": datetime.now(timezone.utc).isoformat(),
+                        }
+                    )
                     self._refresh_agent_data_indexes()
                     _safe_rmtree(skill_dir)
                     return {
@@ -1019,17 +1124,177 @@ class SkillManager:
                 "detail_key": "skills.clawhub.errors.downloadFailed",
             }
 
+    async def handle_skills_openjiuwen_info(self, _params: dict) -> dict:
+        """返回当前配置的 TeamSkillsHub / OpenJiuwen marketplace 基地址（供前端展示链接）。"""
+        return {"success": True, "market_base_url": self._get_openjiuwen_market_base_url()}
+
+    async def handle_skills_openjiuwen_search(self, params: dict) -> dict:
+        """从 OpenJiuwen Marketplace 搜索技能（原生 /api/v1/plugins）。"""
+        query = str(params.get("q", "")).strip()
+        if not query:
+            return {"success": False, "detail": "缺少参数: q"}
+
+        limit = params.get("limit", 50)
+        try:
+            limit = max(1, min(int(limit), 100))
+        except Exception:
+            return {"success": False, "detail": "参数 limit 必须是整数"}
+
+        page = params.get("page", 1)
+        try:
+            page = max(1, int(page))
+        except Exception:
+            return {"success": False, "detail": "参数 page 必须是整数"}
+
+        try:
+            data = await self._openjiuwen_http_get_data(
+                "/api/v1/plugins",
+                params={
+                    "search_keyword": query,
+                    "plugin_type": "skill",
+                    "page": page,
+                    "page_size": limit,
+                    "order_by": "install_count",
+                    "desc": "true",
+                },
+                timeout=_OPENJIUWEN_MARKET_TIMEOUT,
+            )
+            items = data.get("items", []) if isinstance(data, dict) else []
+            normalized: list[dict[str, Any]] = []
+            for item in items:
+                if not isinstance(item, dict):
+                    continue
+                asset_id = str(item.get("asset_id", "")).strip()
+                name = str(item.get("name", "")).strip() or asset_id
+                normalized.append(
+                    {
+                        "asset_id": asset_id,
+                        "name": name,
+                        "display_name": str(item.get("display_name", "")).strip() or name,
+                        "summary": str(item.get("short_desc", "")).strip(),
+                        "version": str(item.get("latest_version", "")).strip(),
+                        "updated_at": int(item.get("update_time") or 0),
+                    }
+                )
+            return {
+                "success": True,
+                "query": query,
+                "count": len(normalized),
+                "skills": normalized,
+            }
+        except Exception as exc:
+            logger.error("OpenJiuwen 搜索失败: %s", exc)
+            return {
+                "success": False,
+                "detail": str(exc)[:500],
+                "detail_key": "skills.openjiuwen.errors.searchFailed",
+            }
+
+    async def handle_skills_openjiuwen_install(self, params: dict) -> dict:
+        """从 OpenJiuwen Marketplace 安装技能（原生 /api/v1/artifacts/{asset_id}）。"""
+        asset_id = str(params.get("asset_id", "")).strip()
+        if not asset_id:
+            return {"success": False, "detail": "缺少参数: asset_id"}
+
+        force = bool(params.get("force", False))
+        version = params.get("version")
+        version_str = str(version).strip() if version is not None else ""
+
+        try:
+            artifact_data = await self._openjiuwen_http_get_data(
+                f"/api/v1/artifacts/{asset_id}",
+                params={"version": version_str} if version_str else None,
+                timeout=_OPENJIUWEN_MARKET_TIMEOUT,
+            )
+            if not isinstance(artifact_data, dict):
+                return {"success": False, "detail": "marketplace 返回数据格式错误"}
+
+            download_url = str(artifact_data.get("download_url", "")).strip()
+            if not download_url:
+                return {"success": False, "detail": "marketplace 未返回 download_url"}
+            self._assert_openjiuwen_download_url_allowed(download_url)
+            checksum_sha256 = str(artifact_data.get("checksum_sha256", "")).strip()
+
+            artifact_bytes = await self._download_zip_and_verify(download_url, checksum_sha256=checksum_sha256)
+
+            with tempfile.TemporaryDirectory(prefix="jiuwenclaw_openjiuwen_") as tmpdir:
+                tmp_path = Path(tmpdir)
+                zip_path = tmp_path / "skill.zip"
+                zip_path.write_bytes(artifact_bytes)
+                self._safe_extract_zip_to_dir(zip_path, tmp_path)
+
+                skill_dir = self._locate_skill_dir(tmp_path)
+                if skill_dir is None:
+                    return {"success": False, "detail": "下载内容不完整，未找到 SKILL.md"}
+
+                md = self._try_find_skill_file(skill_dir)
+                meta = self._parse_skill_md(md) if md else None
+                if meta is None:
+                    return {"success": False, "detail": "无法解析下载的技能文件"}
+
+                skill_name = str(meta.get("name", "")).strip() or asset_id
+                dest = self._skills_dir / skill_name
+                if dest.exists():
+                    if not force:
+                        return {"success": False, "detail": f"技能 {skill_name} 已安装"}
+                    _safe_rmtree(dest)
+
+                shutil.copytree(skill_dir, dest)
+                for mirror_root in self._get_mirror_skills_dirs():
+                    mirror_dest = mirror_root / skill_name
+                    if mirror_dest.exists():
+                        if not force:
+                            continue
+                        _safe_rmtree(mirror_dest)
+                    mirror_root.mkdir(parents=True, exist_ok=True)
+                    shutil.copytree(skill_dir, mirror_dest)
+
+                installed_at = datetime.now(timezone.utc).isoformat()
+                self._add_local_skill(
+                    {
+                        "name": skill_name,
+                        "origin": f"openjiuwen:{asset_id}",
+                        "source": "openjiuwen",
+                        "installed_at": installed_at,
+                    }
+                )
+                self._add_installed_plugin(
+                    {
+                        "name": skill_name,
+                        "marketplace": "openjiuwen",
+                        "version": str(meta.get("version", "")).strip()
+                        or str(artifact_data.get("version", "")).strip(),
+                        "commit": "",
+                        "source": "openjiuwen",
+                        "installed_at": installed_at,
+                    }
+                )
+                self._refresh_agent_data_indexes()
+                return {
+                    "success": True,
+                    "skill": {
+                        "name": skill_name,
+                        "source": "openjiuwen",
+                        "asset_id": asset_id,
+                    },
+                }
+        except Exception as exc:
+            logger.error("OpenJiuwen 安装失败: %s", exc)
+            return {
+                "success": False,
+                "detail": str(exc)[:500],
+                "detail_key": "skills.openjiuwen.errors.installFailed",
+            }
+
     async def _skillnet_install_background(
-            self,
-            install_id: str,
-            skill_url: str,
-            force: bool,
-            mirror_url: str | None = None,
+        self,
+        install_id: str,
+        skill_url: str,
+        force: bool,
+        mirror_url: str | None = None,
     ) -> None:
         try:
-            result = await asyncio.to_thread(
-                self._skillnet_install_files_sync, skill_url, force, mirror_url
-            )
+            result = await asyncio.to_thread(self._skillnet_install_files_sync, skill_url, force, mirror_url)
         except Exception as exc:
             logger.error("SkillNet 后台安装异常: %s", exc)
             raw = str(exc).strip()
@@ -1062,20 +1327,24 @@ class SkillManager:
         meta = result["meta"]
         skill_url_stored = result["skill_url"]
         try:
-            self._add_local_skill({
-                "name": skill_name,
-                "origin": skill_url_stored,
-                "source": "skillnet",
-                "installed_at": datetime.now(timezone.utc).isoformat(),
-            })
-            self._add_installed_plugin({
-                "name": skill_name,
-                "marketplace": "skillnet",
-                "version": meta.get("version", ""),
-                "commit": "",
-                "source": "skillnet",
-                "installed_at": datetime.now(timezone.utc).isoformat(),
-            })
+            self._add_local_skill(
+                {
+                    "name": skill_name,
+                    "origin": skill_url_stored,
+                    "source": "skillnet",
+                    "installed_at": datetime.now(timezone.utc).isoformat(),
+                }
+            )
+            self._add_installed_plugin(
+                {
+                    "name": skill_name,
+                    "marketplace": "skillnet",
+                    "version": meta.get("version", ""),
+                    "commit": "",
+                    "source": "skillnet",
+                    "installed_at": datetime.now(timezone.utc).isoformat(),
+                }
+            )
             self._refresh_agent_data_indexes()
         except Exception as exc:
             logger.error("SkillNet 写入状态失败: %s", exc)
@@ -1105,15 +1374,13 @@ class SkillManager:
         }
 
     def _skillnet_install_files_sync(
-            self, skill_url: str, force: bool, mirror_url: str | None = None
+        self, skill_url: str, force: bool, mirror_url: str | None = None
     ) -> dict[str, Any]:
         """在工作线程中下载并拷贝到 skills 目录；返回 ok / skill_name / meta / skill_url."""
         try:
             with tempfile.TemporaryDirectory(prefix="jiuwenclaw_skillnet_") as tmpdir:
                 tmp_path = Path(tmpdir)
-                download_path_str = self._skillnet_download_sync(
-                    skill_url, str(tmp_path), mirror_url
-                )
+                download_path_str = self._skillnet_download_sync(skill_url, str(tmp_path), mirror_url)
                 download_path = Path(download_path_str).resolve()
                 if not download_path.exists():
                     return {
@@ -1249,23 +1516,44 @@ class SkillManager:
         return {"success": True}
 
     async def handle_skills_import_local(self, params: dict) -> dict:
-        """从本地路径导入 skill.
-
-        params:
-            path: 本地文件或目录路径
-            force: bool (可选, 默认 False)
-        """
+        """从本地路径或远程归档 URL 导入 skill."""
         raw_path = params.get("path", "")
-        force = params.get("force", False)
+        force = bool(params.get("force", False))
+        checksum_sha256 = str(params.get("checksum_sha256", "") or "").strip()
+        logger.info(
+            "[SkillManager] import_local called: path=%r force=%s remote=%s",
+            raw_path,
+            force,
+            self._is_http_download_target(str(raw_path).strip()),
+        )
         if not raw_path:
             return {"success": False, "detail": "缺少参数: path"}
 
-        src = Path(raw_path)
+        remote_url = str(raw_path).strip()
+        if self._is_http_download_target(remote_url):
+            try:
+                return await self._import_skill_from_remote_archive(
+                    download_url=remote_url,
+                    force=force,
+                    checksum_sha256=checksum_sha256,
+                )
+            except Exception as exc:
+                logger.error("remote archive import failed: %s", exc)
+                return {"success": False, "detail": str(exc)[:500]}
+
+        return self._import_local_from_path(Path(raw_path), force=force, origin=str(raw_path))
+
+    def _import_local_from_path(self, src: Path, *, force: bool, origin: str) -> dict[str, Any]:
+        logger.info(
+            "[SkillManager] import_local_from_path start: src=%s origin=%s force=%s",
+            src,
+            origin,
+            force,
+        )
         if not src.exists():
-            return {"success": False, "detail": f"路径不存在: {raw_path}"}
+            return {"success": False, "detail": f"路径不存在: {origin}"}
 
         if src.is_file():
-            # 单文件导入：解析后放入以 name 命名的目录
             meta = self._parse_skill_md(src)
             if meta is None:
                 return {"success": False, "detail": "无法解析 skill 文件"}
@@ -1285,7 +1573,7 @@ class SkillManager:
         elif src.is_dir():
             md = self._try_find_skill_file(src)
             if md is None:
-                return {"success": False, "detail": f"目录中未找到 SKILL.md: {raw_path}"}
+                return {"success": False, "detail": f"目录中未找到 SKILL.md: {origin}"}
             meta = self._parse_skill_md(md) or {}
             raw_skill_name = meta.get("name", src.name)
             try:
@@ -1300,11 +1588,79 @@ class SkillManager:
                 _safe_rmtree(dest)
             shutil.copytree(src, dest)
         else:
-            return {"success": False, "detail": f"不支持的路径类型: {raw_path}"}
+            return {"success": False, "detail": f"不支持的路径类型: {origin}"}
 
-        self._add_local_skill({"name": skill_name, "origin": raw_path, "source": "local"})
+        self._add_local_skill({"name": skill_name, "origin": origin, "source": "local"})
         self._refresh_agent_data_indexes()
+        logger.info(
+            "[SkillManager] import_local_from_path done: skill_name=%s origin=%s dest=%s",
+            skill_name,
+            origin,
+            self._skills_dir / skill_name,
+        )
         return {"success": True, "skill": {"name": skill_name}}
+
+    async def _import_skill_from_remote_archive(
+        self,
+        *,
+        download_url: str,
+        force: bool,
+        checksum_sha256: str = "",
+    ) -> dict[str, Any]:
+        """Download archive by URL, extract by type, then reuse local import flow."""
+        self._assert_import_local_download_url_allowed(download_url)
+        timeout = max(30.0, _IMPORT_LOCAL_REMOTE_TIMEOUT)
+        logger.info(
+            "[SkillManager] remote import start: url=%s force=%s timeout=%s",
+            download_url,
+            force,
+            timeout,
+        )
+
+        def _download_with_requests() -> bytes:
+            with requests.Session() as session:
+                session.mount("https://", _ImportLocalTLSAdapter())
+                logger.info("[SkillManager] remote import downloading: url=%s", download_url)
+                with session.get(
+                    download_url.strip(),
+                    timeout=timeout,
+                    stream=True,
+                    allow_redirects=False,
+                    verify=False,
+                ) as response:
+                    response.raise_for_status()
+                    chunks: list[bytes] = []
+                    for chunk in response.iter_content(chunk_size=8192):
+                        if chunk:
+                            chunks.append(chunk)
+                    body = b"".join(chunks)
+            logger.info(
+                "[SkillManager] remote import downloaded: url=%s bytes=%s",
+                download_url,
+                len(body),
+            )
+            if not body:
+                raise RuntimeError("下载内容为空")
+
+            expected = checksum_sha256.strip().lower()
+            if expected:
+                digest = hashlib.sha256(body).hexdigest().lower()
+                if digest != expected:
+                    raise RuntimeError("下载文件校验失败（SHA256 不匹配）")
+            return body
+
+        artifact_bytes = _download_with_requests()
+
+        with tempfile.TemporaryDirectory(prefix="jiuwenclaw_import_local_") as tmpdir:
+            tmp_path = Path(tmpdir)
+            logger.info("[SkillManager] remote import extracting: url=%s tmpdir=%s", download_url, tmp_path)
+            self._extract_archive_bytes_to_dir(artifact_bytes, tmp_path)
+            skill_dir = self._locate_skill_dir(tmp_path)
+            if skill_dir is None:
+                return {"success": False, "detail": "下载内容不完整，未找到 SKILL.md"}
+            logger.info("[SkillManager] remote import extracted: url=%s skill_dir=%s", download_url, skill_dir)
+            return self._import_local_from_path(skill_dir, force=force, origin=download_url)
+
 
     async def handle_skills_marketplace_add(self, params: dict) -> dict:
         """添加 marketplace 源.
@@ -1736,9 +2092,7 @@ class SkillManager:
         installed_names = {p.get("name") for p in self._get_installed_plugins()}
 
         enabled_marketplaces = {
-            m.get("name")
-            for m in self._get_marketplaces()
-            if bool(m.get("enabled", True)) and m.get("name")
+            m.get("name") for m in self._get_marketplaces() if bool(m.get("enabled", True)) and m.get("name")
         }
 
         for repo_dir in self._marketplace_dir.iterdir():
@@ -1797,15 +2151,13 @@ class SkillManager:
             return []
         try:
             source_repo_root = Path(__file__).resolve().parents[2]
-            source_resources_skills_dir = (
-                    source_repo_root / "jiuwenclaw" / "resources" / "agent" / "skills"
-            )
+            source_resources_skills_dir = source_repo_root / "jiuwenclaw" / "resources" / "agent" / "skills"
             # 开发模式下不将源码目录作为镜像目标
             # 这样用户下载的skill只保存在用户目录，不会污染源码目录
             if (
-                    source_resources_skills_dir.exists()
-                    and source_resources_skills_dir.resolve() != self._skills_dir.resolve()
-                    and source_resources_skills_dir.resolve() != get_builtin_skills_dir().resolve()
+                source_resources_skills_dir.exists()
+                and source_resources_skills_dir.resolve() != self._skills_dir.resolve()
+                and source_resources_skills_dir.resolve() != get_builtin_skills_dir().resolve()
             ):
                 mirrors.append(source_resources_skills_dir)
         except Exception:
@@ -1907,6 +2259,296 @@ class SkillManager:
         return None
 
     @staticmethod
+    def _get_openjiuwen_market_base_url() -> str:
+        raw = (os.getenv("OPENJIUWEN_MARKET_BASE_URL") or _OPENJIUWEN_MARKET_BASE_URL_DEFAULT).strip()
+        return raw.rstrip("/")
+
+    @staticmethod
+    def _get_openjiuwen_allowed_download_hosts() -> list[str]:
+        raw = (os.getenv("OPENJIUWEN_ALLOWED_DOWNLOAD_HOSTS") or "").strip()
+        if not raw:
+            return list(_OPENJIUWEN_DEFAULT_ALLOWED_DOWNLOAD_HOSTS)
+        hosts: list[str] = []
+        for token in raw.split(","):
+            host = token.strip().lower()
+            if not host:
+                continue
+            hosts.append(host)
+        return hosts or list(_OPENJIUWEN_DEFAULT_ALLOWED_DOWNLOAD_HOSTS)
+
+    @staticmethod
+    def _get_import_local_allowed_download_hosts() -> list[str]:
+        raw = (os.getenv("IMPORT_LOCAL_ALLOWED_DOWNLOAD_HOSTS") or "").strip()
+        if not raw:
+            return list(_IMPORT_LOCAL_DEFAULT_ALLOWED_DOWNLOAD_HOSTS)
+        hosts: list[str] = []
+        for token in raw.split(","):
+            host = token.strip().lower()
+            if not host:
+                continue
+            hosts.append(host)
+        return hosts or list(_IMPORT_LOCAL_DEFAULT_ALLOWED_DOWNLOAD_HOSTS)
+
+    @staticmethod
+    def _assert_openjiuwen_download_url_allowed(download_url: str) -> None:
+        parsed = urlparse(download_url)
+        if parsed.scheme != "https":
+            raise RuntimeError("OpenJiuwen download_url 必须使用 HTTPS")
+        host = (parsed.hostname or "").strip().lower()
+        if not host:
+            raise RuntimeError("OpenJiuwen download_url 缺少主机名")
+        for rule in SkillManager._get_openjiuwen_allowed_download_hosts():
+            # 支持 .example.com 后缀匹配与 * 单段通配（如 a.*.c.com）。
+            if rule.startswith("."):
+                if host.endswith(rule):
+                    return
+                continue
+            if SkillManager._openjiuwen_host_matches_rule(host, rule):
+                return
+        raise RuntimeError(f"OpenJiuwen download_url host 不在白名单: {host}")
+
+    @staticmethod
+    def _assert_import_local_download_url_allowed(download_url: str) -> None:
+        parsed = urlparse(download_url)
+        if parsed.scheme != "https":
+            raise RuntimeError("远程导入 URL 必须使用 HTTPS")
+        host = (parsed.hostname or "").strip().lower()
+        if not host:
+            raise RuntimeError("远程导入 URL 缺少主机名")
+        for rule in SkillManager._get_import_local_allowed_download_hosts():
+            if rule.startswith("."):
+                if host.endswith(rule):
+                    return
+                continue
+            if SkillManager._openjiuwen_host_matches_rule(host, rule):
+                return
+        raise RuntimeError(f"远程导入 URL host 不在白名单: {host}")
+
+    @staticmethod
+    def _openjiuwen_host_matches_rule(host: str, rule: str) -> bool:
+        host_parts = host.split(".")
+        rule_parts = rule.split(".")
+        if len(host_parts) != len(rule_parts):
+            return False
+        for host_part, rule_part in zip(host_parts, rule_parts):
+            if rule_part == "*":
+                continue
+            if host_part != rule_part:
+                return False
+        return True
+
+    @staticmethod
+    def _is_http_download_target(value: str) -> bool:
+        parsed = urlparse(str(value or "").strip())
+        return parsed.scheme in {"http", "https"} and bool(parsed.netloc)
+
+    async def _openjiuwen_http_get_data(
+        self,
+        path: str,
+        *,
+        params: dict[str, Any] | None = None,
+        timeout: float = _OPENJIUWEN_MARKET_TIMEOUT,
+    ) -> Any:
+        base_url = self._get_openjiuwen_market_base_url()
+        rel_path = path if path.startswith("/") else f"/{path}"
+        req_url = f"{base_url}{rel_path}"
+        try:
+            async with httpx.AsyncClient(timeout=timeout, follow_redirects=False) as client:
+                resp = await client.get(req_url, params=params)
+        except Exception as exc:
+            raise RuntimeError(f"无法连接 OpenJiuwen marketplace: {exc}") from exc
+
+        if not resp.is_success:
+            detail = (resp.text or "").strip()[:300]
+            raise RuntimeError(f"OpenJiuwen API 错误 HTTP {resp.status_code}: {detail}")
+        try:
+            payload = resp.json()
+        except Exception as exc:
+            raise RuntimeError(f"OpenJiuwen API 响应不是合法 JSON: {exc}") from exc
+        if not isinstance(payload, dict):
+            raise RuntimeError("OpenJiuwen API 响应格式错误")
+
+        code = payload.get("code", 200)
+        if int(code) != 200:
+            message = str(payload.get("message", "")).strip() or "OpenJiuwen API 返回失败"
+            raise RuntimeError(message)
+
+        data = payload.get("data")
+        if not isinstance(data, dict):
+            raise RuntimeError("OpenJiuwen API 响应 data 格式错误")
+        return data
+
+    @staticmethod
+    def _safe_extract_zip_to_dir(zip_path: Path, dest_dir: Path) -> None:
+        """将 ZIP 解压到 dest_dir，拒绝 Zip Slip（..、绝对路径、写出目标目录外）。"""
+        dest_root = dest_dir.resolve()
+        dest_root.mkdir(parents=True, exist_ok=True)
+        with zipfile.ZipFile(zip_path, "r") as zf:
+            for info in zf.infolist():
+                raw = (info.filename or "").replace("\\", "/")
+                if not raw or raw.startswith("/"):
+                    continue
+                if "\0" in raw:
+                    raise RuntimeError("ZIP 包含非法文件名")
+                is_dir = raw.endswith("/") or info.is_dir()
+                rel_str = raw.rstrip("/")
+                if not rel_str:
+                    continue
+                rel = PurePosixPath(rel_str)
+                if rel.is_absolute() or ".." in rel.parts:
+                    raise RuntimeError("ZIP 包含非法路径")
+                dest_path = dest_root.joinpath(*rel.parts)
+                try:
+                    dest_path = dest_path.resolve()
+                    dest_path.relative_to(dest_root)
+                except ValueError as exc:
+                    raise RuntimeError("ZIP 路径越界") from exc
+                if is_dir:
+                    dest_path.mkdir(parents=True, exist_ok=True)
+                    continue
+                dest_path.parent.mkdir(parents=True, exist_ok=True)
+                with zf.open(info, "r") as src:
+                    dest_path.write_bytes(src.read())
+
+    @staticmethod
+    def _safe_extract_tar_to_dir(tar_path: Path, dest_dir: Path) -> None:
+        """Extract TAR/TAR.GZ/TGZ safely into dest_dir."""
+        dest_root = dest_dir.resolve()
+        dest_root.mkdir(parents=True, exist_ok=True)
+        with tarfile.open(tar_path, "r:*") as tf:
+            for member in tf.getmembers():
+                raw = (member.name or "").replace("\\", "/")
+                if not raw or raw.startswith("/"):
+                    continue
+                if "\0" in raw:
+                    raise RuntimeError("归档包含非法文件名")
+                rel = PurePosixPath(raw.rstrip("/"))
+                if not rel.parts:
+                    continue
+                if rel.is_absolute() or ".." in rel.parts:
+                    raise RuntimeError("归档包含非法路径")
+                if member.islnk() or member.issym():
+                    raise RuntimeError("归档包含链接文件，已拒绝导入")
+                dest_path = dest_root.joinpath(*rel.parts)
+                try:
+                    dest_path = dest_path.resolve()
+                    dest_path.relative_to(dest_root)
+                except ValueError as exc:
+                    raise RuntimeError("归档路径越界") from exc
+                if member.isdir():
+                    dest_path.mkdir(parents=True, exist_ok=True)
+                    continue
+                extracted = tf.extractfile(member)
+                if extracted is None:
+                    continue
+                dest_path.parent.mkdir(parents=True, exist_ok=True)
+                with extracted:
+                    dest_path.write_bytes(extracted.read())
+
+    @staticmethod
+    def _detect_archive_format(body: bytes) -> str:
+        if len(body) >= 4 and body.startswith(b"PK"):
+            return "zip"
+        try:
+            with tarfile.open(fileobj=io.BytesIO(body), mode="r:*"):
+                return "tar"
+        except tarfile.TarError:
+            pass
+        return ""
+
+    def _extract_archive_bytes_to_dir(self, body: bytes, dest_dir: Path) -> None:
+        archive_format = self._detect_archive_format(body)
+        logger.info(
+            "[SkillManager] extract archive: format=%s bytes=%s dest_dir=%s",
+            archive_format or "unknown",
+            len(body),
+            dest_dir,
+        )
+        if archive_format == "zip":
+            archive_path = dest_dir / "artifact.zip"
+            archive_path.write_bytes(body)
+            self._safe_extract_zip_to_dir(archive_path, dest_dir)
+            return
+        if archive_format == "tar":
+            archive_path = dest_dir / "artifact.tar"
+            archive_path.write_bytes(body)
+            self._safe_extract_tar_to_dir(archive_path, dest_dir)
+            return
+        raise RuntimeError("下载内容不是受支持的归档格式，目前仅支持 zip/tar/tar.gz/tgz")
+
+    async def _download_remote_archive_and_verify(
+        self,
+        download_url: str,
+        *,
+        checksum_sha256: str = "",
+        timeout: float | None = None,
+    ) -> bytes:
+        timeout = max(30.0, timeout or _IMPORT_LOCAL_REMOTE_TIMEOUT)
+        async with httpx.AsyncClient(timeout=timeout, follow_redirects=False) as client:
+            resp = await client.get(download_url)
+            resp.raise_for_status()
+            body = resp.content or b""
+
+        if not body:
+            raise RuntimeError("下载内容为空")
+
+        expected = checksum_sha256.strip().lower()
+        if expected:
+            digest = hashlib.sha256(body).hexdigest().lower()
+            if digest != expected:
+                raise RuntimeError("下载文件校验失败（SHA256 不匹配）")
+
+        archive_format = self._detect_archive_format(body)
+        if archive_format == "zip":
+            try:
+                with zipfile.ZipFile(io.BytesIO(body), "r") as zf:
+                    if zf.testzip() is not None:
+                        raise RuntimeError("下载 ZIP 文件已损坏")
+            except zipfile.BadZipFile as exc:
+                raise RuntimeError("下载内容不是有效 ZIP 文件") from exc
+            return body
+        if archive_format == "tar":
+            try:
+                with tarfile.open(fileobj=io.BytesIO(body), mode="r:*"):
+                    pass
+            except tarfile.TarError as exc:
+                raise RuntimeError("下载内容不是有效 TAR 归档") from exc
+            return body
+        raise RuntimeError("下载内容不是受支持的归档格式，目前仅支持 zip/tar/tar.gz/tgz")
+
+    async def _download_zip_and_verify(
+        self,
+        download_url: str,
+        *,
+        checksum_sha256: str = "",
+        timeout: float | None = None,
+    ) -> bytes:
+        timeout = max(30.0, timeout or _OPENJIUWEN_MARKET_TIMEOUT)
+        async with httpx.AsyncClient(timeout=timeout, follow_redirects=False) as client:
+            resp = await client.get(download_url)
+            resp.raise_for_status()
+            body = resp.content or b""
+
+        if not body:
+            raise RuntimeError("下载内容为空")
+        if len(body) < 4 or not body.startswith(b"PK"):
+            raise RuntimeError("下载内容不是 ZIP 文件")
+
+        expected = checksum_sha256.strip().lower()
+        if expected:
+            digest = hashlib.sha256(body).hexdigest().lower()
+            if digest != expected:
+                raise RuntimeError("下载文件校验失败（SHA256 不匹配）")
+
+        try:
+            with zipfile.ZipFile(io.BytesIO(body), "r") as zf:
+                if zf.testzip() is not None:
+                    raise RuntimeError("下载 ZIP 文件已损坏")
+        except zipfile.BadZipFile as exc:
+            raise RuntimeError("下载内容不是有效 ZIP 文件") from exc
+        return body
+
+    @staticmethod
     def _get_github_token() -> str:
         return (os.getenv("GITHUB_TOKEN") or "").strip()
 
@@ -1963,8 +2605,9 @@ class SkillManager:
             "github_token": SkillManager._get_github_token() or None,
         }
         try:
-            client = SkillNetClient(**kwargs)
-            result = client.evaluate(target=skill_url, model=str(llm["model"]))
+            with _skillnet_network_context():
+                client = SkillNetClient(**kwargs)
+                result = client.evaluate(target=skill_url, model=str(llm["model"]))
         except SkillNetError as exc:
             return {"ok": False, "detail": str(exc).strip() or "评估失败。"}
         except Exception as exc:
@@ -1979,14 +2622,14 @@ class SkillManager:
     def _skillnet_search_sync(search_kwargs: dict[str, Any]) -> list[Any]:
         """同步调用 skillnet-ai search，供 asyncio.to_thread 使用."""
         try:
-            from skillnet_ai import SkillNetClient
+            from skillnet_ai.searcher import SkillNetSearcher
         except Exception as exc:
-            raise RuntimeError(
-                "未安装 skillnet-ai，请先安装依赖: pip install skillnet-ai"
-            ) from exc
+            raise RuntimeError("未安装 skillnet-ai，请先安装依赖: pip install skillnet-ai") from exc
 
-        client = SkillNetClient(github_token=SkillManager._get_github_token())
-        results = client.search(**search_kwargs)
+        with _skillnet_network_context():
+            searcher = SkillNetSearcher()
+            _configure_skillnet_requests_session(searcher.session)
+            results = searcher.search(**search_kwargs)
         if results is None:
             return []
         if isinstance(results, list):
@@ -2002,6 +2645,7 @@ class SkillManager:
             return ""
 
         dl = SkillDownloader(api_token=SkillManager._get_github_token())
+        _configure_skillnet_requests_session(dl.session)
         parsed = dl._parse_github_url(skill_url)
         if not parsed:
             return ""
@@ -2009,11 +2653,10 @@ class SkillManager:
         owner, repo, ref, dir_path, _ = parsed
         api = f"https://api.github.com/repos/{owner}/{repo}/contents/{dir_path}?ref={ref}"
         try:
-            r = dl.session.get(api, timeout=_SKILLNET_DOWNLOAD_TIMEOUT)
+            with _skillnet_network_context():
+                r = dl.session.get(api, timeout=_SKILLNET_DOWNLOAD_TIMEOUT)
         except Exception as exc:
-            logger.debug(
-                "SkillNet 安装错误上下文: GitHub Contents 请求失败: %s", exc
-            )
+            logger.debug("SkillNet 安装错误上下文: GitHub Contents 请求失败: %s", exc)
             return ""
 
         parts: list[str] = []
@@ -2028,18 +2671,15 @@ class SkillManager:
                     if raw:
                         parts.append(f"HTTP {r.status_code}: {raw}")
             except Exception as exc:
-                logger.debug(
-                    "SkillNet 安装错误上下文: 解析 GitHub 错误 JSON 失败: %s", exc
-                )
+                logger.debug("SkillNet 安装错误上下文: 解析 GitHub 错误 JSON 失败: %s", exc)
                 raw = (r.text or "").strip()[:500]
                 if raw:
                     parts.append(f"HTTP {r.status_code}: {raw}")
 
-            if r.status_code == 403 or any(
-                    "rate limit" in p.lower() for p in parts
-            ):
+            if r.status_code == 403 or any("rate limit" in p.lower() for p in parts):
                 try:
-                    rl = dl.session.get("https://api.github.com/rate_limit", timeout=12)
+                    with _skillnet_network_context():
+                        rl = dl.session.get("https://api.github.com/rate_limit", timeout=12)
                     if rl.status_code == 200:
                         core = rl.json().get("resources", {}).get("core") or {}
                         rem, lim = core.get("remaining"), core.get("limit")
@@ -2057,16 +2697,12 @@ class SkillManager:
         return " | ".join(parts) if parts else ""
 
     @staticmethod
-    def _skillnet_download_sync(
-            skill_url: str, target_dir: str, mirror_url: str | None = None
-    ) -> str:
+    def _skillnet_download_sync(skill_url: str, target_dir: str, mirror_url: str | None = None) -> str:
         """同步调用 skillnet-ai download；失败时附带 GitHub API 返回说明（如前端的限流文案）。"""
         try:
             from skillnet_ai.downloader import SkillDownloader, GitHubAPIError
         except Exception as exc:
-            raise RuntimeError(
-                "未安装 skillnet-ai，请先安装依赖: pip install skillnet-ai"
-            ) from exc
+            raise RuntimeError("未安装 skillnet-ai，请先安装依赖: pip install skillnet-ai") from exc
 
         token = SkillManager._get_github_token()
         dl_kwargs: dict[str, Any] = {
@@ -2076,17 +2712,18 @@ class SkillManager:
         }
         if mirror_url:
             dl_kwargs["mirror_url"] = mirror_url
-        downloader = SkillDownloader(**dl_kwargs)
-
-        try:
-            local_path = downloader.download(folder_url=skill_url, target_dir=target_dir)
-        except GitHubAPIError:
-            raise
-        except Exception as exc:
-            ctx = SkillManager._github_skillnet_install_error_context(skill_url)
-            if ctx:
-                raise RuntimeError(f"{exc} | {ctx}") from exc
-            raise
+        with _skillnet_network_context():
+            downloader = SkillDownloader(**dl_kwargs)
+            _configure_skillnet_requests_session(downloader.session)
+            try:
+                local_path = downloader.download(folder_url=skill_url, target_dir=target_dir)
+            except GitHubAPIError:
+                raise
+            except Exception as exc:
+                ctx = SkillManager._github_skillnet_install_error_context(skill_url)
+                if ctx:
+                    raise RuntimeError(f"{exc} | {ctx}") from exc
+                raise
         if not local_path:
             # skillnet-ai 在多种情况下会无异常地返回 None：URL 无效、目录下列表为空、
             # 或 Contents API 成功但拉 raw 文件全部失败（超时/网络）等，库未区分原因。
@@ -2099,7 +2736,12 @@ class SkillManager:
         dest.parent.mkdir(parents=True, exist_ok=True)
         try:
             proc = await asyncio.create_subprocess_exec(
-                "git", "clone", "--depth", "1", url, str(dest),
+                "git",
+                "clone",
+                "--depth",
+                "1",
+                url,
+                str(dest),
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
             )
@@ -2116,7 +2758,11 @@ class SkillManager:
         """拉取最新代码，返回 commit hash 或 None."""
         try:
             proc = await asyncio.create_subprocess_exec(
-                "git", "-C", str(repo_path), "pull", "--ff-only",
+                "git",
+                "-C",
+                str(repo_path),
+                "pull",
+                "--ff-only",
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
             )
@@ -2133,7 +2779,11 @@ class SkillManager:
         """获取当前 HEAD commit hash."""
         try:
             proc = await asyncio.create_subprocess_exec(
-                "git", "-C", str(repo_path), "rev-parse", "HEAD",
+                "git",
+                "-C",
+                str(repo_path),
+                "rev-parse",
+                "HEAD",
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
             )
@@ -2214,9 +2864,7 @@ class SkillManager:
 
     def _add_marketplace(self, marketplace: dict) -> None:
         self._state.setdefault("marketplaces", []).append(marketplace)
-        self._state["marketplaces"] = self.normalize_marketplaces(
-            self._state.get("marketplaces", [])
-        )
+        self._state["marketplaces"] = self.normalize_marketplaces(self._state.get("marketplaces", []))
         self._save_state()
 
     def _remove_marketplace(self, name: str) -> bool:
@@ -2268,12 +2916,14 @@ class SkillManager:
             url = item.get("url", "")
             if not name or not url:
                 continue
-            normalized.append({
-                **item,
-                "name": name,
-                "url": url,
-                "enabled": bool(item.get("enabled", True)),
-            })
+            normalized.append(
+                {
+                    **item,
+                    "name": name,
+                    "url": url,
+                    "enabled": bool(item.get("enabled", True)),
+                }
+            )
         return normalized
 
     def _normalize_state(self, state: dict[str, Any]) -> None:
