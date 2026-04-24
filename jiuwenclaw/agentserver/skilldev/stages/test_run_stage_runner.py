@@ -432,7 +432,8 @@ class SkillDevTestRunner:
             return None
         return max(versioned, key=lambda d: int(d.name[len("skill-v"):]))
 
-    def _build_system_prompt_with_skill(self, skill_dir: Path, output_dir: Optional[Path] = None) -> str:
+    @staticmethod
+    def _build_system_prompt_with_skill(skill_dir: Path, output_dir: Optional[Path] = None) -> str:
         """构建带 Skill 的系统提示词，指引 Agent 自行读取 skill 文件.
 
         Args:
@@ -459,9 +460,10 @@ class SkillDevTestRunner:
                 f"如需生成任何文件，请将所有输出文件保存到以下目录：\n"
                 f"{output_dir}\n"
             )
-        return base + self._build_external_tools_block()
+        return base
 
-    def _build_baseline_system_prompt(self, output_dir: Optional[Path] = None) -> str:
+    @staticmethod
+    def _build_baseline_system_prompt(output_dir: Optional[Path] = None) -> str:
         """构建基线系统提示词
 
         Args:
@@ -481,57 +483,7 @@ class SkillDevTestRunner:
                 f"如需生成任何文件，请将所有输出文件保存到以下目录：\n"
                 f"{output_dir}\n"
             )
-        return base + self._build_external_tools_block()
-
-    def _build_external_tools_block(self) -> str:
-        """将 ctx.state.external_tools 渲染为 system prompt 片段.
-
-        若无外部工具则返回空字符串，不影响原有提示词。
-
-        注意：web_fetch 工具仅支持 GET 且不支持自定义 header，因此指引 agent
-        优先用 code_execute（Python requests）或 shell（curl）发起 HTTP 请求。
-        """
-        tools = self.ctx.state.external_tools
-        if not tools:
-            return ""
-
-        lines = [
-            "\n\n## 可用的外部工具\n",
-            "你可以在执行任务时调用以下外部工具。\n",
-            "**调用方式**：",
-            "- 需要自定义 header 或 POST body 时，请用 `code_execute` 运行 Python `requests` 代码，",
-            "  或用 `shell` 运行 `curl` 命令。",
-            "- 仅 GET 且无需自定义 header 时，可直接用 `web_fetch`。\n",
-        ]
-        for tool in tools:
-            lines.append(f"### {tool.get('name', '未命名工具')}")
-            desc = tool.get("description")
-            if desc:
-                lines.append(f"描述：{desc}")
-            url = tool.get("url")
-            if url:
-                method = tool.get("method", "GET").upper()
-                lines.append(f"请求：{method} {url}")
-            headers = tool.get("headers")
-            if headers:
-                lines.append(f"请求头：{json.dumps(headers, ensure_ascii=False)}")
-            auth = tool.get("auth")
-            if auth:
-                auth_type = auth.get("type", "")
-                if auth_type == "bearer":
-                    token_env = auth.get("token_env", "")
-                    hint = f"（从环境变量 {token_env} 读取）" if token_env else ""
-                    lines.append(f"认证：Bearer Token{hint}，写入 `Authorization: Bearer <token>` 请求头")
-                elif auth_type == "api_key":
-                    key_header = auth.get("header", "X-API-Key")
-                    key_env = auth.get("key_env", "")
-                    hint = f"（从环境变量 {key_env} 读取）" if key_env else ""
-                    lines.append(f"认证：API Key{hint}，写入 `{key_header}` 请求头")
-            params = tool.get("parameters")
-            if params:
-                lines.append(f"参数 schema：{json.dumps(params, ensure_ascii=False)}")
-            lines.append("")
-        return "\n".join(lines)
+        return base
 
     @staticmethod
     def _estimate_tokens(text: str) -> int:

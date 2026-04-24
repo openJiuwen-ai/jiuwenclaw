@@ -131,7 +131,7 @@ class SkillDevState:
     skill_dir_empty: bool = True       # skill/ 目录是否为空（INIT 阶段写入后更新）
     ref_files_dir_empty: bool = True   # resources/ref-files 目录是否为空
     ref_skills_dir_empty: bool = True  # resources/ref-skills 目录是否为空
-    tool_specs_dir_empty: bool = True  # resources/tool_specs 目录是否为空
+    tool_scripts_dir_empty: bool = True  # resources/available-tools 目录是否为空
 
     # 中间产物
     reference_texts: list[str] = field(default_factory=list)  # 资源文件解析后的文本
@@ -178,7 +178,7 @@ class SkillDevState:
             "skill_dir_empty": self.skill_dir_empty,
             "ref_files_dir_empty": self.ref_files_dir_empty,
             "ref_skills_dir_empty": self.ref_skills_dir_empty,
-            "tool_specs_dir_empty": self.tool_specs_dir_empty,
+            "tool_scripts_dir_empty": self.tool_scripts_dir_empty,
             "reference_texts": self.reference_texts,
             "existing_skill_md": self.existing_skill_md,
             "clarification_questions": self.clarification_questions,
@@ -210,7 +210,7 @@ class SkillDevState:
         state.skill_dir_empty = data.get("skill_dir_empty", True)
         state.ref_files_dir_empty = data.get("ref_files_dir_empty", True)
         state.ref_skills_dir_empty = data.get("ref_skills_dir_empty", True)
-        state.tool_specs_dir_empty = data.get("tool_specs_dir_empty", True)
+        state.tool_scripts_dir_empty = data.get("tool_scripts_dir_empty", True)
         state.reference_texts = data.get("reference_texts", [])
         state.existing_skill_md = data.get("existing_skill_md")
         state.clarification_questions = data.get("clarification_questions", [])

@@ -25,6 +25,8 @@ from __future__ import annotations
 import asyncio
 import base64
 import logging
+import secrets
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import AsyncIterator
 
@@ -38,7 +40,11 @@ from jiuwenclaw.agentserver.skilldev.schema import (
     SkillDevState,
     SkillDevStage,
 )
-from jiuwenclaw.agentserver.skilldev.utils import safe_extract_zip
+from jiuwenclaw.agentserver.skilldev.common_utils import safe_extract_zip
+from jiuwenclaw.agentserver.skilldev.stages.validate_stage import parse_skill_frontmatter
+from jiuwenclaw.agentserver.skilldev.utils.upload_file_obs import UploadFileOSMS
+from jiuwenclaw.agentserver.skilldev.utils.download_file_from_url import download_file
+
 
 logger = logging.getLogger(__name__)
 
@@ -96,13 +102,23 @@ class SkillDevService:
         if not task_id:
             yield self._error_chunk(request_id, channel_id, "缺少 task_id 或 session_id 参数")
             return
+        
+        # if params.get("model"):
+        #     self._deps.model_client_config["model_name"] = params.get("model").get("modelID")
+        #     self._deps.model_client_config["client_provider"] = params.get("model").get("providerID")
+        #     self._deps.model_name = params.get("model").get("modelID")
+
+        files_list = params.get("files", [])
+        skill_packages_list = params.get("skill_packages", [])
+        tool_spec_files_list = params.get("tool_spec_files", [])
+
         state = SkillDevState(
             task_id=task_id,
             input={
                 "query": params.get("query", ""),
-                "files": params.get("files", []),
-                "skill_packages": params.get("skill_packages", []),
-                "tool_spec_files": params.get("tool_spec_files", []),
+                "files": files_list,
+                "skill_packages": skill_packages_list,
+                "tool_spec_files": tool_spec_files_list,
             },
         )
         pipeline = SkillDevPipeline(task_id=task_id, state=state, deps=self._deps)
@@ -143,9 +159,9 @@ class SkillDevService:
     # skilldev.parse_skill — 导入并解压本地 skill 包到工作区
     # 仅允许在任务开始前调用（存在 state.json 时拒绝）
     # ------------------------------------------------------------------
-    def _handle_parse_skill(
+    async def _handle_parse_skill(
         self, params: dict, request_id: str, channel_id: str, session_id: str
-    ) -> AgentResponseChunk:
+    ) -> AsyncIterator[AgentResponseChunk]:
         task_id = str(
             params.get("task_id") or params.get("session_id") or session_id or ""
         ).strip()
@@ -156,49 +172,84 @@ class SkillDevService:
             channel_id,
         )
         if not task_id:
-            return self._error_chunk(request_id, channel_id, "缺少 task_id 或 session_id 参数")
+            yield self._error_chunk(request_id, channel_id, "缺少 task_id 或 session_id 参数")
+            return
 
         if self._deps.state_store.load_state_sync(task_id) is not None:
-            return self._error_chunk(
+            yield self._error_chunk(
                 request_id,
                 channel_id,
                 f"任务 {task_id} 已开始，禁止导入新的 skill 包",
             )
+            return
 
         file_obj = params.get("skill_package")
         if not isinstance(file_obj, dict):
-            return self._error_chunk(request_id, channel_id, "缺少 skill_package 参数")
+            yield self._error_chunk(request_id, channel_id, "缺少 skill_package 参数")
+            return
 
-        filename = str(file_obj.get("filename") or "").strip()
-        content_b64 = str(file_obj.get("base64Data") or "").strip()
-        if not filename or not content_b64:
-            return self._error_chunk(
-                request_id,
-                channel_id,
-                "skill_package 参数缺少 filename 或 base64Data",
-            )
+        # 小艺适配
+        if file_obj.get("url", ""):
+            filename = file_obj.get("filename")
+            download_url = file_obj.get("url")
+            suffix = Path(filename).suffix.lower()
+            if suffix not in (".zip", ".skill"):
+                yield self._error_chunk(request_id, channel_id, "仅支持 .zip 或 .skill 格式")
+                return
 
-        suffix = Path(filename).suffix.lower()
-        if suffix not in (".zip", ".skill"):
-            return self._error_chunk(request_id, channel_id, "仅支持 .zip 或 .skill 格式")
+            workspace = await self._deps.workspace_provider.ensure_local(task_id)
 
-        workspace = self._deps.workspace_provider.ensure_local(task_id)
+            skill_dir = workspace / "skill"
+            download_path = workspace / f"imported{suffix}"
+            try:
+                _ = await download_file(download_url, str(download_path))
+            except Exception as exc:
+                logger.warning("[SkillDevService] skill 包导入失败: task_id=%s err=%s", task_id, exc)
+                yield self._error_chunk(request_id, channel_id, f"导入失败: {exc}")
+                return
+            
+        else:
+            filename = str(file_obj.get("filename") or "").strip()
+            content_b64 = str(file_obj.get("base64Data") or "").strip()
+            if not filename or not content_b64:
+                yield self._error_chunk(
+                    request_id,
+                    channel_id,
+                    "skill_package 参数缺少 filename 或 base64Data",
+                )
+                return
+            suffix = Path(filename).suffix.lower()
+            if suffix not in (".zip", ".skill"):
+                yield self._error_chunk(request_id, channel_id, "仅支持 .zip 或 .skill 格式")
+                return
 
-        skill_dir = workspace / "skill"
-        upload_path = workspace / f"imported{suffix}"
+            workspace = await self._deps.workspace_provider.ensure_local(task_id)
+
+            skill_dir = workspace / "skill"
+            download_path = workspace / f"imported{suffix}"
+            
+            raw = base64.b64decode(content_b64)
+            download_path.write_bytes(raw)
 
         try:
-            raw = base64.b64decode(content_b64)
-            upload_path.write_bytes(raw)
-            safe_extract_zip(upload_path, skill_dir, extract_to_stem_dir=False)
+            safe_extract_zip(download_path, skill_dir, extract_to_stem_dir=False)
+            skill_md = skill_dir / "SKILL.md"
+            skill_name, _, _ = parse_skill_frontmatter(skill_md)
+            yield AgentResponseChunk(
+                request_id=request_id,
+                channel_id=channel_id,
+                payload={"event_type": "skilldev.skill_name_ready", "skill_name": skill_name},
+                is_complete=False,
+            )
         except Exception as exc:
             logger.warning("[SkillDevService] skill 包导入失败: task_id=%s err=%s", task_id, exc)
-            return self._error_chunk(request_id, channel_id, f"导入失败: {exc}")
+            yield self._error_chunk(request_id, channel_id, f"导入失败: {exc}")
+            return
         finally:
-            if upload_path.exists():
-                upload_path.unlink(missing_ok=True)
+            if download_path.exists():
+                download_path.unlink(missing_ok=True)
 
-        return AgentResponseChunk(
+        yield AgentResponseChunk(
             request_id=request_id,
             channel_id=channel_id,
             payload={
@@ -295,7 +346,7 @@ class SkillDevService:
     # skilldev.download — 下载产物
     # ------------------------------------------------------------------
 
-    def _handle_download(
+    async def _handle_download(
         self, params: dict, request_id: str, channel_id: str, session_id: str
     ) -> AgentResponseChunk:
         task_id = params.get("task_id")
@@ -312,18 +363,39 @@ class SkillDevService:
         if not zip_path.exists():
             return self._error_chunk(request_id, channel_id, "产物文件不存在")
 
-        content_b64 = base64.b64encode(zip_path.read_bytes()).decode()
+        upload_file_obs = UploadFileOSMS()
+        download_url = await upload_file_obs.upload_file(str(zip_path))
+        if not download_url:
+            return self._error_chunk(request_id, channel_id, "上传文件失败")
+
+        export_id = f"exp_{secrets.token_hex(3)}"
+        export_time = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
         return AgentResponseChunk(
             request_id=request_id,
             channel_id=channel_id,
             payload={
-                "ok": True,
                 "filename": zip_path.name,
-                "content_base64": content_b64,
-                "size_bytes": state.zip_size,
+                "url": download_url,
+                "mimeType": "application/zip",
+                "exportId": export_id,
+                "exportedAt": export_time,
             },
             is_complete=True,
         )
+
+        # content_b64 = base64.b64encode(zip_path.read_bytes()).decode()
+
+        # return AgentResponseChunk(
+        #     request_id=request_id,
+        #     channel_id=channel_id,
+        #     payload={
+        #         "ok": True,
+        #         "filename": zip_path.name,
+        #         "content_base64": content_b64,
+        #         "size_bytes": state.zip_size,
+        #     },
+        #     is_complete=True,
+        # )
 
     # ------------------------------------------------------------------
     # skilldev.cancel — 取消任务

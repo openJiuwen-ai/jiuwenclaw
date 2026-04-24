@@ -30,6 +30,7 @@ from __future__ import annotations
 import re
 import json
 import logging
+import asyncio
 
 from jiuwenclaw.agentserver.skilldev.context import SkillDevContext
 from jiuwenclaw.agentserver.skilldev.schema import SkillDevEventType, SkillDevStage
@@ -120,7 +121,7 @@ Skill 文件位于工作区的 `skill/` 子目录下。**在设计测试用例�
 - 路径格式：`evals/skill-tests/{skill_name}/files/<filename>`
 - 在 expected_output 中说明该文件应如何被处理
 
-## 输出格式（严格 JSON，不包含任何解释文字或 markdown 代码块）
+## 输出格式（严格 JSON，不包含任何解释文字或 markdown 代码块，expectations条目内容无双引号等其他特殊符号，便于JSON解析）
 ```json
 {{
   "skill_name": "{skill_name}",
@@ -154,24 +155,57 @@ Skill 文件位于工作区的 `skill/` 子目录下。**在设计测试用例�
 class TestDesignStageHandler(StageHandler):
     """TEST_DESIGN 阶段：Agent 设计测试用例，输出 evals.json."""
 
+    # 单次 design 失败后的最大重试次数（不含首次）
+    _MAX_DESIGN_RETRIES = 2
+    # 单次 design 调用的超时秒数（防止网络挂起导致整个 stage 无限等待）
+    _DESIGN_TIMEOUT_SECONDS = 120
+
     async def execute(self, ctx: SkillDevContext) -> StageResult:
         """主流程：设计测试用例并保存 evals.json."""
         await ctx.emit(SkillDevEventType.PROGRESS, {"message": "正在设计测试用例..."})
 
         skill_name = self._get_skill_name(ctx)
 
-        # 生成测试案例
-        evals = await self._design_evals(ctx, skill_name)
+        for attempt in range(1, self._MAX_DESIGN_RETRIES + 1):
+            # 生成测试案例（带超时保护，防止网络挂起）
+            try:
+                evals = await asyncio.wait_for(
+                    self._design_evals(ctx, skill_name, attempt),
+                    timeout=self._DESIGN_TIMEOUT_SECONDS,
+                )
+            except asyncio.TimeoutError as e:
+                logger.warning(
+                    "[TestDesignStage] 测试用例设计超时（>%ds），准备重试 (%d/%d)",
+                    self._DESIGN_TIMEOUT_SECONDS, attempt, self._MAX_DESIGN_RETRIES,
+                )
+                if attempt < self._MAX_DESIGN_RETRIES:
+                    wait = 2 ** (attempt - 1)
+                    await asyncio.sleep(wait)
+                    continue
+                raise RuntimeError(
+                    f"测试用例设计超时，{self._MAX_DESIGN_RETRIES} 次重试后仍失败"
+                ) from e
 
-        # 验证 evals schema，确保每个 case 都有 name 字段
-        evals = self._validate_and_normalize_evals(evals, skill_name)
+            # 验证 evals schema，确保每个 case 都有 name 字段
+            evals = self._validate_and_normalize_evals(evals, skill_name)
 
-        # 生成结果为空时不继续推进，避免 TEST_RUN 空跑
-        count = len(evals.get("evals", []))
-        if count == 0:
-            msg = "测试用例设计失败：未能生成任何有效的测试用例，请检查 Skill 文件是否完整"
-            await ctx.emit(SkillDevEventType.ERROR, {"message": msg, "stage": "test_design"})
-            raise RuntimeError(msg)
+            # 验证已生成正确格式的测试用例
+            count = len(evals.get("evals", []))
+
+            if count > 0:
+                break
+
+            if attempt < self._MAX_DESIGN_RETRIES:
+                wait = 2 ** (attempt - 1)  # 指数退避：1s, 2s
+                logger.warning(
+                    "[TestDesignStage] 测试案例生成失败，%ds 后重试 (%d/%d)",
+                    wait, attempt, self._MAX_DESIGN_RETRIES,
+                )
+                await asyncio.sleep(wait)
+            else:
+                msg = f"[TestDesignStage] {self._MAX_DESIGN_RETRIES} 次重试后仍失败"
+                logger.error(msg)
+                raise RuntimeError(msg)
 
         # 更新state，储存生成的测试案例
         ctx.state.evals = evals
@@ -281,7 +315,7 @@ class TestDesignStageHandler(StageHandler):
         
         return normalized
 
-    async def _design_evals(self, ctx: SkillDevContext, skill_name: str) -> dict:
+    async def _design_evals(self, ctx: SkillDevContext, skill_name: str, attempt: int) -> dict:
         """调用 Agent 设计测试用例（流式，实时推送 LLM 推理过程）."""
         try:
             system_prompt = TEST_DESIGN_SYSTEM_PROMPT.format(
@@ -289,9 +323,10 @@ class TestDesignStageHandler(StageHandler):
                 skill_name=skill_name,
                 workspace=ctx.workspace,
             )
-            system_prompt += self._build_external_tools_hint(ctx)
+            # system_prompt += self._build_external_tools_hint(ctx)
             agent = ctx.create_stage_agent(
-                stage_name="test_design",
+                stage_name=f"test_design/{attempt}",
+                whitelist_key="test_design",
                 system_prompt=system_prompt,
                 tools=["file_read", "file_glob", "file_listdir", "web_search_free", 
                     "web_search_paid", "shell", "file_write"],

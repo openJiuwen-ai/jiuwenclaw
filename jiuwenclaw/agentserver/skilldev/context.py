@@ -44,6 +44,8 @@ from openjiuwen.harness.tools.web_tools import (
     WebPaidSearchTool,
 )
 
+from openjiuwen.core.single_agent.rail.base import AgentRail
+
 from jiuwenclaw.agentserver.deep_agent.rails import JiuClawStreamEventRail
 from jiuwenclaw.agentserver.skilldev.deps import SkillDevDeps
 from jiuwenclaw.agentserver.skilldev.schema import SkillDevEvent, SkillDevEventType, SkillDevState
@@ -95,6 +97,23 @@ STAGE_TOOL_WHITELIST: Dict[str, list[str]] = {
     # Description optimization: minimal tools
     "DESC_OPTIMIZE": ["file_read"],
 }
+
+
+class _ModelErrorCapture(AgentRail):
+    """临时注入的 Rail，捕获框架内部静默吞掉的 LLM 调用异常.
+
+    ReActAgent._inner_stream 的 stream_process() 会用 except Exception 捕获所有
+    LLM 异常并仅打 log，导致 run_agent_streaming() 正常耗尽而不抛出。
+    本 Rail 在异常被吞之前（ON_MODEL_EXCEPTION 在 except 之前触发）将其存入
+    captured，供调用方在流结束后检查并重新 raise。
+    """
+
+    def __init__(self) -> None:
+        self.captured: list[Exception] = []
+
+    async def on_model_exception(self, ctx) -> None:
+        if ctx.exception is not None:
+            self.captured.append(ctx.exception)
 
 
 def _chunk_to_frontend_delta(chunk_type: str, payload: dict) -> str:
@@ -319,6 +338,11 @@ class SkillDevContext:
         """
         from openjiuwen.core.runner import Runner
 
+        # 注入错误捕获 Rail：防止框架静默报错并返回空字段，影响下游执行
+        # 将异常存入 captured，供流结束后检查并重新 raise，还原正确的错误信息。
+        error_capture = _ModelErrorCapture()
+        agent.add_rail(error_capture)
+
         inputs = {
             "conversation_id": f"skilldev_{self.task_id}_{stage_name}",
             "query": query,
@@ -368,154 +392,187 @@ class SkillDevContext:
                 await push_reasoning_delta(accumulated_reasoning)
                 accumulated_reasoning = ""
 
-        async for chunk in Runner.run_agent_streaming(agent, inputs=inputs):
-            if not hasattr(chunk, "type") or not hasattr(chunk, "payload"):
-                logger.info(
-                    "[SkillDevContext] stream chunk skipped: missing type/payload (stage=%s, chunk=%s)",
-                    stage_name,
-                    type(chunk).__name__,
-                )
-                continue
+        try:
+            async for chunk in Runner.run_agent_streaming(agent, inputs=inputs):
+                if not hasattr(chunk, "type") or not hasattr(chunk, "payload"):
+                    logger.info(
+                        "[SkillDevContext] stream chunk skipped: missing type/payload (stage=%s, chunk=%s)",
+                        stage_name,
+                        type(chunk).__name__,
+                    )
+                    continue
 
-            chunk_type = str(chunk.type)
-            raw = chunk.payload
-            payload = raw if isinstance(raw, dict) else {}
+                chunk_type = str(chunk.type)
+                raw = chunk.payload
+                payload = raw if isinstance(raw, dict) else {}
 
-            if chunk_type == "llm_reasoning":
-                # 先冲刷正文缓冲，保持时序边界
-                await flush_text()
-                if isinstance(raw, dict):
-                    piece = raw.get("content", "") or raw.get("output", "")
-                else:
-                    piece = str(raw) if raw is not None else ""
-                piece = str(piece) if piece else ""
-                if piece:
-                    accumulated_reasoning += piece
-                    if len(accumulated_reasoning) >= _STREAM_CHAR_THRESHOLD:
-                        await flush_reasoning()
-                    trace_parts.append(piece)
-                continue
+                if chunk_type == "llm_reasoning":
+                    # 先冲刷正文缓冲，保持时序边界
+                    await flush_text()
+                    if isinstance(raw, dict):
+                        piece = raw.get("content", "") or raw.get("output", "")
+                    else:
+                        piece = str(raw) if raw is not None else ""
+                    piece = str(piece) if piece else ""
+                    if piece:
+                        accumulated_reasoning += piece
+                        if len(accumulated_reasoning) >= _STREAM_CHAR_THRESHOLD:
+                            await flush_reasoning()
+                        trace_parts.append(piece)
+                    continue
 
-            if chunk_type in ("llm_output", "content_chunk"):
-                # 先冲刷推理缓冲，保持时序边界
-                await flush_reasoning()
-                if isinstance(raw, dict):
-                    c = raw.get("content")
-                    if c in (None, ""):
-                        c = raw.get("output", "")
-                    text_piece = str(c) if c is not None else ""
-                else:
-                    text_piece = str(raw) if raw is not None else ""
-                if text_piece:
-                    has_streamed_output = True
-                    accumulated_text += text_piece
-                    if len(accumulated_text) >= _STREAM_CHAR_THRESHOLD:
-                        await flush_text()
-                    trace_parts.append(text_piece)
-                continue
+                if chunk_type in ("llm_output", "content_chunk"):
+                    # 先冲刷推理缓冲，保持时序边界
+                    await flush_reasoning()
+                    if isinstance(raw, dict):
+                        c = raw.get("content")
+                        if c in (None, ""):
+                            c = raw.get("output", "")
+                        text_piece = str(c) if c is not None else ""
+                    else:
+                        text_piece = str(raw) if raw is not None else ""
+                    if text_piece:
+                        has_streamed_output = True
+                        accumulated_text += text_piece
+                        if len(accumulated_text) >= _STREAM_CHAR_THRESHOLD:
+                            await flush_text()
+                        trace_parts.append(text_piece)
+                    continue
 
-            if chunk_type in ("tool_call", "tool_result"):
-                await flush_text()
-                await flush_reasoning()
-                delta_text = _chunk_to_frontend_delta(chunk_type, payload)
-                if delta_text:
-                    trace_parts.append(delta_text)
-                if chunk_type == "tool_call":
-                    event_payload = _normalize_tool_call(payload)
-                    if event_payload:
-                        await self.emit(
-                            SkillDevEventType.TOOL_CALL,
-                            {"stage": stage_name, **event_payload},
-                        )
-                    elif delta_text:
-                        await push_output_delta(delta_text)
-                else:
-                    event_payload = _normalize_tool_result(payload)
-                    if event_payload:
-                        await self.emit(
-                            SkillDevEventType.TOOL_RESULT,
-                            {"stage": stage_name, **event_payload},
-                        )
-                    elif delta_text:
-                        await push_output_delta(delta_text)
-                continue
-
-            if chunk_type == "interaction":
-                await flush_text()
-                await flush_reasoning()
-                event_type = payload.get("type")
-                event_payload = payload.get("payload")
-                if isinstance(event_payload, dict):
-                    if event_type == "tool_call":
-                        normalized = _normalize_tool_call(event_payload)
-                        if normalized:
-                            tc_delta = _chunk_to_frontend_delta("tool_call", event_payload)
-                            if tc_delta:
-                                trace_parts.append(tc_delta)
+                if chunk_type in ("tool_call", "tool_result"):
+                    await flush_text()
+                    await flush_reasoning()
+                    delta_text = _chunk_to_frontend_delta(chunk_type, payload)
+                    if delta_text:
+                        trace_parts.append(delta_text)
+                    if chunk_type == "tool_call":
+                        event_payload = _normalize_tool_call(payload)
+                        if event_payload:
                             await self.emit(
                                 SkillDevEventType.TOOL_CALL,
-                                {"stage": stage_name, **normalized},
+                                {"stage": stage_name, **event_payload},
                             )
-                            continue
-                    if event_type == "tool_result":
-                        normalized = _normalize_tool_result(event_payload)
-                        if normalized:
-                            tr_delta = _chunk_to_frontend_delta("tool_result", event_payload)
-                            if tr_delta:
-                                trace_parts.append(tr_delta)
+                        elif delta_text:
+                            await push_output_delta(delta_text)
+                    else:
+                        event_payload = _normalize_tool_result(payload)
+                        if event_payload:
                             await self.emit(
                                 SkillDevEventType.TOOL_RESULT,
-                                {"stage": stage_name, **normalized},
+                                {"stage": stage_name, **event_payload},
                             )
-                            continue
+                        elif delta_text:
+                            await push_output_delta(delta_text)
+                    continue
+
+                if chunk_type == "interaction":
+                    await flush_text()
+                    await flush_reasoning()
+                    event_type = payload.get("type")
+                    event_payload = payload.get("payload")
+                    if isinstance(event_payload, dict):
+                        if event_type == "tool_call":
+                            normalized = _normalize_tool_call(event_payload)
+                            if normalized:
+                                tc_delta = _chunk_to_frontend_delta("tool_call", event_payload)
+                                if tc_delta:
+                                    trace_parts.append(tc_delta)
+                                await self.emit(
+                                    SkillDevEventType.TOOL_CALL,
+                                    {"stage": stage_name, **normalized},
+                                )
+                                continue
+                        if event_type == "tool_result":
+                            normalized = _normalize_tool_result(event_payload)
+                            if normalized:
+                                tr_delta = _chunk_to_frontend_delta("tool_result", event_payload)
+                                if tr_delta:
+                                    trace_parts.append(tr_delta)
+                                await self.emit(
+                                    SkillDevEventType.TOOL_RESULT,
+                                    {"stage": stage_name, **normalized},
+                                )
+                                continue
+                    delta_text = _chunk_to_frontend_delta(chunk_type, payload)
+                    if delta_text:
+                        trace_parts.append(delta_text)
+                        await push_output_delta(delta_text)
+                    continue
+
+                if chunk_type in ("answer", "final_output"):
+                    await flush_text()
+                    await flush_reasoning()
+                    out = payload.get("output") or payload.get("content")
+                    if isinstance(out, dict):
+                        content = out.get("output", str(out))
+                    elif out is not None:
+                        content = str(out)
+                    else:
+                        content = ""
+                    if content:
+                        final_output = content
+                        # 若正文从未流式推送，补推一次（非流式 fallback）；
+                        # 流式模式下 llm_output 已逐片写入 trace_parts，不重复追加
+                        if not has_streamed_output:
+                            trace_parts.append(content)
+                            await push_output_delta(content)
+                    continue
+
+                if chunk_type in (
+                    "todo.updated",
+                    "context.compressed",
+                    "thinking",
+                    "controller_output",
+                    "error",
+                ):
+                    continue
+
                 delta_text = _chunk_to_frontend_delta(chunk_type, payload)
                 if delta_text:
+                    await flush_text()
+                    await flush_reasoning()
+                    trace_parts.append(delta_text)
                     await push_output_delta(delta_text)
-                continue
-
-            if chunk_type in ("answer", "final_output"):
-                await flush_text()
-                await flush_reasoning()
-                out = payload.get("output") or payload.get("content")
-                if isinstance(out, dict):
-                    content = out.get("output", str(out))
-                elif out is not None:
-                    content = str(out)
                 else:
-                    content = ""
-                if content:
-                    final_output = content
-                    # 若正文从未流式推送，补推一次（非流式 fallback）
-                    if not has_streamed_output:
-                        await push_output_delta(content)
-                continue
+                    logger.info(
+                        "[SkillDevContext] stream chunk not emitted: stage=%s type=%s",
+                        stage_name,
+                        chunk_type,
+                    )
 
-            if chunk_type in (
-                "todo.updated",
-                "context.compressed",
-                "thinking",
-                "controller_output",
-                "error",
-            ):
-                continue
+            await flush_text()
+            await flush_reasoning()
 
-            delta_text = _chunk_to_frontend_delta(chunk_type, payload)
-            if delta_text:
-                await flush_text()
-                await flush_reasoning()
-                await push_output_delta(delta_text)
-            else:
-                logger.info(
-                    "[SkillDevContext] stream chunk not emitted: stage=%s type=%s",
-                    stage_name,
-                    chunk_type,
-                )
-
-        await flush_text()
-        await flush_reasoning()
+        # runner正常上抛异常的情况：捕获并上抛
+        except Exception as e:
+            await flush_text()
+            await flush_reasoning()
+            logger.error(
+                "[SkillDevContext] Agent execution failed: stage=%s error=%s",
+                stage_name, e,
+            )
+            raise e
 
         # 返回值只包含正文，不含推理（避免污染后续 JSON 解析等处理）
         output = final_output if final_output is not None else "".join(output_parts)
+
+        # runner静默吞掉异常的情况：通过自定义的rail获取原始报错并上抛
+        # 仅在输出为空时才上抛，有正常输出说明 agent 已从瞬时错误中恢复
+        if error_capture.captured:
+            if not output.strip():
+                e = error_capture.captured[-1]
+                logger.error(
+                    "[SkillDevContext] LLM call failed silently, output is empty: "
+                    "stage=%s error=%s",
+                    stage_name, e,
+                )
+                raise e
+            else:
+                logger.warning(
+                    "[SkillDevContext] LLM had transient errors but agent recovered: "
+                    "stage=%s errors=%d last_error=%s",
+                    stage_name, len(error_capture.captured), error_capture.captured[-1],
+                )
         if capture_trace:
             return output, "".join(trace_parts)
         return output

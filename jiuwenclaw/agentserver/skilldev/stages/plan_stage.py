@@ -179,12 +179,12 @@ class PlanStageHandler(StageHandler):
             parts.append(f"工作区 {ctx.workspace} 中的skill文件夹下存放了已经生成的 SKILL.md， 请**先读取老版本的SKILL.md**再做规划")
             if not (ctx.state.ref_files_dir_empty and ctx.state.ref_skills_dir_empty):
                 parts.append(f"工作区 {ctx.workspace} 中的resources/文件夹下存放了用户原始上传的参考资料，请根据需求自行判断是否需要查看。")
-            if not ctx.state.tool_specs_dir_empty:
+            if not ctx.state.tool_scripts_dir_empty:
                 parts.append(f"用户提供了以下工具，可以在生成的skill中使用：\n{ctx.state.external_tools}")
         else:
             if not (ctx.state.ref_files_dir_empty and ctx.state.ref_skills_dir_empty):
                 parts.append(f"用户已上传参考资料，存放于工作区 {ctx.workspace} 中的resources/目录，请确保**先查看resources目录**中的内容")
-            if not ctx.state.tool_specs_dir_empty:
+            if not ctx.state.tool_scripts_dir_empty:
                 parts.append(f"用户提供了以下工具，可以在生成的skill中使用：\n{ctx.state.external_tools}")
 
         parts.append("请根据以上信息，输出一份完整的 JSON 开发计划。")

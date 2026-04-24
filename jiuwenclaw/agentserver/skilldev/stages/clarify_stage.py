@@ -92,8 +92,12 @@ class ClarifyStageHandler(StageHandler):
             SkillDevEventType.PROGRESS, {"message": "正在分析需求，生成澄清问题..."}
         )
 
-        questions = await self._generate_questions(ctx)
-        ctx.state.clarification_questions = questions
+        try:
+            questions = await self._generate_questions(ctx)
+            ctx.state.clarification_questions = questions
+        except Exception as e:
+            msg = f"澄清问题 生成失败：{e}"
+            raise RuntimeError(msg) from e
 
         await ctx.emit(
             SkillDevEventType.PROGRESS,
@@ -161,12 +165,12 @@ class ClarifyStageHandler(StageHandler):
             parts.append(f"工作区 {ctx.workspace} 中的skill文件夹下存放了已经生成的 SKILL.md， 请**先读取SKILL**后再提问。")
             if not (ctx.state.ref_files_dir_empty and ctx.state.ref_skills_dir_empty):
                 parts.append(f"工作区 {ctx.workspace} 中的resources/文件夹下存放了用户原始上传的参考资料，请根据需求自行判断是否需要查看。")
-            if not ctx.state.tool_specs_dir_empty:
+            if not ctx.state.tool_scripts_dir_empty:
                 parts.append(f"用户提供了以下工具，可以在生成的skill中使用：\n{ctx.state.external_tools}")
         else:
             if not (ctx.state.ref_files_dir_empty and ctx.state.ref_skills_dir_empty):
                 parts.append(f"用户已上传参考资料，存放于工作区 {ctx.workspace} 中的resources/目录，请确保**先查看resources目录**后再提问。")
-            if not ctx.state.tool_specs_dir_empty:
+            if not ctx.state.tool_scripts_dir_empty:
                 parts.append(f"用户提供了以下工具，可以在生成的skill中使用：\n{ctx.state.external_tools}")
 
         parts.append("请根据用户需求，生成必要的关键澄清问题（JSON 数组格式）。")

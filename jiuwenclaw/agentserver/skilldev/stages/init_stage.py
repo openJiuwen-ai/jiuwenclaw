@@ -24,11 +24,10 @@ from jiuwenclaw.agentserver.skilldev.schema import (
     # determine_task_mode,
 )
 from jiuwenclaw.agentserver.skilldev.stages.base import StageHandler, StageResult
-from jiuwenclaw.agentserver.skilldev.utils import safe_extract_zip
-from jiuwenclaw.agentserver.skilldev.stages.validate_stage import (
-    parse_skill_frontmatter,
-)
-
+from jiuwenclaw.agentserver.skilldev.common_utils import safe_extract_zip
+from jiuwenclaw.agentserver.skilldev.stages.validate_stage import parse_skill_frontmatter
+from jiuwenclaw.agentserver.skilldev.tool_utils import generate_tool_scripts_and_usage
+from jiuwenclaw.agentserver.skilldev.utils.download_file_from_url import download_file
 
 logger = logging.getLogger(__name__)
 
@@ -50,33 +49,62 @@ class InitStageHandler(StageHandler):
         # 工作区已由 Pipeline 的 ensure_local 创建，此处直接使用
         ref_files_dir = ctx.workspace / "resources" / "ref-files"
         ref_skills_dir = ctx.workspace / "resources" / "ref-skills"
-        tool_specs_dir = ctx.workspace / "resources" / "tool_specs"
+        tool_scripts_dir = ctx.workspace / "resources" / "available-tools"
+                
         # 解析上传的资源文件（普通参考文件）
         ref_files = ctx.state.input.get("files") or []
-        logger.info(f"[InitStage], {ctx.state.input}")
         if ref_files:
+            # 适配小艺的文件上传方式
             ref_files_dir.mkdir(parents=True, exist_ok=True)
-            await self._write_resources(ref_files, ref_files_dir, extract_zip_to_subdir=True)
+            if ref_files[0].get("url", ""):
+                for file in ref_files:
+                    file_name = file.get("filename", "")
+                    download_url = file.get("url", "")
+                    _ = await download_file(download_url, str(ref_files_dir / file_name))
+                    if Path(file_name).suffix.lower() in (".zip", ".skill"):
+                        safe_extract_zip(
+                            ref_files_dir / file_name, ref_files_dir, extract_to_stem_dir=False
+                            )   
+            else:
+                await self._write_resources(ref_files, ref_files_dir, extract_zip_to_subdir=True)
 
         # 解析上传的参考 skill 压缩包
         skill_packages = ctx.state.input.get("skill_packages") or []
+
         if skill_packages:
             ref_skills_dir.mkdir(parents=True, exist_ok=True)
-            await self._write_resources(
-                skill_packages,
-                ref_skills_dir,
-                extract_zip_to_subdir=True,
-                allowed_suffixes=(".zip", ".skill"),
-            )
+            # 适配小艺
+            if skill_packages[0].get("url", ""):
+                for skill_package in skill_packages:
+                    skill_package_name = skill_package.get("filename", "")
+                    download_url = skill_package.get("url", "")
+                    _ = await download_file(download_url, str(ref_skills_dir / skill_package_name))
+                    safe_extract_zip(
+                        ref_skills_dir / skill_package_name, ref_skills_dir, extract_to_stem_dir=False
+                        )
+            else:
+                await self._write_resources(
+                    skill_packages,
+                    ref_skills_dir,
+                    extract_zip_to_subdir=True,
+                    allowed_suffixes=(".zip", ".skill"),
+                )
 
         # 解析上传的外部工具定义（list[dict]，每项为一个 tool）
         tool_specs = ctx.state.input.get("tool_spec_files") or []
         if tool_specs:
-            tool_specs_dir.mkdir(parents=True, exist_ok=True)
-            await self._write_resources(tool_specs, tool_specs_dir, extract_zip_to_subdir=False)
-            #  校验工具格式并加载到state中，每个 tool dict 至少须包含 "name" 字段，否则跳过
-            ctx.state.external_tools = self._parse_tools(tool_specs_dir)
-            logger.info("[InitStage] 加载外部工具: %d 个", len(ctx.state.external_tools))
+            tool_scripts_dir.mkdir(parents=True, exist_ok=True)
+            # 适配小艺
+            if tool_specs[0].get("protocol", ""): 
+                ctx.state.external_tools = generate_tool_scripts_and_usage(tool_specs, tool_scripts_dir)
+                logger.info("[InitStage] 加载外部工具: %d 个", len(ctx.state.external_tools))
+            else:
+                for tool_info in tool_specs:
+                    content_b64 = tool_info.get("base64Data", "")
+                    tool_info_list = json.loads(base64.b64decode(content_b64).decode("utf-8")) 
+                    
+                    ctx.state.external_tools = generate_tool_scripts_and_usage(tool_info_list, tool_scripts_dir)
+                    logger.info("[InitStage] 加载外部工具: %d 个", len(ctx.state.external_tools))
 
 
         # 更新目录空状态：skill和resources目录
@@ -84,18 +112,18 @@ class InitStageHandler(StageHandler):
         ctx.state.ref_files_dir_empty = not any(ref_files_dir.iterdir()) if ref_files_dir.exists() else True
         ctx.state.ref_skills_dir_empty = not any(ref_skills_dir.iterdir()) if ref_skills_dir.exists() else True
         ctx.state.skill_dir_empty = not any(skill_dir.iterdir()) if skill_dir.exists() else True
-        ctx.state.tool_specs_dir_empty = not any(tool_specs_dir.iterdir()) if tool_specs_dir.exists() else True
+        ctx.state.tool_scripts_dir_empty = not any(tool_scripts_dir.iterdir()) if tool_scripts_dir.exists() else True
 
         # 写完文件后，通过内容扫描推断任务模式
         logger.info(
             "[InitStage] task_id=%s mode=%s ref_files_dir_empty=%s "
-            "ref_skills_dir_empty=%s skill_dir_empty=%s tool_specs_dir_empty=%s",
+            "ref_skills_dir_empty=%s skill_dir_empty=%s tool_scripts_dir_empty=%s",
             ctx.task_id,
             ctx.state.mode.value,
             ctx.state.ref_files_dir_empty,
             ctx.state.ref_skills_dir_empty,
             ctx.state.skill_dir_empty,
-            ctx.state.tool_specs_dir_empty,
+            ctx.state.tool_scripts_dir_empty,
         )
 
         if not ctx.state.skill_dir_empty:
@@ -133,14 +161,20 @@ class InitStageHandler(StageHandler):
         """构造命名 query，要求 Agent 结合用户指令与上传内容."""
         parts = [
             "请生成一个准确的 skill_name。",
-            f"用户需求：{user_query or '（未提供有效需求文本）'}",
-            "命名前请优先检查工作区上传内容（至少查看目录与关键文件名，必要时读取文件内容）：",
-            "- resources/ref-files/",
-            "- resources/ref-skills/",
-            "- resources/tool_specs/",
-            "- skill/（如果已有历史 SKILL.md）",
-            "只输出最终 skill_name，不要解释。",
+            f"用户需求：{user_query}",
         ]
+        has_uploaded_resources = any(
+            (
+                not ctx.state.ref_files_dir_empty,
+                not ctx.state.ref_skills_dir_empty,
+                not ctx.state.tool_scripts_dir_empty,
+            )
+        )
+        if has_uploaded_resources:
+            parts.append(
+                f"命名前请优先检查工作区{ctx.workspace}/resources/目录下的上传内容（至少查看目录与关键文件名，必要时读取文件内容）",
+            )
+        parts.append("只输出最终 skill_name，不要解释。")
         return "\n".join(parts)
 
     def _normalize_skill_name(self, candidate: str, *, fallback_text: str = "") -> str:

@@ -174,7 +174,7 @@ class SkillDevPipeline:
                 )
                 self.state.stage = SkillDevStage.ERROR
                 self.state.error = str(exc)
-                await self._emit(SkillDevEventType.ERROR, {"message": str(exc)})
+                await self._emit(SkillDevEventType.ERROR, {"message": f"阶段 {self.state.stage.value}执行失败: {exc}"})
                 await self._checkpoint()
                 async for evt in self._drain_events():
                     yield evt

@@ -189,7 +189,12 @@ class EvaluateStageHandler(StageHandler):
 
         # --- Step 3: Analyst 分析 ---
         await ctx.emit(SkillDevEventType.PROGRESS, {"message": "正在分析评测模式..."})
-        analyst_notes = await self._analyze_patterns(ctx, benchmark)
+        try:
+            analyst_notes = await self._analyze_patterns(ctx, benchmark)
+        except Exception as e:
+            msg = f"EVALUATE Analyst 分析失败：{e}"
+            await ctx.emit(SkillDevEventType.ERROR, {"message": msg, "stage": "evaluate"})
+            raise RuntimeError(msg) from e
         benchmark.notes = analyst_notes
 
         # 持久化
@@ -225,6 +230,8 @@ class EvaluateStageHandler(StageHandler):
     _GRADE_CONCURRENCY = 4
     # 单次 grading 失败后的最大重试次数（不含首次）
     _MAX_GRADE_RETRIES = 3
+    # 单次 grading 调用的超时秒数（防止网络挂起导致整个 stage 无限等待）
+    _GRADE_TIMEOUT_SECONDS = 120
 
     async def _grade_all_evals(self, ctx: SkillDevContext, iter_dir: Path) -> None:
         """为每个 eval 的 with_skill / baseline 结果并行执行评分.
@@ -325,11 +332,32 @@ class EvaluateStageHandler(StageHandler):
                 input_files=input_files,
                 files_created=files_created,
             )
-            agent_results = await self._grade_expectations_with_agent(
-                ctx, agent, grading_request
-            )
+            try:
+                agent_results = await asyncio.wait_for(
+                    self._grade_expectations_with_agent(ctx, agent, grading_request),
+                    timeout=self._GRADE_TIMEOUT_SECONDS,
+                )
+                is_failure = _is_grading_failure(agent_results, expectations)
+            except asyncio.TimeoutError:
+                # 单次 grading 超时（网络挂起等）→ 视为本次 attempt 失败，触发重试
+                logger.warning(
+                    "[EvaluateStage] 评分超时（>%ds），准备重试 (%d/%d): %s/%s",
+                    self._GRADE_TIMEOUT_SECONDS, attempt, self._MAX_GRADE_RETRIES,
+                    eval_name, variant,
+                )
+                agent_results = None
+                is_failure = True
+            except ValueError as parse_err:
+                # LLM 输出无法解析为合法 JSON → 视为本次 attempt 失败，触发重试
+                # 网络 / 超时异常不在此处捕获，会直接传播到 _grade_all_evals → execute()
+                logger.warning(
+                    "[EvaluateStage] 评分结果解析失败，准备重试 (%d/%d): %s/%s: %s",
+                    attempt, self._MAX_GRADE_RETRIES, eval_name, variant, parse_err,
+                )
+                agent_results = None
+                is_failure = True
 
-            if not _is_grading_failure(agent_results, expectations):
+            if not is_failure:
                 break  # 有效结果，不再重试
 
             if attempt < self._MAX_GRADE_RETRIES:
@@ -385,31 +413,24 @@ class EvaluateStageHandler(StageHandler):
             )
         prompt += "\n请按照 JSON 格式逐条输出评分结果。"
 
-        try:
-            response = await ctx.run_stage_agent_streaming(
-                agent,
-                stage_name=request.stage_name,
-                query=prompt,
-                emit_thinking=False, # 防止前端消息混杂
-                capture_trace=True
-            )
-            response, trace = response if isinstance(response, tuple) else (response, "")
+        # 不捕获 LLM 调用异常（网络断开、超时等）—— 让其向上传播，
+        # 使 pipeline 进入 ERROR 状态并通知前端；
+        # 只在 JSON 解析层面做容错。
+        response = await ctx.run_stage_agent_streaming(
+            agent,
+            stage_name=request.stage_name,
+            query=prompt,
+            emit_thinking=False, # 防止前端消息混杂
+            capture_trace=True
+        )
+        response, trace = response if isinstance(response, tuple) else (response, "")
 
-            if trace and request.run_dir is not None:
-                (request.run_dir / "eval_trace.txt").write_text(trace, encoding="utf-8")
+        if trace and request.run_dir is not None:
+            (request.run_dir / "eval_trace.txt").write_text(trace, encoding="utf-8")
 
-            logger.info(f"[EvaluateStage] Agent 评分响应: {response[:200]}...")
-            agent_results = self._parse_agent_grading_response(response, request.expectations)
-            return agent_results
-        except Exception as e:
-            logger.error(f"[EvaluateStage] Agent 评分失败: {e}")
-            return {
-                "expectations": [
-                    {"expectation": exp, "passed": False, "reason": "Agent 评分失败"}
-                    for exp in request.expectations
-                ],
-                "summary": {"passed": 0, "total": len(request.expectations)}
-            }
+        logger.info(f"[EvaluateStage] Agent 评分响应: {response[:200]}...")
+        # 解析失败直接向上抛出 ValueError，由 _grade_one 的重试循环捕获
+        return self._parse_agent_grading_response(response, request.expectations)
 
     def _parse_agent_grading_response(self, response: str, expectations: list) -> Dict[str, Any]:
         """解析 Agent 的评分响应"""
@@ -719,16 +740,17 @@ class EvaluateStageHandler(StageHandler):
             f"请输出具体的、可执行的改进建议。"
         )
 
+        # 不捕获 LLM 调用异常，让网络错误向上传播到 execute()
+        response = await ctx.run_stage_agent_streaming(
+            analyst_agent, stage_name="evaluate_analyst", query=prompt
+        )
+        logger.info(f"[EvaluateStage] Analyst 响应: {response[:200]}...")
         try:
-            response = await ctx.run_stage_agent_streaming(
-                analyst_agent, stage_name="evaluate_analyst", query=prompt
-            )
-            logger.info(f"[EvaluateStage] Analyst 响应: {response[:200]}...")
             suggestions = self._parse_analyst_suggestions(response)
-            return suggestions
         except Exception as e:
-            logger.error(f"[EvaluateStage] Analyst 分析失败: {e}")
-            return [{"category": "分析失败", "suggestion": str(e), "priority": "low"}]
+            logger.error(f"[EvaluateStage] Analyst 结果解析失败: {e}")
+            suggestions = [{"category": "分析失败", "suggestion": str(e), "priority": "low"}]
+        return suggestions
 
     def _parse_analyst_suggestions(self, response: str) -> list[Dict[str, str]]:
         """解析 Analyst 的建议"""

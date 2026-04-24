@@ -300,9 +300,9 @@ class GenerateStageHandler(StageHandler):
         """调用 Agent 生成完整 Skill 文件集，并回收实际产物列表."""
 
         if ctx.state.skill_dir_empty and ctx.state.ref_skills_dir_empty:
-            retrieved_skills_dir = ctx.workspace / "retrieved_skills"
-            retrieved_skills_dir.mkdir(parents=True, exist_ok=True)
-            system_prompt = GENERATE_SYSTEM_PROMPT_TEMPLATE.format(
+            # retrieved_skills_dir = ctx.workspace / "retrieved_skills"
+            # retrieved_skills_dir.mkdir(parents=True, exist_ok=True)
+            system_prompt = GENERATE_SYSTEM_PROMPT_TEMPLATE_WITH_REF.format(
                 workspace=ctx.workspace
             )
         else:
@@ -356,13 +356,21 @@ class GenerateStageHandler(StageHandler):
                 )
             if not (ctx.state.ref_files_dir_empty and ctx.state.ref_skills_dir_empty):
                 parts.append(f"工作区 {ctx.workspace} 中的resources/文件夹下存放了用户原始上传的参考资料，请根据需求自行判断是否需要查看。")
-            if not ctx.state.tool_specs_dir_empty:
-                parts.append(f"用户提供了以下工具，可以在生成的skill中使用：\n{ctx.state.external_tools}")
+            if not ctx.state.tool_scripts_dir_empty:
+                parts.append(
+                    f"用户提供了以下工具，可以在生成的skill中使用：\n{ctx.state.external_tools}\n"
+                    "工具是通过python脚本的方式调用的。如果需要使用某个工具，请将对应的脚本复制到skill/scripts/目录下，再在SKILL.md中使用。"
+                    "不用去阅读脚本的内容，只需要知道工具的名称和参数即可。"
+                    )
         else:
             if not (ctx.state.ref_files_dir_empty and ctx.state.ref_skills_dir_empty):
                 parts.append(f"用户已上传参考资料，存放于工作区 {ctx.workspace} 中的resources/目录，请确保**先查看resources目录**中的内容")
-            if not ctx.state.tool_specs_dir_empty:
-                parts.append(f"用户提供了以下工具，可以在生成的skill中使用：\n{ctx.state.external_tools}")
+            if not ctx.state.tool_scripts_dir_empty:
+                parts.append(
+                    f"用户提供了以下工具，可以在生成的skill中使用：\n{ctx.state.external_tools}\n"
+                    "工具是通过python脚本的方式调用的。如果需要使用某个工具，请将对应的脚本复制到skill/scripts/目录下，再在SKILL.md中使用。"
+                    "不用去阅读脚本的内容，只需要知道工具的名称和参数即可。"
+                    )
             
         plan = ctx.state.plan
         if plan:
