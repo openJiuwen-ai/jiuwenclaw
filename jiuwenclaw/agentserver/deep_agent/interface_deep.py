@@ -574,6 +574,7 @@ class JiuWenClawDeepAdapter:
         agent_id: str | None = None,
         service_id: str | None = None,
     ) -> None:
+        _apply_llm_io_trace_patch()
         self._instance: DeepAgent | None = None
         self._workspace_dir: str = workspace_dir or str(get_agent_root_dir())
         self._agent_name: str = "main_agent"
