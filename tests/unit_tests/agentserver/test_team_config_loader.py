@@ -179,8 +179,8 @@ def test_load_team_spec_dict_preserves_explicit_empty_skills(monkeypatch, tmp_pa
     assert spec["agents"]["reviewer"]["skills"] == []
 
 
-def test_load_team_spec_dict_expands_missing_skills_to_all_global_skills(monkeypatch, tmp_path):
-    """Missing skills config should expand to the current global skill snapshot."""
+def test_load_team_spec_dict_no_auto_fill_skills_when_missing(monkeypatch, tmp_path):
+    """Missing skills config should not auto-fill with global skills (new behavior)."""
     global_skills_dir = tmp_path / "skills"
     (global_skills_dir / "skill-a").mkdir(parents=True)
     (global_skills_dir / "skill-a" / "SKILL.md").write_text("# skill-a", encoding="utf-8")
@@ -221,8 +221,9 @@ def test_load_team_spec_dict_expands_missing_skills_to_all_global_skills(monkeyp
 
     spec = load_team_spec_dict("session-4")
 
-    assert spec["agents"]["leader"]["skills"] == ["skill-a", "skill-b"]
-    assert spec["agents"]["writer"]["skills"] == ["skill-a", "skill-b"]
+    # skills should not be auto-filled when not configured
+    assert "skills" not in spec["agents"]["leader"]
+    assert "skills" not in spec["agents"]["writer"]
 
 
 def test_resolve_team_sqlite_db_path_defaults_to_agent_teams_home(monkeypatch, tmp_path):

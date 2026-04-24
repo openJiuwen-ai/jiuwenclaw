@@ -13,6 +13,7 @@ from types import SimpleNamespace
 from typing import Any, Callable
 
 from openjiuwen.agent_teams.agent.team_agent import TeamAgent
+from openjiuwen.agent_teams.paths import team_home
 from openjiuwen.agent_teams.schema.blueprint import TeamAgentSpec
 from openjiuwen.agent_teams.spawn.context import reset_session_id, set_session_id
 from openjiuwen.harness import DeepAgent
@@ -215,24 +216,24 @@ class TeamManager:
 
             return True, [str(skill).strip() for skill in skills if str(skill).strip()]
 
-        def copy_member_skills(
+        def copy_member_configured_skills(
             member_skills_dir: Path,
-            *,
-            skills_configured: bool,
             selected_skills: list[str],
         ) -> None:
+            """Copy member-configured skills to member's own skills directory."""
             if not global_skills_dir.exists():
                 logger.warning("[TeamManager] global_skills_dir does not exist: %s", global_skills_dir)
                 return
 
             selected_skill_set = set(selected_skills)
+            member_skills_dir.mkdir(parents=True, exist_ok=True)
             copied_count = 0
             for skill_dir in global_skills_dir.iterdir():
                 if not skill_dir.is_dir():
                     continue
                 if not (skill_dir / "SKILL.md").is_file():
                     continue
-                if skills_configured and skill_dir.name not in selected_skill_set:
+                if skill_dir.name not in selected_skill_set:
                     continue
                 dest = member_skills_dir / skill_dir.name
                 if dest.exists():
@@ -241,15 +242,14 @@ class TeamManager:
                 copied_count += 1
                 logger.info("[TeamManager] Copied skill '%s' to member workspace", skill_dir.name)
 
-            if skills_configured:
-                existing_skill_names = {
-                    path.name for path in member_skills_dir.iterdir() if path.is_dir()
-                }
-                missing = sorted(selected_skill_set - existing_skill_names)
-                if missing:
-                    logger.warning("[TeamManager] configured skills not found in global dir: %s", missing)
+            existing_skill_names = {
+                path.name for path in member_skills_dir.iterdir() if path.is_dir()
+            }
+            missing = sorted(selected_skill_set - existing_skill_names)
+            if missing:
+                logger.warning("[TeamManager] configured skills not found in global dir: %s", missing)
 
-            logger.info("[TeamManager] Total skills copied: %d", copied_count)
+            logger.info("[TeamManager] Total configured skills copied to member: %d", copied_count)
 
         def build_member_skill_state(member_skills_dir: Path) -> dict[str, Any]:
             state: dict[str, Any] = {
@@ -386,18 +386,19 @@ class TeamManager:
                 member_skills_dir = Path(member_workspace.root_path) / "skills"
                 skills_configured, selected_skills = resolve_member_skills(member_name, role)
 
+                # Copy member-configured skills to member's own skills directory
+                # Note: global skills are already copied to team shared directory in create_team
                 try:
+                    # Ensure member skills directory exists
                     member_skills_dir.mkdir(parents=True, exist_ok=True)
-                    copy_member_skills(
-                        member_skills_dir,
-                        skills_configured=skills_configured,
-                        selected_skills=selected_skills,
-                    )
+                    if skills_configured and selected_skills:
+                        copy_member_configured_skills(member_skills_dir, selected_skills)
+                    # Member directory always needs skills_state.json
                     write_member_skill_state(member_skills_dir)
                 except Exception as exc:
                     logger.warning("[TeamManager] skill copy failed: %s", exc)
 
-                # 为 member 创建独立的 SkillManager 和 SkillToolkit
+                # Create independent SkillManager and SkillToolkit for member
                 try:
                     agent.add_rail(
                         MemberSkillToolkitRail(
@@ -470,6 +471,39 @@ class TeamManager:
 
         return customizer
 
+
+    @staticmethod
+    def _copy_global_skills_to_team_shared_dir(spec: TeamAgentSpec) -> None:
+        """Copy global skills to team shared directory (executed once after team build)."""
+        from jiuwenclaw.utils import get_agent_skills_dir
+
+        global_skills_dir = get_agent_skills_dir()
+        if not global_skills_dir.exists():
+            logger.warning("[TeamManager] global_skills_dir does not exist: %s", global_skills_dir)
+            return
+
+        # Resolve team workspace path
+        ws_config = spec.workspace
+        ws_path = ws_config.root_path if ws_config and ws_config.root_path else None
+        if not ws_path:
+            ws_path = str(team_home(spec.team_name) / "team-workspace")
+
+        team_shared_skills_dir = Path(ws_path) / "skills"
+
+        # Check if already copied (via marker file)
+        copied_marker = team_shared_skills_dir / ".team_skills_copied"
+        if copied_marker.exists():
+            logger.info("[TeamManager] Team shared skills already copied, skipping")
+            return
+
+        # Copy entire skills directory (including skills_state.json)
+        team_shared_skills_dir.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copytree(global_skills_dir, team_shared_skills_dir, dirs_exist_ok=True)
+
+        # Write marker file to indicate copy completed
+        copied_marker.write_text("", encoding="utf-8")
+        logger.info("[TeamManager] Copied global skills dir to team shared: %s", team_shared_skills_dir)
+
     async def create_team(
         self,
         session_id: str,
@@ -504,6 +538,10 @@ class TeamManager:
             logger.info("[TeamManager] creating TeamAgent from spec")
             team_agent = spec.build()
             self._team_agents[session_id] = team_agent
+
+            # After build, copy global skills to team shared directory (only once)
+            self._copy_global_skills_to_team_shared_dir(spec)
+
             logger.info(
                 "[TeamManager] Team created: session_id=%s, team_name=%s",
                 session_id,

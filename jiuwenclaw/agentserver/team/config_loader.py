@@ -117,22 +117,9 @@ def _build_agent_spec_dict(
     return merged
 
 
-def _list_global_skill_names() -> list[str]:
-    skills_dir = get_agent_skills_dir()
-    if not skills_dir.exists() or not skills_dir.is_dir():
-        return []
-
-    return sorted(
-        path.name
-        for path in skills_dir.iterdir()
-        if path.is_dir() and (path / "SKILL.md").is_file()
-    )
-
-
 def _build_agents_config(team_raw: dict[str, Any], config_base: dict[str, Any]) -> dict[str, Any]:
     default_model = _build_default_model_dict(config_base)
     default_workspace, max_iterations, completion_timeout = _build_agent_defaults()
-    all_skill_names = _list_global_skill_names()
 
     agents_raw = team_raw.get("agents", {})
     if not isinstance(agents_raw, dict) or not agents_raw:
@@ -142,8 +129,9 @@ def _build_agents_config(team_raw: dict[str, Any], config_base: dict[str, Any]) 
     agents: dict[str, Any] = {}
     for agent_key, raw_agent_config in agents_raw.items():
         agent_config = dict(raw_agent_config) if isinstance(raw_agent_config, dict) else {}
-        if "skills" not in agent_config:
-            agent_config["skills"] = deepcopy(all_skill_names)
+        # No longer auto-fill all skills
+        # When skills not configured, member won't copy any skill to own directory
+        # Global skills are copied to team shared directory, accessible via .team/{team_name}/skills
         agent_spec = _build_agent_spec_dict(
             agent_config,
             default_model=default_model,
