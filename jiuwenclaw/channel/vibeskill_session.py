@@ -29,6 +29,7 @@ class VibeSkillSession:
     created_at: float = field(default_factory=time.time)
     updated_at: float = field(default_factory=time.time)
     metadata: dict[str, Any] = field(default_factory=dict)
+    mode: str = "SkillCreate"  # "SkillCreate" or "Standard"
 
 
 class VibeSkillSessionStore:
@@ -53,6 +54,7 @@ class VibeSkillSessionStore:
         self,
         external_id: str | None,
         internal_id: str | None = None,
+        mode: str = "SkillCreate",
     ) -> VibeSkillSession:
         """获取或创建 session。
 
@@ -74,7 +76,7 @@ class VibeSkillSessionStore:
 
             # 创建新 session
             sid = internal_id or f"vibeskill_{secrets.token_hex(6)}"
-            session = VibeSkillSession(external_id=external_id, internal_id=sid)
+            session = VibeSkillSession(external_id=external_id, internal_id=sid, mode=mode)
             self._sessions[sid] = session
             if external_id:
                 self._external_to_internal[external_id] = sid

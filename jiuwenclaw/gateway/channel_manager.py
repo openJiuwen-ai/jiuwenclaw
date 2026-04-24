@@ -90,6 +90,10 @@ class ChannelManager(ABC):
         """将消息交给 MessageHandler（供自定义入站路径使用）。"""
         self._message_handler.handle_message(msg)
 
+    async def create_agent_session(self, session_id: str) -> str:
+        """通过 MessageHandler 创建 agent session。"""
+        return await self._message_handler.create_agent_session(session_id)
+
     def unregister_channel(self, channel_id: str) -> None:
         """注销指定 Channel."""
         self._channels.pop(channel_id, None)

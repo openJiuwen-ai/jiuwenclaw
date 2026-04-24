@@ -1303,7 +1303,7 @@ class MessageHandler(ABC):
         merged_content = f"{prefix} {cleaned_content}".strip()
         return cls._resolve_at_file_references(merged_content, cwd=cwd)
 
-    async def _ensure_vibeskill_agent_session(self, session_id: str) -> str:
+    async def create_agent_session(self, session_id: str) -> str:
         from jiuwenclaw.e2a.gateway_normalize import e2a_from_agent_fields
         from jiuwenclaw.schema.message import ReqMethod
 
@@ -1349,7 +1349,7 @@ class MessageHandler(ABC):
                 if self._is_known_jiuwenclaw_session_id(external)
                 else self._generate_channel_session_id(_VIBESKILL_CHANNEL_ID)
             )
-            ensured = await self._ensure_vibeskill_agent_session(desired)
+            ensured = await self.create_agent_session(desired)
             self._vibeskill_session_aliases[external] = ensured
             return ensured, ensured != external
 

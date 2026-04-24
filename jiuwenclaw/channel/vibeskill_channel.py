@@ -7,13 +7,17 @@ import secrets
 import socket
 import time
 from dataclasses import dataclass, field
-from typing import Any, Callable
+from typing import TYPE_CHECKING, Any, Callable, cast
 from urllib.parse import parse_qs, urlparse
 
 from jiuwenclaw.channel.base import BaseChannel
 from jiuwenclaw.e2a.gateway_normalize import e2a_from_agent_fields
+
+if TYPE_CHECKING:
+    from jiuwenclaw.gateway.channel_manager import ChannelManager
 from jiuwenclaw.channel.vibeskill_session import (
     VIBESKILL_CHANNEL_ID,
+    VibeSkillSession,
     VibeSkillSessionState,
     VibeSkillSessionStore,
     _VIBESKILL_ORIGINAL_SESSION_ID_KEY,
@@ -422,6 +426,10 @@ class VibeSkillChannel(BaseChannel):
         elif not external_session_id and session.external_id:
             external_session_id = session.external_id
 
+        # 根据 session mode 路由
+        if session.mode == "Standard":
+            return await self._handle_chat_message(ws, data, session, external_session_id)
+
         await self._store.set_state(session.internal_id, VibeSkillSessionState.BUSY)
         await self._emit_session_status(
             ws=ws,
@@ -502,6 +510,82 @@ class VibeSkillChannel(BaseChannel):
         )
 
         # 直接发送到 MessageHandler
+        self.bus.deliver_to_message_handler(msg)
+
+        return True
+
+    async def _handle_chat_message(
+        self,
+        ws: Any,
+        data: dict[str, Any],
+        session: VibeSkillSession,
+        external_session_id: str | None,
+    ) -> bool:
+        """处理 Standard mode 的 chat 消息，走 jiuwenclaw 标准流程。
+
+        通过 MessageHandler 发送 CHAT_SEND 请求到 AgentServer，
+        响应通过 outbound_intercept 接收（chat.delta/chat.final）。
+        """
+        parts = data.get("parts", [])
+        msg_model = data.get("model")
+        agent = data.get("agent", "coder")
+        request_id = f"vibeskill-{int(time.time() * 1000):x}-{secrets.token_hex(3)}"
+
+        # 提取 query (text parts)
+        query = ""
+        for part in parts:
+            if isinstance(part, dict) and part.get("type") == "text":
+                query += str(part.get("text") or "")
+
+        # 设置 session 状态
+        await self._store.set_state(session.internal_id, VibeSkillSessionState.BUSY)
+        await self._emit_session_status(
+            ws=ws,
+            external_sid=(
+                external_session_id
+                or await self._resolve_external_session_id(session.internal_id)
+                or session.internal_id
+            ),
+            status_type=VibeSkillSessionState.BUSY.value,
+        )
+
+        async with self._ws_sessions_lock:
+            if ws not in self._ws_sessions:
+                self._ws_sessions[ws] = set()
+            self._ws_sessions[ws].add(session.internal_id)
+            self._session_to_ws[session.internal_id] = ws
+
+        # 构建 chat.send 格式的 params
+        params: dict[str, Any] = {
+            "query": query,
+        }
+
+        # model
+        if msg_model and isinstance(msg_model, dict):
+            if msg_model.get("providerID"):
+                params["provider_id"] = msg_model["providerID"]
+            if msg_model.get("modelID"):
+                params["model_id"] = msg_model["modelID"]
+
+        if agent:
+            params["agent"] = agent
+
+        msg_metadata = {_VIBESKILL_ORIGINAL_SESSION_ID_KEY: external_session_id} if external_session_id else None
+
+        # 构建 Message 并通过 MessageHandler 发送到 AgentServer
+        msg = Message(
+            id=request_id,
+            type="req",
+            channel_id=VIBESKILL_CHANNEL_ID,
+            session_id=session.internal_id,
+            params=params,
+            timestamp=time.time(),
+            ok=True,
+            req_method=ReqMethod.CHAT_SEND,
+            is_stream=True,
+            metadata=msg_metadata,
+        )
+
         self.bus.deliver_to_message_handler(msg)
 
         return True
@@ -952,13 +1036,20 @@ class VibeSkillChannel(BaseChannel):
                 "properties": self._serialize_part(part, external_sid),
             }]
 
-        # 序号2: 第一次来这个 stage（stage_key 不存在）→ message.part.updated 创建气泡
+        # 序号2: 第一次来这个 stage（stage_key 不存在）→ message.updated 创建气泡
         if is_first:
             part["status"] = "running"
             part["message"] = message
             return [{
-                "type": "message.part.updated",
-                "properties": self._serialize_part(part, external_sid),
+                "type": "message.updated",
+                "properties": {
+                    "info": {
+                        "id": ctx["message_id"],
+                        "sessionID": external_sid,
+                        "role": "assistant",
+                        "parts": self._serialize_parts(ctx["parts"], external_sid),
+                    }
+                },
             }]
 
         # 序号3: 中间消息 → message.part.delta 更新气泡
@@ -1557,8 +1648,25 @@ class VibeSkillChannel(BaseChannel):
 
         仅创建本地 session 记录，配置数据由 message.send 的 parts 传入。
         """
-        # 创建本地 session
-        session = await self._store.get_or_create(external_id=None)
+        # 解析请求体，获取 mode
+        mode = "SkillCreate"  # 默认值
+        if body:
+            try:
+                req_body = json.loads(body.decode("utf-8"))
+                mode = str(req_body.get("mode", "SkillCreate")).strip()
+            except (json.JSONDecodeError, UnicodeDecodeError):
+                pass  # 使用默认值
+
+        # 验证 mode
+        if mode not in ("SkillCreate", "Standard"):
+            return self._json_response(400, {"error": f"Invalid mode: {mode}"})
+
+        if mode == "Standard":
+            # 创建 jiuwenclaw 标准 session
+            return await self._create_standard_session()
+
+        # 创建 VibeSkill session（SkillCreate 模式）
+        session = await self._store.get_or_create(external_id=None, mode=mode)
         session_id = session.internal_id
 
         response_data = {
@@ -1569,6 +1677,38 @@ class VibeSkillChannel(BaseChannel):
             },
             "status": {
                 "sessionStatus": session.state.value,
+                "sandboxStatus": "none",
+            },
+        }
+        return self._json_response(200, response_data)
+
+    async def _create_standard_session(self) -> tuple[int, dict, bytes]:
+        """创建 jiuwenclaw 标准 session（Standard mode）。
+
+        通过 MessageHandler._create_agent_session 创建物理 session，
+        并存储到本地 _store 中。
+        """
+        # 生成 session ID（与前端一致）
+        ts = format(int(time.time() * 1000), "x")
+        suffix = secrets.token_hex(3)
+        session_id = f"sess_{ts}_{suffix}"
+
+        # 通过 ChannelManager.create_agent_session 创建 session
+        channel_manager = cast("ChannelManager", self.bus)
+        internal_id = await channel_manager.create_agent_session(session_id)
+
+        # 存储到本地 _store，标记为 Standard mode
+        await self._store.get_or_create(external_id=None, internal_id=session_id, mode="Standard")
+
+        # HTTP 200 返回 response
+        response_data = {
+            "sessionID": internal_id,
+            "time": {
+                "created": int(time.time() * 1000),
+                "updated": int(time.time() * 1000),
+            },
+            "status": {
+                "sessionStatus": "idle",
                 "sandboxStatus": "none",
             },
         }
