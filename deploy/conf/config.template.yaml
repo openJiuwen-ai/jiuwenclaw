@@ -500,6 +500,11 @@ extensions:
    # 扩展包搜索目录（字符串），用 ';' 分割多个目录：
    # EXTENSION_DIRS="E:/a;D:/b"; 默认会加载仓库根目录 extensions
    extension_dirs: "<<EXTENSION_DIRS>>"
+   # 外置扩展 agent_client REST；占位符由deploy脚本从DEPLOY_VARS/.env替换
+   agent_client_rest:
+     enabled: "<<AGENT_CLIENT_REST_ENABLED>>"
+     host: "<<AGENT_CLIENT_REST_HOST>>"
+     port: "<<AGENT_CLIENT_REST_PORT>>"
 
 team:
   team_name: jiuwen_team
