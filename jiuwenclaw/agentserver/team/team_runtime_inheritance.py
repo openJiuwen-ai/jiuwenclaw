@@ -8,18 +8,24 @@ TeamMember 专用 Rail、Ability 继承逻辑，不依赖主 agent adapter。
 from __future__ import annotations
 
 import logging
+from dataclasses import dataclass
 from typing import Any
 
 from openjiuwen.core.foundation.tool import ToolCard
 from openjiuwen.harness.rails.filesystem_rail import FileSystemRail
 from openjiuwen.harness.rails.heartbeat_rail import HeartbeatRail
 from openjiuwen.harness.rails.security_rail import SecurityRail
+from openjiuwen.harness.rails.skill_use_rail import SkillUseRail
+from openjiuwen.harness.rails.subagent_rail import SubagentRail
 from openjiuwen.harness.rails.task_planning_rail import TaskPlanningRail
 
 from jiuwenclaw.agentserver.deep_agent.rails.avatar_rail import AvatarPromptRail
 from jiuwenclaw.agentserver.deep_agent.rails.response_prompt_rail import ResponsePromptRail
 from jiuwenclaw.agentserver.deep_agent.rails.runtime_prompt_rail import RuntimePromptRail
+from jiuwenclaw.agentserver.deep_agent.rails.skill_compliance_rail import SkillComplianceRail
+from jiuwenclaw.agentserver.deep_agent.rails.skill_prompt_rail import SkillProtocolPromptRail
 from jiuwenclaw.agentserver.deep_agent.rails.stream_event_rail import JiuClawStreamEventRail
+from jiuwenclaw.utils import get_agent_registered_skill_dirs
 
 logger = logging.getLogger(__name__)
 
@@ -32,6 +38,11 @@ RAIL_WHITELIST = frozenset({
     "HeartbeatRail",
     "AvatarPromptRail",
     "FileSystemRail",
+    "SkillUseRail",
+    "SkillProtocolPromptRail",
+    "SkillComplianceRail",
+    "JiuClawContextEngineeringRail",
+    "SubagentRail",
 })
 
 TOOL_WHITELIST = frozenset({
@@ -75,25 +86,46 @@ TOOL_WHITELIST = frozenset({
 })
 
 
-def build_member_rails(
-    skills_dir: str,
-    language: str = "cn",
-    channel: str = "default",
-    agent_name: str = "team_member",
-    model_name: str = "gpt-4",
-) -> list[Any]:
-    """为 Team 成员创建 rails 列表.
+@dataclass
+class MemberRailConfig:
+    """``build_member_rails`` 的构造参数集合。
 
-    Args:
-        skills_dir: 兼容保留参数，当前不参与 skill rail 构造
-        language: 语言设置
-        channel: 渠道设置（使用真实 channel_id）
-        agent_name: 成员名称
-        model_name: 模型名称
-
-    Returns:
-        rail 实例列表
+    Attributes:
+        skills_dir: 兼容保留参数，当前不参与 skill rail 构造。
+        language: 语言设置。
+        channel: 渠道设置（使用真实 channel_id）。
+        agent_name: 成员名称。
+        model_name: 模型名称。
+        session_id: team 会话 id，注入给 SkillComplianceRail 以对齐 SkillStepToolkit 的
+            skill_step.md 路径；未传入时 rail 内部会回退到 ctx.conversation_id 或 "default"。
+        member_id: team 成员 id，用于流事件 rail 与日志标识。
+        context_engine_enabled: 是否挂载上下文工程 rail；Team 默认开启。
+        react_config: 与主 agent 一致的 ``react`` 配置片段；默认预置链 B
+            （见 ``session_memory``），可与主 agent 一致地改为链 A。
     """
+
+    skills_dir: str
+    language: str = "cn"
+    channel: str = "default"
+    agent_name: str = "team_member"
+    model_name: str = "gpt-4"
+    session_id: str | None = None
+    member_id: str | None = None
+    context_engine_enabled: bool = True
+    react_config: dict[str, Any] | None = None
+
+
+def build_member_rails(config: MemberRailConfig) -> list[Any]:
+    """为 Team 成员创建 rails 列表。参数通过 ``MemberRailConfig`` 传入。"""
+    language = config.language
+    channel = config.channel
+    agent_name = config.agent_name
+    model_name = config.model_name
+    session_id = config.session_id
+    member_id = config.member_id
+    context_engine_enabled = config.context_engine_enabled
+    react_config = config.react_config
+
     rails_list = []
 
     try:
@@ -125,7 +157,10 @@ def build_member_rails(
     try:
         rail = JiuClawStreamEventRail()
         rails_list.append(rail)
-        logger.info("[TeamRuntime] JiuClawStreamEventRail created")
+        logger.info(
+            "[TeamRuntime] JiuClawStreamEventRail created: member=%s session=%s",
+            member_id, session_id,
+        )
     except Exception as exc:
         logger.warning("[TeamRuntime] JiuClawStreamEventRail failed: %s", exc)
 
@@ -157,25 +192,107 @@ def build_member_rails(
     except Exception as exc:
         logger.warning("[TeamRuntime] AvatarPromptRail failed: %s", exc)
 
+    try:
+        rail = SubagentRail()
+        rails_list.append(rail)
+        logger.info("[TeamRuntime] SubagentRail created (task_tool when deep_config.subagents set)")
+    except Exception as exc:
+        logger.warning("[TeamRuntime] SubagentRail failed: %s", exc)
+
+    # Team 成员的技能清单（"skills" section）由 SkillUseRail 注入，与主 agent 一致；
+    # include_tools=False 是因为 read_file/code/bash 等具体工具已由 TOOL_WHITELIST 继承，
+    # 这里 SkillUseRail 只负责 prompt 段，不再重复注册工具。
+    try:
+        skill_dirs = [str(p) for p in get_agent_registered_skill_dirs()]
+        rail = SkillUseRail(
+            skills_dir=skill_dirs,
+            skill_mode=SkillUseRail.SKILL_MODE_ALL,
+            include_tools=False,
+        )
+        rails_list.append(rail)
+        logger.info("[TeamRuntime] SkillUseRail created: skills_dir=%s", skill_dirs)
+    except Exception as exc:
+        logger.warning("[TeamRuntime] SkillUseRail failed: %s", exc)
+
+    # Team 成员只注册了 SkillStepToolkit，没有 TodoToolkit，故不注入用户任务 todo section，
+    # 避免模型被提示调用不存在的 todo_* 工具。
+    try:
+        rail = SkillProtocolPromptRail(include_user_todo_section=False)
+        rails_list.append(rail)
+        logger.info("[TeamRuntime] SkillProtocolPromptRail created (protocol section only)")
+    except Exception as exc:
+        logger.warning("[TeamRuntime] SkillProtocolPromptRail failed: %s", exc)
+
+    try:
+        rail = SkillComplianceRail(session_id=session_id)
+        rails_list.append(rail)
+        logger.info(
+            "[TeamRuntime] SkillComplianceRail created: session_id=%s", session_id,
+        )
+    except Exception as exc:
+        logger.warning("[TeamRuntime] SkillComplianceRail failed: %s", exc)
+
+    if context_engine_enabled:
+        try:
+            # 与 JiuWenClawDeepAdapter agent.plan 一致（默认预置链 B，见 react.context_engine_config.session_memory）
+            from jiuwenclaw.agentserver.deep_agent.interface_deep import _build_context_engineering_rail
+
+            react = react_config
+            if react is None:
+                try:
+                    from jiuwenclaw.config import get_config
+
+                    react = (get_config() or {}).get("react", {}) or {}
+                except Exception:
+                    react = {}
+            rail = _build_context_engineering_rail(react, mode="agent.plan")
+            if rail is not None:
+                rails_list.append(rail)
+                logger.info(
+                    "[TeamRuntime] Context engineering rail mounted "
+                    "(MicroCompact/FullCompact/offload preset): "
+                    "agent_name=%s member_id=%s session_id=%s. "
+                    "Runtime: search logs for 'trigger context processor' / "
+                    "'MicroCompactProcessor' / '[FullCompact]'. "
+                    "Optional NDJSON dumps: JIUWENCLAW_PROMPT_DUMP_DIR or "
+                    "~/.jiuwenclaw/logs/logs/sessions/<session_id>/compact_<member_id>.log",
+                    agent_name,
+                    member_id,
+                    session_id,
+                )
+        except Exception as exc:
+            logger.warning("[TeamRuntime] Context engineering rail failed: %s", exc)
+
     logger.info("[TeamRuntime] Total rails built: %d", len(rails_list))
+    if not context_engine_enabled:
+        logger.info(
+            "[TeamRuntime] context_engine_enabled=False: team member will not run CE compact/offload chain "
+            "(react.context_engine_config.enabled is false)",
+        )
     return rails_list
 
 
-def filter_inheritable_ability_cards(main_agent: Any) -> list[ToolCard]:
+def filter_inheritable_ability_cards(
+    main_agent: Any,
+    *,
+    exclude_tool_names: frozenset[str] | None = None,
+) -> list[ToolCard]:
     """从主 agent 获取可继承的 ToolCard 白名单.
 
     Args:
         main_agent: 主 DeepAgent 实例
+        exclude_tool_names: 不继承的工具名（如 ``task_tool``，由成员侧 ``SubagentRail`` 自行注册）
 
     Returns:
         白名单内的 ToolCard 列表
     """
     result = []
+    skip = exclude_tool_names or frozenset()
     try:
         abilities = main_agent.ability_manager.list()
         for ability in abilities:
             if isinstance(ability, ToolCard):
-                if ability.name in TOOL_WHITELIST:
+                if ability.name in TOOL_WHITELIST and ability.name not in skip:
                     result.append(ability)
                 else:
                     logger.debug("[TeamRuntime] Tool '%s' not in whitelist, skipped", ability.name)

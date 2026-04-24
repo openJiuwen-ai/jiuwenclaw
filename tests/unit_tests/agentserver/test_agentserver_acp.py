@@ -47,9 +47,10 @@ class FakeAgentManager:
 
 
 class FakeJiuClawContextEngineeringRail:
-    def __init__(self, *, processors=None, preset=None):
+    def __init__(self, *, processors=None, preset=None, session_memory=None, **kwargs):
         self.processors = processors
         self.preset = preset
+        self.session_memory = session_memory
 
 
 class AgentWebSocketServerHarness(agent_ws_server_module.AgentWebSocketServer):
@@ -479,6 +480,7 @@ def test_build_context_engineering_rail_uses_summary_offloader_config(monkeypatc
     rail = adapter.build_context_engineering_rail_for_test(
         {
             "context_engine_config": {
+                "session_memory": False,
                 "message_summary_offloader_config": {
                     "tokens_threshold": 5000,
                     "keep_last_round": False,
@@ -490,6 +492,7 @@ def test_build_context_engineering_rail_uses_summary_offloader_config(monkeypatc
 
     assert isinstance(rail, FakeJiuClawContextEngineeringRail)
     assert rail.preset is True
+    assert rail.session_memory is None
     assert rail.processors == [
         (
             "MessageSummaryOffloader",
@@ -513,6 +516,7 @@ def test_build_context_engineering_rail_prefers_summary_offloader_config(monkeyp
     rail = adapter.build_context_engineering_rail_for_test(
         {
             "context_engine_config": {
+                "session_memory": False,
                 "message_summary_offloader_config": {
                     "tokens_threshold": 6000,
                 },
@@ -524,6 +528,67 @@ def test_build_context_engineering_rail_prefers_summary_offloader_config(monkeyp
     )
 
     assert isinstance(rail, FakeJiuClawContextEngineeringRail)
+    assert rail.session_memory is None
     assert rail.processors == [
         ("MessageSummaryOffloader", {"tokens_threshold": 6000}),
     ]
+
+
+def test_build_context_engineering_rail_chain_b_merges_processor_configs(monkeypatch):
+    monkeypatch.setattr(
+        interface_deep_module,
+        "JiuClawContextEngineeringRail",
+        FakeJiuClawContextEngineeringRail,
+    )
+
+    class _FakeSM:
+        pass
+
+    monkeypatch.setattr(interface_deep_module, "SessionMemoryConfig", lambda **kw: _FakeSM())
+
+    rail = _build_context_engineering_rail(
+        {
+            "context_engine_config": {
+                "tool_result_budget_processor_config": {"tokens_threshold": 40000},
+                "full_compact_processor_config": {"trigger_total_tokens": 120000},
+            }
+        },
+        "agent.plan",
+    )
+
+    assert isinstance(rail, FakeJiuClawContextEngineeringRail)
+    assert isinstance(rail.session_memory, _FakeSM)
+    assert rail.processors == [
+        ("ToolResultBudgetProcessor", {"tokens_threshold": 40000}),
+        ("FullCompactProcessor", {"trigger_total_tokens": 120000}),
+    ]
+
+
+def test_build_context_engineering_rail_defaults_to_preset_chain_b(monkeypatch):
+    """缺省 session_memory 时走预置链 B：传入非 None session_memory，不合并链 A 四类处理器。"""
+    monkeypatch.setattr(
+        interface_deep_module,
+        "JiuClawContextEngineeringRail",
+        FakeJiuClawContextEngineeringRail,
+    )
+
+    class _FakeSessionMemoryConfig:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+            self.validated = None
+
+        @classmethod
+        def model_validate(cls, data):
+            inst = cls()
+            inst.validated = data
+            return inst
+
+    monkeypatch.setattr(interface_deep_module, "SessionMemoryConfig", _FakeSessionMemoryConfig)
+
+    rail = _build_context_engineering_rail({"context_engine_config": {}}, "agent.plan")
+
+    assert isinstance(rail, FakeJiuClawContextEngineeringRail)
+    assert rail.preset is True
+    assert rail.processors is None
+    assert isinstance(rail.session_memory, _FakeSessionMemoryConfig)
+    assert rail.session_memory.kwargs == {}

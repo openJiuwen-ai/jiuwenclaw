@@ -22,6 +22,7 @@ from openjiuwen.core.single_agent.rail.base import (
     AgentRail,
     ToolCallInputs,
 )
+from openjiuwen.harness.schema.config import SubAgentConfig
 from jiuwenclaw.agentserver.deep_agent import interface_deep as interface_module
 from jiuwenclaw.agentserver.deep_agent.interface_deep import JiuWenClawDeepAdapter
 from jiuwenclaw.schema.agent import AgentRequest
@@ -80,6 +81,12 @@ class _TestableJiuWenClawDeepAdapter(JiuWenClawDeepAdapter):
         return self._build_configured_subagents(model, config, config_base)
 
 
+def _subagent_name(item) -> str:
+    if isinstance(item, SubAgentConfig):
+        return item.agent_card.name
+    return item["name"]
+
+
 def create_text_response(content: str) -> AssistantMessage:
     return AssistantMessage(
         content=content,
@@ -132,7 +139,7 @@ def _make_fake_runtime() -> MagicMock:
     return runtime
 
 
-def test_build_configured_subagents_defaults_to_none_when_unconfigured(
+def test_build_configured_subagents_returns_empty_when_unconfigured(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     adapter = _TestableJiuWenClawDeepAdapter()
@@ -149,7 +156,7 @@ def test_build_configured_subagents_defaults_to_none_when_unconfigured(
         {"react": {"max_iterations": 8}},
     )
 
-    assert subagents is None
+    assert subagents == []
 
 
 def test_build_configured_subagents_includes_browser_by_default_when_runtime_enabled(
@@ -178,7 +185,7 @@ def test_build_configured_subagents_includes_browser_by_default_when_runtime_ena
     )
 
     assert subagents is not None
-    assert [item["name"] for item in subagents] == ["browser_agent"]
+    assert [_subagent_name(item) for item in subagents] == ["browser_agent"]
     assert subagents[0]["kwargs"]["max_iterations"] == 8
 
 
@@ -225,7 +232,10 @@ def test_build_configured_subagents_only_includes_explicitly_enabled_agents(
     )
 
     assert subagents is not None
-    assert [item["name"] for item in subagents] == ["code_agent", "browser_agent"]
+    assert [_subagent_name(item) for item in subagents] == [
+        "code_agent",
+        "browser_agent",
+    ]
     assert subagents[0]["kwargs"]["max_iterations"] == 5
     assert subagents[1]["kwargs"]["max_iterations"] == 7
 
@@ -254,7 +264,7 @@ def test_build_configured_subagents_skips_browser_without_runtime(
         {},
     )
 
-    assert subagents is None
+    assert subagents == []
     browser_builder.assert_not_called()
 
 

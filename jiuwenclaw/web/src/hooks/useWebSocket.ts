@@ -706,11 +706,41 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
           stopStreaming();
           handleTtsPlayback(currentStreamId, currentStreamContent);
         }
-        addToolCall(normalizeToolCallPayload(payload));
+        const normalized = normalizeToolCallPayload(payload);
+        addToolCall({
+          id: normalized.id,
+          name: normalized.name,
+          arguments: normalized.arguments,
+          description: normalized.description,
+          formatted_args: normalized.formatted_args,
+          memberId: normalized.memberId,
+          memberName: normalized.memberName,
+        });
       }),
       webClient.on('chat.tool_result', ({ payload }) => {
         if (!shouldHandleSessionEvent(payload)) return;
         if (shouldDropDuplicatedEvent('chat.tool_result', payload)) return;
+        addToolResult(normalizeToolResultPayload(payload));
+      }),
+      // Team 成员子 agent：后端以 team.member.tool_* 广播，与 leader 的 chat.tool_* 区分
+      webClient.on('team.member.tool_call', ({ payload }) => {
+        if (!shouldHandleSessionEvent(payload)) return;
+        if (shouldDropDuplicatedEvent('team.member.tool_call', payload)) return;
+        setThinking(false);
+        const normalized = normalizeToolCallPayload(payload);
+        addToolCall({
+          id: normalized.id,
+          name: normalized.name,
+          arguments: normalized.arguments,
+          description: normalized.description,
+          formatted_args: normalized.formatted_args,
+          memberId: normalized.memberId,
+          memberName: normalized.memberName,
+        });
+      }),
+      webClient.on('team.member.tool_result', ({ payload }) => {
+        if (!shouldHandleSessionEvent(payload)) return;
+        if (shouldDropDuplicatedEvent('team.member.tool_result', payload)) return;
         addToolResult(normalizeToolResultPayload(payload));
       }),
       webClient.on('todo.updated', ({ payload }) => {

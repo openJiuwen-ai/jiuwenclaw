@@ -43,6 +43,9 @@ export interface ToolCall {
   arguments: Record<string, unknown>;
   description?: string;  // 操作描述，如 "创建 3 个任务"
   formatted_args?: string;  // 格式化参数摘要
+  // Team 模式下发起该调用的成员身份（主 agent 为空）
+  memberId?: string;
+  memberName?: string;
 }
 
 export interface ToolResult {

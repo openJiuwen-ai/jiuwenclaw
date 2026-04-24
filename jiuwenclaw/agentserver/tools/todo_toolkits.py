@@ -5,6 +5,12 @@
 Provides todo_create, todo_complete, todo_insert, todo_remove tools that persist
 tasks to a markdown file under the predefined session directory. Tools can be
 registered in the openJiuwen Runner via TodoToolkit.get_tools().
+
+TodoToolkit 可无参构造，此时 session_id 在每次工具调用时通过
+jiuwenclaw.agentserver.plan_todo_context.get_plan_todo_session_id() 动态解析，
+使一个全局注册的实例能在多 session 并发下正确路由到各自的
+agent/sessions/{session_id}/ 文件。SkillStepToolkit 继承本类，只覆盖文件名与工具
+前缀，用于 SkillComplianceRail 追踪 skill 步骤，避免和用户 todo.md 互相覆盖。
 """
 
 from __future__ import annotations
@@ -13,7 +19,7 @@ import os
 import threading
 from enum import Enum
 from pathlib import Path
-from typing import ClassVar, Dict, List
+from typing import ClassVar, Dict, List, Optional
 
 from pydantic import BaseModel
 
@@ -36,39 +42,75 @@ class TodoTask(BaseModel):
     result: str = ""
 
 
+def _resolve_runtime_session_id() -> str:
+    """从 plan_todo_context 解析当前请求 session_id，失败兜底 "default"。"""
+    try:
+        from jiuwenclaw.agentserver.plan_todo_context import get_plan_todo_session_id
+        return get_plan_todo_session_id() or "default"
+    except Exception:
+        return "default"
+
+
 class TodoToolkit:
     """Toolkit for agent todo task tracking. Persists tasks to markdown under session dir."""
 
-    TODO_FILENAME = "todo.md"
+    TODO_FILENAME: ClassVar[str] = "todo.md"
+    TOOL_PREFIX: ClassVar[str] = "todo"
 
     # Markdown line format: - [ ] 1. task | status  or  - [x] 1. task | status | result
     # parts[0]=task, parts[1]=status, parts[2]=result (optional)
     PARTS_MIN_COUNT_WITH_RESULT = 3  # 至少 3 段才有 result
     PARTS_INDEX_RESULT = 2  # result 在 split("|") 后的索引
 
-    # 按 session_id 分组的文件锁，防止并发任务对同一 todo.md 进行 read-modify-write 时丢失更新
+    # 按 {class}:{session_id} 分组的文件锁，防止并发任务对同一 todo.md 进行
+    # read-modify-write 时丢失更新；父子类（TodoToolkit / SkillStepToolkit）不共享锁。
     _session_locks: ClassVar[Dict[str, threading.Lock]] = {}
     _meta_lock: ClassVar[threading.Lock] = threading.Lock()
 
     @classmethod
     def _get_session_lock(cls, session_id: str) -> threading.Lock:
         """获取指定 session 的文件操作锁（线程安全）."""
+        key = f"{cls.__name__}:{session_id}"
         with cls._meta_lock:
-            if session_id not in cls._session_locks:
-                cls._session_locks[session_id] = threading.Lock()
-            return cls._session_locks[session_id]
+            if key not in cls._session_locks:
+                cls._session_locks[key] = threading.Lock()
+            return cls._session_locks[key]
 
-    def __init__(self, session_id: str, todo_dir: Path | None = None):
+    def __init__(self, session_id: Optional[str] = None, todo_dir: Path | None = None):
         """Initialize TodoToolkit for a session.
 
         Args:
-            session_id: Session/conversation identifier for scoping todo files.
+            session_id: Session/conversation identifier for scoping todo files. 为 None
+                时每次工具调用从 plan_todo_context 动态解析，同一实例可被多 session 并发共用。
             todo_dir: Optional custom directory. Defaults to agent/sessions/{session_id}/.
         """
-        self.session_id = session_id
-        self.todo_dir = todo_dir or (get_agent_sessions_dir() / session_id)
-        self.todo_dir.mkdir(parents=True, exist_ok=True)
-        self._todo_path = self.todo_dir / self.TODO_FILENAME
+        self._explicit_session_id: Optional[str] = session_id
+        self._fixed_todo_dir: Optional[Path] = Path(todo_dir) if todo_dir is not None else None
+
+    @property
+    def session_id(self) -> str:
+        return self._explicit_session_id or _resolve_runtime_session_id()
+
+    @property
+    def todo_dir(self) -> Path:
+        if self._fixed_todo_dir is not None:
+            todo_dir = self._fixed_todo_dir
+        else:
+            todo_dir = get_agent_sessions_dir() / self.session_id
+        todo_dir.mkdir(parents=True, exist_ok=True)
+        return todo_dir
+
+    @property
+    def _todo_path(self) -> Path:
+        return self.todo_dir / self.__class__.TODO_FILENAME
+
+    def resolve_todo_path(self) -> tuple[str, Path]:
+        """Return (session_id, todo_file_path) for external callers (e.g. rails)."""
+        return self.session_id, self._todo_path
+
+    def load_tasks(self) -> List[TodoTask]:
+        """Public wrapper of :meth:`_load_tasks` for external callers (e.g. rails)."""
+        return self._load_tasks()
 
     def _load_tasks(self) -> List[TodoTask]:
         """Load tasks from markdown file."""
@@ -140,7 +182,8 @@ class TodoToolkit:
         with self._get_session_lock(self.session_id):
             if self._todo_path.exists():
                 return self._append_todo_list(
-                    f"Error: A todo list for session {self.session_id} already exists. Use todo_insert to add more tasks."
+                    f"Error: A todo list for session {self.session_id} already exists. "
+                    f"Use {self.__class__.TOOL_PREFIX}_insert to add more tasks."
                 )
             todo_tasks = [
                 TodoTask(idx=i + 1, tasks=t, status=TaskStatus.WAITING, result="")
@@ -252,7 +295,7 @@ class TodoToolkit:
         Returns:
             List of Tool instances (LocalFunction) ready for Runner/agent registration.
         """
-        session_id = self.session_id
+        prefix = self.__class__.TOOL_PREFIX
 
         def make_tool(
             name: str,
@@ -284,7 +327,7 @@ class TodoToolkit:
 
         return [
             make_tool(
-                name="todo_create",
+                name=f"{prefix}_create",
                 description=(
                     "Create a list of todo tasks. Cannot be called when a todo list already exists. "
                     "Use this to plan and track work. Pass a list of task descriptions."
@@ -303,7 +346,7 @@ class TodoToolkit:
                 func=todo_create_wrapper,
             ),
             make_tool(
-                name="todo_complete",
+                name=f"{prefix}_complete",
                 description="Mark a task as completed and save a brief result.",
                 input_params={
                     "type": "object",
@@ -323,7 +366,7 @@ class TodoToolkit:
                 func=todo_complete_wrapper,
             ),
             make_tool(
-                name="todo_insert",
+                name=f"{prefix}_insert",
                 description="Insert new tasks at the given index. Existing tasks are shifted.",
                 input_params={
                     "type": "object",
@@ -343,7 +386,7 @@ class TodoToolkit:
                 func=todo_insert_wrapper,
             ),
             make_tool(
-                name="todo_remove",
+                name=f"{prefix}_remove",
                 description="Remove a task by index. Remaining tasks are renumbered.",
                 input_params={
                     "type": "object",
@@ -358,9 +401,21 @@ class TodoToolkit:
                 func=todo_remove_wrapper,
             ),
             make_tool(
-                name="todo_list",
+                name=f"{prefix}_list",
                 description="List all current todo tasks with their status.",
                 input_params={"type": "object", "properties": {}},
                 func=todo_list_wrapper,
             ),
         ]
+
+
+class SkillStepToolkit(TodoToolkit):
+    """Skill 步骤追踪 toolkit：仅覆盖文件名与工具前缀，其他行为继承 TodoToolkit。
+
+    文件：``agent/sessions/{session_id}/skill_step.md``
+    工具：``skill_step_create`` / ``skill_step_complete`` / ``skill_step_insert``
+          / ``skill_step_remove`` / ``skill_step_list``
+    """
+
+    TODO_FILENAME: ClassVar[str] = "skill_step.md"
+    TOOL_PREFIX: ClassVar[str] = "skill_step"

@@ -85,7 +85,14 @@ def test_build_configured_subagents_includes_optional_browser_and_configured_cod
 
     with (
         patch.object(adapter, "_resolve_runtime_language", return_value="cn"),
-        patch.object(adapter, "_browser_runtime_enabled", return_value=True),
+        patch(
+            "jiuwenclaw.agentserver.deep_agent.interface_deep.JiuWenClawDeepAdapter._browser_runtime_enabled",
+            return_value=True,
+        ),
+        patch(
+            "jiuwenclaw.agentserver.deep_agent.interface_deep.get_memory_mode",
+            return_value="remote",
+        ),
         patch(
             "jiuwenclaw.agentserver.deep_agent.interface_deep.build_code_agent_config",
             return_value="code_spec",
@@ -131,7 +138,10 @@ def test_build_configured_subagents_omits_code_research_without_explicit_enable(
 
     with (
         patch.object(adapter, "_resolve_runtime_language", return_value="cn"),
-        patch.object(adapter, "_browser_runtime_enabled", return_value=True),
+        patch(
+            "jiuwenclaw.agentserver.deep_agent.interface_deep.JiuWenClawDeepAdapter._browser_runtime_enabled",
+            return_value=True,
+        ),
         patch(
             "jiuwenclaw.agentserver.deep_agent.interface_deep.build_code_agent_config",
             return_value="code_spec",

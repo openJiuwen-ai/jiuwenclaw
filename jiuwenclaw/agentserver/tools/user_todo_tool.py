@@ -194,7 +194,8 @@ def _write_todos_file(file_path: str, todos: List[TodoItem]):
 @tool(
     name="user_todos",
     description="管理用户的个人待办事项和日程安排（如会议、提醒、计划）。当用户提到未来的安排或计划时应主动调用。注意：\
-        这是用户的个人待办工具，不要用于 agent 内部的任务规划（内部任务规划请用 todo_create/todo_insert 等工具）。",
+        这是用户的个人待办工具，不要用于 agent 内部的任务规划"
+        "（用户任务规划请用 todo_*；SKILL.md 步骤追踪请用 skill_step_*）。",
 )
 async def user_todos(params: UserTodosParams) -> Dict[str, Any]:
     """管理用户的待办事项列表。支持按 channel 隔离，每个 channel 有独立的待办列表。

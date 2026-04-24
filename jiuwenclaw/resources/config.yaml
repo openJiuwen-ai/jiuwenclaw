@@ -102,54 +102,96 @@ react:
   stream_chunk_threshold: 50
   stream_character_threshold: 2000
   context_engine_config:
+    # 默认：预置链 B（SessionMemory + ToolResultBudget / MicroCompact / FullCompact）。
+    # 若要退回预置链 A：设 session_memory: false，并取消注释下方「链 A」四类配置。
+    #
+    # ============ 链 B 参数说明（目标模型 GLM-5.1，上下文窗口 202k）============
+    # 四层互补：SessionMemory 滚动写笔记 → ToolResultBudget 把大工具结果 offload 成占位
+    #         → MicroCompact 折叠同一工具的旧结果 → FullCompact 总窗口级全量压缩。
+    # 阈值需维持序关系：session_memory.trigger_tokens < tool_result_budget.tokens_threshold
+    #                  < full_compact.trigger_total_tokens，确保全量压缩前笔记已落地
+    #                  （FullCompact 依赖 SessionMemory 状态）。
+    #
+    # session_memory.trigger_tokens=10000：首次写笔记阈值。
+    # session_memory.trigger_add_tokens=5000：增量更新节奏，每多 5k token 追写一次。
+    # session_memory.tool_min_=3：两次笔记之间至少间隔 3 次工具调用，避免抖动。
+    #
+    # tool_result_budget.tokens_threshold=50000：工具结果总量超此值才开始 offload。
+    #   源码默认 50000 针对 200k 窗口设计，与 GLM-5.1 202k 匹配。若换 128k 窗口模型，
+    #   建议降到 25000~30000。
+    # tool_result_budget.large_message_threshold=5000：单条工具结果大于此值即
+    #   视为"大消息"，优先 offload。源码默认 10000；5000 更积极一些，能更早释放
+    #   单次 read_file/grep 等中等规模结果，换取 reload 往返成本。
+    #
+    # micro_compact.trigger_threshold=5 + keep_recent_per_tool=10：同一工具被调用
+    #   超过 5+10=15 次后，折叠较旧的，只保留最近 10 条原文。keep=10 是默认 15 与
+    #   激进值 5 之间的折中，兼顾保真和队列长度。
+    #
+    # full_compact.trigger_total_tokens=180000：总窗口超过此值触发全量压缩。
+    #   202k 窗口下预留 ~22k 给 compact 调用自身 + 续写，充分利用窗口。
+    #   若换 128k 窗口模型，必须降到 100000 左右（预留 ~28k）。
+    # ============================================================================
     enable_kv_cache_release: false
     enable_reload: true
     enabled: true
-    message_summary_offloader_config:
-      messages_threshold: null
-      tokens_threshold: 60000
-      large_message_threshold: 20000
-      offload_message_type: [ "tool" ]
-      protected_tool_names: ["read_file:*SKILL.md", "reload_original_context_messages"]
-      messages_to_keep: null
-      keep_last_round: false
-      customized_summary_prompt: null
-      enable_adaptive_compression: true
-      summary_max_tokens: 900
-      enable_precise_step: false
-      step_summary_max_context_messages: 8
-      content_max_chars_for_compression: 200000
-    dialogue_compressor_config:
-      messages_threshold: null
-      tokens_threshold: 100000
-      messages_to_keep: 10
-      keep_last_round: false
-      compression_target_tokens: 1800
-      offload_writeback_enabled: false
-    current_round_compressor_config:
-      tokens_threshold: 100000
-      messages_to_keep: 6
-      min_selected_tokens_for_compression: 20000
-      compression_target_tokens: 4000
-      summary_merge_target_tokens: 4000
-      accumulated_summary_token_limit: 20000
-      summary_merge_min_blocks: 3
-      prior_context_window_size: 10
-      offload_writeback_enabled: false
-    round_level_compressor_config:
-      rounds_threshold: 2
-      tokens_threshold: 230000
-      trigger_total_tokens: 230000
-      target_total_tokens: 160000
-      compression_call_max_tokens: 250000
-      keep_last_round: true
-      keep_recent_messages: 6
-      messages_to_keep: 6
-      first_pass_target_tokens: 30000
-      second_pass_target_tokens: 20000
-      third_pass_target_tokens: 10000
-      truncate_head_ratio: 0.2
-      offload_writeback_enabled: false
+    session_memory:
+      trigger_tokens: 10000
+      trigger_add_tokens: 5000
+      tool_min_: 3
+    tool_result_budget_processor_config:
+      tokens_threshold: 50000
+      large_message_threshold: 5000
+    micro_compact_processor_config:
+      trigger_threshold: 5
+      keep_recent_per_tool: 10
+    full_compact_processor_config:
+      trigger_total_tokens: 180000
+    # ---------- 预置链 A（仅当 session_memory: false 时生效；与链 B 二选一）----------
+    # message_summary_offloader_config:
+    #   messages_threshold: null
+    #   tokens_threshold: 60000
+    #   large_message_threshold: 20000
+    #   offload_message_type: [ "tool" ]
+    #   protected_tool_names: ["read_file:*SKILL.md", "reload_original_context_messages"]
+    #   messages_to_keep: null
+    #   keep_last_round: false
+    #   customized_summary_prompt: null
+    #   enable_adaptive_compression: true
+    #   summary_max_tokens: 900
+    #   enable_precise_step: false
+    #   step_summary_max_context_messages: 8
+    #   content_max_chars_for_compression: 200000
+    # dialogue_compressor_config:
+    #   messages_threshold: null
+    #   tokens_threshold: 100000
+    #   messages_to_keep: 10
+    #   keep_last_round: false
+    #   compression_target_tokens: 1800
+    #   offload_writeback_enabled: false
+    # current_round_compressor_config:
+    #   tokens_threshold: 100000
+    #   messages_to_keep: 6
+    #   min_selected_tokens_for_compression: 20000
+    #   compression_target_tokens: 4000
+    #   summary_merge_target_tokens: 4000
+    #   accumulated_summary_token_limit: 20000
+    #   summary_merge_min_blocks: 3
+    #   prior_context_window_size: 10
+    #   offload_writeback_enabled: false
+    # round_level_compressor_config:
+    #   rounds_threshold: 2
+    #   tokens_threshold: 230000
+    #   trigger_total_tokens: 230000
+    #   target_total_tokens: 160000
+    #   compression_call_max_tokens: 250000
+    #   keep_last_round: true
+    #   keep_recent_messages: 6
+    #   messages_to_keep: 6
+    #   first_pass_target_tokens: 30000
+    #   second_pass_target_tokens: 20000
+    #   third_pass_target_tokens: 10000
+    #   truncate_head_ratio: 0.2
+    #   offload_writeback_enabled: false
   # Skills 在线自演进配置
   evolution:
     enabled: true             # true = 启用在线 Skills 自演进

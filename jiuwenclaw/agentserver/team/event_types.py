@@ -21,6 +21,7 @@ class TeamEventCategory(str, Enum):
     MEMBER = "team.member"
     TASK = "team.task"
     MESSAGE = "team.message"
+    MEMBER_ACTIVITY = "team.member.activity"
 
 
 class TeamEventType(str, Enum):
@@ -50,6 +51,10 @@ class TeamEventType(str, Enum):
     MESSAGE_P2P = "team.message.p2p"
     MESSAGE_BROADCAST = "team.message.broadcast"
 
+    # 成员运行时活动事件（非 SDK 事件，来自 rail 本地广播）
+    MEMBER_TOOL_CALL = "team.member.tool_call"
+    MEMBER_TOOL_RESULT = "team.member.tool_result"
+
 
 EVENT_TYPE_TO_CATEGORY: dict[TeamEventType, TeamEventCategory] = {
     # 成员事件
@@ -67,6 +72,9 @@ EVENT_TYPE_TO_CATEGORY: dict[TeamEventType, TeamEventCategory] = {
     # 消息事件
     TeamEventType.MESSAGE_P2P: TeamEventCategory.MESSAGE,
     TeamEventType.MESSAGE_BROADCAST: TeamEventCategory.MESSAGE,
+    # 成员运行时活动事件
+    TeamEventType.MEMBER_TOOL_CALL: TeamEventCategory.MEMBER_ACTIVITY,
+    TeamEventType.MEMBER_TOOL_RESULT: TeamEventCategory.MEMBER_ACTIVITY,
 }
 
 SDK_TO_TEAM_EVENT_MAP: dict[MonitorEventType, TeamEventType] = {

@@ -370,7 +370,10 @@ class _SpaStaticHandler(SimpleHTTPRequestHandler):
                 self.wfile.write(resp_body)
         except Exception as exc:  # noqa: BLE001
             self.log_error("proxy http error: %s", exc)
-            self.send_error(502, "proxy http error")
+            try:
+                self.send_error(502, "proxy http error")
+            except (OSError, RuntimeError):
+                pass
         finally:
             conn.close()
 
@@ -392,7 +395,10 @@ class _SpaStaticHandler(SimpleHTTPRequestHandler):
                 upstream = ctx.wrap_socket(upstream, server_hostname=upstream_host)
         except OSError as exc:
             self.log_error("proxy ws connect failed: %s", exc)
-            self.send_error(502, "proxy ws connect failed")
+            try:
+                self.send_error(502, "proxy ws connect failed")
+            except OSError:
+                pass
             return
 
         try:

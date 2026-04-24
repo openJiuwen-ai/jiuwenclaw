@@ -1,0 +1,235 @@
+# Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
+
+"""SkillProtocolPromptRail — 注入「技能执行规范」与「用户任务 todo」两段提示词。
+
+技能清单由上游 SkillUseRail 的 ``skills`` section 负责,本 rail 只加 skill 执行规范
+(section ``skill_protocol``)+ 可选的用户 todo section,并把 SkillStepToolkit / TodoToolkit
+随生命周期注册到 agent。``include_user_todo_section=False`` 用于 Team 成员等不持有
+TodoToolkit 的场景,避免提示模型调用不存在的工具。
+"""
+
+from __future__ import annotations
+
+from typing import Any
+
+from openjiuwen.core.foundation.tool import ToolCard
+from openjiuwen.core.runner import Runner
+from openjiuwen.core.single_agent.rail.base import AgentCallbackContext
+from openjiuwen.harness.prompts import PromptSection
+from openjiuwen.harness.rails.base import DeepAgentRail
+
+from jiuwenclaw.agentserver.deep_agent.prompt_builder import PromptPriority
+from jiuwenclaw.utils import logger
+
+
+_SKILL_PROTOCOL_SECTION_NAME = "skill_protocol"
+_TODO_SECTION_NAME = "todo"
+
+
+def _build_skill_protocol_section_text(language: str) -> str:
+    if language == "cn":
+        return """## 技能执行规范（强制）
+
+可用技能清单见本 prompt 的「技能」段（由 SkillUseRail 注入）。选中某个技能后，
+**必须先用 view_file 阅读对应 SKILL.md**，再按其工作流执行；下面的规范约束执行过程。
+
+1. **声明步骤**：每次行动前，必须在回复开头声明当前所在步骤，格式：`[当前步骤: <步骤名称>]`
+2. **创建步骤级 skill_step**：读完 SKILL.md 后，**必须**立即调用 skill_step_create 为文档中定义的每个步骤创建一个 skill_step 项，作为执行路线图。**一旦进入 SKILL 执行语境，对 SKILL 步骤的任何拆解、追踪、完成标记，必须且只能使用 `skill_step_*` 工具，禁止使用 `todo_*` 工具承载 SKILL 步骤** —— `todo_*` 只用于 SKILL 语境以外的独立用户请求
+3. **严格顺序**：按 SKILL.md 定义的顺序逐步执行，**禁止跳过、合并或重排步骤**
+4. **原子级拆分**：开始执行某个步骤前，先用 skill_step_insert 将该步骤拆解为原子级子步骤——每个 skill_step 项应对应单一、可独立验证的操作，不可再拆才算合格。如果步骤包含循环（如逐项处理），每轮循环的每个动作都应是独立 skill_step。禁止创建笼统的聚合型 skill_step
+5. **逐项完成**：严格按 skill_step 列表顺序执行，每完成一项立即标记完成。**所有子步骤 skill_step 完成后才能标记该步骤为完成**
+6. **闸门等待**：遇到需要用户确认/审批的步骤时，**必须等待用户回复，禁止自行假设用户同意**
+7. **不确定时重读**：如果不确定当前进度或下一步要求，立即使用 view_file 重新阅读 SKILL.md
+8. **内容忠实**：SKILL.md 是规格说明，不是参考建议。其中定义的选项列表、参数值、标签文本、推荐标记等必须**原样使用**，禁止自行添加、删除、修改或重新措辞
+9. **错误处理**：执行子步骤出错时，**禁止自行决定跳过该步骤或后续步骤**。必须先尝试修复（如安装缺失依赖、修正参数），修复失败则询问用户如何处理，等待用户指示后再继续
+10. **工具降级**：SKILL.md 中提到的工具如果在当前环境中不存在，必须先告知用户该工具不可用并说明你打算如何替代，获得用户同意后再继续。不要花时间反复检查工具列表
+"""
+    return """## Skill Execution Protocol (Mandatory)
+
+The list of available skills is provided in the "Skills" section of this prompt (injected by SkillUseRail). Once a skill is selected, **you MUST first read the relevant SKILL.md using view_file** and follow its workflow; the protocol below governs how that execution is carried out.
+
+1. **Declare step**: Before each action, state your current step at the start of your reply: `[Current Step: <step name>]`
+2. **Create step-level skill_step items**: After reading SKILL.md, you **MUST** immediately call skill_step_create with one skill_step item per step defined in the document as your execution roadmap. **Once in a SKILL execution context, any breakdown, tracking, or completion of SKILL steps MUST use `skill_step_*` tools exclusively. Never use `todo_*` tools to hold SKILL steps** — `todo_*` is only for standalone user requests outside any SKILL context.
+3. **Strict order**: Execute steps in the exact order defined in SKILL.md. **Never skip, merge, or reorder steps.**
+4. **Atomic breakdown**: Before starting a step, use skill_step_insert to break it into atomic sub-steps — each skill_step should correspond to a single, independently verifiable action that cannot be broken down further. If a step contains a loop (e.g. process items one by one), each action in each iteration must be a separate skill_step. Never create vague, aggregated skill_step items.
+5. **Complete sequentially**: Execute skill_step items in order, marking each done immediately upon completion. **All sub-step skill_step items must be completed before marking the step as done.**
+6. **Gate enforcement**: When a step requires user confirmation/approval, **you MUST wait for the user's response. Never assume approval.**
+7. **Re-read when unsure**: If uncertain about progress or next requirements, immediately re-read SKILL.md using view_file.
+8. **Content fidelity**: SKILL.md is a specification, not a suggestion. Option lists, parameter values, label text, and recommendation markers defined therein must be used **verbatim** — never add, remove, modify, or rephrase them.
+9. **Error handling**: When a sub-step fails, **never decide on your own to skip it or subsequent steps**. First attempt to fix the issue (e.g. install missing dependencies, correct parameters). If the fix fails, ask the user how to proceed and wait for their instructions.
+10. **Tool fallback**: If a tool mentioned in SKILL.md does not exist in your current environment, you MUST first inform the user that the tool is unavailable and explain how you plan to substitute it. Only proceed after the user agrees. Do not spend time repeatedly checking the tool list.
+"""
+
+
+def _build_todo_section_text(language: str) -> str:
+    """用户任务规划 ``todo_*`` 工具的使用说明（与 skill_step_* 职责分离）。"""
+    if language == "cn":
+        return """### 用户任务规划与追踪
+
+以下 `todo_*` 工具**仅用于 SKILL 执行语境以外的独立用户请求**的拆解与跟踪。
+
+**严禁用于 SKILL 步骤**：一旦你进入任何 SKILL 执行语境（已加载或正在执行 SKILL.md），对 SKILL 步骤的任何拆解、追踪、完成标记**必须**使用 `skill_step_*` 工具，**不得**使用下列 `todo_*` 工具承载 SKILL 步骤。
+
+| 工具名称 | 功能说明 |
+|---------|---------|
+| `todo_create` | 创建任务（单条或多条） |
+| `todo_insert` | 插入任务到指定位置 |
+| `todo_complete` | 完成任务并记录结果 |
+| `todo_remove` | 移除任务 |
+| `todo_list` | 查看所有任务 |
+"""
+    return """### User Task Planning & Tracking
+
+The `todo_*` tools below are **only for standalone user requests outside any SKILL execution context**.
+
+**Never for SKILL steps**: Once you enter any SKILL execution context (SKILL.md loaded or being executed), any breakdown, tracking, or completion of SKILL steps **MUST** use `skill_step_*` tools. You **MUST NOT** use the `todo_*` tools below to hold SKILL steps.
+
+| Tool Name | Description |
+|-----------|-------------|
+| `todo_create` | Create tasks (single or multiple) |
+| `todo_insert` | Insert tasks at a specific position |
+| `todo_complete` | Mark a task complete and record the outcome |
+| `todo_remove` | Remove a task |
+| `todo_list` | View all tasks |
+"""
+
+
+class SkillProtocolPromptRail(DeepAgentRail):
+    """每次 model_call 前刷新 skill_protocol + todo 提示词段。
+
+    ``include_user_todo_section``：是否注入用户任务规划 todo section。
+    仅当调用方 agent 注册了 TodoToolkit 时传 True；Team 成员等未注册 TodoToolkit
+    的场景传 False，避免提示模型调用不存在的工具。
+    """
+
+    priority = 8
+
+    def __init__(self, *, include_user_todo_section: bool = True) -> None:
+        super().__init__()
+        self._include_user_todo_section: bool = include_user_todo_section
+        self.system_prompt_builder = None
+        self._registered_tools: list[Any] = []
+
+    def init(self, agent) -> None:
+        self.system_prompt_builder = getattr(agent, "system_prompt_builder", None)
+        self._register_session_toolkits(agent)
+
+    def uninit(self, agent) -> None:
+        if self.system_prompt_builder is not None:
+            self.system_prompt_builder.remove_section(_SKILL_PROTOCOL_SECTION_NAME)
+            self.system_prompt_builder.remove_section(_TODO_SECTION_NAME)
+        self.system_prompt_builder = None
+        self._unregister_session_toolkits(agent)
+
+    def _register_session_toolkits(self, agent) -> None:
+        """注册 SkillStepToolkit（+ 可选 TodoToolkit）到 agent，随 rail 生命周期上线/下线。"""
+        if self._registered_tools:
+            return
+        try:
+            from jiuwenclaw.agentserver.tools.todo_toolkits import (
+                SkillStepToolkit,
+                TodoToolkit,
+            )
+        except Exception as exc:
+            logger.warning(
+                "[SkillProtocolPromptRail] session toolkits import failed: %s", exc,
+            )
+            return
+
+        toolkit_classes: list[type] = [SkillStepToolkit]
+        if self._include_user_todo_section:
+            toolkit_classes.append(TodoToolkit)
+
+        registered: list[Any] = []
+        ability_mgr = getattr(agent, "ability_manager", None)
+        for toolkit_cls in toolkit_classes:
+            try:
+                toolkit = toolkit_cls()
+                for tool in toolkit.get_tools():
+                    if ability_mgr is not None:
+                        existing = ability_mgr.get(tool.card.name)
+                        if isinstance(existing, ToolCard):
+                            ability_mgr.remove(tool.card.name)
+                    if not Runner.resource_mgr.get_tool(tool.card.id):
+                        Runner.resource_mgr.add_tool(tool)
+                    if ability_mgr is not None:
+                        ability_mgr.add(tool.card)
+                    registered.append(tool)
+            except Exception as exc:
+                logger.warning(
+                    "[SkillProtocolPromptRail] register %s failed: %s",
+                    toolkit_cls.__name__, exc,
+                )
+
+        self._registered_tools = registered
+        logger.info(
+            "[SkillProtocolPromptRail] session toolkits registered: tools=%s",
+            [t.card.name for t in registered],
+        )
+
+    def _unregister_session_toolkits(self, agent) -> None:
+        if not self._registered_tools:
+            return
+        ability_mgr = getattr(agent, "ability_manager", None)
+        for tool in self._registered_tools:
+            try:
+                if ability_mgr is not None:
+                    ability_mgr.remove(tool.card.name)
+                Runner.resource_mgr.remove_tool(tool.card.id)
+            except Exception as exc:
+                logger.warning(
+                    "[SkillProtocolPromptRail] unregister %s failed: %s",
+                    tool.card.name, exc,
+                )
+        self._registered_tools = []
+
+    def _resolve_priority(self, name: str, default_priority: int) -> int:
+        existing = self.system_prompt_builder.get_section(name)
+        return existing.priority if existing is not None else default_priority
+
+    def _resolve_language(self) -> str:
+        lang = getattr(self.system_prompt_builder, "language", None) or "cn"
+        return "cn" if lang in ("cn", "zh") else "en"
+
+    async def before_model_call(self, ctx: AgentCallbackContext) -> None:
+        _ = ctx
+        if self.system_prompt_builder is None:
+            return
+
+        language = self._resolve_language()
+
+        try:
+            protocol_text = _build_skill_protocol_section_text(language)
+            self.system_prompt_builder.add_section(PromptSection(
+                name=_SKILL_PROTOCOL_SECTION_NAME,
+                content={language: protocol_text},
+                priority=self._resolve_priority(
+                    _SKILL_PROTOCOL_SECTION_NAME, PromptPriority.SKILL_PROTOCOL,
+                ),
+            ))
+        except Exception as exc:
+            logger.warning(
+                "[SkillProtocolPromptRail] build skill_protocol section failed: %s", exc,
+            )
+
+        if self._include_user_todo_section:
+            try:
+                todo_text = _build_todo_section_text(language)
+                self.system_prompt_builder.add_section(PromptSection(
+                    name=_TODO_SECTION_NAME,
+                    content={language: todo_text},
+                    priority=self._resolve_priority(_TODO_SECTION_NAME, PromptPriority.TODO),
+                ))
+            except Exception as exc:
+                logger.warning("[SkillProtocolPromptRail] build todo section failed: %s", exc)
+        else:
+            # Team 等未注册 TodoToolkit 的场景：确保上游不残留旧的 todo section。
+            try:
+                self.system_prompt_builder.remove_section(_TODO_SECTION_NAME)
+            except Exception as exc:
+                logger.debug(
+                    "[SkillProtocolPromptRail] remove residual todo section skipped: %s", exc,
+                )
+
+
+__all__ = ["SkillProtocolPromptRail"]

@@ -46,6 +46,20 @@ export interface NormalizedToolCall {
   arguments: Record<string, unknown>;
   description?: string;
   formatted_args?: string;
+  memberId?: string;
+  memberName?: string;
+}
+
+function resolveMemberInfo(
+  payload: UnknownPayload,
+  inner: UnknownPayload,
+): { memberId?: string; memberName?: string } {
+  const pick = (v: unknown) =>
+    typeof v === 'string' && v.trim() ? v.trim() : undefined;
+  return {
+    memberId: pick(payload.member_id) ?? pick(inner.member_id),
+    memberName: pick(payload.member_name) ?? pick(inner.member_name),
+  };
 }
 
 export interface NormalizedToolResult {
@@ -72,12 +86,16 @@ export function normalizeToolCallPayload(payload: UnknownPayload): NormalizedToo
       ? toolCallPayload.formatted_args
       : undefined;
 
+  const { memberId, memberName } = resolveMemberInfo(payload, toolCallPayload);
+
   return {
     id,
     name,
     arguments: parseArguments(toolCallPayload.arguments),
     description,
     formatted_args,
+    memberId,
+    memberName,
   };
 }
 

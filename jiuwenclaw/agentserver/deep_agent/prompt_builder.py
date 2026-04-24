@@ -19,6 +19,7 @@ class PromptPriority(IntEnum):
     SAFETY = 20
     TOOLS = 30
     SKILLS = 40
+    SKILL_PROTOCOL = 45
     MEMORY = 50
     RESPONSE = 60
     WORKSPACE = 70

@@ -645,6 +645,8 @@ function AppContent() {
                 arguments: n.arguments,
                 description: n.description,
                 formatted_args: n.formatted_args,
+                memberId: n.memberId,
+                memberName: n.memberName,
               },
               { startedAt: item.at }
             );
@@ -832,6 +834,8 @@ function AppContent() {
                 arguments: n.arguments,
                 description: n.description,
                 formatted_args: n.formatted_args,
+                memberId: n.memberId,
+                memberName: n.memberName,
               },
               { startedAt: item.at }
             );

@@ -17,6 +17,7 @@ from dataclasses import dataclass
 from typing import Any, AsyncIterator, Callable, List, Tuple
 
 from dotenv import load_dotenv
+from openjiuwen.core.context_engine.context.session_memory_manager import SessionMemoryConfig
 from openjiuwen.core.context_engine.schema.config import ContextEngineConfig
 from openjiuwen.core.foundation.llm import ModelRequestConfig, ModelClientConfig, Model
 from openjiuwen.core.foundation.store.base_embedding import EmbeddingConfig
@@ -88,6 +89,11 @@ from jiuwenclaw.agentserver.deep_agent.rails import (
     RequestSystemPromptRail,
     ResponsePromptRail,
     RuntimePromptRail,
+    SkillComplianceRail,
+    SkillProtocolPromptRail,
+)
+from jiuwenclaw.agentserver.deep_agent.rails.dispatch_agent_rail import (
+    DispatchAgentRail,
 )
 from jiuwenclaw.agentserver.deep_agent.permissions.owner_scopes import (
     TOOL_PERMISSION_CONTEXT,
@@ -424,6 +430,33 @@ def _deep_agent_context_engine_config(react_cfg: dict[str, Any] | None) -> Conte
     )
 
 
+# react.context_engine_config 键 -> openjiuwen _merge_processors 注册的处理器类名（预置链 B）
+_CHAIN_B_OPTIONAL_PROCESSORS: Tuple[Tuple[str, str], ...] = (
+    ("tool_result_budget_processor_config", "ToolResultBudgetProcessor"),
+    ("micro_compact_processor_config", "MicroCompactProcessor"),
+    ("full_compact_processor_config", "FullCompactProcessor"),
+)
+
+
+def _resolve_session_memory_for_context_rail(context_engine_cfg: dict[str, Any]) -> Any | None:
+    """解析 ``react.context_engine_config.session_memory``，对应 openjiuwen 预置链 A / B。
+
+    - 缺省或 ``null``：默认 **预置链 B**（SessionMemory + ToolResultBudget / MicroCompact / FullCompact）。
+    - ``false``：显式 **预置链 A**（四类摘要/压缩处理器），并与 yaml 中 *_config 合并。
+    - ``dict``：``SessionMemoryConfig.model_validate``；``{}`` 表示默认 SessionMemory 参数。
+    """
+    if "session_memory" not in context_engine_cfg:
+        return SessionMemoryConfig()
+    raw = context_engine_cfg["session_memory"]
+    if raw is False:
+        return None
+    if raw is None:
+        return SessionMemoryConfig()
+    if isinstance(raw, dict):
+        return SessionMemoryConfig.model_validate(raw)
+    return raw
+
+
 def _build_context_engineering_rail(config: dict[str, Any],
                                     mode: str = "agent.fast") -> ContextEngineeringRail | None:
     """Build ContextEngineeringRail with user config merged into presets.
@@ -431,39 +464,55 @@ def _build_context_engineering_rail(config: dict[str, Any],
     用户提供的 processor 配置（dict 格式）会与预置配置做字段级别合并，
     只覆盖用户指定的字段，其他使用预置默认值。
 
+    预置链 B 可选键（``react.context_engine_config``）：
+    ``tool_result_budget_processor_config`` / ``micro_compact_processor_config`` /
+    ``full_compact_processor_config``；Session Memory 笔记节奏见 ``session_memory``。
+
     Args:
         config: 配置字典
         mode: 模式，agent.plan 模式使用 preset=True 和 processors，其他模式使用 preset=False 和 processors=None
     """
     try:
         if mode == "agent.plan":
-            user_processors: List[Tuple[str, dict]] = []
             context_engine_cfg = config.get("context_engine_config", {})
+            session_memory = _resolve_session_memory_for_context_rail(context_engine_cfg)
 
-            offloader_cfg = context_engine_cfg.get("message_summary_offloader_config", {})
-            if isinstance(offloader_cfg, dict) and offloader_cfg:
-                user_processors.append(("MessageSummaryOffloader", offloader_cfg))
+            user_processors: List[Tuple[str, dict]] = []
+            if session_memory is None:
+                # 预置链 A：四类处理器与用户 yaml 字段级合并
+                offloader_cfg = context_engine_cfg.get("message_summary_offloader_config", {})
+                if isinstance(offloader_cfg, dict) and offloader_cfg:
+                    user_processors.append(("MessageSummaryOffloader", offloader_cfg))
 
-            compressor_cfg = context_engine_cfg.get("dialogue_compressor_config", {})
-            if isinstance(compressor_cfg, dict) and compressor_cfg:
-                user_processors.append(("DialogueCompressor", compressor_cfg))
+                compressor_cfg = context_engine_cfg.get("dialogue_compressor_config", {})
+                if isinstance(compressor_cfg, dict) and compressor_cfg:
+                    user_processors.append(("DialogueCompressor", compressor_cfg))
 
-            current_round_cfg = context_engine_cfg.get("current_round_compressor_config", {})
-            if isinstance(current_round_cfg, dict) and current_round_cfg:
-                user_processors.append(("CurrentRoundCompressor", current_round_cfg))
+                current_round_cfg = context_engine_cfg.get("current_round_compressor_config", {})
+                if isinstance(current_round_cfg, dict) and current_round_cfg:
+                    user_processors.append(("CurrentRoundCompressor", current_round_cfg))
 
-            round_level_cfg = context_engine_cfg.get("round_level_compressor_config", {})
-            if isinstance(round_level_cfg, dict) and round_level_cfg:
-                user_processors.append(("RoundLevelCompressor", round_level_cfg))
+                round_level_cfg = context_engine_cfg.get("round_level_compressor_config", {})
+                if isinstance(round_level_cfg, dict) and round_level_cfg:
+                    user_processors.append(("RoundLevelCompressor", round_level_cfg))
+            else:
+                # 预置链 B：三类处理器与用户 yaml 字段级合并（仅非空 dict 参与）
+                for yaml_key, processor_name in _CHAIN_B_OPTIONAL_PROCESSORS:
+                    proc_cfg = context_engine_cfg.get(yaml_key, {})
+                    if isinstance(proc_cfg, dict) and proc_cfg:
+                        user_processors.append((processor_name, proc_cfg))
 
             context_rail = JiuClawContextEngineeringRail(
                 processors=user_processors if user_processors else None,
                 preset=True,
+                session_memory=session_memory,
             )
+            chain = "B" if session_memory is not None else "A"
             logger.info(
                 "[JiuWenClawDeepAdapter] JiuClawContextEngineeringRail create success for agent.plan mode, "
-                "user_processors=%s",
-                [p[0] for p in user_processors] if user_processors else "none"
+                "preset_chain=%s user_processors=%s",
+                chain,
+                [p[0] for p in user_processors] if user_processors else "none",
             )
         else:
             context_rail = JiuClawContextEngineeringRail(
@@ -546,12 +595,15 @@ class JiuWenClawDeepAdapter:
         self._request_system_prompt_rail: RequestSystemPromptRail | None = None
         self._runtime_prompt_rail: RuntimePromptRail | None = None
         self._response_prompt_rail: ResponsePromptRail | None = None
+        self._skill_protocol_prompt_rail: SkillProtocolPromptRail | None = None
+        self._skill_compliance_rail: SkillComplianceRail | None = None
         self._security_rail: SecurityRail | None = None
         self._memory_rail: MemoryRail | None = None
         self._lsp_rail: LspRail | None = None
         self._heartbeat_rail: HeartbeatRail | None = None
         self._skill_evolution_rail: SkillEvolutionRail | None = None
         self._subagent_rail: SubagentRail | None = None
+        self._dispatch_agent_rail: DispatchAgentRail | None = None
         self._permission_rail: Any = None
         self._avatar_rail: Any = None
         self._tool_cards = None
@@ -758,7 +810,7 @@ class JiuWenClawDeepAdapter:
                 "skipping browser subagent registration"
             )
 
-        return subagents or None
+        return subagents
 
     def _build_vision_model_config(
             self,
@@ -1321,6 +1373,17 @@ class JiuWenClawDeepAdapter:
             subagent_rail = None
         return subagent_rail
 
+    @staticmethod
+    def _build_dispatch_agent_rail() -> DispatchAgentRail | None:
+        """Build DispatchAgentRail for free-form subagent dispatch."""
+        try:
+            rail = DispatchAgentRail()
+            logger.info("[JiuWenClawDeepAdapter] DispatchAgentRail create success")
+        except Exception as exc:
+            logger.warning("[JiuWenClawDeepAdapter] DispatchAgentRail create failed: %s", exc)
+            rail = None
+        return rail
+
     def _build_security_rail(self) -> SecurityRail | None:
         """Build SecurityPromptRail."""
         try:
@@ -1430,6 +1493,38 @@ class JiuWenClawDeepAdapter:
             logger.warning("[JiuWenClawDeepAdapter] AvatarPromptRail create failed: %s", exc)
             return None
 
+    @staticmethod
+    def _build_skill_protocol_prompt_rail() -> SkillProtocolPromptRail | None:
+        """Build SkillProtocolPromptRail: skills 段（skill_step_*）+ 用户任务 todo 段（todo_*）。"""
+        try:
+            rail = SkillProtocolPromptRail(include_user_todo_section=True)
+            logger.info(
+                "[JiuWenClawDeepAdapter] SkillProtocolPromptRail create success "
+                "(plan: skill_step_* + todo_*)"
+            )
+            return rail
+        except Exception as exc:
+            logger.warning(
+                "[JiuWenClawDeepAdapter] SkillProtocolPromptRail create failed: %s", exc
+            )
+            return None
+
+    @staticmethod
+    def _build_skill_compliance_rail() -> SkillComplianceRail | None:
+        """Build SkillComplianceRail：硬绑 skill_step.md / skill_step_*。"""
+        try:
+            rail = SkillComplianceRail()
+            logger.info(
+                "[JiuWenClawDeepAdapter] SkillComplianceRail create success "
+                "(skill_step.md / skill_step_*)"
+            )
+            return rail
+        except Exception as exc:
+            logger.warning(
+                "[JiuWenClawDeepAdapter] SkillComplianceRail create failed: %s", exc
+            )
+            return None
+
     def _build_runtime_prompt_rail(self) -> RuntimePromptRail | None:
         """Build RuntimePromptRail for per-model-call time/channel/runtime injection."""
         try:
@@ -1477,6 +1572,7 @@ class JiuWenClawDeepAdapter:
             _RailBuildInfo("_heartbeat_rail", self._build_heartbeat_rail),
             _RailBuildInfo("_avatar_rail", self._build_avatar_rail),
             _RailBuildInfo("_subagent_rail", self._build_subagent_rail),
+            _RailBuildInfo("_dispatch_agent_rail", self._build_dispatch_agent_rail),
             _RailBuildInfo("_permission_rail", build_permission_rail, {"config": config_base, "llm": self._model,
                                                                        "model_name": config_base.get("models", {}).get(
                                                                            "default", {}).get("model_client_config",
@@ -1493,6 +1589,19 @@ class JiuWenClawDeepAdapter:
         # LspRail 仅在 code 模式下挂载
         if mode == "code":
             rail_infos.append(_RailBuildInfo("_lsp_rail", self._build_lsp_rail))
+
+        # Skill 合规相关 rail 仅在 plan 模式下挂载；agent 模式不注入，避免改变既有行为。
+        # team 模式由 build_member_rails 自行挂载，不在这里处理。
+        if mode == "agent.plan":
+            rail_infos.append(
+                _RailBuildInfo("_skill_protocol_prompt_rail", self._build_skill_protocol_prompt_rail)
+            )
+            rail_infos.append(
+                _RailBuildInfo("_skill_compliance_rail", self._build_skill_compliance_rail)
+            )
+        else:
+            self._skill_protocol_prompt_rail = None
+            self._skill_compliance_rail = None
 
         if self._filesystem_rail_enabled_for_profile():
             rail_infos.insert(1, _RailBuildInfo("_filesystem_rail", self._build_filesystem_rail))
@@ -1625,7 +1734,7 @@ class JiuWenClawDeepAdapter:
             rails_list.append(self._permission_rail)
         return rails_list
 
-    async def _get_tool_cards(self, agent_id: str):
+    async def _get_tool_cards(self, agent_id: str, *, mode: str = "agent.plan"):
         """Get tool cards."""
         tool_cards = []
 
@@ -1742,6 +1851,11 @@ class JiuWenClawDeepAdapter:
         except Exception as exc:
             logger.warning("[JiuWenClawDeepAdapter] skill tools registration failed: %s", exc)
 
+        # Session 级 todo 工具（TodoToolkit / SkillStepToolkit）改由
+        # SkillProtocolPromptRail.init() 跟随 rail 生命周期注册到 agent，
+        # 保证 prompt 中提到的 skill_step_* / todo_* 工具与 prompt section 同上同下。
+        # Team 成员的 SkillStepToolkit 由 TeamManager 在成员创建时单独注册，不走此路径。
+
         return tool_cards
 
     def _build_cron_tools(self) -> list[Any]:
@@ -1783,7 +1897,7 @@ class JiuWenClawDeepAdapter:
         model = self._create_model(config_base)
         agent_card = AgentCard(name=self._agent_name, id='jiuwenclaw')
 
-        tool_cards = await self._get_tool_cards(agent_card.id)
+        tool_cards = await self._get_tool_cards(agent_card.id, mode=mode)
         self._tool_cards = tool_cards
 
         permissions_cfg = config_base.get("permissions", {})
@@ -1947,7 +2061,9 @@ class JiuWenClawDeepAdapter:
             metadata: dict[str, Any] | None,
             request_id: str | None,
             mode: str | None,
-    ) -> tuple[Token[str], Token[str | None], Token[dict[str, Any] | None], Token[str | None]]:
+    ) -> tuple[Token[str], Token[str | None], Token[dict[str, Any] | None], Token[str | None], Any]:
+        from jiuwenclaw.agentserver import plan_todo_context as _plan_todo
+
         normalized_channel = str(channel_id or "").strip() or CronTargetChannel.WEB.value
         normalized_mode = str(mode).strip() if isinstance(mode, str) and mode.strip() else None
         normalized_metadata = dict(metadata) if isinstance(metadata, dict) else None
@@ -1960,13 +2076,17 @@ class JiuWenClawDeepAdapter:
             _CRON_TOOL_SESSION_ID.set(session_id),
             _CRON_TOOL_METADATA.set(normalized_metadata),
             _CRON_TOOL_MODE.set(normalized_mode),
+            _plan_todo.PLAN_TODO_SESSION_ID.set(session_id or "default"),
         )
 
     @staticmethod
     def _reset_runtime_cron_context(
-            tokens: tuple[Token[str], Token[str | None], Token[dict[str, Any] | None], Token[str | None]],
+            tokens: tuple[Token[str], Token[str | None], Token[dict[str, Any] | None], Token[str | None], Any],
     ) -> None:
-        channel_token, session_token, metadata_token, mode_token = tokens
+        from jiuwenclaw.agentserver import plan_todo_context as _plan_todo
+
+        channel_token, session_token, metadata_token, mode_token, todo_token = tokens
+        _plan_todo.PLAN_TODO_SESSION_ID.reset(todo_token)
         _CRON_TOOL_MODE.reset(mode_token)
         _CRON_TOOL_METADATA.reset(metadata_token)
         _CRON_TOOL_SESSION_ID.reset(session_token)
@@ -2021,6 +2141,27 @@ class JiuWenClawDeepAdapter:
             if self._subagent_rail is not None:
                 await self._instance.register_rail(self._subagent_rail)
                 logger.info("[JiuWenClawDeepAdapter] SubagentRail registered for plan mode")
+        # 注册 dispatch agent rail（plan 模式下启用：允许 LLM 运行时自由起草子代理规格）
+        if self._dispatch_agent_rail is None:
+            self._dispatch_agent_rail = self._build_dispatch_agent_rail()
+            if self._dispatch_agent_rail is not None:
+                await self._instance.register_rail(self._dispatch_agent_rail)
+                logger.info("[JiuWenClawDeepAdapter] DispatchAgentRail registered for plan mode")
+        # plan 模式下注册 skill 合规相关 rail
+        if self._skill_protocol_prompt_rail is None:
+            self._skill_protocol_prompt_rail = self._build_skill_protocol_prompt_rail()
+            if self._skill_protocol_prompt_rail is not None:
+                await self._instance.register_rail(self._skill_protocol_prompt_rail)
+                logger.info(
+                    "[JiuWenClawDeepAdapter] SkillProtocolPromptRail registered for plan mode"
+                )
+        if self._skill_compliance_rail is None:
+            self._skill_compliance_rail = self._build_skill_compliance_rail()
+            if self._skill_compliance_rail is not None:
+                await self._instance.register_rail(self._skill_compliance_rail)
+                logger.info(
+                    "[JiuWenClawDeepAdapter] SkillComplianceRail registered for plan mode"
+                )
 
     async def _update_agent_mode_rails(self) -> None:
         """agent 模式：卸载 plan 专属 rails，按需注册 agent 专属 rails。"""
@@ -2028,6 +2169,9 @@ class JiuWenClawDeepAdapter:
                 ("_task_planning_rail", "TaskPlanningRail"),
                 ("_skill_evolution_rail", "SkillEvolutionRail"),
                 ("_subagent_rail", "SubagentRail"),
+                ("_dispatch_agent_rail", "DispatchAgentRail"),
+                ("_skill_protocol_prompt_rail", "SkillProtocolPromptRail"),
+                ("_skill_compliance_rail", "SkillComplianceRail"),
         ):
             rail = getattr(self, attr)
             if rail is not None:

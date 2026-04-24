@@ -27,6 +27,7 @@ from jiuwenclaw.agentserver.team.config_loader import (
 from jiuwenclaw.agentserver.team.monitor_handler import TeamMonitorHandler
 from jiuwenclaw.agentserver.team.team_runtime_inheritance import (
     RAIL_WHITELIST,
+    MemberRailConfig,
     build_member_rails,
     filter_inheritable_ability_cards,
     get_default_model_name,
@@ -85,6 +86,7 @@ class TeamManager:
         from jiuwenclaw.agentserver.cron_config import should_register_cron_tools
         from jiuwenclaw.agentserver.deep_agent.cron_runtime import CronRuntimeBridge
         from jiuwenclaw.agentserver.tools.send_file_to_user import SendFileToolkit
+        from jiuwenclaw.agentserver.tools.todo_toolkits import SkillStepToolkit
         from openjiuwen.core.runner import Runner
 
         agent_id = getattr(getattr(agent, "card", None), "id", None)
@@ -109,6 +111,28 @@ class TeamManager:
                 logger.warning("[TeamManager] cron tool registration failed for member agent=%s: %s", agent_id, exc)
         else:
             logger.info("[TeamManager] skip cron tool registration for member agent=%s: disabled by env", agent_id)
+
+        # Team 成员的 skill 步骤追踪（SkillStepToolkit）：写入 skill_step.md，
+        # 与 SkillComplianceRail 共用该文件路径。
+        # 这里再调一次只是保险兜底：主 adapter 未初始化的场景（如单元测试直接构造 team）也能可用。
+        # 与 SkillComplianceRail 一致使用显式 team session，避免依赖未绑定的 plan 上下文。
+        try:
+            skill_step_toolkit = SkillStepToolkit(session_id=session_id)
+            skill_step_tool_names: list[str] = []
+            for step_tool in skill_step_toolkit.get_tools():
+                if not Runner.resource_mgr.get_tool(step_tool.card.id):
+                    Runner.resource_mgr.add_tool(step_tool)
+                agent.ability_manager.add(step_tool.card)
+                skill_step_tool_names.append(step_tool.card.name)
+            logger.info(
+                "[TeamManager] SkillStepToolkit registered for member agent=%s session=%s tools=%s",
+                agent_id, session_id, skill_step_tool_names,
+            )
+        except Exception as exc:
+            logger.warning(
+                "[TeamManager] SkillStepToolkit registration failed for member agent=%s: %s",
+                agent_id, exc,
+            )
 
         if not request_id or not channel_id:
             logger.info("[TeamManager] SendFileToolkit skipped: missing request_id or channel_id")
@@ -331,7 +355,17 @@ class TeamManager:
             else:
                 logger.warning("[TeamManager] agent deep_config.workspace is None")
 
-            inheritable_cards = filter_inheritable_ability_cards(deep_agent)
+            try:
+                from jiuwenclaw.agentserver.team.member_subagents import assign_team_member_subagents
+
+                assign_team_member_subagents(deep_agent, agent)
+            except Exception as exc:
+                logger.warning("[TeamManager] assign_team_member_subagents failed: %s", exc)
+
+            inheritable_cards = filter_inheritable_ability_cards(
+                deep_agent,
+                exclude_tool_names=frozenset({"task_tool"}),
+            )
             existing_ability_ids = {card.id for card in agent.ability_manager.list() or []}
             added_count = 0
             for card in inheritable_cards:
@@ -378,12 +412,34 @@ class TeamManager:
                     logger.warning("[TeamManager] MemberSkillToolkitRail setup failed: %s", exc)
 
                 try:
+                    from jiuwenclaw.config import get_config as _get_cfg
+                    _react = ((_get_cfg() or {}).get("react") or {})
+                    _ce_enabled = bool(
+                        (_react.get("context_engine_config") or {}).get("enabled", True)
+                    )
+                except Exception:
+                    _react = {}
+                    _ce_enabled = True
+
+                try:
                     member_rails = build_member_rails(
-                        skills_dir=str(member_skills_dir),
-                        language="cn",
-                        channel=resolved_channel,
-                        agent_name=getattr(agent.card, "name", "team_member"),
-                        model_name=resolved_model_name,
+                        MemberRailConfig(
+                            skills_dir=str(member_skills_dir),
+                            language="cn",
+                            channel=resolved_channel,
+                            agent_name=getattr(agent.card, "name", "team_member"),
+                            model_name=resolved_model_name,
+                            session_id=session_id,
+                            member_id=getattr(agent.card, "id", None),
+                            context_engine_enabled=_ce_enabled,
+                            react_config=_react,
+                        )
+                    )
+                    logger.info(
+                        "[TeamManager] member context_engine_config.enabled=%s (member_id=%s session_id=%s)",
+                        _ce_enabled,
+                        getattr(agent.card, "id", None),
+                        session_id,
                     )
                     for rail in member_rails:
                         if type(rail).__name__ in RAIL_WHITELIST:

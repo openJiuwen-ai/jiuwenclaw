@@ -102,6 +102,15 @@ function ToolDetailModal({ execution, onClose }: ToolDetailModalProps) {
               >
                 {toolCall.name}
               </h2>
+              {toolCall.memberName && (
+                <p
+                  className="text-xs mt-1"
+                  style={{ color: 'var(--accent, #3b82f6)' }}
+                  title={toolCall.memberId || toolCall.memberName}
+                >
+                  @{toolCall.memberName}
+                </p>
+              )}
               {toolCall.formatted_args && (
                 <p
                   className="text-sm font-mono mt-1"
@@ -297,6 +306,23 @@ export function ToolExecutionItem({ execution }: { execution: ToolExecution }) {
             )}
           </span>
 
+          {toolCall.memberName && (
+            <span
+              className="tool-pair-member"
+              title={toolCall.memberId || toolCall.memberName}
+              style={{
+                fontSize: 'var(--font-size-xs, 12px)',
+                padding: '2px 6px',
+                borderRadius: '4px',
+                backgroundColor: 'var(--accent-subtle, rgba(59,130,246,0.12))',
+                color: 'var(--accent, #3b82f6)',
+                marginRight: '6px',
+                whiteSpace: 'nowrap',
+              }}
+            >
+              @{toolCall.memberName}
+            </span>
+          )}
           {toolCall.name === 'session' ? (
             <span className="tool-pair-name">{subtitle || t('chatUi.toolGroup.sessionCompleted')}</span>
           ) : (

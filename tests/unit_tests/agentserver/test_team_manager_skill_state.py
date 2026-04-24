@@ -42,7 +42,7 @@ def test_member_skill_state_inherits_marketplaces_and_rebuilds_installed_skills(
     )
     monkeypatch.setattr(
         "jiuwenclaw.agentserver.team.team_runtime_inheritance.build_member_rails",
-        lambda **kwargs: [],
+        lambda config: [],
     )
     monkeypatch.setattr(
         "jiuwenclaw.agentserver.extensions.rail_manager.get_rail_manager",
