@@ -20,7 +20,7 @@ spec:
         fsGroup: 1000
       containers:
         - name: gateway
-          image: <<CLAW_GATEWAY_IMAGE>>
+          image: <<CLAW_GATEWAY_PRODUCT_IMAGE>>
           imagePullPolicy: IfNotPresent
           ports:
             - name: http

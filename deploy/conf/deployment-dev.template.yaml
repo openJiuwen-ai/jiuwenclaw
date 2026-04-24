@@ -26,7 +26,7 @@ spec:
         fsGroup: 0 # 修改为 root 组，解决挂载目录权限
       containers:
         - name: gateway
-          image: <<CLAW_GATEWAY_IMAGE>>
+          image: <<CLAW_GATEWAY_DEV_IMAGE>>
           imagePullPolicy: IfNotPresent
           ports:
             - name: http
