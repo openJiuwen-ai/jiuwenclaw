@@ -20,7 +20,8 @@ from openjiuwen.harness.rails.base import DeepAgentRail
 from jiuwenclaw.utils import (
     get_user_workspace_dir,
     get_agent_memory_dir,
-    get_agent_skills_dir,
+    get_agent_registered_skill_dirs,
+    get_shared_agent_skills_dirs,
     get_agent_workspace_dir,
     get_deepagent_todo_dir,
     get_multi_tenant_user_workspace_dir,
@@ -112,7 +113,8 @@ class RuntimePromptRail(DeepAgentRail):
                     "config": str(base_workspace / "config"),
                     "workspace": str(workspace_root),
                     "memory": str(workspace_root / "memory"),
-                    "skills": str(workspace_root / "skills"),
+                    "skills": ", ".join(str(d) for d in get_shared_agent_skills_dirs())
+                    if get_shared_agent_skills_dirs() else str(workspace_root / "skills"),
                     "todo": str(workspace_root / "todo"),
                 }
         
@@ -121,7 +123,7 @@ class RuntimePromptRail(DeepAgentRail):
             "config": str(get_user_workspace_dir() / "config"),
             "workspace": self._workspace_dir or str(get_agent_workspace_dir()),
             "memory": str(get_agent_memory_dir()),
-            "skills": str(get_agent_skills_dir()),
+            "skills": ", ".join(str(d) for d in get_agent_registered_skill_dirs()),
             "todo": str(get_deepagent_todo_dir()),
         }
 

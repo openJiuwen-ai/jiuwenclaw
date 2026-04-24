@@ -207,13 +207,13 @@ async def test_runtime_rail_single_tenant_workspace_dirs():
         patch("jiuwenclaw.agentserver.deep_agent.rails.runtime_prompt_rail.get_user_workspace_dir") as mock_user_ws,
         patch("jiuwenclaw.agentserver.deep_agent.rails.runtime_prompt_rail.get_agent_workspace_dir") as mock_agent_ws,
         patch("jiuwenclaw.agentserver.deep_agent.rails.runtime_prompt_rail.get_agent_memory_dir") as mock_memory,
-        patch("jiuwenclaw.agentserver.deep_agent.rails.runtime_prompt_rail.get_agent_skills_dir") as mock_skills,
+        patch("jiuwenclaw.agentserver.deep_agent.rails.runtime_prompt_rail.get_agent_registered_skill_dirs") as mock_skills,
         patch("jiuwenclaw.agentserver.deep_agent.rails.runtime_prompt_rail.get_deepagent_todo_dir") as mock_todo,
     ):
         mock_user_ws.return_value = Path("/home/user/.jiuwenclaw")
         mock_agent_ws.return_value = Path("/home/user/.jiuwenclaw/workspace")
         mock_memory.return_value = Path("/home/user/.jiuwenclaw/memory")
-        mock_skills.return_value = Path("/home/user/.jiuwenclaw/skills")
+        mock_skills.return_value = [Path("/home/user/.jiuwenclaw/skills")]
         mock_todo.return_value = Path("/home/user/.jiuwenclaw/todo")
         
         ctx = AgentCallbackContext(agent=None, inputs=None, session=None)
