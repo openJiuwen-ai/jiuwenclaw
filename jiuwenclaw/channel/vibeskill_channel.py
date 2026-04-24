@@ -1254,6 +1254,13 @@ class VibeSkillChannel(BaseChannel):
         ))
 
         responses.append({
+            "type": "task.error",
+            "properties": {
+                "error": error_text,
+            },
+        })
+
+        responses.append({
             "type": "session.status",
             "properties": {
                 "sessionID": external_sid,
