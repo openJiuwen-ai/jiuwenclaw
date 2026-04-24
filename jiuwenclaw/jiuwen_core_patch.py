@@ -16,12 +16,6 @@ from openjiuwen.core.foundation.llm.model_clients.openai_model_client import \
 class PatchOpenAIModelClient(OpenAIModelClient):
 
     def _create_async_openai_client(self, timeout: Optional[float] = None) -> "openai.AsyncOpenAI":
-        """
-        Create an OpenAI Async client with configured SSL/proxy/http client settings.
-        
-        Args:
-            timeout: Optional timeout override for this specific request
-        """
         from openai import AsyncOpenAI
         
         ssl_verify, ssl_cert = self.model_client_config.verify_ssl, self.model_client_config.ssl_cert
@@ -57,14 +51,28 @@ class PatchOpenAIModelClient(OpenAIModelClient):
     
     def _parse_stream_chunk(self, chunk: Any) -> Optional[AssistantMessageChunk]:
         """Parse OpenAI streaming response chunk
-        
+
         Args:
             chunk: OpenAI streaming response chunk
-            
+
         Returns:
             AssistantMessageChunk or None
         """
+        # Final chunk with usage but no choices — still emit for token accounting
         if not chunk.choices:
+            if hasattr(chunk, 'usage') and chunk.usage:
+                usage_metadata = UsageMetadata(
+                    model_name=self.model_config.model_name,
+                    input_tokens=getattr(chunk.usage, 'prompt_tokens', 0) or 0,
+                    output_tokens=getattr(chunk.usage, 'completion_tokens', 0) or 0,
+                    total_tokens=getattr(chunk.usage, 'total_tokens', 0) or 0
+                )
+                return AssistantMessageChunk(
+                    content="",
+                    tool_calls=None,
+                    usage_metadata=usage_metadata,
+                    finish_reason="null"
+                )
             return None
 
         choice = chunk.choices[0]
@@ -113,6 +121,22 @@ class PatchOpenAIModelClient(OpenAIModelClient):
 
 def apply_openai_model_client_patch() -> None:
     """Monkey-patch upstream OpenAIModelClient with JiuwenClaw SSL/headers/stream behavior."""
+    # pylint: disable=protected-access  # Monkey-patching requires accessing protected members
+    _original_build_request_params = OpenAIModelClient._build_request_params
+
+    def _patched_build_request_params(self, *, messages, tools, temperature, top_p, model,
+                                      stop, max_tokens, stream, **kwargs):
+        """Build request params with stream_options for usage reporting."""
+        params = _original_build_request_params(
+            self, messages=messages, tools=tools, temperature=temperature,
+            top_p=top_p, model=model, stop=stop, max_tokens=max_tokens,
+            stream=stream, **kwargs
+        )
+        if stream:
+            params["stream_options"] = {"include_usage": True}
+        return params
+
     _impl = PatchOpenAIModelClient.__dict__
     setattr(OpenAIModelClient, "_create_async_openai_client", _impl["_create_async_openai_client"])
+    setattr(OpenAIModelClient, "_build_request_params", _patched_build_request_params)
     setattr(OpenAIModelClient, "_parse_stream_chunk", _impl["_parse_stream_chunk"])

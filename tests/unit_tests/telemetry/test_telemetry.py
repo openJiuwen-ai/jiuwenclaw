@@ -38,6 +38,10 @@ from opentelemetry.sdk.metrics import MeterProvider
 from opentelemetry.sdk.metrics.export import InMemoryMetricReader
 from opentelemetry.trace import SpanKind, StatusCode
 
+# Pre-import jiuwenclaw.config so its module-level Path.home() call succeeds
+# before any test clears USERPROFILE/HOME from os.environ.
+import jiuwenclaw.config  # noqa: F401
+
 
 # ---------------------------------------------------------------------------
 # In-memory span exporter
@@ -2457,10 +2461,11 @@ class TestQueueInstrumentor:
         msg = MagicMock()
         msg.channel_id = "web"
 
-        with patch.object(queue_mod.queue_enqueued, "add") as mock_add:
+        mock_counter = MagicMock()
+        with patch.object(queue_mod, "queue_enqueued", return_value=mock_counter):
             queue_mod._on_enqueue(msg, "user")
 
-        mock_add.assert_called_once_with(1, {"queue": "user", "jiuwenclaw.channel.id": "web"})
+        mock_counter.add.assert_called_once_with(1, {"queue": "user", "jiuwenclaw.channel.id": "web"})
         assert hasattr(msg, "_otel_enqueue_time")
 
     @staticmethod
@@ -2472,16 +2477,19 @@ class TestQueueInstrumentor:
         msg.channel_id = "feishu"
         msg._otel_enqueue_time = time.monotonic() - 0.05  # 50ms ago
 
-        with patch.object(queue_mod.queue_dequeued, "add") as mock_dequeued, \
-             patch.object(queue_mod.message_processed, "add") as mock_processed, \
-             patch.object(queue_mod.queue_wait_duration, "record") as mock_wait:
+        mock_dequeued = MagicMock()
+        mock_processed = MagicMock()
+        mock_wait_hist = MagicMock()
+        with patch.object(queue_mod, "queue_dequeued", return_value=mock_dequeued), \
+             patch.object(queue_mod, "message_processed", return_value=mock_processed), \
+             patch.object(queue_mod, "queue_wait_duration", return_value=mock_wait_hist):
             queue_mod._on_dequeue(msg, "user")
 
         expected_attrs = {"queue": "user", "jiuwenclaw.channel.id": "feishu"}
-        mock_dequeued.assert_called_once_with(1, expected_attrs)
-        mock_processed.assert_called_once_with(1, {**expected_attrs, "status": "success"})
-        mock_wait.assert_called_once()
-        recorded_ms = mock_wait.call_args[0][0]
+        mock_dequeued.add.assert_called_once_with(1, expected_attrs)
+        mock_processed.add.assert_called_once_with(1, {**expected_attrs, "status": "success"})
+        mock_wait_hist.record.assert_called_once()
+        recorded_ms = mock_wait_hist.record.call_args[0][0]
         assert recorded_ms >= 40  # at least ~40ms
 
     @staticmethod
@@ -2492,12 +2500,13 @@ class TestQueueInstrumentor:
         msg = MagicMock(spec=["channel_id"])
         msg.channel_id = "web"
 
-        with patch.object(queue_mod.queue_dequeued, "add"), \
-             patch.object(queue_mod.message_processed, "add"), \
-             patch.object(queue_mod.queue_wait_duration, "record") as mock_wait:
+        mock_wait_hist = MagicMock()
+        with patch.object(queue_mod, "queue_dequeued", return_value=MagicMock()), \
+             patch.object(queue_mod, "message_processed", return_value=MagicMock()), \
+             patch.object(queue_mod, "queue_wait_duration", return_value=mock_wait_hist):
             queue_mod._on_dequeue(msg, "robot")
 
-        mock_wait.assert_not_called()
+        mock_wait_hist.record.assert_not_called()
 
     @staticmethod
     def test_depth_observer_returns_queue_sizes():
@@ -2540,7 +2549,7 @@ class TestQueueInstrumentor:
         msg = MagicMock()
         msg.channel_id = "web"
 
-        with patch.object(queue_mod.queue_enqueued, "add"):
+        with patch.object(queue_mod, "queue_enqueued", return_value=MagicMock()):
             _run(handler.publish_user_messages(msg))
 
         assert len(original_called) == 1
@@ -2564,7 +2573,7 @@ class TestQueueInstrumentor:
         msg = MagicMock()
         msg.channel_id = "dingtalk"
 
-        with patch.object(queue_mod.queue_enqueued, "add"):
+        with patch.object(queue_mod, "queue_enqueued", return_value=MagicMock()):
             handler.publish_user_messages_nowait(msg)
 
         assert len(original_called) == 1
@@ -2586,13 +2595,14 @@ class TestQueueInstrumentor:
         queue_mod._patch_consume(FakeHandler, "consume_user_messages", "user")
 
         handler = FakeHandler()
-        with patch.object(queue_mod.queue_dequeued, "add") as mock_dequeued, \
-             patch.object(queue_mod.message_processed, "add"), \
-             patch.object(queue_mod.queue_wait_duration, "record"):
+        mock_dequeued = MagicMock()
+        with patch.object(queue_mod, "queue_dequeued", return_value=mock_dequeued), \
+             patch.object(queue_mod, "message_processed", return_value=MagicMock()), \
+             patch.object(queue_mod, "queue_wait_duration", return_value=MagicMock()):
             result = _run(handler.consume_user_messages(timeout=1.0))
 
         assert result is msg
-        mock_dequeued.assert_called_once()
+        mock_dequeued.add.assert_called_once()
 
     @staticmethod
     def test_patch_consume_none_skips_dequeue():
@@ -2606,7 +2616,8 @@ class TestQueueInstrumentor:
         queue_mod._patch_consume(FakeHandler, "consume_robot_messages", "robot")
 
         handler = FakeHandler()
-        with patch.object(queue_mod.queue_dequeued, "add") as mock_dequeued:
+        mock_dequeued = MagicMock()
+        with patch.object(queue_mod, "queue_dequeued", return_value=mock_dequeued):
             result = _run(handler.consume_robot_messages(timeout=0.1))
 
         assert result is None

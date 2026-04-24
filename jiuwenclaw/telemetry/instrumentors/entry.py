@@ -60,7 +60,7 @@ def instrument_entry() -> None:
             # Re-inject after span is created so the correct trace_id is propagated
             inject_trace_context(env.channel_context)
 
-            request_count.add(1, {JIUWENCLAW_CHANNEL_ID: env.channel or ""})
+            request_count().add(1, {JIUWENCLAW_CHANNEL_ID: env.channel or ""})
             start = time.monotonic()
             try:
                 await _original_process_stream(self, env, session_id, request_metadata)
@@ -68,11 +68,11 @@ def instrument_entry() -> None:
             except Exception as exc:
                 span.set_status(StatusCode.ERROR, str(exc)[:256])
                 span.record_exception(exc)
-                request_error_count.add(1, {JIUWENCLAW_CHANNEL_ID: env.channel or ""})
+                request_error_count().add(1, {JIUWENCLAW_CHANNEL_ID: env.channel or ""})
                 raise
             finally:
                 duration = time.monotonic() - start
-                request_duration.record(duration, {JIUWENCLAW_CHANNEL_ID: env.channel or ""})
+                request_duration().record(duration, {JIUWENCLAW_CHANNEL_ID: env.channel or ""})
 
     MessageHandler.message_to_e2a = _traced_message_to_e2a
     MessageHandler.process_stream = _traced_process_stream

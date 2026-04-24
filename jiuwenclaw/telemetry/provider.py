@@ -184,9 +184,19 @@ def _build_meter_provider(cfg: TelemetryConfig, resource: Resource) -> MeterProv
 
 def _create_otlp_span_exporter(cfg: TelemetryConfig, signal: str = "traces"):
     """Create OTLP span exporter based on protocol config."""
+    from jiuwenclaw.utils import logger
+
     protocol = getattr(cfg, f"{signal}_protocol")
     endpoint = getattr(cfg, f"{signal}_endpoint")
     headers = getattr(cfg, f"{signal}_headers")
+
+    logger.info(
+        "[Telemetry] OTLP Span Exporter Config: protocol=%s, endpoint=%s, headers=%s",
+        protocol,
+        endpoint,
+        headers,
+    )
+
     if protocol == "http":
         from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
         return OTLPSpanExporter(endpoint=f"{endpoint}/v1/traces", headers=headers)
@@ -197,9 +207,19 @@ def _create_otlp_span_exporter(cfg: TelemetryConfig, signal: str = "traces"):
 
 def _create_otlp_metric_exporter(cfg: TelemetryConfig, signal: str = "metrics"):
     """Create OTLP metric exporter based on protocol config."""
+    from jiuwenclaw.utils import logger
+
     protocol = getattr(cfg, f"{signal}_protocol")
     endpoint = getattr(cfg, f"{signal}_endpoint")
     headers = getattr(cfg, f"{signal}_headers")
+
+    logger.info(
+        "[Telemetry] OTLP Metric Exporter Config: protocol=%s, endpoint=%s, headers=%s",
+        protocol,
+        endpoint,
+        headers,
+    )
+
     if protocol == "http":
         from opentelemetry.exporter.otlp.proto.http.metric_exporter import OTLPMetricExporter
         return OTLPMetricExporter(

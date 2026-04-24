@@ -60,7 +60,7 @@ def instrument_agent() -> None:
                 raise
             finally:
                 duration = time.monotonic() - start
-                agent_duration.record(duration, {
+                agent_duration().record(duration, {
                     JIUWENCLAW_AGENT_NAME: getattr(self, "_agent_name", ""),
                     JIUWENCLAW_CHANNEL_ID: request.channel_id or "",
                 })
@@ -87,7 +87,7 @@ def instrument_agent() -> None:
             raise
         finally:
             duration = time.monotonic() - start
-            agent_duration.record(duration, {
+            agent_duration().record(duration, {
                 JIUWENCLAW_AGENT_NAME: getattr(self, "_agent_name", ""),
                 JIUWENCLAW_CHANNEL_ID: request.channel_id or "",
             })

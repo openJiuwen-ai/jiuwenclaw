@@ -20,6 +20,7 @@ from jiuwenclaw.telemetry.attributes import (
     JIUWENCLAW_SESSION_STATE_REASON,
 )
 from jiuwenclaw.telemetry.metrics import (
+    session_active,
     session_created_count,
     session_state_count,
     session_stuck_count,
@@ -35,7 +36,7 @@ _tracked_agent_servers: weakref.WeakSet[Any] = weakref.WeakSet()
 
 def _emit_state(session_id: str, state: str, reason: str) -> None:
     """Record a session state transition."""
-    session_state_count.add(1, {
+    session_state_count().add(1, {
         JIUWENCLAW_SESSION_ID: session_id,
         JIUWENCLAW_SESSION_STATE: state,
         JIUWENCLAW_SESSION_STATE_REASON: reason,
@@ -64,6 +65,7 @@ def instrument_session(
     _stuck_threshold_ms = float(stuck_threshold_ms)
     _stuck_check_interval_s = float(stuck_check_interval_s)
     set_session_active_observer(_count_active_sessions)
+    session_active()  # Initialize observable gauge
 
     try:
         from jiuwenclaw.agentserver.interface import JiuWenClaw
@@ -91,7 +93,7 @@ def instrument_session(
             self._session_priorities[session_id] = 0
 
             # >>> 埋点: state=created
-            session_created_count.add(1)
+            session_created_count().add(1)
             _emit_state(session_id, "created", "new_request")
 
             # 创建任务处理器
@@ -185,10 +187,10 @@ def _ensure_stuck_checker(agent_server) -> None:
                     age_ms = (now - start) * 1000
                     if age_ms > _stuck_threshold_ms:
                         # Always record age histogram
-                        session_stuck_age.record(age_ms, {JIUWENCLAW_SESSION_ID: sid})
+                        session_stuck_age().record(age_ms, {JIUWENCLAW_SESSION_ID: sid})
                         # Only count first detection
                         if not stuck_reported.get(sid):
-                            session_stuck_count.add(1, {JIUWENCLAW_SESSION_ID: sid})
+                            session_stuck_count().add(1, {JIUWENCLAW_SESSION_ID: sid})
                             stuck_reported[sid] = True
                             logger.warning(
                                 "[Telemetry] Session stuck detected: session_id=%s, age_ms=%.0f",

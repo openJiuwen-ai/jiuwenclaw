@@ -496,11 +496,12 @@ class TestTelemetryRegression:
                 session_mod._tracked_agent_servers.clear()
                 metrics_mod.set_session_active_observer(None)
 
+                mock_created_counter = MagicMock()
                 with patch(
                     "jiuwenclaw.telemetry.instrumentors.session._ensure_stuck_checker",
                     side_effect=lambda agent_server: None,
                 ):
-                    with patch.object(session_mod.session_created_count, "add") as mock_created:
+                    with patch.object(session_mod, "session_created_count", return_value=mock_created_counter):
                         session_mod.instrument_session(
                             stuck_threshold_ms=1000,
                             stuck_check_interval_s=60,
@@ -512,16 +513,16 @@ class TestTelemetryRegression:
 
                         try:
                             await agent._ensure_session_processor("sess_created_1")
-                            assert mock_created.call_count == 1
+                            assert mock_created_counter.add.call_count == 1
                             assert session_mod._count_active_sessions() == 1
                             assert list(metrics_mod._observe_session_active(MagicMock()))[0].value == 1
 
                             # Reusing the same session must not increment the created counter again.
                             await agent._ensure_session_processor("sess_created_1")
-                            assert mock_created.call_count == 1
+                            assert mock_created_counter.add.call_count == 1
 
                             await agent._ensure_session_processor("sess_created_2")
-                            assert mock_created.call_count == 2
+                            assert mock_created_counter.add.call_count == 2
                             assert session_mod._count_active_sessions() == 2
                             assert list(metrics_mod._observe_session_active(MagicMock()))[0].value == 2
                         finally:
@@ -558,6 +559,8 @@ class TestTelemetryRegression:
                 session_mod._tracked_agent_servers.clear()
                 metrics_mod.set_session_active_observer(None)
 
+                mock_created_counter = MagicMock()
+                mock_request_counter = MagicMock()
                 with patch(
                     "jiuwenclaw.telemetry.instrumentors.session._ensure_stuck_checker",
                     side_effect=lambda agent_server: None,
@@ -576,8 +579,8 @@ class TestTelemetryRegression:
                         handler = MessageHandler(agent)
 
                         try:
-                            with patch.object(session_mod.session_created_count, "add") as mock_created:
-                                with patch.object(entry_mod.request_count, "add") as mock_request:
+                            with patch.object(session_mod, "session_created_count", return_value=mock_created_counter):
+                                with patch.object(entry_mod, "request_count", return_value=mock_request_counter):
                                     req_1 = await _dispatch_stream_message(
                                         handler,
                                         "req_same_1",
@@ -594,11 +597,11 @@ class TestTelemetryRegression:
                                     assert req_2.channel_context["source"] == "test"
                                     assert req_2.channel_context["traceparent"] == "test-traceparent"
 
-                                    assert mock_created.call_count == 1
-                                    assert mock_request.call_count == 2
+                                    assert mock_created_counter.add.call_count == 1
+                                    assert mock_request_counter.add.call_count == 2
                                     assert all(
                                         call.args == (1, {"jiuwenclaw.channel.id": "web"})
-                                        for call in mock_request.call_args_list
+                                        for call in mock_request_counter.add.call_args_list
                                     )
                                     assert len(agent._session_processors) == 1
                                     assert session_mod._count_active_sessions() == 1
@@ -639,6 +642,8 @@ class TestTelemetryRegression:
                 session_mod._tracked_agent_servers.clear()
                 metrics_mod.set_session_active_observer(None)
 
+                mock_created_counter = MagicMock()
+                mock_request_counter = MagicMock()
                 with patch(
                     "jiuwenclaw.telemetry.instrumentors.session._ensure_stuck_checker",
                     side_effect=lambda agent_server: None,
@@ -658,8 +663,8 @@ class TestTelemetryRegression:
                         session_ids = ("sess_multi_1", "sess_multi_2", "sess_multi_3")
 
                         try:
-                            with patch.object(session_mod.session_created_count, "add") as mock_created:
-                                with patch.object(entry_mod.request_count, "add") as mock_request:
+                            with patch.object(session_mod, "session_created_count", return_value=mock_created_counter):
+                                with patch.object(entry_mod, "request_count", return_value=mock_request_counter):
                                     for session_id in session_ids:
                                         for index in range(1, 3):
                                             req = await _dispatch_stream_message(
@@ -670,11 +675,11 @@ class TestTelemetryRegression:
                                             assert req.channel_context["source"] == "test"
                                             assert req.channel_context["traceparent"] == "test-traceparent"
 
-                                    assert mock_created.call_count == 3
-                                    assert mock_request.call_count == 6
+                                    assert mock_created_counter.add.call_count == 3
+                                    assert mock_request_counter.add.call_count == 6
                                     assert all(
                                         call.args == (1, {"jiuwenclaw.channel.id": "web"})
-                                        for call in mock_request.call_args_list
+                                        for call in mock_request_counter.add.call_args_list
                                     )
                                     assert set(agent._session_processors.keys()) == set(session_ids)
                                     assert session_mod._count_active_sessions() == 3
@@ -718,11 +723,12 @@ class TestTelemetryRegression:
                     model_config_obj=SimpleNamespace(temperature=None, top_p=None),
                 )
 
-                with patch.object(llm_mod.llm_call_count, "add") as mock_metric_add:
+                mock_metric_counter = MagicMock()
+                with patch.object(llm_mod, "llm_call_count", return_value=mock_metric_counter):
                     with pytest.raises(RuntimeError, match="LLM timeout"):
                         _run(agent._call_llm([], None, None, 10))
 
-                mock_metric_add.assert_called_once_with(
+                mock_metric_counter.add.assert_called_once_with(
                     1,
                     {"gen_ai.request.model": "deepseek-chat", "status": "error", "jiuwenclaw.channel.id": ""},
                 )

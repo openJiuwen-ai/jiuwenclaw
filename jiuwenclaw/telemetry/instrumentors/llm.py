@@ -111,7 +111,7 @@ def instrument_llm() -> None:
                     _record_output_message(span, result)
 
                 span.set_status(StatusCode.OK)
-                llm_call_count.add(
+                llm_call_count().add(
                     1,
                     {
                         GEN_AI_REQUEST_MODEL: model_name,
@@ -124,7 +124,7 @@ def instrument_llm() -> None:
             except Exception as exc:
                 span.set_status(StatusCode.ERROR, str(exc)[:256])
                 span.record_exception(exc)
-                llm_call_count.add(
+                llm_call_count().add(
                     1,
                     {
                         GEN_AI_REQUEST_MODEL: model_name,
@@ -135,7 +135,7 @@ def instrument_llm() -> None:
                 raise
             finally:
                 duration = time.monotonic() - start
-                llm_duration.record(duration, {
+                llm_duration().record(duration, {
                     GEN_AI_REQUEST_MODEL: model_name,
                     GEN_AI_SYSTEM: system,
                     JIUWENCLAW_CHANNEL_ID: channel_id,
@@ -216,8 +216,8 @@ def _record_token_usage(span, result, model_name: str, system: str, channel_id: 
     # Metric counters
     base_attrs = {GEN_AI_REQUEST_MODEL: model_name, GEN_AI_SYSTEM: system, JIUWENCLAW_CHANNEL_ID: channel_id}
     if input_tokens:
-        token_usage.add(input_tokens, {**base_attrs, "gen_ai.token.type": "input"})
+        token_usage().add(input_tokens, {**base_attrs, "gen_ai.token.type": "input"})
     if output_tokens:
-        token_usage.add(output_tokens, {**base_attrs, "gen_ai.token.type": "output"})
+        token_usage().add(output_tokens, {**base_attrs, "gen_ai.token.type": "output"})
     if cache_read:
-        token_usage.add(cache_read, {**base_attrs, "gen_ai.token.type": "cache_read"})
+        token_usage().add(cache_read, {**base_attrs, "gen_ai.token.type": "cache_read"})
