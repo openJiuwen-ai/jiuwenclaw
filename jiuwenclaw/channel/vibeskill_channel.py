@@ -866,7 +866,8 @@ class VibeSkillChannel(BaseChannel):
     async def _handle_skilldev_skill_name_ready(
         self,
         payload: dict,
-        external_sid: str | None
+        external_sid: str | None,
+        session_id: str | None,
     ) -> list[dict]:
         """skilldev.skill_name_ready - 技能名就绪"""
         skill_name = str(payload.get("skill_name") or "").strip()
