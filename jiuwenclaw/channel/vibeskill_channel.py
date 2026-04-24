@@ -742,17 +742,24 @@ class VibeSkillChannel(BaseChannel):
             text = str(payload.get("content") or "")
             if not text:
                 return False
-            response = {
-                "type": "message.part.delta",
-                "properties": {
-                    "sessionID": external_sid,
-                    "messageID": self._ensure_message_context(msg.session_id).get("message_id"),
-                    "partID": self._ensure_text_part(msg.session_id, "text").get("id"),
-                    "field": "text",
-                    "delta": text,
-                },
-            }
-            await self._send_ws_json(ws, response, source="chat.delta")
+            ctx = self._ensure_message_context(msg.session_id)
+            text_part, _ = self._ensure_text_part(msg.session_id, "text")
+            responses = self._prepend_message_announcement(
+                ctx,
+                external_sid,
+                [{
+                    "type": "message.part.delta",
+                    "properties": {
+                        "sessionID": external_sid,
+                        "messageID": ctx.get("message_id"),
+                        "partID": text_part.get("id"),
+                        "field": "text",
+                        "delta": text,
+                    },
+                }],
+            )
+            for response in responses:
+                await self._send_ws_json(ws, response, source="chat.delta")
             return True
 
         if event_type == "chat.final":
@@ -837,22 +844,22 @@ class VibeSkillChannel(BaseChannel):
         if case_done:
             part["status"] = "done"
             part["message"] = message
-            return [{
+            return self._prepend_message_announcement(ctx, external_sid, [{
                 "type": "message.part.updated",
                 "properties": self._serialize_part(part, external_sid),
-            }]
+            }])
 
         # 序号2: 第一次来这个 stage → message.part.updated 创建气泡
         if is_first:
             part["status"] = "running"
             part["message"] = message
-            return [{
+            return self._prepend_message_announcement(ctx, external_sid, [{
                 "type": "message.part.updated",
                 "properties": self._serialize_part(part, external_sid),
-            }]
+            }])
 
         # 序号3: 中间消息 → message.part.delta 更新气泡
-        return [{
+        return self._prepend_message_announcement(ctx, external_sid, [{
             "type": "message.part.delta",
             "properties": {
                 "sessionID": external_sid,
@@ -861,7 +868,7 @@ class VibeSkillChannel(BaseChannel):
                 "type": "text",
                 "delta": message,
             },
-        }]
+        }])
 
     async def _handle_skilldev_skill_name_ready(
         self,
@@ -948,7 +955,7 @@ class VibeSkillChannel(BaseChannel):
                     "properties": self._serialize_part(part, external_sid),
                 }
             )
-        return responses
+        return self._prepend_message_announcement(ctx, external_sid, responses)
 
     async def _handle_skilldev_tool_result(
         self,
@@ -988,7 +995,8 @@ class VibeSkillChannel(BaseChannel):
                     "properties": self._serialize_part(part, external_sid),
                 }
             )
-        return responses
+        ctx = self._ensure_message_context(session_id, stage)
+        return self._prepend_message_announcement(ctx, external_sid, responses)
 
     async def _handle_skilldev_test_progress(
         self,
@@ -1032,10 +1040,10 @@ class VibeSkillChannel(BaseChannel):
         if case_status:
             part["status"] = case_status  # "success" or "failed"
             part["message"] = message
-            return [{
+            return self._prepend_message_announcement(ctx, external_sid, [{
                 "type": "message.part.updated",
                 "properties": self._serialize_part(part, external_sid),
-            }]
+            }])
 
         # 序号2: 第一次来这个 stage（stage_key 不存在）→ message.updated 创建气泡
         if is_first:
@@ -1495,6 +1503,23 @@ class VibeSkillChannel(BaseChannel):
             },
         }]
 
+    def _prepend_message_announcement(
+        self,
+        ctx: dict[str, Any],
+        external_sid: str | None,
+        responses: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        if not responses:
+            return responses
+        has_part_event = any(
+            str(r.get("type") or "").startswith("message.part.")
+            for r in responses
+            if isinstance(r, dict)
+        )
+        if not has_part_event:
+            return responses
+        return self._ensure_message_announced(ctx, external_sid) + responses
+
     def _build_text_stream_events(
         self,
         session_id: str | None,
@@ -1531,7 +1556,7 @@ class VibeSkillChannel(BaseChannel):
                 "delta": delta,
             },
         })
-        return responses
+        return self._prepend_message_announcement(ctx, external_sid, responses)
 
     def _serialize_parts(self, parts: list[dict[str, Any]], external_sid: str | None) -> list[dict[str, Any]]:
         return [self._serialize_part(part, external_sid) for part in parts]
