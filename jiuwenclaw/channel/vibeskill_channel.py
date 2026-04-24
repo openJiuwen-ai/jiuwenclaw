@@ -18,6 +18,8 @@ from jiuwenclaw.channel.vibeskill_session import (
     VibeSkillSessionStore,
     _VIBESKILL_ORIGINAL_SESSION_ID_KEY,
 )
+
+_VIBESKILL_PROTOCOL_KEY = "protocol"
 from jiuwenclaw.channel.vibeskill_file_utils import skilldev_tree_to_file_tree_nodes
 from jiuwenclaw.schema.message import Message, ReqMethod
 
@@ -473,7 +475,14 @@ class VibeSkillChannel(BaseChannel):
         if system_prompt:
             params["system"] = system_prompt
 
-        msg_metadata = {_VIBESKILL_ORIGINAL_SESSION_ID_KEY: external_session_id} if external_session_id else None
+        # 提取 protocol 并透传到 metadata
+        protocol = data.get("protocol")
+        metadata_dict = {}
+        if external_session_id:
+            metadata_dict[_VIBESKILL_ORIGINAL_SESSION_ID_KEY] = external_session_id
+        if protocol:
+            metadata_dict[_VIBESKILL_PROTOCOL_KEY] = protocol
+        msg_metadata = metadata_dict if metadata_dict else None
 
         # 构建 Message 并直接发送到 MessageHandler
         msg = Message(
@@ -1137,13 +1146,25 @@ class VibeSkillChannel(BaseChannel):
                 await self._store.set_state(session_id, VibeSkillSessionState.IDLE)
             except Exception:
                 logger.exception("[VibeSkillChannel] set_state error for skilldev.error, session_id=%s", session_id)
+
+        # 发送 message.part.updated，type=text，包含错误信息
+        error_text = str(payload.get("error") or payload.get("message") or "skilldev error")
+        text_payload = {"text": error_text}
+        responses.extend(self._build_text_stream_events(
+            session_id=session_id,
+            external_sid=external_sid,
+            payload=text_payload,
+            part_type="text",
+            text_field="text",
+        ))
+
         responses.append({
             "type": "session.status",
             "properties": {
                 "sessionID": external_sid,
                 "status": {
                     "type": "idle",
-                    "message": str(payload.get("error") or "skilldev error"),
+                    "message": error_text,
                 },
             },
         })
