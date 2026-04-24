@@ -15,8 +15,15 @@ from typing import Any, ClassVar
 from jiuwenclaw.agentserver.session_history import enrich_history_messages_session_id
 from jiuwenclaw.agentserver.gateway_push.wire import build_server_push_wire
 from jiuwenclaw.agentserver.tools.acp_output_tools import get_acp_output_manager
-from jiuwenclaw.utils import get_agent_sessions_dir, get_config_file
+from jiuwenclaw.agentserver.agent_manager import AgentManager
+from jiuwenclaw.utils import get_agent_sessions_dir, get_config_file, FileTransferStartParams
 from jiuwenclaw.e2a.agent_compat import e2a_to_agent_request
+from jiuwenclaw.e2a.constants import (
+    FILE_TRANSFER_START,
+    FILE_TRANSFER_CHUNK,
+    FILE_TRANSFER_COMPLETE,
+    FILE_TRANSFER_EVENT_TYPES,
+)
 from jiuwenclaw.e2a.gateway_normalize import (
     E2A_FALLBACK_FAILED_KEY,
     E2A_INTERNAL_CONTEXT_KEY,
@@ -36,6 +43,7 @@ from jiuwenclaw.schema.hooks_context import AgentServerChatHookContext, AgentWsS
 from jiuwenclaw.agentserver.agent_manager import AgentManager, ACP_DEFAULT_CAPABILITIES
 from jiuwenclaw.agentserver.permissions.config_rpc import get_permissions_config_req_methods
 from jiuwenclaw.agentserver.tenant_agent_pool import TenantAgentPool
+from jiuwenclaw.agentserver.file_transfer_manager import get_file_transfer_manager
 from jiuwenclaw.security.ws_origin import (
     extract_handshake_request,
     forbidden_origin_response,
@@ -176,6 +184,11 @@ class AgentWebSocketServer:
             logger.warning("[AgentWebSocketServer] 服务端已在运行")
             return
 
+        # 启动文件传输管理器的清理任务
+        ft_manager = get_file_transfer_manager()
+        if ft_manager.enabled:
+            await ft_manager.start_cleanup_task()
+
         try:
             from websockets.legacy.server import serve as legacy_serve
             self._server = await legacy_serve(
@@ -223,6 +236,11 @@ class AgentWebSocketServer:
 
     async def stop(self) -> None:
         """停止 WebSocket 服务端."""
+        # 停止文件传输管理器的清理任务
+        ft_manager = get_file_transfer_manager()
+        if ft_manager.enabled:
+            await ft_manager.stop_cleanup_task()
+
         if self._server is None:
             return
         self._server.close()
@@ -327,6 +345,26 @@ class AgentWebSocketServer:
                 if not isinstance(legacy, dict):
                     raise ValueError("legacy_agent_request missing or not a dict")
                 request = _payload_to_request(legacy)
+            # 文件传输请求：method 不在 ReqMethod 枚举中，需要特殊处理
+            elif env.method in (FILE_TRANSFER_START, FILE_TRANSFER_CHUNK, FILE_TRANSFER_COMPLETE):
+                logger.info(
+                    "[E2A][in] request_id=%s channel=%s method=%s is_stream=%s",
+                    env.request_id,
+                    env.channel,
+                    env.method,
+                    env.is_stream,
+                )
+                # 直接构造 AgentRequest，不走 e2a_to_agent_request
+                request = AgentRequest(
+                    request_id=env.request_id or "",
+                    channel_id=env.channel or "",
+                    session_id=env.session_id,
+                    req_method=None,  # 文件传输没有对应的 ReqMethod
+                    params=dict(env.params or {}),
+                    is_stream=False,
+                    timestamp=0.0,
+                    metadata=None,
+                )
             else:
                 logger.info(
                     "[E2A][in] request_id=%s channel=%s method=%s is_stream=%s",
@@ -423,6 +461,11 @@ class AgentWebSocketServer:
                 return
             if request.req_method == ReqMethod.EXTENSIONS_TOGGLE:
                 await self._handle_extensions_toggle(ws, request, send_lock)
+                return
+            # 文件传输处理
+            event_type = request.params.get("event_type") if isinstance(request.params, dict) else None
+            if event_type in FILE_TRANSFER_EVENT_TYPES:
+                await self._handle_file_transfer(ws, request, send_lock)
                 return
             if request.is_stream:
                 await self._handle_stream(ws, request, send_lock)
@@ -1462,7 +1505,101 @@ class AgentWebSocketServer:
     def get_agent_manager(self) -> TenantAgentPool:
         """获取 AgentManager 实例."""
         return self._agent_manager
-    
+
+    # =========================================================================
+    # 文件传输处理
+    # =========================================================================
+
+    async def _handle_file_transfer(
+        self, ws: Any, request: AgentRequest, send_lock: asyncio.Lock
+    ) -> None:
+        """处理文件传输请求（Gateway -> AgentServer）.
+
+        支持：
+        - file.transfer.start: 开始传输
+        - file.transfer.chunk: 传输分片
+        - file.transfer.complete: 完成传输
+        """
+        params = request.params if isinstance(request.params, dict) else {}
+        event_type = params.get("event_type", "")
+        transfer_id = params.get("transfer_id", "")
+
+        ft_manager = get_file_transfer_manager()
+
+        # 检查是否启用分布式模式
+        if not ft_manager.enabled:
+            resp = AgentResponse(
+                request_id=request.request_id,
+                channel_id=request.channel_id,
+                ok=False,
+                payload={
+                    "error": "file transfer not enabled (distributed mode required)",
+                    "event_type": event_type,
+                },
+            )
+            wire = encode_agent_response_for_wire(resp, response_id=request.request_id)
+            async with send_lock:
+                await ws.send(json.dumps(wire, ensure_ascii=False))
+            return
+
+        try:
+            if event_type == FILE_TRANSFER_START:
+                ft_params = FileTransferStartParams(
+                    transfer_id=transfer_id,
+                    filename=params.get("filename", "unnamed"),
+                    file_size=params.get("file_size", 0),
+                    sha256=params.get("sha256", ""),
+                    total_chunks=params.get("total_chunks", 0),
+                    chunk_size=params.get("chunk_size", 65536),
+                    mime_type=params.get("mime_type", ""),
+                    session_id=request.session_id or "",
+                )
+                result = await ft_manager.handle_transfer_start(ft_params)
+            elif event_type == FILE_TRANSFER_CHUNK:
+                result = await ft_manager.handle_transfer_chunk(
+                    transfer_id=transfer_id,
+                    chunk_index=params.get("chunk_index", 0),
+                    base64_data=params.get("base64_data", ""),
+                )
+            elif event_type == FILE_TRANSFER_COMPLETE:
+                result = await ft_manager.handle_transfer_complete(
+                    transfer_id=transfer_id,
+                    sha256=params.get("sha256", ""),
+                )
+            else:
+                result = {
+                    "accepted": False,
+                    "error": f"unknown event_type: {event_type}",
+                }
+
+            resp = AgentResponse(
+                request_id=request.request_id,
+                channel_id=request.channel_id,
+                ok=result.get("success", result.get("accepted", False)),
+                payload={
+                    "event_type": event_type,
+                    **result,
+                },
+            )
+        except Exception as e:
+            logger.exception(
+                "[AgentWebSocketServer] 文件传输处理失败: %s",
+                e,
+            )
+            resp = AgentResponse(
+                request_id=request.request_id,
+                channel_id=request.channel_id,
+                ok=False,
+                payload={
+                    "error": str(e),
+                    "event_type": event_type,
+                },
+            )
+
+        wire = encode_agent_response_for_wire(resp, response_id=request.request_id)
+        async with send_lock:
+            await ws.send(json.dumps(wire, ensure_ascii=False))
+            
     @staticmethod
     def get_conversation_history(session_id: str, page_idx: int) -> dict[str, Any] | None:
         # 按照 session_id 和分页消息获取历史记录

@@ -41,6 +41,27 @@ for _lg in LogManager.get_all_loggers().values():
 load_dotenv(dotenv_path=get_env_file())
 
 
+class _NopCronScheduler:
+    """A no-op scheduler placeholder for CronController.
+
+    In split deployment, AgentServer only provides cron CRUD storage.
+    Actual scheduling/triggering is handled by the Gateway process.
+    """
+
+    async def reload(self) -> None:
+        return None
+
+    async def start(self) -> None:
+        return None
+
+    async def stop(self) -> None:
+        return None
+
+    @staticmethod
+    def is_running() -> bool:
+        return False
+
+
 async def _run(host: str, port: int) -> None:
     from openjiuwen.core.runner import Runner
     from jiuwenclaw.agentserver.agent_ws_server import AgentWebSocketServer
@@ -72,7 +93,9 @@ async def _run(host: str, port: int) -> None:
 
     server = AgentWebSocketServer.get_instance(
         host=host,
-        port=port
+        port=port,
+        ping_interval=20.0,
+        ping_timeout=20.0,
     )
     await server.start()
 

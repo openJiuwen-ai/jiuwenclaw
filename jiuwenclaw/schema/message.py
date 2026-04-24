@@ -116,7 +116,7 @@ class ReqMethod(Enum):
     UPDATER_GET_CONF = "updater.get_conf"
     UPDATER_SET_CONF = "updater.set_conf"
 
-    # SkillDev 模式请求方法
+# SkillDev 模式请求方法
     SKILLDEV_START = "skilldev.start"  # 发起新任务（create/upgrade 由 params 自动判断）
     SKILLDEV_RESPOND = "skilldev.respond"  # 统一确认入口（后端根据 task_id 当前阶段自动路由）
     SKILLDEV_STATUS = "skilldev.status"  # 查询状态（不传 task_id → 返回任务列表）
@@ -128,6 +128,10 @@ class ReqMethod(Enum):
 
     TOOLS_ADD = "tools.add"
 
+    # 文件传输方法（分布式部署）
+    FILE_TRANSFER_START = "file.transfer.start"
+    FILE_TRANSFER_CHUNK = "file.transfer.chunk"
+    FILE_TRANSFER_COMPLETE = "file.transfer.complete"
 
 class EventType(Enum):
     CONNECTION_ACK = "connection.ack"

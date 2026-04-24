@@ -7,8 +7,22 @@ import sys
 import tempfile
 from pathlib import Path
 from typing import Generator
+from unittest.mock import MagicMock
 
 import pytest
+
+# Mock fastmcp for CI compatibility (rich 14.x removed tracebacks_max_frames)
+mock_fastmcp = MagicMock()
+mock_fastmcp.FastMCP = MagicMock
+sys.modules["fastmcp"] = mock_fastmcp
+sys.modules["fastmcp.client"] = MagicMock()
+sys.modules["fastmcp.utilities"] = MagicMock()
+sys.modules["fastmcp.utilities.logging"] = MagicMock()
+
+
+def pytest_configure(config):
+    """Register custom marks."""
+    config.addinivalue_line("markers", "asyncio: mark test as async test")
 
 
 @pytest.fixture

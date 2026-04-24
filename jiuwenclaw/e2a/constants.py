@@ -132,13 +132,6 @@ FILE_DOWNLOAD_START = "file.download.start"
 FILE_DOWNLOAD_CHUNK = "file.download.chunk"
 FILE_DOWNLOAD_COMPLETE = "file.download.complete"
 
-# 文件传输错误类型
-FILE_TRANSFER_ERROR_TIMEOUT = "file.transfer.timeout"
-FILE_TRANSFER_ERROR_CHECKSUM_MISMATCH = "file.transfer.checksum_mismatch"
-FILE_TRANSFER_ERROR_CHUNK_MISSING = "file.transfer.chunk_missing"
-FILE_TRANSFER_ERROR_SIZE_EXCEEDED = "file.transfer.size_exceeded"
-FILE_TRANSFER_ERROR_INVALID_FILE = "file.transfer.invalid_file"
-
 # 文件传输事件类型集合
 FILE_TRANSFER_EVENT_TYPES: tuple[str, ...] = (
     FILE_TRANSFER_START,
@@ -149,6 +142,13 @@ FILE_TRANSFER_EVENT_TYPES: tuple[str, ...] = (
     FILE_DOWNLOAD_COMPLETE,
 )
 
+# 文件传输错误类型
+FILE_TRANSFER_ERROR_TIMEOUT = "file.transfer.timeout"
+FILE_TRANSFER_ERROR_CHECKSUM_MISMATCH = "file.transfer.checksum_mismatch"
+FILE_TRANSFER_ERROR_CHUNK_MISSING = "file.transfer.chunk_missing"
+FILE_TRANSFER_ERROR_SIZE_EXCEEDED = "file.transfer.size_exceeded"
+FILE_TRANSFER_ERROR_INVALID_FILE = "file.transfer.invalid_file"
+
 # 文件传输错误类型集合
 FILE_TRANSFER_ERROR_TYPES: tuple[str, ...] = (
     FILE_TRANSFER_ERROR_TIMEOUT,
@@ -157,4 +157,3 @@ FILE_TRANSFER_ERROR_TYPES: tuple[str, ...] = (
     FILE_TRANSFER_ERROR_SIZE_EXCEEDED,
     FILE_TRANSFER_ERROR_INVALID_FILE,
 )
-

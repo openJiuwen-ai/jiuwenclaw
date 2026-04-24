@@ -506,6 +506,28 @@ updater:
   sha256_name_pattern: "jiuwenclaw-setup-{version}.exe.sha256"
   timeout_seconds: 20
 
+# 文件传输配置（分布式部署模式）
+# 当 Gateway 和 AgentServer 分开部署时，需要启用此配置
+file_transfer:
+  # 是否启用分布式模式（true=启用 WebSocket 文件传输）
+  enabled: false
+  # 分片大小（字节），默认 64KB
+  chunk_size: 65536
+  # 最大文件大小（字节），默认 100MB，0=不限制
+  max_file_size: 104857600
+  # 传输超时时间（秒），默认 300 秒
+  transfer_timeout: 300
+  # 单分片最大重试次数
+  max_retries: 3
+  # 接收文件存储目录（相对于 workspace）
+  received_files_dir: "received_files"
+  # 临时文件清理间隔（秒）
+  cleanup_interval: 3600
+  # 清理超过 N 秒的临时文件
+  cleanup_age: 86400
+  # 最大并发传输数
+  max_concurrent_transfers: 5
+
 extensions:
    # 扩展包搜索目录（字符串），用 ';' 分割多个目录：
    # EXTENSION_DIRS="E:/a;D:/b"; 默认会加载仓库根目录 extensions

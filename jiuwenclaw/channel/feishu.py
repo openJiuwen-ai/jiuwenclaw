@@ -950,6 +950,7 @@ class FeishuChannel(BaseChannel):
         content: str,
         timestamp_ms: int,
         metadata: dict[str, Any],
+        params: dict[str, Any] | None = None,
     ) -> None:
         """将同一用户的连续消息做短暂聚合，再统一交给 gateway 入站链路。"""
         if self._is_control_message(content):
@@ -960,6 +961,7 @@ class FeishuChannel(BaseChannel):
                 merged_content="/new_session",
                 timestamp_ms=timestamp_ms,
                 metadata=metadata,
+                params=params,
                 )
             await self._process_batched_message(
                 chat_id=chat_id,
@@ -967,6 +969,7 @@ class FeishuChannel(BaseChannel):
                 merged_content=content,
                 timestamp_ms=timestamp_ms,
                 metadata=metadata,
+                params=params,
             )
             return
 
@@ -978,6 +981,7 @@ class FeishuChannel(BaseChannel):
                 merged_content=content,
                 timestamp_ms=timestamp_ms,
                 metadata=metadata,
+                params=params,
             )
             return
 
@@ -998,6 +1002,7 @@ class FeishuChannel(BaseChannel):
                     "content": content,
                     "timestamp_ms": timestamp_ms,
                     "metadata": dict(metadata),
+                    "params": params,
                 }
             )
 
@@ -1064,6 +1069,15 @@ class FeishuChannel(BaseChannel):
         if mentioned_open_ids:
             merged_metadata["mentioned_open_ids"] = mentioned_open_ids
 
+        # 取最后一个消息的 params（文件通常单独发送）
+        last_params = last_item.get("params")
+        # 如果最后一个消息没有 params，从 items 中找第一个有 files 的
+        if not last_params:
+            for item in reversed(items):
+                if item.get("params") and item["params"].get("files"):
+                    last_params = item["params"]
+                    break
+
         if len(items) > 1:
             logger.info(
                 "[FeishuChannel] 合并连续消息: chat_id=%s open_id=%s count=%s",
@@ -1078,6 +1092,7 @@ class FeishuChannel(BaseChannel):
             merged_content=merged_content,
             timestamp_ms=int(last_item["timestamp_ms"]),
             metadata=merged_metadata,
+            params=last_params,
         )
 
     async def _process_batched_message(
@@ -1088,6 +1103,7 @@ class FeishuChannel(BaseChannel):
         merged_content: str,
         timestamp_ms: int,
         metadata: dict[str, Any],
+        params: dict[str, Any] | None = None,
     ) -> None:
         """对单条或合并后的消息做平台整理后转发。"""
         chat_type = metadata.get("chat_type", "")
@@ -1107,6 +1123,7 @@ class FeishuChannel(BaseChannel):
             user_id=open_id,
             bot_id=self.config.app_id or "",
             metadata=enriched_metadata,
+            params=params,
         )
         await self._handle_message(inbound)
 
@@ -2260,6 +2277,7 @@ class FeishuChannel(BaseChannel):
                     content=content,
                     timestamp_ms=_ts,
                     metadata=_meta,
+                    params=params,
                 )
             else:
                 await self._process_batched_message(
@@ -2268,6 +2286,7 @@ class FeishuChannel(BaseChannel):
                     merged_content=content,
                     timestamp_ms=_ts,
                     metadata=_meta,
+                    params=params,
                 )
 
         except Exception as e:
@@ -2588,9 +2607,13 @@ class FeishuChannel(BaseChannel):
             )
 
             if file_info:
-                file_info["name"] = file_name
+                # 关键修复：name 必须与实际存储的文件名一致，确保 Agent 能精确定位文件
+                # file_name 是飞书原始名，file_info["path"] 包含实际存储的文件名
+                local_filename = os.path.basename(file_info.get("path", ""))
+                file_info["name"] = local_filename if local_filename else file_name
+                file_info["_original_name"] = file_name  # 保留飞书原始文件名（用于用户展示）
                 file_info["size"] = file_size
-                logger.info(f"飞书文件下载成功: {file_name}, path={file_info.get('path')}")
+                logger.info(f"飞书文件下载成功: 原始名={file_name}, 存储名={local_filename}, path={file_info.get('path')}")
                 return f"[文件: {file_name}]", file_info
 
             logger.warning(f"飞书文件下载失败: {file_name}")

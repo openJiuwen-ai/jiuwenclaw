@@ -107,7 +107,7 @@ _CONTEXT_SIZE_HINT_KEYS: tuple[str, ...] = (
 )
 
 
-def build_user_prompt(content: str, files: dict, channel: str, language: str) -> str:
+def build_user_prompt(content: str, files: dict | list, channel: str, language: str) -> str:
     """Build user prompt for the agent."""
     if language == "zh":
         prompt = "你收到一条消息：\n"
@@ -123,12 +123,15 @@ def build_user_prompt(content: str, files: dict, channel: str, language: str) ->
             },
             ensure_ascii=False,
         )
+    # 兼容 files 为 dict 或 list 格式
+    # 空容器统一输出 "{}"（对 Agent 来说空 dict 和空 list 都表示无文件）
+    files_json = json.dumps(files, ensure_ascii=False) if files else "{}"
     return prompt + json.dumps(
         {
             "source": channel,
             "preferred_response_language": language,
             "content": content,
-            "files_updated_by_user": json.dumps(files, ensure_ascii=False),
+            "files_updated_by_user": files_json,
             "type": "user input",
         },
         ensure_ascii=False,

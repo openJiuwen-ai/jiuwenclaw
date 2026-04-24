@@ -16,7 +16,7 @@ from enum import Enum
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Dict
 from jiuwenclaw.channel.base import ChannelType
-from jiuwenclaw.e2a.constants import E2A_WIRE_INTERNAL_METADATA_KEYS
+from jiuwenclaw.e2a.constants import E2A_WIRE_INTERNAL_METADATA_KEYS, FILE_TRANSFER_EVENT_TYPES
 from jiuwenclaw.gateway.session_map import SessionMap
 from jiuwenclaw.gateway.slash_command import (
     ParsedControlAction,
@@ -24,6 +24,8 @@ from jiuwenclaw.gateway.slash_command import (
 )
 from jiuwenclaw.schema.hook_event import GatewayHookEvents
 from jiuwenclaw.schema.hooks_context import GatewayChatHookContext
+from jiuwenclaw.extensions.registry import ExtensionRegistry
+from jiuwenclaw.utils import FileTransferStartParams
 
 logger = logging.getLogger(__name__)
 
@@ -158,12 +160,6 @@ class MessageHandler(ABC):
         self._inbound_pipeline = None   # type: Any  # IMInboundPipeline | None
         self._outbound_pipeline = None  # type: Any  # IMOutboundPipeline | None
 
-    def set_inbound_pipeline(self, pipeline: Any) -> None:
-        self._inbound_pipeline = pipeline
-
-    def set_outbound_pipeline(self, pipeline: Any) -> None:
-        self._outbound_pipeline = pipeline
-
         # 直接使用 jiuwenclaw.config 的 get_config_raw/set_config/update_channel_in_config
         # 避免在此处重复实现 config 模块加载逻辑。
         from jiuwenclaw.config import get_config_raw, update_channel_in_config
@@ -175,6 +171,15 @@ class MessageHandler(ABC):
 
         if isinstance(self._agent_client, WebSocketAgentServerClient):
             self._agent_client.set_server_push_handler(self._handle_agent_server_push)
+
+        # 文件传输处理器（延迟初始化）
+        self._file_transfer_handler = None
+
+    def set_inbound_pipeline(self, pipeline: Any) -> None:
+        self._inbound_pipeline = pipeline
+
+    def set_outbound_pipeline(self, pipeline: Any) -> None:
+        self._outbound_pipeline = pipeline
 
     @classmethod
     def get_instance(cls, agent_client: "AgentServerClient | None" = None) -> "MessageHandler":
@@ -1453,6 +1458,11 @@ class MessageHandler(ABC):
     async def _handle_agent_server_push(self, wire: dict[str, Any]) -> None:
         """AgentServer ``send_push`` 下行：与 RPC 共用连接但不得占用 unary/stream 等待队列。"""
         from jiuwenclaw.e2a.wire_codec import parse_agent_server_wire_chunk
+        from jiuwenclaw.e2a.constants import (
+            FILE_DOWNLOAD_START,
+            FILE_DOWNLOAD_CHUNK,
+            FILE_DOWNLOAD_COMPLETE,
+        )
 
         try:
             chunk = parse_agent_server_wire_chunk(wire)
@@ -1485,15 +1495,31 @@ class MessageHandler(ABC):
 
         if chunk.channel_id == _ACP_CHANNEL_ID:
             session_id = self._resolve_acp_external_session_id(session_id, bus_metadata)
-        if isinstance(chunk.payload, dict) and chunk.payload.get("event_type") == "cron.response":
-            await self._handle_cron_push_payload(
-                payload=dict(chunk.payload),
-                request_id=rid,
-                channel_id=chunk.channel_id,
-                session_id=session_id,
-                metadata=bus_metadata,
-            )
-            return
+
+        # 检查是否是文件下载事件（AgentServer -> Gateway 的文件传输）
+        payload = chunk.payload or {}
+        if isinstance(payload, dict):
+            event_type = payload.get("event_type", "")
+            if event_type in FILE_TRANSFER_EVENT_TYPES:
+                await self._handle_file_transfer_event(
+                    event_type, payload, session_id, chunk.channel_id, bus_metadata
+                )
+                logger.info(
+                    "[MessageHandler] server_push 文件下载事件已处理: request_id=%s event_type=%s",
+                    rid,
+                    event_type,
+                )
+                return
+            if event_type == "cron.response":
+                await self._handle_cron_push_payload(
+                    payload=dict(chunk.payload),
+                    request_id=rid,
+                    channel_id=chunk.channel_id,
+                    session_id=session_id,
+                    metadata=bus_metadata,
+                )
+                return
+
         if self._is_terminal_stream_chunk(chunk):
             logger.debug(
                 "[MessageHandler] 忽略 server_push 终止 chunk: request_id=%s",
@@ -1717,8 +1743,6 @@ class MessageHandler(ABC):
             req_method=msg.req_method.value if msg.req_method is not None else None,
             params=params,
         )
-        from jiuwenclaw.extensions.registry import ExtensionRegistry
-
         await ExtensionRegistry.get_instance().trigger(GatewayHookEvents.BEFORE_CHAT_REQUEST, ctx)
 
     @staticmethod
@@ -2063,6 +2087,18 @@ class MessageHandler(ABC):
                 agent_msg = await self._prepare_agent_dispatch_message(msg)
                 await self._trigger_before_chat_request_hook(agent_msg)
                 env = self.message_to_e2a(agent_msg)
+
+                # 分布式文件传输：将 Gateway 本地文件传输到 AgentServer
+                try:
+                    if self._should_transfer_files(env):
+                        env = await self._transfer_files_to_agent_server(env, msg)
+                except Exception as e:
+                    logger.exception(
+                        "[MessageHandler] 文件传输过程异常: request_id=%s error=%s, 继续使用原路径",
+                        env.request_id,
+                        e,
+                    )
+
                 stream_rid = env.request_id or msg.id
                 try:
                     if env.is_stream:
@@ -2163,14 +2199,20 @@ class MessageHandler(ABC):
                             session_id,
                             approval_request_id,
                         )
-                # 携带 request metadata，供 Feishu/Xiaoyi 用平台身份回发
-                # 检查是否是 processing_status=false 事件
-                payload = chunk.payload or {}
-                if isinstance(payload, dict):
-                    if payload.get("event_type") == "chat.processing_status":
-                        if payload.get("is_processing") is False:
+
+                    # 处理文件下载事件（分布式模式）
+                    if event_type in FILE_TRANSFER_EVENT_TYPES:
+                        await self._handle_file_transfer_event(
+                            event_type, chunk.payload, session_id, channel_id, request_metadata
+                        )
+                        continue
+
+                    # 检查是否是 processing_status=false 事件
+                    if event_type == "chat.processing_status":
+                        if chunk.payload.get("is_processing") is False:
                             has_processing_status_false = True
 
+                # 携带 request metadata，供 Feishu/Xiaoyi 用平台身份回发
                 out = self._chunk_to_message(
                     chunk,
                     session_id=session_id,
@@ -2218,6 +2260,346 @@ class MessageHandler(ABC):
                     "[MessageHandler] 所有流式任务已完成，已发送 is_processing=false: session_id=%s",
                     session_id,
                 )
+
+    async def _handle_file_transfer_event(
+        self,
+        event_type: str,
+        payload: dict[str, Any],
+        session_id: str | None,
+        channel_id: str,
+        request_metadata: dict[str, Any] | None,
+    ) -> None:
+        """处理文件传输事件（AgentServer -> Gateway 的文件下载）.
+
+        Args:
+            event_type: 事件类型（file.download.start/chunk/complete）
+            payload: 事件参数
+            session_id: 会话ID
+            channel_id: 频道ID
+            request_metadata: 请求元数据
+        """
+        from jiuwenclaw.e2a.constants import (
+            FILE_DOWNLOAD_START,
+            FILE_DOWNLOAD_CHUNK,
+            FILE_DOWNLOAD_COMPLETE,
+        )
+        from jiuwenclaw.gateway.file_transfer_handler import get_file_transfer_handler
+
+        # 延迟初始化文件传输处理器
+        if self._file_transfer_handler is None:
+            self._file_transfer_handler = get_file_transfer_handler()
+
+        ft_handler = self._file_transfer_handler
+
+        # 检查是否启用分布式模式
+        if not ft_handler.enabled:
+            logger.warning(
+                "[MessageHandler] 收到文件下载事件但未启用分布式模式: event_type=%s",
+                event_type,
+            )
+            return
+
+        try:
+            if event_type == FILE_DOWNLOAD_START:
+                dl_params = FileTransferStartParams(
+                    transfer_id=payload.get("transfer_id", ""),
+                    filename=payload.get("filename", "unnamed"),
+                    file_size=payload.get("file_size", 0),
+                    sha256=payload.get("sha256", ""),
+                    total_chunks=payload.get("total_chunks", 0),
+                    chunk_size=payload.get("chunk_size", 65536),
+                    mime_type=payload.get("mime_type", ""),
+                    session_id=session_id or "",
+                    channel_id=channel_id,
+                )
+                result = await ft_handler.handle_download_start(dl_params)
+                logger.info(
+                    "[MessageHandler] 文件下载开始: transfer_id=%s accepted=%s",
+                    payload.get("transfer_id"),
+                    result.get("accepted"),
+                )
+
+            elif event_type == FILE_DOWNLOAD_CHUNK:
+                result = await ft_handler.handle_download_chunk(
+                    transfer_id=payload.get("transfer_id", ""),
+                    chunk_index=payload.get("chunk_index", 0),
+                    base64_data=payload.get("base64_data", ""),
+                )
+                logger.debug(
+                    "[MessageHandler] 文件下载分片: transfer_id=%s chunk=%d",
+                    payload.get("transfer_id"),
+                    payload.get("chunk_index"),
+                )
+
+            elif event_type == FILE_DOWNLOAD_COMPLETE:
+                result = await ft_handler.handle_download_complete(
+                    transfer_id=payload.get("transfer_id", ""),
+                    sha256=payload.get("sha256", ""),
+                )
+
+                if result.get("success"):
+                    # 文件接收成功，发送 chat.file 事件到 Channel
+                    file_path = result.get("file_path", "")
+                    logger.info(
+                        "[MessageHandler] 文件下载完成: transfer_id=%s path=%s",
+                        payload.get("transfer_id"),
+                        file_path,
+                    )
+
+                    # 发送 chat.file 事件到 Channel
+                    from jiuwenclaw.schema.message import Message, EventType
+
+                    files_payload = [{
+                        "path": file_path,
+                        "name": Path(file_path).name,
+                    }]
+
+                    file_msg = Message(
+                        id=f"file_{payload.get('transfer_id', '')}",
+                        type="event",
+                        channel_id=channel_id,
+                        session_id=session_id,
+                        params={},
+                        timestamp=time.time(),
+                        ok=True,
+                        payload={
+                            "event_type": EventType.CHAT_FILE.value,
+                            "files": files_payload,
+                        },
+                        event_type=EventType.CHAT_FILE,
+                        metadata=request_metadata,
+                    )
+                    await self.publish_robot_messages(file_msg)
+                    logger.info(
+                        "[MessageHandler] 已发送 chat.file 事件: channel_id=%s file=%s",
+                        channel_id,
+                        file_path,
+                    )
+                else:
+                    logger.warning(
+                        "[MessageHandler] 文件下载失败: transfer_id=%s error=%s",
+                        payload.get("transfer_id"),
+                        result.get("error"),
+                    )
+
+        except Exception as e:
+            logger.exception(
+                "[MessageHandler] 处理文件传输事件失败: event_type=%s error=%s",
+                event_type,
+                e,
+            )
+
+    def _should_transfer_files(self, env: "E2AEnvelope") -> bool:
+        """判断是否需要进行分布式文件传输.
+
+        Args:
+            env: E2AEnvelope 信封
+
+        Returns:
+            True 如果需要传输文件
+        """
+        # 延迟初始化文件传输处理器
+        if self._file_transfer_handler is None:
+            from jiuwenclaw.gateway.file_transfer_handler import get_file_transfer_handler
+            self._file_transfer_handler = get_file_transfer_handler()
+
+        # 检查是否启用分布式模式
+        if not self._file_transfer_handler.enabled:
+            return False
+
+        # 检查 params.files 是否存在且非空
+        params = env.params or {}
+        files = params.get("files")
+        if not files or not isinstance(files, list):
+            return False
+
+        # 检查是否有需要传输的本地文件
+        for file_info in files:
+            if isinstance(file_info, dict):
+                path = file_info.get("path", "")
+                if path and Path(path).exists():
+                    return True
+
+        return False
+
+    async def _transfer_files_to_agent_server(
+        self,
+        env: "E2AEnvelope",
+        msg: "Message",
+    ) -> "E2AEnvelope":
+        """将 params.files 中的文件传输到 AgentServer（分布式模式）.
+
+        Args:
+            env: 已构建的 E2AEnvelope
+            msg: 原始消息（用于提取 session_id, channel_id 等）
+
+        Returns:
+            更新后的 E2AEnvelope（params.files 中的 path 已替换为 AgentServer 端路径）
+        """
+        from jiuwenclaw.e2a.constants import (
+            FILE_TRANSFER_START,
+            FILE_TRANSFER_CHUNK,
+            FILE_TRANSFER_COMPLETE,
+        )
+        from jiuwenclaw.e2a.models import E2AEnvelope
+
+        # 确保文件传输处理器已初始化
+        if self._file_transfer_handler is None:
+            from jiuwenclaw.gateway.file_transfer_handler import get_file_transfer_handler
+            self._file_transfer_handler = get_file_transfer_handler()
+
+        ft_handler = self._file_transfer_handler
+        params = dict(env.params or {})
+        files = params.get("files", [])
+
+        if not files:
+            return env
+
+        # 构建 send_callback：使用 agent_client 的 file_transfer 方法
+        async def send_callback(method: str, ft_params: dict[str, Any]) -> dict[str, Any]:
+            """文件传输回调函数，通过 agent_client 发送传输消息."""
+            if method == FILE_TRANSFER_START:
+                start_params = FileTransferStartParams(
+                    transfer_id=ft_params.get("transfer_id", ""),
+                    filename=ft_params.get("filename", "unnamed"),
+                    file_size=ft_params.get("file_size", 0),
+                    sha256=ft_params.get("sha256", ""),
+                    total_chunks=ft_params.get("total_chunks", 0),
+                    chunk_size=ft_params.get("chunk_size", 65536),
+                    mime_type=ft_params.get("mime_type", ""),
+                    session_id=ft_params.get("session_id", "") or env.session_id or "",
+                    channel_id=env.channel or "",
+                )
+                return await self._agent_client.file_transfer_start(start_params)
+            elif method == FILE_TRANSFER_CHUNK:
+                return await self._agent_client.file_transfer_chunk(
+                    transfer_id=ft_params.get("transfer_id", ""),
+                    chunk_index=ft_params.get("chunk_index", 0),
+                    base64_data=ft_params.get("base64_data", ""),
+                    chunk_size=ft_params.get("chunk_size", 0),
+                    channel_id=env.channel or "",
+                )
+            elif method == FILE_TRANSFER_COMPLETE:
+                return await self._agent_client.file_transfer_complete(
+                    transfer_id=ft_params.get("transfer_id", ""),
+                    sha256=ft_params.get("sha256", ""),
+                    channel_id=env.channel or "",
+                )
+            else:
+                return {"accepted": False, "error": f"unknown method: {method}"}
+
+        # 并行传输多个文件（使用信号量限制并发数）
+        semaphore = asyncio.Semaphore(ft_handler.config.max_concurrent_transfers)
+
+        async def transfer_single_file(file_info: dict[str, Any]) -> dict[str, Any]:
+            """传输单个文件."""
+            async with semaphore:
+                local_path = file_info.get("path", "")
+                if not local_path or not Path(local_path).exists():
+                    logger.warning(
+                        "[MessageHandler] 文件不存在或路径无效: %s",
+                        local_path,
+                    )
+                    return file_info  # 返回原信息，不修改
+
+                try:
+                    # 调用 FileTransferHandler 进行传输
+                    result = await ft_handler.send_file_to_agent_server(
+                        file_path=local_path,
+                        send_callback=send_callback,
+                        session_id=env.session_id or "",
+                        channel_id=env.channel or "",
+                        request_id=env.request_id or "",
+                    )
+
+                    if result.get("success"):
+                        # 传输成功，更新路径为 AgentServer 端路径
+                        new_path = result.get("file_path", "")
+                        logger.info(
+                            "[MessageHandler] 文件传输成功: local=%s -> remote=%s",
+                            local_path,
+                            new_path,
+                        )
+                        # 保留其他元数据，更新 path、name 和 size
+                        # 关键修复：name 必须与 AgentServer 端实际存储的文件名一致，确保 Agent 能精确访问文件
+                        updated_info = dict(file_info)
+                        updated_info["path"] = new_path
+                        updated_info["name"] = os.path.basename(new_path)
+                        updated_info["size"] = result.get("file_size", file_info.get("size", 0))
+                        updated_info["_transferred"] = True  # 标记已传输
+                        updated_info["_original_path"] = local_path  # 保留原始路径
+                        updated_info["_original_name"] = file_info.get("name", "")  # 保留飞书原始文件名（用于展示）
+                        return updated_info
+                    else:
+                        # 传输失败，记录警告但保留原路径（回退到本地模式）
+                        logger.warning(
+                            "[MessageHandler] 文件传输失败: path=%s error=%s, 回退到本地模式",
+                            local_path,
+                            result.get("error", "unknown"),
+                        )
+                        return file_info
+
+                except Exception as e:
+                    logger.exception(
+                        "[MessageHandler] 文件传输异常: path=%s error=%s",
+                        local_path,
+                        e,
+                    )
+                    return file_info  # 异常时保留原信息
+
+        # 并行执行所有文件传输
+        transfer_tasks = [transfer_single_file(f) for f in files if isinstance(f, dict)]
+
+        if transfer_tasks:
+            logger.info(
+                "[MessageHandler] 开始分布式文件传输: request_id=%s files=%d",
+                env.request_id,
+                len(transfer_tasks),
+            )
+            updated_files = await asyncio.gather(*transfer_tasks)
+
+            # 更新 params.files
+            params["files"] = updated_files
+
+            # 创建新的 E2AEnvelope（保持其他字段不变）
+            updated_env = E2AEnvelope(
+                protocol_version=env.protocol_version,
+                provenance=env.provenance,
+                request_id=env.request_id,
+                jsonrpc_id=env.jsonrpc_id,
+                correlation_id=env.correlation_id,
+                task_id=env.task_id,
+                context_id=env.context_id,
+                session_id=env.session_id,
+                message_id=env.message_id,
+                timestamp=env.timestamp,
+                identity_origin=env.identity_origin,
+                channel=env.channel,
+                user_id=env.user_id,
+                source_agent_id=env.source_agent_id,
+                method=env.method,
+                params=params,  # 更新后的 params
+                ext_method=env.ext_method,
+                session_update_kind=env.session_update_kind,
+                is_stream=env.is_stream,
+                expected_output_modes=env.expected_output_modes,
+                auth=env.auth,
+                channel_context=env.channel_context,
+                a2a_metadata=env.a2a_metadata,
+                acp_meta=env.acp_meta,
+            )
+
+            transferred_count = sum(1 for f in updated_files if f.get("_transferred"))
+            logger.info(
+                "[MessageHandler] 文件传输完成: request_id=%s files=%d transferred=%d",
+                env.request_id,
+                len(files),
+                transferred_count,
+            )
+
+            return updated_env
+
+        return env
 
     async def _send_stream_cancelled_notification(
         self, request_id: str | None, channel_id: str, session_id: str | None
@@ -2350,9 +2732,20 @@ class MessageHandler(ABC):
         self._forward_task = asyncio.create_task(self._forward_loop())
         logger.info("[MessageHandler] 转发循环已启动 (_user_messages -> AgentServer -> _robot_messages)")
 
+        # 启动文件传输处理器的清理任务（分布式模式）
+        if self._file_transfer_handler is None:
+            from jiuwenclaw.gateway.file_transfer_handler import get_file_transfer_handler
+            self._file_transfer_handler = get_file_transfer_handler()
+        if self._file_transfer_handler.enabled:
+            await self._file_transfer_handler.start_cleanup_task()
+
     async def stop_forwarding(self) -> None:
         """停止转发任务."""
         self._running = False
+
+        # 停止文件传输处理器的清理任务
+        if self._file_transfer_handler is not None and self._file_transfer_handler.enabled:
+            await self._file_transfer_handler.stop_cleanup_task()
 
         # 取消所有流式任务
         for rid, task in list(self._stream_tasks.items()):

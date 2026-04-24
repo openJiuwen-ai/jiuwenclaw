@@ -35,9 +35,9 @@ import time
 import datetime
 import asyncio
 import shutil
-import time
+import mimetypes
 from pathlib import Path
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Literal, Optional
 from collections import OrderedDict
 import logging
@@ -1639,3 +1639,60 @@ def fix_json_arguments(arguments: str | dict) -> str | dict:
         before_final,
     )
     return {}
+
+
+# ===========================================================================
+# 文件传输工具函数
+# ===========================================================================
+
+
+@dataclass
+class FileTransferStartParams:
+    """文件传输开始参数（用于封装多参数方法调用）."""
+    transfer_id: str
+    filename: str
+    file_size: int
+    sha256: str
+    total_chunks: int
+    chunk_size: int
+    mime_type: str = ""
+    session_id: str = ""
+    channel_id: str = ""
+
+
+@dataclass
+class TransferProgress:
+    """文件传输进度状态（Gateway 和 AgentServer 共用）."""
+    transfer_id: str
+    filename: str
+    file_size: int
+    total_chunks: int
+    received_chunks: int = 0
+    sha256: str = ""
+    chunks: dict[int, bytes] = field(default_factory=dict)
+    start_time: float = field(default_factory=time.time)
+    mime_type: str = ""
+    session_id: str = ""
+    channel_id: str = ""  # Gateway 端需要，AgentServer 端可选
+
+
+def safe_filename(filename: str) -> str:
+    """生成安全的文件名.
+
+    移除路径分隔符和可能导致跨平台文件系统问题的字符，
+    防止路径遍历攻击。
+    """
+    # 移除路径分隔符，防止路径遍历
+    safe = filename.replace("/", "_").replace("\\", "_")
+    # 只保留字母、数字和安全的标点符号
+    safe = "".join(c for c in safe if c.isalnum() or c in "._- ")
+    return safe or "unnamed_file"
+
+
+def guess_mime_type(filename: str) -> str:
+    """根据文件扩展名猜测 MIME 类型.
+
+    使用 Python 标准 mimetypes 库，支持大多数常见文件类型。
+    """
+    mime_type, _ = mimetypes.guess_type(filename)
+    return mime_type or "application/octet-stream"

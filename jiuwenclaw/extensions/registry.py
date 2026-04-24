@@ -6,7 +6,6 @@ from openjiuwen.core.runner.callback.framework import AsyncCallbackFramework
 
 from jiuwenclaw.extensions.callback_compat import unregister_callback_sync
 from jiuwenclaw.extensions.extension_tool_entry import ExtensionLocalToolEntry
-from jiuwenclaw.gateway.agent_client import AgentServerClient
 from jiuwenclaw.extensions.sdk.agent_server_client import AgentServerClientExtension
 from jiuwenclaw.extensions.sdk.crypto_utility import CryptoUtility
 from jiuwenclaw.extensions.sdk.llm_base_model_client import LlmBaseModelClient, create_delegating_client
@@ -14,6 +13,7 @@ from jiuwenclaw.extensions.sdk.telemetry_provider import TelemetryProviderExtens
 from jiuwenclaw.extensions.types import ExtensionConfig
 
 if TYPE_CHECKING:
+    from jiuwenclaw.gateway.agent_client import AgentServerClient
     from jiuwenclaw.security.base_crypto import CryptoProvider
 
 
@@ -80,7 +80,12 @@ class ExtensionRegistry:
 
     def get_agent_server_client(self) -> "AgentServerClient | None":
         ext = self._agent_server_client
-        return ext.get_client() if ext is not None else None
+        if ext is None:
+            return None
+        # 延迟导入以避免循环导入
+        from jiuwenclaw.gateway.agent_client import AgentServerClient
+        client = ext.get_client()
+        return client if isinstance(client, AgentServerClient) else None
 
     def get_crypto_utility_extension(self) -> CryptoUtility | None:
         return self._crypto_tool
