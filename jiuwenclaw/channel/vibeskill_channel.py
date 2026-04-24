@@ -704,8 +704,68 @@ class VibeSkillChannel(BaseChannel):
         external_sid: str | None,
         session_id: str | None,
     ) -> list[dict]:
-        """skilldev.progress - 进度更新"""
-        return []
+        """skilldev.progress - 进度更新（evaluate 阶段）
+
+        逻辑：
+        - eval_name/variant 存在 → 这是 evaluate 阶段的事件
+        - 检查 stage_key 是否存在，不存在 → 第一次来，创建气泡
+        - case_done=True → 序号4（结束），发 message.part.updated 更新气泡"已完成"
+        """
+        if not session_id:
+            return []
+
+        message = str(payload.get("message") or "")
+        eval_name = str(payload.get("eval_name") or "")
+        variant = str(payload.get("variant") or "")
+        case_done = bool(payload.get("case_done", False))
+        completed = payload.get("completed", 0)
+        total = payload.get("total", 0)
+
+        # 没有 eval_name/variant 跳过（可能是其他类型的 progress 事件）
+        if not eval_name or not variant:
+            return []
+
+        stage = f"evaluate_grader/{eval_name}/{variant}"
+
+        # 检查是否是第一次来这个 stage
+        ctx = self._ensure_message_context(session_id, stage)
+        key = (stage, "text")
+        is_first = key not in ctx["part_by_type"]
+
+        # 获取或创建 part
+        part, _ = self._ensure_text_part(session_id, "text", stage)
+        part["completed"] = completed
+        part["total"] = total
+
+        # 序号4: 评估结束，case_done=True → message.part.updated 标记完成
+        if case_done:
+            part["status"] = "done"
+            part["message"] = message
+            return [{
+                "type": "message.part.updated",
+                "properties": self._serialize_part(part, external_sid),
+            }]
+
+        # 序号2: 第一次来这个 stage → message.part.updated 创建气泡
+        if is_first:
+            part["status"] = "running"
+            part["message"] = message
+            return [{
+                "type": "message.part.updated",
+                "properties": self._serialize_part(part, external_sid),
+            }]
+
+        # 序号3: 中间消息 → message.part.delta 更新气泡
+        return [{
+            "type": "message.part.delta",
+            "properties": {
+                "sessionID": external_sid,
+                "messageID": ctx["message_id"],
+                "partID": part["id"],
+                "type": "text",
+                "delta": message,
+            },
+        }]
 
     async def _handle_skilldev_skill_name_ready(
         self,
@@ -763,7 +823,8 @@ class VibeSkillChannel(BaseChannel):
         """skilldev.tool_call - 工具调用"""
         if not session_id:
             return []
-        ctx = self._ensure_message_context(session_id)
+        stage = payload.get("stage")
+        ctx = self._ensure_message_context(session_id, stage)
         call_id = str(
             payload.get("tool_call_id")
             or payload.get("toolCallId")
@@ -773,7 +834,7 @@ class VibeSkillChannel(BaseChannel):
         tool_name = str(payload.get("tool_name") or payload.get("tool") or "").strip()
         tool_input = payload.get("arguments") or payload.get("params") or payload.get("input") or {}
         now_ms = int(time.time() * 1000)
-        part = self._ensure_tool_part(session_id, call_id, tool_name)
+        part, is_new = self._ensure_tool_part(session_id, call_id, tool_name, stage)
         part["state"] = {
             "status": "running",
             "input": tool_input,
@@ -781,13 +842,15 @@ class VibeSkillChannel(BaseChannel):
             "metadata": payload.get("metadata", {}),
             "time": {"start": now_ms, "end": None},
         }
-        responses = self._ensure_message_announced(ctx, external_sid)
-        responses.append(
-            {
-                "type": "message.part.updated",
-                "properties": self._serialize_part(part, external_sid),
-            }
-        )
+        responses = []
+        # 第一次创建此 tool part 时，发 message.part.updated
+        if is_new:
+            responses.append(
+                {
+                    "type": "message.part.updated",
+                    "properties": self._serialize_part(part, external_sid),
+                }
+            )
         return responses
 
     async def _handle_skilldev_tool_result(
@@ -799,7 +862,7 @@ class VibeSkillChannel(BaseChannel):
         """skilldev.tool_result - 工具结果"""
         if not session_id:
             return []
-        ctx = self._ensure_message_context(session_id)
+        stage = payload.get("stage")
         call_id = str(
             payload.get("tool_call_id")
             or payload.get("toolCallId")
@@ -810,7 +873,7 @@ class VibeSkillChannel(BaseChannel):
         tool_name = str(payload.get("tool_name") or payload.get("tool") or "").strip()
         success = bool(payload.get("success", True))
         result = payload.get("result") or payload.get("output") or ""
-        part = self._ensure_tool_part(session_id, call_id, tool_name)
+        part, is_new = self._ensure_tool_part(session_id, call_id, tool_name, stage)
         start = part.get("state", {}).get("time", {}).get("start") or int(time.time() * 1000)
         part["state"] = {
             "status": "completed" if success else "error",
@@ -819,13 +882,15 @@ class VibeSkillChannel(BaseChannel):
             "metadata": payload.get("metadata", {}),
             "time": {"start": start, "end": int(time.time() * 1000)},
         }
-        responses = self._ensure_message_announced(ctx, external_sid)
-        responses.append(
-            {
-                "type": "message.part.updated",
-                "properties": self._serialize_part(part, external_sid),
-            }
-        )
+        responses = []
+        # 第一次创建此 tool part 时，发 message.part.updated
+        if is_new:
+            responses.append(
+                {
+                    "type": "message.part.updated",
+                    "properties": self._serialize_part(part, external_sid),
+                }
+            )
         return responses
 
     async def _handle_skilldev_test_progress(
@@ -834,8 +899,67 @@ class VibeSkillChannel(BaseChannel):
         external_sid: str | None,
         session_id: str | None,
     ) -> list[dict]:
-        """skilldev.test_progress - 测试进度"""
-        return []
+        """skilldev.test_progress - 测试进度
+
+        逻辑：
+        - case_status 存在 → 序号4（结束），发 message.part.updated 更新气泡"已完成"
+        - 检查 stage_key 是否存在，不存在 → 序号2（第一次来），发 message.part.updated 创建气泡
+        """
+        if not session_id:
+            return []
+
+        message = str(payload.get("message") or "")
+        case_name = str(payload.get("case_name") or "")
+        variant = str(payload.get("variant") or "")
+        case_status = str(payload.get("case_status") or "")
+        completed_count = payload.get("completed", 0)
+        total_tasks = payload.get("total", 0)
+
+        # 没有 case_name/variant 无法标识，跳过
+        if not case_name or not variant:
+            return []
+
+        stage = f"test_run/{case_name}/{variant}"
+
+        # 检查是否是第一次来这个 stage（通过 _message_ctx 中是否有此 stage_key）
+        ctx = self._ensure_message_context(session_id, stage)
+        key = (stage, "text")
+        is_first = key not in ctx["part_by_type"]
+
+        # 获取或创建 part
+        part, _ = self._ensure_text_part(session_id, "text", stage)
+        part["completed"] = completed_count
+        part["total"] = total_tasks
+
+        # 序号4: 测试结束，case_status 存在 → message.part.updated 标记完成
+        if case_status:
+            part["status"] = case_status  # "success" or "failed"
+            part["message"] = message
+            return [{
+                "type": "message.part.updated",
+                "properties": self._serialize_part(part, external_sid),
+            }]
+
+        # 序号2: 第一次来这个 stage（stage_key 不存在）→ message.part.updated 创建气泡
+        if is_first:
+            part["status"] = "running"
+            part["message"] = message
+            return [{
+                "type": "message.part.updated",
+                "properties": self._serialize_part(part, external_sid),
+            }]
+
+        # 序号3: 中间消息 → message.part.delta 更新气泡
+        return [{
+            "type": "message.part.delta",
+            "properties": {
+                "sessionID": external_sid,
+                "messageID": ctx["message_id"],
+                "partID": part["id"],
+                "type": "text",
+                "delta": message,
+            },
+        }]
 
     async def _handle_skilldev_todos_update(
         self,
@@ -1152,11 +1276,12 @@ class VibeSkillChannel(BaseChannel):
             status.update(extra)
         await self._emit_ws_event(ws, "session.status", {"sessionID": external_sid, "status": status})
 
-    def _ensure_message_context(self, session_id: str | None) -> dict[str, Any]:
+    def _ensure_message_context(self, session_id: str | None, stage: str | None = None) -> dict[str, Any]:
         sid = str(session_id or "").strip()
         if not sid:
             sid = "_default"
-        ctx = self._message_ctx.get(sid)
+        key = f"{sid}:{stage}" if stage else sid
+        ctx = self._message_ctx.get(key)
         if ctx is None:
             ctx = {
                 "message_id": f"msg_{secrets.token_hex(6)}",
@@ -1165,40 +1290,59 @@ class VibeSkillChannel(BaseChannel):
                 "tool_parts": {},
                 "message_announced": False,
             }
-            self._message_ctx[sid] = ctx
+            self._message_ctx[key] = ctx
         return ctx
 
-    def _ensure_text_part(self, session_id: str | None, part_type: str) -> dict[str, Any]:
-        ctx = self._ensure_message_context(session_id)
-        part = ctx["part_by_type"].get(part_type)
-        if part is None:
-            part = {
-                "id": f"prt_{secrets.token_hex(6)}",
-                "sessionID": session_id,
-                "messageID": ctx["message_id"],
-                "type": part_type,
-                "text": "",
-            }
-            ctx["part_by_type"][part_type] = part
-            ctx["parts"].append(part)
-        return part
+    def _ensure_text_part(
+        self, session_id: str | None, part_type: str, stage: str | None = None
+    ) -> tuple[dict[str, Any], bool]:
+        """获取或创建 text part.
 
-    def _ensure_tool_part(self, session_id: str | None, call_id: str, tool_name: str) -> dict[str, Any]:
-        ctx = self._ensure_message_context(session_id)
-        part = ctx["tool_parts"].get(call_id)
-        if part is None:
-            part = {
-                "id": f"prt_{secrets.token_hex(6)}",
-                "sessionID": session_id,
-                "messageID": ctx["message_id"],
-                "type": "tool",
-                "callID": call_id,
-                "tool": tool_name,
-                "state": {},
-            }
-            ctx["tool_parts"][call_id] = part
-            ctx["parts"].append(part)
-        return part
+        当指定 stage 时，按 stage + part_type 组合区分不同并发流的输出。
+        第一次创建该 stage 的 part 时返回 is_new=True。
+
+        Returns:
+            (part, is_new_part): part 对象和是否是新创建的 part
+        """
+        ctx = self._ensure_message_context(session_id, stage)
+        part_key = (stage, part_type) if stage else part_type
+        existing = ctx["part_by_type"].get(part_key)
+        if existing is not None:
+            return existing, False
+        part = {
+            "id": f"prt_{secrets.token_hex(6)}",
+            "sessionID": session_id,
+            "messageID": ctx["message_id"],
+            "type": part_type,
+            "text": "",
+        }
+        if stage:
+            part["stage"] = stage
+        ctx["part_by_type"][part_key] = part
+        ctx["parts"].append(part)
+        return part, True
+
+    def _ensure_tool_part(
+        self, session_id: str | None, call_id: str, tool_name: str, stage: str | None = None
+    ) -> tuple[dict[str, Any], bool]:
+        ctx = self._ensure_message_context(session_id, stage)
+        existing = ctx["tool_parts"].get(call_id)
+        if existing is not None:
+            return existing, False
+        part = {
+            "id": f"prt_{secrets.token_hex(6)}",
+            "sessionID": session_id,
+            "messageID": ctx["message_id"],
+            "type": "tool",
+            "callID": call_id,
+            "tool": tool_name,
+            "state": {},
+        }
+        if stage:
+            part["stage"] = stage
+        ctx["tool_parts"][call_id] = part
+        ctx["parts"].append(part)
+        return part, True
 
     def _ensure_message_announced(self, ctx: dict[str, Any], external_sid: str | None) -> list[dict]:
         if ctx.get("message_announced"):
@@ -1227,16 +1371,21 @@ class VibeSkillChannel(BaseChannel):
         delta = str(payload.get(text_field) or payload.get("text") or "")
         if not delta:
             return []
-        ctx = self._ensure_message_context(session_id)
-        part = self._ensure_text_part(session_id, part_type)
+        stage = payload.get("stage")
+        ctx = self._ensure_message_context(session_id, stage)
+        part, is_new = self._ensure_text_part(session_id, part_type, stage)
         part["text"] = str(part.get("text") or "") + delta
-        responses = self._ensure_message_announced(ctx, external_sid)
-        responses.append(
-            {
+
+        responses = []
+
+        # 第一次收到这个 stage 的 part，发 message.part.updated 创建气泡
+        if is_new:
+            responses.append({
                 "type": "message.part.updated",
                 "properties": self._serialize_part(part, external_sid),
-            }
-        )
+            })
+
+        # 后续都用 message.part.delta 更新
         responses.append({
             "type": "message.part.delta",
             "properties": {
