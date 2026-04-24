@@ -174,7 +174,7 @@ embed:
 task_memory:
   # Set enabled: true to activate TaskMemoryService skill tools
   # (experience_retrieve, experience_learn, experience_clear)
-  enabled: true
+  enabled: false
   # Override defaults below if task memory uses a different model/key than the main agent
   llm_model: ${TASK_MEMORY_LLM_MODEL}
   embedding_model: ${TASK_MEMORY_EMBED_MODEL}
