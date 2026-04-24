@@ -225,10 +225,8 @@ class RuntimePromptRail(DeepAgentRail):
 
 ## 输出文件放置规范
 执行用户任务时产生的生成产物（如代码文件、文档、数据文件等），若用户未指定存放位置，请遵循以下规则：
-- **通用产物**：非技能相关的生成产物必须放在 `{resolved_workspace}` 下合适的位置，根据文件用途和项目结构合理组织路径，\
+- 生成产物必须放在 `{resolved_workspace}` 下合适的位置，根据文件用途和项目结构合理组织路径，\
 便于用户统一管理和访问
-- **技能产物**：涉及技能（skill）执行的产物必须放在技能专属目录 `{skills_dir}/{{skill_name}}/` 下，\
-并根据产物类型和用途在该目录下合理组织子目录，确保技能资源的独立性和可维护性
 
 ## 文件发送
 
@@ -265,12 +263,9 @@ Be careful with your configuration. If changes are required, remember to restart
 ## Output File Placement
 Generated artifacts (code files, documents, data files, etc.) produced during user task execution should \
 follow these placement rules unless the user specifies otherwise:
-- **General Artifacts**: Non-skill-related artifacts must be placed in an appropriate location \
+- artifacts must be placed in an appropriate location \
 within `{resolved_workspace}`, organized according to file purpose and project structure for \
 unified user management and access
-- **Skill Artifacts**: Artifacts from skill execution must be placed in the skill's dedicated \
-directory `{skills_dir}/{{skill_name}}/`, with subdirectories organized by artifact type and \
-purpose to ensure independence and maintainability
 
 ## Sending Files
 
