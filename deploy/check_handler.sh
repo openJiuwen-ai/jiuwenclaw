@@ -70,28 +70,57 @@ check_cluster_has_enough_nodes() {
     success "Cluster has ${node_count} Ready nodes, check passed!"
 }
 
-check_if_oyr_exist()
+check_if_yr_exist()
 {
     if helm list --filter "^${OYL_CHART_NAME}$" | grep -q "${OYL_CHART_NAME}"; then
-        error "${OYL_CHART_NAME} is already deployed. Please clean up environment first with: ./$(basename "$0") down"
+        error "${OYL_CHART_NAME} is already deployed. Please uninstall it first with: ./$(basename "$0") down yr-claw"
     fi
 }
 
-check_dependency(){
-    check_if_master
+check_if_yr_claw_up() {
+    local pool_id=${DEPLOY_VARS["POOL_ID"]}
+    local claw_deployment_name="function-agent-${pool_id}"
+    local err_msg="YR_CLAW is not deployed. Please deploy it first with: ./$(basename "$0") up yr_claw"
+
+    if ! helm list --filter "^${OYL_CHART_NAME}$" | grep -q "${OYL_CHART_NAME}"; then
+        error ${err_msg}
+    fi
+
+    if ! check_k8s_resource_exists "deployment" "${claw_deployment_name}"; then
+        error ${err_msg}
+    fi
 }
 
-check_claw_up_dependency(){
+check_if_nfs_up() {
+    if ! check_k8s_resource_exists "deployment" "${DEPLOY_VARS["NFS_NAME"]}"; then
+        error "NFS is not deployed. Please deploy it first with: ./$(basename "$0") up nfs"
+    fi
+}
+
+
+check_dependency(){
+    check_if_master
     check_if_root
     detect_os
-    check_cmds
-    check_cluster_has_enough_nodes
-    check_ssh_connectivity
-    check_if_oyr_exist
 }
 
 check_nfs_up_dependency(){
-    detect_os
     check_cmds
     check_cluster_has_enough_nodes
+    check_ssh_connectivity
+}
+
+check_yr_claw_up_dependency(){
+    check_cmds
+    check_cluster_has_enough_nodes
+    check_ssh_connectivity
+    check_if_nfs_up
+    check_if_yr_exist
+}
+
+check_gateway_up_dependency(){
+    check_cmds
+    check_cluster_has_enough_nodes
+    check_ssh_connectivity
+    check_if_yr_claw_up
 }

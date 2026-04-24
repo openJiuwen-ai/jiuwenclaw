@@ -1,6 +1,11 @@
 #!/usr/bin/env bash
 set -euo >/dev/null 2>&1
 
+# Wait for kubernetes resource rollout ready
+# Args:
+#   1: resource kind
+#   2: resource name
+#   3: namespace (optional, default: default)
 wait_k8s_resource_ready() {
     local kind="$1"
     local name="$2"
@@ -11,6 +16,37 @@ wait_k8s_resource_ready() {
     success "${kind}/${namespace}/${name} is ready now"
 }
 
+# Check if kubernetes resource exists
+# Args:
+#   1: resource kind
+#   2: resource name
+#   3: namespace (optional, default: default)
+# Return: 0 = exists, 1 = not exists
+check_k8s_resource_exists() {
+    local kind="$1"
+    local name="$2"
+    local namespace="${3:-default}"
+    local args=""
+
+    # Cluster-scoped resource: PersistentVolume
+    if [[ "${kind}" == "pv" || "${kind}" == "PersistentVolume" ]]; then
+        args="${kind} ${name}"
+        namespace=""
+    else
+        args="${kind} ${name} -n ${namespace}"
+    fi
+
+    if kubectl get ${args} >/dev/null 2>&1; then
+        return 0
+    fi
+    return 1
+}
+
+# Delete specified kubernetes resource
+# Args:
+#   1: resource kind
+#   2: resource name
+#   3: namespace (optional, default: default)
 delete_k8s_resource() {
     local kind="$1"
     local name="$2"

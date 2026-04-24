@@ -58,27 +58,19 @@ unzip JiuwenClawXopenYuanrong_deployTool_<VERSION>_<ARCH>.zip
 - 一键部署
 
 ```
-# 第一次，需要部署全部： nfs + openyuanrong + claw
-./deploy.sh all up
-
-# 单独部署nfs
-./deploy.sh nfs up
-
-# 单独部署 openyuanrong + claw
-./deploy.sh up
-./deploy.sh claw up
+./deploy.sh up              # 部署所有模块
+./deploy.sh up all          # 部署所有模块
+./deploy.sh up nfs          # 仅部署 NFS 模块
+./deploy.sh up yr-claw      # 仅部署 OpenYuanRong-CLAW 模块
+./deploy.sh up gateway      # 仅部署 Gateway 模块
 ```
 
 - 一键卸载
 
 ```
-# 单独卸载 openyuanrong + claw
-./deploy.sh down
-./deploy.sh claw down
-
-# 单独卸载 nfs
-./deploy.sh nfs down
-
-# 一次卸载全部： nfs + openyuanrong + claw
-./deploy.sh all down
+./deploy.sh down            # 卸载所有模块
+./deploy.sh down all        # 卸载所有模块
+./deploy.sh down gateway    # 仅卸载 Gateway 模块
+./deploy.sh down yr-claw    # 仅卸载 OpenYuanRong-CLAW 模块
+./deploy.sh down nfs        # 仅卸载 NFS 模块
 ```

@@ -5,13 +5,13 @@ source "global_vars.sh"
 source "common.sh"
 source "cmd_handler.sh"
 source "args_handler.sh"
-source "oyr_handler.sh"    
 source "check_handler.sh"
 source "envfile_handler.sh"
 source "k8s_handler.sh"
 source "template_handler.sh"
 source "storage_handler.sh"
-
+source "oyr_handler.sh"
+source "gateway_handler.sh"
 
 process_vars() {
     if [ -z "${DEPLOY_VARS["NFS_SERVER_ADDR"]:-}" ]; then
@@ -39,12 +39,19 @@ process_up() {
                 collect_k8s_cluster_info
                 deploy_nfs
                 ;;
-            CLAW)
-                check_claw_up_dependency
+            YR-CLAW)
+                check_yr_claw_up_dependency
                 collect_k8s_cluster_info
                 read_env_from_file "${CUSTOM_ENV_FILE}" "DEPLOY_VARS"
                 process_vars
                 deploy_oyr
+                ;;
+            GATEWAY)
+                check_gateway_up_dependency
+                collect_k8s_cluster_info
+                collect_oyr_info
+                read_env_from_file "${CUSTOM_ENV_FILE}" "DEPLOY_VARS"
+                deploy_claw_gateway
                 ;;
         esac
     done
@@ -66,8 +73,11 @@ process_down() {
             NFS)
                 uninstall_nfs
                 ;;
-            CLAW)
+            YR-CLAW)
                 uninstall_oyr
+                ;;
+            GATEWAY)
+                uninstall_gateway
                 ;;
         esac
     done

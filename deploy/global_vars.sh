@@ -42,7 +42,7 @@ CMD=""
 MASTER_NODE_NAME=""
 
 # ==== All available modules ====
-declare -ga ALL_MODULES=("NFS" "CLAW")
+declare -ga ALL_MODULES=("NFS" "YR-CLAW" "GATEWAY")
 
 declare -ga MODULES=()
 
@@ -54,7 +54,6 @@ declare -A DEPLOY_VARS=(
     ["GATEWAY_DEPLOYMENT_NAME"]="jiuwenclaw-gateway"
     ["FUNC_SVC_NAME"]="0@jiuwen@clawtest"
     ["GATEWAY_CONFIG_MAP_NAME"]="jiuwenclaw-gateway-config"
-    ["CLAW_GATEWAY_EXTENSION_DIRS"]="/app/jiuwenclaw/deploy/yr_extensions"
     ["NFS_NAME"]="nfs-server"
     ["NFS_HOST_PATH"]="/data/nfs"
     ["PVC_NAME"]="pvc-nfs-shared"
