@@ -1281,19 +1281,31 @@ class VibeSkillChannel(BaseChannel):
         external_sid: str | None,
         session_id: str | None,
     ) -> list[dict]:
-        """skilldev.completed - 完成"""
+        """Handle skilldev.completed: Agent 已结束本轮 skill 流水线.
+
+        触发来源: MessageHandler 入站 event, payload.event_type=skilldev.completed
+        (对应同一会话上, 由客户端经 WebSocket 发送的 message.send 所启动的 skilldev 一次执行).
+
+        北向(发往当前会话绑定的 WebSocket 对端)连续两帧, 与其它事件的 type+properties
+        形状一致(见同文件 outbound_intercept 对 skilldev 事件的组帧方式):
+        1) type=task.completed, properties 为无键空对象(协议: 不承载业务字段);
+        2) type=session.status, 会话状态为 idle.
+        """
         if session_id:
             try:
                 await self._store.set_state(session_id, VibeSkillSessionState.IDLE)
             except Exception:
                 logger.exception("[VibeSkillChannel] set_state error for skilldev.completed, session_id=%s", session_id)
-        return [{
-            "type": "session.status",
-            "properties": {
-                "sessionID": external_sid,
-                "status": {"type": "idle"},
+        return [
+            {"type": "task.completed", "properties": {}},
+            {
+                "type": "session.status",
+                "properties": {
+                    "sessionID": external_sid,
+                    "status": {"type": "idle"},
+                },
             },
-        }]
+        ]
 
     async def cleanup(self, ws: Any) -> None:
         """ws 断开时清理关联的会话映射。"""
