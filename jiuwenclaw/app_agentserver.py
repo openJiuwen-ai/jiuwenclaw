@@ -100,7 +100,7 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    host = os.getenv("AGENT_SERVER_HOST", "0.0.0.0")
+    host = os.getenv("AGENT_SERVER_HOST", "127.0.0.1")
     port = args.port
     if port is None:
         for key in ("AGENT_SERVER_PORT", "AGENT_PORT"):
