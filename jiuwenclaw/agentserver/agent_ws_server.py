@@ -316,6 +316,10 @@ class AgentWebSocketServer:
         """解析一条 JSON 请求并分发到 IAgentServer 处理."""
         try:
             data = json.loads(raw)
+            logger.info(
+                "[AgentWebSocketServer] inbound raw payload: %s",
+                data,
+            )
         except json.JSONDecodeError as e:
             wire = encode_json_parse_error_wire(
                 request_id="",
