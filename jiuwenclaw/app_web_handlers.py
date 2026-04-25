@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import json
 import logging
 import os
 import re
@@ -33,6 +34,7 @@ from jiuwenclaw.config import (
     update_context_engine_enabled_in_config,
     update_kv_cache_affinity_enabled_in_config,
     update_permissions_enabled_in_config,
+    update_disabled_tools_in_config,
     update_memory_forbidden_enabled_in_config,
     update_memory_forbidden_description_in_config,
     update_updater_in_config,
@@ -232,6 +234,7 @@ _CONFIG_YAML_KEYS = frozenset({
     "permissions_enabled",
     "memory_forbidden_enabled",
     "memory_forbidden_description",
+    "disabled_tools",  # 新增
 })
 
 
@@ -375,6 +378,10 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             memory_desc = memory_cfg.get("description") or {}
             preferred_lang = raw.get("preferred_language", "zh")
             payload["memory_forbidden_description"] = memory_desc.get(preferred_lang, memory_desc.get("zh", ""))
+            # disabled_tools 数组
+            react_cfg = raw.get("react") or {}
+            disabled_tools = react_cfg.get("disabled_tools") or []
+            payload["disabled_tools"] = disabled_tools
             if not payload.get("free_search_ddg_enabled"):
                 payload["free_search_ddg_enabled"] = "true"
             if not payload.get("free_search_bing_enabled"):
@@ -396,6 +403,7 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             payload.setdefault("free_search_bing_enabled", "true")
             payload.setdefault("deepsearch_web_search_engine_name", "tavily")
             payload.setdefault("deepsearch_execution_method", "dependency_driving")
+            payload.setdefault("disabled_tools", [])
         await channel.send_response(ws, req_id, ok=True, payload=payload)
 
     def _persist_env_updates(updates: dict[str, str]) -> None:
@@ -477,6 +485,27 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
                 elif param_key == "memory_forbidden_description":
                     desc_val = str(val).strip()
                     update_memory_forbidden_description_in_config({preferred_lang: desc_val})
+                elif param_key == "disabled_tools":
+                    # Accept either raw list or JSON string (from frontend normalizeConfigValue)
+                    if isinstance(val, list):
+                        update_disabled_tools_in_config(val)
+                    elif isinstance(val, str):
+                        try:
+                            parsed_list = json.loads(val)
+                            if isinstance(parsed_list, list):
+                                update_disabled_tools_in_config(parsed_list)
+                            else:
+                                logger.warning("[config.set] disabled_tools JSON must decode to list, got: %s", type(
+                                    parsed_list).__name__)
+                                continue
+                        except json.JSONDecodeError:
+                            logger.warning(
+                                "[config.set] disabled_tools must be valid JSON list: %s", val[:50])
+                            continue
+                    else:
+                        logger.warning(
+                            "[config.set] disabled_tools must be a list or JSON string, got: %s", type(val).__name__)
+                        continue  # Skip yaml_updated.append on validation failure
                 yaml_updated.append(param_key)
             except Exception as e:  # noqa: BLE001
                 logger.warning("[config.set] 写回 config.yaml 失败 %s: %s", param_key, e)
