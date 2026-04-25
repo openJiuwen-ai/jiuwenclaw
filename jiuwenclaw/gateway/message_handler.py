@@ -1327,6 +1327,29 @@ class MessageHandler(ABC):
             raise RuntimeError("vibeskill session.create returned empty session_id")
         return resolved_str
 
+    async def register_skill(self, session_id: str, skill_url: str) -> dict[str, Any]:
+        """通过 AgentServer 将远程 skill 包注册到当前 session 的 workspace。
+
+        仅支持 Standard mode session。
+        """
+        from jiuwenclaw.e2a.gateway_normalize import e2a_from_agent_fields
+        from jiuwenclaw.schema.message import ReqMethod
+
+        env = e2a_from_agent_fields(
+            request_id=f"vibeskill-register-skill-{int(time.time() * 1000):x}-{secrets.token_hex(3)}",
+            channel_id=_VIBESKILL_CHANNEL_ID,
+            session_id=session_id,
+            req_method=ReqMethod.SKILLS_IMPORT_LOCAL,
+            params={"path": skill_url, "force": True},
+            is_stream=False,
+            timestamp=time.time(),
+        )
+        resp = await self._agent_client.send_request(env)
+        if not resp.ok:
+            payload = dict(resp.payload or {}) if isinstance(resp.payload, dict) else {}
+            raise RuntimeError(str(payload.get("error") or payload.get("detail") or "register skill failed"))
+        return dict(resp.payload or {}) if isinstance(resp.payload, dict) else {"success": True}
+
     async def _resolve_vibeskill_internal_session_id(
         self,
         external_session_id: str | None,

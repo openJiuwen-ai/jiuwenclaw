@@ -1708,6 +1708,15 @@ class VibeSkillChannel(BaseChannel):
             session_id = request_path.split("/api/v1/session/", 1)[-1].replace("/export", "")
             return await self._handle_http_export(session_id, body)
 
+        # 注册 skill 路由（仅支持 Standard mode）
+        if (
+            request_path.startswith("/api/v1/session/")
+            and request_path.endswith("/register-skill")
+            and method == "POST"
+        ):
+            session_id = request_path.split("/api/v1/session/", 1)[-1].replace("/register-skill", "")
+            return await self._handle_http_register_skill(session_id, body)
+
         # Session GET 兜底必须放在最后，避免覆盖更具体的子路由（如 /file）。
         if request_path.startswith("/api/v1/session/") and method == "GET":
             session_id = request_path.split("/api/v1/session/", 1)[-1]
@@ -1794,6 +1803,50 @@ class VibeSkillChannel(BaseChannel):
             },
         }
         return self._json_response(200, response_data)
+
+    async def _handle_http_register_skill(self, session_id: str, body: bytes) -> tuple[int, dict, bytes]:
+        """POST /api/v1/session/{sessionID}/register-skill - 注册远程 skill 包。
+
+        仅支持 Standard mode 的 session。
+        """
+        # 解析 body
+        if not body:
+            return self._json_response(400, {"error": "Missing request body"})
+        try:
+            req_body = json.loads(body.decode("utf-8"))
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            return self._json_response(400, {"error": "Invalid JSON"})
+        skills = req_body.get("skills", [])
+        if not skills:
+            return self._json_response(400, {"error": "Missing skills field or empty list"})
+
+        # 解析 session_id（优先 external -> internal）
+        internal_id = await self._store.resolve_internal(session_id)
+        if not internal_id:
+            internal_id = session_id
+
+        # 校验 session 存在
+        session_obj = await self._store.get_session(internal_id)
+        if not session_obj:
+            return self._json_response(404, {"error": f"Session not found: {session_id}"})
+
+        # 仅支持 Standard mode
+        if session_obj.mode != "Standard":
+            err_msg = "register-skill is only supported for Standard mode sessions"
+            return self._json_response(
+                400,
+                {"error": f"{err_msg}, current mode: {session_obj.mode}"}
+            )
+
+        # 注册每个 skill
+        channel_manager = cast("ChannelManager", self.bus)
+        for skill in skills:
+            skill_url = skill.get("url", "").strip()
+            if not skill_url:
+                return self._json_response(400, {"error": "Missing url in skills"})
+            await channel_manager.register_skill(session_id, skill_url)
+
+        return self._json_response(200, {"registered": True})
 
     async def _handle_http_session_get(self, session_id: str) -> tuple[int, dict, bytes]:
         """GET /api/v1/session/{id} - 查询会话状态。"""
