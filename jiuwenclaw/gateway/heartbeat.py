@@ -59,6 +59,7 @@ __all__ = [
 class HeartbeatConfig:
     """Heartbeat 配置.
 
+    enabled: 是否启用心跳服务，默认为 True。
     interval_seconds: 心跳间隔（秒），MUST > 0。
     timeout_seconds: 单次心跳请求超时（秒），可选；若提供则 MUST > 0。
     channel_id: 心跳请求使用的 channel_id，默认 __heartbeat__。
@@ -68,6 +69,7 @@ class HeartbeatConfig:
     """
 
     interval_seconds: float
+    enabled: bool = True
     timeout_seconds: float | None = None
     channel_id: str = HEARTBEAT_CHANNEL_ID
     relay_channel_id: str | None = None

@@ -60,6 +60,30 @@ logger = logging.getLogger(__name__)
 _PROMPT_IDLE_FINALIZE_SECONDS = 3.0
 
 
+def _get_bool_config(
+    env_key: str | None,
+    cfg_value: Any,
+    default: bool = True,
+) -> bool:
+    """读取布尔配置项，支持环境变量优先或 config.yaml 配置。
+
+    Args:
+        env_key: 环境变量名，如 "HEARTBEAT_ENABLED"；为 None 则不读取环境变量。
+        cfg_value: config.yaml 中的配置值。
+        default: 默认值。
+
+    Returns:
+        配置结果：环境变量优先 > config.yaml > 默认值。
+    """
+    if env_key is not None:
+        env_raw = os.getenv(env_key)
+        if env_raw is not None:
+            return env_raw.lower() in ("true", "1", "yes")
+    if cfg_value is not None:
+        return bool(cfg_value)
+    return default
+
+
 def _normalize_gateway_message(msg):
     from jiuwenclaw.schema.message import Message, ReqMethod
 
@@ -746,6 +770,8 @@ async def _run(
     from jiuwenclaw.extensions.manager import ExtensionManager
     from jiuwenclaw.extensions.registry import ExtensionRegistry
     from jiuwenclaw.schema.message import Message
+    from jiuwenclaw.schema.hook_event import GatewayHookEvents
+    from jiuwenclaw.schema.hooks_context import WebChannelCreatedHookContext
     from jiuwenclaw.updater import WindowsUpdaterService
     from jiuwenclaw.telemetry import init_telemetry
     from openjiuwen.core.runner import Runner
@@ -815,14 +841,17 @@ async def _run(
     full_cfg: dict[str, Any] = {}
     heartbeat_cfg: dict | None = None
     channels_cfg: dict | None = None
+    sync_config_cfg: dict | None = None
     try:
         full_cfg = get_config()
         heartbeat_cfg = full_cfg.get("heartbeat") if isinstance(full_cfg, dict) else None
         channels_cfg = full_cfg.get("channels") if isinstance(full_cfg, dict) else None
+        sync_config_cfg = full_cfg.get("sync_config") if isinstance(full_cfg, dict) else None
     except Exception as e:  # noqa: BLE001
         logger.warning("[App] failed to read heartbeat config from config.yaml, using defaults: %s", e)
         heartbeat_cfg = None
         channels_cfg = None
+        sync_config_cfg = None
 
     # 配置解密后存储在内存中
     env_dict = {}
@@ -834,10 +863,12 @@ async def _run(
     )
 
     if isinstance(heartbeat_cfg, dict):
+        cfg_enabled = heartbeat_cfg.get("enabled")
         cfg_every = heartbeat_cfg.get("every")
         cfg_target = heartbeat_cfg.get("target")
         cfg_active_hours = heartbeat_cfg.get("active_hours")
     else:
+        cfg_enabled = None
         cfg_every = None
         cfg_target = None
         cfg_active_hours = None
@@ -851,7 +882,10 @@ async def _run(
         str(cfg_target) if cfg_target is not None else "web"
     )
 
+    heartbeat_enabled = _get_bool_config("HEARTBEAT_ENABLED", cfg_enabled, default=True)
+
     heartbeat_config = HeartbeatConfig(
+        enabled=heartbeat_enabled,
         interval_seconds=heartbeat_interval,
         timeout_seconds=heartbeat_timeout,
         relay_channel_id=heartbeat_relay_channel,
@@ -862,7 +896,10 @@ async def _run(
         heartbeat_config,
         message_handler=message_handler,
     )
-    await heartbeat_service.start()
+    if heartbeat_enabled:
+        await heartbeat_service.start()
+    else:
+        logger.info("[App] Heartbeat service disabled by config")
 
     initial_channels_conf: dict = channels_cfg if isinstance(channels_cfg, dict) else {}
     channel_manager = ChannelManager(message_handler, config=initial_channels_conf)
@@ -936,17 +973,33 @@ async def _run(
             logger.warning("[App] hot config reload failed, scheduling restart: %s", e)
             _schedule_restart()
             return False
-    # 启动时将配置同步给agentserver
-    callback_result = _on_config_saved(
-        set(_CONFIG_SET_ENV_MAP.values()) | _CONFIG_YAML_KEYS,
-        env_updates=dict(env_dict),
-        config_payload=dict(full_cfg or {})
-    )
-    if inspect.isawaitable(callback_result):
-        await callback_result
+    # 启动时将配置同步给agentserver（可通过配置关闭）
+    sync_config_enabled_cfg = sync_config_cfg.get("enabled") if isinstance(sync_config_cfg, dict) else None
+    sync_config_on_startup = _get_bool_config("SYNC_CONFIG_ON_STARTUP", sync_config_enabled_cfg, default=True)
+
+    if sync_config_on_startup:
+        callback_result = _on_config_saved(
+            set(_CONFIG_SET_ENV_MAP.values()) | _CONFIG_YAML_KEYS,
+            env_updates=dict(env_dict),
+            config_payload=dict(full_cfg or {})
+        )
+        if inspect.isawaitable(callback_result):
+            await callback_result
+    else:
+        logger.info("[App] Sync config to AgentServer on startup disabled by config")
     web_channel = None
     web_config = WebChannelConfig(enabled=True, host=web_host, port=web_port, path=web_path)
     web_channel = WebChannel(web_config, _DummyBus())
+
+    # 触发 WebChannel 创建完成扩展点
+    web_channel_ctx = WebChannelCreatedHookContext(
+        web_channel=web_channel,
+        host=web_host,
+        port=web_port,
+        path=web_path,
+    )
+    await extension_registry.trigger(GatewayHookEvents.WEB_CHANNEL_CREATED, web_channel_ctx)
+
     _register_web_handlers(
         WebHandlersBindParams(
             channel=web_channel,
@@ -954,7 +1007,7 @@ async def _run(
             message_handler=message_handler,
             channel_manager=channel_manager,
             on_config_saved=_on_config_saved,
-            heartbeat_service=heartbeat_service,
+            heartbeat_service=heartbeat_service if heartbeat_enabled else None,
             cron_controller=cron_controller,
             updater_service=updater_service,
         )
@@ -1647,7 +1700,8 @@ async def _run(
 
         await cron_scheduler.stop()
         await channel_manager.stop_dispatch()
-        await heartbeat_service.stop()
+        if heartbeat_enabled:
+            await heartbeat_service.stop()
         await message_handler.stop_forwarding()
         await client.disconnect()
         logger.info("[App] Gateway stopped")

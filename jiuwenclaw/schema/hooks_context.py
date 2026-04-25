@@ -68,3 +68,21 @@ class SystemPromptHookContext:
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
+
+
+@dataclass
+class WebChannelCreatedHookContext:
+    """WebChannel 创建完成后的 hook context。
+
+    扩展可在 WebChannel 创建后进行自定义配置或注册额外 handler。
+    """
+
+    web_channel: Any  # WebChannel 实例
+    host: str
+    port: int
+    path: str
+    # 输出扩展
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
