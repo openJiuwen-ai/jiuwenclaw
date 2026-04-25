@@ -2031,6 +2031,43 @@ class JiuWenClawDeepAdapter:
         # 动态加载用户自定义的 Rail 扩展
         await self.load_user_rails()
 
+        # Initialize fork_agent tools
+        self._init_subagent_tools()
+
+    def _init_subagent_tools(self) -> None:
+        """Initialize fork_agent and spawn_subagent tools for creating subagents."""
+        try:
+            from openjiuwen.core.runner import Runner
+            from jiuwenclaw.agentserver.tools.subagent_executor import init_subagent_executor
+            from jiuwenclaw.agentserver.tools.subagent_tools import fork_agent, spawn_subagent
+
+            # Initialize the subagent executor with parent agent and model
+            init_subagent_executor(
+                self._instance,
+                model=self._model,  # Pass the model instance
+                default_role_prompts=None,  # Can be customized later
+            )
+
+            # Register fork_agent tool (ignore if already exists)
+            try:
+                Runner.resource_mgr.add_tool(fork_agent)
+            except Exception as e:
+                if "already exist" not in str(e):
+                    logger.warning("[JiuWenClawDeepAdapter] Failed to register fork_agent tool: %s", e)
+            self._instance.ability_manager.add(fork_agent.card)
+
+            # Register spawn_subagent tool (ignore if already exists)
+            try:
+                Runner.resource_mgr.add_tool(spawn_subagent)
+            except Exception as e:
+                if "already exist" not in str(e):
+                    logger.warning("[JiuWenClawDeepAdapter] Failed to register spawn_subagent tool: %s", e)
+            self._instance.ability_manager.add(spawn_subagent.card)
+
+            logger.info("[JiuWenClawDeepAdapter] Fork agent and spawn_subagent tools initialized")
+        except Exception as exc:
+            logger.warning("[JiuWenClawDeepAdapter] Failed to initialize subagent tools: %s", exc)
+
     async def load_user_rails(self) -> None:
         """动态加载用户自定义的 Rail 扩展."""
         try:

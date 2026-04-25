@@ -22,6 +22,34 @@ from .skill_toolkits import (
     SkillToolkit,
 )
 
+# Subagent/Fork Agent tools
+from .subagent_executor import (
+    ForkAgentExecutor,
+    set_subagent_parent_session,
+    get_subagent_parent_session,
+    set_current_agent_context,
+    get_current_agent_context,
+    set_current_agent_subagent_id,
+    get_current_agent_subagent_id,
+    get_fork_agent_executor,
+    init_subagent_executor,
+    SubagentSessionProxy,
+    SubagentContextRail,
+)
+from .subagent_models import (
+    ForkAgentTaskSpec,
+    ForkAgentResult,
+    SubagentTaskSpec,
+    SubagentResult,
+    SubagentConfig,
+    SubagentRoleDefinition,
+)
+from .subagent_tools import (
+    fork_agent,
+    spawn_subagent,
+    get_fork_messages,
+)
+
 # Re-export deep openjiuwen symbols at ≤3-layer depth so task_tools.py can comply
 # with the G.IMP import-depth lint rule without creating additional files.
 try:
@@ -57,6 +85,27 @@ __all__ = [
     "is_group_chat_mode",
     "SendFileToolkit",
     "SkillToolkit",
+    # Subagent/Fork Agent tools
+    "ForkAgentExecutor",
+    "set_subagent_parent_session",
+    "get_subagent_parent_session",
+    "set_current_agent_context",
+    "get_current_agent_context",
+    "set_current_agent_subagent_id",
+    "get_current_agent_subagent_id",
+    "get_fork_agent_executor",
+    "init_subagent_executor",
+    "SubagentSessionProxy",
+    "SubagentContextRail",
+    "ForkAgentTaskSpec",
+    "ForkAgentResult",
+    "SubagentTaskSpec",
+    "SubagentResult",
+    "SubagentConfig",
+    "SubagentRoleDefinition",
+    "fork_agent",
+    "spawn_subagent",
+    "get_fork_messages",
     # openjiuwen re-exports
     "tool",
     "ce_config",

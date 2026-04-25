@@ -33,6 +33,12 @@ from openjiuwen.harness.workspace.workspace import WorkspaceNode
 
 from jiuwenclaw.utils import fix_json_arguments, logger
 
+# Import subagent context functions for fork_agent
+from jiuwenclaw.agentserver.tools.subagent_executor import (
+    set_subagent_parent_session,
+    set_current_agent_context,
+)
+
 _TODO_TOOL_NAMES = frozenset(["todo_create", "todo_list", "todo_modify"])
 
 
@@ -104,7 +110,7 @@ class JiuClawStreamEventRail(DeepAgentRail):
         await self._emit_context_compression(ctx)
 
     # ------------------------------------------------------------------
-    # before_tool_call: pause check + emit tool_call event
+    # before_tool_call: pause check + emit tool_call event + set context for fork_agent
     # ------------------------------------------------------------------
 
     async def before_tool_call(self, ctx: AgentCallbackContext) -> None:
@@ -112,17 +118,34 @@ class JiuClawStreamEventRail(DeepAgentRail):
         if self._abort_requested:
             raise asyncio.CancelledError("Agent abort requested")
 
+        # Set current agent context for fork_agent to get correct messages
+        # This ensures fork_agent gets messages from the running context
+        # (not from storage which may be empty for subagent scenarios)
+        if ctx.context is not None:
+            set_current_agent_context(ctx.context)
+
+        # Set parent session for subagent tools
+        # Use parent session if session is a proxy (SubagentSessionProxy)
+        # This ensures tools get the actual parent session, not the proxy wrapper
         session = ctx.session
+        if session is not None:
+            actual_session = getattr(session, '_parent', session) if session else None
+            set_subagent_parent_session(actual_session)
+
         if session is not None and isinstance(ctx.inputs, ToolCallInputs):
             tc = ctx.inputs.tool_call
             await self._emit_tool_call(session, tc)
             await self._emit_tool_update(session, tc, status="in_progress")
 
     # ------------------------------------------------------------------
-    # after_tool_call: emit tool_result + todo.updated
+    # after_tool_call: emit tool_result + todo.updated + clear context
     # ------------------------------------------------------------------
 
     async def after_tool_call(self, ctx: AgentCallbackContext) -> None:
+        # Clear context after tool execution
+        set_current_agent_context(None)
+        set_subagent_parent_session(None)
+
         session = ctx.session
         if session is None or not isinstance(ctx.inputs, ToolCallInputs):
             return
@@ -134,10 +157,14 @@ class JiuClawStreamEventRail(DeepAgentRail):
             await self._emit_todo_updated(ctx.agent, session, self._conversation_id)
 
     # ------------------------------------------------------------------
-    # on_model_exception: attempt context repair
+    # on_model_exception: attempt context repair + clear context
     # ------------------------------------------------------------------
 
     async def on_model_exception(self, ctx: AgentCallbackContext) -> None:
+        # Clear context on exception
+        set_current_agent_context(None)
+        set_subagent_parent_session(None)
+
         if ctx.context is not None:
             logger.info("[StreamEventRail] Attempting context repair after model exception")
             await self._fix_incomplete_tool_context(ctx.context)
