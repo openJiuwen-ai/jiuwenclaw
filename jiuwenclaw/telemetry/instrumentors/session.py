@@ -24,10 +24,10 @@ from jiuwenclaw.telemetry.attributes import (
     JIUWENCLAW_SESSION_STATE_REASON,
 )
 from jiuwenclaw.telemetry.metrics import (
-    session_created_count,
-    session_state_count,
-    session_stuck_count,
-    session_stuck_age,
+    add_session_created_count,
+    add_session_state_count,
+    add_session_stuck_count,
+    record_session_stuck_age,
     set_session_active_observer,
 )
 
@@ -39,7 +39,7 @@ _tracked_session_managers: "weakref.WeakSet[Any]" = weakref.WeakSet()
 
 def _emit_state(session_id: str, state: str, reason: str) -> None:
     """Record a session state transition."""
-    session_state_count.add(1, {
+    add_session_state_count(1, {
         JIUWENCLAW_SESSION_ID: session_id,
         JIUWENCLAW_SESSION_STATE: state,
         JIUWENCLAW_SESSION_STATE_REASON: reason,
@@ -102,7 +102,7 @@ def instrument_session(
         self._session_priorities[session_id] = 0
 
         # >>> 埋点: state=created
-        session_created_count.add(1)
+        add_session_created_count(1)
         _emit_state(session_id, "created", "new_request")
 
         async def process_session_queue():
@@ -196,9 +196,9 @@ def _ensure_stuck_checker(session_manager) -> None:
                 for sid, start in list(start_times.items()):
                     age_ms = (now - start) * 1000
                     if age_ms > _stuck_threshold_ms:
-                        session_stuck_age.record(age_ms, {JIUWENCLAW_SESSION_ID: sid})
+                        record_session_stuck_age(age_ms, {JIUWENCLAW_SESSION_ID: sid})
                         if not stuck_reported.get(sid):
-                            session_stuck_count.add(1, {JIUWENCLAW_SESSION_ID: sid})
+                            add_session_stuck_count(1, {JIUWENCLAW_SESSION_ID: sid})
                             stuck_reported[sid] = True
                             logger.warning(
                                 "[Telemetry] Session stuck detected: session_id=%s, age_ms=%.0f",

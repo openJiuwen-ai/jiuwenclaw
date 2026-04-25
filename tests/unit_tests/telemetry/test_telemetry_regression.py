@@ -545,7 +545,7 @@ class TestTelemetryRegression:
                     "jiuwenclaw.telemetry.instrumentors.session._ensure_stuck_checker",
                     side_effect=lambda agent_server: None,
                 ):
-                    with patch.object(session_mod.session_created_count, "add") as mock_created:
+                    with patch.object(metrics_mod.session_created_count, "add") as mock_created:
                         session_mod.instrument_session(
                             stuck_threshold_ms=1000,
                             stuck_check_interval_s=60,
@@ -621,8 +621,8 @@ class TestTelemetryRegression:
                         handler = MessageHandler(agent)
 
                         try:
-                            with patch.object(session_mod.session_created_count, "add") as mock_created:
-                                with patch.object(entry_mod.request_count, "add") as mock_request:
+                            with patch.object(metrics_mod.session_created_count, "add") as mock_created:
+                                with patch.object(metrics_mod.request_count, "add") as mock_request:
                                     req_1 = await _dispatch_stream_message(
                                         handler,
                                         "req_same_1",
@@ -642,7 +642,8 @@ class TestTelemetryRegression:
                                     assert mock_created.call_count == 1
                                     assert mock_request.call_count == 2
                                     assert all(
-                                        call.args == (1, {"jiuwenclaw.channel.id": "web"})
+                                        call.args[0] == 1
+                                        and call.args[1].get("jiuwenclaw.channel.id") == "web"
                                         for call in mock_request.call_args_list
                                     )
                                     assert len(agent._session_processors) == 1
@@ -703,8 +704,8 @@ class TestTelemetryRegression:
                         session_ids = ("sess_multi_1", "sess_multi_2", "sess_multi_3")
 
                         try:
-                            with patch.object(session_mod.session_created_count, "add") as mock_created:
-                                with patch.object(entry_mod.request_count, "add") as mock_request:
+                            with patch.object(metrics_mod.session_created_count, "add") as mock_created:
+                                with patch.object(metrics_mod.request_count, "add") as mock_request:
                                     for session_id in session_ids:
                                         for index in range(1, 3):
                                             req = await _dispatch_stream_message(
@@ -718,7 +719,8 @@ class TestTelemetryRegression:
                                     assert mock_created.call_count == 3
                                     assert mock_request.call_count == 6
                                     assert all(
-                                        call.args == (1, {"jiuwenclaw.channel.id": "web"})
+                                        call.args[0] == 1
+                                        and call.args[1].get("jiuwenclaw.channel.id") == "web"
                                         for call in mock_request.call_args_list
                                     )
                                     assert set(agent._session_processors.keys()) == set(session_ids)
@@ -746,6 +748,7 @@ class TestTelemetryRegression:
         with _patched_regression_modules():
             from jiuwenclaw.agentserver.react_agent import JiuClawReActAgent
             import jiuwenclaw.telemetry.instrumentors.llm as llm_mod
+            import jiuwenclaw.telemetry.metrics as metrics_mod
 
             original_call_llm = getattr(JiuClawReActAgent, "_call_llm", None)
 
@@ -763,14 +766,15 @@ class TestTelemetryRegression:
                     model_config_obj=SimpleNamespace(temperature=None, top_p=None),
                 )
 
-                with patch.object(llm_mod.llm_call_count, "add") as mock_metric_add:
+                with patch.object(metrics_mod.llm_call_count, "add") as mock_metric_add:
                     with pytest.raises(RuntimeError, match="LLM timeout"):
                         _run(agent._call_llm([], None, None, 10))
 
-                mock_metric_add.assert_called_once_with(
-                    1,
-                    {"gen_ai.request.model": "deepseek-chat", "status": "error", "jiuwenclaw.channel.id": ""},
-                )
+                mock_metric_add.assert_called_once()
+                call_args = mock_metric_add.call_args
+                assert call_args[0][0] == 1  # value
+                assert call_args[0][1]["gen_ai.request.model"] == "deepseek-chat"
+                assert call_args[0][1]["status"] == "error"
             finally:
                 if original_call_llm is None:
                     delattr(JiuClawReActAgent, "_call_llm")

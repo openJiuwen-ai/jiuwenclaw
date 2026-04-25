@@ -33,7 +33,7 @@ from jiuwenclaw.telemetry.attributes import (
     JIUWENCLAW_REQUEST_ID,
     JIUWENCLAW_SESSION_ID,
 )
-from jiuwenclaw.telemetry.metrics import llm_call_count, llm_duration, token_usage
+from jiuwenclaw.telemetry.metrics import add_llm_call_count, add_token_usage, record_llm_duration
 
 _tracer = trace.get_tracer("jiuwenclaw.llm")
 
@@ -111,7 +111,7 @@ def instrument_llm() -> None:
                     _record_output_message(span, result)
 
                 span.set_status(StatusCode.OK)
-                llm_call_count.add(
+                add_llm_call_count(
                     1,
                     {
                         GEN_AI_REQUEST_MODEL: model_name,
@@ -124,7 +124,7 @@ def instrument_llm() -> None:
             except Exception as exc:
                 span.set_status(StatusCode.ERROR, str(exc)[:256])
                 span.record_exception(exc)
-                llm_call_count.add(
+                add_llm_call_count(
                     1,
                     {
                         GEN_AI_REQUEST_MODEL: model_name,
@@ -135,7 +135,7 @@ def instrument_llm() -> None:
                 raise
             finally:
                 duration = time.monotonic() - start
-                llm_duration.record(duration, {
+                record_llm_duration(duration, {
                     GEN_AI_REQUEST_MODEL: model_name,
                     GEN_AI_SYSTEM: system,
                     JIUWENCLAW_CHANNEL_ID: channel_id,
@@ -216,8 +216,8 @@ def _record_token_usage(span, result, model_name: str, system: str, channel_id: 
     # Metric counters
     base_attrs = {GEN_AI_REQUEST_MODEL: model_name, GEN_AI_SYSTEM: system, JIUWENCLAW_CHANNEL_ID: channel_id}
     if input_tokens:
-        token_usage.add(input_tokens, {**base_attrs, "gen_ai.token.type": "input"})
+        add_token_usage(input_tokens, {**base_attrs, "gen_ai.token.type": "input"})
     if output_tokens:
-        token_usage.add(output_tokens, {**base_attrs, "gen_ai.token.type": "output"})
+        add_token_usage(output_tokens, {**base_attrs, "gen_ai.token.type": "output"})
     if cache_read:
-        token_usage.add(cache_read, {**base_attrs, "gen_ai.token.type": "cache_read"})
+        add_token_usage(cache_read, {**base_attrs, "gen_ai.token.type": "cache_read"})

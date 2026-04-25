@@ -348,12 +348,12 @@ class PatchOpenAIModelClient(RetryMixin, OpenAIModelClient):
     def _create_async_openai_client(self, timeout: Optional[float] = None) -> "openai.AsyncOpenAI":
         """
         Create an OpenAI Async client with configured SSL/proxy/http client settings.
-        
+
         Args:
             timeout: Optional timeout override for this specific request
         """
         from openai import AsyncOpenAI
-        
+
         ssl_verify, ssl_cert = self.model_client_config.verify_ssl, self.model_client_config.ssl_cert
         verify = SslUtils.create_strict_ssl_context(ssl_cert) if ssl_verify else ssl_verify
 
@@ -385,7 +385,7 @@ class PatchOpenAIModelClient(RetryMixin, OpenAIModelClient):
             max_retries=self.model_client_config.max_retries,
             default_headers=default_headers
         )
-    
+
     def _parse_stream_chunk(self, chunk: Any) -> Optional[AssistantMessageChunk]:
         """Parse OpenAI streaming response chunk
 
@@ -439,7 +439,6 @@ class PatchOpenAIModelClient(RetryMixin, OpenAIModelClient):
                 usage_metadata=usage_metadata,
                 finish_reason="stop",  # Usage chunk always indicates completion
             )
-
 
         # When stream_options={"include_usage": true}, OpenAI sends a final
         # usage-only chunk with ``choices=[]`` and ``usage`` populated. Emit a

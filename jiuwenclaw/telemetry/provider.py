@@ -43,6 +43,7 @@ from jiuwenclaw.telemetry.config import TelemetryConfig
 class ProviderBundle:
     tracer_provider: TracerProvider | None = None
     meter_provider: MeterProvider | None = None
+    resource: Resource | None = None  # 暴露 Resource 供 metrics 获取 claw_id
 
 
 def init_providers(cfg: TelemetryConfig) -> ProviderBundle:
@@ -50,6 +51,11 @@ def init_providers(cfg: TelemetryConfig) -> ProviderBundle:
     bundle = _build_extension_provider_bundle(cfg) or build_default_providers(cfg)
 
     install_providers(bundle)
+
+    # 将 Resource 传递给 metrics 模块，用于获取 claw_id
+    from jiuwenclaw.telemetry.metrics import set_resource
+    set_resource(bundle.resource)
+
     return bundle
 
 
@@ -69,6 +75,7 @@ def build_default_providers(cfg: TelemetryConfig) -> ProviderBundle:
     return ProviderBundle(
         tracer_provider=tracer_provider,
         meter_provider=meter_provider,
+        resource=resource,
     )
 
 
@@ -98,9 +105,17 @@ def _coerce_provider_bundle(value: Any) -> ProviderBundle:
             f"meter_provider must be a MeterProvider instance, got {type(meter_provider).__name__}"
         )
 
+    # 从 Provider 获取 Resource（用于 metrics 获取 claw_id）
+    resource = getattr(value, "resource", None)
+    if resource is None and tracer_provider is not None:
+        resource = getattr(tracer_provider, "resource", None)
+    if resource is None and meter_provider is not None:
+        resource = getattr(meter_provider, "resource", None)
+
     return ProviderBundle(
         tracer_provider=tracer_provider,
         meter_provider=meter_provider,
+        resource=resource,
     )
 
 

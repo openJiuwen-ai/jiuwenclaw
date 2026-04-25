@@ -62,6 +62,7 @@ from jiuwenclaw.telemetry.metrics import (
     tool_call_count,
     tool_duration,
     tool_error_count,
+    _with_resource_labels,
 )
 from jiuwenclaw.telemetry.context_propagation import extract_trace_context
 
@@ -302,10 +303,10 @@ class TelemetryRail(DeepAgentRail):
 
             # Record duration metric
             duration = time.monotonic() - agent_start_time
-            agent_duration.record(duration, {
+            agent_duration.record(duration, _with_resource_labels({
                 JIUWENCLAW_AGENT_NAME: getattr(self._agent, "card", None) and getattr(self._agent.card, "id", ""),
                 JIUWENCLAW_CHANNEL_ID: req_ctx["channel_id"],
-            })
+            }))
 
             agent_span.end()
 
@@ -447,26 +448,26 @@ class TelemetryRail(DeepAgentRail):
         if hasattr(ctx, "error") and ctx.error:
             span.set_status(StatusCode.ERROR, str(ctx.error)[:256])
             span.record_exception(ctx.error)
-            llm_call_count.add(1, {
+            llm_call_count.add(1, _with_resource_labels({
                 GEN_AI_REQUEST_MODEL: model_name,
                 "status": "error",
                 JIUWENCLAW_CHANNEL_ID: channel_id,
-            })
+            }))
         else:
             span.set_status(StatusCode.OK)
-            llm_call_count.add(1, {
+            llm_call_count.add(1, _with_resource_labels({
                 GEN_AI_REQUEST_MODEL: model_name,
                 "status": "success",
                 JIUWENCLAW_CHANNEL_ID: channel_id,
-            })
+            }))
 
         # Record duration metric
         duration = time.monotonic() - start_time
-        llm_duration.record(duration, {
+        llm_duration.record(duration, _with_resource_labels({
             GEN_AI_REQUEST_MODEL: model_name,
             GEN_AI_SYSTEM: system,
             JIUWENCLAW_CHANNEL_ID: channel_id,
-        })
+        }))
 
         span.end()
 
@@ -538,10 +539,10 @@ class TelemetryRail(DeepAgentRail):
 
         self._tool_spans[span_key] = (span, time.monotonic(), tool_name)
 
-        tool_call_count.add(1, {
+        tool_call_count.add(1, _with_resource_labels({
             GEN_AI_TOOL_NAME: tool_name,
             JIUWENCLAW_CHANNEL_ID: req_ctx["channel_id"],
-        })
+        }))
 
         # Store span_key in ctx for retrieval in after_tool_call
         ctx._otel_tool_span_key = span_key
@@ -593,19 +594,19 @@ class TelemetryRail(DeepAgentRail):
 
         if is_error:
             span.set_status(StatusCode.ERROR, result_str[:256])
-            tool_error_count.add(1, {
+            tool_error_count.add(1, _with_resource_labels({
                 GEN_AI_TOOL_NAME: span_tool_name,
                 JIUWENCLAW_CHANNEL_ID: req_ctx["channel_id"],
-            })
+            }))
         else:
             span.set_status(StatusCode.OK)
 
         # Record duration metric
         duration = time.monotonic() - start_time
-        tool_duration.record(duration, {
+        tool_duration.record(duration, _with_resource_labels({
             GEN_AI_TOOL_NAME: span_tool_name,
             JIUWENCLAW_CHANNEL_ID: req_ctx["channel_id"],
-        })
+        }))
 
         span.end()
 
@@ -674,11 +675,11 @@ class TelemetryRail(DeepAgentRail):
             span.set_attribute(GEN_AI_USAGE_CACHE_READ_TOKENS, cache_read)
 
         # Metric counters
-        base_attrs = {
+        base_attrs = _with_resource_labels({
             GEN_AI_REQUEST_MODEL: model_name,
             GEN_AI_SYSTEM: system,
             JIUWENCLAW_CHANNEL_ID: channel_id,
-        }
+        })
         if input_tokens:
             token_usage.add(input_tokens, {**base_attrs, "gen_ai.token.type": "input"})
         if output_tokens:

@@ -21,7 +21,7 @@ from jiuwenclaw.telemetry.attributes import (
     JIUWENCLAW_SESSION_ID,
 )
 from jiuwenclaw.telemetry.context_propagation import extract_trace_context
-from jiuwenclaw.telemetry.metrics import agent_duration
+from jiuwenclaw.telemetry.metrics import record_agent_duration
 
 _tracer = trace.get_tracer("jiuwenclaw.agent")
 
@@ -60,7 +60,7 @@ def instrument_agent() -> None:
                 raise
             finally:
                 duration = time.monotonic() - start
-                agent_duration.record(duration, {
+                record_agent_duration(duration, {
                     JIUWENCLAW_AGENT_NAME: getattr(self, "_agent_name", ""),
                     JIUWENCLAW_CHANNEL_ID: request.channel_id or "",
                 })
@@ -87,7 +87,7 @@ def instrument_agent() -> None:
             raise
         finally:
             duration = time.monotonic() - start
-            agent_duration.record(duration, {
+            record_agent_duration(duration, {
                 JIUWENCLAW_AGENT_NAME: getattr(self, "_agent_name", ""),
                 JIUWENCLAW_CHANNEL_ID: request.channel_id or "",
             })

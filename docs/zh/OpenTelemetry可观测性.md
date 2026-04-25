@@ -43,7 +43,8 @@ telemetry:
   endpoint: http://localhost:4317   # OTLP endpoint
   protocol: grpc                    # grpc / http
   log_messages: true                # 是否记录完整消息内容
-  service_name: jiuwenclaw
+  service_name: jiuwenclaw          # 服务名称
+  claw_id: claw-instance-001        # Claw 实例标识（可选）
 ```
 
 > 环境变量优先级高于 config.yaml。telemetry 默认关闭；若需要实际导出，请先开启 telemetry，再将 `exporter`、`OTEL_TRACES_EXPORTER` 或 `OTEL_METRICS_EXPORTER` 改为 `console` 或 `otlp`。
@@ -60,6 +61,7 @@ telemetry:
 | `OTEL_EXPORTER_OTLP_PROTOCOL` | `telemetry.protocol` | `grpc` | OTLP 协议：grpc / http |
 | `OTEL_LOG_MESSAGES` | `telemetry.log_messages` | `true` | 是否在 Span Event 中记录完整消息内容 |
 | `OTEL_SERVICE_NAME` | `telemetry.service_name` | `jiuwenclaw` | 服务名称 |
+| `OTEL_CLAW_ID` | `telemetry.claw_id` | `None` | Claw 实例标识，用于区分同一服务下的不同实例 |
 
 ## 4. Trace 调用链结构
 
@@ -185,12 +187,18 @@ telemetry:
 
 ### 5.4 资源属性
 
-除上表中的 point labels 外，默认 Provider 还会为所有 metrics 附带以下资源属性：
+除上表中的 point labels 外，默认 Provider 还会为所有 telemetry 数据附带以下资源属性：
 
-| 属性 | 值来源 |
-|---|---|
-| `service.name` | `OTEL_SERVICE_NAME` 或 `telemetry.service_name`，默认 `jiuwenclaw` |
-| `service.version` | 当前默认写死为 `0.1.5` |
+| 属性 | 值来源 | 说明 |
+|---|---|---|
+| `service.name` | `OTEL_SERVICE_NAME` 或 `telemetry.service_name`，默认 `jiuwenclaw` | 服务标识，用于区分不同部署实例 |
+| `service.version` | 当前默认写死为 `0.1.5` | 服务版本号 |
+| `jiuwenclaw.claw.id` | `OTEL_CLAW_ID` 或 `telemetry.claw_id` | Claw 实例标识，用于区分同一服务下的不同 Claw 实例 |
+
+> **注入机制**：
+> - **Resource 层**：在 `provider.py` 的 `build_default_providers()` 中通过 `Resource.create(resource_attrs)` 设置，所有 Span 和 Metric 自动关联 Resource
+> - **Metric Attributes 层**：`jiuwenclaw.claw.id` 会额外注入到每个 metric 数据点的 attributes 中（从 Resource 获取），便于在 Metric 后端按实例聚合查询
+> - `service.name` 不注入到 metric attributes，仅通过 Resource 关联
 
 ### 5.5 代码来源
 
@@ -352,38 +360,107 @@ OTEL_EXPORTER_OTLP_METRICS_HEADERS
 
 Metrics 同理。
 
-### 8.4 Provider Factory 扩展点
+### 8.4 Provider 扩展点
 
-当默认 provider 逻辑不能满足需求时，可以通过以下扩展点完全接管 provider 初始化：
+当默认 provider 逻辑不能满足需求时，可以通过 `TelemetryProviderExtension` 扩展点完全接管 provider 初始化。
 
-```bash
-OTEL_PROVIDER_FACTORY=package.module:function
+#### 扩展点优先级机制
+
+扩展点选择遵循以下优先级：
+
+```
+┌──────────────────────────────────────────────────────────────┐
+│  优先级 1: ExtensionRegistry 中的 TelemetryProviderExtension  │
+│     → 存在则使用扩展的 build_providers() 构建 provider        │
+│     → 扩展返回 None 则 fallback 到默认 provider               │
+└──────────────────────────────────────────────────────────────┘
+                              ↓ fallback
+┌──────────────────────────────────────────────────────────────┐
+│  优先级 2: 默认 provider                                       │
+│     → 读取环境变量 / config.yaml 构建                          │
+└──────────────────────────────────────────────────────────────┘
 ```
 
-函数签名约定为：
+#### 扩展目录加载优先级
+
+多个扩展目录的加载顺序由 `extension.yaml` 中的 `priority` 字段控制：
+
+| priority 值 | 加载顺序 | 说明 |
+|-------------|----------|------|
+| 5 | 先加载 | 高优先级扩展，优先注册 |
+| 10 | 后加载 | 默认优先级（未设置时默认为 10） |
+| 15 | 最后加载 | 低优先级扩展 |
+
+> **数值越小越先加载**，先加载的扩展先注册到 Registry。
+
+#### 注册 TelemetryProviderExtension
+
+实现自定义扩展：
 
 ```python
-def build_providers() -> ProviderBundle:
-    ...
+from jiuwenclaw.extensions.sdk.telemetry_provider import TelemetryProviderExtension
+from jiuwenclaw.telemetry.provider import ProviderBundle
+from jiuwenclaw.telemetry.config import TelemetryConfig
+
+class MyTelemetryExtension(TelemetryProviderExtension):
+    """自定义 telemetry provider 扩展"""
+    
+    def build_providers(self, cfg: TelemetryConfig) -> ProviderBundle:
+        """基于 telemetry 配置构建自定义 provider"""
+        # 自定义 TracerProvider 和 MeterProvider 构建逻辑
+        tracer_provider = self._build_tracer_provider(cfg)
+        meter_provider = self._build_meter_provider(cfg)
+        
+        return ProviderBundle(
+            tracer_provider=tracer_provider,
+            meter_provider=meter_provider,
+        )
+    
+    def _build_tracer_provider(self, cfg):
+        # ... 自定义实现
+        pass
+    
+    def _build_meter_provider(self, cfg):
+        # ... 自定义实现
+        pass
 ```
 
-返回值需要包含：
+在扩展目录的 `extension.py` 中注册：
 
 ```python
-ProviderBundle(
-    tracer_provider=...,
-    meter_provider=...,
-)
+# extension.py
+async def register_extensions(registry):
+    from my_extension import MyTelemetryExtension
+    
+    registry.register_telemetry_provider(MyTelemetryExtension())
+    return []
 ```
 
-框架行为如下：
+#### 扩展目录配置
 
-- 若未配置 `OTEL_PROVIDER_FACTORY`，使用内置默认 provider 初始化逻辑
-- 若配置了 `OTEL_PROVIDER_FACTORY`，框架动态加载该函数
-- 第三方函数负责自行读取环境变量、构造 tracer provider 和 meter provider
-- 框架仅负责安装 provider，并继续应用 instrumentor
+在 `extension.yaml` 中设置加载优先级：
+
+```yaml
+id: my-telemetry-extension
+name: My Custom Telemetry
+version: 1.0.0
+description: 自定义 telemetry provider，上报到私有后端
+author: my-team
+min_jiuwenclaw_version: 0.1.0
+priority: 5  # 高优先级，先于其他扩展加载
+dependencies: {}
+```
+
+#### 注意事项
+
+- **TelemetryProviderExtension 是单一实例**：后注册的扩展会覆盖之前注册的
+- 若需要多个扩展协作，应通过 `priority` 控制加载顺序，让期望的扩展先注册
+- 扩展的 `build_providers()` 返回 `None` 时，框架自动 fallback 到默认 provider
+- 扩展构建的 provider 仍需遵循 `OTEL_ENABLED` 总开关控制
 
 ### 8.5 第三方接入示例
+
+#### 使用默认 provider
 
 直接使用默认 provider，将 trace 和 metrics 分别上报到不同后端：
 
@@ -410,19 +487,39 @@ export OTEL_TRACES_EXPORTER=otlp
 export OTEL_METRICS_EXPORTER=none
 ```
 
-使用自定义 provider factory：
+#### 使用自定义 TelemetryProviderExtension
 
-```bash
-export OTEL_ENABLED=true
-export OTEL_PROVIDER_FACTORY=mycompany.custom_otel:build_providers
+创建扩展目录结构：
+
+```
+extensions/
+└── my-custom-telemetry/
+    ├── extension.yaml
+    └── extension.py
 ```
 
-示例：
+**extension.yaml**:
+
+```yaml
+id: my-custom-telemetry
+name: Custom Telemetry Provider
+version: 1.0.0
+description: 上报到私有观测后端
+author: my-team
+min_jiuwenclaw_version: 0.1.0
+priority: 5
+dependencies: {}
+```
+
+**extension.py**:
 
 ```python
 import os
 
+from jiuwenclaw.extensions.sdk.telemetry_provider import TelemetryProviderExtension
 from jiuwenclaw.telemetry.provider import ProviderBundle
+from jiuwenclaw.telemetry.config import TelemetryConfig
+
 from opentelemetry.exporter.otlp.proto.http.metric_exporter import OTLPMetricExporter
 from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
 from opentelemetry.sdk.metrics import MeterProvider
@@ -432,21 +529,23 @@ from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import BatchSpanProcessor
 
 
-def build_providers() -> ProviderBundle:
-    service_name = os.getenv("OTEL_SERVICE_NAME", "my-app")
-    trace_endpoint = os.getenv("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", "")
-    metric_endpoint = os.getenv("OTEL_EXPORTER_OTLP_METRICS_ENDPOINT", "")
-
-    trace_token = os.getenv("TRACE_BACKEND_TOKEN", "")
-    metric_token = os.getenv("METRIC_BACKEND_TOKEN", "")
-
-    resource = Resource.create({
-        SERVICE_NAME: service_name,
-        "service.version": os.getenv("APP_VERSION", "unknown"),
-    })
-
-    tracer_provider = TracerProvider(resource=resource)
-    if trace_endpoint:
+class CustomTelemetryExtension(TelemetryProviderExtension):
+    """自定义 telemetry provider，上报到私有后端"""
+    
+    def build_providers(self, cfg: TelemetryConfig) -> ProviderBundle:
+        service_name = cfg.service_name
+        trace_endpoint = os.getenv("CUSTOM_TRACE_ENDPOINT", "https://trace.example.com")
+        metric_endpoint = os.getenv("CUSTOM_METRIC_ENDPOINT", "https://metrics.example.com")
+        trace_token = os.getenv("TRACE_BACKEND_TOKEN", "")
+        metric_token = os.getenv("METRIC_BACKEND_TOKEN", "")
+        
+        resource = Resource.create({
+            SERVICE_NAME: service_name,
+            "service.version": os.getenv("APP_VERSION", "unknown"),
+        })
+        
+        # 构建 TracerProvider
+        tracer_provider = TracerProvider(resource=resource)
         tracer_provider.add_span_processor(
             BatchSpanProcessor(
                 OTLPSpanExporter(
@@ -455,22 +554,29 @@ def build_providers() -> ProviderBundle:
                 )
             )
         )
+        
+        # 构建 MeterProvider
+        meter_provider = MeterProvider(
+            resource=resource,
+            metric_readers=[
+                PeriodicExportingMetricReader(
+                    OTLPMetricExporter(
+                        endpoint=f"{metric_endpoint}/v1/metrics",
+                        headers={"Authorization": f"Bearer {metric_token}"},
+                    ),
+                    export_interval_millis=15000,
+                )
+            ],
+        )
+        
+        return ProviderBundle(
+            tracer_provider=tracer_provider,
+            meter_provider=meter_provider,
+        )
 
-    meter_provider = MeterProvider(
-        resource=resource,
-        metric_readers=[
-            PeriodicExportingMetricReader(
-                OTLPMetricExporter(
-                    endpoint=f"{metric_endpoint}/v1/metrics",
-                    headers={"Authorization": f"Bearer {metric_token}"},
-                ),
-                export_interval_millis=15000,
-            )
-        ],
-    )
 
-    return ProviderBundle(
-        tracer_provider=tracer_provider,
-        meter_provider=meter_provider,
-    )
+async def register_extensions(registry):
+    """扩展入口函数"""
+    registry.register_telemetry_provider(CustomTelemetryExtension())
+    return []
 ```

@@ -23,7 +23,7 @@ from jiuwenclaw.telemetry.attributes import (
     JIUWENCLAW_REQUEST_ID,
     JIUWENCLAW_SESSION_ID,
 )
-from jiuwenclaw.telemetry.metrics import tool_call_count, tool_duration, tool_error_count
+from jiuwenclaw.telemetry.metrics import add_tool_call_count, add_tool_error_count, record_tool_duration
 
 _tracer = trace.get_tracer("jiuwenclaw.tool")
 
@@ -66,7 +66,7 @@ def instrument_tools() -> None:
         span.add_event("tool.arguments", {"arguments": str(arguments)[:4096]})
         _active_tool_spans[tool_call_id] = (span, time.monotonic(), channel_id)
 
-        tool_call_count.add(1, {GEN_AI_TOOL_NAME: tool_name, JIUWENCLAW_CHANNEL_ID: channel_id})
+        add_tool_call_count(1, {GEN_AI_TOOL_NAME: tool_name, JIUWENCLAW_CHANNEL_ID: channel_id})
 
         await _original_emit_tool_call(self, session, tool_call)
 
@@ -89,12 +89,12 @@ def instrument_tools() -> None:
 
             if is_error:
                 span.set_status(StatusCode.ERROR, result_str[:256])
-                tool_error_count.add(1, {GEN_AI_TOOL_NAME: tool_name, JIUWENCLAW_CHANNEL_ID: channel_id})
+                add_tool_error_count(1, {GEN_AI_TOOL_NAME: tool_name, JIUWENCLAW_CHANNEL_ID: channel_id})
             else:
                 span.set_status(StatusCode.OK)
 
             duration = time.monotonic() - start_time
-            tool_duration.record(duration, {GEN_AI_TOOL_NAME: tool_name, JIUWENCLAW_CHANNEL_ID: channel_id})
+            record_tool_duration(duration, {GEN_AI_TOOL_NAME: tool_name, JIUWENCLAW_CHANNEL_ID: channel_id})
             span.end()
 
         await _original_emit_tool_result(self, session, tool_call, result)

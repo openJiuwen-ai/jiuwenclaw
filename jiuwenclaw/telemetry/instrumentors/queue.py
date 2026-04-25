@@ -11,10 +11,10 @@ from opentelemetry.metrics import Observation
 from jiuwenclaw.utils import logger
 from jiuwenclaw.telemetry.attributes import JIUWENCLAW_CHANNEL_ID
 from jiuwenclaw.telemetry.metrics import (
-    message_processed,
-    queue_dequeued,
-    queue_enqueued,
-    queue_wait_duration,
+    add_message_processed,
+    add_queue_dequeued,
+    add_queue_enqueued,
+    record_queue_wait_duration,
     set_queue_depth_observer,
 )
 
@@ -69,7 +69,7 @@ def _on_enqueue(msg, queue_name: str) -> None:
     try:
         channel_id = getattr(msg, "channel_id", "") or ""
         setattr(msg, "_otel_enqueue_time", time.monotonic())
-        queue_enqueued.add(1, {_QUEUE_LABEL: queue_name, JIUWENCLAW_CHANNEL_ID: channel_id})
+        add_queue_enqueued(1, {_QUEUE_LABEL: queue_name, JIUWENCLAW_CHANNEL_ID: channel_id})
     except Exception as e:
         logger.warning(f"[Telemetry] Failed to record enqueue metrics for queue '{queue_name}': {e}")
 
@@ -79,13 +79,13 @@ def _on_dequeue(msg, queue_name: str) -> None:
         channel_id = getattr(msg, "channel_id", "") or ""
         attrs = {_QUEUE_LABEL: queue_name, JIUWENCLAW_CHANNEL_ID: channel_id}
 
-        queue_dequeued.add(1, attrs)
-        message_processed.add(1, {**attrs, "status": "success"})
+        add_queue_dequeued(1, attrs)
+        add_message_processed(1, {**attrs, "status": "success"})
 
         enqueue_time = getattr(msg, "_otel_enqueue_time", None)
         if enqueue_time is not None:
             elapsed_ms = (time.monotonic() - enqueue_time) * 1000
-            queue_wait_duration.record(elapsed_ms, attrs)
+            record_queue_wait_duration(elapsed_ms, attrs)
     except Exception as e:
         logger.warning(f"[Telemetry] Failed to record dequeue metrics for queue '{queue_name}': {e}")
 

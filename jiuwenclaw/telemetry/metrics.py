@@ -8,9 +8,32 @@ from collections.abc import Callable, Iterable
 
 from opentelemetry import metrics
 from opentelemetry.metrics import CallbackOptions, Observation
+from opentelemetry.sdk.resources import Resource
+
+from jiuwenclaw.telemetry.attributes import JIUWENCLAW_CLAW_ID
 
 _meter = metrics.get_meter("jiuwenclaw")
 _session_active_observer: Callable[[], int] | None = None
+
+# Global Resource reference for metric attributes
+_resource: Resource | None = None
+
+
+def set_resource(resource: Resource | None) -> None:
+    """设置 Resource 引用，用于从 Resource 获取 claw_id."""
+    global _resource
+    _resource = resource
+
+
+def _with_resource_labels(attrs: dict) -> dict:
+    """将 claw.id 注入到 metric attributes 中（从 Resource 获取）."""
+    result = dict(attrs)
+    if _resource is not None:
+        # 从 Resource.attributes 获取 claw_id
+        claw_id = _resource.attributes.get(JIUWENCLAW_CLAW_ID)
+        if claw_id is not None:
+            result[JIUWENCLAW_CLAW_ID] = claw_id
+    return result
 
 
 def set_session_active_observer(observer: Callable[[], int] | None) -> None:
@@ -29,7 +52,14 @@ def _observe_session_active(_options: CallbackOptions) -> Iterable[Observation]:
     except Exception:
         return []
 
-    return [Observation(active_sessions)]
+    # Add claw.id to attributes
+    attrs = {}
+    if _resource is not None:
+        claw_id = _resource.attributes.get(JIUWENCLAW_CLAW_ID)
+        if claw_id is not None:
+            attrs[JIUWENCLAW_CLAW_ID] = claw_id
+
+    return [Observation(active_sessions, attributes=attrs)]
 
 # --- Histograms ---
 request_duration = _meter.create_histogram(
@@ -140,7 +170,17 @@ def _observe_queue_depth(_options: CallbackOptions) -> Iterable[Observation]:
     if observer is None:
         return []
     try:
-        return observer()
+        observations = observer()
+        # Wrap each Observation with claw.id
+        wrapped = []
+        for obs in observations:
+            attrs = dict(obs.attributes or {})
+            if _resource is not None:
+                claw_id = _resource.attributes.get(JIUWENCLAW_CLAW_ID)
+                if claw_id is not None:
+                    attrs[JIUWENCLAW_CLAW_ID] = claw_id
+            wrapped.append(Observation(obs.value, attributes=attrs))
+        return wrapped
     except Exception:
         return []
 
@@ -175,3 +215,77 @@ message_processed = _meter.create_counter(
     unit="{message}",
     description="Processed message count by status",
 )
+
+# --- Recorder helpers with resource labels injection ---
+
+
+def record_agent_duration(duration: float, attrs: dict) -> None:
+    agent_duration.record(duration, _with_resource_labels(attrs))
+
+
+def record_request_duration(duration: float, attrs: dict) -> None:
+    request_duration.record(duration, _with_resource_labels(attrs))
+
+
+def record_llm_duration(duration: float, attrs: dict) -> None:
+    llm_duration.record(duration, _with_resource_labels(attrs))
+
+
+def record_tool_duration(duration: float, attrs: dict) -> None:
+    tool_duration.record(duration, _with_resource_labels(attrs))
+
+
+def record_queue_wait_duration(duration_ms: float, attrs: dict) -> None:
+    queue_wait_duration.record(duration_ms, _with_resource_labels(attrs))
+
+
+def record_session_stuck_age(age_ms: float, attrs: dict) -> None:
+    session_stuck_age.record(age_ms, _with_resource_labels(attrs))
+
+
+def add_request_count(value: int, attrs: dict) -> None:
+    request_count.add(value, _with_resource_labels(attrs))
+
+
+def add_request_error_count(value: int, attrs: dict) -> None:
+    request_error_count.add(value, _with_resource_labels(attrs))
+
+
+def add_llm_call_count(value: int, attrs: dict) -> None:
+    llm_call_count.add(value, _with_resource_labels(attrs))
+
+
+def add_token_usage(value: int, attrs: dict) -> None:
+    token_usage.add(value, _with_resource_labels(attrs))
+
+
+def add_tool_call_count(value: int, attrs: dict) -> None:
+    tool_call_count.add(value, _with_resource_labels(attrs))
+
+
+def add_tool_error_count(value: int, attrs: dict) -> None:
+    tool_error_count.add(value, _with_resource_labels(attrs))
+
+
+def add_session_created_count(value: int) -> None:
+    session_created_count.add(value, _with_resource_labels({}))
+
+
+def add_session_state_count(value: int, attrs: dict) -> None:
+    session_state_count.add(value, _with_resource_labels(attrs))
+
+
+def add_session_stuck_count(value: int, attrs: dict) -> None:
+    session_stuck_count.add(value, _with_resource_labels(attrs))
+
+
+def add_queue_enqueued(value: int, attrs: dict) -> None:
+    queue_enqueued.add(value, _with_resource_labels(attrs))
+
+
+def add_queue_dequeued(value: int, attrs: dict) -> None:
+    queue_dequeued.add(value, _with_resource_labels(attrs))
+
+
+def add_message_processed(value: int, attrs: dict) -> None:
+    message_processed.add(value, _with_resource_labels(attrs))
