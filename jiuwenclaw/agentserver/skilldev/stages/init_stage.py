@@ -57,14 +57,18 @@ class InitStageHandler(StageHandler):
             # 适配小艺的文件上传方式
             ref_files_dir.mkdir(parents=True, exist_ok=True)
             if ref_files[0].get("url", ""):
-                for file in ref_files:
-                    file_name = file.get("filename", "")
-                    download_url = file.get("url", "")
-                    _ = await download_file(download_url, str(ref_files_dir / file_name))
-                    if Path(file_name).suffix.lower() in (".zip", ".skill"):
-                        safe_extract_zip(
-                            ref_files_dir / file_name, ref_files_dir, extract_to_stem_dir=False
-                            )   
+                try:
+                    for file in ref_files:
+                        file_name = file.get("filename", "")
+                        download_url = file.get("url", "")
+                        _ = await download_file(download_url, str(ref_files_dir / file_name))
+                        if Path(file_name).suffix.lower() in (".zip", ".skill"):
+                            safe_extract_zip(
+                                ref_files_dir / file_name, ref_files_dir, extract_to_stem_dir=False
+                                ) 
+                except Exception as exc:
+                    logger.warning("[InitStage] 参考文件下载失败: err=%s", exc)
+                    raise
             else:
                 await self._write_resources(ref_files, ref_files_dir, extract_zip_to_subdir=True)
 
@@ -75,13 +79,17 @@ class InitStageHandler(StageHandler):
             ref_skills_dir.mkdir(parents=True, exist_ok=True)
             # 适配小艺
             if skill_packages[0].get("url", ""):
-                for skill_package in skill_packages:
-                    skill_package_name = skill_package.get("filename", "")
-                    download_url = skill_package.get("url", "")
-                    _ = await download_file(download_url, str(ref_skills_dir / skill_package_name))
-                    safe_extract_zip(
-                        ref_skills_dir / skill_package_name, ref_skills_dir, extract_to_stem_dir=False
-                        )
+                try:
+                    for skill_package in skill_packages:
+                        skill_package_name = skill_package.get("filename", "")
+                        download_url = skill_package.get("url", "")
+                        _ = await download_file(download_url, str(ref_skills_dir / skill_package_name))
+                        safe_extract_zip(
+                            ref_skills_dir / skill_package_name, ref_skills_dir, extract_to_stem_dir=False
+                            )
+                except Exception as exc:
+                    logger.warning("[InitStage] 参考 skill 包下载失败: err=%s", exc)
+                    raise
             else:
                 await self._write_resources(
                     skill_packages,

@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import inspect
 import logging
 import secrets
 from datetime import datetime, timezone
@@ -85,9 +86,11 @@ class SkillDevService:
         handler = getattr(self, handler_name)
         result = handler(request.params, request.request_id, request.channel_id, request.session_id)
 
-        if hasattr(result, "__aiter__"):
+        if inspect.isasyncgen(result):
             async for chunk in result:
                 yield chunk
+        elif inspect.isawaitable(result):
+            yield await result
         else:
             yield result
 
@@ -204,8 +207,8 @@ class SkillDevService:
             try:
                 _ = await download_file(download_url, str(download_path))
             except Exception as exc:
-                logger.warning("[SkillDevService] skill 包导入失败: task_id=%s err=%s", task_id, exc)
-                yield self._error_chunk(request_id, channel_id, f"导入失败: {exc}")
+                logger.warning("[SkillDevService] skill 包下载失败: task_id=%s err=%s", task_id, exc)
+                yield self._error_chunk(request_id, channel_id, f"下载失败: {exc}")
                 return
             
         else:
@@ -362,11 +365,12 @@ class SkillDevService:
         zip_path = Path(state.zip_path)
         if not zip_path.exists():
             return self._error_chunk(request_id, channel_id, "产物文件不存在")
-
-        upload_file_obs = UploadFileOSMS()
-        download_url = await upload_file_obs.upload_file(str(zip_path))
-        if not download_url:
-            return self._error_chunk(request_id, channel_id, "上传文件失败")
+        try:
+            upload_file_obs = UploadFileOSMS()
+            download_url = await upload_file_obs.upload_file(str(zip_path))
+        except Exception as exc:
+            logger.warning("[SkillDevService] skill 包上传失败: task_id=%s err=%s", task_id, exc)
+            return self._error_chunk(request_id, channel_id, f"skill 包上传失败: {exc}")
 
         export_id = f"exp_{secrets.token_hex(3)}"
         export_time = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
