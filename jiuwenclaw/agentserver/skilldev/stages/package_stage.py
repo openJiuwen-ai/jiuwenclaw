@@ -43,7 +43,7 @@ class PackageStageHandler(StageHandler):
             SkillDevEventType.PROGRESS, {"message": f"正在打包 {skill_filename}..."}
         )
 
-        self._zip_skill_dir(skill_dir, skill_path)
+        self._zip_skill_dir(skill_dir, skill_path, skill_name)
 
         ctx.state.zip_path = str(skill_path)
         ctx.state.zip_size = skill_path.stat().st_size
@@ -63,15 +63,15 @@ class PackageStageHandler(StageHandler):
         )
         return StageResult(next_stage=SkillDevStage.COMPLETED)
 
-    def _zip_skill_dir(self, skill_dir: Path, zip_path: Path) -> None:
-        """将 skill_dir 打包为 zip，排除无关文件."""
+    def _zip_skill_dir(self, skill_dir: Path, zip_path: Path, root_dir_name: str) -> None:
+        """将 skill_dir 打包为 zip，排除无关文件并添加根目录."""
         with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
             for file_path in skill_dir.rglob("*"):
                 if not file_path.is_file():
                     continue
                 if self._should_exclude(file_path, skill_dir):
                     continue
-                arcname = file_path.relative_to(skill_dir)
+                arcname = Path(root_dir_name) / file_path.relative_to(skill_dir)
                 zf.write(file_path, arcname)
         logger.info(
             "[PackageStage] 打包完成: %s (%d bytes)", zip_path, zip_path.stat().st_size
