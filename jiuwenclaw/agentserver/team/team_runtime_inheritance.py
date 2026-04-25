@@ -199,15 +199,16 @@ def build_member_rails(config: MemberRailConfig) -> list[Any]:
     except Exception as exc:
         logger.warning("[TeamRuntime] SubagentRail failed: %s", exc)
 
-    # Team 成员的技能清单（"skills" section）由 SkillUseRail 注入，与主 agent 一致；
-    # include_tools=False 是因为 read_file/code/bash 等具体工具已由 TOOL_WHITELIST 继承，
-    # 这里 SkillUseRail 只负责 prompt 段，不再重复注册工具。
+    # Team 成员的技能清单（"skills" section）由 SkillUseRail 注入，与主 agent 一致。
+    # include_tools=False：read_file/code/bash 由成员 TOOL_WHITELIST 继承，不在此重复注册。
+    # include_skill_body_tools=True：仍注册 skill_tool/skill_complete，与「技能」段及主站行为一致。
     try:
         skill_dirs = [str(p) for p in get_agent_registered_skill_dirs()]
         rail = SkillUseRail(
             skills_dir=skill_dirs,
             skill_mode=SkillUseRail.SKILL_MODE_ALL,
             include_tools=False,
+            include_skill_body_tools=True,
         )
         rails_list.append(rail)
         logger.info("[TeamRuntime] SkillUseRail created: skills_dir=%s", skill_dirs)

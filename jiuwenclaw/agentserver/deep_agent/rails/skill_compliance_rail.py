@@ -5,8 +5,10 @@
 按 conversation_id 分桶管理 session 状态(多会话并发隔离)。三条钩子:
 - before_invoke: 记录 session_id;连续两次 no-tool 调用后卸载 active skill
 - after_model_call: 扫 LLM 回复识别 [当前步骤: Stage N] 步骤跳跃
-- after_tool_call:  view_file/file_read/*_load_skill 命中 SKILL.md 时激活;
-                    追加 todo 合规提醒;mcp_exec_command 失败时注入恢复指引
+- after_tool_call: 仅当 ``skill_tool`` 成功返回且 ToolMessage 仍带 ``is_skill_body`` 时激活
+  （本 rail 在 SkillUseRail 之前执行，此时正文尚未被 stub），与 SkillUseRail / active_skill_bodies 口径一致；
+  不再根据 view_file / load_skill 等旁路激活，避免与 ``skill_tool`` 双轨混淆。
+  随后追加 todo 合规提醒；mcp_exec_command 失败时注入恢复指引
 
 硬拦截通过把强警示拼到下一轮 tool_msg 上实现(DeepAgent 无 continue 重跑 LLM 的原语)。
 """
@@ -26,7 +28,6 @@ from jiuwenclaw.utils import logger
 
 
 _BASH_BLOCK_RE = re.compile(r'```bash\s*\n(.*?)```', re.DOTALL)
-_SKILL_MD_RE = re.compile(r"[/\\]([^/\\]+)[/\\]SKILL\.md", re.IGNORECASE)
 _STEP_DECL_RE = re.compile(r'\[(?:当前步骤|[Cc]urrent\s*[Ss]tep)[：:]\s*(.+?)\]')
 _STAGE_NUM_RE = re.compile(r'[Ss]tage\s*(\d+)|阶段\s*(\d+)|[Ss]tep\s*(\d+)')
 
@@ -238,41 +239,41 @@ class SkillComplianceRail(DeepAgentRail):
     def _maybe_track_active_skill(
         self, state: _SkillSessionState, tc: Any, tool_msg: Any, session_id: str,
     ) -> None:
+        """Align with SkillUseRail: only ``skill_tool`` + ``is_skill_body`` enters compliance tracking.
+
+        This rail runs before SkillUseRail (lower ``priority``), so the tool result is still
+        the full SKILL body when ``is_skill_body`` is set.
+        """
         tool_name = getattr(tc, "name", "")
         if not tool_name:
             return
 
-        if tool_name in ("view_file", "file_read"):
-            file_path = self._get_arg(tc, "file_path", default="")
-            if not isinstance(file_path, str):
-                file_path = str(file_path)
-            m = _SKILL_MD_RE.search(file_path)
-            if m:
-                self._activate_skill(
-                    state, m.group(1), _str_content(tool_msg), tool_msg, session_id,
+        if tool_name == "skill_complete":
+            skill_name = (self._get_arg(tc, "skill_name", "") or "").strip()
+            if skill_name and state.active_skill == skill_name:
+                logger.info(
+                    "[SkillComplianceRail] compliance track cleared after skill_complete(%s)",
+                    skill_name,
                 )
+                state.reset()
             return
 
-        if tool_name.endswith("load_skill"):
-            import json as _json
-            raw = _str_content(tool_msg)
-            try:
-                try:
-                    payload = _json.loads(raw)
-                except (ValueError, TypeError):
-                    import ast
-                    payload = ast.literal_eval(raw)
-                if isinstance(payload, dict) and isinstance(payload.get("result"), str):
-                    payload = _json.loads(payload["result"])
-                if isinstance(payload, dict):
-                    skill_name = payload.get("name", "")
-                    skill_md = payload.get("skillMarkdown", "")
-                    if skill_name and skill_md:
-                        self._activate_skill(state, skill_name, skill_md, tool_msg, session_id)
-            except Exception as exc:
-                logger.debug(
-                    "[SkillComplianceRail] load_skill payload parse failed: %s", exc,
-                )
+        if tool_name != "skill_tool":
+            return
+
+        meta = getattr(tool_msg, "metadata", None) or {}
+        if not meta.get("is_skill_body"):
+            return
+
+        skill_name = (meta.get("skill_name") or self._get_arg(tc, "skill_name", "") or "").strip()
+        if not skill_name:
+            return
+
+        body = _str_content(tool_msg)
+        if not body.strip():
+            return
+
+        self._activate_skill(state, skill_name, body, tool_msg, session_id)
 
     @staticmethod
     def _get_arg(tc: Any, key: str, default: Any = None) -> Any:

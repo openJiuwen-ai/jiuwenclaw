@@ -2,10 +2,12 @@
 
 """SkillProtocolPromptRail — 注入「技能执行规范」与「用户任务 todo」两段提示词。
 
-技能清单由上游 SkillUseRail 的 ``skills`` section 负责,本 rail 只加 skill 执行规范
-(section ``skill_protocol``)+ 可选的用户 todo section,并把 SkillStepToolkit / TodoToolkit
-随生命周期注册到 agent。``include_user_todo_section=False`` 用于 Team 成员等不持有
-TodoToolkit 的场景,避免提示模型调用不存在的工具。
+技能清单与 ``skill_tool`` / ``skill_complete`` 约定由上游 SkillUseRail 的 ``skills`` 段负责；
+本 rail 的 ``skill_protocol`` 与之对齐（加载 SKILL.md 正文**只能**使用 ``skill_tool``：
+只有它会走 agent 侧 ``active_skill_bodies`` / 消息保护与 pin 注入；
+**禁止**用其它工具冒充等价加载），
+并可选注入用户 todo section，以及随生命周期注册 SkillStepToolkit / TodoToolkit。
+``include_user_todo_section=False`` 用于 Team 成员等不持有 TodoToolkit 的场景。
 """
 
 from __future__ import annotations
@@ -30,8 +32,15 @@ def _build_skill_protocol_section_text(language: str) -> str:
     if language == "cn":
         return """## 技能执行规范（强制）
 
-可用技能清单见本 prompt 的「技能」段（由 SkillUseRail 注入）。选中某个技能后，
-**必须先用 view_file 阅读对应 SKILL.md**，再按其工作流执行；下面的规范约束执行过程。
+可用技能清单与加载/释放约定见本 prompt 的「技能」段（SkillUseRail 注入），**须与该段一致**。
+
+**加载 SKILL.md 正文（禁止用 bash 执行工具名）：**
+- **必须**且**只能**使用 `skill_tool(skill_name=..., relative_file_path="SKILL.md")` 加载；整段技能执行结束且不再需要正文时调用 `skill_complete(skill_name=...)`。不要把这些名字当作 shell 命令。
+- 只有 `skill_tool` 会走系统集成路径（正文入会话、后续上下文中的保护与 [ACTIVE SKILL BODY] 注入），**禁止**用任何其它工具加载或拼凑 SKILL.md。
+- 若你当前可用工具列表中**没有** `skill_tool`：无法按本系统路径加载技能正文，请向用户说明环境未开放该能力；**不得**用其它工具代替。
+- 需要多看或刷新全文时，**只能**再次调用 `skill_tool`。
+
+随后按 SKILL 工作流执行；下列规范约束执行过程。
 
 1. **声明步骤**：每次行动前，必须在回复开头声明当前所在步骤，格式：`[当前步骤: <步骤名称>]`
 2. **创建步骤级 skill_step**：读完 SKILL.md 后，**必须**立即调用 skill_step_create 为文档中定义的每个步骤创建一个 skill_step 项，作为执行路线图。**一旦进入 SKILL 执行语境，对 SKILL 步骤的任何拆解、追踪、完成标记，必须且只能使用 `skill_step_*` 工具，禁止使用 `todo_*` 工具承载 SKILL 步骤** —— `todo_*` 只用于 SKILL 语境以外的独立用户请求
@@ -39,14 +48,22 @@ def _build_skill_protocol_section_text(language: str) -> str:
 4. **原子级拆分**：开始执行某个步骤前，先用 skill_step_insert 将该步骤拆解为原子级子步骤——每个 skill_step 项应对应单一、可独立验证的操作，不可再拆才算合格。如果步骤包含循环（如逐项处理），每轮循环的每个动作都应是独立 skill_step。禁止创建笼统的聚合型 skill_step
 5. **逐项完成**：严格按 skill_step 列表顺序执行，每完成一项立即标记完成。**所有子步骤 skill_step 完成后才能标记该步骤为完成**
 6. **闸门等待**：遇到需要用户确认/审批的步骤时，**必须等待用户回复，禁止自行假设用户同意**
-7. **不确定时重读**：如果不确定当前进度或下一步要求，立即使用 view_file 重新阅读 SKILL.md
+7. **不确定时重读**：只能再次调用 `skill_tool`，**不得**用其它工具获取 SKILL.md
 8. **内容忠实**：SKILL.md 是规格说明，不是参考建议。其中定义的选项列表、参数值、标签文本、推荐标记等必须**原样使用**，禁止自行添加、删除、修改或重新措辞
 9. **错误处理**：执行子步骤出错时，**禁止自行决定跳过该步骤或后续步骤**。必须先尝试修复（如安装缺失依赖、修正参数），修复失败则询问用户如何处理，等待用户指示后再继续
 10. **工具降级**：SKILL.md 中提到的工具如果在当前环境中不存在，必须先告知用户该工具不可用并说明你打算如何替代，获得用户同意后再继续。不要花时间反复检查工具列表
 """
     return """## Skill Execution Protocol (Mandatory)
 
-The list of available skills is provided in the "Skills" section of this prompt (injected by SkillUseRail). Once a skill is selected, **you MUST first read the relevant SKILL.md using view_file** and follow its workflow; the protocol below governs how that execution is carried out.
+The "Skills" section of this prompt (from SkillUseRail) lists available skills and how to load/release them — **follow that section**.
+
+**Load SKILL.md body (never run tool names as shell/bash commands):**
+- You **must** use **only** `skill_tool(skill_name=..., relative_file_path="SKILL.md")` to load the body; when the whole skill flow is done and you no longer need the body, call `skill_complete(skill_name=...)`.
+- Only `skill_tool` enters the integrated path (session body copy, message protection, and `[ACTIVE SKILL BODY]` reinjection). **Do not** load or stitch SKILL.md with any other tool.
+- If `skill_tool` is **not** in your available tool list, you cannot load skill bodies on this integration path—tell the user; **do not** substitute another file-reading tool.
+- To see more or refresh the full SKILL.md, you **may only** call `skill_tool` again.
+
+Then execute the workflow; the rules below govern execution.
 
 1. **Declare step**: Before each action, state your current step at the start of your reply: `[Current Step: <step name>]`
 2. **Create step-level skill_step items**: After reading SKILL.md, you **MUST** immediately call skill_step_create with one skill_step item per step defined in the document as your execution roadmap. **Once in a SKILL execution context, any breakdown, tracking, or completion of SKILL steps MUST use `skill_step_*` tools exclusively. Never use `todo_*` tools to hold SKILL steps** — `todo_*` is only for standalone user requests outside any SKILL context.
@@ -54,7 +71,7 @@ The list of available skills is provided in the "Skills" section of this prompt 
 4. **Atomic breakdown**: Before starting a step, use skill_step_insert to break it into atomic sub-steps — each skill_step should correspond to a single, independently verifiable action that cannot be broken down further. If a step contains a loop (e.g. process items one by one), each action in each iteration must be a separate skill_step. Never create vague, aggregated skill_step items.
 5. **Complete sequentially**: Execute skill_step items in order, marking each done immediately upon completion. **All sub-step skill_step items must be completed before marking the step as done.**
 6. **Gate enforcement**: When a step requires user confirmation/approval, **you MUST wait for the user's response. Never assume approval.**
-7. **Re-read when unsure**: If uncertain about progress or next requirements, immediately re-read SKILL.md using view_file.
+7. **Re-read when unsure**: Refresh the SKILL.md body **only** by calling `skill_tool` again — **never** use any other tool to obtain SKILL.md.
 8. **Content fidelity**: SKILL.md is a specification, not a suggestion. Option lists, parameter values, label text, and recommendation markers defined therein must be used **verbatim** — never add, remove, modify, or rephrase them.
 9. **Error handling**: When a sub-step fails, **never decide on your own to skip it or subsequent steps**. First attempt to fix the issue (e.g. install missing dependencies, correct parameters). If the fix fails, ask the user how to proceed and wait for their instructions.
 10. **Tool fallback**: If a tool mentioned in SKILL.md does not exist in your current environment, you MUST first inform the user that the tool is unavailable and explain how you plan to substitute it. Only proceed after the user agrees. Do not spend time repeatedly checking the tool list.

@@ -172,99 +172,133 @@ react:
   stream_chunk_threshold: 50
   stream_character_threshold: 2000
   context_engine_config:
-    # 默认：预置链 B（SessionMemory + ToolResultBudget / MicroCompact / FullCompact）。
-    # 若要退回预置链 A：设 session_memory: false，并取消注释下方「链 A」四类配置。
-    #
-    # ============ 链 B 参数说明（目标模型 GLM-5.1，上下文窗口 202k）============
-    # 四层互补：SessionMemory 滚动写笔记 → ToolResultBudget 把大工具结果 offload 成占位
-    #         → MicroCompact 折叠同一工具的旧结果 → FullCompact 总窗口级全量压缩。
-    # 阈值需维持序关系：session_memory.trigger_tokens < tool_result_budget.tokens_threshold
-    #                  < full_compact.trigger_total_tokens，确保全量压缩前笔记已落地
-    #                  （FullCompact 依赖 SessionMemory 状态）。
-    #
-    # session_memory.trigger_tokens=10000：首次写笔记阈值。
-    # session_memory.trigger_add_tokens=5000：增量更新节奏，每多 5k token 追写一次。
-    # session_memory.tool_min_=3：两次笔记之间至少间隔 3 次工具调用，避免抖动。
-    #
-    # tool_result_budget.tokens_threshold=50000：工具结果总量超此值才开始 offload。
-    #   源码默认 50000 针对 200k 窗口设计，与 GLM-5.1 202k 匹配。若换 128k 窗口模型，
-    #   建议降到 25000~30000。
-    # tool_result_budget.large_message_threshold=5000：单条工具结果大于此值即
-    #   视为"大消息"，优先 offload。源码默认 10000；5000 更积极一些，能更早释放
-    #   单次 read_file/grep 等中等规模结果，换取 reload 往返成本。
-    #
-    # micro_compact.trigger_threshold=5 + keep_recent_per_tool=10：同一工具被调用
-    #   超过 5+10=15 次后，折叠较旧的，只保留最近 10 条原文。keep=10 是默认 15 与
-    #   激进值 5 之间的折中，兼顾保真和队列长度。
-    #
-    # full_compact.trigger_total_tokens=180000：总窗口超过此值触发全量压缩。
-    #   202k 窗口下预留 ~22k 给 compact 调用自身 + 续写，充分利用窗口。
-    #   若换 128k 窗口模型，必须降到 100000 左右（预留 ~28k）。
-    # ============================================================================
+    # ---------- 关停 / 切链开关 ----------
+    # 整体关闭上下文工程（链 A/B 全部不挂载，仅 default_window_round_num 滑动窗口）：
+    #   enabled: false
+    # 关闭 KV cache 释放（推理后端亲和优化）：
+    #   enable_kv_cache_release: false
+    # 关闭 reload 工具（模型不能再调 reload_original_context_messages 拉回 offload 内容）：
+    #   enable_reload: false
+    # 切回链 A（DialogueCompressor / MessageSummaryOffloader / CurrentRoundCompressor /
+    # RoundLevelCompressor 4 类）—— 显式关 SessionMemory：
+    #   session_memory: false
+    # 关链 B 中的某一层（不切链）：
+    #   ⚠ 链 B 是 preset 注入，yaml 里删 key 或写空 dict 仍按预置默认启用，无法物理移除。
+    #   调测时把阈值调到极大即等价于不触发：
+    #     tool_result_budget.tokens_threshold: 99999999
+    #     micro_compact.trigger_threshold: 99999  + keep_recent_per_tool: 99999
+    #     full_compact.trigger_total_tokens: 99999999
+    #   彻底物理移除某层须改 agent-core 的 _merge_processors 预置或切链 A。
     enable_kv_cache_release: false
     enable_reload: true
-    enabled: true
+    enabled: true                  # 总开关：false = 链 A/B 全关，仅默认窗口生效
+    # 同时刻可 pin 进 LLM 上下文的 active skill 正文条数（默认 1）。>1 时才可在 load 多技能时
+    # 都保留 [ACTIVE SKILL BODY]；为 1 时再 load 会驱逐前一个（trace 里 [ACTIVE SKILL EVICTED]）。
+    # max_active_skill_bodies: 1
+
+    # ============ 一键切链（链 B 默认 / 链 A 备选）============
+    # 当前：链 B = SessionMemory + ToolResultBudget + MicroCompact + FullCompact
+    # 切链 A = MessageSummaryOffloader + DialogueCompressor + CurrentRoundCompressor + RoundLevelCompressor
+    #
+    #   切链 A：把下方 `session_memory: { ... }` dict 整段注释掉，然后取消下一行：
+    # session_memory: false
+    #         ↑ 取消注释这行 + 注释掉下方 dict，即切到链 A
+    #         同时取消文件底部"链 A 备选块"4 个 *_config 的注释（按需调参）。
+    #
+    #   切回链 B：把上面两步反过来即可（恢复 dict + 注释回这行）。
+    #
+    # 顺序约束（小 → 大）：
+    #   session_memory.trigger_tokens
+    #     < tool_result_budget.tokens_threshold (单 round tool 总和)
+    #     < full_compact.trigger_total_tokens   (整窗口总 token)
+    # 数值面向 200k 窗口；128k 模型需整体下调。
+    # ===========================================================
+
     session_memory:
-      trigger_tokens: 10000
-      trigger_add_tokens: 5000
-      tool_min_: 3
+      # 滚动写"会话笔记"到工作区文件（不在 trace 里）；FullCompact 走 session_memory 路径会用。
+      trigger_tokens: 10000        # 首次写笔记：窗口 token ≥ 此值开始写
+      trigger_add_tokens: 5000     # 增量节奏：每多 N token 追写一次（应 ≤ trigger_tokens）
+      tool_min_: 3                 # 两次笔记间至少 N 次工具调用，避免抖动；≥1
+      # update_mode: agent_edit             # agent_edit=ReActAgent 编辑 / direct_replace=整体重写
+      # direct_replace_max_retries: 2       # direct_replace 失败重试次数
+      # model / model_client:               # 写笔记的 LLM；不设则继承默认模型
+
     tool_result_budget_processor_config:
-      tokens_threshold: 50000
-      large_message_threshold: 5000
+      # 单 round 内 ToolMessage 总 token 超阈值，且单条 > large_message_threshold 时，
+      # 把该条替换为 OffloadToolMessage：<persisted-output>...preview...</persisted-output>。
+      tokens_threshold: 50000        # 单 round tool 结果总 token 阈值；200k 窗口下 50000 合适，128k 模型建议 25000~30000
+      large_message_threshold: 5000  # 单条 ToolMessage 算"大"的门槛（候选）；< tokens_threshold；源码默认 10000，5000 更积极
+      # trim_size: 3000                      # offload 后 preview 字符数；应 << 原文长度
+      # tool_name_allowlist: null            # 仅这些工具的结果才考虑 offload；null/空 = 全部允许
+      # offload_message_type: ["tool"]       # 当前仅支持 tool
+      # messages_threshold: null             # 备用消息计数阈值；当前主走 tokens 路径
+      # messages_to_keep: null               # 备用：保留尾部 N 条不动
+
     micro_compact_processor_config:
-      trigger_threshold: 5
-      keep_recent_per_tool: 10
+      # 同一工具调用次数 > trigger_threshold + keep_recent_per_tool 时，
+      # 把"较旧的那 keep_recent_per_tool 条之外"的全部替换为 cleared_marker。
+      trigger_threshold: 5           # 触发额度（在 keep 之上还能堆多少条）
+      keep_recent_per_tool: 10       # 压缩后每工具保留最近 N 条原文；默认 15，10 是中庸值
+      # cleared_marker: "[Old tool result content cleared]"   # 替换后的占位文案
+      # compactable_tool_names: 白名单（精确匹配 ToolMessage.name），不在名单的工具完全忽略。
+      # 原则：✅ 高频且可重放（read_file/grep/web_search）；
+      #      ❌ 有副作用（write_file/edit_file/bash/exec）—— 折叠会丢执行证据。
+      # 源码默认：["grep","glob","read_file","web_search","web_fetch"]；
+      # 本配置加入了 jiuwenclaw 常用的搜索/抓网页 mcp 工具。
+      compactable_tool_names:
+        - grep
+        - glob
+        - read_file
+        - web_search
+        - web_fetch
+        - mcp_free_search
+        - mcp_paid_search
+        - mcp_petal_search
+        - mcp_fetch_webpage
+
     full_compact_processor_config:
-      trigger_total_tokens: 180000
+      # 整窗口 token 超阈值时，调一次 LLM 把历史压成
+      # [FULL_COMPACT_BOUNDARY] + summary，并在尾部 reinject 最近 skill/file/task_status 等关键状态。
+      trigger_total_tokens: 180000   # 整窗口 token 阈值；202k 窗口下预留 ~22k 给压缩调用本身；128k 模型建议 100000
+      # compression_call_max_tokens: 200000   # 压缩调 LLM 时的最大上下文预算
+      # messages_to_keep: 10                  # 保留最近 N 条；buffer < 此值时不会"删历史"，只新增 summary
+      # keep_tool_message_pairs: true         # 保留区里成对的 (tool_call ↔ tool_result) 不被截断
+      # state_snapshot_max_chars: 4000        # state 快照（plan/task/skills）正文最大字符
+      # reinject_recent_skills: 3             # summary 后重注最近 N 个 skill
+      # reinject_file_tool_names:             # 在 summary 末尾重注这些工具的最近调用（默认列表）
+      #   ["read_file","write_file","edit_file","glob","grep"]
+      # reinject_tool_result_hint_names:      # 同上，针对 tool 结果的提示
+      #   ["read_file","write_file","edit_file","glob","grep"]
+      # marker: "[FULL_COMPACT_BOUNDARY]"     # 系统消息分界 marker
+      # state_marker: "[FULL_COMPACT_STATE]"  # state 块 marker
+      # synthetic_user_marker: "[earlier conversation truncated for compaction retry]"
+      # session_memory_enabled: true          # 优先用 session_memory 笔记替换历史；放不下再走 LLM 全量压
+      # session_memory_marker: "[SESSION_MEMORY_BOUNDARY]"
+      # summary_intro / recent_messages_notice / session_memory_intro:   # 文案，一般不改
+      # model / model_client:                 # 全量压缩的 LLM；不设则继承默认模型
+    # ----------------------------------------------------------------------------------
     # ---------- 预置链 A（仅当 session_memory: false 时生效；与链 B 二选一）----------
-    # message_summary_offloader_config:
-    #   messages_threshold: null
-    #   tokens_threshold: 60000
-    #   large_message_threshold: 20000
-    #   offload_message_type: [ "tool" ]
+    # 取消下方注释 + 顶部加 `session_memory: false` 即切回链 A。
+    # 数值参考 develop 分支默认档（200k 窗口）；其余字段均按源码默认。
+    # message_summary_offloader_config:        # offload 大工具结果到摘要
+    #   tokens_threshold: 60000                # 总 token 超过即触发
+    #   large_message_threshold: 20000         # 单条算"大消息"的门槛
     #   protected_tool_names: ["read_file:*SKILL.md", "reload_original_context_messages"]
-    #   messages_to_keep: null
-    #   keep_last_round: false
-    #   customized_summary_prompt: null
-    #   enable_adaptive_compression: true
-    #   summary_max_tokens: 900
-    #   enable_precise_step: false
-    #   step_summary_max_context_messages: 8
-    #   content_max_chars_for_compression: 200000
-    # dialogue_compressor_config:
-    #   messages_threshold: null
+    # dialogue_compressor_config:              # 对话级摘要压缩
     #   tokens_threshold: 100000
-    #   messages_to_keep: 10
-    #   keep_last_round: false
-    #   compression_target_tokens: 1800
-    #   offload_writeback_enabled: false
-    # current_round_compressor_config:
+    #   messages_to_keep: 10                   # 保留最近 N 条
+    #   compression_target_tokens: 1800        # 摘要目标 token
+    # current_round_compressor_config:         # 当前 round 内压缩
     #   tokens_threshold: 100000
     #   messages_to_keep: 6
-    #   min_selected_tokens_for_compression: 20000
     #   compression_target_tokens: 4000
-    #   summary_merge_target_tokens: 4000
-    #   accumulated_summary_token_limit: 20000
-    #   summary_merge_min_blocks: 3
-    #   prior_context_window_size: 10
-    #   offload_writeback_enabled: false
-    # round_level_compressor_config:
-    #   rounds_threshold: 2
-    #   tokens_threshold: 230000
-    #   trigger_total_tokens: 230000
-    #   target_total_tokens: 160000
-    #   compression_call_max_tokens: 250000
-    #   keep_last_round: true
-    #   keep_recent_messages: 6
-    #   messages_to_keep: 6
-    #   first_pass_target_tokens: 30000
-    #   second_pass_target_tokens: 20000
-    #   third_pass_target_tokens: 10000
-    #   truncate_head_ratio: 0.2
-    #   offload_writeback_enabled: false
+    # round_level_compressor_config:           # round 级递归压缩（兜底）
+    #   trigger_total_tokens: 230000           # 触发总 token；> target_total_tokens
+    #   target_total_tokens: 160000            # 压缩后目标总 token
+    #   keep_recent_messages: 6                # 末尾保护区
   # Skills 在线自演进配置
   evolution:
-    enabled: true             # true = 启用在线 Skills 自演进
+    enabled: false             # true = 启用在线 Skills 自演进
     auto_scan: false           # true = 每轮对话后自动扫描（建议先用手动 /evolve）
     skill_base_dir: "agent/skills"  # Skill 根目录
   # LLM 调用重试配置

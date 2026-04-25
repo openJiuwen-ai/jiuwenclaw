@@ -17,6 +17,16 @@ from dataclasses import dataclass
 from typing import Any, AsyncIterator, Callable, List, Tuple
 
 from dotenv import load_dotenv
+try:
+    from openjiuwen.core.context_engine.active_skill_bodies import (
+        DEFAULT_MAX_ACTIVE_SKILL_BODIES,
+    )
+    _UPSTREAM_HAS_ACTIVE_SKILL_BODIES = True
+except ImportError:
+    # Fallback for upstream openjiuwen versions without active_skill_bodies.
+    # Remove once agent-core enterprise-dev includes the module.
+    DEFAULT_MAX_ACTIVE_SKILL_BODIES = 1
+    _UPSTREAM_HAS_ACTIVE_SKILL_BODIES = False
 from openjiuwen.core.context_engine.context.session_memory_manager import SessionMemoryConfig
 from openjiuwen.core.context_engine.schema.config import ContextEngineConfig
 from openjiuwen.core.foundation.llm import ModelRequestConfig, ModelClientConfig, Model
@@ -426,15 +436,29 @@ def _apply_llm_io_trace_patch() -> None:
 def _deep_agent_context_engine_config(react_cfg: dict[str, Any] | None) -> ContextEngineConfig:
     """供 ``create_deep_agent(..., context_engine_config=...)`` 使用（与 agent-core 集成测试方法二一致）。
 
-    仅根据 ``react.context_engine_config.enable_kv_cache_release`` 切换亲和开关；
-    其余字段与 ``ReActAgentConfig`` 默认 ``context_engine_config`` 一致。
+    从 ``react.context_engine_config`` 合并与 ``ContextEngineConfig`` 同名的顶层字段（若 yaml 中出现），
+    例如 ``enable_kv_cache_release``、``enable_reload``、``default_window_round_num`` 等；
+    未出现的键保持 ``ReActAgentConfig`` 内置默认。
     """
+    base = ReActAgentConfig().context_engine_config
     react_cfg = react_cfg or {}
     cec = react_cfg.get("context_engine_config")
-    enable_kv = bool(cec.get("enable_kv_cache_release", False)) if isinstance(cec, dict) else False
-    return ReActAgentConfig().context_engine_config.model_copy(
-        update={"enable_kv_cache_release": enable_kv}
-    )
+    if not isinstance(cec, dict):
+        return base
+    cec_toplevel_keys = [
+        "enable_kv_cache_release",
+        "enable_reload",
+        "max_context_message_num",
+        "default_window_message_num",
+        "default_window_round_num",
+        "active_skill_pin_target",
+    ]
+    if _UPSTREAM_HAS_ACTIVE_SKILL_BODIES:
+        cec_toplevel_keys.append("max_active_skill_bodies")
+    updates = {k: cec[k] for k in cec_toplevel_keys if k in cec}
+    if not updates:
+        return base
+    return base.model_copy(update=updates)
 
 
 # react.context_engine_config 键 -> openjiuwen _merge_processors 注册的处理器类名（预置链 B）
@@ -661,10 +685,19 @@ class JiuWenClawDeepAdapter:
         raw = self._instance_overrides.get("enable_filesystem_rail", True)
         return bool(raw)
 
-    def _skill_include_tools_for_profile(self) -> bool:
+    def _skill_include_harness_fs_tools(self) -> bool:
+        """Register harness read_file/code/bash via SkillUseRail (bundled with skill tools).
+
+        When FileSystemRail is enabled, those file/shell tools live on FileSystemRail instead;
+        use ``_skill_include_skill_body_tools`` so ``skill_tool`` / ``skill_complete`` still register.
+        """
         if self._is_acp_tool_profile(self._instance_overrides):
             return False
-        return self._filesystem_rail is None
+        return not self._filesystem_rail_enabled_for_profile()
+
+    def _skill_include_skill_body_tools(self) -> bool:
+        """Expose ``skill_tool`` / ``skill_complete`` unless the session is an ACP tool profile."""
+        return not self._is_acp_tool_profile(self._instance_overrides)
 
     @staticmethod
     def _resolve_prompt_channel(session_id: str | None = None) -> str:
@@ -1319,16 +1352,35 @@ class JiuWenClawDeepAdapter:
             fs_rail = None
         return fs_rail
 
-    def _build_skill_rail(self, config: dict[str, Any], include_tools: bool = False) -> SkillUseRail | None:
+    def _build_skill_rail(
+        self,
+        config: dict[str, Any],
+        *,
+        include_tools: bool = False,
+        include_skill_body_tools: bool = True,
+    ) -> SkillUseRail | None:
         """Build SkillUseRail."""
         try:
             skill_mode = self._resolve_skill_mode(config)
             logger.info("[JiuWenClawDeepAdapter] current skill_mode: %s", skill_mode)
-            skill_rail = SkillUseRail(
+            # Must match react.context_engine_config.max_active_skill_bodies (ContextEngineConfig);
+            # otherwise SkillUseRail.init overwrites the merged yaml cap with the rail default (1).
+            react_cec = (config.get("react") or {}).get("context_engine_config")
+            max_bodies = DEFAULT_MAX_ACTIVE_SKILL_BODIES
+            if isinstance(react_cec, dict) and react_cec.get("max_active_skill_bodies") is not None:
+                try:
+                    max_bodies = int(react_cec["max_active_skill_bodies"])
+                except (TypeError, ValueError):
+                    max_bodies = DEFAULT_MAX_ACTIVE_SKILL_BODIES
+            skill_rail_kwargs: dict[str, Any] = dict(
                 skills_dir=[str(p) for p in get_agent_registered_skill_dirs()],
                 skill_mode=skill_mode,
                 include_tools=include_tools,
             )
+            if _UPSTREAM_HAS_ACTIVE_SKILL_BODIES:
+                skill_rail_kwargs["include_skill_body_tools"] = include_skill_body_tools
+                skill_rail_kwargs["max_active_skill_bodies"] = max_bodies
+            skill_rail = SkillUseRail(**skill_rail_kwargs)
             logger.info("[JiuWenClawDeepAdapter] SkillUseRail create success")
         except Exception as exc:
             logger.warning("[JiuWenClawDeepAdapter] SkillUseRail create failed: %s", exc)
@@ -1655,7 +1707,11 @@ class JiuWenClawDeepAdapter:
             _RailBuildInfo(
                 "_skill_rail",
                 self._build_skill_rail,
-                {"config": config, "include_tools": self._skill_include_tools_for_profile()},
+                {
+                    "config": config,
+                    "include_tools": self._skill_include_harness_fs_tools(),
+                    "include_skill_body_tools": self._skill_include_skill_body_tools(),
+                },
             ),
         )
 
@@ -1754,7 +1810,8 @@ class JiuWenClawDeepAdapter:
 
         self._skill_rail = self._build_skill_rail(
             config,
-            include_tools=self._skill_include_tools_for_profile(),
+            include_tools=self._skill_include_harness_fs_tools(),
+            include_skill_body_tools=self._skill_include_skill_body_tools(),
         )
 
         if not self._filesystem_rail_enabled_for_profile():
