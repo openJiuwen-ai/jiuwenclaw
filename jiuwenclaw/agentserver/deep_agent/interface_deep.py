@@ -3922,6 +3922,18 @@ class JiuWenClawDeepAdapter:
                         "current_task": "thinking",
                     }
 
+                if chunk_type == "retry_notification":
+                    if isinstance(payload, dict):
+                        output = payload.get("output", {})
+                        content = output.get("output", "") if isinstance(output, dict) else str(output)
+                    else:
+                        content = str(payload)
+                    return {
+                        "event_type": "chat.delta",
+                        "content": content,
+                        "source_chunk_type": chunk_type,
+                    }
+
                 if chunk_type == "todo.updated":
                     todos = (
                         payload.get("todos", [])

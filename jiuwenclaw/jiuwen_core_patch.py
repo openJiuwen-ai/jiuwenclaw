@@ -1,7 +1,12 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 import json
 import os
+import asyncio
+import logging
 from typing import Any, Optional
+from contextvars import ContextVar
+from dataclasses import dataclass
+from typing import Any, Optional, AsyncIterator
 
 from pydantic import Field
 import httpx
@@ -12,8 +17,311 @@ from openjiuwen.core.foundation.llm.schema.config import ModelClientConfig
 from openjiuwen.core.foundation.llm.model_clients.openai_model_client import \
     AssistantMessageChunk, OpenAIModelClient, ToolCall, UsageMetadata
 
+from openjiuwen.core.foundation.llm.model_clients.siliconflow_model_client import (
+    SiliconFlowModelClient,
+)
+from openjiuwen.core.session.stream import OutputSchema
+llm_logger = logging.getLogger("jiuwenclaw.app")
+
+# Session context for retry notifications.
+# Set by react_agent._call_llm_stream before calling llm.stream/invoke.
+_retry_session: ContextVar[Optional[Any]] = ContextVar("retry_session", default=None)
 
 _ORIGINAL_BUILD_REQUEST_PARAMS = None
+
+# ============================================================
+# LLM Retry Mechanism
+# ============================================================
+_orig_invoke = OpenAIModelClient.invoke
+_orig_stream = OpenAIModelClient.stream # SiliconFlow 原始方法引用
+_sf_orig_invoke = SiliconFlowModelClient.invoke
+_sf_orig_stream = SiliconFlowModelClient.stream
+
+
+@dataclass
+class LlmRetryConfig:
+    """LLM 调用重试配置。"""
+    enabled: bool = False
+    max_attempts: int = 3
+    initial_backoff: float = 10.0
+    max_backoff: float = 60.0
+    backoff_factor: float = 2.0
+    retry_on_rate_limit: bool = True
+
+
+class RetryMixin:
+    """LLM 重试逻辑混入基类，供所有 Patch ModelClient 复用。"""
+
+    _RETRYABLE_KEYWORDS = (
+        "connection error", "connecttimeout", "connect error",
+        "network is unreachable", "connection reset", "broken pipe",
+        "connection refused", "readtimeout", "timeout",
+        "operation timed out", "500", "502", "503", "504",
+        "too many requests", "响应超时", "timed out", "timeout",
+        "connection failed", "connection closed unexpectedly", "WebSocket connection closed"
+    )
+
+    _NON_RETRYABLE_KEYWORDS = (
+        "400", "401", "403", "404", "422",
+        "invalid_api_key", "unauthorized", "forbidden", "authentication",
+        "model cannot be none", "invalid request",
+        "ssl", "certificate verify",
+        "model provider is invalid",
+        "model service config error",
+        "model config error",
+        "model invoke parameter error",
+        "model client_config is invalid",
+    )
+
+    @classmethod
+    def _classify_error(cls, exc: Exception, cfg: LlmRetryConfig) -> str:
+        """分类错误原因，返回可读描述。"""
+        error_msg = str(exc).lower()
+
+        if any(kw in error_msg for kw in ("429", "rate_limit", "rate limit")):
+            return "HTTP 429 限流"
+
+        if any(kw in error_msg for kw in ("500",)):
+            return "HTTP 500 服务端错误"
+        if any(kw in error_msg for kw in ("502",)):
+            return "HTTP 502 网关错误"
+        if any(kw in error_msg for kw in ("503",)):
+            return "HTTP 503 服务不可用"
+        if any(kw in error_msg for kw in ("504",)):
+            return "HTTP 504 网关超时"
+
+        if any(kw in error_msg for kw in ("readtimeout", "timeout", "operation timed out")):
+            return "请求超时"
+        # pylint: disable=complicate-comprehension
+        if any(kw in error_msg for kw in ("connection error", "connecttimeout", "connect error",
+                                            "network is unreachable", "connection reset", "broken pipe",
+                                            "connection refused")):  # pylint: disable=complicate-comprehension
+            return "连接错误"
+
+        return "未知错误"
+
+    @staticmethod
+    def _extract_error_details(exc: Exception) -> str:
+        """提取异常中的详细信息：HTTP 状态码、响应体、请求头等。"""
+        parts = []
+
+        # 提取 HTTP 状态码
+        status_code = getattr(exc, "status_code", None)
+        if status_code is None:
+            resp = getattr(exc, "response", None)
+            if resp is not None:
+                status_code = getattr(resp, "status_code", None)
+        if status_code is not None:
+            parts.append(f"status_code={status_code}")
+
+        # 提取异常类型名
+        parts.append(f"type={type(exc).__name__}")
+
+        # 提取响应体/message 字段
+        for attr in ("message", "body", "response_text"):
+            val = getattr(exc, attr, None)
+            if val is not None:
+                parts.append(f"{attr}={val}")
+                break
+
+        # 提取 request.id
+        request_id = getattr(getattr(exc, "request", None), "id", None)
+        if request_id:
+            parts.append(f"request_id={request_id}")
+
+        # 如果有 response 对象，尝试提取更多字段
+        resp = getattr(exc, "response", None)
+        if resp is not None:
+            url = getattr(resp, "url", None)
+            if url:
+                parts.append(f"url={url}")
+            headers = getattr(resp, "headers", None)
+            if headers:
+                x_request_id = headers.get("x-request-id") or headers.get("cf-ray")
+                if x_request_id:
+                    parts.append(f"trace_id={x_request_id}")
+
+        return ", ".join(parts)
+
+    @classmethod
+    def _get_retry_config(cls) -> LlmRetryConfig:
+        """从 config.yaml 读取重试配置，未配置则使用代码默认值。"""
+        try:
+            from jiuwenclaw.config import get_config
+            cfg = get_config()
+            react_cfg = (cfg or {}).get("react", {})
+            retry_cfg = (react_cfg or {}).get("llm_retry", {})
+            if retry_cfg:
+                return LlmRetryConfig(
+                    enabled=retry_cfg.get("enabled", True),
+                    max_attempts=retry_cfg.get("max_attempts", 3),
+                    initial_backoff=retry_cfg.get("initial_backoff", 10.0),
+                    max_backoff=retry_cfg.get("max_backoff", 60.0),
+                    backoff_factor=retry_cfg.get("backoff_factor", 2.0),
+                    retry_on_rate_limit=retry_cfg.get("retry_on_rate_limit", True),
+                )
+        except Exception:
+            llm_logger.warning("Failed to get retry config from config.yaml, use default values.")
+        return LlmRetryConfig()
+
+    def _is_retryable_error(self, exc: Exception, cfg: LlmRetryConfig) -> bool:
+        """判断错误是否可重试。
+
+        两步策略：
+        1. 命中不可重试关键词 → 立即返回 False
+        2. 命中可重试关键词 → 返回 True（429 受 retry_on_rate_limit 控制）
+        3. 兜底返回 False（未知错误不重试）
+        """
+        error_msg = str(exc).lower()
+
+        if any(kw in error_msg for kw in self._NON_RETRYABLE_KEYWORDS):
+            return False
+
+        if any(kw in error_msg for kw in ("429", "rate_limit", "rate limit")):
+            return cfg.retry_on_rate_limit
+
+        if any(kw in error_msg for kw in self._RETRYABLE_KEYWORDS):
+            return True
+
+        return False
+
+    def _calculate_backoff(self, attempt: int, exc: Exception,
+                        cfg: LlmRetryConfig) -> float:
+        """指数退避 + Retry-After 头（取 max，避免等待过短）。"""
+        backoff = min(cfg.initial_backoff * (cfg.backoff_factor ** attempt), cfg.max_backoff)
+        retry_after = self._extract_retry_after(exc)
+        if retry_after is not None:
+            backoff = max(backoff, retry_after)
+        return backoff
+
+    async def _notify_retry_start(self, reason: str, attempt: int, max_attempts: int, backoff: float) -> None:
+        """向前端发送重试开始通知。"""
+        session = _retry_session.get()
+        if session is None:
+            llm_logger.debug("[notify] _notify_retry_start: session is None, skip notification")
+            return
+        try:
+            await session.write_stream(
+                OutputSchema(
+                    type="retry_notification",
+                    index=999,
+                    payload={
+                        "output": {
+                            "output": f"\n\n⚠️ 模型调用异常 [{reason}], "
+                                    f"将在 {backoff:.1f} 秒后进行第 {attempt}/{max_attempts} 次重试...",
+                            "result_type": "text",
+                        },
+                    },
+                )
+            )
+            llm_logger.info(f"retry notification sent successfully, ({attempt}/{max_attempts}), "
+                            f"session_id={getattr(session, 'get_session_id', lambda: 'N/A')()}")
+        except Exception as e:
+            llm_logger.error(f"[notify] _notify_retry_start 发送失败: {type(e).__name__}: {e}")
+
+    async def _notify_retry_end(self) -> None:
+        """清除前端重试提示。"""
+        session = _retry_session.get()
+        if session is None:
+            return
+        try:
+            await session.write_stream(
+                OutputSchema(
+                    type="processing_complete",
+                    index=999,
+                    payload={},
+                )
+            )
+        except Exception as e:
+            llm_logger.error(f"[notify] _notify_retry_end 发送失败: {type(e).__name__}: {e}")
+
+    @staticmethod
+    def _extract_retry_after(exc: Exception) -> float | None:
+        """从 429 响应的 Retry-After 头读取等待时间。"""
+        if hasattr(exc, "response") and exc.response is not None:
+            retry_after = exc.response.headers.get("Retry-After")
+            if retry_after is not None:
+                try:
+                    return float(retry_after)
+                except (ValueError, TypeError):
+                    pass
+        return None
+
+    async def _invoke_with_retry(self, invoke_func, *args, **kwargs):
+        """带重试的 invoke 包装器。
+        max_attempts 表示纯重试次数，不包含首次正常调用。
+        """
+        cfg = self._get_retry_config()
+        if not cfg.enabled:
+            llm_logger.info("LLM invoke 未启用重试，直接返回结果")
+            return await invoke_func(*args, **kwargs)
+
+        last_error = None
+        for attempt in range(cfg.max_attempts + 1):
+            try:
+                return await invoke_func(*args, **kwargs)
+            except Exception as e:
+                last_error = e
+                if not self._is_retryable_error(e, cfg):
+                    reason = self._classify_error(e, cfg)
+                    details = self._extract_error_details(e)
+                    llm_logger.info(f"LLM invoke 不可重试 [{reason}] [{details}], details: {e}")
+                    raise
+                reason = self._classify_error(e, cfg)
+                details = self._extract_error_details(e)
+                backoff = self._calculate_backoff(attempt, e, cfg)
+                if attempt >= cfg.max_attempts:
+                    break
+                llm_logger.warning(f"LLM invoke 失败 [{reason}] [{details}]，将在 {backoff:.1f}s 后重试, "
+                    f"(第 {attempt + 1} 次重试 / 共 {cfg.max_attempts} 次): {e}")
+                await self._notify_retry_start(reason, attempt + 1, cfg.max_attempts, backoff)
+                await asyncio.sleep(backoff)
+
+        reason = self._classify_error(last_error, cfg)
+        details = self._extract_error_details(last_error)
+        llm_logger.error(f"LLM invoke 重试次数耗尽 [{reason}] [{details}]，已执行 {cfg.max_attempts} 次重试）: {last_error}")
+        await self._notify_retry_end()
+        raise last_error
+
+    async def _stream_with_retry(self, stream_func, *args, **kwargs):
+        """带重试的 stream 包装器。
+        max_attempts 表示纯重试次数，不包含首次正常调用。。
+        """
+        cfg = self._get_retry_config()
+        if not cfg.enabled:
+            llm_logger.info("LLM stream 未启用重试机制")
+            async for chunk in stream_func(*args, **kwargs):
+                yield chunk
+            return
+
+        last_error = None
+        for attempt in range(cfg.max_attempts + 1):
+            try:
+                async for chunk in stream_func(*args, **kwargs):
+                    yield chunk
+                return  # 流式成功完成
+            except Exception as e:
+                last_error = e
+                if not self._is_retryable_error(e, cfg):
+                    reason = self._classify_error(e, cfg)
+                    details = self._extract_error_details(e)
+                    llm_logger.info(f"LLM stream 不可重试 [{reason}] [{details}], details: {e}")
+                    raise
+                reason = self._classify_error(e, cfg)
+                details = self._extract_error_details(e)
+                backoff = self._calculate_backoff(attempt, e, cfg)
+                if attempt >= cfg.max_attempts:
+                    break
+                llm_logger.warning(f"LLM stream 失败 [{reason}] [{details}]，将在 {backoff:.1f}s 后重试 "
+                    f"(第 {attempt + 1} 次重试 / 共 {cfg.max_attempts} 次): {e}")
+                await self._notify_retry_start(reason, attempt + 1, cfg.max_attempts, backoff)
+                await asyncio.sleep(backoff)
+
+        reason = self._classify_error(last_error, cfg)
+        details = self._extract_error_details(last_error)
+        llm_logger.error(f"LLM stream 重试次数耗尽 [{reason}] [{details}]，已尝试{cfg.max_attempts} 次重试）: {last_error}")
+        await self._notify_retry_end()
+        raise last_error
 
 
 def _patched_build_request_params(self, *, stream: bool, **kwargs) -> dict:
@@ -35,7 +343,7 @@ def _patched_build_request_params(self, *, stream: bool, **kwargs) -> dict:
     return params
 
 
-class PatchOpenAIModelClient(OpenAIModelClient):
+class PatchOpenAIModelClient(RetryMixin, OpenAIModelClient):
 
     def _create_async_openai_client(self, timeout: Optional[float] = None) -> "openai.AsyncOpenAI":
         """
@@ -57,10 +365,11 @@ class PatchOpenAIModelClient(OpenAIModelClient):
         # Use method-level timeout if provided, otherwise use config timeout
         final_timeout = timeout if timeout is not None else self.model_client_config.timeout
         llm_logger.info(
-            "Before create openai client, model client config params ready.",
-            event_type=LogEventType.LLM_CALL_START,
-            timeout=final_timeout,
-            max_retries=self.model_client_config.max_retries
+            "Before create openai client, model client config params ready. "
+            "event_type=%s, timeout=%s, max_retries=%s",
+            LogEventType.LLM_CALL_START,
+            final_timeout,
+            self.model_client_config.max_retries
         )
         default_headers = os.getenv("default_headers", None)
         try:
@@ -228,6 +537,169 @@ class PatchOpenAIModelClient(OpenAIModelClient):
             usage_metadata=usage_metadata,
             finish_reason=choice.finish_reason or "null"
         )
+    
+    async def invoke(
+        self,
+        messages,
+        *,
+        tools=None,
+        temperature=None,
+        top_p=None,
+        model=None,
+        max_tokens=None,
+        stop=None,
+        output_parser=None,
+        timeout=None,
+        **kwargs,
+    ):
+        return await self._invoke_with_retry(
+            _orig_invoke,
+            self,
+            messages,
+            tools=tools,
+            temperature=temperature,
+            top_p=top_p,
+            model=model,
+            max_tokens=max_tokens,
+            stop=stop,
+            output_parser=output_parser,
+            timeout=timeout,
+            **kwargs,
+        )
+
+    async def stream(
+        self,
+        messages,
+        *,
+        tools=None,
+        temperature=None,
+        top_p=None,
+        model=None,
+        max_tokens=None,
+        stop=None,
+        output_parser=None,
+        timeout=None,
+        **kwargs,
+    ):
+        async for chunk in self._stream_with_retry(
+            _orig_stream,
+            self,
+            messages,
+            tools=tools,
+            temperature=temperature,
+            top_p=top_p,
+            model=model,
+            max_tokens=max_tokens,
+            stop=stop,
+            output_parser=output_parser,
+            timeout=timeout,
+            **kwargs,
+        ):
+            yield chunk
+
+
+class PatchSiliconFlowModelClient(RetryMixin, SiliconFlowModelClient):
+    """带重试的 SiliconFlowModelClient。结构同 OpenAI，包装原始方法即可。"""
+
+    async def invoke(
+        self,
+        messages,
+        *,
+        tools=None,
+        temperature=None,
+        top_p=None,
+        model=None,
+        max_tokens=None,
+        stop=None,
+        output_parser=None,
+        timeout=None,
+        **kwargs,
+    ):
+        return await self._invoke_with_retry(
+            _sf_orig_invoke,
+            self,
+            messages,
+            tools=tools,
+            temperature=temperature,
+            top_p=top_p,
+            model=model,
+            max_tokens=max_tokens,
+            stop=stop,
+            output_parser=output_parser,
+            timeout=timeout,
+            **kwargs,
+        )
+
+    async def stream(
+        self,
+        messages,
+        *,
+        tools=None,
+        temperature=None,
+        top_p=None,
+        model=None,
+        max_tokens=None,
+        stop=None,
+        output_parser=None,
+        timeout=None,
+        **kwargs,
+    ):
+        async for chunk in self._stream_with_retry(
+            _sf_orig_stream,
+            self,
+            messages,
+            tools=tools,
+            temperature=temperature,
+            top_p=top_p,
+            model=model,
+            max_tokens=max_tokens,
+            stop=stop,
+            output_parser=output_parser,
+            timeout=timeout,
+            **kwargs,
+        ):
+            yield chunk
+
+
+def _patch_railed_model_call_session() -> None:
+    """Monkey-patch ReActAgent._railed_model_call to set _retry_session ContextVar
+    around llm.invoke/stream calls so RetryMixin._notify_retry_start can reach the frontend."""
+    from openjiuwen.core.single_agent.agents.react_agent import ReActAgent
+
+    _orig_railed_model_call = ReActAgent._railed_model_call  # pylint: disable=protected-access
+
+    async def _patched_railed_model_call(self, ctx):
+        session = ctx.session
+        token = _retry_session.set(session)
+        try:
+            return await _orig_railed_model_call(self, ctx)
+        finally:
+            _retry_session.reset(token)
+
+    ReActAgent._railed_model_call = _patched_railed_model_call  # pylint: disable=protected-access
+
+
+def apply_siliconflow_model_client_patch() -> None:
+    """Inject retry into SiliconFlowModelClient."""
+    _impl = PatchSiliconFlowModelClient.__dict__
+    SiliconFlowModelClient.invoke = _impl["invoke"]
+    SiliconFlowModelClient.stream = _impl["stream"]
+
+    _instance_attrs = (
+        '_stream_with_retry', '_invoke_with_retry',
+        '_classify_error', '_is_retryable_error', '_calculate_backoff',
+        '_notify_retry_start', '_notify_retry_end', '_get_retry_config',
+    )
+    _class_attrs = ('_NON_RETRYABLE_KEYWORDS', '_RETRYABLE_KEYWORDS')
+    _static_attrs = ('_extract_error_details', '_extract_retry_after')
+
+    for _attr in _static_attrs:
+        if hasattr(RetryMixin, _attr):
+            setattr(SiliconFlowModelClient, _attr, staticmethod(getattr(RetryMixin, _attr)))
+
+    for _attr in _instance_attrs + _class_attrs:
+        if hasattr(RetryMixin, _attr):
+            setattr(SiliconFlowModelClient, _attr, getattr(RetryMixin, _attr))
 
 
 def apply_openai_model_client_patch() -> None:
@@ -240,3 +712,22 @@ def apply_openai_model_client_patch() -> None:
     setattr(OpenAIModelClient, "_create_async_openai_client", _impl["_create_async_openai_client"])
     setattr(OpenAIModelClient, "_parse_stream_chunk", _impl["_parse_stream_chunk"])
     setattr(OpenAIModelClient, "_build_request_params", _patched_build_request_params)
+
+    OpenAIModelClient.invoke = PatchOpenAIModelClient.invoke
+    OpenAIModelClient.stream = PatchOpenAIModelClient.stream
+    _patch_railed_model_call_session()
+    _static_attrs = ('_extract_error_details', '_extract_retry_after', '_raise_mock_error')
+    _instance_attrs = (
+        '_stream_with_retry', '_invoke_with_retry',
+        '_classify_error', '_is_retryable_error', '_calculate_backoff',
+        '_notify_retry_start', '_notify_retry_end', '_get_retry_config',
+    )
+    _class_attrs = ('_NON_RETRYABLE_KEYWORDS', '_RETRYABLE_KEYWORDS')
+
+    for _attr in _static_attrs:
+        if hasattr(RetryMixin, _attr):
+            setattr(OpenAIModelClient, _attr, staticmethod(getattr(RetryMixin, _attr)))
+
+    for _attr in _instance_attrs + _class_attrs:
+        if hasattr(RetryMixin, _attr):
+            setattr(OpenAIModelClient, _attr, getattr(RetryMixin, _attr))

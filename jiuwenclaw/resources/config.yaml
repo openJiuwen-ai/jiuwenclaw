@@ -197,6 +197,14 @@ react:
     enabled: true             # true = 启用在线 Skills 自演进
     auto_scan: false           # true = 每轮对话后自动扫描（建议先用手动 /evolve）
     skill_base_dir: "agent/skills"  # Skill 根目录
+  # LLM 调用重试配置
+  llm_retry:
+    enabled: true              # 重试开关
+    max_attempts: 3            # 最大尝试次数（含首次）
+    initial_backoff: 10.0      # 初始等待时间（秒）
+    max_backoff: 60.0          # 最大等待时间（秒）
+    backoff_factor: 2.0        # 等待倍率
+    retry_on_rate_limit: true  # 是否重试 429 限流
 
 tools:
   - todo
