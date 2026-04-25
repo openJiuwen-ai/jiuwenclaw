@@ -111,7 +111,7 @@ class RuntimePromptRail(DeepAgentRail):
                 workspace_root = base_workspace / "jiuwenclaw_workspace"
                 return {
                     "config": str(base_workspace / "config"),
-                    "workspace": str(workspace_root),
+                    "workspace": self._workspace_dir or str(workspace_root), # 优先使用请求中的 workspace_dir
                     "memory": str(workspace_root / "memory"),
                     "skills": ", ".join(str(d) for d in get_shared_agent_skills_dirs())
                     if get_shared_agent_skills_dirs() else str(workspace_root / "skills"),
