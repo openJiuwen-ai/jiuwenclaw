@@ -19,6 +19,15 @@ from .config import (
     DEFAULT_WORKSPACE_DIR,
 )
 from .embeddings import EmbeddingProvider, create_embedding_provider
+from .external_memory_config import (
+    get_external_memory_config,
+    is_external_memory_enabled,
+    build_openjiuwen_provider_config,
+    get_memory_engine,
+    is_builtin_memory_allowed,
+    is_external_memory_allowed,
+)
+from .external_memory_builder import build_external_memory_rail
 from .internal import (
     estimate_tokens,
     ensure_dir,
@@ -59,4 +68,11 @@ __all__ = [
     "get_embed_config",
     "DEFAULT_WORKSPACE_DIR",
     "estimate_tokens",
+    "get_external_memory_config",
+    "is_external_memory_enabled",
+    "build_openjiuwen_provider_config",
+    "build_external_memory_rail",
+    "get_memory_engine",
+    "is_builtin_memory_allowed",
+    "is_external_memory_allowed",
 ]

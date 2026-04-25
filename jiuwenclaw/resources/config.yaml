@@ -14,13 +14,83 @@ logging:
   full: INFO
 
 memory:
-  mode: ${MEMORY_MODE:-local}
+  # ============================================================
+  # 记忆系统配置
+  # ============================================================
+  # 两个正交开关：
+  #   1) engine — 挂载哪套 rail（内置 / 外接 / 都挂 / 都不挂）
+  #   2) mode   — 内置记忆的存储位置（local | cloud），不影响外接
+  #
+  # 外接 rail 的启用 = (engine ∈ {external, both}) AND (external.provider 非空)
+  # 内置 rail 的启用 = (engine ∈ {builtin, both})  AND (mode=local)
+  #                    AND modes.agent.<当前 mode>.memory.enabled=true
+  # ============================================================
+
+  mode: ${MEMORY_MODE:-local}            # 内置记忆存储位置：local | cloud
+  # 记忆引擎总开关：builtin | external | both | none
+  #   builtin  — 仅内置记忆（默认，兼容旧配置）
+  #   external — 仅外接记忆（LTM / 插件）
+  #   both     — 内置 + 外接并存
+  #   none     — 全部关闭
+  engine: ${MEMORY_ENGINE:-external}
   forbidden_memory_definition:
     enabled: false
     patterns: []
     description:
       zh: "以下内容禁止记忆：密码、API密钥、Secret、Token、信用卡号、身份证号、手机号等敏感信息"
       en: "The following content is forbidden to remember: passwords, API keys, secrets, tokens, credit card numbers, ID numbers, phone numbers and other sensitive information"
+
+  # ------------------------------------------------------------
+  # 外接记忆（External Memory）
+  # ------------------------------------------------------------
+  # 启用方式（任选一种）：
+  #
+  # 【方案 1：YAML 直接改】
+  #   memory.engine: external   # 或 both
+  #   memory.external.provider: openjiuwen   # 选一个：openjiuwen | <plugin-name>
+  #   # 然后在下方对应的 openjiuwen 子段填 api_key
+  #
+  # 【方案 2：环境变量覆盖】
+  #   export MEMORY_ENGINE=external
+  #   export MEMORY_EXTERNAL_PROVIDER=openjiuwen
+  #
+  # 【关闭外接记忆】
+  #   把 memory.engine 改回 builtin 或 none；
+  #   或把 memory.external.provider 留空（两者任一生效即可禁用）
+  #
+  # 【挂载模式常见组合】
+  #   ┌─────────────┬───────────────┬──────────────────────────────────────┐
+  #   │ engine      │ provider      │ 效果                                 │
+  #   ├─────────────┼───────────────┼──────────────────────────────────────┤
+  #   │ builtin     │ *             │ 只挂内置（默认；外接即使填了也不挂）    │
+  #   │ external    │ openjiuwen    │ 只挂外接 LTM                         │
+  #   │ external    │ <plugin-name> │ 只挂用户安装的插件                    │
+  #   │ both        │ 任一          │ 内置 + 外接同时挂（LLM 两套工具并列）   │
+  #   │ none        │ *             │ 全关，任何记忆 rail 都不挂             │
+  #   └─────────────┴───────────────┴──────────────────────────────────────┘
+  #
+  # 说明：
+  # - 外接记忆 mode-independent：配置一次，plan / fast 模式全程生效，
+  #   跨 config 热重载持久存活（保留 prefetch 缓存、电路断路器、会话状态）
+  # - 单 provider 策略：同一时刻 provider 只能选一个
+  # - 失败降级：provider 构建失败或网络异常不阻塞主流程
+  external:
+    # 选哪家 provider。空字符串 = 禁用外接（等价于 engine=builtin）
+    provider: ${MEMORY_EXTERNAL_PROVIDER:-openjiuwen}   # '' | openjiuwen| <plugin-name>
+    # 数据隔离标识（所有 provider 共用）
+    user_id: ${MEMORY_USER_ID:-__default__}
+    scope_id: ${MEMORY_SCOPE_ID:-__default__}
+
+    # -- OpenJiuwen LTM（本地长期记忆：KV + 向量 + DB）--
+    # 生效条件：provider='openjiuwen'
+    # 依赖顶层 embed 段提供 embedding 配置（不单独配置 api_key）
+    openjiuwen:
+      kv_type: shelve                                    # shelve | in_memory | sqlite
+      kv_path: ${MEMORY_KV_PATH:-}                       # 默认 ~/.jiuwenclaw/memory/ltm/kv
+      vector_type: chroma                                # chroma
+      vector_persist_dir: ${MEMORY_VECTOR_DIR:-}         # 默认 ~/.jiuwenclaw/memory/ltm/chroma
+      db_type: sqlite
+      db_path: ${MEMORY_DB_PATH:-}                       # 默认 ~/.jiuwenclaw/memory/ltm/ltm.db
 
 models:
   default:
@@ -417,6 +487,14 @@ permissions:
     coding_memory_write: allow
     coding_memory_edit: allow
     coding_memory_read: allow
+    # 外接记忆工具（External Memory — OpenJiuwen）
+    ltm_search: allow
+    ltm_search_summary: allow
+    viking_search: allow
+    viking_read: allow
+    viking_browse: allow
+    viking_remember: allow
+    viking_add_resource: allow
     mcp_free_search: allow
     mcp_paid_search: allow
     mcp_petal_search: allow

@@ -124,6 +124,7 @@ from jiuwenclaw.agentserver.tools.deepresearch_tools import (
 )
 from jiuwenclaw.agentserver.tools.petal_search_tools import enable_petal_search, mcp_petal_search
 from jiuwenclaw.agentserver.tools.multi_session_toolkits import MultiSessionToolkit
+from jiuwenclaw.agentserver.memory.external_memory_config import is_builtin_memory_allowed
 from jiuwenclaw.agentserver.tools.xiaoyi_phone_tools import (
     get_user_location,
     create_note,
@@ -606,6 +607,8 @@ class JiuWenClawDeepAdapter:
         self._skill_compliance_rail: SkillComplianceRail | None = None
         self._security_rail: SecurityRail | None = None
         self._memory_rail: MemoryRail | None = None
+        self._external_memory_rail: Any = None
+        self._external_memory_rail_registered: bool = False
         self._lsp_rail: LspRail | None = None
         self._heartbeat_rail: HeartbeatRail | None = None
         self._skill_evolution_rail: SkillEvolutionRail | None = None
@@ -2243,6 +2246,8 @@ class JiuWenClawDeepAdapter:
                 self._instance.ability_manager.remove(existing.name)
         # plan 模式，根据config选择是否注册或者卸载memory rail
         await self._handle_memory_rail_by_config("plan")
+        # 外接记忆 rail（mode-independent，注册一次，跨 reload 持久）
+        await self._handle_external_memory_rail_by_config()
         # 恢复上下文 rail（仅配置启用时）
         if self._config_cache.get("context_engine_config", {}).get("enabled", False):
             if self._context_engineering_rail is not None and self._context_engineering_rail_mode != "agent.plan":
@@ -2311,6 +2316,8 @@ class JiuWenClawDeepAdapter:
                 logger.info("[JiuWenClawDeepAdapter] %s unregistered for agent mode", label)
         # agent 模式，根据config选择是否注册或者卸载memory rail
         await self._handle_memory_rail_by_config("fast")
+        # 外接记忆 rail（mode-independent，注册一次，跨 reload 持久）
+        await self._handle_external_memory_rail_by_config()
         # agent/智能模式：恢复上下文 rail（仅配置启用时）
         if self._config_cache.get("context_engine_config", {}).get("enabled", False):
             if self._context_engineering_rail is not None and self._context_engineering_rail_mode == "agent.plan":
@@ -2603,14 +2610,19 @@ class JiuWenClawDeepAdapter:
                         pass
             # 非群聊数字分身且记忆启用时，恢复写入工具
             else:
-                try:
-                    from openjiuwen.core.memory.lite.memory_tools import get_decorated_tools as _get_sdk_memory_tools
-                    for tool in _get_sdk_memory_tools():
-                        name = getattr(getattr(tool, "card", None), "name", "")
-                        if name in ("write_memory", "edit_memory"):
-                            self._instance.ability_manager.add(tool.card)
-                except ImportError:
-                    pass
+                if is_builtin_memory_allowed(get_config()):
+                    try:
+                        from openjiuwen.core.memory.lite.memory_tools import (
+                            get_decorated_tools as _get_sdk_memory_tools,
+                        )
+                        for tool in _get_sdk_memory_tools():
+                            name = getattr(getattr(tool, "card", None), "name", "")
+                            if name in ("write_memory", "edit_memory"):
+                                self._instance.ability_manager.add(tool.card)
+                    except ImportError:
+                        logger.warning(
+                            "[JiuWenClawDeepAdapter] 恢复写入记忆工具失败，SDK memory_tools 不可用"
+                        )
 
     @staticmethod
     def _should_register_acp_runtime_tools(
@@ -4113,7 +4125,9 @@ class JiuWenClawDeepAdapter:
     async def _handle_memory_rail_by_config(self, mode: str):
         config = get_config()
         if get_memory_mode(config) == "local":
-            if is_memory_enabled(mode, config):
+            # 引擎门禁：memory.engine 未放行内置时，等同于禁用
+            builtin_on = is_builtin_memory_allowed(config) and is_memory_enabled(mode, config)
+            if builtin_on:
                 # 开启记忆
                 if self._memory_rail is not None:
                     cur_memory_type = is_proactive_memory(mode, config)
@@ -4129,10 +4143,70 @@ class JiuWenClawDeepAdapter:
                 if self._memory_rail is not None:
                     await self._instance.register_rail(self._memory_rail)
                     logger.info(f"[JiuWenClawDeepAdapter] MemoryRail registered for {mode} mode")
-            elif not is_memory_enabled(mode, config) and self._memory_rail is not None:
+            elif not builtin_on and self._memory_rail is not None:
                 await self._instance.unregister_rail(self._memory_rail)
                 self._memory_rail = None
                 logger.info(f"[JiuWenClawDeepAdapter] MemoryRail unregistered for {mode} mode")
+
+    def _build_external_memory_rail(self):
+        from jiuwenclaw.agentserver.memory.external_memory_builder import (
+            build_external_memory_rail,
+        )
+        return build_external_memory_rail(
+            config=get_config(),
+            workspace_dir=self._workspace_dir,
+        )
+
+    async def _handle_external_memory_rail_by_config(self):
+        """Register / unregister ExternalMemoryRail based on config.
+
+        External memory is mode-independent — configured once and active for
+        both plan and fast modes. `_external_memory_rail_registered` dedups
+        calls from both _update_plan_mode_rails() and _update_agent_mode_rails().
+        Not part of `_get_current_agent_rails()`, so it is not torn down on
+        config hot-reload (preserves prefetch cache + circuit breaker state).
+        """
+        from jiuwenclaw.agentserver.memory.external_memory_config import (
+            is_external_memory_enabled,
+        )
+        config = get_config()
+        if is_external_memory_enabled(config):
+            if self._external_memory_rail_registered:
+                return
+            if self._external_memory_rail is None:
+                self._external_memory_rail = self._build_external_memory_rail()
+            if self._external_memory_rail is None:
+                return
+            try:
+                await self._instance.register_rail(self._external_memory_rail)
+                self._external_memory_rail_registered = True
+                logger.info("[JiuWenClawDeepAdapter] ExternalMemoryRail registered")
+            except Exception as exc:
+                logger.error(
+                    "[JiuWenClawDeepAdapter] ExternalMemoryRail register failed: %s", exc
+                )
+                self._external_memory_rail = None
+        elif self._external_memory_rail is not None and self._external_memory_rail_registered:
+            # Call on_session_end BEFORE unregister_rail: unregister -> uninit()
+            # is sync, and run_coroutine_threadsafe from the same event loop
+            # thread would deadlock.
+            provider = getattr(self._external_memory_rail, "_provider", None)
+            if provider is not None and hasattr(provider, "on_session_end"):
+                try:
+                    await provider.on_session_end()
+                except Exception as exc:
+                    logger.debug(
+                        "[JiuWenClawDeepAdapter] on_session_end failed: %s", exc
+                    )
+            try:
+                await self._instance.unregister_rail(self._external_memory_rail)
+                logger.info("[JiuWenClawDeepAdapter] ExternalMemoryRail unregistered")
+            except Exception as exc:
+                logger.warning(
+                    "[JiuWenClawDeepAdapter] ExternalMemoryRail unregister failed: %s", exc
+                )
+            self._external_memory_rail = None
+            self._external_memory_rail_registered = False
 
     def is_working(self, session_tasks: dict[str, asyncio.Task], session_queues: dict[str, asyncio.PriorityQueue]):
         """返回 Agent 是否正在工作的状态.

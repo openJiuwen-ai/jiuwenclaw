@@ -189,30 +189,61 @@ def create_memory_settings(
     return settings
 
 
+def _resolve_mode_memory(mode: str, config: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    """Locate the `memory:` block under modes for a given mode token.
+
+    Accepts several mode formats used across the codebase:
+      - "agent.plan" / "agent.fast"  -> modes.agent.plan / modes.agent.fast
+      - "plan" / "fast"              -> modes.agent.plan / modes.agent.fast
+      - "code"                       -> modes.code
+    Returns {} when no block is found (callers treat missing as disabled).
+    """
+    modes_cfg = (config or {}).get("modes", {}) if isinstance(config, dict) else {}
+    if not isinstance(modes_cfg, dict):
+        return {}
+
+    token = (mode or "").strip()
+    if "." in token:
+        top, sub = token.split(".", 1)
+        node = modes_cfg.get(top, {})
+        if isinstance(node, dict):
+            node = node.get(sub, {})
+    elif token == "code":
+        node = modes_cfg.get("code", {})
+    else:
+        agent_node = modes_cfg.get("agent", {}) if isinstance(modes_cfg.get("agent"), dict) else {}
+        node = agent_node.get(token, {})
+
+    if not isinstance(node, dict):
+        return {}
+    mem = node.get("memory", {})
+    return mem if isinstance(mem, dict) else {}
+
+
 def is_memory_enabled(mode: str, config: Optional[Dict[str, Any]] = None) -> bool:
-    """Check if memory is enabled.
+    """Check if built-in memory is enabled for the given mode.
+
+    Reads `modes.agent.<plan|fast>.memory.enabled` (or `modes.code.memory.enabled`).
 
     Args:
         config: Optional config dict. If provided, reads from it directly
                 (avoids stale cache). Otherwise reads from config.yaml.
     """
     try:
-        memory_config = (config or {}).get("modes", {}).get("agent", {}).get(mode, {}).get("memory", {})
-        return memory_config.get("enabled", False)
+        return bool(_resolve_mode_memory(mode, config).get("enabled", False))
     except Exception as e:
         logger.warning(f"Invalid memory config, disable memory, error: {e}")
         return False
 
 
 def is_proactive_memory(mode: str, config: Optional[Dict[str, Any]] = None) -> bool:
-    """Check if proactive memory is enabled.
+    """Check if proactive memory is enabled for the given mode.
 
-    When True (default): agent auto-records everything and searches before every response.
-    When False: agent only records/searches when user explicitly asks.
+    When True: agent auto-records everything and searches before every response.
+    When False (default): agent only records/searches when user explicitly asks.
     """
     try:
-        memory_config = (config or {}).get("modes", {}).get("agent", {}).get(mode, {}).get("memory", {})
-        return memory_config.get("is_proactive", False)
+        return bool(_resolve_mode_memory(mode, config).get("is_proactive", False))
     except Exception as e:
         logger.warning(f"Invalid memory config, disable proactive memory, error: {e}")
         return False
