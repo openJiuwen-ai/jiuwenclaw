@@ -842,6 +842,9 @@ class VibeSkillChannel(BaseChannel):
 
         # 序号4: 评估结束，case_done=True → message.part.updated 标记完成
         if case_done:
+            part = self._append_text_part(session_id, "text", stage)
+            part["completed"] = completed
+            part["total"] = total
             part["status"] = "done"
             part["text"] = message
             return self._prepend_message_announcement(ctx, external_sid, [{
@@ -986,24 +989,27 @@ class VibeSkillChannel(BaseChannel):
         tool_name = str(payload.get("tool_name") or payload.get("tool") or "").strip()
         success = bool(payload.get("success", True))
         result = payload.get("result") or payload.get("output") or ""
-        part, is_new = self._ensure_tool_part(session_id, call_id, tool_name, stage)
+        part, _ = self._ensure_tool_part(session_id, call_id, tool_name, stage)
         start = part.get("state", {}).get("time", {}).get("start") or int(time.time() * 1000)
+        existing_input = part.get("state", {}).get("input")
+        result_input = payload.get("arguments") or payload.get("params") or payload.get("input")
         part["state"] = {
             "status": "completed" if success else "error",
+            "input": result_input if result_input is not None else existing_input,
             "output": result,
             "title": payload.get("title") or f"{tool_name or call_id} 执行结果",
             "metadata": payload.get("metadata", {}),
             "time": {"start": start, "end": int(time.time() * 1000)},
         }
         responses = []
-        # 第一次创建此 tool part 时，发 message.part.updated
-        if is_new:
-            responses.append(
-                {
-                    "type": "message.part.updated",
-                    "properties": self._serialize_part(part, external_sid),
-                }
-            )
+        # 与 tool_call 不同：结果到达时 part 往往已存在（is_new=False），
+        # 仍须推送 message.part.updated，否则前端拿不到 state.output。
+        responses.append(
+            {
+                "type": "message.part.updated",
+                "properties": self._serialize_part(part, external_sid),
+            }
+        )
         ctx = self._ensure_message_context(session_id, stage)
         return self._prepend_message_announcement(ctx, external_sid, responses)
 
@@ -1047,6 +1053,9 @@ class VibeSkillChannel(BaseChannel):
 
         # 序号4: 测试结束，case_status 存在 → message.part.updated 标记完成
         if case_status:
+            part = self._append_text_part(session_id, "text", stage)
+            part["completed"] = completed_count
+            part["total"] = total_tasks
             part["status"] = case_status  # "success" or "failed"
             part["text"] = message
             return self._prepend_message_announcement(ctx, external_sid, [{
@@ -1474,6 +1483,23 @@ class VibeSkillChannel(BaseChannel):
         ctx["part_by_type"][part_key] = part
         ctx["parts"].append(part)
         return part, True
+
+    def _append_text_part(
+        self, session_id: str | None, part_type: str, stage: str | None = None
+    ) -> dict[str, Any]:
+        """始终创建并追加一个新的 text part（不会覆盖 part_by_type）。"""
+        ctx = self._ensure_message_context(session_id, stage)
+        part = {
+            "id": f"prt_{secrets.token_hex(6)}",
+            "sessionID": session_id,
+            "messageID": ctx["message_id"],
+            "type": part_type,
+            "text": "",
+        }
+        if stage:
+            part["stage"] = stage
+        ctx["parts"].append(part)
+        return part
 
     def _ensure_tool_part(
         self, session_id: str | None, call_id: str, tool_name: str, stage: str | None = None
