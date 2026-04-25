@@ -94,6 +94,10 @@ class ExtensionLoader:
         use_uv = uv_path is not None
 
         for package, version_spec in dependencies.items():
+            # 自动添加版本操作符（如果缺失）
+            if version_spec and not any(version_spec.startswith(op) for op in ['==', '>=', '<=', '>', '<', '!=', '~=', '~=']):
+                version_spec = f"=={version_spec}"
+            
             package_name = f"{package}{version_spec}" if version_spec else package
             try:
                 importlib.metadata.version(package)
