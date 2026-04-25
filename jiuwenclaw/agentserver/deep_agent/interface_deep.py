@@ -3637,6 +3637,7 @@ class JiuWenClawDeepAdapter:
                         payload={"event_type": "chat.delta", "content": content},
                         is_complete=False,
                     )
+                    continue
 
                 if chunk_type == "llm_output":
                     has_streamed_content = True
@@ -3653,10 +3654,12 @@ class JiuWenClawDeepAdapter:
                         if isinstance(chunk.payload, dict)
                         else str(chunk.payload)
                     )
+                    if not content:
+                        continue
                     yield AgentResponseChunk(
                         request_id=rid,
                         channel_id=cid,
-                        payload={"event_type": "chat.delta", "content": content},
+                        payload={"event_type": "chat.reasoning", "content": content},
                         is_complete=False,
                     )
                     continue
@@ -3925,7 +3928,10 @@ class JiuWenClawDeepAdapter:
                         is_chunked = False
 
                     if _has_streamed_content and not is_chunked:
-                        return {"event_type": "chat.final", "content": content}
+                        # When llm_output has already streamed the full user-facing text,
+                        # keep chat.final as a completion marker only to avoid duplicating
+                        # the final answer block downstream.
+                        return {"event_type": "chat.final", "content": ""}
 
                     if not content:
                         return None

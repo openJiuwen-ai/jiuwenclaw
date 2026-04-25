@@ -203,7 +203,9 @@ def _parse_typed_chunk(chunk: Any, _has_streamed_content: bool) -> dict[str, Any
             is_chunked = False
 
         if _has_streamed_content and not is_chunked:
-            return {"event_type": "chat.final", "content": content}
+            # Keep chat.final as a completion marker when the final answer text
+            # has already been streamed via chat.delta.
+            return {"event_type": "chat.final", "content": ""}
 
         if not content:
             return None
