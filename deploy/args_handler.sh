@@ -12,14 +12,22 @@ parse_args() {
                 CMD="${args[$i]}"
                 i=$((i+1))
                 ;;
-            nfs|yr-claw|gateway)
-                # treat as modules
-                local module="${args[$i]^^}"
-                MODULES+=("${module}")
+            nfs|yr_claw)
+                if [ "${DEPLOY_VARS["AGENT_CLIENT_TYPE"]}" == "yuanrong_frontend" ]; then
+                    MODULES+=("${args[$i]^^}")
+                fi
+                i=$((i+1))
+                ;;
+            gateway)
+                MODULES+=("${args[$i]^^}")
                 i=$((i+1))
                 ;;
             all)
-                MODULES=("${ALL_MODULES[@]}")
+                if [ "${DEPLOY_VARS["AGENT_CLIENT_TYPE"]}" == "yuanrong_frontend" ]; then
+                    MODULES=("${ALL_MODULES[@]}")
+                else
+                     MODULES=("GATEWAY")
+                fi
                 i=$((i+1))
                 ;;
             -h|--help)
@@ -57,7 +65,7 @@ Commands (required):
   down      Stop and shutdown the specified modules
 
 Modules (optional, default: all):
-  yr-claw   Deploy/Shutdown OpenYuanRong CLAW module
+  yr_claw   Deploy/Shutdown OpenYuanRong CLAW module
   nfs       Deploy/Shutdown NFS module
   gateway   Deploy/Shutdown Gateway module
   all       Deploy/Shutdown all modules (default if no module is specified)
@@ -67,7 +75,7 @@ Options:
 
 Examples:
   ./$(basename "$0") up                # Start all modules (default)
-  ./$(basename "$0") up yr-claw nfs    # Start only CLAW and NFS modules
+  ./$(basename "$0") up yr_claw nfs    # Start only CLAW and NFS modules
   ./$(basename "$0") down all          # Shutdown all modules
   ./$(basename "$0") down gateway      # Shutdown only Gateway module
 EOF

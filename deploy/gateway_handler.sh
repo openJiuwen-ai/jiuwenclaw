@@ -3,6 +3,18 @@ set -euo >/dev/null 2>&1
 
 
 gen_gateway_config_file() {
+    local client_type="${DEPLOY_VARS["AGENT_CLIENT_TYPE"]}"
+
+    info "AGENT_CLIENT_TYPE: ${client_type}"
+    if [ "${client_type}" == "yuanrong_frontend" ]; then
+        GATEWAY_CONFIG_TEMPLATE_FILE="${SCRIPT_DIR}/conf/config-yr.template.yaml"
+    elif [ "${client_type}" == "runtime_orchestrator" ]; then
+        GATEWAY_CONFIG_TEMPLATE_FILE="${SCRIPT_DIR}/conf/config-rt.template.yaml"
+    else
+        error "Unsupported AGENT_CLIENT_TYPE: ${client_type}"
+    fi
+    info "GATEWAY_CONFIG_TEMPLATE_FILE: ${GATEWAY_CONFIG_TEMPLATE_FILE}"
+
     render_config_template ${GATEWAY_CONFIG_TEMPLATE_FILE} ${GATEWAY_CONFIG_FILE} "DEPLOY_VARS"
 
     # Clear configuration
@@ -34,15 +46,17 @@ deploy_claw_gateway(){
     local file_name=$(basename "${GATEWAY_CONFIG_FILE}")
     local deploy_template_file="${SCRIPT_DIR}/conf/deployment-${DEPLOY_VARS["MODE"]}.template.yaml"
 
-    render_config_template ${deploy_template_file} ${GATEWAY_DEPLOYMENT_FILE} "DEPLOY_VARS"
+    # Create configMap
+    if [ "${DEPLOY_VARS["AGENT_CLIENT_TYPE"]}" == "yuanrong_frontend" ]; then
+        collect_oyr_info
+    fi
     gen_gateway_config_file
-
     info "Executing: kubectl create configmap ${DEPLOY_VARS["GATEWAY_CONFIG_MAP_NAME"]} --from-file=${file_name}=${GATEWAY_CONFIG_FILE} --dry-run=client -o yaml | kubectl apply -f -"
     kubectl create configmap ${DEPLOY_VARS["GATEWAY_CONFIG_MAP_NAME"]} --from-file=${file_name}=${GATEWAY_CONFIG_FILE} --dry-run=client -o yaml | kubectl apply -f -
 
     # Start gateway
+    render_config_template ${deploy_template_file} ${GATEWAY_DEPLOYMENT_FILE} "DEPLOY_VARS"
     exec_cmd kubectl apply -f ${GATEWAY_DEPLOYMENT_FILE}
-
     wait_k8s_resource_ready "deployment" "${DEPLOY_VARS["GATEWAY_DEPLOYMENT_NAME"]}"
 
 }

@@ -13,15 +13,6 @@ source "storage_handler.sh"
 source "oyr_handler.sh"
 source "gateway_handler.sh"
 
-process_vars() {
-    if [ -z "${DEPLOY_VARS["NFS_SERVER_ADDR"]:-}" ]; then
-        info "Use built-in NFS server"
-        DEPLOY_VARS["NFS_SERVER_ADDR"]=${DEPLOY_VARS["MASTER_NODE_IP"]}
-    else
-        info "Use external NFS server"
-    fi
-}
-
 process_up() {
     # MODULES是ALL_MODULES的子集，启动顺序正着来
     local sorted_modules=()
@@ -31,26 +22,20 @@ process_up() {
         fi
     done
     info "sorted_modules=${sorted_modules[@]}"
+    collect_k8s_cluster_info
 
     for module in "${sorted_modules[@]}"; do
         case "${module}" in
             NFS)
-                check_nfs_up_dependency
-                collect_k8s_cluster_info
+                check_nfs_up_dependency      
                 deploy_nfs
                 ;;
-            YR-CLAW)
+            YR_CLAW)
                 check_yr_claw_up_dependency
-                collect_k8s_cluster_info
-                read_env_from_file "${CUSTOM_ENV_FILE}" "DEPLOY_VARS"
-                process_vars
                 deploy_oyr
                 ;;
             GATEWAY)
                 check_gateway_up_dependency
-                collect_k8s_cluster_info
-                collect_oyr_info
-                read_env_from_file "${CUSTOM_ENV_FILE}" "DEPLOY_VARS"
                 deploy_claw_gateway
                 ;;
         esac
@@ -73,7 +58,7 @@ process_down() {
             NFS)
                 uninstall_nfs
                 ;;
-            YR-CLAW)
+            YR_CLAW)
                 uninstall_oyr
                 ;;
             GATEWAY)
@@ -85,6 +70,7 @@ process_down() {
 
 # ==================== Main function ====================
 main() {
+    read_env_from_file "${CUSTOM_ENV_FILE}" "DEPLOY_VARS"
     parse_args "$@"
     check_dependency
     process_${CMD}

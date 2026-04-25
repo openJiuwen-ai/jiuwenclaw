@@ -21,7 +21,7 @@ POOL_FILE="${SCRIPT_DIR}/conf/pool.json"
 CLAW_META_TEMPLATE_FILE="${SCRIPT_DIR}/conf/claw_meta.template.json"
 CLAW_META_FILE="${SCRIPT_DIR}/conf/claw_meta.json"
 
-GATEWAY_CONFIG_TEMPLATE_FILE="${SCRIPT_DIR}/conf/config.template.yaml"
+GATEWAY_CONFIG_TEMPLATE_FILE=""
 GATEWAY_CONFIG_FILE="${SCRIPT_DIR}/conf/config.yaml"
 
 GATEWAY_DEPLOYMENT_FILE="${SCRIPT_DIR}/conf/deployment.yaml"
@@ -41,8 +41,9 @@ META_PORT=""
 CMD=""
 MASTER_NODE_NAME=""
 
+
 # ==== All available modules ====
-declare -ga ALL_MODULES=("NFS" "YR-CLAW" "GATEWAY")
+declare -ga ALL_MODULES=("NFS" "YR_CLAW" "GATEWAY")
 
 declare -ga MODULES=()
 
@@ -59,10 +60,6 @@ declare -A DEPLOY_VARS=(
     ["PVC_NAME"]="pvc-nfs-shared"
     ["PV_NAME"]="pv-nfs-shared"
     ["NFS_SHARE_PATH"]="/"
-    # extensions.agent_client_rest（可被 .env / .env.custom 覆盖）
-    ["AGENT_CLIENT_REST_ENABLED"]="true"
-    ["AGENT_CLIENT_REST_HOST"]="0.0.0.0"
-    ["AGENT_CLIENT_REST_PORT"]="18080"
 )
 
 declare -A OYR_COMPONENTS=(

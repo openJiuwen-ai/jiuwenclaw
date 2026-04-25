@@ -33,7 +33,7 @@ read_env_from_file() {
             key="${BASH_REMATCH[1]}"
             value="${BASH_REMATCH[2]}"
             
-            if [[ $value =~ (.*)\"$ ]]; then
+            if [[ $value =~ (.*)\"[[:space:]]*$ ]]; then
                 target_array["$key"]="${BASH_REMATCH[1]}"
                 in_quote=0
             else
@@ -44,7 +44,7 @@ read_env_from_file() {
         fi
 
         if (( in_quote )); then
-            if [[ $buffer =~ (.*)\"$ ]]; then
+            if [[ $buffer =~ (.*)\"[[:space:]]*$ ]]; then
                 target_array["$key"]="${BASH_REMATCH[1]}"
                 in_quote=0
                 key=""

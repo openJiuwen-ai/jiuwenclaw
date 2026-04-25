@@ -73,7 +73,7 @@ check_cluster_has_enough_nodes() {
 check_if_yr_exist()
 {
     if helm list --filter "^${OYL_CHART_NAME}$" | grep -q "${OYL_CHART_NAME}"; then
-        error "${OYL_CHART_NAME} is already deployed. Please uninstall it first with: ./$(basename "$0") down yr-claw"
+        error "${OYL_CHART_NAME} is already deployed. Please uninstall it first with: ./$(basename "$0") down yr_claw"
     fi
 }
 
@@ -96,7 +96,6 @@ check_if_nfs_up() {
         error "NFS is not deployed. Please deploy it first with: ./$(basename "$0") up nfs"
     fi
 }
-
 
 check_dependency(){
     check_if_master
@@ -122,5 +121,7 @@ check_gateway_up_dependency(){
     check_cmds
     check_cluster_has_enough_nodes
     check_ssh_connectivity
-    check_if_yr_claw_up
+    #check_if_yr_claw_up
 }
+
+
