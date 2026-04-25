@@ -294,7 +294,11 @@ class ReActAgentEvolve(BaseAgent):
             )
 
             # Add AI message to context
-            ai_msg_for_context = AssistantMessage(content=ai_message.content, tool_calls=ai_message.tool_calls)
+            ai_msg_for_context = AssistantMessage(
+                content=ai_message.content,
+                tool_calls=ai_message.tool_calls,
+                reasoning_content=getattr(ai_message, "reasoning_content", None),
+            )
             await context.add_messages(ai_msg_for_context)
 
             # Check for tool calls
