@@ -5,37 +5,36 @@
 from __future__ import annotations
 
 import asyncio
-import os
+import json
+import logging
 import re
 from html import unescape
+from typing import Any
 from urllib.parse import parse_qs, unquote, urlparse
 
 import requests
-from openjiuwen.core.foundation.tool import tool
+import trafilatura
+from openjiuwen.core.foundation.tool import ToolCard, tool
+
+from jiuwenclaw.agentserver.tools.ssl_config import get_requests_verify
+
+logger = logging.getLogger(__name__)
 
 _USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
     "AppleWebKit/537.36 (KHTML, like Gecko) "
     "Chrome/124.0.0.0 Safari/537.36"
 )
-_REQUEST_HEADERS = {"User-Agent": _USER_AGENT}
-_FREE_SEARCH_PROXY_URL_ENV = "FREE_SEARCH_PROXY_URL"
-_FREE_SEARCH_DEFAULT_NO_PROXY = (
-    "127.0.0.1,.huawei.com,localhost,local,.local,10.155.97.247,.myhuaweicloud.coms"
-)
+_REQUEST_HEADERS = {
+    "User-Agent": _USER_AGENT,
+    "Accept": "text/markdown, text/html;q=0.9, */*;q=0.1",
+    "Accept-Language": "en-US,en;q=0.9",
+}
 _CHARSET_HEADER_RE = re.compile(r"charset=([^\s;]+)", flags=re.IGNORECASE)
 _CHARSET_META_RE = re.compile(
-    br"""<meta[^>]+charset=["']?\s*([A-Za-z0-9._-]+)""",
+    rb"""<meta[^>]+charset=["']?\s*([A-Za-z0-9._-]+)""",
     flags=re.IGNORECASE,
 )
-
-
-def _env_bool(name: str, default: bool = False) -> bool:
-    """Parse boolean environment variable (1/true/yes/on = True)."""
-    value = (os.environ.get(name) or "").strip().lower()
-    if not value:
-        return default
-    return value in {"1", "true", "yes", "on"}
 
 
 def _extract_declared_charset(response: requests.Response) -> str:
@@ -52,40 +51,6 @@ def _extract_declared_charset(response: requests.Response) -> str:
         except Exception:
             return ""
     return ""
-
-
-def _get_free_search_proxy_url() -> str:
-    return str(os.environ.get(_FREE_SEARCH_PROXY_URL_ENV, "") or "").strip()
-
-
-def _no_proxy_entries() -> list[str]:
-    configured = os.environ.get("NO_PROXY") or os.environ.get("no_proxy") or _FREE_SEARCH_DEFAULT_NO_PROXY
-    return [entry.strip().lower() for entry in configured.split(",") if entry.strip()]
-
-
-def _should_bypass_free_search_proxy(url: str) -> bool:
-    proxy_url = _get_free_search_proxy_url()
-    if not proxy_url:
-        return True
-    hostname = (urlparse(url).hostname or "").lower()
-    if not hostname:
-        return False
-    for entry in _no_proxy_entries():
-        if entry == "*":
-            return True
-        if entry.startswith(".") and (hostname == entry[1:] or hostname.endswith(entry)):
-            return True
-        if hostname == entry or hostname.endswith(f".{entry}"):
-            return True
-    return False
-
-
-def _apply_free_search_proxy(url: str, kwargs: dict[str, object]) -> bool:
-    proxy_url = _get_free_search_proxy_url()
-    if not proxy_url or _should_bypass_free_search_proxy(url):
-        return False
-    kwargs.setdefault("proxies", {"http": proxy_url, "https": proxy_url})
-    return True
 
 
 def _decode_response_text(response: requests.Response) -> str:
@@ -132,19 +97,17 @@ def _decode_response_text(response: requests.Response) -> str:
 
 def _http_get(url: str, **kwargs) -> requests.Response:
     """Try normal requests first; retry without env proxies on ProxyError."""
-    explicit_proxy = _apply_free_search_proxy(url, kwargs)
+    kwargs.setdefault("verify", get_requests_verify())
     try:
         return requests.get(url, **kwargs)
     except requests.exceptions.ProxyError:
-        if explicit_proxy:
-            raise
         with requests.Session() as session:
             session.trust_env = False
             return session.get(url, **kwargs)
 
 
 def _clip_text(value: str, max_chars: int) -> str:
-    if max_chars <= 0 or len(value) <= max_chars:
+    if len(value) <= max_chars:
         return value
     return f"{value[:max_chars]}\n...[truncated]"
 
@@ -175,80 +138,271 @@ def _normalize_url(url: str) -> str:
     return f"https://{decoded}"
 
 
-def _fetch_via_jina_reader_sync(url: str, timeout_seconds: int) -> dict[str, str | int]:
-    reader_url = f"https://r.jina.ai/{url}"
-    response = _http_get(reader_url, headers=_REQUEST_HEADERS, timeout=timeout_seconds)
-    response.raise_for_status()
-    return {
-        "url": url,
-        "status_code": response.status_code,
-        "title": "",
-        "content": _decode_response_text(response).strip(),
-    }
+def _extract_content_with_trafilatura(
+    html: str, url: str, content_type: str, extract_mode: str = "markdown"
+) -> tuple[str, str]:
+    """Extract main content using trafilatura with fallback to basic cleaning.
 
+    Returns:
+        tuple of (content, title)
+    """
+    content_type_lower = (content_type or "").lower()
 
-def _fetch_webpage_sync(url: str, timeout_seconds: int) -> dict[str, str | int]:
-    response = _http_get(url, headers=_REQUEST_HEADERS, timeout=timeout_seconds)
-    # 只在显式启用时才使用 Jina Reader fallback
-    if response.status_code in {401, 403, 429}:
-        if _env_bool("JIUWENCLAW_ENABLE_JINA_FETCH", default=False):
-            return _fetch_via_jina_reader_sync(url, timeout_seconds)
-        response.raise_for_status()
-    response.raise_for_status()
+    if "application/json" in content_type_lower:
+        try:
+            return json.dumps(json.loads(html), indent=2, ensure_ascii=False), ""
+        except Exception:
+            return html, ""
 
-    text = _decode_response_text(response)
-    content_type = response.headers.get("Content-Type", "")
-    title_match = re.search(r"<title[^>]*>(.*?)</title>", text, flags=re.IGNORECASE | re.DOTALL)
-    title = _strip_tags(title_match.group(1)) if title_match else ""
+    if "text/markdown" in content_type_lower or "text/x-markdown" in content_type_lower:
+        return html, ""
 
-    if "html" in content_type.lower():
-        text = re.sub(r"<script[^>]*>.*?</script>", " ", text, flags=re.IGNORECASE | re.DOTALL)
-        text = re.sub(r"<style[^>]*>.*?</style>", " ", text, flags=re.IGNORECASE | re.DOTALL)
+    if "text/html" in content_type_lower or not content_type_lower:
+        try:
+            metadata = trafilatura.extract_metadata(html, default_url=url)
+            title = metadata.title if metadata else ""
+        except Exception:
+            title = ""
+
+        try:
+            output_format = "markdown" if extract_mode == "markdown" else "text"
+            result = trafilatura.extract(
+                html,
+                url=url,
+                output_format=output_format,
+                include_links=True,
+                include_images=False,
+                favor_precision=True,
+            )
+            if result:
+                return result, title
+        except Exception:
+            logger.warning(
+                "Trafilatura extraction failed in precision mode, falling back",
+                exc_info=True,
+            )
+
+        try:
+            result = trafilatura.extract(
+                html,
+                url=url,
+                output_format=extract_mode,
+                include_links=False,
+                include_images=False,
+            )
+            if result:
+                return result, title
+        except Exception:
+            logger.warning(
+                "Trafilatura extraction failed in fallback mode, using HTML cleanup",
+                exc_info=True,
+            )
+
+        text = re.sub(
+            r"<script[^>]*>.*?</script>", " ", html, flags=re.IGNORECASE | re.DOTALL
+        )
+        text = re.sub(
+            r"<style[^>]*>.*?</style>", " ", text, flags=re.IGNORECASE | re.DOTALL
+        )
+        text = re.sub(
+            r"<nav[^>]*>.*?</nav>", " ", text, flags=re.IGNORECASE | re.DOTALL
+        )
+        text = re.sub(
+            r"<footer[^>]*>.*?</footer>", " ", text, flags=re.IGNORECASE | re.DOTALL
+        )
+        text = re.sub(
+            r"<header[^>]*>.*?</header>", " ", text, flags=re.IGNORECASE | re.DOTALL
+        )
+        text = re.sub(
+            r"<aside[^>]*>.*?</aside>", " ", text, flags=re.IGNORECASE | re.DOTALL
+        )
         text = _strip_tags(text)
-    else:
-        text = re.sub(r"\s+", " ", text).strip()
 
-    return {
-        "url": response.url,
-        "status_code": response.status_code,
-        "title": title,
-        "content": text,
-    }
+        title_match = re.search(
+            r"<title[^>]*>(.*?)</title>", html, flags=re.IGNORECASE | re.DOTALL
+        )
+        if not title and title_match:
+            title = _strip_tags(title_match.group(1))
+
+        return text, title
+
+    text = re.sub(r"\s+", " ", html).strip()
+    return text, ""
+
+
+def _fetch_direct_sync(url: str, timeout_seconds: int) -> dict[str, Any] | None:
+    """Direct HTTP request with content extraction."""
+    try:
+        response = _http_get(url, headers=_REQUEST_HEADERS, timeout=timeout_seconds)
+
+        if response.status_code >= 400:
+            return None
+
+        response.raise_for_status()
+
+        html = _decode_response_text(response)
+        content_type = response.headers.get("Content-Type", "")
+        content, title = _extract_content_with_trafilatura(html, url, content_type)
+
+        return {
+            "url": response.url or url,
+            "status_code": response.status_code,
+            "title": title,
+            "content": content,
+            "provider": "direct",
+        }
+    except Exception:
+        logger.warning("Direct webpage fetch failed", exc_info=True)
+        return None
+
+
+def _fetch_via_jina_sync(url: str, timeout_seconds: int) -> dict[str, Any] | None:
+    """Fetch via Jina Reader proxy."""
+    try:
+        reader_url = f"https://r.jina.ai/{url}"
+        response = _http_get(
+            reader_url, headers=_REQUEST_HEADERS, timeout=timeout_seconds
+        )
+        response.raise_for_status()
+
+        content = _decode_response_text(response).strip()
+
+        title = ""
+        title_match = re.search(r"^#\s+(.+)$", content, flags=re.MULTILINE)
+        if title_match:
+            title = title_match.group(1).strip()
+
+        return {
+            "url": url,
+            "status_code": 200,
+            "title": title,
+            "content": content,
+            "provider": "jina",
+        }
+    except Exception:
+        logger.warning("Jina proxy webpage fetch failed", exc_info=True)
+        return None
+
+
+async def _fetch_webpage_async(
+    url: str, timeout_seconds: int, overall_timeout: int
+) -> dict[str, Any]:
+    """Concurrent fetch with quality-first fallback strategy.
+
+    Strategy:
+    - If jina returns first and succeeds: use jina (best quality)
+    - If direct returns first:
+      - If direct failed (4xx/5xx or no content): wait for jina
+      - If direct succeeded: wait for jina up to 3s, use jina if available, else direct
+    """
+
+    async def fetch_direct():
+        return await asyncio.to_thread(_fetch_direct_sync, url, timeout_seconds)
+
+    async def fetch_jina():
+        return await asyncio.to_thread(_fetch_via_jina_sync, url, timeout_seconds)
+
+    direct_task = asyncio.create_task(fetch_direct())
+    jina_task = asyncio.create_task(fetch_jina())
+
+    pending = {direct_task, jina_task}
+    direct_result = None
+    jina_result = None
+
+    try:
+        async with asyncio.timeout(overall_timeout):
+            while pending:
+                done, pending = await asyncio.wait(
+                    pending, return_when=asyncio.FIRST_COMPLETED
+                )
+
+                for task in done:
+                    if task == direct_task:
+                        direct_result = task.result()
+                    elif task == jina_task:
+                        jina_result = task.result()
+
+                if jina_result is not None:
+                    if jina_result.get("content"):
+                        if not direct_task.done():
+                            direct_task.cancel()
+                        return jina_result
+
+                if direct_result is not None:
+                    if direct_result.get("content"):
+                        try:
+                            async with asyncio.timeout(1):
+                                jina_result = await jina_task
+                                if jina_result and jina_result.get("content"):
+                                    return jina_result
+                        except asyncio.TimeoutError:
+                            pass
+
+                        return direct_result
+
+    except asyncio.TimeoutError:
+        pass
+    except Exception:
+        logger.warning(
+            "Concurrent webpage fetch failed unexpectedly", exc_info=True
+        )
+    finally:
+        for t in [direct_task, jina_task]:
+            if not t.done():
+                t.cancel()
+
+    if jina_result and jina_result.get("content"):
+        return jina_result
+    if direct_result and direct_result.get("content"):
+        return direct_result
+
+    raise RuntimeError("All fetch methods failed to return content")
 
 
 @tool(
-    name="mcp_fetch_webpage",
-    description=(
-        "Fetch webpage text content from URL. Returns status/title/plain text content. "
-        "Set max_chars=0 to disable output clipping. "
-        "Use a larger timeout_seconds for slow websites."
+    card=ToolCard(
+        id="mcp_fetch_webpage",
+        name="mcp_fetch_webpage",
+        description=(
+            "Fetch webpage text content from URL with concurrent fallback. "
+            "Returns status/title/plain text content."
+        ),
+        properties={"truncate_length": 60000},
+        input_params={
+            "type": "object",
+            "properties": {
+                "url": {
+                    "type": "string",
+                    "description": "The URL of the webpage to fetch",
+                },
+                "max_chars": {
+                    "type": "integer",
+                    "description": "Maximum characters of content to return (500-50000, default 12000)",
+                    "default": 12000,
+                },
+                "timeout_seconds": {
+                    "type": "integer",
+                    "description": "HTTP request timeout in seconds (3-10, default 5)",
+                    "default": 5,
+                },
+            },
+            "required": ["url"],
+        },
     ),
 )
-async def mcp_fetch_webpage(url: str, max_chars: int = 0, timeout_seconds: int = 30) -> str:
+async def mcp_fetch_webpage(
+    url: str, max_chars: int = 12000, timeout_seconds: int = 5
+) -> str:
     url = _normalize_url(url)
     if not url:
         return "[ERROR]: url cannot be empty."
 
-    try:
-        max_chars = int(max_chars)
-    except (TypeError, ValueError):
-        max_chars = 0
-    if max_chars < 0:
-        max_chars = 0
+    max_chars = max(500, min(max_chars, 50000))
+    timeout_seconds = max(3, min(timeout_seconds, 10))
+    overall_timeout = 5
 
     try:
-        timeout_seconds = int(timeout_seconds)
-    except (TypeError, ValueError):
-        timeout_seconds = 30
-    try:
-        max_timeout_seconds = int(os.getenv("MCP_FETCH_WEBPAGE_MAX_TIMEOUT_SECONDS") or "3600")
-    except ValueError:
-        max_timeout_seconds = 3600
-    max_timeout_seconds = max(1, max_timeout_seconds)
-    timeout_seconds = max(1, min(timeout_seconds, max_timeout_seconds))
-
-    try:
-        data = await asyncio.to_thread(_fetch_webpage_sync, url, timeout_seconds)
+        data = await _fetch_webpage_async(url, timeout_seconds, overall_timeout)
     except Exception as exc:
         return f"[ERROR]: failed to fetch webpage: {exc}"
 
@@ -258,6 +412,8 @@ async def mcp_fetch_webpage(url: str, max_chars: int = 0, timeout_seconds: int =
     ]
     if data.get("title"):
         lines.append(f"Title: {data['title']}")
+    if data.get("provider"):
+        lines.append(f"Provider: {data['provider']}")
     lines.append("Content:")
     lines.append(_clip_text(str(data.get("content", "") or ""), max_chars) or "[empty]")
     return "\n".join(lines)

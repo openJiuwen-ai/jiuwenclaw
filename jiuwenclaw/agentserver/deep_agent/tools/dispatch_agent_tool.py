@@ -37,6 +37,8 @@ from openjiuwen.harness.rails.filesystem_rail import FileSystemRail
 from openjiuwen.harness.schema.config import SubAgentConfig
 from openjiuwen.harness.tools.base_tool import ToolOutput
 
+from jiuwenclaw.agentserver.tools.harness_named_web_tools import build_jiuwen_harness_named_web_tools
+
 if TYPE_CHECKING:
     from openjiuwen.harness.deep_agent import DeepAgent
 
@@ -52,6 +54,7 @@ _DESCRIPTION_CN = (
     "- 需要一个临时特化角色（如 PPT 校对员、数据分析师），而已有子代理不匹配；\n"
     "- 要并行调度多个独立职责的子任务。\n\n"
     "子代理默认挂 FileSystemRail（read_file/write_file/edit_file/glob/list_dir/grep/bash/code），"
+    "并附带与主代理一致的网页工具 free_search、fetch_webpage（实现与 agentserver/tools 一致）；"
     "工作目录、模型、语言与主代理一致，会话独立。"
 )
 
@@ -66,8 +69,9 @@ _DESCRIPTION_EN = (
     "existing subagent matches;\n"
     "- You want to run multiple independent subtasks in parallel.\n\n"
     "The spawned subagent gets FileSystemRail (read_file/write_file/edit_file/glob/"
-    "list_dir/grep/bash/code). Its workspace, model, and language mirror the main agent; "
-    "its session is isolated."
+    "list_dir/grep/bash/code) plus the same web tools as the main agent: free_search and "
+    "fetch_webpage (jiuwenclaw agentserver/tools implementation). Its workspace, model, "
+    "and language mirror the main agent; its session is isolated."
 )
 
 _PARAMS: Dict[str, Dict[str, str]] = {
@@ -155,6 +159,10 @@ class DispatchAgentTool(Tool):
             agent_card=AgentCard(name=unique_name, description=description),
             system_prompt=system_prompt,
             model=model,
+            tools=build_jiuwen_harness_named_web_tools(
+                agent_id=unique_name,
+                language=str(language or "cn"),
+            ),
             rails=[FileSystemRail()],
             workspace=workspace,
             language=language,

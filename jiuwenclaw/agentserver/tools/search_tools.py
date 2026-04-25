@@ -7,6 +7,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import json
+import logging
 import os
 import re
 from html import unescape
@@ -18,65 +19,20 @@ from openjiuwen.core.foundation.tool import tool
 
 from jiuwenclaw.agentserver.tools.ssl_config import get_requests_verify
 
+logger = logging.getLogger(__name__)
+
 _USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
     "AppleWebKit/537.36 (KHTML, like Gecko) "
     "Chrome/124.0.0.0 Safari/537.36"
 )
 _REQUEST_HEADERS = {"User-Agent": _USER_AGENT}
-_FREE_SEARCH_PROXY_URL_ENV = "FREE_SEARCH_PROXY_URL"
-_FREE_SEARCH_DEFAULT_NO_PROXY = (
-    "127.0.0.1,.huawei.com,localhost,local,.local,10.155.97.247,.myhuaweicloud.coms"
-)
-
-
-def _env_bool(name: str, default: bool = False) -> bool:
-    """Parse boolean environment variable (1/true/yes/on = True)."""
-    value = (os.environ.get(name) or "").strip().lower()
-    if not value:
-        return default
-    return value in {"1", "true", "yes", "on"}
-
-
-def _get_free_search_proxy_url() -> str:
-    return str(os.environ.get(_FREE_SEARCH_PROXY_URL_ENV, "") or "").strip()
-
-
-def _no_proxy_entries() -> list[str]:
-    configured = os.environ.get("NO_PROXY") or os.environ.get("no_proxy") or _FREE_SEARCH_DEFAULT_NO_PROXY
-    return [entry.strip().lower() for entry in configured.split(",") if entry.strip()]
-
-
-def _should_bypass_free_search_proxy(url: str) -> bool:
-    proxy_url = _get_free_search_proxy_url()
-    if not proxy_url:
-        return True
-    hostname = (urlparse(url).hostname or "").lower()
-    if not hostname:
-        return False
-    for entry in _no_proxy_entries():
-        if entry == "*":
-            return True
-        if entry.startswith(".") and (hostname == entry[1:] or hostname.endswith(entry)):
-            return True
-        if hostname == entry or hostname.endswith(f".{entry}"):
-            return True
-    return False
-
-
-def _apply_free_search_proxy(url: str, kwargs: dict[str, Any]) -> bool:
-    proxy_url = _get_free_search_proxy_url()
-    if not proxy_url or _should_bypass_free_search_proxy(url):
-        return False
-    kwargs.setdefault("proxies", {"http": proxy_url, "https": proxy_url})
-    return True
 
 
 def _http_request(method: str, url: str, **kwargs) -> requests.Response:
     """Try normal request first; retry without env proxies on ProxyError."""
     kwargs.setdefault("verify", get_requests_verify())
     method_up = method.upper()
-    explicit_proxy = _apply_free_search_proxy(url, kwargs)
     try:
         if method_up == "GET":
             return requests.get(url, **kwargs)
@@ -84,8 +40,6 @@ def _http_request(method: str, url: str, **kwargs) -> requests.Response:
             return requests.post(url, **kwargs)
         return requests.request(method_up, url, **kwargs)
     except requests.exceptions.ProxyError:
-        if explicit_proxy:
-            raise
         with requests.Session() as session:
             session.trust_env = False
             return session.request(method_up, url, **kwargs)
@@ -124,12 +78,13 @@ def _decode_bing_redirect(url: str) -> str:
         payload = encoded[2:]
         padding = "=" * (-len(payload) % 4)
         try:
-            decoded = base64.urlsafe_b64decode((payload + padding).encode("utf-8")).decode(
-                "utf-8", errors="ignore"
-            )
+            decoded = base64.urlsafe_b64decode(
+                (payload + padding).encode("utf-8")
+            ).decode("utf-8", errors="ignore")
             if decoded.startswith(("http://", "https://")):
                 return decoded
         except Exception:
+            logger.warning("Failed to decode Bing redirect URL", exc_info=True)
             return url
     elif encoded.startswith(("http://", "https://")):
         return encoded
@@ -149,13 +104,19 @@ def _is_ddg_challenge_page(status_code: int, html: str) -> bool:
     return any(marker in text for marker in markers)
 
 
-def _search_duckduckgo_sync(query: str, max_results: int, timeout_seconds: int) -> list[dict[str, str]]:
+def _search_duckduckgo_sync(
+    query: str, max_results: int, timeout_seconds: int
+) -> list[dict[str, str]]:
     url = f"https://duckduckgo.com/html/?q={quote_plus(query)}"
-    response = _http_request("GET", url, headers=_REQUEST_HEADERS, timeout=timeout_seconds)
+    response = _http_request(
+        "GET", url, headers=_REQUEST_HEADERS, timeout=timeout_seconds
+    )
     if _is_ddg_challenge_page(response.status_code, response.text):
         raise RuntimeError("DuckDuckGo anti-bot challenge page returned")
     if response.status_code != 200:
-        raise RuntimeError(f"DuckDuckGo returned non-200 status: {response.status_code}")
+        raise RuntimeError(
+            f"DuckDuckGo returned non-200 status: {response.status_code}"
+        )
     response.raise_for_status()
     html = response.text
 
@@ -189,12 +150,16 @@ def _search_duckduckgo_via_jina_sync(
     query: str, max_results: int, timeout_seconds: int
 ) -> list[dict[str, str]]:
     url = f"https://r.jina.ai/http://duckduckgo.com/html/?q={quote_plus(query)}"
-    response = _http_request("GET", url, headers=_REQUEST_HEADERS, timeout=timeout_seconds)
+    response = _http_request(
+        "GET", url, headers=_REQUEST_HEADERS, timeout=timeout_seconds
+    )
     response.raise_for_status()
     text = response.text or ""
 
     # Parse markdown links rendered by r.jina.ai.
-    matches = re.findall(r"\[([^\]\n]+)\]\((https?://[^\s)]+)\)", text, flags=re.IGNORECASE)
+    matches = re.findall(
+        r"\[([^\]\n]+)\]\((https?://[^\s)]+)\)", text, flags=re.IGNORECASE
+    )
 
     rows: list[dict[str, str]] = []
     seen: set[str] = set()
@@ -218,9 +183,13 @@ def _search_duckduckgo_via_jina_sync(
     return rows
 
 
-def _search_bing_sync(query: str, max_results: int, timeout_seconds: int) -> list[dict[str, str]]:
+def _search_bing_sync(
+    query: str, max_results: int, timeout_seconds: int
+) -> list[dict[str, str]]:
     url = f"https://www.bing.com/search?q={quote_plus(query)}"
-    response = _http_request("GET", url, headers=_REQUEST_HEADERS, timeout=timeout_seconds)
+    response = _http_request(
+        "GET", url, headers=_REQUEST_HEADERS, timeout=timeout_seconds
+    )
     response.raise_for_status()
     html = response.text
 
@@ -246,9 +215,17 @@ def _search_bing_sync(query: str, max_results: int, timeout_seconds: int) -> lis
         if not href or href in seen:
             continue
         seen.add(href)
-        snippet_match = re.search(r"<p>(.*?)</p>", block, flags=re.IGNORECASE | re.DOTALL)
+        snippet_match = re.search(
+            r"<p>(.*?)</p>", block, flags=re.IGNORECASE | re.DOTALL
+        )
         snippet = _strip_tags(snippet_match.group(1)) if snippet_match else ""
-        rows.append({"title": title or f"Result {len(rows) + 1}", "url": href, "snippet": snippet})
+        rows.append(
+            {
+                "title": title or f"Result {len(rows) + 1}",
+                "url": href,
+                "snippet": snippet,
+            }
+        )
         if len(rows) >= max_results:
             break
 
@@ -259,19 +236,11 @@ def _search_free_sync(
     query: str, max_results: int, timeout_seconds: int
 ) -> tuple[str, list[dict[str, str]]]:
     errors: list[str] = []
-    engines: list[tuple[str, callable]] = []
-
-    # Bing 作为默认可用引擎
-    engines.append(("bing", _search_bing_sync))
-
-    # DuckDuckGo 直接搜索 - 需要显式启用
-    if _env_bool("JIUWENCLAW_ENABLE_DDG_SEARCH", default=False):
-        engines.append(("duckduckgo", _search_duckduckgo_sync))
-
-    # DuckDuckGo via Jina 代理 - 需要显式启用
-    if _env_bool("JIUWENCLAW_ENABLE_JINA_SEARCH", default=False):
-        engines.append(("duckduckgo-jina", _search_duckduckgo_via_jina_sync))
-
+    engines = [
+        ("duckduckgo", _search_duckduckgo_sync),
+        ("duckduckgo-jina", _search_duckduckgo_via_jina_sync),
+        ("bing", _search_bing_sync),
+    ]
     for engine_name, runner in engines:
         try:
             rows = runner(query, max_results, timeout_seconds)
@@ -284,6 +253,105 @@ def _search_free_sync(
     raise RuntimeError(" | ".join(errors))
 
 
+async def _search_free_async(
+    query: str, max_results: int, timeout_seconds: int, overall_timeout: int
+) -> tuple[str, list[dict[str, str]]]:
+    """Concurrent search with quality-first fallback strategy.
+
+    Quality ranking: DDG = DDG-jina > Bing
+
+    Strategy:
+    - If DDG/DDG-jina returns first and succeeds: use it (best quality)
+    - If Bing returns first and succeeds: wait for DDG/DDG-jina up to 2s
+    """
+    engines = [
+        ("duckduckgo", _search_duckduckgo_sync),
+        ("duckduckgo-jina", _search_duckduckgo_via_jina_sync),
+        ("bing", _search_bing_sync),
+    ]
+
+    async def run_engine(
+        engine_name: str, runner
+    ) -> tuple[str, list[dict[str, str]]] | None:
+        try:
+            rows = await asyncio.wait_for(
+                asyncio.to_thread(runner, query, max_results, timeout_seconds),
+                timeout=timeout_seconds,
+            )
+            if rows:
+                return engine_name, rows
+            return None
+        except Exception:
+            logger.warning(
+                "Free search engine failed: %s", engine_name, exc_info=True
+            )
+            return None
+
+    tasks = {asyncio.create_task(run_engine(name, fn)): name for name, fn in engines}
+    results: dict[str, tuple[str, list[dict[str, str]]]] = {}
+
+    try:
+        async with asyncio.timeout(overall_timeout):
+            pending = set(tasks.keys())
+            while pending:
+                done, pending = await asyncio.wait(
+                    pending, return_when=asyncio.FIRST_COMPLETED
+                )
+
+                for task in done:
+                    result = task.result()
+                    if result:
+                        engine_name, rows = result
+                        results[engine_name] = result
+
+                        if engine_name in ("duckduckgo", "duckduckgo-jina"):
+                            for t in pending:
+                                t.cancel()
+                            return engine_name, rows
+
+                if (
+                    "bing" in results
+                    and "duckduckgo" not in results
+                    and "duckduckgo-jina" not in results
+                ):
+                    try:
+                        async with asyncio.timeout(1):
+                            while pending:
+                                done2, pending = await asyncio.wait(
+                                    pending, return_when=asyncio.FIRST_COMPLETED
+                                )
+                                for task in done2:
+                                    result = task.result()
+                                    if result:
+                                        engine_name, rows = result
+                                        if engine_name in (
+                                            "duckduckgo",
+                                            "duckduckgo-jina",
+                                        ):
+                                            return engine_name, rows
+                    except asyncio.TimeoutError:
+                        pass
+
+                    return results["bing"]
+
+    except asyncio.TimeoutError:
+        pass
+    except Exception:
+        logger.warning(
+            "Concurrent free search failed unexpectedly", exc_info=True
+        )
+    finally:
+        for t in tasks:
+            if not t.done():
+                t.cancel()
+
+    for engine in ("duckduckgo", "duckduckgo-jina", "bing"):
+        if engine in results:
+            return results[engine]
+
+    raise RuntimeError("All engines returned empty results")
+
+
 def _engine_display_name(engine: str) -> str:
     mapping = {
         "duckduckgo": "DuckDuckGo",
@@ -291,6 +359,148 @@ def _engine_display_name(engine: str) -> str:
         "bing": "Bing",
     }
     return mapping.get(engine, engine)
+
+
+def _resolve_petal_search_url() -> str:
+    """Build Petal Search URL from LLM API_BASE: strip trailing /v2, append /v1/ai-tools/web-search."""
+    api_base = (
+        os.environ.get("API_BASE")
+        or os.environ.get("OPENAI_BASE_URL")
+        or os.environ.get("OPENAI_API_BASE")
+        or ""
+    ).strip()
+    if not api_base:
+        raise ValueError(
+            "API_BASE is not set (use the same OpenAI-compatible base URL as the LLM)"
+        )
+    trimmed = api_base.rstrip("/")
+    if trimmed.lower().endswith("/v2"):
+        trimmed = trimmed[:-3]
+    trimmed = trimmed.rstrip("/")
+    return f"{trimmed}/v1/ai-tools/web-search"
+
+
+def _load_llm_default_headers() -> dict[str, str]:
+    """Same JSON object as LLM client (e.g. Authorization); env name ``default_headers``."""
+    raw = os.environ.get("default_headers", "").strip()
+    if not raw:
+        raise ValueError(
+            "default_headers is not set (use the same JSON headers as the LLM, e.g. Authorization)"
+        )
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"default_headers is not valid JSON: {exc}") from exc
+    if not isinstance(parsed, dict):
+        raise ValueError("default_headers must be a JSON object")
+    return {str(k): str(v) for k, v in parsed.items() if v is not None}
+
+
+def enable_petal_search() -> bool:
+    """Return whether Petal web-search is available for current runtime."""
+    try:
+        from jiuwenclaw.config import get_config_raw
+
+        if not (get_config_raw().get("enable_petal_search") or False):
+            return False
+    except Exception:
+        logger.warning(
+            "Failed to read enable_petal_search config", exc_info=True
+        )
+        return False
+    api_base = (
+        os.environ.get("API_BASE")
+        or os.environ.get("OPENAI_BASE_URL")
+        or os.environ.get("OPENAI_API_BASE")
+        or ""
+    ).strip()
+    if not api_base:
+        return False
+    raw = os.environ.get("default_headers", "").strip()
+    if not raw:
+        return False
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError:
+        return False
+    return isinstance(parsed, dict)
+
+
+# Align with common search-record assembly (title / url / content); avoid huge tool payloads.
+_PETAL_MAX_TITLE_LEN = 2000
+_PETAL_MAX_URL_LEN = 2048
+_PETAL_MAX_CONTENT_LEN = 8000
+
+
+def _petal_normalize_web_page_item(item: dict[str, Any]) -> dict[str, str]:
+    """Map Petal ``web_pages[]`` entry to page record fields (same shape as collector ``new_item``)."""
+    raw_url = item.get("url") or item.get("link") or item.get("source_url") or ""
+    title = (item.get("title") or item.get("name") or "").strip()
+    content = (
+        item.get("content")
+        or item.get("snippet")
+        or item.get("description")
+        or item.get("summary")
+        or ""
+    )
+    content = str(content).strip()
+    return {
+        "title": title[:_PETAL_MAX_TITLE_LEN],
+        "url": str(raw_url).strip()[:_PETAL_MAX_URL_LEN],
+        "content": content[:_PETAL_MAX_CONTENT_LEN],
+    }
+
+
+def _petal_format_answer_from_records(records: list[dict[str, str]]) -> str:
+    """One block per result: title, URL, content (same layout idea as ``mcp_free_search``)."""
+    lines: list[str] = []
+    n = 0
+    for rec in records:
+        title = (rec.get("title") or "").strip()
+        url = (rec.get("url") or "").strip()
+        content = (rec.get("content") or "").strip()
+        if not title and not url and not content:
+            continue
+        n += 1
+        display_title = title if title else "(无标题)"
+        lines.append(f"{n}. {display_title}")
+        if url:
+            lines.append(f"   URL: {url}")
+        if content:
+            lines.append(f"   Content: {content}")
+    return "\n".join(lines)
+
+
+def _petal_search_sync(
+    query: str, max_results: int, timeout_seconds: int
+) -> dict[str, Any]:
+    """Petal Search API: POST JSON with query + content; response.web_pages[]."""
+    search_url = _resolve_petal_search_url()
+    header_map = _load_llm_default_headers()
+    headers = {**header_map, "Content-Type": "application/json"}
+    payload = {"query": query, "content": True}
+
+    response = _http_request(
+        "POST",
+        search_url,
+        headers=headers,
+        json=payload,
+        timeout=timeout_seconds,
+    )
+    response.raise_for_status()
+    data = response.json()
+    web_pages = data.get("web_pages", [])
+
+    records: list[dict[str, str]] = []
+    if isinstance(web_pages, list):
+        for raw in web_pages[:max_results]:
+            if not isinstance(raw, dict):
+                continue
+            records.append(_petal_normalize_web_page_item(raw))
+
+    answer = _petal_format_answer_from_records(records)
+    urls = [r["url"] for r in records if r.get("url")][:max_results]
+    return {"provider": "petal", "answer": answer, "urls": urls}
 
 
 def _parse_perplexity_citations(data: dict[str, Any]) -> list[str]:
@@ -303,7 +513,9 @@ def _parse_perplexity_citations(data: dict[str, Any]) -> list[str]:
             if isinstance(item, str):
                 urls.append(item)
             elif isinstance(item, dict):
-                maybe_url = item.get("url") or item.get("link") or item.get("source_url")
+                maybe_url = (
+                    item.get("url") or item.get("link") or item.get("source_url")
+                )
                 if maybe_url:
                     urls.append(str(maybe_url))
         if urls:
@@ -311,7 +523,9 @@ def _parse_perplexity_citations(data: dict[str, Any]) -> list[str]:
     return []
 
 
-def _perplexity_search_sync(query: str, max_results: int, timeout_seconds: int) -> dict[str, Any]:
+def _perplexity_search_sync(
+    query: str, max_results: int, timeout_seconds: int
+) -> dict[str, Any]:
     perplexity_key = os.environ.get("PERPLEXITY_API_KEY", "")
     if not perplexity_key:
         raise ValueError("PERPLEXITY_API_KEY is not set")
@@ -319,7 +533,10 @@ def _perplexity_search_sync(query: str, max_results: int, timeout_seconds: int) 
     payload = {
         "model": os.environ.get("PPLX_MODEL", "sonar-pro"),
         "messages": [
-            {"role": "system", "content": "Provide concise answer and include citations."},
+            {
+                "role": "system",
+                "content": "Provide concise answer and include citations.",
+            },
             {"role": "user", "content": query},
         ],
         "max_tokens": 1024,
@@ -329,7 +546,10 @@ def _perplexity_search_sync(query: str, max_results: int, timeout_seconds: int) 
     response = _http_request(
         "POST",
         os.environ.get("PPLX_API_URL", "https://api.perplexity.ai/chat/completions"),
-        headers={"Authorization": f"Bearer {perplexity_key}", "Content-Type": "application/json"},
+        headers={
+            "Authorization": f"Bearer {perplexity_key}",
+            "Content-Type": "application/json",
+        },
         json=payload,
         timeout=timeout_seconds,
     )
@@ -348,80 +568,9 @@ def _perplexity_search_sync(query: str, max_results: int, timeout_seconds: int) 
     }
 
 
-def _extract_bocha_urls(data: dict[str, Any], max_results: int) -> list[str]:
-    candidates: list[Any] = []
-    for container in (
-        data.get("data", {}).get("webPages", {}).get("value"),
-        data.get("webPages", {}).get("value"),
-        data.get("data", {}).get("webPages"),
-        data.get("webPages"),
-        data.get("data", {}).get("results"),
-        data.get("results"),
-    ):
-        if isinstance(container, list):
-            candidates = container
-            break
-
-    urls: list[str] = []
-    for item in candidates[:max_results]:
-        if not isinstance(item, dict):
-            continue
-        maybe_url = item.get("url") or item.get("link")
-        if maybe_url:
-            urls.append(str(maybe_url))
-    return urls
-
-
-def _extract_bocha_answer(data: dict[str, Any]) -> str:
-    candidates = [
-        data.get("summary"),
-        data.get("answer"),
-        data.get("data", {}).get("summary"),
-        data.get("data", {}).get("answer"),
-        data.get("data", {}).get("message"),
-    ]
-    for value in candidates:
-        if isinstance(value, str) and value.strip():
-            return value.strip()
-
-    web_pages = data.get("data", {}).get("webPages", {})
-    if isinstance(web_pages, dict):
-        value = web_pages.get("value")
-        if isinstance(value, list):
-            snippets: list[str] = []
-            for item in value[:3]:
-                if not isinstance(item, dict):
-                    continue
-                snippet = item.get("summary") or item.get("snippet")
-                if isinstance(snippet, str) and snippet.strip():
-                    snippets.append(snippet.strip())
-            if snippets:
-                return "\n\n".join(snippets[:3])
-    return ""
-
-
-def _bocha_search_sync(query: str, max_results: int, timeout_seconds: int) -> dict[str, Any]:
-    bocha_key = os.environ.get("BOCHA_API_KEY", "")
-    if not bocha_key:
-        raise ValueError("BOCHA_API_KEY is not set")
-
-    response = _http_request(
-        "POST",
-        os.environ.get("BOCHA_API_URL", "https://api.bocha.cn/v1/web-search"),
-        headers={"Authorization": f"Bearer {bocha_key}", "Content-Type": "application/json"},
-        json={"query": query, "summary": True, "count": max_results},
-        timeout=timeout_seconds,
-    )
-    response.raise_for_status()
-    data = response.json()
-    return {
-        "provider": "bocha",
-        "answer": _extract_bocha_answer(data),
-        "urls": _extract_bocha_urls(data, max_results),
-    }
-
-
-def _serper_search_sync(query: str, max_results: int, timeout_seconds: int) -> dict[str, Any]:
+def _serper_search_sync(
+    query: str, max_results: int, timeout_seconds: int
+) -> dict[str, Any]:
     serper_key = os.environ.get("SERPER_API_KEY", "")
     if not serper_key:
         raise ValueError("SERPER_API_KEY is not set")
@@ -458,7 +607,10 @@ def _jina_search_sync(query: str, timeout_seconds: int) -> dict[str, Any]:
     response = _http_request(
         "POST",
         "https://deepsearch.jina.ai/v1/chat/completions",
-        headers={"Authorization": f"Bearer {jina_key}", "Content-Type": "application/json"},
+        headers={
+            "Authorization": f"Bearer {jina_key}",
+            "Content-Type": "application/json",
+        },
         json=payload,
         timeout=timeout_seconds,
     )
@@ -475,21 +627,36 @@ def _jina_search_sync(query: str, timeout_seconds: int) -> dict[str, Any]:
 
 @tool(
     name="mcp_free_search",
-    description="Free search via DuckDuckGo. Input query and return ranked URLs with snippets.",
+    description=(
+        "Free search via DuckDuckGo/Bing with concurrent fallback. "
+        "Input query and return ranked URLs with snippets."
+    ),
 )
-async def mcp_free_search(query: str, max_results: int = 8, timeout_seconds: int = 20) -> str:
+async def mcp_free_search(
+    query: str,
+    max_results: int = 8,
+    timeout_seconds: int = 5,
+    overall_timeout: int = 5,
+) -> str:
     query = (query or "").strip()
     if not query:
         return "[ERROR]: query cannot be empty."
 
     max_results = max(1, min(max_results, 20))
-    timeout_seconds = max(5, min(timeout_seconds, 60))
+    timeout_seconds = max(3, min(timeout_seconds, 10))
+    overall_timeout = 5
+
     try:
-        engine_used, rows = await asyncio.to_thread(
-            _search_free_sync, query, max_results, timeout_seconds
+        engine_used, rows = await _search_free_async(
+            query, max_results, timeout_seconds, overall_timeout
         )
     except Exception as exc:
-        return f"[ERROR]: free search failed: {exc}"
+        try:
+            engine_used, rows = await asyncio.to_thread(
+                _search_free_sync, query, max_results, timeout_seconds
+            )
+        except Exception as fallback_exc:
+            return f"[ERROR]: free search failed: {exc}, fallback also failed: {fallback_exc}"
 
     if not rows:
         return f"No search results for: {query}"
@@ -505,7 +672,10 @@ async def mcp_free_search(query: str, max_results: int = 8, timeout_seconds: int
 
 @tool(
     name="mcp_paid_search",
-    description="Paid search via Bocha/Perplexity/SERPER/JINA. Support provider=auto|bocha|perplexity|serper|jina.",
+    description=(
+        "Paid search via Petal/Perplexity/SERPER/JINA. "
+        "provider=auto|petal|perplexity|serper|jina."
+    ),
 )
 async def mcp_paid_search(
     query: str,
@@ -518,14 +688,14 @@ async def mcp_paid_search(
         return "[ERROR]: query cannot be empty."
 
     provider = (provider or "auto").strip().lower()
-    if provider not in {"auto", "bocha", "jina", "serper", "perplexity"}:
-        return "[ERROR]: provider must be one of auto|bocha|jina|serper|perplexity."
+    if provider not in {"auto", "jina", "serper", "perplexity", "petal"}:
+        return "[ERROR]: provider must be one of auto|petal|jina|serper|perplexity."
 
     timeout_seconds = max(10, min(timeout_seconds, 120))
     max_results = max(1, min(max_results, 20))
 
     runners = {
-        "bocha": lambda: _bocha_search_sync(
+        "petal": lambda: _petal_search_sync(
             query=query, max_results=max_results, timeout_seconds=timeout_seconds
         ),
         "jina": lambda: _jina_search_sync(query=query, timeout_seconds=timeout_seconds),
@@ -536,26 +706,11 @@ async def mcp_paid_search(
             query=query, max_results=max_results, timeout_seconds=timeout_seconds
         ),
     }
-    
-    available_providers = []
-    if os.environ.get("BOCHA_API_KEY"):
-        available_providers.append("bocha")
-    if os.environ.get("PERPLEXITY_API_KEY"):
-        available_providers.append("perplexity")
-    if os.environ.get("SERPER_API_KEY"):
-        available_providers.append("serper")
-    if os.environ.get("JINA_API_KEY"):
-        available_providers.append("jina")
-    
-    if not available_providers:
-        return "[ERROR]: no paid search API keys configured."
-    
-    if provider != "auto":
-        if provider not in available_providers:
-            return f"[ERROR]: {provider} API key not configured. Available providers: {', '.join(available_providers)}"
-        order = [provider]
-    else:
-        order = [p for p in ["bocha", "perplexity", "serper", "jina"] if p in available_providers]
+    order = (
+        [provider]
+        if provider != "auto"
+        else ["perplexity", "serper", "jina", "petal"]
+    )
 
     errors: list[str] = []
     for name in order:

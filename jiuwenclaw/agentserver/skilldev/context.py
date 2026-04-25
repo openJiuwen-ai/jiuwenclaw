@@ -38,15 +38,15 @@ from openjiuwen.harness.tools.filesystem import (
     ListDirTool,
 )
 from openjiuwen.harness.tools.bash import BashTool
-from openjiuwen.harness.tools.web_tools import (
-    WebFetchWebpageTool,
-    WebFreeSearchTool,
-    WebPaidSearchTool,
-)
+from openjiuwen.harness.tools.web_tools import WebPaidSearchTool
 
 from openjiuwen.core.single_agent.rail.base import AgentRail
 
 from jiuwenclaw.agentserver.deep_agent.rails import JiuClawStreamEventRail
+from jiuwenclaw.agentserver.tools.harness_named_web_tools import (
+    JiuwenHarnessFetchWebpageTool,
+    JiuwenHarnessFreeSearchTool,
+)
 from jiuwenclaw.agentserver.skilldev.deps import SkillDevDeps
 from jiuwenclaw.agentserver.skilldev.schema import SkillDevEvent, SkillDevEventType, SkillDevState
 
@@ -65,9 +65,9 @@ HARNESS_TOOL_CLASSES: Dict[str, Type] = {
     "file_listdir": ListDirTool,
     "shell": BashTool,
     "code_execute": CodeTool,
-    "web_search_free": WebFreeSearchTool,
+    "web_search_free": JiuwenHarnessFreeSearchTool,
     "web_search_paid": WebPaidSearchTool,
-    "web_fetch": WebFetchWebpageTool,
+    "web_fetch": JiuwenHarnessFetchWebpageTool,
 }
 
 # Stage-level tool isolation: stage_name -> allowed tool names

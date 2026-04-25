@@ -1,6 +1,6 @@
 from types import SimpleNamespace
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import ANY, patch
 
 import pytest
 
@@ -11,6 +11,10 @@ from openjiuwen.harness.prompts import PromptSection, SystemPromptBuilder
 from jiuwenclaw.agentserver.deep_agent.interface_deep import JiuWenClawDeepAdapter
 from jiuwenclaw.agentserver.deep_agent.prompt_builder import build_identity_prompt
 from jiuwenclaw.agentserver.deep_agent.rails.runtime_prompt_rail import RuntimePromptRail
+from jiuwenclaw.agentserver.tools.harness_named_web_tools import (
+    JiuwenHarnessFetchWebpageTool,
+    JiuwenHarnessFreeSearchTool,
+)
 
 
 class _TestableJiuWenClawDeepAdapter(JiuWenClawDeepAdapter):
@@ -121,7 +125,12 @@ def test_build_configured_subagents_includes_optional_browser_and_configured_cod
         workspace="/tmp/jiuwenclaw-workspace",
         language="cn",
         max_iterations=9,
+        tools=ANY,
     )
+    research_tools = mock_research.call_args.kwargs["tools"]
+    assert len(research_tools) == 2
+    assert isinstance(research_tools[0], JiuwenHarnessFreeSearchTool)
+    assert isinstance(research_tools[1], JiuwenHarnessFetchWebpageTool)
     mock_browser.assert_called_once_with(
         model,
         workspace="/tmp/jiuwenclaw-workspace",

@@ -61,8 +61,6 @@ from openjiuwen.harness.subagents.browser_agent import build_browser_agent_confi
 from openjiuwen.harness.subagents.code_agent import build_code_agent_config
 from openjiuwen.harness.subagents.research_agent import build_research_agent_config
 from openjiuwen.harness.tools import (
-    WebFetchWebpageTool,
-    WebFreeSearchTool,
     WebPaidSearchTool,
     create_audio_tools,
     create_vision_tools,
@@ -115,6 +113,7 @@ from jiuwenclaw.agentserver.tools.multimodal_config import (
     dedicated_multimodal_model_configured,
 )
 from jiuwenclaw.agentserver.tools.video_tools import video_understanding
+from jiuwenclaw.agentserver.tools.harness_named_web_tools import build_jiuwen_harness_named_web_tools
 
 from jiuwenclaw.agentserver.tools import SendFileToolkit, SkillToolkit
 from jiuwenclaw.agentserver.tools.acp_output_tools import get_tools as get_acp_output_tools
@@ -783,6 +782,10 @@ class JiuWenClawDeepAdapter:
                         max_iterations=_parse_int(
                             research_agent_cfg.get("max_iterations"),
                             react_cfg.get("max_iterations", 15),
+                        ),
+                        tools=build_jiuwen_harness_named_web_tools(
+                            agent_id="research_agent",
+                            language=resolved_language,
                         ),
                     )
                 )
@@ -1785,10 +1788,12 @@ class JiuWenClawDeepAdapter:
         """Get tool cards."""
         tool_cards = []
 
-        for tool_cls in [WebFreeSearchTool, WebFetchWebpageTool]:
-            tool_instance = tool_cls(agent_id=agent_id)
-            Runner.resource_mgr.add_tool(tool_instance)
-            tool_cards.append(tool_instance.card)
+        for tool in build_jiuwen_harness_named_web_tools(
+                agent_id=agent_id,
+                language=self._resolve_runtime_language(),
+        ):
+            Runner.resource_mgr.add_tool(tool)
+            tool_cards.append(tool.card)
 
         # 付费搜索工具：有任意一个付费 key 就注册
         if any(

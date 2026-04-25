@@ -37,6 +37,7 @@ dependencies = [
     "opentelemetry-exporter-otlp-proto-grpc>=1.25.0",
     "opentelemetry-exporter-otlp-proto-http>=1.25.0",
     "json-repair>=0.58.0",
+    "trafilatura>=1.6.0",
     "tree-sitter>=0.25.0,<0.26.0",
     "tree-sitter-bash>=0.25.0,<0.26.0",
     # 缺乏这些包TestTenantAgentPool无法执行
