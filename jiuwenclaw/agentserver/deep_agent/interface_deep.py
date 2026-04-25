@@ -90,6 +90,7 @@ from jiuwenclaw.agentserver.deep_agent.rails import (
     SkillComplianceRail,
     SkillProtocolPromptRail,
 )
+from jiuwenclaw.agentserver.deep_agent.rails.disabled_tools_rail import DisabledToolsRail
 from jiuwenclaw.agentserver.deep_agent.rails.dispatch_agent_rail import (
     DispatchAgentRail,
 )
@@ -610,6 +611,7 @@ class JiuWenClawDeepAdapter:
         self._skill_evolution_rail: SkillEvolutionRail | None = None
         self._subagent_rail: SubagentRail | None = None
         self._dispatch_agent_rail: DispatchAgentRail | None = None
+        self._disabled_tools_rail: DisabledToolsRail | None = None
         self._permission_rail: Any = None
         self._avatar_rail: Any = None
         self._tool_cards = None
@@ -1569,6 +1571,20 @@ class JiuWenClawDeepAdapter:
             rail = None
         return rail
 
+    def _build_disabled_tools_rail(self, config: dict[str, Any]) -> DisabledToolsRail | None:
+        """Build DisabledToolsRail to filter out disabled tools based on config."""
+        try:
+            disabled_list = config.get("disabled_tools", [])
+            rail = DisabledToolsRail(disabled_tools=disabled_list)
+            logger.info(
+                "[JiuWenClawDeepAdapter] DisabledToolsRail create success, disabled_tools: %s",
+                disabled_list,
+            )
+        except Exception as exc:
+            logger.warning("[JiuWenClawDeepAdapter] DisabledToolsRail create failed: %s", exc)
+            rail = None
+        return rail
+
     def _build_agent_rails(self, config: dict[str, Any], config_base: dict[str, Any], *,
                            mode: str = "agent.plan") -> list[Any]:
         """Build DeepAgent rails consistently for cold start and hot reload."""
@@ -1600,6 +1616,8 @@ class JiuWenClawDeepAdapter:
                                                                            "default", {}).get("model_client_config",
                                                                                               {}).get("model_name",
                                                                                                       "gpt-4")}),
+            # DisabledToolsRail - highest priority (100), runs last to filter disabled tools
+            _RailBuildInfo("_disabled_tools_rail", self._build_disabled_tools_rail, {"config": config}),
         ]
         # ContextEngineeringRail 不在冷启动时挂载，由 _update_rails_for_mode 按 mode 按需注册/注销
 
@@ -1741,6 +1759,16 @@ class JiuWenClawDeepAdapter:
 
         self._update_permission_rail(config_base)
 
+        # Update disabled_tools_rail config in-place (no re-init needed)
+        disabled_list = config.get("disabled_tools", [])
+        if self._disabled_tools_rail is not None:
+            self._disabled_tools_rail.update_config(disabled_list)
+        elif disabled_list:
+            # First time enabling - create the rail
+            self._disabled_tools_rail = DisabledToolsRail(disabled_tools=disabled_list)
+            if self._disabled_tools_rail is not None:
+                logger.info("[JiuWenClawDeepAdapter] _disabled_tools_rail newly created on hot-reload")
+
         rails_list = []
         if self._skill_rail is not None:
             rails_list.append(self._skill_rail)
@@ -1754,6 +1782,8 @@ class JiuWenClawDeepAdapter:
             rails_list.append(self._avatar_rail)
         if self._permission_rail is not None:
             rails_list.append(self._permission_rail)
+        if self._disabled_tools_rail is not None:
+            rails_list.append(self._disabled_tools_rail)
         return rails_list
 
     async def _get_tool_cards(self, agent_id: str, *, mode: str = "agent.plan"):
