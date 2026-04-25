@@ -1517,6 +1517,7 @@ class JiuWenClaw:
                 extra=request.params,
             )
 
+            from jiuwenclaw.extensions.registry import ExtensionRegistry
             await ExtensionRegistry.get_instance().trigger(AgentServerHookEvents.MEMORY_AFTER_CHAT, after_ctx)
 
         return AgentResponse(
@@ -1722,6 +1723,7 @@ class JiuWenClaw:
                 extra=request.params,
             )
 
+            from jiuwenclaw.extensions.registry import ExtensionRegistry
             await ExtensionRegistry.get_instance().trigger(AgentServerHookEvents.MEMORY_AFTER_CHAT, after_ctx)
 
         if request.params.get("mode", "plan") == "plan":
