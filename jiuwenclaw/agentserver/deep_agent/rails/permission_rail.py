@@ -502,7 +502,7 @@ class PermissionInterruptRail(ConfirmInterruptRail):
             return "read"
         if tool_name in {"write_file", "write_text_file", "edit_file", "write"}:
             return "edit"
-        if tool_name in {"grep", "glob_file_search", "mcp_free_search", "mcp_paid_search"}:
+        if tool_name in {"grep", "glob_file_search", "mcp_free_search", "mcp_paid_search", "mcp_petal_search"}:
             return "search"
         if tool_name in {"fetch_webpage", "mcp_fetch_webpage"}:
             return "fetch"
