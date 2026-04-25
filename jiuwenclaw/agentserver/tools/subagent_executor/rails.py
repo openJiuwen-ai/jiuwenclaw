@@ -7,10 +7,8 @@ Provides message injection and context variable management for fork/spawn agents
 
 from __future__ import annotations
 
-from typing import Any, TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
-from openjiuwen.core.session.agent import Session
-from openjiuwen.core.session.stream.base import OutputSchema
 from openjiuwen.core.single_agent.rail.base import (
     AgentCallbackContext,
     ToolCallInputs,
@@ -23,6 +21,12 @@ from jiuwenclaw.agentserver.tools.subagent_executor.context_vars import (
     set_current_agent_subagent_id,
     set_subagent_parent_session,
 )
+from jiuwenclaw.agentserver.deep_agent.rails.stream_event_rail import (
+    JiuClawStreamEventRail,
+)
+
+if TYPE_CHECKING:
+    from openjiuwen.core.session.agent import Session
 
 if TYPE_CHECKING:
     pass
@@ -161,18 +165,20 @@ class SubagentContextRail(DeepAgentRail):
 
         # Emit tool_call event using stored parent_session (NOT ctx.session)
         # ctx.session is Runner's internal session, not our SubagentSessionProxy
+        # Reuse JiuClawStreamEventRail's static methods to avoid code duplication
         if self._parent_session is not None and isinstance(ctx.inputs, ToolCallInputs):
             tc = ctx.inputs.tool_call
-            await self._emit_tool_call(self._parent_session, tc)
-            await self._emit_tool_update(self._parent_session, tc, status="in_progress")
+            await JiuClawStreamEventRail._emit_tool_call(self._parent_session, tc)
+            await JiuClawStreamEventRail._emit_tool_update(self._parent_session, tc, status="in_progress")
 
     async def after_tool_call(self, ctx: AgentCallbackContext) -> None:
         """Clear context after tool execution and emit tool_result event."""
         # Emit tool_result event using stored parent_session
+        # Reuse JiuClawStreamEventRail's static method
         if self._parent_session is not None and isinstance(ctx.inputs, ToolCallInputs):
             tc = ctx.inputs.tool_call
             result = ctx.inputs.tool_result
-            await self._emit_tool_result(self._parent_session, tc, result)
+            await JiuClawStreamEventRail._emit_tool_result(self._parent_session, tc, result)
 
         # Clear context variables
         set_current_agent_context(None)
@@ -184,75 +190,3 @@ class SubagentContextRail(DeepAgentRail):
         set_current_agent_context(None)
         set_current_agent_subagent_id(None)
         set_subagent_parent_session(None)
-
-    # Static methods for emitting stream events (same as JiuClawStreamEventRail)
-
-    @staticmethod
-    async def _emit_tool_call(session: Session, tool_call: Any) -> None:
-        """Emit tool_call event for frontend display."""
-        try:
-            await session.write_stream(
-                OutputSchema(
-                    type="tool_call",
-                    index=0,
-                    payload={
-                        "tool_call": {
-                            "name": getattr(tool_call, "name", ""),
-                            "arguments": getattr(tool_call, "arguments", {}),
-                            "tool_call_id": getattr(tool_call, "id", ""),
-                        }
-                    },
-                )
-            )
-        except Exception:
-            logger.debug("[SubagentContextRail] tool_call emit failed", exc_info=True)
-
-    @staticmethod
-    async def _emit_tool_update(session: Session, tool_call: Any, *, status: str) -> None:
-        """Emit tool_update event for frontend display."""
-        try:
-            await session.write_stream(
-                OutputSchema(
-                    type="tool_update",
-                    index=0,
-                    payload={
-                        "tool_update": {
-                            "tool_name": getattr(tool_call, "name", "") if tool_call else "",
-                            "tool_call_id": getattr(tool_call, "id", "") if tool_call else "",
-                            "arguments": getattr(tool_call, "arguments", {}) if tool_call else {},
-                            "status": str(status or "").strip() or "in_progress",
-                        }
-                    },
-                )
-            )
-        except Exception:
-            logger.debug("[SubagentContextRail] tool_update emit failed", exc_info=True)
-
-    @staticmethod
-    async def _emit_tool_result(session: Session, tool_call: Any, result: Any) -> None:
-        """Emit tool_result event for frontend display."""
-        try:
-            # Handle structured result payload (same as JiuClawStreamEventRail)
-            raw_output = None
-            if isinstance(result, (dict, list)):
-                raw_output = result
-
-            tool_result_payload = {
-                "tool_name": getattr(tool_call, "name", "") if tool_call else "",
-                "tool_call_id": getattr(tool_call, "id", "") if tool_call else "",
-                "result": str(result)[:1000] if result is not None else "",
-            }
-            if raw_output is not None:
-                tool_result_payload["raw_output"] = raw_output
-
-            await session.write_stream(
-                OutputSchema(
-                    type="tool_result",
-                    index=0,
-                    payload={
-                        "tool_result": tool_result_payload
-                    },
-                )
-            )
-        except Exception:
-            logger.debug("[SubagentContextRail] tool_result emit failed", exc_info=True)
