@@ -363,6 +363,8 @@ class VibeSkillChannel(BaseChannel):
 
         if msg_type == "message.send":
             return await self._handle_message_send(ws, data)
+        if msg_type == "skill.parse":
+            return await self._handle_skill_parse(data)
         if msg_type == "question.replied":
             return await self._handle_question_replied(data)
         if msg_type == "review.replied":
@@ -512,6 +514,43 @@ class VibeSkillChannel(BaseChannel):
         # 直接发送到 MessageHandler
         self.bus.deliver_to_message_handler(msg)
 
+        return True
+
+    async def _handle_skill_parse(self, data: dict[str, Any]) -> bool:
+        """处理 skill.parse，封装为 skilldev.parse_skill。"""
+        properties = data.get("properties") if isinstance(data.get("properties"), dict) else data
+        session_id = str(properties.get("sessionID") or data.get("sessionID") or "").strip()
+        if not session_id:
+            return False
+
+        internal_id = await self._store.resolve_internal(session_id)
+        if not internal_id:
+            internal_id = session_id
+
+        session_obj = await self._store.get_session(internal_id)
+        if session_obj and session_obj.mode != "SkillCreate":
+            return False
+
+        task_id = str(properties.get("taskId") or properties.get("task_id") or internal_id).strip()
+        url = str(properties.get("url") or "").strip()
+        filename = str(properties.get("filename") or "").strip()
+        if not url or not filename:
+            return False
+
+        skill_package = {"url": url, "filename": filename}
+        msg = Message(
+            id=f"vibeskill-parse-skill-{int(time.time() * 1000):x}-{secrets.token_hex(3)}",
+            type="req",
+            channel_id=VIBESKILL_CHANNEL_ID,
+            session_id=internal_id,
+            params={"task_id": task_id, "skill_package": skill_package},
+            timestamp=time.time(),
+            ok=True,
+            req_method=ReqMethod.SKILLDEV_PARSE_SKILL,
+            is_stream=True,
+            metadata={_VIBESKILL_ORIGINAL_SESSION_ID_KEY: session_id},
+        )
+        self.bus.deliver_to_message_handler(msg)
         return True
 
     async def _handle_chat_message(
