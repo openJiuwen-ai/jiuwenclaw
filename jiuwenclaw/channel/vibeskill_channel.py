@@ -327,8 +327,8 @@ class VibeSkillChannel(BaseChannel):
                                 "sessionID": external_sid,
                                 "messageID": ctx["message_id"],
                                 "partID": part["id"],
-                                "field": "text",
-                                "delta": text,
+                                "type": "text",
+                                "text": text,
                             },
                         }
                         await self._send_ws_json(ws, response, source="fallback.chat.delta")
@@ -753,8 +753,8 @@ class VibeSkillChannel(BaseChannel):
                         "sessionID": external_sid,
                         "messageID": ctx.get("message_id"),
                         "partID": text_part.get("id"),
-                        "field": "text",
-                        "delta": text,
+                        "type": "text",
+                        "text": text,
                     },
                 }],
             )
@@ -843,22 +843,31 @@ class VibeSkillChannel(BaseChannel):
         # 序号4: 评估结束，case_done=True → message.part.updated 标记完成
         if case_done:
             part["status"] = "done"
-            part["message"] = message
+            part["text"] = message
             return self._prepend_message_announcement(ctx, external_sid, [{
                 "type": "message.part.updated",
                 "properties": self._serialize_part(part, external_sid),
             }])
 
-        # 序号2: 第一次来这个 stage → message.part.updated 创建气泡
+        # 序号2: 第一次来这个 stage → message.updated 创建 message（包含 part）
         if is_first:
             part["status"] = "running"
-            part["message"] = message
-            return self._prepend_message_announcement(ctx, external_sid, [{
-                "type": "message.part.updated",
-                "properties": self._serialize_part(part, external_sid),
-            }])
+            part["text"] = message
+            ctx["message_announced"] = True
+            return [{
+                "type": "message.updated",
+                "properties": {
+                    "info": {
+                        "id": ctx["message_id"],
+                        "sessionID": external_sid,
+                        "role": "assistant",
+                        "parts": self._serialize_parts(ctx["parts"], external_sid),
+                    }
+                },
+            }]
 
         # 序号3: 中间消息 → message.part.delta 更新气泡
+        part["text"] = str(part.get("text") or "") + message
         return self._prepend_message_announcement(ctx, external_sid, [{
             "type": "message.part.delta",
             "properties": {
@@ -866,7 +875,7 @@ class VibeSkillChannel(BaseChannel):
                 "messageID": ctx["message_id"],
                 "partID": part["id"],
                 "type": "text",
-                "delta": message,
+                "text": message,
             },
         }])
 
@@ -1039,7 +1048,7 @@ class VibeSkillChannel(BaseChannel):
         # 序号4: 测试结束，case_status 存在 → message.part.updated 标记完成
         if case_status:
             part["status"] = case_status  # "success" or "failed"
-            part["message"] = message
+            part["text"] = message
             return self._prepend_message_announcement(ctx, external_sid, [{
                 "type": "message.part.updated",
                 "properties": self._serialize_part(part, external_sid),
@@ -1048,7 +1057,7 @@ class VibeSkillChannel(BaseChannel):
         # 序号2: 第一次来这个 stage（stage_key 不存在）→ message.updated 创建气泡
         if is_first:
             part["status"] = "running"
-            part["message"] = message
+            part["text"] = message
             return [{
                 "type": "message.updated",
                 "properties": {
@@ -1062,6 +1071,7 @@ class VibeSkillChannel(BaseChannel):
             }]
 
         # 序号3: 中间消息 → message.part.delta 更新气泡
+        part["text"] = str(part.get("text") or "") + message
         return [{
             "type": "message.part.delta",
             "properties": {
@@ -1069,7 +1079,7 @@ class VibeSkillChannel(BaseChannel):
                 "messageID": ctx["message_id"],
                 "partID": part["id"],
                 "type": "text",
-                "delta": message,
+                "text": message,
             },
         }]
 
@@ -1553,7 +1563,7 @@ class VibeSkillChannel(BaseChannel):
                 "messageID": ctx["message_id"],
                 "partID": part["id"],
                 "type": part_type,
-                "delta": delta,
+                "text": delta,
             },
         })
         return self._prepend_message_announcement(ctx, external_sid, responses)
@@ -1957,7 +1967,7 @@ class VibeSkillChannel(BaseChannel):
             channel_id=VIBESKILL_CHANNEL_ID,
             session_id=session_id,
             req_method=ReqMethod.SKILLDEV_DOWNLOAD,
-            params={"sessionID": session_id},
+            params={"task_id": session_id},
             is_stream=False,
             timestamp=time.time(),
         )
