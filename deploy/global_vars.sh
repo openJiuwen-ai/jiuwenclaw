@@ -59,6 +59,10 @@ declare -A DEPLOY_VARS=(
     ["PVC_NAME"]="pvc-nfs-shared"
     ["PV_NAME"]="pv-nfs-shared"
     ["NFS_SHARE_PATH"]="/"
+    # extensions.agent_client_rest（可被 .env / .env.custom 覆盖）
+    ["AGENT_CLIENT_REST_ENABLED"]="true"
+    ["AGENT_CLIENT_REST_HOST"]="0.0.0.0"
+    ["AGENT_CLIENT_REST_PORT"]="18080"
 )
 
 declare -A OYR_COMPONENTS=(

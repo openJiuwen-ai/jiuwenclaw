@@ -582,6 +582,11 @@ extensions:
    # 扩展包搜索目录（字符串），用 ';' 分割多个目录：
    # EXTENSION_DIRS="E:/a;D:/b"; 默认会加载仓库根目录 extensions
    extension_dirs: ${EXTENSION_DIRS:-extensions}
+   # 外置扩展 agent_client REST 监听（与 docker/extensions/agent_client 配套）；本地开发可通过环境变量覆盖
+   agent_client_rest:
+     enabled: ${AGENT_CLIENT_REST_ENABLED:-true}
+     host: ${AGENT_CLIENT_REST_HOST:-127.0.0.1}
+     port: ${AGENT_CLIENT_REST_PORT:-18080}
 
 team:
   team_name: jiuwen_team
