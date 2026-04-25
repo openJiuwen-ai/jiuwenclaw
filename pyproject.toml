@@ -37,6 +37,8 @@ dependencies = [
     "opentelemetry-exporter-otlp-proto-grpc>=1.25.0",
     "opentelemetry-exporter-otlp-proto-http>=1.25.0",
     "json-repair>=0.58.0",
+    "tree-sitter>=0.25.0,<0.26.0",
+    "tree-sitter-bash>=0.25.0,<0.26.0",
     # 缺乏这些包TestTenantAgentPool无法执行
     "sqlite-vec==0.1.6",
     "pytest==8.3.5",
@@ -53,10 +55,6 @@ dependencies = [
 desktop = ["pywebview>=5.4"]
 dev = ["pyinstaller>=6.0.0", "pywebview>=5.4"]
 tui = ["jiuwenclaw-tui==0.1.10"]
-shell-ast = [
-    "tree-sitter>=0.25.0,<0.26.0",
-    "tree-sitter-bash>=0.25.0,<0.26.0",
-]
 # Same packages as [dependency-groups] test (pip install -e ".[test]")
 test = [
     "pytest>=8.3.5",

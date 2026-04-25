@@ -310,8 +310,8 @@ def update_permissions_deny_guidance_in_config(msg: str) -> None:
 # ---------- Web UI：permissions.tools / rules / approval_overrides ----------
 
 _VALID_PERM_LEVEL = frozenset({"allow", "ask", "deny"})
-_VALID_RULE_SEVERITY = frozenset({"LOW", "MEDIUM", "HIGH", "CRITICAL"})
-_RULE_MUTABLE_KEYS = frozenset({"tools", "pattern", "severity", "action", "description", "match_type"})
+_VALID_RULE_ACTION = frozenset({"allow", "deny"})
+_RULE_MUTABLE_KEYS = frozenset({"pattern", "action", "description"})
 
 
 def get_permissions_tools() -> dict[str, Any]:
@@ -324,7 +324,7 @@ def get_permissions_tools() -> dict[str, Any]:
 
 
 def replace_permissions_tools_in_config(tools: Any) -> None:
-    """整表替换 ``permissions.tools``；值仅允许 ``allow|ask|deny``（或 legacy ``{\"*\": level}``）。"""
+    """整表替换 ``permissions.tools``；值仅允许 ``allow|ask|deny``。"""
     normalized = _validate_tools_map(tools)
     data = _load_yaml_round_trip(_CONFIG_YAML_PATH)
     if "permissions" not in data:
@@ -338,7 +338,7 @@ def update_permissions_tool_in_config(tool_name: str, level: Any) -> dict[str, A
 
     Args:
         tool_name: 工具名（如 ``mcp_exec_command``），与 ``permissions.tools`` 键一致。
-        level: ``allow`` / ``ask`` / ``deny`` 字符串，或 legacy ``{\"*\": level}``。
+        level: ``allow`` / ``ask`` / ``deny`` 字符串。
 
     Returns:
         ``{\"tools\": {...}}`` 更新后的完整 tools 映射（便于前端刷新）。
@@ -392,12 +392,10 @@ def _validate_tools_map(tools: Any) -> dict[str, str]:
         name = str(k).strip()
         if not name:
             raise ValueError("tool name must be non-empty")
-        if isinstance(v, dict) and isinstance(v.get("*"), str):
-            level = str(v["*"]).strip().lower()
-        elif isinstance(v, str):
+        if isinstance(v, str):
             level = v.strip().lower()
         else:
-            raise ValueError(f"tools[{name!r}]: value must be allow|ask|deny or object {{'*': level}}")
+            raise ValueError(f"tools[{name!r}]: value must be allow|ask|deny")
         if level not in _VALID_PERM_LEVEL:
             raise ValueError(f"tools[{name!r}]: invalid level {level!r}")
         out[name] = level
@@ -431,15 +429,12 @@ def create_permissions_rule_in_config(rule: dict[str, Any]) -> dict[str, Any]:
     for key in _RULE_MUTABLE_KEYS:
         if key in rule and rule[key] is not None:
             stored[key] = rule[key]
-    if "tools" not in stored or "pattern" not in stored:
-        raise ValueError("tools and pattern are required")
-    stored["tools"] = _normalize_rule_tools(stored["tools"])
+    if "pattern" not in stored:
+        raise ValueError("pattern is required")
     stored["pattern"] = str(stored["pattern"]).strip()
-    if not stored["tools"]:
-        raise ValueError("tools must be a non-empty list")
     if not stored["pattern"]:
         raise ValueError("pattern must be non-empty")
-    _normalize_rule_severity_action(stored)
+    _normalize_rule_action(stored)
 
     data = _load_yaml_round_trip(_CONFIG_YAML_PATH)
     if "permissions" not in data:
@@ -488,15 +483,11 @@ def update_permissions_rule_in_config(rule_id: str, patch: dict[str, Any]) -> di
         else:
             merged[k] = v
     merged["id"] = rid
-    if "tools" in merged:
-        merged["tools"] = _normalize_rule_tools(merged["tools"])
     if "pattern" in merged:
         merged["pattern"] = str(merged["pattern"]).strip()
-    if not merged.get("tools"):
-        raise ValueError("tools must be a non-empty list")
     if not merged.get("pattern"):
         raise ValueError("pattern must be non-empty")
-    _normalize_rule_severity_action(merged)
+    _normalize_rule_action(merged)
     rules[idx] = merged
     data["permissions"]["rules"] = rules
     _dump_yaml_round_trip(_CONFIG_YAML_PATH, data)
@@ -541,26 +532,11 @@ def delete_permissions_approval_override_in_config(override_id: str) -> bool:
     return True
 
 
-def _normalize_rule_tools(raw: Any) -> list[str]:
-    if isinstance(raw, str):
-        s = raw.strip()
-        return [s] if s else []
-    if isinstance(raw, list):
-        return [str(x).strip() for x in raw if isinstance(x, str) and str(x).strip()]
-    raise ValueError("tools must be a string or array of strings")
-
-
-def _normalize_rule_severity_action(rule: dict[str, Any]) -> None:
-    if "severity" in rule:
-        sev = str(rule["severity"]).strip().upper()
-        if sev not in _VALID_RULE_SEVERITY:
-            raise ValueError(f"invalid severity {sev!r}")
-        rule["severity"] = sev
-    if "action" in rule:
-        act = str(rule["action"]).strip().lower()
-        if act not in _VALID_PERM_LEVEL:
-            raise ValueError(f"invalid action {act!r}")
-        rule["action"] = act
+def _normalize_rule_action(rule: dict[str, Any]) -> None:
+    act = str(rule.get("action") or "").strip().lower()
+    if act not in _VALID_RULE_ACTION:
+        raise ValueError("action must be allow or deny")
+    rule["action"] = act
 
 
 def _decrypt_model_entries(entries: list[dict[str, Any]]) -> list[dict[str, Any]]:

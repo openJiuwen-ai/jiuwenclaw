@@ -9,7 +9,6 @@ from __future__ import annotations
 
 from typing import Any
 
-from jiuwenclaw.agentserver.permissions.checker import collect_permission_rail_tool_names
 from jiuwenclaw.agentserver.permissions.core import get_permission_engine
 from jiuwenclaw.utils import logger
 
@@ -41,28 +40,20 @@ def build_permission_rail(
         logger.info("[InterruptHelpers] Permission system is disabled, returning None")
         return None
 
-    tools_config = permission_config.get("tools", {})
-    tool_names = collect_permission_rail_tool_names(permission_config)
     logger.info(
-        "[InterruptHelpers] tools_config keys: %s, rail tool_names (with rules): %s",
-        list(tools_config.keys()),
-        tool_names,
-    )
-    logger.info(
-        "[InterruptHelpers] Building PermissionInterruptRail with tool_names=%s llm=%s model_name=%s",
-        tool_names, llm is not None, model_name,
+        "[InterruptHelpers] Building PermissionInterruptRail intercept=all llm=%s model_name=%s",
+        llm is not None,
+        model_name,
     )
     try:
         permission_rail = PermissionInterruptRail(
             config=permission_config,
             engine=get_permission_engine(),
-            tool_names=tool_names,
             llm=llm,
             model_name=model_name,
         )
         logger.info(
-            "[InterruptHelpers] PermissionInterruptRail created successfully with tool_names=%s",
-            tool_names
+            "[InterruptHelpers] PermissionInterruptRail created successfully intercept=all"
         )
     except Exception as exc:
         logger.warning("[InterruptHelpers] PermissionInterruptRail create failed: %s", exc)

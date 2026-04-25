@@ -56,6 +56,7 @@ from jiuwenclaw.agentserver.permissions.patterns import (
 from jiuwenclaw.agentserver.permissions.models import (
     PermissionLevel,
     PermissionResult,
+    SubcommandPermissionResult,
 )
 from jiuwenclaw.agentserver.permissions.owner_scopes import (
     TOOL_PERMISSION_CONTEXT,
@@ -66,6 +67,7 @@ __all__ = [
     # Models
     "PermissionLevel",
     "PermissionResult",
+    "SubcommandPermissionResult",
     # Core
     "PermissionEngine",
     "init_permission_engine",

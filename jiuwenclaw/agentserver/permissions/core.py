@@ -16,18 +16,14 @@ from typing import Any
 from jiuwenclaw.agentserver.permissions.checker import (
     PERMISSION_ENABLED_CHANNELS,
     ExternalDirectoryChecker,
-    ToolPermissionChecker,
 )
 from jiuwenclaw.agentserver.permissions.models import (
     PermissionLevel,
     PermissionResult,
+    SubcommandPermissionResult,
 )
 from jiuwenclaw.agentserver.permissions.tiered_policy import (
-    evaluate_tiered_policy,
-    matched_rule_allows_legacy_shell_operator_escalation,
-    matched_rule_uses_approval_override,
-    maybe_escalate_shell_operators,
-    permissions_schema_is_tiered_policy,
+    evaluate_tiered_policy_detailed,
     strictest as tiered_policy_strictest,
 )
 
@@ -47,7 +43,6 @@ class PermissionEngine:
         self._enabled = self.config.get("enabled", True)
         self._llm = llm
         self._model_name = model_name
-        self._tool_checker = ToolPermissionChecker(self.config)
         self._external_checker = ExternalDirectoryChecker(self.config)
 
     # ---------- 配置 ----------
@@ -56,7 +51,6 @@ class PermissionEngine:
         """热更新配置."""
         self.config = config
         self._enabled = config.get("enabled", True)
-        self._tool_checker = ToolPermissionChecker(config)
         self._external_checker = ExternalDirectoryChecker(config)
 
     def update_llm(self, llm: Any, model_name: str | None) -> None:
@@ -92,6 +86,31 @@ class PermissionEngine:
         include_external_directory: bool = True,
     ) -> tuple[PermissionLevel | None, str | None]:
         """直接评估全局权限，不受 enabled/channel 短路影响。"""
+        permission, matched_rule, _ = self.evaluate_global_policy_with_details(
+            tool_name,
+            tool_args,
+            channel_id,
+            include_external_directory=include_external_directory,
+        )
+        return permission, matched_rule
+
+    def evaluate_global_policy_with_details(
+        self,
+        tool_name: str,
+        tool_args: dict[str, Any],
+        channel_id: str = "web",
+        *,
+        include_external_directory: bool = True,
+    ) -> tuple[
+        PermissionLevel | None,
+        str | None,
+        list[SubcommandPermissionResult] | None,
+    ]:
+        """同 :meth:`evaluate_global_policy_directly`，但额外返回 simple shell 子命令的逐条评估结果。
+
+        第三个返回值仅在 tiered_policy + simple shell 多/单子命令场景下非空，便于
+        rail 在持久化阶段直接复用第一次评估出的 ASK 子命令，避免再次评估。
+        """
         if not isinstance(tool_args, dict):
             logger.warning(
                 "[PermissionEngine] direct tool_args is not a dict (type=%s), using {}",
@@ -100,18 +119,15 @@ class PermissionEngine:
             tool_args = {}
 
         matched_rule: str | None = None
-        if permissions_schema_is_tiered_policy(self.config):
-            permission, matched_rule = evaluate_tiered_policy(self.config, tool_name, tool_args)
-            if matched_rule == "tiered_policy:fallback(no_config)":
-                permission = None
-                matched_rule = None
-            elif (
-                not matched_rule_uses_approval_override(matched_rule)
-                and matched_rule_allows_legacy_shell_operator_escalation(matched_rule)
-            ):
-                permission = maybe_escalate_shell_operators(tool_name, tool_args, permission)
-        else:
-            permission, matched_rule = self._tool_checker.check_tool(tool_name, tool_args, channel_id)
+        subcommand_results: list[SubcommandPermissionResult] | None = None
+        permission, matched_rule, raw_subs = evaluate_tiered_policy_detailed(
+            self.config, tool_name, tool_args,
+        )
+        if raw_subs is not None:
+            subcommand_results = [
+                SubcommandPermissionResult(text=text, permission=lvl, matched_rule=rule)
+                for text, lvl, rule in raw_subs
+            ]
 
         if include_external_directory:
             ext_result = self._external_checker.check_external_paths(tool_name, tool_args)
@@ -123,7 +139,7 @@ class PermissionEngine:
                     permission = tiered_policy_strictest(permission, ext_result.permission)
                     matched_rule = f"{matched_rule}|{ext_result.matched_rule or 'external_directory'}"
 
-        return permission, matched_rule
+        return permission, matched_rule, subcommand_results
 
     # ---------- 权限检查 ----------
 
@@ -169,9 +185,9 @@ class PermissionEngine:
             )
             tool_args = {}
 
-        # 1. 工具级 + 参数规则 + 默认（legacy 或 tiered_policy）
+        # 1. 工具级 + 参数级规则（统一 tiered policy）
         external_paths: list[str] | None = None
-        permission, matched_rule = self.evaluate_global_policy_directly(
+        permission, matched_rule, subcommand_results = self.evaluate_global_policy_with_details(
             tool_name,
             tool_args,
             channel_id,
@@ -181,32 +197,19 @@ class PermissionEngine:
             permission = PermissionLevel.ASK
             matched_rule = "default"
         logger.info(
-            "[PermissionEngine] permission.policy.result tool=%s permission=%s matched_rule=%s",
+            "[PermissionEngine] permission.policy.result tool=%s permission=%s matched_rule=%s "
+            "subcommand_results=%s",
             tool_name,
             permission.value, matched_rule,
+            [(item.text, item.permission.value) for item in subcommand_results]
+            if subcommand_results else [],
         )
 
-        # 2. 外部路径：与当前决策取更严（不放宽）
-        ext_result = self._external_checker.check_external_paths(tool_name, tool_args)
-        if ext_result is not None:
-            logger.info(
-                "[PermissionEngine] permission.external.result tool=%s checked=true permission=%s "
-                "matched_rule=%s external_paths=%s merged_with=%s",
-                tool_name,
-                ext_result.permission.value,
-                ext_result.matched_rule or "external_directory",
-                ext_result.external_paths,
-                permission.value,
-            )
-            permission = tiered_policy_strictest(permission, ext_result.permission)
-            matched_rule = f"{matched_rule}|{ext_result.matched_rule or 'external_directory'}"
-            external_paths = ext_result.external_paths
-        else:
-            logger.info(
-                "[PermissionEngine] permission.external.result tool=%s checked=true permission=none "
-                "matched_rule=none external_paths=[]",
-                tool_name,
-            )
+        logger.info(
+            "[PermissionEngine] permission.external.result tool=%s checked=false permission=none "
+            "matched_rule=none external_paths=[] reason=disabled_in_tool_permission_flow",
+            tool_name,
+        )
 
         result = PermissionResult(
             permission=permission,
@@ -214,6 +217,7 @@ class PermissionEngine:
             reason=self._get_reason(permission, tool_name, matched_rule),
             risk=None,
             external_paths=external_paths,
+            subcommand_results=subcommand_results,
         )
 
         logger.info(

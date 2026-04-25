@@ -21,12 +21,25 @@ class PermissionLevel(str, Enum):
 
 
 @dataclass
+class SubcommandPermissionResult:
+    """单个 shell 子命令的权限评估结果。
+
+    用于 simple 多子命令 shell 调用，把第一次评估每个子命令的结果传递给后续
+    的持久化逻辑（避免在 rail 中重复评估同一个子命令）。
+    """
+    text: str
+    permission: PermissionLevel
+    matched_rule: str | None = None
+
+
+@dataclass
 class PermissionResult:
     permission: PermissionLevel
     matched_rule: str | None = None
     reason: str | None = None
     external_paths: list[str] | None = None
     risk: dict | None = None
+    subcommand_results: list[SubcommandPermissionResult] | None = None
 
     @property
     def is_allowed(self) -> bool:

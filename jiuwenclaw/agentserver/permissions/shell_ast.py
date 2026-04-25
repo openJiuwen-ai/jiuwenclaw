@@ -77,6 +77,8 @@ class ShellAstParseResult:
     flags: ShellStructureFlags = field(default_factory=ShellStructureFlags)
     reason: str | None = None
     backend: str = "fallback"
+    all_command_heads: tuple[str, ...] = field(default_factory=tuple)
+    all_invocations: tuple[str, ...] = field(default_factory=tuple)
 
 
 def parse_shell_for_permission(command: str) -> ShellAstParseResult:
@@ -92,6 +94,14 @@ def parse_shell_for_permission(command: str) -> ShellAstParseResult:
     text = (command or "").strip()
     if not text:
         return ShellAstParseResult(kind="simple", backend="fallback")
+    unsupported_reason = _unsupported_cmd_control_flow_reason(text)
+    if unsupported_reason:
+        return ShellAstParseResult(
+            kind="parse_unavailable",
+            flags=_scan_shell_structure(text),
+            reason=unsupported_reason,
+            backend="cmd-guard",
+        )
 
     parser = _get_tree_sitter_bash_parser()
     if parser is not None:
@@ -101,6 +111,17 @@ def parse_shell_for_permission(command: str) -> ShellAstParseResult:
             logger.warning("[PermissionEngine] permission.shell_ast.parse_failed fallback=true", exc_info=True)
 
     return _parse_with_conservative_fallback(text)
+
+
+def _unsupported_cmd_control_flow_reason(command: str) -> str | None:
+    text = (command or "").strip().lower()
+    if not text:
+        return None
+    if re.match(r"^if\b", text) and re.search(r"\belse\b", text):
+        return "unsupported Windows cmd if/else control flow"
+    if re.match(r"^for\b", text):
+        return "unsupported Windows cmd for control flow"
+    return None
 
 
 def _get_tree_sitter_bash_parser() -> Any | None:
@@ -152,6 +173,8 @@ def _parse_with_conservative_fallback(command: str) -> ShellAstParseResult:
         subcommands=(subcommand,),
         flags=flags,
         backend="fallback",
+        all_command_heads=(argv[0],) if argv else (),
+        all_invocations=(command,),
     )
 
 
@@ -196,14 +219,27 @@ def _parse_with_tree_sitter(command: str, parser: Any) -> ShellAstParseResult:
             reason="tree-sitter returned no root node",
             backend="tree-sitter",
         )
+    flags = _collect_tree_sitter_flags(root)
+    command_nodes = _collect_command_nodes(root)
+    all_invocations = tuple(
+        text
+        for text in (_node_text(node, source).strip() for node in command_nodes)
+        if text
+    )
+    all_command_heads = tuple(dict.fromkeys(
+        head
+        for head in (_command_head_from_node(node, source) for node in command_nodes)
+        if head
+    ))
     if getattr(root, "has_error", False):
         return ShellAstParseResult(
             kind="too_complex",
+            flags=flags,
             reason="tree-sitter reported parse errors",
             backend="tree-sitter",
+            all_command_heads=all_command_heads,
+            all_invocations=all_invocations,
         )
-
-    flags = _collect_tree_sitter_flags(root)
     if any((
         flags.has_command_substitution,
         flags.has_process_substitution,
@@ -217,15 +253,18 @@ def _parse_with_tree_sitter(command: str, parser: Any) -> ShellAstParseResult:
             flags=flags,
             reason="tree-sitter detected unsupported complex shell structure",
             backend="tree-sitter",
+            all_command_heads=all_command_heads,
+            all_invocations=all_invocations,
         )
 
-    command_nodes = _collect_command_nodes(root)
     if not command_nodes:
         return ShellAstParseResult(
             kind="too_complex",
             flags=flags,
             reason="tree-sitter could not extract any executable command node",
             backend="tree-sitter",
+            all_command_heads=all_command_heads,
+            all_invocations=all_invocations,
         )
 
     subcommands: list[ShellSubcommand] = []
@@ -258,6 +297,8 @@ def _parse_with_tree_sitter(command: str, parser: Any) -> ShellAstParseResult:
             flags=flags,
             reason="tree-sitter extracted only empty command nodes",
             backend="tree-sitter",
+            all_command_heads=all_command_heads,
+            all_invocations=all_invocations,
         )
 
     return ShellAstParseResult(
@@ -265,6 +306,8 @@ def _parse_with_tree_sitter(command: str, parser: Any) -> ShellAstParseResult:
         subcommands=tuple(subcommands),
         flags=flags,
         backend="tree-sitter",
+        all_command_heads=all_command_heads,
+        all_invocations=all_invocations,
     )
 
 
@@ -335,7 +378,6 @@ def _collect_command_nodes(root: Any) -> list[Any]:
         node = stack.pop()
         if str(getattr(node, "type", "")) == "command":
             command_nodes.append(node)
-            continue
         for child in reversed(list(getattr(node, "children", []) or [])):
             if child is not None:
                 stack.append(child)
@@ -346,3 +388,17 @@ def _node_text(node: Any, source: bytes) -> str:
     start = int(getattr(node, "start_byte", 0))
     end = int(getattr(node, "end_byte", 0))
     return source[start:end].decode("utf-8", errors="replace")
+
+
+def _command_head_from_node(node: Any, source: bytes) -> str:
+    for child in list(getattr(node, "children", []) or []):
+        if str(getattr(child, "type", "")) == "command_name":
+            return _node_text(child, source).strip()
+    text = _node_text(node, source).strip()
+    if not text:
+        return ""
+    try:
+        argv = shlex.split(text, posix=(os.name != "nt"))
+    except ValueError:
+        argv = text.split()
+    return str(argv[0]).strip() if argv else ""

@@ -318,23 +318,19 @@ channels:
     bot_name: ""
     enable_memory: false
 
-# ========== 细粒度权限管控（tiered_policy）==========
+# ========== 工具权限管控 ==========
 #
-# schema: tiered_policy（或兼容 v_cc / v4.2）时由 tiered_policy.evaluate_tiered_policy 求值；
-# permission_mode: normal|strict 决定 severity 映射，见 agentserver/permissions/tiered_policy.py。
-# severity（normal）：LOW/MEDIUM→allow，HIGH/CRITICAL→ask；strict 下 MEDIUM→ask、CRITICAL→deny。
-# rules[*].action: 可选显式动作 allow|ask|deny；配置后优先于 severity 映射，适合敏感文件读取、
-# 系统控制等不希望随 permission_mode 漂移的规则。
-# 内置参数规则 > 用户 rules；整工具存在则不用 defaults；详见 tiered_policy 模块说明。
-#
-# 三种动作: allow / ask / deny
+# 三种整工具动作: allow / ask / deny。
+# tools.<name> 优先于参数级规则；allow/deny 会直接短路。
+# rules / approval_overrides 仅匹配 shell 命令文本，schema 为：
+#   - id: string
+#     description: string
+#     pattern: string or re:...
+#     action: allow | deny
 permissions:
   enabled: false
-  schema: tiered_policy
-  permission_mode: normal
-
-  defaults:
-    "*": "allow"
+  # Default permission for tools not listed below.
+  defaults: ask
 
   tools:
     bash: ask
@@ -371,97 +367,46 @@ permissions:
 
   rules:
     - id: shell_allow_dir
-      tools: [bash, mcp_exec_command, create_terminal]
       pattern: "dir *"
-      severity: LOW
+      action: allow
     - id: shell_allow_ls
-      tools: [bash, mcp_exec_command, create_terminal]
       pattern: "ls *"
-      severity: LOW
+      action: allow
     - id: shell_allow_pwd
-      tools: [bash, mcp_exec_command, create_terminal]
       pattern: "pwd *"
-      severity: LOW
+      action: allow
     - id: shell_allow_cd
-      tools: [bash, mcp_exec_command, create_terminal]
       pattern: "cd *"
-      severity: LOW
+      action: allow
     - id: shell_allow_echo
-      tools: [bash, mcp_exec_command, create_terminal]
       pattern: "echo *"
-      severity: LOW
+      action: allow
     - id: shell_allow_cat
-      tools: [bash, mcp_exec_command, create_terminal]
       pattern: "cat *"
-      severity: LOW
+      action: allow
     - id: shell_allow_type
-      tools: [bash, mcp_exec_command, create_terminal]
       pattern: "type *"
-      severity: LOW
+      action: allow
     - id: shell_allow_head
-      tools: [bash, mcp_exec_command, create_terminal]
       pattern: "head *"
-      severity: LOW
+      action: allow
     - id: shell_allow_tail
-      tools: [bash, mcp_exec_command, create_terminal]
       pattern: "tail *"
-      severity: LOW
+      action: allow
     - id: shell_allow_git_status
-      tools: [bash, mcp_exec_command, create_terminal]
       pattern: "git status *"
-      severity: LOW
+      action: allow
     - id: shell_allow_git_log
-      tools: [bash, mcp_exec_command, create_terminal]
       pattern: "git log *"
-      severity: LOW
+      action: allow
     - id: shell_allow_git_diff
-      tools: [bash, mcp_exec_command, create_terminal]
       pattern: "git diff *"
-      severity: LOW
+      action: allow
     - id: shell_allow_git_branch
-      tools: [bash, mcp_exec_command, create_terminal]
       pattern: "git branch *"
-      severity: LOW
-    - id: shell_ask_rm
-      tools: [bash, mcp_exec_command, create_terminal]
-      pattern: "rm *"
-      severity: HIGH
-    - id: shell_ask_del
-      tools: [bash, mcp_exec_command, create_terminal]
-      pattern: "del *"
-      severity: HIGH
-    - id: shell_ask_rd
-      tools: [bash, mcp_exec_command, create_terminal]
-      pattern: "rd *"
-      severity: HIGH
-    - id: shell_ask_mv
-      tools: [bash, mcp_exec_command, create_terminal]
-      pattern: "mv *"
-      severity: HIGH
-    - id: shell_ask_cp
-      tools: [bash, mcp_exec_command, create_terminal]
-      pattern: "cp *"
-      severity: HIGH
-    - id: shell_ask_chmod
-      tools: [bash, mcp_exec_command, create_terminal]
-      pattern: "chmod *"
-      severity: HIGH
-    - id: shell_ask_chown
-      tools: [bash, mcp_exec_command, create_terminal]
-      pattern: "chown *"
-      severity: HIGH
-    - id: shell_ask_sensitive_file_reads
-      tools: [bash, mcp_exec_command, create_terminal]
-      pattern: 're:(?i)(^|[\s;&|()])((cat|type|less|more|head|tail|grep|find|Get-Content|Select-String)\b[^;&|]*(id_rsa|id_ed25519|\.pem\b|\.pfx\b|\.key\b|\.kube/config|\.aws/(credentials|config)|\.npmrc\b|\.env(\.[A-Za-z0-9_-]+)?\b|authorized_keys|\.ssh/))'
-      severity: HIGH
-    - id: path_ask_ssh
-      tools: [read_file, write_file, edit_file, read_text_file, write_text_file, write, read, glob_file_search, glob, list_dir, list_files, grep, search_replace]
-      pattern: "**/.ssh/**"
-      severity: HIGH
-    - id: path_ask_env
-      tools: [read_file, write_file, edit_file, read_text_file, write_text_file, write, read, glob_file_search, glob, list_dir, list_files, grep, search_replace]
-      pattern: "**/.env*"
-      severity: HIGH
+      action: allow
+
+  approval_overrides: []
 
   # 数字分身 owner-scoped 权限（默认空，不生效）
   owner_scopes: {}
