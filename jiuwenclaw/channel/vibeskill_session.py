@@ -16,6 +16,7 @@ class VibeSkillSessionState(str, Enum):
 
     IDLE = "idle"
     BUSY = "busy"
+    COMPLETED = "completed"
     RETRY = "retry"
 
 
@@ -40,6 +41,8 @@ class VibeSkillSessionStore:
 
     Session 状态转换：
         idle ──(message.send)──► busy
+        busy ──(task.completed)──► completed
+        completed ──(message.send)──► busy
         busy ──(chat.final/cancel)──► idle
         busy ──(error)──► retry
         retry ──(message.send)──► busy

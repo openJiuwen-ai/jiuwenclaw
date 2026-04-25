@@ -1362,11 +1362,11 @@ class VibeSkillChannel(BaseChannel):
         北向(发往当前会话绑定的 WebSocket 对端)连续两帧, 与其它事件的 type+properties
         形状一致(见同文件 outbound_intercept 对 skilldev 事件的组帧方式):
         1) type=task.completed, properties 为无键空对象(协议: 不承载业务字段);
-        2) type=session.status, 会话状态为 idle.
+        2) type=session.status, 会话状态为 completed.
         """
         if session_id:
             try:
-                await self._store.set_state(session_id, VibeSkillSessionState.IDLE)
+                await self._store.set_state(session_id, VibeSkillSessionState.COMPLETED)
             except Exception:
                 logger.exception("[VibeSkillChannel] set_state error for skilldev.completed, session_id=%s", session_id)
         return [
@@ -1375,7 +1375,7 @@ class VibeSkillChannel(BaseChannel):
                 "type": "session.status",
                 "properties": {
                     "sessionID": external_sid,
-                    "status": {"type": "idle"},
+                    "status": {"type": "completed"},
                 },
             },
         ]
