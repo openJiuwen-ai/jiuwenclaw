@@ -23,7 +23,6 @@ from jiuwenclaw.channel.vibeskill_session import (
     _VIBESKILL_ORIGINAL_SESSION_ID_KEY,
 )
 
-_VIBESKILL_PROTOCOL_KEY = "protocol"
 from jiuwenclaw.channel.vibeskill_file_utils import skilldev_tree_to_file_tree_nodes
 from jiuwenclaw.schema.message import Message, ReqMethod
 
@@ -419,6 +418,7 @@ class VibeSkillChannel(BaseChannel):
                     "name": part.get("name", ""),
                     "description": part.get("description", ""),
                     "parameters": part.get("parameters", {}),
+                    "protocol": part.get("protocol", ""),
                 })
 
         session = await self._store.get_or_create(external_id=external_session_id or None)
@@ -451,7 +451,7 @@ class VibeSkillChannel(BaseChannel):
 
         # 构建 skilldev.start 格式的 params
         params: dict[str, Any] = {
-            "session_id": session.internal_id,
+            "task_id": session.internal_id,
             "query": query,
         }
 
@@ -465,12 +465,9 @@ class VibeSkillChannel(BaseChannel):
 
         # tools (toolDefinition)
         if tools:
-            params["tools"] = tools
+            params["tool_spec_files"] = tools
 
         # 可选字段
-        task_id = data.get("taskId") or data.get("task_id")
-        if task_id:
-            params["task_id"] = task_id
         inbound_agent_id = str(data.get("agent_id") or data.get("agentId") or "").strip()
         if inbound_agent_id:
             params["agent_id"] = inbound_agent_id
@@ -488,13 +485,9 @@ class VibeSkillChannel(BaseChannel):
         if system_prompt:
             params["system"] = system_prompt
 
-        # 提取 protocol 并透传到 metadata
-        protocol = data.get("protocol")
         metadata_dict = {}
         if external_session_id:
             metadata_dict[_VIBESKILL_ORIGINAL_SESSION_ID_KEY] = external_session_id
-        if protocol:
-            metadata_dict[_VIBESKILL_PROTOCOL_KEY] = protocol
         msg_metadata = metadata_dict if metadata_dict else None
 
         # 构建 Message 并直接发送到 MessageHandler
