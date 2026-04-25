@@ -91,6 +91,14 @@ class TodoToolkit:
     def session_id(self) -> str:
         return self._explicit_session_id or _resolve_runtime_session_id()
 
+    def set_session_id(self, session_id: str) -> None:
+        """Set the session ID for this toolkit instance.
+
+        Args:
+            session_id: The session/conversation identifier to use.
+        """
+        self._explicit_session_id = session_id
+
     @property
     def todo_dir(self) -> Path:
         if self._fixed_todo_dir is not None:
@@ -126,6 +134,9 @@ class TodoToolkit:
                 if "[-]" in line:
                     status = TaskStatus.CANCELLED
                     checked = False
+                elif "[>]" in line:
+                    status = TaskStatus.RUNNING
+                    checked = False
                 else:
                     checked = "[x]" in line.lower() or "[√]" in line
                     status = TaskStatus.COMPLETED if checked else TaskStatus.WAITING
@@ -133,8 +144,19 @@ class TodoToolkit:
                 parts = [p.strip() for p in line.split("|")]
                 if len(parts) >= self.PARTS_MIN_COUNT_WITH_RESULT:
                     result = parts[self.PARTS_INDEX_RESULT]
-                # 解析行："- [ ] 1. xxx" / "- [x] 1. xxx"
-                rest = line.replace("- [x]", "").replace("- [-]", "").replace("- [ ]", "").strip()
+                # 解析状态字段（第二段）
+                if len(parts) >= 2:
+                    status_str = parts[1].strip().lower()
+                    if status_str == "running":
+                        status = TaskStatus.RUNNING
+                    elif status_str == "waiting":
+                        status = TaskStatus.WAITING
+                    elif status_str == "completed":
+                        status = TaskStatus.COMPLETED
+                    elif status_str == "cancelled":
+                        status = TaskStatus.CANCELLED
+                # 解析行："- [ ] 1. xxx" / "- [x] 1. xxx" / "- [>] 1. xxx"
+                rest = line.replace("- [x]", "").replace("- [-]", "").replace("- [>]", "").replace("- [ ]", "").strip()
                 if "." in rest:
                     idx_str, _, task_text = rest.partition(".")
                     task_text = task_text.split("|")[0].strip()  # drop | status | result
@@ -155,6 +177,8 @@ class TodoToolkit:
                 checkbox = "[x]"
             elif t.status == TaskStatus.CANCELLED:
                 checkbox = "[-]"
+            elif t.status == TaskStatus.RUNNING:
+                checkbox = "[>]"
             else:
                 checkbox = "[ ]"
             if t.result:
@@ -191,6 +215,28 @@ class TodoToolkit:
             ]
             self._save_tasks(todo_tasks)
             return self._append_todo_list(f"Created {len(todo_tasks)} todo tasks.")
+
+    def todo_start(self, idx: int) -> str:
+        """Mark a task as running (in progress).
+
+        Args:
+            idx: 1-based index of the task.
+
+        Returns:
+            Status message and current todo list.
+        """
+        with self._get_session_lock(self.session_id):
+            todo_tasks = self._load_tasks()
+            for t in todo_tasks:
+                if t.idx == idx:
+                    if t.status == TaskStatus.COMPLETED:
+                        return self._append_todo_list(f"Error: Task {idx} is already completed.")
+                    if t.status == TaskStatus.CANCELLED:
+                        return self._append_todo_list(f"Error: Task {idx} is cancelled.")
+                    t.status = TaskStatus.RUNNING
+                    self._save_tasks(todo_tasks)
+                    return self._append_todo_list(f"Task {idx} marked as running.")
+            return self._append_todo_list(f"Error: Task {idx} not found.")
 
     def todo_complete(self, idx: int, result: str = "") -> str:
         """Mark a task as completed and save a brief result.
@@ -277,7 +323,14 @@ class TodoToolkit:
             return "No todo tasks."
         lines = []
         for t in todo_tasks:
-            status_icon = "[x]" if t.status == TaskStatus.COMPLETED else "[ ]"
+            if t.status == TaskStatus.COMPLETED:
+                status_icon = "[x]"
+            elif t.status == TaskStatus.RUNNING:
+                status_icon = "[>]"
+            elif t.status == TaskStatus.CANCELLED:
+                status_icon = "[-]"
+            else:
+                status_icon = "[ ]"
             suffix = f" | {t.result}" if t.result else ""
             lines.append(f"{status_icon} {t.idx}. {t.tasks}{suffix}")
         return "\n".join(lines)
@@ -313,6 +366,9 @@ class TodoToolkit:
         def todo_create_wrapper(tasks: List[str]) -> str:
             return self.todo_create(tasks)
 
+        def todo_start_wrapper(idx: int) -> str:
+            return self.todo_start(idx)
+
         def todo_complete_wrapper(idx: int, result: str = "") -> str:
             return self.todo_complete(idx, result)
 
@@ -344,6 +400,21 @@ class TodoToolkit:
                     "required": ["tasks"],
                 },
                 func=todo_create_wrapper,
+            ),
+            make_tool(
+                name=f"{prefix}_start",
+                description="Mark a task as running (in progress). Call this before starting to work on a task.",
+                input_params={
+                    "type": "object",
+                    "properties": {
+                        "idx": {
+                            "type": "integer",
+                            "description": "1-based index of the task to start",
+                        },
+                    },
+                    "required": ["idx"],
+                },
+                func=todo_start_wrapper,
             ),
             make_tool(
                 name=f"{prefix}_complete",

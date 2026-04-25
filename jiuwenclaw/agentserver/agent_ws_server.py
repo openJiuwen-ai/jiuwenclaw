@@ -606,7 +606,7 @@ class AgentWebSocketServer:
                         )
                         async with send_lock:
                             await ws.send(json.dumps(wire, ensure_ascii=False))
-                        logger.info(
+                        logger.debug(
                             "[AgentWebSocketServer] keepalive chunk 发送: request_id=%s",
                             request.request_id,
                         )

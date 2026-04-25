@@ -98,11 +98,13 @@ from jiuwenclaw.agentserver.deep_agent.rails import (
     RuntimePromptRail,
     SkillComplianceRail,
     SkillProtocolPromptRail,
+    TaskExecutionRail,
 )
 from jiuwenclaw.agentserver.deep_agent.rails.disabled_tools_rail import DisabledToolsRail
 from jiuwenclaw.agentserver.deep_agent.rails.dispatch_agent_rail import (
     DispatchAgentRail,
 )
+from jiuwenclaw.agentserver.deep_agent.rails.task_execution_rail import get_current_task_id
 from jiuwenclaw.agentserver.deep_agent.permissions.owner_scopes import (
     TOOL_PERMISSION_CONTEXT,
     setup_permission_context,
@@ -643,6 +645,7 @@ class JiuWenClawDeepAdapter:
         self._filesystem_rail: FileSystemRail | None = None
         self._skill_rail: SkillUseRail | None = None
         self._stream_event_rail: JiuClawStreamEventRail | None = None
+        self._task_execution_rail: TaskExecutionRail | None = None
         self._task_planning_rail: TaskPlanningRail | None = None
         self._context_engineering_rail: ContextEngineeringRail | None = None
         self._context_engineering_rail_mode: str | None = None
@@ -1271,6 +1274,11 @@ class JiuWenClawDeepAdapter:
             return self._model_cache[requested]
         return self._model
 
+    def _get_task_id(self) -> str | None:
+        if self._task_execution_rail is not None:
+            return self._task_execution_rail.get_current_task_id()
+        return get_current_task_id()
+
     def _apply_model_to_react_agent(self, model: Model) -> None:
         """将指定模型应用到 react_agent 实例（替换 _llm 和 _config 字段）。
 
@@ -1428,6 +1436,17 @@ class JiuWenClawDeepAdapter:
             logger.warning("[JiuWenClawDeepAdapter] JiuClawStreamEventRail create failed: %s", exc)
             stream_event_rail = None
         return stream_event_rail
+
+    @staticmethod
+    def _build_task_execution_rail() -> TaskExecutionRail | None:
+        """Build TaskExecutionRail."""
+        try:
+            task_execution_rail = TaskExecutionRail()
+            logger.info("[JiuWenClawDeepAdapter] TaskExecutionRail create success")
+        except Exception as exc:
+            logger.warning("[JiuWenClawDeepAdapter] TaskExecutionRail create failed: %s", exc)
+            task_execution_rail = None
+        return task_execution_rail
 
     @staticmethod
     def _build_telemetry_rail() -> Any | None:
@@ -1668,6 +1687,7 @@ class JiuWenClawDeepAdapter:
             _RailBuildInfo("_telemetry_rail", self._build_telemetry_rail),
             _RailBuildInfo("_runtime_prompt_rail", self._build_runtime_prompt_rail),
             _RailBuildInfo("_response_prompt_rail", self._build_response_prompt_rail),
+            _RailBuildInfo("_task_execution_rail", self._build_task_execution_rail),
             _RailBuildInfo("_stream_event_rail", self._build_stream_event_rail),
             _RailBuildInfo("_task_planning_rail", self._build_task_planning_rail),
             _RailBuildInfo("_security_rail", self._build_security_rail),
@@ -1737,6 +1757,10 @@ class JiuWenClawDeepAdapter:
                 logger.warning("[JiuWenClawDeepAdapter] Rail %s build returned None", info.attr_name)
         logger.info("[JiuWenClawDeepAdapter] Total rails built: %d, rail names: %s", len(rails_list),
                     [type(r).__name__ for r in rails_list])
+        if self._task_execution_rail is None:
+            logger.warning("[JiuWenClawDeepAdapter] TaskExecutionRail missing after _build_agent_rails")
+        else:
+            logger.info("[JiuWenClawDeepAdapter] TaskExecutionRail attached to adapter")
         return rails_list
 
     def _make_deep_agent_config(
@@ -3657,18 +3681,29 @@ class JiuWenClawDeepAdapter:
                     parsed = self._parse_stream_chunk(chunk)
                     if parsed is not None:
                         if accumulated_text:
+                            delta_payload: dict[str, Any] = {"event_type": "chat.delta", "content": accumulated_text}
+                            task_id = self._get_task_id()
+                            if task_id:
+                                delta_payload["task_id"] = task_id
                             yield AgentResponseChunk(
                                 request_id=rid,
                                 channel_id=cid,
-                                payload={"event_type": "chat.delta", "content": accumulated_text},
+                                payload=delta_payload,
                                 is_complete=False,
                             )
                             accumulated_text = ""
                         if accumulated_reasoning:
+                            reasoning_payload: dict[str, Any] = {
+                                "event_type": "chat.reasoning",
+                                "content": accumulated_reasoning,
+                            }
+                            task_id = self._get_task_id()
+                            if task_id:
+                                reasoning_payload["task_id"] = task_id
                             yield AgentResponseChunk(
                                 request_id=rid,
                                 channel_id=cid,
-                                payload={"event_type": "chat.reasoning", "content": accumulated_reasoning},
+                                payload=reasoning_payload,
                                 is_complete=False,
                             )
                             accumulated_reasoning = ""
@@ -3705,10 +3740,14 @@ class JiuWenClawDeepAdapter:
                         if isinstance(chunk.payload, dict)
                         else str(chunk.payload)
                     )
+                    delta_payload: dict[str, Any] = {"event_type": "chat.delta", "content": content}
+                    task_id = self._get_task_id()
+                    if task_id:
+                        delta_payload["task_id"] = task_id
                     yield AgentResponseChunk(
                         request_id=rid,
                         channel_id=cid,
-                        payload={"event_type": "chat.delta", "content": content},
+                        payload=delta_payload,
                         is_complete=False,
                     )
                     continue
@@ -3716,10 +3755,17 @@ class JiuWenClawDeepAdapter:
                 if chunk_type == "llm_output":
                     has_streamed_content = True
                     if accumulated_reasoning:
+                        reasoning_payload: dict[str, Any] = {
+                            "event_type": "chat.reasoning",
+                            "content": accumulated_reasoning,
+                        }
+                        task_id = self._get_task_id()
+                        if task_id:
+                            reasoning_payload["task_id"] = task_id
                         yield AgentResponseChunk(
                             request_id=rid,
                             channel_id=cid,
-                            payload={"event_type": "chat.reasoning", "content": accumulated_reasoning},
+                            payload=reasoning_payload,
                             is_complete=False,
                         )
                         accumulated_reasoning = ""
@@ -3728,12 +3774,14 @@ class JiuWenClawDeepAdapter:
                         if isinstance(chunk.payload, dict)
                         else str(chunk.payload)
                     )
-                    if not content:
-                        continue
+                    delta_payload: dict[str, Any] = {"event_type": "chat.delta", "content": content}
+                    task_id = self._get_task_id()
+                    if task_id:
+                        delta_payload["task_id"] = task_id
                     yield AgentResponseChunk(
                         request_id=rid,
                         channel_id=cid,
-                        payload={"event_type": "chat.reasoning", "content": content},
+                        payload=delta_payload,
                         is_complete=False,
                     )
                     continue
@@ -3753,18 +3801,29 @@ class JiuWenClawDeepAdapter:
                         )
                         evolution_status_started = True
                     if accumulated_text:
+                        delta_payload: dict[str, Any] = {"event_type": "chat.delta", "content": accumulated_text}
+                        task_id = self._get_task_id()
+                        if task_id:
+                            delta_payload["task_id"] = task_id
                         yield AgentResponseChunk(
                             request_id=rid,
                             channel_id=cid,
-                            payload={"event_type": "chat.delta", "content": accumulated_text},
+                            payload=delta_payload,
                             is_complete=False,
                         )
                         accumulated_text = ""
                     if accumulated_reasoning:
+                        reasoning_payload: dict[str, Any] = {
+                            "event_type": "chat.reasoning",
+                            "content": accumulated_reasoning,
+                        }
+                        task_id = self._get_task_id()
+                        if task_id:
+                            reasoning_payload["task_id"] = task_id
                         yield AgentResponseChunk(
                             request_id=rid,
                             channel_id=cid,
-                            payload={"event_type": "chat.reasoning", "content": accumulated_reasoning},
+                            payload=reasoning_payload,
                             is_complete=False,
                         )
                         accumulated_reasoning = ""
@@ -3789,18 +3848,29 @@ class JiuWenClawDeepAdapter:
                     continue
 
                 if accumulated_text:
+                    delta_payload: dict[str, Any] = {"event_type": "chat.delta", "content": accumulated_text}
+                    task_id = self._get_task_id()
+                    if task_id:
+                        delta_payload["task_id"] = task_id
                     yield AgentResponseChunk(
                         request_id=rid,
                         channel_id=cid,
-                        payload={"event_type": "chat.delta", "content": accumulated_text},
+                        payload=delta_payload,
                         is_complete=False,
                     )
                     accumulated_text = ""
                 if accumulated_reasoning:
+                    reasoning_payload: dict[str, Any] = {
+                        "event_type": "chat.reasoning",
+                        "content": accumulated_reasoning,
+                    }
+                    task_id = self._get_task_id()
+                    if task_id:
+                        reasoning_payload["task_id"] = task_id
                     yield AgentResponseChunk(
                         request_id=rid,
                         channel_id=cid,
-                        payload={"event_type": "chat.reasoning", "content": accumulated_reasoning},
+                        payload=reasoning_payload,
                         is_complete=False,
                     )
                     accumulated_reasoning = ""
@@ -3821,10 +3891,14 @@ class JiuWenClawDeepAdapter:
                     is_complete=False,
                 )
             if accumulated_reasoning:
+                reasoning_payload: dict[str, Any] = {"event_type": "chat.reasoning", "content": accumulated_reasoning}
+                task_id = self._get_task_id()
+                if task_id:
+                    reasoning_payload["task_id"] = task_id
                 yield AgentResponseChunk(
                     request_id=rid,
                     channel_id=cid,
-                    payload={"event_type": "chat.reasoning", "content": accumulated_reasoning},
+                    payload=reasoning_payload,
                     is_complete=False,
                 )
 
@@ -3913,8 +3987,7 @@ class JiuWenClawDeepAdapter:
             is_complete=True,
         )
 
-    @staticmethod
-    def _parse_stream_chunk(chunk, *, _has_streamed_content: bool = False) -> dict | None:
+    def _parse_stream_chunk(self, chunk, *, _has_streamed_content: bool = False) -> dict | None:
         """将 SDK OutputSchema 转为前端可消费的 payload dict.
 
         Args:
@@ -3948,7 +4021,11 @@ class JiuWenClawDeepAdapter:
                     )
                     if not content:
                         return None
-                    return {"event_type": "chat.delta", "content": content}
+                    result: dict[str, Any] = {"event_type": "chat.delta", "content": content}
+                    task_id = self._get_task_id()
+                    if task_id:
+                        result["task_id"] = task_id
+                    return result
 
                 if chunk_type == "llm_reasoning":
                     content = (
@@ -3958,7 +4035,11 @@ class JiuWenClawDeepAdapter:
                     )
                     if not content:
                         return None
-                    return {"event_type": "chat.reasoning", "content": content}
+                    result: dict[str, Any] = {"event_type": "chat.reasoning", "content": content}
+                    task_id = self._get_task_id()
+                    if task_id:
+                        result["task_id"] = task_id
+                    return result
 
                 if chunk_type == "content_chunk":
                     content = (
@@ -3968,7 +4049,11 @@ class JiuWenClawDeepAdapter:
                     )
                     if not content:
                         return None
-                    return {"event_type": "chat.delta", "content": content}
+                    result: dict[str, Any] = {"event_type": "chat.delta", "content": content}
+                    task_id = self._get_task_id()
+                    if task_id:
+                        result["task_id"] = task_id
+                    return result
 
                 if chunk_type == "answer":
                     if isinstance(payload, dict):
@@ -4010,7 +4095,11 @@ class JiuWenClawDeepAdapter:
                     if not content:
                         return None
                     if is_chunked:
-                        return {"event_type": "chat.delta", "content": content}
+                        result: dict[str, Any] = {"event_type": "chat.delta", "content": content}
+                        task_id = self._get_task_id()
+                        if task_id:
+                            result["task_id"] = task_id
+                        return result
                     return {"event_type": "chat.final", "content": content}
 
                 if chunk_type == "tool_calls.delta":
@@ -4023,11 +4112,18 @@ class JiuWenClawDeepAdapter:
                         }
                         if "source" in payload:
                             result["source"] = payload.get("source")
+                        task_id = self._get_task_id()
+                        if task_id:
+                            result["task_id"] = task_id
                         return result
-                    return {
+                    result = {
                         "event_type": "chat.tool_calls.delta",
                         "tool_calls": tool_calls_payload_to_json_list(payload),
                     }
+                    task_id = self._get_task_id()
+                    if task_id:
+                        result["task_id"] = task_id
+                    return result
 
                 if chunk_type == "tool_call":
                     tool_info = (
@@ -4035,7 +4131,11 @@ class JiuWenClawDeepAdapter:
                         if isinstance(payload, dict)
                         else payload
                     )
-                    return {"event_type": "chat.tool_call", "tool_call": tool_info}
+                    result = {"event_type": "chat.tool_call", "tool_call": tool_info}
+                    task_id = self._get_task_id()
+                    if task_id:
+                        result["task_id"] = task_id
+                    return result
 
                 if chunk_type == "tool_update":
                     if isinstance(payload, dict):
@@ -4047,10 +4147,14 @@ class JiuWenClawDeepAdapter:
                         )
                     else:
                         update_payload = {"content": str(payload)}
-                    return {
+                    result = {
                         "event_type": "chat.tool_update",
                         **update_payload,
                     }
+                    task_id = self._get_task_id()
+                    if task_id:
+                        result["task_id"] = task_id
+                    return result
 
                 if chunk_type == "tool_result":
                     if isinstance(payload, dict):
@@ -4076,10 +4180,14 @@ class JiuWenClawDeepAdapter:
                                 result_payload["raw_output"] = raw_output
                     else:
                         result_payload = {"result": str(payload)}
-                    return {
+                    result = {
                         "event_type": "chat.tool_result",
                         **result_payload,
                     }
+                    task_id = self._get_task_id()
+                    if task_id:
+                        result["task_id"] = task_id
+                    return result
 
                 if chunk_type == "error":
                     error_msg = (
@@ -4135,6 +4243,32 @@ class JiuWenClawDeepAdapter:
                 if chunk_type == "__interaction__":
                     return convert_interactions_to_ask_user_question([payload])
 
+                if chunk_type == "task.start":
+                    if isinstance(payload, dict):
+                        return {
+                            "event_type": "task.start",
+                            "task_id": payload.get("task_id"),
+                            "task_content": payload.get("task_content"),
+                            "task_index": payload.get("task_index"),
+                            "total_tasks": payload.get("total_tasks"),
+                            "parent_request_id": payload.get("parent_request_id"),
+                            "timestamp": payload.get("timestamp"),
+                        }
+                    return None
+
+                if chunk_type == "task.complete":
+                    if isinstance(payload, dict):
+                        return {
+                            "event_type": "task.complete",
+                            "task_id": payload.get("task_id"),
+                            "task_content": payload.get("task_content"),
+                            "status": payload.get("status"),
+                            "duration_ms": payload.get("duration_ms"),
+                            "error": payload.get("error"),
+                            "timestamp": payload.get("timestamp"),
+                        }
+                    return None
+
                 if isinstance(payload, dict):
                     if "traceId" in payload or "invokeId" in payload:
                         return None
@@ -4143,7 +4277,11 @@ class JiuWenClawDeepAdapter:
                         return None
                 else:
                     content = str(payload)
-                return {"event_type": "chat.delta", "content": content}
+                result: dict[str, Any] = {"event_type": "chat.delta", "content": content}
+                task_id = self._get_task_id()
+                if task_id:
+                    result["task_id"] = task_id
+                return result
 
             if isinstance(chunk, dict):
                 if "traceId" in chunk or "invokeId" in chunk:
@@ -4169,7 +4307,11 @@ class JiuWenClawDeepAdapter:
                     }
                 output = chunk.get("output", "")
                 if output:
-                    return {"event_type": "chat.delta", "content": str(output)}
+                    result: dict[str, Any] = {"event_type": "chat.delta", "content": str(output)}
+                    task_id = self._get_task_id()
+                    if task_id:
+                        result["task_id"] = task_id
+                    return result
                 return None
 
         except Exception:

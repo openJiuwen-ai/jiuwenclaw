@@ -18,6 +18,7 @@ Tasks are stored as Markdown in `workspace/session/{session_id}/todo.md`, isolat
 | :--- | :--- |
 | `todo_create` | Create the initial list. **Fails** if a list already exists — use `todo_insert` instead. |
 | `todo_insert` | Insert at an index; shifts later tasks. Creates the list if missing. |
+| `todo_start` | Mark a task as running (in progress). Call before starting work on a task. |
 | `todo_complete` | Mark done; optional `result` text. |
 | `todo_remove` | Remove a task; renumbers remaining items. |
 | `todo_list` | List all tasks and states. |
@@ -35,9 +36,10 @@ Tasks are stored as Markdown in `workspace/session/{session_id}/todo.md`, isolat
 
 1. User asks for something complex → `todo_create` breaks it into steps.
 2. User adds work mid-flight → `todo_insert`.
-3. Subtask done → `todo_complete` with result.
-4. Drop a task → `todo_remove`.
-5. Check status anytime → `todo_list`.
+3. Start a subtask → `todo_start` to mark as in progress.
+4. Subtask done → `todo_complete` with result.
+5. Drop a task → `todo_remove`.
+6. Check status anytime → `todo_list`.
 
 This reduces **lost goals** and **broken execution** on long jobs.
 

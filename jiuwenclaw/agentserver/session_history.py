@@ -129,6 +129,7 @@ def append_history_record(
     channel_metadata: dict[str, Any] | None = None,
     mode: str | None = None,
     sessions_root: str | Path | None = None,
+    task_id: str | None = None,
 ) -> None:
     """向指定 session 的 history.json 异步追加一条 JSONL 记录."""
     sid = (session_id or "default").strip() or "default"
@@ -147,6 +148,8 @@ def append_history_record(
     }
     if role_norm == "assistant" and event_type:
         item["event_type"] = event_type
+    if task_id:
+        item["task_id"] = task_id
     if isinstance(extra, dict) and extra:
         serialized_extra = _serialize_value(extra)
         if isinstance(serialized_extra, dict):

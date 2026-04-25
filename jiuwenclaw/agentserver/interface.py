@@ -924,14 +924,14 @@ class JiuWenClaw:
                     if isinstance(data, AgentResponseChunk):
                         if isinstance(data.payload, dict) and isinstance(data.payload.get("event_type"), str):
                             et = str(data.payload.get("event_type"))
-                            should_record = et.startswith("chat.")
+                            should_record = et.startswith("chat.") or et.startswith("task.")
                             if not should_record and et == EventType.TEAM_MESSAGE.value:
                                 should_record = True
 
                             if should_record:
                                 payload_dict = dict(data.payload)
                                 extra_fields = {k: v for k, v in payload_dict.items() if
-                                                k not in ("event_type", "content")}
+                                                k not in ("event_type", "content", "task_id")}
                                 if et == EventType.TEAM_MESSAGE.value and "event" in payload_dict:
                                     event_data = payload_dict.get("event", {})
                                     if isinstance(event_data, dict):
@@ -949,6 +949,7 @@ class JiuWenClaw:
                                     extra=extra_fields if extra_fields else None,
                                     mode=request.params.get("mode", "unknown"),
                                     sessions_root=self._sessions_dir,
+                                    task_id=payload_dict.get("task_id"),
                                 )
                             if et == "chat.final":
                                 final_answer_content = str(data.payload.get("content", ""))
@@ -957,12 +958,16 @@ class JiuWenClaw:
                         yield data
                     elif isinstance(data, dict) and isinstance(data.get("event_type"), str):
                         et = str(data.get("event_type"))
-                        should_record = et.startswith("chat.")
+                        should_record = et.startswith("chat.") or et.startswith("task.")
                         if not should_record and et == EventType.TEAM_MESSAGE.value:
                             should_record = True
 
                         if should_record:
-                            extra_fields = {k: v for k, v in data.items() if k not in ("event_type", "content")}
+                            extra_fields = {
+                                k: v
+                                for k, v in data.items()
+                                if k not in ("event_type", "content", "task_id")
+                            }
                             if et == EventType.TEAM_MESSAGE.value and "event" in data:
                                 event_data = data.get("event", {})
                                 if isinstance(event_data, dict):
@@ -980,6 +985,7 @@ class JiuWenClaw:
                                 extra=extra_fields if extra_fields else None,
                                 mode=request.params.get("mode", "unknown"),
                                 sessions_root=self._sessions_dir,
+                                task_id=data.get("task_id"),
                             )
                         if et == "chat.final":
                             final_answer_content = str(data.get("content", ""))

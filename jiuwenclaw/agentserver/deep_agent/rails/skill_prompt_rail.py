@@ -44,6 +44,14 @@ def _build_skill_protocol_section_text(language: str) -> str:
 
 1. **声明步骤**：每次行动前，必须在回复开头声明当前所在步骤，格式：`[当前步骤: <步骤名称>]`
 2. **创建步骤级 skill_step**：读完 SKILL.md 后，**必须**立即调用 skill_step_create 为文档中定义的每个步骤创建一个 skill_step 项，作为执行路线图。**一旦进入 SKILL 执行语境，对 SKILL 步骤的任何拆解、追踪、完成标记，必须且只能使用 `skill_step_*` 工具，禁止使用 `todo_*` 工具承载 SKILL 步骤** —— `todo_*` 只用于 SKILL 语境以外的独立用户请求
+   | 工具名称 | 功能说明 |
+   |---------|---------|
+   | `skill_step_create` | 创建步骤列表（一次性创建所有步骤） |
+   | `skill_step_start` | 标记步骤为进行中 |
+   | `skill_step_insert` | 插入原子级子步骤到指定位置 |
+   | `skill_step_complete` | 完成步骤并记录结果 |
+   | `skill_step_remove` | 移除步骤 |
+   | `skill_step_list` | 查看所有步骤 |
 3. **严格顺序**：按 SKILL.md 定义的顺序逐步执行，**禁止跳过、合并或重排步骤**
 4. **原子级拆分**：开始执行某个步骤前，先用 skill_step_insert 将该步骤拆解为原子级子步骤——每个 skill_step 项应对应单一、可独立验证的操作，不可再拆才算合格。如果步骤包含循环（如逐项处理），每轮循环的每个动作都应是独立 skill_step。禁止创建笼统的聚合型 skill_step
 5. **逐项完成**：严格按 skill_step 列表顺序执行，每完成一项立即标记完成。**所有子步骤 skill_step 完成后才能标记该步骤为完成**
@@ -67,6 +75,14 @@ Then execute the workflow; the rules below govern execution.
 
 1. **Declare step**: Before each action, state your current step at the start of your reply: `[Current Step: <step name>]`
 2. **Create step-level skill_step items**: After reading SKILL.md, you **MUST** immediately call skill_step_create with one skill_step item per step defined in the document as your execution roadmap. **Once in a SKILL execution context, any breakdown, tracking, or completion of SKILL steps MUST use `skill_step_*` tools exclusively. Never use `todo_*` tools to hold SKILL steps** — `todo_*` is only for standalone user requests outside any SKILL context.
+   | Tool Name | Description |
+   |-----------|-------------|
+   | `skill_step_create` | Create step list (create all steps at once) |
+   | `skill_step_start` | Mark a step as running (in progress) |
+   | `skill_step_insert` | Insert atomic sub-steps at a specific position |
+   | `skill_step_complete` | Mark a step complete and record the outcome |
+   | `skill_step_remove` | Remove a step |
+   | `skill_step_list` | View all steps |
 3. **Strict order**: Execute steps in the exact order defined in SKILL.md. **Never skip, merge, or reorder steps.**
 4. **Atomic breakdown**: Before starting a step, use skill_step_insert to break it into atomic sub-steps — each skill_step should correspond to a single, independently verifiable action that cannot be broken down further. If a step contains a loop (e.g. process items one by one), each action in each iteration must be a separate skill_step. Never create vague, aggregated skill_step items.
 5. **Complete sequentially**: Execute skill_step items in order, marking each done immediately upon completion. **All sub-step skill_step items must be completed before marking the step as done.**
@@ -90,6 +106,7 @@ def _build_todo_section_text(language: str) -> str:
 | 工具名称 | 功能说明 |
 |---------|---------|
 | `todo_create` | 创建任务（单条或多条） |
+| `todo_start` | 标记任务为进行中 |
 | `todo_insert` | 插入任务到指定位置 |
 | `todo_complete` | 完成任务并记录结果 |
 | `todo_remove` | 移除任务 |
@@ -104,6 +121,7 @@ The `todo_*` tools below are **only for standalone user requests outside any SKI
 | Tool Name | Description |
 |-----------|-------------|
 | `todo_create` | Create tasks (single or multiple) |
+| `todo_start` | Mark a task as running (in progress) |
 | `todo_insert` | Insert tasks at a specific position |
 | `todo_complete` | Mark a task complete and record the outcome |
 | `todo_remove` | Remove a task |
