@@ -117,6 +117,11 @@ from jiuwenclaw.agentserver.tools.video_tools import video_understanding
 
 from jiuwenclaw.agentserver.tools import SendFileToolkit, SkillToolkit
 from jiuwenclaw.agentserver.tools.acp_output_tools import get_tools as get_acp_output_tools
+from jiuwenclaw.agentserver.tools.deepresearch_tools import (
+    get_deepresearch_tools,
+    push_deepresearch_route,
+    reset_deepresearch_route,
+)
 from jiuwenclaw.agentserver.tools.multi_session_toolkits import MultiSessionToolkit
 from jiuwenclaw.agentserver.tools.xiaoyi_phone_tools import (
     get_user_location,
@@ -1852,6 +1857,21 @@ class JiuWenClawDeepAdapter:
         except Exception as exc:
             logger.warning("[JiuWenClawDeepAdapter] skill tools registration failed: %s", exc)
 
+        # DeepResearch 工具注册（深度研究任务管理）
+        try:
+            dr_tool_names: list[str] = []
+            for dr_tool in get_deepresearch_tools():
+                if not Runner.resource_mgr.get_tool(dr_tool.card.id):
+                    Runner.resource_mgr.add_tool(dr_tool)
+                tool_cards.append(dr_tool.card)
+                dr_tool_names.append(dr_tool.card.name)
+            logger.info(
+                "[JiuWenClawDeepAdapter] DeepResearch tools registered: tools=%s",
+                dr_tool_names,
+            )
+        except Exception as exc:
+            logger.warning("[JiuWenClawDeepAdapter] DeepResearch tools registration failed: %s", exc)
+
         # Session 级 todo 工具（TodoToolkit / SkillStepToolkit）改由
         # SkillProtocolPromptRail.init() 跟随 rail 生命周期注册到 agent，
         # 保证 prompt 中提到的 skill_step_* / todo_* 工具与 prompt section 同上同下。
@@ -2072,12 +2092,19 @@ class JiuWenClawDeepAdapter:
             normalized_metadata = {}
         if isinstance(request_id, str) and request_id.strip():
             normalized_metadata["request_id"] = request_id.strip()
+        # 设置 DeepResearch 路由上下文
+        dr_token = push_deepresearch_route(
+            request_id=request_id or "",
+            channel_id=normalized_channel,
+            session_id=session_id or "",
+        )
         return (
             _CRON_TOOL_CHANNEL_ID.set(normalized_channel),
             _CRON_TOOL_SESSION_ID.set(session_id),
             _CRON_TOOL_METADATA.set(normalized_metadata),
             _CRON_TOOL_MODE.set(normalized_mode),
             _plan_todo.PLAN_TODO_SESSION_ID.set(session_id or "default"),
+            dr_token,
         )
 
     @staticmethod
@@ -2086,12 +2113,14 @@ class JiuWenClawDeepAdapter:
     ) -> None:
         from jiuwenclaw.agentserver import plan_todo_context as _plan_todo
 
-        channel_token, session_token, metadata_token, mode_token, todo_token = tokens
+        channel_token, session_token, metadata_token, mode_token, todo_token, dr_token = tokens
         _plan_todo.PLAN_TODO_SESSION_ID.reset(todo_token)
         _CRON_TOOL_MODE.reset(mode_token)
         _CRON_TOOL_METADATA.reset(metadata_token)
         _CRON_TOOL_SESSION_ID.reset(session_token)
         _CRON_TOOL_CHANNEL_ID.reset(channel_token)
+        # 重置 DeepResearch 路由上下文
+        reset_deepresearch_route(dr_token)
 
     async def _update_rails_for_mode(self, mode: str) -> None:
         """按 mode 注册或卸载 rails。"""

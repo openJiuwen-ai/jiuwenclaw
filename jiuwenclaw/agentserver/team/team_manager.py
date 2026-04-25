@@ -33,6 +33,11 @@ from jiuwenclaw.agentserver.team.team_runtime_inheritance import (
     filter_inheritable_ability_cards,
     get_default_model_name,
 )
+from jiuwenclaw.agentserver.tools.deepresearch_tools import (
+    get_deepresearch_tools,
+    push_deepresearch_route,
+    reset_deepresearch_route,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -112,63 +117,89 @@ class TeamManager:
                 logger.warning("[TeamManager] cron tool registration failed for member agent=%s: %s", agent_id, exc)
         else:
             logger.info("[TeamManager] skip cron tool registration for member agent=%s: disabled by env", agent_id)
+        # 设置 DeepResearch 路由上下文（Team 模式）
+        dr_token = push_deepresearch_route(
+            request_id=request_id or "",
+            channel_id=channel_id or "web",
+            session_id=session_id,
+        )
 
-        # Team 成员的 skill 步骤追踪（SkillStepToolkit）：写入 skill_step.md，
-        # 与 SkillComplianceRail 共用该文件路径。
-        # 这里再调一次只是保险兜底：主 adapter 未初始化的场景（如单元测试直接构造 team）也能可用。
-        # 与 SkillComplianceRail 一致使用显式 team session，避免依赖未绑定的 plan 上下文。
+        # 整个方法体放在 try-finally 中，确保路由上下文在退出时重置
         try:
-            skill_step_toolkit = SkillStepToolkit(session_id=session_id)
-            skill_step_tool_names: list[str] = []
-            for step_tool in skill_step_toolkit.get_tools():
-                if not Runner.resource_mgr.get_tool(step_tool.card.id):
-                    Runner.resource_mgr.add_tool(step_tool)
-                agent.ability_manager.add(step_tool.card)
-                skill_step_tool_names.append(step_tool.card.name)
-            logger.info(
-                "[TeamManager] SkillStepToolkit registered for member agent=%s session=%s tools=%s",
-                agent_id, session_id, skill_step_tool_names,
-            )
-        except Exception as exc:
-            logger.warning(
-                "[TeamManager] SkillStepToolkit registration failed for member agent=%s: %s",
-                agent_id, exc,
-            )
-
-        if not request_id or not channel_id:
-            logger.info("[TeamManager] SendFileToolkit skipped: missing request_id or channel_id")
-            return
-
-        try:
-            config = get_config()
-            send_file_enabled = (
-                config.get("channels", {})
-                .get(str(channel_id), {})
-                .get("send_file_allowed", False)
-            )
-            if not send_file_enabled:
+            # Team 成员的 skill 步骤追踪（SkillStepToolkit）：写入 skill_step.md，
+            # 与 SkillComplianceRail 共用该文件路径。
+            # 这里再调一次只是保险兜底：主 adapter 未初始化的场景（如单元测试直接构造 team）也能可用。
+            # 与 SkillComplianceRail 一致使用显式 team session，避免依赖未绑定的 plan 上下文。
+            try:
+                skill_step_toolkit = SkillStepToolkit(session_id=session_id)
+                skill_step_tool_names: list[str] = []
+                for step_tool in skill_step_toolkit.get_tools():
+                    if not Runner.resource_mgr.get_tool(step_tool.card.id):
+                        Runner.resource_mgr.add_tool(step_tool)
+                    agent.ability_manager.add(step_tool.card)
+                    skill_step_tool_names.append(step_tool.card.name)
                 logger.info(
-                    "[TeamManager] SendFileToolkit skipped: send_file_allowed=False for channel=%s",
-                    channel_id,
+                    "[TeamManager] SkillStepToolkit registered for member agent=%s session=%s tools=%s",
+                    agent_id, session_id, skill_step_tool_names,
                 )
-                return
+            except Exception as exc:
+                logger.warning(
+                    "[TeamManager] SkillStepToolkit registration failed for member agent=%s: %s",
+                    agent_id, exc,
+                )
 
-            for existing in list(agent.ability_manager.list() or []):
-                if getattr(existing, "name", "").startswith("send_file_to_user"):
-                    agent.ability_manager.remove(existing.name)
+            # SendFileToolkit 注册（仅在 request_id 和 channel_id 有效时）
+            if request_id and channel_id:
+                try:
+                    config = get_config()
+                    send_file_enabled = (
+                        config.get("channels", {})
+                        .get(str(channel_id), {})
+                        .get("send_file_allowed", False)
+                    )
+                    if send_file_enabled:
+                        for existing in list(agent.ability_manager.list() or []):
+                            if getattr(existing, "name", "").startswith("send_file_to_user"):
+                                agent.ability_manager.remove(existing.name)
 
-            send_file_toolkit = SendFileToolkit(
-                request_id=request_id,
-                session_id=session_id,
-                channel_id=channel_id,
-                metadata=request_metadata,
-            )
-            for sf_tool in send_file_toolkit.get_tools():
-                Runner.resource_mgr.add_tool(sf_tool)
-                agent.ability_manager.add(sf_tool.card)
-            logger.info("[TeamManager] SendFileToolkit registered for channel=%s", channel_id)
-        except Exception as exc:
-            logger.warning("[TeamManager] SendFileToolkit registration failed: %s", exc)
+                        send_file_toolkit = SendFileToolkit(
+                            request_id=request_id,
+                            session_id=session_id,
+                            channel_id=channel_id,
+                            metadata=request_metadata,
+                        )
+                        for sf_tool in send_file_toolkit.get_tools():
+                            Runner.resource_mgr.add_tool(sf_tool)
+                            agent.ability_manager.add(sf_tool.card)
+                        logger.info("[TeamManager] SendFileToolkit registered for channel=%s", channel_id)
+                    else:
+                        logger.info(
+                            "[TeamManager] SendFileToolkit skipped: send_file_allowed=False for channel=%s",
+                            channel_id,
+                        )
+                except Exception as exc:
+                    logger.warning("[TeamManager] SendFileToolkit registration failed: %s", exc)
+            else:
+                logger.info("[TeamManager] SendFileToolkit skipped: missing request_id or channel_id")
+
+            # DeepResearch 工具注册（深度研究任务管理）
+            try:
+                dr_tool_names: list[str] = []
+                for dr_tool in get_deepresearch_tools():
+                    if not Runner.resource_mgr.get_tool(dr_tool.card.id):
+                        Runner.resource_mgr.add_tool(dr_tool)
+                    agent.ability_manager.add(dr_tool.card)
+                    dr_tool_names.append(dr_tool.card.name)
+                logger.info(
+                    "[TeamManager] DeepResearch tools registered for member agent=%s: tools=%s",
+                    agent_id,
+                    dr_tool_names,
+                )
+            except Exception as exc:
+                logger.warning("[TeamManager] DeepResearch tools registration failed: %s", exc)
+        finally:
+            # 重置 DeepResearch 路由上下文
+            reset_deepresearch_route(dr_token)
 
     @staticmethod
     def build_agent_customizer(

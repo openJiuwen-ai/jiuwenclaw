@@ -5,7 +5,11 @@
 import os
 import sys
 import tempfile
+import types
+from contextvars import ContextVar
+from enum import Enum
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Generator
 from unittest.mock import MagicMock
 
@@ -18,6 +22,117 @@ sys.modules["fastmcp"] = mock_fastmcp
 sys.modules["fastmcp.client"] = MagicMock()
 sys.modules["fastmcp.utilities"] = MagicMock()
 sys.modules["fastmcp.utilities.logging"] = MagicMock()
+
+
+def _stdlib_bz2_available() -> bool:
+    """Return whether this Python build includes the native _bz2 extension."""
+    try:
+        import bz2  # noqa: F401
+    except ModuleNotFoundError as exc:
+        if exc.name == "_bz2":
+            return False
+        raise
+    return True
+
+
+def _install_openjiuwen_deepsearch_stubs() -> None:
+    """Stub deepsearch imports for tests that do not exercise deepsearch itself.
+
+    Some CI Python builds miss the native _bz2 extension, which makes importing
+    networkx fail through openjiuwen_deepsearch during pytest collection. These
+    stubs keep unrelated tests isolated from that optional-heavy dependency.
+    """
+
+    def ensure_package(name: str) -> types.ModuleType:
+        module = sys.modules.get(name)
+        if module is None:
+            module = types.ModuleType(name)
+            module.__path__ = []
+            sys.modules[name] = module
+        return module
+
+    for package_name in [
+        "openjiuwen_deepsearch",
+        "openjiuwen_deepsearch.config",
+        "openjiuwen_deepsearch.framework",
+        "openjiuwen_deepsearch.framework.openjiuwen",
+        "openjiuwen_deepsearch.framework.openjiuwen.agent",
+        "openjiuwen_deepsearch.utils",
+        "openjiuwen_deepsearch.utils.log_utils",
+    ]:
+        ensure_package(package_name)
+
+    config_module = types.ModuleType("openjiuwen_deepsearch.config.config")
+
+    class Config:
+        def __init__(self):
+            self.agent_config = SimpleNamespace(
+                model_dump=lambda: {
+                    "llm_config": {"general": {}},
+                    "web_search_engine_config": {},
+                }
+            )
+
+    config_module.Config = Config
+    sys.modules[config_module.__name__] = config_module
+
+    method_module = types.ModuleType("openjiuwen_deepsearch.config.method")
+
+    class ExecutionMethod(str, Enum):
+        DEPENDENCY_DRIVING = "dependency_driving"
+        PARALLEL = "parallel"
+
+    method_module.ExecutionMethod = ExecutionMethod
+    sys.modules[method_module.__name__] = method_module
+
+    agent_factory_module = types.ModuleType(
+        "openjiuwen_deepsearch.framework.openjiuwen.agent.agent_factory"
+    )
+
+    class AgentFactory:
+        @staticmethod
+        def create_agent(*_args, **_kwargs):
+            raise RuntimeError(
+                "openjiuwen_deepsearch is stubbed because this Python build lacks _bz2"
+            )
+
+    agent_factory_module.AgentFactory = AgentFactory
+    sys.modules[agent_factory_module.__name__] = agent_factory_module
+
+    workflow_module = types.ModuleType(
+        "openjiuwen_deepsearch.framework.openjiuwen.agent.workflow"
+    )
+
+    def parse_endnode_content(_chunk_content):
+        return None
+
+    workflow_module.parse_endnode_content = parse_endnode_content
+    sys.modules[workflow_module.__name__] = workflow_module
+
+    log_common_module = types.ModuleType(
+        "openjiuwen_deepsearch.utils.log_utils.log_common"
+    )
+    log_common_module.session_id_ctx = ContextVar("session_id", default="")
+    sys.modules[log_common_module.__name__] = log_common_module
+
+    log_manager_module = types.ModuleType(
+        "openjiuwen_deepsearch.utils.log_utils.log_manager"
+    )
+
+    class LogManager:
+        _SAFE_BASE = ""
+        _initialized = False
+
+        @classmethod
+        def init(cls, *_args, **_kwargs):
+            cls._initialized = True
+
+    log_manager_module.LogManager = LogManager
+    sys.modules[log_manager_module.__name__] = log_manager_module
+
+
+if not _stdlib_bz2_available():
+    _install_openjiuwen_deepsearch_stubs()
 
 
 def pytest_configure(config):
