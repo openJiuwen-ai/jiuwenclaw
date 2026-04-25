@@ -218,6 +218,19 @@ def update_permissions_enabled_in_config(value: bool) -> None:
     _dump_yaml_round_trip(_CONFIG_YAML_PATH, data)
 
 
+def update_disabled_tools_in_config(disabled_tools: list[str]) -> None:
+    """更新 react.disabled_tools 数组并写回 config.yaml。
+
+    Args:
+        disabled_tools: 禁用的工具名列表，如 ["bash", "read_file"]
+    """
+    data = _load_yaml_round_trip(_CONFIG_YAML_PATH)
+    if "react" not in data:
+        data["react"] = {}
+    data["react"]["disabled_tools"] = disabled_tools
+    _dump_yaml_round_trip(_CONFIG_YAML_PATH, data)
+
+
 def update_updater_in_config(updates: dict[str, Any]) -> None:
     """只更新 updater 段并写回。"""
     data = _load_yaml_round_trip(_CONFIG_YAML_PATH)
