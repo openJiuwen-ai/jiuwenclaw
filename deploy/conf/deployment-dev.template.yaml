@@ -32,6 +32,9 @@ spec:
             - name: http
               containerPort: 19000
               protocol: TCP
+          env:
+            - name: PIP_EXTRA_ARGS
+              value: <<PIP_EXTRA_ARGS>>
           volumeMounts:
             - name: gateway-config
               mountPath: /root/.jiuwenclaw/config/config.yaml

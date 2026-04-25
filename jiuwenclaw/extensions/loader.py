@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import importlib
 import importlib.util
 from pathlib import Path
@@ -93,6 +94,9 @@ class ExtensionLoader:
         uv_path = shutil.which("uv")
         use_uv = uv_path is not None
 
+        pip_extra_args = os.environ.get("PIP_EXTRA_ARGS", "").strip()
+        extra_args = pip_extra_args.split() if pip_extra_args else []
+
         for package, version_spec in dependencies.items():
             # 自动添加版本操作符（如果缺失）
             if version_spec and not any(version_spec.startswith(op) for op in ['==', '>=', '<=', '>', '<', '!=', '~=', '~=']):
@@ -110,17 +114,17 @@ class ExtensionLoader:
             try:
                 if use_uv:
                     subprocess.check_call(
-                        [uv_path, "pip", "install", package_name],
+                        [uv_path, "pip", "install", package_name] + extra_args,
                         stdout=subprocess.DEVNULL,
-                        stderr=subprocess.PIPE,
-                        timeout=120,
+                        stderr=None,
+                        timeout=600,
                     )
                 else:
                     subprocess.check_call(
-                        [sys.executable, "-m", "pip", "install", package_name],
+                        [sys.executable, "-m", "pip", "install", package_name] + extra_args,
                         stdout=subprocess.DEVNULL,
-                        stderr=subprocess.PIPE,
-                        timeout=120,
+                        stderr=None,
+                        timeout=600,
                     )
                 logger.info(f"[ExtensionLoader] 扩展 {root.name} 依赖 {package} 安装成功")
             except subprocess.TimeoutExpired:
