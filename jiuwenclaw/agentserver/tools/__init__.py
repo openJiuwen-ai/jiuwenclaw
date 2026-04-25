@@ -35,6 +35,7 @@ from .subagent_executor import (
     init_subagent_executor,
     SubagentSessionProxy,
     SubagentContextRail,
+    ForkMessageInjectionRail,
 )
 from .subagent_models import (
     ForkAgentTaskSpec,
@@ -97,6 +98,7 @@ __all__ = [
     "init_subagent_executor",
     "SubagentSessionProxy",
     "SubagentContextRail",
+    "ForkMessageInjectionRail",
     "ForkAgentTaskSpec",
     "ForkAgentResult",
     "SubagentTaskSpec",

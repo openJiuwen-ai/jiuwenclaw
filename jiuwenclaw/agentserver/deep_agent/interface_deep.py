@@ -90,7 +90,6 @@ from jiuwenclaw.agentserver.deep_agent.rails import (
     SkillComplianceRail,
     SkillProtocolPromptRail,
 )
-from jiuwenclaw.agentserver.deep_agent.rails.disabled_tools_rail import DisabledToolsRail
 from jiuwenclaw.agentserver.deep_agent.rails.dispatch_agent_rail import (
     DispatchAgentRail,
 )
@@ -613,7 +612,6 @@ class JiuWenClawDeepAdapter:
         self._dispatch_agent_rail: DispatchAgentRail | None = None
         self._permission_rail: Any = None
         self._avatar_rail: Any = None
-        self._disabled_tools_rail: DisabledToolsRail | None = None
         self._tool_cards = None
         self._sys_operation = None
         self._vision_model_config: VisionModelConfig | None = None
@@ -1571,20 +1569,6 @@ class JiuWenClawDeepAdapter:
             rail = None
         return rail
 
-    def _build_disabled_tools_rail(self, config: dict[str, Any]) -> DisabledToolsRail | None:
-        """Build DisabledToolsRail to filter out disabled tools based on config."""
-        try:
-            disabled_list = config.get("disabled_tools", [])
-            rail = DisabledToolsRail(disabled_tools=disabled_list)
-            logger.info(
-                "[JiuWenClawDeepAdapter] DisabledToolsRail create success, disabled_tools: %s",
-                disabled_list,
-            )
-        except Exception as exc:
-            logger.warning("[JiuWenClawDeepAdapter] DisabledToolsRail create failed: %s", exc)
-            rail = None
-        return rail
-
     def _build_agent_rails(self, config: dict[str, Any], config_base: dict[str, Any], *,
                            mode: str = "agent.plan") -> list[Any]:
         """Build DeepAgent rails consistently for cold start and hot reload."""
@@ -1616,8 +1600,6 @@ class JiuWenClawDeepAdapter:
                                                                            "default", {}).get("model_client_config",
                                                                                               {}).get("model_name",
                                                                                                       "gpt-4")}),
-            # DisabledToolsRail - highest priority (100), runs last to filter disabled tools
-            _RailBuildInfo("_disabled_tools_rail", self._build_disabled_tools_rail, {"config": config}),
         ]
         # ContextEngineeringRail 不在冷启动时挂载，由 _update_rails_for_mode 按 mode 按需注册/注销
 
@@ -1758,16 +1740,6 @@ class JiuWenClawDeepAdapter:
             self._filesystem_rail = None
 
         self._update_permission_rail(config_base)
-
-        # Update disabled_tools_rail config in-place (no re-init needed)
-        disabled_list = config.get("disabled_tools", [])
-        if self._disabled_tools_rail is not None:
-            self._disabled_tools_rail.update_config(disabled_list)
-        elif disabled_list:
-            # First time enabling - create the rail
-            self._disabled_tools_rail = DisabledToolsRail(disabled_tools=disabled_list)
-            if self._disabled_tools_rail is not None:
-                logger.info("[JiuWenClawDeepAdapter] _disabled_tools_rail newly created on hot-reload")
 
         rails_list = []
         if self._skill_rail is not None:
@@ -2042,7 +2014,7 @@ class JiuWenClawDeepAdapter:
     def _init_subagent_tools(self) -> None:
         """Initialize fork_agent and spawn_subagent tools for creating subagents."""
         try:
-            from openjiuwen.core.runner import Runner
+            from openjiuwen.core.runner import Runner as RunnerClass
             from jiuwenclaw.agentserver.tools.subagent_executor import init_subagent_executor
             from jiuwenclaw.agentserver.tools.subagent_tools import fork_agent, spawn_subagent
 
@@ -2055,7 +2027,7 @@ class JiuWenClawDeepAdapter:
 
             # Register fork_agent tool (ignore if already exists)
             try:
-                Runner.resource_mgr.add_tool(fork_agent)
+                RunnerClass.resource_mgr.add_tool(fork_agent)
             except Exception as e:
                 if "already exist" not in str(e):
                     logger.warning("[JiuWenClawDeepAdapter] Failed to register fork_agent tool: %s", e)
@@ -2063,7 +2035,7 @@ class JiuWenClawDeepAdapter:
 
             # Register spawn_subagent tool (ignore if already exists)
             try:
-                Runner.resource_mgr.add_tool(spawn_subagent)
+                RunnerClass.resource_mgr.add_tool(spawn_subagent)
             except Exception as e:
                 if "already exist" not in str(e):
                     logger.warning("[JiuWenClawDeepAdapter] Failed to register spawn_subagent tool: %s", e)

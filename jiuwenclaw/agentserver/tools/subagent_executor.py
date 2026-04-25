@@ -135,52 +135,74 @@ class ForkMessageInjectionRail(DeepAgentRail):
 class SubagentContextRail(DeepAgentRail):
     """Minimal rail for spawn/fork agent to set context for nested fork_agent calls.
 
-    This rail only handles context variable setup for fork_agent inheritance:
-    - before_tool_call: sets _current_agent_context and _subagent_parent_session
-    - after_tool_call/on_model_exception: clears context variables
+    This rail handles:
+    - Context variable setup for fork_agent inheritance
+    - Stream event emission for tool calls (so frontend can see subagent's tool execution)
+    - before_tool_call: sets _current_agent_context and _subagent_parent_session, emits tool_call event
+    - after_tool_call: clears context variables, emits tool_result event
 
-    Does NOT handle stream events, pause/abort, or other features (those are
-    handled by parent agent's JiuClawStreamEventRail via SubagentSessionProxy).
+    Does NOT handle pause/abort (those are handled by parent agent's JiuClawStreamEventRail).
+
+    IMPORTANT: ctx.session is the Session created by Runner.run_agent internally, NOT the
+    SubagentSessionProxy we pass to Runner. So we must store parent_session in the rail
+    and use it directly for event emission.
     """
 
     priority = 80
 
-    def __init__(self, subagent_id: str | None = None) -> None:
-        """Initialize with optional subagent_id for nested session_id construction.
+    def __init__(
+        self,
+        subagent_id: str | None = None,
+        parent_session: Session | None = None,
+    ) -> None:
+        """Initialize with optional subagent_id and parent_session for event forwarding.
 
         Args:
             subagent_id: The subagent_id of this agent (e.g., "subagent_1222fc63" or "fork_295a9e7")
+            parent_session: The parent session to forward events to (NOT ctx.session which is internal)
         """
         super().__init__()
         self._subagent_id = subagent_id
+        self._parent_session = parent_session  # Store parent session for event emission
 
     async def before_tool_call(self, ctx: AgentCallbackContext) -> None:
-        """Set context variables for fork_agent to get correct messages."""
+        """Set context variables for fork_agent to get correct messages and emit tool_call event."""
         # Set current agent context for fork_agent to get correct messages
         # This ensures fork_agent gets messages from the running context
         # (not from storage which may be empty for subagent scenarios)
         if ctx.context is not None:
             set_current_agent_context(ctx.context)
-            logger.debug(
-                f"[SubagentContextRail] Set _current_agent_context for fork inheritance"
-            )
 
         # Set subagent_id for nested session_id construction
         if self._subagent_id:
             set_current_agent_subagent_id(self._subagent_id)
-            logger.debug(
-                f"[SubagentContextRail] Set _current_agent_subagent_id={self._subagent_id}"
-            )
 
-        # Set parent session for subagent tools
-        session = ctx.session
-        if session is not None:
-            # Use parent session if session is a proxy (SubagentSessionProxy)
-            actual_session = getattr(session, '_parent', session) if session else None
+        # CRITICAL: Set parent session for nested subagent/fork tools
+        # Use self._parent_session (SubagentSessionProxy) NOT ctx.session (Runner's internal Session)
+        # This ensures fork_agent created inside spawn can forward events correctly
+        if self._parent_session is not None:
+            set_subagent_parent_session(self._parent_session)
+        elif ctx.session is not None:
+            # Fallback: only if no parent_session stored, use ctx.session
+            actual_session = getattr(ctx.session, '_parent', ctx.session) if ctx.session else None
             set_subagent_parent_session(actual_session)
 
+        # Emit tool_call event using stored parent_session (NOT ctx.session)
+        # ctx.session is Runner's internal session, not our SubagentSessionProxy
+        if self._parent_session is not None and isinstance(ctx.inputs, ToolCallInputs):
+            tc = ctx.inputs.tool_call
+            await self._emit_tool_call(self._parent_session, tc)
+            await self._emit_tool_update(self._parent_session, tc, status="in_progress")
+
     async def after_tool_call(self, ctx: AgentCallbackContext) -> None:
-        """Clear context after tool execution."""
+        """Clear context after tool execution and emit tool_result event."""
+        # Emit tool_result event using stored parent_session
+        if self._parent_session is not None and isinstance(ctx.inputs, ToolCallInputs):
+            tc = ctx.inputs.tool_call
+            result = ctx.inputs.tool_result
+            await self._emit_tool_result(self._parent_session, tc, result)
+
+        # Clear context variables
         set_current_agent_context(None)
         set_current_agent_subagent_id(None)
         set_subagent_parent_session(None)
@@ -190,6 +212,78 @@ class SubagentContextRail(DeepAgentRail):
         set_current_agent_context(None)
         set_current_agent_subagent_id(None)
         set_subagent_parent_session(None)
+
+    # Static methods for emitting stream events (same as JiuClawStreamEventRail)
+
+    @staticmethod
+    async def _emit_tool_call(session: Session, tool_call: Any) -> None:
+        """Emit tool_call event for frontend display."""
+        try:
+            await session.write_stream(
+                OutputSchema(
+                    type="tool_call",
+                    index=0,
+                    payload={
+                        "tool_call": {
+                            "name": getattr(tool_call, "name", ""),
+                            "arguments": getattr(tool_call, "arguments", {}),
+                            "tool_call_id": getattr(tool_call, "id", ""),
+                        }
+                    },
+                )
+            )
+        except Exception:
+            logger.debug("[SubagentContextRail] tool_call emit failed", exc_info=True)
+
+    @staticmethod
+    async def _emit_tool_update(session: Session, tool_call: Any, *, status: str) -> None:
+        """Emit tool_update event for frontend display."""
+        try:
+            await session.write_stream(
+                OutputSchema(
+                    type="tool_update",
+                    index=0,
+                    payload={
+                        "tool_update": {
+                            "tool_name": getattr(tool_call, "name", "") if tool_call else "",
+                            "tool_call_id": getattr(tool_call, "id", "") if tool_call else "",
+                            "arguments": getattr(tool_call, "arguments", {}) if tool_call else {},
+                            "status": str(status or "").strip() or "in_progress",
+                        }
+                    },
+                )
+            )
+        except Exception:
+            logger.debug("[SubagentContextRail] tool_update emit failed", exc_info=True)
+
+    @staticmethod
+    async def _emit_tool_result(session: Session, tool_call: Any, result: Any) -> None:
+        """Emit tool_result event for frontend display."""
+        try:
+            # Handle structured result payload (same as JiuClawStreamEventRail)
+            raw_output = None
+            if isinstance(result, (dict, list)):
+                raw_output = result
+
+            tool_result_payload = {
+                "tool_name": getattr(tool_call, "name", "") if tool_call else "",
+                "tool_call_id": getattr(tool_call, "id", "") if tool_call else "",
+                "result": str(result)[:1000] if result is not None else "",
+            }
+            if raw_output is not None:
+                tool_result_payload["raw_output"] = raw_output
+
+            await session.write_stream(
+                OutputSchema(
+                    type="tool_result",
+                    index=0,
+                    payload={
+                        "tool_result": tool_result_payload
+                    },
+                )
+            )
+        except Exception:
+            logger.debug("[SubagentContextRail] tool_result emit failed", exc_info=True)
 
 
 def set_subagent_parent_session(session: Optional[Session]) -> None:
@@ -264,9 +358,12 @@ class SubagentSessionProxy:
     """
 
     # Event types to forward (tool execution + thinking process + permission requests)
+    # Include tool_update for showing tool execution status (in_progress, etc.)
     FORWARD_TYPES = {
-        "tool_call", "tool_result", "thinking", "llm_reasoning",
+        "tool_call", "tool_result", "tool_update",
+        "thinking", "llm_reasoning",
         "retry_notification", "chat.ask_user_question",
+        "context.compressed",  # Context compression info
     }
     # Event types to suppress (user-facing messages only)
     SUPPRESS_TYPES = {"answer", "complete", "start"}
@@ -391,19 +488,21 @@ class ForkAgentExecutor:
             True if resolved successfully, False otherwise
         """
         for task_id, fork_agent in self._active_fork_agents.items():
-            if hasattr(fork_agent, "_resolve_permission_approval"):
+            # Use getattr to call the internal method (works with protected member)
+            resolve_method = getattr(fork_agent, "_resolve_permission_approval", None)
+            if resolve_method is not None:
                 try:
-                    resolved = fork_agent._resolve_permission_approval(
-                        request_id, answers
-                    )
+                    resolved = resolve_method(request_id, answers)
                     if resolved:
                         logger.info(
-                            f"[ForkAgent] Resolved permission approval in fork_agent task_id={task_id}, request_id={request_id}"
+                            f"[ForkAgent] Resolved permission approval in "
+                            f"task_id={task_id}, request_id={request_id}"
                         )
                         return True
                 except Exception as e:
                     logger.warning(
-                        f"[ForkAgent] Failed to resolve permission approval in task_id={task_id}: {e}"
+                        f"[ForkAgent] Failed to resolve permission approval "
+                        f"in task_id={task_id}: {e}"
                     )
         return False
 
@@ -426,7 +525,8 @@ class ForkAgentExecutor:
 
         return None
 
-    def _generate_dynamic_role_prompt(self, role_id: str) -> str:
+    @staticmethod
+    def _generate_dynamic_role_prompt(role_id: str) -> str:
         """
         Generate dynamic role prompt based on role name.
 
@@ -487,15 +587,7 @@ Approach each task methodically and deliver high-quality results.
             parent_session = get_subagent_parent_session()
 
         try:
-            # 1. Create fork agent with fork_messages injection rail
-            fork_agent = await self._create_fork_agent(task, fork_messages)
-
-            # 2. Build full prompt
-            full_prompt = task.objective
-            if task.prompt:
-                full_prompt = f"{task.objective}\n\n{task.prompt}"
-
-            # 3. Create session proxy for event forwarding
+            # 1. Create session proxy FIRST (needed for SubagentContextRail to emit events)
             session_proxy: SubagentSessionProxy | None = None
             if parent_session is not None:
                 session_proxy = SubagentSessionProxy(
@@ -503,6 +595,15 @@ Approach each task methodically and deliver high-quality results.
                     subagent_id=task.task_id,
                     role_id=task.role_id,
                 )
+
+            # 2. Create fork agent with fork_messages injection rail - pass session_proxy for event forwarding
+            fork_agent = await self._create_fork_agent(task, fork_messages, parent_session=session_proxy)
+
+            # 3. Build full prompt
+            full_prompt = task.objective
+            if task.prompt:
+                full_prompt = f"{task.objective}\n\n{task.prompt}"
+
             logger.info(
                 f"[ForkAgent] Starting execution, task_id={task.task_id}, role_id={task.role_id}, "
                 f"inherited_messages={len(fork_messages)}"
@@ -618,15 +719,7 @@ Approach each task methodically and deliver high-quality results.
                     f"[SpawnAgent] Generated dynamic role prompt for: {task.role_id}"
                 )
 
-            # 3. Create spawn agent (DeepAgent instance)
-            spawn_agent = await self._create_spawn_agent(task, system_prompt)
-
-            # 4. Build full prompt
-            full_prompt = task.objective
-            if task.prompt:
-                full_prompt = f"{task.objective}\n\n{task.prompt}"
-
-            # 5. Create session proxy for event forwarding
+            # 3. Create session proxy FIRST (needed for SubagentContextRail to emit events)
             session_proxy: SubagentSessionProxy | None = None
             if parent_session is not None:
                 # task.task_id already contains prefix (e.g., "subagent_xxx")
@@ -635,6 +728,15 @@ Approach each task methodically and deliver high-quality results.
                     subagent_id=task.task_id,  # Already has prefix like "subagent_xxx"
                     role_id=task.role_id,
                 )
+
+            # 4. Create spawn agent (DeepAgent instance) - pass session_proxy for event forwarding
+            spawn_agent = await self._create_spawn_agent(task, system_prompt, parent_session=session_proxy)
+
+            # 5. Build full prompt
+            full_prompt = task.objective
+            if task.prompt:
+                full_prompt = f"{task.objective}\n\n{task.prompt}"
+
             logger.info(
                 f"[SpawnAgent] Starting execution, task_id={task.task_id}, role_id={task.role_id}"
             )
@@ -720,6 +822,7 @@ Approach each task methodically and deliver high-quality results.
         self,
         task: SubagentTaskSpec,
         system_prompt: str,
+        parent_session: Session | None = None,
     ) -> DeepAgent:
         """Create spawn agent (DeepAgent instance) with isolated context.
 
@@ -731,6 +834,7 @@ Approach each task methodically and deliver high-quality results.
         Args:
             task: SubagentTaskSpec
             system_prompt: System prompt for the agent
+            parent_session: Parent session for event forwarding (passed to SubagentContextRail)
 
         Returns:
             DeepAgent instance for spawn subagent
@@ -775,14 +879,14 @@ Approach each task methodically and deliver high-quality results.
         )
 
         # Create DeepAgent instance using create_deep_agent
-        # Use SubagentContextRail for nested fork context inheritance
+        # Use SubagentContextRail for nested fork context inheritance and event forwarding
         spawn_agent = create_deep_agent(
             model=self._model,
             card=card,
             system_prompt=augmented_prompt,
             max_iterations=config_base.get("max_iterations", 15),
             workspace=workspace_obj,
-            rails=[SubagentContextRail(subagent_id=task.task_id)],  # task_id already has prefix
+            rails=[SubagentContextRail(subagent_id=task.task_id, parent_session=parent_session)],
             language=language,
             enable_task_loop=False,  # Subagent doesn't need task loop
         )
@@ -815,7 +919,7 @@ Approach each task methodically and deliver high-quality results.
             allowed_tools: Optional subset of tools to restrict to
         """
         # Note: fork_agent is NOT excluded, allowing spawn -> fork nesting
-        EXCLUDED_TOOLS = {
+        excluded_tools = {
             "spawn_subagent",  # Prevent recursive spawning
             "todo_create",
             "todo_complete",
@@ -841,7 +945,7 @@ Approach each task methodically and deliver high-quality results.
                         tool_name = tool.card.name
 
                     # Skip excluded tools
-                    if tool_name in EXCLUDED_TOOLS:
+                    if tool_name in excluded_tools:
                         logger.debug(f"[SpawnAgent] Skipping excluded tool: {tool_name}")
                         continue
 
@@ -870,6 +974,7 @@ Approach each task methodically and deliver high-quality results.
         self,
         task: ForkAgentTaskSpec,
         fork_messages: list[Any],  # Messages to inherit from parent
+        parent_session: Session | None = None,
     ) -> DeepAgent:
         """Create fork agent (DeepAgent instance) with inherited messages.
 
@@ -880,6 +985,7 @@ Approach each task methodically and deliver high-quality results.
         Args:
             task: Fork agent task specification
             fork_messages: Messages from parent agent to inherit
+            parent_session: Parent session for event forwarding (passed to SubagentContextRail)
 
         Returns:
             DeepAgent instance configured with message injection rail
@@ -958,7 +1064,7 @@ Execute the given task using inherited context and available tools.
             workspace=workspace_obj,
             rails=[
                 ForkMessageInjectionRail(fork_messages),  # Inject inherited messages
-                SubagentContextRail(subagent_id=task.task_id),  # Support nested fork
+                SubagentContextRail(subagent_id=task.task_id, parent_session=parent_session),  # Event forwarding
             ],
             language=language,
             enable_task_loop=False,
@@ -982,7 +1088,7 @@ Execute the given task using inherited context and available tools.
         Excludes fork_agent to prevent recursive forking.
         Optionally restricts to allowed_tools subset.
         """
-        EXCLUDED_TOOLS = {
+        excluded_tools = {
             "fork_agent",  # Prevent recursive forking
             "spawn_subagent",  # Prevent spawning new subagents from fork
             "todo_create",
@@ -1009,7 +1115,7 @@ Execute the given task using inherited context and available tools.
                         tool_name = tool.card.name
 
                     # Skip excluded tools
-                    if tool_name in EXCLUDED_TOOLS:
+                    if tool_name in excluded_tools:
                         logger.debug(f"[ForkAgent] Skipping excluded tool: {tool_name}")
                         continue
 
