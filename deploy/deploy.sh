@@ -36,7 +36,7 @@ process_up() {
                 ;;
             GATEWAY)
                 check_gateway_up_dependency
-                deploy_claw_gateway
+                deploy_gateway
                 ;;
         esac
     done

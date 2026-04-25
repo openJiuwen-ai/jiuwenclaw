@@ -121,7 +121,6 @@ check_gateway_up_dependency(){
     check_cmds
     check_cluster_has_enough_nodes
     check_ssh_connectivity
-    #check_if_yr_claw_up
 }
 
 

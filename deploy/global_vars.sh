@@ -24,6 +24,9 @@ CLAW_META_FILE="${SCRIPT_DIR}/conf/claw_meta.json"
 GATEWAY_CONFIG_TEMPLATE_FILE=""
 GATEWAY_CONFIG_FILE="${SCRIPT_DIR}/conf/config.yaml"
 
+GATEWAY_RBAC_TEMPLATE_FILE="${SCRIPT_DIR}/conf/gateway-rbac.template.yaml"
+GATEWAY_RBAC_FILE="${SCRIPT_DIR}/conf/gateway-rbac.yaml"
+
 GATEWAY_DEPLOYMENT_FILE="${SCRIPT_DIR}/conf/deployment.yaml"
 
 NFS_SERVER_TEMPLATE_FILE="${SCRIPT_DIR}/conf/nfs-server.template.yaml"
@@ -60,6 +63,7 @@ declare -A DEPLOY_VARS=(
     ["PVC_NAME"]="pvc-nfs-shared"
     ["PV_NAME"]="pv-nfs-shared"
     ["NFS_SHARE_PATH"]="/"
+    ["GATEWAY_SERVICE_ACCOUNT"]="jiuwenclaw-gateway-sa"
 )
 
 declare -A OYR_COMPONENTS=(

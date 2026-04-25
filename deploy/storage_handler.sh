@@ -33,6 +33,11 @@ install_pv_pvc() {
     exec_cmd kubectl apply -f ${PVC_FILE}
 }
 
+uninstall_pv_pvc() {
+    exec_cmd kubectl delete -f ${PV_FILE}
+    exec_cmd kubectl delete -f ${PVC_FILE}
+}
+
 deploy_nfs() {
     label_master_nfs_node
 

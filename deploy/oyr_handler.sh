@@ -219,8 +219,6 @@ uninstall_oyr() {
         warning "Helm release ${OYL_CHART_NAME} not found, skipping uninstall."
     fi
 
-    delete_k8s_resource "pvc" "${DEPLOY_VARS["PVC_NAME"]}"
-    delete_k8s_resource "pv" "${DEPLOY_VARS["PV_NAME"]}"
-
+    uninstall_pv_pvc
     success "Uninstall ${OYL_CHART_NAME} completed successfully."
 }

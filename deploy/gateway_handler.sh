@@ -2,7 +2,7 @@
 set -euo >/dev/null 2>&1
 
 
-gen_gateway_config_file() {
+gen_gateway_configmap() {
     local client_type="${DEPLOY_VARS["AGENT_CLIENT_TYPE"]}"
 
     info "AGENT_CLIENT_TYPE: ${client_type}"
@@ -38,27 +38,33 @@ gen_gateway_config_file() {
         yq eval ".channels.feishu_enterprise.${bot_name}.enabled = true" -i "${GATEWAY_CONFIG_FILE}"
     done
 
-    info "Configuration generation completed: ${GATEWAY_CONFIG_FILE}"
-}
+    success "Configuration generation completed: ${GATEWAY_CONFIG_FILE}"
 
-
-deploy_claw_gateway(){
     local file_name=$(basename "${GATEWAY_CONFIG_FILE}")
-    local deploy_template_file="${SCRIPT_DIR}/conf/deployment-${DEPLOY_VARS["MODE"]}.template.yaml"
-
-    # Create configMap
-    if [ "${DEPLOY_VARS["AGENT_CLIENT_TYPE"]}" == "yuanrong_frontend" ]; then
-        collect_oyr_info
-    fi
-    gen_gateway_config_file
     info "Executing: kubectl create configmap ${DEPLOY_VARS["GATEWAY_CONFIG_MAP_NAME"]} --from-file=${file_name}=${GATEWAY_CONFIG_FILE} --dry-run=client -o yaml | kubectl apply -f -"
     kubectl create configmap ${DEPLOY_VARS["GATEWAY_CONFIG_MAP_NAME"]} --from-file=${file_name}=${GATEWAY_CONFIG_FILE} --dry-run=client -o yaml | kubectl apply -f -
+}
 
-    # Start gateway
+deploy_gateway(){
+    local client_type="${DEPLOY_VARS["AGENT_CLIENT_TYPE"]}"
+    local deploy_template_file="${SCRIPT_DIR}/conf/deployment-${DEPLOY_VARS["MODE"]}.template.yaml"
+
+    if [ "${client_type}" == "yuanrong_frontend" ]; then
+        collect_oyr_info
+    elif [ "${client_type}" == "runtime_orchestrator" ]; then
+        deploy_template_file="${SCRIPT_DIR}/conf/deployment-rt.template.yaml"
+
+        # create gateway rbac
+        render_config_template "${GATEWAY_RBAC_TEMPLATE_FILE}" "${GATEWAY_RBAC_FILE}" "DEPLOY_VARS"
+        exec_cmd kubectl apply -f ${GATEWAY_RBAC_FILE}
+    fi
+
+    gen_gateway_configmap
+
+    # start gateway
     render_config_template ${deploy_template_file} ${GATEWAY_DEPLOYMENT_FILE} "DEPLOY_VARS"
     exec_cmd kubectl apply -f ${GATEWAY_DEPLOYMENT_FILE}
     wait_k8s_resource_ready "deployment" "${DEPLOY_VARS["GATEWAY_DEPLOYMENT_NAME"]}"
-
 }
 
 
@@ -68,4 +74,8 @@ uninstall_gateway() {
     wait_pod_terminated "${DEPLOY_VARS["GATEWAY_DEPLOYMENT_NAME"]}"
 
     delete_k8s_resource "configmap" "${DEPLOY_VARS["GATEWAY_CONFIG_MAP_NAME"]}"
+
+    if [ "${DEPLOY_VARS["AGENT_CLIENT_TYPE"]}" == "runtime_orchestrator" ]; then
+        exec_cmd kubectl delete -f ${GATEWAY_RBAC_FILE}
+    fi
 }
