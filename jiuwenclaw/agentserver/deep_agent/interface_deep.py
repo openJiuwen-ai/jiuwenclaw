@@ -14,7 +14,7 @@ import os
 from contextvars import ContextVar, Token
 from dataclasses import dataclass
 
-from typing import Any, AsyncIterator, Callable, List, Tuple
+from typing import Any, AsyncIterator, Callable, List, Self, Tuple
 
 from dotenv import load_dotenv
 try:
@@ -94,7 +94,6 @@ from jiuwenclaw.agentserver.deep_agent.prompt_builder import build_identity_prom
 from jiuwenclaw.agentserver.deep_agent.rails import (
     JiuClawContextEngineeringRail,
     JiuClawStreamEventRail,
-    RequestSystemPromptRail,
     ResponsePromptRail,
     RuntimePromptRail,
     SkillComplianceRail,
@@ -231,6 +230,29 @@ _ACP_BLOCKED_DEFAULT_TOOL_NAMES = frozenset(
         "code",
     }
 )
+
+
+@dataclass(slots=True)
+class _RuntimeConfigParams:
+    """`_update_runtime_config` 的具名入参封装（会话、模式与请求级上下文）。"""
+
+    session_id: str | None
+    mode: str = "agent.plan"
+    request_id: str | None = None
+    channel_id: str | None = None
+    request_metadata: dict[str, Any] | None = None
+    request_system_prompt: str | None = None
+
+    @classmethod
+    def from_agent_request(cls, request: AgentRequest, mode: str) -> Self:
+        return cls(
+            session_id=request.session_id,
+            mode=mode,
+            request_id=request.request_id,
+            channel_id=request.channel_id,
+            request_metadata=request.metadata,
+            request_system_prompt=request.params.get("system_prompt"),
+        )
 
 
 def _parse_int(value: Any, default: int) -> int:
@@ -624,7 +646,6 @@ class JiuWenClawDeepAdapter:
         self._task_planning_rail: TaskPlanningRail | None = None
         self._context_engineering_rail: ContextEngineeringRail | None = None
         self._context_engineering_rail_mode: str | None = None
-        self._request_system_prompt_rail: RequestSystemPromptRail | None = None
         self._runtime_prompt_rail: RuntimePromptRail | None = None
         self._response_prompt_rail: ResponsePromptRail | None = None
         self._skill_protocol_prompt_rail: SkillProtocolPromptRail | None = None
@@ -1286,17 +1307,6 @@ class JiuWenClawDeepAdapter:
         return SkillUseRail.SKILL_MODE_ALL
 
     @staticmethod
-    def _build_request_system_prompt_rail() -> RequestSystemPromptRail | None:
-        """Build per-request system prompt rail."""
-        try:
-            rail = RequestSystemPromptRail()
-            logger.info("[JiuWenClawDeepAdapter] RequestSystemPromptRail create success")
-        except Exception as exc:
-            logger.warning("[JiuWenClawDeepAdapter] RequestSystemPromptRail create failed: %s", exc)
-            rail = None
-        return rail
-
-    @staticmethod
     def _build_response_prompt_rail() -> ResponsePromptRail | None:
         """Build ResponsePromptRail so message rules keep priority ordering."""
         try:
@@ -1656,7 +1666,6 @@ class JiuWenClawDeepAdapter:
         rail_infos = [
             # TelemetryRail - lowest priority, runs first for full coverage
             _RailBuildInfo("_telemetry_rail", self._build_telemetry_rail),
-            _RailBuildInfo("_request_system_prompt_rail", self._build_request_system_prompt_rail),
             _RailBuildInfo("_runtime_prompt_rail", self._build_runtime_prompt_rail),
             _RailBuildInfo("_response_prompt_rail", self._build_response_prompt_rail),
             _RailBuildInfo("_stream_event_rail", self._build_stream_event_rail),
@@ -2582,14 +2591,7 @@ class JiuWenClawDeepAdapter:
         if self._instance.deep_config is not None:
             self._instance.deep_config.language = resolved_language
 
-    async def _update_runtime_config(
-            self,
-            session_id: str | None,
-            mode: str = "agent.plan",
-            request_id: str | None = None,
-            channel_id: str | None = None,
-            request_metadata: dict[str, Any] | None = None,
-    ) -> None:
+    async def _update_runtime_config(self, params: _RuntimeConfigParams) -> None:
         """Register per-request tools for current agent execution."""
         if self._instance is None:
             raise RuntimeError("JiuWenClawDeepAdapter 未初始化，请先调用 create_instance()")
@@ -2597,10 +2599,13 @@ class JiuWenClawDeepAdapter:
         resolved_language = self._resolve_runtime_language()
         if self._runtime_prompt_rail:
             self._runtime_prompt_rail.set_language(resolved_language)
-            resolved_channel = str(channel_id or self._resolve_prompt_channel(session_id) or "web").strip() or "web"
+            resolved_channel = (
+                str(params.channel_id or self._resolve_prompt_channel(params.session_id) or "web").strip() or "web"
+            )
             self._runtime_prompt_rail.set_channel(resolved_channel)
+            self._runtime_prompt_rail.set_request_system_prompt(params.request_system_prompt)
 
-            md = request_metadata or {}
+            md = params.request_metadata or {}
             v = md.get("effective_project_dir")
             if isinstance(v, str) and v.strip():
                 resolved_workspace_dir = v.strip()
@@ -2608,11 +2613,16 @@ class JiuWenClawDeepAdapter:
                 resolved_workspace_dir = self._workspace_dir
             self._runtime_prompt_rail.set_workspace_dir(resolved_workspace_dir)
 
-        await self._update_rails_for_mode(mode)
-        await self._update_tools_for_mode(mode, session_id, request_id)
-        await self._update_session_tools(session_id, request_id, channel_id=channel_id)
-        self._refresh_acp_runtime_tools(session_id, request_id, channel_id, request_metadata)
-        self._update_prompt_for_mode(mode, resolved_language)
+        await self._update_rails_for_mode(params.mode)
+        await self._update_tools_for_mode(params.mode, params.session_id, params.request_id)
+        await self._update_session_tools(params.session_id, params.request_id, channel_id=params.channel_id)
+        self._refresh_acp_runtime_tools(
+            params.session_id,
+            params.request_id,
+            params.channel_id,
+            params.request_metadata,
+        )
+        self._update_prompt_for_mode(params.mode, resolved_language)
 
         # user_todos 工具注册（工具只注册一次，channel_id 每次请求由 ContextVar 更新）
         try:
@@ -3491,13 +3501,7 @@ class JiuWenClawDeepAdapter:
         resolved_model = self._resolve_model_for_request(request)
         self._apply_model_to_react_agent(resolved_model)
         try:
-            await self._update_runtime_config(
-                request.session_id,
-                mode,
-                request_id=request.request_id,
-                channel_id=request.channel_id,
-                request_metadata=request.metadata,
-            )
+            await self._update_runtime_config(_RuntimeConfigParams.from_agent_request(request, mode))
 
             result = await Runner.run_agent(agent=self._instance, inputs=inputs)
         except asyncio.CancelledError:
@@ -3641,13 +3645,7 @@ class JiuWenClawDeepAdapter:
         resolved_model = self._resolve_model_for_request(request)
         self._apply_model_to_react_agent(resolved_model)
         try:
-            await self._update_runtime_config(
-                request.session_id,
-                mode,
-                request_id=request.request_id,
-                channel_id=request.channel_id,
-                request_metadata=request.metadata,
-            )
+            await self._update_runtime_config(_RuntimeConfigParams.from_agent_request(request, mode))
 
             if self._stream_event_rail is not None:
                 self._stream_event_rail.reset_abort()

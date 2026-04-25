@@ -56,6 +56,7 @@ class RuntimePromptRail(DeepAgentRail):
         self._workspace_dir = workspace_dir
         self._agent_id = agent_id
         self._service_id = service_id
+        self._request_system_prompt: str = ""
 
     def init(self, agent) -> None:
         """从 agent 获取 system_prompt_builder 引用。"""
@@ -67,6 +68,7 @@ class RuntimePromptRail(DeepAgentRail):
             self.system_prompt_builder.remove_section("time")
             self.system_prompt_builder.remove_section("runtime")
             self.system_prompt_builder.remove_section("workspace")
+            self.system_prompt_builder.remove_section("request_system_prompt")
         self.system_prompt_builder = None
 
     def set_language(self, language: str) -> None:
@@ -80,6 +82,11 @@ class RuntimePromptRail(DeepAgentRail):
     def set_workspace_dir(self, workspace_dir: Optional[str]) -> None:
         """per-request 更新工作空间目录。"""
         self._workspace_dir = workspace_dir
+
+    def set_request_system_prompt(self, prompt: Optional[str]) -> None:
+        """per-request 更新 system prompt 追加内容。"""
+        value = prompt.strip() if isinstance(prompt, str) else ""
+        self._request_system_prompt = value
 
     @staticmethod
     def _get_git_branch() -> str:
@@ -281,3 +288,11 @@ When the `send_file_to_user` tool is available in your tool list, you **must** p
             content={"cn": workspace_content, "en": workspace_content},
             priority=15,
         ))
+
+        self.system_prompt_builder.remove_section("request_system_prompt")
+        if self._request_system_prompt:
+            self.system_prompt_builder.add_section(PromptSection(
+                name="request_system_prompt",
+                content={"cn": self._request_system_prompt, "en": self._request_system_prompt},
+                priority=95,
+            ))
