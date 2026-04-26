@@ -101,9 +101,6 @@ from jiuwenclaw.agentserver.deep_agent.rails import (
     TaskExecutionRail,
 )
 from jiuwenclaw.agentserver.deep_agent.rails.disabled_tools_rail import DisabledToolsRail
-from jiuwenclaw.agentserver.deep_agent.rails.dispatch_agent_rail import (
-    DispatchAgentRail,
-)
 from jiuwenclaw.agentserver.deep_agent.rails.task_execution_rail import get_current_task_id
 from jiuwenclaw.agentserver.deep_agent.permissions.owner_scopes import (
     TOOL_PERMISSION_CONTEXT,
@@ -130,7 +127,6 @@ from jiuwenclaw.agentserver.tools import SendFileToolkit, SkillToolkit
 from jiuwenclaw.agentserver.tools.acp_output_tools import get_tools as get_acp_output_tools
 from jiuwenclaw.agentserver.tools.acp_output_tools import get_acp_output_manager
 from jiuwenclaw.agentserver.tools.deepresearch_tools import (
-    get_deepresearch_tools,
     push_deepresearch_route,
     reset_deepresearch_route,
 )
@@ -664,7 +660,6 @@ class JiuWenClawDeepAdapter:
         self._heartbeat_rail: HeartbeatRail | None = None
         self._skill_evolution_rail: SkillEvolutionRail | None = None
         self._subagent_rail: SubagentRail | None = None
-        self._dispatch_agent_rail: DispatchAgentRail | None = None
         self._disabled_tools_rail: DisabledToolsRail | None = None
         self._permission_rail: Any = None
         self._avatar_rail: Any = None
@@ -1484,17 +1479,6 @@ class JiuWenClawDeepAdapter:
             subagent_rail = None
         return subagent_rail
 
-    @staticmethod
-    def _build_dispatch_agent_rail() -> DispatchAgentRail | None:
-        """Build DispatchAgentRail for free-form subagent dispatch."""
-        try:
-            rail = DispatchAgentRail()
-            logger.info("[JiuWenClawDeepAdapter] DispatchAgentRail create success")
-        except Exception as exc:
-            logger.warning("[JiuWenClawDeepAdapter] DispatchAgentRail create failed: %s", exc)
-            rail = None
-        return rail
-
     def _build_security_rail(self) -> SecurityRail | None:
         """Build SecurityPromptRail."""
         try:
@@ -1697,7 +1681,6 @@ class JiuWenClawDeepAdapter:
             _RailBuildInfo("_heartbeat_rail", self._build_heartbeat_rail),
             _RailBuildInfo("_avatar_rail", self._build_avatar_rail),
             _RailBuildInfo("_subagent_rail", self._build_subagent_rail),
-            _RailBuildInfo("_dispatch_agent_rail", self._build_dispatch_agent_rail),
             _RailBuildInfo("_permission_rail", build_permission_rail, {"config": config_base, "llm": self._model,
                                                                        "model_name": config_base.get("models", {}).get(
                                                                            "default", {}).get("model_client_config",
@@ -2020,21 +2003,6 @@ class JiuWenClawDeepAdapter:
             )
         except Exception as exc:
             logger.warning("[JiuWenClawDeepAdapter] skill tools registration failed: %s", exc)
-
-        # DeepResearch 工具注册（深度研究任务管理）
-        try:
-            dr_tool_names: list[str] = []
-            for dr_tool in get_deepresearch_tools():
-                if not Runner.resource_mgr.get_tool(dr_tool.card.id):
-                    Runner.resource_mgr.add_tool(dr_tool)
-                tool_cards.append(dr_tool.card)
-                dr_tool_names.append(dr_tool.card.name)
-            logger.info(
-                "[JiuWenClawDeepAdapter] DeepResearch tools registered: tools=%s",
-                dr_tool_names,
-            )
-        except Exception as exc:
-            logger.warning("[JiuWenClawDeepAdapter] DeepResearch tools registration failed: %s", exc)
 
         # Session 级 todo 工具（TodoToolkit / SkillStepToolkit）改由
         # SkillProtocolPromptRail.init() 跟随 rail 生命周期注册到 agent，
@@ -2375,12 +2343,6 @@ class JiuWenClawDeepAdapter:
             if self._subagent_rail is not None:
                 await self._instance.register_rail(self._subagent_rail)
                 logger.info("[JiuWenClawDeepAdapter] SubagentRail registered for plan mode")
-        # 注册 dispatch agent rail（plan 模式下启用：允许 LLM 运行时自由起草子代理规格）
-        if self._dispatch_agent_rail is None:
-            self._dispatch_agent_rail = self._build_dispatch_agent_rail()
-            if self._dispatch_agent_rail is not None:
-                await self._instance.register_rail(self._dispatch_agent_rail)
-                logger.info("[JiuWenClawDeepAdapter] DispatchAgentRail registered for plan mode")
         # plan 模式下注册 skill 合规相关 rail
         if self._skill_protocol_prompt_rail is None:
             self._skill_protocol_prompt_rail = self._build_skill_protocol_prompt_rail()
@@ -2403,7 +2365,6 @@ class JiuWenClawDeepAdapter:
                 ("_task_planning_rail", "TaskPlanningRail"),
                 ("_skill_evolution_rail", "SkillEvolutionRail"),
                 ("_subagent_rail", "SubagentRail"),
-                ("_dispatch_agent_rail", "DispatchAgentRail"),
                 ("_skill_protocol_prompt_rail", "SkillProtocolPromptRail"),
                 ("_skill_compliance_rail", "SkillComplianceRail"),
         ):

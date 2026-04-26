@@ -34,7 +34,6 @@ from jiuwenclaw.agentserver.team.team_runtime_inheritance import (
     get_default_model_name,
 )
 from jiuwenclaw.agentserver.tools.deepresearch_tools import (
-    get_deepresearch_tools,
     push_deepresearch_route,
     reset_deepresearch_route,
 )
@@ -182,21 +181,6 @@ class TeamManager:
             else:
                 logger.info("[TeamManager] SendFileToolkit skipped: missing request_id or channel_id")
 
-            # DeepResearch 工具注册（深度研究任务管理）
-            try:
-                dr_tool_names: list[str] = []
-                for dr_tool in get_deepresearch_tools():
-                    if not Runner.resource_mgr.get_tool(dr_tool.card.id):
-                        Runner.resource_mgr.add_tool(dr_tool)
-                    agent.ability_manager.add(dr_tool.card)
-                    dr_tool_names.append(dr_tool.card.name)
-                logger.info(
-                    "[TeamManager] DeepResearch tools registered for member agent=%s: tools=%s",
-                    agent_id,
-                    dr_tool_names,
-                )
-            except Exception as exc:
-                logger.warning("[TeamManager] DeepResearch tools registration failed: %s", exc)
         finally:
             # 重置 DeepResearch 路由上下文
             reset_deepresearch_route(dr_token)

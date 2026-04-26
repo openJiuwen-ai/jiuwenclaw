@@ -15,6 +15,7 @@ from openjiuwen.core.session.agent import Session
 from openjiuwen.core.single_agent import AgentCard
 from openjiuwen.harness import DeepAgent
 from openjiuwen.harness.factory import create_deep_agent
+from openjiuwen.harness.rails.filesystem_rail import FileSystemRail
 from openjiuwen.harness.workspace.workspace import Workspace
 from openjiuwen.core.foundation.llm import Model
 
@@ -42,6 +43,9 @@ from jiuwenclaw.agentserver.tools.subagent_executor.rails import (
 
 if TYPE_CHECKING:
     pass
+
+# Subagent ReAct cap when parent has no usable max_iterations (mirrors interface_deep fallback).
+_DEFAULT_SUBAGENT_MAX_ITERATIONS = 15
 
 
 class ForkAgentExecutor:
@@ -94,6 +98,69 @@ class ForkAgentExecutor:
                     return (root, "parent_config.workspace.root_path")
 
         return (get_agent_root_dir(), "get_agent_root_dir()")
+
+    def _resolve_subagent_max_iterations(self) -> int:
+        """Use parent DeepAgent's max_iterations; then react.max_iterations; then default.
+
+        Keeps spawn/fork subagents aligned with the main agent cap (see interface_deep react).
+        """
+        parent = self._parent_agent
+        dc = getattr(parent, "deep_config", None)
+        if dc is not None:
+            raw = getattr(dc, "max_iterations", None)
+            if raw is not None:
+                try:
+                    n = int(raw)
+                    if n > 0:
+                        return n
+                except (TypeError, ValueError):
+                    pass
+
+        cfg = get_config()
+        react = cfg.get("react") if isinstance(cfg.get("react"), dict) else {}
+        raw = react.get("max_iterations")
+        if raw is not None and raw != "":
+            try:
+                n = int(raw)
+                if n > 0:
+                    return n
+            except (TypeError, ValueError):
+                pass
+
+        return _DEFAULT_SUBAGENT_MAX_ITERATIONS
+
+    def _parent_has_filesystem_rail(self) -> bool:
+        """Return whether the parent agent exposes local file tools through FileSystemRail."""
+        parent_config = getattr(self._parent_agent, "deep_config", None)
+        candidate_rails = []
+        for source in (
+            getattr(parent_config, "rails", None),
+            getattr(self._parent_agent, "rails", None),
+            getattr(self._parent_agent, "_rails", None),
+        ):
+            if source:
+                candidate_rails.extend(source)
+
+        return any(type(rail).__name__ == "FileSystemRail" for rail in candidate_rails)
+
+    def _build_inherited_filesystem_rail(self, *, allowed_tools: tuple[str, ...] | None) -> FileSystemRail | None:
+        """Create a child FileSystemRail when the parent had one.
+
+        FileSystemRail tools are not necessarily present in ability_manager, so spawn/fork must
+        mount their own rail instead of relying only on ToolCard inheritance.
+        """
+        if allowed_tools is not None:
+            logger.debug("[Subagent] Skipping FileSystemRail inheritance because allowed_tools is set")
+            return None
+
+        if not self._parent_has_filesystem_rail():
+            return None
+
+        try:
+            return FileSystemRail()
+        except Exception as exc:
+            logger.warning("[Subagent] FileSystemRail inheritance failed: %s", exc)
+            return None
 
     def resolve_permission_approval(self, request_id: str, answers: list) -> bool:
         """Resolve permission approval across all active fork agents.
@@ -464,23 +531,33 @@ Approach each task methodically and deliver high-quality results.
             language=language,
         )
 
+        max_iterations = self._resolve_subagent_max_iterations()
+        filesystem_rail = self._build_inherited_filesystem_rail(allowed_tools=task.allowed_tools)
+        rails = [
+            JiuClawContextEngineeringRail(preset=True),  # 上下文压缩
+            SubagentContextRail(subagent_id=task.task_id, parent_session=parent_session),
+        ]
+        if filesystem_rail is not None:
+            rails.insert(0, filesystem_rail)
+
         spawn_agent = create_deep_agent(
             model=self._model,
             card=card,
             system_prompt=augmented_prompt,
-            max_iterations=config_base.get("max_iterations", 15),
+            max_iterations=max_iterations,
             workspace=workspace_obj,
-            rails=[
-                JiuClawContextEngineeringRail(preset=True),  # 上下文压缩
-                SubagentContextRail(subagent_id=task.task_id, parent_session=parent_session),
-            ],
+            rails=rails,
             language=language,
             enable_task_loop=False,
         )
 
         self._inherit_tools_for_spawn(spawn_agent, task.allowed_tools)
 
-        logger.info(f"[SpawnAgent] Created spawn agent instance, task_id={task.task_id}")
+        logger.info(
+            "[SpawnAgent] Created spawn agent instance, task_id=%s, max_iterations=%s",
+            task.task_id,
+            max_iterations,
+        )
         return spawn_agent
 
     def _inherit_tools_for_spawn(
@@ -592,24 +669,34 @@ Execute the given task using inherited context and available tools.
             language=language,
         )
 
+        max_iterations = self._resolve_subagent_max_iterations()
+        filesystem_rail = self._build_inherited_filesystem_rail(allowed_tools=task.allowed_tools)
+        rails = [
+            ForkMessageInjectionRail(fork_messages),  # 注入继承的消息
+            JiuClawContextEngineeringRail(preset=True),  # 上下文压缩（fork 继承大量消息时尤其重要）
+            SubagentContextRail(subagent_id=task.task_id, parent_session=parent_session),
+        ]
+        if filesystem_rail is not None:
+            rails.insert(0, filesystem_rail)
+
         fork_agent = create_deep_agent(
             model=self._model,
             card=card,
             system_prompt=augmented_prompt,
-            max_iterations=config_base.get("max_iterations", 15),
+            max_iterations=max_iterations,
             workspace=workspace_obj,
-            rails=[
-                ForkMessageInjectionRail(fork_messages),  # 注入继承的消息
-                JiuClawContextEngineeringRail(preset=True),  # 上下文压缩（fork 继承大量消息时尤其重要）
-                SubagentContextRail(subagent_id=task.task_id, parent_session=parent_session),
-            ],
+            rails=rails,
             language=language,
             enable_task_loop=False,
         )
 
         self._inherit_tools_for_fork(fork_agent, task.allowed_tools)
 
-        logger.info(f"[ForkAgent] Created fork agent instance, task_id={task.task_id}")
+        logger.info(
+            "[ForkAgent] Created fork agent instance, task_id=%s, max_iterations=%s",
+            task.task_id,
+            max_iterations,
+        )
         return fork_agent
 
     def _inherit_tools_for_fork(

@@ -4,8 +4,8 @@
 
 Commit 155a107 added:
 - ``assign_team_member_subagents`` copies main DeepAgent's subagent specs onto
-  each freshly-spawned team member so members can also call ``dispatch_agent`` /
-  ``task_tool`` etc. without rebuilding the list.
+  each freshly-spawned team member so members can also call ``task_tool`` etc.
+  without rebuilding the list.
 - ``team.member.tool_call`` / ``team.member.tool_result`` event types under
   the ``team.member.activity`` category so member tool invocations can be
   broadcast to the UI.
@@ -39,7 +39,7 @@ def _fake_agent_with_subagents(subagents):
 
 
 def test_member_inherits_subagents_from_main_when_main_has_them():
-    main_sub_spec = MagicMock(name="dispatch_agent_spec")
+    main_sub_spec = MagicMock(name="subagent_spec")
     main = _fake_agent_with_subagents([main_sub_spec])
     member = _fake_agent_with_subagents(None)
 
