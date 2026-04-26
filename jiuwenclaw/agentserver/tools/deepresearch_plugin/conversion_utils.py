@@ -4,7 +4,6 @@ from __future__ import annotations
 import html
 import logging
 import re
-from dataclasses import dataclass
 from pathlib import Path
 
 import pypandoc
@@ -42,6 +41,15 @@ CITATION_ANCHOR_RE = re.compile(
     r'(?<!<sup class="citation">)(<a\b[^>]*href="https?://[^"]+"[^>]*>\[(\d+)\]</a>)',
     flags=re.IGNORECASE,
 )
+MERMAID_BLOCK_WITH_ADJACENT_CAPTION_RE = re.compile(
+    r'(?is)```[ \t]*mermaid[ \t]*\r?\n(.*?)\r?\n```[ \t]*'
+    r'(?:'
+    r'(?:\r?\n[ \t]*)+'
+    r'<div\b(?=[^>]*\b(?:style="text-align:\s*center;?"|class="figure-caption"))[^>]*>'
+    r'.*?'
+    r'</div>[ \t]*'
+    r')?'
+)
 
 try:
     from PIL import Image, ImageEnhance
@@ -58,13 +66,6 @@ try:
     DOCX_STYLE_AVAILABLE = True
 except Exception:
     DOCX_STYLE_AVAILABLE = False
-
-
-@dataclass(slots=True)
-class MermaidRenderStats:
-    total: int = 0
-    success: int = 0
-    failed: int = 0
 
 
 def ensure_pandoc() -> None:
@@ -371,31 +372,15 @@ def fix_center_caption_blocks(text: str) -> str:
     return CENTER_CAPTION_RE.sub('<div class="figure-caption" markdown="1">', text)
 
 
-def render_mermaid_supplement(supplement_markdown: str) -> str:
-    """Wrap mermaid supplement content in a styled timeline-notes div.
-    
-    Creates an HTML div container with appropriate class for rendering
-    supplementary notes and content alongside mermaid diagrams.
-    
-    Args:
-        supplement_markdown: The markdown content to wrap. May be empty.
-    
-    Returns:
-        An empty string if input is empty/whitespace-only, otherwise
-        the content wrapped in a timeline-notes div with markdown attribute.
-    
-    Note:
-        The markdown="1" attribute ensures the content is processed
-        as markdown within the HTML div.
+def strip_mermaid_blocks(text: str) -> str:
+    """Remove Mermaid fenced code blocks and adjacent figure captions.
+
+    Mermaid charts are now generated upstream as regular image references.
+    Any leftover Mermaid fences are treated as stale intermediate content and
+    removed before HTML or DOCX conversion. An immediately following caption
+    block is removed as well so no orphaned figure note remains.
     """
-    supplement_markdown = supplement_markdown.strip()
-    if not supplement_markdown:
-        return ""
-    return (
-        '\n<div class="timeline-notes" markdown="1">\n'
-        f"{supplement_markdown}\n"
-        "</div>\n"
-    )
+    return MERMAID_BLOCK_WITH_ADJACENT_CAPTION_RE.sub("\n", text)
 
 
 def preprocess_markdown_text(text: str) -> str:
@@ -420,7 +405,8 @@ def preprocess_markdown_text(text: str) -> str:
     text = replace_citations(text)
     text = normalize_pipe_tables(text)
     text = normalize_reference_lines(text)
-    return fix_center_caption_blocks(text)
+    text = fix_center_caption_blocks(text)
+    return strip_mermaid_blocks(text)
 
 
 def _filter_remote_urls_for_ssrf(text: str) -> str:
@@ -466,7 +452,8 @@ def preprocess_markdown_text_for_docx(text: str) -> str:
     text = normalize_pipe_tables(text)
     text = normalize_reference_lines(text)
     text = _filter_remote_urls_for_ssrf(text)
-    return fix_center_caption_blocks(text)
+    text = fix_center_caption_blocks(text)
+    return strip_mermaid_blocks(text)
 
 
 def postprocess_html(html_text: str) -> str:

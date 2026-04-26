@@ -119,15 +119,13 @@ class DeepResearchTaskManager:
     def _resolve_petal_search_url() -> str:
         """Build Petal Search URL from LLM API_BASE: strip trailing /v2, append /v1/ai-tools/web-search."""
         api_base = (
-                os.environ.get("API_BASE")
-                or os.environ.get("OPENAI_BASE_URL")
-                or os.environ.get("OPENAI_API_BASE")
-                or ""
+            os.environ.get("API_BASE")
+            or os.environ.get("OPENAI_BASE_URL")
+            or os.environ.get("OPENAI_API_BASE")
+            or ""
         ).strip()
         if not api_base:
-            raise ValueError(
-                "API_BASE is not set (use the same OpenAI-compatible base URL as the LLM)"
-            )
+            return ""
         trimmed = api_base.rstrip("/")
         if trimmed.lower().endswith("/v2"):
             trimmed = trimmed[:-3]
@@ -165,12 +163,14 @@ class DeepResearchTaskManager:
                 or os.environ.get("API_KEY", "").strip()
         )
 
-        # 其他配置：直接从 DeepSearch 专属环境变量获取
         web_search_engine_name = os.environ.get("WEB_SEARCH_ENGINE_NAME", "petal").strip()
-        web_search_api_key = (os.environ.get("OPENAI_DEFAULT_HEADERS") or os.environ.get("default_headers")
-                              or os.environ.get("WEB_SEARCH_API_KEY", "").strip())
-        web_search_url = (DeepResearchTaskManager._resolve_petal_search_url()
-                          or os.environ.get("WEB_SEARCH_URL", "").strip())
+        web_search_api_key = (os.environ.get("WEB_SEARCH_API_KEY") 
+                              or os.environ.get("OPENAI_DEFAULT_HEADERS") 
+                              or os.environ.get("default_headers", "")
+                              ).strip()
+        web_search_url = (os.environ.get("WEB_SEARCH_URL") 
+                          or DeepResearchTaskManager._resolve_petal_search_url()
+                          ).strip()
         execution_method = os.environ.get("EXECUTION_METHOD", "parallel").strip()
 
         config = {
@@ -351,6 +351,7 @@ class DeepResearchTaskManager:
             flags=html_re.IGNORECASE | html_re.DOTALL
         )
 
+        # 移除危险标签: iframe, object, embed, applet, form
         dangerous_tags = ['iframe', 'object', 'embed', 'applet', 'form', 'meta', 'link', 'base']
         for tag in dangerous_tags:
             html_content = html_re.sub(
@@ -400,43 +401,6 @@ class DeepResearchTaskManager:
         return html_content
 
     @staticmethod
-    def _write_inference_html_files(report_file: str, infer_messages: Any):
-        """将溯源推理图写入独立 HTML 文件，返回目录路径."""
-        html_map = DeepResearchTaskManager._collect_inference_html(infer_messages)
-        if not html_map:
-            return None
-
-        infer_dir = f"{report_file}_infer"
-        os.makedirs(infer_dir, exist_ok=True)
-        for infer_id, html_content in html_map.items():
-            safe_html_content = html_content
-
-            infer_file = os.path.join(infer_dir, f"inference_{infer_id}.html")
-            with open(infer_file, "w", encoding="utf-8") as f:
-                f.write(safe_html_content)
-        return None
-
-    @staticmethod
-    def _replace_inference_links(report_content: str, infer_dir: str | None) -> str:
-        """将 #inference:N 链接替换为本地 HTML 超链接."""
-        infer_dir_name = os.path.basename(infer_dir) if infer_dir else ""
-
-        def repl(match: re.Match[str]) -> str:
-            label = match.group(1)
-            infer_id = match.group(2)
-            if not infer_dir_name or not infer_dir:
-                return label
-
-            infer_path = os.path.join(infer_dir, f"inference_{infer_id}.html")
-            if not os.path.exists(infer_path):
-                return label
-
-            relative_link = os.path.join(infer_dir_name, f"inference_{infer_id}.html").replace("\\", "/")
-            return f"[{label}]({relative_link})"
-
-        return INFERENCE_LINK_RE.sub(repl, report_content)
-
-    @staticmethod
     def _build_report_content(data: Any, report_file: str) -> tuple[str, str | None, str | None]:
         """根据 DeepResearch 结果构建最终落盘的报告内容（带资源边界检查）."""
         infer_dir = None
@@ -473,15 +437,14 @@ class DeepResearchTaskManager:
             return json.dumps(data, ensure_ascii=False, indent=2), infer_dir, chart_dir
         return str(data), infer_dir, chart_dir
 
-
     @staticmethod
     def _write_report_artifacts(
-            data: Any,
-            file_name: str,
-            output_dir: str = SAVE_REPORT_PATH,
-            *,
-            task_id: str = "",
-            cancel_event: threading.Event | None = None,
+        data: Any,
+        file_name: str,
+        output_dir: str = SAVE_REPORT_PATH,
+        *,
+        task_id: str = "",
+        cancel_event: threading.Event | None = None,
     ) -> dict[str, str]:
         """写出 markdown/html/docx 报告及推理图目录（支持协作取消）."""
         # 检查取消状态
@@ -733,14 +696,14 @@ class DeepResearchTaskManager:
         # 5. 使用 LogManager.init() 初始化完整日志系统
         LogManager.init(
             log_dir=str(log_dir),
-            level="DEBUG",
+            level="INFO",
             max_bytes=10 * 1024 * 1024,  # 10MB
             backup_count=5,
             is_sensitive=False,
         )
 
-        logger.debug(
-            "[DeepResearchTaskManager] LogManager initialized with log_dir=%s level=DEBUG",
+        logger.info(
+            "[DeepResearchTaskManager] LogManager initialized with log_dir=%s level=INFO",
             log_dir
         )
 
@@ -795,10 +758,10 @@ class DeepResearchTaskManager:
         )
 
     async def _execute_task(
-            self,
-            task_id: str,
-            query: str,
-            file_name: str,
+        self,
+        task_id: str,
+        query: str,
+        file_name: str,
     ) -> None:
         """执行 DeepResearch 任务（后台协程）."""
         task = self._tasks[task_id]
@@ -993,12 +956,12 @@ class DeepResearchTaskManager:
             )
 
     async def create_task(
-            self,
-            query: str,
-            file_name: str,
-            session_id: str = "",
-            channel_id: str = "",
-            request_id: str = "",
+        self,
+        query: str,
+        file_name: str,
+        session_id: str = "",
+        channel_id: str = "",
+        request_id: str = "",
     ) -> str:
         """创建并启动 DeepResearch 任务.
 
@@ -1087,10 +1050,10 @@ class DeepResearchTaskManager:
         return task_id
 
     async def get_task_status(
-            self,
-            task_id: str,
-            caller_session_id: str = "",
-            caller_channel_id: str = "",
+        self,
+        task_id: str,
+        caller_session_id: str = "",
+        caller_channel_id: str = "",
     ) -> Dict[str, Any] | None:
         """获取任务状态.
 
@@ -1175,10 +1138,10 @@ class DeepResearchTaskManager:
         return False
 
     async def list_tasks(
-            self,
-            status_filter: str | None = None,
-            caller_session_id: str = "",
-            caller_channel_id: str = "",
+        self,
+        status_filter: str | None = None,
+        caller_session_id: str = "",
+        caller_channel_id: str = "",
     ) -> List[Dict[str, Any]]:
         """列出任务（仅返回调用者拥有的任务）.
 
@@ -1216,10 +1179,10 @@ class DeepResearchTaskManager:
         return tasks
 
     async def cancel_task(
-            self,
-            task_id: str,
-            caller_session_id: str = "",
-            caller_channel_id: str = "",
+        self,
+        task_id: str,
+        caller_session_id: str = "",
+        caller_channel_id: str = "",
     ) -> bool:
         """取消任务（仅允许任务所有者取消）.
 
@@ -1280,10 +1243,10 @@ class DeepResearchTaskManager:
         return True
 
     async def get_task_result(
-            self,
-            task_id: str,
-            caller_session_id: str = "",
-            caller_channel_id: str = "",
+        self,
+        task_id: str,
+        caller_session_id: str = "",
+        caller_channel_id: str = "",
     ) -> str | None:
         """获取任务结果（仅允许任务所有者获取）.
 
@@ -1309,12 +1272,12 @@ class DeepResearchTaskManager:
         return task.result
 
     async def run_task_and_wait(
-            self,
-            query: str,
-            file_name: str,
-            session_id: str = "",
-            channel_id: str = "",
-            request_id: str = "",
+        self,
+        query: str,
+        file_name: str,
+        session_id: str = "",
+        channel_id: str = "",
+        request_id: str = "",
     ) -> Dict[str, Any]:
         """创建任务并等待执行结束，适合 CLI 或脚本入口直接调用."""
         task_id = await self.create_task(
