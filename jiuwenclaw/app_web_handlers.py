@@ -2059,6 +2059,14 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
     _register_perm("permissions.rules.delete", _PermReq.PERMISSIONS_RULES_DELETE)
     _register_perm("permissions.approval_overrides.get", _PermReq.PERMISSIONS_APPROVAL_OVERRIDES_GET)
     _register_perm("permissions.approval_overrides.delete", _PermReq.PERMISSIONS_APPROVAL_OVERRIDES_DELETE)
+    _register_perm(
+        "permissions.file_guard.workspace.rw_enabled.get",
+        _PermReq.PERMISSIONS_WORKSPACE_ENABLE_GET,
+    )
+    _register_perm(
+        "permissions.file_guard.workspace.rw_enabled.set",
+        _PermReq.PERMISSIONS_WORKSPACE_ENABLE_SET,
+    )
 
     async def _memory_forbidden_get(ws, req_id, params, session_id):
         try:

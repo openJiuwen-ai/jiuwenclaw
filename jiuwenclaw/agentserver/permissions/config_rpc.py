@@ -29,6 +29,8 @@ _PERMISSIONS_CFG_METHODS: frozenset[ReqMethod] = frozenset(
         ReqMethod.PERMISSIONS_RULES_DELETE,
         ReqMethod.PERMISSIONS_APPROVAL_OVERRIDES_GET,
         ReqMethod.PERMISSIONS_APPROVAL_OVERRIDES_DELETE,
+        ReqMethod.PERMISSIONS_WORKSPACE_ENABLE_GET,
+        ReqMethod.PERMISSIONS_WORKSPACE_ENABLE_SET,
     }
 )
 
@@ -48,6 +50,12 @@ def _normalize_permissions_config_params(params: dict[str, Any]) -> dict[str, An
         normalized["enabled"] = permissions.get("enabled")
     if "tools" not in normalized and "tools" in permissions:
         normalized["tools"] = permissions.get("tools")
+
+    fg = permissions.get("file_guard")
+    if isinstance(fg, dict):
+        ws = fg.get("workspace")
+        if isinstance(ws, dict) and "rw_enabled" not in normalized and "rw_enabled" in ws:
+            normalized["rw_enabled"] = ws.get("rw_enabled")
 
     return normalized
 
@@ -93,6 +101,8 @@ def dispatch_permissions_config_request(request: AgentRequest) -> AgentResponse:
         delete_permissions_tool_in_config,
         replace_permissions_tools_in_config,
         update_permissions_enabled_in_config,
+        update_permissions_file_guard_workspace_rw_enabled_in_config,
+        get_permissions_file_guard_workspace_rw_enabled,
         update_permissions_rule_in_config,
         update_permissions_tool_in_config,
     )
@@ -119,6 +129,23 @@ def dispatch_permissions_config_request(request: AgentRequest) -> AgentResponse:
             except Exception as e:
                 logger.warning("[%s] Failed to hot reload permission engine: %s", tag, e)
             return _ok(request, {"enabled": value})
+
+        if m == ReqMethod.PERMISSIONS_WORKSPACE_ENABLE_GET:
+            rw_enabled = get_permissions_file_guard_workspace_rw_enabled()
+            return _ok(request, {"rw_enabled": rw_enabled})
+
+        if m == ReqMethod.PERMISSIONS_WORKSPACE_ENABLE_SET:
+            if not isinstance(params, dict):
+                return _err(request, "params must be object")
+            value = params.get("rw_enabled")
+            if not isinstance(value, bool):
+                return _err(request, "rw_enabled must be boolean")
+            update_permissions_file_guard_workspace_rw_enabled_in_config(value)
+            try:
+                _hot_reload_permission_engine_from_config()
+            except Exception as e:
+                logger.warning("[%s] Failed to hot reload permission engine: %s", tag, e)
+            return _ok(request, {"rw_enabled": value})
 
         if m == ReqMethod.PERMISSIONS_TOOLS_GET:
             return _ok(request, dict(get_permissions_tools()))

@@ -218,6 +218,34 @@ def update_permissions_enabled_in_config(value: bool) -> None:
     _dump_yaml_round_trip(_CONFIG_YAML_PATH, data)
 
 
+def get_permissions_file_guard_workspace_rw_enabled() -> bool:
+    """读取 ``permissions.file_guard.workspace.rw_enabled``（缺省为 True，与 Phase-1 默认一致）。"""
+    cfg = get_config() or {}
+    fg = (cfg.get("permissions") or {}).get("file_guard")
+    if not isinstance(fg, dict):
+        return True
+    ws = fg.get("workspace")
+    if not isinstance(ws, dict):
+        return True
+    return bool(ws.get("rw_enabled", True))
+
+
+def update_permissions_file_guard_workspace_rw_enabled_in_config(value: bool) -> None:
+    """更新 ``permissions.file_guard.workspace.rw_enabled`` 并写回 config.yaml。"""
+    data = _load_yaml_round_trip(_CONFIG_YAML_PATH)
+    perms = data.setdefault("permissions", {})
+    fg = perms.get("file_guard")
+    if not isinstance(fg, dict):
+        fg = {}
+        perms["file_guard"] = fg
+    ws = fg.get("workspace")
+    if not isinstance(ws, dict):
+        ws = {}
+        fg["workspace"] = ws
+    ws["rw_enabled"] = bool(value)
+    _dump_yaml_round_trip(_CONFIG_YAML_PATH, data)
+
+
 def update_disabled_tools_in_config(disabled_tools: list[str]) -> None:
     """更新 react.disabled_tools 数组并写回 config.yaml。
 
