@@ -1063,7 +1063,8 @@ class JiuWenClaw:
 
         logger.info("[JiuWenClaw] cleanup: 完成")
 
-    def is_working(self) -> dict:
+    def is_working(self) -> bool:
+        """返回 Agent 是否正在工作."""
         task = self._session_manager.get_session_tasks()
         queue = self._session_manager.get_session_queues()
         return self._adapter.is_working(task, queue)

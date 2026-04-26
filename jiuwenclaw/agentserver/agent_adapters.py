@@ -82,6 +82,18 @@ class AgentAdapter(Protocol):
     async def handle_heartbeat(self, request: AgentRequest) -> AgentResponse:
         """Handle heartbeat requests."""
 
+    def is_working(self, session_tasks: dict, session_queues: dict) -> bool:
+        """Return whether the agent is currently working.
+
+        Args:
+            session_tasks: Dict of session_id -> asyncio.Task
+            session_queues: Dict of session_id -> asyncio.PriorityQueue
+
+        Returns:
+            bool: True if agent is working, False otherwise.
+        """
+        ...
+
 
 def resolve_sdk_choice() -> str:
     """Resolve SDK choice from environment variable.

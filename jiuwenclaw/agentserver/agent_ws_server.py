@@ -1799,13 +1799,12 @@ class AgentWebSocketServer:
         """Public test helper that delegates to ACP tool-response handling."""
         await self._handle_acp_tool_response(ws, request, send_lock)
 
-    def is_working(self) -> dict:
-        """返回 Agent 是否正在工作的状态.
+    def is_working(self) -> bool:
+        """返回 Agent 是否正在工作.
 
         用于沙箱保活校验。
 
         Returns:
-            dict: 工作状态信息，包含 working, initialized, model_configured,
-                active_tasks, active_sessions 字段.
+            bool: 是否正在工作
         """
         return self._agent_manager.is_working()

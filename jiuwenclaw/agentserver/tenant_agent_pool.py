@@ -148,46 +148,22 @@ class TenantAgentPool:
         self._lock_loops.clear()
         logger.info("[TenantAgentPool] All agent managers and states cleaned up")
 
-    def is_working(self) -> dict:
-        """返回所有租户 Agent 是否正在工作的状态.
+    def is_working(self) -> bool:
+        """返回是否有任何租户 Agent 正在工作.
 
-        Returns:
-            dict: 包含整体工作状态和各租户详情：
-                - working: 整体工作状态，任意租户在工作则为 True
-                - tenants: 各租户状态字典，key 为 "{agent_id}_{service_id}"
+        任意租户在工作则返回 True，立即短路返回。
         """
-        try:
-            loop = asyncio.get_running_loop()
-            future = asyncio.run_coroutine_threadsafe(
-                self._agent_wrappers.keys(),
-                loop
-            )
-            keys = future.result(timeout=1)
-        except Exception:
-            keys = []
-
-        tenants = {}
-        for key in keys:
-            try:
-                loop = asyncio.get_running_loop()
-                future = asyncio.run_coroutine_threadsafe(
-                    self._agent_wrappers.get(key),
-                    loop
-                )
-                agent_manager = future.result(timeout=1)
-                if agent_manager is not None:
-                    tenants[key] = agent_manager.is_working()
-            except Exception as e:
-                logger.warning("Get working status failed for key=%s: %s", key, e)
-                continue
-
-        # 整体工作状态：任意租户在工作则为 True
-        working = any(t.get("working", False) for t in tenants.values())
-
-        return {
-            "working": working,
-            "tenants": tenants,
-        }
+        # 直接访问内部缓存
+        cache = self._agent_wrappers._cache
+        for key, (agent_manager, _) in cache.items():
+            if agent_manager is not None:
+                try:
+                    if agent_manager.is_working():
+                        return True
+                except Exception as e:
+                    logger.warning("Get working status failed for key=%s: %s", key, e)
+                    continue
+        return False
 
     async def cancel_all_inflight_work(self, reason: str = "[gateway ws disconnect] ") -> None:
         """WebSocket 断开时：对每个已缓存 ``AgentManager`` 取消在途任务。"""

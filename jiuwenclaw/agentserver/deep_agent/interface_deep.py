@@ -128,6 +128,7 @@ from jiuwenclaw.agentserver.tools.harness_named_web_tools import build_jiuwen_ha
 
 from jiuwenclaw.agentserver.tools import SendFileToolkit, SkillToolkit
 from jiuwenclaw.agentserver.tools.acp_output_tools import get_tools as get_acp_output_tools
+from jiuwenclaw.agentserver.tools.acp_output_tools import get_acp_output_manager
 from jiuwenclaw.agentserver.tools.deepresearch_tools import (
     get_deepresearch_tools,
     push_deepresearch_route,
@@ -169,6 +170,7 @@ from jiuwenclaw.config import get_config, get_default_models, resolve_env_vars
 from jiuwenclaw.agentserver.stream_utils import tool_calls_payload_to_json_list
 from jiuwenclaw.agentserver.extensions import get_rail_manager
 from jiuwenclaw.gateway.cron import CronTargetChannel
+from jiuwenclaw.agentserver.team import get_team_manager
 from jiuwenclaw.schema.agent import AgentRequest, AgentResponse, AgentResponseChunk
 from jiuwenclaw.utils import (
     get_agent_registered_skill_dirs,
@@ -4412,62 +4414,50 @@ class JiuWenClawDeepAdapter:
             self._external_memory_rail = None
             self._external_memory_rail_registered = False
 
-    def is_working(self, session_tasks: dict[str, asyncio.Task], session_queues: dict[str, asyncio.PriorityQueue]):
-        """返回 Agent 是否正在工作的状态.
+    @classmethod
+    def is_working(cls, session_tasks: dict[str, asyncio.Task],
+                   session_queues: dict[str, asyncio.PriorityQueue]) -> bool:
+        """返回 Agent 是否正在工作.
 
-        用于沙箱保活校验，检查当前服务是否有正在处理或待处理的消息任务.
+        用于沙箱保活校验，一旦发现任何活跃状态立即返回 True.
 
         判断维度：
         1. 非流式任务：_session_tasks 中正在执行的 Task
         2. 待处理消息：_session_queues 中队列的消息数
-        3. 流式任务：_instance._stream_tasks 中正在执行的流式 Task
+        3. Team 流式任务：TeamManager._stream_tasks 中正在执行的 Team 模式流式任务
+        4. Team monitors：TeamManager._team_monitors 中正在运行的监控处理器
+        5. ACP 待响应请求：AcpOutputManager._pending 中等待用户响应的 ACP 工具请求
 
         Returns:
-            dict 包含以下字段:
-                - working: bool, 是否正在工作（有活跃任务或待处理消息）
-                - initialized: bool, Agent 实例是否已初始化
-                - model_configured: bool, 模型是否已配置
-                - active_tasks: int, 当前正在执行的非流式任务数
-                - stream_tasks: int, 当前正在执行的流式任务数
-                - pending_messages: int, 队列中待处理的消息数
-                - active_sessions: list[str], 有活跃任务或待处理消息的 session 列表
+            bool: 是否正在工作
         """
-        initialized = self._instance is not None
-        model_configured = self._has_valid_model_config() if initialized else False
-
-        active_sessions = set()
-        active_tasks = 0
-        stream_tasks = 0
-        pending_messages = 0
-
         # 检查正在执行的非流式任务
-        for session_id, task in session_tasks.items():
+        for task in session_tasks.values():
             if task is not None and not task.done():
-                active_sessions.add(session_id)
-                active_tasks += 1
+                return True
 
         # 检查队列中待处理的消息
-        for session_id, queue in session_queues.items():
-            queue_size = queue.qsize()
-            if queue_size > 0:
-                active_sessions.add(session_id)
-                pending_messages += queue_size
+        for queue in session_queues.values():
+            if queue.qsize() > 0:
+                return True
 
-        # 检查流式任务
-        if initialized:
-            stream_task_set = getattr(self._instance, '_stream_tasks', set())
-            for task in stream_task_set:
-                if not task.done():
-                    stream_tasks += 1
+        # 检查 Team 模式下的流式任务和 monitors
+        try:
+            team_manager = get_team_manager()
+            for task in team_manager._stream_tasks.values():  # pylint: disable=protected-access
+                if task is not None and not task.done():
+                    return True
+            for monitor in team_manager._team_monitors.values():  # pylint: disable=protected-access
+                if monitor is not None and monitor.is_running:
+                    return True
+        except Exception:
+            pass
 
-        working = initialized and (active_tasks > 0 or pending_messages > 0 or stream_tasks > 0)
+        # 检查 ACP 待响应请求
+        try:
+            if len(get_acp_output_manager()._pending) > 0:  # pylint: disable=protected-access
+                return True
+        except Exception:
+            pass
 
-        return {
-            "working": working,
-            "initialized": initialized,
-            "model_configured": model_configured,
-            "active_tasks": active_tasks,
-            "stream_tasks": stream_tasks,
-            "pending_messages": pending_messages,
-            "active_sessions": list(active_sessions),
-        }
+        return False
