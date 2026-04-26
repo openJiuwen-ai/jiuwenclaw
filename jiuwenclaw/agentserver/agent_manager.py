@@ -374,14 +374,15 @@ class AgentManager:
         logger.info("[AgentManager] All agents cleaned up for tenant %s", self.agent_id)
 
     def is_working(self) -> dict:
-        """返回 Agent 是否正在工作的状态.
+        """返回租户是否正在工作的状态.
+
+        聚合该租户内所有 Agent 的状态，任意一个 Agent 在工作则租户活跃。
+
         Returns:
-            dict: 工作状态信息，包含 working, initialized, active_tasks,
-                stream_tasks, pending_messages, active_sessions 字段.
-                如果 Agent 未初始化，返回 working=False.
+            dict: 工作状态信息，包含 working, initialized, model_configured,
+                active_tasks, stream_tasks, pending_messages, active_sessions 字段。
         """
-        agent = self.agents.get("default_session")
-        if agent is None:
+        if not self.agents:
             return {
                 "working": False,
                 "initialized": False,
@@ -391,4 +392,42 @@ class AgentManager:
                 "pending_messages": 0,
                 "active_sessions": [],
             }
-        return agent.is_working()
+
+        total_active_tasks = 0
+        total_stream_tasks = 0
+        total_pending_messages = 0
+        all_active_sessions = []
+        any_working = False
+        any_initialized = False
+        any_model_configured = False
+
+        for channel_agents in self.agents.values():
+            if not isinstance(channel_agents, dict):
+                continue
+            for agent in channel_agents.values():
+                if hasattr(agent, "is_working"):
+                    try:
+                        status = agent.is_working()
+                        total_active_tasks += status.get("active_tasks", 0)
+                        total_stream_tasks += status.get("stream_tasks", 0)
+                        total_pending_messages += status.get("pending_messages", 0)
+                        all_active_sessions.extend(status.get("active_sessions", []))
+                        if status.get("working"):
+                            any_working = True
+                        if status.get("initialized"):
+                            any_initialized = True
+                        if status.get("model_configured"):
+                            any_model_configured = True
+                    except Exception as e:
+                        logger.warning("Get working status failed, %s", e)
+                        continue
+
+        return {
+            "working": any_working,
+            "initialized": any_initialized,
+            "model_configured": any_model_configured,
+            "active_tasks": total_active_tasks,
+            "stream_tasks": total_stream_tasks,
+            "pending_messages": total_pending_messages,
+            "active_sessions": all_active_sessions,
+        }
