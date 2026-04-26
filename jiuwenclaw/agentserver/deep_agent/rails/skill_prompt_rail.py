@@ -12,7 +12,8 @@
 
 from __future__ import annotations
 
-from typing import Any
+import contextvars
+from typing import Any, Optional
 
 from openjiuwen.core.foundation.tool import ToolCard
 from openjiuwen.core.runner import Runner
@@ -21,11 +22,87 @@ from openjiuwen.harness.prompts import PromptSection
 from openjiuwen.harness.rails.base import DeepAgentRail
 
 from jiuwenclaw.agentserver.deep_agent.prompt_builder import PromptPriority
+from jiuwenclaw.agentserver.deep_agent.rails.skill_compliance_rail import (
+    SkillPhase,
+    get_session_active_skill,
+    get_session_phase,
+)
 from jiuwenclaw.utils import logger
 
 
 _SKILL_PROTOCOL_SECTION_NAME = "skill_protocol"
 _TODO_SECTION_NAME = "todo"
+_SKILL_PLAN_REQUIRED_SECTION_NAME = "skill_plan_required"
+_SKILL_COMPLETE_REQUIRED_SECTION_NAME = "skill_complete_required"
+# Slot just above SKILL_PROTOCOL so phase-driven directives render adjacent
+# to the protocol section without disturbing other priorities.
+_SKILL_PHASE_DIRECTIVE_PRIORITY = int(PromptPriority.SKILL_PROTOCOL) - 1
+
+_session_id_var: contextvars.ContextVar[Optional[str]] = contextvars.ContextVar(
+    "skill_prompt_rail_session_id", default=None,
+)
+
+
+def _extract_conversation_id(ctx: AgentCallbackContext) -> Optional[str]:
+    inputs = getattr(ctx, "inputs", None)
+    if inputs is None:
+        return None
+    conv_id = getattr(inputs, "conversation_id", None)
+    return str(conv_id) if conv_id else None
+
+
+def _build_skill_plan_required_text(language: str, skill_name: str) -> str:
+    if language == "cn":
+        return (
+            f"## 强制规约：必须先创建 skill_step 计划（技能 {skill_name}）\n\n"
+            f"当前 session 已加载 SKILL.md（技能：{skill_name}），但**尚未**创建对应的 "
+            f"skill_step 计划。在创建计划之前：\n\n"
+            f"1. **禁止**执行 SKILL.md 中的任何步骤、脚本、工具调用（包括"
+            f"『先看一下』『先调用一次试试』等）。\n"
+            f"2. **必须**首先调用 `skill_step_create`，为 SKILL.md 中定义的每个步骤"
+            f"创建一个 skill_step 项，作为执行路线图。\n"
+            f"3. 只有 skill_step 计划创建完成后，才能开始按顺序执行第一个步骤。\n\n"
+            f"⚠️ 这是『中途进入』也必须遵守的硬性约束——无论你是从对话开头还是中途加载的 "
+            f"SKILL.md，都必须先 create 再执行。\n"
+        )
+    return (
+        f"## Mandatory: Create skill_step plan first (skill: {skill_name})\n\n"
+        f"This session has loaded SKILL.md (skill: {skill_name}) but has NOT yet "
+        f"created the corresponding skill_step plan. Before the plan is created:\n\n"
+        f"1. You MUST NOT execute any step, script, or tool call from SKILL.md "
+        f"(including 'just take a look' or 'try calling it once').\n"
+        f"2. You MUST first call `skill_step_create` with one skill_step item per "
+        f"step defined in SKILL.md as the execution roadmap.\n"
+        f"3. Only after the skill_step plan is created may you begin executing the "
+        f"first step in order.\n\n"
+        f"This is a hard constraint that applies even when SKILL.md is loaded "
+        f"mid-session — regardless of whether you loaded it at the start of the "
+        f"conversation or partway through, you MUST create the plan first.\n"
+    )
+
+
+def _build_skill_complete_required_text(language: str, skill_name: str) -> str:
+    if language == "cn":
+        return (
+            f"## 强制规约：必须调用 skill_complete 收尾（技能 {skill_name}）\n\n"
+            f"当前 session 的所有 skill_step 项已经全部完成（技能：{skill_name}）。"
+            f"在调用 `skill_complete(skill_name=\"{skill_name}\")` 收尾之前：\n\n"
+            f"1. **禁止**继续执行 SKILL.md 中的任何步骤——它们都已完成。\n"
+            f"2. **禁止**为同一技能再次 `skill_step_create` 或 `skill_step_insert` 添加新任务。\n"
+            f"3. **必须**立即调用 `skill_complete(skill_name=\"{skill_name}\")` 释放技能上下文。\n\n"
+            f"只有调用 skill_complete 之后，才能进入下一个任务（或下一个技能）。\n"
+        )
+    return (
+        f"## Mandatory: Call skill_complete to finalize (skill: {skill_name})\n\n"
+        f"All skill_step items for this session have been completed (skill: {skill_name}). "
+        f"Before calling `skill_complete(skill_name=\"{skill_name}\")` to finalize:\n\n"
+        f"1. You MUST NOT execute additional steps from SKILL.md — they are all done.\n"
+        f"2. You MUST NOT add new tasks via `skill_step_create` or `skill_step_insert` "
+        f"for this same skill.\n"
+        f"3. You MUST call `skill_complete(skill_name=\"{skill_name}\")` immediately to "
+        f"release the skill context.\n\n"
+        f"Only after skill_complete may you proceed to the next task (or next skill).\n"
+    )
 
 
 def _build_skill_protocol_section_text(language: str) -> str:
@@ -153,8 +230,17 @@ class SkillProtocolPromptRail(DeepAgentRail):
         if self.system_prompt_builder is not None:
             self.system_prompt_builder.remove_section(_SKILL_PROTOCOL_SECTION_NAME)
             self.system_prompt_builder.remove_section(_TODO_SECTION_NAME)
+            self.system_prompt_builder.remove_section(_SKILL_PLAN_REQUIRED_SECTION_NAME)
+            self.system_prompt_builder.remove_section(_SKILL_COMPLETE_REQUIRED_SECTION_NAME)
         self.system_prompt_builder = None
         self._unregister_session_toolkits(agent)
+
+    async def before_invoke(self, ctx: AgentCallbackContext) -> None:
+        # Capture conversation_id for downstream before_model_call hook;
+        # ctx.inputs only carries conversation_id at invoke time.
+        conv_id = _extract_conversation_id(ctx)
+        if conv_id:
+            _session_id_var.set(conv_id)
 
     def _register_session_toolkits(self, agent) -> None:
         """注册 SkillStepToolkit（+ 可选 TodoToolkit）到 agent，随 rail 生命周期上线/下线。"""
@@ -226,12 +312,65 @@ class SkillProtocolPromptRail(DeepAgentRail):
         lang = getattr(self.system_prompt_builder, "language", None) or "cn"
         return "cn" if lang in ("cn", "zh") else "en"
 
+    def _refresh_skill_phase_sections(
+        self, language: str, session_id: Optional[str],
+    ) -> None:
+        """Inject/remove phase-driven mandatory sections.
+
+        Phase → section mapping:
+            WAITING_PLAN → skill_plan_required (must call skill_step_create)
+            DONE         → skill_complete_required (must call skill_complete)
+            IDLE / IN_PROGRESS → no extra phase section (only the always-on
+                                 skill_protocol section applies).
+        """
+        phase = get_session_phase(session_id) if session_id else SkillPhase.IDLE
+        skill_name = get_session_active_skill(session_id) if session_id else None
+
+        want_plan_required = phase == SkillPhase.WAITING_PLAN and bool(skill_name)
+        want_complete_required = phase == SkillPhase.DONE and bool(skill_name)
+
+        self._set_section(
+            _SKILL_PLAN_REQUIRED_SECTION_NAME, want_plan_required,
+            language, _build_skill_plan_required_text, skill_name,
+        )
+        self._set_section(
+            _SKILL_COMPLETE_REQUIRED_SECTION_NAME, want_complete_required,
+            language, _build_skill_complete_required_text, skill_name,
+        )
+
+    def _set_section(
+        self, name: str, want: bool, language: str,
+        builder, skill_name: Optional[str],
+    ) -> None:
+        if not want:
+            try:
+                self.system_prompt_builder.remove_section(name)
+            except Exception as exc:
+                logger.debug(
+                    "[SkillProtocolPromptRail] remove %s section skipped: %s", name, exc,
+                )
+            return
+        try:
+            text = builder(language, skill_name)
+            self.system_prompt_builder.add_section(PromptSection(
+                name=name,
+                content={language: text},
+                priority=self._resolve_priority(name, _SKILL_PHASE_DIRECTIVE_PRIORITY),
+            ))
+        except Exception as exc:
+            logger.warning(
+                "[SkillProtocolPromptRail] build %s section failed: %s", name, exc,
+            )
+
     async def before_model_call(self, ctx: AgentCallbackContext) -> None:
-        _ = ctx
         if self.system_prompt_builder is None:
             return
 
         language = self._resolve_language()
+        # Latch conversation_id again in case before_invoke wasn't reached
+        # (e.g. nested model calls within the same task).
+        conv_id = _extract_conversation_id(ctx) or _session_id_var.get()
+        self._refresh_skill_phase_sections(language, conv_id)
 
         try:
             protocol_text = _build_skill_protocol_section_text(language)

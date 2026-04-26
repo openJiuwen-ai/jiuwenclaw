@@ -191,6 +191,8 @@ react:
     #   彻底物理移除某层须改 agent-core 的 _merge_processors 预置或切链 A。
     enable_kv_cache_release: false
     enable_reload: true
+    # 关闭 SDK 默认英文 reload prompt；中文版由 JiuClawContextEngineeringRail 注入。
+    enable_reload_prompt: false
     enabled: true                  # 总开关：false = 链 A/B 全关，仅默认窗口生效
     # 同时刻可 pin 进 LLM 上下文的 active skill 正文条数（默认 1）。>1 时才可在 load 多技能时
     # 都保留 [ACTIVE SKILL BODY]；为 1 时再 load 会驱逐前一个（trace 里 [ACTIVE SKILL EVICTED]）。

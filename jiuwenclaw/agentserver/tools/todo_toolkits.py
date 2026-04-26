@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import os
 import threading
+from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
 from typing import ClassVar, Dict, List, Optional
@@ -40,6 +41,54 @@ class TodoTask(BaseModel):
     tasks: str
     status: TaskStatus
     result: str = ""
+
+
+# Operation kinds emitted by the toolkit. Rails match on these exact strings
+# (no string-prefix sniffing on user-facing messages).
+class TodoOpKind(str, Enum):
+    CREATE = "create"
+    START = "start"
+    COMPLETE = "complete"
+    INSERT = "insert"
+    REMOVE = "remove"
+
+
+@dataclass(frozen=True)
+class TodoOpResult:
+    """
+    Structured result of a write operation. ``cancelled`` tasks are
+    excluded from both ``remaining_count`` and ``total_count`` (treated as
+    voided, not as plan members).
+    """
+    kind: TodoOpKind
+    success: bool
+    message: str             # human-readable string returned to the LLM
+    remaining_count: int     # waiting + running, after the op
+    total_count: int         # waiting + running + completed, after the op
+    all_completed: bool      # True iff total_count > 0 and remaining_count == 0
+
+
+# Per-session publish/consume of the most recent TodoOpResult. The toolkit
+# publishes inside the user-facing method (within the per-session lock) and
+# the rail consumes once in after_tool_call. Same-session writers are
+# serialized by the lock; cross-session writes are isolated by key.
+_last_op_result: Dict[str, TodoOpResult] = {}
+_last_op_result_lock = threading.Lock()
+
+
+def _publish_op_result(session_id: str, result: TodoOpResult) -> None:
+    if not session_id:
+        return
+    with _last_op_result_lock:
+        _last_op_result[session_id] = result
+
+
+def consume_last_op_result(session_id: str) -> Optional[TodoOpResult]:
+    """Pop the most recent TodoOpResult for ``session_id`` (one-shot)."""
+    if not session_id:
+        return None
+    with _last_op_result_lock:
+        return _last_op_result.pop(session_id, None)
 
 
 def _resolve_runtime_session_id() -> str:
@@ -120,6 +169,21 @@ class TodoToolkit:
         """Public wrapper of :meth:`_load_tasks` for external callers (e.g. rails)."""
         return self._load_tasks()
 
+    def clear_tasks(self) -> bool:
+        """Delete the todo file for the current session if it exists.
+
+        Returns True if a file was actually removed, False if there was nothing
+        to remove. Safe under the per-session lock; intended for end-of-skill
+        cleanup so a stale plan from a previous skill cannot be misread as the
+        active plan after the next SKILL.md load.
+        """
+        with self._get_session_lock(self.session_id):
+            path = self._todo_path
+            if not path.exists():
+                return False
+            path.unlink()
+            return True
+
     def _load_tasks(self) -> List[TodoTask]:
         """Load tasks from markdown file."""
         if not self._todo_path.exists():
@@ -194,6 +258,34 @@ class TodoToolkit:
         current = self.todo_list()
         return f"{message}\n\nCurrent todo list:\n{current}"
 
+    @staticmethod
+    def _compute_counts(tasks: List[TodoTask]) -> tuple[int, int]:
+        """Return (remaining_count, total_count). cancelled tasks are excluded
+        from both — they're voided and not considered plan members."""
+        waiting_running = sum(
+            1 for t in tasks if t.status in (TaskStatus.WAITING, TaskStatus.RUNNING)
+        )
+        completed = sum(1 for t in tasks if t.status == TaskStatus.COMPLETED)
+        return waiting_running, waiting_running + completed
+
+    def _publish(
+        self, kind: TodoOpKind, success: bool, message: str,
+        tasks_after: Optional[List[TodoTask]],
+    ) -> None:
+        """Compute counts from ``tasks_after`` and publish a TodoOpResult."""
+        if tasks_after is None:
+            remaining, total = 0, 0
+        else:
+            remaining, total = self._compute_counts(tasks_after)
+        _publish_op_result(self.session_id, TodoOpResult(
+            kind=kind,
+            success=success,
+            message=message,
+            remaining_count=remaining,
+            total_count=total,
+            all_completed=(success and total > 0 and remaining == 0),
+        ))
+
     def todo_create(self, tasks: List[str]) -> str:
         """Create a list of todo tasks. Fails if a todo list already exists.
 
@@ -205,16 +297,20 @@ class TodoToolkit:
         """
         with self._get_session_lock(self.session_id):
             if self._todo_path.exists():
-                return self._append_todo_list(
+                msg = (
                     f"Error: A todo list for session {self.session_id} already exists. "
                     f"Use {self.__class__.TOOL_PREFIX}_insert to add more tasks."
                 )
+                self._publish(TodoOpKind.CREATE, False, msg, self._load_tasks())
+                return self._append_todo_list(msg)
             todo_tasks = [
                 TodoTask(idx=i + 1, tasks=t, status=TaskStatus.WAITING, result="")
                 for i, t in enumerate(tasks)
             ]
             self._save_tasks(todo_tasks)
-            return self._append_todo_list(f"Created {len(todo_tasks)} todo tasks.")
+            msg = f"Created {len(todo_tasks)} todo tasks."
+            self._publish(TodoOpKind.CREATE, True, msg, todo_tasks)
+            return self._append_todo_list(msg)
 
     def todo_start(self, idx: int) -> str:
         """Mark a task as running (in progress).
@@ -230,13 +326,21 @@ class TodoToolkit:
             for t in todo_tasks:
                 if t.idx == idx:
                     if t.status == TaskStatus.COMPLETED:
-                        return self._append_todo_list(f"Error: Task {idx} is already completed.")
+                        msg = f"Error: Task {idx} is already completed."
+                        self._publish(TodoOpKind.START, False, msg, todo_tasks)
+                        return self._append_todo_list(msg)
                     if t.status == TaskStatus.CANCELLED:
-                        return self._append_todo_list(f"Error: Task {idx} is cancelled.")
+                        msg = f"Error: Task {idx} is cancelled."
+                        self._publish(TodoOpKind.START, False, msg, todo_tasks)
+                        return self._append_todo_list(msg)
                     t.status = TaskStatus.RUNNING
                     self._save_tasks(todo_tasks)
-                    return self._append_todo_list(f"Task {idx} marked as running.")
-            return self._append_todo_list(f"Error: Task {idx} not found.")
+                    msg = f"Task {idx} marked as running."
+                    self._publish(TodoOpKind.START, True, msg, todo_tasks)
+                    return self._append_todo_list(msg)
+            msg = f"Error: Task {idx} not found."
+            self._publish(TodoOpKind.START, False, msg, todo_tasks)
+            return self._append_todo_list(msg)
 
     def todo_complete(self, idx: int, result: str = "") -> str:
         """Mark a task as completed and save a brief result.
@@ -255,8 +359,12 @@ class TodoToolkit:
                     t.status = TaskStatus.COMPLETED
                     t.result = result or "done"
                     self._save_tasks(todo_tasks)
-                    return self._append_todo_list(f"Task {idx} marked as completed.")
-            return self._append_todo_list(f"Error: Task {idx} not found.")
+                    msg = f"Task {idx} marked as completed."
+                    self._publish(TodoOpKind.COMPLETE, True, msg, todo_tasks)
+                    return self._append_todo_list(msg)
+            msg = f"Error: Task {idx} not found."
+            self._publish(TodoOpKind.COMPLETE, False, msg, todo_tasks)
+            return self._append_todo_list(msg)
 
     def todo_insert(self, idx: int, tasks: List[str]) -> str:
         """Insert new tasks at the given index. Existing tasks are shifted.
@@ -277,7 +385,11 @@ class TodoToolkit:
                     for i, t in enumerate(tasks)
                 ]
                 self._save_tasks(new_tasks)
-                return self._append_todo_list(f"Created {len(new_tasks)} todo tasks.")
+                msg = f"Created {len(new_tasks)} todo tasks."
+                # Insert-into-empty is semantically a create — publish CREATE so
+                # the rail's WAITING_PLAN→IN_PROGRESS transition fires.
+                self._publish(TodoOpKind.CREATE, True, msg, new_tasks)
+                return self._append_todo_list(msg)
             new_tasks = [
                 TodoTask(idx=i + idx, tasks=t, status=TaskStatus.WAITING, result="")
                 for i, t in enumerate(tasks)
@@ -289,7 +401,9 @@ class TodoToolkit:
             todo_tasks.extend(new_tasks)
             todo_tasks.sort(key=lambda x: x.idx)
             self._save_tasks(todo_tasks)
-            return self._append_todo_list(f"Inserted {len(tasks)} task(s) at index {idx}.")
+            msg = f"Inserted {len(tasks)} task(s) at index {idx}."
+            self._publish(TodoOpKind.INSERT, True, msg, todo_tasks)
+            return self._append_todo_list(msg)
 
     def todo_remove(self, idx: int) -> str:
         """Remove a task and renumber remaining tasks.
@@ -304,13 +418,17 @@ class TodoToolkit:
             todo_tasks = self._load_tasks()
             found = [t for t in todo_tasks if t.idx == idx]
             if not found:
-                return self._append_todo_list(f"Error: Task {idx} not found.")
+                msg = f"Error: Task {idx} not found."
+                self._publish(TodoOpKind.REMOVE, False, msg, todo_tasks)
+                return self._append_todo_list(msg)
             todo_tasks = [t for t in todo_tasks if t.idx != idx]
             # Renumber
             for i, t in enumerate(todo_tasks, 1):
                 t.idx = i
             self._save_tasks(todo_tasks)
-            return self._append_todo_list(f"Removed task {idx}.")
+            msg = f"Removed task {idx}."
+            self._publish(TodoOpKind.REMOVE, True, msg, todo_tasks)
+            return self._append_todo_list(msg)
 
     def todo_list(self) -> str:
         """List all current todo tasks.

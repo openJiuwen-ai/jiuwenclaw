@@ -474,6 +474,7 @@ def _deep_agent_context_engine_config(react_cfg: dict[str, Any] | None) -> Conte
     cec_toplevel_keys = [
         "enable_kv_cache_release",
         "enable_reload",
+        "enable_reload_prompt",
         "max_context_message_num",
         "default_window_message_num",
         "default_window_round_num",
