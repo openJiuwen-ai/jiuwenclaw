@@ -20,6 +20,8 @@ from openjiuwen.harness.rails.interrupt.confirm_rail import (
 )
 
 from jiuwenclaw.agentserver.permissions.core import PermissionEngine, get_permission_engine
+from jiuwenclaw.agentserver.permissions.file_guard import persist_file_operations_allow
+from jiuwenclaw.agentserver.permissions.models import FileOperation
 from jiuwenclaw.agentserver.permissions.patterns import persist_permission_allow_rule
 from jiuwenclaw.agentserver.permissions.shell_ast import parse_shell_for_permission
 from jiuwenclaw.agentserver.permissions.suggestions import build_permission_suggestions
@@ -78,6 +80,15 @@ class PermissionInterruptRail(ConfirmInterruptRail):
         self._static_config = config or {}
         if engine is not None:
             self._engine = engine
+            # 复用外部引擎时也要把 LLM 句柄打进去，否则 L3-Cmd 永远拿不到 llm
+            # （根因：``init_permission_engine(...)`` 首启时通常没有 LLM，
+            # 而 ``build_permission_rail(... llm=...)`` 又把 engine 直接传了进来。）
+            if llm is not None or model_name is not None:
+                effective_llm = llm if llm is not None else self._engine.llm
+                effective_model = (
+                    model_name if model_name is not None else self._engine.model_name
+                )
+                self._engine.update_llm(effective_llm, effective_model)
         else:
             self._engine = PermissionEngine(
                 config=self._static_config,
@@ -88,9 +99,14 @@ class PermissionInterruptRail(ConfirmInterruptRail):
             "[PermissionEngine] permission.rail.init tool_names=%s tools_keys=%s llm_enabled=%s model_name=%s",
             list(self._tool_names),
             list((self._static_config.get("tools") or {}).keys()),
-            self._engine._llm is not None,
-            self._engine._model_name,
+            self._engine.llm is not None,
+            self._engine.model_name,
         )
+
+    @property
+    def engine(self) -> PermissionEngine:
+        """只读暴露底层 ``PermissionEngine``（单测 / 诊断用，避免直接读 ``_engine``）。"""
+        return self._engine
 
     def init(self, agent: Any) -> None:
         super().init(agent)
@@ -241,19 +257,38 @@ class PermissionInterruptRail(ConfirmInterruptRail):
         ctx.extra["_interrupt_decision"] = decision
         self._apply_decision(ctx, tool_call, tool_name, decision)
 
-    def update_config(self, config: dict, tool_names: Optional[Iterable[str]] = None) -> None:
+    def update_config(
+        self,
+        config: dict,
+        tool_names: Optional[Iterable[str]] = None,
+        *,
+        llm: Any = None,
+        model_name: str | None = None,
+    ) -> None:
         """Hot-update static permission config.
 
         Config updates must not shrink the rail interception surface. This rail
         checks every tool call regardless of whether the tool appears in config.
+
+        ``llm`` / ``model_name`` 可选；若任一非 ``None``，则同步刷新底层引擎的
+        LLM 句柄，避免 L3-Cmd 拿不到模型而静默退化为空。
         """
         self._static_config = config
         self._engine.update_config(config)
+        if llm is not None or model_name is not None:
+            effective_llm = llm if llm is not None else self._engine.llm
+            effective_model = (
+                model_name if model_name is not None else self._engine.model_name
+            )
+            self._engine.update_llm(effective_llm, effective_model)
         if tool_names is not None:
             self._tool_names.update(str(x).strip() for x in tool_names if str(x).strip())
         logger.info(
-            "[PermissionEngine] permission.rail.config_updated intercept=all diagnostic_tool_names=%s",
+            "[PermissionEngine] permission.rail.config_updated intercept=all diagnostic_tool_names=%s "
+            "llm_enabled=%s model_name=%s",
             list(self._tool_names),
+            self._engine.llm is not None,
+            self._engine.model_name,
         )
 
     def _build_pending_permission_context(
@@ -282,7 +317,44 @@ class PermissionInterruptRail(ConfirmInterruptRail):
         else:
             context["would_persist_patterns"] = []
             context["would_persist_whole_tool"] = True
+        if result.file_operations:
+            context["file_operations"] = [
+                {
+                    "action": op.action,
+                    "path": op.path,
+                    "source": op.source,
+                    "prompt": op.prompt,
+                }
+                for op in result.file_operations
+            ]
         return context
+
+    @staticmethod
+    def _restore_file_operations(pending_context: dict[str, Any] | None) -> list[FileOperation]:
+        if not isinstance(pending_context, dict):
+            return []
+        raw = pending_context.get("file_operations")
+        if not isinstance(raw, list):
+            return []
+        ops: list[FileOperation] = []
+        for item in raw:
+            if not isinstance(item, dict):
+                continue
+            action = str(item.get("action") or "").strip().lower()
+            path = str(item.get("path") or "").strip()
+            if action not in ("read", "write", "exec") or not path:
+                continue
+            source = str(item.get("source") or "tool_arg").strip().lower()
+            if source not in ("tool_arg", "shlex", "script_scan", "llm"):
+                source = "tool_arg"
+            prompt = str(item.get("prompt") or "")
+            ops.append(FileOperation(
+                action=action,  # type: ignore[arg-type]
+                path=path,
+                source=source,  # type: ignore[arg-type]
+                prompt=prompt,
+            ))
+        return ops
 
     def _build_would_persist_patterns(
         self,
@@ -324,21 +396,58 @@ class PermissionInterruptRail(ConfirmInterruptRail):
         return " ".join(f"`{item}`" for item in cleaned)
 
     @staticmethod
-    def _display_matched_rule(tool_name: str, result: PermissionResult) -> str:
+    def extract_file_guard_tail(raw: str) -> str | None:
+        """从 ``core.py`` 拼出来的 raw matched_rule 里抠出 ``|file_guard:xxx`` 段。
+
+        ``core.py`` 用 ``f"{baseline}|{fg_result.matched_rule}"`` 拼接，
+        ``fg_result.matched_rule`` 形如 ``file_guard:ask`` / ``file_guard:deny``，
+        本身不含 ``|``。**但 baseline 段可能含 ``|``**——典型情况是 shell tool
+        的 ``tiered_policy:shell_subcommands:<long command>...``，命令字符串里
+        合法的 PowerShell / bash 管道（``ls | grep x``）会让 ``split("|")``
+        错切第一个 ``|``，导致 ``head`` / ``tail`` 全错位。这里改用 ``rfind``
+        从右侧定位最后一个 ``|file_guard:`` 边界，避开 baseline 内部的伪 ``|``。
+        """
+        if not raw:
+            return None
+        sep_idx = raw.rfind("|file_guard:")
+        if sep_idx < 0:
+            return None
+        return raw[sep_idx + 1:].strip() or None
+
+    @staticmethod
+    def display_matched_rule(tool_name: str, result: PermissionResult) -> str:
         raw = str(result.matched_rule or "").strip()
         if result.permission != PermissionLevel.ASK:
             return raw or "N/A"
         if tool_name in _SHELL_PERMISSION_TOOLS:
-            return f"{tool_name}.shell_command.ask"
-        if raw == "defaults.ask":
-            return raw
-        if raw == f"tools.{tool_name}":
-            return f"{tool_name}.ask"
-        if raw.startswith("tools."):
-            configured_tool = raw.removeprefix("tools.").strip()
-            if configured_tool:
-                return f"{configured_tool}.ask"
-        return raw or f"{tool_name}.ask"
+            # shell tool 的 baseline matched_rule（``tiered_policy:shell_subcommands:<完整命令串>=>...``）
+            # 又长又含管道符，前端展示价值不高，所以折叠成 ``{tool}.shell_command.ask``。
+            # 但 file_guard 子线 B 的判定结果（``file_guard:ask`` / ``file_guard:deny``）
+            # 仍然必须保留，否则审批卡上看不出本次决策是不是被 file_guard 抬高的。
+            head = f"{tool_name}.shell_command.ask"
+            fg_tail = PermissionInterruptRail.extract_file_guard_tail(raw)
+            return f"{head}|{fg_tail}" if fg_tail else head
+        # 非 shell tool：baseline head（``tools.{tool}`` / ``defaults.ask`` / ``defaults.guard``）
+        # 不含 ``|``，``split("|")`` 切第一段就是干净的 head。这里只对 head 做美化，
+        # 后续段（``file_guard:ask`` 等）保持原样，最后再用 ``|`` 拼回，避免把 ``.ask`` 后缀
+        # 错误地追加到整串末尾导致 ``write_file|file_guard:ask.ask`` 这种怪异显示。
+        segments = [s.strip() for s in raw.split("|")] if raw else []
+        head = segments[0] if segments else ""
+        tail = [s for s in segments[1:] if s]
+
+        if head in ("defaults.ask", "defaults.guard"):
+            display_head = head
+        elif head == f"tools.{tool_name}":
+            display_head = f"{tool_name}.ask"
+        elif head.startswith("tools."):
+            configured_tool = head.removeprefix("tools.").strip()
+            display_head = f"{configured_tool}.ask" if configured_tool else f"{tool_name}.ask"
+        elif head:
+            display_head = head
+        else:
+            display_head = f"{tool_name}.ask"
+
+        return "|".join([display_head, *tail])
 
     def _existing_allow_override_patterns(self) -> set[str]:
         raw = self._static_config.get("approval_overrides")
@@ -545,6 +654,19 @@ class PermissionInterruptRail(ConfirmInterruptRail):
                         tool_name,
                         persisted,
                     )
+                    if result.file_operations:
+                        try:
+                            persist_file_operations_allow(list(result.file_operations))
+                            logger.info(
+                                "[PermissionEngine] permission.persist.file_operations tool=%s channel=acp count=%s",
+                                tool_name,
+                                len(result.file_operations),
+                            )
+                        except Exception:
+                            logger.exception(
+                                "[PermissionEngine] permission.persist.file_operations.failed tool=%s",
+                                tool_name,
+                            )
                 if self._should_store_auto_confirm(
                     auto_confirm=confirm_payload.auto_confirm,
                     session=ctx.session,
@@ -617,6 +739,21 @@ class PermissionInterruptRail(ConfirmInterruptRail):
                 self._resolve_channel_id(),
                 persisted,
             )
+            file_ops = self._restore_file_operations(pending_context)
+            if file_ops:
+                try:
+                    persist_file_operations_allow(file_ops)
+                    logger.info(
+                        "[PermissionEngine] permission.persist.file_operations tool=%s channel=%s count=%s",
+                        tool_name,
+                        self._resolve_channel_id(),
+                        len(file_ops),
+                    )
+                except Exception:
+                    logger.exception(
+                        "[PermissionEngine] permission.persist.file_operations.failed tool=%s",
+                        tool_name,
+                    )
 
         if self._should_store_auto_confirm(
             auto_confirm=payload.auto_confirm,
@@ -793,13 +930,39 @@ class PermissionInterruptRail(ConfirmInterruptRail):
             ],
         }
         permission_context = self._build_pending_permission_context(tool_name, tool_args, result)
+        file_ops_payload = permission_context.get("file_operations") or []
+
+        if file_ops_payload:
+            existing_locations = descriptor.get("locations") if isinstance(descriptor.get("locations"), list) else []
+            seen_paths = {
+                str(loc.get("path") or "").strip()
+                for loc in existing_locations if isinstance(loc, dict)
+            }
+            extra_locations: list[dict[str, Any]] = []
+            for op in file_ops_payload:
+                path = str(op.get("path") or "").strip()
+                if not path or path in seen_paths:
+                    continue
+                seen_paths.add(path)
+                extra_locations.append({"path": path})
+            if extra_locations:
+                request["toolCall"]["locations"] = list(existing_locations) + extra_locations
+
+            raw_input = request["toolCall"].get("rawInput")
+            if not isinstance(raw_input, dict):
+                raw_input = {}
+            raw_input["__file_operations"] = list(file_ops_payload)
+            request["toolCall"]["rawInput"] = raw_input
+
         request["permissionContext"] = {
             "askSubcommands": permission_context.get("ask_subcommands", []),
             "wouldPersistPatterns": permission_context.get("would_persist_patterns", []),
             "wouldPersistWholeTool": bool(permission_context.get("would_persist_whole_tool", False)),
             "persistAllowTargets": self._build_persist_allow_targets(tool_name, tool_args, result),
-            "displayMatchedRule": self._display_matched_rule(tool_name, result),
+            "displayMatchedRule": self.display_matched_rule(tool_name, result),
             "toolName": tool_name,
+            "fileOperations": list(file_ops_payload),
+            "toolDescription": self._extract_tool_description(tool_args),
         }
         return request
 
@@ -904,6 +1067,26 @@ class PermissionInterruptRail(ConfirmInterruptRail):
         except Exception:
             return str(tool_args)[:1000]
 
+    @staticmethod
+    def _extract_tool_description(tool_args: dict) -> str:
+        """读取工具自带的 ``description`` 字段（如 ``mcp_exec_command`` 的语义描述）。
+
+        - 仅接受字符串；非字符串或空白一律视为缺省。
+        - 截断长度，避免审批卡被超长描述撑爆。
+        """
+        if not isinstance(tool_args, dict):
+            return ""
+        raw = tool_args.get("description")
+        if not isinstance(raw, str):
+            return ""
+        text = raw.strip()
+        if not text:
+            return ""
+        max_len = 500
+        if len(text) > max_len:
+            text = text[:max_len].rstrip() + "…"
+        return text
+
     def _build_message(
         self,
         tool_call: Optional[ToolCall],
@@ -920,23 +1103,52 @@ class PermissionInterruptRail(ConfirmInterruptRail):
 
         parts = [
             f"**工具 `{tool_name}` 需要授权才能执行{target_suffix}**\n\n",
-            f"**安全风险评估：** {risk.get('icon', '')} **{risk.get('level', '')}风险**\n\n",
-            f"> {risk.get('explanation', '')}\n\n",
         ]
+        description = self._extract_tool_description(tool_args)
+        if description:
+            parts.append(f"> 行为意图：{description}\n\n")
+
+        file_ops = list(result.file_operations or [])
+        if file_ops:
+            parts.append(f"> {self._render_file_operations_section(file_ops)}\n\n")
+
+        parts.extend([
+            f"**安全风险评估：** {risk.get('icon', '')} **{risk.get('level', '')}风险**\n\n",
+        ])
 
         args_preview = self._format_args_preview(tool_args)
         if args_preview and args_preview != "{}":
             parts.append(f"参数：\n```json\n{args_preview}\n```\n")
 
-        parts.append(f"\n匹配规则：`{self._display_matched_rule(tool_name, result)}`")
-
-        external_paths = getattr(result, "external_paths", None) or []
-        if external_paths:
-            parts.append(f"\n\n**外部路径：** `{', '.join(external_paths)}`")
-
-        parts.append(self._build_always_allow_hint(tool_call, result))
+        parts.append(f"\n匹配规则：`{self.display_matched_rule(tool_name, result)}`")
 
         return "".join(parts)
+
+    @staticmethod
+    def _render_file_operations_section(file_ops: list[FileOperation]) -> str:
+        if not file_ops:
+            return ""
+        verb_cn = {"read": "读取", "write": "写入", "exec": "执行"}
+        groups: dict[str, list[FileOperation]] = {}
+        for op in file_ops:
+            groups.setdefault(op.source, []).append(op)
+
+        order = ["tool_arg", "shlex", "llm", "script_scan"]
+        chunks: list[str] = ["\n\n**涉及的文件操作：**"]
+        for src in order:
+            ops = groups.get(src)
+            if not ops:
+                continue
+            for op in ops:
+                verb = verb_cn.get(op.action, op.action)
+                chunks.append(f"\n- {verb} `{op.path}`")
+        for src, ops in groups.items():
+            if src in order:
+                continue
+            for op in ops:
+                verb = verb_cn.get(op.action, op.action)
+                chunks.append(f"\n- {verb} `{op.path}`")
+        return "".join(chunks)
 
     def _build_always_allow_hint(
         self,

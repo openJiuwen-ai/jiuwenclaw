@@ -6,6 +6,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import Enum
+from typing import Literal
 
 
 class PermissionLevel(str, Enum):
@@ -18,6 +19,25 @@ class PermissionLevel(str, Enum):
     ALLOW = "allow"
     ASK = "ask"
     DENY = "deny"
+
+
+FileOperationAction = Literal["read", "write", "exec"]
+FileOperationSource = Literal["tool_arg", "shlex", "script_scan", "llm"]
+
+
+@dataclass(frozen=True)
+class FileOperation:
+    """文件操作明细（审批卡渲染 + 持久化分发）。
+
+    - ``action``: 单值 ``read`` / ``write`` / ``exec``
+    - ``path``:   规范化绝对路径（POSIX）
+    - ``source``: 抽取来源（注册表 / shlex / 脚本扫描 / LLM）
+    - ``prompt``: 给用户的中文文案（如 "是否允许读取 xxx"）
+    """
+    action: FileOperationAction
+    path: str
+    source: FileOperationSource = "tool_arg"
+    prompt: str = ""
 
 
 @dataclass
@@ -40,6 +60,7 @@ class PermissionResult:
     external_paths: list[str] | None = None
     risk: dict | None = None
     subcommand_results: list[SubcommandPermissionResult] | None = None
+    file_operations: list[FileOperation] | None = None
 
     @property
     def is_allowed(self) -> bool:
@@ -61,4 +82,3 @@ class PatternRule:
     permission: PermissionLevel
     description: str = ""
     rule_id: str = ""
-

@@ -1816,14 +1816,19 @@ class JiuWenClawDeepAdapter:
     def _update_permission_rail(self, config_base: dict[str, Any] | None) -> None:
         """原地更新已有 PermissionRail 配置，或在首次启用时新建。"""
         permission_config = config_base.get("permissions", {}) if config_base else {}
+        model_name = (config_base or {}).get("models", {}).get(
+            "default", {}).get("model_client_config", {}).get("model_name", "gpt-4")
         if self._permission_rail is not None:
-            self._permission_rail.update_config(permission_config)
+            self._permission_rail.update_config(
+                permission_config,
+                llm=self._model,
+                model_name=model_name,
+            )
             logger.info("[JiuWenClawDeepAdapter] _permission_rail config hot-updated")
         elif permission_config.get("enabled", False):
             self._permission_rail = build_permission_rail(
                 config=config_base, llm=self._model,
-                model_name=config_base.get("models", {}).get(
-                    "default", {}).get("model_client_config", {}).get("model_name", "gpt-4"),
+                model_name=model_name,
             )
             if self._permission_rail is not None:
                 logger.info("[JiuWenClawDeepAdapter] _permission_rail newly created on hot-reload")

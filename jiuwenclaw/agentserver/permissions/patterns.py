@@ -223,6 +223,27 @@ def contains_path(parent: str | Path, child: str | Path) -> bool:
 # ---------- 权限规则持久化 ----------
 
 
+def _is_guard_baseline(permissions: dict[str, Any], tool_name: str) -> bool:
+    """Phase-1：判断 tool baseline 是否为 ``guard``（含历史 ``ask`` 自动升级）。
+
+    若 ``tools.<tool>`` 显式声明了 ``allow / deny / guard / ask``，按字面判定；
+    否则回退到 ``defaults``。``ask`` 在 Phase-1 一律视为 ``guard``。
+    """
+    tools_cfg = permissions.get("tools") or {}
+    raw = tools_cfg.get(tool_name) if isinstance(tools_cfg, dict) else None
+    if isinstance(raw, str):
+        norm = raw.strip().lower()
+        if norm in ("guard", "ask"):
+            return True
+        if norm in ("allow", "deny"):
+            return False
+    raw_default = permissions.get("defaults", "guard")
+    if isinstance(raw_default, str):
+        norm = raw_default.strip().lower()
+        return norm in ("guard", "ask")
+    return True
+
+
 def persist_permission_allow_rule(
     tool_name: str,
     tool_args: dict | str,
@@ -269,14 +290,26 @@ def persist_permission_allow_rule(
                 tool_name,
             )
             return False
-        current_permission, _matched_rule = evaluate_tiered_policy(
+        current_permission, current_matched_rule = evaluate_tiered_policy(
             permissions, tool_name, tool_args,
         )
-        if current_permission != PermissionLevel.ASK:
+        # Phase-1：``guard`` baseline 的非 shell 工具会让 tiered_policy 返回 ALLOW
+        # （表示"无意见，交给 file_guard 裁决"）。这种 ALLOW 不能阻止 persist：
+        # 用户的"总是允许"既可能是想把 tools.<name> 提为 allow，也可能是想把
+        # file_guard 规则永久化。判定窗口放宽：只要 baseline 是 guard 视为可持久化。
+        is_guard_baseline = _is_guard_baseline(permissions, tool_name)
+        if current_permission != PermissionLevel.ASK and not is_guard_baseline:
             logger.warning(
                 "[PermissionEngine] permission.persist.skip tool=%s reason=current_permission_not_ask current=%s",
                 tool_name,
                 current_permission.value,
+            )
+            return False
+        if current_permission == PermissionLevel.DENY:
+            logger.warning(
+                "[PermissionEngine] permission.persist.skip tool=%s reason=current_permission_deny matched_rule=%s",
+                tool_name,
+                current_matched_rule,
             )
             return False
 
@@ -464,52 +497,29 @@ def _existing_allow_override_patterns(permissions: dict) -> set[str]:
 
 
 def persist_external_directory_allow(paths: list[str]) -> None:
-    """用户选择「总是允许」外部路径时，写入 external_directory 配置."""
+    """已废弃：兼容旧调用方，转发到 ``file_guard.persist_legacy_external_allow_paths``。
+
+    Phase-1 起所有「外部路径总是允许」的写入都落到 ``permissions.file_guard.global``，
+    不再写 ``permissions.external_directory``（后者只在加载时迁移）。
+    """
     if not paths:
         return
-    logger.info("[PermissionEngine] permission.persist.external.start paths=%s", paths[:3])
-    try:
-        from jiuwenclaw.agentserver.permissions.core import get_permission_engine
-        from jiuwenclaw.config import (
-            _CONFIG_YAML_PATH,
-            _load_yaml_round_trip,
-            _dump_yaml_round_trip,
-        )
-        from ruamel.yaml.scalarstring import DoubleQuotedScalarString
-
-        data = _load_yaml_round_trip(_CONFIG_YAML_PATH)
-        permissions = data.get("permissions")
-        if permissions is None:
-            permissions = {}
-            data["permissions"] = permissions
-        ext_cfg = permissions.get("external_directory")
-        if not isinstance(ext_cfg, dict):
-            ext_cfg = {"*": "ask"}
-            permissions["external_directory"] = ext_cfg
-        for path_str in paths:
-            path_norm = path_str.replace("\\", "/").rstrip("/")
-            parent = str(Path(path_norm).parent).replace("\\", "/")
-            key = parent if parent and parent != "." else path_norm
-            if key not in ext_cfg or ext_cfg[key] != "allow":
-                ext_cfg[DoubleQuotedScalarString(key)] = DoubleQuotedScalarString("allow")
-                logger.info(
-                    "[PermissionEngine] permission.persist.external.write path=%s action=allow",
-                    key,
-                )
-        _dump_yaml_round_trip(_CONFIG_YAML_PATH, data)
-        engine = get_permission_engine()
-        engine.update_config(data.get("permissions", {}))
-        logger.info("[PermissionEngine] permission.persist.external.reload reloaded=true")
-    except Exception:
-        logger.error("[PermissionEngine] permission.persist.external.failed", exc_info=True)
+    from jiuwenclaw.agentserver.permissions.file_guard import (
+        persist_legacy_external_allow_paths,
+    )
+    logger.info(
+        "[PermissionEngine] permission.persist.external.compat paths=%s target=file_guard.global",
+        paths[:3],
+    )
+    persist_legacy_external_allow_paths(list(paths))
 
 
 def persist_cli_trusted_directory(raw_path: str) -> dict[str, Any]:
     """CLI ``command.add_dir``：全局信任目录子树。
 
-    写入 ``permissions.external_directory``（以目录路径为前缀键），并在 ``tiered_policy`` 下追加
-    ``approval_overrides``（路径类工具一条、shell 类工具一条），以便同时消除外部路径维度的 ASK
-    与参数级 ASK。
+    Phase-1 起：路径维度写入 ``permissions.file_guard.global / trusted_exec_directory``
+    （读 / 写 / 执行均放行），并在 ``tiered_policy`` 下追加 ``approval_overrides`` 让 shell
+    命令字符串里出现该路径时也直接放行。
 
     ``remember`` 由调用方忽略；本函数始终落盘。
     """
@@ -527,13 +537,15 @@ def persist_cli_trusted_directory(raw_path: str) -> dict[str, Any]:
 
     try:
         from jiuwenclaw.agentserver.permissions.core import get_permission_engine
+        from jiuwenclaw.agentserver.permissions.file_guard import (
+            apply_cli_trusted_to_permissions_dict,
+        )
         from jiuwenclaw.agentserver.permissions.tiered_policy import _SHELL_TOOLS
         from jiuwenclaw.config import (
             _CONFIG_YAML_PATH,
             _load_yaml_round_trip,
             _dump_yaml_round_trip,
         )
-        from ruamel.yaml.scalarstring import DoubleQuotedScalarString
 
         data = _load_yaml_round_trip(_CONFIG_YAML_PATH)
         permissions = data.get("permissions")
@@ -541,13 +553,9 @@ def persist_cli_trusted_directory(raw_path: str) -> dict[str, Any]:
             permissions = {}
             data["permissions"] = permissions
 
-        ext_cfg = permissions.get("external_directory")
-        if not isinstance(ext_cfg, dict):
-            ext_cfg = {"*": "ask"}
-            permissions["external_directory"] = ext_cfg
-        ext_cfg[DoubleQuotedScalarString(dir_norm)] = DoubleQuotedScalarString("allow")
+        apply_cli_trusted_to_permissions_dict(permissions, dir_norm)
         logger.info(
-            "[PermissionEngine] permission.persist.cli_add_dir.external.write path=%s action=allow",
+            "[PermissionEngine] permission.persist.cli_add_dir.file_guard.write path=%s targets=global+trusted_exec",
             dir_norm,
         )
 

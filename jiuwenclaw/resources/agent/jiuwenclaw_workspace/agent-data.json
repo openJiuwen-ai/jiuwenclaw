@@ -166,45 +166,6 @@
       "isMarkdown": true
     }
   ],
-  "jiuwenclaw_workspace/skills/openJiuwen-DeepSearch": [
-    {
-      "name": "README.md",
-      "path": "agent/jiuwenclaw_workspace/skills/openJiuwen-DeepSearch/README.md",
-      "isMarkdown": true
-    },
-    {
-      "name": "SKILL.md",
-      "path": "agent/jiuwenclaw_workspace/skills/openJiuwen-DeepSearch/SKILL.md",
-      "isMarkdown": true
-    }
-  ],
-  "jiuwenclaw_workspace/skills/openJiuwen-DeepSearch/scripts": [
-    {
-      "name": "convert_docx.py",
-      "path": "agent/jiuwenclaw_workspace/skills/openJiuwen-DeepSearch/scripts/convert_docx.py",
-      "isMarkdown": false
-    },
-    {
-      "name": "convert_html.py",
-      "path": "agent/jiuwenclaw_workspace/skills/openJiuwen-DeepSearch/scripts/convert_html.py",
-      "isMarkdown": false
-    },
-    {
-      "name": "main.py",
-      "path": "agent/jiuwenclaw_workspace/skills/openJiuwen-DeepSearch/scripts/main.py",
-      "isMarkdown": false
-    },
-    {
-      "name": "validate_environment.py",
-      "path": "agent/jiuwenclaw_workspace/skills/openJiuwen-DeepSearch/scripts/validate_environment.py",
-      "isMarkdown": false
-    },
-    {
-      "name": "verify_skill_structure.py",
-      "path": "agent/jiuwenclaw_workspace/skills/openJiuwen-DeepSearch/scripts/verify_skill_structure.py",
-      "isMarkdown": false
-    }
-  ],
   "jiuwenclaw_workspace/skills/skill-creator": [
     {
       "name": "LICENSE.txt",

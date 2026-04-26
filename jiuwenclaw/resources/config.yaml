@@ -588,7 +588,30 @@ permissions:
   owner_scopes: {}
   deny_guidance_message: ""
 
-  # 外部目录访问 (访问 workspace 外路径时的权限)
+  # Phase-1: 命令意图抽取（L1 shlex + L3-Cmd LLM）；关闭后只保留工具参数三轴判定。
+  command_intent:
+    enabled: true
+    timeout_seconds: 15
+    extra_body:
+      thinking:
+        type: disabled
+
+  # Phase-1: 文件路径三轴权限（read / write / exec）。
+  # - workspace: agent workspace 内的读写默认放行（rw_enabled=false 时所有内部读写也要审批）
+  # - global:    workspace 外的读写白名单（最长前缀匹配）；
+  #              entry 形如 {read_enable: true, write_enable: false}
+  # - trusted_exec_directory: 允许「通过解释器执行」的脚本目录前缀列表
+  # - tool_bindings: 在不改代码的情况下把额外工具的某个参数注册为 read / write / exec
+  file_guard:
+    workspace:
+      rw_enabled: true
+      description: "Agent workspace 内默认放行 read / write"
+    global: {}
+    trusted_exec_directory: []
+    tool_bindings: {}
+
+  # 兼容键：旧 external_directory 在加载时会被自动迁移到 file_guard.global，
+  # 新写入入口（persist_*）一律落到 file_guard，不再回写这里。
   external_directory:
     "*": "ask"
 
