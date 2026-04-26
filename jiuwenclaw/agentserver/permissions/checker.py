@@ -27,6 +27,7 @@ from typing import Any, Awaitable, Callable, List
 from jiuwenclaw.agentserver.permissions.tiered_policy import (
     collect_builtin_permission_rail_tool_names,
 )
+from jiuwenclaw.agentserver.permissions.shell_tools import extract_shell_command
 
 logger = logging.getLogger(__name__)
 
@@ -269,6 +270,128 @@ _RISK_EVALUATION_PROMPT = (
 )
 
 _RISK_ICON_MAP = {"高": "\U0001f534", "中": "\U0001f7e1", "低": "\U0001f7e2"}
+_RISK_LEVEL_RANK = {"低": 0, "中": 1, "高": 2}
+
+
+def _normalize_risk_tool_args(tool_args: dict | str) -> dict:
+    if isinstance(tool_args, str):
+        try:
+            parsed = json.loads(tool_args)
+        except Exception:
+            return {}
+        return parsed if isinstance(parsed, dict) else {}
+    return tool_args if isinstance(tool_args, dict) else {}
+
+
+def _risk_result(level: str, explanation: str) -> dict:
+    return {
+        "level": level,
+        "explanation": explanation,
+        "icon": _RISK_ICON_MAP.get(level, "\U0001f7e1"),
+    }
+
+
+def _select_highest_risk(reasons: list[tuple[str, str]]) -> dict | None:
+    if not reasons:
+        return None
+    reasons.sort(key=lambda item: _RISK_LEVEL_RANK.get(item[0], 1), reverse=True)
+    primary_level, primary_message = reasons[0]
+    secondary_message = ""
+    for level, message in reasons[1:]:
+        if level == primary_level:
+            continue
+        secondary_message = message
+        break
+    explanation = primary_message
+    if secondary_message:
+        explanation = f"{primary_message}；同时{secondary_message}"
+    return _risk_result(primary_level, explanation)
+
+
+def _collect_static_command_risk_reasons(cmd: str) -> list[tuple[str, str]]:
+    reasons: list[tuple[str, str]] = []
+    if not cmd:
+        return reasons
+
+    stripped_cmd = cmd.strip()
+    if stripped_cmd.startswith("$("):
+        reasons.append(("高", "该命令使用命令替换作为实际执行命令，运行时执行目标不直观"))
+    elif "$(" in stripped_cmd:
+        reasons.append(("中", "该命令包含命令替换，实际参数会在运行时动态生成"))
+    if re.match(r"^%[^%\s]+%", stripped_cmd):
+        reasons.append(("中", "该命令使用环境变量展开作为实际执行命令，运行时执行目标不直观"))
+
+    checks: list[tuple[str, str, str]] = [
+        (
+            "高",
+            r"(?i)(^|[&|;(]\s*)(rm|del|erase)\b",
+            "该命令包含删除文件操作，可能造成不可逆的数据丢失",
+        ),
+        (
+            "高",
+            r"(?i)(^|[&|;(]\s*)(rmdir|rd)\b[^\r\n&|;]*\s/[sq]\b",
+            "该命令包含递归删除目录操作，可能删除目录及其所有内容",
+        ),
+        (
+            "高",
+            r"(?i)\b(remove-item|rm)\b[^\r\n&|;]*\s-(r|recurse|force|rf)\b",
+            "该命令包含强制或递归删除操作，可能造成不可逆的数据丢失",
+        ),
+        (
+            "高",
+            r"(?i)\b(reg\s+delete|format|shutdown|reboot|mkfs|dd\s+if=|>\s*/dev/)\b",
+            "该命令可能修改系统关键状态或造成系统损坏",
+        ),
+        (
+            "高",
+            r"(?i)\bpowershell(?:\.exe)?\b[^\r\n&|;]*(?:-enc|-encodedcommand)\b",
+            "该命令包含编码后的 PowerShell 脚本，实际执行内容不易审查",
+        ),
+        (
+            "高",
+            r"(?i)\b(curl|wget|iwr|invoke-webrequest)\b[^\r\n|]*\|\s*(sh|bash|iex|powershell)\b",
+            "该命令包含下载内容后直接执行的模式，存在执行不可信代码的风险",
+        ),
+        (
+            "中",
+            r"(?i)\b(sudo|chmod|chown|set-executionpolicy)\b",
+            "该命令涉及权限或执行策略变更",
+        ),
+        (
+            "中",
+            r"(?i)\b(pip\s+install|npm\s+install|pnpm\s+install|yarn\s+add)\b",
+            "该命令包含软件安装操作，会修改当前环境依赖",
+        ),
+        (
+            "中",
+            r"(?i)(^|[&|;(]\s*)(node|python|python3|py|ruby|perl|php|pwsh|powershell|cmd|bash|sh)\b",
+            "该命令通过脚本解释器或 shell 执行入口运行代码，执行内容可能读取、写入文件或启动其他命令",
+        ),
+        (
+            "中",
+            r"(?i)(^|[&|;(]\s*)(npm|npx|pnpm|yarn)\b",
+            "该命令通过包管理器或脚本运行器执行，可能运行项目脚本、安装依赖或修改当前环境",
+        ),
+        (
+            "中",
+            r"(?i)(^|[&|;(]\s*)(copy|xcopy|robocopy|move|ren|rename)\b",
+            "该命令包含文件复制、移动或重命名操作，会修改文件状态",
+        ),
+        (
+            "中",
+            r"(?i)\b(new-item|set-content|add-content|out-file)\b",
+            "该命令包含文件写入操作，会修改文件内容",
+        ),
+    ]
+    for level, pattern, message in checks:
+        if re.search(pattern, cmd):
+            reasons.append((level, message))
+
+    if re.search(r"(?<![<>=])>(?![>=])", cmd):
+        reasons.append(("中", "该命令包含重定向写入 `>`，可能覆盖目标文件内容"))
+    elif ">>" in cmd:
+        reasons.append(("中", "该命令包含追加写入 `>>`，会修改目标文件内容"))
+    return reasons
 
 
 def assess_command_risk_static(tool_name: str, tool_args: dict | str) -> dict:
@@ -277,26 +400,28 @@ def assess_command_risk_static(tool_name: str, tool_args: dict | str) -> dict:
     Returns:
         {"level": "高|中|低", "explanation": "...", "icon": "🔴|🟡|🟢"}
     """
-    if isinstance(tool_args, str):
-        try:
-            tool_args = json.loads(tool_args)
-        except Exception:
-            tool_args = {}
-
-    cmd = str(tool_args.get("command", tool_args.get("cmd", "")))
-    if re.search(
-            r"\b(rm\s+-rf|del\s+/[fsq]|format|shutdown|reboot|mkfs|dd\s+if=|>\s*/dev/)",
-            cmd, re.IGNORECASE,
-    ):
-        return {"level": "高", "explanation": "该命令可能造成不可逆的数据丢失或系统损坏", "icon": "\U0001f534"}
-    if re.search(
-            r"\b(sudo|pip\s+install|npm\s+install|curl.*\|\s*sh|wget.*\|\s*sh|chmod|chown)",
-            cmd, re.IGNORECASE,
-    ):
-        return {"level": "中", "explanation": "该命令涉及权限变更或软件安装", "icon": "\U0001f7e1"}
+    tool_args = _normalize_risk_tool_args(tool_args)
+    cmd = extract_shell_command(tool_args)
+    command_risk = _select_highest_risk(_collect_static_command_risk_reasons(cmd))
+    if command_risk is not None:
+        return command_risk
     if tool_name == "mcp_exec_command":
-        return {"level": "中", "explanation": "该命令需要用户确认后执行", "icon": "\U0001f7e1"}
-    return {"level": "低", "explanation": "该操作风险较低", "icon": "\U0001f7e2"}
+        return _risk_result("中", "该命令需要用户确认后执行")
+    return _risk_result("低", "该操作风险较低")
+
+
+def assess_shell_targets_risk_static(targets: list[str]) -> dict:
+    """Evaluate risk for the permission targets shown in allow-always preview."""
+    reasons: list[tuple[str, str]] = []
+    for target in targets:
+        text = str(target or "").strip()
+        if not text:
+            continue
+        reasons.extend(_collect_static_command_risk_reasons(text))
+    command_risk = _select_highest_risk(reasons)
+    if command_risk is not None:
+        return command_risk
+    return _risk_result("低", "该命令持久化目标未命中明显危险操作")
 
 
 async def assess_command_risk_with_llm(

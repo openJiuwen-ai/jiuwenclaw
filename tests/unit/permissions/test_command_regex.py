@@ -171,6 +171,7 @@ def test_tiered_policy_allow_ask_deny():
                 "tools": ["mcp_exec_command"],
                 "action": "allow",
                 "pattern": "git status *",
+                "scope": "wildcard",
             },
         ],
     }

@@ -28,6 +28,13 @@ from jiuwenclaw.agentserver.permissions.suggestions import build_permission_sugg
 from jiuwenclaw.config import get_config
 from jiuwenclaw.agentserver.permissions.checker import (
     TOOL_PERMISSION_CHANNEL_ID,
+    assess_command_risk_static,
+    assess_shell_targets_risk_static,
+)
+from jiuwenclaw.agentserver.permissions.shell_tools import (
+    SHELL_PERMISSION_TOOLS,
+    extract_shell_command,
+    is_shell_permission_tool,
 )
 from jiuwenclaw.agentserver.permissions import PermissionLevel, PermissionResult
 from jiuwenclaw.e2a.acp_tool_updates import build_acp_tool_descriptor
@@ -42,7 +49,7 @@ TOOL_NAME_ALIASES = {
 }
 
 INTERRUPT_PENDING_PERMISSION_CONTEXT_KEY = "jiuwenclaw_pending_permission_contexts"
-_SHELL_PERMISSION_TOOLS = frozenset({"bash", "mcp_exec_command", "create_terminal"})
+_SHELL_PERMISSION_TOOLS = SHELL_PERMISSION_TOOLS
 
 
 @dataclass(frozen=True)
@@ -51,6 +58,15 @@ class PermissionConfirmResponse:
     feedback: str = ""
     auto_confirm: bool = False
     persist_allow: bool = False
+
+
+@dataclass(frozen=True)
+class PersistPreview:
+    targets: list[str]
+    whole_tool: bool = False
+    disabled_reason: str = ""
+    ask_subcommands: list[str] | None = None
+    file_operations: list[FileOperation] | None = None
 
 
 class PermissionInterruptRail(ConfirmInterruptRail):
@@ -140,9 +156,8 @@ class PermissionInterruptRail(ConfirmInterruptRail):
         tool_name = tool_call.name or ""
         tool_args = self._parse_tool_args(tool_call)
 
-        if tool_name in {"bash", "mcp_exec_command", "create_terminal"}:
-            cmd = tool_args.get("command", tool_args.get("cmd", ""))
-            return self._build_shell_auto_confirm_key(tool_name, str(cmd or ""))
+        if is_shell_permission_tool(tool_name):
+            return self._build_shell_auto_confirm_key(tool_name, extract_shell_command(tool_args))
 
         return tool_name
 
@@ -172,8 +187,23 @@ class PermissionInterruptRail(ConfirmInterruptRail):
         session: Any,
         auto_confirm_key: str,
         persisted: bool,
+        persist_requested: bool = False,
     ) -> bool:
-        return bool(auto_confirm and session is not None and auto_confirm_key and not persisted)
+        if not auto_confirm or session is None or not auto_confirm_key:
+            return False
+        if persisted:
+            logger.info(
+                "[PermissionEngine] permission.auto_confirm.skip key=%s reason=persisted_rule",
+                auto_confirm_key,
+            )
+            return False
+        if persist_requested:
+            logger.info(
+                "[PermissionEngine] permission.auto_confirm.skip key=%s reason=persist_failed",
+                auto_confirm_key,
+            )
+            return False
+        return True
 
     @staticmethod
     def _read_session_state(session: Any, key: str) -> Any:
@@ -297,26 +327,20 @@ class PermissionInterruptRail(ConfirmInterruptRail):
         tool_args: dict[str, Any],
         result: PermissionResult,
     ) -> dict[str, Any]:
+        preview = self._build_persist_preview(tool_name, tool_args, result)
         context: dict[str, Any] = {
             "tool_name": tool_name,
             "tool_args": dict(tool_args),
             "permission": result.permission.value,
             "matched_rule": result.matched_rule,
             "reason": result.reason,
+            "would_persist_patterns": list(preview.targets) if not preview.whole_tool else [],
+            "would_persist_whole_tool": preview.whole_tool,
         }
-        if tool_name in _SHELL_PERMISSION_TOOLS:
-            ask_subcommands = self._extract_ask_subcommands(result)
-            if ask_subcommands:
-                context["ask_subcommands"] = ask_subcommands
-            context["would_persist_patterns"] = self._build_would_persist_patterns(
-                tool_name,
-                tool_args,
-                ask_subcommands=ask_subcommands,
-            )
-            context["would_persist_whole_tool"] = False
-        else:
-            context["would_persist_patterns"] = []
-            context["would_persist_whole_tool"] = True
+        if preview.ask_subcommands:
+            context["ask_subcommands"] = preview.ask_subcommands
+        if preview.disabled_reason:
+            context["persist_disabled_reason"] = preview.disabled_reason
         if result.file_operations:
             context["file_operations"] = [
                 {
@@ -328,6 +352,37 @@ class PermissionInterruptRail(ConfirmInterruptRail):
                 for op in result.file_operations
             ]
         return context
+
+    def _build_persist_preview(
+        self,
+        tool_name: str,
+        tool_args: dict[str, Any],
+        result: PermissionResult | None = None,
+    ) -> PersistPreview:
+        file_operations = list(result.file_operations or []) if result is not None else []
+        if is_shell_permission_tool(tool_name):
+            ask_subcommands = self._extract_ask_subcommands(result) if result is not None else []
+            targets = self._build_would_persist_patterns(
+                tool_name,
+                tool_args,
+                ask_subcommands=ask_subcommands,
+            )
+            return PersistPreview(
+                targets=targets,
+                whole_tool=False,
+                disabled_reason=(
+                    "" if file_operations else self._build_no_persist_target_reason(tool_name, tool_args, targets)
+                ),
+                ask_subcommands=ask_subcommands,
+                file_operations=file_operations,
+            )
+        targets = [tool_name] if tool_name else []
+        return PersistPreview(
+            targets=targets,
+            whole_tool=bool(tool_name),
+            disabled_reason="" if targets else "工具名为空，无法生成持久化规则",
+            file_operations=file_operations,
+        )
 
     @staticmethod
     def _restore_file_operations(pending_context: dict[str, Any] | None) -> list[FileOperation]:
@@ -363,7 +418,7 @@ class PermissionInterruptRail(ConfirmInterruptRail):
         *,
         ask_subcommands: list[str] | None = None,
     ) -> list[str]:
-        command = str(tool_args.get("command", "") or tool_args.get("cmd", "") or "").strip()
+        command = extract_shell_command(tool_args)
         if not command:
             return []
         suggestions = build_permission_suggestions(
@@ -371,9 +426,22 @@ class PermissionInterruptRail(ConfirmInterruptRail):
             tool_args,
             shell_ast_result=parse_shell_for_permission(command),
             ask_subcommands=ask_subcommands,
-            existing_patterns=self._existing_allow_override_patterns(),
+            existing_patterns=self._existing_allow_patterns(),
         )
         return [item.pattern for item in suggestions]
+
+    def _build_no_persist_target_reason(
+        self,
+        tool_name: str,
+        tool_args: dict[str, Any],
+        persist_targets: list[str],
+    ) -> str:
+        if not is_shell_permission_tool(tool_name) or persist_targets:
+            return ""
+        command = extract_shell_command(tool_args)
+        if not command:
+            return "命令为空，无法生成持久化规则"
+        return "没有可写入的新持久化规则"
 
     def _build_persist_allow_targets(
         self,
@@ -381,14 +449,7 @@ class PermissionInterruptRail(ConfirmInterruptRail):
         tool_args: dict[str, Any],
         result: PermissionResult | None = None,
     ) -> list[str]:
-        if tool_name in _SHELL_PERMISSION_TOOLS:
-            ask_subcommands = self._extract_ask_subcommands(result) if result is not None else []
-            return self._build_would_persist_patterns(
-                tool_name,
-                tool_args,
-                ask_subcommands=ask_subcommands,
-            )
-        return [tool_name] if tool_name else []
+        return self._build_persist_preview(tool_name, tool_args, result).targets
 
     @staticmethod
     def _format_inline_code_items(items: list[str]) -> str:
@@ -426,6 +487,8 @@ class PermissionInterruptRail(ConfirmInterruptRail):
             # 仍然必须保留，否则审批卡上看不出本次决策是不是被 file_guard 抬高的。
             head = f"{tool_name}.shell_command.ask"
             fg_tail = PermissionInterruptRail.extract_file_guard_tail(raw)
+            if fg_tail == "file_guard:ask" and not PermissionInterruptRail._has_shell_ask(result, raw):
+                return fg_tail
             return f"{head}|{fg_tail}" if fg_tail else head
         # 非 shell tool：baseline head（``tools.{tool}`` / ``defaults.ask`` / ``defaults.guard``）
         # 不含 ``|``，``split("|")`` 切第一段就是干净的 head。这里只对 head 做美化，
@@ -449,19 +512,93 @@ class PermissionInterruptRail(ConfirmInterruptRail):
 
         return "|".join([display_head, *tail])
 
-    def _existing_allow_override_patterns(self) -> set[str]:
-        raw = self._static_config.get("approval_overrides")
-        if not isinstance(raw, list):
-            return set()
+    @staticmethod
+    def _has_shell_ask(result: PermissionResult, raw_matched_rule: str) -> bool:
+        subcommand_results = result.subcommand_results or []
+        for item in subcommand_results:
+            if item.permission == PermissionLevel.ASK:
+                return True
+        if subcommand_results:
+            return False
+        baseline = raw_matched_rule
+        fg_sep_idx = raw_matched_rule.rfind("|file_guard:")
+        if fg_sep_idx >= 0:
+            baseline = raw_matched_rule[:fg_sep_idx]
+        return "fallback(no_allow_match)" in baseline or "shell_empty_command" in baseline
+
+    @staticmethod
+    def _risk_rank(risk: dict[str, Any]) -> int:
+        return {"低": 0, "中": 1, "高": 2}.get(str(risk.get("level") or ""), 1)
+
+    def _build_risk_for_message(
+        self,
+        tool_name: str,
+        tool_args: dict[str, Any],
+        result: PermissionResult,
+        preview: PersistPreview,
+    ) -> dict[str, str]:
+        if result.risk:
+            return self._append_persistence_risk_note(result.risk, preview.disabled_reason)
+
+        if not is_shell_permission_tool(tool_name):
+            risk = {
+                "level": "低",
+                "icon": "🟢",
+                "explanation": "该工具调用不属于命令执行类操作，当前仅因工具权限配置需要用户确认",
+            }
+            return self._append_persistence_risk_note(risk, preview.disabled_reason)
+
+        targets = preview.targets
+        if targets:
+            risk = assess_shell_targets_risk_static(targets)
+        else:
+            risk = assess_command_risk_static(tool_name, tool_args)
+        if preview.disabled_reason:
+            if self._risk_rank(risk) < 1:
+                risk = {
+                    "level": "中",
+                    "icon": "🟡",
+                    "explanation": "当前命令结构复杂，需要用户确认后执行",
+                }
+            return self._append_persistence_risk_note(risk, preview.disabled_reason)
+        external_paths = getattr(result, "external_paths", None) or []
+        if external_paths and self._risk_rank(risk) < 1:
+            return {
+                "level": "中",
+                "icon": "🟡",
+                "explanation": "该操作涉及工作区外部路径，需要用户确认后执行",
+            }
+        return risk
+
+    @staticmethod
+    def _append_persistence_risk_note(risk: dict[str, Any], persist_disabled_reason: str) -> dict[str, str]:
+        if not persist_disabled_reason:
+            return risk
+        explanation = str(risk.get("explanation") or "").strip()
+        note = f"当前命令{persist_disabled_reason}，无法为“总是允许”写入持久化规则"
+        if note in explanation:
+            return risk
+        combined = f"{explanation}；{note}" if explanation else note
+        return {
+            "level": str(risk.get("level") or "中"),
+            "icon": str(risk.get("icon") or "🟡"),
+            "explanation": combined,
+        }
+
+    def _existing_allow_patterns(self) -> set[str]:
         patterns: set[str] = set()
-        for item in raw:
-            if not isinstance(item, dict):
+        for section_name in ("rules", "approval_overrides"):
+            raw = self._static_config.get(section_name)
+            if not isinstance(raw, list):
                 continue
-            if str(item.get("action") or "").strip().lower() != "allow":
-                continue
-            pattern = item.get("pattern")
-            if isinstance(pattern, str) and pattern:
-                patterns.add(pattern)
+            for item in raw:
+                if not isinstance(item, dict):
+                    continue
+                if str(item.get("action") or "").strip().lower() != "allow":
+                    continue
+                pattern = item.get("pattern")
+                if isinstance(pattern, str) and pattern:
+                    patterns.add(pattern)
         return patterns
 
     @property
@@ -657,12 +794,14 @@ class PermissionInterruptRail(ConfirmInterruptRail):
                     if result.file_operations:
                         try:
                             persist_file_operations_allow(list(result.file_operations))
+                            persisted = True
                             logger.info(
                                 "[PermissionEngine] permission.persist.file_operations tool=%s channel=acp count=%s",
                                 tool_name,
                                 len(result.file_operations),
                             )
                         except Exception:
+                            persisted = False
                             logger.exception(
                                 "[PermissionEngine] permission.persist.file_operations.failed tool=%s",
                                 tool_name,
@@ -672,6 +811,7 @@ class PermissionInterruptRail(ConfirmInterruptRail):
                     session=ctx.session,
                     auto_confirm_key=auto_confirm_key,
                     persisted=persisted,
+                    persist_requested=confirm_payload.persist_allow,
                 ):
                     self._store_auto_confirm(ctx, auto_confirm_key)
                 if confirm_payload.approved:
@@ -710,15 +850,16 @@ class PermissionInterruptRail(ConfirmInterruptRail):
         logger.info("[PermissionEngine] permission.rail.user_response tool=%s", tool_name)
         payload = self._parse_confirm_payload(user_input)
         if payload is None:
-            message = self._build_message(tool_call, PermissionResult(
-                permission=PermissionLevel.ASK,
-                matched_rule=None,
-                reason="Invalid confirmation payload",
-            ))
-            return self.interrupt(InterruptRequest(
-                message=message,
-                payload_schema=ConfirmPayload.to_schema(),
-            ))
+            logger.warning(
+                "[PermissionEngine] permission.rail.invalid_response tool=%s "
+                "tool_call_id=%s user_input_type=%s",
+                tool_name,
+                tool_call_id,
+                type(user_input).__name__,
+            )
+            return self.reject(
+                tool_result="[PERMISSION_REJECTED] Invalid permission confirmation payload."
+            )
 
         persisted = False
         pending_context = self._pop_pending_permission_context(
@@ -743,6 +884,7 @@ class PermissionInterruptRail(ConfirmInterruptRail):
             if file_ops:
                 try:
                     persist_file_operations_allow(file_ops)
+                    persisted = True
                     logger.info(
                         "[PermissionEngine] permission.persist.file_operations tool=%s channel=%s count=%s",
                         tool_name,
@@ -750,6 +892,7 @@ class PermissionInterruptRail(ConfirmInterruptRail):
                         len(file_ops),
                     )
                 except Exception:
+                    persisted = False
                     logger.exception(
                         "[PermissionEngine] permission.persist.file_operations.failed tool=%s",
                         tool_name,
@@ -760,6 +903,7 @@ class PermissionInterruptRail(ConfirmInterruptRail):
             session=ctx.session,
             auto_confirm_key=auto_confirm_key,
             persisted=persisted,
+            persist_requested=payload.persist_allow,
         ):
             self._store_auto_confirm(ctx, auto_confirm_key)
 
@@ -958,8 +1102,11 @@ class PermissionInterruptRail(ConfirmInterruptRail):
             "askSubcommands": permission_context.get("ask_subcommands", []),
             "wouldPersistPatterns": permission_context.get("would_persist_patterns", []),
             "wouldPersistWholeTool": bool(permission_context.get("would_persist_whole_tool", False)),
-            "persistAllowTargets": self._build_persist_allow_targets(tool_name, tool_args, result),
             "displayMatchedRule": self.display_matched_rule(tool_name, result),
+            "persistDisabledReason": permission_context.get("persist_disabled_reason", ""),
+            "persistAllowTargets": permission_context.get("would_persist_patterns", []) or (
+                [tool_name] if permission_context.get("would_persist_whole_tool") else []
+            ),
             "toolName": tool_name,
             "fileOperations": list(file_ops_payload),
             "toolDescription": self._extract_tool_description(tool_args),
@@ -1094,12 +1241,16 @@ class PermissionInterruptRail(ConfirmInterruptRail):
     ) -> str:
         tool_name = tool_call.name if tool_call else ""
         tool_args = self._parse_tool_args(tool_call)
-        risk = result.risk or {"level": "中", "icon": "🟡", "explanation": "需要用户确认"}
-        persist_targets = self._build_persist_allow_targets(tool_name, tool_args, result)
-        persist_targets_text = self._format_inline_code_items(persist_targets)
+        preview = self._build_persist_preview(tool_name, tool_args, result)
+        risk = self._build_risk_for_message(tool_name, tool_args, result, preview)
+        persist_targets_text = self._format_inline_code_items(preview.targets)
         target_suffix = ""
-        if tool_name in _SHELL_PERMISSION_TOOLS and persist_targets_text:
+        if is_shell_permission_tool(tool_name) and persist_targets_text:
             target_suffix = f" {persist_targets_text}"
+        elif preview.file_operations:
+            target_suffix = "文件操作"
+        elif is_shell_permission_tool(tool_name) and preview.disabled_reason:
+            target_suffix = ""
 
         parts = [
             f"**工具 `{tool_name}` 需要授权才能执行{target_suffix}**\n\n",
@@ -1114,6 +1265,7 @@ class PermissionInterruptRail(ConfirmInterruptRail):
 
         parts.extend([
             f"**安全风险评估：** {risk.get('icon', '')} **{risk.get('level', '')}风险**\n\n",
+            f"> {risk.get('explanation', '')}\n\n",
         ])
 
         args_preview = self._format_args_preview(tool_args)
@@ -1121,6 +1273,12 @@ class PermissionInterruptRail(ConfirmInterruptRail):
             parts.append(f"参数：\n```json\n{args_preview}\n```\n")
 
         parts.append(f"\n匹配规则：`{self.display_matched_rule(tool_name, result)}`")
+
+        external_paths = getattr(result, "external_paths", None) or []
+        if external_paths:
+            parts.append(f"\n\n**外部路径：** `{', '.join(external_paths)}`")
+
+        parts.append(self._build_always_allow_hint(tool_name, preview))
 
         return "".join(parts)
 
@@ -1152,23 +1310,51 @@ class PermissionInterruptRail(ConfirmInterruptRail):
 
     def _build_always_allow_hint(
         self,
-        tool_call: Optional[ToolCall],
-        result: PermissionResult | None = None,
+        tool_name: str,
+        preview: PersistPreview,
     ) -> str:
-        if tool_call is None:
-            return ""
-
-        tool_name = tool_call.name or ""
-        tool_args = self._parse_tool_args(tool_call)
-        targets = self._build_persist_allow_targets(tool_name, tool_args, result)
-        targets_text = self._format_inline_code_items(targets)
+        targets_text = self._format_inline_code_items(preview.targets)
+        file_targets_text = self._format_file_operation_targets(preview.file_operations or [])
+        if targets_text and file_targets_text:
+            if preview.whole_tool:
+                return (
+                    f'\n\n> 选择"总是允许"将允许整个工具：{targets_text}；'
+                    f"并允许文件操作：{file_targets_text}"
+                )
+            return (
+                f'\n\n> 选择"总是允许"将写入持久化允许规则：{targets_text}；'
+                f"并允许文件操作：{file_targets_text}"
+            )
         if targets_text:
+            if preview.whole_tool:
+                return f'\n\n> 选择"总是允许"将允许整个工具：{targets_text}'
             return f'\n\n> 选择"总是允许"将写入持久化允许规则：{targets_text}'
+        if file_targets_text:
+            return f'\n\n> 选择"总是允许"将允许文件操作：{file_targets_text}'
 
-        auto_confirm_key = self._get_auto_confirm_key(tool_call)
-        if auto_confirm_key:
-            return f'\n\n> 选择"总是允许"将在当前会话自动放行 `{auto_confirm_key}` 调用'
+        if preview.disabled_reason:
+            return (
+                f'\n\n> 当前命令{preview.disabled_reason}；选择"总是允许"不会写入持久化允许规则，'
+                "后续相同或类似命令仍可能再次审批"
+            )
         return ""
+
+    @classmethod
+    def _format_file_operation_targets(cls, file_operations: list[FileOperation]) -> str:
+        verb_cn = {"read": "读取", "write": "写入", "exec": "执行"}
+        items: list[str] = []
+        seen: set[tuple[str, str]] = set()
+        for op in file_operations:
+            action = str(op.action or "").strip()
+            path = str(op.path or "").strip()
+            if not action or not path:
+                continue
+            key = (action, path)
+            if key in seen:
+                continue
+            seen.add(key)
+            items.append(f"{verb_cn.get(action, action)} {path}")
+        return cls._format_inline_code_items(items)
 
 
 __all__ = [

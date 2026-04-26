@@ -26,10 +26,15 @@ from jiuwenclaw.agentserver.permissions.suggestions import (
     PermissionSuggestion,
     build_permission_suggestions,
 )
+from jiuwenclaw.agentserver.permissions.shell_tools import (
+    SHELL_PERMISSION_TOOLS,
+    extract_shell_command,
+    is_shell_permission_tool,
+)
 
 logger = logging.getLogger(__name__)
 
-_SHELL_APPROVAL_TOOLS = frozenset({"bash", "mcp_exec_command", "create_terminal"})
+_SHELL_APPROVAL_TOOLS = SHELL_PERMISSION_TOOLS
 
 
 @dataclass(frozen=True)
@@ -273,6 +278,7 @@ def persist_permission_allow_rule(
         from jiuwenclaw.agentserver.permissions.shell_ast import parse_shell_for_permission
         from jiuwenclaw.agentserver.permissions.tiered_policy import (
             evaluate_tiered_policy,
+            evaluate_tiered_policy_detailed,
         )
         from jiuwenclaw.agentserver.permissions.models import PermissionLevel
         from jiuwenclaw.config import (
@@ -313,17 +319,23 @@ def persist_permission_allow_rule(
             )
             return False
 
-        if tool_name in _SHELL_APPROVAL_TOOLS:
+        if is_shell_permission_tool(tool_name):
             suggestions = _permission_suggestions_from_context(permission_context)
             if not suggestions:
-                shell_ast_result = parse_shell_for_permission(
-                    str(tool_args.get("command", "") or tool_args.get("cmd", "") or "").strip()
-                )
+                ask_subcommands = _ask_subcommands_from_context(permission_context)
+                if not ask_subcommands:
+                    _level, _rule, subcommand_results = evaluate_tiered_policy_detailed(
+                        permissions,
+                        tool_name,
+                        tool_args,
+                    )
+                    ask_subcommands = _ask_subcommands_from_policy_result(subcommand_results)
+                shell_ast_result = parse_shell_for_permission(extract_shell_command(tool_args))
                 suggestions = build_permission_suggestions(
                     tool_name,
                     tool_args,
                     shell_ast_result=shell_ast_result,
-                    ask_subcommands=(permission_context or {}).get("ask_subcommands"),
+                    ask_subcommands=ask_subcommands,
                     existing_patterns=_existing_allow_override_patterns(permissions),
                 )
             persisted = _persist_tiered_approval_override_suggestions(permissions, suggestions)
@@ -374,14 +386,48 @@ def _permission_suggestions_from_context(permission_context: dict | None) -> lis
         if not pattern or pattern in seen:
             continue
         seen.add(pattern)
+        scope = _infer_persisted_rule_scope(pattern)
         suggestions.append(PermissionSuggestion(
             tools=tuple(_SHELL_APPROVAL_TOOLS),
             match_type="command",
             pattern=pattern,
             action="allow",
+            scope=scope,
             reason="permission_context.would_persist_patterns",
         ))
     return suggestions
+
+
+def _infer_persisted_rule_scope(pattern: str) -> str:
+    text = str(pattern or "").strip()
+    if text.lower().startswith("re:"):
+        return "regex"
+    if text.endswith(" *"):
+        return "head"
+    return "exact"
+
+
+def _ask_subcommands_from_context(permission_context: dict | None) -> list[str]:
+    if not isinstance(permission_context, dict):
+        return []
+    raw = permission_context.get("ask_subcommands")
+    if not isinstance(raw, list):
+        return []
+    return [item.strip() for item in raw if isinstance(item, str) and item.strip()]
+
+
+def _ask_subcommands_from_policy_result(
+    subcommand_results: list[tuple[str, Any, str]] | None,
+) -> list[str]:
+    if not subcommand_results:
+        return []
+    ask_subcommands: list[str] = []
+    for text, permission, _matched_rule in subcommand_results:
+        if not text:
+            continue
+        if permission == "ask" or getattr(permission, "value", None) == "ask":
+            ask_subcommands.append(text)
+    return ask_subcommands
 
 
 def _persist_tiered_approval_override_suggestions(
@@ -401,6 +447,7 @@ def _persist_tiered_approval_override_suggestions(
                 overrides,
                 pattern=suggestion.pattern,
                 action=suggestion.action,
+                scope=suggestion.scope,
         ):
             persisted_any = True
     return persisted_any
@@ -440,6 +487,7 @@ def _ensure_single_allow_override(
     *,
     pattern: str,
     action: str,
+    scope: str = "head",
 ) -> bool:
     for existing in overrides:
         if not isinstance(existing, dict):
@@ -462,6 +510,7 @@ def _ensure_single_allow_override(
         "id": _build_approval_override_id(pattern),
         "pattern": pattern,
         "action": action,
+        "scope": scope,
     })
     return True
 
@@ -473,26 +522,27 @@ def _is_same_allow_override(signature: _ApprovalOverrideSignature) -> bool:
 
 
 def _build_approval_override_id(pattern: str) -> str:
-    raw = f"user_allow_{pattern}"
-    collapsed = re.sub(r"[^a-zA-Z0-9]+", "_", raw).strip("_").lower()
-    if not collapsed:
-        return "user_allow_override"
-    return collapsed[:120]
+    raw_pattern = str(pattern or "").strip()
+    digest = hashlib.sha256(raw_pattern.encode("utf-8")).hexdigest()[:12]
+    collapsed = re.sub(r"[^a-zA-Z0-9]+", "_", raw_pattern).strip("_").lower()
+    preview = collapsed[:32].strip("_") or "override"
+    return f"user_allow_{preview}_{digest}"
 
 
 def _existing_allow_override_patterns(permissions: dict) -> set[str]:
-    raw = permissions.get("approval_overrides")
-    if not isinstance(raw, list):
-        return set()
     patterns: set[str] = set()
-    for item in raw:
-        if not isinstance(item, dict):
+    for section_name in ("rules", "approval_overrides"):
+        raw = permissions.get(section_name)
+        if not isinstance(raw, list):
             continue
-        if str(item.get("action") or "").strip().lower() != "allow":
-            continue
-        pattern = item.get("pattern")
-        if isinstance(pattern, str) and pattern:
-            patterns.add(pattern)
+        for item in raw:
+            if not isinstance(item, dict):
+                continue
+            if str(item.get("action") or "").strip().lower() != "allow":
+                continue
+            pattern = item.get("pattern")
+            if isinstance(pattern, str) and pattern:
+                patterns.add(pattern)
     return patterns
 
 
@@ -540,7 +590,6 @@ def persist_cli_trusted_directory(raw_path: str) -> dict[str, Any]:
         from jiuwenclaw.agentserver.permissions.file_guard import (
             apply_cli_trusted_to_permissions_dict,
         )
-        from jiuwenclaw.agentserver.permissions.tiered_policy import _SHELL_TOOLS
         from jiuwenclaw.config import (
             _CONFIG_YAML_PATH,
             _load_yaml_round_trip,
@@ -587,7 +636,7 @@ def persist_cli_trusted_directory(raw_path: str) -> dict[str, Any]:
             logger.info(
                 "[PermissionEngine] permission.persist.cli_add_dir.override.write target=shell id=%s tools=%s",
                 shell_override_id,
-                sorted(_SHELL_TOOLS),
+                sorted(SHELL_PERMISSION_TOOLS),
             )
 
         _dump_yaml_round_trip(_CONFIG_YAML_PATH, data)

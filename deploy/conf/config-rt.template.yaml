@@ -387,6 +387,18 @@ permissions:
     - id: shell_allow_type
       pattern: "type *"
       action: allow
+    - id: shell_allow_tree
+      pattern: "tree *"
+      action: allow
+    - id: shell_allow_get_childitem
+      pattern: "Get-ChildItem *"
+      action: allow
+    - id: shell_allow_get_content
+      pattern: "Get-Content *"
+      action: allow
+    - id: shell_allow_select_string
+      pattern: "Select-String *"
+      action: allow
     - id: shell_allow_head
       pattern: "head *"
       action: allow

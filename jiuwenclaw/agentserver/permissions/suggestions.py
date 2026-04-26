@@ -15,10 +15,12 @@ from jiuwenclaw.agentserver.permissions.shell_ast import (
     ShellAstParseResult,
     parse_shell_for_permission,
 )
+from jiuwenclaw.agentserver.permissions.shell_tools import (
+    extract_shell_command,
+    is_shell_permission_tool,
+)
 
 logger = logging.getLogger(__name__)
-
-_SHELL_SUGGESTION_TOOLS = frozenset({"bash", "mcp_exec_command", "create_terminal"})
 
 
 @dataclass(frozen=True)
@@ -39,9 +41,9 @@ def build_permission_suggestions(
     ask_subcommands: list[str] | None = None,
     existing_patterns: set[str] | None = None,
 ) -> list[PermissionSuggestion]:
-    if tool_name not in _SHELL_SUGGESTION_TOOLS:
+    if not is_shell_permission_tool(tool_name):
         return []
-    command = str(tool_args.get("command", "") or tool_args.get("cmd", "") or "").strip()
+    command = extract_shell_command(tool_args)
     if not command:
         return []
     return build_shell_permission_suggestions(
@@ -66,6 +68,16 @@ def build_shell_permission_suggestions(
 
     if selected_texts:
         heads = [_extract_command_head(text) for text in selected_texts]
+    elif shell_ast_result.kind == "parse_unavailable":
+        return _dedupe_suggestions([
+            PermissionSuggestion(
+                tools=(tool_name,),
+                match_type="command",
+                pattern=command.strip(),
+                scope="exact",
+                reason=shell_ast_result.reason or "parse_unavailable_exact_command",
+            )
+        ], existing_patterns=existing_patterns)
     else:
         heads = list(shell_ast_result.all_command_heads)
         if not heads and shell_ast_result.kind == "simple":

@@ -11,10 +11,17 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
+import pytest
 import yaml
 
+from jiuwenclaw.agentserver.permissions.checker import assess_command_risk_static, assess_shell_targets_risk_static
 from jiuwenclaw.agentserver.permissions.core import PermissionEngine, set_permission_engine
-from jiuwenclaw.agentserver.permissions.models import PermissionLevel, PermissionResult, SubcommandPermissionResult
+from jiuwenclaw.agentserver.permissions.models import (
+    FileOperation,
+    PermissionLevel,
+    PermissionResult,
+    SubcommandPermissionResult,
+)
 from jiuwenclaw.agentserver.permissions.patterns import persist_permission_allow_rule
 from jiuwenclaw.agentserver.permissions.shell_ast import (
     ShellAstParseResult,
@@ -254,7 +261,7 @@ def test_suggestions_use_heads_and_filter_existing_patterns():
     result = ShellAstParseResult(
         kind="too_complex",
         flags=ShellStructureFlags(has_heredoc=True),
-        all_command_heads=("cat",),
+        all_command_heads=("cat", "git"),
         all_invocations=("cat <<EOF\nhi\nEOF",),
     )
 
@@ -262,10 +269,10 @@ def test_suggestions_use_heads_and_filter_existing_patterns():
         "bash",
         "cat <<EOF\nhi\nEOF",
         shell_ast_result=result,
-        existing_patterns={"git *"},
+        existing_patterns={"cat *"},
     )
 
-    assert [item.pattern for item in suggestions] == ["cat *"]
+    assert [item.pattern for item in suggestions] == ["git *"]
 
 
 def test_suggestions_filter_to_ask_subcommands():
@@ -342,22 +349,44 @@ def test_persist_shell_allow_rule_writes_minimal_approval_override(monkeypatch):
     assert persist_permission_allow_rule(
         "bash",
         {"command": "git status && npm test"},
-        permission_context={
-            "ask_subcommands": ["npm test"],
-            "would_persist_patterns": ["npm *"],
-        },
+        permission_context={"ask_subcommands": ["npm test"]},
     )
 
     saved = yaml.safe_load(config_path.read_text(encoding="utf-8"))
     keys = list(saved["permissions"].keys())
     assert keys.index("approval_overrides") > keys.index("rules")
-    assert saved["permissions"]["approval_overrides"] == [
-        {
-            "id": "user_allow_npm",
-            "pattern": "npm *",
-            "action": "allow",
-        }
-    ]
+    overrides = saved["permissions"]["approval_overrides"]
+    assert len(overrides) == 1
+    assert overrides[0]["id"].startswith("user_allow_npm_")
+    assert overrides[0]["pattern"] == "npm *"
+    assert overrides[0]["action"] == "allow"
+    assert overrides[0]["scope"] == "head"
+
+
+def test_persist_shell_allow_rule_fallback_uses_ask_subcommands(monkeypatch):
+    base_dir = _tmp_dir("persist-fallback-ask-subcommands")
+    config_path = base_dir / "config.yaml"
+    config_path.write_text(
+        yaml.safe_dump({
+            "permissions": {
+                "enabled": True,
+                "tools": {"bash": "ask"},
+                "approval_overrides": [{"id": "git", "pattern": "git *", "action": "allow"}],
+                "rules": [],
+            }
+        }, allow_unicode=True),
+        encoding="utf-8",
+    )
+    config_mod = importlib.import_module("jiuwenclaw.config")
+    monkeypatch.setattr(config_mod, "_CONFIG_YAML_PATH", config_path)
+    _config_dir_with_builtin(base_dir, monkeypatch, [])
+    set_permission_engine(PermissionEngine({"enabled": True, "tools": {"bash": "ask"}}))
+
+    assert persist_permission_allow_rule("bash", {"command": "git status && npm test"})
+
+    saved = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    patterns = [item["pattern"] for item in saved["permissions"]["approval_overrides"]]
+    assert patterns == ["git *", "npm *"]
 
 
 def test_persist_shell_allow_rule_prefers_preview_patterns(monkeypatch):
@@ -379,13 +408,12 @@ def test_persist_shell_allow_rule_prefers_preview_patterns(monkeypatch):
     )
 
     saved = yaml.safe_load(config_path.read_text(encoding="utf-8"))
-    assert saved["permissions"]["approval_overrides"] == [
-        {
-            "id": "user_allow_rm",
-            "pattern": "rm *",
-            "action": "allow",
-        }
-    ]
+    overrides = saved["permissions"]["approval_overrides"]
+    assert len(overrides) == 1
+    assert overrides[0]["id"].startswith("user_allow_rm_")
+    assert overrides[0]["pattern"] == "rm *"
+    assert overrides[0]["action"] == "allow"
+    assert overrides[0]["scope"] == "head"
 
 
 def test_persist_shell_allow_rule_expands_preseeded_approval_overrides(monkeypatch):
@@ -424,7 +452,40 @@ def test_persist_shell_allow_rule_expands_preseeded_approval_overrides(monkeypat
     assert text.index("  rules:") < text.index("  approval_overrides:")
     assert text.index("  approval_overrides:") < text.index("  owner_scopes:")
     assert "  approval_overrides: []" not in text
-    assert "    - id: user_allow_python" in text
+    assert "    - id: user_allow_python_" in text
+
+
+def test_persist_shell_allow_rule_uses_short_stable_id_for_long_exact_pattern(monkeypatch):
+    base_dir = _tmp_dir("persist-long-exact-id")
+    config_path = base_dir / "config.yaml"
+    config_path.write_text(
+        yaml.safe_dump(
+            {"permissions": {"enabled": True, "tools": {"bash": "ask"}, "rules": []}},
+            allow_unicode=True,
+        ),
+        encoding="utf-8",
+    )
+    config_mod = importlib.import_module("jiuwenclaw.config")
+    monkeypatch.setattr(config_mod, "_CONFIG_YAML_PATH", config_path)
+    _config_dir_with_builtin(base_dir, monkeypatch, [])
+    set_permission_engine(PermissionEngine({"enabled": True, "tools": {"bash": "ask"}}))
+
+    long_source = "print('hello')" * 80
+    exact_pattern = f"custom-runner --inline-code {long_source}"
+
+    assert persist_permission_allow_rule(
+        "bash",
+        {"command": exact_pattern},
+        permission_context={"would_persist_patterns": [exact_pattern]},
+    )
+
+    saved = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    override = saved["permissions"]["approval_overrides"][0]
+    assert override["pattern"] == exact_pattern
+    assert override["scope"] == "exact"
+    assert override["id"].startswith("user_allow_custom_runner_inline_code_")
+    assert len(override["id"]) <= 64
+    assert long_source not in override["id"]
 
 
 def test_persist_non_shell_allow_rule_updates_whole_tool(monkeypatch):
@@ -465,6 +526,219 @@ def test_pending_permission_context_contains_persistence_preview():
     assert context["would_persist_whole_tool"] is False
 
 
+def test_shell_message_does_not_offer_existing_rule_when_file_guard_asks():
+    from jiuwenclaw.agentserver.deep_agent.rails.permission_rail import PermissionInterruptRail
+
+    rail = PermissionInterruptRail(
+        config={
+            "tools": {"bash": "ask"},
+            "rules": [{"id": "shell_allow_echo", "pattern": "echo *", "action": "allow"}],
+        },
+    )
+    result = PermissionResult(
+        permission=PermissionLevel.ASK,
+        matched_rule=(
+            "tiered_policy:shell_subcommands:echo test > C:/Users/demo/.jiuwenclaw/b.txt"
+            "=>tiered_policy:rules:rules[shell_allow_echo]|file_guard:ask"
+        ),
+        subcommand_results=[
+            SubcommandPermissionResult(
+                "echo test > C:/Users/demo/.jiuwenclaw/b.txt",
+                PermissionLevel.ALLOW,
+                "tiered_policy:rules:rules[shell_allow_echo]",
+            )
+        ],
+        file_operations=[
+            FileOperation(
+                action="write",
+                path="C:/Users/demo/.jiuwenclaw/b.txt",
+                source="llm",
+            )
+        ],
+    )
+
+    message = rail.build_permission_message(
+        SimpleNamespace(
+            name="bash",
+            arguments={"command": "echo test > C:\\Users\\demo\\.jiuwenclaw\\b.txt"},
+        ),
+        result,
+    )
+    context = rail.build_pending_permission_context(
+        "bash",
+        {"command": "echo test > C:\\Users\\demo\\.jiuwenclaw\\b.txt"},
+        result,
+    )
+
+    assert context["would_persist_patterns"] == []
+    assert context["file_operations"][0]["path"] == "C:/Users/demo/.jiuwenclaw/b.txt"
+    assert "需要授权才能执行 `echo *`" not in message
+    assert "工具 `bash` 需要授权才能执行文件操作" in message
+    assert '选择"总是允许"将写入持久化允许规则：`echo *`' not in message
+    assert '选择"总是允许"将允许文件操作：`写入 C:/Users/demo/.jiuwenclaw/b.txt`' in message
+    assert "匹配规则：`file_guard:ask`" in message
+
+
+def test_permission_message_uses_exact_pattern_for_complex_shell_command():
+    from jiuwenclaw.agentserver.deep_agent.rails.permission_rail import PermissionInterruptRail
+
+    rail = PermissionInterruptRail(config={"tools": {"bash": "ask"}})
+    result = PermissionResult(
+        permission=PermissionLevel.ASK,
+        matched_rule="tiered_policy:fallback(no_allow_match)",
+    )
+
+    message = rail.build_permission_message(
+        SimpleNamespace(name="bash", arguments={"command": "if exist a.txt type a.txt else echo missing > a.txt"}),
+        result,
+    )
+    context = rail.build_pending_permission_context(
+        "bash",
+        {"command": "if exist a.txt type a.txt else echo missing > a.txt"},
+        result,
+    )
+
+    exact_pattern = "if exist a.txt type a.txt else echo missing > a.txt"
+    assert f"工具 `bash` 需要授权才能执行 `{exact_pattern}`" in message
+    assert f'选择"总是允许"将写入持久化允许规则：`{exact_pattern}`' in message
+    assert context["would_persist_patterns"] == [exact_pattern]
+    assert "无法为“总是允许”写入持久化规则" not in message
+
+
+def test_exact_shell_override_matches_literal_wildcard_characters(monkeypatch):
+    _config_dir_with_builtin(_tmp_dir("literal-wildcard-exact"), monkeypatch, [])
+    cfg = {
+        "tools": {"bash": "ask"},
+        "approval_overrides": [
+            {
+                "id": "user_allow_for_f_in_txt_do_type_f",
+                "pattern": "for %f in (*.txt) do type %f",
+                "action": "allow",
+                "scope": "exact",
+            }
+        ],
+    }
+
+    perm, matched_rule = evaluate_tiered_policy(
+        cfg,
+        "bash",
+        {"command": "for %f in (*.txt) do type %f"},
+    )
+
+    assert perm == PermissionLevel.ALLOW
+    assert "user_allow_for_f_in_txt_do_type_f" in matched_rule
+    assert evaluate_tiered_policy(
+        cfg,
+        "bash",
+        {"command": "for %f in (a.txt) do type %f"},
+    )[0] == PermissionLevel.ASK
+
+
+def test_legacy_exact_shell_override_inferrs_literal_wildcard_scope(monkeypatch):
+    _config_dir_with_builtin(_tmp_dir("legacy-literal-wildcard-exact"), monkeypatch, [])
+    cfg = {
+        "tools": {"bash": "ask"},
+        "approval_overrides": [
+            {
+                "id": "legacy_for",
+                "pattern": "for %f in (*.txt) do type %f",
+                "action": "allow",
+            }
+        ],
+    }
+
+    assert evaluate_tiered_policy(
+        cfg,
+        "bash",
+        {"command": "for %f in (*.txt) do type %f"},
+    )[0] == PermissionLevel.ALLOW
+    assert evaluate_tiered_policy(
+        cfg,
+        "bash",
+        {"command": "for %f in (a.txt) do type %f"},
+    )[0] == PermissionLevel.ASK
+
+
+def test_legacy_multi_word_star_rule_keeps_wildcard_scope(monkeypatch):
+    _config_dir_with_builtin(_tmp_dir("legacy-multi-word-wildcard"), monkeypatch, [])
+    cfg = {
+        "tools": {"bash": "ask"},
+        "rules": [
+            {
+                "id": "allow_git_status",
+                "pattern": "git status *",
+                "action": "allow",
+            }
+        ],
+    }
+
+    assert evaluate_tiered_policy(
+        cfg,
+        "bash",
+        {"command": "git status"},
+    )[0] == PermissionLevel.ALLOW
+    assert evaluate_tiered_policy(
+        cfg,
+        "bash",
+        {"command": "git status --short"},
+    )[0] == PermissionLevel.ALLOW
+    assert evaluate_tiered_policy(
+        cfg,
+        "bash",
+        {"command": "git stash"},
+    )[0] == PermissionLevel.ASK
+
+
+def test_non_shell_permission_message_uses_low_risk():
+    from jiuwenclaw.agentserver.deep_agent.rails.permission_rail import PermissionInterruptRail
+
+    rail = PermissionInterruptRail(config={"tools": {"Write": "ask"}})
+    result = PermissionResult(permission=PermissionLevel.ASK, matched_rule="tools.Write")
+
+    message = rail.build_permission_message(
+        SimpleNamespace(name="Write", arguments={"path": "a.txt", "content": "hello"}),
+        result,
+    )
+
+    assert "🟢 **低风险**" in message
+    assert "不属于命令执行类操作" in message
+
+
+@pytest.mark.parametrize(
+    ("command", "expected_level", "expected_fragment"),
+    [
+        ("del a.txt && type nul > b.txt", "高", "删除文件操作"),
+        ("$(which rm) a.txt", "高", "命令替换作为实际执行命令"),
+        ("%CMD% hello", "中", "环境变量展开作为实际执行命令"),
+        ("cat $(ls /tmp)", "中", "命令替换"),
+    ],
+)
+def test_static_risk_explains_command_risk(command, expected_level, expected_fragment):
+    risk = assess_command_risk_static("bash", {"command": command})
+
+    assert risk["level"] == expected_level
+    assert expected_fragment in risk["explanation"]
+
+
+def test_static_risk_uses_persistence_targets():
+    risk = assess_shell_targets_risk_static(["rm *"])
+
+    assert risk["level"] == "高"
+    assert "删除文件操作" in risk["explanation"]
+
+
+@pytest.mark.parametrize(
+    ("target", "expected_fragment"),
+    [
+        ("node *", "脚本解释器"),
+        ("npm *", "包管理器"),
+    ],
+)
+def test_static_risk_marks_script_and_package_runners_medium(target, expected_fragment):
+    risk = assess_shell_targets_risk_static([target])
+
+    assert risk["level"] == "中"
+    assert expected_fragment in risk["explanation"]
 
 
 def test_acp_permission_context_contains_readable_match_and_persist_targets():

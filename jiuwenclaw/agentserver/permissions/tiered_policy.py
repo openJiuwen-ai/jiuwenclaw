@@ -24,6 +24,11 @@ import yaml
 from jiuwenclaw.agentserver.permissions.models import PermissionLevel
 from jiuwenclaw.agentserver.permissions.patterns import match_wildcard
 from jiuwenclaw.agentserver.permissions.shell_ast import parse_shell_for_permission
+from jiuwenclaw.agentserver.permissions.shell_tools import (
+    SHELL_PERMISSION_TOOLS,
+    extract_shell_command,
+    is_shell_permission_tool,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -33,7 +38,7 @@ _MR = "tiered_policy"
 _APPROVAL_OVERRIDES_PREFIX = f"{_MR}:approval_overrides"
 _SHELL_SUBCOMMANDS_PREFIX = f"{_MR}:shell_subcommands"
 
-_SHELL_TOOLS = frozenset({"bash", "mcp_exec_command", "create_terminal"})
+_SHELL_TOOLS = SHELL_PERMISSION_TOOLS
 
 # Backward-compatible exports for modules that still need path extraction for
 # external_directory. They are no longer used by the tiered policy itself.
@@ -128,17 +133,20 @@ def _parse_level(value: str) -> PermissionLevel:
 
 
 def _is_shell_tool(tool_name: str) -> bool:
-    return tool_name in _SHELL_TOOLS
+    return is_shell_permission_tool(tool_name)
 
 
 def _command_text(tool_args: dict[str, Any]) -> str:
-    return str(tool_args.get("command", "") or tool_args.get("cmd", "") or "").strip()
+    return extract_shell_command(tool_args)
 
 
-def _shell_pattern_matches(pattern: str, command: str) -> bool:
+def _shell_pattern_matches(pattern: str, command: str, scope: str = "") -> bool:
     if not pattern or not command:
         return False
     p = pattern.strip()
+    normalized_scope = str(scope or "").strip().lower()
+    if normalized_scope == "exact":
+        return command == p
     if p.lower().startswith("re:"):
         expr = p[3:].strip()
         flags = re.IGNORECASE if sys.platform == "win32" else 0
@@ -148,7 +156,21 @@ def _shell_pattern_matches(pattern: str, command: str) -> bool:
         except re.error:
             logger.warning("[PermissionEngine] permission.tiered_policy.invalid_shell_regex expr=%r", expr)
             return False
+    if command == p:
+        return True
     return match_wildcard(command, p) if any(ch in p for ch in "*?[") else command == p
+
+
+def _rule_scope(rule: dict[str, Any]) -> str:
+    raw = str(rule.get("scope") or "").strip().lower()
+    if raw in {"exact", "head", "regex", "wildcard"}:
+        return raw
+    pattern = str(rule.get("pattern") or "").strip()
+    if pattern.lower().startswith("re:"):
+        return "regex"
+    if pattern.endswith(" *"):
+        return "wildcard"
+    return "exact"
 
 
 def _command_head(command: str) -> str:
@@ -188,8 +210,13 @@ def _dynamic_command_head(text: str) -> str:
     return ""
 
 
-def _allow_rule_matches_invocation(pattern: str, invocation: str) -> bool:
-    if _shell_pattern_matches(pattern, invocation):
+def _allow_rule_matches_invocation(rule: dict[str, Any], invocation: str) -> bool:
+    pattern = str(rule["pattern"])
+    scope = _rule_scope(rule)
+    if scope == "head":
+        head = _command_head(invocation)
+        return bool(head and pattern.strip() == f"{head} *")
+    if _shell_pattern_matches(pattern, invocation, scope=scope):
         return True
     head = _command_head(invocation)
     return bool(head and pattern.strip() == f"{head} *")
@@ -222,10 +249,10 @@ def _scan_whole_command_deny(
 ) -> tuple[bool, str | None]:
     hits: list[str] = []
     for rule in _iter_shell_rules(builtin_rules, "deny"):
-        if _shell_pattern_matches(str(rule["pattern"]), command):
+        if _shell_pattern_matches(str(rule["pattern"]), command, scope=_rule_scope(rule)):
             hits.append(_rule_label("builtin", rule))
     for rule in _iter_shell_rules(user_rules, "deny"):
-        if _shell_pattern_matches(str(rule["pattern"]), command):
+        if _shell_pattern_matches(str(rule["pattern"]), command, scope=_rule_scope(rule)):
             hits.append(_rule_label("rules", rule))
     if hits:
         return True, f"{_MR}:whole_command_deny:" + "+".join(sorted(set(hits)))
@@ -244,7 +271,7 @@ def _evaluate_subcommand_allow(
         ("builtin", builtin_rules),
     ):
         for rule in _iter_shell_rules(rules, "allow"):
-            if _allow_rule_matches_invocation(str(rule["pattern"]), subcommand_text):
+            if _allow_rule_matches_invocation(rule, subcommand_text):
                 return PermissionLevel.ALLOW, f"{_MR}:{namespace}:{_rule_label(namespace, rule)}"
     return PermissionLevel.ASK, f"{_MR}:fallback(no_allow_match)"
 
