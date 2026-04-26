@@ -3740,7 +3740,7 @@ class JiuWenClawDeepAdapter:
                         if isinstance(chunk.payload, dict)
                         else str(chunk.payload)
                     )
-                    delta_payload: dict[str, Any] = {"event_type": "chat.delta", "content": content}
+                    delta_payload: dict[str, Any] = {"event_type": "chat.reasoning", "content": content}
                     task_id = self._get_task_id()
                     if task_id:
                         delta_payload["task_id"] = task_id
@@ -3756,7 +3756,7 @@ class JiuWenClawDeepAdapter:
                     has_streamed_content = True
                     if accumulated_reasoning:
                         reasoning_payload: dict[str, Any] = {
-                            "event_type": "chat.reasoning",
+                            "event_type": "chat.delta",
                             "content": accumulated_reasoning,
                         }
                         task_id = self._get_task_id()
