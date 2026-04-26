@@ -530,7 +530,7 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
                 return
 
         for env_key, value in env_updates.items():
-            os.environ[env_key] = value
+            os.environ[env_key] = encrypt(env_key, value)
         applied_without_restart = True
 
         if env_updates:
