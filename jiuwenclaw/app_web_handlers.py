@@ -2048,6 +2048,8 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
         channel.register_method(method_name, _handler)
 
     _register_perm("permissions.tools.get", _PermReq.PERMISSIONS_TOOLS_GET)
+    _register_perm("permissions.enabled.get", _PermReq.PERMISSIONS_ENABLED_GET)
+    _register_perm("permissions.enabled.set", _PermReq.PERMISSIONS_ENABLED_SET)
     _register_perm("permissions.tools.set", _PermReq.PERMISSIONS_TOOLS_SET)
     _register_perm("permissions.tools.update", _PermReq.PERMISSIONS_TOOLS_UPDATE)
     _register_perm("permissions.tools.delete", _PermReq.PERMISSIONS_TOOLS_DELETE)

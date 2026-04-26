@@ -82,6 +82,8 @@ class ReqMethod(Enum):
 
     # 安全防护 permissions（与 Web ``register_method`` 同名，经 E2A → AgentServer 处理；owner_scopes 仅走 Web 直连）
     PERMISSIONS_TOOLS_GET = "permissions.tools.get"
+    PERMISSIONS_ENABLED_GET = "permissions.enabled.get"
+    PERMISSIONS_ENABLED_SET = "permissions.enabled.set"
     PERMISSIONS_TOOLS_SET = "permissions.tools.set"
     PERMISSIONS_TOOLS_UPDATE = "permissions.tools.update"
     PERMISSIONS_TOOLS_DELETE = "permissions.tools.delete"
