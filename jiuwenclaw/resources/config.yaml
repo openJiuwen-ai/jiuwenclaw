@@ -296,6 +296,11 @@ react:
     #   trigger_total_tokens: 230000           # 触发总 token；> target_total_tokens
     #   target_total_tokens: 160000            # 压缩后目标总 token
     #   keep_recent_messages: 6                # 末尾保护区
+  # SkillToolkit：search_skill（SkillNet/ClawHub）/ install_skill / uninstall_skill
+  skill_toolkit:
+    # false = 不向 agent 注册 search_skill（install_skill、uninstall_skill 仍注册）
+    search_skill_enabled: false
+
   # Skills 在线自演进配置
   evolution:
     enabled: false             # true = 启用在线 Skills 自演进

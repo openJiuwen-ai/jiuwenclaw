@@ -11,8 +11,27 @@ from typing import Any, Callable
 from openjiuwen.core.foundation.tool import LocalFunction, Tool, ToolCard
 
 from jiuwenclaw.agentserver.skill_manager import SkillManager
+from jiuwenclaw.config import get_config
 
 logger = logging.getLogger(__name__)
+
+
+def _skill_toolkit_search_skill_enabled() -> bool:
+    """react.skill_toolkit.search_skill_enabled in config.yaml; default True."""
+    try:
+        raw = (
+            get_config()
+            .get("react", {})
+            .get("skill_toolkit", {})
+            .get("search_skill_enabled", False)
+        )
+    except Exception:  # noqa: BLE001
+        return True
+    if isinstance(raw, bool):
+        return raw
+    if isinstance(raw, str):
+        return raw.strip().lower() in ("1", "true", "yes", "on")
+    return bool(raw)
 
 _AUTO_SOURCE = "auto"
 _DEFAULT_SOURCE = "skillnet"
@@ -497,36 +516,46 @@ class SkillToolkit:
             )
             return LocalFunction(card=card, func=func)
 
-        return [
-            make_tool(
-                name="search_skill",
-                description=(
-                    "Search installable skills from SkillNet and ClawHub. "
-                    "Use the returned identifier with install_skill."
-                ),
-                input_params={
-                    "type": "object",
-                    "properties": {
-                        "query": {"type": "string", "description": "Search query for the skill."},
-                        "source": {
-                            "type": "string",
-                            "enum": ["auto", "skillnet", "clawhub"],
-                            "description": (
-                                "Skill source to search. Defaults to skillnet. "
-                                "Use auto to search both sources."
-                            ),
-                            "default": "skillnet",
+        tools: list[Tool] = []
+        if _skill_toolkit_search_skill_enabled():
+            tools.append(
+                make_tool(
+                    name="search_skill",
+                    description=(
+                        "Search installable skills from SkillNet and ClawHub. "
+                        "Use the returned identifier with install_skill."
+                    ),
+                    input_params={
+                        "type": "object",
+                        "properties": {
+                            "query": {"type": "string", "description": "Search query for the skill."},
+                            "source": {
+                                "type": "string",
+                                "enum": ["auto", "skillnet", "clawhub"],
+                                "description": (
+                                    "Skill source to search. Defaults to skillnet. "
+                                    "Use auto to search both sources."
+                                ),
+                                "default": "skillnet",
+                            },
+                            "limit": {
+                                "type": "integer",
+                                "description": "Maximum number of skills to return.",
+                                "default": 10,
+                            },
                         },
-                        "limit": {
-                            "type": "integer",
-                            "description": "Maximum number of skills to return.",
-                            "default": 10,
-                        },
+                        "required": ["query"],
                     },
-                    "required": ["query"],
-                },
-                func=self.search_skill,
-            ),
+                    func=self.search_skill,
+                )
+            )
+        else:
+            logger.info(
+                "[SkillToolkit] search_skill not registered (react.skill_toolkit.search_skill_enabled=false)"
+            )
+
+        tools.extend(
+            [
             make_tool(
                 name="install_skill",
                 description=(
@@ -567,4 +596,6 @@ class SkillToolkit:
                 },
                 func=self.uninstall_skill,
             ),
-        ]
+            ]
+        )
+        return tools
