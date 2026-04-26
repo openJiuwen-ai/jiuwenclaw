@@ -318,7 +318,7 @@ class VibeSkillChannel(BaseChannel):
                     if text:
                         external_sid = await self._resolve_external_session_id(session_id, msg.metadata)
                         ctx = self._ensure_message_context(session_id)
-                        part = self._ensure_text_part(session_id, "text")
+                        part, _ = self._ensure_text_part(session_id, "text")
                         part["text"] = str(part.get("text") or "") + text
                         response = {
                             "type": "message.part.delta",
@@ -335,7 +335,7 @@ class VibeSkillChannel(BaseChannel):
                     text = str(msg.payload.get("content") or "")
                     external_sid = await self._resolve_external_session_id(session_id, msg.metadata)
                     ctx = self._ensure_message_context(session_id)
-                    part = self._ensure_text_part(session_id, "text")
+                    part, _ = self._ensure_text_part(session_id, "text")
                     part["text"] = str(part.get("text") or "") + text
                     response = {
                         "type": "message.updated",
@@ -797,7 +797,7 @@ class VibeSkillChannel(BaseChannel):
         if event_type == "chat.final":
             text = str(payload.get("content") or "")
             ctx = self._ensure_message_context(msg.session_id)
-            text_part = self._ensure_text_part(msg.session_id, "text")
+            text_part, _ = self._ensure_text_part(msg.session_id, "text")
             text_part["text"] = str(text_part.get("text") or "") + text
             response = {
                 "type": "message.updated",
