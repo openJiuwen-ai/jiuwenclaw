@@ -69,7 +69,7 @@ class SkillDevTestRunner:
     """
     
     # 配置常量
-    DEFAULT_TIMEOUT_SECONDS = 300
+    DEFAULT_TIMEOUT_SECONDS = 600
     DEFAULT_MAX_RETRIES = 2
 
     def __init__(

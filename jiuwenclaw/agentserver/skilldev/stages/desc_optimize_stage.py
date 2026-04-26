@@ -27,6 +27,8 @@ import random
 import re
 from dataclasses import dataclass
 from pathlib import Path
+from time import perf_counter
+from typing import Any
 
 from jiuwenclaw.agentserver.skilldev.context import SkillDevContext
 from jiuwenclaw.agentserver.skilldev.schema import (
@@ -43,7 +45,7 @@ from jiuwenclaw.agentserver.skilldev.stages.validate_stage import (
 
 logger = logging.getLogger(__name__)
 
-MAX_ITERATIONS = 5
+MAX_ITERATIONS = 3
 HOLDOUT_RATIO = 0.4
 
 # ---------------------------------------------------------------------------
@@ -51,20 +53,20 @@ HOLDOUT_RATIO = 0.4
 # ---------------------------------------------------------------------------
 
 TRIGGER_QUERY_GEN_PROMPT = """\
-你是一个 Skill 触发优化专家。根据以下 Skill 的名称和描述，生成 20 个测试查询。
+你是一个 Skill 触发优化专家。根据以下 Skill 的名称和描述，生成 10 个测试查询。
 
 Skill 名称: {skill_name}
 当前 Description: {description}
 
 ## 要求
 
-### should_trigger=true 的查询（约 10 个）
+### should_trigger=true 的查询（约 5 个）
 - 用户确实需要这个 Skill 时会说的话
 - 不同表达风格（正式/随意/简短/详细）
 - 有些不直接提及 Skill 名称但确实需要其功能
 - 包含具体细节（文件路径、个人背景、数据名称等）
 
-### should_trigger=false 的查询（约 10 个）
+### should_trigger=false 的查询（约 5 个）
 - 关键词相近但实际不需要这个 Skill 的 **近似场景**
 - 相邻领域、歧义措辞、看似相关但应由其他工具处理
 - 不要用明显无关的查询（"写斐波那契函数"对 PDF 技能来说太容易区分了）
@@ -145,6 +147,8 @@ class DescOptimizeStageHandler(StageHandler):
     """DESC_OPTIMIZE 阶段：优化 SKILL.md 的 description 以提高触发准确率."""
 
     async def execute(self, ctx: SkillDevContext) -> StageResult:
+        logger.info("Session_id %s :[DescOptimizeStage] 开始进行描述优化阶段", ctx.state.task_id)
+
         skill_dir = ctx.workspace / "skill"
         skill_md = skill_dir / "SKILL.md"
 
@@ -160,6 +164,8 @@ class DescOptimizeStageHandler(StageHandler):
         await ctx.emit(
             SkillDevEventType.PROGRESS, {"message": "正在生成触发测试查询集..."}
         )
+        logger.info("Session_id %s :[DescOptimizeStage] 生成触发测试查询集", ctx.state.task_id)
+
         queries = await self._generate_trigger_queries(ctx, skill_name, current_desc)
 
         # Step 2: Train/test split
@@ -171,7 +177,7 @@ class DescOptimizeStageHandler(StageHandler):
                 "message": f"开始描述优化循环（train={len(train_set)}, test={len(test_set)}）",
             },
         )
-
+        logger.info("Session_id %s :[DescOptimizeStage] 开始描述优化循环", ctx.state.task_id)
         # Step 3: 优化循环
         loop_input = _OptimizationLoopInput(
             skill_name=skill_name,
@@ -248,7 +254,7 @@ class DescOptimizeStageHandler(StageHandler):
                 len(queries),
             )
             queries = self._default_trigger_queries(skill_name)
-        return queries
+        return queries[:10] if len(queries) > 10 else queries
 
     # ------------------------------------------------------------------
     # Train/test split（内化自官方 run_loop.py 的 split_eval_set）
@@ -299,6 +305,7 @@ class DescOptimizeStageHandler(StageHandler):
                     "message": f"描述优化第 {i}/{MAX_ITERATIONS} 轮...",
                 },
             )
+            logger.info("Session_id %s :[DescOptimizeStage] 第 %d 轮描述优化", ctx.state.task_id, i)
 
             # 评估 train + test
             train_results = await self._eval_description(ctx, current_desc, train_set)
@@ -359,9 +366,22 @@ class DescOptimizeStageHandler(StageHandler):
         """对每个 query，调用模型判断当前 description 是否会触发."""
         if not queries:
             return []
+        eval_agent = self._create_eval_agent(ctx)
+        start_ts = perf_counter()
+        fallback_count = 0
         results: list[dict] = []
         for q in queries:
-            triggered = await self._test_single_trigger(ctx, description, q.query)
+            logger.info("Session_id %s :[DescOptimizeStage] 开始评估单条查询: %s", ctx.state.task_id, q.query)
+            triggered = await self._test_single_trigger(
+                ctx,
+                description,
+                q.query,
+                agent=eval_agent,
+            )
+            logger.info("Session_id %s :[DescOptimizeStage] 评估单条查询完成: %s", ctx.state.task_id, q.query)
+            if triggered is None:
+                fallback_count += 1
+                triggered = False
             passed = triggered == q.should_trigger
             results.append(
                 {
@@ -371,6 +391,13 @@ class DescOptimizeStageHandler(StageHandler):
                     "pass": passed,
                 }
             )
+        elapsed_ms = int((perf_counter() - start_ts) * 1000)
+        logger.info(
+            "[DescOptimize] eval batch done. size=%d elapsed_ms=%d fallback_count=%d",
+            len(queries),
+            elapsed_ms,
+            fallback_count,
+        )
         return results
 
     # ------------------------------------------------------------------
@@ -461,27 +488,26 @@ class DescOptimizeStageHandler(StageHandler):
         ctx: SkillDevContext,
         description: str,
         query: str,
-    ) -> bool:
+        agent: Any | None = None,
+    ) -> bool | None:
         """对单条 query 进行是否触发判定."""
         eval_prompt = TRIGGER_EVAL_PROMPT.format(
             description=description,
             query=query,
         )
-        agent = ctx.create_stage_agent(
-            stage_name="desc_optimize_eval",
-            system_prompt=(
-                "你是 JSON 判定器。只输出 JSON 对象。"
-                '字段: {"triggered": boolean, "reason": string}'
-            ),
-            tools=["file_read"],
-            whitelist_key="desc_optimize",
-            max_iterations=8,
-        )
-        output = await ctx.run_stage_agent_streaming(
-            agent,
-            stage_name="desc_optimize",
-            query=eval_prompt,
-        )
+        eval_agent = agent or self._create_eval_agent(ctx)
+        try:
+            output = await ctx.run_stage_agent_streaming(
+                eval_agent,
+                stage_name="desc_optimize",
+                query=eval_prompt,
+            )
+        except Exception:
+            logger.exception(
+                "[DescOptimize] trigger eval failed, fallback false. query=%s",
+                query[:60],
+            )
+            return None
         parsed = self._parse_json_candidate(output)
         if isinstance(parsed, dict):
             triggered = parsed.get("triggered")
@@ -492,7 +518,21 @@ class DescOptimizeStageHandler(StageHandler):
             query[:60],
             output[:200],
         )
-        return False
+        return None
+
+    @staticmethod
+    def _create_eval_agent(ctx: SkillDevContext):
+        """创建 desc_optimize 阶段的触发判定 agent."""
+        return ctx.create_stage_agent(
+            stage_name="desc_optimize_eval",
+            system_prompt=(
+                "你是 JSON 判定器。只输出 JSON 对象。"
+                '字段: {"triggered": boolean, "reason": string}'
+            ),
+            tools=["file_read"],
+            whitelist_key="desc_optimize",
+            max_iterations=8,
+        )
 
     @staticmethod
     def _parse_json_candidate(text: str):

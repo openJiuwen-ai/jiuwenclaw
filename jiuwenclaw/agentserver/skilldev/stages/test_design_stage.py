@@ -158,7 +158,7 @@ class TestDesignStageHandler(StageHandler):
     # 单次 design 失败后的最大重试次数（不含首次）
     _MAX_DESIGN_RETRIES = 2
     # 单次 design 调用的超时秒数（防止网络挂起导致整个 stage 无限等待）
-    _DESIGN_TIMEOUT_SECONDS = 120
+    _DESIGN_TIMEOUT_SECONDS = 300
 
     async def execute(self, ctx: SkillDevContext) -> StageResult:
         """主流程：设计测试用例并保存 evals.json."""
