@@ -99,11 +99,39 @@ export function normalizeToolCallPayload(payload: UnknownPayload): NormalizedToo
   };
 }
 
+interface DeepResearchAsyncResultBlob {
+  task_id: string;
+  status: string;
+  result?: unknown;
+  query?: string;
+}
+
+function isDeepResearchAsyncResultBlob(value: unknown): value is DeepResearchAsyncResultBlob {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    return false;
+  }
+  const o = value as UnknownPayload;
+  return typeof o.task_id === 'string' && !!o.task_id && typeof o.status === 'string';
+}
+
 export function normalizeToolResultPayload(payload: UnknownPayload): NormalizedToolResult {
   const toolResultPayload = asRecord(payload.tool_result) ?? payload;
+  let rawResultUnknown: unknown = toolResultPayload.result;
+
+  if (isDeepResearchAsyncResultBlob(rawResultUnknown)) {
+    const inner = rawResultUnknown.result;
+    if (typeof inner === 'string' && inner) {
+      rawResultUnknown = inner;
+    } else if (inner != null && typeof inner !== 'string') {
+      rawResultUnknown = JSON.stringify(inner);
+    } else {
+      rawResultUnknown =
+        typeof rawResultUnknown.query === 'string' ? rawResultUnknown.query : '';
+    }
+  }
+
   const result =
-    (typeof toolResultPayload.result === 'string' &&
-      toolResultPayload.result) ||
+    (typeof rawResultUnknown === 'string' && rawResultUnknown) ||
     (toolResultPayload.data != null ? String(toolResultPayload.data) : '') ||
     (typeof toolResultPayload.error === 'string'
       ? toolResultPayload.error
@@ -112,11 +140,13 @@ export function normalizeToolResultPayload(payload: UnknownPayload): NormalizedT
     typeof toolResultPayload.status === 'string'
       ? toolResultPayload.status
       : '';
+  const maybeDrBlob = toolResultPayload.result;
+  const nestedStatus = isDeepResearchAsyncResultBlob(maybeDrBlob) ? maybeDrBlob.status : '';
   const success =
     typeof toolResultPayload.success === 'boolean'
       ? toolResultPayload.success
-      : status
-        ? status !== 'error'
+      : (nestedStatus || status)
+        ? (nestedStatus || status) !== 'error'
         : true;
   const toolName =
     (typeof toolResultPayload.tool_name === 'string' &&
@@ -136,5 +166,43 @@ export function normalizeToolResultPayload(payload: UnknownPayload): NormalizedT
     result,
     success,
     summary,
+  };
+}
+
+/**
+ * DeepResearch 网关异步推送（tool_name=deepresearch + result 为 task 对象）：作为独立气泡展示，不走工具结果合并。
+ */
+export function tryDeepResearchStandaloneAssistantTurn(
+  payload: UnknownPayload,
+): { messageId: string; content: string } | null {
+  const toolResultPayload = asRecord(payload.tool_result) ?? payload;
+  if (
+    typeof toolResultPayload.tool_name !== 'string' ||
+    toolResultPayload.tool_name !== 'deepresearch'
+  ) {
+    return null;
+  }
+  const raw = toolResultPayload.result;
+  if (!isDeepResearchAsyncResultBlob(raw)) {
+    return null;
+  }
+  const n = normalizeToolResultPayload(payload);
+  const title =
+    raw.status === 'completed'
+      ? '深度研究已完成'
+      : raw.status === 'cancelled'
+        ? '深度研究已取消'
+        : raw.status === 'error'
+          ? '深度研究失败'
+          : `深度研究（${raw.status}）`;
+  const parts: string[] = [`### ${title}`, '', `**任务 ID：** \`${raw.task_id}\``];
+  if (typeof raw.query === 'string' && raw.query.trim()) {
+    parts.push(`**主题：** ${raw.query.trim()}`);
+  }
+  const body = (n.result || '').trim() || (n.success ? '' : '无输出');
+  parts.push('', body);
+  return {
+    messageId: `assistant-deepresearch-${raw.task_id}`,
+    content: parts.join('\n'),
   };
 }
