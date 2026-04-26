@@ -349,6 +349,11 @@ class VibeSkillChannel(BaseChannel):
                         },
                     }
                     await self._send_ws_json(ws, response, source="fallback.chat.final")
+                    await self._send_ws_json(
+                        ws,
+                        {"type": "task.completed", "properties": {}},
+                        source="fallback.chat.final.completed",
+                    )
 
     async def inbound_intercept(self, ws: Any, data: dict[str, Any]) -> bool:
         """拦截 VibeSkill WebSocket 消息。
@@ -714,7 +719,7 @@ class VibeSkillChannel(BaseChannel):
             or internal_id
         )
         accept = bool(properties.get("accept", False))
-        action = "optimize" if accept else "skip"
+        action = "skip" if accept else "optimize"
         self._pending_confirms.pop(request_id, None)
         return self._dispatch_skilldev_respond(
             internal_id=internal_id,
@@ -811,6 +816,11 @@ class VibeSkillChannel(BaseChannel):
                 },
             }
             await self._send_ws_json(ws, response, source="chat.final")
+            await self._send_ws_json(
+                ws,
+                {"type": "task.completed", "properties": {}},
+                source="chat.final.completed",
+            )
             return True
 
         return False
@@ -944,7 +954,7 @@ class VibeSkillChannel(BaseChannel):
             external_sid=external_sid,
             payload=payload,
             part_type="reasoning",
-            text_field="thinking",
+            text_field="delta",
         )
 
     async def _handle_skilldev_agent_output(
@@ -959,7 +969,7 @@ class VibeSkillChannel(BaseChannel):
             external_sid=external_sid,
             payload=payload,
             part_type="text",
-            text_field="output",
+            text_field="delta",
         )
 
     async def _handle_skilldev_tool_call(
