@@ -37,6 +37,21 @@ def get_permissions_config_req_methods() -> frozenset[ReqMethod]:
     return _PERMISSIONS_CFG_METHODS
 
 
+def _normalize_permissions_config_params(params: dict[str, Any]) -> dict[str, Any]:
+    """Accept nested relay-claw style payloads and map them to permissions RPC params."""
+    normalized = dict(params)
+    permissions = params.get("permissions")
+    if not isinstance(permissions, dict):
+        return normalized
+
+    if "enabled" not in normalized and "enabled" in permissions:
+        normalized["enabled"] = permissions.get("enabled")
+    if "tools" not in normalized and "tools" in permissions:
+        normalized["tools"] = permissions.get("tools")
+
+    return normalized
+
+
 def _hot_reload_permission_engine_from_config() -> None:
     from jiuwenclaw.config import get_config
     from jiuwenclaw.agentserver.permissions.core import get_permission_engine
@@ -84,6 +99,7 @@ def dispatch_permissions_config_request(request: AgentRequest) -> AgentResponse:
 
     m = request.req_method
     params = request.params if isinstance(request.params, dict) else {}
+    params = _normalize_permissions_config_params(params)
     tag = m.value if m is not None else ""
 
     try:
