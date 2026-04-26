@@ -56,7 +56,9 @@ class AgentManager:
             service_id: 服务ID（chat_id + bot_app_id 组合）
             user_workspace_dir: 用户工作目录路径
         """
-        self.agents: dict[str, dict[str, "JiuWenClaw"]] = {}
+        # 结构: dict[channel_id][mode][session_id] -> JiuWenClaw
+        # 每个 session_id 对应独立的 Agent 实例，支持多 session 并发执行
+        self.agents: dict[str, dict[str, dict[str, "JiuWenClaw"]]] = {}
         self._client_capabilities_by_channel: dict[str, dict[str, Any]] = {}
         self._latest_env_overrides: dict[str, Any] = {}
         self.agent_id = agent_id
@@ -71,12 +73,18 @@ class AgentManager:
 
     # pylint: disable=protected-access
     async def _create_agent(
-        self, agent_key: str, mode: str = "agent", config: dict[str, Any] | None = None
+        self,
+        agent_key: str,
+        mode: str = "agent",
+        session_id: str = "default",
+        config: dict[str, Any] | None = None
     ) -> "JiuWenClaw":
         """创建 Agent 实例.
 
         Args:
             agent_key: Agent 键（如 "acp" 或 "default"）
+            mode: 工作模式
+            session_id: 会话 ID，用于实例命名和存储
             config: 可选配置
 
         Returns:
@@ -90,17 +98,17 @@ class AgentManager:
                 os.environ.pop(key, None)
             else:
                 os.environ[key] = str(env_value)
-        logger.info("[AgentManager] Creating %s agent (mode=%s)", agent_key, mode)
+        logger.info("[AgentManager] Creating %s agent (mode=%s, session=%s)", agent_key, mode, session_id)
 
         agent = JiuWenClaw(
             user_workspace_dir=str(self.user_workspace_dir) if self.user_workspace_dir else None,
             agent_id=self.agent_id,
             service_id=self.service_id,
         )
-        agent._agent_name = f"agent_{self.agent_id}_{self.service_id}_{agent_key}"
+        agent._agent_name = f"agent_{self.agent_id}_{self.service_id}_{agent_key}_{session_id}"
         await agent.create_instance(config, mode=mode)
-        self.agents.setdefault(agent_key, {})[mode] = agent
-        logger.info("[AgentManager] %s agent created for tenant %s", agent_key, self.agent_id)
+        self.agents.setdefault(agent_key, {}).setdefault(mode, {})[session_id] = agent
+        logger.info("[AgentManager] %s agent created for tenant %s (session=%s)", agent_key, self.agent_id, session_id)
         return agent
 
     async def initialize(
@@ -126,28 +134,30 @@ class AgentManager:
 
             if "acp" in self.agents:
                 logger.info("[AgentManager] Resetting ACP agent for tenant %s", self.agent_id)
-                for agent in self.agents.get("acp", {}).values():
-                    if hasattr(agent, "cleanup"):
-                        try:
-                            await agent.cleanup()
-                        except Exception as e:
-                            logger.warning("[AgentManager] ACP agent cleanup failed: %s", e)
+                for mode_agents in self.agents.get("acp", {}).values():
+                    for agent in mode_agents.values():
+                        if hasattr(agent, "cleanup"):
+                            try:
+                                await agent.cleanup()
+                            except Exception as e:
+                                logger.warning("[AgentManager] ACP agent cleanup failed: %s", e)
                 del self.agents["acp"]
 
             config = _build_acp_agent_config(extra_config)
-            await self._create_agent("acp", "code", config)
+            await self._create_agent("acp", "code", "default", config)
 
             return ACP_DEFAULT_CAPABILITIES.copy()
         return None
 
     async def cancel_all_inflight_work(self, reason: str = "[gateway ws disconnect] ") -> None:
         """Gateway 与 AgentServer 的 WebSocket 断开时：取消所有已创建 Agent 实例上的在途任务。"""
-        for modes in list(self.agents.values()):
-            for agent in list(modes.values()):
-                try:
-                    await agent.cancel_inflight_work(reason)
-                except Exception:
-                    logger.exception("[AgentManager] cancel_inflight_work failed")
+        for channel_agents in list(self.agents.values()):
+            for mode_agents in list(channel_agents.values()):
+                for agent in list(mode_agents.values()):
+                    try:
+                        await agent.cancel_inflight_work(reason)
+                    except Exception:
+                        logger.exception("[AgentManager] cancel_inflight_work failed")
 
     def get_client_capabilities(self, channel_id: str = "") -> dict[str, Any]:
         """获取指定通道的客户端能力.
@@ -190,45 +200,60 @@ class AgentManager:
             self,
             channel_id: str = "",
             mode: str = "agent",
-            workspace_dir: str = None
+            workspace_dir: str = None,
+            session_id: str | None = None,
     ) -> "JiuWenClaw | None":
         """获取 Agent 实例（自动创建）.
 
-        如果 agent 不存在，会自动创建。
+        每个 session_id 对应独立的 Agent 实例，支持多 session 并发执行。
 
         Args:
             channel_id: 通道 ID
             mode: 每个模式对应的实例
             workspace_dir: project dir
+            session_id: 会话 ID，用于实例隔离
 
         Returns:
             JiuWenClaw | None: Agent 实例
         """
-        if channel_id in self.agents and mode in self.agents[channel_id]:
-            return self.agents[channel_id][mode]
-        else:
-            config = {"workspace_dir": workspace_dir} if workspace_dir else {}
-            if channel_id == "acp":
-                config = {
-                    **config,
-                    **_build_acp_agent_config()
-                }
-            await self._create_agent(channel_id, mode, config)
-        return self.agents.get(channel_id, {}).get(mode)
+        effective_session_id = session_id or "default"
 
-    def get_agent_nowait(self, channel_id: str = "") -> "JiuWenClaw | None":
+        if channel_id in self.agents and mode in self.agents[channel_id]:
+            if effective_session_id in self.agents[channel_id][mode]:
+                return self.agents[channel_id][mode][effective_session_id]
+
+        config = {"workspace_dir": workspace_dir} if workspace_dir else {}
+        if channel_id == "acp":
+            config = {
+                **config,
+                **_build_acp_agent_config()
+            }
+        await self._create_agent(channel_id, mode, effective_session_id, config)
+        return self.agents.get(channel_id, {}).get(mode, {}).get(effective_session_id)
+
+    def get_agent_nowait(
+            self,
+            channel_id: str = "",
+            mode: str = "agent",
+            session_id: str | None = None,
+    ) -> "JiuWenClaw | None":
         """获取 Agent 实例（同步，不自动创建）.
 
         Args:
             channel_id: 通道 ID
+            mode: 工作模式
+            session_id: 会话 ID
 
         Returns:
             JiuWenClaw | None: Agent 实例，如果不存在则返回 None
         """
         channel_key = channel_id or "default"
+        effective_session_id = session_id or "default"
         channel_agents = self.agents.get(channel_key, {})
         if isinstance(channel_agents, dict):
-            return channel_agents.get("agent") or next(iter(channel_agents.values()), None)
+            mode_agents = channel_agents.get(mode, {})
+            if effective_session_id in mode_agents:
+                return mode_agents[effective_session_id]
         return None
 
     async def reload_agents_config(self, config, env) -> None:
@@ -241,19 +266,20 @@ class AgentManager:
             else:
                 os.environ[key] = str(env_value)
 
-        for channel_id, agents in self.agents.items():
-            if not isinstance(agents, dict):
+        for channel_id, channel_agents in self.agents.items():
+            if not isinstance(channel_agents, dict):
                 logger.warning(
                     "[AgentManager] unexpected agents entry for channel %s: %r",
                     channel_id,
-                    type(agents),
+                    type(channel_agents),
                 )
                 continue
-            for _, agent in agents.items():
-                await agent.reload_agent_config(
-                    config_base=config,
-                    env_overrides=env,
-                )
+            for mode_agents in channel_agents.values():
+                for agent in mode_agents.values():
+                    await agent.reload_agent_config(
+                        config_base=config,
+                        env_overrides=env,
+                    )
             logger.info(f"channel {channel_id} reload agent config success.")
 
     async def process_message(self, request: Any) -> Any:
@@ -266,6 +292,7 @@ class AgentManager:
             AgentResponse 对象
         """
         channel_id = getattr(request, "channel_id", "")
+        session_id = getattr(request, "session_id", None)
         params = getattr(request, "params", {}) if isinstance(getattr(request, "params", {}), dict) else {}
         mode_full = params.get("mode", "agent.plan")
         mode = str(mode_full).split(".")[0] if mode_full else "agent"
@@ -275,6 +302,7 @@ class AgentManager:
             channel_id=channel_id,
             mode=mode,
             workspace_dir=workspace_dir,
+            session_id=session_id,
         )
         if agent is None:
             raise RuntimeError(f"[AgentManager] No agent available for channel {channel_id}")
@@ -307,6 +335,7 @@ class AgentManager:
             AgentResponseChunk 对象
         """
         channel_id = getattr(request, "channel_id", "")
+        session_id = getattr(request, "session_id", None)
         params = getattr(request, "params", {}) if isinstance(getattr(request, "params", {}), dict) else {}
         mode_full = params.get("mode", "agent.plan")
         mode = str(mode_full).split(".")[0] if mode_full else "agent"
@@ -316,6 +345,7 @@ class AgentManager:
             channel_id=channel_id,
             mode=mode,
             workspace_dir=workspace_dir,
+            session_id=session_id,
         )
         if agent is None:
             raise RuntimeError(f"[AgentManager] No agent available for channel {channel_id}")
@@ -360,15 +390,43 @@ class AgentManager:
             env_overrides=env_overrides
         )
 
+    async def cleanup_session(
+        self,
+        channel_id: str,
+        mode: str,
+        session_id: str
+    ) -> None:
+        """清理指定 session 的 Agent 实例.
+
+        Args:
+            channel_id: 通道 ID
+            mode: 工作模式
+            session_id: 会话 ID
+        """
+        try:
+            session_agents = self.agents.get(channel_id, {}).get(mode, {})
+            agent = session_agents.pop(session_id, None)
+
+            if agent:
+                if hasattr(agent, "cleanup"):
+                    await agent.cleanup()
+                logger.info(
+                    "[AgentManager] Session cleaned up: channel=%s mode=%s session=%s",
+                    channel_id, mode, session_id
+                )
+        except Exception as e:
+            logger.warning("[AgentManager] Session cleanup failed: %s", e)
+
     async def cleanup(self) -> None:
         """清理所有 agent 实例."""
-        for key, agents in list(self.agents.items()):
-            for agent in agents.values():
-                if hasattr(agent, "cleanup"):
-                    try:
-                        await agent.cleanup()
-                    except Exception as e:
-                        logger.warning("[AgentManager] Agent cleanup failed: %s", e)
+        for key, channel_agents in list(self.agents.items()):
+            for mode_agents in channel_agents.values():
+                for agent in mode_agents.values():
+                    if hasattr(agent, "cleanup"):
+                        try:
+                            await agent.cleanup()
+                        except Exception as e:
+                            logger.warning("[AgentManager] Agent cleanup failed: %s", e)
             del self.agents[key]
         self._client_capabilities_by_channel.clear()
         logger.info("[AgentManager] All agents cleaned up for tenant %s", self.agent_id)
@@ -384,12 +442,13 @@ class AgentManager:
         for channel_agents in self.agents.values():
             if not isinstance(channel_agents, dict):
                 continue
-            for agent in channel_agents.values():
-                if hasattr(agent, "is_working"):
-                    try:
-                        if agent.is_working():
-                            return True
-                    except Exception as e:
-                        logger.warning("Get working status failed, %s", e)
-                        continue
+            for mode_agents in channel_agents.values():
+                for agent in mode_agents.values():
+                    if hasattr(agent, "is_working"):
+                        try:
+                            if agent.is_working():
+                                return True
+                        except Exception as e:
+                            logger.warning("Get working status failed, %s", e)
+                            continue
         return False
