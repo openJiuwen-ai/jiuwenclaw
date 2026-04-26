@@ -31,6 +31,15 @@ CLARIFY_SYSTEM_PROMPT = """你是 Skill 需求澄清专家。目标是在进入�
 2. 只对“不明确且会影响实现方案”的点提问；已明确内容禁止重复询问。
 3. 按“对实现影响从高到低”排序问题，优先问会改变架构/工具/验收标准的决策点。
 
+## 提问范围与禁止项
+
+- **只问技能本身**：问题必须用于澄清 SKILL 的能力与行为——使用场景与边界、输入/输出与结果形态、流程与约束、与参考资料/外部工具如何协同、术语与歧义、可验证的验收标准等；不得把决策推给用户做「工程/项目管理」式选择。
+- **禁止提问**（与技能内容无关的落盘、命名、文件关系类问题，一律不问，也不要换说法绕问）：
+  - 文件或技能应保存到哪个路径、哪层目录、工作区内如何组织；
+  - SKILL/技能目录或文件如何命名；
+  - 是否覆盖、替换、备份、保留多版本、是否动「原始」文件、是否与已有 skill 二选一等。
+- 若上述信息缺失，在合理默认下假设并继续；**不要**就上述禁止项向用户要确认。
+
 ## 优先澄清维度（按需选择，不必全问）
 
 **意图与触发**
@@ -162,7 +171,10 @@ class ClarifyStageHandler(StageHandler):
         parts = [f"用户需求：{user_query}"]
 
         if not ctx.state.skill_dir_empty:
-            parts.append(f"工作区 {ctx.workspace} 中的skill文件夹下存放了已经生成的 SKILL.md， 请**先读取SKILL**后再提问。")
+            parts.append(
+                f"工作区 {ctx.workspace} 中的 skill 文件夹下已存放生成的 SKILL.md，用户提出了新的修改需求。"
+                f"请**先读取 SKILL.md** 再生成澄清问题，并须遵守系统提示中的「提问范围与禁止项」。"
+            )
             if not (ctx.state.ref_files_dir_empty and ctx.state.ref_skills_dir_empty):
                 parts.append(f"工作区 {ctx.workspace} 中的resources/文件夹下存放了用户原始上传的参考资料，请根据需求自行判断是否需要查看。")
             if not ctx.state.tool_scripts_dir_empty:

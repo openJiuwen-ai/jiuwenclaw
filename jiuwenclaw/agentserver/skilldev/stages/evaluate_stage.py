@@ -27,6 +27,7 @@ import re
 from pathlib import Path
 from typing import Any, Dict
 
+from jiuwenclaw.agentserver.skilldev.common_utils import strip_agent_output_noise
 from jiuwenclaw.agentserver.skilldev.context import SkillDevContext
 from jiuwenclaw.agentserver.skilldev.schema import (
     Benchmark,
@@ -307,7 +308,7 @@ class EvaluateStageHandler(StageHandler):
         input_files = case.get("files", [])
 
         # 清洗输出：去除泄漏的 <think> 推理块和未执行的 <tool_call> 文本标签
-        output = _clean_agent_output(output)
+        output = strip_agent_output_noise(output)
 
         # 带重试的 grading：每次重试创建新 agent（新 stage_name → 新 conversation_id）
         # 避免复用失败会话导致模型沿着错误路径继续
@@ -951,25 +952,3 @@ def _calc_stats(values: list[float]) -> MetricStats:
         max=round(max(values), 4),
     )
 
-
-def _clean_agent_output(text: str) -> str:
-    """清洗 agent 输出，去除泄漏的推理块和未执行的文本格式工具调用.
-
-    处理三类噪音：
-    1. 完整的 <think>…</think> 块 — reasoning 内容意外流入 llm_output 事件
-    2. 孤立的 </think> — opening tag 在捕获窗口之前，closing tag 漏入
-    3. <tool_call>…</tool_call> 或未闭合的 <tool_call>… — 模型以文本格式
-       输出工具调用但框架未执行，保留这些内容会误导 grader
-
-    Returns:
-        清洗后的文本（strip 前后空白）；若清洗结果为空则返回空字符串
-    """
-    # 去除完整 <think>…</think> 块（含跨行内容）
-    text = re.sub(r"<think>[\s\S]*?</think>", "", text)
-    # 去除孤立的 </think>
-    text = re.sub(r"</think>", "", text)
-    # 去除完整 <tool_call>…</tool_call> 块
-    text = re.sub(r"<tool_call>[\s\S]*?</tool_call>", "", text)
-    # 去除未闭合的 <tool_call>…（直到字符串末尾）
-    text = re.sub(r"<tool_call>[\s\S]*$", "", text)
-    return text.strip()

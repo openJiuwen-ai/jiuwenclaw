@@ -16,6 +16,7 @@ from pathlib import Path
 from jiuwenclaw.agentserver.skilldev.context import SkillDevContext
 from jiuwenclaw.agentserver.skilldev.schema import SkillDevEventType, SkillDevStage
 from jiuwenclaw.agentserver.skilldev.stages.base import StageHandler, StageResult
+from jiuwenclaw.agentserver.skilldev.stages.validate_stage import parse_skill_frontmatter
 
 logger = logging.getLogger(__name__)
 
@@ -34,7 +35,11 @@ class PackageStageHandler(StageHandler):
         output_dir = ctx.workspace / "output"
         output_dir.mkdir(exist_ok=True)
 
-        skill_name = (ctx.state.plan or {}).get("skill_name", "skill")
+        # skill_name = (ctx.state.plan or {}).get("skill_name", "skill")
+
+        skill_md_path = skill_dir / "SKILL.md"
+        skill_name, _, _ = parse_skill_frontmatter(skill_md_path)
+
         # 官方格式为 .skill（本质是 zip）
         skill_filename = f"{skill_name}.zip"
         skill_path = output_dir / skill_filename

@@ -24,20 +24,26 @@ from jiuwenclaw.agentserver.skilldev.schema import (
     # determine_task_mode,
 )
 from jiuwenclaw.agentserver.skilldev.stages.base import StageHandler, StageResult
-from jiuwenclaw.agentserver.skilldev.common_utils import safe_extract_zip
+from jiuwenclaw.agentserver.skilldev.common_utils import safe_extract_zip, strip_agent_output_noise
 from jiuwenclaw.agentserver.skilldev.stages.validate_stage import parse_skill_frontmatter
 from jiuwenclaw.agentserver.skilldev.tool_utils import generate_tool_scripts_and_usage
 from jiuwenclaw.agentserver.skilldev.utils.download_file_from_url import download_file
 
 logger = logging.getLogger(__name__)
 
+_MAX_SKILL_NAME_ATTEMPTS = 2
+_SKILL_NAME_MAX_PLAUSIBLE_LEN = 48
+_SKILL_NAME_MAX_SEGMENTS = 8
+_SKILL_NAME_MAX_RAW_LEN = 200
+_SKILL_NAME_KEBAB_RE = re.compile(r"^(?:[a-z0-9]+(?:-[a-z0-9]+)*)$")
+
 _SKILL_NAME_SYSTEM_PROMPT = """你是命名助手。请基于用户需求与已上传资料生成一个简短的 skill 标识名。
 
 要求：
-1) 只输出 skill 名称本身，不要解释。
+1) 只输出 skill 名称本身，不要思考，不要解释。
 2) 使用 kebab-case，仅允许小写字母、数字、短横线。
-3) 语义清晰，长度建议 2-6 个词。
-4) 当用户指令信息不足时，必须优先查看上传资料的文件名与关键内容后再命名。
+3) 语义清晰，长度建议 2-4 个词。
+4) skill 名称中不要出现`skill`字样，只输出技能名称本身。
 """
 
 
@@ -149,7 +155,7 @@ class InitStageHandler(StageHandler):
         return StageResult(next_stage=SkillDevStage.CLARIFY)
 
     async def _generate_skill_name(self, ctx: SkillDevContext) -> str:
-        """根据用户输入生成规范化的 skill_name（kebab-case）."""
+        """根据用户输入生成规范化的 skill_name（kebab-case，ASCII）."""
         user_query = str(ctx.state.input.get("query", "")).strip()
         agent = ctx.create_stage_agent(
             stage_name="init",
@@ -157,15 +163,46 @@ class InitStageHandler(StageHandler):
             tools=["file_read", "file_glob", "file_listdir"],
             max_iterations=8,
         )
-        query = self._build_skill_name_query(ctx, user_query=user_query)
-        try:
-            raw_name = await ctx.run_stage_agent_streaming(agent, stage_name="init", query=query)
-        except Exception as exc:
-            logger.warning("[InitStage] 生成 skill_name 失败，使用兜底规则: %s", exc)
-            raw_name = user_query
-        return self._normalize_skill_name(raw_name, fallback_text=user_query)
+        for attempt in range(1, _MAX_SKILL_NAME_ATTEMPTS + 1):
 
-    def _build_skill_name_query(self, ctx: SkillDevContext, *, user_query: str) -> str:
+            query = self._build_skill_name_query(ctx, user_query=user_query, attempt=attempt)
+            try:
+                raw_name = await ctx.run_stage_agent_streaming(
+                    agent,
+                    stage_name="init",
+                    query=query,
+                    emit_thinking=False,
+                )
+                logger.info(
+                    "[InitStage] 生成 skill_name (尝试 %d/%d): %s",
+                    attempt,
+                    _MAX_SKILL_NAME_ATTEMPTS,
+                    raw_name,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "[InitStage] 生成 skill_name 失败 (尝试 %d/%d)，%s: %s",
+                    attempt,
+                    _MAX_SKILL_NAME_ATTEMPTS,
+                    "将重试" if attempt < _MAX_SKILL_NAME_ATTEMPTS else "使用兜底",
+                    exc,
+                )
+                if attempt < _MAX_SKILL_NAME_ATTEMPTS:
+                    continue
+                name, _ = self._normalize_skill_name(user_query, fallback_text=user_query)
+                return name
+
+            name, need_retry = self._normalize_skill_name(raw_name, fallback_text="")
+            if not need_retry and name:
+                return name
+            if attempt < _MAX_SKILL_NAME_ATTEMPTS:
+                continue
+            return "generated-skill"
+        return "generated-skill"
+
+    def _build_skill_name_query(
+        self, ctx: SkillDevContext, *, user_query: str, attempt: int = 1
+    ) -> str:
         """构造命名 query，要求 Agent 结合用户指令与上传内容."""
         parts = [
             "请生成一个准确的 skill_name。",
@@ -182,27 +219,59 @@ class InitStageHandler(StageHandler):
             parts.append(
                 f"命名前请优先检查工作区{ctx.workspace}/resources/目录下的上传内容（至少查看目录与关键文件名，必要时读取文件内容）",
             )
-        parts.append("只输出最终 skill_name，不要解释。")
+        if attempt > 1:
+            parts.append(
+                "本次只输出单独一行 kebab-case 标识，不要前缀、不要解释、不要换行列举多个方案。",
+            )
+        parts.append("只输出最终 skill_name，不要思考，不要解释，不要输出任何其他内容。")
         return "\n".join(parts)
 
-    def _normalize_skill_name(self, candidate: str, *, fallback_text: str = "") -> str:
-        """清洗任意文本为 kebab-case skill 名称."""
-        text = (candidate or "").strip().lower()
-        text = re.sub(r"^```[a-z]*\s*", "", text)
-        text = re.sub(r"```$", "", text).strip()
-        text = re.sub(r"[^\w\s-]", " ", text, flags=re.UNICODE)
-        text = re.sub(r"[_\s]+", "-", text)
-        text = re.sub(r"-{2,}", "-", text).strip("-")
+    @staticmethod
+    def _to_ascii_skill_kebab(s: str) -> str:
+        """将文本转为小写 ASCII kebab（优先取末行中合法的 skill 行）."""
+        t = (s or "").strip().lower()
+        t = re.sub(r"^```[a-z]*\s*", "", t)
+        t = re.sub(r"```\s*$", "", t).strip()
+        lines = [ln.strip() for ln in t.splitlines() if ln.strip()]
+        for ln in reversed(lines):
+            if _SKILL_NAME_KEBAB_RE.match(ln) and len(ln) <= 64:
+                return ln
+        t = re.sub(r"[^a-z0-9]+", "-", t)
+        t = re.sub(r"-{2,}", "-", t).strip("-")
+        return t[:64].strip("-")
 
-        if not text:
-            fallback = (fallback_text or "generated skill").lower()
-            fallback = re.sub(r"[^\w\s-]", " ", fallback, flags=re.UNICODE)
-            fallback = re.sub(r"[_\s]+", "-", fallback)
-            text = re.sub(r"-{2,}", "-", fallback).strip("-")
+    def _normalize_skill_name(self, candidate: str, *, fallback_text: str = "") -> tuple[str, bool]:
+        """清洗为 kebab-case；返回 (名称, 是否需要重试/不可靠).
 
-        if not text:
+        当 fallback_text 非空时，若主文本无法得到有效名，会依次尝试从 fallback 派生、最后为 generated-skill
+        （用于 Agent 连续失败后的路径）。
+        """
+        cleaned = strip_agent_output_noise(candidate or "")
+        needs_retry = False
+        if len(cleaned) > _SKILL_NAME_MAX_RAW_LEN:
+            needs_retry = True
+        if re.search(
+            r"<redacted_thinking|</?redacted_thinking>|<tool_call|</tool_call>",
+            cleaned,
+            re.I,
+        ):
+            needs_retry = True
+
+        text = self._to_ascii_skill_kebab(cleaned)
+        if not text and fallback_text:
+            text = self._to_ascii_skill_kebab(fallback_text)
+        if not text and fallback_text:
             text = "generated-skill"
-        return text[:64].strip("-") or "generated-skill"
+        if not text:
+            return ("", True)
+
+        if len(text) > _SKILL_NAME_MAX_PLAUSIBLE_LEN:
+            needs_retry = True
+        if len(text.split("-")) > _SKILL_NAME_MAX_SEGMENTS:
+            needs_retry = True
+        if not _SKILL_NAME_KEBAB_RE.match(text):
+            needs_retry = True
+        return (text, needs_retry)
 
     async def _write_resources(
         self,

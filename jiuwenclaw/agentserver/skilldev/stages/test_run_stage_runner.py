@@ -17,6 +17,7 @@ from typing import Dict, Any, Optional
 from dataclasses import dataclass, asdict
 from datetime import datetime, timezone
 from enum import Enum
+from jiuwenclaw.agentserver.skilldev.common_utils import strip_agent_output_noise
 from jiuwenclaw.agentserver.skilldev.context import SkillDevContext
 
 logger = logging.getLogger(__name__)
@@ -267,8 +268,8 @@ class SkillDevTestRunner:
             duration = (datetime.now(timezone.utc) - start_time).total_seconds()
 
             # 清洗噪音（泄漏的推理块 / 未执行的文本格式工具调用）
-            output = self._clean_agent_output(output)
-            trace = self._clean_agent_output(trace)
+            output = strip_agent_output_noise(output)
+            trace = strip_agent_output_noise(trace)
 
             # 将 trace 写入 trace.txt，供 grader 评分时参考
             if trace:
@@ -418,11 +419,10 @@ class SkillDevTestRunner:
         取版本号最小的目录作为 baseline（即本次改动前的原始版本）。
         未找到则返回 None，调用方降级为无 skill 的 baseline。
         """
-        import re as _re
         workspace = self.ctx.workspace
         versioned = [
             d for d in workspace.iterdir()
-            if d.is_dir() and _re.match(r"^skill-v\d+$", d.name)
+            if d.is_dir() and re.match(r"^skill-v\d+$", d.name)
         ]
         if not versioned:
             logger.warning(
@@ -550,24 +550,6 @@ class SkillDevTestRunner:
         except Exception as e:
             logger.error(f"[SkillDevTestRunner] 保存结果失败: {e}")
     
-    @staticmethod
-    def _clean_agent_output(text: str) -> str:
-        """清洗 agent 输出，去除泄漏的推理块和未执行的文本格式工具调用.
-
-        处理三类噪音：
-        1. 完整的 <think>…</think> 块 — reasoning 内容意外流入 llm_output 事件
-        2. 孤立的 </think> — opening tag 在捕获窗口之前，closing tag 漏入
-        3. <tool_call>…</tool_call> 或未闭合的 <tool_call>… — 模型以文本格式
-           输出工具调用但框架未执行，保留这些内容会误导 grader
-        """
-        text = re.sub(r"<think>[\s\S]*?</think>", "", text)
-        text = re.sub(r"</think>", "", text)
-        text = re.sub(r"<think>", "", text)
-        text = re.sub(r"<tool_call>[\s\S]*?</tool_call>", "", text)
-        text = re.sub(r"<tool_call>[\s\S]*$", "", text)
-        text = re.sub(r"</tool_call>[\s\S]*$", "", text)
-        return text.strip()
-
     def _create_error_result(
         self,
         eval_id: int,

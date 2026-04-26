@@ -21,6 +21,13 @@ from jiuwenclaw.agentserver.skilldev.stages.base import StageHandler, StageResul
 
 logger = logging.getLogger(__name__)
 
+# 注入 user query 时：强调澄清问答对生成结果具有约束力，避免模型忽略或与补充信息矛盾。
+GENERATE_USER_CLARIFICATION_BINDING = """【必须遵守·用户补充信息】以下澄清内容与「用户需求」具有同等效力；其中已明确约定的点，对本次生成具有约束力，优于常识默认或笼统计划表述。
+
+- 须在 SKILL.md（及 scripts/、references/ 等配套文件）中逐项落实：能力范围、触发与流程、输入输出形态、工具/数据依赖、禁止项、术语、验收标准等——凡用户在补充信息中已选定、确认或声明的内容，必须在正文、步骤、检查清单或可执行约定中显式体现，不得忽略、省略、弱化或仅一笔带过。
+- 禁止编写与补充信息相矛盾的能力描述、工作流步骤、示例或隐含默认行为；禁止用「通用做法」或自行推测的默认方案覆盖用户已在补充信息中给出的明确选择。
+- 若下文中「skill 开发计划」或既有草稿与补充信息冲突，以补充信息为准，并相应修正实现与表述，不得保留冲突内容。"""
+
 GENERATE_SYSTEM_PROMPT_TEMPLATE = """你是一个 Skill 开发专家。根据已确认的开发计划，生成完整的 Skill 文件集。
 
 ## SKILL.md 格式要求（必须严格遵守）
@@ -340,12 +347,14 @@ class GenerateStageHandler(StageHandler):
                 for a in ctx.state.clarification_answers
             ]
             parts.append("用户补充信息（澄清问答）：\n" + "\n".join(qa_lines))
+            parts.append(GENERATE_USER_CLARIFICATION_BINDING)
         elif ctx.state.clarification_answers:
             qa_lines = [
                 f"- {a['question_id']}: {a['answer']}"
                 for a in ctx.state.clarification_answers
             ]
             parts.append("用户补充信息：\n" + "\n".join(qa_lines))
+            parts.append(GENERATE_USER_CLARIFICATION_BINDING)
 
         if not ctx.state.skill_dir_empty:
             if ctx.state.generate_retries == 0:
