@@ -33,6 +33,13 @@ _current_agent_subagent_id: ContextVar[Optional[str]] = ContextVar(
     "current_agent_subagent_id", default=None
 )
 
+# Per-request workspace dir (same resolution as RuntimePromptRail: metadata
+# effective_project_dir or adapter default). Used by fork/spawn so subagent
+# prompts and Workspace match the main agent for the current request.
+_effective_request_workspace_dir: ContextVar[Optional[str]] = ContextVar(
+    "effective_request_workspace_dir", default=None
+)
+
 
 def set_subagent_parent_session(session: Optional["Session"]) -> None:
     """Set the parent session context for subagent execution."""
@@ -84,6 +91,16 @@ def get_current_agent_subagent_id() -> Optional[str]:
     Used to construct nested session_id when creating fork from subagent.
     """
     return _current_agent_subagent_id.get()
+
+
+def set_effective_request_workspace_dir(workspace_dir: Optional[str]) -> None:
+    """Store workspace for the current request (aligned with RuntimePromptRail)."""
+    _effective_request_workspace_dir.set(workspace_dir)
+
+
+def get_effective_request_workspace_dir() -> Optional[str]:
+    """Workspace dir for the current request, or None if not set."""
+    return _effective_request_workspace_dir.get()
 
 
 def _get_llm_trace_session_id_var() -> ContextVar[str]:

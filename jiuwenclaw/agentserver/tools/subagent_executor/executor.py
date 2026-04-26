@@ -30,6 +30,7 @@ from jiuwenclaw.utils import get_agent_root_dir, logger
 from jiuwenclaw.config import get_config
 
 from jiuwenclaw.agentserver.tools.subagent_executor.context_vars import (
+    get_effective_request_workspace_dir,
     get_subagent_parent_session,
     _get_llm_trace_session_id_var,
 )
@@ -67,6 +68,32 @@ class ForkAgentExecutor:
         self._model = model
         self._default_role_prompts = default_role_prompts or {}
         self._active_fork_agents: dict[str, Any] = {}  # task_id -> subagent instance
+
+    def _resolve_subagent_workspace_dir(
+        self,
+        task_workspace_dir: str | None,
+    ) -> tuple[str, str]:
+        """Resolve workspace for fork/spawn to match the main agent for the current request.
+
+        Order: explicit task path > per-request (same as RuntimePromptRail) >
+        parent DeepAgent workspace > agent root.
+        """
+        if task_workspace_dir and str(task_workspace_dir).strip():
+            return (str(task_workspace_dir).strip(), "task.workspace_dir")
+
+        req_ws = get_effective_request_workspace_dir()
+        if isinstance(req_ws, str) and req_ws.strip():
+            return (req_ws.strip(), "effective_request_workspace_dir")
+
+        parent_config = getattr(self._parent_agent, "deep_config", None)
+        if parent_config and hasattr(parent_config, "workspace"):
+            parent_ws = getattr(parent_config.workspace, "root_path", None)
+            if parent_ws:
+                root = str(parent_ws).strip()
+                if root:
+                    return (root, "parent_config.workspace.root_path")
+
+        return (get_agent_root_dir(), "get_agent_root_dir()")
 
     def resolve_permission_approval(self, request_id: str, answers: list) -> bool:
         """Resolve permission approval across all active fork agents.
@@ -409,15 +436,13 @@ Approach each task methodically and deliver high-quality results.
         Returns:
             DeepAgent instance for spawn subagent
         """
-        ws = task.workspace_dir
-        if ws is None:
-            parent_config = getattr(self._parent_agent, 'deep_config', None)
-            if parent_config and hasattr(parent_config, 'workspace'):
-                parent_ws = getattr(parent_config.workspace, 'root_path', None)
-                if parent_ws:
-                    ws = parent_ws
-        if ws is None:
-            ws = get_agent_root_dir()
+        ws, ws_source = self._resolve_subagent_workspace_dir(task.workspace_dir)
+        logger.debug(
+            "[SpawnAgent] workspace_dir=%s source=%s task.workspace_dir=%s",
+            ws,
+            ws_source,
+            task.workspace_dir,
+        )
 
         config_base = get_config()
         language = config_base.get("preferred_language", "zh")
@@ -524,22 +549,8 @@ Approach each task methodically and deliver high-quality results.
         Returns:
             DeepAgent instance configured with message injection rail
         """
-        ws = task.workspace_dir
-        ws_source = "task.workspace_dir"
-        logger.debug(f"[ForkAgent] Initial ws={ws}, task.workspace_dir={task.workspace_dir}")
-
-        if ws is None:
-            parent_config = getattr(self._parent_agent, 'deep_config', None)
-            if parent_config and hasattr(parent_config, 'workspace'):
-                parent_ws = getattr(parent_config.workspace, 'root_path', None)
-                if parent_ws:
-                    ws = parent_ws
-                    ws_source = "parent_config.workspace.root_path"
-        if ws is None:
-            ws = get_agent_root_dir()
-            ws_source = "get_agent_root_dir()"
-
-        logger.info(f"[ForkAgent] Final workspace_dir={ws}, source={ws_source}")
+        ws, ws_source = self._resolve_subagent_workspace_dir(task.workspace_dir)
+        logger.info("[ForkAgent] Final workspace_dir=%s, source=%s", ws, ws_source)
 
         config_base = get_config()
         language = config_base.get("preferred_language", "zh")

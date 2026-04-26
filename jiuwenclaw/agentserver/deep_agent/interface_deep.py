@@ -2621,6 +2621,20 @@ class JiuWenClawDeepAdapter:
             raise RuntimeError("JiuWenClawDeepAdapter 未初始化，请先调用 create_instance()")
 
         resolved_language = self._resolve_runtime_language()
+
+        md = params.request_metadata or {}
+        v = md.get("effective_project_dir")
+        if isinstance(v, str) and v.strip():
+            resolved_workspace_dir = v.strip()
+        else:
+            resolved_workspace_dir = self._workspace_dir
+
+        from jiuwenclaw.agentserver.tools.subagent_executor.context_vars import (
+            set_effective_request_workspace_dir,
+        )
+
+        set_effective_request_workspace_dir(resolved_workspace_dir)
+
         if self._runtime_prompt_rail:
             self._runtime_prompt_rail.set_language(resolved_language)
             resolved_channel = (
@@ -2628,13 +2642,6 @@ class JiuWenClawDeepAdapter:
             )
             self._runtime_prompt_rail.set_channel(resolved_channel)
             self._runtime_prompt_rail.set_request_system_prompt(params.request_system_prompt)
-
-            md = params.request_metadata or {}
-            v = md.get("effective_project_dir")
-            if isinstance(v, str) and v.strip():
-                resolved_workspace_dir = v.strip()
-            else:
-                resolved_workspace_dir = self._workspace_dir
             self._runtime_prompt_rail.set_workspace_dir(resolved_workspace_dir)
 
         await self._update_rails_for_mode(params.mode)
