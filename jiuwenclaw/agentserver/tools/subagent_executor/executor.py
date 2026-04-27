@@ -17,6 +17,7 @@ from openjiuwen.core.single_agent import AgentCard
 from openjiuwen.harness import DeepAgent
 from openjiuwen.harness.factory import create_deep_agent
 from openjiuwen.harness.rails.filesystem_rail import FileSystemRail
+from openjiuwen.harness.rails.skill_use_rail import SkillUseRail
 from openjiuwen.harness.workspace.workspace import Workspace
 from openjiuwen.core.foundation.llm import Model
 
@@ -28,7 +29,11 @@ from jiuwenclaw.agentserver.tools.subagent_models import (
 )
 from jiuwenclaw.agentserver.deep_agent.prompt_builder import build_subagent_base_prompt
 from jiuwenclaw.agentserver.deep_agent.rails import JiuClawContextEngineeringRail
-from jiuwenclaw.utils import get_agent_root_dir, logger
+from jiuwenclaw.utils import (
+    get_agent_registered_skill_dirs,
+    get_agent_root_dir,
+    logger,
+)
 from jiuwenclaw.config import get_config
 
 from jiuwenclaw.agentserver.tools.subagent_executor.context_vars import (
@@ -40,6 +45,9 @@ from jiuwenclaw.agentserver.tools.subagent_executor.session_proxy import Subagen
 from jiuwenclaw.agentserver.tools.subagent_executor.rails import (
     ForkMessageInjectionRail,
     SubagentContextRail,
+)
+from jiuwenclaw.agentserver.tools.subagent_executor.skill_use_rail_subagent import (
+    SubagentSkillUseRail,
 )
 
 # Default timeout for subagent execution
@@ -561,6 +569,16 @@ Approach each task methodically and deliver high-quality results.
                 session_memory=SessionMemoryConfig(),
                 minimal=True),  # 上下文压缩 - 默认链路 B（ToolResultBudget + MicroCompact + FullCompact），不注入 tools/context
             SubagentContextRail(subagent_id=task.task_id, parent_session=parent_session),
+            # active-skill body 的 lift/pin 由 rail.after_tool_call 触发；
+            # include_tools/include_skill_body_tools 都关掉：skill_tool/skill_complete
+            # 已通过 _inherit_tools_for_spawn 从父 agent 继承，不重复注册。
+            # 子类版本跳过 before_model_call 的"# 技能"列表渲染（父 prompt 已指明）。
+            SubagentSkillUseRail(
+                skills_dir=[str(p) for p in get_agent_registered_skill_dirs()],
+                skill_mode=SkillUseRail.SKILL_MODE_ALL,
+                include_tools=False,
+                include_skill_body_tools=False,
+            ),
         ]
         if filesystem_rail is not None:
             rails.insert(0, filesystem_rail)
@@ -690,6 +708,14 @@ Execute the given task using inherited context and available tools.
                 session_memory=SessionMemoryConfig(),
                 minimal=True),  # 上下文压缩 - 默认链路 B，不注入 tools/context
             SubagentContextRail(subagent_id=task.task_id, parent_session=parent_session),
+            # 与 spawn 路径同样的 active-skill body lift/pin 接入；
+            # fork 继承的 skill_tool/skill_complete 走 _inherit_tools_for_fork。
+            SubagentSkillUseRail(
+                skills_dir=[str(p) for p in get_agent_registered_skill_dirs()],
+                skill_mode=SkillUseRail.SKILL_MODE_ALL,
+                include_tools=False,
+                include_skill_body_tools=False,
+            ),
         ]
         if filesystem_rail is not None:
             rails.insert(0, filesystem_rail)
