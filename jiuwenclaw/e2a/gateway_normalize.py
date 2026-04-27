@@ -152,8 +152,11 @@ def message_to_e2a(msg: "Message") -> E2AEnvelope:
     
     data = msg.params if isinstance(msg.params, dict) else {}
     agent_id = str(data.get("agent_id") or "").strip()
+    service_id = str(data.get("service_id") or "").strip()
     if agent_id:
         d["agent_id"] = agent_id
+    if service_id:
+        d["service_id"] = service_id
     return E2AEnvelope.from_dict(d)
 
 
@@ -214,8 +217,11 @@ def e2a_from_agent_fields(
 
     data = params if isinstance(params, dict) else {}
     agent_id = str(data.get("agent_id") or "").strip()
+    service_id = str(data.get("service_id") or "").strip()
     if agent_id:
         d["agent_id"] = agent_id
+    if service_id:
+        d["service_id"] = service_id
     return E2AEnvelope.from_dict(d)
 
 

@@ -1340,7 +1340,12 @@ class MessageHandler(ABC):
             channel_id=_VIBESKILL_CHANNEL_ID,
             session_id=session_id,
             req_method=ReqMethod.SKILLS_IMPORT_LOCAL,
-            params={"path": skill_url, "force": True},
+            params={
+                "path": skill_url,
+                "force": True,
+                # 与 Standard chat 一致，按 session 维度路由到对应租户工作区
+                "service_id": str(session_id or "").strip(),
+            },
             is_stream=False,
             timestamp=time.time(),
         )

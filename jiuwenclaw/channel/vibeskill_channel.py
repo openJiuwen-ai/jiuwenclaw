@@ -596,6 +596,8 @@ class VibeSkillChannel(BaseChannel):
         params: dict[str, Any] = {
             "query": query,
         }
+        # Standard 模式也按 session 维度做租户隔离，避免落到 default_service_id 共享工作区
+        params["service_id"] = str(external_session_id or session.internal_id).strip()
 
         # model
         if msg_model and isinstance(msg_model, dict):
@@ -1398,6 +1400,30 @@ class VibeSkillChannel(BaseChannel):
         for sid in internal_ids:
             self._session_to_ws.pop(sid, None)
             self._message_ctx.pop(sid, None)
+            try:
+                await self._store.set_state(sid, VibeSkillSessionState.IDLE)
+            except Exception:
+                logger.exception("[VibeSkillChannel] cleanup set_state idle failed, session_id=%s", sid)
+
+            try:
+                cancel_msg = Message(
+                    id=f"vibeskill-ws-disconnect-cancel-{int(time.time() * 1000):x}-{secrets.token_hex(3)}",
+                    type="req",
+                    channel_id=VIBESKILL_CHANNEL_ID,
+                    session_id=sid,
+                    params={"task_id": sid, "session_id": sid},
+                    timestamp=time.time(),
+                    ok=True,
+                    req_method=ReqMethod.SKILLDEV_CANCEL,
+                    is_stream=True,
+                )
+                self.bus.deliver_to_message_handler(cancel_msg)
+                logger.info(
+                    "[VibeSkillChannel] WS disconnected, dispatched skilldev.cancel, task_id=%s",
+                    sid,
+                )
+            except Exception:
+                logger.exception("[VibeSkillChannel] cleanup dispatch skilldev.cancel failed, session_id=%s", sid)
 
     async def _resolve_external_session_id(
         self,
