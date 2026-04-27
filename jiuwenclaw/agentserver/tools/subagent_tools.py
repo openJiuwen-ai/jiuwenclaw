@@ -36,11 +36,6 @@ from jiuwenclaw.utils import logger
 async def fork_agent(
     objective: str,
     prompt: str = "",
-    role_id: str = "ForkedWorker",
-    inherit_tools: bool = True,
-    allowed_tools: list[str] | None = None,
-    timeout_seconds: float = 300.0,
-    workspace_dir: str | None = None,
 ) -> dict[str, Any]:
     """
     Create fork subAgent inheriting parent Agent's message history (shared context).
@@ -55,11 +50,6 @@ async def fork_agent(
     Args:
         objective: Task objective (what to accomplish)
         prompt: Execution prompt (optional, detailed instructions)
-        role_id: Role ID (default: ForkedWorker)
-        inherit_tools: Inherit parent tools (default: True)
-        allowed_tools: Optional, restrict available tools subset
-        timeout_seconds: Timeout in seconds (default: 300)
-        workspace_dir: Working directory (optional, inherits from parent)
 
     Returns:
         {"success": bool, "task_id": str, "role_id": str, "result": str, "error": str, "usage": dict}
@@ -74,13 +64,8 @@ async def fork_agent(
     fork_messages = await get_fork_messages()
 
     task = ForkAgentTaskSpec(
-        role_id=role_id,
         objective=objective,
         prompt=prompt,
-        inherit_tools=inherit_tools,
-        allowed_tools=tuple(allowed_tools) if allowed_tools else None,
-        workspace_dir=workspace_dir,
-        timeout_seconds=timeout_seconds,
     )
 
     result = await executor.execute_fork(
@@ -103,10 +88,6 @@ async def spawn_subagent(
     objective: str,
     role_id: str = "MainAgent",
     prompt: str = "",
-    skill_path: str | None = None,
-    workspace_dir: str | None = None,
-    timeout_seconds: float = 300.0,
-    system_prompt: str | None = None,
 ) -> dict[str, Any]:
     """
     Spawn a subagent to execute a task, blocking until result is returned.
@@ -124,10 +105,6 @@ async def spawn_subagent(
         objective: Task objective description
         role_id: Role ID to use (default: MainAgent)
         prompt: Execution prompt (optional)
-        skill_path: Sub-skill path, relative to skills directory (optional)
-        workspace_dir: Working directory (optional)
-        timeout_seconds: Timeout in seconds (default: 300)
-        system_prompt: Override role's system prompt (optional)
 
     Returns:
         {"success": bool, "task_id": str, "role_id": str, "result": str, "error": str, "usage": dict}
@@ -142,10 +119,6 @@ async def spawn_subagent(
         role_id=role_id,
         objective=objective,
         prompt=prompt,
-        skill_path=skill_path,
-        workspace_dir=workspace_dir,
-        timeout_seconds=timeout_seconds,
-        system_prompt=system_prompt,
     )
 
     result = await executor.execute_spawn(

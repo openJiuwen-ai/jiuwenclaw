@@ -41,8 +41,41 @@ from jiuwenclaw.agentserver.tools.subagent_executor.rails import (
     SubagentContextRail,
 )
 
-if TYPE_CHECKING:
-    pass
+# Default timeout for subagent execution
+_DEFAULT_TIMEOUT_SECONDS = 300.0
+
+# Default excluded tools for spawn/fork agents
+EXCLUDED_TOOLS_SPAWN = {
+    "spawn_subagent",
+    # 主 Agent 级调度与消息（子 Agent 不应触发）
+    "office_claw_dispatch_agent_task",
+    "office_claw_post_message",
+    "office_claw_get_pending_mentions",
+    "office_claw_ack_mentions",
+    "office_claw_get_thread_context",
+    "office_claw_list_threads",
+    "office_claw_cross_post_message",
+    "office_claw_register_pr_tracking",
+    "office_claw_multi_mention",
+    # 主 Agent 级计划任务
+    "office_claw_list_scheduled_tasks",
+    "office_claw_list_schedule_templates",
+    "office_claw_preview_scheduled_task",
+    "office_claw_register_scheduled_task",
+    "office_claw_set_scheduled_task_enabled",
+    "office_claw_remove_scheduled_task",
+    # 主 Agent 级记忆与反思
+    "office_claw_retain_memory_callback",
+    "office_claw_search_evidence",
+    "office_claw_reflect",
+    # 主 Agent 级会话链追踪
+    "office_claw_list_session_chain",
+    "office_claw_read_session_events",
+    "office_claw_read_session_digest",
+    "office_claw_read_invocation_detail",
+}
+
+EXCLUDED_TOOLS_FORK = EXCLUDED_TOOLS_SPAWN | {"fork_agent"}
 
 # Subagent ReAct cap when parent has no usable max_iterations (mirrors interface_deep fallback).
 _DEFAULT_SUBAGENT_MAX_ITERATIONS = 15
@@ -73,18 +106,11 @@ class ForkAgentExecutor:
         self._default_role_prompts = default_role_prompts or {}
         self._active_fork_agents: dict[str, Any] = {}  # task_id -> subagent instance
 
-    def _resolve_subagent_workspace_dir(
-        self,
-        task_workspace_dir: str | None,
-    ) -> tuple[str, str]:
+    def _resolve_subagent_workspace_dir(self) -> tuple[str, str]:
         """Resolve workspace for fork/spawn to match the main agent for the current request.
 
-        Order: explicit task path > per-request (same as RuntimePromptRail) >
-        parent DeepAgent workspace > agent root.
+        Order: per-request (same as RuntimePromptRail) > parent DeepAgent workspace > agent root.
         """
-        if task_workspace_dir and str(task_workspace_dir).strip():
-            return (str(task_workspace_dir).strip(), "task.workspace_dir")
-
         req_ws = get_effective_request_workspace_dir()
         if isinstance(req_ws, str) and req_ws.strip():
             return (req_ws.strip(), "effective_request_workspace_dir")
@@ -143,16 +169,12 @@ class ForkAgentExecutor:
 
         return any(type(rail).__name__ == "FileSystemRail" for rail in candidate_rails)
 
-    def _build_inherited_filesystem_rail(self, *, allowed_tools: tuple[str, ...] | None) -> FileSystemRail | None:
+    def _build_inherited_filesystem_rail(self) -> FileSystemRail | None:
         """Create a child FileSystemRail when the parent had one.
 
         FileSystemRail tools are not necessarily present in ability_manager, so spawn/fork must
         mount their own rail instead of relying only on ToolCard inheritance.
         """
-        if allowed_tools is not None:
-            logger.debug("[Subagent] Skipping FileSystemRail inheritance because allowed_tools is set")
-            return None
-
         if not self._parent_has_filesystem_rail():
             return None
 
@@ -302,7 +324,7 @@ Approach each task methodically and deliver high-quality results.
             token_trace_sid = llm_trace_var.set(trace_session_id)
 
             # 6. Execute fork agent
-            session_id = task.session_id or task.task_id
+            session_id = task.task_id
             invoke_inputs = {"query": full_prompt, "conversation_id": session_id}
 
             try:
@@ -345,13 +367,13 @@ Approach each task methodically and deliver high-quality results.
 
         except asyncio.TimeoutError:
             logger.warning(
-                f"[ForkAgent] Timeout after {task.timeout_seconds} seconds, task_id={task.task_id}"
+                f"[ForkAgent] Timeout after {_DEFAULT_TIMEOUT_SECONDS} seconds, task_id={task.task_id}"
             )
             return ForkAgentResult(
                 success=False,
                 task_id=task.task_id,
                 role_id=task.role_id,
-                error=f"Timeout after {task.timeout_seconds} seconds",
+                error=f"Timeout after {_DEFAULT_TIMEOUT_SECONDS} seconds",
             )
         except Exception as e:
             logger.exception(f"[ForkAgent] Execution failed: {e}")
@@ -385,10 +407,8 @@ Approach each task methodically and deliver high-quality results.
             # 1. Get role definition
             role_def = self._get_role_definition(task.role_id)
 
-            # 2. Determine system_prompt (priority: call param > role def > dynamic generation)
-            if task.system_prompt:
-                system_prompt = task.system_prompt
-            elif role_def and hasattr(role_def, 'system_prompt') and role_def.system_prompt:
+            # 2. Determine system_prompt (priority: role def > dynamic generation)
+            if role_def and hasattr(role_def, 'system_prompt') and role_def.system_prompt:
                 system_prompt = role_def.system_prompt
             else:
                 system_prompt = self._generate_dynamic_role_prompt(task.role_id)
@@ -427,7 +447,7 @@ Approach each task methodically and deliver high-quality results.
             token_trace_sid = llm_trace_var.set(trace_session_id)
 
             # 8. Execute with isolated context
-            session_id = task.session_id or task.task_id
+            session_id = task.task_id
             invoke_inputs = {"query": full_prompt, "conversation_id": session_id}
 
             try:
@@ -470,13 +490,13 @@ Approach each task methodically and deliver high-quality results.
 
         except asyncio.TimeoutError:
             logger.warning(
-                f"[SpawnAgent] Timeout after {task.timeout_seconds} seconds, task_id={task.task_id}"
+                f"[SpawnAgent] Timeout after {_DEFAULT_TIMEOUT_SECONDS} seconds, task_id={task.task_id}"
             )
             return SubagentResult(
                 success=False,
                 task_id=task.task_id,
                 role_id=task.role_id,
-                error=f"Timeout after {task.timeout_seconds} seconds",
+                error=f"Timeout after {_DEFAULT_TIMEOUT_SECONDS} seconds",
             )
         except Exception as e:
             logger.exception(f"[SpawnAgent] Execution failed: {e}")
@@ -503,12 +523,11 @@ Approach each task methodically and deliver high-quality results.
         Returns:
             DeepAgent instance for spawn subagent
         """
-        ws, ws_source = self._resolve_subagent_workspace_dir(task.workspace_dir)
+        ws, ws_source = self._resolve_subagent_workspace_dir()
         logger.debug(
-            "[SpawnAgent] workspace_dir=%s source=%s task.workspace_dir=%s",
+            "[SpawnAgent] workspace_dir=%s source=%s",
             ws,
             ws_source,
-            task.workspace_dir,
         )
 
         config_base = get_config()
@@ -532,7 +551,7 @@ Approach each task methodically and deliver high-quality results.
         )
 
         max_iterations = self._resolve_subagent_max_iterations()
-        filesystem_rail = self._build_inherited_filesystem_rail(allowed_tools=task.allowed_tools)
+        filesystem_rail = self._build_inherited_filesystem_rail()
         rails = [
             JiuClawContextEngineeringRail(preset=True),  # 上下文压缩
             SubagentContextRail(subagent_id=task.task_id, parent_session=parent_session),
@@ -551,7 +570,7 @@ Approach each task methodically and deliver high-quality results.
             enable_task_loop=False,
         )
 
-        self._inherit_tools_for_spawn(spawn_agent, task.allowed_tools)
+        self._inherit_tools_for_spawn(spawn_agent)
 
         logger.info(
             "[SpawnAgent] Created spawn agent instance, task_id=%s, max_iterations=%s",
@@ -560,21 +579,11 @@ Approach each task methodically and deliver high-quality results.
         )
         return spawn_agent
 
-    def _inherit_tools_for_spawn(
-        self,
-        spawn_agent: DeepAgent,
-        allowed_tools: tuple[str, ...] | None = None,
-    ) -> None:
+    def _inherit_tools_for_spawn(self, spawn_agent: DeepAgent) -> None:
         """Inherit tools from parent agent for spawn agent.
 
         IMPORTANT: Does NOT exclude fork_agent, allowing spawn to call fork.
         """
-        excluded_tools = {
-            "spawn_subagent",
-            "todo_create", "todo_complete", "todo_insert", "todo_remove", "todo_list",
-            "office_claw_list_skills", "office_claw_load_skill",
-        }
-
         try:
             parent_tools = self._parent_agent.ability_manager.list()
             if not parent_tools:
@@ -588,12 +597,8 @@ Approach each task methodically and deliver high-quality results.
                     if hasattr(tool, "card") and hasattr(tool.card, "name"):
                         tool_name = tool.card.name
 
-                    if tool_name in excluded_tools:
+                    if tool_name in EXCLUDED_TOOLS_SPAWN:
                         logger.debug(f"[SpawnAgent] Skipping excluded tool: {tool_name}")
-                        continue
-
-                    if allowed_tools and tool_name not in allowed_tools:
-                        logger.debug(f"[SpawnAgent] Skipping tool not in allowed_tools: {tool_name}")
                         continue
 
                     if hasattr(tool, "card"):
@@ -626,7 +631,7 @@ Approach each task methodically and deliver high-quality results.
         Returns:
             DeepAgent instance configured with message injection rail
         """
-        ws, ws_source = self._resolve_subagent_workspace_dir(task.workspace_dir)
+        ws, ws_source = self._resolve_subagent_workspace_dir()
         logger.info("[ForkAgent] Final workspace_dir=%s, source=%s", ws, ws_source)
 
         config_base = get_config()
@@ -670,7 +675,7 @@ Execute the given task using inherited context and available tools.
         )
 
         max_iterations = self._resolve_subagent_max_iterations()
-        filesystem_rail = self._build_inherited_filesystem_rail(allowed_tools=task.allowed_tools)
+        filesystem_rail = self._build_inherited_filesystem_rail()
         rails = [
             ForkMessageInjectionRail(fork_messages),  # 注入继承的消息
             JiuClawContextEngineeringRail(preset=True),  # 上下文压缩（fork 继承大量消息时尤其重要）
@@ -690,7 +695,7 @@ Execute the given task using inherited context and available tools.
             enable_task_loop=False,
         )
 
-        self._inherit_tools_for_fork(fork_agent, task.allowed_tools)
+        self._inherit_tools_for_fork(fork_agent)
 
         logger.info(
             "[ForkAgent] Created fork agent instance, task_id=%s, max_iterations=%s",
@@ -699,21 +704,11 @@ Execute the given task using inherited context and available tools.
         )
         return fork_agent
 
-    def _inherit_tools_for_fork(
-        self,
-        fork_agent: DeepAgent,
-        allowed_tools: tuple[str, ...] | None = None,
-    ) -> None:
+    def _inherit_tools_for_fork(self, fork_agent: DeepAgent) -> None:
         """Inherit tools from parent agent for fork agent.
 
         Excludes fork_agent to prevent recursive forking.
         """
-        excluded_tools = {
-            "fork_agent", "spawn_subagent",
-            "todo_create", "todo_complete", "todo_insert", "todo_remove", "todo_list",
-            "office_claw_list_skills", "office_claw_load_skill",
-        }
-
         try:
             parent_tools = self._parent_agent.ability_manager.list()
             if not parent_tools:
@@ -727,12 +722,8 @@ Execute the given task using inherited context and available tools.
                     if hasattr(tool, "card") and hasattr(tool.card, "name"):
                         tool_name = tool.card.name
 
-                    if tool_name in excluded_tools:
+                    if tool_name in EXCLUDED_TOOLS_FORK:
                         logger.debug(f"[ForkAgent] Skipping excluded tool: {tool_name}")
-                        continue
-
-                    if allowed_tools and tool_name not in allowed_tools:
-                        logger.debug(f"[ForkAgent] Skipping tool not in allowed_tools: {tool_name}")
                         continue
 
                     if hasattr(tool, "card"):

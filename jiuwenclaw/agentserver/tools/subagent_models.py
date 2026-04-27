@@ -64,13 +64,6 @@ class SubagentTaskSpec(BaseModel):
     role_id: str = "MainAgent"
     objective: str
     prompt: str = ""
-    skill_path: str | None = None
-    workspace_dir: str | None = None
-    session_id: str | None = None
-    timeout_seconds: float = 300.0
-    system_prompt: str | None = None
-    inherit_tools: bool = True
-    allowed_tools: tuple[str, ...] | None = None
 
 
 class SubagentResult(BaseModel):
@@ -106,16 +99,7 @@ class ForkAgentTaskSpec(BaseModel):
     )
     objective: str
     prompt: str = ""
-    role_id: str = "ForkedWorker"
-
-    # Tool configuration
-    inherit_tools: bool = True
-    allowed_tools: tuple[str, ...] | None = None
-
-    # Execution configuration
-    timeout_seconds: float = 300.0
-    workspace_dir: str | None = None
-    session_id: str | None = None
+    role_id: str = "ForkedWorker"  # 内部使用，不再从工具入参传入
 
 
 class ForkAgentResult(BaseModel):
