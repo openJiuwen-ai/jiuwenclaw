@@ -4,6 +4,9 @@
 
 Subclasses the SDK ContextEngineeringRail to inject an independent 'offload'
 PromptSection, replacing the old approach of appending to the 'context' section.
+
+F-REDUCE: Added `minimal` mode for subagent — skips tools/context injection,
+only keeps context compression processors and offload hint.
 """
 from __future__ import annotations
 
@@ -13,7 +16,12 @@ from openjiuwen.harness.rails.context_engineering_rail import ContextEngineering
 
 
 class JiuClawContextEngineeringRail(ContextEngineeringRail):
-    """扩展 CE Rail，注入独立的 offload/上下文压缩 section。"""
+    """扩展 CE Rail，注入独立的 offload/上下文压缩 section。
+
+    Args:
+        preset: 是否启用预置的上下文压缩 processor 配置。
+        minimal: F-REDUCE — 是否跳过 tools/context section 注入（用于 subagent）。
+    """
 
     OFFLOAD_HINT_CN = (
         "# 上下文压缩\n\n"
@@ -35,9 +43,21 @@ class JiuClawContextEngineeringRail(ContextEngineeringRail):
         'Storage types: "in_memory" (session cache)'
     )
 
+    def __init__(self, preset: bool = True, minimal: bool = False) -> None:
+        """Initialize with optional minimal mode for subagent.
+
+        Args:
+            preset: Enable preset context compression processors.
+            minimal: Skip tools/context section injection (for subagent).
+        """
+        super().__init__(preset=preset)
+        self._minimal = minimal
+
     async def before_model_call(self, ctx: AgentCallbackContext) -> None:
-        """先执行父类注入 workspace + context，再注入独立的 offload section。"""
-        await super().before_model_call(ctx)
+        """Inject workspace + context (if not minimal), then offload section."""
+        # F-REDUCE: minimal mode skips parent's tools/context injection
+        if not self._minimal:
+            await super().before_model_call(ctx)
 
         if not self.system_prompt_builder:
             return

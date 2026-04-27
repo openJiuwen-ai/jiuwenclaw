@@ -49,6 +49,7 @@ pnpm-debug.log*
 .claude
 CLAUDE.md
 workspace/agent-data.json
+*.iml
 
 # reference
 reference/

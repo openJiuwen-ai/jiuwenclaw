@@ -43,7 +43,7 @@ from jiuwenclaw.agentserver.tools.subagent_executor.rails import (
 )
 
 # Default timeout for subagent execution
-_DEFAULT_TIMEOUT_SECONDS = 300.0
+_DEFAULT_TIMEOUT_SECONDS = 600.0
 
 # Default excluded tools for spawn/fork agents
 EXCLUDED_TOOLS_SPAWN = {
@@ -539,7 +539,9 @@ Approach each task methodically and deliver high-quality results.
             workspace_dir=ws,
             include_time=True,
         )
-        augmented_prompt = base_prompt + "\n\n---\n\n# Subagent Role\n\n" + system_prompt
+        # F-REDUCE: Do not append role prompt or use ContextEngineeringRail.
+        # Subagent only needs minimal base prompt; tools come from tool schema, not prompt.
+        augmented_prompt = base_prompt
 
         card = AgentCard(
             name=f"spawn_{task.role_id}",
@@ -557,7 +559,7 @@ Approach each task methodically and deliver high-quality results.
             JiuClawContextEngineeringRail(
                 preset=True,
                 session_memory=SessionMemoryConfig(),
-            ),  # 上下文压缩 - 默认链路 B（ToolResultBudget + MicroCompact + FullCompact）
+                minimal=True),  # 上下文压缩 - 默认链路 B（ToolResultBudget + MicroCompact + FullCompact），不注入 tools/context
             SubagentContextRail(subagent_id=task.task_id, parent_session=parent_session),
         ]
         if filesystem_rail is not None:
@@ -647,22 +649,23 @@ Approach each task methodically and deliver high-quality results.
             include_time=True,
         )
 
-        if language == "zh":
+        # Fork agent role prompt — explain inherited context to model
+        if language == "cn" or language == "zh":
             role_prompt = f"""---
 
-# Fork Agent Role
+# Fork 子代理角色
 
-你是一个 AI 助手的 fork 子代理，角色为 {task.role_id}。
-你继承了父代理的上下文，专门执行父代理分派的特定任务。
+你是一个 AI 助手的 fork 子代理，角色为 `{task.role_id}`。
+你继承了父代理的消息历史（上下文），可以访问父代理之前的对话、文档理解和工具调用结果。
 使用继承的上下文和可用工具执行给定任务。
 """
         else:
             role_prompt = f"""---
 
-# Fork Agent Role
+# Fork Subagent Role
 
-You are a fork subagent of an AI assistant, with role {task.role_id}.
-You inherit parent agent's context and execute tasks assigned by the parent agent.
+You are a fork subagent of an AI assistant, with role `{task.role_id}`.
+You inherit parent agent's message history (context), including previous conversations, document understanding, and tool call results.
 Execute the given task using inherited context and available tools.
 """
 
@@ -685,7 +688,7 @@ Execute the given task using inherited context and available tools.
             JiuClawContextEngineeringRail(
                 preset=True,
                 session_memory=SessionMemoryConfig(),
-            ),  # 上下文压缩 - 默认链路 B（fork 继承大量消息时尤其重要）
+                minimal=True),  # 上下文压缩 - 默认链路 B，不注入 tools/context
             SubagentContextRail(subagent_id=task.task_id, parent_session=parent_session),
         ]
         if filesystem_rail is not None:
