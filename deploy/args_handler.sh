@@ -12,22 +12,12 @@ parse_args() {
                 CMD="${args[$i]}"
                 i=$((i+1))
                 ;;
-            nfs|yr_claw)
-                if [ "${DEPLOY_VARS["AGENT_CLIENT_TYPE"]}" == "yuanrong_frontend" ]; then
-                    MODULES+=("${args[$i]^^}")
-                fi
-                i=$((i+1))
-                ;;
-            gateway)
+            nfs|yr_claw|gateway)
                 MODULES+=("${args[$i]^^}")
                 i=$((i+1))
                 ;;
             all)
-                if [ "${DEPLOY_VARS["AGENT_CLIENT_TYPE"]}" == "yuanrong_frontend" ]; then
-                    MODULES=("${ALL_MODULES[@]}")
-                else
-                     MODULES=("GATEWAY")
-                fi
+                process_modules
                 i=$((i+1))
                 ;;
             -h|--help)
@@ -47,16 +37,25 @@ parse_args() {
 
     # If no modules are specified, deploy all by default
     if [ ${#MODULES[@]} -eq 0 ]; then
-        if [ "${DEPLOY_VARS["AGENT_CLIENT_TYPE"]}" == "yuanrong_frontend" ]; then
-            MODULES=("${ALL_MODULES[@]}")
-        else
-            MODULES=("GATEWAY")
-        fi
+        process_modules
     fi
 
     info "Executing command: $*"
     info "CMD=${CMD}"
     info "MODULES=${MODULES[@]}"
+}
+
+process_modules() {
+    if [ -n "${DEPLOY_VARS["NFS_SERVER_ADDR"]:-}" ]; then
+        info "Use external NFS server"
+        MODULES=("GATEWAY")
+    else
+        MODULES=("NFS" "GATEWAY")
+    fi
+
+    if [ "${DEPLOY_VARS["AGENT_CLIENT_TYPE"]}" == "yuanrong_frontend" ]; then
+        MODULES+=("YR_CLAW")
+    fi
 }
 
 # Print help info and exit

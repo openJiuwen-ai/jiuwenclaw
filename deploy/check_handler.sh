@@ -92,9 +92,19 @@ check_if_yr_claw_up() {
 }
 
 check_if_nfs_up() {
+    # No external NFS server
+    if [ -n "${DEPLOY_VARS["NFS_SERVER_ADDR"]:-}" ]; then
+        info "Use external NFS server"
+        return
+    fi
+
+    # No Build-In NFS server
     if ! check_k8s_resource_exists "deployment" "${DEPLOY_VARS["NFS_NAME"]}"; then
         error "NFS is not deployed. Please deploy it first with: ./$(basename "$0") up nfs"
     fi
+
+    info "Use built-in NFS server"
+    DEPLOY_VARS["NFS_SERVER_ADDR"]=${DEPLOY_VARS["MASTER_NODE_IP"]}
 }
 
 check_dependency(){
@@ -121,6 +131,7 @@ check_gateway_up_dependency(){
     check_cmds
     check_cluster_has_enough_nodes
     check_ssh_connectivity
+    check_if_nfs_up
 }
 
 

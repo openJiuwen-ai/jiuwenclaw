@@ -181,17 +181,7 @@ register_oyr_func() {
     success "Serverless function created successfully! function_id: ${DEPLOY_VARS["FUNCTION_ID"]}"
 }
 
-process_oyr_vars() {
-    if [ -z "${DEPLOY_VARS["NFS_SERVER_ADDR"]:-}" ]; then
-        info "Use built-in NFS server"
-        DEPLOY_VARS["NFS_SERVER_ADDR"]=${DEPLOY_VARS["MASTER_NODE_IP"]}
-    else
-        info "Use external NFS server"
-    fi
-}
-
 deploy_oyr() {
-    process_oyr_vars
     install_pv_pvc
     install_oyr
     create_func_pool
