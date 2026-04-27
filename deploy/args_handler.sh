@@ -47,7 +47,11 @@ parse_args() {
 
     # If no modules are specified, deploy all by default
     if [ ${#MODULES[@]} -eq 0 ]; then
-        MODULES=("${ALL_MODULES[@]}")
+        if [ "${DEPLOY_VARS["AGENT_CLIENT_TYPE"]}" == "yuanrong_frontend" ]; then
+            MODULES=("${ALL_MODULES[@]}")
+        else
+            MODULES=("GATEWAY")
+        fi
     fi
 
     info "Executing command: $*"

@@ -34,8 +34,8 @@ install_pv_pvc() {
 }
 
 uninstall_pv_pvc() {
-    exec_cmd kubectl delete -f ${PV_FILE}
-    exec_cmd kubectl delete -f ${PVC_FILE}
+    exec_cmd kubectl delete -f ${PV_FILE} false
+    exec_cmd kubectl delete -f ${PVC_FILE} false
 }
 
 deploy_nfs() {
