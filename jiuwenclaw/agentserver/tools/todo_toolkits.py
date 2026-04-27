@@ -767,9 +767,20 @@ class SkillStepToolkit(TodoToolkit):
     工具：``skill_step_create`` / ``skill_step_complete`` /
           ``skill_step_complete_batch`` / ``skill_step_insert`` /
           ``skill_step_remove`` / ``skill_step_list``
+
+    写操作（create/start/complete/insert/remove）的返回值**不**附带整份清单，
+    避免每条 tool 结果重复「Current todo list」撑爆上下文；权威状态在磁盘
+    ``skill_step.md``，需要时用 ``skill_step_list`` 拉取。
     """
 
     TODO_FILENAME: ClassVar[str] = "skill_step.md"
     TOOL_PREFIX: ClassVar[str] = "skill_step"
     EXPOSE_START: ClassVar[bool] = False
     EXPOSE_COMPLETE_BATCH: ClassVar[bool] = True
+
+    def _append_todo_list(self, message: str) -> str:
+        """Do not append full plan on every mutating call; TodoToolkit does for todo_*."""
+        return (
+            f"{message}\n\n"
+            "Full plan: session skill_step.md — call skill_step_list if you need the list."
+        )
