@@ -135,6 +135,7 @@ from jiuwenclaw.agentserver.tools.acp_output_tools import get_acp_output_manager
 from jiuwenclaw.agentserver.tools.deepresearch_tools import (
     push_deepresearch_route,
     reset_deepresearch_route,
+    get_deepresearch_tools,
 )
 from jiuwenclaw.agentserver.tools.petal_search_tools import enable_petal_search, mcp_petal_search
 from jiuwenclaw.agentserver.tools.multi_session_toolkits import MultiSessionToolkit
@@ -2022,6 +2023,20 @@ class JiuWenClawDeepAdapter:
             logger.info("[JiuWenClawDeepAdapter] AskUserQuestion tool registered")
         except Exception as exc:
             logger.warning("[JiuWenClawDeepAdapter] AskUserQuestion tool registration failed: %s", exc)
+
+        # DeepResearch 执行工具
+        try:
+            for tool in get_deepresearch_tools():
+                Runner.resource_mgr.add_tool(tool)
+                tool_cards.append(tool.card)
+            logger.info(
+                "[JiuWenClawDeepAdapter] deepresearch tools registered successfully",
+            )
+        except Exception as exc:
+            logger.warning(
+                "[JiuWenClawDeepAdapter] deepresearch tools registration failed: %s",
+                exc,
+            )
 
         # Session 级 todo 工具（TodoToolkit / SkillStepToolkit）改由
         # SkillProtocolPromptRail.init() 跟随 rail 生命周期注册到 agent，

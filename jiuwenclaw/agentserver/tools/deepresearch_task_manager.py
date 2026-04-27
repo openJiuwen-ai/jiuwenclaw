@@ -23,6 +23,7 @@ from openjiuwen_deepsearch.framework.openjiuwen.agent.workflow import parse_endn
 from openjiuwen_deepsearch.utils.log_utils.log_common import session_id_ctx
 from openjiuwen_deepsearch.utils.log_utils.log_manager import LogManager
 
+from jiuwenclaw.agentserver.gateway_push import GatewayPushTransport, WebSocketGatewayPushTransport
 from jiuwenclaw.agentserver.tools.deepresearch_plugin.convert_docx_offline import convert_md_to_docx
 from jiuwenclaw.agentserver.tools.deepresearch_plugin.convert_html_offline import convert_md_to_html
 from jiuwenclaw.agentserver.tools.deepresearch_plugin.report_bundle import build_report_bundle
@@ -105,6 +106,7 @@ class DeepResearchTaskManager:
         self._task_handles: Dict[str, asyncio.Task] = {}
         self._task_semaphore = asyncio.Semaphore(DeepResearchTaskManager.MAX_ACTIVE_TASKS)
         self._initialized = True
+        self._gateway_push: GatewayPushTransport = WebSocketGatewayPushTransport()
         logger.info("[DeepResearchTaskManager] 初始化完成（全局单例）")
 
     @classmethod
@@ -164,11 +166,11 @@ class DeepResearchTaskManager:
         )
 
         web_search_engine_name = os.environ.get("WEB_SEARCH_ENGINE_NAME", "petal").strip()
-        web_search_api_key = (os.environ.get("WEB_SEARCH_API_KEY") 
-                              or os.environ.get("OPENAI_DEFAULT_HEADERS") 
+        web_search_api_key = (os.environ.get("WEB_SEARCH_API_KEY")
+                              or os.environ.get("OPENAI_DEFAULT_HEADERS")
                               or os.environ.get("default_headers", "")
                               ).strip()
-        web_search_url = (os.environ.get("WEB_SEARCH_URL") 
+        web_search_url = (os.environ.get("WEB_SEARCH_URL")
                           or DeepResearchTaskManager._resolve_petal_search_url()
                           ).strip()
         execution_method = os.environ.get("EXECUTION_METHOD", "parallel").strip()
@@ -465,12 +467,10 @@ class DeepResearchTaskManager:
             )
             safe_base_name = f"report_{task_id or 'default'}"
 
-        if task_id:
-            unique_base_name = f"{task_id}_{safe_base_name}"
-        else:
-            unique_base_name = f"anonymous_{safe_base_name}_{secrets.token_hex(4)}"
 
-        report_file = os.path.join(output_dir, f"report_{unique_base_name}").replace("\\", "/")
+        report_file = os.path.join(output_dir, 
+                                   f"report_{safe_base_name}_{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S')}")
+        report_file = report_file.replace("\\", "/")
 
         # 路径 containment 校验
         if not DeepResearchTaskManager._verify_path_containment(output_dir, report_file):
@@ -661,12 +661,6 @@ class DeepResearchTaskManager:
         log_dir = Path(log_output_dir)
         log_dir.mkdir(parents=True, exist_ok=True)
         context["log_dir"] = str(log_dir)
-
-        logger.info(
-            "[DeepResearchTaskManager] Task execution log directory: %s",
-            log_dir,
-            extra={'user_visible': 'critical'}
-        )
 
         # 3. 处理 LogManager 单例和路径限制
         # 保存原始 _SAFE_BASE 值以便恢复
@@ -947,7 +941,7 @@ class DeepResearchTaskManager:
         )
 
         try:
-            logger.info("notify report generation result")
+            await self._gateway_push.send_push(msg)
         except Exception as exc:
             logger.warning(
                 "[DeepResearchTaskManager] 发送 WebSocket 通知失败 task_id=%s error=%s",
@@ -1296,6 +1290,142 @@ class DeepResearchTaskManager:
         if task_info is None:
             raise RuntimeError(f"DeepResearch task not found after execution: {task_id}")
         return task_info
+
+    async def run_task_direct(
+        self,
+        query: str,
+        file_name: str,
+        session_id: str = "",
+        channel_id: str = "",
+        request_id: str = "",
+    ) -> str:
+        """直接执行深度研究任务并阻塞等待完成，不提交到任务池.
+
+        与 create_task 的区别：
+        - 不创建 DeepResearchTask 对象
+        - 不占用任务池资源（_tasks、_task_handles）
+        - 不受 MAX_ACTIVE_TASKS、MAX_TASKS_PER_SESSION 等限制
+        - 不发送 WebSocket 完成通知
+        - 直接在当前协程中执行，阻塞等待完成
+
+        适用场景：
+        - Agent 会话中需要即时获取结果
+        - 不需要异步后台执行的场景
+
+        Args:
+            query: 研究查询
+            file_name: 报告文件名，不带后缀
+            session_id: 会话 ID（仅用于日志关联）
+            channel_id: 渠道 ID（仅用于日志关联）
+            request_id: 请求 ID（仅用于日志关联）
+
+        Returns:
+            报告保存路径信息字符串
+
+        Raises:
+            ValueError: 配置验证失败或执行结果为空
+            Exception: 工作流执行过程中的其他异常
+        """
+        # 生成临时任务 ID（仅用于日志和报告文件命名）
+        temp_task_id = f"dr_blocking_{time.monotonic_ns()}_{secrets.token_hex(4)}"
+
+        logger.info(
+            "[DeepResearchTaskManager] 开始阻塞执行深度研究任务 temp_task_id=%s query=%s "
+            "session_id=%s channel_id=%s",
+            temp_task_id,
+            query[:80] + "..." if len(query) > 80 else query,
+            session_id,
+            channel_id,
+            extra={'user_visible': 'critical'}
+        )
+
+        # 1. 加载配置
+        config = DeepResearchTaskManager._load_config()
+
+        # 2. 验证配置
+        config_valid, config_msg = DeepResearchTaskManager._validate_config(config)
+        if not config_valid:
+            raise ValueError(config_msg)
+
+        # 3. 设置 SSL 配置
+        os.environ["LLM_SSL_VERIFY"] = "false"
+        os.environ["LLM_SSL_CERT"] = ""
+        os.environ["TOOL_SSL_VERIFY"] = "false"
+        os.environ["TOOL_SSL_CERT"] = ""
+
+        config_extension = {
+            "extra_body": {
+                "thinking": {
+                    "type": "disabled"
+                }
+            }
+        }
+
+        # 4. 解析 LLM 配置
+        current_agent_config = Config().agent_config.model_dump()
+        current_agent_config["llm_config"]["general"] = {}
+        current_agent_config["llm_config"]["general"]["model_name"] = config["LLM_MODEL_NAME"]
+        current_agent_config["llm_config"]["general"]["model_type"] = config["LLM_MODEL_TYPE"]
+        current_agent_config["llm_config"]["general"]["base_url"] = config["LLM_BASE_URL"]
+        current_agent_config["llm_config"]["general"]["extension"] = config_extension
+        current_agent_config["llm_config"]["general"]["api_key"] = bytearray(config["LLM_API_KEY"],
+                                                                              encoding="utf-8")
+        current_agent_config["llm_config"]["general"]["verify_ssl"] = False
+
+        # 5. 解析搜索引擎配置
+        current_agent_config["web_search_engine_config"]["search_engine_name"] = config["WEB_SEARCH_ENGINE_NAME"]
+        current_agent_config["web_search_engine_config"]["search_api_key"] = bytearray(
+            config["WEB_SEARCH_API_KEY"], encoding="utf-8"
+        )
+        current_agent_config["web_search_engine_config"]["search_url"] = config["WEB_SEARCH_URL"]
+        current_agent_config["web_search_engine_config"]["max_web_search_results"] = (
+            config["MAX_WEB_SEARCH_RESULTS"]
+        )
+        current_agent_config["outliner_max_section_num"] = int(config["OUTLINER_MAX_SECTION_NUM"])
+
+        current_agent_config["workflow_human_in_the_loop"] = config["WORKFLOW_HUMAN_IN_THE_LOOP"]
+        current_agent_config["outline_interaction_enabled"] = config["OUTLINE_INTERACTION_ENABLED"]
+        current_agent_config["source_tracer_infer_switch"] = config["SOURCE_TRACER_INFER_SWITCHES"]
+        current_agent_config["vlm_chart_generator_enable"] = config["VLM_CHART_GENERATOR_ENABLE"]
+        current_agent_config["vlm_chart_generator_max_iterations"] = config["VLM_CHART_GENERATOR_MAX_ITERATIONS"]
+        if config["EXECUTION_METHOD"] == ExecutionMethod.DEPENDENCY_DRIVING.value:
+            current_agent_config["execution_method"] = ExecutionMethod.DEPENDENCY_DRIVING.value
+        else:
+            current_agent_config["execution_method"] = ExecutionMethod.PARALLEL.value
+
+        # 6. 直接执行工作流（阻塞等待）
+        report_dir = os.path.join(get_agent_workspace_dir(), "reports")
+        data = await self._run_jiuwen_workflow(
+            query,
+            current_agent_config,
+            "",
+            task_id=temp_task_id,
+            log_output_dir="",  # 使用默认日志目录
+        )
+
+        if not data:
+            raise ValueError("DeepResearch 返回空结果")
+
+        # 7. 写出报告文件
+        report_paths = await asyncio.to_thread(
+            self._write_report_artifacts,
+            data,
+            file_name,
+            report_dir,
+            task_id=temp_task_id,
+            cancel_event=None,  # 阻塞执行不支持取消
+        )
+
+        result = self._format_report_result(report_paths)
+
+        logger.info(
+            "[DeepResearchTaskManager] 阻塞执行任务完成 temp_task_id=%s result=%s",
+            temp_task_id,
+            result,
+            extra={'user_visible': 'critical'}
+        )
+
+        return result
 
 
 __all__ = [

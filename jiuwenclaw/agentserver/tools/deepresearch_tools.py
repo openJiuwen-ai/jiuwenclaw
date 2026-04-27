@@ -7,6 +7,7 @@ import json
 from openjiuwen.core.foundation.tool import tool
 
 from jiuwenclaw.agentserver.tools.deepresearch_task_manager import DeepResearchTaskManager
+from jiuwenclaw.config import get_config
 
 # 使用 contextvars
 _deepresearch_route_ctx: contextvars.ContextVar[dict[str, str] | None] = contextvars.ContextVar(
@@ -220,18 +221,73 @@ async def deepresearch_get_result(task_id: str) -> str:
     return result
 
 
+@tool(
+    name="deepresearch_run_task",
+    description=(
+        "执行深度研究任务，并阻塞等待生成独立的长文研究报告。"
+        "适用场景：独立的深度研究报告生成、全面市场调研、行业分析报告、政策解读报告。"
+        "与异步版本的区别：不提交到后台任务池，直接在当前协程执行，阻塞等待完成后返回结果。"
+        "执行时间较长（通常数分钟），会阻塞当前 Agent 会话直至完成。"
+        "⚠不适用场景：PPT制作辅助研究、PPT准备内容素材、单点数据查询、快速搜索"
+    ),
+)
+async def deepresearch_run_task(
+    query: str,
+    file_name: str,
+) -> str:
+    """阻塞执行 DeepResearch 任务并返回结果.
+
+    与 deepresearch_create_task 的区别：
+    - 不创建后台任务，直接在当前协程执行
+    - 不返回任务 ID，直接返回报告保存路径
+    - 阻塞等待完成，适合需要即时获取结果的场景
+    - 不受任务池资源限制
+
+    Args:
+        query: 研究查询
+        file_name: 报告文件名，不带后缀
+
+    Returns:
+        报告保存路径信息字符串
+    """
+    manager = await DeepResearchTaskManager.get_instance()
+    route = _get_route()
+    result = await manager.run_task_direct(
+        query=query,
+        file_name=file_name,
+        session_id=route.get("session_id", ""),
+        channel_id=route.get("channel_id", ""),
+        request_id=route.get("request_id", ""),
+    )
+    return result
+
+
+def enable_deepresearch() -> bool:
+    """检查 DeepResearch 工具是否启用.
+
+    Returns:
+        是否启用 DeepResearch 工具
+    """
+
+    try:
+        cfg = get_config()
+        if not bool(cfg.get("enable_deepresearch", True)):
+            return False
+        return True
+    except Exception:
+        return False
+
+
 def get_deepresearch_tools() -> list:
     """获取 DeepResearch 工具列表.
 
     Returns:
-        工具列表（仅包含任务池工具）
+        工具列表
     """
+    if not enable_deepresearch():
+        return []
     return [
-        deepresearch_create_task,
-        deepresearch_get_status,
-        deepresearch_list_tasks,
-        deepresearch_cancel_task,
-        deepresearch_get_result,
+        deepresearch_run_task,
     ]
 
 
@@ -241,5 +297,6 @@ __all__ = [
     "deepresearch_list_tasks",
     "deepresearch_cancel_task",
     "deepresearch_get_result",
+    "deepresearch_run_task",
     "get_deepresearch_tools",
 ]
