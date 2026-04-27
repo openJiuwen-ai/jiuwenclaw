@@ -340,6 +340,16 @@ def _patched_build_request_params(self, *, stream: bool, **kwargs) -> dict:
             params["stream_options"] = {"include_usage": True}
         elif isinstance(existing, dict) and "include_usage" not in existing:
             existing["include_usage"] = True
+    # Fallback max_tokens to environment variable if not configured
+    if params.get("max_tokens") is None:
+        env_max_tokens = os.environ.get("LLM_MAX_TOKENS")
+        if env_max_tokens:
+            try:
+                params["max_tokens"] = int(env_max_tokens)
+            except ValueError:
+                logger.warning(
+                    f"Invalid LLM_MAX_TOKENS env value: '{env_max_tokens}' (not an integer), ignoring"
+                )
     return params
 
 
