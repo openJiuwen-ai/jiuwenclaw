@@ -28,7 +28,6 @@ class ModelConfigUpdateRequest(BaseModel):
 
 class ModelConfigRecord(BaseModel):
     id: int
-    jiuwenclaw_id: str
     model_name: str
     model_type: str
     api_endpoint: str
@@ -56,7 +55,6 @@ class ChannelConfigDeactivateRequest(BaseModel):
 
 class ChannelConfigRecord(BaseModel):
     id: int
-    jiuwenclaw_id: str
     channel_id: str
     channel_name: str
     channel_type: str

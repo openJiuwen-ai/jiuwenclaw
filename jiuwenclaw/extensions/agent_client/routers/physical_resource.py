@@ -11,7 +11,6 @@ from jiuwenclaw.extensions.agent_client.schemas import ResponseModel, ResourceCo
 from jiuwenclaw.utils import get_user_workspace_dir
 
 physical_resource_router = APIRouter()
-DEFAULT_INSTANCE_ID = "gateway-default"
 
 
 def _resource_config_file() -> Path:
@@ -68,15 +67,14 @@ def _validate_resource_config(payload: dict[str, Any]) -> None:
         raise ValueError("memory_request cannot be greater than memory_limit")
 
 
-def _upsert_resource_config(jiuwenclaw_id: str, req: ResourceConfigUpdateRequest) -> dict[str, Any]:
+def _upsert_resource_config(req: ResourceConfigUpdateRequest) -> dict[str, Any]:
     now = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
-    key_instance = jiuwenclaw_id or "gateway-default"
     records = _read_records()
     normalized_component = (req.component or "agent_server").strip() or "agent_server"
 
     _validate_resource_config(req.model_dump())
     for row in records:
-        if row.get("jiuwenclaw_id") == key_instance and row.get("component") == normalized_component:
+        if row.get("component") == normalized_component:
             for field in (
                 "cpu_request",
                 "cpu_limit",
@@ -93,7 +91,6 @@ def _upsert_resource_config(jiuwenclaw_id: str, req: ResourceConfigUpdateRequest
 
     new_row = {
         "id": (max((int(x.get("id", 0)) for x in records), default=0) + 1),
-        "jiuwenclaw_id": key_instance,
         "component": normalized_component,
         "cpu_request": req.cpu_request or "500m",
         "cpu_limit": req.cpu_limit or "2000m",
@@ -109,12 +106,9 @@ def _upsert_resource_config(jiuwenclaw_id: str, req: ResourceConfigUpdateRequest
     return new_row
 
 
-def _query_resource_configs(jiuwenclaw_id: str, component: str | None) -> list[dict[str, Any]]:
-    key_instance = jiuwenclaw_id or "gateway-default"
+def _query_resource_configs(component: str | None) -> list[dict[str, Any]]:
     items: list[dict[str, Any]] = []
     for row in _read_records():
-        if row.get("jiuwenclaw_id") != key_instance:
-            continue
         if component and row.get("component") != component:
             continue
         item = dict(row)
@@ -131,7 +125,7 @@ def _query_resource_configs(jiuwenclaw_id: str, component: str | None) -> list[d
 async def update_instance_resources(
     request: ResourceConfigUpdateRequest,
 ) -> ResponseModel[dict[str, Any]]:
-    row = _upsert_resource_config(DEFAULT_INSTANCE_ID, request)
+    row = _upsert_resource_config(request)
     return ResponseModel(
         code=200,
         message="success",
@@ -151,7 +145,7 @@ async def update_instance_resources(
 async def get_instance_resources(
     component: str | None = Query(default=None),
 ) -> ResponseModel[dict[str, Any]]:
-    items = _query_resource_configs(DEFAULT_INSTANCE_ID, component)
+    items = _query_resource_configs(component)
     return ResponseModel(code=200, message="success", data={"items": items})
 
 
