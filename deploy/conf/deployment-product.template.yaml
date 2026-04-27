@@ -26,7 +26,11 @@ spec:
             - name: http
               containerPort: 19000
               protocol: TCP
-          env: []
+          env:
+            - name: HEARTBEAT_ENABLED
+              value: "FALSE"
+            - name: SYNC_CONFIG_ON_STARTUP
+              value: "FALSE"
           volumeMounts:
             - name: gateway-config
               mountPath: /home/app/.jiuwenclaw/config/config.yaml
