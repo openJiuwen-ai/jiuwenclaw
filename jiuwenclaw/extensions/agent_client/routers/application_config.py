@@ -21,7 +21,6 @@ from jiuwenclaw.extensions.agent_client.schemas import (
 from jiuwenclaw.utils import get_user_workspace_dir
 
 application_config_router = APIRouter()
-DEFAULT_INSTANCE_ID = "gateway-default"
 
 
 def _model_config_file() -> Path:
@@ -90,7 +89,7 @@ def _validate_channel_payload(payload: dict[str, Any]) -> None:
         raise ValueError("status must be active or inactive")
 
 
-def _create_model_config(jiuwenclaw_id: str, request: ModelConfigCreateRequest) -> dict[str, Any]:
+def _create_model_config(request: ModelConfigCreateRequest) -> dict[str, Any]:
     records = _read_model_config_records()
     now = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
     payload = request.model_dump()
@@ -98,7 +97,6 @@ def _create_model_config(jiuwenclaw_id: str, request: ModelConfigCreateRequest) 
     new_id = max((int(row.get("id", 0)) for row in records), default=0) + 1
     row = {
         "id": new_id,
-        "jiuwenclaw_id": jiuwenclaw_id,
         "model_name": payload["model_name"].strip(),
         "model_type": payload["model_type"].strip(),
         "api_endpoint": payload["api_endpoint"].strip(),
@@ -115,14 +113,11 @@ def _create_model_config(jiuwenclaw_id: str, request: ModelConfigCreateRequest) 
 
 
 def _list_model_configs(
-    jiuwenclaw_id: str,
     model_type: str | None = None,
     enabled: bool | None = None,
 ) -> list[dict[str, Any]]:
     items: list[dict[str, Any]] = []
     for row in _read_model_config_records():
-        if row.get("jiuwenclaw_id") != jiuwenclaw_id:
-            continue
         if model_type and row.get("model_type") != model_type:
             continue
         if enabled is not None and bool(row.get("enabled")) != enabled:
@@ -131,13 +126,11 @@ def _list_model_configs(
     return items
 
 
-def _update_model_config(jiuwenclaw_id: str, model_id: int, request: ModelConfigUpdateRequest) -> bool:
+def _update_model_config(model_id: int, request: ModelConfigUpdateRequest) -> bool:
     records = _read_model_config_records()
     now = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
     updated = False
     for row in records:
-        if row.get("jiuwenclaw_id") != jiuwenclaw_id:
-            continue
         if int(row.get("id", -1)) != model_id:
             continue
         for field in (
@@ -161,12 +154,12 @@ def _update_model_config(jiuwenclaw_id: str, model_id: int, request: ModelConfig
     return updated
 
 
-def _delete_model_config(jiuwenclaw_id: str, model_id: int) -> bool:
+def _delete_model_config(model_id: int) -> bool:
     records = _read_model_config_records()
     kept: list[dict[str, Any]] = []
     deleted = False
     for row in records:
-        if row.get("jiuwenclaw_id") == jiuwenclaw_id and int(row.get("id", -1)) == model_id:
+        if int(row.get("id", -1)) == model_id:
             deleted = True
             continue
         kept.append(row)
@@ -194,20 +187,19 @@ def _parse_import_file(file_name: str, text: str) -> list[dict[str, Any]]:
     raise ValueError("file must be .csv or .json")
 
 
-def _register_channel(jiuwenclaw_id: str, request: ChannelConfigCreateRequest) -> dict[str, Any]:
+def _register_channel(request: ChannelConfigCreateRequest) -> dict[str, Any]:
     records = _read_channel_config_records()
     now = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
     payload = request.model_dump()
     _validate_channel_payload(payload)
 
     for row in records:
-        if row.get("jiuwenclaw_id") == jiuwenclaw_id and row.get("channel_id") == payload["channel_id"]:
+        if row.get("channel_id") == payload["channel_id"]:
             raise ValueError("channel_id already exists")
 
     new_id = max((int(row.get("id", 0)) for row in records), default=0) + 1
     row = {
         "id": new_id,
-        "jiuwenclaw_id": jiuwenclaw_id,
         "channel_id": payload["channel_id"].strip(),
         "channel_name": payload["channel_name"].strip(),
         "channel_type": payload["channel_type"].strip(),
@@ -223,14 +215,11 @@ def _register_channel(jiuwenclaw_id: str, request: ChannelConfigCreateRequest) -
 
 
 def _list_channels(
-    jiuwenclaw_id: str,
     channel_type: str | None = None,
     status: str | None = None,
 ) -> list[dict[str, Any]]:
     items: list[dict[str, Any]] = []
     for row in _read_channel_config_records():
-        if row.get("jiuwenclaw_id") != jiuwenclaw_id:
-            continue
         if channel_type and row.get("channel_type") != channel_type:
             continue
         if status and row.get("status") != status:
@@ -240,14 +229,13 @@ def _list_channels(
 
 
 def _set_channel_status(
-    jiuwenclaw_id: str,
     channel_id: str,
     target_status: str,
 ) -> dict[str, Any] | None:
     records = _read_channel_config_records()
     now = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
     for row in records:
-        if row.get("jiuwenclaw_id") == jiuwenclaw_id and row.get("channel_id") == channel_id:
+        if row.get("channel_id") == channel_id:
             row["status"] = target_status
             row["updated_at"] = now
             _write_channel_config_records(records)
@@ -255,12 +243,12 @@ def _set_channel_status(
     return None
 
 
-def _delete_channel(jiuwenclaw_id: str, channel_id: str) -> bool:
+def _delete_channel(channel_id: str) -> bool:
     records = _read_channel_config_records()
     kept: list[dict[str, Any]] = []
     deleted = False
     for row in records:
-        if row.get("jiuwenclaw_id") == jiuwenclaw_id and row.get("channel_id") == channel_id:
+        if row.get("channel_id") == channel_id:
             deleted = True
             continue
         kept.append(row)
@@ -274,7 +262,7 @@ async def create_model_config(
     request: ModelConfigCreateRequest,
 ) -> ResponseModel[dict[str, Any]]:
     try:
-        row = _create_model_config(DEFAULT_INSTANCE_ID, request)
+        row = _create_model_config(request)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return ResponseModel(
@@ -293,7 +281,7 @@ async def list_model_configs(
     model_type: str | None = Query(default=None),
     enabled: bool | None = Query(default=None),
 ) -> ResponseModel[dict[str, Any]]:
-    items = _list_model_configs(DEFAULT_INSTANCE_ID, model_type=model_type, enabled=enabled)
+    items = _list_model_configs(model_type=model_type, enabled=enabled)
     brief_items = [
         {
             "model_id": item["id"],
@@ -330,7 +318,7 @@ async def import_model_configs(
                 rate_limit=row.get("rate_limit") if isinstance(row.get("rate_limit"), dict) else {},
                 enabled=bool(row.get("enabled", True)),
             )
-            _create_model_config(DEFAULT_INSTANCE_ID, req)
+            _create_model_config(req)
             success += 1
         except Exception as exc:
             errors.append({"row": idx, "error": str(exc)})
@@ -353,7 +341,7 @@ async def update_model_config(
     request: ModelConfigUpdateRequest,
 ) -> ResponseModel[None]:
     try:
-        updated = _update_model_config(DEFAULT_INSTANCE_ID, model_id, request)
+        updated = _update_model_config(model_id, request)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     if not updated:
@@ -363,7 +351,7 @@ async def update_model_config(
 
 @application_config_router.delete("/models/{model_id}")
 async def delete_model_config(model_id: int) -> ResponseModel[None]:
-    deleted = _delete_model_config(DEFAULT_INSTANCE_ID, model_id)
+    deleted = _delete_model_config(model_id)
     if not deleted:
         raise HTTPException(status_code=404, detail="model config not found")
     return ResponseModel(code=200, message="success")
@@ -374,7 +362,7 @@ async def register_channel(
     request: ChannelConfigCreateRequest,
 ) -> ResponseModel[dict[str, Any]]:
     try:
-        row = _register_channel(DEFAULT_INSTANCE_ID, request)
+        row = _register_channel(request)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return ResponseModel(
@@ -393,7 +381,7 @@ async def list_channels(
     channel_type: str | None = Query(default=None),
     status: str | None = Query(default=None),
 ) -> ResponseModel[dict[str, Any]]:
-    items = _list_channels(DEFAULT_INSTANCE_ID, channel_type=channel_type, status=status)
+    items = _list_channels(channel_type=channel_type, status=status)
     brief_items = [
         {
             "id": item["id"],
@@ -409,7 +397,7 @@ async def list_channels(
 
 @application_config_router.post("/channels/{channel_id}/activate")
 async def activate_channel(channel_id: str) -> ResponseModel[dict[str, Any]]:
-    row = _set_channel_status(DEFAULT_INSTANCE_ID, channel_id, "active")
+    row = _set_channel_status(channel_id, "active")
     if row is None:
         raise HTTPException(status_code=404, detail="channel not found")
     return ResponseModel(
@@ -425,7 +413,7 @@ async def deactivate_channel(
     request: ChannelConfigDeactivateRequest,
 ) -> ResponseModel[dict[str, Any]]:
     # graceful/timeout are accepted for workflow compatibility; persisted in config metadata.
-    row = _set_channel_status(DEFAULT_INSTANCE_ID, channel_id, "inactive")
+    row = _set_channel_status(channel_id, "inactive")
     if row is None:
         raise HTTPException(status_code=404, detail="channel not found")
     meta = row.get("config") if isinstance(row.get("config"), dict) else {}
@@ -434,7 +422,7 @@ async def deactivate_channel(
     row["updated_at"] = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
     records = _read_channel_config_records()
     for item in records:
-        if item.get("jiuwenclaw_id") == DEFAULT_INSTANCE_ID and item.get("channel_id") == channel_id:
+        if item.get("channel_id") == channel_id:
             item.update(row)
             break
     _write_channel_config_records(records)
@@ -447,7 +435,7 @@ async def deactivate_channel(
 
 @application_config_router.delete("/channels/{channel_id}")
 async def unregister_channel(channel_id: str) -> ResponseModel[None]:
-    deleted = _delete_channel(DEFAULT_INSTANCE_ID, channel_id)
+    deleted = _delete_channel(channel_id)
     if not deleted:
         raise HTTPException(status_code=404, detail="channel not found")
     return ResponseModel(code=200, message="success")

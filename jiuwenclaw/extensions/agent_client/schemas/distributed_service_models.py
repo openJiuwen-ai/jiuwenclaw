@@ -15,7 +15,6 @@ class AgentServerConfigUpdateRequest(BaseModel):
 
 class InstanceConfigRecord(BaseModel):
     id: int
-    jiuwenclaw_id: str
     component: str = Field(default="agent_server")
     min_replicas: int
     max_replicas: int
@@ -76,7 +75,6 @@ class TenantIsolationPolicyUpdateRequest(BaseModel):
 
 class TenantIsolationPolicyRecord(BaseModel):
     id: int
-    jiuwenclaw_id: str
     policy_name: str
     isolation_level: str
     selector: dict[str, Any]
@@ -98,7 +96,6 @@ class SessionAffinityPolicyUpdateRequest(BaseModel):
 
 class SessionAffinityPolicyRecord(BaseModel):
     id: int
-    jiuwenclaw_id: str
     policy_name: str
     affinity_type: str
     session_ttl: int

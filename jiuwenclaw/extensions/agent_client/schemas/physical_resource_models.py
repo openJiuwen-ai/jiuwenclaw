@@ -17,7 +17,6 @@ class ResourceConfigUpdateRequest(BaseModel):
 
 class ResourceConfigRecord(BaseModel):
     id: int
-    jiuwenclaw_id: str
     component: str
     cpu_request: str
     cpu_limit: str

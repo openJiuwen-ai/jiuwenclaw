@@ -21,7 +21,6 @@ from jiuwenclaw.extensions.agent_client.schemas import (
 from jiuwenclaw.utils import get_user_workspace_dir
 
 distributed_service_router = APIRouter()
-DEFAULT_INSTANCE_ID = "gateway-default"
 
 
 def _instance_config_file() -> Path:
@@ -153,13 +152,12 @@ def _validate_update(req: AgentServerConfigUpdateRequest, old: dict[str, Any] | 
         raise ValueError("autoscale_metrics.memory_target must be in [1, 100]")
 
 
-def _upsert_config(jiuwenclaw_id: str, req: AgentServerConfigUpdateRequest) -> dict[str, Any]:
-    key_instance = jiuwenclaw_id or "gateway-default"
+def _upsert_config(req: AgentServerConfigUpdateRequest) -> dict[str, Any]:
     records = _read_records()
     now = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
     target = None
     for row in records:
-        if row.get("jiuwenclaw_id") == key_instance and row.get("component") == "agent_server":
+        if row.get("component") == "agent_server":
             target = row
             break
 
@@ -172,7 +170,6 @@ def _upsert_config(jiuwenclaw_id: str, req: AgentServerConfigUpdateRequest) -> d
         max_replicas = req.max_replicas if req.max_replicas is not None else 3
         target = {
             "id": max((int(r.get("id", 0)) for r in records), default=0) + 1,
-            "jiuwenclaw_id": key_instance,
             "component": "agent_server",
             "min_replicas": min_replicas,
             "max_replicas": max_replicas,
@@ -210,15 +207,13 @@ def _upsert_config(jiuwenclaw_id: str, req: AgentServerConfigUpdateRequest) -> d
     return target
 
 
-def _get_config(jiuwenclaw_id: str) -> dict[str, Any]:
-    key_instance = jiuwenclaw_id or "gateway-default"
+def _get_config() -> dict[str, Any]:
     for row in _read_records():
-        if row.get("jiuwenclaw_id") == key_instance and row.get("component") == "agent_server":
+        if row.get("component") == "agent_server":
             return row
     now = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
     return {
         "id": 0,
-        "jiuwenclaw_id": key_instance,
         "component": "agent_server",
         "min_replicas": 1,
         "max_replicas": 3,
@@ -234,11 +229,10 @@ def _get_config(jiuwenclaw_id: str) -> dict[str, Any]:
     }
 
 
-def _default_service_statuses(jiuwenclaw_id: str) -> list[dict[str, Any]]:
+def _default_service_statuses() -> list[dict[str, Any]]:
     now = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
     return [
         {
-            "jiuwenclaw_id": jiuwenclaw_id,
             "pod_name": "agent-server-0",
             "component": "agent_server",
             "status": "Running",
@@ -261,11 +255,10 @@ def _default_service_statuses(jiuwenclaw_id: str) -> list[dict[str, Any]]:
     ]
 
 
-def _default_session_mappings(jiuwenclaw_id: str) -> list[dict[str, Any]]:
+def _default_session_mappings() -> list[dict[str, Any]]:
     now = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
     return [
         {
-            "jiuwenclaw_id": jiuwenclaw_id,
             "session_id": "sess-123456",
             "user_id": "user-001",
             "group_id": "group-001",
@@ -278,12 +271,11 @@ def _default_session_mappings(jiuwenclaw_id: str) -> list[dict[str, Any]]:
     ]
 
 
-def _default_isolation_policies(jiuwenclaw_id: str) -> list[dict[str, Any]]:
+def _default_isolation_policies() -> list[dict[str, Any]]:
     now = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
     return [
         {
             "id": 1,
-            "jiuwenclaw_id": jiuwenclaw_id,
             "policy_name": "VIP用户隔离策略",
             "isolation_level": "user",
             "selector": {"user_tier": "vip"},
@@ -297,12 +289,11 @@ def _default_isolation_policies(jiuwenclaw_id: str) -> list[dict[str, Any]]:
     ]
 
 
-def _default_session_affinity_policies(jiuwenclaw_id: str) -> list[dict[str, Any]]:
+def _default_session_affinity_policies() -> list[dict[str, Any]]:
     now = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
     return [
         {
             "id": 1,
-            "jiuwenclaw_id": jiuwenclaw_id,
             "policy_name": "默认session亲和策略",
             "affinity_type": "session_id",
             "session_ttl": 3600,
@@ -315,14 +306,11 @@ def _default_session_affinity_policies(jiuwenclaw_id: str) -> list[dict[str, Any
 
 
 def _query_service_statuses(
-    jiuwenclaw_id: str,
     component: str | None = None,
     status: str | None = None,
 ) -> list[dict[str, Any]]:
     records = _read_service_status_records()
-    scoped = [x for x in records if x.get("jiuwenclaw_id") == jiuwenclaw_id]
-    if not scoped:
-        scoped = _default_service_statuses(jiuwenclaw_id)
+    scoped = records if records else _default_service_statuses()
 
     items: list[dict[str, Any]] = []
     for row in scoped:
@@ -335,8 +323,8 @@ def _query_service_statuses(
     return items
 
 
-def _get_service_detail(jiuwenclaw_id: str, pod_name: str) -> dict[str, Any] | None:
-    items = _query_service_statuses(jiuwenclaw_id)
+def _get_service_detail(pod_name: str) -> dict[str, Any] | None:
+    items = _query_service_statuses()
     for item in items:
         if item.get("pod_name") == pod_name:
             return item
@@ -344,7 +332,6 @@ def _get_service_detail(jiuwenclaw_id: str, pod_name: str) -> dict[str, Any] | N
 
 
 def _query_session_mappings(
-    jiuwenclaw_id: str,
     *,
     session_id: str | None = None,
     user_id: str | None = None,
@@ -352,9 +339,7 @@ def _query_session_mappings(
     bot_id: str | None = None,
 ) -> list[dict[str, Any]]:
     records = _read_session_mapping_records()
-    scoped = [x for x in records if x.get("jiuwenclaw_id") == jiuwenclaw_id]
-    if not scoped:
-        scoped = _default_session_mappings(jiuwenclaw_id)
+    scoped = records if records else _default_session_mappings()
 
     items: list[dict[str, Any]] = []
     for row in scoped:
@@ -370,23 +355,20 @@ def _query_session_mappings(
     return items
 
 
-def _get_session_detail(jiuwenclaw_id: str, session_id: str) -> dict[str, Any] | None:
-    items = _query_session_mappings(jiuwenclaw_id, session_id=session_id)
+def _get_session_detail(session_id: str) -> dict[str, Any] | None:
+    items = _query_session_mappings(session_id=session_id)
     if not items:
         return None
     return items[0]
 
 
 def _query_isolation_policies(
-    jiuwenclaw_id: str,
     *,
     isolation_level: str | None = None,
     enabled: bool | None = None,
 ) -> list[dict[str, Any]]:
     records = _read_isolation_policy_records()
-    scoped = [x for x in records if x.get("jiuwenclaw_id") == jiuwenclaw_id]
-    if not scoped:
-        scoped = _default_isolation_policies(jiuwenclaw_id)
+    scoped = records if records else _default_isolation_policies()
 
     items: list[dict[str, Any]] = []
     for row in scoped:
@@ -400,19 +382,16 @@ def _query_isolation_policies(
 
 
 def _update_isolation_policy(
-    jiuwenclaw_id: str,
     policy_id: int,
     request: TenantIsolationPolicyUpdateRequest,
 ) -> bool:
     records = _read_isolation_policy_records()
     if not records:
-        records = _default_isolation_policies(jiuwenclaw_id)
+        records = _default_isolation_policies()
     now = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
     updated = False
     for row in records:
-        if row.get("jiuwenclaw_id") != jiuwenclaw_id:
-            continue
         if int(row.get("id", -1)) != policy_id:
             continue
         for field in (
@@ -458,59 +437,36 @@ def _validate_session_affinity_update(
 
 
 def _upsert_session_affinity_policy(
-    jiuwenclaw_id: str,
     request: SessionAffinityPolicyUpdateRequest,
 ) -> dict[str, Any]:
     records = _read_session_affinity_policy_records()
     if not records:
-        records = _default_session_affinity_policies(jiuwenclaw_id)
+        records = _default_session_affinity_policies()
     now = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
-    target = None
-    for row in records:
-        if row.get("jiuwenclaw_id") == jiuwenclaw_id:
-            target = row
-            break
+    target = records[0]
 
     _validate_session_affinity_update(request, target)
 
-    if target is None:
-        target = {
-            "id": max((int(r.get("id", 0)) for r in records), default=0) + 1,
-            "jiuwenclaw_id": jiuwenclaw_id,
-            "policy_name": request.policy_name or "默认session亲和策略",
-            "affinity_type": request.affinity_type or "session_id",
-            "session_ttl": request.session_ttl if request.session_ttl is not None else 3600,
-            "max_concurrent_per_session": request.max_concurrent_per_session
-            if request.max_concurrent_per_session is not None
-            else 10,
-            "failover_enabled": request.failover_enabled if request.failover_enabled is not None else True,
-            "created_at": now,
-            "updated_at": now,
-        }
-        records.append(target)
-    else:
-        for field in (
-            "policy_name",
-            "affinity_type",
-            "session_ttl",
-            "max_concurrent_per_session",
-            "failover_enabled",
-        ):
-            value = getattr(request, field)
-            if value is not None:
-                target[field] = value
-        target["updated_at"] = now
+    for field in (
+        "policy_name",
+        "affinity_type",
+        "session_ttl",
+        "max_concurrent_per_session",
+        "failover_enabled",
+    ):
+        value = getattr(request, field)
+        if value is not None:
+            target[field] = value
+    target["updated_at"] = now
 
     _write_session_affinity_policy_records(records)
     return SessionAffinityPolicyRecord(**target).model_dump(mode="json")
 
 
-def _get_session_affinity_policy(jiuwenclaw_id: str) -> dict[str, Any]:
+def _get_session_affinity_policy() -> dict[str, Any]:
     records = _read_session_affinity_policy_records()
-    scoped = [x for x in records if x.get("jiuwenclaw_id") == jiuwenclaw_id]
-    if not scoped:
-        scoped = _default_session_affinity_policies(jiuwenclaw_id)
+    scoped = records if records else _default_session_affinity_policies()
     row = scoped[0]
     return SessionAffinityPolicyRecord(**row).model_dump(mode="json")
 
@@ -519,7 +475,7 @@ def _get_session_affinity_policy(jiuwenclaw_id: str) -> dict[str, Any]:
 async def update_instance_agent_server_config(
     request: AgentServerConfigUpdateRequest,
 ) -> ResponseModel[dict[str, Any]]:
-    row = _upsert_config(DEFAULT_INSTANCE_ID, request)
+    row = _upsert_config(request)
     return ResponseModel(
         code=200,
         message="success",
@@ -540,7 +496,7 @@ async def update_instance_agent_server_config(
 
 @distributed_service_router.get("/agent-server/config")
 async def get_instance_agent_server_config() -> ResponseModel[dict[str, Any]]:
-    row = _get_config(DEFAULT_INSTANCE_ID)
+    row = _get_config()
     return ResponseModel(
         code=200,
         message="success",
@@ -565,7 +521,6 @@ async def get_instance_service_status_list(
     status: str | None = Query(default=None),
 ) -> ResponseModel[dict[str, Any]]:
     items = _query_service_statuses(
-        jiuwenclaw_id=DEFAULT_INSTANCE_ID,
         component=component,
         status=status,
     )
@@ -574,7 +529,7 @@ async def get_instance_service_status_list(
 
 @distributed_service_router.get("/services/{pod_name}")
 async def get_instance_service_detail(pod_name: str) -> ResponseModel[dict[str, Any]]:
-    detail = _get_service_detail(jiuwenclaw_id=DEFAULT_INSTANCE_ID, pod_name=pod_name)
+    detail = _get_service_detail(pod_name=pod_name)
     if detail is None:
         raise HTTPException(status_code=404, detail="service pod not found")
     return ResponseModel(code=200, message="success", data=detail)
@@ -585,7 +540,6 @@ async def get_instance_session_mapping_list(
     query: Annotated[SessionMappingListQueryRequest, Depends()],
 ) -> ResponseModel[dict[str, Any]]:
     items = _query_session_mappings(
-        DEFAULT_INSTANCE_ID,
         session_id=query.session_id,
         user_id=query.user_id,
         group_id=query.group_id,
@@ -609,7 +563,7 @@ async def get_instance_session_mapping_list(
 
 @distributed_service_router.get("/sessions/{session_id}")
 async def get_instance_session_mapping_detail(session_id: str) -> ResponseModel[dict[str, Any]]:
-    detail = _get_session_detail(jiuwenclaw_id=DEFAULT_INSTANCE_ID, session_id=session_id)
+    detail = _get_session_detail(session_id=session_id)
     if detail is None:
         raise HTTPException(status_code=404, detail="session mapping not found")
     return ResponseModel(code=200, message="success", data=detail)
@@ -621,7 +575,6 @@ async def get_instance_isolation_policy_list(
     enabled: bool | None = Query(default=None),
 ) -> ResponseModel[dict[str, Any]]:
     items = _query_isolation_policies(
-        jiuwenclaw_id=DEFAULT_INSTANCE_ID,
         isolation_level=isolation_level,
         enabled=enabled,
     )
@@ -644,7 +597,6 @@ async def update_instance_isolation_policy(
     request: TenantIsolationPolicyUpdateRequest,
 ) -> ResponseModel[None]:
     updated = _update_isolation_policy(
-        jiuwenclaw_id=DEFAULT_INSTANCE_ID,
         policy_id=policy_id,
         request=request,
     )
@@ -657,7 +609,7 @@ async def update_instance_isolation_policy(
 async def update_instance_session_affinity_policy(
     request: SessionAffinityPolicyUpdateRequest,
 ) -> ResponseModel[dict[str, Any]]:
-    row = _upsert_session_affinity_policy(jiuwenclaw_id=DEFAULT_INSTANCE_ID, request=request)
+    row = _upsert_session_affinity_policy(request)
     return ResponseModel(
         code=200,
         message="success",
@@ -673,7 +625,7 @@ async def update_instance_session_affinity_policy(
 
 @distributed_service_router.get("/session-affinity")
 async def get_instance_session_affinity_policy() -> ResponseModel[dict[str, Any]]:
-    row = _get_session_affinity_policy(DEFAULT_INSTANCE_ID)
+    row = _get_session_affinity_policy()
     return ResponseModel(
         code=200,
         message="success",
