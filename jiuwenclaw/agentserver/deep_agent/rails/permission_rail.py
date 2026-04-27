@@ -28,6 +28,7 @@ from jiuwenclaw.agentserver.permissions.suggestions import build_permission_sugg
 from jiuwenclaw.config import get_config
 from jiuwenclaw.agentserver.permissions.checker import (
     TOOL_PERMISSION_CHANNEL_ID,
+    ToolPermissionLog,
     assess_command_risk_static,
     assess_shell_targets_risk_static,
 )
@@ -736,27 +737,36 @@ class PermissionInterruptRail(ConfirmInterruptRail):
             )
 
             if result.permission == PermissionLevel.ALLOW:
-                logger.info(
-                    "[PermissionEngine] permission.rail.result tool=%s decision=allow matched_rule=%s",
-                    tool_name,
-                    result.matched_rule,
-                )
+                logger.info(ToolPermissionLog(
+                    tool=tool_name,
+                    decision="ALLOW",
+                    source="system",
+                    rule=result.matched_rule or "N/A",
+                    channel=self._resolve_channel_id() or "empty",
+                    session_id=self._resolve_session_id(ctx) or "N/A",
+                ).to_json(), extra={'component': 'permissions'})
                 return self.approve()
 
             if result.permission == PermissionLevel.DENY:
-                logger.warning(
-                    "[PermissionEngine] permission.rail.result tool=%s decision=deny matched_rule=%s",
-                    tool_name,
-                    result.matched_rule,
-                )
+                logger.warning(ToolPermissionLog(
+                    tool=tool_name,
+                    decision="DENY",
+                    source="system",
+                    rule=result.matched_rule or "N/A",
+                    channel=self._resolve_channel_id() or "empty",
+                    session_id=self._resolve_session_id(ctx) or "N/A",
+                ).to_json(), extra={'component': 'permissions'})
                 return self.reject(tool_result=f"[PERMISSION_DENIED] {result.reason or 'Operation not allowed'}")
 
             if self._is_auto_confirmed(auto_confirm_config, auto_confirm_key):
-                logger.info(
-                    "[PermissionEngine] permission.auto_confirm.hit tool=%s key=%s",
-                    tool_name,
-                    auto_confirm_key,
-                )
+                logger.info(ToolPermissionLog(
+                    tool=tool_name,
+                    decision="ALLOW",
+                    source="system",
+                    rule=f"auto_confirm:{auto_confirm_key}",
+                    channel=self._resolve_channel_id() or "empty",
+                    session_id=self._resolve_session_id(ctx) or "N/A",
+                ).to_json(), extra={'component': 'permissions'})
                 return self.approve()
 
             resolved_channel = self._resolve_channel_id()
@@ -816,26 +826,37 @@ class PermissionInterruptRail(ConfirmInterruptRail):
                     self._store_auto_confirm(ctx, auto_confirm_key)
                 if confirm_payload.approved:
                     decision = "allow_always" if confirm_payload.persist_allow else "allow_once"
-                    logger.info(
-                        "[PermissionEngine] permission.user.decision tool=%s channel=acp decision=%s persisted=%s",
-                        tool_name,
-                        decision,
-                        persisted,
-                    )
+                    logger.info(ToolPermissionLog(
+                        tool=tool_name,
+                        decision="ALLOW",
+                        source="user",
+                        rule=result.matched_rule or "N/A",
+                        user_decision=decision,
+                        channel="acp",
+                        session_id=self._resolve_session_id(ctx) or "N/A",
+                    ).to_json(), extra={'component': 'permissions'})
                     return self.approve()
-                logger.info(
-                    "[PermissionEngine] permission.user.decision tool=%s channel=acp decision=deny",
-                    tool_name,
-                )
+                logger.info(ToolPermissionLog(
+                    tool=tool_name,
+                    decision="DENY",
+                    source="user",
+                    rule=result.matched_rule or "N/A",
+                    user_decision="deny",
+                    channel="acp",
+                    session_id=self._resolve_session_id(ctx) or "N/A",
+                ).to_json(), extra={'component': 'permissions'})
                 return self.reject(
                     tool_result=confirm_payload.feedback or "[PERMISSION_REJECTED] User rejected the request."
                 )
 
-            logger.info(
-                "[PermissionEngine] permission.interrupt.ask tool=%s matched_rule=%s",
-                tool_name,
-                result.matched_rule,
-            )
+            logger.info(ToolPermissionLog(
+                tool=tool_name,
+                decision="ASK",
+                source="system",
+                rule=result.matched_rule or "N/A",
+                channel=self._resolve_channel_id() or "empty",
+                session_id=self._resolve_session_id(ctx) or "N/A",
+            ).to_json(), extra={'component': 'permissions'})
             self._store_pending_permission_context(
                 ctx,
                 tool_call_id,
@@ -909,20 +930,26 @@ class PermissionInterruptRail(ConfirmInterruptRail):
 
         if payload.approved:
             decision = "allow_always" if payload.persist_allow else "allow_once"
-            logger.info(
-                "[PermissionEngine] permission.user.decision tool=%s channel=%s decision=%s persisted=%s",
-                tool_name,
-                self._resolve_channel_id(),
-                decision,
-                persisted,
-            )
+            logger.info(ToolPermissionLog(
+                tool=tool_name,
+                decision="ALLOW",
+                source="user",
+                rule=pending_context.get("matched_rule") if pending_context else "N/A",
+                user_decision=decision,
+                channel=resolved_channel or "empty",
+                session_id=self._resolve_session_id(ctx) or "N/A",
+            ).to_json(), extra={'component': 'permissions'})
             return self.approve()
 
-        logger.info(
-            "[PermissionEngine] permission.user.decision tool=%s channel=%s decision=deny",
-            tool_name,
-            self._resolve_channel_id(),
-        )
+        logger.info(ToolPermissionLog(
+            tool=tool_name,
+            decision="DENY",
+            source="user",
+            rule=pending_context.get("matched_rule") if pending_context else "N/A",
+            user_decision="deny",
+            channel=resolved_channel or "empty",
+            session_id=self._resolve_session_id(ctx) or "N/A",
+        ).to_json(), extra={'component': 'permissions'})
         return self.reject(tool_result=payload.feedback or "[PERMISSION_REJECTED] User rejected the request.")
 
     @staticmethod

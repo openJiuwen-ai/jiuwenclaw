@@ -188,6 +188,9 @@ class _ComponentNameFilter(logging.Filter):
         self.component = component
 
     def filter(self, record: logging.LogRecord) -> bool:
+        # 优先使用 extra 中的 component 标记，允许精确控制特定日志行
+        if hasattr(record, 'component'):
+            return record.component == self.component
         return _log_component_from_logger_name(record.name) == self.component
 
 

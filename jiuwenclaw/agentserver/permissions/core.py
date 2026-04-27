@@ -18,7 +18,7 @@ import logging
 from pathlib import Path
 from typing import Any
 
-from jiuwenclaw.agentserver.permissions.checker import PERMISSION_ENABLED_CHANNELS
+from jiuwenclaw.agentserver.permissions.checker import PERMISSION_ENABLED_CHANNELS, ToolPermissionLog
 from jiuwenclaw.agentserver.permissions.command_intent import (
     CommandIntent,
     collect_command_intents,
@@ -237,7 +237,14 @@ class PermissionEngine:
         )
 
         if not self._enabled:
-            logger.info("[PermissionEngine] permission.check.skip reason=system_disabled decision=allow")
+            logger.info(ToolPermissionLog(
+                tool="N/A",
+                decision="SKIP",
+                source="system",
+                rule="system_disabled",
+                channel=channel_id or "empty",
+                session_id=session_id or "empty",
+            ).to_json(), extra={'component': 'permissions'})
             return PermissionResult(
                 permission=PermissionLevel.ALLOW,
                 reason="Permission system is disabled",
@@ -245,10 +252,14 @@ class PermissionEngine:
 
         normalized_channel = (channel_id or "").strip() or "web"
         if normalized_channel not in PERMISSION_ENABLED_CHANNELS:
-            logger.info(
-                "[PermissionEngine] permission.check.skip reason=channel_disabled channel=%s",
-                normalized_channel,
-            )
+            logger.info(ToolPermissionLog(
+                tool="N/A",
+                decision="SKIP",
+                source="system",
+                rule="channel_filter",
+                channel=normalized_channel,
+                session_id=session_id or "empty",
+            ).to_json(), extra={'component': 'permissions'})
             return PermissionResult(
                 permission=PermissionLevel.ALLOW,
                 reason=f"Skipped for channel: {normalized_channel}",
