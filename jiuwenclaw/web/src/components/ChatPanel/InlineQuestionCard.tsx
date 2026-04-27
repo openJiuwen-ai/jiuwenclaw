@@ -196,6 +196,13 @@ export function InlineQuestionCard({ onSubmit }: InlineQuestionCardProps) {
             </button>
           )}
         </div>
+        {isAskTool &&
+        typeof pendingQuestion.expires_at_ms === 'number' &&
+        Number.isFinite(pendingQuestion.expires_at_ms) ? (
+          <div className="px-4 pb-2 text-[11px] leading-snug" style={{ color: 'var(--muted)' }}>
+            截止：{new Date(pendingQuestion.expires_at_ms).toLocaleString(undefined, { hour12: false })}
+          </div>
+        ) : null}
 
         {/* 问题列表 */}
         <div
