@@ -306,6 +306,152 @@ def test_deep_adapter_handle_user_answer_ignores_team_plan_approval_compat(monke
     assert response.payload["resolved"] is False
 
 
+def test_build_inputs_threads_workspace_dir_into_cwd(monkeypatch, tmp_path):
+    """``params.workspace_dir`` scopes a single prompt's cwd AND workspace to
+    the supplied directory and creates it on demand. Threaded into BOTH
+    ``inputs["cwd"]`` (so tools that read ``get_cwd()`` resolve relative paths
+    against it) and ``inputs["workspace_dir"]`` (so the deep adapter forwards
+    it as the workspace override on ``init_cwd``, which controls
+    ``fs_operation``'s sandbox enforcement for absolute-path writes). Used by
+    external drivers (IDE plugins, headless evaluators) that allocate a
+    per-invocation scratch dir.
+    """
+    from jiuwenswarm.server.runtime.agent_adapter import interface as interface_module
+
+    class FakeSkillManager:
+        def __init__(self, workspace_dir=None):
+            self.workspace_dir = workspace_dir
+            self.hook = None
+
+        def set_skillnet_install_complete_hook(self, hook):
+            self.hook = hook
+
+    class FakeSessionManager:
+        @staticmethod
+        def get_session_id(session_id):
+            return session_id or "default"
+
+        async def submit_and_wait(self, _session_id, task_func):
+            return await task_func()
+
+    class FakeAdapter:
+        def __init__(self):
+            self.seen_inputs = None
+            self.skill_manager = None
+
+        def set_skill_manager(self, skill_manager):
+            self.skill_manager = skill_manager
+
+        async def handle_heartbeat(self, _request):
+            return None
+
+        async def process_message_impl(self, request, inputs):
+            self.seen_inputs = inputs
+            return AgentResponse(
+                request_id=request.request_id,
+                channel_id=request.channel_id,
+                payload={"content": "ok"},
+            )
+
+    fake_adapter = FakeAdapter()
+
+    monkeypatch.setattr(interface_module, "get_config", lambda: {"preferred_language": "zh"})
+    monkeypatch.setattr(interface_module, "get_memory_mode", lambda _config: "disabled")
+    monkeypatch.setattr(interface_module, "SkillManager", FakeSkillManager)
+    monkeypatch.setattr(interface_module, "SessionManager", FakeSessionManager)
+    monkeypatch.setattr(interface_module, "append_history_record", lambda **_kwargs: None)
+    monkeypatch.setattr(interface_module, "resolve_sdk_choice", lambda: "harness")
+    monkeypatch.setattr(interface_module, "create_adapter", lambda _sdk, mode="agent": fake_adapter)
+
+    scratch = tmp_path / "scoped-run-001"  # does NOT exist yet
+    assert not scratch.exists()
+
+    request = AgentRequest(
+        request_id="req-ws",
+        channel_id="acp",
+        session_id="acp_session",
+        params={"query": "hello", "workspace_dir": str(scratch)},
+    )
+
+    asyncio.run(interface_module.JiuWenClaw().process_message(request))
+
+    inputs = fake_adapter.seen_inputs
+    # Path is resolved (symlinks followed, absolute form) before threading.
+    resolved = str(scratch.resolve())
+    assert inputs["cwd"] == resolved, "workspace_dir must thread into inputs.cwd"
+    assert inputs["workspace_dir"] == resolved, (
+        "workspace_dir must also thread into inputs.workspace_dir so the deep "
+        "adapter forwards it as the workspace override on init_cwd"
+    )
+    assert scratch.is_dir(), "_build_inputs must mkdir the scratch dir"
+
+
+def test_build_inputs_omits_cwd_when_workspace_dir_unset(monkeypatch):
+    """When ``params.workspace_dir`` is absent or empty, ``_build_inputs``
+    does not overwrite ``inputs.cwd`` -- letting the explicit ``params.cwd``
+    (or the downstream default) win.
+    """
+    from jiuwenswarm.server.runtime.agent_adapter import interface as interface_module
+
+    class FakeSkillManager:
+        def __init__(self, workspace_dir=None):
+            self.workspace_dir = workspace_dir
+            self.hook = None
+
+        def set_skillnet_install_complete_hook(self, hook):
+            self.hook = hook
+
+    class FakeSessionManager:
+        @staticmethod
+        def get_session_id(session_id):
+            return session_id or "default"
+
+        async def submit_and_wait(self, _session_id, task_func):
+            return await task_func()
+
+    class FakeAdapter:
+        def __init__(self):
+            self.seen_inputs = None
+            self.skill_manager = None
+
+        def set_skill_manager(self, skill_manager):
+            self.skill_manager = skill_manager
+
+        async def handle_heartbeat(self, _request):
+            return None
+
+        async def process_message_impl(self, request, inputs):
+            self.seen_inputs = inputs
+            return AgentResponse(
+                request_id=request.request_id,
+                channel_id=request.channel_id,
+                payload={"content": "ok"},
+            )
+
+    fake_adapter = FakeAdapter()
+
+    monkeypatch.setattr(interface_module, "get_config", lambda: {"preferred_language": "zh"})
+    monkeypatch.setattr(interface_module, "get_memory_mode", lambda _config: "disabled")
+    monkeypatch.setattr(interface_module, "SkillManager", FakeSkillManager)
+    monkeypatch.setattr(interface_module, "SessionManager", FakeSessionManager)
+    monkeypatch.setattr(interface_module, "append_history_record", lambda **_kwargs: None)
+    monkeypatch.setattr(interface_module, "resolve_sdk_choice", lambda: "harness")
+    monkeypatch.setattr(interface_module, "create_adapter", lambda _sdk, mode="agent": fake_adapter)
+
+    request = AgentRequest(
+        request_id="req-nows",
+        channel_id="acp",
+        session_id="acp_session",
+        params={"query": "hello", "cwd": "/tmp/explicit-cwd"},  # no workspace_dir
+    )
+
+    asyncio.run(interface_module.JiuWenClaw().process_message(request))
+
+    inputs = fake_adapter.seen_inputs
+    # params.cwd is preserved untouched
+    assert inputs["cwd"] == "/tmp/explicit-cwd"
+
+
 def test_handle_stream_accepts_team_mode_without_sub_mode(monkeypatch):
     class FakeAgent:
         def __init__(self):

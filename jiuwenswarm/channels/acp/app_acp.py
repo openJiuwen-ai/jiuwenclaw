@@ -55,6 +55,17 @@ def _build_parser() -> argparse.ArgumentParser:
         help="ACP 请求使用的 session_id。",
     )
     acp_parser.add_argument(
+        "--workspace-dir",
+        default=None,
+        help=(
+            "Per-request scratch directory. The AgentServer mkdir-p's it and "
+            "scopes the agent's cwd (via openjiuwen's CwdState ContextVar) "
+            "to the path for the duration of the prompt, so filesystem/shell "
+            "tools resolve relative paths against it. See E2A-protocol.md "
+            "section 11.6."
+        ),
+    )
+    acp_parser.add_argument(
         "args",
         nargs=argparse.REMAINDER,
         help="Prompt 内容。",
@@ -69,9 +80,13 @@ def run_acp(args: argparse.Namespace) -> int:
         return 2
 
     request_id = f"acp_cli_{uuid.uuid4().hex[:12]}"
+    params: dict = {"content": prompt}
+    workspace_dir = getattr(args, "workspace_dir", None)
+    if workspace_dir:
+        params["workspace_dir"] = str(workspace_dir)
     env = envelope_from_acp_jsonrpc(
         method="session/prompt",
-        params={"content": prompt},
+        params=params,
         jsonrpc_id=request_id,
         session_id=str(args.session_id or "acp_cli_session"),
         channel="acp",

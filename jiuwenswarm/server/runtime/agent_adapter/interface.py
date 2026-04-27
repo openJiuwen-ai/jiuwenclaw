@@ -15,6 +15,7 @@ import json
 import logging
 import re
 import time
+from pathlib import Path
 from typing import Any, AsyncIterator, Tuple
 
 from datetime import datetime, timedelta, timezone
@@ -446,6 +447,29 @@ class JiuWenClaw:
                 "kind": "cron",
                 "context": {"extra": {"cron": cron}},
             }
+
+        # Per-request workspace_dir scopes one prompt's cwd to the given
+        # directory; threaded into inputs["cwd"] which downstream init_cwd
+        # installs onto openjiuwen's CwdState ContextVar. See E2A-protocol.md
+        # section 11.6 for the wire contract and precedence rules.
+        workspace_dir = request.params.get("workspace_dir")
+        if isinstance(workspace_dir, str) and workspace_dir.strip():
+            expanded = Path(workspace_dir).expanduser().resolve()
+            try:
+                expanded.mkdir(parents=True, exist_ok=True)
+            except OSError as exc:
+                logger.warning(
+                    "[JiuWenClaw] workspace_dir %s mkdir failed (%s); "
+                    "request falls back to params.cwd or the global default",
+                    workspace_dir, exc,
+                )
+            else:
+                # Scope BOTH cwd and workspace so the agent's tools (which
+                # read get_cwd() for relative-path resolution) AND its
+                # fs_operation sandbox (which gates absolute-path writes by
+                # workspace membership) agree on the per-request root.
+                inputs["cwd"] = str(expanded)
+                inputs["workspace_dir"] = str(expanded)
 
         # 返回原始 query（未经 build_user_prompt 包装）
         # Team 模式需要使用原始 query，而不是 JSON 包装后的 prompt
