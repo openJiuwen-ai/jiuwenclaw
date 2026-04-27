@@ -13,12 +13,24 @@ import time
 
 from dotenv import load_dotenv
 
-from jiuwenclaw.utils import get_user_workspace_dir, get_env_file, prepare_workspace, cleanup_team_files, update_config
+from jiuwenclaw.utils import (
+    get_user_workspace_dir,
+    get_env_file,
+    prepare_workspace,
+    cleanup_team_files,
+    update_config,
+    get_multi_tenant_user_workspace_dir,
+)
 
 
 _workspace_dir = get_user_workspace_dir()
 _config_file = _workspace_dir / "config" / "config.yaml"
-_new_workspace = _workspace_dir / "agent" / "jiuwenclaw_workspace"
+# 多租户路径：service_default/agent_default/agent/jiuwenclaw_workspace
+_multi_tenant_workspace = get_multi_tenant_user_workspace_dir("default", "default")
+if _multi_tenant_workspace:
+    _new_workspace = _multi_tenant_workspace / "agent" / "jiuwenclaw_workspace"
+else:
+    _new_workspace = _workspace_dir / "agent" / "jiuwenclaw_workspace"
 _old_workspace = _workspace_dir / "agent" / "workspace"
 
 # 始终清理 Team 旧版本遗留文件（幂等操作，在 prepare_workspace 之前执行）

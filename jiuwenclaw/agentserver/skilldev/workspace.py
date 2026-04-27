@@ -5,7 +5,7 @@
 职责：提供每个 task_id 的隔离工作区目录，并维护标准目录结构。
 
 目录结构（单机本地模式）：
-    ~/.jiuwenclaw/agent/workspace/skilldev/{task_id}/
+    ~/.jiuwenclaw/service_default/agent_default/agent/jiuwenclaw_workspace/skilldev/{task_id}/
     ├── state.json          ← StateStore checkpoint
     ├── resources/
     │   ├── ref-files/      ← 上传的普通参考文件（解压后）
@@ -42,7 +42,7 @@ class WorkspaceProvider:
         """
         Args:
             base_dir: SkillDev 工作区根目录，约定为 get_workspace_dir() / "skilldev"
-                      即 ~/.jiuwenclaw/agent/workspace/skilldev/
+                      即 ~/.jiuwenclaw/service_default/agent_default/agent/jiuwenclaw_workspace/skilldev/
         """
         self._base_dir = base_dir
 

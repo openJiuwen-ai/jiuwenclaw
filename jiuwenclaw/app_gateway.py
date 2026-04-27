@@ -17,7 +17,6 @@ import asyncio
 import json
 import logging
 import os
-import sys
 import inspect
 import time
 import uuid as uuid_module
@@ -32,7 +31,12 @@ import jiuwenclaw.channel.acp_channel as acp_channel_module
 from jiuwenclaw.channel.acp_channel import AcpGatewayBridge
 from jiuwenclaw.gateway.route_binding import GatewayRouteBinding
 from jiuwenclaw.jiuwen_core_patch import apply_openai_model_client_patch
-from jiuwenclaw.utils import get_user_workspace_dir, get_env_file, prepare_workspace
+from jiuwenclaw.utils import (
+    get_user_workspace_dir,
+    get_env_file,
+    prepare_workspace,
+    get_multi_tenant_user_workspace_dir,
+)
 from jiuwenclaw.extensions.extension_config_sync import decrypt_extensions_sensitive_for_agent
 from jiuwenclaw.local_env_config import decrypt
 
@@ -41,7 +45,12 @@ apply_openai_model_client_patch()
 # Ensure workspace initialized
 _workspace_dir = get_user_workspace_dir()
 _config_file = _workspace_dir / "config" / "config.yaml"
-_new_workspace = _workspace_dir / "agent" / "jiuwenclaw_workspace"
+# 多租户路径：service_default/agent_default/agent/jiuwenclaw_workspace
+_multi_tenant_workspace = get_multi_tenant_user_workspace_dir("default", "default")
+if _multi_tenant_workspace:
+    _new_workspace = _multi_tenant_workspace / "agent" / "jiuwenclaw_workspace"
+else:
+    _new_workspace = _workspace_dir / "agent" / "jiuwenclaw_workspace"
 _old_workspace = _workspace_dir / "agent" / "workspace"
 
 # Initialize if config doesn't exist, or if legacy workspace exists but new doesn't (migration)
@@ -776,17 +785,6 @@ async def _run(
     from jiuwenclaw.telemetry import init_telemetry
     from openjiuwen.core.runner import Runner
 
-    def _do_restart() -> None:
-        logger.info("[App] .env updated, restarting Gateway...")
-        os.execv(sys.executable, [sys.executable, *sys.argv])
-
-    def _schedule_restart() -> None:
-        try:
-            loop = asyncio.get_running_loop()
-            loop.call_later(2.0, _do_restart)
-        except RuntimeError:
-            _do_restart()
-
     logger.info("[App] Gateway starting, connecting AgentServer: %s", agent_server_url)
 
     callback_framework = Runner.callback_framework
@@ -970,8 +968,7 @@ async def _run(
                 await client.send_request(restart_env)
             return True
         except Exception as e:  # noqa: BLE001
-            logger.warning("[App] hot config reload failed, scheduling restart: %s", e)
-            _schedule_restart()
+            logger.error("[App] hot config reload failed: %s", e)
             return False
     # 启动时将配置同步给agentserver（可通过配置关闭）
     sync_config_enabled_cfg = sync_config_cfg.get("enabled") if isinstance(sync_config_cfg, dict) else None

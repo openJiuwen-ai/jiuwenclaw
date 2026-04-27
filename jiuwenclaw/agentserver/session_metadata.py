@@ -350,14 +350,20 @@ def remove_team_mode_session_dirs_at_startup() -> None:
 def get_all_sessions_metadata(
     limit: int = 20,
     offset: int = 0,
+    sessions_root: str | Path | None = None,
 ) -> tuple[list[dict[str, Any]], int]:
     """
     获取所有会话的元数据。
 
+    Args:
+        limit: 返回数量上限
+        offset: 偏移量
+        sessions_root: 会话存储根目录，默认使用单租户路径
+
     Returns:
         (sessions, total): 当前页的会话列表 和 会话总数
     """
-    sessions_dir = get_agent_sessions_dir()
+    sessions_dir = Path(sessions_root) if sessions_root else get_agent_sessions_dir()
     if not sessions_dir.exists() or not sessions_dir.is_dir():
         return [], 0
 
@@ -367,7 +373,7 @@ def get_all_sessions_metadata(
             continue
 
         session_id = session_dir.name
-        metadata = _read_metadata(session_id)
+        metadata = _read_metadata(session_id, sessions_root=str(sessions_dir) if sessions_root else None)
 
         if not metadata:
             # 没有 metadata.json 的旧会话: 只构造最小信息,不读取 history.json

@@ -27,7 +27,13 @@ from jiuwenclaw.e2a.constants import (
     FILE_TRANSFER_ERROR_CHUNK_MISSING,
     FILE_TRANSFER_ERROR_CHECKSUM_MISMATCH,
 )
-from jiuwenclaw.utils import get_root_dir, TransferProgress, safe_filename, guess_mime_type, FileTransferStartParams
+from jiuwenclaw.utils import (
+    get_service_root_dir,
+    TransferProgress,
+    safe_filename,
+    guess_mime_type,
+    FileTransferStartParams,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -44,8 +50,8 @@ class FileTransferManager:
         self._config = config or get_file_transfer_config()
         self._transfers: dict[str, TransferProgress] = {}
         self._lock = asyncio.Lock()
-        # 接收文件存储目录
-        self._received_dir = Path(get_root_dir()) / self._config.received_files_dir
+        # 接收文件存储目录（service 级别，多 agent 共享）
+        self._received_dir = get_service_root_dir() / self._config.received_files_dir
         self._received_dir.mkdir(parents=True, exist_ok=True)
         # 后台清理任务
         self._cleanup_task: asyncio.Task | None = None

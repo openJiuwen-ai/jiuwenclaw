@@ -277,7 +277,7 @@ class TenantAgentPool:
 
     async def process_message(self, request: AgentRequest) -> AgentResponse:
         """处理非流式请求."""
-        agent_id, service_id = self._extract_ids(request)
+        agent_id, service_id = self.extract_ids(request)
         agent_manager = await self._ensure_agent_manager(agent_id, service_id)
         return await agent_manager.process_message(request)
 
@@ -285,23 +285,30 @@ class TenantAgentPool:
             self, request: AgentRequest
     ):
         """处理流式请求."""
-        agent_id, service_id = self._extract_ids(request)
+        agent_id, service_id = self.extract_ids(request)
         agent_manager = await self._ensure_agent_manager(agent_id, service_id)
         async for chunk in agent_manager.process_message_stream(request):
             yield chunk
 
     @staticmethod
-    def _extract_ids(request: AgentRequest):
-        """从请求中提取 agent_id 和 service_id."""
+    def extract_ids(request: AgentRequest):
+        """从请求中提取 agent_id 和 service_id.
+
+        单租户作为多租户的默认特例：
+        - 无指定时返回 ('default', 'default')
+        - 有指定时返回对应值
+        - ACP 通道返回 ('acp', 'global_acp')
+        """
         agent_id = getattr(request, 'agent_id', None)
         service_id = getattr(request, 'service_id', None)
+
         # ACP 通道使用固定租户
         if request.channel_id == "acp":
-            agent_id = "acp"
-            service_id = "global_acp"
-        else:
-            agent_id = agent_id or "default_agent_id"
-            service_id = service_id or "default_service_id"
+            return "acp", "global_acp"
+
+        # 无指定时使用默认租户（单租户作为多租户的默认特例）
+        agent_id = agent_id or "default"
+        service_id = service_id or "default"
 
         return agent_id, service_id
 
@@ -312,7 +319,7 @@ class TenantAgentPool:
             env_overrides: dict | None = None
     ) -> None:
         """重新加载指定租户的 Agent 配置."""
-        service_id = "global_acp" if agent_id == "acp" else "default_service_id"
+        service_id = "global_acp" if agent_id == "acp" else "default"
         agent_manager = await self._ensure_agent_manager(agent_id, service_id)
         channel_id = "acp" if agent_id == "acp" else "default"
         await agent_manager.reload_agent_config(

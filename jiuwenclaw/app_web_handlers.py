@@ -42,9 +42,9 @@ from jiuwenclaw.config import (
 from jiuwenclaw.jiuwen_core_patch import apply_openai_model_client_patch
 from jiuwenclaw.updater import WindowsUpdaterService
 from jiuwenclaw.utils import (
-    get_agent_sessions_dir,
     get_env_file,
     get_root_dir,
+    get_multi_tenant_user_workspace_dir,
 )
 from jiuwenclaw.version import __version__
 from jiuwenclaw.local_env_config import decrypt, encrypt
@@ -972,7 +972,12 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
 
         from jiuwenclaw.agentserver.session_metadata import get_all_sessions_metadata
 
-        sessions, total = get_all_sessions_metadata(limit=limit, offset=offset)
+        # 使用默认多租户路径（单租户作为多租户的默认特例）
+        sessions_root = get_multi_tenant_user_workspace_dir("default", "default") / "agent" / "sessions"
+
+        sessions, total = get_all_sessions_metadata(
+            limit=limit, offset=offset, sessions_root=sessions_root
+        )
 
         await channel.send_response(ws, req_id, ok=True, payload={
             "sessions": sessions,
@@ -996,7 +1001,7 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             return
         session_id_to_create = session_id_to_create.strip()
 
-        workspace_session_dir = get_agent_sessions_dir()
+        workspace_session_dir = get_multi_tenant_user_workspace_dir("default", "default") / "agent" / "sessions"
         if not workspace_session_dir.exists():
             workspace_session_dir.mkdir(parents=True)
         session_dir = workspace_session_dir / session_id_to_create
@@ -1037,7 +1042,7 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             return
         session_id_to_delete = session_id_to_delete.strip()
 
-        workspace_session_dir = get_agent_sessions_dir()
+        workspace_session_dir = get_multi_tenant_user_workspace_dir("default", "default") / "agent" / "sessions"
         session_dir = workspace_session_dir / session_id_to_delete
         if not session_dir.exists():
             await channel.send_response(

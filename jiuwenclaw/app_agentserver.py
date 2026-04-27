@@ -26,14 +26,26 @@ except ImportError:
     # The module will be imported lazily when needed in _run().
     pass
 from jiuwenclaw.jiuwen_core_patch import apply_openai_model_client_patch
-from jiuwenclaw.utils import get_user_workspace_dir, get_env_file, prepare_workspace, logger, update_config
+from jiuwenclaw.utils import (
+    get_user_workspace_dir,
+    get_env_file,
+    prepare_workspace,
+    logger,
+    update_config,
+    get_multi_tenant_user_workspace_dir,
+)
 
 apply_openai_model_client_patch()
 
 # Ensure workspace initialized
 _workspace_dir = get_user_workspace_dir()
 _config_file = _workspace_dir / "config" / "config.yaml"
-_new_workspace = _workspace_dir / "agent" / "jiuwenclaw_workspace"
+# 多租户路径：service_default/agent_default/agent/jiuwenclaw_workspace
+_multi_tenant_workspace = get_multi_tenant_user_workspace_dir("default", "default")
+if _multi_tenant_workspace:
+    _new_workspace = _multi_tenant_workspace / "agent" / "jiuwenclaw_workspace"
+else:
+    _new_workspace = _workspace_dir / "agent" / "jiuwenclaw_workspace"
 _old_workspace = _workspace_dir / "agent" / "workspace"
 
 # Initialize if config doesn't exist, or if legacy workspace exists but new doesn't (migration)

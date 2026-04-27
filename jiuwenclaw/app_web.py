@@ -20,8 +20,8 @@ from typing import Any
 from urllib.parse import unquote, urlparse
 
 from jiuwenclaw.agentserver.tools.ssl_config import get_insecure_ssl_context, get_ssl_verify
-from jiuwenclaw.utils import get_agent_root_dir, get_logs_dir, \
-    get_root_dir, get_user_workspace_dir, is_package_installation
+from jiuwenclaw.utils import get_agent_root_dir, get_logs_dir, get_service_root_dir, \
+    get_multi_tenant_user_workspace_dir, get_root_dir, get_user_workspace_dir, is_package_installation
 
 
 def _get_package_dir() -> Path:
@@ -64,8 +64,19 @@ def _normalize_lang_suffix(name: str) -> str:
 
 
 def _generate_agent_data(project_root: Path) -> None:
-    """Generate agent/jiuwenclaw_workspace/agent-data.json from agent tree."""
-    agent_root = (project_root / "agent").resolve()
+    """Generate agent/jiuwenclaw_workspace/agent-data.json from default tenant workspace.
+
+    Scans entire agent directory including sessions, workspace, and other subdirs.
+    Sessions directories are sorted by modification time (most recent first).
+    Output follows DeepAgent standard layout.
+
+    Note: project_root parameter is ignored; uses default multi-tenant path instead.
+    """
+    # 使用默认多租户路径（单租户作为多租户的默认特例）
+    default_workspace = get_multi_tenant_user_workspace_dir("default", "default")
+    if default_workspace is None:
+        raise FileNotFoundError("default multi-tenant workspace not found")
+    agent_root = (default_workspace / "agent").resolve()
     workspace_root = (agent_root / "jiuwenclaw_workspace").resolve()
     output_path = (workspace_root / "agent-data.json").resolve()
     root_folder_key = "__root__"
@@ -77,7 +88,11 @@ def _generate_agent_data(project_root: Path) -> None:
 
     folder_data: dict[str, list[dict[str, str | bool]]] = {}
     seen_paths: dict[str, set[str]] = {}  # folder_key -> normalized paths，用于去重
-    for entry in sorted(workspace_root.rglob("*")):
+    # 记录每个 session 目录的修改时间，用于倒序排序
+    session_mtime_map: dict[str, float] = {}
+
+    # 扫描整个 agent 目录（包括 sessions, jiuwenclaw_workspace 等）
+    for entry in sorted(agent_root.rglob("*")):
         if not entry.is_file() or entry.name.startswith("."):
             continue
         relative_folder_path = entry.parent.relative_to(agent_root).as_posix()
@@ -102,9 +117,32 @@ def _generate_agent_data(project_root: Path) -> None:
             }
         )
 
+        # 对于 sessions 目录，记录其修改时间
+        if relative_folder_path.startswith("sessions/") and entry.parent.exists():
+            session_mtime_map[folder_key] = entry.parent.stat().st_mtime
+
+    # 排序：sessions 目录按修改时间倒序，其他目录按字母顺序
+    def sort_folder_key(item: tuple[str, list]) -> tuple[int, float | str, str]:
+        folder_key = item[0]
+        if folder_key.startswith("sessions/"):
+            # sessions 目录优先，按修改时间倒序
+            mtime = session_mtime_map.get(folder_key, 0)
+            return (0, -mtime, folder_key)  # 负数实现倒序
+        else:
+            # 其他目录按字母顺序
+            return (1, 0, folder_key)
+
+    def sort_files(folder_key: str, files: list) -> list:
+        if folder_key.startswith("sessions/"):
+            # sessions 目录下的文件按修改时间倒序
+            return sorted(files, key=lambda item: -session_mtime_map.get(folder_key, 0))
+        else:
+            # 其他目录按 path 字母顺序
+            return sorted(files, key=lambda item: item["path"])
+
     sorted_folder_data = {
-        folder_key: sorted(files, key=lambda item: item["path"])
-        for folder_key, files in sorted(folder_data.items(), key=lambda item: item[0])
+        folder_key: sort_files(folder_key, files)
+        for folder_key, files in sorted(folder_data.items(), key=sort_folder_key)
     }
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -497,7 +535,10 @@ class _SpaStaticHandler(SimpleHTTPRequestHandler):
         try:
             in_workspace = os.path.commonpath([str(cls.workspace_root), str(target_resolved)]) == str(cls.workspace_root)
             in_logs = os.path.commonpath([str(cls.logs_root), str(target_resolved)]) == str(cls.logs_root)
-            return in_workspace or in_logs
+            # 允许多租户路径（在 get_user_workspace_dir 下的 service_*/agent_* 目录）
+            user_workspace = str(get_user_workspace_dir())
+            in_user_workspace = os.path.commonpath([user_workspace, str(target_resolved)]) == user_workspace
+            return in_workspace or in_logs or in_user_workspace
         except ValueError:
             return False
 
@@ -526,7 +567,12 @@ class _SpaStaticHandler(SimpleHTTPRequestHandler):
             if not dir_arg:
                 self._write_json(400, {"error": "missing_dir"})
                 return
-            full_dir = (self.project_root / dir_arg).resolve()
+            # 使用默认多租户路径（单租户作为多租户的默认特例）
+            base_dir = get_multi_tenant_user_workspace_dir("default", "default")
+            if base_dir is None:
+                self._write_json(500, {"error": "default_workspace_not_found"})
+                return
+            full_dir = (base_dir / dir_arg).resolve()
             if not self._is_path_under_allowed_root(full_dir):
                 self._write_json(403, {"error": "forbidden_dir"})
                 return
@@ -540,7 +586,7 @@ class _SpaStaticHandler(SimpleHTTPRequestHandler):
                 files.append(
                     {
                         "name": entry.name,
-                        "path": str(entry.relative_to(self.project_root)),
+                        "path": str(entry.relative_to(base_dir)),
                     }
                 )
             self._write_json(200, {"files": files})
@@ -551,7 +597,12 @@ class _SpaStaticHandler(SimpleHTTPRequestHandler):
             if not dir_arg:
                 self._write_json(400, {"error": "missing_dir"})
                 return
-            full_dir = (self.project_root / dir_arg).resolve()
+            # 使用默认多租户路径（单租户作为多租户的默认特例）
+            base_dir = get_multi_tenant_user_workspace_dir("default", "default")
+            if base_dir is None:
+                self._write_json(500, {"error": "default_workspace_not_found"})
+                return
+            full_dir = (base_dir / dir_arg).resolve()
             if not self._is_path_under_allowed_root(full_dir):
                 self._write_json(403, {"error": "forbidden_dir"})
                 return
@@ -563,11 +614,12 @@ class _SpaStaticHandler(SimpleHTTPRequestHandler):
                 full_dir.iterdir(),
                 key=lambda p: (not p.is_dir(), p.name.lower()),
             )
+            # 计算相对路径时使用 base_dir
             for entry in entries:
                 files.append(
                     {
                         "name": entry.name,
-                        "path": str(entry.relative_to(self.project_root)),
+                        "path": str(entry.relative_to(base_dir)),
                         "isMarkdown": self._is_markdown(entry) if entry.is_file() else False,
                         "isDirectory": entry.is_dir(),
                     }
@@ -580,14 +632,27 @@ class _SpaStaticHandler(SimpleHTTPRequestHandler):
             if not file_arg:
                 self._write_json(400, {"error": "missing_file_path"})
                 return
-            full_path = (self.project_root / file_arg).resolve()
+            # 根据路径前缀决定 base_dir
+            # - .logs/ 路径使用 service 根目录（service 级别共享）
+            # - .checkpoint/ 路径使用 agent_default 级别
+            # - agent/ 路径使用默认多租户路径
+            file_arg_normalized = file_arg.replace("\\", "/")
+            if file_arg_normalized.startswith(".logs/") or file_arg_normalized.startswith("logs/"):
+                base_dir = get_service_root_dir()
+            else:
+                # .checkpoint/ 和其他路径都使用默认多租户路径
+                base_dir = get_multi_tenant_user_workspace_dir("default", "default")
+                if base_dir is None:
+                    self._write_json(500, {"error": "default_workspace_not_found"})
+                    return
+            full_path = (base_dir / file_arg).resolve()
             if not self._is_path_under_allowed_root(full_path):
                 self._write_json(403, {"error": "forbidden_path"})
                 return
             if not full_path.exists():
                 if file_arg.replace("\\", "/") == "agent/jiuwenclaw_workspace/agent-data.json":
                     try:
-                        _generate_agent_data(self.project_root)
+                        _generate_agent_data(base_dir)
                     except Exception as exc:  # noqa: BLE001
                         self._write_json(500, {"error": "generate_failed", "detail": str(exc)})
                         return
@@ -622,7 +687,11 @@ class _SpaStaticHandler(SimpleHTTPRequestHandler):
     def _handle_file_api_post(self, parsed) -> None:
         if parsed.path == "/file-api/rebuild-agent-data":
             try:
-                _generate_agent_data(self.project_root)
+                base_dir = get_multi_tenant_user_workspace_dir("default", "default")
+                if base_dir is None:
+                    self._write_json(500, {"error": "default_workspace_not_found"})
+                    return
+                _generate_agent_data(base_dir)
             except Exception as exc:  # noqa: BLE001
                 self._write_json(500, {"error": "rebuild_failed", "detail": str(exc)})
                 return
@@ -648,7 +717,12 @@ class _SpaStaticHandler(SimpleHTTPRequestHandler):
                 self._write_json(400, {"error": "missing_file_content"})
                 return
 
-            full_path = (self.project_root / request_path).resolve()
+            # 使用默认多租户路径（单租户作为多租户的默认特例）
+            base_dir = get_multi_tenant_user_workspace_dir("default", "default")
+            if base_dir is None:
+                self._write_json(500, {"error": "default_workspace_not_found"})
+                return
+            full_path = (base_dir / request_path).resolve()
             if not self._is_path_under_allowed_root(full_path):
                 self._write_json(403, {"error": "forbidden_path"})
                 return
@@ -847,7 +921,10 @@ def main() -> None:
     default_project_root = get_user_workspace_dir()
 
     project_root = default_project_root
-    workspace_root = (project_root / "agent").resolve()
+    # 多租户架构：workspace_root 指向默认多租户路径
+    workspace_root = get_multi_tenant_user_workspace_dir("default", "default")
+    if workspace_root is None:
+        workspace_root = project_root
     logs_root = get_logs_dir().resolve()
     logger = _setup_logger(logs_root, args.log_level)
 

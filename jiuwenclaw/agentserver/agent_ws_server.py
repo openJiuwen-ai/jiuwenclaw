@@ -16,7 +16,12 @@ from jiuwenclaw.agentserver.session_history import enrich_history_messages_sessi
 from jiuwenclaw.agentserver.gateway_push.wire import build_server_push_wire
 from jiuwenclaw.agentserver.tools.acp_output_tools import get_acp_output_manager
 from jiuwenclaw.agentserver.agent_manager import AgentManager
-from jiuwenclaw.utils import get_agent_sessions_dir, get_config_file, FileTransferStartParams
+from jiuwenclaw.utils import (
+    FileTransferStartParams,
+    get_agent_sessions_dir,
+    get_config_file,
+    get_multi_tenant_user_workspace_dir,
+)
 from jiuwenclaw.e2a.agent_compat import e2a_to_agent_request
 from jiuwenclaw.e2a.constants import (
     FILE_TRANSFER_START,
@@ -658,10 +663,15 @@ class AgentWebSocketServer:
         )
 
     async def _handle_session_list(self, ws: Any, request: AgentRequest, send_lock: asyncio.Lock) -> None:
-        """处理 session.list 请求：扫描 sessions 目录，返回历史会话基础信息列表."""
+        """处理 session.list 请求：扫描 sessions 目录，返回历史会话基础信息列表.
+
+        使用 TenantAgentPool.extract_ids 获取租户 ID，默认为 ('default', 'default')。
+        """
         from jiuwenclaw.agentserver.session_metadata import get_session_metadata
 
-        sessions_dir = get_agent_sessions_dir()
+        # extract_ids 现在总是返回有效值（默认或指定的 tenant ID）
+        agent_id, service_id = TenantAgentPool.extract_ids(request)
+        sessions_dir = get_multi_tenant_user_workspace_dir(service_id, agent_id) / "agent" / "sessions"
         sessions = []
 
         try:

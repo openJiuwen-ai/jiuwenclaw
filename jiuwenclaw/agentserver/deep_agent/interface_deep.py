@@ -1333,12 +1333,12 @@ class JiuWenClawDeepAdapter:
             rail = None
         return rail
 
-    @staticmethod
-    def _create_sys_operation() -> SysOperation | None:
-        """Create a sys operation."""
+    def _create_sys_operation(self) -> SysOperation | None:
+        """Create a sys operation with workspace as working directory."""
         try:
             sandbox_url = _sandbox_config.get("url", None)
             sandbox_type = _sandbox_config.get("type", None)
+            work_dir = self._workspace_dir or str(get_agent_root_dir())
             if sandbox_url and sandbox_type:
                 gateway_config = SandboxGatewayConfig(
                     isolation=SandboxIsolationConfig(container_scope=ContainerScope.SYSTEM),
@@ -1351,13 +1351,13 @@ class JiuWenClawDeepAdapter:
                 )
                 sysop_card = SysOperationCard(
                     mode=OperationMode.SANDBOX,
-                    work_config=LocalWorkConfig(shell_allowlist=None),
+                    work_config=LocalWorkConfig(work_dir=work_dir, shell_allowlist=None),
                     gateway_config=gateway_config,
                 )
             else:
                 sysop_card = SysOperationCard(
                     mode=OperationMode.LOCAL,
-                    work_config=LocalWorkConfig(shell_allowlist=None),
+                    work_config=LocalWorkConfig(work_dir=work_dir, shell_allowlist=None),
                 )
             result = Runner.resource_mgr.add_sys_operation(sysop_card)
             if result.is_err():
