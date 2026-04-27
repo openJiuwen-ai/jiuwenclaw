@@ -777,10 +777,3 @@ class SkillStepToolkit(TodoToolkit):
     TOOL_PREFIX: ClassVar[str] = "skill_step"
     EXPOSE_START: ClassVar[bool] = False
     EXPOSE_COMPLETE_BATCH: ClassVar[bool] = True
-
-    def _append_todo_list(self, message: str) -> str:
-        """Do not append full plan on every mutating call; TodoToolkit does for todo_*."""
-        return (
-            f"{message}\n\n"
-            "Full plan: session skill_step.md — call skill_step_list if you need the list."
-        )
