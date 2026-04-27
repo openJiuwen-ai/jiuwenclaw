@@ -438,6 +438,10 @@ class VibeSkillChannel(BaseChannel):
             return await self._handle_chat_message(ws, data, session, external_session_id)
 
         await self._store.set_state(session.internal_id, VibeSkillSessionState.BUSY)
+        logger.info(
+            "[VibeSkillChannel] session state -> busy, source=message.send.skillcreate, session_id=%s",
+            session.internal_id,
+        )
         await self._emit_session_status(
             ws=ws,
             external_sid=(
@@ -576,6 +580,10 @@ class VibeSkillChannel(BaseChannel):
 
         # 设置 session 状态
         await self._store.set_state(session.internal_id, VibeSkillSessionState.BUSY)
+        logger.info(
+            "[VibeSkillChannel] session state -> busy, source=message.send.standard, session_id=%s",
+            session.internal_id,
+        )
         await self._emit_session_status(
             ws=ws,
             external_sid=(
@@ -775,7 +783,14 @@ class VibeSkillChannel(BaseChannel):
         # 通用 chat 事件处理
         if event_type in ("chat.final", "chat.cancel"):
             if msg.session_id:
-                await self._store.set_state(msg.session_id, VibeSkillSessionState.IDLE)
+                session_obj = await self._store.get_session(msg.session_id)
+                if session_obj and session_obj.mode == "Standard":
+                    await self._store.set_state(msg.session_id, VibeSkillSessionState.IDLE)
+                    logger.info(
+                        "[VibeSkillChannel] session state -> idle, source=%s, session_id=%s",
+                        event_type,
+                        msg.session_id,
+                    )
 
         if event_type == "chat.delta":
             text = str(payload.get("content") or "")
@@ -1310,6 +1325,10 @@ class VibeSkillChannel(BaseChannel):
         if session_id:
             try:
                 await self._store.set_state(session_id, VibeSkillSessionState.IDLE)
+                logger.info(
+                    "[VibeSkillChannel] session state -> idle, source=skilldev.error, session_id=%s",
+                    session_id,
+                )
             except Exception:
                 logger.exception("[VibeSkillChannel] set_state error for skilldev.error, session_id=%s", session_id)
 
@@ -1372,6 +1391,10 @@ class VibeSkillChannel(BaseChannel):
         if session_id:
             try:
                 await self._store.set_state(session_id, VibeSkillSessionState.COMPLETED)
+                logger.info(
+                    "[VibeSkillChannel] session state -> completed, source=skilldev.completed, session_id=%s",
+                    session_id,
+                )
             except Exception:
                 logger.exception("[VibeSkillChannel] set_state error for skilldev.completed, session_id=%s", session_id)
         return [
@@ -1382,7 +1405,7 @@ class VibeSkillChannel(BaseChannel):
                     "sessionID": external_sid,
                     "status": {"type": "completed"},
                 },
-            },
+            }
         ]
 
     async def cleanup(self, ws: Any) -> None:
@@ -1401,9 +1424,15 @@ class VibeSkillChannel(BaseChannel):
             self._session_to_ws.pop(sid, None)
             self._message_ctx.pop(sid, None)
             try:
-                await self._store.set_state(sid, VibeSkillSessionState.IDLE)
+                state = await self._store.get_state(sid)
+                if state == VibeSkillSessionState.BUSY:
+                    await self._store.set_state(sid, VibeSkillSessionState.IDLE)
+                    logger.info(
+                        "[VibeSkillChannel] WS disconnected, session state busy -> idle, session_id=%s",
+                        sid,
+                    )
             except Exception:
-                logger.exception("[VibeSkillChannel] cleanup set_state idle failed, session_id=%s", sid)
+                logger.exception("[VibeSkillChannel] cleanup set_state failed, session_id=%s", sid)
 
             try:
                 cancel_msg = Message(
@@ -1936,6 +1965,11 @@ class VibeSkillChannel(BaseChannel):
                 "sandboxStatus": "none",
             },
         }
+        logger.info(
+            "[VibeSkillChannel] http.session.get response session_id=%s body=%s",
+            session_id,
+            json.dumps(response_data, ensure_ascii=False),
+        )
         return self._json_response(200, response_data)
 
     async def _handle_http_session_abort(self, session_id: str) -> tuple[int, dict, bytes]:
@@ -1958,6 +1992,10 @@ class VibeSkillChannel(BaseChannel):
 
         await self._send_agent_request(env)
         await self._store.set_state(internal_id, VibeSkillSessionState.IDLE)
+        logger.info(
+            "[VibeSkillChannel] session state -> idle, source=http.session.abort, session_id=%s",
+            internal_id,
+        )
 
         return self._json_response(200, {"aborted": True})
 
