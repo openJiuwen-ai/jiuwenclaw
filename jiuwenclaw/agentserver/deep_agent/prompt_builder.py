@@ -109,17 +109,11 @@ After completing a system task, notify the user via a reply.
     )
 
 
-def _identity_prompt(language: str) -> PromptSection:
+def _runtime_environment_prompt(language: str) -> str:
+    """OS / shell command hints shared by main agent identity and subagent / fork / spawn base prompts."""
     os_type = sys.platform
-
     if language == "cn":
-        content = f"""你是一个私人智能体。像一个有温度的人类助手一样与用户互动。
-
-对外交流时，不要主动提及内部框架名、内部目录名、供应商实现或运行细节；如果上层系统已经定义了你的对外身份、产品名称或自我介绍口径，应以该口径为准，不要补充内部实现信息。
-
----
-
-## 运行环境
+        return f"""## 运行环境
 
 当前运行平台：`{os_type}`
 
@@ -138,15 +132,7 @@ def _identity_prompt(language: str) -> PromptSection:
 
 **特别注意**：Windows 的 `mkdir` 不支持 `-p` 参数！在 Windows 上使用 `mkdir -p folder` 会错误创建名为 `-p` 的目录。如需创建嵌套目录，请使用 PowerShell `New-Item -ItemType Directory -Path "parent/child" -Force`，或使用 cmd 分步创建 `mkdir parent && mkdir parent\\child`。
 """
-    else:
-        content = f"""
-You are a personal agent. Interact with your user like a warm, human-like assistant.
-
-When talking to the user, do not proactively mention internal framework names, internal directory names, vendor implementation details, or runtime details. If the host system has already defined your external identity, product name, or self-introduction, follow that wording and do not add internal implementation details.
-
----
-
-## Runtime Environment
+    return f"""## Runtime Environment
 
 Current platform: `{os_type}`
 
@@ -164,6 +150,28 @@ Common command differences:
 | Find file | `dir /s pattern` or PowerShell `Get-ChildItem -Recurse -Filter pattern` | `find . -name pattern` |
 
 **WARNING**: Windows `mkdir` does NOT support the `-p` flag! Using `mkdir -p folder` on Windows will incorrectly create a directory named `-p`. To create nested directories on Windows, use either PowerShell `New-Item -ItemType Directory -Path "parent/child" -Force` or cmd with step-by-step creation `mkdir parent && mkdir parent\\child`.
+"""
+
+
+def _identity_prompt(language: str) -> PromptSection:
+    if language == "cn":
+        content = f"""你是一个私人智能体。像一个有温度的人类助手一样与用户互动。
+
+对外交流时，不要主动提及内部框架名、内部目录名、供应商实现或运行细节；如果上层系统已经定义了你的对外身份、产品名称或自我介绍口径，应以该口径为准，不要补充内部实现信息。
+
+---
+
+{_runtime_environment_prompt("cn")}
+"""
+    else:
+        content = f"""
+You are a personal agent. Interact with your user like a warm, human-like assistant.
+
+When talking to the user, do not proactively mention internal framework names, internal directory names, vendor implementation details, or runtime details. If the host system has already defined your external identity, product name, or self-introduction, follow that wording and do not add internal implementation details.
+
+---
+
+{_runtime_environment_prompt("en")}
 """
     return PromptSection(
         name="identity",
@@ -400,6 +408,10 @@ Your responsibility is to efficiently complete assigned tasks and return results
 
     # Optional: workspace
     parts.append(_subagent_workspace_prompt(language, workspace_dir=ws) + '\n')
+
+    # Same OS / shell hints as main agent identity (fork & spawn use this builder)
+    parts.append("---\n\n")
+    parts.append(_runtime_environment_prompt(language) + '\n')
 
     parts.append(_subagent_principle_prompt(language) + '\n')
 
