@@ -91,6 +91,17 @@ def consume_last_op_result(session_id: str) -> Optional[TodoOpResult]:
         return _last_op_result.pop(session_id, None)
 
 
+def reset_op_results() -> None:
+    """Clear the entire ``TodoOpResult`` publish-bus across all sessions.
+
+    Intended for test isolation between cases that share the process-global
+    publish bus. Production code should not need this — use
+    :func:`consume_last_op_result` for normal one-shot consumption.
+    """
+    with _last_op_result_lock:
+        _last_op_result.clear()
+
+
 def _resolve_runtime_session_id() -> str:
     """从 plan_todo_context 解析当前请求 session_id，失败兜底 "default"。"""
     try:
@@ -105,6 +116,13 @@ class TodoToolkit:
 
     TODO_FILENAME: ClassVar[str] = "todo.md"
     TOOL_PREFIX: ClassVar[str] = "todo"
+
+    # Subclasses may flip these to tailor which surface is exposed without
+    # rewriting get_tools. SkillStepToolkit, for example, hides ``*_start`` and
+    # exposes ``*_complete_batch`` so that skill protocol enforcement can rely
+    # on a single batch-friendly completion call per logical step.
+    EXPOSE_START: ClassVar[bool] = True
+    EXPOSE_COMPLETE_BATCH: ClassVar[bool] = False
 
     # Markdown line format: - [ ] 1. task | status  or  - [x] 1. task | status | result
     # parts[0]=task, parts[1]=status, parts[2]=result (optional)
@@ -366,6 +384,88 @@ class TodoToolkit:
             self._publish(TodoOpKind.COMPLETE, False, msg, todo_tasks)
             return self._append_todo_list(msg)
 
+    def todo_complete_batch(
+        self, indices: List[int], results: Optional[List[str]] = None,
+    ) -> str:
+        """Mark several tasks as completed in a single call.
+
+        Indices must be strictly ascending and start at the first task that is
+        not yet completed/cancelled, so the agent cannot retroactively close a
+        gap or close steps out of order. ``results`` is optional; when provided
+        it must align 1:1 with ``indices``. The whole batch is atomic — on any
+        validation error nothing is written and a single failure event is
+        published.
+        """
+        with self._get_session_lock(self.session_id):
+            todo_tasks = self._load_tasks()
+
+            if not indices:
+                msg = "Error: indices must be a non-empty list."
+                self._publish(TodoOpKind.COMPLETE, False, msg, todo_tasks)
+                return self._append_todo_list(msg)
+
+            if results is None:
+                results = ["done"] * len(indices)
+            elif len(results) != len(indices):
+                msg = (
+                    f"Error: results length ({len(results)}) does not match "
+                    f"indices length ({len(indices)})."
+                )
+                self._publish(TodoOpKind.COMPLETE, False, msg, todo_tasks)
+                return self._append_todo_list(msg)
+
+            for i in range(1, len(indices)):
+                if indices[i] != indices[i - 1] + 1:
+                    msg = (
+                        f"Error: indices must be strictly ascending and "
+                        f"contiguous. Got {indices}."
+                    )
+                    self._publish(TodoOpKind.COMPLETE, False, msg, todo_tasks)
+                    return self._append_todo_list(msg)
+
+            first_open_idx: Optional[int] = None
+            for t in todo_tasks:
+                if t.status in (TaskStatus.WAITING, TaskStatus.RUNNING):
+                    first_open_idx = t.idx
+                    break
+            if first_open_idx is None:
+                msg = "Error: no open tasks left to complete."
+                self._publish(TodoOpKind.COMPLETE, False, msg, todo_tasks)
+                return self._append_todo_list(msg)
+            if indices[0] != first_open_idx:
+                msg = (
+                    f"Error: batch must start at idx {first_open_idx} (the "
+                    f"first open task); got start idx {indices[0]}."
+                )
+                self._publish(TodoOpKind.COMPLETE, False, msg, todo_tasks)
+                return self._append_todo_list(msg)
+
+            tasks_by_idx = {t.idx: t for t in todo_tasks}
+            for idx in indices:
+                t = tasks_by_idx.get(idx)
+                if t is None:
+                    msg = f"Error: Task {idx} not found."
+                    self._publish(TodoOpKind.COMPLETE, False, msg, todo_tasks)
+                    return self._append_todo_list(msg)
+                if t.status == TaskStatus.COMPLETED:
+                    msg = f"Error: Task {idx} is already completed."
+                    self._publish(TodoOpKind.COMPLETE, False, msg, todo_tasks)
+                    return self._append_todo_list(msg)
+                if t.status == TaskStatus.CANCELLED:
+                    msg = f"Error: Task {idx} is cancelled."
+                    self._publish(TodoOpKind.COMPLETE, False, msg, todo_tasks)
+                    return self._append_todo_list(msg)
+
+            for idx, result in zip(indices, results):
+                t = tasks_by_idx[idx]
+                t.status = TaskStatus.COMPLETED
+                t.result = (result or "").strip() or "done"
+
+            self._save_tasks(todo_tasks)
+            msg = f"Tasks {list(indices)} marked as completed."
+            self._publish(TodoOpKind.COMPLETE, True, msg, todo_tasks)
+            return self._append_todo_list(msg)
+
     def todo_insert(self, idx: int, tasks: List[str]) -> str:
         """Insert new tasks at the given index. Existing tasks are shifted.
 
@@ -490,6 +590,11 @@ class TodoToolkit:
         def todo_complete_wrapper(idx: int, result: str = "") -> str:
             return self.todo_complete(idx, result)
 
+        def todo_complete_batch_wrapper(
+            indices: List[int], results: Optional[List[str]] = None,
+        ) -> str:
+            return self.todo_complete_batch(indices, results)
+
         def todo_insert_wrapper(idx: int, tasks: List[str]) -> str:
             return self.todo_insert(idx, tasks)
 
@@ -499,7 +604,7 @@ class TodoToolkit:
         def todo_list_wrapper() -> str:
             return self.todo_list()
 
-        return [
+        tools: List[Tool] = [
             make_tool(
                 name=f"{prefix}_create",
                 description=(
@@ -519,7 +624,10 @@ class TodoToolkit:
                 },
                 func=todo_create_wrapper,
             ),
-            make_tool(
+        ]
+
+        if self.__class__.EXPOSE_START:
+            tools.append(make_tool(
                 name=f"{prefix}_start",
                 description="Mark a task as running (in progress). Call this before starting to work on a task.",
                 input_params={
@@ -533,27 +641,74 @@ class TodoToolkit:
                     "required": ["idx"],
                 },
                 func=todo_start_wrapper,
-            ),
-            make_tool(
-                name=f"{prefix}_complete",
-                description="Mark a task as completed and save a brief result.",
+            ))
+
+        complete_desc = "Mark a task as completed and save a brief result."
+        if self.__class__.EXPOSE_COMPLETE_BATCH:
+            complete_desc = (
+                "Mark a single task as completed and save a brief result. "
+                f"When several already-finished steps can be closed together, "
+                f"prefer ``{prefix}_complete_batch`` to avoid extra tool round-trips."
+            )
+        tools.append(make_tool(
+            name=f"{prefix}_complete",
+            description=complete_desc,
+            input_params={
+                "type": "object",
+                "properties": {
+                    "idx": {
+                        "type": "integer",
+                        "description": "1-based index of the task to complete",
+                    },
+                    "result": {
+                        "type": "string",
+                        "description": "Brief result or outcome",
+                        "default": "",
+                    },
+                },
+                "required": ["idx"],
+            },
+            func=todo_complete_wrapper,
+        ))
+
+        if self.__class__.EXPOSE_COMPLETE_BATCH:
+            tools.append(make_tool(
+                name=f"{prefix}_complete_batch",
+                description=(
+                    "Mark several already-finished tasks as completed in one "
+                    "call. Indices must be strictly ascending, contiguous, and "
+                    "start at the first open task — gaps, reordering, and "
+                    "closing already-completed tasks are rejected. Use this "
+                    "only for steps that are truly done; never pre-close steps."
+                ),
                 input_params={
                     "type": "object",
                     "properties": {
-                        "idx": {
-                            "type": "integer",
-                            "description": "1-based index of the task to complete",
+                        "indices": {
+                            "type": "array",
+                            "items": {"type": "integer"},
+                            "description": (
+                                "1-based indices of tasks to complete; "
+                                "strictly ascending and contiguous, must "
+                                "start at the first open task."
+                            ),
                         },
-                        "result": {
-                            "type": "string",
-                            "description": "Brief result or outcome",
-                            "default": "",
+                        "results": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": (
+                                "Per-task brief outcomes, aligned 1:1 with "
+                                "indices. Optional; defaults to 'done' for "
+                                "each entry."
+                            ),
                         },
                     },
-                    "required": ["idx"],
+                    "required": ["indices"],
                 },
-                func=todo_complete_wrapper,
-            ),
+                func=todo_complete_batch_wrapper,
+            ))
+
+        tools.extend([
             make_tool(
                 name=f"{prefix}_insert",
                 description="Insert new tasks at the given index. Existing tasks are shifted.",
@@ -595,16 +750,26 @@ class TodoToolkit:
                 input_params={"type": "object", "properties": {}},
                 func=todo_list_wrapper,
             ),
-        ]
+        ])
+        return tools
 
 
 class SkillStepToolkit(TodoToolkit):
     """Skill 步骤追踪 toolkit：仅覆盖文件名与工具前缀，其他行为继承 TodoToolkit。
 
+    与父类的 ``todo_*`` 工具集差异：
+    - 不暴露 ``skill_step_start``：当前步骤通过 prompt 文本声明即可，
+      避免每步多一次工具调用与 LLM 思考往返。
+    - 暴露 ``skill_step_complete_batch``：允许将多个连续且已实际完成的步骤
+      在一次调用内一并收尾，进一步压缩工具调用次数。
+
     文件：``agent/sessions/{session_id}/skill_step.md``
-    工具：``skill_step_create`` / ``skill_step_complete`` / ``skill_step_insert``
-          / ``skill_step_remove`` / ``skill_step_list``
+    工具：``skill_step_create`` / ``skill_step_complete`` /
+          ``skill_step_complete_batch`` / ``skill_step_insert`` /
+          ``skill_step_remove`` / ``skill_step_list``
     """
 
     TODO_FILENAME: ClassVar[str] = "skill_step.md"
     TOOL_PREFIX: ClassVar[str] = "skill_step"
+    EXPOSE_START: ClassVar[bool] = False
+    EXPOSE_COMPLETE_BATCH: ClassVar[bool] = True

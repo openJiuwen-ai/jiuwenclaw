@@ -77,7 +77,8 @@ class TaskExecutionRail(DeepAgentRail):
         tool_name = ctx.inputs.tool_name
         todo_tools = {
             "todo_create", "todo_start", "todo_complete", "todo_insert", "todo_remove",
-            "skill_step_create", "skill_step_start", "skill_step_complete", "skill_step_insert", "skill_step_remove",
+            "skill_step_create", "skill_step_complete", "skill_step_complete_batch",
+            "skill_step_insert", "skill_step_remove",
         }
         if tool_name in todo_tools:
             self._todo_map_before_tool = dict(self._todo_map)
@@ -91,7 +92,8 @@ class TaskExecutionRail(DeepAgentRail):
         tool_name = ctx.inputs.tool_name
         todo_tools = {
             "todo_create", "todo_start", "todo_complete", "todo_insert", "todo_remove",
-            "skill_step_create", "skill_step_start", "skill_step_complete", "skill_step_insert", "skill_step_remove",
+            "skill_step_create", "skill_step_complete", "skill_step_complete_batch",
+            "skill_step_insert", "skill_step_remove",
         }
         if tool_name in todo_tools:
             await self._sync_from_todo_tool_and_emit_transitions(ctx)
