@@ -14,7 +14,6 @@ import os
 from typing import Any, AsyncIterator, Protocol, runtime_checkable
 
 from jiuwenclaw.schema.agent import AgentRequest, AgentResponse, AgentResponseChunk
-
 logger = logging.getLogger(__name__)
 
 _SDK_ENV_VAR = "JIUWENCLAW_AGENT_SDK"
@@ -124,7 +123,7 @@ def resolve_sdk_choice() -> str:
     return _DEFAULT_SDK
 
 
-def create_adapter(
+async def create_adapter(
     sdk: str | None = None,
     workspace_dir: str | None = None,
     agent_id: str | None = None,
@@ -148,12 +147,17 @@ def create_adapter(
     sdk_name = sdk or resolve_sdk_choice()
 
     if sdk_name == "harness":
-        from jiuwenclaw.agentserver.deep_agent.interface_deep import JiuWenClawDeepAdapter
-        return JiuWenClawDeepAdapter(
-            workspace_dir=workspace_dir,
-            agent_id=agent_id,
-            service_id=service_id,
-        )
+        import asyncio
+
+        def import_and_create():
+            from jiuwenclaw.agentserver.deep_agent.interface_deep import JiuWenClawDeepAdapter
+            return JiuWenClawDeepAdapter(
+                workspace_dir=workspace_dir,
+                agent_id=agent_id,
+                service_id=service_id,
+            )
+
+        return await asyncio.get_event_loop().run_in_executor(None, import_and_create)
 
     if sdk_name == "pi":
         raise NotImplementedError(

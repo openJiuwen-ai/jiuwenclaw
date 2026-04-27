@@ -200,11 +200,11 @@ class JiuWenClaw:
         logger.info("[JiuWenClaw] SkillDevService 初始化完成")
         return self._skilldev_service
 
-    def _ensure_adapter(self) -> AgentAdapter:
+    async def _ensure_adapter(self) -> AgentAdapter:
         """确保 adapter 已初始化，如果未初始化则根据环境变量创建."""
         if self._adapter is None:
             self._sdk_name = resolve_sdk_choice()
-            self._adapter = create_adapter(
+            self._adapter = await create_adapter(
                 self._sdk_name,
                 workspace_dir=self._workspace_dir,
                 agent_id=self._agent_id,
@@ -325,7 +325,7 @@ class JiuWenClaw:
             config: 可选配置，透传给底层 adapter.
             mode: 实例化模式，"claw"（默认）或 "code"，透传给底层 adapter.
         """
-        adapter = self._ensure_adapter()
+        adapter = await self._ensure_adapter()
         await adapter.create_instance(config, mode=mode)
         logger.info("[JiuWenClaw] Agent instance created: sdk=%s", self._sdk_name)
 
@@ -425,7 +425,7 @@ class JiuWenClaw:
             config_base: 可选的完整配置快照；传入时优先使用它而不是读取本地 config.yaml。
             env_overrides: 可选的环境变量增量；仅覆盖请求中出现的 key。
         """
-        adapter = self._ensure_adapter()
+        adapter = await self._ensure_adapter()
         await adapter.reload_agent_config(config_base, env_overrides)
         logger.info("[JiuWenClaw] Agent config reloaded: sdk=%s", self._sdk_name)
 
@@ -636,7 +636,7 @@ class JiuWenClaw:
         Returns:
             AgentResponse 包含 interrupt_result 事件数据
         """
-        adapter = self._ensure_adapter()
+        adapter = await self._ensure_adapter()
         # 调用 adapter 的 process_interrupt 处理 SDK 特定逻辑（如 pause/resume、todo 标记等）
         response = await adapter.process_interrupt(request)
         intent = request.params.get("intent", "cancel")
@@ -664,7 +664,7 @@ class JiuWenClaw:
 
         支持多 session 并发执行，同 session 内任务按先进后出顺序执行.
         """
-        adapter = self._ensure_adapter()
+        adapter = await self._ensure_adapter()
 
         if request.req_method == ReqMethod.CHAT_CANCEL:
             return await self._process_interrupt(request)
@@ -789,7 +789,7 @@ class JiuWenClaw:
                 )
             return
 
-        adapter = self._ensure_adapter()
+        adapter = await self._ensure_adapter()
 
         session_id = self._session_manager.get_session_id(request.session_id)
         query = request.params.get("query", "")
