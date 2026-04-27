@@ -38,6 +38,8 @@ dependencies = [
     "opentelemetry-exporter-otlp-proto-http>=1.25.0",
     "json-repair>=0.58.0",
     "trafilatura>=1.6.0",
+    # lxml 5.2+ 将 html.clean 拆出；trafilatura/justext 仍依赖 lxml.html.clean
+    "lxml_html_clean>=0.4.0",
     "tree-sitter>=0.25.0,<0.26.0",
     "tree-sitter-bash>=0.25.0,<0.26.0",
     # 缺乏这些包TestTenantAgentPool无法执行
@@ -87,6 +89,9 @@ where = ["."]
 include = ["jiuwenclaw*"]
 exclude = ["jiuwenclaw.cli*", "jiuwenclaw.web*"]
 namespaces = false
+
+[[tool.uv.index]]
+url = "https://mirrors.aliyun.com/pypi/simple/"
 
 [tool.setuptools.package-data]
 "*" = ["LICENSE"]

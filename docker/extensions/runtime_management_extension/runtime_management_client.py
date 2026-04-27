@@ -11,6 +11,7 @@ import asyncio
 import hashlib
 import json
 import logging
+import threading
 import uuid
 from typing import Any, AsyncIterator, Optional
 
@@ -48,10 +49,18 @@ from openjiuwen_runtime.management.session.models import MessagePriority
 
 logger = logging.getLogger(__name__)
 
+_session_id_lock = threading.Lock()
+_session_id_to_service_pair: dict[str, tuple[str, str | None]] = {}
 
-def _session_id_to_invoke_ids(self, session_id: str) -> tuple[str, str | None]:
-    with self._session_instance_lock:
-        cached = self._session_instance_map.get(session_id)
+
+def _md5_chat_bot_id(chat_id: str, bot_id: str) -> str:
+    return hashlib.md5("::".join((chat_id, bot_id)).encode("utf-8")).hexdigest()
+
+
+def _session_id_to_invoke_ids(session_id: str) -> tuple[str, str | None]:
+    """将网关 session_id 转为 invoker 的 (service_id, agent_id/space_id)，与 yuanrong_frontend_client 逻辑对齐。"""
+    with _session_id_lock:
+        cached = _session_id_to_service_pair.get(session_id)
         if cached:
             return cached
 
@@ -60,30 +69,40 @@ def _session_id_to_invoke_ids(self, session_id: str) -> tuple[str, str | None]:
     # per_chat_bot_user: provider::chat::bot::user::ts::suffix
     # For non-standard ids, fallback to md5(session_id) + no space_id.
     from jiuwenclaw.gateway.session_map import load_session_map_scope
+
     _ = load_session_map_scope()
     parts = session_id.split("::")
     if len(parts) == 6:
         _provider, chat_id, bot_id, user_id, _ts, _suffix = parts
-        pair = (self._md5_id(chat_id, bot_id), user_id)
+        pair = (_md5_chat_bot_id(chat_id, bot_id), user_id)
     elif len(parts) == 5:
         _provider, chat_id, bot_id, _ts, _suffix = parts
-        pair = (self._md5_id(chat_id, bot_id), None)
+        pair = (_md5_chat_bot_id(chat_id, bot_id), None)
     else:
         pair = (hashlib.md5(session_id.encode("utf-8")).hexdigest(), None)
 
-    with self._session_instance_lock:
-        self._session_instance_map.setdefault(session_id, pair)
-        return self._session_instance_map[session_id]
+    with _session_id_lock:
+        _session_id_to_service_pair.setdefault(session_id, pair)
+        return _session_id_to_service_pair[session_id]
 
 
 class _SessionRequest(ISessionRequest):
+    """ISessionRequest：上行负载与 WebSocket 直连 Agent 一致，使用 E2AEnvelope.to_dict() 的 JSON 串。"""
 
-    def __init__(self, msg: AgentRequest):
+    def __init__(self, msg: AgentRequest, envelope: E2AEnvelope) -> None:
         self._req = msg
+        self._envelope = envelope
+        service_id, agent_id = _session_id_to_invoke_ids(self._req.session_id or "")
+        self._service_id = service_id
+        self._req.service_id = service_id
+        self._req.agent_id = agent_id or ""
+        # 与 AgentRequest 一致，供下游按 service_id / agent 路由
+        self._envelope.service_id = service_id
+        self._envelope.agent_id = agent_id or None
 
     @property
     def session_id(self) -> str:
-        return self._req.session_id
+        return self._service_id
 
     @property
     def session_concurrency(self) -> int:
@@ -103,7 +122,7 @@ class _SessionRequest(ISessionRequest):
 
     @property
     def raw_msg(self) -> Any:
-        return self._req
+        return json.dumps(self._envelope.to_dict(), ensure_ascii=False)
 
 
 def _e2a_nested_is_complete(data: dict[str, Any]) -> bool:
@@ -186,7 +205,7 @@ class RuntimeManagementAgentClient(AgentServerClient):
                     self, response_parser: IResponseParser
             ) -> IServiceHandler:
                 k8s = K8sServiceHandler(
-                    "swr.cn-north-4.myhuaweicloud.com/openjiuwen/jiuwenclaw-agentserver-amd64:0.0.1",
+                    "swr.cn-north-4.myhuaweicloud.com/openjiuwen/jiuwenclaw-agentserver-amd64:0.0.15",
                     name_prefix="jiuwenclaw",
                     namespace="default",
                     container_name="jiuwenclaw-agentserver",
@@ -194,10 +213,12 @@ class RuntimeManagementAgentClient(AgentServerClient):
                     port_name="http1",
                     image_pull_policy="IfNotPresent",
                     env_vars={
+                        "AGENT_SERVER_HOST": "0.0.0.0",
+                        "AGENT_CLIENT_TYPE": "runtime",
                         "MODEL_PROVIDER": "OpenAI",
                         "MODEL_NAME": "Qwen/Qwen3-32B",
-                        "API_BASE": "https://api.siliconflow.cn/v1",
-                        "API_KEY": "sk-xicwxncrmiymkavenhjupgtprrqcejzcvtvhtncpahutlabd"
+                        "API_BASE": "",
+                        "API_KEY": ""
                     },
                     kubeconfig=None,
                     readiness_initial_delay=5,
@@ -262,7 +283,7 @@ class RuntimeManagementAgentClient(AgentServerClient):
         if self._connected:
             return
         acc_cfg = AccessConfig(
-            image="swr.cn-north-4.myhuaweicloud.com/openjiuwen/jiuwenclaw-agentserver-amd64:0.0.1",
+            image="swr.cn-north-4.myhuaweicloud.com/openjiuwen/jiuwenclaw-agentserver-amd64:0.0.15",
             service_concurrency=10,
             min_idle_services=1,
             max_services=10,
@@ -315,7 +336,7 @@ class RuntimeManagementAgentClient(AgentServerClient):
         request = e2a_to_agent_request(envelope)
 
         # 构造 IRequest 实现（非流式）
-        session_request = _SessionRequest(request)
+        session_request = _SessionRequest(request, envelope)
 
         try:
             # 调用 Access.send_message，它返回 AsyncIterator
@@ -372,7 +393,7 @@ class RuntimeManagementAgentClient(AgentServerClient):
         request = e2a_to_agent_request(envelope)
 
         # 构造 IRequest 实现（流式）
-        session_request = _SessionRequest(request)
+        session_request = _SessionRequest(request, envelope)
 
         try:
             # 调用 Access.send_message，它返回 AsyncIterator
