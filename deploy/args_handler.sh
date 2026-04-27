@@ -8,7 +8,7 @@ parse_args() {
 
     while [ $i -lt ${#args[@]} ]; do
         case "${args[$i]}" in
-            up|down)
+            up|down|restart)
                 CMD="${args[$i]}"
                 i=$((i+1))
                 ;;

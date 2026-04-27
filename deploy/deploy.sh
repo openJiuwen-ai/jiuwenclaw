@@ -68,6 +68,11 @@ process_down() {
     done
 }
 
+process_restart() {
+    process_down
+    process_up
+}
+
 # ==================== Main function ====================
 main() {
     read_env_from_file "${CUSTOM_ENV_FILE}" "DEPLOY_VARS"
