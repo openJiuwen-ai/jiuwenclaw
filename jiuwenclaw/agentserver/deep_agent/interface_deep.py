@@ -2526,7 +2526,9 @@ class JiuWenClawDeepAdapter:
         config_base = get_config()
         channel = str(channel_id or self._resolve_prompt_channel(session_id) or "web").strip() or "web"
         send_file_enabled = config_base.get("channels", {}).get(channel, {}).get("send_file_allowed", False)
-        if send_file_enabled and request_id and session_id:
+        send_file_channel_allowed = send_file_enabled or channel == "officeclaw"
+        has_send_file_request_context = bool(request_id and session_id)
+        if send_file_channel_allowed and has_send_file_request_context:
             # 先卸载上一次请求遗留的 send_file 工具
             for existing in list(self._instance.ability_manager.list() or []):
                 if getattr(existing, "name", "").startswith("send_file_to_user"):
