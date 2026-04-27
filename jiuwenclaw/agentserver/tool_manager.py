@@ -413,7 +413,14 @@ class ToolManager:
                     add_res = Runner.resource_mgr.add_tool(ephemeral, tag=mcp_cfg.server_name)
                     if add_res is not None and hasattr(add_res, "is_ok") and not add_res.is_ok():
                         err = _mcp_add_result_error_text(add_res)
-                        raise RuntimeError(f"注册 ephemeral Cat Cafe 工具失败 {tname}: {err}")
+                        if "already exist" not in err.lower():
+                            raise RuntimeError(f"注册 ephemeral Cat Cafe 工具失败 {tname}: {err}")
+                        logger.info(
+                            "[ToolManager] ephemeral Cat Cafe 工具已存在，复用现有资源 tool=%s id=%s err=%s",
+                            tname,
+                            tool_id,
+                            err,
+                        )
                     agent.ability_manager.add(card)
                     self._cat_cafe_ephemeral_tools.append((tool_id, tname))
                 logger.info(
