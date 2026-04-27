@@ -4909,7 +4909,11 @@ class JiuWenClawDeepAdapter:
             yield AgentResponseChunk(
                 request_id=rid,
                 channel_id=cid,
-                payload={"event_type": "chat.error", "error": str(exc)},
+                payload={
+                    "event_type": "chat.error",
+                    "error": str(exc),
+                    "error_type": type(exc).__name__,
+                },
                 is_complete=False,
             )
         finally:

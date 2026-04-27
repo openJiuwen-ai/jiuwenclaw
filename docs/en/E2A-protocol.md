@@ -422,6 +422,21 @@ Runtime list: **`constants.E2A_RESPONSE_KINDS`**; **`body`** is a **dict**. Norm
 
 Cross-reference: request log normalization in **`E2A-AgentRequest-log-migration.md`**; response logging can adopt the same single-line JSON convention later.
 
+### 12.9 Streaming `chat.error` carries `error_type`
+
+When the inner agent loop raises, the streaming aggregator emits a
+`chat.error` event whose payload carries the originating exception class.
+Consumers can group failures structurally instead of regexing the message
+string.
+
+```json
+{"event_type":"chat.error","error":"rate limited (429)","error_type":"RateLimitError"}
+```
+
+The same `error_type` field appears at the top level of the persisted
+`history.json` record. Cancellation (`asyncio.CancelledError`) propagates
+as cancellation rather than being classified as a `chat.error`.
+
 ---
 
 ## 13. Security notes

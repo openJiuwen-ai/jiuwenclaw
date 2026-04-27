@@ -1050,6 +1050,17 @@ class JiuWenClaw:
                     if isinstance(data, asyncio.CancelledError):
                         logger.info("[JiuWenClaw] 流式处理被中断: request_id=%s", rid)
                         raise data
+                    # Surface exception class so consumers can classify
+                    # failures structurally instead of regexing the message.
+                    error_type = (
+                        type(data).__name__ if isinstance(data, BaseException) else ""
+                    )
+                    error_payload: dict[str, Any] = {
+                        "event_type": "chat.error",
+                        "error": str(data),
+                    }
+                    if error_type:
+                        error_payload["error_type"] = error_type
                     append_history_record(
                         session_id=session_id,
                         request_id=rid,
@@ -1059,11 +1070,12 @@ class JiuWenClaw:
                         content=str(data),
                         timestamp=time.time(),
                         mode=request.params.get("mode", "unknown"),
+                        extra={"error_type": error_type} if error_type else None,
                     )
                     yield AgentResponseChunk(
                         request_id=rid,
                         channel_id=cid,
-                        payload={"event_type": "chat.error", "error": str(data)},
+                        payload=error_payload,
                         is_complete=False,
                     )
                 else:
