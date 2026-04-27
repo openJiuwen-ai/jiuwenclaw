@@ -276,21 +276,32 @@ def _evaluate_subcommand_allow(
     return PermissionLevel.ASK, f"{_MR}:fallback(no_allow_match)"
 
 
-def _default_level(permission_config: dict[str, Any]) -> tuple[PermissionLevel | None, str | None]:
-    """解析 ``permissions.defaults``。
+def _defaults_guard_baseline(tool_name: str) -> tuple[PermissionLevel | None, str | None]:
+    """``defaults`` 落在 guard（含历史 ask 升级、非法兜底）时的档位。
+
+    与 ``tools.<name>: guard`` 对称：**非 shell** 无子线 A 命令可评 → ``ASK``；
+    **shell** → ``(None, …)`` 继续走子线 A。
+    """
+    if not _is_shell_tool(tool_name):
+        return PermissionLevel.ASK, "defaults.guard"
+    return None, "defaults.guard"
+
+
+def _default_level(permission_config: dict[str, Any], tool_name: str) -> tuple[PermissionLevel | None, str | None]:
+    """解析 ``permissions.defaults``（需 ``tool_name`` 以区分 shell / 非 shell 的 guard 语义）.
 
     Phase-1 规则：
 
-    - ``guard``       → ``(None, "defaults.guard")``，进入 Guard 管线
-    - 历史 ``ask``    → 静默升级为 ``guard``，仅一次性 INFO 日志
+    - ``guard`` / 历史 ``ask`` / 非法兜底 guard：**shell** → ``(None, "defaults.guard")``；
+      **非 shell** → ``(ASK, "defaults.guard")``（与显式 ``tools.*: guard`` 一致）。
     - ``allow / deny`` → 原样返回
-    - 非法值 / 非标量 → 兜底 ``guard``
+    - 非标量 → 兜底 guard（同上 shell / 非 shell 分流）
     """
     raw = permission_config.get("defaults", GUARD_LEVEL_LITERAL)
     if isinstance(raw, str):
         norm = raw.strip().lower()
         if norm == GUARD_LEVEL_LITERAL:
-            return None, "defaults.guard"
+            return _defaults_guard_baseline(tool_name)
         if norm == "ask":
             global _LEGACY_ASK_DEPRECATED_DEFAULTS
             if not _LEGACY_ASK_DEPRECATED_DEFAULTS:
@@ -300,7 +311,7 @@ def _default_level(permission_config: dict[str, Any]) -> tuple[PermissionLevel |
                     raw,
                 )
                 _LEGACY_ASK_DEPRECATED_DEFAULTS = True
-            return None, "defaults.guard"
+            return _defaults_guard_baseline(tool_name)
         try:
             level = _parse_level(raw)
             return level, f"defaults.{level.value}"
@@ -309,13 +320,13 @@ def _default_level(permission_config: dict[str, Any]) -> tuple[PermissionLevel |
                 "[PermissionEngine] permission.tiered_policy.invalid_default_level value=%r fallback=guard",
                 raw,
             )
-            return None, "defaults.guard"
+            return _defaults_guard_baseline(tool_name)
     logger.warning(
         "[PermissionEngine] permission.tiered_policy.invalid_default_level reason=non_scalar_level "
         "value=%r fallback=guard",
         raw,
     )
-    return None, "defaults.guard"
+    return _defaults_guard_baseline(tool_name)
 
 
 def _baseline_level(
@@ -327,18 +338,23 @@ def _baseline_level(
 
     Phase-1 规则：
 
-    - 显式写 ``guard``：返回 ``(None, "tools.<name>")``，让 Guard 管线接管。
-    - 历史 ``ask``：等价于 ``guard``，只在首次出现时打 INFO，**不**打 WARN。
+    - 显式写 ``guard``：**shell 工具**返回 ``(None, "tools.<name>")``，让子线 A（命令规则）
+      继续评估；**非 shell 工具**子线 A 无命令串可评，直接返回 ``(ASK, "tools.<name>")``，
+      避免误用 ``baseline is None`` 分支把档位显示成「子线 A 放行 ALLOW」。
+    - 历史 ``ask``：等价于 ``guard``，只在首次出现时打 INFO，**不**打 WARN；shell / 非 shell
+      分流与上条相同。
     - ``allow / deny``：原样返回。
     - 工具未配置：交由 ``_default_level``。
     - 非法值或非标量：返回 ``(None, None)``。
     """
     if tool_name not in tools_cfg:
-        return _default_level(permission_config)
+        return _default_level(permission_config, tool_name)
     raw = tools_cfg[tool_name]
     if isinstance(raw, str):
         norm = raw.strip().lower()
         if norm == GUARD_LEVEL_LITERAL:
+            if not _is_shell_tool(tool_name):
+                return PermissionLevel.ASK, f"tools.{tool_name}"
             return None, f"tools.{tool_name}"
         if norm == "ask":
             if tool_name not in _LEGACY_ASK_DEPRECATED_TOOLS:
@@ -350,6 +366,8 @@ def _baseline_level(
                     tool_name,
                 )
                 _LEGACY_ASK_DEPRECATED_TOOLS.add(tool_name)
+            if not _is_shell_tool(tool_name):
+                return PermissionLevel.ASK, f"tools.{tool_name}"
             return None, f"tools.{tool_name}"
         try:
             return _parse_level(raw), f"tools.{tool_name}"
@@ -443,7 +461,8 @@ def evaluate_tiered_policy_detailed(
         return PermissionLevel.ALLOW, baseline_rule or f"{_MR}:tools.allow", None
 
     if baseline is None:
-        # guard 档位：非 shell 工具子线 A 没有意见，让 strictest 由子线 B（file_guard）裁决。
+        # 仅兜底：如非法 ``tools.<name>`` 档位得到 ``(None, None)``；默认 / 显式 guard 下的非 shell
+        # 已在 ``_default_level`` / ``_baseline_level`` 提升为 ASK，不会落到此处。
         if not _is_shell_tool(tool_name):
             return PermissionLevel.ALLOW, baseline_rule or f"{_MR}:guard_no_rules", None
         # shell 工具继续走子线 A 的命令/参数规则评估。

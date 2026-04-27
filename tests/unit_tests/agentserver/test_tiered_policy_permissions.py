@@ -168,7 +168,7 @@ def test_complex_command_substitution_evaluates_outer_and_inner_heads(monkeypatc
 
 
 def test_non_shell_tool_guard_defers_to_file_guard(monkeypatch):
-    """Write:guard 时子线 A 放行 ALLOW；最终档位由 file_guard 子线 B 决定。"""
+    """Write:guard 时子线 A 对非 shell 直接给 ASK；与 file_guard 子线 B 的合并在 core 内完成。"""
     _config_dir_with_builtin(_tmp_dir("non-shell"), monkeypatch, [])
     cfg = {
         "tools": {"Write": "guard"},
@@ -178,12 +178,11 @@ def test_non_shell_tool_guard_defers_to_file_guard(monkeypatch):
 
     perm, mr = evaluate_tiered_policy(cfg, "Write", {"path": "/tmp/a.txt"})
 
-    assert perm == PermissionLevel.ALLOW
-    # baseline_rule 优先返回 ``tools.Write``；唯有完全无 baseline 时退化为 ``guard_no_rules``。
-    assert mr in ("tools.Write", "tiered_policy:guard_no_rules")
+    assert perm == PermissionLevel.ASK
+    assert mr == "tools.Write"
 
     legacy_ask = evaluate_tiered_policy({"tools": {"Write": "ask"}}, "Write", {"path": "/tmp/a.txt"})
-    assert legacy_ask[0] == PermissionLevel.ALLOW
+    assert legacy_ask[0] == PermissionLevel.ASK
     assert legacy_ask[1] == "tools.Write"
 
     allow_result = evaluate_tiered_policy({"tools": {"Write": "allow"}}, "Write", {"path": "/tmp/a.txt"})
@@ -193,7 +192,7 @@ def test_non_shell_tool_guard_defers_to_file_guard(monkeypatch):
 
 
 def test_engine_checks_unconfigured_tools_via_file_guard(monkeypatch):
-    """Phase-1：未配置工具走 ``defaults.guard``，子线 A 没意见，由 file_guard 兜底。
+    """Phase-1：未配置工具走 ``defaults.guard``；非 shell 在 tiered 已为 ASK，再与 file_guard 合并。
 
     ``Write({"path": "/tmp/a.txt"})`` 在大多数测试环境里都在 workspace 之外，
     file_guard 默认会要求 ASK，并把命中提示拼进 ``matched_rule``。
@@ -212,13 +211,13 @@ def test_engine_checks_unconfigured_tools_via_file_guard(monkeypatch):
 def test_unconfigured_tool_uses_configured_default_level(monkeypatch):
     _config_dir_with_builtin(_tmp_dir("configured-default"), monkeypatch, [])
 
-    # 旧 ``defaults: ask`` 在 Phase-1 等价 ``guard``：子线 A 对非 shell 不发表意见。
+    # 旧 ``defaults: ask`` 在 Phase-1 等价 ``guard``：非 shell 与显式 ``tools.*: guard`` 一致为 ASK。
     legacy_ask = evaluate_tiered_policy({"defaults": "ask", "tools": {}}, "Write", {"path": "/tmp/a.txt"})
-    assert legacy_ask[0] == PermissionLevel.ALLOW
+    assert legacy_ask[0] == PermissionLevel.ASK
     assert legacy_ask[1] == "defaults.guard"
 
     explicit_guard = evaluate_tiered_policy({"defaults": "guard", "tools": {}}, "Write", {"path": "/tmp/a.txt"})
-    assert explicit_guard[0] == PermissionLevel.ALLOW
+    assert explicit_guard[0] == PermissionLevel.ASK
     assert explicit_guard[1] == "defaults.guard"
 
     assert evaluate_tiered_policy({"defaults": "deny", "tools": {}}, "Write", {"path": "/tmp/a.txt"}) == (
@@ -575,8 +574,10 @@ def test_shell_message_does_not_offer_existing_rule_when_file_guard_asks():
     assert "需要授权才能执行 `echo *`" not in message
     assert "工具 `bash` 需要授权才能执行文件操作" in message
     assert '选择"总是允许"将写入持久化允许规则：`echo *`' not in message
-    assert '选择"总是允许"将允许文件操作：`写入 C:/Users/demo/.jiuwenclaw/b.txt`' in message
-    assert "匹配规则：`file_guard:ask`" in message
+    # ``_build_message`` 已不再拼接「总是允许」提示与匹配规则行，仅保留标题/文件操作/风险等级/参数。
+    assert "需要授权的文件操作" in message
+    assert "写入 `C:/Users/demo/.jiuwenclaw/b.txt`" in message
+    assert "**风险等级：高风险**" in message
 
 
 def test_permission_message_uses_exact_pattern_for_complex_shell_command():
@@ -600,7 +601,6 @@ def test_permission_message_uses_exact_pattern_for_complex_shell_command():
 
     exact_pattern = "if exist a.txt type a.txt else echo missing > a.txt"
     assert f"工具 `bash` 需要授权才能执行 `{exact_pattern}`" in message
-    assert f'选择"总是允许"将写入持久化允许规则：`{exact_pattern}`' in message
     assert context["would_persist_patterns"] == [exact_pattern]
     assert "无法为“总是允许”写入持久化规则" not in message
 
@@ -700,8 +700,8 @@ def test_non_shell_permission_message_uses_low_risk():
         result,
     )
 
-    assert "🟢 **低风险**" in message
-    assert "不属于命令执行类操作" in message
+    assert "**风险等级：低风险**" in message
+    assert "**工具 `Write` 需要授权才能执行**" in message
 
 
 @pytest.mark.parametrize(
@@ -761,7 +761,7 @@ def test_acp_permission_context_contains_readable_match_and_persist_targets():
 
 
 def test_permission_message_omits_description_section_when_blank():
-    """``description`` 缺省 / 空白时，标题段后**直接**衔接安全风险评估，不出现额外引用块。"""
+    """``description`` 缺省 / 空白时，标题段后不经「行为意图」引用块，直接衔接风险等级等正文。"""
     from jiuwenclaw.agentserver.deep_agent.rails.permission_rail import PermissionInterruptRail
 
     rail = PermissionInterruptRail(config={"tools": {"write_file": "guard"}})
@@ -784,7 +784,8 @@ def test_permission_message_omits_description_section_when_blank():
     for msg in (msg_no_desc, msg_blank_desc):
         assert title in msg
         _, _, tail = msg.partition(title)
-        assert tail.startswith("**安全风险评估：**"), msg
+        assert not tail.startswith("> 行为意图："), msg
+        assert tail.startswith("**风险等级："), msg
 
 
 def test_acp_permission_context_carries_tool_description():
@@ -835,6 +836,84 @@ def test_display_matched_rule_preserves_file_guard_tail_for_non_shell_tool():
         matched_rule="tools.write_file",
     )
     assert rail.display_matched_rule("write_file", plain_baseline) == "write_file.ask"
+
+
+def test_display_matched_rule_allow_tool_shows_only_file_guard_when_elevated():
+    """tools.<name> 为 allow 且仅 file_guard 把整次调用抬到 ASK 时，匹配规则只展示 file_guard 段。"""
+    from jiuwenclaw.agentserver.deep_agent.rails.permission_rail import PermissionInterruptRail
+
+    rail = PermissionInterruptRail(config={"tools": {"read_file": "allow"}})
+    merged = PermissionResult(
+        permission=PermissionLevel.ASK,
+        matched_rule="tools.read_file|file_guard:ask",
+    )
+    assert rail.display_matched_rule("read_file", merged) == "file_guard:ask"
+
+
+def test_build_risk_non_shell_low_without_file_paths():
+    from jiuwenclaw.agentserver.deep_agent.rails.permission_rail import (
+        PermissionInterruptRail,
+        PersistPreview,
+    )
+
+    rail = PermissionInterruptRail(config={})
+    result = PermissionResult(permission=PermissionLevel.ASK, matched_rule="tools.write_file")
+    preview = PersistPreview(targets=[], disabled_reason="")
+    risk = rail.build_risk_for_message("write_file", {}, result, preview)
+    assert risk["level"] == "低"
+    assert "不涉及需额外审批的文件路径" in risk["explanation"]
+
+
+def test_build_risk_non_shell_high_when_file_guard_paths():
+    from jiuwenclaw.agentserver.deep_agent.rails.permission_rail import (
+        PermissionInterruptRail,
+        PersistPreview,
+    )
+
+    rail = PermissionInterruptRail(config={})
+    result = PermissionResult(
+        permission=PermissionLevel.ASK,
+        matched_rule="tools.read_file|file_guard:ask",
+        external_paths=["/outside/readme.txt"],
+        file_operations=[
+            FileOperation(action="read", path="/outside/readme.txt", source="tool_arg"),
+        ],
+    )
+    preview = PersistPreview(targets=[], disabled_reason="")
+    risk = rail.build_risk_for_message("read_file", {"path": "/outside/readme.txt"}, result, preview)
+    assert risk["level"] == "高"
+    assert "策略范围外" in risk["explanation"] or "未授权" in risk["explanation"]
+
+
+def test_build_risk_shell_high_when_external_paths_even_if_command_simple():
+    from jiuwenclaw.agentserver.deep_agent.rails.permission_rail import (
+        PermissionInterruptRail,
+        PersistPreview,
+    )
+
+    rail = PermissionInterruptRail(config={})
+    result = PermissionResult(
+        permission=PermissionLevel.ASK,
+        matched_rule="bash.shell_command.ask|file_guard:ask",
+        external_paths=["C:/Windows/Temp/out.txt"],
+    )
+    preview = PersistPreview(targets=[], disabled_reason="")
+    risk = rail.build_risk_for_message("bash", {"command": "echo hi"}, result, preview)
+    assert risk["level"] == "高"
+
+
+def test_build_risk_shell_mid_when_persist_disabled_and_command_simple():
+    from jiuwenclaw.agentserver.deep_agent.rails.permission_rail import (
+        PermissionInterruptRail,
+        PersistPreview,
+    )
+
+    rail = PermissionInterruptRail(config={})
+    result = PermissionResult(permission=PermissionLevel.ASK, matched_rule="bash.shell_command.ask")
+    preview = PersistPreview(targets=[], disabled_reason="结构过于复杂，无法生成持久化规则")
+    risk = rail.build_risk_for_message("bash", {"command": "echo hi"}, result, preview)
+    assert risk["level"] == "中"
+    assert "结构复杂" in risk["explanation"] or "命令结构复杂" in risk["explanation"]
 
 
 def test_display_matched_rule_preserves_file_guard_tail_for_shell_tool():

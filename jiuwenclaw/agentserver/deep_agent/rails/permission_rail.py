@@ -476,8 +476,30 @@ class PermissionInterruptRail(ConfirmInterruptRail):
             return None
         return raw[sep_idx + 1:].strip() or None
 
-    @staticmethod
-    def display_matched_rule(tool_name: str, result: PermissionResult) -> str:
+    def _tools_cfg_allows_tool(self, tool_name: str) -> bool:
+        """``permissions.tools.<name>`` 是否为字面 ``allow``（与 ``tiered_policy`` 命中段一致）。"""
+        tools = self._static_config.get("tools")
+        if not isinstance(tools, dict):
+            return False
+        key = self._normalize_tool_name(tool_name)
+        raw = tools.get(key)
+        return isinstance(raw, str) and raw.strip().lower() == "allow"
+
+    def _non_shell_allow_plus_file_guard_ask_display(
+        self, tool_name: str, result: PermissionResult, raw: str,
+    ) -> bool:
+        """非 shell、子线 A 为 allow（``tools.<name>``）、仅子线 B 抬到 ASK 的合成 matched_rule。"""
+        if tool_name in _SHELL_PERMISSION_TOOLS or result.permission != PermissionLevel.ASK:
+            return False
+        if not raw or "|file_guard:" not in raw:
+            return False
+        if not self._tools_cfg_allows_tool(tool_name):
+            return False
+        key = self._normalize_tool_name(tool_name)
+        first = raw.split("|", 1)[0].strip()
+        return first == f"tools.{key}"
+
+    def display_matched_rule(self, tool_name: str, result: PermissionResult) -> str:
         raw = str(result.matched_rule or "").strip()
         if result.permission != PermissionLevel.ASK:
             return raw or "N/A"
@@ -491,6 +513,12 @@ class PermissionInterruptRail(ConfirmInterruptRail):
             if fg_tail == "file_guard:ask" and not PermissionInterruptRail._has_shell_ask(result, raw):
                 return fg_tail
             return f"{head}|{fg_tail}" if fg_tail else head
+        # 非 shell：``read_file`` 配 ``allow`` 但路径越界时 core 拼 ``tools.read_file|file_guard:ask``。
+        # 此时子线 A 并未要求 ASK，展示 ``read_file.ask|…`` 会误导用户——与 shell 侧「无子线 A ASK
+        # 则只展示 file_guard」对称，这里整段折叠为 ``file_guard:ask``。
+        fg_tail = PermissionInterruptRail.extract_file_guard_tail(raw)
+        if fg_tail and self._non_shell_allow_plus_file_guard_ask_display(tool_name, result, raw):
+            return fg_tail
         # 非 shell tool：baseline head（``tools.{tool}`` / ``defaults.ask`` / ``defaults.guard``）
         # 不含 ``|``，``split("|")`` 切第一段就是干净的 head。这里只对 head 做美化，
         # 后续段（``file_guard:ask`` 等）保持原样，最后再用 ``|`` 拼回，避免把 ``.ask`` 后缀
@@ -531,22 +559,50 @@ class PermissionInterruptRail(ConfirmInterruptRail):
     def _risk_rank(risk: dict[str, Any]) -> int:
         return {"低": 0, "中": 1, "高": 2}.get(str(risk.get("level") or ""), 1)
 
-    def _build_risk_for_message(
+    @staticmethod
+    def _pending_file_guard_paths(result: PermissionResult) -> list[str]:
+        """``file_guard`` 抬到 ASK 时附带的待确认路径（与 ``core`` 的 ``external_paths`` 同源）。"""
+        ext = getattr(result, "external_paths", None) or []
+        if ext:
+            return [str(p).strip() for p in ext if str(p).strip()]
+        ops = getattr(result, "file_operations", None) or []
+        return [str(op.path).strip() for op in ops if str(getattr(op, "path", "") or "").strip()]
+
+    @staticmethod
+    def _risk_high_unauthorized_file_access() -> dict[str, str]:
+        return {
+            "level": "高",
+            "icon": "🔴",
+            "explanation": (
+                "该操作涉及策略范围外或未授权的文件路径访问，安全风险较高，需用户确认后方可继续"
+            ),
+        }
+
+    def build_risk_for_message(
         self,
         tool_name: str,
         tool_args: dict[str, Any],
         result: PermissionResult,
         preview: PersistPreview,
     ) -> dict[str, str]:
+        """合成审批卡用的风险等级与说明（供消息体与结构化上下文复用）。"""
         if result.risk:
             return self._append_persistence_risk_note(result.risk, preview.disabled_reason)
 
+        pending_paths = PermissionInterruptRail._pending_file_guard_paths(result)
+
         if not is_shell_permission_tool(tool_name):
-            risk = {
-                "level": "低",
-                "icon": "🟢",
-                "explanation": "该工具调用不属于命令执行类操作，当前仅因工具权限配置需要用户确认",
-            }
+            if pending_paths:
+                risk = PermissionInterruptRail._risk_high_unauthorized_file_access()
+            else:
+                risk = {
+                    "level": "低",
+                    "icon": "🟢",
+                    "explanation": (
+                        "该工具调用不涉及需额外审批的文件路径访问，"
+                        "当前仅因工具权限配置需要用户确认"
+                    ),
+                }
             return self._append_persistence_risk_note(risk, preview.disabled_reason)
 
         targets = preview.targets
@@ -554,22 +610,16 @@ class PermissionInterruptRail(ConfirmInterruptRail):
             risk = assess_shell_targets_risk_static(targets)
         else:
             risk = assess_command_risk_static(tool_name, tool_args)
-        if preview.disabled_reason:
-            if self._risk_rank(risk) < 1:
-                risk = {
-                    "level": "中",
-                    "icon": "🟡",
-                    "explanation": "当前命令结构复杂，需要用户确认后执行",
-                }
-            return self._append_persistence_risk_note(risk, preview.disabled_reason)
-        external_paths = getattr(result, "external_paths", None) or []
-        if external_paths and self._risk_rank(risk) < 1:
-            return {
+
+        if pending_paths:
+            risk = PermissionInterruptRail._risk_high_unauthorized_file_access()
+        elif preview.disabled_reason and self._risk_rank(risk) < 1:
+            risk = {
                 "level": "中",
                 "icon": "🟡",
-                "explanation": "该操作涉及工作区外部路径，需要用户确认后执行",
+                "explanation": "当前命令结构复杂，需要用户确认后执行",
             }
-        return risk
+        return self._append_persistence_risk_note(risk, preview.disabled_reason)
 
     @staticmethod
     def _append_persistence_risk_note(risk: dict[str, Any], persist_disabled_reason: str) -> dict[str, str]:
@@ -1269,7 +1319,7 @@ class PermissionInterruptRail(ConfirmInterruptRail):
         tool_name = tool_call.name if tool_call else ""
         tool_args = self._parse_tool_args(tool_call)
         preview = self._build_persist_preview(tool_name, tool_args, result)
-        risk = self._build_risk_for_message(tool_name, tool_args, result, preview)
+        risk = self.build_risk_for_message(tool_name, tool_args, result, preview)
         persist_targets_text = self._format_inline_code_items(preview.targets)
         target_suffix = ""
         if is_shell_permission_tool(tool_name) and persist_targets_text:
@@ -1291,21 +1341,21 @@ class PermissionInterruptRail(ConfirmInterruptRail):
             parts.append(f"> {self._render_file_operations_section(file_ops)}\n\n")
 
         parts.extend([
-            f"**安全风险评估：** {risk.get('icon', '')} **{risk.get('level', '')}风险**\n\n",
-            f"> {risk.get('explanation', '')}\n\n",
+            f"**风险等级：{risk.get('level', '')}风险**\n\n",
+            #f"> {risk.get('explanation', '')}\n\n",
         ])
 
-        args_preview = self._format_args_preview(tool_args)
-        if args_preview and args_preview != "{}":
-            parts.append(f"参数：\n```json\n{args_preview}\n```\n")
+        # args_preview = self._format_args_preview(tool_args)
+        # if args_preview and args_preview != "{}":
+        #     parts.append(f"参数：\n```json\n{args_preview}\n```\n")
 
-        parts.append(f"\n匹配规则：`{self.display_matched_rule(tool_name, result)}`")
+        #parts.append(f"\n匹配规则：`{self.display_matched_rule(tool_name, result)}`")
 
-        external_paths = getattr(result, "external_paths", None) or []
-        if external_paths:
-            parts.append(f"\n\n**外部路径：** `{', '.join(external_paths)}`")
+        # external_paths = getattr(result, "external_paths", None) or []
+        # if external_paths:
+        #     parts.append(f"\n\n**外部路径：** `{', '.join(external_paths)}`")
 
-        parts.append(self._build_always_allow_hint(tool_name, preview))
+        # parts.append(self._build_always_allow_hint(tool_name, preview))
 
         return "".join(parts)
 
@@ -1319,7 +1369,7 @@ class PermissionInterruptRail(ConfirmInterruptRail):
             groups.setdefault(op.source, []).append(op)
 
         order = ["tool_arg", "shlex", "llm", "script_scan"]
-        chunks: list[str] = ["\n\n**涉及的文件操作：**"]
+        chunks: list[str] = ["\n\n**需要授权的文件操作：**"]
         for src in order:
             ops = groups.get(src)
             if not ops:
