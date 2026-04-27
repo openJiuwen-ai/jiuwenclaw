@@ -1,6 +1,7 @@
 # -*- coding: UTF-8 -*-
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 import time
+import asyncio
 from copy import deepcopy
 from dataclasses import dataclass
 from typing import Any, List, Optional
@@ -92,17 +93,62 @@ class ToolMgr:
             raise build_error(StatusCode.RESOURCE_MCP_SERVER_ADD_ERROR, server_config=server_config,
                               reason="server_id is already exist")
         client = self._create_client(server_config)
-        try:
-            connected = await client.connect()
-            if not connected:
-                raise build_error(StatusCode.RESOURCE_MCP_SERVER_CONNECTION_ERROR, server_config=server_config,
-                                  reason="")
-            results = await self._inner_refresh_mcp_tools(client, server_config, expiry_time)
-            self._mcp_server_name_to_ids.setdefault(server_config.server_name, []).append(server_config.server_id)
-            return results
-        except Exception as e:
-            raise build_error(StatusCode.RESOURCE_MCP_SERVER_ADD_ERROR, cause=e, server_config=server_config,
-                              reason=str(e))
+        # 持续尝试连接：try in every 5s, and max wait time is 120s.
+        retry_interval = 5.0
+        max_wait_time = 120.0
+        start_time = asyncio.get_event_loop().time()
+        attempt = 0
+        last_error = None
+        while True:
+            attempt += 1
+            elapsed_time = asyncio.get_event_loop().time() - start_time
+            # check overtime
+            if elapsed_time >= max_wait_time:
+                error_msg = (f"MCP server connection timeout after {elapsed_time:.1f}s "
+                        f"(max_wait_time={max_wait_time}s), attempted {attempt} times. "
+                        f"Last error: {last_error}")
+                logger.error(error_msg)
+                raise build_error(StatusCode.RESOURCE_MCP_SERVER_CONNECTION_ERROR,
+                                server_config=server_config,
+                                reason=error_msg)
+            try:
+                logger.info(f"Attempting to connect to MCP server (attempt {attempt}, "
+                        f"elapsed={elapsed_time:.1f}s/{max_wait_time}s), "
+                        f"server_id={server_config.server_id}, server_name={server_config.server_name}")
+                connected = await client.connect()
+                if not connected:
+                    last_error = f"connect() returned False on attempt {attempt}"
+                    logger.warning(f"MCP server connection failed (attempt {attempt}): "
+                                f"connect() returned False, server_id={server_config.server_id}")
+                    remaining_time = max_wait_time - elapsed_time
+                    if remaining_time > retry_interval:
+                        logger.info(f"Retrying in {retry_interval} seconds... (remaining time: {remaining_time:.1f}s)")
+                        await asyncio.sleep(retry_interval)
+                        continue
+                    elif remaining_time > 0:
+                        logger.info(f"Final attempt: waiting {remaining_time:.1f}s before last try...")
+                        await asyncio.sleep(remaining_time)
+                        continue
+                    else:
+                        # overtime
+                        continue
+                # fresh tool list
+                logger.info(f"MCP server connected successfully after {elapsed_time:.1f}s "
+                        f"(attempt {attempt}), server_id={server_config.server_id}")
+                results = await self._inner_refresh_mcp_tools(client, server_config, expiry_time)
+                self._mcp_server_name_to_ids.setdefault(server_config.server_name, []).append(server_config.server_id)
+                return results
+            except Exception as e:
+                last_error = str(e)
+                logger.error(f"MCP server connection error (attempt {attempt}, elapsed={elapsed_time:.1f}s): "
+                            f"server_id={server_config.server_id}, error={str(e)}")
+                error_msg = (f"MCP server connection failed with exception after {elapsed_time:.1f}s "
+                        f"(attempt {attempt}): {last_error}")
+                logger.error(error_msg)
+                # pylint: disable=raise-missing-from
+                raise build_error(StatusCode.RESOURCE_MCP_SERVER_ADD_ERROR, cause=e,
+                                server_config=server_config,
+                                reason=error_msg) from e
 
     @staticmethod
     def _create_client(config: McpServerConfig) -> McpClient:
