@@ -14,7 +14,7 @@ from typing import Any
 
 from jiuwenclaw.config import get_config
 from jiuwenclaw.extensions.sdk.agent_server_client import AgentServerClientExtension
-from .runtime_management_client import RuntimeManagementAgentClient
+from jiuwenclaw.extensions.runtime_management_client import RuntimeManagementAgentClient
 
 logger = logging.getLogger(__name__)
 
@@ -88,30 +88,74 @@ async def register_extensions(registry) -> list[RuntimeManagementExtension]:
         )
         return []
 
-    # 创建 Access 实例
+    # 创建 ServiceManager 及相关组件
     try:
-        from openjiuwen_runtime.management.orchestrator.access import Access, AccessConfig
-        from openjiuwen_runtime.foundation.db.handler import DBHandler
-
-        db_config = agent_client.get("db_config", {})
-        db_handler = DBHandler(**db_config) if db_config else None
-
-        access_config = AccessConfig(
-            db_handler=db_handler,
-            image=agent_client.get("image", "jiuwenclaw-agent:latest"),
-            max_concurrency=int(agent_client.get("max_concurrency", 200)),
-            min_idle_services=int(agent_client.get("min_idle_services", 1)),
-            max_services=int(agent_client.get("max_services", 10)),
-            target_port=int(agent_client.get("target_port", 8000)),
-            invoke_path=agent_client.get("invoke_path", "/invoke"),
-            service_ttl=int(agent_client.get("service_ttl", 300)),
-            queue_size=int(agent_client.get("queue_size", 100)),
-            message_timeout=float(agent_client.get("message_timeout", 30)),
-            max_retries=int(agent_client.get("max_retries", 3)),
+        from openjiuwen_runtime.management.session.dual_queue import PriorityDualAsyncQueues
+        from openjiuwen_runtime.management.session.service_manager import ServiceManager
+        from openjiuwen_runtime.management.session.timer import Timer
+        from openjiuwen_runtime.management.session.runtime import NoOpDeployController
+        from openjiuwen_runtime.management.session.service_handler import ServiceHandler
+        from openjiuwen_runtime.management.session.ws_client_channel import WSServiceMessageChannel
+        from openjiuwen_runtime.management.session.interfaces import (
+            IServiceInstanceFactory,
+            IServiceHandler,
+            IResponseParser,
+            IServiceManager,
         )
 
-        access_instance = Access(config=access_config)
-        logger.info("[RuntimeManagement] Access 实例创建成功")
+        # 创建 WebSocket 消息通道，用于连接下游 Agent Runtime 服务实例
+        target_port = int(agent_client.get("target_port", 8080))
+        invoke_path = agent_client.get("invoke_path", "/invoke")
+        ws_use_tls = bool(agent_client.get("ws_use_tls", False))
+        connect_timeout = float(agent_client.get("connect_timeout", 30.0))
+        
+        message_channel = WSServiceMessageChannel(
+            target_port=target_port,
+            invoke_path=invoke_path,
+            ws_use_tls=ws_use_tls,
+            connect_timeout=connect_timeout,
+        )
+        
+        logger.info(
+            "[RuntimeManagement] WebSocket 消息通道已创建: port=%s path=%s tls=%s timeout=%.1fs",
+            target_port, invoke_path, ws_use_tls, connect_timeout
+        )
+
+        # 创建服务工厂
+        class _ServiceFactory(IServiceInstanceFactory):
+            def __init__(self) -> None:
+                self._response_parser: IResponseParser | None = None
+
+            async def new_service(self, response_parser: IResponseParser) -> IServiceHandler:
+                self._response_parser = response_parser
+                return ServiceHandler(
+                    total_concurrency=int(agent_client.get("max_concurrency", 200)),
+                    message_channel=message_channel,
+                    response_parser=response_parser,
+                    deploy_controller=NoOpDeployController(),
+                )
+
+        service_factory = _ServiceFactory()
+
+        # 创建双队列
+        dual_queue = PriorityDualAsyncQueues(
+            user_queue_size=int(agent_client.get("queue_size", 1000)),
+            system_queue_size=int(agent_client.get("system_queue_size", 100)),
+        )
+
+        # 使用ServiceManager实例实现IServiceManager接口
+        service_manager = ServiceManager(
+            service_factory=service_factory,
+            dual_queue=dual_queue,
+            timer=Timer(),
+            service_concurrency=int(agent_client.get("max_concurrency", 200)),
+            min_idle_services=int(agent_client.get("min_idle_services", 0)),
+            max_services=int(agent_client.get("max_services", 10)),
+            autoscale_interval=float(agent_client.get("autoscale_interval", 0.5)),
+            service_idle_ttl=int(agent_client.get("service_ttl", 300)),
+        )
+
+        logger.info("[RuntimeManagement] ServiceManager 创建成功")
 
     except ImportError as exc:
         logger.error("[RuntimeManagement] 无法导入 openjiuwen_runtime: %s", exc)
@@ -119,12 +163,12 @@ async def register_extensions(registry) -> list[RuntimeManagementExtension]:
             "openjiuwen_runtime 未安装，请运行: pip install openjiuwen-runtime"
         ) from exc
     except Exception as exc:
-        logger.error("[RuntimeManagement] 创建 Access 实例失败: %s", exc)
+        logger.error("[RuntimeManagement] 创建 ServiceManager 失败: %s", exc)
         raise
 
     # 创建客户端
     client = RuntimeManagementAgentClient(
-        access_instance=access_instance,
+        service_manager=service_manager,
         concurrency=int(agent_client.get("concurrency", 1)),
         invoke_timeout_s=float(agent_client.get("invoke_timeout_s", 60.0)),
     )
