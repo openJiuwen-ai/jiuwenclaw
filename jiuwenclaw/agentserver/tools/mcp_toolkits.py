@@ -236,11 +236,12 @@ def _has_paid_search_api_key() -> bool:
 
 def get_mcp_tools() -> list[Tool]:
     """Return all MCP toolkit tools for registration in Runner."""
-    tools: list[Tool] = [mcp_free_search]
-    if _has_paid_search_api_key():
-        tools.append(mcp_paid_search)
+    tools: list[Tool] = []
     if enable_petal_search():
         tools.append(mcp_petal_search)
+    tools.append(mcp_free_search)
+    if _has_paid_search_api_key():
+        tools.append(mcp_paid_search)
     tools.extend([mcp_fetch_webpage, mcp_exec_command])
     return tools
 

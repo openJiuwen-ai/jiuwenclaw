@@ -156,6 +156,7 @@ def enable_petal_search() -> bool:
 @tool(
     name="mcp_petal_search",
     description=(
+        "Preferred web search tool when available. Use this before mcp_free_search for web searches. "
         "Petal web search via the same OpenAI-compatible API_BASE as the LLM "
         "(POST .../v1/ai-tools/web-search). Requires enable_petal_search in config and default_headers env."
     ),

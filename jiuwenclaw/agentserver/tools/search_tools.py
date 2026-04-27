@@ -628,7 +628,9 @@ def _jina_search_sync(query: str, timeout_seconds: int) -> dict[str, Any]:
 @tool(
     name="mcp_free_search",
     description=(
-        "Free search via DuckDuckGo/Bing with concurrent fallback. "
+        "Fallback or second-pass web search via DuckDuckGo/Bing. "
+        "Do not call in the same step as mcp_petal_search; first observe the Petal result, "
+        "then use this only if Petal failed, returned empty results, or lacks needed coverage. "
         "Input query and return ranked URLs with snippets."
     ),
 )
