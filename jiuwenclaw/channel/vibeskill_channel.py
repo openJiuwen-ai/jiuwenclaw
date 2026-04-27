@@ -798,6 +798,7 @@ class VibeSkillChannel(BaseChannel):
                 return False
             ctx = self._ensure_message_context(msg.session_id)
             text_part, _ = self._ensure_text_part(msg.session_id, "text")
+            text_part["text"] = str(text_part.get("text") or "") + text
             responses = self._prepend_message_announcement(
                 ctx,
                 external_sid,
@@ -1126,6 +1127,7 @@ class VibeSkillChannel(BaseChannel):
         if is_first:
             part["status"] = "running"
             part["text"] = message
+            ctx["message_announced"] = True
             return [{
                 "type": "message.updated",
                 "properties": {
@@ -1671,24 +1673,24 @@ class VibeSkillChannel(BaseChannel):
 
         responses = []
 
-        # 第一次收到这个 stage 的 part，发 message.part.updated 创建气泡
+        # 第一次收到这个 stage 的 part，只发 message.part.updated（避免首段文本重复）
         if is_new:
             responses.append({
                 "type": "message.part.updated",
                 "properties": self._serialize_part(part, external_sid),
             })
-
-        # 后续都用 message.part.delta 更新
-        responses.append({
-            "type": "message.part.delta",
-            "properties": {
-                "sessionID": external_sid,
-                "messageID": ctx["message_id"],
-                "partID": part["id"],
-                "type": part_type,
-                "text": delta,
-            },
-        })
+        else:
+            # 后续都用 message.part.delta 更新
+            responses.append({
+                "type": "message.part.delta",
+                "properties": {
+                    "sessionID": external_sid,
+                    "messageID": ctx["message_id"],
+                    "partID": part["id"],
+                    "type": part_type,
+                    "text": delta,
+                },
+            })
         return self._prepend_message_announcement(ctx, external_sid, responses)
 
     def _serialize_parts(self, parts: list[dict[str, Any]], external_sid: str | None) -> list[dict[str, Any]]:
