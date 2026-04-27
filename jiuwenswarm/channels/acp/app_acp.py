@@ -130,6 +130,12 @@ def run_acp(args: argparse.Namespace) -> int:
                         "id": resp.jsonrpc_id,
                         "result": resp.body,
                     }
+                # The gateway may remap the client-supplied session_id to an
+                # internal id. Surface that resolved id so callers can locate
+                # the written history.json.
+                if isinstance(final_rpc.get("result"), dict):
+                    if not final_rpc["result"].get("session_id") and resp.session_id:
+                        final_rpc["result"]["session_id"] = resp.session_id
                 break
     finally:
         if proc.poll() is None:
