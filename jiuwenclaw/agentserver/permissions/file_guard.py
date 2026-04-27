@@ -191,12 +191,44 @@ class FileGuardChecker:
 
     def workspace_root(self) -> Path:
         if self._workspace_root is not None:
-            return Path(self._workspace_root).resolve()
+            p = Path(self._workspace_root).resolve()
+            logger.info(
+                "[file_guard] workspace_root source=constructor path=%s",
+                p,
+            )
+            return p
+        # Align with RuntimePromptRail / _update_runtime_config: metadata effective_project_dir
+        # (set via set_effective_request_workspace_dir on each request).
+        try:
+            from jiuwenclaw.agentserver.tools.subagent_executor.context_vars import (
+                get_effective_request_workspace_dir,
+            )
+            req_ws = get_effective_request_workspace_dir()
+            if isinstance(req_ws, str) and req_ws.strip():
+                p = Path(req_ws.strip()).resolve()
+                logger.info(
+                    "[file_guard] workspace_root source=effective_request "
+                    "(metadata effective_project_dir / RuntimePromptRail) path=%s",
+                    p,
+                )
+                return p
+        except ImportError:
+            pass
         try:
             from jiuwenclaw.utils import get_agent_workspace_dir
-            return Path(get_agent_workspace_dir()).resolve()
+            p = Path(get_agent_workspace_dir()).resolve()
+            logger.debug(
+                "[file_guard] workspace_root source=agent_default (get_agent_workspace_dir) path=%s",
+                p,
+            )
+            return p
         except ImportError:
-            return Path.cwd().resolve()
+            p = Path.cwd().resolve()
+            logger.debug(
+                "[file_guard] workspace_root source=cwd_fallback path=%s",
+                p,
+            )
+            return p
 
     def _workspace_rw_enabled(self) -> bool:
         ws = self._fg.get("workspace") or {}
