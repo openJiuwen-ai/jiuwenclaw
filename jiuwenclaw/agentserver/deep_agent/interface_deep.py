@@ -753,12 +753,15 @@ class JiuWenClawDeepAdapter:
     @staticmethod
     def _browser_runtime_enabled() -> bool:
         """Whether browser runtime support is enabled for DeepAgent subagent wiring."""
-        value = str(
-            os.getenv("PLAYWRIGHT_RUNTIME_MCP_ENABLED")
-            or os.getenv("BROWSER_RUNTIME_MCP_ENABLED")
-            or ""
-        ).strip().lower()
-        return value in {"1", "true", "yes", "on"}
+        # value = str(
+        #     os.getenv("PLAYWRIGHT_RUNTIME_MCP_ENABLED")
+        #     or os.getenv("BROWSER_RUNTIME_MCP_ENABLED")
+        #     or ""
+        # ).strip().lower()
+        # return value in {"1", "true", "yes", "on"}
+
+        # close browser subagent
+        return False
 
     @staticmethod
     def _resolve_managed_browser_binary_from_config() -> str:
@@ -2337,12 +2340,12 @@ class JiuWenClawDeepAdapter:
             if self._skill_evolution_rail is not None:
                 await self._instance.register_rail(self._skill_evolution_rail)
                 logger.info("[JiuWenClawDeepAdapter] SkillEvolutionRail registered for plan mode")
-        # 注册 subagent rail（plan 模式下启用）
+        # 已使用subagent tool替代subagent rail
         if self._subagent_rail is None:
             self._subagent_rail = self._build_subagent_rail()
             if self._subagent_rail is not None:
-                await self._instance.register_rail(self._subagent_rail)
-                logger.info("[JiuWenClawDeepAdapter] SubagentRail registered for plan mode")
+                await self._instance.unregister_rail(self._subagent_rail)
+                logger.info("[JiuWenClawDeepAdapter] SubagentRail unregistered for plan mode")
         # plan 模式下注册 skill 合规相关 rail
         if self._skill_protocol_prompt_rail is None:
             self._skill_protocol_prompt_rail = self._build_skill_protocol_prompt_rail()
