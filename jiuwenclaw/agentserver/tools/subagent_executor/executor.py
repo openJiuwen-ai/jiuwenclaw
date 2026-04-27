@@ -10,7 +10,6 @@ from __future__ import annotations
 import asyncio
 from typing import Any, TYPE_CHECKING
 
-from openjiuwen.core.context_engine.context.session_memory_manager import SessionMemoryConfig
 from openjiuwen.core.runner import Runner
 from openjiuwen.core.session.agent import Session
 from openjiuwen.core.single_agent import AgentCard
@@ -73,6 +72,7 @@ EXCLUDED_TOOLS_SPAWN = {
     "office_claw_register_scheduled_task",
     "office_claw_set_scheduled_task_enabled",
     "office_claw_remove_scheduled_task",
+    "office_claw_update_scheduled_task",
     # 主 Agent 级记忆与反思
     "office_claw_retain_memory_callback",
     "office_claw_search_evidence",
@@ -82,6 +82,8 @@ EXCLUDED_TOOLS_SPAWN = {
     "office_claw_read_session_events",
     "office_claw_read_session_digest",
     "office_claw_read_invocation_detail",
+    # 主 Agent 级技能管理
+    "office_claw_list_skills",
 }
 
 EXCLUDED_TOOLS_FORK = EXCLUDED_TOOLS_SPAWN | {"fork_agent"}
@@ -566,7 +568,6 @@ Approach each task methodically and deliver high-quality results.
         rails = [
             JiuClawContextEngineeringRail(
                 preset=True,
-                session_memory=SessionMemoryConfig(),
                 minimal=True),  # 上下文压缩 - 默认链路 B（ToolResultBudget + MicroCompact + FullCompact），不注入 tools/context
             SubagentContextRail(subagent_id=task.task_id, parent_session=parent_session),
             # active-skill body 的 lift/pin 由 rail.after_tool_call 触发；
@@ -705,7 +706,6 @@ Execute the given task using inherited context and available tools.
             ForkMessageInjectionRail(fork_messages),  # 注入继承的消息
             JiuClawContextEngineeringRail(
                 preset=True,
-                session_memory=SessionMemoryConfig(),
                 minimal=True),  # 上下文压缩 - 默认链路 B，不注入 tools/context
             SubagentContextRail(subagent_id=task.task_id, parent_session=parent_session),
             # 与 spawn 路径同样的 active-skill body lift/pin 接入；
