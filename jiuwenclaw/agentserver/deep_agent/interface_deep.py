@@ -79,6 +79,11 @@ from openjiuwen.harness.tools.todo import TodoStatus, TodoModifyTool
 from openjiuwen.harness.workspace.workspace import Workspace, WorkspaceNode
 
 from jiuwenclaw.agentserver.deep_agent.cron_runtime import CronRuntimeBridge
+from jiuwenclaw.agentserver.deep_agent.ask_user_question_registry import (
+    ASK_REQUEST_PREFIX,
+    AskUserQuestionRegistry,
+    ask_user_question_request_scope,
+)
 from jiuwenclaw.agentserver.llm_io_trace import (
     log_invoke_input,
     log_invoke_output,
@@ -124,6 +129,7 @@ from jiuwenclaw.agentserver.tools.video_tools import video_understanding
 from jiuwenclaw.agentserver.tools.harness_named_web_tools import build_jiuwen_harness_named_web_tools
 
 from jiuwenclaw.agentserver.tools import SendFileToolkit, SkillToolkit
+from jiuwenclaw.agentserver.tools.ask_user_question_tool import get_ask_user_question_tool
 from jiuwenclaw.agentserver.tools.acp_output_tools import get_tools as get_acp_output_tools
 from jiuwenclaw.agentserver.tools.acp_output_tools import get_acp_output_manager
 from jiuwenclaw.agentserver.tools.deepresearch_tools import (
@@ -2007,6 +2013,16 @@ class JiuWenClawDeepAdapter:
         except Exception as exc:
             logger.warning("[JiuWenClawDeepAdapter] skill tools registration failed: %s", exc)
 
+        # AskUserQuestion 工具：用于 LLM 主动结构化追问并等待用户回答
+        try:
+            ask_tool = get_ask_user_question_tool()
+            if not Runner.resource_mgr.get_tool(ask_tool.card.id):
+                Runner.resource_mgr.add_tool(ask_tool)
+            tool_cards.append(ask_tool.card)
+            logger.info("[JiuWenClawDeepAdapter] AskUserQuestion tool registered")
+        except Exception as exc:
+            logger.warning("[JiuWenClawDeepAdapter] AskUserQuestion tool registration failed: %s", exc)
+
         # Session 级 todo 工具（TodoToolkit / SkillStepToolkit）改由
         # SkillProtocolPromptRail.init() 跟随 rail 生命周期注册到 agent，
         # 保证 prompt 中提到的 skill_step_* / todo_* 工具与 prompt section 同上同下。
@@ -2779,6 +2795,7 @@ class JiuWenClawDeepAdapter:
                 await self._instance.abort()
             # 3. 取消当前会话关联的 MultiSessionToolkit 子任务（按 request 跟踪，避免误停其它会话）
             await self._cancel_session_toolkits(request.session_id, "interrupt(supplement): ")
+            AskUserQuestionRegistry.get_instance().cancel_for_session(str(request.session_id or ""))
             # 4. 不清理 todo — 保留给新任务继续
             logger.info(
                 "[JiuWenClawDeepAdapter] interrupt(supplement): 已停止执行 request_id=%s",
@@ -2799,6 +2816,7 @@ class JiuWenClawDeepAdapter:
                 request.session_id,
                 f"interrupt(cancel) request_id={request.request_id}: ",
             )
+            AskUserQuestionRegistry.get_instance().cancel_for_session(str(request.session_id or ""))
             # 4. 将未完成的 todo 项标记为 cancelled，并获取更新后的 todo 列表
             updated_todos = None
             if request.session_id:
@@ -2928,14 +2946,26 @@ class JiuWenClawDeepAdapter:
         return False
 
     async def handle_user_answer(self, request: AgentRequest) -> AgentResponse:
-        """Handle chat.user_answer request, route user answer to evolution approval Future."""
-        request_id = request.params.get("request_id", "") if isinstance(request.params, dict) else ""
-        answers = request.params.get("answers", []) if isinstance(request.params, dict) else []
+        """Handle chat.user_answer request with explicit source-based routing."""
+        params = request.params if isinstance(request.params, dict) else {}
+        request_id = params.get("request_id", "")
+        answers = params.get("answers", [])
+        source = params.get("source", "")
         resolved = False
-        if request_id.startswith("skill_evolve_"):
+        if source == "skill_evolve":
             resolved = await self._handle_evolution_approval(request_id, answers)
-        elif request_id.startswith("skill_create_"):
+        elif source == "skill_create":
             resolved = await self._handle_skill_create_approval(request_id, answers)
+        elif source == "ask_tool":
+            resolved = AskUserQuestionRegistry.get_instance().resolve(request_id, answers)
+        else:
+            # Backward compatibility: keep request_id-prefix routing for old channels/frontends.
+            if request_id.startswith("skill_evolve_"):
+                resolved = await self._handle_evolution_approval(request_id, answers)
+            elif request_id.startswith("skill_create_"):
+                resolved = await self._handle_skill_create_approval(request_id, answers)
+            elif isinstance(request_id, str) and request_id.startswith(ASK_REQUEST_PREFIX):
+                resolved = AskUserQuestionRegistry.get_instance().resolve(request_id, answers)
 
         return AgentResponse(
             request_id=request.request_id,
@@ -3564,6 +3594,7 @@ class JiuWenClawDeepAdapter:
         cid = request.channel_id
         query = request.params.get("query", "")
         mode = request.params.get("mode", "agent.plan")
+        interactive_ask = bool(request.params.get("interactive_ask", request.params.get("interactiveAsk", False)))
 
         token_trace_sid = _LLM_TRACE_SESSION_ID.set(session_id)
         token_trace_rid = _LLM_TRACE_REQUEST_ID.set(rid or "")
@@ -3652,13 +3683,140 @@ class JiuWenClawDeepAdapter:
 
             if self._stream_event_rail is not None:
                 self._stream_event_rail.reset_abort()
-            async for chunk in Runner.run_agent_streaming(self._instance, inputs):
-                chunk_iteration = _extract_iteration_from_chunk(chunk)
-                if chunk_iteration is not None:
-                    _LLM_TRACE_ITERATION.set(chunk_iteration)
-                if not (hasattr(chunk, "type") and hasattr(chunk, "payload")):
-                    parsed = self._parse_stream_chunk(chunk)
-                    if parsed is not None:
+            async with ask_user_question_request_scope(
+                interactive_ask=interactive_ask,
+                session_id=session_id,
+                stream_request_id=rid or "",
+                channel_id=cid or "",
+            ):
+                async for chunk in Runner.run_agent_streaming(self._instance, inputs):
+                    chunk_iteration = _extract_iteration_from_chunk(chunk)
+                    if chunk_iteration is not None:
+                        _LLM_TRACE_ITERATION.set(chunk_iteration)
+                    if not (hasattr(chunk, "type") and hasattr(chunk, "payload")):
+                        parsed = self._parse_stream_chunk(chunk)
+                        if parsed is not None:
+                            if accumulated_text:
+                                delta_payload: dict[str, Any] = {"event_type": "chat.delta",
+                                                                 "content": accumulated_text}
+                                task_id = self._get_task_id()
+                                if task_id:
+                                    delta_payload["task_id"] = task_id
+                                yield AgentResponseChunk(
+                                    request_id=rid,
+                                    channel_id=cid,
+                                payload=delta_payload,
+                                    is_complete=False,
+                                )
+                                accumulated_text = ""
+                            if accumulated_reasoning:
+                                reasoning_payload: dict[str, Any] = {
+                                    "event_type": "chat.reasoning",
+                                    "content": accumulated_reasoning,
+                                }
+                                task_id = self._get_task_id()
+                                if task_id:
+                                    reasoning_payload["task_id"] = task_id
+                                yield AgentResponseChunk(
+                                    request_id=rid,
+                                    channel_id=cid,
+                                    payload=reasoning_payload,
+                                    is_complete=False,
+                                )
+                                accumulated_reasoning = ""
+                            yield AgentResponseChunk(
+                                request_id=rid,
+                                channel_id=cid,
+                                payload=parsed,
+                                is_complete=False,
+                            )
+                        continue
+
+                    chunk_type = chunk.type
+
+                    if chunk_type == "llm_usage":
+                        logger.info(f"[JiuWenClawDeepAdapter] llm_usage chunk: {chunk}")
+                        usage_meta = chunk.payload.get("usage_metadata", {}) if isinstance(chunk.payload, dict) else {}
+                        if isinstance(usage_meta, dict):
+                            for token in ("input_tokens", "output_tokens", "total_tokens"):
+                                usage_accumulator[token] += usage_meta.get(token, 0) or 0
+                            for cost in ("input_cost", "output_cost", "total_cost"):
+                                usage_accumulator[cost] += usage_meta.get(cost, 0.0) or 0.0
+                        yield AgentResponseChunk(
+                            request_id=rid,
+                            channel_id=cid,
+                            payload={"event_type": "chat.usage_metadata", "metadata": chunk.payload,
+                                     "session_id": session_id},
+                            is_complete=False,
+                        )
+                        continue
+
+                    if chunk_type == "llm_reasoning":
+                        content = (
+                            (chunk.payload.get("content", "") or chunk.payload.get("output", ""))
+                            if isinstance(chunk.payload, dict)
+                            else str(chunk.payload)
+                        )
+                        delta_payload: dict[str, Any] = {"event_type": "chat.reasoning", "content": content}
+                        task_id = self._get_task_id()
+                        if task_id:
+                            delta_payload["task_id"] = task_id
+                        yield AgentResponseChunk(
+                            request_id=rid,
+                            channel_id=cid,
+                            payload=delta_payload,
+                            is_complete=False,
+                        )
+                        continue
+
+                    if chunk_type == "llm_output":
+                        has_streamed_content = True
+                        if accumulated_reasoning:
+                            reasoning_payload: dict[str, Any] = {
+                                "event_type": "chat.delta",
+                                "content": accumulated_reasoning,
+                            }
+                            task_id = self._get_task_id()
+                            if task_id:
+                                reasoning_payload["task_id"] = task_id
+                            yield AgentResponseChunk(
+                                request_id=rid,
+                                channel_id=cid,
+                                payload=reasoning_payload,
+                                is_complete=False,
+                            )
+                            accumulated_reasoning = ""
+                        content = (
+                            chunk.payload.get("content", "")
+                            if isinstance(chunk.payload, dict)
+                            else str(chunk.payload)
+                        )
+                        delta_payload: dict[str, Any] = {"event_type": "chat.delta", "content": content}
+                        task_id = self._get_task_id()
+                        if task_id:
+                            delta_payload["task_id"] = task_id
+                        yield AgentResponseChunk(
+                            request_id=rid,
+                            channel_id=cid,
+                            payload=delta_payload,
+                            is_complete=False,
+                        )
+                        continue
+
+                    if chunk_type == "answer":
+                        if (
+                                not evolution_status_started
+                                and self._skill_evolution_rail is not None
+                                and request.params.get("mode", "agent.plan") == "agent.plan"
+                        ):
+                            # Mark evolution phase start before after_invoke auto-evolution runs.
+                            yield AgentResponseChunk(
+                                request_id=rid,
+                                channel_id=cid,
+                                payload={"event_type": "chat.evolution_status", "status": "start"},
+                                is_complete=False,
+                            )
+                            evolution_status_started = True
                         if accumulated_text:
                             delta_payload: dict[str, Any] = {"event_type": "chat.delta", "content": accumulated_text}
                             task_id = self._get_task_id()
@@ -3686,99 +3844,26 @@ class JiuWenClawDeepAdapter:
                                 is_complete=False,
                             )
                             accumulated_reasoning = ""
-                        yield AgentResponseChunk(
-                            request_id=rid,
-                            channel_id=cid,
-                            payload=parsed,
-                            is_complete=False,
-                        )
-                    continue
+                        if has_streamed_content:
+                            parsed = self._parse_stream_chunk(chunk, _has_streamed_content=True)
+                            if parsed is not None:
+                                yield AgentResponseChunk(
+                                    request_id=rid,
+                                    channel_id=cid,
+                                    payload=parsed,
+                                    is_complete=False,
+                                )
+                            continue
+                        parsed = self._parse_stream_chunk(chunk)
+                        if parsed is not None:
+                            yield AgentResponseChunk(
+                                request_id=rid,
+                                channel_id=cid,
+                                payload=parsed,
+                                is_complete=False,
+                            )
+                            continue
 
-                chunk_type = chunk.type
-
-                if chunk_type == "llm_usage":
-                    logger.info(f"[JiuWenClawDeepAdapter] llm_usage chunk: {chunk}")
-                    usage_meta = chunk.payload.get("usage_metadata", {}) if isinstance(chunk.payload, dict) else {}
-                    if isinstance(usage_meta, dict):
-                        for token in ("input_tokens", "output_tokens", "total_tokens"):
-                            usage_accumulator[token] += usage_meta.get(token, 0) or 0
-                        for cost in ("input_cost", "output_cost", "total_cost"):
-                            usage_accumulator[cost] += usage_meta.get(cost, 0.0) or 0.0
-                    yield AgentResponseChunk(
-                        request_id=rid,
-                        channel_id=cid,
-                        payload={"event_type": "chat.usage_metadata", "metadata": chunk.payload,
-                                 "session_id": session_id},
-                        is_complete=False,
-                    )
-                    continue
-
-                if chunk_type == "llm_reasoning":
-                    content = (
-                        (chunk.payload.get("content", "") or chunk.payload.get("output", ""))
-                        if isinstance(chunk.payload, dict)
-                        else str(chunk.payload)
-                    )
-                    delta_payload: dict[str, Any] = {"event_type": "chat.reasoning", "content": content}
-                    task_id = self._get_task_id()
-                    if task_id:
-                        delta_payload["task_id"] = task_id
-                    yield AgentResponseChunk(
-                        request_id=rid,
-                        channel_id=cid,
-                        payload=delta_payload,
-                        is_complete=False,
-                    )
-                    continue
-
-                if chunk_type == "llm_output":
-                    has_streamed_content = True
-                    if accumulated_reasoning:
-                        reasoning_payload: dict[str, Any] = {
-                            "event_type": "chat.delta",
-                            "content": accumulated_reasoning,
-                        }
-                        task_id = self._get_task_id()
-                        if task_id:
-                            reasoning_payload["task_id"] = task_id
-                        yield AgentResponseChunk(
-                            request_id=rid,
-                            channel_id=cid,
-                            payload=reasoning_payload,
-                            is_complete=False,
-                        )
-                        accumulated_reasoning = ""
-                    content = (
-                        chunk.payload.get("content", "")
-                        if isinstance(chunk.payload, dict)
-                        else str(chunk.payload)
-                    )
-                    delta_payload: dict[str, Any] = {"event_type": "chat.delta", "content": content}
-                    task_id = self._get_task_id()
-                    if task_id:
-                        delta_payload["task_id"] = task_id
-                    yield AgentResponseChunk(
-                        request_id=rid,
-                        channel_id=cid,
-                        payload=delta_payload,
-                        is_complete=False,
-                    )
-                    continue
-
-                if chunk_type == "answer":
-                    if (
-                            not evolution_status_started
-                            and self._skill_evolution_rail is not None
-                            and request.params.get("mode", "agent.plan") == "agent.plan"
-                    ):
-                        # Mark evolution phase start before after_invoke auto-evolution runs.
-                        yield AgentResponseChunk(
-                            request_id=rid,
-                            channel_id=cid,
-                            payload={"event_type": "chat.evolution_status", "status": "start"},
-                            is_complete=False,
-                        )
-                        evolution_status_started = True
                     if accumulated_text:
                         delta_payload: dict[str, Any] = {"event_type": "chat.delta", "content": accumulated_text}
                         task_id = self._get_task_id()
@@ -3806,16 +3891,6 @@ class JiuWenClawDeepAdapter:
                             is_complete=False,
                         )
                         accumulated_reasoning = ""
-                    if has_streamed_content:
-                        parsed = self._parse_stream_chunk(chunk, _has_streamed_content=True)
-                        if parsed is not None:
-                            yield AgentResponseChunk(
-                                request_id=rid,
-                                channel_id=cid,
-                                payload=parsed,
-                                is_complete=False,
-                            )
-                        continue
                     parsed = self._parse_stream_chunk(chunk)
                     if parsed is not None:
                         yield AgentResponseChunk(
@@ -3824,43 +3899,6 @@ class JiuWenClawDeepAdapter:
                             payload=parsed,
                             is_complete=False,
                         )
-                    continue
-
-                if accumulated_text:
-                    delta_payload: dict[str, Any] = {"event_type": "chat.delta", "content": accumulated_text}
-                    task_id = self._get_task_id()
-                    if task_id:
-                        delta_payload["task_id"] = task_id
-                    yield AgentResponseChunk(
-                        request_id=rid,
-                        channel_id=cid,
-                        payload=delta_payload,
-                        is_complete=False,
-                    )
-                    accumulated_text = ""
-                if accumulated_reasoning:
-                    reasoning_payload: dict[str, Any] = {
-                        "event_type": "chat.reasoning",
-                        "content": accumulated_reasoning,
-                    }
-                    task_id = self._get_task_id()
-                    if task_id:
-                        reasoning_payload["task_id"] = task_id
-                    yield AgentResponseChunk(
-                        request_id=rid,
-                        channel_id=cid,
-                        payload=reasoning_payload,
-                        is_complete=False,
-                    )
-                    accumulated_reasoning = ""
-                parsed = self._parse_stream_chunk(chunk)
-                if parsed is not None:
-                    yield AgentResponseChunk(
-                        request_id=rid,
-                        channel_id=cid,
-                        payload=parsed,
-                        is_complete=False,
-                    )
 
             if accumulated_text:
                 yield AgentResponseChunk(

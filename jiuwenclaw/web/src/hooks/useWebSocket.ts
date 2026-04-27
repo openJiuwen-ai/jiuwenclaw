@@ -284,6 +284,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
         await request('chat.send', {
           session_id: sessionId,
           content,
+          interactive_ask: true,
           mode: currentMode,
           ...(selectedModel ? { model_name: selectedModel } : {}),
         });
@@ -432,6 +433,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
             query: '',
             request_id: requestId,
             answers: answers,
+            ...(source ? { source } : {}),
           });
         } else {
           // 否则发送 chat.user_answer（自进化确认）
@@ -439,6 +441,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
             session_id: sessionId,
             request_id: requestId,
             answers,
+            ...(source ? { source } : {}),
           });
         }
         setPendingQuestion(null);

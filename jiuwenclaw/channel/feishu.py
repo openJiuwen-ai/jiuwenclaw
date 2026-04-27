@@ -239,7 +239,13 @@ class FeishuChannel(BaseChannel):
         """
         # Message 的 id 必须全局唯一；多 bot 同群时飞书消息 message_id 相同，需加上 channel_id 防止冲突。
         msg_id = f"{self.channel_id}:{inbound.message_id}"
-        params = {"content": inbound.content, "query": inbound.content} if inbound.params is None else inbound.params
+        base_params = {
+            "content": inbound.content,
+            "query": inbound.content,
+            "interactive_ask": True,
+        }
+        params = base_params if inbound.params is None else {**base_params, **inbound.params}
+        params["interactive_ask"] = True
         _meta = inbound.metadata or {}
         _chat_type = _meta.get("chat_type", "")
         _is_group = _chat_type == "group"
@@ -2231,7 +2237,11 @@ class FeishuChannel(BaseChannel):
                 pass
 
             # 构建消息参数
-            params = {"content": content, "query": content}
+            params = {
+                "content": content,
+                "query": content,
+                "interactive_ask": True,
+            }
             if file_info:
                 params["files"] = [file_info]
 
@@ -2420,6 +2430,7 @@ class FeishuChannel(BaseChannel):
         """
         try:
             request_id = action_value.pop("request_id", "")
+            source = str(action_value.pop("source", "") or "").strip()
             if not request_id:
                 raise ValueError("missing request_id")
             # 构建用户响应（符合 evolution service 期望的格式）
@@ -2430,12 +2441,16 @@ class FeishuChannel(BaseChannel):
                 token,
                 action_value,
             )
+            params = {"answers": answers, "request_id": request_id}
+            if source:
+                params["source"] = source
+
             msg = Message(
                     id=token,
                     type="event",
                     channel_id=self.channel_id,
                     session_id=operator_id,
-                    params={"answers": answers, "request_id": request_id},
+                    params=params,
                     timestamp=time.time(),
                     ok=True,
                     req_method=ReqMethod.CHAT_ANSWER,

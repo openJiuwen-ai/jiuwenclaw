@@ -91,14 +91,18 @@ export function InlineQuestionCard({ onSubmit }: InlineQuestionCardProps) {
   // Support skill evolution (skill_evolve_*) and new skill creation (skill_create_*)
   const isEvolution = (pendingQuestion?.request_id?.startsWith('skill_evolve_') ||
                        pendingQuestion?.request_id?.startsWith('skill_create_')) ?? false;
+  const isAskTool = pendingQuestion?.source === 'ask_tool';
 
   if (!pendingQuestion) {
     return null;
   }
 
+  const infoColor = 'var(--info, #3b82f6)';
   const borderColor = isEvolution
     ? 'var(--warning, #f59e0b)'
-    : 'var(--accent)';
+    : isAskTool
+      ? infoColor
+      : 'var(--accent)';
 
   return (
     <div className="animate-rise mx-2 my-3">
@@ -133,6 +137,21 @@ export function InlineQuestionCard({ onSubmit }: InlineQuestionCardProps) {
                   d="M3.75 13.5l10.5-11.25L12 10.5h8.25L9.75 21.75 12 13.5H3.75z"
                 />
               </svg>
+            ) : isAskTool ? (
+              <svg
+                className="w-3.5 h-3.5 flex-shrink-0"
+                fill="none"
+                stroke="currentColor"
+                viewBox="0 0 24 24"
+                strokeWidth={2}
+                style={{ color: infoColor }}
+              >
+                <path
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  d="M8.625 9.75a3.375 3.375 0 116.75 0c0 1.473-.956 2.725-2.281 3.167-.6.2-1.094.78-1.094 1.413V15m.563 3h.008v.008h-.008V18z"
+                />
+              </svg>
             ) : (
               <svg
                 className="w-3.5 h-3.5 flex-shrink-0"
@@ -151,7 +170,7 @@ export function InlineQuestionCard({ onSubmit }: InlineQuestionCardProps) {
             )}
             <span
               className="text-xs font-semibold"
-              style={{ color: isEvolution ? borderColor : 'var(--accent)' }}
+              style={{ color: isEvolution || isAskTool ? borderColor : 'var(--accent)' }}
             >
               {pendingQuestion.questions[0]?.header ?? t('chatUi.inlineQuestion.header')}
             </span>
