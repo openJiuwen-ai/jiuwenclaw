@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 from typing import Any, TYPE_CHECKING
 
+from openjiuwen.core.context_engine.context.session_memory_manager import SessionMemoryConfig
 from openjiuwen.core.runner import Runner
 from openjiuwen.core.session.agent import Session
 from openjiuwen.core.single_agent import AgentCard
@@ -553,7 +554,10 @@ Approach each task methodically and deliver high-quality results.
         max_iterations = self._resolve_subagent_max_iterations()
         filesystem_rail = self._build_inherited_filesystem_rail()
         rails = [
-            JiuClawContextEngineeringRail(preset=True),  # 上下文压缩
+            JiuClawContextEngineeringRail(
+                preset=True,
+                session_memory=SessionMemoryConfig(),
+            ),  # 上下文压缩 - 默认链路 B（ToolResultBudget + MicroCompact + FullCompact）
             SubagentContextRail(subagent_id=task.task_id, parent_session=parent_session),
         ]
         if filesystem_rail is not None:
@@ -678,7 +682,10 @@ Execute the given task using inherited context and available tools.
         filesystem_rail = self._build_inherited_filesystem_rail()
         rails = [
             ForkMessageInjectionRail(fork_messages),  # 注入继承的消息
-            JiuClawContextEngineeringRail(preset=True),  # 上下文压缩（fork 继承大量消息时尤其重要）
+            JiuClawContextEngineeringRail(
+                preset=True,
+                session_memory=SessionMemoryConfig(),
+            ),  # 上下文压缩 - 默认链路 B（fork 继承大量消息时尤其重要）
             SubagentContextRail(subagent_id=task.task_id, parent_session=parent_session),
         ]
         if filesystem_rail is not None:

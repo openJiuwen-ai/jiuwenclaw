@@ -228,8 +228,8 @@ react:
     tool_result_budget_processor_config:
       # 单 round 内 ToolMessage 总 token 超阈值，且单条 > large_message_threshold 时，
       # 把该条替换为 OffloadToolMessage：<persisted-output>...preview...</persisted-output>。
-      tokens_threshold: 50000        # 单 round tool 结果总 token 阈值；200k 窗口下 50000 合适，128k 模型建议 25000~30000
-      large_message_threshold: 5000  # 单条 ToolMessage 算"大"的门槛（候选）；< tokens_threshold；源码默认 10000，5000 更积极
+      tokens_threshold: 15000        # 单 round tool 结果总 token 阈值；relay-claw 实测峰值 ~58k、典型一轮 4 个 fetch_webpage ≈ 16k 即触发；200k 窗口默认 50000，128k 模型建议 25000~30000
+      large_message_threshold: 5000  # 单条 ToolMessage 算"大"的门槛（候选）；< tokens_threshold；源码默认 10000，5000 让 5k+ 的 webpage 优先被 offload
       # trim_size: 3000                      # offload 后 preview 字符数；应 << 原文长度
       # tool_name_allowlist: null            # 仅这些工具的结果才考虑 offload；null/空 = 全部允许
       # offload_message_type: ["tool"]       # 当前仅支持 tool
@@ -240,23 +240,22 @@ react:
       # 同一工具调用次数 > trigger_threshold + keep_recent_per_tool 时，
       # 把"较旧的那 keep_recent_per_tool 条之外"的全部替换为 cleared_marker。
       trigger_threshold: 5           # 触发额度（在 keep 之上还能堆多少条）
-      keep_recent_per_tool: 10       # 压缩后每工具保留最近 N 条原文；默认 15，10 是中庸值
+      keep_recent_per_tool: 10        # 每工具保留最近 N 条原文，源码默认 15。
       # cleared_marker: "[Old tool result content cleared]"   # 替换后的占位文案
       # compactable_tool_names: 白名单（精确匹配 ToolMessage.name），不在名单的工具完全忽略。
-      # 原则：✅ 高频且可重放（read_file/grep/web_search）；
-      #      ❌ 有副作用（write_file/edit_file/bash/exec）—— 折叠会丢执行证据。
-      # 源码默认：["grep","glob","read_file","web_search","web_fetch"]；
-      # 本配置加入了 jiuwenclaw 常用的搜索/抓网页 mcp 工具。
+      # 选取标准：本 harness 真实出现 + 单条返回较大 + 历史可丢（再要时可重新调用）。
+      # 提醒：bash 输出常含执行证据（错误堆栈、产物路径），spawn_subagent 是已消耗 token 的成果，
+      # 折叠后无法回溯。本配置纳入是基于 relay-claw 实测 bash/spawn_subagent 多用于查询性命令、
+      # 单条体积大且压缩收益高；如果你的场景里 bash 主要做有副作用的执行，请把它移出白名单。
+      # 源码默认 ["grep","glob","read_file","web_search","web_fetch"] 是 Claude Code 命名空间，
+      # relay-claw / jiuwenclaw 不使用这些名字，故白名单只列本 harness 实际命名空间下的工具。
       compactable_tool_names:
-        - grep
-        - glob
-        - read_file
-        - web_search
-        - web_fetch
-        - mcp_free_search
-        - mcp_paid_search
-        - mcp_petal_search
+        - fetch_webpage
         - mcp_fetch_webpage
+        - free_search
+        - mcp_free_search
+        - bash
+        - spawn_subagent
 
     full_compact_processor_config:
       # 整窗口 token 超阈值时，调一次 LLM 把历史压成
