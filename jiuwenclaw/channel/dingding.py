@@ -303,6 +303,7 @@ class DingTalkChannel(BaseChannel):
             timestamp=time.time(),
             ok=True,
             req_method=ReqMethod.CHAT_SEND,
+            chat_id=conversation_id,
             metadata=metadata,
         )
 
@@ -1117,5 +1118,6 @@ class DingTalkChannel(BaseChannel):
             session_id=msg.session_id,
             payload={"event_type": "chat.file", "files": files_payload},
             metadata=msg.metadata,
+            chat_id=getattr(msg, "chat_id", None),
         )
         await self._send_file_message(fallback_msg)

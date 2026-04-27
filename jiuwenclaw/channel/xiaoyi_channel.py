@@ -785,6 +785,7 @@ class XiaoyiChannel(BaseChannel):
             is_stream=self.config.enable_streaming,
             ok=True,
             req_method=ReqMethod.CHAT_SEND,
+            chat_id=session_id,
             metadata=metadata,
         )
 

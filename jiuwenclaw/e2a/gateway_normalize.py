@@ -115,6 +115,7 @@ def message_to_e2a(msg: "Message") -> E2AEnvelope:
         "request_id": msg.id,
         "channel_id": msg.channel_id,
         "session_id": msg.session_id,
+        "chat_id": msg.chat_id,
         "params": dict(msg.params or {}),
         "is_stream": bool(msg.is_stream),
         "timestamp": msg.timestamp,

@@ -122,6 +122,7 @@ class E2AEnvelope:
     identity_origin: IdentityOrigin = IdentityOrigin.USER
     channel: str | None = None
     user_id: str | None = None
+    chat_id: str | None = None
     source_agent_id: str | None = None
 
     # --- 网关 RPC（原 req_method）；ACP 转入时同字段承载 JSON-RPC method ---
@@ -386,6 +387,7 @@ def _envelope_from_dict(data: dict[str, Any]) -> E2AEnvelope:
         identity_origin=origin,
         channel=ch,
         user_id=data.get("user_id"),
+        chat_id=data.get("chat_id"),
         source_agent_id=data.get("source_agent_id"),
         method=raw_method,
         params=params,

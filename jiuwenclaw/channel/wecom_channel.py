@@ -766,6 +766,7 @@ class WecomChannel(BaseChannel):
             ok=True,
             req_method=ReqMethod.CHAT_SEND,
             is_stream=is_stream,
+            chat_id=chat_id,
             metadata=metadata,
             group_digital_avatar=effective_group_digital_avatar,
             enable_memory=self.config.enable_memory,
@@ -1643,6 +1644,7 @@ class WecomChannel(BaseChannel):
             ok=True,
             req_method=ReqMethod.CHAT_SEND,
             is_stream=True,
+            chat_id=chatid,
             metadata={
                 "wecom_chat_id": chatid,
                 "wecom_req_id": req_id_final,
