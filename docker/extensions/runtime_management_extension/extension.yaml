@@ -4,6 +4,10 @@ version: 0.1.0
 description: OpenJiuwen Runtime
 author: openjiuwen
 min_jiuwenclaw_version: "0.1.0"
-dependencies: {"openjiuwen_runtime_management": "0.1.0"}
+dependencies:
+  {
+    "openjiuwen_runtime_management":
+      " @ git+https://gitcode.com/openJiuwen/agent-runtime.git@feature/scaling#subdirectory=management"
+  }
 config_schema:
   type: object
