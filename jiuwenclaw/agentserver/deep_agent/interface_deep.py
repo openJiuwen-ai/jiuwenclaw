@@ -3611,8 +3611,11 @@ class JiuWenClawDeepAdapter:
         cid = request.channel_id
         query = request.params.get("query", "")
         mode = request.params.get("mode", "agent.plan")
-        interactive_ask = bool(request.params.get("interactive_ask", request.params.get("interactiveAsk", False)))
-
+        raw_interactive = request.params.get("interactive_ask", request.params.get("interactiveAsk"))
+        if raw_interactive is None:
+            interactive_ask = AskUserQuestionRegistry.get_instance().session_interactive_ask_enabled(session_id)
+        else:
+            interactive_ask = bool(raw_interactive)
         token_trace_sid = _LLM_TRACE_SESSION_ID.set(session_id)
         token_trace_rid = _LLM_TRACE_REQUEST_ID.set(rid or "")
         token_trace_iter = _LLM_TRACE_ITERATION.set(0)

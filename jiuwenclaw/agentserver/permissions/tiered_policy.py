@@ -40,6 +40,14 @@ _SHELL_SUBCOMMANDS_PREFIX = f"{_MR}:shell_subcommands"
 
 _SHELL_TOOLS = SHELL_PERMISSION_TOOLS
 
+# 仅 UI 追问、不向磁盘/网络执行敏感操作；未在 permissions.tools 中显式配置时，
+# 若仍走 defaults.guard，则非 shell 未知工具会变成 ASK → PermissionRail 在工具体之前
+# 弹出「权限审批」，导致 chat.ask_user_question 永远不发出，表现为「引导选择题不弹」。
+_INTRINSIC_SAFE_UI_TOOL_NAMES: frozenset[str] = frozenset({
+    "ask_user_question",
+    "jiuwenclaw_ask_user_question",
+})
+
 # Backward-compatible exports for modules that still need path extraction for
 # external_directory. They are no longer used by the tiered policy itself.
 _PATH_TOOLS = frozenset({
@@ -297,6 +305,9 @@ def _default_level(permission_config: dict[str, Any], tool_name: str) -> tuple[P
     - ``allow / deny`` → 原样返回
     - 非标量 → 兜底 guard（同上 shell / 非 shell 分流）
     """
+    if tool_name in _INTRINSIC_SAFE_UI_TOOL_NAMES:
+        return PermissionLevel.ALLOW, f"{_MR}:intrinsic_safe_ui:{tool_name}"
+
     raw = permission_config.get("defaults", GUARD_LEVEL_LITERAL)
     if isinstance(raw, str):
         norm = raw.strip().lower()

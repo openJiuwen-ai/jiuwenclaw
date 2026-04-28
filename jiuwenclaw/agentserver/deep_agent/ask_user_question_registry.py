@@ -44,8 +44,9 @@ async def ask_user_question_request_scope(
     """Bind per-request context for AskUserQuestion (push routing / user_answer)."""
     reg = AskUserQuestionRegistry.get_instance()
     sr = str(stream_request_id or "").strip()
-    if sr:
-        reg.bind_stream_chat_flags(sr, bool(interactive_ask))
+    sid = str(session_id or "").strip()
+    if sr or sid:
+        reg.bind_stream_chat_flags(sr, bool(interactive_ask), session_id=sid)
     t_ia = _interactive_ask_cv.set(bool(interactive_ask))
     t_sid = _session_id_cv.set(session_id or "")
     t_rid = _stream_request_id_cv.set(stream_request_id or "")
@@ -80,6 +81,9 @@ class AskUserQuestionRegistry:
         self._pending: dict[str, asyncio.Future[list[Any]]] = {}
         self._pending_sessions: dict[str, str] = {}
         self._stream_interactive_ask: dict[str, bool] = {}
+        # 与单次 stream_request_id 并行：同一 session 在本次 HTTP 流内是否开启过 interactive_ask。
+        # 部分环境下工具第二次执行时 ContextVar 未继承，仅靠 stream_rid 查表会在 unbind 后失效。
+        self._session_interactive_ask: dict[str, bool] = {}
 
     @classmethod
     def get_instance(cls) -> "AskUserQuestionRegistry":
@@ -91,11 +95,15 @@ class AskUserQuestionRegistry:
     def reset_instance_for_tests(cls) -> None:
         cls._instance = None
 
-    def bind_stream_chat_flags(self, stream_request_id: str, interactive_ask: bool) -> None:
+    def bind_stream_chat_flags(
+        self, stream_request_id: str, interactive_ask: bool, *, session_id: str = "",
+    ) -> None:
         rid = str(stream_request_id or "").strip()
-        if not rid:
-            return
-        self._stream_interactive_ask[rid] = bool(interactive_ask)
+        if rid:
+            self._stream_interactive_ask[rid] = bool(interactive_ask)
+        sid = str(session_id or "").strip()
+        if sid:
+            self._session_interactive_ask[sid] = bool(interactive_ask)
 
     def unbind_stream_chat_flags(self, stream_request_id: str) -> None:
         self._stream_interactive_ask.pop(str(stream_request_id or "").strip(), None)
@@ -103,6 +111,10 @@ class AskUserQuestionRegistry:
     def stream_interactive_ask_enabled(self, stream_request_id: str) -> bool:
         rid = str(stream_request_id or "").strip()
         return bool(rid) and bool(self._stream_interactive_ask.get(rid))
+
+    def session_interactive_ask_enabled(self, session_id: str) -> bool:
+        sid = str(session_id or "").strip()
+        return bool(sid) and bool(self._session_interactive_ask.get(sid))
 
     def resolve(self, request_id: str, answers: Any) -> bool:
         rid = str(request_id or "").strip()
@@ -150,10 +162,14 @@ class AskUserQuestionRegistry:
                 sid,
                 len(to_cancel),
             )
+        self._session_interactive_ask.pop(sid, None)
 
     async def wait_for_answer(self, request_id: str, *, timeout: float) -> list[Any]:
         interactive_ask, session_id, _, _ = get_ask_request_context()
-        fut = self.register(request_id, session_id if interactive_ask else "")
+        effective_interactive = interactive_ask
+        if not effective_interactive and session_id:
+            effective_interactive = self.session_interactive_ask_enabled(session_id)
+        fut = self.register(request_id, session_id if effective_interactive else "")
         try:
             return await asyncio.wait_for(fut, timeout=timeout)
         except asyncio.TimeoutError:

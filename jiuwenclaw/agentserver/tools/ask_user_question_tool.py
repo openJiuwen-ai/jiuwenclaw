@@ -28,6 +28,50 @@ _ASK_TOOL_MAX_QUESTIONS = 4
 _ASK_TOOL_MIN_OPTIONS = 2
 _ASK_TOOL_MAX_OPTIONS = 4
 
+_OTHER_FALLBACK_LABEL = "其他"
+
+
+def _coerce_raw_options(opts: Any, question_index: int) -> list[dict[str, Any]]:
+    """Ensure 2–4 labeled options; trim excess, pad singles, tolerate str entries."""
+    if not isinstance(opts, list) or not opts:
+        raise ValueError(f"questions[{question_index}].options 必须为非空数组")
+    normalized: list[dict[str, Any]] = []
+    for j, opt in enumerate(opts):
+        if isinstance(opt, str):
+            entry = {"label": opt.strip()}
+        elif isinstance(opt, dict):
+            entry = dict(opt)
+        else:
+            raise ValueError(f"questions[{question_index}].options[{j}] 必须为对象或字符串")
+        label = str(entry.get("label", "") or "").strip()
+        if not label:
+            raise ValueError(f"questions[{question_index}].options[{j}].label 不能为空")
+        normalized.append(entry)
+
+    if len(normalized) > _ASK_TOOL_MAX_OPTIONS:
+        logger.info(
+            "[ask_user_question] questions[%s].options 共 %s 项，裁剪为 %s 项",
+            question_index,
+            len(normalized),
+            _ASK_TOOL_MAX_OPTIONS,
+        )
+        normalized = normalized[: _ASK_TOOL_MAX_OPTIONS]
+
+    if len(normalized) == 1:
+        logger.info(
+            "[ask_user_question] questions[%s].options 仅 1 项，补充「%s」选项以便交互选择",
+            question_index,
+            _OTHER_FALLBACK_LABEL,
+        )
+        normalized.append(
+            {"label": _OTHER_FALLBACK_LABEL, "description": "请在下一句补充说明你的选择"},
+        )
+
+    if len(normalized) < _ASK_TOOL_MIN_OPTIONS:
+        raise ValueError(f"questions[{question_index}].options 至少需要 {_ASK_TOOL_MIN_OPTIONS} 个有效选项")
+
+    return normalized
+
 
 def _normalize_questions(raw: Any) -> list[dict[str, Any]]:
     if isinstance(raw, str):
@@ -48,20 +92,11 @@ def _normalize_questions(raw: Any) -> list[dict[str, Any]]:
         qtext = str(item.get("question", "") or "").strip()
         if not qtext:
             raise ValueError(f"questions[{i}].question 不能为空")
-        opts = item.get("options", item.get("Options", []))
-        if not isinstance(opts, list) or not opts:
-            raise ValueError(f"questions[{i}].options 必须为非空数组")
-        if not (_ASK_TOOL_MIN_OPTIONS <= len(opts) <= _ASK_TOOL_MAX_OPTIONS):
-            raise ValueError(
-                f"questions[{i}].options 数量必须在 {_ASK_TOOL_MIN_OPTIONS}-{_ASK_TOOL_MAX_OPTIONS} 之间",
-            )
+        raw_opts = item.get("options", item.get("Options", []))
+        coerced = _coerce_raw_options(raw_opts, i)
         norm_opts: list[dict[str, str]] = []
-        for j, opt in enumerate(opts):
-            if not isinstance(opt, dict):
-                raise ValueError(f"questions[{i}].options[{j}] 必须为对象")
+        for opt in coerced:
             label = str(opt.get("label", "") or "").strip()
-            if not label:
-                raise ValueError(f"questions[{i}].options[{j}].label 不能为空")
             entry: dict[str, str] = {"label": label}
             desc = opt.get("description")
             if isinstance(desc, str) and desc.strip():
@@ -137,6 +172,8 @@ async def _ask_user_question_impl(questions: Any, timeout: Any = None) -> dict[s
     reg = AskUserQuestionRegistry.get_instance()
     if stream_rid and not interactive:
         interactive = reg.stream_interactive_ask_enabled(stream_rid)
+    if not interactive and session_id:
+        interactive = reg.session_interactive_ask_enabled(session_id)
     try:
         normalized = _normalize_questions(questions)
         timeout_sec = _parse_timeout(timeout)
