@@ -105,7 +105,12 @@ jiuwenclaw = [
 ]
 
 [tool.setuptools.exclude-package-data]
-jiuwenclaw = ["web/node_modules/**", "web/node_modules/*"]
+jiuwenclaw = [
+    "web/node_modules/**",
+    "web/node_modules/*",
+    "web_enterprise/node_modules/**",
+    "web_enterprise/node_modules/*",
+]
 
 [tool.uv.sources]
 jiuwenclaw-tui = { path = "./packages/jiuwenclaw-tui" }
