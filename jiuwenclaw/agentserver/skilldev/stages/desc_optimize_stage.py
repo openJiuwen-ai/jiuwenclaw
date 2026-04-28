@@ -147,7 +147,7 @@ class DescOptimizeStageHandler(StageHandler):
     """DESC_OPTIMIZE 阶段：优化 SKILL.md 的 description 以提高触发准确率."""
 
     async def execute(self, ctx: SkillDevContext) -> StageResult:
-        logger.info("Session_id %s :[DescOptimizeStage] 开始进行描述优化阶段", ctx.state.task_id)
+        logger.info("[session=%s] [DescOptimizeStage] 开始进行描述优化阶段", ctx.state.task_id)
 
         skill_dir = ctx.workspace / "skill"
         skill_md = skill_dir / "SKILL.md"
@@ -164,7 +164,7 @@ class DescOptimizeStageHandler(StageHandler):
         await ctx.emit(
             SkillDevEventType.PROGRESS, {"message": "正在生成触发测试查询集..."}
         )
-        logger.info("Session_id %s :[DescOptimizeStage] 生成触发测试查询集", ctx.state.task_id)
+        logger.info("[session=%s] [DescOptimizeStage] 生成触发测试查询集", ctx.state.task_id)
 
         queries = await self._generate_trigger_queries(ctx, skill_name, current_desc)
 
@@ -177,7 +177,7 @@ class DescOptimizeStageHandler(StageHandler):
                 "message": f"开始描述优化循环（train={len(train_set)}, test={len(test_set)}）",
             },
         )
-        logger.info("Session_id %s :[DescOptimizeStage] 开始描述优化循环", ctx.state.task_id)
+        logger.info("[session=%s] [DescOptimizeStage] 开始描述优化循环", ctx.state.task_id)
         # Step 3: 优化循环
         loop_input = _OptimizationLoopInput(
             skill_name=skill_name,
@@ -250,7 +250,8 @@ class DescOptimizeStageHandler(StageHandler):
         queries = self._normalize_trigger_queries(parsed, skill_name)
         if len(queries) < 4:
             logger.warning(
-                "[DescOptimize] generated query set too small, fallback to defaults. size=%d",
+                "[session=%s] [DescOptimizeStage] generated query set too small, fallback to defaults. size=%d",
+                ctx.state.task_id,
                 len(queries),
             )
             queries = self._default_trigger_queries(skill_name)
@@ -305,7 +306,7 @@ class DescOptimizeStageHandler(StageHandler):
                     "message": f"描述优化第 {i}/{MAX_ITERATIONS} 轮...",
                 },
             )
-            logger.info("Session_id %s :[DescOptimizeStage] 第 %d 轮描述优化", ctx.state.task_id, i)
+            logger.info("[session=%s] [DescOptimizeStage] 第 %d 轮描述优化", ctx.state.task_id, i)
 
             # 评估 train + test
             train_results = await self._eval_description(ctx, current_desc, train_set)
@@ -371,14 +372,14 @@ class DescOptimizeStageHandler(StageHandler):
         fallback_count = 0
         results: list[dict] = []
         for q in queries:
-            logger.info("Session_id %s :[DescOptimizeStage] 开始评估单条查询: %s", ctx.state.task_id, q.query)
+            logger.info("[session=%s] [DescOptimizeStage] 开始评估单条查询: %s", ctx.state.task_id, q.query)
             triggered = await self._test_single_trigger(
                 ctx,
                 description,
                 q.query,
                 agent=eval_agent,
             )
-            logger.info("Session_id %s :[DescOptimizeStage] 评估单条查询完成: %s", ctx.state.task_id, q.query)
+            logger.info("[session=%s] [DescOptimizeStage] 评估单条查询完成: %s", ctx.state.task_id, q.query)
             if triggered is None:
                 fallback_count += 1
                 triggered = False
@@ -393,7 +394,8 @@ class DescOptimizeStageHandler(StageHandler):
             )
         elapsed_ms = int((perf_counter() - start_ts) * 1000)
         logger.info(
-            "[DescOptimize] eval batch done. size=%d elapsed_ms=%d fallback_count=%d",
+            "[session=%s] [DescOptimizeStage] eval batch done. size=%d elapsed_ms=%d fallback_count=%d",
+            ctx.state.task_id,
             len(queries),
             elapsed_ms,
             fallback_count,
@@ -450,7 +452,11 @@ class DescOptimizeStageHandler(StageHandler):
         )
         new_desc = self._extract_tag_content(output, "new_description")
         if not new_desc:
-            logger.warning("[DescOptimize] improve output missing <new_description>")
+            logger.warning(
+                "[session=%s] [DescOptimizeStage] improve output missing "
+                "<new_description>",
+                ctx.state.task_id,
+            )
             return improve_input.current_desc
         new_desc = self._normalize_description_text(new_desc)
         if not new_desc:
@@ -504,7 +510,8 @@ class DescOptimizeStageHandler(StageHandler):
             )
         except Exception:
             logger.exception(
-                "[DescOptimize] trigger eval failed, fallback false. query=%s",
+                "[session=%s] [DescOptimizeStage] trigger eval failed, fallback false. query=%s",
+                ctx.state.task_id,
                 query[:60],
             )
             return None
@@ -514,7 +521,8 @@ class DescOptimizeStageHandler(StageHandler):
             if isinstance(triggered, bool):
                 return triggered
         logger.warning(
-            "[DescOptimize] trigger eval parse failed, fallback false. query=%s output=%s",
+            "[session=%s] [DescOptimizeStage] trigger eval parse failed, fallback false. query=%s output=%s",
+            ctx.state.task_id,
             query[:60],
             output[:200],
         )

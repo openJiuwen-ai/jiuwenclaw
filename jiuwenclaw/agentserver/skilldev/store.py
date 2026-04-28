@@ -47,7 +47,7 @@ class StateStore:
             json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8"
         )
         logger.debug(
-            "[StateStore] checkpoint saved: task_id=%s stage=%s",
+            "[session=%s] [StateStore] checkpoint saved: stage=%s",
             task_id,
             state.stage.value,
         )
@@ -56,12 +56,14 @@ class StateStore:
         """从 state.json 恢复状态，不存在则返回 None."""
         state_file = self._state_file(task_id)
         if not state_file.exists():
-            logger.warning("[StateStore] state not found: task_id=%s", task_id)
+            logger.warning("[session=%s] [StateStore] state not found", task_id)
             return None
         data = json.loads(state_file.read_text(encoding="utf-8"))
         state = SkillDevState.from_checkpoint_dict(data)
         logger.debug(
-            "[StateStore] state loaded: task_id=%s stage=%s", task_id, state.stage.value
+            "[session=%s] [StateStore] state loaded: stage=%s",
+            task_id,
+            state.stage.value,
         )
         return state
 

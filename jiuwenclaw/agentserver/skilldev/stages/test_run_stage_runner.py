@@ -116,7 +116,7 @@ class SkillDevTestRunner:
         eval_id = case.get("id", 0)
         eval_name = case.get("name", f"eval-{eval_id}")
 
-        logger.info(f"[SkillDevTestRunner] 开始执行 with_skill: {eval_name}")
+        logger.info("[session=%s] [SkillDevTestRunner] 开始执行 with_skill: %s", self.ctx.state.task_id, eval_name)
 
         try:
             variant_dir = output_dir / "with_skill"
@@ -141,14 +141,17 @@ class SkillDevTestRunner:
             )
             
             logger.info(
-                f"[SkillDevTestRunner] with_skill 完成: {eval_name} "
-                f"({result.duration_seconds:.2f}s)"
+                "[session=%s] [SkillDevTestRunner] with_skill 完成: %s (%.2fs)",
+                self.ctx.state.task_id,
+                eval_name,
+                result.duration_seconds,
             )
             
             return result.to_dict()
         
         except Exception as e:
-            logger.exception(f"[SkillDevTestRunner] with_skill 执行失败: {eval_name}")
+            logger.exception("[session=%s] [SkillDevTestRunner] with_skill 执行失败: %s", 
+            self.ctx.state.task_id, eval_name)
             return self._create_error_result(
                 eval_id=eval_id,
                 eval_name=eval_name,
@@ -174,7 +177,7 @@ class SkillDevTestRunner:
         eval_id = case.get("id", 0)
         eval_name = case.get("name", f"eval-{eval_id}")
         
-        logger.info(f"[SkillDevTestRunner] 开始执行 baseline: {eval_name}")
+        logger.info("[session=%s] [SkillDevTestRunner] 开始执行 baseline: %s", self.ctx.state.task_id, eval_name)
         
         try:
             variant_dir = output_dir / "baseline"
@@ -207,14 +210,16 @@ class SkillDevTestRunner:
             )
             
             logger.info(
-                f"[SkillDevTestRunner] baseline 完成: {eval_name} "
-                f"({result.duration_seconds:.2f}s)"
+                "[session=%s] [SkillDevTestRunner] baseline 完成: %s (%.2fs)",
+                self.ctx.state.task_id,
+                eval_name,
+                result.duration_seconds,
             )
             
             return result.to_dict() if isinstance(result, ExecutionResult) else result
         
         except Exception as e:
-            logger.exception(f"[SkillDevTestRunner] baseline 执行失败: {eval_name}")
+            logger.exception("[session=%s] [SkillDevTestRunner] baseline 执行失败: %s", self.ctx.state.task_id, eval_name)
             return self._create_error_result(
                 eval_id=eval_id,
                 eval_name=eval_name,
@@ -287,8 +292,12 @@ class SkillDevTestRunner:
                 timestamp=datetime.now(timezone.utc).isoformat(),
             )
             logger.info(
-                f"[SkillDevTestRunner] {variant} 执行成功 "
-                f"(耗时 {duration:.2f}s, output={len(output)}字符, trace={len(trace)}字符)"
+                "[session=%s] [SkillDevTestRunner] %s 执行成功 (耗时 %.2fs, output=%d字符, trace=%d字符)",
+                self.ctx.state.task_id,
+                variant,
+                duration,
+                len(output),
+                len(trace),
             )
         
         except asyncio.TimeoutError:
@@ -306,8 +315,10 @@ class SkillDevTestRunner:
             )
             
             logger.warning(
-                f"[SkillDevTestRunner] {variant} 执行超时 "
-                f"({self.timeout_seconds}s)"
+                "[session=%s] [SkillDevTestRunner] %s 执行超时 (%ss)",
+                self.ctx.state.task_id,
+                variant,
+                self.timeout_seconds,
             )
         
         except Exception as e:
@@ -325,7 +336,10 @@ class SkillDevTestRunner:
             )
             
             logger.error(
-                f"[SkillDevTestRunner] {variant} 执行出错: {e}",
+                "[session=%s] [SkillDevTestRunner] %s 执行出错: %s",
+                self.ctx.state.task_id,
+                variant,
+                e,
                 exc_info=True
             )
         
@@ -362,7 +376,12 @@ class SkillDevTestRunner:
 
         for attempt in range(1, max_retries + 1):
             try:
-                logger.info(f"[SkillDevTestRunner] 执行尝试 {attempt}/{max_retries}")
+                logger.info(
+                    "[session=%s] [SkillDevTestRunner] 执行尝试 %d/%d",
+                    self.ctx.state.task_id,
+                    attempt,
+                    max_retries,
+                )
 
                 result = await asyncio.wait_for(
                     self.ctx.run_stage_agent_streaming(
@@ -389,8 +408,11 @@ class SkillDevTestRunner:
                 
                 wait_time = 2 ** (attempt - 1)  # 指数退避: 1s, 2s, 4s, ...
                 logger.warning(
-                    f"[SkillDevTestRunner] 超时，{wait_time}s 后重试 "
-                    f"(第 {attempt}/{max_retries} 次)"
+                    "[session=%s] [SkillDevTestRunner] 超时，%ss 后重试 (第 %d/%d 次)",
+                    self.ctx.state.task_id,
+                    wait_time,
+                    attempt,
+                    max_retries,
                 )
                 await asyncio.sleep(wait_time)
             
@@ -402,8 +424,12 @@ class SkillDevTestRunner:
                 
                 wait_time = 2 ** (attempt - 1)
                 logger.warning(
-                    f"[SkillDevTestRunner] 执行失败: {e}，{wait_time}s 后重试 "
-                    f"(第 {attempt}/{max_retries} 次)"
+                    "[session=%s] [SkillDevTestRunner] 执行失败: %s，%ss 后重试 (第 %d/%d 次)",
+                    self.ctx.state.task_id,
+                    e,
+                    wait_time,
+                    attempt,
+                    max_retries,
                 )
                 await asyncio.sleep(wait_time)
         
@@ -426,8 +452,8 @@ class SkillDevTestRunner:
         ]
         if not versioned:
             logger.warning(
-                "[SkillDevTestRunner] MODIFY 模式下未找到旧版本 skill 目录（skill-vN/），"
-                "baseline 将回退为无 skill 模式"
+                "[session=%s] [SkillDevTestRunner] MODIFY 模式下未找到旧版本 skill 目录（skill-vN/），baseline 将回退为无 skill 模式",
+                self.ctx.state.task_id,
             )
             return None
         return max(versioned, key=lambda d: int(d.name[len("skill-v"):]))
@@ -501,8 +527,7 @@ class SkillDevTestRunner:
         # 粗略估算：1 token ≈ 4 个字符
         return max(1, len(text) // 4)
     
-    @staticmethod
-    def _save_result(variant_dir: Path, result: ExecutionResult) -> None:
+    def _save_result(self, variant_dir: Path, result: ExecutionResult) -> None:
         """保存执行结果
         
         Args:
@@ -544,11 +569,13 @@ class SkillDevTestRunner:
             )
             
             logger.info(
-                f"[SkillDevTestRunner] 结果已保存到: {variant_dir}"
+                "[session=%s] [SkillDevTestRunner] 结果已保存到: %s",
+                self.ctx.state.task_id,
+                variant_dir,
             )
         
         except Exception as e:
-            logger.error(f"[SkillDevTestRunner] 保存结果失败: {e}")
+            logger.error("[session=%s] [SkillDevTestRunner] 保存结果失败: %s", self.ctx.state.task_id, e)
     
     def _create_error_result(
         self,

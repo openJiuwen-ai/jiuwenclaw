@@ -127,28 +127,32 @@ class PlanStageHandler(StageHandler):
                 agent, stage_name="plan", query=query
             )
             logger.info(
-                "[PlanStage] attempt=%s/%s plan_text length: %d",
+                "[session=%s] [PlanStage] attempt=%s/%s plan_text length: %d",
+                ctx.state.task_id,
                 attempt,
                 total_attempts,
                 len(plan_text),
             )
-            plan = self._parse_plan_json(plan_text)
+            plan = self._parse_plan_json(plan_text, ctx.state.task_id)
             if plan is not None:
                 logger.info(
-                    "[PlanStage] attempt=%s/%s parse success",
+                    "[session=%s] [PlanStage] attempt=%s/%s parse success",
+                    ctx.state.task_id,
                     attempt,
                     total_attempts,
                 )
                 break
             logger.warning(
-                "[PlanStage] attempt=%s/%s parse failed",
+                "[session=%s] [PlanStage] attempt=%s/%s parse failed",
+                ctx.state.task_id,
                 attempt,
                 total_attempts,
             )
 
         if plan is None:
             logger.warning(
-                "[PlanStage] all attempts failed, fallback to default plan. total_attempts=%s",
+                "[session=%s] [PlanStage] all attempts failed, fallback to default plan. total_attempts=%s",
+                ctx.state.task_id,
                 total_attempts,
             )
             plan = self._default_plan(ctx)
@@ -190,7 +194,7 @@ class PlanStageHandler(StageHandler):
         parts.append("请根据以上信息，输出一份完整的 JSON 开发计划。")
         return "\n\n".join(parts)
 
-    def _parse_plan_json(self, text: str) -> dict | None:
+    def _parse_plan_json(self, text: str, session_id: str) -> dict | None:
         """从 Agent 输出中提取 JSON plan.
 
         优先提取 ```json ... ``` 代码块，否则用平衡括号匹配 JSON 对象。
@@ -204,7 +208,7 @@ class PlanStageHandler(StageHandler):
 
         start = text.find("{")
         if start == -1:
-            logger.warning("[PlanStage] Agent 未输出有效的 JSON plan 对象")
+            logger.warning("[session=%s] [PlanStage] Agent 未输出有效的 JSON plan 对象", session_id)
             return None
 
         depth = 0
@@ -235,12 +239,12 @@ class PlanStageHandler(StageHandler):
 
         end = text.rfind("}") + 1
         if end == 0:
-            logger.warning("[PlanStage] Agent 未输出有效的 JSON plan 对象")
+            logger.warning("[session=%s] [PlanStage] Agent 未输出有效的 JSON plan 对象", session_id)
             return None
         try:
             return json.loads(text[start:end])
         except json.JSONDecodeError:
-            logger.warning("[PlanStage] JSON 解析失败")
+            logger.warning("[session=%s] [PlanStage] JSON 解析失败", session_id)
             return None
 
     def _default_plan(self, ctx: SkillDevContext) -> dict:

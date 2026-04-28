@@ -55,6 +55,8 @@ class GradingAgentRequest:
     run_dir: Path | None = None
     input_files: list = field(default_factory=list)
     files_created: list = field(default_factory=list)
+    # 上次 JSON 解析失败的错误信息；非空时 prompt 开头会注入强力格式警告
+    parse_error_hint: str = ""
 
 # ---------------------------------------------------------------------------
 # Grader Agent 系统 Prompt
@@ -114,9 +116,17 @@ GRADER_SYSTEM_PROMPT = """\
 1. 最终输出必须是一个合法的 JSON 列表
 2. 列表中的每个元素必须为字典且有三个字段：expectation, passed, reason
 3. passed 字段只能是 true 或 false（布尔值，不是字符串）
-4. expectation 字段必须是原始的 expectation 文本
-5. reason 字段需要简明扼要（1-2 句），禁止出现markdown、双引号等无法被json.loads解析的内容
+4. expectation 字段必须逐字复制原始文本，不得改动
+5. reason 字段须遵守以下规则：
+   - **禁止出现双引号**（`"`）—— 若需引用内容，改用单引号（`'`）或【】括号
+   - **禁止出现换行符** —— reason 必须是单行文本
+   - 禁止使用 Markdown 语法（禁止 `**`、`` ` ``、`#` 等）
+   - 长度控制在 1-2 句，50 字以内
 6. 数组长度必须等于输入的 expectation 数量，顺序与输入一致
+
+**常见格式错误（禁止出现）：**
+- reason 中含双引号：`"文件包含 "hello""` → 改为 `"文件包含 'hello'"`
+- reason 中含换行：`"第一行\n第二行"` → 改为 `"第一行，第二行"`
 """
 
 # ---------------------------------------------------------------------------
@@ -255,7 +265,7 @@ class EvaluateStageHandler(StageHandler):
                 tasks.append((case, variant, run_dir))
 
         if not tasks:
-            logger.warning("[EvaluateStage] 没有可评分的 run，跳过 grading")
+            logger.warning("[session=%s] [EvaluateStage] 没有可评分的 run，跳过 grading", ctx.state.task_id)
             return
 
         semaphore = asyncio.Semaphore(self._GRADE_CONCURRENCY)
@@ -314,6 +324,7 @@ class EvaluateStageHandler(StageHandler):
         # 避免复用失败会话导致模型沿着错误路径继续
         agent_results: dict | None = None
         base_stage_key = f"evaluate_grader/{eval_name}/{variant}"
+        last_parse_error: str = ""   # 上次 JSON 解析失败的原因；非空时下次 attempt 注入格式警告
 
         for attempt in range(1, self._MAX_GRADE_RETRIES + 1):
             stage_key = base_stage_key if attempt == 1 else f"{base_stage_key}/retry{attempt}"
@@ -332,6 +343,7 @@ class EvaluateStageHandler(StageHandler):
                 run_dir=run_dir,
                 input_files=input_files,
                 files_created=files_created,
+                parse_error_hint=last_parse_error,
             )
             try:
                 agent_results = await asyncio.wait_for(
@@ -339,24 +351,29 @@ class EvaluateStageHandler(StageHandler):
                     timeout=self._GRADE_TIMEOUT_SECONDS,
                 )
                 is_failure = _is_grading_failure(agent_results, expectations)
+                last_parse_error = ""  # 本次成功，清除错误标记
             except asyncio.TimeoutError:
                 # 单次 grading 超时（网络挂起等）→ 视为本次 attempt 失败，触发重试
                 logger.warning(
-                    "[EvaluateStage] 评分超时（>%ds），准备重试 (%d/%d): %s/%s",
+                    "[session=%s] [EvaluateStage] 评分超时（>%ds），准备重试 (%d/%d): %s/%s",
+                    ctx.state.task_id,
                     self._GRADE_TIMEOUT_SECONDS, attempt, self._MAX_GRADE_RETRIES,
                     eval_name, variant,
                 )
                 agent_results = None
                 is_failure = True
+                last_parse_error = ""  # 超时不属于格式问题，清除
             except ValueError as parse_err:
                 # LLM 输出无法解析为合法 JSON → 视为本次 attempt 失败，触发重试
                 # 网络 / 超时异常不在此处捕获，会直接传播到 _grade_all_evals → execute()
                 logger.warning(
-                    "[EvaluateStage] 评分结果解析失败，准备重试 (%d/%d): %s/%s: %s",
+                    "[session=%s] [EvaluateStage] 评分结果解析失败，准备重试 (%d/%d): %s/%s: %s",
+                    ctx.state.task_id,
                     attempt, self._MAX_GRADE_RETRIES, eval_name, variant, parse_err,
                 )
                 agent_results = None
                 is_failure = True
+                last_parse_error = str(parse_err)[:300]  # 传给下次 attempt 的格式警告
 
             if not is_failure:
                 break  # 有效结果，不再重试
@@ -364,13 +381,15 @@ class EvaluateStageHandler(StageHandler):
             if attempt < self._MAX_GRADE_RETRIES:
                 wait = 2 ** (attempt - 1)  # 指数退避：1s, 2s
                 logger.warning(
-                    "[EvaluateStage] grading 结果无效，%ds 后重试 (%d/%d): %s/%s",
+                    "[session=%s] [EvaluateStage] grading 结果无效，%ds 后重试 (%d/%d): %s/%s",
+                    ctx.state.task_id,
                     wait, attempt, self._MAX_GRADE_RETRIES, eval_name, variant,
                 )
                 await asyncio.sleep(wait)
             else:
                 logger.error(
-                    "[EvaluateStage] grading %d 次重试后仍失败: %s/%s",
+                    "[session=%s] [EvaluateStage] grading %d 次重试后仍失败: %s/%s",
+                    ctx.state.task_id,
                     self._MAX_GRADE_RETRIES, eval_name, variant,
                 )
 
@@ -380,7 +399,7 @@ class EvaluateStageHandler(StageHandler):
             json.dumps(grading_dict, ensure_ascii=False, indent=2),
             encoding="utf-8",
         )
-        logger.info("[EvaluateStage] grading 完成: %s/%s", eval_name, variant)
+        logger.info("[session=%s] [EvaluateStage] grading 完成: %s/%s", ctx.state.task_id, eval_name, variant)
 
     async def _grade_expectations_with_agent(
         self,
@@ -389,7 +408,21 @@ class EvaluateStageHandler(StageHandler):
         request: GradingAgentRequest,
     ) -> Dict[str, Any]:
         """使用 Agent 验证 expectations（流式，实时推送推理过程）."""
-        prompt = "请根据以下执行结果，逐条判断 expectations 是否满足：\n\n"
+        # 若上次因 JSON 格式错误失败，在 prompt 最开头注入强力警告
+        if request.parse_error_hint:
+            prompt = (
+                "⚠️【JSON 格式错误警告 - 本次为重试】⚠️\n"
+                "上次输出因 JSON 格式错误无法解析，错误信息：\n"
+                f"{request.parse_error_hint}\n\n"
+                "本次必须严格遵守以下规则，否则评分无效：\n"
+                "1. reason 字段禁止出现双引号（用单引号替代）\n"
+                "2. reason 字段禁止换行，必须是单行文本\n"
+                "3. 禁止在 JSON 外包裹任何解释文字（直接输出 JSON 数组）\n"
+                "4. 禁止在字符串值内嵌套引号或特殊转义符\n\n"
+            )
+        else:
+            prompt = ""
+        prompt += "请根据以下执行结果，逐条判断 expectations 是否满足：\n\n"
         prompt += "待评估的 Expectations：\n"
         for i, exp in enumerate(request.expectations, 1):
             prompt += f"{i}. {exp}\n"
@@ -429,7 +462,7 @@ class EvaluateStageHandler(StageHandler):
         if trace and request.run_dir is not None:
             (request.run_dir / "eval_trace.txt").write_text(trace, encoding="utf-8")
 
-        logger.info(f"[EvaluateStage] Agent 评分响应: {response[:200]}...")
+        logger.info("[session=%s] [EvaluateStage] Agent 评分响应: %s...", ctx.state.task_id, response[:200])
         # 解析失败直接向上抛出 ValueError，由 _grade_one 的重试循环捕获
         return self._parse_agent_grading_response(response, request.expectations)
 
@@ -560,7 +593,7 @@ class EvaluateStageHandler(StageHandler):
             eval_name = case.get("name", f"eval-{case.get('id', 0)}")
             case_dir = iter_dir / eval_name
             if not case_dir.exists():
-                logger.info(f"Case directory not found: {case_dir}")
+                logger.info("[session=%s] [EvaluateStage] Case directory not found: %s", ctx.state.task_id, case_dir)
                 continue
 
             for variant in ["with_skill", "baseline"]:
@@ -569,7 +602,11 @@ class EvaluateStageHandler(StageHandler):
                 timing_file = variant_dir / "timing.json"
 
                 if not grading_file.exists():
-                    logger.info(f"Grading file not found: {grading_file}")
+                    logger.info(
+                        "[session=%s] [EvaluateStage] Grading file not found: %s",
+                        ctx.state.task_id,
+                        grading_file,
+                    )
                     continue
 
                 try:
@@ -592,11 +629,20 @@ class EvaluateStageHandler(StageHandler):
                     )
                     variant_runs[variant].append(run)
                     logger.info(
-                        f"Loaded {variant}/{eval_name}: "
-                        f"pass_rate={run.pass_rate}, time={run.time_seconds}s"
+                        "[session=%s] [EvaluateStage] Loaded %s/%s: pass_rate=%s, time=%ss",
+                        ctx.state.task_id,
+                        variant,
+                        eval_name,
+                        run.pass_rate,
+                        run.time_seconds,
                     )
                 except Exception as e:
-                    logger.error(f"Failed to parse {variant_dir}: {e}")
+                    logger.error(
+                        "[session=%s] [EvaluateStage] Failed to parse %s: %s",
+                        ctx.state.task_id,
+                        variant_dir,
+                        e,
+                    )
                     continue
 
         # 聚合统计
@@ -604,7 +650,11 @@ class EvaluateStageHandler(StageHandler):
         for variant in ["with_skill", "baseline"]:
             runs = variant_runs[variant]
             if not runs:
-                logger.warning(f"No runs found for variant: {variant}")
+                logger.warning(
+                    "[session=%s] [EvaluateStage] No runs found for variant: %s",
+                    ctx.state.task_id,
+                    variant,
+                )
                 continue
 
             fully_passed_count = sum(
@@ -620,17 +670,19 @@ class EvaluateStageHandler(StageHandler):
             }
 
             logger.info(
-                f"{variant}: "
-                f"pass_rate={variant_stats[variant]['pass_rate']['mean']:.1%} ± "
-                f"{variant_stats[variant]['pass_rate']['stddev']:.1%}, "
-                f"runs={len(runs)}"
+                "[session=%s] [EvaluateStage]%s: pass_rate=%.1f%% +/- %.1f%%, runs=%d",
+                ctx.state.task_id,
+                variant,
+                variant_stats[variant]["pass_rate"]["mean"] * 100,
+                variant_stats[variant]["pass_rate"]["stddev"] * 100,
+                len(runs),
             )
 
         # 计算 delta
-        delta = self._calculate_delta(variant_stats)
+        delta = self._calculate_delta(variant_stats, ctx.state.task_id)
         # 打印 delta 摘要
         if delta:
-            logger.info(f"Delta: {delta}")
+            logger.info("[session=%s] [EvaluateStage] Delta: %s", ctx.state.task_id, delta)
             variant_stats["delta"] = delta
 
         # 合并所有 runs 并返回
@@ -642,7 +694,7 @@ class EvaluateStageHandler(StageHandler):
             timestamp=_now_iso(),
         )
 
-    def _calculate_delta(self, variant_stats: dict) -> dict:
+    def _calculate_delta(self, variant_stats: dict, session_id: str) -> dict:
         """计算 with_skill vs baseline 的改进指标.
         
         Args:
@@ -661,7 +713,7 @@ class EvaluateStageHandler(StageHandler):
         delta = {}
 
         if "with_skill" not in variant_stats or "baseline" not in variant_stats:
-            logger.warning("Missing with_skill or baseline in variant_stats")
+            logger.warning("[session=%s] [EvaluateStage] Missing with_skill or baseline in variant_stats", session_id)
             return delta
 
         ws = variant_stats["with_skill"]
@@ -745,11 +797,11 @@ class EvaluateStageHandler(StageHandler):
         response = await ctx.run_stage_agent_streaming(
             analyst_agent, stage_name="evaluate_analyst", query=prompt
         )
-        logger.info(f"[EvaluateStage] Analyst 响应: {response[:200]}...")
+        logger.info("[session=%s] [EvaluateStage] Analyst 响应: %s...", ctx.state.task_id, response[:200])
         try:
             suggestions = self._parse_analyst_suggestions(response)
         except Exception as e:
-            logger.error(f"[EvaluateStage] Analyst 结果解析失败: {e}")
+            logger.error("[session=%s] [EvaluateStage] Analyst 结果解析失败: %s", ctx.state.task_id, e)
             suggestions = [{"category": "分析失败", "suggestion": str(e), "priority": "low"}]
         return suggestions
 

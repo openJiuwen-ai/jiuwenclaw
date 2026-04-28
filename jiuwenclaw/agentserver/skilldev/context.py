@@ -262,7 +262,8 @@ class SkillDevContext:
         agent_id = self._resolve_agent_id(agent_or_agent_id)
         if not agent_id:
             logger.warning(
-                "[SkillDevContext] release_agent_tools: cannot resolve agent_id from input=%s",
+                "[session=%s] [SkillDevContext] release_agent_tools: cannot resolve agent_id from input=%s",
+                self.task_id,
                 type(agent_or_agent_id).__name__,
             )
             return
@@ -270,7 +271,8 @@ class SkillDevContext:
         tool_ids = sorted(self._agent_tool_ids.get(agent_id, set()))
         if not tool_ids:
             logger.debug(
-                "[SkillDevContext] release_agent_tools: no tracked tools for agent_id=%s",
+                "[session=%s] [SkillDevContext] release_agent_tools: no tracked tools for agent_id=%s",
+                self.task_id,
                 agent_id,
             )
             return
@@ -287,13 +289,20 @@ class SkillDevContext:
                 else:
                     failed += 1
             logger.info(
-                "[SkillDevContext] release_agent_tools: agent_id=%s attempted=%d removed=%d failed=%d",
-                agent_id, len(tool_ids), removed, failed,
+                "[session=%s] [SkillDevContext] release_agent_tools: agent_id=%s attempted=%d removed=%d failed=%d",
+                self.task_id,
+                agent_id,
+                len(tool_ids),
+                removed,
+                failed,
             )
         except Exception as exc:
             logger.warning(
-                "[SkillDevContext] release_agent_tools failed: agent_id=%s tools=%s err=%s",
-                agent_id, tool_ids, exc,
+                "[session=%s] [SkillDevContext] release_agent_tools failed: agent_id=%s tools=%s err=%s",
+                self.task_id,
+                agent_id,
+                tool_ids,
+                exc,
             )
         finally:
             # Always clear local tracking to keep release idempotent.
@@ -396,7 +405,9 @@ class SkillDevContext:
             async for chunk in Runner.run_agent_streaming(agent, inputs=inputs):
                 if not hasattr(chunk, "type") or not hasattr(chunk, "payload"):
                     logger.info(
-                        "[SkillDevContext] stream chunk skipped: missing type/payload (stage=%s, chunk=%s)",
+                        "[session=%s] [SkillDevContext] stream chunk skipped: "
+                        "missing type/payload (stage=%s, chunk=%s)",
+                        self.task_id,
                         stage_name,
                         type(chunk).__name__,
                     )
@@ -535,7 +546,8 @@ class SkillDevContext:
                     await push_output_delta(delta_text)
                 else:
                     logger.info(
-                        "[SkillDevContext] stream chunk not emitted: stage=%s type=%s",
+                        "[session=%s] [SkillDevContext] stream chunk not emitted: stage=%s type=%s",
+                        self.task_id,
                         stage_name,
                         chunk_type,
                     )
@@ -548,8 +560,10 @@ class SkillDevContext:
             await flush_text()
             await flush_reasoning()
             logger.error(
-                "[SkillDevContext] Agent execution failed: stage=%s error=%s",
-                stage_name, e,
+                "[session=%s] [SkillDevContext] Agent execution failed: stage=%s error=%s",
+                self.task_id,
+                stage_name,
+                e,
             )
             raise e
 
@@ -562,16 +576,21 @@ class SkillDevContext:
             if not output.strip():
                 e = error_capture.captured[-1]
                 logger.error(
-                    "[SkillDevContext] LLM call failed silently, output is empty: "
+                    "[session=%s] [SkillDevContext] LLM call failed silently, output is empty: "
                     "stage=%s error=%s",
-                    stage_name, e,
+                    self.task_id,
+                    stage_name,
+                    e,
                 )
                 raise e
             else:
                 logger.warning(
-                    "[SkillDevContext] LLM had transient errors but agent recovered: "
+                    "[session=%s] [SkillDevContext] LLM had transient errors but agent recovered: "
                     "stage=%s errors=%d last_error=%s",
-                    stage_name, len(error_capture.captured), error_capture.captured[-1],
+                    self.task_id,
+                    stage_name,
+                    len(error_capture.captured),
+                    error_capture.captured[-1],
                 )
         if capture_trace:
             return output, "".join(trace_parts)
@@ -597,8 +616,11 @@ class SkillDevContext:
             配置完毕的 DeepAgent 实例（尚未执行）
         """
         logger.info(
-            "[SkillDevContext] create_stage_agent: stage=%s tools=%s max_iterations=%d",
-            stage_name, tools, max_iterations,
+            "[session=%s] [SkillDevContext] create_stage_agent: stage=%s tools=%s max_iterations=%d",
+            self.task_id,
+            stage_name,
+            tools,
+            max_iterations,
         )
 
         agent_card = AgentCard(
@@ -662,9 +684,11 @@ class SkillDevContext:
 
         if not allowed_tools:
             logger.warning(
-                "[SkillDevContext] No tool whitelist defined for stage '%s' "
+                "[session=%s] [SkillDevContext] No tool whitelist defined for stage '%s' "
                 "(lookup_key='%s'), skipping tool registration for safety",
-                stage_name, lookup_upper,
+                self.task_id,
+                stage_name,
+                lookup_upper,
             )
             return
 
@@ -697,17 +721,22 @@ class SkillDevContext:
         for tool_name in tool_names:
             if tool_name in seen_tool_names:
                 logger.debug(
-                    "[SkillDevContext] Skip duplicated tool name '%s' in stage=%s",
-                    tool_name, stage_name,
+                    "[session=%s] [SkillDevContext] Skip duplicated tool name '%s' in stage=%s",
+                    self.task_id,
+                    tool_name,
+                    stage_name,
                 )
                 continue
             seen_tool_names.add(tool_name)
             # Stage-level tool isolation: check if tool is allowed for this stage
             if tool_name not in allowed_tools:
                 logger.warning(
-                    "[SkillDevContext] Tool '%s' is not allowed in stage '%s' "
+                    "[session=%s] [SkillDevContext] Tool '%s' is not allowed in stage '%s' "
                     "(allowed: %s), skipping",
-                    tool_name, stage_name, allowed_tools
+                    self.task_id,
+                    tool_name,
+                    stage_name,
+                    allowed_tools,
                 )
                 continue
             # 处理 harness 工具
@@ -732,8 +761,11 @@ class SkillDevContext:
                     add_result = Runner.resource_mgr.add_tool(harness_tool)
                     if not getattr(add_result, "is_ok", lambda: False)():
                         logger.warning(
-                            "[SkillDevContext] Failed to add tool into resource_mgr: %s (id=%s), skip ability add",
-                            tool_name, tool_id,
+                            "[session=%s] [SkillDevContext] Failed to add tool into "
+                            "resource_mgr: %s (id=%s), skip ability add",
+                            self.task_id,
+                            tool_name,
+                            tool_id,
                         )
                         continue
 
@@ -743,16 +775,21 @@ class SkillDevContext:
                         self._track_agent_tool(agent_id, tool_id)
 
                     logger.debug(
-                        "[SkillDevContext] Registered harness tool: %s (id=%s)",
-                        tool_name, tool_id,
+                        "[session=%s] [SkillDevContext] Registered harness tool: %s (id=%s)",
+                        self.task_id,
+                        tool_name,
+                        tool_id,
                     )
                 except Exception as exc:
                     logger.warning(
-                        "[SkillDevContext] Failed to register harness tool %s: %s",
-                        tool_name, exc,
+                        "[session=%s] [SkillDevContext] Failed to register harness tool %s: %s",
+                        self.task_id,
+                        tool_name,
+                        exc,
                     )
             else:
                 logger.warning(
-                    "[SkillDevContext] Unknown tool: %s (not in harness or MCP)",
+                    "[session=%s] [SkillDevContext] Unknown tool: %s (not in harness or MCP)",
+                    self.task_id,
                     tool_name,
                 )

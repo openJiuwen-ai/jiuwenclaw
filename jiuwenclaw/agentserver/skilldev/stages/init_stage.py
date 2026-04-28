@@ -73,10 +73,15 @@ class InitStageHandler(StageHandler):
                                 ref_files_dir / file_name, ref_files_dir, extract_to_stem_dir=False
                                 ) 
                 except Exception as exc:
-                    logger.warning("[InitStage] 参考文件下载失败: err=%s", exc)
+                    logger.warning("[session=%s] [InitStage] 参考文件下载失败: err=%s", ctx.state.task_id, exc)
                     raise
             else:
-                await self._write_resources(ref_files, ref_files_dir, extract_zip_to_subdir=True)
+                await self._write_resources(
+                    ref_files,
+                    ref_files_dir,
+                    extract_zip_to_subdir=True,
+                    session_id=ctx.state.task_id,
+                )
 
         # 解析上传的参考 skill 压缩包
         skill_packages = ctx.state.input.get("skill_packages") or []
@@ -94,7 +99,7 @@ class InitStageHandler(StageHandler):
                             ref_skills_dir / skill_package_name, ref_skills_dir, extract_to_stem_dir=False
                             )
                 except Exception as exc:
-                    logger.warning("[InitStage] 参考 skill 包下载失败: err=%s", exc)
+                    logger.warning("[session=%s] [InitStage] 参考 skill 包下载失败: err=%s", ctx.state.task_id, exc)
                     raise
             else:
                 await self._write_resources(
@@ -102,6 +107,7 @@ class InitStageHandler(StageHandler):
                     ref_skills_dir,
                     extract_zip_to_subdir=True,
                     allowed_suffixes=(".zip", ".skill"),
+                    session_id=ctx.state.task_id,
                 )
 
         # 解析上传的外部工具定义（list[dict]，每项为一个 tool）
@@ -111,14 +117,22 @@ class InitStageHandler(StageHandler):
             # 适配小艺
             if tool_specs[0].get("protocol", ""): 
                 ctx.state.external_tools = generate_tool_scripts_and_usage(tool_specs, tool_scripts_dir)
-                logger.info("[InitStage] 加载外部工具: %d 个", len(ctx.state.external_tools))
+                logger.info(
+                    "[session=%s] [InitStage] 加载外部工具: %d 个",
+                    ctx.state.task_id,
+                    len(ctx.state.external_tools),
+                )
             else:
                 for tool_info in tool_specs:
                     content_b64 = tool_info.get("base64Data", "")
                     tool_info_list = json.loads(base64.b64decode(content_b64).decode("utf-8")) 
                     
                     ctx.state.external_tools = generate_tool_scripts_and_usage(tool_info_list, tool_scripts_dir)
-                    logger.info("[InitStage] 加载外部工具: %d 个", len(ctx.state.external_tools))
+                    logger.info(
+                        "[session=%s] [InitStage] 加载外部工具: %d 个",
+                        ctx.state.task_id,
+                        len(ctx.state.external_tools),
+                    )
 
 
         # 更新目录空状态：skill和resources目录
@@ -130,7 +144,7 @@ class InitStageHandler(StageHandler):
 
         # 写完文件后，通过内容扫描推断任务模式
         logger.info(
-            "[InitStage] task_id=%s mode=%s ref_files_dir_empty=%s "
+            "[session=%s] [InitStage] mode=%s ref_files_dir_empty=%s "
             "ref_skills_dir_empty=%s skill_dir_empty=%s tool_scripts_dir_empty=%s",
             ctx.task_id,
             ctx.state.mode.value,
@@ -146,7 +160,7 @@ class InitStageHandler(StageHandler):
             ctx.state.skill_name = skill_name
         else:
             skill_name = await self._generate_skill_name(ctx)
-            logger.info("[InitStage] 基于指令与上传内容生成 skill_name: %s", skill_name)
+            logger.info("[session=%s] [InitStage] 基于指令与上传内容生成 skill_name: %s", ctx.state.task_id, skill_name)
             ctx.state.skill_name = skill_name
             await ctx.emit(
                 SkillDevEventType.SKILL_NAME_READY,
@@ -174,14 +188,16 @@ class InitStageHandler(StageHandler):
                     emit_thinking=False,
                 )
                 logger.info(
-                    "[InitStage] 生成 skill_name (尝试 %d/%d): %s",
+                    "[session=%s] [InitStage] 生成 skill_name (尝试 %d/%d): %s",
+                    ctx.state.task_id,
                     attempt,
                     _MAX_SKILL_NAME_ATTEMPTS,
                     raw_name,
                 )
             except Exception as exc:
                 logger.warning(
-                    "[InitStage] 生成 skill_name 失败 (尝试 %d/%d)，%s: %s",
+                    "[session=%s] [InitStage] 生成 skill_name 失败 (尝试 %d/%d)，%s: %s",
+                    ctx.state.task_id,
                     attempt,
                     _MAX_SKILL_NAME_ATTEMPTS,
                     "将重试" if attempt < _MAX_SKILL_NAME_ATTEMPTS else "使用兜底",
@@ -280,6 +296,7 @@ class InitStageHandler(StageHandler):
         *,
         extract_zip_to_subdir: bool,
         allowed_suffixes: tuple[str, ...] | None = None,
+        session_id: str = "",
     ) -> None:
         """将所有资源文件 base64 解码后写入 dest_dir。
 
@@ -295,7 +312,12 @@ class InitStageHandler(StageHandler):
                 if allowed_suffixes and suffix not in allowed_suffixes:
                     raise ValueError(f"不支持的文件类型: {name}")
                 file_path.write_bytes(raw)
-                logger.info("[InitStage] 写入资源: %s (%d bytes)", name, len(raw))
+                logger.info(
+                    "[session=%s] [InitStage] 写入资源: %s (%d bytes)",
+                    session_id,
+                    name,
+                    len(raw),
+                )
 
                 if suffix in (".zip", ".skill"):
                     safe_extract_zip(file_path, dest_dir, extract_to_stem_dir=extract_zip_to_subdir)
@@ -303,22 +325,25 @@ class InitStageHandler(StageHandler):
                     raise NotImplementedError(f"RAR format not supported, please use zip instead.")
             except Exception as exc:
                 logger.warning(
-                    "[InitStage] 资源文件写入失败: name=%s error=%s", name, exc
+                    "[session=%s] [InitStage] 资源文件写入失败: name=%s error=%s",
+                    session_id,
+                    name,
+                    exc,
                 )
 
-    def _parse_tools(self, tools_dir: Path) -> list[dict]:
+    def _parse_tools(self, tools_dir: Path, session_id: str = "") -> list[dict]:
         """从工具目录解析工具定义，返回合法的 tool dict 列表。
 
         在 tools_dir 中读取全部 .json 文件并合并（内容应为 list[dict]）。
         每个 tool dict 至少须包含 "name" 字段，不合规项会被跳过。
         """
         if not tools_dir.exists() or not tools_dir.is_dir():
-            logger.warning("[InitStage] 工具目录不存在或不是目录: %s", tools_dir)
+            logger.warning("[session=%s] [InitStage] 工具目录不存在或不是目录: %s", session_id, tools_dir)
             return []
 
         json_files = sorted(tools_dir.glob("*.json"))
         if not json_files:
-            logger.warning("[InitStage] 工具目录中未找到 JSON 文件: %s", tools_dir)
+            logger.warning("[session=%s] [InitStage] 工具目录中未找到 JSON 文件: %s", session_id, tools_dir)
             return []
 
         valid: list[dict] = []
@@ -326,19 +351,19 @@ class InitStageHandler(StageHandler):
             try:
                 parsed = json.loads(json_file.read_text(encoding="utf-8"))
             except Exception as exc:
-                logger.warning("[InitStage] 读取工具文件失败: file=%s error=%s", json_file.name, exc)
+                logger.warning("[session=%s] [InitStage] 读取工具文件失败: file=%s error=%s", session_id, json_file.name, exc)
                 continue
 
             if not isinstance(parsed, list):
-                logger.warning("[InitStage] 工具文件内容应为 list: file=%s", json_file.name)
+                logger.warning("[session=%s] [InitStage] 工具文件内容应为 list: file=%s", session_id, json_file.name)
                 continue
 
             for i, item in enumerate(parsed):
                 if not isinstance(item, dict):
-                    logger.warning("[InitStage] %s[%d] 不是 dict，跳过", json_file.name, i)
+                    logger.warning("[session=%s] [InitStage] %s[%d] 不是 dict，跳过", session_id, json_file.name, i)
                     continue
                 if not item.get("name"):
-                    logger.warning("[InitStage] %s[%d] 缺少 'name' 字段，跳过", json_file.name, i)
+                    logger.warning("[session=%s] [InitStage] %s[%d] 缺少 'name' 字段，跳过", session_id, json_file.name, i)
                     continue
                 valid.append(item)
 

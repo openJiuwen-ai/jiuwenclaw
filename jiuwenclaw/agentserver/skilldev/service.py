@@ -169,9 +169,9 @@ class SkillDevService:
             params.get("task_id") or params.get("session_id") or session_id or ""
         ).strip()
         logger.info(
-            "[SkillDevService] _handle_parse_skill called: request_id=%s task_id=%s channel_id=%s",
-            request_id,
+            "[session=%s] [SkillDevService] _handle_parse_skill called: request_id=%s channel_id=%s",
             task_id,
+            request_id,
             channel_id,
         )
         if not task_id:
@@ -207,8 +207,12 @@ class SkillDevService:
             try:
                 _ = await download_file(download_url, str(download_path))
             except Exception as exc:
-                logger.warning("[SkillDevService] skill 包下载失败: task_id=%s err=%s", task_id, exc)
-                yield self._error_chunk(request_id, channel_id, f"下载失败: {exc}")
+                logger.warning(
+                    "[session=%s] [SkillDevService] skill 包下载失败: err=%s",
+                    task_id,
+                    exc,
+                )
+                yield self._error_chunk(request_id, channel_id, f"skill 包下载失败: {exc}")
                 return
             
         else:
@@ -245,8 +249,12 @@ class SkillDevService:
                 is_complete=False,
             )
         except Exception as exc:
-            logger.warning("[SkillDevService] skill 包导入失败: task_id=%s err=%s", task_id, exc)
-            yield self._error_chunk(request_id, channel_id, f"导入失败: {exc}")
+            logger.warning(
+                "[session=%s] [SkillDevService] skill 包解压缩失败: err=%s",
+                task_id,
+                exc,
+            )
+            yield self._error_chunk(request_id, channel_id, f"skill 包解压缩失败: {exc}")
             return
         finally:
             if download_path.exists():
@@ -369,8 +377,12 @@ class SkillDevService:
             upload_file_obs = UploadFileOSMS()
             download_url = await upload_file_obs.upload_file(str(zip_path))
         except Exception as exc:
-            logger.warning("[SkillDevService] skill 包上传失败: task_id=%s err=%s", task_id, exc)
-            return self._error_chunk(request_id, channel_id, f"skill 包上传失败: {exc}")
+            logger.warning(
+                "[session=%s] [SkillDevService] skill 包上传到OBS服务器失败: err=%s",
+                task_id,
+                exc,
+            )
+            return self._error_chunk(request_id, channel_id, f"skill 包上传到OBS服务器失败: {exc}")
 
         export_id = f"exp_{secrets.token_hex(3)}"
         export_time = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -387,20 +399,6 @@ class SkillDevService:
             is_complete=True,
         )
 
-        # content_b64 = base64.b64encode(zip_path.read_bytes()).decode()
-
-        # return AgentResponseChunk(
-        #     request_id=request_id,
-        #     channel_id=channel_id,
-        #     payload={
-        #         "ok": True,
-        #         "filename": zip_path.name,
-        #         "content_base64": content_b64,
-        #         "size_bytes": state.zip_size,
-        #     },
-        #     is_complete=True,
-        # )
-
     # ------------------------------------------------------------------
     # skilldev.cancel — 取消任务
     # ------------------------------------------------------------------
@@ -412,10 +410,10 @@ class SkillDevService:
         if event:
             event.set()
             msg = "取消信号已发送，pipeline 将在下一阶段边界终止"
-            logger.info("[SkillDevService] 取消信号已发送: task_id=%s", task_id)
+            logger.info("[session=%s] [SkillDevService] 取消信号已发送", task_id)
         else:
             msg = "任务未在运行中，无需取消"
-            logger.info("[SkillDevService] 取消请求：任务未在运行: task_id=%s", task_id)
+            logger.info("[session=%s] [SkillDevService] 取消请求：任务未在运行", task_id)
         return AgentResponseChunk(
             request_id=request_id,
             channel_id=channel_id,

@@ -9,7 +9,7 @@
 - 只包含允许的 frontmatter key
 
 校验失败 → 回退 GENERATE 重新生成。
-校验成功 → 进入 TEST_DESIGN。
+校验成功 → 进入 SKIP_TESTS_CONFIRM（用户选择运行测试或跳过）。
 """
 
 from __future__ import annotations
@@ -56,7 +56,7 @@ class ValidateStageHandler(StageHandler):
 
         ctx.state.generate_retries = 0
         ctx.state.last_validate_error = None
-        return StageResult(next_stage=SkillDevStage.TEST_DESIGN)
+        return StageResult(next_stage=SkillDevStage.SKIP_TESTS_CONFIRM)
 
     async def _handle_failure(
         self, ctx: SkillDevContext, message: str
@@ -71,14 +71,18 @@ class ValidateStageHandler(StageHandler):
 
         if ctx.state.generate_retries >= MAX_GENERATE_RETRIES:
             logger.error(
-                "[ValidateStage] 校验失败且已达最大重试次数 (%d): %s",
-                MAX_GENERATE_RETRIES, message,
+                "[session=%s] [ValidateStage] 校验失败且已达最大重试次数 (%d): %s",
+                ctx.state.task_id,
+                MAX_GENERATE_RETRIES,
+                message,
             )
             return StageResult(next_stage=SkillDevStage.ERROR)
 
         logger.warning(
-            "[ValidateStage] 校验失败 (第 %d 次): %s，回退到 GENERATE",
-            ctx.state.generate_retries, message,
+            "[session=%s] [ValidateStage] 校验失败 (第 %d 次): %s，回退到 GENERATE",
+            ctx.state.task_id,
+            ctx.state.generate_retries,
+            message,
         )
         return StageResult(next_stage=SkillDevStage.GENERATE)
 

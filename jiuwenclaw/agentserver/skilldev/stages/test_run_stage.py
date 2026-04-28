@@ -93,7 +93,11 @@ class TestRunStageHandler(StageHandler):
             await ctx.emit(SkillDevEventType.ERROR, {"message": msg, "stage": "test_run"})
             raise RuntimeError(msg) from e
 
-        summary = self._generate_summary(results, len(eval_cases))
+        summary = self._generate_summary(
+            results,
+            len(eval_cases),
+            session_id=ctx.state.task_id,
+        )
         summary_file = iter_dir / "iteration_summary.json"
         try:
             summary_file.write_text(
@@ -150,8 +154,9 @@ class TestRunStageHandler(StageHandler):
         skill_dir = ctx.workspace / "skill"
         if not skill_dir.exists():
             logger.warning(
-                f"[TestRunStage] Skill 目录不存在: {skill_dir}。"
-                f"将仅执行 baseline 测试。"
+                "[session=%s] [TestRunStage] Skill 目录不存在: %s。将仅执行 baseline 测试。",
+                ctx.state.task_id,
+                skill_dir,
             )
 
     async def _run_all_evals(self, ctx: SkillDevContext, eval_cases: list[dict], iter_dir) -> list[dict]:
@@ -216,11 +221,16 @@ class TestRunStageHandler(StageHandler):
 
             # 任务一结束立即 emit，不等其他任务
             processed_result = self._process_and_validate_runner_result(
-                processed, case_name, variant, case_id
+                processed,
+                case_name,
+                variant,
+                case_id,
+                session_id=ctx.state.task_id,
             )
             self._ensure_result_files_created(
                 iter_dir / case_name / variant,
-                processed_result
+                processed_result,
+                session_id=ctx.state.task_id,
             )
             completed_count += 1
             await ctx.emit(
@@ -248,7 +258,7 @@ class TestRunStageHandler(StageHandler):
         # 过滤掉异常（_bounded_task 已处理，不应出现，但防御性保留）
         results = [r for r in results if isinstance(r, dict)]
 
-        logger.info(f"[TestRunStage] 所有任务完成，共 {len(results)} 个结果")
+        logger.info("[session=%s] [TestRunStage] 所有任务完成，共 %d 个结果", ctx.state.task_id, len(results))
         return results
 
     async def _bounded_task(self, semaphore, ctx, case_name: str, variant: str, func, *args):
@@ -269,7 +279,8 @@ class TestRunStageHandler(StageHandler):
         result: Any,
         case_name: str,
         variant: str,
-        case_id: int
+        case_id: int,
+        session_id: str = "",
     ) -> Dict[str, Any]:
         """处理和验证 SkillDevTestRunner 的返回值.
         
@@ -285,7 +296,11 @@ class TestRunStageHandler(StageHandler):
         # 情况 1：异常返回
         if isinstance(result, Exception):
             logger.error(
-                f"[TestRunStage] {case_name}/{variant} 执行异常: {result}",
+                "[session=%s] [TestRunStage] %s/%s 执行异常: %s",
+                session_id,
+                case_name,
+                variant,
+                result,
                 exc_info=result
             )
             return {
@@ -303,7 +318,11 @@ class TestRunStageHandler(StageHandler):
         # 情况 2：没有返回值或非 dict
         if not isinstance(result, dict):
             logger.warning(
-                f"[TestRunStage] {case_name}/{variant} 返回值不是 dict: {type(result)}"
+                "[session=%s] [TestRunStage] %s/%s 返回值不是 dict: %s",
+                session_id,
+                case_name,
+                variant,
+                type(result),
             )
             return {
                 "status": "error",
@@ -331,7 +350,11 @@ class TestRunStageHandler(StageHandler):
         # 如果 status 不在预期的值中，标记为 error
         if validated["status"] not in ("success", "error", "timeout"):
             logger.warning(
-                f"[TestRunStage] {case_name}/{variant} status 非预期值: {validated['status']}"
+                "[session=%s] [TestRunStage] %s/%s status 非预期值: %s",
+                session_id,
+                case_name,
+                variant,
+                validated["status"],
             )
             validated["status"] = "error"
             validated["error_message"] = f"未知的 status: {result.get('status')}"
@@ -345,7 +368,8 @@ class TestRunStageHandler(StageHandler):
     def _ensure_result_files_created(
         self,
         variant_dir: Path,
-        result: Dict[str, Any]
+        result: Dict[str, Any],
+        session_id: str = "",
     ) -> None:
         """确保 result.json 和 timing.json 被创建.
         
@@ -373,7 +397,7 @@ class TestRunStageHandler(StageHandler):
             json.dumps(result_data, ensure_ascii=False, indent=2),
             encoding="utf-8"
         )
-        logger.info(f"[TestRunStage] 创建: {result_file}")
+        logger.info("[session=%s] [TestRunStage] 创建: %s", session_id, result_file)
 
         # 创建 timing.json
         timing_file = variant_dir / "timing.json"
@@ -386,9 +410,11 @@ class TestRunStageHandler(StageHandler):
             json.dumps(timing_data, ensure_ascii=False, indent=2),
             encoding="utf-8"
         )
-        logger.info(f"[TestRunStage] 创建: {timing_file}")
+        logger.info("[session=%s] [TestRunStage] 创建: %s", session_id, timing_file)
 
-    def _generate_summary(self, results: List[Dict], eval_count: int) -> Dict[str, Any]:
+    def _generate_summary(
+        self, results: List[Dict], eval_count: int, session_id: str = ""
+    ) -> Dict[str, Any]:
         """生成汇总报告
         
         Args:
@@ -420,8 +446,11 @@ class TestRunStageHandler(StageHandler):
         }
 
         logger.info(
-            f"[TestRunStage] 汇总: 成功 {successful}/{len(results)}, "
-            f"失败率 {summary['success_rate']:.1f}%"
+            "[session=%s] [TestRunStage] 汇总: 成功 %d/%d, 失败率 %.1f%%",
+            session_id,
+            successful,
+            len(results),
+            summary["success_rate"],
         )
 
         return summary

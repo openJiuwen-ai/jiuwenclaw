@@ -55,7 +55,7 @@ class WorkspaceProvider:
         workspace = self._base_dir / task_id
         for sub in ("resources", "evals", "skill", "output"):
             (workspace / sub).mkdir(parents=True, exist_ok=True)
-        logger.debug("[WorkspaceProvider] workspace ready: %s", workspace)
+        logger.debug("[session=%s] [WorkspaceProvider] workspace ready: %s", task_id, workspace)
         return workspace
 
     async def sync_to_remote(self, task_id: str) -> None:

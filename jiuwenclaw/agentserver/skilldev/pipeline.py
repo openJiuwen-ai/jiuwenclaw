@@ -4,7 +4,7 @@
 
 Pipeline 是整个 SkillDev 流程的骨架：
 - 维护阶段跳转顺序（STAGE_HANDLERS 注册表）
-- 在挂起点（QUESTION_CLARIFY / REVIEW / DESC_OPTIMIZE_CONFIRM）checkpoint 并暂停
+- 在挂起点（QUESTION_CLARIFY / SKIP_TESTS_CONFIRM / REVIEW / DESC_OPTIMIZE_CONFIRM）checkpoint 并暂停
 - 提供 run() 和 resume() 两个执行入口
 - 每次请求创建、执行到挂起点/完成后释放（不长驻内存）
 
@@ -52,7 +52,7 @@ class SkillDevPipeline:
     不长驻内存，不持有 JiuWenClaw 实例。
     """
 
-    # QUESTION_CLARIFY / REVIEW / DESC_OPTIMIZE_CONFIRM 是挂起点，由 SUSPENSION_POINTS 处理
+    # QUESTION_CLARIFY / SKIP_TESTS_CONFIRM / REVIEW / DESC_OPTIMIZE_CONFIRM 是挂起点，由 SUSPENSION_POINTS 处理
     STAGE_HANDLERS = {
         SkillDevStage.INIT: InitStageHandler,
         SkillDevStage.CLARIFY: ClarifyStageHandler,
@@ -87,10 +87,9 @@ class SkillDevPipeline:
         while self.state.stage not in (SkillDevStage.COMPLETED, SkillDevStage.ERROR):
             # 检测外部取消信号（由 skilldev.cancel 请求触发）
             if cancel_event and cancel_event.is_set():
-                logger.info("[Pipeline] 收到取消信号，终止任务: task_id=%s", self.task_id)
+                logger.info("[session=%s] [Pipeline] 收到取消信号，终止任务", self.task_id)
                 self.state.stage = SkillDevStage.ERROR
                 self.state.error = "任务已取消"
-                await self._emit(SkillDevEventType.ERROR, {"message": "任务已取消"})
                 await self._checkpoint()
                 async for evt in self._drain_events():
                     yield evt
@@ -121,8 +120,6 @@ class SkillDevPipeline:
 
             # 执行当前阶段
             handler_cls = self.STAGE_HANDLERS.get(self.state.stage)
-            if handler_cls is None:
-                raise RuntimeError(f"阶段 {self.state.stage} 没有对应的处理器")
 
             workspace = await self._deps.workspace_provider.ensure_local(self.task_id)
             ctx = SkillDevContext(
@@ -156,7 +153,12 @@ class SkillDevPipeline:
                 async for evt in self._run_handler_streaming(handler, ctx):
                     yield evt
                 result = self._last_handler_result
-                logger.info(f"阶段 {self.state.stage.value} 执行完成，即将进入阶段 {result.next_stage}")
+                logger.info(
+                    "[session=%s] [Pipeline] 阶段 %s 执行完成，即将进入阶段 %s",
+                    self.task_id,
+                    self.state.stage.value,
+                    result.next_stage,
+                )
                 self.state.stage = result.next_stage
                 await self._checkpoint()
 
@@ -170,11 +172,13 @@ class SkillDevPipeline:
 
             except Exception as exc:
                 logger.exception(
-                    "[Pipeline] 阶段 %s 执行失败: %s", self.state.stage.value, exc
+                    "[session=%s] [Pipeline] 阶段 %s 执行失败: %s",
+                    self.task_id,
+                    self.state.stage.value,
+                    exc,
                 )
                 self.state.stage = SkillDevStage.ERROR
                 self.state.error = str(exc)
-                await self._emit(SkillDevEventType.ERROR, {"message": f"阶段 {self.state.stage.value}执行失败: {exc}"})
                 await self._checkpoint()
                 async for evt in self._drain_events():
                     yield evt
@@ -194,8 +198,6 @@ class SkillDevPipeline:
             SkillDevEvent：恢复后各阶段产生的事件
         """
         current_stage = self.state.stage
-        if current_stage not in SUSPENSION_POINTS:
-            raise ValueError(f"阶段 {current_stage} 不是挂起点，无法调用 resume()")
 
         suspension = SUSPENSION_POINTS[current_stage]
 
@@ -263,7 +265,7 @@ class SkillDevPipeline:
         await self._deps.state_store.save_state(self.task_id, self.state)
         await self._deps.workspace_provider.sync_to_remote(self.task_id)
         logger.debug(
-            "[Pipeline] checkpoint: task_id=%s stage=%s",
+            "[session=%s] [Pipeline] checkpoint: stage=%s",
             self.task_id,
             self.state.stage.value,
         )

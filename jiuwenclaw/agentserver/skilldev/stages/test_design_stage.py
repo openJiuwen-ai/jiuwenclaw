@@ -175,7 +175,8 @@ class TestDesignStageHandler(StageHandler):
                 )
             except asyncio.TimeoutError as e:
                 logger.warning(
-                    "[TestDesignStage] 测试用例设计超时（>%ds），准备重试 (%d/%d)",
+                    "[session=%s] [TestDesignStage] 测试用例设计超时（>%ds），准备重试 (%d/%d)",
+                    ctx.state.task_id,
                     self._DESIGN_TIMEOUT_SECONDS, attempt, self._MAX_DESIGN_RETRIES,
                 )
                 if attempt < self._MAX_DESIGN_RETRIES:
@@ -187,7 +188,11 @@ class TestDesignStageHandler(StageHandler):
                 ) from e
 
             # 验证 evals schema，确保每个 case 都有 name 字段
-            evals = self._validate_and_normalize_evals(evals, skill_name)
+            evals = self._validate_and_normalize_evals(
+                evals,
+                skill_name,
+                session_id=ctx.state.task_id,
+            )
 
             # 验证已生成正确格式的测试用例
             count = len(evals.get("evals", []))
@@ -198,13 +203,18 @@ class TestDesignStageHandler(StageHandler):
             if attempt < self._MAX_DESIGN_RETRIES:
                 wait = 2 ** (attempt - 1)  # 指数退避：1s, 2s
                 logger.warning(
-                    "[TestDesignStage] 测试案例生成失败，%ds 后重试 (%d/%d)",
+                    "[session=%s] [TestDesignStage] 测试案例生成失败，%ds 后重试 (%d/%d)",
+                    ctx.state.task_id,
                     wait, attempt, self._MAX_DESIGN_RETRIES,
                 )
                 await asyncio.sleep(wait)
             else:
                 msg = f"[TestDesignStage] {self._MAX_DESIGN_RETRIES} 次重试后仍失败"
-                logger.error(msg)
+                logger.error(
+                    "[session=%s] [TestDesignStage] %s 次重试后仍失败",
+                    ctx.state.task_id,
+                    self._MAX_DESIGN_RETRIES,
+                )
                 raise RuntimeError(msg)
 
         # 更新state，储存生成的测试案例
@@ -235,9 +245,11 @@ class TestDesignStageHandler(StageHandler):
         content = json.dumps(evals, ensure_ascii=False, indent=2)
         (evals_dir / "evals.json").write_text(content, encoding="utf-8")
 
-        logger.info(f"[TestDesignStage] evals.json 写入: {evals_dir}")
+        logger.info("[session=%s] [TestDesignStage] evals.json 写入: %s", ctx.state.task_id, evals_dir)
 
-    def _validate_and_normalize_evals(self, evals: dict, skill_name: str) -> dict:
+    def _validate_and_normalize_evals(
+        self, evals: dict, skill_name: str, session_id: str = ""
+    ) -> dict:
         """验证和规范化 evals，确保符合 schema.
         
         - 确保每个 eval case 都有 "name" 字段
@@ -252,19 +264,19 @@ class TestDesignStageHandler(StageHandler):
             规范化后的 evals dict
         """
         if not isinstance(evals, dict):
-            logger.error(f"[TestDesignStage] evals 不是 dict，而是 {type(evals)}")
+            logger.error("[session=%s] [TestDesignStage] evals 不是 dict，而是 %s", session_id, type(evals))
             return {"skill_name": skill_name, "evals": []}
         
         evals_list = evals.get("evals", [])
         if not isinstance(evals_list, list):
-            logger.error(f"[TestDesignStage] evals['evals'] 不是 list")
+            logger.error("[session=%s] [TestDesignStage] evals['evals'] 不是 list", session_id)
             return {"skill_name": skill_name, "evals": []}
         
         normalized = {"skill_name": skill_name, "evals": []}
         
         for idx, case in enumerate(evals_list, start=1):
             if not isinstance(case, dict):
-                logger.warning(f"[TestDesignStage] eval case #{idx} 不是 dict，跳过")
+                logger.warning("[session=%s] [TestDesignStage] eval case #%s 不是 dict，跳过", session_id, idx)
                 continue
             
             # 确保 name 字段存在
@@ -274,15 +286,22 @@ class TestDesignStageHandler(StageHandler):
                 category = case.get("case_category", "test")
                 case["name"] = f"{category}_{case_id}"
                 logger.warning(
-                    f"[TestDesignStage] eval case #{idx} 缺少 'name' 字段，"
-                    f"已自动生成: {case['name']}"
+                    "[session=%s] [TestDesignStage] eval case #%s 缺少 'name' 字段，已自动生成: %s",
+                    session_id,
+                    idx,
+                    case["name"],
                 )
             
             # 验证必需字段
             required_fields = ["id", "name", "case_category", "prompt", "expectations"]
             for field in required_fields:
                 if field not in case:
-                    logger.warning(f"[TestDesignStage] eval '{case['name']}' 缺少字段 '{field}'")
+                    logger.warning(
+                        "[session=%s] [TestDesignStage] eval '%s' 缺少字段 '%s'",
+                        session_id,
+                        case["name"],
+                        field,
+                    )
                     # 提供默认值
                     if field == "id":
                         case["id"] = idx
@@ -295,7 +314,11 @@ class TestDesignStageHandler(StageHandler):
             
             # 确保 expectations 是列表
             if not isinstance(case.get("expectations"), list):
-                logger.warning(f"[TestDesignStage] eval '{case['name']}' 的 expectations 不是 list")
+                logger.warning(
+                    "[session=%s] [TestDesignStage] eval '%s' 的 expectations 不是 list",
+                    session_id,
+                    case["name"],
+                )
                 case["expectations"] = []
             
             # 确保 files 字段存在（可以是空列表）
@@ -309,9 +332,13 @@ class TestDesignStageHandler(StageHandler):
             normalized["evals"].append(case)
         
         if len(normalized["evals"]) == 0:
-            logger.error("[TestDesignStage] 规范化后没有有效的 eval case")
+            logger.error("[session=%s] [TestDesignStage] 规范化后没有有效的 eval case", session_id)
         else:
-            logger.info(f"[TestDesignStage] 规范化完成，共 {len(normalized['evals'])} 个 eval case")
+            logger.info(
+                "[session=%s] [TestDesignStage] 规范化完成，共 %s 个 eval case",
+                session_id,
+                len(normalized["evals"]),
+            )
         
         return normalized
 
@@ -343,12 +370,12 @@ class TestDesignStageHandler(StageHandler):
             return output
 
         except ValueError as e:
-            logger.error(f"[TestDesignStage] evals JSON 解析失败，使用占位数据: {e}")
+            logger.error("[session=%s] [TestDesignStage] evals JSON 解析失败，使用占位数据: %s", ctx.state.task_id, e)
             msg = f"测试用例初始化失败：Agent 运行错误或输出无法解析为合法 JSON 格式（{e}）"
             await ctx.emit(SkillDevEventType.ERROR, {"message": msg, "stage": "test_design"})
             raise RuntimeError(msg) from e
         except Exception as e:
-            logger.exception(f"[TestDesignStage] 未预期的错误: {e}")
+            logger.exception("[session=%s] [TestDesignStage] 未预期的错误: %s", ctx.state.task_id, e)
             msg = f"测试设计 Agent 执行失败：{e}"
             await ctx.emit(SkillDevEventType.ERROR, {"message": msg, "stage": "test_design"})
             raise RuntimeError(msg) from e

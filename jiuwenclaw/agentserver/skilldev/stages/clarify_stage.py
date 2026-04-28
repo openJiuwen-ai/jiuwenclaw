@@ -138,15 +138,17 @@ class ClarifyStageHandler(StageHandler):
                 agent, stage_name="clarify", query=query
             )
             logger.info(
-                "[ClarifyStage] attempt=%s/%s raw output: %s",
+                "[session=%s] [ClarifyStage] attempt=%s/%s raw output: %s",
+                ctx.state.task_id,
                 attempt,
                 total_attempts,
                 raw_text[:500],
             )
-            questions = self._parse_questions_json(raw_text)
+            questions = self._parse_questions_json(raw_text, ctx.state.task_id)
             if questions is not None:
                 logger.info(
-                    "[ClarifyStage] attempt=%s/%s parse success, questions=%s",
+                    "[session=%s] [ClarifyStage] attempt=%s/%s parse success, questions=%s",
+                    ctx.state.task_id,
                     attempt,
                     total_attempts,
                     len(questions),
@@ -154,13 +156,15 @@ class ClarifyStageHandler(StageHandler):
                 return questions
 
             logger.warning(
-                "[ClarifyStage] attempt=%s/%s parse failed",
+                "[session=%s] [ClarifyStage] attempt=%s/%s parse failed",
+                ctx.state.task_id,
                 attempt,
                 total_attempts,
             )
 
         logger.warning(
-            "[ClarifyStage] all attempts failed, fallback to default questions. total_attempts=%s",
+            "[session=%s] [ClarifyStage] all attempts failed, fallback to default questions. total_attempts=%s",
+            ctx.state.task_id,
             total_attempts,
         )
         return self._default_questions()
@@ -188,7 +192,7 @@ class ClarifyStageHandler(StageHandler):
         parts.append("请根据用户需求，生成必要的关键澄清问题（JSON 数组格式）。")
         return "\n\n".join(parts)
 
-    def _parse_questions_json(self, text: str) -> list[dict] | None:
+    def _parse_questions_json(self, text: str, session_id: str) -> list[dict] | None:
         """从 Agent 输出中提取问题列表 JSON.
 
         优先提取 ```json ... ``` 代码块，否则用平衡括号匹配 JSON 数组。
@@ -206,7 +210,7 @@ class ClarifyStageHandler(StageHandler):
         # 平衡括号匹配 JSON 数组
         start = text.find("[")
         if start == -1:
-            logger.warning("[ClarifyStage] Agent 未输出有效的问题 JSON 数组")
+            logger.warning("[session=%s] [ClarifyStage] Agent 未输出有效的问题 JSON 数组", session_id)
             return None
 
         depth = 0
@@ -237,7 +241,7 @@ class ClarifyStageHandler(StageHandler):
                     except json.JSONDecodeError:
                         break
 
-        logger.warning("[ClarifyStage] JSON 解析失败")
+        logger.warning("[session=%s] [ClarifyStage] JSON 解析失败", session_id)
         return None
 
     def _validate_questions(self, questions: list) -> list[dict] | None:

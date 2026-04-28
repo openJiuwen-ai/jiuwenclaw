@@ -26,9 +26,10 @@ class SkillDevStage(str, Enum):
     """SkillDev Pipeline 的所有阶段.
 
     流程：INIT → CLARIFY → QUESTION_CLARIFY(挂起) → PLAN → GENERATE → VALIDATE
-        → TEST_DESIGN → TEST_RUN → EVALUATE → REVIEW(挂起)
+        → SKIP_TESTS_CONFIRM(挂起) → TEST_DESIGN → TEST_RUN → EVALUATE → REVIEW(挂起)
         → IMPROVE → (回到 TEST_RUN 迭代)
         → DESC_OPTIMIZE_CONFIRM(挂起) → DESC_OPTIMIZE(可选) → PACKAGE → COMPLETED
+    （亦可从 SKIP_TESTS_CONFIRM 选择跳过测试，直接进入 DESC_OPTIMIZE_CONFIRM）
     """
 
     # 主流程
@@ -38,6 +39,7 @@ class SkillDevStage(str, Enum):
     PLAN = "plan"                          # 综合 QA 答案生成开发计划，直接进入 GENERATE
     GENERATE = "generate"
     VALIDATE = "validate"  # 校验生成的 SKILL.md 格式（YAML frontmatter + 命名规范）
+    SKIP_TESTS_CONFIRM = "skip_tests_confirm"  # 挂起点：询问是否跳过集成/评测测试
     TEST_DESIGN = "test_design"
     TEST_RUN = "test_run"
     EVALUATE = "evaluate"  # grader 评分 + aggregate_benchmark 聚合 + analyst 分析
@@ -141,6 +143,7 @@ class SkillDevState:
     plan: dict[str, Any] | None = None  # PLAN 阶段产出
     generate_retries: int = 0  # GENERATE ↔ VALIDATE 重试计数
     last_validate_error: str | None = None  # VALIDATE 失败原因（供 GENERATE 重试时参考）
+    skipped_benchmark_tests: bool = False  # 用户在 SKIP_TESTS_CONFIRM 选择跳过测试
     evals: dict[str, Any] | None = None  # TEST_DESIGN 阶段产出
     eval_results: dict[str, Any] | None = None  # EVALUATE 阶段产出
     feedback_history: list[dict] = field(default_factory=list)  # 每轮改进的用户反馈
@@ -186,6 +189,7 @@ class SkillDevState:
             "plan": self.plan,
             "generate_retries": self.generate_retries,
             "last_validate_error": self.last_validate_error,
+            "skipped_benchmark_tests": self.skipped_benchmark_tests,
             "evals": self.evals,
             "eval_results": self.eval_results,
             "feedback_history": self.feedback_history,
@@ -218,6 +222,7 @@ class SkillDevState:
         state.plan = data.get("plan")
         state.generate_retries = data.get("generate_retries", 0)
         state.last_validate_error = data.get("last_validate_error")
+        state.skipped_benchmark_tests = data.get("skipped_benchmark_tests", False)
         state.evals = data.get("evals")
         state.eval_results = data.get("eval_results")
         state.feedback_history = data.get("feedback_history", [])
@@ -333,6 +338,27 @@ def _desc_optimize_confirm_next_stage(data: dict) -> SkillDevStage:
     )
 
 
+def _skip_tests_confirm_extract_data(state: SkillDevState) -> dict:
+    plan = state.plan or {}
+    desc = plan.get("description") or ""
+    return {
+        "skill_name": state.skill_name,
+        "current_description": desc[:512] if desc else "",
+    }
+
+
+def _skip_tests_confirm_on_resume(state: SkillDevState, data: dict) -> None:
+    action = data.get("action", "run_tests")
+    state.skipped_benchmark_tests = action == "skip_tests"
+
+
+def _skip_tests_confirm_next_stage(data: dict) -> SkillDevStage:
+    action = data.get("action", "run_tests")
+    if action == "skip_tests":
+        return SkillDevStage.DESC_OPTIMIZE_CONFIRM
+    return SkillDevStage.TEST_DESIGN
+
+
 SUSPENSION_POINTS: dict[SkillDevStage, SuspensionConfig] = {
     SkillDevStage.QUESTION_CLARIFY: SuspensionConfig(
         confirm_type="question_clarify",
@@ -368,6 +394,18 @@ SUSPENSION_POINTS: dict[SkillDevStage, SuspensionConfig] = {
         extract_data=_desc_opt_extract_data,
         on_resume=_desc_optimize_confirm_on_resume,
         next_stage=_desc_optimize_confirm_next_stage,
+    ),
+    SkillDevStage.SKIP_TESTS_CONFIRM: SuspensionConfig(
+        confirm_type="skip_tests_confirm",
+        title="测试流程",
+        message="SKILL.md 已通过校验。你可以选择运行完整测试与评测流程，或跳过测试并进入打包前的描述优化确认。",
+        actions=[
+            {"id": "run_tests", "label": "运行测试", "style": "primary"},
+            {"id": "skip_tests", "label": "跳过测试", "style": "secondary"},
+        ],
+        extract_data=_skip_tests_confirm_extract_data,
+        on_resume=_skip_tests_confirm_on_resume,
+        next_stage=_skip_tests_confirm_next_stage,
     ),
 }
 
@@ -585,7 +623,7 @@ class _StageGroup:
 
 
 # 后端定义的阶段分组。前端只负责渲染，不决定内容。
-# 挂起点（QUESTION_CLARIFY / REVIEW / DESC_OPTIMIZE_CONFIRM）归入其所属的逻辑阶段。
+# 挂起点（QUESTION_CLARIFY / SKIP_TESTS_CONFIRM / REVIEW / DESC_OPTIMIZE_CONFIRM）归入其所属的逻辑阶段。
 _STAGE_GROUPS: list[_StageGroup] = [
     _StageGroup(
         id="plan",
@@ -609,6 +647,7 @@ _STAGE_GROUPS: list[_StageGroup] = [
         label="测试与评测",
         stages=frozenset(
             {
+                SkillDevStage.SKIP_TESTS_CONFIRM,
                 SkillDevStage.TEST_DESIGN,
                 SkillDevStage.TEST_RUN,
                 SkillDevStage.EVALUATE,
