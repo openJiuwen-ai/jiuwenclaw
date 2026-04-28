@@ -286,19 +286,18 @@ class SendFileToolkit:
                 description=(
                     "【文件发送工具】当需要将生成的文件、导出的数据、创建的文档等发送给用户时使用此工具。"
                     "使用场景包括：用户请求导出/下载文件、任务完成后需要交付文件、生成报告/文档后发送给用户。"
-                    "参数格式：接受单个路径字符串或路径数组，路径必须是绝对路径。"
-                    "示例：'/tmp/report.pdf' 或 ['/tmp/file1.csv', '/tmp/file2.xlsx']"
+                    "参数格式：接受路径数组，路径必须是绝对路径。"
+                    "示例：['/tmp/file1.csv', '/tmp/file2.xlsx']"
                 ),
                 input_params={
                     "type": "object",
                     "properties": {
                         "abs_file_path_list": {
-                            "type": ["array", "string"],
+                            "type": "array",
                             "items": {"type": "string"},
                             "description": (
                                 "要发送的文件绝对路径。"
-                                "可以是单个路径字符串如 '/path/to/file.pdf'，"
-                                "或路径数组如 ['/path/file1.csv', '/path/file2.xlsx']。"
+                                "必须是数组格式，例如 ['/path/file1.csv', '/path/file2.xlsx']。"
                                 "支持任意文件类型（pdf、xlsx、docx、png、zip等）。"
                             ),
                         }
