@@ -42,30 +42,43 @@ gen_gateway_config_file() {
     success "ConfigMap file generation completed: ${GATEWAY_CONFIG_FILE}"
 }
 
-
 gen_gateway_deploy_file() {
     local client_type="${DEPLOY_VARS["AGENT_RUNTIME"]}"
-    local deploy_template_file="${SCRIPT_DIR}/conf/deployment-${DEPLOY_VARS["MODE"]}.template.yaml"
+    local mode="${DEPLOY_VARS["MODE"]}"
+    local deploy_template_file="${SCRIPT_DIR}/conf/deployment-${mode}.template.yaml"
 
     if [ "${client_type}" == "jiuwen" ]; then
-        # create gateway rbac
+        # Create and apply Gateway RBAC resources for pod creation permissions
         render_config_template "${GATEWAY_RBAC_TEMPLATE_FILE}" "${GATEWAY_RBAC_FILE}" "DEPLOY_VARS"
         exec_cmd kubectl apply -f ${GATEWAY_RBAC_FILE}
+        deploy_template_file="${SCRIPT_DIR}/conf/deployment-dev.template.yaml"
     fi
 
+    # Render deployment manifest template with global variable substitution
     render_config_template ${deploy_template_file} ${GATEWAY_DEPLOYMENT_FILE} "DEPLOY_VARS"
 
     if [ "${client_type}" == "jiuwen" ]; then
+        # Bind dedicated ServiceAccount to grant pod creation privileges
         yq eval ".spec.template.spec.serviceAccountName = \"${DEPLOY_VARS["GATEWAY_SERVICE_ACCOUNT"]}\"" -i "${GATEWAY_DEPLOYMENT_FILE}"
+
+        # Override container runtime image with dedicated release image
         yq eval ".spec.template.spec.containers[0].image = \"${DEPLOY_VARS["CLAW_GATEWAY_RT_IMAGE"]}\"" -i "${GATEWAY_DEPLOYMENT_FILE}"
-        yq eval -i "
+
+         # Inject environment variables via ConfigMap binding
+        yq eval "
             .spec.template.spec.containers[0].envFrom += [{
                 \"configMapRef\": {
                     \"name\": \"${DEPLOY_VARS["GATEWAY_ENV_FILE_NAME"]}\"
                 }
             }]
-        " "${GATEWAY_DEPLOYMENT_FILE}"
+        " -i "${GATEWAY_DEPLOYMENT_FILE}"
 
+        if  [ "${mode}" == "product" ]; then
+             # Remove local host code mounting for production hardening
+            yq eval 'del(.spec.template.spec.containers[].volumeMounts[] | select(.name == "host-code"))' -i "${GATEWAY_DEPLOYMENT_FILE}"
+
+            yq eval 'del(.spec.template.spec.volumes[] | select(.name == "host-code"))' -i "${GATEWAY_DEPLOYMENT_FILE}"
+        fi
     fi
     success "Gateway deployment file generation completed: ${GATEWAY_DEPLOYMENT_FILE}"
 }
