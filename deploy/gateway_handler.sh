@@ -3,16 +3,16 @@ set -euo >/dev/null 2>&1
 
 
 gen_gateway_config_file() {
-    local client_type="${DEPLOY_VARS["AGENT_CLIENT_TYPE"]}"
+    local client_type="${DEPLOY_VARS["AGENT_RUNTIME"]}"
 
-    info "AGENT_CLIENT_TYPE: ${client_type}"
-    if [ "${client_type}" == "yuanrong_frontend" ]; then
+    info "AGENT_RUNTIME: ${client_type}"
+    if [ "${client_type}" == "yuanrong" ]; then
         collect_oyr_info
         GATEWAY_CONFIG_TEMPLATE_FILE="${SCRIPT_DIR}/conf/config-yr.template.yaml"
-    elif [ "${client_type}" == "runtime_orchestrator" ]; then
+    elif [ "${client_type}" == "jiuwen" ]; then
         GATEWAY_CONFIG_TEMPLATE_FILE="${SCRIPT_DIR}/conf/config-rt.template.yaml"
     else
-        error "Unsupported AGENT_CLIENT_TYPE: ${client_type}"
+        error "Unsupported AGENT_RUNTIME: ${client_type}"
     fi
     info "GATEWAY_CONFIG_TEMPLATE_FILE: ${GATEWAY_CONFIG_TEMPLATE_FILE}"
 
@@ -44,10 +44,10 @@ gen_gateway_config_file() {
 
 
 gen_gateway_deploy_file() {
-    local client_type="${DEPLOY_VARS["AGENT_CLIENT_TYPE"]}"
+    local client_type="${DEPLOY_VARS["AGENT_RUNTIME"]}"
     local deploy_template_file="${SCRIPT_DIR}/conf/deployment-${DEPLOY_VARS["MODE"]}.template.yaml"
 
-    if [ "${client_type}" == "runtime_orchestrator" ]; then
+    if [ "${client_type}" == "jiuwen" ]; then
         # create gateway rbac
         render_config_template "${GATEWAY_RBAC_TEMPLATE_FILE}" "${GATEWAY_RBAC_FILE}" "DEPLOY_VARS"
         exec_cmd kubectl apply -f ${GATEWAY_RBAC_FILE}
@@ -55,7 +55,7 @@ gen_gateway_deploy_file() {
 
     render_config_template ${deploy_template_file} ${GATEWAY_DEPLOYMENT_FILE} "DEPLOY_VARS"
 
-    if [ "${client_type}" == "runtime_orchestrator" ]; then
+    if [ "${client_type}" == "jiuwen" ]; then
         yq eval ".spec.template.spec.serviceAccountName = \"${DEPLOY_VARS["GATEWAY_SERVICE_ACCOUNT"]}\"" -i "${GATEWAY_DEPLOYMENT_FILE}"
         yq eval ".spec.template.spec.containers[0].image = \"${DEPLOY_VARS["CLAW_GATEWAY_RT_IMAGE"]}\"" -i "${GATEWAY_DEPLOYMENT_FILE}"
         yq eval -i "
@@ -73,7 +73,7 @@ gen_gateway_deploy_file() {
 
 deploy_gateway() {
     local file_name=$(basename "${GATEWAY_CONFIG_FILE}")
-    local client_type="${DEPLOY_VARS["AGENT_CLIENT_TYPE"]}"
+    local client_type="${DEPLOY_VARS["AGENT_RUNTIME"]}"
 
     # create configMap from config.yaml
     gen_gateway_config_file
@@ -81,7 +81,7 @@ deploy_gateway() {
     kubectl create configmap ${DEPLOY_VARS["GATEWAY_CONFIG_MAP_NAME"]} --from-file=${file_name}=${GATEWAY_CONFIG_FILE} --dry-run=client -o yaml | kubectl apply -f -
 
     # create configMap from gateway.env
-    if [ "${client_type}" == "runtime_orchestrator" ]; then
+    if [ "${client_type}" == "jiuwen" ]; then
         render_config_template "${GATEWAY_ENV_TEMPLATE_FILE}" "${GATEWAY_ENV_FILE}" "DEPLOY_VARS"
         exec_cmd kubectl create configmap ${DEPLOY_VARS["GATEWAY_ENV_FILE_NAME"]} --from-env-file=${GATEWAY_ENV_FILE}
     fi
@@ -100,9 +100,9 @@ uninstall_gateway() {
 
     delete_k8s_resource "configmap" "${DEPLOY_VARS["GATEWAY_CONFIG_MAP_NAME"]}"
 
-    if [ "${DEPLOY_VARS["AGENT_CLIENT_TYPE"]}" == "runtime_orchestrator" ]; then
+    if [ "${DEPLOY_VARS["AGENT_RUNTIME"]}" == "jiuwen" ]; then
         exec_cmd kubectl delete -f ${GATEWAY_RBAC_FILE} false
         exec_cmd kubectl delete configmap ${DEPLOY_VARS["GATEWAY_ENV_FILE_NAME"]} false
-        delete_k8s_pods "jiuwenclaw"
+        # delete_k8s_pods "jiuwenclaw"
     fi
 }

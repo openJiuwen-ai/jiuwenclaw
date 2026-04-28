@@ -201,7 +201,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--function-version-urn", default=os.getenv("YR_FUNCTION_VERSION_URN", ""))
     parser.add_argument("--frontend-concurrency", type=int, default=int(os.getenv("YR_FRONTEND_CONCURRENCY", "1")))
     parser.add_argument("--invoke-timeout-s", type=float, default=float(os.getenv("YR_INVOKE_TIMEOUT_S", "60")))
-    parser.add_argument("--agent-mode", choices=["yuanrong_frontend", "mock_server"], default="mock_server")
+    parser.add_argument("--agent-mode", choices=["yuanrong", "mock_server"], default="mock_server")
     parser.add_argument("--mock-delay-s", type=float, default=3.0)
     parser.add_argument("--deadline-s", type=float, default=60.0)
     return parser.parse_args()
@@ -209,7 +209,7 @@ def _parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = _parse_args()
-    if args.agent_mode == "yuanrong_frontend":
+    if args.agent_mode == "yuanrong":
         if not args.frontend_endpoint.strip():
             raise ValueError("--frontend-endpoint is required")
         if not args.function_version_urn.strip():

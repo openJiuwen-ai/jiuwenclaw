@@ -224,14 +224,14 @@ class AgentWebSocketServer:
         path, request_headers = extract_handshake_request(args)
         origin = get_header_value(request_headers, "Origin")
         
-        # 如果配置了 AGENT_CLIENT_TYPE，则允许所有连接（非浏览器场景）
-        agent_client_type = os.getenv("AGENT_CLIENT_TYPE", "").strip()
-        if agent_client_type:
+        # 如果配置了 AGENT_RUNTIME，则允许所有连接（非浏览器场景）
+        AGENT_RUNTIME = os.getenv("AGENT_RUNTIME", "").strip()
+        if AGENT_RUNTIME:
             logger.info(
-                "[AgentWebSocketServer] 握手允许 path=%s origin=%s reason=agent_client_type=%s",
+                "[AgentWebSocketServer] 握手允许 path=%s origin=%s reason=AGENT_RUNTIME=%s",
                 path,
                 origin,
-                agent_client_type,
+                AGENT_RUNTIME,
             )
             return None
         

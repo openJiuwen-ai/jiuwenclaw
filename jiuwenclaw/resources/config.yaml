@@ -350,9 +350,9 @@ task_memory:
 gateway:
   # AgentServer client mode.
   # websocket: default ws client
-  # yuanrong_frontend: provided by AgentServerClientExtension
+  # yuanrong: provided by AgentServerClientExtension
   agent_client:
-    type: websocket # websocket | yuanrong_frontend
+    type: websocket # websocket | yuanrong
     frontend_endpoint:
     function_version_urn:
     concurrency: 1

@@ -53,7 +53,7 @@ process_modules() {
         MODULES=("NFS" "GATEWAY")
     fi
 
-    if [ "${DEPLOY_VARS["AGENT_CLIENT_TYPE"]}" == "yuanrong_frontend" ]; then
+    if [ "${DEPLOY_VARS["AGENT_RUNTIME"]}" == "yuanrong" ]; then
         MODULES+=("YR_CLAW")
     fi
 }

@@ -10,7 +10,7 @@ models:
 
 gateway:
   agent_client:
-    type: yuanrong_frontend
+    type: yuanrong
     frontend_endpoint: ${YR_FRONTEND_ENDPOINT}
     function_version_urn: ${YR_FUNCTION_VERSION_URN}
     concurrency: ${YR_FRONTEND_CONCURRENCY:-1}

@@ -24,14 +24,14 @@ async def register_extensions(registry):
         return []
 
     client_type = str(agent_client.get("type") or "websocket").strip().lower()
-    if client_type != "yuanrong_frontend":
+    if client_type != "yuanrong":
         return []
 
     frontend_endpoint = str(agent_client.get("frontend_endpoint") or "").strip()
     function_version_urn = str(agent_client.get("function_version_urn") or "").strip()
     if not frontend_endpoint or not function_version_urn:
         raise ValueError(
-            "gateway.agent_client.frontend_endpoint and function_version_urn are required in yuanrong_frontend mode"
+            "gateway.agent_client.frontend_endpoint and function_version_urn are required in yuanrong mode"
         )
 
     ext = YuanrongAgentServerClientExtension(

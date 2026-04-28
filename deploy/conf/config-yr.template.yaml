@@ -187,9 +187,9 @@ task_memory:
 gateway:
   # AgentServer client mode.
   # websocket: default ws client
-  # yuanrong_frontend: provided by AgentServerClientExtension
+  # yuanrong: provided by AgentServerClientExtension
   agent_client:
-    type: yuanrong_frontend
+    type: yuanrong
     frontend_endpoint: http://<<MASTER_NODE_IP>>:<<FRONTEND_PORT>>
     function_version_urn: <<FUNCTION_ID>>
     concurrency: <<CLAW_GATEWAY_CONCURRENCY>>
