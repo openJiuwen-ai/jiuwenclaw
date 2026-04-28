@@ -1393,7 +1393,9 @@ class FeishuChannel(BaseChannel):
                     self._stream_text_buffers.pop(stream_key, None)
                 content_str = self._extract_message_content(msg)
                 is_complete = msg.payload.get("is_complete", False)
-                if is_complete:
+                # chat.final 常带空 content 且未必含 is_complete=True；但必须与上方 pop 出的流式缓冲合并，
+                # 否则缓冲已被弹出却未并入 content_str，会导致正文丢失（仅依赖 processing_status 冲刷时更明显）。
+                if event_name == "chat.final" or is_complete:
                     content_str = self._merge_stream_and_final_content(
                         buffered_text,
                         content_str,
