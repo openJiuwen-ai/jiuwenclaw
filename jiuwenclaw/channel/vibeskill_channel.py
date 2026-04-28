@@ -375,6 +375,8 @@ class VibeSkillChannel(BaseChannel):
             return await self._handle_review_replied(data)
         if msg_type == "desc_optimize.replied":
             return await self._handle_desc_optimize_replied(data)
+        if msg_type == "test.replied":
+            return await self._handle_test_replied(data)
 
         return False
 
@@ -735,6 +737,29 @@ class VibeSkillChannel(BaseChannel):
             internal_id=internal_id,
             external_session_id=session_id,
             params={"task_id": task_id, "action": action},
+        )
+
+    async def _handle_test_replied(self, data: dict[str, Any]) -> bool:
+        """处理 test.replied，封装为 skilldev.respond。"""
+        properties = data.get("properties") if isinstance(data.get("properties"), dict) else data
+        session_id = str(properties.get("sessionID") or "").strip()
+        request_id = str(properties.get("id") or "").strip()
+        if not request_id or not session_id:
+            return False
+
+        internal_id = await self._store.resolve_internal(session_id)
+        if not internal_id:
+            internal_id = session_id
+        if not internal_id:
+            return False
+
+        accept = bool(properties.get("accept", False))
+        action = "test_design" if accept else "skip_tests"
+        self._pending_confirms.pop(request_id, None)
+        return self._dispatch_skilldev_respond(
+            internal_id=internal_id,
+            external_session_id=session_id,
+            params={"task_id": session_id, "action": action},
         )
 
     async def outbound_intercept(self, msg: Message, ws: Any) -> bool:
@@ -1208,6 +1233,20 @@ class VibeSkillChannel(BaseChannel):
                     "id": request_id,
                     "sessionID": external_sid or session_id,
                     "current_description": str(data.get("current_description") or ""),
+                },
+            }]
+        if confirm_type == "skip_tests_confirm":
+            self._pending_confirms[request_id] = {
+                "task_id": task_id,
+                "session_id": session_id or "",
+                "confirm_type": confirm_type,
+            }
+            return [{
+                "type": "test.asked",
+                "properties": {
+                    "id": request_id,
+                    "sessionID": task_id,
+                    "message": str(payload.get("message") or ""),
                 },
             }]
 

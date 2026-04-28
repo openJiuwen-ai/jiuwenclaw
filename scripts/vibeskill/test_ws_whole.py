@@ -132,6 +132,20 @@ async def test():
                             logger.info("sent desc_optimize.replied id=%s accept=false", did)
                             continue
 
+                        if msg_type == "test.asked":
+                            tid = str(props.get("id") or "")
+                            reply_msg = {
+                                "type": "test.replied",
+                                "properties": {
+                                    "id": tid,
+                                    "sessionID": session_id,
+                                    "accept": True,
+                                },
+                            }
+                            await ws.send_str(json.dumps(reply_msg, ensure_ascii=False))
+                            logger.info("sent test.replied id=%s accept=true", tid)
+                            continue
+
                     except asyncio.TimeoutError:
                         consecutive_timeouts += 1
                         logger.warning(
