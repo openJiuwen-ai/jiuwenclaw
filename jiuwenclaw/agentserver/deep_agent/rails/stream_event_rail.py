@@ -31,6 +31,7 @@ from openjiuwen.harness.rails.base import DeepAgentRail
 from openjiuwen.harness.tools.todo import TodoStatus, TodoListTool
 from openjiuwen.harness.workspace.workspace import WorkspaceNode
 
+from jiuwenclaw.config import get_config
 from jiuwenclaw.utils import fix_json_arguments, logger
 
 # Import subagent context functions for fork_agent
@@ -40,6 +41,29 @@ from jiuwenclaw.agentserver.tools.subagent_executor import (
 )
 
 _TODO_TOOL_NAMES = frozenset(["todo_create", "todo_list", "todo_modify"])
+_DEFAULT_CONTEXT_WINDOW_LIMIT_TOKENS = 128000
+
+
+def _resolve_context_window_limit_tokens() -> int:
+    """Read react.context_window_limit_tokens from config with safe coercion.
+
+    Falls back to 128000 on missing / non-positive / non-numeric values.
+    """
+    try:
+        react_cfg = (get_config() or {}).get("react") or {}
+    except Exception:
+        return _DEFAULT_CONTEXT_WINDOW_LIMIT_TOKENS
+
+    raw = react_cfg.get("context_window_limit_tokens")
+    if isinstance(raw, bool):
+        return _DEFAULT_CONTEXT_WINDOW_LIMIT_TOKENS
+    try:
+        value = int(raw) if raw is not None else 0
+    except (TypeError, ValueError):
+        return _DEFAULT_CONTEXT_WINDOW_LIMIT_TOKENS
+    if value <= 0:
+        return _DEFAULT_CONTEXT_WINDOW_LIMIT_TOKENS
+    return value
 
 
 def _structured_tool_result_payload(result: Any) -> Any | None:
@@ -108,6 +132,7 @@ class JiuClawStreamEventRail(DeepAgentRail):
             ctx.extra["_context_fixed"] = True
 
         await self._emit_context_compression(ctx)
+        await self._emit_context_usage(ctx)
 
     # ------------------------------------------------------------------
     # before_tool_call: pause check + emit tool_call event + set context for fork_agent
@@ -387,6 +412,51 @@ class JiuClawStreamEventRail(DeepAgentRail):
             )
         except Exception:
             logger.debug("context_compression emit failed", exc_info=True)
+
+    @staticmethod
+    async def _emit_context_usage(ctx: AgentCallbackContext) -> None:
+        """Emit context window usage stats for the frontend status panel.
+
+        Numerator: current effective context tokens (post-compression).
+        Denominator: react.context_window_limit_tokens from config.
+        """
+        session = ctx.session
+        if session is None:
+            return
+
+        context = ctx.context
+        if context is None:
+            return
+
+        try:
+            stat = context.statistic()
+            used_tokens_raw = getattr(stat, "single_messages_token", None)
+            used_tokens = (
+                max(int(used_tokens_raw), 0)
+                if isinstance(used_tokens_raw, (int, float))
+                else None
+            )
+
+            limit_tokens = _resolve_context_window_limit_tokens()
+            usage_percent = (
+                round(used_tokens / limit_tokens * 100, 1)
+                if used_tokens is not None and limit_tokens > 0
+                else None
+            )
+
+            await session.write_stream(
+                OutputSchema(
+                    type="context.usage",
+                    index=0,
+                    payload={
+                        "used_tokens": used_tokens,
+                        "limit_tokens": limit_tokens,
+                        "usage_percent": usage_percent,
+                    },
+                )
+            )
+        except Exception:
+            logger.debug("context_usage emit failed", exc_info=True)
 
     @staticmethod
     def _ensure_json_arguments(arguments: Any) -> str:

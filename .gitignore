@@ -50,6 +50,7 @@ pnpm-debug.log*
 CLAUDE.md
 AGENTS.md
 .cursorrules
+.traerules
 workspace/agent-data.json
 *.iml
 

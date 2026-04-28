@@ -4271,6 +4271,19 @@ class JiuWenClawDeepAdapter:
                         }
                     return {"event_type": "context.compressed", "rate": 0}
 
+                if chunk_type == "context.usage":
+                    if isinstance(payload, dict):
+                        return {
+                            "event_type": "context.usage",
+                            "used_tokens": payload.get("used_tokens"),
+                            "limit_tokens": payload.get("limit_tokens"),
+                            "usage_percent": payload.get("usage_percent"),
+                            "input_tokens": payload.get("input_tokens"),
+                            "output_tokens": payload.get("output_tokens"),
+                            "total_tokens": payload.get("total_tokens"),
+                        }
+                    return {"event_type": "context.usage"}
+
                 if chunk_type == "chat.ask_user_question":
                     return {
                         "event_type": "chat.ask_user_question",

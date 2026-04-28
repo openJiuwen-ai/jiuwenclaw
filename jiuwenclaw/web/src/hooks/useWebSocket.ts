@@ -166,6 +166,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
     setConnectionStats,
     updateSession,
     setContextCompressionStats,
+    setContextWindowUsage,
     setHeartbeatStatus,
   } =
     useSessionStore();
@@ -458,10 +459,9 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
     activeSessionIdRef.current = activeSessionId;
   }, [activeSessionId]);
 
-  // 会话切换时不再重置上下文压缩信息，保持本地存储的状态
-  // useEffect(() => {
-  //   setContextCompressionStats(null);
-  // }, [activeSessionId, setContextCompressionStats]);
+  useEffect(() => {
+    setContextWindowUsage(null);
+  }, [activeSessionId, setContextWindowUsage]);
 
   useEffect(() => {
     onConnectRef.current = onConnect;
@@ -788,6 +788,54 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
           after_compressed: afterCompressed,
         });
       }),
+      webClient.on('context.usage', ({ payload }) => {
+        if (!shouldHandleSessionEvent(payload)) return;
+        const usedFromPayload =
+          typeof payload.used_tokens === 'number' && Number.isFinite(payload.used_tokens)
+            ? Math.max(Math.round(payload.used_tokens), 0)
+            : null;
+        const inputTokens =
+          typeof payload.input_tokens === 'number' && Number.isFinite(payload.input_tokens)
+            ? payload.input_tokens
+            : null;
+        const outputTokens =
+          typeof payload.output_tokens === 'number' && Number.isFinite(payload.output_tokens)
+            ? payload.output_tokens
+            : null;
+        const totalTokens =
+          typeof payload.total_tokens === 'number' && Number.isFinite(payload.total_tokens)
+            ? payload.total_tokens
+            : null;
+        const limitTokens =
+          typeof payload.limit_tokens === 'number' && Number.isFinite(payload.limit_tokens)
+            ? Math.max(Math.round(payload.limit_tokens), 1)
+            : 1;
+        const fromParts = (inputTokens ?? 0) + (outputTokens ?? 0);
+        const hasAnyTokenField =
+          usedFromPayload != null ||
+          inputTokens != null ||
+          outputTokens != null ||
+          totalTokens != null;
+        const usedTokens = !hasAnyTokenField
+          ? null
+          : usedFromPayload != null
+            ? usedFromPayload
+            : Math.max(totalTokens ?? 0, fromParts);
+        const percent =
+          typeof payload.usage_percent === 'number' && Number.isFinite(payload.usage_percent)
+            ? payload.usage_percent
+            : usedTokens != null
+              ? Number(((usedTokens / limitTokens) * 100).toFixed(1))
+              : null;
+
+        setContextWindowUsage({
+          inputTokens,
+          outputTokens,
+          usedTokens,
+          limitTokens,
+          percent,
+        });
+      }),
       webClient.on('heartbeat.relay', ({ payload }) => {
         const heartbeatText =
           typeof payload.heartbeat === 'string' ? payload.heartbeat : '';
@@ -1065,6 +1113,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
     setInterruptResult,
     setTodos,
     setContextCompressionStats,
+    setContextWindowUsage,
     setHeartbeatStatus,
     updateSession,
     shouldHandleSessionEvent,
@@ -1097,6 +1146,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
       setConnected(false);
       // 不再重置上下文压缩信息，保持本地存储的状态
       // setContextCompressionStats(null);
+      setContextWindowUsage(null);
       setHeartbeatStatus('unknown', null, null);
       setConnectionStats({ state: 'closed', inflight: 0 });
     };
@@ -1110,6 +1160,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
     projectPath,
     provider,
     setContextCompressionStats,
+    setContextWindowUsage,
     setConnectionStats,
     setConnected,
     setHeartbeatStatus,

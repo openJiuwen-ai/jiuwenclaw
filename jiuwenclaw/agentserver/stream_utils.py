@@ -307,6 +307,19 @@ def _parse_typed_chunk(chunk: Any, _has_streamed_content: bool) -> dict[str, Any
                 "after_compressed": payload.get("after_compressed"),
             }
 
+    if chunk_type == "context.usage":
+        if isinstance(payload, dict):
+            return {
+                "event_type": "context.usage",
+                "used_tokens": payload.get("used_tokens"),
+                "limit_tokens": payload.get("limit_tokens"),
+                "usage_percent": payload.get("usage_percent"),
+                "input_tokens": payload.get("input_tokens"),
+                "output_tokens": payload.get("output_tokens"),
+                "total_tokens": payload.get("total_tokens"),
+            }
+        return {"event_type": "context.usage"}
+
     if isinstance(payload, dict):
         if "event_type" in payload:
             if payload.get("event_type") == "chat.tracer_agent":

@@ -20,6 +20,7 @@ export function ToolPanel() {
     contextCompressionRate,
     contextCompressionBefore,
     contextCompressionAfter,
+    contextWindowUsage,
     isConnected,
     memoryUsage,
     setMemoryUsage,
@@ -111,6 +112,21 @@ export function ToolPanel() {
       : '0.0';
   }
   const compressionDisplay = `${afterK}K/${beforeK}K (${compressionRateDisplay}%)`;
+  const windowUsageDisplay = (() => {
+    if (!contextWindowUsage) return '--';
+    const { inputTokens, outputTokens, usedTokens, limitTokens, percent } = contextWindowUsage;
+    const displayUsed =
+      usedTokens != null && Number.isFinite(usedTokens)
+        ? usedTokens
+        : inputTokens != null || outputTokens != null
+          ? (inputTokens ?? 0) + (outputTokens ?? 0)
+          : inputTokens;
+    if (displayUsed == null || !Number.isFinite(displayUsed)) return '--';
+    const usedK = (displayUsed / 1000).toFixed(1);
+    const limitK = (limitTokens / 1000).toFixed(0);
+    const pct = percent != null ? ` · ${percent.toFixed(1)}%` : '';
+    return `${usedK}K / ${limitK}K${pct}`;
+  })();
 
   return (
     <div
@@ -160,6 +176,10 @@ export function ToolPanel() {
             <div className="toolpanel-status-card__row">
               <span className="text-text-muted">{t('toolPanel.contextCompression')}</span>
               <span className="mono text-text">{compressionDisplay}</span>
+            </div>
+            <div className="toolpanel-status-card__row" title={t('toolPanel.contextWindowHint')}>
+              <span className="text-text-muted">{t('toolPanel.contextWindow')}</span>
+              <span className="mono text-text">{windowUsageDisplay}</span>
             </div>
             <div className="toolpanel-status-card__row">
               <span className="text-text-muted">{t('toolPanel.memoryUsage')}</span>
