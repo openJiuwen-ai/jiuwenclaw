@@ -2733,16 +2733,25 @@ class JiuWenClawDeepAdapter:
 
         md = params.request_metadata or {}
         v = md.get("effective_project_dir")
+        logger.info(f"get effect project dir:{v}, ori dir: {self._workspace_dir}")
         if isinstance(v, str) and v.strip():
             resolved_workspace_dir = v.strip()
         else:
             resolved_workspace_dir = self._workspace_dir
 
+        from openjiuwen.core.sys_operation.cwd import set_cwd
         from jiuwenclaw.agentserver.tools.subagent_executor.context_vars import (
             set_effective_request_workspace_dir,
         )
 
         set_effective_request_workspace_dir(resolved_workspace_dir)
+
+        # Sync the tool CWD layer to the client-provided workspace dir so that
+        # relative file paths in tool calls resolve against the correct base.
+        try:
+            set_cwd(resolved_workspace_dir)
+        except Exception as exc:
+            logger.warning("[JiuWenClawDeepAdapter] set_cwd(%s) failed: %s", resolved_workspace_dir, exc)
 
         if self._runtime_prompt_rail:
             self._runtime_prompt_rail.set_language(resolved_language)
