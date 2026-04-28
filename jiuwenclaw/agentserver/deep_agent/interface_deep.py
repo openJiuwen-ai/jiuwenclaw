@@ -1854,12 +1854,12 @@ class JiuWenClawDeepAdapter:
         self._update_permission_rail(config_base)
 
         # Update disabled_tools_rail config in-place (no re-init needed)
-        disabled_list = config.get("disabled_tools", [])
         if self._disabled_tools_rail is not None:
+            disabled_list = config.get("disabled_tools", [])
             self._disabled_tools_rail.update_config(disabled_list)
-        elif disabled_list:
-            # First time enabling - create the rail
-            self._disabled_tools_rail = DisabledToolsRail(disabled_tools=disabled_list)
+        else:
+            # 使用统一的 build 方法创建（与冷启动行为一致）
+            self._disabled_tools_rail = self._build_disabled_tools_rail(config)
             if self._disabled_tools_rail is not None:
                 logger.info("[JiuWenClawDeepAdapter] _disabled_tools_rail newly created on hot-reload")
 

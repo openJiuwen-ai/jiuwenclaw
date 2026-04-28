@@ -12,6 +12,7 @@ So we need to: 1) get ToolCard from ability_manager by name, 2) use card.id to r
 from __future__ import annotations
 
 import logging
+import traceback
 from typing import Set, List, Dict, Optional
 
 from openjiuwen.harness.deep_agent import DeepAgent
@@ -61,8 +62,9 @@ class DisabledToolsRail(DeepAgentRail):
 
     def uninit(self, agent) -> None:
         """Cleanup when rail is removed - re-register all disabled tools."""
+        stack_info = ''.join(traceback.format_stack())
         logger.info(
-            "[DisabledToolsRail] uninit - re-registering all disabled tools")
+            "[DisabledToolsRail] uninit called - stack trace:\n%s", stack_info)
         if self._agent:
             self._register_tools(self._disabled_tools)
         self._agent = None
