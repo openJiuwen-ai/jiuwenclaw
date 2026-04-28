@@ -212,7 +212,7 @@ async def test_handle_session_create_returns_session_id(monkeypatch):
     assert fake_ws.sent == [
         {
             "response_id": "req-session-create",
-            "payload": {"sessionId": "acp_session_001"},
+            "payload": {"sessionId": "acp_session_001", "configOptions": []},
             "ok": True,
         }
     ]
@@ -246,7 +246,7 @@ async def test_handle_session_create_returns_explicit_session_id(monkeypatch):
     assert fake_ws.sent == [
         {
             "response_id": "req-session-create-explicit",
-            "payload": {"sessionId": "sess_explicit_001"},
+            "payload": {"sessionId": "sess_explicit_001", "configOptions": []},
             "ok": True,
         }
     ]

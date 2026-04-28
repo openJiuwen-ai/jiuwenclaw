@@ -115,7 +115,7 @@ async def _run(host: str, port: int) -> None:
         host=host,
         port=port,
         ping_interval=20.0,
-        ping_timeout=20.0,
+        ping_timeout=300.0,
     )
     await server.start()
 

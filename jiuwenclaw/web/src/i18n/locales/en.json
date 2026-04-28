@@ -125,6 +125,7 @@
     "selectFirst": "Select a session first",
     "loadingFiles": "Loading files...",
     "emptyFiles": "No files",
+    "remoteFilesUnavailable": "In distributed mode, only session history restore is supported for now; browsing gateway-local session files is unavailable.",
     "folder": "Folder",
     "notPreviewable": "Not previewable",
     "selectFile": "Select a file to view",

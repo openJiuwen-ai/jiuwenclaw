@@ -9,6 +9,7 @@ interface SessionsPanelProps {
   isConnected: boolean;
   isProcessing: boolean;
   onRestoreSession: (sessionId: string) => void | Promise<void>;
+  isRemoteSessionStorage?: boolean;
 }
 
 interface SessionListResponse {
@@ -163,6 +164,9 @@ interface SessionItem {
   last_message_at?: number;
   created_at?: number;
   message_count?: number;
+  role?: string;
+  timestamp?: number;
+  content?: string;
 }
 
 function toSessionItems(raw: unknown[]): SessionItem[] {
@@ -186,6 +190,9 @@ function toSessionItems(raw: unknown[]): SessionItem[] {
           last_message_at: typeof rec.last_message_at === 'number' ? rec.last_message_at : undefined,
           created_at: typeof rec.created_at === 'number' ? rec.created_at : undefined,
           message_count: typeof rec.message_count === 'number' ? rec.message_count : undefined,
+          role: typeof rec.role === 'string' ? rec.role : undefined,
+          timestamp: typeof rec.timestamp === 'number' ? rec.timestamp : undefined,
+          content: typeof rec.content === 'string' ? rec.content : undefined,
         } as SessionItem;
       }
       return null;
@@ -225,6 +232,7 @@ export function SessionsPanel({
   isConnected,
   isProcessing,
   onRestoreSession,
+  isRemoteSessionStorage = false,
 }: SessionsPanelProps) {
   const { t } = useTranslation();
   const [sessions, setSessions] = useState<SessionItem[]>([]);
@@ -255,6 +263,12 @@ export function SessionsPanel({
         typeof preservePath === 'string' && preservePath.length > 0;
 
       if (!sessionId) {
+        setFiles([]);
+        setFilesError(null);
+        setSelectedFile(null);
+        return;
+      }
+      if (isRemoteSessionStorage) {
         setFiles([]);
         setFilesError(null);
         setSelectedFile(null);
@@ -344,7 +358,7 @@ export function SessionsPanel({
         setLoadingFiles(false);
       }
     },
-    [t]
+    [isRemoteSessionStorage, t]
   );
 
   const loadSessions = useCallback(async () => {
@@ -500,6 +514,11 @@ export function SessionsPanel({
                       title={session.title || parseSessionDisplayLabel(session.session_id, t)}
                     >
                       <span className="truncate block">{session.title || parseSessionDisplayLabel(session.session_id, t)}</span>
+                      {session.content ? (
+                        <span className="truncate block text-xs text-text-muted mt-1">
+                          {session.content}
+                        </span>
+                      ) : null}
                     </button>
                     <button
                       type="button"
@@ -531,6 +550,10 @@ export function SessionsPanel({
               <div className="flex-1 overflow-auto p-2">
                 {!selectedSessionId ? (
                   <div className="h-full flex items-center justify-center text-sm text-text-muted">{t('sessions.selectFirst')}</div>
+                ) : isRemoteSessionStorage ? (
+                  <div className="h-full flex items-center justify-center text-sm text-text-muted">
+                    {t('sessions.remoteFilesUnavailable')}
+                  </div>
                 ) : loadingFiles ? (
                   <div className="h-full flex items-center justify-center text-sm text-text-muted">{t('sessions.loadingFiles')}</div>
                 ) : filesError ? (

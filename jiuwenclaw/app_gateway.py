@@ -1028,9 +1028,25 @@ async def _run(
 
         return _norm_and_forward
 
+    # remote 模式：session 操作经队列与 session.list 顺序一致；create/delete 转发到 Agent，list 在网关读索引
+    from jiuwenclaw.gateway.session_index import is_remote_storage
+    from jiuwenclaw.gateway.web_normalize import (
+        register_forward_method,
+        get_extra_forward_methods,
+        get_extra_no_local_methods,
+    )
+    if is_remote_storage():
+        register_forward_method("session.create", skip_local=True)
+        register_forward_method("session.delete", skip_local=True)
+        register_forward_method("session.list", skip_local=True)
+        logger.info(
+            "[App] remote session storage 已启用：session.create/delete 转发到 Agent，"
+            "session.list 由 MessageHandler 读网关索引",
+        )
+
     web_norm_and_forward = _make_norm_and_forward(
-        _FORWARD_REQ_METHODS,
-        _FORWARD_NO_LOCAL_HANDLER_METHODS,
+        _FORWARD_REQ_METHODS | get_extra_forward_methods(),
+        _FORWARD_NO_LOCAL_HANDLER_METHODS | get_extra_no_local_methods(),
         "Web",
     )
     channel_manager.register_channel_with_inbound(web_channel, web_norm_and_forward)

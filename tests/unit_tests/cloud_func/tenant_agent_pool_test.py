@@ -61,8 +61,22 @@ class TestTenantAgentPool(TestCase):
         """每个测试前重置单例."""
         TenantAgentPool.reset_instance()
 
-    def test_jiuwenclaw(self) -> None:
+    @patch("jiuwenclaw.gateway.cron.CronController")
+    @patch("jiuwenclaw.agentserver.interface.JiuWenClaw")
+    def test_jiuwenclaw(self, mock_jiuwenclaw, mock_cron_controller) -> None:
         """对应原 test_jiuwenclaw：单用户流式请求（plan + agent 模式）."""
+
+        mock_agent_instance = MagicMock()
+        mock_agent_instance.create_instance = AsyncMock()
+
+        async def _fake_process_message_stream(request):
+            return
+            yield
+
+        mock_agent_instance.process_message_stream = _fake_process_message_stream
+        mock_jiuwenclaw.return_value = mock_agent_instance
+
+        mock_cron_controller.get_instance.return_value = MagicMock()
 
         async def _run():
             handler = TenantAgentPool.get_instance()
@@ -93,8 +107,17 @@ class TestTenantAgentPool(TestCase):
 
         asyncio.run(_run())
 
-    def test_jiuwenclaw_not_stream(self) -> None:
+    @patch("jiuwenclaw.gateway.cron.CronController")
+    @patch("jiuwenclaw.agentserver.interface.JiuWenClaw")
+    def test_jiuwenclaw_not_stream(self, mock_jiuwenclaw, mock_cron_controller) -> None:
         """对应原 test_jiuwenclaw_not_stream：单用户非流式请求."""
+
+        mock_agent_instance = MagicMock()
+        mock_agent_instance.create_instance = AsyncMock()
+        mock_agent_instance.process_message = AsyncMock(return_value=MagicMock())
+        mock_jiuwenclaw.return_value = mock_agent_instance
+
+        mock_cron_controller.get_instance.return_value = MagicMock()
 
         async def _run():
             handler = TenantAgentPool.get_instance()

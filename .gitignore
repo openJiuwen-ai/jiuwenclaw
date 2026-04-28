@@ -48,6 +48,8 @@ pnpm-debug.log*
 .DS_Store
 .claude
 CLAUDE.md
+AGENTS.md
+.cursorrules
 workspace/agent-data.json
 *.iml
 

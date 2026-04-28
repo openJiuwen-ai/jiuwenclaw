@@ -364,6 +364,14 @@ class PatchOpenAIModelClient(RetryMixin, OpenAIModelClient):
         """
         from openai import AsyncOpenAI
 
+        api_base = self.model_client_config.api_base or ""
+        if "example.com" in api_base:
+            raise ValueError(
+                f"api_base 指向占位域名 ({api_base})，"
+                "请将 API_BASE 环境变量或配置修改为真实的 API 地址。"
+                "参考 .env.template 中的说明。"
+            )
+
         ssl_verify, ssl_cert = self.model_client_config.verify_ssl, self.model_client_config.ssl_cert
         verify = SslUtils.create_strict_ssl_context(ssl_cert) if ssl_verify else ssl_verify
 
