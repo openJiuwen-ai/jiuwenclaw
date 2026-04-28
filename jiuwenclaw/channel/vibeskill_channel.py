@@ -71,6 +71,10 @@ class VibeSkillChannel(BaseChannel):
         self._message_ctx: dict[str, dict[str, Any]] = {}
         self._pending_confirms: dict[str, dict[str, Any]] = {}
         self._listen_host = self._get_local_ip()
+        
+        # 加载 AK/SK 鉴权配置
+        self._auth_enabled = True
+        logger.info("[Auth] init: auth_enabled=%s", self._auth_enabled)
 
     def on_message(self, callback: Callable[[Message], Any]) -> None:
         self._on_message_cb = callback
@@ -159,6 +163,17 @@ class VibeSkillChannel(BaseChannel):
                 await ws.close(code=1008, reason="unsupported path")
                 return
 
+            # AK/SK 鉴权
+            if self._auth_enabled:
+                from jiuwenclaw.gateway.auth import check_ws_auth
+                logger.info("[Auth] ws check start")
+                ok, error_msg = check_ws_auth(self._auth_enabled, request.headers)
+                if not ok:
+                    logger.warning("[Auth] ws check fail: %s", error_msg)
+                    await ws.close(code=1008, reason="authentication failed")
+                    return
+                logger.info("[Auth] ws check ok")
+                
             self._clients.add(ws)
             logger.info(f"[VibeSkillChannel] Clients: {len(self._clients)}")
 
@@ -1779,7 +1794,16 @@ class VibeSkillChannel(BaseChannel):
         统一入口：HTTP 和 WebSocket 共用同一端口 /api/v1。
         """
         path_str = str(path or "").strip()
-        request_path = urlparse(path_str).path
+
+        # AK/SK 鉴权
+        if self._auth_enabled:
+            from jiuwenclaw.gateway.auth import check_http_auth
+            logger.info("[Auth] http check start")
+            ok, error_msg = check_http_auth(self._auth_enabled, headers)
+            if not ok:
+                logger.warning("[Auth] http check fail: %s", error_msg)
+                return (401, {"Content-Type": "application/json"}, json.dumps({"error": error_msg}).encode("utf-8"))
+            logger.info("[Auth] http check ok")
 
         # Session 路由
         if path_str == "/api/v1/session" and method == "POST":
