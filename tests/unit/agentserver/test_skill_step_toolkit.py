@@ -17,7 +17,7 @@ from pathlib import Path
 
 import pytest
 
-from jiuwenclaw.agentserver.tools.skill_step_toolkit import SkillStepToolkit
+from jiuwenclaw.agentserver.tools.skill_step_toolkit import SkillStepInput, SkillStepToolkit
 from jiuwenclaw.agentserver.tools.todo_toolkits import (
     TaskStatus,
     TodoOpKind,
@@ -175,3 +175,55 @@ def test_complete_batch_rejects_when_no_open_tasks(skill_kit):
     skill_kit.todo_complete(1)
     consume_last_op_result(skill_kit.session_id)
     _expect_failure(skill_kit, [1], fragment="no open tasks")
+
+
+# ---------------- facade input normalization --------------------------------
+
+def test_skill_step_input_accepts_json_encoded_tasks_for_create():
+    parsed = SkillStepInput.model_validate({
+        "action": "create",
+        "tasks": '["stage 0", "stage 1"]',
+    })
+    assert parsed.tasks == ["stage 0", "stage 1"]
+
+
+def test_skill_step_input_accepts_json_encoded_indices_results_for_batch():
+    parsed = SkillStepInput.model_validate({
+        "action": "complete_batch",
+        "indices": "[1, 2]",
+        "results": '["r1", "r2"]',
+    })
+    assert parsed.indices == [1, 2]
+    assert parsed.results == ["r1", "r2"]
+
+
+def test_skill_step_input_accepts_python_literal_list_string():
+    parsed = SkillStepInput.model_validate({
+        "action": "create",
+        "tasks": "['stage 0', 'stage 1']",
+    })
+    assert parsed.tasks == ["stage 0", "stage 1"]
+
+
+def test_skill_step_input_accepts_tuple_literal_for_indices():
+    parsed = SkillStepInput.model_validate({
+        "action": "complete_batch",
+        "indices": "(1, 2, 3)",
+    })
+    assert parsed.indices == [1, 2, 3]
+
+
+def test_skill_step_input_accepts_csv_for_indices():
+    parsed = SkillStepInput.model_validate({
+        "action": "complete_batch",
+        "indices": "1, 2,3",
+    })
+    assert parsed.indices == [1, 2, 3]
+
+
+def test_skill_step_input_accepts_csv_for_tasks():
+    parsed = SkillStepInput.model_validate({
+        "action": "create",
+        "tasks": "stage 0, stage 1",
+    })
+    assert parsed.tasks == ["stage 0", "stage 1"]
