@@ -986,7 +986,7 @@ class PermissionInterruptRail(ConfirmInterruptRail):
                 source="user",
                 rule=pending_context.get("matched_rule") if pending_context else "N/A",
                 user_decision=decision,
-                channel=resolved_channel or "empty",
+                channel=self._resolve_channel_id() or "empty",
                 session_id=self._resolve_session_id(ctx) or "N/A",
             ).to_json(), extra={'component': 'permissions'})
             return self.approve()
@@ -997,7 +997,7 @@ class PermissionInterruptRail(ConfirmInterruptRail):
             source="user",
             rule=pending_context.get("matched_rule") if pending_context else "N/A",
             user_decision="deny",
-            channel=resolved_channel or "empty",
+            channel=self._resolve_channel_id() or "empty",
             session_id=self._resolve_session_id(ctx) or "N/A",
         ).to_json(), extra={'component': 'permissions'})
         return self.reject(tool_result=payload.feedback or "[PERMISSION_REJECTED] User rejected the request.")
