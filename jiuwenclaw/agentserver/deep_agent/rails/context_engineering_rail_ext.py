@@ -19,6 +19,7 @@ class JiuClawContextEngineeringRail(ContextEngineeringRail):
     """扩展 CE Rail，注入独立的 offload/上下文压缩 section。
 
     Args:
+        processors: 透传给父类的用户级 processor 配置（增量合并/替换预置）。
         preset: 是否启用预置的上下文压缩 processor 配置。
         minimal: F-REDUCE — 是否跳过 tools/context section 注入（用于 subagent）。
         session_memory: SessionMemoryConfig 配置（传递给父类）。
@@ -44,15 +45,26 @@ class JiuClawContextEngineeringRail(ContextEngineeringRail):
         'Storage types: "in_memory" (session cache)'
     )
 
-    def __init__(self, preset: bool = True, minimal: bool = False, session_memory=None) -> None:
+    def __init__(
+        self,
+        processors=None,
+        preset: bool = True,
+        minimal: bool = False,
+        session_memory=None,
+    ) -> None:
         """Initialize with optional minimal mode for subagent.
 
         Args:
+            processors: 透传给父类的用户级 processor 配置（增量合并/替换预置）。
             preset: Enable preset context compression processors.
             minimal: Skip tools/context section injection (for subagent).
             session_memory: SessionMemoryConfig for session memory (passed to parent).
         """
-        super().__init__(preset=preset, session_memory=session_memory)
+        super().__init__(
+            processors=processors,
+            preset=preset,
+            session_memory=session_memory,
+        )
         self._minimal = minimal
 
     async def before_model_call(self, ctx: AgentCallbackContext) -> None:
