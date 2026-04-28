@@ -96,7 +96,7 @@ class ExtensionLoader:
         uv_path = shutil.which("uv")
         use_uv = uv_path is not None
 
-        pip_extra_args = os.environ.get("PIP_EXTRA_ARGS", "").strip()
+        pip_extra_args = os.environ.get("PIP_EXTRA_ARGS", "").strip().strip('\'"')
         extra_args = pip_extra_args.split() if pip_extra_args else []
 
         for package, version_spec in dependencies.items():

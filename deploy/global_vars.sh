@@ -24,6 +24,9 @@ CLAW_META_FILE="${SCRIPT_DIR}/conf/claw_meta.json"
 GATEWAY_CONFIG_TEMPLATE_FILE=""
 GATEWAY_CONFIG_FILE="${SCRIPT_DIR}/conf/config.yaml"
 
+GATEWAY_ENV_TEMPLATE_FILE="${SCRIPT_DIR}/conf/gateway.template.env"
+GATEWAY_ENV_FILE="${SCRIPT_DIR}/conf/gateway.env"
+
 GATEWAY_RBAC_TEMPLATE_FILE="${SCRIPT_DIR}/conf/gateway-rbac.template.yaml"
 GATEWAY_RBAC_FILE="${SCRIPT_DIR}/conf/gateway-rbac.yaml"
 
@@ -58,6 +61,7 @@ declare -A DEPLOY_VARS=(
     ["GATEWAY_DEPLOYMENT_NAME"]="jiuwenclaw-gateway"
     ["FUNC_SVC_NAME"]="0@jiuwen@clawtest"
     ["GATEWAY_CONFIG_MAP_NAME"]="jiuwenclaw-gateway-config"
+    ["GATEWAY_ENV_FILE_NAME"]="jiuwenclaw-gateway-env"
     ["NFS_NAME"]="nfs-server"
     ["NFS_HOST_PATH"]="/data/nfs"
     ["PVC_NAME"]="pvc-nfs-shared"

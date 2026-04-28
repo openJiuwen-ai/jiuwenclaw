@@ -42,6 +42,21 @@ check_k8s_resource_exists() {
     return 1
 }
 
+# delete all pods with specified name prefix
+delete_k8s_pods() {
+    local name="$1"
+    local namespace="${2:-default}"
+
+    info "Deleting all pods with prefix: ${name} (namespace: ${namespace})"
+    # Get prefixed pod list and execute batch deletion
+    info "Executing: kubectl get pods -n \"${namespace}\" -o name | grep -E \"^pod/${name}\" | xargs -r kubectl delete -n \"${namespace}\""
+    kubectl get pods -n "${namespace}" -o name \
+        | grep -E "^pod/${name}" \
+        | xargs -r kubectl delete -n "${namespace}"
+    success "All pods with prefix '${name}' have been deleted"
+}
+
+
 # Delete specified kubernetes resource
 # Args:
 #   1: resource kind
@@ -53,6 +68,7 @@ delete_k8s_resource() {
     local namespace="${3:-default}"
 
     local cmd_args=""
+    # PV is cluster-scoped, without namespace
     if [[ "${kind}" == "pv" || "${kind}" == "PersistentVolume" ]]; then
         cmd_args="${kind} ${name}"
         namespace=""
@@ -60,7 +76,7 @@ delete_k8s_resource() {
         cmd_args="${kind} ${name} -n ${namespace}"
     fi
 
-    # Check if resource exists before deletion
+    # Check whether target resource exists
     if ! kubectl get ${cmd_args} >/dev/null 2>&1; then
         info "${kind}/${namespace}/${name} not found, skipping deletion."
         return

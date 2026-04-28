@@ -58,54 +58,36 @@ gen_gateway_deploy_file() {
     if [ "${client_type}" == "runtime_orchestrator" ]; then
         yq eval ".spec.template.spec.serviceAccountName = \"${DEPLOY_VARS["GATEWAY_SERVICE_ACCOUNT"]}\"" -i "${GATEWAY_DEPLOYMENT_FILE}"
         yq eval ".spec.template.spec.containers[0].image = \"${DEPLOY_VARS["CLAW_GATEWAY_RT_IMAGE"]}\"" -i "${GATEWAY_DEPLOYMENT_FILE}"
-    fi
-
-    if [ -n "${DEPLOY_VARS["PIP_EXTRA_ARGS"]:-}" ]; then
         yq eval -i "
-            .spec.template.spec.containers[0].env += [{
-                \"name\": \"PIP_EXTRA_ARGS\",
-                \"value\": \"${DEPLOY_VARS["PIP_EXTRA_ARGS"]}\"
+            .spec.template.spec.containers[0].envFrom += [{
+                \"configMapRef\": {
+                    \"name\": \"${DEPLOY_VARS["GATEWAY_ENV_FILE_NAME"]}\"
+                }
             }]
         " "${GATEWAY_DEPLOYMENT_FILE}"
-    fi
 
+    fi
     success "Gateway deployment file generation completed: ${GATEWAY_DEPLOYMENT_FILE}"
 }
 
 
 deploy_gateway() {
-    gen_gateway_config_file
-
-    # create gateway configMap
     local file_name=$(basename "${GATEWAY_CONFIG_FILE}")
+    local client_type="${DEPLOY_VARS["AGENT_CLIENT_TYPE"]}"
+
+    # create configMap from config.yaml
+    gen_gateway_config_file
     info "Executing: kubectl create configmap ${DEPLOY_VARS["GATEWAY_CONFIG_MAP_NAME"]} --from-file=${file_name}=${GATEWAY_CONFIG_FILE} --dry-run=client -o yaml | kubectl apply -f -"
     kubectl create configmap ${DEPLOY_VARS["GATEWAY_CONFIG_MAP_NAME"]} --from-file=${file_name}=${GATEWAY_CONFIG_FILE} --dry-run=client -o yaml | kubectl apply -f -
 
-    gen_gateway_deploy_file
-
-    # start gateway
-    exec_cmd kubectl apply -f ${GATEWAY_DEPLOYMENT_FILE}
-    wait_k8s_resource_ready "deployment" "${DEPLOY_VARS["GATEWAY_DEPLOYMENT_NAME"]}"
-}
-
-deploy_gateway_huchen(){
-    local client_type="${DEPLOY_VARS["AGENT_CLIENT_TYPE"]}"
-    local deploy_template_file="${SCRIPT_DIR}/conf/deployment-${DEPLOY_VARS["MODE"]}.template.yaml"
-
-    if [ "${client_type}" == "yuanrong_frontend" ]; then
-        collect_oyr_info
-    elif [ "${client_type}" == "runtime_orchestrator" ]; then
-        deploy_template_file="${SCRIPT_DIR}/conf/deployment-rt.template.yaml"
-
-        # create gateway rbac
-        render_config_template "${GATEWAY_RBAC_TEMPLATE_FILE}" "${GATEWAY_RBAC_FILE}" "DEPLOY_VARS"
-        exec_cmd kubectl apply -f ${GATEWAY_RBAC_FILE}
+    # create configMap from gateway.env
+    if [ "${client_type}" == "runtime_orchestrator" ]; then
+        render_config_template "${GATEWAY_ENV_TEMPLATE_FILE}" "${GATEWAY_ENV_FILE}" "DEPLOY_VARS"
+        exec_cmd kubectl create configmap ${DEPLOY_VARS["GATEWAY_ENV_FILE_NAME"]} --from-env-file=${GATEWAY_ENV_FILE}
     fi
 
-    gen_gateway_configmap
-
     # start gateway
-    render_config_template ${deploy_template_file} ${GATEWAY_DEPLOYMENT_FILE} "DEPLOY_VARS"
+    gen_gateway_deploy_file
     exec_cmd kubectl apply -f ${GATEWAY_DEPLOYMENT_FILE}
     wait_k8s_resource_ready "deployment" "${DEPLOY_VARS["GATEWAY_DEPLOYMENT_NAME"]}"
 }
@@ -120,5 +102,7 @@ uninstall_gateway() {
 
     if [ "${DEPLOY_VARS["AGENT_CLIENT_TYPE"]}" == "runtime_orchestrator" ]; then
         exec_cmd kubectl delete -f ${GATEWAY_RBAC_FILE} false
+        exec_cmd kubectl delete configmap ${DEPLOY_VARS["GATEWAY_ENV_FILE_NAME"]} false
+        delete_k8s_pods "jiuwenclaw"
     fi
 }
