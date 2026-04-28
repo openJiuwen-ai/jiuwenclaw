@@ -93,7 +93,7 @@ proxy: {
 npm run dev
 ```
 
-Open http://localhost:5200
+Open http://localhost:5173
 
 ### Start Backend
 

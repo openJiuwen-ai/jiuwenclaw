@@ -93,7 +93,7 @@ proxy: {
 npm run dev
 ```
 
-访问 http://localhost:5200
+访问 http://localhost:5173
 
 ### 启动后端
 

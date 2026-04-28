@@ -497,8 +497,7 @@ export default defineConfig({
     },
   },
   server: {
-    // 与 jiuwenclaw/web (5173) 错开；企业版默认 5200；静态产物仍由 app_web 从 web_enterprise/dist 读取
-    port: 5200,
+    port: 5173,
     strictPort: true,
     proxy: {
       '/api': {

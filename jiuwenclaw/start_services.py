@@ -65,15 +65,7 @@ def _build_commands(mode: str) -> list[tuple[str, list[str], Path]]:
         commands.append(
             (
                 "enterprise-web",
-                [
-                    python_cmd,
-                    "-m",
-                    "jiuwenclaw.app_web",
-                    "--dist",
-                    str(ENTERPRISE_WEB_DIST_DIR),
-                    "--port",
-                    "5200",
-                ],
+                [python_cmd, "-m", "jiuwenclaw.app_web", "--dist", str(ENTERPRISE_WEB_DIST_DIR)],
                 DATA_ROOT,
             )
         )

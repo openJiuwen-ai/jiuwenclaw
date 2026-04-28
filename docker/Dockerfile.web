@@ -21,6 +21,5 @@ ENV PATH=$PATH:/home/app/.local/bin
 RUN pip install -i https://pypi.tuna.tsinghua.edu.cn/simple -e ".[all]" --no-cache-dir
 
 # Start enterprise web (served by app_web from web_enterprise/dist)
-EXPOSE 5200
-ENV GATEWAY_URL=http://127.0.0.1:19000
-CMD ["sh", "-c", "python -m jiuwenclaw.app_web --dist /app/jiuwenclaw/jiuwenclaw/web_enterprise/dist --host 0.0.0.0 --port 5200 --proxy-target \"${GATEWAY_URL}\""]
+EXPOSE 5173
+CMD ["jiuwenclaw-start", "web-enterprise"]

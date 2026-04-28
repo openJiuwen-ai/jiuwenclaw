@@ -869,8 +869,8 @@ def _setup_logger(logs_root: Path, log_level: str) -> logging.Logger:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Serve JiuwenClaw frontend static files.")
-    parser.add_argument("--host", default="localhost", help="Host to bind.")
-    parser.add_argument("--port", type=int, default=5173, help="Port to bind.")
+    parser.add_argument("--host", default=os.getenv("JIUWENCLAW_WEB_HOST", "localhost"), help="Host to bind.")
+    parser.add_argument("--port", type=int, default=os.getenv("JIUWENCLAW_WEB_PORT", "5173"), help="Port to bind.")
     parser.add_argument(
         "--dist",
         default=str(_default_dist_dir()),
@@ -878,7 +878,7 @@ def main() -> None:
     )
     parser.add_argument(
         "--proxy-target",
-        default="http://127.0.0.1:19000",
+        default=os.getenv("JIUWENCLAW_WEB_PROXY_TARGET", "http://127.0.0.1:19000"),
         help="Backend base URL for proxy (used as default for api/ws).",
     )
     parser.add_argument(
