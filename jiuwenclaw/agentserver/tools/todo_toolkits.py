@@ -550,7 +550,7 @@ class TodoToolkit:
             else:
                 status_icon = "[ ]"
             suffix = f" | {t.result}" if t.result else ""
-            lines.append(f"{status_icon} {t.idx}. {t.tasks}{suffix}")
+            lines.append(f"- {status_icon} {t.idx}. {t.tasks}{suffix}")
         return "\n".join(lines)
 
     def get_tools(self) -> List[Tool]:
