@@ -1931,6 +1931,7 @@ class JiuWenClawDeepAdapter:
         self._update_permission_rail(config_base)
 
         # Update disabled_tools_rail config in-place (no re-init needed)
+        disabled_tools_rail_newly_created = False
         if self._disabled_tools_rail is not None:
             disabled_list = config.get("disabled_tools", [])
             self._disabled_tools_rail.update_config(disabled_list)
@@ -1938,6 +1939,7 @@ class JiuWenClawDeepAdapter:
             # 使用统一的 build 方法创建（与冷启动行为一致）
             self._disabled_tools_rail = self._build_disabled_tools_rail(config)
             if self._disabled_tools_rail is not None:
+                disabled_tools_rail_newly_created = True
                 logger.info("[JiuWenClawDeepAdapter] _disabled_tools_rail newly created on hot-reload")
 
         rails_list = []
@@ -1953,7 +1955,10 @@ class JiuWenClawDeepAdapter:
             rails_list.append(self._avatar_rail)
         if self._permission_rail is not None:
             rails_list.append(self._permission_rail)
-        if self._disabled_tools_rail is not None:
+        # core会先卸载与rails_list同类的已注册rail，再加载rails_list中的rail。
+        # 但需要注意，这里不能传一个与已注册的rail相同的对象。否则core只会进行卸载，不会进行加载。
+        # 如果你要更新rail，就传一个新的对象；如果不要更新，就不传；如果需要仅卸载，就传原来的rail对象。
+        if disabled_tools_rail_newly_created and self._disabled_tools_rail is not None:
             rails_list.append(self._disabled_tools_rail)
         return rails_list
 

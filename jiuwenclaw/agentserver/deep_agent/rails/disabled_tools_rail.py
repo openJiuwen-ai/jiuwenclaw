@@ -63,8 +63,6 @@ class DisabledToolsRail(DeepAgentRail):
     def uninit(self, agent) -> None:
         """Cleanup when rail is removed - re-register all disabled tools."""
         stack_info = ''.join(traceback.format_stack())
-        logger.info(
-            "[DisabledToolsRail] uninit called - stack trace:\n%s", stack_info)
         if self._agent:
             self._register_tools(self._disabled_tools)
         self._agent = None
