@@ -34,7 +34,7 @@ def _build_commands(mode: str) -> list[tuple[str, list[str], Path]]:
     commands: list[tuple[str, list[str], Path]] = []
 
     # Always launch package modules so source/package layouts behave the same.
-    if mode in ("all", "app", "dev", "enterprise-dev", "enterprise"):
+    if mode in ("all", "app", "dev", "dev-enterprise", "enterprise"):
         commands.append(("app", [python_cmd, "-m", "jiuwenclaw.app"], DATA_ROOT))
     if mode == "all":
         commands.append(("web", [python_cmd, "-m", "jiuwenclaw.app_web"], DATA_ROOT))
@@ -48,18 +48,18 @@ def _build_commands(mode: str) -> list[tuple[str, list[str], Path]]:
                 "please run app/web mode, or use source checkout for frontend dev."
             )
         commands.append(("web-dev", ["npm", "run", "dev"], WEB_DEV_DIR))
-    elif mode == "enterprise-dev":
+    elif mode == "dev-enterprise":
         package_json = ENTERPRISE_WEB_DEV_DIR / "package.json"
         if is_package_installation() and not package_json.exists():
             raise RuntimeError(
-                "enterprise-dev mode is unavailable in package installation; "
+                "dev-enterprise mode is unavailable in package installation; "
                 "please use source checkout with jiuwenclaw/web_enterprise."
             )
-        commands.append(("enterprise-web-dev", ["npm", "run", "dev"], ENTERPRISE_WEB_DEV_DIR))
-    elif mode == "enterprise":
+        commands.append(("web-dev-enterprise", ["npm", "run", "dev"], ENTERPRISE_WEB_DEV_DIR))
+    elif mode in ("enterprise", "web-enterprise"):
         if is_package_installation() and not ENTERPRISE_WEB_DIST_DIR.exists():
             raise RuntimeError(
-                "enterprise mode is unavailable in package installation; "
+                "enterprise/web-enterprise mode is unavailable in package installation; "
                 "web_enterprise/dist is missing."
             )
         commands.append(
@@ -141,11 +141,11 @@ def _parse_args() -> argparse.Namespace:
         "mode",
         nargs="?",
         default="all",
-        choices=["all", "web", "app", "dev", "enterprise-dev", "enterprise"],
+        choices=["all", "dev", "web", "app", "enterprise", "dev-enterprise", "web-enterprise"],
         help=(
-            "Start mode: all (default), web, app, dev (web Vite), "
-            "enterprise-dev (web_enterprise Vite), or enterprise "
-            "(app + web_enterprise/dist static)."
+            "Start mode: all (default, app + web static), dev (app + web Vite), web, app, "
+            "enterprise (app + web_enterprise static), dev-enterprise (app + web_enterprise Vite) "
+            "or web-enterprise (web_enterprise static)."
         ),
     )
     return parser.parse_args()
