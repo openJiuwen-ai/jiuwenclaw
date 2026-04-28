@@ -1770,11 +1770,16 @@ class VibeSkillChannel(BaseChannel):
                 str(opt.get("label")): str(opt.get("id"))
                 for opt in options if isinstance(opt, dict)
             }
+            id_to_label = {opt_id: label for label, opt_id in label_to_id.items()}
             values = answer_item if isinstance(answer_item, list) else [answer_item]
             normalized_values: list[str] = []
             for value in values:
                 text = str(value)
-                normalized_values.append(label_to_id.get(text, text))
+                # VibeSkill 这里需要向下游提交 label 内容，而非 option id。
+                if text in label_to_id:
+                    normalized_values.append(text)
+                else:
+                    normalized_values.append(id_to_label.get(text, text))
             answer: Any = normalized_values
             multiple = bool(question.get("multiple"))
             if not multiple:
