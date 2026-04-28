@@ -1237,6 +1237,18 @@ async def test_runtime_rail_multi_tenant_workspace_dirs(monkeypatch):
     assert "agent_test_agent_001" in prompt
     assert "Agent 内部数据目录" in prompt
 
+    # 验证完整绝对路径（兼容 Windows/Linux 分隔符；hh 布局为 agent/workspace）
+    expected_config = str(expected_base / "config")
+    expected_workspace = str(expected_base / "agent" / "workspace")
+    expected_config_win = expected_config.replace("/", "\\")
+    expected_workspace_win = expected_workspace.replace("/", "\\")
+    assert (
+        expected_config in prompt or expected_config_win in prompt
+    ), f"Config path not found: {expected_config}"
+    assert (
+        expected_workspace in prompt or expected_workspace_win in prompt
+    ), f"Workspace path not found: {expected_workspace}"
+
 
 @pytest.mark.asyncio
 async def test_runtime_rail_single_tenant_workspace_dirs():
@@ -1269,3 +1281,15 @@ async def test_runtime_rail_single_tenant_workspace_dirs():
     assert "workspace" in prompt
     assert ".jiuwenswarm" in prompt
     assert "Agent 内部数据目录" in prompt
+
+    # 验证完整绝对路径（兼容 Windows/Linux 分隔符）
+    expected_config = "/home/user/.jiuwenswarm/config"
+    expected_workspace = "/home/user/.jiuwenswarm/agent/workspace"
+    expected_config_win = expected_config.replace("/", "\\")
+    expected_workspace_win = expected_workspace.replace("/", "\\")
+    assert (
+        expected_config in prompt or expected_config_win in prompt
+    ), f"Config path not found: {expected_config}"
+    assert (
+        expected_workspace in prompt or expected_workspace_win in prompt
+    ), f"Workspace path not found: {expected_workspace}"
