@@ -55,6 +55,7 @@ _DEFAULT_TIMEOUT_SECONDS = 600.0
 # Default excluded tools for spawn/fork agents
 EXCLUDED_TOOLS_SPAWN = {
     "spawn_subagent",
+    "send_file_to_user",
     # 主 Agent 级调度与消息（子 Agent 不应触发）
     "office_claw_dispatch_agent_task",
     "office_claw_post_message",
