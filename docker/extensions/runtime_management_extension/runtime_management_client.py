@@ -16,8 +16,17 @@ import uuid
 from typing import Any, AsyncIterator, Optional
 
 from jiuwenclaw.e2a.agent_compat import e2a_to_agent_request
-from jiuwenclaw.e2a.models import E2AEnvelope
-from jiuwenclaw.gateway.agent_client import AgentServerClient
+from jiuwenclaw.e2a.constants import (
+    E2A_RESPONSE_KIND_E2A_CHUNK,
+    E2A_RESPONSE_STATUS_IN_PROGRESS,
+)
+from jiuwenclaw.e2a.models import E2AEnvelope, E2AResponse
+from jiuwenclaw.e2a.wire_codec import (
+    is_e2a_response_wire_dict,
+    parse_agent_server_wire_chunk,
+    parse_agent_server_wire_unary,
+)
+from jiuwenclaw.gateway.agent_client import AgentServerClient, _wire_request_id_key
 from jiuwenclaw.schema import AgentRequest
 from jiuwenclaw.schema.agent import AgentResponse, AgentResponseChunk
 
@@ -135,37 +144,70 @@ def _e2a_nested_is_complete(data: dict[str, Any]) -> bool:
         return False
     return det.get("is_complete") is True
 
+
+def _wire_deprecated_unary_shape(data: dict[str, Any]) -> bool:
+    """与 ``wire_codec._deprecated_unary_shape`` 一致（非 E2A 线 unary）。"""
+    return (
+        isinstance(data, dict)
+        and "request_id" in data
+        and "channel_id" in data
+        and "ok" in data
+        and not is_e2a_response_wire_dict(data)
+    )
+
+
+def _wire_deprecated_chunk_shape(data: dict[str, Any]) -> bool:
+    """与 ``wire_codec._deprecated_chunk_shape`` 一致（非 E2A 线 chunk）。"""
+    return (
+        isinstance(data, dict)
+        and "request_id" in data
+        and "channel_id" in data
+        and "is_complete" in data
+        and "payload" in data
+        and "ok" not in data
+        and not is_e2a_response_wire_dict(data)
+    )
+
+
 class E2aEnvelopResponseParser(IResponseParser):
-    """解析 e2a / jiuwenclaw 网关归一化后的 WebSocket 下行 JSON。
+    """解析 AgentServer WebSocket 下行 JSON，与 ``WebSocketAgentServerClient`` 使用同一套 wire 解码。
 
-    典型终态一帧（节选）::
-
-        {
-            "protocol_version": "1.0",
-            "request_id": "req_xxx",
-            "response_id": "req_xxx",
-            "is_final": true,
-            "status": "succeeded",
-            "response_kind": "e2a.complete",
-            "provenance": {"details": {"is_complete": true, ...}},
-            "body": {"result": {}},
-            ...
-        }
-
-    * ``request_id``：与上行多路复用键一致，优先取 ``request_id``，否则 ``response_id``/``id``。
-    * **终态**（``is_completed`` 为真）：任一为真即可——``is_final``、``provenance.details.is_complete``、
-      历史兼容字段（``error``/``done``/``is_end``/``event`` 等）。
-    * ``response``：返回**整条原始 dict**（不剥 ``body``），便于业务自行读 ``body.result`` 等。
+    * ``request_id``：与 ``agent_client._wire_request_id_key`` 对齐；缺失时回退 ``response_id`` / ``id``。
+    * ``is_completed``：E2A 线以 ``E2AResponse.is_final`` 为准；legacy unary 单帧即终态；legacy chunk 看 ``is_complete``。
+    * ``response``：``parse_agent_server_wire_unary`` 或 ``parse_agent_server_wire_chunk``，与直连 WebSocket 客户端一致。
     """
 
     _END_EVENTS = {"stream.end", "stream.done", "chat.done", "response.end"}
     _TERMINAL_STATUS = {"succeeded", "failed", "canceled", "cancelled", "error"}
 
     def request_id(self, data: dict[str, Any]) -> Optional[str]:
-        rid = data.get("request_id") or data.get("response_id") or data.get("id")
-        return str(rid) if rid is not None else None
+        logger.debug(f"parse request_id: {data}")
+        rid = data.get("request_id")
+        if rid is None:
+            rid = data.get("response_id")
+        if rid is None:
+            rid = data.get("id")
+        if rid is None:
+            return None
+        out = _wire_request_id_key(rid)
+        return out if out else None
 
     def is_completed(self, data: dict[str, Any]) -> bool:
+        logger.debug(f"parse is_completed: {data}")
+        if not isinstance(data, dict):
+            return True
+        if data.get("type") == "event":
+            return False
+        if is_e2a_response_wire_dict(data):
+            try:
+                e2a = E2AResponse.from_dict(dict(data))
+                return bool(e2a.is_final)
+            except Exception:
+                return False
+        if _wire_deprecated_unary_shape(data):
+            return True
+        if _wire_deprecated_chunk_shape(data):
+            return bool(data.get("is_complete"))
         if data.get("is_final") is True:
             return True
         if _e2a_nested_is_complete(data):
@@ -188,7 +230,9 @@ class E2aEnvelopResponseParser(IResponseParser):
         return False
 
     def response(self, data: dict[str, Any]) -> Any:
-        return data
+        logger.debug(f"get response: {data}")
+
+        return parse_agent_server_wire_chunk(data)
 
 
 class RuntimeManagementAgentClient(AgentServerClient):
@@ -205,7 +249,7 @@ class RuntimeManagementAgentClient(AgentServerClient):
                     self, response_parser: IResponseParser
             ) -> IServiceHandler:
                 k8s = K8sServiceHandler(
-                    "swr.cn-north-4.myhuaweicloud.com/openjiuwen/jiuwenclaw-agentserver-amd64:0.0.15",
+                    "",
                     name_prefix="jiuwenclaw",
                     namespace="default",
                     container_name="jiuwenclaw-agentserver",
@@ -215,10 +259,10 @@ class RuntimeManagementAgentClient(AgentServerClient):
                     env_vars={
                         "AGENT_SERVER_HOST": "0.0.0.0",
                         "AGENT_CLIENT_TYPE": "runtime",
-                        "MODEL_PROVIDER": "OpenAI",
-                        "MODEL_NAME": "Qwen/Qwen3-32B",
+                        "MODEL_PROVIDER": "",
+                        "MODEL_NAME": "",
                         "API_BASE": "",
-                        "API_KEY": ""
+                        "API_KEY": "",
                     },
                     kubeconfig=None,
                     readiness_initial_delay=5,
@@ -283,7 +327,7 @@ class RuntimeManagementAgentClient(AgentServerClient):
         if self._connected:
             return
         acc_cfg = AccessConfig(
-            image="swr.cn-north-4.myhuaweicloud.com/openjiuwen/jiuwenclaw-agentserver-amd64:0.0.15",
+            image="",
             service_concurrency=10,
             min_idle_services=1,
             max_services=10,
@@ -332,6 +376,7 @@ class RuntimeManagementAgentClient(AgentServerClient):
         Returns:
             Agent 响应
         """
+        logger.debug("send request: %s", envelope)
         self._ensure_connected()
         request = e2a_to_agent_request(envelope)
 
@@ -346,29 +391,9 @@ class RuntimeManagementAgentClient(AgentServerClient):
             # 3. 创建 SessionRequestWrapper
             # 4. 投递到 ServiceManager
             # 5. 从 response_queue 读取并通过 IResponseParser 解析后 yield
-            response_chunks = []
             async for chunk in self._access.send_message(session_request):
-                response_chunks.append(chunk)
-
-            if not response_chunks:
-                return AgentResponse(
-                    request_id=request.request_id,
-                    channel_id=request.channel_id,
-                    ok=False,
-                    payload={"error": "no response received"},
-                    metadata={},
-                )
-
-            # 合并所有响应片段（非流式模式下应该只有一个完整响应）
-            final_response = response_chunks[-1] if response_chunks else {}
-
-            return AgentResponse(
-                request_id=request.request_id,
-                channel_id=request.channel_id,
-                ok=True,
-                payload={"content": final_response},
-                metadata={},
-            )
+                logger.debug("received chunk: %s", chunk)
+                return chunk
 
         except Exception as exc:
             logger.exception("[RuntimeManagementAgentClient] send_request failed: %s", exc)
@@ -389,6 +414,7 @@ class RuntimeManagementAgentClient(AgentServerClient):
         Yields:
             Agent 响应片段
         """
+        logger.info(f"send stream request: {envelope}")
         self._ensure_connected()
         request = e2a_to_agent_request(envelope)
 
@@ -399,21 +425,9 @@ class RuntimeManagementAgentClient(AgentServerClient):
             # 调用 Access.send_message，它返回 AsyncIterator
             # Access 内部通过 IResponseParser 解析响应并逐个 yield
             async for chunk in self._access.send_message(session_request):
+                logger.debug("yield chunk: %s", chunk)
                 # Access 已经通过 IResponseParser.response() 解析了响应
-                yield AgentResponseChunk(
-                    request_id=request.request_id,
-                    channel_id=request.channel_id,
-                    payload=chunk,
-                    is_complete=False,
-                )
-
-            # 发送完成标记
-            yield AgentResponseChunk(
-                request_id=request.request_id,
-                channel_id=request.channel_id,
-                payload=None,
-                is_complete=True,
-            )
+                yield chunk
 
         except Exception as exc:
             logger.exception("[RuntimeManagementAgentClient] send_request_stream failed: %s", exc)
