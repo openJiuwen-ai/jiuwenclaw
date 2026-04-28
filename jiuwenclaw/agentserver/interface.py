@@ -857,6 +857,7 @@ class JiuWenClaw:
         stream_done = asyncio.Event()
         final_answer_content = ""
         final_answer_chunks: list[str] = []
+        adapter_emitted_terminal_chunk = False
 
         async def run_stream_task():
             try:
@@ -922,6 +923,8 @@ class JiuWenClaw:
                     )
                 else:
                     if isinstance(data, AgentResponseChunk):
+                        if data.is_complete:
+                            adapter_emitted_terminal_chunk = True
                         if isinstance(data.payload, dict) and isinstance(data.payload.get("event_type"), str):
                             et = str(data.payload.get("event_type"))
                             should_record = et.startswith("chat.") or et.startswith("task.")
@@ -1015,12 +1018,13 @@ class JiuWenClaw:
             )
             await ExtensionRegistry.get_instance().trigger(AgentServerHookEvents.MEMORY_AFTER_CHAT, after_ctx)
 
-        yield AgentResponseChunk(
-            request_id=rid,
-            channel_id=cid,
-            payload={"is_complete": True},
-            is_complete=True,
-        )
+        if not adapter_emitted_terminal_chunk:
+            yield AgentResponseChunk(
+                request_id=rid,
+                channel_id=cid,
+                payload={"is_complete": True},
+                is_complete=True,
+            )
 
     # ---------- 实例获取 ----------
 
