@@ -135,6 +135,44 @@ _DANGEROUS_COMMAND_CASES: list[tuple[str, str]] = [
     # shell_system_shutdown_or_reboot
     ("shutdown -r now", "shell_system_shutdown_or_reboot"),
     ("reboot", "shell_system_shutdown_or_reboot"),
+    # shell_credential_access
+    (
+        '$cred = Get-StoredCredential -Target "secure-config-encryption-key.office-claw"; '
+        '$b=[Runtime.InteropServices.Marshal]::SecureStringToBSTR($cred.Password); '
+        "[Runtime.InteropServices.Marshal]::PtrToStringBSTR($b)",
+        "shell_credential_access",
+    ),
+    (
+        '$cred = Get-StoredCredential -Target "Clowder/connectors/weixin/session-bot-token"; '
+        '$b=[Runtime.InteropServices.Marshal]::SecureStringToBSTR($cred.Password); '
+        "[Runtime.InteropServices.Marshal]::PtrToStringBSTR($b)",
+        "shell_credential_access",
+    ),
+    (
+        '$cred = Get-StoredCredential -Target "Clowder/env/FEISHU_APP_SECRET"; '
+        '$b=[Runtime.InteropServices.Marshal]::SecureStringToBSTR($cred.Password); '
+        "[Runtime.InteropServices.Marshal]::PtrToStringBSTR($b)",
+        "shell_credential_access",
+    ),
+    (
+        '$cred = Get-StoredCredential -Target "Clowder/profiles/modelarts-shared/apiKey"; '
+        '$b=[Runtime.InteropServices.Marshal]::SecureStringToBSTR($cred.Password); '
+        "[Runtime.InteropServices.Marshal]::PtrToStringBSTR($b)",
+        "shell_credential_access",
+    ),
+    # shell_credential_decrypt
+    (
+        '$cred = Get-StoredCredential -Target "secure-config-encryption-key.office-claw"; '
+        '$b=[Runtime.InteropServices.Marshal]::SecureStringToBSTR($cred.Password); '
+        "[Runtime.InteropServices.Marshal]::PtrToStringBSTR($b)",
+        "shell_credential_decrypt",
+    ),
+    # shell_certificate_key_access
+    (
+        "Get-ChildItem Cert:\\CurrentUser\\My | "
+        "Select-Object -First 1 | ForEach-Object { $_.PrivateKey }",
+        "shell_certificate_key_access",
+    ),
 ]
 
 

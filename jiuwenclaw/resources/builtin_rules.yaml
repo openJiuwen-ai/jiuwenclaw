@@ -41,3 +41,18 @@ rules:
     description: "关机、重启或切换到关机/重启运行级别，属于明显破坏系统可用性的行为"
     pattern: 're:(?i)(^|[\s;&|()])((shutdown|reboot|halt|poweroff)\b|(init|telinit)\s+(0|6)\b)'
     action: deny
+
+  - id: shell_credential_access
+    description: "访问或读取系统存储的凭据：Windows凭据管理器、API、注册表等"
+    pattern: 're:(?i)(Get-StoredCredential|cmdkey\s+/|rundll32\.exe\s+keymgr\.dll|CredRead|CredEnumerate|Advapi32.*Cred|Winlogon|AutoAdminLogon|DefaultPassword)'
+    action: deny
+
+  - id: shell_credential_decrypt
+    description: "解密或转换凭据：SecureString转换、DPAPI解密、提取明文密码等"
+    pattern: 're:(?i)(SecureStringToBSTR|PtrToStringBSTR|ConvertFrom-SecureString|GetNetworkCredential\(\)\.Password|ProtectedData\]::Unprotect|CryptUnprotectData|\[PSCredential\]::new)'
+    action: deny
+
+  - id: shell_certificate_key_access
+    description: "访问或导出证书存储中的证书和私钥"
+    pattern: 're:(?i)(Export-PfxCertificate|\.PrivateKey|Get-ChildItem\s+Cert:|\[System\.Security\.Cryptography\.X509Certificates\])'
+    action: deny
