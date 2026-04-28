@@ -1,8 +1,12 @@
 from types import SimpleNamespace
 from pathlib import Path
-from unittest.mock import ANY, patch
+from unittest.mock import ANY, patch, MagicMock
+import sys
 
 import pytest
+
+# Mock trafilatura before importing jiuwenclaw modules
+sys.modules['trafilatura'] = MagicMock()
 
 from openjiuwen.core.foundation.llm import Model
 from openjiuwen.core.single_agent.rail.base import AgentCallbackContext
@@ -207,6 +211,27 @@ async def test_runtime_rail_multi_tenant_workspace_dirs():
     # 验证多租户路径特征
     assert "service_test_service_001" in prompt
     assert "agent_test_agent_001" in prompt
+    
+    # 验证完整的绝对路径格式（兼容 Windows/Linux 路径分隔符）
+    expected_config = str(expected_base / "config")
+    expected_workspace = str(expected_base / "jiuwenclaw_workspace")
+    expected_memory = str(expected_base / "jiuwenclaw_workspace" / "memory")
+    expected_skills = str(expected_base / "jiuwenclaw_workspace" / "skills")
+    expected_todo = str(expected_base / "jiuwenclaw_workspace" / "todo")
+    
+    # Windows 下 Path 会转换为 \ 分隔符，需要兼容
+    expected_config_win = expected_config.replace("/", "\\")
+    expected_workspace_win = expected_workspace.replace("/", "\\")
+    expected_memory_win = expected_memory.replace("/", "\\")
+    expected_skills_win = expected_skills.replace("/", "\\")
+    expected_todo_win = expected_todo.replace("/", "\\")
+    
+    # 验证所有路径都出现在 prompt 中（兼容两种分隔符）
+    assert (expected_config in prompt or expected_config_win in prompt), f"Config path not found: {expected_config}"
+    assert (expected_workspace in prompt or expected_workspace_win in prompt), f"Workspace path not found: {expected_workspace}"
+    assert (expected_memory in prompt or expected_memory_win in prompt), f"Memory path not found: {expected_memory}"
+    assert (expected_skills in prompt or expected_skills_win in prompt), f"Skills path not found: {expected_skills}"
+    assert (expected_todo in prompt or expected_todo_win in prompt), f"Todo path not found: {expected_todo}"
 
 
 @pytest.mark.asyncio
@@ -248,3 +273,55 @@ async def test_runtime_rail_single_tenant_workspace_dirs():
     assert "todo" in prompt
     # 验证路径格式（Windows 使用 \，Linux 使用 /）
     assert (".jiuwenclaw" in prompt)
+    
+    # 验证完整的绝对路径格式（兼容 Windows/Linux 路径分隔符）
+    expected_config = "/home/user/.jiuwenclaw/config"
+    expected_workspace = "/home/user/.jiuwenclaw/workspace"
+    expected_memory = "/home/user/.jiuwenclaw/memory"
+    expected_skills = "/home/user/.jiuwenclaw/skills"
+    expected_todo = "/home/user/.jiuwenclaw/todo"
+    
+    # Windows 下 Path 会转换为 \ 分隔符，需要兼容
+    expected_config_win = expected_config.replace("/", "\\")
+    expected_workspace_win = expected_workspace.replace("/", "\\")
+    expected_memory_win = expected_memory.replace("/", "\\")
+    expected_skills_win = expected_skills.replace("/", "\\")
+    expected_todo_win = expected_todo.replace("/", "\\")
+    
+    # 验证所有路径都出现在 prompt 中（兼容两种分隔符）
+    assert (expected_config in prompt or expected_config_win in prompt), f"Config path not found: {expected_config}"
+    assert (expected_workspace in prompt or expected_workspace_win in prompt), f"Workspace path not found: {expected_workspace}"
+    assert (expected_memory in prompt or expected_memory_win in prompt), f"Memory path not found: {expected_memory}"
+    assert (expected_skills in prompt or expected_skills_win in prompt), f"Skills path not found: {expected_skills}"
+    assert (expected_todo in prompt or expected_todo_win in prompt), f"Todo path not found: {expected_todo}"
+
+
+def test_interface_deep_skill_rail_uses_multi_tenant_paths():
+    """测试 interface_deep 中的 SkillUseRail 使用多租户 skills 路径。"""
+    from jiuwenclaw.utils import get_multi_tenant_skill_dirs
+    
+    # 测试多租户模式
+    service_id = "test_service"
+    agent_id = "test_agent"
+    
+    with patch(
+        "jiuwenclaw.utils.get_multi_tenant_user_workspace_dir",
+    ) as mock_workspace:
+        mock_workspace.return_value = Path("/tmp/test/service_test/agent_test")
+        skill_dirs = get_multi_tenant_skill_dirs(service_id, agent_id)
+    
+    # 验证返回的是多租户路径
+    assert len(skill_dirs) == 1
+    assert "service_test" in str(skill_dirs[0])
+    assert "agent_test" in str(skill_dirs[0])
+    assert "skills" in str(skill_dirs[0])
+    
+    # 测试单租户模式（不传参数）
+    with patch(
+        "jiuwenclaw.utils.get_agent_skills_dir",
+    ) as mock_single:
+        mock_single.return_value = Path("/home/user/.jiuwenclaw/skills")
+        skill_dirs_single = get_multi_tenant_skill_dirs(None, None)
+    
+    assert len(skill_dirs_single) == 1
+    assert str(skill_dirs_single[0]) == "/home/user/.jiuwenclaw/skills"

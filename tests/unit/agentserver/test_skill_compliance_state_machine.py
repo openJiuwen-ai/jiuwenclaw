@@ -470,3 +470,36 @@ def test_prompt_rail_phase_to_section_mapping(
 
     assert actions.get("skill_plan_required") == expect_plan_action
     assert actions.get("skill_complete_required") == expect_complete_action
+
+
+# ---------------- todo_path multi-tenant verification -----------------------
+
+def test_resolve_todo_file_path_uses_multi_tenant_sessions_dir():
+    """验证 _resolve_todo_file_path 使用多租户 sessions 目录。"""
+    from jiuwenclaw.agentserver.deep_agent.rails.skill_compliance_rail import (
+        _resolve_todo_file_path,
+    )
+    
+    session_id = "test_session_001"
+    
+    # Mock get_agent_sessions_dir 返回多租户路径
+    expected_sessions_dir = Path(
+        "/tmp/test_jiuwenclaw/service_test_service/agent_test_agent/agent/sessions"
+    )
+    expected_todo_path = expected_sessions_dir / session_id / "skill_step.md"
+    
+    with patch(
+        "jiuwenclaw.agentserver.tools.todo_toolkits.get_agent_sessions_dir",
+        return_value=expected_sessions_dir,
+    ):
+        result = _resolve_todo_file_path(session_id)
+    
+    # 验证返回的路径包含多租户特征
+    assert result is not None, "todo_path should not be None"
+    assert "service_test_service" in result, f"Expected service ID in path: {result}"
+    assert "agent_test_agent" in result, f"Expected agent ID in path: {result}"
+    assert session_id in result, f"Expected session ID in path: {result}"
+    assert "skill_step.md" in result, f"Expected skill_step.md in path: {result}"
+    
+    # 验证完整路径
+    assert result == str(expected_todo_path), f"Path mismatch: {result} != {expected_todo_path}"
