@@ -46,6 +46,7 @@ from openjiuwen.core.single_agent.rail.base import AgentCallbackContext
 from openjiuwen.harness.rails.base import DeepAgentRail
 
 from jiuwenclaw.agentserver.tools.todo_toolkits import (
+    TaskStatus,
     TodoOpKind,
     TodoOpResult,
     consume_last_op_result,
@@ -175,9 +176,7 @@ def _read_initial_phase_from_disk(session_id: str) -> SkillPhase:
     if not session_id:
         return SkillPhase.WAITING_PLAN
     try:
-        from jiuwenclaw.agentserver.tools.todo_toolkits import (
-            SkillStepToolkit, TaskStatus,
-        )
+        from jiuwenclaw.agentserver.tools.skill_step_toolkit import SkillStepToolkit
         tasks = SkillStepToolkit(session_id=session_id).load_tasks()
     except Exception as exc:
         logger.debug("[SkillComplianceRail] initial phase read failed: %s", exc)
@@ -191,7 +190,7 @@ def _read_initial_phase_from_disk(session_id: str) -> SkillPhase:
 
 def _resolve_todo_file_path(session_id: str) -> Optional[str]:
     try:
-        from jiuwenclaw.agentserver.tools.todo_toolkits import SkillStepToolkit
+        from jiuwenclaw.agentserver.tools.skill_step_toolkit import SkillStepToolkit
         _, path = SkillStepToolkit(session_id=session_id).resolve_todo_path()
         return str(path)
     except Exception as exc:
@@ -205,7 +204,7 @@ def _clear_skill_step_file(session_id: str, skill_name: str) -> bool:
     if not session_id:
         return False
     try:
-        from jiuwenclaw.agentserver.tools.todo_toolkits import SkillStepToolkit
+        from jiuwenclaw.agentserver.tools.skill_step_toolkit import SkillStepToolkit
         removed = SkillStepToolkit(session_id=session_id).clear_tasks()
     except Exception as exc:
         logger.warning(
@@ -270,24 +269,29 @@ def _build_load_directive(
             head = (
                 "\n\n[技能文档已加载 · 强制规约] 当前 session 不存在 skill_step 计划。"
                 "在执行 SKILL.md 中任何步骤之前，**必须**先调用 "
-                "`skill_step_create` 为文档中定义的每个步骤创建一个 skill_step 项。"
+                "`skill_step(action=\"create\")` 为文档中定义的每个步骤创建一个 skill_step 项。"
                 "未创建计划前，禁止执行 SKILL 中的任何动作（包括只是『先看一下』）。\n"
             )
         elif phase == SkillPhase.DONE:
             head = (
                 "\n\n[技能文档已加载] 当前 session 的 skill_step 计划全部已完成（来自先前执行）。"
                 "如果是延续先前任务，请直接调用 `skill_complete` 收尾；"
-                "如果是新一轮执行，请先 `skill_step_remove` 清空旧 plan 再 `skill_step_create` 重建。\n"
+                "如果是新一轮执行，请先 `skill_step(action=\"remove\")` 清空旧 plan "
+                "再 `skill_step(action=\"create\")` 重建。\n"
             )
         else:  # IN_PROGRESS
             head = (
                 "\n\n[技能文档已加载] 当前 session 已存在 skill_step 计划。"
-                "请用 `skill_step_list` 核对其是否对应当前 SKILL.md；"
-                "若不对应，必须先 `skill_step_remove` 清空再 `skill_step_create` 重建。\n"
+                "请用 `skill_step(action=\"list\")` 核对其是否对应当前 SKILL.md；"
+                "若不对应，必须先 `skill_step(action=\"remove\")` 清空"
+                "再 `skill_step(action=\"create\")` 重建。\n"
             )
         tail = (
-            "⚠️ 每完成一个步骤/子任务后，必须立即调用 skill_step_complete 标记完成（并填写 result 摘要），"
-            "再开始下一项；禁止跳过 complete 直接推进。可随时用 skill_step_list 查看进度。"
+            "⚠️ 完成步骤/子任务后，必须立即标记进度：单项完成用 "
+            "`skill_step(action=\"complete\")`；若多个连续步骤都已实际完成，"
+            "优先用 `skill_step(action=\"complete_batch\")` 一次性收尾。"
+            "禁止预先完成、跳过未完成项或不标记就推进。"
+            "可随时用 `skill_step(action=\"list\")` 查看进度。"
             f"{path_line}"
             "⚠️ Skill 脚本执行原则：SKILL.md 中定义的脚本必须按原样执行，"
             "禁止自行编写代码替代其功能。脚本失败时应修复执行环境（如安装依赖）后重试原脚本。"
@@ -298,7 +302,7 @@ def _build_load_directive(
         head = (
             "\n\n[Skill document loaded · MANDATORY] No skill_step plan exists "
             "for this session. Before executing ANY step from SKILL.md, you MUST "
-            "first call `skill_step_create` with one skill_step item per step "
+            "first call `skill_step(action=\"create\")` with one skill_step item per step "
             "defined in the document. No SKILL action is permitted (including "
             "'just taking a look') until the plan is created.\n"
         )
@@ -307,19 +311,23 @@ def _build_load_directive(
             "\n\n[Skill document loaded] All skill_step items from a previous run "
             "are already completed. If you are continuing that work, call "
             "`skill_complete` to finalize. If this is a new run, "
-            "`skill_step_remove` the old plan and `skill_step_create` a fresh one.\n"
+            "`skill_step(action=\"remove\")` the old plan and "
+            "`skill_step(action=\"create\")` a fresh one.\n"
         )
     else:  # IN_PROGRESS
         head = (
             "\n\n[Skill document loaded] A skill_step plan already exists for "
-            "this session. Use `skill_step_list` to verify it matches the current "
-            "SKILL.md; if not, you MUST `skill_step_remove` to clear it and then "
-            "`skill_step_create` to rebuild before proceeding.\n"
+            "this session. Use `skill_step(action=\"list\")` to verify it matches "
+            "the current SKILL.md; if not, you MUST `skill_step(action=\"remove\")` "
+            "to clear it and then `skill_step(action=\"create\")` to rebuild before proceeding.\n"
         )
     tail = (
-        "After each step/sub-task, you MUST immediately call skill_step_complete "
-        "(with a short result) before moving on. Never advance without marking the "
-        "current item complete. Use skill_step_list anytime to inspect progress."
+        "After completing step/sub-task progress, you MUST mark it promptly: use "
+        "`skill_step(action=\"complete\")` for a single finished item; when several "
+        "contiguous items are already finished, prefer "
+        "`skill_step(action=\"complete_batch\")`. Never "
+        "pre-complete, skip unfinished items, or advance without marking progress. "
+        "Use `skill_step(action=\"list\")` anytime to inspect progress."
         f"{path_line}"
         "Script execution principle: Scripts defined in SKILL.md must be executed as specified. "
         "Do NOT write your own code to replace their functionality. "
@@ -332,13 +340,16 @@ def _build_plan_created_directive(lang: str, skill_name: str, total: int) -> str
     if lang == "zh":
         return (
             f"\n\n[skill_step 计划已建立 · {total} 项] 现在请按顺序从第 1 项开始执行。"
-            f"开始第 1 项前，先用 `skill_step_insert` 将其拆解为原子级子步骤；"
-            f"每完成一项立即 `skill_step_complete` 并写 result。"
+            f"开始第 1 项前，先用 `skill_step(action=\"insert\")` 将其拆解为原子级子步骤；"
+            f"完成单项用 `skill_step(action=\"complete\")` 并写 result；"
+            f"若多个连续项都已实际完成，优先用 `skill_step(action=\"complete_batch\")` 一次性收尾。"
         )
     return (
         f"\n\n[skill_step plan created · {total} items] Begin with item 1. "
-        f"Before starting item 1, use `skill_step_insert` to break it into atomic "
-        f"sub-steps; immediately `skill_step_complete` each one with a short result."
+        f"Before starting item 1, use `skill_step(action=\"insert\")` to break it into atomic "
+        f"sub-steps; use `skill_step(action=\"complete\")` for a single finished item, and "
+        f"prefer `skill_step(action=\"complete_batch\")` when several contiguous items are "
+        f"already finished."
     )
 
 
@@ -360,12 +371,12 @@ def _build_plan_emptied_directive(lang: str, skill_name: str) -> str:
     if lang == "zh":
         return (
             f"\n\n[skill_step 计划已清空] 当前 session 的 skill_step 列表已空。"
-            f"如果还要继续执行 SKILL.md，请重新调用 `skill_step_create` 重建计划；"
+            f"如果还要继续执行 SKILL.md，请重新调用 `skill_step(action=\"create\")` 重建计划；"
             f"如果不再执行，请调用 `skill_complete(skill_name=\"{skill_name}\")` 收尾。"
         )
     return (
         f"\n\n[skill_step plan emptied] The skill_step list is now empty. "
-        f"To continue executing SKILL.md, call `skill_step_create` to rebuild it. "
+        f"To continue executing SKILL.md, call `skill_step(action=\"create\")` to rebuild it. "
         f"To abandon, call `skill_complete(skill_name=\"{skill_name}\")` to finalize."
     )
 
@@ -567,10 +578,10 @@ class SkillComplianceRail(DeepAgentRail):
             self._activate_skill(state, skill_name, body, tool_msg, session_id)
             return
 
-        if tool_name.startswith("skill_step_"):
+        if tool_name == "skill_step":
             op = consume_last_op_result(session_id)
             if op is None:
-                # skill_step_list is read-only (no publish), or the toolkit
+                # skill_step(action="list") is read-only (no publish), or the toolkit
                 # somehow didn't publish. No state change.
                 return
             self._apply_op_result(state, op, tool_msg)

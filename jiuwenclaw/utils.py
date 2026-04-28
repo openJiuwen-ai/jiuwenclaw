@@ -1150,6 +1150,22 @@ def get_agent_skills_dir() -> Path:
     return get_agent_workspace_dir() / "skills"
 
 
+def get_multi_tenant_skill_dirs(
+    service_id: str | None, agent_id: str | None,
+) -> list[Path]:
+    """Resolve the skills directory list for multi-tenant / single-tenant mode.
+
+    - Multi-tenant (any of ``service_id`` / ``agent_id`` provided): returns
+      ``[<multi-tenant user workspace>/skills]``.
+    - Single-tenant (both ``None``): returns ``[get_agent_skills_dir()]``.
+    """
+    if service_id or agent_id:
+        workspace = get_multi_tenant_user_workspace_dir(service_id, agent_id)
+        if workspace is not None:
+            return [workspace / "skills"]
+    return [get_agent_skills_dir()]
+
+
 def get_shared_agent_skills_dirs() -> list[Path]:
     raw = (os.getenv("JIUWENCLAW_SHARED_SKILLS_DIRS") or "").strip()
     if not raw:

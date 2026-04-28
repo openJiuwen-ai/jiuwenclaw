@@ -1615,12 +1615,12 @@ class JiuWenClawDeepAdapter:
 
     @staticmethod
     def _build_skill_protocol_prompt_rail() -> SkillProtocolPromptRail | None:
-        """Build SkillProtocolPromptRail: skills 段（skill_step_*）+ 用户任务 todo 段（todo_*）。"""
+        """Build SkillProtocolPromptRail: skills 段（skill_step）。"""
         try:
-            rail = SkillProtocolPromptRail(include_user_todo_section=True)
+            rail = SkillProtocolPromptRail()
             logger.info(
                 "[JiuWenClawDeepAdapter] SkillProtocolPromptRail create success "
-                "(plan: skill_step_* + todo_*)"
+                "(plan: skill_step)"
             )
             return rail
         except Exception as exc:
@@ -1631,12 +1631,12 @@ class JiuWenClawDeepAdapter:
 
     @staticmethod
     def _build_skill_compliance_rail() -> SkillComplianceRail | None:
-        """Build SkillComplianceRail：硬绑 skill_step.md / skill_step_*。"""
+        """Build SkillComplianceRail：硬绑 skill_step.md / skill_step。"""
         try:
             rail = SkillComplianceRail()
             logger.info(
                 "[JiuWenClawDeepAdapter] SkillComplianceRail create success "
-                "(skill_step.md / skill_step_*)"
+                "(skill_step.md / skill_step)"
             )
             return rail
         except Exception as exc:
@@ -2119,11 +2119,6 @@ class JiuWenClawDeepAdapter:
                 "[JiuWenClawDeepAdapter] deepresearch tools registration failed: %s",
                 exc,
             )
-
-        # Session 级 todo 工具（TodoToolkit / SkillStepToolkit）改由
-        # SkillProtocolPromptRail.init() 跟随 rail 生命周期注册到 agent，
-        # 保证 prompt 中提到的 skill_step_* / todo_* 工具与 prompt section 同上同下。
-        # Team 成员的 SkillStepToolkit 由 TeamManager 在成员创建时单独注册，不走此路径。
 
         return tool_cards
 

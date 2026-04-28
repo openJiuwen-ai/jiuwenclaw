@@ -15,7 +15,8 @@ from openjiuwen.core.single_agent.rail.base import AgentCallbackContext, InvokeI
 from openjiuwen.core.runner import Runner
 from openjiuwen.harness.rails.base import DeepAgentRail
 
-from jiuwenclaw.agentserver.tools.todo_toolkits import TodoToolkit, TaskStatus, SkillStepToolkit
+from jiuwenclaw.agentserver.tools.skill_step_toolkit import SkillStepToolkit
+from jiuwenclaw.agentserver.tools.todo_toolkits import TaskStatus, TodoToolkit
 
 logger = logging.getLogger(__name__)
 
@@ -42,7 +43,7 @@ class TaskExecutionContext:
 class TaskExecutionRail(DeepAgentRail):
     """Emit task.start/task.complete around todo and skill_step execution status transitions.
     
-    This rail tracks both TodoToolkit (todo_*) and SkillStepToolkit (skill_step_*) tools,
+    This rail tracks both TodoToolkit (todo_*) and the skill_step facade tool,
     emitting lifecycle events when task status changes.
     """
 
@@ -77,8 +78,7 @@ class TaskExecutionRail(DeepAgentRail):
         tool_name = ctx.inputs.tool_name
         todo_tools = {
             "todo_create", "todo_start", "todo_complete", "todo_insert", "todo_remove",
-            "skill_step_create", "skill_step_complete", "skill_step_complete_batch",
-            "skill_step_insert", "skill_step_remove",
+            "skill_step",
         }
         if tool_name in todo_tools:
             self._todo_map_before_tool = dict(self._todo_map)
@@ -92,8 +92,7 @@ class TaskExecutionRail(DeepAgentRail):
         tool_name = ctx.inputs.tool_name
         todo_tools = {
             "todo_create", "todo_start", "todo_complete", "todo_insert", "todo_remove",
-            "skill_step_create", "skill_step_complete", "skill_step_complete_batch",
-            "skill_step_insert", "skill_step_remove",
+            "skill_step",
         }
         if tool_name in todo_tools:
             await self._sync_from_todo_tool_and_emit_transitions(ctx)
@@ -106,10 +105,14 @@ class TaskExecutionRail(DeepAgentRail):
         if session is None:
             return
         
-        for tool_key in ["todo_list", "skill_step_list"]:
+        for tool_key in ["todo_list", "skill_step"]:
             try:
-                tool_card = agent.ability_manager.get(tool_key)
-                registered_tool = Runner.resource_mgr.get_tool(tool_card.id)
+                if tool_key == "skill_step":
+                    agent.ability_manager.get(tool_key)
+                    registered_tool = SkillStepToolkit(session_id=session.get_session_id())
+                else:
+                    tool_card = agent.ability_manager.get(tool_key)
+                    registered_tool = Runner.resource_mgr.get_tool(tool_card.id)
                 if isinstance(registered_tool, (TodoToolkit, SkillStepToolkit)):
                     registered_tool.set_session_id(session.get_session_id())
                     todos = registered_tool.load_tasks()
@@ -252,10 +255,13 @@ class TaskExecutionRail(DeepAgentRail):
             )
         )
 
-    def _get_todo_tool(self, agent: BaseAgent, session_id: str, tool_name: str = "") -> TodoToolkit | None:
-        is_skill_step = tool_name.startswith("skill_step_")
+    def _get_todo_tool(self, agent: BaseAgent, session_id: str, tool_name: str = "") -> Any | None:
+        is_skill_step = tool_name == "skill_step"
+        if is_skill_step:
+            return SkillStepToolkit(session_id=session_id)
+
         toolkit_class = SkillStepToolkit if is_skill_step else TodoToolkit
-        tool_key = "skill_step_list" if is_skill_step else "todo_list"
+        tool_key = "todo_list"
         
         try:
             tool_card = agent.ability_manager.get(tool_key)

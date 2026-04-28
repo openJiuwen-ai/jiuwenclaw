@@ -5,21 +5,20 @@
 
 Two surfaces matter:
 
-1. **Tool list shape**: ``skill_step_start`` is hidden and
-   ``skill_step_complete_batch`` is exposed; ``todo_*`` is unaffected.
+1. **Tool list shape**: only the unified ``skill_step`` facade tool is
+   exposed to the agent; ``todo_*`` on the parent toolkit is unaffected.
 2. **Batch completion semantics**: indices must be strictly ascending,
    contiguous, and start at the first open task. Validation failures must
    leave persisted state untouched.
 """
 from __future__ import annotations
 
-import tempfile
 from pathlib import Path
 
 import pytest
 
+from jiuwenclaw.agentserver.tools.skill_step_toolkit import SkillStepToolkit
 from jiuwenclaw.agentserver.tools.todo_toolkits import (
-    SkillStepToolkit,
     TaskStatus,
     TodoOpKind,
     TodoToolkit,
@@ -47,14 +46,13 @@ def todo_kit(tmp_path: Path) -> TodoToolkit:
 
 # ---------------- tool list shape -------------------------------------------
 
-def test_skill_step_tool_list_hides_start_and_exposes_batch(skill_kit):
-    names = {t.card.name for t in skill_kit.get_tools()}
-    assert "skill_step_start" not in names
-    assert "skill_step_complete" in names
-    assert "skill_step_complete_batch" in names
-    # Sanity: other surface is unchanged.
-    assert {"skill_step_create", "skill_step_insert",
-            "skill_step_remove", "skill_step_list"} <= names
+def test_skill_step_tool_list_exposes_only_facade(skill_kit):
+    """Agent surface is collapsed: a single ``skill_step`` tool, no
+    per-action ``skill_step_*`` tools.
+    """
+    tools = skill_kit.get_tools()
+    assert len(tools) == 1
+    assert tools[0].card.name == "skill_step"
 
 
 def test_todo_tool_list_unchanged(todo_kit):

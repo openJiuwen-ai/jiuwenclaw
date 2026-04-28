@@ -26,9 +26,9 @@ from jiuwenclaw.agentserver.deep_agent.rails.skill_compliance_rail import (
     get_session_active_skill,
     get_session_phase,
 )
-from jiuwenclaw.agentserver.tools import todo_toolkits
+from jiuwenclaw.agentserver.tools import skill_step_toolkit, todo_toolkits
+from jiuwenclaw.agentserver.tools.skill_step_toolkit import SkillStepToolkit
 from jiuwenclaw.agentserver.tools.todo_toolkits import (
-    SkillStepToolkit,
     TodoOpKind,
     TodoOpResult,
     consume_last_op_result,
@@ -200,8 +200,11 @@ def test_op_result_dispatch(case):
              remaining=case.remaining, total=case.total)
 
     tool_msg = _mk_tool_msg("ORIG")
-    tool_name = f"skill_step_{case.kind.value}"
-    rail._handle_tool_event(state, _mk_tool_call(tool_name, idx=1), tool_msg, tool_name, sid)
+    rail._handle_tool_event(
+        state,
+        _mk_tool_call("skill_step", action=case.kind.value, idx=1),
+        tool_msg, "skill_step", sid,
+    )
 
     assert state.phase == case.expect_phase, f"phase mismatch for {case.kind.value}@{case.start}"
     if case.expect_substr is None:
@@ -221,7 +224,10 @@ def test_skill_step_list_is_pure_noop():
     # toolkit's todo_list does NOT publish; consume_last_op_result returns None
     assert consume_last_op_result(sid) is None
     tool_msg = _mk_tool_msg("LIST OUTPUT")
-    rail._handle_tool_event(state, _mk_tool_call("skill_step_list"), tool_msg, "skill_step_list", sid)
+    rail._handle_tool_event(
+        state, _mk_tool_call("skill_step", action="list"),
+        tool_msg, "skill_step", sid,
+    )
     assert state.phase == SkillPhase.IN_PROGRESS
     assert tool_msg.content == "LIST OUTPUT"
 
@@ -244,7 +250,7 @@ def test_skill_complete_returns_to_idle_and_clears_file(start_phase):
         tc = _mk_tool_call("skill_complete", skill_name="pdf")
         tool_msg = _mk_tool_msg("done")
         with patch.object(
-            todo_toolkits, "SkillStepToolkit",
+            skill_step_toolkit, "SkillStepToolkit",
             lambda session_id=None: SkillStepToolkit(session_id=session_id, todo_dir=Path(tmp)),
         ):
             rail._handle_tool_event(state, tc, tool_msg, "skill_complete", sid)
@@ -363,7 +369,7 @@ def test_process_restart_recovers_phase_via_disk_read():
         state.active_skill = None
 
         with patch.object(
-            todo_toolkits, "SkillStepToolkit",
+            skill_step_toolkit, "SkillStepToolkit",
             lambda session_id=None: SkillStepToolkit(session_id=session_id, todo_dir=Path(tmp)),
         ):
             tc = _mk_tool_call("skill_tool", skill_name="pdf")
@@ -385,7 +391,7 @@ def test_full_lifecycle_idle_to_done_to_idle():
         state.active_skill = None
 
         with patch.object(
-            todo_toolkits, "SkillStepToolkit",
+            skill_step_toolkit, "SkillStepToolkit",
             lambda session_id=None: SkillStepToolkit(session_id=session_id, todo_dir=Path(tmp)),
         ):
             # 1. Load SKILL.md (no prior plan)
@@ -397,23 +403,23 @@ def test_full_lifecycle_idle_to_done_to_idle():
             # 2. Create plan
             tk = SkillStepToolkit(session_id=sid, todo_dir=Path(tmp))
             tk.todo_create(["s1", "s2"])
-            tc2 = _mk_tool_call("skill_step_create", tasks=["s1", "s2"])
+            tc2 = _mk_tool_call("skill_step", action="create", tasks=["s1", "s2"])
             msg2 = _mk_tool_msg("created")
-            rail._handle_tool_event(state, tc2, msg2, "skill_step_create", sid)
+            rail._handle_tool_event(state, tc2, msg2, "skill_step", sid)
             assert state.phase == SkillPhase.IN_PROGRESS
 
             # 3. Complete each step
             tk.todo_complete(1, "ok")
             rail._handle_tool_event(
-                state, _mk_tool_call("skill_step_complete", idx=1),
-                _mk_tool_msg("c1"), "skill_step_complete", sid,
+                state, _mk_tool_call("skill_step", action="complete", idx=1),
+                _mk_tool_msg("c1"), "skill_step", sid,
             )
             assert state.phase == SkillPhase.IN_PROGRESS
 
             tk.todo_complete(2, "ok")
             rail._handle_tool_event(
-                state, _mk_tool_call("skill_step_complete", idx=2),
-                _mk_tool_msg("c2"), "skill_step_complete", sid,
+                state, _mk_tool_call("skill_step", action="complete", idx=2),
+                _mk_tool_msg("c2"), "skill_step", sid,
             )
             assert state.phase == SkillPhase.DONE
 

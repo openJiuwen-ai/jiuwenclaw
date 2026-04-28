@@ -91,7 +91,7 @@ class TeamManager:
         from jiuwenclaw.agentserver.cron_config import should_register_cron_tools
         from jiuwenclaw.agentserver.deep_agent.cron_runtime import CronRuntimeBridge
         from jiuwenclaw.agentserver.tools.send_file_to_user import SendFileToolkit
-        from jiuwenclaw.agentserver.tools.todo_toolkits import SkillStepToolkit
+        from jiuwenclaw.agentserver.tools.skill_step_toolkit import SkillStepToolkit
         from openjiuwen.core.runner import Runner
 
         agent_id = getattr(getattr(agent, "card", None), "id", None)
@@ -125,7 +125,7 @@ class TeamManager:
 
         # 整个方法体放在 try-finally 中，确保路由上下文在退出时重置
         try:
-            # Team 成员的 skill 步骤追踪（SkillStepToolkit）：写入 skill_step.md，
+            # Team 成员的 skill 步骤追踪（skill_step facade）：写入 skill_step.md，
             # 与 SkillComplianceRail 共用该文件路径。
             # 这里再调一次只是保险兜底：主 adapter 未初始化的场景（如单元测试直接构造 team）也能可用。
             # 与 SkillComplianceRail 一致使用显式 team session，避免依赖未绑定的 plan 上下文。
@@ -138,12 +138,12 @@ class TeamManager:
                     agent.ability_manager.add(step_tool.card)
                     skill_step_tool_names.append(step_tool.card.name)
                 logger.info(
-                    "[TeamManager] SkillStepToolkit registered for member agent=%s session=%s tools=%s",
+                    "[TeamManager] skill_step facade registered for member agent=%s session=%s tools=%s",
                     agent_id, session_id, skill_step_tool_names,
                 )
             except Exception as exc:
                 logger.warning(
-                    "[TeamManager] SkillStepToolkit registration failed for member agent=%s: %s",
+                    "[TeamManager] skill_step facade registration failed for member agent=%s: %s",
                     agent_id, exc,
                 )
 

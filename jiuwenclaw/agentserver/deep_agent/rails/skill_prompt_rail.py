@@ -1,13 +1,12 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 
-"""SkillProtocolPromptRail — 注入「技能执行规范」与「用户任务 todo」两段提示词。
+"""SkillProtocolPromptRail — 注入「技能执行规范」提示词。
 
 技能清单与 ``skill_tool`` / ``skill_complete`` 约定由上游 SkillUseRail 的 ``skills`` 段负责；
 本 rail 的 ``skill_protocol`` 与之对齐（加载 SKILL.md 正文**只能**使用 ``skill_tool``：
 只有它会走 agent 侧 ``active_skill_bodies`` / 消息保护与 pin 注入；
 **禁止**用其它工具冒充等价加载），
-并可选注入用户 todo section，以及随生命周期注册 SkillStepToolkit / TodoToolkit。
-``include_user_todo_section=False`` 用于 Team 成员等不持有 TodoToolkit 的场景。
+并随生命周期注册统一的 ``skill_step`` facade 工具。
 """
 
 from __future__ import annotations
@@ -31,7 +30,6 @@ from jiuwenclaw.utils import logger
 
 
 _SKILL_PROTOCOL_SECTION_NAME = "skill_protocol"
-_TODO_SECTION_NAME = "todo"
 _SKILL_PLAN_REQUIRED_SECTION_NAME = "skill_plan_required"
 _SKILL_COMPLETE_REQUIRED_SECTION_NAME = "skill_complete_required"
 # Slot just above SKILL_PROTOCOL so phase-driven directives render adjacent
@@ -59,7 +57,7 @@ def _build_skill_plan_required_text(language: str, skill_name: str) -> str:
             f"skill_step 计划。在创建计划之前：\n\n"
             f"1. **禁止**执行 SKILL.md 中的任何步骤、脚本、工具调用（包括"
             f"『先看一下』『先调用一次试试』等）。\n"
-            f"2. **必须**首先调用 `skill_step_create`，为 SKILL.md 中定义的每个步骤"
+            f"2. **必须**首先调用 `skill_step(action=\"create\")`，为 SKILL.md 中定义的每个步骤"
             f"创建一个 skill_step 项，作为执行路线图。\n"
             f"3. 只有 skill_step 计划创建完成后，才能开始按顺序执行第一个步骤。\n\n"
             f"⚠️ 这是『中途进入』也必须遵守的硬性约束——无论你是从对话开头还是中途加载的 "
@@ -71,7 +69,7 @@ def _build_skill_plan_required_text(language: str, skill_name: str) -> str:
         f"created the corresponding skill_step plan. Before the plan is created:\n\n"
         f"1. You MUST NOT execute any step, script, or tool call from SKILL.md "
         f"(including 'just take a look' or 'try calling it once').\n"
-        f"2. You MUST first call `skill_step_create` with one skill_step item per "
+        f"2. You MUST first call `skill_step(action=\"create\")` with one skill_step item per "
         f"step defined in SKILL.md as the execution roadmap.\n"
         f"3. Only after the skill_step plan is created may you begin executing the "
         f"first step in order.\n\n"
@@ -88,7 +86,8 @@ def _build_skill_complete_required_text(language: str, skill_name: str) -> str:
             f"当前 session 的所有 skill_step 项已经全部完成（技能：{skill_name}）。"
             f"在调用 `skill_complete(skill_name=\"{skill_name}\")` 收尾之前：\n\n"
             f"1. **禁止**继续执行 SKILL.md 中的任何步骤——它们都已完成。\n"
-            f"2. **禁止**为同一技能再次 `skill_step_create` 或 `skill_step_insert` 添加新任务。\n"
+            f"2. **禁止**为同一技能再次 `skill_step(action=\"create\")` "
+            f"或 `skill_step(action=\"insert\")` 添加新任务。\n"
             f"3. **必须**立即调用 `skill_complete(skill_name=\"{skill_name}\")` 释放技能上下文。\n\n"
             f"只有调用 skill_complete 之后，才能进入下一个任务（或下一个技能）。\n"
         )
@@ -97,7 +96,8 @@ def _build_skill_complete_required_text(language: str, skill_name: str) -> str:
         f"All skill_step items for this session have been completed (skill: {skill_name}). "
         f"Before calling `skill_complete(skill_name=\"{skill_name}\")` to finalize:\n\n"
         f"1. You MUST NOT execute additional steps from SKILL.md — they are all done.\n"
-        f"2. You MUST NOT add new tasks via `skill_step_create` or `skill_step_insert` "
+        f"2. You MUST NOT add new tasks via `skill_step(action=\"create\")` "
+        f"or `skill_step(action=\"insert\")` "
         f"for this same skill.\n"
         f"3. You MUST call `skill_complete(skill_name=\"{skill_name}\")` immediately to "
         f"release the skill context.\n\n"
@@ -120,18 +120,18 @@ def _build_skill_protocol_section_text(language: str) -> str:
 随后按 SKILL 工作流执行；下列规范约束执行过程。
 
 1. **声明步骤**：每次行动前，必须在回复开头声明当前所在步骤，格式：`[当前步骤: <步骤名称>]`。**无需调用任何工具来"开始"步骤**——声明本身即代表进入该步。
-2. **创建路线图**：读完 SKILL.md 后，调用一次 `skill_step_create`，按 SKILL.md 中的**章节级/阶段级步骤**建立执行路线图即可。**一旦进入 SKILL 执行语境，对 SKILL 步骤的任何拆解、追踪、完成标记，必须且只能使用 `skill_step_*` 工具，禁止使用 `todo_*` 工具承载 SKILL 步骤** —— `todo_*` 只用于 SKILL 语境以外的独立用户请求
-   | 工具名称 | 功能说明 |
+2. **创建路线图**：读完 SKILL.md 后，调用一次 `skill_step(action="create", tasks=[...])`，按 SKILL.md 中的**章节级/阶段级步骤**建立执行路线图即可。**对 SKILL 步骤的任何拆解、追踪、完成标记，必须且只能使用 `skill_step` 工具**
+   | 调用方式 | 功能说明 |
    |---------|---------|
-   | `skill_step_create` | 创建步骤列表（一次性创建所有章节级步骤） |
-   | `skill_step_insert` | 仅在确实需要时插入子步骤（见第 4 条） |
-   | `skill_step_complete` | 完成单个步骤并记录结果 |
-   | `skill_step_complete_batch` | 一次性收尾多个**已实际完成**的连续步骤；indices 必须严格升序、连续，且首项等于当前第一个未完成步 |
-   | `skill_step_remove` | 移除步骤 |
-   | `skill_step_list` | 查看所有步骤 |
+   | `skill_step(action="create", tasks=[...])` | 创建步骤列表（一次性创建所有章节级步骤） |
+   | `skill_step(action="insert", idx=..., tasks=[...])` | 仅在确实需要时插入子步骤（见第 4 条） |
+   | `skill_step(action="complete", idx=..., result="...")` | 完成单个步骤并记录结果 |
+   | `skill_step(action="complete_batch", indices=[...], results=[...])` | 一次性收尾多个**已实际完成**的连续步骤；indices 必须严格升序、连续，且首项等于当前第一个未完成步 |
+   | `skill_step(action="remove", idx=...)` | 移除步骤 |
+   | `skill_step(action="list")` | 查看所有步骤 |
 3. **严格顺序**：按 SKILL.md 定义的顺序逐步执行，**禁止跳过、合并或重排步骤**
-4. **按需拆分**：满足以下任一条件时调用 `skill_step_insert`：(a) 该步骤包含**多个独立、可单独失败**的子动作，需要分别跟踪进度；(b) 中间存在**需要单独向用户汇报**的产出节点；(c) 存在**需要单独把关**的风险/审批点。循环类步骤默认建一项即可，只有当每轮产物各自具有独立交付价值、需要单独留痕时才逐项建项。换句话说：只在拆分**真的能让执行更清晰**时才拆，避免为拆而拆
-5. **优先批量收尾**：执行过程中**优先**使用 `skill_step_complete_batch` 把若干已完成的连续步骤一次性收尾，减少工具往返；仅当某一步的产出需要单独说明、或后续步骤依赖该产出的具体描述时，才用单条 `skill_step_complete`。**所有子步骤 skill_step 完成后才能标记该步骤为完成**。**严禁预先标记**：只能为已经实际执行完毕的步骤调用 complete/complete_batch；批量收尾时 results 必须为每一步独立填写，不得合并成一段总结
+4. **按需拆分**：满足以下任一条件时调用 `skill_step(action="insert")`：(a) 该步骤包含**多个独立、可单独失败**的子动作，需要分别跟踪进度；(b) 中间存在**需要单独向用户汇报**的产出节点；(c) 存在**需要单独把关**的风险/审批点。循环类步骤默认建一项即可，只有当每轮产物各自具有独立交付价值、需要单独留痕时才逐项建项。换句话说：只在拆分**真的能让执行更清晰**时才拆，避免为拆而拆
+5. **优先批量收尾**：执行过程中**优先**使用 `skill_step(action="complete_batch")` 把若干已完成的连续步骤一次性收尾，减少工具往返；仅当某一步的产出需要单独说明、或后续步骤依赖该产出的具体描述时，才用 `skill_step(action="complete")`。**所有子步骤 skill_step 完成后才能标记该步骤为完成**。**严禁预先标记**：只能为已经实际执行完毕的步骤调用 complete/complete_batch；批量收尾时 results 必须为每一步独立填写，不得合并成一段总结
 6. **闸门等待**：遇到需要用户确认/审批的步骤时，**必须等待用户回复，禁止自行假设用户同意**
 7. **不确定时重读**：只能再次调用 `skill_tool`，**不得**用其它工具获取 SKILL.md
 8. **内容忠实**：SKILL.md 是规格说明，不是参考建议。其中定义的选项列表、参数值、标签文本、推荐标记等必须**原样使用**，禁止自行添加、删除、修改或重新措辞
@@ -151,18 +151,18 @@ The "Skills" section of this prompt (from SkillUseRail) lists available skills a
 Then execute the workflow; the rules below govern execution.
 
 1. **Declare step**: Before each action, state your current step at the start of your reply: `[Current Step: <step name>]`. **You do NOT call any tool to "start" a step** — the declaration itself enters the step.
-2. **Create the roadmap**: After reading SKILL.md, call `skill_step_create` once with one item per **chapter-level / phase-level step** defined in the document. **Once in a SKILL execution context, any breakdown, tracking, or completion of SKILL steps MUST use `skill_step_*` tools exclusively. Never use `todo_*` tools to hold SKILL steps** — `todo_*` is only for standalone user requests outside any SKILL context.
-   | Tool Name | Description |
+2. **Create the roadmap**: After reading SKILL.md, call `skill_step(action="create", tasks=[...])` once with one item per **chapter-level / phase-level step** defined in the document. **Any breakdown, tracking, or completion of SKILL steps MUST use the `skill_step` tool exclusively.**
+   | Call | Description |
    |-----------|-------------|
-   | `skill_step_create` | Create the step list (one call, all chapter-level steps) |
-   | `skill_step_insert` | Insert sub-steps **only when actually needed** (see rule 4) |
-   | `skill_step_complete` | Mark a single step complete and record the outcome |
-   | `skill_step_complete_batch` | Close out several **already-finished** contiguous steps in one call. `indices` must be strictly ascending, contiguous, and start at the first open step. |
-   | `skill_step_remove` | Remove a step |
-   | `skill_step_list` | View all steps |
+   | `skill_step(action="create", tasks=[...])` | Create the step list (one call, all chapter-level steps) |
+   | `skill_step(action="insert", idx=..., tasks=[...])` | Insert sub-steps **only when actually needed** (see rule 4) |
+   | `skill_step(action="complete", idx=..., result="...")` | Mark a single step complete and record the outcome |
+   | `skill_step(action="complete_batch", indices=[...], results=[...])` | Close out several **already-finished** contiguous steps in one call. `indices` must be strictly ascending, contiguous, and start at the first open step. |
+   | `skill_step(action="remove", idx=...)` | Remove a step |
+   | `skill_step(action="list")` | View all steps |
 3. **Strict order**: Execute steps in the exact order defined in SKILL.md. **Never skip, merge, or reorder steps.**
-4. **Break down on demand**: Use `skill_step_insert` when at least one of the following holds: (a) the step contains **multiple independent, separately-failable sub-actions** that need to be tracked individually; (b) there is an interim deliverable that **must be reported separately to the user**; (c) there is a risk / approval point that **needs separate gating**. For loop-style steps, default to a single skill_step; only enumerate per-iteration items when each iteration's output has independent delivery value and must be tracked separately. In short: split **only when splitting genuinely makes execution clearer** — do not split for the sake of splitting.
-5. **Prefer batch completion**: During execution, **prefer** `skill_step_complete_batch` to close out several finished contiguous steps in one call, reducing unnecessary tool round-trips. Use single `skill_step_complete` only when a particular step's output needs a dedicated description, or when subsequent steps depend on that specific description. **All sub-step skill_step items must be completed before marking the step as done.** **Never pre-mark**: only call complete/complete_batch for steps you have actually executed; in batch calls each `results` entry must be filled independently and must not be merged into a single summary.
+4. **Break down on demand**: Use `skill_step(action="insert")` when at least one of the following holds: (a) the step contains **multiple independent, separately-failable sub-actions** that need to be tracked individually; (b) there is an interim deliverable that **must be reported separately to the user**; (c) there is a risk / approval point that **needs separate gating**. For loop-style steps, default to a single skill_step; only enumerate per-iteration items when each iteration's output has independent delivery value and must be tracked separately. In short: split **only when splitting genuinely makes execution clearer** — do not split for the sake of splitting.
+5. **Prefer batch completion**: During execution, **prefer** `skill_step(action="complete_batch")` to close out several finished contiguous steps in one call, reducing unnecessary tool round-trips. Use `skill_step(action="complete")` only when a particular step's output needs a dedicated description, or when subsequent steps depend on that specific description. **All sub-step skill_step items must be completed before marking the step as done.** **Never pre-mark**: only call complete/complete_batch for steps you have actually executed; in batch calls each `results` entry must be filled independently and must not be merged into a single summary.
 6. **Gate enforcement**: When a step requires user confirmation/approval, **you MUST wait for the user's response. Never assume approval.**
 7. **Re-read when unsure**: Refresh the SKILL.md body **only** by calling `skill_tool` again — **never** use any other tool to obtain SKILL.md.
 8. **Content fidelity**: SKILL.md is a specification, not a suggestion. Option lists, parameter values, label text, and recommendation markers defined therein must be used **verbatim** — never add, remove, modify, or rephrase them.
@@ -171,54 +171,13 @@ Then execute the workflow; the rules below govern execution.
 """
 
 
-def _build_todo_section_text(language: str) -> str:
-    """用户任务规划 ``todo_*`` 工具的使用说明（与 skill_step_* 职责分离）。"""
-    if language == "cn":
-        return """### 用户任务规划与追踪
-
-以下 `todo_*` 工具**仅用于 SKILL 执行语境以外的独立用户请求**的拆解与跟踪。
-
-**严禁用于 SKILL 步骤**：一旦你进入任何 SKILL 执行语境（已加载或正在执行 SKILL.md），对 SKILL 步骤的任何拆解、追踪、完成标记**必须**使用 `skill_step_*` 工具，**不得**使用下列 `todo_*` 工具承载 SKILL 步骤。
-
-| 工具名称 | 功能说明 |
-|---------|---------|
-| `todo_create` | 创建任务（单条或多条） |
-| `todo_start` | 标记任务为进行中 |
-| `todo_insert` | 插入任务到指定位置 |
-| `todo_complete` | 完成任务并记录结果 |
-| `todo_remove` | 移除任务 |
-| `todo_list` | 查看所有任务 |
-"""
-    return """### User Task Planning & Tracking
-
-The `todo_*` tools below are **only for standalone user requests outside any SKILL execution context**.
-
-**Never for SKILL steps**: Once you enter any SKILL execution context (SKILL.md loaded or being executed), any breakdown, tracking, or completion of SKILL steps **MUST** use `skill_step_*` tools. You **MUST NOT** use the `todo_*` tools below to hold SKILL steps.
-
-| Tool Name | Description |
-|-----------|-------------|
-| `todo_create` | Create tasks (single or multiple) |
-| `todo_start` | Mark a task as running (in progress) |
-| `todo_insert` | Insert tasks at a specific position |
-| `todo_complete` | Mark a task complete and record the outcome |
-| `todo_remove` | Remove a task |
-| `todo_list` | View all tasks |
-"""
-
-
 class SkillProtocolPromptRail(DeepAgentRail):
-    """每次 model_call 前刷新 skill_protocol + todo 提示词段。
-
-    ``include_user_todo_section``：是否注入用户任务规划 todo section。
-    仅当调用方 agent 注册了 TodoToolkit 时传 True；Team 成员等未注册 TodoToolkit
-    的场景传 False，避免提示模型调用不存在的工具。
-    """
+    """每次 model_call 前刷新 skill_protocol 提示词段。"""
 
     priority = 8
 
-    def __init__(self, *, include_user_todo_section: bool = True) -> None:
+    def __init__(self) -> None:
         super().__init__()
-        self._include_user_todo_section: bool = include_user_todo_section
         self.system_prompt_builder = None
         self._registered_tools: list[Any] = []
 
@@ -229,7 +188,6 @@ class SkillProtocolPromptRail(DeepAgentRail):
     def uninit(self, agent) -> None:
         if self.system_prompt_builder is not None:
             self.system_prompt_builder.remove_section(_SKILL_PROTOCOL_SECTION_NAME)
-            self.system_prompt_builder.remove_section(_TODO_SECTION_NAME)
             self.system_prompt_builder.remove_section(_SKILL_PLAN_REQUIRED_SECTION_NAME)
             self.system_prompt_builder.remove_section(_SKILL_COMPLETE_REQUIRED_SECTION_NAME)
         self.system_prompt_builder = None
@@ -243,44 +201,35 @@ class SkillProtocolPromptRail(DeepAgentRail):
             _session_id_var.set(conv_id)
 
     def _register_session_toolkits(self, agent) -> None:
-        """注册 SkillStepToolkit（+ 可选 TodoToolkit）到 agent，随 rail 生命周期上线/下线。"""
+        """注册 skill_step facade 到 agent，随 rail 生命周期上线/下线。"""
         if self._registered_tools:
             return
         try:
-            from jiuwenclaw.agentserver.tools.todo_toolkits import (
-                SkillStepToolkit,
-                TodoToolkit,
-            )
+            from jiuwenclaw.agentserver.tools.skill_step_toolkit import SkillStepToolkit
         except Exception as exc:
             logger.warning(
                 "[SkillProtocolPromptRail] session toolkits import failed: %s", exc,
             )
             return
 
-        toolkit_classes: list[type] = [SkillStepToolkit]
-        if self._include_user_todo_section:
-            toolkit_classes.append(TodoToolkit)
-
         registered: list[Any] = []
         ability_mgr = getattr(agent, "ability_manager", None)
-        for toolkit_cls in toolkit_classes:
-            try:
-                toolkit = toolkit_cls()
-                for tool in toolkit.get_tools():
-                    if ability_mgr is not None:
-                        existing = ability_mgr.get(tool.card.name)
-                        if isinstance(existing, ToolCard):
-                            ability_mgr.remove(tool.card.name)
-                    if not Runner.resource_mgr.get_tool(tool.card.id):
-                        Runner.resource_mgr.add_tool(tool)
-                    if ability_mgr is not None:
-                        ability_mgr.add(tool.card)
-                    registered.append(tool)
-            except Exception as exc:
-                logger.warning(
-                    "[SkillProtocolPromptRail] register %s failed: %s",
-                    toolkit_cls.__name__, exc,
-                )
+        try:
+            toolkit = SkillStepToolkit()
+            for tool in toolkit.get_tools():
+                if ability_mgr is not None:
+                    existing = ability_mgr.get(tool.card.name)
+                    if isinstance(existing, ToolCard):
+                        ability_mgr.remove(tool.card.name)
+                if not Runner.resource_mgr.get_tool(tool.card.id):
+                    Runner.resource_mgr.add_tool(tool)
+                if ability_mgr is not None:
+                    ability_mgr.add(tool.card)
+                registered.append(tool)
+        except Exception as exc:
+            logger.warning(
+                "[SkillProtocolPromptRail] register skill_step facade failed: %s", exc,
+            )
 
         self._registered_tools = registered
         logger.info(
@@ -318,7 +267,7 @@ class SkillProtocolPromptRail(DeepAgentRail):
         """Inject/remove phase-driven mandatory sections.
 
         Phase → section mapping:
-            WAITING_PLAN → skill_plan_required (must call skill_step_create)
+            WAITING_PLAN → skill_plan_required (must call skill_step action=create)
             DONE         → skill_complete_required (must call skill_complete)
             IDLE / IN_PROGRESS → no extra phase section (only the always-on
                                  skill_protocol section applies).
@@ -385,25 +334,6 @@ class SkillProtocolPromptRail(DeepAgentRail):
             logger.warning(
                 "[SkillProtocolPromptRail] build skill_protocol section failed: %s", exc,
             )
-
-        if self._include_user_todo_section:
-            try:
-                todo_text = _build_todo_section_text(language)
-                self.system_prompt_builder.add_section(PromptSection(
-                    name=_TODO_SECTION_NAME,
-                    content={language: todo_text},
-                    priority=self._resolve_priority(_TODO_SECTION_NAME, PromptPriority.TODO),
-                ))
-            except Exception as exc:
-                logger.warning("[SkillProtocolPromptRail] build todo section failed: %s", exc)
-        else:
-            # Team 等未注册 TodoToolkit 的场景：确保上游不残留旧的 todo section。
-            try:
-                self.system_prompt_builder.remove_section(_TODO_SECTION_NAME)
-            except Exception as exc:
-                logger.debug(
-                    "[SkillProtocolPromptRail] remove residual todo section skipped: %s", exc,
-                )
 
 
 __all__ = ["SkillProtocolPromptRail"]

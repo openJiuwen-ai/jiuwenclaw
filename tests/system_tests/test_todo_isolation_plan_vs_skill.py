@@ -17,7 +17,8 @@ import pytest
 
 from jiuwenclaw.agentserver import plan_todo_context
 from jiuwenclaw.agentserver.tools import todo_toolkits
-from jiuwenclaw.agentserver.tools.todo_toolkits import SkillStepToolkit, TodoToolkit
+from jiuwenclaw.agentserver.tools.skill_step_toolkit import SkillStepToolkit
+from jiuwenclaw.agentserver.tools.todo_toolkits import TodoToolkit
 
 pytestmark = [pytest.mark.integration, pytest.mark.system]
 
@@ -69,16 +70,18 @@ def test_todo_and_skill_step_write_to_separate_files(sessions_dir: Path, set_ses
     assert "plan task one" not in skill_content
 
 
-def test_skill_step_toolkit_exposes_prefixed_tools(sessions_dir: Path, set_session):
+def test_skill_step_toolkit_exposes_only_facade_tool(sessions_dir: Path, set_session):
+    """SkillStepToolkit collapses to a single ``skill_step`` facade tool, while
+    TodoToolkit keeps its ``todo_*`` surface untouched.
+    """
     set_session("sess-prefix")
 
     todo_tools = {t.card.name for t in TodoToolkit().get_tools()}
     skill_tools = {t.card.name for t in SkillStepToolkit().get_tools()}
 
     assert "todo_create" in todo_tools
-    assert "todo_create" not in skill_tools
-    assert "skill_step_create" in skill_tools
-    assert "skill_step_list" in skill_tools
+    assert skill_tools == {"skill_step"}
+    assert todo_tools.isdisjoint(skill_tools)
 
 
 def test_plan_session_switch_routes_to_different_session_dirs(sessions_dir: Path, set_session):

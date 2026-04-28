@@ -9,8 +9,7 @@ registered in the openJiuwen Runner via TodoToolkit.get_tools().
 TodoToolkit 可无参构造，此时 session_id 在每次工具调用时通过
 jiuwenclaw.agentserver.plan_todo_context.get_plan_todo_session_id() 动态解析，
 使一个全局注册的实例能在多 session 并发下正确路由到各自的
-agent/sessions/{session_id}/ 文件。SkillStepToolkit 继承本类，只覆盖文件名与工具
-前缀，用于 SkillComplianceRail 追踪 skill 步骤，避免和用户 todo.md 互相覆盖。
+agent/sessions/{session_id}/ 文件。
 """
 
 from __future__ import annotations
@@ -118,9 +117,7 @@ class TodoToolkit:
     TOOL_PREFIX: ClassVar[str] = "todo"
 
     # Subclasses may flip these to tailor which surface is exposed without
-    # rewriting get_tools. SkillStepToolkit, for example, hides ``*_start`` and
-    # exposes ``*_complete_batch`` so that skill protocol enforcement can rely
-    # on a single batch-friendly completion call per logical step.
+    # rewriting get_tools.
     EXPOSE_START: ClassVar[bool] = True
     EXPOSE_COMPLETE_BATCH: ClassVar[bool] = False
 
@@ -130,7 +127,7 @@ class TodoToolkit:
     PARTS_INDEX_RESULT = 2  # result 在 split("|") 后的索引
 
     # 按 {class}:{session_id} 分组的文件锁，防止并发任务对同一 todo.md 进行
-    # read-modify-write 时丢失更新；父子类（TodoToolkit / SkillStepToolkit）不共享锁。
+    # read-modify-write 时丢失更新；不同 toolkit 子类不共享锁。
     _session_locks: ClassVar[Dict[str, threading.Lock]] = {}
     _meta_lock: ClassVar[threading.Lock] = threading.Lock()
 
@@ -191,9 +188,7 @@ class TodoToolkit:
         """Delete the todo file for the current session if it exists.
 
         Returns True if a file was actually removed, False if there was nothing
-        to remove. Safe under the per-session lock; intended for end-of-skill
-        cleanup so a stale plan from a previous skill cannot be misread as the
-        active plan after the next SKILL.md load.
+        to remove. Safe under the per-session lock.
         """
         with self._get_session_lock(self.session_id):
             path = self._todo_path
@@ -752,28 +747,3 @@ class TodoToolkit:
             ),
         ])
         return tools
-
-
-class SkillStepToolkit(TodoToolkit):
-    """Skill 步骤追踪 toolkit：仅覆盖文件名与工具前缀，其他行为继承 TodoToolkit。
-
-    与父类的 ``todo_*`` 工具集差异：
-    - 不暴露 ``skill_step_start``：当前步骤通过 prompt 文本声明即可，
-      避免每步多一次工具调用与 LLM 思考往返。
-    - 暴露 ``skill_step_complete_batch``：允许将多个连续且已实际完成的步骤
-      在一次调用内一并收尾，进一步压缩工具调用次数。
-
-    文件：``agent/sessions/{session_id}/skill_step.md``
-    工具：``skill_step_create`` / ``skill_step_complete`` /
-          ``skill_step_complete_batch`` / ``skill_step_insert`` /
-          ``skill_step_remove`` / ``skill_step_list``
-
-    写操作（create/start/complete/insert/remove）的返回值**不**附带整份清单，
-    避免每条 tool 结果重复「Current todo list」撑爆上下文；权威状态在磁盘
-    ``skill_step.md``，需要时用 ``skill_step_list`` 拉取。
-    """
-
-    TODO_FILENAME: ClassVar[str] = "skill_step.md"
-    TOOL_PREFIX: ClassVar[str] = "skill_step"
-    EXPOSE_START: ClassVar[bool] = False
-    EXPOSE_COMPLETE_BATCH: ClassVar[bool] = True
