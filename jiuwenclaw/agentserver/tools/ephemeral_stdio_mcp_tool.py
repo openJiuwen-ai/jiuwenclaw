@@ -102,6 +102,14 @@ class EphemeralStdioMcpTool(Tool):
             tool_result = await session.call_tool(self._card.name, arguments=arguments)
             result_content: str | None = None
             if tool_result.content and len(tool_result.content) > 0:
+                try:
+                    logger.info(
+                        "[EphemeralStdioMcp] tool=%s raw_content=%s",
+                        self._card.name,
+                        repr(tool_result.content),
+                    )
+                except Exception:
+                    logger.debug("[EphemeralStdioMcp] tool=%s raw content debug failed", self._card.name, exc_info=True)
                 result_content = tool_result.content[-1].text
             logger.info("[EphemeralStdioMcp] tool=%s done", self._card.name)
             return {"result": result_content}
