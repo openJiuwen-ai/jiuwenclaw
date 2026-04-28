@@ -48,27 +48,51 @@ class AgentManager:
     - "default": 默认通道
     """
 
-    def __init__(self, agent_id: str, service_id: str, user_workspace_dir: Path | None = None) -> None:
+    def __init__(
+            self,
+            agent_id: str,
+            service_id: str,
+            user_workspace_dir: Path | None = None,
+            config_base: dict[str, Any] | None = None,
+            env_overrides: dict[str, Any] | None = None,
+    ) -> None:
         """初始化 AgentManager.
 
         Args:
             agent_id: agent名称/路径
             service_id: 服务ID（chat_id + bot_app_id 组合）
             user_workspace_dir: 用户工作目录路径
+            config_base: 初始配置（用于懒加载 agent 时重放）
+            env_overrides: 初始环境变量覆盖（用于懒加载 agent 时重放）
         """
         # 结构: dict[channel_id][mode][session_id] -> JiuWenClaw
         # 每个 session_id 对应独立的 Agent 实例，支持多 session 并发执行
         self.agents: dict[str, dict[str, dict[str, "JiuWenClaw"]]] = {}
         self._client_capabilities_by_channel: dict[str, dict[str, Any]] = {}
+
+        # 保存初始配置（用于后续创建的 agent 重放）
+        self._latest_config_base: dict[str, Any] | None = config_base
         self._latest_env_overrides: dict[str, Any] = {}
+
+        # 应用初始 env_overrides
+        if env_overrides is not None and isinstance(env_overrides, dict):
+            self._latest_env_overrides = dict(env_overrides)
+            for env_key, env_value in env_overrides.items():
+                key = str(env_key)
+                if env_value is None:
+                    os.environ.pop(key, None)
+                else:
+                    os.environ[key] = str(env_value)
+
         self.agent_id = agent_id
         self.service_id = service_id
         self.user_workspace_dir = user_workspace_dir
         logger.info(
-            "[AgentManager] 初始化: agent_id=%s, service_id=%s, workspace=%s",
+            "[AgentManager] 初始化: agent_id=%s, service_id=%s, workspace=%s, has_config=%s",
             agent_id,
             service_id,
             user_workspace_dir,
+            config_base is not None,
         )
 
     # pylint: disable=protected-access
@@ -108,6 +132,21 @@ class AgentManager:
         agent._agent_name = f"agent_{self.agent_id}_{self.service_id}_{agent_key}_{session_id}"
         await agent.create_instance(config, mode=mode)
         self.agents.setdefault(agent_key, {}).setdefault(mode, {})[session_id] = agent
+
+        # 创建后如果有保存的配置，重放 reload_agent_config
+        if self._latest_config_base is not None or self._latest_env_overrides:
+            try:
+                await agent.reload_agent_config(
+                    config_base=self._latest_config_base,
+                    env_overrides=self._latest_env_overrides,
+                )
+                logger.info(
+                    "[AgentManager] Replayed reload_agent_config for %s agent (session=%s)",
+                    agent_key, session_id
+                )
+            except Exception as e:
+                logger.warning("[AgentManager] Replay reload_agent_config failed: %s", e)
+
         logger.info("[AgentManager] %s agent created for tenant %s (session=%s)", agent_key, self.agent_id, session_id)
         return agent
 
@@ -258,7 +297,10 @@ class AgentManager:
 
     async def reload_agents_config(self, config, env) -> None:
         """reload agent config"""
+        # 保存配置（用于后续创建的 agent 重放）
         self._latest_env_overrides = dict(env) if isinstance(env, dict) else {}
+        self._latest_config_base = config
+
         for env_key, env_value in self._latest_env_overrides.items():
             key = str(env_key)
             if env_value is None:

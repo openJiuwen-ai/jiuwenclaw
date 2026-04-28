@@ -28,6 +28,10 @@ class TenantAgentPool:
         self._lock_loops: dict[str, asyncio.AbstractEventLoop] = {}
         self._global_lock = asyncio.Lock()
 
+        # 保存全局最新配置，用于后续创建 AgentManager 时传递
+        self._latest_config: Any = None
+        self._latest_env: Any = None
+
     @classmethod
     def get_instance(cls) -> "TenantAgentPool":
         """获取单例实例."""
@@ -181,7 +185,15 @@ class TenantAgentPool:
 
     async def reload_agents_config(self, config: Any, env: Any) -> None:
         """与 ``AgentManager.reload_agents_config`` 一致：对每个已缓存租户热重载配置。"""
+        # 保存配置，用于后续创建的 AgentManager 传递
+        self._latest_config = config
+        self._latest_env = env
+
         keys = await self._agent_wrappers.keys()
+        if not keys:
+            logger.info("[TenantAgentPool] No AgentManager instances yet, config saved for future creation")
+            return
+
         for key in keys:
             agent_manager = await self._agent_wrappers.get(key)
             if agent_manager is None:
@@ -227,11 +239,13 @@ class TenantAgentPool:
 
                 from jiuwenclaw.agentserver.agent_manager import AgentManager
 
-                # 创建新的 AgentManager 实例
+                # 创建新的 AgentManager 实例，传入保存的配置
                 agent_manager = AgentManager(
                     agent_id=agent_id,
                     service_id=service_id,
                     user_workspace_dir=agent_dir_path,
+                    config_base=self._latest_config,
+                    env_overrides=self._latest_env,
                 )
 
                 # 存入 LRU 缓存

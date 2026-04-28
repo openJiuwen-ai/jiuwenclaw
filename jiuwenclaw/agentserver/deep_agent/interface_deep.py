@@ -1384,8 +1384,16 @@ class JiuWenClawDeepAdapter:
         *,
         include_tools: bool = False,
         include_skill_body_tools: bool = True,
+        extra_skill_dir: str | None = None,
     ) -> SkillUseRail | None:
-        """Build SkillUseRail."""
+        """Build SkillUseRail.
+        
+        Args:
+            config: React config dict
+            include_tools: Whether to include harness read_file/code/bash tools
+            include_skill_body_tools: Whether to include skill_tool/skill_complete tools
+            extra_skill_dir: Optional extra skill directory from extension hook
+        """
         try:
             skill_mode = self._resolve_skill_mode(config)
             logger.info("[JiuWenClawDeepAdapter] current skill_mode: %s", skill_mode)
@@ -1398,8 +1406,15 @@ class JiuWenClawDeepAdapter:
                     max_bodies = int(react_cec["max_active_skill_bodies"])
                 except (TypeError, ValueError):
                     max_bodies = DEFAULT_MAX_ACTIVE_SKILL_BODIES
+            
+            # 合并技能目录：基础目录 + 扩展传入的额外目录
+            skills_dirs = [str(p) for p in get_agent_registered_skill_dirs()]
+            if extra_skill_dir:
+                skills_dirs.append(extra_skill_dir)
+                logger.info("[JiuWenClawDeepAdapter] extra_skill_dir added: %s", extra_skill_dir)
+            
             skill_rail_kwargs: dict[str, Any] = dict(
-                skills_dir=[str(p) for p in get_agent_registered_skill_dirs()],
+                skills_dir=skills_dirs,
                 skill_mode=skill_mode,
                 include_tools=include_tools,
             )
@@ -1630,8 +1645,15 @@ class JiuWenClawDeepAdapter:
             )
             return None
 
-    def _build_runtime_prompt_rail(self) -> RuntimePromptRail | None:
-        """Build RuntimePromptRail for per-model-call time/channel/runtime injection."""
+    def _build_runtime_prompt_rail(
+        self,
+        custom_home_dir: str | None = None,
+    ) -> RuntimePromptRail | None:
+        """Build RuntimePromptRail for per-model-call time/channel/runtime injection.
+        
+        Args:
+            custom_home_dir: Optional custom home directory for SOUL.md loading
+        """
         try:
             default_channel = (
                 "acp" if self._is_acp_tool_profile(self._instance_overrides)
@@ -1645,7 +1667,10 @@ class JiuWenClawDeepAdapter:
                 workspace_dir=self._workspace_dir,
                 agent_id=self._agent_id,
                 service_id=self._service_id,
+                custom_home_dir=custom_home_dir,
             )
+            if custom_home_dir:
+                logger.info("[JiuWenClawDeepAdapter] custom_home_dir configured: %s", custom_home_dir)
             logger.info("[JiuWenClawDeepAdapter] RuntimePromptRail create success")
         except Exception as exc:
             logger.warning("[JiuWenClawDeepAdapter] RuntimePromptRail create failed: %s", exc)
@@ -1667,8 +1692,18 @@ class JiuWenClawDeepAdapter:
         return rail
 
     def _build_agent_rails(self, config: dict[str, Any], config_base: dict[str, Any], *,
-                           mode: str = "agent.plan") -> list[Any]:
-        """Build DeepAgent rails consistently for cold start and hot reload."""
+                           mode: str = "agent.plan",
+                           extra_skill_dir: str | None = None,
+                           custom_home_dir: str | None = None) -> list[Any]:
+        """Build DeepAgent rails consistently for cold start and hot reload.
+        
+        Args:
+            config: React config dict
+            config_base: Full config dict
+            mode: Agent mode (agent.plan, agent.fast, code)
+            extra_skill_dir: Optional extra skill directory from extension hook
+            custom_home_dir: Optional custom home directory from extension hook (for SOUL.md)
+        """
 
         @dataclass
         class _RailBuildInfo:
@@ -1682,7 +1717,11 @@ class JiuWenClawDeepAdapter:
         rail_infos = [
             # TelemetryRail - lowest priority, runs first for full coverage
             _RailBuildInfo("_telemetry_rail", self._build_telemetry_rail),
-            _RailBuildInfo("_runtime_prompt_rail", self._build_runtime_prompt_rail),
+            _RailBuildInfo(
+                "_runtime_prompt_rail",
+                self._build_runtime_prompt_rail,
+                {"custom_home_dir": custom_home_dir},
+            ),
             _RailBuildInfo("_response_prompt_rail", self._build_response_prompt_rail),
             _RailBuildInfo("_task_execution_rail", self._build_task_execution_rail),
             _RailBuildInfo("_stream_event_rail", self._build_stream_event_rail),
@@ -1736,6 +1775,7 @@ class JiuWenClawDeepAdapter:
                     "config": config,
                     "include_tools": self._skill_include_harness_fs_tools(),
                     "include_skill_body_tools": self._skill_include_skill_body_tools(),
+                    "extra_skill_dir": extra_skill_dir,
                 },
             ),
         )
@@ -1827,7 +1867,11 @@ class JiuWenClawDeepAdapter:
             if self._permission_rail is not None:
                 logger.info("[JiuWenClawDeepAdapter] _permission_rail newly created on hot-reload")
 
-    def _get_current_agent_rails(self, config: dict[str, Any], config_base: dict[str, Any] | None = None) -> list[Any]:
+    async def _get_current_agent_rails(
+        self,
+        config: dict[str, Any],
+        config_base: dict[str, Any] | None = None,
+    ) -> list[Any]:
         """Return rail instances that need to be re-initialized on hot reload.
 
         SkillUseRail, ContextEngineeringRail, and MemoryRail are rebuilt on config reload.
@@ -1835,6 +1879,29 @@ class JiuWenClawDeepAdapter:
         and are updated in-place where needed — they are NOT passed to configure()
         so their existing registered state is preserved without an uninit/init cycle.
         """
+        # 触发钩子获取扩展目录（与 create_instance 保持一致）
+        extra_skill_dir: str | None = None
+        custom_home_dir: str | None = None
+        try:
+            from jiuwenclaw.extensions.registry import ExtensionRegistry
+            from jiuwenclaw.schema.hooks_context import SystemPromptHookContext
+            from jiuwenclaw.schema import AgentServerHookEvents
+            
+            context = SystemPromptHookContext()
+            await ExtensionRegistry.get_instance().trigger(
+                AgentServerHookEvents.BEFORE_SYSTEM_PROMPT_BUILD, context
+            )
+            extra_skill_dir = context.skill_dir
+            custom_home_dir = context.home_dir
+            
+            logger.info(
+                "[JiuWenClawDeepAdapter] reload_agent_config: BEFORE_SYSTEM_PROMPT_BUILD triggered, "
+                "skill_dir=%s, home_dir=%s",
+                extra_skill_dir, custom_home_dir
+            )
+        except Exception as exc:
+            logger.warning("[JiuWenClawDeepAdapter] reload_agent_config hook trigger failed: %s", exc)
+
         # Apply in-place updates to skill_evolution_rail (no re-init needed).
         if self._skill_evolution_rail is not None:
             self._skill_evolution_rail.update_llm(self._model, config.get("model_name", "gpt-4"))
@@ -1846,7 +1913,17 @@ class JiuWenClawDeepAdapter:
             config,
             include_tools=self._skill_include_harness_fs_tools(),
             include_skill_body_tools=self._skill_include_skill_body_tools(),
+            extra_skill_dir=extra_skill_dir,
         )
+
+        # 更新 RuntimePromptRail 的 custom_home_dir（原地更新，无需重建）
+        if self._runtime_prompt_rail is not None:
+            self._runtime_prompt_rail.set_custom_home_dir(custom_home_dir)
+            if custom_home_dir:
+                logger.info(
+                    "[JiuWenClawDeepAdapter] RuntimePromptRail custom_home_dir updated on hot-reload: %s",
+                    custom_home_dir
+                )
 
         if not self._filesystem_rail_enabled_for_profile():
             self._filesystem_rail = None
@@ -2094,7 +2171,34 @@ class JiuWenClawDeepAdapter:
             permissions_cfg.get("enabled", True),
         )
 
-        rails_list = self._build_agent_rails(config, config_base, mode=mode)
+        # 触发 BEFORE_SYSTEM_PROMPT_BUILD 钩子获取扩展目录
+        extra_skill_dir: str | None = None
+        custom_home_dir: str | None = None
+        try:
+            from jiuwenclaw.extensions.registry import ExtensionRegistry
+            from jiuwenclaw.schema.hooks_context import SystemPromptHookContext
+            from jiuwenclaw.schema import AgentServerHookEvents
+            
+            context = SystemPromptHookContext()
+            await ExtensionRegistry.get_instance().trigger(
+                AgentServerHookEvents.BEFORE_SYSTEM_PROMPT_BUILD, context
+            )
+            extra_skill_dir = context.skill_dir
+            custom_home_dir = context.home_dir
+            
+            logger.info(
+                "[JiuWenClawDeepAdapter] BEFORE_SYSTEM_PROMPT_BUILD triggered: "
+                "skill_dir=%s, home_dir=%s",
+                extra_skill_dir, custom_home_dir
+            )
+        except Exception as exc:
+            logger.warning("[JiuWenClawDeepAdapter] hook trigger failed: %s", exc)
+
+        rails_list = self._build_agent_rails(
+            config, config_base, mode=mode,
+            extra_skill_dir=extra_skill_dir,
+            custom_home_dir=custom_home_dir,
+        )
 
         sys_operation = self._create_sys_operation()
         if sys_operation is None:
@@ -2262,7 +2366,7 @@ class JiuWenClawDeepAdapter:
                 logger.warning("[JiuWenClawDeepAdapter] ACP filesystem rail unregister failed: %s", exc)
             self._filesystem_rail = None
 
-        rails_list = self._get_current_agent_rails(config, config_base)
+        rails_list = await self._get_current_agent_rails(config, config_base)
 
         # 加载用户自定义的 Rail 扩展
         await self.load_user_rails()
