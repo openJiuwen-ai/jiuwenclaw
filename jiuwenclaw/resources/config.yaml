@@ -749,7 +749,7 @@ modes:
 
 # Petal 搜索：默认关闭；为 true 时需同时配置环境变量 API_BASE（或 OPENAI_BASE_URL）与 default_headers（JSON）
 
-enable_petal_search: true
+enable_petal_web_search: true
 
 enable_deepresearch: true
 

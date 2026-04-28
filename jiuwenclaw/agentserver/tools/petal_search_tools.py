@@ -3,7 +3,7 @@
 """Petal Search：通过 LLM 同源的 OpenAI 兼容网关调用 ``/v1/ai-tools/web-search``。
 
 与对话模型共用 ``API_BASE``（或 ``OPENAI_BASE_URL`` / ``OPENAI_API_BASE``）及 ``default_headers``（JSON），
-由 ``enable_petal_search`` 配置项与环境共同决定是否可用。实现独立于 ``search_tools``。"""
+由 ``enable_petal_web_search`` 配置项与环境共同决定是否可用。实现独立于 ``search_tools``。"""
 
 from __future__ import annotations
 
@@ -143,8 +143,7 @@ def petal_search_sync(query: str, max_results: int, timeout_seconds: int) -> dic
 def enable_petal_search() -> bool:
     """配置开启且 ``API_BASE`` + ``default_headers`` 可用时为 True。"""
     try:
-        cfg = get_config()
-        if not bool(cfg.get("enable_petal_search", False)):
+        if not bool(get_config().get("enable_petal_web_search", False)):
             return False
         _resolve_petal_search_url()
         _load_llm_default_headers()
@@ -158,7 +157,7 @@ def enable_petal_search() -> bool:
     description=(
         "Preferred web search tool when available. Use this before mcp_free_search for web searches. "
         "Petal web search via the same OpenAI-compatible API_BASE as the LLM "
-        "(POST .../v1/ai-tools/web-search). Requires enable_petal_search in config and default_headers env."
+        "(POST .../v1/ai-tools/web-search). Requires enable_petal_web_search in config and default_headers env."
     ),
 )
 async def mcp_petal_search(
@@ -173,7 +172,7 @@ async def mcp_petal_search(
     if not enable_petal_search():
         return (
             "[ERROR]: Petal search is disabled or misconfigured. "
-            "Set enable_petal_search: true in config, and API_BASE plus default_headers (JSON) in the environment."
+            "Set enable_petal_web_search: true in config, and API_BASE plus default_headers (JSON) in the environment."
         )
 
     max_results = max(1, min(max_results, 20))

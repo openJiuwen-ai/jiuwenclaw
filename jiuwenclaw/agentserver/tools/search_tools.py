@@ -401,11 +401,11 @@ def enable_petal_search() -> bool:
     try:
         from jiuwenclaw.config import get_config_raw
 
-        if not (get_config_raw().get("enable_petal_search") or False):
+        if not (get_config_raw().get("enable_petal_web_search") or False):
             return False
     except Exception:
         logger.warning(
-            "Failed to read enable_petal_search config", exc_info=True
+            "Failed to read enable_petal_web_search config", exc_info=True
         )
         return False
     api_base = (
