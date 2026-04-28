@@ -367,6 +367,7 @@ class TestDesignStageHandler(StageHandler):
                 agent, stage_name="test_design", query=prompt
             )
             output = self._parse_evals_json(raw)
+            ctx.release_agent_tools(agent)
             return output
 
         except ValueError as e:

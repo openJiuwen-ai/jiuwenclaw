@@ -156,7 +156,7 @@ class PlanStageHandler(StageHandler):
                 total_attempts,
             )
             plan = self._default_plan(ctx)
-
+        ctx.release_agent_tools(agent)
         return plan
 
     def _build_plan_query(self, ctx: SkillDevContext) -> str:

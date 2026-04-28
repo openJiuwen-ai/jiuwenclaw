@@ -146,7 +146,7 @@ class SkillDevTestRunner:
                 eval_name,
                 result.duration_seconds,
             )
-            
+            self.ctx.release_agent_tools(agent)
             return result.to_dict()
         
         except Exception as e:
@@ -215,7 +215,7 @@ class SkillDevTestRunner:
                 eval_name,
                 result.duration_seconds,
             )
-            
+            self.ctx.release_agent_tools(agent)
             return result.to_dict() if isinstance(result, ExecutionResult) else result
         
         except Exception as e:

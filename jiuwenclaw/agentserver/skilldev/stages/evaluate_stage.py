@@ -392,6 +392,7 @@ class EvaluateStageHandler(StageHandler):
                     ctx.state.task_id,
                     self._MAX_GRADE_RETRIES, eval_name, variant,
                 )
+            ctx.release_agent_tools(agent)
 
         grading = self._convert_agent_results_to_grading_result(agent_results)
         grading_dict = grading.to_dict() if hasattr(grading, "to_dict") else grading
@@ -803,6 +804,7 @@ class EvaluateStageHandler(StageHandler):
         except Exception as e:
             logger.error("[session=%s] [EvaluateStage] Analyst 结果解析失败: %s", ctx.state.task_id, e)
             suggestions = [{"category": "分析失败", "suggestion": str(e), "priority": "low"}]
+        ctx.release_agent_tools(analyst_agent)
         return suggestions
 
     def _parse_analyst_suggestions(self, response: str) -> list[Dict[str, str]]:

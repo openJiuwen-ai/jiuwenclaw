@@ -255,6 +255,7 @@ class DescOptimizeStageHandler(StageHandler):
                 len(queries),
             )
             queries = self._default_trigger_queries(skill_name)
+        ctx.release_agent_tools(agent)
         return queries[:10] if len(queries) > 10 else queries
 
     # ------------------------------------------------------------------
@@ -457,12 +458,15 @@ class DescOptimizeStageHandler(StageHandler):
                 "<new_description>",
                 ctx.state.task_id,
             )
+            ctx.release_agent_tools(agent)
             return improve_input.current_desc
         new_desc = self._normalize_description_text(new_desc)
         if not new_desc:
+            ctx.release_agent_tools(agent)
             return improve_input.current_desc
         if len(new_desc) > SKILL_DESC_MAX_LEN:
             new_desc = new_desc[:SKILL_DESC_MAX_LEN].rstrip()
+        ctx.release_agent_tools(agent)
         return new_desc
 
     # ------------------------------------------------------------------

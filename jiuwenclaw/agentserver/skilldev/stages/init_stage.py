@@ -42,7 +42,7 @@ _SKILL_NAME_SYSTEM_PROMPT = """你是命名助手。请基于用户需求与已�
 要求：
 1) 只输出 skill 名称本身，不要思考，不要解释。
 2) 使用 kebab-case，仅允许小写字母、数字、短横线。
-3) 语义清晰，长度建议 2-4 个词。
+3) 语义清晰，长度建议 2-4 个词，总长度不超过30字符。
 4) skill 名称中不要出现`skill`字样，只输出技能名称本身。
 """
 
@@ -206,14 +206,18 @@ class InitStageHandler(StageHandler):
                 if attempt < _MAX_SKILL_NAME_ATTEMPTS:
                     continue
                 name, _ = self._normalize_skill_name(user_query, fallback_text=user_query)
+                ctx.release_agent_tools(agent)
                 return name
 
             name, need_retry = self._normalize_skill_name(raw_name, fallback_text="")
             if not need_retry and name:
+                ctx.release_agent_tools(agent)
                 return name
             if attempt < _MAX_SKILL_NAME_ATTEMPTS:
                 continue
+            ctx.release_agent_tools(agent)
             return "generated-skill"
+        ctx.release_agent_tools(agent)
         return "generated-skill"
 
     def _build_skill_name_query(

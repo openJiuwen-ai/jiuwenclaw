@@ -146,3 +146,4 @@ class ImproveStageHandler(StageHandler):
         await ctx.run_stage_agent_streaming(
             agent, stage_name="improve", query="根据反馈改进 Skill"
         )
+        ctx.release_agent_tools(agent)

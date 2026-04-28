@@ -326,12 +326,14 @@ class GenerateStageHandler(StageHandler):
         query = self._build_user_query(ctx)
         await ctx.run_stage_agent_streaming(agent, stage_name="generate", query=query)
         if not skill_dir.exists():
+            ctx.release_agent_tools(agent)
             return []
         generated_files = [
             str(path.relative_to(skill_dir)).replace("\\", "/")
             for path in skill_dir.rglob("*")
             if path.is_file()
         ]
+        ctx.release_agent_tools(agent)
         return sorted(generated_files)
 
     def _build_user_query(self, ctx: SkillDevContext) -> str:

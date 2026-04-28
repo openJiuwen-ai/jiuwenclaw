@@ -153,6 +153,7 @@ class ClarifyStageHandler(StageHandler):
                     total_attempts,
                     len(questions),
                 )
+                ctx.release_agent_tools(agent)
                 return questions
 
             logger.warning(
@@ -167,6 +168,7 @@ class ClarifyStageHandler(StageHandler):
             ctx.state.task_id,
             total_attempts,
         )
+        ctx.release_agent_tools(agent)
         return self._default_questions()
 
     def _build_query(self, ctx: SkillDevContext) -> str:
