@@ -68,6 +68,7 @@ declare -A DEPLOY_VARS=(
     ["PV_NAME"]="pv-nfs-shared"
     ["NFS_SHARE_PATH"]="/"
     ["GATEWAY_SERVICE_ACCOUNT"]="jiuwenclaw-gateway-sa"
+    ["AGENT_SERVER_POD_NAME"]="jiuwenclaw-agentserver"
 )
 
 declare -A OYR_COMPONENTS=(

@@ -195,14 +195,14 @@ class RuntimeManagementAgentClient(AgentServerClient):
                     image_pull_policy=image_pull_policy,
                     env_vars={
                         "AGENT_SERVER_HOST": "0.0.0.0",
-                        "AGENT_CLIENT_TYPE": "runtime",
+                        "AGENT_RUNTIME": "runtime",
                         "MODEL_PROVIDER": model_provider,
                         "MODEL_NAME": model_name,
                         "API_BASE": api_base,
                         "API_KEY": api_key,
                     } if api_key else {
                         "AGENT_SERVER_HOST": "0.0.0.0",
-                        "AGENT_CLIENT_TYPE": "runtime",
+                        "AGENT_RUNTIME": "runtime",
                     },
                     kubeconfig=kubeconfig,
                     readiness_initial_delay=readiness_initial_delay,
