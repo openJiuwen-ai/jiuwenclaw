@@ -751,5 +751,5 @@ modes:
 
 enable_petal_web_search: true
 
+# DeepResearch 工具：默认开启
 enable_deepresearch: true
-

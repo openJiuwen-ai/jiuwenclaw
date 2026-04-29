@@ -27,7 +27,8 @@ from jiuwenclaw.agentserver.gateway_push import GatewayPushTransport, WebSocketG
 from jiuwenclaw.agentserver.tools.deepresearch_plugin.convert_docx_offline import convert_md_to_docx
 from jiuwenclaw.agentserver.tools.deepresearch_plugin.convert_html_offline import convert_md_to_html
 from jiuwenclaw.agentserver.tools.deepresearch_plugin.report_bundle import build_report_bundle
-from jiuwenclaw.utils import get_agent_workspace_dir, get_logs_dir
+from jiuwenclaw.utils import get_logs_dir
+from jiuwenclaw.agentserver.tools.subagent_executor.context_vars import get_effective_request_workspace_dir
 
 logger = logging.getLogger(__name__)
 SAVE_REPORT_PATH = "workspace/reports"
@@ -834,7 +835,7 @@ class DeepResearchTaskManager:
 
             # 6. 执行工作流（带日志捕获）
             # 报告目录：用于保存报告文件
-            report_dir = os.path.join(get_agent_workspace_dir(), "reports")
+            report_dir = os.path.join(get_effective_request_workspace_dir(), "reports")
             # 日志目录：使用项目日志目录下的 DeepResearch 子文件夹（默认行为）
             data = await self._run_jiuwen_workflow(
                 query,
@@ -1394,7 +1395,7 @@ class DeepResearchTaskManager:
             current_agent_config["execution_method"] = ExecutionMethod.PARALLEL.value
 
         # 6. 直接执行工作流（阻塞等待）
-        report_dir = os.path.join(get_agent_workspace_dir(), "reports")
+        report_dir = os.path.join(get_effective_request_workspace_dir(), "reports")
         data = await self._run_jiuwen_workflow(
             query,
             current_agent_config,
