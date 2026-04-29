@@ -354,8 +354,7 @@ class WebChannel(BaseChannel):
             if event_name in ("connection.ack", "todo.updated", "chat.tool_call", "chat.tool_result",
                     "chat.processing_status", "chat.interrupt_result", "chat.evolution_status", "chat.tool_calls.delta",
                     "chat.error", "heartbeat.relay",
-                    "context.compressed", "context.usage", "chat.ask_user_question", "chat.invocation_paused",
-                    "chat.subtask_update",
+                    "context.compressed", "context.usage", "chat.ask_user_question", "chat.subtask_update",
                     "history.message",
                     "chat.session_result", "chat.usage_metadata",
                     "chat.usage_summary") or event_name.startswith("skilldev.") or event_name.startswith("team."):

@@ -3801,7 +3801,6 @@ class JiuWenClawDeepAdapter:
             "output_cost": 0.0,
             "total_cost": 0.0,
         }
-        hitl_pending_stream = False
 
         cron_context_tokens = self._bind_runtime_cron_context(
             channel_id=request.channel_id,
@@ -3841,8 +3840,6 @@ class JiuWenClawDeepAdapter:
                         _LLM_TRACE_ITERATION.set(chunk_iteration)
                     if not (hasattr(chunk, "type") and hasattr(chunk, "payload")):
                         parsed = self._parse_stream_chunk(chunk)
-                        if self._is_ask_user_payload(parsed):
-                            hitl_pending_stream = True
                         if parsed is not None:
                             if accumulated_text:
                                 delta_payload: dict[str, Any] = {"event_type": "chat.delta",
@@ -3994,8 +3991,6 @@ class JiuWenClawDeepAdapter:
                             accumulated_reasoning = ""
                         if has_streamed_content:
                             parsed = self._parse_stream_chunk(chunk, _has_streamed_content=True)
-                            if self._is_ask_user_payload(parsed):
-                                hitl_pending_stream = True
                             if parsed is not None:
                                 yield AgentResponseChunk(
                                     request_id=rid,
@@ -4005,8 +4000,6 @@ class JiuWenClawDeepAdapter:
                                 )
                             continue
                         parsed = self._parse_stream_chunk(chunk)
-                        if self._is_ask_user_payload(parsed):
-                            hitl_pending_stream = True
                         if parsed is not None:
                             yield AgentResponseChunk(
                                 request_id=rid,
@@ -4044,8 +4037,6 @@ class JiuWenClawDeepAdapter:
                         )
                         accumulated_reasoning = ""
                     parsed = self._parse_stream_chunk(chunk)
-                    if self._is_ask_user_payload(parsed):
-                        hitl_pending_stream = True
                     if parsed is not None:
                         yield AgentResponseChunk(
                             request_id=rid,
@@ -4084,8 +4075,6 @@ class JiuWenClawDeepAdapter:
             if self._skill_evolution_rail is not None:
                 for evt in self._skill_evolution_rail.drain_pending_approval_events():
                     parsed = self._parse_stream_chunk(evt)
-                    if self._is_ask_user_payload(parsed):
-                        hitl_pending_stream = True
                     if parsed is not None:
                         yield AgentResponseChunk(
                             request_id=rid,
@@ -4159,24 +4148,12 @@ class JiuWenClawDeepAdapter:
                 is_complete=False,
             )
 
-        if hitl_pending_stream:
-            yield AgentResponseChunk(
-                request_id=rid,
-                channel_id=cid,
-                payload={"event_type": "chat.invocation_paused", "awaiting_user_input": True},
-                is_complete=True,
-            )
-        else:
-            yield AgentResponseChunk(
-                request_id=rid,
-                channel_id=cid,
-                payload=None,
-                is_complete=True,
-            )
-
-    @staticmethod
-    def _is_ask_user_payload(payload: Any) -> bool:
-        return isinstance(payload, dict) and payload.get("event_type") == "chat.ask_user_question"
+        yield AgentResponseChunk(
+            request_id=rid,
+            channel_id=cid,
+            payload=None,
+            is_complete=True,
+        )
 
     def _parse_stream_chunk(self, chunk, *, _has_streamed_content: bool = False) -> dict | None:
         """将 SDK OutputSchema 转为前端可消费的 payload dict.
