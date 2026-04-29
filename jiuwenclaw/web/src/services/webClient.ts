@@ -243,7 +243,15 @@ class WebClient {
       throw this.createWebError(i18n.t('network.connectionUnavailable'), 'WS_NOT_READY', undefined, true);
     }
 
-    const id = this.generateRequestId();
+    const id = options.requestId ?? this.generateRequestId();
+    if (this.pending.has(id)) {
+      throw this.createWebError(
+        'Duplicate outgoing request id; wait for pending request to settle.',
+        'REQUEST_ID_DUPLICATED',
+        id,
+        true
+      );
+    }
     const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
     const message: WsRequest = {
       type: 'req',
@@ -363,6 +371,7 @@ class WebClient {
         payload: this.normalizePayload(msg.payload),
         seq: typeof msg.seq === 'number' ? msg.seq : undefined,
         stream_id: typeof msg.stream_id === 'string' ? msg.stream_id : undefined,
+        request_id: typeof msg.request_id === 'string' ? msg.request_id : undefined,
       };
     }
 
@@ -375,6 +384,7 @@ class WebClient {
         type: 'event',
         event: mappedEvent,
         payload: this.normalizePayload(msg.payload),
+        request_id: typeof msg.request_id === 'string' ? msg.request_id : undefined,
       };
     }
 

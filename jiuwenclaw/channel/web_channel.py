@@ -379,17 +379,22 @@ class WebChannel(BaseChannel):
             "event": event_name,
             "payload": payload,
         }
+        if msg.id:
+            frame["request_id"] = msg.id
         await self._broadcast(frame)
 
-        # interrupt_result 根据 intent 决定 is_processing 状态
+        # interrupt_result 根据 intent 决定 is_processing 状态（补发一条 status，挂上 request_id 便于前端与 interrupt 链路对齐）
         if event_name == "chat.interrupt_result":
             intent = payload.get("intent", "cancel") if isinstance(payload, dict) else "cancel"
             is_processing = intent in ("pause", "supplement", "resume")
-            await self._broadcast({
+            extra_processing: dict[str, Any] = {
                 "type": "event",
                 "event": "chat.processing_status",
                 "payload": {"session_id": msg.session_id, "is_processing": is_processing},
-            })
+            }
+            if msg.id:
+                extra_processing["request_id"] = msg.id
+            await self._broadcast(extra_processing)
 
     def get_metadata(self) -> ChannelMetadata:
         """获取 Channel 元数据."""
