@@ -261,11 +261,12 @@ react:
         - mcp_free_search
         - bash
         - spawn_subagent
+        - mcp_petal_search
 
     full_compact_processor_config:
       # 整窗口 token 超阈值时，调一次 LLM 把历史压成
       # [FULL_COMPACT_BOUNDARY] + summary，并在尾部 reinject 最近 skill/file/task_status 等关键状态。
-      trigger_total_tokens: 180000   # 整窗口 token 阈值；202k 窗口下预留 ~22k 给压缩调用本身；128k 模型建议 100000
+      trigger_total_tokens: 100000   # 整窗口 token 阈值；202k 窗口下预留 ~22k 给压缩调用本身；128k 模型建议 100000
       # compression_call_max_tokens: 200000   # 压缩调 LLM 时的最大上下文预算
       # messages_to_keep: 10                  # 保留最近 N 条；buffer < 此值时不会"删历史"，只新增 summary
       # keep_tool_message_pairs: true         # 保留区里成对的 (tool_call ↔ tool_result) 不被截断
