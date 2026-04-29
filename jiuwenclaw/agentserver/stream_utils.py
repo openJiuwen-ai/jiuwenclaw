@@ -7,6 +7,8 @@ from __future__ import annotations
 import logging
 from typing import Any
 
+from jiuwenclaw.agentserver.stream_content_sanitize import strip_inline_tool_protocol
+
 logger = logging.getLogger(__name__)
 
 
@@ -201,6 +203,11 @@ def _parse_typed_chunk(chunk: Any, _has_streamed_content: bool) -> dict[str, Any
         else:
             content = str(payload)
             is_chunked = False
+
+        # Belt-and-suspenders: strip any residual inline tool protocol fragments
+        # so that tool tags like todo_insert / function<tool_sep>... never bleed
+        # into user-visible content.
+        content = strip_inline_tool_protocol(content)
 
         if _has_streamed_content and not is_chunked:
             # Keep chat.final as a completion marker when the final answer text

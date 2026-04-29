@@ -170,6 +170,7 @@ from jiuwenclaw.agentserver.tools.xiaoyi_phone_tools import (
     image_reading,
 )
 from jiuwenclaw.config import get_config, get_default_models, resolve_env_vars
+from jiuwenclaw.agentserver.stream_content_sanitize import strip_inline_tool_protocol
 from jiuwenclaw.agentserver.stream_utils import tool_calls_payload_to_json_list
 from jiuwenclaw.agentserver.extensions import get_rail_manager
 from jiuwenclaw.gateway.cron import CronTargetChannel
@@ -4256,6 +4257,11 @@ class JiuWenClawDeepAdapter:
                     else:
                         content = str(payload)
                         is_chunked = False
+
+                    # Belt-and-suspenders: strip any residual inline tool protocol
+                    # fragments (todo_insert / function<tool_sep>... etc.) before
+                    # exposing answer content to the frontend.
+                    content = strip_inline_tool_protocol(content)
 
                     if _has_streamed_content and not is_chunked:
                         # When llm_output has already streamed the full user-facing text,

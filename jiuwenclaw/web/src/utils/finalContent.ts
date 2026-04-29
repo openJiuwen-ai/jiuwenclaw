@@ -2,6 +2,8 @@
  * 将 chat.final 的 payload 规范为可展示的纯文本（与实时 WS 处理一致）。
  */
 
+import { stripResidualInlineToolProtocol } from './toolProtocol';
+
 function decodeQuotedPythonLikeString(raw: string): string {
   return raw
     .replace(/\\r/g, '\r')
@@ -22,7 +24,11 @@ export function normalizeFinalContent(payload: Record<string, unknown>): string 
     return '';
   }
 
-  const trimmed = rawContent.trim();
+  // Belt-and-suspenders: only strip explicit residual protocol tags to avoid deleting
+  // user-visible examples like function<tool_sep>todo_xxx{...}.
+  const cleaned = stripResidualInlineToolProtocol(rawContent);
+
+  const trimmed = cleaned.trim();
 
   if (trimmed.startsWith('{') && trimmed.endsWith('}')) {
     try {
@@ -36,7 +42,6 @@ export function normalizeFinalContent(payload: Record<string, unknown>): string 
   }
 
   if (!trimmed.includes('result_type') || !trimmed.includes('output')) {
-    // 处理嵌套在 delta 中的 chat.final 格式
     try {
       const parsed = JSON.parse(trimmed) as Record<string, unknown>;
       if (parsed.delta && typeof parsed.delta === 'object') {
@@ -48,18 +53,18 @@ export function normalizeFinalContent(payload: Record<string, unknown>): string 
     } catch {
       // ignore
     }
-    return normalizeFinalDisplayText(rawContent);
+    return normalizeFinalDisplayText(cleaned);
   }
 
-  const singleQuoted = rawContent.match(/['"]output['"]\s*:\s*'((?:\\'|[^'])*)'/s);
+  const singleQuoted = cleaned.match(/['"]output['"]\s*:\s*'((?:\\'|[^'])*)'/s);
   if (singleQuoted?.[1] != null) {
     return normalizeFinalDisplayText(decodeQuotedPythonLikeString(singleQuoted[1]));
   }
 
-  const doubleQuoted = rawContent.match(/['"]output['"]\s*:\s*"((?:\\"|[^"])*)"/s);
+  const doubleQuoted = cleaned.match(/['"]output['"]\s*:\s*"((?:\\"|[^"])*)"/s);
   if (doubleQuoted?.[1] != null) {
     return normalizeFinalDisplayText(decodeQuotedPythonLikeString(doubleQuoted[1]));
   }
 
-  return normalizeFinalDisplayText(rawContent);
+  return normalizeFinalDisplayText(cleaned);
 }
