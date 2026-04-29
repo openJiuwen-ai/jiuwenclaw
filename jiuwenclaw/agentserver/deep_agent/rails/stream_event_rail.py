@@ -350,28 +350,19 @@ class JiuClawStreamEventRail(DeepAgentRail):
     ) -> List[dict[str, Any]]:
         """Format todo items for frontend compatibility.
 
-        Maps internal TodoStatus values to frontend-compatible status strings.
-        Cancelled status is mapped to 'pending' for frontend compatibility.
-
         Args:
             todos_data: List of TodoItem objects from TodoListTool.
 
         Returns:
             List of formatted todo dictionaries.
         """
-        status_mapping = {
-            TodoStatus.PENDING: "pending",
-            TodoStatus.IN_PROGRESS: "in_progress",
-            TodoStatus.COMPLETED: "completed",
-            TodoStatus.CANCELLED: "pending",
-        }
-
+        # 社区前端代码暂时不支持cancelled状态。
         return [
             {
                 "id": item.id,
                 "content": item.content,
                 "activeForm": item.activeForm,
-                "status": status_mapping.get(item.status, item.status.value),
+                "status": item.status.value,
                 "createdAt": item.createdAt,
                 "updatedAt": item.updatedAt,
             }
