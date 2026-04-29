@@ -261,124 +261,95 @@ def _read_skill_body_from_session(
 def _build_load_directive(
     lang: str, phase: SkillPhase, skill_name: str, session_id: str,
 ) -> str:
-    """Directive to append on SKILL.md load (covers all three landing phases)."""
+    """Phase-state notice on SKILL.md load.
+
+    Conveys current runtime phase and the next required action for that phase.
+    Behavior rules (how to break down, how to mark complete, etc.) are defined
+    once in SkillProtocolPromptRail's protocol section — not duplicated here.
+    """
     todo_path = _resolve_todo_file_path(session_id)
     if lang == "zh":
-        path_line = f"\nSkill 步骤追踪文件：{todo_path}\n" if todo_path else ""
+        path_line = f"，追踪文件：{todo_path}" if todo_path else ""
         if phase == SkillPhase.WAITING_PLAN:
-            head = (
-                "\n\n[技能文档已加载 · 强制规约] 当前 session 不存在 skill_step 计划。"
-                "在执行 SKILL.md 中任何步骤之前，**必须**先调用 "
-                "`skill_step(action=\"create\")` 为文档中定义的每个步骤创建一个 skill_step 项。"
-                "未创建计划前，禁止执行 SKILL 中的任何动作（包括只是『先看一下』）。\n"
+            next_action = (
+                "下一步：调用 `skill_step(action=\"create\", tasks=[...])` 建立路线图。"
+                "粒度按需：线性、章节边界清晰的技能可只建 1 项作占位（如 "
+                f"`tasks=[\"执行 {skill_name}\"]`）；"
+                "包含循环/分支/多工具长 stage 时再按需拆成多项。"
             )
-        elif phase == SkillPhase.DONE:
-            head = (
-                "\n\n[技能文档已加载] 当前 session 的 skill_step 计划全部已完成（来自先前执行）。"
-                "如果是延续先前任务，请直接调用 `skill_complete` 收尾；"
-                "如果是新一轮执行，请先 `skill_step(action=\"remove\")` 清空旧 plan "
-                "再 `skill_step(action=\"create\")` 重建。\n"
+        elif phase == SkillPhase.IN_PROGRESS:
+            next_action = (
+                "下一步：调用 `skill_step(action=\"list\")` 核对计划是否对应当前 SKILL.md；"
+                "若不对应，先 `skill_step(action=\"remove\")` 清空再 `skill_step(action=\"create\")` 重建。"
             )
-        else:  # IN_PROGRESS
-            head = (
-                "\n\n[技能文档已加载] 当前 session 已存在 skill_step 计划。"
-                "请用 `skill_step(action=\"list\")` 核对其是否对应当前 SKILL.md；"
-                "若不对应，必须先 `skill_step(action=\"remove\")` 清空"
-                "再 `skill_step(action=\"create\")` 重建。\n"
+        else:  # DONE
+            next_action = (
+                f"下一步：若延续先前任务，直接 `skill_complete(skill_name=\"{skill_name}\")` 收尾；"
+                f"若是新一轮执行，先 `skill_step(action=\"remove\")` 清空再 `skill_step(action=\"create\")` 重建。"
             )
-        tail = (
-            "⚠️ 完成步骤/子任务后，必须立即标记进度：单项完成用 "
-            "`skill_step(action=\"complete\")`；若多个连续步骤都已实际完成，"
-            "优先用 `skill_step(action=\"complete_batch\")` 一次性收尾。"
-            "禁止预先完成、跳过未完成项或不标记就推进。"
-            "可随时用 `skill_step(action=\"list\")` 查看进度。"
-            f"{path_line}"
-            "⚠️ Skill 脚本执行原则：SKILL.md 中定义的脚本必须按原样执行，"
-            "禁止自行编写代码替代其功能。脚本失败时应修复执行环境（如安装依赖）后重试原脚本。"
-        )
-        return head + tail
-    path_line = f"\nSkill step tracking file: {todo_path}\n" if todo_path else ""
+        phase_label = {
+            SkillPhase.WAITING_PLAN: "未建立 skill_step 计划",
+            SkillPhase.IN_PROGRESS: "已存在 skill_step 计划（执行中）",
+            SkillPhase.DONE: "skill_step 计划已全部完成",
+        }[phase]
+        return f"\n\n[Skill {skill_name} 状态] {phase_label}{path_line}。{next_action}\n"
+    path_line = f", tracking file: {todo_path}" if todo_path else ""
     if phase == SkillPhase.WAITING_PLAN:
-        head = (
-            "\n\n[Skill document loaded · MANDATORY] No skill_step plan exists "
-            "for this session. Before executing ANY step from SKILL.md, you MUST "
-            "first call `skill_step(action=\"create\")` with one skill_step item per step "
-            "defined in the document. No SKILL action is permitted (including "
-            "'just taking a look') until the plan is created.\n"
+        next_action = (
+            "Next: call `skill_step(action=\"create\", tasks=[...])` to build the roadmap. "
+            "Granularity is on demand: for a linear skill with clear chapter boundaries, a single "
+            f"placeholder item is fine (e.g. `tasks=[\"run {skill_name}\"]`); split into multiple items "
+            "only when the skill has loops, branches, or multi-tool long stages worth tracking separately."
         )
-    elif phase == SkillPhase.DONE:
-        head = (
-            "\n\n[Skill document loaded] All skill_step items from a previous run "
-            "are already completed. If you are continuing that work, call "
-            "`skill_complete` to finalize. If this is a new run, "
-            "`skill_step(action=\"remove\")` the old plan and "
-            "`skill_step(action=\"create\")` a fresh one.\n"
+    elif phase == SkillPhase.IN_PROGRESS:
+        next_action = (
+            "Next: call `skill_step(action=\"list\")` to verify the plan matches the current SKILL.md; "
+            "if it does not, `skill_step(action=\"remove\")` to clear and `skill_step(action=\"create\")` to rebuild."
         )
-    else:  # IN_PROGRESS
-        head = (
-            "\n\n[Skill document loaded] A skill_step plan already exists for "
-            "this session. Use `skill_step(action=\"list\")` to verify it matches "
-            "the current SKILL.md; if not, you MUST `skill_step(action=\"remove\")` "
-            "to clear it and then `skill_step(action=\"create\")` to rebuild before proceeding.\n"
+    else:  # DONE
+        next_action = (
+            f"Next: if continuing previous work, call `skill_complete(skill_name=\"{skill_name}\")` to finalize; "
+            f"if starting a new run, `skill_step(action=\"remove\")` then `skill_step(action=\"create\")` a fresh plan."
         )
-    tail = (
-        "After completing step/sub-task progress, you MUST mark it promptly: use "
-        "`skill_step(action=\"complete\")` for a single finished item; when several "
-        "contiguous items are already finished, prefer "
-        "`skill_step(action=\"complete_batch\")`. Never "
-        "pre-complete, skip unfinished items, or advance without marking progress. "
-        "Use `skill_step(action=\"list\")` anytime to inspect progress."
-        f"{path_line}"
-        "Script execution principle: Scripts defined in SKILL.md must be executed as specified. "
-        "Do NOT write your own code to replace their functionality. "
-        "On script failure, fix the environment (e.g., install dependencies) and retry the original script."
-    )
-    return head + tail
+    phase_label = {
+        SkillPhase.WAITING_PLAN: "no skill_step plan",
+        SkillPhase.IN_PROGRESS: "skill_step plan in progress",
+        SkillPhase.DONE: "skill_step plan complete",
+    }[phase]
+    return f"\n\n[Skill {skill_name} status] {phase_label}{path_line}. {next_action}\n"
 
 
 def _build_plan_created_directive(lang: str, skill_name: str, total: int) -> str:
     if lang == "zh":
         return (
             f"\n\n[skill_step 计划已建立 · {total} 项] 现在请按顺序从第 1 项开始执行。"
-            f"开始第 1 项前，先用 `skill_step(action=\"insert\")` 将其拆解为原子级子步骤；"
-            f"完成单项用 `skill_step(action=\"complete\")` 并写 result；"
-            f"若多个连续项都已实际完成，优先用 `skill_step(action=\"complete_batch\")` 一次性收尾。"
+            f"完成单步用 `skill_step(action=\"complete\", idx=..., result=...)`；"
+            f"若多个连续步骤都已实际完成，优先用 `skill_step(action=\"complete_batch\", indices=[...], results=[...])` 一次性收尾。\n"
         )
     return (
-        f"\n\n[skill_step plan created · {total} items] Begin with item 1. "
-        f"Before starting item 1, use `skill_step(action=\"insert\")` to break it into atomic "
-        f"sub-steps; use `skill_step(action=\"complete\")` for a single finished item, and "
-        f"prefer `skill_step(action=\"complete_batch\")` when several contiguous items are "
-        f"already finished."
+        f"\n\n[skill_step plan created · {total} items] Execute items in order, starting from item 1. "
+        f"Use `skill_step(action=\"complete\", idx=..., result=...)` for a single finished item; "
+        f"prefer `skill_step(action=\"complete_batch\", indices=[...], results=[...])` to close out several "
+        f"already-finished contiguous items in one call.\n"
     )
 
 
 def _build_all_done_directive(lang: str, skill_name: str) -> str:
     if lang == "zh":
         return (
-            f"\n\n[技能 {skill_name} · 全部完成] 所有 skill_step 已完成。"
-            f"**必须**立即调用 `skill_complete(skill_name=\"{skill_name}\")` 收尾，"
-            f"释放技能上下文后才能进入下一任务。"
+            f"\n\n[技能 {skill_name} · 全部完成] 立即调用 "
+            f"`skill_complete(skill_name=\"{skill_name}\")` 收尾。\n"
         )
     return (
-        f"\n\n[Skill {skill_name} · All steps complete] Every skill_step item is done. "
-        f"You MUST now call `skill_complete(skill_name=\"{skill_name}\")` to finalize "
-        f"and release the skill context before moving on."
+        f"\n\n[Skill {skill_name} · all done] Call "
+        f"`skill_complete(skill_name=\"{skill_name}\")` to finalize.\n"
     )
 
 
 def _build_plan_emptied_directive(lang: str, skill_name: str) -> str:
     if lang == "zh":
-        return (
-            f"\n\n[skill_step 计划已清空] 当前 session 的 skill_step 列表已空。"
-            f"如果还要继续执行 SKILL.md，请重新调用 `skill_step(action=\"create\")` 重建计划；"
-            f"如果不再执行，请调用 `skill_complete(skill_name=\"{skill_name}\")` 收尾。"
-        )
-    return (
-        f"\n\n[skill_step plan emptied] The skill_step list is now empty. "
-        f"To continue executing SKILL.md, call `skill_step(action=\"create\")` to rebuild it. "
-        f"To abandon, call `skill_complete(skill_name=\"{skill_name}\")` to finalize."
-    )
+        return f"\n\n[skill_step 计划已清空] 进入 WAITING_PLAN 阶段。\n"
+    return f"\n\n[skill_step plan emptied] Now WAITING_PLAN.\n"
 
 
 # ---------------- the rail ---------------------------------------------------
@@ -619,23 +590,15 @@ class SkillComplianceRail(DeepAgentRail):
         lang = _resolve_lang()
         if lang == "zh":
             recovery = (
-                f"\n\n[脚本执行失败 · 恢复指引]\n"
-                f"SKILL.md 指定的脚本执行失败。请严格按以下步骤恢复：\n"
-                f"1. 分析上方错误信息，判断失败原因（缺少依赖/路径错误/其他）\n"
-                f"2. 使用 mcp_exec_command 修复问题（如 pip install 缺失的库）\n"
-                f"3. 使用 mcp_exec_command 重新执行原始命令：\n"
-                f"   {matching_cmd}\n"
-                f"⚠️ 禁止使用 execute_python_code 自行编写代码替代该脚本。"
+                f"\n\n[SKILL 脚本失败] 禁止自行决定跳过该步骤或后续步骤；"
+                f"必须先尝试修复（如安装缺失依赖、修正参数）后重试 `{matching_cmd}`，"
+                f"修复失败则询问用户如何处理，等待用户指示后再继续。"
             )
         else:
             recovery = (
-                f"\n\n[Script Failure · Recovery Guide]\n"
-                f"A SKILL.md-designated script failed. Follow these steps:\n"
-                f"1. Analyze the error above to determine the cause\n"
-                f"2. Fix the issue via mcp_exec_command (e.g., pip install missing library)\n"
-                f"3. Re-execute the original command via mcp_exec_command:\n"
-                f"   {matching_cmd}\n"
-                f"Do NOT use execute_python_code to rewrite the script's logic."
+                f"\n\n[SKILL script failed] Do NOT skip this step or any subsequent step on your own. "
+                f"First attempt to fix the issue (e.g. install missing dependencies, correct parameters) "
+                f"and retry `{matching_cmd}`. If the fix fails, ask the user how to proceed and wait."
             )
         tool_msg.content = content + recovery
         logger.info(

@@ -57,9 +57,10 @@ def _build_skill_plan_required_text(language: str, skill_name: str) -> str:
             f"skill_step 计划。在创建计划之前：\n\n"
             f"1. **禁止**执行 SKILL.md 中的任何步骤、脚本、工具调用（包括"
             f"『先看一下』『先调用一次试试』等）。\n"
-            f"2. **必须**首先调用 `skill_step(action=\"create\")`，为 SKILL.md 中定义的每个步骤"
-            f"创建一个 skill_step 项，作为执行路线图。\n"
-            f"3. 只有 skill_step 计划创建完成后，才能开始按顺序执行第一个步骤。\n\n"
+            f"2. **必须**首先调用 `skill_step(action=\"create\", tasks=[...])` 建立路线图。"
+            f"粒度按需：线性、章节边界清晰的技能可只建 1 项作占位（如 "
+            f"`tasks=[\"执行 {skill_name}\"]`）；包含循环/分支/多工具长 stage 时再按需拆成多项。\n"
+            f"3. 只有 skill_step 计划创建完成后，才能开始按顺序执行。\n\n"
             f"⚠️ 这是『中途进入』也必须遵守的硬性约束——无论你是从对话开头还是中途加载的 "
             f"SKILL.md，都必须先 create 再执行。\n"
         )
@@ -69,10 +70,11 @@ def _build_skill_plan_required_text(language: str, skill_name: str) -> str:
         f"created the corresponding skill_step plan. Before the plan is created:\n\n"
         f"1. You MUST NOT execute any step, script, or tool call from SKILL.md "
         f"(including 'just take a look' or 'try calling it once').\n"
-        f"2. You MUST first call `skill_step(action=\"create\")` with one skill_step item per "
-        f"step defined in SKILL.md as the execution roadmap.\n"
-        f"3. Only after the skill_step plan is created may you begin executing the "
-        f"first step in order.\n\n"
+        f"2. You MUST first call `skill_step(action=\"create\", tasks=[...])` to build the roadmap. "
+        f"Granularity is on demand: for a linear skill with clear chapter boundaries, a single "
+        f"placeholder item is fine (e.g. `tasks=[\"run {skill_name}\"]`); split into multiple items "
+        f"only when the skill has loops, branches, or multi-tool long stages worth tracking separately.\n"
+        f"3. Only after the skill_step plan is created may you begin execution.\n\n"
         f"This is a hard constraint that applies even when SKILL.md is loaded "
         f"mid-session — regardless of whether you loaded it at the start of the "
         f"conversation or partway through, you MUST create the plan first.\n"
@@ -120,7 +122,7 @@ def _build_skill_protocol_section_text(language: str) -> str:
 随后按 SKILL 工作流执行；下列规范约束执行过程。
 
 1. **声明步骤**：每次行动前，必须在回复开头声明当前所在步骤，格式：`[当前步骤: <步骤名称>]`。**无需调用任何工具来"开始"步骤**——声明本身即代表进入该步。
-2. **创建路线图**：读完 SKILL.md 后，调用一次 `skill_step(action="create", tasks=[...])`，按 SKILL.md 中的**章节级/阶段级步骤**建立执行路线图即可。**对 SKILL 步骤的任何拆解、追踪、完成标记，必须且只能使用 `skill_step` 工具**
+2. **创建路线图**：读完 SKILL.md 后，调用一次 `skill_step(action="create", tasks=[...])` 建立路线图。粒度按需——线性、章节边界清晰的技能可只建 1 项作占位（如 `tasks=["执行 <skill_name>"]`）；只有当技能包含循环/分支/多工具长 stage 时，才按章节级/阶段级拆成多项。**对 SKILL 步骤的任何追踪与完成标记，必须且只能使用 `skill_step` 工具**
    | 调用方式 | 功能说明 |
    |---------|---------|
    | `skill_step(action="create", tasks=[...])` | 创建步骤列表（一次性创建所有章节级步骤） |
@@ -151,7 +153,7 @@ The "Skills" section of this prompt (from SkillUseRail) lists available skills a
 Then execute the workflow; the rules below govern execution.
 
 1. **Declare step**: Before each action, state your current step at the start of your reply: `[Current Step: <step name>]`. **You do NOT call any tool to "start" a step** — the declaration itself enters the step.
-2. **Create the roadmap**: After reading SKILL.md, call `skill_step(action="create", tasks=[...])` once with one item per **chapter-level / phase-level step** defined in the document. **Any breakdown, tracking, or completion of SKILL steps MUST use the `skill_step` tool exclusively.**
+2. **Create the roadmap**: After reading SKILL.md, call `skill_step(action="create", tasks=[...])` once to build the roadmap. Granularity is on demand: for a linear skill with clear chapter boundaries, a single placeholder item is fine (e.g. `tasks=["run <skill_name>"]`); split into multiple chapter-level / phase-level items only when the skill has loops, branches, or multi-tool long stages worth tracking separately. **Any tracking or completion of SKILL steps MUST use the `skill_step` tool exclusively.**
    | Call | Description |
    |-----------|-------------|
    | `skill_step(action="create", tasks=[...])` | Create the step list (one call, all chapter-level steps) |
