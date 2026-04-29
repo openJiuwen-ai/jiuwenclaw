@@ -9,6 +9,7 @@ import json
 import logging
 import math
 import os
+import re
 from pathlib import Path
 from typing import Any, ClassVar
 
@@ -63,6 +64,38 @@ logger = logging.getLogger(__name__)
 # 流式处理心跳间隔：当 Agent 处理时间超过此阈值时，发送心跳 chunk 保持 WebSocket 连接活跃
 # 避免 ping_timeout 导致连接关闭。默认 10 秒，小于服务端 ping_timeout=20s。
 _STREAM_HEARTBEAT_INTERVAL_SECONDS = 10.0
+
+_SYSTEM_PROMPT_USER_HISTORY_PATTERN = re.compile(r"(\[[^\]\n]*用户\]\s*)(.*?)(\s*\[/对话历史\])", re.DOTALL)
+
+
+def _mask_text_for_log(value: str) -> str:
+    return "******" if len(value) <= 20 else f"{value[:5]}******{value[-5:]}"
+
+
+def _mask_system_prompt_for_log(system_prompt: str) -> str:
+    return _SYSTEM_PROMPT_USER_HISTORY_PATTERN.sub(
+        lambda match: f"{match.group(1)}{_mask_text_for_log(match.group(2).strip())}{match.group(3)}",
+        system_prompt,
+    )
+
+
+def _mask_query_for_log(data: dict[str, Any]) -> dict[str, Any]:
+    params = data.get("params")
+    if not isinstance(params, dict):
+        return data
+
+    masked_params = dict(params)
+    query = params.get("query")
+    if isinstance(query, str) and query:
+        masked_params["query"] = _mask_text_for_log(query)
+
+    system_prompt = params.get("system_prompt")
+    if isinstance(system_prompt, str) and system_prompt:
+        masked_params["system_prompt"] = _mask_system_prompt_for_log(system_prompt)
+
+    if masked_params == params:
+        return data
+    return {**data, "params": masked_params}
 
 
 def _payload_to_request(data: dict[str, Any]) -> AgentRequest:
@@ -336,7 +369,7 @@ class AgentWebSocketServer:
             data = json.loads(raw)
             logger.info(
                 "[AgentWebSocketServer] inbound raw payload: %s",
-                data,
+                _mask_query_for_log(data),
             )
         except json.JSONDecodeError as e:
             wire = encode_json_parse_error_wire(
