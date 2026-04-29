@@ -49,7 +49,7 @@ dependencies = [
     "pytest-mock==3.14.0",
     "pytest-cov==7.1.0",
     "sqlite-vec==0.1.6",
-    "openjiuwen_deepsearch @ git+https://gitcode.com/openJiuwen/deepsearch.git@4ba3993c8504a59ea5b61f86a34edc36ded282af",
+    "openjiuwen_deepsearch @ git+https://gitcode.com/openJiuwen/deepsearch.git@852ec60437d30d46b2fdeca6b17e7b42e89fba39",
     "pypandoc",
     "markdown",
 ]

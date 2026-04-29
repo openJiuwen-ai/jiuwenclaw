@@ -471,7 +471,6 @@ class DeepResearchTaskManager:
 
         report_file = os.path.join(output_dir, 
                                    f"report_{safe_base_name}_{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S')}")
-        report_file = report_file.replace("\\", "/")
 
         # 路径 containment 校验
         if not DeepResearchTaskManager._verify_path_containment(output_dir, report_file):
@@ -538,11 +537,12 @@ class DeepResearchTaskManager:
     @staticmethod
     def _format_report_result(report_paths: dict[str, str]) -> str:
         """生成格式化后的报告结果路径字符串."""
-        parts = [f"markdown报告已保存到{report_paths['md']}\n"]
+        parts = []
         if report_paths.get("html"):
             parts.append(f"html报告已保存到{report_paths['html']}\n")
         if report_paths.get("docx"):
             parts.append(f"docx报告已保存到{report_paths['docx']}\n")
+        parts.append(f"markdown报告已保存到{report_paths['md']}\n")
         if report_paths.get("infer_dir"):
             parts.append(f"溯源推理图已保存到{report_paths['infer_dir']}\n")
         if report_paths.get("chart_dir"):
