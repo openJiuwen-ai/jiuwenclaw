@@ -1752,19 +1752,7 @@ class MessageHandler(ABC):
         )
 
     @staticmethod
-    def _should_trigger_before_chat_request_hook(msg: "Message") -> bool:
-        from jiuwenclaw.schema.message import ReqMethod
-
-        return msg.req_method in (
-            ReqMethod.CHAT_SEND,
-            ReqMethod.CHAT_RESUME,
-            ReqMethod.CHAT_ANSWER,
-        )
-
-    async def _trigger_before_chat_request_hook(self, msg: "Message") -> None:
-        if not self._should_trigger_before_chat_request_hook(msg):
-            return
-
+    async def _trigger_before_chat_request_hook(msg: "Message") -> None:
         params = msg.params if isinstance(msg.params, dict) else {}
         if not isinstance(msg.params, dict):
             msg.params = params
@@ -2038,7 +2026,7 @@ class MessageHandler(ABC):
                 msg = await self.consume_user_messages(timeout=None)
                 if msg is None:
                     continue
-
+                # 处理斜杠命令
                 # 处理所有通道的 Channel 控制指令（如 /ls、/view）
                 if self._handle_all_channel_control(msg):
                     continue
@@ -2047,10 +2035,11 @@ class MessageHandler(ABC):
                     # 该消息仅用于修改 session/mode，已给 Channel 回复提示，不再转发给 Agent
                     continue
 
-                # 将当前 Channel 的控制状态应用到消息上
+                # 将当前 Channel 的控制状态应用到消息上. 包括 session_id 和 mode
                 self._apply_channel_state(msg)
 
                 # remote：session.list 在网关读索引并响应，纳入本队列以保证与 session.create/delete 顺序一致
+                # 此处仅特殊处理 remote_storage + web_channel 的情况
                 if msg.req_method == ReqMethod.SESSION_LIST:
                     from jiuwenclaw.gateway.session_index import is_remote_storage
                     if is_remote_storage() and str(msg.channel_id or "").strip() == "web":
@@ -2058,6 +2047,7 @@ class MessageHandler(ABC):
                         continue
 
                 # 检查是否是中断请求
+                # 用户回答 Agent 的审批/确认请求
                 if msg.req_method == ReqMethod.CHAT_ANSWER:
                     # 先正常转发用户审批答案，再按会话自动派发排队的新输入
                     agent_msg = await self._prepare_agent_dispatch_message(msg)
@@ -2263,7 +2253,7 @@ class MessageHandler(ABC):
                 # remote 模式：用户 chat.send 时在网关索引记录 role=user 预览
                 self._maybe_update_session_index_on_user_msg(msg)
                 agent_msg = await self._prepare_agent_dispatch_message(msg)
-                await self._trigger_before_chat_request_hook(agent_msg)
+                await MessageHandler._trigger_before_chat_request_hook(agent_msg)
                 env = self.message_to_e2a(agent_msg)
 
                 # 分布式文件传输：将 Gateway 本地文件传输到 AgentServer

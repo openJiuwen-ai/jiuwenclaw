@@ -30,6 +30,7 @@ from jiuwenclaw.security.ws_origin import (
     get_header_value,
     is_allowed_browser_origin,
 )
+from jiuwenclaw.gateway.local_rpc_hooks import LocalRpcHookDispatcher
 from jiuwenclaw.schema.message import Message, Mode, ReqMethod
 
 logger = logging.getLogger(__name__)
@@ -72,6 +73,7 @@ class WebChannel(BaseChannel):
         self._on_message_cb: Callable[[Message], Any] | None = None
         self._method_handlers: dict[str, MethodHandler] = {}
         self._connect_hooks: list[ConnectHook] = []
+        self._local_rpc_hooks = LocalRpcHookDispatcher()
 
     # ── 公共属性 ──────────────────────────────────────────
 
@@ -116,6 +118,15 @@ class WebChannel(BaseChannel):
             code: str | None = None,
     ) -> None:
         """向指定客户端发送 ``res`` 帧."""
+        # 调用after阶段的hook。执行后会清理hook里的缓存信息。
+        ok, payload, error, code = await self._local_rpc_hooks.after_response(
+            ws,
+            req_id,
+            ok=ok,
+            payload=payload,
+            error=error,
+            code=code,
+        )
         frame: dict[str, Any] = {
             "type": "res",
             "id": req_id,
@@ -259,6 +270,7 @@ class WebChannel(BaseChannel):
         if close_tasks:
             await asyncio.gather(*close_tasks, return_exceptions=True)
         self._clients.clear()
+        self._local_rpc_hooks.clear()
 
         if self._server is not None:
             self._server.close()
@@ -435,6 +447,8 @@ class WebChannel(BaseChannel):
             logger.warning("WebChannel 连接异常: %s", e)
         finally:
             self._clients.discard(ws)
+            # 连接断开时清理对应该ws的hook缓存
+            self._local_rpc_hooks.clear_ws(ws)
             logger.info(f"WebChannel 连接关闭: remote={remote}")
 
     async def _handle_raw_message(self, ws: Any, raw: str, query: dict[str, list[str]]) -> None:
@@ -506,11 +520,29 @@ class WebChannel(BaseChannel):
         handler = self._method_handlers.get(method)
         if handler is not None:
             try:
+                # 调用Before钩子
+                # 钩子方法会把 request 信息缓存起来，用于在response的时候关联 req_id 等信息
+                # 用完后需要显示清理
+                params = await self._local_rpc_hooks.before_request(
+                    ws,
+                    request_id=req_id,
+                    channel_id=self.channel_id,
+                    session_id=session_id,
+                    method=method,
+                    params=params,
+                    source="web",
+                    route=self.config.path,
+                    metadata={"query": query},
+                )
                 await handler(ws, req_id, params, session_id)
+                # 显式清理钩子里的缓存信息，防止response的阶段没能正确清理。该清理方法幂等，多次调用无影响。
+                self._local_rpc_hooks.discard(ws, req_id)
             except Exception as e:
                 # 客户端断开（如服务关闭时 code=1001）不再尝试回包，避免二次异常噪音。
                 ws_closed = bool(getattr(ws, "closed", False))
                 if ws_closed:
+                    # 显式清理钩子里的缓存信息。连接断开的话，执行不到response截断的清理逻辑。
+                    self._local_rpc_hooks.discard(ws, req_id)
                     logger.warning(
                         "WebChannel method handler aborted on closed websocket ({}): {}",
                         method, e,

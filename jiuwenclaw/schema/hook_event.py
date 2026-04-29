@@ -13,6 +13,8 @@ class GatewayHookEvents(HookEventBase):
     GATEWAY_STOPPED = HookEventBase.get_event("gateway_stopped")
     BEFORE_CHAT_REQUEST = HookEventBase.get_event("before_chat_request")
     WEB_CHANNEL_CREATED = HookEventBase.get_event("web_channel_created")
+    BEFORE_LOCAL_RPC_REQUEST = HookEventBase.get_event("before_local_rpc_request")
+    AFTER_LOCAL_RPC_RESPONSE = HookEventBase.get_event("after_local_rpc_response")
 
 
 class AgentServerHookEvents(HookEventBase):

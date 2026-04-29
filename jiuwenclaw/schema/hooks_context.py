@@ -37,6 +37,39 @@ class GatewayChatHookContext:
 
 
 @dataclass
+class GatewayLocalRpcRequestHookContext:
+    request_id: str
+    channel_id: str
+    session_id: str | None
+    method: str
+    params: dict[str, Any] = field(default_factory=dict)
+    source: str = ""
+    route: str | None = None
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass
+class GatewayLocalRpcResponseHookContext:
+    request_id: str
+    channel_id: str
+    session_id: str | None
+    method: str
+    ok: bool
+    payload: dict[str, Any] = field(default_factory=dict)
+    error: str | None = None
+    code: str | None = None
+    source: str = ""
+    route: str | None = None
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass
 class AgentServerChatHookContext:
     request_id: str
     channel_id: str

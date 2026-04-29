@@ -8,6 +8,8 @@ from jiuwenclaw.schema.hooks_context import (
     AgentServerChatHookContext,
     AgentWsServerStartHookContext,
     GatewayChatHookContext,
+    GatewayLocalRpcRequestHookContext,
+    GatewayLocalRpcResponseHookContext,
     MemoryHookContext,
 )
 from jiuwenclaw.schema.message import Message
@@ -22,5 +24,7 @@ __all__ = [
     "AgentWsServerStartHookContext",
     "GatewayHookEvents",
     "GatewayChatHookContext",
+    "GatewayLocalRpcRequestHookContext",
+    "GatewayLocalRpcResponseHookContext",
     "MemoryHookContext",
 ]

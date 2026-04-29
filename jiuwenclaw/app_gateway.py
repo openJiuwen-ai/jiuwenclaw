@@ -29,6 +29,7 @@ from openjiuwen.core.common.logging import LogManager
 
 import jiuwenclaw.channel.acp_channel as acp_channel_module
 from jiuwenclaw.channel.acp_channel import AcpGatewayBridge
+from jiuwenclaw.gateway.local_rpc_hooks import LocalRpcHookDispatcher
 from jiuwenclaw.gateway.route_binding import GatewayRouteBinding
 from jiuwenclaw.jiuwen_core_patch import (
     apply_openai_model_client_patch,
@@ -267,6 +268,7 @@ class GatewayServer:
         self._clients: set[Any] = set()
         self._request_to_client: dict[tuple[str, str], Any] = {}
         self._session_to_client: dict[tuple[str, str], Any] = {}
+        self._local_rpc_hooks = LocalRpcHookDispatcher()
         self._acp_bridge = AcpGatewayBridge(
             self._dispatch_on_message,
             bind_session_client=self._bind_acp_session_client,
@@ -348,6 +350,15 @@ class GatewayServer:
         code: str | None = None,
     ) -> None:
         """向指定客户端发送 res 帧（供本地 handler 使用）。"""
+        # 调用after阶段的hook。执行后会清理hook里的缓存信息。
+        ok, payload, error, code = await self._local_rpc_hooks.after_response(
+            ws,
+            req_id,
+            ok=ok,
+            payload=payload,
+            error=error,
+            code=code,
+        )
         frame: dict[str, Any] = {
             "type": "res",
             "id": req_id,
@@ -432,6 +443,7 @@ class GatewayServer:
         self._clients.clear()
         self._request_to_client.clear()
         self._session_to_client.clear()
+        self._local_rpc_hooks.clear()
         if self._server is not None:
             self._server.close()
             await self._server.wait_closed()
@@ -542,6 +554,8 @@ class GatewayServer:
             stale_session_keys = [key for key, client in self._session_to_client.items() if client is ws]
             for session_key in stale_session_keys:
                 self._session_to_client.pop(session_key, None)
+            # 连接断开时清理对应该ws的hook缓存
+            self._local_rpc_hooks.clear_ws(ws)
             if route.disconnect_handler is not None:
                 try:
                     result = route.disconnect_handler(ws, stale_session_keys)
@@ -681,10 +695,28 @@ class GatewayServer:
         local_handler = route.local_handlers.get(method)
         if local_handler is not None:
             try:
+                # 调用Before钩子
+                # 钩子方法会把 request 信息缓存起来，用于在response的时候关联 req_id 等信息
+                # 用完后需要显示清理
+                params = await self._local_rpc_hooks.before_request(
+                    ws,
+                    request_id=req_id,
+                    channel_id=route.channel_id,
+                    session_id=session_id,
+                    method=method,
+                    params=params,
+                    source=route.channel_id,
+                    route=request_path,
+                    metadata={"path": request_path},
+                )
                 await local_handler(ws, req_id, params, session_id)
+                # 显式清理钩子里的缓存信息，防止response的阶段没能正确清理。该清理方法幂等，多次调用无影响。
+                self._local_rpc_hooks.discard(ws, req_id)
             except Exception as e:
                 ws_closed = bool(getattr(ws, "closed", False))
                 if ws_closed:
+                    # 显式清理钩子里的缓存信息。连接断开的话，执行不到response截断的清理逻辑。
+                    self._local_rpc_hooks.discard(ws, req_id)
                     logger.warning("GatewayServer local handler aborted on closed ws (%s): %s", method, e)
                     return
                 logger.error("GatewayServer local handler error (%s): %s", method, e)
