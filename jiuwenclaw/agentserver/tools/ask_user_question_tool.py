@@ -170,10 +170,9 @@ async def _send_chat_delta(*, stream_request_id: str, channel_id: str, content: 
 async def _ask_user_question_impl(questions: Any, timeout: Any = None) -> dict[str, Any]:
     interactive, session_id, stream_rid, channel_id = get_ask_request_context()
     reg = AskUserQuestionRegistry.get_instance()
+    # 仅按本次流的 stream_request_id 回填（修复 ContextVar 在异步工具内丢失），不按 session 继承以免sticky。
     if stream_rid and not interactive:
         interactive = reg.stream_interactive_ask_enabled(stream_rid)
-    if not interactive and session_id:
-        interactive = reg.session_interactive_ask_enabled(session_id)
     try:
         normalized = _normalize_questions(questions)
         timeout_sec = _parse_timeout(timeout)
@@ -184,20 +183,26 @@ async def _ask_user_question_impl(questions: Any, timeout: Any = None) -> dict[s
         return {"status": "error", "message": "内部错误：缺少 stream_request_id，无法发送追问。", "answers": []}
 
     if not interactive:
+        # 非引导：只推 Markdown，不发 chat.ask_user_question（避免前端弹选择框），不阻塞工具；
+        # 用户在下一条普通消息中回复即可。
         formatted = _format_questions_as_text(normalized)
         try:
-            await _send_chat_delta(stream_request_id=stream_rid, channel_id=channel_id, content=formatted)
+            await _send_chat_delta(
+                stream_request_id=stream_rid,
+                channel_id=channel_id,
+                content=formatted,
+            )
         except Exception as exc:
             logger.exception("[ask_user_question] 纯文本回退 send_push 失败: %s", exc)
             return {
                 "status": "text_only",
-                "message": "当前通道不支持交互式选择，且文本回退推送失败。请改用普通文本继续追问。",
+                "message": "当前未开启引导式交互，且文本回退推送失败。请让用户用普通消息说明选择。",
                 "formatted_questions": formatted,
                 "answers": [],
             }
         return {
             "status": "text_only",
-            "message": "当前通道不支持交互式选择，已将问题以文本形式展示给用户。请结束当前任务，等待用户下一轮回复。",
+            "message": "当前未开启引导式交互，已将问题以文本展示。请结束本步、待用户下一条消息中直接回复。",
             "formatted_questions": formatted,
             "answers": [],
         }
@@ -253,7 +258,8 @@ _ASK_TOOL_CARD = ToolCard(
     name="ask_user_question",
     description=(
         "向用户展示一组带选项的结构化问题（可多题），并阻塞等待用户选择。"
-        "仅在交互模式开启时可用；questions 为 JSON 数组，每项含 question、"
+        "仅当引导/交互已开启时推送选择 UI；未开启时仅将问题以 Markdown 展示，"
+        "由用户在下一条消息中自由回复。questions 为 JSON 数组，每项含 question、"
         "options[{label, description?}]、可选 header、multi_select。"
     ),
     input_params={

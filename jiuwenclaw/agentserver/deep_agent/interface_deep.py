@@ -3725,10 +3725,8 @@ class JiuWenClawDeepAdapter:
         query = request.params.get("query", "")
         mode = request.params.get("mode", "agent.plan")
         raw_interactive = request.params.get("interactive_ask", request.params.get("interactiveAsk"))
-        if raw_interactive is None:
-            interactive_ask = AskUserQuestionRegistry.get_instance().session_interactive_ask_enabled(session_id)
-        else:
-            interactive_ask = bool(raw_interactive)
+        # 未传参时默认为关闭：否则会沿用 session 内上次绑定的引导状态，导致关闭引导后仍弹结构化选择框。
+        interactive_ask = bool(raw_interactive) if raw_interactive is not None else False
         token_trace_sid = _LLM_TRACE_SESSION_ID.set(session_id)
         token_trace_rid = _LLM_TRACE_REQUEST_ID.set(rid or "")
         token_trace_iter = _LLM_TRACE_ITERATION.set(0)
