@@ -85,6 +85,7 @@ from jiuwenclaw.agentserver.deep_agent.ask_user_question_registry import (
     ask_user_question_request_scope,
 )
 from jiuwenclaw.agentserver.llm_io_trace import (
+    log_chat_final,
     log_invoke_input,
     log_invoke_output,
     log_reasoning_delta,
@@ -520,7 +521,8 @@ def _resolve_session_memory_for_context_rail(context_engine_cfg: dict[str, Any])
 
 
 def _build_context_engineering_rail(config: dict[str, Any],
-                                    mode: str = "agent.fast") -> ContextEngineeringRail | None:
+                                    mode: str = "agent.fast",
+                                    minimal: bool = False) -> ContextEngineeringRail | None:
     """Build ContextEngineeringRail with user config merged into presets.
 
     用户提供的 processor 配置（dict 格式）会与预置配置做字段级别合并，
@@ -533,6 +535,7 @@ def _build_context_engineering_rail(config: dict[str, Any],
     Args:
         config: 配置字典
         mode: 模式，agent.plan 模式使用 preset=True 和 processors，其他模式使用 preset=False 和 processors=None
+        minimal: F-REDUCE — 跳过 tools/context section 注入（用于 spawn/fork subagent）
     """
     try:
         if mode == "agent.plan":
@@ -567,24 +570,28 @@ def _build_context_engineering_rail(config: dict[str, Any],
             context_rail = JiuClawContextEngineeringRail(
                 processors=user_processors if user_processors else None,
                 preset=True,
+                minimal=minimal,
                 session_memory=session_memory,
             )
             chain = "B" if session_memory is not None else "A"
             logger.info(
                 "[JiuWenClawDeepAdapter] JiuClawContextEngineeringRail create success for agent.plan mode, "
-                "preset_chain=%s user_processors=%s",
+                "preset_chain=%s minimal=%s user_processors=%s",
                 chain,
+                minimal,
                 [p[0] for p in user_processors] if user_processors else "none",
             )
         else:
             context_rail = JiuClawContextEngineeringRail(
                 processors=None,
                 preset=False,
+                minimal=minimal,
             )
             logger.info(
                 "[JiuWenClawDeepAdapter] JiuClawContextEngineeringRail create success for %s mode, "
-                "preset=False",
-                mode
+                "preset=False minimal=%s",
+                mode,
+                minimal,
             )
         return context_rail
     except Exception as exc:
@@ -3767,6 +3774,12 @@ class JiuWenClawDeepAdapter:
                 )
             else:
                 content = slash_result.get("output", str(slash_result))
+                log_chat_final(
+                    session_id=session_id,
+                    request_id=rid or "",
+                    iteration=_LLM_TRACE_ITERATION.get(),
+                    model_name=_LLM_TRACE_MODEL_NAME.get(),
+                )
                 yield AgentResponseChunk(
                     request_id=request.request_id,
                     channel_id=request.channel_id,
@@ -4042,6 +4055,12 @@ class JiuWenClawDeepAdapter:
                         )
 
             if accumulated_text:
+                log_chat_final(
+                    session_id=session_id,
+                    request_id=rid or "",
+                    iteration=_LLM_TRACE_ITERATION.get(),
+                    model_name=_LLM_TRACE_MODEL_NAME.get(),
+                )
                 yield AgentResponseChunk(
                     request_id=rid,
                     channel_id=cid,
@@ -4267,6 +4286,12 @@ class JiuWenClawDeepAdapter:
                         # When llm_output has already streamed the full user-facing text,
                         # keep chat.final as a completion marker only to avoid duplicating
                         # the final answer block downstream.
+                        log_chat_final(
+                            session_id=_LLM_TRACE_SESSION_ID.get(),
+                            request_id=_LLM_TRACE_REQUEST_ID.get(),
+                            iteration=_LLM_TRACE_ITERATION.get(),
+                            model_name=_LLM_TRACE_MODEL_NAME.get(),
+                        )
                         return {"event_type": "chat.final", "content": ""}
 
                     if not content:
@@ -4277,6 +4302,12 @@ class JiuWenClawDeepAdapter:
                         if task_id:
                             result["task_id"] = task_id
                         return result
+                    log_chat_final(
+                        session_id=_LLM_TRACE_SESSION_ID.get(),
+                        request_id=_LLM_TRACE_REQUEST_ID.get(),
+                        iteration=_LLM_TRACE_ITERATION.get(),
+                        model_name=_LLM_TRACE_MODEL_NAME.get(),
+                    )
                     return {"event_type": "chat.final", "content": content}
 
                 if chunk_type == "tool_calls.delta":

@@ -584,10 +584,20 @@ Approach each task methodically and deliver high-quality results.
 
         max_iterations = self._resolve_subagent_max_iterations()
         filesystem_rail = self._build_inherited_filesystem_rail()
+        # 复用主 Agent 路径：跟随 react.context_engine_config 解析链 A/B 与 yaml 调优值
+        # （tool_result_budget / micro_compact / full_compact）；minimal=True 跳过 tools/context 注入。
+        from jiuwenclaw.agentserver.deep_agent.interface_deep import _build_context_engineering_rail
+
+        react_config = (config_base or {}).get("react", {}) or {}
+        context_engine_config = react_config.get("context_engine_config", {}) or {}
+        ce_rail = None
+        if context_engine_config.get("enabled", False):
+            ce_rail = _build_context_engineering_rail(
+                react_config,
+                mode="agent.plan",
+                minimal=True,
+            ) or JiuClawContextEngineeringRail(preset=True, minimal=True)
         rails = [
-            JiuClawContextEngineeringRail(
-                preset=True,
-                minimal=True),  # 上下文压缩 - 默认链路 B（ToolResultBudget + MicroCompact + FullCompact），不注入 tools/context
             SubagentContextRail(subagent_id=task.task_id, parent_session=parent_session),
             # active-skill body 的 lift/pin 由 rail.after_tool_call 触发；
             # include_tools/include_skill_body_tools 都关掉：skill_tool/skill_complete
@@ -602,6 +612,8 @@ Approach each task methodically and deliver high-quality results.
         ]
         if filesystem_rail is not None:
             rails.insert(0, filesystem_rail)
+        if ce_rail is not None:
+            rails.insert(1 if filesystem_rail is not None else 0, ce_rail)
 
         spawn_agent = create_deep_agent(
             model=self._model,
@@ -721,11 +733,20 @@ Execute the given task using inherited context and available tools.
 
         max_iterations = self._resolve_subagent_max_iterations()
         filesystem_rail = self._build_inherited_filesystem_rail()
+        # 与 spawn 路径同样跟随 react.context_engine_config 解析链 A/B 与 yaml 调优值。
+        from jiuwenclaw.agentserver.deep_agent.interface_deep import _build_context_engineering_rail
+
+        react_config = (config_base or {}).get("react", {}) or {}
+        context_engine_config = react_config.get("context_engine_config", {}) or {}
+        ce_rail = None
+        if context_engine_config.get("enabled", False):
+            ce_rail = _build_context_engineering_rail(
+                react_config,
+                mode="agent.plan",
+                minimal=True,
+            ) or JiuClawContextEngineeringRail(preset=True, minimal=True)
         rails = [
             ForkMessageInjectionRail(fork_messages),  # 注入继承的消息
-            JiuClawContextEngineeringRail(
-                preset=True,
-                minimal=True),  # 上下文压缩 - 默认链路 B，不注入 tools/context
             SubagentContextRail(subagent_id=task.task_id, parent_session=parent_session),
             # 与 spawn 路径同样的 active-skill body lift/pin 接入；
             # fork 继承的 skill_tool/skill_complete 走 _inherit_tools_for_fork。
@@ -738,6 +759,8 @@ Execute the given task using inherited context and available tools.
         ]
         if filesystem_rail is not None:
             rails.insert(0, filesystem_rail)
+        if ce_rail is not None:
+            rails.insert(2 if filesystem_rail is not None else 1, ce_rail)
 
         fork_agent = create_deep_agent(
             model=self._model,

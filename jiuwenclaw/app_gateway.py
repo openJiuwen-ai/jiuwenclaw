@@ -30,7 +30,10 @@ from openjiuwen.core.common.logging import LogManager
 import jiuwenclaw.channel.acp_channel as acp_channel_module
 from jiuwenclaw.channel.acp_channel import AcpGatewayBridge
 from jiuwenclaw.gateway.route_binding import GatewayRouteBinding
-from jiuwenclaw.jiuwen_core_patch import apply_openai_model_client_patch
+from jiuwenclaw.jiuwen_core_patch import (
+    apply_openai_model_client_patch,
+    configure_openjiuwen_logging_under_jiuwenclaw,
+)
 from jiuwenclaw.utils import (
     get_user_workspace_dir,
     get_env_file,
@@ -58,6 +61,7 @@ if not _config_file.exists() or (_old_workspace.exists() and not _new_workspace.
     prepare_workspace(overwrite=False)
 
 # Reduce openjiuwen internal logs (keep Gateway logs)
+configure_openjiuwen_logging_under_jiuwenclaw()
 for _lg in LogManager.get_all_loggers().values():
     _lg.set_level(logging.INFO)
 

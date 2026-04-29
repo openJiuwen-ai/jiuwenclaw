@@ -3,10 +3,9 @@ import json
 import os
 import asyncio
 import logging
-from typing import Any, Optional
+from typing import Any, AsyncIterator, Optional
 from contextvars import ContextVar
 from dataclasses import dataclass
-from typing import Any, Optional, AsyncIterator
 
 from pydantic import Field
 import httpx
@@ -21,6 +20,7 @@ from openjiuwen.core.foundation.llm.model_clients.siliconflow_model_client impor
     SiliconFlowModelClient,
 )
 from openjiuwen.core.session.stream import OutputSchema
+
 llm_logger = logging.getLogger("jiuwenclaw.app")
 
 # Session context for retry notifications.
@@ -28,6 +28,39 @@ llm_logger = logging.getLogger("jiuwenclaw.app")
 _retry_session: ContextVar[Optional[Any]] = ContextVar("retry_session", default=None)
 
 _ORIGINAL_BUILD_REQUEST_PARAMS = None
+
+
+def configure_openjiuwen_logging_under_jiuwenclaw(subdir: str = "openjiuwen") -> None:
+    """Route openjiuwen log files under JiuwenClaw's service-level log directory.
+
+    openjiuwen defaults to ``./logs/``, which depends on the process working
+    directory. JiuwenClaw owns a stable log root via ``get_logs_dir()``; this
+    helper keeps openjiuwen's existing run/interface/performance layout while
+    moving that root to ``<jiuwenclaw logs>/<subdir>``.
+    """
+    try:
+        from openjiuwen.core.common.logging.log_config import (
+            configure_log_config,
+            get_log_config_snapshot,
+        )
+        from jiuwenclaw.utils import get_logs_dir
+
+        log_root = get_logs_dir() / subdir
+        log_root.mkdir(parents=True, exist_ok=True)
+
+        config = get_log_config_snapshot()
+        target = str(log_root)
+        if config.get("log_path") == target:
+            return
+
+        config["log_path"] = target
+        configure_log_config(config)
+    except Exception as exc:
+        llm_logger.warning(
+            "Failed to route openjiuwen logs under JiuwenClaw log dir: %s",
+            exc,
+        )
+
 
 # ============================================================
 # LLM Retry Mechanism

@@ -347,3 +347,23 @@ def log_invoke_output(
     )
     body = format_llm_assistant_for_trace(assistant_msg)
     _log_body_parts(header, body)
+
+
+def log_chat_final(
+    *,
+    session_id: str,
+    request_id: str,
+    iteration: int | None,
+    model_name: str,
+) -> None:
+    """Record the user-facing chat.final boundary without logging final content."""
+    if not _llm_trace_active():
+        return
+    header = _trace_header(
+        session_id=session_id,
+        request_id=request_id,
+        iteration=iteration,
+        model_name=model_name,
+        event="chat.final",
+    )
+    _log_body_parts(header, "")

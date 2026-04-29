@@ -39,7 +39,10 @@ from jiuwenclaw.config import (
     update_memory_forbidden_description_in_config,
     update_updater_in_config,
 )
-from jiuwenclaw.jiuwen_core_patch import apply_openai_model_client_patch
+from jiuwenclaw.jiuwen_core_patch import (
+    apply_openai_model_client_patch,
+    configure_openjiuwen_logging_under_jiuwenclaw,
+)
 from jiuwenclaw.updater import WindowsUpdaterService
 from jiuwenclaw.agentserver.session_id_safe import (
     normalize_safe_session_id,
@@ -56,6 +59,7 @@ from jiuwenclaw.local_env_config import decrypt, encrypt
 
 apply_openai_model_client_patch()
 
+configure_openjiuwen_logging_under_jiuwenclaw()
 for _jiuwen_log in LogManager.get_all_loggers().values():
     _jiuwen_log.set_level(logging.CRITICAL)
 
