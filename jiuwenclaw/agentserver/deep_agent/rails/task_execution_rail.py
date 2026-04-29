@@ -2,21 +2,21 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import time
 from contextvars import ContextVar
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Literal
 
 from openjiuwen.core.session.agent import Session
 from openjiuwen.core.session.stream import OutputSchema
-from openjiuwen.core.single_agent import BaseAgent
 from openjiuwen.core.single_agent.rail.base import AgentCallbackContext, InvokeInputs, ToolCallInputs
-from openjiuwen.core.runner import Runner
 from openjiuwen.harness.rails.base import DeepAgentRail
+from openjiuwen.harness.workspace.workspace import WorkspaceNode
 
-from jiuwenclaw.agentserver.tools.skill_step_toolkit import SkillStepToolkit
-from jiuwenclaw.agentserver.tools.todo_toolkits import TaskStatus, TodoToolkit
+from jiuwenclaw.utils import get_agent_sessions_dir
 
 logger = logging.getLogger(__name__)
 
@@ -31,29 +31,39 @@ def get_current_task_id() -> str | None:
 @dataclass
 class TaskExecutionContext:
     task_id: str
-    todo_id: str
     task_content: str
     task_index: int
     total_tasks: int
     parent_request_id: str
     start_time: float
+    source: Literal["todo", "skill_step"]
     status: Literal["running", "succeeded", "failed", "skipped"] = "running"
 
 
 class TaskExecutionRail(DeepAgentRail):
     """Emit task.start/task.complete around todo and skill_step execution status transitions.
-    
-    This rail tracks both TodoToolkit (todo_*) and the skill_step facade tool,
-    emitting lifecycle events when task status changes.
+
+    Tool Categories:
+    - TODO_TOOLS: todo_create, todo_list, todo_modify - triggers todo state change detection
+    - SKILL_STEP_TOOLS: skill_step - triggers skill_step state change detection
+    - BUSINESS_TOOLS: all other tools - auto-starts first pending skill_step task
     """
 
     priority = 85
+
+    TODO_TOOLS = frozenset({"todo_create", "todo_list", "todo_modify"})
+    SKILL_STEP_TOOLS = frozenset({"skill_step"})
+    ALL_TASK_TOOLS = TODO_TOOLS | SKILL_STEP_TOOLS
 
     def __init__(self) -> None:
         super().__init__()
         self._todo_map: dict[str, dict[str, Any]] = {}
         self._todo_map_before_tool: dict[str, dict[str, Any]] = {}
+        self._skill_step_map: dict[str, dict[str, Any]] = {}
+        self._skill_step_map_before_tool: dict[str, dict[str, Any]] = {}
         self._active_tasks: dict[str, TaskExecutionContext] = {}
+        self._todo_started: set[str] = set()
+        self._skill_step_started: set[str] = set()
         self._deep_agent: Any | None = None
         self._current_task_id: str | None = None
 
@@ -62,159 +72,290 @@ class TaskExecutionRail(DeepAgentRail):
 
     def init(self, agent: Any) -> None:
         self._deep_agent = agent
-        logger.info("[TaskExecutionRail] init done: agent=%s", type(agent).__name__)
 
     async def before_invoke(self, ctx: AgentCallbackContext) -> None:
         self._todo_map = {}
+        self._todo_map_before_tool = {}
+        self._skill_step_map = {}
+        self._skill_step_map_before_tool = {}
         self._active_tasks = {}
+        self._todo_started = set()
+        self._skill_step_started = set()
         self._current_task_id = None
         _ACTIVE_TASK_ID.set(None)
         if isinstance(ctx.inputs, InvokeInputs):
-            await self._init_todo_tracking(ctx.agent, ctx.session)
+            await self._init_task_tracking(ctx.session)
 
     async def before_tool_call(self, ctx: AgentCallbackContext) -> None:
         if not isinstance(ctx.inputs, ToolCallInputs):
             return
         tool_name = ctx.inputs.tool_name
-        todo_tools = {
-            "todo_create", "todo_start", "todo_complete", "todo_insert", "todo_remove",
-            "skill_step",
-        }
-        if tool_name in todo_tools:
+
+        if tool_name in self.TODO_TOOLS:
             self._todo_map_before_tool = dict(self._todo_map)
             return
 
+        if tool_name in self.SKILL_STEP_TOOLS:
+            self._skill_step_map_before_tool = dict(self._skill_step_map)
+            return
+
+        await self._maybe_start_pending_skill_step_task(ctx)
         self._bind_context_to_in_progress_task()
 
     async def after_tool_call(self, ctx: AgentCallbackContext) -> None:
         if not isinstance(ctx.inputs, ToolCallInputs):
             return
         tool_name = ctx.inputs.tool_name
-        todo_tools = {
-            "todo_create", "todo_start", "todo_complete", "todo_insert", "todo_remove",
-            "skill_step",
-        }
-        if tool_name in todo_tools:
-            await self._sync_from_todo_tool_and_emit_transitions(ctx)
+
+        if tool_name in self.TODO_TOOLS:
+            await self._sync_todo_and_emit_transitions(ctx)
+            return
+
+        if tool_name in self.SKILL_STEP_TOOLS:
+            await self._sync_skill_step_and_emit_transitions(ctx)
+            return
 
     async def after_invoke(self, ctx: AgentCallbackContext) -> None:
         self._todo_map_before_tool = {}
+        self._skill_step_map_before_tool = {}
         self._bind_context_to_in_progress_task()
 
-    async def _init_todo_tracking(self, agent: BaseAgent, session: Session | None) -> None:
+    async def _init_task_tracking(self, session: Session | None) -> None:
         if session is None:
             return
-        
-        for tool_key in ["todo_list", "skill_step"]:
-            try:
-                if tool_key == "skill_step":
-                    agent.ability_manager.get(tool_key)
-                    registered_tool = SkillStepToolkit(session_id=session.get_session_id())
-                else:
-                    tool_card = agent.ability_manager.get(tool_key)
-                    registered_tool = Runner.resource_mgr.get_tool(tool_card.id)
-                if isinstance(registered_tool, (TodoToolkit, SkillStepToolkit)):
-                    registered_tool.set_session_id(session.get_session_id())
-                    todos = registered_tool.load_tasks()
-                    total = len(todos)
-                    for index, todo in enumerate(todos):
-                        self._todo_map[str(todo.idx)] = {
-                            "content": str(todo.tasks),
-                            "status": self._normalize_status(todo.status),
-                            "index": index,
-                            "total": total,
-                        }
-                    if total > 0:
-                        logger.info("[TaskExecutionRail] Initialized %s: %d tasks", tool_key, total)
-            except Exception as exc:
-                logger.debug("[TaskExecutionRail] No %s tool found: %s", tool_key, exc)
+        session_id = session.get_session_id()
 
-    async def _sync_from_todo_tool_and_emit_transitions(self, ctx: AgentCallbackContext) -> None:
+        try:
+            todo_items = self._load_todo_from_json(session_id)
+            if todo_items:
+                self._todo_map = self._build_map_from_todo_items(todo_items)
+                logger.info("[TaskExecutionRail] Loaded todo.json: %d tasks", len(todo_items))
+        except Exception as exc:
+            logger.debug("[TaskExecutionRail] Failed to load todo.json: %s", exc)
+
+        try:
+            skill_step_items = self._load_skill_step_from_markdown(session_id)
+            if skill_step_items:
+                self._skill_step_map = self._build_map_from_skill_step_items(skill_step_items)
+                logger.info("[TaskExecutionRail] Loaded skill_step.md: %d tasks", len(skill_step_items))
+        except Exception as exc:
+            logger.debug("[TaskExecutionRail] Failed to load skill_step.md: %s", exc)
+
+    def _load_todo_from_json(self, session_id: str) -> list[dict[str, Any]]:
+        todo_path = self._get_todo_workspace_path(session_id)
+        if not todo_path.exists():
+            return []
+        with open(todo_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return data if isinstance(data, list) else []
+
+    def _load_skill_step_from_markdown(self, session_id: str) -> list[dict[str, Any]]:
+        skill_step_path = self._get_skill_step_workspace_path(session_id)
+        if not skill_step_path.exists():
+            return []
+        items: list[dict[str, Any]] = []
+        with open(skill_step_path, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith("#"):
+                    continue
+                status = self._parse_markdown_status(line)
+                rest = (
+                    line.replace("- [x]", "")
+                    .replace("- [-]", "")
+                    .replace("- [>]", "")
+                    .replace("- [ ]", "")
+                    .strip()
+                )
+                if "." in rest:
+                    idx_str, _, task_text = rest.partition(".")
+                    task_text = task_text.split("|")[0].strip()
+                    try:
+                        idx = int(idx_str.strip())
+                        items.append({"idx": idx, "content": task_text, "status": status})
+                    except ValueError:
+                        pass
+        return sorted(items, key=lambda x: x["idx"])
+
+    def _parse_markdown_status(self, line: str) -> str:
+        if "[-]" in line:
+            return "cancelled"
+        if "[>]" in line:
+            return "in_progress"
+        if "[x]" in line.lower() or "[√]" in line:
+            return "completed"
+        parts = [p.strip() for p in line.split("|")]
+        if len(parts) >= 2:
+            status_str = parts[1].strip().lower()
+            if status_str in ("running", "in_progress"):
+                return "in_progress"
+            if status_str in ("waiting", "pending"):
+                return "pending"
+            if status_str == "completed":
+                return "completed"
+            if status_str == "cancelled":
+                return "cancelled"
+        return "pending"
+
+    def _build_map_from_todo_items(self, items: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+        mapped: dict[str, dict[str, Any]] = {}
+        total = len(items)
+        for index, item in enumerate(items):
+            task_id = item.get("id", str(index))
+            status = item.get("status", "pending")
+            normalized_status = status.lower() if isinstance(status, str) else str(status).lower()
+            mapped[task_id] = {
+                "content": item.get("content", item.get("activeForm", "")),
+                "status": normalized_status,
+                "index": index,
+                "total": total,
+            }
+        return mapped
+
+    def _build_map_from_skill_step_items(self, items: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+        mapped: dict[str, dict[str, Any]] = {}
+        total = len(items)
+        for index, item in enumerate(items):
+            task_id = str(item.get("idx", index))
+            mapped[task_id] = {
+                "content": item.get("content", ""),
+                "status": item.get("status", "pending"),
+                "index": index,
+                "total": total,
+            }
+        return mapped
+
+    async def _sync_todo_and_emit_transitions(self, ctx: AgentCallbackContext) -> None:
         if ctx.session is None:
             return
-        tool_name = ctx.inputs.tool_name if isinstance(ctx.inputs, ToolCallInputs) else ""
-        todo_tool = self._get_todo_tool(ctx.agent, ctx.session.get_session_id(), tool_name)
-        if todo_tool is None:
-            logger.warning("[TaskExecutionRail] todo_tool not found for %s", tool_name)
-            return
-        try:
-            todos = todo_tool.load_tasks()
-        except Exception as exc:
-            logger.warning("[TaskExecutionRail] Failed to load todos: %s", exc)
-            return
-
-        current_map = self._build_todo_map(todos)
-        previous_map = dict(self._todo_map_before_tool or self._todo_map)
+        session_id = ctx.session.get_session_id()
         parent_request_id = self._extract_request_id(ctx)
 
-        for todo_id, current in current_map.items():
-            prev = previous_map.get(todo_id)
-            prev_status = str(prev.get("status", "")) if prev else ""
-            curr_status = str(current.get("status", ""))
+        try:
+            todo_items = self._load_todo_from_json(session_id)
+        except Exception as exc:
+            logger.warning("[TaskExecutionRail] Failed to load todo.json: %s", exc)
+            return
 
-            if curr_status == "in_progress" and prev_status not in {"in_progress", "completed"}:
-                logger.info("[TaskExecutionRail] task.start: idx=%s", todo_id)
-                await self._emit_start_if_needed(ctx.session, todo_id, current, parent_request_id)
+        current_map = self._build_map_from_todo_items(todo_items)
+        previous_map = self._todo_map_before_tool or self._todo_map
+
+        for task_id, current in current_map.items():
+            prev = previous_map.get(task_id)
+            prev_status = prev.get("status", "") if prev else ""
+            curr_status = current.get("status", "")
+
+            if curr_status == "in_progress" and prev_status not in ("in_progress", "completed"):
+                if task_id not in self._todo_started:
+                    await self._emit_task_start_event(
+                        ctx.session, task_id, current, parent_request_id, source="todo"
+                    )
+                    self._todo_started.add(task_id)
             elif prev_status == "in_progress" and curr_status == "completed":
-                logger.info("[TaskExecutionRail] task.complete: idx=%s", todo_id)
-                await self._emit_complete_if_needed(ctx.session, todo_id, status="succeeded")
+                await self._emit_task_complete_event(ctx.session, task_id, current, status="succeeded")
 
         self._todo_map = current_map
         self._todo_map_before_tool = {}
         self._bind_context_to_in_progress_task()
 
-    async def _emit_start_if_needed(
+    async def _maybe_start_pending_skill_step_task(self, ctx: AgentCallbackContext) -> None:
+        if ctx.session is None:
+            return
+
+        if not self._skill_step_map:
+            return
+
+        has_in_progress = any(
+            task.get("status") == "in_progress" for task in self._skill_step_map.values()
+        )
+        if has_in_progress:
+            return
+
+        pending_task_id = None
+        pending_task = None
+        for task_id, task in self._skill_step_map.items():
+            if task.get("status") == "pending":
+                pending_task_id = task_id
+                pending_task = task
+                break
+
+        if pending_task_id is None or pending_task_id in self._skill_step_started:
+            return
+
+        parent_request_id = self._extract_request_id(ctx)
+        await self._emit_task_start_event(
+            ctx.session, pending_task_id, pending_task, parent_request_id, source="skill_step"
+        )
+        self._skill_step_started.add(pending_task_id)
+        self._skill_step_map[pending_task_id]["status"] = "in_progress"
+
+    async def _sync_skill_step_and_emit_transitions(self, ctx: AgentCallbackContext) -> None:
+        if ctx.session is None:
+            return
+        session_id = ctx.session.get_session_id()
+        parent_request_id = self._extract_request_id(ctx)
+
+        try:
+            skill_step_items = self._load_skill_step_from_markdown(session_id)
+        except Exception as exc:
+            logger.warning("[TaskExecutionRail] Failed to load skill_step.md: %s", exc)
+            return
+
+        current_map = self._build_map_from_skill_step_items(skill_step_items)
+        previous_map = self._skill_step_map_before_tool or self._skill_step_map
+
+        for task_id, prev_task in self._skill_step_map.items():
+            if prev_task.get("status") == "in_progress":
+                curr_task = current_map.get(task_id)
+                if curr_task and curr_task.get("status") == "pending":
+                    current_map[task_id]["status"] = "in_progress"
+
+        for task_id, current in current_map.items():
+            prev = previous_map.get(task_id)
+            prev_status = prev.get("status", "") if prev else ""
+            curr_status = current.get("status", "")
+
+            if curr_status == "completed" and prev_status in ("pending", "in_progress", ""):
+                if task_id not in self._skill_step_started:
+                    await self._emit_task_start_event(
+                        ctx.session, task_id, current, parent_request_id, source="skill_step"
+                    )
+                    self._skill_step_started.add(task_id)
+                await self._emit_task_complete_event(ctx.session, task_id, current, status="succeeded")
+
+        self._skill_step_map = current_map
+        self._skill_step_map_before_tool = {}
+        self._bind_context_to_in_progress_task()
+
+    async def _emit_task_start_event(
         self,
         session: Session,
-        todo_id: str,
-        todo: dict[str, Any],
+        task_id: str,
+        task: dict[str, Any],
         parent_request_id: str,
+        source: Literal["todo", "skill_step"],
     ) -> None:
-        task_id = self._build_task_id(todo_id)
-        if task_id in self._active_tasks:
-            _ACTIVE_TASK_ID.set(task_id)
+        full_task_id = f"{source}:{task_id}"
+
+        if full_task_id in self._active_tasks:
+            _ACTIVE_TASK_ID.set(full_task_id)
             return
+
         context = TaskExecutionContext(
-            task_id=task_id,
-            todo_id=todo_id,
-            task_content=str(todo.get("content", "")),
-            task_index=int(todo.get("index", 0)),
-            total_tasks=int(todo.get("total", 0)),
+            task_id=full_task_id,
+            task_content=str(task.get("content", "")),
+            task_index=int(task.get("index", 0)),
+            total_tasks=int(task.get("total", 0)),
             parent_request_id=parent_request_id,
             start_time=time.time(),
+            source=source,
         )
-        self._active_tasks[task_id] = context
-        _ACTIVE_TASK_ID.set(task_id)
-        await self._emit_task_start(session, context)
+        self._active_tasks[full_task_id] = context
+        _ACTIVE_TASK_ID.set(full_task_id)
+        self._current_task_id = full_task_id
 
-    async def _emit_complete_if_needed(
-        self,
-        session: Session,
-        todo_id: str,
-        *,
-        status: Literal["succeeded", "failed", "skipped"],
-        error: str | None = None,
-    ) -> None:
-        task_id = self._build_task_id(todo_id)
-        context = self._active_tasks.get(task_id)
-        if context is None:
-            return
-        if get_current_task_id() == task_id:
-            _ACTIVE_TASK_ID.set(None)
-        await self._emit_task_complete(session, context, status=status, error=error)
-        self._active_tasks.pop(task_id, None)
+        logger.info("[TaskExecutionRail] task.start: %s - %s", full_task_id, context.task_content)
 
-    def _bind_context_to_in_progress_task(self) -> None:
-        for todo_id, todo in self._todo_map.items():
-            if str(todo.get("status", "")) == "in_progress":
-                task_id = self._build_task_id(todo_id)
-                _ACTIVE_TASK_ID.set(task_id)
-                self._current_task_id = task_id
-                return
-        _ACTIVE_TASK_ID.set(None)
-        self._current_task_id = None
-
-    async def _emit_task_start(self, session: Session, context: TaskExecutionContext) -> None:
         await session.write_stream(
             OutputSchema(
                 type="task.start",
@@ -226,20 +367,37 @@ class TaskExecutionRail(DeepAgentRail):
                     "total_tasks": context.total_tasks,
                     "parent_request_id": context.parent_request_id,
                     "timestamp": context.start_time,
+                    "source": source,
                 },
             )
         )
 
-    async def _emit_task_complete(
+    async def _emit_task_complete_event(
         self,
         session: Session,
-        context: TaskExecutionContext,
+        task_id: str,
+        task: dict[str, Any],
         *,
         status: Literal["succeeded", "failed", "skipped"],
         error: str | None = None,
     ) -> None:
+        for source in ["todo", "skill_step"]:
+            full_task_id = f"{source}:{task_id}"
+            context = self._active_tasks.get(full_task_id)
+            if context:
+                break
+        else:
+            return
+
         timestamp = time.time()
         duration_ms = int((timestamp - context.start_time) * 1000)
+
+        if get_current_task_id() == full_task_id:
+            _ACTIVE_TASK_ID.set(None)
+            self._current_task_id = None
+
+        logger.info("[TaskExecutionRail] task.complete: %s - %s (%dms)", full_task_id, status, duration_ms)
+
         await session.write_stream(
             OutputSchema(
                 type="task.complete",
@@ -251,66 +409,40 @@ class TaskExecutionRail(DeepAgentRail):
                     "duration_ms": duration_ms,
                     "error": error,
                     "timestamp": timestamp,
+                    "source": context.source,
                 },
             )
         )
+        self._active_tasks.pop(full_task_id, None)
 
-    def _get_todo_tool(self, agent: BaseAgent, session_id: str, tool_name: str = "") -> Any | None:
-        is_skill_step = tool_name == "skill_step"
-        if is_skill_step:
-            return SkillStepToolkit(session_id=session_id)
+    def _bind_context_to_in_progress_task(self) -> None:
+        # 优先绑定 skill_step 任务，再绑定 todo 任务
+        for task_id, task in self._skill_step_map.items():
+            if task.get("status") == "in_progress":
+                full_task_id = f"skill_step:{task_id}"
+                _ACTIVE_TASK_ID.set(full_task_id)
+                self._current_task_id = full_task_id
+                return
 
-        toolkit_class = SkillStepToolkit if is_skill_step else TodoToolkit
-        tool_key = "todo_list"
-        
-        try:
-            tool_card = agent.ability_manager.get(tool_key)
-            registered_tool = Runner.resource_mgr.get_tool(tool_card.id)
-            if isinstance(registered_tool, toolkit_class):
-                registered_tool.set_session_id(session_id)
-                return registered_tool
-        except Exception as exc:
-            logger.debug("[TaskExecutionRail] Failed to get registered %s: %s", toolkit_class.__name__, exc)
-            pass
+        for task_id, task in self._todo_map.items():
+            if task.get("status") == "in_progress":
+                full_task_id = f"todo:{task_id}"
+                _ACTIVE_TASK_ID.set(full_task_id)
+                self._current_task_id = full_task_id
+                return
 
-        try:
-            return toolkit_class(session_id=session_id)
-        except Exception as exc:
-            logger.warning("[TaskExecutionRail] Failed to create %s: %s", toolkit_class.__name__, exc)
-            return None
+        _ACTIVE_TASK_ID.set(None)
+        self._current_task_id = None
 
-    @staticmethod
-    def _build_todo_map(todos: list[Any]) -> dict[str, dict[str, Any]]:
-        mapped: dict[str, dict[str, Any]] = {}
-        total = len(todos)
-        for index, todo in enumerate(todos):
-            mapped[str(todo.idx)] = {
-                "content": str(todo.tasks),
-                "status": TaskExecutionRail._normalize_status(todo.status),
-                "index": index,
-                "total": total,
-            }
-        return mapped
+    def _get_todo_workspace_path(self, session_id: str) -> Path:
+        if self.workspace is not None:
+            return Path(self.workspace.get_node_path(WorkspaceNode.TODO)) / session_id / "todo.json"
+        return get_agent_sessions_dir() / session_id / "todo.json"
+
+    def _get_skill_step_workspace_path(self, session_id: str) -> Path:
+        return get_agent_sessions_dir() / session_id / "skill_step.md"
 
     @staticmethod
     def _extract_request_id(ctx: AgentCallbackContext) -> str:
         value = getattr(ctx.inputs, "request_id", "")
         return str(value) if value else ""
-
-    @staticmethod
-    def _normalize_status(status: Any) -> str:
-        if isinstance(status, TaskStatus):
-            status_map = {
-                TaskStatus.WAITING: "waiting",
-                TaskStatus.RUNNING: "in_progress",
-                TaskStatus.COMPLETED: "completed",
-                TaskStatus.CANCELLED: "cancelled",
-            }
-            return status_map.get(status, "waiting")
-        if hasattr(status, "value"):
-            return str(getattr(status, "value", "")).lower()
-        return str(status or "").lower()
-
-    @staticmethod
-    def _build_task_id(todo_id: str) -> str:
-        return f"todo:{todo_id}"
