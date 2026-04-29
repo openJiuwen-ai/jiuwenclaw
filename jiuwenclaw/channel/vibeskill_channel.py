@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import secrets
 import socket
 import time
@@ -73,7 +74,7 @@ class VibeSkillChannel(BaseChannel):
         self._listen_host = self._get_local_ip()
         
         # 加载 AK/SK 鉴权配置
-        self._auth_enabled = True
+        self._auth_enabled = os.environ.get("JIUWEN_CLAW_AUTH_ENABLED", "false").lower() == "true"
         logger.info("[Auth] init: auth_enabled=%s", self._auth_enabled)
 
     def on_message(self, callback: Callable[[Message], Any]) -> None:
