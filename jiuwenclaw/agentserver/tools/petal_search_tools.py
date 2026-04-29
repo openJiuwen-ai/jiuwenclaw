@@ -20,7 +20,7 @@ from jiuwenclaw.config import get_config
 
 _PETAL_MAX_TITLE_LEN = 2000
 _PETAL_MAX_URL_LEN = 2048
-_PETAL_MAX_CONTENT_LEN = 8000
+_PETAL_MAX_SUMMARY_LEN = 4000
 
 
 def _resolve_petal_search_url() -> str:
@@ -76,18 +76,11 @@ def _petal_http_request(method: str, url: str, **kwargs: Any) -> requests.Respon
 def _petal_normalize_web_page_item(item: dict[str, Any]) -> dict[str, str]:
     raw_url = item.get("url") or item.get("link") or item.get("source_url") or ""
     title = (item.get("title") or item.get("name") or "").strip()
-    content = (
-        item.get("content")
-        or item.get("snippet")
-        or item.get("description")
-        or item.get("summary")
-        or ""
-    )
-    content = str(content).strip()
+    summary = (item.get("summary") or "").strip()
     return {
         "title": title[:_PETAL_MAX_TITLE_LEN],
         "url": str(raw_url).strip()[:_PETAL_MAX_URL_LEN],
-        "content": content[:_PETAL_MAX_CONTENT_LEN],
+        "summary": summary[:_PETAL_MAX_SUMMARY_LEN],
     }
 
 
@@ -97,16 +90,16 @@ def _petal_format_answer_from_records(records: list[dict[str, str]]) -> str:
     for rec in records:
         title = (rec.get("title") or "").strip()
         url = (rec.get("url") or "").strip()
-        content = (rec.get("content") or "").strip()
-        if not title and not url and not content:
+        summary = (rec.get("summary") or "").strip()
+        if not title and not url and not summary:
             continue
         n += 1
         display_title = title if title else "(无标题)"
         lines.append(f"{n}. {display_title}")
         if url:
             lines.append(f"   URL: {url}")
-        if content:
-            lines.append(f"   Content: {content}")
+        if summary:
+            lines.append(f"   Summary: {summary}")
     return "\n".join(lines)
 
 
@@ -115,7 +108,7 @@ def petal_search_sync(query: str, max_results: int, timeout_seconds: int) -> dic
     search_url = _resolve_petal_search_url()
     header_map = _load_llm_default_headers()
     headers = {**header_map, "Content-Type": "application/json"}
-    payload = {"query": query, "content": True}
+    payload = {"query": query, "content": False}
 
     response = _petal_http_request(
         "POST",
@@ -155,14 +148,13 @@ def enable_petal_search() -> bool:
 @tool(
     name="mcp_petal_search",
     description=(
-        "Preferred web search tool when available. Use this before mcp_free_search for web searches. "
-        "Petal web search via the same OpenAI-compatible API_BASE as the LLM "
-        "(POST .../v1/ai-tools/web-search). Requires enable_petal_web_search in config and default_headers env."
+        "Petal网页搜索工具，返回相关网页 URL 和摘要."
+        "首选网络搜索工具。在进行网络搜索时，请先使用此工具."
     ),
 )
 async def mcp_petal_search(
     query: str,
-    max_results: int = 8,
+    max_results: int = 5,
     timeout_seconds: int = 45,
 ) -> str:
     query = (query or "").strip()
@@ -175,7 +167,7 @@ async def mcp_petal_search(
             "Set enable_petal_web_search: true in config, and API_BASE plus default_headers (JSON) in the environment."
         )
 
-    max_results = max(1, min(max_results, 20))
+    max_results = max(1, min(max_results, 5))
     timeout_seconds = max(10, min(timeout_seconds, 120))
 
     try:
