@@ -36,10 +36,6 @@ def build_permission_rail(
         permission_config.get("enabled", False)
     )
 
-    if not permission_config.get("enabled", False):
-        logger.info("[InterruptHelpers] Permission system is disabled, returning None")
-        return None
-
     logger.info(
         "[InterruptHelpers] Building PermissionInterruptRail intercept=all llm=%s model_name=%s",
         llm is not None,

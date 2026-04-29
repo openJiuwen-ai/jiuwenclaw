@@ -1859,7 +1859,7 @@ class JiuWenClawDeepAdapter:
                 model_name=model_name,
             )
             logger.info("[JiuWenClawDeepAdapter] _permission_rail config hot-updated")
-        elif permission_config.get("enabled", False):
+        else:
             self._permission_rail = build_permission_rail(
                 config=config_base, llm=self._model,
                 model_name=model_name,

@@ -29,6 +29,7 @@ from jiuwenclaw.agentserver.permissions.shell_tools import (
     extract_shell_command,
     is_shell_permission_tool,
 )
+from jiuwenclaw.utils import get_config_file
 
 logger = logging.getLogger(__name__)
 
@@ -82,20 +83,24 @@ def get_package_builtin_rules_path() -> Path:
 
 
 def _resolve_builtin_rules_yaml_path() -> Path | None:
-    user_dir = os.getenv("JIUWENCLAW_CONFIG_DIR")
-    if user_dir:
-        user_path = Path(user_dir) / "builtin_rules.yaml"
+    # Keep builtin rules path consistent with config.yaml path resolution.
+    # This ensures relay-claw and standalone jiuwenclaw deployments read the
+    # same workspace-scoped config directory.
+    try:
+        config_dir = get_config_file().parent
+    except Exception:
+        config_dir = None
+    if isinstance(config_dir, Path):
+        user_path = config_dir / "builtin_rules.yaml"
         if user_path.is_file():
             return user_path
-    fallback_user_path = Path.home() / ".jiuwenclaw" / "config" / "builtin_rules.yaml"
-    if fallback_user_path.is_file():
-        return fallback_user_path
+
     pkg_path = _package_builtin_rules_path()
     if pkg_path.is_file():
         return pkg_path
     logger.warning(
         "[PermissionEngine] permission.tiered_policy.builtin_rules_missing user_path=%s package_path=%s",
-        fallback_user_path,
+        str(config_dir / "builtin_rules.yaml") if isinstance(config_dir, Path) else "",
         pkg_path,
     )
     return None

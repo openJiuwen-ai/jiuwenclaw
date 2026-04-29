@@ -455,7 +455,7 @@ class PermissionInterruptRail(ConfirmInterruptRail):
     @staticmethod
     def _format_inline_code_items(items: list[str]) -> str:
         cleaned = [str(item).strip() for item in items if str(item).strip()]
-        return " ".join(f"`{item}`" for item in cleaned)
+        return ", ".join(f"`{item}`" for item in cleaned)
 
     @staticmethod
     def extract_file_guard_tail(raw: str) -> str | None:

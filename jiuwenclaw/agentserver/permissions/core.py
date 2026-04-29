@@ -15,6 +15,7 @@ Phase-1 编排：
 from __future__ import annotations
 
 import logging
+import re
 from pathlib import Path
 from typing import Any
 
@@ -36,6 +37,7 @@ from jiuwenclaw.agentserver.permissions.models import (
 )
 from jiuwenclaw.agentserver.permissions.tiered_policy import (
     evaluate_tiered_policy_detailed,
+    get_builtin_security_rules,
     strictest as tiered_policy_strictest,
 )
 
@@ -236,7 +238,29 @@ class PermissionEngine:
             tool_name, channel_id, self._enabled,
         )
 
+        if not isinstance(tool_args, dict):
+            logger.warning(
+                "[PermissionEngine] tool_args is not a dict (type=%s), using {}",
+                type(tool_args).__name__,
+            )
+            tool_args = {}
+
         if not self._enabled:
+            builtin_deny = self._evaluate_builtin_deny_only(tool_name, tool_args)
+            if builtin_deny is not None:
+                logger.warning(ToolPermissionLog(
+                    tool=tool_name,
+                    decision="DENY",
+                    source="system",
+                    rule=builtin_deny,
+                    channel=channel_id or "empty",
+                    session_id=session_id or "empty",
+                ).to_json(), extra={'component': 'permissions'})
+                return PermissionResult(
+                    permission=PermissionLevel.DENY,
+                    matched_rule=builtin_deny,
+                    reason=self._get_reason(PermissionLevel.DENY, tool_name, builtin_deny),
+                )
             logger.info(ToolPermissionLog(
                 tool="N/A",
                 decision="SKIP",
@@ -264,13 +288,6 @@ class PermissionEngine:
                 permission=PermissionLevel.ALLOW,
                 reason=f"Skipped for channel: {normalized_channel}",
             )
-
-        if not isinstance(tool_args, dict):
-            logger.warning(
-                "[PermissionEngine] tool_args is not a dict (type=%s), using {}",
-                type(tool_args).__name__,
-            )
-            tool_args = {}
 
         # L1 + L3-Cmd 命令意图（仅对 shell / code 类工具有意义；其他工具返回空）
         extra_intents: list[CommandIntent] = []
@@ -340,6 +357,26 @@ class PermissionEngine:
         )
         return result
 
+    @staticmethod
+    def _evaluate_builtin_deny_only(
+        tool_name: str,
+        tool_args: dict[str, Any],
+    ) -> str | None:
+        """Evaluate builtin dangerous-command deny regardless of enabled toggle.
+
+        Use an empty policy config so only builtin rules can participate.
+        """
+        permission, matched_rule, _ = evaluate_tiered_policy_detailed({}, tool_name, tool_args)
+        if permission != PermissionLevel.DENY:
+            return None
+        if not isinstance(matched_rule, str):
+            return None
+        if not matched_rule.startswith("tiered_policy:whole_command_deny:"):
+            return None
+        if "builtin[" not in matched_rule:
+            return None
+        return matched_rule
+
     # ---------- 辅助 ----------
 
     @staticmethod
@@ -349,8 +386,38 @@ class PermissionEngine:
         if permission == PermissionLevel.ALLOW:
             return f"Allowed by rule: {matched_rule}"
         if permission == PermissionLevel.DENY:
+            builtin_reason = PermissionEngine._format_builtin_deny_reason(matched_rule)
+            if builtin_reason is not None:
+                return builtin_reason
             return f"Denied by rule: {matched_rule}"
         return f"Approval required for {tool_name} (rule: {matched_rule})"
+
+    @staticmethod
+    def _format_builtin_deny_reason(matched_rule: str | None) -> str | None:
+        if not isinstance(matched_rule, str):
+            return None
+        if "tiered_policy:whole_command_deny:" not in matched_rule:
+            return None
+        builtin_ids = re.findall(r"builtin\[([^\]]+)\]", matched_rule)
+        if not builtin_ids:
+            return None
+
+        descriptions_by_id: dict[str, str] = {}
+        for rule in get_builtin_security_rules():
+            if not isinstance(rule, dict):
+                continue
+            rid = str(rule.get("id") or "").strip()
+            if not rid:
+                continue
+            desc = str(rule.get("description") or "").strip()
+            if desc:
+                descriptions_by_id[rid] = desc
+
+        details = []
+        for rid in sorted(set(builtin_ids)):
+            desc = descriptions_by_id.get(rid)
+            details.append(f"{rid}: {desc}" if desc else rid)
+        return f"Denied by builtin dangerous rules: {'; '.join(details)}"
 
 
 # ----- 全局单例 -----
