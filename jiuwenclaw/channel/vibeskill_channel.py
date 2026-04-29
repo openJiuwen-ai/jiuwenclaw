@@ -1799,6 +1799,8 @@ class VibeSkillChannel(BaseChannel):
         统一入口：HTTP 和 WebSocket 共用同一端口 /api/v1。
         """
         path_str = str(path or "").strip()
+        parsed = urlparse(path_str)
+        request_path = parsed.path
 
         # AK/SK 鉴权
         if self._auth_enabled:
