@@ -455,6 +455,82 @@ def evaluate_tiered_policy(
     return permission, matched_rule
 
 
+def _tiered_try_resolve_without_command_rules(
+    permission_config: dict[str, Any],
+    tools_cfg: dict[str, Any],
+    tool_name: str,
+) -> tuple[PermissionLevel, str, None] | None:
+    """若在「命令 / 子命令规则」之前即可定论则返回 ``(level, rule, None)``；shell+guard 等需继续评命令时返回 ``None``。"""
+    baseline, baseline_rule = _baseline_level(permission_config, tools_cfg, tool_name)
+    if baseline == PermissionLevel.DENY:
+        return PermissionLevel.DENY, baseline_rule or f"{_MR}:tools.deny", None
+    if baseline == PermissionLevel.ALLOW:
+        return PermissionLevel.ALLOW, baseline_rule or f"{_MR}:tools.allow", None
+
+    if baseline is None:
+        # 仅兜底：如非法 ``tools.<name>`` 档位得到 ``(None, None)``；默认 / 显式 guard 下的非 shell
+        # 已在 ``_default_level`` / ``_baseline_level`` 提升为 ASK，不会落到此处。
+        if not _is_shell_tool(tool_name):
+            return PermissionLevel.ALLOW, baseline_rule or f"{_MR}:guard_no_rules", None
+        # shell 工具继续走子线 A 的命令/参数规则评估。
+        return None
+    if baseline == PermissionLevel.ASK:
+        # 非 guard 的合法 ASK（理论上 Phase-1 不再产生），保持旧语义。
+        if not _is_shell_tool(tool_name):
+            return PermissionLevel.ASK, baseline_rule or f"{_MR}:non_shell_ask", None
+        return None
+    return None
+
+
+def evaluate_tiered_policy_path_tool_pipeline_a(
+    permission_config: dict[str, Any],
+    tool_name: str,
+) -> tuple[PermissionLevel | None, str | None]:
+    """路径类非 shell 工具在管线 A 中仅解析 **整工具 DENY**。
+
+    非 DENY（allow / guard / defaults 等）时返回 ``(None, None)``：**不**产出 allow/guard/ASK
+    档位供合并**，实质读写判定完全交给 ``file_guard``（管线 B）。不运行 ``rules`` /
+    ``approval_overrides`` / 子命令评估。
+    """
+    if _is_shell_tool(tool_name):
+        raise ValueError(
+            "evaluate_tiered_policy_path_tool_pipeline_a is only for non-shell path-class tools",
+        )
+    tools_cfg = permission_config.get("tools") or {}
+    if not isinstance(tools_cfg, dict):
+        tools_cfg = {}
+    baseline, baseline_rule = _baseline_level(permission_config, tools_cfg, tool_name)
+    if baseline == PermissionLevel.DENY:
+        return PermissionLevel.DENY, baseline_rule or f"{_MR}:tools.deny"
+    return None, None
+
+
+def evaluate_tiered_policy_baseline_only(
+    permission_config: dict[str, Any],
+    tool_name: str,
+) -> tuple[PermissionLevel, str]:
+    """仅解析工具档位与 ``defaults``（deny / allow / guard 语义），不运行命令规则与 builtin deny 扫描。
+
+    测试或独立调用「无命令规则」档位时用；**PermissionEngine** 对路径类工具改用
+    ``evaluate_tiered_policy_path_tool_pipeline_a``（仅 DENY + 管线 B）。
+    """
+    if _is_shell_tool(tool_name):
+        raise ValueError(
+            "evaluate_tiered_policy_baseline_only is only valid for non-shell tools; "
+            "use evaluate_tiered_policy_detailed",
+        )
+    tools_cfg = permission_config.get("tools") or {}
+    if not isinstance(tools_cfg, dict):
+        tools_cfg = {}
+    resolved = _tiered_try_resolve_without_command_rules(permission_config, tools_cfg, tool_name)
+    if resolved is None:
+        raise RuntimeError(
+            "unexpected: non-shell tool failed to resolve in baseline-only tiered policy "
+            f"tool={tool_name!r}",
+        )
+    return resolved[0], resolved[1]
+
+
 def evaluate_tiered_policy_detailed(
     permission_config: dict[str, Any],
     tool_name: str,
@@ -470,22 +546,9 @@ def evaluate_tiered_policy_detailed(
     if not isinstance(approval_overrides, list):
         approval_overrides = []
 
-    baseline, baseline_rule = _baseline_level(permission_config, tools_cfg, tool_name)
-    if baseline == PermissionLevel.DENY:
-        return PermissionLevel.DENY, baseline_rule or f"{_MR}:tools.deny", None
-    if baseline == PermissionLevel.ALLOW:
-        return PermissionLevel.ALLOW, baseline_rule or f"{_MR}:tools.allow", None
-
-    if baseline is None:
-        # 仅兜底：如非法 ``tools.<name>`` 档位得到 ``(None, None)``；默认 / 显式 guard 下的非 shell
-        # 已在 ``_default_level`` / ``_baseline_level`` 提升为 ASK，不会落到此处。
-        if not _is_shell_tool(tool_name):
-            return PermissionLevel.ALLOW, baseline_rule or f"{_MR}:guard_no_rules", None
-        # shell 工具继续走子线 A 的命令/参数规则评估。
-    elif baseline == PermissionLevel.ASK:
-        # 非 guard 的合法 ASK（理论上 Phase-1 不再产生），保持旧语义。
-        if not _is_shell_tool(tool_name):
-            return PermissionLevel.ASK, baseline_rule or f"{_MR}:non_shell_ask", None
+    early = _tiered_try_resolve_without_command_rules(permission_config, tools_cfg, tool_name)
+    if early is not None:
+        return early
 
     command = _command_text(tool_args)
     if not command:
@@ -512,6 +575,15 @@ def evaluate_tiered_policy_detailed(
 
 def matched_rule_uses_approval_override(matched_rule: str | None) -> bool:
     return isinstance(matched_rule, str) and matched_rule.startswith(_APPROVAL_OVERRIDES_PREFIX)
+
+
+def matched_rule_contains_approval_override(matched_rule: str | None) -> bool:
+    """Whether approval_override semantics appear (standalone or inside merged ``a|b`` strings)."""
+    if not isinstance(matched_rule, str) or not matched_rule.strip():
+        return False
+    if matched_rule_uses_approval_override(matched_rule):
+        return True
+    return _APPROVAL_OVERRIDES_PREFIX in matched_rule
 
 
 def _tool_arg_value_looks_like_path(arg_key: str, value: str) -> bool:

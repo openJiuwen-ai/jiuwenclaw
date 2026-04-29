@@ -15,7 +15,7 @@ from __future__ import annotations
 import logging
 import os
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Iterable, Literal
 
 from jiuwenclaw.agentserver.permissions.files.extract import (
     iter_config_tool_bindings,
@@ -312,8 +312,6 @@ class FileGuardChecker:
                 out.append((rp, action, "tool_arg"))
         return out
 
-    # ----- 评估入口 -----
-
     def evaluate_accesses(
             self,
             accesses: Iterable[tuple[Path, str, str]],
@@ -389,6 +387,26 @@ class FileGuardChecker:
         """
         accesses = self.collect_tool_arg_accesses(tool_name, tool_args)
         return self.evaluate_accesses(accesses)
+
+
+def classify_tool_file_action_kind(tool_name: str) -> Literal["read", "write", "both"] | None:
+    """按注册表 / 兜底集合判断路径类工具的「主访问类型」，供 ``PermissionEngine`` 放松合并用。
+
+    - 返回 ``None``：非路径类工具（如 shell），不参与 read/write 维度放松。
+    """
+    specs = lookup_file_tool_specs(tool_name)
+    if specs:
+        acts = {s.action for s in specs}
+        if acts <= {"read"}:
+            return "read"
+        if acts <= {"write"}:
+            return "write"
+        if "read" in acts and "write" in acts:
+            return "both"
+        return None
+    if tool_name not in _PATH_TOOLS:
+        return None
+    return "write" if tool_name in _WRITE_PATH_TOOLS else "read"
 
 
 # ---------- 持久化 ----------

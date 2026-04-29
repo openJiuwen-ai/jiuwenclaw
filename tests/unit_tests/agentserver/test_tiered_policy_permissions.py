@@ -30,7 +30,11 @@ from jiuwenclaw.agentserver.permissions.shell_ast import (
     parse_shell_for_permission,
 )
 from jiuwenclaw.agentserver.permissions.suggestions import build_shell_permission_suggestions
-from jiuwenclaw.agentserver.permissions.tiered_policy import evaluate_tiered_policy, evaluate_tiered_policy_detailed
+from jiuwenclaw.agentserver.permissions.tiered_policy import (
+    evaluate_tiered_policy,
+    evaluate_tiered_policy_detailed,
+    evaluate_tiered_policy_path_tool_pipeline_a,
+)
 
 
 class _FakeTreeNode:
@@ -207,6 +211,76 @@ def test_engine_checks_unconfigured_tools_via_file_guard(monkeypatch):
     assert "file_guard" in (result.matched_rule or "")
     assert result.file_operations
     assert result.file_operations[0].action == "write"
+
+
+def test_engine_relaxes_guard_ask_when_action_aligned_paths_cleared(monkeypatch, tmp_path):
+    """管线 A 仅 DENY 时：workspace 内读路径由管线 B 放行 → 直接 ALLOW（无 tier ASK，故无 relax 后缀）。"""
+    _config_dir_with_builtin(_tmp_dir("relax-fg-aligned"), monkeypatch, [])
+    monkeypatch.setattr(
+        "jiuwenclaw.utils.get_agent_workspace_dir",
+        lambda: str(tmp_path),
+    )
+    cfg = {
+        "enabled": True,
+        "tools": {},
+        "file_guard": {
+            "workspace": {"rw_enabled": True},
+            "global": {},
+        },
+    }
+    engine = PermissionEngine(config=cfg)
+    p = tmp_path / "a.txt"
+    p.write_text("ok", encoding="utf-8")
+    perm, mr, _, _ = engine.evaluate_global_policy_with_details(
+        "read_file",
+        {"path": str(p)},
+        channel_id="web",
+    )
+    assert perm == PermissionLevel.ALLOW
+    assert mr is None
+
+
+def test_engine_no_relax_when_file_guard_still_asks_on_aligned_paths(monkeypatch):
+    """路径维仍 ASK 时不放宽（即便 tier 为 guard 基线 ASK）。"""
+    _config_dir_with_builtin(_tmp_dir("no-relax-fg-ask"), monkeypatch, [])
+    engine = PermissionEngine(config={"enabled": True, "tools": {}})
+    perm, mr, _, _ = engine.evaluate_global_policy_with_details(
+        "read_file",
+        {"path": "/tmp/jiuwenclaw_relax_negative.txt"},
+        channel_id="web",
+    )
+    assert perm == PermissionLevel.ASK
+    assert mr is not None
+    assert "relax_path_allow" not in mr
+
+
+def test_path_tool_pipeline_a_only_deny_rest_deferred(monkeypatch):
+    """路径类：管线 A 仅 DENY；非 DENY 为 (None,None)，不受 rules 干扰。"""
+    _config_dir_with_builtin(_tmp_dir("path-tier-pipeline-a"), monkeypatch, [])
+    deny_cfg = {"tools": {"read_file": "deny"}}
+    assert evaluate_tiered_policy_path_tool_pipeline_a(deny_cfg, "read_file")[0] == PermissionLevel.DENY
+
+    defer_cfg = {
+        "tools": {"read_file": "guard"},
+        "rules": [{"id": "would_only_apply_shell", "pattern": "echo *", "action": "allow"}],
+    }
+    assert evaluate_tiered_policy_path_tool_pipeline_a(defer_cfg, "read_file") == (None, None)
+
+
+def test_engine_file_tool_skips_tier_subcommands(monkeypatch):
+    """PermissionEngine 对路径类工具不带子线 A 的 subcommand_results（不再跑命令规则链）。"""
+    _config_dir_with_builtin(_tmp_dir("engine-no-tier-subs"), monkeypatch, [])
+    cfg = {
+        "tools": {"read_file": "guard"},
+        "rules": [{"id": "would_only_apply_shell", "pattern": "git *", "action": "allow"}],
+    }
+    engine = PermissionEngine(config=cfg)
+    _perm, _mr, subs, _ops = engine.evaluate_global_policy_with_details(
+        "read_file",
+        {"path": "/tmp/a.txt"},
+        channel_id="web",
+    )
+    assert subs is None
 
 
 def test_engine_still_denies_builtin_dangerous_command_when_permissions_disabled(monkeypatch):

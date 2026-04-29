@@ -7,10 +7,13 @@ Phase-1 编排：
 1. 加载 / 热更新 ``permissions`` 配置。
 2. ``check_permission`` 按设计文档第 2 节的 Guard 管线评估：
    - 工具档位（``allow`` / ``deny`` / ``guard``）短路 DENY/ALLOW；``guard`` 进入 Guard 管线。
-   - 子线 A：``evaluate_tiered_policy_detailed``（命令 / 参数规则）。
+   - 子线 A：``evaluate_tiered_policy_detailed``（命令 / 参数规则）。**已注册的「路径类」读写工具**
+     （非 shell）在管线 A **仅解析整工具 DENY**；非 DENY 时不产出 allow/guard 等档位，
+     **跳过**管线 A 的其余档位与 ``rules`` / subcommand，实质判定完全由管线 B（``file_guard``）承担。
    - 子线 B：``FileGuardChecker.evaluate_accesses`` + ``evaluate_command_intents``
      （三轴文件路径判定）。
-   - 通过 ``strictest`` 合并；``file_operations`` 透传到 ``PermissionResult`` 供审批卡渲染。
+   - 通过 ``strictest`` 合并档位与 ``file_guard`` 结果（路径类工具在非 DENY 时仅由 B 侧抬升降）。
+   - ``file_operations`` 透传到 ``PermissionResult`` 供审批卡渲染。
 """
 from __future__ import annotations
 
@@ -27,6 +30,7 @@ from jiuwenclaw.agentserver.permissions.command_intent import (
 )
 from jiuwenclaw.agentserver.permissions.file_guard import (
     FileGuardChecker,
+    classify_tool_file_action_kind,
     report_legacy_path_rules_at_load,
 )
 from jiuwenclaw.agentserver.permissions.models import (
@@ -35,8 +39,10 @@ from jiuwenclaw.agentserver.permissions.models import (
     PermissionResult,
     SubcommandPermissionResult,
 )
+from jiuwenclaw.agentserver.permissions.shell_tools import is_shell_permission_tool
 from jiuwenclaw.agentserver.permissions.tiered_policy import (
     evaluate_tiered_policy_detailed,
+    evaluate_tiered_policy_path_tool_pipeline_a,
     get_builtin_security_rules,
     strictest as tiered_policy_strictest,
 )
@@ -128,6 +134,26 @@ class PermissionEngine:
         )
         return permission, matched_rule
 
+    @staticmethod
+    def _is_registered_path_tool_non_shell(tool_name: str) -> bool:
+        """已注册（或兜底集合）路径类工具且非 shell：管线 A 只做 DENY 短路。"""
+        return (
+            classify_tool_file_action_kind(tool_name) is not None
+            and not is_shell_permission_tool(tool_name)
+        )
+
+    def _evaluate_tier_for_tool(
+        self,
+        tool_name: str,
+        tool_args: dict[str, Any],
+    ) -> tuple[PermissionLevel | None, str | None, list[tuple[str, PermissionLevel, str]] | None]:
+        """子线 A：路径类工具仅 ``evaluate_tiered_policy_path_tool_pipeline_a``（仅 DENY），其余完整 tiered。"""
+        if PermissionEngine._is_registered_path_tool_non_shell(tool_name):
+            tier_perm, tier_rule = evaluate_tiered_policy_path_tool_pipeline_a(self.config, tool_name)
+            return tier_perm, tier_rule, None
+        tp, tr, subs = evaluate_tiered_policy_detailed(self.config, tool_name, tool_args)
+        return tp, tr, subs
+
     def evaluate_global_policy_with_details(
         self,
         tool_name: str,
@@ -155,9 +181,9 @@ class PermissionEngine:
             )
             tool_args = {}
 
-        permission, matched_rule, raw_subs = evaluate_tiered_policy_detailed(
-            self.config, tool_name, tool_args,
-        )
+        tier_perm, tier_rule, raw_subs = self._evaluate_tier_for_tool(tool_name, tool_args)
+        permission = tier_perm
+        matched_rule = tier_rule
         subcommand_results: list[SubcommandPermissionResult] | None = None
         if raw_subs is not None:
             subcommand_results = [
@@ -166,7 +192,8 @@ class PermissionEngine:
             ]
 
         file_operations: list[FileOperation] | None = None
-        if include_external_directory and permission != PermissionLevel.DENY:
+        merged_file_guard = bool(include_external_directory and permission != PermissionLevel.DENY)
+        if merged_file_guard:
             fg_result = self._evaluate_file_guard(tool_name, tool_args, extra_intents)
             if fg_result is not None:
                 if permission is None:
@@ -189,18 +216,20 @@ class PermissionEngine:
                         )
                 if fg_result.file_operations:
                     file_operations = list(fg_result.file_operations)
+            elif permission is None:
+                permission = PermissionLevel.ALLOW
 
         return permission, matched_rule, subcommand_results, file_operations
 
     # ---------- file_guard 调度 ----------
 
-    def _evaluate_file_guard(
+    def _collect_file_guard_accesses(
         self,
         tool_name: str,
         tool_args: dict[str, Any],
         extra_intents: list[CommandIntent] | None,
-    ) -> PermissionResult | None:
-        """合并工具参数通道 + 命令意图通道，得到一份 file_guard 结果。"""
+    ) -> list[tuple[Path, str, str]]:
+        """合并工具参数通道与命令意图通道的路径访问列表（与子线 B 全量判定同源）。"""
         accesses = self._file_guard.collect_tool_arg_accesses(tool_name, tool_args)
         ws = self._file_guard.workspace_root()
         if extra_intents:
@@ -221,6 +250,16 @@ class PermissionEngine:
                     except (OSError, RuntimeError):
                         continue
                     accesses.append((p, action, source))
+        return accesses
+
+    def _evaluate_file_guard(
+        self,
+        tool_name: str,
+        tool_args: dict[str, Any],
+        extra_intents: list[CommandIntent] | None,
+    ) -> PermissionResult | None:
+        """合并工具参数通道 + 命令意图通道，得到一份 file_guard 结果。"""
+        accesses = self._collect_file_guard_accesses(tool_name, tool_args, extra_intents)
         return self._file_guard.evaluate_accesses(accesses)
 
     # ---------- 异步主入口 ----------
