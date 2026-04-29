@@ -32,7 +32,7 @@ memory:
   #   external — 仅外接记忆（LTM / 插件）
   #   both     — 内置 + 外接并存
   #   none     — 全部关闭
-  engine: ${MEMORY_ENGINE:-external}
+  engine: ${MEMORY_ENGINE:-none}
   forbidden_memory_definition:
     enabled: false
     patterns: []
