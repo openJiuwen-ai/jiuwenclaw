@@ -84,9 +84,43 @@ def _coerce_list_int(value: Any) -> Any:
 _JsonListStr = Annotated[Optional[List[str]], BeforeValidator(_coerce_list_str)]
 _JsonListInt = Annotated[Optional[List[int]], BeforeValidator(_coerce_list_int)]
 
+import threading
+from pathlib import Path
+
 from openjiuwen.core.foundation.tool import LocalFunction, Tool, ToolCard
 
-from jiuwenclaw.agentserver.tools.todo_toolkits import TodoToolkit
+from jiuwenclaw.agentserver.tools.todo_toolkits import (
+    TodoOpKind,
+    TodoOpResult,
+    TodoToolkit,
+    _publish_op_result,
+)
+
+
+def _resolve_sub_scope() -> str:
+    """读当前协程的 sub_scope；主 agent 返回 ""。
+
+    解析逻辑放在本模块而非 todo_toolkits，便于将来 todo_toolkits 删除时
+    SkillStepToolkit 切到独立实现，无需迁移此分支。
+    """
+    try:
+        from jiuwenclaw.agentserver.plan_todo_context import get_plan_todo_sub_scope
+        return get_plan_todo_sub_scope() or ""
+    except Exception:
+        return ""
+
+
+def compose_skill_step_bus_key(session_id: str) -> str:
+    """SkillStepToolkit 发布/消费 TodoOpResult 用的 bus key。
+
+    sub_scope 非空时附加在 session_id 后面，避免同 session 下的 spawn /
+    fork 子 agent 互相消费对方的事件。主 agent（sub_scope == ""）保持
+    与历史完全一致的纯 session_id key，不影响旧行为。
+    """
+    sub = _resolve_sub_scope()
+    if not sub:
+        return session_id
+    return f"{session_id}::{sub}"
 
 
 _REQUIRED_BY_ACTION: dict[str, tuple[str, ...]] = {
@@ -218,6 +252,57 @@ class SkillStepToolkit(TodoToolkit):
     EXPOSE_COMPLETE_BATCH: ClassVar[bool] = True
 
     TOOL_NAME: ClassVar[str] = "skill_step"
+
+    @property
+    def _todo_path(self) -> Path:  # type: ignore[override]
+        """文件名按 sub_scope 后缀区隔 spawn / fork 实例。
+
+        主 agent (sub_scope == "") 退化为 ``skill_step.md``，向后兼容。
+        子 agent 各自落到 ``skill_step__{sub_scope}.md`` 独立文件，避免
+        共享同一份 plan 引发的 create-already-exists 与状态覆盖。
+        """
+        sub = _resolve_sub_scope()
+        if not sub:
+            return self.todo_dir / self.__class__.TODO_FILENAME
+        base = self.__class__.TODO_FILENAME
+        stem, dot, ext = base.rpartition(".")
+        if not dot:
+            return self.todo_dir / f"{base}__{sub}"
+        return self.todo_dir / f"{stem}__{sub}.{ext}"
+
+    @classmethod
+    def _get_session_lock(cls, session_id: str) -> threading.Lock:  # type: ignore[override]
+        """Lock key 增加 sub_scope 维度，让 fork 兄弟在各自 plan 文件上不抢锁。"""
+        sub = _resolve_sub_scope()
+        key = f"{cls.__name__}:{session_id}:{sub}"
+        with cls._meta_lock:
+            if key not in cls._session_locks:
+                cls._session_locks[key] = threading.Lock()
+            return cls._session_locks[key]
+
+    def _publish(  # type: ignore[override]
+        self,
+        kind: TodoOpKind,
+        success: bool,
+        message: str,
+        tasks_after: Any,
+    ) -> None:
+        """Bus key 带 sub_scope，避免同 session 下子 agent 互相消费 TodoOpResult。"""
+        if tasks_after is None:
+            remaining, total = 0, 0
+        else:
+            remaining, total = self._compute_counts(tasks_after)
+        _publish_op_result(
+            compose_skill_step_bus_key(self.session_id),
+            TodoOpResult(
+                kind=kind,
+                success=success,
+                message=message,
+                remaining_count=remaining,
+                total_count=total,
+                all_completed=(success and total > 0 and remaining == 0),
+            ),
+        )
 
     async def skill_step(self, **inputs: Any) -> str:
         """Dispatch a skill step action to the underlying backend tool."""
