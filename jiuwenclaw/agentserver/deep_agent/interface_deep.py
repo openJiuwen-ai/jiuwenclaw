@@ -1845,7 +1845,7 @@ class JiuWenClawDeepAdapter:
             rails=rails,
             vision_model_config=self._vision_model_config,
             audio_model_config=self._audio_model_config,
-            completion_timeout=config.get("completion_timeout", 3600.0),
+            completion_timeout=config.get("completion_timeout", 21600.0),
         )
 
     def _update_permission_rail(self, config_base: dict[str, Any] | None) -> None:
@@ -2239,7 +2239,7 @@ class JiuWenClawDeepAdapter:
                 context_engine_config=_deep_agent_context_engine_config(config),
                 vision_model_config=self._vision_model_config,
                 audio_model_config=self._audio_model_config,
-                completion_timeout=config.get("completion_timeout", 3600.0),
+                completion_timeout=config.get("completion_timeout", 21600.0),
             )
         logger.info("[JiuWenClawDeepAdapter] 初始化完成: agent_name=%s", self._agent_name)
 
