@@ -100,11 +100,11 @@ class _SessionRequest(ISessionRequest):
 
     @property
     def session_concurrency(self) -> int:
-        return 10
+        return int(os.getenv("AGENT_SERVER_SESSION_CONCURRENCY"))
 
     @property
     def session_ttl(self) -> int:
-        return 20
+        return int(os.getenv("AGENT_SERVER_SESSION_TTL"))
 
     @property
     def priority(self) -> "MessagePriority":
