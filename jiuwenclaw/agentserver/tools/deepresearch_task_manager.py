@@ -190,7 +190,7 @@ class DeepResearchTaskManager:
             "WORKFLOW_HUMAN_IN_THE_LOOP": "False",
             "OUTLINE_INTERACTION_ENABLED": "False",
             "SOURCE_TRACER_INFER_SWITCHES": "True",
-            "VLM_CHART_GENERATOR_ENABLE": "True",
+            "VLM_CHART_GENERATOR_ENABLE": "False",
             "VLM_CHART_GENERATOR_MAX_ITERATIONS": 0,
         }
         return config
