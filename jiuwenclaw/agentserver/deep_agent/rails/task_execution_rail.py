@@ -53,6 +53,7 @@ class TaskExecutionRail(DeepAgentRail):
 
     TODO_TOOLS = frozenset({"todo_create", "todo_list", "todo_modify"})
     SKILL_STEP_TOOLS = frozenset({"skill_step"})
+    SKILL_COMPLETE_TOOLS = frozenset({"skill_complete"})
     ALL_TASK_TOOLS = TODO_TOOLS | SKILL_STEP_TOOLS
 
     def __init__(self) -> None:
@@ -96,7 +97,10 @@ class TaskExecutionRail(DeepAgentRail):
             return
 
         if tool_name in self.SKILL_STEP_TOOLS:
-            self._skill_step_map_before_tool = dict(self._skill_step_map)
+            return
+
+        if tool_name in self.SKILL_COMPLETE_TOOLS:
+            self._clear_skill_step_cache()
             return
 
         await self._maybe_start_pending_skill_step_task(ctx)
@@ -112,7 +116,7 @@ class TaskExecutionRail(DeepAgentRail):
             return
 
         if tool_name in self.SKILL_STEP_TOOLS:
-            await self._sync_skill_step_and_emit_transitions(ctx)
+            await self._start_first_uncompleted_skill_step(ctx)
             return
 
     async def after_invoke(self, ctx: AgentCallbackContext) -> None:
@@ -258,6 +262,17 @@ class TaskExecutionRail(DeepAgentRail):
         self._todo_map_before_tool = {}
         self._bind_context_to_in_progress_task()
 
+    def _clear_skill_step_cache(self) -> None:
+        """Clear cached skill_step data when skill_complete is called."""
+        self._skill_step_map = {}
+        self._skill_step_map_before_tool = {}
+        self._skill_step_started = set()
+        for full_task_id in list(self._active_tasks):
+            if full_task_id.startswith("skill_step:"):
+                self._active_tasks.pop(full_task_id, None)
+        _ACTIVE_TASK_ID.set(None)
+        self._current_task_id = None
+
     async def _maybe_start_pending_skill_step_task(self, ctx: AgentCallbackContext) -> None:
         if ctx.session is None:
             return
@@ -288,6 +303,48 @@ class TaskExecutionRail(DeepAgentRail):
         )
         self._skill_step_started.add(pending_task_id)
         self._skill_step_map[pending_task_id]["status"] = "in_progress"
+
+    async def _start_first_uncompleted_skill_step(self, ctx: AgentCallbackContext) -> None:
+        """Read skill_step.md, complete finished tasks, and bind first uncompleted as current."""
+        if ctx.session is None:
+            return
+        session_id = ctx.session.get_session_id()
+
+        try:
+            skill_step_items = self._load_skill_step_from_markdown(session_id)
+        except Exception as exc:
+            logger.warning("[TaskExecutionRail] Failed to load skill_step.md: %s", exc)
+            return
+
+        current_map = self._build_map_from_skill_step_items(skill_step_items) if skill_step_items else {}
+        self._skill_step_map = current_map
+
+        # Complete any active skill_step tasks that are now done or removed from file
+        for full_task_id in list(self._active_tasks):
+            if not full_task_id.startswith("skill_step:"):
+                continue
+            task_id = full_task_id.split(":", 1)[1]
+            curr = current_map.get(task_id)
+            if curr is None or curr.get("status") in ("completed", "cancelled"):
+                context = self._active_tasks[full_task_id]
+                await self._emit_task_complete_event(
+                    ctx.session, task_id,
+                    {"content": context.task_content, "index": context.task_index, "total": context.total_tasks},
+                    status="succeeded" if curr is not None and curr.get("status") == "completed" else "skipped",
+                )
+        self._skill_step_started -= set(current_map.keys())
+
+        # Find first uncompleted task and bind context (without emitting task.start)
+        for task_id, task in current_map.items():
+            status = task.get("status", "")
+            if status not in ("completed", "cancelled"):
+                full_task_id = f"skill_step:{task_id}"
+                _ACTIVE_TASK_ID.set(full_task_id)
+                self._current_task_id = full_task_id
+                return
+
+        # No skill_step.md or all tasks completed — clear skill_step context
+        self._bind_context_to_in_progress_task()
 
     async def _sync_skill_step_and_emit_transitions(self, ctx: AgentCallbackContext) -> None:
         if ctx.session is None:

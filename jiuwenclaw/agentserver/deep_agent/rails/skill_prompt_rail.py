@@ -141,10 +141,7 @@ def _build_skill_protocol_section_text(language: str) -> str:
 10. **工具降级**：SKILL.md 中提到的工具如果在当前环境中不存在，必须先告知用户该工具不可用并说明你打算如何替代，获得用户同意后再继续。不要花时间反复检查工具列表
 11. **用户打断后的处置**：按用户**原话**判定意图，**禁止自己猜**：
     - 原话含"继续"/"接着做"/"刚才那个继续" → 按原 skill_step 推进。
-    - 原话含"算了"/"取消"/"不做了" → 调 `skill_complete(skill_name="<当前技能>")` 后回应。
-    - 原话含**显式并列措辞**（"两个都做"/"顺带也做 Y"/"先 X 再 Y"）→ 视为追加任务。
-    - **无关问题/闲聊** → 直接回答，并静默调 `skill_complete` 释放原 skill。
-    - **新实质任务但意图不明**（看不出是覆盖原任务还是并列做）→ **必须问用户**，不要自己猜。例："收到新需求 <X>。请问是替换刚才的 <技能名> 任务，还是两个都要做？"等用户回复后再决定。
+    - 其他情况 → 调 `skill_complete(skill_name="<当前技能>")` 后回应。
 
     ⚠️ 用户发 N 条消息 ≠ N 个并发任务；新消息**默认覆盖**旧任务，**不追加**。禁止措辞："让我先完成之前的"/"先把之前的收尾"/"两个都做"/"先 X 再 Y"（除非用户原话已明示并列）。仅凭 history 有两条任务消息就推断"用户想做两个"是错误推理。
 """
@@ -180,10 +177,7 @@ Then execute the workflow; the rules below govern execution.
 10. **Tool fallback**: If a tool mentioned in SKILL.md does not exist in your current environment, you MUST first inform the user that the tool is unavailable and explain how you plan to substitute it. Only proceed after the user agrees. Do not spend time repeatedly checking the tool list.
 11. **Handling user interruption**: Decide intent strictly from the user's **literal words**, **never guess**:
     - Words include "continue" / "go on" / "resume the previous one" → continue the original skill_step flow.
-    - Words include "never mind" / "cancel" / "drop it" → call `skill_complete(skill_name="<current skill>")`, then respond.
-    - Words contain **explicit conjunction** ("do both", "also do Y", "first X then Y") → treat as parallel tasks.
-    - **Unrelated question / chat** → answer directly and silently call `skill_complete` to release the old skill.
-    - **New substantive task with unclear intent** (you cannot tell whether it replaces the old task or is meant to be done in parallel) → **you MUST ask the user — never guess.** E.g.: "Got a new request <X>. Should it replace the earlier <skill name>, or are both required?" Wait for their reply before acting.
+    - Otherwise → call `skill_complete(skill_name="<current skill>")`, then respond.
 
     ⚠️ N user messages ≠ N parallel tasks; a new substantive message **replaces** the prior request by default — it does NOT stack. Forbidden phrasing: "let me finish the previous task first" / "let me wrap that up" / "let me do both" / "first X then Y" (unless the user's own words explicitly stated parallel intent). Inferring "the user wants two PPTs" purely from "history has two task messages" is a **wrong inference** that MUST be avoided.
 """
