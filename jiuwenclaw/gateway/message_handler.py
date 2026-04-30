@@ -1429,14 +1429,19 @@ class MessageHandler(ABC):
 
     @staticmethod
     def _response_to_message(
-        resp: "AgentResponse",
+        resp: "AgentResponse | AgentResponseChunk",
         session_id: str | None,
         *,
         request_metadata: dict[str, Any] | None = None,
     ) -> "Message":
         from jiuwenclaw.schema.message import Message, EventType
 
-        metadata = MessageHandler._merge_agent_metadata(request_metadata, resp.metadata)
+        resp_metadata = getattr(resp, "metadata", None)
+        metadata = MessageHandler._merge_agent_metadata(request_metadata, resp_metadata)
+        request_id = str(getattr(resp, "request_id", ""))
+        channel_id = str(getattr(resp, "channel_id", ""))
+        payload = getattr(resp, "payload", None)
+        ok = bool(getattr(resp, "ok", True))
 
         # 从 metadata 中提取 group_digital_avatar 和 enable_memory 字段
         # 这些字段在 message_to_e2a 中被放入 metadata，需要在这里提取出来
@@ -1445,21 +1450,21 @@ class MessageHandler(ABC):
 
         # 检查 payload 中是否包含 event_type，如果包含则创建事件消息
         event_type = None
-        if resp.payload and isinstance(resp.payload, dict):
-            event_type_str = resp.payload.get("event_type")
+        if payload and isinstance(payload, dict):
+            event_type_str = payload.get("event_type")
             if isinstance(event_type_str, str):
                 try:
                     event_type = EventType(event_type_str)
                     # 如果是事件类型，创建事件消息而不是响应消息
                     return Message(
-                        id=resp.request_id,
+                        id=request_id,
                         type="event",
-                        channel_id=resp.channel_id,
+                        channel_id=channel_id,
                         session_id=session_id,
                         params={},
                         timestamp=time.time(),
                         ok=True,
-                        payload=resp.payload,
+                        payload=payload,
                         event_type=event_type,
                         metadata=metadata,
                         group_digital_avatar=group_digital_avatar,
@@ -1471,14 +1476,14 @@ class MessageHandler(ABC):
 
         # 普通响应消息
         return Message(
-            id=resp.request_id,
+            id=request_id,
             type="res",
-            channel_id=resp.channel_id,
+            channel_id=channel_id,
             session_id=session_id,
             params={},
             timestamp=time.time(),
-            ok=resp.ok,
-            payload=resp.payload,
+            ok=ok,
+            payload=payload,
             event_type=EventType.CHAT_FINAL,
             metadata=metadata,
             group_digital_avatar=group_digital_avatar,

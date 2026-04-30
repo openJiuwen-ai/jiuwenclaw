@@ -30,6 +30,7 @@ GATEWAY_ENV_FILE="${SCRIPT_DIR}/conf/gateway.env"
 GATEWAY_RBAC_TEMPLATE_FILE="${SCRIPT_DIR}/conf/gateway-rbac.template.yaml"
 GATEWAY_RBAC_FILE="${SCRIPT_DIR}/conf/gateway-rbac.yaml"
 
+GATEWAY_DEPLOYMENT_TEMPLATE_FILE="${SCRIPT_DIR}/conf/deployment.template.yaml"
 GATEWAY_DEPLOYMENT_FILE="${SCRIPT_DIR}/conf/deployment.yaml"
 
 NFS_SERVER_TEMPLATE_FILE="${SCRIPT_DIR}/conf/nfs-server.template.yaml"
@@ -45,7 +46,6 @@ REG_FUNC_FILE="${SCRIPT_DIR}/func/clawee.py"
 
 META_PORT=""
 CMD=""
-MASTER_NODE_NAME=""
 
 
 # ==== All available modules ====
@@ -55,6 +55,10 @@ declare -ga MODULES=()
 
 declare -ga WORKER_NODE_IPS=()
 
+declare -ga OTHER_MASTER_IPS=()
+
+declare -ga OTHER_NODE_IPS=()
+
 declare -A DEPLOY_VARS=(
     ["NAMESPACE"]="default"
     ["POOL_ID"]="claw"
@@ -63,6 +67,7 @@ declare -A DEPLOY_VARS=(
     ["GATEWAY_CONFIG_MAP_NAME"]="jiuwenclaw-gateway-config"
     ["GATEWAY_ENV_FILE_NAME"]="jiuwenclaw-gateway-env"
     ["NFS_NAME"]="nfs-server"
+    ["NFS_IMAGE"]="itsthenetwork/nfs-server-alpine:12"
     ["NFS_HOST_PATH"]="/data/nfs"
     ["PVC_NAME"]="pvc-nfs-shared"
     ["PV_NAME"]="pv-nfs-shared"

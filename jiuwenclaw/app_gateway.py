@@ -1655,10 +1655,33 @@ async def _run(
             agent_server_url,
         )
 
+    shutdown_requested: asyncio.Event | None = None
+    _setup_signals = getattr(agent_server_ext, "setup_gateway_shutdown_signals", None)
+    if agent_server_ext is not None and callable(_setup_signals):
+        shutdown_requested = asyncio.Event()
+        _setup_signals(shutdown_requested)
+
     try:
         tasks_to_wait = [task for task in (gateway_server_task, web_task) if task is not None]
-        if tasks_to_wait:
+        # 无扩展或未实现 setup_gateway_shutdown_signals：等价于原先 await gather（有任务时）
+        if not tasks_to_wait:
+            if shutdown_requested is not None:
+                await shutdown_requested.wait()
+        elif shutdown_requested is None:
             await asyncio.gather(*tasks_to_wait)
+        else:
+            gather_future = asyncio.gather(*tasks_to_wait)
+            sig_task = asyncio.create_task(
+                shutdown_requested.wait(),
+                name="gateway-await-sigterm",
+            )
+            _done, pending = await asyncio.wait(
+                [gather_future, sig_task],
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            for t in pending:
+                t.cancel()
+            await asyncio.gather(*pending, return_exceptions=True)
     except KeyboardInterrupt:
         logger.info("received Ctrl+C, shutting down...")
     except asyncio.CancelledError:

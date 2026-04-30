@@ -18,12 +18,11 @@ spec:
         app: <<NFS_NAME>>
     spec:
       hostNetwork: true
-      # 固定调度到 storage=nfs 标签的节点
-      nodeSelector:
-        storage: nfs
+      # 固定调度到本master节点（运行部署工具的节点）
+      nodeName: <<MASTER_NODE_NAME>>
       containers:
       - name: <<NFS_NAME>>
-        image: itsthenetwork/nfs-server-alpine:12  # 轻量稳定镜像
+        image: <<NFS_IMAGE>>  # 轻量稳定镜像
         imagePullPolicy: IfNotPresent
         env:
           - name: SHARED_DIRECTORY

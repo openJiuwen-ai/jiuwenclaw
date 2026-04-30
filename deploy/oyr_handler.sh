@@ -59,7 +59,7 @@ config_oyr() {
 configure_docker_insecure_registry_on_all_nodes() {
     local docker_daemon_file="/etc/docker/daemon.json"
 
-    sync_file_to_workers "${SCRIPT_DIR}/update_docker_registry.py"
+    sync_file_to_other_nodes "${SCRIPT_DIR}/update_docker_registry.py"
     exec_on_all_nodes '
         echo "Configuring insecure registries in '"${docker_daemon_file}"'"
         python3 '"${SCRIPT_DIR}"'/update_docker_registry.py '"${docker_daemon_file}"'
@@ -139,7 +139,7 @@ create_func_pool() {
     local master_ip=${DEPLOY_VARS["MASTER_NODE_IP"]}
     local claw_deployment_name="function-agent-${pool_id}"
 
-    sync_file_to_workers ${REG_FUNC_FILE}
+    sync_file_to_other_nodes ${REG_FUNC_FILE}
 
     # Create function Pod resource pool
     DEPLOY_VARS["REG_FUNC_DIR"]=$(dirname "${REG_FUNC_FILE}")

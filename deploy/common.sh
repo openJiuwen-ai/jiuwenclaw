@@ -28,51 +28,51 @@ print_array() {
 }
 
 # Execute command on all worker nodes
-exec_on_workers() {
+exec_on_other_nodes() {
     local cmd="$1"
 
-    info "===== Execute command on all Workers ====="
+    info "===== Execute command on other Nodes ====="
     info "Command: ${cmd}"
 
-    for worker_ip in "${WORKER_NODE_IPS[@]}"; do
-        info "Executing command on worker ${worker_ip}"
+    for node_ip in "${OTHER_NODE_IPS[@]}"; do
+        info "Executing command on node ${node_ip}"
 
         # Execute command via SSH
         if ssh -o ConnectTimeout=5 \
                -o StrictHostKeyChecking=no \
-               "${worker_ip}" "${cmd}"; then
-            success "Worker ${worker_ip} - Execute command successfully"
+               "${node_ip}" "${cmd}"; then
+            success "Node ${node_ip} - Execute command successfully"
         else
-            error "Worker ${worker_ip} - Execute command failed! Check network/SSH auth/permissions"
+            error "Node ${node_ip} - Execute command failed! Check network/SSH auth/permissions"
         fi
     done
 
-    success "Execute command on all Workers successfully!"
+    success "Execute command on all other Nodes successfully!"
 }
 
-sync_file_to_workers() {
+sync_file_to_other_nodes() {
     local file=$1
     local file_dir=$(dirname "${file}")
 
-    exec_on_workers "mkdir -p ${file_dir}
+    exec_on_other_nodes "mkdir -p ${file_dir}
         rm -rf ${file}"
 
-    info "===== Sync file from Master to all Workers ====="
+    info "===== Sync file from current node to all other nodes ====="
     info "File: ${file}"
-    for worker_ip in "${WORKER_NODE_IPS[@]}"; do
-        info "Syncing file to Worker ${worker_ip}..."
-        if scp -o ConnectTimeout=5 -o StrictHostKeyChecking=no "${file}" ${worker_ip}:${file_dir}; then
-            success "Worker ${worker_ip} - Sync file successfully"
+    for node_ip in "${OTHER_NODE_IPS[@]}"; do
+        info "Syncing file to Worker ${node_ip}..."
+        if scp -o ConnectTimeout=5 -o StrictHostKeyChecking=no "${file}" ${node_ip}:${file_dir}; then
+            success "Node ${node_ip} - Sync file successfully"
         else
-            error "Worker ${worker_ip} - Sync file failed! Check network/SSH auth/permissions"
+            error "Node ${node_ip} - Sync file failed! Check network/SSH auth/permissions"
         fi
     done
 
-    success "Sync file from Master to all Workers successfully!"
+    success "Sync file from current node to all other nodes successfully!"
 }
 
 exec_on_all_nodes() {
     cmd="$1"
     bash -c "${cmd}"
-    exec_on_workers "${cmd}"
+    exec_on_other_nodes "${cmd}"
 }

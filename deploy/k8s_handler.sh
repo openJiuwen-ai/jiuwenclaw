@@ -103,20 +103,54 @@ wait_pod_terminated() {
   success "Pod has been fully terminated and cleaned up!"
 }
 
+
+# Collect Kubernetes cluster information:
+#     current master IP
+#     current master name
+#     worker IPs
+#     other master IPs
 collect_k8s_cluster_info() {
-    DEPLOY_VARS["MASTER_NODE_IP"]=$(kubectl get nodes \
-        --selector='node-role.kubernetes.io/master' \
-        -o jsonpath='{.items[*].status.addresses[?(@.type=="InternalIP")].address}')
+    # Get node name of current master node
+    DEPLOY_VARS["MASTER_NODE_NAME"]=$(hostname)
+    info "MASTER_NODE_NAME: ${DEPLOY_VARS["MASTER_NODE_NAME"]}"
+
+    # Get InternalIP of current master node
+    DEPLOY_VARS["MASTER_NODE_IP"]=$(kubectl get node "${DEPLOY_VARS["MASTER_NODE_NAME"]}" -o json | \
+        jq -r '.status.addresses[] | 
+            select(.type == "InternalIP") | 
+            .address')
     info "MASTER_NODE_IP: ${DEPLOY_VARS["MASTER_NODE_IP"]}"
 
-    MASTER_NODE_NAME=$(kubectl get nodes \
-        --selector='node-role.kubernetes.io/master' \
-        -o jsonpath='{.items[*].metadata.name}')
-    info "MASTER_NODE_NAME: ${MASTER_NODE_NAME}"
+    # Get Ready worker node IPs (nodes without control-plane or master role)
+    WORKER_NODE_IPS=($(kubectl get nodes -o json | \
+        jq -r '.items[] | 
+            select(
+                (.metadata.labels["node-role.kubernetes.io/control-plane"] == null and
+                .metadata.labels["node-role.kubernetes.io/master"] == null) and
+                (.status.conditions[] | select(.type=="Ready") | .status) == "True"
+            ) | 
+            .status.addresses[] | 
+            select(.type=="InternalIP") | 
+            .address'))
 
-    WORKER_NODE_IPS=($(kubectl get nodes -o jsonpath='{.items[*].status.addresses[?(@.type=="InternalIP")].address}' \
-        | tr ' ' '\n' \
-        | grep -v "${DEPLOY_VARS["MASTER_NODE_IP"]}"))
     info "WORKER_NODE_IPS: ${WORKER_NODE_IPS[*]}"
-}
 
+    # Get OTHER MASTER IPS (control-plane nodes EXCEPT current master)
+    OTHER_MASTER_IPS=($(kubectl get nodes -o json | \
+        jq -r --arg CURRENT_NODE "${DEPLOY_VARS["MASTER_NODE_NAME"]}" \
+        '.items[] | 
+            select(
+                (.metadata.labels["node-role.kubernetes.io/control-plane"] != null or
+                .metadata.labels["node-role.kubernetes.io/master"] != null) and
+                .metadata.name != $CURRENT_NODE and
+                (.status.conditions[] | select(.type=="Ready") | .status) == "True"
+            ) | 
+            .status.addresses[] | 
+            select(.type=="InternalIP") | 
+            .address'))
+
+    info "OTHER_MASTER_IPS: ${OTHER_MASTER_IPS[*]}"
+
+    OTHER_NODE_IPS=("${WORKER_NODE_IPS[@]}" "${OTHER_MASTER_IPS[@]}")
+    info "OTHER_NODE_IPS: ${OTHER_NODE_IPS[*]}"
+}

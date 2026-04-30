@@ -690,10 +690,36 @@ function AppContent() {
     void switchMode(sessionId, mode);
   }, [sessionId, switchMode]);
 
+  const ensureSessionForSend = useCallback(async (): Promise<string | null> => {
+    const current = sessionIdRef.current;
+    if (current && current !== 'new') {
+      return current;
+    }
+    const newSid = generateSessionId();
+    try {
+      const payload = await request<{ session_id?: string }>('session.create', {
+        session_id: newSid,
+      });
+      const createdSid =
+        typeof payload?.session_id === 'string' && payload.session_id
+          ? payload.session_id
+          : newSid;
+      setSessionId(createdSid);
+      storeSessionId(createdSid);
+      return createdSid;
+    } catch (error) {
+      console.error('Failed to create session before send:', error);
+      return null;
+    }
+  }, [request]);
+
   const handleSendMessage = useCallback((content: string) => {
-    if (!sessionId || sessionId === 'new') return;
-    void sendMessage(content, sessionId);
-  }, [sendMessage, sessionId]);
+    void (async () => {
+      const sid = await ensureSessionForSend();
+      if (!sid) return;
+      await sendMessage(content, sid);
+    })();
+  }, [ensureSessionForSend, sendMessage]);
 
   const handleInterrupt = useCallback((newInput?: string) => {
     if (!sessionId || sessionId === 'new') return;

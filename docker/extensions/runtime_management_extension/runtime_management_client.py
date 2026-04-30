@@ -157,6 +157,7 @@ class RuntimeManagementAgentClient(AgentServerClient):
         """初始化 Runtime Management 客户端。"""
         
         agent_image = os.getenv("AGENT_SERVER_IMAGE")
+        agent_runtime = os.getenv("AGENT_RUNTIME")
         namespace = os.getenv("AGENT_SERVER_NAMESPACE")
         container_name = os.getenv("AGENT_SERVER_CONTAINER_NAME")
         container_port = int(os.getenv("AGENT_SERVER_PORT"))
@@ -175,7 +176,13 @@ class RuntimeManagementAgentClient(AgentServerClient):
         readiness_period = int(os.getenv("AGENT_SERVER_READINESS_PERIOD"))
         ready_timeout = int(os.getenv("AGENT_SERVER_READY_TIMEOUT"))
         ready_poll_interval = int(os.getenv("AGENT_SERVER_READY_POLL_INTERVAL"))
-        
+
+        # K8s Resource Configuration
+        cpu_request = os.getenv("CPU_REQUEST")
+        memory_request = os.getenv("MEMORY_REQUEST")
+        cpu_limit = os.getenv("CPU_LIMIT")
+        memory_limit = os.getenv("MEMORY_LIMIT")
+
         model_provider = os.getenv("MODEL_PROVIDER")
         model_name = os.getenv("MODEL_NAME")
         api_base = os.getenv("API_BASE")
@@ -195,14 +202,14 @@ class RuntimeManagementAgentClient(AgentServerClient):
                     image_pull_policy=image_pull_policy,
                     env_vars={
                         "AGENT_SERVER_HOST": "0.0.0.0",
-                        "AGENT_RUNTIME": "runtime",
+                        "AGENT_RUNTIME": agent_runtime,
                         "MODEL_PROVIDER": model_provider,
                         "MODEL_NAME": model_name,
                         "API_BASE": api_base,
                         "API_KEY": api_key,
                     } if api_key else {
                         "AGENT_SERVER_HOST": "0.0.0.0",
-                        "AGENT_RUNTIME": "runtime",
+                        "AGENT_RUNTIME": agent_runtime,
                     },
                     kubeconfig=kubeconfig,
                     readiness_initial_delay=readiness_initial_delay,
@@ -211,7 +218,11 @@ class RuntimeManagementAgentClient(AgentServerClient):
                     ready_poll_interval=ready_poll_interval,
                     nfs_server=nfs_server,
                     nfs_path=nfs_path,
-                    nfs_mount_path=nfs_mount_path
+                    nfs_mount_path=nfs_mount_path,
+                    cpu_request=cpu_request,
+                    memory_request=memory_request,
+                    cpu_limit=cpu_limit,
+                    memory_limit=memory_limit,
                 )
                 ch = WSServiceMessageChannel(
                     target_port=container_port,

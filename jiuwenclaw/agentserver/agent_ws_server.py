@@ -256,18 +256,7 @@ class AgentWebSocketServer:
         """在握手阶段执行 Origin 校验，兼容 legacy/new websockets APIs。"""
         path, request_headers = extract_handshake_request(args)
         origin = get_header_value(request_headers, "Origin")
-        
-        # 如果配置了 AGENT_RUNTIME，则允许所有连接（非浏览器场景）
-        AGENT_RUNTIME = os.getenv("AGENT_RUNTIME", "").strip()
-        if AGENT_RUNTIME:
-            logger.info(
-                "[AgentWebSocketServer] 握手允许 path=%s origin=%s reason=AGENT_RUNTIME=%s",
-                path,
-                origin,
-                AGENT_RUNTIME,
-            )
-            return None
-        
+
         allowed = is_allowed_browser_origin(origin)
         logger.info(
             "[AgentWebSocketServer] 握手检查 path=%s origin=%s allowed=%s",

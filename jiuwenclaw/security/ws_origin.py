@@ -96,6 +96,11 @@ def is_allowed_browser_origin(origin: str | None) -> bool:
     Returns:
         True 表示允许该 Origin，False 表示禁止
     """
+    # 如果配置了 AGENT_RUNTIME，则允许所有连接（非浏览器场景）
+    agent_runtime = os.getenv("AGENT_RUNTIME", "").strip()
+    if agent_runtime:
+        return True
+
     # 配置开关关闭时，跳过校验
     if not _get_ws_origin_check_enabled():
         return True

@@ -10,7 +10,11 @@ check_cmd() {
 }
 
 check_cmds() {
-    for cmd in helm docker python3 jq
+    if [ "${DEPLOY_VARS["AGENT_RUNTIME"]}" == "yuanrong" ]; then
+        check_cmd helm
+    fi
+
+    for cmd in docker python3 jq yq mount.nfs
     do
         check_cmd ${cmd}
     done
@@ -38,25 +42,36 @@ check_if_root() {
 }
 
 check_if_master() {
-    if ! kubectl get node "$(hostname)" -o wide | awk '{print $3}' | grep -qw "master"; then
-        error "This script must be run on master."
+    if ! kubectl get node "$(hostname)" -o wide | awk '{print $3}' | grep -qEw "master|control-plane"; then
+        error "This script must be run on master node."
     fi
 }
 
 # ======== Check passwordless SSH connectivity from Master to Worker nodes ========
 check_ssh_connectivity() {
-    info "Validating passwordless SSH connectivity from Master to all Worker nodes..."
-    for worker_ip in "${WORKER_NODE_IPS[@]}"; do
-        if ssh -o ConnectTimeout=5 -o StrictHostKeyChecking=no ${worker_ip} "echo 'SSH connected successfully'" >/dev/null 2>&1; then
-            success "Worker node ${worker_ip} - SSH passwordless connectivity is normal"
+    #if [ "${DEPLOY_VARS["AGENT_RUNTIME"]}" == "jiuwen" ]; then
+    #    return
+    #fi
+
+    if [ "${CMD}" == "down" ]; then
+        return
+    fi
+
+    info "Validating passwordless SSH connectivity from current node to all other nodes..."
+    for node_ip in "${OTHER_NODE_IPS[@]}"; do
+        if ssh -o ConnectTimeout=5 -o StrictHostKeyChecking=no ${node_ip} "echo 'SSH connected successfully'" >/dev/null 2>&1; then
+            success "Node ${node_ip} - SSH passwordless connectivity is normal"
         else
-            error "Worker node ${worker_ip} - SSH passwordless connectivity failed! Please configure SSH key authentication first."
+            error "Node ${node_ip} - SSH passwordless connectivity failed! Please configure SSH key authentication first."
         fi
     done
 }
 
 # ======== Check if the cluster has at least 2 nodes ======== 
 check_cluster_has_enough_nodes() {
+    if [ "${CMD}" == "down" ]; then
+        return
+    fi
     info "===== Checking cluster node count ====="
 
     # Get ready node count (only Ready nodes)
@@ -108,29 +123,31 @@ check_if_nfs_up() {
 }
 
 check_dependency(){
+    detect_os
+    check_cmds
     check_if_master
     check_if_root
-    detect_os
+    #check_ssh_connectivity
+    check_cluster_has_enough_nodes
 }
 
 check_nfs_up_dependency(){
-    check_cmds
-    check_cluster_has_enough_nodes
-    check_ssh_connectivity
+    # Check if NFS client command mount.nfs is installed on all worker nodes
+    for node_ip in "${OTHER_NODE_IPS[@]}"; do
+        if ssh -o ConnectTimeout=5 -o StrictHostKeyChecking=no ${node_ip} "command -v mount.nfs" >/dev/null 2>&1; then
+            success "Node ${node_ip} - mount.nfs is installed."
+        else
+            error "Node ${node_ip} - mount.nfs is not installed."
+        fi
+    done
 }
 
 check_yr_claw_up_dependency(){
-    check_cmds
-    check_cluster_has_enough_nodes
-    check_ssh_connectivity
     check_if_nfs_up
     check_if_yr_exist
 }
 
 check_gateway_up_dependency(){
-    check_cmds
-    check_cluster_has_enough_nodes
-    check_ssh_connectivity
     check_if_nfs_up
 }
 
