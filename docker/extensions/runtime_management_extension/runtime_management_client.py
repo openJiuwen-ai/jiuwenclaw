@@ -196,6 +196,7 @@ class RuntimeManagementAgentClient(AgentServerClient):
                     agent_image,
                     name_prefix="jiuwenclaw",
                     namespace=namespace,
+                    pod_name=container_name,
                     container_name=container_name,
                     container_port=container_port,
                     port_name=port_name,
