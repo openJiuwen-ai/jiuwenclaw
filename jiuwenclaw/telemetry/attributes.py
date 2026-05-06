@@ -42,10 +42,20 @@ JIUWENCLAW_AGENT_NAME = "jiuwenclaw.agent.name"
 JIUWENCLAW_SESSION_STATE = "jiuwenclaw.session.state"
 JIUWENCLAW_SESSION_STATE_REASON = "jiuwenclaw.session.state.reason"
 
-# Token usage
+# Token usage (OpenTelemetry GenAI semantic conventions)
 GEN_AI_USAGE_INPUT_TOKENS = "gen_ai.usage.input_tokens"
 GEN_AI_USAGE_OUTPUT_TOKENS = "gen_ai.usage.output_tokens"
 GEN_AI_USAGE_TOTAL_TOKENS = "gen_ai.usage.total_tokens"
+
+# Prompt caching tokens (OpenTelemetry standard)
+# https://github.com/open-telemetry/semantic-conventions/blob/main/docs/gen-ai/gen-ai-spans.md
+GEN_AI_USAGE_CACHE_READ_INPUT_TOKENS = "gen_ai.usage.cache_read.input_tokens"
+GEN_AI_USAGE_CACHE_CREATION_INPUT_TOKENS = "gen_ai.usage.cache_creation.input_tokens"
+
+# Reasoning tokens (for models like DeepSeek R1, Claude thinking)
+GEN_AI_USAGE_REASONING_OUTPUT_TOKENS = "gen_ai.usage.reasoning.output_tokens"
+
+# Legacy attribute names (deprecated, kept for backward compatibility)
 GEN_AI_USAGE_CACHE_READ_TOKENS = "gen_ai.usage.cache_read_tokens"
 GEN_AI_USAGE_CACHE_CREATION_TOKENS = "gen_ai.usage.cache_creation_tokens"
 

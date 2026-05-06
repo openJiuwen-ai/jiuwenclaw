@@ -76,4 +76,10 @@ jiuwenclaw/workspace/.whatsapp-auth/
 jiuwenclaw/resources/agent/workspace/
 jiuwenclaw/resources/tui/bin/
 packages/jiuwenclaw-tui/jiuwenclaw_tui/resources/tui/bin/
-packages/jiuwenclaw-tui/jiuwenclaw_tui/resources/tui-bin/
+packages/jiuwenclaw-tui/jiuwenclaw_tui/resources/tui-bin/.worktrees/
+
+# Git worktrees
+.worktrees/
+
+# Local test scripts (not for repo)
+scripts/smoke_telemetry.py

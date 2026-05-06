@@ -42,7 +42,10 @@ from jiuwenclaw.telemetry.attributes import (
     GEN_AI_SYSTEM,
     GEN_AI_TOOL_CALL_ID,
     GEN_AI_TOOL_NAME,
-    GEN_AI_USAGE_CACHE_READ_TOKENS,
+    GEN_AI_USAGE_CACHE_READ_INPUT_TOKENS,
+    GEN_AI_USAGE_CACHE_CREATION_INPUT_TOKENS,
+    GEN_AI_USAGE_REASONING_OUTPUT_TOKENS,
+    GEN_AI_USAGE_CACHE_READ_TOKENS,  # legacy
     GEN_AI_USAGE_ESTIMATED,
     GEN_AI_USAGE_INPUT_TOKENS,
     GEN_AI_USAGE_OUTPUT_TOKENS,
@@ -378,9 +381,26 @@ class TelemetryRail(DeepAgentRail):
             attributes=attrs,
         )
 
+        inputs = getattr(ctx, "inputs", None)
+
         # Record input messages as span events
-        if _log_messages and hasattr(ctx, "messages"):
-            self._record_input_messages(span, ctx.messages)
+        if _log_messages:
+            # messages may be on ctx.inputs.messages (AgentCallbackContext pattern)
+            # or directly on ctx.messages (legacy pattern)
+            messages = None
+            if inputs is not None:
+                messages = getattr(inputs, "messages", None)
+            if messages is None:
+                messages = getattr(ctx, "messages", None)
+            if messages is not None:
+                self._record_input_messages(span, messages)
+
+        # Record available tools as span event
+        tools = None
+        if inputs is not None:
+            tools = getattr(inputs, "tools", None)
+        if tools is not None:
+            self._record_tools(span, tools)
 
         self._llm_spans[call_id] = (span, time.monotonic())
         ctx._otel_llm_call_id = call_id
@@ -443,6 +463,9 @@ class TelemetryRail(DeepAgentRail):
             # Record output message
             if _log_messages:
                 self._record_output_message(span, result)
+
+            # Record decision analysis (ReAct decision: tool_call vs answer)
+            self._record_decision(span, result)
 
         # Check for errors
         if hasattr(ctx, "error") and ctx.error:
@@ -639,14 +662,111 @@ class TelemetryRail(DeepAgentRail):
                     "tool_call_id": str(tool_call_id),
                 })
 
+    def _record_tools(self, span: trace.Span, tools: Any) -> None:
+        """Record available tools as a span event.
+
+        Tools are passed to LLM via OpenAI API's ``tools`` parameter.
+        Each tool is typically a dict with ``type`` and ``function`` keys:
+        {"type": "function", "function": {"name": "...", "description": "...", "parameters": {...}}}
+
+        Records both tool names and descriptions to help understand what tools are available
+        and when LLM should use them.
+        """
+        tool_names = []
+        tool_descriptions = []
+        for tool in tools:
+            name = ""
+            description = ""
+            func = None
+            if isinstance(tool, dict):
+                # OpenAI format: {"type": "function", "function": {"name": "...", "description": "..."}}
+                func = tool.get("function", {})
+                if isinstance(func, dict):
+                    name = func.get("name", "")
+                    description = func.get("description", "")
+            else:
+                # Tool object format (LocalFunction, Tool, etc.)
+                name = getattr(tool, "name", "")
+                if not name:
+                    func = getattr(tool, "function", None)
+                    if func:
+                        name = getattr(func, "name", "")
+                # Try to get description from multiple possible locations
+                card = getattr(tool, "card", None)
+                if card:
+                    description = getattr(card, "description", "")
+                elif func:
+                    description = getattr(func, "description", "")
+                # Also check tool.description directly
+                if not description:
+                    description = getattr(tool, "description", "")
+
+            if name:
+                tool_names.append(name)
+                # Truncate description to avoid excessive token usage
+                if description:
+                    tool_descriptions.append(f"{name}: {description[:50]}")
+
+        if tool_names:
+            span.add_event("gen_ai.tools.available", {
+                "tool_names": str(tool_names),
+                "tool_count": len(tool_names),
+                "tool_descriptions": str(tool_descriptions),
+            })
+
     def _record_output_message(self, span: trace.Span, result: Any) -> None:
-        """Record the assistant output message as a span event."""
+        """Record the assistant output message as a span event.
+
+        Includes:
+        - content: Text output (if any)
+        - tool_calls: Tool call decisions (if any)
+        - reasoning_content: Model's reasoning/thinking process (if supported)
+        """
         content = getattr(result, "content", "") or ""
         tool_calls = getattr(result, "tool_calls", None)
+        reasoning_content = getattr(result, "reasoning_content", None)
+
         attrs = {"content": str(content)}
         if tool_calls:
             attrs["tool_calls"] = str(tool_calls)[:4096]
+        if reasoning_content:
+            attrs["reasoning_content"] = str(reasoning_content)[:4096]
         span.add_event("gen_ai.assistant.message", attrs)
+
+    def _record_decision(self, span: trace.Span, result: Any) -> None:
+        """Record the Agent's decision as a span event.
+
+        ReAct Agent makes two types of decisions:
+        - tool_call: Agent decides to execute tools, continues the loop
+        - answer: Agent decides to output text, ends the loop
+
+        This event helps trace the Agent's reasoning trajectory across iterations.
+        """
+        tool_calls = getattr(result, "tool_calls", None)
+        content = getattr(result, "content", "") or ""
+
+        if tool_calls and len(tool_calls) > 0:
+            # Decision: execute tools
+            tool_names = []
+            for tc in tool_calls:
+                name = getattr(tc, "name", "")
+                if name:
+                    tool_names.append(name)
+
+            span.add_event("gen_ai.decision.tool_call", {
+                "decision_type": "tool_call",
+                "tool_count": len(tool_calls),
+                "tool_names": str(tool_names),
+                "first_tool_name": tool_names[0] if tool_names else "",
+                "content_preview": str(content)[:200] if content else "",
+            })
+        else:
+            # Decision: output answer
+            span.add_event("gen_ai.decision.answer", {
+                "decision_type": "answer",
+                "content_length": len(str(content)),
+                "content_preview": str(content)[:200] if content else "",
+            })
 
     def _record_token_usage(
         self,
@@ -656,7 +776,13 @@ class TelemetryRail(DeepAgentRail):
         system: str,
         channel_id: str = "",
     ) -> None:
-        """Extract token usage from result and record."""
+        """Extract token usage from result and record.
+
+        Supports OpenTelemetry GenAI semantic conventions for:
+        - Basic tokens: input_tokens, output_tokens
+        - Prompt caching: cache_read.input_tokens, cache_creation.input_tokens
+        - Reasoning: reasoning.output_tokens (for DeepSeek R1, Claude thinking, etc.)
+        """
         usage = getattr(result, "usage_metadata", None)
         # TODO(§11.5): when an estimator provides a fallback count because the
         # adapter did not return usage, set GEN_AI_USAGE_ESTIMATED=True on the
@@ -664,15 +790,49 @@ class TelemetryRail(DeepAgentRail):
         if not usage:
             return
 
+        # Basic tokens
         input_tokens = getattr(usage, "input_tokens", 0) or 0
         output_tokens = getattr(usage, "output_tokens", 0) or 0
-        cache_read = getattr(usage, "cache_tokens", 0) or 0
 
+        # Cache read tokens - try multiple field names from different APIs
+        # OpenAI: usage.prompt_tokens_details.cached_tokens
+        # Anthropic: usage.cache_read_input_tokens
+        # GLM/Zhipu: usage.cache_tokens
+        cache_read = 0
+        prompt_details = getattr(usage, "prompt_tokens_details", None)
+        if prompt_details:
+            cache_read = getattr(prompt_details, "cached_tokens", 0) or 0
+        if not cache_read:
+            cache_read = getattr(usage, "cache_read_input_tokens", 0) or 0
+        if not cache_read:
+            cache_read = getattr(usage, "cache_tokens", 0) or 0
+
+        # Cache creation tokens
+        cache_creation = getattr(usage, "cache_creation_input_tokens", 0) or 0
+
+        # Reasoning tokens (for models like DeepSeek R1, Claude thinking)
+        reasoning_tokens = 0
+        completion_details = getattr(usage, "completion_tokens_details", None)
+        if completion_details:
+            reasoning_tokens = getattr(completion_details, "reasoning_tokens", 0) or 0
+        if not reasoning_tokens:
+            reasoning_tokens = getattr(usage, "reasoning_tokens", 0) or 0
+
+        # Record standard OpenTelemetry attributes
         span.set_attribute(GEN_AI_USAGE_INPUT_TOKENS, input_tokens)
         span.set_attribute(GEN_AI_USAGE_OUTPUT_TOKENS, output_tokens)
         span.set_attribute(GEN_AI_USAGE_TOTAL_TOKENS, input_tokens + output_tokens)
+
+        # Prompt caching tokens (OpenTelemetry standard names)
         if cache_read:
-            span.set_attribute(GEN_AI_USAGE_CACHE_READ_TOKENS, cache_read)
+            span.set_attribute(GEN_AI_USAGE_CACHE_READ_INPUT_TOKENS, cache_read)
+            span.set_attribute(GEN_AI_USAGE_CACHE_READ_TOKENS, cache_read)  # legacy compat
+        if cache_creation:
+            span.set_attribute(GEN_AI_USAGE_CACHE_CREATION_INPUT_TOKENS, cache_creation)
+
+        # Reasoning tokens
+        if reasoning_tokens:
+            span.set_attribute(GEN_AI_USAGE_REASONING_OUTPUT_TOKENS, reasoning_tokens)
 
         # Metric counters
         base_attrs = _with_resource_labels({
@@ -686,3 +846,7 @@ class TelemetryRail(DeepAgentRail):
             token_usage.add(output_tokens, {**base_attrs, "gen_ai.token.type": "output"})
         if cache_read:
             token_usage.add(cache_read, {**base_attrs, "gen_ai.token.type": "cache_read"})
+        if cache_creation:
+            token_usage.add(cache_creation, {**base_attrs, "gen_ai.token.type": "cache_creation"})
+        if reasoning_tokens:
+            token_usage.add(reasoning_tokens, {**base_attrs, "gen_ai.token.type": "reasoning"})

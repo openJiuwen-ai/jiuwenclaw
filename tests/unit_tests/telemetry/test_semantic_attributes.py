@@ -62,6 +62,33 @@ async def test_streaming_attribute_set(span_capture):
     assert any(ev.name == "gen_ai.first_token" for ev in llm_spans[0].events)
 
 
+async def test_log_messages_disabled_still_records_llm_span(span_capture):
+    import jiuwenclaw.telemetry.instrumentors.telemetry_rail as mod
+    from jiuwenclaw.telemetry.instrumentors.telemetry_rail import TelemetryRail
+
+    rail = TelemetryRail()
+    mod.set_log_messages(False)
+    try:
+        ctx = _model_ctx()
+        ctx.inputs = SimpleNamespace(messages=[], tools=[])
+
+        await rail.before_model_call(ctx)
+        ctx.result = SimpleNamespace(
+            content="secret response",
+            usage_metadata=SimpleNamespace(input_tokens=3, output_tokens=4),
+            finish_reason="stop",
+        )
+        await rail.after_model_call(ctx)
+    finally:
+        mod.set_log_messages(True)
+
+    spans = [s for s in span_capture.get_finished_spans() if s.name == "gen_ai.chat"]
+    assert len(spans) == 1
+    assert spans[0].attributes.get("gen_ai.usage.input_tokens") == 3
+    assert spans[0].attributes.get("gen_ai.usage.output_tokens") == 4
+    assert all(ev.name != "gen_ai.assistant.message" for ev in spans[0].events)
+
+
 async def test_iteration_attribute_increments(span_capture):
     from jiuwenclaw.telemetry.instrumentors.telemetry_rail import TelemetryRail
 

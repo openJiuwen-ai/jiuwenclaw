@@ -1049,6 +1049,7 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             return
 
         from jiuwenclaw.gateway.session_index import is_remote_storage
+
         if is_remote_storage():
             logger.error(
                 "[session.create] remote 模式但执行了本地 handler（转发未生效？）session_id=%s",
@@ -1139,6 +1140,7 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             return
 
         from jiuwenclaw.gateway.session_index import is_remote_storage
+
         if is_remote_storage():
             logger.error(
                 "[session.delete] remote 模式但执行了本地 handler（转发未生效？）session_id=%s",

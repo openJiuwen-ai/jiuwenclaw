@@ -408,10 +408,12 @@ class PatchOpenAIModelClient(RetryMixin, OpenAIModelClient):
         ssl_verify, ssl_cert = self.model_client_config.verify_ssl, self.model_client_config.ssl_cert
         verify = SslUtils.create_strict_ssl_context(ssl_cert) if ssl_verify else ssl_verify
 
-        http_client = httpx.AsyncClient(
-            proxy=UrlUtils.get_global_proxy_url(self.model_client_config.api_base),
-            verify=verify
-        )
+        proxy_url = UrlUtils.get_global_proxy_url(self.model_client_config.api_base)
+        # httpx不接受空字符串proxy，需要处理
+        if proxy_url and proxy_url.strip():
+            http_client = httpx.AsyncClient(proxy=proxy_url, verify=verify)
+        else:
+            http_client = httpx.AsyncClient(verify=verify)
 
         # Use method-level timeout if provided, otherwise use config timeout
         final_timeout = timeout if timeout is not None else self.model_client_config.timeout

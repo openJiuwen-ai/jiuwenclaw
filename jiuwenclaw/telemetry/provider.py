@@ -169,7 +169,9 @@ def _build_tracer_provider(cfg: TelemetryConfig, resource: Resource) -> TracerPr
 
     if exporter == "otlp":
         span_exporter = _create_otlp_span_exporter(cfg, signal="traces")
-        tracer_provider.add_span_processor(BatchSpanProcessor(span_exporter))
+        tracer_provider.add_span_processor(
+            BatchSpanProcessor(span_exporter, max_export_batch_size=256)
+        )
     elif exporter == "console":
         tracer_provider.add_span_processor(SimpleSpanProcessor(ConsoleSpanExporter()))
     elif exporter != "none":
