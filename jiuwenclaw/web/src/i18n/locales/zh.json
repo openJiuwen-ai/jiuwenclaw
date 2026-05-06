@@ -406,8 +406,6 @@
     "selectModelProvider": "请选择模型提供商",
     "enterValue": "请输入配置值",
     "keys": {
-      "freeSearchProxyUrl": "代理地址",
-      "freeSearchProxyUrlPlaceholder": "http://username:password@proxyhk.huawei.com:8080",
       "memoryForbiddenEnabled": "启用",
       "memoryForbiddenDescription": "禁止记忆内容描述",
       "memoryForbiddenDescriptionPlaceholder": "例如：密码、API密钥、Secret、Token、信用卡号、身份证号、手机号等敏感信息",
@@ -486,7 +484,7 @@
       "model": { "label": "模型配置", "hint": "模型服务与鉴权参数" },
       "embed": { "label": "Embed配置", "hint": "Embed 服务与鉴权参数" },
       "thirdParty": { "label": "第三方服务配置", "hint": "API Key 配置" },
-      "freeSearch": { "label": "免费搜索引擎配置", "hint": "控制搜索引擎启用和企业内网代理" },
+      "freeSearch": { "label": "免费搜索引擎配置", "hint": "控制免费搜索引擎启用" },
       "evolution": { "label": "自演进配置", "hint": "Skills 在线自演进参数" },
       "agents": { "label": "多Agent配置", "hint": "仅供集群模式使用" },
       "team": { "label": "Team配置", "hint": "多智能体团队配置" },

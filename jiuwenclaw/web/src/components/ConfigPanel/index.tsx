@@ -112,58 +112,9 @@ const EVOLUTION_KEYS = new Set(["evolution_auto_scan", "skill_create"]);
 const AGENT_KEYS = new Set(["name", "model", "skills", "max_iterations", "completion_timeout"]);
 const TEAM_KEYS = new Set(["team_name", "lifecycle", "teammate_mode", "spawn_mode"]);
 const FREE_SEARCH_BOOLEAN_KEYS = new Set(["free_search_ddg_enabled", "free_search_bing_enabled"]);
-const FREE_SEARCH_KEYS = new Set([...FREE_SEARCH_BOOLEAN_KEYS, "free_search_proxy_url"]);
+const FREE_SEARCH_KEYS = new Set([...FREE_SEARCH_BOOLEAN_KEYS]);
+const HIDDEN_CONFIG_KEYS = new Set(["free_search_proxy_url"]);
 const MEMORY_KEYS = new Set(["memory_forbidden_enabled", "memory_forbidden_description"]);
-const DEFAULT_PROXY_SCHEME = "http";
-const DEFAULT_PROXY_HOST = "proxyhk.huawei.com";
-const DEFAULT_PROXY_PORT = "8080";
-
-type ProxyParts = {
-  username: string;
-  password: string;
-};
-
-function decodeUrlPart(value: string): string {
-  try {
-    return decodeURIComponent(value);
-  } catch {
-    return value;
-  }
-}
-
-function parseProxyUrl(value: string): ProxyParts {
-  const trimmed = (value || "").trim();
-  if (!trimmed) {
-    return { username: "", password: "" };
-  }
-  try {
-    const url = new URL(trimmed);
-    return {
-      username: decodeUrlPart(url.username),
-      password: decodeUrlPart(url.password),
-    };
-  } catch {
-    const withoutScheme = trimmed.replace(/^[a-z][a-z0-9+.-]*:\/\//i, "");
-    const [authAndHost] = withoutScheme.split(/[/?#]/, 1);
-    const at = authAndHost.lastIndexOf("@");
-    const auth = at >= 0 ? authAndHost.slice(0, at) : "";
-    const colon = auth.indexOf(":");
-    return {
-      username: colon >= 0 ? decodeUrlPart(auth.slice(0, colon)) : decodeUrlPart(auth),
-      password: colon >= 0 ? decodeUrlPart(auth.slice(colon + 1)) : "",
-    };
-  }
-}
-
-function buildProxyUrl(parts: ProxyParts): string {
-  const username = parts.username.trim();
-  const password = parts.password;
-  if (!username && !password) return "";
-  const auth = username || password
-    ? `${encodeURIComponent(username)}${password ? `:${encodeURIComponent(password)}` : ""}@`
-    : "";
-  return `${DEFAULT_PROXY_SCHEME}://${auth}${DEFAULT_PROXY_HOST}:${DEFAULT_PROXY_PORT}`;
-}
 
 function classifyKey(key: string): string {
   if (MODEL_DEFAULT_KEYS.has(key)) return "model_default";
@@ -377,49 +328,9 @@ function isProviderKey(key: string): boolean {
   return key.endsWith("_provider");
 }
 
-function ProxyUrlInput({
-  value,
-  onChange,
-  t,
-}: {
-  value: string;
-  onChange: (value: string) => void;
-  t: (key: string) => string;
-}) {
-  const parts = parseProxyUrl(value);
-  const update = (patch: Partial<ProxyParts>) => {
-    onChange(buildProxyUrl({ ...parts, ...patch }));
-  };
-  const inputClass = "w-full rounded-md border border-border bg-bg px-3 py-2 text-[13px] outline-none focus:border-accent";
-  return (
-    <div className="space-y-1.5">
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
-        <input
-          type="text"
-          value={parts.username}
-          onChange={(e) => update({ username: e.target.value })}
-          placeholder={t("config.keys.proxyUsernamePlaceholder")}
-          className={inputClass}
-          autoComplete="username"
-        />
-        <input
-          type="password"
-          value={parts.password}
-          onChange={(e) => update({ password: e.target.value })}
-          placeholder={t("config.keys.proxyPasswordPlaceholder")}
-          className={inputClass}
-          autoComplete="current-password"
-        />
-      </div>
-      <p className="text-xs text-text-muted">{t("config.keys.freeSearchProxyUrlPlaceholder")}</p>
-    </div>
-  );
-}
-
 /** 表格列显示用：video_api_base -> api_base，避免与分组标题重复 */
 /** i18n 键名映射：字段名 -> 翻译 key（显示名 / placeholder） */
 const KEY_DISPLAY_I18N: Record<string, string> = {
-  free_search_proxy_url: "config.keys.freeSearchProxyUrl",
   memory_forbidden_enabled: "config.keys.memoryForbiddenEnabled",
   memory_forbidden_description: "config.keys.memoryForbiddenDescription",
   name: "config.keys.agentName",
@@ -429,7 +340,6 @@ const KEY_DISPLAY_I18N: Record<string, string> = {
   completion_timeout: "config.keys.agentCompletionTimeout",
 };
 const KEY_PLACEHOLDER_I18N: Record<string, string> = {
-  free_search_proxy_url: "config.keys.freeSearchProxyUrlPlaceholder",
   memory_forbidden_description: "config.keys.memoryForbiddenDescriptionPlaceholder",
 };
 const KEY_LABEL_HINT_I18N: Record<string, string> = {
@@ -442,7 +352,6 @@ const KEY_SORT_PRIORITY: Record<string, number> = {
   skill_create: 1,
   free_search_ddg_enabled: 0,
   free_search_bing_enabled: 1,
-  free_search_proxy_url: 2,
   memory_forbidden_enabled: 0,
   memory_forbidden_description: 1,
   model: 0,
@@ -602,22 +511,6 @@ function GroupSection({
                             </>
                           )}
                         </select>
-                      </div>
-                    </div>
-                  ) : key === "free_search_proxy_url" ? (
-                    <div className="flex items-center gap-2">
-                      <span
-                        className="inline-flex w-3 justify-center shrink-0 font-semibold leading-none select-none text-transparent"
-                        aria-hidden="true"
-                      >
-                        *
-                      </span>
-                      <div className="flex-1">
-                        <ProxyUrlInput
-                          value={draftValues[key] ?? value}
-                          onChange={(nextValue) => onChange(key, nextValue)}
-                          t={t}
-                        />
                       </div>
                     </div>
                   ) : (
@@ -2079,6 +1972,7 @@ export function ConfigPanel({
     if (!Object.keys(normalizedConfig).length) return [];
     const buckets: Record<string, [string, string][]> = {};
     for (const [key, value] of Object.entries(normalizedConfig)) {
+      if (HIDDEN_CONFIG_KEYS.has(key)) continue;
       const tag = classifyKey(key);
       // 临时注释：先隐藏邮件配置，后续需要时可恢复。
       if (tag === "email") continue;

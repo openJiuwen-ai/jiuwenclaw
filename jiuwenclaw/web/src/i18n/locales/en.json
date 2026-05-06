@@ -407,8 +407,6 @@
     "selectModelProvider": "Select a model provider",
     "enterValue": "Enter a configuration value",
     "keys": {
-      "freeSearchProxyUrl": "Proxy URL",
-      "freeSearchProxyUrlPlaceholder": "http://username:password@proxyhk.huawei.com:8080",
       "memoryForbiddenEnabled": "Enable",
       "memoryForbiddenDescription": "Forbidden memory content description",
       "memoryForbiddenDescriptionPlaceholder": "e.g. passwords, API keys, secrets, tokens, credit card numbers, ID numbers, phone numbers",
@@ -487,7 +485,7 @@
       "model": { "label": "Model Configuration", "hint": "Model service and authentication settings" },
       "embed": { "label": "Embed Configuration", "hint": "Embed service and authentication settings" },
       "thirdParty": { "label": "Third-Party Services", "hint": "API key settings" },
-      "freeSearch": { "label": "Free Search Engines", "hint": "Enable engines and optional proxy for enterprise intranet" },
+      "freeSearch": { "label": "Free Search Engines", "hint": "Enable free search engines" },
       "evolution": { "label": "Evolution Settings", "hint": "Online skill evolution settings" },
       "agents": { "label": "Multi-Agent Configuration", "hint": "For cluster mode only" },
       "team": { "label": "Team Configuration", "hint": "Multi-agent team settings" },
