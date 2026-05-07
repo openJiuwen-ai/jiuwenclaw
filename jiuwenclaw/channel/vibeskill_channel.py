@@ -7,7 +7,7 @@ import os
 import secrets
 import socket
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Callable, cast
 from urllib.parse import parse_qs, urlparse
 
@@ -218,6 +218,25 @@ class VibeSkillChannel(BaseChannel):
                     }, source="inbound.invalid_json")
                     continue
 
+                _inbound_sid = (
+                    str(data.get("sessionID") or "").strip()
+                    if isinstance(data, dict)
+                    else ""
+                )
+                if not _inbound_sid:
+                    _bound = self._ws_sessions.get(ws)
+                    _inbound_sid = sorted(_bound)[0] if _bound else "n/a"
+                logger.info(
+                    "[VibeSkillChannel] WS 事件, type=%s, session_id=%s",
+                    (
+                        str(data.get("type") or "").strip()
+                        if isinstance(data, dict)
+                        else "(non-dict)"
+                    )
+                    or "(empty)",
+                    _inbound_sid,
+                )
+
                 # 调用 inbound_intercept 处理入站消息
                 handled = await self.inbound_intercept(ws, data)
                 if not handled:
@@ -281,6 +300,23 @@ class VibeSkillChannel(BaseChannel):
             # 调用 http_handler 处理请求
             status, resp_headers, resp_body = await self.http_handler(
                 method, raw_path, headers, body
+            )
+
+            _rp = urlparse(raw_path).path
+            _meth_u = (method or "").strip().upper() or "?"
+            if _rp == "/api/v1/session" and _meth_u == "POST":
+                _sid_resp = "n/a"
+            elif _rp.startswith("/api/v1/session/"):
+                _rest_r = _rp[len("/api/v1/session/"):].strip("/")
+                _sid_resp = _rest_r.split("/")[0] if _rest_r else "n/a"
+            else:
+                _sid_resp = "n/a"
+            _path_resp_log = raw_path if len(raw_path) <= 512 else f"{raw_path[:512]}...<truncated>"
+            logger.info(
+                "[VibeSkillChannel] HTTP 响应已发送, status=%s session_id=%s path=%s",
+                status,
+                _sid_resp,
+                _path_resp_log,
             )
 
             # 发送响应
@@ -531,6 +567,10 @@ class VibeSkillChannel(BaseChannel):
             metadata=msg_metadata,
         )
 
+        logger.info(
+            "[VibeSkillChannel] skilldev.start sent, session_id=%s",
+            session.internal_id,
+        )
         # 直接发送到 MessageHandler
         self.bus.deliver_to_message_handler(msg)
 
@@ -569,6 +609,10 @@ class VibeSkillChannel(BaseChannel):
             req_method=ReqMethod.SKILLDEV_PARSE_SKILL,
             is_stream=True,
             metadata={_VIBESKILL_ORIGINAL_SESSION_ID_KEY: session_id},
+        )
+        logger.info(
+            "[VibeSkillChannel] skilldev.parse_skill sent, session_id=%s",
+            internal_id,
         )
         self.bus.deliver_to_message_handler(msg)
         return True
@@ -814,6 +858,11 @@ class VibeSkillChannel(BaseChannel):
 
         handler = skilldev_events.get(event_type)
         if handler:
+            logger.info(
+                "[VibeSkillChannel] %s received, session_id=%s",
+                event_type,
+                str(msg.session_id or "").strip() or "n/a",
+            )
             responses = await handler(payload, external_sid, msg.session_id)
             for response in responses:
                 await self._send_ws_json(ws, response, source=f"skilldev.{event_type}")
@@ -1332,6 +1381,10 @@ class VibeSkillChannel(BaseChannel):
             is_stream=True,
             metadata={_VIBESKILL_ORIGINAL_SESSION_ID_KEY: external_session_id} if external_session_id else None,
         )
+        logger.info(
+            "[VibeSkillChannel] skilldev.respond sent, session_id=%s",
+            internal_id,
+        )
         self.bus.deliver_to_message_handler(msg)
         return True
 
@@ -1426,7 +1479,6 @@ class VibeSkillChannel(BaseChannel):
         session_id: str | None,
     ) -> list[dict]:
         """skilldev.suspended - 暂停（不动）"""
-        logger.info("[VibeSkillChannel] skilldev.suspended received, session_id=%s", session_id)
         return []
 
     async def _handle_skilldev_completed(
@@ -1503,6 +1555,10 @@ class VibeSkillChannel(BaseChannel):
                     req_method=ReqMethod.SKILLDEV_CANCEL,
                     is_stream=True,
                 )
+                logger.info(
+                    "[VibeSkillChannel] skilldev.cancel sent, session_id=%s",
+                    sid,
+                )
                 self.bus.deliver_to_message_handler(cancel_msg)
                 logger.info(
                     "[VibeSkillChannel] WS disconnected, dispatched skilldev.cancel, task_id=%s",
@@ -1537,6 +1593,14 @@ class VibeSkillChannel(BaseChannel):
         else:
             payload_for_log = payload_str
         logger.info("[VibeSkillChannel] WS send (%s): %s", source, payload_for_log)
+        _sid_out = "n/a"
+        if isinstance(payload, dict):
+            _props = payload.get("properties")
+            if isinstance(_props, dict):
+                _sid_out = str(_props.get("sessionID") or "").strip() or _sid_out
+            if _sid_out == "n/a":
+                _sid_out = str(payload.get("sessionID") or "").strip() or _sid_out
+        logger.info("[VibeSkillChannel] %s sent, session_id=%s", source, _sid_out)
         try:
             await ws.send(payload_str)
         except Exception as exc:
@@ -1802,6 +1866,22 @@ class VibeSkillChannel(BaseChannel):
         path_str = str(path or "").strip()
         parsed = urlparse(path_str)
         request_path = parsed.path
+
+        _meth_u = (method or "").strip().upper() or "?"
+        if request_path == "/api/v1/session" and _meth_u == "POST":
+            _sid_http = "n/a"
+        elif request_path.startswith("/api/v1/session/"):
+            _rest_h = request_path[len("/api/v1/session/"):].strip("/")
+            _sid_http = _rest_h.split("/")[0] if _rest_h else "n/a"
+        else:
+            _sid_http = "n/a"
+        _path_for_log = path_str if len(path_str) <= 512 else f"{path_str[:512]}...<truncated>"
+        logger.info(
+            "[VibeSkillChannel] %s 接口请求, session_id=%s path=%s",
+            _meth_u,
+            _sid_http,
+            _path_for_log,
+        )
 
         # AK/SK 鉴权
         if self._auth_enabled:
@@ -2100,6 +2180,10 @@ class VibeSkillChannel(BaseChannel):
             is_stream=False,
             timestamp=time.time(),
         )
+        logger.info(
+            "[VibeSkillChannel] skilldev.file.list sent, session_id=%s",
+            internal_id,
+        )
         resp = await self._send_agent_request(env)
         if not resp.ok:
             pl = dict(resp.payload) if isinstance(resp.payload, dict) else {}
@@ -2143,6 +2227,10 @@ class VibeSkillChannel(BaseChannel):
             is_stream=False,
             timestamp=time.time(),
         )
+        logger.info(
+            "[VibeSkillChannel] skilldev.file.read sent, session_id=%s",
+            internal_id,
+        )
         resp = await self._send_agent_request(env)
         if not resp.ok:
             pl = dict(resp.payload) if isinstance(resp.payload, dict) else {}
@@ -2179,7 +2267,7 @@ class VibeSkillChannel(BaseChannel):
     async def _handle_http_version_create(self, session_id: str, body: bytes) -> tuple[int, dict, bytes]:
         """POST /api/v1/session/{id}/version - 创建版本快照。"""
         try:
-            data = json.loads(body) if body else {}
+            _ = json.loads(body) if body else {}
         except json.JSONDecodeError:
             return self._json_response(400, {"error": "Invalid JSON"})
         return self._json_response(200, {
@@ -2228,6 +2316,10 @@ class VibeSkillChannel(BaseChannel):
             params={"task_id": session_id},
             is_stream=False,
             timestamp=time.time(),
+        )
+        logger.info(
+            "[VibeSkillChannel] skilldev.download sent, session_id=%s",
+            session_id,
         )
         resp = await self._send_agent_request(env)
         payload = resp.payload if isinstance(resp.payload, dict) else {}
