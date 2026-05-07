@@ -594,6 +594,28 @@ def _migrate_legacy_workspace(
     except OSError as e:
         logger.warning(f"Failed to remove some old directories: {e}")
 
+    # 多租户布局下删除遗留的根目录平铺 ``<root>/agent``（与新路径非同一目录时）
+    legacy_agent = workspace_dir / "agent"
+    if legacy_agent.is_dir():
+        mt_base = get_multi_tenant_user_workspace_dir("default", "default")
+        if mt_base is not None:
+            new_agent_root = mt_base / "agent"
+            new_deep = new_agent_root / "jiuwenclaw_workspace"
+            if new_deep.is_dir():
+                try:
+                    same_agent_root = legacy_agent.resolve() == new_agent_root.resolve()
+                except OSError as e:
+                    logger.warning("[Cleanup] Skip legacy flat agent cleanup (resolve failed): %s", e)
+                else:
+                    if not same_agent_root:
+                        try:
+                            shutil.rmtree(legacy_agent)
+                            logger.info("[Cleanup] Removed legacy flat agent directory: %s", legacy_agent)
+                        except OSError as e:
+                            logger.warning(
+                                "[Cleanup] Failed to remove legacy flat agent directory %s: %s", legacy_agent, e
+                            )
+
     logger.info(f"Migration completed: {new_workspace}")
 
 
@@ -746,6 +768,13 @@ def update_config():
     config_yaml_dest = config_dest_dir / "config.yaml"
     # 将源码 config.yaml 的新增字段合并到用户 config.yaml，保留用户已有值
     _merge_config_from_source(config_yaml_src, config_yaml_dest)
+
+    # 已有新 DeepAgent 目录时启动走本函数而非 prepare_workspace；若仍残留旧 layout 目录则补跑迁移
+    old_workspace = workspace_dir / "agent" / "workspace"
+    old_skills = workspace_dir / "agent" / "skills"
+    old_memory = workspace_dir / "agent" / "memory"
+    if old_workspace.exists() or old_skills.exists() or old_memory.exists():
+        _migrate_legacy_workspace(workspace_dir, None)
 
 
 def prepare_workspace(
