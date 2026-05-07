@@ -298,7 +298,7 @@ class RetryMixin:
                 if not self._is_retryable_error(e, cfg):
                     reason = self._classify_error(e, cfg)
                     details = self._extract_error_details(e)
-                    llm_logger.info(f"LLM invoke 不可重试 [{reason}] [{details}], details: {e}")
+                    llm_logger.error(f"LLM invoke 不可重试 [{reason}] [{details}], details: {e}")
                     raise
                 reason = self._classify_error(e, cfg)
                 details = self._extract_error_details(e)
