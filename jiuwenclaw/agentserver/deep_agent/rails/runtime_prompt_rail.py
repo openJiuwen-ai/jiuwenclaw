@@ -131,26 +131,6 @@ class RuntimePromptRail(DeepAgentRail):
             logger.debug("[RuntimePromptRail] SOUL.md loaded from default: %s", default_path)
         return content
 
-    @staticmethod
-    def _get_git_branch() -> str:
-        """获取当前 git 分支名，失败时返回 N/A。"""
-        git_bin = which("git")
-        if not git_bin:
-            return "N/A"
-
-        try:
-            result = subprocess.run(
-                [git_bin, "rev-parse", "--abbrev-ref", "HEAD"],
-                capture_output=True,
-                text=True,
-                timeout=5,
-            )
-        except (subprocess.SubprocessError, OSError):
-            return "N/A"
-
-        if result.returncode == 0 and result.stdout.strip():
-            return result.stdout.strip()
-        return "N/A"
 
     def _get_workspace_dirs(self) -> dict[str, str]:
         """获取工作空间目录路径，支持多租户。"""
@@ -211,7 +191,6 @@ class RuntimePromptRail(DeepAgentRail):
 
         plat = f"{platform.system()} {platform.machine()}"
         python_ver = platform.python_version()
-        git_branch = self._get_git_branch()
 
         if self._language == "cn":
             runtime_content = (
@@ -219,7 +198,6 @@ class RuntimePromptRail(DeepAgentRail):
                 f"- 平台：{plat}\n"
                 f"- Python：{python_ver}\n"
                 f"- 模型：{self._model_name}\n"
-                f"- Git 分支：{git_branch}\n"
                 f"- Agent：{self._agent_name}\n"
                 f"- 频道：{self._channel}\n"
                 f"- 语言：{self._language}"
@@ -230,7 +208,6 @@ class RuntimePromptRail(DeepAgentRail):
                 f"- Platform: {plat}\n"
                 f"- Python: {python_ver}\n"
                 f"- Model: {self._model_name}\n"
-                f"- Git branch: {git_branch}\n"
                 f"- Agent: {self._agent_name}\n"
                 f"- Channel: {self._channel}\n"
                 f"- Language: {self._language}"
