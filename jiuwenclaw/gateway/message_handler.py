@@ -236,15 +236,28 @@ class MessageHandler(ABC):
             return f"{channel_id}:{conversation_id}"
         return channel_id
 
+    def _resolve_channel_state_key(self, msg: "Message") -> str:
+        """Resolve the state bucket key for a message.
+
+        SessionMap-backed channels use the stable identity key so `/mode` and
+        `/new_session` stay bound to the same identity even after session_id rotation.
+        Other channels continue to scope state by inbound conversation/session id.
+        """
+        channel_id = str(getattr(msg, "channel_id", "") or "")
+        identity_key = self._extract_identity_tuple(msg)
+        if identity_key and self._channel_id_matches_session_map_types(channel_id):
+            stable_identity_key = self._session_map.get_identity_key(*identity_key)
+            return self._get_channel_state_key(channel_id, stable_identity_key)
+        return self._get_channel_state_key(channel_id, msg.session_id)
+
     def _get_or_create_channel_state(self, msg: "Message") -> ChannelControlState:
         """获取或创建消息对应 channel 状态（使用复合键）。
 
-        conversation_id 从 msg.metadata 获取，如 feishu 的 feishu_chat_id。
+        conversation_id 从 msg.metadata 获取，如 feishu 的 feishu_chat_id，
+        xiaoyi的xiaoyi_session_id，其他用 session_id
         """
         ch = msg.channel_id
-        # 获取 conversation_id：从不同平台的 metadata 中提取会话标识
-        # feishu: feishu_chat_id, xiaoyi: xiaoyi_session_id, 其他用 session_id
-        key = self._get_channel_state_key(ch, msg.session_id)
+        key = self._resolve_channel_state_key(msg)
 
         # 如果状态已存在，直接返回
         state = self._channel_states.get(key)

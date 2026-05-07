@@ -33,18 +33,6 @@ def load_session_map_scope() -> SessionMapScope:
         return default
 
 
-def _make_key(
-    scope: SessionMapScope,
-    provider: str,
-    chat_id: str,
-    bot_id: str,
-    user_id: str,
-) -> str:
-    if scope == SessionMapScope.PER_CHAT_BOT:
-        return f"{provider}::{chat_id}::{bot_id}"
-    return f"{provider}::{chat_id}::{bot_id}::{user_id}"
-
-
 def _make_session_id(
     scope: SessionMapScope,
     provider: str,
@@ -87,6 +75,18 @@ class SessionMap:
         except Exception as exc:  # noqa: BLE001
             logger.warning("SessionMap save failed: %s", exc)
 
+    def get_identity_key(
+        self,
+        provider: str,
+        chat_id: str,
+        bot_id: str,
+        user_id: str,
+    ) -> str:
+        """Return the stable identity key for the configured scope."""
+        if self._scope == SessionMapScope.PER_CHAT_BOT:
+            return f"{provider}::{chat_id}::{bot_id}"
+        return f"{provider}::{chat_id}::{bot_id}::{user_id}"
+
     def get_session_id(
         self,
         provider: str,
@@ -96,7 +96,7 @@ class SessionMap:
         *,
         rotate: bool = False,
     ) -> str:
-        key = _make_key(self._scope, provider, chat_id, bot_id, user_id)
+        key = self.get_identity_key(provider, chat_id, bot_id, user_id)
         existing = self._mapping.get(key)
         if existing and not rotate:
             return existing
