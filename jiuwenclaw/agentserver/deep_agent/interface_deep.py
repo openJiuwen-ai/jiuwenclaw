@@ -36,7 +36,8 @@ from openjiuwen.core.runner import Runner
 from openjiuwen.core.session.checkpointer import CheckpointerFactory
 from openjiuwen.core.session.checkpointer.checkpointer import CheckpointerConfig
 from openjiuwen.core.session.checkpointer.persistence import PersistenceCheckpointerProvider
-from openjiuwen.core.single_agent import AgentCard, ReActAgentConfig
+from openjiuwen.core.session.interaction.interactive_input import InteractiveInput
+from openjiuwen.core.single_agent import AgentCard, ReActAgentConfig, create_agent_session
 from openjiuwen.core.sys_operation import (
     SysOperation,
     SysOperationCard,
@@ -107,6 +108,7 @@ from jiuwenclaw.agentserver.deep_agent.rails import (
     TaskExecutionRail,
 )
 from jiuwenclaw.agentserver.deep_agent.rails.disabled_tools_rail import DisabledToolsRail
+from jiuwenclaw.agentserver.deep_agent.rails.permission_rail import clear_session_interrupt_state
 from jiuwenclaw.agentserver.deep_agent.rails.task_execution_rail import get_current_task_id
 from jiuwenclaw.agentserver.deep_agent.permissions.owner_scopes import (
     TOOL_PERMISSION_CONTEXT,
@@ -2934,6 +2936,10 @@ class JiuWenClawDeepAdapter:
             # 3. 取消当前会话关联的 MultiSessionToolkit 子任务（按 request 跟踪，避免误停其它会话）
             await self._cancel_session_toolkits(request.session_id, "interrupt(supplement): ")
             AskUserQuestionRegistry.get_instance().cancel_for_session(str(request.session_id or ""))
+            await self._clear_session_persisted_interrupt_state(
+                request.session_id,
+                reason="interrupt(supplement)",
+            )
             # 4. 不清理 todo — 保留给新任务继续
             logger.info(
                 "[JiuWenClawDeepAdapter] interrupt(supplement): 已停止执行 request_id=%s",
@@ -2955,6 +2961,10 @@ class JiuWenClawDeepAdapter:
                 f"interrupt(cancel) request_id={request.request_id}: ",
             )
             AskUserQuestionRegistry.get_instance().cancel_for_session(str(request.session_id or ""))
+            await self._clear_session_persisted_interrupt_state(
+                request.session_id,
+                reason="interrupt(cancel)",
+            )
             # 4. 将未完成的 todo 项标记为 cancelled，并获取更新后的 todo 列表
             updated_todos = None
             if request.session_id:
@@ -2993,6 +3003,54 @@ class JiuWenClawDeepAdapter:
             payload=payload,
             metadata=request.metadata,
         )
+
+    @staticmethod
+    def _plain_chat_should_clear_stale_interrupt(request: AgentRequest) -> bool:
+        """普通用户消息（非权限/问答结构化回复）进入 Agent 前应清空 checkpoint 内工具中断。
+
+        否则 OpenJiuwen 会把本轮 query 当作 ``ToolInterruptionState`` 的 resume 输入，
+        PermissionRail 收到纯文本会报 Invalid permission confirmation payload。
+        """
+        sid = str(getattr(request, "session_id", "") or "")
+        if sid.startswith("heartbeat"):
+            return False
+        params = request.params if isinstance(getattr(request, "params", None), dict) else {}
+        q = params.get("query")
+        if isinstance(q, InteractiveInput):
+            return False
+        answers = params.get("answers") or []
+        if answers:
+            return False
+        return True
+
+    async def _clear_session_persisted_interrupt_state(
+        self,
+        session_id: str | None,
+        *,
+        reason: str,
+    ) -> None:
+        if not session_id:
+            return
+        if self._instance is None:
+            return
+
+        try:
+            session = create_agent_session(session_id=session_id, card=self._instance.card)
+            await session.pre_run(inputs=None)
+            clear_session_interrupt_state(session)
+            await session.post_run()
+            logger.info(
+                "[JiuWenClawDeepAdapter] %s: cleared persisted interrupt state session_id=%s",
+                reason,
+                session_id,
+            )
+        except Exception as exc:
+            logger.warning(
+                "[JiuWenClawDeepAdapter] %s: clear persisted interrupt state failed session_id=%s error=%s",
+                reason,
+                session_id,
+                exc,
+            )
 
     async def abort_on_gateway_disconnect(self) -> None:
         """Gateway 与 AgentServer 的 WebSocket 断开时：与 interrupt(cancel) 同样中止 rail 与 DeepAgent 实例。"""
@@ -3626,6 +3684,12 @@ class JiuWenClawDeepAdapter:
         query = request.params.get("query", "")
         mode = request.params.get("mode", "agent.plan")
 
+        if self._plain_chat_should_clear_stale_interrupt(request):
+            await self._clear_session_persisted_interrupt_state(
+                session_id,
+                reason="plain_user_message_before_agent_run",
+            )
+
         token_trace_sid = _LLM_TRACE_SESSION_ID.set(session_id)
         token_trace_rid = _LLM_TRACE_REQUEST_ID.set(request.request_id or "")
         token_trace_iter = _LLM_TRACE_ITERATION.set(0)
@@ -3787,6 +3851,12 @@ class JiuWenClawDeepAdapter:
                     is_complete=True,
                 )
             return
+
+        if self._plain_chat_should_clear_stale_interrupt(request):
+            await self._clear_session_persisted_interrupt_state(
+                session_id,
+                reason="plain_user_message_before_agent_run",
+            )
 
         has_streamed_content = False
         accumulated_text = ""

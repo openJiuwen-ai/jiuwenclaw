@@ -12,7 +12,7 @@ from dataclasses import dataclass
 from typing import Any, Iterable, Optional
 from openjiuwen.core.foundation.llm.schema.tool_call import ToolCall
 from openjiuwen.core.single_agent.interrupt.response import InterruptRequest
-from openjiuwen.core.single_agent.interrupt.state import INTERRUPT_AUTO_CONFIRM_KEY
+from openjiuwen.core.single_agent.interrupt.state import INTERRUPT_AUTO_CONFIRM_KEY, INTERRUPTION_KEY
 from openjiuwen.core.single_agent.rail.base import AgentCallbackContext
 from openjiuwen.harness.rails.interrupt.confirm_rail import (
     ConfirmInterruptRail,
@@ -51,6 +51,27 @@ TOOL_NAME_ALIASES = {
 
 INTERRUPT_PENDING_PERMISSION_CONTEXT_KEY = "jiuwenclaw_pending_permission_contexts"
 _SHELL_PERMISSION_TOOLS = SHELL_PERMISSION_TOOLS
+
+
+def clear_session_interrupt_state(session: Any) -> None:
+    """Clear persisted interrupt-related state for one session.
+
+    This is used by `chat.interrupt(cancel)` to ensure stale permission/interrupt
+    checkpoints cannot be resumed by the next user message.
+    """
+    if session is None:
+        return
+    try:
+        session.update_state({
+            INTERRUPT_PENDING_PERMISSION_CONTEXT_KEY: {},
+            INTERRUPTION_KEY: None,
+        })
+    except Exception:
+        logger.warning(
+            "[PermissionEngine] permission.rail.session_state_clear_failed keys=%s",
+            [INTERRUPT_PENDING_PERMISSION_CONTEXT_KEY, INTERRUPTION_KEY],
+            exc_info=True,
+        )
 
 
 @dataclass(frozen=True)
@@ -1436,4 +1457,5 @@ class PermissionInterruptRail(ConfirmInterruptRail):
 
 __all__ = [
     "PermissionInterruptRail",
+    "clear_session_interrupt_state",
 ]
