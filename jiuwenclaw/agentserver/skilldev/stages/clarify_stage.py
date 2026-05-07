@@ -16,7 +16,9 @@ from __future__ import annotations
 import json
 import logging
 import re
+from pathlib import Path
 
+from jiuwenclaw.agentserver.skilldev.asset_utils import load_skill_content, load_asset_content, load_asset
 from jiuwenclaw.agentserver.skilldev.context import SkillDevContext
 from jiuwenclaw.agentserver.skilldev.schema import SkillDevEventType, SkillDevStage
 from jiuwenclaw.agentserver.skilldev.stages.base import StageHandler, StageResult
@@ -174,24 +176,70 @@ class ClarifyStageHandler(StageHandler):
     def _build_query(self, ctx: SkillDevContext) -> str:
         """构建传给 Agent 的 query."""
         user_query = ctx.state.input.get("query", "")
-        parts = [f"用户需求：{user_query}"]
+        parts = [f"## 用户需求\n{user_query}"]
+
+        asset_json = load_asset(ctx.workspace)
+        has_preloaded_content = False
 
         if not ctx.state.skill_dir_empty:
+            has_preloaded_content = True
+            # 预加载skill内容
+            skill_dir_str = asset_json.get("skill_dir", "")
+            skill_dir = Path(skill_dir_str) if skill_dir_str else ctx.workspace / "skill"
+            skill_content_str, skill_failed = load_skill_content(skill_dir=skill_dir)
+            if skill_failed:
+                logger.warning(
+                    "[session=%s] [ClarifyStage] skill 文件部分未能预加载: %s",
+                    ctx.state.task_id, skill_failed,
+                )
             parts.append(
-                f"工作区 {ctx.workspace} 中的 skill 文件夹下已存放生成的 SKILL.md，用户提出了新的修改需求。"
-                f"请**先读取 SKILL.md** 再生成澄清问题，并须遵守系统提示中的「提问范围与禁止项」。"
+                "## 当前 Skill 内容\n"
+                "用户对现有 Skill 提出了修改需求，以下为当前 Skill 文件的完整内容（已预加载，无需再调用工具读取）：\n\n"
+                + (skill_content_str or "（未找到 skill 文件）")
             )
+            parts.append("根据以上 Skill 内容再生成澄清问题，须遵守系统提示中的「提问范围与禁止项」。")
+
+            # 此模式不预加载用户上传的资料，agent自行判断后可加载
             if not (ctx.state.ref_files_dir_empty and ctx.state.ref_skills_dir_empty):
                 parts.append(f"工作区 {ctx.workspace} 中的resources/文件夹下存放了用户原始上传的参考资料，请根据需求自行判断是否需要查看。")
             if not ctx.state.tool_scripts_dir_empty:
                 parts.append(f"用户提供了以下工具，可以在生成的skill中使用：\n{ctx.state.external_tools}")
         else:
+            # 预加载用户上传的资料
+            content, _ = load_asset_content(
+                asset=asset_json,
+                include_ref_files=True,
+                include_ref_skills=True,
+                include_tools=False
+            )
             if not (ctx.state.ref_files_dir_empty and ctx.state.ref_skills_dir_empty):
-                parts.append(f"用户已上传参考资料，存放于工作区 {ctx.workspace} 中的resources/目录，请确保**先查看resources目录**后再提问。")
-            if not ctx.state.tool_scripts_dir_empty:
-                parts.append(f"用户提供了以下工具，可以在生成的skill中使用：\n{ctx.state.external_tools}")
+                content, _ = load_asset_content(
+                    asset=asset_json,
+                    include_ref_files=True,
+                    include_ref_skills=True,
+                    include_tools=False,
+                )
+                if content:
+                    parts.append(
+                        "## 参考资料\n"
+                        f"以下为用户上传的参考资料，存放于工作区 {ctx.workspace} 中的resources/目录。"
+                        f"现已预加载，无需再调用工具读取）：\n\n{content}"
+                        "请阅读预加载的资料后再提问"
+                    )
+                    has_preloaded_content = True
 
-        parts.append("请根据用户需求，生成必要的关键澄清问题（JSON 数组格式）。")
+            if not ctx.state.tool_scripts_dir_empty:
+                parts.append(
+                    "## 外部工具\n"
+                    "用户提供了以下可调用工具，可以在生成的Skill中使用：\n"
+                    + str(ctx.state.external_tools)
+                )
+                has_preloaded_content = True
+        if has_preloaded_content:
+            parts.append(
+                "以上文件内容已尽量完整预加载。如预加载未覆盖某些文件，可酌情使用文件工具补充查看。\n"
+                "请根据用户需求与以上上下文，生成必要的关键澄清问题（JSON 数组格式）。"
+            )
         return "\n\n".join(parts)
 
     def _parse_questions_json(self, text: str, session_id: str) -> list[dict] | None:

@@ -383,34 +383,37 @@ class TestRunStageHandler(StageHandler):
 
         # 创建 result.json
         result_file = variant_dir / "result.json"
-        result_data = {
-            "status": result.get("status", "unknown"),
-            "output": result.get("output", ""),
-            "case_name": result.get("case_name", ""),
-            "variant": result.get("variant", ""),
-            "eval_id": result.get("eval_id", 0),
-        }
-        if result.get("error_message"):
-            result_data["error_message"] = result["error_message"]
+        if not result_file.exists():
+            result_data = {
+                "status": result.get("status", "unknown"),
+                "output": result.get("output", ""),
+                "case_name": result.get("case_name", ""),
+                "variant": result.get("variant", ""),
+                "eval_id": result.get("eval_id", 0),
+                "files_created": result.get("files_created", []),
+            }
+            if result.get("error_message"):
+                result_data["error_message"] = result["error_message"]
 
-        result_file.write_text(
-            json.dumps(result_data, ensure_ascii=False, indent=2),
-            encoding="utf-8"
-        )
-        logger.info("[session=%s] [TestRunStage] 创建: %s", session_id, result_file)
+            result_file.write_text(
+                json.dumps(result_data, ensure_ascii=False, indent=2),
+                encoding="utf-8"
+            )
+            logger.info("[session=%s] [TestRunStage] 创建: %s", session_id, result_file)
 
         # 创建 timing.json
         timing_file = variant_dir / "timing.json"
-        timing_data = {
-            "total_duration_seconds": result.get("execution_time_seconds", 0),
-            "total_tokens": result.get("tokens_used", 0),
-            "timestamp": json.dumps({"now": time.time()}),
-        }
-        timing_file.write_text(
-            json.dumps(timing_data, ensure_ascii=False, indent=2),
-            encoding="utf-8"
-        )
-        logger.info("[session=%s] [TestRunStage] 创建: %s", session_id, timing_file)
+        if not timing_file.exists():
+            timing_data = {
+                "total_duration_seconds": result.get("execution_time_seconds", 0),
+                "total_tokens": result.get("tokens_used", 0),
+                "timestamp": json.dumps({"now": time.time()}),
+            }
+            timing_file.write_text(
+                json.dumps(timing_data, ensure_ascii=False, indent=2),
+                encoding="utf-8"
+            )
+            logger.info("[session=%s] [TestRunStage] 创建: %s", session_id, timing_file)
 
     def _generate_summary(
         self, results: List[Dict], eval_count: int, session_id: str = ""

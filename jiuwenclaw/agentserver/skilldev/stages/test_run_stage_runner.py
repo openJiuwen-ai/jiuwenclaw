@@ -543,9 +543,11 @@ class SkillDevTestRunner:
             result_dict["output_dir"] = str(variant_dir)
 
             # 扫描 agent 在 output_dir 内创建的文件（排除框架自动写入的标准文件）
+            # 使用 rglob 递归扫描子目录，存储相对路径以保留目录结构信息
             framework_files = {"result.json", "timing.json", "trace.txt"}
             files_created = sorted(
-                f.name for f in variant_dir.iterdir()
+                str(f.relative_to(variant_dir)).replace("\\", "/")
+                for f in variant_dir.rglob("*")
                 if f.is_file() and f.name not in framework_files
             ) if variant_dir.exists() else []
             result_dict["files_created"] = files_created

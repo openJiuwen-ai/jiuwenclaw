@@ -31,7 +31,9 @@ import re
 import json
 import logging
 import asyncio
+from pathlib import Path
 
+from jiuwenclaw.agentserver.skilldev.asset_utils import load_skill_content, load_asset
 from jiuwenclaw.agentserver.skilldev.context import SkillDevContext
 from jiuwenclaw.agentserver.skilldev.schema import SkillDevEventType, SkillDevStage
 from jiuwenclaw.agentserver.skilldev.stages.base import StageHandler, StageResult
@@ -41,18 +43,12 @@ logger = logging.getLogger(__name__)
 _EVAL_COUNT = 2
 
 TEST_DESIGN_SYSTEM_PROMPT = """你是一名专业的 Agent Skill 测试工程师。
-你的工作区路径为：{workspace}
 
-## 首要任务：读取 Skill 文件
+## Skill 文件内容（已预加载，无需再用工具读取）
 
-Skill 文件位于工作区的 `skill/` 子目录下。**在设计测试用例之前，请先使用文件工具读取 Skill 内容：**
-1. 用 `list_directory` 或 `glob` 列出 `skill/` 目录下所有文件
-2. 用 `read_file` 读取 `skill/SKILL.md`（以及其他相关文件，如 `references/`）
-3. 充分理解 Skill 的功能、输入输出、限制后，再设计测试用例
+{skill_content_block}
 
-根据读取到的 Skill 文件内容，设计测试用例集。
-
-用户上传的资料储存在`resources`文件夹下，需要时请使用read_file工具参考。
+根据以上 Skill 文件内容设计测试用例集。
 
 ## 测试用例类别（按覆盖度选取，不强制每类都有）
 
@@ -117,6 +113,9 @@ Skill 文件位于工作区的 `skill/` 子目录下。**在设计测试用例�
 
 ## 输入文件说明
 
+工作区路径：{workspace}。
+禁止在工作区外进行操作。
+
 如果某个测试用例需要真实输入文件（如待处理的 PDF、CSV），在 files 字段中列出路径并在对应地址写入文件：
 - 路径格式：`evals/skill-tests/{skill_name}/files/<filename>`
 - 在 expected_output 中说明该文件应如何被处理
@@ -158,7 +157,7 @@ class TestDesignStageHandler(StageHandler):
     # 单次 design 失败后的最大重试次数（不含首次）
     _MAX_DESIGN_RETRIES = 2
     # 单次 design 调用的超时秒数（防止网络挂起导致整个 stage 无限等待）
-    _DESIGN_TIMEOUT_SECONDS = 300
+    _DESIGN_TIMEOUT_SECONDS = 90
 
     async def execute(self, ctx: SkillDevContext) -> StageResult:
         """主流程：设计测试用例并保存 evals.json."""
@@ -183,9 +182,9 @@ class TestDesignStageHandler(StageHandler):
                     wait = 2 ** (attempt - 1)
                     await asyncio.sleep(wait)
                     continue
-                raise RuntimeError(
-                    f"测试用例设计超时，{self._MAX_DESIGN_RETRIES} 次重试后仍失败"
-                ) from e
+                msg = f"测试用例设计超时，{self._MAX_DESIGN_RETRIES} 次重试后仍失败"
+                await ctx.emit(SkillDevEventType.ERROR, {"message": msg, "stage": "test_design"})
+                raise RuntimeError(msg) from e
 
             # 验证 evals schema，确保每个 case 都有 name 字段
             evals = self._validate_and_normalize_evals(
@@ -215,6 +214,7 @@ class TestDesignStageHandler(StageHandler):
                     ctx.state.task_id,
                     self._MAX_DESIGN_RETRIES,
                 )
+                await ctx.emit(SkillDevEventType.ERROR, {"message": msg, "stage": "test_design"})
                 raise RuntimeError(msg)
 
         # 更新state，储存生成的测试案例
@@ -345,27 +345,52 @@ class TestDesignStageHandler(StageHandler):
     async def _design_evals(self, ctx: SkillDevContext, skill_name: str, attempt: int) -> dict:
         """调用 Agent 设计测试用例（流式，实时推送 LLM 推理过程）."""
         try:
+            # 代码预加载 skill 文件内容，直接注入 system prompt，无需 agent 调用文件工具
+            asset = load_asset(ctx.workspace)
+            skill_dir_str = asset.get("skill_dir", "")
+            skill_dir = Path(skill_dir_str) if skill_dir_str else ctx.workspace / "skill"
+
+            skill_content_block, skill_failed = load_skill_content(skill_dir)
+            if skill_failed:
+                logger.warning(
+                    "[session=%s] [TestDesignStage] skill 文件部分未能预加载: %s",
+                    ctx.state.task_id, skill_failed,
+                )
+            if not skill_content_block:
+                logger.warning("[TestDesignStage] skill 内容为空，asset.json 可能尚未更新")
+                skill_content_block = f"（skill 内容未找到，工作区路径：{ctx.workspace}/skill/）"
+
             system_prompt = TEST_DESIGN_SYSTEM_PROMPT.format(
                 _EVAL_COUNT=_EVAL_COUNT,
                 skill_name=skill_name,
-                workspace=ctx.workspace,
+                skill_content_block=skill_content_block,
+                workspace=ctx.workspace
             )
-            # system_prompt += self._build_external_tools_hint(ctx)
+
+            # stage_name 含 iteration + attempt，保证每次运行 conversation_id 唯一，
+            # 避免 IMPROVE 多轮迭代后历史消息不断累积导致 prefill 爆炸
+            iteration = getattr(ctx.state, "iteration", 0)
+            stage_key = f"test_design/iter_{iteration}/attempt_{attempt}"
+
             agent = ctx.create_stage_agent(
-                stage_name=f"test_design/{attempt}",
+                stage_name=stage_key,
                 whitelist_key="test_design",
                 system_prompt=system_prompt,
-                tools=["file_read", "file_glob", "file_listdir", "web_search_free", 
-                    "web_search_paid", "shell", "file_write"],
-                max_iterations=30,
+                tools=["file_read", "web_search_free", "web_search_paid", "shell", "file_write"],
+                max_iterations=20,
             )
             prompt = (
-                f"请先读取工作区 skill/ 目录下的 Skill 文件，"
-                f"然后为 skill_name='{skill_name}' 设计测试用例，直接输出 JSON，不要包含任何解释文字。"
+                f"Skill 文件内容已在 system prompt 中预加载。"
+                f"请直接为 skill_name='{skill_name}' 设计测试用例，输出 JSON，不要包含任何解释文字。"
             )
-            raw = await ctx.run_stage_agent_streaming(
-                agent, stage_name="test_design", query=prompt
+            raw, trace = await ctx.run_stage_agent_streaming(
+                agent, stage_name=stage_key, query=prompt, capture_trace=True
             )
+            if trace:
+                evals_dir = ctx.workspace / "evals" / skill_name
+                evals_dir.mkdir(parents=True, exist_ok=True)
+                (evals_dir / "test_design_trace.txt").write_text(trace, encoding="utf-8")
+
             output = self._parse_evals_json(raw)
             ctx.release_agent_tools(agent)
             return output

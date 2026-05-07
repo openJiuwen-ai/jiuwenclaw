@@ -54,6 +54,8 @@ _METHOD_DISPATCH = {
     ReqMethod.SKILLDEV_START: "_handle_start",
     ReqMethod.SKILLDEV_RESPOND: "_handle_respond",
     ReqMethod.SKILLDEV_STATUS: "_handle_status",
+    ReqMethod.SKILLDEV_SESSION_LIST: "_handle_session_list",
+    ReqMethod.SKILLDEV_RESTORE: "_handle_restore",
     ReqMethod.SKILLDEV_PARSE_SKILL: "_handle_parse_skill",
     ReqMethod.SKILLDEV_DOWNLOAD: "_handle_download",
     ReqMethod.SKILLDEV_CANCEL: "_handle_cancel",
@@ -105,26 +107,40 @@ class SkillDevService:
         if not task_id:
             yield self._error_chunk(request_id, channel_id, "缺少 task_id 或 session_id 参数")
             return
-        
-        # if params.get("model"):
-        #     self._deps.model_client_config["model_name"] = params.get("model").get("modelID")
-        #     self._deps.model_client_config["client_provider"] = params.get("model").get("providerID")
-        #     self._deps.model_name = params.get("model").get("modelID")
 
-        files_list = params.get("files", [])
-        skill_packages_list = params.get("skill_packages", [])
-        tool_spec_files_list = params.get("tool_spec_files", [])
+        loaded = await self._deps.state_store.load_state(task_id)
+        # 新建任务：无状态或已完成 → 创建新 State；否则续跑已有任务（恢复后继续执行）
+        if loaded is None or loaded.stage == SkillDevStage.COMPLETED:
+            files_list = params.get("files", [])
+            skill_packages_list = params.get("skill_packages", [])
+            tool_spec_files_list = params.get("tool_spec_files", [])
+            state = SkillDevState(
+                task_id=task_id,
+                input={
+                    "query": params.get("query", ""),
+                    "files": files_list,
+                    "skill_packages": skill_packages_list,
+                    "tool_spec_files": tool_spec_files_list,
+                },
+            )
+            record_user_start = True
+        else:
+            state = loaded
+            record_user_start = False
 
-        state = SkillDevState(
-            task_id=task_id,
-            input={
-                "query": params.get("query", ""),
-                "files": files_list,
-                "skill_packages": skill_packages_list,
-                "tool_spec_files": tool_spec_files_list,
-            },
-        )
         pipeline = SkillDevPipeline(task_id=task_id, state=state, deps=self._deps)
+        if self._deps.session_history is not None and record_user_start:
+            self._deps.session_history.append_user_start(
+                task_id=task_id,
+                payload={
+                    "task_id": task_id,
+                    "session_id": session_id,
+                    "query": params.get("query", ""),
+                    "files": files_list,
+                    "skill_packages": skill_packages_list,
+                    "tool_spec_files": tool_spec_files_list,
+                },
+            )
 
         # 注册取消事件，供 _handle_cancel 在运行期间设置
         cancel_event = asyncio.Event()
@@ -137,26 +153,53 @@ class SkillDevService:
                 payload={"event_type": "skilldev.started", "task_id": task_id},
                 is_complete=False,
             )
+            if self._deps.session_history is not None:
+                self._deps.session_history.append_agent_event(
+                    task_id=task_id,
+                    event_type="skilldev.started",
+                    payload={"task_id": task_id},
+                )
 
             async for event in pipeline.run():
                 if state.stage == SkillDevStage.ERROR:
                     yield self._error_chunk(request_id, channel_id, state.error or "未知错误")
                     return
+                if self._deps.session_history is not None:
+                    self._deps.session_history.append_agent_event(
+                        task_id=task_id,
+                        event_type=event.event_type.value,
+                        payload=dict(event.payload),
+                    )
                 yield self._event_to_chunk(event, request_id, channel_id)
 
-            is_done = state.stage == SkillDevStage.COMPLETED
-            yield AgentResponseChunk(
-                request_id=request_id,
-                channel_id=channel_id,
-                payload={
-                    "event_type": "skilldev.completed" if is_done else "skilldev.suspended",
-                    "task_id": task_id,
-                    "stage": state.stage.value,
-                },
-                is_complete=True,
-            )
+            if state.stage == SkillDevStage.ERROR:
+                event_type = "skilldev.error"
+                yield self._error_chunk(
+                    request_id, channel_id, state.error or "未知错误"
+                )
+            else:
+                is_done = state.stage == SkillDevStage.COMPLETED
+                event_type = "skilldev.completed" if is_done else "skilldev.suspended"
+                yield AgentResponseChunk(
+                    request_id=request_id,
+                    channel_id=channel_id,
+                    payload={
+                        "event_type": event_type,
+                        "task_id": task_id,
+                        "stage": state.stage.value,
+                    },
+                    is_complete=True,
+                )
+            if self._deps.session_history is not None:
+                self._deps.session_history.append_agent_event(
+                    task_id=task_id,
+                    event_type=event_type,
+                    payload={"task_id": task_id, "stage": state.stage.value},
+                )
         finally:
             self._deps.cancel_events.pop(task_id, None)
+            if self._deps.session_history is not None:
+                self._deps.session_history.save_state_snapshot(task_id=task_id, state=state)
 
     # ------------------------------------------------------------------
     # skilldev.parse_skill — 导入并解压本地 skill 包到工作区
@@ -298,6 +341,30 @@ class SkillDevService:
             return
 
         pipeline = SkillDevPipeline(task_id=task_id, state=state, deps=self._deps)
+        suspension = SUSPENSION_POINTS.get(state.stage)
+        if self._deps.session_history is not None:
+            self._deps.session_history.append_user_respond(
+                task_id=task_id,
+                payload={
+                    "task_id": task_id,
+                    "session_id": session_id,
+                    "action": params.get("action"),
+                    "feedback": params.get("feedback"),
+                    "answers": params.get("answers"),
+                },
+            )
+            if suspension is not None:
+                self._deps.session_history.append_agent_event(
+                    task_id=task_id,
+                    event_type="skilldev.confirm_resolved",
+                    payload={
+                        "task_id": task_id,
+                        "confirm_type": suspension.confirm_type,
+                        "action": params.get("action"),
+                        "feedback": params.get("feedback"),
+                        "answers": params.get("answers"),
+                    },
+                )
 
         # 注册取消事件，供 _handle_cancel 在运行期间设置
         cancel_event = asyncio.Event()
@@ -308,21 +375,42 @@ class SkillDevService:
                 if state.stage == SkillDevStage.ERROR:
                     yield self._error_chunk(request_id, channel_id, state.error or "未知错误")
                     return
+                if self._deps.session_history is not None:
+                    self._deps.session_history.append_agent_event(
+                        task_id=task_id,
+                        event_type=event.event_type.value,
+                        payload=dict(event.payload),
+                    )
                 yield self._event_to_chunk(event, request_id, channel_id)
 
-            is_done = state.stage == SkillDevStage.COMPLETED
-            yield AgentResponseChunk(
-                request_id=request_id,
-                channel_id=channel_id,
-                payload={
-                    "event_type": "skilldev.completed" if is_done else "skilldev.suspended",
-                    "task_id": task_id,
-                    "stage": state.stage.value,
-                },
-                is_complete=True,
-            )
+            if state.stage == SkillDevStage.ERROR:
+                event_type = "skilldev.error"
+                yield self._error_chunk(
+                    request_id, channel_id, state.error or "未知错误"
+                )
+            else:
+                is_done = state.stage == SkillDevStage.COMPLETED
+                event_type = "skilldev.completed" if is_done else "skilldev.suspended"
+                yield AgentResponseChunk(
+                    request_id=request_id,
+                    channel_id=channel_id,
+                    payload={
+                        "event_type": event_type,
+                        "task_id": task_id,
+                        "stage": state.stage.value,
+                    },
+                    is_complete=True,
+                )
+            if self._deps.session_history is not None:
+                self._deps.session_history.append_agent_event(
+                    task_id=task_id,
+                    event_type=event_type,
+                    payload={"task_id": task_id, "stage": state.stage.value},
+                )
         finally:
             self._deps.cancel_events.pop(task_id, None)
+            if self._deps.session_history is not None:
+                self._deps.session_history.save_state_snapshot(task_id=task_id, state=state)
 
     # ------------------------------------------------------------------
     # skilldev.status — 查状态 / 列任务
@@ -350,6 +438,37 @@ class SkillDevService:
             request_id=request_id,
             channel_id=channel_id,
             payload={"ok": state is not None, **payload},
+            is_complete=True,
+        )
+
+    def _handle_session_list(
+        self, params: dict, request_id: str, channel_id: str, session_id: str
+    ) -> AgentResponseChunk:
+        if self._deps.session_history is None:
+            return self._error_chunk(request_id, channel_id, "session history service is unavailable")
+        sessions = self._deps.session_history.list_sessions()
+        return AgentResponseChunk(
+            request_id=request_id,
+            channel_id=channel_id,
+            payload={"ok": True, "sessions": sessions},
+            is_complete=True,
+        )
+
+    def _handle_restore(
+        self, params: dict, request_id: str, channel_id: str, session_id: str
+    ) -> AgentResponseChunk:
+        if self._deps.session_history is None:
+            return self._error_chunk(request_id, channel_id, "session history service is unavailable")
+        task_id = str(params.get("task_id") or "").strip()
+        if not task_id:
+            return self._error_chunk(request_id, channel_id, "缺少 task_id 参数")
+        restored = self._deps.session_history.restore_session(task_id)
+        if restored is None:
+            return self._error_chunk(request_id, channel_id, f"任务 {task_id} 不存在")
+        return AgentResponseChunk(
+            request_id=request_id,
+            channel_id=channel_id,
+            payload={"ok": True, **restored},
             is_complete=True,
         )
 

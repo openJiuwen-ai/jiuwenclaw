@@ -27,6 +27,7 @@ import re
 from pathlib import Path
 from typing import Any, Dict
 
+from jiuwenclaw.agentserver.skilldev.asset_utils import load_skill_content, preload_files_content, load_asset
 from jiuwenclaw.agentserver.skilldev.common_utils import strip_agent_output_noise
 from jiuwenclaw.agentserver.skilldev.context import SkillDevContext
 from jiuwenclaw.agentserver.skilldev.schema import (
@@ -55,6 +56,10 @@ class GradingAgentRequest:
     run_dir: Path | None = None
     input_files: list = field(default_factory=list)
     files_created: list = field(default_factory=list)
+    # 预加载的产出文件内容：{filename: content}，由 _grade_one 在创建 agent 前填充
+    files_content: dict = field(default_factory=dict)
+    # 未能内联的文件名列表（二进制/超限/不存在），grader 只对这些文件允许工具调用
+    files_failed: list = field(default_factory=list)
     # 上次 JSON 解析失败的错误信息；非空时 prompt 开头会注入强力格式警告
     parse_error_hint: str = ""
 
@@ -79,9 +84,15 @@ GRADER_SYSTEM_PROMPT = """\
 ### Step 2 — 收集证据（不可跳过）
 
 **FILE 类 expectation：**
-- **必须使用文件工具实际读取后再评分（例如：`file_read` / `file_glob` / `file_listdir`）**
+
+> **优先级规则（按顺序检查，满足即止）：**
+>
+> 1. **若 prompt 中「Agent 未在该目录创建任何额外文件」** → 所有 FILE 类 expectation 直接判 FAIL
+> 2. **若 prompt 末尾「产出文件内容（已预加载）」已包含该文件内容** → 直接基于预加载内容判断，禁止再调用文件工具
+> 3. **若文件在预加载列表中但标注为二进制/过大/不存在** → 才允许使用文件工具（`file_read` / `file_glob` / `file_listdir`）读取后判断
+> 4. **若文件完全未出现在预加载列表且未创建文件说明** → 直接判 FAIL
+
 - 禁止仅凭文本输出推断文件是否存在或内容是否正确
-- 若文件不存在，直接判 FAIL
 
 **OUTPUT 类 expectation：**
 - 优先看最终输出内容
@@ -89,7 +100,7 @@ GRADER_SYSTEM_PROMPT = """\
 
 **工具调用失败时的降级规则（重要）：**
 - 若工具调用尝试后无响应，**不得重复尝试同一工具，不得无限循环等待**
-- 立即根据已有信息（文本输出 + 执行轨迹）做出最佳判断
+- 立即根据已有信息（文本输出 + 执行轨迹 + 预加载文件内容）做出最佳判断
 - 在 reason 中注明："无法调用文件工具，依据文本/轨迹推断"
 - 宁可给出一个有据可查的推断结果，也不能因为等待工具而不输出任何评分
 
@@ -135,42 +146,60 @@ GRADER_SYSTEM_PROMPT = """\
 # ---------------------------------------------------------------------------
 
 ANALYST_SYSTEM_PROMPT = """\
-你是一个 Skill 改进顾问。分析评测结果，生成**具体的、可执行的改进建议**。
- 
-## 分析维度
- 
-1. **失败原因分析**：
-   - 哪些 expectations 反复失败？
-   - 失败背后的根本原因是什么？
-   - 是 skill 设计问题还是实现问题？
- 
-2. **性能瓶颈**：
-   - 时间开销是否过大？原因是什么？
-   - Token 消耗是否过多？可以如何优化？
-   - 是否有明显的性能下降趋势？
- 
-3. **改进方向**：
-   - 为了提升通过率，应该如何改进 skill？
-   - 具体需要改动哪些部分？
-   - 优先级是什么？
- 
-4. **风险警告**：
-   - 是否存在与 baseline 相比劣化的指标？
-   - 是否存在 flaky 测试（高方差）？
-   - 是否有隐藏的问题？
- 
-## 输出格式
- 
-输出一个 JSON 数组，每项是一个改进建议：
+你是一个 Skill 改进顾问。根据评测数据和当前 Skill 文件内容，生成**具体的、可落地的改进建议**。
+
+## 分析方法（按此顺序思考，不要跳步骤）
+
+### Step 1：理解 Skill 当前设计
+阅读 prompt 中「当前 Skill 文件内容」部分，明确：
+- Skill 的触发场景和核心指令
+- 执行步骤与输出格式要求
+- 有无 scripts/ references/ 等辅助文件
+
+### Step 2：定位每条失败 expectation 的根因
+对「各测试用例详情」中每条 FAIL 的 expectation：
+1. 阅读 grader 给出的 reason
+2. 结合该 case 的用户 prompt，判断失败类型：
+   - **Skill 指令缺失**：SKILL.md 未覆盖该场景或输出要求，需补充步骤/约束
+   - **Skill 指令歧义**：措辞不清导致模型走错路径，需重写该段指令
+   - **Flaky 行为**：部分 run pass 部分 fail，行为不稳定，需加强确定性约束
+   - **能力上限**：任务超出模型能力，Skill 无法解决，建议调整 expectation 或任务边界
+   - **测试设计问题**：expectation 本身主观/无法客观验证，根因在测试而非 Skill
+
+### Step 3：对比 with_skill vs baseline
+- 哪些指标 with_skill 明显优于 baseline？列出有效贡献
+- 哪些指标 with_skill **劣于** baseline？这是 Skill 引入的负向影响，必须优先修复
+- fully_passed_count 是否有改善？
+
+### Step 4：写出可落地的建议
+每条建议必须说明：
+- **改哪里**：SKILL.md 的哪个段落 / scripts/ 哪个文件 / references/ 哪个文档
+- **改成什么**：具体的修改方向或示例措辞，不允许"优化相关指令"这类空话
+- **预期收益**：改完后哪条 expectation 预期会改善
+
+## 输出格式：严格 JSON 数组
+
+```json
 [
   {
-    "category": "失败原因",
-    "issue": "具体问题描述",
-    "suggestion": "建议的改进方案",
-    "priority": "high/medium/low"
-  },
-  ...
+    "category": "Skill指令缺失 | Skill指令歧义 | Flaky行为 | 性能问题 | 能力上限 | 测试设计问题 | 其他",
+    "issue": "具体问题——引用 grader reason 和 eval prompt 说明现象",
+    "suggestion": "具体改法——指出文件位置和修改内容",
+    "priority": "high | medium | low"
+  }
 ]
+```
+
+**约束：**
+- 最多输出 8 条，按 priority 从高到低排序。
+- 若无修改建议，输出“[无建议]”。
+- 能力上限类只需说明边界，不要给出无法实现的建议
+- 建议必须基于实际的 grader reason，禁止凭空推测
+- issue和suggestion 字段须遵守以下规则：
+   - **禁止出现双引号**（`"`）—— 若需引用内容，改用单引号（`'`）或【】括号
+   - **禁止出现换行符** —— reason 必须是单行文本
+   - 禁止使用 Markdown 语法（禁止 `**`、`` ` ``、`#` 等）
+   - 长度控制在 1-2 句，50 字以内
 """
 
 
@@ -320,6 +349,9 @@ class EvaluateStageHandler(StageHandler):
         # 清洗输出：去除泄漏的 <think> 推理块和未执行的 <tool_call> 文本标签
         output = strip_agent_output_noise(output)
 
+        # 代码预读 files_created 内容，注入 grader prompt，省去 agent 调用 file_read 工具
+        files_content, files_failed = preload_files_content(run_dir, files_created)
+
         # 带重试的 grading：每次重试创建新 agent（新 stage_name → 新 conversation_id）
         # 避免复用失败会话导致模型沿着错误路径继续
         agent_results: dict | None = None
@@ -343,6 +375,8 @@ class EvaluateStageHandler(StageHandler):
                 run_dir=run_dir,
                 input_files=input_files,
                 files_created=files_created,
+                files_content=files_content,
+                files_failed=files_failed,
                 parse_error_hint=last_parse_error,
             )
             try:
@@ -360,6 +394,18 @@ class EvaluateStageHandler(StageHandler):
                     self._GRADE_TIMEOUT_SECONDS, attempt, self._MAX_GRADE_RETRIES,
                     eval_name, variant,
                 )
+                await ctx.emit(
+                    SkillDevEventType.PROGRESS,
+                    {
+                        "message": (
+                            f"评分超时（>{self._GRADE_TIMEOUT_SECONDS}s），"
+                            f"准备重试 ({attempt}/{self._MAX_GRADE_RETRIES}): "
+                            f"{eval_name}/{variant}"
+                        ),
+                        "eval_name": eval_name,
+                        "variant": variant,
+                    },
+                )
                 agent_results = None
                 is_failure = True
                 last_parse_error = ""  # 超时不属于格式问题，清除
@@ -370,6 +416,14 @@ class EvaluateStageHandler(StageHandler):
                     "[session=%s] [EvaluateStage] 评分结果解析失败，准备重试 (%d/%d): %s/%s: %s",
                     ctx.state.task_id,
                     attempt, self._MAX_GRADE_RETRIES, eval_name, variant, parse_err,
+                )
+                await ctx.emit(
+                    SkillDevEventType.PROGRESS,
+                    {
+                        "message": f"评分失败，准备重试 ({attempt}/{self._MAX_GRADE_RETRIES}): {eval_name}/{variant}",
+                        "eval_name": eval_name,
+                        "variant": variant,
+                    },
                 )
                 agent_results = None
                 is_failure = True
@@ -392,7 +446,10 @@ class EvaluateStageHandler(StageHandler):
                     ctx.state.task_id,
                     self._MAX_GRADE_RETRIES, eval_name, variant,
                 )
-            ctx.release_agent_tools(agent)
+        ctx.release_agent_tools(agent)
+        if agent_results is None:
+            raise RuntimeError(f"grading 超时 {self._MAX_GRADE_RETRIES} 次: {eval_name}/{variant}")
+        
 
         grading = self._convert_agent_results_to_grading_result(agent_results)
         grading_dict = grading.to_dict() if hasattr(grading, "to_dict") else grading
@@ -424,28 +481,44 @@ class EvaluateStageHandler(StageHandler):
         else:
             prompt = ""
         prompt += "请根据以下执行结果，逐条判断 expectations 是否满足：\n\n"
-        prompt += "待评估的 Expectations：\n"
+        prompt += "## 待评估的 Expectations：\n"
         for i, exp in enumerate(request.expectations, 1):
             prompt += f"{i}. {exp}\n"
         if request.input_files:
-            prompt += "\n本次测试的输入文件：\n"
+            prompt += "\n## 本次测试的输入文件：\n"
             prompt += "\n".join(f"- {f}" for f in request.input_files) + "\n"
-        prompt += f"\n最终输出内容：\n{request.output}\n"
+        prompt += f"\n## 最终输出内容：\n{request.output}\n"
         if request.trace:
-            prompt += f"\n执行轨迹（工具调用记录前3000字）：\n{request.trace}\n"
+            prompt += f"\n## 执行轨迹（工具调用记录前3000字）：\n{request.trace}\n"
         if request.run_dir is not None:
-            prompt += f"\n本次运行的工作目录：{request.run_dir}\n"
+            prompt += f"\n## 本次运行的工作目录：{request.run_dir}\n"
             if request.files_created:
                 prompt += (
-                    f"Agent 在该目录中创建的文件："
+                    f"\n## Agent输出文件\n本次运行Agent 已在该目录中创建的文件："
                     f"{', '.join(request.files_created)}\n"
                 )
             else:
                 prompt += "Agent 未在该目录创建任何额外文件。\n"
             prompt += (
                 "完整输出见 result.json，完整执行轨迹见 trace.txt。\n"
-                "如上方信息不足以判断某条 expectation，请用文件工具读取对应文件后再下结论。\n"
             )
+
+        # 注入预加载的产出文件内容，grader 直接基于内容评分，无需再调用文件工具
+        if request.files_content:
+            prompt += "\n## 预加载输出文件\n产出文件内容（已预加载，对 FILE 类 expectation 请直接基于以下内容判断，无需调用工具）：\n"
+            for fname, content in request.files_content.items():
+                prompt += f"\n--- 文件标题：{fname} ---\n文件内容预加载：\n{content}\n文件内容预加载结束\n"
+            if request.files_failed:
+                prompt += (
+                    f"\n【注意】以下文件未能预加载，仅在 expectation 涉及具体文件内容时才允许调用文件工具读取：\n"
+                    + "\n".join(
+                        f"- {f['path']}（{f['reason']}）" for f in request.files_failed
+                    ) + "\n"
+                    + "其余已预加载的文件禁止再次调用文件工具。\n"
+                )
+            else:
+                prompt += "\n【重要】所有产出文件内容已完整预加载，**禁止调用任何文件工具**，直接基于上方内容评分。\n"
+
         prompt += "\n请按照 JSON 格式逐条输出评分结果。"
 
         # 不捕获 LLM 调用异常（网络断开、超时等）—— 让其向上传播，
@@ -746,53 +819,16 @@ class EvaluateStageHandler(StageHandler):
         待实现: 接入 create_stage_agent，用 ANALYST_SYSTEM_PROMPT 调用 Agent
               把 benchmark JSON 作为上下文，输出 notes 列表。
         """
-        # 创建分析 agent
+        # 创建分析 agent（所有数据已在 prompt 中，无需文件工具）
         analyst_agent = ctx.create_stage_agent(
             stage_name="evaluate_analyst",
             whitelist_key="evaluate",
             system_prompt=ANALYST_SYSTEM_PROMPT,
-            tools=["file_read", "file_grep", "file_listdir", "file_glob", "shell"],
-            max_iterations=30,
+            tools=[],
+            max_iterations=8,
         )
 
-        # 收集失败的 expectations 和统计信息
-        failed_expectations = []
-        success_rates = {}
-
-        for run in benchmark.runs:
-            for exp in run.expectations:
-                if isinstance(exp, dict):
-                    if not exp.get("passed", False):
-                        failed_expectations.append(exp.get("text", ""))
-                    exp_text = exp.get("text", "")
-                    if exp_text not in success_rates:
-                        success_rates[exp_text] = {"pass": 0, "fail": 0}
-                    if exp.get("passed", False):
-                        success_rates[exp_text]["pass"] += 1
-                    else:
-                        success_rates[exp_text]["fail"] += 1
-
-        # 构造分析 prompt
-        prompt = (
-            f"请分析以下评测结果，生成改进建议：\n\n"
-            f"Skill 名称：{benchmark.skill_name}\n\n"
-            f"整体统计：\n{json.dumps(benchmark.run_summary, ensure_ascii=False, indent=2)}\n\n"
-            f"各 Expectation 的通过情况：\n"
-        )
-
-        for exp_text, counts in sorted(success_rates.items(), key=lambda x: x[1]["fail"], reverse=True):
-            total = counts["pass"] + counts["fail"]
-            rate = counts["pass"] / total * 100 if total > 0 else 0
-            prompt += f"- {exp_text}: 通过率 {rate:.0f}% ({counts['pass']}/{total})\n"
-
-        prompt += (
-            f"\n请分析：\n"
-            f"1. 为什么这些 expectations 失败了？\n"
-            f"2. 如何改进 skill 来提升通过率？\n"
-            f"3. 性能指标是否存在问题？\n"
-            f"4. 优先级是什么？\n\n"
-            f"请输出具体的、可执行的改进建议。"
-        )
+        prompt = self._build_analyst_prompt(ctx, benchmark)
 
         # 不捕获 LLM 调用异常，让网络错误向上传播到 execute()
         response = await ctx.run_stage_agent_streaming(
@@ -807,59 +843,101 @@ class EvaluateStageHandler(StageHandler):
         ctx.release_agent_tools(analyst_agent)
         return suggestions
 
+    def _build_analyst_prompt(self, ctx: SkillDevContext, benchmark: Benchmark) -> str:
+        """构造 analyst prompt，注入三层信息：
+
+        1. 当前 Skill 文件内容（代码读取，无工具调用）
+        2. 整体聚合统计（run_summary + delta）
+        3. 各 eval case 逐条详情：用户 prompt + with_skill/baseline 各 expectation 的
+           passed 状态与 grader reason
+        """
+        parts: list[str] = []
+
+        # ── Section 1: 当前 Skill 文件内容 ───────────────────────────────────
+        asset = load_asset(ctx.workspace)
+        skill_dir_str = asset.get("skill_dir", "")
+        skill_dir = Path(skill_dir_str) if skill_dir_str else ctx.workspace / "skill"
+
+        skill_content, skill_failed = load_skill_content(skill_dir)
+        if skill_failed:
+            logger.warning(
+                "[session=%s] [EvaluateStage] skill 文件部分未能预加载: %s",
+                ctx.state.task_id, skill_failed,
+            )
+        parts.append(
+            "## 当前 Skill 文件内容\n"
+            + (skill_content if skill_content else "（未找到 skill 文件）")
+        )
+
+        # ── Section 2: 整体统计（去除 time/token，analyst 只关注质量维度）─────
+        _skip = {"time_seconds", "tokens"}
+        analyst_summary = {
+            variant: {k: v for k, v in stats.items() if k not in _skip}
+            for variant, stats in benchmark.run_summary.items()
+        }
+        parts.append(
+            "## 整体评测统计\n"
+            + json.dumps(analyst_summary, ensure_ascii=False, indent=2)
+        )
+
+        # ── Section 3: 各 case 逐条详情 ──────────────────────────────────────
+        # 按 eval_name 分组，同一 case 的 with_skill / baseline 并列展示
+        case_runs: dict[str, dict[str, BenchmarkRun]] = {}
+        for run in benchmark.runs:
+            case_runs.setdefault(run.eval_name, {})[run.configuration] = run
+
+        case_lines: list[str] = ["## 各测试用例详情"]
+        for eval_name, variants in sorted(case_runs.items()):
+            any_run = next(iter(variants.values()))
+            case_lines.append(f"\n### Case: {eval_name}")
+            if any_run.prompt:
+                case_lines.append(f"用户 Prompt：{any_run.prompt}")
+
+            for config in ("with_skill", "baseline"):
+                run = variants.get(config)
+                if run is None:
+                    continue
+                pass_pct = f"{run.pass_rate * 100:.0f}%"
+                case_lines.append(f"\n**{config}（pass_rate: {pass_pct}）**")
+                for exp in run.expectations:
+                    if not isinstance(exp, dict):
+                        continue
+                    status = "PASS" if exp.get("passed") else "FAIL"
+                    text = exp.get("expectation") or exp.get("text", "")
+                    reason = exp.get("reason") or exp.get("evidence", "")
+                    case_lines.append(f"- [{status}] {text}")
+                    if reason:
+                        case_lines.append(f"  Grader reason: {reason}")
+
+        parts.append("\n".join(case_lines))
+        parts.append("请根据以上信息输出改进建议，并返回严格 **JSON** 数组。")
+        return "\n\n".join(parts)
+
     def _parse_analyst_suggestions(self, response: str) -> list[Dict[str, str]]:
         """解析 Analyst 的建议"""
-        suggestions = []
-
-        # 尝试提取 JSON（括号计数法，避免 rfind 越界）
+        # 尝试提取 JSON 数组（括号计数法）
         try:
             json_str = _extract_outermost_json(response, "[", "]")
-            if json_str:
+            if json_str and json_str.strip() not in ("[无建议]", "[]"):
                 parsed = json.loads(json_str)
-
                 if isinstance(parsed, list):
+                    suggestions = []
                     for item in parsed:
                         if isinstance(item, dict):
                             suggestions.append({
                                 "category": item.get("category", "其他"),
                                 "issue": item.get("issue", ""),
                                 "suggestion": item.get("suggestion", ""),
-                                "priority": item.get("priority", "medium")
+                                "priority": item.get("priority", "medium"),
                             })
-
-                    if suggestions:
-                        return suggestions
+                    # JSON 解析成功，无论列表是否为空都直接返回，
+                    # 空列表表示 analyst 认为无改进建议，属于合法结果
+                    return suggestions
         except json.JSONDecodeError:
             pass
 
-        # Fallback：按行解析
-        lines = response.split("\n")
-        current_suggestion = {"category": "", "suggestion": "", "priority": "medium"}
-
-        for line in lines:
-            line = line.strip()
-            if not line:
-                continue
-
-            # 简单的启发式解析
-            if any(keyword in line for keyword in ["问题", "失败", "Issue", "问题"]):
-                if current_suggestion.get("suggestion"):
-                    suggestions.append(current_suggestion)
-                current_suggestion = {
-                    "category": "问题分析",
-                    "issue": line,
-                    "suggestion": "",
-                    "priority": "medium"
-                }
-            elif any(keyword in line for keyword in ["建议", "改进", "Suggestion", "优化"]):
-                current_suggestion["suggestion"] = line
-
-        if current_suggestion.get("suggestion"):
-            suggestions.append(current_suggestion)
-
-        return suggestions if suggestions else [
-            {"category": "待分析", "suggestion": response[:200], "priority": "low"}
-        ]
+        # 无建议：JSON 解析失败或明确表示无建议
+        return [{"category": "无建议", "issue": "", "suggestion": "", "priority": "low"}]
 
     # ------------------------------------------------------------------
     # Markdown 报告（给人看，也存入 workspace）

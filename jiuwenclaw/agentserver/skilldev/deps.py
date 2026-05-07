@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass, field
+from typing import Any
 
 from jiuwenclaw.agentserver.skilldev.store import StateStore
 from jiuwenclaw.agentserver.skilldev.workspace import WorkspaceProvider
@@ -33,6 +34,7 @@ class SkillDevDeps:
     # 基础设施
     state_store: StateStore
     workspace_provider: WorkspaceProvider
+    session_history: Any | None = None
 
     # 取消信号：task_id → asyncio.Event；由 _handle_start/_handle_respond 注册，
     # _handle_cancel 通过 event.set() 通知 pipeline 在下一阶段边界终止。

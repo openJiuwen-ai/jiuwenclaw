@@ -43,9 +43,14 @@ class ValidateStageHandler(StageHandler):
                 ctx, "SKILL.md 未生成"
             )
 
-        _, description, _ = parse_skill_frontmatter(skill_md_path)
-        ctx.state.plan["description"] = description
-
+        name, description, _ = parse_skill_frontmatter(skill_md_path)
+        if ctx.state.plan is None or not isinstance(ctx.state.plan, dict):
+            ctx.state.plan = {}
+        if name:
+            ctx.state.plan["skill_name"] = name
+        if description:
+            ctx.state.plan["description"] = description
+            
         valid, message = validate_skill_md(skill_md_path)
         await ctx.emit(
             SkillDevEventType.VALIDATE_RESULT, {"valid": valid, "message": message}

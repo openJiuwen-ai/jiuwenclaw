@@ -75,8 +75,6 @@ STAGE_TOOL_WHITELIST: Dict[str, list[str]] = {
     "INIT": ["file_read", "file_glob", "file_listdir"],
     # Clarification phase: read-only workspace awareness
     "CLARIFY": ["file_read", "file_glob", "file_listdir"],
-    # Planning phase: read-only search tools only
-    "PLAN": ["file_read", "file_glob", "file_listdir", "web_search_free", "web_fetch"],
     # Generation phase: file read/write, no shell
     "GENERATE": ["file_read", "file_write", "file_edit", "file_glob", "file_grep", 
         "file_listdir", "web_search_free", "web_fetch", "shell", "code_execute"],

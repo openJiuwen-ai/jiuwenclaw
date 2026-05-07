@@ -25,7 +25,7 @@ from typing import Any, Callable
 class SkillDevStage(str, Enum):
     """SkillDev Pipeline 的所有阶段.
 
-    流程：INIT → CLARIFY → QUESTION_CLARIFY(挂起) → PLAN → GENERATE → VALIDATE
+    流程：INIT → CLARIFY → QUESTION_CLARIFY(挂起) → GENERATE → VALIDATE
         → SKIP_TESTS_CONFIRM(挂起) → TEST_DESIGN → TEST_RUN → EVALUATE → REVIEW(挂起)
         → IMPROVE → (回到 TEST_RUN 迭代)
         → DESC_OPTIMIZE_CONFIRM(挂起) → DESC_OPTIMIZE(可选) → PACKAGE → COMPLETED
@@ -36,7 +36,6 @@ class SkillDevStage(str, Enum):
     INIT = "init"
     CLARIFY = "clarify"                    # AI 分析需求，生成澄清问题
     QUESTION_CLARIFY = "question_clarify"  # 挂起点：等待用户回答澄清问题
-    PLAN = "plan"                          # 综合 QA 答案生成开发计划，直接进入 GENERATE
     GENERATE = "generate"
     VALIDATE = "validate"  # 校验生成的 SKILL.md 格式（YAML frontmatter + 命名规范）
     SKIP_TESTS_CONFIRM = "skip_tests_confirm"  # 挂起点：询问是否跳过集成/评测测试
@@ -140,7 +139,7 @@ class SkillDevState:
     existing_skill_md: str | None = None  # 已有 SKILL.md 内容
     clarification_questions: list[dict] = field(default_factory=list)  # CLARIFY 阶段产出的问题列表
     clarification_answers: list[dict] = field(default_factory=list)    # 用户在 QUESTION_CLARIFY 阶段回答的答案
-    plan: dict[str, Any] | None = None  # PLAN 阶段产出
+    plan: dict[str, Any] | None = None  # 兼容字段：生成/校验阶段写入的 skill 元数据
     generate_retries: int = 0  # GENERATE ↔ VALIDATE 重试计数
     last_validate_error: str | None = None  # VALIDATE 失败原因（供 GENERATE 重试时参考）
     skipped_benchmark_tests: bool = False  # 用户在 SKIP_TESTS_CONFIRM 选择跳过测试
@@ -206,7 +205,10 @@ class SkillDevState:
     def from_checkpoint_dict(cls, data: dict) -> "SkillDevState":
         """从持久化字典恢复状态."""
         state = cls(task_id=data["task_id"])
-        state.stage = SkillDevStage(data["stage"])
+        checkpoint_stage = data["stage"]
+        if checkpoint_stage == "plan":
+            checkpoint_stage = SkillDevStage.GENERATE.value
+        state.stage = SkillDevStage(checkpoint_stage)
         state.mode = SkillDevTaskMode(data.get("mode", "create"))
         state.iteration = data.get("iteration", 0)
         state.input = data.get("input", {})
@@ -363,13 +365,13 @@ SUSPENSION_POINTS: dict[SkillDevStage, SuspensionConfig] = {
     SkillDevStage.QUESTION_CLARIFY: SuspensionConfig(
         confirm_type="question_clarify",
         title="请回答以下问题",
-        message="AI 需要了解更多信息以生成精准的开发计划",
+        message="AI 需要了解更多信息以生成精准的 Skill",
         actions=[
             {"id": "submit", "label": "提交回答", "style": "primary"},
         ],
         extract_data=_question_clarify_extract_data,
         on_resume=_question_clarify_on_resume,
-        next_stage=SkillDevStage.PLAN,
+        next_stage=SkillDevStage.GENERATE,
     ),
     SkillDevStage.REVIEW: SuspensionConfig(
         confirm_type="review",
@@ -627,13 +629,12 @@ class _StageGroup:
 _STAGE_GROUPS: list[_StageGroup] = [
     _StageGroup(
         id="plan",
-        label="需求澄清与规划",
+        label="需求澄清",
         stages=frozenset(
             {
                 SkillDevStage.INIT,
                 SkillDevStage.CLARIFY,
                 SkillDevStage.QUESTION_CLARIFY,
-                SkillDevStage.PLAN,
             }
         ),
     ),

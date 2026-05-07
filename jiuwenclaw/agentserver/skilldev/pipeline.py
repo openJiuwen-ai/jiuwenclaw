@@ -36,7 +36,6 @@ from jiuwenclaw.agentserver.skilldev.stages import (
     ImproveStageHandler,
     InitStageHandler,
     PackageStageHandler,
-    PlanStageHandler,
     TestDesignStageHandler,
     TestRunStageHandler,
     ValidateStageHandler,
@@ -56,7 +55,6 @@ class SkillDevPipeline:
     STAGE_HANDLERS = {
         SkillDevStage.INIT: InitStageHandler,
         SkillDevStage.CLARIFY: ClarifyStageHandler,
-        SkillDevStage.PLAN: PlanStageHandler,
         SkillDevStage.GENERATE: GenerateStageHandler,
         SkillDevStage.VALIDATE: ValidateStageHandler,
         SkillDevStage.TEST_DESIGN: TestDesignStageHandler,

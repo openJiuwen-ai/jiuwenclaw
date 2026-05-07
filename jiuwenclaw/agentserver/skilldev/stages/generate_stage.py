@@ -15,6 +15,12 @@ from __future__ import annotations
 import logging
 from pathlib import Path
 
+from jiuwenclaw.agentserver.skilldev.asset_utils import (
+    load_asset,
+    save_asset,
+    load_skill_content,
+    load_asset_content
+)
 from jiuwenclaw.agentserver.skilldev.context import SkillDevContext
 from jiuwenclaw.agentserver.skilldev.schema import SkillDevEventType, SkillDevStage
 from jiuwenclaw.agentserver.skilldev.stages.base import StageHandler, StageResult
@@ -28,7 +34,7 @@ GENERATE_USER_CLARIFICATION_BINDING = """【必须遵守·用户补充信息】�
 - 禁止编写与补充信息相矛盾的能力描述、工作流步骤、示例或隐含默认行为；禁止用「通用做法」或自行推测的默认方案覆盖用户已在补充信息中给出的明确选择。
 - 若下文中「skill 开发计划」或既有草稿与补充信息冲突，以补充信息为准，并相应修正实现与表述，不得保留冲突内容。"""
 
-GENERATE_SYSTEM_PROMPT_TEMPLATE = """你是一个 Skill 开发专家。根据已确认的开发计划，生成完整的 Skill 文件集。
+GENERATE_SYSTEM_PROMPT_TEMPLATE = """你是一个 Skill 开发专家。根据用户需求、澄清信息和工作区资料，设计并生成完整的 Skill 文件集。
 
 ## SKILL.md 格式要求（必须严格遵守）
 
@@ -175,7 +181,7 @@ npx skills find '<keywords>'
 """
 
 
-GENERATE_SYSTEM_PROMPT_TEMPLATE_WITH_REF = """你是一个 Skill 开发专家。根据已确认的开发计划，生成完整的 Skill 文件集。
+GENERATE_SYSTEM_PROMPT_TEMPLATE_WITH_REF = """你是一个 Skill 开发专家。根据用户需求、澄清信息和工作区资料，设计并生成完整的 Skill 文件集。
 
 ## SKILL.md 格式要求（必须严格遵守）
 
@@ -274,13 +280,9 @@ skill/
 
 
 class GenerateStageHandler(StageHandler):
-    """GENERATE 阶段：Agent 按 plan 生成完整 skill 文件集."""
+    """GENERATE 阶段：Agent 直接生成完整skill 文件集."""
 
     async def execute(self, ctx: SkillDevContext) -> StageResult:
-        plan = ctx.state.plan
-        if not plan:
-            raise ValueError("GENERATE 阶段缺少 plan，请先完成 PLAN 阶段")
-
         skill_dir = ctx.workspace / "skill"
         generated_files = await self._generate_all_files(ctx, skill_dir)
 
@@ -289,7 +291,7 @@ class GenerateStageHandler(StageHandler):
             {
                 "artifact": {
                     "id": "skill_files",
-                    "name": (plan or {}).get("skill_name", "skill"),
+                    "name": ctx.state.skill_name or "skill",
                     "type": "skill_md",
                     "files": generated_files,
                     "browsable": True,
@@ -333,13 +335,23 @@ class GenerateStageHandler(StageHandler):
             for path in skill_dir.rglob("*")
             if path.is_file()
         ]
+        # 将 agent 生成的 skill 目录路径写入 asset.json，供下游 stage 直接读取
+        self._update_asset_skill_dir(ctx.workspace, skill_dir)
         ctx.release_agent_tools(agent)
         return sorted(generated_files)
+
+    @staticmethod
+    def _update_asset_skill_dir(workspace: Path, skill_dir: Path) -> None:
+        """在 agent 生成完毕后，将 skill_dir 写入 asset.json."""
+        asset = load_asset(workspace)
+        asset["skill_dir"] = str(skill_dir)
+        save_asset(workspace, asset)
+        logger.info("[GenerateStage] asset.json skill_dir 已更新: %s", skill_dir)
 
     def _build_user_query(self, ctx: SkillDevContext) -> str:
         """构建传给 ReActAgent 的 query 字符串."""
         query = ctx.state.input.get("query", "")
-        parts = [f"用户需求：{query}"]
+        parts = [f"## 用户需求：{query}", f"预生成的skill name: {ctx.state.skill_name}"]
 
         # 将 QA 问答内容以可读形式注入
         if ctx.state.clarification_questions and ctx.state.clarification_answers:
@@ -348,41 +360,76 @@ class GenerateStageHandler(StageHandler):
                 f"- {q_map.get(a['question_id'], a['question_id'])}: {a['answer']}"
                 for a in ctx.state.clarification_answers
             ]
-            parts.append("用户补充信息（澄清问答）：\n" + "\n".join(qa_lines))
+            parts.append("## 用户补充信息（澄清问答）：\n" + "\n".join(qa_lines))
             parts.append(GENERATE_USER_CLARIFICATION_BINDING)
         elif ctx.state.clarification_answers:
             qa_lines = [
                 f"- {a['question_id']}: {a['answer']}"
                 for a in ctx.state.clarification_answers
             ]
-            parts.append("用户补充信息：\n" + "\n".join(qa_lines))
+            parts.append("## 用户补充信息：\n" + "\n".join(qa_lines))
             parts.append(GENERATE_USER_CLARIFICATION_BINDING)
 
+        asset_json = load_asset(ctx.workspace)
+        has_preloaded_content = False
         if not ctx.state.skill_dir_empty:
+            has_preloaded_content = True
+            # 预加载当前 skill 内容
             if ctx.state.generate_retries == 0:
+                skill_dir_str = asset_json.get("skill_dir", "")
+                skill_dir = Path(skill_dir_str) if skill_dir_str else ctx.workspace / "skill"
+                skill_content_str, skill_failed = load_skill_content(skill_dir=skill_dir)
+                if skill_failed:
+                    logger.warning(
+                        "[session=%s] [PlanStage] skill 文件部分未能预加载: %s",
+                        ctx.state.task_id, skill_failed,
+                    )
+                skill_content_str = skill_content_str or "（未找到 skill 文件）"
                 parts.append(
-                    f"工作区 {ctx.workspace} 中的skill文件夹下存放了最近一轮生成的skill内容，请你阅读后，根据用户需求，生成新的skill。"
+                    "## 当前 Skill 内容\n"
+                    f"工作区 {ctx.workspace} 中的skill文件夹下存放了最近一轮生成的skill内容。以下为当前 Skill 文件的完整内容（已预加载，无需再调用工具读取）："
+                    f"{skill_content_str}"
                     "在生成新的skill时，请先将原始 skill/ 目录重命名为 skill-vx/（x 表示递增版本号），再新建一个全新的 skill/ 目录，"
                     "并将本次生成的完整 Skill 文件保存到新的 skill/ 目录下。"
                 )
             if not (ctx.state.ref_files_dir_empty and ctx.state.ref_skills_dir_empty):
-                parts.append(f"工作区 {ctx.workspace} 中的resources/文件夹下存放了用户原始上传的参考资料，请根据需求自行判断是否需要查看。")
+                parts.append(f"## 参考资料\n工作区 {ctx.workspace} 中的resources/文件夹下存放了用户原始上传的参考资料，请根据需求自行判断是否需要查看。")
             if not ctx.state.tool_scripts_dir_empty:
                 parts.append(
+                    "## 预加载工具\n"
                     f"用户提供了以下工具，可以在生成的skill中使用：\n{ctx.state.external_tools}\n"
                     "工具是通过python脚本的方式调用的。如果需要使用某个工具，请将对应的脚本复制到skill/scripts/目录下，再在SKILL.md中使用。"
                     "不用去阅读脚本的内容，只需要知道工具的名称和参数即可。"
                     )
         else:
+            # 预加载参考资料
             if not (ctx.state.ref_files_dir_empty and ctx.state.ref_skills_dir_empty):
-                parts.append(f"用户已上传参考资料，存放于工作区 {ctx.workspace} 中的resources/目录，请确保**先查看resources目录**中的内容")
+                content, _ = load_asset_content(
+                    asset=asset_json,
+                    include_ref_files=True,
+                    include_ref_skills=True,
+                    include_tools=False,
+                )
+                if content:
+                    parts.append(
+                        f"## 预加载参考资料\n"
+                        f"以下为用户上传的参考资料，存放于工作区 {ctx.workspace} 中的resources/目录。"
+                        f"现已预加载，无需再调用工具读取：\n\n{content}"
+                        "请阅读以上预加载的资料后再规划"
+                    )
+                    has_preloaded_content = True
             if not ctx.state.tool_scripts_dir_empty:
                 parts.append(
+                    "## 预加载工具\n"
                     f"用户提供了以下工具，可以在生成的skill中使用：\n{ctx.state.external_tools}\n"
                     "工具是通过python脚本的方式调用的。如果需要使用某个工具，请将对应的脚本复制到skill/scripts/目录下，再在SKILL.md中使用。"
                     "不用去阅读脚本的内容，只需要知道工具的名称和参数即可。"
                     )
-            
+                has_preloaded_content = True
+        if has_preloaded_content:
+            parts.append(
+                "以上文件内容已尽量完整预加载。如预加载未覆盖某些文件，可酌情使用文件工具补充查看。\n"
+            )
         plan = ctx.state.plan
         if plan:
             parts.append(f"## skill开发计划：\n{plan}")

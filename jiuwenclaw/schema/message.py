@@ -124,6 +124,8 @@ class ReqMethod(Enum):
     SKILLDEV_START = "skilldev.start"  # 发起新任务（create/upgrade 由 params 自动判断）
     SKILLDEV_RESPOND = "skilldev.respond"  # 统一确认入口（后端根据 task_id 当前阶段自动路由）
     SKILLDEV_STATUS = "skilldev.status"  # 查询状态（不传 task_id → 返回任务列表）
+    SKILLDEV_SESSION_LIST = "skilldev.session.list"  # 查询 SkillDev 会话列表
+    SKILLDEV_RESTORE = "skilldev.restore"  # 恢复 SkillDev 会话
     SKILLDEV_PARSE_SKILL = "skilldev.parse_skill"  # 导入本地 skill 压缩包到任务工作区
     SKILLDEV_DOWNLOAD = "skilldev.download"  # 下载产物
     SKILLDEV_CANCEL = "skilldev.cancel"  # 取消任务
@@ -177,6 +179,7 @@ class EventType(Enum):
     SKILLDEV_TEST_PROGRESS = "skilldev.test_progress"
     SKILLDEV_TODOS_UPDATE = "skilldev.todos_update"
     SKILLDEV_CONFIRM_REQUEST = "skilldev.confirm_request"
+    SKILLDEV_CONFIRM_RESOLVED = "skilldev.confirm_resolved"
     SKILLDEV_ARTIFACT_READY = "skilldev.artifact_ready"
     SKILLDEV_EVAL_READY = "skilldev.eval_ready"
     SKILLDEV_SKILL_NAME_READY = "skilldev.skill_name_ready"

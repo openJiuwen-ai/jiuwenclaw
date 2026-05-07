@@ -15,7 +15,9 @@ from __future__ import annotations
 import json
 import logging
 import re
+from pathlib import Path
 
+from jiuwenclaw.agentserver.skilldev.asset_utils import load_asset, load_asset_content, load_skill_content
 from jiuwenclaw.agentserver.skilldev.context import SkillDevContext
 from jiuwenclaw.agentserver.skilldev.schema import SkillDevEventType, SkillDevStage
 from jiuwenclaw.agentserver.skilldev.stages.base import StageHandler, StageResult
@@ -162,7 +164,7 @@ class PlanStageHandler(StageHandler):
     def _build_plan_query(self, ctx: SkillDevContext) -> str:
         """构造 Agent query，综合原始需求 + QA 答案."""
         user_query = ctx.state.input.get("query", "")
-        parts = [f"用户需求：{user_query}"]
+        parts = [f"## 用户需求\n{user_query}"]
 
         # 将 QA 问答内容以可读形式注入
         if ctx.state.clarification_questions and ctx.state.clarification_answers:
@@ -171,27 +173,67 @@ class PlanStageHandler(StageHandler):
                 f"- {q_map.get(a['question_id'], a['question_id'])}: {a['answer']}"
                 for a in ctx.state.clarification_answers
             ]
-            parts.append("用户补充信息（澄清问答）：\n" + "\n".join(qa_lines))
+            parts.append("## 用户补充信息（澄清问答）\n" + "\n".join(qa_lines))
         elif ctx.state.clarification_answers:
             qa_lines = [
                 f"- {a['question_id']}: {a['answer']}"
                 for a in ctx.state.clarification_answers
             ]
-            parts.append("用户补充信息：\n" + "\n".join(qa_lines))
+            parts.append("## 用户补充信息\n" + "\n".join(qa_lines))
 
+        asset_json = load_asset(ctx.workspace)
+        has_preloaded_content = False
         if not ctx.state.skill_dir_empty:
-            parts.append(f"工作区 {ctx.workspace} 中的skill文件夹下存放了已经生成的 SKILL.md， 请**先读取老版本的SKILL.md**再做规划")
+            has_preloaded_content = True
+            # 预加载当前 skill 内容
+            skill_dir_str = asset_json.get("skill_dir", "")
+            skill_dir = Path(skill_dir_str) if skill_dir_str else ctx.workspace / "skill"
+            skill_content_str, skill_failed = load_skill_content(skill_dir=skill_dir)
+            if skill_failed:
+                logger.warning(
+                    "[session=%s] [PlanStage] skill 文件部分未能预加载: %s",
+                    ctx.state.task_id, skill_failed,
+                )
+            skill_content_str = skill_content_str or "（未找到 skill 文件）"
+            parts.append(
+                "## 当前 Skill 内容\n"
+                f"工作区 {ctx.workspace} 中的skill文件夹下存放了已经生成的 SKILL.md，"
+                f"以下为当前 Skill 文件的完整内容（已预加载，无需再调用工具读取）请先阅读此skill再做规划：\n\n"
+                f"{skill_content_str}"
+            )
             if not (ctx.state.ref_files_dir_empty and ctx.state.ref_skills_dir_empty):
                 parts.append(f"工作区 {ctx.workspace} 中的resources/文件夹下存放了用户原始上传的参考资料，请根据需求自行判断是否需要查看。")
             if not ctx.state.tool_scripts_dir_empty:
                 parts.append(f"用户提供了以下工具，可以在生成的skill中使用：\n{ctx.state.external_tools}")
         else:
+            # 预加载参考资料
             if not (ctx.state.ref_files_dir_empty and ctx.state.ref_skills_dir_empty):
-                parts.append(f"用户已上传参考资料，存放于工作区 {ctx.workspace} 中的resources/目录，请确保**先查看resources目录**中的内容")
-            if not ctx.state.tool_scripts_dir_empty:
-                parts.append(f"用户提供了以下工具，可以在生成的skill中使用：\n{ctx.state.external_tools}")
+                content, _ = load_asset_content(
+                    asset=asset_json,
+                    include_ref_files=True,
+                    include_ref_skills=True,
+                    include_tools=False,
+                )
+                if content:
+                    parts.append(
+                        f"以下为用户上传的参考资料，存放于工作区 {ctx.workspace} 中的resources/目录。"
+                        f"现已预加载，无需再调用工具读取）：\n\n{content}"
+                        "请阅读以上预加载的资料后再规划"
+                    )
+                    has_preloaded_content = True
 
-        parts.append("请根据以上信息，输出一份完整的 JSON 开发计划。")
+            if not ctx.state.tool_scripts_dir_empty:
+                parts.append(
+                    "## 外部工具\n"
+                    "用户提供了以下可调用工具，Skill 可在执行时使用：\n"
+                    + str(ctx.state.external_tools)
+                )
+                has_preloaded_content = True
+        if has_preloaded_content:
+            parts.append(
+                "以上文件内容已尽量完整预加载。如预加载未覆盖某些文件，可酌情使用文件工具补充查看。\n"
+                "请根据以上信息，输出一份完整的 JSON 开发计划。"
+            )
         return "\n\n".join(parts)
 
     def _parse_plan_json(self, text: str, session_id: str) -> dict | None:

@@ -178,6 +178,7 @@ class JiuWenClaw:
             return self._skilldev_service
 
         from jiuwenclaw.agentserver.skilldev import SkillDevDeps, SkillDevService, StateStore, WorkspaceProvider
+        from jiuwenclaw.agentserver.skilldev.session_history import SkillDevSessionHistoryService
         from jiuwenclaw.utils import get_workspace_dir
 
         skilldev_base = get_workspace_dir() / "skilldev"
@@ -195,6 +196,7 @@ class JiuWenClaw:
             sysop_config=None,
             state_store=state_store,
             workspace_provider=workspace_provider,
+            session_history=SkillDevSessionHistoryService(base_dir=skilldev_base, state_store=state_store),
         )
         self._skilldev_service = SkillDevService(deps)
         logger.info("[JiuWenClaw] SkillDevService 初始化完成")

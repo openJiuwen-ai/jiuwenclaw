@@ -16,6 +16,7 @@ import logging
 import re
 from pathlib import Path
 
+from jiuwenclaw.agentserver.skilldev.asset_utils import AssetDirs, build_asset_json
 from jiuwenclaw.agentserver.skilldev.context import SkillDevContext
 from jiuwenclaw.agentserver.skilldev.schema import (
     SkillDevEventType,
@@ -93,46 +94,86 @@ class InitStageHandler(StageHandler):
                 try:
                     for skill_package in skill_packages:
                         skill_package_name = skill_package.get("filename", "")
+                        if Path(skill_package_name).suffix.lower() not in (".zip", ".skill"):
+                            raise ValueError(
+                                f"参考 skill 包仅支持 .zip / .skill 格式，当前文件: {skill_package_name}"
+                            )
                         download_url = skill_package.get("url", "")
                         _ = await download_file(download_url, str(ref_skills_dir / skill_package_name))
                         safe_extract_zip(
                             ref_skills_dir / skill_package_name, ref_skills_dir, extract_to_stem_dir=False
-                            )
+                        )
                 except Exception as exc:
-                    logger.warning("[session=%s] [InitStage] 参考 skill 包下载失败: err=%s", ctx.state.task_id, exc)
-                    raise
+                    msg = f"参考 skill 包处理失败：{exc}"
+                    logger.error("[session=%s] [InitStage] %s", ctx.state.task_id, msg)
+                    await ctx.emit(SkillDevEventType.ERROR, {"message": msg, "stage": "init"})
+                    raise RuntimeError(msg) from exc
             else:
-                await self._write_resources(
-                    skill_packages,
-                    ref_skills_dir,
-                    extract_zip_to_subdir=True,
-                    allowed_suffixes=(".zip", ".skill"),
-                    session_id=ctx.state.task_id,
-                )
+                try:
+                    await self._write_resources(
+                        skill_packages,
+                        ref_skills_dir,
+                        extract_zip_to_subdir=True,
+                        allowed_suffixes=(".zip", ".skill"),
+                        session_id=ctx.state.task_id,
+                    )
+                except ValueError as exc:
+                    msg = f"参考 skill 包格式错误：{exc}"
+                    logger.error("[session=%s] [InitStage] %s", ctx.state.task_id, msg)
+                    await ctx.emit(SkillDevEventType.ERROR, {"message": msg, "stage": "init"})
+                    raise RuntimeError(msg) from exc
 
         # 解析上传的外部工具定义（list[dict]，每项为一个 tool）
         tool_specs = ctx.state.input.get("tool_spec_files") or []
         if tool_specs:
             tool_scripts_dir.mkdir(parents=True, exist_ok=True)
-            # 适配小艺
-            if tool_specs[0].get("protocol", ""): 
-                ctx.state.external_tools = generate_tool_scripts_and_usage(tool_specs, tool_scripts_dir)
-                logger.info(
+            try:
+                # 适配小艺：直接传入结构化对象（含 protocol 字段）
+                if tool_specs[0].get("protocol", ""):
+                    ctx.state.external_tools = generate_tool_scripts_and_usage(tool_specs, tool_scripts_dir)
+                    logger.info(
                     "[session=%s] [InitStage] 加载外部工具: %d 个",
                     ctx.state.task_id,
                     len(ctx.state.external_tools),
                 )
-            else:
-                for tool_info in tool_specs:
-                    content_b64 = tool_info.get("base64Data", "")
-                    tool_info_list = json.loads(base64.b64decode(content_b64).decode("utf-8")) 
-                    
-                    ctx.state.external_tools = generate_tool_scripts_and_usage(tool_info_list, tool_scripts_dir)
-                    logger.info(
-                        "[session=%s] [InitStage] 加载外部工具: %d 个",
-                        ctx.state.task_id,
-                        len(ctx.state.external_tools),
-                    )
+                else:
+                    # base64 路径：文件内容为 JSON 数组，需先解码再解析
+                    for tool_info in tool_specs:
+                        fname = tool_info.get("filename", "?")
+                        content_b64 = tool_info.get("base64Data", "")
+                        if not content_b64:
+                            raise ValueError(f"工具定义文件 [{fname}] 内容为空（base64Data 字段缺失）")
+                        try:
+                            raw_bytes = base64.b64decode(content_b64)
+                        except Exception as exc:
+                            raise ValueError(
+                                f"工具定义文件 [{fname}] base64 解码失败，请确认文件完整性"
+                            ) from exc
+                        try:
+                            tool_info_list = json.loads(raw_bytes.decode("utf-8"))
+                        except json.JSONDecodeError as exc:
+                            raise ValueError(
+                                f"工具定义文件 [{fname}] JSON 解析失败：{exc}，"
+                                f"请确保传入的工具为合法JSON格式"
+                            ) from exc
+                        if not isinstance(tool_info_list, list):
+                            raise ValueError(
+                                f"工具定义文件 [{fname}] 内容应为 JSON 数组，"
+                                f"实际类型：{type(tool_info_list).__name__}"
+                            )
+                        ctx.state.external_tools = generate_tool_scripts_and_usage(
+                            tool_info_list, tool_scripts_dir
+                        )
+                logger.info(
+                    "[session=%s] [InitStage] 加载外部工具: %d 个",
+                    ctx.state.task_id,
+                    len(ctx.state.external_tools or []),
+                )
+            except Exception as exc:
+                msg = f"外部工具定义解析失败：{exc}"
+                logger.error("[session=%s] [InitStage] %s", ctx.state.task_id, msg)
+                await ctx.emit(SkillDevEventType.ERROR, {"message": msg, "stage": "init"})
+                raise RuntimeError(msg) from exc
 
 
         # 更新目录空状态：skill和resources目录
@@ -141,6 +182,20 @@ class InitStageHandler(StageHandler):
         ctx.state.ref_skills_dir_empty = not any(ref_skills_dir.iterdir()) if ref_skills_dir.exists() else True
         ctx.state.skill_dir_empty = not any(skill_dir.iterdir()) if skill_dir.exists() else True
         ctx.state.tool_scripts_dir_empty = not any(tool_scripts_dir.iterdir()) if tool_scripts_dir.exists() else True
+
+        # 写入 asset.json：记录用户上传的所有资源路径（ref_files / ref_skills / tools）
+        # 在 _generate_skill_name 之前写入，使命名 agent 可直接读取 asset 内容。
+        # skill_dir 留空，由 generate_stage 在 agent 生成完毕后填充。
+        build_asset_json(
+            ctx.workspace,
+            ctx.state.iteration,
+            AssetDirs(
+                ref_files_dir=ref_files_dir,
+                ref_skills_dir=ref_skills_dir,
+                tool_scripts_dir=tool_scripts_dir,
+                existing_skill_dir=skill_dir if not ctx.state.skill_dir_empty else None,
+            ),
+        )
 
         # 写完文件后，通过内容扫描推断任务模式
         logger.info(
@@ -166,6 +221,7 @@ class InitStageHandler(StageHandler):
                 SkillDevEventType.SKILL_NAME_READY,
                 {"skill_name": skill_name},
             )
+
         return StageResult(next_stage=SkillDevStage.CLARIFY)
 
     async def _generate_skill_name(self, ctx: SkillDevContext) -> str:
@@ -334,6 +390,7 @@ class InitStageHandler(StageHandler):
                     name,
                     exc,
                 )
+                raise
 
     def _parse_tools(self, tools_dir: Path, session_id: str = "") -> list[dict]:
         """从工具目录解析工具定义，返回合法的 tool dict 列表。
@@ -372,4 +429,3 @@ class InitStageHandler(StageHandler):
                 valid.append(item)
 
         return valid
-
