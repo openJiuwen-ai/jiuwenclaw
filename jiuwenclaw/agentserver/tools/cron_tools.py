@@ -15,6 +15,7 @@ from jiuwenclaw.gateway.cron.models import (
     CronTargetChannel,
     is_valid_target_channel_id,
     normalize_target_channel_id,
+    upgrade_bare_feishu_target_for_multi_bot_config,
 )
 from jiuwenclaw.agentserver.gateway_push import (
     GatewayPushTransport,
@@ -170,7 +171,7 @@ class CronTools:
     def _default_target_from_channel(self) -> str:
         channel_raw = self._resolve_channel_id()
         channel = channel_raw.lower()
-        if channel.startswith("feishu_enterprise:"):
+        if channel.startswith("feishu:"):
             return normalize_target_channel_id(channel_raw, default=CronTargetChannel.WEB.value)
         if channel.startswith("feishu"):
             return CronTargetChannel.FEISHU.value
@@ -213,6 +214,25 @@ class CronTools:
         )
         return fallback
 
+    def _upgrade_bare_feishu_to_route_app_id(self, targets_str: str) -> str:
+        """多 bot 仅注册 feishu:<app_id>；若 LLM 显式写了 targets=feishu，则改为当前会话 bot。"""
+        t = str(targets_str or "").strip()
+        if t != CronTargetChannel.FEISHU.value:
+            return t
+        ch = self._resolve_channel_id()
+        if ch.startswith("feishu:"):
+            out = normalize_target_channel_id(ch, default=CronTargetChannel.WEB.value)
+            if out.startswith("feishu:"):
+                logger.info(
+                    "[CronTools] upgrade bare feishu target for multi-bot: %s -> %s (route=%s)",
+                    t,
+                    out,
+                    ch,
+                )
+                return out
+        # 路由无 app_id（如 Web）但配置仅一个多 bot 子节点时，与网关 CronController 逻辑一致。
+        return upgrade_bare_feishu_target_for_multi_bot_config(t)
+
     async def list_jobs(self) -> Any:
         jobs = await self._local_store.list_jobs()
         return [j.to_dict() for j in jobs]
@@ -224,8 +244,9 @@ class CronTools:
     async def create_job(self, params: dict[str, Any]) -> Any:
         normalized = dict(params or {})
         normalized.pop("session_id", None)
-        normalized["targets"] = self._normalize_targets_param(normalized.get("targets"))
-        targets_str = normalized["targets"]
+        targets_str = self._normalize_targets_param(normalized.get("targets"))
+        targets_str = self._upgrade_bare_feishu_to_route_app_id(str(targets_str))
+        normalized["targets"] = targets_str
         logger.info(
             "[CronTools] create_job: route(channel=%s session=%s request=%s) input.targets=%s normalized.targets=%s",
             self._route().channel_id,
@@ -235,7 +256,7 @@ class CronTools:
             targets_str,
         )
         session_kw: dict[str, Any] = {}
-        if str(targets_str).strip().startswith("feishu_enterprise:"):
+        if str(targets_str).strip().startswith("feishu:"):
             sid = self._route().session_id
             if isinstance(sid, str) and sid.strip():
                 session_kw["session_id"] = sid.strip()
@@ -269,8 +290,11 @@ class CronTools:
         normalized_patch.pop("session_id", None)
         if "targets" in normalized_patch:
             normalized_patch["targets"] = self._normalize_targets_param(normalized_patch.get("targets"))
+            normalized_patch["targets"] = self._upgrade_bare_feishu_to_route_app_id(
+                str(normalized_patch.get("targets") or "")
+            )
             t = str(normalized_patch.get("targets") or "").strip()
-            if t.startswith("feishu_enterprise:"):
+            if t.startswith("feishu:"):
                 sid = self._route().session_id
                 if isinstance(sid, str) and sid.strip():
                     normalized_patch["session_id"] = sid.strip()

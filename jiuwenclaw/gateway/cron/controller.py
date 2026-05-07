@@ -10,6 +10,7 @@ from jiuwenclaw.gateway.cron.models import (
     CronTargetChannel,
     is_valid_target_channel_id,
     normalize_target_channel_id,
+    upgrade_bare_feishu_target_for_multi_bot_config,
 )
 from jiuwenclaw.gateway.cron.scheduler import CronSchedulerService, _cron_next_push_dt
 from jiuwenclaw.gateway.cron.store import CronJobStore
@@ -78,10 +79,12 @@ class CronController:
         if self._target_channel is None and not raw_s:
             raise ValueError("targets is required when target_channel is not set")
         if not raw_s:
-            return normalize_target_channel_id(self._target_channel.value)
+            return upgrade_bare_feishu_target_for_multi_bot_config(
+                normalize_target_channel_id(self._target_channel.value),
+            )
         if not is_valid_target_channel_id(raw_s):
-            raise ValueError("targets must be one of web/feishu/whatsapp/wecom/xiaoyi or feishu_enterprise:<app_id>")
-        return normalize_target_channel_id(raw_s)
+            raise ValueError("targets must be one of web/feishu/whatsapp/wecom/xiaoyi or feishu:<app_id>")
+        return upgrade_bare_feishu_target_for_multi_bot_config(normalize_target_channel_id(raw_s))
 
     @classmethod
     def _normalize_description(cls, description: str, name: str) -> str:
@@ -97,9 +100,9 @@ class CronController:
         return description
 
     @staticmethod
-    def _routing_session_id_for_enterprise(targets: str, raw: Any) -> str | None:
-        """Only accept SessionMap-style ids (feishu::...) for feishu_enterprise targets."""
-        if not str(targets or "").strip().startswith("feishu_enterprise:"):
+    def _routing_session_id_for_feishu_multi(targets: str, raw: Any) -> str | None:
+        """Only accept SessionMap-style ids (feishu::...) for feishu:<app_id> targets."""
+        if not str(targets or "").strip().startswith("feishu:"):
             return None
         if not isinstance(raw, str):
             return None
@@ -133,7 +136,7 @@ class CronController:
         self._validate_schedule(cron_expr=cron_expr, timezone=timezone)
         description = self._normalize_description(description, name)
 
-        routing_sid = self._routing_session_id_for_enterprise(targets, params.get("session_id"))
+        routing_sid = self._routing_session_id_for_feishu_multi(targets, params.get("session_id"))
         chat_type = params.get("chat_type")
         delete_after_run = params.get("delete_after_run")
         job = await self._store.create_job(
@@ -170,13 +173,13 @@ class CronController:
 
         final_targets = str(patch.get("targets") or existing.targets).strip()
         if "session_id" in patch:
-            if final_targets.startswith("feishu_enterprise:"):
-                patch["session_id"] = self._routing_session_id_for_enterprise(
+            if final_targets.startswith("feishu:"):
+                patch["session_id"] = self._routing_session_id_for_feishu_multi(
                     final_targets, patch.get("session_id")
                 )
             else:
                 patch["session_id"] = None
-        elif "targets" in patch and not final_targets.startswith("feishu_enterprise:"):
+        elif "targets" in patch and not final_targets.startswith("feishu:"):
             patch["session_id"] = None
 
         job = await self._store.update_job(job_id, patch)

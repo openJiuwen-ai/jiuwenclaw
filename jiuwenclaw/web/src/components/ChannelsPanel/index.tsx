@@ -39,6 +39,26 @@ type SupportedChannelId =
   | 'wechat';
 
 const ADAPTING_CHANNEL_IDS = new Set<SupportedChannelId>([]);
+const FEISHU_SINGLE_FIELD_KEYS = new Set<string>([
+  'app_id',
+  'app_secret',
+  'encrypt_key',
+  'verification_token',
+  'allow_from',
+  'enable_streaming',
+  'chat_id',
+  'enabled',
+  'send_file_allowed',
+  'group_digital_avatar',
+  'my_user_id',
+  'my_open_id',
+  'bot_name',
+  'enable_memory',
+  'message_merge_window_ms',
+  'last_chat_id',
+  'last_open_id',
+  'last_message_id',
+]);
 
 type FeishuConfig = {
   enabled: boolean;
@@ -69,6 +89,8 @@ type FeishuDraft = {
   bot_name: string;
   enable_memory: boolean;
 };
+type FeishuMode = 'single' | 'multi';
+type FeishuMultiBotDraft = FeishuDraft & { bot_key: string };
 
 type XiaoyiConfig = {
   enabled: boolean;
@@ -355,6 +377,28 @@ function normalizeFeishuConfig(input: unknown): FeishuConfig {
   };
 }
 
+function extractFeishuMultiBotChildren(input: unknown): Record<string, Record<string, unknown>> {
+  if (!input || typeof input !== 'object') {
+    return {};
+  }
+  const data = input as Record<string, unknown>;
+  const out: Record<string, Record<string, unknown>> = {};
+  for (const [key, value] of Object.entries(data)) {
+    if (FEISHU_SINGLE_FIELD_KEYS.has(key)) {
+      continue;
+    }
+    if (!value || typeof value !== 'object' || Array.isArray(value)) {
+      continue;
+    }
+    const bot = value as Record<string, unknown>;
+    if (!('app_id' in bot) && !('app_secret' in bot) && !('enabled' in bot)) {
+      continue;
+    }
+    out[key] = bot;
+  }
+  return out;
+}
+
 function draftFromFeishuConfig(conf: FeishuConfig): FeishuDraft {
   return {
     enabled: conf.enabled,
@@ -369,6 +413,13 @@ function draftFromFeishuConfig(conf: FeishuConfig): FeishuDraft {
     my_user_id: conf.my_user_id,
     bot_name: conf.bot_name,
     enable_memory: conf.enable_memory,
+  };
+}
+
+function draftFromFeishuMultiBotConfig(botKey: string, input: unknown): FeishuMultiBotDraft {
+  return {
+    bot_key: botKey,
+    ...draftFromFeishuConfig(normalizeFeishuConfig(input)),
   };
 }
 
@@ -394,6 +445,52 @@ function buildFeishuPayload(draft: FeishuDraft): Record<string, unknown> {
     bot_name: draft.bot_name.trim(),
     enable_memory: draft.enable_memory,
   };
+}
+
+function extractFeishuMultiBotDrafts(input: unknown): FeishuMultiBotDraft[] {
+  const bots = extractFeishuMultiBotChildren(input);
+  return Object.entries(bots)
+    .sort(([a], [b]) => a.localeCompare(b))
+    .map(([key, value]) => draftFromFeishuMultiBotConfig(key, value));
+}
+
+function buildFeishuMultiBotPayload(drafts: FeishuMultiBotDraft[]): Record<string, unknown> {
+  const payload: Record<string, unknown> = {};
+  for (const item of drafts) {
+    const key = item.bot_key.trim();
+    if (!key) {
+      continue;
+    }
+    payload[key] = {
+      enabled: item.enabled,
+      enable_streaming: item.enable_streaming,
+      app_id: item.app_id.trim(),
+      app_secret: item.app_secret.trim(),
+      encrypt_key: item.encrypt_key.trim(),
+      verification_token: item.verification_token.trim(),
+      chat_id: item.chat_id.trim(),
+      allow_from: normalizeAllowFromText(item.allow_from),
+      group_digital_avatar: item.group_digital_avatar,
+      my_user_id: item.my_user_id.trim(),
+      bot_name: item.bot_name.trim(),
+    };
+  }
+  return payload;
+}
+
+function isFeishuMultiBotValid(drafts: FeishuMultiBotDraft[]): boolean {
+  if (drafts.length === 0) {
+    return false;
+  }
+  const keySet = new Set<string>();
+  for (const item of drafts) {
+    const key = item.bot_key.trim();
+    if (!key || keySet.has(key) || !item.app_id.trim() || !item.app_secret.trim()) {
+      return false;
+    }
+    keySet.add(key);
+  }
+  return true;
 }
 
 function normalizeXiaoyiConfig(input: unknown): XiaoyiConfig {
@@ -736,8 +833,12 @@ export function ChannelsPanel({ isConnected }: ChannelsPanelProps) {
 
   const [feishuConfig, setFeishuConfig] = useState<FeishuConfig>(DEFAULT_FEISHU_CONF);
   const [draft, setDraft] = useState<FeishuDraft>(draftFromFeishuConfig(DEFAULT_FEISHU_CONF));
+  const [feishuMultiBotsConfig, setFeishuMultiBotsConfig] = useState<FeishuMultiBotDraft[]>([]);
   const [visibleFields, setVisibleFields] = useState<Record<string, boolean>>({});
+  const [feishuMultiVisibleFields, setFeishuMultiVisibleFields] = useState<Record<string, boolean>>({});
   const [feishuLoading, setFeishuLoading] = useState(false);
+  const [feishuMode, setFeishuMode] = useState<FeishuMode>('single');
+  const [feishuMultiBots, setFeishuMultiBots] = useState<FeishuMultiBotDraft[]>([]);
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
   const [success, setSuccess] = useState<string | null>(null);
@@ -821,9 +922,15 @@ export function ChannelsPanel({ isConnected }: ChannelsPanelProps) {
     try {
       const payload = await webRequest<{ config?: unknown }>('channel.feishu.get_conf');
       const normalized = normalizeFeishuConfig(payload?.config);
+      const multiBots = extractFeishuMultiBotDrafts(payload?.config);
+      const mode: FeishuMode = multiBots.length > 0 ? 'multi' : 'single';
+      setFeishuMode(mode);
+      setFeishuMultiBotsConfig(multiBots);
+      setFeishuMultiBots(multiBots);
       setFeishuConfig(normalized);
       setDraft(draftFromFeishuConfig(normalized));
       setVisibleFields({});
+      setFeishuMultiVisibleFields({});
     } catch (err) {
       setSaveError(err instanceof Error ? err.message : t('channels.errors.loadFeishu'));
     } finally {
@@ -1060,6 +1167,11 @@ export function ChannelsPanel({ isConnected }: ChannelsPanelProps) {
   }, [channels, loadState, t]);
 
   const hasConfigChanges = useMemo(() => {
+    if (feishuMode === 'multi') {
+      const current = JSON.stringify(buildFeishuMultiBotPayload(feishuMultiBots), null, 2);
+      const base = JSON.stringify(buildFeishuMultiBotPayload(feishuMultiBotsConfig), null, 2);
+      return current !== base;
+    }
     const baseDraft = draftFromFeishuConfig(feishuConfig);
     return (
       baseDraft.enabled !== draft.enabled ||
@@ -1075,7 +1187,7 @@ export function ChannelsPanel({ isConnected }: ChannelsPanelProps) {
       baseDraft.bot_name !== draft.bot_name ||
       baseDraft.enable_memory !== draft.enable_memory
     );
-  }, [draft, feishuConfig]);
+  }, [draft, feishuConfig, feishuMode, feishuMultiBots, feishuMultiBotsConfig]);
   const hasXiaoyiConfigChanges = useMemo(() => {
     const baseDraft = draftFromXiaoyiConfig(xiaoyiConfig);
     return (
@@ -1177,15 +1289,80 @@ export function ChannelsPanel({ isConnected }: ChannelsPanelProps) {
     }
   };
 
+  const handleFeishuModeChange = (mode: FeishuMode) => {
+    setFeishuMode(mode);
+    if (saveError) {
+      setSaveError(null);
+    }
+    if (success) {
+      setSuccess(null);
+    }
+  };
+
+  const handleFeishuMultiBotFieldChange = <K extends keyof FeishuMultiBotDraft>(
+    index: number,
+    field: K,
+    value: FeishuMultiBotDraft[K],
+  ) => {
+    setFeishuMultiBots((prev) => prev.map((item, i) => (i === index ? { ...item, [field]: value } : item)));
+    if (saveError) {
+      setSaveError(null);
+    }
+    if (success) {
+      setSuccess(null);
+    }
+  };
+
+  const handleAddFeishuMultiBot = () => {
+    const currentKeys = new Set(feishuMultiBots.map((item) => item.bot_key.trim()));
+    let index = feishuMultiBots.length + 1;
+    let suggested = `feishu_${index}`;
+    while (currentKeys.has(suggested)) {
+      index += 1;
+      suggested = `feishu_${index}`;
+    }
+    setFeishuMultiBots((prev) => [
+      ...prev,
+      {
+        ...draftFromFeishuConfig(DEFAULT_FEISHU_CONF),
+        bot_key: suggested,
+      },
+    ]);
+    if (saveError) {
+      setSaveError(null);
+    }
+    if (success) {
+      setSuccess(null);
+    }
+  };
+
+  const handleRemoveFeishuMultiBot = (index: number) => {
+    setFeishuMultiBots((prev) => prev.filter((_, i) => i !== index));
+    if (saveError) {
+      setSaveError(null);
+    }
+    if (success) {
+      setSuccess(null);
+    }
+  };
+
   const handleCancelConfig = () => {
     if (!hasConfigChanges) return;
+    setFeishuMode(feishuMultiBotsConfig.length > 0 ? 'multi' : 'single');
+    setFeishuMultiBots(feishuMultiBotsConfig);
     setDraft(draftFromFeishuConfig(feishuConfig));
     setSaveError(null);
     setSuccess(null);
+    setFeishuMultiVisibleFields({});
   };
 
   const toggleFieldVisible = (field: keyof FeishuDraft) => {
     setVisibleFields((prev) => ({ ...prev, [field]: !prev[field] }));
+  };
+
+  const toggleFeishuMultiFieldVisible = (index: number, field: keyof FeishuDraft) => {
+    const key = `${index}:${field}`;
+    setFeishuMultiVisibleFields((prev) => ({ ...prev, [key]: !prev[key] }));
   };
 
   const handleXiaoyiFieldChange = <K extends keyof XiaoyiDraft>(key: K, value: XiaoyiDraft[K]) => {
@@ -1345,12 +1522,38 @@ export function ChannelsPanel({ isConnected }: ChannelsPanelProps) {
 
   const handleSaveConfig = async () => {
     if (!hasConfigChanges || saving) return;
+    const originalMode: FeishuMode = feishuMultiBotsConfig.length > 0 ? 'multi' : 'single';
+    if (feishuMode !== originalMode) {
+      const shouldContinue = window.confirm(
+        feishuMode === 'multi'
+          ? t('channels.confirm.feishuSwitchToMulti')
+          : t('channels.confirm.feishuSwitchToSingle'),
+      );
+      if (!shouldContinue) {
+        return;
+      }
+    }
     setSaving(true);
     setSaveError(null);
     try {
-      const payload = buildFeishuPayload(draft);
+      let payload: Record<string, unknown>;
+      if (feishuMode === 'multi') {
+        if (!isFeishuMultiBotValid(feishuMultiBots)) {
+          setSaveError(t('channels.errors.feishuMultiBotInvalid'));
+          return;
+        }
+        payload = buildFeishuMultiBotPayload(feishuMultiBots);
+      } else {
+        payload = buildFeishuPayload(draft);
+      }
       const result = await webRequest<{ config?: unknown }>('channel.feishu.set_conf', payload);
       const normalized = normalizeFeishuConfig(result?.config);
+      const multiBots = extractFeishuMultiBotDrafts(result?.config);
+      const mode: FeishuMode = multiBots.length > 0 ? 'multi' : 'single';
+      setFeishuMode(mode);
+      setFeishuMultiBotsConfig(multiBots);
+      setFeishuMultiBots(multiBots);
+      setFeishuMultiVisibleFields({});
       setFeishuConfig(normalized);
       setDraft(draftFromFeishuConfig(normalized));
       setSuccess(t('channels.saved.feishu'));
@@ -1986,7 +2189,13 @@ export function ChannelsPanel({ isConnected }: ChannelsPanelProps) {
                           <button
                             type="button"
                             onClick={() => void handleSaveConfig()}
-                            disabled={!hasConfigChanges || saving || !isConnected || !draft.app_id.trim() || !draft.app_secret.trim()}
+                            disabled={
+                              !hasConfigChanges ||
+                              saving ||
+                              !isConnected ||
+                              (feishuMode === 'single' && (!draft.app_id.trim() || !draft.app_secret.trim())) ||
+                              (feishuMode === 'multi' && !isFeishuMultiBotValid(feishuMultiBots))
+                            }
                             className="btn primary !px-3 !py-1.5 disabled:opacity-50 disabled:cursor-not-allowed"
                           >
                             {saving ? t('common.saving') : t('common.save')}
@@ -2002,8 +2211,188 @@ export function ChannelsPanel({ isConnected }: ChannelsPanelProps) {
                     ) : null}
 
                     <div className="p-4 pt-3 flex-1 overflow-auto">
+                      <div className="mb-3 flex items-center gap-2 text-xs text-text-muted">
+                        <span className="mono">mode</span>
+                        <button
+                          type="button"
+                          onClick={() => handleFeishuModeChange('single')}
+                          disabled={saving}
+                          className={`btn !px-2 !py-1 ${feishuMode === 'single' ? 'primary' : ''} disabled:opacity-50 disabled:cursor-not-allowed`}
+                        >
+                          single
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => handleFeishuModeChange('multi')}
+                          disabled={saving}
+                          className={`btn !px-2 !py-1 ${feishuMode === 'multi' ? 'primary' : ''} disabled:opacity-50 disabled:cursor-not-allowed`}
+                        >
+                          multi
+                        </button>
+                      </div>
                       {feishuLoading ? (
                         <div className="text-sm text-text-muted">{t('channels.loading.feishu')}</div>
+                      ) : feishuMode === 'multi' ? (
+                        <div className="space-y-4">
+                          <div className="flex items-center justify-between">
+                            <div className="text-xs text-text-muted">{t('channels.notices.feishuMultiBotFormHint')}</div>
+                            <button
+                              type="button"
+                              onClick={handleAddFeishuMultiBot}
+                              disabled={saving}
+                              className="btn !px-2 !py-1 disabled:opacity-50 disabled:cursor-not-allowed"
+                            >
+                              {t('channels.actions.addFeishuBot')}
+                            </button>
+                          </div>
+                          {feishuMultiBots.length === 0 ? (
+                            <div className="rounded-md border border-border px-3 py-2 text-xs text-text-muted">
+                              {t('channels.notices.feishuMultiBotEmpty')}
+                            </div>
+                          ) : null}
+                          {feishuMultiBots.map((bot, index) => (
+                            <div key={`${bot.bot_key}-${index}`} className="rounded-md border border-border bg-card">
+                              <div className="flex items-center justify-between border-b border-border px-4 py-2">
+                                <div className="mono text-xs text-text-muted">bot #{index + 1}</div>
+                                <button
+                                  type="button"
+                                  onClick={() => handleRemoveFeishuMultiBot(index)}
+                                  disabled={saving}
+                                  className="btn !px-2 !py-1 text-err disabled:opacity-50 disabled:cursor-not-allowed"
+                                >
+                                  {t('channels.actions.removeFeishuBot')}
+                                </button>
+                              </div>
+                              <table className="w-full text-sm">
+                                <tbody>
+                                  {(['enabled', 'enable_streaming'] as const).map((field) => (
+                                    <tr key={field} className="border-t border-border first:border-t-0 even:bg-secondary/10">
+                                      <td className="px-4 py-2.5 align-middle mono text-xs text-text-muted w-[32%]">{field}</td>
+                                      <td className="px-4 py-2.5 align-middle">
+                                        <button
+                                          type="button"
+                                          role="switch"
+                                          aria-checked={bot[field]}
+                                          onClick={() => handleFeishuMultiBotFieldChange(index, field, !bot[field])}
+                                          className={`relative inline-flex h-5 w-9 flex-shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 focus:outline-none ${
+                                            bot[field] ? 'bg-ok' : 'bg-secondary'
+                                          }`}
+                                        >
+                                          <span
+                                            className={`pointer-events-none inline-block h-4 w-4 transform rounded-full bg-white shadow transition duration-200 ${
+                                              bot[field] ? 'translate-x-4' : 'translate-x-0'
+                                            }`}
+                                          />
+                                        </button>
+                                      </td>
+                                    </tr>
+                                  ))}
+                                  <tr className="border-t border-border first:border-t-0 even:bg-secondary/10">
+                                    <td className="px-4 py-2.5 align-middle mono text-xs text-text-muted w-[32%]">bot_key</td>
+                                    <td className="px-4 py-2.5 break-all text-[13px] align-middle">
+                                      <input
+                                        type="text"
+                                        value={bot.bot_key}
+                                        onChange={(e) => handleFeishuMultiBotFieldChange(index, 'bot_key', e.target.value)}
+                                        placeholder="feishu_1"
+                                        className="w-full rounded-md border border-border bg-bg px-3 py-2 text-[13px] outline-none focus:border-accent"
+                                      />
+                                    </td>
+                                  </tr>
+                                  {(['app_id', 'app_secret', 'encrypt_key', 'verification_token', 'chat_id'] as const).map((field) => (
+                                    <tr key={field} className="border-t border-border first:border-t-0 even:bg-secondary/10">
+                                      <td className="px-4 py-2.5 align-middle mono text-xs text-text-muted w-[32%]">{field}</td>
+                                      <td className="px-4 py-2.5 break-all text-[13px] align-middle">
+                                        <div className="relative">
+                                          <input
+                                            type={isSensitiveField(field) && !feishuMultiVisibleFields[`${index}:${field}`] ? 'password' : 'text'}
+                                            value={bot[field]}
+                                            onChange={(e) => handleFeishuMultiBotFieldChange(index, field, e.target.value)}
+                                            placeholder={field === 'chat_id' ? t('channels.placeholders.chatId') : t('channels.placeholders.configValue')}
+                                            className={`w-full rounded-md border border-border bg-bg px-3 py-2 text-[13px] outline-none focus:border-accent ${
+                                              isSensitiveField(field) ? 'pr-10' : ''
+                                            }`}
+                                          />
+                                          {isSensitiveField(field) ? (
+                                            <button
+                                              type="button"
+                                              onClick={() => toggleFeishuMultiFieldVisible(index, field)}
+                                              className="channels-panel__visibility-toggle"
+                                              aria-label={feishuMultiVisibleFields[`${index}:${field}`] ? t('channels.hideValue') : t('channels.showValue')}
+                                              title={feishuMultiVisibleFields[`${index}:${field}`] ? t('channels.hideValue') : t('channels.showValue')}
+                                            >
+                                              <VisibilityIcon visible={Boolean(feishuMultiVisibleFields[`${index}:${field}`])} />
+                                            </button>
+                                          ) : null}
+                                        </div>
+                                      </td>
+                                    </tr>
+                                  ))}
+                                  <tr className="border-t border-border first:border-t-0 even:bg-secondary/10">
+                                    <td className="px-4 py-2.5 align-top mono text-xs text-text-muted w-[32%]">allow_from</td>
+                                    <td className="px-4 py-2.5 break-all text-[13px] align-middle">
+                                      <textarea
+                                        value={bot.allow_from}
+                                        onChange={(e) => handleFeishuMultiBotFieldChange(index, 'allow_from', e.target.value)}
+                                        placeholder={t('channels.placeholders.ids')}
+                                        rows={4}
+                                        className="w-full rounded-md border border-border bg-bg px-3 py-2 text-[13px] outline-none focus:border-accent resize-y"
+                                      />
+                                    </td>
+                                  </tr>
+                                  <tr className="border-t border-border first:border-t-0 even:bg-secondary/10">
+                                    <td className="px-4 py-2.5 align-middle mono text-xs text-text-muted w-[32%]">group_digital_avatar</td>
+                                    <td className="px-4 py-2.5 align-middle">
+                                      <button
+                                        type="button"
+                                        role="switch"
+                                        aria-checked={bot.group_digital_avatar}
+                                        onClick={() => handleFeishuMultiBotFieldChange(index, 'group_digital_avatar', !bot.group_digital_avatar)}
+                                        className={`relative inline-flex h-5 w-9 flex-shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 focus:outline-none ${
+                                          bot.group_digital_avatar ? 'bg-ok' : 'bg-secondary'
+                                        }`}
+                                      >
+                                        <span
+                                          className={`pointer-events-none inline-block h-4 w-4 transform rounded-full bg-white shadow transition duration-200 ${
+                                            bot.group_digital_avatar ? 'translate-x-4' : 'translate-x-0'
+                                          }`}
+                                        />
+                                      </button>
+                                    </td>
+                                  </tr>
+                                  {bot.group_digital_avatar && (
+                                    <>
+                                      <tr className="border-t border-border first:border-t-0 even:bg-secondary/10">
+                                        <td className="px-4 py-2.5 align-middle mono text-xs text-text-muted w-[32%]">my_user_id</td>
+                                        <td className="px-4 py-2.5 break-all text-[13px] align-middle">
+                                          <input
+                                            type="text"
+                                            value={bot.my_user_id}
+                                            onChange={(e) => handleFeishuMultiBotFieldChange(index, 'my_user_id', e.target.value)}
+                                            placeholder={t('channels.placeholders.employeeIds')}
+                                            className="w-full rounded-md border border-border bg-bg px-3 py-2 text-[13px] outline-none focus:border-accent"
+                                          />
+                                        </td>
+                                      </tr>
+                                      <tr className="border-t border-border first:border-t-0 even:bg-secondary/10">
+                                        <td className="px-4 py-2.5 align-middle mono text-xs text-text-muted w-[32%]">bot_name</td>
+                                        <td className="px-4 py-2.5 break-all text-[13px] align-middle">
+                                          <input
+                                            type="text"
+                                            value={bot.bot_name}
+                                            onChange={(e) => handleFeishuMultiBotFieldChange(index, 'bot_name', e.target.value)}
+                                            placeholder={t('channels.placeholders.configValue')}
+                                            className="w-full rounded-md border border-border bg-bg px-3 py-2 text-[13px] outline-none focus:border-accent"
+                                          />
+                                        </td>
+                                      </tr>
+                                    </>
+                                  )}
+                                </tbody>
+                              </table>
+                            </div>
+                          ))}
+                        </div>
                       ) : (
                         <table className="w-full text-sm">
                           <tbody>

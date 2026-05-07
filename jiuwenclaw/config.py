@@ -136,6 +136,16 @@ def update_channel_in_config(channel_id: str, conf: dict[str, Any]) -> None:
     _dump_yaml_round_trip(_current_config_yaml_path(), data)
 
 
+def replace_channel_in_config(channel_id: str, conf: dict[str, Any]) -> None:
+    """整段替换 channels[channel_id] 并写回。"""
+    data = _load_yaml_round_trip(_CONFIG_YAML_PATH)
+    if "channels" not in data:
+        data["channels"] = {}
+    channels = data["channels"]
+    channels[channel_id] = dict(conf)
+    _dump_yaml_round_trip(_CONFIG_YAML_PATH, data)
+
+
 def update_channel_subsection_in_config(
     channel_id: str,
     subsection_id: str,

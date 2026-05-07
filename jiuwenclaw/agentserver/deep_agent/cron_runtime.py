@@ -212,7 +212,7 @@ def _extract_legacy_params(
     context_channel = str((context.channel_id if context else "") or "").strip()
     context_target = ""
     if context_channel:
-        if context_channel.startswith("feishu_enterprise:"):
+        if context_channel.startswith("feishu:"):
             context_target = normalize_target_channel_id(
                 context_channel,
                 default=CronTargetChannel.WEB.value,

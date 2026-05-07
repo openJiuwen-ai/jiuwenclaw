@@ -350,7 +350,17 @@
       "wechat": "微信配置已保存"
     },
     "notices": {
-      "wechatAutoLogin": "已启用且 bot_token 为空时，点击「保存」后将自动弹出扫码。若无「保存」按钮（与后端已一致），可临时切换 auto_login 或微调任一字段后再保存；再次扫码请清空 bot_token 后保存。"
+      "wechatAutoLogin": "已启用且 bot_token 为空时，点击「保存」后将自动弹出扫码。若无「保存」按钮（与后端已一致），可临时切换 auto_login 或微调任一字段后再保存；再次扫码请清空 bot_token 后保存。",
+      "feishuMultiBotFormHint": "多 Bot 模式：请在下方逐个配置 bot，bot_key 必须唯一。",
+      "feishuMultiBotEmpty": "当前还没有 bot，点击“新增 bot”开始配置。"
+    },
+    "actions": {
+      "addFeishuBot": "新增 bot",
+      "removeFeishuBot": "删除 bot"
+    },
+    "confirm": {
+      "feishuSwitchToMulti": "保存后将切换为多 Bot 模式，并覆盖当前单 Bot 配置。是否继续？",
+      "feishuSwitchToSingle": "保存后将切换为单 Bot 模式，并删除当前多 Bot 子配置。是否继续？"
     },
     "wechatLogin": {
       "title": "微信扫码登录（iLink）",
@@ -384,7 +394,8 @@
       "loadWecom": "获取企业微信配置失败",
       "loadWechat": "获取微信配置失败",
       "unbindWechat": "微信解绑失败",
-      "saveGeneric": "保存失败，请稍后重试"
+      "saveGeneric": "保存失败，请稍后重试",
+      "feishuMultiBotInvalid": "多 Bot 配置不合法：请确保 bot_key、app_id、app_secret 均已填写，且 bot_key 不重复。"
     }
   },
   "config": {

@@ -107,6 +107,35 @@ class ChannelManager(ABC):
         """根据 channel_id 获取 Channel."""
         return self._channels.get(channel_id)
 
+    def _resolve_dispatch_channel_id(self, channel_id: str) -> str:
+        """robot_messages 派发用的 channel_id。
+
+        多 bot 模式下仅注册 ``feishu:<app_id>``，若消息仍携带裸 ``feishu``（cron/心跳等遗留或 LLM 填写），
+        在**只存在一个** ``feishu:*`` 实例时解析到该实例，避免静默丢消息。
+        多个 ``feishu:*`` 时不猜测，保持原样以便走原有告警路径。
+        """
+        cid = str(channel_id or "").strip()
+        if cid in self._channels:
+            return cid
+        if cid != "feishu":
+            return cid
+        multi = [k for k in self._channels if isinstance(k, str) and k.startswith("feishu:")]
+        if len(multi) == 1:
+            resolved = multi[0]
+            logger.info(
+                "[ChannelManager] resolve bare feishu to registered multi-bot channel: %s -> %s",
+                cid,
+                resolved,
+            )
+            return resolved
+        if len(multi) > 1:
+            logger.warning(
+                "[ChannelManager] bare feishu is ambiguous (%d feishu:* channels); "
+                "use feishu:<app_id> in cron targets / heartbeat.target",
+                len(multi),
+            )
+        return cid
+
     @property
     def enabled_channels(self) -> list[str]:
         """当前已注册的 Channel 标识列表."""
@@ -162,20 +191,21 @@ class ChannelManager(ABC):
                     "[ChannelManager] 从 robot_messages 取出，准备派发: id=%s channel_id=%s type=%s",
                     msg.id, msg.channel_id, msg.type,
                 )
-                channel = self._channels.get(msg.channel_id)
+                dispatch_id = self._resolve_dispatch_channel_id(msg.channel_id)
+                channel = self._channels.get(dispatch_id)
                 if channel:
                     try:
                         await channel.send(msg)
                         logger.info(
                             "[ChannelManager] 已派发到 Channel: channel_id=%s id=%s",
-                            msg.channel_id, msg.id,
+                            dispatch_id, msg.id,
                         )
                     except Exception as e:
-                        logger.error("send to channel %s: %s", msg.channel_id, e, exc_info=True)
+                        logger.error("send to channel %s: %s", dispatch_id, e, exc_info=True)
                 else:
                     logger.warning(
                         "[ChannelManager] 未找到 Channel，丢弃 robot_messages: channel_id=%s id=%s",
-                        msg.channel_id, msg.id,
+                        dispatch_id, msg.id,
                     )
             except asyncio.CancelledError:
                 break

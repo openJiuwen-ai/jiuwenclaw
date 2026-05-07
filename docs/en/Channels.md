@@ -236,17 +236,25 @@ permissions:
 | `enable_memory` | Enable group chat memory. When on, the bot can read and search local memory files in group chats |
 | `owner_scopes` | Tool permissions scoped by `channel_id` + `user_id`. Supports `allow` / `deny`; `ask` is automatically downgraded to `deny` in avatar mode. Web UI configuration is recommended |
 
-## 10. Multiple Feishu bots (`feishu_enterprise`)
+## 10. Multiple Feishu bots (`feishu`)
 
-Use `channels.feishu_enterprise` when one JiuwenClaw instance must serve **multiple Feishu apps** (multiple bots).
+Use keyed bot configs under `channels.feishu` when one JiuwenClaw instance must serve **multiple Feishu apps** (multiple bots).
 
-Each bot is a separate channel; `channel_id` looks like `feishu_enterprise:<app_id>`.
+Each bot is a separate channel; `channel_id` looks like `feishu:<app_id>`.
 
-Configure only via `~/.jiuwenclaw/config/config.yaml`:
+> ⚠️ **Mutual exclusion rule**: single-bot and multi-bot configs cannot coexist.  
+> - Single bot: configure top-level fields under `channels.feishu` such as `app_id`/`app_secret`/`enabled`  
+> - Multi bot: configure only keyed children under `channels.feishu.<bot_key>` (for example `bot_a`, `bot_b`)  
+> If both styles are present at the same time, the service will fail to start.
+
+You can configure multiple bots either from the Web UI or by editing the config file:
+
+- Web UI: go to **Channels -> Feishu**, add multiple bot entries, then save/enable each one.
+- Manual: edit `~/.jiuwenclaw/config/config.yaml`.
 
 ``````
 channels:
-  feishu_enterprise:
+  feishu:
     bot_a:
       app_id: "cli_xxx"
       app_secret: "xxx"
@@ -283,7 +291,7 @@ channels:
 ### vs single `feishu`
 
 - `feishu`: one channel, `channel_id` is always `feishu`.
-- `feishu_enterprise`: multiple channels, one per bot (`feishu_enterprise:<app_id>`).
+- `feishu` multi-bot: multiple channels, one per bot (`feishu:<app_id>`).
 - Session state is tracked per bot so bots do not overwrite each other.
 
 # DingTalk

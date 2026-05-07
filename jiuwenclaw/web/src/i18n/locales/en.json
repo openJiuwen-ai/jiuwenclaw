@@ -350,8 +350,13 @@
       "wecom": "WeCom settings saved",
       "wechat": "WeChat settings saved"
     },
-    "notices": {
-      "wechatAutoLogin": "When enabled with an empty bot_token, Save opens the QR dialog. If Save is disabled (already in sync), toggle auto_login or tweak any field, then Save. To scan again, clear bot_token and Save."
+    "actions": {
+      "addFeishuBot": "Add bot",
+      "removeFeishuBot": "Remove bot"
+    },
+    "confirm": {
+      "feishuSwitchToMulti": "Saving will switch to multi-bot mode and overwrite the current single-bot configuration. Continue?",
+      "feishuSwitchToSingle": "Saving will switch to single-bot mode and remove the current multi-bot sub-configurations. Continue?"
     },
     "wechatLogin": {
       "title": "WeChat QR login (iLink)",
@@ -385,7 +390,13 @@
       "loadWecom": "Failed to load WeCom settings",
       "loadWechat": "Failed to load WeChat settings",
       "unbindWechat": "Failed to unlink WeChat",
-      "saveGeneric": "Save failed, please try again later"
+      "saveGeneric": "Save failed, please try again later",
+      "feishuMultiBotInvalid": "Invalid multi-bot configuration. Ensure bot_key, app_id and app_secret are filled and bot_key values are unique."
+    },
+    "notices": {
+      "wechatAutoLogin": "When enabled with an empty bot_token, Save opens the QR dialog. If Save is disabled (already in sync), toggle auto_login or tweak any field, then Save. To scan again, clear bot_token and Save.",
+      "feishuMultiBotFormHint": "Multi-bot mode: configure each bot in the form below. bot_key must be unique.",
+      "feishuMultiBotEmpty": "No bots configured yet. Click \"Add bot\" to create one."
     }
   },
   "config": {

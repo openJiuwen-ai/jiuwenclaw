@@ -43,7 +43,7 @@ class FeishuConfig(BaseModel):
     enable_streaming: bool = True  # 是否开启流式/过程消息下发
     chat_id: str = ""  # 可选：固定推送目标 chat_id（群聊 oc_xxx 或个人 open_id）
     channel_id: str = "feishu"  # ChannelManager 路由键，支持多实例
-    bot_key: str = ""  # 企业飞书多 bot 配置键（仅 feishu_enterprise 使用）
+    bot_key: str = ""  # 飞书多 bot 配置键（仅多 bot 场景使用）
     # 收消息时写入 config.yaml，用于无 metadata 时的回发兜底（与 session_id 解耦）
     last_chat_id: str = ""
     last_open_id: str = ""
@@ -2211,12 +2211,12 @@ class FeishuChannel(BaseChannel):
                 except Exception:
                     # 不影响正常收消息
                     pass
-            elif self.channel_id.startswith("feishu_enterprise:") and self.config.bot_key:
+            elif self.channel_id.startswith("feishu:") and self.config.bot_key:
                 try:
                     from jiuwenclaw.config import update_channel_subsection_in_config
 
                     update_channel_subsection_in_config(
-                        "feishu_enterprise",
+                        "feishu",
                         self.config.bot_key,
                         {
                             "last_chat_id": getattr(message, "chat_id", None) or "",

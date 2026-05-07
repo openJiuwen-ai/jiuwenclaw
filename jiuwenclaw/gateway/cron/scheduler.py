@@ -379,6 +379,12 @@ class CronSchedulerService:
                 state.error = str(exc)
             finally:
                 state.finished_at = self._now_fn()
+                # 已发过占位后必须能补发一条终态；异常路径往往未写入 result_text，若不填补则 push_update 永远不会调度。
+                if state.placeholder_sent and not state.result_text:
+                    if state.error:
+                        state.result_text = f"[cron] 执行失败：{state.error}"
+                    elif state.status == "failed":
+                        state.result_text = "[cron] 任务执行失败（无详细错误）"
                 # if placeholder already sent, push update immediately
                 if state.placeholder_sent and not state.pushed_final and state.result_text:
                     logger.info(
@@ -485,12 +491,26 @@ class CronSchedulerService:
         if not channel_id:
             return
 
-        # 企业飞书：优先用作业里绑定的 SessionMap session_id（feishu::chat_id::bot_id::...），
+        # 飞书多 bot：优先用作业里绑定的 SessionMap session_id（feishu::chat_id::bot_id::...），
         # 避免多群共用 bot 时误用 config 中的 last_*（最近一条消息的会话）。
         metadata: dict | None = None
         msg_session_id: str | None = None
         routing_sid = str(getattr(job, "session_id", None) or "").strip()
-        if channel_id.startswith("feishu_enterprise:") and routing_sid and "::" in routing_sid:
+
+        # 后续 group_digital_avatar / feishu: 子配置依赖 channels_cfg；若仅从 session_id 提前填了 metadata，
+        # 也必须加载配置，否则会 UnboundLocalError。
+        channels_cfg: dict[str, Any] = {}
+        ch_cfg: dict[str, Any] = {}
+        try:
+            from jiuwenclaw.config import get_config_raw
+
+            cfg = get_config_raw() or {}
+            channels_cfg = cfg.get("channels") or {}
+            ch_cfg = channels_cfg.get(channel_id) or {}
+        except Exception:
+            pass
+
+        if channel_id.startswith("feishu:") and routing_sid and "::" in routing_sid:
             parts = routing_sid.split("::")
             if len(parts) >= 3 and parts[0] == "feishu":
                 chat_part = str(parts[1] or "").strip()
@@ -505,14 +525,7 @@ class CronSchedulerService:
         # 针对 feishu/xiaoyi/whatsapp：从 config.yaml 取最近一次可回发的平台身份，写入 metadata
         # 这样即使 cron 推送没有 session_id，也能让 Channel.send 正常路由到对应会话。
         if metadata is None:
-            channels_cfg: dict = {}
-            ch_cfg: dict = {}
             try:
-                from jiuwenclaw.config import get_config_raw
-
-                cfg = get_config_raw() or {}
-                channels_cfg = cfg.get("channels") or {}
-                ch_cfg = channels_cfg.get(channel_id) or {}
                 if channel_id == "feishu":
                     last_chat_id = str(ch_cfg.get("last_chat_id") or "").strip()
                     last_open_id = str(ch_cfg.get("last_open_id") or "").strip()
@@ -521,9 +534,9 @@ class CronSchedulerService:
                             "feishu_chat_id": last_chat_id,
                             "feishu_open_id": last_open_id,
                         }
-                elif channel_id.startswith("feishu_enterprise:"):
+                elif channel_id.startswith("feishu:"):
                     app_id = channel_id.split(":", 1)[1].strip()
-                    enterprise_cfg = channels_cfg.get("feishu_enterprise") or {}
+                    enterprise_cfg = channels_cfg.get("feishu") or {}
                     if isinstance(enterprise_cfg, dict) and app_id:
                         for _, bot_cfg in enterprise_cfg.items():
                             if not isinstance(bot_cfg, dict):
@@ -587,9 +600,9 @@ class CronSchedulerService:
         elif channel_id == "feishu":
             _group_digital_avatar = bool(ch_cfg.get("group_digital_avatar") or False)
             _my_user_id = str(ch_cfg.get("my_user_id") or "").strip()
-        elif channel_id.startswith("feishu_enterprise:"):
+        elif channel_id.startswith("feishu:"):
             app_id = channel_id.split(":", 1)[1].strip()
-            enterprise_cfg = channels_cfg.get("feishu_enterprise") or {}
+            enterprise_cfg = channels_cfg.get("feishu") or {}
             if isinstance(enterprise_cfg, dict) and app_id:
                 for _, bot_cfg in enterprise_cfg.items():
                     if not isinstance(bot_cfg, dict):
@@ -618,7 +631,7 @@ class CronSchedulerService:
                 metadata["chat_type"] = "group"
                 if channel_id == "wecom":
                     metadata["reply_wecom_user_id"] = _my_user_id
-                elif channel_id == "feishu" or channel_id.startswith("feishu_enterprise:"):
+                elif channel_id == "feishu" or channel_id.startswith("feishu:"):
                     metadata["reply_candidate_feishu_open_id"] = _my_user_id
                 metadata["reply_candidate_reason"] = "cron_target_user"
                 metadata["reply_target_name"] = _my_user_id

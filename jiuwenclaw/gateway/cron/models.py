@@ -17,10 +17,10 @@ class CronTargetChannel(str, Enum):
     # DINGTALK = "dingtalk"
 
 
-def _feishu_enterprise_app_id(s: str) -> str:
-    """feishu_enterprise 通道键仅为 feishu_enterprise:<app_id>；忽略 :chat: 等后续后缀。"""
+def _feishu_app_id(s: str) -> str:
+    """feishu 通道键仅为 feishu:<app_id>；忽略 :chat: 等后续后缀。"""
     parts = str(s or "").strip().split(":")
-    if len(parts) < 2 or parts[0].strip().lower() != "feishu_enterprise":
+    if len(parts) < 2 or parts[0].strip().lower() != "feishu":
         return ""
     return parts[1].strip()
 
@@ -29,8 +29,8 @@ def is_valid_target_channel_id(raw: str) -> bool:
     s = str(raw or "").strip()
     if not s:
         return False
-    if s.startswith("feishu_enterprise:"):
-        return bool(_feishu_enterprise_app_id(s))
+    if s.startswith("feishu:"):
+        return bool(_feishu_app_id(s))
     try:
         CronTargetChannel(s.lower())
         return True
@@ -42,16 +42,86 @@ def normalize_target_channel_id(raw: str, *, default: str = CronTargetChannel.WE
     s = str(raw or "").strip()
     if not s:
         return default
-    if s.startswith("feishu_enterprise:"):
-        app_id = _feishu_enterprise_app_id(s)
+    if s.startswith("feishu:"):
+        app_id = _feishu_app_id(s)
         if app_id:
-            return f"feishu_enterprise:{app_id}"
+            return f"feishu:{app_id}"
         return default
     low = s.lower()
     try:
         return CronTargetChannel(low).value
     except ValueError:
         return default
+
+
+# 与 app_gateway 中单/多飞书 Bot 判别一致（子节点需含 app_id / app_secret / enabled 之一）
+_FEISHU_SINGLE_BOT_TOP_KEYS = frozenset(
+    {
+        "app_id",
+        "app_secret",
+        "encrypt_key",
+        "verification_token",
+        "allow_from",
+        "enable_streaming",
+        "chat_id",
+        "enabled",
+        "send_file_allowed",
+        "group_digital_avatar",
+        "my_user_id",
+        "my_open_id",
+        "bot_name",
+        "enable_memory",
+        "message_merge_window_ms",
+        "last_chat_id",
+        "last_open_id",
+        "last_message_id",
+    }
+)
+
+
+def feishu_multi_bot_app_ids_from_config(feishu_conf: dict[str, Any]) -> list[str]:
+    """列出 ``channels.feishu`` 下多 bot 子区块的 ``app_id``（不含单 bot 顶层扁平形态）。"""
+    out: list[str] = []
+    if not isinstance(feishu_conf, dict):
+        return out
+    for bot_key, bot_raw in feishu_conf.items():
+        if not isinstance(bot_key, str) or not bot_key.strip():
+            continue
+        if bot_key in _FEISHU_SINGLE_BOT_TOP_KEYS:
+            continue
+        bot = bot_raw if isinstance(bot_raw, dict) else None
+        if bot is None:
+            continue
+        if not any(k in bot for k in ("app_id", "app_secret", "enabled")):
+            continue
+        aid = str(bot.get("app_id") or "").strip()
+        if aid:
+            out.append(aid)
+    return out
+
+
+def upgrade_bare_feishu_target_for_multi_bot_config(targets: str) -> str:
+    """合并 enterprise 与飞书后：裸 ``feishu`` 仅在对「多 bot 配置且唯一子 bot」时可改为 ``feishu:<app_id>``。
+
+    - 单 bot 扁平 ``channels.feishu.app_id`` 仍用注册键 ``feishu``，此处不改写。
+    - 多 bot 若仅配一个子节点，与网关注册的 ``feishu:<app_id>`` 对齐，避免投递歧义。
+    """
+    t = str(targets or "").strip()
+    if t != CronTargetChannel.FEISHU.value:
+        return t
+    try:
+        from jiuwenclaw.config import get_config_raw
+
+        fc = (get_config_raw() or {}).get("channels") or {}
+        feishu_conf = fc.get("feishu")
+        if not isinstance(feishu_conf, dict):
+            return t
+        ids = feishu_multi_bot_app_ids_from_config(feishu_conf)
+        if len(ids) == 1:
+            return f"feishu:{ids[0]}"
+    except Exception:
+        return t
+    return t
 
 
 def _normalize_targets_str(raw: str) -> str:
@@ -98,7 +168,7 @@ class CronJob:
     # Target channel ID to push results to (e.g. "web").
     # JSON 字段名仍然叫 targets，用字符串保存频道 ID，兼容旧数据。
     targets: str = ""
-    # SessionMap 形态（如 feishu::chat_id::bot_id::...），仅 feishu_enterprise 投递用；由 AgentServer 上下文写入。
+    # SessionMap 形态（如 feishu::chat_id::bot_id::...），仅 feishu 多 bot 投递用；由 AgentServer 上下文写入。
     session_id: str | None = None
     created_at: float | None = None
     updated_at: float | None = None

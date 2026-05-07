@@ -361,7 +361,7 @@ gateway:
     concurrency: 1
     invoke_timeout_s: 60
 
-  # SessionMap 仅用于企业claw场景，如 feishu_enterprise 等通道：将平台身份映射为 Agent 的 session_id。
+  # SessionMap 用于多 bot 场景（如 channels.feishu.<bot_key>）：将平台身份映射为 Agent 的 session_id。
   # 取值：per_chat_bot（默认，同 chat+bot 共享会话）, per_chat_bot_user（按 user 分会话）
   session_map_scope: per_chat_bot
   # 会话列表存储模式：local（默认）或 remote。
@@ -396,8 +396,8 @@ channels:
     my_user_id: ""
     bot_name: ""
     enable_memory: false
-  feishu_enterprise:
-    # 企业飞书多 Bot 配置（每个 bot 会注册为独立 channel: feishu_enterprise:<app_id>）
+    # 多 Bot 配置示例（每个 bot 会注册为独立 channel: feishu:<app_id>）
+    # 注意：单 Bot（顶层 app_id/app_secret）与多 Bot（bot_a/bot_b...）配置不能并存。
     # bot_a:
     #   app_id:
     #   app_secret:

@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import Enum
+import re
 from typing import Any, Literal
 
 # ---------------------------------------------------------------------------
@@ -67,6 +68,13 @@ CONTROL_MESSAGE_TEXTS: frozenset[str] = frozenset(
     }
 )
 
+_NEW_SESSION_MENTION_ONLY_RE = re.compile(
+    r"^/new_session(?:\s+@[^\s]+)+$"
+)
+_LEADING_MENTIONS_RE = re.compile(
+    r"^(?:@[^\s]+\s+)+(.+)$"
+)
+
 
 class ParsedControlAction(str, Enum):
     """parse_channel_control_text 的判定结果。"""
@@ -98,7 +106,9 @@ def parse_channel_control_text(text: str) -> ParsedChannelControl:
     """解析单条用户文本是否为 /new_session、/mode、/switch、/skills list、/ls、/view 控制指令。
 
     - 含换行则视为非控制（与原 _handle_channel_control 一致）。
-    - /new_session 仅整行精确匹配为合法；带后缀为非法但仍为控制指令。
+    - /new_session 支持整行精确匹配，或仅追加 @mention 尾巴（如 /new_session @bot）。
+      同时支持前置 @mention（如 @bot /new_session）。
+      其它后缀为非法但仍为控制指令。
     - /mode 仅白名单整行合法；支持 agent|code|team 及四个直达模式值；其它以 /mode 开头且单行非法。
     - /switch 仅白名单整行合法；其它以 /switch 开头且单行非法。
     - /skills list 仅整行精确匹配（/skills 本身不再触发）。
@@ -111,7 +121,13 @@ def parse_channel_control_text(text: str) -> ParsedChannelControl:
         return ParsedChannelControl(ParsedControlAction.NONE)
     t = text.strip()
     normalized = " ".join(t.split())
+    m = _LEADING_MENTIONS_RE.match(normalized)
+    if m:
+        normalized = m.group(1).strip()
+        t = normalized
     if t == GatewaySlashCommand.NEW_SESSION.value:
+        return ParsedChannelControl(ParsedControlAction.NEW_SESSION_OK)
+    if _NEW_SESSION_MENTION_ONLY_RE.match(normalized):
         return ParsedChannelControl(ParsedControlAction.NEW_SESSION_OK)
     if t.startswith(GatewaySlashCommand.NEW_SESSION.value):
         return ParsedChannelControl(ParsedControlAction.NEW_SESSION_BAD)
@@ -147,6 +163,10 @@ def is_control_like_for_im_batching(text: str) -> bool:
         return False
     t = text.strip()
     normalized = " ".join(t.split())
+    m = _LEADING_MENTIONS_RE.match(normalized)
+    if m:
+        normalized = m.group(1).strip()
+        t = normalized
     if t in CONTROL_MESSAGE_TEXTS:
         return True
     if normalized == GatewaySlashCommand.SKILLS_LIST.value:

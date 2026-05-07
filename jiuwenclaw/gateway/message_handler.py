@@ -150,7 +150,7 @@ class MessageHandler(ABC):
         }
         # 使用 SessionMap 的 channel 族（由 config 中 gateway.session_map_scope 决定是否在 key 中含 user）
         self._session_map_channel_types = frozenset({
-            "feishu_enterprise",
+            "feishu",
         })
         self._channel_states: Dict[str, ChannelControlState] = {}
         self._session_map = SessionMap()

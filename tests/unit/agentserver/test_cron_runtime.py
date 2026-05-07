@@ -55,7 +55,7 @@ class _FakeCronTools:
 
 def test_extract_legacy_params_maps_implicit_web_to_context_channel() -> None:
     context = SimpleNamespace(
-        channel_id="feishu_enterprise:open_id:abc",
+        channel_id="feishu:open_id:abc",
         session_id="sess-1",
         metadata={"request_id": "req-1"},
     )
@@ -67,12 +67,12 @@ def test_extract_legacy_params_maps_implicit_web_to_context_channel() -> None:
 
     out = _extract_legacy_params(payload, context=context, require_schedule=True)
 
-    # normalize_target_channel_id keeps the canonical enterprise channel prefix.
-    assert out["targets"] == "feishu_enterprise:open_id"
+    # normalize_target_channel_id keeps the canonical multi-bot feishu channel prefix.
+    assert out["targets"] == "feishu:open_id"
 
 
 def test_extract_legacy_params_delivery_channel_takes_priority_over_targets() -> None:
-    context = SimpleNamespace(channel_id="feishu_enterprise:open_id:abc")
+    context = SimpleNamespace(channel_id="feishu:open_id:abc")
     payload = {
         "schedule": {"kind": "cron", "expr": "*/5 * * * *"},
         "payload": {"kind": "agentTurn", "message": "ping"},

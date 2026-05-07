@@ -34,6 +34,10 @@ parse_channel_control_text = _MOD.parse_channel_control_text
         ("", ParsedControlAction.NONE, None, None),
         ("hello", ParsedControlAction.NONE, None, None),
         ("/new_session", ParsedControlAction.NEW_SESSION_OK, None, None),
+        ("/new_session @jiuwenclaw-bot1", ParsedControlAction.NEW_SESSION_OK, None, None),
+        ("/new_session   @jiuwenclaw-bot1   @jiuwenclaw-bot2", ParsedControlAction.NEW_SESSION_OK, None, None),
+        ("@jiuwenclaw-bot1 /new_session", ParsedControlAction.NEW_SESSION_OK, None, None),
+        ("@jiuwenclaw-bot1 @jiuwenclaw-bot2 /new_session", ParsedControlAction.NEW_SESSION_OK, None, None),
         ("/new_session x", ParsedControlAction.NEW_SESSION_BAD, None, None),
         ("/mode agent", ParsedControlAction.MODE_OK, "agent", None),
         ("/mode code", ParsedControlAction.MODE_OK, "code", None),
@@ -88,6 +92,8 @@ def test_is_control_like_for_im_batching() -> None:
     assert is_control_like_for_im_batching("/switch plan")
     assert is_control_like_for_im_batching("/switch foo")
     assert is_control_like_for_im_batching("/new_sessionoops")
+    assert is_control_like_for_im_batching("/new_session @jiuwenclaw-bot1")
+    assert is_control_like_for_im_batching("@jiuwenclaw-bot1 /new_session")
     assert is_control_like_for_im_batching("/skills list")
     assert is_control_like_for_im_batching("/skills   list")
     assert not is_control_like_for_im_batching("/skills")

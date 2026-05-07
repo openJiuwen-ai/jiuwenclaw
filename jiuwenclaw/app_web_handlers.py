@@ -29,6 +29,7 @@ from jiuwenclaw.config import (
     update_default_models_in_config,
     update_heartbeat_in_config,
     update_channel_in_config,
+    replace_channel_in_config,
     update_browser_in_config,
     update_preferred_language_in_config,
     update_context_engine_enabled_in_config,
@@ -1445,7 +1446,9 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             await cm.set_conf("feishu", params)
             conf = cm.get_conf("feishu")
             try:
-                update_channel_in_config("feishu", conf)
+                # Feishu single/multi modes are mutually exclusive in one section.
+                # Replace full section to prevent stale keys from the other mode.
+                replace_channel_in_config("feishu", conf)
                 await _clear_agent_config_cache(_resolve(agent_client))
             except Exception as e:  # noqa: BLE001
                 logger.warning("[channel.feishu.set_conf] 写回 config.yaml 失败: %s", e)
