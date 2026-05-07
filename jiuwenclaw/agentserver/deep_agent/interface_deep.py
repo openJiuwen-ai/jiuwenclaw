@@ -135,7 +135,6 @@ from jiuwenclaw.agentserver.tools.acp_output_tools import get_acp_output_manager
 from jiuwenclaw.agentserver.tools.deepresearch_tools import (
     push_deepresearch_route,
     reset_deepresearch_route,
-    get_deepresearch_tools,
 )
 from jiuwenclaw.agentserver.tools.petal_search_tools import enable_petal_search, mcp_petal_search
 from jiuwenclaw.agentserver.tools.multi_session_toolkits import MultiSessionToolkit
@@ -1333,12 +1332,12 @@ class JiuWenClawDeepAdapter:
             rail = None
         return rail
 
-    def _create_sys_operation(self) -> SysOperation | None:
-        """Create a sys operation with workspace as working directory."""
+    @staticmethod
+    def _create_sys_operation() -> SysOperation | None:
+        """Create a sys operation."""
         try:
             sandbox_url = _sandbox_config.get("url", None)
             sandbox_type = _sandbox_config.get("type", None)
-            work_dir = self._workspace_dir or str(get_agent_root_dir())
             if sandbox_url and sandbox_type:
                 gateway_config = SandboxGatewayConfig(
                     isolation=SandboxIsolationConfig(container_scope=ContainerScope.SYSTEM),
@@ -1351,13 +1350,13 @@ class JiuWenClawDeepAdapter:
                 )
                 sysop_card = SysOperationCard(
                     mode=OperationMode.SANDBOX,
-                    work_config=LocalWorkConfig(work_dir=work_dir, shell_allowlist=None),
+                    work_config=LocalWorkConfig(shell_allowlist=None),
                     gateway_config=gateway_config,
                 )
             else:
                 sysop_card = SysOperationCard(
                     mode=OperationMode.LOCAL,
-                    work_config=LocalWorkConfig(work_dir=work_dir, shell_allowlist=None),
+                    work_config=LocalWorkConfig(shell_allowlist=None),
                 )
             result = Runner.resource_mgr.add_sys_operation(sysop_card)
             if result.is_err():
@@ -1384,16 +1383,8 @@ class JiuWenClawDeepAdapter:
         *,
         include_tools: bool = False,
         include_skill_body_tools: bool = True,
-        extra_skill_dir: str | None = None,
     ) -> SkillUseRail | None:
-        """Build SkillUseRail.
-        
-        Args:
-            config: React config dict
-            include_tools: Whether to include harness read_file/code/bash tools
-            include_skill_body_tools: Whether to include skill_tool/skill_complete tools
-            extra_skill_dir: Optional extra skill directory from extension hook
-        """
+        """Build SkillUseRail."""
         try:
             skill_mode = self._resolve_skill_mode(config)
             logger.info("[JiuWenClawDeepAdapter] current skill_mode: %s", skill_mode)
@@ -1406,15 +1397,8 @@ class JiuWenClawDeepAdapter:
                     max_bodies = int(react_cec["max_active_skill_bodies"])
                 except (TypeError, ValueError):
                     max_bodies = DEFAULT_MAX_ACTIVE_SKILL_BODIES
-            
-            # 合并技能目录：基础目录 + 扩展传入的额外目录
-            skills_dirs = [str(p) for p in get_agent_registered_skill_dirs()]
-            if extra_skill_dir:
-                skills_dirs.append(extra_skill_dir)
-                logger.info("[JiuWenClawDeepAdapter] extra_skill_dir added: %s", extra_skill_dir)
-            
             skill_rail_kwargs: dict[str, Any] = dict(
-                skills_dir=skills_dirs,
+                skills_dir=[str(p) for p in get_agent_registered_skill_dirs()],
                 skill_mode=skill_mode,
                 include_tools=include_tools,
             )
@@ -1615,12 +1599,12 @@ class JiuWenClawDeepAdapter:
 
     @staticmethod
     def _build_skill_protocol_prompt_rail() -> SkillProtocolPromptRail | None:
-        """Build SkillProtocolPromptRail: skills 段（skill_step）。"""
+        """Build SkillProtocolPromptRail: skills 段（skill_step_*）+ 用户任务 todo 段（todo_*）。"""
         try:
-            rail = SkillProtocolPromptRail()
+            rail = SkillProtocolPromptRail(include_user_todo_section=True)
             logger.info(
                 "[JiuWenClawDeepAdapter] SkillProtocolPromptRail create success "
-                "(plan: skill_step)"
+                "(plan: skill_step_* + todo_*)"
             )
             return rail
         except Exception as exc:
@@ -1631,12 +1615,12 @@ class JiuWenClawDeepAdapter:
 
     @staticmethod
     def _build_skill_compliance_rail() -> SkillComplianceRail | None:
-        """Build SkillComplianceRail：硬绑 skill_step.md / skill_step。"""
+        """Build SkillComplianceRail：硬绑 skill_step.md / skill_step_*。"""
         try:
             rail = SkillComplianceRail()
             logger.info(
                 "[JiuWenClawDeepAdapter] SkillComplianceRail create success "
-                "(skill_step.md / skill_step)"
+                "(skill_step.md / skill_step_*)"
             )
             return rail
         except Exception as exc:
@@ -1645,15 +1629,8 @@ class JiuWenClawDeepAdapter:
             )
             return None
 
-    def _build_runtime_prompt_rail(
-        self,
-        custom_home_dir: str | None = None,
-    ) -> RuntimePromptRail | None:
-        """Build RuntimePromptRail for per-model-call time/channel/runtime injection.
-        
-        Args:
-            custom_home_dir: Optional custom home directory for SOUL.md loading
-        """
+    def _build_runtime_prompt_rail(self) -> RuntimePromptRail | None:
+        """Build RuntimePromptRail for per-model-call time/channel/runtime injection."""
         try:
             default_channel = (
                 "acp" if self._is_acp_tool_profile(self._instance_overrides)
@@ -1667,10 +1644,7 @@ class JiuWenClawDeepAdapter:
                 workspace_dir=self._workspace_dir,
                 agent_id=self._agent_id,
                 service_id=self._service_id,
-                custom_home_dir=custom_home_dir,
             )
-            if custom_home_dir:
-                logger.info("[JiuWenClawDeepAdapter] custom_home_dir configured: %s", custom_home_dir)
             logger.info("[JiuWenClawDeepAdapter] RuntimePromptRail create success")
         except Exception as exc:
             logger.warning("[JiuWenClawDeepAdapter] RuntimePromptRail create failed: %s", exc)
@@ -1692,18 +1666,8 @@ class JiuWenClawDeepAdapter:
         return rail
 
     def _build_agent_rails(self, config: dict[str, Any], config_base: dict[str, Any], *,
-                           mode: str = "agent.plan",
-                           extra_skill_dir: str | None = None,
-                           custom_home_dir: str | None = None) -> list[Any]:
-        """Build DeepAgent rails consistently for cold start and hot reload.
-        
-        Args:
-            config: React config dict
-            config_base: Full config dict
-            mode: Agent mode (agent.plan, agent.fast, code)
-            extra_skill_dir: Optional extra skill directory from extension hook
-            custom_home_dir: Optional custom home directory from extension hook (for SOUL.md)
-        """
+                           mode: str = "agent.plan") -> list[Any]:
+        """Build DeepAgent rails consistently for cold start and hot reload."""
 
         @dataclass
         class _RailBuildInfo:
@@ -1717,11 +1681,7 @@ class JiuWenClawDeepAdapter:
         rail_infos = [
             # TelemetryRail - lowest priority, runs first for full coverage
             _RailBuildInfo("_telemetry_rail", self._build_telemetry_rail),
-            _RailBuildInfo(
-                "_runtime_prompt_rail",
-                self._build_runtime_prompt_rail,
-                {"custom_home_dir": custom_home_dir},
-            ),
+            _RailBuildInfo("_runtime_prompt_rail", self._build_runtime_prompt_rail),
             _RailBuildInfo("_response_prompt_rail", self._build_response_prompt_rail),
             _RailBuildInfo("_task_execution_rail", self._build_task_execution_rail),
             _RailBuildInfo("_stream_event_rail", self._build_stream_event_rail),
@@ -1775,7 +1735,6 @@ class JiuWenClawDeepAdapter:
                     "config": config,
                     "include_tools": self._skill_include_harness_fs_tools(),
                     "include_skill_body_tools": self._skill_include_skill_body_tools(),
-                    "extra_skill_dir": extra_skill_dir,
                 },
             ),
         )
@@ -1867,11 +1826,7 @@ class JiuWenClawDeepAdapter:
             if self._permission_rail is not None:
                 logger.info("[JiuWenClawDeepAdapter] _permission_rail newly created on hot-reload")
 
-    async def _get_current_agent_rails(
-        self,
-        config: dict[str, Any],
-        config_base: dict[str, Any] | None = None,
-    ) -> list[Any]:
+    def _get_current_agent_rails(self, config: dict[str, Any], config_base: dict[str, Any] | None = None) -> list[Any]:
         """Return rail instances that need to be re-initialized on hot reload.
 
         SkillUseRail, ContextEngineeringRail, and MemoryRail are rebuilt on config reload.
@@ -1879,29 +1834,6 @@ class JiuWenClawDeepAdapter:
         and are updated in-place where needed — they are NOT passed to configure()
         so their existing registered state is preserved without an uninit/init cycle.
         """
-        # 触发钩子获取扩展目录（与 create_instance 保持一致）
-        extra_skill_dir: str | None = None
-        custom_home_dir: str | None = None
-        try:
-            from jiuwenclaw.extensions.registry import ExtensionRegistry
-            from jiuwenclaw.schema.hooks_context import SystemPromptHookContext
-            from jiuwenclaw.schema import AgentServerHookEvents
-            
-            context = SystemPromptHookContext()
-            await ExtensionRegistry.get_instance().trigger(
-                AgentServerHookEvents.BEFORE_SYSTEM_PROMPT_BUILD, context
-            )
-            extra_skill_dir = context.skill_dir
-            custom_home_dir = context.home_dir
-            
-            logger.info(
-                "[JiuWenClawDeepAdapter] reload_agent_config: BEFORE_SYSTEM_PROMPT_BUILD triggered, "
-                "skill_dir=%s, home_dir=%s",
-                extra_skill_dir, custom_home_dir
-            )
-        except Exception as exc:
-            logger.warning("[JiuWenClawDeepAdapter] reload_agent_config hook trigger failed: %s", exc)
-
         # Apply in-place updates to skill_evolution_rail (no re-init needed).
         if self._skill_evolution_rail is not None:
             self._skill_evolution_rail.update_llm(self._model, config.get("model_name", "gpt-4"))
@@ -1913,17 +1845,7 @@ class JiuWenClawDeepAdapter:
             config,
             include_tools=self._skill_include_harness_fs_tools(),
             include_skill_body_tools=self._skill_include_skill_body_tools(),
-            extra_skill_dir=extra_skill_dir,
         )
-
-        # 更新 RuntimePromptRail 的 custom_home_dir（原地更新，无需重建）
-        if self._runtime_prompt_rail is not None:
-            self._runtime_prompt_rail.set_custom_home_dir(custom_home_dir)
-            if custom_home_dir:
-                logger.info(
-                    "[JiuWenClawDeepAdapter] RuntimePromptRail custom_home_dir updated on hot-reload: %s",
-                    custom_home_dir
-                )
 
         if not self._filesystem_rail_enabled_for_profile():
             self._filesystem_rail = None
@@ -1931,15 +1853,13 @@ class JiuWenClawDeepAdapter:
         self._update_permission_rail(config_base)
 
         # Update disabled_tools_rail config in-place (no re-init needed)
-        disabled_tools_rail_newly_created = False
+        disabled_list = config.get("disabled_tools", [])
         if self._disabled_tools_rail is not None:
-            disabled_list = config.get("disabled_tools", [])
             self._disabled_tools_rail.update_config(disabled_list)
-        else:
-            # 使用统一的 build 方法创建（与冷启动行为一致）
-            self._disabled_tools_rail = self._build_disabled_tools_rail(config)
+        elif disabled_list:
+            # First time enabling - create the rail
+            self._disabled_tools_rail = DisabledToolsRail(disabled_tools=disabled_list)
             if self._disabled_tools_rail is not None:
-                disabled_tools_rail_newly_created = True
                 logger.info("[JiuWenClawDeepAdapter] _disabled_tools_rail newly created on hot-reload")
 
         rails_list = []
@@ -1955,10 +1875,7 @@ class JiuWenClawDeepAdapter:
             rails_list.append(self._avatar_rail)
         if self._permission_rail is not None:
             rails_list.append(self._permission_rail)
-        # core会先卸载与rails_list同类的已注册rail，再加载rails_list中的rail。
-        # 但需要注意，这里不能传一个与已注册的rail相同的对象。否则core只会进行卸载，不会进行加载。
-        # 如果你要更新rail，就传一个新的对象；如果不要更新，就不传；如果需要仅卸载，就传原来的rail对象。
-        if disabled_tools_rail_newly_created and self._disabled_tools_rail is not None:
+        if self._disabled_tools_rail is not None:
             rails_list.append(self._disabled_tools_rail)
         return rails_list
 
@@ -2106,19 +2023,10 @@ class JiuWenClawDeepAdapter:
         except Exception as exc:
             logger.warning("[JiuWenClawDeepAdapter] AskUserQuestion tool registration failed: %s", exc)
 
-        # DeepResearch 执行工具
-        try:
-            for tool in get_deepresearch_tools():
-                Runner.resource_mgr.add_tool(tool)
-                tool_cards.append(tool.card)
-            logger.info(
-                "[JiuWenClawDeepAdapter] deepresearch tools registered successfully",
-            )
-        except Exception as exc:
-            logger.warning(
-                "[JiuWenClawDeepAdapter] deepresearch tools registration failed: %s",
-                exc,
-            )
+        # Session 级 todo 工具（TodoToolkit / SkillStepToolkit）改由
+        # SkillProtocolPromptRail.init() 跟随 rail 生命周期注册到 agent，
+        # 保证 prompt 中提到的 skill_step_* / todo_* 工具与 prompt section 同上同下。
+        # Team 成员的 SkillStepToolkit 由 TeamManager 在成员创建时单独注册，不走此路径。
 
         return tool_cards
 
@@ -2171,34 +2079,7 @@ class JiuWenClawDeepAdapter:
             permissions_cfg.get("enabled", True),
         )
 
-        # 触发 BEFORE_SYSTEM_PROMPT_BUILD 钩子获取扩展目录
-        extra_skill_dir: str | None = None
-        custom_home_dir: str | None = None
-        try:
-            from jiuwenclaw.extensions.registry import ExtensionRegistry
-            from jiuwenclaw.schema.hooks_context import SystemPromptHookContext
-            from jiuwenclaw.schema import AgentServerHookEvents
-            
-            context = SystemPromptHookContext()
-            await ExtensionRegistry.get_instance().trigger(
-                AgentServerHookEvents.BEFORE_SYSTEM_PROMPT_BUILD, context
-            )
-            extra_skill_dir = context.skill_dir
-            custom_home_dir = context.home_dir
-            
-            logger.info(
-                "[JiuWenClawDeepAdapter] BEFORE_SYSTEM_PROMPT_BUILD triggered: "
-                "skill_dir=%s, home_dir=%s",
-                extra_skill_dir, custom_home_dir
-            )
-        except Exception as exc:
-            logger.warning("[JiuWenClawDeepAdapter] hook trigger failed: %s", exc)
-
-        rails_list = self._build_agent_rails(
-            config, config_base, mode=mode,
-            extra_skill_dir=extra_skill_dir,
-            custom_home_dir=custom_home_dir,
-        )
+        rails_list = self._build_agent_rails(config, config_base, mode=mode)
 
         sys_operation = self._create_sys_operation()
         if sys_operation is None:
@@ -2366,7 +2247,7 @@ class JiuWenClawDeepAdapter:
                 logger.warning("[JiuWenClawDeepAdapter] ACP filesystem rail unregister failed: %s", exc)
             self._filesystem_rail = None
 
-        rails_list = await self._get_current_agent_rails(config, config_base)
+        rails_list = self._get_current_agent_rails(config, config_base)
 
         # 加载用户自定义的 Rail 扩展
         await self.load_user_rails()
@@ -2630,9 +2511,7 @@ class JiuWenClawDeepAdapter:
         config_base = get_config()
         channel = str(channel_id or self._resolve_prompt_channel(session_id) or "web").strip() or "web"
         send_file_enabled = config_base.get("channels", {}).get(channel, {}).get("send_file_allowed", False)
-        send_file_channel_allowed = send_file_enabled or channel == "officeclaw"
-        has_send_file_request_context = bool(request_id and session_id)
-        if send_file_channel_allowed and has_send_file_request_context:
+        if send_file_enabled and request_id and session_id:
             # 先卸载上一次请求遗留的 send_file 工具
             for existing in list(self._instance.ability_manager.list() or []):
                 if getattr(existing, "name", "").startswith("send_file_to_user"):
@@ -2733,25 +2612,16 @@ class JiuWenClawDeepAdapter:
 
         md = params.request_metadata or {}
         v = md.get("effective_project_dir")
-        logger.info(f"get effect project dir:{v}, ori dir: {self._workspace_dir}")
         if isinstance(v, str) and v.strip():
             resolved_workspace_dir = v.strip()
         else:
             resolved_workspace_dir = self._workspace_dir
 
-        from openjiuwen.core.sys_operation.cwd import set_cwd
         from jiuwenclaw.agentserver.tools.subagent_executor.context_vars import (
             set_effective_request_workspace_dir,
         )
 
         set_effective_request_workspace_dir(resolved_workspace_dir)
-
-        # Sync the tool CWD layer to the client-provided workspace dir so that
-        # relative file paths in tool calls resolve against the correct base.
-        try:
-            set_cwd(resolved_workspace_dir)
-        except Exception as exc:
-            logger.warning("[JiuWenClawDeepAdapter] set_cwd(%s) failed: %s", resolved_workspace_dir, exc)
 
         if self._runtime_prompt_rail:
             self._runtime_prompt_rail.set_language(resolved_language)
@@ -3724,11 +3594,8 @@ class JiuWenClawDeepAdapter:
         cid = request.channel_id
         query = request.params.get("query", "")
         mode = request.params.get("mode", "agent.plan")
-        raw_interactive = request.params.get("interactive_ask", request.params.get("interactiveAsk"))
-        if raw_interactive is None:
-            interactive_ask = AskUserQuestionRegistry.get_instance().session_interactive_ask_enabled(session_id)
-        else:
-            interactive_ask = bool(raw_interactive)
+        interactive_ask = bool(request.params.get("interactive_ask", request.params.get("interactiveAsk", False)))
+
         token_trace_sid = _LLM_TRACE_SESSION_ID.set(session_id)
         token_trace_rid = _LLM_TRACE_REQUEST_ID.set(rid or "")
         token_trace_iter = _LLM_TRACE_ITERATION.set(0)
@@ -3789,7 +3656,6 @@ class JiuWenClawDeepAdapter:
             "output_cost": 0.0,
             "total_cost": 0.0,
         }
-        hitl_pending_stream = False
 
         cron_context_tokens = self._bind_runtime_cron_context(
             channel_id=request.channel_id,
@@ -3829,8 +3695,6 @@ class JiuWenClawDeepAdapter:
                         _LLM_TRACE_ITERATION.set(chunk_iteration)
                     if not (hasattr(chunk, "type") and hasattr(chunk, "payload")):
                         parsed = self._parse_stream_chunk(chunk)
-                        if self._is_ask_user_payload(parsed):
-                            hitl_pending_stream = True
                         if parsed is not None:
                             if accumulated_text:
                                 delta_payload: dict[str, Any] = {"event_type": "chat.delta",
@@ -3982,8 +3846,6 @@ class JiuWenClawDeepAdapter:
                             accumulated_reasoning = ""
                         if has_streamed_content:
                             parsed = self._parse_stream_chunk(chunk, _has_streamed_content=True)
-                            if self._is_ask_user_payload(parsed):
-                                hitl_pending_stream = True
                             if parsed is not None:
                                 yield AgentResponseChunk(
                                     request_id=rid,
@@ -3993,8 +3855,6 @@ class JiuWenClawDeepAdapter:
                                 )
                             continue
                         parsed = self._parse_stream_chunk(chunk)
-                        if self._is_ask_user_payload(parsed):
-                            hitl_pending_stream = True
                         if parsed is not None:
                             yield AgentResponseChunk(
                                 request_id=rid,
@@ -4032,8 +3892,6 @@ class JiuWenClawDeepAdapter:
                         )
                         accumulated_reasoning = ""
                     parsed = self._parse_stream_chunk(chunk)
-                    if self._is_ask_user_payload(parsed):
-                        hitl_pending_stream = True
                     if parsed is not None:
                         yield AgentResponseChunk(
                             request_id=rid,
@@ -4066,8 +3924,6 @@ class JiuWenClawDeepAdapter:
             if self._skill_evolution_rail is not None:
                 for evt in self._skill_evolution_rail.drain_pending_approval_events():
                     parsed = self._parse_stream_chunk(evt)
-                    if self._is_ask_user_payload(parsed):
-                        hitl_pending_stream = True
                     if parsed is not None:
                         yield AgentResponseChunk(
                             request_id=rid,
@@ -4141,24 +3997,12 @@ class JiuWenClawDeepAdapter:
                 is_complete=False,
             )
 
-        if hitl_pending_stream:
-            yield AgentResponseChunk(
-                request_id=rid,
-                channel_id=cid,
-                payload={"event_type": "chat.invocation_paused", "awaiting_user_input": True},
-                is_complete=True,
-            )
-        else:
-            yield AgentResponseChunk(
-                request_id=rid,
-                channel_id=cid,
-                payload=None,
-                is_complete=True,
-            )
-
-    @staticmethod
-    def _is_ask_user_payload(payload: Any) -> bool:
-        return isinstance(payload, dict) and payload.get("event_type") == "chat.ask_user_question"
+        yield AgentResponseChunk(
+            request_id=rid,
+            channel_id=cid,
+            payload=None,
+            is_complete=True,
+        )
 
     def _parse_stream_chunk(self, chunk, *, _has_streamed_content: bool = False) -> dict | None:
         """将 SDK OutputSchema 转为前端可消费的 payload dict.
@@ -4406,19 +4250,6 @@ class JiuWenClawDeepAdapter:
                             "after_compressed": payload.get("after_compressed"),
                         }
                     return {"event_type": "context.compressed", "rate": 0}
-
-                if chunk_type == "context.usage":
-                    if isinstance(payload, dict):
-                        return {
-                            "event_type": "context.usage",
-                            "used_tokens": payload.get("used_tokens"),
-                            "limit_tokens": payload.get("limit_tokens"),
-                            "usage_percent": payload.get("usage_percent"),
-                            "input_tokens": payload.get("input_tokens"),
-                            "output_tokens": payload.get("output_tokens"),
-                            "total_tokens": payload.get("total_tokens"),
-                        }
-                    return {"event_type": "context.usage"}
 
                 if chunk_type == "chat.ask_user_question":
                     return {
