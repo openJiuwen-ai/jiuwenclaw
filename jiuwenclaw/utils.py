@@ -45,6 +45,8 @@ from logging.handlers import BaseRotatingHandler
 from ruamel.yaml import YAML
 from ruamel.yaml.comments import CommentedMap
 
+logger = logging.getLogger(__name__)
+
 _LOG_FILE_MAX_BYTES = 20 * 1024 * 1024
 _LOG_FILE_BACKUP_COUNT = 20
 
@@ -1608,7 +1610,6 @@ class AsyncLRUCache:
             return list(self._cache.keys())
 
 setup_logger()
-logger = logging.getLogger(__name__)
 
 _TOOL_ARGS_LOG_MAX_DEFAULT = 480
 
