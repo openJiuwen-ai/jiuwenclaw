@@ -762,6 +762,8 @@ class VibeSkillChannel(BaseChannel):
             feedback = str(properties.get("feedback") or "").strip()
             if feedback:
                 params["feedback"] = feedback
+            # 清空上下文后由后续 skilldev.agent_* 事件重新分配新 message_id，避免重用 message_id
+            self._pop_message_context_stage(internal_id, "improve")
 
         self._pending_confirms.pop(request_id, None)
         return self._dispatch_skilldev_respond(
@@ -1655,6 +1657,16 @@ class VibeSkillChannel(BaseChannel):
         if extra:
             status.update(extra)
         await self._emit_ws_event(ws, "session.status", {"sessionID": external_sid, "status": status})
+
+    def _pop_message_context_stage(self, session_id: str | None, stage: str) -> None:
+        """丢弃某会话下与 stage 绑定的 assistant message 聚合状态（用于新一轮输出使用新 message_id）。"""
+        sid = str(session_id or "").strip()
+        if not sid:
+            return
+        st = str(stage or "").strip()
+        if not st:
+            return
+        self._message_ctx.pop(f"{sid}:{st}", None)
 
     def _ensure_message_context(self, session_id: str | None, stage: str | None = None) -> dict[str, Any]:
         sid = str(session_id or "").strip()

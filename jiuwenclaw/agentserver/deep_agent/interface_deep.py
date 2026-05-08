@@ -759,14 +759,6 @@ class JiuWenClawDeepAdapter:
     @staticmethod
     def _browser_runtime_enabled() -> bool:
         """Whether browser runtime support is enabled for DeepAgent subagent wiring."""
-        # value = str(
-        #     os.getenv("PLAYWRIGHT_RUNTIME_MCP_ENABLED")
-        #     or os.getenv("BROWSER_RUNTIME_MCP_ENABLED")
-        #     or ""
-        # ).strip().lower()
-        # return value in {"1", "true", "yes", "on"}
-
-        # close browser subagent
         return False
 
     @staticmethod
@@ -2220,7 +2212,7 @@ class JiuWenClawDeepAdapter:
             config_base = resolve_env_vars(config_base)
 
         # 同步扩展配置到 ExtensionRegistry
-         # Gateway 已解密 extension_security_configs，AgentServer 直接使用明文
+        # Gateway 已解密 extension_security_configs，AgentServer 直接使用明文
         try:
             from jiuwenclaw.extensions.registry import ExtensionRegistry
             registry = ExtensionRegistry.get_instance()
@@ -3705,7 +3697,7 @@ class JiuWenClawDeepAdapter:
                                 yield AgentResponseChunk(
                                     request_id=rid,
                                     channel_id=cid,
-                                payload=delta_payload,
+                                    payload=delta_payload,
                                     is_complete=False,
                                 )
                                 accumulated_text = ""
