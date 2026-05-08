@@ -2,7 +2,7 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: <<NFS_NAME>>
-  namespace: <<NAMESPACE>>
+  namespace: default
   labels:
     app: <<NFS_NAME>>
 spec:

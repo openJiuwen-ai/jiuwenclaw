@@ -12,6 +12,7 @@ source "template_handler.sh"
 source "storage_handler.sh"
 source "oyr_handler.sh"
 source "gateway_handler.sh"
+source "web_handler.sh"
 
 process_up() {
     # MODULES是ALL_MODULES的子集，启动顺序正着来
@@ -22,6 +23,11 @@ process_up() {
         fi
     done
     info "sorted_modules=${sorted_modules[@]}"
+
+    local namespace="${DEPLOY_VARS["NAMESPACE"]}"
+    if [ ${namespace} != "default" ]; then
+        create_k8s_resource "ns" ${namespace}
+    fi
     collect_k8s_cluster_info
 
     for module in "${sorted_modules[@]}"; do
@@ -38,11 +44,19 @@ process_up() {
                 check_gateway_up_dependency
                 deploy_gateway
                 ;;
+            WEB)
+                check_web_up_dependency
+                deploy_web
+                ;;
         esac
     done
 }
 
+
 process_down() {
+    local namespace="${DEPLOY_VARS["NAMESPACE"]}"
+    local client_type="${DEPLOY_VARS["AGENT_RUNTIME"]}"
+
     # MODULES是ALL_MODULES的子集，卸载顺序倒着来
     local reversed_modules=()
     for ((i=${#ALL_MODULES[@]}-1; i>=0; i--)); do
@@ -64,6 +78,9 @@ process_down() {
             GATEWAY)
                 uninstall_gateway
                 ;;
+            WEB)
+                uninstall_web
+                ;;
         esac
     done
 }
@@ -77,6 +94,7 @@ process_restart() {
 main() {
     read_env_from_file "${CUSTOM_ENV_FILE}" "DEPLOY_VARS"
     parse_args "$@"
+    process_namespace
     check_dependency
     process_${CMD}
 }

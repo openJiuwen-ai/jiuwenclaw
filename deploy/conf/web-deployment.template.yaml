@@ -1,0 +1,42 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: <<WEB_NAME>>
+  namespace: <<NAMESPACE>>
+  labels:
+    app: <<WEB_NAME>>
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: <<WEB_NAME>>
+  template:
+    metadata:
+      labels:
+        app: <<WEB_NAME>>
+    spec:
+      # 固定调度到本master节点（运行部署工具的节点）
+      nodeName: ecs-38b3-0002
+      securityContext:
+        fsGroup: 1000
+      containers:
+        - name: web
+          image: <<WEB_IMAGE>>
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 5173
+              protocol: TCP
+              hostPort: <<WEB_HOST_PORT>>
+          env:
+            - name: JIUWENCLAW_WEB_HOST
+              value: "0.0.0.0"
+            - name: JIUWENCLAW_WEB_PORT
+              value: "5173"
+            - name: JIUWENCLAW_WEB_PROXY_TARGET
+              value: "http://<<GATEWAY_NAME>>:19000"
+          securityContext:
+            allowPrivilegeEscalation: false
+            runAsNonRoot: true
+            runAsUser: 1000
+            runAsGroup: 1000

@@ -14,19 +14,21 @@ uninstall_pv_pvc() {
     exec_cmd kubectl delete -f ${PV_FILE} false
 }
 
+
+# NFS is on default namespace
 deploy_nfs() {
     local nfs_path=${DEPLOY_VARS["NFS_HOST_PATH"]}
-    render_config_template ${NFS_SERVER_TEMPLATE_FILE} ${NFS_SERVER_FILE} "DEPLOY_VARS"
 
+    render_config_template ${NFS_SERVER_TEMPLATE_FILE} ${NFS_SERVER_FILE} "DEPLOY_VARS"
     exec_cmd mkdir -p ${nfs_path}
     exec_cmd chmod -R 777 ${nfs_path}
-
     exec_cmd kubectl apply -f ${NFS_SERVER_FILE}
     wait_k8s_resource_ready "deployment" "${DEPLOY_VARS["NFS_NAME"]}"
 }
 
 uninstall_nfs() {
     local nfs_name=${DEPLOY_VARS["NFS_NAME"]}
+
     delete_k8s_resource "deployment" "${nfs_name}"
     wait_pod_terminated "${nfs_name}"
 }

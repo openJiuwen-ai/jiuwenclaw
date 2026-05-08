@@ -89,9 +89,11 @@ configure_docker_insecure_registry_on_all_nodes() {
 }
 
 wait_oyr_ready() {
+    local namespace="${DEPLOY_VARS["NAMESPACE"]}"
+
     info "Waiting for all openyuanrong resources to be ready..."
     for name in "${!OYR_COMPONENTS[@]}"; do
-        wait_k8s_resource_ready "${OYR_COMPONENTS[${name}]}" "${name}"
+        wait_k8s_resource_ready "${OYR_COMPONENTS[${name}]}" "${name}" "${namespace}"
     done
     success "All openyuanrong resources are ready"
 }
@@ -107,7 +109,21 @@ collect_oyr_info() {
 }
 
 
+# This chart does NOT support multiple concurrent deployments in a 
+# single Kubernetes cluster.It can only be installed ONCE per cluster.
+
+# The root cause is that the chart uses **ClusterRole** and **ClusterRoleBinding**,
+# which are **cluster-scoped, globally unique resources** (not namespaced resources).
+# Only one instance of a ClusterRole/ClusterRoleBinding with the same name can exist 
+# in the entire cluster.
+
+# Helm enforces strict release ownership validation:
+# If a cluster-scoped resource (like ClusterRole) already exists and was previously 
+# managed by a Helm release from a namespace, Helm will **block any new installation** 
+# from another namespace for security and resource ownership safety.
 install_oyr() {
+    local namespace="${DEPLOY_VARS["NAMESPACE"]}"
+
     # Configure the openYuanrong whitelist image repository address
     configure_docker_insecure_registry_on_all_nodes
 
@@ -125,7 +141,7 @@ install_oyr() {
     config_oyr
 
     # Deploy openYuanrong
-    exec_cmd helm install ${OYL_CHART_NAME} .
+    exec_cmd helm install ${OYL_CHART_NAME} . -n ${NAMESPACE}
     success "Install openYuanrong helm repository"
 
     # Wait for all openYuanrong Kubernetes resources to be ready
@@ -138,6 +154,7 @@ create_func_pool() {
     local pool_id=${DEPLOY_VARS["POOL_ID"]}
     local master_ip=${DEPLOY_VARS["MASTER_NODE_IP"]}
     local claw_deployment_name="function-agent-${pool_id}"
+    local namespace="${DEPLOY_VARS["NAMESPACE"]}"
 
     sync_file_to_other_nodes ${REG_FUNC_FILE}
 
@@ -156,7 +173,7 @@ create_func_pool() {
     fi
     success "Function pod resource pool created successfully!"
 
-    wait_k8s_resource_ready "deployment" "${claw_deployment_name}"
+    wait_k8s_resource_ready "deployment" "${claw_deployment_name}" "${namespace}"
 }
 
 # Register openyuanrong function
@@ -190,25 +207,28 @@ deploy_oyr() {
 
 
 wait_oyr_terminated() {
+    local namespace="${DEPLOY_VARS["NAMESPACE"]}"
+
     info "Waiting for all openyuanrong resources to be terminated..."
     for name in "${!OYR_COMPONENTS[@]}"; do
-        wait_pod_terminated "${name}"
+        wait_pod_terminated "${name}" "${namespace}"
     done
 }
 
 uninstall_oyr() {
-    info "Starting to uninstall openyuanrong..."
+    local namespace="${DEPLOY_VARS["NAMESPACE"]}"
 
+    info "Starting to uninstall openyuanrong..."
     # unistall if Helm release exists
-    if helm list --filter "^${OYL_CHART_NAME}$" | grep -q "${OYL_CHART_NAME}"; then
-        exec_cmd helm uninstall ${OYL_CHART_NAME}
+    if helm list -n ${namespace} --filter "^${OYL_CHART_NAME}$" | grep -q "${OYL_CHART_NAME}"; then
+        exec_cmd helm uninstall -n ${namespace} ${OYL_CHART_NAME}
 
         # Wait until all resources and associated pods are fully terminated
         wait_oyr_terminated
     else
-        warning "Helm release ${OYL_CHART_NAME} not found, skipping uninstall."
+        warning "Helm release ${namespace}/${OYL_CHART_NAME} not found, skipping uninstall."
     fi
 
     uninstall_pv_pvc
-    success "Uninstall ${OYL_CHART_NAME} completed successfully."
+    success "Uninstall ${namespace}/${OYL_CHART_NAME} completed successfully."
 }

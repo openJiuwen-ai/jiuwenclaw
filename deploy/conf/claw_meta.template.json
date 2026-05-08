@@ -4,8 +4,8 @@
   "description": "jiuwen claw",
   "handler": "clawee.handler",
   "kind": "faas",
-  "cpu": <<CLAW_MGR_CPU>>,
-  "memory": <<CLAW_MGR_MEMORY>>,
+  "cpu": <<MGR_CPU>>,
+  "memory": <<MGR_MEMORY>>,
   "timeout": 600,
   "customResources": {},
   "environment": {
@@ -25,9 +25,9 @@
     "initializer": 600,
     "pre_stop": 10
   },
-  "minInstance": "<<CLAW_MGR_MIN_INSTANCE>>",
-  "maxInstance": "<<CLAW_MGR_MAX_INSTANCE>>",
-  "concurrentNum": "<<CLAW_MGR_CONCURRENT_NUM>>",
+  "minInstance": "<<MGR_MIN_INSTANCE>>",
+  "maxInstance": "<<MGR_MAX_INSTANCE>>",
+  "concurrentNum": "<<MGR_CONCURRENT_NUM>>",
   "storageType": "local",
   "codePath": "/home/sn/jiuwenclaw",
   "s3CodePath": {},

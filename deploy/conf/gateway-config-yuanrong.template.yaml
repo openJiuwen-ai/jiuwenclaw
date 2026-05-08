@@ -185,16 +185,19 @@ task_memory:
   summary_algo: ACE
 
 gateway:
-  # AgentServer Client Mode, supported client types:
-  #  websocket: Native WebSocket client, default
-  #  yuanrong: Yuanrong frontend client (powered by AgentServerClientExtension)
-  #  jiuwen: Runtime orchestration management client (powered by AgentServerClientExtension)
+  # AgentServer client mode.
+  # websocket: default ws client
+  # yuanrong: provided by AgentServerClientExtension
   agent_client:
-    type: jiuwen
+    type: yuanrong
+    frontend_endpoint: http://<<MASTER_NODE_IP>>:<<FRONTEND_PORT>>
+    function_version_urn: <<FUNCTION_ID>>
+    concurrency: <<GATEWAY_CONCURRENCY>>
+    invoke_timeout_s: <<GATEWAY_INVOKE_TIMEOUT>>
 
   # SessionMap 仅用于企业claw场景，如 feishu_enterprise 等通道：将平台身份映射为 Agent 的 session_id。
   # 取值：per_chat_bot（默认，同 chat+bot 共享会话）, per_chat_bot_user（按 user 分会话）
-  session_map_scope: <<CLAW_GATEWAY_SESSION_MAP_SCOPE>>
+  session_map_scope: <<GATEWAY_SESSION_MAP_SCOPE>>
 
 heartbeat:
   # 心跳间隔（秒），默认 60
@@ -356,6 +359,7 @@ permissions:
     coding_memory_read: allow
     mcp_free_search: allow
     mcp_paid_search: allow
+    mcp_petal_search: allow
     mcp_fetch_webpage: allow
     cron_list_jobs: allow
     cron_get_job: allow
@@ -470,11 +474,7 @@ updater:
 extensions:
    # 扩展包搜索目录（字符串），用 ';' 分割多个目录：
    # EXTENSION_DIRS="E:/a;D:/b"; 默认会加载仓库根目录 extensions
-   extension_dirs: "/app/jiuwenclaw/docker/extensions"
-   agent_client_rest:
-     enabled: true
-     host: "0.0.0.0"
-     port: 18080
+   extension_dirs: "/app/jiuwenclaw/docker/yr_extensions"
 
 team:
   team_name: jiuwen_team
@@ -518,3 +518,6 @@ modes:
     memory:
     rails:
     tools:
+
+# Petal 搜索：默认关闭；为 true 时需同时配置环境变量 API_BASE（或 OPENAI_BASE_URL）与 default_headers（JSON）
+enable_petal_web_search: true

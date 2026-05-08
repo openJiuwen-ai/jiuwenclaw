@@ -1,0 +1,22 @@
+ARG BASE_IMAGE
+FROM ${BASE_IMAGE}
+
+RUN apt-get update && apt-get install -y --no-install-recommends yq
+
+WORKDIR /app/jiuwenclaw
+COPY . /app/jiuwenclaw/
+
+ENV PATH=$PATH:/home/app/.local/bin
+
+RUN pip install -e ".[all]" \
+    git+https://gitcode.com/openJiuwen/agent-runtime.git@dev/enterprise_kub#subdirectory=management \
+    kubernetes \
+    --no-cache-dir \
+    -i https://pypi.tuna.tsinghua.edu.cn/simple
+
+RUN yq -y -i '.dependencies = {}' docker/extensions/runtime_management_extension/extension.yaml
+
+RUN mkdir -p /home/app/.jiuwenclaw && printf 'yes\nzh\n' | jiuwenclaw-init
+
+EXPOSE 19000
+CMD ["jiuwenclaw-gateway"]

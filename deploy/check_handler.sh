@@ -87,21 +87,23 @@ check_cluster_has_enough_nodes() {
 
 check_if_yr_exist()
 {
-    if helm list --filter "^${OYL_CHART_NAME}$" | grep -q "${OYL_CHART_NAME}"; then
-        error "${OYL_CHART_NAME} is already deployed. Please uninstall it first with: ./$(basename "$0") down yr_claw"
+    local namespace="${DEPLOY_VARS["NAMESPACE"]}"
+
+    if helm list -n ${namespace} --filter "^${OYL_CHART_NAME}$" | grep -q "${OYL_CHART_NAME}"; then
+        error "${namespace}/${OYL_CHART_NAME} is already deployed. Please uninstall it first with: ./$(basename "$0") down yr_claw"
     fi
 }
 
 check_if_yr_claw_up() {
-    local pool_id=${DEPLOY_VARS["POOL_ID"]}
-    local claw_deployment_name="function-agent-${pool_id}"
+    local namespace="${DEPLOY_VARS["NAMESPACE"]}"
+    local name="function-agent-${DEPLOY_VARS["POOL_ID"]}"
     local err_msg="YR_CLAW is not deployed. Please deploy it first with: ./$(basename "$0") up yr_claw"
 
-    if ! helm list --filter "^${OYL_CHART_NAME}$" | grep -q "${OYL_CHART_NAME}"; then
+    if ! helm list -n ${namespace} --filter "^${OYL_CHART_NAME}$" | grep -q "${OYL_CHART_NAME}"; then
         error ${err_msg}
     fi
 
-    if ! check_k8s_resource_exists "deployment" "${claw_deployment_name}"; then
+    if ! check_k8s_resource_exists "deployment" "${name}" "${namespace}"; then
         error ${err_msg}
     fi
 }
@@ -122,6 +124,14 @@ check_if_nfs_up() {
     DEPLOY_VARS["NFS_SERVER_ADDR"]=${DEPLOY_VARS["MASTER_NODE_IP"]}
 }
 
+check_vars() {
+    local client_type="${DEPLOY_VARS["AGENT_RUNTIME"]}"
+
+    if [[ "${client_type}" != "jiuwen" && "${client_type}" != "yuanrong" ]]; then
+        error "Unsupported AGENT_RUNTIME: ${client_type}"
+    fi
+}
+
 check_dependency(){
     detect_os
     check_cmds
@@ -129,6 +139,7 @@ check_dependency(){
     check_if_root
     #check_ssh_connectivity
     check_cluster_has_enough_nodes
+    check_vars
 }
 
 check_nfs_up_dependency(){
@@ -151,4 +162,8 @@ check_gateway_up_dependency(){
     check_if_nfs_up
 }
 
-
+check_web_up_dependency(){
+    if ! check_k8s_resource_exists "deployment" "${DEPLOY_VARS["GATEWAY_NAME"]}" "${DEPLOY_VARS["NAMESPACE"]}"; then
+        error "GATEWAY is not deployed. Please deploy it first with: ./$(basename "$0") up gateway"
+    fi
+}

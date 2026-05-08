@@ -57,6 +57,36 @@ delete_k8s_pods() {
 }
 
 
+# Create specified kubernetes resource
+# Args:
+#   1: resource kind
+#   2: resource name
+#   3: namespace (optional, default: default)
+create_k8s_resource() {
+    local kind="$1"
+    local name="$2"
+    local namespace="${3:-default}"
+
+    local cmd_args=""
+    # PV and namespace are cluster-scoped, without namespace
+    if [[ "${kind}" == "pv" || "${kind}" == "ns" ]]; then
+        cmd_args="${kind} ${name}"
+        namespace=""
+    else
+        cmd_args="${kind} ${name} -n ${namespace}"
+    fi
+
+    # Check whether target resource exists
+    if kubectl get ${cmd_args} >/dev/null 2>&1; then
+        info "${kind}/${namespace}/${name} exists, skipping create."
+        return
+    fi
+
+    info "Creating k8s resource:  ${kind}/${namespace}/${name}"
+    exec_cmd kubectl create ${cmd_args}
+    success "${kind}/${namespace}/${name} is created now"
+}
+
 # Delete specified kubernetes resource
 # Args:
 #   1: resource kind
@@ -153,4 +183,23 @@ collect_k8s_cluster_info() {
 
     OTHER_NODE_IPS=("${WORKER_NODE_IPS[@]}" "${OTHER_MASTER_IPS[@]}")
     info "OTHER_NODE_IPS: ${OTHER_NODE_IPS[*]}"
+}
+
+
+# Check if any node has the gateway=enable label
+if_any_nodes_gateway_label() {
+    info "=== Checking if any node has gateway=enable label ==="
+
+    local all_nodes=$(kubectl get nodes -o jsonpath='{.items[*].metadata.name}')
+
+    for node in ${all_nodes}; do
+        local label_value=$(kubectl get node "${node}" -o jsonpath='{.metadata.labels.gateway}')
+        if [ "$label_value" == "enable" ]; then
+            info "Check result: Node ${node} with gateway=enable label **exists** in the cluster"
+            return 0
+        fi
+    done
+
+    info "❌ Check result: No nodes with gateway=enable label **exist** in the cluster"
+    return 1
 }
