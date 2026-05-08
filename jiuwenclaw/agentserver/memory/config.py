@@ -2,72 +2,44 @@
 
 """Memory configuration for JiuWenClaw.
 
-Configuration is loaded from config/config.yaml.
-Embedding API settings are in the 'embed' section.
+Uses merged runtime config (package template + user ``config/config.yaml`` override),
+same as ``jiuwenclaw.config.get_config``. Embedding API settings are in the ``embed`` section.
 """
 
 import logging
-import os
-import re
 from typing import Any, Optional, Dict, List
 from dataclasses import dataclass, field
-from pathlib import Path
 
-import yaml
-
-from jiuwenclaw.utils import get_config_file, get_agent_workspace_dir
+from jiuwenclaw.config import get_config
+from jiuwenclaw.utils import get_agent_workspace_dir
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_CONFIG_PATH = str(get_config_file())
 DEFAULT_WORKSPACE_DIR = str(get_agent_workspace_dir())
 
 _config_cache: Optional[Dict[str, Any]] = None
 
 
-def _resolve_env_vars(value: Any) -> Any:
-    """Recursively resolve environment variables in config values."""
-    if isinstance(value, str):
-        pattern = r'\$\{([^:}]+)(?::-([^}]*))?\}'
-        def replace_env(match):
-            var_name = match.group(1)
-            default = match.group(2) if match.group(2) is not None else ""
-            return os.getenv(var_name, default)
-        return re.sub(pattern, replace_env, value)
-    elif isinstance(value, dict):
-        return {k: _resolve_env_vars(v) for k, v in value.items()}
-    elif isinstance(value, list):
-        return [_resolve_env_vars(item) for item in value]
-    else:
-        return value
-
-
 def clear_config_cache() -> None:
-    """清除配置缓存，使下次 _load_config() 重新从 config.yaml 读取并解析环境变量."""
+    """清除配置缓存，使下次 _load_config() 重新读取合并后的配置（含环境变量解析）。"""
     global _config_cache
     _config_cache = None
 
 
 def _load_config() -> Dict[str, Any]:
-    """Load configuration from YAML file."""
+    """加载包内模板与用户 override 合并后的配置（与 ``get_config()`` 一致）。"""
     global _config_cache
 
     if _config_cache is not None:
         return _config_cache
-    
-    config_path = Path(DEFAULT_CONFIG_PATH)
-    
-    if not config_path.exists():
-        logger.warning(f"Config file not found: {config_path}")
+
+    try:
+        cfg = get_config()
+        _config_cache = cfg if isinstance(cfg, dict) else {}
+    except Exception as e:
+        logger.warning("Failed to load merged config for memory module: %s", e)
         _config_cache = {}
-        return _config_cache
-    
-    with open(config_path, "r", encoding="utf-8") as f:
-        config = yaml.safe_load(f) or {}
-    
-    config = _resolve_env_vars(config)
-    _config_cache = config
-    return config
+    return _config_cache
 
 
 def get_embed_config() -> Dict[str, str]:
