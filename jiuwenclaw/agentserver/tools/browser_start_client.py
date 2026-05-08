@@ -103,13 +103,24 @@ def _persist_browser_profile(
 
 
 def _load_browser_config(config_file: str = "") -> dict[str, Any]:
-    cfg_file = _config_path(config_file)
-    if not cfg_file.exists():
+    """读取 ``browser`` 段；未指定 ``config_file`` 时使用合并后的主配置（模板 + 用户 override）。"""
+    if config_file:
+        cfg_file = Path(config_file).expanduser().resolve()
+        if not cfg_file.exists():
+            return {}
+        with cfg_file.open("r", encoding="utf-8") as f:
+            data = yaml.safe_load(f) or {}
+        browser_cfg = data.get("browser")
+        return browser_cfg if isinstance(browser_cfg, dict) else {}
+    try:
+        from jiuwenclaw.config import get_config
+
+        data = get_config()
+        browser_cfg = data.get("browser")
+        return browser_cfg if isinstance(browser_cfg, dict) else {}
+    except Exception as e:
+        logger.warning("Failed to load browser config from merged runtime config: %s", e)
         return {}
-    with cfg_file.open("r", encoding="utf-8") as f:
-        data = yaml.safe_load(f) or {}
-    browser_cfg = data.get("browser")
-    return browser_cfg if isinstance(browser_cfg, dict) else {}
 
 
 def _os_key() -> str:

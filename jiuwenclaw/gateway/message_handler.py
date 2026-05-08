@@ -160,7 +160,7 @@ class MessageHandler(ABC):
         self._inbound_pipeline = None   # type: Any  # IMInboundPipeline | None
         self._outbound_pipeline = None  # type: Any  # IMOutboundPipeline | None
 
-        # 直接使用 jiuwenclaw.config 的 get_config_raw/set_config/update_channel_in_config
+        # 直接使用 jiuwenclaw.config 的 get_config_raw（合并后快照）/update_channel_in_config
         # 避免在此处重复实现 config 模块加载逻辑。
         from jiuwenclaw.config import get_config_raw, update_channel_in_config
 

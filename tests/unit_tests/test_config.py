@@ -2,14 +2,20 @@
 
 """Unit tests for config module."""
 
-import os
 import math
+import os
 from pathlib import Path
 
 import pytest
 import yaml
 
-from jiuwenclaw.config import resolve_env_vars, get_config_raw
+from jiuwenclaw.config import (
+    get_config_raw,
+    get_merged_config_dict,
+    merge_template_with_override,
+    resolve_env_vars,
+    resolve_template_config_path,
+)
 
 
 class TestResolveEnvVars:
@@ -118,17 +124,30 @@ class TestConfigFunctions:
     """Test config module functions."""
 
     @staticmethod
-    def test_get_config_raw(temp_config_file: Path):
-        """Test reading raw config without env resolution."""
-        config = get_config_raw()
-        assert config is not None
-        assert "model" in config or "channels" in config
+    def test_merge_template_with_override():
+        """Sparse override deep-merges over template; extra override keys kept."""
+        template = {"a": 1, "nested": {"x": 1, "y": 2}}
+        override = {"nested": {"y": 99}, "extra": True}
+        merged = merge_template_with_override(template, override)
+        assert merged["a"] == 1
+        assert merged["nested"]["x"] == 1
+        assert merged["nested"]["y"] == 99
+        assert merged["extra"] is True
 
     @staticmethod
-    def test_config_file_structure(temp_config_file: Path):
-        """Test that config file has expected structure."""
-        config = get_config_raw()
-        # Check for common top-level keys
-        expected_keys = {"model", "channels", "evolution", "heartbeat"}
-        actual_keys = set(config.keys())
-        assert len(actual_keys & expected_keys) > 0, "Config should have at least some expected keys"
+    def test_get_config_raw_is_merged_sparse_override(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+        """Override file may be sparse; get_config_raw returns template ∪ override."""
+        cfg_path = tmp_path / "config.yaml"
+        cfg_path.write_text("version: 1.0\npreferred_language: en\n", encoding="utf-8")
+        monkeypatch.setattr("jiuwenclaw.utils.get_config_file", lambda: cfg_path)
+        monkeypatch.setattr("jiuwenclaw.config.get_config_file", lambda: cfg_path)
+
+        raw = get_config_raw()
+        assert raw.get("preferred_language") == "en"
+        assert raw.get("version") == 1.0
+        tpl_path = resolve_template_config_path()
+        if tpl_path.exists():
+            assert "logging" in raw or "memory" in raw
+
+        merged = get_merged_config_dict()
+        assert merged.get("preferred_language") == "en"

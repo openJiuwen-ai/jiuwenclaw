@@ -19,12 +19,6 @@ import os
 from dotenv import load_dotenv
 from openjiuwen.core.common.logging import LogManager
 
-try:
-    import jiuwenclaw.agentserver.deep_agent.interface_deep  # 重要：优化冷启动性能，不要删除
-except ImportError:
-    # Fallback for environments where interface_deep dependencies are not available.
-    # The module will be imported lazily when needed in _run().
-    pass
 from jiuwenclaw.jiuwen_core_patch import (
     apply_openai_model_client_patch,
     configure_openjiuwen_logging_under_jiuwenclaw,
@@ -36,9 +30,18 @@ from jiuwenclaw.utils import (
     logger,
     update_config,
     get_multi_tenant_user_workspace_dir,
+    migrate_legacy_user_config_if_needed,
 )
 
 apply_openai_model_client_patch()
+migrate_legacy_user_config_if_needed()
+
+try:
+    import jiuwenclaw.agentserver.deep_agent.interface_deep  # 重要：优化冷启动性能，不要删除
+except ImportError:
+    # Fallback for environments where interface_deep dependencies are not available.
+    # The module will be imported lazily when needed in _run().
+    pass
 
 # Ensure workspace initialized
 _workspace_dir = get_user_workspace_dir()
