@@ -889,12 +889,16 @@ class VibeSkillChannel(BaseChannel):
             if not text:
                 return False
             ctx = self._ensure_message_context(msg.session_id)
-            text_part, _ = self._ensure_text_part(msg.session_id, "text")
+            text_part, is_new = self._ensure_text_part(msg.session_id, "text")
             text_part["text"] = str(text_part.get("text") or "") + text
-            responses = self._prepend_message_announcement(
-                ctx,
-                external_sid,
-                [{
+
+            if is_new:
+                part_events: list[dict[str, Any]] = [{
+                    "type": "message.part.updated",
+                    "properties": self._serialize_part(text_part, external_sid),
+                }]
+            else:
+                part_events = [{
                     "type": "message.part.delta",
                     "properties": {
                         "sessionID": external_sid,
@@ -903,8 +907,8 @@ class VibeSkillChannel(BaseChannel):
                         "type": "text",
                         "text": text,
                     },
-                }],
-            )
+                }]
+            responses = self._prepend_message_announcement(ctx, external_sid, part_events)
             for response in responses:
                 await self._send_ws_json(ws, response, source="chat.delta")
             return True
