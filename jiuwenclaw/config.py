@@ -1,18 +1,27 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 
+import copy
+import logging
 import os
-import re
 import sys
 import uuid
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 import yaml
 from ruamel.yaml import YAML
 
+from jiuwenclaw.config_merge_core import (
+    load_yaml_dict,
+    merge_template_with_override,
+    resolve_shipped_template_config_path,
+)
+from jiuwenclaw.env_resolve import resolve_env_vars
 from jiuwenclaw.utils import USER_WORKSPACE_DIR, get_config_file
-from jiuwenclaw.local_env_config import get_local_config
+
+_logger = logging.getLogger(__name__)
+_logged_template_config_path = False
 
 _CONFIG_MODULE_DIR = Path(__file__).parent
 _CONFIG_YAML_PATH = get_config_file()
@@ -34,52 +43,35 @@ if str(_CONFIG_MODULE_DIR) not in sys.path:
     sys.path.insert(0, str(_CONFIG_MODULE_DIR))
 
 
-def resolve_env_vars(value: Any) -> Any:
-    """递归解析配置中的环境变量替换语法 ${VAR:-default}.
+def resolve_template_config_path() -> Path:
+    """包内 shipped 模板：jiuwenclaw/resources/config.yaml。"""
+    global _logged_template_config_path
+    path = resolve_shipped_template_config_path()
+    if not _logged_template_config_path:
+        _logged_template_config_path = True
+        _logger.debug("jiuwenclaw template config (shipped): %s", path.resolve())
+    return path
 
-    Args:
-        value: 配置值，可能是字符串、字典或列表
 
-    Returns:
-        解析后的值
-    """
-    if isinstance(value, str):
-        # 匹配 ${VAR:-default} 格式
-        pattern = r'\$\{([^:}]+)(?::-([^}]*))?\}'
-
-        def replace_env(match):
-            var_name = match.group(1)
-            default = match.group(2)
-            current = get_local_config(var_name)
-            # Bash: ${VAR:-default} uses default when VAR is unset OR empty.
-            # ${VAR} (no :-) keeps getenv behavior; unset -> "".
-            if default is not None:
-                if current is None or current == "":
-                    return default
-                return current
-            return current if current is not None else ""
-
-        return re.sub(pattern, replace_env, value)
-    elif isinstance(value, dict):
-        return {k: resolve_env_vars(v) for k, v in value.items()}
-    elif isinstance(value, list):
-        return [resolve_env_vars(item) for item in value]
-    else:
-        return value
+def get_merged_config_dict() -> dict[str, Any]:
+    """模板与用户 override 合并后的字典（不解析环境变量）。"""
+    template = load_yaml_dict(resolve_template_config_path())
+    override = load_yaml_dict(_current_config_yaml_path())
+    return merge_template_with_override(template, override)
 
 
 def get_config():
-    with open(get_config_file(), "r", encoding="utf-8") as f:
-        config_base = yaml.safe_load(f)
-    config_base = resolve_env_vars(config_base)
-
-    return config_base
+    config_base = get_merged_config_dict()
+    return resolve_env_vars(config_base)
 
 
 def get_config_raw():
-    """读 config.yaml 原始内容（不解析环境变量），供局部更新后写回。"""
-    with open(_current_config_yaml_path(), "r", encoding="utf-8") as f:
-        return yaml.safe_load(f) or {}
+    """合并包内模板与用户 override 后的快照（不解析环境变量）。
+
+    磁盘上的用户文件可能仅为稀疏 override；本函数返回有效配置树。
+    局部写回 override 请使用 ``_load_yaml_round_trip(get_config_file())``。
+    """
+    return get_merged_config_dict()
 
 
 def set_config(config):
@@ -138,12 +130,12 @@ def update_channel_in_config(channel_id: str, conf: dict[str, Any]) -> None:
 
 def replace_channel_in_config(channel_id: str, conf: dict[str, Any]) -> None:
     """整段替换 channels[channel_id] 并写回。"""
-    data = _load_yaml_round_trip(_CONFIG_YAML_PATH)
+    data = _load_yaml_round_trip(_current_config_yaml_path())
     if "channels" not in data:
         data["channels"] = {}
     channels = data["channels"]
     channels[channel_id] = dict(conf)
-    _dump_yaml_round_trip(_CONFIG_YAML_PATH, data)
+    _dump_yaml_round_trip(_current_config_yaml_path(), data)
 
 
 def update_channel_subsection_in_config(
@@ -584,8 +576,6 @@ def _normalize_rule_action(rule: dict[str, Any]) -> None:
 
 def _decrypt_model_entries(entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """解密模型条目中的 api_key 字段，返回深拷贝不改变原始数据。"""
-    import copy
-
     reg_mod = sys.modules.get("jiuwenclaw.extensions.registry")
     if reg_mod is None or not hasattr(reg_mod, "ExtensionRegistry"):
         return copy.deepcopy(entries)
