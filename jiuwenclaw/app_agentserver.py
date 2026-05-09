@@ -34,6 +34,7 @@ from jiuwenclaw.utils import (
     get_env_file,
     prepare_workspace,
     logger,
+    cleanup_legacy_flat_agent_dir,
     update_config,
     get_multi_tenant_user_workspace_dir,
 )
@@ -56,6 +57,7 @@ if not _config_file.exists() or (_old_workspace.exists() and not _new_workspace.
     prepare_workspace(overwrite=False)
 else:
     update_config()
+    cleanup_legacy_flat_agent_dir(_workspace_dir)
 
 configure_openjiuwen_logging_under_jiuwenclaw()
 for _lg in LogManager.get_all_loggers().values():

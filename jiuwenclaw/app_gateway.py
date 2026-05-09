@@ -39,6 +39,7 @@ from jiuwenclaw.utils import (
     get_user_workspace_dir,
     get_env_file,
     prepare_workspace,
+    cleanup_legacy_flat_agent_dir,
     update_config,
     get_multi_tenant_user_workspace_dir,
 )
@@ -62,8 +63,8 @@ _old_workspace = _workspace_dir / "agent" / "workspace"
 if not _config_file.exists() or (_old_workspace.exists() and not _new_workspace.exists()):
     prepare_workspace(overwrite=False)
 else:
-    # 与 AgentServer 一致：合并 config；若仍残留旧 layout 目录则在 update_config 内补跑迁移
     update_config()
+    cleanup_legacy_flat_agent_dir(_workspace_dir)
 
 # Reduce openjiuwen internal logs (keep Gateway logs)
 configure_openjiuwen_logging_under_jiuwenclaw()
