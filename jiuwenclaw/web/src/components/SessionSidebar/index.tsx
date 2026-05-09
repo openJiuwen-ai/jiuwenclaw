@@ -9,7 +9,7 @@ import { FEATURE_APP_UPDATER_UI } from '../../featureFlags';
 import { OffloadFilesWidget } from './OffloadFilesWidget';
 import './SessionSidebar.css';
 
-type MainNavKey = 'chat' | 'skills' | 'agents' | 'sessions' | 'heartbeat' | 'cron' | 'channels' | 'extensions' | 'configpanel' | 'logspanel' | 'browserpanel' | 'updatepanel';
+type MainNavKey = 'chat' | 'skills' | 'agents' | 'sessions' | 'heartbeat' | 'cron' | 'channels' | 'extensions' | 'configpanel' | 'logspanel' | 'browserpanel' | 'updatepanel' | 'skilldev';
 
 interface SessionSidebarProps {
   activeNav: MainNavKey;
@@ -39,6 +39,15 @@ export function SessionSidebar({
             <path strokeLinecap="round" strokeLinejoin="round" d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z" />
           </svg>
           {t('nav.chat')}
+        </button>
+        <button
+          onClick={() => onNavigate('skilldev')}
+          className={`nav-item w-full ${activeNav === 'skilldev' ? 'active' : ''}`}
+        >
+          <svg className="w-4 h-4 nav-item__icon" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={1.5}>
+            <path strokeLinecap="round" strokeLinejoin="round" d="M17.25 6.75L22.5 12l-5.25 5.25m-10.5 0L1.5 12l5.25-5.25m7.5-3l-4.5 16.5" />
+          </svg>
+          {t('nav.skilldev', 'Skill Dev')}
         </button>
       </div>
 

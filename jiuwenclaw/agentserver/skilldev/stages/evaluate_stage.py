@@ -357,6 +357,7 @@ class EvaluateStageHandler(StageHandler):
         agent_results: dict | None = None
         base_stage_key = f"evaluate_grader/{eval_name}/{variant}"
         last_parse_error: str = ""   # 上次 JSON 解析失败的原因；非空时下次 attempt 注入格式警告
+        last_failure_reason: str = ""  # 最后一次失败的原因，用于最终 raise 的错误信息
 
         for attempt in range(1, self._MAX_GRADE_RETRIES + 1):
             stage_key = base_stage_key if attempt == 1 else f"{base_stage_key}/retry{attempt}"
@@ -409,6 +410,7 @@ class EvaluateStageHandler(StageHandler):
                 agent_results = None
                 is_failure = True
                 last_parse_error = ""  # 超时不属于格式问题，清除
+                last_failure_reason = f"评分超时（>{self._GRADE_TIMEOUT_SECONDS}s）"
             except ValueError as parse_err:
                 # LLM 输出无法解析为合法 JSON → 视为本次 attempt 失败，触发重试
                 # 网络 / 超时异常不在此处捕获，会直接传播到 _grade_all_evals → execute()
@@ -428,6 +430,7 @@ class EvaluateStageHandler(StageHandler):
                 agent_results = None
                 is_failure = True
                 last_parse_error = str(parse_err)[:300]  # 传给下次 attempt 的格式警告
+                last_failure_reason = f"评分失败（{str(parse_err)[:100]}）"
 
             if not is_failure:
                 break  # 有效结果，不再重试
@@ -448,8 +451,10 @@ class EvaluateStageHandler(StageHandler):
                 )
         ctx.release_agent_tools(agent)
         if agent_results is None:
-            raise RuntimeError(f"grading 超时 {self._MAX_GRADE_RETRIES} 次: {eval_name}/{variant}")
-        
+            raise RuntimeError(
+                f"评分 {self._MAX_GRADE_RETRIES} 次重试后仍失败"
+                f"（{last_failure_reason}）: {eval_name}/{variant}"
+            )
 
         grading = self._convert_agent_results_to_grading_result(agent_results)
         grading_dict = grading.to_dict() if hasattr(grading, "to_dict") else grading

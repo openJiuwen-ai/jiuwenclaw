@@ -87,7 +87,7 @@ Skill 文件存储于工作区的 `skill/` 子目录下。
 禁止生成与 Skill 交付无关的文件，例如实现总结、README、CHANGELOG、开发说明、复盘文档等。
 
 ## 原则性要求
-请务必将文件写入 skill/ 目录下（如 skill/SKILL.md），并确保 YAML frontmatter 格式正确（name 为 kebab-case, description 不含 < >）。
+请务必将文件写入 skill/ 目录下（如 skill/SKILL.md），并确保 YAML frontmatter 格式正确（name 为 kebab-case）。
 
 ## 工作区
 当前工作区路径为：{workspace}

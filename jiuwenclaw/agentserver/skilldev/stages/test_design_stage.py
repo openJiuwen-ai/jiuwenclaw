@@ -52,13 +52,13 @@ TEST_DESIGN_SYSTEM_PROMPT = """你是一名专业的 Agent Skill 测试工程师
 
 ## 测试用例类别（按覆盖度选取，不强制每类都有）
 
-| 类别             | case_category      | 目的                           | 示例                             |
-| ---------------- | ------------------ | ------------------------------ | -------------------------------- |
-| 基础可用性       | smoke_test         | 最简输入验证 skill 能跑通      | 创建最简单的输出                 |
-| 标准场景         | happy_path         | 真实用户的完整功能请求         | 含具体细节的功能完整请求         |
-| 边界/异常输入    | edge_case          | 空输入、超大输入、非常规格式   | 空文件、极长文本、特殊字符       |
-| 错误恢复         | error_handling     | 无效输入、缺失文件、格式错误   | 传入不支持的文件类型             |
-| 端到端工作流     | integration        | 多步骤、跨功能的完整流程       | 使用 skill 多个能力的复合请求    |
+| 类别             | case_category      | 目的                           |
+| ---------------- | ------------------ | ------------------------------ |
+| 基础可用性       | smoke_test         | 最简输入验证 skill 能跑通      |
+| 标准场景         | happy_path         | 真实用户的完整功能请求         |
+| 边界/异常输入    | edge_case          | 空输入、超大输入、非常规格式   |
+| 错误恢复         | error_handling     | 无效输入、缺失文件、格式错误   |
+| 端到端工作流     | integration        | 多步骤、跨功能的完整流程       |
 
 只选适用的类别，不适用的直接跳过。总数控制在 {_EVAL_COUNT}。
 
@@ -81,7 +81,7 @@ TEST_DESIGN_SYSTEM_PROMPT = """你是一名专业的 Agent Skill 测试工程师
 **写法要求：**
 - 必须与当前用例的 prompt 内容绑定——换一个 prompt 这条就不适用
 - 通用 LLM 在不使用本 skill 的情况下，完成同一 prompt 大概率无法通过此条
-
+- 对于含有脚本的skill，通过分析和预测agent运行结果来书写断言，无需实际运行任何脚本或代码
 
 **好的示例（与 prompt 绑定，可验证文件内容）：**
 - prompt 要求从 sales_2024.csv 提取月度趋势 → "输出文件或回复中包含 1–12 月各月的具体销售数值"
@@ -157,7 +157,7 @@ class TestDesignStageHandler(StageHandler):
     # 单次 design 失败后的最大重试次数（不含首次）
     _MAX_DESIGN_RETRIES = 2
     # 单次 design 调用的超时秒数（防止网络挂起导致整个 stage 无限等待）
-    _DESIGN_TIMEOUT_SECONDS = 90
+    _DESIGN_TIMEOUT_SECONDS = 300
 
     async def execute(self, ctx: SkillDevContext) -> StageResult:
         """主流程：设计测试用例并保存 evals.json."""

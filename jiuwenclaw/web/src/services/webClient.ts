@@ -290,6 +290,36 @@ class WebClient {
     });
   }
 
+  /**
+   * Fire-and-forget: 发送流式请求，不等待 res 帧，结果通过事件监听获取。
+   * 用于 skilldev.start / skilldev.respond 等流式方法。
+   */
+  async sendStream(
+    method: string,
+    params?: Record<string, unknown>,
+  ): Promise<void> {
+    await this.ensureReady();
+
+    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
+      throw this.createWebError(i18n.t('network.connectionUnavailable'), 'WS_NOT_READY', undefined, true);
+    }
+
+    const id = this.generateRequestId();
+    const message: WsRequest = {
+      type: 'req',
+      id,
+      method,
+      params: params ?? {},
+    };
+
+    logDevWsTraffic({
+      direction: 'outgoing',
+      messageType: 'req',
+      data: message,
+    });
+    this.ws.send(JSON.stringify(message));
+  }
+
   private async ensureReady(): Promise<void> {
     if (this.ws?.readyState === WebSocket.OPEN && this.state === 'ready') {
       return;
@@ -512,6 +542,13 @@ export async function webRequest<T = unknown>(
   options?: WebRequestOptions
 ): Promise<T> {
   return webClient.request<T>(method, params, options);
+}
+
+export async function webSendStream(
+  method: string,
+  params?: Record<string, unknown>,
+): Promise<void> {
+  return webClient.sendStream(method, params);
 }
 
 export type { WsEvent, WebMessage };

@@ -5,6 +5,7 @@
 export * from './message';
 export * from './todo';
 export * from './websocket';
+export * from './skilldev';
 
 // 会话类型
 export interface Session {

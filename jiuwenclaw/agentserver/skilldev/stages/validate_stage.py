@@ -4,8 +4,8 @@
 
 校验 GENERATE 产出的 SKILL.md 是否符合 Skill 规范：
 - YAML frontmatter 存在且合法（name, description 必填）
-- name 是 kebab-case，≤64 字符
-- description ≤1024 字符，无 < >
+- name 是 kebab-case，≤30 字符
+- description ≤1024 字符
 - 只包含允许的 frontmatter key
 
 校验失败 → 回退 GENERATE 重新生成。
@@ -133,8 +133,6 @@ def validate_skill_md(skill_md_path: Path) -> tuple[bool, str]:
 
     # description
     desc = frontmatter["description"].strip()
-    if "<" in desc or ">" in desc:
-        return False, "description 不能包含尖括号 (< 或 >)"
     if len(desc) > SKILL_DESC_MAX_LEN:
         return False, f"description 过长（{len(desc)} 字符，最大 {SKILL_DESC_MAX_LEN}）"
 

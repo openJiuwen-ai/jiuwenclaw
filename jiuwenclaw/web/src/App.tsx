@@ -20,6 +20,7 @@ import { BrowserPanel } from './components/BrowserPanel';
 import { UpdatePanel } from './components/UpdatePanel';
 import { StatusBar } from './components/StatusBar';
 import { ExtensionsPanel } from './components/ExtensionsPanel';
+import { SkillDevPanel } from './components/SkillDevPanel';
 import { FEATURE_APP_UPDATER_UI } from './featureFlags';
 import { HeartbeatMessageModal } from './features/HeartbeatMessageModal';
 import {
@@ -41,7 +42,7 @@ import { useTranslation } from 'react-i18next';
 import i18n from './i18n';
 import './App.css';
 
-type MainNavKey = 'chat' | 'skills' | 'agents' | 'sessions' | 'heartbeat' | 'cron' | 'channels' | 'extensions' | 'configpanel' | 'logspanel' | 'browserpanel' | 'updatepanel';
+type MainNavKey = 'chat' | 'skills' | 'agents' | 'sessions' | 'heartbeat' | 'cron' | 'channels' | 'extensions' | 'configpanel' | 'logspanel' | 'browserpanel' | 'updatepanel' | 'skilldev';
 
 // 错误边界组件
 interface ErrorBoundaryState {
@@ -1146,6 +1147,11 @@ function AppContent() {
         {activeNav === 'extensions' && (
           <div className="app-section">
             <ExtensionsPanel isConnected={isConnected} />
+          </div>
+        )}
+        {activeNav === 'skilldev' && (
+          <div className="flex-1 flex min-h-0 overflow-hidden">
+            <SkillDevPanel />
           </div>
         )}
       </main>

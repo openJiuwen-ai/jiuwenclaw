@@ -18,6 +18,13 @@ import {
   UserAnswer,
   MediaItem,
   AgentMode,
+  SkillDevStartParams,
+  SkillDevRespondParams,
+  SkillDevStatusParams,
+  SkillDevDownloadParams,
+  SkillDevCancelParams,
+  SkillDevFileListParams,
+  SkillDevFileReadParams,
   Session,
   ToolResult,
  	ToolCall,
@@ -80,6 +87,13 @@ interface UseWebSocketReturn {
     source?: string
   ) => Promise<void>;
   getInflightCount: () => number;
+  startSkillDev: (params: SkillDevStartParams) => Promise<{ task_id: string }>;
+  respondSkillDev: (params: SkillDevRespondParams) => Promise<{ stage: string }>;
+  getSkillDevStatus: (params?: SkillDevStatusParams) => Promise<{ tasks: string[] } | Record<string, unknown>>;
+  downloadSkillDevArtifact: (params: SkillDevDownloadParams) => Promise<{ ok: boolean; filename: string; content_base64: string; size_bytes: number }>;
+  cancelSkillDev: (params: SkillDevCancelParams) => Promise<{ ok: boolean; message: string }>;
+  listSkillDevFiles: (params: SkillDevFileListParams) => Promise<{ ok: boolean; tree: unknown[] }>;
+  readSkillDevFile: (params: SkillDevFileReadParams) => Promise<{ ok: boolean; path: string; content: string }>;
 }
 
 function normalizeAgentMode(rawMode: unknown): AgentMode {
@@ -453,6 +467,130 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
       }
     },
     [request, setConnectionStats, setPendingQuestion]
+  );
+
+  // ==================== SkillDev 方法 ====================
+
+  // 启动 SkillDev 任务
+  const startSkillDev = useCallback(
+    async (params: SkillDevStartParams) => {
+      try {
+        const response = await request<{ task_id: string }>('skilldev.start', params);
+        return response;
+      } catch (error) {
+        const webError = error as WebError;
+        onErrorRef.current?.(webError.message || '启动 SkillDev 任务失败');
+        throw error;
+      }
+    },
+    [request]
+  );
+
+  // 响应 SkillDev 确认请求
+  const respondSkillDev = useCallback(
+    async (params: SkillDevRespondParams) => {
+      try {
+        const response = await request<{ stage: string }>('skilldev.respond', params);
+        return response;
+      } catch (error) {
+        const webError = error as WebError;
+        onErrorRef.current?.(webError.message || '响应 SkillDev 请求失败');
+        throw error;
+      }
+    },
+    [request]
+  );
+
+  // 查询 SkillDev 任务状态
+  const getSkillDevStatus = useCallback(
+    async (params?: SkillDevStatusParams) => {
+      try {
+        const response = await request<
+          | { tasks: string[] }
+          | Record<string, unknown>
+        >('skilldev.status', params || {});
+        return response;
+      } catch (error) {
+        const webError = error as WebError;
+        onErrorRef.current?.(webError.message || '获取 SkillDev 状态失败');
+        throw error;
+      }
+    },
+    [request]
+  );
+
+  // 下载 SkillDev 产物
+  const downloadSkillDevArtifact = useCallback(
+    async (params: SkillDevDownloadParams) => {
+      try {
+        const response = await request<{
+          ok: boolean;
+          filename: string;
+          content_base64: string;
+          size_bytes: number;
+        }>('skilldev.download', params);
+        return response;
+      } catch (error) {
+        const webError = error as WebError;
+        onErrorRef.current?.(webError.message || '下载 SkillDev 产物失败');
+        throw error;
+      }
+    },
+    [request]
+  );
+
+  // 取消 SkillDev 任务
+  const cancelSkillDev = useCallback(
+    async (params: SkillDevCancelParams) => {
+      try {
+        const response = await request<{ ok: boolean; message: string }>(
+          'skilldev.cancel',
+          params
+        );
+        return response;
+      } catch (error) {
+        const webError = error as WebError;
+        onErrorRef.current?.(webError.message || '取消 SkillDev 任务失败');
+        throw error;
+      }
+    },
+    [request]
+  );
+
+  // 获取 SkillDev 文件列表
+  const listSkillDevFiles = useCallback(
+    async (params: SkillDevFileListParams) => {
+      try {
+        const response = await request<{ ok: boolean; tree: unknown[] }>(
+          'skilldev.file.list',
+          params
+        );
+        return response;
+      } catch (error) {
+        const webError = error as WebError;
+        onErrorRef.current?.(webError.message || '获取 SkillDev 文件列表失败');
+        throw error;
+      }
+    },
+    [request]
+  );
+
+  // 读取 SkillDev 文件内容
+  const readSkillDevFile = useCallback(
+    async (params: SkillDevFileReadParams) => {
+      try {
+        const response = await request<{ ok: boolean; path: string; content: string }>(
+          'skilldev.file.read',
+          params
+        );
+        return response;
+      } catch (error) {
+        const webError = error as WebError;
+        onErrorRef.current?.(webError.message || '读取 SkillDev 文件失败');
+        throw error;
+      }
+    },
+    [request]
   );
 
   useEffect(() => {
@@ -1244,5 +1382,12 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
     disconnect,
     sendUserAnswer,
     getInflightCount: () => webClient.getInflightCount(),
+    startSkillDev,
+    respondSkillDev,
+    getSkillDevStatus,
+    downloadSkillDevArtifact,
+    cancelSkillDev,
+    listSkillDevFiles,
+    readSkillDevFile,
   };
 }

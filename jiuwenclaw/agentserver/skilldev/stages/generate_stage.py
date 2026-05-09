@@ -194,8 +194,7 @@ description: 用祈使句描述何时触发、做什么。描述应聚焦用户�
 ```
 
 规则：
-- name 必须是 kebab-case（小写字母、数字、连字符），≤64 字符
-- description 不能包含 < 或 >
+- name 必须是 kebab-case（小写字母、数字、连字符），≤30 字符
 - description 长度 ≤1024 字符
 - 仅允许的 frontmatter key: name, description, license, allowed-tools, metadata, compatibility
 - frontmatter 必须是 YAML 对象，且 key 不可重复；若存在未知 key，必须移除后再提交
@@ -252,7 +251,7 @@ skill/
 - skill/assets/**
 
 ## 原则性要求
-请务必将文件写入 skill/ 目录下（如 skill/SKILL.md），并确保 YAML frontmatter 格式正确（name 为 kebab-case, description 不含 < >）。
+请务必将文件写入 skill/ 目录下（如 skill/SKILL.md），并确保 YAML frontmatter 格式正确（name 为 kebab-case）。
 
 ## 生成流程要求
 1. 先给出“计划写入的文件清单”
@@ -261,8 +260,8 @@ skill/
 
 ## 自检清单（必须逐项输出通过/失败）
 - `skill/SKILL.md` 存在
-- frontmatter 中 `name` 为 kebab-case 且长度 ≤64
-- `description` 不含 `<` 或 `>` 且长度 ≤1024
+- frontmatter 中 `name` 为 kebab-case 且长度 ≤30
+- `description` 长度 ≤1024
 - frontmatter 仅包含允许 key
 - 所有输出文件均在 `skill/` 目录下
 - 未生成任何与 Skill 无关文件（如 `README.md`、`implement_report.md`）
