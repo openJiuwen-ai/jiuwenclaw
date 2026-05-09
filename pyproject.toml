@@ -45,6 +45,9 @@ desktop = ["pywebview>=5.4"]
 dev = ["pyinstaller>=6.0.0", "pywebview>=5.4"]
 tui = ["jiuwenclaw-tui==0.1.11"]
 distribute = ["openjiuwen[postgres,zmq]"]
+dovescore = [
+    "DoveScore @ git+https://github.com/dannalily/DoveScore.git",
+]
 shell-ast = [
     "tree-sitter>=0.25.0,<0.26.0",
     "tree-sitter-bash>=0.25.0,<0.26.0",

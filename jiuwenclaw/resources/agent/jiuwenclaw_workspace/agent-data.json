@@ -483,5 +483,26 @@
       "path": "agent/jiuwenclaw_workspace/skills/skvm-jit/SKILL.md",
       "isMarkdown": true
     }
+  ],
+  "jiuwenclaw_workspace/skills/dovescore-evaluator": [
+    {
+      "name": "SKILL.md",
+      "path": "agent/jiuwenclaw_workspace/skills/dovescore-evaluator/SKILL.md",
+      "isMarkdown": true
+    }
+  ],
+  "jiuwenclaw_workspace/skills/dovescore-evaluator/references": [
+    {
+      "name": "usage.md",
+      "path": "agent/jiuwenclaw_workspace/skills/dovescore-evaluator/references/usage.md",
+      "isMarkdown": true
+    }
+  ],
+  "jiuwenclaw_workspace/skills/dovescore-evaluator/scripts": [
+    {
+      "name": "run_dovescore.py",
+      "path": "agent/jiuwenclaw_workspace/skills/dovescore-evaluator/scripts/run_dovescore.py",
+      "isMarkdown": false
+    }
   ]
 }
