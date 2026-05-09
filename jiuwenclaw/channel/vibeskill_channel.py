@@ -837,26 +837,7 @@ class VibeSkillChannel(BaseChannel):
         external_sid = await self._resolve_external_session_id(msg.session_id, msg.metadata)
 
         # SkillDev 事件处理
-        skilldev_events = {
-            "skilldev.started": self._handle_skilldev_started,
-            "skilldev.stage_changed": self._handle_skilldev_stage_changed,
-            "skilldev.progress": self._handle_skilldev_progress,
-            "skilldev.skill_name_ready": self._handle_skilldev_skill_name_ready,
-            "skilldev.agent_thinking": self._handle_skilldev_agent_thinking,
-            "skilldev.agent_output": self._handle_skilldev_agent_output,
-            "skilldev.tool_call": self._handle_skilldev_tool_call,
-            "skilldev.tool_result": self._handle_skilldev_tool_result,
-            "skilldev.test_progress": self._handle_skilldev_test_progress,
-            "skilldev.todos_update": self._handle_skilldev_todos_update,
-            "skilldev.confirm_request": self._handle_skilldev_confirm_request,
-            "skilldev.artifact_ready": self._handle_skilldev_artifact_ready,
-            "skilldev.eval_ready": self._handle_skilldev_eval_ready,
-            "skilldev.validate_result": self._handle_skilldev_validate_result,
-            "skilldev.desc_opt_ready": self._handle_skilldev_desc_opt_ready,
-            "skilldev.error": self._handle_skilldev_error,
-            "skilldev.suspended": self._handle_skilldev_suspended,
-            "skilldev.completed": self._handle_skilldev_completed,
-        }
+        skilldev_events = self._get_skilldev_event_handlers()
 
         handler = skilldev_events.get(event_type)
         if handler:
@@ -938,6 +919,29 @@ class VibeSkillChannel(BaseChannel):
             return True
 
         return False
+
+    def _get_skilldev_event_handlers(self) -> dict[str, Callable[[dict, str | None, str | None], Any]]:
+        """共享的 skilldev 事件处理映射。"""
+        return {
+            "skilldev.started": self._handle_skilldev_started,
+            "skilldev.stage_changed": self._handle_skilldev_stage_changed,
+            "skilldev.progress": self._handle_skilldev_progress,
+            "skilldev.skill_name_ready": self._handle_skilldev_skill_name_ready,
+            "skilldev.agent_thinking": self._handle_skilldev_agent_thinking,
+            "skilldev.agent_output": self._handle_skilldev_agent_output,
+            "skilldev.tool_call": self._handle_skilldev_tool_call,
+            "skilldev.tool_result": self._handle_skilldev_tool_result,
+            "skilldev.test_progress": self._handle_skilldev_test_progress,
+            "skilldev.todos_update": self._handle_skilldev_todos_update,
+            "skilldev.confirm_request": self._handle_skilldev_confirm_request,
+            "skilldev.artifact_ready": self._handle_skilldev_artifact_ready,
+            "skilldev.eval_ready": self._handle_skilldev_eval_ready,
+            "skilldev.validate_result": self._handle_skilldev_validate_result,
+            "skilldev.desc_opt_ready": self._handle_skilldev_desc_opt_ready,
+            "skilldev.error": self._handle_skilldev_error,
+            "skilldev.suspended": self._handle_skilldev_suspended,
+            "skilldev.completed": self._handle_skilldev_completed,
+        }
 
     async def _handle_skilldev_started(
         self,
@@ -1839,6 +1843,383 @@ class VibeSkillChannel(BaseChannel):
         serialized["sessionID"] = external_sid
         return serialized
 
+    def _merge_message_update_events(self, events: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """合并 message/part 更新事件。
+
+        规则：
+        - `message.updated` / `message.part.updated` / `message.part.delta` 归并到同一条 `message.updated`
+        - message 顺序按首次出现 messageID
+        - part 顺序按首次出现 partID
+        """
+        merged_events: list[dict[str, Any]] = []
+        message_states: dict[str, dict[str, Any]] = {}
+        message_index_map: dict[str, int] = {}
+
+        def _part_id(part: dict[str, Any]) -> str:
+            return str(part.get("partID") or part.get("id") or "").strip()
+
+        def _ensure_message_state(
+            message_id: str,
+            session_id: str,
+            role: str,
+            event_role: str,
+        ) -> dict[str, Any]:
+            state = message_states.get(message_id)
+            if state is not None:
+                return state
+
+            state = {
+                "id": message_id,
+                "sessionID": session_id,
+                "role": role,
+                "event_role": event_role,
+                "parts": [],
+                "part_by_id": {},
+            }
+            message_states[message_id] = state
+            merged_events.append({
+                "type": "message.updated",
+                "role": event_role,
+                "sessionID": session_id,
+                "properties": {
+                    "info": {
+                        "id": message_id,
+                        "sessionID": session_id,
+                        "role": role,
+                        "parts": [],
+                    }
+                },
+            })
+            message_index_map[message_id] = len(merged_events) - 1
+            return state
+
+        def _upsert_part(state: dict[str, Any], incoming_part: dict[str, Any], event_type: str) -> None:
+            incoming = dict(incoming_part)
+            incoming.pop("messageID", None)
+            part_id = _part_id(incoming)
+
+            if not part_id:
+                state["parts"].append(incoming)
+                return
+
+            part_map = state["part_by_id"]
+            existing = part_map.get(part_id)
+            if existing is None:
+                existing = {"partID": part_id}
+                part_map[part_id] = existing
+                state["parts"].append(existing)
+
+            if event_type == "message.part.delta":
+                delta_text = str(incoming.get("text") or "")
+                existing_text = str(existing.get("text") or "")
+                existing.update({k: v for k, v in incoming.items() if k != "text"})
+                existing["text"] = existing_text + delta_text
+                return
+
+            existing.update(incoming)
+
+        def _refresh_message_event(state: dict[str, Any]) -> None:
+            message_id = str(state.get("id") or "")
+            index = message_index_map.get(message_id)
+            if index is None:
+                return
+
+            parts = [dict(part) for part in state.get("parts", []) if isinstance(part, dict)]
+            merged_events[index] = {
+                "type": "message.updated",
+                "role": state.get("event_role") or "assistant",
+                "sessionID": state.get("sessionID") or "",
+                "properties": {
+                    "info": {
+                        "id": message_id,
+                        "sessionID": state.get("sessionID") or "",
+                        "role": state.get("role") or "assistant",
+                        "parts": parts,
+                    }
+                },
+            }
+
+        for event in events:
+            if not isinstance(event, dict):
+                continue
+
+            event_type = str(event.get("type") or "").strip()
+            if event_type not in {"message.updated", "message.part.updated", "message.part.delta"}:
+                merged_events.append(event)
+                continue
+
+            properties = event.get("properties") if isinstance(event.get("properties"), dict) else {}
+            event_role = str(event.get("role") or "assistant")
+            fallback_sid = str(event.get("sessionID") or "")
+
+            if event_type == "message.updated":
+                info = properties.get("info") if isinstance(properties.get("info"), dict) else {}
+                message_id = str(info.get("id") or "").strip()
+                if not message_id:
+                    merged_events.append(event)
+                    continue
+
+                session_id = str(info.get("sessionID") or fallback_sid or "").strip()
+                role = str(info.get("role") or event_role or "assistant")
+                state = _ensure_message_state(message_id, session_id, role, event_role)
+                if session_id:
+                    state["sessionID"] = session_id
+                if role:
+                    state["role"] = role
+
+                info_parts = info.get("parts") if isinstance(info.get("parts"), list) else []
+                for part in info_parts:
+                    if isinstance(part, dict):
+                        _upsert_part(state, part, event_type)
+
+                _refresh_message_event(state)
+                continue
+
+            message_id = str(properties.get("messageID") or "").strip()
+            if not message_id:
+                merged_events.append(event)
+                continue
+
+            session_id = str(properties.get("sessionID") or fallback_sid or "").strip()
+            state = _ensure_message_state(message_id, session_id, "assistant", event_role)
+            if session_id:
+                state["sessionID"] = session_id
+
+            _upsert_part(state, properties, event_type)
+            _refresh_message_event(state)
+
+        return merged_events
+
+    async def _convert_timeline_to_messages(
+        self, timeline_items: list[dict[str, Any]], session_id: str
+    ) -> list[dict[str, Any]]:
+        """将 skilldev timeline_items 转换为 client 消息格式。
+
+        Args:
+            timeline_items: skilldev.restore 返回的原始事件列表
+            session_id: 外部会话 ID
+
+        Returns:
+            client 消息列表，按 seq 顺序排列
+        """
+        messages: list[dict[str, Any]] = []
+        pending_confirms: list[dict[str, Any]] = []
+        replay_ctx_backup = self._message_ctx
+        replay_pending_backup = self._pending_confirms
+        self._message_ctx = {}
+        self._pending_confirms = {}
+
+        # 需要 replay 的事件类型（使用流式处理器处理）
+        replayable_event_keys = (
+            "skilldev.progress",
+            "skilldev.skill_name_ready",
+            "skilldev.agent_thinking",
+            "skilldev.agent_output",
+            "skilldev.tool_call",
+            "skilldev.tool_result",
+            "skilldev.test_progress",
+            "skilldev.todos_update",
+            "skilldev.confirm_request",
+            "skilldev.error",
+            "skilldev.completed",
+        )
+        all_handlers = self._get_skilldev_event_handlers()
+        replayable_handlers = {
+            key: handler
+            for key, handler in all_handlers.items()
+            if key in replayable_event_keys
+        }
+
+        try:
+            for item in timeline_items:
+                source = item.get("source", "assistant")
+                event_type = item.get("event_type", "")
+                payload = item.get("payload", {}) or {}
+                role = "user" if source == "user" else "assistant"
+
+                # 1. skilldev.user_start → message.send
+                if event_type == "skilldev.user_start":
+                    query = payload.get("query", "")
+                    parts: list[dict[str, Any]] = []
+
+                    if query:
+                        parts.append({"type": "text", "text": query})
+
+                    for file_info in payload.get("files", []) or []:
+                        if not isinstance(file_info, dict):
+                            continue
+                        parts.append({
+                            "type": "file",
+                            "filename": str(file_info.get("filename") or ""),
+                            "url": str(file_info.get("url") or ""),
+                            "mime": str(file_info.get("mime") or ""),
+                        })
+
+                    for skill_pkg in payload.get("skill_packages", []) or []:
+                        if not isinstance(skill_pkg, dict):
+                            continue
+                        parts.append({
+                            "type": "file",
+                            "filename": str(skill_pkg.get("filename") or ""),
+                            "url": str(skill_pkg.get("url") or ""),
+                            "mime": str(skill_pkg.get("mime") or ""),
+                            "resourceType": "skill",
+                        })
+
+                    for tool_def in payload.get("tool_spec_files", []) or []:
+                        if not isinstance(tool_def, dict):
+                            continue
+                        parts.append({
+                            "type": "toolDefinition",
+                            "toolId": str(tool_def.get("toolId") or ""),
+                            "toolType": str(tool_def.get("toolType") or ""),
+                            "name": str(tool_def.get("name") or ""),
+                            "description": str(tool_def.get("description") or ""),
+                            "parameters": tool_def.get("parameters", {}),
+                            "protocol": str(tool_def.get("protocol") or ""),
+                        })
+
+                    messages.append({
+                        "role": role,
+                        "sessionID": session_id,
+                        "type": "message.send",
+                        "parts": parts,
+                    })
+                    continue
+
+                # 2. skilldev.user_respond → *.replied（根据上一条 confirm_request 反推）
+                if event_type == "skilldev.user_respond":
+                    action = payload.get("action", "")
+                    answers = payload.get("answers", [])
+                    feedback = payload.get("feedback")
+                    task_id = str(payload.get("task_id") or payload.get("session_id") or "").strip()
+                    pending = None
+                    if pending_confirms:
+                        if task_id:
+                            for idx in range(len(pending_confirms) - 1, -1, -1):
+                                candidate = pending_confirms[idx]
+                                candidate_task_id = str(candidate.get("task_id") or "").strip()
+                                if not candidate_task_id or candidate_task_id == task_id:
+                                    pending = pending_confirms.pop(idx)
+                                    break
+                        if pending is None:
+                            pending = pending_confirms.pop()
+
+                    confirm_type = str(
+                        payload.get("confirm_type")
+                        or (pending or {}).get("confirm_type")
+                        or "question_clarify"
+                    )
+                    request_id = str((pending or {}).get("request_id") or "")
+
+                    if confirm_type == "review":
+                        messages.append({
+                            "role": role,
+                            "sessionID": session_id,
+                            "type": "review.replied",
+                            "properties": {
+                                "id": request_id,
+                                "sessionID": session_id,
+                                "accept": str(action).strip() == "accept",
+                                "feedback": feedback,
+                            },
+                        })
+                        continue
+
+                    if confirm_type == "desc_optimize_confirm":
+                        messages.append({
+                            "role": role,
+                            "sessionID": session_id,
+                            "type": "desc_optimize.replied",
+                            "properties": {
+                                "id": request_id,
+                                "sessionID": session_id,
+                                "accept": str(action).strip() == "skip",
+                            },
+                        })
+                        continue
+
+                    if confirm_type == "skip_tests_confirm":
+                        messages.append({
+                            "role": role,
+                            "sessionID": session_id,
+                            "type": "test.replied",
+                            "properties": {
+                                "id": request_id,
+                                "sessionID": session_id,
+                                "accept": str(action).strip() in ("run_tests", "test_design"),
+                            },
+                        })
+                        continue
+
+                    pending_data = pending or {}
+                    questions_raw = pending_data.get("questions")
+                    question_defs = questions_raw if isinstance(questions_raw, list) else []
+                    answer_map: dict[str, Any] = {}
+                    if isinstance(answers, list):
+                        for answer_item in answers:
+                            if not isinstance(answer_item, dict):
+                                continue
+                            question_id = str(answer_item.get("question_id") or answer_item.get("id") or "").strip()
+                            if question_id:
+                                answer_map[question_id] = answer_item.get("answer")
+
+                    reply_answers: list[Any] = []
+                    for idx, question in enumerate(question_defs):
+                        if not isinstance(question, dict):
+                            continue
+                        question_id = str(question.get("id") or f"q_{idx + 1}")
+                        answer_value = answer_map.get(question_id, "")
+                        reply_answers.append(answer_value)
+
+                    messages.append({
+                        "role": role,
+                        "sessionID": session_id,
+                        "type": "question.replied",
+                        "properties": {
+                            "sessionID": session_id,
+                            "requestID": request_id,
+                            "answers": reply_answers,
+                        },
+                    })
+                    continue
+
+                if event_type == "skilldev.confirm_request":
+                    payload = dict(payload)
+                    request_id = str(payload.get("request_id") or f"req_{item.get('seq') or secrets.token_hex(4)}")
+                    payload["request_id"] = request_id
+                    task_id = str(payload.get("task_id") or "")
+                    data = payload.get("data", {}) if isinstance(payload.get("data"), dict) else {}
+                    pending_confirms.append({
+                        "request_id": request_id,
+                        "task_id": task_id,
+                        "confirm_type": str(payload.get("confirm_type") or "").strip(),
+                        "questions": data.get("questions", []),
+                    })
+
+                handler = replayable_handlers.get(event_type)
+                if handler is not None:
+                    responses = await handler(payload, session_id, session_id)
+                    for response in responses:
+                        if not isinstance(response, dict):
+                            continue
+                        replay_message = dict(response)
+                        replay_message.setdefault("role", role)
+                        replay_message.setdefault("sessionID", session_id)
+                        messages.append(replay_message)
+                    if responses:
+                        continue
+
+                logger.debug(
+                    "[VibeSkillChannel] unhandled timeline event: event_type=%s",
+                    event_type,
+                )
+
+            return self._merge_message_update_events(messages)
+        finally:
+            self._message_ctx = replay_ctx_backup
+            self._pending_confirms = replay_pending_backup
+
     def _convert_question_answers(self, questions: list[dict[str, Any]], raw_answers: Any) -> list[dict[str, Any]]:
         if not isinstance(raw_answers, list):
             return []
@@ -1918,8 +2299,8 @@ class VibeSkillChannel(BaseChannel):
         if request_path.startswith("/api/v1/session/") and request_path.endswith("/abort") and method == "POST":
             session_id = request_path.replace("/api/v1/session/", "").replace("/abort", "")
             return await self._handle_http_session_abort(session_id)
-        if request_path.startswith("/api/v1/session/") and request_path.endswith("/message") and method == "GET":
-            session_id = request_path.replace("/api/v1/session/", "").replace("/message", "")
+        if request_path.startswith("/api/v1/session/") and request_path.endswith("/messages") and method == "GET":
+            session_id = request_path.replace("/api/v1/session/", "").replace("/messages", "")
             return await self._handle_http_session_message(session_id, headers)
         if request_path.startswith("/api/v1/session/") and request_path.endswith("/summarize") and method == "POST":
             session_id = request_path.replace("/api/v1/session/", "").replace("/summarize", "")
@@ -2169,8 +2550,71 @@ class VibeSkillChannel(BaseChannel):
         return self._json_response(200, {"aborted": True})
 
     async def _handle_http_session_message(self, session_id: str, headers: dict) -> tuple[int, dict, bytes]:
-        """GET /api/v1/session/{id}/message - 获取历史消息。"""
-        return self._json_response(200, {"total": 0, "messages": []})
+        """GET /api/v1/session/{id}/messages - 获取历史消息。
+
+        通过 skilldev.restore API 获取 SkillDev 会话的历史时间线。
+        """
+        if not session_id:
+            return self._json_response(400, {"error": "missing_session_id"})
+
+        try:
+            request_id = f"vibeskill-session-msg-{int(time.time() * 1000):x}-{secrets.token_hex(3)}"
+            internal_id = await self._store.resolve_internal(session_id)
+            if not internal_id:
+                internal_id = session_id
+
+            env = e2a_from_agent_fields(
+                request_id=request_id,
+                channel_id=VIBESKILL_CHANNEL_ID,
+                session_id=internal_id,
+                req_method=ReqMethod.SKILLDEV_RESTORE,
+                params={"task_id": internal_id},
+                is_stream=False,
+                timestamp=time.time(),
+            )
+
+            resp = await self._send_agent_request(env)
+            if not resp:
+                return self._json_response(502, {"error": "agent request failed"})
+
+            # 检查 agentserver 是否返回错误
+            if not getattr(resp, "ok", True):
+                error_payload = getattr(resp, "payload", None) or {}
+                if isinstance(error_payload, dict):
+                    error_msg = error_payload.get("error", "unknown_error")
+                else:
+                    error_msg = str(error_payload)
+                logger.info(
+                    "[VibeSkillChannel] skilldev.restore error: session_id=%s error=%s",
+                    session_id,
+                    error_msg,
+                )
+                return self._json_response(500, {"error": error_msg})
+
+            payload = getattr(resp, "payload", None) if hasattr(resp, "payload") else None
+
+            if not payload:
+                # skilldev.restore 返回空，检查 session 是否存在
+                session_exists = await self._store.get_session(internal_id) is not None
+                if not session_exists:
+                    return self._json_response(404, {"error": "session_not_found"})
+                # Session 存在但没有历史，返回空列表
+                return self._json_response(200, {"total": 0, "messages": []})
+
+            # 转换 timeline_items 为 client 消息格式
+            timeline_items = payload.get("timeline_items", []) if isinstance(payload, dict) else []
+            messages = await self._convert_timeline_to_messages(timeline_items, session_id)
+
+            logger.info(
+                "[VibeSkillChannel] session messages: session_id=%s total=%d",
+                session_id,
+                len(messages),
+            )
+            return self._json_response(200, {"total": len(messages), "messages": messages})
+
+        except Exception as exc:
+            logger.warning("[VibeSkillChannel] Failed to get session messages: %s", exc)
+            return self._json_response(500, {"error": str(exc)})
 
     async def _handle_http_session_summarize(self, session_id: str) -> tuple[int, dict, bytes]:
         """POST /api/v1/session/{id}/summarize - 触发会话总结。"""
