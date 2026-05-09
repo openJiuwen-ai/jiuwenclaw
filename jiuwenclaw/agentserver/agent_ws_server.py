@@ -93,6 +93,10 @@ def _mask_query_for_log(data: dict[str, Any]) -> dict[str, Any]:
     if isinstance(system_prompt, str) and system_prompt:
         masked_params["system_prompt"] = _mask_system_prompt_for_log(system_prompt)
 
+    supplementary_info = params.get("supplementary_info")
+    if isinstance(supplementary_info, str) and supplementary_info:
+        masked_params["supplementary_info"] = _mask_text_for_log(supplementary_info)
+
     if masked_params == params:
         return data
     return {**data, "params": masked_params}

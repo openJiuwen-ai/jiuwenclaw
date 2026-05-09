@@ -52,6 +52,7 @@ def _response_prompt(language: str) -> PromptSection:
   "channel": "【频道来源，如 feishu / telegram / web】",
   "preferred_response_language": "【en 或 zh】",
   "content": "【用户消息内容】",
+  "supplementary_info": "【可选】补充信息（纯文本）：主消息之外的背景、协作摘要、系统注入说明等；与 content 一并理解；无补充内容时则无此字段",
   "source": "user"
 }}
 ```
@@ -83,6 +84,7 @@ You receive user messages and system messages; handle each by source and type.
   "channel": "【channel source, e.g. feishu / telegram / web】",
   "preferred_response_language": "【en or zh】",
   "content": "【user message content】",
+  "supplementary_info": "【optional】Plain-text supplementary material (context, collaboration notes, system-injected notes, etc.); read together with content; omitted when there is nothing extra",
   "source": "user"
 }}
 ```

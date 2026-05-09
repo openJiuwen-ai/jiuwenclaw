@@ -107,7 +107,14 @@ _CONTEXT_SIZE_HINT_KEYS: tuple[str, ...] = (
 )
 
 
-def build_user_prompt(content: str, files: dict | list, channel: str, language: str) -> str:
+def build_user_prompt(
+    content: str,
+    files: dict | list,
+    channel: str,
+    language: str,
+    *,
+    supplementary_info: str | None = None,
+) -> str:
     """Build user prompt for the agent."""
     if language == "zh":
         prompt = "你收到一条消息：\n"
@@ -126,16 +133,16 @@ def build_user_prompt(content: str, files: dict | list, channel: str, language: 
     # 兼容 files 为 dict 或 list 格式
     # 空容器统一输出 "{}"（对 Agent 来说空 dict 和空 list 都表示无文件）
     files_json = json.dumps(files, ensure_ascii=False) if files else "{}"
-    return prompt + json.dumps(
-        {
-            "source": channel,
-            "preferred_response_language": language,
-            "content": content,
-            "files_updated_by_user": files_json,
-            "type": "user input",
-        },
-        ensure_ascii=False,
-    )
+    payload: dict[str, Any] = {
+        "source": channel,
+        "preferred_response_language": language,
+        "content": content,
+        "files_updated_by_user": files_json,
+        "type": "user input",
+    }
+    if supplementary_info:
+        payload["supplementary_info"] = supplementary_info
+    return prompt + json.dumps(payload, ensure_ascii=False)
 
 
 class JiuWenClaw:
@@ -442,6 +449,12 @@ class JiuWenClaw:
         if isinstance(query, InteractiveInput):
             final_query = query
         else:
+            _supp_raw = request.params.get("supplementary_info")
+            supplementary: str | None = None
+            if isinstance(_supp_raw, str):
+                stripped = _supp_raw.strip()
+                if stripped:
+                    supplementary = stripped
             answers = request.params.get("answers", [])
             if answers:
                 request_id = request.params.get("request_id", "")
@@ -450,14 +463,16 @@ class JiuWenClaw:
                     query,
                     files=request.params.get("files", {}),
                     channel=channel,
-                    language=language
+                    language=language,
+                    supplementary_info=supplementary,
                 )
             else:
                 final_query = build_user_prompt(
                     query,
                     files=request.params.get("files", {}),
                     channel=channel,
-                    language=language
+                    language=language,
+                    supplementary_info=supplementary,
                 )
 
         inputs: dict[str, Any] = {
