@@ -225,7 +225,7 @@ export function SkillDevPanel() {
     });
   }, [addMessage, finalizeAgentRunCard]);
 
-  const handleAgentThinking = useCallback((data: { delta: string; __restore_ts?: string }) => {
+  const handleAgentThinking = useCallback((data: { delta: string; stage?: string; __restore_ts?: string }) => {
     addThinkingMessage(data.delta, { timestamp: eventTimestamp(data) });
   }, [addThinkingMessage]);
 
@@ -571,8 +571,12 @@ export function SkillDevPanel() {
     stage?: string;
     [key: string]: unknown;
   }) => {
-    // TEST_RUN / EVALUATE 子 Agent 的工具调用不混入全局工具执行列表
-    if (data.stage?.startsWith('test_run/') || data.stage?.startsWith('evaluate_')) return;
+    // TEST_RUN / EVALUATE / DESC_OPTIMIZE 子 Agent 的工具调用不混入全局工具执行列表
+    if (
+      data.stage?.startsWith('test_run/')
+      || data.stage?.startsWith('evaluate_')
+      || data.stage?.startsWith('desc_optimize_eval/')
+    ) return;
     const toolCallId = data.tool_call_id || `${Date.now()}`;
     const toolName = data.tool_name || 'unknown';
     addToolCall({
@@ -590,8 +594,12 @@ export function SkillDevPanel() {
     stage?: string;
     [key: string]: unknown;
   }) => {
-    // TEST_RUN / EVALUATE 子 Agent 的工具结果不混入全局工具执行列表
-    if (data.stage?.startsWith('test_run/') || data.stage?.startsWith('evaluate_')) return;
+    // TEST_RUN / EVALUATE / DESC_OPTIMIZE 子 Agent 的工具结果不混入全局工具执行列表
+    if (
+      data.stage?.startsWith('test_run/')
+      || data.stage?.startsWith('evaluate_')
+      || data.stage?.startsWith('desc_optimize_eval/')
+    ) return;
     addToolResult({
       toolCallId: data.tool_call_id,
       toolName: data.tool_name || 'unknown',

@@ -322,12 +322,14 @@ class SkillDevContext:
         stage_name: str,
         query: str,
         emit_thinking: bool = True,
+        emit_output: bool = True,
+        capture_thinking: bool = False,
         capture_trace: bool = False,
-    ) -> "str | tuple[str, str]":
+    ) -> "str | tuple[str, str] | tuple[str, str, str]":
         """流式执行 Agent，将推理与正文分别经缓冲后推送到不同事件通道.
 
         - llm_reasoning  → AGENT_THINKING（受 emit_thinking 控制）
-        - llm_output / content_chunk → AGENT_OUTPUT（始终发送，前端按 stage 决定是否渲染）
+        - llm_output / content_chunk → AGENT_OUTPUT（受 emit_output 控制）
         - tool_call / tool_result → 结构化事件
         - answer / final_output → 未流式推送过正文时补推 AGENT_OUTPUT
 
@@ -335,13 +337,19 @@ class SkillDevContext:
         保证 clarify/plan/evaluate 等阶段的 JSON 解析不受 reasoning 污染。
 
         Args:
-            emit_thinking:  是否将推理 chunk 推送为 AGENT_THINKING 事件（默认 True）。
-            capture_trace:  若为 True，同时收集结构化执行轨迹（工具调用 / 工具结果），
-                            返回值变为 (output, trace) 元组；False 时保持原有 str 返回值。
+            emit_thinking:    是否将推理 chunk 推送为 AGENT_THINKING 事件（默认 True）。
+            emit_output:      是否将正文 chunk 推送为 AGENT_OUTPUT 事件（默认 True）。
+                              并发 / 缓冲场景下可设为 False，由调用方在合适时机
+                              手动 emit 完整文本，避免多任务输出按 chunk 交织。
+            capture_thinking: 若为 True，同时收集推理文本并随返回值返回。
+            capture_trace:    若为 True，同时收集结构化执行轨迹（工具调用 / 工具结果）。
 
         Returns:
-            capture_trace=False：Agent 的最终正文输出（str，不含 reasoning）
-            capture_trace=True ：(output: str, trace: str) 元组
+            按以下规则确定返回形态：
+            - 默认：``output: str``
+            - capture_thinking=True：``(output, thinking)``
+            - capture_trace=True：``(output, trace)``
+            - 两者都为 True：``(output, thinking, trace)``
         """
         from openjiuwen.core.runner import Runner
 
@@ -356,6 +364,8 @@ class SkillDevContext:
         }
         # output_parts 只收集正文（llm_output / content_chunk / answer），不含推理
         output_parts: list[str] = []
+        # thinking_parts 收集完整推理文本，仅在 capture_thinking=True 时被消费
+        thinking_parts: list[str] = []
         accumulated_text = ""      # 正文缓冲区
         accumulated_reasoning = "" # 推理缓冲区
         final_output: str | None = None
@@ -364,9 +374,10 @@ class SkillDevContext:
         trace_parts: list[str] = []
 
         async def push_reasoning_delta(delta: str) -> None:
-            """将推理 delta 推送为 AGENT_THINKING 事件（不计入正文返回值）."""
+            """将推理 delta 推送为 AGENT_THINKING 事件并累计到 thinking_parts."""
             if not delta:
                 return
+            thinking_parts.append(delta)
             if emit_thinking:
                 await self.emit(
                     SkillDevEventType.AGENT_THINKING,
@@ -376,16 +387,17 @@ class SkillDevContext:
         async def push_output_delta(delta: str) -> None:
             """将正文 delta 推送为 AGENT_OUTPUT 事件，并累计到 output_parts.
 
-            始终发送；前端按 payload.stage 决定是否渲染（generate/improve 渲染，
-            test_run/evaluate 等内部阶段由前端 VISIBLE_OUTPUT_STAGES 过滤）。
+            是否实时推送由 emit_output 控制；并发 / 缓冲场景下调用方可关闭推送、
+            自行在合适时机一次性 emit 完整文本，避免多任务输出按 chunk 交织。
             """
             if not delta:
                 return
             output_parts.append(delta)
-            await self.emit(
-                SkillDevEventType.AGENT_OUTPUT,
-                {"delta": delta, "stage": stage_name},
-            )
+            if emit_output:
+                await self.emit(
+                    SkillDevEventType.AGENT_OUTPUT,
+                    {"delta": delta, "stage": stage_name},
+                )
 
         async def flush_text() -> None:
             nonlocal accumulated_text
@@ -590,6 +602,10 @@ class SkillDevContext:
                     len(error_capture.captured),
                     error_capture.captured[-1],
                 )
+        if capture_thinking and capture_trace:
+            return output, "".join(thinking_parts), "".join(trace_parts)
+        if capture_thinking:
+            return output, "".join(thinking_parts)
         if capture_trace:
             return output, "".join(trace_parts)
         return output

@@ -21,6 +21,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import random
@@ -28,7 +29,6 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 from time import perf_counter
-from typing import Any
 
 from jiuwenclaw.agentserver.skilldev.context import SkillDevContext
 from jiuwenclaw.agentserver.skilldev.schema import (
@@ -47,6 +47,7 @@ logger = logging.getLogger(__name__)
 
 MAX_ITERATIONS = 3
 HOLDOUT_RATIO = 0.4
+_EVAL_CONCURRENCY = 6
 
 # ---------------------------------------------------------------------------
 # Prompts（内化自官方 improve_description.py 的 prompt 结构）
@@ -310,9 +311,13 @@ class DescOptimizeStageHandler(StageHandler):
             logger.info("[session=%s] [DescOptimizeStage] 第 %d 轮描述优化", ctx.state.task_id, i)
 
             # 评估 train + test
-            train_results = await self._eval_description(ctx, current_desc, train_set)
+            train_results = await self._eval_description(
+                ctx, current_desc, train_set, batch_label=f"iter{i}/train",
+            )
             test_results = (
-                await self._eval_description(ctx, current_desc, test_set)
+                await self._eval_description(
+                    ctx, current_desc, test_set, batch_label=f"iter{i}/test",
+                )
                 if test_set
                 else None
             )
@@ -364,35 +369,79 @@ class DescOptimizeStageHandler(StageHandler):
         ctx: SkillDevContext,
         description: str,
         queries: list[TriggerEvalQuery],
+        batch_label: str = "",
     ) -> list[dict]:
-        """对每个 query，调用模型判断当前 description 是否会触发."""
+        """对每个 query，并发调用模型判断当前 description 是否会触发.
+
+        策略：
+        - 并发执行 LLM 调用（Semaphore 限流），但**关闭** AGENT_THINKING /
+          AGENT_OUTPUT 的实时推送，避免多任务的 chunk 在前端按粒度交织。
+        - 每条 query 在 LLM 完成后，将完整的 thinking + output 缓存在本地。
+        - 通过 Event 链按 **输入顺序** 依次将缓存的 thinking 与 output 作为
+          单个 delta emit 到前端，前端因此感知到的是与原串行版本完全一致的
+          "思考过程 + JSON 输出" 顺序卡片序列。
+        - 最终 results 列表的顺序与输入 queries 顺序保持一致。
+        """
         if not queries:
             return []
-        eval_agent = self._create_eval_agent(ctx)
         start_ts = perf_counter()
         fallback_count = 0
-        results: list[dict] = []
-        for q in queries:
-            logger.info("[session=%s] [DescOptimizeStage] 开始评估单条查询: %s", ctx.state.task_id, q.query)
-            triggered = await self._test_single_trigger(
-                ctx,
-                description,
-                q.query,
-                agent=eval_agent,
-            )
-            logger.info("[session=%s] [DescOptimizeStage] 评估单条查询完成: %s", ctx.state.task_id, q.query)
-            if triggered is None:
-                fallback_count += 1
-                triggered = False
-            passed = triggered == q.should_trigger
-            results.append(
-                {
+        total = len(queries)
+
+        semaphore = asyncio.Semaphore(_EVAL_CONCURRENCY)
+        ordered_results: list[dict | None] = [None] * total
+        label_prefix = f"{batch_label}/" if batch_label else ""
+        # flush_events[i] 在第 i 条 query 的输出已推送到前端后被 set；
+        # 第 i+1 条必须等待 flush_events[i] 才能开始推送自己的内容，
+        # 由此形成严格的输入顺序展示链。
+        flush_events: list[asyncio.Event] = [asyncio.Event() for _ in range(total)]
+
+        async def _bounded(idx: int, q: TriggerEvalQuery) -> None:
+            nonlocal fallback_count
+            stage_name = f"desc_optimize_eval/{label_prefix}{idx}"
+            async with semaphore:
+                logger.info(
+                    "[session=%s] [DescOptimizeStage] 开始评估单条查询: %s",
+                    ctx.state.task_id, q.query,
+                )
+                triggered, thinking_text, output_text = await self._test_single_trigger(
+                    ctx, description, q.query, stage_name=stage_name,
+                )
+                logger.info(
+                    "[session=%s] [DescOptimizeStage] 评估单条查询完成: %s",
+                    ctx.state.task_id, q.query,
+                )
+                if triggered is None:
+                    fallback_count += 1
+                    triggered = False
+                passed = triggered == q.should_trigger
+                ordered_results[idx] = {
                     "query": q.query,
                     "should_trigger": q.should_trigger,
                     "triggered": triggered,
                     "pass": passed,
                 }
-            )
+
+            # 等待前序 query 完成展示（首条无需等待）；
+            # semaphore 已释放，等待期间不占用并发槽位，下一批 LLM 调用可继续。
+            if idx > 0:
+                await flush_events[idx - 1].wait()
+
+            if thinking_text:
+                await ctx.emit(
+                    SkillDevEventType.AGENT_THINKING,
+                    {"delta": thinking_text, "stage": stage_name},
+                )
+            if output_text:
+                await ctx.emit(
+                    SkillDevEventType.AGENT_OUTPUT,
+                    {"delta": output_text, "stage": stage_name},
+                )
+            flush_events[idx].set()
+
+        await asyncio.gather(*[_bounded(i, q) for i, q in enumerate(queries)])
+
+        results: list[dict] = [r for r in ordered_results if r is not None]
         elapsed_ms = int((perf_counter() - start_ts) * 1000)
         logger.info(
             "[session=%s] [DescOptimizeStage] eval batch done. size=%d elapsed_ms=%d fallback_count=%d",
@@ -498,19 +547,38 @@ class DescOptimizeStageHandler(StageHandler):
         ctx: SkillDevContext,
         description: str,
         query: str,
-        agent: Any | None = None,
-    ) -> bool | None:
-        """对单条 query 进行是否触发判定."""
+        stage_name: str = "desc_optimize_eval",
+    ) -> tuple[bool | None, str, str]:
+        """对单条 query 进行是否触发判定.
+
+        Args:
+            stage_name: agent 的 conversation_id 后缀及对外 emit 时使用的 stage 标识。
+                并发场景下必须为每条 query 传入唯一值，避免协程共享会话产生历史污染。
+
+        Returns:
+            ``(triggered, thinking_text, output_text)`` 三元组：
+
+            - ``triggered``：模型对该 query 的触发判定（解析失败时为 ``None``）
+            - ``thinking_text``：模型完整推理文本（供调用方按输入顺序回放到前端）
+            - ``output_text``：模型完整正文输出（同上）
+
+            实时流式推送已通过 ``emit_thinking=False`` / ``emit_output=False`` 抑制；
+            调用方拿到完整文本后，自行决定何时按何种顺序 emit 给前端，从而实现
+            "并行执行、串行展示" 的效果。
+        """
         eval_prompt = TRIGGER_EVAL_PROMPT.format(
             description=description,
             query=query,
         )
-        eval_agent = agent or self._create_eval_agent(ctx)
+        eval_agent = self._create_eval_agent(ctx, stage_name=stage_name)
         try:
-            output = await ctx.run_stage_agent_streaming(
+            output, thinking = await ctx.run_stage_agent_streaming(
                 eval_agent,
-                stage_name="desc_optimize",
+                stage_name=stage_name,
                 query=eval_prompt,
+                emit_thinking=False,
+                emit_output=False,
+                capture_thinking=True,
             )
         except Exception:
             logger.exception(
@@ -518,25 +586,32 @@ class DescOptimizeStageHandler(StageHandler):
                 ctx.state.task_id,
                 query[:60],
             )
-            return None
+            return None, "", ""
         parsed = self._parse_json_candidate(output)
         if isinstance(parsed, dict):
             triggered = parsed.get("triggered")
             if isinstance(triggered, bool):
-                return triggered
+                return triggered, thinking, output
         logger.warning(
             "[session=%s] [DescOptimizeStage] trigger eval parse failed, fallback false. query=%s output=%s",
             ctx.state.task_id,
             query[:60],
             output[:200],
         )
-        return None
+        return None, thinking, output
 
     @staticmethod
-    def _create_eval_agent(ctx: SkillDevContext):
-        """创建 desc_optimize 阶段的触发判定 agent."""
+    def _create_eval_agent(
+        ctx: SkillDevContext,
+        stage_name: str = "desc_optimize_eval",
+    ):
+        """创建 desc_optimize 阶段的触发判定 agent.
+
+        stage_name 同时决定 agent 的 conversation_id（见 context.run_stage_agent_streaming），
+        因此并发场景下必须传入唯一值，避免多协程共享会话造成历史污染。
+        """
         return ctx.create_stage_agent(
-            stage_name="desc_optimize_eval",
+            stage_name=stage_name,
             system_prompt=(
                 "你是 JSON 判定器。只输出 JSON 对象。"
                 '字段: {"triggered": boolean, "reason": string}'
