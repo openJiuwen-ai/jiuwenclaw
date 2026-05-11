@@ -121,7 +121,7 @@ TEST_DESIGN_SYSTEM_PROMPT = """你是一名专业的 Agent Skill 测试工程师
 - 在 expected_output 中说明该文件应如何被处理
 
 ## 输出格式（严格 JSON，不包含任何解释文字或 markdown 代码块，expectations条目内容无双引号等其他特殊符号，便于JSON解析）
-```json
+
 {{
   "skill_name": "{skill_name}",
   "evals": [
@@ -148,7 +148,7 @@ TEST_DESIGN_SYSTEM_PROMPT = """你是一名专业的 Agent Skill 测试工程师
     }}
   ]
 }}
-```"""
+"""
 
 
 class TestDesignStageHandler(StageHandler):
@@ -376,11 +376,11 @@ class TestDesignStageHandler(StageHandler):
                 stage_name=stage_key,
                 whitelist_key="test_design",
                 system_prompt=system_prompt,
-                tools=["file_read", "web_search_free", "web_search_paid", "shell", "file_write"],
-                max_iterations=20,
+                tools=["file_read", "web_search_free", "shell", "file_write"],
+                max_iterations=30,
             )
             prompt = (
-                f"Skill 文件内容已在 system prompt 中预加载。"
+                f"Skill 文件内容已在 system prompt 中预加载。无需再去调用文件工具读取文件内容。"
                 f"请直接为 skill_name='{skill_name}' 设计测试用例，输出 JSON，不要包含任何解释文字。"
             )
             raw, trace = await ctx.run_stage_agent_streaming(

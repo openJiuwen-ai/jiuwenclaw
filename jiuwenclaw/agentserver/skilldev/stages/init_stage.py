@@ -295,6 +295,10 @@ class InitStageHandler(StageHandler):
             parts.append(
                 f"命名前请优先检查工作区{ctx.workspace}/resources/目录下的上传内容（至少查看目录与关键文件名，必要时读取文件内容）",
             )
+        else:
+            parts.append(
+                f"没有上传参考资料，请直接生成skill name，禁止调用文件工具读取文件内容。",
+            )
         if attempt > 1:
             parts.append(
                 "本次只输出单独一行 kebab-case 标识，不要前缀、不要解释、不要换行列举多个方案。",

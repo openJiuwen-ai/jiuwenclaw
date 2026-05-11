@@ -34,154 +34,8 @@ GENERATE_USER_CLARIFICATION_BINDING = """【必须遵守·用户补充信息】�
 - 禁止编写与补充信息相矛盾的能力描述、工作流步骤、示例或隐含默认行为；禁止用「通用做法」或自行推测的默认方案覆盖用户已在补充信息中给出的明确选择。
 - 若下文中「skill 开发计划」或既有草稿与补充信息冲突，以补充信息为准，并相应修正实现与表述，不得保留冲突内容。"""
 
+
 GENERATE_SYSTEM_PROMPT_TEMPLATE = """你是一个 Skill 开发专家。根据用户需求、澄清信息和工作区资料，设计并生成完整的 Skill 文件集。
-
-## SKILL.md 格式要求（必须严格遵守）
-
-**YAML Frontmatter（必填）：**
-```
----
-name: skill-name-here
-description: 用祈使句描述何时触发、做什么。描述应聚焦用户意图而非实现细节。≤1024 字符。
----
-```
-
-规则：
-- name 必须是 kebab-case（小写字母、数字、连字符），≤64 字符
-- description 不能包含 < 或 >
-- description 长度 ≤1024 字符
-- 仅允许的 frontmatter key: name, description, license, allowed-tools, metadata, compatibility
-- frontmatter 必须是 YAML 对象，且 key 不可重复；若存在未知 key，必须移除后再提交
-- 若包含 allowed-tools，必须是字符串数组
-
-## Skill 目录结构
-
-```
-skill/
-├── SKILL.md (必需)
-├── scripts/    - 确定性/重复性任务的可执行脚本
-├── references/ - 按需加载的领域文档
-└── assets/     - 输出中使用的模板、图标、字体等
-```
-
-## 写作原则
-
-### 渐进式信息展示 (Progressive Disclosure)
-1. **元数据**（name + description）— 始终在上下文中（~100 词）
-2. **SKILL.md 正文** — 触发时加载（<500 行为佳）
-3. **捆绑资源** — 按需加载（无大小限制，脚本可不加载直接执行）
-
-### 写作风格
-- 使用祈使句式（"执行 X" 而非 "这个 skill 会执行 X"）
-- 解释 **为什么** 而非堆砌规则；避免过度使用 MUST/NEVER/ALWAYS
-- 使用心理模型让模型理解意图，比死板指令更有效
-- 保持 SKILL.md ≤500 行；超过时拆分到 references/ 并标明何时查阅
-
-### 输出格式定义
-明确定义预期输出结构，使用模板或示例：
-```markdown
-## 报告结构
-请严格使用以下模板：
-# [Title]
-## Executive summary
-## Key findings
-## Recommendations
-```
-
-### 发现重复工作 -> 捆绑脚本
-如果测试中发现模型反复独立编写类似的辅助脚本，应将其捆绑到 scripts/ 中。
-
-### description 的触发性
-当前模型倾向于"不够主动触发"skill。description 应略微"推进式"——
-除了说明 skill 做什么，还要列举具体触发场景，即使用户没有明确提到 skill 名称。
-
-## 参考技能检索（必须先执行，再开始生成）
-
-### Step 1: 提炼检索关键词
-- 从用户需求中提炼 1-2 个语义准确的英文关键词（不是中文，不是逐字翻译）
-- 示例：
-  - "我想创建一个 PR review 技能" -> `code review`
-  - "帮我写一个根据 git 历史生成 changelog 的技能" -> `changelog git`
-
-### Step 2: 检索社区技能
-- 在 Windows 环境下，必须使用以下命令格式检索（否则可能出现空结果）：
-```bash
-powershell -Command "npx skills find '<keywords>'"
-```
-- 在 macOS/Linux 环境下可使用：
-```bash
-npx skills find '<keywords>'
-```
-- Windows 关键注意事项：不要直接运行 `npx skills find`（不加 `powershell -Command`），否则可能出现“静默空结果”
-- 若错误地使用了命令格式导致空结果，必须先用正确命令重试，再判断是否无结果
-- 按安装量从高到低选择前 2 个结果作为参考；若不足 2 个，则按实际数量使用
-- 若确认命令格式正确后仍无结果，可跳过参考检索并继续生成
-
-### Step 3: 拉取完整参考目录（不安装）
-- 对每个入选结果（格式通常为 `owner/repo@skill-name`），拉取完整技能目录（不仅是 `SKILL.md`）
-- 禁止使用 `npx skills add`（会引入软链接并污染技能环境）
-- 仅将参考内容放入当前工作区 {workspace} 中的 retrieved_skills 目录，禁止放到其他目录。
-- 可采用 sparse clone 思路仅拉取目标技能子目录；若技能在仓库根目录，则复制根目录作为参考
-- 参考读取目标是结构借鉴，不是复刻内容
-
-### Step 4: 先分析参考，再生成新技能
-- 先输出检索到的技能列表（包含安装量）
-- 再说明每个参考技能的结构特征（是否包含 `SKILL.md`、`scripts/`、`references/`、`assets/`、`agents/`）
-- 分层吸收（Progressive Disclosure）：
-  - Layer 1（必须）：目录巡检，列出目录树并识别分层设计意图
-  - Layer 2（必须）：阅读 `SKILL.md`，提取 Scope、Structure、Instruction style、Pointers、Edge cases
-  - Layer 3（按需）：仅在相关时阅读 `scripts/`、`references/`、`assets/`、`agents/`
-- Layer 3 的读取决策：
-  - 若新技能需要自动化/确定性步骤 -> 优先读 `scripts/`
-  - 若新技能需要大体量领域知识 -> 优先读 `references/`
-  - 若新技能需要模板化产物 -> 优先读 `assets/`
-  - 若新技能需要子代理协作 -> 优先读 `agents/`
-- 不要一次性读完全部参考文件，优先读取能回答“他们如何解决与当前需求相同问题”的文件
-- 仅借鉴结构与方法，不得照抄内容；必须基于当前用户需求重新设计并生成
-- 若参考中存在可复用的重复性流程，优先在新技能中落地为 `scripts/`（而不是每次临时编写）
-- 用户确认技能最终完成后，删除 retrieved_skills 目录：`{workspace}/retrieved_skills`
-
-## 文件范围约束
-你只能生成与 Skill 本身直接相关的文件（例如 SKILL.md、scripts/、references/、assets/）。
-禁止生成与 Skill 交付无关的文件，例如 `README.md`、`implement_report.md`、实现总结、CHANGELOG、开发说明、复盘文档等。
-仅允许写入以下路径：
-- skill/SKILL.md
-- skill/scripts/**
-- skill/references/**
-- skill/assets/**
-
-## 原则性要求
-请务必将文件写入 skill/ 目录下（如 skill/SKILL.md），并确保 YAML frontmatter 格式正确（name 为 kebab-case, description 不含 < >）。
-
-## 生成流程要求
-1. 先输出“参考技能检索与分析结果”
-2. 再给出“计划写入的文件清单”
-3. 再执行文件写入
-4. 完成后进行自检并输出结果
-5. 若本次创建了 `_borrowed_refs`，在用户确认完成后清理该目录
-
-## 自检清单（必须逐项输出通过/失败）
-- `skill/SKILL.md` 存在
-- frontmatter 中 `name` 为 kebab-case 且长度 ≤64
-- `description` 不含 `<` 或 `>` 且长度 ≤1024
-- frontmatter 仅包含允许 key
-- 所有输出文件均在 `skill/` 目录下
-- 未生成任何与 Skill 无关文件（如 `README.md`、`implement_report.md`）
-
-## 最终输出格式（固定）
-请按以下结构输出：
-1. 参考技能检索与分析结果（关键词、命中技能、安装量、结构特征、借鉴点）
-2. 本次写入文件列表（逐行路径）
-3. 每个文件一句用途说明
-4. 自检结果（对应“自检清单”逐项列出）
-
-## 工作区
-工作区路径：{workspace}。
-禁止在工作区外进行操作。
-"""
-
-
-GENERATE_SYSTEM_PROMPT_TEMPLATE_WITH_REF = """你是一个 Skill 开发专家。根据用户需求、澄清信息和工作区资料，设计并生成完整的 Skill 文件集。
 
 ## SKILL.md 格式要求（必须严格遵守）
 
@@ -274,6 +128,7 @@ skill/
 
 ## 工作区
 工作区路径：{workspace}。
+工作区中已经创建了skill文件夹，无需重复创建。
 禁止在工作区外进行操作。
 """
 
@@ -307,16 +162,9 @@ class GenerateStageHandler(StageHandler):
     ) -> list[str]:
         """调用 Agent 生成完整 Skill 文件集，并回收实际产物列表."""
 
-        if ctx.state.skill_dir_empty and ctx.state.ref_skills_dir_empty:
-            # retrieved_skills_dir = ctx.workspace / "retrieved_skills"
-            # retrieved_skills_dir.mkdir(parents=True, exist_ok=True)
-            system_prompt = GENERATE_SYSTEM_PROMPT_TEMPLATE_WITH_REF.format(
-                workspace=ctx.workspace
-            )
-        else:
-            system_prompt = GENERATE_SYSTEM_PROMPT_TEMPLATE_WITH_REF.format(
-                workspace=ctx.workspace
-            )
+        system_prompt = GENERATE_SYSTEM_PROMPT_TEMPLATE.format(
+            workspace=ctx.workspace
+        )
         agent = ctx.create_stage_agent(
             stage_name="generate",
             system_prompt=system_prompt,
@@ -350,7 +198,7 @@ class GenerateStageHandler(StageHandler):
     def _build_user_query(self, ctx: SkillDevContext) -> str:
         """构建传给 ReActAgent 的 query 字符串."""
         query = ctx.state.input.get("query", "")
-        parts = [f"## 用户需求：{query}", f"预生成的skill name: {ctx.state.skill_name}"]
+        parts = [f"## 用户需求：{query}", f"预生成的skill name: {ctx.state.skill_name}。如果用户明确指出修改skill name，请根据用户需求进行修改。"]
 
         # 将 QA 问答内容以可读形式注入
         if ctx.state.clarification_questions and ctx.state.clarification_answers:
@@ -427,18 +275,18 @@ class GenerateStageHandler(StageHandler):
                 has_preloaded_content = True
         if has_preloaded_content:
             parts.append(
-                "以上文件内容已尽量完整预加载。如预加载未覆盖某些文件，可酌情使用文件工具补充查看。\n"
+                "## 约束\n1. 创建Skill可供参考的文件内容已尽量完整预加载。如预加载未覆盖某些文件，可酌情使用文件工具补充查看。\n"
+                "2. 严禁主动读取其他文件内容。\n3. 请根据用户需求与参考资料，生成skill相关内容"
             )
-        plan = ctx.state.plan
-        if plan:
-            parts.append(f"## skill开发计划：\n{plan}")
+        else:
+            parts.append("## 约束\n请根据用户需求，生成skill相关内容。不需主动调用工具读取文件内容。")
 
         if ctx.state.last_validate_error:
             parts.append(
-                f"⚠️ 上次生成的 SKILL.md 校验失败（第 {ctx.state.generate_retries} 次重试）：\n"
+                f"## 重要信息补充\n⚠️ 上次生成的 SKILL.md 校验失败（第 {ctx.state.generate_retries} 次重试）：\n"
                 f"失败原因：{ctx.state.last_validate_error}\n"
                 f"请务必将文件写入 {ctx.workspace} 中的 skill/ 目录下（如 skill/SKILL.md），"
-                f"并确保 YAML frontmatter 格式正确（name 为 kebab-case, description 不含 < >）。"
+                f"并确保 YAML frontmatter 格式正确（name 为 kebab-case）。"
             )
 
         return "\n\n".join(parts)

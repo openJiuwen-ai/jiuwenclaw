@@ -127,7 +127,7 @@ class SkillDevTestRunner:
                 whitelist_key="test_run",
                 system_prompt=self._build_system_prompt_with_skill(self.skill_dir, variant_dir),
                 tools=["file_read", "file_write", "shell", "code_execute", "file_glob", 
-                    "shell", "web_search_free", "web_search_paid"],
+                    "shell", "web_search_free"],
                 max_iterations=30,
             )
 
@@ -196,7 +196,7 @@ class SkillDevTestRunner:
                 whitelist_key="test_run",
                 system_prompt=baseline_prompt,
                 tools=["file_read", "shell", "code_execute", "file_glob", 
-                    "shell", "web_search_free", "web_search_paid", "web_fetch"],
+                    "shell", "web_search_free", "file_write"],
                 max_iterations=30,
             )
             

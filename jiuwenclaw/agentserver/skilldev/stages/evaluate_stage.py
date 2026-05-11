@@ -89,7 +89,7 @@ GRADER_SYSTEM_PROMPT = """\
 >
 > 1. **若 prompt 中「Agent 未在该目录创建任何额外文件」** → 所有 FILE 类 expectation 直接判 FAIL
 > 2. **若 prompt 末尾「产出文件内容（已预加载）」已包含该文件内容** → 直接基于预加载内容判断，禁止再调用文件工具
-> 3. **若文件在预加载列表中但标注为二进制/过大/不存在** → 才允许使用文件工具（`file_read` / `file_glob` / `file_listdir`）读取后判断
+> 3. **若文件在预加载列表中但标注为二进制/过大/不存在** → 才允许使用文件工具（`read_file` / `glob` / `list_files`）读取后判断
 > 4. **若文件完全未出现在预加载列表且未创建文件说明** → 直接判 FAIL
 
 - 禁止仅凭文本输出推断文件是否存在或内容是否正确
@@ -271,7 +271,7 @@ class EvaluateStageHandler(StageHandler):
     # 单次 grading 失败后的最大重试次数（不含首次）
     _MAX_GRADE_RETRIES = 3
     # 单次 grading 调用的超时秒数（防止网络挂起导致整个 stage 无限等待）
-    _GRADE_TIMEOUT_SECONDS = 120
+    _GRADE_TIMEOUT_SECONDS = 300
 
     async def _grade_all_evals(self, ctx: SkillDevContext, iter_dir: Path) -> None:
         """为每个 eval 的 with_skill / baseline 结果并行执行评分.
@@ -366,7 +366,7 @@ class EvaluateStageHandler(StageHandler):
                 whitelist_key="evaluate",
                 system_prompt=GRADER_SYSTEM_PROMPT,
                 tools=["file_read", "file_grep", "file_listdir", "file_glob", "shell"],
-                max_iterations=15,
+                max_iterations=30,
             )
             grading_request = GradingAgentRequest(
                 expectations=expectations,
@@ -830,7 +830,7 @@ class EvaluateStageHandler(StageHandler):
             whitelist_key="evaluate",
             system_prompt=ANALYST_SYSTEM_PROMPT,
             tools=[],
-            max_iterations=8,
+            max_iterations=30,
         )
 
         prompt = self._build_analyst_prompt(ctx, benchmark)

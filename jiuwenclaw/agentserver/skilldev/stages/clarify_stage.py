@@ -206,12 +206,6 @@ class ClarifyStageHandler(StageHandler):
                 parts.append(f"用户提供了以下工具，可以在生成的skill中使用：\n{ctx.state.external_tools}")
         else:
             # 预加载用户上传的资料
-            content, _ = load_asset_content(
-                asset=asset_json,
-                include_ref_files=True,
-                include_ref_skills=True,
-                include_tools=False
-            )
             if not (ctx.state.ref_files_dir_empty and ctx.state.ref_skills_dir_empty):
                 content, _ = load_asset_content(
                     asset=asset_json,
@@ -224,7 +218,6 @@ class ClarifyStageHandler(StageHandler):
                         "## 参考资料\n"
                         f"以下为用户上传的参考资料，存放于工作区 {ctx.workspace} 中的resources/目录。"
                         f"现已预加载，无需再调用工具读取）：\n\n{content}"
-                        "\n\n请阅读预加载的资料后再提问"
                     )
                     has_preloaded_content = True
 
@@ -237,9 +230,11 @@ class ClarifyStageHandler(StageHandler):
                 has_preloaded_content = True
         if has_preloaded_content:
             parts.append(
-                "以上文件内容已尽量完整预加载。如预加载未覆盖某些文件，可酌情使用文件工具补充查看。\n"
-                "请根据用户需求与以上上下文，生成必要的关键澄清问题（JSON 数组格式）。"
+                "## 约束\n1. 创建Skill可供参考的文件内容已尽量完整预加载。如预加载未覆盖某些文件，可酌情使用文件工具补充查看。\n"
+                "2. 严禁主动读取其他文件内容。\n3. 请根据用户需求与参考资料，生成必要的关键澄清问题（JSON 数组格式）。"
             )
+        else:
+            parts.append("## 约束\n请根据用户需求，生成必要的澄清问题（JSON 数组格式）。严禁调用工具读取文件内容。")
         return "\n\n".join(parts)
 
     def _parse_questions_json(self, text: str, session_id: str) -> list[dict] | None:
