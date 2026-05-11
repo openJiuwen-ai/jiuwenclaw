@@ -27,23 +27,86 @@ Runtime layout:
 内置模板位于包内 ``jiuwenclaw/resources/``（含 ``agent/`` 下各技能模板以及 ``skills_state.json``）。
 """
 
+import asyncio
+import copy
+import datetime
 import json
+import logging
+import mimetypes
 import os
 import re
+import shutil
 import sys
 import time
-import datetime
-import asyncio
-import shutil
-import mimetypes
-from pathlib import Path
-from dataclasses import dataclass, field
-from typing import Any, Literal, Optional
 from collections import OrderedDict
-import logging
+from dataclasses import dataclass, field
 from logging.handlers import BaseRotatingHandler
+from pathlib import Path
+from typing import Any, Literal, Optional
+
+import yaml
 from ruamel.yaml import YAML
 from ruamel.yaml.comments import CommentedMap
+
+from jiuwenclaw.local_env_config import get_local_config
+
+logger = logging.getLogger(__name__)
+
+
+def merge_template_with_override(
+    template: dict[str, Any],
+    override: dict[str, Any],
+) -> dict[str, Any]:
+    """模板默认值 + 用户 override；用户键覆盖模板。override 中独有的顶层键保留。"""
+    out: dict[str, Any] = {}
+    for key, tmpl_val in template.items():
+        if key not in override:
+            out[key] = copy.deepcopy(tmpl_val)
+        elif isinstance(tmpl_val, dict) and isinstance(override.get(key), dict):
+            out[key] = merge_template_with_override(tmpl_val, override[key])
+        else:
+            out[key] = override[key]
+    for key, over_val in override.items():
+        if key not in template:
+            out[key] = copy.deepcopy(over_val)
+    return out
+
+
+def load_yaml_dict(path: Path) -> dict[str, Any]:
+    if not path.exists():
+        return {}
+    with open(path, "r", encoding="utf-8") as f:
+        data = yaml.safe_load(f)
+    return data if isinstance(data, dict) else {}
+
+
+def resolve_shipped_template_config_path() -> Path:
+    """包内 shipped 模板：jiuwenclaw/resources/config.yaml。"""
+    return Path(__file__).resolve().parent / "resources" / "config.yaml"
+
+
+def resolve_env_vars(value: Any) -> Any:
+    """递归解析配置中的环境变量替换语法 ${VAR:-default}."""
+    if isinstance(value, str):
+        pattern = r'\$\{([^:}]+)(?::-([^}]*))?\}'
+
+        def replace_env(match):
+            var_name = match.group(1)
+            default = match.group(2)
+            current = get_local_config(var_name)
+            if default is not None:
+                if current is None or current == "":
+                    return default
+                return current
+            return current if current is not None else ""
+
+        return re.sub(pattern, replace_env, value)
+    if isinstance(value, dict):
+        return {k: resolve_env_vars(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [resolve_env_vars(item) for item in value]
+    return value
+
 
 _LOG_FILE_MAX_BYTES = 20 * 1024 * 1024
 _LOG_FILE_BACKUP_COUNT = 20
@@ -206,17 +269,18 @@ class _CompositeFilter(logging.Filter):
 
 
 def _load_logging_config_from_yaml() -> dict[str, Any]:
-    """读取 ~/.jiuwenclaw/config/config.yaml 中的 logging 段（无则空）。"""
+    """读取合并并解析环境变量后的 ``logging`` 段（包内模板 + 用户 override）。
+
+    逻辑与本模块中的 ``merge_template_with_override`` / ``resolve_env_vars`` 一致；
+    放在 ``utils`` 内以便 ``setup_logger`` 在导入 ``jiuwenclaw.config`` 之前即可执行。
+    """
     try:
-        cf = get_config_file()
-        if not cf.exists():
-            return {}
-        rt = YAML()
-        with open(cf, "r", encoding="utf-8") as f:
-            data = rt.load(f) or {}
-        raw = data.get("logging")
+        template = load_yaml_dict(resolve_shipped_template_config_path())
+        override = load_yaml_dict(get_config_file())
+        merged = merge_template_with_override(template, override)
+        raw = merged.get("logging")
         if isinstance(raw, dict):
-            return raw
+            return resolve_env_vars(raw)
     except Exception as e:
         logger.error(f"load logging config failed, caused by={e}")
     return {}
@@ -716,7 +780,83 @@ def _merge_config_from_source(src: Path, dest: Path) -> None:
         )
 
 
+def _read_template_version_value(template_path: Path) -> Any:
+    """读取模板 config.yaml 顶层的 ``version``（缺省 ``1.0``）；有定义则按 YAML 解析结果原样采用。"""
+    if not template_path.exists():
+        return 1.0
+    try:
+        rt = YAML()
+        rt.preserve_quotes = True
+        with open(template_path, "r", encoding="utf-8") as f:
+            tpl = rt.load(f)
+        if isinstance(tpl, dict) and tpl.get("version") is not None:
+            return tpl["version"]
+    except OSError as e:
+        logger.warning("Failed to read template version from %s: %s", template_path, e)
+    return 1.0
+
+
+def _write_initial_user_override_config(template_src: Path, dest: Path) -> None:
+    """首次初始化用户目录时写入稀疏 override（仅 ``version``，取自模板）。"""
+    version_val = _read_template_version_value(template_src)
+    rt = YAML()
+    rt.preserve_quotes = True
+    rt.default_flow_style = False
+    rt.indent(mapping=2, sequence=4, offset=2)
+    rt.width = 4096
+    data = CommentedMap()
+    data["version"] = version_val
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    with open(dest, "w", encoding="utf-8") as f:
+        rt.dump(data, f)
+
+
+def migrate_legacy_user_config_if_needed() -> None:
+    """无 ``version`` 的旧版完整 config 迁移为稀疏 override：仅保留 permissions + version。
+
+    已有 ``version`` 的用户文件不修改。
+    """
+    cfg_path = get_config_file()
+    if not cfg_path.exists():
+        return
+    try:
+        rt = YAML()
+        rt.preserve_quotes = True
+        rt.default_flow_style = False
+        rt.indent(mapping=2, sequence=4, offset=2)
+        rt.width = 4096
+        with open(cfg_path, "r", encoding="utf-8") as f:
+            data = rt.load(f)
+        if data is None:
+            data = {}
+        if not isinstance(data, dict):
+            return
+        ver = data.get("version")
+        if ver is not None and str(ver).strip() != "":
+            return
+
+        package_root = _find_package_root()
+        tpl_file = (package_root / "resources" / "config.yaml") if package_root else None
+        version_val = _read_template_version_value(tpl_file) if tpl_file else 1.0
+
+        new_data = CommentedMap()
+        if "permissions" in data:
+            new_data["permissions"] = data["permissions"]
+        new_data["version"] = version_val
+
+        with open(cfg_path, "w", encoding="utf-8") as f:
+            rt.dump(new_data, f)
+        logger.info(
+            "[jiuwenclaw] migrated legacy config.yaml to sparse override (schema version %s)",
+            version_val,
+        )
+    except OSError as e:
+        logger.warning("[jiuwenclaw] legacy config migration failed: %s", e)
+
+
 def update_config():
+    migrate_legacy_user_config_if_needed()
+
     package_root = _find_package_root()
     if not package_root:
         raise RuntimeError("package root not found")
@@ -724,7 +864,7 @@ def update_config():
     workspace_dir = get_user_workspace_dir()
     workspace_dir.mkdir(parents=True, exist_ok=True)
 
-    # ----- config: copy config.yaml -----
+    # ----- config：稀疏 override 模式不再将模板合并写入用户文件 -----
     resources_dir = package_root / "resources"
     config_yaml_src_candidates = [
         resources_dir / "config.yaml",
@@ -741,9 +881,6 @@ def update_config():
 
     config_dest_dir = workspace_dir / "config"
     config_dest_dir.mkdir(parents=True, exist_ok=True)
-    config_yaml_dest = config_dest_dir / "config.yaml"
-    # 将源码 config.yaml 的新增字段合并到用户 config.yaml，保留用户已有值
-    _merge_config_from_source(config_yaml_src, config_yaml_dest)
 
 
 def prepare_workspace(
@@ -756,6 +893,7 @@ def prepare_workspace(
 
     workspace_dir = get_user_workspace_dir()
     workspace_dir.mkdir(parents=True, exist_ok=True)
+    migrate_legacy_user_config_if_needed()
 
     # Check for legacy workspace migration or cleanup
     old_workspace = workspace_dir / "agent" / "workspace"
@@ -809,7 +947,7 @@ def prepare_workspace(
     config_yaml_dest = config_dest_dir / "config.yaml"
 
     if overwrite or not config_yaml_dest.exists():
-        shutil.copy2(config_yaml_src, config_yaml_dest)
+        _write_initial_user_override_config(config_yaml_src, config_yaml_dest)
 
     builtin_rules_src = resources_dir / "builtin_rules.yaml"
     builtin_rules_dest = config_dest_dir / "builtin_rules.yaml"
@@ -923,9 +1061,8 @@ def prepare_workspace(
     # sessions is runtime-only (template may not include it)
     agent_sessions.mkdir(parents=True, exist_ok=True)
 
-    from jiuwenclaw.config import migrate_config_from_template, set_preferred_language_in_config_file
+    from jiuwenclaw.config import set_preferred_language_in_config_file
 
-    migrate_config_from_template(config_yaml_src, config_yaml_dest)
     set_preferred_language_in_config_file(config_yaml_dest, resolved_lang)
     # 由于日志初始化在前, 调用过_resolve_paths。workspace完成后务必要再调用一次_resolve_paths
     _resolve_paths(force=True)
@@ -1491,7 +1628,8 @@ def setup_logger(log_level: Optional[str] = None) -> logging.Logger:
 
     所有分类日志同时写入 ``full.log``。输出目录：``~/.jiuwenclaw/agent/.logs/``。
 
-    级别由 ``config.yaml`` 的 ``logging`` 段控制；环境变量 ``LOG_LEVEL`` 仅覆盖**控制台**级别
+    级别由合并后的 ``logging`` 段控制（模板默认值 + 用户 override；含 ``${VAR:-default}`` 解析）；
+    环境变量 ``LOG_LEVEL`` 仅覆盖**控制台**级别
     （``log_level`` 参数为 ``None`` 时）。若传入 ``log_level``（如单测），则控制台与各文件级别均为该值。
     """
     log_root_path = os.getenv("LOG_ROOT_PATH", "").strip()

@@ -27,10 +27,6 @@ from urllib.parse import urlparse
 from dotenv import load_dotenv
 from openjiuwen.core.common.logging import LogManager
 
-import jiuwenclaw.channel.acp_channel as acp_channel_module
-from jiuwenclaw.channel.acp_channel import AcpGatewayBridge
-from jiuwenclaw.gateway.local_rpc_hooks import LocalRpcHookDispatcher
-from jiuwenclaw.gateway.route_binding import GatewayRouteBinding
 from jiuwenclaw.jiuwen_core_patch import (
     apply_openai_model_client_patch,
     configure_openjiuwen_logging_under_jiuwenclaw,
@@ -40,11 +36,18 @@ from jiuwenclaw.utils import (
     get_env_file,
     prepare_workspace,
     get_multi_tenant_user_workspace_dir,
+    migrate_legacy_user_config_if_needed,
 )
-from jiuwenclaw.extensions.extension_config_sync import decrypt_extensions_sensitive_for_agent
-from jiuwenclaw.local_env_config import decrypt
 
 apply_openai_model_client_patch()
+migrate_legacy_user_config_if_needed()
+
+import jiuwenclaw.channel.acp_channel as acp_channel_module
+from jiuwenclaw.channel.acp_channel import AcpGatewayBridge
+from jiuwenclaw.gateway.local_rpc_hooks import LocalRpcHookDispatcher
+from jiuwenclaw.gateway.route_binding import GatewayRouteBinding
+from jiuwenclaw.extensions.extension_config_sync import decrypt_extensions_sensitive_for_agent
+from jiuwenclaw.local_env_config import decrypt
 
 # Ensure workspace initialized
 _workspace_dir = get_user_workspace_dir()

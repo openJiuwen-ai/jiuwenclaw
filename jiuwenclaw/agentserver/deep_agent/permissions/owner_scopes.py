@@ -16,13 +16,10 @@ from __future__ import annotations
 import contextvars
 import json
 import logging
-import threading
 from dataclasses import dataclass
 from typing import Any
 
 logger = logging.getLogger(__name__)
-
-_persist_lock = threading.Lock()
 
 
 @dataclass
@@ -227,31 +224,3 @@ def _match_args(pattern: str, tool_args: dict[str, Any]) -> bool:
         return False
     except Exception:
         return False
-
-
-def persist_to_owner_scope(
-    tool_name: str,
-    pattern: str,
-    channel_id: str,
-    user_id: str,
-    config: dict,
-) -> None:
-    """将规则持久化到 config.yaml 的 owner_scopes 节点."""
-    try:
-        from jiuwenclaw.config import get_config_raw, set_config
-
-        with _persist_lock:
-            raw = get_config_raw()
-            perm_cfg = raw.setdefault("permissions", {})
-            scopes = perm_cfg.setdefault("owner_scopes", {})
-            ch = scopes.setdefault(channel_id, {})
-            user = ch.setdefault(user_id, {})
-            tools = user.setdefault("tools", {})
-            existing = tools.get(tool_name)
-            if isinstance(existing, dict):
-                existing["*"] = pattern
-            else:
-                tools[tool_name] = pattern
-            set_config(raw)
-    except Exception as e:
-        logger.warning("persist_to_owner_scope failed: %s", e)
