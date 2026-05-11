@@ -2164,13 +2164,19 @@ class VibeSkillChannel(BaseChannel):
                             if question_id:
                                 answer_map[question_id] = answer_item.get("answer")
 
-                    reply_answers: list[Any] = []
+                    reply_answers: list[list[str]] = []
                     for idx, question in enumerate(question_defs):
                         if not isinstance(question, dict):
+                            reply_answers.append([])
                             continue
                         question_id = str(question.get("id") or f"q_{idx + 1}")
                         answer_value = answer_map.get(question_id, "")
-                        reply_answers.append(answer_value)
+                        if isinstance(answer_value, list):
+                            reply_answers.append([str(v) for v in answer_value])
+                        elif answer_value:
+                            reply_answers.append([str(answer_value)])
+                        else:
+                            reply_answers.append([])
 
                     messages.append({
                         "role": role,
