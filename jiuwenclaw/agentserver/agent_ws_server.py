@@ -67,7 +67,7 @@ def _payload_to_request(data: dict[str, Any]) -> AgentRequest:
 
     return AgentRequest(
         request_id=data["request_id"],
-        channel_id=data.get("channel_id", ""),
+        channel_id=data.get("channel_id", "web"),
         session_id=data.get("session_id"),
         req_method=req_method,
         params=data.get("params", {}),
@@ -176,6 +176,10 @@ class AgentWebSocketServer:
         if self._server is not None:
             logger.warning("[AgentWebSocketServer] 服务端已在运行")
             return
+
+        # Reset harness package state to native on service startup
+        from jiuwenclaw.agentserver.deep_agent.auto_harness_service import reset_harness_packages_state
+        reset_harness_packages_state()
 
         try:
             from websockets.legacy.server import serve as legacy_serve
@@ -420,6 +424,18 @@ class AgentWebSocketServer:
             if request.req_method == ReqMethod.EXTENSIONS_TOGGLE:
                 await self._handle_extensions_toggle(ws, request, send_lock)
                 return
+            if request.req_method == ReqMethod.HARNESS_PACKAGES_GET:
+                await self._handle_harness_packages_get(ws, request, send_lock)
+                return
+            if request.req_method == ReqMethod.HARNESS_PACKAGES_SCAN:
+                await self._handle_harness_packages_scan(ws, request, send_lock)
+                return
+            if request.req_method == ReqMethod.HARNESS_PACKAGES_ACTIVATE:
+                await self._handle_harness_packages_activate(ws, request, send_lock)
+                return
+            if request.req_method == ReqMethod.HARNESS_PACKAGES_DELETE:
+                await self._handle_harness_packages_delete(ws, request, send_lock)
+                return
             if request.is_stream:
                 await self._handle_stream(ws, request, send_lock)
             else:
@@ -490,6 +506,7 @@ class AgentWebSocketServer:
             return
 
         mode = request.params.get("mode", "agent.plan").split(".")[0]
+        agent_mode = "agent" if mode == "auto_harness" else mode
         try:
             sub_mode = request.params.get("mode", "agent.plan").split(".")[1]
         except IndexError:
@@ -497,7 +514,7 @@ class AgentWebSocketServer:
         trusted_dirs = request.params.get("trusted_dirs", None)
         agent = await self._agent_manager.get_agent(
             channel_id=channel_id,
-            mode=mode,
+            mode=agent_mode,
             project_dir=trusted_dirs[0] if trusted_dirs else None,
             sub_mode=sub_mode,
         )
@@ -529,6 +546,7 @@ class AgentWebSocketServer:
         """流式处理：调用 process_message_stream，逐条发送 E2AResponse 线 JSON。"""
         channel_id = request.channel_id or "default"
         mode = request.params.get("mode", "agent.plan").split(".")[0]
+        agent_mode = "agent" if mode == "auto_harness" else mode
         try:
             sub_mode = request.params.get("mode", "agent.plan").split(".")[1]
         except IndexError:
@@ -536,7 +554,7 @@ class AgentWebSocketServer:
         trusted_dirs = request.params.get("trusted_dirs", None)
         agent = await self._agent_manager.get_agent(
             channel_id=channel_id,
-            mode=mode,
+            mode=agent_mode,
             project_dir=trusted_dirs[0] if trusted_dirs else None,
             sub_mode=sub_mode,
         )
@@ -1782,3 +1800,186 @@ class AgentWebSocketServer:
     ) -> None:
         """Public test helper that delegates to ACP tool-response handling."""
         await self._handle_acp_tool_response(ws, request, send_lock)
+
+    async def _handle_harness_packages_get(
+        self, ws: Any, request: AgentRequest, send_lock: asyncio.Lock
+    ) -> None:
+        """Handle harness.packages.get request - retrieve packages info."""
+        from jiuwenclaw.agentserver.deep_agent.auto_harness_service import AutoHarnessService
+
+        try:
+            service = AutoHarnessService(rail=None, agent=None)
+            payload = service.get_packages_info()
+            resp = AgentResponse(
+                request_id=request.request_id,
+                channel_id=request.channel_id,
+                ok=True,
+                payload=payload,
+            )
+        except Exception as exc:
+            logger.exception("[AgentServer] harness.packages.get failed: %s", exc)
+            resp = AgentResponse(
+                request_id=request.request_id,
+                channel_id=request.channel_id,
+                ok=False,
+                payload={"error": str(exc)},
+            )
+
+        wire = encode_agent_response_for_wire(resp, response_id=request.request_id)
+        async with send_lock:
+            await ws.send(json.dumps(wire, ensure_ascii=False))
+
+    async def _handle_harness_packages_scan(
+        self, ws: Any, request: AgentRequest, send_lock: asyncio.Lock
+    ) -> None:
+        """Handle harness.packages.scan request - scan runtime extensions."""
+        from jiuwenclaw.agentserver.deep_agent.auto_harness_service import AutoHarnessService
+
+        try:
+            service = AutoHarnessService(rail=None, agent=None)
+            payload = service.scan_runtime_extensions()
+            service.save_packages(payload)
+            resp = AgentResponse(
+                request_id=request.request_id,
+                channel_id=request.channel_id,
+                ok=True,
+                payload=payload,
+            )
+        except Exception as exc:
+            logger.exception("[AgentServer] harness.packages.scan failed: %s", exc)
+            resp = AgentResponse(
+                request_id=request.request_id,
+                channel_id=request.channel_id,
+                ok=False,
+                payload={"error": str(exc)},
+            )
+
+        wire = encode_agent_response_for_wire(resp, response_id=request.request_id)
+        async with send_lock:
+            await ws.send(json.dumps(wire, ensure_ascii=False))
+
+    async def _handle_harness_packages_activate(
+        self, ws: Any, request: AgentRequest, send_lock: asyncio.Lock
+    ) -> None:
+        """Handle harness.packages.activate request - activate a harness package."""
+        from jiuwenclaw.agentserver.deep_agent.auto_harness_service import AutoHarnessService
+
+        params = request.params if isinstance(request.params, dict) else {}
+        package_id = params.get("package_id")
+
+        if not package_id:
+            resp = AgentResponse(
+                request_id=request.request_id,
+                channel_id=request.channel_id,
+                ok=False,
+                payload={"error": "missing package_id"},
+            )
+            wire = encode_agent_response_for_wire(resp, response_id=request.request_id)
+            async with send_lock:
+                await ws.send(json.dumps(wire, ensure_ascii=False))
+            return
+
+        try:
+            # Get or create the agent instance (auto-create if not exists)
+            channel_id = request.channel_id or "default"
+            agent = await self._agent_manager.get_agent(channel_id=channel_id, mode="agent")
+            agent_instance = None
+            if agent is not None:
+                agent_instance = agent.get_instance()
+                logger.info(
+                    "[AgentServer] harness.packages.activate: agent_instance type=%s, has_load_harness_config=%s",
+                    type(agent_instance).__name__ if agent_instance else None,
+                    hasattr(agent_instance, "load_harness_config") if agent_instance else False,
+                )
+
+            service = AutoHarnessService(rail=None, agent=agent_instance)
+            payload = await service.activate_package(package_id)
+            resp = AgentResponse(
+                request_id=request.request_id,
+                channel_id=request.channel_id,
+                ok=True,
+                payload=payload,
+            )
+        except ValueError as exc:
+            logger.warning("[AgentServer] harness.packages.activate validation error: %s", exc)
+            resp = AgentResponse(
+                request_id=request.request_id,
+                channel_id=request.channel_id,
+                ok=False,
+                payload={"error": str(exc)},
+            )
+        except Exception as exc:
+            logger.exception("[AgentServer] harness.packages.activate failed: %s", exc)
+            resp = AgentResponse(
+                request_id=request.request_id,
+                channel_id=request.channel_id,
+                ok=False,
+                payload={"error": str(exc)},
+            )
+
+        wire = encode_agent_response_for_wire(resp, response_id=request.request_id)
+        async with send_lock:
+            await ws.send(json.dumps(wire, ensure_ascii=False))
+
+    async def _handle_harness_packages_delete(
+        self, ws: Any, request: AgentRequest, send_lock: asyncio.Lock
+    ) -> None:
+        """Handle harness.packages.delete request - delete a harness package."""
+        from jiuwenclaw.agentserver.deep_agent.auto_harness_service import AutoHarnessService
+
+        params = request.params if isinstance(request.params, dict) else {}
+        package_id = params.get("package_id")
+
+        if not package_id:
+            resp = AgentResponse(
+                request_id=request.request_id,
+                channel_id=request.channel_id,
+                ok=False,
+                payload={"error": "missing package_id"},
+            )
+            wire = encode_agent_response_for_wire(resp, response_id=request.request_id)
+            async with send_lock:
+                await ws.send(json.dumps(wire, ensure_ascii=False))
+            return
+
+        if package_id == "native":
+            resp = AgentResponse(
+                request_id=request.request_id,
+                channel_id=request.channel_id,
+                ok=False,
+                payload={"error": "Cannot delete native agent version"},
+            )
+            wire = encode_agent_response_for_wire(resp, response_id=request.request_id)
+            async with send_lock:
+                await ws.send(json.dumps(wire, ensure_ascii=False))
+            return
+
+        try:
+            service = AutoHarnessService(rail=None, agent=None)
+            payload = service.delete_package(package_id)
+            resp = AgentResponse(
+                request_id=request.request_id,
+                channel_id=request.channel_id,
+                ok=True,
+                payload=payload,
+            )
+        except ValueError as exc:
+            logger.warning("[AgentServer] harness.packages.delete validation error: %s", exc)
+            resp = AgentResponse(
+                request_id=request.request_id,
+                channel_id=request.channel_id,
+                ok=False,
+                payload={"error": str(exc)},
+            )
+        except Exception as exc:
+            logger.exception("[AgentServer] harness.packages.delete failed: %s", exc)
+            resp = AgentResponse(
+                request_id=request.request_id,
+                channel_id=request.channel_id,
+                ok=False,
+                payload={"error": str(exc)},
+            )
+
+        wire = encode_agent_response_for_wire(resp, response_id=request.request_id)
+        async with send_lock:
+            await ws.send(json.dumps(wire, ensure_ascii=False))

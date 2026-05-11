@@ -12,6 +12,7 @@ import { HeartbeatMessageModal } from '../../features/HeartbeatMessageModal';
 import { TodoList } from '../TodoList';
 import { TeamArea } from '../TeamArea';
 import { TeamTaskEvents } from '../TeamTaskEvents';
+import { HarnessExtensionTree } from './HarnessExtensionTree';
 import './ToolPanel.css';
 
 export function ToolPanel() {
@@ -119,8 +120,15 @@ export function ToolPanel() {
       style={{ width: 'var(--tool-panel-width)' }}
     >
       <div className="h-full bg-panel flex flex-col overflow-hidden">
-        {/* 任务事件日志 */}
-        {mode === 'team' ? (
+        {/* Auto-harness extension file tree */}
+        {mode === 'auto_harness' ? (
+          <div className="flex-1 overflow-hidden mb-4">
+            <div className="bg-card rounded-lg border border-border overflow-hidden h-full">
+              <HarnessExtensionTree />
+            </div>
+          </div>
+        ) : mode === 'team' ? (
+          /* 任务事件日志 */
           <div className="flex-1 overflow-y-auto mb-4">
             <div className="bg-card rounded-lg border border-border overflow-hidden h-full">
               <TeamTaskEvents events={teamTaskEvents} />

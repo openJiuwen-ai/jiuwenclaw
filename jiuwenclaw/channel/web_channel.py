@@ -344,7 +344,10 @@ class WebChannel(BaseChannel):
                               "context.compressed", "chat.ask_user_question", "chat.subtask_update",
                               "history.message",
                               "chat.session_result", "chat.usage_metadata",
-                              "chat.usage_summary") or event_name.startswith("team."):
+                              "chat.usage_summary", "harness.extension_ready",
+                              "harness.message", "harness.stage_result",
+                              "harness.activate_interaction",
+                              "harness.activate_resume_ack") or event_name.startswith("team."):
                 # 传递完整 payload，保留所有字段
                 payload = {**msg.payload}
                 # 确保包含 session_id

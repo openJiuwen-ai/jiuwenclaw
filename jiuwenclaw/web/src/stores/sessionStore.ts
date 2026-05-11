@@ -56,6 +56,7 @@ function normalizeAgentMode(mode: unknown): AgentMode {
   const normalized = mode.trim().toLowerCase();
   if (normalized === 'agent.fast') return 'agent.fast';
   if (normalized === 'team') return 'team';
+  if (normalized === 'auto_harness') return 'auto_harness';
   return 'agent.plan';
 }
 

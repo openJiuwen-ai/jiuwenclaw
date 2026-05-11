@@ -46,7 +46,7 @@ from jiuwenclaw.utils import (
 from jiuwenclaw.version import __version__
 
 for _jiuwen_log in LogManager.get_all_loggers().values():
-    _jiuwen_log.set_level(logging.CRITICAL)
+    _jiuwen_log.set_level(logging.INFO)
 
 logger = logging.getLogger(__name__)
 
@@ -2077,3 +2077,218 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
 
     channel.register_method("memory.forbidden.get", _memory_forbidden_get)
     channel.register_method("memory.forbidden.set", _memory_forbidden_set)
+
+    async def _forward_harness_to_agent(ws, req_id, params, session_id, *, req_method):
+        """harness.*：优先经 E2A 转发到 AgentServer；Agent 未就绪时本地执行（无 agent 实例）。"""
+        from jiuwenclaw.e2a.gateway_normalize import e2a_from_agent_fields
+        from jiuwenclaw.schema.agent import AgentRequest
+        from jiuwenclaw.schema.message import ReqMethod
+
+        if not isinstance(req_method, ReqMethod):
+            await channel.send_response(ws, req_id, ok=False, error="invalid req_method", code="INTERNAL_ERROR")
+            return
+
+        synthetic = AgentRequest(
+            request_id=str(req_id) if req_id else "",
+            channel_id="",
+            session_id=session_id,
+            req_method=req_method,
+            params=dict(params) if isinstance(params, dict) else {},
+        )
+
+        ac = _resolve(agent_client)
+        if ac is None or not getattr(ac, "server_ready", False):
+            # Agent 未就绪时本地处理（无 agent 实例可用）
+            from jiuwenclaw.agentserver.deep_agent.auto_harness_service import (
+                _HARNESS_PACKAGES_FILE,
+                AutoHarnessService,
+            )
+            from pathlib import Path
+            import json
+
+            try:
+                if req_method == ReqMethod.HARNESS_PACKAGES_GET:
+                    packages_file = Path(_HARNESS_PACKAGES_FILE)
+                    if packages_file.exists():
+                        data = json.loads(packages_file.read_text(encoding="utf-8"))
+                    else:
+                        service = AutoHarnessService(rail=None, agent=None)
+                        data = service.scan_runtime_extensions()
+                        service.save_packages(data)
+                    await channel.send_response(ws, req_id, ok=True, payload=data)
+                    return
+                elif req_method == ReqMethod.HARNESS_PACKAGES_SCAN:
+                    service = AutoHarnessService(rail=None, agent=None)
+                    data = service.scan_runtime_extensions()
+                    service.save_packages(data)
+                    await channel.send_response(ws, req_id, ok=True, payload=data)
+                    return
+                elif req_method == ReqMethod.HARNESS_PACKAGES_DELETE:
+                    package_id = params.get("package_id")
+                    if package_id == "native":
+                        await channel.send_response(
+                            ws, req_id, ok=False, error="Cannot delete native agent version", code="BAD_REQUEST")
+                        return
+                    service = AutoHarnessService(rail=None, agent=None)
+                    payload = service.delete_package(package_id)
+                    await channel.send_response(ws, req_id, ok=True, payload=payload)
+                    return
+                else:
+                    await channel.send_response(
+                        ws, req_id, ok=False,
+                        error="Agent not ready for this operation",
+                        code="SERVICE_UNAVAILABLE"
+                    )
+                    return
+            except ValueError as exc:
+                await channel.send_response(ws, req_id, ok=False, error=str(exc), code="BAD_REQUEST")
+                return
+            except Exception as exc:
+                logger.exception("[harness] local fallback failed: %s", exc)
+                await channel.send_response(ws, req_id, ok=False, error=str(exc), code="INTERNAL_ERROR")
+                return
+
+        env = e2a_from_agent_fields(
+            request_id=str(req_id) if req_id else "",
+            channel_id="",
+            session_id=session_id,
+            req_method=req_method,
+            params=dict(params) if isinstance(params, dict) else {},
+        )
+        try:
+            resp = await ac.send_request(env)
+        except Exception as e:
+            logger.exception("[harness] forward to agent failed: %s", e)
+            await channel.send_response(ws, req_id, ok=False, error=str(e), code="INTERNAL_ERROR")
+            return
+        if not resp.ok:
+            pl = resp.payload if isinstance(resp.payload, dict) else {}
+            await channel.send_response(
+                ws,
+                req_id,
+                ok=False,
+                error=str(pl.get("error") or "request failed"),
+                code=str(pl.get("code") or "BAD_REQUEST"),
+            )
+            return
+        out = resp.payload if isinstance(resp.payload, dict) else {}
+        await channel.send_response(ws, req_id, ok=True, payload=out)
+
+    from jiuwenclaw.schema.message import ReqMethod as _HarnessReq
+
+    def _register_harness(method_name: str, rm: Any) -> None:
+        async def _handler(ws, req_id, params, session_id):
+            await _forward_harness_to_agent(ws, req_id, params, session_id, req_method=rm)
+
+        channel.register_method(method_name, _handler)
+
+    _register_harness("harness.packages", _HarnessReq.HARNESS_PACKAGES_GET)
+    _register_harness("harness.packages.scan", _HarnessReq.HARNESS_PACKAGES_SCAN)
+    _register_harness("harness.activate", _HarnessReq.HARNESS_PACKAGES_ACTIVATE)
+    _register_harness("harness.delete", _HarnessReq.HARNESS_PACKAGES_DELETE)
+
+    async def _harness_import_handler(ws, req_id, params, session_id):
+        """Import a harness package via WebSocket (base64 encoded zip content)."""
+        import base64
+        import uuid
+        from jiuwenclaw.agentserver.deep_agent.auto_harness_service import AutoHarnessService
+        from jiuwenclaw.utils import get_user_workspace_dir
+
+        # Get base64 encoded file content
+        file_content_b64 = params.get("file_content")
+        if not file_content_b64:
+            await channel.send_response(ws, req_id, ok=False, error="Missing file_content", code="BAD_REQUEST")
+            return
+
+        # Decode base64 content
+        try:
+            file_content = base64.b64decode(file_content_b64)
+        except Exception as e:
+            await channel.send_response(ws, req_id, ok=False, error=f"Invalid base64 content: {e}", code="BAD_REQUEST")
+            return
+
+        # Check file size (100MB limit)
+        max_size = 50 * 1024 * 1024
+        if len(file_content) > max_size:
+            await channel.send_response(ws, req_id, ok=False, error="File exceeds 100MB limit", code="BAD_REQUEST")
+            return
+
+        # Save to temp directory
+        temp_dir = get_user_workspace_dir() / "auto-harness" / "temp" / "uploads"
+        temp_dir.mkdir(parents=True, exist_ok=True)
+        temp_zip_path = temp_dir / f"upload_{uuid.uuid4().hex[:8]}.zip"
+
+        try:
+            temp_zip_path.write_bytes(file_content)
+            service = AutoHarnessService(rail=None, agent=None)
+            package_info = service.import_package(temp_zip_path)
+            await channel.send_response(ws, req_id, ok=True, payload={
+                "ok": True,
+                "package": package_info,
+                "message": "Package imported successfully",
+            })
+        except ValueError as exc:
+            msg = str(exc)
+            if "already exists" in msg.lower():
+                await channel.send_response(ws, req_id, ok=False, error=msg, code="CONFLICT")
+            elif "invalid" in msg.lower() or "must contain" in msg.lower():
+                await channel.send_response(ws, req_id, ok=False, error=msg, code="BAD_REQUEST")
+            else:
+                await channel.send_response(ws, req_id, ok=False, error=msg, code="BAD_REQUEST")
+        except Exception as exc:
+            logger.exception("[harness.import] failed: %s", exc)
+            await channel.send_response(ws, req_id, ok=False, error=f"Import failed: {exc}", code="INTERNAL_ERROR")
+        finally:
+            # Cleanup temp file
+            try:
+                temp_zip_path.unlink(missing_ok=True)
+            except Exception:
+                pass
+
+    channel.register_method("harness.import", _harness_import_handler)
+
+    async def _harness_export_handler(ws, req_id, params, session_id):
+        """Export a harness package via WebSocket (returns base64 encoded zip content)."""
+        import base64
+        from jiuwenclaw.agentserver.deep_agent.auto_harness_service import AutoHarnessService
+        from jiuwenclaw.utils import get_user_workspace_dir
+
+        # Get package_id
+        package_id = params.get("package_id")
+        if not package_id:
+            await channel.send_response(ws, req_id, ok=False, error="Missing package_id", code="BAD_REQUEST")
+            return
+
+        try:
+            service = AutoHarnessService(rail=None, agent=None)
+            zip_path = service.export_package(package_id)
+            # Read zip file and encode as base64
+            zip_content = zip_path.read_bytes()
+            zip_content_b64 = base64.b64encode(zip_content).decode("utf-8")
+            filename = zip_path.name
+
+            await channel.send_response(ws, req_id, ok=True, payload={
+                "ok": True,
+                "file_content": zip_content_b64,
+                "filename": filename,
+                "message": "Package exported successfully",
+            })
+
+            # Cleanup temp zip file
+            try:
+                zip_path.unlink(missing_ok=True)
+            except Exception:
+                pass
+        except ValueError as exc:
+            msg = str(exc)
+            if "not found" in msg.lower():
+                await channel.send_response(ws, req_id, ok=False, error=msg, code="NOT_FOUND")
+            elif "native" in msg.lower():
+                await channel.send_response(ws, req_id, ok=False, error=msg, code="BAD_REQUEST")
+            else:
+                await channel.send_response(ws, req_id, ok=False, error=msg, code="BAD_REQUEST")
+        except Exception as exc:
+            logger.exception("[harness.export] failed: %s", exc)
+            await channel.send_response(ws, req_id, ok=False, error=f"Export failed: {exc}", code="INTERNAL_ERROR")
+
+    channel.register_method("harness.export", _harness_export_handler)

@@ -55,7 +55,7 @@ def _read_metadata(session_id: str) -> dict[str, Any]:
     if not fpath.exists():
         return {}
     try:
-        data = json.loads(fpath.read_text(encoding="utf-8"))
+        data = json.loads(fpath.read_text(encoding="utf-8") or '{}')
         if isinstance(data, dict):
             return data
     except Exception as exc:
@@ -233,7 +233,7 @@ def remove_team_mode_session_dirs_at_startup() -> None:
         if not meta_path.is_file():
             continue
         try:
-            raw = json.loads(meta_path.read_text(encoding="utf-8"))
+            raw = json.loads(meta_path.read_text(encoding="utf-8") or '{}')
         except Exception as exc:  # noqa: BLE001
             logger.warning("启动清理跳过会话 %s: 读取 metadata.json 失败: %s", session_dir.name, exc)
             continue

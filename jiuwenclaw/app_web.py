@@ -142,6 +142,7 @@ class _SpaStaticHandler(SimpleHTTPRequestHandler):
     project_root = get_user_workspace_dir()
     workspace_root = get_agent_root_dir()
     logs_root = get_logs_dir()
+    auto_harness_root = project_root / "auto-harness"
     logger = logging.getLogger(__name__)
 
     _HOP_BY_HOP_HEADERS = {
@@ -500,7 +501,9 @@ class _SpaStaticHandler(SimpleHTTPRequestHandler):
         try:
             in_workspace = os.path.commonpath([str(cls.workspace_root), str(target_resolved)]) == str(cls.workspace_root)
             in_logs = os.path.commonpath([str(cls.logs_root), str(target_resolved)]) == str(cls.logs_root)
-            return in_workspace or in_logs
+            in_auto_harness = \
+                os.path.commonpath([str(cls.auto_harness_root), str(target_resolved)]) == str(cls.auto_harness_root)
+            return in_workspace or in_logs or in_auto_harness
         except ValueError:
             return False
 

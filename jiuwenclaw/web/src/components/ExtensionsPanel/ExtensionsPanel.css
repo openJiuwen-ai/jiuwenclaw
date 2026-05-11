@@ -1,6 +1,8 @@
 .extensions-panel {
   width: 100%;
+  height: 100%;
   padding: 20px;
+  overflow-y: auto;
 }
 
 .extensions-panel__title {

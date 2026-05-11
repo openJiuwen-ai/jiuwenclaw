@@ -58,7 +58,7 @@ if not _config_file.exists() or (_old_workspace.exists() and not _new_workspace.
 
 # Reduce openjiuwen internal logs (keep Gateway logs)
 for _lg in LogManager.get_all_loggers().values():
-    _lg.set_level(logging.CRITICAL)
+    _lg.set_level(logging.INFO)
 
 load_dotenv(dotenv_path=get_env_file())
 reset_free_search_runtime_flags()

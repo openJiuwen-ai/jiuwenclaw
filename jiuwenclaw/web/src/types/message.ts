@@ -35,6 +35,8 @@ export interface Message {
   // 是否正在流式输出
   isStreaming?: boolean;
   usageSummary?: UsageSummary;
+  // Harness message flag for special styling
+  isHarnessMessage?: boolean;
 }
 
 export interface ToolCall {

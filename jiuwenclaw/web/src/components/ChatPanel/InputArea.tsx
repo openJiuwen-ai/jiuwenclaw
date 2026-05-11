@@ -45,6 +45,7 @@ export function InputArea({
   const isInterruptible = isProcessing || isPaused;
   const isAgentMode = mode === 'agent.fast';
   const isTeamMode = mode === 'team';
+  const isAutoHarnessMode = mode === 'auto_harness';
   const hasHistoryMessages = messages.length > 0;
   const modes: Array<{ value: AgentMode; label: string; icon: JSX.Element }> = [
     { value: 'agent.plan', label: t('chat.modePlan'), icon: (
@@ -60,6 +61,11 @@ export function InputArea({
     { value: 'team', label: t('chat.modeAgentTeam'), icon: (
       <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2}>
         <path strokeLinecap="round" strokeLinejoin="round" d="M17.982 18.725A7.488 7.488 0 0012 15.75a7.488 7.488 0 00-5.982 2.975m11.963 0a9 9 0 10-11.963 0m11.963 0A8.966 8.966 0 0112 21a8.966 8.966 0 01-5.982-2.275M15 9.75a3 3 0 11-6 0 3 3 0 016 0zm6 3a2.25 2.25 0 11-4.5 0 2.25 2.25 0 014.5 0zm-13.5 0a2.25 2.25 0 11-4.5 0 2.25 2.25 0 014.5 0z" />
+      </svg>
+    )},
+    { value: 'auto_harness', label: t('chat.modeAutoHarness'), icon: (
+      <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2}>
+        <path strokeLinecap="round" strokeLinejoin="round" d="M4.5 12a7.5 7.5 0 0015 0m-15 0a7.5 7.5 0 1115 0m-15 0H3m16.5 0H21m-1.5 0H12m-8.457 3.077l1.41-.513m14.095-5.13l1.41-.513M5.106 17.785l1.15-.964m11.69-9.765l1.15-.964m-3.093 5.25l.906-1.356m-6.768 1.356l.906-1.356M9 12H7.5m6.5 0H12m-1.5 0a1.5 1.5 0 103 0 1.5 1.5 0 00-3 0z" />
       </svg>
     )},
   ];
@@ -316,6 +322,8 @@ export function InputArea({
         placeholder={
           isListening
             ? t('chat.placeholderVoice')
+            : isAutoHarnessMode
+            ? t('autoHarness.inputPlaceholder')
             : isAgentMode && isInterruptible
             ? t('chat.placeholderProcessingQueue')
             : isInterruptible

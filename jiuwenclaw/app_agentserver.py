@@ -46,7 +46,7 @@ if not _config_file.exists() or (_old_workspace.exists() and not _new_workspace.
     prepare_workspace(overwrite=False)
 
 for _lg in LogManager.get_all_loggers().values():
-    _lg.set_level(logging.CRITICAL)
+    _lg.set_level(logging.INFO)
 
 # Load env from user workspace config/.env
 load_dotenv(dotenv_path=get_env_file())
@@ -183,4 +183,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

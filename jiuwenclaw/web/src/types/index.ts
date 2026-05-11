@@ -26,7 +26,7 @@ export interface Session {
   last_message_at?: number;    // 最近对话时间(Unix时间戳)
 }
 
-export type AgentMode = 'agent.fast' | 'agent.plan' | 'team';
+export type AgentMode = 'agent.fast' | 'agent.plan' | 'team' | 'auto_harness';
 export type SessionStatus = 'active' | 'paused' | 'completed' | 'interrupted';
 
 export interface ModelEntry {
@@ -52,4 +52,38 @@ export interface OffloadFileContentResponse {
   filename: string;
   content: string;
   path: string;
+}
+
+export interface PackageInfo {
+  id: string;
+  extension_name: string;
+  runtime_path: string;
+  config_path: string;
+  created_at: string;
+  activated_at?: string;
+  is_active: boolean;
+  version_label?: string;
+  description?: string;
+}
+
+export interface NativeVersionInfo {
+  id: 'native';
+  extension_name: 'Native Agent';
+  is_active: boolean;
+}
+
+export interface PackagesPayload {
+  packages: PackageInfo[];
+  native_version: NativeVersionInfo;
+  active_package_id: string | null;
+  last_updated?: string;
+}
+
+export interface ActivatePayload {
+  activated_package_id: string;
+  extension_name: string;
+  runtime_path: string;
+  config_path: string;
+  message: string;
+  loaded_resources?: string[];
 }

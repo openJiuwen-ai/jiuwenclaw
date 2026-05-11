@@ -13,6 +13,7 @@ import { InputArea } from './InputArea';
 import { SubtaskProgress } from './SubtaskProgress';
 import { InlineQuestionCard } from './InlineQuestionCard';
 import { HistoryPagerBar } from './HistoryPagerBar';
+import { HarnessProgressBar } from './HarnessProgressBar';
 import './ChatPanel.css';
 
 export interface ChatHistoryPagerProps {
@@ -178,6 +179,10 @@ export function ChatPanel({
 
   return (
     <div className="flex flex-col h-full" data-testid="chat-panel">
+      {/* HarnessProgressBar - sticky header, doesn't scroll with messages */}
+      <div className="sticky top-0 z-10 px-3 pt-2 bg-bg/95 backdrop-blur-sm">
+        <HarnessProgressBar />
+      </div>
       <div ref={scrollContainerRef} className="flex-1 overflow-y-auto px-3 py-4" onScroll={handleScroll} onWheel={handleWheel}>
         {historyPager || messages.length > 0 ? (
           <>

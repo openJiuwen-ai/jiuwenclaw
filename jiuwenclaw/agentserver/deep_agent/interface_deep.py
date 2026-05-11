@@ -17,7 +17,7 @@ import subprocess
 from contextvars import ContextVar, Token
 from dataclasses import dataclass
 from shutil import which
-from typing import Any, AsyncIterator, Callable, List, Tuple
+from typing import Any, AsyncIterator, Callable, List, Optional, Tuple
 
 import yaml
 from dotenv import load_dotenv
@@ -104,6 +104,7 @@ from jiuwenclaw.agentserver.a2x_registry_runtime import (
     resolve_a2x_config,
 )
 from jiuwenclaw.agentserver.deep_agent.cron_runtime import CronRuntimeBridge
+from jiuwenclaw.agentserver.deep_agent.auto_harness_service import AutoHarnessService
 from jiuwenclaw.agentserver.deep_agent.interrupt.interrupt_helpers import (
     build_permission_rail,
     convert_interactions_to_ask_user_question,
@@ -427,6 +428,7 @@ class JiuWenClawDeepAdapter:
         self._default_model_name: str = ""
         self._registered_mcp_server_ids: set[str] = set()
         self._registered_mcp_servers: dict[str, McpServerConfig] = {}
+        self._auto_harness_service: Optional[AutoHarnessService] = None
 
     def set_skill_manager(self, skill_manager: SkillManager) -> None:
         """Inject shared SkillManager from facade for tool reuse."""
@@ -2782,6 +2784,21 @@ class JiuWenClawDeepAdapter:
                 except Exception as exc:
                     logger.warning("[JiuWenClawDeepAdapter] 标记 todo cancelled 失败: %s", exc)
 
+                # Cancel auto_harness active run if exists
+                try:
+                    if self._auto_harness_service is not None \
+                        and self._auto_harness_service.has_active_run(request.session_id):
+                        self._auto_harness_service.cancel_session_run(request.session_id)
+                        logger.info(
+                            "[JiuWenClawDeepAdapter] interrupt(cancel): cancelled auto_harness run for session=%s",
+                            request.session_id,
+                        )
+                except Exception as exc:
+                    logger.warning(
+                        "[JiuWenClawDeepAdapter] Failed to cancel auto_harness run: %s",
+                        exc,
+                    )
+
             logger.info(
                 "[JiuWenClawDeepAdapter] interrupt(cancel): 已停止执行 request_id=%s",
                 request.request_id,
@@ -3681,6 +3698,42 @@ class JiuWenClawDeepAdapter:
                 yield chunk
             return
 
+        # Auto-Harness 模式处理
+        if mode == "auto_harness":
+            if self._auto_harness_service is None:
+                self._auto_harness_service = AutoHarnessService(
+                    self._stream_event_rail,
+                    agent=self._instance,
+                )
+
+            activate_response = request.params.get("activate_response")
+            if isinstance(activate_response, dict):
+                async for chunk in self._auto_harness_service.resume_activate(
+                    session_id, rid, cid, activate_response
+                ):
+                    yield chunk
+                return
+
+            resolved_model = self._resolve_model_for_request(request)
+            if self._auto_harness_service.is_activate_only_request(request, query):
+                async for chunk in self._auto_harness_service.run_activate_only(
+                    request, session_id, rid, query, model=resolved_model
+                ):
+                    yield chunk
+                return
+            if self._auto_harness_service.is_implement_only_request(request, query):
+                async for chunk in self._auto_harness_service.run_implement_only(
+                    request, session_id, rid, query, model=resolved_model
+                ):
+                    yield chunk
+                return
+
+            async for chunk in self._auto_harness_service.run(
+                request, session_id, rid, query, model=resolved_model
+            ):
+                yield chunk
+            return
+
         # 拦截斜杠命令
         slash_result = await self._handle_slash_command(query, session_id, mode)
         if slash_result is not None:
@@ -4002,12 +4055,18 @@ class JiuWenClawDeepAdapter:
         )
 
     @staticmethod
-    def _parse_stream_chunk(chunk, *, _has_streamed_content: bool = False) -> dict | None:
+    def _parse_stream_chunk(
+        chunk,
+        *,
+        _has_streamed_content: bool = False,
+        _stage: str = "",
+    ) -> dict | None:
         """将 SDK OutputSchema 转为前端可消费的 payload dict.
 
         Args:
             chunk: OutputSchema 或 dict
             _has_streamed_content: 是否已通过 llm_output 流式发送过内容
+            _stage: 当前阶段名称，用于 auto_harness harness.message 事件
 
         Returns:
             dict  – 含 event_type 的 payload，或 None（需跳过的帧）。
@@ -4168,7 +4227,102 @@ class JiuWenClawDeepAdapter:
                     }
 
                 if chunk_type == "__interaction__":
+                    if isinstance(payload, dict) and payload.get("interaction_type") == "activate_confirm":
+                        return {
+                            "event_type": "harness.activate_interaction",
+                            "interaction_type": "activate_confirm",
+                            "interaction_id": payload.get("interaction_id", ""),
+                            "extension_name": payload.get("extension_name", ""),
+                            "runtime_path": payload.get("runtime_path", ""),
+                            "session_runtime_path": payload.get("session_runtime_path", ""),
+                            "extension_runtime_path": payload.get("extension_runtime_path", payload.get("runtime_path", "")),
+                            "options": payload.get("options", ["accept", "reject"]),
+                        }
                     return convert_interactions_to_ask_user_question([payload])
+
+                # Auto-harness specific: harness.message event
+                if chunk_type == "message":
+                    content = (
+                        payload.get("content", "")
+                        if isinstance(payload, dict)
+                        else str(payload)
+                    )
+                    # Extract stage from payload if available, fallback to _stage parameter
+                    stage_from_payload = (
+                        payload.get("stage", "")
+                        if isinstance(payload, dict)
+                        else ""
+                    )
+                    result: dict[str, Any] = {
+                        "event_type": "harness.message",
+                        "content": content,
+                        "stage": stage_from_payload or _stage,
+                    }
+                    # Pass through stages array for dynamic stage definition
+                    if isinstance(payload, dict):
+                        if "stages" in payload:
+                            result["stages"] = payload["stages"]
+                        if "pipeline" in payload:
+                            result["pipeline"] = payload["pipeline"]
+                    return result
+
+                # Auto-harness specific: harness.stage_result event
+                if chunk_type == "stage_result":
+                    if isinstance(payload, dict):
+                        stage = payload.get("stage", _stage)
+                        return {
+                            "event_type": "harness.stage_result",
+                            "stage": stage,
+                            "status": payload.get("status", "success"),
+                            "error": payload.get("error", ""),
+                            "messages": payload.get("messages", []),
+                            "metrics": payload.get("metrics", {}),
+                            "scope": payload.get("scope", ""),
+                            "parent_stage": payload.get("parent_stage", ""),
+                            "extension_stage": payload.get("extension_stage", ""),
+                            "extension_name": payload.get("extension_name", ""),
+                            "task_id": payload.get("task_id", ""),
+                        }
+                    return None
+
+                # Auto-harness specific: harness.extension_ready event
+                if chunk_type == "extension_ready":
+                    if isinstance(payload, dict):
+                        return {
+                            "event_type": "harness.extension_ready",
+                            "extension_name": payload.get("extension_name", ""),
+                            "runtime_path": payload.get("runtime_path", ""),
+                            "session_runtime_path": payload.get("session_runtime_path", ""),
+                            "extension_runtime_path": payload.get("extension_runtime_path", ""),
+                            "config_path": payload.get("config_path", ""),
+                            "runtime_extensions": payload.get("runtime_extensions", []),
+                            "verify_report": payload.get("verify_report", {}),
+                            "components_summary": payload.get("components_summary", {}),
+                        }
+                    return None
+
+                if chunk_type == "harness_session_finished":
+                    if isinstance(payload, dict):
+                        return {
+                            "event_type": "harness.session_finished",
+                            "pipeline": payload.get("pipeline", ""),
+                            "status": payload.get("status", "success"),
+                            "results_count": payload.get("results_count", 0),
+                            "is_terminal": bool(payload.get("is_terminal", True)),
+                        }
+                    return {
+                        "event_type": "harness.session_finished",
+                        "status": "success",
+                        "is_terminal": True,
+                    }
+
+                # Auto-harness specific: activate_testing_guide summary
+                if chunk_type == "activate_testing_guide":
+                    if isinstance(payload, dict):
+                        text = payload.get("text", "")
+                        if text:
+                            return {"event_type": "chat.delta", "content": text}
+                    return None
 
                 if isinstance(payload, dict):
                     if "traceId" in payload or "invokeId" in payload:

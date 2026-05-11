@@ -1,0 +1,55 @@
+.extensions-hub-panel {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  width: 100%;
+  overflow: hidden;
+}
+
+.extensions-hub-panel__header {
+  display: flex;
+  align-items: center;
+  padding: 12px 20px;
+  border-bottom: 1px solid var(--border);
+  background: var(--panel-strong);
+}
+
+.extensions-hub-panel__tabs {
+  display: flex;
+  gap: 8px;
+}
+
+.extensions-hub-panel__tab {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 16px;
+  font-size: 14px;
+  font-weight: 500;
+  border-radius: var(--radius-md);
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+  transition: all 0.2s;
+}
+
+.extensions-hub-panel__tab:hover {
+  color: var(--text);
+  background: var(--bg-hover);
+}
+
+.extensions-hub-panel__tab--active {
+  color: var(--text-strong);
+  background: var(--accent-subtle);
+  border-color: var(--border-accent);
+}
+
+.extensions-hub-panel__tab--active svg {
+  color: var(--accent);
+}
+
+.extensions-hub-panel__content {
+  flex: 1;
+  overflow: hidden;
+}

@@ -127,11 +127,6 @@ class IMOutboundPipeline:
 
     async def apply(self, msg: "Message") -> None:
         """对出站消息执行路由决策，结果写入 msg.metadata（原地修改）。"""
-        logger.info(
-            "[IMOutboundPipeline] apply 入口: channel=%s msg.id=%s group_digital_avatar=%s",
-            msg.channel_id, msg.id, msg.group_digital_avatar
-        )
-
         meta = dict(msg.metadata or {})
         is_digital_avatar = msg.group_digital_avatar or bool(meta.get("avatar_mode"))
         if not is_digital_avatar:

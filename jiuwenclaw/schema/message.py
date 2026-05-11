@@ -123,6 +123,14 @@ class ReqMethod(Enum):
     UPDATER_GET_CONF = "updater.get_conf"
     UPDATER_SET_CONF = "updater.set_conf"
 
+    # Harness package management
+    HARNESS_PACKAGES_GET = "harness.packages.get"
+    HARNESS_PACKAGES_SCAN = "harness.packages.scan"
+    HARNESS_PACKAGES_ACTIVATE = "harness.packages.activate"
+    HARNESS_PACKAGES_DELETE = "harness.packages.delete"
+    HARNESS_PACKAGES_IMPORT = "harness.packages.import"
+    HARNESS_PACKAGES_EXPORT = "harness.packages.export"
+
 class EventType(Enum):
     CONNECTION_ACK = "connection.ack"
     HELLO = "hello"

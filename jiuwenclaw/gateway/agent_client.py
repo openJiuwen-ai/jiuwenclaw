@@ -369,13 +369,8 @@ class WebSocketAgentServerClient(AgentServerClient):
                         break
                 else:
                     data = await queue.get()
-                logger.info("[WebSocketAgentServerClient] 收到流式事件 raw: %s", json.dumps(data, ensure_ascii=False))
                 chunk = parse_agent_server_wire_chunk(data)
                 chunk_count += 1
-                logger.info(
-                    "[WebSocketAgentServerClient] 收到流式 chunk #%s AgentResponseChunk: %s",
-                    chunk_count, _to_json(asdict(chunk)),
-                )
                 yield chunk
                 if chunk.is_complete:
                     saw_complete = True

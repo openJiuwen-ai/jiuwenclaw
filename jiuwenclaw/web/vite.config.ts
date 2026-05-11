@@ -165,8 +165,9 @@ function devFileContentApi(): Plugin {
   const projectRootDir = resolveProjectRootDir()
   const workspaceRootDir = path.resolve(projectRootDir, 'agent')
   const webLogsRootDir = path.resolve(projectRootDir, '.logs')
+  const autoHarnessDir = path.resolve(projectRootDir, 'auto-harness')
   const generateAgentFoldersScriptPath = path.resolve(__dirname, '../scripts/generate-agent-folders.js')
-  // dev 模式默认开启调试视图，与“前端 dev 即调试模式”一致。
+  // dev 模式默认开启调试视图，与”前端 dev 即调试模式”一致。
   let wsDisableCompress = true
   const isMarkdownFile = (targetPath: string) => {
     const ext = path.extname(targetPath).toLowerCase()
@@ -177,7 +178,9 @@ function devFileContentApi(): Plugin {
     const inWorkspace = !relativeWorkspacePath.startsWith('..') && !path.isAbsolute(relativeWorkspacePath)
     const relativeLogsPath = path.relative(webLogsRootDir, targetPath)
     const inWebLogs = !relativeLogsPath.startsWith('..') && !path.isAbsolute(relativeLogsPath)
-    return inWorkspace || inWebLogs
+    const relativeAutoHarnessPath = path.relative(autoHarnessDir, targetPath)
+    const inAutoHarness = !relativeAutoHarnessPath.startsWith('..') && !path.isAbsolute(relativeAutoHarnessPath)
+    return inWorkspace || inWebLogs || inAutoHarness
   }
 
   return {

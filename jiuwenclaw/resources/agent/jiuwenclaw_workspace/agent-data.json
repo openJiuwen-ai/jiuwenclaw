@@ -215,6 +215,13 @@
       "isMarkdown": true
     }
   ],
+  "jiuwenclaw_workspace/skills/doc-update": [
+    {
+      "name": "SKILL.md",
+      "path": "agent/jiuwenclaw_workspace/skills/doc-update/SKILL.md",
+      "isMarkdown": true
+    }
+  ],
   "jiuwenclaw_workspace/skills/financial-document-parser": [
     {
       "name": "financial_parser.py",
@@ -482,6 +489,81 @@
       "name": "SKILL.md",
       "path": "agent/jiuwenclaw_workspace/skills/skvm-jit/SKILL.md",
       "isMarkdown": true
+    }
+  ],
+  "jiuwenclaw_workspace/skills/teamskill-creator": [
+    {
+      "name": "SKILL.md",
+      "path": "agent/jiuwenclaw_workspace/skills/teamskill-creator/SKILL.md",
+      "isMarkdown": true
+    }
+  ],
+  "jiuwenclaw_workspace/skills/teamskill-creator/reference": [
+    {
+      "name": "community-search.md",
+      "path": "agent/jiuwenclaw_workspace/skills/teamskill-creator/reference/community-search.md",
+      "isMarkdown": true
+    },
+    {
+      "name": "compliance-checklist.md",
+      "path": "agent/jiuwenclaw_workspace/skills/teamskill-creator/reference/compliance-checklist.md",
+      "isMarkdown": true
+    },
+    {
+      "name": "conversion-guide.md",
+      "path": "agent/jiuwenclaw_workspace/skills/teamskill-creator/reference/conversion-guide.md",
+      "isMarkdown": true
+    },
+    {
+      "name": "pattern-selection.md",
+      "path": "agent/jiuwenclaw_workspace/skills/teamskill-creator/reference/pattern-selection.md",
+      "isMarkdown": true
+    },
+    {
+      "name": "role-design.md",
+      "path": "agent/jiuwenclaw_workspace/skills/teamskill-creator/reference/role-design.md",
+      "isMarkdown": true
+    }
+  ],
+  "jiuwenclaw_workspace/skills/teamskill-creator/scripts": [
+    {
+      "name": "validate_teamskill.py",
+      "path": "agent/jiuwenclaw_workspace/skills/teamskill-creator/scripts/validate_teamskill.py",
+      "isMarkdown": false
+    }
+  ],
+  "jiuwenclaw_workspace/skills/teamskill-creator/templates": [
+    {
+      "name": "bind.md.template",
+      "path": "agent/jiuwenclaw_workspace/skills/teamskill-creator/templates/bind.md.template",
+      "isMarkdown": false
+    },
+    {
+      "name": "dependencies.yaml.template",
+      "path": "agent/jiuwenclaw_workspace/skills/teamskill-creator/templates/dependencies.yaml.template",
+      "isMarkdown": false
+    },
+    {
+      "name": "role.md.template",
+      "path": "agent/jiuwenclaw_workspace/skills/teamskill-creator/templates/role.md.template",
+      "isMarkdown": false
+    },
+    {
+      "name": "SKILL.md.template",
+      "path": "agent/jiuwenclaw_workspace/skills/teamskill-creator/templates/SKILL.md.template",
+      "isMarkdown": false
+    },
+    {
+      "name": "workflow.md.template",
+      "path": "agent/jiuwenclaw_workspace/skills/teamskill-creator/templates/workflow.md.template",
+      "isMarkdown": false
+    }
+  ],
+  "workspace": [
+    {
+      "name": "agent-data.json",
+      "path": "agent/workspace/agent-data.json",
+      "isMarkdown": false
     }
   ]
 }

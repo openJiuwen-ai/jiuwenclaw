@@ -150,18 +150,10 @@ class ChannelManager(ABC):
                 msg = await consume(timeout=1.0)
                 if msg is None:
                     continue
-                logger.info(
-                    "[ChannelManager] 从 robot_messages 取出，准备派发: id=%s channel_id=%s type=%s",
-                    msg.id, msg.channel_id, msg.type,
-                )
                 channel = self._channels.get(msg.channel_id)
                 if channel:
                     try:
                         await channel.send(msg)
-                        logger.info(
-                            "[ChannelManager] 已派发到 Channel: channel_id=%s id=%s",
-                            msg.channel_id, msg.id,
-                        )
                     except Exception as e:
                         logger.error("send to channel %s: %s", msg.channel_id, e, exc_info=True)
                 else:

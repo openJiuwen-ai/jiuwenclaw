@@ -645,6 +645,11 @@ class JiuWenClaw:
         mode = request.params.get("mode", "") if isinstance(request.params, dict) else ""
         team_flag = request.params.get("team", False) if isinstance(request.params, dict) else False
         is_team_mode = team_flag or (isinstance(mode, str) and mode.strip().lower() == "team")
+        is_auto_harness_resume = (
+            isinstance(mode, str)
+            and mode.strip().lower() == "auto_harness"
+            and isinstance(request.params.get("activate_response"), dict)
+        )
 
         append_history_record(
             session_id=session_id,
@@ -723,6 +728,12 @@ class JiuWenClaw:
         if is_team_mode and not is_team_first_request:
             logger.info(
                 "[JiuWenClaw] Team模式后续请求，直接执行: request_id=%s session_id=%s",
+                rid, session_id,
+            )
+            asyncio.create_task(run_stream_task())
+        elif is_auto_harness_resume:
+            logger.info(
+                "[JiuWenClaw] Auto-Harness resume请求，绕过Session队列: request_id=%s session_id=%s",
                 rid, session_id,
             )
             asyncio.create_task(run_stream_task())

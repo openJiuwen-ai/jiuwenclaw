@@ -24,7 +24,7 @@ import {
  	ToolCall,
   UsageSummary,
 } from '../types';
-import { useChatStore, useTodoStore, useSessionStore } from '../stores';
+import { useChatStore, useTodoStore, useSessionStore, useHarnessStore } from '../stores';
 import { webClient } from '../services/webClient';
 import i18n from '../i18n';
 import {
@@ -79,6 +79,12 @@ interface UseWebSocketReturn {
     answers: UserAnswer[],
     source?: string
   ) => Promise<void>;
+  respondActivate: (
+    sessionId: string,
+    interactionId: string,
+    action: 'accept' | 'reject',
+    feedback?: string
+  ) => Promise<void>;
   getInflightCount: () => number;
 }
 
@@ -87,6 +93,7 @@ function normalizeAgentMode(rawMode: unknown): AgentMode {
   const normalized = rawMode.trim().toLowerCase();
   if (normalized === 'agent.fast') return 'agent.fast';
   if (normalized === 'team') return 'team';
+  if (normalized === 'auto_harness') return 'auto_harness';
   return 'agent.plan';
 }
 
@@ -281,6 +288,9 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
       // 正常调用接口
       const currentMode = useSessionStore.getState().mode;
       const selectedModel = useSessionStore.getState().selectedModelName;
+      if (currentMode === 'auto_harness') {
+        useHarnessStore.getState().reset();
+      }
       try {
         await request('chat.send', {
           session_id: sessionId,
@@ -407,6 +417,11 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
   // 切换模式
   const switchMode = useCallback(
     async (sessionId: string, mode: AgentMode) => {
+      const currentMode = useSessionStore.getState().mode;
+      // Reset harnessStore when leaving auto_harness mode
+      if (currentMode === 'auto_harness' && mode !== 'auto_harness') {
+        useHarnessStore.getState().reset();
+      }
       if (sessionId && sessionId !== 'new') {
         try {
           await interrupt(sessionId, 'cancel');
@@ -436,6 +451,23 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
             request_id: requestId,
             answers: answers,
           });
+        } else if (source === 'activate_confirm') {
+          const action = answers[0]?.selected_options[0] === '拒绝' ? 'reject' : 'accept';
+          const interactionId = requestId || useHarnessStore.getState().activateInteraction?.interactionId || '';
+          if (!interactionId) {
+            throw new Error('missing activate interaction id');
+          }
+          await request('chat.send', {
+            session_id: sessionId,
+            content: '',
+            mode: 'auto_harness',
+            activate_response: {
+              interaction_id: interactionId,
+              action,
+              feedback: '',
+            },
+          });
+          useHarnessStore.getState().setActivateInteraction(null);
         } else {
           // 否则发送 chat.user_answer（自进化确认）
           await request('chat.user_answer', {
@@ -452,6 +484,28 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
       }
     },
     [request, setConnectionStats, setPendingQuestion]
+  );
+
+  const respondActivate = useCallback(
+    async (sessionId: string, interactionId: string, action: 'accept' | 'reject', feedback?: string) => {
+      try {
+        await request('chat.send', {
+          session_id: sessionId,
+          content: '',
+          mode: 'auto_harness',
+          activate_response: {
+            interaction_id: interactionId,
+            action,
+            feedback: feedback || '',
+          },
+        });
+        useHarnessStore.getState().setActivateInteraction(null);
+      } catch (error) {
+        const webError = error as WebError;
+        setConnectionStats({ lastError: webError.message });
+      }
+    },
+    [request, setConnectionStats]
   );
 
   useEffect(() => {
@@ -502,6 +556,15 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
     []
   );
 
+  const clearThinkingForVisibleOutput = useCallback(() => {
+    const currentMode = useSessionStore.getState().mode;
+    const isProcessingNow = useChatStore.getState().isProcessing;
+    if (currentMode === 'auto_harness' && isProcessingNow) {
+      return;
+    }
+    setThinking(false);
+  }, [setThinking]);
+
   useEffect(() => {
     const unsubs = [
       webClient.on('connection.ack', ({ payload }) => {
@@ -518,7 +581,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
         
         // team 模式下，累积 chat.delta 内容
         if (currentMode === 'team' && content) {
-          setThinking(false);
+          clearThinkingForVisibleOutput();
           
           const { messages } = useChatStore.getState();
           const existingMsg = messages.find(m => 
@@ -548,7 +611,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
         }
         
         const { currentStreamId } = useChatStore.getState();
-        setThinking(false);
+        clearThinkingForVisibleOutput();
         if (!currentStreamId && content) {
           const assistantMsgId = `assistant-${Date.now()}`;
           addMessage({
@@ -570,7 +633,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
         
         // team 模式下，将 chat.final 作为 team_leader 消息处理
         if (currentMode === 'team' && content) {
-          setThinking(false);
+          clearThinkingForVisibleOutput();
           
           const { messages } = useChatStore.getState();
           const existingMsg = messages.find(m => 
@@ -703,7 +766,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
       webClient.on('chat.tool_call', ({ payload }) => {
         if (!shouldHandleSessionEvent(payload)) return;
         if (shouldDropDuplicatedEvent('chat.tool_call', payload)) return;
-        setThinking(false);
+        clearThinkingForVisibleOutput();
         const { currentStreamId, currentStreamContent } = useChatStore.getState();
         if (currentStreamId && currentStreamContent) {
           updateMessage(currentStreamId, { isStreaming: false });
@@ -842,7 +905,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
       }),
       // 同时监听 session_result 事件，以处理后端可能发送的不同格式
       webClient.on('session_result', ({ payload }) => {
-        setThinking(false);
+        clearThinkingForVisibleOutput();
         const sessionId =
           typeof payload.session_id === 'string' ? payload.session_id : '';
         const description =
@@ -878,7 +941,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
         if (shouldDropDuplicatedEvent('chat.session_result', payload)) {
           return;
         }
-        setThinking(false);
+        clearThinkingForVisibleOutput();
         const sessionId =
           typeof payload.session_id === 'string' ? payload.session_id : '';
         const description =
@@ -914,7 +977,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
         if (shouldDropDuplicatedEvent('team.event', payload)) {
           return;
         }
-        setThinking(false);
+        clearThinkingForVisibleOutput();
         addMessage({
           id: `team-event-${Date.now()}`,
           role: 'system',
@@ -926,7 +989,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
         if (shouldDropDuplicatedEvent('team.message', payload)) {
           return;
         }
-        setThinking(false);
+        clearThinkingForVisibleOutput();
         addMessage({
           id: `team-message-${Date.now()}`,
           role: 'system',
@@ -938,7 +1001,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
         if (shouldDropDuplicatedEvent('team.task', payload)) {
           return;
         }
-        setThinking(false);
+        clearThinkingForVisibleOutput();
         const p = payload as { payload?: { event?: unknown }; event?: unknown };
         const event = p.payload?.event || p.event;
         if (event) {
@@ -957,7 +1020,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
         if (shouldDropDuplicatedEvent('team.member', payload)) {
           return;
         }
-        setThinking(false);
+        clearThinkingForVisibleOutput();
         const p = payload as { payload?: { event?: unknown }; event?: unknown };
         const event = p.payload?.event || p.event;
         if (event) {
@@ -1004,6 +1067,159 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
           useChatStore.getState().setUsageSummary(targetId, usage);
         }
       }),
+      webClient.on('harness.message', ({ payload }) => {
+        if (!shouldHandleSessionEvent(payload)) return;
+        const content = typeof payload.content === 'string' ? payload.content : '';
+        const stage = typeof payload.stage === 'string' ? payload.stage : undefined;
+        useHarnessStore.getState().addHarnessMessage(content, stage);
+
+        // Pipeline start message contains stages array: { content, pipeline, stages: [{slot, display_name}] }
+        const rawStages = payload.stages;
+        if (Array.isArray(rawStages) && rawStages.length > 0) {
+          const stages: { slot: string; display_name: string }[] = [];
+          for (const s of rawStages) {
+            if (typeof s === 'object' && s !== null) {
+              const obj = s as Record<string, unknown>;
+              const slot = typeof obj.slot === 'string' ? obj.slot : '';
+              const displayName = typeof obj.display_name === 'string' ? obj.display_name : '';
+              if (slot) stages.push({ slot, display_name: displayName || slot });
+            }
+          }
+          if (stages.length > 0) useHarnessStore.getState().setStageDefinitions(stages);
+        }
+
+        // Mark stage as running (skip pipeline start message which has stages array)
+        if (stage && !rawStages) {
+          const existingStage = useHarnessStore.getState().stageResults.find(s => s.stage === stage);
+          if (existingStage?.status !== 'running') {
+            useHarnessStore.getState().updateStageResult({ stage, status: 'running', messages: [], metrics: {} });
+          }
+        }
+
+        addMessage({
+          id: `harness-msg-${Date.now()}`,
+          role: 'system',
+          content,
+          timestamp: new Date().toISOString(),
+          isHarnessMessage: true,
+        });
+      }),
+      webClient.on('harness.stage_result', ({ payload }) => {
+        if (!shouldHandleSessionEvent(payload)) return;
+        const stage = typeof payload.stage === 'string' ? payload.stage : '';
+        const status = typeof payload.status === 'string' ? payload.status : 'success';
+        const error = typeof payload.error === 'string' ? payload.error : undefined;
+        const messages = Array.isArray(payload.messages) ? payload.messages.filter((m) => typeof m === 'string') : [];
+        const metrics = typeof payload.metrics === 'object' && payload.metrics !== null && !Array.isArray(payload.metrics)
+          ? payload.metrics as Record<string, unknown>
+          : {};
+        const scope = typeof payload.scope === 'string' ? payload.scope : '';
+        const extensionName = typeof payload.extension_name === 'string' ? payload.extension_name : '';
+        const extensionStage = typeof payload.extension_stage === 'string' ? payload.extension_stage : '';
+        const parentStage = typeof payload.parent_stage === 'string' ? payload.parent_stage : '';
+        const taskId = typeof payload.task_id === 'string' ? payload.task_id : undefined;
+        if (scope === 'extension' && extensionName) {
+          useHarnessStore.getState().updateExtensionProgress({
+            extensionName,
+            taskId,
+            parentStage: parentStage || stage,
+            extensionStage,
+            status: status as 'running' | 'success' | 'failed' | 'timeout' | 'pending' | 'waiting' | 'skipped' | 'rejected',
+            error,
+            messages,
+          });
+        }
+        if (stage) {
+          useHarnessStore.getState().updateStageResult({
+            stage,
+            status: status as 'running' | 'success' | 'failed' | 'timeout' | 'pending',
+            error,
+            messages,
+            metrics,
+          });
+          if (status === 'failed' && error) {
+            addMessage({
+              id: `harness-error-${Date.now()}`,
+              role: 'system',
+              content: `Stage ${stage} failed: ${error}`,
+              timestamp: new Date().toISOString(),
+            });
+          }
+        } else {
+          console.warn('[harness.stage_result] No stage field in payload, skipping update');
+        }
+      }),
+      webClient.on('harness.extension_ready', ({ payload }) => {
+        if (!shouldHandleSessionEvent(payload)) return;
+        const extensionName = typeof payload.extension_name === 'string' ? payload.extension_name : '';
+        const runtimePath = typeof payload.runtime_path === 'string' ? payload.runtime_path : '';
+        const sessionRuntimePath = typeof payload.session_runtime_path === 'string' ? payload.session_runtime_path : runtimePath;
+        const extensionRuntimePath = typeof payload.extension_runtime_path === 'string' ? payload.extension_runtime_path : '';
+        const configPath = typeof payload.config_path === 'string' ? payload.config_path : '';
+        const runtimeExtensions = Array.isArray(payload.runtime_extensions)
+          ? payload.runtime_extensions
+              .filter((item) => typeof item === 'object' && item !== null)
+              .map((item) => {
+                const obj = item as Record<string, unknown>;
+                return {
+                  extensionName: typeof obj.extension_name === 'string' ? obj.extension_name : '',
+                  runtimePath: typeof obj.runtime_path === 'string' ? obj.runtime_path : '',
+                  configPath: typeof obj.config_path === 'string' ? obj.config_path : '',
+                };
+              })
+              .filter((item) => item.extensionName && item.runtimePath)
+          : [];
+        const verifyReport = typeof payload.verify_report === 'object' && payload.verify_report !== null && !Array.isArray(payload.verify_report)
+          ? payload.verify_report as Record<string, unknown>
+          : {};
+        const componentsSummary = typeof payload.components_summary === 'object' && payload.components_summary !== null && !Array.isArray(payload.components_summary)
+          ? payload.components_summary as Record<string, unknown>
+          : {};
+
+        useHarnessStore.getState().setExtensionReady({
+          extensionName,
+          runtimePath,
+          sessionRuntimePath,
+          extensionRuntimePath,
+          configPath,
+          runtimeExtensions,
+          verifyReport,
+          componentsSummary,
+        });
+      }),
+      webClient.on('harness.activate_interaction', ({ payload }) => {
+        if (!shouldHandleSessionEvent(payload)) return;
+        const interactionId = typeof payload.interaction_id === 'string' ? payload.interaction_id : '';
+        const extensionName = typeof payload.extension_name === 'string' ? payload.extension_name : '';
+        const runtimePath = typeof payload.runtime_path === 'string' ? payload.runtime_path : '';
+        const options: string[] = Array.isArray(payload.options) ? payload.options : ['accept', 'reject'];
+
+        useHarnessStore.getState().setActivateInteraction({
+          interactionId,
+          extensionName,
+          runtimePath,
+          options,
+          pending: true,
+        });
+        setPendingQuestion({
+          request_id: interactionId,
+          source: 'activate_confirm',
+          questions: [{
+            header: '扩展激活确认',
+            question: `是否激活扩展 **${extensionName}**？`,
+            options: options.map((opt: string) => ({
+              label: opt === 'accept' ? '激活' : opt === 'reject' ? '拒绝' : opt,
+              description: '',
+            })),
+          }],
+        });
+      }),
+      webClient.on('harness.session_finished', ({ payload }) => {
+        if (!shouldHandleSessionEvent(payload)) return;
+        setProcessing(false);
+        setThinking(false);
+        useHarnessStore.getState().setHarnessRunning(false);
+      }),
     ];
 
     return () => {
@@ -1026,6 +1242,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
     setTodos,
     setContextCompressionStats,
     setHeartbeatStatus,
+    clearThinkingForVisibleOutput,
     updateSession,
     shouldHandleSessionEvent,
     shouldDropDuplicatedEvent,
@@ -1152,6 +1369,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
     switchMode,
     disconnect,
     sendUserAnswer,
+    respondActivate,
     getInflightCount: () => webClient.getInflightCount(),
   };
 }

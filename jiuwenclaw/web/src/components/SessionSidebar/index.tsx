@@ -105,8 +105,7 @@ export function SessionSidebar({
           className={`nav-item w-full ${activeNav === 'extensions' ? 'active' : ''}`}
         >
           <svg className="w-4 h-4 nav-item__icon" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={1.5}>
-            <path strokeLinecap="round" strokeLinejoin="round" d="M12 6v12m6-6H6" />
-            <circle cx="12" cy="12" r="9" />
+            <path strokeLinecap="round" strokeLinejoin="round" d="M21 7.5l-9-5.25L3 7.5m18 0l-9 5.25m9-5.25v9l-9 5.25M3 7.5l9 5.25M3 7.5v9l9 5.25m0-9v9" />
           </svg>
           {t('nav.extensions', 'Extensions')}
         </button>

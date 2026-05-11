@@ -283,17 +283,6 @@ def encode_agent_chunk_for_wire(
                 exc=te,
                 is_stream=is_stream,
             )
-        logger.info(
-            (
-                "[E2A][wire][out] chunk request_id=%s response_id=%s seq=%s response_kind=%s "
-                "is_final=%s legacy_stashed=false"
-            ),
-            rid,
-            response_id,
-            sequence,
-            e2a.response_kind,
-            e2a.is_final,
-        )
         return wire
     except Exception as e:
         logger.exception(
