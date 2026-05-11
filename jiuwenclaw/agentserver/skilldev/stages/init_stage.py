@@ -231,7 +231,7 @@ class InitStageHandler(StageHandler):
             stage_name="init",
             system_prompt=_SKILL_NAME_SYSTEM_PROMPT,
             tools=["file_read", "file_glob", "file_listdir"],
-            max_iterations=8,
+            max_iterations=30,
         )
         for attempt in range(1, _MAX_SKILL_NAME_ATTEMPTS + 1):
 

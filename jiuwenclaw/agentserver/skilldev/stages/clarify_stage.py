@@ -144,7 +144,7 @@ class ClarifyStageHandler(StageHandler):
                 ctx.state.task_id,
                 attempt,
                 total_attempts,
-                raw_text[:500],
+                raw_text,
             )
             questions = self._parse_questions_json(raw_text, ctx.state.task_id)
             if questions is not None:
@@ -197,7 +197,7 @@ class ClarifyStageHandler(StageHandler):
                 "用户对现有 Skill 提出了修改需求，以下为当前 Skill 文件的完整内容（已预加载，无需再调用工具读取）：\n\n"
                 + (skill_content_str or "（未找到 skill 文件）")
             )
-            parts.append("根据以上 Skill 内容再生成澄清问题，须遵守系统提示中的「提问范围与禁止项」。")
+            parts.append("根据以上 Skill 内容生成澄清问题，须遵守系统提示中的「提问范围与禁止项」。")
 
             # 此模式不预加载用户上传的资料，agent自行判断后可加载
             if not (ctx.state.ref_files_dir_empty and ctx.state.ref_skills_dir_empty):
@@ -224,7 +224,7 @@ class ClarifyStageHandler(StageHandler):
                         "## 参考资料\n"
                         f"以下为用户上传的参考资料，存放于工作区 {ctx.workspace} 中的resources/目录。"
                         f"现已预加载，无需再调用工具读取）：\n\n{content}"
-                        "请阅读预加载的资料后再提问"
+                        "\n\n请阅读预加载的资料后再提问"
                     )
                     has_preloaded_content = True
 

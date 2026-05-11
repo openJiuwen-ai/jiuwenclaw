@@ -628,6 +628,13 @@ class SkillDevContext:
         model_client_config = ModelClientConfig(**self.deps.model_client_config)
         model_request_kwargs = dict(self.deps.model_config_obj or {})
         model_request_kwargs.setdefault("model", self.deps.model_name)
+
+        # # Structured-analysis stages benefit from JSON-constrained outputs.
+        # # Keep GENERATE / IMPROVE / TEST_RUN free-form to avoid over-constraining text/code generation.
+        # structured_output_stages = {"CLARIFY", "TEST_DESIGN"}
+        # if stage_name.upper() in structured_output_stages:
+        #     model_request_kwargs.setdefault("response_format", {"type": "json_object"})
+
         model_request_config = ModelRequestConfig(**model_request_kwargs)
         model = Model(
             model_client_config=model_client_config,
