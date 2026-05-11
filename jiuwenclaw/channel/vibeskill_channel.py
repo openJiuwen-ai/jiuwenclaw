@@ -8,6 +8,7 @@ import secrets
 import socket
 import time
 from dataclasses import dataclass
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable, cast
 from urllib.parse import parse_qs, urlparse
 
@@ -26,8 +27,58 @@ from jiuwenclaw.channel.vibeskill_session import (
 
 from jiuwenclaw.channel.vibeskill_file_utils import skilldev_tree_to_file_tree_nodes
 from jiuwenclaw.schema.message import Message, ReqMethod
+from jiuwenclaw.utils import SafeRotatingFileHandler, SensitiveDataFilter
 
 logger = logging.getLogger(__name__)
+
+_INTERFACE_LOG_HANDLER_ATTR = "_jiuwenclaw_interface_log_file_handler"
+_INTERFACE_LOG_MAX_BYTES = 20 * 1024 * 1024
+_INTERFACE_LOG_BACKUP_COUNT = 20
+
+
+def _configure_interface_log_path() -> None:
+    """若设置环境变量 `INTERFACE_LOG_PATH`，将本模块日志额外写入该文件路径。"""
+    raw = os.environ.get("INTERFACE_LOG_PATH", "").strip()
+    if not raw:
+        return
+    for h in logger.handlers:
+        if getattr(h, _INTERFACE_LOG_HANDLER_ATTR, False):
+            return
+    log_path = Path(raw).expanduser().resolve()
+    try:
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        logger.warning(
+            "INTERFACE_LOG_PATH: cannot create directory %s: %s",
+            log_path.parent,
+            exc,
+        )
+        return
+    formatter = logging.Formatter(
+        fmt="%(asctime)s.%(msecs)03d [%(process)d] %(levelname)s %(name)s %(filename)s:%(lineno)d: %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+    )
+    try:
+        fh = SafeRotatingFileHandler(
+            filename=str(log_path),
+            maxBytes=_INTERFACE_LOG_MAX_BYTES,
+            backupCount=_INTERFACE_LOG_BACKUP_COUNT,
+            encoding="utf-8",
+        )
+    except OSError as exc:
+        logger.warning(
+            "INTERFACE_LOG_PATH: cannot open log file %s: %s",
+            log_path,
+            exc,
+        )
+        return
+    setattr(fh, _INTERFACE_LOG_HANDLER_ATTR, True)
+    fh.setFormatter(formatter)
+    fh.addFilter(SensitiveDataFilter())
+    logger.addHandler(fh)
+
+
+_configure_interface_log_path()
 
 
 @dataclass
