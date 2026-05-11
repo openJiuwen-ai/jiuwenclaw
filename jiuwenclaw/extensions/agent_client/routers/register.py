@@ -10,7 +10,7 @@ api_router = APIRouter()
 
 
 def router_register(app: FastAPI) -> None:
-    v1_router = APIRouter(prefix="/v1")
+    v1_router = APIRouter(prefix="/v1/instances")
     v1_router.include_router(
         physical_resource_router,
         prefix="",

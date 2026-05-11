@@ -34,3 +34,14 @@ extensions:
     enabled: ${AGENT_CLIENT_REST_ENABLED:-true}
     host: ${AGENT_CLIENT_REST_HOST:-0.0.0.0}
     port: ${AGENT_CLIENT_REST_PORT:-18080}
+    # Agent Client REST 持久化库
+    database:
+      db_type: ${AGENT_CLIENT_DB_TYPE:-sqlite}
+      sqlite_path: ${AGENT_CLIENT_SQLITE_PATH:-}
+      # 关系型库连接参数（mysql 等）
+      db:
+        host: ${DB_HOST:-localhost}
+        port: ${DB_PORT:-3306}
+        user: ${DB_USER:-root}
+        password: ${DB_PASSWORD:-root}
+        db_name: ${DB_NAME:-openjiuwen_gateway}
