@@ -27,25 +27,86 @@ Runtime layout:
 内置模板位于包内 ``jiuwenclaw/resources/``（含 ``agent/`` 下各技能模板以及 ``skills_state.json``）。
 """
 
+import asyncio
+import copy
+import datetime
 import json
+import logging
+import mimetypes
 import os
 import re
+import shutil
 import sys
 import time
-import datetime
-import asyncio
-import shutil
-import mimetypes
-from pathlib import Path
-from dataclasses import dataclass, field
-from typing import Any, Literal, Optional
 from collections import OrderedDict
-import logging
+from dataclasses import dataclass, field
 from logging.handlers import BaseRotatingHandler
+from pathlib import Path
+from typing import Any, Literal, Optional
+
+import yaml
 from ruamel.yaml import YAML
 from ruamel.yaml.comments import CommentedMap
 
+from jiuwenclaw.local_env_config import get_local_config
+
 logger = logging.getLogger(__name__)
+
+
+def merge_template_with_override(
+    template: dict[str, Any],
+    override: dict[str, Any],
+) -> dict[str, Any]:
+    """模板默认值 + 用户 override；用户键覆盖模板。override 中独有的顶层键保留。"""
+    out: dict[str, Any] = {}
+    for key, tmpl_val in template.items():
+        if key not in override:
+            out[key] = copy.deepcopy(tmpl_val)
+        elif isinstance(tmpl_val, dict) and isinstance(override.get(key), dict):
+            out[key] = merge_template_with_override(tmpl_val, override[key])
+        else:
+            out[key] = override[key]
+    for key, over_val in override.items():
+        if key not in template:
+            out[key] = copy.deepcopy(over_val)
+    return out
+
+
+def load_yaml_dict(path: Path) -> dict[str, Any]:
+    if not path.exists():
+        return {}
+    with open(path, "r", encoding="utf-8") as f:
+        data = yaml.safe_load(f)
+    return data if isinstance(data, dict) else {}
+
+
+def resolve_shipped_template_config_path() -> Path:
+    """包内 shipped 模板：jiuwenclaw/resources/config.yaml。"""
+    return Path(__file__).resolve().parent / "resources" / "config.yaml"
+
+
+def resolve_env_vars(value: Any) -> Any:
+    """递归解析配置中的环境变量替换语法 ${VAR:-default}."""
+    if isinstance(value, str):
+        pattern = r'\$\{([^:}]+)(?::-([^}]*))?\}'
+
+        def replace_env(match):
+            var_name = match.group(1)
+            default = match.group(2)
+            current = get_local_config(var_name)
+            if default is not None:
+                if current is None or current == "":
+                    return default
+                return current
+            return current if current is not None else ""
+
+        return re.sub(pattern, replace_env, value)
+    if isinstance(value, dict):
+        return {k: resolve_env_vars(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [resolve_env_vars(item) for item in value]
+    return value
+
 
 _LOG_FILE_MAX_BYTES = 20 * 1024 * 1024
 _LOG_FILE_BACKUP_COUNT = 20
@@ -210,16 +271,10 @@ class _CompositeFilter(logging.Filter):
 def _load_logging_config_from_yaml() -> dict[str, Any]:
     """读取合并并解析环境变量后的 ``logging`` 段（包内模板 + 用户 override）。
 
-    使用 ``config_merge_core`` + ``env_resolve``，避免在 ``utils`` 导入阶段循环导入 ``jiuwenclaw.config``。
+    逻辑与本模块中的 ``merge_template_with_override`` / ``resolve_env_vars`` 一致；
+    放在 ``utils`` 内以便 ``setup_logger`` 在导入 ``jiuwenclaw.config`` 之前即可执行。
     """
     try:
-        from jiuwenclaw.config_merge_core import (
-            merge_template_with_override,
-            load_yaml_dict,
-            resolve_shipped_template_config_path,
-        )
-        from jiuwenclaw.env_resolve import resolve_env_vars
-
         template = load_yaml_dict(resolve_shipped_template_config_path())
         override = load_yaml_dict(get_config_file())
         merged = merge_template_with_override(template, override)

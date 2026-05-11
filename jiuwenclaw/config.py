@@ -12,13 +12,14 @@ from typing import Any
 import yaml
 from ruamel.yaml import YAML
 
-from jiuwenclaw.config_merge_core import (
+from jiuwenclaw.utils import (
+    USER_WORKSPACE_DIR,
+    get_config_file,
     load_yaml_dict,
     merge_template_with_override,
+    resolve_env_vars,
     resolve_shipped_template_config_path,
 )
-from jiuwenclaw.env_resolve import resolve_env_vars
-from jiuwenclaw.utils import USER_WORKSPACE_DIR, get_config_file
 
 _logger = logging.getLogger(__name__)
 _logged_template_config_path = False
