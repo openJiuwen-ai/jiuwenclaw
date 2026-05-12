@@ -15,6 +15,7 @@ import json
 import logging
 import os
 import time
+from pathlib import Path
 from collections import OrderedDict
 from pathlib import Path
 from typing import Any, AsyncIterator, Tuple
@@ -173,6 +174,8 @@ class JiuWenClaw:
         self._session_project_dir: OrderedDict[str, str] = OrderedDict()
         # SkillDev 模式：懒初始化，首次 skilldev.* 请求时构造
         self._skilldev_service = None
+        # Storage 服务：懒初始化，首次文件操作时构造
+        self._storage = None
         self._tool_manager = None
 
     def _get_skilldev_service(self):
@@ -206,6 +209,20 @@ class JiuWenClaw:
         self._skilldev_service = SkillDevService(deps)
         logger.info("[JiuWenClaw] SkillDevService 初始化完成")
         return self._skilldev_service
+
+    async def _get_storage(self):
+        """懒初始化并返回 StorageService 实例.
+
+        StorageService 是单例，首次调用时根据配置创建后端实例。
+        """
+        if self._storage is not None:
+            return self._storage
+
+        from jiuwenclaw.storage import StorageService
+
+        self._storage = await StorageService.get_instance()
+        logger.info("[JiuWenClaw] StorageService 初始化完成")
+        return self._storage
 
     async def _ensure_adapter(self) -> AgentAdapter:
         """确保 adapter 已初始化，如果未初始化则根据环境变量创建."""
@@ -435,6 +452,143 @@ class JiuWenClaw:
         adapter = await self._ensure_adapter()
         await adapter.reload_agent_config(config_base, env_overrides)
         logger.info("[JiuWenClaw] Agent config reloaded: sdk=%s", self._sdk_name)
+
+    async def prepare_files_for_agent(self, request: AgentRequest) -> None:
+        """预处理文件：从对象存储下载文件到本地 workspace.
+
+        从 request.params.files 中提取文件引用，下载到本地 workspace，
+        并更新 files 字段添加 path 字段供 Agent 访问。
+
+        Args:
+            request: AgentRequest，会被原地修改
+        """
+
+        files = request.params.get("files")
+        if not files:
+            return
+
+        # 获取存储服务
+        storage = await self._get_storage()
+
+        # 构建本地下载目录：~/.jiuwenclaw/agent/jiuwenclaw_workspace/files/{user_id}/input/
+        # 从 session_id 或 metadata 中提取用户 ID
+        user_id = request.session_id or "default"
+        if request.metadata and isinstance(request.metadata, dict):
+            user_id = request.metadata.get("user_id", user_id)
+        input_dir = Path(self._workspace_dir) / "files" / user_id / "input"
+        input_dir.mkdir(parents=True, exist_ok=True)
+
+        # 处理每个文件
+        for file_key, file_ref in files.items():
+            if isinstance(file_ref, dict):
+                uri = file_ref.get("uri")
+                if not uri:
+                    continue
+            elif hasattr(file_ref, 'uri'):
+                uri = file_ref.uri
+            else:
+                continue
+
+            # 构建本地保存路径
+            filename = file_ref.get("name") if isinstance(file_ref, dict) else (file_ref.name or "file")
+            local_path = str(input_dir / filename)
+
+            try:
+                # 下载文件
+                await storage.download_file(uri, local_path)
+
+                # 更新 file_ref 添加 path 字段
+                if isinstance(file_ref, dict):
+                    file_ref["path"] = local_path
+                elif hasattr(file_ref, '__dict__'):
+                    # 对于 dataclass，尝试添加 path 属性
+                    if not hasattr(file_ref, 'path'):
+                        file_ref.meta['path'] = local_path
+                    else:
+                        file_ref.path = local_path
+
+                logger.info(f"[JiuWenClaw] 文件已下载: {uri} -> {local_path}")
+
+            except Exception as e:
+                logger.error(f"[JiuWenClaw] 文件下载失败: {uri}: {e}")
+                # 继续处理其他文件
+                continue
+
+    async def upload_agent_files(self, response: AgentResponse, user_id: str) -> None:
+        """后处理文件：上传 Agent 生成的文件到对象存储.
+
+        从 response.payload 中提取文件路径，上传到对象存储，
+        并更新 response 添加 uri 字段供前端访问。
+
+        Args:
+            response: AgentResponse，会被原地修改
+            user_id: 用户 ID（用于对象存储路径隔离）
+        """
+
+        if not response.payload or not isinstance(response.payload, dict):
+            return
+
+        # 检查 payload 中是否有文件信息
+        # 可能的字段：files, output_files, generated_files 等
+        files_data = None
+        for key in ["files", "output_files", "generated_files"]:
+            if key in response.payload:
+                files_data = response.payload[key]
+                break
+
+        if not files_data:
+            return
+
+        # 获取存储服务
+        storage = await self._get_storage()
+
+        # 处理文件列表
+        if isinstance(files_data, list):
+            files_list = files_data
+        elif isinstance(files_data, dict):
+            files_list = list(files_data.values())
+        else:
+            return
+
+        # 上传每个文件
+        for file_info in files_list:
+            if isinstance(file_info, dict):
+                local_path = file_info.get("path")
+                if not local_path:
+                    # 尝试其他可能的字段名
+                    local_path = file_info.get("local_path") or file_info.get("file_path")
+            elif hasattr(file_info, 'path'):
+                local_path = file_info.path
+            else:
+                continue
+
+            if not local_path:
+                continue
+
+            # 检查文件是否存在
+            if not Path(local_path).exists():
+                logger.warning(f"[JiuWenClaw] 文件不存在，跳过上传: {local_path}")
+                continue
+
+            try:
+                # 上传文件
+                uri = await storage.upload_file(local_path, user_id)
+
+                # 更新 file_info 添加 uri 字段
+                if isinstance(file_info, dict):
+                    file_info["uri"] = uri
+                elif hasattr(file_info, '__dict__'):
+                    if not hasattr(file_info, 'uri'):
+                        file_info.meta['uri'] = uri
+                    else:
+                        file_info.uri = uri
+
+                logger.info(f"[JiuWenClaw] 文件已上传: {local_path} -> {uri}")
+
+            except Exception as e:
+                logger.error(f"[JiuWenClaw] 文件上传失败: {local_path}: {e}")
+                # 继续处理其他文件
+                continue
 
     def _build_inputs(self, request: AgentRequest) -> Tuple[dict[str, Any], str]:
         """构建 adapter 所需的 inputs 字典."""
@@ -722,6 +876,9 @@ class JiuWenClaw:
             request.request_id, request.channel_id, session_id, self._sdk_name,
         )
 
+        # 文件预处理：从对象存储下载输入文件到本地 workspace
+        await self.prepare_files_for_agent(request)
+
         inputs, memory_mode, raw_query = self._build_inputs(request)
         self._apply_effective_project_dir_to_request(request, session_id, inputs)
 
@@ -778,6 +935,14 @@ class JiuWenClaw:
                     extra=request.params,
                 )
                 await ExtensionRegistry.get_instance().trigger(AgentServerHookEvents.MEMORY_AFTER_CHAT, after_ctx)
+
+        # 文件后处理：上传 Agent 生成的输出文件到对象存储
+        if result.ok:
+            # 从 session_id 或 metadata 中提取用户 ID
+            user_id = request.session_id or "default"
+            if request.metadata and isinstance(request.metadata, dict):
+                user_id = request.metadata.get("user_id", user_id)
+            await self.upload_agent_files(result, user_id)
 
         return result
 

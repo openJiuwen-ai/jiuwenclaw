@@ -16,6 +16,35 @@ logging:
   agent_server: INFO
   full: INFO
 
+# ============================================================
+# 对象存储接口配置（AgentServer内部存储服务）
+# ============================================================
+storage:
+  # ============================================================
+  # 对象存储配置（AgentServer 内部使用）
+  # ============================================================
+  # 存储后端类型：local（本地文件系统）, huawei-obs（华为云OBS）, aliyun-oss（阿里云OSS）
+  type: ${STORAGE_TYPE:-local}
+
+  # 本地文件系统存储配置（开源版本、开发环境）
+  local:
+    base_dir: ${STORAGE_LOCAL_BASE_DIR:-~/.jiuwenclaw/storage/local}
+    upload_dir: ${STORAGE_LOCAL_UPLOAD_DIR:-~/.jiwenclaw/uploads}
+
+  # 华为云 OBS 配置（商用版本、生产环境）
+  huawei_obs:
+    access_key: ${OBS_ACCESS_KEY:-}
+    secret_key: ${OBS_SECRET_KEY:-}
+    endpoint: ${OBS_ENDPOINT:-obs.cn-north-4.myhuaweicloud.com}
+    bucket: ${OBS_BUCKET:-}
+
+  # 阿里云 OSS 配置（商用版本、生产环境）
+  aliyun_oss:
+    access_key: ${OSS_ACCESS_KEY:-}
+    secret_key: ${OSS_SECRET_KEY:-}
+    endpoint: ${OSS_ENDPOINT:-oss-cn-hangzhou.aliyuncs.com}
+    bucket: ${OSS_BUCKET:-}
+
 memory:
   # ============================================================
   # 记忆系统配置

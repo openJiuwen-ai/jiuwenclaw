@@ -11,6 +11,9 @@ from unittest.mock import patch
 
 import pytest
 
+# 为所有系统测试添加 ST 标记
+pytestmark = pytest.mark.st
+
 
 # Add parent directory to path for imports
 sys.path.append(str(Path(__file__).parent.parent.parent))
