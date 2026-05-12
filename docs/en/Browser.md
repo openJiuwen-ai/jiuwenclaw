@@ -38,7 +38,7 @@ Install Chrome first.
 
 ### Step 2: Open the browser service panel
 
-1. Open the JiuwenClaw web UI.
+1. Open the JiuwenSwarm web UI.
 
 ![Browser panel](../assets/images/browser1.png)
 

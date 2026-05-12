@@ -1,6 +1,6 @@
 # Agent & workspace
 
-`workspace` is JiuwenClaw’s runtime directory for agent memory, skills, session data, and configurable heartbeat tasks. In **source mode** it lives at the project root `workspace`; in **wheel install mode**, the bundled `workspace` is copied to `~/.jiuwenclaw/workspace` on first run.
+`workspace` is JiuwenSwarm’s runtime directory for agent memory, skills, session data, and configurable heartbeat tasks. In **source mode** it lives at the project root `workspace`; in **wheel install mode**, the bundled `workspace` is copied to `~/.jiuwenclaw/workspace` on first run.
 
 ![Workspace](../assets/images/agent.png)
 

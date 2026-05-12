@@ -15,7 +15,7 @@
 - leader 和 teammate 都是 Linux 节点。
 - 节点之间内网互通，优先使用内网 IP。
 - NFS / RPC 相关端口已在安全组或防火墙中放行。
-- 挂载或切换 NFS 前，先停止 leader / teammate 上正在运行的 JiuwenClaw Team 进程。
+- 挂载或切换 NFS 前，先停止 leader / teammate 上正在运行的 JiuwenSwarm Team 进程。
 
 下文使用占位符：
 
@@ -124,7 +124,7 @@ cat /root/.jiuwenclaw/.agent_teams/nfs_team_test.txt
 
 ## 5. 推荐启动顺序
 
-1. 停止 leader / teammate 上的 JiuwenClaw Team 进程。
+1. 停止 leader / teammate 上的 JiuwenSwarm Team 进程。
 2. leader 执行 `setup_nfs_server.sh`。
 3. teammate 执行 `setup_nfs_client.sh`。
 4. 确认 `mount | grep agent_teams` 正常。

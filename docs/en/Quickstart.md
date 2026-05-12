@@ -2,11 +2,11 @@
 
 > **⚠️ Version Sync**: This document should be kept in sync with [`docs/zh/Quickstart.md`](../zh/Quickstart.md). When updating one, please update the other.
 
-JiuwenClaw provides two installation methods: `pip install` or `install from source`.
+JiuwenSwarm provides two installation methods: `pip install` or `install from source`.
 
 ## Prerequisites
 
-- Download JiuwenClaw code:
+- Download JiuwenSwarm code:
   ```bash
   git clone https://gitcode.com/openjiuwen/jiuwenclaw.git
   ```
@@ -20,7 +20,7 @@ JiuwenClaw provides two installation methods: `pip install` or `install from sou
 
 Suitable for users who manage their own Python environment. Follow these steps:
 
-- Create a virtual environment & install JiuwenClaw
+- Create a virtual environment & install JiuwenSwarm
 
   ```bash
   # Create a virtual environment named jiuwenclaw
@@ -29,21 +29,21 @@ Suitable for users who manage their own Python environment. Follow these steps:
   # Activate the jiuwenclaw virtual environment
   jiuwenclaw\Scripts\activate
 
-  # Install JiuwenClaw
+  # Install JiuwenSwarm
   pip install jiuwenclaw
   ```
 
-- Initialize & start JiuwenClaw
+- Initialize & start JiuwenSwarm
 
   ```bash
-  # Initialize JiuwenClaw (first time setup)
+  # Initialize JiuwenSwarm (first time setup)
   jiuwenclaw-init
 
-  # Start JiuwenClaw
+  # Start JiuwenSwarm
   jiuwenclaw-start
   ```
 
-  After running, you can access the JiuwenClaw web UI. The default local access URL is `http://localhost:5173`.
+  After running, you can access the JiuwenSwarm web UI. The default local access URL is `http://localhost:5173`.
 
   **Note:** For remote access, run the following commands:
 
@@ -57,7 +57,7 @@ Suitable for users who manage their own Python environment. Follow these steps:
 
 ## Method 2: Install from Source
 
-Suitable for users who perform custom development or adaptation based on JiuwenClaw.
+Suitable for users who perform custom development or adaptation based on JiuwenSwarm.
 
 ### uv Installation
 
@@ -103,16 +103,16 @@ Suitable for users who perform custom development or adaptation based on JiuwenC
     uv run jiuwenclaw-start dev
     ```
 
-  After running, you can access the JiuwenClaw web UI.
+  After running, you can access the JiuwenSwarm web UI.
 
 ### conda Installation
 
 - Create a virtual environment with `conda`
   ```bash
   # Create a virtual environment with Anaconda (supports any of 3.11, 3.12, 3.13)
-  conda create -n JiuwenClaw python=3.11
-  # or: conda create -n JiuwenClaw python=3.12
-  # or: conda create -n JiuwenClaw python=3.13
+  conda create -n jiuwenclaw python=3.11
+  # or: conda create -n jiuwenclaw python=3.12
+  # or: conda create -n jiuwenclaw python=3.13
   ```
 
 - Install Python dependencies
@@ -155,4 +155,4 @@ Suitable for users who perform custom development or adaptation based on JiuwenC
     jiuwenclaw-start dev
     ```
 
-  After running, you can access the JiuwenClaw web UI.
+  After running, you can access the JiuwenSwarm web UI.

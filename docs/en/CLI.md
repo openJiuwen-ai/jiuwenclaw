@@ -1,6 +1,6 @@
 ## CLI / channel control commands
 
-JiuwenClaw supports **special prefix commands** to control sessions and modes. Common ones:
+JiuwenSwarm supports **special prefix commands** to control sessions and modes. Common ones:
 
 - `/new_session`: start a new `session_id` for the current channel
 - `/mode plan`, `/mode fast`, `/mode team`, `/mode code`: switch the channel's working mode

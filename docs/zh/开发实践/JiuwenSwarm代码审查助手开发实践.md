@@ -1,4 +1,4 @@
-# 告别人工 Code Review？用 JiuwenClaw 构建自动化审查流水线
+# 告别人工 Code Review？用 JiuwenSwarm 构建自动化审查流水线
 
 ## 引言｜当"代码质量"真正走进日常开发流程
 
@@ -45,7 +45,7 @@
 
 | 项目 | 配置值 |
 | --- | --- |
-| **项目路径** | `D:\Download\jiuwenclaw` |
+| **项目路径** | `D:\Download\jiuwenswarm` |
 | **操作系统** | Windows 10 |
 | **Python** | 3.10+ |
 | **模型服务** | 智谱AI (GLM-4.7) |
@@ -65,7 +65,7 @@
 ### 核心文件位置
 
 ```plain
-D:\Download\jiuwenclaw\
+D:\Download\jiuwenswarm\
 ├── .env                              # 环境变量配置
 ├── workspace/
 │   └── agent/
@@ -118,9 +118,9 @@ D:\Download\jiuwenclaw\
 
 用了代码审查助手之后，这些问题确实解决了很多。系统会自动运行 Ruff（Lint）、Radon（复杂度）、Bandit（安全）三个工具，然后通过评分引擎计算质量分、安全分、复杂度分、风格分，最终给出综合评分和改进建议。
 
-### 1.3 JiuwenClaw 技能系统的优势
+### 1.3 JiuwenSwarm 技能系统的优势
 
-JiuwenClaw 是一个开源的 Agent 开发框架，其技能系统非常适合构建代码审查工具：
+JiuwenSwarm 是一个开源的 Agent 开发框架，其技能系统非常适合构建代码审查工具：
 
 | 能力 | 说明 |
 | --- | --- |
@@ -135,7 +135,7 @@ JiuwenClaw 是一个开源的 Agent 开发框架，其技能系统非常适合�
 
 ### 2.1 分层架构设计
 
-代码审查助手采用经典的三层架构，在 JiuwenClaw 的 Application Layer（应用层）：
+代码审查助手采用经典的三层架构，在 JiuwenSwarm 的 Application Layer（应用层）：
 
 ```
 ┌─────────────────────────────────────────────────────────┐
@@ -294,13 +294,13 @@ allowed_tools: [bash, read_file, write_file]
 ### 审查远程 Git 仓库
 
 ```bash
-cd D:/Download/jiuwenclaw && python workspace/agent/skills/code-review/run_review.py clone --url <仓库地址>
+cd D:/Download/jiuwenswarm && python workspace/agent/skills/code-review/run_review.py clone --url <仓库地址>
 ```
 
 ### 审查本地代码
 
 ```bash
-cd D:/Download/jiuwenclaw && python workspace/agent/skills/code-review/run_review.py local --path <路径>
+cd D:/Download/jiuwenswarm && python workspace/agent/skills/code-review/run_review.py local --path <路径>
 ```
 
 ## ⚠️ 重要限制
@@ -1423,8 +1423,8 @@ class ReportGenerator:
 ### 7.1 环境变量配置
 
 > **本项目采用项目目录模式**，所有配置文件位于项目目录：
-> - 配置文件：`D:\Download\jiuwenclaw\.env`
-> - 技能目录：`D:\Download\jiuwenclaw\workspace\agent\skills\`
+> - 配置文件：`D:\Download\jiuwenswarm\.env`
+> - 技能目录：`D:\Download\jiuwenswarm\workspace\agent\skills\`
 >
 > 这样可以随项目版本控制，方便提交 PR。
 
@@ -1464,12 +1464,12 @@ FEISHU_REVIEW_CHAT_ID=oc_xxx
 ATOMGIT_TOKEN=xxx
 ```
 
-### 7.2 JiuwenClaw 配置文件
+### 7.2 JiuwenSwarm 配置文件
 
 > **本项目采用项目目录模式**，配置文件位于：
-> `D:\Download\jiuwenclaw\config\config.yaml`
+> `D:\Download\jiuwenswarm\config\config.yaml`
 
-JiuwenClaw 配置文件内容：
+JiuwenSwarm 配置文件内容：
 
 ```yaml
 react:
@@ -1562,14 +1562,14 @@ pip install lark-oapi
 | 测试方式 | 说明 |
 |--------|------|
 | 飞书对话 | 通过飞书私聊机器人发送审查请求 |
-| Web 对话 | 通过 JiuwenClaw Web 界面发送审查请求 |
+| Web 对话 | 通过 JiuwenSwarm Web 界面发送审查请求 |
 
 ### 8.1 飞书对话测试
 
-JiuwenClaw 作为远程智能管家，支持通过飞书与机器人对话进行代码审查。
+JiuwenSwarm 作为远程智能管家，支持通过飞书与机器人对话进行代码审查。
 
 **前提条件：**
-1. 启动 JiuwenClaw 服务
+1. 启动 JiuwenSwarm 服务
 2. 配置飞书机器人并建立 WebSocket 长连接
 3. code-review 技能已部署到项目目录
 
@@ -1601,10 +1601,10 @@ https://atomgit.com/openJiuwen/deepsearch 对这个仓库进行审查
 
 ### 8.2 Web 对话测试
 
-JiuwenClaw 提供 Web 界面，可以直接在浏览器中与 Agent 对话进行代码审查。
+JiuwenSwarm 提供 Web 界面，可以直接在浏览器中与 Agent 对话进行代码审查。
 
 **前提条件：**
-1. 启动 JiuwenClaw Web 服务：`python start_services.py web`
+1. 启动 JiuwenSwarm Web 服务：`python start_services.py web`
 2. 访问 Web 界面（默认 http://localhost:8000）
 3. code-review 技能已部署到项目目录
 
@@ -1639,7 +1639,7 @@ Agent 会按照技能指引执行审查流程，返回包含评分、问题列�
 | 属性 | 值 |
 |------|-----|
 | 审查类型 | local |
-| 目标 | `./jiuwenclaw` |
+| 目标 | `./jiuwenswarm` |
 | 审查时间 | 2026-03-07 21:53 |
 | 扫描文件 | 110 |
 
@@ -1715,7 +1715,7 @@ Agent 会按照技能指引执行审查流程，返回包含评分、问题列�
    解决：改用 git clone 方式获取代码
 
 4. **切换到项目目录模式**
-   背景：JiuwenClaw 默认优先使用用户工作区 `C:\Users\<用户名>\.jiuwenclaw\`，但这不利于项目版本控制
+   背景：JiuwenSwarm 默认优先使用用户工作区 `C:\Users\<用户名>\.jiuwenswarm\`，但这不利于项目版本控制
    解决：删除用户工作区的 config 目录，让系统回退到项目目录模式
 
    ```bash
@@ -1731,14 +1731,14 @@ Agent 会按照技能指引执行审查流程，返回包含评分、问题列�
    **切换后的路径：**
    | 项目 | 路径 |
    |------|------|
-   | 配置文件 | `D:\Download\jiuwenclaw\config\` |
-   | 环境变量 | `D:\Download\jiuwenclaw\.env` |
-   | 技能目录 | `D:\Download\jiuwenclaw\workspace\agent\skills\` |
-   | 报告目录 | `D:\Download\jiuwenclaw\workspace\agent\reports\` |
+   | 配置文件 | `D:\Download\jiuwenswarm\config\` |
+   | 环境变量 | `D:\Download\jiuwenswarm\.env` |
+   | 技能目录 | `D:\Download\jiuwenswarm\workspace\agent\skills\` |
+   | 报告目录 | `D:\Download\jiuwenswarm\workspace\agent\reports\` |
 
 5. **技能文件路径**
    本项目采用项目目录模式，技能直接放在项目目录即可：
-   `D:\Download\jiuwenclaw\workspace\agent\skills\code-review\`
+   `D:\Download\jiuwenswarm\workspace\agent\skills\code-review\`
 
 6. **Agent 迭代次数超限**
    问题：复杂任务达到 max_iterations (100) 后未完成
@@ -1820,7 +1820,7 @@ Agent 会按照技能指引执行审查流程，返回包含评分、问题列�
 
 ---
 
-**项目地址**：`D:\Download\jiuwenclaw\workspace\agent\skills\code-review\`
+**项目地址**：`D:\Download\jiuwenswarm\workspace\agent\skills\code-review\`
 
 **技能文档**：`SKILL.md`
 

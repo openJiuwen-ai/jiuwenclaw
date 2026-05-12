@@ -1,6 +1,6 @@
 # Task Memory (Experience Memory)
 
-Task Memory is JiuwenClaw's built-in experience system that allows the Agent to retrieve, record, and consolidate lessons from past tasks — avoiding repeated mistakes and reusing effective solutions in future tasks.
+Task Memory is JiuwenSwarm's built-in experience system that allows the Agent to retrieve, record, and consolidate lessons from past tasks — avoiding repeated mistakes and reusing effective solutions in future tasks.
 
 ---
 

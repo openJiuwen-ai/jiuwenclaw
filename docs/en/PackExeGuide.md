@@ -109,7 +109,7 @@ chmod +x scripts/build-macos.sh
 ./scripts/build-macos.sh
 ```
 
-Produces `dist/JiuwenClaw.app` and `dist/JiuwenClaw-<version>.dmg`.
+Produces `dist/JiuwenSwarm.app` and `dist/JiuwenSwarm-<version>.dmg`.
 
 - Open the `.app` or mount the `.dmg` and drag to **Applications**.
 - Not codesigned/notarized — fine for local testing; for distribution add `.icns`, signing, and notarization.

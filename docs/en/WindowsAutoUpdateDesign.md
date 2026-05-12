@@ -1,6 +1,6 @@
 # Windows Auto-Update Design
 
-This document describes the minimum viable auto-update solution for JiuwenClaw on Windows desktop. The goal is to prioritize stability over seamless upgrades.
+This document describes the minimum viable auto-update solution for JiuwenSwarm on Windows desktop. The goal is to prioritize stability over seamless upgrades.
 
 ## Scope
 
@@ -53,7 +53,7 @@ Update settings are in the `updater` section of `config.yaml`:
 updater:
   enabled: true
   repo_owner: CharlieZhao95
-  repo_name: jiuwenclaw
+  repo_name: jiuwenswarm
   release_api_url: ""
   asset_name_pattern: "jiuwenclaw-setup-{version}.exe"
   sha256_name_pattern: "jiuwenclaw-setup-{version}.exe.sha256"

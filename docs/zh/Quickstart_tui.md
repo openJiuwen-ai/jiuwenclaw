@@ -2,10 +2,10 @@
 
 > **⚠️ 版本同步**: 本文档应与英文版 [`docs/en/Quickstart_tui.md`](../en/Quickstart_tui.md) 保持同步。更新一版时请同时更新另一版。
 
-JiuwenClaw提供两种安装方式：`pip安装`或`源码安装`。
+JiuwenSwarm提供两种安装方式：`pip安装`或`源码安装`。
 
 安装前准备：
-- JiuwenClaw代码下载
+- JiuwenSwarm代码下载
   ```bash
   git clone https://gitcode.com/openjiuwen/jiuwenclaw.git
   ```
@@ -21,29 +21,29 @@ JiuwenClaw提供两种安装方式：`pip安装`或`源码安装`。
 - 创建虚拟环境 & 安装 jiuwenclaw 项目
 
   ```bash
-  # 创建名为 Jiuwenclaw 的虚拟环境
+  # 创建名为 jiuwenclaw 的虚拟环境
   python -m venv jiuwenclaw
 
-  # Windows 激活 Jiuwenclaw 虚拟环境
+  # Windows 激活 jiuwenclaw 虚拟环境
   jiuwenclaw\Scripts\activate
 
-  # Mac 激活 Jiuwenclaw 虚拟环境
+  # Mac 激活 JiuwenSwarm 虚拟环境
   source .venv/bin/activate
 
-  # 安装 Jiuwenclaw
+  # 安装 JiuwenSwarm
   pip install jiuwenclaw
 
-  # 安装 Jiuwenclaw-tui
+  # 安装 JiuwenSwarm-tui
   pip install jiuwenclaw-tui
   ```
 
 - 初始化 & 启动 jiuwenclaw 项目
 
   ```bash
-  # 初始化 JiuwenClaw (首次启动)
+  # 初始化 JiuwenSwarm (首次启动)
   jiuwenclaw-init
 
-  # 启动 JiuwenClaw
+  # 启动 JiuwenSwarm
   jiuwenclaw-start
   ```
 
@@ -55,7 +55,7 @@ JiuwenClaw提供两种安装方式：`pip安装`或`源码安装`。
 
 ## **方式二：源码运行** 
 
-​适合基于JiuwenClaw进行二次开发适配的用户。
+​适合基于JiuwenSwarm进行二次开发适配的用户。
 
 ### `uv`方式安装
 - 使用`uv`新建虚拟环境
@@ -66,12 +66,12 @@ JiuwenClaw提供两种安装方式：`pip安装`或`源码安装`。
   # 或 uv venv --python=3.13
   ```
 
-- 激活 Jiuwenclaw 虚拟环境
+- 激活 JiuwenSwarm 虚拟环境
   ```bash
-  # Windows 激活 Jiuwenclaw 虚拟环境
+  # Windows 激活 jiuwenclaw 虚拟环境
   jiuwenclaw\Scripts\activate
 
-  # Mac 激活 Jiuwenclaw 虚拟环境
+  # Mac 激活 JiuwenSwarm 虚拟环境
   source .venv/bin/activate
   ```
 
@@ -108,7 +108,7 @@ JiuwenClaw提供两种安装方式：`pip安装`或`源码安装`。
     uv run jiuwenclaw-start dev
     ```
 
-  运行完成后即可在网页前端访问JiuwenClaw服务。
+  运行完成后即可在网页前端访问JiuwenSwarm服务。
 
 - 安装TUI依赖
   另外打开新终端界面，进入TUI目录 jiuwenclaw/cli 安装依赖：
@@ -127,9 +127,9 @@ JiuwenClaw提供两种安装方式：`pip安装`或`源码安装`。
 - 使用`conda`新建虚拟环境
   ```bash
   # 使用Anaconda新建虚拟环境（支持 3.11、3.12、3.13 任一版本）
-  conda create -n JiuwenClaw python=3.11
-  # 或 conda create -n JiuwenClaw python=3.12
-  # 或 conda create -n JiuwenClaw python=3.13
+  conda create -n jiuwenclaw python=3.11
+  # 或 conda create -n jiuwenclaw python=3.12
+  # 或 conda create -n jiuwenclaw python=3.13
   ```
 - 安装python依赖
   
@@ -170,7 +170,7 @@ JiuwenClaw提供两种安装方式：`pip安装`或`源码安装`。
     jiuwenclaw-start dev
     ```
 
-  运行完成后即可在网页前端访问JiuwenClaw服务。
+  运行完成后即可在网页前端访问JiuwenSwarm服务。
 
 - 安装TUI依赖
   另外打开新终端界面，进入TUI目录 jiuwenclaw/cli 安装依赖：

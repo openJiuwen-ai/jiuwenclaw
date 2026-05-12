@@ -1,6 +1,6 @@
 # Windows 自动更新设计
 
-本文档描述 JiuwenClaw 在 Windows 桌面版上的最小可用自动更新方案。目标是优先保证稳定性，而不是追求无感升级。
+本文档描述 JiuwenSwarm 在 Windows 桌面版上的最小可用自动更新方案。目标是优先保证稳定性，而不是追求无感升级。
 
 ## 目标范围
 
@@ -53,7 +53,7 @@ https://api.github.com/repos/{owner}/{repo}/releases/latest
 updater:
   enabled: true
   repo_owner: CharlieZhao95
-  repo_name: jiuwenclaw
+  repo_name: jiuwenswarm
   release_api_url: ""
   asset_name_pattern: "jiuwenclaw-setup-{version}.exe"
   sha256_name_pattern: "jiuwenclaw-setup-{version}.exe.sha256"

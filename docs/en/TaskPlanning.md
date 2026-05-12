@@ -1,6 +1,6 @@
 # Task planning
 
-For long, shifting tasks, users need to **interrupt**, **insert new work**, and **merge outcomes** (e.g. finish December invoices, then add January and email a combined summary) without losing thread. JiuwenClaw’s **task planning** mode uses structured todo tools so the agent can break work down and adapt when requirements change.
+For long, shifting tasks, users need to **interrupt**, **insert new work**, and **merge outcomes** (e.g. finish December invoices, then add January and email a combined summary) without losing thread. JiuwenSwarm’s **task planning** mode uses structured todo tools so the agent can break work down and adapt when requirements change.
 
 [Demo video](../assets/videos/todo.mp4)
 

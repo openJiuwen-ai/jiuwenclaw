@@ -1,6 +1,6 @@
 # Tool Permissions & Security
 
-This document explains how JiuwenClaw **tool call permissions** (`allow` / `ask` / `deny`) take effect, how they relate to **workspace-external paths**, **built-in security rules**, **user approval persistence**, and what the **CLI `/add-dir`** command changes in configuration.
+This document explains how JiuwenSwarm **tool call permissions** (`allow` / `ask` / `deny`) take effect, how they relate to **workspace-external paths**, **built-in security rules**, **user approval persistence**, and what the **CLI `/add-dir`** command changes in configuration.
 
 The main configuration file is typically `~/.jiuwenclaw/config/config.yaml`; you can override this via the `JIUWENCLAW_CONFIG_DIR` environment variable (consistent with [Configuration](Configuration.md)).
 

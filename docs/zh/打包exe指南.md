@@ -1,6 +1,6 @@
-# JiuwenClaw 桌面打包指南
+# JiuwenSwarm 桌面打包指南
 
-本文档说明如何使用 uv + PyInstaller + pywebview 将 JiuwenClaw 打包成桌面应用。当前支持 Windows `onedir` 分发目录和 macOS `.app + .dmg`。
+本文档说明如何使用 uv + PyInstaller + pywebview 将 JiuwenSwarm 打包成桌面应用。当前支持 Windows `onedir` 分发目录和 macOS `.app + .dmg`。
 
 ## 前置要求
 
@@ -120,18 +120,18 @@ chmod +x scripts/build-macos.sh
 ./scripts/build-macos.sh
 ```
 
-脚本会自动完成：安装依赖 → 构建前端 → 使用 PyInstaller 生成 `JiuwenClaw.app` → 生成 `JiuwenClaw-<version>.dmg`。
+脚本会自动完成：安装依赖 → 构建前端 → 使用 PyInstaller 生成 `JiuwenSwarm.app` → 生成 `JiuwenSwarm-<version>.dmg`。
 
 生成后的产物：
 
-- `dist/JiuwenClaw.app`
-- `dist/JiuwenClaw-<version>.dmg`
+- `dist/JiuwenSwarm.app`
+- `dist/JiuwenSwarm-<version>.dmg`
 
 验证方式：
 
-1. 双击 `dist/JiuwenClaw.app`
-2. 或挂载 `dist/JiuwenClaw-<version>.dmg`
-3. 将 `JiuwenClaw.app` 拖到 `Applications`
+1. 双击 `dist/JiuwenSwarm.app`
+2. 或挂载 `dist/JiuwenSwarm-<version>.dmg`
+3. 将 `JiuwenSwarm.app` 拖到 `Applications`
 
 注意事项：
 

@@ -1,6 +1,6 @@
 # Multi-Instance Operation
 
-Run multiple independent JiuwenClaw instances on the same machine, each with isolated workspace, configuration, and ports.
+Run multiple independent JiuwenSwarm instances on the same machine, each with isolated workspace, configuration, and ports.
 
 ## Use Cases
 

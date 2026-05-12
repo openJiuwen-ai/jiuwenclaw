@@ -33,6 +33,6 @@
   - [ACP 插件使用](ACP插件使用.md)
   - [Windows 自动更新设计](windows自动更新设计.md)
 - [开发实践](开发实践/README.md)
-  - [日报生成器开发实践](开发实践/JiuwenClaw日报生成器开发实践.md)
-  - [代码审查助手开发实践](开发实践/JiuwenClaw代码审查助手开发实践.md)
+  - [日报生成器开发实践](开发实践/JiuwenSwarm日报生成器开发实践.md)
+  - [代码审查助手开发实践](开发实践/JiuwenSwarm代码审查助手开发实践.md)
 - [Linux NFS 共享文件系统](../linux-agent-teams-shared-filesystem.md)

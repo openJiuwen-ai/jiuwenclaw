@@ -4,7 +4,7 @@ This guide describes the WhatsApp integration currently implemented in this repo
 
 ## Architecture
 
-JiuwenClaw does not talk to WhatsApp directly from Python.
+JiuwenSwarm does not talk to WhatsApp directly from Python.
 
 `WhatsApp app` <-> `Baileys bridge (Node.js)` <-> `WhatsAppChannel (Python)`
 

@@ -1,6 +1,6 @@
 # Skills
 
-JiuwenClaw’s **Skills** system lets you extend the agent with new capabilities, tool permissions, and extra system prompt content. Use the **Skills** panel in the web UI and the backend `SkillManager` to install, remove, import, and manage skills from multiple sources.
+JiuwenSwarm’s **Skills** system lets you extend the agent with new capabilities, tool permissions, and extra system prompt content. Use the **Skills** panel in the web UI and the backend `SkillManager` to install, remove, import, and manage skills from multiple sources.
 
 ## 1. Skill sources
 

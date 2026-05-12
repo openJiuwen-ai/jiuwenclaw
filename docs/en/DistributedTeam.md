@@ -33,7 +33,7 @@ Typical keys for distributed integration (templates: `config.team.distributed.le
 | `team.runtime.role` | Whether this process is `leader` or `teammate` |
 | `team.runtime.member_name` | Default teammate identity; after bootstrap it adopts the member name dynamically requested by the leader |
 | `team.transport.type` | `pyzmq` |
-| `react.a2x_registry` | Teammates register idle nodes at startup; leaders reserve idle teammates from the registry before teaming. **The registry is not bundled with jiuwenclaw**: clone upstream [agent-protocol (`feature/Agentregistry`)](https://gitcode.com/openJiuwen/agent-protocol/tree/feature/Agentregistry) and deploy it as a separate service per that repo's instructions |
+| `react.a2x_registry` | Teammates register idle nodes at startup; leaders reserve idle teammates from the registry before teaming. **The registry is not bundled with jiuwenswarm**: clone upstream [agent-protocol (`feature/Agentregistry`)](https://gitcode.com/openJiuwen/agent-protocol/tree/feature/Agentregistry) and deploy it as a separate service per that repo's instructions |
 | `team.transport.params` | This process' `direct_addr` / `bootstrap_direct_addr`, `pubsub_*`, etc.; leaders do not need static teammate `known_peers` |
 | `team.predefined_members` | Backward-compatible static member declaration; not required for current blank-teammate integration |
 | `team.storage` | For multi-process setups, `connection_string` must point to a **shared** DB (e.g. the same sqlite path visible to all nodes) |
@@ -203,7 +203,7 @@ Replace `<REPO_ROOT>`, `<LEADER_HOME>`, `<TEAMMATE_HOME>` with paths on your mac
 
 Run the registry **as its own process**, separate from leader/teammate:
 
-Follow the [agent-protocol Agent Team quick start](https://gitcode.com/openJiuwen/agent-protocol/blob/feature/Agentregistry/README_forAgentTeam.md). Since `0.1.6`, the default install is the lightweight Agent Team build: SDK, FastAPI, uvicorn, and a few small runtime dependencies only. The registry backend starts empty; it does not need preloaded data or LLM config. Teammate registration, leader lookup/reservation, and reservation leases are handled by the `jiuwenclaw` client-side integration.
+Follow the [agent-protocol Agent Team quick start](https://gitcode.com/openJiuwen/agent-protocol/blob/feature/Agentregistry/README_forAgentTeam.md). Since `0.1.6`, the default install is the lightweight Agent Team build: SDK, FastAPI, uvicorn, and a few small runtime dependencies only. The registry backend starts empty; it does not need preloaded data or LLM config. Teammate registration, leader lookup/reservation, and reservation leases are handled by the `jiuwenswarm` client-side integration.
 
 Install (Python >= 3.10):
 

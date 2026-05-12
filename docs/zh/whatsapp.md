@@ -4,7 +4,7 @@
 
 ## 架构
 
-JiuwenClaw 的 Python 代码不会直接连接 WhatsApp。
+JiuwenSwarm 的 Python 代码不会直接连接 WhatsApp。
 
 `WhatsApp 客户端` <-> `Baileys bridge（Node.js）` <-> `WhatsAppChannel（Python）`
 

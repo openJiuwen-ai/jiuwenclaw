@@ -1,4 +1,4 @@
-# 从基础配置到架构设计：JiuwenClaw 进阶版日报生成器开发实践
+# 从基础配置到架构设计：JiuwenSwarm 进阶版日报生成器开发实践
 ## 引言｜当"日报自动化"真正走进日常工作场景
 过去一年，AI Agent 的能力被讨论得很多。从简单的问答到复杂的工作流编排，看起来 AI 已经无所不能。但当我们真正把 Agent 带到日常办公场景时，会发现一个很现实的问题：
 
@@ -36,7 +36,7 @@
 ### 实际运行环境
 | 项目 | 配置值 |
 | --- | --- |
-| **项目路径** | `D:\Download\jiuwenclaw` |
+| **项目路径** | `D:\Download\jiuwenswarm` |
 | **操作系统** | Windows 10 |
 | **Python** | 3.10+ |
 | **模型服务** | ModelScope (Qwen/Qwen3-235B-A22B-Instruct-2507) |
@@ -45,7 +45,7 @@
 ### 实际数据源配置
 | 数据源 | 配置值 |
 | --- | --- |
-| **Git 仓库** | `D:\Download\jiuwenclaw` (当前项目) |
+| **Git 仓库** | `D:\Download\jiuwenswarm` (当前项目) |
 | **邮箱** | `zxworkem@163.com` (网易163邮箱) |
 | **推送渠道** | 飞书 (`cli_a92035b1823a9cd2`) |
 | **心跳时间** | 每天 18:00-18:30 |
@@ -53,7 +53,7 @@
 
 ### 核心文件位置
 ```plain
-D:\Download\jiuwenclaw\
+D:\Download\jiuwenswarm\
 ├── .env                              # 环境变量配置
 ├── config/config.yaml                # 应用配置（心跳、飞书频道）
 ├── workspace/
@@ -107,8 +107,8 @@ D:\Download\jiuwenclaw\
 
 用了进阶版日报生成器之后，这些问题确实解决了很多。系统会自动采集 Git 提交、邮件统计、记忆记录、待办事项，然后通过工作分析引擎计算效率指标，生成趋势对比，给出工作建议。
 
-### 1.3 JiuwenClaw 的技能系统特性
-JiuwenClaw 是一个开源的 Agent 开发框架，其技能系统支持：
+### 1.3 JiuwenSwarm 的技能系统特性
+JiuwenSwarm 是一个开源的 Agent 开发框架，其技能系统支持：
 
 | 能力 | 说明 |
 | --- | --- |
@@ -121,8 +121,8 @@ JiuwenClaw 是一个开源的 Agent 开发框架，其技能系统支持：
 这个框架的价值在哪？简单说就是**能力可扩展**。通过模块化设计，我们可以把数据采集、工作分析、报告生成分别封装，形成清晰的责任边界。
 
 ## 二、技术方案
-### 2.1 JiuwenClaw 的分层设计
-JiuwenClaw 是分层架构的，我们的进阶版日报生成器在 Application Layer（应用层）：
+### 2.1 JiuwenSwarm 的分层设计
+JiuwenSwarm 是分层架构的，我们的进阶版日报生成器在 Application Layer（应用层）：
 
 <!-- 这是一张图片，ocr 内容为：APPLICATION LAYER 应用层 V2.0 L1 ADVANCED-DAILY-REPORT SKILL REACTAGENT 高级版 ORCHESTRATION LAYER 编排层 L2 CHANNELMANAGER MESSAGEHANDLER HEARTBEAT EXECUTION LAYER 执行层 FILETOOLS MEMORYTOOLS TODOTOOLKIT FOUNDATIONLAYER 基础层 L4 目 PROMPTS MEMORY RETRIEVAL TOOLS LLM INFRASTRUCTURE LAYER 基础设施层 L5 新增 新增 IMAP FILESTORAGE WEBCHANNEL FEISHCHANNEL GIT ADVANCED DAILYREPORT ARCHITECTURE -->
 ![](https://cdn.nlark.com/yuque/0/2026/png/27326384/1772822901009-32c4955a-17b4-47f8-81f3-22283748f998.png)
@@ -269,7 +269,7 @@ daily-report/
 **必须使用 `bash` 工具执行脚本**，而不是直接回复用户。
 
 **脚本会自动采集以下数据**：
-- **Git 提交记录**：通过 `git log` 命令读取 `D:/Download/jiuwenclaw` 仓库的提交历史
+- **Git 提交记录**：通过 `git log` 命令读取 `D:/Download/jiuwenswarm` 仓库的提交历史
 - **邮箱邮件统计**：通过 IMAP 协议连接 `zxworkem@163.com` 读取邮件统计（需要邮箱授权码）
 - **记忆系统**：读取 `workspace/agent/memory/` 目录下的每日记忆文件
 - **待办事项**：读取 `workspace/session/` 目录下的 todo.md 文件
@@ -280,19 +280,19 @@ daily-report/
 
 ```bash
 # 生成今日日报（包含Git提交、待办任务、记忆数据）
-cd D:/Download/jiuwenclaw && python workspace/agent/skills/daily-report/run_report.py daily --save
+cd D:/Download/jiuwenswarm && python workspace/agent/skills/daily-report/run_report.py daily --save
 
 # 生成指定日期日报
-cd D:/Download/jiuwenclaw && python workspace/agent/skills/daily-report/run_report.py daily --date 2026-03-06 --save
+cd D:/Download/jiuwenswarm && python workspace/agent/skills/daily-report/run_report.py daily --date 2026-03-06 --save
 
 # 生成周报（聚合一周数据）
-cd D:/Download/jiuwenclaw && python workspace/agent/skills/daily-report/run_report.py weekly --save
+cd D:/Download/jiuwenswarm && python workspace/agent/skills/daily-report/run_report.py weekly --save
 
 # 生成月报（聚合一月数据，包含每日Git提交统计）
-cd D:/Download/jiuwenclaw && python workspace/agent/skills/daily-report/run_report.py monthly --save
+cd D:/Download/jiuwenswarm && python workspace/agent/skills/daily-report/run_report.py monthly --save
 
 # 生成月报（指定月份）
-cd D:/Download/jiuwenclaw && python workspace/agent/skills/daily-report/run_report.py monthly --year 2026 --month 3 --save
+cd D:/Download/jiuwenswarm && python workspace/agent/skills/daily-report/run_report.py monthly --year 2026 --month 3 --save
 ```
 
 ### 执行步骤
@@ -317,7 +317,7 @@ cd D:/Download/jiuwenclaw && python workspace/agent/skills/daily-report/run_repo
 
 | 数据源 | 采集方式 | 配置位置 |
 |--------|----------|----------|
-| **Git 仓库** | `git log` 命令 | 仓库路径: `D:/Download/jiuwenclaw` |
+| **Git 仓库** | `git log` 命令 | 仓库路径: `D:/Download/jiuwenswarm` |
 | **网易邮箱** | IMAP 协议 | `.env`: `EMAIL_ADDRESS`, `EMAIL_TOKEN` |
 | **记忆系统** | 读取 MD 文件 | `workspace/agent/memory/YYYY-MM-DD.md` |
 | **待办事项** | 解析 todo.md | `workspace/session/*/todo.md` |
@@ -389,7 +389,7 @@ cd D:/Download/jiuwenclaw && python workspace/agent/skills/daily-report/run_repo
 本项目监控的 Git 仓库（脚本会自动读取）：
 
 ```
-仓库路径: D:/Download/jiuwenclaw
+仓库路径: D:/Download/jiuwenswarm
 ```
 
 脚本通过 `git log` 命令采集以下数据：
@@ -1608,7 +1608,7 @@ class DataAggregator:
 
 | 数据源 | 采集方式 | 配置位置 |
 | --- | --- | --- |
-| **Git 仓库** | `git log` 命令 | 仓库路径: `D:/Download/jiuwenclaw` |
+| **Git 仓库** | `git log` 命令 | 仓库路径: `D:/Download/jiuwenswarm` |
 | **网易邮箱** | IMAP 协议 | `.env`: `EMAIL_ADDRESS`, `EMAIL_TOKEN` |
 | **记忆系统** | 读取 MD 文件 | `workspace/agent/memory/YYYY-MM-DD.md` |
 | **待办事项** | 解析 todo.md | `workspace/session/*/todo.md` |
@@ -1619,13 +1619,13 @@ class DataAggregator:
 
 ```bash
 # 生成日报
-cd D:/Download/jiuwenclaw && python workspace/agent/skills/daily-report/run_report.py daily --save
+cd D:/Download/jiuwenswarm && python workspace/agent/skills/daily-report/run_report.py daily --save
 
 # 生成周报
-cd D:/Download/jiuwenclaw && python workspace/agent/skills/daily-report/run_report.py weekly --save
+cd D:/Download/jiuwenswarm && python workspace/agent/skills/daily-report/run_report.py weekly --save
 
 # 生成月报
-cd D:/Download/jiuwenclaw && python workspace/agent/skills/daily-report/run_report.py monthly --save
+cd D:/Download/jiuwenswarm && python workspace/agent/skills/daily-report/run_report.py monthly --save
 ```
 
 ### 5.3 效率指标数据结构
@@ -2311,7 +2311,7 @@ PERPLEXITY_API_KEY=
 ```markdown
 # 心跳任务
 
-在此文件中配置需要 JiuwenClaw 周期性执行的任务。
+在此文件中配置需要 JiuwenSwarm 周期性执行的任务。
 
 ---
 
@@ -2375,7 +2375,7 @@ heartbeat:
 本项目监控的 Git 仓库（脚本会自动读取）：
 
 ```plain
-仓库路径: D:/Download/jiuwenclaw
+仓库路径: D:/Download/jiuwenswarm
 ```
 
 **采集方式**：脚本通过 `git log` 命令采集数据，无需额外配置。
@@ -2391,7 +2391,7 @@ heartbeat:
 
 ```bash
 # 脚本内部执行的 git 命令
-git -C D:/Download/jiuwenclaw log --since="2026-03-07 00:00:00" --until="2026-03-07 23:59:59" --format="%H|%s|%an|%ai" --numstat
+git -C D:/Download/jiuwenswarm log --since="2026-03-07 00:00:00" --until="2026-03-07 23:59:59" --format="%H|%s|%an|%ai" --numstat
 ```
 
 **多仓库支持**：如需监控多个仓库，可扩展 `DataAggregator`：
@@ -2399,8 +2399,8 @@ git -C D:/Download/jiuwenclaw log --since="2026-03-07 00:00:00" --until="2026-03
 ```python
 # 扩展配置示例（需自行实现）
 git_repos:
-  - path: "D:/Download/jiuwenclaw"
-    name: "jiuwenclaw"
+  - path: "D:/Download/jiuwenswarm"
+    name: "jiuwenswarm"
   - path: "D:/Projects/another-repo"
     name: "another-project"
 ```
@@ -2446,7 +2446,7 @@ channels:
 ### 7.1 测试数据采集器
 ```bash
 # 测试 Git 采集（采集指定日期的提交记录）
-cd D:\Download\jiuwenclaw
+cd D:\Download\jiuwenswarm
 python workspace/agent/skills/daily-report/run_report.py daily --date 2026-03-07
 
 # 测试月报生成（采集整月数据）
@@ -2571,7 +2571,7 @@ git commit -m "feat: 添加日报生成器完整功能
 
 > **让 AI Agent 真正成为智能工作助手，从进阶版日报生成器开始。**
 >
-> — JiuwenClaw 进阶版日报生成器开发实践
+> — JiuwenSwarm 进阶版日报生成器开发实践
 
 ---
 

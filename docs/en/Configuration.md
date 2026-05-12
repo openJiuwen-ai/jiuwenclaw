@@ -1,6 +1,6 @@
 # Configuration
 
-JiuwenClaw reads settings from `config/config.yaml`, `.env`, and the web UI. This document explains **what you can change in the UI**, **what must be edited in files**, and what each option does.
+JiuwenSwarm reads settings from `config/config.yaml`, `.env`, and the web UI. This document explains **what you can change in the UI**, **what must be edited in files**, and what each option does.
 
 ---
 

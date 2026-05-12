@@ -49,8 +49,8 @@ Set these in `~/.jiuwenclaw/config/.env` or process environment (read by `app_ga
 | `A2A_SERVER_PROTOCOL_VERSION` | `1.0.0` | written into `AgentCard.AgentInterface.protocol_version` |
 | `A2A_SERVER_CARD_PATH` | `/.well-known/agent-card.json` | Agent Card path |
 | `A2A_SERVER_EXTENDED_CARD_PATH` | `/agent/authenticatedExtendedCard` | Extended Card path |
-| `A2A_SERVER_APP_NAME` | `JiuwenClaw Gateway A2A Server` | Agent Card `name` |
-| `A2A_SERVER_APP_DESCRIPTION` | `A2A ingress for JiuwenClaw Gateway` | Agent Card `description` |
+| `A2A_SERVER_APP_NAME` | `JiuwenSwarm Gateway A2A Server` | Agent Card `name` |
+| `A2A_SERVER_APP_DESCRIPTION` | `A2A ingress for JiuwenSwarm Gateway` | Agent Card `description` |
 | `A2A_SERVER_APP_VERSION` | `0.1.0` | Agent Card `version` |
 
 AgentServer connectivity still follows existing gateway config (for example `AGENT_SERVER_URL`) and is independent from the A2A listening endpoint.

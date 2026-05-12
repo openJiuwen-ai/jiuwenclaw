@@ -1,6 +1,6 @@
 ## Scheduled tasks (Cron)
 
-How to create and manage a simple scheduled job in JiuwenClaw and push results to a channel (e.g. web, Feishu).
+How to create and manage a simple scheduled job in JiuwenSwarm and push results to a channel (e.g. web, Feishu).
 
 ---
 

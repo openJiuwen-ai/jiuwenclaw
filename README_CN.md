@@ -1,6 +1,6 @@
 <div align="center">
 
-# JiuwenClaw
+# JiuwenSwarm
 
 > 随叫随到的智能管家，让AI触手可及
 
@@ -12,7 +12,7 @@
 
 ## 🌟 项目简介
 
-**JiuwenClaw** 是一款基于Python开发的智能AI Agent，正如其名——"Claw"象征着精准的抓取与连接。它能够将大语言模型的强大能力，通过你日常使用的各类通讯应用，直接延伸至你的指尖。
+**JiuwenSwarm** 是一款基于Python开发的多智能体协作系统，正如其名——"Swarm"象征着群体智能与协作涌现。它通过编排多个专业智能体协同工作，将大语言模型的强大能力以协调一致的方式，通过你日常使用的各类通讯应用，直接延伸至你的指尖。
 
 ### ✨ 核心特色
 
@@ -26,7 +26,7 @@
 > **懂你所想，自主演进**
 
 ### 🤝 贴身任务管家
-面对复杂的输入场景——任务追加、指令打断、需求修改，JiuwenClaw都能精准理解，为你智能排期，有条不紊地完成任务。
+面对复杂的输入场景——任务追加、指令打断、需求修改，JiuwenSwarm都能精准理解，为你智能排期，有条不紊地完成任务。
 
 ### 🔄 自主演进
 当你表达不满或运行出错时，它会根据你的反馈自动调整相应技能，持续演进，全心全意为你服务。
@@ -37,9 +37,9 @@
 
 ## ⚠️ 版本升级提醒
 
-如果您从旧版本升级，请查看更新日志确认是否有重大变更。如有重大变更，升级后**必须**重新初始化 JiuwenClaw，否则服务将无法启动。
+如果您从旧版本升级，请查看更新日志确认是否有重大变更。如有重大变更，升级后**必须**重新初始化 JiuwenSwarm，否则服务将无法启动。
 
-### 升级前备份数据
+### 升级前备份数据（可选）
 
 | 数据类型 | 原路径 | 说明 |
 |---------|--------|------|
@@ -49,11 +49,17 @@
 
 ### 数据迁移步骤
 
-升级并运行 `jiuwenclaw-init` 后，请手动迁移数据：
+升级后，只需运行 `jiuwenclaw-init` 即可。该命令现已支持**自动合并**历史记忆和技能，不再需要手动迁移：
 
-1. **迁移记忆数据**：将原目录下的 `.jiuwenclaw/workspace/agent/memory` 复制到 `.jiuwenclaw/agent/memory`
+```bash
+# 升级后运行初始化命令
+jiuwenclaw-init
+```
 
-2. **迁移技能数据**：将原目录下的 `.jiuwenclaw/workspace/agent/skills` 复制到 `.jiuwenclaw/agent/skills`
+初始化过程会自动完成：
+- 合并旧位置的历史记忆
+- 将自定义技能转移到新结构
+- 保留现有的配置设置
 
 ## 🚀 快速上手
 
@@ -83,42 +89,42 @@ jiuwenclaw-tui
 | 方式 | 说明                                        |
 |------|-------------------------------------------|
 | **Web前端** | 启动服务后访问 `http://localhost:5173`，通过浏览器直接对话 |
-| **小艺频道** | 华为手机用户可直接唤醒小艺，与JiuwenClaw对话               |
-| **飞书频道** | 完成渠道配置后，在飞书中与JiuwenClaw畅聊                 |
+| **小艺频道** | 华为手机用户可直接唤醒小艺，与JiuwenSwarm对话               |
+| **飞书频道** | 完成渠道配置后，在飞书中与JiuwenSwarm畅聊                 |
 
 #### 2️⃣ 配置模型
 
 在 Web 页面左侧找到「配置信息」，进入配置页面：
 
-![](docs/assets/images/jiuwenclaw_configuration_Info.png)
+![](docs/assets/images/jiuwenswarm_configuration_Info.png)
 
 完善以下四项基本配置，完成后点击右上角「保存」：
 
-![](docs/assets/images/jiuwenclaw_config_api.png)
+![](docs/assets/images/jiuwenswarm_config_api.png)
 
 #### 3️⃣ 开始对话
 
 在 Web 页面左侧找到「对话」，输入问题即可开始：
 
-![](docs/assets/images/jiuwenclaw_example.png)
+![](docs/assets/images/jiuwenswarm_example.png)
 
 #### 4️⃣ 会话管理
 
 点击下方的「+」号，可清空当前会话并开启新会话：
 
-![](docs/assets/images/jiuwenclaw_new_session.png)
+![](docs/assets/images/jiuwenswarm_new_session.png)
 
 清理后页面显示：
 
-![](docs/assets/images/jiuwenclaw_clear_session.png)
+![](docs/assets/images/jiuwenswarm_clear_session.png)
 
 #### 5️⃣ 定时任务
 
-设置心跳任务，填写待办事项，JiuwenClaw即可定时被唤醒，自动执行预设任务。让你的日程管理更加智能高效！
+设置心跳任务，填写待办事项，JiuwenSwarm即可定时被唤醒，自动执行预设任务。让你的日程管理更加智能高效！
 
 #### 6️⃣ 清空记忆
 
-当你需要让 JiuwenClaw 忘记之前的所有对话历史和用户信息时，可以清空记忆文件。
+当你需要让 JiuwenSwarm 忘记之前的所有对话历史和用户信息时，可以清空记忆文件。
 
 **适用场景：**
 - **隐私保护**：清除包含敏感信息的历史记录
@@ -131,12 +137,12 @@ jiuwenclaw-tui
 记忆文件存储在 `{workspace_dir}/memory/` 目录下：
 
 **方式一：通过 Agent 删除**
-直接告诉 JiuwenClaw："请删除所有记忆文件" 或 "清空我的记忆"，Agent 会调用文件工具删除 memory 目录下的文件。
-![](docs/assets/images/jiuwenclaw_delete_memory.png)
+直接告诉 JiuwenSwarm："请删除所有记忆文件" 或 "清空我的记忆"，Agent 会调用文件工具删除 memory 目录下的文件。
+![](docs/assets/images/jiuwenswarm_delete_memory.png)
 
 **方式二：手动删除**
-停止 JiuwenClaw 服务后，直接删除 `memory/` 目录下的所有 Markdown 文件即可。
-![](docs/assets/images/jiuwenclaw_memory.png)
+停止 JiuwenSwarm 服务后，直接删除 `memory/` 目录下的所有 Markdown 文件即可。
+![](docs/assets/images/jiuwenswarm_memory.png)
 
 > ⚠️ **注意**：清空记忆后无法恢复，请谨慎操作。建议定期备份重要的记忆文件。
 
@@ -144,8 +150,8 @@ jiuwenclaw-tui
 
 | 文档 | 核心内容 |
 |:-----|:---------|
-| [📖 快速开始](docs/zh/Quickstart.md) | 5分钟上手JiuwenClaw |
-| [📖 快速开始(TUI)](docs/zh/Quickstart_tui.md) | 5分钟上手JiuwenClaw-tui |
+| [📖 快速开始](docs/zh/Quickstart.md) | 5分钟上手JiuwenSwarm |
+| [📖 快速开始(TUI)](docs/zh/Quickstart_tui.md) | 5分钟上手JiuwenSwarm-tui |
 | [⚙️ 配置与工作空间](docs/zh/配置信息.md) | 环境配置与工作区管理 |
 | [📁 工作区结构](docs/zh/智能体.md) | workspace 目录说明，预置与动态生成内容 |
 | [🔄 模式系统](docs/zh/模式系统.md) | PLAN / AGENT / CODE / TEAM 模式切换与配置 |
@@ -193,5 +199,5 @@ jiuwenclaw-tui
 
 <p align="center">
   <strong>让智能触手可及，让生活更加简单</strong><br>
-  <sub>✨ JiuwenClaw —— 您的专属AI助理 ✨</sub>
+  <sub>✨ JiuwenSwarm —— 您的专属AI助理 ✨</sub>
 </p>
