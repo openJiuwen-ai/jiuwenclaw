@@ -55,6 +55,35 @@ logger = logging.getLogger(__name__)
 # 流式处理心跳间隔：当 Agent 处理时间超过此阈值时，发送心跳 chunk 保持 WebSocket 连接活跃
 # 避免 ping_timeout 导致连接关闭。默认 10 秒，小于服务端 ping_timeout=20s。
 _STREAM_HEARTBEAT_INTERVAL_SECONDS = 10.0
+_HISTORY_PAGE_SIZE = 20
+
+_HISTORY_RESTORABLE_ASSISTANT_EVENT_TYPES = frozenset(
+    {
+        "chat.final",
+        "chat.tool_call",
+        "chat.tool_result",
+        "chat.usage_summary",
+        "team.message",
+    }
+)
+
+
+def _is_restorable_history_record(record: Any) -> bool:
+    """Coarsely filter records that the web history UI cannot use for pagination."""
+    if not isinstance(record, dict):
+        return False
+
+    role = record.get("role")
+    content = record.get("content")
+    has_content = isinstance(content, str) and bool(content.strip())
+
+    if role == "user":
+        return has_content
+
+    event_type = record.get("event_type")
+    if not event_type:
+        return has_content
+    return event_type in _HISTORY_RESTORABLE_ASSISTANT_EVENT_TYPES
 
 
 def resolve_agent_request_mode(raw_mode: Any) -> tuple[str, str | None, str]:
@@ -1631,17 +1660,31 @@ class AgentWebSocketServer:
         if not isinstance(raw, list):
             return None
 
-        page_size = 50
-        total = len(raw)
+        page_size = _HISTORY_PAGE_SIZE
+        restorable = [
+            item for item in raw
+            if _is_restorable_history_record(item)
+        ]
+        total = len(restorable)
         total_pages = max(1, math.ceil(total / page_size))
         if page_idx > total_pages:
             return None
 
-        ordered = list(reversed(raw))
+        ordered = list(reversed(restorable))
         start = (page_idx - 1) * page_size
         end = start + page_size
+        page_messages = ordered[start:end]
+        logger.debug(
+            "[history.get] session_id=%s page_idx=%s raw_total=%s restorable_total=%s total_pages=%s returned=%s",
+            session_id.strip(),
+            page_idx,
+            len(raw),
+            total,
+            total_pages,
+            len(page_messages),
+        )
         return {
-            "messages": ordered[start:end],
+            "messages": page_messages,
             "total_pages": total_pages,
             "page_idx": page_idx,
         }

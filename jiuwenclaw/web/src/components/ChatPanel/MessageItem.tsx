@@ -136,6 +136,19 @@ export function MessageItem({ message, autoSpeak = false }: MessageItemProps) {
     }
   }, [autoSpeak, role, isStreaming, hasAutoSpoken, content, handleSpeak]);
 
+  useEffect(() => {
+    return () => {
+      stopGeneratedAudio();
+    };
+  }, [stopGeneratedAudio]);
+
+  useEffect(() => {
+    return onTtsStop(() => {
+      stopGeneratedAudio();
+      stop();
+    });
+  }, [stopGeneratedAudio, stop]);
+
   // 工具调用/结果消息
   if (role === 'tool') {
     return (
@@ -354,19 +367,6 @@ export function MessageItem({ message, autoSpeak = false }: MessageItemProps) {
   );
   const showCopy = Boolean(content) && !isStreaming;
   const isPlaying = audioBase64 ? isAudioPlaying : isSpeaking;
-
-  useEffect(() => {
-    return () => {
-      stopGeneratedAudio();
-    };
-  }, [stopGeneratedAudio]);
-
-  useEffect(() => {
-    return onTtsStop(() => {
-      stopGeneratedAudio();
-      stop();
-    });
-  }, [stopGeneratedAudio, stop]);
 
   return (
     <div className={clsx(

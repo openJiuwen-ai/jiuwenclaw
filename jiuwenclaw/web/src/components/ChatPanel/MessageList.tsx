@@ -73,7 +73,7 @@ function buildTimelineItems(
     .filter((msg) => msg.role !== 'tool')
     .map((message, index) => ({
       type: 'message',
-      key: `message-${message.id}`,
+      key: `message-${message.id}-${index}`,
       timestampMs: toTimestampMs(message.timestamp),
       sourceIndex: index,
       message,

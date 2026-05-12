@@ -11,6 +11,7 @@ const ALLOWED_ASSISTANT_EVENT_TYPES = new Set([
   'chat.tool_call',
   'chat.tool_result',
   'chat.usage_summary',
+  'team.message',
 ]);
 
 /** 后端约定：最后一帧 `history.message` 使用 `payload.status: done`（兼容旧版 `payload.content: done`） */
@@ -149,8 +150,12 @@ function recordTimestampIso(record: Record<string, unknown>): string {
   return new Date().toISOString();
 }
 
+function isTeamModeRecord(record: Record<string, unknown>): boolean {
+  return typeof record.mode === 'string' && record.mode.trim().toLowerCase() === 'team';
+}
+
 const _HISTORY_RECORD_META_KEYS = new Set([
-  'id', 'role', 'request_id', 'channel_id', 'timestamp', 'event_type', 'event_payload',
+  'id', 'role', 'request_id', 'channel_id', 'timestamp', 'event_type', 'event_payload', 'mode',
 ]);
 
 /** 合并 event_payload 与顶层 content，供 final / tool 解析 */
@@ -211,6 +216,23 @@ function parseHistoryTimelineEntry(
     return null;
   }
 
+  if (eventType === 'team.message') {
+    if (!isRecord(record.event)) {
+      return null;
+    }
+    const teamPayload = { event: record.event };
+    const id = pickFirstString(record.event, ['message_id'])!;
+    return {
+      kind: 'message',
+      message: {
+        id,
+        role: 'system',
+        content: `team.event:${JSON.stringify(teamPayload)}`,
+        timestamp: at,
+      },
+    };
+  }
+
   const payload = buildEventPayloadForRecord(record);
 
   if (eventType === 'chat.final') {
@@ -220,6 +242,20 @@ function parseHistoryTimelineEntry(
     }
     const id =
       pickFirstString(record, ['id', 'message_id', 'msg_id']) ?? `hist-final-${sessionId}-${at}`;
+    if (isTeamModeRecord(record)) {
+      return {
+        kind: 'message',
+        message: {
+          id: `team-leader-${id}`,
+          role: 'system',
+          content: `team.leader:${JSON.stringify({
+            content,
+            timestamp: Date.parse(at),
+          })}`,
+          timestamp: at,
+        },
+      };
+    }
     return {
       kind: 'message',
       message: { id, role: 'assistant', content, timestamp: at },

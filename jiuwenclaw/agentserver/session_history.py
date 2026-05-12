@@ -118,6 +118,8 @@ def append_history_record(
         serialized_extra = _serialize_value(extra)
         if isinstance(serialized_extra, dict):
             item.update(serialized_extra)
+    if mode:
+        item["mode"] = str(mode)
 
     _ensure_worker_started()
     try:

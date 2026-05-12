@@ -98,7 +98,7 @@ export function ChatPanel({
     userScrolledUpRef.current = !atBottom;
     
     // 当滚动到顶部且有更多历史消息时，加载更多
-    if (el.scrollTop === 0 && historyPager && historyPager.loadedPages < historyPager.totalPages && !historyPager.loadingMore) {
+    if (el.scrollTop <= 8 && historyPager && historyPager.loadedPages < historyPager.totalPages && !historyPager.loadingMore) {
       void historyPager.onLoadMore();
     }
   }, [historyPager]);
@@ -109,7 +109,7 @@ export function ChatPanel({
     if (e.deltaY < 0 && historyPager && historyPager.loadedPages < historyPager.totalPages && !historyPager.loadingMore) {
       // 检查是否已经在顶部（没有滚动条时 scrollTop 始终为 0）
       const el = scrollContainerRef.current;
-      if (el && el.scrollTop === 0) {
+      if (el && el.scrollTop <= 8) {
         void historyPager.onLoadMore();
       }
     }
@@ -123,9 +123,11 @@ export function ChatPanel({
     
     // 只有当用户在底部时才自动滚动
     if (!userScrolledUpRef.current) {
-      messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+      messagesEndRef.current?.scrollIntoView({
+        behavior: historyPager?.loadedPages === 1 ? 'auto' : 'smooth',
+      });
     }
-  }, [messages, isThinking]);
+  }, [messages, isThinking, historyPager]);
 
   useLayoutEffect(() => {
     if (!historyPager) {
