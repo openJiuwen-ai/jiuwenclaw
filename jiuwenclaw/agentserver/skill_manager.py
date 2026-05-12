@@ -716,8 +716,13 @@ class SkillManager:
 
         # 尽量与 SkillNet API 对齐，便于前端透传。
         search_kwargs: dict[str, Any] = {"q": query}
-        if params.get("mode"):
-            search_kwargs["mode"] = params.get("mode")
+
+        mode = params.get("mode")
+        if mode in ("keyword", "vector"):
+            search_kwargs["mode"] = mode
+        else:
+            search_kwargs["mode"] = "keyword"
+
         if params.get("category"):
             search_kwargs["category"] = params.get("category")
         if params.get("limit") is not None:
