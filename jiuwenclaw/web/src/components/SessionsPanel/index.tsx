@@ -8,7 +8,7 @@ interface SessionsPanelProps {
   currentSessionId: string;
   isConnected: boolean;
   isProcessing: boolean;
-  onRestoreSession: (sessionId: string) => void | Promise<void>;
+  onRestoreSession: (sessionId: string, mode?: string) => void | Promise<void>;
 }
 
 interface SessionListResponse {
@@ -163,6 +163,7 @@ interface SessionItem {
   last_message_at?: number;
   created_at?: number;
   message_count?: number;
+  mode?: string;
 }
 
 function toSessionItems(raw: unknown[]): SessionItem[] {
@@ -186,6 +187,7 @@ function toSessionItems(raw: unknown[]): SessionItem[] {
           last_message_at: typeof rec.last_message_at === 'number' ? rec.last_message_at : undefined,
           created_at: typeof rec.created_at === 'number' ? rec.created_at : undefined,
           message_count: typeof rec.message_count === 'number' ? rec.message_count : undefined,
+          mode: typeof rec.mode === 'string' ? rec.mode : undefined,
         } as SessionItem;
       }
       return null;
@@ -471,7 +473,8 @@ export function SessionsPanel({
                   disabled={!canRestoreSelectedSession}
                   onClick={() => {
                     if (!selectedSessionId || !canRestoreSelectedSession) return;
-                    void onRestoreSession(selectedSessionId);
+                    const selectedSession = sessions.find(s => s.session_id === selectedSessionId);
+                    void onRestoreSession(selectedSessionId, selectedSession?.mode);
                   }}
                   className="btn !px-3 !py-1.5 shrink-0 disabled:opacity-50 disabled:cursor-not-allowed"
                 >

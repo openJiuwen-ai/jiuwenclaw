@@ -32,62 +32,67 @@
    =========================================== */
 
 :root {
-  /* Background - Warmer dark with depth */
-  --bg: #0f1320;
-  --bg-accent: #131a2a;
-  --bg-elevated: #1a2234;
-  --bg-hover: #232f46;
-  --bg-muted: #202b42;
-  --bg-content: #f5f5f5;
+  /* Background */
+  --bg: #2a2b30;
+  --bg-accent: #2d2e34;
+  --bg-elevated: #393a42;
+  --bg-hover: #41434c;
+  --bg-muted: #34353c;
+  --bg-content: #2d2e34;
+  --menu-bg: #303138;
+  --menu-active: rgba(221, 129, 59, 0.2);
+  --control-bg: #34353c;
+  --placeholder: #a0a4ac;
 
-  /* Card / Surface - More contrast between levels */
-  --card: #171f30;
-  --card-foreground: #f4f4f5;
-  --card-highlight: rgba(255, 255, 255, 0.05);
-  --popover: #171f30;
-  --popover-foreground: #f4f4f5;
+  /* Card / Surface */
+  --card: #363740;
+  --card-foreground: #f4f1ec;
+  --card-highlight: rgba(255, 255, 255, 0.1);
+  --popover: #3a3c44;
+  --popover-foreground: #f4f1ec;
 
   /* Panel */
-  --panel: #101728;
-  --panel-strong: #182134;
-  --panel-hover: #25334d;
-  --chrome: rgba(15, 19, 32, 0.92);
-  --chrome-strong: rgba(15, 19, 32, 0.97);
+  --panel: #303138;
+  --panel-strong: #3d3f48;
+  --panel-hover: rgba(221, 129, 59, 0.18);
+  --chrome: rgba(45, 46, 52, 0.94);
+  --chrome-strong: rgba(48, 49, 56, 0.98);
 
-  /* Text - Slightly warmer */
-  --text: #e4e4e7;
-  --text-strong: #fafafa;
-  --chat-text: #e4e4e7;
-  --muted: #71717a;
-  --muted-strong: #52525b;
-  --muted-foreground: #71717a;
+  /* Text */
+  --text: #ede9e2;
+  --text-strong: #fffaf2;
+  --chat-text: #ede9e2;
+  --muted: #c2c5cc;
+  --muted-strong: #d8dbe0;
+  --muted-foreground: #c2c5cc;
 
-  /* Border - Subtle but defined */
-  --border: #243049;
-  --border-strong: #33456b;
-  --border-hover: #47618f;
-  --border-accent: rgba(96, 165, 250, 0.5);
+  /* Border */
+  --border: #4a4c55;
+  --border-subtle: #3c3e46;
+  --border-strong: #5a5d68;
+  --border-hover: #686c78;
+  --border-accent: rgba(221, 129, 59, 0.46);
   --border-ok: rgba(34, 197, 94, 0.5);
   --border-danger: rgba(239, 68, 68, 0.5);
-  --input: #283550;
-  --ring: #60a5fa;
+  --input: #5b5e68;
+  --ring: #DD813B;
 
-  /* Accent - Blue theme (brighter for dark mode visibility) */
-  --accent: #60a5fa;
-  --accent-hover: #93c5fd;
-  --accent-muted: #60a5fa;
-  --accent-subtle: rgba(96, 165, 250, 0.18);
-  --accent-foreground: #1e293b;
-  --accent-glow: rgba(96, 165, 250, 0.3);
-  --primary: #60a5fa;
-  --primary-foreground: #1e293b;
+  /* Accent */
+  --accent: #DD813B;
+  --accent-hover: #c96f2d;
+  --accent-muted: #DD813B;
+  --accent-subtle: rgba(221, 129, 59, 0.12);
+  --accent-foreground: #ffffff;
+  --accent-glow: rgba(221, 129, 59, 0.16);
+  --primary: #DD813B;
+  --primary-foreground: #ffffff;
 
-  /* Secondary - Teal accent for variety */
-  --secondary: #1e2028;
-  --secondary-foreground: #f4f4f5;
-  --accent-2: #14b8a6;
-  --accent-2-muted: rgba(20, 184, 166, 0.7);
-  --accent-2-subtle: rgba(20, 184, 166, 0.15);
+  /* Secondary */
+  --secondary: #3a3c44;
+  --secondary-foreground: #e8e3dc;
+  --accent-2: #DD813B;
+  --accent-2-muted: rgba(221, 129, 59, 0.75);
+  --accent-2-subtle: rgba(221, 129, 59, 0.12);
 
   /* Semantic - More saturated */
   --ok: #22c55e;
@@ -101,10 +106,10 @@
   --danger: #ef4444;
   --danger-muted: rgba(239, 68, 68, 0.75);
   --danger-subtle: rgba(239, 68, 68, 0.12);
-  --info: #3b82f6;
+  --info: #DD813B;
 
   /* Focus - With glow */
-  --focus: rgba(96, 165, 250, 0.25);
+  --focus: rgba(221, 129, 59, 0.16);
   --focus-ring: 0 0 0 2px var(--bg), 0 0 0 4px var(--ring);
   --focus-glow: 0 0 0 2px var(--bg), 0 0 0 4px var(--ring), 0 0 20px var(--accent-glow);
 
@@ -116,18 +121,18 @@
   --font-body: "HarmonyOS Sans SC", -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
   --font-display: "HarmonyOS Sans SC", -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
 
-  /* Shadows - Richer with subtle color */
-  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.2);
-  --shadow-md: 0 4px 12px rgba(0, 0, 0, 0.25), 0 0 0 1px rgba(255, 255, 255, 0.03);
-  --shadow-lg: 0 12px 28px rgba(0, 0, 0, 0.35), 0 0 0 1px rgba(255, 255, 255, 0.03);
-  --shadow-xl: 0 24px 48px rgba(0, 0, 0, 0.4), 0 0 0 1px rgba(255, 255, 255, 0.03);
+  /* Shadows - soft desktop depth */
+  --shadow-sm: 0 1px 5px rgba(0, 0, 0, 0.22);
+  --shadow-md: 0 4px 12px rgba(0, 0, 0, 0.24);
+  --shadow-lg: 0 10px 24px rgba(0, 0, 0, 0.28);
+  --shadow-xl: 0 18px 40px rgba(0, 0, 0, 0.32);
   --shadow-glow: 0 0 30px var(--accent-glow);
 
-  /* Radii - Slightly larger for friendlier feel */
-  --radius-sm: 6px;
-  --radius-md: 8px;
-  --radius-lg: 12px;
-  --radius-xl: 16px;
+  /* Radii - modest and product-like */
+  --radius-sm: 4px;
+  --radius-md: 6px;
+  --radius-lg: 8px;
+  --radius-xl: 10px;
   --radius-full: 9999px;
   --radius: 8px;
 
@@ -142,7 +147,7 @@
   /* Shell Layout */
   --shell-pad: 16px;
   --shell-gap: 16px;
-  --shell-nav-width: 220px;
+  --shell-nav-width: 240px;
   --tool-panel-width: var(--shell-nav-width);
   --statusbar-right-space: var(--tool-panel-width);
   --shell-topbar-height: 56px;
@@ -158,57 +163,62 @@
   color-scheme: dark;
 }
 
-/* Light theme - Clean with subtle warmth */
+/* Light theme */
 :root[data-theme="light"] {
-  --bg: #fafafa;
-  --bg-accent: #f5f5f5;
+  --bg: #ffffff;
+  --bg-accent: #ffffff;
   --bg-elevated: #ffffff;
-  --bg-hover: #f0f0f0;
-  --bg-muted: #f0f0f0;
-  --bg-content: #f5f5f5;
+  --bg-hover: #f8f8f8;
+  --bg-muted: #f8f8f8;
+  --bg-content: #ffffff;
+  --menu-bg: #f8f8f8;
+  --menu-active: #F1EDE5;
+  --control-bg: rgba(201, 201, 201, 0.2);
+  --placeholder: #aeaeae;
 
   --card: #ffffff;
-  --card-foreground: #18181b;
-  --card-highlight: rgba(0, 0, 0, 0.03);
+  --card-foreground: #191919;
+  --card-highlight: rgba(255, 255, 255, 0.72);
   --popover: #ffffff;
-  --popover-foreground: #18181b;
+  --popover-foreground: #191919;
 
-  --panel: #fafafa;
-  --panel-strong: #f5f5f5;
-  --panel-hover: #ebebeb;
-  --chrome: rgba(250, 250, 250, 0.95);
-  --chrome-strong: rgba(250, 250, 250, 0.98);
+  --panel: #f8f8f8;
+  --panel-strong: #ffffff;
+  --panel-hover: #F1EDE5;
+  --chrome: rgba(255, 255, 255, 0.96);
+  --chrome-strong: rgba(255, 255, 255, 0.98);
 
-  --text: #3f3f46;
-  --text-strong: #18181b;
-  --chat-text: #3f3f46;
-  --muted: #71717a;
-  --muted-strong: #52525b;
-  --muted-foreground: #71717a;
+  --text: #191919;
+  --text-strong: #191919;
+  --chat-text: #191919;
+  --muted: #777777;
+  --muted-strong: #555555;
+  --muted-foreground: #777777;
 
-  --border: #e4e4e7;
-  --border-strong: #d4d4d8;
-  --border-hover: #a1a1aa;
-  --border-accent: rgba(37, 99, 235, 0.5);
+  --border: #dfdfdf;
+  --border-subtle: #f3f3f3;
+  --border-strong: #c9c9c9;
+  --border-hover: #b8b8b8;
+  --border-accent: rgba(221, 129, 59, 0.38);
   --border-ok: rgba(22, 163, 74, 0.5);
   --border-danger: rgba(220, 38, 38, 0.5);
-  --input: #e4e4e7;
-  --ring: #2563eb;
+  --input: #dfdfdf;
+  --ring: #DD813B;
 
-  --accent: #2563eb;
-  --accent-hover: #3b82f6;
-  --accent-muted: #2563eb;
-  --accent-subtle: rgba(37, 99, 235, 0.12);
+  --accent: #DD813B;
+  --accent-hover: #c96f2d;
+  --accent-muted: #DD813B;
+  --accent-subtle: rgba(221, 129, 59, 0.12);
   --accent-foreground: #ffffff;
-  --accent-glow: rgba(37, 99, 235, 0.15);
-  --primary: #2563eb;
+  --accent-glow: rgba(221, 129, 59, 0.16);
+  --primary: #DD813B;
   --primary-foreground: #ffffff;
 
-  --secondary: #f4f4f5;
-  --secondary-foreground: #3f3f46;
-  --accent-2: #0d9488;
-  --accent-2-muted: rgba(13, 148, 136, 0.75);
-  --accent-2-subtle: rgba(13, 148, 136, 0.12);
+  --secondary: #f8f8f8;
+  --secondary-foreground: #191919;
+  --accent-2: #DD813B;
+  --accent-2-muted: rgba(221, 129, 59, 0.75);
+  --accent-2-subtle: rgba(221, 129, 59, 0.12);
 
   --ok: #16a34a;
   --ok-muted: rgba(22, 163, 74, 0.75);
@@ -221,19 +231,19 @@
   --danger: #dc2626;
   --danger-muted: rgba(220, 38, 38, 0.75);
   --danger-subtle: rgba(220, 38, 38, 0.1);
-  --info: #2563eb;
+  --info: #DD813B;
 
-  --focus: rgba(37, 99, 235, 0.2);
+  --focus: rgba(221, 129, 59, 0.16);
   --focus-ring: 0 0 0 2px var(--bg), 0 0 0 4px var(--ring);
   --focus-glow: 0 0 0 2px var(--bg), 0 0 0 4px var(--ring), 0 0 16px var(--accent-glow);
 
-  --grid-line: rgba(0, 0, 0, 0.05);
+  --grid-line: rgba(25, 25, 25, 0.04);
 
   /* Light shadows */
-  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.06);
-  --shadow-md: 0 4px 12px rgba(0, 0, 0, 0.08), 0 0 0 1px rgba(0, 0, 0, 0.04);
-  --shadow-lg: 0 12px 28px rgba(0, 0, 0, 0.12), 0 0 0 1px rgba(0, 0, 0, 0.04);
-  --shadow-xl: 0 24px 48px rgba(0, 0, 0, 0.15), 0 0 0 1px rgba(0, 0, 0, 0.04);
+  --shadow-sm: 0 1px 6px rgba(0, 0, 0, 0.078);
+  --shadow-md: 0 4px 12px rgba(0, 0, 0, 0.08);
+  --shadow-lg: 0 10px 24px rgba(0, 0, 0, 0.1);
+  --shadow-xl: 0 18px 42px rgba(0, 0, 0, 0.12);
   --shadow-glow: 0 0 24px var(--accent-glow);
 
   color-scheme: light;
@@ -255,7 +265,7 @@ body {
 body {
   margin: 0;
   font: 400 var(--font-size-base)/1.55 var(--font-body);
-  letter-spacing: -0.02em;
+  letter-spacing: 0;
   background: var(--bg);
   color: var(--text);
   -webkit-font-smoothing: antialiased;
@@ -263,10 +273,7 @@ body {
 }
 
 :root:not([data-theme="light"]) body {
-  background:
-    radial-gradient(1200px 480px at 55% -20%, rgba(37, 99, 235, 0.16), transparent 60%),
-    radial-gradient(720px 320px at 18% 8%, rgba(20, 184, 166, 0.08), transparent 65%),
-    var(--bg);
+  background: var(--bg);
 }
 
 #root {
@@ -496,7 +503,7 @@ select {
   .brand-title {
     font-size: 16px;
     font-weight: 700;
-    letter-spacing: -0.03em;
+    letter-spacing: 0;
     line-height: 1.1;
     color: var(--text-strong);
   }
@@ -515,8 +522,8 @@ select {
     grid-area: nav;
     overflow-y: auto;
     overflow-x: hidden;
-    padding: 16px 12px;
-    background: var(--panel);
+    padding: 14px 10px;
+    background: var(--menu-bg);
     scrollbar-width: none;
     min-height: 0;
     border-right: 1px solid var(--border);
@@ -539,7 +546,9 @@ select {
     border-radius: var(--radius-md);
     border: 1px solid transparent;
     background: transparent;
-    color: var(--muted);
+    color: var(--text);
+    font-size: 14px;
+    line-height: 22px;
     cursor: pointer;
     text-decoration: none;
     transition:
@@ -550,17 +559,15 @@ select {
 
   .nav-item:hover {
     color: var(--text);
-    background: var(--bg-hover);
+    background: var(--menu-active);
+    border-color: transparent;
     text-decoration: none;
   }
 
   .nav-item.active {
-    color: var(--text-strong);
-    background: var(--accent-subtle);
-  }
-
-  .nav-item.active .nav-item__icon {
-    color: var(--accent);
+    color: var(--text);
+    border-color: transparent;
+    background: var(--menu-active);
   }
 
   /* Content Area */
@@ -572,7 +579,7 @@ select {
     min-height: 0;
     overflow-y: auto;
     overflow-x: hidden;
-    background: linear-gradient(180deg, var(--bg-accent), var(--bg));
+    background: var(--bg-accent);
   }
 
   :root[data-theme="light"] .content {
@@ -595,6 +602,47 @@ select {
   .card:hover {
     border-color: var(--border-strong);
     box-shadow: var(--shadow-md), inset 0 1px 0 var(--card-highlight);
+  }
+
+  /* Horizontal sub-tabs (e.g. config page categories) */
+  .app-subtabs {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: stretch;
+    gap: 0.25rem;
+    margin-bottom: 1rem;
+    border-bottom: 1px solid var(--border);
+  }
+
+  .app-subtabs__tab {
+    appearance: none;
+    margin: 0;
+    padding: 0.55rem 0.9rem;
+    font-size: var(--font-size-sm);
+    font-weight: 500;
+    letter-spacing: 0;
+    color: var(--muted);
+    background: transparent;
+    border: 1px solid transparent;
+    border-bottom: 2px solid transparent;
+    border-radius: var(--radius-md) var(--radius-md) 0 0;
+    cursor: pointer;
+    transition:
+      background var(--duration-fast) var(--ease-out),
+      border-color var(--duration-fast) var(--ease-out),
+      color var(--duration-fast) var(--ease-out);
+  }
+
+  .app-subtabs__tab:hover {
+    background: var(--bg-hover);
+    color: var(--text);
+  }
+
+  .app-subtabs__tab--active {
+    background: var(--panel-strong);
+    color: var(--accent);
+    border-color: var(--border);
+    border-bottom-color: var(--accent);
   }
 
   /* Pills */
@@ -631,6 +679,65 @@ select {
     animation: none;
   }
 
+  .topbar-status {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    color: var(--text);
+    font-size: 12px;
+    font-weight: 400;
+    line-height: 20px;
+    white-space: nowrap;
+  }
+
+  .topbar-status .statusDot {
+    width: 8px;
+    height: 8px;
+    background: #e02128;
+    box-shadow: none;
+    animation: none;
+  }
+
+  .topbar-status .statusDot.ok {
+    background: #00c853;
+    box-shadow: none;
+  }
+
+  .language-switcher {
+    display: inline-flex;
+    align-items: center;
+    gap: 2px;
+    height: 32px;
+    padding: 2px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-full);
+    background: var(--control-bg);
+  }
+
+  .language-switcher__button {
+    min-width: 46px;
+    height: 28px;
+    border: 0;
+    border-radius: var(--radius-full);
+    background: transparent;
+    color: var(--text);
+    cursor: pointer;
+    font-size: 14px;
+    line-height: 22px;
+    transition:
+      background var(--duration-fast) ease,
+      color var(--duration-fast) ease;
+  }
+
+  .language-switcher__button:hover {
+    color: var(--text);
+  }
+
+  .language-switcher__button.active {
+    background: var(--panel-strong);
+    color: var(--accent);
+  }
+
   /* Buttons */
   .btn {
     display: inline-flex;
@@ -638,12 +745,12 @@ select {
     justify-content: center;
     gap: 8px;
     border: 1px solid var(--border);
-    background: var(--bg-elevated);
-    padding: 9px 16px;
+    background: var(--card);
+    padding: 8px 14px;
     border-radius: var(--radius-md);
     font-size: var(--font-size-sm);
     font-weight: 500;
-    letter-spacing: -0.01em;
+    letter-spacing: 0;
     cursor: pointer;
     transition:
       border-color var(--duration-fast) var(--ease-out),
@@ -666,16 +773,16 @@ select {
   }
 
   .btn.primary {
-    border-color: var(--accent);
-    background: var(--accent);
+    border-color: var(--primary);
+    background: var(--primary);
     color: var(--primary-foreground);
-    box-shadow: 0 1px 2px rgba(0, 0, 0, 0.2);
+    box-shadow: 0 1px 2px rgba(32, 23, 16, 0.18);
   }
 
   .btn.primary:hover {
-    background: var(--accent-hover);
-    border-color: var(--accent-hover);
-    box-shadow: var(--shadow-md), 0 0 20px var(--accent-glow);
+    background: color-mix(in srgb, var(--primary) 92%, var(--accent-hover));
+    border-color: color-mix(in srgb, var(--primary) 80%, var(--accent-hover));
+    box-shadow: var(--shadow-md);
   }
 
   .btn:disabled {
@@ -724,25 +831,25 @@ select {
   /* Chat Bubbles */
   .chat-bubble {
     border: 1px solid transparent;
-    background: var(--card);
+    background: var(--bg-muted);
     border-radius: var(--radius-lg);
     padding: 10px 14px;
     min-width: 0;
   }
 
   :root[data-theme="light"] .chat-bubble {
-    border-color: var(--border);
-    background: var(--bg);
+    border-color: transparent;
+    background: var(--bg-muted);
   }
 
   .chat-bubble.user {
     border-color: transparent;
-    background: var(--accent-subtle);
+    background: var(--bg-muted);
   }
 
   :root[data-theme="light"] .chat-bubble.user {
-    border-color: rgba(59, 130, 246, 0.2);
-    background: rgba(59, 130, 246, 0.12);
+    border-color: transparent;
+    background: var(--bg-muted);
   }
 
   .chat-bubble.assistant {
@@ -751,7 +858,7 @@ select {
   }
 
   :root[data-theme="light"] .chat-bubble.assistant {
-    border-color: var(--border);
+    border-color: transparent;
     background: var(--bg-muted);
   }
 
@@ -1109,23 +1216,23 @@ select {
   }
  	 
   .tool-pair-item-session {
-    background: rgba(96, 165, 250, 0.05);
-    border-bottom: 1px solid rgba(96, 165, 250, 0.15);
+    background: color-mix(in srgb, var(--accent-subtle) 45%, transparent);
+    border-bottom: 1px solid color-mix(in srgb, var(--accent) 18%, transparent);
   }
 
   .tool-pair-pre-session {
-    background: rgba(96, 165, 250, 0.08);
-    border-color: rgba(96, 165, 250, 0.3);
+    background: color-mix(in srgb, var(--accent-subtle) 65%, transparent);
+    border-color: color-mix(in srgb, var(--accent) 30%, transparent);
   }
  	 
   :root[data-theme="light"] .tool-pair-item-session {
-    background: rgba(96, 165, 250, 0.08);
-    border-bottom: 1px solid rgba(96, 165, 250, 0.2);
+    background: rgba(221, 129, 59, 0.08);
+    border-bottom: 1px solid rgba(221, 129, 59, 0.2);
   }
 
   :root[data-theme="light"] .tool-pair-pre-session {
-    background: rgba(96, 165, 250, 0.12);
-    border-color: rgba(96, 165, 250, 0.4);
+    background: rgba(221, 129, 59, 0.11);
+    border-color: rgba(221, 129, 59, 0.34);
   }
 
   .tool-pair-name {
@@ -1255,8 +1362,8 @@ select {
     gap: var(--theme-gap);
     padding: var(--theme-pad);
     border-radius: var(--radius-full);
-    border: 1px solid var(--border);
-    background: var(--secondary);
+    border: 0;
+    background: var(--control-bg);
   }
 
   .theme-toggle__indicator {
@@ -1281,7 +1388,7 @@ select {
     border: 0;
     border-radius: var(--radius-full);
     background: transparent;
-    color: var(--muted);
+    color: var(--text);
     cursor: pointer;
     position: relative;
     z-index: 1;
@@ -1293,7 +1400,7 @@ select {
   }
 
   .theme-toggle__button.active {
-    color: var(--accent-foreground);
+    color: #ffffff;
   }
 
   /* Keyboard shortcut badge */
@@ -1391,7 +1498,7 @@ select {
     border-right: none;
     border-bottom: 1px solid var(--border);
     padding: 10px 14px;
-    background: var(--bg);
+    background: var(--menu-bg);
   }
 }
 
@@ -1405,7 +1512,7 @@ select {
     --font-size-sm: 14px;
     --font-size-xs: 13px;
     --font-size-2xs: 12px;
-    --shell-nav-width: 248px;
+    --shell-nav-width: 240px;
     --tool-panel-width: var(--shell-nav-width);
     --statusbar-right-space: var(--tool-panel-width);
     --shell-topbar-height: 60px;
@@ -1418,7 +1525,7 @@ select {
     --font-size-sm: 15px;
     --font-size-xs: 14px;
     --font-size-2xs: 13px;
-    --shell-nav-width: 272px;
+    --shell-nav-width: 240px;
     --tool-panel-width: var(--shell-nav-width);
     --statusbar-right-space: var(--tool-panel-width);
     --shell-topbar-height: 64px;

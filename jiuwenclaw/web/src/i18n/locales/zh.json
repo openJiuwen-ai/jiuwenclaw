@@ -1008,7 +1008,7 @@
   },
   "version": "版本 {{version}}",
   "app": {
-    "title": "JiuwenClaw",
+    "title": "JiuwenSwarm",
     "subtitle": "AI Assistant",
     "errorTitle": "应用加载出错",
     "unknownError": "未知错误",

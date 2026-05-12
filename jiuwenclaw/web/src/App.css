@@ -34,7 +34,7 @@
 }
 
 .app-connection-toast {
-  border-radius: 0.5rem;
+  border-radius: var(--radius-md);
   background: var(--danger);
   padding: 0.5rem 1rem;
   color: #fff;
@@ -42,7 +42,7 @@
 }
 
 .app-session-toast {
-  border-radius: 0.5rem;
+  border-radius: var(--radius-md);
   background: var(--info);
   padding: 0.5rem 1rem;
   color: #fff;
@@ -53,7 +53,7 @@
   width: min(88vw, 420px);
   overflow: hidden;
   border: 1px solid var(--border);
-  border-radius: 0.75rem;
+  border-radius: var(--radius-lg);
   background: var(--card);
   box-shadow: var(--shadow-xl);
   backdrop-filter: blur(4px);
@@ -82,7 +82,7 @@
 
 .app-heartbeat-toast__close {
   border: 0;
-  border-radius: 0.375rem;
+  border-radius: var(--radius-sm);
   background: transparent;
   color: var(--muted);
   cursor: pointer;
@@ -140,7 +140,7 @@
   width: 100%;
   max-width: 24rem;
   border: 1px solid var(--border);
-  border-radius: 0.75rem;
+  border-radius: var(--radius-lg);
   background: var(--card);
   box-shadow: var(--shadow-xl);
   padding: 1.5rem;

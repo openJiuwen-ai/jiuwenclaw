@@ -598,17 +598,13 @@ export function SkillPanel({ sessionId, onNavigateToConfig }: SkillPanelProps) {
           <div className="flex items-center justify-end gap-2 flex-wrap">
             <button
               onClick={() => fetchSkills(true)}
-              className="px-3 py-1.5 rounded-md text-sm bg-secondary text-text-muted hover:text-text hover:bg-card border border-border"
+              className="btn !px-3 !py-1.5 disabled:opacity-50 disabled:cursor-not-allowed"
             >
               {t('common.refresh')}
             </button>
             <button
               onClick={handleImportLocal}
-              className={`px-3 py-1.5 rounded-md text-sm transition-colors ${
-                actionTarget === "import_local"
-                  ? "bg-secondary text-text-muted cursor-not-allowed"
-                  : "bg-secondary text-text hover:bg-card border border-border"
-              }`}
+              className="btn !px-3 !py-1.5 disabled:opacity-50 disabled:cursor-not-allowed"
               disabled={actionTarget === "import_local"}
             >
               {t('skills.actions.importLocal')}
@@ -752,7 +748,7 @@ export function SkillPanel({ sessionId, onNavigateToConfig }: SkillPanelProps) {
                   <button
                     key={skill.name}
                     onClick={() => handleOpenSkill(skill.name)}
-                    className="w-full text-left p-4 rounded-lg border border-border bg-panel hover:bg-card transition-colors"
+                    className="w-full text-left p-4 rounded-lg border border-border bg-card hover:bg-panel transition-colors"
                   >
                     <div className="flex items-start justify-between gap-4">
                       <div className="min-w-0 flex-1">

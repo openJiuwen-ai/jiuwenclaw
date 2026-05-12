@@ -6,6 +6,7 @@ import { useChatStore, useSessionStore } from '../../stores';
 import { AgentMode } from '../../types';
 import clsx from 'clsx';
 import { getEvolutionPillLabel } from './evolution-status';
+import sendIcon from '../../assets/chat-icons/send_colored.svg';
 
 interface InputAreaProps {
   onSubmit: (content: string) => void;
@@ -411,9 +412,11 @@ export function InputArea({
             title={t('chat.send')}
             data-testid="chat-send"
           >
-            <svg className="chat-input-btn-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2}>
-              <path strokeLinecap="round" strokeLinejoin="round" d="M4.5 10.5L12 3m0 0l7.5 7.5M12 3v18" />
-            </svg>
+            <span
+              className="chat-input-btn-icon chat-input-btn-icon--send"
+              style={{ '--chat-send-icon': `url(${sendIcon})` } as CSSProperties}
+              aria-hidden="true"
+            />
           </button>
         </div>
       </div>

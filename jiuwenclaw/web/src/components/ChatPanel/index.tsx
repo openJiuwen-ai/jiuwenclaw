@@ -62,6 +62,25 @@ function SuggestionCard({ text, onClick }: { text: string; onClick: () => void }
   );
 }
 
+function WelcomeHeading() {
+  const { i18n } = useTranslation();
+  const isZh = i18n.language.startsWith('zh');
+
+  if (isZh) {
+    return (
+      <>
+        我是<span className="chat-welcome__brand">JiuwenSwarm</span>，很高兴认识你!
+      </>
+    );
+  }
+
+  return (
+    <>
+      Hi, I&apos;m <span className="chat-welcome__brand">JiuwenSwarm</span>. Nice to meet you!
+    </>
+  );
+}
+
 
 export function ChatPanel({
   onSendMessage,
@@ -210,8 +229,7 @@ export function ChatPanel({
           </>
         ) : (
           <div className="chat-welcome">
-            <img src="/logo.png" alt={t('chat.welcomeLogoAlt')} className="chat-welcome__logo" />
-            <h2 className="chat-welcome__heading">{t('chat.welcomeHeading')}</h2>
+            <h2 className="chat-welcome__heading"><WelcomeHeading /></h2>
             <p className="chat-welcome__subtext">
               {t('chat.welcomeSubtext')}
             </p>

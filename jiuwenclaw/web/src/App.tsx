@@ -109,18 +109,18 @@ function LanguageSwitcher() {
     });
   };
   return (
-    <div className="flex items-center gap-1 rounded-lg bg-secondary/60 px-2 py-1">
+    <div className="language-switcher">
       <button
         type="button"
         onClick={() => handleChange('zh')}
-        className={`text-xs px-2 py-1 rounded ${isZh ? 'bg-accent text-white font-medium' : 'text-text-muted hover:text-text'}`}
+        className={`language-switcher__button ${isZh ? 'active' : ''}`}
       >
         中
       </button>
       <button
         type="button"
         onClick={() => handleChange('en')}
-        className={`text-xs px-2 py-1 rounded ${!isZh ? 'bg-accent text-white font-medium' : 'text-text-muted hover:text-text'}`}
+        className={`language-switcher__button ${!isZh ? 'active' : ''}`}
       >
         En
       </button>
@@ -295,7 +295,7 @@ function AppContent() {
 
   useEffect(() => () => disposeInFlightHistoryHandles(), [disposeInFlightHistoryHandles]);
 
-  const { setCurrentSession, setSessions, setAvailableModels, mode, heartbeatMessage, heartbeatUpdatedAt } = useSessionStore();
+  const { setCurrentSession, setSessions, setAvailableModels, setMode, mode, heartbeatMessage, heartbeatUpdatedAt } = useSessionStore();
   const {
     clearMessages,
     clearSubtasks,
@@ -937,7 +937,7 @@ function AppContent() {
   ]);
 
   const handleRestoreSession = useCallback(
-    (targetSessionId: string) => {
+    (targetSessionId: string, targetMode?: string) => {
       if (!targetSessionId.startsWith('sess_')) return;
 
       disposeInFlightHistoryHandles();
@@ -953,6 +953,9 @@ function AppContent() {
       setSessionId(targetSessionId);
       setCurrentSession(null);
       storeSessionId(targetSessionId);
+      if (targetMode) {
+        setMode(targetMode as AgentMode);
+      }
       setActiveNav('chat');
       // 历史加载只由下方 useEffect 发起一次。若 sessionId 与当前相同，须 bump key 才会重跑 effect，
       // 否则 historyPagerMeta 会停在 null，无法向上滚动加载更早分页。
@@ -968,6 +971,7 @@ function AppContent() {
       setCurrentSession,
       setHistoryLoadingMore,
       setHistoryPagerMeta,
+      setMode,
       setPaused,
       setProcessing,
       setSessionId,
@@ -994,17 +998,16 @@ function AppContent() {
           <div className="brand">
             <img src="/logo.png" alt="OpenJiuwen" className="brand-logo-img" />
             <div className="brand-text">
-              <span className="brand-title">JiuwenClaw</span>
-              <span className="brand-sub">AI Assistant</span>
+              <span className="brand-title">{t('app.title')}</span>
             </div>
           </div>
         </div>
 
         <div className="flex items-center gap-3">
           {/* 连接状态 */}
-          <div className="pill">
+          <div className="topbar-status">
             <span className={`statusDot ${isConnected ? 'ok' : ''}`} />
-            <span className="mono text-sm">
+            <span>
               {isConnected ? t('connection.connected') : t('connection.disconnected')}
             </span>
           </div>

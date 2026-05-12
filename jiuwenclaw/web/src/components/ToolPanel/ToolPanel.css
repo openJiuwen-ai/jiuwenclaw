@@ -6,7 +6,7 @@
   border-radius: var(--radius-lg);
   background: var(--card);
   box-shadow:
-    0 2px 8px rgba(15, 23, 42, 0.06),
+    0 2px 8px rgba(60, 43, 30, 0.07),
     inset 0 1px 0 var(--card-highlight);
   transition:
     box-shadow var(--duration-fast) ease,
@@ -17,7 +17,7 @@
 .toolpanel-status-card:hover {
   border-color: var(--border-strong);
   box-shadow:
-    0 8px 20px rgba(15, 23, 42, 0.10),
+    0 8px 20px rgba(60, 43, 30, 0.11),
     inset 0 1px 0 var(--card-highlight);
   transform: translateY(-1px);
 }
