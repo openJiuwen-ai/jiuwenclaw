@@ -4,20 +4,20 @@ from typing import Any
 
 from fastapi import APIRouter, File, HTTPException, Query, Request, UploadFile
 
-from jiuwenclaw.extensions.agent_client.core.application_config.channel_management import (
+from ..core.application_config.channel_management import (
     create_channel_config_record,
     delete_channel_config_record,
     list_channel_config_records,
     set_channel_status,
 )
-from jiuwenclaw.extensions.agent_client.core.application_config.model_management import (
+from ..core.application_config.model_management import (
     batch_import_model_configs,
     create_model_config_record,
     delete_model_config_record,
     list_model_config_records,
     update_model_config_record,
 )
-from jiuwenclaw.extensions.agent_client.schemas import (
+from ..schemas import (
     ChannelConfigCreateRequest,
     ModelConfigCreateRequest,
     ModelConfigUpdateRequest,

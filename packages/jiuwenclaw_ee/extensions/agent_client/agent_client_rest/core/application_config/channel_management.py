@@ -2,7 +2,7 @@
 
 """Channel 配置（channel_config）持久化：基于 ``DBHandler`` 异步读写。
 
-应用启动时由 ``extensions.agent_client.app`` 的 lifespan 完成 ``connect`` 与
+应用启动时由 ``agent_client_rest.app`` 的 lifespan 完成 ``connect`` 与
 ``init_table(CHANNEL_CONFIG_TABLE_DEF)``。
 """
 
@@ -12,11 +12,11 @@ from typing import Any
 
 from openjiuwen_runtime.foundation.db.handler import DBHandler
 
-from jiuwenclaw.extensions.agent_client.core.utils import format_ts, utc_now
-from jiuwenclaw.extensions.agent_client.models.application_config_models import (
+from ..utils import format_ts, utc_now
+from ...models.application_config_models import (
     CHANNEL_CONFIG_TABLE_DEF,
 )
-from jiuwenclaw.extensions.agent_client.schemas.application_config_schemas import (
+from ...schemas.application_config_schemas import (
     ChannelConfigCreateRequest,
 )
 

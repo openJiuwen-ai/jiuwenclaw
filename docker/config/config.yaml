@@ -28,8 +28,7 @@ channels:
       allow_from: []
 
 extensions:
-  extension_dirs: ${EXTENSION_DIRS:-/app/jiuwenclaw/extensions}
-  # docker/extensions/agent_client REST（FastAPI）；由环境变量覆盖，未设置则用默认值
+  extension_dirs: ${EXTENSION_DIRS:-/app/jiuwenclaw/packages/jiuwenclaw_ee/extensions}
   agent_client_rest:
     enabled: ${AGENT_CLIENT_REST_ENABLED:-true}
     host: ${AGENT_CLIENT_REST_HOST:-0.0.0.0}

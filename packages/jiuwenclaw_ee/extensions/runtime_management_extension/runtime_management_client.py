@@ -7,12 +7,39 @@
 
 from __future__ import annotations
 
-import os
 import hashlib
 import json
 import logging
+import os
 import threading
 from typing import Any, AsyncIterator, Optional
+
+from openjiuwen_runtime.management.session.access import Access
+from openjiuwen_runtime.management.session.dual_queue import PriorityDualAsyncQueues
+from openjiuwen_runtime.management.session.interfaces import (
+    IResponseParser,
+    IServiceHandler,
+    IServiceInstanceFactory,
+    ISessionRequest,
+)
+from openjiuwen_runtime.management.session.k8s_service_handler import (
+    K8sDeployController,
+    K8sServiceHandler,
+)
+from openjiuwen_runtime.management.session.models import (
+    AccessConfig,
+    MessagePriority,
+    SessionConfig,
+)
+from openjiuwen_runtime.management.session.service_handler import ServiceHandler
+from openjiuwen_runtime.management.session.service_manager import (
+    QueueItem,
+    ServiceManager,
+)
+from openjiuwen_runtime.management.session.timer import Timer
+from openjiuwen_runtime.management.session.ws_client_channel import (
+    WSServiceMessageChannel,
+)
 
 from jiuwenclaw.e2a.agent_compat import e2a_to_agent_request
 from jiuwenclaw.e2a.models import E2AEnvelope, E2AResponse
@@ -21,30 +48,9 @@ from jiuwenclaw.e2a.wire_codec import (
     parse_agent_server_wire_chunk,
 )
 from jiuwenclaw.gateway.agent_client import AgentServerClient, _wire_request_id_key
+from jiuwenclaw.gateway.session_map import load_session_map_scope
 from jiuwenclaw.schema import AgentRequest
 from jiuwenclaw.schema.agent import AgentResponse, AgentResponseChunk
-
-from openjiuwen_runtime.management.session.access import Access
-from openjiuwen_runtime.management.session.dual_queue import PriorityDualAsyncQueues
-from openjiuwen_runtime.management.session.interfaces import (
-    IResponseParser,
-    IServiceInstanceFactory,
-    IServiceHandler,
-)
-from openjiuwen_runtime.management.session.k8s_service_handler import (
-    K8sDeployController,
-    K8sServiceHandler,
-)
-from openjiuwen_runtime.management.session.models import AccessConfig, SessionConfig
-from openjiuwen_runtime.management.session.service_handler import ServiceHandler
-from openjiuwen_runtime.management.session.service_manager import (
-    ServiceManager,
-    QueueItem,
-)
-from openjiuwen_runtime.management.session.timer import Timer
-from openjiuwen_runtime.management.session.ws_client_channel import WSServiceMessageChannel
-from openjiuwen_runtime.management.session.interfaces import ISessionRequest
-from openjiuwen_runtime.management.session.models import MessagePriority
 
 logger = logging.getLogger(__name__)
 
@@ -63,9 +69,8 @@ def _session_id_to_invoke_ids(session_id: str) -> tuple[str, str | None]:
         if cached:
             return cached
 
-    from jiuwenclaw.gateway.session_map import load_session_map_scope
     _ = load_session_map_scope()
-    
+
     parts = session_id.split("::")
     if len(parts) == 6:
         _provider, chat_id, bot_id, user_id, _ts, _suffix = parts
@@ -155,7 +160,7 @@ class RuntimeManagementAgentClient(AgentServerClient):
 
     def __init__(self) -> None:
         """初始化 Runtime Management 客户端。"""
-        
+
         agent_image = os.getenv("AGENT_SERVER_IMAGE")
         agent_runtime = os.getenv("AGENT_RUNTIME")
         namespace = os.getenv("AGENT_SERVER_NAMESPACE")
@@ -275,7 +280,7 @@ class RuntimeManagementAgentClient(AgentServerClient):
         autoscale_interval = float(os.getenv("AGENT_SERVER_AUTOSCALE_INTERVAL"))
         session_concurrency = int(os.getenv("AGENT_SERVER_SESSION_CONCURRENCY"))
         session_ttl = int(os.getenv("AGENT_SERVER_SESSION_TTL"))
-        
+
         acc_cfg = AccessConfig(
             image=agent_image,
             service_concurrency=service_concurrency,

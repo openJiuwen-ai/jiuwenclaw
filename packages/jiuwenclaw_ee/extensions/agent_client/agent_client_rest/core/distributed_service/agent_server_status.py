@@ -12,8 +12,8 @@ from typing import Any
 
 from openjiuwen_runtime.foundation.db.handler import DBHandler
 
-from jiuwenclaw.extensions.agent_client.core.utils import utc_now
-from jiuwenclaw.extensions.agent_client.models.distributed_service_models import (
+from ..utils import utc_now
+from ...models.distributed_service_models import (
     SERVICE_STATUS_VIEW_TABLE_DEF,
     ServiceStatusViewInfo,
 )

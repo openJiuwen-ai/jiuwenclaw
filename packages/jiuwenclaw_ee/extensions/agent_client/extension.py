@@ -7,7 +7,7 @@ from jiuwenclaw.config import get_config
 from jiuwenclaw.extensions.sdk.base import BaseExtension
 from jiuwenclaw.extensions.types import ExtensionConfig
 
-from jiuwenclaw.extensions.agent_client.app import create_app
+from .agent_client_rest.app import create_app
 
 
 class AgentClientRestExtension(BaseExtension):

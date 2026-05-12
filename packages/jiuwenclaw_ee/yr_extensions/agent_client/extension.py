@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from jiuwenclaw.config import get_config
 from jiuwenclaw.extensions.sdk import AgentServerClientExtension
-from jiuwenclaw.extensions.yuanrong_frontend_client import YuanrongFrontendAgentClient
+from .yuanrong_frontend_client import YuanrongFrontendAgentClient
 
 
 class YuanrongAgentServerClientExtension(AgentServerClientExtension):

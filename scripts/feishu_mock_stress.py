@@ -11,8 +11,11 @@ from dataclasses import dataclass
 from types import SimpleNamespace
 from typing import Any
 
+from jiuwenclaw_ee.yr_extensions.agent_client.yuanrong_frontend_client import (
+    YuanrongFrontendAgentClient,
+)
+
 from jiuwenclaw.channel.feishu import FeishuChannel, FeishuConfig
-from jiuwenclaw.extensions.yuanrong_frontend_client import YuanrongFrontendAgentClient
 from jiuwenclaw.gateway.channel_manager import ChannelManager
 from jiuwenclaw.gateway.message_handler import MessageHandler
 from jiuwenclaw.schema.agent import AgentResponse, AgentResponseChunk

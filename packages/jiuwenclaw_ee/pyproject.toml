@@ -1,0 +1,56 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "jiuwenclaw_ee"
+version = "0.1.0"
+description = "JiuwenClaw enterprise edition gateway extension bundles"
+requires-python = ">=3.11.4,<3.14"
+license = { text = "Apache-2.0" }
+classifiers = [
+    "License :: OSI Approved :: Apache Software License",
+]
+# 扩展在运行时从 jiuwenclaw 主包导入 SDK；请与主仓库 jiuwenclaw 同环境安装使用。
+# 下列为 extensions/ 下扩展**单独** import、且主包 jiuwenclaw 未声明的依赖（含 agent-runtime develop 分支，与 extension.yaml 一致）。
+dependencies = [
+    # extensions/agent_client/agent_client_rest：FastAPI 路由与 multipart 上传
+    "fastapi>=0.115.0",
+    "python-multipart>=0.0.9",
+    # extensions/agent_client/extension.py：内嵌 uvicorn 线程跑 ASGI
+    "uvicorn[standard]>=0.30.0",
+    # agent-runtime develop 分支（refs/heads/develop，勿用 @develop 以免被解析为 tag）
+    "openjiuwen_runtime_foundation @ git+https://gitcode.com/openJiuwen/agent-runtime.git@refs/heads/develop#subdirectory=foundation",
+    "openjiuwen_runtime_management @ git+https://gitcode.com/openJiuwen/agent-runtime.git@refs/heads/develop#subdirectory=management",
+]
+
+[tool.setuptools]
+include-package-data = true
+# 与 setuptools.find_packages(
+#     where=".", include=["extensions*", "yr_extensions*"], namespaces=False
+# ) 再加上根包 "jiuwenclaw_ee" 一致；新增子包时可在本目录执行上述命令核对。
+packages = [
+    "jiuwenclaw_ee",
+    "jiuwenclaw_ee.extensions",
+    "jiuwenclaw_ee.extensions.agent_client",
+    "jiuwenclaw_ee.extensions.agent_client.agent_client_rest",
+    "jiuwenclaw_ee.extensions.agent_client.agent_client_rest.core",
+    "jiuwenclaw_ee.extensions.agent_client.agent_client_rest.core.application_config",
+    "jiuwenclaw_ee.extensions.agent_client.agent_client_rest.core.distributed_service",
+    "jiuwenclaw_ee.extensions.agent_client.agent_client_rest.core.physical_resource",
+    "jiuwenclaw_ee.extensions.agent_client.agent_client_rest.models",
+    "jiuwenclaw_ee.extensions.agent_client.agent_client_rest.routers",
+    "jiuwenclaw_ee.extensions.agent_client.agent_client_rest.schemas",
+    "jiuwenclaw_ee.extensions.runtime_management_extension",
+    "jiuwenclaw_ee.yr_extensions",
+    "jiuwenclaw_ee.yr_extensions.agent_client",
+]
+
+[tool.setuptools.package-dir]
+jiuwenclaw_ee = "."
+
+[tool.setuptools.package-data]
+jiuwenclaw_ee = [
+    "extensions/**/*",
+    "yr_extensions/**/*",
+]

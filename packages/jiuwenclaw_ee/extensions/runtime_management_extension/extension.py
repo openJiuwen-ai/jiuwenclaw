@@ -13,6 +13,7 @@ from .runtime_management_client import RuntimeManagementAgentClient
 
 logger = logging.getLogger(__name__)
 
+
 class RuntimeManagementExtension(AgentServerClientExtension):
     """Runtime 管理扩展。"""
 

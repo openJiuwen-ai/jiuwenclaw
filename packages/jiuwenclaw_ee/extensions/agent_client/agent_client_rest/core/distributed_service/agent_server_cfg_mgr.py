@@ -11,11 +11,11 @@ from typing import Any
 
 from openjiuwen_runtime.foundation.db.handler import DBHandler
 
-from jiuwenclaw.extensions.agent_client.core.utils import format_ts, utc_now
-from jiuwenclaw.extensions.agent_client.models.distributed_service_models import (
+from ..utils import format_ts, utc_now
+from ...models.distributed_service_models import (
     INSTANCE_CONFIG_TABLE_DEF,
 )
-from jiuwenclaw.extensions.agent_client.schemas.distributed_service_schemas import (
+from ...schemas.distributed_service_schemas import (
     AgentServerConfigUpdateRequest,
 )
 

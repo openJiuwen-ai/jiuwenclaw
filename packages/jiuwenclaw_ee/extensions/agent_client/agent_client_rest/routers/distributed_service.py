@@ -4,27 +4,27 @@ from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 
-from jiuwenclaw.extensions.agent_client.core.distributed_service.agent_server_cfg_mgr import (
+from ..core.distributed_service.agent_server_cfg_mgr import (
     get_agent_server_instance_config,
     upsert_agent_server_instance_config,
 )
-from jiuwenclaw.extensions.agent_client.core.distributed_service.agent_server_status import (
+from ..core.distributed_service.agent_server_status import (
     get_agent_server_service_detail,
     list_agent_server_service_status,
 )
-from jiuwenclaw.extensions.agent_client.core.distributed_service.session_map import (
+from ..core.distributed_service.session_map import (
     get_session_mapping_detail,
     list_session_mappings,
 )
-from jiuwenclaw.extensions.agent_client.core.distributed_service.tenant_isolation_mgr import (
+from ..core.distributed_service.tenant_isolation_mgr import (
     list_tenant_isolation_policies,
     upsert_tenant_isolation_policy,
 )
-from jiuwenclaw.extensions.agent_client.core.distributed_service.session_affinity_mgr import (
+from ..core.distributed_service.session_affinity_mgr import (
     list_session_affinity_policies,
     upsert_session_affinity_policy,
 )
-from jiuwenclaw.extensions.agent_client.schemas import (
+from ..schemas import (
     AgentServerConfigUpdateRequest,
     ResponseModel,
     SessionMappingListQueryRequest,

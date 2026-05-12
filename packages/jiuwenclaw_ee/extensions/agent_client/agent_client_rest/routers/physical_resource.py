@@ -4,11 +4,11 @@ from typing import Any
 
 from fastapi import APIRouter, HTTPException, Query, Request
 
-from jiuwenclaw.extensions.agent_client.core.physical_resource.agent_server_res_mgr import (
+from ..core.physical_resource.agent_server_res_mgr import (
     list_resource_config_records,
     upsert_resource_config_record,
 )
-from jiuwenclaw.extensions.agent_client.schemas import ResponseModel, ResourceConfigUpdateRequest
+from ..schemas import ResponseModel, ResourceConfigUpdateRequest
 
 physical_resource_router = APIRouter()
 
