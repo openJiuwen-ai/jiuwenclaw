@@ -542,6 +542,10 @@ class VibeSkillChannel(BaseChannel):
         if session.mode == "Standard":
             return await self._handle_chat_message(ws, data, session, external_session_id)
 
+        # 新一轮 skilldev 执行必须使用新的 assistant message_id；否则同会话同 stage（如 generate）
+        # 会复用 _message_ctx 中已有聚合状态，导致多次 message.send 的产出落在同一 message 下。
+        self._clear_message_context_for_session(session.internal_id)
+
         await self._store.set_state(session.internal_id, VibeSkillSessionState.BUSY)
         logger.info(
             "[VibeSkillChannel] session state -> busy, source=message.send.skillcreate, session_id=%s",
@@ -1592,7 +1596,7 @@ class VibeSkillChannel(BaseChannel):
         internal_ids = self._ws_sessions.pop(ws, set())
         for sid in internal_ids:
             self._session_to_ws.pop(sid, None)
-            self._message_ctx.pop(sid, None)
+            self._clear_message_context_for_session(sid)
             try:
                 state = await self._store.get_state(sid)
                 if state == VibeSkillSessionState.BUSY:
@@ -1726,6 +1730,16 @@ class VibeSkillChannel(BaseChannel):
         if not st:
             return
         self._message_ctx.pop(f"{sid}:{st}", None)
+
+    def _clear_message_context_for_session(self, session_id: str | None) -> None:
+        """移除某 internal session 下全部 assistant message 聚合状态（含 `sid` 与 `sid:*` 键）。"""
+        sid = str(session_id or "").strip()
+        if not sid:
+            return
+        prefix = f"{sid}:"
+        for key in list(self._message_ctx.keys()):
+            if key == sid or key.startswith(prefix):
+                self._message_ctx.pop(key, None)
 
     def _ensure_message_context(self, session_id: str | None, stage: str | None = None) -> dict[str, Any]:
         sid = str(session_id or "").strip()

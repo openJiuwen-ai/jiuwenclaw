@@ -83,8 +83,8 @@ async def test():
                         if msg_type == "session.status":
                             status = props.get("status", {}) if isinstance(props.get("status"), dict) else {}
                             status_type = str(status.get("type") or "").strip()
-                            if package_in_progress_seen and status_type == "idle":
-                                logger.info("received session.status idle after package in_progress, stop")
+                            if status_type == "completed":
+                                logger.info("received session.status completed, stop")
                                 break
 
                         # SkillDev 澄清问题：自动回填答案，继续流程
