@@ -11,7 +11,6 @@ import platform
 import subprocess
 from datetime import datetime, timedelta, timezone
 from logging import getLogger
-from pathlib import Path
 from shutil import which
 from typing import Optional
 
@@ -26,7 +25,6 @@ from jiuwenclaw.utils import (
     get_shared_agent_skills_dirs,
     get_agent_workspace_dir,
     get_deepagent_todo_dir,
-    get_deepagent_soul_md_path,
     get_multi_tenant_user_workspace_dir,
 )
 
@@ -50,7 +48,6 @@ class RuntimePromptRail(DeepAgentRail):
         workspace_dir: Optional[str] = None,
         agent_id: Optional[str] = None,
         service_id: Optional[str] = None,
-        custom_home_dir: Optional[str] = None,
     ) -> None:
         super().__init__()
         self.system_prompt_builder = None
@@ -63,7 +60,6 @@ class RuntimePromptRail(DeepAgentRail):
         self._agent_id = agent_id
         self._service_id = service_id
         self._request_system_prompt: str = ""
-        self._custom_home_dir = custom_home_dir
 
     def init(self, agent) -> None:
         """从 agent 获取 system_prompt_builder 引用。"""
@@ -75,7 +71,6 @@ class RuntimePromptRail(DeepAgentRail):
             self.system_prompt_builder.remove_section("time")
             self.system_prompt_builder.remove_section("runtime")
             self.system_prompt_builder.remove_section("workspace")
-            self.system_prompt_builder.remove_section("soul")
             self.system_prompt_builder.remove_section("request_system_prompt")
         self.system_prompt_builder = None
 
@@ -87,14 +82,6 @@ class RuntimePromptRail(DeepAgentRail):
         """per-request 更新频道。"""
         self._channel = channel
 
-    def set_custom_home_dir(self, custom_home_dir: str | None) -> None:
-        """更新自定义 home 目录（用于 SOUL.md 加载）。
-
-        Args:
-            custom_home_dir: 自定义 home 目录路径
-        """
-        self._custom_home_dir = custom_home_dir
-
     def set_workspace_dir(self, workspace_dir: Optional[str]) -> None:
         """per-request 更新工作空间目录。"""
         self._workspace_dir = workspace_dir
@@ -103,34 +90,6 @@ class RuntimePromptRail(DeepAgentRail):
         """per-request 更新 system prompt 追加内容。"""
         value = prompt.strip() if isinstance(prompt, str) else ""
         self._request_system_prompt = value
-
-    def _read_file(self, file_path: str) -> Optional[str]:
-        """读取文件内容，失败返回 None"""
-        if not file_path:
-            return None
-        try:
-            with open(file_path, "r", encoding="utf-8") as f:
-                content = f.read().strip()
-                return content if content else None
-        except Exception as e:
-            logger.debug("[RuntimePromptRail] file read failed: %s: %s", file_path, e)
-            return None
-
-    def _load_soul_md(self) -> Optional[str]:
-        """加载 SOUL.md 内容，优先从定制 home_dir 加载"""
-        if self._custom_home_dir:
-            custom_path = Path(self._custom_home_dir) / "SOUL.md"
-            content = self._read_file(str(custom_path))
-            if content:
-                logger.info("[RuntimePromptRail] SOUL.md loaded from custom: %s", custom_path)
-                return content
-        
-        default_path = get_deepagent_soul_md_path()
-        content = self._read_file(str(default_path))
-        if content:
-            logger.debug("[RuntimePromptRail] SOUL.md loaded from default: %s", default_path)
-        return content
-
 
     def _get_workspace_dirs(self) -> dict[str, str]:
         """获取工作空间目录路径，支持多租户。"""
@@ -308,15 +267,6 @@ When the `send_file_to_user` tool is available in your tool list, you **must** p
             content={"cn": workspace_content, "en": workspace_content},
             priority=15,
         ))
-
-        # 注入 SOUL.md section（优先从定制 home_dir 加载）
-        soul_content = self._load_soul_md()
-        if soul_content:
-            self.system_prompt_builder.add_section(PromptSection(
-                name="soul",
-                content={"cn": soul_content, "en": soul_content},
-                priority=12,
-            ))
 
         self.system_prompt_builder.remove_section("request_system_prompt")
         if self._request_system_prompt:

@@ -1242,6 +1242,23 @@ class JiuWenClawDeepAdapter:
         """根据单个模型条目的 model_client_config / model_config_obj 构建 Model 实例。"""
         mcc = JiuWenClawDeepAdapter._normalize_model_client_config_dict(mcc)
         name = mcc.get("model_name", "")
+
+        # 如果 api_key 为空，尝试从环境变量获取或使用默认占位值
+        if not mcc.get("api_key"):
+            env_api_key = os.getenv("API_KEY", "").strip()
+            if env_api_key:
+                mcc["api_key"] = env_api_key
+                logger.info(
+                    "[_build_model_from_entry] 从环境变量 API_KEY 获取到 api_key: model_name=%s",
+                    name
+                )
+            else:
+                mcc["api_key"] = "placeholder-api-key"
+                logger.warning(
+                    "[_build_model_from_entry] api_key 为空且环境变量未设置，使用占位值: model_name=%s",
+                    name
+                )
+
         m_config = ModelRequestConfig(
             model=name,
             temperature=mco.get("temperature", 0.95),
@@ -1657,15 +1674,8 @@ class JiuWenClawDeepAdapter:
             )
             return None
 
-    def _build_runtime_prompt_rail(
-        self,
-        custom_home_dir: str | None = None,
-    ) -> RuntimePromptRail | None:
-        """Build RuntimePromptRail for per-model-call time/channel/runtime injection.
-        
-        Args:
-            custom_home_dir: Optional custom home directory for SOUL.md loading
-        """
+    def _build_runtime_prompt_rail(self) -> RuntimePromptRail | None:
+        """Build RuntimePromptRail for per-model-call time/channel/runtime injection."""
         try:
             default_channel = (
                 "acp" if self._is_acp_tool_profile(self._instance_overrides)
@@ -1679,10 +1689,7 @@ class JiuWenClawDeepAdapter:
                 workspace_dir=self._workspace_dir,
                 agent_id=self._agent_id,
                 service_id=self._service_id,
-                custom_home_dir=custom_home_dir,
             )
-            if custom_home_dir:
-                logger.info("[JiuWenClawDeepAdapter] custom_home_dir configured: %s", custom_home_dir)
             logger.info("[JiuWenClawDeepAdapter] RuntimePromptRail create success")
         except Exception as exc:
             logger.warning("[JiuWenClawDeepAdapter] RuntimePromptRail create failed: %s", exc)
@@ -1705,16 +1712,14 @@ class JiuWenClawDeepAdapter:
 
     def _build_agent_rails(self, config: dict[str, Any], config_base: dict[str, Any], *,
                            mode: str = "agent.plan",
-                           extra_skill_dir: str | None = None,
-                           custom_home_dir: str | None = None) -> list[Any]:
+                           extra_skill_dir: str | None = None) -> list[Any]:
         """Build DeepAgent rails consistently for cold start and hot reload.
-        
+
         Args:
             config: React config dict
             config_base: Full config dict
             mode: Agent mode (agent.plan, agent.fast, code)
             extra_skill_dir: Optional extra skill directory from extension hook
-            custom_home_dir: Optional custom home directory from extension hook (for SOUL.md)
         """
 
         @dataclass
@@ -1729,11 +1734,7 @@ class JiuWenClawDeepAdapter:
         rail_infos = [
             # TelemetryRail - lowest priority, runs first for full coverage
             _RailBuildInfo("_telemetry_rail", self._build_telemetry_rail),
-            _RailBuildInfo(
-                "_runtime_prompt_rail",
-                self._build_runtime_prompt_rail,
-                {"custom_home_dir": custom_home_dir},
-            ),
+            _RailBuildInfo("_runtime_prompt_rail", self._build_runtime_prompt_rail),
             _RailBuildInfo("_response_prompt_rail", self._build_response_prompt_rail),
             _RailBuildInfo("_task_execution_rail", self._build_task_execution_rail),
             _RailBuildInfo("_stream_event_rail", self._build_stream_event_rail),
@@ -1893,23 +1894,21 @@ class JiuWenClawDeepAdapter:
         """
         # 触发钩子获取扩展目录（与 create_instance 保持一致）
         extra_skill_dir: str | None = None
-        custom_home_dir: str | None = None
         try:
             from jiuwenclaw.extensions.registry import ExtensionRegistry
             from jiuwenclaw.schema.hooks_context import SystemPromptHookContext
             from jiuwenclaw.schema import AgentServerHookEvents
-            
+
             context = SystemPromptHookContext()
             await ExtensionRegistry.get_instance().trigger(
                 AgentServerHookEvents.BEFORE_SYSTEM_PROMPT_BUILD, context
             )
             extra_skill_dir = context.skill_dir
-            custom_home_dir = context.home_dir
-            
+
             logger.info(
                 "[JiuWenClawDeepAdapter] reload_agent_config: BEFORE_SYSTEM_PROMPT_BUILD triggered, "
-                "skill_dir=%s, home_dir=%s",
-                extra_skill_dir, custom_home_dir
+                "skill_dir=%s",
+                extra_skill_dir,
             )
         except Exception as exc:
             logger.warning("[JiuWenClawDeepAdapter] reload_agent_config hook trigger failed: %s", exc)
@@ -1927,15 +1926,6 @@ class JiuWenClawDeepAdapter:
             include_skill_body_tools=self._skill_include_skill_body_tools(),
             extra_skill_dir=extra_skill_dir,
         )
-
-        # 更新 RuntimePromptRail 的 custom_home_dir（原地更新，无需重建）
-        if self._runtime_prompt_rail is not None:
-            self._runtime_prompt_rail.set_custom_home_dir(custom_home_dir)
-            if custom_home_dir:
-                logger.info(
-                    "[JiuWenClawDeepAdapter] RuntimePromptRail custom_home_dir updated on hot-reload: %s",
-                    custom_home_dir
-                )
 
         if not self._filesystem_rail_enabled_for_profile():
             self._filesystem_rail = None
@@ -2185,23 +2175,21 @@ class JiuWenClawDeepAdapter:
 
         # 触发 BEFORE_SYSTEM_PROMPT_BUILD 钩子获取扩展目录
         extra_skill_dir: str | None = None
-        custom_home_dir: str | None = None
         try:
             from jiuwenclaw.extensions.registry import ExtensionRegistry
             from jiuwenclaw.schema.hooks_context import SystemPromptHookContext
             from jiuwenclaw.schema import AgentServerHookEvents
-            
+
             context = SystemPromptHookContext()
             await ExtensionRegistry.get_instance().trigger(
                 AgentServerHookEvents.BEFORE_SYSTEM_PROMPT_BUILD, context
             )
             extra_skill_dir = context.skill_dir
-            custom_home_dir = context.home_dir
-            
+
             logger.info(
                 "[JiuWenClawDeepAdapter] BEFORE_SYSTEM_PROMPT_BUILD triggered: "
-                "skill_dir=%s, home_dir=%s",
-                extra_skill_dir, custom_home_dir
+                "skill_dir=%s",
+                extra_skill_dir,
             )
         except Exception as exc:
             logger.warning("[JiuWenClawDeepAdapter] hook trigger failed: %s", exc)
@@ -2209,7 +2197,6 @@ class JiuWenClawDeepAdapter:
         rails_list = self._build_agent_rails(
             config, config_base, mode=mode,
             extra_skill_dir=extra_skill_dir,
-            custom_home_dir=custom_home_dir,
         )
 
         sys_operation = self._create_sys_operation()
@@ -3130,15 +3117,24 @@ class JiuWenClawDeepAdapter:
         if os.getenv("API_KEY"):
             return True
 
-        # 检查实例的配置
-        if self._instance is not None and hasattr(self._instance, "_react_agent"):
-            react_agent = self._instance.react_agent
-            if react_agent is not None and hasattr(react_agent, "_config"):
-                config = react_agent._config
-                if hasattr(config, "model_client_config") and isinstance(config.model_client_config, dict):
+        # 检查初始化时设置的 model_client_config（优先）
+        if self._model_client_config is not None:
+            api_key = getattr(self._model_client_config, "api_key", "")
+            if api_key and api_key != "placeholder-api-key":
+                return True
+
+        # 检查实例的配置（作为后备）
+        if self._instance is not None:
+            react_agent = getattr(self._instance, "_react_agent", None) or getattr(self._instance, "react_agent", None)
+            if react_agent is not None:
+                config = getattr(react_agent, "_config", None)
+                if config is not None and hasattr(config, "model_client_config"):
                     mcc = config.model_client_config
-                    api_key = mcc.get("api_key", "")
-                    if api_key:
+                    if isinstance(mcc, dict):
+                        api_key = mcc.get("api_key", "")
+                    else:
+                        api_key = getattr(mcc, "api_key", "")
+                    if api_key and api_key != "placeholder-api-key":
                         return True
 
         return False
