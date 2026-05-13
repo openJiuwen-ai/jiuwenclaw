@@ -4,6 +4,7 @@ import argparse
 import http.client
 import logging
 import os
+import shutil
 import signal
 import socket
 import subprocess
@@ -558,6 +559,8 @@ class DesktopRuntime:
         self.start_services()
 
         storage_path = get_user_workspace_dir() / "tmp" / "webview"
+        if storage_path.exists():
+            shutil.rmtree(storage_path)
         storage_path.mkdir(parents=True, exist_ok=True)
 
         self.window = webview.create_window(
