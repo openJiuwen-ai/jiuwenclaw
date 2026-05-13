@@ -412,9 +412,10 @@ export function InputArea({
             title={t('chat.send')}
             data-testid="chat-send"
           >
-            <span
+            <img
               className="chat-input-btn-icon chat-input-btn-icon--send"
-              style={{ '--chat-send-icon': `url(${sendIcon})` } as CSSProperties}
+              src={sendIcon}
+              alt=""
               aria-hidden="true"
             />
           </button>
