@@ -114,6 +114,8 @@ jiuwenclaw = [
 
 [tool.uv.sources]
 jiuwenclaw-tui = { path = "./packages/jiuwenclaw-tui" }
+jiuwenclaw_ee = { path = "./packages/jiuwenclaw_ee" }
+jiuwenclaw-manager = { path = "./packages/jiuwenclaw-ee/claw_manager" }
 
 [dependency-groups]
 # Testing (keep in sync with optional-dependencies.test)
