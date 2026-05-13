@@ -125,7 +125,8 @@ class VibeSkillChannel(BaseChannel):
         self._listen_host = self._get_local_ip()
         
         # 加载 AK/SK 鉴权配置
-        self._auth_enabled = os.environ.get("JIUWEN_CLAW_AUTH_ENABLED", "false").lower() == "true"
+        auth_val = os.environ.get("JIUWEN_CLAW_AUTH_ENABLED") or os.environ.get("HTTP_WS_AUTH_ENABLED", "false")
+        self._auth_enabled = auth_val.lower() == "true"
         logger.info("[Auth] init: auth_enabled=%s", self._auth_enabled)
 
     def on_message(self, callback: Callable[[Message], Any]) -> None:
