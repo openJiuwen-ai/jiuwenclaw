@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import logging
+import shutil
 import zipfile
 from pathlib import Path
 
@@ -25,6 +26,12 @@ _EXCLUDE_DIRS = {"__pycache__", "node_modules", ".git"}
 _EXCLUDE_FILES = {".DS_Store"}
 _EXCLUDE_GLOBS = {"*.pyc"}
 _ROOT_EXCLUDE_DIRS = {"evals"}
+
+# 打包前需要递归清理的可执行/编译产物
+# - 目录: __pycache__ (Python 字节码缓存目录)
+# - 文件: *.pyc / *.pyo / *.pyd (Python 编译产物 / 扩展模块)
+_CLEANUP_DIRS = {"__pycache__"}
+_CLEANUP_GLOBS = ("*.pyc", "*.pyo", "*.pyd")
 
 
 class PackageStageHandler(StageHandler):
@@ -43,6 +50,10 @@ class PackageStageHandler(StageHandler):
         # 官方格式为 .skill（本质是 zip）
         skill_filename = f"{skill_name}.zip"
         skill_path = output_dir / skill_filename
+
+        # 打包前递归清理 skill_dir 中的 pyc 等可执行/编译产物，
+        # 避免将运行期间生成的字节码/扩展文件打入最终的 .skill 包。
+        self._cleanup_executables(skill_dir, ctx.state.task_id)
 
         await ctx.emit(
             SkillDevEventType.PROGRESS, {"message": f"正在打包 {skill_filename}..."}
@@ -67,6 +78,74 @@ class PackageStageHandler(StageHandler):
             },
         )
         return StageResult(next_stage=SkillDevStage.COMPLETED)
+
+    def _cleanup_executables(self, skill_dir: Path, session_id: str) -> None:
+        """递归清理 skill_dir 中的 pyc 等可执行/编译产物.
+
+        - 删除所有 ``__pycache__`` 目录（递归）
+        - 删除所有匹配 ``*.pyc`` / ``*.pyo`` / ``*.pyd`` 的文件（递归）
+
+        清理过程中的单个文件/目录删除失败不会中断流程，仅记录 warning 日志。
+        """
+        if not skill_dir.exists() or not skill_dir.is_dir():
+            return
+
+        removed_files = 0
+        removed_dirs = 0
+
+        for pattern in _CLEANUP_GLOBS:
+            for file_path in skill_dir.rglob(pattern):
+                if not file_path.is_file():
+                    continue
+                try:
+                    file_path.unlink()
+                    removed_files += 1
+                    logger.debug(
+                        "[session=%s] [PackageStage] 已删除文件: %s",
+                        session_id,
+                        file_path.relative_to(skill_dir),
+                    )
+                except OSError as exc:
+                    logger.warning(
+                        "[session=%s] [PackageStage] 删除文件失败 %s: %s",
+                        session_id,
+                        file_path,
+                        exc,
+                    )
+
+        # 删除目录需要在文件删除之后；使用 list() 物化结果避免边遍历边删除
+        for dir_name in _CLEANUP_DIRS:
+            for dir_path in list(skill_dir.rglob(dir_name)):
+                if not dir_path.is_dir():
+                    continue
+                try:
+                    shutil.rmtree(dir_path)
+                    removed_dirs += 1
+                    logger.debug(
+                        "[session=%s] [PackageStage] 已删除目录: %s",
+                        session_id,
+                        dir_path.relative_to(skill_dir),
+                    )
+                except OSError as exc:
+                    logger.warning(
+                        "[session=%s] [PackageStage] 删除目录失败 %s: %s",
+                        session_id,
+                        dir_path,
+                        exc,
+                    )
+
+        if removed_files or removed_dirs:
+            logger.info(
+                "[session=%s] [PackageStage] 打包前清理完成: 文件 %d 个, 目录 %d 个",
+                session_id,
+                removed_files,
+                removed_dirs,
+            )
+        else:
+            logger.info(
+                "[session=%s] [PackageStage] 打包前清理: 未发现需清理的可执行/编译产物",
+                session_id,
+            )
 
     def _zip_skill_dir(
         self, skill_dir: Path, zip_path: Path, root_dir_name: str, session_id: str

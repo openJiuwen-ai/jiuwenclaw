@@ -701,8 +701,8 @@ class EvaluateStageHandler(StageHandler):
                         eval_name=eval_name,
                         configuration=variant,
                         pass_rate=grading.get("summary", {}).get("pass_rate", 0.0),
-                        time_seconds=timing.get("total_duration_seconds", 0.0),
-                        tokens=timing.get("total_tokens", 0),
+                        time_seconds=timing.get("duration_seconds", 0.0),
+                        tokens=timing.get("tokens_used", 0),
                         expectations=grading.get("expectations", []),
                         prompt=case.get("prompt", ""),
                     )

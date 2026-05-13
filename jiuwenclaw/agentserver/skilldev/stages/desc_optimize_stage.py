@@ -586,11 +586,13 @@ class DescOptimizeStageHandler(StageHandler):
                 ctx.state.task_id,
                 query[:60],
             )
+            ctx.release_agent_tools(eval_agent)
             return None, "", ""
         parsed = self._parse_json_candidate(output)
         if isinstance(parsed, dict):
             triggered = parsed.get("triggered")
             if isinstance(triggered, bool):
+                ctx.release_agent_tools(eval_agent)
                 return triggered, thinking, output
         logger.warning(
             "[session=%s] [DescOptimizeStage] trigger eval parse failed, fallback false. query=%s output=%s",
@@ -598,6 +600,7 @@ class DescOptimizeStageHandler(StageHandler):
             query[:60],
             output[:200],
         )
+        ctx.release_agent_tools(eval_agent)
         return None, thinking, output
 
     @staticmethod
