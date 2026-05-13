@@ -3,9 +3,9 @@ requires = ["setuptools>=61.0"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "jiuwenclaw"
-version = "0.1.11"
-description = "JiuwenClaw"
+name = "jiuwenswarm"
+version = "0.2.0"
+description = "JiuwenSwarm"
 requires-python = ">=3.11,<3.14"
 license = { text = "Apache-2.0" }
 classifiers = [
@@ -43,7 +43,7 @@ dependencies = [
 [project.optional-dependencies]
 desktop = ["pywebview>=5.4"]
 dev = ["pyinstaller>=6.0.0", "pywebview>=5.4"]
-tui = ["jiuwenclaw-tui==0.1.11"]
+tui = ["jiuwenswarm-tui==0.2.0"]
 shell-ast = [
     "tree-sitter>=0.25.0,<0.26.0",
     "tree-sitter-bash>=0.25.0,<0.26.0",
@@ -95,7 +95,7 @@ jiuwenclaw = [
 jiuwenclaw = ["web/node_modules/**", "web/node_modules/*"]
 
 [tool.uv.sources]
-jiuwenclaw-tui = { path = "./packages/jiuwenclaw-tui" }
+jiuwenswarm-tui = { path = "./packages/jiuwenclaw-tui" }
 
 [dependency-groups]
 # Testing (keep in sync with optional-dependencies.test)

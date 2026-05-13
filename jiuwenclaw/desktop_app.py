@@ -4,6 +4,7 @@ import argparse
 import http.client
 import logging
 import os
+import signal
 import socket
 import subprocess
 import sys
@@ -285,13 +286,18 @@ def _build_child_env(name: str) -> dict[str, str]:
 
 def _start_process(name: str, command: list[str]) -> subprocess.Popen[bytes]:
     logger.info("[desktop] starting %s: %s", name, command)
-    return subprocess.Popen(
-        command,
-        env=_build_child_env(name),
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        creationflags=_creationflags(),
-    )
+    kwargs: dict[str, object] = {
+        "env": _build_child_env(name),
+        "stdout": subprocess.DEVNULL,
+        "stderr": subprocess.DEVNULL,
+    }
+    # macOS/Linux: 用 start_new_session=True 创建新进程组，
+    # 以便后续用 os.killpg 杀掉整个进程树（含孙子进程）。
+    if os.name != "nt":
+        kwargs["start_new_session"] = True
+    else:
+        kwargs["creationflags"] = _creationflags()
+    return subprocess.Popen(command, **kwargs)
 
 
 def _wait_for_tcp(
@@ -478,7 +484,15 @@ class DesktopRuntime:
     def close_window(self) -> bool:
         if self.window is None or not hasattr(self.window, "destroy"):
             return False
-        self.window.destroy()
+
+        def _delayed_destroy() -> None:
+            time.sleep(0.15)
+            try:
+                self.window.destroy()
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("[desktop] failed to close desktop window: %s", exc)
+
+        threading.Thread(target=_delayed_destroy, daemon=True).start()
         return True
 
     def install_update(self, installer_path: str) -> bool:
@@ -527,7 +541,7 @@ class DesktopRuntime:
 
         for process in self.processes.values():
             if process.poll() is None:
-                process.terminate()
+                _terminate_process_tree(process)
 
         while time.monotonic() < deadline:
             if all(process.poll() is not None for process in self.processes.values()):
@@ -536,7 +550,7 @@ class DesktopRuntime:
 
         for process in self.processes.values():
             if process.poll() is None:
-                process.kill()
+                _kill_process_tree(process)
 
         self.processes.clear()
 
@@ -582,6 +596,56 @@ class DesktopRuntime:
 
     def _on_closed(self) -> None:
         self.shutdown()
+
+
+def _psutil_terminate(pid: int, force: bool = False) -> None:
+    """Terminate a process and all its descendants using psutil.
+
+    Unlike ``taskkill.exe``, this is a pure-Python operation that does not
+    spawn an external console process, avoiding console window flashes on
+    Windows (console=False builds).
+    """
+    try:
+        import psutil
+
+        parent = psutil.Process(pid)
+        # 获取所有子孙进程（在杀父进程之前先拿到完整列表）
+        children = parent.children(recursive=True)
+        kill_fn = (lambda p: p.kill()) if force else (lambda p: p.terminate())
+        # 先杀子孙，再杀父进程，避免子孙变成孤儿
+        for child in reversed(children):
+            try:
+                kill_fn(child)
+            except psutil.NoSuchProcess:
+                pass
+        try:
+            kill_fn(parent)
+        except psutil.NoSuchProcess:
+            pass
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def _terminate_process_tree(process: subprocess.Popen[bytes]) -> None:
+    """Gracefully terminate a process and all its descendants."""
+    if os.name != "nt":
+        try:
+            os.killpg(process.pid, signal.SIGTERM)
+        except OSError:
+            process.terminate()
+    else:
+        _psutil_terminate(process.pid, force=False)
+
+
+def _kill_process_tree(process: subprocess.Popen[bytes]) -> None:
+    """Force kill a process and all its descendants."""
+    if os.name != "nt":
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except OSError:
+            process.kill()
+    else:
+        _psutil_terminate(process.pid, force=True)
 
 
 def _parse_args() -> argparse.Namespace:

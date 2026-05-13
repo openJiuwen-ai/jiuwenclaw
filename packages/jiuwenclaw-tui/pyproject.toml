@@ -3,9 +3,9 @@ requires = ["setuptools>=61.0", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "jiuwenclaw-tui"
-version = "0.1.11"
-description = "Native terminal UI launcher for JiuwenClaw"
+name = "jiuwenswarm-tui"
+version = "0.2.0"
+description = "Native terminal UI launcher for JiuwenSwarm"
 requires-python = ">=3.11,<3.14"
 license = { text = "Apache-2.0" }
 classifiers = [

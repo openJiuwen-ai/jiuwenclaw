@@ -9,6 +9,7 @@ Supports ``--dotenv <path>`` for multi-instance isolation.
 
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
 import time
@@ -76,20 +77,29 @@ def main() -> None:
 
     python = sys.executable
 
-    # Build subprocess commands with --dotenv if parsed
-    agent_cmd = [python, "-m", "jiuwenclaw.app_agentserver"]
-    gateway_cmd = [python, "-m", "jiuwenclaw.app_gateway"]
+    # Build subprocess commands – in frozen (PyInstaller) mode use flags
+    # instead of -m which won't work with a bundled executable.
+    if getattr(sys, "frozen", False):
+        agent_cmd = [python, "--desktop-run-agent"]
+        gateway_cmd = [python, "--desktop-run-gateway"]
+    else:
+        agent_cmd = [python, "-m", "jiuwenclaw.app_agentserver"]
+        gateway_cmd = [python, "-m", "jiuwenclaw.app_gateway"]
 
     # Pass --dotenv to subprocesses for multi-instance isolation
     if dotenv_path is not None:
         agent_cmd.extend(["--dotenv", str(dotenv_path)])
         gateway_cmd.extend(["--dotenv", str(dotenv_path)])
 
-    agent = subprocess.Popen(agent_cmd)
+    _popen_kwargs: dict = {}
+    if os.name == "nt":
+        _popen_kwargs["creationflags"] = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+
+    agent = subprocess.Popen(agent_cmd, **_popen_kwargs)
     gateway = None
     try:
         time.sleep(0.4)
-        gateway = subprocess.Popen(gateway_cmd)
+        gateway = subprocess.Popen(gateway_cmd, **_popen_kwargs)
     except Exception:
         if agent.poll() is None:
             agent.terminate()

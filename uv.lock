@@ -1509,8 +1509,8 @@ wheels = [
 ]
 
 [[package]]
-name = "jiuwenclaw"
-version = "0.1.11"
+name = "jiuwenswarm"
+version = "0.2.0"
 source = { editable = "." }
 dependencies = [
     { name = "a2a-sdk", extra = ["http-server"] },
@@ -1563,7 +1563,7 @@ test = [
     { name = "pyyaml" },
 ]
 tui = [
-    { name = "jiuwenclaw-tui" },
+    { name = "jiuwenswarm-tui" },
 ]
 
 [package.dev-dependencies]
@@ -1588,7 +1588,7 @@ requires-dist = [
     { name = "discord-py", specifier = ">=2.4.0" },
     { name = "google-genai", specifier = ">=1.68.0" },
     { name = "greenlet", specifier = ">=3.3.2" },
-    { name = "jiuwenclaw-tui", marker = "extra == 'tui'", directory = "packages/jiuwenclaw-tui" },
+    { name = "jiuwenswarm-tui", marker = "extra == 'tui'", directory = "packages/jiuwenclaw-tui" },
     { name = "lark-oapi", specifier = ">=1.5.3" },
     { name = "loguru", specifier = ">=0.7.3" },
     { name = "mutagen", specifier = ">=1.47.0" },
@@ -1633,8 +1633,8 @@ test = [
 ]
 
 [[package]]
-name = "jiuwenclaw-tui"
-version = "0.1.11"
+name = "jiuwenswarm-tui"
+version = "0.2.0"
 source = { directory = "packages/jiuwenclaw-tui" }
 
 [[package]]

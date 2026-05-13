@@ -100,6 +100,12 @@ excludes = [
 # 入口脚本位于 scripts 目录
 entry_script = os.path.join(project_root, "scripts", "jiuwenclaw_exe_entry.py")
 
+# 图标路径（Windows 用 .ico，macOS 用 .icns）
+icon_path = os.path.join(
+    project_root, "jiuwenclaw", "web", "public",
+    "logo.ico" if sys.platform == "win32" else "logo.icns",
+)
+
 a = Analysis(
     [entry_script],
     pathex=[project_root],
@@ -135,6 +141,7 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
+    icon=icon_path,
 )
 
 coll = COLLECT(
@@ -152,7 +159,7 @@ if sys.platform == "darwin":
     app = BUNDLE(
         coll,
         name="JiuwenClaw.app",
-        icon=None,
+        icon=icon_path,
         bundle_identifier="com.jiuwenclaw.desktop",
         info_plist={
             "CFBundleName": "JiuwenClaw",

@@ -25,9 +25,17 @@ Pop-Location
 
 # 3. 执行 PyInstaller 打包
 Write-Host "`n[3/3] 执行 PyInstaller 打包..." -ForegroundColor Yellow
-uv run pyinstaller scripts\jiuwenclaw.spec
+uv run pyinstaller scripts\jiuwenclaw.spec --noconfirm
+if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+# 4. 打包 zip
+Write-Host "`n[4/4] 打包 zip..." -ForegroundColor Yellow
+$ZipPath = "$ProjectRoot\dist\jiuwenclaw.zip"
+if (Test-Path $ZipPath) { Remove-Item $ZipPath -Force }
+Compress-Archive -Path "$ProjectRoot\dist\jiuwenclaw\*" -DestinationPath $ZipPath
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
 Write-Host "`n=== 打包完成 ===" -ForegroundColor Green
 Write-Host "桌面版目录: $ProjectRoot\dist\jiuwenclaw" -ForegroundColor Green
 Write-Host "主程序: $ProjectRoot\dist\jiuwenclaw\jiuwenclaw.exe" -ForegroundColor Green
+Write-Host "发布包: $ZipPath" -ForegroundColor Green
