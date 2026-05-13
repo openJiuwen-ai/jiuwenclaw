@@ -64,8 +64,12 @@ datas = webview_datas + [
 datas += copy_metadata("fastmcp", recursive=True)
 datas += copy_metadata("mcp", recursive=True)
 datas += copy_metadata("openjiuwen", recursive=True)
+datas += collect_data_files("openjiuwen", include_py_files=False)
 
 # 部分包需要显式声明隐藏导入
+# openjiuwen 使用动态导入，需要收集全部子模块
+openjiuwen_submodules = collect_submodules("openjiuwen")
+
 hiddenimports = webview_hiddenimports + [
     "pandas",  # pymilvus 依赖
     "tiktoken_ext",  # tiktoken 编码插件（cl100k_base 等）
@@ -77,7 +81,6 @@ hiddenimports = webview_hiddenimports + [
     "chromadb",
     "chromadb.config",
     "chromadb.telemetry",
-    "openjiuwen",
     "psutil",
     "aiosqlite",
     "croniter",
@@ -87,7 +90,7 @@ hiddenimports = webview_hiddenimports + [
     "webview",
     "jiuwenclaw.app_web",  # 静态文件服务
     "jiuwenclaw.desktop_app",  # 桌面入口
-]
+] + openjiuwen_submodules
 
 # 排除不需要的模块以减小体积（pandas 为 pymilvus/openjiuwen 所需，不可排除）
 excludes = [
@@ -95,6 +98,16 @@ excludes = [
     "matplotlib",
     "scipy",
     "numpy.tests",
+    # 测试框架
+    "pytest",
+    "pytest-asyncio",
+    "_pytest",
+    "py",
+    "tox",
+    "hypothesis",
+    "mock",
+    "coverage",
+    "pytest-cov",
 ]
 
 # 入口脚本位于 scripts 目录
@@ -128,7 +141,7 @@ exe = EXE(
     pyz,
     a.scripts,
     [],
-    name="jiuwenclaw",
+    name="jiuwenswarm",
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
@@ -152,18 +165,18 @@ coll = COLLECT(
     strip=False,
     upx=True,
     upx_exclude=[],
-    name="jiuwenclaw",
+    name="jiuwenswarm",
 )
 
 if sys.platform == "darwin":
     app = BUNDLE(
         coll,
-        name="JiuwenClaw.app",
+        name="JiuwenSwarm.app",
         icon=icon_path,
-        bundle_identifier="com.jiuwenclaw.desktop",
+        bundle_identifier="com.jiuwenswarm.desktop",
         info_plist={
-            "CFBundleName": "JiuwenClaw",
-            "CFBundleDisplayName": "JiuwenClaw",
+            "CFBundleName": "JiuwenSwarm",
+            "CFBundleDisplayName": "JiuwenSwarm",
             "CFBundleShortVersionString": "0.1.7",
             "CFBundleVersion": "0.1.7",
             "NSHighResolutionCapable": "True",

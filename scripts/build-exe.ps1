@@ -1,4 +1,4 @@
-# JiuwenClaw 打包 exe 脚本
+# JiuwenSwarm 打包 exe 脚本
 # 用法: .\scripts\build-exe.ps1  或  pwsh -File scripts\build-exe.ps1
 
 $ErrorActionPreference = "Stop"
@@ -6,7 +6,7 @@ $ErrorActionPreference = "Stop"
 $ProjectRoot = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)
 Set-Location $ProjectRoot
 
-Write-Host "=== JiuwenClaw 打包 exe ===" -ForegroundColor Cyan
+Write-Host "=== JiuwenSwarm 打包 exe ===" -ForegroundColor Cyan
 Write-Host "项目目录: $ProjectRoot`n" -ForegroundColor Gray
 
 # 1. 安装依赖
@@ -17,6 +17,8 @@ if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 # 2. 构建前端
 Write-Host "`n[2/3] 构建前端 (jiuwenclaw/web)..." -ForegroundColor Yellow
 Push-Location (Join-Path $ProjectRoot "jiuwenclaw\web")
+$WebDist = Join-Path $ProjectRoot "jiuwenclaw\web\dist"
+if (Test-Path $WebDist) { Remove-Item $WebDist -Recurse -Force }
 npm install
 if ($LASTEXITCODE -ne 0) { Pop-Location; exit $LASTEXITCODE }
 npm run build
@@ -30,12 +32,12 @@ if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
 # 4. 打包 zip
 Write-Host "`n[4/4] 打包 zip..." -ForegroundColor Yellow
-$ZipPath = "$ProjectRoot\dist\jiuwenclaw.zip"
+$ZipPath = "$ProjectRoot\dist\jiuwenswarm.zip"
 if (Test-Path $ZipPath) { Remove-Item $ZipPath -Force }
-Compress-Archive -Path "$ProjectRoot\dist\jiuwenclaw\*" -DestinationPath $ZipPath
+Compress-Archive -Path "$ProjectRoot\dist\jiuwenswarm\*" -DestinationPath $ZipPath
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
 Write-Host "`n=== 打包完成 ===" -ForegroundColor Green
-Write-Host "桌面版目录: $ProjectRoot\dist\jiuwenclaw" -ForegroundColor Green
-Write-Host "主程序: $ProjectRoot\dist\jiuwenclaw\jiuwenclaw.exe" -ForegroundColor Green
+Write-Host "桌面版目录: $ProjectRoot\dist\jiuwenswarm" -ForegroundColor Green
+Write-Host "主程序: $ProjectRoot\dist\jiuwenswarm\jiuwenswarm.exe" -ForegroundColor Green
 Write-Host "发布包: $ZipPath" -ForegroundColor Green
