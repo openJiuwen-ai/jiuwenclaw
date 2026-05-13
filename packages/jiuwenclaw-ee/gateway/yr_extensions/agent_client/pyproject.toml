@@ -1,0 +1,16 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "jiuwenclaw-ee-yr-agent-client-deps"
+version = "0.1.0"
+description = "Pip dependencies for jiuwenclaw_ee yr_extensions.agent_client (yuanrong client)"
+requires-python = ">=3.11.4,<3.14"
+license = { text = "Apache-2.0" }
+# extension.yaml 未声明额外包；仅保留与 gateway 一致的占位发行版，便于统一路径安装。
+dependencies = []
+
+[tool.setuptools]
+packages = []
+py-modules = ["_ee_deps_yr_agent_client"]

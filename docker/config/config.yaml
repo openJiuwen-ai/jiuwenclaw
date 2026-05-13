@@ -28,7 +28,7 @@ channels:
       allow_from: []
 
 extensions:
-  extension_dirs: ${EXTENSION_DIRS:-/app/jiuwenclaw/packages/jiuwenclaw_ee/extensions}
+  extension_dirs: ${EXTENSION_DIRS:-/app/jiuwenclaw/packages/jiuwenclaw-ee/gateway/extensions}
   agent_client_rest:
     enabled: ${AGENT_CLIENT_REST_ENABLED:-true}
     host: ${AGENT_CLIENT_REST_HOST:-0.0.0.0}
