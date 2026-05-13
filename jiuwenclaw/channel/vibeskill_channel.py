@@ -1206,16 +1206,21 @@ class VibeSkillChannel(BaseChannel):
         success = bool(payload.get("success", True))
         result = payload.get("result") or payload.get("output") or ""
         part, _ = self._ensure_tool_part(session_id, call_id, tool_name, stage)
-        start = part.get("state", {}).get("time", {}).get("start") or int(time.time() * 1000)
+        existing_time = part.get("state", {}).get("time", {})
+        existing_start = existing_time.get("start") if existing_time else None
         existing_input = part.get("state", {}).get("input")
         result_input = payload.get("arguments") or payload.get("params") or payload.get("input")
+        now_ms = int(time.time() * 1000)
         part["state"] = {
             "status": "completed" if success else "error",
             "input": result_input if result_input is not None else existing_input,
             "output": result,
             "title": payload.get("title") or f"{tool_name or call_id} 执行结果",
             "metadata": payload.get("metadata", {}),
-            "time": {"start": start, "end": int(time.time() * 1000)},
+            "time": {
+                "start": existing_start if existing_start is not None else now_ms,
+                "end": now_ms,
+            },
         }
         responses = []
         # 与 tool_call 不同：结果到达时 part 往往已存在（is_new=False），
