@@ -58,7 +58,6 @@ dependencies = [
 desktop = ["pywebview>=5.4"]
 dev = ["pyinstaller>=6.0.0", "pywebview>=5.4"]
 tui = ["jiuwenclaw-tui==0.1.10"]
-ee = ["jiuwenclaw_ee==0.1.0"]
 # Same packages as [dependency-groups] test (pip install -e ".[test]")
 test = [
     "pytest>=9.0.2",
@@ -115,7 +114,6 @@ jiuwenclaw = [
 
 [tool.uv.sources]
 jiuwenclaw-tui = { path = "./packages/jiuwenclaw-tui" }
-jiuwenclaw_ee = { path = "./packages/jiuwenclaw_ee" }
 
 [dependency-groups]
 # Testing (keep in sync with optional-dependencies.test)

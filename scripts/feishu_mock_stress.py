@@ -6,14 +6,20 @@ import asyncio
 import json
 import os
 import statistics
+import sys
 import time
 from dataclasses import dataclass
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
-from jiuwenclaw_ee.yr_extensions.agent_client.yuanrong_frontend_client import (
-    YuanrongFrontendAgentClient,
-)
+_root = Path(__file__).resolve().parents[1]
+_yr_agent_client_dir = _root / "packages" / "jiuwenclaw-ee" / "gateway" / "yr_extensions" / "agent_client"
+_p = str(_yr_agent_client_dir)
+if _p not in sys.path:
+    sys.path.append(_p)
+
+from yuanrong_frontend_client import YuanrongFrontendAgentClient  # type: ignore[import-untyped]
 
 from jiuwenclaw.channel.feishu import FeishuChannel, FeishuConfig
 from jiuwenclaw.gateway.channel_manager import ChannelManager
