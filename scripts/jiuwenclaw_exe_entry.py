@@ -77,8 +77,8 @@ def _release_single_instance_lock() -> None:
 
 
 def _show_already_running_message() -> None:
-    msg = "JiuwenClaw is already running. Please use the existing window."
-    title = "JiuwenClaw"
+    msg = "JiuwenSwarm is already running. Please use the existing window."
+    title = "JiuwenSwarm"
     try:
         if os.name == "nt":
             import ctypes
