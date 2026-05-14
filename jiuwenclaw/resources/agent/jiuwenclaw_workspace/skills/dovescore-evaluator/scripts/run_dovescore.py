@@ -14,6 +14,17 @@ from typing import Any
 logger = logging.getLogger(__name__)
 
 
+def _emit_result(rendered: str) -> None:
+    result_logger = logging.getLogger("dovescore.result")
+    if not result_logger.handlers:
+        handler = logging.StreamHandler(sys.stdout)
+        handler.setFormatter(logging.Formatter("%(message)s"))
+        result_logger.addHandler(handler)
+    result_logger.setLevel(logging.INFO)
+    result_logger.propagate = False
+    result_logger.info("%s", rendered)
+
+
 def _read_text(value: str | None, file_path: str | None, label: str) -> str:
     if value and file_path:
         raise ValueError(f"Pass either --{label} or --{label}-file, not both.")
@@ -98,7 +109,7 @@ def main() -> int:
     rendered = json.dumps(result, ensure_ascii=False, indent=indent)
     if args.output:
         Path(args.output).expanduser().write_text(rendered + "\n", encoding="utf-8")
-    sys.stdout.write(rendered + "\n")
+    _emit_result(rendered)
     return 0
 
 
