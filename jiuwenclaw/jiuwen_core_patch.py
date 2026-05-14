@@ -53,6 +53,11 @@ def configure_openjiuwen_logging_under_jiuwenclaw(subdir: str = "openjiuwen") ->
         if config.get("log_path") == target:
             return
 
+        # Patch log format to match JiuwenClaw format
+        config["format"] = (
+            "%(asctime)s.%(msecs)03d [%(process)d] %(levelname)s "
+            "%(log_type)s %(filename)s:%(lineno)d: %(message)s"
+        )
         config["log_path"] = target
         configure_log_config(config)
     except Exception as exc:
