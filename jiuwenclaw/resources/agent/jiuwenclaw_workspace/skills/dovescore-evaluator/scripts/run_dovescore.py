@@ -4,21 +4,24 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import os
 import sys
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
+logger = logging.getLogger(__name__)
+
 
 def _read_text(value: str | None, file_path: str | None, label: str) -> str:
     if value and file_path:
-        raise SystemExit(f"Pass either --{label} or --{label}-file, not both.")
+        raise ValueError(f"Pass either --{label} or --{label}-file, not both.")
     if file_path:
         return Path(file_path).expanduser().read_text(encoding="utf-8")
     if value:
         return value
-    raise SystemExit(f"Missing input: pass --{label} or --{label}-file.")
+    raise ValueError(f"Missing input: pass --{label} or --{label}-file.")
 
 
 def _flatten_text(text: str) -> str:
@@ -60,27 +63,30 @@ def parse_args() -> argparse.Namespace:
 
 
 def main() -> int:
+    logging.basicConfig(level=logging.ERROR, format="%(message)s")
     args = parse_args()
-    source = _flatten_text(_read_text(args.source, args.source_file, "source"))
-    target = _flatten_text(_read_text(args.target, args.target_file, "target"))
+    try:
+        source = _flatten_text(_read_text(args.source, args.source_file, "source"))
+        target = _flatten_text(_read_text(args.target, args.target_file, "target"))
+    except (OSError, ValueError) as exc:
+        logger.error("%s", exc)
+        return 2
 
     try:
         from DoveScore import DoveScoreEvaluator
     except ImportError as exc:
-        print(
+        logger.error(
             "DoveScore is not installed. Install JiuwenClaw with "
             "`pip install -e \".[dovescore]\"` or install the local DoveScore repo "
-            "with `pip install -e /path/to/DoveScore`.",
-            file=sys.stderr,
+            "with `pip install -e /path/to/DoveScore`."
         )
-        print(f"Import error: {exc}", file=sys.stderr)
+        logger.error("Import error: %s", exc)
         return 2
 
     if not args.api_key:
-        print(
+        logger.error(
             "Missing API key. Set OPENAI_API_KEY or DOVESCORE_API_KEY, "
-            "or pass --api-key.",
-            file=sys.stderr,
+            "or pass --api-key."
         )
         return 2
 
@@ -92,7 +98,7 @@ def main() -> int:
     rendered = json.dumps(result, ensure_ascii=False, indent=indent)
     if args.output:
         Path(args.output).expanduser().write_text(rendered + "\n", encoding="utf-8")
-    print(rendered)
+    sys.stdout.write(rendered + "\n")
     return 0
 
 
