@@ -239,6 +239,8 @@ _ASK_TOOL_CARD = ToolCard(
         "properties": {
             "questions": {
                 "type": ["array", "string"],
+                # OpenAI 等校验器要求 array 必须带 items；对 string 实例 items 不适用。
+                "items": {"type": "object"},
                 "description": "问题列表：JSON 数组，或 JSON 数组的字符串形式",
             },
             "timeout": {
