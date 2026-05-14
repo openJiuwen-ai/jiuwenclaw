@@ -21,6 +21,8 @@ dependencies = [
     "aiosqlite>=0.20",
     "structlog>=24.0",
     "aio-pika>=9.4",
+    "pyyaml>=6.0",
+    "openjiuwen_runtime_foundation @ git+https://gitcode.com/openJiuwen/agent-runtime.git@refs/heads/develop#subdirectory=foundation",
 ]
 
 [project.optional-dependencies]

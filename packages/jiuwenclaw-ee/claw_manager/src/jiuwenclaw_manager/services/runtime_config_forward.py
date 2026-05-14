@@ -32,6 +32,7 @@ class RuntimeConfigForwardService:
         relative_path: str,
         *,
         json_body: dict[str, Any] | None = None,
+        params: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         base = await resolve_management_api_base(self._repo, jiuwenclaw_id)
         url = f"{base}{AGENT_CLIENT_INSTANCES_PREFIX}{relative_path}"
@@ -40,6 +41,7 @@ class RuntimeConfigForwardService:
                 method,
                 url,
                 json=json_body,
+                params=params,
                 headers=self._headers or None,
             )
         except httpx.RequestError as exc:
@@ -66,6 +68,22 @@ class RuntimeConfigForwardService:
 
     async def create_model(self, jiuwenclaw_id: str, body: dict[str, Any]) -> dict[str, Any]:
         return await self._request("POST", jiuwenclaw_id, "/models", json_body=body)
+
+    async def list_models(
+        self,
+        jiuwenclaw_id: str,
+        *,
+        model_type: str | None = None,
+        enabled: bool | None = None,
+        page_size: int = 20,
+        page_num: int = 1,
+    ) -> dict[str, Any]:
+        q: dict[str, Any] = {"page_size": page_size, "page_num": page_num}
+        if model_type is not None:
+            q["model_type"] = model_type
+        if enabled is not None:
+            q["enabled"] = enabled
+        return await self._request("GET", jiuwenclaw_id, "/models", params=q)
 
     async def update_model(self, jiuwenclaw_id: str, model_id: int, body: dict[str, Any]) -> dict[str, Any]:
         return await self._request("PUT", jiuwenclaw_id, f"/models/{model_id}", json_body=body)

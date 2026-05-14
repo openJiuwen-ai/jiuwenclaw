@@ -93,6 +93,18 @@ class AgentWsServerStartHookContext:
 
 
 @dataclass
+class AgentServerListeningHookContext:
+    """WebSocket 服务端已成功 listen 后触发一次（非每个客户端连接）。"""
+
+    skills_dir: str
+    host: str
+    port: int
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass
 class SystemPromptHookContext:
     # 扩展可设置此目录，用于覆盖默认的 home_dir
     home_dir: str | None = None

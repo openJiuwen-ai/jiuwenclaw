@@ -1801,6 +1801,7 @@ async def _run(
         if heartbeat_enabled:
             await heartbeat_service.stop()
         await message_handler.stop_forwarding()
+        await extension_manager.shutdown_all_extensions()
         await client.disconnect()
         logger.info("[App] Gateway stopped")
 

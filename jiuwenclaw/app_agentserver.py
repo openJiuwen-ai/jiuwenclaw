@@ -147,6 +147,7 @@ async def _run(host: str, port: int) -> None:
         pass
     finally:
         logger.info("[AgentServer] stopping…")
+        await extension_manager.shutdown_all_extensions()
         await server.stop()
         logger.info("[AgentServer] stopped")
 

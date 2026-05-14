@@ -9,7 +9,14 @@ from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from jiuwenclaw_manager.api.deps import get_db
-from jiuwenclaw_manager.models.schemas import ApiResponse, CreateInstanceBody, PatchInstanceDataBody
+from jiuwenclaw_manager.config import settings
+from jiuwenclaw_manager.models.schemas import (
+    ApiResponse,
+    CreateInstanceBody,
+    PatchInstanceDataBody,
+    ProvisionLocalInstanceBody,
+)
+from jiuwenclaw_manager.services.instance_provisioner import provision_local_jiuwenclaw
 from jiuwenclaw_manager.services.instance_service import InstanceService
 
 router = APIRouter(prefix="/instances", tags=["instances"])
@@ -30,6 +37,28 @@ class HeartbeatIngestBody(BaseModel):
 
 def _svc(session: AsyncSession) -> InstanceService:
     return InstanceService(session)
+
+
+@router.post("/provision-local", response_model=ApiResponse)
+async def provision_local_instance(
+    body: ProvisionLocalInstanceBody,
+    session: Annotated[AsyncSession, Depends(get_db)],
+):
+    try:
+        data = await provision_local_jiuwenclaw(
+            session,
+            settings,
+            jiuwenclaw_name=body.jiuwenclaw_name,
+            creator_id=body.creator_id,
+            description=body.description,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+    except FileExistsError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return ApiResponse(data=data)
 
 
 @router.post("", response_model=ApiResponse)

@@ -23,6 +23,14 @@ class Settings(BaseSettings):
     # 调用组网内 agent_client REST（extensions.agent_client 挂载的 /api/v1/instances/*）
     upstream_http_timeout_seconds: float = 60.0
     upstream_api_key: str | None = None
+    # --- 本地拉起 Gateway + AgentServer（仅开发/联调；需显式开启）---
+    allow_local_provision: bool = False
+    provision_workspace_root: str = ".claw_provisioned_instances"
+    provision_python: str | None = None
+    provision_pythonpath: str | None = None
+    provision_repo_root: str | None = None
+    provision_extension_dirs: str | None = None
+    instance_config_template: str | None = None
 
 
 settings = Settings()

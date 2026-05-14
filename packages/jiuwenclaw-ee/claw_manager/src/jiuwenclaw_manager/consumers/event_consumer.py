@@ -2,11 +2,9 @@
 
 from __future__ import annotations
 
-import json
 from typing import Any
 
-import aio_pika
-from aio_pika import ExchangeType, IncomingMessage
+from openjiuwen_runtime.foundation.messaging import consume_topic_json_forever
 
 from jiuwenclaw_manager.config import settings
 from jiuwenclaw_manager.infrastructure.db import get_session_factory
@@ -42,41 +40,28 @@ async def start_consumer() -> None:
         manager_id=settings.manager_id,
     )
 
-    connection = await aio_pika.connect_robust(url)
-    async with connection:
-        channel = await connection.channel()
-        await channel.set_qos(prefetch_count=20)
-
-        exchange = await channel.declare_exchange(
-            settings.rabbitmq_exchange,
-            ExchangeType.TOPIC,
-            durable=True,
-        )
-        queue = await channel.declare_queue(queue_name, durable=True, auto_delete=False)
-        await queue.bind(exchange, routing_key=settings.rabbitmq_routing_key)
-
-        async with queue.iterator() as queue_iter:
-            async for message in queue_iter:
-                await _handle_message(message)
-
-    _log.info("rabbitmq_consumer_stopped")
-
-
-async def _handle_message(message: IncomingMessage) -> None:
-    routing_key = message.routing_key or ""
-    async with message.process(requeue=False):
-        try:
-            raw = message.body.decode("utf-8")
-            body: Any = json.loads(raw)
-        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-            _log.warning("rabbitmq_bad_encoding_or_json", routing_key=routing_key, error=str(exc))
-            return
-        if not isinstance(body, dict):
-            _log.warning("rabbitmq_body_not_object", routing_key=routing_key)
-            return
-
+    async def _handler(body: dict[str, Any], routing_key: str) -> None:
         factory = get_session_factory()
         async with factory() as session:
             svc = InstanceService(session)
-            await svc.process_instance_mq_payload(body, routing_key)
-            await session.commit()
+            try:
+                await svc.process_instance_mq_payload(body, routing_key)
+                await session.commit()
+            except ValueError as exc:
+                await session.rollback()
+                _log.warning(
+                    "rabbitmq_instance_event_skipped",
+                    routing_key=routing_key,
+                    error=str(exc),
+                )
+
+    await consume_topic_json_forever(
+        amqp_url=url,
+        exchange_name=settings.rabbitmq_exchange,
+        routing_key_pattern=settings.rabbitmq_routing_key,
+        queue_name=queue_name,
+        prefetch_count=20,
+        handler=_handler,
+    )
+
+    _log.info("rabbitmq_consumer_stopped")

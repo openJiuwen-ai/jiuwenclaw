@@ -4,10 +4,12 @@ import threading
 from typing import Any
 
 from jiuwenclaw.config import get_config
+from jiuwenclaw.extensions.registry import ExtensionRegistry
 from jiuwenclaw.extensions.sdk.base import BaseExtension
 from jiuwenclaw.extensions.types import ExtensionConfig
 
 from .agent_client_rest.app import create_app
+from .claw_manager_reporting import register_claw_manager_dmq_hooks, shutdown_reporting_task
 
 
 class AgentClientRestExtension(BaseExtension):
@@ -50,6 +52,13 @@ class AgentClientRestExtension(BaseExtension):
         self._server_thread = None
 
 
+class ClawManagerDmqLifecycleExtension:
+    """仅用于进程退出时 cancel DMQ 心跳任务并发布 offline（无独立 extension.yaml）。"""
+
+    async def shutdown(self) -> None:
+        await shutdown_reporting_task()
+
+
 def _resolve_rest_config() -> tuple[bool, str, int]:
     cfg = get_config()
     ext_cfg = cfg.get("extensions") if isinstance(cfg, dict) else {}
@@ -57,17 +66,24 @@ def _resolve_rest_config() -> tuple[bool, str, int]:
     if not isinstance(rest_cfg, dict):
         rest_cfg = {}
 
-    enabled = bool(rest_cfg.get("enabled", True))
+    raw_en = rest_cfg.get("enabled", True)
+    if isinstance(raw_en, bool):
+        enabled = raw_en
+    elif isinstance(raw_en, str):
+        enabled = raw_en.strip().lower() in ("true", "1", "yes", "on")
+    else:
+        enabled = bool(raw_en)
     host = str(rest_cfg.get("host") or "127.0.0.1").strip()
     port = int(rest_cfg.get("port") or 18080)
     return enabled, host, port
 
 
-async def register_extensions(registry):
+async def register_extensions(registry: ExtensionRegistry) -> list[Any]:
+    register_claw_manager_dmq_hooks(registry)
+    loaded: list[Any] = [ClawManagerDmqLifecycleExtension()]
     enabled, host, port = _resolve_rest_config()
-    if not enabled:
-        return []
-
-    ext = AgentClientRestExtension(host=host, port=port)
-    await ext.initialize(registry.config)
-    return [ext]
+    if enabled:
+        rest = AgentClientRestExtension(host=host, port=port)
+        await rest.initialize(registry.config)
+        loaded.insert(0, rest)
+    return loaded

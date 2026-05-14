@@ -6,6 +6,7 @@ author: jiuwenclaw
 min_jiuwenclaw_version: "0.1.0"
 dependencies:
   openjiuwen_runtime_foundation: " @ git+https://gitcode.com/openJiuwen/agent-runtime.git@refs/heads/develop#subdirectory=foundation"
+  aio-pika: ">=9.4"
   fastapi: ">=0.100.0"
   uvicorn: ">=0.23.0"
 config_schema:

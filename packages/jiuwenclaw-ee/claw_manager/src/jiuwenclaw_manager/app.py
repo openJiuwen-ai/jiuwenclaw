@@ -6,7 +6,7 @@ import asyncio
 from contextlib import asynccontextmanager
 
 import httpx
-from fastapi import FastAPI
+from fastapi import APIRouter, FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from jiuwenclaw_manager import __version__
@@ -53,7 +53,7 @@ async def lifespan(application: FastAPI):  # 改名 app -> application
             await consumer_task
         except asyncio.CancelledError:
             pass
-    await application.state.http_client.aclose()  # 使用新的参数名
+    await application.state.http_client.aclose()
     await dispose_engine()
     _log.info("shutdown")
 
@@ -65,8 +65,23 @@ def create_app() -> FastAPI:
         version=__version__,
         lifespan=lifespan,
     )
-    # ... 其余代码保持不变 ...
+    application.add_middleware(
+        CORSMiddleware,
+        allow_origins=["*"],
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
+    api_v1 = APIRouter(prefix="/api/v1")
+    api_v1.include_router(instances_router)
+    api_v1.include_router(runtime_config_router)
+    application.include_router(api_v1)
+
+    @application.get("/health")
+    async def health() -> dict[str, str]:
+        return {"status": "ok"}
+
     return application
 
 
-app = create_app()  # 这里的全局变量 app 不再冲突
+app = create_app()

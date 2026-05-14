@@ -1,11 +1,11 @@
-"""将 Manager 配置操作转发到组网内 agent_client REST（routers/application_config、distributed_service、physical_resource）。"""
+"""将 Manager 配置操作转发到组网内 agent_client REST（/api/v1/instances/...）。"""
 
 from __future__ import annotations
 
 from typing import Annotated
 
 import httpx
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from jiuwenclaw_manager.api.deps import get_db, get_http_client
@@ -21,7 +21,7 @@ from jiuwenclaw_manager.models.upstream_payloads import (
 )
 from jiuwenclaw_manager.services.runtime_config_forward import RuntimeConfigForwardService
 
-router = APIRouter(tags=["runtime-config"])
+router = APIRouter(prefix="/instances", tags=["runtime-config"])
 
 
 def _svc(session: AsyncSession, client: httpx.AsyncClient) -> RuntimeConfigForwardService:
@@ -39,7 +39,32 @@ def _require_ok(out: dict) -> dict:
     raise HTTPException(status_code=int(out.get("http_status", 502)), detail=out.get("upstream"))
 
 
-@router.post("/{jiuwenclaw_id}/runtime/models", response_model=ApiResponse)
+@router.get("/{jiuwenclaw_id}/models", response_model=ApiResponse)
+async def forward_list_models(
+    jiuwenclaw_id: str,
+    session: Annotated[AsyncSession, Depends(get_db)],
+    client: Annotated[httpx.AsyncClient, Depends(get_http_client)],
+    model_type: str | None = None,
+    enabled: bool | None = None,
+    page_size: int = Query(20, ge=1, le=200),
+    page_num: int = Query(1, ge=1),
+):
+    try:
+        out = _require_ok(
+            await _svc(session, client).list_models(
+                jiuwenclaw_id,
+                model_type=model_type,
+                enabled=enabled,
+                page_size=page_size,
+                page_num=page_num,
+            )
+        )
+    except httpx.RequestError as exc:
+        raise HTTPException(status_code=502, detail=f"upstream unreachable: {exc}") from exc
+    return ApiResponse(data=out)
+
+
+@router.post("/{jiuwenclaw_id}/models", response_model=ApiResponse)
 async def forward_create_model(
     jiuwenclaw_id: str,
     body: ModelConfigCreateBody,
@@ -53,7 +78,7 @@ async def forward_create_model(
     return ApiResponse(data=out)
 
 
-@router.put("/{jiuwenclaw_id}/runtime/models/{model_id}", response_model=ApiResponse)
+@router.put("/{jiuwenclaw_id}/models/{model_id}", response_model=ApiResponse)
 async def forward_update_model(
     jiuwenclaw_id: str,
     model_id: int,
@@ -72,7 +97,7 @@ async def forward_update_model(
     return ApiResponse(data=out)
 
 
-@router.delete("/{jiuwenclaw_id}/runtime/models/{model_id}", response_model=ApiResponse)
+@router.delete("/{jiuwenclaw_id}/models/{model_id}", response_model=ApiResponse)
 async def forward_delete_model(
     jiuwenclaw_id: str,
     model_id: int,
@@ -86,7 +111,7 @@ async def forward_delete_model(
     return ApiResponse(data=out)
 
 
-@router.post("/{jiuwenclaw_id}/runtime/channels", response_model=ApiResponse)
+@router.post("/{jiuwenclaw_id}/channels", response_model=ApiResponse)
 async def forward_create_channel(
     jiuwenclaw_id: str,
     body: ChannelConfigCreateBody,
@@ -102,7 +127,7 @@ async def forward_create_channel(
     return ApiResponse(data=out)
 
 
-@router.post("/{jiuwenclaw_id}/runtime/channels/{channel_id}/activate", response_model=ApiResponse)
+@router.post("/{jiuwenclaw_id}/channels/{channel_id}/activate", response_model=ApiResponse)
 async def forward_activate_channel(
     jiuwenclaw_id: str,
     channel_id: str,
@@ -116,7 +141,7 @@ async def forward_activate_channel(
     return ApiResponse(data=out)
 
 
-@router.post("/{jiuwenclaw_id}/runtime/channels/{channel_id}/deactivate", response_model=ApiResponse)
+@router.post("/{jiuwenclaw_id}/channels/{channel_id}/deactivate", response_model=ApiResponse)
 async def forward_deactivate_channel(
     jiuwenclaw_id: str,
     channel_id: str,
@@ -130,7 +155,7 @@ async def forward_deactivate_channel(
     return ApiResponse(data=out)
 
 
-@router.delete("/{jiuwenclaw_id}/runtime/channels/{channel_id}", response_model=ApiResponse)
+@router.delete("/{jiuwenclaw_id}/channels/{channel_id}", response_model=ApiResponse)
 async def forward_delete_channel(
     jiuwenclaw_id: str,
     channel_id: str,
@@ -144,7 +169,7 @@ async def forward_delete_channel(
     return ApiResponse(data=out)
 
 
-@router.put("/{jiuwenclaw_id}/runtime/session-affinity", response_model=ApiResponse)
+@router.put("/{jiuwenclaw_id}/session-affinity", response_model=ApiResponse)
 async def forward_put_session_affinity(
     jiuwenclaw_id: str,
     body: SessionAffinityPolicyUpdateBody,
@@ -162,7 +187,7 @@ async def forward_put_session_affinity(
     return ApiResponse(data=out)
 
 
-@router.put("/{jiuwenclaw_id}/runtime/isolation-policies/{policy_id}", response_model=ApiResponse)
+@router.put("/{jiuwenclaw_id}/isolation-policies/{policy_id}", response_model=ApiResponse)
 async def forward_put_isolation_policy(
     jiuwenclaw_id: str,
     policy_id: int,
@@ -181,7 +206,7 @@ async def forward_put_isolation_policy(
     return ApiResponse(data=out)
 
 
-@router.put("/{jiuwenclaw_id}/runtime/agent-server/config", response_model=ApiResponse)
+@router.put("/{jiuwenclaw_id}/agent-server/config", response_model=ApiResponse)
 async def forward_put_agent_server_config(
     jiuwenclaw_id: str,
     body: AgentServerConfigUpdateBody,
@@ -199,7 +224,7 @@ async def forward_put_agent_server_config(
     return ApiResponse(data=out)
 
 
-@router.put("/{jiuwenclaw_id}/runtime/resources", response_model=ApiResponse)
+@router.put("/{jiuwenclaw_id}/resources", response_model=ApiResponse)
 async def forward_put_resources(
     jiuwenclaw_id: str,
     body: ResourceConfigUpdateBody,

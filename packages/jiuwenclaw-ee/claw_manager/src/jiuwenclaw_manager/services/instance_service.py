@@ -97,9 +97,12 @@ class InstanceService:
         )
 
     async def delete(self, jiuwenclaw_id: str) -> bool:
+        from jiuwenclaw_manager.services.instance_provisioner import terminate_local_if_present
+
         row = await self._repo.get(jiuwenclaw_id)
         if row is None:
             return False
+        await terminate_local_if_present(self._session, jiuwenclaw_id)
         await self._repo.delete(row)
         return True
 
