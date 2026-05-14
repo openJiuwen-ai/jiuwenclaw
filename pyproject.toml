@@ -103,6 +103,9 @@ jiuwenclaw = [
     "resources/**/*",
     "resources/*",
     "resources/.env.template",
+    # vendor 嵌入依赖（通过 --vendor 构建）
+    "vendor/**/*",
+    "vendor/*",
 ]
 
 [tool.setuptools.exclude-package-data]

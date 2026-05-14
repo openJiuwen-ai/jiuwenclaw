@@ -2,11 +2,26 @@
 # JiuwenClaw 打包脚本
 # 1. 编译前端 (jiuwenclaw/web)
 # 2. 构建 wheel 包（包含前端 dist）
+# 3. 构建 TUI wheel 包
+#
+# 注意: 此脚本不嵌入 vendor 依赖。
+#       如果之前用 build_release.sh --vendor 打包过，会自动清理 vendor 子目录。
 
 set -e
 PROJECT_ROOT="$(cd "$(dirname "$(dirname "$0")")" && pwd)"
 
 echo "[build] 项目根目录: $PROJECT_ROOT"
+
+# 清理 vendor 子目录（避免打包残留的嵌入依赖）
+VENDOR_DIR="$PROJECT_ROOT/jiuwenclaw/vendor"
+if [[ -d "$VENDOR_DIR/openjiuwen" ]]; then
+    echo "[build] 清理残留 vendor/openjiuwen"
+    rm -rf "$VENDOR_DIR/openjiuwen"
+fi
+if [[ -d "$VENDOR_DIR/openjiuwen_deepsearch" ]]; then
+    echo "[build] 清理残留 vendor/openjiuwen_deepsearch"
+    rm -rf "$VENDOR_DIR/openjiuwen_deepsearch"
+fi
 
 # 1. 编译前端
 WEB_DIR="$PROJECT_ROOT/jiuwenclaw/web"
