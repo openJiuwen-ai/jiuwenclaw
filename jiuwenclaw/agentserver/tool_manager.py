@@ -24,20 +24,16 @@ from jiuwenclaw.agentserver.tools.ephemeral_stdio_mcp_tool import (
 )
 from jiuwenclaw.agentserver.tools.mcp_toolkits import create_mcp_tool
 
-_CAT_CAFE_SERVER_NAME_PREFIX = "cat-cafe"
-_REQUEST_SCOPED_CAT_CAFE_SERVER_ID = "cat-cafe-request"
+_OFFICE_CLAW_SERVER_NAME_PREFIX = "office-claw"
+_REQUEST_SCOPED_OFFICE_CLAW_SERVER_ID = "office-claw-request"
 
 # 请求级 stdio 参数：每个异步上下文独立，避免并发请求间配置串台
-_CAT_CAFE_STDIO_PARAMS: ContextVar[dict[str, Any]] = ContextVar("_CAT_CAFE_STDIO_PARAMS", default={})
+_OFFICE_CLAW_STDIO_PARAMS: ContextVar[dict[str, Any]] = ContextVar("_OFFICE_CLAW_STDIO_PARAMS", default={})
 
 
-def _get_cat_cafe_stdio_params() -> dict[str, Any]:
+def _get_office_claw_stdio_params() -> dict[str, Any]:
     """回调函数：供 EphemeralStdioMcpTool 在 invoke 时获取当前请求级的 stdio 参数。"""
-    return _CAT_CAFE_STDIO_PARAMS.get()
-
-
-_CAT_CAFE_SERVER_NAME_PREFIX = "cat-cafe"
-_REQUEST_SCOPED_CAT_CAFE_SERVER_ID = "cat-cafe-request"
+    return _OFFICE_CLAW_STDIO_PARAMS.get()
 
 
 def _mcp_add_result_is_ok(result: Any) -> bool:
@@ -207,8 +203,8 @@ class ToolManager:
         """
         self._get_agent = get_agent
         self._get_tools_dir = get_tools_dir
-        # (tool_id, tool_name)，请求级 Cat Cafe stdio 走 ephemeral 注册时用于下次替换前卸载
-        self._cat_cafe_ephemeral_tools: list[tuple[str, str]] = []
+        # (tool_id, tool_name)，请求级 Office Claw stdio 走 ephemeral 注册时用于下次替换前卸载
+        self._office_claw_ephemeral_tools: list[tuple[str, str]] = []
 
     def _resolve_tools_dir(self) -> Path:
         if self._get_tools_dir is not None:
@@ -358,19 +354,19 @@ class ToolManager:
             "errors": errors,
         }
 
-    async def register_request_scoped_cat_cafe_mcp(self, cfg: dict[str, Any]) -> dict[str, Any]:
-        """按请求注册 Cat Cafe MCP；stdio 工具以单次 invoke 模式执行。"""
+    async def register_request_scoped_office_claw_mcp(self, cfg: dict[str, Any]) -> dict[str, Any]:
+        """按请求注册 Office Claw MCP；stdio 工具以单次 invoke 模式执行。"""
         if not isinstance(cfg, dict):
-            raise ValueError("cat_cafe_mcp 必须是对象")
+            raise ValueError("office_claw_mcp 必须是对象")
 
         agent = self._get_agent() if self._get_agent else None
         if agent is None:
             raise RuntimeError("JiuWenClaw 未初始化，请先调用 create_instance()")
 
+        mcp_servers = getattr(agent.ability_manager, "_mcp_servers", {})
         names_to_remove = [
-            name
-            for name in getattr(agent.ability_manager, "_mcp_servers", {}).keys()
-            if isinstance(name, str) and (name == _CAT_CAFE_SERVER_NAME_PREFIX or name.startswith(f"{_CAT_CAFE_SERVER_NAME_PREFIX}-"))
+            name for name in mcp_servers
+            if isinstance(name, str) and name.startswith(_OFFICE_CLAW_SERVER_NAME_PREFIX)
         ]
         for server_name in names_to_remove:
             get_server_ids = getattr(Runner.resource_mgr, "get_mcp_server_ids", None)
@@ -379,12 +375,13 @@ class ToolManager:
                 try:
                     await Runner.resource_mgr.remove_tool_server(server_id, ignore_not_exist=True)
                 except Exception as exc:
-                    logger.warning("[ToolManager] 移除旧的 Cat Cafe MCP 失败 name=%s id=%s: %s", server_name, server_id, exc)
+                    logger.warning("[ToolManager] 移除旧的 Office Claw MCP 失败 name=%s id=%s: %s",
+                        server_name, server_id, exc)
             agent.ability_manager.remove(server_name)
 
         record = {
-            "name": _CAT_CAFE_SERVER_NAME_PREFIX,
-            "server_id": _REQUEST_SCOPED_CAT_CAFE_SERVER_ID,
+            "name": _OFFICE_CLAW_SERVER_NAME_PREFIX,
+            "server_id": _REQUEST_SCOPED_OFFICE_CLAW_SERVER_ID,
             **cfg,
         }
         single_json = json.dumps(record, ensure_ascii=False)
@@ -393,13 +390,13 @@ class ToolManager:
         # stdio：不经过 add_mcp_server，每工具每次 invoke 单独起停子进程，避免会话间状态串台
         if getattr(mcp_cfg, "client_type", "") == "stdio":
             stdio_sp = stdio_params_from_mcp_config(mcp_cfg.params or {})
-            _CAT_CAFE_STDIO_PARAMS.set(stdio_sp)
+            _OFFICE_CLAW_STDIO_PARAMS.set(stdio_sp)
 
-            if not self._cat_cafe_ephemeral_tools:
+            if not self._office_claw_ephemeral_tools:
                 try:
                     tool_defs = await list_stdio_mcp_tool_defs(mcp_cfg.params or {})
                 except Exception as exc:
-                    raise RuntimeError(f"列举 Cat Cafe stdio MCP 工具失败: {exc}") from exc
+                    raise RuntimeError(f"列举 Office Claw stdio MCP 工具失败: {exc}") from exc
                 for td in tool_defs:
                     tname = td["name"]
                     tool_id = f"{mcp_cfg.server_id}.{mcp_cfg.server_name}.{tname}"
@@ -409,30 +406,30 @@ class ToolManager:
                         description=td.get("description") or "",
                         input_params=td.get("input_params") or {},
                     )
-                    ephemeral = EphemeralStdioMcpTool(card, _get_cat_cafe_stdio_params)
+                    ephemeral = EphemeralStdioMcpTool(card, _get_office_claw_stdio_params)
                     add_res = Runner.resource_mgr.add_tool(ephemeral, tag=mcp_cfg.server_name)
                     if add_res is not None and hasattr(add_res, "is_ok") and not add_res.is_ok():
                         err = _mcp_add_result_error_text(add_res)
                         if "already exist" not in err.lower():
-                            raise RuntimeError(f"注册 ephemeral Cat Cafe 工具失败 {tname}: {err}")
+                            raise RuntimeError(f"注册 ephemeral Office Claw 工具失败 {tname}: {err}")
                         logger.info(
-                            "[ToolManager] ephemeral Cat Cafe 工具已存在，复用现有资源 tool=%s id=%s err=%s",
+                            "[ToolManager] ephemeral Office Claw 工具已存在，复用现有资源 tool=%s id=%s err=%s",
                             tname,
                             tool_id,
                             err,
                         )
                     agent.ability_manager.add(card)
-                    self._cat_cafe_ephemeral_tools.append((tool_id, tname))
+                    self._office_claw_ephemeral_tools.append((tool_id, tname))
                 logger.info(
-                    "[ToolManager] 已注册请求级 Cat Cafe MCP（stdio 每调用隔离）name=%s id=%s tools=%s",
+                    "[ToolManager] 已注册请求级 Office Claw MCP（stdio 每调用隔离）name=%s id=%s tools=%s",
                     mcp_cfg.server_name,
                     mcp_cfg.server_id,
-                    [t[1] for t in self._cat_cafe_ephemeral_tools],
+                    [t[1] for t in self._office_claw_ephemeral_tools],
                 )
             else:
                 logger.info(
-                    "[ToolManager] 已有 ephemeral Cat Cafe 工具，仅更新 stdio 参数 tools=%s",
-                    [t[1] for t in self._cat_cafe_ephemeral_tools],
+                    "[ToolManager] 已有 ephemeral Office Claw 工具，仅更新 stdio 参数 tools=%s",
+                    [t[1] for t in self._office_claw_ephemeral_tools],
                 )
             return {
                 "registered": True,
@@ -441,7 +438,7 @@ class ToolManager:
             }
 
         await _add_mcp_server_and_ability(agent, mcp_cfg, tag=mcp_cfg.server_name)
-        logger.info("[ToolManager] 已注册请求级 Cat Cafe MCP name=%s id=%s", mcp_cfg.server_name, mcp_cfg.server_id)
+        logger.info("[ToolManager] 已注册请求级 Office Claw MCP name=%s id=%s", mcp_cfg.server_name, mcp_cfg.server_id)
         return {
             "registered": True,
             "name": mcp_cfg.server_name,

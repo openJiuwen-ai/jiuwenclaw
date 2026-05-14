@@ -897,13 +897,13 @@ class JiuWenClaw:
             inputs["memory_block"] = memory_block
 
         async def run_agent_task():
-            # 注册 Cat Cafe MCP（请求级环境变量）
-            cat_cafe_mcp = request.params.get("cat_cafe_mcp")
-            if isinstance(cat_cafe_mcp, dict):
+            # 注册 Office Claw MCP（请求级环境变量）
+            office_claw_mcp = request.params.get("office_claw_mcp")
+            if isinstance(office_claw_mcp, dict):
                 try:
-                    await self._get_tool_manager().register_request_scoped_cat_cafe_mcp(cat_cafe_mcp)
+                    await self._get_tool_manager().register_request_scoped_office_claw_mcp(office_claw_mcp)
                 except Exception as exc:
-                    logger.warning("[JiuWenClaw] cat_cafe_mcp 注册失败: %s", exc)
+                    logger.warning("[JiuWenClaw] office_claw_mcp 注册失败: %s", exc)
             return await adapter.process_message_impl(request, inputs)
 
         result = await self._session_manager.submit_and_wait(session_id, run_agent_task)
@@ -1041,13 +1041,13 @@ class JiuWenClaw:
 
         async def run_stream_task():
             try:
-                # 注册 Cat Cafe MCP（请求级环境变量）
-                cat_cafe_mcp = request.params.get("cat_cafe_mcp")
-                if isinstance(cat_cafe_mcp, dict):
+                # 注册 Office Claw MCP（请求级环境变量）
+                office_claw_mcp = request.params.get("office_claw_mcp")
+                if isinstance(office_claw_mcp, dict):
                     try:
-                        await self._get_tool_manager().register_request_scoped_cat_cafe_mcp(cat_cafe_mcp)
+                        await self._get_tool_manager().register_request_scoped_office_claw_mcp(office_claw_mcp)
                     except Exception as exc:
-                        logger.warning("[JiuWenClaw] cat_cafe_mcp 注册失败: %s", exc)
+                        logger.warning("[JiuWenClaw] office_claw_mcp 注册失败: %s", exc)
                 async for chunk in adapter.process_message_stream_impl(request, inputs):
                     await stream_queue.put(("chunk", chunk))
             except asyncio.CancelledError:
