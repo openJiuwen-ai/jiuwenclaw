@@ -10,7 +10,7 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
-CLI_ENTRY = ROOT / "jiuwenclaw" / "cli" / "src" / "index.ts"
+TUI_ENTRY = ROOT / "jiuwenclaw" / "channels" / "tui" / "frontend" / "src" / "index.ts"
 OUTPUT_ROOT = ROOT / "packages" / "jiuwenclaw-tui" / "jiuwenclaw_tui" / "resources" / "tui-bin"
 
 TARGETS = {
@@ -85,7 +85,7 @@ def build_target(platform_key: str) -> Path:
         bun_target,
         "--outfile",
         str(output_path),
-        str(CLI_ENTRY),
+        str(TUI_ENTRY),
     ]
     subprocess.run(cmd, cwd=ROOT, check=True)
 
@@ -111,8 +111,8 @@ def main() -> None:
 
     if shutil.which("bun") is None:
         raise SystemExit("bun is required to build jiuwenclaw-tui binaries")
-    if not CLI_ENTRY.exists():
-        raise SystemExit(f"CLI entry not found: {CLI_ENTRY}")
+    if not TUI_ENTRY.exists():
+        raise SystemExit(f"CLI entry not found: {TUI_ENTRY}")
 
     if args.clean and OUTPUT_ROOT.exists():
         shutil.rmtree(OUTPUT_ROOT)

@@ -3,7 +3,7 @@ r"""JiuwenClaw PyInstaller 打包配置。
 
 构建前请先：
 1. 安装依赖: uv sync --extra dev
-2. 构建前端: cd jiuwenclaw/web && npm run build
+2. 构建前端: cd jiuwenclaw/channels/web/frontend && npm run build
 3. 执行打包: .\scripts\build-exe.ps1  或  uv run pyinstaller scripts/jiuwenclaw.spec
 """
 
@@ -50,16 +50,16 @@ elif sys.platform == "darwin":
     ])
 
 # 检查前端是否已构建
-web_dist = os.path.join(project_root, "jiuwenclaw", "web", "dist")
+web_dist = os.path.join(project_root, "jiuwenclaw", "channels", "web", "frontend", "dist")
 if not os.path.isdir(web_dist) or not os.listdir(web_dist):
     raise SystemExit(
-        "错误: 请先构建前端。执行: cd jiuwenclaw/web && npm install && npm run build"
+        "错误: 请先构建前端。执行: cd jiuwenclaw/channels/web/frontend && npm install && npm run build"
     )
 
 # 数据文件：resources（含 agent 模板）、前端构建产物
 datas = webview_datas + [
     (os.path.join(project_root, "jiuwenclaw", "resources"), "jiuwenclaw/resources"),
-    (os.path.join(project_root, "jiuwenclaw", "web", "dist"), "jiuwenclaw/web/dist"),
+    (os.path.join(project_root, "jiuwenclaw", "channels", "web", "frontend", "dist"), "jiuwenclaw/channels/web/frontend/dist"),
 ]
 datas += copy_metadata("fastmcp", recursive=True)
 datas += copy_metadata("mcp", recursive=True)

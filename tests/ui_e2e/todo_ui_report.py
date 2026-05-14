@@ -31,12 +31,11 @@ except ImportError:
         resolve_runtime_python,
     )
 
-
 UI_E2E_ROOT = Path(__file__).resolve().parent
 REPO_ROOT = Path(__file__).resolve().parents[2]
-WEB_DIR = REPO_ROOT / "jiuwenclaw" / "web"
+WEB_DIR = REPO_ROOT / "jiuwenclaw" / "channels" / "web"
 WEB_DIST_DIR = WEB_DIR / "dist"
-APP_WEB = REPO_ROOT / "jiuwenclaw" / "app_web.py"
+APP_WEB = REPO_ROOT / "jiuwenclaw" / "channels" / "web" / "app_web.py"
 DEFAULT_HOME = Path.home()
 
 

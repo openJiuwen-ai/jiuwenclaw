@@ -97,8 +97,8 @@ A: Set `heartbeat.active_hours.start` / `end`, e.g. `09:00`–`18:00`.
 **Q: Heartbeat timeout?**  
 A: Set `HEARTBEAT_TIMEOUT` (seconds). On timeout the beat is marked failed and a WARNING is logged.
 
-**Q: Where must `HEARTBEAT.md` live?**  
-A: At the workspace root: `workspace/HEARTBEAT.md`, aligned with the agent workspace. Otherwise it is treated as no custom tasks.
+**Q: Where must `HEARTBEAT.md` live?**
+A: At the DeepAgent workspace root: `~/.jiuwenclaw/agent/jiuwenclaw_workspace/HEARTBEAT.md` (in installed mode) or `jiuwenclaw/resources/agent/jiuwenclaw_workspace/HEARTBEAT.md` (in source mode). Otherwise it is treated as no custom tasks.
 
 ---
 
@@ -106,5 +106,5 @@ A: At the workspace root: `workspace/HEARTBEAT.md`, aligned with the agent works
 
 - Service: `jiuwenclaw/gateway/heartbeat.py` (`GatewayHeartbeatService`, `HeartbeatConfig`).
 - Config: `config/config.py` (`update_heartbeat_in_config`); `app.py` builds `HeartbeatConfig` from YAML + env.
-- Agent: `jiuwenclaw/agentserver/interface.py` reads `workspace/HEARTBEAT.md` when `request.params` indicates heartbeat.
-- Web: `jiuwenclaw/web/src/components/HeartbeatPanel/`, `heartbeat.get_conf` / `heartbeat.set_conf`, `heartbeat.relay`.
+- Agent: `jiuwenclaw/server/runtime/agent_adapter/interface.py` reads `HEARTBEAT.md` when `request.params` indicates heartbeat.
+- Web: `jiuwenclaw/channels/web/frontend/src/components/HeartbeatPanel/`, `heartbeat.get_conf` / `heartbeat.set_conf`, `heartbeat.relay`.

@@ -43,7 +43,7 @@ logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("httpcore").setLevel(logging.WARNING)
 
 # Enable TeamManager logs
-logging.getLogger("jiuwenclaw.agentserver.team.team_manager").setLevel(logging.INFO)
+logging.getLogger("jiuwenclaw.agents.harness.team.team_manager").setLevel(logging.INFO)
 
 
 @dataclass
@@ -265,7 +265,7 @@ async def test_team_continuous_dialog(temp_home: Path, monkeypatch: pytest.Monke
 
     logger.info("Starting agent server on port %s", agent_port)
     agent_proc = _start_process(
-        [sys.executable, "-m", "jiuwenclaw.app_agentserver", "--port", str(agent_port)],
+        [sys.executable, "-m", "jiuwenclaw.server.app_agentserver", "--port", str(agent_port)],
         env=env,
         log_path=agent_log,
     )
@@ -275,7 +275,7 @@ async def test_team_continuous_dialog(temp_home: Path, monkeypatch: pytest.Monke
 
         logger.info("Starting gateway on port %s", web_port)
         gateway_proc = _start_process(
-            [sys.executable, "-m", "jiuwenclaw.app_gateway", "--port", str(web_port)],
+            [sys.executable, "-m", "jiuwenclaw.gateway.app_gateway", "--port", str(web_port)],
             env=env,
             log_path=gateway_log,
         )

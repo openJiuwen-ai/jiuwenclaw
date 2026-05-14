@@ -13,7 +13,7 @@ if errorlevel 1 exit /b 1
 
 echo.
 echo [2/3] 构建前端...
-cd jiuwenclaw\web
+cd jiuwenclaw\channels\web\frontend
 call npm install
 if errorlevel 1 (cd ..\.. & exit /b 1)
 call npm run build

@@ -59,13 +59,13 @@ uv sync --extra dev --upgrade-package openjiuwen
 前端为 React 应用，需先构建为静态文件，打包进 exe：
 
 ```bash
-cd jiuwenclaw/web
+cd jiuwenclaw/channels/web/frontend
 npm install
 npm run build
 cd ../..
 ```
 
-构建完成后，`jiuwenclaw/web/dist` 下会有静态文件。
+构建完成后，`jiuwenclaw/channels/web/frontend/dist` 下会有静态文件。
 
 #### 3. 执行打包
 
@@ -152,7 +152,7 @@ chmod +x scripts/build-macos.sh
 
 ### 1. 打包失败：找不到 web/dist
 
-先执行 `cd jiuwenclaw/web && npm run build`，确保 `jiuwenclaw/web/dist` 存在。
+先执行 `cd jiuwenclaw/channels/web/frontend && npm run build`，确保 `jiuwenclaw/channels/web/frontend/dist` 存在。
 
 ### 2. 运行 exe 报错 ModuleNotFoundError
 

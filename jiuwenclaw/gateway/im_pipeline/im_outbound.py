@@ -18,12 +18,12 @@ import re
 import secrets
 from typing import TYPE_CHECKING, Any
 
-from jiuwenclaw.config import _parse_custom_headers
-from jiuwenclaw.gateway.interaction_context import PendingInteraction
+from jiuwenclaw.common.config import _parse_custom_headers
+from jiuwenclaw.gateway.routing.interaction_context import PendingInteraction
 
 if TYPE_CHECKING:
     from jiuwenclaw.gateway.im_pipeline.im_inbound import IMPlatformAdapter
-    from jiuwenclaw.schema.message import Message
+    from jiuwenclaw.common.schema.message import Message
 
 logger = logging.getLogger(__name__)
 
@@ -72,7 +72,7 @@ class IMOutboundPipeline:
             return True
 
         try:
-            from jiuwenclaw.config import get_config
+            from jiuwenclaw.common.config import get_config
             cfg = get_config() or {}
         except Exception:
             cfg = {}
@@ -127,11 +127,6 @@ class IMOutboundPipeline:
 
     async def apply(self, msg: "Message") -> None:
         """对出站消息执行路由决策，结果写入 msg.metadata（原地修改）。"""
-        logger.info(
-            "[IMOutboundPipeline] apply 入口: channel=%s msg.id=%s group_digital_avatar=%s",
-            msg.channel_id, msg.id, msg.group_digital_avatar
-        )
-
         meta = dict(msg.metadata or {})
         is_digital_avatar = msg.group_digital_avatar or bool(meta.get("avatar_mode"))
         if not is_digital_avatar:

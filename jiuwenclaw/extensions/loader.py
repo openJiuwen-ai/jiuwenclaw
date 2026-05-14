@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Any
 
 from jiuwenclaw.extensions.registry import ExtensionRegistry
-from jiuwenclaw.utils import logger
+from jiuwenclaw.common.utils import logger
 
 MANIFEST_FILENAME = "extension.yaml"
 ENTRY_FILENAME = "extension.py"

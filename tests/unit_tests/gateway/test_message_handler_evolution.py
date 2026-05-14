@@ -2,7 +2,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from jiuwenclaw.gateway.message_handler import MessageHandler
+from jiuwenclaw.gateway.message_handler.message_handler import MessageHandler
 
 
 class _FakeAgentClient:

@@ -13,11 +13,11 @@ from typing import Any, Protocol
 from openjiuwen.core.foundation.llm import Model
 from openjiuwen.core.foundation.llm.schema.config import ModelClientConfig, ModelRequestConfig
 
-from jiuwenclaw.config import _parse_custom_headers
-from jiuwenclaw.gateway.interaction_context import PendingInteraction
-from jiuwenclaw.schema.message import Message, ReqMethod
-from jiuwenclaw.gateway.slash_command import CONTROL_MESSAGE_TEXTS
-from jiuwenclaw.utils import get_deepagent_user_md_path, logger
+from jiuwenclaw.common.config import _parse_custom_headers
+from jiuwenclaw.gateway.routing.interaction_context import PendingInteraction
+from jiuwenclaw.common.schema.message import Message, ReqMethod
+from jiuwenclaw.gateway.message_handler.command_parser.slash_command import CONTROL_MESSAGE_TEXTS
+from jiuwenclaw.common.utils import get_deepagent_user_md_path, logger
 SYSTEM_PROMPT_TEMPLATE = """
 你是{principal_name}的数字分身，活跃在即时通讯群聊中。当群里有其他用户发送与{principal_name}相关的消息时，你的任务是改写这条消息，使其更清晰、更完整，以便后续帮助{principal_name}生成恰当的回复。
 
@@ -154,7 +154,7 @@ class IMConversationProcessor:
     def _load_model_config(model_name_override: str | None = None) -> tuple[str, dict]:
         """与 react agent 一致的模型配置读取：config.yaml → 环境变量 → 默认值。"""
         try:
-            from jiuwenclaw.config import get_config
+            from jiuwenclaw.common.config import get_config
             cfg = get_config() or {}
         except Exception:
             cfg = {}
@@ -307,7 +307,7 @@ class IMConversationProcessor:
                 return True
             # 同时检查机器人名称（从配置读取）是否在文本中
             try:
-                from jiuwenclaw.config import get_config
+                from jiuwenclaw.common.config import get_config
                 cfg = get_config()
                 bot_name = str(
                     cfg.get("bot_name") or

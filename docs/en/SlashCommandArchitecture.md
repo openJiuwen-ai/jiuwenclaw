@@ -11,7 +11,7 @@ Slash-prefixed commands (`/`) are currently implemented in multiple places:
 
 - **Gateway**: `MessageHandler._handle_channel_control` handles `/new_session`, `/mode …`, etc. on controlled channels, deciding whether to **intercept and NOT forward to Agent**.
 - **IM Pipeline / Channels**: e.g. `gateway/im_pipeline/im_inbound.py` maintains its own control message set; Feishu/WeCom channels may have text-based checks that **diverge from the main logic**.
-- **CLI TUI**: `jiuwenclaw/cli/src/core/commands/` has a local registry; some commands call the backend via WebSocket, others are purely local.
+- **CLI TUI**: `jiuwenclaw/channels/tui/frontend/src/core/commands/` has a local registry; some commands call the backend via WebSocket, others are purely local.
 
 Without clear layering and a single source of truth, the project risks: **semantic inconsistencies for the same command name, documentation-code drift, and duplicated parsing logic in new channels.**
 

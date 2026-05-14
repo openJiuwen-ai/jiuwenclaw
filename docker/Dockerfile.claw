@@ -11,14 +11,14 @@ COPY --chown=app:app . /app/jiuwenclaw/
 USER app
 
 # Build web
-WORKDIR /app/jiuwenclaw/jiuwenclaw/web
+WORKDIR /app/jiuwenclaw/jiuwenclaw/channels/web/frontend
 RUN npm install
 RUN npm run build
 
 # Install server dependencies
 WORKDIR /app/jiuwenclaw
 ENV PATH=$PATH:/home/app/.local/bin
-RUN sed -i '/--host/ s/default="localhost"/default="0.0.0.0"/' /app/jiuwenclaw/jiuwenclaw/app_web.py
+RUN sed -i '/--host/ s/default="localhost"/default="0.0.0.0"/' /app/jiuwenclaw/jiuwenclaw/channels/web/app_web.py
 RUN pip install -i https://pypi.tuna.tsinghua.edu.cn/simple -e ".[all]" --no-cache-dir
 
 # Start claw app

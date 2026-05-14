@@ -57,14 +57,30 @@ def _get_agent_workspace_dir():
 
 # Load the real jiuwenclaw.utils (do NOT replace it in sys.modules — that
 # leaks str-returning stubs into every later test in the session). Patch
-# only the two attrs we need; the module-scoped autouse fixture in this
-# package's conftest.py restores them after this module's tests finish.
-import jiuwenclaw.utils as utils_stub  # noqa: E402
+# only the two attrs we need; restore immediately after importing the
+# module under test so other test modules can collect.
+import jiuwenclaw.common.utils as utils_stub  # noqa: E402
+
+_saved_get_config_file = utils_stub.get_config_file
+_saved_get_agent_workspace_dir = utils_stub.get_agent_workspace_dir
 
 utils_stub.get_config_file = _get_config_file
 utils_stub.get_agent_workspace_dir = _get_agent_workspace_dir
 
-from jiuwenclaw.agentserver.memory import external_memory_config as emc  # noqa: E402
+from jiuwenclaw.agents.harness.common.memory import external_memory_config as emc  # noqa: E402
+
+utils_stub.get_config_file = _saved_get_config_file
+utils_stub.get_agent_workspace_dir = _saved_get_agent_workspace_dir
+
+
+@pytest.fixture(autouse=True)
+def _isolate_utils_stubs():
+    """Re-apply utils stubs for this module's tests, restore after."""
+    utils_stub.get_config_file = _get_config_file
+    utils_stub.get_agent_workspace_dir = _get_agent_workspace_dir
+    yield
+    utils_stub.get_config_file = _saved_get_config_file
+    utils_stub.get_agent_workspace_dir = _saved_get_agent_workspace_dir
 
 
 # ---------------------------------------------------------------------------

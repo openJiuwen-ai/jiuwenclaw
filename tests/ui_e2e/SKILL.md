@@ -17,7 +17,7 @@ description: 运行 JiuwenClaw Web UI 端到端测试并收集截图、日志、
 
 - 选择用于启动 `jiuwenclaw.app` 和 `jiuwenclaw.app_web` 的 Python 解释器。
 - 在该解释器里安装项目依赖和 `.[e2e]`。
-- 确保 `jiuwenclaw/web` 已安装前端依赖。
+- 确保 `jiuwenclaw/channels/web/frontend` 已安装前端依赖。
 - 确保本机可用 Chrome/Chromium；没有时再安装 Playwright 浏览器。
 
 常用命令：

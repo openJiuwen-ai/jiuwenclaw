@@ -114,8 +114,8 @@ memory:
       user: ${OPENVIKING_USER:-default}
 
 models:
-  default:
-      model_client_config:
+  defaults:
+    - model_client_config:
         api_base: ${API_BASE}
         api_key: ${API_KEY}
         model_name: ${MODEL_NAME:-xiaomi/mimo-v2-omni}
@@ -196,6 +196,8 @@ react:
   # code_agent / research_agent 默认不启用；只有显式配置 enabled: true 才会显示并可被 task_tool 调用
   # browser_agent 保持原行为，仍由浏览器 runtime 开关决定是否默认注册；这里只支持覆盖其参数
   subagents:
+    general_agent:
+      enabled: true
     code_agent:
       enabled: false
       # max_iterations: 15
@@ -320,6 +322,8 @@ heartbeat:
     end: 22:00
 
 channels:
+  web:
+    send_file_allowed: true
   feishu:
     # 飞书应用配置
     app_id:
@@ -715,6 +719,7 @@ modes:
     #   ConfirmInterruptRail, ContextProcessorRail
     rails:
       - SkillUseRail
+      - WorktreeRail
 
     # 动态 Tools — 列表中出现的 = 启用
     # send_file_to_user 由运行时 _update_session_tools 注册，不在此配置

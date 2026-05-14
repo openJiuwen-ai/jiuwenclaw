@@ -31,7 +31,7 @@ Pre-installation Preparation
 1. Install the ACP Client extension from the marketplace. Search for `formulahendry.acp-client` and install it.
 2. In the extension, click the `+` button (`ACP: Add Agent Configuration`).
 3. For `Name`, enter: `jiuwenclaw`.
-4. For `Command`, enter the absolute path to run_gateway_acp.cmd.
+4. For `Command`, enter the absolute path to run_gateway_acp.cmd (which uses `jiuwenclaw.gateway.channel_manager.protocol.acp.acp_connect` as the entry point).
 5. Leave `Config` empty.
 6. Start the main process in the terminal first: `python -m jiuwenclaw.app`
 7. Connect to `jiuwenclaw` in the extension, then chat in the window.

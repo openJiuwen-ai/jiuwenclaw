@@ -21,7 +21,7 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
-import jiuwenclaw.utils as _utils
+import jiuwenclaw.common.utils as _utils
 
 _REAL_GET_CONFIG_FILE = _utils.get_config_file
 _REAL_GET_AGENT_WORKSPACE_DIR = _utils.get_agent_workspace_dir

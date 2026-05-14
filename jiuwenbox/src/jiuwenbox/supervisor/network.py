@@ -14,18 +14,19 @@ import subprocess
 from dataclasses import dataclass, field
 from functools import lru_cache
 
+from jiuwenbox.logging_config import configure_logging
 from jiuwenbox.models.policy import NetworkPolicy, NetworkMode, NetworkRulePolicy
 
-logging.basicConfig(level=logging.INFO)
+configure_logging()
 logger = logging.getLogger(__name__)
 
-IP_BINARY = "/usr/sbin/ip"
-IPTABLES_BINARY = "/usr/sbin/iptables"
-IP6TABLES_BINARY = "/usr/sbin/ip6tables"
-IPTABLES_LEGACY_BINARY = "/usr/sbin/iptables-legacy"
-IP6TABLES_LEGACY_BINARY = "/usr/sbin/ip6tables-legacy"
-IPTABLES_NFT_BINARY = "/usr/sbin/iptables-nft"
-IP6TABLES_NFT_BINARY = "/usr/sbin/ip6tables-nft"
+IP_BINARY = "ip"
+IPTABLES_BINARY = "iptables"
+IP6TABLES_BINARY = "ip6tables"
+IPTABLES_LEGACY_BINARY = "iptables-legacy"
+IP6TABLES_LEGACY_BINARY = "ip6tables-legacy"
+IPTABLES_NFT_BINARY = "iptables-nft"
+IP6TABLES_NFT_BINARY = "ip6tables-nft"
 
 
 class NetworkSetupError(RuntimeError):
@@ -159,7 +160,7 @@ def _run_iptables_binary(
 def _select_iptables_binary(ip_version: int, namespace: str | None = None) -> str:
     """Return a working iptables backend for the target namespace.
 
-    Some distributions default /usr/sbin/iptables to the nf_tables backend,
+    Some distributions default iptables to the nf_tables backend,
     while older or constrained kernels only support legacy xtables. Probe both
     and keep the sandbox creation failure explicit if neither backend works.
     """
@@ -195,6 +196,21 @@ def _run_iptables(
     """Run an iptables/ip6tables command."""
     binary = _select_iptables_binary(ip_version, namespace)
     return _run_iptables_binary(binary, args, check=check, namespace=namespace)
+
+
+def run_iptables(
+    args: list[str],
+    check: bool = True,
+    namespace: str | None = None,
+    ip_version: int = 4,
+) -> subprocess.CompletedProcess:
+    """Run an iptables/ip6tables command for callers outside this module."""
+    return _run_iptables(
+        args,
+        check=check,
+        namespace=namespace,
+        ip_version=ip_version,
+    )
 
 
 def _ip_version(value: str) -> int:

@@ -2,7 +2,7 @@
 
 import pytest
 
-from jiuwenclaw.agentserver.team.distributed_runtime import (
+from jiuwenclaw.agents.harness.team.distributed_runtime import (
     normalize_distributed_transport_fields,
     parse_port,
 )

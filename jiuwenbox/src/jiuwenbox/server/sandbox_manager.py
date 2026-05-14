@@ -21,9 +21,11 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
+from jiuwenbox.logging_config import configure_logging
 from jiuwenbox.models.common import AuditEventType
 from jiuwenbox.models.policy import SecurityPolicy
 from jiuwenbox.models.sandbox import (
+    BackgroundExecResult,
     ExecResult,
     PolicyMode,
     SandboxPhase,
@@ -32,13 +34,13 @@ from jiuwenbox.models.sandbox import (
 )
 from jiuwenbox.server.audit_logger import AuditLogger
 from jiuwenbox.server.policy_engine import PolicyEngine
+from jiuwenbox.server.policy_reader import PolicyReader
 from jiuwenbox.server.runtime.base import RuntimeAdapter, RuntimeExecRequest
 from jiuwenbox.server.runtime.process import ProcessRuntime
+from jiuwenbox.server.workspace import JIUWENBOX_HOME
 
-logging.basicConfig(level=logging.INFO)
+configure_logging()
 logger = logging.getLogger(__name__)
-
-DEFAULT_POLICY_PATH_ENV = "JIUWENBOX_DEFAULT_POLICY_PATH"
 
 
 @dataclass(frozen=True)
@@ -80,48 +82,31 @@ class SandboxManager:
         policy_engine: PolicyEngine | None = None,
         audit_logger: AuditLogger | None = None,
         state_dir: Path | None = None,
-        default_policy_path: Path | None = None,
+        policy_reader: PolicyReader | None = None,
+        policy_path: Path | None = None,
     ) -> None:
         self.runtime = runtime or ProcessRuntime()
         self.policy_engine = policy_engine or PolicyEngine()
         self.audit = audit_logger or AuditLogger()
-        self.state_dir = state_dir or Path.home() / ".jiuwenbox" / "sandboxes"
+        self.state_dir = state_dir or JIUWENBOX_HOME / "sandboxes"
         self.state_dir.mkdir(parents=True, exist_ok=True)
-        self.default_policy_path = (
-            Path(default_policy_path)
-            if default_policy_path is not None
-            else self._resolve_default_policy_path()
+        self.policy_reader = policy_reader or PolicyReader(
+            policy_engine=self.policy_engine,
+            policy_path=policy_path,
         )
-        self.default_policy = self._load_default_policy()
+        self.policy = self.policy_reader.load_policy()
 
         self._lock = asyncio.Lock()
         self._sandboxes: dict[str, SandboxRef] = {}
         self._policies: dict[str, SecurityPolicy] = {}
         self._load_state()
 
-    @staticmethod
-    def _resolve_default_policy_path() -> Path:
-        env_path = os.environ.get(DEFAULT_POLICY_PATH_ENV)
-        if env_path:
-            return Path(env_path).expanduser()
-        return Path(__file__).resolve().parents[3] / "configs" / "default-policy.yaml"
-
-    def _load_default_policy(self) -> SecurityPolicy:
-        if self.default_policy_path.exists():
-            return self.policy_engine.load_policy_from_file(self.default_policy_path)
-
-        logger.warning(
-            "Default policy file not found at %s, falling back to SecurityPolicy defaults",
-            self.default_policy_path,
-        )
-        return SecurityPolicy()
-
     def _resolve_effective_policy(
         self,
         policy_data: SecurityPolicy | Mapping[str, object] | None,
         policy_mode: PolicyMode,
     ) -> SecurityPolicy:
-        base_policy = self.default_policy.model_copy(deep=True)
+        base_policy = self.policy.model_copy(deep=True)
         if policy_data is None:
             return base_policy
 
@@ -136,7 +121,6 @@ class SandboxManager:
         if isinstance(policy_payload, SecurityPolicy):
             return policy_payload.model_copy(deep=True)
 
-        policy_payload.setdefault("sandbox_workspace", base_policy.sandbox_workspace)
         return SecurityPolicy.model_validate(policy_payload)
 
     def _load_state(self) -> None:
@@ -168,7 +152,6 @@ class SandboxManager:
     async def create_sandbox(
         self,
         spec: SandboxSpec,
-        command: list[str] | None = None,
         policy_data: SecurityPolicy | Mapping[str, object] | None = None,
         policy_mode: PolicyMode = PolicyMode.OVERRIDE,
     ) -> SandboxRef:
@@ -176,13 +159,12 @@ class SandboxManager:
         async with self._lock:
             sandbox_id = str(uuid.uuid4())[:12]
             policy = self._resolve_effective_policy(policy_data, policy_mode)
+            logger.debug("Creating sandbox %s with policy %s", sandbox_id, str(policy))
             self.policy_engine.validate_policy(policy)
             # Create sandbox ref
             ref = SandboxRef(
                 id=sandbox_id,
                 phase=SandboxPhase.PROVISIONING,
-                command=[],
-                workdir=spec.workdir,
                 env=dict(spec.env),
             )
             self._sandboxes[sandbox_id] = ref
@@ -195,25 +177,38 @@ class SandboxManager:
             policy_path = self.policy_engine.write_sandbox_policy(sandbox_id, policy)
             self.audit.log(AuditEventType.POLICY_APPLIED, sandbox_id, policy_name=policy.name)
 
-            # Start via runtime
-            try:
-                pid = await self.runtime.create(
-                    sandbox_id=sandbox_id,
-                    policy_path=policy_path,
-                    command=ref.command,
-                    workdir=ref.workdir,
-                    env=ref.env,
-                )
-                ref.phase = SandboxPhase.READY
-                ref.pid = pid
-                ref.started_at = datetime.now(timezone.utc)
-            except Exception as e:
+        # Runtime startup can be expensive. Do it outside the manager-wide lock
+        # so independent sandboxes can start in parallel.
+        try:
+            pid = await self.runtime.create(
+                sandbox_id=sandbox_id,
+                policy_path=policy_path,
+                workdir=None,
+                env=ref.env,
+            )
+            cleanup_after_create = False
+            async with self._lock:
+                current_ref = self._sandboxes.get(sandbox_id)
+                if current_ref is not ref or ref.phase == SandboxPhase.DELETING:
+                    cleanup_after_create = True
+                else:
+                    ref.phase = SandboxPhase.READY
+                    ref.pid = pid
+                    ref.started_at = datetime.now(timezone.utc)
+                    self._save_state(ref)
+            if cleanup_after_create:
+                await self.runtime.cleanup(sandbox_id)
+        except Exception as e:
+            async with self._lock:
+                current_ref = self._sandboxes.get(sandbox_id)
+                if current_ref is not ref or ref.phase == SandboxPhase.DELETING:
+                    return ref
                 ref.phase = SandboxPhase.ERROR
                 ref.error_message = str(e)
                 logger.error("Failed to create sandbox %s: %s", sandbox_id, e)
+                self._save_state(ref)
 
-            self._save_state(ref)
-            return ref
+        return ref
 
     async def get_sandbox(self, sandbox_id: str) -> SandboxRef:
         async with self._lock:
@@ -258,8 +253,7 @@ class SandboxManager:
             pid = await self.runtime.create(
                 sandbox_id=sandbox_id,
                 policy_path=policy_path,
-                command=ref.command,
-                workdir=ref.workdir,
+                workdir=None,
                 env=ref.env,
             )
             ref.phase = SandboxPhase.READY
@@ -299,10 +293,14 @@ class SandboxManager:
             ref.phase = SandboxPhase.DELETING
             self._save_state(ref)
 
-            await self.runtime.cleanup(sandbox_id)
-            self.policy_engine.delete_sandbox_policy(sandbox_id)
-            self.audit.log(AuditEventType.SANDBOX_DELETED, sandbox_id)
+        # Cleanup can wait on processes and namespace teardown. Keep it outside
+        # the global state lock so deleting one sandbox does not block unrelated
+        # sandbox operations.
+        await self.runtime.cleanup(sandbox_id)
+        self.policy_engine.delete_sandbox_policy(sandbox_id)
+        self.audit.log(AuditEventType.SANDBOX_DELETED, sandbox_id)
 
+        async with self._lock:
             self._sandboxes.pop(sandbox_id, None)
             self._policies.pop(sandbox_id, None)
             self._delete_state(sandbox_id)
@@ -319,12 +317,45 @@ class SandboxManager:
                     f"Cannot exec in sandbox '{sandbox_id}': state is {ref.phase.value}"
                 )
 
-            self.audit.log(
-                AuditEventType.EXEC_COMMAND, sandbox_id,
-                command=request.command, workdir=request.workdir,
-            )
+        self.audit.log(
+            AuditEventType.EXEC_COMMAND,
+            sandbox_id,
+            command=request.command,
+            workdir=request.workdir,
+        )
 
         return await self.runtime.exec(
+            sandbox_id,
+            RuntimeExecRequest(
+                command=request.command,
+                workdir=request.workdir,
+                env=request.env,
+                stdin_data=request.stdin_data,
+                timeout=request.timeout,
+            ),
+        )
+
+    async def exec_background_in_sandbox(
+        self,
+        sandbox_id: str,
+        request: SandboxExecRequest,
+    ) -> BackgroundExecResult:
+        async with self._lock:
+            ref = self._get_sandbox(sandbox_id)
+            if ref.phase != SandboxPhase.READY:
+                raise SandboxStateError(
+                    f"Cannot exec in sandbox '{sandbox_id}': state is {ref.phase.value}"
+                )
+
+        self.audit.log(
+            AuditEventType.EXEC_COMMAND,
+            sandbox_id,
+            command=request.command,
+            workdir=request.workdir,
+            background=True,
+        )
+
+        return await self.runtime.exec_background(
             sandbox_id,
             RuntimeExecRequest(
                 command=request.command,
@@ -341,6 +372,13 @@ class SandboxManager:
         sandbox_path: str,
         content: bytes,
     ) -> None:
+        async with self._lock:
+            ref = self._get_sandbox(sandbox_id)
+            if ref.phase != SandboxPhase.READY:
+                raise SandboxStateError(
+                    f"Cannot upload to sandbox '{sandbox_id}': state is {ref.phase.value}"
+                )
+
         self.audit.log(
             AuditEventType.FILE_TRANSFER,
             sandbox_id,
@@ -348,31 +386,63 @@ class SandboxManager:
             sandbox_path=sandbox_path,
         )
 
-        encoded_content = base64.b64encode(content)
+        # Fast path: tell the in-sandbox daemon to write the file in its
+        # own process. The daemon already runs with the sandbox uid/gid,
+        # mount layout, seccomp filter, and Landlock ruleset, so doing
+        # the write in-process is exactly equivalent (security-wise) to
+        # spawning ``bash -c 'cat > "$target"'`` but skips the bash
+        # cold-start and an extra fork/exec roundtrip per upload.
+        result = await self.runtime.write_file(
+            sandbox_id,
+            sandbox_path,
+            content,
+            mkdir_parents=True,
+        )
+        if result.ok:
+            return
+
+        if result.error in ("daemon_unavailable", "transport_failure", "unsupported"):
+            await self._upload_via_exec_fallback(sandbox_id, sandbox_path, content)
+            return
+
+        detail = result.detail or result.error or "unknown failure"
+        raise SandboxStateError(
+            f"Failed to upload file to '{sandbox_path}': {detail}"
+        )
+
+    async def _upload_via_exec_fallback(
+        self,
+        sandbox_id: str,
+        sandbox_path: str,
+        content: bytes,
+    ) -> None:
+        """Legacy ``bash + cat`` upload path used only when the IPC fast
+        path is unavailable (e.g. an older runtime adapter, or a sandbox
+        whose daemon flagged itself unhealthy mid-request)."""
         upload_script = textwrap.dedent(
             """
             set -euo pipefail
             target="$1"
-            parent=$(/usr/bin/dirname -- "$target") || {
+            parent=$(dirname -- "$target") || {
                 status=$?
                 printf "dirname failed for upload target '%s' (exit %s)\\n" "$target" "$status" >&2
                 exit "$status"
             }
-            /usr/bin/mkdir -p -- "$parent" || {
+            mkdir -p -- "$parent" || {
                 status=$?
-                uid=$(/usr/bin/id -u 2>/dev/null || true)
-                gid=$(/usr/bin/id -g 2>/dev/null || true)
-                parent_parent=$(/usr/bin/dirname -- "$parent" 2>/dev/null || true)
+                uid=$(id -u 2>/dev/null || true)
+                gid=$(id -g 2>/dev/null || true)
+                parent_parent=$(dirname -- "$parent" 2>/dev/null || true)
                 printf "mkdir failed: parent='%s' target='%s'\\n" "$parent" "$target" >&2
                 printf "sandbox identity: uid=%s gid=%s exit=%s\\n" "$uid" "$gid" "$status" >&2
                 if [ -n "$parent_parent" ]; then
-                    /usr/bin/ls -ld -- "$parent_parent" "$parent" >&2 || true
+                    ls -ld -- "$parent_parent" "$parent" >&2 || true
                 fi
                 exit "$status"
             }
-            /usr/bin/base64 -d > "$target" || {
+            cat > "$target" || {
                 status=$?
-                printf "base64 decode/write failed: target='%s' exit=%s\\n" "$target" "$status" >&2
+                printf "write failed: target='%s' exit=%s\\n" "$target" "$status" >&2
                 exit "$status"
             }
             """
@@ -381,13 +451,13 @@ class SandboxManager:
             sandbox_id,
             SandboxExecRequest(
                 command=[
-                    "/usr/bin/bash",
+                    "bash",
                     "-c",
                     upload_script,
                     "jiuwenbox-upload",
                     sandbox_path,
                 ],
-                stdin_data=encoded_content,
+                stdin_data=content,
             ),
         )
         if result.exit_code != 0:
@@ -403,6 +473,13 @@ class SandboxManager:
         sandbox_id: str,
         sandbox_path: str,
     ) -> bytes:
+        async with self._lock:
+            ref = self._get_sandbox(sandbox_id)
+            if ref.phase != SandboxPhase.READY:
+                raise SandboxStateError(
+                    f"Cannot download from sandbox '{sandbox_id}': state is {ref.phase.value}"
+                )
+
         self.audit.log(
             AuditEventType.FILE_TRANSFER,
             sandbox_id,
@@ -410,18 +487,49 @@ class SandboxManager:
             sandbox_path=sandbox_path,
         )
 
+        # Fast path: ask the daemon to read the file directly. The daemon
+        # carries the sandbox's full security envelope so it cannot read
+        # any path that user code couldn't read. Binary content survives
+        # the IPC unchanged - no base64 round-trip.
+        result = await self.runtime.read_file(sandbox_id, sandbox_path)
+        if result.ok:
+            return result.content or b""
+
+        if result.error == "not_found":
+            raise FileNotFoundError(sandbox_path)
+        if result.error in ("is_directory", "is_a_directory"):
+            raise SandboxStateError(f"Sandbox path '{sandbox_path}' is a directory")
+        if result.error == "is_symlink":
+            raise SandboxStateError(
+                f"Refusing to follow symlink at '{sandbox_path}'"
+            )
+        if result.error in ("daemon_unavailable", "transport_failure", "unsupported"):
+            return await self._download_via_exec_fallback(sandbox_id, sandbox_path)
+
+        detail = result.detail or result.error or "unknown failure"
+        raise SandboxStateError(
+            f"Failed to download file from '{sandbox_path}': {detail}"
+        )
+
+    async def _download_via_exec_fallback(
+        self,
+        sandbox_id: str,
+        sandbox_path: str,
+    ) -> bytes:
+        """Legacy bash+base64 download path used only when the IPC fast
+        path is unavailable."""
         result = await self.exec_in_sandbox(
             sandbox_id,
             SandboxExecRequest(
                 command=[
-                    "/usr/bin/bash",
+                    "bash",
                     "-c",
                     (
                         "set -euo pipefail; "
                         'target="$1"; '
                         'if [ ! -e "$target" ]; then exit 44; fi; '
                         'if [ -d "$target" ]; then exit 45; fi; '
-                        '/usr/bin/base64 -w 0 -- "$target"'
+                        'base64 -w 0 -- "$target"'
                     ),
                     "jiuwenbox-download",
                     sandbox_path,
@@ -449,6 +557,48 @@ class SandboxManager:
         sandbox_id: str,
         request: SandboxListRequest,
     ) -> list[dict[str, object]]:
+        async with self._lock:
+            ref = self._get_sandbox(sandbox_id)
+            if ref.phase != SandboxPhase.READY:
+                raise SandboxStateError(
+                    f"Cannot list files in sandbox '{sandbox_id}': state is {ref.phase.value}"
+                )
+
+        # Fast path: ask the daemon to walk the directory in-process.
+        # Saves the python3 cold start and the fork+exec that the legacy
+        # helper paid on every call.
+        result = await self.runtime.list_dir(
+            sandbox_id,
+            request.sandbox_path,
+            recursive=request.recursive,
+            max_depth=request.max_depth,
+            include_files=request.include_files,
+            include_dirs=request.include_dirs,
+        )
+        if result.ok:
+            return list(result.items or [])
+
+        if result.error == "not_found":
+            raise FileNotFoundError(request.sandbox_path)
+        if result.error in ("not_a_directory", "is_not_a_directory"):
+            raise SandboxStateError(
+                f"Sandbox path '{request.sandbox_path}' is not a directory"
+            )
+        if result.error in ("daemon_unavailable", "transport_failure", "unsupported"):
+            return await self._list_via_exec_fallback(sandbox_id, request)
+
+        detail = result.detail or result.error or "unknown failure"
+        raise SandboxStateError(
+            f"Failed to list files in '{request.sandbox_path}': {detail}"
+        )
+
+    async def _list_via_exec_fallback(
+        self,
+        sandbox_id: str,
+        request: SandboxListRequest,
+    ) -> list[dict[str, object]]:
+        """Legacy ``python3`` helper kept for runtimes without a daemon
+        IPC channel."""
         script = textwrap.dedent(
             """
             import datetime
@@ -508,7 +658,8 @@ class SandboxManager:
             sandbox_id,
             SandboxExecRequest(
                 command=[
-                    "/usr/bin/python3",
+                    "python3",
+                    "-S",
                     "-c",
                     script,
                     request.sandbox_path,
@@ -522,7 +673,9 @@ class SandboxManager:
         if result.exit_code == 44:
             raise FileNotFoundError(request.sandbox_path)
         if result.exit_code == 45:
-            raise SandboxStateError(f"Sandbox path '{request.sandbox_path}' is not a directory")
+            raise SandboxStateError(
+                f"Sandbox path '{request.sandbox_path}' is not a directory"
+            )
         if result.exit_code != 0:
             raise SandboxStateError(
                 f"Failed to list files in '{request.sandbox_path}': {result.stderr or result.stdout}"
@@ -586,8 +739,11 @@ class SandboxManager:
         result = await self.exec_in_sandbox(
             sandbox_id,
             SandboxExecRequest(
+                # ``-S`` skips ``import site`` for the in-sandbox python3 cold
+                # start; the helper script only needs the standard library.
                 command=[
-                    "/usr/bin/python3",
+                    "python3",
+                    "-S",
                     "-c",
                     script,
                     sandbox_path,

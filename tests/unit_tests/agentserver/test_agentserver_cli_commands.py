@@ -3,9 +3,9 @@ import json
 
 import pytest
 
-from jiuwenclaw.agentserver import agent_ws_server as agent_ws_server_module
-from jiuwenclaw.schema.agent import AgentRequest
-from jiuwenclaw.schema.message import ReqMethod
+from jiuwenclaw.server import agent_ws_server as agent_ws_server_module
+from jiuwenclaw.common.schema.agent import AgentRequest
+from jiuwenclaw.common.schema.message import ReqMethod
 
 
 class FakeWebSocket:

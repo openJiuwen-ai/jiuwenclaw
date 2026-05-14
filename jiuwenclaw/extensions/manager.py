@@ -1,10 +1,10 @@
 from pathlib import Path
 from typing import Any
 
-from jiuwenclaw.config import get_config
+from jiuwenclaw.common.config import get_config
 from jiuwenclaw.extensions.loader import ExtensionLoader
 from jiuwenclaw.extensions.registry import ExtensionRegistry
-from jiuwenclaw.utils import logger
+from jiuwenclaw.common.utils import logger
 
 
 def _split_extension_dirs(value: str) -> list[str]:

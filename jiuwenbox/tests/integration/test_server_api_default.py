@@ -3,35 +3,30 @@
 
 import copy
 import logging
+import socket
 import textwrap
+import time
+from pathlib import Path
 
 import httpx
 import pytest
+import yaml
 
 from jiuwenbox.models.policy import SecurityPolicy
 from jiuwenbox.supervisor import network as network_module
 from jiuwenbox.supervisor.bwrap import BwrapConfig
 
-LONG_RUNNING_COMMAND = ["/usr/bin/python3", "-c", "import time; time.sleep(36000)"]
-SYSTEM_BIND_MOUNTS = [
-    {"host_path": "/bin", "sandbox_path": "/bin", "mode": "ro"},
-    {"host_path": "/sbin", "sandbox_path": "/sbin", "mode": "ro"},
-    {"host_path": "/usr", "sandbox_path": "/usr", "mode": "ro"},
-    {"host_path": "/lib", "sandbox_path": "/lib", "mode": "ro"},
-    {"host_path": "/lib64", "sandbox_path": "/lib64", "mode": "ro"},
-    {"host_path": "/etc/resolv.conf", "sandbox_path": "/etc/resolv.conf", "mode": "ro"},
-    {"host_path": "/etc/hosts", "sandbox_path": "/etc/hosts", "mode": "ro"},
-    {"host_path": "/etc/nsswitch.conf", "sandbox_path": "/etc/nsswitch.conf", "mode": "ro"},
-    {"host_path": "/etc/host.conf", "sandbox_path": "/etc/host.conf", "mode": "ro"},
-    {"host_path": "/etc/ssl/certs", "sandbox_path": "/etc/ssl/certs", "mode": "ro"},
-    {"host_path": "/etc/pki", "sandbox_path": "/etc/pki", "mode": "ro"},
-    {"host_path": "/opt", "sandbox_path": "/opt", "mode": "ro"},
-]
-DEVICE_MOUNTS = [
-    {"host_path": "/dev/urandom", "sandbox_path": "/dev/urandom"},
-    {"host_path": "/dev/null", "sandbox_path": "/dev/null"},
-]
-TMP_DIRECTORY = {"path": "/tmp", "permissions": "1777"}
+_DEFAULT_POLICY = yaml.safe_load(
+    (Path(__file__).resolve().parents[2] / "configs" / "default-policy.yaml").read_text(encoding="utf-8")
+)
+_DEFAULT_FILESYSTEM_POLICY = _DEFAULT_POLICY["filesystem_policy"]
+
+SYSTEM_BIND_MOUNTS = copy.deepcopy(_DEFAULT_FILESYSTEM_POLICY["bind_mounts"])
+DEVICE_MOUNTS = copy.deepcopy(_DEFAULT_FILESYSTEM_POLICY["device"])
+DEFAULT_FILES = copy.deepcopy(_DEFAULT_FILESYSTEM_POLICY.get("files", []))
+SANDBOX_WORKSPACE = "/root/.jiuwenbox"
+DIRECTORIES = copy.deepcopy(_DEFAULT_FILESYSTEM_POLICY["directories"])
+
 logger = logging.getLogger(__name__)
 
 
@@ -89,6 +84,69 @@ def _normalize_endpoint(endpoint: str) -> str:
 
 def _sandbox_health_url(server_endpoint: str) -> str:
     return f"{_normalize_endpoint(server_endpoint).rstrip('/')}/health"
+
+
+def _host_network_ip_from_sandbox(client, sandbox_id: str) -> str:
+    script = textwrap.dedent(
+        """
+        import re
+        import subprocess
+        import sys
+
+        def run_ip(args):
+            try:
+                return subprocess.check_output(
+                    ["ip", *args],
+                    stderr=subprocess.DEVNULL,
+                    text=True,
+                )
+            except (FileNotFoundError, subprocess.CalledProcessError):
+                return ""
+
+        route = run_ip(["-4", "route", "get", "1.1.1.1"])
+        match = re.search(r"\\bsrc\\s+(\\d+\\.\\d+\\.\\d+\\.\\d+)", route)
+        if match and not match.group(1).startswith("127."):
+            print(match.group(1))
+            sys.exit(0)
+
+        addresses = run_ip(["-4", "-o", "addr", "show", "scope", "global"])
+        for address in re.findall(r"\\binet\\s+(\\d+\\.\\d+\\.\\d+\\.\\d+)/", addresses):
+            if not address.startswith("127."):
+                print(address)
+                sys.exit(0)
+
+        print("failed to resolve host-network IPv4 address from sandbox", file=sys.stderr)
+        sys.exit(1)
+        """
+    ).strip()
+    response = client.post(f"/api/v1/sandboxes/{sandbox_id}/exec", json={
+        "command": ["python3", "-c", script],
+        "timeout_seconds": 5,
+    })
+    assert response.status_code == 200, response.text
+    data = response.json()
+    assert data["exit_code"] == 0, data
+    return data["stdout"].strip()
+
+
+def _unused_host_network_tcp_port_from_sandbox(client, sandbox_id: str) -> int:
+    script = textwrap.dedent(
+        """
+        import socket
+
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+            sock.bind(("0.0.0.0", 0))
+            print(sock.getsockname()[1])
+        """
+    ).strip()
+    response = client.post(f"/api/v1/sandboxes/{sandbox_id}/exec", json={
+        "command": ["python3", "-c", script],
+        "timeout_seconds": 5,
+    })
+    assert response.status_code == 200, response.text
+    data = response.json()
+    assert data["exit_code"] == 0, data
+    return int(data["stdout"].strip())
 
 
 def _capability_check_script(cap_bit: int) -> str:
@@ -172,12 +230,8 @@ def _with_runtime_support(policy: dict) -> dict:
             bind_mounts.append(mount.copy())
 
     directories = filesystem_policy.setdefault("directories", [])
-    if (
-        "/tmp" in filesystem_policy.get("read_write", [])
-        and not _has_directory(directories, "/tmp")
-        and not _has_bind_mount(bind_mounts, "/tmp")
-    ):
-        directories.append(TMP_DIRECTORY.copy())
+    for directory_entry in DIRECTORIES:
+        directories.append(directory_entry.copy())
 
     return runtime_policy
 
@@ -213,10 +267,8 @@ def create_sandbox_with_policy(client):
         name_prefix: str,
         policy: dict,
         policy_mode: str = "override",
-        command: list[str] | None = None,
     ) -> dict:
         response = client.post("/api/v1/sandboxes", json={
-            "command": command or LONG_RUNNING_COMMAND,
             "policy_mode": policy_mode,
             "policy": _with_runtime_support(policy),
         })
@@ -249,19 +301,18 @@ class TestSandboxCRUD:
 
     @staticmethod
     def test_create_sandbox(client):
-        resp = client.post("/api/v1/sandboxes", json={
-            "command": ["/usr/bin/echo", "hello"],
-        })
+        resp = client.post("/api/v1/sandboxes", json={})
         assert resp.status_code == 201
         data = resp.json()
         assert "id" in data
         assert "name" not in data
-        assert data["command"] == []
+        assert "command" not in data
+        assert "workdir" not in data
         assert data["phase"] in ("provisioning", "ready", "error")
 
     @staticmethod
     def test_list_sandboxes_after_create(client):
-        create_resp = client.post("/api/v1/sandboxes", json={"command": ["/usr/bin/echo"]})
+        create_resp = client.post("/api/v1/sandboxes", json={})
         sandbox_id = create_resp.json()["id"]
         resp = client.get("/api/v1/sandboxes")
         assert resp.status_code == 200
@@ -271,9 +322,7 @@ class TestSandboxCRUD:
 
     @staticmethod
     def test_get_sandbox(client):
-        create_resp = client.post("/api/v1/sandboxes", json={
-            "command": ["/usr/bin/echo"],
-        })
+        create_resp = client.post("/api/v1/sandboxes", json={})
         sandbox_id = create_resp.json()["id"]
 
         resp = client.get(f"/api/v1/sandboxes/{sandbox_id}")
@@ -289,9 +338,7 @@ class TestSandboxCRUD:
 
     @staticmethod
     def test_delete_sandbox(client):
-        create_resp = client.post("/api/v1/sandboxes", json={
-            "command": ["/usr/bin/echo"],
-        })
+        create_resp = client.post("/api/v1/sandboxes", json={})
         sandbox_id = create_resp.json()["id"]
 
         resp = client.delete(f"/api/v1/sandboxes/{sandbox_id}")
@@ -304,9 +351,7 @@ class TestSandboxCRUD:
 class TestSandboxLifecycle:
     @staticmethod
     def test_start_stopped_sandbox(client):
-        create_resp = client.post("/api/v1/sandboxes", json={
-            "command": ["/usr/bin/sleep", "3600"],
-        })
+        create_resp = client.post("/api/v1/sandboxes", json={})
         sandbox_id = create_resp.json()["id"]
 
         stop_resp = client.post(f"/api/v1/sandboxes/{sandbox_id}/stop")
@@ -319,9 +364,7 @@ class TestSandboxLifecycle:
 
     @staticmethod
     def test_stop_sandbox(client):
-        create_resp = client.post("/api/v1/sandboxes", json={
-            "command": ["/usr/bin/sleep", "3600"],
-        })
+        create_resp = client.post("/api/v1/sandboxes", json={})
         sandbox_id = create_resp.json()["id"]
 
         resp = client.post(f"/api/v1/sandboxes/{sandbox_id}/stop")
@@ -330,9 +373,7 @@ class TestSandboxLifecycle:
 
     @staticmethod
     def test_restart_sandbox(client):
-        create_resp = client.post("/api/v1/sandboxes", json={
-            "command": ["/usr/bin/sleep", "3600"],
-        })
+        create_resp = client.post("/api/v1/sandboxes", json={})
         sandbox_id = create_resp.json()["id"]
 
         resp = client.post(f"/api/v1/sandboxes/{sandbox_id}/restart")
@@ -341,9 +382,14 @@ class TestSandboxLifecycle:
 
     @staticmethod
     def test_sandbox_process_cannot_target_sandbox_daemon(client):
-        create_resp = client.post("/api/v1/sandboxes", json={
-            "command": LONG_RUNNING_COMMAND,
-        })
+        # The long-running daemon shares the sandbox PID namespace with
+        # user-spawned children (the daemon is PID 1 in that namespace).
+        # The kernel protects PID 1 of a namespace from in-namespace senders
+        # for any signal that PID 1 has not registered a handler for; the
+        # daemon registers no handlers, so SIGTERM/SIGINT/SIGKILL from user
+        # code must all be silently dropped and the daemon must continue to
+        # service requests.
+        create_resp = client.post("/api/v1/sandboxes", json={})
         assert create_resp.status_code == 201
         sandbox = create_resp.json()
         assert sandbox["phase"] == "ready", sandbox
@@ -351,51 +397,57 @@ class TestSandboxLifecycle:
 
         kill_resp = client.post(f"/api/v1/sandboxes/{sandbox_id}/exec", json={
             "command": [
-                "/usr/bin/python3",
+                "python3",
                 "-c",
                 textwrap.dedent(
                     """
                     import os
-                    from pathlib import Path
+                    import signal
                     import sys
+                    import time
 
-                    needle = "jiuwenbox-sandbox-" + "daemon.py"
-                    daemon_pids = []
-                    current_pid = str(os.getpid())
-                    for cmdline_path in Path("/proc").glob("[0-9]*/cmdline"):
-                        pid = cmdline_path.parent.name
-                        if pid == current_pid:
-                            continue
+                    targets = [signal.SIGTERM, signal.SIGINT, signal.SIGKILL,
+                               signal.SIGHUP, signal.SIGUSR1, signal.SIGUSR2]
+                    delivered = []
+                    for sig in targets:
                         try:
-                            cmdline = cmdline_path.read_bytes().replace(b"\\0", b" ").decode(
-                                errors="replace",
-                            )
-                        except (FileNotFoundError, PermissionError, ProcessLookupError):
+                            os.kill(1, sig)
+                        except ProcessLookupError:
+                            delivered.append(f"missing:{sig}")
+                        except PermissionError:
                             continue
-                        if needle in cmdline:
-                            daemon_pids.append(pid)
+                        except OSError as exc:
+                            delivered.append(f"error:{sig}:{exc.errno}")
+                    time.sleep(0.5)
 
-                    if daemon_pids:
-                        print(f"daemon-visible:{','.join(daemon_pids)}")
-                        sys.exit(7)
+                    try:
+                        os.kill(1, 0)
+                    except ProcessLookupError:
+                        print("daemon-killed")
+                        sys.exit(1)
+                    except PermissionError:
+                        pass
 
-                    print("daemon-hidden")
+                    if delivered:
+                        print(f"unexpected:{','.join(delivered)}")
+                        sys.exit(2)
+                    print("daemon-survived")
                     """
                 ).strip(),
             ],
-            "timeout_seconds": 5,
+            "timeout_seconds": 10,
         })
         assert kill_resp.status_code == 200
         kill_data = kill_resp.json()
         assert kill_data["exit_code"] == 0, kill_data
-        assert kill_data["stdout"].strip() == "daemon-hidden"
+        assert kill_data["stdout"].strip() == "daemon-survived"
 
         status_resp = client.get(f"/api/v1/sandboxes/{sandbox_id}")
         assert status_resp.status_code == 200
         assert status_resp.json()["phase"] == "ready", status_resp.json()
 
         exec_resp = client.post(f"/api/v1/sandboxes/{sandbox_id}/exec", json={
-            "command": ["/usr/bin/echo", "daemon-alive"],
+            "command": ["echo", "daemon-alive"],
             "timeout_seconds": 5,
         })
         assert exec_resp.status_code == 200
@@ -404,10 +456,14 @@ class TestSandboxLifecycle:
         assert exec_data["stdout"].strip() == "daemon-alive"
 
     @staticmethod
-    def test_sandbox_process_cannot_see_sandbox_daemon(client):
-        create_resp = client.post("/api/v1/sandboxes", json={
-            "command": LONG_RUNNING_COMMAND,
-        })
+    def test_sandbox_process_cannot_inspect_sandbox_daemon_memory(client):
+        # PID 1 of the sandbox PID namespace is the long-running daemon.
+        # Reading the daemon's address space (``/proc/1/mem``) requires
+        # CAP_SYS_PTRACE (stripped by the default policy) and
+        # ``ptrace(PTRACE_ATTACH, 1)`` is blocked by seccomp. Together
+        # these prevent a sandboxed process from extracting secrets from
+        # or hijacking the long-running daemon.
+        create_resp = client.post("/api/v1/sandboxes", json={})
         assert create_resp.status_code == 201
         sandbox = create_resp.json()
         assert sandbox["phase"] == "ready", sandbox
@@ -415,47 +471,54 @@ class TestSandboxLifecycle:
 
         script = textwrap.dedent(
             """
+            import ctypes
             import os
-            from pathlib import Path
             import sys
 
-            needle = "jiuwenbox-sandbox-" + "daemon.py"
-            daemon_cmdlines = []
-            current_pid = str(os.getpid())
-            for cmdline_path in Path("/proc").glob("[0-9]*/cmdline"):
-                pid = cmdline_path.parent.name
-                if pid == current_pid:
-                    continue
+            try:
+                fd = os.open('/proc/1/mem', os.O_RDONLY)
+            except PermissionError:
+                pass
+            except FileNotFoundError:
+                pass
+            else:
                 try:
-                    cmdline = cmdline_path.read_bytes().replace(b"\\0", b" ").decode(
-                        errors="replace",
-                    )
-                except (FileNotFoundError, PermissionError, ProcessLookupError):
-                    continue
-                if needle in cmdline:
-                    daemon_cmdlines.append(cmdline)
+                    os.read(fd, 16)
+                except PermissionError:
+                    pass
+                except OSError:
+                    pass
+                else:
+                    os.close(fd)
+                    print('daemon-memory-readable')
+                    sys.exit(2)
+                os.close(fd)
 
-            if daemon_cmdlines:
-                print("\\n".join(daemon_cmdlines))
-                sys.exit(7)
+            try:
+                libc = ctypes.CDLL('libc.so.6', use_errno=True)
+                PTRACE_ATTACH = 16
+                rc = libc.ptrace(PTRACE_ATTACH, 1, 0, 0)
+                if rc == 0:
+                    print('daemon-ptraceable')
+                    sys.exit(3)
+            except OSError:
+                pass
 
-            print("daemon-hidden")
+            print('daemon-protected')
             """
         ).strip()
         response = client.post(f"/api/v1/sandboxes/{sandbox_id}/exec", json={
-            "command": ["/usr/bin/python3", "-c", script],
+            "command": ["python3", "-c", script],
             "timeout_seconds": 5,
         })
         assert response.status_code == 200
         data = response.json()
         assert data["exit_code"] == 0, data
-        assert data["stdout"].strip() == "daemon-hidden"
+        assert data["stdout"].strip() == "daemon-protected"
 
     @staticmethod
     def test_get_logs(client):
-        create_resp = client.post("/api/v1/sandboxes", json={
-            "command": ["/usr/bin/echo"],
-        })
+        create_resp = client.post("/api/v1/sandboxes", json={})
         sandbox_id = create_resp.json()["id"]
 
         resp = client.get(f"/api/v1/sandboxes/{sandbox_id}/logs")
@@ -465,9 +528,7 @@ class TestSandboxLifecycle:
 class TestPolicyAPI:
     @staticmethod
     def test_get_sandbox_policy(client):
-        create_resp = client.post("/api/v1/sandboxes", json={
-            "command": ["/usr/bin/echo"],
-        })
+        create_resp = client.post("/api/v1/sandboxes", json={})
         sandbox_id = create_resp.json()["id"]
 
         resp = client.get(f"/api/v1/policies/{sandbox_id}")
@@ -475,8 +536,10 @@ class TestPolicyAPI:
         data = resp.json()
         assert data["version"] == 1
         assert data["name"] == "server-default"
+        assert data["environment"] == {}
+        assert "sandbox_workspace" not in data
         assert "resources" not in data
-        assert data["filesystem_policy"]["directories"] == [{'path': '/home', 'permissions': '0755'},
+        assert data["filesystem_policy"]["directories"] == [{'path': '/home', 'permissions': '0777'},
                                                             {'path': '/tmp', 'permissions': '1777'}]
         assert data["filesystem_policy"]["read_only"] == [
             "/",
@@ -491,6 +554,7 @@ class TestPolicyAPI:
         assert data["filesystem_policy"]["read_write"] == ["/home", "/tmp"]
         assert data["filesystem_policy"]["bind_mounts"] == SYSTEM_BIND_MOUNTS
         assert data["filesystem_policy"]["device"] == DEVICE_MOUNTS
+        assert data["filesystem_policy"]["files"] == DEFAULT_FILES
         assert data["process"]["run_as_user"] == "sandbox"
         assert data["process"]["run_as_group"] == "sandbox"
         assert data["namespace"] == {
@@ -510,12 +574,12 @@ class TestPolicyAPI:
         assert data["network"]["egress"]["default"] == "allow"
         assert data["network"]["egress"]["blocked_domains"] == ["ip.me"]
         assert data["network"]["egress"]["allowed_ports"] == [443, 80]
-        assert data["network"]["ingress"]["default"] == "deny"
+        assert data["network"]["ingress"]["default"] == "allow"
         assert data["network"]["ingress"]["allowed_domains"] == ["localhost"]
         assert data["network"]["ingress"]["allowed_ips"] == ["127.0.0.1/32", "::1/128"]
         assert data["network"]["ingress"]["blocked_ips"] == []
         assert data["network"]["ingress"]["allowed_ports"] == [8080]
-        assert data["network"]["ingress"]["blocked_ports"] == [22]
+        assert data["network"]["ingress"]["blocked_ports"] == []
         assert "profile" not in data["syscall"]
         assert "blocked" not in data["syscall"]
         assert "mount" in data["syscall"]["x86_64"]["blocked"]
@@ -526,10 +590,12 @@ class TestPolicyAPI:
     @staticmethod
     def test_append_policy_merges_with_server_default(client):
         create_resp = client.post("/api/v1/sandboxes", json={
-            "command": ["/usr/bin/echo"],
             "policy_mode": "append",
             "policy": {
                 "name": "appended-policy",
+                "environment": {
+                    "JIUWENBOX_APPEND_ENV": "append-ok",
+                },
                 "filesystem_policy": {
                     "directories": [{"path": "/tmp/appended-dir", "permissions": "0700"}],
                     "read_only": ["/var/log"],
@@ -577,6 +643,8 @@ class TestPolicyAPI:
         assert resp.status_code == 200
         data = resp.json()
         assert data["name"] == "appended-policy"
+        assert data["environment"] == {"JIUWENBOX_APPEND_ENV": "append-ok"}
+        assert "sandbox_workspace" not in data
         assert data["network"]["egress"]["allowed_domains"] == [
             "baidu.com",
             "extra.example.com",
@@ -607,7 +675,7 @@ class TestPolicyAPI:
             "/var/log",
         ]
         assert data["filesystem_policy"]["read_write"] == ["/home", "/tmp", "/var/tmp"]
-        assert data["filesystem_policy"]["directories"] == [{'path': '/home', 'permissions': '0755'},
+        assert data["filesystem_policy"]["directories"] == [{'path': '/home', 'permissions': '0777'},
                                                             {'path': '/tmp', 'permissions': '1777'},
                                                             {"path": "/tmp/appended-dir", "permissions": "0700"}]
         assert data["filesystem_policy"]["bind_mounts"] == SYSTEM_BIND_MOUNTS + [{
@@ -616,6 +684,7 @@ class TestPolicyAPI:
             "mode": "rw",
         }]
         assert data["filesystem_policy"]["device"] == DEVICE_MOUNTS
+        assert data["filesystem_policy"]["files"] == DEFAULT_FILES
         assert data["process"]["run_as_user"] == "root"
         assert data["process"]["run_as_group"] == "root"
         assert data["namespace"] == {
@@ -636,10 +705,12 @@ class TestPolicyAPI:
     @staticmethod
     def test_override_policy_replaces_server_default(client):
         create_resp = client.post("/api/v1/sandboxes", json={
-            "command": ["/usr/bin/echo"],
             "policy_mode": "override",
             "policy": {
                 "name": "override-policy",
+                "environment": {
+                    "JIUWENBOX_OVERRIDE_ENV": "override-ok",
+                },
                 "filesystem_policy": {
                     "directories": [{
                         "path": "/tmp/override-dir",
@@ -697,6 +768,8 @@ class TestPolicyAPI:
         assert resp.status_code == 200
         data = resp.json()
         assert data["name"] == "override-policy"
+        assert data["environment"] == {"JIUWENBOX_OVERRIDE_ENV": "override-ok"}
+        assert "sandbox_workspace" not in data
         assert data["network"]["mode"] == "host"
         assert data["network"]["egress"]["allowed_domains"] == ["override.example.com"]
         assert data["network"]["egress"]["allowed_ips"] == ["198.51.100.10/32"]
@@ -711,6 +784,7 @@ class TestPolicyAPI:
         assert data["filesystem_policy"]["read_write"] == ["/var/tmp"]
         assert data["filesystem_policy"]["bind_mounts"] == SYSTEM_BIND_MOUNTS
         assert data["filesystem_policy"]["device"] == []
+        assert data["filesystem_policy"]["files"] == []
         assert data["filesystem_policy"]["directories"] == [{
             "path": "/tmp/override-dir",
             "permissions": "0700",
@@ -737,12 +811,11 @@ class TestPolicyAPI:
     @staticmethod
     def test_create_sandbox_rejects_direct_sandbox_bind_mount(client):
         resp = client.post("/api/v1/sandboxes", json={
-            "command": ["/usr/bin/echo", "hello"],
             "policy": {
                 "name": "bad-sandbox-mount-policy",
                 "filesystem_policy": {
                     "bind_mounts": [{
-                        "host_path": "/sandbox/manual",
+                        "host_path": f"{SANDBOX_WORKSPACE}/manual",
                         "sandbox_path": "/tmp/manual",
                         "mode": "rw",
                     }],
@@ -754,17 +827,16 @@ class TestPolicyAPI:
         })
 
         assert resp.status_code == 400
-        assert "/sandbox" in resp.json()["error"]
+        assert SANDBOX_WORKSPACE in resp.json()["error"]
 
     @staticmethod
     def test_create_sandbox_rejects_direct_sandbox_device_mount(client):
         resp = client.post("/api/v1/sandboxes", json={
-            "command": ["/usr/bin/echo", "hello"],
             "policy": {
                 "name": "bad-sandbox-device-policy",
                 "filesystem_policy": {
                     "device": [{
-                        "host_path": "/sandbox/manual-device",
+                        "host_path": f"{SANDBOX_WORKSPACE}/manual-device",
                         "sandbox_path": "/dev/manual-device",
                     }],
                 },
@@ -775,16 +847,15 @@ class TestPolicyAPI:
         })
 
         assert resp.status_code == 400
-        assert "/sandbox" in resp.json()["error"]
+        assert SANDBOX_WORKSPACE in resp.json()["error"]
 
     @staticmethod
     def test_create_sandbox_rejects_direct_sandbox_path(client):
         resp = client.post("/api/v1/sandboxes", json={
-            "command": ["/usr/bin/echo", "hello"],
             "policy": {
                 "name": "bad-sandbox-path-policy",
                 "filesystem_policy": {
-                    "read_write": ["/sandbox/manual"],
+                    "read_write": [f"{SANDBOX_WORKSPACE}/manual"],
                 },
                 "network": {
                     "mode": "host",
@@ -793,17 +864,16 @@ class TestPolicyAPI:
         })
 
         assert resp.status_code == 400
-        assert "/sandbox" in resp.json()["error"]
+        assert SANDBOX_WORKSPACE in resp.json()["error"]
 
     @staticmethod
     def test_create_sandbox_rejects_direct_sandbox_directory(client):
         resp = client.post("/api/v1/sandboxes", json={
-            "command": ["/usr/bin/echo", "hello"],
             "policy": {
                 "name": "bad-sandbox-dir-policy",
                 "filesystem_policy": {
                     "directories": [{
-                        "path": "/sandbox/manual",
+                        "path": f"{SANDBOX_WORKSPACE}/manual",
                         "permissions": "0700",
                     }],
                 },
@@ -814,7 +884,27 @@ class TestPolicyAPI:
         })
 
         assert resp.status_code == 400
-        assert "/sandbox" in resp.json()["error"]
+        assert SANDBOX_WORKSPACE in resp.json()["error"]
+
+    @staticmethod
+    def test_create_sandbox_rejects_direct_sandbox_file(client):
+        resp = client.post("/api/v1/sandboxes", json={
+            "policy": {
+                "name": "bad-sandbox-file-policy",
+                "filesystem_policy": {
+                    "files": [{
+                        "path": f"{SANDBOX_WORKSPACE}/manual-file",
+                        "permissions": "0600",
+                    }],
+                },
+                "network": {
+                    "mode": "host",
+                },
+            },
+        })
+
+        assert resp.status_code == 400
+        assert SANDBOX_WORKSPACE in resp.json()["error"]
 
 
 class TestPolicyEnforcement:
@@ -907,7 +997,7 @@ class TestPolicyEnforcement:
 
         response = client.post(f"/api/v1/sandboxes/{sandbox['id']}/exec", json={
             "command": [
-                "/usr/bin/python3",
+                "python",
                 "-c",
                 (
                     "import os, stat; "
@@ -923,6 +1013,105 @@ class TestPolicyEnforcement:
         data = response.json()
         assert data["exit_code"] == 0, data
         assert data["stdout"].splitlines() == ["True", "0o700"]
+
+    @staticmethod
+    def test_filesystem_directories_rule_creates_nested_directory(
+        client,
+        create_sandbox_with_policy,
+    ):
+        sandbox = create_sandbox_with_policy(
+            name_prefix="fs-nested-dir",
+            policy={
+                "name": "fs-nested-dir-policy",
+                "filesystem_policy": {
+                    "directories": [{
+                        "path": "/policy-created/level1/level2",
+                        "permissions": "0711",
+                    }],
+                    "read_only": ["/usr", "/lib", "/lib64", "/etc", "/opt"],
+                    "read_write": ["/tmp"],
+                },
+                "landlock": {
+                    "compatibility": "disabled",
+                },
+                "network": {
+                    "mode": "host",
+                },
+            },
+        )
+
+        response = client.post(f"/api/v1/sandboxes/{sandbox['id']}/exec", json={
+            "command": [
+                "python3",
+                "-c",
+                (
+                    "import os, stat; "
+                    "from pathlib import Path; "
+                    "parent = Path('/policy-created/level1'); "
+                    "path = parent / 'level2'; "
+                    "print(Path('/policy-created').is_dir()); "
+                    "print(parent.is_dir()); "
+                    "print(path.is_dir()); "
+                    "print(oct(stat.S_IMODE(os.stat(path).st_mode)))"
+                ),
+            ],
+            "timeout_seconds": 5,
+        })
+        assert response.status_code == 200
+        data = response.json()
+        assert data["exit_code"] == 0, data
+        assert data["stdout"].splitlines() == ["True", "True", "True", "0o711"]
+
+    @staticmethod
+    def test_filesystem_files_rule_creates_nested_empty_file(
+        client,
+        create_sandbox_with_policy,
+    ):
+        sandbox = create_sandbox_with_policy(
+            name_prefix="fs-file",
+            policy={
+                "name": "fs-file-policy",
+                "filesystem_policy": {
+                    "files": [{
+                        "path": "/policy-created/level1/marker.txt",
+                        "permissions": "0640",
+                    }],
+                    "read_only": ["/usr", "/lib", "/lib64", "/etc", "/opt"],
+                    "read_write": ["/tmp"],
+                },
+                "landlock": {
+                    "compatibility": "disabled",
+                },
+                "network": {
+                    "mode": "host",
+                },
+            },
+        )
+
+        response = client.post(f"/api/v1/sandboxes/{sandbox['id']}/exec", json={
+            "command": [
+                "python3",
+                "-c",
+                (
+                    "import os, stat; "
+                    "from pathlib import Path; "
+                    "parent = Path('/policy-created/level1'); "
+                    "path = parent / 'marker.txt'; "
+                    "print(Path('/policy-created').is_dir()); "
+                    "print(parent.is_dir()); "
+                    "print(path.is_file()); "
+                    "print(path.read_text()); "
+                    "print(oct(stat.S_IMODE(os.stat(path).st_mode)))"
+                ),
+            ],
+            "timeout_seconds": 5,
+        })
+        assert response.status_code == 200
+        data = response.json()
+        assert data["exit_code"] == 0, data
+        lines = data["stdout"].splitlines()
+        assert lines[:4] == ["True", "True", "True", ""]
+        assert lines[4] in {"0o640", "0o646"}, lines
 
     @staticmethod
     def test_filesystem_directories_rule_creates_directory_under_home(
@@ -959,7 +1148,7 @@ class TestPolicyEnforcement:
 
         response = client.post(f"/api/v1/sandboxes/{sandbox['id']}/exec", json={
             "command": [
-                "/usr/bin/python3",
+                "python3",
                 "-c",
                 (
                     "import os; "
@@ -1014,7 +1203,7 @@ class TestPolicyEnforcement:
             "print(sys.stdin.read())"
         )
         response = client.post(f"/api/v1/sandboxes/{sandbox['id']}/exec", json={
-            "command": ["/usr/bin/python3", "-c", script],
+            "command": ["python3", "-c", script],
             "workdir": "/tmp",
             "env": {"BOX_TEST": "env-ok"},
             "stdin": "stdin-ok",
@@ -1024,6 +1213,53 @@ class TestPolicyEnforcement:
         data = response.json()
         assert data["exit_code"] == 0, data
         assert data["stdout"].splitlines() == ["env-ok", "/tmp", "stdin-ok"]
+
+    @staticmethod
+    def test_policy_environment_applies_to_all_exec_processes(
+        client,
+        create_sandbox_with_policy,
+    ):
+        sandbox = create_sandbox_with_policy(
+            name_prefix="policy-env",
+            policy={
+                "name": "policy-env-policy",
+                "environment": {
+                    "JIUWENBOX_POLICY_ENV": "policy-env-ok",
+                    "JIUWENBOX_SHARED_ENV": "from-policy",
+                },
+                "filesystem_policy": {
+                    "read_only": ["/usr", "/lib", "/lib64", "/etc", "/opt"],
+                    "read_write": ["/tmp"],
+                },
+                "network": {
+                    "mode": "host",
+                },
+            },
+        )
+
+        script = (
+            "import os; "
+            "print(os.environ['JIUWENBOX_POLICY_ENV']); "
+            "print(os.environ['JIUWENBOX_SHARED_ENV'])"
+        )
+        response = client.post(f"/api/v1/sandboxes/{sandbox['id']}/exec", json={
+            "command": ["python3", "-c", script],
+            "timeout_seconds": 5,
+        })
+        assert response.status_code == 200
+        data = response.json()
+        assert data["exit_code"] == 0, data
+        assert data["stdout"].splitlines() == ["policy-env-ok", "from-policy"]
+
+        response = client.post(f"/api/v1/sandboxes/{sandbox['id']}/exec", json={
+            "command": ["python3", "-c", script],
+            "env": {"JIUWENBOX_SHARED_ENV": "from-exec"},
+            "timeout_seconds": 5,
+        })
+        assert response.status_code == 200
+        data = response.json()
+        assert data["exit_code"] == 0, data
+        assert data["stdout"].splitlines() == ["policy-env-ok", "from-exec"]
 
     @staticmethod
     def test_exec_runs_javascript_code(
@@ -1051,7 +1287,7 @@ class TestPolicyEnforcement:
             "console.log(`sum=${sum}`);"
         )
         response = client.post(f"/api/v1/sandboxes/{sandbox['id']}/exec", json={
-            "command": ["/usr/bin/node", "-e", js_code],
+            "command": ["node", "-e", js_code],
             "env": {"BOX_JS_TEST": "js-ok"},
             "timeout_seconds": 5,
         })
@@ -1132,7 +1368,7 @@ class TestPolicyEnforcement:
 
         setup = client.post(f"/api/v1/sandboxes/{sandbox['id']}/exec", json={
             "command": [
-                "/usr/bin/python3",
+                "python3",
                 "-c",
                 (
                     "from pathlib import Path; "
@@ -1190,7 +1426,7 @@ class TestPolicyEnforcement:
 
         setup = client.post(f"/api/v1/sandboxes/{sandbox['id']}/exec", json={
             "command": [
-                "/usr/bin/python3",
+                "python3",
                 "-c",
                 (
                     "from pathlib import Path; "
@@ -1241,7 +1477,7 @@ class TestPolicyEnforcement:
         )
 
         response = client.post(f"/api/v1/sandboxes/{sandbox['id']}/exec", json={
-            "command": ["/usr/bin/id", "-u"],
+            "command": ["id", "-u"],
             "timeout_seconds": 5,
         })
         assert response.status_code == 200
@@ -1250,7 +1486,7 @@ class TestPolicyEnforcement:
         assert uid_data["stdout"].strip() == "0"
 
         response = client.post(f"/api/v1/sandboxes/{sandbox['id']}/exec", json={
-            "command": ["/usr/bin/id", "-g"],
+            "command": ["id", "-g"],
             "timeout_seconds": 5,
         })
         assert response.status_code == 200
@@ -1265,7 +1501,6 @@ class TestPolicyEnforcement:
     ):
         sandbox = create_sandbox_with_policy(
             name_prefix="syscall-block",
-            command=["/usr/bin/sleep", "3600"],
             policy={
                 "name": "syscall-block-policy",
                 "filesystem_policy": {
@@ -1284,7 +1519,7 @@ class TestPolicyEnforcement:
 
         response = client.post(f"/api/v1/sandboxes/{sandbox['id']}/exec", json={
             "command": [
-                "/usr/bin/python3",
+                "python3",
                 "-c",
                 textwrap.dedent(
                     """
@@ -1350,7 +1585,7 @@ class TestPolicyEnforcement:
         )
 
         response = client.post(f"/api/v1/sandboxes/{sandbox['id']}/exec", json={
-            "command": ["/usr/bin/python3", "-c", "import os; print(os.getpid())"],
+            "command": ["python3", "-c", "import os; print(os.getpid())"],
             "timeout_seconds": 5,
         })
         assert response.status_code == 200
@@ -1389,7 +1624,7 @@ class TestPolicyEnforcement:
         )
 
         response = client.post(f"/api/v1/sandboxes/{sandbox['id']}/exec", json={
-            "command": ["/usr/bin/python3", "-c", _capability_check_script(13)],
+            "command": ["python", "-c", _capability_check_script(13)],
             "timeout_seconds": 5,
         })
         assert response.status_code == 200
@@ -1428,7 +1663,7 @@ class TestPolicyEnforcement:
         )
 
         response = client.post(f"/api/v1/sandboxes/{sandbox['id']}/exec", json={
-            "command": ["/usr/bin/python3", "-c", _capability_check_script(13)],
+            "command": ["python", "-c", _capability_check_script(13)],
             "timeout_seconds": 5,
         })
         assert response.status_code == 200
@@ -1441,7 +1676,6 @@ class TestPolicyEnforcement:
         client,
     ):
         create_resp = client.post("/api/v1/sandboxes", json={
-            "command": ["/usr/bin/echo", "landlock-ok"],
             "policy": _with_runtime_support({
                 "name": "landlock-hard-policy",
                 "filesystem_policy": {
@@ -1470,7 +1704,6 @@ class TestPolicyEnforcement:
     ):
         create_resp = client.post("/api/v1/sandboxes", json={
             "name": "landlock-rules",
-            "command": LONG_RUNNING_COMMAND,
             "policy": _with_runtime_support({
                 "name": "landlock-rules-policy",
                 "filesystem_policy": {
@@ -1502,7 +1735,7 @@ class TestPolicyEnforcement:
             assert allowed.read_text() == "landlock-allowed"
 
             try:
-                Path("/run/jiuwenbox-landlock-launcher.py").read_text()
+                Path("/jiuwenbox/landlock-launcher.py").read_text()
             except PermissionError:
                 print("landlock-denied")
                 sys.exit(7)
@@ -1511,7 +1744,7 @@ class TestPolicyEnforcement:
             """
         ).strip()
         response = client.post(f"/api/v1/sandboxes/{sandbox['id']}/exec", json={
-            "command": ["/usr/bin/python3", "-c", script],
+            "command": ["python", "-c", script],
             "timeout_seconds": 5,
         })
         assert response.status_code == 200
@@ -1547,7 +1780,7 @@ class TestPolicyEnforcement:
             "print('unexpected-success')"
         )
         response = client.post(f"/api/v1/sandboxes/{sandbox['id']}/exec", json={
-            "command": ["/usr/bin/python3", "-c", script, _sandbox_health_url(server_endpoint)],
+            "command": ["python", "-c", script, _sandbox_health_url(server_endpoint)],
             "timeout_seconds": 5,
         })
         assert response.status_code == 200
@@ -1559,7 +1792,6 @@ class TestPolicyEnforcement:
     def test_network_mode_host_allows_http_requests(
         client,
         create_sandbox_with_policy,
-        server_endpoint,
     ):
         sandbox = create_sandbox_with_policy(
             name_prefix="net-host",
@@ -1576,24 +1808,108 @@ class TestPolicyEnforcement:
             },
         )
 
-        script = (
-            "import sys, urllib.request; "
-            "print(urllib.request.urlopen(sys.argv[1], timeout=2).read().decode())"
-        )
+        script = textwrap.dedent(
+            """
+            import sys
+            import urllib.request
+
+            request = urllib.request.Request(
+                sys.argv[1],
+                headers={"User-Agent": "jiuwenbox-integration-test"},
+            )
+            with urllib.request.urlopen(request, timeout=10) as response:
+                print(response.status)
+                print(response.geturl())
+            """
+        ).strip()
         response = client.post(f"/api/v1/sandboxes/{sandbox['id']}/exec", json={
-            "command": ["/usr/bin/python3", "-c", script, _sandbox_health_url(server_endpoint)],
-            "timeout_seconds": 5,
+            "command": ["python3", "-c", script, "https://www.huawei.com/"],
+            "timeout_seconds": 15,
         })
         assert response.status_code == 200
         data = response.json()
         assert data["exit_code"] == 0
-        assert '"status":"ok"' in data["stdout"].replace(" ", "")
+        assert "huawei.com" in data["stdout"].lower()
+
+    @staticmethod
+    def test_host_network_allows_external_tcp_connection_to_sandbox_process(
+        client,
+        create_sandbox_with_policy,
+    ):
+        sandbox = create_sandbox_with_policy(
+            name_prefix="net-host-listener",
+            policy={
+                "name": "net-host-listener-policy",
+                "filesystem_policy": {
+                    "read_only": ["/usr", "/lib", "/lib64", "/etc", "/opt"],
+                    "read_write": ["/tmp"],
+                },
+                "network": {
+                    "mode": "host",
+                    "egress": {"default": "allow"},
+                    "ingress": {"default": "allow"},
+                },
+            },
+        )
+        host = _host_network_ip_from_sandbox(client, sandbox["id"])
+        port = _unused_host_network_tcp_port_from_sandbox(client, sandbox["id"])
+        script = textwrap.dedent(
+            """
+            import socket
+            import sys
+
+            port = int(sys.argv[1])
+            server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            server.bind(("0.0.0.0", port))
+            server.listen(1)
+            print("server-listening", flush=True)
+            while True:
+                conn, _ = server.accept()
+                data = conn.recv(64)
+                print("received:" + data.decode(), flush=True)
+                conn.sendall(b"pong-from-sandbox")
+                conn.close()
+            """
+        ).strip()
+        response = client.post(f"/api/v1/sandboxes/{sandbox['id']}/exec_background", json={
+            "command": ["python3", "-c", script, str(port)],
+            "timeout_seconds": 10,
+        })
+        assert response.status_code == 200, response.text
+        background = response.json()
+        assert background["started"] is True, background
+        assert isinstance(background["pid"], int), background
+        assert background["error_message"] is None
+
+        deadline = time.monotonic() + 8
+        last_error = None
+        payload = b""
+        while time.monotonic() < deadline:
+            try:
+                with socket.create_connection((host, port), timeout=0.5) as sock:
+                    sock.sendall(b"ping-from-host")
+                    payload = sock.recv(64)
+                    break
+            except OSError as exc:
+                last_error = exc
+                time.sleep(0.1)
+        else:
+            raise AssertionError(
+                f"sandbox tcp server did not accept connections: {last_error}; "
+                f"background={background}"
+            )
+
+        assert payload == b"pong-from-sandbox"
+        for index in range(5):
+            with socket.create_connection((host, port), timeout=0.5) as sock:
+                sock.sendall(f"ping-{index}".encode())
+                assert sock.recv(64) == b"pong-from-sandbox"
+            time.sleep(0.5)
 
     @staticmethod
     def test_default_policy_allows_network_https(client):
-        response = client.post("/api/v1/sandboxes", json={
-            "command": LONG_RUNNING_COMMAND,
-        })
+        response = client.post("/api/v1/sandboxes", json={})
         assert response.status_code == 201, response.text
         sandbox = response.json()
         assert sandbox["phase"] == "ready", sandbox
@@ -1613,7 +1929,7 @@ class TestPolicyEnforcement:
             """
         ).strip()
         response = client.post(f"/api/v1/sandboxes/{sandbox['id']}/exec", json={
-            "command": ["/usr/bin/python3", "-c", script, "https://www.huawei.com/"],
+            "command": ["python3", "-c", script, "https://www.huawei.com/"],
             "timeout_seconds": 15,
         })
         assert response.status_code == 200
@@ -1622,10 +1938,38 @@ class TestPolicyEnforcement:
         assert "huawei.com" in data["stdout"].lower()
 
     @staticmethod
-    def test_default_policy_does_not_expose_sensitive_etc_files(client):
-        response = client.post("/api/v1/sandboxes", json={
-            "command": LONG_RUNNING_COMMAND,
+    def test_default_policy_blocks_access_to_box_server_health(client, server_endpoint):
+        response = client.post("/api/v1/sandboxes", json={})
+        assert response.status_code == 201, response.text
+        sandbox = response.json()
+        assert sandbox["phase"] == "ready", sandbox
+
+        script = textwrap.dedent(
+            """
+            import sys
+            import urllib.request
+
+            try:
+                urllib.request.urlopen(sys.argv[1], timeout=3).read()
+            except Exception as exc:
+                print(type(exc).__name__)
+                sys.exit(7)
+
+            print("unexpected-success")
+            """
+        ).strip()
+        response = client.post(f"/api/v1/sandboxes/{sandbox['id']}/exec", json={
+            "command": ["python3", "-c", script, _sandbox_health_url(server_endpoint)],
+            "timeout_seconds": 10,
         })
+        assert response.status_code == 200
+        data = response.json()
+        assert data["exit_code"] == 7, data
+        assert "unexpected-success" not in data["stdout"]
+
+    @staticmethod
+    def test_default_policy_does_not_expose_sensitive_etc_files(client):
+        response = client.post("/api/v1/sandboxes", json={})
         assert response.status_code == 201, response.text
         sandbox = response.json()
         assert sandbox["phase"] == "ready", sandbox
@@ -1654,7 +1998,7 @@ class TestPolicyEnforcement:
             """
         ).strip()
         response = client.post(f"/api/v1/sandboxes/{sandbox['id']}/exec", json={
-            "command": ["/usr/bin/python3", "-c", script],
+            "command": ["python3", "-c", script],
             "timeout_seconds": 5,
         })
         assert response.status_code == 200
@@ -1695,7 +2039,7 @@ class TestPolicyEnforcement:
         )
 
         response = client.post(f"/api/v1/sandboxes/{sandbox['id']}/exec", json={
-            "command": ["/usr/bin/python3", "-c", _loopback_ingress_script(True), "18081"],
+            "command": ["python3", "-c", _loopback_ingress_script(True), "18081"],
             "timeout_seconds": 5,
         })
         assert response.status_code == 200
@@ -1730,7 +2074,7 @@ class TestPolicyEnforcement:
         )
 
         response = client.post(f"/api/v1/sandboxes/{sandbox['id']}/exec", json={
-            "command": ["/usr/bin/python3", "-c", _loopback_ingress_script(False), "18082"],
+            "command": ["python3", "-c", _loopback_ingress_script(False), "18082"],
             "timeout_seconds": 5,
         })
         assert response.status_code == 200
@@ -1764,7 +2108,7 @@ class TestPolicyEnforcement:
         )
 
         first_exec = client.post(f"/api/v1/sandboxes/{sandbox['id']}/exec", json={
-            "command": ["/usr/bin/python3", "-c", _loopback_ingress_script(True), "18083"],
+            "command": ["python3", "-c", _loopback_ingress_script(True), "18083"],
             "timeout_seconds": 5,
         })
         assert first_exec.status_code == 200
@@ -1778,7 +2122,7 @@ class TestPolicyEnforcement:
         assert start_response.status_code == 200
 
         second_exec = client.post(f"/api/v1/sandboxes/{sandbox['id']}/exec", json={
-            "command": ["/usr/bin/python3", "-c", _loopback_ingress_script(True), "18083"],
+            "command": ["python3", "-c", _loopback_ingress_script(True), "18083"],
             "timeout_seconds": 5,
         })
         assert second_exec.status_code == 200
@@ -1787,6 +2131,558 @@ class TestPolicyEnforcement:
 
         delete_response = client.delete(f"/api/v1/sandboxes/{sandbox['id']}")
         assert delete_response.status_code == 204
+
+    # ------------------------------------------------------------------
+    # ``/jiuwenbox`` runtime-script integrity
+    #
+    # jiuwenbox places two trusted scripts on a tmpfs at ``/jiuwenbox``
+    # inside every sandbox:
+    #
+    #   * ``/jiuwenbox/landlock-launcher.py`` - applies the Landlock
+    #     ruleset, then either ``compile``/``exec``s the daemon
+    #     in-process or ``execvp``s a one-shot user command.
+    #   * ``/jiuwenbox/sandbox-daemon.py``    - long-running daemon that
+    #     fronts ``exec`` / ``write_file`` / ``read_file`` / ``list_dir``
+    #     IPC requests with the policy uid/gid, mount layout, seccomp
+    #     filter, and Landlock ruleset already applied.
+    #
+    # If user code inside the sandbox could read, modify, replace, or
+    # unlink either script, the entire trust model collapses: a hostile
+    # payload could rewrite the daemon and gain a foothold for every
+    # *subsequent* exec the box-server dispatches into the sandbox.
+    #
+    # The launcher pre-reads both scripts into memory **before** Landlock
+    # is installed, so user code (which always runs strictly after
+    # Landlock is in force) is supposed to see ``/jiuwenbox`` as
+    # completely off-limits. The two cases below pin that contract; the
+    # complementary ``TestReservedSandboxPaths`` class below proves that
+    # user policies cannot widen the Landlock allowlist to expose
+    # ``/jiuwenbox`` from the outside.
+    # ------------------------------------------------------------------
+
+    _RESERVED_SCRIPT_DAEMON = "/jiuwenbox/sandbox-daemon.py"
+    _RESERVED_SCRIPT_LAUNCHER = "/jiuwenbox/landlock-launcher.py"
+
+    _RESERVED_INTEGRITY_POLICY = {
+        "name": "reserved-script-integrity-policy",
+        "filesystem_policy": {
+            # /jiuwenbox is intentionally NOT listed below - the runtime
+            # artifacts there must remain inaccessible to user code, and
+            # PolicyEngine would reject the policy outright if it tried.
+            "read_only": ["/usr", "/lib", "/lib64", "/etc", "/opt"],
+            "read_write": ["/tmp"],
+        },
+        "landlock": {
+            "compatibility": "hard_requirement",
+        },
+        "network": {
+            "mode": "host",
+        },
+    }
+
+    @staticmethod
+    def test_reserved_dir_scripts_cannot_be_tampered_with(
+        create_sandbox_with_policy,
+        client,
+    ):
+        """User code must hit ``PermissionError`` on every flavour of
+        access against ``/jiuwenbox`` and the trusted scripts inside it.
+
+        The script returns exit code 0 only when *every* attempted attack
+        was rejected; any successful read/write/delete/symlink/listdir
+        would surface as a non-zero exit code with a label in stderr, so
+        the happy path here is the locked-down path.
+        """
+        sandbox = create_sandbox_with_policy(
+            name_prefix="reserved-script-integrity",
+            policy=TestPolicyEnforcement._RESERVED_INTEGRITY_POLICY,
+        )
+
+        daemon_path = TestPolicyEnforcement._RESERVED_SCRIPT_DAEMON
+        launcher_path = TestPolicyEnforcement._RESERVED_SCRIPT_LAUNCHER
+
+        attack_script = textwrap.dedent(
+            f"""
+            import errno
+            import os
+            import sys
+
+            DAEMON = {daemon_path!r}
+            LAUNCHER = {launcher_path!r}
+
+            failures = []
+
+            # Errnos that mean the attack was rejected. The first three
+            # come straight from Landlock (EACCES on read/write/exec,
+            # EPERM on operations like unlink, EROFS on tmpfs that we
+            # remount read-only). The last two come from the filesystem
+            # layer doing its own job *before* Landlock even gets to
+            # rule:
+            #   * EEXIST - ``os.symlink(target, link)`` refuses to clobber
+            #     an existing file at ``link``. The daemon script is
+            #     therefore not replaced, which is exactly the
+            #     containment guarantee we are pinning here.
+            #   * EXDEV - ``os.rename(src, dst)`` cannot move a file
+            #     across different mounts. ``/jiuwenbox`` is its own
+            #     tmpfs and ``/tmp`` is another one, so the
+            #     rename-shadow attack cannot complete regardless of
+            #     Landlock. Treating this as containment success
+            #     documents the additional defence-in-depth that the
+            #     runtime relies on.
+            BLOCKED_ERRNOS = (
+                errno.EACCES,
+                errno.EPERM,
+                errno.EROFS,
+                errno.EEXIST,
+                errno.EXDEV,
+            )
+
+            def expect_blocked(label, fn):
+                try:
+                    fn()
+                except PermissionError:
+                    return
+                except FileNotFoundError:
+                    # Landlock can mask the path so it appears not to
+                    # exist; that is also a containment success.
+                    return
+                except FileExistsError:
+                    # See BLOCKED_ERRNOS comment above re: EEXIST.
+                    return
+                except OSError as exc:
+                    if exc.errno in BLOCKED_ERRNOS:
+                        return
+                    failures.append(
+                        f"{{label}}: unexpected OSError errno={{exc.errno}} {{exc!r}}"
+                    )
+                    return
+                failures.append(f"{{label}}: did not raise")
+
+            # 1. Direct read of the trusted scripts must be denied.
+            expect_blocked("read-daemon",   lambda: open(DAEMON, "rb").close())
+            expect_blocked("read-launcher", lambda: open(LAUNCHER, "rb").close())
+
+            # 2. Truncating / overwriting either script must be denied.
+            expect_blocked("write-truncate-daemon",   lambda: open(DAEMON, "wb").close())
+            expect_blocked("write-append-daemon",     lambda: open(DAEMON, "ab").close())
+            expect_blocked("write-truncate-launcher", lambda: open(LAUNCHER, "wb").close())
+
+            # 3. Unlinking the scripts must be denied.
+            expect_blocked("unlink-daemon",   lambda: os.unlink(DAEMON))
+            expect_blocked("unlink-launcher", lambda: os.unlink(LAUNCHER))
+
+            # 4. Replacing them via symlink (atomic shadow attack) must
+            #    be denied. We try both ``symlink`` over the existing
+            #    path and ``rename`` of an attacker-controlled file.
+            expect_blocked(
+                "symlink-shadow-daemon",
+                lambda: os.symlink("/tmp/evil", DAEMON),
+            )
+            attacker = "/tmp/jiuwenbox-attacker.py"
+            try:
+                with open(attacker, "wb") as fh:
+                    fh.write(b"# planted by user code\\n")
+            except OSError as exc:
+                failures.append(
+                    f"setup-attacker-failed: {{exc!r}}"
+                )
+            else:
+                expect_blocked(
+                    "rename-shadow-daemon",
+                    lambda: os.rename(attacker, DAEMON),
+                )
+
+            # 5. Creating *new* files inside ``/jiuwenbox`` must also
+            #    be denied so an attacker cannot drop a co-resident
+            #    decoy that the runtime might later mistakenly load.
+            expect_blocked(
+                "create-new-file-in-reserved-dir",
+                lambda: open("/jiuwenbox/evil.py", "wb").close(),
+            )
+
+            # 6. Even directory enumeration must be denied; otherwise an
+            #    attacker could probe what exists before mounting another
+            #    technique.
+            expect_blocked("listdir-reserved", lambda: os.listdir("/jiuwenbox"))
+            expect_blocked("scandir-reserved", lambda: list(os.scandir("/jiuwenbox")))
+
+            # 7. Permission bits must not be mutable from user code.
+            expect_blocked("chmod-daemon", lambda: os.chmod(DAEMON, 0o777))
+
+            if failures:
+                for fail in failures:
+                    print(fail, file=sys.stderr)
+                sys.exit(1)
+            print("all-blocked")
+            """
+        ).strip()
+
+        response = client.post(
+            f"/api/v1/sandboxes/{sandbox['id']}/exec",
+            json={
+                "command": ["python3", "-c", attack_script],
+                "timeout_seconds": 10,
+            },
+        )
+        assert response.status_code == 200, response.text
+        data = response.json()
+        assert data["exit_code"] == 0, data
+        assert data["stdout"].strip() == "all-blocked", data
+
+    @staticmethod
+    def test_sandbox_remains_functional_after_attempted_reserved_dir_tampering(
+        create_sandbox_with_policy,
+        client,
+    ):
+        """Attempting to tamper with ``/jiuwenbox`` scripts must not
+        damage the IPC daemon.
+
+        The daemon is loaded into memory before Landlock applies, so its
+        on-disk artifact is consumed only at sandbox-creation time. This
+        test guards against a regression where a future change makes
+        the daemon reload from ``/jiuwenbox`` on later requests - which
+        would mean an attacker who *did* break in could bend subsequent
+        execs to their will. We pound the attack endpoint, then verify
+        that two different IPC code paths (exec and read_file via
+        download) still produce the expected results.
+        """
+        sandbox = create_sandbox_with_policy(
+            name_prefix="reserved-script-survival",
+            policy=TestPolicyEnforcement._RESERVED_INTEGRITY_POLICY,
+        )
+        sandbox_id = sandbox["id"]
+
+        daemon_path = TestPolicyEnforcement._RESERVED_SCRIPT_DAEMON
+        launcher_path = TestPolicyEnforcement._RESERVED_SCRIPT_LAUNCHER
+
+        attack_script = textwrap.dedent(
+            f"""
+            import os
+            DAEMON = {daemon_path!r}
+            LAUNCHER = {launcher_path!r}
+            for path in (DAEMON, LAUNCHER):
+                for opener in (
+                    lambda p=path: open(p, 'rb').close(),
+                    lambda p=path: open(p, 'wb').close(),
+                    lambda p=path: os.unlink(p),
+                    lambda p=path: os.symlink('/tmp/evil', p),
+                    lambda p=path: os.chmod(p, 0o777),
+                ):
+                    try:
+                        opener()
+                    except OSError:
+                        pass
+            print('attempted')
+            """
+        ).strip()
+
+        attack_resp = client.post(
+            f"/api/v1/sandboxes/{sandbox_id}/exec",
+            json={
+                "command": ["python3", "-c", attack_script],
+                "timeout_seconds": 10,
+            },
+        )
+        assert attack_resp.status_code == 200, attack_resp.text
+        # The script swallows every error on purpose; what matters is
+        # that the daemon survives the volley of attempted mutations.
+        assert attack_resp.json()["exit_code"] == 0, attack_resp.json()
+
+        # IPC-exec must still work end-to-end after the attack.
+        followup_resp = client.post(
+            f"/api/v1/sandboxes/{sandbox_id}/exec",
+            json={
+                "command": [
+                    "python3",
+                    "-c",
+                    "print('post-attack-exec-ok')",
+                ],
+                "timeout_seconds": 10,
+            },
+        )
+        assert followup_resp.status_code == 200, followup_resp.text
+        followup = followup_resp.json()
+        assert followup["exit_code"] == 0, followup
+        assert "post-attack-exec-ok" in followup["stdout"]
+
+        # IPC file-op fast paths must also still work. Round-trip a
+        # payload through upload + download to confirm the daemon is
+        # still serving non-exec requests too.
+        target = "/tmp/post-attack-marker.txt"
+        marker = b"post-attack-file-op-ok"
+        upload_resp = client.post(
+            f"/api/v1/sandboxes/{sandbox_id}/upload",
+            params={"sandbox_path": target},
+            files={"file": ("marker.txt", marker, "text/plain")},
+        )
+        assert upload_resp.status_code == 204, upload_resp.text
+
+        download_resp = client.get(
+            f"/api/v1/sandboxes/{sandbox_id}/download",
+            params={"sandbox_path": target},
+        )
+        assert download_resp.status_code == 200, download_resp.text
+        assert download_resp.content == marker
+
+
+# ----------------------------------------------------------------------
+# Reserved-sandbox-path validation
+#
+# ``PolicyEngine`` reserves a small set of in-sandbox paths
+# (``_RESERVED_SANDBOX_PATHS``, currently ``("/jiuwenbox",)``) for the
+# trusted launcher and daemon scripts. Any user policy that names that
+# subtree must be rejected at sandbox-creation time, otherwise:
+#
+#   * ``read_only`` / ``read_write`` / ``directories`` / ``files``
+#     entries would punch ``/jiuwenbox`` into the Landlock allowlist
+#     (see ``jiuwenbox/supervisor/landlock.py``), letting user code read
+#     the launcher and daemon scripts and bypassing the
+#     ``test_reserved_dir_scripts_cannot_be_tampered_with`` guarantee;
+#   * ``bind_mounts`` with ``sandbox_path`` under ``/jiuwenbox`` would
+#     either shadow our launcher mount or bind a user-controlled host
+#     directory under the reserved name, which would also leak into the
+#     Landlock allowlist;
+#   * ``device`` mounts behave the same way as ``bind_mounts``, with
+#     the additional risk of granting ``--dev-bind`` privileges inside
+#     a path the runtime treats as trusted.
+#
+# The cases below assert that every flavour of policy-supplied path
+# referencing the reserved subtree is rejected with a 400 response and a
+# message that names the offending path.
+# ----------------------------------------------------------------------
+
+
+class TestReservedSandboxPaths:
+    """Server must reject user policies that target ``/jiuwenbox``."""
+
+    _RESERVED_DIR = "/jiuwenbox"
+    _RESERVED_NESTED = "/jiuwenbox/landlock-launcher.py"
+    _RESERVED_DEEP_NESTED = "/jiuwenbox/sub/dir/file.py"
+
+    @staticmethod
+    def _post_policy(client, policy: dict):
+        """Submit a policy and return ``(status_code, body)`` pairs.
+
+        ``create_sandbox_with_policy`` asserts ``phase == "ready"`` so it
+        is unsuitable for negative tests; we hit the endpoint directly.
+        """
+        return client.post(
+            "/api/v1/sandboxes",
+            json={
+                "policy_mode": "override",
+                "policy": _with_runtime_support(policy),
+            },
+        )
+
+    @staticmethod
+    def _assert_rejected_with_reserved_message(response, expected_path: str):
+        assert response.status_code == 400, response.text
+        body = response.json()
+        assert "error" in body, body
+        message = body["error"]
+        assert expected_path in message, message
+        assert "reserved" in message.lower(), message
+
+    @staticmethod
+    @pytest.mark.parametrize(
+        "field, sandbox_path",
+        [
+            ("read_only", _RESERVED_DIR),
+            ("read_only", _RESERVED_NESTED),
+            ("read_only", _RESERVED_DEEP_NESTED),
+            ("read_write", _RESERVED_DIR),
+            ("read_write", _RESERVED_NESTED),
+            ("read_write", _RESERVED_DEEP_NESTED),
+        ],
+    )
+    def test_read_lists_cannot_reference_reserved_subtree(
+        client,
+        field: str,
+        sandbox_path: str,
+    ):
+        """``read_only`` / ``read_write`` are pushed straight into the
+        Landlock allowlist by ``encode_landlock_payload``. Letting a user
+        sneak ``/jiuwenbox`` in there would expose the launcher / daemon
+        scripts the moment Landlock applies, so the policy engine has to
+        bounce these inputs before any sandbox is created.
+        """
+        policy = {
+            "name": f"reserved-{field}-policy",
+            "filesystem_policy": {field: [sandbox_path]},
+        }
+        response = TestReservedSandboxPaths._post_policy(client, policy)
+        TestReservedSandboxPaths._assert_rejected_with_reserved_message(
+            response, sandbox_path,
+        )
+
+    @staticmethod
+    @pytest.mark.parametrize(
+        "sandbox_path",
+        [_RESERVED_DIR, _RESERVED_NESTED, _RESERVED_DEEP_NESTED],
+    )
+    def test_directories_field_cannot_reference_reserved_subtree(
+        client,
+        sandbox_path: str,
+    ):
+        """``filesystem_policy.directories`` ultimately becomes a
+        ``--dir`` mount + Landlock read_write entry; both behaviours
+        would clobber our reserved tmpfs.
+        """
+        policy = {
+            "name": "reserved-directories-policy",
+            "filesystem_policy": {"directories": [sandbox_path]},
+        }
+        response = TestReservedSandboxPaths._post_policy(client, policy)
+        TestReservedSandboxPaths._assert_rejected_with_reserved_message(
+            response, sandbox_path,
+        )
+
+    @staticmethod
+    @pytest.mark.parametrize(
+        "sandbox_path",
+        [_RESERVED_DIR, _RESERVED_NESTED, _RESERVED_DEEP_NESTED],
+    )
+    def test_files_field_cannot_reference_reserved_subtree(
+        client,
+        sandbox_path: str,
+    ):
+        """A single user-controlled file inside ``/jiuwenbox`` would
+        still leak that path into the Landlock allowlist via
+        ``encode_landlock_payload``; reject the whole subtree, not just
+        the canonical script names.
+        """
+        policy = {
+            "name": "reserved-files-policy",
+            "filesystem_policy": {"files": [sandbox_path]},
+        }
+        response = TestReservedSandboxPaths._post_policy(client, policy)
+        TestReservedSandboxPaths._assert_rejected_with_reserved_message(
+            response, sandbox_path,
+        )
+
+    @staticmethod
+    @pytest.mark.parametrize("mode", ["ro", "rw"])
+    @pytest.mark.parametrize(
+        "sandbox_path",
+        [_RESERVED_DIR, _RESERVED_NESTED, _RESERVED_DEEP_NESTED],
+    )
+    def test_bind_mounts_cannot_target_reserved_subtree(
+        client,
+        sandbox_path: str,
+        mode: str,
+    ):
+        """``bind_mounts.sandbox_path`` is the most dangerous knob: it
+        mounts a host-controlled directory under the reserved subtree
+        and tells Landlock to allow it. ``host_path`` is irrelevant for
+        the policy reservation (it lives in the operator's filesystem)
+        but we need to supply *something* that exists on host so the
+        request reaches validation.
+        """
+        policy = {
+            "name": "reserved-bind-mounts-policy",
+            "filesystem_policy": {
+                "bind_mounts": [
+                    {
+                        "host_path": "/tmp",
+                        "sandbox_path": sandbox_path,
+                        "mode": mode,
+                    },
+                ],
+            },
+        }
+        response = TestReservedSandboxPaths._post_policy(client, policy)
+        TestReservedSandboxPaths._assert_rejected_with_reserved_message(
+            response, sandbox_path,
+        )
+
+    @staticmethod
+    @pytest.mark.parametrize(
+        "sandbox_path",
+        [_RESERVED_DIR, _RESERVED_NESTED, _RESERVED_DEEP_NESTED],
+    )
+    def test_device_mounts_cannot_target_reserved_subtree(
+        client,
+        sandbox_path: str,
+    ):
+        """``device`` mounts go through ``--dev-bind`` and the Landlock
+        allowlist; if a user can pin ``/jiuwenbox/foo`` here, they
+        smuggle the reserved subtree back into Landlock the same way
+        ``bind_mounts`` would.
+        """
+        policy = {
+            "name": "reserved-device-policy",
+            "filesystem_policy": {
+                "device": [
+                    {
+                        "host_path": "/dev/null",
+                        "sandbox_path": sandbox_path,
+                    },
+                ],
+            },
+        }
+        response = TestReservedSandboxPaths._post_policy(client, policy)
+        TestReservedSandboxPaths._assert_rejected_with_reserved_message(
+            response, sandbox_path,
+        )
+
+    @staticmethod
+    def test_unrelated_sandbox_paths_are_not_rejected(
+        client, create_sandbox_with_policy,
+    ):
+        """Sanity check: paths that merely resemble the reserved name
+        (substring matches, suffix collisions, ``/run`` left over from
+        the previous design) must still be allowed. This guards against
+        an over-broad ``startswith`` style implementation.
+        """
+        policy = {
+            "name": "non-reserved-policy",
+            "filesystem_policy": {
+                "read_only": [
+                    "/usr",
+                    "/lib",
+                    "/lib64",
+                    "/etc",
+                    "/opt",
+                    # ``/jiuwenbox-public`` is *not* under
+                    # ``/jiuwenbox`` because PurePosixPath compares full
+                    # path components, not raw string prefixes.
+                    "/jiuwenbox-public",
+                    # Legacy directory we used to host the launcher in -
+                    # plain ``/run`` must remain a normal user-policy
+                    # path now that the reserved subtree has moved.
+                    "/run",
+                ],
+                "read_write": ["/tmp"],
+            },
+        }
+        sandbox = create_sandbox_with_policy(
+            name_prefix="non-reserved",
+            policy=policy,
+        )
+        assert sandbox["phase"] == "ready", sandbox
+
+    @staticmethod
+    def test_reserved_subtree_rejection_runs_before_sandbox_creation(
+        client,
+    ):
+        """The launcher / daemon scripts must never be touched by an
+        invalid policy. We assert the failure path returns 400 *and*
+        does not surface a non-zero phase, which would imply the runtime
+        partially started a sandbox before bouncing.
+        """
+        policy = {
+            "name": "reserved-pre-creation-policy",
+            "filesystem_policy": {
+                "read_only": [TestReservedSandboxPaths._RESERVED_DIR],
+            },
+        }
+        response = TestReservedSandboxPaths._post_policy(client, policy)
+        TestReservedSandboxPaths._assert_rejected_with_reserved_message(
+            response, TestReservedSandboxPaths._RESERVED_DIR,
+        )
+        # The /sandboxes endpoint only returns a created body on 201.
+        # 400 responses must not contain phase information.
+        assert "phase" not in response.json(), response.json()
 
 
 class TestBwrapFilesystem:
@@ -1811,7 +2707,7 @@ class TestBwrapFilesystem:
             },
         })
 
-        args = BwrapConfig.from_policy(policy, ["/usr/bin/true"]).to_args()
+        args = BwrapConfig.from_policy(policy, ["true"]).to_args()
 
         assert not _has_mount(args, "--ro-bind", "/host-read-only", "/host-read-only")
         assert not _has_mount(args, "--bind", "/host-read-write", "/host-read-write")
@@ -1830,7 +2726,7 @@ class TestBwrapFilesystem:
             },
         })
 
-        args = BwrapConfig.from_policy(policy, ["/usr/bin/true"]).to_args()
+        args = BwrapConfig.from_policy(policy, ["true"]).to_args()
 
         assert _has_arg_pair(args, "--dir", "/etc")
         assert _has_mount(args, "--ro-bind", "/etc/resolv.conf", "/etc/resolv.conf")
@@ -1846,7 +2742,7 @@ class TestBwrapFilesystem:
             },
         })
 
-        args = BwrapConfig.from_policy(policy, ["/usr/bin/true"]).to_args()
+        args = BwrapConfig.from_policy(policy, ["true"]).to_args()
 
         assert not _has_arg_pair(args, "--dir", "/dev")
         assert _has_arg_pair(args, "--dir", "/dev/dri")
@@ -1866,7 +2762,7 @@ class TestBwrapFilesystem:
             },
         })
 
-        args = BwrapConfig.from_policy(policy, ["/usr/bin/true"]).to_args()
+        args = BwrapConfig.from_policy(policy, ["true"]).to_args()
 
         assert not _has_arg_pair(args, "--dir", "/etc")
         assert _has_arg_pair(args, "--tmpfs", "/etc")
@@ -1938,16 +2834,14 @@ class TestNetworkIptables:
 class TestSandboxExec:
     @staticmethod
     def test_exec_requires_running_sandbox(client):
-        create_resp = client.post("/api/v1/sandboxes", json={
-            "command": ["/usr/bin/sleep", "3600"],
-        })
+        create_resp = client.post("/api/v1/sandboxes", json={})
         sandbox_id = create_resp.json()["id"]
 
         # Stop it first
         client.post(f"/api/v1/sandboxes/{sandbox_id}/stop")
 
         resp = client.post(f"/api/v1/sandboxes/{sandbox_id}/exec", json={
-            "command": ["/usr/bin/echo", "hello"],
+            "command": ["echo", "hello"],
         })
         assert resp.status_code == 409
 
@@ -1956,9 +2850,7 @@ class TestSandboxListing:
     @staticmethod
     def test_list_returns_all_sandboxes(client):
         for i in range(3):
-            client.post("/api/v1/sandboxes", json={
-                "command": ["/usr/bin/echo"],
-            })
+            client.post("/api/v1/sandboxes", json={})
 
         resp = client.get("/api/v1/sandboxes")
         assert resp.status_code == 200

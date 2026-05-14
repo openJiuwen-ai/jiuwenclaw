@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from jiuwenclaw.gateway.cron.models import CronJob, CronTarget
-from jiuwenclaw.utils import get_cron_jobs_path
+from jiuwenclaw.common.utils import get_cron_jobs_path
 
 
 class CronJobStore:

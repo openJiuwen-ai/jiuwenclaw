@@ -1,0 +1,664 @@
+/**
+ * HarnessPackagePanel Component
+ *
+ * Plugin version management panel for auto-harness.
+ * Displays version selector, version info, file tree, and hot-activate button.
+ */
+
+import { useEffect, useState, useCallback, useRef } from 'react';
+import { useTranslation } from 'react-i18next';
+import { useHarnessStore } from '../../stores';
+import { webRequest } from '../../services/webClient';
+import { PackageInfo, PackagesPayload, ActivatePayload } from '../../types';
+import { HarnessExtensionTree } from '../ToolPanel/HarnessExtensionTree';
+import './HarnessPackagePanel.css';
+
+interface HarnessPackagePanelProps {
+  sessionId: string;
+}
+
+interface DeletePayload {
+  deleted_package_id: string;
+  extension_name: string;
+  switched_to_native: boolean;
+  message: string;
+}
+
+export function HarnessPackagePanel({ sessionId }: HarnessPackagePanelProps) {
+  const { t } = useTranslation();
+  const {
+    packages,
+    nativeVersion,
+    activePackageId,
+    selectedPackageId,
+    loadingPackages,
+    activatingPackage,
+    setPackages,
+    setActivePackageId,
+    setSelectedPackageId,
+    setLoadingPackages,
+    setActivatingPackage,
+    setExtensionReady,
+  } = useHarnessStore();
+
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [activateError, setActivateError] = useState<string | null>(null);
+  const [activateSuccess, setActivateSuccess] = useState<string | null>(null);
+  const [deleteConfirmOpen, setDeleteConfirmOpen] = useState(false);
+  const [deletingPackage, setDeletingPackage] = useState(false);
+  const [deleteError, setDeleteError] = useState<string | null>(null);
+  const [deleteSuccess, setDeleteSuccess] = useState<string | null>(null);
+  const [importing, setImporting] = useState(false);
+  const [exporting, setExporting] = useState(false);
+  const [importError, setImportError] = useState<string | null>(null);
+  const [exportError, setExportError] = useState<string | null>(null);
+  const [importSuccess, setImportSuccess] = useState<string | null>(null);
+  const [exportSuccess, setExportSuccess] = useState<string | null>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+
+  // Fetch packages on mount
+  const fetchPackages = useCallback(async () => {
+    setLoadingPackages(true);
+    setLoadError(null);
+
+    try {
+      const payload = await webRequest<PackagesPayload>('harness.packages', undefined);
+      const activeId = payload.active_package_id || null;
+      setPackages(
+        payload.packages || [],
+        payload.native_version || { id: 'native', extension_name: 'Native Agent', is_active: true },
+        activeId
+      );
+      // Set selectedPackageId to active_package_id or 'native' as default
+      setSelectedPackageId(activeId || 'native');
+    } catch (err) {
+      console.error('Failed to fetch packages:', err);
+      setLoadError(err instanceof Error ? err.message : t('harnessPackage.loadPackagesFailed'));
+    } finally {
+      setLoadingPackages(false);
+    }
+  }, [setLoadingPackages, setPackages, setSelectedPackageId, t]);
+
+  useEffect(() => {
+    fetchPackages();
+  }, [fetchPackages]);
+
+  // Get selected package info
+  const getSelectedPackage = useCallback((): PackageInfo | null => {
+    if (!selectedPackageId || selectedPackageId === 'native') return null;
+    return packages.find(p => p.id === selectedPackageId) || null;
+  }, [selectedPackageId, packages]);
+
+  const selectedPackage = getSelectedPackage();
+
+  // Check if selected is native version
+  const isSelectedNative = selectedPackageId === 'native';
+
+  // Handle version selection change
+  const handleVersionChange = (e: React.ChangeEvent<HTMLSelectElement>) => {
+    const value = e.target.value;
+    setSelectedPackageId(value || 'native');
+    // Clear status messages when switching
+    setActivateError(null);
+    setActivateSuccess(null);
+    setDeleteError(null);
+    setDeleteSuccess(null);
+    setImportError(null);
+    setImportSuccess(null);
+    setExportError(null);
+    setExportSuccess(null);
+  };
+
+  // Handle hot activate
+  const handleHotActivate = async () => {
+    if (!selectedPackageId) return;
+
+    setActivatingPackage(true);
+    setActivateError(null);
+    setActivateSuccess(null);
+
+    try {
+      const payload = await webRequest<ActivatePayload>('harness.activate', {
+        package_id: selectedPackageId,
+        session_id: sessionId,
+      });
+
+      setActivePackageId(payload.activated_package_id);
+      setActivateSuccess(payload.message);
+
+      // Update extensionReady if activating a package
+      if (payload.activated_package_id === 'native' || selectedPackageId === 'native') {
+        setExtensionReady(null);
+      } else {
+        setExtensionReady({
+          extensionName: payload.extension_name,
+          runtimePath: payload.runtime_path,
+          configPath: payload.config_path,
+          verifyReport: {},
+          componentsSummary: {},
+        });
+      }
+
+      // Refresh packages to update is_active status and dropdown display
+      await fetchPackages();
+    } catch (err) {
+      console.error('Failed to activate package:', err);
+      setActivateError(err instanceof Error ? err.message : t('harnessPackage.activateFailed'));
+    } finally {
+      setActivatingPackage(false);
+    }
+  };
+
+  // Handle delete button click - open confirmation modal
+  const handleDeleteClick = () => {
+    if (!selectedPackage || isSelectedNative) return;
+    setDeleteConfirmOpen(true);
+    setDeleteError(null);
+    setDeleteSuccess(null);
+  };
+
+  // Handle delete confirmation
+  const handleDeleteConfirm = async () => {
+    if (!selectedPackage) return;
+
+    setDeletingPackage(true);
+    setDeleteError(null);
+    setDeleteSuccess(null);
+
+    try {
+      const payload = await webRequest<DeletePayload>('harness.delete', {
+        package_id: selectedPackageId,
+      });
+
+      // If switched to native, update state
+      if (payload.switched_to_native) {
+        setActivePackageId(null);
+        setExtensionReady(null);
+        setSelectedPackageId('native');
+      }
+
+      // Refresh packages list
+      await fetchPackages();
+
+      setDeleteSuccess(payload.message);
+      setDeleteConfirmOpen(false);
+    } catch (err) {
+      console.error('Failed to delete package:', err);
+      setDeleteError(err instanceof Error ? err.message : t('harnessPackage.deleteFailed'));
+    } finally {
+      setDeletingPackage(false);
+    }
+  };
+
+  // Handle delete modal close
+  const handleDeleteCancel = () => {
+    setDeleteConfirmOpen(false);
+  };
+
+  // Handle export - download package as zip via WebSocket
+  const handleExport = async () => {
+    if (!selectedPackageId || isSelectedNative) return;
+
+    setExporting(true);
+    setExportError(null);
+    setExportSuccess(null);
+
+    try {
+      // Send via WebSocket
+      const result = await webRequest<{ file_content: string; filename: string }>('harness.export', {
+        package_id: selectedPackageId,
+      });
+
+      // Decode base64 content and download
+      const binaryString = atob(result.file_content);
+      const bytes = new Uint8Array(binaryString.length);
+      for (let i = 0; i < binaryString.length; i++) {
+        bytes[i] = binaryString.charCodeAt(i);
+      }
+      const blob = new Blob([bytes], { type: 'application/zip' });
+      const url = window.URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = result.filename || `${selectedPackage?.extension_name || 'package'}.zip`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      window.URL.revokeObjectURL(url);
+
+      setExportSuccess(t('harnessPackage.exportSuccess'));
+    } catch (err) {
+      console.error('Export failed:', err);
+      setExportError(err instanceof Error ? err.message : t('harnessPackage.exportError'));
+    } finally {
+      setExporting(false);
+    }
+  };
+
+  // Handle import button click - open file picker
+  const handleImportClick = () => {
+    fileInputRef.current?.click();
+  };
+
+  // Handle file selection for import
+  const handleFileSelect = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    setImporting(true);
+    setImportError(null);
+    setImportSuccess(null);
+
+    try {
+      // Read file and convert to base64
+      const fileContent = await file.arrayBuffer();
+      const base64Content = btoa(
+        new Uint8Array(fileContent).reduce(
+          (data, byte) => data + String.fromCharCode(byte),
+          ''
+        )
+      );
+
+      // Send via WebSocket
+      await webRequest('harness.import', {
+        file_content: base64Content,
+      });
+
+      setImportSuccess(t('harnessPackage.importSuccess'));
+      // Refresh package list
+      await fetchPackages();
+    } catch (err) {
+      console.error('Import failed:', err);
+      setImportError(err instanceof Error ? err.message : t('harnessPackage.importError'));
+    } finally {
+      setImporting(false);
+      // Reset file input
+      if (fileInputRef.current) {
+        fileInputRef.current.value = '';
+      }
+    }
+  };
+
+  // Build version options for dropdown
+  const buildVersionOptions = () => {
+    const options: JSX.Element[] = [];
+
+    // Native version option (always first)
+    options.push(
+      <option key="native" value="native">
+        {nativeVersion?.extension_name || 'Native Agent'}
+        {nativeVersion?.is_active ? ` (${t('harnessPackage.currentActive')})` : ''}
+      </option>
+    );
+
+    // Package options
+    packages.forEach((pkg) => {
+      options.push(
+        <option key={pkg.id} value={pkg.id}>
+          {pkg.extension_name}
+          {pkg.version_label ? ` - ${pkg.version_label}` : ''}
+          {pkg.is_active ? ` (${t('harnessPackage.currentActive')})` : ''}
+        </option>
+      );
+    });
+
+    return options;
+  };
+
+  // Check if selected version differs from active
+  const canActivate = selectedPackageId !== activePackageId && selectedPackageId !== null;
+
+  // Format date for display
+  const formatDate = (dateStr: string | undefined) => {
+    if (!dateStr) return '-';
+    try {
+      const date = new Date(dateStr);
+      return date.toLocaleString();
+    } catch {
+      return dateStr;
+    }
+  };
+
+  // Render version info
+  const renderVersionInfo = () => {
+    if (isSelectedNative) {
+      return (
+        <div className="harness-package-panel__info">
+          <div className="harness-package-panel__info-title">
+            {t('harnessPackage.versionInfo')}
+          </div>
+          <div className="harness-package-panel__info-item">
+            <span className="harness-package-panel__info-label">
+              {t('harnessPackage.versionType')}
+            </span>
+            <span className="harness-package-panel__info-badge">
+              {t('harnessPackage.nativeVersion')}
+            </span>
+          </div>
+          <div className="harness-package-panel__info-item">
+            <span className="harness-package-panel__info-label">
+              {t('harnessPackage.status')}
+            </span>
+            <span className={`harness-package-panel__info-badge ${nativeVersion?.is_active ? 'harness-package-panel__info-badge--active' : ''}`}>
+              {nativeVersion?.is_active ? t('harnessPackage.active') : t('harnessPackage.inactive')}
+            </span>
+          </div>
+          <div className="harness-package-panel__info-item">
+            <span className="harness-package-panel__info-label">
+              {t('harnessPackage.description')}
+            </span>
+            <span className="harness-package-panel__info-value">
+              {t('harnessPackage.nativeDescription')}
+            </span>
+          </div>
+        </div>
+      );
+    }
+
+    if (!selectedPackage) {
+      return null;
+    }
+
+    return (
+      <div className="harness-package-panel__info">
+        <div className="harness-package-panel__info-title">
+          {t('harnessPackage.versionInfo')}
+        </div>
+        <div className="harness-package-panel__info-item">
+          <span className="harness-package-panel__info-label">
+            {t('harnessPackage.extensionName')}
+          </span>
+          <span className="harness-package-panel__info-value">
+            {selectedPackage.extension_name}
+          </span>
+        </div>
+        <div className="harness-package-panel__info-item">
+          <span className="harness-package-panel__info-label">
+            {t('harnessPackage.versionType')}
+          </span>
+          <span className="harness-package-panel__info-badge">
+            {t('harnessPackage.harnessVersion')}
+          </span>
+        </div>
+        <div className="harness-package-panel__info-item">
+          <span className="harness-package-panel__info-label">
+            {t('harnessPackage.status')}
+          </span>
+          <span className={`harness-package-panel__info-badge ${selectedPackage.is_active ? 'harness-package-panel__info-badge--active' : ''}`}>
+            {selectedPackage.is_active ? t('harnessPackage.active') : t('harnessPackage.inactive')}
+          </span>
+        </div>
+        <div className="harness-package-panel__info-item">
+          <span className="harness-package-panel__info-label">
+            {t('harnessPackage.createdAt')}
+          </span>
+          <span className="harness-package-panel__info-value">
+            {formatDate(selectedPackage.created_at)}
+          </span>
+        </div>
+        {selectedPackage.is_active && selectedPackage.activated_at && (
+          <div className="harness-package-panel__info-item">
+            <span className="harness-package-panel__info-label">
+              {t('harnessPackage.activatedAt')}
+            </span>
+            <span className="harness-package-panel__info-value">
+              {formatDate(selectedPackage.activated_at)}
+            </span>
+          </div>
+        )}
+        {selectedPackage.version_label && (
+          <div className="harness-package-panel__info-item">
+            <span className="harness-package-panel__info-label">
+              {t('harnessPackage.versionLabel')}
+            </span>
+            <span className="harness-package-panel__info-value">
+              {selectedPackage.version_label}
+            </span>
+          </div>
+        )}
+        <div className="harness-package-panel__info-item">
+          <span className="harness-package-panel__info-label">
+            {t('harnessPackage.runtimePath')}
+          </span>
+          <span className="harness-package-panel__info-value harness-package-panel__info-value--mono">
+            {selectedPackage.runtime_path}
+          </span>
+        </div>
+        {selectedPackage.description && (
+          <div className="harness-package-panel__info-item">
+            <span className="harness-package-panel__info-label">
+              {t('harnessPackage.description')}
+            </span>
+            <span className="harness-package-panel__info-value">
+              {selectedPackage.description}
+            </span>
+          </div>
+        )}
+      </div>
+    );
+  };
+
+  if (loadingPackages) {
+    return (
+      <div className="harness-package-panel">
+        <div className="harness-package-panel__loading">
+          <div className="harness-package-panel__spinner" />
+          <span>{t('harnessPackage.loading')}</span>
+        </div>
+      </div>
+    );
+  }
+
+  if (loadError) {
+    return (
+      <div className="harness-package-panel">
+        <div className="harness-package-panel__error">
+          <span>{loadError}</span>
+          <button
+            type="button"
+            onClick={fetchPackages}
+            className="harness-package-panel__retry-btn"
+          >
+            {t('harnessPackage.retry')}
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="harness-package-panel">
+      {/* Header */}
+      <div className="harness-package-panel__header">
+        <h3>{t('harnessPackage.title')}</h3>
+        <div className="harness-package-panel__header-actions">
+          <button
+            type="button"
+            onClick={fetchPackages}
+            className="harness-package-panel__refresh-btn"
+            disabled={loadingPackages}
+          >
+            {loadingPackages ? t('common.refreshing') : t('harnessPackage.refresh')}
+          </button>
+          <button
+            type="button"
+            onClick={handleImportClick}
+            className="harness-package-panel__import-btn"
+            disabled={importing}
+          >
+            {importing ? t('harnessPackage.importing') : t('harnessPackage.import')}
+          </button>
+          <button
+            type="button"
+            onClick={handleExport}
+            className="harness-package-panel__export-btn"
+            disabled={isSelectedNative || exporting || !selectedPackage}
+          >
+            {exporting ? t('harnessPackage.exporting') : t('harnessPackage.export')}
+          </button>
+        </div>
+        {/* Hidden file input for import */}
+        <input
+          type="file"
+          accept=".zip"
+          ref={fileInputRef}
+          onChange={handleFileSelect}
+          style={{ display: 'none' }}
+        />
+      </div>
+
+      {/* Main content - Left: selector & info, Right: file tree */}
+      <div className="harness-package-panel__main">
+        {/* Left side */}
+        <div className="harness-package-panel__left">
+          {/* Version Selector */}
+          <div className="harness-package-panel__selector">
+            <label htmlFor="version-select">{t('harnessPackage.versionSelector')}</label>
+            <select
+              id="version-select"
+              value={selectedPackageId || 'native'}
+              onChange={handleVersionChange}
+              className="harness-package-panel__select"
+            >
+              {buildVersionOptions()}
+            </select>
+          </div>
+
+          {/* Version Info */}
+          {renderVersionInfo()}
+        </div>
+
+        {/* Right side - File Tree */}
+        <div className="harness-package-panel__right">
+          <div className="harness-package-panel__tree">
+            {selectedPackage ? (
+              <HarnessExtensionTree
+                key={selectedPackage.id}
+                runtimePath={selectedPackage.runtime_path}
+                extensionName={selectedPackage.extension_name}
+                showExport={false}
+              />
+            ) : (
+              <div className="harness-package-panel__no-extension">
+                {t('harnessPackage.selectToViewFiles')}
+              </div>
+            )}
+          </div>
+        </div>
+      </div>
+
+      {/* Footer - Activate Section */}
+      <div className="harness-package-panel__footer">
+        <div className="harness-package-panel__actions">
+          {/* Hot Activate Button */}
+          <button
+            type="button"
+            onClick={handleHotActivate}
+            className="harness-package-panel__activate-btn"
+            disabled={!canActivate || activatingPackage}
+          >
+            {activatingPackage
+              ? t('harnessPackage.activating')
+              : t('harnessPackage.hotActivate')}
+          </button>
+
+          {/* Delete Button */}
+          <button
+            type="button"
+            onClick={handleDeleteClick}
+            className="harness-package-panel__delete-btn"
+            disabled={isSelectedNative || deletingPackage || !selectedPackage}
+          >
+            {deletingPackage
+              ? t('harnessPackage.deleting')
+              : t('harnessPackage.delete')}
+          </button>
+        </div>
+
+        {/* Status Messages */}
+        <div className="harness-package-panel__status">
+          {activateSuccess && (
+            <div className="harness-package-panel__success">
+              {activateSuccess}
+            </div>
+          )}
+          {activateError && (
+            <div className="harness-package-panel__error-msg">
+              {activateError}
+            </div>
+          )}
+          {deleteSuccess && (
+            <div className="harness-package-panel__success">
+              {deleteSuccess}
+            </div>
+          )}
+          {deleteError && (
+            <div className="harness-package-panel__error-msg">
+              {deleteError}
+            </div>
+          )}
+          {importSuccess && (
+            <div className="harness-package-panel__success">
+              {importSuccess}
+            </div>
+          )}
+          {importError && (
+            <div className="harness-package-panel__error-msg">
+              {importError}
+            </div>
+          )}
+          {exportSuccess && (
+            <div className="harness-package-panel__success">
+              {exportSuccess}
+            </div>
+          )}
+          {exportError && (
+            <div className="harness-package-panel__error-msg">
+              {exportError}
+            </div>
+          )}
+        </div>
+      </div>
+
+      {/* Delete Confirmation Modal */}
+      {deleteConfirmOpen && selectedPackage && (
+        <div className="harness-package-panel__modal-overlay" onClick={handleDeleteCancel}>
+          <div className="harness-package-panel__modal" onClick={e => e.stopPropagation()}>
+            <div className="harness-package-panel__modal-header">
+              <h4>{t('harnessPackage.deleteConfirmTitle')}</h4>
+            </div>
+            <div className="harness-package-panel__modal-body">
+              <p>
+                {t('harnessPackage.deleteConfirmMessage', {
+                  extensionName: selectedPackage.extension_name,
+                })}
+              </p>
+              {selectedPackage.is_active && (
+                <p className="harness-package-panel__modal-warning">
+                  {t('harnessPackage.deleteActiveWarning')}
+                </p>
+              )}
+            </div>
+            <div className="harness-package-panel__modal-footer">
+              <button
+                type="button"
+                onClick={handleDeleteCancel}
+                className="harness-package-panel__modal-cancel-btn"
+                disabled={deletingPackage}
+              >
+                {t('common.cancel')}
+              </button>
+              <button
+                type="button"
+                onClick={handleDeleteConfirm}
+                className="harness-package-panel__modal-confirm-btn"
+                disabled={deletingPackage}
+              >
+                {deletingPackage ? t('harnessPackage.deleting') : t('common.confirm')}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}

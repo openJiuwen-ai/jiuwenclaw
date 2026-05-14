@@ -52,7 +52,7 @@ Use this as a hard gate before you treat a generated `SKILL.md` as done:
 
 ## What the worker is doing (conceptually)
 
-1. Ingest the source SOP from a local file, a URL, pasted raw text, or a structured SOP object.
+1. Ingest the source SOP from a local file, a URL, pasted raw text, or a structured SOP object. When **no** document text exists after brief recovery offers, **by default** use **`await skill_gen.sop_fallback.build_intent_fallback_sop(user_intent=…, skill_name_hint=…, invoke_llm_json=…)`** with **`invoke_llm_json`** whenever the runtime can invoke the model: full **`SOPStructure`** (and synthesized **`raw_text`**) plus one internal LLM refinement (**`enrich_fallback_sop_with_llm`**). **Only if** the system **cannot** invoke a model for that step, use **`invoke_llm_json=None`** with that same call, or **`skill_gen.sop_fallback.build_fallback_sop_structure`** (skeleton only). Label the draft as template-driven until the user supplies a canonical source—still not a substitute for attaching a real policy document.
 2. Build or consume structured SOP data such as title, purpose, scope, steps, decision points, exceptions, roles, and references.
 3. Draft an executable `SKILL.md` that turns the SOP into a usable agent workflow.
 
@@ -67,6 +67,17 @@ Then the authoring model should use both that **structured summary** and the **f
 3. Generate a `SKILL.md` tailored to that SOP type.
 
 The structured object keeps the draft organized; the raw text keeps it faithful to the source.
+
+### Intent-only snapshot file (`reference/intent-sop-snapshot.md`)
+
+When **`extraction_meta["fallback_sop"]`** is true (intent-only template from **`build_intent_fallback_sop`** / **`build_fallback_sop_structure`**, not extracted from a policy file), the draft under **`skills-draft/<skill_name>/`** **must** include **`reference/intent-sop-snapshot.md`**.
+
+Contents:
+
+1. A **short warning** at the top (plain Markdown): this file is **not** an authoritative SOP; it records the **synthesized** procedure text used for drafting; treat as **provisional** until the user attaches a real document.
+2. The **verbatim** **`SOPStructure.raw_text`** from the same object you pass into skill authoring (no paraphrase).
+
+Do **not** drop this file to save tokens; it is the audit trail for what the fallback produced besides the generated **`SKILL.md`**.
 
 ### Same-session install (required for SOP → new skill)
 

@@ -1,6 +1,6 @@
 import pytest
 
-from jiuwenclaw.channel.cli_channel import (
+from jiuwenclaw.gateway.channel_manager.tui.tui_connect import (
     CliHandlersBindParams,
     CliRouteBindParams,
     build_cli_route_binding,
@@ -110,7 +110,7 @@ async def test_config_validate_model_handler_uses_local_probe(monkeypatch):
         async def invoke(self, *args, **kwargs):
             return {"content": "hello"}
 
-    monkeypatch.setattr("jiuwenclaw.channel.cli_channel.Model", FakeModel)
+    monkeypatch.setattr("jiuwenclaw.gateway.channel_manager.tui.tui_connect.Model", FakeModel)
 
     await cli_handlers["config.validate_model"](
         object(),

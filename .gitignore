@@ -15,6 +15,7 @@ ENV/
 *.egg-info/
 .coverage
 .coverage.*
+coverage.xml
 htmlcov/
 
 # Node.js / Frontend
@@ -22,11 +23,11 @@ htmlcov/
 dist/
 build/
 coverage/
-jiuwenclaw/web/logs/
-jiuwenclaw/web/cd
-jiuwenclaw/web/tsc
-jiuwenclaw/web/openjiuwen-web@0.1.0
-jiuwenclaw/cli/bun.lock
+jiuwenclaw/channels/web/frontend/logs/
+jiuwenclaw/channels/web/frontend/cd
+jiuwenclaw/channels/web/frontend/tsc
+jiuwenclaw/channels/web/frontend/openjiuwen-web@0.1.0
+jiuwenclaw/channels/tui/frontend/bun.lock
 *.tsbuildinfo
 npm-debug.log*
 yarn-debug.log*

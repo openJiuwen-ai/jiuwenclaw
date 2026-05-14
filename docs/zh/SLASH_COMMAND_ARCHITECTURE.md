@@ -11,7 +11,7 @@
 
 - **Gateway**：`MessageHandler._handle_channel_control` 处理受控通道上的 `/new_session`、`/mode …` 等，并决定是否**拦截、不转发 Agent**。
 - **IM 管线 / 各 Channel**：例如 `gateway/im_pipeline/im_inbound.py` 中的控制消息集合、飞书/企业微信等通道内的文本判断，可能与主逻辑**集合不一致**。
-- **CLI TUI**：`jiuwenclaw/cli/src/core/commands/` 下本地注册表，部分命令通过 WebSocket 调用后端，部分纯本地。
+- **CLI TUI**：`jiuwenclaw/channels/tui/frontend/src/core/commands/` 下本地注册表，部分命令通过 WebSocket 调用后端，部分纯本地。
 
 若不建立明确分层与单一数据源，会出现：**同名命令语义不一致、文档与代码漂移、新通道重复实现解析规则**。
 

@@ -9,12 +9,12 @@ from datetime import datetime, timedelta
 from typing import Any, Callable
 from zoneinfo import ZoneInfo
 
-from jiuwenclaw.gateway.agent_client import AgentServerClient
+from jiuwenclaw.gateway.routing.agent_client import AgentServerClient
 from jiuwenclaw.gateway.cron.models import CronJob, CronRunState
 from jiuwenclaw.gateway.cron.store import CronJobStore
-from jiuwenclaw.gateway.message_handler import MessageHandler
-from jiuwenclaw.e2a.gateway_normalize import e2a_from_agent_fields
-from jiuwenclaw.schema.message import EventType, Message, ReqMethod
+from jiuwenclaw.gateway.message_handler.message_handler import MessageHandler
+from jiuwenclaw.common.e2a.gateway_normalize import e2a_from_agent_fields
+from jiuwenclaw.common.schema.message import EventType, Message, ReqMethod
 
 logger = logging.getLogger(__name__)
 
@@ -542,7 +542,7 @@ class CronSchedulerService:
             channels_cfg: dict = {}
             ch_cfg: dict = {}
             try:
-                from jiuwenclaw.config import get_config_raw
+                from jiuwenclaw.common.config import get_config_raw
 
                 cfg = get_config_raw() or {}
                 channels_cfg = cfg.get("channels") or {}

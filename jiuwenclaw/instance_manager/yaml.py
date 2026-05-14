@@ -22,7 +22,7 @@ from jiuwenclaw.instance_manager.config import (
     PORT_TYPES,
     validate_instance_name,
 )
-from jiuwenclaw.utils import get_user_home
+from jiuwenclaw.common.utils import get_user_home
 
 logger = logging.getLogger(__name__)
 

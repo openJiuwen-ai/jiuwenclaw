@@ -7,9 +7,9 @@ from openjiuwen.core.foundation.llm import Model
 from openjiuwen.core.single_agent.rail.base import AgentCallbackContext
 from openjiuwen.harness.prompts import PromptSection, SystemPromptBuilder
 
-from jiuwenclaw.agentserver.deep_agent.interface_deep import JiuWenClawDeepAdapter
-from jiuwenclaw.agentserver.deep_agent.prompt_builder import build_identity_prompt
-from jiuwenclaw.agentserver.deep_agent.rails.runtime_prompt_rail import RuntimePromptRail
+from jiuwenclaw.server.runtime.agent_adapter.interface_deep import JiuWenClawDeepAdapter
+from jiuwenclaw.agents.harness.common.prompt.prompt_builder import build_identity_prompt
+from jiuwenclaw.agents.harness.common.rails.runtime_prompt_rail import RuntimePromptRail
 
 
 class _TestableJiuWenClawDeepAdapter(JiuWenClawDeepAdapter):
@@ -54,11 +54,11 @@ async def test_runtime_time_section_participates_in_priority_order():
         "# 可用工具",
         "# 工作空间",
         "# 当前日期与时间",
-        "# 运行时",
+        "# 运行时状态",
     ]
     positions = [prompt.index(marker) for marker in ordered_markers]
     assert positions == sorted(positions)
-    assert "runtime_state.yaml" in prompt
+    assert "当前模型" in prompt
 
 
 def test_resolve_skill_mode_accepts_all_and_auto_list():
@@ -67,7 +67,8 @@ def test_resolve_skill_mode_accepts_all_and_auto_list():
     assert JiuWenClawDeepAdapter._resolve_skill_mode({"skill_mode": "invalid"}) == "all"
 
 
-def test_resolve_enable_task_loop_can_be_called_on_class():
+def test_resolve_enable_task_loop_can_be_called_on_class(monkeypatch):
+    monkeypatch.delenv("SKILL_CREATE", raising=False)
     assert (
         JiuWenClawDeepAdapter._resolve_enable_task_loop(
             {"enable_task_loop": False},
@@ -103,11 +104,11 @@ def test_deep_adapter_subagents_includes_optional_browser_and_configured_researc
         patch.object(adapter, "_resolve_runtime_language", return_value="cn"),
         patch.object(adapter, "_browser_runtime_enabled", return_value=True),
         patch(
-            "jiuwenclaw.agentserver.deep_agent.interface_deep.build_research_agent_config",
+            "jiuwenclaw.server.runtime.agent_adapter.interface_deep.build_research_agent_config",
             return_value="research_spec",
         ) as mock_research,
         patch(
-            "jiuwenclaw.agentserver.deep_agent.interface_deep.build_browser_agent_config",
+            "jiuwenclaw.server.runtime.agent_adapter.interface_deep.build_browser_agent_config",
             return_value="browser_spec",
         ) as mock_browser,
     ):
@@ -138,11 +139,11 @@ def test_deep_adapter_subagents_omits_research_without_explicit_enable():
         patch.object(adapter, "_resolve_runtime_language", return_value="cn"),
         patch.object(adapter, "_browser_runtime_enabled", return_value=True),
         patch(
-            "jiuwenclaw.agentserver.deep_agent.interface_deep.build_research_agent_config",
+            "jiuwenclaw.server.runtime.agent_adapter.interface_deep.build_research_agent_config",
             return_value="research_spec",
         ) as mock_research,
         patch(
-            "jiuwenclaw.agentserver.deep_agent.interface_deep.build_browser_agent_config",
+            "jiuwenclaw.server.runtime.agent_adapter.interface_deep.build_browser_agent_config",
             return_value="browser_spec",
         ) as mock_browser,
     ):

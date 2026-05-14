@@ -1,6 +1,6 @@
 from abc import abstractmethod
 
-from jiuwenclaw.gateway.agent_client import AgentServerClient
+from jiuwenclaw.gateway.routing.agent_client import AgentServerClient
 from jiuwenclaw.extensions.sdk.base import BaseExtension
 
 

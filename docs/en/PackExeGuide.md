@@ -49,13 +49,13 @@ uv sync --extra dev
 #### 2. Build the web UI
 
 ```bash
-cd jiuwenclaw/web
+cd jiuwenclaw/channels/web/frontend
 npm install
 npm run build
 cd ../..
 ```
 
-Static files land in `jiuwenclaw/web/dist`.
+Static files land in `jiuwenclaw/channels/web/frontend/dist`.
 
 #### 3. PyInstaller
 
@@ -128,7 +128,7 @@ Produces `dist/JiuwenClaw.app` and `dist/JiuwenClaw-<version>.dmg`.
 
 ### Missing `web/dist`
 
-Run `cd jiuwenclaw/web && npm run build`.
+Run `cd jiuwenclaw/channels/web/frontend && npm run build`.
 
 ### `ModuleNotFoundError` at runtime
 

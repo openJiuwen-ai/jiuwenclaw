@@ -4,10 +4,7 @@
 
 from pathlib import Path
 
-from jiuwenclaw.agentserver.team.config_loader import (
-    load_team_spec_dict,
-    resolve_team_sqlite_db_path,
-)
+from jiuwenclaw.agents.harness.team.config_loader import load_team_spec_dict, resolve_team_sqlite_db_path
 
 
 def _wrap_modes_team(team_mapping: dict[str, dict]) -> dict:
@@ -73,17 +70,17 @@ def test_load_team_spec_dict_supports_member_specific_agents(monkeypatch, tmp_pa
     }
 
     monkeypatch.setattr(
-        "jiuwenclaw.agentserver.team.config_loader.get_config",
+        "jiuwenclaw.agents.harness.team.config_loader.get_config",
         lambda: config,
     )
     monkeypatch.setattr(
-        "jiuwenclaw.agentserver.team.config_loader.get_agent_teams_home",
+        "jiuwenclaw.agents.harness.team.config_loader.get_agent_teams_home",
         lambda: fake_agent_teams_home,
     )
 
-    spec = load_team_spec_dict("session-1")
+    spec = load_team_spec_dict()
 
-    assert spec["team_name"] == "demo_team_session-1"
+    assert spec["team_name"] == "demo_team"
     assert spec["leader"]["member_name"] == "team_leader"
     assert spec["leader"]["display_name"] == "TeamLeader"
     assert spec["leader"]["persona"] == "Lead the team"
@@ -142,19 +139,64 @@ def test_load_team_spec_dict_uses_first_team_from_modes_team(monkeypatch, tmp_pa
     }
 
     monkeypatch.setattr(
-        "jiuwenclaw.agentserver.team.config_loader.get_config",
+        "jiuwenclaw.agents.harness.team.config_loader.get_config",
         lambda: config,
     )
     monkeypatch.setattr(
-        "jiuwenclaw.agentserver.team.config_loader.get_agent_teams_home",
+        "jiuwenclaw.agents.harness.team.config_loader.get_agent_teams_home",
         lambda: tmp_path / ".agent_teams",
     )
 
-    spec = load_team_spec_dict("session-first")
+    spec = load_team_spec_dict()
 
-    assert spec["team_name"] == "alpha_team_session-first"
+    assert spec["team_name"] == "alpha_team"
     assert spec["leader"]["member_name"] == "alpha_leader"
     assert spec["agents"]["leader"]["skills"] == ["alpha-skill"]
+
+
+def test_load_team_spec_dict_fills_default_transport_and_workspace(monkeypatch, tmp_path):
+    """Missing team transport/workspace should fall back to local inprocess defaults."""
+    config = {
+        "models": {
+            "default": {
+                "model_client_config": {
+                    "model_name": "gpt-defaults",
+                    "client_provider": "openai",
+                },
+                "model_config_obj": {},
+            }
+        },
+        **_wrap_modes_team(
+            {
+                "demo_team": {
+                    "team_name": "demo_team",
+                    "agents": {
+                        "leader": {},
+                        "reviewer": {},
+                    },
+                }
+            }
+        ),
+    }
+
+    monkeypatch.setattr(
+        "jiuwenclaw.agents.harness.team.config_loader.get_config",
+        lambda: config,
+    )
+    monkeypatch.setattr(
+        "jiuwenclaw.agents.harness.team.config_loader.get_agent_teams_home",
+        lambda: tmp_path / ".agent_teams",
+    )
+
+    spec = load_team_spec_dict()
+
+    assert spec["transport"] == {"type": "inprocess"}
+    assert spec["workspace"] == {
+        "enabled": True,
+        "version_control": False,
+    }
+    assert spec["agents"]["leader"]["workspace"] == {"stable_base": True}
+    assert spec["agents"]["reviewer"]["workspace"] == {"stable_base": True}
 
 
 def test_load_team_spec_dict_keeps_role_defaults_when_member_alias_is_added(monkeypatch, tmp_path):
@@ -188,15 +230,15 @@ def test_load_team_spec_dict_keeps_role_defaults_when_member_alias_is_added(monk
     }
 
     monkeypatch.setattr(
-        "jiuwenclaw.agentserver.team.config_loader.get_config",
+        "jiuwenclaw.agents.harness.team.config_loader.get_config",
         lambda: config,
     )
     monkeypatch.setattr(
-        "jiuwenclaw.agentserver.team.config_loader.get_agent_teams_home",
+        "jiuwenclaw.agents.harness.team.config_loader.get_agent_teams_home",
         lambda: tmp_path / ".agent_teams",
     )
 
-    spec = load_team_spec_dict("session-2")
+    spec = load_team_spec_dict()
 
     assert "leader" in spec["agents"]
     assert "teammate" in spec["agents"]
@@ -233,15 +275,15 @@ def test_load_team_spec_dict_preserves_explicit_empty_skills(monkeypatch, tmp_pa
     }
 
     monkeypatch.setattr(
-        "jiuwenclaw.agentserver.team.config_loader.get_config",
+        "jiuwenclaw.agents.harness.team.config_loader.get_config",
         lambda: config,
     )
     monkeypatch.setattr(
-        "jiuwenclaw.agentserver.team.config_loader.get_agent_teams_home",
+        "jiuwenclaw.agents.harness.team.config_loader.get_agent_teams_home",
         lambda: tmp_path / ".agent_teams",
     )
 
-    spec = load_team_spec_dict("session-3")
+    spec = load_team_spec_dict()
 
     assert "reviewer" in spec["agents"]
     assert spec["agents"]["reviewer"]["skills"] == []
@@ -280,19 +322,19 @@ def test_load_team_spec_dict_no_auto_fill_skills_when_missing(monkeypatch, tmp_p
     }
 
     monkeypatch.setattr(
-        "jiuwenclaw.agentserver.team.config_loader.get_config",
+        "jiuwenclaw.agents.harness.team.config_loader.get_config",
         lambda: config,
     )
     monkeypatch.setattr(
-        "jiuwenclaw.agentserver.team.config_loader.get_agent_teams_home",
+        "jiuwenclaw.agents.harness.team.config_loader.get_agent_teams_home",
         lambda: tmp_path / ".agent_teams",
     )
     monkeypatch.setattr(
-        "jiuwenclaw.agentserver.team.config_loader.get_agent_skills_dir",
+        "jiuwenclaw.agents.harness.team.config_loader.get_agent_skills_dir",
         lambda: global_skills_dir,
     )
 
-    spec = load_team_spec_dict("session-4")
+    spec = load_team_spec_dict()
 
     # skills should not be auto-filled when not configured
     assert "skills" not in spec["agents"]["leader"]
@@ -314,11 +356,11 @@ def test_resolve_team_sqlite_db_path_defaults_to_agent_teams_home(monkeypatch, t
     )
 
     monkeypatch.setattr(
-        "jiuwenclaw.agentserver.team.config_loader.get_config",
+        "jiuwenclaw.agents.harness.team.config_loader.get_config",
         lambda: config,
     )
     monkeypatch.setattr(
-        "jiuwenclaw.agentserver.team.config_loader.get_agent_teams_home",
+        "jiuwenclaw.agents.harness.team.config_loader.get_agent_teams_home",
         lambda: tmp_path / ".agent_teams",
     )
 
@@ -357,15 +399,15 @@ def test_load_team_spec_dict_preserves_arbitrary_team_top_level_fields(monkeypat
     }
 
     monkeypatch.setattr(
-        "jiuwenclaw.agentserver.team.config_loader.get_config",
+        "jiuwenclaw.agents.harness.team.config_loader.get_config",
         lambda: config,
     )
     monkeypatch.setattr(
-        "jiuwenclaw.agentserver.team.config_loader.get_agent_teams_home",
+        "jiuwenclaw.agents.harness.team.config_loader.get_agent_teams_home",
         lambda: tmp_path / ".agent_teams",
     )
 
-    spec = load_team_spec_dict("session-custom")
+    spec = load_team_spec_dict()
 
     assert spec["runtime_flags"] == {
         "enable_observer": True,

@@ -179,13 +179,13 @@ BROWSER_ALLOW_SHORT_TIMEOUT_OVERRIDE=0
 ## 7. Code index
 
 ### Frontend
-- `jiuwenclaw/web/src/components/BrowserPanel/index.tsx` — path, save, start service.
+- `jiuwenclaw/channels/web/frontend/src/components/BrowserPanel/index.tsx` — path, save, start service.
 
 ### Backend
 - `app.py` — `path.get`, `path.set`, `browser.start`, etc.
-- `jiuwenclaw/agentserver/tools/browser_start_client.py` — Chrome launch from `config.yaml`.
-- `jiuwenclaw/agentserver/tools/browser_tools.py` — MCP client, auto-start wrapper.
-- `jiuwenclaw/agentserver/tools/browser-move/src/playwright_runtime_mcp_server.py` — MCP server.
+- `jiuwenclaw/agents/harness/common/tools/browser_start_client.py` — Chrome launch from `config.yaml`.
+- `jiuwenclaw/agents/harness/common/tools/browser_tools.py` — MCP client, auto-start wrapper.
+- `jiuwenclaw/agents/harness/common/tools/browser-move/src/playwright_runtime_mcp_server.py` — MCP server.
 - `.../playwright_runtime/runtime.py`, `service.py`, `agents.py`, `config.py` — runtime orchestration.
 
 ### Config

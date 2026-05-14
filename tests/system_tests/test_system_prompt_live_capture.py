@@ -29,11 +29,11 @@ import pytest
 from openjiuwen.core.runner import Runner
 from openjiuwen.core.runner.callback.events import LLMCallEvents
 
-from jiuwenclaw.agentserver.deep_agent.interface_deep import JiuWenClawDeepAdapter
-from jiuwenclaw.agentserver.interface import build_user_prompt
-from jiuwenclaw.config import get_config
-from jiuwenclaw.schema.agent import AgentRequest
-from jiuwenclaw.schema.message import ReqMethod
+from jiuwenclaw.server.runtime.agent_adapter.interface_deep import JiuWenClawDeepAdapter
+from jiuwenclaw.server.runtime.agent_adapter.interface import build_user_prompt
+from jiuwenclaw.common.config import get_config
+from jiuwenclaw.common.schema.agent import AgentRequest
+from jiuwenclaw.common.schema.message import ReqMethod
 
 OUTPUT_DIR = Path(__file__).parent / "output"
 logger = logging.getLogger(__name__)
@@ -248,7 +248,7 @@ async def _run_live_capture(
     ), mock.patch.dict(
         "os.environ", {"BROWSER_RUNTIME_MCP_ENABLED": "true"}
     ), mock.patch(
-        "jiuwenclaw.agentserver.deep_agent.interface_deep.get_config",
+        "jiuwenclaw.server.runtime.agent_adapter.interface_deep.get_config",
         return_value=config_base,
     ):
         adapter = JiuWenClawDeepAdapter()

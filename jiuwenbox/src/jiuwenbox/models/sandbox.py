@@ -38,8 +38,6 @@ class SandboxRef(BaseModel):
     created_at: datetime = Field(default_factory=datetime.now)
     started_at: datetime | None = None
     error_message: str | None = None
-    command: list[str] = Field(default_factory=list)
-    workdir: str | None = None
     env: dict[str, str] = Field(default_factory=dict)
 
 
@@ -49,3 +47,12 @@ class ExecResult(BaseModel):
     exit_code: int
     stdout: str = ""
     stderr: str = ""
+
+
+class BackgroundExecResult(BaseModel):
+    """Result of starting a background command in a sandbox."""
+
+    started: bool
+    pid: int | None = None
+    command: list[str] = Field(default_factory=list)
+    error_message: str | None = None

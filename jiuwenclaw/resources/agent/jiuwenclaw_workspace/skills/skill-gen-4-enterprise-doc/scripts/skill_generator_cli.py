@@ -15,6 +15,10 @@ Examples:
 Full ``SOPStructure`` JSON comes from ``skill_gen.sop_parser.parse_sop_file`` or
 ``parse_sop_raw_text`` plus ``invoke_llm_json`` (see ``reference/sop-structure-pipeline.md``).
 
+Intent-only fallback (no document): ``await skill_gen.sop_fallback.build_intent_fallback_sop(...)`` —
+pass ``invoke_llm_json`` by default whenever the runtime can invoke the model;
+omit it only when the system cannot (see ``../SKILL.md``).
+
 End-to-end draft flow: ``../SKILL.md``.
 """
 

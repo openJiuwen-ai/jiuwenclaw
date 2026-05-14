@@ -20,7 +20,7 @@ from jiuwenclaw.dotenv_early import parse_dotenv_early, get_parsed_dotenv
 parse_dotenv_early("jiuwenclaw-app")
 
 # --- Now safe to import jiuwenclaw modules ---
-from jiuwenclaw.utils import (
+from jiuwenclaw.common.utils import (
     cleanup_team_files,
     get_env_file,
     get_user_workspace_dir,
@@ -77,8 +77,8 @@ def main() -> None:
     python = sys.executable
 
     # Build subprocess commands with --dotenv if parsed
-    agent_cmd = [python, "-m", "jiuwenclaw.app_agentserver"]
-    gateway_cmd = [python, "-m", "jiuwenclaw.app_gateway"]
+    agent_cmd = [python, "-m", "jiuwenclaw.server.app_agentserver"]
+    gateway_cmd = [python, "-m", "jiuwenclaw.gateway.app_gateway"]
 
     # Pass --dotenv to subprocesses for multi-instance isolation
     if dotenv_path is not None:

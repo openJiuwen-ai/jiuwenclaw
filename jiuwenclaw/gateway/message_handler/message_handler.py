@@ -1,0 +1,2565 @@
+# Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
+
+"""MessageHandler - 消息处理抽象与双队列实现（入队经 AgentServerClient 发往 AgentServer）."""
+
+from __future__ import annotations
+
+import logging
+import asyncio
+import os
+import re
+import secrets
+import time
+from abc import ABC
+from dataclasses import dataclass, replace
+from enum import Enum
+from pathlib import Path
+from typing import TYPE_CHECKING, Any, Dict
+from jiuwenclaw.gateway.channel_manager.base import ChannelType
+from jiuwenclaw.common.e2a.constants import E2A_WIRE_INTERNAL_METADATA_KEYS
+from jiuwenclaw.gateway.routing.session_map import SessionMap
+from jiuwenclaw.gateway.message_handler.command_parser.slash_command import (
+    ParsedControlAction,
+    parse_channel_control_text,
+)
+from jiuwenclaw.extensions.hook_event import GatewayHookEvents
+from jiuwenclaw.extensions.hooks_context import GatewayChatHookContext
+
+logger = logging.getLogger(__name__)
+
+_ACP_CHANNEL_ID = "acp"
+_ACP_ORIGINAL_SESSION_ID_KEY = "acp_original_session_id"
+_DEFAULT_INLINE_FILE_SIZE_LIMIT = 128 * 1024
+_KNOWN_JIUWENCLAW_SESSION_PREFIXES = (
+    "sess_",
+    "tui_",
+    "acp_",
+    "cron_",
+    "feishu_",
+    "wechat_",
+    "xiaoyi_",
+    "dingtalk_",
+    "wecom_",
+    "telegram_",
+    "discord_",
+    "whatsapp_",
+)
+
+
+
+class ChannelMode(str, Enum):
+    AGENT_PLAN = "agent.plan"
+    AGENT_FAST = "agent.fast"
+    CODE_PLAN = "code.plan"
+    CODE_NORMAL = "code.normal"
+    CODE_TEAM = "code.team"
+    TEAM = "team"
+
+
+@dataclass
+class ChannelControlState:
+    session_id: str | None = None
+    mode: ChannelMode = ChannelMode.AGENT_PLAN
+
+
+@dataclass
+class NewSessionCancelParams:
+    """\\new_session 时取消旧会话并发通知所需的具名参数（避免过长形参列表）。"""
+
+    user_infos: dict[str, Any]
+    channel_id: str
+    reply_session_id: str | None
+    new_sid: str
+    old_sid: str | None
+
+
+@dataclass
+class ModeChangeCancelParams:
+    """\\mode 切换时取消旧会话并发通知所需的具名参数。"""
+
+    user_infos: dict[str, Any]
+    channel_id: str
+    reply_session_id: str | None
+    old_sid: str | None
+    new_mode_label: str
+
+
+if TYPE_CHECKING:
+    from jiuwenclaw.common.e2a.models import E2AEnvelope
+    from jiuwenclaw.gateway.routing.agent_client import AgentServerClient
+    from jiuwenclaw.common.schema.agent import AgentResponse, AgentResponseChunk
+    from jiuwenclaw.common.schema.message import Message
+
+
+# ---------- 双队列实现：入队经 AgentServerClient 发往 AgentServer ----------
+class MessageHandler(ABC):
+    """
+    维护两个异步消息队列，入队消息通过 AgentServerClient 发送给 AgentServer：
+
+    - _user_messages：Channel 发来的消息，由内部转发循环消费并调用 agent_client.send_request
+    - _robot_messages：AgentServer 的响应，由 ChannelManager 消费并派发到对应 Channel
+
+    AgentServer 经 WebSocket 下行 **E2AResponse** 线 JSON；``WebSocketAgentServerClient`` 内
+    （``jiuwenclaw.e2a.wire_codec``）解析并还原为 ``AgentResponse`` / ``AgentResponseChunk``，
+    本类仍通过 ``_response_to_message`` / ``_chunk_to_message`` 转为 ``Message`` 供 Channel 消费。
+
+    单例模式：全局仅存在一个 MessageHandler 实例，可通过 MessageHandler(client) 或
+    MessageHandler.get_instance(client) 获取。
+    """
+
+    _instance: "MessageHandler | None" = None
+
+    def __new__(cls, agent_client: "AgentServerClient", *args: Any, **kwargs: Any) -> "MessageHandler":
+        if cls._instance is None:
+            cls._instance = super().__new__(cls)
+        return cls._instance
+
+    def __init__(self, agent_client: "AgentServerClient") -> None:
+        if getattr(self, "_singleton_initialized", False):
+            return
+        self._singleton_initialized = True
+        self._agent_client = agent_client
+        self._user_messages: asyncio.Queue["Message"] = asyncio.Queue()
+        self._robot_messages: asyncio.Queue["Message"] = asyncio.Queue()
+        self._running = False
+        self._forward_task: asyncio.Task | None = None
+        self._stream_tasks: dict[str, asyncio.Task] = {}  # request_id -> task
+        self._stream_sessions: dict[str, str | None] = {}  # request_id -> session_id
+        self._stream_metadata: dict[str, dict[str, Any] | None] = {}  # request_id -> request metadata
+        self._stream_modes: dict[str, str] = {}  # request_id -> mode
+        self._pending_evolution_approval: dict[str, str] = {}  # session_id -> approval_request_id
+        self._queued_supplement_input: dict[str, dict[str, Any]] = {}  # session_id -> queued supplement payload
+        self._session_evolution_in_progress: set[str] = set()
+        self._acp_session_aliases: dict[str, str] = {}  # external_session_id -> internal_session_id
+        self._acp_session_alias_lock = asyncio.Lock()
+
+        # per-channel 控制状态：支持 \new_session / \mode 指令。
+        # 使用 ChannelType 的 value 作为标准键，避免散落的硬编码字符串。
+        self._control_channel_types = {
+            ChannelType.FEISHU.value,
+            ChannelType.XIAOYI.value,
+            ChannelType.DINGTALK.value,
+            ChannelType.WHATSAPP.value,
+            ChannelType.WECOM.value,
+            ChannelType.WECHAT.value,
+        }
+        # 使用 SessionMap 的 channel 族（由 config 中 gateway.session_map_scope 决定是否在 key 中含 user）
+        self._session_map_channel_types = frozenset({
+            "feishu_enterprise",
+        })
+        self._channel_states: Dict[str, ChannelControlState] = {}
+        self._session_map = SessionMap()
+        self._cron_controller = None
+
+        # IM Pipeline（数字分身）— None 时不执行，不影响原有逻辑
+        self._inbound_pipeline = None   # type: Any  # IMInboundPipeline | None
+        self._outbound_pipeline = None  # type: Any  # IMOutboundPipeline | None
+
+    def set_inbound_pipeline(self, pipeline: Any) -> None:
+        self._inbound_pipeline = pipeline
+
+    def set_outbound_pipeline(self, pipeline: Any) -> None:
+        self._outbound_pipeline = pipeline
+
+        # 直接使用 jiuwenclaw.config 的 get_config_raw/set_config/update_channel_in_config
+        # 避免在此处重复实现 config 模块加载逻辑。
+        from jiuwenclaw.common.config import get_config_raw, update_channel_in_config
+
+        self._get_config_raw = get_config_raw
+        self._update_channel_in_config = update_channel_in_config
+
+        from jiuwenclaw.gateway.routing.agent_client import WebSocketAgentServerClient
+
+        if isinstance(self._agent_client, WebSocketAgentServerClient):
+            self._agent_client.set_server_push_handler(self._handle_agent_server_push)
+
+    @classmethod
+    def get_instance(cls, agent_client: "AgentServerClient | None" = None) -> "MessageHandler":
+        """获取单例实例。
+
+        - 若实例已存在：可直接调用 get_instance() 或 get_instance(None)，无需传入 client。
+        - 若尚未创建：需传入 agent_client，即 get_instance(client) 或 MessageHandler(client)。
+        """
+        if cls._instance is not None:
+            return cls._instance
+        if agent_client is None:
+            raise RuntimeError(
+                "MessageHandler 尚未初始化，请先使用 MessageHandler(client) 或 get_instance(client) 创建"
+            )
+        return cls(agent_client)
+
+    def handle_message(self, msg: "Message") -> None:
+        """Channel 同步回调：将消息放入 user_messages 队列，由转发循环发给 AgentServer."""
+        self._user_messages.put_nowait(msg)
+        logger.info(
+            "[MessageHandler] _user_messages 入队: id=%s channel_id=%s session_id=%s",
+            msg.id, msg.channel_id, msg.session_id,
+        )
+
+    # ---------- Channel 控制状态：\new_session / \mode ----------
+
+    def _get_channel_default_state(self, channel_id: str) -> ChannelControlState:
+        """从 config.yaml 读取 Channel 的默认 session_id / mode."""
+        try:
+            cfg: Dict[str, Any] = self._get_config_raw()
+        except Exception:  # noqa: BLE001
+            cfg = {}
+        channels_cfg = cfg.get("channels") or {}
+        ch_cfg = channels_cfg.get(channel_id) or {}
+        sid_raw = ch_cfg.get("default_session_id") or ""
+        sid = str(sid_raw).strip() or None
+        # 若未在 config 中指定默认 session_id，为该 channel 生成一个带时间戳的新 session_id
+        if not sid:
+            sid = self._generate_channel_session_id(channel_id)
+        mode_raw = str(ch_cfg.get("default_mode") or "agent.plan").strip().lower()
+        mode_map = {
+            "agent.plan": ChannelMode.AGENT_PLAN,
+            "agent.fast": ChannelMode.AGENT_FAST,
+            "code.plan": ChannelMode.CODE_PLAN,
+            "code.normal": ChannelMode.CODE_NORMAL,
+            "code.team": ChannelMode.CODE_TEAM,
+            "team": ChannelMode.TEAM,
+        }
+        mode = mode_map.get(mode_raw, ChannelMode.AGENT_PLAN)
+        return ChannelControlState(session_id=sid, mode=mode)
+
+    def _get_channel_state_key(self, channel_id: str, conversation_id: str | None) -> str:
+        """生成 channel 状态的复合键：channel_id:conversation_id."""
+        if conversation_id:
+            return f"{channel_id}:{conversation_id}"
+        return channel_id
+
+    def _get_or_create_channel_state(self, msg: "Message") -> ChannelControlState:
+        """获取或创建消息对应 channel 状态（使用复合键）。
+
+        conversation_id 从 msg.metadata 获取，如 feishu 的 feishu_chat_id。
+        """
+        ch = msg.channel_id
+        # 获取 conversation_id：从不同平台的 metadata 中提取会话标识
+        # feishu: feishu_chat_id, xiaoyi: xiaoyi_session_id, 其他用 session_id
+        key = self._get_channel_state_key(ch, msg.session_id)
+
+        # 如果状态已存在，直接返回
+        state = self._channel_states.get(key)
+        if state is not None:
+            return state
+
+        # 否则从 config 加载默认值，并缓存
+        state = self._get_channel_default_state(ch)
+        identity_key = self._extract_identity_tuple(msg)
+        if identity_key and self._channel_id_matches_session_map_types(str(ch or "")):
+            state.session_id = self._session_map.get_session_id(*identity_key)
+        self._channel_states[key] = state
+        return state
+
+    def _save_channel_state_to_config(self, channel_id: str) -> None:
+        """将指定 Channel 的默认 session_id / mode 写回 config.yaml."""
+        state = self._channel_states.get(channel_id)
+        if not state:
+            return
+        self._update_channel_in_config(
+            channel_id,
+            {
+                "default_session_id": state.session_id or "",
+                "default_mode": state.mode.value if hasattr(state.mode, 'value') else str(state.mode),
+            },
+        )
+
+    def _generate_channel_session_id(self, channel_id: str) -> str:
+        """为指定 channel 生成新的 session_id."""
+        ts = format(int(time.time() * 1000), "x")
+        suffix = secrets.token_hex(3)
+        return f"{channel_id}_{ts}_{suffix}"
+
+    @staticmethod
+    def _extract_identity_tuple(msg: "Message") -> tuple[str, str, str, str] | None:
+        provider = str(getattr(msg, "provider", None) or "").strip()
+        chat_id = str(getattr(msg, "chat_id", None) or "").strip()
+        bot_id = str(getattr(msg, "bot_id", None) or "").strip()
+        user_id = str(getattr(msg, "user_id", None) or "").strip()
+        identity_parts = (provider, chat_id, bot_id, user_id)
+        if all(identity_parts):
+            return (provider, chat_id, bot_id, user_id)
+        return None
+
+    def _channel_id_matches_session_map_types(self, channel_id: str) -> bool:
+        """channel_id 是否属于 _session_map_channel_types 中某一族（精确匹配或 base: 前缀）."""
+        cid = str(channel_id or "").strip()
+        for base in self._session_map_channel_types:
+            if cid == base or cid.startswith(f"{base}:"):
+                return True
+        return False
+
+    def _resolve_control_channel_type(self, msg: "Message") -> str:
+        """Resolve control channel type key: prefer provider, fallback to channel_id."""
+        provider_raw = getattr(msg, "provider", None)
+        provider = str(getattr(provider_raw, "value", provider_raw) or "").strip()
+        if provider:
+            return provider
+        return str(getattr(msg, "channel_id", "") or "")
+
+    async def _send_channel_notice(
+        self,
+        user_infos: dict,
+        channel_id: str,
+        session_id: str | None,
+        text_or_payload: str | dict[str, Any],
+    ) -> None:
+        """向指定 channel 发送一条系统提示消息.
+
+        - str: 兼容历史行为，封装为 {"content": text, "is_complete": True}
+        - dict: 透传给 channel（仅确保 is_complete=True）
+        """
+        from jiuwenclaw.common.schema.message import Message, EventType
+
+        if isinstance(text_or_payload, dict):
+            payload = dict(text_or_payload)
+            payload.setdefault("is_complete", True)
+        else:
+            payload = {"content": text_or_payload, "is_complete": True}
+
+        msg = Message(
+            id=user_infos['id'],
+            type="event",
+            channel_id=channel_id,
+            session_id=session_id,
+            params={},
+            timestamp=time.time(),
+            ok=True,
+            payload=payload,
+            event_type=EventType.CHAT_FINAL,
+            metadata=user_infos['meta_data']
+        )
+        await self.publish_robot_messages(msg)
+
+    async def _cancel_agent_work_for_session(self, msg: "Message", old_sid: str | None) -> None:
+        """取消指定 session 的网关流式任务，并向 AgentServer 发送 CHAT_CANCEL（与 Web chat.interrupt intent=cancel 对齐）。
+
+        网关侧仅取消 ``_stream_sessions[rid] == old_sid`` 的流式任务，并向 AgentServer 发送同 session 的
+        ``intent=cancel``，由 AgentServer 继续取消该 session 上的实际执行任务。
+        """
+        from jiuwenclaw.common.schema.message import Message, ReqMethod
+
+        self._clear_session_evolution_states(old_sid)
+
+        tasks_to_cancel: list[asyncio.Task] = []
+        rids_cancelled: list[str] = []
+
+        for rid, task in list(self._stream_tasks.items()):
+            if self._stream_sessions.get(rid) != old_sid:
+                continue
+            if not task.done():
+                logger.info(
+                    "[MessageHandler] 取消流式任务: request_id=%s session_id=%s",
+                    rid,
+                    old_sid,
+                )
+                task.cancel()
+                tasks_to_cancel.append(task)
+                rids_cancelled.append(rid)
+
+        if tasks_to_cancel:
+            await asyncio.gather(*tasks_to_cancel, return_exceptions=True)
+            logger.info(
+                "[MessageHandler] 当前 session 流式任务已终止: session_id=%s request_ids=%s",
+                old_sid,
+                rids_cancelled,
+            )
+
+        if old_sid is None and not rids_cancelled:
+            return
+
+        sid_for_agent = (old_sid or "").strip()
+        if not sid_for_agent:
+            return
+
+        # 即使网关侧已无活跃流式拉取任务（例如 Agent 正在执行 shell/工具），也必须通知 AgentServer，
+        # 否则仅断开 CLI WebSocket 无法停止已派发的工作。
+
+        # 从 msg.params（已被 _apply_channel_state 注入 mode）或 channel_states
+        # 获取 mode 信息，注入到 cancel params 以确保 AgentServer 找到正确的 agent
+        cancel_params = {
+            "intent": "cancel",
+            "session_id": sid_for_agent,
+        }
+        cancel_mode = None
+        if isinstance(msg.params, dict) and msg.params.get("mode"):
+            # _apply_channel_state 已将 mode 写入 msg.params
+            cancel_mode = msg.params["mode"]
+        else:
+            # 回退到 channel_states
+            state = self._channel_states.get(
+                self._get_channel_state_key(msg.channel_id, msg.session_id)
+            ) or self._channel_states.get(msg.channel_id)
+            if state is not None:
+                cancel_mode = state.mode.value if hasattr(state.mode, 'value') else str(state.mode)
+        if cancel_mode:
+            cancel_params["mode"] = cancel_mode
+        if isinstance(msg.params, dict) and msg.params.get("trusted_dirs"):
+            cancel_params["trusted_dirs"] = msg.params["trusted_dirs"]
+
+        cancel_req = Message(
+            id=f"interrupt_{int(time.time() * 1000):x}_{secrets.token_hex(3)}",
+            type="req",
+            channel_id=msg.channel_id,
+            session_id=sid_for_agent,
+            params=cancel_params,
+            timestamp=time.time(),
+            ok=True,
+            req_method=ReqMethod.CHAT_CANCEL,
+            metadata=msg.metadata,
+            provider=getattr(msg, "provider", None),
+            chat_id=getattr(msg, "chat_id", None),
+            user_id=getattr(msg, "user_id", None),
+            bot_id=getattr(msg, "bot_id", None),
+        )
+        agent_msg = await self._prepare_agent_dispatch_message(cancel_req)
+        env_interrupt = self.message_to_e2a(agent_msg)
+        try:
+            resp = await self._agent_client.send_request(env_interrupt)
+        except Exception as exc:
+            logger.warning("[MessageHandler] AgentServer 中断请求失败: %s", exc)
+            await self._send_interrupt_result_notification(
+                msg.id,
+                msg.channel_id,
+                sid_for_agent,
+                "cancel",
+                message=f"任务终止失败: {exc}",
+                success=False,
+            )
+            return
+
+        payload = resp.payload if isinstance(resp.payload, dict) else {}
+        if payload.get("event_type") == "chat.interrupt_result":
+            out = self._response_to_message(
+                resp,
+                sid_for_agent,
+                request_metadata=msg.metadata,
+            )
+            await self.publish_robot_messages(out)
+            logger.info(
+                "[MessageHandler] 已转发 AgentServer 中断结果: request_id=%s ok=%s",
+                resp.request_id,
+                resp.ok,
+            )
+            return
+
+        error_message = "任务终止失败"
+        if isinstance(payload, dict):
+            raw_error = payload.get("error") or payload.get("message")
+            if isinstance(raw_error, str) and raw_error.strip():
+                error_message = raw_error.strip()
+        elif not resp.ok:
+            error_message = "任务终止失败"
+
+        await self._send_interrupt_result_notification(
+            msg.id,
+            msg.channel_id,
+            sid_for_agent,
+            "cancel",
+            message=error_message,
+            success=False,
+        )
+
+    async def cancel_agent_sessions_on_disconnect(
+        self,
+        session_keys: list[tuple[str, str]],
+    ) -> None:
+        """TUI/WebSocket 异常断开时，取消仍绑定在该连接上的会话（与显式 chat.interrupt 对齐）。"""
+        from jiuwenclaw.common.schema.message import Message, ReqMethod
+
+        seen: set[str] = set()
+        for _channel_id, session_id in session_keys:
+            sid = (session_id or "").strip()
+            if not sid or sid in seen:
+                continue
+            seen.add(sid)
+            # 注入 mode 信息，确保 AgentServer 找到正确的 agent
+            disconnect_params = {"intent": "cancel", "session_id": sid}
+            disconnect_state = self._channel_states.get(
+                self._get_channel_state_key(_channel_id, sid)
+            ) or self._channel_states.get(_channel_id)
+            if disconnect_state is not None:
+                disconnect_params["mode"] = (
+                    disconnect_state.mode.value
+                    if hasattr(disconnect_state.mode, 'value')
+                    else str(disconnect_state.mode)
+                )
+            stub = Message(
+                id=f"ws_drop_{int(time.time() * 1000):x}_{secrets.token_hex(4)}",
+                type="req",
+                channel_id=_channel_id,
+                session_id=sid,
+                params=disconnect_params,
+                timestamp=time.time(),
+                ok=True,
+                req_method=ReqMethod.CHAT_CANCEL,
+                is_stream=False,
+            )
+            try:
+                await self._cancel_agent_work_for_session(stub, sid)
+            except Exception:
+                logger.warning(
+                    "[MessageHandler] disconnect cancel failed: channel_id=%s session_id=%s",
+                    _channel_id,
+                    sid,
+                    exc_info=True,
+                )
+
+    async def _new_session_cancel_and_notice(
+        self,
+        params: NewSessionCancelParams,
+        msg: "Message",
+    ) -> None:
+        """先完成旧会话取消与 AgentServer 中断，再下发 session 已变更提示。"""
+        await self._cancel_agent_work_for_session(msg, params.old_sid)
+        await self._send_channel_notice(
+            params.user_infos,
+            params.channel_id,
+            params.reply_session_id,
+            f"[收到 CLI 指令], session_id 已变更为 {params.new_sid}",
+        )
+
+    async def _mode_change_cancel_and_notice(
+        self,
+        params: ModeChangeCancelParams,
+        msg: "Message",
+    ) -> None:
+        """与 /new_session 一致：先取消当前会话在网关与 Agent 侧的任务，再下发 mode 已变更提示。"""
+        await self._cancel_agent_work_for_session(msg, params.old_sid)
+        await self._send_channel_notice(
+            params.user_infos,
+            params.channel_id,
+            params.reply_session_id,
+            self._build_mode_change_notice_text(params.new_mode_label),
+        )
+
+    @staticmethod
+    def _build_mode_change_notice_text(mode_label: str) -> str:
+        return f"[收到 CLI 指令], mode 已变更为 {mode_label}"
+
+    def _handle_channel_control(self, msg: "Message") -> bool:
+        r"""处理 \new_session / \mode / \skills 指令.
+
+        Returns:
+            True: 该消息是控制指令，已处理完毕，不需要转发给 Agent。
+            False: 非控制指令，继续正常处理。
+        """
+        user_infos = {"id": msg.id, "meta_data": msg.metadata}
+
+        ch = msg.channel_id
+        channel_type = self._resolve_control_channel_type(msg)
+        if channel_type not in self._control_channel_types:
+            return False
+
+        params = msg.params or {}
+        text = str(params.get("query") or params.get("content") or "").strip()
+        if not text:
+            return False
+
+        parsed = parse_channel_control_text(text)
+        if parsed.action is ParsedControlAction.NONE:
+            return False
+
+        logger.info(
+            "[MessageHandler] _handle_channel_control channel=%s text=%s action=%s",
+            channel_type,
+            text,
+            parsed.action.value,
+        )
+
+        if parsed.action is ParsedControlAction.SKILLS_OK:
+            asyncio.create_task(
+                self._skills_slash_notice(user_infos, ch, msg.session_id, msg)
+            )
+            return True
+
+        # 获取当前会话的状态（使用复合键）
+        state = self._get_or_create_channel_state(msg)
+
+        if parsed.action is ParsedControlAction.NEW_SESSION_OK:
+            old_sid = state.session_id
+            cid = str(getattr(msg, "channel_id", "") or "")
+            identity_key = self._extract_identity_tuple(msg)
+            if identity_key and self._channel_id_matches_session_map_types(cid):
+                new_sid = self._session_map.get_session_id(*identity_key, rotate=True)
+            else:
+                new_sid = self._generate_channel_session_id(channel_type)
+            state.session_id = new_sid
+            asyncio.create_task(
+                self._new_session_cancel_and_notice(
+                    NewSessionCancelParams(
+                        user_infos=user_infos,
+                        channel_id=ch,
+                        reply_session_id=msg.session_id,
+                        new_sid=new_sid,
+                        old_sid=old_sid,
+                    ),
+                    msg,
+                )
+            )
+            return True
+        if parsed.action is ParsedControlAction.NEW_SESSION_BAD:
+            asyncio.create_task(
+                self._send_channel_notice(
+                    user_infos,
+                    ch,
+                    msg.session_id,
+                    "非法指令",
+                )
+            )
+            return True
+
+        if parsed.action is ParsedControlAction.MODE_OK:
+            mode_str = parsed.mode_subcommand or ""
+            if mode_str not in (
+                "agent",
+                "code",
+                "team",
+                "agent.plan",
+                "agent.fast",
+                "code.plan",
+                "code.normal",
+                "code.team",
+            ):
+                asyncio.create_task(
+                    self._send_channel_notice(
+                        user_infos,
+                        ch,
+                        msg.session_id,
+                        "非法指令",
+                    )
+                )
+                return True
+            old_mode = state.mode
+            old_sid = state.session_id
+            if mode_str == "agent":
+                state.mode = ChannelMode.AGENT_PLAN
+            elif mode_str == "code":
+                state.mode = ChannelMode.CODE_NORMAL
+            elif mode_str == "team":
+                state.mode = ChannelMode.TEAM
+            elif mode_str == "agent.plan":
+                state.mode = ChannelMode.AGENT_PLAN
+            elif mode_str == "agent.fast":
+                state.mode = ChannelMode.AGENT_FAST
+            elif mode_str == "code.plan":
+                state.mode = ChannelMode.CODE_PLAN
+            elif mode_str == "code.normal":
+                state.mode = ChannelMode.CODE_NORMAL
+            elif mode_str == "code.team":
+                state.mode = ChannelMode.CODE_TEAM
+            new_label = state.mode.value
+            if old_mode != state.mode:
+                asyncio.create_task(
+                    self._mode_change_cancel_and_notice(
+                        ModeChangeCancelParams(
+                            user_infos=user_infos,
+                            channel_id=ch,
+                            reply_session_id=msg.session_id,
+                            old_sid=old_sid,
+                            new_mode_label=new_label,
+                        ),
+                        msg,
+                    )
+                )
+            else:
+                asyncio.create_task(
+                    self._send_channel_notice(
+                        user_infos,
+                        ch,
+                        msg.session_id,
+                        self._build_mode_change_notice_text(new_label),
+                    )
+                )
+            return True
+        if parsed.action is ParsedControlAction.SWITCH_OK:
+            switch_str = parsed.switch_subcommand or ""
+            target_mode: ChannelMode | None = None
+            if switch_str == "plan":
+                if state.mode in (ChannelMode.AGENT_PLAN, ChannelMode.AGENT_FAST):
+                    target_mode = ChannelMode.AGENT_PLAN
+                elif state.mode in (
+                    ChannelMode.CODE_PLAN,
+                    ChannelMode.CODE_NORMAL,
+                    ChannelMode.CODE_TEAM,
+                ):
+                    target_mode = ChannelMode.CODE_PLAN
+            elif switch_str == "fast":
+                if state.mode in (ChannelMode.AGENT_PLAN, ChannelMode.AGENT_FAST):
+                    target_mode = ChannelMode.AGENT_FAST
+            elif switch_str == "normal":
+                if state.mode in (
+                    ChannelMode.CODE_PLAN,
+                    ChannelMode.CODE_NORMAL,
+                    ChannelMode.CODE_TEAM,
+                ):
+                    target_mode = ChannelMode.CODE_NORMAL
+            elif switch_str == "team":
+                if state.mode in (
+                    ChannelMode.CODE_PLAN,
+                    ChannelMode.CODE_NORMAL,
+                    ChannelMode.CODE_TEAM,
+                ):
+                    target_mode = ChannelMode.CODE_TEAM
+            if target_mode is None:
+                asyncio.create_task(
+                    self._send_channel_notice(
+                        user_infos,
+                        ch,
+                        msg.session_id,
+                        "非法指令",
+                    )
+                )
+                return True
+            old_mode = state.mode
+            old_sid = state.session_id
+            state.mode = target_mode
+            new_label = state.mode.value
+            if old_mode != state.mode:
+                asyncio.create_task(
+                    self._mode_change_cancel_and_notice(
+                        ModeChangeCancelParams(
+                            user_infos=user_infos,
+                            channel_id=ch,
+                            reply_session_id=msg.session_id,
+                            old_sid=old_sid,
+                            new_mode_label=new_label,
+                        ),
+                        msg,
+                    )
+                )
+            else:
+                asyncio.create_task(
+                    self._send_channel_notice(
+                        user_infos,
+                        ch,
+                        msg.session_id,
+                        self._build_mode_change_notice_text(new_label),
+                    )
+                )
+            return True
+        if parsed.action in (ParsedControlAction.MODE_BAD, ParsedControlAction.SWITCH_BAD):
+            asyncio.create_task(
+                self._send_channel_notice(
+                    user_infos,
+                    ch,
+                    msg.session_id,
+                    "非法指令",
+                )
+            )
+            return True
+
+        if parsed.action is ParsedControlAction.BRANCH_OK:
+            asyncio.create_task(
+                self._branch_slash_notice(
+                    user_infos, ch, msg.session_id, msg,
+                    branch_name=parsed.branch_name or "",
+                )
+            )
+            return True
+
+        if parsed.action is ParsedControlAction.REWIND_OK:
+            # 两步确认：先发送确认提示，不立即执行
+            turn_index = parsed.rewind_turn or 1
+            asyncio.create_task(
+                self._rewind_slash_confirm_prompt(
+                    user_infos, ch, msg.session_id, msg,
+                    turn_index=turn_index,
+                )
+            )
+            return True
+
+        if parsed.action is ParsedControlAction.REWIND_CONFIRM:
+            # 用户确认执行 rewind
+            asyncio.create_task(
+                self._rewind_slash_notice(
+                    user_infos, ch, msg.session_id, msg,
+                    turn_index=parsed.rewind_turn or 1,
+                )
+            )
+            return True
+
+        if parsed.action is ParsedControlAction.REWIND_CANCEL:
+            # 用户取消 rewind
+            asyncio.create_task(
+                self._send_channel_notice(
+                    user_infos, ch, msg.session_id,
+                    "[收到 /rewind cancel] 已取消回退操作。",
+                )
+            )
+            return True
+
+        if parsed.action is ParsedControlAction.REWIND_BAD:
+            asyncio.create_task(
+                self._send_channel_notice(
+                    user_infos,
+                    ch,
+                    msg.session_id,
+                    "非法指令，/rewind 须带正整数轮次编号，如 /rewind 2",
+                )
+            )
+            return True
+
+        return False
+
+    async def _skills_slash_notice(
+        self,
+        user_infos: dict[str, Any],
+        channel_id: str,
+        reply_session_id: str | None,
+        msg: "Message",
+    ) -> None:
+        """受控通道整行 /skills list：请求 skills.list 并以 CHAT_FINAL 通知透传。"""
+        from jiuwenclaw.common.schema.message import Message, ReqMethod
+
+        req_id = f"skills_slash_{int(time.time() * 1000):x}_{secrets.token_hex(3)}"
+        skills_req = Message(
+            id=req_id,
+            type="req",
+            channel_id=msg.channel_id,
+            session_id=msg.session_id,
+            params={},
+            timestamp=time.time(),
+            ok=True,
+            req_method=ReqMethod.SKILLS_LIST,
+            is_stream=False,
+            metadata=msg.metadata,
+            provider=getattr(msg, "provider", None),
+            chat_id=getattr(msg, "chat_id", None),
+            user_id=getattr(msg, "user_id", None),
+            bot_id=getattr(msg, "bot_id", None),
+        )
+        try:
+            env = self.message_to_e2a(skills_req)
+            resp = await self._agent_client.send_request(env)
+            if resp.ok:
+                if isinstance(resp.payload, dict):
+                    notice_payload: dict[str, Any] = dict(resp.payload)
+                else:
+                    notice_payload = {"data": resp.payload}
+            else:
+                err = ""
+                if isinstance(resp.payload, dict):
+                    err = str(resp.payload.get("error") or "").strip()
+                notice_payload = {
+                    "error": f"获取技能列表失败{(': ' + err) if err else ''}",
+                }
+            await self._send_channel_notice(
+                user_infos, channel_id, reply_session_id, notice_payload
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("[MessageHandler] /skills list 请求失败: %s", exc)
+            await self._send_channel_notice(
+                user_infos,
+                channel_id,
+                reply_session_id,
+                {"error": f"获取技能列表失败：{exc}"},
+            )
+
+    async def _branch_slash_notice(
+        self,
+        user_infos: dict[str, Any],
+        channel_id: str,
+        reply_session_id: str | None,
+        msg: "Message",
+        *,
+        branch_name: str = "",
+    ) -> None:
+        """受控通道 /branch：分叉当前会话，切换到新 session 并通知。
+
+        Sends session.fork to AgentServer so both filesystem copy (history.json,
+        metadata) and in-memory context copy (DeepAgent checkpointer + context
+        engine) are performed atomically.
+        """
+        from jiuwenclaw.common.e2a.gateway_normalize import e2a_from_agent_fields
+        from jiuwenclaw.common.schema.message import ReqMethod
+
+        state = self._get_or_create_channel_state(msg)
+        source_sid = state.session_id
+        if not source_sid:
+            await self._send_channel_notice(
+                user_infos, channel_id, reply_session_id,
+                {"error": "当前无活跃会话，无法分叉"},
+            )
+            return
+
+        channel_type = self._resolve_control_channel_type(msg)
+        new_sid = self._generate_channel_session_id(channel_type)
+
+        try:
+            env = e2a_from_agent_fields(
+                request_id=f"branch-{int(time.time() * 1000):x}-{secrets.token_hex(3)}",
+                channel_id=channel_type,
+                session_id=source_sid,
+                req_method=ReqMethod.SESSION_FORK,
+                params={
+                    "source_session_id": source_sid,
+                    "target_session_id": new_sid,
+                    "title": branch_name,
+                },
+                is_stream=False,
+                timestamp=time.time(),
+            )
+            resp = await self._agent_client.send_request(env)
+            if not resp.ok:
+                payload = dict(resp.payload or {}) if isinstance(resp.payload, dict) else {}
+                raise ValueError(str(payload.get("error") or "session.fork failed"))
+
+            result = dict(resp.payload or {}) if isinstance(resp.payload, dict) else {}
+            fork_sid = result.get("session_id", new_sid)
+            fork_title = result.get("title", branch_name or "Branched conversation")
+
+            old_sid = state.session_id
+            state.session_id = fork_sid
+
+            await self._cancel_agent_work_for_session(msg, old_sid)
+
+            await self._send_channel_notice(
+                user_infos, channel_id, reply_session_id,
+                f"[收到 /branch 指令] 已分叉会话「{fork_title}」，当前已切换到新会话。",
+            )
+            logger.info(
+                "[MessageHandler] /branch 完成: source=%s fork=%s title=%s",
+                source_sid, fork_sid, fork_title,
+            )
+        except ValueError as e:
+            await self._send_channel_notice(
+                user_infos, channel_id, reply_session_id,
+                {"error": f"分叉失败：{e}"},
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("[MessageHandler] /branch 失败: %s", exc)
+            await self._send_channel_notice(
+                user_infos, channel_id, reply_session_id,
+                {"error": f"分叉失败：{exc}"},
+            )
+
+    async def _rewind_slash_confirm_prompt(
+        self,
+        user_infos: dict[str, Any],
+        channel_id: str,
+        reply_session_id: str | None,
+        msg: "Message",
+        *,
+        turn_index: int = 1,
+    ) -> None:
+        """受控通道 /rewind N：发送确认提示（两步确认第一步）。
+
+        IM 渠道 /rewind 是不可逆操作，需要确认后才执行。
+        """
+        state = self._get_or_create_channel_state(msg)
+        target_sid = state.session_id
+        if not target_sid:
+            await self._send_channel_notice(
+                user_infos, channel_id, reply_session_id,
+                {"error": "当前无活跃会话，无法回退"},
+            )
+            return
+
+        await self._send_channel_notice(
+            user_infos, channel_id, reply_session_id,
+            f"[收到 /rewind {turn_index} 指令] 确认要回退到第 {turn_index} 轮吗？\n"
+            f"此操作不可逆，将删除第 {turn_index} 轮及之后的所有对话。\n"
+            f"请回复 /rewind confirm {turn_index} 确认，或 /rewind cancel 取消。\n"
+            f"注意：回退不影响手动编辑的文件或通过 bash 执行的命令。",
+        )
+
+    async def _rewind_slash_notice(
+        self,
+        user_infos: dict[str, Any],
+        channel_id: str,
+        reply_session_id: str | None,
+        msg: "Message",
+        *,
+        turn_index: int = 1,
+    ) -> None:
+        """受控通道 /rewind N：回退当前会话到指定轮次并通知。"""
+        from jiuwenclaw.agents.harness.common.session_ops_service import rewind_session
+
+        state = self._get_or_create_channel_state(msg)
+        target_sid = state.session_id
+        if not target_sid:
+            await self._send_channel_notice(
+                user_infos, channel_id, reply_session_id,
+                {"error": "当前无活跃会话，无法回退"},
+            )
+            return
+
+        try:
+            await self._cancel_agent_work_for_session(msg, target_sid)
+
+            result = rewind_session(session_id=target_sid, turn_index=turn_index)
+            preview = result.get("content_preview", "")
+            remaining = result.get("remaining_records", 0)
+            removed = result.get("removed_records", 0)
+
+            await self._send_channel_notice(
+                user_infos, channel_id, reply_session_id,
+                f"[收到 /rewind 指令] 已回退到第 {turn_index} 轮"
+                f'（"{preview[:50]}"）'
+                f"，删除 {removed} 条记录，剩余 {remaining} 条。",
+            )
+            logger.info(
+                "[MessageHandler] /rewind 完成: session=%s turn=%s remaining=%s removed=%s",
+                target_sid, turn_index, remaining, removed,
+            )
+        except ValueError as e:
+            await self._send_channel_notice(
+                user_infos, channel_id, reply_session_id,
+                {"error": f"回退失败：{e}"},
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("[MessageHandler] /rewind 失败: %s", exc)
+            await self._send_channel_notice(
+                user_infos, channel_id, reply_session_id,
+                {"error": f"回退失败：{exc}"},
+            )
+
+    def _apply_channel_state(self, msg: "Message") -> None:
+        """将当前 Channel 的控制状态应用到消息上（session_id / mode）."""
+        channel_type = self._resolve_control_channel_type(msg)
+        if channel_type not in self._control_channel_types:
+            return
+        state = self._get_or_create_channel_state(msg)
+
+        # 仅 _session_map_channel_types 中的通道族使用 SessionMap；其它受控通道仍按 config/state 与入站 session_id。
+        cid = str(getattr(msg, "channel_id", "") or "")
+        identity_key = self._extract_identity_tuple(msg)
+        if identity_key and self._channel_id_matches_session_map_types(cid):
+            sid = self._session_map.get_session_id(*identity_key)
+            state.session_id = sid
+            msg.session_id = sid
+        elif state.session_id:
+            msg.session_id = state.session_id
+
+        # 将 mode 写入 params，后续 E2A / Agent 侧从 params["mode"] 读取
+        if msg.params is None:
+            msg.params = {}
+        if isinstance(msg.params, dict):
+            msg.params.setdefault("mode", state.mode.value)
+
+    # ---------- user_messages ----------
+
+    async def publish_user_messages(self, msg: "Message") -> None:
+        """将消息放入 user_messages 队列（异步）."""
+        await self._user_messages.put(msg)
+
+    def publish_user_messages_nowait(self, msg: "Message") -> None:
+        """将消息放入 user_messages 队列（同步）."""
+        self._user_messages.put_nowait(msg)
+
+    async def consume_user_messages(self, timeout: float | None = None) -> "Message | None":
+        """消费一条 user_messages；timeout 为 None 则阻塞，否则超时返回 None."""
+        if timeout is not None and timeout <= 0:
+            try:
+                return self._user_messages.get_nowait()
+            except asyncio.QueueEmpty:
+                return None
+        try:
+            if timeout is None:
+                return await self._user_messages.get()
+            return await asyncio.wait_for(self._user_messages.get(), timeout=timeout)
+        except asyncio.TimeoutError:
+            return None
+
+    # ---------- robot_messages ----------
+
+    async def publish_robot_messages(self, msg: "Message") -> None:
+        """将 Agent 响应放入 robot_messages 队列."""
+        # Outbound Pipeline（数字分身出站路由）— 在入队前运行
+        if self._outbound_pipeline is not None:
+            try:
+                await self._outbound_pipeline.apply(msg)
+            except Exception:
+                logger.exception("Outbound pipeline error, message queued without routing")
+        await self._robot_messages.put(msg)
+
+    def publish_robot_messages_nowait(self, msg: "Message") -> None:
+        """将 Agent 响应放入 robot_messages 队列（同步）."""
+        self._robot_messages.put_nowait(msg)
+
+    async def consume_robot_messages(self, timeout: float | None = None) -> "Message | None":
+        """消费一条 robot_messages；timeout 为 None 则阻塞，否则超时返回 None."""
+        if timeout is not None and timeout <= 0:
+            try:
+                return self._robot_messages.get_nowait()
+            except asyncio.QueueEmpty:
+                return None
+        try:
+            if timeout is None:
+                return await self._robot_messages.get()
+            return await asyncio.wait_for(self._robot_messages.get(), timeout=timeout)
+        except asyncio.TimeoutError:
+            return None
+
+    @staticmethod
+    def _is_session_map_style_session_id(session_id: str) -> bool:
+        parts = [part.strip() for part in str(session_id or "").split("::")]
+        if len(parts) not in (5, 6):
+            return False
+        return all(parts)
+
+    @classmethod
+    def _is_known_jiuwenclaw_session_id(cls, session_id: str | None) -> bool:
+        sid = str(session_id or "").strip()
+        if not sid:
+            return False
+        if sid.startswith(_KNOWN_JIUWENCLAW_SESSION_PREFIXES):
+            return True
+        return cls._is_session_map_style_session_id(sid)
+
+    async def _ensure_acp_agent_session(self, session_id: str) -> str:
+        from jiuwenclaw.common.e2a.gateway_normalize import e2a_from_agent_fields
+        from jiuwenclaw.common.schema.message import ReqMethod
+
+        env = e2a_from_agent_fields(
+            request_id=f"acp-session-create-{int(time.time() * 1000):x}-{secrets.token_hex(3)}",
+            channel_id=_ACP_CHANNEL_ID,
+            session_id=session_id,
+            req_method=ReqMethod.SESSION_CREATE,
+            params={"session_id": session_id},
+            is_stream=False,
+            timestamp=time.time(),
+        )
+        resp = await self._agent_client.send_request(env)
+        if not resp.ok:
+            payload = dict(resp.payload or {}) if isinstance(resp.payload, dict) else {}
+            raise RuntimeError(str(payload.get("error") or "acp session.create failed"))
+        payload = dict(resp.payload or {}) if isinstance(resp.payload, dict) else {}
+        resolved = payload.get("sessionId") or payload.get("session_id") or session_id
+        resolved_str = str(resolved or "").strip()
+        if not resolved_str:
+            raise RuntimeError("acp session.create returned empty session_id")
+        return resolved_str
+
+    async def _resolve_acp_internal_session_id(
+        self,
+        external_session_id: str | None,
+    ) -> tuple[str | None, bool]:
+        external = str(external_session_id or "").strip()
+        if not external:
+            return None, False
+
+        cached = self._acp_session_aliases.get(external)
+        if cached:
+            return cached, cached != external
+
+        async with self._acp_session_alias_lock:
+            cached = self._acp_session_aliases.get(external)
+            if cached:
+                return cached, cached != external
+
+            desired = (
+                external
+                if self._is_known_jiuwenclaw_session_id(external)
+                else self._generate_channel_session_id(_ACP_CHANNEL_ID)
+            )
+            ensured = await self._ensure_acp_agent_session(desired)
+            self._acp_session_aliases[external] = ensured
+            return ensured, ensured != external
+
+    async def _prepare_agent_dispatch_message(self, msg: "Message") -> "Message":
+        from jiuwenclaw.common.schema.message import ReqMethod
+
+        if msg.channel_id != _ACP_CHANNEL_ID:
+            return msg
+        if msg.req_method in (ReqMethod.INITIALIZE, ReqMethod.SESSION_CREATE):
+            return msg
+
+        internal_session_id, aliased = await self._resolve_acp_internal_session_id(msg.session_id)
+        if not internal_session_id:
+            return msg
+
+        params = dict(msg.params or {})
+        params["session_id"] = internal_session_id
+
+        metadata = dict(msg.metadata or {})
+        if aliased:
+            metadata.setdefault(_ACP_ORIGINAL_SESSION_ID_KEY, str(msg.session_id or ""))
+
+        return replace(
+            msg,
+            session_id=internal_session_id,
+            params=params,
+            metadata=metadata or None,
+        )
+
+    def _resolve_acp_external_session_id(
+        self,
+        session_id: str | None,
+        metadata: dict[str, Any] | None = None,
+    ) -> str | None:
+        sid = str(session_id or "").strip()
+        if not sid:
+            return None
+
+        original = ""
+        if isinstance(metadata, dict):
+            original = str(metadata.get(_ACP_ORIGINAL_SESSION_ID_KEY) or "").strip()
+        if original:
+            return original
+
+        for external, internal in self._acp_session_aliases.items():
+            if internal == sid:
+                return external
+        return sid
+
+    @staticmethod
+    def _resolve_at_file_references(
+        content: str,
+        cwd: str | None = None,
+        max_file_size: int | None = _DEFAULT_INLINE_FILE_SIZE_LIMIT,
+    ) -> str:
+        """Parse ``@path`` references in *content* and inline the file text.
+
+        Supported forms:
+        - ``@relative/path`` / ``@/absolute/path`` — resolved against *cwd*
+        - ``@"path with spaces"`` — quoted paths
+        - ``@path#L10-20`` — line-range suffix (ignored for now, whole file read)
+
+        Returns content with ``@path`` replaced by a ``<file-content>`` block
+        containing the actual text.  If a file cannot be read the original
+        ``@path`` is kept unchanged.
+        """
+        if not content:
+            return content
+
+        working_dir = cwd or os.getcwd()
+
+        # Match @path or @"quoted path", optionally followed by #L... line range
+        pattern = re.compile(
+            r'(?P<prefix>(?:^|(?<=\s)))@(?:"(?P<quoted>[^"]+)"|(?P<plain>[^\s#]+))(?:#[^#\s]*)?'
+        )
+
+        def _replacer(m: re.Match[str]) -> str:
+            raw = m.group("quoted") or m.group("plain") or ""
+            if not raw:
+                return m.group(0)
+
+            # Resolve path
+            if raw.startswith("~/"):
+                home = os.path.expanduser("~")
+                resolved = os.path.join(home, raw[2:])
+            elif MessageHandler._is_absolute_reference_path(raw):
+                resolved = raw
+            else:
+                resolved = os.path.join(working_dir, raw)
+
+            try:
+                path = Path(resolved)
+                if not path.is_file():
+                    return m.group(0)
+                size = path.stat().st_size
+                truncated = False
+                if max_file_size is None:
+                    text = path.read_text(encoding="utf-8", errors="replace")
+                else:
+                    with path.open("r", encoding="utf-8", errors="replace") as handle:
+                        text = handle.read(max_file_size + 1)
+                    if size > max_file_size or len(text) > max_file_size:
+                        truncated = True
+                    if len(text) > max_file_size:
+                        text = text[:max_file_size]
+                    if truncated:
+                        suffix = f"\n... (truncated, original_size={size} bytes)"
+                        text = f"{text}{suffix}"
+                return (
+                    f'\n<file-content path="{raw}">\n{text}\n</file-content>\n'
+                )
+            except (OSError, UnicodeDecodeError):
+                return m.group(0)
+
+        return pattern.sub(_replacer, content)
+
+    @staticmethod
+    def _is_absolute_reference_path(raw: str) -> bool:
+        return raw.startswith("/") or (len(raw) >= 3 and raw[1] == ":" and raw[2] == "\\")
+
+    @staticmethod
+    def _resolve_reference_path(raw: str, cwd: str | None = None) -> str:
+        working_dir = cwd or os.getcwd()
+        if raw.startswith("~/"):
+            return os.path.join(os.path.expanduser("~"), raw[2:])
+        if MessageHandler._is_absolute_reference_path(raw):
+            return raw
+        return os.path.join(working_dir, raw)
+
+    @classmethod
+    def _normalize_structured_attachments(
+        cls,
+        attachments: Any,
+        cwd: str | None = None,
+    ) -> list[dict[str, Any]]:
+        if not isinstance(attachments, list):
+            return []
+
+        normalized: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        for item in attachments:
+            if not isinstance(item, dict):
+                continue
+            raw_path = str(item.get("path") or "").strip()
+            if not raw_path:
+                continue
+            resolved_path = cls._resolve_reference_path(raw_path, cwd)
+            if resolved_path in seen:
+                continue
+            seen.add(resolved_path)
+            normalized.append(
+                {
+                    "path": resolved_path,
+                    "type": str(item.get("type") or "file").strip() or "file",
+                    "filename": str(item.get("filename") or Path(resolved_path).name).strip(),
+                }
+            )
+        return normalized
+
+    @classmethod
+    def _strip_attached_mentions(
+        cls,
+        content: str,
+        attachments: list[dict[str, Any]],
+        cwd: str | None = None,
+    ) -> str:
+        if not content or not attachments:
+            return content
+
+        attached_paths = {
+            cls._resolve_reference_path(str(item.get("path") or ""), cwd)
+            for item in attachments
+            if str(item.get("path") or "").strip()
+        }
+        if not attached_paths:
+            return content
+
+        pattern = re.compile(
+            r'(?P<prefix>(?:^|(?<=\s)))@(?:"(?P<quoted>[^"]+)"|(?P<plain>[^\s#]+))(?:#[^#\s]*)?'
+        )
+
+        def _replacer(match: re.Match[str]) -> str:
+            raw = match.group("quoted") or match.group("plain") or ""
+            if not raw:
+                return match.group(0)
+            resolved = cls._resolve_reference_path(raw, cwd)
+            if resolved not in attached_paths:
+                return match.group(0)
+            return f"{match.group('prefix')}{raw}"
+
+        return pattern.sub(_replacer, content)
+
+    @classmethod
+    def _resolve_structured_attachments(
+        cls,
+        content: str,
+        attachments: Any,
+        cwd: str | None = None,
+    ) -> str:
+        normalized = cls._normalize_structured_attachments(attachments, cwd)
+        if not normalized:
+            return content
+
+        prefix = " ".join(f'@"{item["path"]}"' for item in normalized)
+        cleaned_content = cls._strip_attached_mentions(content, normalized, cwd)
+        merged_content = f"{prefix} {cleaned_content}".strip()
+        return cls._resolve_at_file_references(merged_content, cwd=cwd)
+
+    @staticmethod
+    def message_to_e2a(msg: "Message") -> "E2AEnvelope":
+        from jiuwenclaw.common.e2a.gateway_normalize import message_to_e2a_or_fallback
+
+        return message_to_e2a_or_fallback(msg)
+
+
+    @staticmethod
+    def _merge_agent_metadata(
+        request_metadata: dict[str, Any] | None,
+        response_metadata: dict[str, Any] | None,
+    ) -> dict[str, Any] | None:
+        """合并 Agent 响应 metadata 与网关请求 metadata。
+
+        send_push / 工具链返回的响应常不带 metadata，通道（如钉钉 batchSend）需要
+        请求侧的 dingtalk_sender_id、conversation_type 等；响应中有同名字段时优先响应。
+        """
+        req_md = request_metadata or {}
+        resp_md = response_metadata or {}
+        if not req_md and not resp_md:
+            return None
+        merged: dict[str, Any] = {**req_md, **resp_md}
+        return merged
+
+    @staticmethod
+    def _response_to_message(
+        resp: "AgentResponse",
+        session_id: str | None,
+        *,
+        request_metadata: dict[str, Any] | None = None,
+    ) -> "Message":
+        from jiuwenclaw.common.schema.message import Message, EventType
+
+        metadata = MessageHandler._merge_agent_metadata(request_metadata, resp.metadata)
+
+        # 从 metadata 中提取 group_digital_avatar 和 enable_memory 字段
+        # 这些字段在 message_to_e2a 中被放入 metadata，需要在这里提取出来
+        group_digital_avatar = bool(metadata.get("group_digital_avatar", False)) if metadata else False
+        enable_memory = bool(metadata.get("enable_memory", True)) if metadata else True
+
+        # 检查 payload 中是否包含 event_type，如果包含则创建事件消息
+        event_type = None
+        if resp.payload and isinstance(resp.payload, dict):
+            event_type_str = resp.payload.get("event_type")
+            if isinstance(event_type_str, str):
+                try:
+                    event_type = EventType(event_type_str)
+                    # 如果是事件类型，创建事件消息而不是响应消息
+                    return Message(
+                        id=resp.request_id,
+                        type="event",
+                        channel_id=resp.channel_id,
+                        session_id=session_id,
+                        params={},
+                        timestamp=time.time(),
+                        ok=True,
+                        payload=resp.payload,
+                        event_type=event_type,
+                        metadata=metadata,
+                        group_digital_avatar=group_digital_avatar,
+                        enable_memory=enable_memory,
+                    )
+                except ValueError:
+                    # 不是有效的 EventType，继续作为普通响应处理
+                    pass
+
+        # 普通响应消息
+        return Message(
+            id=resp.request_id,
+            type="res",
+            channel_id=resp.channel_id,
+            session_id=session_id,
+            params={},
+            timestamp=time.time(),
+            ok=resp.ok,
+            payload=resp.payload,
+            event_type=EventType.CHAT_FINAL,
+            metadata=metadata,
+            group_digital_avatar=group_digital_avatar,
+            enable_memory=enable_memory,
+        )
+
+    async def _handle_agent_server_push(self, wire: dict[str, Any]) -> None:
+        """AgentServer ``send_push`` 下行：与 RPC 共用连接但不得占用 unary/stream 等待队列。"""
+        from jiuwenclaw.common.e2a.wire_codec import parse_agent_server_wire_chunk
+
+        try:
+            chunk = parse_agent_server_wire_chunk(wire)
+        except Exception as e:
+            logger.exception("[MessageHandler] server_push 解析失败: %s", e)
+            return
+        rid = str(chunk.request_id or "")
+        sid_raw = wire.get("session_id")
+        if sid_raw is not None and str(sid_raw).strip():
+            session_id: str | None = str(sid_raw)
+        else:
+            session_id = self._stream_sessions.get(rid)
+        
+        # 获取原始请求的 metadata，用于合并
+        request_metadata = self._stream_metadata.get(rid)
+        
+        # 获取 AgentServer 返回的 metadata
+        wmd = wire.get("metadata")
+        if isinstance(wmd, dict):
+            resp_md = {
+                k: v
+                for k, v in wmd.items()
+                if k not in E2A_WIRE_INTERNAL_METADATA_KEYS
+            }
+        else:
+            resp_md = None
+
+        # 合并 metadata：请求 metadata 在前，响应 metadata 在后（响应优先）
+        bus_metadata = MessageHandler._merge_agent_metadata(request_metadata, resp_md)
+
+        if chunk.channel_id == _ACP_CHANNEL_ID:
+            session_id = self._resolve_acp_external_session_id(session_id, bus_metadata)
+        if isinstance(chunk.payload, dict) and chunk.payload.get("event_type") == "cron.response":
+            await self._handle_cron_push_payload(
+                payload=dict(chunk.payload),
+                request_id=rid,
+                channel_id=chunk.channel_id,
+                session_id=session_id,
+                metadata=bus_metadata,
+            )
+            return
+        if self._is_terminal_stream_chunk(chunk):
+            logger.debug(
+                "[MessageHandler] 忽略 server_push 终止 chunk: request_id=%s",
+                chunk.request_id,
+            )
+            return
+
+        # Track evolution state on the server_push path as well.
+        await self._handle_evolution_chunk(chunk, session_id, bus_metadata)
+
+        out = self._chunk_to_message(
+            chunk, session_id=session_id, metadata=bus_metadata
+        )
+        await self.publish_robot_messages(out)
+        logger.info(
+            "[MessageHandler] server_push 已写入 robot_messages: request_id=%s channel_id=%s",
+            rid,
+            chunk.channel_id,
+        )
+
+    def set_cron_controller(self, controller: Any) -> None:
+        self._cron_controller = controller
+
+    async def _handle_cron_push_payload(
+        self,
+        *,
+        payload: dict[str, Any],
+        request_id: str,
+        channel_id: str,
+        session_id: str | None,
+        metadata: dict[str, Any] | None,
+    ) -> None:
+        cc = self._cron_controller
+        if cc is None:
+            return
+        action = str(payload.get("action") or "").strip()
+        params = payload.get("data") or {}
+        if not isinstance(params, dict):
+            params = {}
+        try:
+            if action == "list":
+                data = await cc.list_jobs()
+            elif action == "get":
+                data = await cc.get_job(str(params.get("job_id") or ""))
+            elif action == "create":
+                # 从原始请求中获取 mode，覆盖 LLM 工具调用的默认值
+                request_mode = self._stream_modes.get(request_id)
+                if request_mode:
+                    params["mode"] = request_mode
+                data = await cc.create_job(params)
+            elif action == "update":
+                data = await cc.update_job(str(params.get("job_id") or ""), dict(params.get("patch") or {}))
+            elif action == "delete":
+                data = {"deleted": await cc.delete_job(str(params.get("job_id") or ""))}
+            elif action == "toggle":
+                data = await cc.toggle_job(str(params.get("job_id") or ""), bool(params.get("enabled")))
+            elif action == "preview":
+                data = await cc.preview_job(str(params.get("job_id") or ""), int(params.get("count", 5)))
+            elif action == "run_now":
+                data = {"run_id": await cc.run_now(str(params.get("job_id") or ""))}
+            else:
+                data = {"error": f"unknown cron action: {action}"}
+        except Exception as exc:  # noqa: BLE001
+            data = {"error": str(exc)}
+
+        from jiuwenclaw.common.schema.message import EventType, Message
+        out = Message(
+            id=request_id,
+            type="event",
+            channel_id=channel_id,
+            session_id=session_id,
+            params={},
+            timestamp=time.time(),
+            ok=True,
+            payload={
+                "event_type": "chat.tool_result",
+                "tool_name": "cron",
+                "result": data,
+            },
+            event_type=EventType.CHAT_TOOL_RESULT,
+            metadata=metadata,
+            enable_streaming=False,  # 工具结果不开启流式，避免被发送到群聊
+        )
+        await self.publish_robot_messages(out)
+
+    @staticmethod
+    def _chunk_to_message(
+        chunk: AgentResponseChunk,
+        session_id: str | None,
+        metadata: dict[str, Any] | None = None,
+    ) -> Message:
+        """将 AgentResponseChunk 转换为 Message（用于流式处理）。
+        metadata 传入 request 的 metadata，供 Feishu/Xiaoyi 等通道回发时使用平台身份。
+        """
+        from jiuwenclaw.common.schema.message import Message, EventType
+
+        # 从 metadata 中提取 group_digital_avatar 和 enable_memory 字段
+        # 这些字段在 message_to_e2a 中被放入 metadata，需要在这里提取出来
+        group_digital_avatar = bool(metadata.get("group_digital_avatar", False)) if metadata else False
+        enable_memory = bool(metadata.get("enable_memory", True)) if metadata else True
+
+        # 从 payload 中提取 event_type（如果存在）
+        event_type = None
+        if chunk.payload and isinstance(chunk.payload, dict):
+            event_type_str = chunk.payload.get("event_type")
+            if isinstance(event_type_str, str):
+                try:
+                    event_type = EventType(event_type_str)
+                except ValueError:
+                    logger.debug("未知的 event_type: %s", event_type_str)
+
+        return Message(
+            id=chunk.request_id,
+            type="event",
+            channel_id=chunk.channel_id,
+            session_id=session_id,
+            params={},
+            timestamp=time.time(),
+            ok=True,
+            payload=chunk.payload,
+            event_type=event_type,
+            metadata=metadata,
+            group_digital_avatar=group_digital_avatar,
+            enable_memory=enable_memory,
+        )
+
+    @staticmethod
+    def _is_terminal_stream_chunk(chunk: AgentResponseChunk) -> bool:
+        """识别仅用于结束流的哨兵 chunk，避免被当作业务事件继续下发。"""
+        if not bool(getattr(chunk, "is_complete", False)):
+            return False
+        payload = getattr(chunk, "payload", None)
+        if not payload:
+            return True
+        if not isinstance(payload, dict):
+            return False
+        if payload.get("event_type"):
+            return False
+        if payload.get("content") not in (None, ""):
+            return False
+        if payload.get("error") not in (None, ""):
+            return False
+        return payload.get("is_complete") is True and set(payload.keys()) <= {"is_complete"}
+
+    async def _publish_stream_cancelled_final(
+        self,
+        request_id: str,
+        channel_id: str,
+        session_id: str | None,
+        request_metadata: dict[str, Any] | None,
+    ) -> None:
+        """流式任务被网关取消时补发 chat.final，带 is_complete（供飞书等通道合并缓冲）。"""
+        from jiuwenclaw.common.schema.message import Message, EventType
+
+        group_digital_avatar = bool(request_metadata.get("group_digital_avatar", False)) if request_metadata else False
+        enable_memory = bool(request_metadata.get("enable_memory", True)) if request_metadata else True
+
+        out = Message(
+            id=request_id,
+            type="event",
+            channel_id=channel_id,
+            session_id=session_id,
+            params={},
+            timestamp=time.time(),
+            ok=True,
+            payload={
+                "event_type": EventType.CHAT_FINAL.value,
+                "content": "",
+                "is_complete": True,
+            },
+            event_type=EventType.CHAT_FINAL,
+            metadata=request_metadata,
+            group_digital_avatar=group_digital_avatar,
+            enable_memory=enable_memory,
+        )
+        await self.publish_robot_messages(out)
+        logger.info(
+            "[MessageHandler] 已发送流式取消结束帧: request_id=%s session_id=%s",
+            request_id,
+            session_id,
+        )
+
+    @staticmethod
+    def _non_stream_rpc_may_run_parallel(env: "E2AEnvelope") -> bool:
+        """可与其它非流式 RPC 并发，不阻塞 _forward_loop。
+
+        网关队列否则串行 await Agent，慢请求（如 SkillNet 搜索）会堵住后续的 skills.list 刷新。
+        聊天相关必须按入队顺序与流式任务协调，不得后台并发。
+        """
+        from jiuwenclaw.common.schema.message import ReqMethod
+
+        m = env.method
+        if not m:
+            return False
+        return m not in (
+            ReqMethod.CHAT_SEND.value,
+            ReqMethod.CHAT_RESUME.value,
+            ReqMethod.CHAT_CANCEL.value,
+            ReqMethod.CHAT_ANSWER.value,
+        )
+
+    @staticmethod
+    def _should_trigger_before_chat_request_hook(msg: "Message") -> bool:
+        from jiuwenclaw.common.schema.message import ReqMethod
+
+        return msg.req_method in (
+            ReqMethod.CHAT_SEND,
+            ReqMethod.CHAT_RESUME,
+            ReqMethod.CHAT_ANSWER,
+        )
+
+    async def _trigger_before_chat_request_hook(self, msg: "Message") -> None:
+        if not self._should_trigger_before_chat_request_hook(msg):
+            return
+
+        params = msg.params if isinstance(msg.params, dict) else {}
+        if not isinstance(msg.params, dict):
+            msg.params = params
+
+        ctx = GatewayChatHookContext(
+            request_id=msg.id,
+            channel_id=msg.channel_id,
+            session_id=msg.session_id,
+            req_method=msg.req_method.value if msg.req_method is not None else None,
+            params=params,
+        )
+        from jiuwenclaw.extensions.registry import ExtensionRegistry
+
+        await ExtensionRegistry.get_instance().trigger(GatewayHookEvents.BEFORE_CHAT_REQUEST, ctx)
+
+    @staticmethod
+    def _is_evolution_approval_request_id(request_id: Any) -> bool:
+        # Support skill evolution (skill_evolve_*) and team skill evolution (team_skill_evolve_*).
+        # Note: skill creation (SkillCreateRail/TeamSkillCreateRail) uses ask_user + skill-creator
+        # flow, not the approval-based routing.
+        return isinstance(request_id, str) and (
+            request_id.startswith("skill_evolve_") or
+            request_id.startswith("team_skill_evolve_")
+        )
+
+    def _queue_supplement_input(
+        self,
+        session_id: str | None,
+        new_input: str,
+        attachments: list[dict[str, Any]] | None = None,
+    ) -> None:
+        if not session_id:
+            return
+        payload: dict[str, Any] = {"new_input": new_input}
+        if attachments:
+            payload["attachments"] = attachments
+        self._queued_supplement_input[session_id] = payload
+
+    def _pop_queued_supplement_input(self, session_id: str | None) -> dict[str, Any] | None:
+        if not session_id:
+            return None
+        return self._queued_supplement_input.pop(session_id, None)
+
+    def _mark_pending_evolution_approval(self, session_id: str | None, request_id: Any) -> None:
+        if not session_id:
+            return
+        if self._is_evolution_approval_request_id(request_id):
+            self._pending_evolution_approval[session_id] = str(request_id)
+
+    def _build_auto_accept_evolution_answer(
+        self,
+        *,
+        channel_id: str,
+        session_id: str,
+        request_id: str,
+        metadata: dict[str, Any] | None = None,
+    ) -> "Message":
+        from jiuwenclaw.common.schema.message import Message, ReqMethod
+
+        return Message(
+            id=f"auto_evolve_answer_{int(time.time() * 1000):x}_{secrets.token_hex(3)}",
+            type="req",
+            channel_id=channel_id,
+            session_id=session_id,
+            params={
+                "request_id": request_id,
+                "answers": [{"selected_options": ["接收"]}],
+                "source": "auto_accept",
+            },
+            timestamp=time.time(),
+            ok=True,
+            req_method=ReqMethod.CHAT_ANSWER,
+            is_stream=False,
+            metadata=metadata,
+        )
+
+    def _maybe_auto_accept_replaced_evolution_approval(
+        self,
+        *,
+        session_id: str | None,
+        incoming_request_id: str,
+        channel_id: str,
+        metadata: dict[str, Any] | None = None,
+    ) -> None:
+        if not session_id or not incoming_request_id:
+            return
+
+        previous_request_id = self._pending_evolution_approval.get(session_id)
+        if not previous_request_id or previous_request_id == incoming_request_id:
+            return
+
+        auto_answer = self._build_auto_accept_evolution_answer(
+            channel_id=channel_id,
+            session_id=session_id,
+            request_id=previous_request_id,
+            metadata=metadata,
+        )
+        self._user_messages.put_nowait(auto_answer)
+        logger.info(
+            "[MessageHandler] auto-accept superseded evolution approval: session_id=%s old=%s new=%s",
+            session_id,
+            previous_request_id,
+            incoming_request_id,
+        )
+
+    def _clear_pending_evolution_approval(self, session_id: str | None) -> None:
+        if not session_id:
+            return
+        self._pending_evolution_approval.pop(session_id, None)
+
+    def _mark_session_evolution_in_progress(self, session_id: str | None) -> None:
+        if not session_id:
+            return
+        self._session_evolution_in_progress.add(session_id)
+
+    def _clear_session_evolution_in_progress(self, session_id: str | None) -> None:
+        if not session_id:
+            return
+        self._session_evolution_in_progress.discard(session_id)
+
+    def _is_session_evolution_in_progress(self, session_id: str | None) -> bool:
+        return isinstance(session_id, str) and session_id in self._session_evolution_in_progress
+
+    def _finish_evolution_approval_if_current(
+        self,
+        session_id: str | None,
+        answered_request_id: str | None,
+    ) -> dict[str, Any] | None:
+        if not session_id or not answered_request_id:
+            return None
+
+        current_request_id = self._pending_evolution_approval.get(session_id)
+        if current_request_id != answered_request_id:
+            logger.info(
+                "[MessageHandler] stale evolution approval resolved, "
+                "keep current pending: session_id=%s answered=%s current=%s",
+                session_id,
+                answered_request_id,
+                current_request_id,
+            )
+            return None
+
+        self._clear_pending_evolution_approval(session_id)
+        self._clear_session_evolution_in_progress(session_id)
+        return self._pop_queued_supplement_input(session_id)
+
+    async def _handle_evolution_chunk(
+        self,
+        chunk,
+        session_id: str | None,
+        request_metadata: dict[str, Any] | None = None,
+    ) -> None:
+        """处理 chunk 中的演进状态和审批事件，更新 Gateway 状态机。
+
+        在 process_stream 和 _handle_agent_server_push 两条路径中复用。
+        """
+        if not isinstance(chunk.payload, dict):
+            return
+        event_type = chunk.payload.get("event_type")
+        if event_type == "chat.evolution_status":
+            status = str(chunk.payload.get("status", "")).strip().lower()
+            if status == "start":
+                self._mark_session_evolution_in_progress(session_id)
+                rid = getattr(chunk, "request_id", "")
+                logger.info(
+                    "[MessageHandler] evolution status start: session_id=%s request_id=%s",
+                    session_id,
+                    rid,
+                )
+            elif status == "end":
+                self._clear_session_evolution_in_progress(session_id)
+                rid = getattr(chunk, "request_id", "")
+                logger.info(
+                    "[MessageHandler] evolution status end: session_id=%s request_id=%s",
+                    session_id,
+                    rid,
+                )
+        approval_request_id = chunk.payload.get("request_id")
+        if (
+            event_type == "chat.ask_user_question"
+            and self._is_evolution_approval_request_id(approval_request_id)
+        ):
+            self._maybe_auto_accept_replaced_evolution_approval(
+                session_id=session_id,
+                incoming_request_id=str(approval_request_id),
+                channel_id=str(getattr(chunk, "channel_id", "") or ""),
+                metadata=request_metadata,
+            )
+            self._mark_pending_evolution_approval(session_id, approval_request_id)
+            logger.info(
+                "[MessageHandler] evolution approval detected: session_id=%s request_id=%s",
+                session_id,
+                approval_request_id,
+            )
+
+    def _clear_session_evolution_states(self, session_id: str | None) -> None:
+        self._clear_session_evolution_in_progress(session_id)
+        self._clear_pending_evolution_approval(session_id)
+        self._pop_queued_supplement_input(session_id)
+
+    @staticmethod
+    def _build_queued_chat_send_message(
+        msg: "Message",
+        new_input: str,
+        attachments: list[dict[str, Any]] | None = None,
+    ) -> "Message":
+        from jiuwenclaw.common.schema.message import Message, ReqMethod
+
+        new_req_id = f"req_{int(time.time() * 1000):x}_{msg.id}"
+        params: dict[str, Any] = {
+            "query": new_input,
+            "session_id": msg.session_id,
+            "is_supplement": True,
+        }
+        if attachments:
+            params["attachments"] = attachments
+        return Message(
+            id=new_req_id,
+            type="req",
+            channel_id=msg.channel_id,
+            session_id=msg.session_id,
+            params=params,
+            timestamp=time.time(),
+            ok=True,
+            req_method=ReqMethod.CHAT_SEND,
+            is_stream=True,
+        )
+
+    async def _process_non_stream_request(self, msg: "Message", env: "E2AEnvelope") -> Any:
+        """执行单次非流式 Agent 请求并将结果写入 robot_messages（供串行或后台任务复用）。"""
+        try:
+            resp = await self._agent_client.send_request(env)
+            out = self._response_to_message(
+                resp,
+                session_id=msg.session_id,
+                request_metadata=msg.metadata,
+            )
+            await self.publish_robot_messages(out)
+            logger.info(
+                "[MessageHandler] Agent 响应已写入 robot_messages: request_id=%s channel_id=%s",
+                resp.request_id,
+                resp.channel_id,
+            )
+            return resp
+        except Exception as e:
+            logger.exception("AgentServer send_request failed for %s: %s", msg.id, e)
+            err_msg = self._build_error_out_message(msg, e)
+            await self.publish_robot_messages(err_msg)
+            logger.info(
+                "[MessageHandler] 错误响应已写入 robot_messages: id=%s channel_id=%s",
+                msg.id,
+                msg.channel_id,
+            )
+            return None
+
+    # ---------- 入队 -> AgentServer -> 出队 转发循环 ----------
+
+    async def _forward_loop(self) -> None:
+        """循环：从 user_messages 取消息，经 AgentServerClient 发往 AgentServer，将响应写入 robot_messages.
+        支持流式和非流式两种模式。使用 timeout=None 阻塞等待，保证有消息时第一时间被唤醒处理；
+        stop 时 task 被 cancel 会打断 get() 并退出。
+
+        支持中断机制：当收到 CHAT_CANCEL 请求时，会立即取消正在执行的流式任务。
+        """
+        from jiuwenclaw.common.schema.message import ReqMethod
+
+        while self._running:
+            try:
+                msg = await self.consume_user_messages(timeout=None)
+                if msg is None:
+                    continue
+                
+         
+                # 先处理受控通道的 Channel 控制指令（如 /new_session、/mode、/skills list）
+                if self._handle_channel_control(msg):
+                    # 该消息仅用于修改 session/mode，已给 Channel 回复提示，不再转发给 Agent
+                    continue
+
+                # 将当前 Channel 的控制状态应用到消息上
+                self._apply_channel_state(msg)
+
+                # 检查是否是中断请求
+                if msg.req_method == ReqMethod.CHAT_ANSWER:
+                    agent_msg = await self._prepare_agent_dispatch_message(msg)
+                    env = self.message_to_e2a(agent_msg)
+                    resp = await self._process_non_stream_request(msg, env)
+                    answer_request_id = (msg.params or {}).get("request_id")
+                    if self._is_evolution_approval_request_id(answer_request_id):
+                        # Check whether the response indicates the approval was actually resolved.
+                        resolved = False
+                        if resp is not None and hasattr(resp, "payload") and isinstance(resp.payload, dict):
+                            resolved = resp.payload.get("resolved", False) is True
+                        if resolved:
+                            queued_payload = self._finish_evolution_approval_if_current(
+                                msg.session_id,
+                                str(answer_request_id or ""),
+                            )
+                            queued_input = str((queued_payload or {}).get("new_input") or "").strip()
+                            queued_attachments = (queued_payload or {}).get("attachments")
+                            if queued_input:
+                                queued_msg = self._build_queued_chat_send_message(
+                                    msg,
+                                    queued_input,
+                                    queued_attachments if isinstance(queued_attachments, list) else None,
+                                )
+                                self._user_messages.put_nowait(queued_msg)
+                                logger.info(
+                                    "[MessageHandler] evolution approval answered (resolved), "
+                                    "queued supplement dispatched: id=%s session_id=%s",
+                                    queued_msg.id,
+                                    msg.session_id,
+                                )
+                        else:
+                            logger.info(
+                                "[MessageHandler] evolution approval answered but not resolved: "
+                                "id=%s session_id=%s request_id=%s",
+                                msg.id,
+                                msg.session_id,
+                                answer_request_id,
+                            )
+                    continue
+
+                if msg.req_method == ReqMethod.CHAT_CANCEL:
+                    logger.info(
+                        "[MessageHandler] 收到中断请求: id=%s channel_id=%s",
+                        msg.id, msg.channel_id,
+                    )
+                    new_input = (msg.params or {}).get("new_input")
+                    has_new_input = isinstance(new_input, str) and new_input.strip()
+                    raw_attachments = (msg.params or {}).get("attachments")
+                    supplement_attachments = (
+                        raw_attachments if isinstance(raw_attachments, list) else None
+                    )
+                    intent = (msg.params or {}).get("intent", "cancel")
+
+                    if has_new_input:
+                        if (
+                            self._is_session_evolution_in_progress(msg.session_id)
+                            or (
+                                isinstance(msg.session_id, str)
+                                and msg.session_id in self._pending_evolution_approval
+                            )
+                        ):
+                            queued_input = new_input.strip()
+                            self._queue_supplement_input(
+                                msg.session_id,
+                                queued_input,
+                                supplement_attachments,
+                            )
+                            logger.info(
+                                "[MessageHandler] evolution phase pending, queue supplement input: session_id=%s",
+                                msg.session_id,
+                            )
+                            await self._send_interrupt_result_notification(
+                                msg.id,
+                                msg.channel_id,
+                                msg.session_id,
+                                "supplement",
+                                message="已加入队列，等待演进完成",
+                            )
+                            continue
+
+                        # 有新输入：取消旧任务 → 保留 todo → 启动新任务（非并发）
+
+                        # 1. 取消 gateway 侧当前 session 相关的流式任务（而非所有任务）
+                        tasks_to_cancel = []
+                        rids_cancelled = []
+                        current_sid = msg.session_id
+                        for rid, task in list(self._stream_tasks.items()):
+                            # 只取消与当前 session_id 关联的任务
+                            if self._stream_sessions.get(rid) != current_sid:
+                                continue
+                            if not task.done():
+                                logger.info(
+                                    "[MessageHandler] supplement: 取消流式任务 request_id=%s session_id=%s",
+                                    rid, current_sid,
+                                )
+                                task.cancel()
+                                tasks_to_cancel.append(task)
+                                rids_cancelled.append(rid)
+                        if tasks_to_cancel:
+                            await asyncio.gather(*tasks_to_cancel, return_exceptions=True)
+
+                        # 2. 通知前端 supplement（前端据此判断 is_processing 状态）
+                        await self._send_interrupt_result_notification(
+                            msg.id, msg.channel_id, msg.session_id, "supplement",
+                        )
+
+                        # 3. 发送 supplement intent 到 AgentServer（取消任务但保留 todo）
+                        #    用 await 确保 agent 侧先完成取消再启动新任务
+                        from jiuwenclaw.common.e2a.gateway_normalize import e2a_from_agent_fields
+
+                        agent_msg = await self._prepare_agent_dispatch_message(msg)
+                        # 注入 mode 信息，确保 AgentServer 找到正确的 agent
+                        supplement_params = {"intent": "supplement", "session_id": agent_msg.session_id}
+                        sup_state = self._channel_states.get(
+                            self._get_channel_state_key(msg.channel_id, msg.session_id)
+                        ) or self._channel_states.get(msg.channel_id)
+                        if sup_state is not None:
+                            supplement_params["mode"] = (
+                                sup_state.mode.value
+                                if hasattr(sup_state.mode, 'value')
+                                else str(sup_state.mode)
+                            )
+                        supplement_env = e2a_from_agent_fields(
+                            request_id=f"supplement_{int(time.time() * 1000):x}",
+                            channel_id=msg.channel_id,
+                            session_id=agent_msg.session_id,
+                            req_method=ReqMethod.CHAT_CANCEL,
+                            params=supplement_params,
+                            is_stream=False,
+                            timestamp=time.time(),
+                        )
+                        try:
+                            await self._send_interrupt_to_agent(supplement_env)
+                        except Exception:
+                            pass  # 即使失败也继续启动新任务
+
+                        # 4. 入队新任务（单一任务，不并发）
+                        from jiuwenclaw.common.schema.message import Message
+
+                        new_req_id = f"req_{int(time.time() * 1000):x}_{msg.id}"
+                        sup_meta = dict(msg.metadata) if msg.metadata else None
+                        new_msg = Message(
+                            id=new_req_id,
+                            type="req",
+                            channel_id=msg.channel_id,
+                            session_id=msg.session_id,
+                            params={
+                                "query": new_input.strip(),
+                                "session_id": msg.session_id,
+                                "is_supplement": True,
+                                **(
+                                    {"model_name": (msg.params or {}).get("model_name")}
+                                    if (msg.params or {}).get("model_name")
+                                    else {}
+                                ),
+                                **(
+                                    {"attachments": supplement_attachments}
+                                    if supplement_attachments
+                                    else {}
+                                ),
+                            },
+                            timestamp=time.time(),
+                            ok=True,
+                            req_method=ReqMethod.CHAT_SEND,
+                            is_stream=True,
+                            provider=msg.provider,
+                            chat_id=msg.chat_id,
+                            user_id=msg.user_id,
+                            bot_id=msg.bot_id,
+                            metadata=sup_meta,
+                        )
+                        self._user_messages.put_nowait(new_msg)
+                        logger.info(
+                            "[MessageHandler] supplement: 旧任务已取消，新任务已入队: id=%s session_id=%s",
+                            new_msg.id, msg.session_id,
+                        )
+
+                    elif intent == "cancel":
+                        await self._cancel_agent_work_for_session(msg, msg.session_id)
+
+                    elif intent in ("pause", "resume"):
+                        # 暂停/恢复：不取消流式任务，转发给 AgentServer 处理 ReAct 循环
+                        agent_msg = await self._prepare_agent_dispatch_message(msg)
+                        # 确保 mode 信息存在，否则从 channel_states 注入
+                        if isinstance(agent_msg.params, dict) and not agent_msg.params.get("mode"):
+                            pr_state = self._channel_states.get(
+                                self._get_channel_state_key(msg.channel_id, msg.session_id)
+                            ) or self._channel_states.get(msg.channel_id)
+                            if pr_state is not None:
+                                agent_msg.params["mode"] = (
+                                    pr_state.mode.value
+                                    if hasattr(pr_state.mode, 'value')
+                                    else str(pr_state.mode)
+                                )
+                        env_interrupt = self.message_to_e2a(agent_msg)
+                        asyncio.create_task(self._send_interrupt_to_agent(env_interrupt))
+                        # 检查当前 session 是否有活跃的流式任务
+                        current_sid = msg.session_id
+                        has_active_task = False
+                        for rid, task in list(self._stream_tasks.items()):
+                            if self._stream_sessions.get(rid) == current_sid and not task.done():
+                                has_active_task = True
+                                break
+                        # 通知前端状态变更（事件）
+                        await self._send_interrupt_result_notification(
+                            msg.id, msg.channel_id, msg.session_id, intent,
+                            has_active_task=has_active_task,
+                        )
+
+                    continue
+
+                # ---- Inbound Pipeline（数字分身入站过滤）----
+                if self._inbound_pipeline is not None and msg.req_method == ReqMethod.CHAT_SEND:
+                    try:
+                        should_forward = await self._inbound_pipeline.apply(msg)
+                    except Exception:
+                        logger.exception("Inbound pipeline error, fallback to forwarding")
+                    else:
+                        if not should_forward:
+                            continue  # 不相关消息，跳过
+
+                # ---- Resolve @file references in chat.send content ----
+                if msg.req_method == ReqMethod.CHAT_SEND and msg.params:
+                    content = msg.params.get("query") or msg.params.get("content") or ""
+                    attachments = msg.params.get("attachments")
+                    cwd = None
+                    if isinstance(msg.metadata, dict):
+                        cwd = msg.metadata.get("cwd")
+                    enriched = content
+                    if attachments:
+                        enriched = self._resolve_structured_attachments(
+                            content,
+                            attachments,
+                            cwd=cwd,
+                        )
+                    elif content and "@" in content:
+                        enriched = self._resolve_at_file_references(content, cwd=cwd)
+                    if enriched != content:
+                        msg.params = dict(msg.params)
+                        msg.params["query"] = enriched
+                        if "content" in msg.params:
+                            msg.params["content"] = enriched
+                        logger.info(
+                            "[MessageHandler] attachments resolved in chat.send: id=%s",
+                            msg.id,
+                        )
+
+                logger.info(
+                    "[MessageHandler] 从 user_messages 取出，发往 AgentServer: id=%s channel_id=%s is_stream=%s",
+                    msg.id, msg.channel_id, msg.is_stream,
+                )
+                agent_msg = await self._prepare_agent_dispatch_message(msg)
+                await self._trigger_before_chat_request_hook(agent_msg)
+                env = self.message_to_e2a(agent_msg)
+                stream_rid = env.request_id or msg.id
+                try:
+                    if env.is_stream:
+                        # 流式处理：启动后台任务，支持多任务并发
+                        # 通知前端新任务开始处理
+                        await self._send_processing_status(
+                            stream_rid, msg.session_id, msg.channel_id, is_processing=True,
+                        )
+                        task = asyncio.create_task(
+                            self.process_stream(env, msg.session_id, msg.metadata)
+                        )
+                        self._stream_tasks[stream_rid] = task
+                        self._stream_sessions[stream_rid] = msg.session_id
+                        self._stream_metadata[stream_rid] = msg.metadata
+                        self._stream_modes[stream_rid] = (
+                            msg.params.get("mode", "plan") if isinstance(msg.params, dict) else "plan"
+                        )
+                        logger.info(
+                            "[MessageHandler] Stream 任务已启动（后台运行）: request_id=%s channel_id=%s 当前并发=%d",
+                            stream_rid, msg.channel_id, len(self._stream_tasks),
+                        )
+                        # 不 await，让流式任务在后台运行，_forward_loop 继续处理下一个消息
+                    elif self._non_stream_rpc_may_run_parallel(env):
+                        # 非流式且非聊天：后台执行，避免慢 RPC（如 SkillNet）阻塞队列中的其它请求
+                        method_label = env.method or "none"
+                        asyncio.create_task(
+                            self._process_non_stream_request(msg, env),
+                            name=f"gw-nonstr-{method_label}-{stream_rid[:24]}",
+                        )
+                        logger.info(
+                            "[MessageHandler] 非流式 RPC 已后台执行: id=%s method=%s",
+                            msg.id,
+                            method_label,
+                        )
+                    else:
+                        await self._process_non_stream_request(msg, env)
+                except Exception as e:
+                    logger.exception("AgentServer send_request failed for %s: %s", msg.id, e)
+                    err_msg = self._build_error_out_message(msg, e)
+                    await self.publish_robot_messages(err_msg)
+                    logger.info(
+                            "[MessageHandler] 错误响应已写入 robot_messages: id=%s channel_id=%s",
+                        msg.id, msg.channel_id,
+                    )
+            except asyncio.CancelledError:
+                break
+
+    async def process_stream(
+        self,
+        env: "E2AEnvelope",
+        session_id: str | None,
+        request_metadata: dict[str, Any] | None,
+    ) -> None:
+        """处理流式请求，逐个 chunk 写入 robot_messages.
+
+        这个方法被包装为 Task，在后台运行，可以被随时取消。
+        遥测可通过替换类上的 ``process_stream`` 进行打点。
+        """
+        rid = env.request_id or ""
+        channel_id = env.channel or ""
+        cancelled = False
+        has_processing_status_false = False  # 追踪 AgentServer 是否已发送 processing_status=false
+        try:
+            async for chunk in self._agent_client.send_request_stream(env):
+                # 跳过终止 chunk（仅作为流结束信号，不含实际数据）
+                if self._is_terminal_stream_chunk(chunk):
+                    logger.debug(
+                        "[MessageHandler] 跳过终止 chunk: request_id=%s",
+                        chunk.request_id,
+                    )
+                    continue
+                await self._handle_evolution_chunk(chunk, session_id, request_metadata)
+                # 携带 request metadata，供 Feishu/Xiaoyi 用平台身份回发
+                # 检查是否是 processing_status=false 事件
+                payload = chunk.payload or {}
+                if isinstance(payload, dict):
+                    if payload.get("event_type") == "chat.processing_status":
+                        if payload.get("is_processing") is False:
+                            has_processing_status_false = True
+
+                out = self._chunk_to_message(
+                    chunk,
+                    session_id=session_id,
+                    metadata=request_metadata,
+                )
+                await self.publish_robot_messages(out)
+                logger.debug(
+                    "[MessageHandler] Stream chunk 已写入 robot_messages: request_id=%s event_type=%s",
+                    chunk.request_id, out.event_type,
+                )
+            logger.info(
+                "[MessageHandler] Stream 正常完成: request_id=%s",
+                rid,
+            )
+        except asyncio.CancelledError:
+            cancelled = True
+            logger.info(
+                "[MessageHandler] Stream 被取消: request_id=%s",
+                rid,
+            )
+            await self._publish_stream_cancelled_final(
+                rid, channel_id, session_id, request_metadata,
+            )
+            raise  # 重新抛出，让调用者知道任务被取消
+        finally:
+            # 清理状态
+            self._stream_tasks.pop(rid, None)
+            self._stream_sessions.pop(rid, None)
+            self._stream_metadata.pop(rid, None)
+            self._stream_modes.pop(rid, None)
+            if session_id is not None and session_id not in self._stream_sessions.values():
+                # Fallback cleanup when stream exits unexpectedly without evolution end signal.
+                self._clear_session_evolution_in_progress(session_id)
+            logger.debug(
+                "[MessageHandler] Stream 任务状态已清理: request_id=%s",
+                rid,
+            )
+            # 该 session 流式任务正常结束后，通知前端处理完成
+            # 只有当 AgentServer 没有发送过 processing_status=false 时才发送
+            if not cancelled and not has_processing_status_false:
+                # 检查该 session_id 是否还有活跃任务
+                session_has_active_tasks = any(
+                    sid == session_id for sid in self._stream_sessions.values()
+                )
+                if not session_has_active_tasks:
+                    await self._send_processing_status(
+                        rid, session_id, channel_id, is_processing=False,
+                    )
+                    logger.info(
+                        "[MessageHandler] 该 session 流式任务已完成，已发送 is_processing=false: session_id=%s",
+                        session_id,
+                    )
+
+    async def _send_stream_cancelled_notification(
+        self, request_id: str | None, channel_id: str, session_id: str | None
+    ) -> None:
+        """发送流式任务被取消的通知到客户端."""
+        if not request_id:
+            return
+
+        from jiuwenclaw.common.schema.message import Message, EventType
+
+        cancel_msg = Message(
+            id=request_id,
+            type="event",
+            channel_id=channel_id,
+            session_id=session_id,
+            params={},
+            timestamp=time.time(),
+            ok=True,
+            payload={
+                "event_type": "chat.interrupt_result",
+                "intent": "cancel",
+                "success": True,
+                "message": "任务已取消",
+            },
+            event_type=EventType.CHAT_INTERRUPT_RESULT,
+            metadata=None,
+        )
+        await self.publish_robot_messages(cancel_msg)
+        logger.info(
+            "[MessageHandler] 已发送流式任务取消通知: request_id=%s",
+            request_id,
+        )
+
+    async def _send_interrupt_to_agent(self, env: "E2AEnvelope") -> None:
+        """Fire-and-forget: 发送中断请求到 AgentServer，不阻塞转发循环."""
+        try:
+            resp = await self._agent_client.send_request(env)
+            logger.info(
+                "[MessageHandler] AgentServer 中断响应(已丢弃): request_id=%s ok=%s",
+                resp.request_id, resp.ok,
+            )
+        except Exception as e:
+            logger.warning("[MessageHandler] AgentServer 中断请求失败(忽略): %s", e)
+
+    async def _send_interrupt_result_notification(
+        self,
+        request_id: str,
+        channel_id: str,
+        session_id: str | None,
+        intent: str,
+        message: str | None = None,
+        success: bool = True,
+        has_active_task: bool | None = None,
+    ) -> None:
+        """发送 interrupt_result 事件到前端（pause / resume 等）."""
+        from jiuwenclaw.common.schema.message import Message, EventType
+
+        # 根据 has_active_task 调整 pause/resume 的消息
+        success_messages_map = {
+            "pause": "任务已暂停" if has_active_task else "任务已完成",
+            "resume": "任务已恢复" if has_active_task else "任务已完成",
+            "cancel": "任务已取消",
+            "supplement": "任务已切换",
+        }
+        failure_messages_map = {
+            "pause": "任务暂停失败",
+            "resume": "任务恢复失败",
+            "cancel": "任务终止失败",
+            "supplement": "任务切换失败",
+        }
+        payload_dict: dict = {
+            "event_type": "chat.interrupt_result",
+            "intent": intent,
+            "success": success,
+            "message": message
+            or (
+                success_messages_map.get(intent, "任务已中断")
+                if success
+                else failure_messages_map.get(intent, "任务中断失败")
+            ),
+        }
+        if has_active_task is not None:
+            payload_dict["has_active_task"] = has_active_task
+        notify_msg = Message(
+            id=request_id,
+            type="event",
+            channel_id=channel_id,
+            session_id=session_id,
+            params={},
+            timestamp=time.time(),
+            ok=True,
+            payload=payload_dict,
+            event_type=EventType.CHAT_INTERRUPT_RESULT,
+            metadata=None,
+        )
+        await self.publish_robot_messages(notify_msg)
+        logger.info(
+            "[MessageHandler] 已发送 interrupt_result 通知: intent=%s request_id=%s",
+            intent, request_id,
+        )
+
+    async def _send_processing_status(
+        self, request_id: str, session_id: str | None, channel_id: str, *, is_processing: bool,
+    ) -> None:
+        """发送 chat.processing_status 事件到客户端."""
+        from jiuwenclaw.common.schema.message import Message, EventType
+
+        status_msg = Message(
+            id=request_id,
+            type="event",
+            channel_id=channel_id,
+            session_id=session_id,
+            params={},
+            timestamp=time.time(),
+            ok=True,
+            payload={
+                "event_type": "chat.processing_status",
+                "session_id": session_id,
+                "is_processing": is_processing,
+                "is_complete": not is_processing
+            },
+            event_type=EventType.CHAT_PROCESSING_STATUS,
+            metadata=None,
+        )
+        await self.publish_robot_messages(status_msg)
+
+    def _build_error_out_message(self, msg: "Message", error: Exception) -> "Message":
+        from jiuwenclaw.common.schema.message import Message
+
+        return Message(
+            id=msg.id,
+            type="res",
+            channel_id=msg.channel_id,
+            session_id=msg.session_id,
+            params={},
+            timestamp=time.time(),
+            ok=False,
+            payload={"error": str(error)},
+            metadata=msg.metadata,
+        )
+
+    async def start_forwarding(self) -> None:
+        """启动入队 -> AgentServer -> 出队 的转发任务."""
+        if self._forward_task is not None:
+            return
+        self._running = True
+        self._forward_task = asyncio.create_task(self._forward_loop())
+        logger.info("[MessageHandler] 转发循环已启动 (_user_messages -> AgentServer -> _robot_messages)")
+
+    async def stop_forwarding(self) -> None:
+        """停止转发任务."""
+        self._running = False
+
+        # 取消所有流式任务
+        for rid, task in list(self._stream_tasks.items()):
+            if not task.done():
+                logger.info("[MessageHandler] 停止时取消流式任务: request_id=%s", rid)
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
+        self._stream_tasks.clear()
+        self._stream_sessions.clear()
+        self._stream_metadata.clear()
+        self._stream_modes.clear()
+        self._session_evolution_in_progress.clear()
+        self._pending_evolution_approval.clear()
+        self._queued_supplement_input.clear()
+
+        # 取消转发循环
+        if self._forward_task is not None:
+            self._forward_task.cancel()
+            try:
+                await self._forward_task
+            except asyncio.CancelledError:
+                pass
+            self._forward_task = None
+
+        logger.info("[MessageHandler] 转发循环已停止")
+
+    # ---------- 状态 ----------
+
+    @property
+    def user_messages_size(self) -> int:
+        return self._user_messages.qsize()
+
+    @property
+    def robot_messages_size(self) -> int:
+        return self._robot_messages.qsize()

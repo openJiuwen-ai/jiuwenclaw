@@ -18,6 +18,7 @@ through a small supervisor process that applies the configured isolation policy.
 - Seccomp syscall filtering
 - Python and JavaScript execution support when the corresponding runtimes exist
 - Audit logging and persisted sandbox lifecycle state
+- Inference Privacy Proxy for LLM API request routing with automatic API key injection
 
 ## Architecture
 
@@ -26,30 +27,19 @@ through a small supervisor process that applies the configured isolation policy.
     API routing.
 - `server/runtime`
   - Runtime adapter that starts one supervisor process per sandbox command.
+- `server/proxy_manager`
+  - Manages inference privacy proxies for LLM API routing with API key injection.
+- `server/policy_reader`
+  - Shared policy file reader for sandbox and proxy managers.
 - `supervisor`
   - Per-command launcher that translates the effective policy into
     `bubblewrap`, Landlock, seccomp, and namespace settings.
+- `proxy`
+  - HTTP-aware inference privacy proxy with path-based routing and API key
+    injection (supports OpenAI and Anthropic formats).
 - `models`
   - Pydantic models for policies, sandboxes, API responses, and common status
     structures.
-
-## Layout
-
-```text
-configs/
-  default-policy.yaml
-  jiuwenclaw-policy.yaml
-docker/
-scripts/
-  server.sh
-  test.sh
-src/jiuwenbox/
-  models/
-  server/
-  supervisor/
-tests/
-  integration/
-```
 
 ## Requirements
 
@@ -64,45 +54,50 @@ On Ubuntu:
 
 ```bash
 sudo apt-get update
-sudo apt-get install -y bubblewrap iproute2 iptables nftables python3-pip nodejs
+sudo apt-get install -y bubblewrap iproute2 iptables nftables python3-pip python3-venv nodejs
 ```
 
 ## Install
 
 ```bash
 cd jiuwenclaw/jiuwenbox
-uv venv
+python3 -m venv .venv
 source .venv/bin/activate
-uv sync
+python3 -m pip install --upgrade pip build
+python3 -m build --wheel
+python3 -m pip install dist/jiuwenbox-*.whl
 ```
 
 ## Start The Server
 
 ### Local Start
 
-`scripts/server.sh` accepts a policy file as the first positional argument.
-The path is resolved relative to the caller's current directory and then passed
-to the server as an absolute path.
+Set the default policy path and start the installed service with `python -m`:
 
 ```bash
-sudo ./scripts/server.sh
-sudo ./scripts/server.sh configs/default-policy.yaml
-sudo ./scripts/server.sh configs/jiuwenclaw-policy.yaml 9000
+export JIUWENBOX_POLICY_PATH="$(pwd)/configs/default-policy.yaml"
+sudo -E .venv/bin/python -m uvicorn jiuwenbox.server.app:app --host 0.0.0.0 --port 8321 --log-level debug
 ```
 
-The default port is `8321`. A numeric second positional argument overrides the
-port. Additional arguments are forwarded to `uvicorn`.
-
-The selected policy path is exported as:
+Use another policy or port by changing the environment variable or uvicorn
+arguments:
 
 ```bash
-JIUWENBOX_DEFAULT_POLICY_PATH=/absolute/path/to/policy.yaml
+export JIUWENBOX_POLICY_PATH="$(pwd)/configs/jiuwenclaw-policy.yaml"
+sudo -E .venv/bin/python -m uvicorn jiuwenbox.server.app:app --host 0.0.0.0 --port 9000 --log-level debug
 ```
 
-The port can also be set through:
+The selected policy path is read from:
 
 ```bash
-JIUWENBOX_PORT=9000 sudo ./scripts/server.sh configs/default-policy.yaml
+JIUWENBOX_POLICY_PATH=/absolute/path/to/policy.yaml
+```
+
+The port can also be set through `JIUWENBOX_PORT` when your process manager
+uses it to render the uvicorn command:
+
+```bash
+JIUWENBOX_PORT=9000
 ```
 
 ### Docker Start
@@ -110,7 +105,7 @@ JIUWENBOX_PORT=9000 sudo ./scripts/server.sh configs/default-policy.yaml
 Build the image:
 
 ```bash
-cd jiuwenclaw/jiuwenbox/docker
+cd jiuwenclaw/jiuwenbox/scripts
 sudo ./build_docker.sh
 ```
 
@@ -119,8 +114,6 @@ Run with the default policy:
 ```bash
 sudo ./run_docker.sh
 ```
-
-The Docker image starts `./scripts/server.sh` by default.
 
 ## Policy Files
 
@@ -269,58 +262,137 @@ network:
       - 22
 ```
 
-## API Examples
+## Inference Privacy Proxy
 
-Create a sandbox:
+The inference privacy proxy enables secure LLM API access from edge servers:
 
-```bash
-curl -sS -X POST http://127.0.0.1:8321/api/v1/sandboxes \
-  -H 'Content-Type: application/json' \
-  -d '{"command":["/usr/bin/python3","-c","import time; time.sleep(3600)"]}'
+- Path-based routing to different LLM providers (OpenAI, Anthropic, custom)
+- Automatic API key injection (OpenAI `Authorization: Bearer`, Anthropic `X-Api-Key`)
+- Hot-pluggable via REST API (create/start/stop/update/delete)
+- Configured via policy YAML or dynamically through API
+
+**Architecture**:
+
+One global proxy process listens on a single host:port.
+
+**Privacy routes default to `listen_port=0` (disabled)**. When enabled, both `listen_host` (IP address) and `listen_port` must be configured.
+
+Routes are differentiated by `path_prefix` (forwarding rules). Each route has **independent state** (`running` = enabled forwarding; `stopped` = disabled).
+
+**Creating routes via API requires valid `listen_host` and `listen_port > 0`**, otherwise returns an error.
+
+### Proxy Configuration
+
+Policy YAML configuration schema:
+
+```yaml
+inference_privacy_proxies:
+  listen_host: ipaddress, IP address to bind  # MUST
+  listen_port: number, listen port             # MUST, non-zero enables proxy
+
+  # OPTIONAL, can be managed via REST API after startup
+  routes:
+   - path_prefix: str, path name for forwarding rule
+      target_endpoint: URL, target endpoint
+      api_key: str, api key to inject when forwarding
+      skip_cert_verify: boolean, skip cert verify for self-signed https targets, debug only
 ```
 
-Run a command:
+### API Key Injection
 
-```bash
-curl -sS -X POST http://127.0.0.1:8321/api/v1/sandboxes/<sandbox-id>/exec \
-  -H 'Content-Type: application/json' \
-  -d '{"command":["/usr/bin/python3","-c","print(\"hello\")"],"workdir":"/tmp"}'
+- OpenAI: Replace `Authorization: Bearer <placeholder>` with actual key
+- Anthropic: Replace `X-Api-Key: <placeholder>` with actual key
+
+### Configuration Example
+
+`Note: The network endpoints https://api.openai.com and http://192.168.1.100:9000 are examples only`
+
+#### Policy YAML Example
+
+```yaml
+inference_privacy_proxies:
+
+  listen_host: "127.0.0.1"
+  listen_port: 8080
+  
+  routes:
+    - path_prefix: "openai"
+      target_endpoint: "https://api.openai.com"
+      api_key: "sk_sandbox_managed_openai_key"
+   - path_prefix: "custom"
+      target_endpoint: "http://192.168.1.100:9000"
+      api_key: "sk_sandbox_managed_custom_key"
 ```
 
-Upload a file:
+For edge servers, use `listen_host: "0.0.0.0"` to accept connections from all interfaces.
 
-```bash
-curl -sS -X POST \
-  'http://127.0.0.1:8321/api/v1/sandboxes/<sandbox-id>/upload?sandbox_path=/tmp/input.txt' \
-  -F 'file=@input.txt'
+#### Forwarding Example
+
+```text
+Client request:  POST http://127.0.0.1:8322/openai/v1/chat/completions -H "Authorization: Bearer sk_fake_key"
+Proxy forwards:  POST https://api.openai.com/v1/chat/completions       -H "Authorization: Bearer sk_sandbox_managed_openai_key"
+
+Client request:  POST http://127.0.0.1:8322/custom/v1/chat/completions -H "Authorization: Bearer sk_fake_key"
+Proxy forwards:  POST http://192.168.1.100:9000/v1/chat/completions    -H "Authorization: Bearer sk_sandbox_managed_custom_key"
 ```
 
-Download a file:
+#### jiuwenclaw Configuration Example
 
-```bash
-curl -sS \
-  'http://127.0.0.1:8321/api/v1/sandboxes/<sandbox-id>/download?sandbox_path=/tmp/input.txt'
-```
-
-Delete a sandbox:
-
-```bash
-curl -sS -X DELETE http://127.0.0.1:8321/api/v1/sandboxes/<sandbox-id>
-```
+| Config    | Old Value                     | New Value                          |
+| --------- | ----------------------------- | ---------------------------------- |
+| api_base  | http://192.168.1.100:9000/v1/ | http://127.0.0.1:8322/custom/v1/   |
+| api_key   | sk_sandbox_managed_custom_key | sk_fake_key                        |
 
 ## Run Integration Tests
 
 Run one policy-specific integration suite:
 
 ```bash
-./scripts/test.sh default # jiuwenbox runs the service using default-policy.yaml as the security policy.
-./scripts/test.sh jiuwenclaw-tool # jiuwenbox runs the service using jiuwenclaw-tool-policy.yaml as the security policy.
+./tests/test.sh default # jiuwenbox runs the service using default-policy.yaml as the security policy.
+./tests/test.sh yuanrong # jiuwenbox runs the service using yuanrong.yaml with proxy enabled on port 8322.
 ```
 
 Run specific test-case:
 
 ```bash
 python3 -m pytest tests/integration/test_server_api_default.py::TestPolicyEnforcement::test_network_mode_isolated_blocks_http_requests -s --server-endpoint 127.0.0.1:8321
+```
+
+### Performance Tests
+
+Run the office-workload performance suite:
+
+```bash
+./tests/test.sh performance --server-endpoint 127.0.0.1:8321
+```
+
+Tune sandbox count, per-sandbox concurrency, and per-task loop count:
+
+```bash
+./tests/test.sh performance \
+  --sandbox-count 2 \
+  --concurrency 16 \
+  --loop 8 \
+  --server-endpoint 127.0.0.1:8321
+```
+
+The script maps these arguments to environment variables used by the performance
+fixtures:
+
+| Script argument | Environment variable | Default |
+| --------------- | -------------------- | ------- |
+| `--sandbox-count` | `JIUWENBOX_PERF_SANDBOX_COUNT` | `1` |
+| `--concurrency` | `JIUWENBOX_PERF_CONCURRENCY` | `4` |
+| `--loop` | `JIUWENBOX_PERF_LOOP` | `8` |
+
+### Real LLM Integration Tests
+
+To run real LLM integration tests, set the following environment variables. These tests are skipped by default if the environment variables are not set.:
+
+```bash
+export JIUWENBOX_TEST_LLM_ENDPOINT="https://api.openai.com"
+export JIUWENBOX_TEST_LLM_API_KEY="sk_sandbox_managed_key"
+export JIUWENBOX_TEST_LLM_MODEL="YOUR_MODEL"
 ```
 
 ## Notes

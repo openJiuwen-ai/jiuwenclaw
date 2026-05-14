@@ -15,8 +15,8 @@ uv sync --extra dev
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
 # 2. 构建前端
-Write-Host "`n[2/3] 构建前端 (jiuwenclaw/web)..." -ForegroundColor Yellow
-Push-Location (Join-Path $ProjectRoot "jiuwenclaw\web")
+Write-Host "`n[2/3] 构建前端 (jiuwenclaw/channels/web/frontend)..." -ForegroundColor Yellow
+Push-Location (Join-Path $ProjectRoot "jiuwenclaw\channels\web\frontend")
 npm install
 if ($LASTEXITCODE -ne 0) { Pop-Location; exit $LASTEXITCODE }
 npm run build

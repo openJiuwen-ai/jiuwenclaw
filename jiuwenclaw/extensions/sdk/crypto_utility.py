@@ -1,7 +1,7 @@
 from abc import abstractmethod
 
 from jiuwenclaw.extensions.sdk.base import BaseExtension
-from jiuwenclaw.security.base_crypto import CryptoProvider
+from jiuwenclaw.common.security.base_crypto import CryptoProvider
 
 
 class CryptoUtility(BaseExtension):

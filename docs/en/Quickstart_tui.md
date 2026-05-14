@@ -88,9 +88,9 @@ Suitable for users who perform custom development or adaptation based on JiuwenC
 
 - Install frontend dependencies
 
-  Navigate to the frontend directory `jiuwenclaw/web` and install dependencies:
+  Navigate to the frontend directory `jiuwenclaw/channels/web/frontend` and install dependencies:
   ```bash
-  cd jiuwenclaw/web
+  cd jiuwenclaw/channels/web/frontend
   npm install
   ```
 
@@ -116,9 +116,9 @@ Suitable for users who perform custom development or adaptation based on JiuwenC
   After running, you can access the JiuwenClaw web UI.
 
 - Install TUI dependencies
-  Open one new erminal，navigate to the TUI directory `jiuwenclaw/cli` and install dependencies:
+  Open one new erminal，navigate to the TUI directory `jiuwenclaw/channels/tui/frontend` and install dependencies:
   ```bash
-  cd jiuwenclaw/cli
+  cd jiuwenclaw/channels/tui/frontend
   npm install
   ```
 
@@ -152,9 +152,9 @@ Suitable for users who perform custom development or adaptation based on JiuwenC
 
 - Install frontend dependencies
 
-  Navigate to the frontend directory `jiuwenclaw/web` and install dependencies:
+  Navigate to the frontend directory `jiuwenclaw/channels/web/frontend` and install dependencies:
   ```bash
-  cd jiuwenclaw/web
+  cd jiuwenclaw/channels/web/frontend
   npm install
   ```
 
@@ -181,9 +181,9 @@ Suitable for users who perform custom development or adaptation based on JiuwenC
   After running, you can access the JiuwenClaw web UI.
 
 - Install TUI dependencies
-  Open one new erminal，navigate to the TUI directory `jiuwenclaw/cli` and install dependencies:
+  Open one new erminal，navigate to the TUI directory `jiuwenclaw/channels/tui/frontend` and install dependencies:
   ```bash
-  cd jiuwenclaw/cli
+  cd jiuwenclaw/channels/tui/frontend
   npm install
   ```
 

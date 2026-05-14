@@ -8,20 +8,20 @@ from dataclasses import asdict
 
 import pytest
 
-from jiuwenclaw.e2a.constants import E2A_WIRE_LEGACY_AGENT_RESPONSE_KEY
-from jiuwenclaw.e2a.gateway_normalize import (
+from jiuwenclaw.common.e2a.constants import E2A_WIRE_LEGACY_AGENT_RESPONSE_KEY
+from jiuwenclaw.common.e2a.gateway_normalize import (
     e2a_response_from_agent_chunk,
     e2a_response_from_agent_response,
     e2a_response_to_agent_chunk,
     e2a_response_to_agent_response,
 )
-from jiuwenclaw.e2a.wire_codec import (
+from jiuwenclaw.common.e2a.wire_codec import (
     encode_agent_chunk_for_wire,
     encode_agent_response_for_wire,
     parse_agent_server_wire_chunk,
     parse_agent_server_wire_unary,
 )
-from jiuwenclaw.schema.agent import AgentResponse, AgentResponseChunk
+from jiuwenclaw.common.schema.agent import AgentResponse, AgentResponseChunk
 
 
 def test_roundtrip_unary_ok() -> None:

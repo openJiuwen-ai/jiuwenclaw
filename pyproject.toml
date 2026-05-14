@@ -18,7 +18,6 @@ dependencies = [
     "lark-oapi>=1.5.3",
     "loguru>=0.7.3",
     "openjiuwen @ git+https://gitcode.com/openJiuwen/agent-core.git@develop",
-    "pip==26.0.1",
     "pgvector>=0.4.2",
     "websockets>=12.0",
     "psutil>=7.2.2",
@@ -62,13 +61,13 @@ test = [
 
 [project.scripts]
 jiuwenclaw-app = "jiuwenclaw.app:main"
-jiuwenclaw-agentserver = "jiuwenclaw.app_agentserver:main"
-jiuwenclaw-gateway = "jiuwenclaw.app_gateway:main"
-jiuwenclaw-web = "jiuwenclaw.app_web:main"
+jiuwenclaw-agentserver = "jiuwenclaw.server.app_agentserver:main"
+jiuwenclaw-gateway = "jiuwenclaw.gateway.app_gateway:main"
+jiuwenclaw-web = "jiuwenclaw.channels.web.app_web:main"
 jiuwenclaw-start = "jiuwenclaw.start_services:main"
 jiuwenclaw-init = "jiuwenclaw.init_workspace:main"
-jiuwenclaw-desktop = "jiuwenclaw.desktop_app:main"
-jiuwenclaw-cli = "jiuwenclaw.app_cli:main"
+jiuwenclaw-desktop = "jiuwenclaw.channels.desktop.desktop_app:main"
+jiuwenclaw-tui = "jiuwenclaw.channels.acp.app_acp:main"
 
 [tool.setuptools]
 # 入口脚本现在是 jiuwenclaw 包内的一部分，不需要 py-modules
@@ -84,8 +83,8 @@ namespaces = false
 [tool.setuptools.package-data]
 "*" = ["LICENSE"]
 jiuwenclaw = [
-    "web/dist/**/*",
-    "web/dist/*",
+    "channels/web/frontend/dist/**/*",
+    "channels/web/frontend/dist/*",
     # config / env 模板放在 resources 目录
     "resources/**/*",
     "resources/*",
@@ -93,12 +92,17 @@ jiuwenclaw = [
 ]
 
 [tool.setuptools.exclude-package-data]
-jiuwenclaw = ["web/node_modules/**", "web/node_modules/*"]
+jiuwenclaw = ["channels/web/frontend/node_modules/**", "channels/web/frontend/node_modules/*"]
 
 [tool.uv.sources]
 jiuwenclaw-tui = { path = "./packages/jiuwenclaw-tui" }
 
 [dependency-groups]
+dev = [
+    "pytest>=9.0.3",
+    "pytest-asyncio>=1.3.0",
+    "pytest-cov>=7.1.0",
+]
 # Testing (keep in sync with optional-dependencies.test)
 test = [
     "pytest>=8.3.5",

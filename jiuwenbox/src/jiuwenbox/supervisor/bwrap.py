@@ -14,6 +14,7 @@ import subprocess
 from dataclasses import dataclass, field
 from typing import IO
 
+from jiuwenbox.logging_config import configure_logging
 from jiuwenbox.models.policy import (
     CapabilityPolicy,
     FilesystemPolicy,
@@ -24,10 +25,10 @@ from jiuwenbox.models.policy import (
     SecurityPolicy,
 )
 
-logging.basicConfig(level=logging.INFO)
+configure_logging()
 logger = logging.getLogger(__name__)
 
-BWRAP_BINARY = "/usr/bin/bwrap"
+BWRAP_BINARY = "bwrap"
 
 
 def _normalize_capability(capability: str) -> str:
@@ -118,6 +119,7 @@ class BwrapConfig:
         cls._apply_namespace(cfg, policy.namespace)
         cls._apply_capabilities(cfg, policy.capabilities)
         cls._apply_network(cfg, policy.network)
+        cls._apply_environment(cfg, policy.environment)
         return cfg
 
     def add_dir_mount(self, path: str, permissions: str | None = None) -> None:
@@ -176,6 +178,10 @@ class BwrapConfig:
     @staticmethod
     def _apply_network(cfg: BwrapConfig, net: NetworkPolicy) -> None:
         cfg.unshare_net = net.mode == NetworkMode.ISOLATED
+
+    @staticmethod
+    def _apply_environment(cfg: BwrapConfig, environment: dict[str, str]) -> None:
+        cfg.env.update(environment)
 
     def to_args(self) -> list[str]:
         """Convert this config into a bwrap argument list."""

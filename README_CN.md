@@ -78,7 +78,27 @@ jiuwenclaw-tui
 
 ### 💬 使用方式
 
-#### 1️⃣ 对话模式
+📖 详细的快速上手指南，请参阅 [📖 快速开始文档](docs/zh/Quickstart.md)，包含：
+
+- **配置模型**：模型配置与API设置
+- **开始对话**：如何与JiuwenClaw对话
+- **会话管理**：清空会话的场景与效果对比
+- **清空记忆**：风险提示与操作步骤
+
+快速启动命令：
+
+```bash
+# 安装并启动 JiuwenClaw
+pip install jiuwenclaw
+jiuwenclaw-init    # 首次运行或升级后执行
+jiuwenclaw-start   # 启动服务，访问 http://localhost:5173
+
+# 或使用 TUI 版本
+pip install jiuwenclaw-tui
+jiuwenclaw-tui
+```
+
+### 💬 对话模式
 
 | 方式 | 说明                                        |
 |------|-------------------------------------------|
@@ -86,33 +106,7 @@ jiuwenclaw-tui
 | **小艺频道** | 华为手机用户可直接唤醒小艺，与JiuwenClaw对话               |
 | **飞书频道** | 完成渠道配置后，在飞书中与JiuwenClaw畅聊                 |
 
-#### 2️⃣ 配置模型
-
-在 Web 页面左侧找到「配置信息」，进入配置页面：
-
-![](docs/assets/images/jiuwenclaw_configuration_Info.png)
-
-完善以下四项基本配置，完成后点击右上角「保存」：
-
-![](docs/assets/images/jiuwenclaw_config_api.png)
-
-#### 3️⃣ 开始对话
-
-在 Web 页面左侧找到「对话」，输入问题即可开始：
-
-![](docs/assets/images/jiuwenclaw_example.png)
-
-#### 4️⃣ 会话管理
-
-点击下方的「+」号，可清空当前会话并开启新会话：
-
-![](docs/assets/images/jiuwenclaw_new_session.png)
-
-清理后页面显示：
-
-![](docs/assets/images/jiuwenclaw_clear_session.png)
-
-#### 5️⃣ 定时任务
+### ⏰ 定时任务
 
 设置心跳任务，填写待办事项，JiuwenClaw即可定时被唤醒，自动执行预设任务。让你的日程管理更加智能高效！
 
@@ -147,6 +141,7 @@ jiuwenclaw-tui
 | [📖 安装指南](docs/zh/安装指南.md) | 从零安装（pip、源码、conda、Docker 等） |
 | [📖 快速开始](docs/zh/Quickstart.md) | 5分钟上手JiuwenClaw |
 | [📖 快速开始(TUI)](docs/zh/Quickstart_tui.md) | 5分钟上手JiuwenClaw-tui |
+| [📖 TUI 使用指南](docs/zh/TUI使用指南.md) | TUI 命令行参数、Slash 命令、工具与 Code 模式详解 |
 | [⚙️ 配置与工作空间](docs/zh/配置信息.md) | 环境配置与工作区管理 |
 | [📁 工作区结构](docs/zh/智能体.md) | workspace 目录说明，预置与动态生成内容 |
 | [🔄 模式系统](docs/zh/模式系统.md) | PLAN / AGENT / CODE / TEAM 模式切换与配置 |

@@ -8,7 +8,7 @@ version = "0.1.0"
 description = "Jiuwen sandbox system"
 readme = "README.md"
 requires-python = ">=3.11"
-license = "Apache-2.0"
+license = {text = "Apache-2.0"}
 dependencies = [
     "pydantic>=2.0",
     "pyyaml>=6.0",
@@ -32,6 +32,14 @@ include = ["jiuwenbox*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+markers = [
+    "unit: Unit tests",
+    "integration: Integration tests",
+    "performance: Performance tests",
+    "system: System tests",
+    "slow: Slow running tests",
+    "async: Async tests",
+]
 
 [tool.ruff]
 src = ["src"]

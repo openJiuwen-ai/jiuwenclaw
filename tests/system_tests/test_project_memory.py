@@ -14,20 +14,20 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from jiuwenclaw.agentserver.deep_agent.interface_code import JiuwenClawCodeAdapter
-from jiuwenclaw.agentserver.deep_agent.interface_deep import JiuWenClawDeepAdapter
-from jiuwenclaw.agentserver.deep_agent.rails.project_memory import (
+from jiuwenclaw.server.runtime.agent_adapter.interface_code import JiuwenClawCodeAdapter
+from jiuwenclaw.server.runtime.agent_adapter.interface_deep import JiuWenClawDeepAdapter
+from jiuwenclaw.agents.harness.common.rails.project_memory import (
     SECTION_NAME,
     clear_project_memory_cache,
     discover_and_load_memory_files,
     merge_memory_content,
 )
-from jiuwenclaw.agentserver.deep_agent.rails.project_memory.files import (
+from jiuwenclaw.agents.harness.common.rails.project_memory.files import (
     GitWorktreeInfo,
     LoadedMemoryFile,
     PRIORITY,
 )
-from jiuwenclaw.agentserver.deep_agent.rails.project_memory_rail import (
+from jiuwenclaw.agents.harness.common.rails import (
     ProjectMemoryRail,
 )
 
@@ -395,7 +395,7 @@ class TestExploreAgentSubagentIntegration:
         )
 
         # Config without subagents key — explore_agent should be default-enabled
-        subagents = adapter._build_configured_subagents(model, {"max_iterations": 8}, {})
+        subagents, _should_add_general = adapter._build_configured_subagents(model, {"max_iterations": 8}, {})
         assert subagents is not None
         names = [s.agent_card.name for s in subagents]
         assert any(n.lower() == "explore" or n == "explore_agent" for n in names)
@@ -428,7 +428,7 @@ class TestExploreAgentSubagentIntegration:
         )
 
         # explore_agent 的 enabled: False 被忽略，仍然挂载
-        subagents = adapter._build_configured_subagents(
+        subagents, _should_add_general = adapter._build_configured_subagents(
             model,
             {"max_iterations": 8, "subagents": {"explore_agent": {"enabled": False}}},
             {},
@@ -464,7 +464,7 @@ class TestExploreAgentSubagentIntegration:
         )
 
         # Config with explore_agent having custom max_iterations
-        subagents = adapter._build_configured_subagents(
+        subagents, _should_add_general = adapter._build_configured_subagents(
             model,
             {"max_iterations": 8, "subagents": {"explore_agent": {"max_iterations": 5}}},
             {},

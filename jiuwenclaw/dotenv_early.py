@@ -11,7 +11,7 @@ Usage in entry point files:
     parse_dotenv_early()
 
     # Now safe to import other jiuwenclaw modules
-    from jiuwenclaw.utils import ...
+    from jiuwenclaw.common.utils import ...
 
 The parsing happens before any jiuwenclaw imports:
 - sys.argv is scanned for --dotenv <path> and --name <name>
@@ -71,7 +71,7 @@ def parse_dotenv_early(component_name: str = "jiuwenclaw") -> Path | None:
         parse_dotenv_early("jiuwenclaw-app")
 
         # Now safe to import jiuwenclaw modules
-        from jiuwenclaw.utils import get_user_workspace_dir
+        from jiuwenclaw.common.utils import get_user_workspace_dir
     """
     global _parsed_dotenv, _component_name
     _component_name = component_name

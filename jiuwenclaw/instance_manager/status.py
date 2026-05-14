@@ -89,7 +89,7 @@ def get_default_instance_status() -> InstanceStatus:
     Returns:
         InstanceStatus for default instance
     """
-    from jiuwenclaw.utils import get_user_workspace_dir
+    from jiuwenclaw.common.utils import get_user_workspace_dir
 
     workspace = get_user_workspace_dir()
     ports = {pt: compute_auto_port(pt, 0) for pt in PORT_TYPES}

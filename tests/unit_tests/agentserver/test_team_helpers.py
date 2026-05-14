@@ -8,8 +8,9 @@ import asyncio
 from types import SimpleNamespace
 
 import pytest
+from openjiuwen.agent_teams.schema.team import TeamRole
 
-from jiuwenclaw.agentserver.deep_agent import team_helpers
+from jiuwenclaw.server.runtime.agent_adapter import team_helpers
 
 
 class _FakeTransport:
@@ -93,7 +94,7 @@ async def test_team_evolution_monitor_pushes_status_with_real_request_id(monkeyp
     rail = _FakeRail([[reasoning_event, approval_event]], pending_first=False)
 
     monkeypatch.setattr(
-        "jiuwenclaw.agentserver.gateway_push.WebSocketGatewayPushTransport",
+        "jiuwenclaw.server.gateway_push.WebSocketGatewayPushTransport",
         _FakeTransport,
     )
     monkeypatch.setattr(
@@ -139,7 +140,7 @@ async def test_team_evolution_monitor_uses_delivery_context_metadata(monkeypatch
         return message
 
     monkeypatch.setattr(
-        "jiuwenclaw.agentserver.gateway_push.WebSocketGatewayPushTransport",
+        "jiuwenclaw.server.gateway_push.WebSocketGatewayPushTransport",
         _FakeTransport,
     )
     monkeypatch.setattr(
@@ -190,7 +191,7 @@ async def test_team_evolution_monitor_rebinds_to_real_request_id_after_provision
             return []
 
     monkeypatch.setattr(
-        "jiuwenclaw.agentserver.gateway_push.WebSocketGatewayPushTransport",
+        "jiuwenclaw.server.gateway_push.WebSocketGatewayPushTransport",
         _FakeTransport,
     )
     monkeypatch.setattr(team_helpers, "parse_stream_chunk", lambda evt: None)
@@ -243,7 +244,7 @@ async def test_team_evolution_monitor_pushes_start_before_drain_finishes(monkeyp
             return []
 
     monkeypatch.setattr(
-        "jiuwenclaw.agentserver.gateway_push.WebSocketGatewayPushTransport",
+        "jiuwenclaw.server.gateway_push.WebSocketGatewayPushTransport",
         _FakeTransport,
     )
 
@@ -284,7 +285,7 @@ async def test_team_evolution_monitor_does_not_end_when_wait_timeout_returns_emp
             return []
 
     monkeypatch.setattr(
-        "jiuwenclaw.agentserver.gateway_push.WebSocketGatewayPushTransport",
+        "jiuwenclaw.server.gateway_push.WebSocketGatewayPushTransport",
         _FakeTransport,
     )
 
@@ -452,6 +453,94 @@ async def test_process_team_message_stream_handles_team_evolve_list(monkeypatch)
     assert chunks[0].payload["event_type"] == "chat.final"
     assert 'Skill "demo-skill"' in chunks[0].payload["content"]
     assert chunks[1].is_complete is True
+
+
+@pytest.mark.anyio
+async def test_consume_stream_with_query_broadcasts_only_leader_team_outputs(monkeypatch):
+    broadcasted: list[dict] = []
+    ready_calls: list[tuple[str, str]] = []
+
+    async def _fake_stream(**kwargs):
+        yield SimpleNamespace(
+            type="team.runtime_ready",
+            payload={
+                "event_type": "team.runtime_ready",
+                "team_name": "demo-team",
+                "activation_kind": "create",
+            },
+            role=TeamRole.LEADER,
+        )
+        yield SimpleNamespace(
+            type="answer",
+            payload={"output": {"output": "leader answer"}, "result_type": "answer"},
+            role=TeamRole.LEADER,
+        )
+        yield SimpleNamespace(
+            type="answer",
+            payload={"output": {"output": "teammate answer"}, "result_type": "answer"},
+            role=TeamRole.TEAMMATE,
+        )
+        yield SimpleNamespace(
+            type="answer",
+            payload={"output": {"output": "human answer"}, "result_type": "answer"},
+            role=SimpleNamespace(value=TeamRole.HUMAN_AGENT.value),
+        )
+
+    class _FakeRunner:
+        run_agent_team_streaming = staticmethod(_fake_stream)
+
+        @staticmethod
+        async def get_agent_team_monitor(team_name: str, session_id: str):
+            return None
+
+    class _FakeManager:
+        @staticmethod
+        def commit_runtime_ready(session_id: str, team_name: str) -> None:
+            ready_calls.append((session_id, team_name))
+
+        @staticmethod
+        def clear_pending_runtime(session_id: str) -> None:
+            pass
+
+        @staticmethod
+        def pop_stream_task(session_id: str) -> None:
+            pass
+
+        @staticmethod
+        def get_monitor(session_id: str):
+            return None
+
+        @staticmethod
+        async def attach_distributed_hooks_for_runner_runtime(
+            team_name: str,
+            session_id: str,
+            channel_id: str,
+        ) -> None:
+            pass
+
+    monkeypatch.setattr(team_helpers, "Runner", _FakeRunner)
+    monkeypatch.setattr(team_helpers, "get_team_manager", lambda channel_id: _FakeManager())
+    monkeypatch.setattr(
+        team_helpers,
+        "_broadcast_event",
+        lambda channel_id, session_id, event: broadcasted.append(event),
+    )
+    monkeypatch.setattr(team_helpers, "get_session_metadata", lambda session_id: {})
+    monkeypatch.setattr(team_helpers, "update_session_metadata", lambda **kwargs: None)
+
+    await team_helpers._consume_stream_with_query(  # pylint: disable=protected-access
+        "web",
+        "sess-leader-only",
+        SimpleNamespace(team_name="demo-team"),
+        "hello",
+    )
+
+    assert ready_calls == [("sess-leader-only", "demo-team")]
+    assert [event["event_type"] for event in broadcasted] == [
+        "team.runtime_ready",
+        "chat.final",
+    ]
+    assert broadcasted[1]["content"] == "leader answer"
 
 
 @pytest.mark.anyio

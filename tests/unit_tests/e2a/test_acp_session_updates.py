@@ -1,10 +1,10 @@
 from types import SimpleNamespace
 
-from jiuwenclaw.e2a.acp.session_updates import (
+from jiuwenclaw.common.e2a.acp.session_updates import (
     build_acp_final_text_update,
     build_acp_session_update,
 )
-from jiuwenclaw.schema.message import EventType, Message
+from jiuwenclaw.common.schema.message import EventType, Message
 
 
 def _build_message(event_type: EventType) -> Message:

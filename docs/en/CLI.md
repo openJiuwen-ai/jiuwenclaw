@@ -88,7 +88,7 @@ The Gateway will:
 
 ### 3. TUI: `/workspace_dir` — workspace path for outbound requests
 
-**Scope:** terminal UI (`jiuwenclaw-cli`) only; parsed locally, not by the Gateway control pipeline.
+**Scope:** terminal UI (`jiuwenclaw-tui`) only; parsed locally, not by the Gateway control pipeline.
 
 **Behavior**
 

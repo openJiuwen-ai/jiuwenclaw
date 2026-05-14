@@ -2,8 +2,26 @@
 """In-sandbox Landlock launcher.
 
 This module is executed inside bubblewrap after mounts/namespaces are in place.
-It applies Landlock to itself, then execs the target command so restrictions are
-inherited by the sandboxed program.
+It pre-reads the in-sandbox daemon script, applies Landlock to itself, and
+then runs the daemon code in the same Python process via ``compile`` + ``exec``.
+No further ``execve`` happens between Landlock setup and the daemon, so the
+daemon (and every child it spawns) inherits the Landlock ruleset directly
+without ever needing the daemon script's on-disk path to remain readable.
+
+This is what lets us keep ``/jiuwenbox`` *outside* the Landlock allowlist:
+only the launcher (loaded before Landlock) and the daemon source (read
+into memory before Landlock) need access to that subtree. After Landlock
+applies, user code spawned by the daemon cannot read ``/jiuwenbox`` at
+all, which is the property
+``test_landlock_rules_allow_policy_paths_and_deny_other_mounted_paths``
+and the runtime-script integrity tests rely on. The mirror invariant -
+that user policies cannot punch ``/jiuwenbox`` back into the Landlock
+allowlist via ``read_only`` / ``read_write`` / ``bind_mounts`` etc. -
+is enforced by ``PolicyEngine._RESERVED_SANDBOX_PATHS``.
+
+This module deliberately depends on the standard library only so the in-sandbox
+Python interpreter does not have to load the rest of jiuwenbox before launching
+the daemon. That keeps per-sandbox cold-start overhead low.
 """
 
 from __future__ import annotations
@@ -21,8 +39,7 @@ LANDLOCK_RESTRICT_SELF = 446
 LANDLOCK_RULE_PATH_BENEATH = 1
 PR_SET_NO_NEW_PRIVS = 38
 
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("jiuwenbox.landlock_launcher")
 
 READ_FILE = 1 << 2
 READ_DIR = 1 << 3
@@ -191,24 +208,118 @@ def apply_landlock(payload: dict) -> None:
         os.close(ruleset_fd)
 
 
-def main() -> int:
-    if len(sys.argv) < 4 or sys.argv[2] != "--":
-        logger.error(
-            "Usage: landlock_launcher.py <payload> -- <command> [args...]",
-        )
+def _run_daemon_in_process(daemon_path: str, payload: dict) -> int:
+    """Apply Landlock and run the daemon script in this Python process.
+
+    The daemon source is read **before** ``apply_landlock`` so the
+    ``/jiuwenbox`` directory containing the daemon script can be locked
+    away by Landlock immediately afterward. Running the daemon in-process
+    (no second ``execve``) is what lets the daemon - and every user
+    child it spawns - inherit Landlock without ever needing the on-disk
+    daemon script to remain reachable. That keeps ``/jiuwenbox`` outside
+    the Landlock allowlist, which matters for the policy-enforcement
+    tests.
+
+    ``__name__`` is deliberately **not** set to ``"__main__"`` so the
+    ``if __name__ == "__main__": raise SystemExit(main())`` guard at the
+    bottom of the daemon script does not fire. We call ``main()`` directly
+    instead and use its int return value, which avoids ``except SystemExit``
+    in this function (G.ERR.11).
+    """
+    try:
+        with open(daemon_path, "rb") as fh:
+            daemon_source = fh.read()
+    except OSError as exc:
+        logger.error("Failed to read daemon script %s: %s", daemon_path, exc)
         return 2
 
-    payload = _decode_payload(sys.argv[1])
-    command = sys.argv[3:]
     try:
         apply_landlock(payload)
-        os.execvp(command[0], command)
     except LandlockHardRequirementError:
         return 126
+
+    daemon_globals: dict = {
+        "__name__": "jiuwenbox.supervisor.sandbox_daemon_inproc",
+        "__file__": daemon_path,
+    }
+    try:
+        compiled = compile(daemon_source, daemon_path, "exec")
+    except SyntaxError as exc:
+        logger.error("Failed to compile daemon script %s: %s", daemon_path, exc)
+        return 2
+    exec(compiled, daemon_globals)
+
+    daemon_main = daemon_globals.get("main")
+    if not callable(daemon_main):
+        logger.error(
+            "Daemon script %s does not expose a callable ``main`` symbol",
+            daemon_path,
+        )
+        return 2
+    result = daemon_main()
+    try:
+        return int(result) if result is not None else 0
+    except (TypeError, ValueError):
+        return 1
+
+
+def _run_command(command: list[str], payload: dict) -> int:
+    """Apply Landlock and ``execvp`` the user command (legacy path).
+
+    Used by ``exec_background``-style callers that still spawn a fresh
+    bubblewrap per command and need Landlock to be inherited by the
+    user binary they exec into.
+    """
+    try:
+        apply_landlock(payload)
+    except LandlockHardRequirementError:
+        return 126
+    try:
+        os.execvp(command[0], command)
     except OSError as exc:
         logger.error("Failed to exec command %s: %s", command[0], exc)
         return 127
     return 0
+
+
+def main() -> int:
+    """Dispatch between the daemon and generic-exec launcher modes.
+
+    Layouts:
+      ``landlock_launcher.py PAYLOAD --daemon DAEMON_SCRIPT_PATH``
+        Apply Landlock and run the daemon script via ``compile``/``exec``.
+      ``landlock_launcher.py PAYLOAD -- COMMAND [ARGS...]``
+        Apply Landlock and ``execvp`` the user command (legacy path,
+        used by ``exec_background`` for one-shot bwrap invocations).
+    """
+    if len(sys.argv) < 4:
+        logger.error(
+            "Usage: landlock_launcher.py <payload> --daemon <daemon_script>"
+            " | landlock_launcher.py <payload> -- <command> [args...]",
+        )
+        return 2
+
+    payload_b64 = sys.argv[1]
+    mode_token = sys.argv[2]
+
+    try:
+        payload = _decode_payload(payload_b64)
+    except ValueError as exc:
+        # ``ValueError`` already covers ``json.JSONDecodeError`` (G.ERR.09).
+        logger.error("Failed to decode landlock payload: %s", exc)
+        return 2
+
+    if mode_token == "--daemon":
+        return _run_daemon_in_process(sys.argv[3], payload)
+    if mode_token == "--":
+        command = sys.argv[3:]
+        if not command:
+            logger.error("Generic launcher mode requires a command after '--'")
+            return 2
+        return _run_command(command, payload)
+
+    logger.error("Unknown launcher mode token %r", mode_token)
+    return 2
 
 
 if __name__ == "__main__":

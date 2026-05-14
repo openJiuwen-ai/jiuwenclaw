@@ -2,5 +2,5 @@
 recursive-include jiuwenclaw/resources *
 
 # 排除 node_modules，避免打包进 wheel
-prune jiuwenclaw/web/node_modules
+prune jiuwenclaw/channels/web/frontend/node_modules
 global-exclude node_modules

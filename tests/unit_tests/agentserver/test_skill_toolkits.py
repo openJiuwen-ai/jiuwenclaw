@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import asyncio
 
-from jiuwenclaw.agentserver.skill_manager import SkillManager
-from jiuwenclaw.agentserver.tools.skill_toolkits import SkillToolkit
+from jiuwenclaw.server.runtime.skill.skill_manager import SkillManager
+from jiuwenclaw.agents.harness.common.tools.skill_toolkits import SkillToolkit
 
 
 def test_uninstall_skill_removes_local_skill_without_plugin_record(tmp_path):

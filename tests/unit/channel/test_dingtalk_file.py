@@ -10,13 +10,13 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 import httpx
 
-from jiuwenclaw.channel.dingding import (
+from jiuwenclaw.gateway.channel_manager.im_platforms.dingtalk.dingtalk_connect import (
     DingTalkChannel,
     DingTalkConfig,
 )
-from jiuwenclaw.channel.dingtalk_file_service import DingTalkFileService
-from jiuwenclaw.channel.base import RobotMessageRouter
-from jiuwenclaw.schema.message import Message, EventType
+from jiuwenclaw.gateway.channel_manager.im_platforms.dingtalk.dingtalk_file_service import DingTalkFileService
+from jiuwenclaw.gateway.channel_manager.base import RobotMessageRouter
+from jiuwenclaw.common.schema.message import Message, EventType
 
 
 # ---------------------------------------------------------------------------

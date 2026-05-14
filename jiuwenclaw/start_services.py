@@ -27,7 +27,7 @@ from jiuwenclaw.dotenv_early import parse_dotenv_early
 parse_dotenv_early("jiuwenclaw-start")
 
 # --- Now safe to import jiuwenclaw modules ---
-from jiuwenclaw.utils import get_root_dir, get_user_workspace_dir, is_package_installation
+from jiuwenclaw.common.utils import get_root_dir, get_user_workspace_dir, is_package_installation
 from jiuwenclaw.instance_manager import (
     InstanceConfig,
     InstanceLock,
@@ -278,7 +278,7 @@ def _build_commands(mode: str, dotenv_path: Path | None = None) -> list[tuple[st
         commands.append(("app", cmd, DATA_ROOT))
 
     if mode in ("all", "web"):
-        cmd = [python_cmd, "-m", "jiuwenclaw.app_web"] + dotenv_arg
+        cmd = [python_cmd, "-m", "jiuwenclaw.channels.web.app_web"] + dotenv_arg
         commands.append(("web", cmd, DATA_ROOT))
 
     elif mode == "dev":

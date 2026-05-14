@@ -122,7 +122,7 @@ uv pip install -e .
 
 ```bash
 # Enter front-end directory
-cd web
+cd jiuwenclaw/channels/web
 
 # Install front-end dependencies
 npm install
@@ -132,9 +132,9 @@ npm run build
 
 # Copy build output into the user workspace
 # Windows:
-xcopy /E /I dist %USERPROFILE%\.jiuwenclaw\web\dist
+xcopy /E /I dist %USERPROFILE%\.jiuwenclaw\channels\web\frontend\dist
 # macOS/Linux:
-cp -r dist ~/.jiuwenclaw/web/dist
+cp -r dist ~/.jiuwenclaw/channels/web/frontend/dist
 
 # Back to repo root
 cd ..
@@ -144,7 +144,7 @@ cd ..
 
 - `pip install -e .` / `uv pip install -e .` is an editable install that points at your source tree.
 - `web/dist` is ignored by `.gitignore` and is not shipped in the repo.
-- You must build and copy artifacts to `~/.jiuwenclaw/web/dist`.
+- You must build and copy artifacts to `~/.jiuwenclaw/channels/web/frontend/dist`.
 
 #### 4. First launch
 
@@ -251,7 +251,7 @@ pip install -e .
 
 ```bash
 # Enter front-end directory
-cd web
+cd jiuwenclaw/channels/web
 
 # Install front-end dependencies
 npm install
@@ -261,9 +261,9 @@ npm run build
 
 # Copy build output into the user workspace
 # Windows:
-xcopy /E /I dist %USERPROFILE%\.jiuwenclaw\web\dist
+xcopy /E /I dist %USERPROFILE%\.jiuwenclaw\channels\web\frontend\dist
 # macOS/Linux:
-cp -r dist ~/.jiuwenclaw/web/dist
+cp -r dist ~/.jiuwenclaw/channels/web/frontend/dist
 
 # Back to repo root
 cd ..
@@ -273,7 +273,7 @@ cd ..
 
 - `pip install -e .` is an editable install that points at your source tree.
 - `web/dist` is ignored by `.gitignore` and is not shipped in the repo.
-- You must build and copy artifacts to `~/.jiuwenclaw/web/dist`.
+- You must build and copy artifacts to `~/.jiuwenclaw/channels/web/frontend/dist`.
 
 #### 5. First launch
 
@@ -326,15 +326,15 @@ git pull
 pip install -e .
 
 # Rebuild the front end (when it changed)
-cd web
+cd jiuwenclaw/channels/web
 npm install
 npm run build
 
 # Copy build output
 # Windows:
-xcopy /E /I dist %USERPROFILE%\.jiuwenclaw\web\dist
+xcopy /E /I dist %USERPROFILE%\.jiuwenclaw\channels\web\frontend\dist
 # macOS/Linux:
-cp -r dist ~/.jiuwenclaw/web/dist
+cp -r dist ~/.jiuwenclaw/channels/web/frontend/dist
 
 cd ..
 ```
@@ -530,4 +530,4 @@ pip uninstall jiuwenclaw
 
 ---
 
-*Last updated: 2026-04-09*
+*Last updated: 2026-05-09*

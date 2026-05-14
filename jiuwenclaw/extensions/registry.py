@@ -3,11 +3,11 @@ from typing import Any, Callable
 from openjiuwen.core.runner.callback.framework import AsyncCallbackFramework
 
 from jiuwenclaw.extensions.callback_compat import unregister_callback_sync
-from jiuwenclaw.gateway.agent_client import AgentServerClient
+from jiuwenclaw.gateway import AgentServerClient
 from jiuwenclaw.extensions.sdk.agent_server_client import AgentServerClientExtension
 from jiuwenclaw.extensions.sdk.crypto_utility import CryptoUtility
 from jiuwenclaw.extensions.types import ExtensionConfig
-from jiuwenclaw.security.base_crypto import CryptoProvider
+from jiuwenclaw.common.security.base_crypto import CryptoProvider
 
 
 class ExtensionRegistry:

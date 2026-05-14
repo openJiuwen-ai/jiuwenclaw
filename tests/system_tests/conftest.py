@@ -41,7 +41,7 @@ def clean_environment(temp_home: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     Use this fixture when testing initialization to ensure tests are isolated.
     """
     # Import before monkeypatching to get reference
-    import jiuwenclaw.utils as utils_module
+    import jiuwenclaw.common.utils as utils_module
 
     # Override HOME to use temporary directory
     monkeypatch.setenv("HOME", str(temp_home))
@@ -112,7 +112,7 @@ MODEL_PROVIDER="OpenAI"
     def mock_find_package_root():
         return package_dir
 
-    monkeypatch.setattr("jiuwenclaw.utils._find_package_root", mock_find_package_root)
+    monkeypatch.setattr("jiuwenclaw.common.utils._find_package_root", mock_find_package_root)
 
 
 @pytest.fixture
@@ -138,7 +138,7 @@ def skip_if_no_resources():
     Use this fixture for tests that require the actual package resources
     to be available (e.g., when testing in development mode).
     """
-    from jiuwenclaw.utils import _find_package_root
+    from jiuwenclaw.common.utils import _find_package_root
 
     package_root = _find_package_root()
     resources_dir = package_root / "resources"

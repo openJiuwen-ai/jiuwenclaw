@@ -8,9 +8,9 @@ from unittest.mock import MagicMock, AsyncMock
 
 import pytest
 
-from jiuwenclaw.channel.feishu import FeishuChannel, FeishuConfig
-from jiuwenclaw.channel.base import RobotMessageRouter
-from jiuwenclaw.schema.message import Message, EventType
+from jiuwenclaw.gateway.channel_manager.im_platforms.feishu.feishu_connect import FeishuChannel, FeishuConfig
+from jiuwenclaw.gateway.channel_manager.base import RobotMessageRouter
+from jiuwenclaw.common.schema.message import Message, EventType
 
 
 def _make_channel() -> FeishuChannel:

@@ -9,11 +9,11 @@ from pathlib import Path
 
 from openjiuwen.agent_teams.schema.blueprint import TeamAgentSpec
 
-from jiuwenclaw.agentserver.team.team_manager import TeamManager
+from jiuwenclaw.agents.harness.team.team_manager import TeamManager
 
 
-def test_copy_global_skills_to_team_shared_dir(tmp_path, monkeypatch):
-    """Global skills should be copied to team shared directory via _copy_global_skills_to_team_shared_dir."""
+def test_ensure_team_shared_skills_initialized_copies_global_skills(tmp_path, monkeypatch):
+    """Global skills should be copied to team shared directory via the public helper."""
     # Create global skills directory
     global_skills_dir = tmp_path / "global_skills"
     global_skills_dir.mkdir(parents=True)
@@ -33,7 +33,7 @@ def test_copy_global_skills_to_team_shared_dir(tmp_path, monkeypatch):
     )
 
     monkeypatch.setattr(
-        "jiuwenclaw.agentserver.team.team_manager.get_agent_skills_dir",
+        "jiuwenclaw.agents.harness.team.team_manager.get_agent_skills_dir",
         lambda: global_skills_dir,
     )
 
@@ -54,9 +54,8 @@ def test_copy_global_skills_to_team_shared_dir(tmp_path, monkeypatch):
         }
     )
 
-    # Call _copy_global_skills_to_team_shared_dir method directly
     manager = TeamManager()
-    manager._copy_global_skills_to_team_shared_dir(spec)
+    manager.ensure_team_shared_skills_initialized(spec)
 
     # Verify marker file exists in team shared skills directory
     assert (team_shared_skills / ".team_skills_copied").exists()
@@ -81,7 +80,7 @@ def test_copy_global_skills_not_copied_twice(tmp_path, monkeypatch):
     (global_skills_dir / "skills_state.json").write_text("{}", encoding="utf-8")
 
     monkeypatch.setattr(
-        "jiuwenclaw.agentserver.team.team_manager.get_agent_skills_dir",
+        "jiuwenclaw.agents.harness.team.team_manager.get_agent_skills_dir",
         lambda: global_skills_dir,
     )
 
@@ -101,7 +100,7 @@ def test_copy_global_skills_not_copied_twice(tmp_path, monkeypatch):
     )
 
     manager = TeamManager()
-    manager._copy_global_skills_to_team_shared_dir(spec)
+    manager.ensure_team_shared_skills_initialized(spec)
 
     # Verify no new skill copied (marker file already exists)
     assert not (team_shared_skills / "skill-a").exists()
@@ -125,15 +124,15 @@ def test_member_configured_skills_copied_to_own_dir(tmp_path, monkeypatch):
     )
 
     monkeypatch.setattr(
-        "jiuwenclaw.agentserver.team.team_manager.get_agent_skills_dir",
+        "jiuwenclaw.agents.harness.team.team_manager.get_agent_skills_dir",
         lambda: global_skills_dir,
     )
     monkeypatch.setattr(
-        "jiuwenclaw.agentserver.team.team_runtime_inheritance.build_member_rails",
+        "jiuwenclaw.agents.harness.team.team_runtime_inheritance.build_member_rails",
         lambda **kwargs: [],
     )
     monkeypatch.setattr(
-        "jiuwenclaw.agentserver.extensions.rail_manager.get_rail_manager",
+        "jiuwenclaw.agents.harness.common.plugins.rail_manager.get_rail_manager",
         lambda: type(
             "_DummyRailManager",
             (),
@@ -222,15 +221,15 @@ def test_member_no_configured_skills_has_state_file(tmp_path, monkeypatch):
     )
 
     monkeypatch.setattr(
-        "jiuwenclaw.agentserver.team.team_manager.get_agent_skills_dir",
+        "jiuwenclaw.agents.harness.team.team_manager.get_agent_skills_dir",
         lambda: global_skills_dir,
     )
     monkeypatch.setattr(
-        "jiuwenclaw.agentserver.team.team_runtime_inheritance.build_member_rails",
+        "jiuwenclaw.agents.harness.team.team_runtime_inheritance.build_member_rails",
         lambda **kwargs: [],
     )
     monkeypatch.setattr(
-        "jiuwenclaw.agentserver.extensions.rail_manager.get_rail_manager",
+        "jiuwenclaw.agents.harness.common.plugins.rail_manager.get_rail_manager",
         lambda: type("_DummyRailManager", (), {
             "get_registered_rail_names": lambda self: [],
             "load_rail_instance_without_enabled_check": lambda self, name: None,

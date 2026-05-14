@@ -283,7 +283,7 @@ Leader 不需要配置 teammate 的静态 endpoint；`spawn_member` 时会从注
 ### 6.4 Web 前端（可选）
 
 ```bash
-cd "<REPO_ROOT>/jiuwenclaw/web"
+cd "<REPO_ROOT>/jiuwenclaw/channels/web/frontend"
 VITE_WS_BASE="ws://localhost:29100" npm run dev -- --host 0.0.0.0 --port 5173
 ```
 

@@ -12,11 +12,11 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 SIDECAR_ROOT = ROOT / "packages" / "jiuwenclaw-tui"
 SIDE_CAR_DIST = SIDECAR_ROOT / "dist"
-CLI_ROOT = ROOT / "jiuwenclaw" / "cli"
+TUI_ROOT = ROOT / "jiuwenclaw" / "channels" / "tui" / "frontend"
 
 TUI_TARGETS = {
-    #"linux-x64": "linux_x86_64",
-    #"linux-arm64": "linux_aarch64",
+    "linux-x64": "linux_x86_64",
+    "linux-arm64": "linux_aarch64",
     #"macos-x64": "macosx_10_15_x86_64",
     "macos-arm64": "macosx_11_0_arm64",
     "windows-x64": "win_amd64",
@@ -69,7 +69,7 @@ def build_tui_binary(target: str, clean: bool) -> None:
 
 
 def ensure_js_dependencies(install: bool) -> None:
-    node_modules = CLI_ROOT / "node_modules"
+    node_modules = TUI_ROOT / "node_modules"
     if node_modules.exists():
         return
 
@@ -77,24 +77,24 @@ def ensure_js_dependencies(install: bool) -> None:
         raise SystemExit(
             "\n".join(
                 [
-                    "missing JavaScript dependencies for jiuwenclaw/cli",
+                    "missing JavaScript dependencies for jiuwenclaw/channels/tui/frontend",
                     f"expected: {node_modules}",
                     "run one of:",
-                    "  cd jiuwenclaw/cli && npm install",
+                    "  cd jiuwenclaw/channels/tui/frontend && npm install",
                     "  python scripts/build_python_packages.py --install-js-deps",
                 ]
             )
         )
 
-    if (CLI_ROOT / "package-lock.json").exists():
-        run(["npm", "install"], CLI_ROOT)
+    if (TUI_ROOT / "package-lock.json").exists():
+        run(["npm", "install"], TUI_ROOT)
         return
 
-    if (CLI_ROOT / "bun.lock").exists() or (CLI_ROOT / "bun.lockb").exists():
-        run(["bun", "install"], CLI_ROOT)
+    if (TUI_ROOT / "bun.lock").exists() or (TUI_ROOT / "bun.lockb").exists():
+        run(["bun", "install"], TUI_ROOT)
         return
 
-    run(["npm", "install"], CLI_ROOT)
+    run(["npm", "install"], TUI_ROOT)
 
 
 def resolve_requested_targets(raw: str) -> list[str]:
@@ -147,7 +147,7 @@ def main() -> None:
     parser.add_argument(
         "--install-js-deps",
         action="store_true",
-        help="Install jiuwenclaw/cli JavaScript dependencies if node_modules is missing",
+        help="Install jiuwenclaw/channels/tui/frontend JavaScript dependencies if node_modules is missing",
     )
     args = parser.parse_args()
     targets = resolve_requested_targets(args.target)

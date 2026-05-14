@@ -11,11 +11,13 @@ import logging
 import os
 import platform
 import struct
+from functools import lru_cache
 from pathlib import Path
 
+from jiuwenbox.logging_config import configure_logging
 from jiuwenbox.models.policy import SyscallPolicy
 
-logging.basicConfig(level=logging.INFO)
+configure_logging()
 logger = logging.getLogger(__name__)
 
 # ── BPF constants (linux/bpf_common.h, linux/seccomp.h) ──
@@ -143,6 +145,7 @@ def _fallback_syscall_numbers() -> dict[str, int]:
     }
 
 
+@lru_cache(maxsize=1)
 def _get_syscall_numbers() -> dict[str, int]:
     """Load the syscall number table for the current architecture.
 

@@ -7,7 +7,7 @@ from types import SimpleNamespace
 from openjiuwen.core.foundation.tool import LocalFunction, ToolCard
 from openjiuwen.core.single_agent.ability_manager import AbilityManager
 
-from jiuwenclaw.agentserver.deep_agent.rails.team_member_skill_toolkit_rail import (
+from jiuwenclaw.agents.harness.team.rails.team_member_skill_toolkit_rail import (
     MemberSkillToolkitRail,
 )
 
@@ -75,7 +75,7 @@ def _make_agent(agent_id: str):
 def test_team_member_skill_toolkit_rail_init_registers_member_scoped_tools(monkeypatch, tmp_path):
     """Rail init should replace inherited global cards with member-scoped tool ids."""
     resource_mgr = _FakeResourceManager()
-    rail_module = "jiuwenclaw.agentserver.deep_agent.rails.team_member_skill_toolkit_rail"
+    rail_module = "jiuwenclaw.agents.harness.team.rails.team_member_skill_toolkit_rail"
 
     monkeypatch.setattr(f"{rail_module}.Runner", SimpleNamespace(resource_mgr=resource_mgr))
     monkeypatch.setattr(f"{rail_module}.SkillManager", _FakeSkillManager)
@@ -99,7 +99,7 @@ def test_team_member_skill_toolkit_rail_init_registers_member_scoped_tools(monke
 def test_team_member_skill_toolkit_rail_uninit_cleans_up_registered_tools(monkeypatch, tmp_path):
     """Rail uninit should remove member-scoped tools from ability and resource managers."""
     resource_mgr = _FakeResourceManager()
-    rail_module = "jiuwenclaw.agentserver.deep_agent.rails.team_member_skill_toolkit_rail"
+    rail_module = "jiuwenclaw.agents.harness.team.rails.team_member_skill_toolkit_rail"
 
     monkeypatch.setattr(f"{rail_module}.Runner", SimpleNamespace(resource_mgr=resource_mgr))
     monkeypatch.setattr(f"{rail_module}.SkillManager", _FakeSkillManager)

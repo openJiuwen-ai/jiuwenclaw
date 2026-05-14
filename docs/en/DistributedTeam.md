@@ -15,8 +15,8 @@ The main config file is usually `~/.jiuwenclaw/config/config.yaml`. Override the
 | **Mode** | `team.runtime.mode`: `local \| distributed` |
 | **Role** | `team.runtime.role`: `leader \| teammate` |
 | **Transport** | `team.transport.type`: `inprocess \| pyzmq`; distributed setups typically use `pyzmq` |
-| **Entry** | `TeamManager` (`jiuwenclaw/agentserver/team/team_manager.py`): normalizes transport / identity before building `TeamAgentSpec` |
-| **Loading** | `load_team_spec_dict()` (`jiuwenclaw/agentserver/team/config_loader.py`): `name` / `display_name` compatibility for leader and `predefined_members` |
+| **Entry** | `TeamManager` (`jiuwenclaw/agents/harness/team/team_manager.py`): normalizes transport / identity before building `TeamAgentSpec` |
+| **Loading** | `load_team_spec_dict()` (`jiuwenclaw/agents/harness/team/config_loader.py`): `name` / `display_name` compatibility for leader and `predefined_members` |
 | **Sample** | `jiuwenclaw/resources/config.team.distributed.leader.yaml` / `config.team.distributed.teammate.yaml` (current role-specific templates) |
 
 **Session semantics**: aligned with regular Team—**single active session** per process: creating a Team for a new session tears down other session Teams first. This document does not add a multi-session routing layer for distributed mode.
@@ -259,7 +259,7 @@ GIT_AUTHOR_EMAIL="teambot@example.com" \
 GIT_COMMITTER_NAME="teambot" \
 GIT_COMMITTER_EMAIL="teambot@example.com" \
 AGENT_SERVER_PORT=28193 \
-uv run python -m jiuwenclaw.app_agentserver
+uv run python -m jiuwenclaw.server.app_agentserver
 ```
 
 After startup, the teammate registers its `bootstrap_direct_addr` as a blank agent, for example `endpoint=tcp://127.0.0.1:28610`.
@@ -283,7 +283,7 @@ Leader does not need a static teammate endpoint; `spawn_member` obtains an idle 
 ### 6.4 Web UI (optional)
 
 ```bash
-cd "<REPO_ROOT>/jiuwenclaw/web"
+cd "<REPO_ROOT>/jiuwenclaw/channels/web/frontend"
 VITE_WS_BASE="ws://localhost:29100" npm run dev -- --host 0.0.0.0 --port 5173
 ```
 

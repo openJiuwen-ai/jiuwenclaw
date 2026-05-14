@@ -4,10 +4,11 @@
 
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 from openjiuwen.agent_teams.schema.blueprint import TeamAgentSpec
 
-from jiuwenclaw.agentserver.team.team_manager import TeamManager
+from jiuwenclaw.agents.harness.team.team_manager import TeamManager
 
 
 def test_member_skill_state_inherits_marketplaces_and_rebuilds_installed_skills(monkeypatch, tmp_path):
@@ -37,15 +38,15 @@ def test_member_skill_state_inherits_marketplaces_and_rebuilds_installed_skills(
     )
 
     monkeypatch.setattr(
-        "jiuwenclaw.agentserver.team.team_manager.get_agent_skills_dir",
+        "jiuwenclaw.agents.harness.team.team_manager.get_agent_skills_dir",
         lambda: global_skills_dir,
     )
     monkeypatch.setattr(
-        "jiuwenclaw.agentserver.team.team_runtime_inheritance.build_member_rails",
+        "jiuwenclaw.agents.harness.team.team_runtime_inheritance.build_member_rails",
         lambda **kwargs: [],
     )
     monkeypatch.setattr(
-        "jiuwenclaw.agentserver.extensions.rail_manager.get_rail_manager",
+        "jiuwenclaw.agents.harness.common.plugins.rail_manager.get_rail_manager",
         lambda: type(
             "_DummyRailManager",
             (),
@@ -116,3 +117,204 @@ def test_member_skill_state_inherits_marketplaces_and_rebuilds_installed_skills(
     assert [plugin["name"] for plugin in state["installed_plugins"]] == ["skill-a"]
     assert [skill["name"] for skill in state["local_skills"]] == ["skill-a"]
     assert Path(state["local_skills"][0]["origin"]).name == "skill-a"
+
+
+def test_code_team_customizer_applies_code_profile_to_member(monkeypatch, tmp_path):
+    """code.team parent agents should make each team member use the code profile."""
+    global_skills_dir = tmp_path / "global_skills"
+    global_skills_dir.mkdir(parents=True)
+    (global_skills_dir / "skills_state.json").write_text(
+        json.dumps({"marketplaces": [], "installed_plugins": [], "local_skills": []}),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        "jiuwenclaw.agents.harness.team.team_manager.get_agent_skills_dir",
+        lambda: global_skills_dir,
+    )
+    monkeypatch.setattr(
+        "jiuwenclaw.agents.harness.team.team_manager.build_member_rails",
+        lambda **kwargs: [],
+    )
+    monkeypatch.setattr(
+        "jiuwenclaw.agents.harness.common.plugins.rail_manager.get_rail_manager",
+        lambda: type(
+            "_DummyRailManager",
+            (),
+            {
+                "get_registered_rail_names": lambda self: [],
+                "load_rail_instance_without_enabled_check": lambda self, name: None,
+            },
+        )(),
+    )
+
+    calls = []
+
+    def fake_configure_code_member(agent, **kwargs):
+        calls.append({"agent": agent, **kwargs})
+
+    monkeypatch.setattr(
+        "jiuwenclaw.server.runtime.agent_adapter.interface_code.configure_code_team_member_agent",
+        fake_configure_code_member,
+    )
+
+    spec = TeamAgentSpec.model_validate(
+        {
+            "team_name": "demo_team",
+            "agents": {
+                "leader": {},
+                "member_a": {},
+            },
+        }
+    )
+    parent_project = tmp_path / "project"
+    parent_project.mkdir()
+    parent_agent = SimpleNamespace(
+        _jiuwenclaw_adapter_mode="code",
+        _jiuwenclaw_code_project_dir=str(parent_project),
+        deep_config=SimpleNamespace(
+            workspace=SimpleNamespace(root_path=str(parent_project)),
+            sys_operation=None,
+        ),
+        ability_manager=SimpleNamespace(list=lambda: []),
+    )
+    customizer = TeamManager.build_agent_customizer(
+        spec=spec,
+        deep_agent=parent_agent,
+        session_id="session-1",
+        request_id="request-1",
+        channel_id="tui",
+        request_metadata={"source": "test"},
+    )
+
+    class AbilityManager:
+        def __init__(self):
+            self.cards = []
+
+        def list(self):
+            return list(self.cards)
+
+        def add(self, card):
+            self.cards.append(card)
+
+    class Agent:
+        def __init__(self):
+            self.deep_config = SimpleNamespace(
+                workspace=SimpleNamespace(root_path=str(tmp_path / "member_workspace")),
+                sys_operation=None,
+            )
+            self.ability_manager = AbilityManager()
+            self.card = SimpleNamespace(id="member_a", name="member")
+            self.rails = []
+
+        def add_rail(self, rail):
+            self.rails.append(rail)
+
+    agent = Agent()
+
+    customizer(agent, member_name="member_a", role="teammate")
+
+    assert len(calls) == 1
+    assert calls[0]["agent"] is agent
+    assert calls[0]["parent_agent"] is parent_agent
+    assert calls[0]["member_name"] == "member_a"
+    assert calls[0]["role"] == "teammate"
+    assert calls[0]["session_id"] == "session-1"
+    assert calls[0]["channel_id"] == "tui"
+    assert calls[0]["project_dir"] == str(parent_project)
+    assert calls[0]["skill_manager"] is not None
+
+
+def test_configure_code_team_member_uses_relative_coding_memory_path(monkeypatch, tmp_path):
+    """code.team members should register workspace directories with relative paths."""
+    from jiuwenclaw.server.runtime.agent_adapter import interface_code
+
+    global_workspace = tmp_path / "global_agent_workspace"
+    member_workspace = tmp_path / "member_workspace"
+    parent_project = tmp_path / "project"
+    global_workspace.mkdir()
+    member_workspace.mkdir()
+    parent_project.mkdir()
+
+    monkeypatch.setattr(interface_code, "get_config", lambda: {"react": {}})
+    monkeypatch.setattr(interface_code, "get_agent_workspace_dir", lambda: global_workspace)
+    monkeypatch.setattr(
+        interface_code.JiuwenClawCodeAdapter,
+        "_refresh_multimodal_configs",
+        lambda self, config: None,
+    )
+    monkeypatch.setattr(
+        interface_code.JiuwenClawCodeAdapter,
+        "_create_model",
+        lambda self, config: object(),
+    )
+    monkeypatch.setattr(
+        interface_code.JiuwenClawCodeAdapter,
+        "_create_sys_operation",
+        lambda self: object(),
+    )
+    monkeypatch.setattr(
+        interface_code.JiuwenClawCodeAdapter,
+        "build_code_tool_cards",
+        lambda self, agent_id: [],
+    )
+    monkeypatch.setattr(
+        interface_code.JiuwenClawCodeAdapter,
+        "_build_agent_rails",
+        lambda self, react_config, config_base, mode: [],
+    )
+    monkeypatch.setattr(
+        interface_code.JiuwenClawCodeAdapter,
+        "_build_configured_subagents",
+        lambda self, model, react_config, config_base: ([], False),
+    )
+    monkeypatch.setattr(
+        interface_code.JiuwenClawCodeAdapter,
+        "_extract_enabled_mcp_server_entries",
+        lambda self, config_base: [],
+    )
+
+    class Workspace:
+        def __init__(self, root_path):
+            self.root_path = str(root_path)
+            self.directories = []
+
+        def set_directory(self, directory):
+            self.directories.append(directory)
+
+    class AbilityManager:
+        @staticmethod
+        def list():
+            return []
+
+        @staticmethod
+        def add(card):
+            raise AssertionError("no tool cards should be added in this test")
+
+    workspace = Workspace(member_workspace)
+    agent = SimpleNamespace(
+        card=SimpleNamespace(id="counter-1", name="Counter 1"),
+        deep_config=SimpleNamespace(
+            workspace=workspace,
+            model=None,
+            sys_operation=None,
+            subagents=[],
+            mcps=[],
+        ),
+        ability_manager=AbilityManager(),
+        add_rail=lambda rail: None,
+    )
+    parent_agent = SimpleNamespace(
+        _jiuwenclaw_code_project_dir=str(parent_project),
+        deep_config=SimpleNamespace(workspace=SimpleNamespace(root_path=str(parent_project))),
+    )
+
+    interface_code.configure_code_team_member_agent(
+        agent,
+        parent_agent=parent_agent,
+        member_name="counter-1",
+        role="counter",
+    )
+
+    coding_memory_path = Path(workspace.directories[0]["path"])
+    assert not coding_memory_path.is_absolute()
+    assert coding_memory_path.parts == ("coding_memory", parent_project.name)

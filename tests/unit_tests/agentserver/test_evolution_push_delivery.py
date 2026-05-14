@@ -6,8 +6,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from jiuwenclaw.agentserver.deep_agent import interface_deep as interface_deep_module
-from jiuwenclaw.agentserver.deep_agent.interface_deep import JiuWenClawDeepAdapter
+from jiuwenclaw.server.runtime.agent_adapter import interface_deep as interface_deep_module
+from jiuwenclaw.server.runtime.agent_adapter.interface_deep import JiuWenClawDeepAdapter
 
 
 class _FakeTransport:
@@ -74,7 +74,7 @@ async def test_normal_evolution_watcher_uses_delivery_context_metadata(monkeypat
         return message
 
     monkeypatch.setattr(
-        "jiuwenclaw.agentserver.gateway_push.WebSocketGatewayPushTransport",
+        "jiuwenclaw.server.gateway_push.WebSocketGatewayPushTransport",
         _FakeTransport,
     )
     monkeypatch.setattr(

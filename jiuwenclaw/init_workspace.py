@@ -23,7 +23,7 @@ import logging
 import sys
 from typing import Optional
 
-from jiuwenclaw.utils import get_user_home, init_user_workspace, get_user_workspace_dir
+from jiuwenclaw.common.utils import get_user_home, init_user_workspace, get_user_workspace_dir
 from jiuwenclaw.instance_manager import (
     create_bootstrap_env,
     get_default_instance_status,

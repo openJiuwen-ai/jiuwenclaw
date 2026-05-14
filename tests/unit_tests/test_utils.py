@@ -9,7 +9,7 @@ from unittest.mock import patch
 
 import pytest
 
-from jiuwenclaw import utils
+from jiuwenclaw.common import utils
 
 
 class TestPathResolution:
@@ -103,8 +103,8 @@ class TestLoggerSetup:
 class TestUserWorkspace:
     """Test user workspace functions."""
 
-    @patch("jiuwenclaw.utils.get_user_workspace_dir")
-    @patch("jiuwenclaw.utils._find_package_root")
+    @patch("jiuwenclaw.common.utils.get_user_workspace_dir")
+    @patch("jiuwenclaw.common.utils._find_package_root")
     @patch("pathlib.Path.exists")
     @patch("builtins.input")
     def test_init_user_workspace_cancelled(
@@ -234,7 +234,7 @@ class TestHardcodedPathsPhase2:
     @staticmethod
     def test_cron_tools_path_equivalence():
         """Test cron_tools.py path matches expected structure (cross-platform)."""
-        from jiuwenclaw.utils import get_agent_home_dir, get_user_workspace_dir
+        from jiuwenclaw.common.utils import get_agent_home_dir, get_user_workspace_dir
 
         # Original hardcoded: get_user_workspace_dir() / "agent" / "home" / "cron_jobs.json"
         # New: get_agent_home_dir() / "cron_jobs.json"
@@ -257,8 +257,8 @@ class TestHardcodedPathsPhase2:
         setattr(utils, '_workspace_dir', None)
         setattr(utils, '_root_dir', None)
 
-        from jiuwenclaw.agentserver.tools.task_tools import _get_task_data_path
-        from jiuwenclaw.utils import get_user_workspace_dir
+        from jiuwenclaw.agents.harness.common.tools.task_tools import _get_task_data_path
+        from jiuwenclaw.common.utils import get_user_workspace_dir
 
         workspace = get_user_workspace_dir()
         expected_path = workspace / "agent" / "jiuwenclaw_workspace" / "task-data.json"
@@ -277,7 +277,7 @@ class TestHardcodedPathsPhase2:
         setattr(utils, '_workspace_dir', None)
         setattr(utils, '_root_dir', None)
 
-        from jiuwenclaw.utils import get_deepagent_user_md_path, get_user_workspace_dir
+        from jiuwenclaw.common.utils import get_deepagent_user_md_path, get_user_workspace_dir
 
         workspace = get_user_workspace_dir()
         expected_path = workspace / "agent" / "jiuwenclaw_workspace" / "USER.md"
@@ -296,8 +296,8 @@ class TestAdditionalHardcodedPaths:
     @staticmethod
     def test_rail_manager_path_structure():
         """Test rail_manager.py uses get_agent_workspace_dir() for extensions path."""
-        from jiuwenclaw.agentserver.extensions.rail_manager import RailManager
-        from jiuwenclaw.utils import get_user_workspace_dir
+        from jiuwenclaw.agents.harness.common.plugins.rail_manager import RailManager
+        from jiuwenclaw.common.utils import get_user_workspace_dir
 
         workspace = get_user_workspace_dir()
         expected_path = workspace / "agent" / "jiuwenclaw_workspace" / "extensions"
@@ -310,8 +310,8 @@ class TestAdditionalHardcodedPaths:
     @staticmethod
     def test_config_module_dir_structure():
         """Test config.py _CONFIG_MODULE_DIR uses get_config_dir()."""
-        from jiuwenclaw.config import _CONFIG_MODULE_DIR
-        from jiuwenclaw.utils import get_config_dir
+        from jiuwenclaw.common.config import _CONFIG_MODULE_DIR
+        from jiuwenclaw.common.utils import get_config_dir
 
         config_dir = get_config_dir()
         expected_path = config_dir
@@ -327,7 +327,7 @@ class TestAdditionalHardcodedPaths:
         setattr(utils, '_user_home', None)
         setattr(utils, '_workspace_base_dir', None)
 
-        from jiuwenclaw.utils import get_interactions_dir, get_user_workspace_dir
+        from jiuwenclaw.common.utils import get_interactions_dir, get_user_workspace_dir
 
         workspace = get_user_workspace_dir()
         expected_path = workspace / "agent" / "jiuwenclaw_workspace" / "interactions"

@@ -9,6 +9,7 @@ This section collects common usage notes and feature documentation for JiuwenCla
 - A2A protocol integration: [A2A Integration Guide](A2A.md)（[中文版](../zh/A2A.md)）
 - ACP client configuration: [ACP Client Config](ACP_Client_Config.md)
 - Model and system configuration: [Configuration](Configuration.md)
+- Developer guide (source setup, testing, building): [Developer Guide](developer_guide.md)
 
 Topic guides:
 

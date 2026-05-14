@@ -21,7 +21,7 @@ from zoneinfo import ZoneInfo
 
 # 尝试从 jiuwenclaw.utils 导入，如果失败则使用环境变量或硬编码路径
 try:
-    from jiuwenclaw.utils import get_agent_root_dir, get_env_file
+    from jiuwenclaw.common.utils import get_agent_root_dir, get_env_file
     _has_jiuwenclaw = True
 except ImportError:
     _has_jiuwenclaw = False

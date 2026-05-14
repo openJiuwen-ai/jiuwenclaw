@@ -4,8 +4,8 @@ version: 1
 # Human-readable policy name shown by the server policy API.
 name: "server-default"
 
-# Host directory used for server-managed sandbox backing storage.
-sandbox_workspace: "/sandbox"
+# Environment variables injected into every process running inside the sandbox.
+environment: {}
 
 # Filesystem access rules. Paths are sandbox-visible absolute paths.
 filesystem_policy:
@@ -20,9 +20,18 @@ filesystem_policy:
   # by the directory permissions and Landlock.
   directories:
     - path: "/home"
-      permissions: "0755"
+      permissions: "0777"
     - path: "/tmp"
       permissions: "1777"
+
+  # Lifecycle files to create for the sandbox and bind into the sandbox path.
+  # Items may be either:
+  #   - "/path/to/file": create a server-managed empty file with default permissions
+  #   - path: "/path/to/file"
+  #     permissions: "0644"  # optional octal permissions applied on the backing file
+  # Paths must be absolute sandbox-visible paths. Files persist for the sandbox
+  # lifecycle and are removed when the sandbox is deleted.
+  files: []
 
   # Read-only paths inside the sandbox. These entries grant read permission only;
   # they do not mount host paths by themselves.
@@ -258,7 +267,7 @@ network:
     # default:
     #   deny: block traffic unless it matches allowed_domains/allowed_ips and allowed_ports
     #   allow: allow traffic unless it matches blocked_domains/blocked_ips/blocked_ports
-    default: deny
+    default: allow
 
     # Domain names allowed as inbound sources. These are resolved to source IP rules.
     allowed_domains:
@@ -281,5 +290,4 @@ network:
       - 8080
 
     # TCP destination ports blocked for inbound traffic. Block rules take precedence.
-    blocked_ports:
-      - 22
+    blocked_ports: []

@@ -137,13 +137,13 @@ python -m jiuwenclaw.app
 **Windows**
 
 ```text
-C:\path\to\your\venv\Scripts\python.exe -m jiuwenclaw.channel.acp_channel
+C:\path\to\your\venv\Scripts\python.exe -m jiuwenclaw.gateway.channel_manager.protocol.acp.acp_connect
 ```
 
 **Linux / macOS**
 
 ```text
-/path/to/your/venv/bin/python -m jiuwenclaw.channel.acp_channel
+/path/to/your/venv/bin/python -m jiuwenclaw.gateway.channel_manager.protocol.acp.acp_connect
 ```
 
 ![ACP配置](../assets/images/ACP插件添加agent.png)

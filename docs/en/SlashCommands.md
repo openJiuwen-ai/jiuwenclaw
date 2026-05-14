@@ -20,8 +20,13 @@ Executed locally in the terminal UI, not through Gateway control pipeline.
 | `/help` | Show available commands |
 | `/theme` | Switch theme |
 | `/config` | Modify configuration (currently local, planned to unify with Gateway) |
+| `/context` | Show context window usage and token breakdown (see below) |
 | `/workspace` | Manage trusted directories (see below) |
 | `/teamskills` | TeamSkills Hub publish/delete (`publish`/`delete`) |
+| `/export` | Export current conversation to file or clipboard (see below) |
+| `/status` | Show jiuwenclaw status overview, usage, config (see below) |
+| `/statusline` | Configure the TUI footer status bar with a custom command (see below) |
+| `/permissions` | Manage tool permissions (`allow`/`ask`/`deny`) |
 
 > Note: `/mode` controlled switching logic is primarily on Gateway side, see "`/mode` and `/switch`" below.
 
@@ -42,6 +47,9 @@ Identified by Gateway and forwarded to AgentServer and other backend capabilitie
 | `/diff` | View session changes by turn (see below) |
 | `/compact` | Compress current context (see below) |
 | `/init` | Project initialization (see below) |
+| `/branch` | Create a branch session from current conversation point (see below) |
+| `/rewind` | Rewind conversation to before a specific turn (see below) |
+| `/memory` | Memory management (see below) |
 
 ---
 
@@ -137,6 +145,19 @@ Manages directories AI can access for file read, edit, and execute operations.
   - `compressed`: Success, shows before/after token counts and savings ratio;
   - `noop`: No compression needed, context already optimal.
 
+### `/context` (Context Window Usage)
+
+- Usage: `/context` (no parameters, no subcommands).
+- Function: View the current session's context window occupancy and token usage details.
+- Data source: TUI requests Agent context statistics service via `command.context`, carrying the current `mode`.
+- Display contents:
+  - **Overview panel**: Context window occupancy percentage + progress bar; `context_window` (used / limit tokens), `occupancy` (rate), `messages` (count);
+  - **Token breakdown panel**: Shows token usage by `system_prompt`, `messages`, `tools`, and `total`;
+  - **DeepAgent occupancy details** (if available): Key-value list of `context_occupancy` fields;
+  - **DeepAgent usage details** (if available): Key-value list of `deepagent_usage` fields.
+- Threshold warning: When occupancy >= 90%, the overview title shows `Context window 90% full — consider /compact`.
+- Error handling: On request failure, displays `context failed: <error message>`.
+
 ### `/init` (Project Initialization)
 
 - Usage: `/init` (no parameters).
@@ -174,6 +195,79 @@ Manages directories AI can access for file read, edit, and execute operations.
   - Changes are written to `config.yaml` under `mcp.servers`;
   - After write, Agent config reload is triggered, and runtime MCP server bindings are synced accordingly.
 
+### `/branch` (Branch Session)
+
+- Usage: `/branch [name]`.
+- Alias: `/fork`.
+- Function: Create a branch session from the current conversation state, copying the current conversation history.
+- Constraints:
+  - Rejected when the session is busy (`session is busy`);
+  - Rejected when the current session has no conversation records.
+- Behavior:
+  1. Generate a new `session_id` and send `session.fork` RPC to the backend (carrying `source_session_id`, `target_session_id`, and optional title).
+  2. TUI automatically switches to the new branch session, clears the current transcript, and restores the branch history.
+  3. Prompts the user that they are now in the new branch, and informs them they can use `/resume <original_session_id>` to return to the original session.
+- Examples:
+  - `/branch` — Create an untitled branch
+  - `/branch fix-login-bug` — Create a branch named `fix-login-bug`
+
+### `/rewind` (Rewind Conversation)
+
+- Usage: `/rewind [turn_number]`.
+- Alias: `/checkpoint`.
+- Function: Rewind the current session to before a specified turn, supporting conversation-only, code-only, or both.
+- Constraints:
+  - Rejected when the session is busy (`session is busy`);
+  - Rejected when there are no conversation turns.
+- Interactive flow:
+  1. Without parameters, displays a list of all conversation turns (with timestamps and file change statistics) for the user to select the target turn.
+  2. After selecting, displays restore options:
+     - **Restore conversation and code** — Truncate conversation and restore files to their prior state;
+     - **Restore conversation only** — Only truncate conversation, files remain unchanged;
+     - **Restore code only** — Only restore files, conversation remains unchanged (shown only when the target turn has file changes);
+     - **Cancel** — Abort the operation.
+  3. Calls the corresponding backend RPC based on selection:
+     - `both` → `session.rewind_and_restore`
+     - `conversation` → `session.rewind`
+     - `code` → `session.restore_files`
+- After rewind: TUI clears the transcript and reloads history; if the rewinded content contains user input, it is automatically filled into the input box.
+- Limitation: Rewinding does not affect files edited manually or via bash commands.
+- Examples:
+  - `/rewind` — Interactive turn selection and restore mode confirmation
+  - `/rewind 2` — Directly rewind to before turn 2
+
+### `/memory` (Memory Management)
+
+- Alias: `/mem`.
+- Function: View and manage memory system status, memory files, toggle settings, and directory paths.
+- Subcommands:
+
+| Command | Description |
+|---|---|
+| `/memory` or `/memory edit` | Interactively select and edit a memory file (lists available files when no path is given) |
+| `/memory list` | List all memory files (with size, line count, modification time) |
+| `/memory edit <path>` | Open the specified memory file for editing (via `$EDITOR`) |
+| `/memory status` | Show detailed memory system status |
+| `/memory toggle [key]` | Toggle memory system switches (lists togglable items when no key is given) |
+| `/memory open` | Show memory system directory paths |
+
+- `status` display contents:
+  - Current mode, storage engine, enabled status, proactive status, forbidden filter status;
+  - Index status (FTS5, Vector, Cache), file count, chunk count;
+  - Statistics for Project Memory, Coding Memory, Auto Memory, and External Memory.
+- `toggle` available keys:
+  - `memory_enabled` — Master memory switch;
+  - `memory_proactive` — Proactive memory switch;
+  - `memory_forbidden_enabled` — Forbidden filter switch.
+  - After toggling, a prompt is shown if a session restart is required for the change to take effect.
+- Examples:
+  - `/memory` — Interactively edit a memory file
+  - `/memory list` — List memory files
+  - `/memory edit memory/MEMORY.md` — Edit a specific memory file
+  - `/memory status` — View detailed status
+  - `/memory toggle memory_enabled` — Toggle the master memory switch
+  - `/memory open` — View memory directory paths
+
 ### `/skills` (Skills Management)
 
 Manage skills lifecycle: listing, installing, uninstalling, and marketplace source management.
@@ -182,8 +276,8 @@ Manage skills lifecycle: listing, installing, uninstalling, and marketplace sour
 
 | Command | Description |
 |---|---|
-| `/skills` or `/skills list` | List currently installed skills |
-| `/skills install <spec>` | Install a skill from marketplace (e.g., `my-skill@marketplace`) |
+| `/skills` or `/skills list` | List skills (grouped: Installed / Available to install) |
+| `/skills install <skill>` or `/skills install <skill@marketplace>` or `/skills install <path_or_url>` | Install a skill: builtin skills accept bare name, marketplace skills use `<name>@<marketplace>` format, local paths and remote URLs are auto-detected |
 | `/skills uninstall <name>` | Uninstall a skill by name |
 | `/skills marketplace` or `/skills marketplace list` | List marketplace sources (name, URL, enabled status, last updated) |
 | `/skills marketplace add <name> <url>` | Add a new marketplace source |
@@ -193,10 +287,20 @@ Manage skills lifecycle: listing, installing, uninstalling, and marketplace sour
 
 #### Concepts
 
-- **Skill**: An extension capability that can be installed from marketplace sources, providing additional functionality to the agent.
+- **Skill**: An extension capability that can be installed from marketplace sources, builtin directory, or local paths, providing additional functionality to the agent.
+- **Builtin skill**: A preset skill shipped with the software. Install using bare skill name (e.g., `/skills install advanced-daily-report`); no marketplace source needed.
 - **Marketplace source**: A remote repository (typically a Git URL) that hosts available skills. Each source has a name, URL, and enabled/disabled state.
-- **Spec**: The install identifier format `<skill>@<marketplace>` used when installing a skill from a specific marketplace.
-- **Install location**: The directory where a skill is stored after installation.
+- **Spec**: The install identifier format `<skill>@<marketplace>` used when installing from a marketplace; for builtin skills, omit `@` and the system auto-detects as `@builtin`.
+- **Local install**: Use `/skills install <path>` to install from a local directory (must contain `SKILL.md`) or remote archive URL; paths/URLs are auto-detected and routed to the local import flow.
+- **Install location**: The directory where a skill is stored after installation (`~/.jiuwenclaw/agent/jiuwenclaw_workspace/skills/`).
+- **Source tag**: Each skill in the list is tagged with its source: `[builtin]` = builtin, `[local]` = imported, `[project]` or marketplace name = other.
+
+#### Grouped List Display
+
+`/skills list` returns skills in two groups:
+
+1. **Installed**: Skills already in the user's skills directory, ready to use.
+2. **Available to install**: Builtin skills not yet installed, plus marketplace skills available for installation. Use `/skills install` first.
 
 #### IM vs TUI Differences
 
@@ -205,22 +309,28 @@ Both ultimately request `skills.list`, but trigger methods and display differ.
 | Side | Trigger Method | Behavior |
 |---|---|---|
 | IM (Feishu etc. controlled channel) | Exact match `/skills list` (whitespace normalized first) | Gateway intercepts control message and requests `skills.list`, results shown as IM notification/card; standalone `/skills` doesn't go through this control path. |
-| TUI (CLI built-in) | Input `/skills` | Locally executes built-in command and calls `skills.list`, displays as list view in session (title `Skills`); shows `No skills returned` when empty. |
+| TUI (CLI built-in) | Input `/skills` | Locally executes built-in command and calls `skills.list`, displays as grouped list view in session (titles `Installed Skills` and `Available Skills`); shows `No installed skills` when empty. |
 
 For other subcommands (`/skills install`, `/skills uninstall`, `/skills marketplace add/remove/toggle`, `/skills use`), Gateway does **not** intercept them — on the IM side they are treated as regular chat messages. These subcommands are only functional on the TUI (CLI built-in) and Web UI paths, where they send RPC requests directly to AgentServer.
 
 #### Notes
 
 - **Timeout**: `install`, `uninstall`, and `marketplace toggle` requests have a 120-second timeout on the TUI side; other subcommands have no explicit timeout.
+- **Builtin auto-detection**: When installing with `/skills install <skill>` (no `@`), the system checks if it matches a builtin skill and redirects to the builtin install flow; if not, a format hint is returned.
+- **Path/URL auto-detection**: When installing with `/skills install <path>` (local path like `/path/to/skill` or `C:\skill`, or remote URL `https://...`), the system automatically routes to the local import flow.
 - **Cache cleanup**: `marketplace remove` sends `{ name, remove_cache: true }` to also clear the local cache for that source.
 - **Auto-refresh**: `marketplace add`, `marketplace remove`, and `marketplace toggle` automatically re-list marketplace sources after a successful operation.
 - **Offline handling**: `/skills use` checks connection status; if offline, shows `offline: waiting for reconnect before sending /skills use request`.
 
 #### Examples
 
-- `/skills` — List installed skills
-- `/skills list` — List installed skills (explicit subcommand)
+- `/skills` — List skills (grouped: Installed / Available)
+- `/skills list` — List skills (explicit subcommand)
+- `/skills install advanced-daily-report` — Install a builtin skill (bare name auto-detect)
+- `/skills install advanced-daily-report@builtin` — Install a builtin skill (explicit format)
 - `/skills install my-skill@marketplace` — Install a skill from marketplace
+- `/skills install /path/to/my-skill` — Install a skill from local directory
+- `/skills install https://example.com/skill.zip` — Install a skill from remote URL
 - `/skills uninstall my-skill` — Uninstall a skill
 - `/skills marketplace list` — List marketplace sources
 - `/skills marketplace add community https://github.com/user/skills-repo` — Add a marketplace source named "community"
@@ -229,14 +339,286 @@ For other subcommands (`/skills install`, `/skills uninstall`, `/skills marketpl
 - `/skills marketplace toggle community off` — Disable the "community" marketplace source
 - `/skills use my-skill, Code and execute a Hello World program.` — Use a skill to execute a query
 
+### `/export` (Export Conversation)
+
+Export the current conversation to a file or clipboard.
+
+#### Usage
+
+- `/export` — Copy conversation to clipboard (no filename argument)
+- `/export <filename>` — Save conversation to a `.txt` file in workspace directory
+
+#### Subcommands
+
+| Command | Description |
+|---|---|
+| `/export` | Copy entire conversation to clipboard; if clipboard unavailable, prompt to specify a filename |
+| `/export <filename>` | Write conversation to `filename.txt` in workspace directory; if filename lacks `.txt` extension, it is automatically appended |
+
+#### Output Format
+
+The exported text renders each conversation entry with a timestamp and role prefix:
+
+- `[User] <timestamp>` — User input
+- `[Assistant] <timestamp>` — Assistant response
+- `[Thinking] <timestamp>` — Internal reasoning trace
+- `[Tools] <timestamp>` — Tool calls with name, summary, and truncated result (max 500 chars)
+- `[System] / [Error] / [Info] <timestamp>` — System messages
+- `[Diff] <timestamp>` — Per-turn file change summary
+
+#### Tab Completion
+
+When typing `/export ` and pressing Tab, auto-generated filename suggestions appear:
+
+- `<timestamp>-<sanitized-first-prompt>.txt` — Based on the first user message (truncated to 50 chars, sanitized)
+- `conversation-<timestamp>.txt` — Generic timestamped name
+
+Timestamp format: `YYYY-MM-DD-HHmmss`.
+
+#### Behavior Details
+
+- **Clipboard fallback**: If no filename is given and clipboard is unavailable, an error message prompts the user to specify a filename instead.
+- **Filename normalization**: Any extension is replaced with `.txt`; e.g., `/export my-chat.json` becomes `my-chat.txt`.
+- **Write location**: Files are saved to `ctx.getWorkspaceDir()` (or `process.cwd()` as fallback).
+
+#### Examples
+
+- `/export` — Copy conversation to clipboard
+- `/export my-chat` — Save to `my-chat.txt` in workspace
+- `/export 2026-05-09-debug-session.txt` — Save with explicit timestamp name
+
+### `/status` (Show Status)
+
+Display jiuwenclaw runtime status: overview, usage statistics, or config editor.
+
+#### Usage
+
+- `/status` or `/status overview` — Show core identity, model/API info, MCP servers, and config sources
+- `/status usage` — Show session token usage statistics
+- `/status config` — Enter interactive config editor
+
+#### Subcommands
+
+| Command | Description |
+|---|---|
+| `/status` | Show full status overview (version, session, model, connection, MCP servers, config) |
+| `/status overview` | Same as `/status` — explicit overview subcommand |
+| `/status usage` | Show session token usage (input, output, total, per-model breakdown) |
+| `/status config` | Enter interactive config editor (same as `/config edit`) |
+
+#### Overview Display Sections
+
+When `/status` is run, four key-value panels are displayed:
+
+1. **Core identity**: version, session ID, session name (or prompt to `/rename`), cwd, current mode
+2. **Model & API**: model name, provider, API base URL, connection status
+3. **MCP servers**: each server's name, transport type, and enabled/disabled state
+4. **Config sources**: config file path and all settings source paths
+
+#### Usage Display
+
+`/status usage` shows token consumption for the current session:
+
+- Total input tokens, output tokens, and total tokens
+- Per-model breakdown: model name, token count, input/output split
+
+#### Interactive Mode
+
+If the TUI provides an interactive StatusView (`ctx.enterStatusView`), `/status` opens the full status UI with tabs. The subcommand argument selects the initial tab:
+
+- `/status` → opens on overview tab
+- `/status usage` → opens on usage tab
+- `/status config` → opens on config tab
+
+If StatusView is unavailable, the command falls back to inline key-value display.
+
+#### Data Sources
+
+- Overview data: `command.status` RPC request to AgentServer
+- Usage data: `ctx.getUsageSummary()` from local session tracking
+- Config data: `config.get` RPC request to AgentServer
+
+#### Examples
+
+- `/status` — Show full overview
+- `/status overview` — Show overview (explicit)
+- `/status usage` — Show token usage
+- `/status config` — Open config editor
+
+### `/statusline` (TUI Footer Status Bar)
+
+Configure the TUI footer status bar with a custom shell command that dynamically displays session info (mode, model, cwd, etc.), modeled after Claude Code's `/statusline` implementation.
+
+#### Subcommands
+
+| Command | Description |
+|---|---|
+| `/statusline` or `/statusline get` | View current status line configuration |
+| `/statusline set <shell-command>` | Set the status line command (its output will appear in the TUI footer) |
+| `/statusline clear` | Remove the status line configuration (footer bar will hide) |
+| `/statusline help` | Show the JSON input fields reference |
+
+#### Concepts
+
+- **StatusLine**: A one-line text area at the bottom of the TUI that displays user-defined dynamic information. When a custom statusline is configured, the built-in status line is automatically hidden to avoid redundant information.
+- **Shell command**: The configured shell command is automatically executed every 2 seconds; its stdout output is rendered as the status bar text.
+- **JSON input**: Each execution receives current session info as JSON, which can be parsed with `jq` or other tools. On POSIX (Linux/macOS), JSON is passed via stdin pipe; on Windows, due to MSYS2 pipe inheritance limitations, the system automatically writes JSON to a temp file and replaces `$(cat)` in the command with `$(cat "filepath")` — the user doesn't need to modify their command format.
+- **Prerequisites**: Requires `jq` (https://stedolan.github.io/jq/) for JSON parsing; Windows users also need to add Git Bash's `usr\bin` directory to the system PATH (e.g., `E:\Git\usr\bin`).
+
+#### JSON Input Fields
+
+The command receives the following JSON data on each execution:
+
+| Field | Description |
+|---|---|
+| `session_id` | Current session ID |
+| `session_name` | Session title (set via `/rename`) |
+| `cwd` | Current working directory |
+| `mode` | Current mode (`agent.plan` / `agent.fast` / `code.plan` / `code.normal` / `team`) |
+| `model` | Current model name |
+| `provider` | Model provider |
+| `version` | jiuwenclaw version |
+| `connection` | Connection status (`idle` / `connecting` / `connected` / `reconnecting` / `auth_failed`) |
+| `theme` | Current theme name |
+| `accent_color` | Current accent color name |
+| `transcript_mode` | Transcript display mode (`compact` / `detailed`) |
+| `transcript_fold_mode` | Fold mode (`none` / `tools` / `thinking` / `all`) |
+| `is_processing` | Whether agent is working (`true` / `false`) |
+| `is_paused` | Whether paused (`true` / `false`) |
+| `is_interrupted` | Whether interrupted (`true` / `false`) |
+| `cancellable_work` | Whether there is running work (`true` / `false`) |
+| `streaming_state` | Streaming state (`idle` / `streaming` / `tool_call` / `tool_result`) |
+| `last_error` | Last error message or `null` |
+| `evolution_status` | Evolution status (`idle` / `running`) |
+| `active_subtask_count` | Number of active subtasks |
+| `todo_count` | Number of todo items |
+| `usage.total_input_tokens` | Total input tokens for session |
+| `usage.total_output_tokens` | Total output tokens for session |
+| `usage.total_tokens` | Total tokens for session |
+
+#### Command Writing Template
+
+Use the following template to write commands. `input=$(cat)` reads JSON into a variable, then `echo "$input" | jq -r .field` extracts each field. `// "default"` is jq's fallback syntax — when a field is null or empty, the default value is used.
+
+**General formula**:
+
+```
+/statusline set 'input=$(cat); field1=$(echo "$input" | jq -r '.field1 // "default"'); field2=$(echo "$input" | jq -r '.field2 // "default"'); echo "format string"'
+```
+
+**Recommended universal command** (shows mode, model, tokens, connection):
+
+```
+/statusline set 'input=$(cat); mode=$(echo "$input" | jq -r '.mode // "?"'); model=$(echo "$input" | jq -r '.model // "?"'); tokens=$(echo "$input" | jq -r '.usage.total_tokens // 0'); conn=$(echo "$input" | jq -r '.connection // "?"'); echo "$mode | $model | tokens:$tokens | $conn"'
+```
+
+**Field extraction quick reference**:
+
+| Field to display | jq syntax |
+|---|---|
+| Session name | `jq -r '.session_name // ""'` |
+| Working directory | `jq -r '.cwd // "?"'` |
+| Mode | `jq -r '.mode // "?"'` |
+| Model name | `jq -r '.model // "?"'` |
+| Provider | `jq -r '.provider // "?"'` |
+| Version | `jq -r '.version // "?"'` |
+| Connection | `jq -r '.connection // "?"'` |
+| Is processing | `jq -r '.is_processing // false'` |
+| Is paused | `jq -r '.is_paused // false'` |
+| Streaming state | `jq -r '.streaming_state // "idle"'` |
+| Last error | `jq -r '.last_error // ""'` |
+| Evolution status | `jq -r '.evolution_status // "idle"'` |
+| Subtask count | `jq -r '.active_subtask_count // 0'` |
+| Todo count | `jq -r '.todo_count // 0'` |
+| Total input tokens | `jq -r '.usage.total_input_tokens // 0'` |
+| Total output tokens | `jq -r '.usage.total_output_tokens // 0'` |
+| Total tokens | `jq -r '.usage.total_tokens // 0'` |
+
+#### More Examples
+
+- `/statusline` — View current configuration
+- `/statusline set 'input=$(cat); model=$(echo "$input" | jq -r .model); echo "$model"'` — Show model name only
+- `/statusline set 'input=$(cat); proc=$(echo "$input" | jq -r .is_processing); model=$(echo "$input" | jq -r .model); echo "$proc | $model"'` — Show processing state and model
+- `/statusline set 'input=$(cat); err=$(echo "$input" | jq -r .last_error); if [ "$err" != "null" ] && [ "$err" != "" ]; then echo "error: $err"; else echo "ok"; fi'` — Show error when present, otherwise "ok"
+- `/statusline clear` — Remove status line configuration
+- `/statusline help` — View JSON input fields reference
+
+#### Behavior Details
+
+- **Poll frequency**: The configured command runs every 2 seconds automatically.
+- **Timeout protection**: Individual executions timeout after 3 seconds; no impact on subsequent polls.
+- **Output limit**: Command output over 10KB is truncated; display width auto-fits the TUI terminal width.
+- **Failure silence**: Command execution failures don't show errors; previous successful output is kept or the bar hides.
+- **Persistence**: Configuration is saved in `~/.jiuwenclaw-tui/config.json` under the `statusLine` field; restored on TUI restart.
+- **Alias**: `/sl`
+- **Windows adaptation**: The system automatically replaces `$(cat)` with reading from a temp file; the user's command format remains unchanged. Git Bash's `usr\bin` must be in the system PATH.
+
+#### Config File Structure
+
+```json
+{
+  "statusLine": {
+    "type": "command",
+    "command": "input=$(cat); mode=$(echo \"$input\" | jq -r '.mode // \"?\"'); model=$(echo \"$input\" | jq -r '.model // \"?\"'); tokens=$(echo \"$input\" | jq -r '.usage.total_tokens // 0'); echo \"$mode | $model | tokens:$tokens\"",
+    "padding": 0
+  }
+}
+```
+
 ---
+
+
+### `/auto-harness` (Task Management)
+
+Manage Auto-Harness task execution with support for both one-time and scheduled recurring modes.
+
+#### Subcommands
+
+| Command | Description |
+|---|---|
+| `/auto-harness run <query>` | Execute a one-time task (runs immediately, no repetition after completion) |
+| `/auto-harness schedule start --interval <hours> [--immediate] <query>` | Create a scheduled task |
+| `/auto-harness schedule list` | List all tasks (includes one-time and scheduled tasks) |
+| `/auto-harness schedule status <task_id>` | View task details |
+| `/auto-harness schedule logs <task_id> [--current \| --history <n>]` | View execution logs |
+| `/auto-harness schedule cancel <task_id>` | Cancel currently running task |
+| `/auto-harness schedule delete <task_id>` | Delete task |
+
+#### Concepts
+
+- **One-time Task**: Executes immediately once, status becomes `completed` after finish, no repetition
+- **Scheduled Task**: An Auto-Harness task that automatically executes periodically at specified intervals
+- **Execution**: Each trigger produces a single execution with its own execution_id
+- **Log types**:
+  - `--current`: Logs for the currently running execution
+  - `--history 0`: Logs for the most recently completed execution
+  - `--history 1`: Logs for the second most recent execution
+
+#### Configuration Requirements
+
+First-time use requires configuring the following git/gitcode information (auto-guided):
+- git.user_name: Git commit username
+- git.user_email: Git commit email
+- git.fork_owner: Fork repository owner
+- GitCode Access Token (can be configured via environment variable)
+
+#### Examples
+
+- `/auto-harness run Optimize Context Engine offload feature` — Execute a one-time task, no repetition after completion
+- `/auto-harness schedule start --interval 4 Optimize Context Engine offload feature` — Create a task that runs every 4 hours
+- `/auto-harness schedule start --interval 4 --immediate Optimize Context Engine offload feature` — Create task and execute immediately
+- `/auto-harness schedule list` — View all tasks
+- `/auto-harness schedule status sch_abc123` — View task details
+- `/auto-harness schedule logs sch_abc123 --current` — Stream current execution logs
+- `/auto-harness schedule logs sch_abc123 --history 0` — View most recent execution logs
+- `/auto-harness schedule cancel sch_abc123` — Cancel running task
+- `/auto-harness schedule delete sch_abc123` — Delete task
 
 ## Planned Features
 
 | Command | Description |
 |---|---|
 | `/btw` | Ask question |
-| `/context` | Context status view |
-| `/export` | Export related files |
 | `/memory` | Memory management |
+| `/export` | Export related files |
 | `/permissions` | Permission management |

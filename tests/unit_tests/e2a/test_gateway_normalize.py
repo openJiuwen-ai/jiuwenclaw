@@ -2,8 +2,8 @@
 
 import time
 
-from jiuwenclaw.e2a.agent_compat import e2a_to_agent_request
-from jiuwenclaw.e2a.gateway_normalize import (
+from jiuwenclaw.common.e2a.agent_compat import e2a_to_agent_request
+from jiuwenclaw.common.e2a.gateway_normalize import (
     E2A_FALLBACK_FAILED_KEY,
     E2A_INTERNAL_CONTEXT_KEY,
     E2A_LEGACY_AGENT_REQUEST_KEY,
@@ -13,8 +13,8 @@ from jiuwenclaw.e2a.gateway_normalize import (
     message_to_e2a_or_fallback,
     message_to_legacy_agent_dict,
 )
-from jiuwenclaw.e2a.models import E2AEnvelope
-from jiuwenclaw.schema.message import Message, ReqMethod
+from jiuwenclaw.common.e2a.models import E2AEnvelope
+from jiuwenclaw.common.schema.message import Message, ReqMethod
 
 
 def test_message_to_e2a_or_fallback_basic():

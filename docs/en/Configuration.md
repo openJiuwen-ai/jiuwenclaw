@@ -1,298 +1,401 @@
-# Configuration
+# Configuration Information
 
-JiuwenClaw reads settings from `config/config.yaml`, `.env`, and the web UI. This document explains **what you can change in the UI**, **what must be edited in files**, and what each option does.
+JiuwenClaw configuration serves as the foundational setup for your interactions with the agent. Proper configuration allows you to connect to various model services, enable multimodal capabilities, integrate third-party services, and adjust system behavior parameters.
+
+This document details each configuration option in the JiuwenClaw frontend panel to help you get started quickly and fully leverage the system's capabilities.
 
 ---
 
-## 1. Configurable in the web UI
+## 1. Configuration entry
 
-These can be changed in the web app; values are written back to `.env` or config as appropriate.
+Open **Configuration** from the left navigation bar to view and edit settings for models, third-party services, free search, and more. Click **Save** after changes; whether you need to wait for services to become ready depends on your deployment.
 
-**Path**: left sidebar → **Configuration**
+![Configuration Panel](../assets/images/config.png)
 
-![Configuration](../assets/images/config.png)
+The configuration panel contains the following main sections:
 
-**Saved to**: `.env` (environment variables)
+- **Model Configuration**: Default chat model, video/audio/vision models (see [2. Model Configuration](#2-model-configuration))
+- **Embedding Configuration**: Vector embedding service (see [3. Embedding Configuration](#3-embedding-configuration))
+- **Third-Party Services**: Jina, Bocha, Serper, Perplexity, GitHub, etc. (see [4. Third-Party Service Configuration](#4-third-party-service-configuration))
+- **Self-Evolution Configuration**: Automatic skill improvement (see [5. Self-Evolution Configuration](#5-self-evolution-configuration))
+- **Context Compression**: Dialogue history management (see [6. Context Compression](#6-context-compression))
+- **Tool Security Guardrails**: Tool invocation permission checks (see [7. Tool Security Guardrails](#7-tool-security-guardrails))
 
-| Field | Environment variable | Description |
-|--------|------------------------|-------------|
-| `api_base` | `API_BASE` | Model API base URL (e.g. `https://api.deepseek.com`) |
-| `api_key` | `API_KEY` | Model API key |
-| `model` | `MODEL_NAME` | Model name (e.g. `deepseek-chat`) |
-| `model_provider` | `MODEL_PROVIDER` | Provider (e.g. `OpenAI`) |
-| `embed_api_base` | `EMBED_API_BASE` | Embedding API base URL |
-| `embed_api_key` | `EMBED_API_KEY` | Embedding API key |
-| `embed_model` | `EMBED_MODEL` | Embedding model name |
-| `video_model` | `VIDEO_MODEL_NAME` | Video processing model |
-| `audio_model` | `AUDIO_MODEL_NAME` | Audio processing model |
-| `vision_model` | `VISION_MODEL_NAME` | Vision model |
-| `image_gen_model` | `IMAGE_GEN_MODEL_NAME` | Image generation model |
-| `jina_api_key` | `JINA_API_KEY` | Jina search API key |
-| `serper_api_key` | `SERPER_API_KEY` | Serper search API key |
-| `perplexity_api_key` | `PERPLEXITY_API_KEY` | Perplexity API key |
-| `github_token` | `GITHUB_TOKEN` | GitHub PAT; SkillNet search/install uses the GitHub API |
-| `free_search_proxy_url` | `FREE_SEARCH_PROXY_URL` | Optional HTTP/HTTPS proxy for free search, webpage fetch, and SkillNet network requests. The UI asks for username/password and stores `http://username:password@proxyhk.huawei.com:8080`. |
-| `evolution_auto_scan` | `EVOLUTION_AUTO_SCAN` | Auto-scan evolvable skills after each turn (`true`/`false`) |
+> 💡 **Tip**: Model configuration (`api_base`, `api_key`, `model`, `model_provider`) is required; all other configurations are optional.
 
-**Note**: After saving, the backend restarts to load new settings. Model fields (`api_base`, `api_key`, `model`, `model_provider`) are required.
+---
 
-### Multi-model management and aliases
+## 2. Model Configuration
 
-The **model list** block in the Configuration panel supports maintaining multiple models simultaneously. Fields for each model entry:
+> Before using JiuwenClaw, you must obtain an API key from your chosen model provider. Visit the provider's official website and follow instructions to apply for an API key.
 
-| Field | Required | Description |
-|-------|----------|-------------|
-| `model_name` | Yes | API-level model identifier (e.g. `gpt-4o`, `deepseek-chat`) |
-| `alias` | No | Display name / switch identifier; defaults to `model_name` if left empty |
-| `api_base` | Yes | API base URL for this model |
-| `api_key` | Yes | API key for this model |
-| `model_provider` | Yes | Provider (e.g. `OpenAI`, `DeepSeek`) |
-| `temperature` | No | Sampling temperature, default `0.95` |
+### 2.1 Supported Model Types
 
-**`alias` rules**:
-- If left blank, the stored value is automatically set to `model_name`.
-- Must be globally unique across all configured models: cannot match another model's `alias` or `model_name`.
-- When switching models (web dropdown / CLI `\model <name>`), either `alias` or `model_name` can be used as the identifier.
+JiuwenClaw supports multiple model types to meet diverse scenario requirements:
 
-Multi-model configuration is saved to the `models.defaults` list in `config.yaml`. Example:
+| Model Type       | Purpose                                                                 | Capability Requirements                                                                 | Required |
+| ---------------- | ----------------------------------------------------------------------- | ---------------------------------------------------------------------------------------- | -------- |
+| **Default Model** | Core dialogue model; handles text chat, task planning, tool calling, etc | Must support **Function Calling** and multi-turn dialogue                                 | ✅ Yes    |
+| **Video Model**   | Video understanding and analysis; supports video Q&A, scene detection    | Must support **video understanding** and process video input                             | ⭕ No     |
+| **Audio Model**   | Speech recognition and processing; supports ASR, audio content analysis   | Must support **speech recognition / audio understanding**                                 | ⭕ No     |
+| **Vision Model**  | Image understanding and analysis; supports image Q&A, OCR, captioning    | Must support **image understanding** and process image input                              | ⭕ No     |
+| **Image Generation Model** | Generate images from text descriptions; supports AI painting, image creation | Must support **image generation** and create images from text | ⭕ No     |
 
-```yaml
-models:
-  defaults:
-    - alias: my-gpt          # display name; used for switching in both UI and CLI
-      model_client_config:
-        api_base: https://api.openai.com/v1
-        api_key: ${API_KEY}
-        model_name: gpt-4o
-        client_provider: OpenAI
-        timeout: 1800
-        verify_ssl: false
-      model_config_obj:
-        temperature: 0.95
+> 💡 **Tip**: The default model is essential for system operation and must be configured correctly. Video, audio, vision, and image generation models are optional; configure them only when multimodal capabilities are needed.
+
+### 2.2 Configuration Fields
+
+Each model type supports the following parameters:
+
+| Field              | Description                  | Remarks                                                                                      |
+| ------------------ | ---------------------------- | -------------------------------------------------------------------------------------------- |
+| `api_base`         | Base URL for model API        | Use the provider's API endpoint; **do not include `/chat/completions`**; appended automatically |
+| `api_key`          | Model API key                | Obtained from the model provider; keep confidential                                           |
+| `model`            | Model identifier             | Use exact model ID such as `gpt-4o`, `claude-3-opus`, `deepseek-chat`                                         |
+| `model_provider`   | Model provider type          | Supports `OpenAI`, `Azure`, `SiliconFlow`, etc., for API format adaptation                    |
+
+> 💡 **Test Function**: The configuration panel provides a **Test button**. After filling in the model configuration, you can click "Test" to verify the API connection. The system will send a simple test request and display "Test Successful" if successful, or show error information otherwise.
+
+![Model Test Configuration Example](../assets/images/config_model_connect_test.png)
+
+#### Configuration Examples
+
+**OpenAI-compatible API**
+
+```
+api_base: https://api.openai.com/v1
+api_key: sk-your-openai-api-key
+model: gpt-4o
+model_provider: OpenAI
 ```
 
-The first entry in the list is the default model; use the UI to drag-reorder or click "Set as default" to change it.
+> 💡 **Tip**: Most model providers offer OpenAI-compatible APIs. You can adjust `api_base` and `model` parameters based on your actual provider.
 
-## 2. Not configurable in the web UI
+### 2.3 Multi-Model Management and Aliases
 
-Edit **`config/config.yaml`** or **`.env`** directly; there is no UI for these.
+The **Model List** section in the configuration panel supports maintaining multiple models simultaneously for quick switching between different models.
 
-### 2.1 `config.yaml` — file-only fields
+Each model entry contains the following fields:
 
-| Path | Description |
-|------|-------------|
-| `react.agent_name` | Agent name, default `main_agent` |
-| `react.max_iterations` | Max iterations, default 100 |
-| `react.context_engine_config.enable_reload` | Enable context reload |
-| `react.evolution.enabled` | Enable online skill evolution |
-| `react.evolution.skill_base_dir` | Skill root, default `agent/skills` |
-| `tools` | Enabled tools (e.g. `todo`, `skill`) |
-| `browser.remote_debugging_address` | Remote debugging address |
-| `browser.remote_debugging_port` | Remote debugging port |
-| `browser.user_data_dir` | Chrome user data directory |
-| `browser.profile_directory` | Chrome profile directory |
+| Field | Required | Description |
+|------|---------|------|
+| `model_name` | Yes | Model name at the API layer (e.g., `gpt-4o`, `deepseek-chat`) |
+| `alias` | No | Display name / switch identifier; defaults to `model_name` if empty |
+| `api_base` | Yes | API endpoint for this model |
+| `api_key` | Yes | API key for this model |
+| `model_provider` | Yes | Provider (e.g., `OpenAI`, `DeepSeek`) |
+| `temperature` | No | Sampling temperature, default `0.95` |
 
-See also:
-- [Modes](Modes.md) — `modes` section configuration
-- [Tool Permissions & Security](ToolPermissionsSecurity.md) — `permissions` section configuration
+**`alias` Rules**:
+- If empty, it automatically defaults to `model_name` when saved;
+- Must be globally unique across all configured models: cannot duplicate another model's `alias` or `model_name`;
+- When switching models (Web dropdown / CLI `\model <name>`), you can use either `alias` or `model_name` as the identifier.
 
-### 2.2 `models` section (Multi-Model Configuration)
+The first item in the list is the default model; you can drag to reorder or click "Set as Default" to change the default.
 
-Configure multiple model profiles for different use cases (main agent, video, audio, vision, image generation).
+### 2.4 Multimodal Model Usage Examples
 
-| Path | Description |
-|------|-------------|
-| `models.default.model_client_config` | Default (main) model connection: `api_base`, `api_key`, `model_name`, `client_provider`, `timeout`, `verify_ssl`, `custom_headers` |
-| `models.default.model_config_obj` | Default model generation params: `temperature`, etc. |
-| `models.video.model_client_config` | Video processing model |
-| `models.audio.model_client_config` | Audio processing model |
-| `models.vision.model_client_config` | Vision / image understanding model |
-| `models.image_gen.model_client_config` | Image generation model |
-| `models.image_gen.model_config_obj` | Image generation params: `temperature`, etc. |
+Once video, audio, or vision models are configured, JiuwenClaw enables corresponding multimodal features automatically.
 
-Each sub-model section supports the same `model_client_config` keys: `api_base`, `api_key`, `model_name`, `client_provider`, `timeout`, `verify_ssl`. Environment variable substitution (e.g. `${VIDEO_API_BASE}`) is used throughout.
+#### Video Model
 
-### 2.3 memory.external section (External Memory)
+Using **GLM-4.6V-Flash11** video understanding API as an example:
 
-| Path | Description |
-|------|-------------|
-| `memory.engine` | Engine switch: `builtin` \| `external` \| `both` \| `none` |
-| `memory.external.provider` | Provider name: `openjiuwen` \| `mem0` \| `openviking` \| `<plugin>` |
-| `memory.external.user_id` | Data isolation identifier |
-| `memory.external.scope_id` | Scope identifier |
+```
+api_base: https://open.bigmodel.cn/api/paas/v4
+api_key: your-zhipu-api-key
+model: GLM-4.6V-Flash11
+model_provider: ZhiPu
+```
 
-See [Memory](Memory.md) for details.
+When you send a video file to JiuwenClaw, the system will invoke the video model for analysis:
 
-### 2.4 team.runtime section (Distributed Team)
+```
+User: Analyze this video and list the main scenes.
+[Attachment: meeting_recording.mp4]
 
-| Path | Description |
-|------|-------------|
-| `team.runtime.mode` | Runtime mode: `local` \| `distributed` |
-| `team.runtime.role` | Process role: `leader` \| `teammate` |
-| `team.runtime.member_name` | Teammate name identifier |
-| `team.teammate_mode` | Teammate build method: `build_mode` |
-| `team.spawn_mode` | Teammate process mode: `inprocess` |
+JiuwenClaw: Based on video analysis, the main scenes are:
+1. Opening remarks (0:00–2:30)
+2. Project progress report (2:30–8:15)
+3. Issue discussion (8:15–12:00)
+4. Summary and next steps (12:00–15:00)
+```
 
-See [Distributed Team](DistributedTeam.md) for details.
+![Video Model Configuration Example](../assets/images/config_video_model_demo.png)
 
-### 2.5 task_memory section (Experience Memory)
+#### Audio Model
 
-| Path | Description |
-|------|-------------|
-| `task_memory.enabled` | Enable experience memory tools, default `true` |
-| `task_memory.llm_model` | LLM model for experience memory (empty = main model) |
-| `task_memory.embedding_model` | Embedding model for experience memory |
-| `task_memory.api_key` | API key for experience memory (empty = main key) |
-| `task_memory.api_base` | API base URL for experience memory (empty = main base) |
+Using **GLM-ASR-2512** audio model as an example:
 
-When enabled, the agent gains `experience_retrieve`, `experience_learn`, and `experience_clear` tools. Available retrieval algorithms: `ACE`, `ReasoningBank`, `ReMe`.
+```
+api_base: https://open.bigmodel.cn/api/paas/v4
+api_key: your-zhipu-api-key
+model: glm-asr-2512
+model_provider: ZhiPu
+```
 
-### 2.6 email_settings section (Email)
+When you send an audio file, the system will invoke the audio model for speech recognition or analysis:
 
-| Path | Description |
-|------|-------------|
-| `email_settings.email_address` | Sender email address |
-| `email_settings.token` | Email authorization code |
-| `email_settings.smtp_server` | SMTP server, default `smtp.gmail.com` |
-| `email_settings.port` | SMTP port, default `587` |
+```
+User: Transcribe this audio recording.
+[Attachment: voice_message.m4a]
 
-### 2.7 extensions section (Extension Packages)
+JiuwenClaw: Transcription:
+"Project review meeting at 3 PM tomorrow in Conference Room B. Please prepare materials in advance..."
+```
 
-| Path | Description |
-|------|-------------|
-| `extensions.extension_dirs` | Extension search directories, semicolon-separated (e.g. `E:/a;D:/b`), maps to env var `EXTENSION_DIRS` |
+![Audio Model Configuration Example](../assets/images/config_audio_model_demo.png)
 
-### 2.8 mcp section (MCP Servers)
+#### Vision Model
 
-| Path | Description |
-|------|-------------|
-| `mcp.servers` | MCP server list; each entry includes `name`, `enabled`, `transport` (`stdio`/`sse`/`streamable-http`), `command`, `args`, `url`, etc. |
+Using **GLM-4.6V-Flash11** vision model as an example:
 
-Browser MCP runtime is configured via environment variables (see below).
+```
+api_base: https://open.bigmodel.cn/api/paas/v4
+api_key: your-zhipu-api-key
+model: GLM-4.6V-Flash11
+model_provider: ZhiPu
+```
 
-### 2.9 updater section (Auto-Update)
+```
+User: Extract data from the table in this image.
+[Attachment: data_chart.png]
 
-| Path | Description |
-|------|-------------|
-| `updater.enabled` | Enable auto-update, default `true` |
-| `updater.repo_owner` | GitHub repository owner |
-| `updater.repo_name` | GitHub repository name |
-| `updater.asset_name_pattern` | Release asset name pattern |
-| `updater.timeout_seconds` | Update check timeout, default `20` |
+JiuwenClaw: Extracted sales data:
+- January: 1.2M
+- February: 1.35M
+- March: 1.48M
+Showing an upward trend...
+```
 
----
+![Vision Model](../assets/images/config-vision-model-test-en.png)
 
-### 2.10 gateway section (Gateway Routing)
+#### Image Generation Model
 
-| Key | Type | Default | Description |
-|-----|------|---------|-------------|
-| `gateway.session_map_scope` | string | `per_chat_bot` | SessionMap scope: `per_chat_bot` (shared session per chat+bot) or `per_chat_bot_user` (session per user). Enterprise channels only (e.g. Feishu Enterprise). |
+Using **GLM-4.6V-Flash11** image generation model as an example:
 
-### 2.11 logging section (Logging)
+```
+api_base: https://open.bigmodel.cn/api/paas/v4
+api_key: your-zhipu-api-key
+model: GLM-4.6V-Flash11
+model_provider: ZhiPu
+```
 
-| Key | Type | Default | Description |
-|-----|------|---------|-------------|
-| `logging.level` | string | `INFO` | Global log level |
-| `logging.console_level` | string | `INFO` | Console log level |
-| `logging.gateway` | string | `INFO` | Gateway module log level |
+When you request image generation, the system will invoke the image generation model:
 
-Log files are stored in `~/.jiuwenclaw/agent/.logs/`, split into `gateway.log`, `channel.log`, `agent_server.log`; `full.log` is the aggregate.
+```
+User: Generate an image of a beach at sunset.
 
-### 2.12 telemetry section (OpenTelemetry)
-
-| Key | Type | Default | Description |
-|-----|------|---------|-------------|
-| `telemetry.enabled` | bool | `false` | Master switch (env var `OTEL_ENABLED` takes priority) |
-| `telemetry.exporter` | string | `otlp` | Exporter type: `otlp` / `console` / `none` |
-| `telemetry.endpoint` | string | `http://localhost:4317` | OTLP endpoint |
-| `telemetry.protocol` | string | `grpc` | Transport protocol: `grpc` / `http` |
-| `telemetry.headers` | map | `{}` | Common OTLP headers; can be overridden by traces/metrics |
-| `telemetry.log_messages` | bool | `true` | Whether to record full message content in span events |
-| `telemetry.service_name` | string | `jiuwenclaw` | Service name identifier |
-| `telemetry.provider_factory` | string | | Custom Provider Factory, format `module:function` |
-| `telemetry.traces.exporter` | string | | Trace exporter; falls back to `telemetry.exporter` |
-| `telemetry.traces.endpoint` | string | | Trace endpoint; falls back to `telemetry.endpoint` |
-| `telemetry.traces.protocol` | string | | Trace protocol; falls back to `telemetry.protocol` |
-| `telemetry.traces.headers` | map | `{}` | Trace-specific headers |
-| `telemetry.metrics.exporter` | string | | Metrics exporter; falls back to `telemetry.exporter` |
-| `telemetry.metrics.endpoint` | string | | Metrics endpoint; falls back to `telemetry.endpoint` |
-| `telemetry.metrics.protocol` | string | | Metrics protocol; falls back to `telemetry.protocol` |
-| `telemetry.metrics.headers` | map | `{}` | Metrics-specific headers |
-
-### 2.13 Other Settings
-
-| Key | Type | Default | Description |
-|-----|------|---------|-------------|
-| `preferred_language` | string | `zh` | Agent default reply language (`zh` / `en`) |
-
-### 2.14 Environment-only fields
-
-| Variable | Description |
-|----------|-------------|
-| `HEARTBEAT_TIMEOUT` | Heartbeat request timeout (seconds) |
-| `HEARTBEAT_RELAY_CHANNEL_ID` | Heartbeat relay channel (overrides `target` in config) |
-| `HEARTBEAT_INTERVAL` | Heartbeat interval (seconds), overrides `every` in config |
-| `BROWSER_RUNTIME_MCP_ENABLED` | Enable browser MCP runtime |
-| `BROWSER_RUNTIME_MCP_CLIENT_TYPE` | MCP client type (`stdio` / `sse` / `streamable-http`) |
-| `BROWSER_RUNTIME_MCP_SERVER_PATH` | MCP server URL |
-| `BROWSER_RUNTIME_MCP_SERVER_ID` | MCP server identifier, default `playwright_runtime_wrapper` |
-| `BROWSER_RUNTIME_MCP_SERVER_NAME` | MCP server display name, default `playwright-runtime-wrapper` |
-| `BROWSER_RUNTIME_MCP_TIMEOUT_S` | MCP server request timeout (seconds), default `300` |
-| `BROWSER_RUNTIME_MCP_HOST` | MCP server host, default `127.0.0.1` |
-| `BROWSER_RUNTIME_MCP_PORT` | MCP server port, default `8940` |
-| `BROWSER_RUNTIME_MCP_PATH` | MCP server path, default `/mcp` |
-| `BROWSER_RUNTIME_MCP_COMMAND` | MCP server command (stdio mode, empty = use default) |
-| `BROWSER_RUNTIME_MCP_ARGS` | MCP server args (stdio mode, empty = use default) |
-| `BROWSER_RUNTIME_MCP_AUTO_SSE_FALLBACK` | Auto SSE fallback (stdio mode), default `1` |
-| `PLAYWRIGHT_CDP_URL` | Playwright CDP URL for Chrome |
-| `PLAYWRIGHT_TOOL_TIMEOUT_S` | Playwright tool timeout (seconds) |
-| `BROWSER_TIMEOUT_S` | Browser task timeout (seconds) |
-| `BROWSER_DRIVER` | Browser driver mode: `managed` / `remote` / `extension` |
-| `BROWSER_ALLOW_SHORT_TIMEOUT_OVERRIDE` | Allow model-provided timeout shorter than `BROWSER_TIMEOUT_S`; default `0` (off) |
-| `BROWSER_PROFILE_NAME` | Browser profile name, default `Default` |
-| `PLAYWRIGHT_MCP_COMMAND` | Playwright MCP command, default `npx` |
-| `PLAYWRIGHT_MCP_ARGS` | Playwright MCP args, default `-y @playwright/mcp@latest` |
-| `CUSTOM_HEADERS` | Custom HTTP headers for model API calls (JSON or empty) |
-| `VIDEO_API_BASE` | Video model API base URL |
-| `VIDEO_API_KEY` | Video model API key |
-| `VIDEO_PROVIDER` | Video model provider |
-| `AUDIO_API_BASE` | Audio model API base URL |
-| `AUDIO_API_KEY` | Audio model API key |
-| `AUDIO_PROVIDER` | Audio model provider |
-| `VISION_API_BASE` | Vision model API base URL |
-| `VISION_API_KEY` | Vision model API key |
-| `VISION_PROVIDER` | Vision model provider |
-| `IMAGE_GEN_API_BASE` | Image generation model API base URL |
-| `IMAGE_GEN_API_KEY` | Image generation model API key |
-| `IMAGE_GEN_PROVIDER` | Image generation model provider |
-| `FREE_SEARCH_DDG_URL` | DuckDuckGo HTML endpoint URL |
-| `FREE_SEARCH_SSL_VERIFY` | Enable SSL verification for free search; default `true`, set `false` behind corporate proxies |
-| `NO_PROXY` | Comma-separated hosts to bypass proxy |
-| `EMAIL_ADDRESS` | Sender email address (maps to `email_settings.email_address`) |
-| `EMAIL_TOKEN` | Email authorization code (maps to `email_settings.token`) |
-| `EVOLUTION_AUTO_SCAN` | Auto-scan evolvable skills after each turn (`true`/`false`) |
-| `SKILLNET_DOWNLOAD_TIMEOUT` | SkillNet download timeout (seconds), default 60 |
-| `SKILLNET_MAX_RETRIES` | SkillNet download max retries, default 3 |
-| `TEAM_SKILLS_HUB_BASE_URL` | TeamSkillsHub market URL (empty = default) |
-| `TEAM_SKILLS_HUB_USER_TOKEN` | TeamSkillsHub user token (mutually exclusive with system token) |
-| `TEAM_SKILLS_HUB_SYSTEM_TOKEN` | TeamSkillsHub system token (mutually exclusive with user token) |
-| `TEAM_SKILLS_HUB_TIMEOUT` | TeamSkillsHub request timeout (seconds), default 60 |
-| `TEAM_SKILLS_HUB_ALLOWED_DOWNLOAD_HOSTS` | TeamSkillsHub ZIP download host allowlist, comma-separated |
-| `MEMORY_MODE` | Memory mode (empty = `local` default) |
-| `EXTENSION_DIRS` | Extension search directories, semicolon-separated (maps to `extensions.extension_dirs`) |
-| `OTEL_ENABLED` | Enable OpenTelemetry (maps to `telemetry.enabled`) |
-| `OTEL_EXPORTER` | OTLP exporter type (maps to `telemetry.exporter`) |
-| `OTEL_ENDPOINT` | OTLP endpoint (maps to `telemetry.endpoint`) |
-| `JIUWENCLAW_CONFIG_DIR` | Custom config directory path |
-| `JIUWENCLAW_DATA_DIR` | Absolute path to the user data root (`config/`, `agent/`, `.logs`, etc.). If unset, defaults to `~/.jiuwenclaw`. Set in the shell or service environment **before** starting the process so workspace paths resolve from the first import; defining it only in `config/.env` is often too late for that bootstrap. |
-| `JIUWENCLAW_DISABLE_CRON_TOOLS` | Set to `1` to disable Agent-side cron tool registration and hide cron-tool prompt text |
-
-See `.env.template` for more variables.
+JiuwenClaw: [Generated image]
+Generated an image of a beach at sunset, golden sunlight sparkling on the shimmering sea...
+```
 
 ---
 
-### 2.15 Precedence
+## 3. Embedding Configuration
 
-- **Environment variables** override **`config.yaml`**
-- Example: `react.model_name: ${MODEL_NAME:-deepseek-chat}` reads `MODEL_NAME` first, then falls back to `deepseek-chat`.
-- Values saved from the Config panel go to `.env` and take effect on next start.
+Embedding models convert text into vector representations and form the core of JiuwenClaw's memory system for semantic retrieval.
+
+### 3.1 Purpose
+
+- **Semantic search**: Vectorize memory content for similarity-based retrieval rather than simple keyword matching
+- **Memory recall**: Improve accuracy when querying historical information
+- **Hybrid retrieval**: Combine with BM25 full-text search for optimal recall
+
+> 💡 **Tip**: Embedding configuration is optional. If not set, the system uses a mock provider for basic retrieval. Configuring an embedding model improves semantic search precision. See the [Memory](Memory.md) documentation for details.
+
+### 3.2 Configuration Fields
+
+| Field              | Description                     | Remarks                                   |
+| ------------------ | ------------------------------- | ----------------------------------------- |
+| `embed_api_base`   | Base URL for embedding API      | Embedding service API endpoint            |
+| `embed_api_key`    | Embedding service API key       | Obtained from the service provider        |
+| `embed_model`      | Embedding model name            | Chinese-optimized embedding recommended   |
+
+#### Configuration Example
+
+**SiliconFlow**
+
+```
+embed_api_base: https://api.siliconflow.cn/v1
+embed_api_key: sk-your-siliconflow-api-key
+embed_model: BAAI/bge-large-zh-v1.5
+```
+
+---
+
+## 4. Third-Party Service Configuration
+
+This section mirrors **§1.4** and **§1.5** for readers who jump here first. All items below appear on the **Configuration** page (all optional).
+
+| Field | Description | Reference |
+| --- | --- | --- |
+| `jina_api_key` | Jina; fetch and some search flows | [Jina](https://jina.ai/) |
+| `bocha_api_key` | Bocha Web Search | [Bocha Open Platform](https://open.bochaai.com/) |
+| `serper_api_key` | Serper | [Serper](https://serper.dev/) |
+| `perplexity_api_key` | Perplexity | [Perplexity](https://www.perplexity.ai/) |
+| `github_token` | GitHub; SkillNet, etc. | [GitHub tokens](https://github.com/settings/tokens) |
+| `teamskills_hub_token` | TeamSkillsHub user token | [TeamSkillsHub](https://teamskills.openjiuwen.com) |
+
+> ⚠️ **Note**: All optional. If unset, related features may be unavailable or fall back; exact behavior depends on your product version.
+
+---
+
+## 5. Self-Evolution Configuration
+
+Self-evolution controls the automatic improvement of JiuwenClaw's Skills.
+
+![Self-Evolution Configuration Example](../assets/images/config_self_evolve.png)
+
+### Toggle
+
+- **Field**: `evolution.enabled`
+- **Default**: `false` (disabled)
+- **Purpose**: When enabled, the system detects issues in Skill execution and generates improvement suggestions to continuously optimize performance.
+
+When enabled, the system will:
+
+1. Monitor Skill execution and dialogue history
+2. Detect execution failures, user feedback, and improvement signals
+3. Automatically generate and log refinement suggestions
+
+> 📖 For details on the self-evolution mechanism, see [Skill self-evolution](SkillSelfEvolution.md).
+
+---
+
+## 6. Context Compression
+
+Context compression manages dialogue history retention strategies.
+
+![Context Compression Configuration Example](../assets/images/config_context_compress.png)
+
+### Toggle
+
+- **Field**: `context_engine.enabled`
+- **Default**: `true` (enabled)
+- **Purpose**: Automatically compress and offload dialogue history when exceeding context window limits to maintain fluent interaction.
+
+When enabled, the system will:
+
+1. Monitor message count and token usage
+2. Archive low-priority content when thresholds are reached
+3. Preserve lightweight indexes to free space for ongoing tasks
+
+> 📖 For details, see [Context Compression & Offloading](ContextCompression.md).
+
+---
+
+## 7. Tool Security Guardrails
+
+Security guardrails enforce permission checks during tool invocation.
+
+![Tool Security Guardrails Configuration Example](../assets/images/config_tool_security_guard.png)
+
+### Toggle
+
+- **Field**: `permissions.enabled`
+- **Default**: `false` (disabled)
+- **Purpose**: When enabled, the system performs permission checks before sensitive tool operations and follows policies to allow, prompt for confirmation, or deny actions.
+
+When enabled, the system will:
+
+1. Check permission rules for each tool call
+2. Resolve action: `allow`, `ask`, or `deny`
+3. Prompt user confirmation for `ask`-classified operations
+
+### Example Permission Rules
+
+```yaml
+permissions:
+  enabled: true
+  defaults:
+    "*": "allow"           # Allow all actions by default
+  tools:
+    mcp_exec_command:
+      "*": "ask"           # Require confirmation for command execution
+      patterns:
+        - pattern: "rm -rf"
+          action: "deny"   # Reject dangerous commands
+```
+
+---
+
+## 8. Advanced Configuration
+
+Beyond the **Configuration** page, the product may use a **main configuration** for timeouts, temperature, heartbeat interval, context thresholds, and toggles that work together with **context compression**, **permissions**, **memory restrictions**, and similar UI switches. **This document does not state where those files live on disk**; for offline edits or bulk rollout, contact your administrator.
+
+### 8.1 Common logical keys (conceptual paths)
+
+These are **conceptual** paths in the main configuration for cross-reference with ops or release notes; they are **not** a one-to-one list of every UI field.
+
+| Item (conceptual path) | Description | Typical default |
+| --- | --- | --- |
+| `preferred_language` | UI language | `zh` |
+| `models.*.model_client_config.timeout` | Model request timeout (seconds) | `1800` |
+| `models.*.model_client_config.verify_ssl` | Verify SSL | `false` |
+| `models.*.model_config_obj.temperature` | Temperature | `0.95` |
+| `heartbeat.every` | Heartbeat interval (seconds) | `3600` |
+| `context_engine.max_messages` | Message count threshold | `100` |
+| `context_engine.max_tokens` | Token threshold | `100000` |
+
+<a id="dotenv-configuration"></a>
+
+### 8.2 Runtime parameters outside the Configuration page
+
+Fine-grained options for browser automation, network proxies, or some search paths may be supplied by the **runtime or deployment template** and **may not** appear on the **Configuration** page. Typical users only need required UI fields and business keys; leave the rest to admins or ops.
+
+### 8.3 Precedence (conceptual)
+
+Generally, from highest to lowest: **values you save in the web Configuration UI** → **environment-injected variables** → **built-in product defaults**. Exact behavior depends on your version and deployment.
+
+> 💡 **Tip**: If changes do not seem to apply immediately, wait briefly or ask an admin whether services have reloaded.
+
+---
+
+## 9. FAQ
+
+### Q: Configurations not taking effect after saving?
+
+A: The backend restarts automatically after saving. Please wait a few moments and retry. If issues persist, verify configuration format correctness.
+
+### Q: How to view the currently active model?
+
+A: Model information is displayed on the configuration panel. You may also check system logs for the actual model being called.
+
+### Q: Are multimodal models required?
+
+A: No. Video, audio, and vision models are optional and only required for their respective multimodal functions.
+
+### Q: Which embedding model is recommended?
+
+A: `BAAI/bge-large-zh-v1.5` is recommended for high-quality Chinese embeddings. Other models may be selected based on language requirements.
+
+### Q: How to test if the configured model is working?
+
+A: After configuration, you can test the model with these methods:
+
+1. **Send a simple message**: Send a simple message like "Hello" via the web frontend and check if you receive a normal response
+2. **Check logs**: Review backend logs to confirm successful model calls without errors
+3. **Test multimodal**: If multimodal models are configured, send images/audio/video to test
+
+![Model Test Example](../assets/images/config-model-test.png)
+
+### Q: How to troubleshoot configuration errors?
+
+A: When configuration issues occur, follow these steps:
+
+1. **Check API Key**: Verify the API Key is correct, not expired, and has sufficient quota
+2. **Check API Base**: Verify the API address is correct, note that `/chat/completions` suffix should not be included
+3. **Check Model Name**: Verify the model name is correct, different providers may have different naming conventions
+4. **View Logs**: Backend logs will show specific error messages like authentication failure, model not found, etc.
+
+Common errors and solutions:
+
+| Error Message | Possible Cause | Solution |
+| ------------ | -------------- | -------- |
+| `401 Unauthorized` | Invalid or expired API Key | Check and update API Key |
+| `404 Not Found` | Incorrect API address or model name | Check api_base and model configuration |
+| `429 Too Many Requests` | Rate limit exceeded | Wait and retry, or upgrade plan |
+| `Connection Error` | Network issue or API address unreachable | Check network connection and API address |
+
+---

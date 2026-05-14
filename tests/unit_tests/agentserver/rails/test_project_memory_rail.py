@@ -11,12 +11,12 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from jiuwenclaw.agentserver.deep_agent.rails import project_memory_rail as _rail_mod
-from jiuwenclaw.agentserver.deep_agent.rails.project_memory import SECTION_NAME
-from jiuwenclaw.agentserver.deep_agent.rails.project_memory import (
+from jiuwenclaw.agents.harness.common.rails import project_memory_rail as _rail_mod
+from jiuwenclaw.agents.harness.common.rails.project_memory import SECTION_NAME
+from jiuwenclaw.agents.harness.common.rails.project_memory import (
     files as _files_mod,
 )
-from jiuwenclaw.agentserver.deep_agent.rails.project_memory_rail import (
+from jiuwenclaw.agents.harness.common.rails.project_memory_rail import (
     ProjectMemoryRail,
 )
 

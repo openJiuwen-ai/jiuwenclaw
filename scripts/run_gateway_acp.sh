@@ -11,4 +11,4 @@ export PYTHONIOENCODING=utf-8
 cd "$ROOT"
 
 # 启动程序（Linux/Mac 虚拟环境路径不同）
-"$ROOT/.venv/bin/python" -m jiuwenclaw.channel.acp_channel "$@"
+"$ROOT/.venv/bin/python" -m jiuwenclaw.gateway.channel_manager.protocol.acp.acp_connect "$@"

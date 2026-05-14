@@ -14,17 +14,50 @@ from pathlib import Path
 
 import yaml
 
+from jiuwenbox.logging_config import configure_logging
 from jiuwenbox.models.policy import NetworkMode, SecurityPolicy
 from jiuwenbox.supervisor.bwrap import BwrapConfig, BwrapProcess
 from jiuwenbox.supervisor.landlock import encode_landlock_payload
+from jiuwenbox.supervisor.daemon_ipc import SANDBOX_RESERVED_DIR
 from jiuwenbox.supervisor.sandbox_daemon import (
     SANDBOX_DAEMON_COMMAND,
     SANDBOX_DAEMON_SANDBOX_PATH,
+    SANDBOX_LAUNCHER_PATH,
 )
 from jiuwenbox.supervisor.seccomp import open_seccomp_filter
 
-logging.basicConfig(level=logging.INFO)
+configure_logging()
 logger = logging.getLogger(__name__)
+RUNTIME_SANDBOX_ENV = "JIUWENBOX_SANDBOX_ENV"
+RUNTIME_SANDBOX_WORKDIR = "JIUWENBOX_SANDBOX_WORKDIR"
+RUNTIME_POLICY_BINDS = "JIUWENBOX_POLICY_BINDS"
+
+
+def _load_runtime_sandbox_env() -> dict[str, str]:
+    """Load per-exec sandbox environment passed by the server runtime."""
+    raw_env = os.environ.get(RUNTIME_SANDBOX_ENV)
+    if not raw_env:
+        return {}
+
+    try:
+        data = json.loads(raw_env)
+    except json.JSONDecodeError:
+        logger.warning("Ignoring invalid %s", RUNTIME_SANDBOX_ENV, exc_info=True)
+        return {}
+
+    if not isinstance(data, dict):
+        logger.warning("Ignoring non-object %s", RUNTIME_SANDBOX_ENV)
+        return {}
+
+    return {str(key): str(value) for key, value in data.items()}
+
+
+def _load_runtime_sandbox_workdir() -> str | None:
+    """Load per-exec sandbox workdir passed by the server runtime."""
+    workdir = os.environ.get(RUNTIME_SANDBOX_WORKDIR)
+    if not workdir:
+        return None
+    return workdir
 
 
 class Supervisor:
@@ -81,9 +114,9 @@ class Supervisor:
             config.unshare_net = False
 
     @staticmethod
-    def _setup_policy_directory_mounts(config: BwrapConfig) -> None:
-        """Attach server-created lifecycle directories to their sandbox paths."""
-        raw_binds = os.environ.get("JIUWENBOX_DIRECTORY_BINDS")
+    def _setup_policy_bind_mounts(config: BwrapConfig) -> None:
+        """Attach server-created lifecycle paths to their sandbox paths."""
+        raw_binds = os.environ.get(RUNTIME_POLICY_BINDS)
         if not raw_binds:
             return
 
@@ -96,7 +129,7 @@ class Supervisor:
             return
 
         daemon_path = Path(__file__).with_name("sandbox_daemon.py")
-        temp_daemon_path = temp_dir / "jiuwenbox-sandbox-daemon.py"
+        temp_daemon_path = temp_dir / "sandbox-daemon.py"
         temp_daemon_path.write_bytes(daemon_path.read_bytes())
         os.chmod(temp_daemon_path, 0o644)
         self._sandbox_daemon_path = temp_daemon_path
@@ -111,17 +144,20 @@ class Supervisor:
             return
 
         launcher_path = Path(__file__).with_name("landlock_launcher.py")
-        temp_launcher_path = temp_dir / "jiuwenbox-landlock-launcher.py"
+        temp_launcher_path = temp_dir / "landlock-launcher.py"
         temp_launcher_path.write_bytes(launcher_path.read_bytes())
         os.chmod(temp_launcher_path, 0o644)
         self._landlock_launcher_path = temp_launcher_path
 
-        sandbox_launcher_path = "/run/jiuwenbox-landlock-launcher.py"
-        config.add_dir_mount("/run")
-        config.ro_binds.append((str(self._landlock_launcher_path), sandbox_launcher_path))
+        # ``SANDBOX_RESERVED_DIR`` is locked away by ``PolicyEngine`` so
+        # the user cannot collide with this mount via ``bind_mounts`` or
+        # smuggle ``/jiuwenbox`` into the Landlock allowlist via
+        # ``read_only`` / ``read_write``.
+        config.add_dir_mount(SANDBOX_RESERVED_DIR)
+        config.ro_binds.append((str(self._landlock_launcher_path), SANDBOX_LAUNCHER_PATH))
         config.command = [
-            "/usr/bin/python3",
-            sandbox_launcher_path,
+            "python3",
+            SANDBOX_LAUNCHER_PATH,
             encode_landlock_payload(self.policy),
             "--",
             *config.command,
@@ -137,7 +173,7 @@ class Supervisor:
                 if self.workdir:
                     config.workdir = self.workdir
                 self._setup_network_namespace(config)
-                self._setup_policy_directory_mounts(config)
+                self._setup_policy_bind_mounts(config)
                 self._setup_sandbox_daemon_mount(config, Path(temp_dir))
                 self._setup_landlock_launcher(config, Path(temp_dir))
 
@@ -192,16 +228,20 @@ async def run_supervisor(
     env: dict[str, str] | None = None,
 ) -> int:
     """High-level entry point: load policy and run the sandbox."""
-    supervisor = Supervisor.from_policy_file(policy_path, command, workdir=workdir, env=env)
+    runtime_env = _load_runtime_sandbox_env() if env is None else env
+    runtime_workdir = _load_runtime_sandbox_workdir() if workdir is None else workdir
+    supervisor = Supervisor.from_policy_file(
+        policy_path,
+        command,
+        workdir=runtime_workdir,
+        env=runtime_env,
+    )
     return await supervisor.start()
 
 
 def main() -> int:
     """CLI entry point for box-supervisor (used by box-server to spawn)."""
-    logging.basicConfig(
-        level=logging.INFO,
-        format="[%(asctime)s] %(name)s %(levelname)s: %(message)s",
-    )
+    configure_logging()
 
     if len(sys.argv) < 3:
         logger.error("Usage: %s <policy.yaml> <command> [args...]", sys.argv[0])

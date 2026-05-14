@@ -11,13 +11,13 @@ import pytest
 
 pytestmark = [pytest.mark.integration, pytest.mark.system]
 
-
 _BOOTSTRAP_PATH = (
-    Path(__file__).resolve().parents[2]
-    / "jiuwenclaw"
-    / "agentserver"
-    / "team"
-    / "remote_member_bootstrap.py"
+        Path(__file__).resolve().parents[2]
+        / "jiuwenclaw"
+        / "agents"
+        / "harness"
+        / "team"
+        / "remote_member_bootstrap.py"
 )
 _BOOTSTRAP_SPEC = importlib.util.spec_from_file_location(
     "test_remote_member_bootstrap_module",
@@ -29,11 +29,14 @@ _BOOTSTRAP_SPEC.loader.exec_module(bootstrap_module)
 
 
 def _install_fake_openjiuwen_schema(monkeypatch: pytest.MonkeyPatch) -> None:
+    import openjiuwen.agent_teams.schema.events as real_events
+    import openjiuwen.agent_teams.schema.team as real_team
+
     events_module = ModuleType("openjiuwen.agent_teams.schema.events")
-    events_module.TeamEvent = SimpleNamespace(MESSAGE="message")
+    events_module.__dict__.update(real_events.__dict__)
 
     team_module = ModuleType("openjiuwen.agent_teams.schema.team")
-    team_module.TeamRole = SimpleNamespace(TEAMMATE="teammate")
+    team_module.__dict__.update(real_team.__dict__)
 
     monkeypatch.setitem(sys.modules, "openjiuwen.agent_teams.schema.events", events_module)
     monkeypatch.setitem(sys.modules, "openjiuwen.agent_teams.schema.team", team_module)
@@ -69,10 +72,10 @@ def _bootstrap_envelope_json(*, member_name: str, dataset: str, service_id: str)
 
 
 def _make_team_agent(
-    *,
-    deep_agent: object,
-    envelope_content: str,
-    target_member: str,
+        *,
+        deep_agent: object,
+        envelope_content: str,
+        target_member: str,
 ) -> tuple[SimpleNamespace, list]:
     listeners: list = []
     mm = SimpleNamespace(
@@ -102,12 +105,12 @@ def _make_team_agent(
 
 @pytest.mark.asyncio
 async def test_teammate_bootstrap_replaces_card_using_local_dataset_service_id(
-    monkeypatch: pytest.MonkeyPatch,
+        monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _install_fake_openjiuwen_schema(monkeypatch)
     monkeypatch.setattr(bootstrap_module, "processed_message_ids", set(), raising=False)
     monkeypatch.setattr(
-        "jiuwenclaw.config.get_config",
+        "jiuwenclaw.common.config.get_config",
         lambda: {"team": {"runtime": {"mode": "distributed", "role": "teammate"}}},
     )
     monkeypatch.setattr(bootstrap_module, "_apply_leader_route_from_envelope", lambda *_a, **_k: True)
@@ -152,12 +155,12 @@ async def test_teammate_bootstrap_replaces_card_using_local_dataset_service_id(
 
 @pytest.mark.asyncio
 async def test_teammate_bootstrap_raises_when_local_dataset_service_id_missing(
-    monkeypatch: pytest.MonkeyPatch,
+        monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _install_fake_openjiuwen_schema(monkeypatch)
     monkeypatch.setattr(bootstrap_module, "processed_message_ids", set(), raising=False)
     monkeypatch.setattr(
-        "jiuwenclaw.config.get_config",
+        "jiuwenclaw.common.config.get_config",
         lambda: {"team": {"runtime": {"mode": "distributed", "role": "teammate"}}},
     )
     monkeypatch.setattr(bootstrap_module, "_apply_leader_route_from_envelope", lambda *_a, **_k: True)
@@ -194,12 +197,12 @@ async def test_teammate_bootstrap_raises_when_local_dataset_service_id_missing(
 
 @pytest.mark.asyncio
 async def test_teammate_bootstrap_raises_when_local_a2x_client_missing(
-    monkeypatch: pytest.MonkeyPatch,
+        monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _install_fake_openjiuwen_schema(monkeypatch)
     monkeypatch.setattr(bootstrap_module, "processed_message_ids", set(), raising=False)
     monkeypatch.setattr(
-        "jiuwenclaw.config.get_config",
+        "jiuwenclaw.common.config.get_config",
         lambda: {"team": {"runtime": {"mode": "distributed", "role": "teammate"}}},
     )
     monkeypatch.setattr(bootstrap_module, "_apply_leader_route_from_envelope", lambda *_a, **_k: True)

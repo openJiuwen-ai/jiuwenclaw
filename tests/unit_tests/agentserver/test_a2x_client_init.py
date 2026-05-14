@@ -7,16 +7,16 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from jiuwenclaw.agentserver.deep_agent import interface_deep as interface_module
-from jiuwenclaw.agentserver.a2x_registry_runtime import (
+from jiuwenclaw.server.runtime.agent_adapter.interface_deep import JiuWenClawDeepAdapter
+from jiuwenclaw.server.runtime.agent_adapter import interface_deep as interface_module
+from jiuwenclaw.agents.harness.team.a2x.a2x_registry_runtime import (
     clear_blank_registration_cache_for_tests,
     reserve_blank_teammate_agent,
     resolve_a2x_config,
     restore_teammate_blank_agent_on_destroy,
     register_teammate_blank_agent_at_startup,
 )
-from jiuwenclaw.agentserver.deep_agent.interface_deep import JiuWenClawDeepAdapter
-from jiuwenclaw.a2x_registry_client.errors import NotOwnedError
+from jiuwenclaw.agents.harness.team.a2x.client.errors import NotOwnedError
 
 
 class _FakeAsyncA2XRegistryClient:
@@ -175,7 +175,7 @@ def test_teammate_a2x_endpoint_defaults_to_bootstrap_addr() -> None:
 async def test_create_instance_registers_blank_agent_for_teammate(monkeypatch: pytest.MonkeyPatch) -> None:
     clear_blank_registration_cache_for_tests()
     _FakeAsyncA2XRegistryClient.instances.clear()
-    fake_module = ModuleType("jiuwenclaw.a2x_registry_client")
+    fake_module = ModuleType("jiuwenclaw.agents.harness.team.a2x.client")
     fake_module.AsyncA2XRegistryClient = _FakeAsyncA2XRegistryClient
 
     adapter = JiuWenClawDeepAdapter()
@@ -185,7 +185,7 @@ async def test_create_instance_registers_blank_agent_for_teammate(monkeypatch: p
         endpoint="http://agent.example/ws",
     )
 
-    monkeypatch.setitem(sys.modules, "jiuwenclaw.a2x_registry_client", fake_module)
+    monkeypatch.setitem(sys.modules, "jiuwenclaw.agents.harness.team.a2x.client", fake_module)
     monkeypatch.setattr(interface_module, "get_config", lambda: config_base)
 
     with (
@@ -199,7 +199,7 @@ async def test_create_instance_registers_blank_agent_for_teammate(monkeypatch: p
                      return_value=(None, False)),
         patch.object(interface_module.JiuWenClawDeepAdapter, "load_user_rails", AsyncMock()),
         patch.object(interface_module, "init_permission_engine", return_value=None),
-        patch.object(interface_module, "create_deep_agent", return_value=MagicMock(name="deep_agent")),
+        patch.object(interface_module, "create_deep_agent", return_value=MagicMock(name="deep_agent", ensure_initialized=AsyncMock())),
     ):
         await adapter.create_instance()
 
@@ -218,9 +218,9 @@ async def test_create_instance_registers_blank_agent_for_teammate(monkeypatch: p
 async def test_startup_registers_blank_agent_without_deepagent(monkeypatch: pytest.MonkeyPatch) -> None:
     clear_blank_registration_cache_for_tests()
     _FakeAsyncA2XRegistryClient.instances.clear()
-    fake_module = ModuleType("jiuwenclaw.a2x_registry_client")
+    fake_module = ModuleType("jiuwenclaw.agents.harness.team.a2x.client")
     fake_module.AsyncA2XRegistryClient = _FakeAsyncA2XRegistryClient
-    monkeypatch.setitem(sys.modules, "jiuwenclaw.a2x_registry_client", fake_module)
+    monkeypatch.setitem(sys.modules, "jiuwenclaw.agents.harness.team.a2x.client", fake_module)
 
     registered = await register_teammate_blank_agent_at_startup(
         _make_config(
@@ -248,11 +248,11 @@ async def test_startup_registers_blank_agent_without_deepagent(monkeypatch: pyte
 async def test_teammate_destroy_restore_replaces_agent_card(monkeypatch: pytest.MonkeyPatch) -> None:
     clear_blank_registration_cache_for_tests()
     _FakeAsyncA2XRegistryClient.instances.clear()
-    fake_module = ModuleType("jiuwenclaw.a2x_registry_client")
+    fake_module = ModuleType("jiuwenclaw.agents.harness.team.a2x.client")
     fake_module.AsyncA2XRegistryClient = _FakeAsyncA2XRegistryClient
-    a2x_internal = importlib.import_module("jiuwenclaw.a2x_registry_client._internal")
+    a2x_internal = importlib.import_module("jiuwenclaw.agents.harness.team.a2x.client._internal")
     setattr(fake_module, "_internal", a2x_internal)
-    monkeypatch.setitem(sys.modules, "jiuwenclaw.a2x_registry_client", fake_module)
+    monkeypatch.setitem(sys.modules, "jiuwenclaw.agents.harness.team.a2x.client", fake_module)
 
     restored = await restore_teammate_blank_agent_on_destroy(
         _make_config(
@@ -289,11 +289,11 @@ async def test_teammate_destroy_restore_recovers_missing_ownership(
 ) -> None:
     clear_blank_registration_cache_for_tests()
     _NotOwnedOnceAsyncA2XRegistryClient.instances.clear()
-    fake_module = ModuleType("jiuwenclaw.a2x_registry_client")
+    fake_module = ModuleType("jiuwenclaw.agents.harness.team.a2x.client")
     fake_module.AsyncA2XRegistryClient = _NotOwnedOnceAsyncA2XRegistryClient
-    a2x_internal = importlib.import_module("jiuwenclaw.a2x_registry_client._internal")
+    a2x_internal = importlib.import_module("jiuwenclaw.agents.harness.team.a2x.client._internal")
     setattr(fake_module, "_internal", a2x_internal)
-    monkeypatch.setitem(sys.modules, "jiuwenclaw.a2x_registry_client", fake_module)
+    monkeypatch.setitem(sys.modules, "jiuwenclaw.agents.harness.team.a2x.client", fake_module)
 
     restored = await restore_teammate_blank_agent_on_destroy(
         _make_config(
@@ -323,9 +323,9 @@ async def test_teammate_destroy_restore_recovers_missing_ownership(
 async def test_leader_reserves_blank_teammate_from_registry(monkeypatch: pytest.MonkeyPatch) -> None:
     clear_blank_registration_cache_for_tests()
     _FakeAsyncA2XRegistryClient.instances.clear()
-    fake_module = ModuleType("jiuwenclaw.a2x_registry_client")
+    fake_module = ModuleType("jiuwenclaw.agents.harness.team.a2x.client")
     fake_module.AsyncA2XRegistryClient = _FakeAsyncA2XRegistryClient
-    monkeypatch.setitem(sys.modules, "jiuwenclaw.a2x_registry_client", fake_module)
+    monkeypatch.setitem(sys.modules, "jiuwenclaw.agents.harness.team.a2x.client", fake_module)
 
     reserved = await reserve_blank_teammate_agent(
         _make_config("teamleader", dataset="team_pool"),
@@ -352,16 +352,16 @@ async def test_leader_reserves_blank_teammate_from_registry(monkeypatch: pytest.
 
 @pytest.mark.asyncio
 async def test_create_instance_continues_when_a2x_client_init_fails(monkeypatch: pytest.MonkeyPatch) -> None:
-    fake_module = ModuleType("jiuwenclaw.a2x_registry_client")
+    fake_module = ModuleType("jiuwenclaw.agents.harness.team.a2x.client")
     fake_module.AsyncA2XRegistryClient = _FailingAsyncA2XRegistryClient
 
     adapter = JiuWenClawDeepAdapter()
     config_base = _make_config("teamleader")
 
-    monkeypatch.setitem(sys.modules, "jiuwenclaw.a2x_registry_client", fake_module)
+    monkeypatch.setitem(sys.modules, "jiuwenclaw.agents.harness.team.a2x.client", fake_module)
     monkeypatch.setattr(interface_module, "get_config", lambda: config_base)
 
-    created_instance = MagicMock(name="deep_agent")
+    created_instance = MagicMock(name="deep_agent", ensure_initialized=AsyncMock())
 
     with (
         patch.object(interface_module.JiuWenClawDeepAdapter, "set_checkpoint", AsyncMock()),

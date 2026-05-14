@@ -56,7 +56,7 @@ Use **`get_agent_root_dir()`**, **`get_agent_workspace_dir()`**, **`get_agent_sk
 ## After extraction: drafting
 
 1. Obtain **`SOPStructure`** per **[sop-structure-pipeline.md](./sop-structure-pipeline.md)**.
-2. Produce **`SKILL.md`** per **[generator-worker-spec.md](./generator-worker-spec.md)** under **`get_agent_workspace_dir() / "skills-draft" / <skill_name>`** (create **`skills-draft`** if needed).
+2. Produce **`SKILL.md`** per **[generator-worker-spec.md](./generator-worker-spec.md)** under **`get_agent_workspace_dir() / "skills-draft" / <skill_name>`** (create **`skills-draft`** if needed). If **`extraction_meta["fallback_sop"]`**, also write **`reference/intent-sop-snapshot.md`** (see **generator-worker-spec** — *Intent-only snapshot file*).
 3. Run **`skills.import_local`** as above.
 
 ---
@@ -69,7 +69,7 @@ This section is the same document as **# Skill Generator Operator Playbook** abo
 
 1. **SOP plain text** — local file (`sop-text` / read in-tool), URL body (`url-fetch`), or pasted text in chat.
 2. **Full `SOPStructure`** — **`parse_sop_file` / `parse_sop_raw_text` + `invoke_llm_json`** only ([sop-structure-pipeline.md](./sop-structure-pipeline.md)).
-3. **Draft package** — **`SKILL.md`** (and optional `reference/`, `evals.json`, …) under **`get_agent_workspace_dir() / "skills-draft" / <skill_name>`** ([generator-worker-spec.md](./generator-worker-spec.md)).
+3. **Draft package** — **`SKILL.md`** (and optional `reference/`, `evals.json`, …) under **`get_agent_workspace_dir() / "skills-draft" / <skill_name>`** ([generator-worker-spec.md](./generator-worker-spec.md)). When intent-only fallback was used, include **`reference/intent-sop-snapshot.md`**.
 4. **Promote in the same workflow** — **`skills.import_local`** with **`path`** = **absolute** path to the draft directory (folder containing `SKILL.md`). Copies to **`get_agent_skills_dir() / <skill_name>`** (same root the runtime uses for user-installed skills) and refreshes indexes. Use **`force: true`** to replace an existing installed skill of the same name.
 
 Optionally run **`scripts/skill_gen/validator.py`** on the draft directory before **`skills.import_local`**.

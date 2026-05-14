@@ -21,7 +21,7 @@ In digital persona and group chat scenarios, `ask` may be downgraded to `deny` â
 
 ## 2. Tiered Policy Resolution â€” How a Tool Call Gets Its Level
 
-This corresponds to `evaluate_tiered_policy()` in `jiuwenclaw/agentserver/permissions/tiered_policy.py`. Parameters are the current `tool_name` and `tool_args` (e.g. bash `command`, file-read `path`, etc.).
+This corresponds to `evaluate_tiered_policy()` in the `openjiuwen` harness SDK. Parameters are the current `tool_name` and `tool_args` (e.g. bash `command`, file-read `path`, etc.). The tiered policy engine is part of the `openjiuwen.harness.security` module shipped with the harness SDK.
 
 ### 2.1 Setup: `permission_mode` and `severity`
 
@@ -138,11 +138,11 @@ If not using `tiered_policy`, typically **only** `external_directory` is updated
 
 | Module | Path |
 |--------|------|
-| Tiered policy | `jiuwenclaw/agentserver/permissions/tiered_policy.py` |
-| External directory checker | `jiuwenclaw/agentserver/permissions/checker.py` (`ExternalDirectoryChecker`) |
-| Persistence / `add_dir` | `jiuwenclaw/agentserver/permissions/patterns.py` (`persist_cli_trusted_directory`, etc.) |
-| Engine merging | `jiuwenclaw/agentserver/permissions/core.py` |
-| WebSocket command | `jiuwenclaw/agentserver/agent_ws_server.py` (`_handle_command_add_dir`) |
+| Tiered policy | `openjiuwen.harness.security` (harness SDK) |
+| Permissions persistence | `jiuwenclaw/agents/harness/common/rails/permissions/permissions_persist.py` |
+| Owner scopes | `jiuwenclaw/agents/harness/common/rails/permissions/owner_scopes.py` |
+| Tool permission RPC | `jiuwenclaw/agents/harness/common/rails/permissions/permissions_config_rpc.py` |
+| Tool permission context | `jiuwenclaw/agents/harness/common/rails/permissions/tool_permission_context.py` |
 
 ---
 

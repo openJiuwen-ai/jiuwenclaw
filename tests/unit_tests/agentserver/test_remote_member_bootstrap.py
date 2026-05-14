@@ -12,7 +12,7 @@ import pytest
 _root = Path(__file__).resolve().parents[3]
 _spec = importlib.util.spec_from_file_location(
     "_jiuwen_remote_member_bootstrap_test",
-    _root / "jiuwenclaw" / "agentserver" / "team" / "remote_member_bootstrap.py",
+    _root / "jiuwenclaw" / "agents" / "harness" / "team" / "remote_member_bootstrap.py",
 )
 _mod = importlib.util.module_from_spec(_spec)
 assert _spec.loader is not None
@@ -74,7 +74,7 @@ async def test_ack_listener_updates_db_and_marks_read(monkeypatch):
     from openjiuwen.agent_teams.schema.team import TeamRole
 
     monkeypatch.setattr(
-        "jiuwenclaw.config.get_config",
+        "jiuwenclaw.common.config.get_config",
         lambda: {
             "team": {
                 "runtime": {"mode": "distributed", "role": "leader"},
@@ -129,7 +129,7 @@ async def test_ack_listener_ignores_plain_text_message(monkeypatch):
     from openjiuwen.agent_teams.schema.team import TeamRole
 
     monkeypatch.setattr(
-        "jiuwenclaw.config.get_config",
+        "jiuwenclaw.common.config.get_config",
         lambda: {
             "team": {
                 "runtime": {"mode": "distributed", "role": "leader"},
@@ -181,7 +181,7 @@ async def test_ack_listener_accepts_any_sender_when_remote_all(monkeypatch):
     from openjiuwen.agent_teams.schema.team import TeamRole
 
     monkeypatch.setattr(
-        "jiuwenclaw.config.get_config",
+        "jiuwenclaw.common.config.get_config",
         lambda: {"team": {"runtime": {"mode": "distributed", "role": "leader"}}},
     )
 
@@ -227,7 +227,7 @@ async def test_distributed_local_spawn_guard_disables_local_startup(monkeypatch)
     from openjiuwen.core.runner import Runner
 
     monkeypatch.setattr(
-        "jiuwenclaw.config.get_config",
+        "jiuwenclaw.common.config.get_config",
         lambda: {"team": {"runtime": {"mode": "distributed", "role": "leader"}}},
     )
 
@@ -263,7 +263,7 @@ async def test_spawn_member_wrapper_rebinds_reused_tool_to_latest_team(monkeypat
     from openjiuwen.core.runner import Runner
 
     monkeypatch.setattr(
-        "jiuwenclaw.config.get_config",
+        "jiuwenclaw.common.config.get_config",
         lambda: {"team": {"runtime": {"mode": "distributed", "role": "leader"}}},
     )
 
@@ -281,8 +281,8 @@ async def test_spawn_member_wrapper_rebinds_reused_tool_to_latest_team(monkeypat
 
     bootstrap_calls = []
 
-    async def _fake_send_bootstrap(team_agent, member_name, prompt):
-        bootstrap_calls.append((team_agent, member_name, prompt))
+    async def _fake_send_bootstrap(team_agent, session_id, member_name, prompt):
+        bootstrap_calls.append((team_agent, session_id, member_name, prompt))
         return True
 
     monkeypatch.setattr(_mod, "_send_bootstrap_message", _fake_send_bootstrap)
@@ -310,7 +310,7 @@ async def test_spawn_member_wrapper_rebinds_reused_tool_to_latest_team(monkeypat
 
     await tool.invoke({"member_name": "calculator", "prompt": "run calc"})
 
-    assert bootstrap_calls == [(new_team, "calculator", "run calc")]
+    assert bootstrap_calls == [(new_team, "new-sid", "calculator", "run calc")]
     old_team.team_backend.db.update_member_status.assert_not_awaited()
     new_team.team_backend.db.update_member_status.assert_any_await("calculator", "new-team", "unstarted")
     new_team.team_backend.db.update_member_status.assert_any_await("calculator", "new-team", "ready")
@@ -322,7 +322,7 @@ async def test_spawn_member_wrapper_ensures_member_row_on_active_team(monkeypatc
     from openjiuwen.core.runner import Runner
 
     monkeypatch.setattr(
-        "jiuwenclaw.config.get_config",
+        "jiuwenclaw.common.config.get_config",
         lambda: {"team": {"runtime": {"mode": "distributed", "role": "leader"}}},
     )
 
@@ -476,11 +476,11 @@ async def test_replace_teammate_card_after_direct_bootstrap_uses_local_a2x_state
         return True
 
     monkeypatch.setattr(
-        "jiuwenclaw.agentserver.agent_ws_server.AgentWebSocketServer.get_instance",
+        "jiuwenclaw.server.agent_ws_server.AgentWebSocketServer.get_instance",
         lambda: server,
     )
     monkeypatch.setattr(
-        "jiuwenclaw.agentserver.a2x_registry_runtime.replace_teammate_agent_card_after_bootstrap",
+        "jiuwenclaw.agents.harness.team.a2x.a2x_registry_runtime.replace_teammate_agent_card_after_bootstrap",
         fake_replace_teammate_agent_card_after_bootstrap,
     )
     replace_teammate_card = getattr(
@@ -586,7 +586,11 @@ async def test_release_a2x_reservations_notifies_remote_teammate_and_does_not_re
         runtime_context=None,
         _messager=messager,
     )
-    setattr(ta, "_jiuwen_a2x_blank_agent_reservations", [("math-calc-1", reservation)])
+    setattr(
+        ta,
+        "_jiuwen_a2x_blank_agent_reservations",
+        [("sess_destroy_1", "math-calc-1", reservation)],
+    )
 
     await release_a2x_reservations_for_team(ta)
 
@@ -611,12 +615,12 @@ async def test_release_a2x_reservations_notifies_remote_teammate_and_does_not_re
 async def test_team_destroy_stops_dynamic_member_runtime(monkeypatch):
     destroy_team = AsyncMock(return_value=True)
     monkeypatch.setattr(
-        "jiuwenclaw.agentserver.team.team_manager.get_team_manager",
+        "jiuwenclaw.agents.harness.team.team_manager.get_team_manager",
         lambda channel_id: SimpleNamespace(destroy_team=destroy_team),
     )
-    monkeypatch.setattr("jiuwenclaw.config.get_config", lambda: {})
+    monkeypatch.setattr("jiuwenclaw.common.config.get_config", lambda: {})
     monkeypatch.setattr(
-        "jiuwenclaw.agentserver.a2x_registry_runtime.restore_teammate_blank_agent_on_destroy",
+        "jiuwenclaw.agents.harness.team.a2x.a2x_registry_runtime.restore_teammate_blank_agent_on_destroy",
         AsyncMock(return_value=True),
     )
 
