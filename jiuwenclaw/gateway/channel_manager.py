@@ -59,9 +59,11 @@ class ChannelManager(ABC):
         logger.info(
             "[ChannelManager] Channel 消息 -> MessageHandler: id=%s channel_id=%s",
             msg.id, msg.channel_id,
+            extra={'user_visible': 'progress'},
         )
         if not self._channels.get(msg.channel_id, None):
-            logger.info(f"[ChannelManager] Channel: {msg.channel_id} closed, cancel this user message.")
+            logger.info(f"[ChannelManager] Channel: {msg.channel_id} closed, cancel this user message.",
+                       extra={'user_visible': 'critical'})
             return
 
         self._message_handler.handle_message(msg)
@@ -71,7 +73,8 @@ class ChannelManager(ABC):
         cid = channel.channel_id
         self._channels[cid] = channel
         channel.on_message(self._on_channel_message)
-        logger.info("[ChannelManager] 已注册 Channel: channel_id=%s, 当前共 %d 个", cid, len(self._channels))
+        logger.info("[ChannelManager] 已注册 Channel: channel_id=%s, 当前共 %d 个", cid, len(self._channels),
+                   extra={'user_visible': 'progress'})
 
     def register_channel_with_inbound(
         self,
@@ -101,7 +104,8 @@ class ChannelManager(ABC):
     def unregister_channel(self, channel_id: str) -> None:
         """注销指定 Channel."""
         self._channels.pop(channel_id, None)
-        logger.info("[ChannelManager] 已注销 Channel: channel_id=%s", channel_id)
+        logger.info("[ChannelManager] 已注销 Channel: channel_id=%s", channel_id,
+                   extra={'user_visible': 'progress'})
 
     def get_channel(self, channel_id: str) -> "BaseChannel | None":
         """根据 channel_id 获取 Channel."""
@@ -190,6 +194,7 @@ class ChannelManager(ABC):
                 logger.info(
                     "[ChannelManager] 从 robot_messages 取出，准备派发: id=%s channel_id=%s type=%s",
                     msg.id, msg.channel_id, msg.type,
+                    extra={'user_visible': 'progress'},
                 )
                 dispatch_id = self._resolve_dispatch_channel_id(msg.channel_id)
                 channel = self._channels.get(dispatch_id)
@@ -199,13 +204,16 @@ class ChannelManager(ABC):
                         logger.info(
                             "[ChannelManager] 已派发到 Channel: channel_id=%s id=%s",
                             dispatch_id, msg.id,
+                            extra={'user_visible': 'critical'},
                         )
                     except Exception as e:
-                        logger.error("send to channel %s: %s", dispatch_id, e, exc_info=True)
+                        logger.error("send to channel %s: %s", dispatch_id, e, exc_info=True,
+                                   extra={'user_visible': 'critical'})
                 else:
                     logger.warning(
                         "[ChannelManager] 未找到 Channel，丢弃 robot_messages: channel_id=%s id=%s",
                         dispatch_id, msg.id,
+                        extra={'user_visible': 'critical'},
                     )
             except asyncio.CancelledError:
                 break

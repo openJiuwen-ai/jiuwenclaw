@@ -581,8 +581,16 @@ class SkillManager:
         """
         spec = params.get("spec", "")
         force = params.get("force", False)
+        logger.info(
+            f"[SkillManager] Skill安装开始: spec={spec}",
+            extra={'user_visible': 'critical'}
+        )
 
         if "@" not in spec:
+            logger.error(
+                f"[SkillManager] Skill安装失败: spec={spec} error=spec格式应为plugin@marketplace",
+                extra={'user_visible': 'critical'}
+            )
             return {"success": False, "detail": "spec 格式应为 plugin@marketplace"}
 
         plugin_name, marketplace_name = spec.rsplit("@", 1)
@@ -605,6 +613,10 @@ class SkillManager:
                 marketplace = m
                 break
         if marketplace is None:
+            logger.error(
+                f"[SkillManager] Skill安装失败: spec={spec} error=未找到marketplace:{marketplace_name}",
+                extra={'user_visible': 'critical'}
+            )
             return {"success": False, "detail": f"未找到 marketplace: {marketplace_name}"}
 
         git_url = marketplace.get("url", "")
@@ -637,6 +649,10 @@ class SkillManager:
         dest = _safe_child_path(self._skills_dir, plugin_name, "skill")
         if dest.exists():
             if not force:
+                logger.error(
+                    f"[SkillManager] Skill安装失败: spec={spec} error=skill{plugin_name}已存在",
+                    extra={'user_visible': 'critical'}
+                )
                 return {"success": False, "detail": f"skill {plugin_name} 已存在"}
             _safe_rmtree(dest)
         shutil.copytree(plugin_src, dest)
@@ -658,6 +674,10 @@ class SkillManager:
         )
         self._refresh_agent_data_indexes()
 
+        logger.info(
+            f"[SkillManager] Skill安装成功: spec={spec}",
+            extra={'user_visible': 'critical'}
+        )
         return {"success": True}
 
     async def handle_skills_install_builtin(self, params: dict) -> dict:
@@ -667,7 +687,15 @@ class SkillManager:
             name: skill 名称
         """
         name = params.get("name", "")
+        logger.info(
+            f"[SkillManager] Skill内置安装开始: name={name}",
+            extra={'user_visible': 'critical'}
+        )
         if not name:
+            logger.error(
+                f"[SkillManager] Skill内置安装失败: name={name} error=缺少参数name",
+                extra={'user_visible': 'critical'}
+            )
             return {"success": False, "detail": "缺少参数: name"}
         try:
             name = _safe_path_name(name, "skill")
@@ -677,6 +705,10 @@ class SkillManager:
 
         builtin_dir = get_builtin_skills_dir()
         if not builtin_dir.exists():
+            logger.error(
+                f"[SkillManager] Skill内置安装失败: name={name} error=内置技能目录不存在",
+                extra={'user_visible': 'critical'}
+            )
             return {"success": False, "detail": "内置技能目录不存在"}
 
         src = _safe_child_path(builtin_dir, name, "skill")
@@ -686,6 +718,10 @@ class SkillManager:
         # 检查是否已经安装
         dest = _safe_child_path(self._skills_dir, name, "skill")
         if dest.exists() and dest.is_dir():
+            logger.error(
+                f"[SkillManager] Skill内置安装失败: name={name} error=技能已经安装",
+                extra={'user_visible': 'critical'}
+            )
             return {"success": False, "detail": f"技能 {name} 已经安装"}
 
         # 复制技能到用户目录
@@ -711,6 +747,10 @@ class SkillManager:
         # 刷新索引
         self._refresh_agent_data_indexes()
 
+        logger.info(
+            f"[SkillManager] Skill内置安装成功: name={name}",
+            extra={'user_visible': 'critical'}
+        )
         return {"success": True}
 
     async def handle_skills_skillnet_search(self, params: dict) -> dict:
@@ -796,7 +836,15 @@ class SkillManager:
         """
         skill_url = str(params.get("url", "")).strip()
         force = bool(params.get("force", False))
+        logger.info(
+            f"[SkillManager] SkillNet安装开始: url={skill_url}",
+            extra={'user_visible': 'critical'}
+        )
         if not skill_url:
+            logger.error(
+                f"[SkillManager] SkillNet安装失败: url={skill_url} error=缺少参数url",
+                extra={'user_visible': 'critical'}
+            )
             return {"success": False, "detail": "缺少参数: url"}
 
         mirror_url: str | None = None
@@ -805,6 +853,10 @@ class SkillManager:
             ms = str(raw_mirror).strip()
             if ms:
                 if not _is_valid_http_mirror_url(ms):
+                    logger.error(
+                        f"[SkillManager] SkillNet安装失败: url={skill_url} error=mirror_url不是有效的http(s)地址",
+                        extra={'user_visible': 'critical'}
+                    )
                     return {
                         "success": False,
                         "detail": "mirror_url 不是有效的 http(s) 地址",
@@ -817,6 +869,11 @@ class SkillManager:
         asyncio.create_task(
             self._skillnet_install_background(install_id, skill_url, force, mirror_url),
             name=f"skillnet_install_{install_id[:8]}",
+        )
+
+        logger.info(
+            f"[SkillManager] SkillNet安装成功: url={skill_url} install_id={install_id}",
+            extra={'user_visible': 'critical'}
         )
         return {
             "success": True,
@@ -994,7 +1051,15 @@ class SkillManager:
             force: 强制覆盖 (可选，默认 False)
         """
         slug = str(params.get("slug", "")).strip()
+        logger.info(
+            f"[SkillManager] ClawHub下载开始: slug={slug}",
+            extra={'user_visible': 'critical'}
+        )
         if not slug:
+            logger.error(
+                f"[SkillManager] ClawHub下载失败: slug={slug} error=缺少参数slug",
+                extra={'user_visible': 'critical'}
+            )
             return {"success": False, "detail": "缺少参数: slug"}
         try:
             slug = _safe_path_name(slug, "skill")
@@ -1004,6 +1069,10 @@ class SkillManager:
 
         token = self._get_clawhub_token()
         if not token:
+            logger.error(
+                f"[SkillManager] ClawHub下载失败: slug={slug} error=未配置ClawHub CLI token",
+                extra={'user_visible': 'critical'}
+            )
             return {
                 "success": False,
                 "detail": "未配置 ClawHub CLI token，请先配置",
@@ -1017,6 +1086,10 @@ class SkillManager:
         # 检查 skill 是否已安装
         dest = _safe_child_path(self._skills_dir, slug, "skill")
         if dest.exists() and not force:
+            logger.error(
+                f"[SkillManager] ClawHub下载失败: slug={slug} error=技能已安装",
+                extra={'user_visible': 'critical'}
+            )
             return {
                 "success": False,
                 "detail": f"技能 {slug} 已安装",
@@ -1116,6 +1189,11 @@ class SkillManager:
                     )
                     self._refresh_agent_data_indexes()
                     _safe_rmtree(skill_dir)
+
+                    logger.info(
+                        f"[SkillManager] ClawHub下载成功: slug={slug} name={skill_name}",
+                        extra={'user_visible': 'critical'}
+                    )
                     return {
                         "success": True,
                         "skill": {"name": skill_name, "source": "clawhub"},
@@ -1477,7 +1555,15 @@ class SkillManager:
             name: skill 名称
         """
         name = params.get("name", "")
+        logger.info(
+            f"[SkillManager] Skill卸载开始: name={name}",
+            extra={'user_visible': 'critical'}
+        )
         if not name:
+            logger.error(
+                f"[SkillManager] Skill卸载失败: name={name} error=缺少参数name",
+                extra={'user_visible': 'critical'}
+            )
             return {"success": False, "detail": "缺少参数: name"}
         try:
             name = _safe_path_name(name, "skill")
@@ -1488,6 +1574,10 @@ class SkillManager:
         # 使用 _resolve_local_skill_dir 正确解析技能目录（处理 name 与文件夹名称不一致的情况）
         dest = self._resolve_local_skill_dir(name)
         if dest is None:
+            logger.error(
+                f"[SkillManager] Skill卸载失败: name={name} error=未找到skill",
+                extra={'user_visible': 'critical'}
+            )
             return {"success": False, "detail": f"未找到 skill: {name}"}
 
         # 检查是否为真正的内置技能（源码目录中的，不允许删除）
@@ -1513,6 +1603,10 @@ class SkillManager:
 
             if builtin_skill_path:
                 if dest.resolve() == builtin_skill_path.resolve():
+                    logger.error(
+                        f"[SkillManager] Skill卸载失败: name={name} error=内置技能不允许删除",
+                        extra={'user_visible': 'critical'}
+                    )
                     return {"success": False, "detail": "内置技能不允许删除"}
 
         _safe_rmtree(dest)
@@ -1526,6 +1620,11 @@ class SkillManager:
         self._remove_installed_plugin(name)
         self._remove_local_skill(name)
         self._refresh_agent_data_indexes()
+
+        logger.info(
+            f"[SkillManager] Skill卸载成功: name={name}",
+            extra={'user_visible': 'critical'}
+        )
         return {"success": True}
 
     async def handle_skills_import_local(self, params: dict) -> dict:

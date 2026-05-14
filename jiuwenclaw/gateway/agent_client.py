@@ -153,7 +153,7 @@ class WebSocketAgentServerClient(AgentServerClient):
     async def connect(self, uri: str) -> None:
         if self._ws is not None:
             await self.disconnect()
-        logger.info("[WebSocketAgentServerClient] 正在连接: %s", uri)
+        logger.info("[WebSocketAgentServerClient] 正在连接: %s", uri, extra={'user_visible': 'progress'})
         self._uri = uri
         self._server_ready = False
         origin = _build_ws_origin(uri)
@@ -171,7 +171,7 @@ class WebSocketAgentServerClient(AgentServerClient):
             close_timeout=5.0,
             max_size=_WS_MAX_SIZE,
         )
-        logger.info("[WebSocketAgentServerClient] 已连接: %s", uri)
+        logger.info("[WebSocketAgentServerClient] 已连接: %s", uri, extra={'user_visible': 'critical'})
 
         # 读取 AgentServer 的 connection.ack 事件
         try:
@@ -181,21 +181,26 @@ class WebSocketAgentServerClient(AgentServerClient):
             logger.info("[WebSocketAgentServerClient] connect 首帧(parsed): %s", _to_json(data))
             if data.get("type") == "event" and data.get("event") == "connection.ack":
                 self._server_ready = True
-                logger.info("[WebSocketAgentServerClient] 收到 connection.ack，AgentServer 已就绪")
+                logger.info("[WebSocketAgentServerClient] 收到 connection.ack，AgentServer 已就绪",
+                           extra={'user_visible': 'critical'})
             else:
                 logger.warning(
                     "[WebSocketAgentServerClient] 首帧非 connection.ack: %s",
                     data.get("type"),
+                    extra={'user_visible': 'critical'},
                 )
         except asyncio.TimeoutError:
-            logger.warning("[WebSocketAgentServerClient] 等待 connection.ack 超时")
+            logger.warning("[WebSocketAgentServerClient] 等待 connection.ack 超时",
+                          extra={'user_visible': 'critical'})
         except Exception as e:
-            logger.warning("[WebSocketAgentServerClient] 读取 connection.ack 失败: %s", e)
+            logger.warning("[WebSocketAgentServerClient] 读取 connection.ack 失败: %s", e,
+                          extra={'user_visible': 'critical'})
 
         # 启动消息接收和分发任务
         self._running = True
         self._receiver_task = asyncio.create_task(self._message_receiver_loop())
-        logger.info("[WebSocketAgentServerClient] 消息接收任务已启动")
+        logger.info("[WebSocketAgentServerClient] 消息接收任务已启动",
+                   extra={'user_visible': 'progress'})
 
     async def _message_receiver_loop(self) -> None:
         """后台任务：从 WebSocket 接收消息并根据 request_id 分发到对应队列."""
@@ -304,7 +309,8 @@ class WebSocketAgentServerClient(AgentServerClient):
             # 发送请求
             async with self._lock:
                 payload = _e2a_to_wire(envelope)
-                logger.info("[WebSocketAgentServerClient] 发送请求(非流式) payload: %s", _to_json(payload))
+                logger.info("[WebSocketAgentServerClient] 发送请求(非流式) payload: %s", _to_json(payload),
+                           extra={'user_visible': 'progress'})
                 await self._ws.send(json.dumps(payload, ensure_ascii=False))
 
             try:
@@ -314,6 +320,7 @@ class WebSocketAgentServerClient(AgentServerClient):
                     "[WebSocketAgentServerClient] 非流式请求超时: request_id=%s timeout=%ss",
                     rid,
                     _UNARY_REQUEST_TIMEOUT_SECONDS,
+                    extra={'user_visible': 'critical'},
                 )
                 raise RuntimeError(
                     f"AgentServer 非流式请求超时 (request_id={rid}, timeout={_UNARY_REQUEST_TIMEOUT_SECONDS}s)"

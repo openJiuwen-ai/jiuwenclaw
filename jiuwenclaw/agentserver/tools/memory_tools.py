@@ -326,8 +326,8 @@ async def write_memory(
         with open(full_path, mode, encoding="utf-8") as f:
             f.write(content)
             f.write("\n")
-        
-        logger.info(f"{'Appended to' if append else 'Wrote'} file: {resolved_path}")
+
+        logger.info(f"{'Appended to' if append else 'Wrote'} file: {resolved_path}", extra={'user_visible': 'critical'})
 
         return {
             "success": True,
@@ -403,12 +403,12 @@ async def edit_memory(
             }
         
         new_content = content.replace(oldText, newText, 1)
-        
+
         with open(full_path, "w", encoding="utf-8") as f:
             f.write(new_content)
             f.write("\n")
-        
-        logger.info(f"Edited file: {resolved_path}")
+
+        logger.info(f"Edited file: {resolved_path}", extra={'user_visible': 'critical'})
 
         return {
             "success": True,

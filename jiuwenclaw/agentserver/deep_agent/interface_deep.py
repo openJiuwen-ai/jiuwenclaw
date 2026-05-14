@@ -1308,7 +1308,15 @@ class JiuWenClawDeepAdapter:
         """根据请求中的 model_name 参数查找对应模型，未匹配则回退默认模型。"""
         requested = (request.params.get("model_name") or "").strip()
         if requested and requested in self._model_cache:
+            logger.info(
+                f"[JiuWenClawDeepAdapter] 模型配置解析: requested={requested} -> found_in_cache",
+                extra={'user_visible': 'progress'}
+            )
             return self._model_cache[requested]
+        logger.info(
+            f"[JiuWenClawDeepAdapter] 模型配置解析: using_default_model",
+            extra={'user_visible': 'progress'}
+        )
         return self._model
 
     def _get_task_id(self) -> str | None:
@@ -2618,6 +2626,10 @@ class JiuWenClawDeepAdapter:
                         self._instance.ability_manager.add(cron_tool.card)
                     logger.info("[JiuWenClawDeepAdapter] Cron tools registered successfully")
             except Exception as exc:
+                logger.error(
+                    f"[JiuWenClawDeepAdapter] 定时工具注册失败: request_id={request_id} error={str(exc)}",
+                    extra={'user_visible': 'critical'}
+                )
                 logger.error("[JiuWenClawDeepAdapter] 定时工具注册失败: %s", exc)
         elif not (normalized_session_id.startswith("heartbeat") or normalized_session_id.startswith("cron")):
             logger.info("[JiuWenClawDeepAdapter] skip cron tools registration: disabled by env")
@@ -3862,6 +3874,7 @@ class JiuWenClawDeepAdapter:
         accumulated_reasoning = ""
         evolution_status_started = False
         evolution_status_ended = False
+        last_logged_iteration = -1  # 用于记录上次记录进度的迭代次数
         usage_accumulator = {
             "input_tokens": 0,
             "output_tokens": 0,
@@ -3893,6 +3906,10 @@ class JiuWenClawDeepAdapter:
         # 按请求选择模型
         resolved_model = self._resolve_model_for_request(request)
         self._apply_model_to_react_agent(resolved_model)
+        logger.info(
+            f"[JiuWenClawDeepAdapter] 模型应用成功: model={resolved_model}",
+            extra={'user_visible': 'progress'}
+        )
         try:
             await self._update_runtime_config(_RuntimeConfigParams.from_agent_request(request, mode))
 
@@ -3904,15 +3921,40 @@ class JiuWenClawDeepAdapter:
                 stream_request_id=rid or "",
                 channel_id=cid or "",
             ):
+                logger.info(
+                    f"[JiuWenClawDeepAdapter] Agent执行开始: request_id={request.request_id} mode={mode}",
+                    extra={'user_visible': 'critical'}
+                )
                 async for chunk in Runner.run_agent_streaming(self._instance, inputs):
                     chunk_iteration = _extract_iteration_from_chunk(chunk)
                     if chunk_iteration is not None:
                         _LLM_TRACE_ITERATION.set(chunk_iteration)
+                        # 每次迭代或每5次迭代记录一次进度（避免日志过多）
+                        if chunk_iteration > last_logged_iteration and chunk_iteration % 5 == 0:
+                            logger.info(
+                                f"[JiuWenClawDeepAdapter] LLM迭代进度: iteration={chunk_iteration}",
+                                extra={'user_visible': 'progress'}
+                            )
+                            last_logged_iteration = chunk_iteration
                     if not (hasattr(chunk, "type") and hasattr(chunk, "payload")):
                         parsed = self._parse_stream_chunk(chunk)
                         if self._should_pause_for_user_input(parsed):
                             hitl_pending_stream = True
                         if parsed is not None:
+                            # 工具执行日志标记
+                            event_type = parsed.get("event_type")
+                            if event_type == "chat.tool_call":
+                                tool_info = parsed.get("tool_call", {})
+                                tool_name = tool_info.get("name") if isinstance(tool_info, dict) else str(tool_info)
+                                logger.info(f"[JiuWenClawDeepAdapter] 开始执行工具: {tool_name}",
+                                           extra={'user_visible': 'critical'})
+                            elif event_type == "chat.tool_result":
+                                tool_name = parsed.get("tool_name", "unknown")
+                                logger.info(f"[JiuWenClawDeepAdapter] 工具执行完成: {tool_name}",
+                                           extra={'user_visible': 'critical'})
+                            elif event_type == "chat.error":
+                                logger.error(f"[JiuWenClawDeepAdapter] 工具执行失败: {parsed.get('error', 'unknown')}",
+                                            extra={'user_visible': 'critical'})
                             if accumulated_text:
                                 delta_payload: dict[str, Any] = {"event_type": "chat.delta",
                                                                  "content": accumulated_text}
@@ -4032,6 +4074,10 @@ class JiuWenClawDeepAdapter:
                                 channel_id=cid,
                                 payload={"event_type": "chat.evolution_status", "status": "start"},
                                 is_complete=False,
+                            )
+                            logger.info(
+                                f"[JiuWenClawDeepAdapter] Evolution操作开始: request_id={rid}",
+                                extra={'user_visible': 'progress'}
                             )
                             evolution_status_started = True
                         if accumulated_text:
@@ -4163,6 +4209,11 @@ class JiuWenClawDeepAdapter:
                             is_complete=False,
                         )
 
+                logger.info(
+                    f"[JiuWenClawDeepAdapter] Agent执行成功: request_id={request.request_id}",
+                    extra={'user_visible': 'critical'}
+                )
+
             if evolution_status_started and not evolution_status_ended:
                 yield AgentResponseChunk(
                     request_id=rid,
@@ -4170,11 +4221,19 @@ class JiuWenClawDeepAdapter:
                     payload={"event_type": "chat.evolution_status", "status": "end"},
                     is_complete=False,
                 )
+                logger.info(
+                    f"[JiuWenClawDeepAdapter] Evolution操作完成: request_id={rid}",
+                    extra={'user_visible': 'progress'}
+                )
                 evolution_status_ended = True
         except asyncio.CancelledError:
             logger.info("[JiuWenClawDeepAdapter] 流式任务被取消: request_id=%s session_id=%s", rid, session_id)
             raise
         except Exception as exc:
+            logger.error(
+                f"[JiuWenClawDeepAdapter] Agent执行失败: request_id={request.request_id} error={str(exc)}",
+                extra={'user_visible': 'critical'}
+            )
             logger.exception("[JiuWenClawDeepAdapter] 流式任务异常: %s", exc)
             if evolution_status_started and not evolution_status_ended:
                 yield AgentResponseChunk(
@@ -4182,6 +4241,10 @@ class JiuWenClawDeepAdapter:
                     channel_id=cid,
                     payload={"event_type": "chat.evolution_status", "status": "end"},
                     is_complete=False,
+                )
+                logger.info(
+                    f"[JiuWenClawDeepAdapter] Evolution操作完成: request_id={rid}",
+                    extra={'user_visible': 'progress'}
                 )
                 evolution_status_ended = True
             yield AgentResponseChunk(

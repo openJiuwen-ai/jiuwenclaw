@@ -514,7 +514,13 @@ class JiuWenClaw:
                 # 继续处理其他文件
                 continue
 
-    async def upload_agent_files(self, response: AgentResponse, user_id: str) -> None:
+    async def upload_agent_files(
+        self,
+        response: AgentResponse,
+        user_id: str,
+        chat_id: str,
+        channel_type: str
+    ) -> None:
         """后处理文件：上传 Agent 生成的文件到对象存储.
 
         从 response.payload 中提取文件路径，上传到对象存储，
@@ -523,6 +529,8 @@ class JiuWenClaw:
         Args:
             response: AgentResponse，会被原地修改
             user_id: 用户 ID（用于对象存储路径隔离）
+            chat_id: 会话 ID（用于会话级别文件隔离）
+            channel_type: 渠道类型
         """
 
         if not response.payload or not isinstance(response.payload, dict):
@@ -571,8 +579,8 @@ class JiuWenClaw:
                 continue
 
             try:
-                # 上传文件
-                uri = await storage.upload_file(local_path, user_id)
+                # 上传文件（使用新的接口签名）
+                uri = await storage.upload_file(local_path, user_id, chat_id, channel_type)
 
                 # 更新 file_info 添加 uri 字段
                 if isinstance(file_info, dict):
@@ -583,12 +591,72 @@ class JiuWenClaw:
                     else:
                         file_info.uri = uri
 
-                logger.info(f"[JiuWenClaw] 文件已上传: {local_path} -> {uri}")
+                logger.info(
+                    f"[JiuWenClaw] 文件已上传: {local_path} -> {uri} "
+                    f"(user={user_id}, channel={channel_type}, chat={chat_id})"
+                )
 
             except Exception as e:
-                logger.error(f"[JiuWenClaw] 文件上传失败: {local_path}: {e}")
-                # 继续处理其他文件
-                continue
+                logger.error(
+                    f"[JiuWenClaw] 文件上传失败: {local_path}: {e} "
+                    f"(user={user_id}, channel={channel_type}, chat={chat_id})"
+                )
+
+    @staticmethod
+    def _extract_chat_id(request: AgentRequest) -> str:
+        """从请求中提取 chat_id.
+
+        Args:
+            request: AgentRequest 请求对象
+
+        Returns:
+            提取的 chat_id
+        """
+        channel = request.channel_id
+
+        # 处理 channel 为空的情况
+        if not channel:
+            return request.session_id or "default"
+
+        if channel == "web":
+            # WebChannel 使用 session_id
+            return request.session_id or "default"
+
+        elif channel == "dingtalk":
+            # DingTalk 使用 chat_id (conversation_id)
+            return request.chat_id or request.session_id or "default"
+
+        elif channel == "xiaoyi":
+            # XiaoYi 使用 chat_id (session_id)
+            return request.chat_id or request.session_id or "default"
+
+        elif channel == "wecom":
+            # Wecom 优先从 metadata 获取
+            if request.metadata and isinstance(request.metadata, dict):
+                wecom_chat_id = request.metadata.get("wecom_chat_id")
+                if wecom_chat_id:
+                    return str(wecom_chat_id)
+            return request.chat_id or request.session_id or "default"
+
+        else:
+            # 其他 channel 默认使用 session_id
+            return request.session_id or "default"
+
+    @staticmethod
+    def _extract_channel_type(request: AgentRequest) -> str:
+        """从请求中提取 channel_type.
+
+        Args:
+            request: AgentRequest 请求对象
+
+        Returns:
+            提取的 channel_type
+        """
+        # 处理 None 和空字符串的情况
+        channel = request.channel_id
+        if not channel:  # 处理 None 和空字符串
+            return "unknown"
+        return channel
 
     def _build_inputs(self, request: AgentRequest) -> Tuple[dict[str, Any], str]:
         """构建 adapter 所需的 inputs 字典."""
@@ -893,6 +961,10 @@ class JiuWenClaw:
                 extra=request.params,
             )
             await ExtensionRegistry.get_instance().trigger(AgentServerHookEvents.MEMORY_BEFORE_CHAT, mem_ctx)
+            logger.info(
+                f"[JiuWenClaw] Memory hook执行完成: request_id={request.request_id}",
+                extra={'user_visible': 'progress'}
+            )
             memory_block = "\n\n".join(b for b in mem_ctx.memory_blocks if b)
             inputs["memory_block"] = memory_block
 
@@ -942,7 +1014,12 @@ class JiuWenClaw:
             user_id = request.session_id or "default"
             if request.metadata and isinstance(request.metadata, dict):
                 user_id = request.metadata.get("user_id", user_id)
-            await self.upload_agent_files(result, user_id)
+
+            # 提取 chat_id 和 channel_type
+            chat_id = self._extract_chat_id(request)
+            channel_type = self._extract_channel_type(request)
+
+            await self.upload_agent_files(result, user_id, chat_id, channel_type)
 
         return result
 
@@ -970,6 +1047,10 @@ class JiuWenClaw:
             return
 
         adapter = await self._ensure_adapter()
+        logger.info(
+            f"[JiuWenClaw] Adapter初始化成功: request_id={request.request_id}",
+            extra={'user_visible': 'progress'}
+        )
 
         session_id = self._session_manager.get_session_id(request.session_id)
         query = request.params.get("query", "")
@@ -996,6 +1077,10 @@ class JiuWenClaw:
         )
 
         inputs, memory_mode, raw_query = self._build_inputs(request)
+        logger.info(
+            f"[JiuWenClaw] Inputs构建完成: request_id={request.request_id}",
+            extra={'user_visible': 'progress'}
+        )
         self._apply_effective_project_dir_to_request(request, session_id, inputs)
         rid = request.request_id
         cid = request.channel_id
@@ -1019,6 +1104,10 @@ class JiuWenClaw:
                 extra=request.params,
             )
             await ExtensionRegistry.get_instance().trigger(AgentServerHookEvents.MEMORY_BEFORE_CHAT, mem_ctx)
+            logger.info(
+                f"[JiuWenClaw] Memory hook执行完成: request_id={request.request_id}",
+                extra={'user_visible': 'progress'}
+            )
             memory_block = "\n\n".join(b for b in mem_ctx.memory_blocks if b)
             inputs["memory_block"] = memory_block
 
@@ -1032,6 +1121,11 @@ class JiuWenClaw:
                 "[JiuWenClaw] Team模式: session_id=%s is_first=%s",
                 session_id, is_team_first_request
             )
+            if is_team_first_request:
+                logger.info(
+                    f"[JiuWenClaw] Team模式启用: session_id={session_id}",
+                    extra={'user_visible': 'critical'}
+                )
 
         stream_queue = asyncio.Queue()
         stream_done = asyncio.Event()
@@ -1047,6 +1141,10 @@ class JiuWenClaw:
                     try:
                         await self._get_tool_manager().register_request_scoped_office_claw_mcp(office_claw_mcp)
                     except Exception as exc:
+                        logger.error(
+                            f"[JiuWenClaw] office_claw_mcp注册失败: request_id={request.request_id} error={str(exc)}",
+                            extra={'user_visible': 'critical'}
+                        )
                         logger.warning("[JiuWenClaw] office_claw_mcp 注册失败: %s", exc)
                 async for chunk in adapter.process_message_stream_impl(request, inputs):
                     await stream_queue.put(("chunk", chunk))
@@ -1066,6 +1164,10 @@ class JiuWenClaw:
             logger.info(
                 "[JiuWenClaw] Team模式后续请求，直接执行: request_id=%s session_id=%s",
                 rid, session_id,
+            )
+            logger.info(
+                f"[JiuWenClaw] Team模式后续请求: request_id={rid} session_id={session_id}",
+                extra={'user_visible': 'progress'}
             )
             asyncio.create_task(run_stream_task())
         else:

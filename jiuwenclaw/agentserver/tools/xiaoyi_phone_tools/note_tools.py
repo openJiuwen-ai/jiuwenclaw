@@ -86,7 +86,7 @@ async def create_note(title: str, content: str) -> Dict[str, Any]:
 
         raise_if_device_error(outputs, "创建备忘录失败")
 
-        logger.info("[CREATE_NOTE_TOOL] Note create completed")
+        logger.info("[CREATE_NOTE_TOOL] Note create completed", extra={'user_visible': 'critical'})
 
         return format_success_response(dict(outputs), f"备忘录 '{title}' 创建成功")
 

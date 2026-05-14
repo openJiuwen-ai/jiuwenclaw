@@ -306,8 +306,24 @@ class PermissionInterruptRail(ConfirmInterruptRail):
             user_input=user_input,
             auto_confirm_config=auto_confirm_config,
         )
+
         ctx.extra["_interrupt_decision"] = decision
         self._apply_decision(ctx, tool_call, tool_name, decision)
+
+        # 在应用决策后检查工具是否被拒绝
+        if hasattr(tool_call, 'error') and tool_call.error:
+            logger.error(
+                f"[PermissionRail] 工具权限被拒绝: tool={tool_name} error={tool_call.error}",
+                extra={'user_visible': 'critical'}
+            )
+        elif hasattr(ctx, 'extra') and isinstance(ctx.extra, dict):
+            interrupt_decision = ctx.extra.get("_interrupt_decision")
+            if interrupt_decision and hasattr(interrupt_decision, 'status'):
+                if interrupt_decision.status == 'pending':
+                    logger.info(
+                        f"[PermissionRail] 等待用户确认工具执行: tool={tool_name}",
+                        extra={'user_visible': 'progress'}
+                    )
 
     def update_config(
         self,

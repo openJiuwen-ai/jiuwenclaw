@@ -253,7 +253,8 @@ class AgentWebSocketServer:
                 ping_timeout=self._ping_timeout,
             )
         logger.info(
-            "[AgentWebSocketServer] 已启动: ws://%s:%s", self._host, self._port
+            "[AgentWebSocketServer] 已启动: ws://%s:%s", self._host, self._port,
+            extra={'user_visible': 'progress'},
         )
 
     async def _process_request(self, *args: Any) -> Any:
@@ -290,7 +291,7 @@ class AgentWebSocketServer:
         self._server.close()
         await self._server.wait_closed()
         self._server = None
-        logger.info("[AgentWebSocketServer] 已停止")
+        logger.info("[AgentWebSocketServer] 已停止", extra={'user_visible': 'critical'})
 
     # ---------- 连接处理 ----------
 
@@ -301,7 +302,7 @@ class AgentWebSocketServer:
         await self._trigger_agent_server_started_hook()
 
         remote = ws.remote_address
-        logger.info("[AgentWebSocketServer] 新连接: %s", remote)
+        logger.info("[AgentWebSocketServer] 新连接: %s", remote, extra={'user_visible': 'progress'})
 
         send_lock = asyncio.Lock()
         self._current_ws = ws
@@ -315,9 +316,11 @@ class AgentWebSocketServer:
                 "payload": {"status": "ready"},
             }
             await ws.send(json.dumps(ack_frame, ensure_ascii=False))
-            logger.info("[AgentWebSocketServer] 已发送 connection.ack: %s", remote)
+            logger.info("[AgentWebSocketServer] 已发送 connection.ack: %s", remote,
+                       extra={'user_visible': 'critical'})
         except Exception as e:
-            logger.warning("[AgentWebSocketServer] 发送 connection.ack 失败: %s", e)
+            logger.warning("[AgentWebSocketServer] 发送 connection.ack 失败: %s", e,
+                          extra={'user_visible': 'critical'})
 
         tasks: set[asyncio.Task] = set()
 
@@ -364,7 +367,15 @@ class AgentWebSocketServer:
                 "[AgentWebSocketServer] inbound raw payload: %s",
                 _mask_query_for_log(data),
             )
+            logger.info(
+                f"[AgentWebSocketServer] JSON解析成功: request_id={data.get('request_id', '')}",
+                extra={'user_visible': 'progress'}
+            )
         except json.JSONDecodeError as e:
+            logger.error(
+                f"[AgentWebSocketServer] JSON解析失败: error={str(e)}",
+                extra={'user_visible': 'critical'}
+            )
             wire = encode_json_parse_error_wire(
                 request_id="",
                 channel_id="",
@@ -376,6 +387,10 @@ class AgentWebSocketServer:
 
         try:
             env = E2AEnvelope.from_dict(data)
+            logger.info(
+                f"[AgentWebSocketServer] E2A协议解析成功: request_id={env.request_id}",
+                extra={'user_visible': 'progress'}
+            )
         except Exception as parse_err:
             logger.warning(
                 "[AgentWebSocketServer] E2A from_dict 失败，按旧载荷解析: %s",
@@ -667,6 +682,20 @@ class AgentWebSocketServer:
         try:
             async for chunk in self._agent_manager.process_message_stream(request):
                 chunk_count += 1
+
+                # 流式响应开始标记（第一个chunk）
+                if chunk_count == 1:
+                    logger.info(
+                        f"[AgentWebSocketServer] 流式响应开始: request_id={request.request_id}",
+                        extra={'user_visible': 'critical'}
+                    )
+                # 流式响应进度标记（每10个chunk）
+                elif chunk_count % 10 == 0:
+                    logger.info(
+                        f"[AgentWebSocketServer] 流式响应进度: request_id={request.request_id} chunk_count={chunk_count}",
+                        extra={'user_visible': 'progress'}
+                    )
+
                 # 通知心跳任务有真实 chunk 发送，重置心跳计时
                 heartbeat_event.set()
                 wire = encode_agent_chunk_for_wire(

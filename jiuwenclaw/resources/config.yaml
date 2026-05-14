@@ -16,6 +16,43 @@ logging:
   agent_server: INFO
   full: INFO
 
+  # === 新增日志系统配置（日志系统迁移 - JSON格式化 + user_visible标记） ===
+
+  # 统一输出格式控制（控制台 + 文件）
+  # text：控制台文本 + 文件仅 .log（文本格式）
+  # json：控制台 JSON + 文件仅 .json（JSON 格式）
+  # dual：控制台文本 + 文件双模式（.log + .json 同时生成）
+  # format: text  # 默认：text（开发环境）
+  # format: json  # 生产环境：仅 JSON 格式
+  # format: dual  # 混合环境：文本控制台 + 双模式文件
+  format: text
+
+  # 日志输出开关（正交控制输出目标）
+  console_enabled: true   # 控制台日志开关（true：启用终端输出；false：关闭终端输出）
+  file_enabled: true      # 文件日志开关（true：启用文件输出含 permissions.log；false：关闭文件输出）
+
+  # JSON 格式详细配置（⚠️ 配置项已添加，功能待实现）
+  json:
+    # 时间戳格式
+    timestamp_format: text  # 使用文本格式时间戳 "2026-05-07 11:33:22.537"
+    # timestamp_format: iso8601  # ISO 8601 格式 "2026-05-07T11:33:22.537Z"（可选）
+
+    # 字段配置
+    include_component: true  # 自动添加组件分类字段（gateway/channel/agent_server）
+
+    # 敏感数据脱敏
+    sanitize_sensitive_data: true  # 自动应用 SensitiveDataFilter 脱敏
+
+    # 异常信息处理
+    exc_info_style: simple  # 仅包含异常类型和消息 "TypeError: xxx"
+    # exc_info_style: full  # 包含完整堆栈信息（可选）
+
+  # 用户可见日志 Tag 配置
+  # 控制日志中 [USER] 和 [USER_PROGRESS] Tag 的显示
+  tags:
+    user_visible: true           # 启用 [USER] Tag（关键用户操作）
+    user_progress_visible: true   # 启用 [USER_PROGRESS] Tag（进度信息）
+
 # ============================================================
 # 对象存储接口配置（AgentServer内部存储服务）
 # ============================================================
@@ -29,7 +66,7 @@ storage:
   # 本地文件系统存储配置（开源版本、开发环境）
   local:
     base_dir: ${STORAGE_LOCAL_BASE_DIR:-~/.jiuwenclaw/storage/local}
-    upload_dir: ${STORAGE_LOCAL_UPLOAD_DIR:-~/.jiwenclaw/uploads}
+    upload_dir: ${STORAGE_LOCAL_UPLOAD_DIR:-~/.jiuwenclaw/uploads}
 
   # 华为云 OBS 配置（商用版本、生产环境）
   huawei_obs:

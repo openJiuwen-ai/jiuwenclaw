@@ -32,6 +32,11 @@ import copy
 import datetime
 import json
 import logging
+import asyncio
+import copy
+import datetime
+import json
+import logging
 import mimetypes
 import os
 import re
@@ -42,13 +47,20 @@ from collections import OrderedDict
 from dataclasses import dataclass, field
 from logging.handlers import BaseRotatingHandler
 from pathlib import Path
-from typing import Any, Literal, Optional
+from datetime import datetime
+from typing import Any, Dict, Literal, Optional
 
 import yaml
 from ruamel.yaml import YAML
 from ruamel.yaml.comments import CommentedMap
 
 from jiuwenclaw.local_env_config import get_local_config
+
+# 尝试导入 pythonjsonlogger（用于 JSON 格式化输出）
+try:
+    from pythonjsonlogger import jsonlogger
+except ImportError:
+    jsonlogger = None
 
 logger = logging.getLogger(__name__)
 
@@ -1648,25 +1660,565 @@ class JsonOnlyFormatter(logging.Formatter):
         return record.getMessage()
 
 
+class LoggingTagConfig:
+    """用户可见性 Tag 配置管理
+
+    管理两个配置项：
+    - user_visible: 是否启用 [USER] Tag（默认 True）
+    - user_progress_visible: 是否启用 [USER_PROGRESS] Tag（默认 True）
+
+    配置优先级：环境变量 > config.yaml > 默认值
+    """
+
+    user_visible: bool = True
+    user_progress_visible: bool = True
+    _config_file_path: Optional[Path] = None
+    _env_prefix: str = "JIUWENCLAW_LOG_"
+    _skip_env_load: bool = False
+
+    def __init__(self, skip_env_load: bool = False):
+        """初始化配置并加载配置
+
+        Args:
+            skip_env_load: 是否跳过配置加载（用于测试）
+        """
+        self._skip_env_load = skip_env_load
+        self.__post_init__()
+
+    def __post_init__(self):
+        """初始化后加载配置"""
+        # 如果 skip_env_load 为 True（用于测试），跳过配置加载
+        if self._skip_env_load:
+            self.user_visible = True
+            self.user_progress_visible = True
+            return
+        self._load_config()
+
+    def _load_config(self):
+        """加载配置（环境变量 + config.yaml）"""
+        # 1. 默认值
+        base_user_visible = True
+        base_user_progress_visible = True
+
+        # 2. 从环境变量加载（优先级最高）
+        user_visible = self._load_from_env("USER_VISIBLE", base_user_visible)
+        user_progress_visible = self._load_from_env("USER_PROGRESS_VISIBLE", base_user_progress_visible)
+
+        # 3. 如果环境变量未设置(None)，从 config.yaml 加载
+        env_user_visible = os.getenv(f"{self._env_prefix}USER_VISIBLE")
+        env_user_progress_visible = os.getenv(f"{self._env_prefix}USER_PROGRESS_VISIBLE")
+
+        if env_user_visible is None:
+            user_visible = self._load_from_yaml("user_visible", user_visible)
+        if env_user_progress_visible is None:
+            user_progress_visible = self._load_from_yaml("user_progress_visible", user_progress_visible)
+
+        self.user_visible = user_visible
+        self.user_progress_visible = user_progress_visible
+
+    def _load_from_env(self, key: str, default: bool) -> bool:
+        """从环境变量加载配置
+
+        Args:
+            key: 配置键名（如 "USER_VISIBLE"）
+            default: 默认值
+
+        Returns:
+            bool: 配置值，如果环境变量未设置或无效则返回默认值
+        """
+        env_key = f"{self._env_prefix}{key}"
+        env_value = os.getenv(env_key)
+
+        if env_value is None:
+            return default
+
+        # 解析布尔值（支持多种格式）
+        value = env_value.strip().lower()
+        if value in ('true', '1', 'yes', 'on'):
+            return True
+        elif value in ('false', '0', 'no', 'off'):
+            return False
+        else:
+            logger.warning(
+                f"无效的环境变量 '{env_key}': '{env_value}', "
+                f"期望 'true'/'false'（或 '1'/'0'、'yes'/'no'、'on'/'off'），使用默认值 '{default}'"
+            )
+            return default
+
+    @classmethod
+    def _load_from_yaml(cls, key: str, default: bool) -> bool:
+        """从 config.yaml 加载配置
+
+        Args:
+            key: 配置键名（如 "user_visible"）
+            default: 默认值
+
+        Returns:
+            bool: 配置值，如果配置文件不存在或该键未设置则返回默认值
+        """
+        try:
+            config_data = _load_logging_config_from_yaml()
+            if not config_data:
+                return default
+
+            value = config_data.get(key)
+            if value is None:
+                return default
+
+            if isinstance(value, bool):
+                return value
+            else:
+                logger.warning(
+                    f"config.yaml 中的 logging.{key} 不是布尔值: '{value}', 使用默认值 '{default}'"
+                )
+                return default
+        except Exception as e:
+            logger.warning(f"加载 config.yaml 中的 logging.{key} 失败: {e}, 使用默认值 '{default}'")
+            return default
+
+    def is_user_visible_enabled(self) -> bool:
+        """检查 [USER] Tag 是否启用
+
+        Returns:
+            bool: True 表示启用，False 表示禁用
+        """
+        return self.user_visible
+
+    def is_user_progress_visible_enabled(self) -> bool:
+        """检查 [USER_PROGRESS] Tag 是否启用
+
+        Returns:
+            bool: True 表示启用，False 表示禁用
+        """
+        return self.user_progress_visible
+
+
+class JsonUserVisibleFormatter(jsonlogger.JsonFormatter if jsonlogger else logging.Formatter):
+    """JSON 格式化日志输出
+
+    继承 pythonjsonlogger.JsonFormatter，扩展以下特性：
+    1. 时间戳格式与文本格式一致："2026-05-07 11:33:22.537"
+    2. user_visible 字段："critical"/"progress"/null
+    3. component 字段：自动推导组件分类
+    4. 敏感数据脱敏：自动应用 _sanitize_log_text
+    5. 异常信息简化：仅包含类型和消息
+    6. 中文编码支持：json_ensure_ascii=False
+
+    使用方式：
+        logger.info("消息", extra={'user_visible': 'critical'})
+    """
+
+    # 标准字段名映射（pythonjsonlogger 默认字段名 -> 我们的字段名）
+    _FIELD_RENAME_MAP = {
+        'asctime': 'timestamp',
+        'levelname': 'level',
+        'name': 'logger',
+    }
+
+    def __init__(
+        self,
+        fmt: Optional[str] = None,
+        datefmt: Optional[str] = None,
+        style: str = '%',
+        validate: bool = True,
+        timestamp_format: str = 'text',
+        include_component: bool = True,
+        sanitize_sensitive_data: bool = True,
+        exc_info_style: str = 'simple',
+        *args,
+        **kwargs
+    ):
+        """初始化 JSON 格式化器
+
+        Args:
+            timestamp_format: 时间戳格式
+                - 'text': 与文本格式一致 "2026-05-07 11:33:22.537"（默认）
+                - 'iso8601': ISO 8601 格式 "2026-05-07T11:33:22.537Z"（可选）
+            include_component: 是否包含组件分类字段（默认 True）
+            sanitize_sensitive_data: 是否启用敏感数据脱敏（默认 True）
+            exc_info_style: 异常信息风格
+                - 'simple': 仅包含异常类型和消息（默认）
+                - 'full': 包含完整堆栈信息（可选）
+        """
+        if jsonlogger is None:
+            # 如果 pythonjsonlogger 未安装，fallback 到标准 Formatter
+            if fmt is None:
+                fmt = "%(asctime)s %(levelname)s %(name)s %(message)s"
+            if datefmt is None:
+                datefmt = "%Y-%m-%d %H:%M:%S"
+            super().__init__(fmt, datefmt, style, validate, *args, **kwargs)
+        else:
+            # pythonjsonlogger 默认格式
+            if fmt is None:
+                fmt = '%(asctime)s %(levelname)s %(name)s %(message)s'
+            if datefmt is None:
+                datefmt = "%Y-%m-%d %H:%M:%S"
+            # 设置 json_ensure_ascii=False（保持中文可读，不转义为 \uXXXX）
+            kwargs['json_ensure_ascii'] = False
+            super().__init__(fmt, datefmt, style, validate, *args, **kwargs)
+
+        self.timestamp_format = timestamp_format
+        self.include_component = include_component
+        self.sanitize_sensitive_data = sanitize_sensitive_data
+        self.exc_info_style = exc_info_style
+
+    def add_fields(
+        self,
+        log_record: Dict[str, Any],
+        record: logging.LogRecord,
+        message_dict: Dict[str, Any]
+    ) -> None:
+        """添加 JSON 字段
+
+        Args:
+            log_record: JSON 输出字典（会被序列化）
+            record: Python logging LogRecord
+            message_dict: 消息字典
+        """
+        # 如果 pythonjsonlogger 未安装，直接返回
+        if jsonlogger is None:
+            return
+
+        # 调用父类方法添加基础字段
+        super().add_fields(log_record, record, message_dict)
+
+        # 立即删除user_visible字段（无论值是什么），后续会重新验证并添加有效值
+        # merge_record_extra会自动添加所有record属性，我们只保留有效的user_visible值
+        if 'user_visible' in log_record:
+            del log_record['user_visible']
+
+        # 字段重命名
+        for old_key, new_key in self._FIELD_RENAME_MAP.items():
+            if old_key in log_record:
+                log_record[new_key] = log_record.pop(old_key)
+
+        # 处理时间戳格式
+        if 'timestamp' in log_record and self.timestamp_format == 'text':
+            # 保持与文本格式一致："2026-05-07 11:33:22.537"
+            timestamp = log_record['timestamp']
+            if isinstance(timestamp, str):
+                # pythonjsonlogger 默认输出 ISO 8601 格式，转换为文本格式
+                try:
+                    dt = datetime.fromisoformat(timestamp.replace('Z', '+00:00'))
+                    log_record['timestamp'] = dt.strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
+                except Exception:
+                    pass  # 保持原格式
+
+        # 添加组件分类字段
+        if self.include_component:
+            log_record['component'] = _log_component_from_logger_name(record.name)
+
+        # 处理 user_visible 字段
+        user_visible = getattr(record, 'user_visible', None)
+        if user_visible is not None:
+            # 验证 user_visible 值有效性
+            if user_visible not in ('critical', 'progress'):
+                logger.warning(
+                    f"无效的 user_visible 值: '{user_visible}'，期望 'critical' 或 'progress'"
+                )
+                user_visible = None
+
+            # 只在 user_visible 有有效值时才添加到 JSON 输出中
+            # 这样可以避免输出 "user_visible": null，保持 JSON 清洁
+            if user_visible is not None:
+                log_record['user_visible'] = user_visible
+        # 当 user_visible 为 None 时，不添加该字段到 JSON 输出中
+
+        # 敏感数据脱敏
+        if self.sanitize_sensitive_data and 'message' in log_record:
+            log_record['message'] = _sanitize_log_text(log_record['message'])
+
+        # 异常信息简化
+        if 'exc_info' in log_record and log_record['exc_info']:
+            if self.exc_info_style == 'simple':
+                # 简化为类型和消息
+                exc_info = log_record['exc_info']
+                if isinstance(exc_info, tuple) and len(exc_info) >= 2:
+                    exc_type, exc_value = exc_info[:2]
+                    log_record['exc_info'] = f"{exc_type.__name__}: {exc_value}"
+            # 'full' 模式保持原样
+
+
+class UserVisibleTagFilter(logging.Filter):
+    """用户可见性 Tag 过滤器
+
+    根据日志记录的 user_visible 属性添加对应的 Tag：
+    - [USER]: 关键用户操作（user_visible='critical'）
+    - [USER_PROGRESS]: 进度信息（user_visible='progress'）
+
+    使用方式：
+        logger.info("消息", extra={'user_visible': 'critical'})
+    """
+
+    _USER_TAG = "[USER]"
+    _USER_PROGRESS_TAG = "[USER_PROGRESS]"
+    _USER_VISIBLE_ATTR = "user_visible"
+    _TAG_VALUE_CRITICAL = 'critical'
+    _TAG_VALUE_PROGRESS = 'progress'
+
+    def __init__(self, tag_config: Optional[LoggingTagConfig] = None):
+        """初始化 Tag 过滤器
+
+        Args:
+            tag_config: Tag 配置对象（可选，默认创建新实例）
+        """
+        super().__init__()
+        self.tag_config = tag_config if tag_config is not None else LoggingTagConfig()
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        """根据 user_visible 属性添加 Tag
+
+        Args:
+            record: 日志记录对象
+
+        Returns:
+            bool: 总是返回 True（不过滤日志，仅添加 Tag）
+        """
+        # 获取 user_visible 属性
+        user_visible = getattr(record, self._USER_VISIBLE_ATTR, None)
+
+        # 设置自定义字段而不是修改消息（修复重复标签和位置问题）
+        # 默认设置为空字符串，确保formatter总能找到这个字段
+        if user_visible == self._TAG_VALUE_CRITICAL and self.tag_config.is_user_visible_enabled():
+            record.user_tag = "[USER] "
+        elif user_visible == self._TAG_VALUE_PROGRESS and self.tag_config.is_user_progress_visible_enabled():
+            record.user_tag = "[USER_PROGRESS] "
+        else:
+            # 无标记、未知值、或配置禁用时设置为空字符串
+            record.user_tag = ""
+
+        return True
+
+
+def _resolve_json_config() -> Dict[str, Any]:
+    """解析JSON格式化子配置段
+
+    从 config.yaml 读取 logging.json 子段，提供默认值和验证。
+
+    Returns:
+        Dict[str, Any]: json配置字典，包含：
+            - timestamp_format: 'text' | 'iso8601'
+            - include_component: bool
+            - sanitize_sensitive_data: bool
+            - exc_info_style: 'simple' | 'full'
+    """
+    # 默认配置
+    default_config = {
+        'timestamp_format': 'text',
+        'include_component': True,
+        'sanitize_sensitive_data': True,
+        'exc_info_style': 'simple'
+    }
+
+    # 从config.yaml读取
+    config_data = _load_logging_config_from_yaml()
+    if not config_data:
+        return default_config
+
+    json_config = config_data.get('json', {})
+    if not isinstance(json_config, dict):
+        return default_config
+
+    # 合并默认值
+    result = default_config.copy()
+    result.update(json_config)
+
+    # 验证字段值
+    result = _validate_json_config(result)
+
+    return result
+
+
+def _validate_json_config(config: Dict[str, Any]) -> Dict[str, Any]:
+    """验证JSON配置字段值有效性
+
+    Args:
+        config: json配置字典
+
+    Returns:
+        Dict[str, Any]: 验证后的配置字典（无效值使用默认值）
+    """
+    # 验证 timestamp_format
+    if config.get('timestamp_format') not in ('text', 'iso8601'):
+        logger.warning(
+            f"无效的logging.json.timestamp_format配置: '{config.get('timestamp_format')}', "
+            f"期望 'text' 或 'iso8601'，使用默认值 'text'"
+        )
+        config['timestamp_format'] = 'text'
+
+    # 验证 include_component
+    if 'include_component' in config and not isinstance(config['include_component'], bool):
+        logger.warning(
+            f"无效的logging.json.include_component配置: '{config.get('include_component')}', "
+            f"期望布尔值，使用默认值 True"
+        )
+        config['include_component'] = True
+
+    # 验证 sanitize_sensitive_data
+    if 'sanitize_sensitive_data' in config and not isinstance(config['sanitize_sensitive_data'], bool):
+        logger.warning(
+            f"无效的logging.json.sanitize_sensitive_data配置: '{config.get('sanitize_sensitive_data')}', "
+            f"期望布尔值，使用默认值 True"
+        )
+        config['sanitize_sensitive_data'] = True
+
+    # 验证 exc_info_style
+    exc_style = config.get('exc_info_style', 'simple')
+    if exc_style not in ('simple', 'full'):
+        logger.warning(
+            f"无效的logging.json.exc_info_style配置: '{exc_style}', "
+            f"期望 'simple' 或 'full'，使用默认值 'simple'"
+        )
+        config['exc_info_style'] = 'simple'
+
+    return config
+
+
+def _resolve_logging_format() -> str:
+    """解析日志格式配置（text/json/dual）
+
+    配置优先级：环境变量 > config.yaml > 默认值
+
+    Returns:
+        str: 'text' / 'json' / 'dual'
+    """
+    # 1. 从环境变量加载（最高优先级）
+    env_format = os.getenv("JIUWENCLAW_LOG_FORMAT")
+    if env_format:
+        format_value = env_format.strip().lower()
+        if format_value in ('text', 'json', 'dual'):
+            return format_value
+        else:
+            logger.warning(
+                f"无效的日志格式环境变量: '{env_format}', "
+                f"期望 'text'、'json' 或 'dual', 使用默认值 'text'"
+            )
+
+    # 2. 从 config.yaml 加载
+    try:
+        config_data = _load_logging_config_from_yaml()
+        if config_data:
+            format_value = config_data.get('format')
+            if format_value and format_value in ('text', 'json', 'dual'):
+                return format_value
+
+            # 3. 向后兼容：检测 dual_output.enabled=true 自动映射为 format=dual
+            dual_output = config_data.get('dual_output')
+            if isinstance(dual_output, dict):
+                dual_enabled = dual_output.get('enabled')
+                if dual_enabled is True:
+                    logger.warning(
+                        "检测到旧配置 dual_output.enabled=true，已自动映射为 format=dual"
+                    )
+                    return 'dual'
+    except Exception as e:
+        logger.warning(f"加载 config.yaml 中的 logging.format 失败: {e}")
+
+    # 4. 默认值
+    return 'text'
+
+
+def _resolve_output_switches() -> Dict[str, bool]:
+    """解析输出开关配置（console_enabled/file_enabled）
+
+    配置优先级：环境变量 > config.yaml > 默认值
+
+    Returns:
+        Dict[str, bool]: {'console_enabled': bool, 'file_enabled': bool}
+    """
+    result = {'console_enabled': True, 'file_enabled': True}
+
+    # 1. 控制台开关（console_enabled）
+    env_console = os.getenv("JIUWENCLAW_LOG_CONSOLE_ENABLED")
+    if env_console:
+        value = env_console.strip().lower()
+        if value in ('true', '1', 'yes', 'on'):
+            result['console_enabled'] = True
+        elif value in ('false', '0', 'no', 'off'):
+            result['console_enabled'] = False
+        else:
+            logger.warning(
+                f"无效的控制台开关环境变量: '{env_console}', "
+                f"期望 'true'/'false'（或 '1'/'0'、'yes'/'no'、'on'/'off'），使用默认值 'true'"
+            )
+    else:
+        # 从 config.yaml 加载
+        try:
+            config_data = _load_logging_config_from_yaml()
+            if config_data:
+                console_enabled = config_data.get('console_enabled')
+                if isinstance(console_enabled, bool):
+                    result['console_enabled'] = console_enabled
+        except (FileNotFoundError, yaml.YAMLError, PermissionError) as e:
+            # 具体的配置文件相关异常，记录日志后使用默认值
+            logger.debug(f"无法从 config.yaml 加载 console_enabled 配置，使用默认值: {e}")
+        except Exception as e:
+            # 其他未预期的异常，记录警告日志后使用默认值
+            logger.warning(f"加载 console_enabled 配置时发生未预期错误: {e}，使用默认值")
+
+    # 2. 文件开关（file_enabled）
+    env_file = os.getenv("JIUWENCLAW_LOG_FILE_ENABLED")
+    if env_file:
+        value = env_file.strip().lower()
+        if value in ('true', '1', 'yes', 'on'):
+            result['file_enabled'] = True
+        elif value in ('false', '0', 'no', 'off'):
+            result['file_enabled'] = False
+        else:
+            logger.warning(
+                f"无效的文件开关环境变量: '{env_file}', "
+                f"期望 'true'/'false'（或 '1'/'0'、'yes'/'no'、'on'/'off'），使用默认值 'true'"
+            )
+    else:
+        # 从 config.yaml 加载
+        try:
+            config_data = _load_logging_config_from_yaml()
+            if config_data:
+                file_enabled = config_data.get('file_enabled')
+                if isinstance(file_enabled, bool):
+                    result['file_enabled'] = file_enabled
+        except (FileNotFoundError, yaml.YAMLError, PermissionError) as e:
+            # 具体的配置文件相关异常，记录日志后使用默认值
+            logger.debug(f"无法从 config.yaml 加载 file_enabled 配置，使用默认值: {e}")
+        except Exception as e:
+            # 其他未预期的异常，记录警告日志后使用默认值
+            logger.warning(f"加载 file_enabled 配置时发生未预期错误: {e}，使用默认值")
+
+    return result
+
+
 def setup_logger(log_level: Optional[str] = None) -> logging.Logger:
     """配置 ``jiuwenclaw`` 根日志：控制台 + 分组件文件 + 汇总 full.log。
 
     各模块应使用 ``logging.getLogger(__name__)``，分文件规则：
     - ``jiuwenclaw.channel.*`` → channel.log
-    - ``jiuwenclaw.agentserver.*`` → agent_server.log
+    - ``jiuwenclaw.agents.*`` 或 ``jiuwenclaw.server.*`` → agent_server.log
     - 其余 ``jiuwenclaw.*``（含 ``jiuwenclaw.app``、gateway、evolution、utils 等）→ gateway.log
 
     所有分类日志同时写入 ``full.log``。输出目录：``~/.jiuwenclaw/agent/.logs/``。
 
-    级别由合并后的 ``logging`` 段控制（模板默认值 + 用户 override；含 ``${VAR:-default}`` 解析）；
-    环境变量 ``LOG_LEVEL`` 仅覆盖**控制台**级别
+    级别由 ``config.yaml`` 的 ``logging`` 段控制；环境变量 ``LOG_LEVEL`` 仅覆盖**控制台**级别
     （``log_level`` 参数为 ``None`` 时）。若传入 ``log_level``（如单测），则控制台与各文件级别均为该值。
+
+    扩展功能：
+    - format 配置（text/json/dual）：通过 config.yaml 或 JIUWENCLAW_LOG_FORMAT 环境变量控制
+    - console_enabled/file_enabled：控制输出开关
+    - JSON 格式化：使用 JsonUserVisibleFormatter
+    - user_visible Tag：使用 UserVisibleTagFilter（仅文本格式）
     """
     log_root_path = os.getenv("LOG_ROOT_PATH", "").strip()
     logs_root = Path(log_root_path).expanduser().resolve() if log_root_path else get_logs_dir()
     logs_root.mkdir(parents=True, exist_ok=True)
 
     levels = _resolve_logging_levels(log_level)
+
+    # 解析日志格式配置（text/json/dual）
+    log_format = _resolve_logging_format()
+
+    # 解析输出开关配置
+    output_switches = _resolve_output_switches()
+    console_enabled = output_switches['console_enabled']
+    file_enabled = output_switches['file_enabled']
 
     root = logging.getLogger("jiuwenclaw")
     root.setLevel(levels.logger)
@@ -1675,18 +2227,55 @@ def setup_logger(log_level: Optional[str] = None) -> logging.Logger:
         handler.close()
         root.removeHandler(handler)
 
-    formatter = logging.Formatter(
-        fmt="%(asctime)s.%(msecs)03d [%(process)d] %(levelname)s %(name)s %(filename)s:%(lineno)d: %(message)s",
-        datefmt="%Y-%m-%d %H:%M:%S",
-    )
+    # 解析JSON子配置段
+    json_config = _resolve_json_config() if log_format in ('json', 'dual') else {}
+
+    # 根据format选择Formatter
+    if log_format in ('json', 'dual'):
+        # JSON 格式使用 JsonUserVisibleFormatter，动态读取配置参数
+        json_formatter = JsonUserVisibleFormatter(
+            timestamp_format=json_config.get('timestamp_format', 'text'),
+            include_component=json_config.get('include_component', True),
+            sanitize_sensitive_data=json_config.get('sanitize_sensitive_data', True),
+            exc_info_style=json_config.get('exc_info_style', 'simple')
+        )
+        # 文本格式用于 dual 模式或作为 fallback
+        text_formatter = logging.Formatter(
+            fmt="%(asctime)s.%(msecs)03d %(levelname)s %(user_tag)s%(name)s: %(message)s",
+            datefmt="%Y-%m-%d %H:%M:%S",
+        )
+    else:
+        # 文本格式使用标准 Formatter + UserVisibleTagFilter
+        text_formatter = logging.Formatter(
+            fmt="%(asctime)s.%(msecs)03d %(levelname)s %(user_tag)s%(name)s: %(message)s",
+            datefmt="%Y-%m-%d %H:%M:%S",
+        )
+        json_formatter = None
+
     privacy_filter = SensitiveDataFilter()
+
+    # 初始化 LoggingTagConfig（仅文本格式需要）
+    tag_config = LoggingTagConfig() if log_format in ('text', 'dual') else None
 
     def _add_rotating(
         filename: str,
         level: int,
         name_filter: Optional[_ComponentNameFilter] = None,
         custom_formatter: Optional[logging.Formatter] = None,
+        use_json: bool = False,
     ) -> None:
+        """添加文件 Handler
+
+        Args:
+            filename: 日志文件名
+            level: 日志级别
+            name_filter: 组件过滤器
+            custom_formatter: 自定义格式化器
+            use_json: 是否使用JSON格式（仅format=json/dual时有效）
+        """
+        if not file_enabled:
+            return
+
         h = SafeRotatingFileHandler(
             filename=logs_root / filename,
             maxBytes=_LOG_FILE_MAX_BYTES,
@@ -1694,25 +2283,87 @@ def setup_logger(log_level: Optional[str] = None) -> logging.Logger:
             encoding="utf-8",
         )
         h.setLevel(level)
-        h.setFormatter(custom_formatter if custom_formatter is not None else formatter)
+
+        # 选择formatter
+        if custom_formatter is not None:
+            h.setFormatter(custom_formatter)
+        elif use_json and json_formatter is not None:
+            h.setFormatter(json_formatter)
+        else:
+            h.setFormatter(text_formatter)
+
         h.addFilter(privacy_filter)
+
+        # 为所有文件 handler 添加 UserVisibleTagFilter（仅在 text/dual 模式下）
+        if tag_config:
+            h.addFilter(UserVisibleTagFilter(tag_config))
+
         if name_filter is not None:
             h.addFilter(name_filter)
         root.addHandler(h)
 
-    _add_rotating("gateway.log", levels.gateway, _ComponentNameFilter("gateway"))
-    _add_rotating("channel.log", levels.channel, _ComponentNameFilter("channel"))
-    _add_rotating("agent_server.log", levels.agent_server,
-        _CompositeFilter([_ComponentNameFilter("agent_server"), _ComponentNameFilter("permissions")]))
-    _add_rotating("full.log", levels.full, None)
-    json_formatter = JsonOnlyFormatter()
-    _add_rotating("permissions.log", levels.agent_server, _ComponentNameFilter("permissions"), json_formatter)
+    # 根据format配置输出文件策略
+    if log_format == 'text':
+        # text模式：仅输出.log文件（文本格式）
+        _add_rotating("gateway.log", levels.gateway, _ComponentNameFilter("gateway"))
+        _add_rotating("channel.log", levels.channel, _ComponentNameFilter("channel"))
+        _add_rotating("agent_server.log", levels.agent_server,
+            _CompositeFilter([_ComponentNameFilter("agent_server"), _ComponentNameFilter("permissions")]))
+        _add_rotating("full.log", levels.full, None)
+        permissions_formatter = JsonOnlyFormatter()
+        _add_rotating("permissions.log", levels.agent_server, 
+                      _ComponentNameFilter("permissions"), permissions_formatter)
 
-    stream_handler = logging.StreamHandler()
-    stream_handler.setLevel(levels.console)
-    stream_handler.setFormatter(formatter)
-    stream_handler.addFilter(privacy_filter)
-    root.addHandler(stream_handler)
+    elif log_format == 'json':
+        # json模式：仅输出.json文件（JSON格式）
+        _add_rotating("gateway.json", levels.gateway, _ComponentNameFilter("gateway"), use_json=True)
+        _add_rotating("channel.json", levels.channel, _ComponentNameFilter("channel"), use_json=True)
+        _add_rotating("agent_server.json", levels.agent_server,
+            _CompositeFilter([_ComponentNameFilter("agent_server"), 
+                              _ComponentNameFilter("permissions")]), use_json=True)
+        _add_rotating("full.json", levels.full, None, use_json=True)
+        # permissions.log 保持特殊处理（使用JsonOnlyFormatter）
+        permissions_formatter = JsonOnlyFormatter()
+        _add_rotating("permissions.log", levels.agent_server, 
+                      _ComponentNameFilter("permissions"), permissions_formatter)
+
+    elif log_format == 'dual':
+        # dual模式：同时输出.log和.json文件
+        # .log文件（文本格式）
+        _add_rotating("gateway.log", levels.gateway, _ComponentNameFilter("gateway"))
+        _add_rotating("channel.log", levels.channel, _ComponentNameFilter("channel"))
+        _add_rotating("agent_server.log", levels.agent_server,
+            _CompositeFilter([_ComponentNameFilter("agent_server"), _ComponentNameFilter("permissions")]))
+        _add_rotating("full.log", levels.full, None)
+        permissions_formatter = JsonOnlyFormatter()
+        _add_rotating("permissions.log", levels.agent_server, 
+                      _ComponentNameFilter("permissions"), permissions_formatter)
+
+        # .json文件（JSON格式）
+        _add_rotating("gateway.json", levels.gateway, _ComponentNameFilter("gateway"), use_json=True)
+        _add_rotating("channel.json", levels.channel, _ComponentNameFilter("channel"), use_json=True)
+        _add_rotating("agent_server.json", levels.agent_server,
+            _CompositeFilter([_ComponentNameFilter("agent_server"), 
+                              _ComponentNameFilter("permissions")]), use_json=True)
+        _add_rotating("full.json", levels.full, None, use_json=True)
+
+    # 控制台输出（如果启用）
+    if console_enabled:
+        stream_handler = logging.StreamHandler()
+        stream_handler.setLevel(levels.console)
+
+        # 根据format选择控制台formatter
+        if log_format == 'json':
+            stream_handler.setFormatter(json_formatter)
+        else:
+            stream_handler.setFormatter(text_formatter)
+            # 文本格式添加UserVisibleTagFilter
+            if tag_config:
+                stream_handler.addFilter(UserVisibleTagFilter(tag_config))
+
+        stream_handler.addFilter(privacy_filter)
+        root.addHandler(stream_handler)
+
     return root
 
 

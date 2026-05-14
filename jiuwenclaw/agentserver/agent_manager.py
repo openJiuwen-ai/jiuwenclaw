@@ -122,7 +122,8 @@ class AgentManager:
                 os.environ.pop(key, None)
             else:
                 os.environ[key] = str(env_value)
-        logger.info("[AgentManager] Creating %s agent (mode=%s, session=%s)", agent_key, mode, session_id)
+        logger.info("[AgentManager] Creating %s agent (mode=%s, session=%s)", agent_key, mode, session_id,
+                   extra={'user_visible': 'progress'})
 
         agent = JiuWenClaw(
             user_workspace_dir=str(self.user_workspace_dir) if self.user_workspace_dir else None,
@@ -147,7 +148,8 @@ class AgentManager:
             except Exception as e:
                 logger.warning("[AgentManager] Replay reload_agent_config failed: %s", e)
 
-        logger.info("[AgentManager] %s agent created for tenant %s (session=%s)", agent_key, self.agent_id, session_id)
+        logger.info("[AgentManager] %s agent created for tenant %s (session=%s)", agent_key, self.agent_id, session_id,
+                   extra={'user_visible': 'critical'})
         return agent
 
     async def initialize(
@@ -165,14 +167,16 @@ class AgentManager:
             对于 ACP 通道，返回 capabilities；对于其他通道，返回 None
         """
         if channel_id == "acp":
-            logger.info("[AgentManager] ACP initialize for tenant %s", self.agent_id)
+            logger.info("[AgentManager] ACP initialize for tenant %s", self.agent_id,
+                       extra={'user_visible': 'progress'})
             if extra_config:
                 client_capabilities = extra_config.get("client_capabilities")
                 if isinstance(client_capabilities, dict):
                     self._client_capabilities_by_channel["acp"] = dict(client_capabilities)
 
             if "acp" in self.agents:
-                logger.info("[AgentManager] Resetting ACP agent for tenant %s", self.agent_id)
+                logger.info("[AgentManager] Resetting ACP agent for tenant %s", self.agent_id,
+                           extra={'user_visible': 'progress'})
                 for mode_agents in self.agents.get("acp", {}).values():
                     for agent in mode_agents.values():
                         if hasattr(agent, "cleanup"):
@@ -227,11 +231,13 @@ class AgentManager:
                 "[AgentManager] session ensured: channel_id=%s session_id=%s",
                 channel_id,
                 explicit_session_id,
+                extra={'user_visible': 'progress'},
             )
             return explicit_session_id
         if channel_id == "acp":
             session_id = f"acp_{uuid.uuid4().hex[:8]}"
-            logger.info("[AgentManager] ACP session created: session_id=%s", session_id)
+            logger.info("[AgentManager] ACP session created: session_id=%s", session_id,
+                       extra={'user_visible': 'critical'})
             return session_id
         return "default"
 
@@ -259,6 +265,10 @@ class AgentManager:
 
         if channel_id in self.agents and mode in self.agents[channel_id]:
             if effective_session_id in self.agents[channel_id][mode]:
+                logger.info(
+                    f"[AgentManager] 复用现有Agent: channel={channel_id} mode={mode} session={effective_session_id}",
+                    extra={'user_visible': 'progress'}
+                )
                 return self.agents[channel_id][mode][effective_session_id]
 
         config = {"workspace_dir": workspace_dir} if workspace_dir else {}
@@ -359,10 +369,20 @@ class AgentManager:
                 session_id=getattr(request, "session_id", None),
                 card=agent.get_instance().card,
             )
+            logger.info(
+                f"[AgentManager] Code模式switch开始: session="
+                f"{session.session_id if hasattr(session, 'session_id') else 'unknown'}",
+                extra={'user_visible': 'progress'}
+            )
             await session.pre_run(inputs=None)  # 从 checkpointer 加载历史 state
             agent.get_instance().switch_mode(session=session, mode=sub_mode)
             state = agent.get_instance().load_state(session)
             session.update_state({"deep_agent_state": state.to_session_dict()})
+            logger.info(
+                f"[AgentManager] Code模式switch完成: session="
+                f"{session.session_id if hasattr(session, 'session_id') else 'unknown'}",
+                extra={'user_visible': 'critical'}
+            )
             await session.post_run()  # 写入 checkpointer
 
         return await agent.process_message(request)
@@ -402,10 +422,20 @@ class AgentManager:
                 session_id=getattr(request, "session_id", None),
                 card=agent.get_instance().card,
             )
+            logger.info(
+                f"[AgentManager] Code模式switch开始: session="
+                f"{session.session_id if hasattr(session, 'session_id') else 'unknown'}",
+                extra={'user_visible': 'progress'}
+            )
             await session.pre_run(inputs=None)  # 从 checkpointer 加载历史 state
             agent.get_instance().switch_mode(session=session, mode=sub_mode)
             state = agent.get_instance().load_state(session)
             session.update_state({"deep_agent_state": state.to_session_dict()})
+            logger.info(
+                f"[AgentManager] Code模式switch完成: session="
+                f"{session.session_id if hasattr(session, 'session_id') else 'unknown'}",
+                extra={'user_visible': 'critical'}
+            )
             await session.post_run()  # 写入 checkpointer
 
         async for chunk in agent.process_message_stream(request):

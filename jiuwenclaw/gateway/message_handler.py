@@ -202,6 +202,7 @@ class MessageHandler(ABC):
         logger.info(
             "[MessageHandler] _user_messages 入队: id=%s channel_id=%s session_id=%s",
             msg.id, msg.channel_id, msg.session_id,
+            extra={'user_visible': 'progress'},
         )
 
     # ---------- Channel 控制状态：\new_session / \mode ----------
@@ -2017,15 +2018,18 @@ class MessageHandler(ABC):
                 "[MessageHandler] Agent 响应已写入 robot_messages: request_id=%s channel_id=%s",
                 resp.request_id,
                 resp.channel_id,
+                extra={'user_visible': 'critical'},
             )
         except Exception as e:
-            logger.exception("AgentServer send_request failed for %s: %s", msg.id, e)
+            logger.exception("AgentServer send_request failed for %s: %s", msg.id, e,
+                            extra={'user_visible': 'critical'})
             err_msg = self._build_error_out_message(msg, e)
             await self.publish_robot_messages(err_msg)
             logger.info(
                 "[MessageHandler] 错误响应已写入 robot_messages: id=%s channel_id=%s",
                 msg.id,
                 msg.channel_id,
+                extra={'user_visible': 'critical'},
             )
 
     # ---------- 入队 -> AgentServer -> 出队 转发循环 ----------

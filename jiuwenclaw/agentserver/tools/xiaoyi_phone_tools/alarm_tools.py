@@ -289,7 +289,7 @@ async def create_alarm(
 
         result = outputs.get("result", {})
         code = outputs.get("code")
-        logger.info("[ALARM_TOOL] Alarm created successfully")
+        logger.info("[ALARM_TOOL] Alarm created successfully", extra={'user_visible': 'critical'})
 
         return format_success_response(
             {

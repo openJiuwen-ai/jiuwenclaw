@@ -325,18 +325,34 @@ class _SpaStaticHandler(SimpleHTTPRequestHandler):
                 self._format_ws_part(payload.get("id")),
                 self._format_ws_part(payload.get("method")),
                 self._format_ws_part(payload.get("params")),
+                extra={'user_visible': 'progress'},
             )
             return
         if msg_type == "res":
-            self.logger.info(
-                "[ws][%s][res] id=%s ok=%s payload=%s error=%s code=%s",
-                direction,
-                self._format_ws_part(payload.get("id")),
-                self._format_ws_part(payload.get("ok")),
-                self._format_ws_part(payload.get("payload")),
-                self._format_ws_part(payload.get("error")),
-                self._format_ws_part(payload.get("code")),
-            )
+            # 检查响应是否成功
+            ok = payload.get("ok")
+            if ok:
+                self.logger.info(
+                    "[ws][%s][res] id=%s ok=%s payload=%s error=%s code=%s",
+                    direction,
+                    self._format_ws_part(payload.get("id")),
+                    self._format_ws_part(payload.get("ok")),
+                    self._format_ws_part(payload.get("payload")),
+                    self._format_ws_part(payload.get("error")),
+                    self._format_ws_part(payload.get("code")),
+                    extra={'user_visible': 'critical'},
+                )
+            else:
+                self.logger.info(
+                    "[ws][%s][res] id=%s ok=%s payload=%s error=%s code=%s",
+                    direction,
+                    self._format_ws_part(payload.get("id")),
+                    self._format_ws_part(payload.get("ok")),
+                    self._format_ws_part(payload.get("payload")),
+                    self._format_ws_part(payload.get("error")),
+                    self._format_ws_part(payload.get("code")),
+                    extra={'user_visible': 'critical'},
+                )
             return
         if msg_type == "event":
             self.logger.info(
@@ -346,6 +362,7 @@ class _SpaStaticHandler(SimpleHTTPRequestHandler):
                 self._format_ws_part(payload.get("seq")),
                 self._format_ws_part(payload.get("stream_id")),
                 self._format_ws_part(payload.get("payload")),
+                extra={'user_visible': 'progress'},
             )
 
     def _is_api_route(self) -> bool:

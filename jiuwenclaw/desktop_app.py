@@ -284,7 +284,7 @@ def _build_child_env(name: str) -> dict[str, str]:
 
 
 def _start_process(name: str, command: list[str]) -> subprocess.Popen[bytes]:
-    logger.info("[desktop] starting %s: %s", name, command)
+    logger.info("[desktop] starting %s: %s", name, command, extra={'user_visible': 'progress'})
     return subprocess.Popen(
         command,
         env=_build_child_env(name),
@@ -456,7 +456,7 @@ class DesktopRuntime:
             STARTUP_TIMEOUT_SECONDS,
             process=self.processes["web"],
         )
-        logger.info("[desktop] services ready: %s", self.frontend_url)
+        logger.info("[desktop] services ready: %s", self.frontend_url, extra={'user_visible': 'critical'})
 
     def minimize_window(self) -> bool:
         if self.window is None or not hasattr(self.window, "minimize"):
@@ -483,12 +483,12 @@ class DesktopRuntime:
 
     def install_update(self, installer_path: str) -> bool:
         if os.name != "nt":
-            logger.warning("[desktop] update install is only supported on Windows")
+            logger.warning("[desktop] update install is only supported on Windows", extra={'user_visible': 'critical'})
             return False
 
         target = Path(installer_path).expanduser().resolve()
         if not target.is_file():
-            logger.error("[desktop] installer not found: %s", target)
+            logger.error("[desktop] installer not found: %s", target, extra={'user_visible': 'critical'})
             return False
 
         app_executable = Path(sys.executable).resolve()
@@ -512,7 +512,7 @@ class DesktopRuntime:
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )
-        logger.info("[desktop] launched update installer helper: %s", target)
+        logger.info("[desktop] launched update installer helper: %s", target, extra={'user_visible': 'critical'})
         self.close_window()
         return True
 
@@ -523,7 +523,7 @@ class DesktopRuntime:
             self._is_shutting_down = True
 
         deadline = time.monotonic() + 8.0
-        logger.info("[desktop] shutting down child processes")
+        logger.info("[desktop] shutting down child processes", extra={'user_visible': 'critical'})
 
         for process in self.processes.values():
             if process.poll() is None:
@@ -564,7 +564,7 @@ class DesktopRuntime:
         self.window.events.closed += self._on_closed
 
         gui = "edgechromium" if os.name == "nt" else None
-        logger.info("[desktop] opening window: %s", self.frontend_url)
+        logger.info("[desktop] opening window: %s", self.frontend_url, extra={'user_visible': 'progress'})
         webview.start(
             debug=debug,
             gui=gui,
@@ -578,7 +578,7 @@ class DesktopRuntime:
         try:
             self.window.evaluate_js(DESKTOP_BRIDGE_SCRIPT)
         except Exception as exc:  # noqa: BLE001
-            logger.warning("[desktop] failed to inject desktop controls: %s", exc)
+            logger.warning("[desktop] failed to inject desktop controls: %s", exc, extra={'user_visible': 'critical'})
 
     def _on_closed(self) -> None:
         self.shutdown()
