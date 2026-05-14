@@ -39,6 +39,19 @@ from jiuwenclaw.evolution.schema import EvolutionEntry, EvolutionFile
 
 logger = logging.getLogger(__name__)
 
+# Cold-start skills allowlist: when set, pass the raw string to SkillUseRail._normalize_name_list (no splitting here).
+ENABLED_SKILLS_ENV = "ENABLED_SKILLS"
+
+
+def enabled_skills_from_environ() -> str | None:
+    raw = os.environ.get(ENABLED_SKILLS_ENV)
+    if raw is None:
+        return None
+    if not raw.strip():
+        return None
+    return raw
+
+
 _SKILLNET_DOWNLOAD_TIMEOUT: int = int(os.environ.get("SKILLNET_DOWNLOAD_TIMEOUT", "60"))
 _SKILLNET_MAX_RETRIES: int = int(os.environ.get("SKILLNET_MAX_RETRIES", "3"))
 _FREE_SEARCH_PROXY_URL_ENV = "FREE_SEARCH_PROXY_URL"

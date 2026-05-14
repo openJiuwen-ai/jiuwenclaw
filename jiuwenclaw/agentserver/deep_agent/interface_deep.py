@@ -123,7 +123,7 @@ from jiuwenclaw.agentserver.memory.config import (clear_config_cache, get_memory
                                                   is_proactive_memory)
 from jiuwenclaw.agentserver.permissions.checker import TOOL_PERMISSION_CHANNEL_ID
 from jiuwenclaw.agentserver.cron_config import should_register_cron_tools
-from jiuwenclaw.agentserver.skill_manager import SkillManager
+from jiuwenclaw.agentserver.skill_manager import SkillManager, enabled_skills_from_environ
 from jiuwenclaw.agentserver.tools.multimodal_config import (
     apply_audio_model_config_from_yaml,
     apply_video_model_config_from_yaml,
@@ -1450,6 +1450,7 @@ class JiuWenClawDeepAdapter:
             if _UPSTREAM_HAS_ACTIVE_SKILL_BODIES:
                 skill_rail_kwargs["include_skill_body_tools"] = include_skill_body_tools
                 skill_rail_kwargs["max_active_skill_bodies"] = max_bodies
+            skill_rail_kwargs["enabled_skills"] = enabled_skills_from_environ()
             skill_rail = SkillUseRail(**skill_rail_kwargs)
             logger.info("[JiuWenClawDeepAdapter] SkillUseRail create success")
         except Exception as exc:
