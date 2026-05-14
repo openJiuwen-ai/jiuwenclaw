@@ -87,9 +87,10 @@ def main() -> int:
         from DoveScore import DoveScoreEvaluator
     except ImportError as exc:
         logger.error(
-            "DoveScore is not installed. Install JiuwenClaw with "
-            "`pip install -e \".[dovescore]\"` or install the local DoveScore repo "
-            "with `pip install -e /path/to/DoveScore`."
+            "DoveScore is not installed. Install it with "
+            "`pip install git+https://github.com/dannalily/DoveScore.git` "
+            "or install a local DoveScore checkout with "
+            "`pip install -e /path/to/DoveScore`."
         )
         logger.error("Import error: %s", exc)
         return 2

@@ -19,10 +19,10 @@ DoveScore Evaluator 用于评估源文本与目标文本之间的长文本信息
 
 ## 配置方式
 
-DoveScore 作为 JiuwenClaw 的可选依赖提供。需要使用该 skill 时，在 JiuwenClaw 仓库根目录安装：
+DoveScore 依赖在默认 JiuwenClaw 环境中不强制安装，避免影响常规 CI 和普通用户的依赖同步。需要使用该 skill 时，先安装 DoveScore：
 
 ```bash
-pip install -e ".[dovescore]"
+pip install git+https://github.com/dannalily/DoveScore.git
 ```
 
 随后配置 OpenAI API key：
@@ -35,10 +35,10 @@ export OPENAI_API_KEY="your-api-key"
 
 ## Requirements
 
-DoveScore is an optional JiuwenClaw dependency. If it is not installed, install JiuwenClaw with:
+DoveScore is intentionally not installed by default. If it is not installed, install it with:
 
 ```bash
-pip install -e ".[dovescore]"
+pip install git+https://github.com/dannalily/DoveScore.git
 ```
 
 For local development from a DoveScore checkout, this is also acceptable:

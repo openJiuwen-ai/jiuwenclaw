@@ -47,10 +47,10 @@ python scripts/run_dovescore.py --source-file source.txt --target-file target.tx
 
 ## Troubleshooting
 
-If import fails, install the optional dependency from the JiuwenClaw repository root:
+If import fails, install DoveScore:
 
 ```bash
-pip install -e ".[dovescore]"
+pip install git+https://github.com/dannalily/DoveScore.git
 ```
 
 If authentication fails, set:
