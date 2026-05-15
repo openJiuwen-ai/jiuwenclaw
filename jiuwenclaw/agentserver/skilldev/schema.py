@@ -737,10 +737,11 @@ MAX_GENERATE_RETRIES = 3  # GENERATE ↔ VALIDATE 最大重试次数
 
 
 def _now_iso() -> str:
-    """返回当前 UTC 时间的 ISO 8601 字符串."""
-    import datetime
+    """返回当前中国时区（Asia/Shanghai）时间的 ISO 8601 字符串."""
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
 
-    return datetime.datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
+    return datetime.now(ZoneInfo("Asia/Shanghai")).isoformat(timespec="seconds")
 
 
 def generate_task_id() -> str:
