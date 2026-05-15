@@ -295,6 +295,7 @@ react:
       trigger_tokens: 10000        # 首次写笔记：窗口 token ≥ 此值开始写
       trigger_add_tokens: 5000     # 增量节奏：每多 N token 追写一次（应 ≤ trigger_tokens）
       tool_min_: 3                 # 两次笔记间至少 N 次工具调用，避免抖动；≥1
+      incremental_mode: true       # true=增量扫描（仅处理上次更新后的新消息，节省 token）/ false=全量扫描
       # update_mode: agent_edit             # agent_edit=ReActAgent 编辑 / direct_replace=整体重写
       # direct_replace_max_retries: 2       # direct_replace 失败重试次数
       # model / model_client:               # 写笔记的 LLM；不设则继承默认模型
