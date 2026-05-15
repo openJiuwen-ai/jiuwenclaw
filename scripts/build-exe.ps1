@@ -30,14 +30,34 @@ Write-Host "`n[3/4] Running PyInstaller..." -ForegroundColor Yellow
 uv run pyinstaller scripts\jiuwenclaw.spec --noconfirm
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
-# 4. Pack archive
-Write-Host "`n[4/4] Packing archive..." -ForegroundColor Yellow
-$ArchivePath = "$ProjectRoot\dist\jiuwenswarm.tar.gz"
-if (Test-Path $ArchivePath) { Remove-Item $ArchivePath -Force }
-tar -czf $ArchivePath -C "$ProjectRoot\dist\jiuwenswarm" .
+# 4. Build installer (Inno Setup)
+Write-Host "`n[4/4] Building installer (Inno Setup)..." -ForegroundColor Yellow
+$IsccPaths = @(
+    "C:\Program Files (x86)\Inno Setup 6\ISCC.exe",
+    "C:\Program Files\Inno Setup 6\ISCC.exe"
+)
+$Iscc = $IsccPaths | Where-Object { Test-Path $_ } | Select-Object -First 1
+if (-not $Iscc) {
+    $Iscc = Get-Command iscc -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Source
+}
+if (-not $Iscc) {
+    Write-Host "Downloading Inno Setup 6..." -ForegroundColor Yellow
+    $InnoUrl = "https://jrsoftware.org/download.php/is.exe"
+    $InnoExe = "$env:TEMP\innosetup-6.7.1.exe"
+    Invoke-WebRequest -Uri $InnoUrl -OutFile $InnoExe -UseBasicParsing
+    Write-Host "Installing Inno Setup 6 (silent)..." -ForegroundColor Yellow
+    Start-Process -FilePath $InnoExe -ArgumentList "/VERYSILENT","/SUPPRESSMSGBOXES","/NORESTART","/SP-" -Wait -NoNewWindow
+    $Iscc = "C:\Program Files (x86)\Inno Setup 6\ISCC.exe"
+    if (-not (Test-Path $Iscc)) {
+        Write-Host "ERROR: Inno Setup installation failed" -ForegroundColor Red
+        exit 1
+    }
+}
+& $Iscc "$ProjectRoot\scripts\installer.iss"
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
+$InstallerPath = "$ProjectRoot\dist\jiuwenswarm-setup.exe"
+
 Write-Host "`n=== Build complete ===" -ForegroundColor Green
-Write-Host "Output dir: $ProjectRoot\dist\jiuwenswarm" -ForegroundColor Green
-Write-Host "Executable: $ProjectRoot\dist\jiuwenswarm\jiuwenswarm.exe" -ForegroundColor Green
-Write-Host "Archive: $ArchivePath" -ForegroundColor Green
+Write-Host "Installer: $InstallerPath" -ForegroundColor Green
+Write-Host "Size: $([math]::Round((Get-Item $InstallerPath).Length / 1MB, 1)) MB" -ForegroundColor Green
