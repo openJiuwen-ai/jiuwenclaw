@@ -463,6 +463,13 @@ class WebSocketAgentServerClient(AgentServerClient):
         self._ensure_connected()
         request_id = f"ft_start_{params.transfer_id}"
 
+        extra: dict[str, Any] = {}
+        _svc = str(params.service_id or "").strip()
+        if _svc:
+            extra["service_id"] = _svc
+            _ag = str(params.agent_id or "").strip()
+            extra["agent_id"] = _ag if _ag else None
+
         envelope = E2AEnvelope(
             request_id=request_id,
             channel=params.channel_id,
@@ -479,6 +486,7 @@ class WebSocketAgentServerClient(AgentServerClient):
             },
             session_id=params.session_id,
             is_stream=False,
+            **extra,
         )
 
         logger.info(
@@ -499,6 +507,9 @@ class WebSocketAgentServerClient(AgentServerClient):
         base64_data: str,
         chunk_size: int,
         channel_id: str = "",
+        *,
+        service_id: str = "",
+        agent_id: str = "",
     ) -> dict[str, Any]:
         """发送 FILE_TRANSFER_CHUNK 消息.
 
@@ -515,6 +526,13 @@ class WebSocketAgentServerClient(AgentServerClient):
         self._ensure_connected()
         request_id = f"ft_chunk_{transfer_id}_{chunk_index}"
 
+        extra: dict[str, Any] = {}
+        _svc = str(service_id or "").strip()
+        if _svc:
+            extra["service_id"] = _svc
+            _ag = str(agent_id or "").strip()
+            extra["agent_id"] = _ag if _ag else None
+
         envelope = E2AEnvelope(
             request_id=request_id,
             channel=channel_id,
@@ -527,6 +545,7 @@ class WebSocketAgentServerClient(AgentServerClient):
                 "chunk_size": chunk_size,
             },
             is_stream=False,
+            **extra,
         )
 
         logger.debug(
@@ -545,6 +564,9 @@ class WebSocketAgentServerClient(AgentServerClient):
         transfer_id: str,
         sha256: str,
         channel_id: str = "",
+        *,
+        service_id: str = "",
+        agent_id: str = "",
     ) -> dict[str, Any]:
         """发送 FILE_TRANSFER_COMPLETE 消息.
 
@@ -559,6 +581,13 @@ class WebSocketAgentServerClient(AgentServerClient):
         self._ensure_connected()
         request_id = f"ft_complete_{transfer_id}"
 
+        extra: dict[str, Any] = {}
+        _svc = str(service_id or "").strip()
+        if _svc:
+            extra["service_id"] = _svc
+            _ag = str(agent_id or "").strip()
+            extra["agent_id"] = _ag if _ag else None
+
         envelope = E2AEnvelope(
             request_id=request_id,
             channel=channel_id,
@@ -569,6 +598,7 @@ class WebSocketAgentServerClient(AgentServerClient):
                 "sha256": sha256,
             },
             is_stream=False,
+            **extra,
         )
 
         logger.info(
@@ -586,6 +616,9 @@ class WebSocketAgentServerClient(AgentServerClient):
         file_path: str,
         session_id: str = "",
         channel_id: str = "",
+        *,
+        service_id: str = "",
+        agent_id: str = "",
     ) -> dict[str, Any]:
         """发送文件到 AgentServer（分片发送）.
 
@@ -638,6 +671,8 @@ class WebSocketAgentServerClient(AgentServerClient):
             chunk_size=chunk_size,
             session_id=session_id,
             channel_id=channel_id,
+            service_id=service_id,
+            agent_id=agent_id,
         )
         start_resp = await self.file_transfer_start(start_params)
 
@@ -660,6 +695,8 @@ class WebSocketAgentServerClient(AgentServerClient):
                 base64_data=b64_data,
                 chunk_size=len(chunk_data),
                 channel_id=channel_id,
+                service_id=service_id,
+                agent_id=agent_id,
             )
 
             if not chunk_resp.get("accepted"):
@@ -674,6 +711,8 @@ class WebSocketAgentServerClient(AgentServerClient):
             transfer_id=transfer_id,
             sha256=sha256,
             channel_id=channel_id,
+            service_id=service_id,
+            agent_id=agent_id,
         )
 
         return complete_resp

@@ -109,6 +109,9 @@ class FileTransferHandler:
         session_id: str = "",
         channel_id: str = "",
         request_id: str = "",
+        *,
+        service_id: str = "",
+        agent_id: str = "",
     ) -> dict[str, Any]:
         """发送文件到 AgentServer（分片发送）.
 
@@ -118,6 +121,8 @@ class FileTransferHandler:
             session_id: 会话ID
             channel_id: 频道ID
             request_id: 请求ID
+            service_id: 运行时路由用（如元戎 / SessionMap）；与 agent_id 一并透传给各分片
+            agent_id: 同上，可选
 
         Returns:
             发送结果，包含 AgentServer 返回的最终文件路径
@@ -174,6 +179,8 @@ class FileTransferHandler:
                 "chunk_size": chunk_size,
                 "mime_type": guess_mime_type(filename),
                 "session_id": session_id,
+                "service_id": service_id,
+                "agent_id": agent_id,
             },
         )
 
@@ -197,6 +204,8 @@ class FileTransferHandler:
                     "chunk_index": i,
                     "base64_data": base64_data,
                     "chunk_size": len(chunk_data),
+                    "service_id": service_id,
+                    "agent_id": agent_id,
                 },
             )
 
@@ -214,6 +223,8 @@ class FileTransferHandler:
                 "transfer_id": transfer_id,
                 "sha256": sha256,
                 "total_chunks": total_chunks,
+                "service_id": service_id,
+                "agent_id": agent_id,
             },
         )
 
