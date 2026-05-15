@@ -92,21 +92,15 @@ def _resolve_default_model_config(config_base: dict[str, Any]) -> dict[str, Any]
     if not isinstance(models_raw, dict):
         return {}
 
-    legacy_default = models_raw.get("default")
-    if isinstance(legacy_default, dict) and legacy_default:
-        return legacy_default
-
     defaults_raw = models_raw.get("defaults")
-    if not isinstance(defaults_raw, list):
-        return {}
+    if isinstance(defaults_raw, list):
+        for item in defaults_raw:
+            if isinstance(item, dict):
+                return item
 
-    for item in defaults_raw:
-        if isinstance(item, dict) and item.get("is_default"):
-            return item
-
-    for item in defaults_raw:
-        if isinstance(item, dict):
-            return item
+    legacy_default = models_raw.get("default")
+    if isinstance(legacy_default, dict):
+        return legacy_default
 
     return {}
 

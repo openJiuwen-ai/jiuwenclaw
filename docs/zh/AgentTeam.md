@@ -224,6 +224,16 @@ Agent Team 模式下同样支持技能（Skills）的使用和开发。团队中
 3. **协作效率提升**：技能可以让 Agent 更高效地完成分配的任务
 
 > 有关 Team Skills 的详细使用和开发教程，请参阅 [Team Skill 开发指南](TeamSkill.md)。
+
+### 2.5 Team Memory
+
+Agent Team 模式下，每个团队都有自己的双层记忆：成员各自的**个人记忆**（独立读写）和团队共享的 **`TEAM_MEMORY.md`**（所有成员只读，Leader 在 round 结束后由提取 agent 自动写入）。
+
+- **临时团队**：成员只读访问父 agent 的 workspace 记忆，团队销毁后不留痕
+- **持久团队**：每个成员独立的个人记忆 + 跨 round 累积的团队记忆，预定义成员的原有 workspace 通过 symlink 自动延续
+
+完整的存储布局、提取分类（`[decision]` / `[lesson]` / `[member]` / `[context]`）、跨团队/跨成员隔离机制详见 [记忆系统 → Agent Team 团队记忆](记忆.md#agent-team-团队记忆)。
+
 ---
 
 ## 案例实践
@@ -357,17 +367,20 @@ Agent Team 的文件结构分为两个层级：**团队共享工作区**和**成
 
 ```
 .agent_teams/                          ← Agent Team 根目录
-└── <session_id>/                      ← 每个 Agent Team Session 独立一个文件夹
+└── <team_name>/                       ← 每个团队独立一个文件夹
     ├── team-workspace/                 ← 团队共享工作区（所有成员共享）
     │   ├── artifacts/                  ← 团队产出物
     │   │   ├── code/                   ← 代码产出
     │   │   ├── docs/                   ← 文档产出
     │   │   └── reports/                ← 报告产出
     │   └── skills/                     ← 团队共享技能
+    ├── team-memory/                    ← 团队共享记忆（Leader 自动提取）
+    │   └── TEAM_MEMORY.md
     └── workspaces/                     ← 各成员独立工作空间
         └── <agent_name>_workspace/     ← 各 Agent 的独立空间
             ├── AGENT.md                ← 智能体配置
-            ├── memory/                 ← 长期记忆
+            ├── memory/                 ← 个人长期记忆（general 场景）
+            ├── coding_memory/          ← 个人编码记忆（coding 场景）
             ├── skills/                 ← 技能库
             ├── todo/                   ← 待办事项
             └── ...                     ← 其他 Agent 专属文件

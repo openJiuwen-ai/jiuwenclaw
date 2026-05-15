@@ -236,6 +236,15 @@ In Agent Team mode you can still use and develop **Skills**. Each agent can conf
 
 > For detailed usage and development of Team Skills, see [Team Skill developer guide](TeamSkill.md).
 
+### 2.5 Team Memory
+
+Each Agent Team has two memory layers: **personal memory** (each member reads/writes its own) and a shared **`TEAM_MEMORY.md`** (read-only to members; the Leader writes it via an extractor agent at the end of each round).
+
+- **Temporary team** — members read-only access the parent agent's workspace memory; nothing persists once the team is torn down
+- **Persistent team** — each member has isolated personal memory plus team memory that accumulates across rounds; predefined members keep their existing workspace via symlink
+
+For the full layout, extraction categories (`[decision]` / `[lesson]` / `[member]` / `[context]`), and cross-team / cross-member isolation, see [Memory → Agent Team Memory](Memory.md#agent-team-memory).
+
 ---
 
 ## Case study
@@ -375,17 +384,20 @@ Full path layout:
 
 ```text
 .agent_teams/                          ← Agent Team root
-└── <session_id>/                      ← one folder per Agent Team session
+└── <team_name>/                       ← one folder per team
     ├── team-workspace/                ← shared by all members
     │   ├── artifacts/                 ← team outputs
     │   │   ├── code/                  ← code artifacts
     │   │   ├── docs/                  ← document artifacts
     │   │   └── reports/               ← report artifacts
     │   └── skills/                    ← team-shared skills
+    ├── team-memory/                   ← shared team memory (auto-extracted by leader)
+    │   └── TEAM_MEMORY.md
     └── workspaces/                    ← per-member workspaces
         └── <agent_name>_workspace/    ← each agent’s private space
             ├── AGENT.md               ← agent configuration
-            ├── memory/                ← long-term memory
+            ├── memory/                ← personal long-term memory (general scenario)
+            ├── coding_memory/         ← personal coding memory (coding scenario)
             ├── skills/                ← skill library
             ├── todo/                  ← todos
             └── ...                    ← other agent-specific files

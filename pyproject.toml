@@ -68,6 +68,7 @@ jiuwenclaw-start = "jiuwenclaw.start_services:main"
 jiuwenclaw-init = "jiuwenclaw.init_workspace:main"
 jiuwenclaw-desktop = "jiuwenclaw.channels.desktop.desktop_app:main"
 jiuwenclaw-tui = "jiuwenclaw.channels.acp.app_acp:main"
+jiuwenclaw-acp = "jiuwenclaw.gateway.channel_manager.protocol.acp.acp_connect:main"
 
 [tool.setuptools]
 # 入口脚本现在是 jiuwenclaw 包内的一部分，不需要 py-modules

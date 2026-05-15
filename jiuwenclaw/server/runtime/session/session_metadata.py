@@ -230,6 +230,12 @@ def get_session_metadata(session_id: str) -> dict[str, Any]:
     return _read_metadata(session_id)
 
 
+def remove_session_metadata_cache(session_id: str) -> None:
+    """Remove cached session metadata after the session directory is deleted."""
+    with _CACHE_LOCK:
+        _METADATA_CACHE.pop(session_id, None)
+
+
 def set_session_delivery_context(
     *,
     session_id: str,

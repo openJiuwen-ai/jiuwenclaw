@@ -1117,8 +1117,8 @@ def register_cli_handlers(bind: CliHandlersBindParams) -> None:
             )
             return
         try:
-            rewind_result = rewind_session(session_id=target_sid, turn_index=turn_index)
             restore_result = restore_session_files(session_id=target_sid, turn_index=turn_index)
+            rewind_result = rewind_session(session_id=target_sid, turn_index=turn_index)
             combined = {
                 **rewind_result,
                 "restored_files": restore_result.get("restored_files", []),

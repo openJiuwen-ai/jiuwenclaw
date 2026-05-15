@@ -34,6 +34,56 @@ def test_load_team_spec_dict_reads_models_defaults_from_repository_config(monkey
     assert model["model_request_config"]["model"] == "gpt-template"
 
 
+def test_load_team_spec_dict_uses_first_models_defaults_entry_for_team(monkeypatch):
+    """Team config loading should use the first models.defaults entry."""
+    config = {
+        "models": {
+            "defaults": [
+                {
+                    "model_client_config": {
+                        "api_base": "https://first.example.test/v1",
+                        "api_key": "sk-first",
+                        "model_name": "first-model",
+                        "client_provider": "OpenAI",
+                    },
+                    "model_config_obj": {"temperature": 0.1},
+                    "is_default": False,
+                },
+                {
+                    "model_client_config": {
+                        "api_base": "https://second.example.test/v1",
+                        "api_key": "sk-second",
+                        "model_name": "second-model",
+                        "client_provider": "OpenAI",
+                    },
+                    "model_config_obj": {"temperature": 0.9},
+                    "is_default": True,
+                },
+            ]
+        },
+        **_wrap_modes_team(
+            {
+                "demo_team": {
+                    "team_name": "demo_team",
+                    "agents": {
+                        "leader": {},
+                        "teammate": {},
+                    },
+                }
+            }
+        ),
+    }
+
+    spec = load_team_spec_dict(config_base=config)
+
+    model = spec["agents"]["leader"]["model"]
+    assert model["model_client_config"]["api_base"] == "https://first.example.test/v1"
+    assert model["model_client_config"]["api_key"] == "sk-first"
+    assert model["model_client_config"]["model_name"] == "first-model"
+    assert model["model_request_config"]["model"] == "first-model"
+    assert model["model_request_config"]["temperature"] == 0.1
+
+
 def test_load_team_spec_dict_supports_member_specific_agents(monkeypatch, tmp_path):
     """Predefined members should resolve to member_name-keyed DeepAgentSpec entries."""
     fake_agent_teams_home = tmp_path / ".agent_teams"

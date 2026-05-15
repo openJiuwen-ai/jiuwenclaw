@@ -21,7 +21,7 @@ from functools import partial
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
-from urllib.parse import unquote, urlparse
+from urllib.parse import quote, unquote, urlparse
 
 # --- Early --dotenv parsing (before jiuwenclaw imports) ---
 from jiuwenclaw.dotenv_early import parse_dotenv_early
@@ -678,9 +678,10 @@ class _SpaStaticHandler(SimpleHTTPRequestHandler):
             self.send_response(200)
             self.send_header("Content-Type", mime_type)
             self.send_header("Content-Length", str(file_size))
+            encoded_name = quote(file_name, safe="")
             self.send_header(
                 "Content-Disposition",
-                f'attachment; filename="{file_name}"',
+                f"attachment; filename*=UTF-8''{encoded_name}",
             )
             self.send_header("Cache-Control", "no-store")
             self.end_headers()
