@@ -1710,6 +1710,46 @@ class JiuWenClawDeepAdapter:
             rail = None
         return rail
 
+    def _build_fast_subagent_permission_rail(self) -> Any | None:
+        """为 agent.fast 子 ReActAgent 构造独立的 PermissionInterruptRail（每实例新建）。"""
+        try:
+            config_base = get_config()
+            model_name = (
+                (config_base.get("models") or {})
+                .get("default", {})
+                .get("model_client_config", {})
+                .get("model_name", "gpt-4")
+            )
+            return build_permission_rail(
+                config=config_base,
+                llm=self._model,
+                model_name=model_name,
+            )
+        except Exception as exc:
+            logger.warning(
+                "[JiuWenClawDeepAdapter] fast sub-agent PermissionInterruptRail build failed: %s",
+                exc,
+            )
+            return None
+
+    def _build_fast_subagent_disabled_tools_rail(self) -> DisabledToolsRail | None:
+        """为 agent.fast 子 ReActAgent 构造 DisabledToolsRail；仅剥离 ability，避免并发踩共享 resource_mgr。"""
+        react = self._config_cache or {}
+        disabled_list = react.get("disabled_tools") or []
+        if not disabled_list:
+            return None
+        try:
+            return DisabledToolsRail(
+                disabled_tools=list(disabled_list),
+                touch_shared_resource_mgr=False,
+            )
+        except Exception as exc:
+            logger.warning(
+                "[JiuWenClawDeepAdapter] fast sub-agent DisabledToolsRail build failed: %s",
+                exc,
+            )
+            return None
+
     def _build_agent_rails(self, config: dict[str, Any], config_base: dict[str, Any], *,
                            mode: str = "agent.plan",
                            extra_skill_dir: str | None = None) -> list[Any]:
@@ -2584,6 +2624,8 @@ class JiuWenClawDeepAdapter:
                 channel_id=_CRON_TOOL_CHANNEL_ID.get(),
                 request_id=request_id,
                 sub_agent_config=sub_agent_config,
+                sub_agent_permission_rail_factory=self._build_fast_subagent_permission_rail,
+                sub_agent_disabled_tools_rail_factory=self._build_fast_subagent_disabled_tools_rail,
             )
             if request_id:
                 self._track_session_toolkit(request_id, session_id, self._multi_session_toolkit)

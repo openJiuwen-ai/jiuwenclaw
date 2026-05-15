@@ -27,7 +27,8 @@ import logging
 import secrets
 import time
 from enum import Enum
-from typing import Dict, List
+from collections.abc import Callable
+from typing import Any, Dict, List
 
 from openjiuwen.core.runner import Runner
 from openjiuwen.core.single_agent import ReActAgent, ReActAgentConfig, AgentCard
@@ -60,12 +61,27 @@ class SessionTask(BaseModel):
 class MultiSessionToolkit:
     """Toolkit for multi-session agent task tracking. Supports parallel sub-agent execution."""
 
-    def __init__(self, session_id: str, channel_id: str, request_id: str, sub_agent_config: ReActAgentConfig) -> None:
+    def __init__(
+        self,
+        session_id: str,
+        channel_id: str,
+        request_id: str,
+        sub_agent_config: ReActAgentConfig,
+        *,
+        sub_agent_permission_rail_factory: Callable[[], Any] | None = None,
+        sub_agent_disabled_tools_rail_factory: Callable[[], Any] | None = None,
+    ) -> None:
         """Initialize MultiSessionToolkit for a session.
 
         Args:
             session_id: Parent session/conversation identifier.
             channel_id: Channel ID for routing notify messages back to parent.
+            request_id: Request identifier for notify routing.
+            sub_agent_config: Model/runtime config for spawned ReActAgent instances.
+            sub_agent_permission_rail_factory: Returns a new PermissionInterruptRail (or None)
+                per sub-agent. Do not reuse rails bound to the parent DeepAgent.
+            sub_agent_disabled_tools_rail_factory: Returns a new DisabledToolsRail (or None)
+                per sub-agent; use touch_shared_resource_mgr=False for fast sub-agents.
         """
         self.session_id = session_id
         self.channel_id = channel_id
@@ -73,6 +89,8 @@ class MultiSessionToolkit:
         self.sessions: List[SessionTask] = []
         self._tasks: Dict[str, asyncio.Task] = {}
         self._sub_agent_config: ReActAgentConfig = sub_agent_config
+        self._sub_agent_permission_rail_factory = sub_agent_permission_rail_factory
+        self._sub_agent_disabled_tools_rail_factory = sub_agent_disabled_tools_rail_factory
         logger.info(
             "[MultiSessionToolkit] 初始化 parent_session_id=%s channel_id=%s request_id=%s",
             session_id,
@@ -92,7 +110,33 @@ class MultiSessionToolkit:
         for mcp_tool in mcp_tools:
             Runner.resource_mgr.add_tool(mcp_tool)
             agent.ability_manager.add(mcp_tool.card)
-        logger.debug("[MultiSessionToolkit] get_sub_agent 完成 mcp_tools_count=%d", len(mcp_tools))
+
+        perm_factory = self._sub_agent_permission_rail_factory
+        if perm_factory is not None:
+            try:
+                permission_rail = perm_factory()
+            except Exception:
+                logger.exception("[MultiSessionToolkit] get_sub_agent 权限轨工厂异常")
+                permission_rail = None
+            if permission_rail is not None:
+                await agent.register_rail(permission_rail)
+
+        disabled_factory = self._sub_agent_disabled_tools_rail_factory
+        if disabled_factory is not None:
+            try:
+                disabled_rail = disabled_factory()
+            except Exception:
+                logger.exception("[MultiSessionToolkit] get_sub_agent 禁用工具轨工厂异常")
+                disabled_rail = None
+            if disabled_rail is not None:
+                await agent.register_rail(disabled_rail)
+
+        logger.debug(
+            "[MultiSessionToolkit] get_sub_agent 完成 mcp_tools_count=%d permission_factory=%s disabled_factory=%s",
+            len(mcp_tools),
+            perm_factory is not None,
+            disabled_factory is not None,
+        )
         return agent
 
     async def _run_and_notify(

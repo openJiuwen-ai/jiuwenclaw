@@ -32,18 +32,32 @@ class DisabledToolsRail(DeepAgentRail):
     Example config in config.yaml:
         react:
           disabled_tools: ["bash", "write_file", "mcp_exec_command"]
+
+    When ``touch_shared_resource_mgr`` is False, only the current agent's
+    ``ability_manager`` is updated; ``Runner.resource_mgr`` is unchanged so
+    parallel lightweight agents (e.g. agent.fast sub-ReActAgent) do not evict
+    shared tool registrations.
     """
 
     priority: int = 1  # 低优先级，确保最后执行
 
-    def __init__(self, disabled_tools: List[str] | None = None) -> None:
+    def __init__(
+        self,
+        disabled_tools: List[str] | None = None,
+        *,
+        touch_shared_resource_mgr: bool = True,
+    ) -> None:
         """Initialize DisabledToolsRail.
 
         Args:
             disabled_tools: List of tool names to disable. Can be None or empty.
+            touch_shared_resource_mgr: When True (default), remove tools from both
+                ability_manager and Runner.resource_mgr. When False, detach only
+                from ability_manager for this agent.
         """
         super().__init__()
         self._disabled_tools: Set[str] = set(disabled_tools or [])
+        self._touch_shared_resource_mgr = touch_shared_resource_mgr
         self._agent: Optional["DeepAgent"] = None  # 保存 agent 引用用于热更新
         # tool_name -> (tool_id, Tool, ToolCard) - 保存被移除的完整信息用于重新注册
         self._removed_data: Dict[str, tuple[str, Tool, ToolCard]] = {}
@@ -99,12 +113,19 @@ class DisabledToolsRail(DeepAgentRail):
             # Step 2: 用 card.id 先获取 Tool 对象
             tool = Runner.resource_mgr.get_tool(tool_id)
 
-            # Step 3: 用 card.id 删除 resource_mgr 中的 Tool
-            remove_result = Runner.resource_mgr.remove_tool(tool_id)
-            # remove_tool 返回 Result 类型，检查是否成功
-            if hasattr(remove_result, 'is_ok') and not remove_result.is_ok():
-                logger.warning("[DisabledToolsRail] remove_tool failed for '%s' (id=%s): %s",
-                               tool_name, tool_id, remove_result)
+            # Step 3: 用 card.id 删除 resource_mgr 中的 Tool（可选：并发子 agent 保留共享注册）
+            if self._touch_shared_resource_mgr:
+                remove_result = Runner.resource_mgr.remove_tool(tool_id)
+                if hasattr(remove_result, 'is_ok') and not remove_result.is_ok():
+                    logger.warning("[DisabledToolsRail] remove_tool failed for '%s' (id=%s): %s",
+                                   tool_name, tool_id, remove_result)
+            else:
+                logger.info(
+                    "[DisabledToolsRail] ability-only detach (shared resource_mgr untouched): "
+                    "name=%s id=%s",
+                    tool_name,
+                    tool_id,
+                )
 
             if not tool:
                 logger.warning(
@@ -156,8 +177,8 @@ class DisabledToolsRail(DeepAgentRail):
             logger.info(
                 "[DisabledToolsRail] re-registered ToolCard: name=%s", tool_name)
 
-            # Step 2: 重新添加 Tool 到 resource_mgr（如果有 Tool 实例）
-            if tool:
+            # Step 2: 重新添加 Tool 到 resource_mgr（仅当当初从共享池移除过）
+            if tool and self._touch_shared_resource_mgr:
                 Runner.resource_mgr.add_tool(tool)
                 logger.info(
                     "[DisabledToolsRail] re-registered Tool: name=%s, id=%s",
