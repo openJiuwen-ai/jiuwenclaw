@@ -45,7 +45,11 @@ from jiuwenclaw.schema.agent import AgentRequest, AgentResponse, AgentResponseCh
 from jiuwenclaw.schema.hook_event import AgentServerHookEvents
 from jiuwenclaw.agentserver.extensions import get_rail_manager
 from jiuwenclaw.agentserver.permissions.patterns import persist_cli_trusted_directory
-from jiuwenclaw.schema.hooks_context import AgentServerChatHookContext, AgentWsServerStartHookContext
+from jiuwenclaw.schema.hooks_context import (
+    AgentServerChatHookContext,
+    AgentWsServerStartHookContext,
+    AgentReloadConfigHookContext,
+)
 from jiuwenclaw.agentserver.agent_manager import AgentManager, ACP_DEFAULT_CAPABILITIES
 from jiuwenclaw.e2a.acp.protocol import build_acp_session_new_result
 from jiuwenclaw.agentserver.permissions.config_rpc import get_permissions_config_req_methods
@@ -1399,6 +1403,25 @@ class AgentWebSocketServer:
             params = request.params or {}
             config_payload = params.get("config")
             env_overrides = params.get("env")
+
+            # 触发 AGENT_RELOAD_CONFIG hook
+            try:
+                from jiuwenclaw.extensions.registry import ExtensionRegistry
+                ctx = AgentReloadConfigHookContext(
+                    request_id=request.request_id,
+                    channel_id=request.channel_id,
+                    config=config_payload,
+                    env=env_overrides,
+                )
+                await ExtensionRegistry.get_instance().trigger(
+                    AgentServerHookEvents.AGENT_RELOAD_CONFIG, ctx
+                )
+                # 允许扩展修改配置
+                config_payload = ctx.config
+                env_overrides = ctx.env
+            except RuntimeError:
+                # ExtensionRegistry 未初始化，跳过
+                pass
 
             await self._agent_manager.reload_agents_config(
                 config=config_payload,

@@ -32,3 +32,4 @@ class AgentServerHookEvents(HookEventBase):
     MEMORY_BEFORE_CHAT = HookEventBase.get_event("memory_before_chat")
     MEMORY_AFTER_CHAT = HookEventBase.get_event("memory_after_chat")
     BEFORE_SYSTEM_PROMPT_BUILD = HookEventBase.get_event("before_system_prompt_build")
+    AGENT_RELOAD_CONFIG = HookEventBase.get_event("agent_reload_config")
