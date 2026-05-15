@@ -18,12 +18,22 @@ uninstall_pv_pvc() {
 # NFS is on default namespace
 deploy_nfs() {
     local nfs_path=${DEPLOY_VARS["NFS_HOST_PATH"]}
+    local rabbit_path=${DEPLOY_VARS["RABBITMQ_PATH"]}
+    local nfs_dname=${DEPLOY_VARS["NFS_NAME"]}
 
     render_config_template ${NFS_SERVER_TEMPLATE_FILE} ${NFS_SERVER_FILE} "DEPLOY_VARS"
     exec_cmd mkdir -p ${nfs_path}
     exec_cmd chmod -R 777 ${nfs_path}
     exec_cmd kubectl apply -f ${NFS_SERVER_FILE}
-    wait_k8s_resource_ready "deployment" "${DEPLOY_VARS["NFS_NAME"]}"
+    wait_k8s_resource_ready "deployment" "${nfs_dname}"
+
+    info "Preparing RabbitMQ data directory: ${rabbit_path}"
+    local nfs_pod=$(kubectl get pods -n default -l app=${nfs_dname} -o jsonpath='{.items[0].metadata.name}')
+
+    info "Executing: kubectl exec ${nfs_pod} -- sh -c \"mkdir -p ${rabbit_path}\""
+    kubectl exec ${nfs_pod} -- sh -c "mkdir -p ${rabbit_path}"
+
+    success "RabbitMQ directory created successfully in NFS Pod!"
 }
 
 uninstall_nfs() {

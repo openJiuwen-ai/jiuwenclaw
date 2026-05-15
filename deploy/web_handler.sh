@@ -7,7 +7,7 @@ deploy_web() {
 
     render_config_template "${WEB_DEPLOYMENT_TEMPLATE_FILE}" "${WEB_DEPLOYMENT_FILE}" "DEPLOY_VARS"
     exec_cmd kubectl apply -f ${WEB_DEPLOYMENT_FILE}
-    wait_k8s_resource_ready "deployment" "${web_name}"  "${namespace}"
+    wait_k8s_resource_ready "deployment" "${web_name}" "${namespace}"
 }
 
 uninstall_web() {

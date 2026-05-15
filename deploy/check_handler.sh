@@ -14,7 +14,7 @@ check_cmds() {
         check_cmd helm
     fi
 
-    for cmd in docker python3 jq yq mount.nfs
+    for cmd in docker python3 jq yq mount.nfs base64
     do
         check_cmd ${cmd}
     done
@@ -166,4 +166,8 @@ check_web_up_dependency(){
     if ! check_k8s_resource_exists "deployment" "${DEPLOY_VARS["GATEWAY_NAME"]}" "${DEPLOY_VARS["NAMESPACE"]}"; then
         error "GATEWAY is not deployed. Please deploy it first with: ./$(basename "$0") up gateway"
     fi
+}
+
+check_rabbitmq_up_dependency(){
+    check_if_nfs_up
 }

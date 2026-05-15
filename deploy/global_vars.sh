@@ -39,6 +39,9 @@ GATEWAY_SERVICE_FILE="${SCRIPT_DIR}/conf/gateway-service.yaml"
 WEB_DEPLOYMENT_TEMPLATE_FILE="${SCRIPT_DIR}/conf/web-deployment.template.yaml"
 WEB_DEPLOYMENT_FILE="${SCRIPT_DIR}/conf/web-deployment.yaml"
 
+RABBITMQ_TEMPLATE_FILE="${SCRIPT_DIR}/conf/rabbitmq.template.yaml"
+RABBITMQ_FILE="${SCRIPT_DIR}/conf/rabbitmq.yaml"
+
 NFS_SERVER_TEMPLATE_FILE="${SCRIPT_DIR}/conf/nfs-server.template.yaml"
 NFS_SERVER_FILE="${SCRIPT_DIR}/conf/nfs-server.yaml"
 
@@ -55,7 +58,7 @@ CMD=""
 
 
 # ==== All available modules ====
-declare -ga ALL_MODULES=("NFS" "YR_CLAW" "GATEWAY" "WEB")
+declare -ga ALL_MODULES=("NFS" "RABBITMQ" "YR_CLAW" "GATEWAY" "WEB")
 
 declare -ga MODULES=()
 
@@ -82,6 +85,11 @@ declare -A DEPLOY_VARS=(
     ["AGENT_SERVER_POD_NAME"]="jiuwenclaw-agentserver"
     ["WEB_NAME"]="jiuwenclaw-web"
     ["WEB_HOST_PORT"]="8080"
+    ["RABBITMQ_NAME"]="rabbitmq"
+    ["RABBITMQ_IMAGE"]="rabbitmq:3.9.22-management"
+    ["RABBITMQ_PATH"]="/exports/rabbitmq"
+    ["RABBITMQ_USER"]="admin"
+    ["RABBITMQ_PASSWORD"]="Rabbitmq@123"
 )
 
 declare -A OYR_COMPONENTS=(
