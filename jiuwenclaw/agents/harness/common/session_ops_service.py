@@ -182,7 +182,9 @@ def rewind_session(
     removed_turn_content = ""
     if 0 <= target_user_index < len(history):
         content = history[target_user_index].get("content", "")
-        removed_turn_content = content if isinstance(content, str) else str(content)
+        raw = content if isinstance(content, str) else str(content)
+        # 剥离 <file-content> 块（系统注入的文件元数据，非用户实际输入）
+        removed_turn_content = re.sub(r"<file-content[^>]*>.*?</file-content>", "", raw, flags=re.DOTALL).strip()
 
     result = truncate_history_records(session_id=session_id, cut_index=cut_index)
 

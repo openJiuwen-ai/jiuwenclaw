@@ -523,6 +523,7 @@
     "groupsCount": "共 {{count}} 个配置组",
     "paramsCount": "{{count}} 项参数",
     "requiredIncomplete": "模型配置必填项未完成",
+    "agentsTeamsValidationError": "Agent/Team 配置校验未通过，请检查后保存",
     "empty": "暂未获取到配置，请确认后端服务状态。",
     "selectModelProvider": "请选择模型提供商",
     "enterValue": "请输入配置值",
@@ -587,6 +588,12 @@
       "alias": "别名",
       "aliasPlaceholder": "选填，默认为空"
     },
+    "model": {
+      "referencedBy": "被 {{count}} 个 Agent 引用",
+      "deleteConfirmTitle": "确认删除模型？",
+      "deleteConfirmMessage": "确定要删除模型 \"{{modelName}}\" 吗？",
+      "deleteConfirmMessageSimple": "模型 \"{{modelName}}\" 正在被 {{count}} 个 Agent 引用，删除后相关 Agent 将无法使用该模型。"
+    },
     "agentList": {
       "addAgent": "添加Agent",
       "removeAgent": "删除",
@@ -611,7 +618,9 @@
       "deleteMemberConfirmTitle": "确认删除成员？",
       "deleteMemberConfirmMessage": "确定要删除成员 \"{{memberName}}\" 吗？",
       "duplicateMemberName": "成员名称已存在",
-      "memberNameEnglishOnly": "成员名称只能包含英文字母"
+      "memberNameEnglishOnly": "成员名称只能包含英文字母",
+      "memberNameFormatInvalid": "成员名称仅支持字母/数字/下划线",
+      "referencedByTeams": "被 {{count}} 个 Team 引用"
     },
     "groups": {
       "modelDefault": { "label": "默认模型（主对话）", "hint": "主对话模型服务与鉴权参数" },

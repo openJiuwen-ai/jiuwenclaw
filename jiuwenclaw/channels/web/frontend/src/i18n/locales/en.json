@@ -524,6 +524,7 @@
     "groupsCount": "{{count}} configuration groups",
     "paramsCount": "{{count}} parameters",
     "requiredIncomplete": "Required model configuration is incomplete",
+    "agentsTeamsValidationError": "Agent/Team configuration validation failed, please check before saving",
     "empty": "No configuration loaded yet. Please check the backend service status.",
     "selectModelProvider": "Select a model provider",
     "enterValue": "Enter a configuration value",
@@ -588,6 +589,12 @@
       "alias": "Alias",
       "aliasPlaceholder": "Optional, defaults to empty"
     },
+    "model": {
+      "referencedBy": "Referenced by {{count}} Agent(s)",
+      "deleteConfirmTitle": "Delete Model?",
+      "deleteConfirmMessage": "Are you sure you want to delete model \"{{modelName}}\"?",
+      "deleteConfirmMessageSimple": "Model \"{{modelName}}\" is referenced by {{count}} Agent(s). After deletion, related Agents will no longer be able to use this model."
+    },
     "agentList": {
       "addAgent": "Add Agent",
       "removeAgent": "Remove",
@@ -612,7 +619,9 @@
       "deleteMemberConfirmTitle": "Delete Member?",
       "deleteMemberConfirmMessage": "Are you sure you want to delete member \"{{memberName}}\"?",
       "duplicateMemberName": "Member name already exists",
-      "memberNameEnglishOnly": "Member name can only contain English letters"
+      "memberNameEnglishOnly": "Member name can only contain English letters",
+      "memberNameFormatInvalid": "Member name only supports letters/numbers/underscore",
+      "referencedByTeams": "Referenced by {{count}} Team(s)"
     },
     "groups": {
       "modelDefault": { "label": "Default Model (Main Chat)", "hint": "Primary chat model service and auth" },

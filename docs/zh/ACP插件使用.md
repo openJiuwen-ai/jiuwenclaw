@@ -126,25 +126,10 @@ python -m jiuwenclaw.app
 在 ACP Client 插件中执行 **ACP: Add Agent Configuration**，然后填写：
 
 * **Name**：`jiuwenclaw`
-* **Command**：
-
-  * Windows：`python -m jiuwenclaw.channel.acp_channel`
-  * Linux / macOS：`python -m jiuwenclaw.channel.acp_channel`
+* **Command**：`jiuwenclaw-acp`
 * **Config / Arguments**：留空
 
-**注意**：python 需为已安装 jiuwenclaw 包的 Python 解释器；若非当前默认解释器，请使用对应环境中的 Python 完整路径替代。例如：
-
-**Windows**
-
-```text
-C:\path\to\your\venv\Scripts\python.exe -m jiuwenclaw.gateway.channel_manager.protocol.acp.acp_connect
-```
-
-**Linux / macOS**
-
-```text
-/path/to/your/venv/bin/python -m jiuwenclaw.gateway.channel_manager.protocol.acp.acp_connect
-```
+> 说明：`jiuwenclaw-acp` 是 pip install 后自动生成的命令，与 `jiuwenclaw-init`、`jiuwenclaw-start` 同级。需确保 VS Code 在已安装 jiuwenclaw 的虚拟环境中运行，否则需填写完整路径，例如 Windows：`C:\path\to\venv\Scripts\jiuwenclaw-acp.exe`，Linux / macOS：`/path/to/venv/bin/jiuwenclaw-acp`。
 
 ![ACP配置](../assets/images/ACP插件添加agent.png)
 

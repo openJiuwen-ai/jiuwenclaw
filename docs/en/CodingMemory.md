@@ -81,6 +81,14 @@ Coding memory data is stored in the `workspace/agent/memory/` directory, sharing
 
 ---
 
+## Sleep-Time Consolidation (Dreaming)
+
+When Dreaming is enabled in Code mode, the system reviews past coding sessions during idle time and automatically extracts reusable experience — debugging root causes, API edge behaviors, design decisions — to `{workspace}/coding_memory/consolidated_{hash}.md`. This is the sleep-time complement to the in-session `coding_memory_*` tools above.
+
+See [Memory → Dreaming: Sleep-Time Memory Consolidation](Memory.md#dreaming-sleep-time-memory-consolidation) for how to enable it and extraction details.
+
+---
+
 ## See Also
 
 - [Modes](Modes.md) — Mode configuration and switching

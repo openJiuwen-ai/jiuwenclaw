@@ -2137,9 +2137,12 @@ class AgentWebSocketServer:
                 # overview (default)
                 config = get_config()
                 session_id = request.session_id or ""
-                model_name = os.getenv("MODEL_NAME", config.get("model", ""))
-                provider = os.getenv("MODEL_PROVIDER", str(config.get("model_provider", "")))
-                api_base = os.getenv("API_BASE", str(config.get("api_base", "")))
+                default_models = get_default_models(config)
+                active_entry = default_models[0] if default_models else {}
+                mcc = active_entry.get("model_client_config", {})
+                model_name = str(mcc.get("model_name", "") or config.get("model", ""))
+                provider = str(mcc.get("client_provider", "") or config.get("model_provider", ""))
+                api_base = str(mcc.get("api_base", "") or config.get("api_base", ""))
 
                 mcp_servers = get_mcp_servers()
                 mcp_summary = [
@@ -2166,7 +2169,7 @@ class AgentWebSocketServer:
                     payload={
                         "version": __version__,
                         "session_id": session_id,
-                        "cwd": os.getcwd(),
+                        "cwd": str(params.get("cwd", "") or os.getcwd()),
                         "model": model_name,
                         "provider": provider,
                         "api_base": api_base,
