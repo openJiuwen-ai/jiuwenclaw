@@ -8,6 +8,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import sys
 from contextvars import ContextVar
 from pathlib import Path
 from typing import Any, Callable
@@ -22,7 +23,7 @@ from jiuwenclaw.agentserver.tools.ephemeral_stdio_mcp_tool import (
     list_stdio_mcp_tool_defs,
     stdio_params_from_mcp_config,
 )
-from jiuwenclaw.agentserver.tools.mcp_toolkits import create_mcp_tool
+from jiuwenclaw.agentserver.tools.mcp_toolkits import _normalize_stdio_command_kind, create_mcp_tool
 
 _OFFICE_CLAW_SERVER_NAME_PREFIX = "office-claw"
 _REQUEST_SCOPED_OFFICE_CLAW_SERVER_ID = "office-claw-request"
@@ -34,6 +35,112 @@ _OFFICE_CLAW_STDIO_PARAMS: ContextVar[dict[str, Any]] = ContextVar("_OFFICE_CLAW
 def _get_office_claw_stdio_params() -> dict[str, Any]:
     """回调函数：供 EphemeralStdioMcpTool 在 invoke 时获取当前请求级的 stdio 参数。"""
     return _OFFICE_CLAW_STDIO_PARAMS.get()
+
+
+def _trusted_cat_cafe_stdio_roots() -> list[Path]:
+    """请求级 stdio MCP 允许加载的脚本/工作目录须落在这些根路径之下。"""
+    roots: list[Path] = []
+    raw = (os.getenv("CAT_CAFE_MCP_CWD") or "").strip()
+    if raw:
+        try:
+            roots.append(Path(raw).expanduser().resolve())
+        except OSError:
+            pass
+    try:
+        roots.append((Path.home() / ".office-claw").resolve())
+    except OSError:
+        pass
+    try:
+        roots.append(Path(sys.executable).resolve().parent)
+    except OSError:
+        pass
+    lp = (os.getenv("LOCALAPPDATA") or "").strip()
+    if lp:
+        inst = Path(lp) / "Programs" / "OfficeClaw"
+        try:
+            if inst.exists():
+                roots.append(inst.resolve())
+        except OSError:
+            pass
+    for env_key in ("ProgramFiles", "ProgramFiles(x86)"):
+        base = os.getenv(env_key, "").strip()
+        if not base:
+            continue
+        inst = Path(base) / "OfficeClaw"
+        try:
+            if inst.exists():
+                roots.append(inst.resolve())
+        except OSError:
+            pass
+    seen: set[str] = set()
+    out: list[Path] = []
+    for r in roots:
+        key = os.path.normcase(str(r))
+        if key not in seen:
+            seen.add(key)
+            out.append(r)
+    return out
+
+
+def _path_is_under_trusted_root(path: Path, roots: list[Path]) -> bool:
+    try:
+        rp = path.resolve()
+    except OSError:
+        return False
+    for root in roots:
+        try:
+            rp.relative_to(root)
+            return True
+        except ValueError:
+            continue
+    return False
+
+
+def _validate_cat_cafe_request_scoped_stdio(params: dict[str, Any]) -> None:
+    """限制请求级 stdio：禁止内联代码执行面，脚本路径须在受信根目录下。"""
+    cmd = str(params.get("command") or "").strip()
+    args = params.get("args") or []
+    if not isinstance(args, list):
+        raise ValueError("stdio MCP 的 args 须为列表")
+
+    kind = _normalize_stdio_command_kind(cmd)
+    flat = [str(a) for a in args]
+    lowered = [a.strip().lower() for a in flat]
+    if any(x == "-c" or x == "--command" for x in lowered):
+        raise ValueError("请求级 cat_cafe_mcp 禁止使用 python -c / --command")
+    if kind == "node" and any(x in ("-e", "--eval") for x in lowered):
+        raise ValueError("请求级 cat_cafe_mcp 禁止使用 node -e / --eval")
+
+    cwd_path: Path | None = None
+    cwd_raw = params.get("cwd")
+    if isinstance(cwd_raw, str) and cwd_raw.strip():
+        try:
+            cwd_path = Path(cwd_raw).expanduser().resolve()
+        except OSError as exc:
+            raise ValueError(f"请求级 cat_cafe_mcp cwd 无效: {cwd_raw}") from exc
+        if not _path_is_under_trusted_root(cwd_path, _trusted_cat_cafe_stdio_roots()):
+            raise ValueError(f"请求级 cat_cafe_mcp cwd 不在受信根目录下: {cwd_path}")
+
+    roots = _trusted_cat_cafe_stdio_roots()
+    for a in flat:
+        s = a.strip()
+        if not s or s.startswith("-"):
+            continue
+        path_like_suffix = s.lower().endswith((".js", ".mjs", ".cjs", ".py"))
+        if "/" not in s and "\\" not in s and not path_like_suffix:
+            continue
+        candidate = Path(s).expanduser()
+        if not candidate.is_absolute() and cwd_path is None:
+            raise ValueError("请求级 cat_cafe_mcp 使用相对脚本路径时必须提供位于受信根下的 cwd")
+        try:
+            if cwd_path is not None and not candidate.is_absolute():
+                resolved = (cwd_path / candidate).resolve()
+            else:
+                resolved = candidate.resolve()
+        except OSError:
+            continue
+        if not _path_is_under_trusted_root(resolved, roots):
+            raise ValueError(f"请求级 cat_cafe_mcp 参数路径不在受信根目录下: {resolved}")
 
 
 def _mcp_add_result_is_ok(result: Any) -> bool:
@@ -389,6 +496,10 @@ class ToolManager:
 
         # stdio：不经过 add_mcp_server，每工具每次 invoke 单独起停子进程，避免会话间状态串台
         if getattr(mcp_cfg, "client_type", "") == "stdio":
+            try:
+                _validate_cat_cafe_request_scoped_stdio(mcp_cfg.params or {})
+            except ValueError as exc:
+                raise RuntimeError(str(exc)) from exc
             stdio_sp = stdio_params_from_mcp_config(mcp_cfg.params or {})
             _OFFICE_CLAW_STDIO_PARAMS.set(stdio_sp)
 
