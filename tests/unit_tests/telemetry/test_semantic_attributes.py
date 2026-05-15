@@ -59,7 +59,34 @@ async def test_streaming_attribute_set(span_capture):
     llm_spans = [s for s in spans if s.name == "gen_ai.chat"]
     assert llm_spans, "expected gen_ai.chat span"
     assert llm_spans[0].attributes.get("gen_ai.request.streaming") is True
-    assert any(ev.name == "gen_ai.first_token" for ev in llm_spans[0].events)
+    assert llm_spans[0].attributes.get("gen_ai.streaming.first_token") is True
+
+
+async def test_log_messages_disabled_still_records_llm_span(span_capture):
+    import jiuwenclaw.telemetry.instrumentors.telemetry_rail as mod
+    from jiuwenclaw.telemetry.instrumentors.telemetry_rail import TelemetryRail
+
+    rail = TelemetryRail()
+    mod.set_log_messages(False)
+    try:
+        ctx = _model_ctx()
+        ctx.inputs = SimpleNamespace(messages=[], tools=[])
+
+        await rail.before_model_call(ctx)
+        ctx.result = SimpleNamespace(
+            content="secret response",
+            usage_metadata=SimpleNamespace(input_tokens=3, output_tokens=4),
+            finish_reason="stop",
+        )
+        await rail.after_model_call(ctx)
+    finally:
+        mod.set_log_messages(True)
+
+    spans = [s for s in span_capture.get_finished_spans() if s.name == "gen_ai.chat"]
+    assert len(spans) == 1
+    assert spans[0].attributes.get("gen_ai.usage.input_tokens") == 3
+    assert spans[0].attributes.get("gen_ai.usage.output_tokens") == 4
+    assert all(ev.name != "gen_ai.assistant.message" for ev in spans[0].events)
 
 
 async def test_log_messages_disabled_still_records_llm_span(span_capture):
@@ -207,3 +234,165 @@ async def test_llm_span_parents_to_active_context_not_agent_field(span_capture):
         "gen_ai.chat must parent to the intermediate span (current context), "
         "not jump over it to self._agent_span"
     )
+
+
+async def test_input_messages_as_json_attribute(span_capture):
+    """gen_ai.input.messages should be a JSON array attribute."""
+    import json
+
+    from jiuwenclaw.telemetry.instrumentors.telemetry_rail import TelemetryRail
+
+    rail = TelemetryRail()
+    ctx = _model_ctx()
+    ctx.inputs = SimpleNamespace(
+        messages=[
+            SimpleNamespace(role="system", content="You are helpful"),
+            SimpleNamespace(role="user", content="Hello"),
+            SimpleNamespace(role="assistant", content="Hi"),
+            SimpleNamespace(role="user", content="How are you?"),
+        ],
+        tools=[]
+    )
+
+    await rail.before_model_call(ctx)
+    ctx.result = SimpleNamespace(
+        content="Good!",
+        usage_metadata=SimpleNamespace(input_tokens=1, output_tokens=1),
+        finish_reason="stop",
+    )
+    await rail.after_model_call(ctx)
+
+    spans = [s for s in span_capture.get_finished_spans() if s.name == "gen_ai.chat"]
+    assert spans
+
+    # Check JSON attribute exists
+    messages_json = spans[0].attributes.get("gen_ai.input.messages")
+    assert messages_json, "expected gen_ai.input.messages attribute"
+
+    # Parse and verify structure
+    messages = json.loads(messages_json)
+    assert isinstance(messages, list)
+    assert all("role" in m for m in messages)
+    assert all("parts" in m for m in messages)
+
+
+async def test_input_messages_count_and_length(span_capture):
+    """gen_ai.input.messages.count and .total_length should always be recorded."""
+    from jiuwenclaw.telemetry.instrumentors.telemetry_rail import TelemetryRail
+
+    rail = TelemetryRail()
+    ctx = _model_ctx()
+    ctx.inputs = SimpleNamespace(
+        messages=[
+            SimpleNamespace(role="user", content="Short"),
+            SimpleNamespace(role="assistant", content="Medium length response"),
+        ],
+        tools=[]
+    )
+
+    await rail.before_model_call(ctx)
+    ctx.result = SimpleNamespace(
+        content="ok",
+        usage_metadata=SimpleNamespace(input_tokens=1, output_tokens=1),
+        finish_reason="stop",
+    )
+    await rail.after_model_call(ctx)
+
+    spans = [s for s in span_capture.get_finished_spans() if s.name == "gen_ai.chat"]
+    assert spans
+
+    # Count should match message count
+    count = spans[0].attributes.get("gen_ai.input.messages.count")
+    assert count == 2
+
+    # Total length should be sum of content lengths
+    total_length = spans[0].attributes.get("gen_ai.input.messages.total_length")
+    assert total_length == len("Short") + len("Medium length response")
+
+
+async def test_tool_definitions_as_json_attribute(span_capture):
+    """gen_ai.tool.definitions should be a JSON array attribute."""
+    import json
+
+    from jiuwenclaw.telemetry.instrumentors.telemetry_rail import TelemetryRail
+
+    rail = TelemetryRail()
+    ctx = _model_ctx()
+    ctx.inputs = SimpleNamespace(
+        messages=[],
+        tools=[
+            {
+                "type": "function",
+                "function": {
+                    "name": "search",
+                    "description": "Search the web",
+                    "parameters": {"type": "object", "properties": {"query": {"type": "string"}}},
+                },
+            }
+        ],
+    )
+
+    await rail.before_model_call(ctx)
+    ctx.result = SimpleNamespace(
+        content="result",
+        usage_metadata=SimpleNamespace(input_tokens=1, output_tokens=1),
+        finish_reason="stop",
+    )
+    await rail.after_model_call(ctx)
+
+    spans = [s for s in span_capture.get_finished_spans() if s.name == "gen_ai.chat"]
+    assert spans
+
+    tool_defs_json = spans[0].attributes.get("gen_ai.tool.definitions")
+    assert tool_defs_json, "expected gen_ai.tool.definitions attribute"
+
+    tool_defs = json.loads(tool_defs_json)
+    assert isinstance(tool_defs, list)
+    assert tool_defs[0]["type"] == "function"
+    assert tool_defs[0]["name"] == "search"
+
+
+async def test_decision_tool_call_as_attributes(span_capture):
+    """Decision should use gen_ai.decision.type attribute."""
+    from jiuwenclaw.telemetry.instrumentors.telemetry_rail import TelemetryRail
+
+    rail = TelemetryRail()
+    ctx = _model_ctx()
+    ctx.inputs = SimpleNamespace(messages=[], tools=[])
+
+    await rail.before_model_call(ctx)
+    ctx.result = SimpleNamespace(
+        content="",
+        tool_calls=[SimpleNamespace(id="call_1", name="search", arguments={"query": "test"})],
+        usage_metadata=SimpleNamespace(input_tokens=1, output_tokens=1),
+        finish_reason="tool_calls",
+    )
+    await rail.after_model_call(ctx)
+
+    spans = [s for s in span_capture.get_finished_spans() if s.name == "gen_ai.chat"]
+    assert spans
+
+    assert spans[0].attributes.get("gen_ai.decision.type") == "tool_call"
+    assert spans[0].attributes.get("gen_ai.decision.tool_count") == 1
+
+
+async def test_decision_answer_as_attribute(span_capture):
+    """Answer decision should use gen_ai.decision.type='answer'."""
+    from jiuwenclaw.telemetry.instrumentors.telemetry_rail import TelemetryRail
+
+    rail = TelemetryRail()
+    ctx = _model_ctx()
+    ctx.inputs = SimpleNamespace(messages=[], tools=[])
+
+    await rail.before_model_call(ctx)
+    ctx.result = SimpleNamespace(
+        content="The answer is 42",
+        usage_metadata=SimpleNamespace(input_tokens=1, output_tokens=1),
+        finish_reason="stop",
+    )
+    await rail.after_model_call(ctx)
+
+    spans = [s for s in span_capture.get_finished_spans() if s.name == "gen_ai.chat"]
+    assert spans
+
+    assert spans[0].attributes.get("gen_ai.decision.type") == "answer"

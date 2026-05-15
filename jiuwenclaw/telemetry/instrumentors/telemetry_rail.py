@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import functools
+import json
 import os
 import time
 from contextvars import ContextVar, Token
@@ -56,6 +57,18 @@ from jiuwenclaw.telemetry.attributes import (
     JIUWENCLAW_ITERATION,
     JIUWENCLAW_REQUEST_ID,
     JIUWENCLAW_SESSION_ID,
+    # New constants for attribute refactor
+    GEN_AI_INPUT_MESSAGES,
+    GEN_AI_INPUT_MESSAGES_COUNT,
+    GEN_AI_INPUT_MESSAGES_TOTAL_LENGTH,
+    GEN_AI_OUTPUT_MESSAGES,
+    GEN_AI_TOOL_DEFINITIONS,
+    GEN_AI_DECISION_TYPE,
+    GEN_AI_DECISION_TOOL_NAMES,
+    GEN_AI_DECISION_TOOL_COUNT,
+    GEN_AI_STREAMING_FIRST_TOKEN,
+    GEN_AI_TOOL_ARGUMENTS,
+    GEN_AI_TOOL_RESULT,
 )
 from jiuwenclaw.telemetry.metrics import (
     agent_duration,
@@ -73,6 +86,10 @@ _tracer = trace.get_tracer("jiuwenclaw.telemetry_rail")
 
 # Module-level flag for message logging
 _log_messages: bool = True
+
+# Environment variable configs for message recording
+_log_full_messages: bool = os.getenv("OTEL_LOG_FULL_MESSAGES", "false").lower() == "true"
+_message_content_max_length: int = int(os.getenv("OTEL_MESSAGE_CONTENT_MAX_LENGTH", "4096"))
 
 # Request-scoped context variables (isolates state across concurrent requests)
 # Each request sets these via set_telemetry_context(), and they are automatically
@@ -406,9 +423,9 @@ class TelemetryRail(DeepAgentRail):
         ctx._otel_llm_call_id = call_id
 
     def record_first_token(self, ctx: Any) -> None:
-        """Emit a `gen_ai.first_token` event on the active LLM span.
+        """Set gen_ai.streaming.first_token attribute on active LLM span.
 
-        Call sites are responsible for invoking this at the first streaming chunk.
+        Call sites invoke this at the first streaming chunk.
         No-op if no matching span is found.
         """
         call_id = getattr(ctx, "_otel_llm_call_id", None)
@@ -418,7 +435,7 @@ class TelemetryRail(DeepAgentRail):
         if not entry:
             return
         span, _ = entry
-        span.add_event("gen_ai.first_token")
+        span.set_attribute(GEN_AI_STREAMING_FIRST_TOKEN, True)
 
     @_hook_safe
     async def after_model_call(self, ctx: Any) -> None:
@@ -557,8 +574,8 @@ class TelemetryRail(DeepAgentRail):
             attributes=attrs,
         )
 
-        # Record arguments as span event
-        span.add_event("tool.arguments", {"arguments": str(arguments)[:4096]})
+        # Record arguments as span attribute
+        span.set_attribute(GEN_AI_TOOL_ARGUMENTS, str(arguments)[:4096])
 
         self._tool_spans[span_key] = (span, time.monotonic(), tool_name)
 
@@ -605,9 +622,9 @@ class TelemetryRail(DeepAgentRail):
             if hasattr(inputs, "tool_result"):
                 result = inputs.tool_result
 
-        # Record result
+        # Record result as span attribute
         result_str = str(result)[:4096] if result is not None else ""
-        span.add_event("tool.result", {"result": result_str})
+        span.set_attribute(GEN_AI_TOOL_RESULT, result_str[:4096] if result_str else "")
 
         # Error detection
         is_error = False
@@ -637,136 +654,239 @@ class TelemetryRail(DeepAgentRail):
     # Private helpers
     # ------------------------------------------------------------------
 
-    def _record_input_messages(self, span: trace.Span, messages: Any) -> None:
-        """Record input messages as span events."""
+    def _get_role(self, msg: Any) -> str:
+        """Extract role from message object or dict."""
+        role = getattr(msg, "role", None)
+        if role is None and isinstance(msg, dict):
+            role = msg.get("role", "unknown")
+        return str(role) if role else "unknown"
+
+    def _get_content(self, msg: Any) -> str:
+        """Extract content from message object or dict."""
+        content = getattr(msg, "content", None)
+        if content is None and isinstance(msg, dict):
+            content = msg.get("content", "")
+        return str(content) if content else ""
+
+    def _build_message_entry(self, msg: Any) -> dict:
+        """Build a single message entry for gen_ai.input.messages JSON array."""
+        role = self._get_role(msg)
+        content = self._get_content(msg)
+
+        entry = {
+            "role": role,
+            "parts": [{"type": "text", "content": content}]
+        }
+
+        # Tool message needs tool_call_id
+        if role == "tool":
+            tool_call_id = getattr(msg, "tool_call_id", "") or ""
+            if isinstance(msg, dict):
+                tool_call_id = msg.get("tool_call_id", "")
+            entry["tool_call_id"] = str(tool_call_id)
+
+        return entry
+
+    def _build_recent_messages(self, messages: list) -> list:
+        """Extract key context: system + last tool + last assistant + current user.
+
+        Used when OTEL_LOG_FULL_MESSAGES=false (default mode).
+        """
+        recent = []
+
+        # 1. System prompt (first message)
         for msg in messages:
-            role = getattr(msg, "role", None)
-            if role is None and isinstance(msg, dict):
-                role = msg.get("role", "unknown")
-            content = getattr(msg, "content", None)
-            if content is None and isinstance(msg, dict):
-                content = msg.get("content", "")
+            if self._get_role(msg) == "system":
+                recent.append(self._build_message_entry(msg))
+                break
 
-            content_str = str(content) if content else ""
+        # 2. From end: last tool, last assistant, current user
+        last_tool = None
+        last_assistant = None
+        current_user = None
 
-            if role == "system":
-                span.add_event("gen_ai.system.message", {"content": content_str})
-            elif role == "user":
-                span.add_event("gen_ai.user.message", {"content": content_str})
-            elif role == "assistant":
-                span.add_event("gen_ai.assistant.message", {"content": content_str})
-            elif role == "tool":
-                tool_call_id = getattr(msg, "tool_call_id", "") or ""
-                span.add_event("gen_ai.tool.message", {
-                    "content": content_str[:4096],
-                    "tool_call_id": str(tool_call_id),
-                })
+        for msg in reversed(messages):
+            role = self._get_role(msg)
+            if role == "user" and current_user is None:
+                current_user = msg
+            elif role == "assistant" and last_assistant is None:
+                last_assistant = msg
+            elif role == "tool" and last_tool is None:
+                last_tool = msg
+
+        if last_tool:
+            recent.append(self._build_message_entry(last_tool))
+        if last_assistant:
+            recent.append(self._build_message_entry(last_assistant))
+        if current_user:
+            recent.append(self._build_message_entry(current_user))
+
+        return recent
+
+    def _build_full_messages(self, messages: list) -> list:
+        """Build full message history with truncation.
+
+        Used when OTEL_LOG_FULL_MESSAGES=true.
+        """
+        attr_messages = []
+        for msg in messages:
+            entry = self._build_message_entry(msg)
+            # Apply truncation to text parts
+            for part in entry.get("parts", []):
+                if part.get("type") == "text":
+                    content = part.get("content", "")
+                    if len(content) > _message_content_max_length:
+                        part["content"] = self._smart_truncate(content, _message_content_max_length)
+            attr_messages.append(entry)
+        return attr_messages
+
+    def _smart_truncate(self, content: str, max_len: int) -> str:
+        """Smart truncation: preserve start + end with ellipsis."""
+        if len(content) <= max_len:
+            return content
+        head_len = int(max_len * 0.8)
+        tail_len = max_len - head_len - 3
+        return content[:head_len] + "..." + content[-tail_len:]
+
+    def _record_input_messages(self, span: trace.Span, messages: Any) -> None:
+        """Record input messages as gen_ai.input.messages JSON attribute.
+
+        Follows OpenTelemetry GenAI semantic conventions with configurable
+        message collection strategy via environment variables.
+        """
+        # Always record context metadata (even when message content disabled)
+        total_count = len(messages)
+        total_length = sum(len(self._get_content(m)) for m in messages)
+        span.set_attribute(GEN_AI_INPUT_MESSAGES_COUNT, total_count)
+        span.set_attribute(GEN_AI_INPUT_MESSAGES_TOTAL_LENGTH, total_length)
+
+        # Skip content recording if disabled
+        if not _log_messages:
+            return
+
+        # Choose collection strategy based on env var
+        if _log_full_messages:
+            attr_messages = self._build_full_messages(messages)
+        else:
+            attr_messages = self._build_recent_messages(messages)
+
+        # Set as JSON attribute
+        span.set_attribute(GEN_AI_INPUT_MESSAGES, json.dumps(attr_messages, ensure_ascii=False))
 
     def _record_tools(self, span: trace.Span, tools: Any) -> None:
-        """Record available tools as a span event.
+        """Record available tools as gen_ai.tool.definitions JSON attribute.
 
-        Tools are passed to LLM via OpenAI API's ``tools`` parameter.
-        Each tool is typically a dict with ``type`` and ``function`` keys:
-        {"type": "function", "function": {"name": "...", "description": "...", "parameters": {...}}}
-
-        Records both tool names and descriptions to help understand what tools are available
-        and when LLM should use them.
+        Follows OpenTelemetry GenAI semantic conventions.
+        Format: [{"type": "function", "name": "...", "description": "...", "parameters": {...}}]
         """
-        tool_names = []
-        tool_descriptions = []
+        tool_defs = []
         for tool in tools:
-            name = ""
-            description = ""
-            func = None
+            tool_def = {}
+
             if isinstance(tool, dict):
-                # OpenAI format: {"type": "function", "function": {"name": "...", "description": "..."}}
+                # OpenAI format
+                tool_def["type"] = tool.get("type", "function")
                 func = tool.get("function", {})
                 if isinstance(func, dict):
-                    name = func.get("name", "")
-                    description = func.get("description", "")
+                    if func.get("name"):
+                        tool_def["name"] = func["name"]
+                    if func.get("description"):
+                        tool_def["description"] = func["description"]
+                    if func.get("parameters"):
+                        tool_def["parameters"] = func["parameters"]
             else:
                 # Tool object format (LocalFunction, Tool, etc.)
+                tool_def["type"] = getattr(tool, "type", "function")
                 name = getattr(tool, "name", "")
                 if not name:
                     func = getattr(tool, "function", None)
                     if func:
                         name = getattr(func, "name", "")
-                # Try to get description from multiple possible locations
+                if name:
+                    tool_def["name"] = name
+
+                # Description from multiple sources
+                description = ""
                 card = getattr(tool, "card", None)
                 if card:
                     description = getattr(card, "description", "")
-                elif func:
+                elif hasattr(tool, "function"):
+                    func = tool.function
                     description = getattr(func, "description", "")
-                # Also check tool.description directly
                 if not description:
                     description = getattr(tool, "description", "")
-
-            if name:
-                tool_names.append(name)
-                # Truncate description to avoid excessive token usage
                 if description:
-                    tool_descriptions.append(f"{name}: {description[:50]}")
+                    tool_def["description"] = description
 
-        if tool_names:
-            span.add_event("gen_ai.tools.available", {
-                "tool_names": str(tool_names),
-                "tool_count": len(tool_names),
-                "tool_descriptions": str(tool_descriptions),
-            })
+                # Parameters
+                func = getattr(tool, "function", None)
+                if func:
+                    params = getattr(func, "parameters", None)
+                    if params:
+                        tool_def["parameters"] = params
+
+            if tool_def.get("name"):
+                tool_defs.append(tool_def)
+
+        if tool_defs:
+            span.set_attribute(GEN_AI_TOOL_DEFINITIONS, json.dumps(tool_defs, ensure_ascii=False))
 
     def _record_output_message(self, span: trace.Span, result: Any) -> None:
-        """Record the assistant output message as a span event.
+        """Record assistant output message as gen_ai.output.messages JSON attribute.
 
-        Includes:
-        - content: Text output (if any)
-        - tool_calls: Tool call decisions (if any)
-        - reasoning_content: Model's reasoning/thinking process (if supported)
+        Follows OpenTelemetry GenAI semantic conventions.
         """
         content = getattr(result, "content", "") or ""
         tool_calls = getattr(result, "tool_calls", None)
         reasoning_content = getattr(result, "reasoning_content", None)
 
-        attrs = {"content": str(content)}
+        output_message = {
+            "role": "assistant",
+            "parts": [{"type": "text", "content": str(content)}]
+        }
+
+        # Add tool_calls if present
         if tool_calls:
-            attrs["tool_calls"] = str(tool_calls)[:4096]
+            tc_list = []
+            for tc in tool_calls:
+                tc_entry = {
+                    "id": getattr(tc, "id", ""),
+                    "name": getattr(tc, "name", ""),
+                }
+                args = getattr(tc, "arguments", None)
+                if args:
+                    tc_entry["arguments"] = args if isinstance(args, dict) else str(args)
+                tc_list.append(tc_entry)
+            output_message["tool_calls"] = tc_list
+
+        # Add reasoning content if present
         if reasoning_content:
-            attrs["reasoning_content"] = str(reasoning_content)[:4096]
-        span.add_event("gen_ai.assistant.message", attrs)
+            output_message["parts"].append({
+                "type": "reasoning",
+                "content": str(reasoning_content)[:4096]
+            })
+
+        span.set_attribute(GEN_AI_OUTPUT_MESSAGES, json.dumps([output_message], ensure_ascii=False))
 
     def _record_decision(self, span: trace.Span, result: Any) -> None:
-        """Record the Agent's decision as a span event.
+        """Record Agent decision as attributes.
 
         ReAct Agent makes two types of decisions:
         - tool_call: Agent decides to execute tools, continues the loop
         - answer: Agent decides to output text, ends the loop
-
-        This event helps trace the Agent's reasoning trajectory across iterations.
         """
         tool_calls = getattr(result, "tool_calls", None)
         content = getattr(result, "content", "") or ""
 
         if tool_calls and len(tool_calls) > 0:
             # Decision: execute tools
-            tool_names = []
-            for tc in tool_calls:
-                name = getattr(tc, "name", "")
-                if name:
-                    tool_names.append(name)
-
-            span.add_event("gen_ai.decision.tool_call", {
-                "decision_type": "tool_call",
-                "tool_count": len(tool_calls),
-                "tool_names": str(tool_names),
-                "first_tool_name": tool_names[0] if tool_names else "",
-                "content_preview": str(content)[:200] if content else "",
-            })
+            span.set_attribute(GEN_AI_DECISION_TYPE, "tool_call")
+            tool_names = [getattr(tc, "name", "") for tc in tool_calls if getattr(tc, "name", "")]
+            span.set_attribute(GEN_AI_DECISION_TOOL_NAMES, str(tool_names))
+            span.set_attribute(GEN_AI_DECISION_TOOL_COUNT, len(tool_calls))
         else:
             # Decision: output answer
-            span.add_event("gen_ai.decision.answer", {
-                "decision_type": "answer",
-                "content_length": len(str(content)),
-                "content_preview": str(content)[:200] if content else "",
-            })
+            span.set_attribute(GEN_AI_DECISION_TYPE, "answer")
 
     def _record_token_usage(
         self,

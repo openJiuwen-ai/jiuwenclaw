@@ -74,3 +74,24 @@ JIUWENCLAW_AGENT_PARENT = "jiuwenclaw.agent.parent"
 # --- Cancel / timeout ---
 JIUWENCLAW_CANCELED = "jiuwenclaw.canceled"
 ERROR_TYPE = "error.type"
+
+# === Message attributes (OpenTelemetry GenAI semantic conventions) ===
+GEN_AI_INPUT_MESSAGES = "gen_ai.input.messages"
+GEN_AI_INPUT_MESSAGES_COUNT = "gen_ai.input.messages.count"
+GEN_AI_INPUT_MESSAGES_TOTAL_LENGTH = "gen_ai.input.messages.total_length"
+GEN_AI_OUTPUT_MESSAGES = "gen_ai.output.messages"
+
+# === Tool definitions ===
+GEN_AI_TOOL_DEFINITIONS = "gen_ai.tool.definitions"
+
+# === Decision attributes ===
+GEN_AI_DECISION_TYPE = "gen_ai.decision.type"
+GEN_AI_DECISION_TOOL_NAMES = "gen_ai.decision.tool_names"
+GEN_AI_DECISION_TOOL_COUNT = "gen_ai.decision.tool_count"
+
+# === Streaming ===
+GEN_AI_STREAMING_FIRST_TOKEN = "gen_ai.streaming.first_token"
+
+# === Tool execution ===
+GEN_AI_TOOL_ARGUMENTS = "gen_ai.tool.arguments"
+GEN_AI_TOOL_RESULT = "gen_ai.tool.result"
