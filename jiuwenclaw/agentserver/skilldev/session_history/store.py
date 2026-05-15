@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from jiuwenclaw.agentserver.skilldev.session_history.schema import SkillDevSessionEventRecord
+from jiuwenclaw.utils import format_session_log
 
 logger = logging.getLogger(__name__)
 
@@ -50,7 +51,10 @@ class SkillDevSessionHistoryStore:
                     next_seq = int(last.get("seq", 0)) + 1
             except Exception as exc:  # noqa: BLE001
                 logger.warning(
-                    "[SkillDevSessionHistoryStore] 读取最后序号失败，重置为1: task_id=%s err=%s",
+                    format_session_log(
+                        task_id,
+                        "[SkillDevSessionHistoryStore] 读取最后序号失败，重置为1: task_id=%s err=%s",
+                    ),
                     task_id,
                     exc,
                 )
@@ -85,7 +89,10 @@ class SkillDevSessionHistoryStore:
                     out.append(SkillDevSessionEventRecord.from_dict(parsed))
             except Exception as exc:  # noqa: BLE001
                 logger.warning(
-                    "[SkillDevSessionHistoryStore] 事件解析失败: task_id=%s line=%s err=%s",
+                    format_session_log(
+                        task_id,
+                        "[SkillDevSessionHistoryStore] 事件解析失败: task_id=%s line=%s err=%s",
+                    ),
                     task_id,
                     line_no,
                     exc,
@@ -109,7 +116,10 @@ class SkillDevSessionHistoryStore:
             data = json.loads(snapshot_file.read_text(encoding="utf-8"))
         except Exception as exc:  # noqa: BLE001
             logger.warning(
-                "[SkillDevSessionHistoryStore] 读取快照失败: task_id=%s err=%s",
+                format_session_log(
+                    task_id,
+                    "[SkillDevSessionHistoryStore] 读取快照失败: task_id=%s err=%s",
+                ),
                 task_id,
                 exc,
             )

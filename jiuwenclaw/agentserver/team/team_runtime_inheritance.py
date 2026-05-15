@@ -25,6 +25,7 @@ from jiuwenclaw.agentserver.deep_agent.rails.runtime_prompt_rail import RuntimeP
 from jiuwenclaw.agentserver.deep_agent.rails.skill_compliance_rail import SkillComplianceRail
 from jiuwenclaw.agentserver.deep_agent.rails.skill_prompt_rail import SkillProtocolPromptRail
 from jiuwenclaw.agentserver.deep_agent.rails.stream_event_rail import JiuClawStreamEventRail
+from jiuwenclaw.utils import format_session_log
 from jiuwenclaw.utils import get_agent_registered_skill_dirs
 
 logger = logging.getLogger(__name__)
@@ -226,7 +227,7 @@ def build_member_rails(config: MemberRailConfig) -> list[Any]:
         rail = SkillComplianceRail(session_id=session_id)
         rails_list.append(rail)
         logger.info(
-            "[TeamRuntime] SkillComplianceRail created: session_id=%s", session_id,
+            format_session_log(session_id, "[TeamRuntime] SkillComplianceRail created"),
         )
     except Exception as exc:
         logger.warning("[TeamRuntime] SkillComplianceRail failed: %s", exc)
@@ -248,13 +249,16 @@ def build_member_rails(config: MemberRailConfig) -> list[Any]:
             if rail is not None:
                 rails_list.append(rail)
                 logger.info(
-                    "[TeamRuntime] Context engineering rail mounted "
+                    format_session_log(
+                        session_id,
+                        "[TeamRuntime] Context engineering rail mounted "
                     "(MicroCompact/FullCompact/offload preset): "
                     "agent_name=%s member_id=%s session_id=%s. "
                     "Runtime: search logs for 'trigger context processor' / "
                     "'MicroCompactProcessor' / '[FullCompact]'. "
                     "Optional NDJSON dumps: JIUWENCLAW_PROMPT_DUMP_DIR or "
                     "~/.jiuwenclaw/logs/logs/sessions/<session_id>/compact_<member_id>.log",
+                    ),
                     agent_name,
                     member_id,
                     session_id,

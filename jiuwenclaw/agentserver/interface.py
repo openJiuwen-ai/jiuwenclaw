@@ -37,6 +37,7 @@ from jiuwenclaw.agentserver.session_metadata import (
 )
 from jiuwenclaw.agentserver.skill_manager import SkillManager
 from jiuwenclaw.config import get_config
+from jiuwenclaw.utils import format_session_log
 from jiuwenclaw.extensions.registry import ExtensionRegistry
 from jiuwenclaw.schema.agent import AgentRequest, AgentResponse, AgentResponseChunk
 from jiuwenclaw.schema.hook_event import AgentServerHookEvents
@@ -262,8 +263,10 @@ class JiuWenClaw:
                 return existing
             if not can_persist:
                 logger.warning(
-                    "[JiuWenClaw] 跳过 metadata 读取 project_dir：非法 session_id=%r",
-                    session_id,
+                    format_session_log(
+                        session_id,
+                        "[JiuWenClaw] 跳过 metadata 读取 project_dir：非法 session_id",
+                    )
                 )
                 return default
             loaded = get_resolved_project_dir(session_id, sessions_root)
@@ -282,8 +285,10 @@ class JiuWenClaw:
                 )
             else:
                 logger.warning(
-                    "[JiuWenClaw] 跳过 metadata 写入 project_dir：非法 session_id=%r",
-                    session_id,
+                    format_session_log(
+                        session_id,
+                        "[JiuWenClaw] 跳过 metadata 写入 project_dir：非法 session_id",
+                    )
                 )
             return resolved
         if existing == resolved:
@@ -295,10 +300,10 @@ class JiuWenClaw:
                 )
             return existing
         logger.warning(
-            "[JiuWenClaw] 忽略冲突的 project_dir：session_id=%s 保留 %r，收到 %r",
-            session_id,
-            existing,
-            resolved,
+            format_session_log(
+                session_id,
+                f"[JiuWenClaw] 忽略冲突的 project_dir：保留 {existing!r}，收到 {resolved!r}",
+            )
         )
         return existing
 
@@ -541,7 +546,7 @@ class JiuWenClaw:
             final = chunks[-1] if chunks else None
             payload = final.payload if final else {}
         except Exception as exc:
-            logger.error("[JiuWenClaw] skilldev 请求处理失败: %s", exc)
+            logger.error(format_session_log(request.session_id, f"[JiuWenClaw] skilldev 请求处理失败: {exc}"))
             return AgentResponse(
                 request_id=request.request_id,
                 channel_id=request.channel_id,
@@ -578,7 +583,7 @@ class JiuWenClaw:
             if _reload_after_skills:
                 await self.create_instance()
         except Exception as exc:
-            logger.error("[JiuWenClaw] skills 请求处理失败: %s", exc)
+            logger.error(format_session_log(request.session_id, f"[JiuWenClaw] skills 请求处理失败: {exc}"))
             return AgentResponse(
                 request_id=request.request_id,
                 channel_id=request.channel_id,
@@ -605,7 +610,7 @@ class JiuWenClaw:
         try:
             payload = await handler(request.params)
         except Exception as exc:
-            logger.error("[JiuWenClaw] tools 请求处理失败: %s", exc)
+            logger.error(format_session_log(request.session_id, f"[JiuWenClaw] tools 请求处理失败: {exc}"))
             return AgentResponse(
                 request_id=request.request_id,
                 channel_id=request.channel_id,
@@ -705,8 +710,11 @@ class JiuWenClaw:
         )
 
         logger.info(
-            "[JiuWenClaw] 处理请求: request_id=%s channel_id=%s session_id=%s sdk=%s",
-            request.request_id, request.channel_id, session_id, self._sdk_name,
+            format_session_log(
+                session_id,
+                f"[JiuWenClaw] 处理请求: request_id={request.request_id} "
+                f"channel_id={request.channel_id} sdk={self._sdk_name}",
+            )
         )
 
         inputs, memory_mode, raw_query = self._build_inputs(request)
@@ -733,7 +741,7 @@ class JiuWenClaw:
                 try:
                     await self._get_tool_manager().register_request_scoped_cat_cafe_mcp(cat_cafe_mcp)
                 except Exception as exc:
-                    logger.warning("[JiuWenClaw] cat_cafe_mcp 注册失败: %s", exc)
+                    logger.warning(format_session_log(session_id, f"[JiuWenClaw] cat_cafe_mcp 注册失败: {exc}"))
             return await adapter.process_message_impl(request, inputs)
 
         result = await self._session_manager.submit_and_wait(session_id, run_agent_task)
@@ -782,7 +790,7 @@ class JiuWenClaw:
                 async for chunk in service.handle(request):
                     yield chunk
             except Exception as exc:
-                logger.error("[JiuWenClaw] skilldev 流式请求处理失败: %s", exc)
+                logger.error(format_session_log(request.session_id, f"[JiuWenClaw] skilldev 流式请求处理失败: {exc}"))
                 yield AgentResponseChunk(
                     request_id=request.request_id,
                     channel_id=request.channel_id,
@@ -813,8 +821,11 @@ class JiuWenClaw:
         )
 
         logger.info(
-            "[JiuWenClaw] 处理流式请求: request_id=%s channel_id=%s session_id=%s sdk=%s",
-            request.request_id, request.channel_id, session_id, self._sdk_name,
+            format_session_log(
+                session_id,
+                f"[JiuWenClaw] 处理流式请求: request_id={request.request_id} "
+                f"channel_id={request.channel_id} sdk={self._sdk_name}",
+            )
         )
 
         inputs, memory_mode, raw_query = self._build_inputs(request)
@@ -826,8 +837,10 @@ class JiuWenClaw:
         if is_team_mode:
             inputs["query"] = raw_query
             logger.info(
-                "[JiuWenClaw] Team模式使用原始query: %s",
-                raw_query[:100] if raw_query else "",
+                format_session_log(
+                    session_id,
+                    f"[JiuWenClaw] Team模式使用原始query: {raw_query[:100] if raw_query else ''}",
+                )
             )
 
         # cloud memory: before chat hook
@@ -851,8 +864,10 @@ class JiuWenClaw:
             team_manager = get_team_manager()
             is_team_first_request = not team_manager.has_stream_task(session_id)
             logger.info(
-                "[JiuWenClaw] Team模式: session_id=%s is_first=%s",
-                session_id, is_team_first_request
+                format_session_log(
+                    session_id,
+                    f"[JiuWenClaw] Team模式: is_first={is_team_first_request}",
+                )
             )
 
         stream_queue = asyncio.Queue()
@@ -869,14 +884,14 @@ class JiuWenClaw:
                     try:
                         await self._get_tool_manager().register_request_scoped_cat_cafe_mcp(cat_cafe_mcp)
                     except Exception as exc:
-                        logger.warning("[JiuWenClaw] cat_cafe_mcp 注册失败: %s", exc)
+                        logger.warning(format_session_log(session_id, f"[JiuWenClaw] cat_cafe_mcp 注册失败: {exc}"))
                 async for chunk in adapter.process_message_stream_impl(request, inputs):
                     await stream_queue.put(("chunk", chunk))
             except asyncio.CancelledError:
-                logger.info("[JiuWenClaw] 流式任务被取消: request_id=%s session_id=%s", rid, session_id)
+                logger.info(format_session_log(session_id, f"[JiuWenClaw] 流式任务被取消: request_id={rid}"))
                 await stream_queue.put(("error", asyncio.CancelledError()))
             except Exception as exc:
-                logger.exception("[JiuWenClaw] 流式任务异常: %s", exc)
+                logger.exception(format_session_log(session_id, f"[JiuWenClaw] 流式任务异常: {exc}"))
                 await stream_queue.put(("error", exc))
             finally:
                 stream_done.set()
@@ -886,8 +901,10 @@ class JiuWenClaw:
         # 且 team_helpers 内部已有请求锁保证同一 session 的请求串行执行
         if is_team_mode and not is_team_first_request:
             logger.info(
-                "[JiuWenClaw] Team模式后续请求，直接执行: request_id=%s session_id=%s",
-                rid, session_id,
+                format_session_log(
+                    session_id,
+                    f"[JiuWenClaw] Team模式后续请求，直接执行: request_id={rid}",
+                )
             )
             asyncio.create_task(run_stream_task())
         else:
@@ -904,7 +921,7 @@ class JiuWenClaw:
 
                 if event_type == "error":
                     if isinstance(data, asyncio.CancelledError):
-                        logger.info("[JiuWenClaw] 流式处理被中断: request_id=%s", rid)
+                        logger.info(format_session_log(session_id, f"[JiuWenClaw] 流式处理被中断: request_id={rid}"))
                         raise data
                     append_history_record(
                         session_id=session_id,
@@ -1003,7 +1020,7 @@ class JiuWenClaw:
                             is_complete=False,
                         )
         except asyncio.CancelledError:
-            logger.info("[JiuWenClaw] 流式处理被中断: request_id=%s", rid)
+            logger.info(format_session_log(session_id, f"[JiuWenClaw] 流式处理被中断: request_id={rid}"))
             raise
 
         # cloud memory: after chat hook

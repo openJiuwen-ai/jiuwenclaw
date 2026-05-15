@@ -11,6 +11,7 @@ from typing import Any, Dict
 
 from openjiuwen.core.foundation.tool import tool
 
+from jiuwenclaw.utils import format_session_log
 from jiuwenclaw.utils import logger
 from jiuwenclaw.channel.xiaoyi_channel import get_xiaoyi_channel
 
@@ -85,7 +86,10 @@ async def xiaoyi_gui_agent(query: str) -> Dict[str, Any]:
     message_id = last_message_id or f"gui_{int(time.time() * 1000)}_{uuid.uuid4().hex[:8]}"
 
     logger.info(
-        "[XIAOYI_GUI_TOOL] call session_id=%s interaction_id=%s rpc_id=%s",
+        format_session_log(
+            session_id,
+            "[XIAOYI_GUI_TOOL] call session_id=%s interaction_id=%s rpc_id=%s",
+        ),
         session_id[:12] + "..." if len(session_id) > 12 else session_id,
         interaction_id[:12] + "..." if len(interaction_id) > 12 else interaction_id,
         message_id[:32] + "..." if len(message_id) > 32 else message_id,
@@ -135,7 +139,7 @@ async def xiaoyi_gui_agent(query: str) -> Dict[str, Any]:
                     "interactionId": interaction_id,
                 },
             }
-            logger.info("[XIAOYI_GUI_TOOL] sending InvokeJarvisGUIAgentRequest")
+            logger.info(format_session_log(session_id, "[XIAOYI_GUI_TOOL] sending InvokeJarvisGUIAgentRequest"))
             sent = await channel.send_xiaoyi_phone_tools_command(
                 session_id=session_id,
                 task_id=task_id or session_id,
@@ -162,6 +166,5 @@ async def xiaoyi_gui_agent(query: str) -> Dict[str, Any]:
                 channel.unregister_gui_agent_handler(on_gui)
             except Exception as unreg_err:
                 logger.warning(
-                    "[XIAOYI_GUI_TOOL] unregister_gui_agent_handler: %s",
-                    unreg_err,
+                    format_session_log(session_id, f"[XIAOYI_GUI_TOOL] unregister_gui_agent_handler: {unreg_err}"),
                 )

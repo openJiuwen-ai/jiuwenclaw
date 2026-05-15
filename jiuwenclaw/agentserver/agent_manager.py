@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any, TYPE_CHECKING
 
 from jiuwenclaw.e2a.acp.protocol import build_acp_initialize_result
+from jiuwenclaw.utils import format_session_log
 
 if TYPE_CHECKING:
     from jiuwenclaw.agentserver.interface import JiuWenClaw
@@ -122,7 +123,12 @@ class AgentManager:
                 os.environ.pop(key, None)
             else:
                 os.environ[key] = str(env_value)
-        logger.info("[AgentManager] Creating %s agent (mode=%s, session=%s)", agent_key, mode, session_id)
+        logger.info(
+            format_session_log(
+                session_id,
+                f"[AgentManager] Creating {agent_key} agent (mode={mode})",
+            )
+        )
 
         agent = JiuWenClaw(
             user_workspace_dir=str(self.user_workspace_dir) if self.user_workspace_dir else None,
@@ -141,13 +147,20 @@ class AgentManager:
                     env_overrides=self._latest_env_overrides,
                 )
                 logger.info(
-                    "[AgentManager] Replayed reload_agent_config for %s agent (session=%s)",
-                    agent_key, session_id
+                    format_session_log(
+                        session_id,
+                        f"[AgentManager] Replayed reload_agent_config for {agent_key} agent",
+                    )
                 )
             except Exception as e:
                 logger.warning("[AgentManager] Replay reload_agent_config failed: %s", e)
 
-        logger.info("[AgentManager] %s agent created for tenant %s (session=%s)", agent_key, self.agent_id, session_id)
+        logger.info(
+            format_session_log(
+                session_id,
+                f"[AgentManager] {agent_key} agent created for tenant {self.agent_id}",
+            )
+        )
         return agent
 
     async def initialize(
@@ -224,14 +237,15 @@ class AgentManager:
         explicit_session_id = str(session_id or "").strip()
         if explicit_session_id:
             logger.info(
-                "[AgentManager] session ensured: channel_id=%s session_id=%s",
-                channel_id,
-                explicit_session_id,
+                format_session_log(
+                    explicit_session_id,
+                    f"[AgentManager] session ensured: channel_id={channel_id}",
+                )
             )
             return explicit_session_id
         if channel_id == "acp":
             session_id = f"acp_{uuid.uuid4().hex[:8]}"
-            logger.info("[AgentManager] ACP session created: session_id=%s", session_id)
+            logger.info(format_session_log(session_id, "[AgentManager] ACP session created"))
             return session_id
         return "default"
 
@@ -453,8 +467,10 @@ class AgentManager:
                 if hasattr(agent, "cleanup"):
                     await agent.cleanup()
                 logger.info(
-                    "[AgentManager] Session cleaned up: channel=%s mode=%s session=%s",
-                    channel_id, mode, session_id
+                    format_session_log(
+                        session_id,
+                        f"[AgentManager] Session cleaned up: channel={channel_id} mode={mode}",
+                    )
                 )
         except Exception as e:
             logger.warning("[AgentManager] Session cleanup failed: %s", e)
