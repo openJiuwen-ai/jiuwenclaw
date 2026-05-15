@@ -472,8 +472,56 @@ def _get_builtin_skill_names() -> set[str]:
     return {item.name for item in builtin_skills_dir.iterdir() if item.is_dir()}
 
 
+def _migrate_legacy_flat_agent_sessions(legacy_agent: Path, new_agent_root: Path) -> None:
+    """Move legacy ``<root>/agent/sessions`` entries into multi-tenant ``.../agent/sessions``.
+
+    For each top-level name under legacy ``sessions``:
+    - If ``<new_sessions>/<name>`` already exists, skip.
+    - Otherwise move that entry (file or directory) into ``new_sessions``.
+    If ``new_sessions`` did not exist, the whole legacy ``sessions`` directory is moved.
+    """
+    legacy_sessions = legacy_agent / "sessions"
+    if not legacy_sessions.is_dir():
+        return
+
+    new_sessions = new_agent_root / "sessions"
+    new_agent_root.mkdir(parents=True, exist_ok=True)
+
+    try:
+        if not new_sessions.exists():
+            shutil.move(str(legacy_sessions), str(new_sessions))
+            logger.info("[Cleanup] Migrated legacy sessions: %s -> %s", legacy_sessions, new_sessions)
+            return
+
+        new_sessions.mkdir(parents=True, exist_ok=True)
+        for child in list(legacy_sessions.iterdir()):
+            dest = new_sessions / child.name
+            if dest.exists():
+                logger.info(
+                    "[Cleanup] Skip legacy sessions entry (destination exists): %s",
+                    child.name,
+                )
+                continue
+            shutil.move(str(child), str(dest))
+            logger.info("[Cleanup] Moved legacy sessions entry: %s -> %s", child.name, dest)
+
+        if legacy_sessions.exists():
+            shutil.rmtree(legacy_sessions, ignore_errors=True)
+    except OSError as e:
+        logger.warning(
+            "[Cleanup] Sessions migration failed (%s -> %s): %s",
+            legacy_sessions,
+            new_sessions,
+            e,
+        )
+
+
 def cleanup_legacy_flat_agent_dir(workspace_dir: Path) -> None:
-    """Remove legacy root-level agent data after the multi-tenant workspace exists."""
+    """Remove legacy root-level agent data after the multi-tenant workspace exists.
+
+    Before removing ``<root>/agent``, migrates ``<root>/agent/sessions`` to
+    ``<root>/service_default/agent_default/agent/sessions`` when present.
+    """
     legacy_agent = workspace_dir / "agent"
     if not legacy_agent.is_dir():
         return
@@ -491,6 +539,8 @@ def cleanup_legacy_flat_agent_dir(workspace_dir: Path) -> None:
 
     if same_agent_root:
         return
+
+    _migrate_legacy_flat_agent_sessions(legacy_agent, new_agent_root)
 
     try:
         shutil.rmtree(legacy_agent)
