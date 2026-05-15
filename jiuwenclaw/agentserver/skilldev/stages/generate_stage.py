@@ -24,6 +24,9 @@ from jiuwenclaw.agentserver.skilldev.asset_utils import (
 from jiuwenclaw.agentserver.skilldev.context import SkillDevContext
 from jiuwenclaw.agentserver.skilldev.schema import SkillDevEventType, SkillDevStage
 from jiuwenclaw.agentserver.skilldev.stages.base import StageHandler, StageResult
+from jiuwenclaw.agentserver.skilldev.utils.skill_description_fix import (
+    fix_skill_md_description,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -49,7 +52,7 @@ description: 用祈使句描述何时触发、做什么。描述应聚焦用户�
 
 规则：
 - name 必须是 kebab-case（小写字母、数字、连字符），≤30 字符
-- description 长度 ≤1024 字符
+- description 必须是**单行纯文本**，以祈使句描述何时触发、做什么；禁止以 `>`、`-`、`*`、`#` 等 Markdown 标记开头；禁止使用 YAML 块标量（如 `>-`、`|`）；长度 ≤1024 字符
 - 仅允许的 frontmatter key: name, description, license, allowed-tools, metadata, compatibility
 - frontmatter 必须是 YAML 对象，且 key 不可重复；若存在未知 key，必须移除后再提交
 - 若包含 allowed-tools，必须是字符串数组
@@ -115,7 +118,7 @@ skill/
 ## 自检清单（必须逐项输出通过/失败）
 - `skill/SKILL.md` 存在
 - frontmatter 中 `name` 为 kebab-case 且长度 ≤30
-- `description` 长度 ≤1024
+- `description` 为单行纯文本，不以 Markdown 标记（`>`、`-`、`*`、`#`）开头，长度 ≤1024
 - frontmatter 仅包含允许 key
 - 所有输出文件均在 `skill/` 目录下
 - 未生成任何与 Skill 无关文件（如 `README.md`、`implement_report.md`）
@@ -174,6 +177,9 @@ class GenerateStageHandler(StageHandler):
         )
         query = self._build_user_query(ctx)
         await ctx.run_stage_agent_streaming(agent, stage_name="generate", query=query)
+        skill_md_path = skill_dir / "SKILL.md"
+        if skill_md_path.exists():
+            fix_skill_md_description(skill_md_path)
         if not skill_dir.exists():
             ctx.release_agent_tools(agent)
             return []

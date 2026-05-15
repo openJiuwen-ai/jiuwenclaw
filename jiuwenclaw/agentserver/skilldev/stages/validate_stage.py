@@ -28,6 +28,10 @@ from jiuwenclaw.agentserver.skilldev.schema import (
     SkillDevStage,
 )
 from jiuwenclaw.agentserver.skilldev.stages.base import StageHandler, StageResult
+from jiuwenclaw.agentserver.skilldev.utils.skill_description_fix import (
+    normalize_skill_description,
+    parse_frontmatter,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -111,7 +115,7 @@ def validate_skill_md(skill_md_path: Path) -> tuple[bool, str]:
     if not match:
         return False, "YAML frontmatter 格式无效"
 
-    frontmatter = _parse_frontmatter(match.group(1))
+    frontmatter = parse_frontmatter(match.group(1))
 
     if "name" not in frontmatter:
         return False, "frontmatter 缺少必填字段 'name'"
@@ -132,9 +136,16 @@ def validate_skill_md(skill_md_path: Path) -> tuple[bool, str]:
         return False, f"name 过长（{len(name)} 字符，最大 {SKILL_NAME_MAX_LEN}）"
 
     # description
-    desc = frontmatter["description"].strip()
+    desc = normalize_skill_description(frontmatter["description"])
+    if not desc:
+        return False, "description 不能为空"
     if len(desc) > SKILL_DESC_MAX_LEN:
         return False, f"description 过长（{len(desc)} 字符，最大 {SKILL_DESC_MAX_LEN}）"
+    if desc != frontmatter["description"].strip():
+        return False, (
+            "description 不能以 Markdown 标记（如 >、-、*、#）开头；"
+            "请使用纯文本单行描述"
+        )
 
     return True, "SKILL.md 校验通过"
 
@@ -149,34 +160,12 @@ def parse_skill_frontmatter(skill_md_path: Path) -> tuple[str, str, str]:
     if not match:
         return "", "", content
 
-    fm = _parse_frontmatter(match.group(1))
-    return fm.get("name", ""), fm.get("description", ""), match.group(2)
-
-
-def _parse_frontmatter(text: str) -> dict[str, str]:
-    """极简 YAML frontmatter 解析（key: value 单行 + block scalar）.
-
-    生产环境可替换为 yaml.safe_load（需添加 PyYAML 依赖）。
-    """
-    result: dict[str, str] = {}
-    current_key: str | None = None
-    current_lines: list[str] = []
-
-    for line in text.split("\n"):
-        key_match = re.match(r"^([a-zA-Z_-]+):\s*(.*)", line)
-        if key_match:
-            if current_key:
-                result[current_key] = "\n".join(current_lines).strip()
-            current_key = key_match.group(1)
-            value = key_match.group(2)
-            current_lines = [] if value in ("|", ">") else [value]
-        elif current_key:
-            current_lines.append(line)
-
-    if current_key:
-        result[current_key] = "\n".join(current_lines).strip()
-
-    return result
+    fm = parse_frontmatter(match.group(1))
+    return (
+        fm.get("name", ""),
+        normalize_skill_description(fm.get("description", "")),
+        match.group(2),
+    )
 
 
 def _has_invalid_hyphen_usage(name: str) -> bool:

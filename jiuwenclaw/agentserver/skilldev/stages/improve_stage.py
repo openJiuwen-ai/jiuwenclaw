@@ -25,6 +25,9 @@ from pathlib import Path
 from jiuwenclaw.agentserver.skilldev.context import SkillDevContext
 from jiuwenclaw.agentserver.skilldev.schema import SkillDevEventType, SkillDevStage
 from jiuwenclaw.agentserver.skilldev.stages.base import StageHandler, StageResult
+from jiuwenclaw.agentserver.skilldev.utils.skill_description_fix import (
+    fix_skill_md_description,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -88,6 +91,7 @@ Skill 文件存储于工作区的 `skill/` 子目录下。
 
 ## 原则性要求
 请务必将文件写入 skill/ 目录下（如 skill/SKILL.md），并确保 YAML frontmatter 格式正确（name 为 kebab-case）。
+frontmatter 中的 `description` 必须是单行纯文本，禁止以 `>`、`-`、`*`、`#` 等 Markdown 标记开头，禁止使用 YAML 块标量（`>-`、`|` 等）。
 
 ## 工作区
 当前工作区路径为：{workspace}
@@ -146,4 +150,7 @@ class ImproveStageHandler(StageHandler):
         await ctx.run_stage_agent_streaming(
             agent, stage_name="improve", query="根据反馈改进 Skill"
         )
+        skill_md_path = ctx.workspace / "skill" / "SKILL.md"
+        if skill_md_path.exists():
+            fix_skill_md_description(skill_md_path)
         ctx.release_agent_tools(agent)
