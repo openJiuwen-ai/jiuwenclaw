@@ -1,4 +1,4 @@
-# Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
+# Copyright (c) Huawei Technologies Co., Ltd. 2025-2026. All rights reserved.
 
 """Serve built frontend static files with optional reverse proxy.
 
@@ -29,8 +29,18 @@ parse_dotenv_early("jiuwenclaw-web")
 
 # --- Now safe to import jiuwenclaw modules ---
 from jiuwenclaw.agents.harness.common.tools.ssl_config import get_insecure_ssl_context, get_ssl_verify
+from jiuwenclaw.agents.harness.team.bootstrap import configure_agent_teams_home
 from jiuwenclaw.common.utils import get_agent_root_dir, get_logs_dir, \
     get_root_dir, get_user_workspace_dir, is_package_installation
+
+configure_agent_teams_home()
+
+
+def _get_agent_teams_root() -> Path:
+    """Return the agent teams root after dotenv initialization."""
+    from openjiuwen.agent_teams.paths import get_agent_teams_home
+
+    return get_agent_teams_home().resolve()
 
 
 def _get_package_dir() -> Path:
@@ -141,6 +151,7 @@ class _SpaStaticHandler(SimpleHTTPRequestHandler):
     ws_disable_compress = False
     project_root = get_user_workspace_dir()
     workspace_root = get_agent_root_dir()
+    agent_teams_root = _get_agent_teams_root()
     logs_root = get_logs_dir()
     auto_harness_root = project_root / "auto-harness"
     logger = logging.getLogger(__name__)
@@ -500,10 +511,13 @@ class _SpaStaticHandler(SimpleHTTPRequestHandler):
         target_resolved = target.resolve()
         try:
             in_workspace = os.path.commonpath([str(cls.workspace_root), str(target_resolved)]) == str(cls.workspace_root)
+            in_agent_teams = (
+                os.path.commonpath([str(cls.agent_teams_root), str(target_resolved)]) == str(cls.agent_teams_root)
+            )
             in_logs = os.path.commonpath([str(cls.logs_root), str(target_resolved)]) == str(cls.logs_root)
             in_auto_harness = \
                 os.path.commonpath([str(cls.auto_harness_root), str(target_resolved)]) == str(cls.auto_harness_root)
-            return in_workspace or in_logs or in_auto_harness
+            return in_workspace or in_agent_teams or in_logs or in_auto_harness
         except ValueError:
             return False
 
@@ -947,6 +961,7 @@ def main() -> None:
 
     project_root = default_project_root
     workspace_root = (project_root / "agent").resolve()
+    agent_teams_root = _get_agent_teams_root()
     logs_root = get_logs_dir().resolve()
     logger = _setup_logger(logs_root, args.log_level)
 
@@ -958,6 +973,7 @@ def main() -> None:
     _ConfiguredHandler.ws_disable_compress = args.ws_disable_compress
     _ConfiguredHandler.project_root = project_root
     _ConfiguredHandler.workspace_root = workspace_root
+    _ConfiguredHandler.agent_teams_root = agent_teams_root
     _ConfiguredHandler.logs_root = logs_root
     _ConfiguredHandler.logger = logger
     handler = partial(_ConfiguredHandler, directory=str(dist_dir))
@@ -968,7 +984,7 @@ def main() -> None:
     logger.info("[jiuwenclaw-web] /api -> %s", api_target)
     logger.info("[jiuwenclaw-web] /ws  -> %s", ws_target)
     logger.info("[jiuwenclaw-web] ws disable compress: %s", args.ws_disable_compress)
-    logger.info("[jiuwenclaw-web] /file-api roots -> %s, %s", workspace_root, logs_root)
+    logger.info("[jiuwenclaw-web] /file-api roots -> %s, %s, %s", workspace_root, agent_teams_root, logs_root)
     try:
         server.serve_forever()
     except KeyboardInterrupt:

@@ -194,6 +194,36 @@ const THIRD_PARTY_API_KEYS = new Set([
 const REQUIRED_MODEL_FIELDS = ["api_base", "api_key", "model", "model_provider"] as const;
 const REQUIRED_MODEL_FIELD_SET = new Set<string>(REQUIRED_MODEL_FIELDS);
 const EVOLUTION_KEYS = new Set(["evolution_auto_scan", "skill_create"]);
+
+// 模型字段长度校验常量
+const MAX_MODEL_NAME_LENGTH = 100;
+const MAX_ALIAS_LENGTH = 100;
+const MAX_API_BASE_LENGTH = 100;
+const MAX_API_KEY_LENGTH = 500;
+
+// URL 格式校验函数
+function validateBaseUrl(url: string): boolean {
+  if (!url.trim()) return true; // 空值不校验（必填由其他逻辑控制）
+  const urlPattern = /^https?:\/\//i;
+  return urlPattern.test(url);
+}
+
+// 获取字段长度超限的错误信息（返回 i18n key）
+function getFieldLengthErrorKey(field: keyof ModelEntry, value: string): string | null {
+  const length = value.length;
+  switch (field) {
+    case "model_name":
+      return length > MAX_MODEL_NAME_LENGTH ? "config.modelList.modelNameTooLong" : null;
+    case "alias":
+      return length > MAX_ALIAS_LENGTH ? "config.modelList.aliasTooLong" : null;
+    case "api_base":
+      return length > MAX_API_BASE_LENGTH ? "config.modelList.apiBaseTooLong" : null;
+    case "api_key":
+      return length > MAX_API_KEY_LENGTH ? "config.modelList.apiKeyTooLong" : null;
+    default:
+      return null;
+  }
+}
 const AGENT_KEYS = new Set(["name", "model", "skills", "max_iterations", "completion_timeout"]);
 const TEAM_KEYS = new Set(["team_name", "lifecycle", "teammate_mode", "spawn_mode"]);
 const FREE_SEARCH_BOOLEAN_KEYS = new Set(["free_search_ddg_enabled", "free_search_bing_enabled"]);
@@ -730,6 +760,18 @@ function MultiModelSection({
   };
 
   const updateModel = (idx: number, field: keyof ModelEntry, value: string) => {
+    // 字段长度校验
+    const lengthErrorKey = getFieldLengthErrorKey(field, value);
+    if (lengthErrorKey) {
+      setLocalError(t(lengthErrorKey));
+      return;
+    }
+
+    // 校验通过，清除之前的字段长度错误（alias 冲突错误由 alias 逻辑单独处理）
+    if (field !== "alias") {
+      setLocalError(null);
+    }
+
     if (field === "alias") {
       const alias = value.trim();
       if (alias) {
@@ -743,6 +785,9 @@ function MultiModelSection({
         setLocalError(null);
       }
     }
+
+    // api_base URL 格式校验（仅在保存时校验，实时校验会导致用户输入过程中不断报错）
+
     const copy = [...models];
     copy[idx] = { ...copy[idx], [field]: value };
     if (field === "model_name" && value !== models[idx].model_name) {
@@ -859,10 +904,36 @@ function MultiModelSection({
   const handleAddNew = () => {
     const name = newModel.model_name.trim();
     if (!name) return;
+
+    // 字段长度校验
+    if (name.length > MAX_MODEL_NAME_LENGTH) {
+      setLocalError(t("config.modelList.modelNameTooLong"));
+      return;
+    }
+    if ((newModel.alias || "").length > MAX_ALIAS_LENGTH) {
+      setLocalError(t("config.modelList.aliasTooLong"));
+      return;
+    }
+    if ((newModel.api_base || "").length > MAX_API_BASE_LENGTH) {
+      setLocalError(t("config.modelList.apiBaseTooLong"));
+      return;
+    }
+    if ((newModel.api_key || "").length > MAX_API_KEY_LENGTH) {
+      setLocalError(t("config.modelList.apiKeyTooLong"));
+      return;
+    }
+
     if (!newModel.api_key.trim()) {
       setLocalError(t("config.modelList.apiKeyRequired"));
       return;
     }
+
+    // api_base URL 格式校验
+    if (newModel.api_base && !validateBaseUrl(newModel.api_base)) {
+      setLocalError(t("config.modelList.apiBaseUrlInvalid"));
+      return;
+    }
+
     const alias = newModel.alias?.trim() ?? "";
     if (alias) {
       const conflict = models.find((m) => (m.alias || "") === alias || m.model_name === alias);
@@ -986,7 +1057,7 @@ function MultiModelSection({
                 {(["model_name", "alias", "api_base", "api_key", "model_provider"] as const).map((field) => (
                   <div key={field} className="flex items-center gap-2 text-xs">
                     <label className="w-28 text-text-muted shrink-0">
-                      {field}{field === "api_key" && <span className="text-danger ml-0.5">*</span>}
+                      {field}{["api_key", "api_base", "model_name", "model_provider"].includes(field) && <span className="text-danger ml-0.5">*</span>}
                     </label>
                     {field === "model_provider" ? (
                       <select
@@ -1033,7 +1104,7 @@ function MultiModelSection({
           {(["model_name", "alias", "api_base", "api_key", "model_provider"] as const).map((field) => (
             <div key={field} className="flex items-center gap-2 text-xs">
               <label className="w-28 text-text-muted shrink-0">
-                {field}{field === "api_key" && <span className="text-danger ml-0.5">*</span>}
+                {field}{["api_key", "api_base", "model_name", "model_provider"].includes(field) && <span className="text-danger ml-0.5">*</span>}
               </label>
               {field === "model_provider" ? (
                 <select
@@ -1282,9 +1353,12 @@ function MultiAgentSection({
                       <input
                         type="number"
                         step="1"
-                        min="0"
-                        value={agent[field] ?? 0}
-                        onChange={(e) => updateAgentField(idx, field, parseInt(e.target.value) || 0)}
+                        min="1"
+                        value={agent[field] ?? 1}
+                        onChange={(e) => {
+                          const v = parseInt(e.target.value);
+                          updateAgentField(idx, field, v > 0 ? v : 1);
+                        }}
                         className="flex-1 rounded border border-border bg-bg px-2 py-1 text-text text-xs"
                       />
                     ) : field === "completion_timeout" ? (
@@ -1383,9 +1457,12 @@ function MultiAgentSection({
                 <input
                   type="number"
                   step="1"
-                  min="0"
-                  value={newAgent[field] ?? 0}
-                  onChange={(e) => setNewAgent((p) => ({ ...p, [field]: parseInt(e.target.value) || 0 }))}
+                  min="1"
+                  value={newAgent[field] ?? 1}
+                  onChange={(e) => {
+                    const v = parseInt(e.target.value);
+                    setNewAgent((p) => ({ ...p, [field]: v > 0 ? v : 1 }));
+                  }}
                   className="flex-1 rounded border border-border bg-bg px-2 py-1 text-text text-xs"
                 />
               ) : field === "completion_timeout" ? (
@@ -1447,6 +1524,9 @@ function TeamItemSection({
   const [openMembers, setOpenMembers] = useState(false);
   const [expandedMemberIdx, setExpandedMemberIdx] = useState<number | null>(null);
   const [memberNameError, setMemberNameError] = useState<string | null>(null);
+  const [addingNewMember, setAddingNewMember] = useState(false);
+  const [newMember, setNewMember] = useState<TeamMember>({ member_name: "", display_name: "", persona: "", prompt_hint: "", agent_key: "" });
+  const [newMemberNameError, setNewMemberNameError] = useState<string | null>(null);
 
   const checkMemberNameDuplicate = (leaderName: string, members: TeamMember[], excludeIdx?: number): string | null => {
     if (!leaderName) return null;
@@ -1459,10 +1539,20 @@ function TeamItemSection({
     return null;
   };
 
+  const checkEnglishOnly = (value: string): string | null => {
+    if (!value) return null;
+    if (!/^[a-zA-Z]+$/.test(value)) {
+      return t("config.team.memberNameEnglishOnly");
+    }
+    return null;
+  };
+
   const updateLeader = (field: keyof Leader, value: string) => {
     if (field === "member_name") {
-      const error = checkMemberNameDuplicate(value, team.predefined_members || []);
-      setMemberNameError(error);
+      const duplicateError = checkMemberNameDuplicate(value, team.predefined_members || []);
+      const englishError = checkEnglishOnly(value);
+      const errors = [englishError, duplicateError].filter(Boolean);
+      setMemberNameError(errors.length > 0 ? errors.join("; ") : null);
     }
     onTeamChange({ ...team, leader: { ...team.leader, [field]: value } });
   };
@@ -1471,16 +1561,50 @@ function TeamItemSection({
     if (field === "member_name") {
       const members = [...team.predefined_members];
       members[idx] = { ...members[idx], [field]: value };
-      const error = checkMemberNameDuplicate(value, members, idx);
-      if (team.leader?.member_name === value) {
-        setMemberNameError(t("config.team.duplicateMemberName"));
-      } else {
-        setMemberNameError(error);
-      }
+      const duplicateError = checkMemberNameDuplicate(value, members, idx);
+      const leaderDuplicate = team.leader?.member_name === value ? t("config.team.duplicateMemberName") : null;
+      const englishError = checkEnglishOnly(value);
+      const errors = [englishError, duplicateError, leaderDuplicate].filter(Boolean);
+      setMemberNameError(errors.length > 0 ? errors[0] : null);
     }
     const updated = [...team.predefined_members];
     updated[idx] = { ...updated[idx], [field]: value };
     onTeamChange({ ...team, predefined_members: updated });
+  };
+
+  const validateNewMemberName = (value: string): boolean => {
+    const englishError = checkEnglishOnly(value);
+    const duplicateInMembers = team.predefined_members.some((m) => m.member_name === value);
+    const duplicateError = duplicateInMembers ? t("config.team.duplicateMemberName") : null;
+    const leaderDuplicate = team.leader?.member_name === value ? t("config.team.duplicateMemberName") : null;
+    const errors = [englishError, duplicateError, leaderDuplicate].filter(Boolean);
+    setNewMemberNameError(errors.length > 0 ? errors[0] : null);
+    return errors.length === 0;
+  };
+
+  const updateNewMember = (field: keyof TeamMember, value: string) => {
+    setNewMember((prev) => ({ ...prev, [field]: value }));
+    if (field === "member_name") {
+      validateNewMemberName(value);
+    }
+  };
+
+  const handleAddNewMember = () => {
+    if (!newMember.member_name.trim()) return;
+    if (!validateNewMemberName(newMember.member_name)) return;
+    onTeamChange({
+      ...team,
+      predefined_members: [...team.predefined_members, newMember],
+    });
+    setNewMember({ member_name: "", display_name: "", persona: "", prompt_hint: "", agent_key: "" });
+    setNewMemberNameError(null);
+    setAddingNewMember(false);
+  };
+
+  const cancelAddNewMember = () => {
+    setNewMember({ member_name: "", display_name: "", persona: "", prompt_hint: "", agent_key: "" });
+    setNewMemberNameError(null);
+    setAddingNewMember(false);
   };
 
   const updateTeammate = (field: keyof Teammate, value: string) => {
@@ -1737,13 +1861,18 @@ function TeamItemSection({
                               ))}
                             </select>
                           ) : (
-                            <input
-                              type="text"
-                              value={member[field] ?? ""}
-                              onChange={(e) => updateMember(idx, field, e.target.value)}
-                              maxLength={field === "prompt_hint" ? 4096 : (field === "persona" ? 2048 : 64)}
-                              className={`flex-1 rounded border bg-bg px-2 py-1 text-text text-xs ${memberNameError ? "border-danger" : "border-border"}`}
-                            />
+                            <div className="flex-1">
+                              <input
+                                type="text"
+                                value={member[field] ?? ""}
+                                onChange={(e) => updateMember(idx, field, e.target.value)}
+                                maxLength={field === "prompt_hint" ? 4096 : (field === "persona" ? 2048 : 64)}
+                                className={`w-full rounded border bg-bg px-2 py-1 text-text text-xs ${field === "member_name" && memberNameError ? "border-danger" : "border-border"}`}
+                              />
+                              {field === "member_name" && memberNameError && (
+                                <p className="text-[10px] text-danger mt-1">{memberNameError}</p>
+                              )}
+                            </div>
                           )}
                         </div>
                       ))}
@@ -1752,18 +1881,52 @@ function TeamItemSection({
                 </div>
               );
             })}
-            <button
-              type="button"
-              onClick={() => {
-                onTeamChange({
-                  ...team,
-                  predefined_members: [...team.predefined_members, { member_name: "", display_name: "", persona: "", prompt_hint: "", agent_key: "" }],
-                });
-              }}
-              className="w-full rounded border border-dashed border-border py-1 text-xs text-text-muted hover:bg-secondary/40"
-            >
-              + {t("config.team.addMember")}
-            </button>
+            {addingNewMember ? (
+              <div className="rounded border border-accent/40 bg-accent/5 p-2 space-y-2">
+                {memberFields.map((field) => (
+                  <div key={field} className="flex items-center gap-2 text-xs">
+                    <label className="w-28 text-text-muted shrink-0">{getMemberFieldLabel(field)}</label>
+                    {field === "agent_key" ? (
+                      <select
+                        value={newMember[field] ?? ""}
+                        onChange={(e) => updateNewMember(field, e.target.value)}
+                        className="flex-1 rounded border border-border bg-bg px-2 py-1 text-text text-xs"
+                      >
+                        <option value="">-- Select Agent --</option>
+                        {agents.map((agent) => (
+                          <option key={agent.name} value={agent.name}>{agent.name || "(unnamed)"}</option>
+                        ))}
+                      </select>
+                    ) : (
+                      <div className="flex-1">
+                        <input
+                          type="text"
+                          value={newMember[field] ?? ""}
+                          onChange={(e) => updateNewMember(field, e.target.value)}
+                          maxLength={field === "prompt_hint" ? 4096 : (field === "persona" ? 2048 : 64)}
+                          className={`w-full rounded border bg-bg px-2 py-1 text-text text-xs ${field === "member_name" && newMemberNameError ? "border-danger" : "border-border"}`}
+                        />
+                        {field === "member_name" && newMemberNameError && (
+                          <p className="text-[10px] text-danger mt-1">{newMemberNameError}</p>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                ))}
+                <div className="flex justify-end gap-2 pt-1">
+                  <button type="button" onClick={cancelAddNewMember} className="btn !px-3 !py-1 text-xs">{t("common.cancel")}</button>
+                  <button type="button" onClick={handleAddNewMember} disabled={!newMember.member_name.trim()} className="btn primary !px-3 !py-1 text-xs">{t("common.confirm")}</button>
+                </div>
+              </div>
+            ) : (
+              <button
+                type="button"
+                onClick={() => setAddingNewMember(true)}
+                className="w-full rounded border border-dashed border-border py-1 text-xs text-text-muted hover:bg-secondary/40"
+              >
+                + {t("config.team.addMember")}
+              </button>
+            )}
           </div>
         )}
       </div>
@@ -1990,7 +2153,24 @@ export function ConfigPanel({
 
   const confirmDeleteAgent = () => {
     if (!deleteAgentConfirm) return;
+    const deletedName = deleteAgentConfirm.agentName;
     setDraftAgents((prev) => prev.filter((_, i) => i !== deleteAgentConfirm.idx));
+    setDraftTeams((prev) =>
+      prev.map((team) => ({
+        ...team,
+        leader: team.leader?.agent_key === deletedName
+          ? { ...team.leader, agent_key: "" }
+          : team.leader,
+        teammate: team.teammate?.agent_key === deletedName
+          ? { agent_key: "" }
+          : team.teammate,
+        predefined_members: (team.predefined_members || []).map((member) =>
+          member.agent_key === deletedName
+            ? { ...member, agent_key: "" }
+            : member
+        ),
+      }))
+    );
     setAgentsTeamsEdited(true);
     setDeleteAgentConfirm(null);
   };
@@ -2058,7 +2238,7 @@ export function ConfigPanel({
           model: matchedModel.model_name || "",
         } : { provider: "", api_base: "", api_key: "", model: modelName },
         skills: (normalizedConfig[`agent_skills_${i}`] || normalizedConfig[`agent_${i}_skills`] || "").split(/[,，]/).map((s: string) => s.trim()).filter(Boolean),
-        max_iterations: Number(normalizedConfig[`agent_max_iterations_${i}`]) || Number(normalizedConfig[`agent_${i}_max_iterations`]) || 200,
+        max_iterations: Math.max(1, Number(normalizedConfig[`agent_max_iterations_${i}`]) || Number(normalizedConfig[`agent_${i}_max_iterations`]) || 200),
         completion_timeout: Number(normalizedConfig[`agent_completion_timeout_${i}`]) || Number(normalizedConfig[`agent_${i}_completion_timeout`]) || 600,
       });
     }
@@ -2232,6 +2412,10 @@ export function ConfigPanel({
     () => draftModels.some((m) => !m.api_key.trim()),
     [draftModels],
   );
+  const hasMissingModelApiBase = useMemo(
+    () => draftModels.some((m) => !m.api_base.trim()),
+    [draftModels],
+  );
 
   const handleFieldChange = (key: string, value: string) => {
     setDraftValues((prev) => ({ ...prev, [key]: value }));
@@ -2262,6 +2446,10 @@ export function ConfigPanel({
       setError(t('config.modelList.apiKeyRequired'));
       return;
     }
+    if (hasMissingModelApiBase) {
+      setError(t('config.modelList.apiBaseRequired'));
+      return;
+    }
     // alias 唯一性校验
     const aliasSeen = new Map<string, string>();
     for (const m of draftModels) {
@@ -2277,6 +2465,32 @@ export function ConfigPanel({
         return;
       }
     }
+
+    // 字段长度校验
+    for (const m of draftModels) {
+      if ((m.model_name || "").length > MAX_MODEL_NAME_LENGTH) {
+        setError(t("config.modelList.modelNameTooLong"));
+        return;
+      }
+      if ((m.alias || "").length > MAX_ALIAS_LENGTH) {
+        setError(t("config.modelList.aliasTooLong"));
+        return;
+      }
+      if ((m.api_base || "").length > MAX_API_BASE_LENGTH) {
+        setError(t("config.modelList.apiBaseTooLong"));
+        return;
+      }
+      if ((m.api_key || "").length > MAX_API_KEY_LENGTH) {
+        setError(t("config.modelList.apiKeyTooLong"));
+        return;
+      }
+      // api_base URL 格式校验
+      if (m.api_base && !validateBaseUrl(m.api_base)) {
+        setError(t("config.modelList.apiBaseUrlInvalid"));
+        return;
+      }
+    }
+
     setSaving(true);
     setError(null);
     try {
@@ -2355,7 +2569,7 @@ export function ConfigPanel({
             <button
               type="button"
               onClick={() => void handleSaveAndRestart()}
-              disabled={!hasChanges || saving || hasMissingRequiredModelFields || hasMissingModelApiKey || (isProcessing && mode !== 'team')}
+              disabled={!hasChanges || saving || hasMissingRequiredModelFields || hasMissingModelApiKey || hasMissingModelApiBase || (isProcessing && mode !== 'team')}
               className="btn primary !px-3 !py-1.5 disabled:opacity-50 disabled:cursor-not-allowed"
             >
               {saving ? t('common.saving') : t('common.save')}
@@ -2370,6 +2584,11 @@ export function ConfigPanel({
         {!error && hasMissingRequiredModelFields ? (
           <div className="mb-4 rounded-md border border-[var(--border-danger)] bg-danger-subtle px-3 py-2 text-sm text-danger">
             {t('config.requiredIncomplete')}: {missingRequiredModelFields.join('、')}
+          </div>
+        ) : null}
+        {!error && hasMissingModelApiBase ? (
+          <div className="mb-4 rounded-md border border-[var(--border-danger)] bg-danger-subtle px-3 py-2 text-sm text-danger">
+            {t('config.modelList.apiBaseRequired')}
           </div>
         ) : null}
 

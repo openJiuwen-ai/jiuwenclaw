@@ -95,6 +95,23 @@ def _is_distributed_leader_runtime(config_base: dict[str, Any]) -> bool:
     return mode == "distributed" and role == "leader"
 
 
+def _team_agent_deep_agent(team_agent: Any) -> Any | None:
+    """Return the underlying DeepAgent across openjiuwen TeamAgent variants."""
+    deep_agent = getattr(team_agent, "deep_agent", None)
+    if deep_agent is not None:
+        return deep_agent
+
+    harness = getattr(team_agent, "harness", None)
+    if harness is None:
+        return None
+
+    deep_agent = getattr(harness, "inner_agent", None)
+    if deep_agent is not None:
+        return deep_agent
+
+    return getattr(harness, "_deep_agent", None)
+
+
 def _spawn_member_tool_id(leader_deep_agent: Any) -> str:
     """Resolve qualified tool id (inprocess mode rewrites card ids)."""
     try:
@@ -766,8 +783,9 @@ def attach_spawn_member_remote_bootstrap_wrapper(
 
     if getattr(team_agent, "role", None) != TeamRole.LEADER:
         return
-    leader = team_agent.deep_agent
+    leader = _team_agent_deep_agent(team_agent)
     if leader is None:
+        logger.debug("[RemoteMemberBootstrap] skip spawn_member wrapper: missing leader DeepAgent")
         return
 
     tool_id = _spawn_member_tool_id(leader)
@@ -950,9 +968,9 @@ def attach_distributed_local_spawn_guard(
     if getattr(team_agent, _LOCAL_SPAWN_GUARD_ATTR, False):
         return
 
-    leader = team_agent.deep_agent
+    leader = _team_agent_deep_agent(team_agent)
     if leader is None:
-        logger.debug("[RemoteMemberBootstrap] skip local spawn guard: missing leader deep_agent")
+        logger.debug("[RemoteMemberBootstrap] skip local spawn guard: missing leader DeepAgent")
         return
 
     tool_id = _team_tool_id(leader, "send_message")
@@ -1935,7 +1953,7 @@ def attach_remote_teammate_bootstrap_listener(
         _adopt_teammate_member_name(team_agent, target_member)
         route_applied = _apply_leader_route_from_envelope(team_agent, envelope)
 
-        deep_agent = getattr(team_agent, "deep_agent", None)
+        deep_agent = _team_agent_deep_agent(team_agent)
         client = getattr(deep_agent, "_jiuwen_a2x_client", None) if deep_agent is not None else None
         dataset = str(getattr(deep_agent, "_jiuwen_a2x_blank_dataset", "") or "").strip()
         service_id = str(getattr(deep_agent, "_jiuwen_a2x_blank_service_id", "") or "").strip()

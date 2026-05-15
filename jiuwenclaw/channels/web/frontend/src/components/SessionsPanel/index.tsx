@@ -160,6 +160,7 @@ interface SessionItem {
   title?: string;
   channel_id?: string;
   user_id?: string;
+  team_name?: string;
   last_message_at?: number;
   created_at?: number;
   message_count?: number;
@@ -184,6 +185,7 @@ function toSessionItems(raw: unknown[]): SessionItem[] {
           title: typeof rec.title === 'string' ? rec.title : undefined,
           channel_id: typeof rec.channel_id === 'string' ? rec.channel_id : undefined,
           user_id: typeof rec.user_id === 'string' ? rec.user_id : undefined,
+          team_name: typeof rec.team_name === 'string' ? rec.team_name : undefined,
           last_message_at: typeof rec.last_message_at === 'number' ? rec.last_message_at : undefined,
           created_at: typeof rec.created_at === 'number' ? rec.created_at : undefined,
           message_count: typeof rec.message_count === 'number' ? rec.message_count : undefined,
@@ -503,6 +505,11 @@ export function SessionsPanel({
                       title={session.title || parseSessionDisplayLabel(session.session_id, t)}
                     >
                       <span className="truncate block">{session.title || parseSessionDisplayLabel(session.session_id, t)}</span>
+                      {session.mode === 'team' && session.team_name ? (
+                        <span className="mt-1 block truncate text-[11px] text-text-muted">
+                          {t('sessions.teamLabel', { team: session.team_name })}
+                        </span>
+                      ) : null}
                     </button>
                     <button
                       type="button"

@@ -210,6 +210,13 @@ class JiuwenClawCodeAdapter(JiuWenClawDeepAdapter):
         )
 
         await self._instance.ensure_initialized()
+        # 修正 .agent_history 写入路径：openjiuwen 文件工具默认将
+        # .agent_history 写到 Workspace.root_path（即项目目录），
+        # 这里覆写为 agent 系统 workspace，避免污染用户项目目录。
+        for rail in getattr(self._instance, '_registered_rails', []):
+            for tool in getattr(rail, 'tools', []) or []:
+                if hasattr(tool, '_workspace_path'):
+                    setattr(tool, '_workspace_path', self._agent_workspace_dir)
         if self._project_dir:
             set_cwd(self._project_dir)
 

@@ -122,9 +122,9 @@ class DiffService:
             )
 
         turns_with_files = [t for t in turns if t["files"]]
-        for i, turn in enumerate(turns_with_files):
-            turn["turnIndex"] = i + 1
-
+        # Keep original turnIndex (aligned with user_count in history)
+        # instead of renumbering — allows list_session_turns to correctly
+        # map stats by the actual turn position.
         return turns_with_files
 
     @staticmethod

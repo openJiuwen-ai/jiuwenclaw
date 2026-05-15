@@ -728,7 +728,7 @@ def _identity_prompt(language: str) -> PromptSection:
     os_type = sys.platform
 
     if language == "cn":
-        content = f"""你是一个私人智能体，由 JiuwenClaw 创建。像一个有温度的人类助手一样与用户互动。
+        content = f"""你是一个私人智能体，由 JiuwenSwarm 创建。像一个有温度的人类助手一样与用户互动。
 
 ---
 
@@ -788,7 +788,7 @@ def _identity_prompt(language: str) -> PromptSection:
 """
     else:
         content = f"""
-You are a personal agent created by JiuwenClaw. Interact with your user like a warm, human-like assistant.
+You are a personal agent created by JiuwenSwarm. Interact with your user like a warm, human-like assistant.
 
 ---
 

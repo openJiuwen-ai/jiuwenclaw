@@ -17,6 +17,7 @@
   "nav": {
     "chat": "对话",
     "agent": "智能体",
+    "teams": "团队",
     "sessions": "会话",
     "heartbeat": "心跳",
     "cron": "定时任务",
@@ -43,6 +44,30 @@
     "statusShutdownRequested": "请求关闭",
     "statusShutdown": "已关闭",
     "statusError": "错误"
+  },
+  "teams": {
+    "title": "团队管理",
+    "subtitle": "查看团队目录或删除团队",
+    "teamList": "团队列表",
+    "count": "当前 {{count}} 个团队",
+    "sessionCount": "{{count}} 个会话",
+    "directory": "团队目录",
+    "noneSelected": "未选择团队",
+    "empty": "暂无团队",
+    "selectFirst": "请先选择团队",
+    "loadingDirectory": "加载团队目录中...",
+    "emptyDirectory": "暂无团队目录文件",
+    "deleteTeam": "删除团队",
+    "deleting": "删除中...",
+    "deleteConfirm": "确认删除团队 {{team}} ?\n将删除团队运行时、关联会话及目录。",
+    "folder": "文件夹",
+    "notPreviewable": "不可预览",
+    "selectFile": "请选择一个文件查看",
+    "errors": {
+      "loadTeams": "团队列表加载失败",
+      "loadDirectory": "团队目录加载失败",
+      "deleteTeam": "删除团队失败：{{team}}"
+    }
   },
   "statusBar": {
     "cancel": "取消",
@@ -95,6 +120,8 @@
     "newSessionDisabled": "处理中或录音中不可新建",
     "modeSwitchTitle": "切换模式",
     "modeSwitchConfirm": "当前会话有历史消息，切换模式将新建会话。是否继续？",
+    "teamPause": "暂停",
+    "teamPauseHint": "团队暂停后，直接发送下一条消息即可继续",
     "historyPager": {
       "loadedOfTotal": "历史已加载 {{loaded}} / {{total}} 页",
       "loadingMore": "加载中…",
@@ -210,6 +237,7 @@
     "restoreDisabledUnsupported": "仅支持恢复 web 前端会话（sess_）",
     "restoreEmpty": "该会话没有可恢复的消息（为空或均被过滤）。仍可在此继续对话。",
     "delete": "删除会话",
+      "teamLabel": "团队：{{team}}",
     "files": "会话文件",
     "selectFirst": "请先选择会话",
     "loadingFiles": "加载文件中...",
@@ -237,6 +265,7 @@
       "loadSessions": "会话列表加载失败",
       "loadFiles": "会话文件列表加载失败",
       "deleteSession": "删除会话失败：{{sessionId}}",
+      "switchSession": "切换团队会话失败",
       "restoreFailed": "恢复会话失败：{{sessionId}}"
     }
   },
@@ -549,6 +578,12 @@
       "onlyOneInGroup": "同模型名仅一个，自动默认",
       "apiKeyRequired": "API Key 为必填项，请填写后再保存",
       "apiKeyPlaceholder": "本地模型无需 API Key 可随意填写，如 sk-1234",
+      "apiBaseRequired": "API Base URL 为必填项，请填写后再保存",
+      "apiBaseUrlInvalid": "API Base URL 必须以 http:// 或 https:// 开头",
+      "modelNameTooLong": "模型名称过长，请控制在 100 字符以内",
+      "aliasTooLong": "别名过长，请控制在 100 字符以内",
+      "apiBaseTooLong": "API Base URL 过长，请控制在 100 字符以内",
+      "apiKeyTooLong": "API Key 过长，请控制在 500 字符以内",
       "alias": "别名",
       "aliasPlaceholder": "选填，默认为空"
     },
@@ -575,7 +610,8 @@
       "deleteConfirmMessage": "确定要删除 Team \"{{teamName}}\" 吗？",
       "deleteMemberConfirmTitle": "确认删除成员？",
       "deleteMemberConfirmMessage": "确定要删除成员 \"{{memberName}}\" 吗？",
-      "duplicateMemberName": "成员名称已存在"
+      "duplicateMemberName": "成员名称已存在",
+      "memberNameEnglishOnly": "成员名称只能包含英文字母"
     },
     "groups": {
       "modelDefault": { "label": "默认模型（主对话）", "hint": "主对话模型服务与鉴权参数" },

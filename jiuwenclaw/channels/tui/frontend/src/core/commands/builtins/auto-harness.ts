@@ -849,10 +849,10 @@ function formatLogSection(section: ParsedLogSection): string | null {
       // Skip duplicate content - if content equals display_name, don't show it again
       const showContent = section.content && section.content !== stageDisplayName;
       if (showContent) {
-        const stageContent = section.content.length > 80
-          ? section.content.substring(0, 80) + "..."
-          : section.content;
-        return `\n${startProgressBar}\n${ANSI.yellow}${ANSI.bold}▶ 📊 ${stageDisplayName}${ANSI.reset}\n${ANSI.yellow}${stageContent}${ANSI.reset}\n`;
+        // Wrap content to visual width (100 chars) and add indent
+        const wrappedContent = wrapText(section.content, 100);
+        const indentedContent = wrappedContent.split("\n").map(line => "  " + line).join("\n");
+        return `\n${startProgressBar}\n${ANSI.yellow}${ANSI.bold}▶ 📊 ${stageDisplayName}${ANSI.reset}\n${ANSI.yellow}${indentedContent}${ANSI.reset}\n`;
       }
       // Only show progress bar and stage name
       return `\n${startProgressBar}\n${ANSI.yellow}${ANSI.bold}▶ 📊 ${stageDisplayName}${ANSI.reset}\n`;
@@ -1185,7 +1185,10 @@ function formatLogSectionDetailed(section: ParsedLogSection): string | null {
       // Skip duplicate content display
       const showContentDetailed = section.content && section.content !== stageDisplayNameDetailed;
       if (showContentDetailed) {
-        return `\n${startProgressBarDetailed}\n${ANSI.yellow}${ANSI.bold}▶ 📊 ${stageDisplayNameDetailed}${ANSI.reset}\n${ANSI.yellow}${indentMultiline(section.content, "  ", 300)}${ANSI.reset}\n`;
+        // Wrap content to visual width (100 chars) and add indent
+        const wrappedContentDetailed = wrapText(section.content, 100);
+        const indentedContentDetailed = wrappedContentDetailed.split("\n").map(line => "  " + line).join("\n");
+        return `\n${startProgressBarDetailed}\n${ANSI.yellow}${ANSI.bold}▶ 📊 ${stageDisplayNameDetailed}${ANSI.reset}\n${ANSI.yellow}${indentedContentDetailed}${ANSI.reset}\n`;
       }
       return `\n${startProgressBarDetailed}\n${ANSI.yellow}${ANSI.bold}▶ 📊 ${stageDisplayNameDetailed}${ANSI.reset}\n`;
     case "session_finished":
@@ -1211,17 +1214,6 @@ function formatLogSectionDetailed(section: ParsedLogSection): string | null {
     default:
       return null;
   }
-}
-
-// Helper: indent multiline content
-function indentMultiline(text: string, prefix: string, maxLength: number): string {
-  const lines = text.split("\n");
-  const result: string[] = [];
-  for (const line of lines) {
-    const truncated = line.length > maxLength ? line.substring(0, maxLength) + "..." : line;
-    result.push(prefix + truncated);
-  }
-  return result.join("\n");
 }
 
 const scheduleCancelCommand: SlashCommand = {
@@ -1399,6 +1391,7 @@ export function createAutoHarnessCommand(): SlashCommand {
   return {
     name: "auto-harness",
     description: "Auto-Harness 任务管理",
+    hidden: true, // Temporarily hidden from TUI, core functionality preserved for future re-enable
     kind: CommandKind.BUILT_IN,
     takesArgs: true,
     subCommands: [runCommand, scheduleCommand],

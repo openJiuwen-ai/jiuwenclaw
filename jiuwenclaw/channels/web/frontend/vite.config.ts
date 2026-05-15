@@ -164,6 +164,7 @@ function devWsTrafficLogger(): Plugin {
 function devFileContentApi(): Plugin {
   const projectRootDir = resolveProjectRootDir()
   const workspaceRootDir = path.resolve(projectRootDir, 'agent')
+  const agentTeamsRootDir = path.resolve(projectRootDir, '.agent_teams')
   const webLogsRootDir = path.resolve(projectRootDir, '.logs')
   const autoHarnessDir = path.resolve(projectRootDir, 'auto-harness')
   const generateAgentFoldersScriptPath = path.resolve(__dirname, '../scripts/generate-agent-folders.js')
@@ -176,11 +177,13 @@ function devFileContentApi(): Plugin {
   const isPathUnderAllowedRoot = (targetPath: string) => {
     const relativeWorkspacePath = path.relative(workspaceRootDir, targetPath)
     const inWorkspace = !relativeWorkspacePath.startsWith('..') && !path.isAbsolute(relativeWorkspacePath)
+    const relativeAgentTeamsPath = path.relative(agentTeamsRootDir, targetPath)
+    const inAgentTeams = !relativeAgentTeamsPath.startsWith('..') && !path.isAbsolute(relativeAgentTeamsPath)
     const relativeLogsPath = path.relative(webLogsRootDir, targetPath)
     const inWebLogs = !relativeLogsPath.startsWith('..') && !path.isAbsolute(relativeLogsPath)
     const relativeAutoHarnessPath = path.relative(autoHarnessDir, targetPath)
     const inAutoHarness = !relativeAutoHarnessPath.startsWith('..') && !path.isAbsolute(relativeAutoHarnessPath)
-    return inWorkspace || inWebLogs || inAutoHarness
+    return inWorkspace || inAgentTeams || inWebLogs || inAutoHarness
   }
 
   return {

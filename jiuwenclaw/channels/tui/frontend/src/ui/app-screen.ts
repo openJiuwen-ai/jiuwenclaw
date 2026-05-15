@@ -10,6 +10,7 @@ import {
   type SlashCommand as TuiSlashCommand,
   TUI,
   matchesKey,
+  decodeKittyPrintable,
   truncateToWidth,
 } from "@mariozechner/pi-tui";
 import { spawnSync } from "node:child_process";
@@ -25,7 +26,12 @@ import {
   isSupportedAttachment,
   syncComposerImageTokens,
 } from "../core/attachments.js";
-import { CommandService, parseSlashCommand, type InstalledSkillEntry } from "../core/commands/CommandService.js";
+import {
+  CommandService,
+  parseSlashCommand,
+  type InstalledSkillEntry,
+} from "../core/commands/CommandService.js";
+import type { SlashCommand } from "../core/commands/types.js";
 import { addCommandEcho, addError, addInfo } from "../core/commands/helpers.js";
 import type { FileAttachment } from "../core/protocol.js";
 import {
@@ -86,6 +92,7 @@ type ResumeSessionListState = {
   list: SelectList;
   sessions: SessionMeta[];
   total: number;
+  searchQuery: string;
 };
 
 type ModelListState = {
@@ -440,12 +447,27 @@ function formatSessionTime(timestamp: number | undefined): string {
   return new Date(timestamp * 1000).toLocaleString();
 }
 
+function getDisplayLabel(s: SessionMeta): string {
+  return s.title?.trim() || s.session_id;
+}
+
+function sessionToSelectItem(s: SessionMeta): SelectItem {
+  return {
+    value: s.session_id,
+    label: getDisplayLabel(s),
+    description: `${s.session_id} · msgs ${s.message_count ?? 0} · ${formatSessionTime(s.last_message_at)}`,
+  };
+}
+
 function buildResumeSessionItems(sessions: SessionMeta[]): SelectItem[] {
-  return sessions.map((session) => ({
-    value: session.session_id,
-    label: session.title?.trim() || session.session_id,
-    description: `${session.session_id} · msgs ${session.message_count ?? 0} · ${formatSessionTime(session.last_message_at)}`,
-  }));
+  return sessions.map(sessionToSelectItem);
+}
+
+function filterResumeSessions(sessions: SessionMeta[], query: string): SelectItem[] {
+  const normalizedQuery = query.toLowerCase();
+  return sessions
+    .filter((s) => getDisplayLabel(s).toLowerCase().includes(normalizedQuery))
+    .map(sessionToSelectItem);
 }
 
 export class AppScreen implements Component, Focusable {
@@ -826,7 +848,23 @@ export class AppScreen implements Component, Focusable {
     }
 
     if (!snapshot.pendingQuestion && this.resumeSessionList !== null) {
-      this.resumeSessionList.list.handleInput(data);
+      const printableChar = this.getPrintableChar(data);
+      if (printableChar !== undefined) {
+        const newQuery = this.resumeSessionList.searchQuery + printableChar;
+        this.updateResumeSearchQuery(newQuery);
+      } else if (matchesKey(data, "backspace")) {
+        const newQuery = this.resumeSessionList.searchQuery.slice(0, -1);
+        this.updateResumeSearchQuery(newQuery);
+      } else if (matchesKey(data, "escape")) {
+        if (this.resumeSessionList.searchQuery) {
+          this.updateResumeSearchQuery("");
+        } else {
+          this.resumeSessionList = null;
+          this.tui.requestRender();
+        }
+      } else {
+        this.resumeSessionList.list.handleInput(data);
+      }
       this.tui.requestRender();
       return;
     }
@@ -1413,7 +1451,7 @@ export class AppScreen implements Component, Focusable {
         this.resumeSessionList = null;
         this.tui.requestRender();
       };
-      this.resumeSessionList = { list, sessions, total };
+      this.resumeSessionList = { list, sessions, total, searchQuery: "" };
       this.tui.requestRender();
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
@@ -1431,6 +1469,52 @@ export class AppScreen implements Component, Focusable {
     this.state.updateSession(nextSessionId);
     this.state.clearEntries();
     await this.state.restoreHistory(nextSessionId);
+    this.tui.requestRender();
+  }
+
+  private getPrintableChar(data: string): string | undefined {
+    // Kitty protocol printable character
+    const kittyChar = decodeKittyPrintable(data);
+    if (kittyChar) return kittyChar;
+
+    // Check for printable Unicode character (not control sequences)
+    if (data.length === 1) {
+      const code = data.charCodeAt(0);
+      // Control characters (0-31, 127) and DEL (127) are not printable
+      // Extended ASCII (128-255) and Unicode (>255) printable chars are accepted
+      if (code >= 32 && code !== 127) return data;
+    }
+
+    // UTF-8 multi-byte characters (Chinese, etc.)
+    // Check if data looks like a valid UTF-8 printable string (not an escape sequence)
+    if (data.length > 1 && !data.startsWith("\x1b")) {
+      try {
+        // Verify it's a valid printable string
+        const firstChar = data[0];
+        if (firstChar && firstChar.charCodeAt(0) >= 32) {
+          return data;
+        }
+      } catch {
+        // Invalid UTF-8, ignore
+      }
+    }
+
+    return undefined;
+  }
+
+  private updateResumeSearchQuery(query: string): void {
+    if (!this.resumeSessionList) return;
+    const filteredItems = filterResumeSessions(this.resumeSessionList.sessions, query);
+    const list = new SelectList(filteredItems, Math.min(Math.max(filteredItems.length, 1), 8), selectListTheme, {
+      minPrimaryColumnWidth: 24,
+      maxPrimaryColumnWidth: 42,
+    });
+    list.onSelect = (item) => void this.handleResumeSessionSelection(item.value);
+    list.onCancel = () => {
+      this.resumeSessionList = null;
+      this.tui.requestRender();
+    };
+    this.resumeSessionList = { ...this.resumeSessionList, list, searchQuery: query };
     this.tui.requestRender();
   }
 
@@ -1458,13 +1542,24 @@ export class AppScreen implements Component, Focusable {
     if (!this.resumeSessionList) {
       return [];
     }
+    const searchBox = this.resumeSessionList.searchQuery
+      ? padToWidth(palette.text.primary(`Search: ${this.resumeSessionList.searchQuery}${END_CURSOR}`), width)
+      : padToWidth(palette.text.dim("Type to search · ↑/↓ choose · Enter resume · Esc cancel"), width);
     return [
       padToWidth(
         palette.status.warning(`Resume session (${this.resumeSessionList.total} total)`),
         width,
       ),
+      searchBox,
       ...this.resumeSessionList.list.render(width),
-      padToWidth(palette.text.dim("↑/↓ choose · Enter resume · Esc cancel"), width),
+      padToWidth(
+        palette.text.dim(
+          this.resumeSessionList.searchQuery
+            ? "Backspace delete · Enter resume · Esc clear"
+            : "↑/↓ choose · Enter resume · Esc cancel"
+        ),
+        width,
+      ),
     ];
   }
 
@@ -2881,8 +2976,8 @@ export class AppScreen implements Component, Focusable {
       const reject = question.options.find((option) => option.label === "拒绝");
       if (reject) {
         this.handleQuestionSelection(reject.label);
-      } else if (question.options.length > 0) {
-        this.handleQuestionSelection(question.options[0].label);
+      } else {
+        this.handleQuestionSelection("");
       }
     };
     const selectedValue = this.pendingQuestionAnswers.get(this.activeQuestionIndex);

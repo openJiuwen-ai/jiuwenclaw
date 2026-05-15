@@ -37,7 +37,7 @@ from jiuwenclaw.agents.harness.common.plugins.rail_manager import get_rail_manag
 from jiuwenclaw.agents.harness.common.rails.permissions.permissions_persist import persist_cli_trusted_directory
 from jiuwenclaw.extensions.hooks_context import AgentServerChatHookContext
 from jiuwenclaw.server.runtime.agent_manager import AgentManager, ACP_DEFAULT_CAPABILITIES
-from jiuwenclaw.server.runtime.session.session_metadata import get_all_sessions_metadata
+from jiuwenclaw.server.runtime.session.session_metadata import get_all_sessions_metadata, remove_session_metadata_cache
 from jiuwenclaw.server.utils.utils import is_team_params
 from jiuwenclaw.agents.harness.common.rails.permissions.permissions_config_rpc import get_permissions_config_req_methods
 from jiuwenclaw.common.config import (
@@ -1077,6 +1077,8 @@ class AgentWebSocketServer:
                                 team_session_id,
                                 exc,
                             )
+                            continue
+                    remove_session_metadata_cache(team_session_id)
 
                 resp = AgentResponse(
                     request_id=request.request_id,
@@ -1160,6 +1162,7 @@ class AgentWebSocketServer:
                     )
                 else:
                     shutil.rmtree(session_dir)
+                    remove_session_metadata_cache(target)
                     resp = AgentResponse(
                         request_id=request.request_id,
                         channel_id=request.channel_id,

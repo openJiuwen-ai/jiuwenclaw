@@ -578,53 +578,6 @@
 
 ---
 
-
-### `/auto-harness`（任务管理）
-
-管理 Auto-Harness 任务执行，支持定时循环和一次性执行两种模式。
-
-#### 子命令
-
-| 命令 | 说明 |
-|---|---|
-| `/auto-harness run <query>` | 执行一次性任务（立即执行，完成后不重复） |
-| `/auto-harness schedule start --interval <hours> [--immediate] <query>` | 创建定时任务 |
-| `/auto-harness schedule list` | 列出所有任务（含一次性与定时任务） |
-| `/auto-harness schedule status <task_id>` | 查看任务详情 |
-| `/auto-harness schedule logs <task_id> [--current \| --history <n>]` | 查看执行日志 |
-| `/auto-harness schedule cancel <task_id>` | 取消正在执行的任务 |
-| `/auto-harness schedule delete <task_id>` | 删除任务 |
-
-#### 概念说明
-
-- **一次性任务（One-time Task）**：立即执行一次，完成后状态变为 `completed`，不会重复执行
-- **定时任务（Scheduled Task）**：按照指定间隔周期自动执行的 Auto-Harness 任务
-- **执行轮次（Execution）**：每次触发的单次执行，有独立的 execution_id
-- **日志类型**：
-  - `--current`：当前正在执行的日志
-  - `--history 0`：最新完成的执行日志
-  - `--history 1`：倒数第二次执行日志
-
-#### 配置要求
-
-首次使用需要配置以下 git/gitcode 信息（会自动引导）：
-- git.user_name：Git 提交用户名
-- git.user_email：Git 提交邮箱
-- git.fork_owner：Fork 仓库所有者
-- GitCode Access Token（可通过环境变量配置）
-
-#### 示例
-
-- `/auto-harness run 优化上下文工程卸载能力` — 执行一次性任务，完成后不再重复
-- `/auto-harness schedule start --interval 4 优化上下文工程卸载能力` — 创建每 4 小时执行一次的定时任务
-- `/auto-harness schedule start --interval 4 --immediate 优化上下文工程卸载能力` — 创建定时任务并立即执行一次
-- `/auto-harness schedule list` — 查看所有任务
-- `/auto-harness schedule status sch_abc123` — 查看任务详情
-- `/auto-harness schedule logs sch_abc123 --current` — 实时跟踪当前执行日志
-- `/auto-harness schedule logs sch_abc123 --history 0` — 查看最近一次执行日志
-- `/auto-harness schedule cancel sch_abc123` — 取消正在执行的任务
-- `/auto-harness schedule delete sch_abc123` — 删除任务
-
 ## 待开发
 
 | 命令             | 说明      |

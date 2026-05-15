@@ -17,6 +17,7 @@
   "nav": {
     "chat": "Chat",
     "agent": "Agent",
+    "teams": "Teams",
     "sessions": "Sessions",
     "heartbeat": "Heartbeat",
     "cron": "Scheduled Tasks",
@@ -43,6 +44,30 @@
     "statusShutdownRequested": "Shutdown Requested",
     "statusShutdown": "Shutdown",
     "statusError": "Error"
+  },
+  "teams": {
+    "title": "Team Management",
+    "subtitle": "Inspect team directories or delete teams",
+    "teamList": "Teams",
+    "count": "{{count}} team(s)",
+    "sessionCount": "{{count}} session(s)",
+    "directory": "Team Directory",
+    "noneSelected": "No team selected",
+    "empty": "No teams",
+    "selectFirst": "Select a team first",
+    "loadingDirectory": "Loading team directory...",
+    "emptyDirectory": "No files in this team directory",
+    "deleteTeam": "Delete team",
+    "deleting": "Deleting...",
+    "deleteConfirm": "Delete team {{team}}?\nThis will delete the team runtime, linked sessions, and directory.",
+    "folder": "Folder",
+    "notPreviewable": "Not previewable",
+    "selectFile": "Select a file to view",
+    "errors": {
+      "loadTeams": "Failed to load teams",
+      "loadDirectory": "Failed to load team directory",
+      "deleteTeam": "Failed to delete team: {{team}}"
+    }
   },
   "statusBar": {
     "cancel": "Cancel",
@@ -95,6 +120,8 @@
     "newSessionDisabled": "Cannot create session while processing or recording",
     "modeSwitchTitle": "Switch Mode",
     "modeSwitchConfirm": "Current session has history messages. Switching mode will create a new session. Continue?",
+    "teamPause": "Pause",
+    "teamPauseHint": "After pausing a team, send the next message to continue",
     "historyPager": {
       "loadedOfTotal": "Loaded {{loaded}} / {{total}} pages",
       "loadingMore": "Loading...",
@@ -210,6 +237,7 @@
     "restoreDisabledUnsupported": "Only web frontend sessions (sess_) can be restored",
     "restoreEmpty": "This session has no restorable messages (empty or filtered). You can still chat from here.",
     "delete": "Delete session",
+      "teamLabel": "Team: {{team}}",
     "files": "Session Files",
     "selectFirst": "Select a session first",
     "loadingFiles": "Loading files...",
@@ -237,6 +265,7 @@
       "loadSessions": "Failed to load sessions",
       "loadFiles": "Failed to load session files",
       "deleteSession": "Failed to delete session: {{sessionId}}",
+      "switchSession": "Failed to switch team session",
       "restoreFailed": "Failed to restore session: {{sessionId}}"
     }
   },
@@ -550,6 +579,12 @@
       "onlyOneInGroup": "Only one in group, auto-default",
       "apiKeyRequired": "API Key is required, please fill it in before saving",
       "apiKeyPlaceholder": "Local models don't need an API Key — enter any value, e.g. sk-1234",
+      "apiBaseRequired": "API Base URL is required, please fill it in before saving",
+      "apiBaseUrlInvalid": "API Base URL must start with http:// or https://",
+      "modelNameTooLong": "Model name is too long, please keep it under 100 characters",
+      "aliasTooLong": "Alias is too long, please keep it under 100 characters",
+      "apiBaseTooLong": "API Base URL is too long, please keep it under 100 characters",
+      "apiKeyTooLong": "API Key is too long, please keep it under 500 characters",
       "alias": "Alias",
       "aliasPlaceholder": "Optional, defaults to empty"
     },
@@ -576,7 +611,8 @@
       "deleteConfirmMessage": "Are you sure you want to delete team \"{{teamName}}\"?",
       "deleteMemberConfirmTitle": "Delete Member?",
       "deleteMemberConfirmMessage": "Are you sure you want to delete member \"{{memberName}}\"?",
-      "duplicateMemberName": "Member name already exists"
+      "duplicateMemberName": "Member name already exists",
+      "memberNameEnglishOnly": "Member name can only contain English letters"
     },
     "groups": {
       "modelDefault": { "label": "Default Model (Main Chat)", "hint": "Primary chat model service and auth" },

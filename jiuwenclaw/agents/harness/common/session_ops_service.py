@@ -241,6 +241,7 @@ def list_session_turns(
         return {"turns": [], "total": 0}
 
     diff_stats_map: dict[int, dict[str, int]] = {}
+    diff_files_map: dict[int, list[dict[str, Any]]] = {}
     try:
         from jiuwenclaw.server.utils.diff_service import get_diff_service
 
@@ -251,6 +252,15 @@ def list_session_turns(
                 ti = td.get("turnIndex")
                 if isinstance(ti, int) and ti > 0:
                     diff_stats_map[ti] = td.get("stats", {})
+                    files_data: list[dict[str, Any]] = []
+                    for fp, finfo in td.get("files", {}).items():
+                        files_data.append({
+                            "path": fp,
+                            "linesAdded": finfo.get("linesAdded", 0),
+                            "linesRemoved": finfo.get("linesRemoved", 0),
+                            "isNewFile": finfo.get("isNewFile", False),
+                        })
+                    diff_files_map[ti] = files_data
     except Exception as exc:
         logger.debug("list_session_turns: diff service unavailable: %s", exc)
 
@@ -263,7 +273,12 @@ def list_session_turns(
         content = record.get("content", "")
         if isinstance(content, str) and not _is_selectable_user_message(content):
             continue
-        preview = content[:80] if isinstance(content, str) else ""
+        if isinstance(content, str):
+            # 剥离 <file-content>...</file-content> 块（系统元数据），只保留用户实际输入
+            cleaned = re.sub(r"<file-content[^>]*>.*?</file-content>", "", content, flags=re.DOTALL)
+            preview = cleaned.strip()[:80]
+        else:
+            preview = ""
         stats = diff_stats_map.get(user_count, {
             "filesChanged": 0,
             "linesAdded": 0,
@@ -276,6 +291,7 @@ def list_session_turns(
             "id": record.get("id", ""),
             "request_id": record.get("request_id", ""),
             "stats": stats,
+            "files": diff_files_map.get(user_count, []),
         })
 
     return {"turns": turns, "total": user_count}

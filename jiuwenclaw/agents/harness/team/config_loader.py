@@ -87,8 +87,26 @@ def resolve_team_sqlite_db_path(config_base: dict[str, Any] | None = None) -> Pa
     return get_agent_teams_home() / conn_str
 
 
+def _resolve_default_model_config(config_base: dict[str, Any]) -> dict[str, Any]:
+    models_raw = config_base.get("models", {})
+    if not isinstance(models_raw, dict):
+        return {}
+
+    defaults_raw = models_raw.get("defaults")
+    if isinstance(defaults_raw, list):
+        for item in defaults_raw:
+            if isinstance(item, dict):
+                return item
+
+    legacy_default = models_raw.get("default")
+    if isinstance(legacy_default, dict):
+        return legacy_default
+
+    return {}
+
+
 def _build_default_model_dict(config_base: dict[str, Any]) -> dict[str, Any]:
-    model_config = config_base.get("models", {}).get("default", {})
+    model_config = _resolve_default_model_config(config_base)
     model_client_config = dict(model_config.get("model_client_config", {}))
     model_request_config = dict(model_config.get("model_config_obj", {}))
 

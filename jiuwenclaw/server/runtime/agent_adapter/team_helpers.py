@@ -814,10 +814,11 @@ async def _consume_stream_with_query(
                 },
             )
         else:
-            logger.warning(
-                "[TeamHelpers] stream ended unexpectedly: channel_id=%s session_id=%s",
+            logger.info(
+                "[TeamHelpers] stream ended: channel_id=%s session_id=%s chunks=%s",
                 _resolve_channel_id(channel_id),
                 session_id,
+                received_chunks,
             )
     except asyncio.CancelledError:
         logger.info(

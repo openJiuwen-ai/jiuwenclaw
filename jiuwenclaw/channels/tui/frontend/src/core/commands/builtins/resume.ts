@@ -36,15 +36,17 @@ export function createResumeCommand(): SlashCommand {
     action: async (ctx, args) => {
       const value = args.trim();
       try {
+        // 获取 session 列表用于匹配
+        const listPayload = await ctx.request<SessionListPayload>("session.list", {});
+        const allSessions = listPayload.sessions ?? [];
+
         if (value === "" || value === "list") {
-          const payload = await ctx.request<SessionListPayload>("session.list", {});
-          const sessions = payload.sessions ?? [];
-          const total = payload.total ?? sessions.length;
-          if (sessions.length === 0) {
+          const total = listPayload.total ?? allSessions.length;
+          if (allSessions.length === 0) {
             ctx.addItem(addInfo(ctx.sessionId, "No sessions found", "r"));
             return;
           }
-          const items = sessions.map((s, i) => {
+          const items = allSessions.map((s, i) => {
             const lastActive = s.last_message_at
               ? new Date(s.last_message_at * 1000).toLocaleString()
               : "-";
@@ -64,19 +66,16 @@ export function createResumeCommand(): SlashCommand {
           return;
         }
 
-        const payload = await ctx.request<ResumeResumePayload>(
-          "command.resume",
-          value ? { query: value } : {},
+        // 1. 先检查是否完全匹配 session_id
+        const sessionIdMatch = allSessions.find(
+          (s) => s.session_id === value || s.session_id.startsWith(value) && value.length >= 8,
         );
-
-        const nextSessionId = payload.session_id?.trim();
-        if (payload.resumed && nextSessionId) {
+        if (sessionIdMatch) {
+          const nextSessionId = sessionIdMatch.session_id;
           ctx.updateSession(nextSessionId);
           ctx.clearEntries();
           ctx.addItem(addInfo(nextSessionId, `Resumed session ${nextSessionId}`, "r"));
           void ctx.restoreHistory(nextSessionId);
-          // 异步拉取被恢复会话的标题；在拿到结果前保留上一会话的 title 显示，
-          // 避免 "清空 -> 回填" 造成状态栏闪烁。成功后覆盖，失败不影响核心功能。
           void (async () => {
             try {
               const meta = await ctx.request<{ session_id: string; title: string }>(
@@ -90,25 +89,48 @@ export function createResumeCommand(): SlashCommand {
           })();
           return;
         }
+
+        // 2. 检查是否完全匹配 title（显示内容，title 或 fallback 的 session_id）
+        const titleMatches = allSessions.filter((s) => {
+          const displayLabel = s.title?.trim() || s.session_id;
+          return displayLabel === value;
+        });
+
+        if (titleMatches.length === 1) {
+          const nextSessionId = titleMatches[0]!.session_id;
+          ctx.updateSession(nextSessionId);
+          ctx.clearEntries();
+          ctx.addItem(addInfo(nextSessionId, `Resumed session ${nextSessionId}`, "r"));
+          void ctx.restoreHistory(nextSessionId);
+          void (async () => {
+            try {
+              const meta = await ctx.request<{ session_id: string; title: string }>(
+                "session.rename",
+                { session_id: nextSessionId },
+              );
+              ctx.setSessionTitle(meta.title || "");
+            } catch {
+              ctx.setSessionTitle("");
+            }
+          })();
+          return;
+        }
+
+        // 3. 多个 title 匹配
+        if (titleMatches.length > 1) {
+          ctx.addItem(
+            addInfo(
+              ctx.sessionId,
+              `Found ${titleMatches.length} sessions matching "${value}". Please use /resume to pick a specific session.`,
+              "r",
+            ),
+          );
+          return;
+        }
+
+        // 4. 没有匹配
         ctx.addItem(
-          addInfo(
-            ctx.sessionId,
-            nextSessionId
-              ? `Resume candidate: ${nextSessionId}`
-              : value
-                ? `No resume match for ${value}`
-                : "No resumable session returned",
-            "r",
-            {
-              view: "kv",
-              title: "Resume",
-              items: [
-                ...(nextSessionId ? [{ label: "session", value: nextSessionId }] : []),
-                ...(payload.query ? [{ label: "query", value: payload.query }] : []),
-                ...(payload.preview ? [{ label: "preview", value: payload.preview }] : []),
-              ],
-            },
-          ),
+          addInfo(ctx.sessionId, `Session "${value}" was not found. Use /resume to see available sessions.`, "r"),
         );
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);

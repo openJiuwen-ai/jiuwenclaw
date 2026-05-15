@@ -13,9 +13,10 @@ interface StatusBarProps {
   onPause?: () => void;
   onCancel?: () => void;
   onResume?: () => void;
+  teamMode?: boolean;
 }
 
-export function StatusBar({ onPause, onCancel, onResume }: StatusBarProps) {
+export function StatusBar({ onPause, onCancel, onResume, teamMode = false }: StatusBarProps) {
   const { t } = useTranslation();
   const { isProcessing, isPaused, pausedTask, interruptResult, switchingMode } = useChatStore();
   const showExec = (isProcessing || isPaused) && !switchingMode;
@@ -25,7 +26,7 @@ export function StatusBar({ onPause, onCancel, onResume }: StatusBarProps) {
   return (
     <div className="statusbar-root">
       <div className="statusbar-center">
-        {showInterruptBarOnly ? (
+        {showInterruptBarOnly && !teamMode ? (
           <div
             className={`pill animate-fade-in ${
               interruptResult!.success
@@ -37,8 +38,25 @@ export function StatusBar({ onPause, onCancel, onResume }: StatusBarProps) {
           </div>
         ) : (
           <>
+        {teamMode && onPause && (
+          <div className="statusbar-exec">
+            {isPaused ? (
+              <div className="statusbar-pill statusbar-pill--paused">
+                <span className="statusbar-dot" />
+                <span>{t('statusBar.paused')}</span>
+              </div>
+            ) : (
+              <button
+                onClick={onPause}
+                className="statusbar-action-btn statusbar-action-btn--pause"
+              >
+                {t('statusBar.pause')}
+              </button>
+            )}
+          </div>
+        )}
         {/* 执行状态：左侧取消，中间状态，右侧暂停/恢复 */}
-        {showExec && (
+        {!teamMode && showExec && (
           <div className="statusbar-exec">
             {onCancel && (
               <button

@@ -9,6 +9,7 @@ import { ChatPanel } from './components/ChatPanel';
 import { SessionSidebar } from './components/SessionSidebar';
 import { SkillPanel } from './components/SkillPanel';
 import { AgentPanel } from './components/AgentPanel/index';
+import { TeamPanel } from './components/TeamPanel';
 import { SessionsPanel } from './components/SessionsPanel';
 import { HeartbeatPanel } from './components/HeartbeatPanel';
 import CronPanel from './components/CronPanel';
@@ -41,7 +42,7 @@ import { useTranslation } from 'react-i18next';
 import i18n from './i18n';
 import './App.css';
 
-type MainNavKey = 'chat' | 'skills' | 'agents' | 'sessions' | 'heartbeat' | 'cron' | 'channels' | 'extensions' | 'configpanel' | 'logspanel' | 'browserpanel' | 'updatepanel';
+type MainNavKey = 'chat' | 'skills' | 'agents' | 'teams' | 'sessions' | 'heartbeat' | 'cron' | 'channels' | 'extensions' | 'configpanel' | 'logspanel' | 'browserpanel' | 'updatepanel';
 
 // 错误边界组件
 interface ErrorBoundaryState {
@@ -1089,8 +1090,22 @@ function AppContent() {
   ]);
 
   const handleRestoreSession = useCallback(
-    (targetSessionId: string, targetMode?: string) => {
+    async (targetSessionId: string, targetMode?: string) => {
       if (!targetSessionId.startsWith('sess_')) return;
+
+      const resolvedMode = targetMode ?? mode;
+      if (resolvedMode === 'team' && sessionId && sessionId !== targetSessionId) {
+        try {
+          await request('session.switch', {
+            session_id: targetSessionId,
+            mode: 'team',
+          });
+        } catch (error) {
+          console.error('Failed to switch team session:', error);
+          window.alert(t('sessions.errors.switchSession'));
+          return;
+        }
+      }
 
       disposeInFlightHistoryHandles();
       setHistoryPagerMeta(null);
@@ -1106,8 +1121,8 @@ function AppContent() {
       setSessionId(targetSessionId);
       setCurrentSession(null);
       storeSessionId(targetSessionId);
-      if (targetMode) {
-        setMode(targetMode as AgentMode);
+      if (resolvedMode) {
+        setMode(resolvedMode as AgentMode);
       }
       setActiveNav('chat');
       // 历史加载只由下方 useEffect 发起一次。若 sessionId 与当前相同，须 bump key 才会重跑 effect，
@@ -1120,7 +1135,10 @@ function AppContent() {
       clearSubtasks,
       clearTodos,
       disposeInFlightHistoryHandles,
+      mode,
+      request,
       resetHarnessStore,
+      sessionId,
       setActiveNav,
       setCurrentSession,
       setHistoryLoadingMore,
@@ -1130,6 +1148,7 @@ function AppContent() {
       setProcessing,
       setSessionId,
       setThinking,
+      t,
     ]
   );
 
@@ -1223,14 +1242,12 @@ function AppContent() {
                   />
                 </div>
 
-                {/* Status Bar - 只在非集群模式下显示 */}
-                {mode !== 'team' && (
-                  <StatusBar
-                    onPause={handlePause}
-                    onCancel={handleCancel}
-                    onResume={handleResume}
-                  />
-                )}
+                <StatusBar
+                  onPause={handlePause}
+                  onCancel={mode === 'team' ? undefined : handleCancel}
+                  onResume={mode === 'team' ? undefined : handleResume}
+                  teamMode={mode === 'team'}
+                />
               </div>
 
               {/* Tool Panel */}
@@ -1241,6 +1258,11 @@ function AppContent() {
         {activeNav === 'agents' && (
           <div className="app-section">
             <AgentPanel sessionId={sessionId} />
+          </div>
+        )}
+        {activeNav === 'teams' && (
+          <div className="app-section">
+            <TeamPanel />
           </div>
         )}
         {activeNav === 'sessions' && (

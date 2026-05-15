@@ -9,6 +9,7 @@
 - [A2A 接入说明](A2A.md)
 - [配置说明](配置信息.md)
 - [分布式 Team](分布式Team.md)
+- [Agent Team 使用指南](AgentTeam.md)
 - [单机多实例运行](单机多实例运行.md)
 - [使用指南](README.md)
   - [频道](频道.md)

@@ -13,6 +13,13 @@ import './ExtensionsHubPanel.css';
 
 type HubTabKey = 'rails' | 'harnesspkg';
 
+interface TabItem {
+  key: HubTabKey;
+  label: string;
+  icon: JSX.Element;
+  hidden?: boolean;
+}
+
 interface ExtensionsHubPanelProps {
   sessionId: string;
   isConnected: boolean;
@@ -20,34 +27,49 @@ interface ExtensionsHubPanelProps {
 
 export function ExtensionsHubPanel({ sessionId, isConnected }: ExtensionsHubPanelProps) {
   const { t } = useTranslation();
-  const [activeTab, setActiveTab] = useState<HubTabKey>('harnesspkg');
+  const [activeTab, setActiveTab] = useState<HubTabKey>('rails');
+
+  const tabs: TabItem[] = [
+    {
+      key: 'harnesspkg',
+      label: t('nav.harnesspkg', 'Plugins'),
+      hidden: true, // Temporarily hidden from web UI, core functionality preserved for future re-enable
+      icon: (
+        <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={1.5}>
+          <path strokeLinecap="round" strokeLinejoin="round" d="M21 7.5l-9-5.25L3 7.5m18 0l-9 5.25m9-5.25v9l-9 5.25M3 7.5l9 5.25M3 7.5v9l9 5.25m0-9v9" />
+        </svg>
+      ),
+    },
+    {
+      key: 'rails',
+      label: t('nav.rails', 'Extensions'),
+      icon: (
+        <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={1.5}>
+          <path strokeLinecap="round" strokeLinejoin="round" d="M12 6v12m6-6H6" />
+          <circle cx="12" cy="12" r="9" />
+        </svg>
+      ),
+    },
+  ];
+
+  const visibleTabs = tabs.filter((tab) => !tab.hidden);
 
   return (
     <div className="extensions-hub-panel">
       {/* Tab Header */}
       <div className="extensions-hub-panel__header">
         <div className="extensions-hub-panel__tabs">
-          <button
-            type="button"
-            onClick={() => setActiveTab('harnesspkg')}
-            className={`extensions-hub-panel__tab ${activeTab === 'harnesspkg' ? 'extensions-hub-panel__tab--active' : ''}`}
-          >
-            <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={1.5}>
-              <path strokeLinecap="round" strokeLinejoin="round" d="M21 7.5l-9-5.25L3 7.5m18 0l-9 5.25m9-5.25v9l-9 5.25M3 7.5l9 5.25M3 7.5v9l9 5.25m0-9v9" />
-            </svg>
-            <span>{t('nav.harnesspkg', 'Plugins')}</span>
-          </button>
-          <button
-            type="button"
-            onClick={() => setActiveTab('rails')}
-            className={`extensions-hub-panel__tab ${activeTab === 'rails' ? 'extensions-hub-panel__tab--active' : ''}`}
-          >
-            <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={1.5}>
-              <path strokeLinecap="round" strokeLinejoin="round" d="M12 6v12m6-6H6" />
-              <circle cx="12" cy="12" r="9" />
-            </svg>
-            <span>{t('nav.rails', 'Extensions')}</span>
-          </button>
+          {visibleTabs.map((tab) => (
+            <button
+              type="button"
+              key={tab.key}
+              onClick={() => setActiveTab(tab.key)}
+              className={`extensions-hub-panel__tab ${activeTab === tab.key ? 'extensions-hub-panel__tab--active' : ''}`}
+            >
+              {tab.icon}
+              <span>{tab.label}</span>
+            </button>
+          ))}
         </div>
       </div>
 

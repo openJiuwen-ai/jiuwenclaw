@@ -567,53 +567,6 @@ Use the following template to write commands. `input=$(cat)` reads JSON into a v
 
 ---
 
-
-### `/auto-harness` (Task Management)
-
-Manage Auto-Harness task execution with support for both one-time and scheduled recurring modes.
-
-#### Subcommands
-
-| Command | Description |
-|---|---|
-| `/auto-harness run <query>` | Execute a one-time task (runs immediately, no repetition after completion) |
-| `/auto-harness schedule start --interval <hours> [--immediate] <query>` | Create a scheduled task |
-| `/auto-harness schedule list` | List all tasks (includes one-time and scheduled tasks) |
-| `/auto-harness schedule status <task_id>` | View task details |
-| `/auto-harness schedule logs <task_id> [--current \| --history <n>]` | View execution logs |
-| `/auto-harness schedule cancel <task_id>` | Cancel currently running task |
-| `/auto-harness schedule delete <task_id>` | Delete task |
-
-#### Concepts
-
-- **One-time Task**: Executes immediately once, status becomes `completed` after finish, no repetition
-- **Scheduled Task**: An Auto-Harness task that automatically executes periodically at specified intervals
-- **Execution**: Each trigger produces a single execution with its own execution_id
-- **Log types**:
-  - `--current`: Logs for the currently running execution
-  - `--history 0`: Logs for the most recently completed execution
-  - `--history 1`: Logs for the second most recent execution
-
-#### Configuration Requirements
-
-First-time use requires configuring the following git/gitcode information (auto-guided):
-- git.user_name: Git commit username
-- git.user_email: Git commit email
-- git.fork_owner: Fork repository owner
-- GitCode Access Token (can be configured via environment variable)
-
-#### Examples
-
-- `/auto-harness run Optimize Context Engine offload feature` — Execute a one-time task, no repetition after completion
-- `/auto-harness schedule start --interval 4 Optimize Context Engine offload feature` — Create a task that runs every 4 hours
-- `/auto-harness schedule start --interval 4 --immediate Optimize Context Engine offload feature` — Create task and execute immediately
-- `/auto-harness schedule list` — View all tasks
-- `/auto-harness schedule status sch_abc123` — View task details
-- `/auto-harness schedule logs sch_abc123 --current` — Stream current execution logs
-- `/auto-harness schedule logs sch_abc123 --history 0` — View most recent execution logs
-- `/auto-harness schedule cancel sch_abc123` — Cancel running task
-- `/auto-harness schedule delete sch_abc123` — Delete task
-
 ## Planned Features
 
 | Command | Description |

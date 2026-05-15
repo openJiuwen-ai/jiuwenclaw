@@ -332,6 +332,9 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
       if (currentMode === 'auto_harness') {
         useHarnessStore.getState().reset();
       }
+      if (currentMode === 'team') {
+        setPaused(false);
+      }
       try {
         await request('chat.send', {
           session_id: sessionId,
@@ -385,6 +388,10 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
           session_id: sessionId,
           intent,
         };
+        if (useSessionStore.getState().mode === 'team' && (intent === 'pause' || intent === 'resume')) {
+          params.mode = 'team';
+          params.team = true;
+        }
         if (intent === 'supplement') {
           params.new_input = newInput ?? '';
           const selectedModel = useSessionStore.getState().selectedModelName;

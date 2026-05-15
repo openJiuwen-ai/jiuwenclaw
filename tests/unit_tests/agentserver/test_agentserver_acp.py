@@ -546,6 +546,7 @@ async def test_handle_team_delete_deletes_all_matching_team_sessions(monkeypatch
     delete_calls = []
     removed_dirs = []
     stop_calls = []
+    cleared_metadata_cache = []
 
     async def fake_delete_agent_team(*, team_name, session_ids, force):
         delete_calls.append(
@@ -605,6 +606,11 @@ async def test_handle_team_delete_deletes_all_matching_team_sessions(monkeypatch
         "rmtree",
         lambda path: removed_dirs.append(path.session_id),
     )
+    monkeypatch.setattr(
+        agent_ws_server_module,
+        "remove_session_metadata_cache",
+        lambda session_id: cleared_metadata_cache.append(session_id),
+    )
 
     request = AgentRequest(
         request_id="req-team-delete",
@@ -627,6 +633,7 @@ async def test_handle_team_delete_deletes_all_matching_team_sessions(monkeypatch
         {"session_id": "team_sess_002", "reason": "team.delete: "},
     ]
     assert removed_dirs == ["team_sess_001", "team_sess_002"]
+    assert cleared_metadata_cache == ["team_sess_001", "team_sess_002"]
     assert fake_team_manager_web.popped_stream_tasks == ["team_sess_001", "team_sess_002"]
     assert fake_team_manager_web.cleared_active_sessions == ["team_sess_001", "team_sess_002"]
     assert fake_team_manager_web.cleared_pending_sessions == ["team_sess_001", "team_sess_002"]

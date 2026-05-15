@@ -1,6 +1,13 @@
 import { addCommandEcho, addError, addInfo } from "../helpers.js";
 import { CommandKind, type SlashCommand } from "../types.js";
 
+export interface TurnFileChange {
+  path: string;
+  linesAdded: number;
+  linesRemoved: number;
+  isNewFile: boolean;
+}
+
 export interface TurnInfo {
   turn_index: number;
   content_preview: string;
@@ -12,6 +19,7 @@ export interface TurnInfo {
     linesAdded: number;
     linesRemoved: number;
   };
+  files?: TurnFileChange[];
 }
 
 export interface ListTurnsPayload {
@@ -33,6 +41,25 @@ export interface RewindPayload {
 
 /** 恢复选项类型 */
 type RestoreOption = "both" | "conversation" | "code" | "cancel";
+
+const GREEN = "\x1b[32m";
+const RED = "\x1b[31m";
+const RESET = "\x1b[0m";
+
+function toRelativePath(absPath: string, workspaceDir?: string): string {
+  if (!workspaceDir) return absPath;
+  const prefix = workspaceDir.endsWith("/") ? workspaceDir : workspaceDir + "/";
+  if (absPath.startsWith(prefix)) return absPath.slice(prefix.length);
+  return absPath;
+}
+
+function formatFileChange(f: TurnFileChange, workspaceDir?: string): string {
+  const relPath = toRelativePath(f.path, workspaceDir);
+  const prefix = f.isNewFile ? "+" : "";
+  const a = f.linesAdded > 0 ? `${GREEN}+${f.linesAdded}${RESET}` : `+${f.linesAdded}`;
+  const r = f.linesRemoved > 0 ? `${RED}-${f.linesRemoved}${RESET}` : `-${f.linesRemoved}`;
+  return `${prefix}${relPath} (${a}/${r})`;
+}
 
 export function createRewindCommand(): SlashCommand {
   return {
@@ -81,43 +108,46 @@ export function createRewindCommand(): SlashCommand {
           }
           selectedTurnIndex = parsed;
         } else {
-          const items = turns.map((t) => {
-            const time = t.timestamp
-              ? new Date(t.timestamp * 1000).toLocaleString()
-              : "-";
-            const statsStr =
-              t.stats.filesChanged > 0
-                ? ` | files: ${t.stats.filesChanged} +${t.stats.linesAdded}/-${t.stats.linesRemoved}`
-                : "";
-            return {
-              label: String(t.turn_index),
-              value: `${t.content_preview}  |  ${time}${statsStr}`,
-            };
-          });
+          const workspaceDir = ctx.getWorkspaceDir();
 
-          ctx.addItem(
-            addInfo(ctx.sessionId, `Conversation Turns (${total} total)`, "r", {
-              view: "list",
-              title: "Rewind - Select a Turn",
-              items,
-            }),
-          );
+          const turnOptions: { label: string; description: string }[] = [
+            {
+              label: "current",
+              description: "Stay at current session (no change)",
+            },
+          ];
+          for (const t of turns) {
+            let desc = t.content_preview;
+            if (t.files && t.files.length > 0) {
+              const fileList = t.files
+                .map((f) => formatFileChange(f, workspaceDir))
+                .join(", ");
+              desc += `  [${fileList}]`;
+            } else if (t.stats.filesChanged > 0) {
+              desc += `  [files: ${t.stats.filesChanged} +${t.stats.linesAdded}/-${t.stats.linesRemoved}]`;
+            }
+            turnOptions.push({
+              label: String(t.turn_index),
+              description: desc,
+            });
+          }
 
           const answers = await ctx.askQuestions(
             [
               {
                 header: "Turn",
                 question: "Which turn do you want to rewind to? (this turn and all after will be removed)",
-                options: turns.map((t) => ({
-                  label: String(t.turn_index),
-                  description: t.content_preview,
-                })),
+                options: turnOptions,
               },
             ],
             "rewind",
           );
 
           const userInput = answers[0]?.selected_options?.[0] || answers[0]?.custom_input || "";
+          if (userInput === "current" || !userInput) {
+            ctx.addItem(addInfo(ctx.sessionId, "Rewind cancelled, staying at current session", "c"));
+            return;
+          }
           const parsed = parseInt(userInput, 10);
           if (Number.isNaN(parsed) || parsed < 1 || parsed > total) {
             ctx.addItem(addError(ctx.sessionId, `Invalid turn number: ${userInput}`));
@@ -132,11 +162,13 @@ export function createRewindCommand(): SlashCommand {
           return;
         }
 
-        // 判断目标 turn 是否有文件变更（决定是否显示 code 相关选项）
-        const hasCodeChanges = selectedTurn.stats.filesChanged > 0;
-
         // 构建恢复选项
         const restoreOptions: { label: string; description: string; value: RestoreOption }[] = [
+          {
+            label: "Cancel",
+            description: "Keep conversation and files as is",
+            value: "cancel",
+          },
           {
             label: "Restore conversation and code",
             description: "Remove this turn and all after; restore modified files to their prior state",
@@ -147,21 +179,12 @@ export function createRewindCommand(): SlashCommand {
             description: "Remove this turn and all after; files remain unchanged",
             value: "conversation",
           },
-        ];
-
-        if (hasCodeChanges) {
-          restoreOptions.push({
+          {
             label: "Restore code only",
             description: "Restore modified files to their prior state; conversation remains unchanged",
             value: "code",
-          });
-        }
-
-        restoreOptions.push({
-          label: "Cancel",
-          description: "Keep conversation and files as is",
-          value: "cancel",
-        });
+          },
+        ];
 
         // 局限提示
         const limitationNote =
