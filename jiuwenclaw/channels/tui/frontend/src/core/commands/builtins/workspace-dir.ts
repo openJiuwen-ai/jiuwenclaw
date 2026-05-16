@@ -9,7 +9,7 @@ function showAllTrustedPaths(ctx: CommandContext): void {
   // Show system default workspace (fixed)
   items.push({
     label: "workspace (system)",
-    value: "~/.jiuwenclaw/agent/jiuwenclaw_workspace",
+    value: "~/.jiuwenswarm/agent/workspace",
   });
 
   // Show trusted directories

@@ -6,7 +6,7 @@ This process only starts:
 - AgentWebSocketServer (ws server for Gateway)
 
 Gateway should be started separately and connect to this ws server.
-Both processes share the same user workspace directory (~/.jiuwenclaw).
+Both processes share the same user workspace directory (~/.jiuwenswarm).
 
 Supports ``--dotenv <path>`` for multi-instance isolation.
 """
@@ -25,7 +25,7 @@ from openjiuwen.core.common.logging import LogManager
 
 # --- Early --dotenv parsing (before jiuwenclaw imports) ---
 from jiuwenclaw.dotenv_early import parse_dotenv_early
-parse_dotenv_early("jiuwenclaw-agentserver")
+parse_dotenv_early("jiuwenswarm-agentserver")
 
 # --- Now safe to import jiuwenclaw modules ---
 from jiuwenclaw.common.utils import (
@@ -40,8 +40,8 @@ from jiuwenclaw.common.utils import (
 # Ensure workspace initialized
 _workspace_dir = get_user_workspace_dir()
 _config_file = _workspace_dir / "config" / "config.yaml"
-_new_workspace = _workspace_dir / "agent" / "jiuwenclaw_workspace"
-_old_workspace = _workspace_dir / "agent" / "workspace"
+_new_workspace = _workspace_dir / "agent" / "workspace"
+_old_workspace = _workspace_dir / "agent" / "jiuwenclaw_workspace"
 
 # Initialize if config doesn't exist, or if legacy workspace exists but new doesn't (migration)
 if not _config_file.exists() or (_old_workspace.exists() and not _new_workspace.exists()):
@@ -191,7 +191,7 @@ def main() -> None:
     from jiuwenclaw.dotenv_early import get_parsed_dotenv
 
     parser = argparse.ArgumentParser(
-        prog="jiuwenclaw-agentserver",
+        prog="jiuwenswarm-agentserver",
         description="Start JiuwenClaw AgentServer (standalone process for Gateway to connect).",
     )
     parser.add_argument(

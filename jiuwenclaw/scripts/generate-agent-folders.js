@@ -15,7 +15,7 @@ if (!agentRoot) {
   process.exit(1);
 }
 
-const outputPath = path.join(agentRoot, 'jiuwenclaw_workspace', 'agent-data.json');
+const outputPath = path.join(agentRoot, 'workspace', 'agent-data.json');
 
 console.log('扫描目录:', agentRoot);
 

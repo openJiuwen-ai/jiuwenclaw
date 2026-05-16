@@ -4,7 +4,7 @@ import { join } from "node:path";
 
 import type { AccentColorName, ThemeName } from "../ui/theme.js";
 
-const CONFIG_DIR = join(homedir(), ".jiuwenclaw-tui");
+const CONFIG_DIR = join(homedir(), ".jiuwenswarm-tui");
 const CONFIG_FILE = join(CONFIG_DIR, "config.json");
 
 export interface StatusLineSetting {

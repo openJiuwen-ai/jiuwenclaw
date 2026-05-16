@@ -156,7 +156,7 @@ def verify_workspace_structure():
 
     Example:
         def test_something(verify_workspace_structure):
-            workspace = Path("~/.jiuwenclaw").expanduser()
+            workspace = Path("~/.jiuwenswarm").expanduser()
             verify_workspace_structure(workspace, language="zh")
     """
 

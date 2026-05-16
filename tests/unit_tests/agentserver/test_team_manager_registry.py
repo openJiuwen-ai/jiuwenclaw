@@ -334,7 +334,7 @@ async def test_create_team_does_not_run_global_runtime_cleanup(monkeypatch: pyte
 
 
 @pytest.mark.asyncio
-async def test_create_team_appends_session_id_to_feishu_team_name(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_create_team_appends_session_id_to_team_name(monkeypatch: pytest.MonkeyPatch) -> None:
     created_team_names: list[str] = []
 
     class _FakeWorkspace:
@@ -365,7 +365,7 @@ async def test_create_team_appends_session_id_to_feishu_team_name(monkeypatch: p
 
 
 @pytest.mark.asyncio
-async def test_create_team_keeps_non_feishu_team_name(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_create_team_appends_session_id_to_web_team_name(monkeypatch: pytest.MonkeyPatch) -> None:
     created_team_names: list[str] = []
 
     class _FakeWorkspace:
@@ -392,7 +392,7 @@ async def test_create_team_keeps_non_feishu_team_name(monkeypatch: pytest.Monkey
     team_agent = await manager.create_team("oc_abc123", deep_agent=object(), channel_id="web")
 
     assert team_agent is not None
-    assert created_team_names == ["demo_team"]
+    assert created_team_names == ["demo_team_oc_abc123"]
 
 
 @pytest.mark.asyncio

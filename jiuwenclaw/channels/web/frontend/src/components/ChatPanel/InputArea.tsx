@@ -1,4 +1,4 @@
-import { useState, useRef, useCallback, KeyboardEvent, PointerEvent as ReactPointerEvent, useEffect, CSSProperties } from 'react';
+import { useState, useRef, useCallback, KeyboardEvent, PointerEvent as ReactPointerEvent, useEffect } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useSpeechRecognition } from '../../hooks';
 import { stopAllTts } from '../../utils';
@@ -6,6 +6,9 @@ import { useChatStore, useSessionStore } from '../../stores';
 import { AgentMode } from '../../types';
 import clsx from 'clsx';
 import { getEvolutionPillLabel } from './evolution-status';
+import sendIcon from '../../assets/send.svg';
+import sendActiveIcon from '../../assets/send_active.svg';
+import clusterIcon from '../../assets/cluster.svg';
 
 interface InputAreaProps {
   onSubmit: (content: string) => void;
@@ -23,9 +26,11 @@ export function InputArea({
   onNewSession,
 }: InputAreaProps) {
   const [pendingVoiceText, setPendingVoiceText] = useState('');
+  const [isModeMenuOpen, setIsModeMenuOpen] = useState(false);
   const [showModeSwitchModal, setShowModeSwitchModal] = useState(false);
   const [pendingMode, setPendingMode] = useState<AgentMode | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const modeMenuRef = useRef<HTMLDivElement>(null);
   const autoSendTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const isComposingRef = useRef(false);
   const activePointerIdRef = useRef<number | null>(null);
@@ -59,9 +64,7 @@ export function InputArea({
       </svg>
     )},
     { value: 'team', label: t('chat.modeAgentTeam'), icon: (
-      <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2}>
-        <path strokeLinecap="round" strokeLinejoin="round" d="M17.982 18.725A7.488 7.488 0 0012 15.75a7.488 7.488 0 00-5.982 2.975m11.963 0a9 9 0 10-11.963 0m11.963 0A8.966 8.966 0 0112 21a8.966 8.966 0 01-5.982-2.275M15 9.75a3 3 0 11-6 0 3 3 0 016 0zm6 3a2.25 2.25 0 11-4.5 0 2.25 2.25 0 014.5 0zm-13.5 0a2.25 2.25 0 11-4.5 0 2.25 2.25 0 014.5 0z" />
-      </svg>
+      <img src={clusterIcon} className="w-4 h-4" alt="" aria-hidden="true" />
     )},
     { value: 'auto_harness', label: t('chat.modeAutoHarness'), icon: (
       <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2}>
@@ -126,6 +129,22 @@ export function InputArea({
       }
     };
   }, []);
+
+  useEffect(() => {
+    if (!isModeMenuOpen) return;
+
+    const handlePointerDown = (event: PointerEvent) => {
+      if (!modeMenuRef.current?.contains(event.target as Node)) {
+        setIsModeMenuOpen(false);
+      }
+    };
+
+    document.addEventListener('pointerdown', handlePointerDown);
+
+    return () => {
+      document.removeEventListener('pointerdown', handlePointerDown);
+    };
+  }, [isModeMenuOpen]);
 
   const handleSubmit = useCallback(() => {
     const trimmed = (inputValue + pendingVoiceText).trim();
@@ -246,6 +265,11 @@ export function InputArea({
     }
   }, [mode, hasHistoryMessages, onNewSession, onSwitchMode]);
 
+  const handleModeSelect = useCallback(async (targetMode: AgentMode) => {
+    setIsModeMenuOpen(false);
+    await handleModeSwitch(targetMode);
+  }, [handleModeSwitch]);
+
   const confirmModeSwitch = useCallback(async () => {
     if (pendingMode) {
       setShowModeSwitchModal(false);
@@ -260,19 +284,23 @@ export function InputArea({
     setPendingMode(null);
   }, []);
 
+  useEffect(() => {
+    setIsModeMenuOpen(false);
+  }, [mode]);
+
   const displayValue = isListening
     ? inputValue + pendingVoiceText + interimTranscript
     : inputValue + pendingVoiceText;
 
   const canSend = inputValue.trim().length > 0 || isListening;
-  const visibleModes = modes.filter((m) => !m.hidden);
-  const modeIndex = Math.max(0, visibleModes.findIndex((m) => m.value === mode));
+  const currentMode = modes.find((item) => item.value === mode) ?? modes[0];
   const evolutionLabel = getEvolutionPillLabel(mode, evolutionStatus, t);
 
   return (
     <div
       className={cx(
         'chat-input-container',
+        isModeMenuOpen && 'chat-input-container--menu-open',
         isListening && 'chat-input-container--recording',
       )}
     >
@@ -345,25 +373,64 @@ export function InputArea({
       <div className="chat-input-toolbar">
         <div className="chat-input-toolbar-left">
           <div
-            className="chat-mode-switch"
-            style={{ '--chat-mode-count': visibleModes.length, '--chat-mode-index': modeIndex } as CSSProperties}
+            ref={modeMenuRef}
+            className={clsx(
+              'chat-mode-select',
+              isModeMenuOpen && 'chat-mode-select--open',
+            )}
           >
-            <div className="chat-mode-switch__indicator" />
-            {visibleModes.map((m) => (
-              <button
-                type="button"
-                key={m.value}
-                onClick={() => handleModeSwitch(m.value)}
-                className={clsx(
-                  'chat-mode-btn',
-                  mode === m.value ? 'chat-mode-btn--active' : 'chat-mode-btn--inactive'
-                )}
-                data-testid={`chat-mode-${m.value}`}
+            <button
+              type="button"
+              className="chat-mode-select__trigger"
+              onClick={() => setIsModeMenuOpen((open) => !open)}
+              aria-haspopup="menu"
+              aria-expanded={isModeMenuOpen}
+              data-testid={`chat-mode-${currentMode.value}`}
+            >
+              <span className="chat-mode-select__value">
+                <span className="chat-mode-select__icon" aria-hidden="true">
+                  {currentMode.icon}
+                </span>
+                <span className="chat-mode-select__label">{currentMode.label}</span>
+              </span>
+              <svg className="chat-mode-select__chevron" viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth={1.8} aria-hidden="true">
+                <path strokeLinecap="round" strokeLinejoin="round" d="M6 8l4 4 4-4" />
+              </svg>
+            </button>
+
+            {isModeMenuOpen && (
+              <div
+                className="chat-mode-select__menu"
+                role="menu"
               >
-                {m.icon}
-                {m.label}
-              </button>
-            ))}
+                {modes.filter((m) => !m.hidden).map((m) => (
+                  <button
+                    type="button"
+                    key={m.value}
+                    onClick={() => void handleModeSelect(m.value)}
+                    className={clsx(
+                      'chat-mode-select__option',
+                      mode === m.value && 'chat-mode-select__option--active',
+                    )}
+                    role="menuitemradio"
+                    aria-checked={mode === m.value}
+                    data-testid={`chat-mode-option-${m.value}`}
+                  >
+                    <span className="chat-mode-select__option-main">
+                      <span className="chat-mode-select__icon" aria-hidden="true">
+                        {m.icon}
+                      </span>
+                      <span className="chat-mode-select__label">{m.label}</span>
+                    </span>
+                    {mode === m.value && (
+                      <svg className="chat-mode-select__check" viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth={2} aria-hidden="true">
+                        <path strokeLinecap="round" strokeLinejoin="round" d="M5 10.5l3 3L15 6.5" />
+                      </svg>
+                    )}
+                  </button>
+                ))}
+              </div>
+            )}
           </div>
           {evolutionLabel && (
             <div className="chat-input-evolution-pill" title={evolutionLabel}>
@@ -426,9 +493,12 @@ export function InputArea({
             title={t('chat.send')}
             data-testid="chat-send"
           >
-            <svg className="chat-input-btn-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2}>
-              <path strokeLinecap="round" strokeLinejoin="round" d="M4.5 10.5L12 3m0 0l7.5 7.5M12 3v18" />
-            </svg>
+            <img
+              className="chat-input-btn-icon chat-input-btn-icon--image"
+              src={canSend ? sendActiveIcon : sendIcon}
+              alt=""
+              aria-hidden="true"
+            />
           </button>
         </div>
       </div>

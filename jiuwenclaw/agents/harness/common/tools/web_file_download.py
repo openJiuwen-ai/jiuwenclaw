@@ -35,7 +35,7 @@ def _get_secret_file_path() -> Path:
     workspace = os.getenv("JIUWENCLAW_WORKSPACE")
     if workspace:
         return Path(workspace) / "config" / _SECRET_FILE_NAME
-    return Path.home() / ".jiuwenclaw" / "config" / _SECRET_FILE_NAME
+    return Path.home() / ".jiuwenswarm" / "config" / _SECRET_FILE_NAME
 
 
 def _load_or_create_secret() -> str:

@@ -587,15 +587,22 @@ class AgentWebSocketServer:
                 await self._handle_schedule_request(ws, request, send_lock, "delete")
                 return
             if request.req_method == ReqMethod.CHAT_CANCEL:
-                # 中断请求：先取消该 session 正在运行的流式任务，再复用已有 agent 处理 interrupt
+                # 中断请求：根据 intent 决定是否取消流式任务
                 sid = request.session_id or "default"
-                stream_task = self._session_stream_tasks.get(sid)
-                if stream_task is not None and not stream_task.done():
-                    logger.info(
-                        "[AgentWebSocketServer] cancel: 终止 session 流式任务: session_id=%s",
-                        sid,
-                    )
-                    stream_task.cancel()
+                intent = request.params.get("intent", "cancel") if isinstance(request.params, dict) else "cancel"
+
+                # 只有 cancel/supplement 才取消流式任务
+                # pause/resume 不取消，因为任务仍在运行（pause 在 checkpoint 阻塞，resume 解除阻塞）
+                if intent in ("cancel", "supplement"):
+                    stream_task = self._session_stream_tasks.get(sid)
+                    if stream_task is not None and not stream_task.done():
+                        logger.info(
+                            "[AgentWebSocketServer] cancel: 终止 session 流式任务: session_id=%s intent=%s",
+                            sid,
+                            intent,
+                        )
+                        stream_task.cancel()
+
                 # 专门处理 cancel，复用已有 agent（不再 fallthrough 到 _handle_unary）
                 await self._handle_cancel(ws, request, send_lock)
                 return

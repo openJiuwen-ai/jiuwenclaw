@@ -23,4 +23,4 @@ RUN pip install -i https://pypi.tuna.tsinghua.edu.cn/simple -e ".[all]" --no-cac
 
 # Start claw app
 EXPOSE 5173
-CMD ["jiuwenclaw-start"]
+CMD ["jiuwenswarm-start"]

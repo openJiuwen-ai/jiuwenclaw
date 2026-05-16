@@ -18,7 +18,7 @@ class TaskStore:
     """Manages scheduled task metadata and execution logs.
 
     Storage layout:
-        ~/.jiuwenclaw/auto-harness/
+        ~/.jiuwenswarm/auto-harness/
         ├── scheduled-tasks.json        # Task index
         └── runs/
             └── sch_abc123/

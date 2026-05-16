@@ -1,6 +1,6 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 
-"""System tests for jiuwenclaw-init command.
+"""System tests for jiuwenswarm-init command.
 
 These tests verify the initialization process of the JiuwenClaw workspace,
 including directory creation, file copying, and configuration generation.
@@ -53,7 +53,7 @@ class TestResolvePreferredLanguage:
         """Test _resolve_preferred_language with explicit language parameter."""
         from jiuwenclaw.common.utils import _resolve_preferred_language
 
-        workspace_dir = temp_home / ".jiuwenclaw"
+        workspace_dir = temp_home / ".jiuwenswarm"
         workspace_dir.mkdir(parents=True, exist_ok=True)
         (workspace_dir / "config").mkdir(parents=True, exist_ok=True)
 
@@ -71,7 +71,7 @@ class TestResolvePreferredLanguage:
         """Test _resolve_preferred_language defaults to 'zh' when no config exists."""
         from jiuwenclaw.common.utils import _resolve_preferred_language
 
-        workspace_dir = temp_home / ".jiuwenclaw"
+        workspace_dir = temp_home / ".jiuwenswarm"
         workspace_dir.mkdir(parents=True, exist_ok=True)
         (workspace_dir / "config").mkdir(parents=True, exist_ok=True)
 
@@ -255,11 +255,11 @@ class TestInitWorkspaceMain:
 
 
 class TestInitCLI:
-    """Test jiuwenclaw-init command line interface."""
+    """Test jiuwenswarm-init command line interface."""
 
     @staticmethod
     def test_cli_init_command():
-        """Test jiuwenclaw-init as a subprocess command."""
+        """Test jiuwenswarm-init as a subprocess command."""
         # This test requires the package to be installed
         # Skip if not in development mode or if package not available
         pytest.skip("CLI integration test - requires full package installation")
@@ -279,7 +279,7 @@ class TestInitIntegration:
     def test_full_initialization_flow():
         """Test full initialization flow with prepare_workspace().
 
-        NOTE: This test will create files in the actual ~/.jiuwenclaw directory.
+        NOTE: This test will create files in the actual ~/.jiuwenswarm directory.
         Only run this test manually or in isolated environments.
         """
         pytest.skip("Integration test - requires manual execution in isolated environment")
@@ -288,7 +288,7 @@ class TestInitIntegration:
     def test_config_file_content():
         """Test config.yaml content after initialization.
 
-        NOTE: This test will create files in the actual ~/.jiuwenclaw directory.
+        NOTE: This test will create files in the actual ~/.jiuwenswarm directory.
         """
         pytest.skip("Integration test - requires manual execution in isolated environment")
 
@@ -296,6 +296,6 @@ class TestInitIntegration:
     def test_agent_templates_copied():
         """Test agent templates are copied correctly.
 
-        NOTE: This test will create files in the actual ~/.jiuwenclaw directory.
+        NOTE: This test will create files in the actual ~/.jiuwenswarm directory.
         """
         pytest.skip("Integration test - requires manual execution in isolated environment")

@@ -1,6 +1,6 @@
 /**
  * ClawHub 在线搜索弹窗
- * 从 ClawHub 检索并安装技能
+ * �?ClawHub 检索并安装技�?
  */
 import { useCallback, useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
@@ -18,8 +18,11 @@ type ClawHubSkillItem = {
 
 interface ClawHubSearchModalProps {
   open: boolean;
+  embedded?: boolean;
   sessionId: string;
-  /** 当前已安装技能名（用于判断是否已安装） */
+  /** 外部传入的搜索关键词 */
+  externalSearchQuery?: string;
+  /** 当前已安装技能名（用于判断是否已安装�?*/
   installedSkillNames?: ReadonlySet<string>;
   onClose: () => void;
   onInstalled?: (skillName: string) => void | Promise<void>;
@@ -27,7 +30,9 @@ interface ClawHubSearchModalProps {
 
 export function ClawHubSearchModal({
   open,
+  embedded = false,
   sessionId,
+  externalSearchQuery,
   installedSkillNames,
   onClose,
   onInstalled,
@@ -42,8 +47,8 @@ export function ClawHubSearchModal({
   const [loading, setLoading] = useState(false);
   const [message, setMessage] = useState<{ type: "success" | "error"; text: string } | null>(null);
   const [installingSlug, setInstallingSlug] = useState<string | null>(null);
-  // 本地跟踪已安装的skill slug
   const [installedSlugs, setInstalledSlugs] = useState<Set<string>>(new Set());
+  const [tokenLoading, setTokenLoading] = useState(true);
 
   const withSession = useCallback(
     (params?: Record<string, unknown>) => ({
@@ -59,6 +64,7 @@ export function ClawHubSearchModal({
   }, []);
 
   const fetchToken = useCallback(async () => {
+    setTokenLoading(true);
     try {
       const data = await webRequest<{ success: boolean; token: string; has_token: boolean }>(
         "skills.clawhub.get_token",
@@ -68,15 +74,22 @@ export function ClawHubSearchModal({
         setToken(data.token || "");
         const hasToken = data.has_token || false;
         setHasToken(hasToken);
-        // 如果没有 token，显示配置弹窗；否则不显示
-        setShowTokenConfig(!hasToken);
+        // 弹窗模式下：如果没有 token，显示配置弹�?
+        // 内嵌模式下：不自动显示配置界面，只记录状�?
+        if (!embedded) {
+          setShowTokenConfig(!hasToken);
+        }
       }
     } catch (error) {
       console.error("Failed to fetch token:", error);
-      // 获取失败时，默认显示token配置
-      setShowTokenConfig(true);
+      // 获取失败时，弹窗模式下默认显示token配置
+      if (!embedded) {
+        setShowTokenConfig(true);
+      }
+    } finally {
+      setTokenLoading(false);
     }
-  }, [withSession]);
+  }, [withSession, embedded]);
 
   useEffect(() => {
     if (open) {
@@ -85,6 +98,15 @@ export function ClawHubSearchModal({
       setInstalledSlugs(new Set());
     }
   }, [open, fetchToken]);
+
+  useEffect(() => {
+    if (embedded && externalSearchQuery !== undefined) {
+      setQuery(externalSearchQuery);
+      if (externalSearchQuery.trim()) {
+        handleSearch();
+      }
+    }
+  }, [externalSearchQuery, embedded]);
 
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
@@ -143,7 +165,7 @@ export function ClawHubSearchModal({
         setHasToken(true);
         setShowTokenConfig(false);
         showMessage("success", t("skills.clawhub.messages.tokenSaved"));
-        // 保存后自动开始搜索
+        // 保存后自动开始搜�?
         if (query.trim()) {
           await handleSearch();
         }
@@ -179,10 +201,10 @@ export function ClawHubSearchModal({
         throw new Error(message);
       }
       const skillName = data.skill?.name || slug;
-      // 更新本地已安装状态
+      // 更新本地已安装状�?
       setInstalledSlugs(prev => new Set([...prev, slug]));
       showMessage("success", t("skills.clawhub.messages.installed", { name: skillName }));
-      // 通知父组件刷新技能列表
+      // 通知父组件刷新技能列�?
       await onInstalled?.(skillName);
     } catch (err) {
       console.error(err);
@@ -196,6 +218,155 @@ export function ClawHubSearchModal({
   }, [installingSlug, t, withSession, showMessage, onInstalled]);
 
   if (!open) return null;
+
+  if (embedded) {
+    if (tokenLoading) {
+      return (
+        <div className="flex items-center justify-center h-full text-text-muted">
+          {t("common.loading")}
+        </div>
+      );
+    }
+
+    if (showTokenConfig) {
+      return (
+        <div className="p-4">
+          <h3 className="text-lg font-semibold text-text mb-3">
+            {t("skills.clawhub.configTitle")}
+          </h3>
+          <p className="text-sm text-text-muted mb-4">
+            {t("skills.clawhub.configDescription")}
+          </p>
+          <div className="space-y-4">
+            <div>
+              <label className="block text-sm font-medium text-text mb-2">
+                {t("skills.clawhub.tokenLabel")}
+              </label>
+              <input
+                type="password"
+                value={token}
+                onChange={(e) => setToken(e.target.value)}
+                placeholder={t("skills.clawhub.tokenPlaceholder")}
+                className="w-full px-3 py-2 rounded-md bg-secondary border border-border text-sm text-text placeholder:text-text-muted"
+              />
+            </div>
+            <div className="flex items-center gap-3 justify-end">
+              <button
+                type="button"
+                onClick={() => setShowTokenConfig(false)}
+                className="w-[76px] h-[28px] rounded-[24px] text-sm text-[#191919] border border-[#191919] hover:bg-secondary/50 transition-colors"
+              >
+                {t("common.cancel")}
+              </button>
+              <button
+                type="button"
+                onClick={handleSaveToken}
+                disabled={loading || !token.trim()}
+                className={`w-[76px] h-[28px] rounded-[24px] text-sm text-[#191919] border border-[#191919] hover:bg-secondary/50 transition-colors ${
+                  loading || !token.trim()
+                    ? "text-text-muted cursor-not-allowed"
+                    : "text-text"
+                }`}
+              >
+                {loading ? t("common.saving") : t("common.save")}
+              </button>
+            </div>
+          </div>
+        </div>
+      );
+    }
+
+    return (
+      <div className="flex flex-col h-full">
+        <div className="p-4 overflow-auto flex-1 min-h-0">
+          {!hasToken && (
+            <div className="mb-4 p-4 rounded-lg border border-amber-500/45 bg-amber-500/12">
+              <p className="text-sm text-text mb-3">
+                {t("skills.clawhub.configDescription")}
+              </p>
+              <button
+                type="button"
+                onClick={() => setShowTokenConfig(true)}
+                className="w-[76px] h-[28px] rounded-[24px] text-sm text-[#191919] border border-[#191919] hover:bg-secondary/50 transition-colors"
+              >
+                {t("skills.clawhub.configTitle")}
+              </button>
+            </div>
+          )}
+          {hasToken && (
+            <div className="mb-4 flex items-center justify-between p-3 rounded-lg border border-border bg-secondary/50">
+              <p className="text-xs text-text-muted">
+                {t("skills.clawhub.tokenConfigured", { token: token.slice(0, 8) + "****" })}
+              </p>
+              <button
+                type="button"
+                onClick={() => setShowTokenConfig(true)}
+                className="w-[76px] h-[28px] rounded-[24px] text-sm text-[#191919] border border-[#191919] hover:bg-secondary/50 transition-colors"
+              >
+                {t("common.modify")}
+              </button>
+            </div>
+          )}
+          {message && (
+            <div className={`mb-3 px-3 py-2 rounded-lg text-sm ${
+              message.type === "success" 
+                ? "border border-[color:var(--border-ok)] bg-ok-subtle text-ok"
+                : "border border-danger/40 bg-danger/10 text-danger"
+            }`}>
+              {message.text}
+            </div>
+          )}
+          {loadState === "success" && (
+            <div className="space-y-2">
+              {results.length === 0 ? (
+                <div className="text-sm text-text-muted">{t("skills.clawhub.noResults")}</div>
+              ) : (
+                results.map((item) => {
+                  const isInstalled = installedSkillNames?.has(item.slug) ?? false;
+                  const isInstalling = installingSlug === item.slug;
+                  return (
+                    <div
+                      key={item.slug}
+                      className="p-4 rounded-lg border border-border bg-panel flex items-start justify-between gap-4"
+                    >
+                      <div className="min-w-0 flex-1">
+                        <div className="text-base font-semibold text-text-strong truncate">
+                          {item.display_name}
+                        </div>
+                        <div className="text-sm text-text-muted mt-1 line-clamp-3">
+                          {item.summary || t("skills.noDescription")}
+                        </div>
+                      </div>
+                      <div className="flex flex-col items-end gap-2 flex-shrink-0">
+                        {isInstalled ? (
+                          <span className="px-4 h-[28px] flex items-center rounded-2xl text-sm whitespace-nowrap border border-[color:var(--border-ok)] bg-ok-subtle text-ok">
+                            {t("skills.status.installed")}
+                          </span>
+                        ) : (
+                          <button
+                            type="button"
+                            onClick={() => void handleInstall(item)}
+                            disabled={isInstalling}
+                            className={`w-[76px] h-[28px] rounded-[24px] text-sm text-[#191919] border border-[#191919] hover:bg-secondary/50 transition-colors whitespace-nowrap ${
+                              isInstalling
+                                ? "text-text-muted cursor-not-allowed"
+                                : "text-text"
+                            }`}
+                          >
+                            {isInstalling ? t("skills.clawhub.installing") : t("skills.actions.install")}
+                          </button>
+                        )}
+                      </div>
+                    </div>
+                  );
+                })
+              )}
+            </div>
+          )}
+        </div>
+      </div>
+    );
+  }
 
   if (showTokenConfig) {
     return (
@@ -230,7 +401,7 @@ export function ClawHubSearchModal({
               <button
                 type="button"
                 onClick={onClose}
-                className="px-4 py-2 rounded-md text-sm bg-secondary text-text hover:bg-card border border-border"
+                className="w-[76px] h-[28px] rounded-[24px] text-sm text-[#191919] border border-[#191919] hover:bg-secondary/50 transition-colors"
               >
                 {t("common.cancel")}
               </button>
@@ -238,10 +409,10 @@ export function ClawHubSearchModal({
                 type="button"
                 onClick={handleSaveToken}
                 disabled={loading || !token.trim()}
-                className={`px-4 py-2 rounded-md text-sm transition-colors ${
+                className={`w-[76px] h-[28px] rounded-[24px] text-sm text-[#191919] border border-[#191919] hover:bg-secondary/50 transition-colors ${
                   loading || !token.trim()
-                    ? "bg-secondary text-text-muted cursor-not-allowed"
-                    : "bg-accent text-white hover:bg-accent-hover"
+                    ? "text-text-muted cursor-not-allowed"
+                    : "text-text"
                 }`}
               >
                 {loading ? t("common.saving") : t("common.save")}
@@ -253,7 +424,7 @@ export function ClawHubSearchModal({
     );
   }
 
-  // 主搜索弹窗
+  // 主搜索弹�?
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
       <button
@@ -289,7 +460,7 @@ export function ClawHubSearchModal({
               <button
                 type="button"
                 onClick={() => setShowTokenConfig(true)}
-                className="px-3 py-1.5 rounded-md text-sm bg-secondary text-text hover:text-text hover:bg-card border border-border"
+                className="w-[76px] h-[28px] rounded-[24px] text-sm text-[#191919] border border-[#191919] hover:bg-secondary/50 transition-colors"
               >
                 {t("common.modify")}
               </button>
@@ -297,7 +468,7 @@ export function ClawHubSearchModal({
             <button
               type="button"
               onClick={onClose}
-              className="px-3 py-1.5 rounded-md text-sm bg-secondary text-text-muted hover:text-text hover:bg-card border border-border"
+              className="w-[76px] h-[28px] rounded-[24px] text-sm text-[#191919] border border-[#191919] hover:bg-secondary/50 transition-colors"
             >
               {t("common.close")}
             </button>
@@ -329,10 +500,10 @@ export function ClawHubSearchModal({
               type="button"
               onClick={() => void handleSearch()}
               disabled={loadState === "loading" || !query.trim()}
-              className={`px-3 py-2 rounded-md text-sm transition-colors ${
+              className={`w-[76px] h-[28px] rounded-[24px] text-sm text-[#191919] border border-[#191919] hover:bg-secondary/50 transition-colors ${
                 loadState === "loading" || !query.trim()
-                  ? "bg-secondary text-text-muted cursor-not-allowed"
-                  : "bg-accent text-white hover:bg-accent-hover"
+                  ? "text-text-muted cursor-not-allowed"
+                  : "text-text"
               }`}
             >
               {loadState === "loading" ? t("common.loading") : t("skills.clawhub.search")}
@@ -346,37 +517,30 @@ export function ClawHubSearchModal({
                   <div className="text-xs text-text-muted">{t("skills.clawhub.noResults")}</div>
                 ) : (
                   results.map((item) => {
-                    // 使用本地状态判断是否已安装（刚安装的会立即更新）
+                    // 使用本地状态判断是否已安装（刚安装的会立即更新�?
                     const isInstalled = installedSlugs.has(item.slug) || (installedSkillNames?.has(item.slug) ?? false);
                     const isInstalling = installingSlug === item.slug;
                     return (
                       <div
                         key={item.slug}
-                        className="p-3 rounded-md border border-border bg-secondary flex items-start justify-between gap-3"
+                        className="p-4 rounded-lg border border-border bg-panel flex items-start justify-between gap-4"
                       >
                         <div className="min-w-0 flex-1">
-                          <div className="text-sm text-text font-medium truncate">
+                          <div className="text-base font-semibold text-text-strong truncate">
                             {item.display_name || item.slug}
                           </div>
-                          <div className="text-xs text-text-muted line-clamp-2 mt-1">
+                          <div className="text-sm text-text-muted mt-1 line-clamp-3">
                             {item.summary || t("skills.noDescription")}
                           </div>
-                          <div className="text-xs text-text-muted mt-2 flex items-center gap-2">
-                            {item.version && (
-                              <span className="px-2 py-0.5 rounded-full bg-secondary border border-border">
-                                v{item.version}
-                              </span>
-                            )}
-                            <span>
-                              {t("skills.clawhub.updatedAt", {
-                                date: new Date(item.updated_at).toLocaleDateString(),
-                              })}
-                            </span>
+                          <div className="text-xs text-text-muted mt-1">
+                            {t("skills.clawhub.updatedAt", {
+                              date: new Date(item.updated_at).toLocaleDateString(),
+                            })}
                           </div>
                         </div>
                         <div className="flex flex-col items-end gap-2 flex-shrink-0">
                           {isInstalled ? (
-                            <span className="px-3 py-1.5 rounded-md text-xs whitespace-nowrap border border-[color:var(--border-ok)] bg-ok-subtle text-ok">
+                            <span className="px-4 py-2 rounded-2xl text-sm whitespace-nowrap border border-[color:var(--border-ok)] bg-ok-subtle text-ok">
                               {t("skills.status.installed")}
                             </span>
                           ) : (
@@ -384,15 +548,15 @@ export function ClawHubSearchModal({
                               type="button"
                               onClick={() => void handleInstall(item)}
                               disabled={isInstalling}
-                              className={`px-3 py-1.5 rounded-md text-xs whitespace-nowrap transition-colors ${
+                              className={`w-[76px] h-[28px] rounded-[24px] text-sm text-[#191919] border border-[#191919] hover:bg-secondary/50 transition-colors whitespace-nowrap ${
                                 isInstalling
-                                  ? "bg-secondary text-text-muted cursor-not-allowed"
-                                  : "bg-accent text-white hover:bg-accent-hover"
+                                  ? "text-text-muted cursor-not-allowed"
+                                  : "text-text"
                               }`}
                             >
                               {isInstalling
                                 ? t("skills.clawhub.installing")
-                                : t("skills.clawhub.install")}
+                                : t("skills.actions.install")}
                             </button>
                           )}
                         </div>

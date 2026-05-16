@@ -45,8 +45,7 @@ export function ExtensionsHubPanel({ sessionId, isConnected }: ExtensionsHubPane
       label: t('nav.rails', 'Extensions'),
       icon: (
         <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={1.5}>
-          <path strokeLinecap="round" strokeLinejoin="round" d="M12 6v12m6-6H6" />
-          <circle cx="12" cy="12" r="9" />
+          <path strokeLinecap="round" strokeLinejoin="round" d="M3.75 6.75h16.5M3.75 12h16.5m-16.5 5.25h16.5" />
         </svg>
       ),
     },
@@ -56,22 +55,24 @@ export function ExtensionsHubPanel({ sessionId, isConnected }: ExtensionsHubPane
 
   return (
     <div className="extensions-hub-panel">
-      {/* Tab Header */}
-      <div className="extensions-hub-panel__header">
-        <div className="extensions-hub-panel__tabs">
-          {visibleTabs.map((tab) => (
-            <button
-              type="button"
-              key={tab.key}
-              onClick={() => setActiveTab(tab.key)}
-              className={`extensions-hub-panel__tab ${activeTab === tab.key ? 'extensions-hub-panel__tab--active' : ''}`}
-            >
-              {tab.icon}
-              <span>{tab.label}</span>
-            </button>
-          ))}
+      {/* Tab Header - only show when multiple tabs visible */}
+      {visibleTabs.length > 1 && (
+        <div className="extensions-hub-panel__header">
+          <div className="extensions-hub-panel__tabs">
+            {visibleTabs.map((tab) => (
+              <button
+                type="button"
+                key={tab.key}
+                onClick={() => setActiveTab(tab.key)}
+                className={`extensions-hub-panel__tab ${activeTab === tab.key ? 'extensions-hub-panel__tab--active' : ''}`}
+              >
+                {tab.icon}
+                <span>{tab.label}</span>
+              </button>
+            ))}
+          </div>
         </div>
-      </div>
+      )}
 
       {/* Tab Content */}
       <div className="extensions-hub-panel__content">

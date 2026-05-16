@@ -242,7 +242,7 @@ jiuwenclaw/channels/web/frontend/
 
 ### Branding
 
-1. Replace `public/logo.png`
+1. Replace `public/logo.svg`
 2. Change `<title>` in `index.html`
 3. Change brand text in `src/App.tsx`
 

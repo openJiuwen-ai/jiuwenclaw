@@ -5,7 +5,7 @@ Walks the full runtime path:
     create_instance() → process_message_impl() → Runner.run_agent()
     → rails before_model_call → LLM_INPUT callback captures messages
 
-Reads real ~/.jiuwenclaw/config/config.yaml for model configuration.
+Reads real ~/.jiuwenswarm/config/config.yaml for model configuration.
 Outputs:
     tests/system_tests/output/system_prompt_live_capture.json
     tests/system_tests/output/system_prompt_live_capture.txt
@@ -70,7 +70,7 @@ def _sync_prompt_workspace_templates(language: str) -> None:
     if not str(home_dir).startswith("/tmp/"):
         return
 
-    workspace_dir = home_dir / ".jiuwenclaw" / "agent" / "jiuwenclaw_workspace"
+    workspace_dir = home_dir / ".jiuwenswarm" / "agent" / "workspace"
     if not workspace_dir.exists():
         return
 
@@ -79,7 +79,7 @@ def _sync_prompt_workspace_templates(language: str) -> None:
         / "jiuwenclaw"
         / "resources"
         / "agent"
-        / "jiuwenclaw_workspace"
+        / "workspace"
     )
     suffix = "ZH" if language == "zh" else "EN"
     file_map = [

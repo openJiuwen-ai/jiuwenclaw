@@ -21,6 +21,7 @@ import { BrowserPanel } from './components/BrowserPanel';
 import { UpdatePanel } from './components/UpdatePanel';
 import { StatusBar } from './components/StatusBar';
 import { ExtensionsHubPanel } from './components/ExtensionsHubPanel';
+
 import { FEATURE_APP_UPDATER_UI } from './featureFlags';
 import { HeartbeatMessageModal } from './features/HeartbeatMessageModal';
 import {
@@ -100,100 +101,7 @@ function ErrorFallback({ error }: { error: Error | null }) {
   );
 }
 
-// 语言切换组件（与 config.yaml preferred_language 同步）
-function LanguageSwitcher() {
-  const { i18n } = useTranslation();
-  const isZh = i18n.language.startsWith('zh');
-  const handleChange = (lang: 'zh' | 'en') => {
-    i18n.changeLanguage(lang);
-    void webRequest('locale.set_conf', { preferred_language: lang }).catch(() => {
-      // 写回 config 失败时静默忽略，本地切换仍生效
-    });
-  };
-  return (
-    <div className="flex items-center gap-1 rounded-lg bg-secondary/60 px-2 py-1">
-      <button
-        type="button"
-        onClick={() => handleChange('zh')}
-        className={`text-xs px-2 py-1 rounded ${isZh ? 'bg-accent text-white font-medium' : 'text-text-muted hover:text-text'}`}
-      >
-        中
-      </button>
-      <button
-        type="button"
-        onClick={() => handleChange('en')}
-        className={`text-xs px-2 py-1 rounded ${!isZh ? 'bg-accent text-white font-medium' : 'text-text-muted hover:text-text'}`}
-      >
-        En
-      </button>
-    </div>
-  );
-}
 
-// 主题切换组件
-function ThemeToggle() {
-  const { t } = useTranslation();
-  const [theme, setTheme] = useState(() => {
-    return localStorage.getItem('theme') || 'light';
-  });
-
-  const toggleTheme = (newTheme: string) => {
-    setTheme(newTheme);
-    localStorage.setItem('theme', newTheme);
-    if (newTheme === 'light') {
-      document.documentElement.setAttribute('data-theme', 'light');
-    } else {
-      document.documentElement.removeAttribute('data-theme');
-    }
-  };
-
-  const themeIndex = theme === 'system' ? 0 : theme === 'dark' ? 1 : 2;
-
-  return (
-    <div className="theme-toggle">
-      <div className="theme-toggle__track" style={{ '--theme-index': themeIndex } as React.CSSProperties}>
-        <div className="theme-toggle__indicator" />
-        <button
-          className={`theme-toggle__button ${theme === 'system' ? 'active' : ''}`}
-          onClick={() => toggleTheme('system')}
-          title={t('app.themeSystem')}
-        >
-          <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-            <rect x="2" y="3" width="20" height="14" rx="2" ry="2" />
-            <line x1="8" y1="21" x2="16" y2="21" />
-            <line x1="12" y1="17" x2="12" y2="21" />
-          </svg>
-        </button>
-        <button
-          className={`theme-toggle__button ${theme === 'dark' ? 'active' : ''}`}
-          onClick={() => toggleTheme('dark')}
-          title={t('app.themeDark')}
-        >
-          <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-            <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z" />
-          </svg>
-        </button>
-        <button
-          className={`theme-toggle__button ${theme === 'light' ? 'active' : ''}`}
-          onClick={() => toggleTheme('light')}
-          title={t('app.themeLight')}
-        >
-          <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-            <circle cx="12" cy="12" r="5" />
-            <line x1="12" y1="1" x2="12" y2="3" />
-            <line x1="12" y1="21" x2="12" y2="23" />
-            <line x1="4.22" y1="4.22" x2="5.64" y2="5.64" />
-            <line x1="18.36" y1="18.36" x2="19.78" y2="19.78" />
-            <line x1="1" y1="12" x2="3" y2="12" />
-            <line x1="21" y1="12" x2="23" y2="12" />
-            <line x1="4.22" y1="19.78" x2="5.64" y2="18.36" />
-            <line x1="18.36" y1="5.64" x2="19.78" y2="4.22" />
-          </svg>
-        </button>
-      </div>
-    </div>
-  );
-}
 
 // 会话 ID 持久化（使用 sessionStorage：同标签页刷新保留，多标签页隔离）
 const SESSION_STORAGE_KEY = 'openjiuwen_current_session';
@@ -246,6 +154,7 @@ function AppContent() {
   const [heartbeatModalOpen, setHeartbeatModalOpen] = useState(false);
   const [hasVisitedSkills, setHasVisitedSkills] = useState(false);
   const [hasVisitedChannels, setHasVisitedChannels] = useState(false);
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const startupUpdateCheckRef = useRef(false);
   /** 从 SkillNet 等入口跳转配置页时，首次展开对应配置分组（如第三方服务） */
   const [configInitialExpandGroup, setConfigInitialExpandGroup] = useState<string | null>(null);
@@ -913,6 +822,11 @@ function AppContent() {
       useSessionStore.getState().setTeamMembers([]);
       useSessionStore.getState().setTeamTaskEvents([]);
     }
+    // 从集群模式切换到其他模式时，也需要清空成员列表和事件列表
+    if (mode !== 'team' && useSessionStore.getState().mode === 'team') {
+      useSessionStore.getState().setTeamMembers([]);
+      useSessionStore.getState().setTeamTaskEvents([]);
+    }
     void switchMode(sessionId, mode);
   }, [sessionId, switchMode]);
 
@@ -1164,42 +1078,18 @@ function AppContent() {
     : heartbeatToastPreviewRaw;
 
   return (
-    <div className="shell" data-testid="app-shell" data-session-id={sessionId}>
-      {/* Topbar */}
-      <header className="topbar">
-        <div className="flex items-center gap-4">
-          <div className="brand">
-            <img src="/logo.png" alt="OpenJiuwen" className="brand-logo-img" />
-            <div className="brand-text">
-              <span className="brand-title">JiuwenClaw</span>
-              <span className="brand-sub">AI Assistant</span>
-            </div>
-          </div>
-        </div>
-
-        <div className="flex items-center gap-3">
-          {/* 连接状态 */}
-          <div className="pill">
-            <span className={`statusDot ${isConnected ? 'ok' : ''}`} />
-            <span className="mono text-sm">
-              {isConnected ? t('connection.connected') : t('connection.disconnected')}
-            </span>
-          </div>
-
-          {/* 语言切换 */}
-          <LanguageSwitcher />
-
-          {/* 主题切换 */}
-          <ThemeToggle />
-        </div>
-      </header>
-
-      {/* Navigation Sidebar */}
+    <div className={`shell ${sidebarCollapsed ? 'shell--collapsed' : ''}`} data-testid="app-shell" data-session-id={sessionId}>
+      {/* Navigation Sidebar - always rendered, 48px icon strip when collapsed */}
       <SessionSidebar
         activeNav={activeNav}
         onNavigate={handleNavigate}
         sessionId={sessionId}
         appVersion={typeof serverConfig?.app_version === 'string' ? serverConfig.app_version : '0.1.7'}
+        isConnected={isConnected}
+        onNewSession={handleNewSession}
+        collapsed={sidebarCollapsed}
+        onCollapse={() => setSidebarCollapsed(true)}
+        onExpand={() => setSidebarCollapsed(false)}
       />
 
       {/* Main Content */}
@@ -1218,7 +1108,7 @@ function AppContent() {
 
         {activeNav === 'chat' && (
           <>
-            <div className="flex-1 flex min-h-0 overflow-hidden">
+            <div className="flex-1 flex min-h-0 overflow-hidden card">
               {/* Chat Panel */}
               <div className="flex-1 flex flex-col min-w-0 min-h-0">
                 <div className="flex-1 min-h-0">
@@ -1251,7 +1141,7 @@ function AppContent() {
               </div>
 
               {/* Tool Panel */}
-              <ToolPanel />
+              {<ToolPanel />}
             </div>
           </>
         )}

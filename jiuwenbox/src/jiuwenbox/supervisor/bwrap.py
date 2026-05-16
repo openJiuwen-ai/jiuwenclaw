@@ -216,7 +216,7 @@ class BwrapConfig:
         rw_binds = [(src, dst) for src, dst in self.rw_binds if dst != "/"]
         if root_rw_binds:
             # A read-write root bind already exposes every absolute child path.
-            # Re-binding private children such as /home/<user>/.jiuwenclaw can
+            # Re-binding private children such as /home/<user>/.jiuwenswarm can
             # fail because bwrap may open sources after entering userns.
             # Keep synthetic binds whose source differs from the sandbox path,
             # such as the Landlock launcher mounted into /run.

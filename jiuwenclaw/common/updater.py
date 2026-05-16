@@ -19,9 +19,10 @@ from jiuwenclaw.common.utils import get_user_workspace_dir
 from jiuwenclaw.common.version import __version__
 
 
-DEFAULT_RELEASE_API = "https://api.github.com/repos/{owner}/{repo}/releases/latest"
-DEFAULT_ASSET_PATTERN = "jiuwenclaw-setup-{version}.exe"
-DEFAULT_SHA256_PATTERN = "jiuwenclaw-setup-{version}.exe.sha256"
+DEFAULT_RELEASE_API = "https://api.gitcode.com/api/v5/repos/{owner}/{repo}/releases/latest"
+DEFAULT_TEXT = "MUysTzUxEjB2hq-SzbZD9JcA"
+DEFAULT_ASSET_PATTERN = "JiuwenSwarm-setup-{version}.exe"
+DEFAULT_SHA256_PATTERN = "JiuwenSwarm-setup-{version}.exe.sha256"
 DEFAULT_TIMEOUT_SECONDS = 20
 DOWNLOAD_CHUNK_SIZE = 1024 * 512
 
@@ -58,6 +59,12 @@ def _parse_sha256(raw: str) -> str:
     if re.fullmatch(r"[0-9a-f]{64}", digest):
         return digest
     return ""
+
+
+def _extract_version(raw: str) -> str:
+    normalized = _normalize_version(raw)
+    match = re.search(r"\d+(?:\.\d+)*", normalized)
+    return match.group() if match else normalized
 
 
 @dataclass
@@ -102,6 +109,7 @@ class WindowsUpdaterService:
             "asset_name_pattern": config["asset_name_pattern"],
             "sha256_name_pattern": config["sha256_name_pattern"],
             "timeout_seconds": config["timeout_seconds"],
+            "access_token": config["access_token"],
         }
 
     def check(self, manual: bool = False) -> dict[str, Any]:
@@ -126,7 +134,7 @@ class WindowsUpdaterService:
             if not latest_version:
                 raise RuntimeError("Latest release tag is missing.")
 
-            asset_name = config["asset_name_pattern"].format(version=latest_version)
+            asset_name = config["asset_name_pattern"].format(version=_extract_version(latest_version))
             assets = release.get("assets") or []
             asset = next(
                 (
@@ -140,7 +148,7 @@ class WindowsUpdaterService:
                 raise RuntimeError(f"Release asset not found: {asset_name}")
 
             sha256_url = ""
-            sha256_name = config["sha256_name_pattern"].format(version=latest_version)
+            sha256_name = config["sha256_name_pattern"].format(version=_extract_version(latest_version))
             sha_asset = next(
                 (
                     item
@@ -154,11 +162,16 @@ class WindowsUpdaterService:
 
             has_update = _is_newer_version(latest_version, __version__)
             next_state = "update_available" if has_update else "up_to_date"
+            published_at = str(
+                release.get("published_at")
+                or release.get("created_at")
+                or ""
+            )
             self._update_status(
                 latest_version=latest_version,
                 has_update=has_update,
                 release_notes=str(release.get("body") or ""),
-                published_at=str(release.get("published_at") or ""),
+                published_at=published_at,
                 asset_name=asset_name,
                 download_url=str(asset.get("browser_download_url") or ""),
                 sha256_url=sha256_url,
@@ -205,7 +218,7 @@ class WindowsUpdaterService:
         thread = threading.Thread(
             target=self._download_worker,
             daemon=True,
-            name="jiuwenclaw-updater-download",
+            name="jiuwenswarm-updater-download",
         )
         self._download_thread = thread
         thread.start()
@@ -259,6 +272,7 @@ class WindowsUpdaterService:
             )
 
     def _download_file(self, url: str, destination: Path) -> None:
+        url = self._inject_access_token(url)
         request = Request(url, headers=self._request_headers())
         destination.parent.mkdir(parents=True, exist_ok=True)
         timeout_seconds = self._load_config()["timeout_seconds"]
@@ -287,6 +301,7 @@ class WindowsUpdaterService:
         return json.loads(self._fetch_text(url, timeout_seconds))
 
     def _fetch_text(self, url: str, timeout_seconds: int) -> str:
+        url = self._inject_access_token(url)
         request = Request(url, headers=self._request_headers())
         try:
             with urlopen(request, timeout=timeout_seconds) as response:
@@ -301,19 +316,26 @@ class WindowsUpdaterService:
     @staticmethod
     def _request_headers() -> dict[str, str]:
         headers = {
-            "Accept": "application/vnd.github+json",
+            "Accept": "application/json",
             "User-Agent": f"JiuwenClaw-Updater/{__version__}",
         }
-        token = os.getenv("GITHUB_TOKEN", "").strip()
-        if token:
-            headers["Authorization"] = f"Bearer {token}"
         return headers
+
+    @staticmethod
+    def _inject_access_token(url: str) -> str:
+        token = os.getenv("GITCODE_TOKEN", "").strip() or DEFAULT_TEXT
+        if not token:
+            return url
+        if "gitcode.com" not in url:
+            return url
+        separator = "&" if "?" in url else "?"
+        return f"{url}{separator}access_token={token}"
 
     @staticmethod
     def _load_config() -> dict[str, Any]:
         raw = get_config_raw() or {}
         updater = raw.get("updater") or {}
-        owner = str(updater.get("repo_owner") or "CharlieZhao95").strip()
+        owner = str(updater.get("repo_owner") or "openJiuwen").strip()
         repo = str(updater.get("repo_name") or "jiuwenclaw").strip()
         release_api_url = str(updater.get("release_api_url") or "").strip()
         if not release_api_url:
@@ -337,6 +359,7 @@ class WindowsUpdaterService:
                 updater.get("sha256_name_pattern") or DEFAULT_SHA256_PATTERN
             ),
             "timeout_seconds": timeout_seconds,
+            "access_token": os.getenv("GITCODE_TOKEN", "").strip() or DEFAULT_TEXT,
         }
 
     @staticmethod

@@ -64,6 +64,10 @@ datas = webview_datas + [
 datas += copy_metadata("fastmcp", recursive=True)
 datas += copy_metadata("mcp", recursive=True)
 datas += copy_metadata("openjiuwen", recursive=True)
+datas += collect_data_files("openjiuwen", include_py_files=False)
+
+# openjiuwen 使用动态导入，需要收集全部子模块
+openjiuwen_submodules = collect_submodules("openjiuwen")
 
 # 部分包需要显式声明隐藏导入
 hiddenimports = webview_hiddenimports + [
@@ -87,7 +91,7 @@ hiddenimports = webview_hiddenimports + [
     "webview",
     "jiuwenclaw.app_web",  # 静态文件服务
     "jiuwenclaw.desktop_app",  # 桌面入口
-]
+] + openjiuwen_submodules
 
 # 排除不需要的模块以减小体积（pandas 为 pymilvus/openjiuwen 所需，不可排除）
 excludes = [
@@ -95,10 +99,26 @@ excludes = [
     "matplotlib",
     "scipy",
     "numpy.tests",
+    # 测试框架
+    "pytest",
+    "pytest-asyncio",
+    "_pytest",
+    "py",
+    "tox",
+    "hypothesis",
+    "mock",
+    "coverage",
+    "pytest-cov",
 ]
 
 # 入口脚本位于 scripts 目录
 entry_script = os.path.join(project_root, "scripts", "jiuwenclaw_exe_entry.py")
+
+# 图标路径（Windows 用 .ico，macOS 用 .icns）
+icon_path = os.path.join(
+    project_root, "jiuwenclaw", "channels", "web", "frontend", "public",
+    "logo.ico" if sys.platform == "win32" else "logo.icns",
+)
 
 a = Analysis(
     [entry_script],
@@ -122,7 +142,7 @@ exe = EXE(
     pyz,
     a.scripts,
     [],
-    name="jiuwenclaw",
+    name="jiuwenswarm",
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
@@ -135,6 +155,7 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
+    icon=icon_path,
 )
 
 coll = COLLECT(
@@ -145,20 +166,20 @@ coll = COLLECT(
     strip=False,
     upx=True,
     upx_exclude=[],
-    name="jiuwenclaw",
+    name="jiuwenswarm",
 )
 
 if sys.platform == "darwin":
     app = BUNDLE(
         coll,
-        name="JiuwenClaw.app",
-        icon=None,
-        bundle_identifier="com.jiuwenclaw.desktop",
+        name="JiuwenSwarm.app",
+        icon=icon_path,
+        bundle_identifier="com.jiuwenswarm.desktop",
         info_plist={
-            "CFBundleName": "JiuwenClaw",
-            "CFBundleDisplayName": "JiuwenClaw",
-            "CFBundleShortVersionString": "0.1.7",
-            "CFBundleVersion": "0.1.7",
+            "CFBundleName": "JiuwenSwarm",
+            "CFBundleDisplayName": "JiuwenSwarm",
+            "CFBundleShortVersionString": "0.1.11",
+            "CFBundleVersion": "0.1.11",
             "NSHighResolutionCapable": "True",
         },
     )

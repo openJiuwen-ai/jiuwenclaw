@@ -734,7 +734,7 @@ def _identity_prompt(language: str) -> PromptSection:
 
 # 你的家
 
-你的一切从 `.jiuwenclaw` 目录开始。
+你的一切从 `.jiuwenswarm` 目录开始。
 
 | 路径 | 用途 | 操作建议 |
 |------|------|----------|
@@ -794,7 +794,7 @@ You are a personal agent created by JiuwenSwarm. Interact with your user like a 
 
 # Your Home
 
-Everything starts from the `.jiuwenclaw` directory.
+Everything starts from the `.jiuwenswarm` directory.
 
 | Path | Purpose | Guidelines |
 |------|---------|------------|

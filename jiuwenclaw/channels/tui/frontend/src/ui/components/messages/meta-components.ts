@@ -13,7 +13,7 @@ function renderGroupedHelpView(
   const innerWidth = Math.max(1, width);
 
   const version = meta?.version || "";
-  const versionText = version ? `jiuwenclaw CLI v${version}` : "jiuwenclaw CLI";
+  const versionText = version ? `jiuwenswarm CLI v${version}` : "jiuwenswarm CLI";
   lines.push(...renderWrappedText(innerWidth, `· ${versionText} — ${meta?.title ?? "Slash Commands"}`, palette.text.info));
   lines.push("");
 

@@ -25,7 +25,7 @@ from urllib.parse import quote, unquote, urlparse
 
 # --- Early --dotenv parsing (before jiuwenclaw imports) ---
 from jiuwenclaw.dotenv_early import parse_dotenv_early
-parse_dotenv_early("jiuwenclaw-web")
+parse_dotenv_early("jiuwenswarm-web")
 
 # --- Now safe to import jiuwenclaw modules ---
 from jiuwenclaw.agents.harness.common.tools.ssl_config import get_insecure_ssl_context, get_ssl_verify
@@ -80,9 +80,9 @@ def _normalize_lang_suffix(name: str) -> str:
 
 
 def _generate_agent_data(project_root: Path) -> None:
-    """Generate agent/jiuwenclaw_workspace/agent-data.json from agent tree."""
+    """Generate agent/workspace/agent-data.json from agent tree."""
     agent_root = (project_root / "agent").resolve()
-    workspace_root = (agent_root / "jiuwenclaw_workspace").resolve()
+    workspace_root = (agent_root / "workspace").resolve()
     output_path = (workspace_root / "agent-data.json").resolve()
     root_folder_key = "__root__"
 
@@ -605,7 +605,7 @@ class _SpaStaticHandler(SimpleHTTPRequestHandler):
                 self._write_json(403, {"error": "forbidden_path"})
                 return
             if not full_path.exists():
-                if file_arg.replace("\\", "/") == "agent/jiuwenclaw_workspace/agent-data.json":
+                if file_arg.replace("\\", "/") == "agent/workspace/agent-data.json":
                     try:
                         _generate_agent_data(self.project_root)
                     except Exception as exc:  # noqa: BLE001
@@ -765,7 +765,7 @@ class _SpaStaticHandler(SimpleHTTPRequestHandler):
 
             type(self).ws_disable_compress = ws_disable_compress
             self.logger.info(
-                "[jiuwenclaw-web] ws disable compress updated: %s",
+                "[jiuwenswarm-web] ws disable compress updated: %s",
                 ws_disable_compress,
             )
             self._write_json(200, {"ok": True, "wsDisableCompress": ws_disable_compress})
@@ -956,7 +956,7 @@ def main() -> None:
     except ValueError as exc:
         raise SystemExit(str(exc)) from exc
 
-    # default_project_root should be the user workspace root (~/.jiuwenclaw in package mode)
+    # default_project_root should be the user workspace root (~/.jiuwenswarm in package mode)
     # get_root_dir() already handles this correctly
     default_project_root = get_user_workspace_dir()
 
@@ -980,19 +980,19 @@ def main() -> None:
     handler = partial(_ConfiguredHandler, directory=str(dist_dir))
     server = ThreadingHTTPServer((args.host, args.port), handler)
 
-    logger.info("[jiuwenclaw-web] serving %s", dist_dir)
-    logger.info("[jiuwenclaw-web] http://%s:%s", args.host, args.port)
-    logger.info("[jiuwenclaw-web] /api -> %s", api_target)
-    logger.info("[jiuwenclaw-web] /ws  -> %s", ws_target)
-    logger.info("[jiuwenclaw-web] ws disable compress: %s", args.ws_disable_compress)
-    logger.info("[jiuwenclaw-web] /file-api roots -> %s, %s, %s", workspace_root, agent_teams_root, logs_root)
+    logger.info("[jiuwenswarm-web] serving %s", dist_dir)
+    logger.info("[jiuwenswarm-web] http://%s:%s", args.host, args.port)
+    logger.info("[jiuwenswarm-web] /api -> %s", api_target)
+    logger.info("[jiuwenswarm-web] /ws  -> %s", ws_target)
+    logger.info("[jiuwenswarm-web] ws disable compress: %s", args.ws_disable_compress)
+    logger.info("[jiuwenswarm-web] /file-api roots -> %s, %s, %s", workspace_root, agent_teams_root, logs_root)
     try:
         server.serve_forever()
     except KeyboardInterrupt:
         pass
     finally:
         server.server_close()
-        logger.info("[jiuwenclaw-web] server closed")
+        logger.info("[jiuwenswarm-web] server closed")
 
 
 if __name__ == "__main__":

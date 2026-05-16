@@ -39,6 +39,7 @@
   --bg-hover: #232f46;
   --bg-muted: #202b42;
   --bg-content: #f5f5f5;
+  --placeholder: #71717a;
 
   /* Card / Surface - More contrast between levels */
   --card: #171f30;
@@ -142,12 +143,12 @@
   /* Shell Layout */
   --shell-pad: 16px;
   --shell-gap: 16px;
-  --shell-nav-width: 220px;
+  --shell-nav-width: 240px;
   --tool-panel-width: var(--shell-nav-width);
   --statusbar-right-space: var(--tool-panel-width);
-  --shell-topbar-height: 56px;
   --shell-focus-duration: 200ms;
   --shell-focus-ease: var(--ease-out);
+  --shell-surface-light: #f5f6f9;
 
   /* Typography scale (desktop baseline) */
   --font-size-base: 14px;
@@ -165,7 +166,8 @@
   --bg-elevated: #ffffff;
   --bg-hover: #f0f0f0;
   --bg-muted: #f0f0f0;
-  --bg-content: #f5f5f5;
+  --bg-content: #ffffff;
+  --placeholder: #808080;
 
   --card: #ffffff;
   --card-foreground: #18181b;
@@ -173,11 +175,11 @@
   --popover: #ffffff;
   --popover-foreground: #18181b;
 
-  --panel: #fafafa;
-  --panel-strong: #f5f5f5;
-  --panel-hover: #ebebeb;
-  --chrome: rgba(250, 250, 250, 0.95);
-  --chrome-strong: rgba(250, 250, 250, 0.98);
+  --panel: #ffffff;
+  --panel-strong: #ffffff;
+  --panel-hover: #ffffff;
+  --chrome: rgba(255, 255, 255, 0.95);
+  --chrome-strong: rgba(255, 255, 255, 0.98);
 
   --text: #3f3f46;
   --text-strong: #18181b;
@@ -425,9 +427,8 @@ select {
     height: 100vh;
     display: grid;
     grid-template-columns: minmax(var(--shell-nav-width), var(--shell-nav-width)) minmax(0, 1fr);
-    grid-template-rows: var(--shell-topbar-height) 1fr;
+    grid-template-rows: 1fr;
     grid-template-areas:
-      "topbar topbar"
       "nav content";
     gap: 0;
     animation: rise 0.4s var(--ease-out);
@@ -440,6 +441,12 @@ select {
     .shell {
       height: 100dvh;
     }
+  }
+
+  /* Shell collapsed - nav column shrinks to 48px icon strip */
+  .shell--collapsed {
+    grid-template-columns: 48px minmax(0, 1fr);
+    grid-template-areas: "nav content";
   }
 
   /* Topbar */
@@ -566,7 +573,7 @@ select {
   /* Content Area */
   .content {
     grid-area: content;
-    padding: 0;
+    padding: 16px 16px 16px 0;
     display: flex;
     flex-direction: column;
     min-height: 0;
@@ -576,25 +583,14 @@ select {
   }
 
   :root[data-theme="light"] .content {
-    background: var(--bg-content);
+    background: var(--shell-surface-light);
   }
 
   /* Cards */
   .card {
-    border: 1px solid var(--border);
     background: var(--card);
     border-radius: var(--radius-lg);
     padding: 20px;
-    animation: rise 0.35s var(--ease-out) backwards;
-    transition:
-      border-color var(--duration-normal) var(--ease-out),
-      box-shadow var(--duration-normal) var(--ease-out);
-    box-shadow: var(--shadow-sm), inset 0 1px 0 var(--card-highlight);
-  }
-
-  .card:hover {
-    border-color: var(--border-strong);
-    box-shadow: var(--shadow-md), inset 0 1px 0 var(--card-highlight);
   }
 
   /* Horizontal sub-tabs (e.g. config page categories) */
@@ -979,7 +975,55 @@ select {
 
   /* Chat compose wrapper */
   .chat-compose {
-    padding-top: 4px;
+    width: var(--chat-content-width);
+    margin-inline: auto;
+    padding: 4px 0 16px;
+  }
+
+  .chat-panel-shell {
+    --chat-page-max-width: 920px;
+    --chat-page-gutter: clamp(16px, 4vw, 56px);
+    --chat-content-width: min(
+      var(--chat-page-max-width),
+      calc(100% - (var(--chat-page-gutter) * 2))
+    );
+  }
+
+  .chat-scroll {
+    padding: 18px 0 22px;
+  }
+
+  .chat-content {
+    width: var(--chat-content-width);
+    margin-inline: auto;
+  }
+
+  .chat-content--welcome {
+    min-height: 100%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+
+  @media (min-width: 1280px) {
+    .chat-panel-shell {
+      --chat-page-max-width: 860px;
+      --chat-page-gutter: clamp(48px, 12vw, 240px);
+    }
+  }
+
+  @media (max-width: 640px) {
+    .chat-panel-shell {
+      --chat-page-gutter: 12px;
+    }
+
+    .chat-scroll {
+      padding-top: 12px;
+    }
+
+    .chat-compose {
+      padding-bottom: 12px;
+    }
   }
 
   /* Tool cards (legacy single) */
@@ -1409,23 +1453,17 @@ select {
     --shell-pad: 12px;
     --shell-gap: 12px;
     grid-template-columns: 1fr;
-    grid-template-rows: auto auto 1fr;
+    grid-template-rows: auto 1fr;
     grid-template-areas:
-      "topbar"
       "nav"
       "content";
   }
 
-  .nav {
-    position: static;
-    max-height: none;
-    display: flex;
-    gap: 6px;
-    overflow-x: auto;
+  .sidebar {
+    width: 100%;
+    height: auto;
     border-right: none;
     border-bottom: 1px solid var(--border);
-    padding: 10px 14px;
-    background: var(--bg);
   }
 }
 
@@ -1442,7 +1480,6 @@ select {
     --shell-nav-width: 248px;
     --tool-panel-width: var(--shell-nav-width);
     --statusbar-right-space: var(--tool-panel-width);
-    --shell-topbar-height: 60px;
   }
 }
 
@@ -1455,6 +1492,5 @@ select {
     --shell-nav-width: 272px;
     --tool-panel-width: var(--shell-nav-width);
     --statusbar-right-space: var(--tool-panel-width);
-    --shell-topbar-height: 64px;
   }
 }

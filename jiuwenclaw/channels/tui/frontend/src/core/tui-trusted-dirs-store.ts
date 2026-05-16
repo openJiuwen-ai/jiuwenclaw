@@ -5,7 +5,7 @@ import { resolve } from "node:path";
 import { loadTuiConfig, saveTuiConfig } from "./tui-config-store.js";
 
 /**
- * Trusted directories storage with persistence via ~/.jiuwenclaw-tui/config.json.
+ * Trusted directories storage with persistence via ~/.jiuwenswarm-tui/config.json.
  * Managed at CLI startup and via /workspace commands.
  */
 let _trustedDirs: string[] | null = null;
@@ -213,5 +213,5 @@ export function isTrustedDir(path: string): boolean {
  * Get the default workspace path.
  */
 export function getDefaultWorkspacePath(): string {
-  return resolve(homedir(), ".jiuwenclaw/agent/jiuwenclaw_workspace");
+  return resolve(homedir(), ".jiuwenswarm/agent/workspace");
 }

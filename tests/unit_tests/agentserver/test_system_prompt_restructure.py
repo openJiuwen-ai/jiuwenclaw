@@ -90,7 +90,7 @@ def test_resolve_enable_task_loop_can_be_called_on_class(monkeypatch):
 
 def test_deep_adapter_subagents_includes_optional_browser_and_configured_research():
     adapter = _TestableJiuWenClawDeepAdapter()
-    adapter.set_workspace_dir("/tmp/jiuwenclaw-workspace")
+    adapter.set_workspace_dir("/tmp/jiuwenswarm-workspace")
     model = object()
     config = {
         "max_iterations": 9,
@@ -117,13 +117,13 @@ def test_deep_adapter_subagents_includes_optional_browser_and_configured_researc
     assert subagents == ["research_spec", "browser_spec"]
     mock_research.assert_called_once_with(
         model,
-        workspace="/tmp/jiuwenclaw-workspace",
+        workspace="/tmp/jiuwenswarm-workspace",
         language="cn",
         max_iterations=9,
     )
     mock_browser.assert_called_once_with(
         model,
-        workspace="/tmp/jiuwenclaw-workspace",
+        workspace="/tmp/jiuwenswarm-workspace",
         language="cn",
         max_iterations=7,
     )
@@ -131,7 +131,7 @@ def test_deep_adapter_subagents_includes_optional_browser_and_configured_researc
 
 def test_deep_adapter_subagents_omits_research_without_explicit_enable():
     adapter = _TestableJiuWenClawDeepAdapter()
-    adapter.set_workspace_dir("/tmp/jiuwenclaw-workspace")
+    adapter.set_workspace_dir("/tmp/jiuwenswarm-workspace")
     model = object()
     config = {"max_iterations": 9}
 

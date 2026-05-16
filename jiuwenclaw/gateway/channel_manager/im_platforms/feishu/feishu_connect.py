@@ -1549,7 +1549,7 @@ class FeishuChannel(BaseChannel):
 
         用于兜底检测 LLM 提到但未通过 send_file_to_user 发送的文件。
         支持两种模式：
-        1. 完整绝对路径：/home/xxx/.jiuwenclaw/agent/workspace/xxx.docx
+        1. 完整绝对路径：/home/xxx/.jiuwenswarm/agent/workspace/xxx.docx
         2. 仅文件名：'xxx.docx' 或 "xxx.docx"——在 workspace 目录下查找
         """
         from jiuwenclaw.common.utils import get_agent_workspace_dir
@@ -1559,7 +1559,7 @@ class FeishuChannel(BaseChannel):
         result: list[str] = []
 
         # 模式1：完整路径 - 动态匹配当前 workspace 目录
-        # 支持 Linux (/home/xxx/.jiuwenclaw/...) 和 Windows (C:\Users\xxx\.jiuwenclaw\...)
+        # 支持 Linux (/home/xxx/.jiuwenswarm/...) 和 Windows (C:\Users\xxx\.jiuwenswarm\...)
         workspace_pattern = re.escape(workspace_dir) + r"[^\s\[\]\"']+\.\w+"
         for m in re.findall(workspace_pattern, text):
             m = m.rstrip(".,;:!?)")

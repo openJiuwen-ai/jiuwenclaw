@@ -27,7 +27,7 @@ ArchitecturesInstallIn64BitMode=x64compatible
 DisableProgramGroupPage=yes
 SetupLogging=yes
 OutputDir=..\dist\installer
-OutputBaseFilename=jiuwenclaw-setup-{#MyAppVersion}
+OutputBaseFilename=jiuwenswarm-setup-{#MyAppVersion}
 UninstallDisplayIcon={app}\{#MyAppExeName}
 
 ; 如果后续补了 ico，可以取消下面两行注释并指向同一图标文件
@@ -58,5 +58,5 @@ Filename: "{app}\{#MyAppExeName}"; Description: "启动 {#MyAppName}"; Flags: no
 [Code]
 function UserWorkspaceDir(): string;
 begin
-  Result := ExpandConstant('{userappdata}') + '\..\.jiuwenclaw';
+  Result := ExpandConstant('{userappdata}') + '\..\.jiuwenswarm';
 end;

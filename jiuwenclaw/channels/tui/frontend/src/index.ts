@@ -19,7 +19,7 @@ const { values } = parseArgs({
 });
 
 if (values.help) {
-  console.log(`jiuwenclaw-tui - Terminal CLI for JiuwenClaw
+  console.log(`jiuwenswarm-tui - Terminal CLI for JiuwenSwarm
 
 Options:
   --url <url>       Gateway CLI WebSocket URL (default: ws://127.0.0.1:19001/tui)
@@ -31,7 +31,7 @@ Options:
 }
 
 if (!process.stdin.isTTY || !process.stdout.isTTY) {
-  console.error("jiuwenclaw-tui requires an interactive TTY");
+  console.error("jiuwenswarm-tui requires an interactive TTY");
   process.exit(1);
 }
 

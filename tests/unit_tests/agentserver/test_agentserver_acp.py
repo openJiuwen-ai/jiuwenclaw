@@ -182,14 +182,14 @@ def test_parse_stream_chunk_serializes_team_runtime_enum_kind():
     parsed = parse_stream_chunk(
         {
             "type": "team.runtime_ready",
-            "activation_kind": RunActionKind.WARM_RECOVER,
+            "activation_kind": RunActionKind.NEW_TEAM_IN_SESSION,
             "team_name": "demo-team",
         }
     )
 
     assert parsed == {
         "event_type": "team.runtime_ready",
-        "activation_kind": RunActionKind.WARM_RECOVER.value,
+        "activation_kind": RunActionKind.NEW_TEAM_IN_SESSION.value,
         "team_name": "demo-team",
     }
 
@@ -245,7 +245,7 @@ def test_sync_team_identity_metadata_skips_recover_kinds(monkeypatch):
         session_id="team_sess_001",
         mode="team",
         ready_team_name="new-team",
-        activation_kind=RunActionKind.WARM_RECOVER.value,
+        activation_kind=RunActionKind.NEW_TEAM_IN_SESSION.value,
     )
 
     assert updates == []

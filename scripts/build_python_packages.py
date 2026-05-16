@@ -10,7 +10,7 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
-SIDECAR_ROOT = ROOT / "packages" / "jiuwenclaw-tui"
+SIDECAR_ROOT = ROOT / "packages" / "jiuwenswarm-tui"
 SIDE_CAR_DIST = SIDECAR_ROOT / "dist"
 TUI_ROOT = ROOT / "jiuwenclaw" / "channels" / "tui" / "frontend"
 
@@ -43,7 +43,7 @@ def clean_root() -> None:
 
 
 def clean_sidecar() -> None:
-    for relative in ("dist", "build", "jiuwenclaw_tui.egg-info"):
+    for relative in ("dist", "build", "jiuwenswarm_tui.egg-info"):
         remove_path(SIDECAR_ROOT / relative)
 
 
@@ -53,7 +53,7 @@ def build_root_wheel() -> None:
 
 
 def build_sidecar_wheel(platform_tag: str | None = None) -> None:
-    for relative in ("build", "jiuwenclaw_tui.egg-info"):
+    for relative in ("build", "jiuwenswarm_tui.egg-info"):
         remove_path(SIDECAR_ROOT / relative)
     env = os.environ.copy()
     if platform_tag:
@@ -121,8 +121,8 @@ def main() -> None:
     )
     parser.add_argument(
         "--out-dir",
-        default="./packages/jiuwenclaw-tui/dist",
-        help="Directory to output the built TUI binary (default: ./packages/jiuwenclaw-tui/dist)",
+        default="./packages/jiuwenswarm-tui/dist",
+        help="Directory to output the built TUI binary (default: ./packages/jiuwenswarm-tui/dist)",
     )
     parser.add_argument(
         "--skip-binary",
@@ -137,7 +137,7 @@ def main() -> None:
     parser.add_argument(
         "--skip-sidecar",
         action="store_true",
-        help="Skip building the jiuwenclaw-tui sidecar wheel",
+        help="Skip building the jiuwenswarm-tui sidecar wheel",
     )
     parser.add_argument(
         "--clean",

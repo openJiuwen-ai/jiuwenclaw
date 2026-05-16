@@ -63,6 +63,25 @@ function SuggestionCard({ text, onClick }: { text: string; onClick: () => void }
   );
 }
 
+function WelcomeHeading() {
+  const { i18n } = useTranslation();
+  const isZh = i18n.language.startsWith('zh');
+
+  if (isZh) {
+    return (
+      <>
+        我是<span className="chat-welcome__brand">JiuwenSwarm</span>，很高兴认识你!
+      </>
+    );
+  }
+
+  return (
+    <>
+      Hi, I&apos;m <span className="chat-welcome__brand">JiuwenSwarm</span>. Nice to meet you!
+    </>
+  );
+}
+
 
 export function ChatPanel({
   onSendMessage,
@@ -179,67 +198,80 @@ export function ChatPanel({
     (text: string) => handleSendMessage(text),
     [handleSendMessage],
   );
+  const hasConversation = Boolean(historyPager || hasTimelineContent);
 
   return (
-    <div className="flex flex-col h-full" data-testid="chat-panel">
+    <div className="chat-panel-shell flex flex-col h-full" data-testid="chat-panel">
       {/* HarnessProgressBar - sticky header, doesn't scroll with messages */}
       <div className="sticky top-0 z-10 px-3 pt-2 bg-bg/95 backdrop-blur-sm">
         <HarnessProgressBar />
       </div>
-      <div ref={scrollContainerRef} className="flex-1 overflow-y-auto px-3 py-4" onScroll={handleScroll} onWheel={handleWheel}>
-        {historyPager || messages.length > 0 ? (
-          <>
-            {historyPager && (
-              <HistoryPagerBar
-                loadedPages={historyPager.loadedPages}
-                totalPages={historyPager.totalPages}
-                loadingMore={historyPager.loadingMore}
-                onLoadMore={historyPager.onLoadMore}
-              />
-            )}
-            {hasTimelineContent ? (
-              <>
-                <MessageList messages={messages} />
-                <SubtaskProgress />
-                {/* 内联审批卡片（演进审批 & 权限审批共用） */}
-                <InlineQuestionCard onSubmit={onUserAnswer} />
-                {/* 思考中指示器 */}
-                {isThinking && <ThinkingIndicator />}
-              </>
-            ) : (
-              <div className="flex items-center justify-center h-32">
-                <div className="text-text-muted text-sm">
-                  {t('connection.loadingConfig')}
+      <div ref={scrollContainerRef} className="chat-scroll flex-1 overflow-y-auto" onScroll={handleScroll} onWheel={handleWheel}>
+        <div className={hasConversation ? 'chat-content' : 'chat-content chat-content--welcome'}>
+          {hasConversation ? (
+            <>
+              {historyPager && (
+                <HistoryPagerBar
+                  loadedPages={historyPager.loadedPages}
+                  totalPages={historyPager.totalPages}
+                  loadingMore={historyPager.loadingMore}
+                  onLoadMore={historyPager.onLoadMore}
+                />
+              )}
+              {hasTimelineContent ? (
+                <>
+                  <MessageList messages={messages} />
+                  <SubtaskProgress />
+                  {/* 内联审批卡片（演进审批 & 权限审批共用） */}
+                  <InlineQuestionCard onSubmit={onUserAnswer} />
+                  {/* 思考中指示器 */}
+                  {isThinking && <ThinkingIndicator />}
+                </>
+              ) : (
+                <div className="flex items-center justify-center h-32">
+                  <div className="text-text-muted text-sm">
+                    {t('connection.loadingConfig')}
+                  </div>
                 </div>
+              )}
+            </>
+          ) : (
+            <div className="chat-welcome">
+              <h2 className="chat-welcome__heading"><WelcomeHeading /></h2>
+              <p className="chat-welcome__subtext">
+                {t('chat.welcomeSubtext')}
+              </p>
+              <div className="chat-welcome__composer">
+                <InputArea
+                  onSubmit={handleSendMessage}
+                  onInterrupt={onInterrupt}
+                  onSwitchMode={onSwitchMode}
+                  isProcessing={isProcessing}
+                  onNewSession={onNewSession}
+                />
               </div>
-            )}
-          </>
-        ) : (
-          <div className="chat-welcome">
-            <img src="/logo.png" alt={t('chat.welcomeLogoAlt')} className="chat-welcome__logo" />
-            <h2 className="chat-welcome__heading">{t('chat.welcomeHeading')}</h2>
-            <p className="chat-welcome__subtext">
-              {t('chat.welcomeSubtext')}
-            </p>
-            <div className="chat-suggestions">
-              {suggestions.map((text) => (
-                <SuggestionCard key={text} text={text} onClick={() => handleSuggestion(text)} />
-              ))}
+              <div className="chat-suggestions">
+                {suggestions.map((text) => (
+                  <SuggestionCard key={text} text={text} onClick={() => handleSuggestion(text)} />
+                ))}
+              </div>
             </div>
-          </div>
-        )}
-        <div ref={messagesEndRef} />
+          )}
+          <div ref={messagesEndRef} />
+        </div>
       </div>
 
-      <div className="chat-compose px-3 pb-4">
-        <InputArea
-          onSubmit={handleSendMessage}
-          onInterrupt={onInterrupt}
-          onSwitchMode={onSwitchMode}
-          isProcessing={isProcessing}
-          onNewSession={onNewSession}
-        />
-      </div>
+      {hasConversation && (
+        <div className="chat-compose">
+          <InputArea
+            onSubmit={handleSendMessage}
+            onInterrupt={onInterrupt}
+            onSwitchMode={onSwitchMode}
+            isProcessing={isProcessing}
+            onNewSession={onNewSession}
+          />
+        </div>
+      )}
     </div>
   );
 }

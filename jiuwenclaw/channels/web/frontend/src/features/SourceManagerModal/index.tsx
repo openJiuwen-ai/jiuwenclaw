@@ -189,7 +189,7 @@ export function SourceManagerModal({
         onClick={onClose}
         aria-label={t("sourceManager.closeAria")}
       />
-      <div className="relative w-full max-w-4xl max-h-[88vh] overflow-hidden rounded-xl border border-border bg-card shadow-2xl animate-rise">
+      <div className="relative w-full max-w-4xl max-h-[88vh] overflow-hidden rounded-[8px] border border-border bg-card shadow-2xl animate-rise">
         <div className="flex items-center justify-between gap-3 px-5 py-3 border-b border-border bg-panel">
           <div>
             <h3 className="text-base font-semibold text-text">{t("sourceManager.title")}</h3>
@@ -199,16 +199,22 @@ export function SourceManagerModal({
             <button
               type="button"
               onClick={() => void fetchMarketplaces()}
-              className="px-3 py-1.5 rounded-md text-sm bg-secondary text-text-muted hover:text-text hover:bg-card border border-border"
+              className="w-7 h-7 flex items-center justify-center rounded-lg text-text hover:text-text-strong transition-colors"
+              title={t("common.refresh")}
             >
-              {t("common.refresh")}
+              <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+              </svg>
             </button>
             <button
               type="button"
               onClick={onClose}
-              className="px-3 py-1.5 rounded-md text-sm bg-secondary text-text-muted hover:text-text hover:bg-card border border-border"
+              className="w-7 h-7 flex items-center justify-center rounded-lg text-text hover:text-text-strong transition-colors"
+              aria-label={t("sourceManager.closeAria")}
             >
-              {t("common.close")}
+              <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+              </svg>
             </button>
           </div>
         </div>
@@ -235,10 +241,10 @@ export function SourceManagerModal({
               <button
                 type="button"
                 onClick={() => void handleAddSource()}
-                className={`px-3 py-2 rounded-md text-sm transition-colors ${
+                className={`w-[76px] h-[28px] rounded-[24px] text-sm text-[#191919] border border-[#191919] hover:bg-secondary/50 transition-colors whitespace-nowrap ${
                   actionTarget === "add"
-                    ? "bg-secondary text-text-muted cursor-not-allowed"
-                    : "bg-accent text-white hover:bg-accent-hover"
+                    ? "text-text-muted cursor-not-allowed"
+                    : ""
                 }`}
                 disabled={actionTarget === "add"}
               >
@@ -301,12 +307,10 @@ export function SourceManagerModal({
                         <button
                           type="button"
                           onClick={() => void handleToggleSource(source)}
-                          className={`px-3 py-1.5 rounded-md text-xs transition-colors ${
+                          className={`w-[76px] h-[28px] rounded-[24px] text-sm text-[#191919] border border-[#191919] hover:bg-secondary/50 transition-colors whitespace-nowrap ${
                             toggleLoading
-                              ? "bg-secondary text-text-muted cursor-not-allowed"
-                              : enabled
-                                ? "bg-secondary text-text hover:bg-card border border-border"
-                                : "bg-accent text-white hover:bg-accent-hover"
+                              ? "text-text-muted cursor-not-allowed"
+                              : ""
                           }`}
                           disabled={toggleLoading || removeLoading}
                         >
@@ -315,10 +319,10 @@ export function SourceManagerModal({
                         <button
                           type="button"
                           onClick={() => void handleRemoveSource(source.name)}
-                          className={`px-3 py-1.5 rounded-md text-xs transition-colors ${
+                          className={`w-[76px] h-[28px] rounded-[24px] text-sm text-danger border border-danger hover:bg-danger hover:text-white transition-colors whitespace-nowrap ${
                             removeLoading
-                              ? "bg-secondary text-text-muted cursor-not-allowed"
-                              : "bg-danger text-white hover:bg-danger/90"
+                              ? "text-text-muted cursor-not-allowed"
+                              : ""
                           }`}
                           disabled={toggleLoading || removeLoading}
                         >

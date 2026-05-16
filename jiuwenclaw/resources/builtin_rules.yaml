@@ -1,7 +1,7 @@
 
 # jiuwenclaw built-in shell high-risk rules.
 #
-# 运行时可放在与 config.yaml 同目录：~/.jiuwenclaw/config/builtin_rules.yaml（优先加载）；
+# 运行时可放在与 config.yaml 同目录：~/.jiuwenswarm/config/builtin_rules.yaml（优先加载）；
 # 若不存在则使用包内本文件。
 #
 # This file stores built-in parameter-level rules in the shell guardrail

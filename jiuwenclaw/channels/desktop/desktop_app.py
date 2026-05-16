@@ -4,6 +4,8 @@ import argparse
 import http.client
 import logging
 import os
+import shutil
+import signal
 import socket
 import subprocess
 import sys
@@ -26,191 +28,6 @@ APP_CHILD_FLAG = "--desktop-run-app"
 WEB_CHILD_FLAG = "--desktop-run-web"
 UPDATE_HELPER_FLAG = "--desktop-install-update"
 STARTUP_TIMEOUT_SECONDS = 45.0
-
-DESKTOP_BRIDGE_SCRIPT = r"""
-(() => {
-  if (window.__jiuwenclawDesktopControlsMounted) {
-    return;
-  }
-
-  const style = document.createElement('style');
-  style.textContent = `
-    :root {
-      --desktop-controls-surface: rgba(22, 28, 45, 0.76);
-      --desktop-controls-border: rgba(71, 85, 105, 0.4);
-      --desktop-controls-icon: rgba(226, 232, 240, 0.82);
-      --desktop-controls-icon-strong: rgba(248, 250, 252, 0.98);
-      --desktop-controls-hover: rgba(255, 255, 255, 0.08);
-      --desktop-controls-close: rgba(127, 29, 29, 0.22);
-      --desktop-controls-close-border: rgba(248, 113, 113, 0.28);
-      --desktop-controls-close-icon: rgba(254, 202, 202, 0.96);
-    }
-    :root[data-theme="light"] {
-      --desktop-controls-surface: rgba(255, 255, 255, 0.92);
-      --desktop-controls-border: rgba(148, 163, 184, 0.28);
-      --desktop-controls-icon: rgba(15, 23, 42, 0.72);
-      --desktop-controls-icon-strong: rgba(2, 6, 23, 0.88);
-      --desktop-controls-hover: rgba(148, 163, 184, 0.16);
-      --desktop-controls-close: rgba(254, 226, 226, 0.92);
-      --desktop-controls-close-border: rgba(248, 113, 113, 0.32);
-      --desktop-controls-close-icon: rgba(185, 28, 28, 0.88);
-    }
-    #__jiuwenclaw_desktop_controls {
-      display: flex;
-      align-items: center;
-      gap: 6px;
-      margin-left: 10px;
-      padding: 3px;
-      border-radius: 14px;
-      border: 1px solid var(--desktop-controls-border);
-      background: var(--desktop-controls-surface);
-      box-shadow: 0 8px 18px rgba(15, 23, 42, 0.08), inset 0 1px 0 rgba(255, 255, 255, 0.12);
-      pointer-events: auto;
-      user-select: none;
-      flex-shrink: 0;
-    }
-    #__jiuwenclaw_desktop_controls button {
-      width: 28px;
-      height: 28px;
-      border: 1px solid transparent;
-      border-radius: 10px;
-      cursor: pointer;
-      display: inline-flex;
-      align-items: center;
-      justify-content: center;
-      color: var(--desktop-controls-icon);
-      background: transparent;
-      transition:
-        transform 120ms ease,
-        background 120ms ease,
-        border-color 120ms ease,
-        color 120ms ease,
-        box-shadow 120ms ease;
-    }
-    #__jiuwenclaw_desktop_controls button:hover {
-      transform: translateY(-1px);
-      background: var(--desktop-controls-hover);
-      border-color: var(--desktop-controls-border);
-      color: var(--desktop-controls-icon-strong);
-    }
-    #__jiuwenclaw_desktop_controls button:active {
-      transform: translateY(0);
-    }
-    #__jiuwenclaw_desktop_controls button svg {
-      width: 14px;
-      height: 14px;
-      stroke: currentColor;
-      stroke-width: 1.9;
-      fill: none;
-      vector-effect: non-scaling-stroke;
-    }
-    #__jiuwenclaw_desktop_controls button[data-action="fullscreen"] svg {
-      width: 13px;
-      height: 13px;
-    }
-    #__jiuwenclaw_desktop_controls button[data-action="close"] {
-      color: var(--desktop-controls-close-icon);
-    }
-    #__jiuwenclaw_desktop_controls button[data-action="close"]:hover {
-      background: var(--desktop-controls-close);
-      border-color: var(--desktop-controls-close-border);
-      color: var(--desktop-controls-close-icon);
-      box-shadow: 0 6px 14px rgba(239, 68, 68, 0.12);
-    }
-    #__jiuwenclaw_desktop_controls.__floating {
-      position: fixed;
-      top: 12px;
-      right: 12px;
-      z-index: 2147483647;
-      padding: 4px;
-      margin-left: 0;
-    }
-    .pywebview-drag-region {
-      cursor: default;
-    }
-  `;
-
-  const container = document.createElement('div');
-  container.id = '__jiuwenclaw_desktop_controls';
-  container.innerHTML = `
-    <button type="button" data-action="minimize" title="Minimize" aria-label="Minimize window">
-      <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M3 8.5h10" /></svg>
-    </button>
-    <button type="button" data-action="fullscreen" title="Toggle fullscreen" aria-label="Toggle fullscreen">
-      <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M5 3.5H3.5V5M11 3.5h1.5V5M5 12.5H3.5V11M11 12.5h1.5V11" /></svg>
-    </button>
-    <button type="button" data-action="close" title="Close" aria-label="Close window">
-      <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M4.25 4.25l7.5 7.5M11.75 4.25l-7.5 7.5" /></svg>
-    </button>
-  `;
-
-  window.__jiuwenclawDesktopControlsMounted = true;
-
-  const callApi = (methodName) => {
-    const api = window.pywebview && window.pywebview.api;
-    if (!api || typeof api[methodName] !== 'function') {
-      return Promise.resolve(false);
-    }
-    try {
-      return Promise.resolve(api[methodName]());
-    } catch (error) {
-      console.error('[desktop-controls]', error);
-      return Promise.resolve(false);
-    }
-  };
-
-  container.addEventListener('click', (event) => {
-    const target = event.target;
-    if (!(target instanceof Element)) {
-      return;
-    }
-    const button = target.closest('button[data-action]');
-    if (!(button instanceof HTMLElement)) {
-      return;
-    }
-    const action = button.dataset.action;
-    if (action === 'minimize') {
-      void callApi('minimize_window');
-    } else if (action === 'fullscreen') {
-      void callApi('toggle_fullscreen_window');
-    } else if (action === 'close') {
-      void callApi('close_window');
-    }
-  });
-
-  const mountControls = () => {
-    const topbar = document.querySelector('.topbar');
-    if (topbar instanceof HTMLElement) {
-      topbar.classList.add('pywebview-drag-region');
-      const rightZone = topbar.lastElementChild;
-      if (rightZone instanceof HTMLElement) {
-        rightZone.appendChild(container);
-        container.classList.remove('__floating');
-        return true;
-      }
-      topbar.appendChild(container);
-      container.classList.remove('__floating');
-      return true;
-    }
-
-    container.classList.add('__floating');
-    document.body.appendChild(container);
-    return false;
-  };
-
-  document.head.appendChild(style);
-
-  if (!mountControls()) {
-    const observer = new MutationObserver(() => {
-      if (mountControls()) {
-        observer.disconnect();
-      }
-    });
-    observer.observe(document.documentElement, { childList: true, subtree: true });
-    window.addEventListener('beforeunload', () => observer.disconnect(), { once: true });
-  }
-})();
-"""
 
 
 def _setup_logger() -> logging.Logger:
@@ -285,13 +102,18 @@ def _build_child_env(name: str) -> dict[str, str]:
 
 def _start_process(name: str, command: list[str]) -> subprocess.Popen[bytes]:
     logger.info("[desktop] starting %s: %s", name, command)
-    return subprocess.Popen(
-        command,
-        env=_build_child_env(name),
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        creationflags=_creationflags(),
-    )
+    kwargs: dict[str, object] = {
+        "env": _build_child_env(name),
+        "stdout": subprocess.DEVNULL,
+        "stderr": subprocess.DEVNULL,
+    }
+    # macOS/Linux: 用 start_new_session=True 创建新进程组，
+    # 以便后续用 os.killpg 杀掉整个进程树（含孙子进程）。
+    if os.name != "nt":
+        kwargs["start_new_session"] = True
+    else:
+        kwargs["creationflags"] = _creationflags()
+    return subprocess.Popen(command, **kwargs)
 
 
 def _wait_for_tcp(
@@ -478,7 +300,15 @@ class DesktopRuntime:
     def close_window(self) -> bool:
         if self.window is None or not hasattr(self.window, "destroy"):
             return False
-        self.window.destroy()
+
+        def _delayed_destroy() -> None:
+            time.sleep(0.15)
+            try:
+                self.window.destroy()
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("[desktop] failed to close desktop window: %s", exc)
+
+        threading.Thread(target=_delayed_destroy, daemon=True).start()
         return True
 
     def install_update(self, installer_path: str) -> bool:
@@ -527,7 +357,7 @@ class DesktopRuntime:
 
         for process in self.processes.values():
             if process.poll() is None:
-                process.terminate()
+                _terminate_process_tree(process)
 
         while time.monotonic() < deadline:
             if all(process.poll() is not None for process in self.processes.values()):
@@ -536,35 +366,45 @@ class DesktopRuntime:
 
         for process in self.processes.values():
             if process.poll() is None:
-                process.kill()
+                _kill_process_tree(process)
 
         self.processes.clear()
 
     def run(self, window_title: str, width: int, height: int, debug: bool) -> None:
-        self.start_services()
-
         storage_path = get_user_workspace_dir() / "tmp" / "webview"
+        if storage_path.exists():
+            shutil.rmtree(storage_path)
         storage_path.mkdir(parents=True, exist_ok=True)
 
         self.window = webview.create_window(
             window_title,
-            self.frontend_url,
+            html=self._build_loading_html(),
             js_api=_WindowApi(self),
             width=width,
             height=height,
             min_size=(1100, 720),
-            frameless=True,
+            frameless=False,
             easy_drag=False,
             draggable=True,
             text_select=True,
             background_color="#0f172a",
         )
 
-        self.window.events.loaded += self._on_loaded
+        self.window.events.loaded += self._on_loaded_first
         self.window.events.closed += self._on_closed
 
+        def _start_services_and_navigate() -> None:
+            try:
+                self.start_services()
+                if self.window is not None:
+                    self.window.load_url(self.frontend_url)
+            except Exception as exc:
+                logger.error("[desktop] service startup failed: %s", exc)
+
+        threading.Thread(target=_start_services_and_navigate, daemon=True).start()
+
         gui = "edgechromium" if os.name == "nt" else None
-        logger.info("[desktop] opening window: %s", self.frontend_url)
+        logger.info("[desktop] opening window with loading screen")
         webview.start(
             debug=debug,
             gui=gui,
@@ -572,21 +412,172 @@ class DesktopRuntime:
             storage_path=str(storage_path),
         )
 
+    @staticmethod
+    def _build_loading_html() -> str:
+        logo_svg = ""
+        pkg_dir = Path(__file__).resolve().parent
+        logo_path = pkg_dir.parent / "web" / "frontend" / "dist" / "logo.svg"
+        if not logo_path.is_file():
+            logo_path = pkg_dir.parent / "web" / "frontend" / "public" / "logo.svg"
+        if logo_path.is_file():
+            try:
+                logo_svg = logo_path.read_text(encoding="utf-8")
+            except Exception:  # noqa: BLE001
+                pass
+
+        return r"""<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+html,body{width:100%;height:100%;overflow:hidden;background:#0f172a;
+font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;
+color:#e2e8f0;display:flex;align-items:center;justify-content:center}
+.root{display:flex;flex-direction:column;align-items:center;gap:32px;padding:40px}
+
+/* Logo */
+.logo{width:64px;height:64px;border-radius:16px;
+background:linear-gradient(135deg,#3b82f6,#8b5cf6);
+display:flex;align-items:center;justify-content:center;
+box-shadow:0 8px 24px rgba(59,130,246,.25)}
+.logo svg{width:64px;height:64px;border-radius:16px}
+
+/* App name */
+.app-name{font-size:22px;font-weight:700;letter-spacing:-.3px;color:#f1f5f9}
+
+/* Spinner */
+.spinner{width:32px;height:32px;border:3px solid rgba(148,163,184,.2);
+border-top-color:#60a5fa;border-radius:50%;animation:spin 1.5s linear infinite}
+@keyframes spin{to{transform:rotate(360deg)}}
+
+/* Tip area */
+.tip-area{margin-top:8px;text-align:center;min-height:60px;
+display:flex;flex-direction:column;align-items:center;gap:8px}
+.tip-label{font-size:11px;text-transform:uppercase;letter-spacing:1.5px;color:#475569}
+.tip-text{font-size:13px;color:#94a3b8;max-width:320px;line-height:1.5;
+transition:opacity .4s ease,transform .4s ease}
+.tip-text.fade-out{opacity:0;transform:translateY(-8px)}
+.tip-text.fade-in{opacity:1;transform:translateY(0)}
+
+/* Dots */
+.dots{display:flex;gap:4px;justify-content:center}
+.dot{width:4px;height:4px;border-radius:50%;background:#475569}
+.dot.active{background:#60a5fa;animation:pulse 1.2s ease infinite}
+@keyframes pulse{0%,100%{opacity:.4}50%{opacity:1}}
+</style>
+</head>
+<body>
+<div class="root">
+<div class="logo">__LOGO_SVG__</div>
+<div class="app-name">JiuwenSwarm</div>
+<div class="spinner"></div>
+<div class="tip-area">
+    <div class="tip-label">专属智能AI Agent助理</div>
+    <div class="tip-text" id="tip"></div>
+</div>
+<div class="dots" id="dots"></div>
+<div class="tip-label" style="margin-top:16px">服务启动加载中</div>
+</div>
+<script>
+const tips=[
+"多智能体协作 —— 编排多个专业 Agent 协同工作，群体智能涌现",
+"多端接入 —— 支持 Web、飞书、微信、钉钉、Telegram 等多种交互方式",
+"贴身任务管家 —— 精准理解复杂指令，智能排期，有条不紊完成任务",
+"自主演进 —— 根据你的反馈自动调整技能，持续进化，越用越懂你"
+];
+let idx=0;
+const el=document.getElementById('tip');
+const dotsEl=document.getElementById('dots');
+
+tips.forEach((_,i)=>{
+const d=document.createElement('div');
+d.className='dot'+(i===0?' active':'');
+dotsEl.appendChild(d);
+});
+
+function showTip(){
+const dots=dotsEl.children;
+for(let i=0;i<dots.length;i++) dots[i].className='dot'+(i===idx?' active':'');
+el.className='tip-text fade-out';
+setTimeout(()=>{
+    el.textContent=tips[idx];
+    el.className='tip-text fade-in';
+},400);
+idx=(idx+1)%tips.length;
+}
+showTip();
+setInterval(showTip,3500);
+</script>
+</body>
+</html>""".replace("__LOGO_SVG__", logo_svg)
+
+    def _on_loaded_first(self) -> None:
+        if self.window is not None:
+            self.window.events.loaded -= self._on_loaded_first
+            self.window.events.loaded += self._on_loaded
+
     def _on_loaded(self) -> None:
-        if self.window is None:
-            return
-        try:
-            self.window.evaluate_js(DESKTOP_BRIDGE_SCRIPT)
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("[desktop] failed to inject desktop controls: %s", exc)
+        pass
 
     def _on_closed(self) -> None:
         self.shutdown()
 
 
+def _psutil_terminate(pid: int, force: bool = False) -> None:
+    """Terminate a process and all its descendants using psutil.
+
+    Unlike ``taskkill.exe``, this is a pure-Python operation that does not
+    spawn an external console process, avoiding console window flashes on
+    Windows (console=False builds).
+    """
+    try:
+        import psutil
+
+        parent = psutil.Process(pid)
+        # 获取所有子孙进程（在杀父进程之前先拿到完整列表）
+        children = parent.children(recursive=True)
+        kill_fn = (lambda p: p.kill()) if force else (lambda p: p.terminate())
+        # 先杀子孙，再杀父进程，避免子孙变成孤儿
+        for child in reversed(children):
+            try:
+                kill_fn(child)
+            except psutil.NoSuchProcess:
+                pass
+        try:
+            kill_fn(parent)
+        except psutil.NoSuchProcess:
+            pass
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def _terminate_process_tree(process: subprocess.Popen[bytes]) -> None:
+    """Gracefully terminate a process and all its descendants."""
+    if os.name != "nt":
+        try:
+            os.killpg(process.pid, signal.SIGTERM)
+        except OSError:
+            process.terminate()
+    else:
+        _psutil_terminate(process.pid, force=False)
+
+
+def _kill_process_tree(process: subprocess.Popen[bytes]) -> None:
+    """Force kill a process and all its descendants."""
+    if os.name != "nt":
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except OSError:
+            process.kill()
+    else:
+        _psutil_terminate(process.pid, force=True)
+
+
 def _parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Launch JiuwenClaw desktop window.")
-    parser.add_argument("--title", default="JiuwenClaw", help="Desktop window title.")
+    parser = argparse.ArgumentParser(description="Launch JiuwenSwarm desktop window.")
+    parser.add_argument("--title", default="JiuwenSwarm", help="Desktop window title.")
     parser.add_argument("--width", type=int, default=1440, help="Initial window width.")
     parser.add_argument(
         "--height", type=int, default=960, help="Initial window height."

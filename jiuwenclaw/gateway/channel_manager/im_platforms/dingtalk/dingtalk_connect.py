@@ -1059,7 +1059,7 @@ class DingTalkChannel(BaseChannel):
         found_files = []
 
         # 模式1：完整绝对路径匹配
-        # 匹配类似 /home/xxx/.jiuwenclaw/agent/workspace/xxx.ext 的路径
+        # 匹配类似 /home/xxx/.jiuwenswarm/agent/workspace/xxx.ext 的路径
         path_pattern = re.compile(
             r'(?:^|["\'「「【《\s])(' + re.escape(workspace_dir) + r'[^\s"\'」」】》]+\.\w{1,10})(?:$|["\'」」】》\s])',
             re.MULTILINE

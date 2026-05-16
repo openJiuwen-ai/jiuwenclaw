@@ -1,13 +1,33 @@
 /**
- * SessionSidebar 组件
+ * SessionSidebar Component
  *
- * 会话侧边栏，显示会话列表
+ * Redesigned sidebar with logo, navigation, and advanced config panel.
+ * Supports collapsed 48px icon-only mode matching the Pixso high-fidelity design.
  */
 
+import { useState, useRef, useEffect, useLayoutEffect, useCallback } from 'react';
+import { createPortal } from 'react-dom';
 import { useTranslation } from 'react-i18next';
-import { FEATURE_APP_UPDATER_UI } from '../../featureFlags';
-import { OffloadFilesWidget } from './OffloadFilesWidget';
 import './SessionSidebar.css';
+import dialogueIcon from '../../assets/sidebar/dialogue.svg';
+import agentIcon from '../../assets/sidebar/agent.svg';
+import sessionIcon from '../../assets/sidebar/session.svg';
+import heartbeatIcon from '../../assets/sidebar/heartbeat.svg';
+import cronIcon from '../../assets/sidebar/cron.svg';
+import skillIcon from '../../assets/sidebar/skill.svg';
+import channelIcon from '../../assets/sidebar/channel.svg';
+import pluginIcon from '../../assets/sidebar/plugin.svg';
+import configIcon from '../../assets/sidebar/config.svg';
+import webIcon from '../../assets/sidebar/web.svg';
+import logsIcon from '../../assets/sidebar/logs.svg';
+import plusIcon from '../../assets/sidebar/plus.svg';
+import logoIcon from '../../assets/sidebar/logo.svg';
+import advancedConfigIcon from '../../assets/sidebar/advanced-config-new.svg';
+import collapseIcon from '../../assets/sidebar/collapse.svg';
+import updateIcon from '../../assets/sidebar/advanced-config.svg';
+import appearanceSystemIcon from '../../assets/sidebar/appearance-system.svg';
+import appearanceDarkIcon from '../../assets/sidebar/appearance-dark.svg';
+import appearanceLightIcon from '../../assets/sidebar/appearance-light.svg';
 
 type MainNavKey = 'chat' | 'skills' | 'agents' | 'teams' | 'sessions' | 'heartbeat' | 'cron' | 'channels' | 'extensions' | 'configpanel' | 'logspanel' | 'browserpanel' | 'updatepanel';
 
@@ -16,167 +36,524 @@ interface SessionSidebarProps {
   onNavigate: (nav: MainNavKey) => void;
   sessionId: string;
   appVersion: string;
+  isConnected: boolean;
+  onNewSession?: () => void;
+  collapsed?: boolean;
+  onCollapse?: () => void;
+  onExpand?: () => void;
+}
+
+interface NavItem {
+  key: MainNavKey;
+  labelKey: string;
+  icon: React.ReactNode;
+}
+
+const mainNavItems: NavItem[] = [
+  { key: 'chat', labelKey: 'nav.chat', icon: <img src={dialogueIcon} alt="" /> },
+  { key: 'agents', labelKey: 'nav.agent', icon: <img src={agentIcon} alt="" /> },
+  { key: 'sessions', labelKey: 'nav.sessions', icon: <img src={sessionIcon} alt="" /> },
+  {
+    key: 'teams',
+    labelKey: 'nav.teams',
+    icon: (
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.5}>
+        <path strokeLinecap="round" strokeLinejoin="round" d="M18 18.72a8.96 8.96 0 01-12 0m12 0a3.75 3.75 0 00-6 0m6 0A8.96 8.96 0 0012 15.75a8.96 8.96 0 00-6 2.97m12 0A9 9 0 1012 21a8.96 8.96 0 006-2.28zM15 9.75a3 3 0 11-6 0 3 3 0 016 0zm6 3a2.25 2.25 0 11-4.5 0 2.25 2.25 0 014.5 0zm-13.5 0a2.25 2.25 0 11-4.5 0 2.25 2.25 0 014.5 0z" />
+      </svg>
+    ),
+  },
+  { key: 'heartbeat', labelKey: 'nav.heartbeat', icon: <img src={heartbeatIcon} alt="" /> },
+  { key: 'cron', labelKey: 'nav.cron', icon: <img src={cronIcon} alt="" /> },
+  { key: 'skills', labelKey: 'nav.skills', icon: <img src={skillIcon} alt="" /> },
+  { key: 'channels', labelKey: 'nav.channels', icon: <img src={channelIcon} alt="" /> },
+  { key: 'extensions', labelKey: 'nav.extensions', icon: <img src={pluginIcon} alt="" /> },
+];
+
+const settingsNavItems: NavItem[] = [
+  { key: 'configpanel', labelKey: 'nav.config', icon: <img src={configIcon} alt="" /> },
+  { key: 'browserpanel', labelKey: 'nav.browser', icon: <img src={webIcon} alt="" /> },
+  { key: 'logspanel', labelKey: 'nav.logs', icon: <img src={logsIcon} alt="" /> },
+  { key: 'updatepanel', labelKey: 'nav.update', icon: <img src={updateIcon} alt="" /> },
+];
+
+// Tooltip component — SVG speech bubble matching high-fidelity design
+function Tooltip({
+  text,
+  targetRef,
+  visible,
+}: {
+  text: string;
+  targetRef: React.RefObject<HTMLElement>;
+  visible: boolean;
+}) {
+  const tipRef = useRef<HTMLDivElement>(null);
+  const textRef = useRef<SVGTextElement>(null);
+  const posRef = useRef({ top: 0, left: 0 });
+  const textWidthRef = useRef(0);
+  const [, forceRender] = useState(0);
+
+  useLayoutEffect(() => {
+    if (visible && textRef.current) {
+      const w = textRef.current.getComputedTextLength();
+      if (Math.abs(textWidthRef.current - w) > 0.5) {
+        textWidthRef.current = w;
+        forceRender((n) => n + 1);
+      }
+    }
+  }, [visible, text]);
+
+  useLayoutEffect(() => {
+    if (!visible || !targetRef.current || !tipRef.current) return;
+    function updatePos() {
+      if (!targetRef.current || !tipRef.current) return;
+      const rect = targetRef.current.getBoundingClientRect();
+      // Body 30px tall, tail centered vertically (no overhang)
+      const top = rect.top + rect.height / 2 - 30 / 2;
+      const left = rect.right + 11;
+      if (Math.abs(posRef.current.top - top) > 0.5 || Math.abs(posRef.current.left - left) > 0.5) {
+        posRef.current = { top, left };
+        forceRender((n) => n + 1);
+      }
+    }
+    updatePos();
+    window.addEventListener('scroll', updatePos, true);
+    return () => window.removeEventListener('scroll', updatePos, true);
+  }, [visible, targetRef]);
+
+  useEffect(() => {
+    return () => { posRef.current = { top: 0, left: 0 }; };
+  }, []);
+
+  if (!visible) return null;
+
+  const textW = Math.max(textWidthRef.current, 20);
+  const W = textW + 24; // 12px padding each side
+
+  return createPortal(
+    <div ref={tipRef} style={{ position: 'fixed', top: posRef.current.top, left: posRef.current.left, zIndex: 1100, pointerEvents: 'none' }}>
+      <svg
+        width={W + 8}
+        height={30}
+        viewBox={`-8 0 ${W + 8} 30`}
+        xmlns="http://www.w3.org/2000/svg"
+      >
+        <defs>
+          <filter id="bubble-shadow" x="-50%" y="-20%" width="200%" height="200%">
+            <feDropShadow dx="0" dy="8" stdDeviation="12" floodColor="rgba(0,0,0,0.16)" />
+          </filter>
+        </defs>
+        <g filter="url(#bubble-shadow)">
+          {/* Body — rounded rect, 4px radius, #2A2A2A */}
+          <rect x="0" y="0" width={W} height="30" rx="4" fill="#2A2A2A" />
+          {/* Tail — base inside body (invisible), rounded tip protrudes 8px left,
+              centered vertically at y=15 */}
+          <polygon
+            points={`10,10 -6,15 10,20`}
+            fill="#2A2A2A"
+            stroke="#2A2A2A"
+            strokeWidth="3"
+            strokeLinejoin="round"
+          />
+        </g>
+        <text
+          ref={textRef}
+          x="12"
+          y="22"
+          fill="#FFFFFF"
+          fontSize="14"
+          fontFamily="HarmonyOS Sans SC, PingFang SC, sans-serif"
+          fontWeight="400"
+        >
+          {text}
+        </text>
+      </svg>
+    </div>,
+    document.body
+  );
+}
+
+// Advanced Config Panel Component
+function AdvancedConfigPanel({
+  isOpen,
+  onClose,
+  isConnected,
+  buttonRef,
+}: {
+  isOpen: boolean;
+  onClose: () => void;
+  isConnected: boolean;
+  buttonRef: React.RefObject<HTMLButtonElement>;
+}) {
+  const { i18n } = useTranslation();
+  const [theme, setTheme] = useState(() => localStorage.getItem('theme') || 'light');
+  const panelRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    function handleClickOutside(event: MouseEvent) {
+      if (
+        panelRef.current &&
+        !panelRef.current.contains(event.target as Node) &&
+        buttonRef.current &&
+        !buttonRef.current.contains(event.target as Node)
+      ) {
+        onClose();
+      }
+    }
+    if (isOpen) {
+      document.addEventListener('mousedown', handleClickOutside);
+    }
+    return () => {
+      document.removeEventListener('mousedown', handleClickOutside);
+    };
+  }, [isOpen, onClose, buttonRef]);
+
+  const handleLanguageChange = (lang: 'zh' | 'en') => {
+    i18n.changeLanguage(lang);
+    void fetch('/api/locale.set_conf', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ preferred_language: lang }),
+    }).catch(() => {});
+  };
+
+  const handleThemeChange = (newTheme: string) => {
+    setTheme(newTheme);
+    localStorage.setItem('theme', newTheme);
+    if (newTheme === 'light') {
+      document.documentElement.setAttribute('data-theme', 'light');
+    } else {
+      document.documentElement.removeAttribute('data-theme');
+    }
+  };
+
+  const isZh = i18n.language.startsWith('zh');
+
+  if (!isOpen) return null;
+
+  return (
+    <div ref={panelRef} className="advanced-config-panel">
+      <div className="config-row">
+        <span className="config-row__label">连接状态</span>
+        <div className={`connection-status ${isConnected ? 'connection-status--connected' : 'connection-status--disconnected'}`}>
+          <span className="connection-status__dot" />
+          <span className="connection-status__text">
+            {isConnected ? '已连接' : '未连接'}
+          </span>
+        </div>
+      </div>
+
+      <div className="config-row">
+        <span className="config-row__label">语言</span>
+        <div className="segmented-control">
+          <button
+            className={`segmented-control__btn ${isZh ? 'segmented-control__btn--active' : ''}`}
+            onClick={() => handleLanguageChange('zh')}
+          >
+            中
+          </button>
+          <button
+            className={`segmented-control__btn ${!isZh ? 'segmented-control__btn--active' : ''}`}
+            onClick={() => handleLanguageChange('en')}
+          >
+            En
+          </button>
+        </div>
+      </div>
+
+      <div className="config-row">
+        <span className="config-row__label">外观</span>
+        <div className="segmented-control segmented-control--icons">
+          <button
+            className={`segmented-control__btn ${theme === 'system' ? 'segmented-control__btn--active' : ''}`}
+            onClick={() => handleThemeChange('system')}
+            title="跟随系统"
+          >
+            <img src={appearanceSystemIcon} alt="" />
+          </button>
+          <button
+            className={`segmented-control__btn ${theme === 'dark' ? 'segmented-control__btn--active' : ''}`}
+            onClick={() => handleThemeChange('dark')}
+            title="深色模式"
+          >
+            <img src={appearanceDarkIcon} alt="" />
+          </button>
+          <button
+            className={`segmented-control__btn ${theme === 'light' ? 'segmented-control__btn--active' : ''}`}
+            onClick={() => handleThemeChange('light')}
+            title="浅色模式"
+          >
+            <img src={appearanceLightIcon} alt="" />
+          </button>
+        </div>
+      </div>
+    </div>
+  );
 }
 
 export function SessionSidebar({
   activeNav,
   onNavigate,
-  sessionId,
+  sessionId: _sessionId,
   appVersion,
+  isConnected,
+  onNewSession,
+  collapsed = false,
+  onCollapse,
+  onExpand,
 }: SessionSidebarProps) {
   const { t } = useTranslation();
-  return (
-    <aside className="nav flex flex-col">
-      <div className="session-sidebar-group-title session-sidebar-group-title--uppercase">
-        {t('nav.chat')}
-      </div>
-      <div className="space-y-1 mb-4">
-        <button
-          onClick={() => onNavigate('chat')}
-          className={`nav-item w-full ${activeNav === 'chat' ? 'active' : ''}`}
-        >
-          <svg className="w-4 h-4 nav-item__icon" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={1.5}>
-            <path strokeLinecap="round" strokeLinejoin="round" d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z" />
-          </svg>
-          {t('nav.chat')}
-        </button>
-      </div>
+  const [advancedConfigOpen, setAdvancedConfigOpen] = useState(false);
+  const advancedBtnRef = useRef<HTMLButtonElement>(null);
 
-      <div className="session-sidebar-group-title">
-        {t('nav.agent')}
-      </div>
-      <div className="space-y-1">
-        <button
-          onClick={() => onNavigate('agents')}
-          className={`nav-item w-full ${activeNav === 'agents' ? 'active' : ''}`}
-        >
-          <svg className="w-4 h-4 nav-item__icon" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={1.5}>
-            <path strokeLinecap="round" strokeLinejoin="round" d="M9.75 17L9 20l-1 1h8l-1-1-.75-3M3 13h18M5 17h14a2 2 0 002-2V5a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z" />
-          </svg>
-          {t('nav.agent')}
-        </button>
-        <button
-          onClick={() => onNavigate('sessions')}
-          className={`nav-item w-full ${activeNav === 'sessions' ? 'active' : ''}`}
-        >
-          <svg className="w-4 h-4 nav-item__icon" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={1.5}>
-            <path strokeLinecap="round" strokeLinejoin="round" d="M12 6v12m6-6H6m9-9h3a2.25 2.25 0 012.25 2.25v3M9 3H6a2.25 2.25 0 00-2.25 2.25v3m0 6v3A2.25 2.25 0 006 19.75h3m6 0h3a2.25 2.25 0 002.25-2.25v-3" />
-          </svg>
-          {t('nav.sessions')}
-        </button>
-        <button
-          onClick={() => onNavigate('teams')}
-          className={`nav-item w-full ${activeNav === 'teams' ? 'active' : ''}`}
-        >
-          <svg className="w-4 h-4 nav-item__icon" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={1.5}>
-            <path strokeLinecap="round" strokeLinejoin="round" d="M18 18.72a8.96 8.96 0 01-12 0m12 0a3.75 3.75 0 00-6 0m6 0A8.96 8.96 0 0012 15.75a8.96 8.96 0 00-6 2.97m12 0A9 9 0 1012 21a8.96 8.96 0 006-2.28zM15 9.75a3 3 0 11-6 0 3 3 0 016 0zm6 3a2.25 2.25 0 11-4.5 0 2.25 2.25 0 014.5 0zm-13.5 0a2.25 2.25 0 11-4.5 0 2.25 2.25 0 014.5 0z" />
-          </svg>
-          {t('nav.teams')}
-        </button>
-        <button
-          onClick={() => onNavigate('heartbeat')}
-          className={`nav-item w-full ${activeNav === 'heartbeat' ? 'active' : ''}`}
-        >
-          <svg className="w-4 h-4 nav-item__icon" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={1.5}>
-            <path strokeLinecap="round" strokeLinejoin="round" d="M3.75 12h3.75l1.5-4.5 3 9 2.25-6h6" />
-          </svg>
-          {t('nav.heartbeat')}
-        </button>
-        <button
-          onClick={() => onNavigate('cron')}
-          className={`nav-item w-full ${activeNav === 'cron' ? 'active' : ''}`}
-        >
-          <svg className="w-4 h-4 nav-item__icon" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={1.5}>
-            <path strokeLinecap="round" strokeLinejoin="round" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />
-          </svg>
-          {t('nav.cron')}
-        </button>
-        <button
-          onClick={() => onNavigate('skills')}
-          className={`nav-item w-full ${activeNav === 'skills' ? 'active' : ''}`}
-        >
-          <svg className="w-4 h-4 nav-item__icon" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={1.5}>
-            <path strokeLinecap="round" strokeLinejoin="round" d="M3.75 13.5l10.5-11.25L12 10.5h8.25L9.75 21.75 12 13.5H3.75z" />
-          </svg>
-          {t('nav.skills')}
-        </button>
-        <button
-          onClick={() => onNavigate('channels')}
-          className={`nav-item w-full ${activeNav === 'channels' ? 'active' : ''}`}
-        >
-          <svg className="w-4 h-4 nav-item__icon" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={1.5}>
-            <path strokeLinecap="round" strokeLinejoin="round" d="M4.5 6.75h15m-15 5.25h15m-15 5.25h15" />
-          </svg>
-          {t('nav.channels')}
-        </button>
-        <button
-          onClick={() => onNavigate('extensions')}
-          className={`nav-item w-full ${activeNav === 'extensions' ? 'active' : ''}`}
-        >
-          <svg className="w-4 h-4 nav-item__icon" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={1.5}>
-            <path strokeLinecap="round" strokeLinejoin="round" d="M21 7.5l-9-5.25L3 7.5m18 0l-9 5.25m9-5.25v9l-9 5.25M3 7.5l9 5.25M3 7.5v9l9 5.25m0-9v9" />
-          </svg>
-          {t('nav.extensions', 'Extensions')}
-        </button>
-      </div>
+  // Tooltip state for collapsed mode
+  const [hoveredNav, setHoveredNav] = useState<string | null>(null);
+  const mouseMovedRef = useRef(false);
+  const sidebarRef = useRef<HTMLElement>(null);
+  const logoRef = useRef<HTMLDivElement>(null);
+  const newChatRef = useRef<HTMLButtonElement>(null);
+  const settingsRef = useRef<HTMLButtonElement>(null);
+  const navRefs = useRef<Map<string, HTMLButtonElement>>(new Map());
 
-      <div className="session-sidebar-group-title session-sidebar-group-title--with-top-gap">
-        {t('nav.settings')}
-      </div>
-      <div className="space-y-1">
-        <button
-          onClick={() => onNavigate('configpanel')}
-          className={`nav-item w-full ${activeNav === 'configpanel' ? 'active' : ''}`}
-        >
-          <svg className="w-4 h-4 nav-item__icon" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={1.5}>
-            <path strokeLinecap="round" strokeLinejoin="round" d="M9.594 3.94c.09-.542.56-.94 1.11-.94h2.593c.55 0 1.02.398 1.11.94l.213 1.281c.063.374.313.686.645.87.074.04.147.083.22.127.325.196.72.257 1.075.124l1.217-.456a1.125 1.125 0 011.37.49l1.296 2.247a1.125 1.125 0 01-.26 1.431l-1.003.827c-.293.241-.438.613-.43.992a7.723 7.723 0 010 .255c-.008.378.137.75.43.991l1.004.827c.424.35.534.955.26 1.43l-1.298 2.247a1.125 1.125 0 01-1.369.491l-1.217-.456c-.355-.133-.75-.072-1.076.124a6.47 6.47 0 01-.22.128c-.331.183-.581.495-.644.869l-.213 1.281c-.09.543-.56.941-1.11.941h-2.594c-.55 0-1.019-.398-1.11-.94l-.213-1.281c-.062-.374-.312-.686-.644-.87a6.52 6.52 0 01-.22-.127c-.325-.196-.72-.257-1.076-.124l-1.217.456a1.125 1.125 0 01-1.369-.49l-1.297-2.247a1.125 1.125 0 01.26-1.431l1.004-.827c.292-.24.437-.613.43-.991a6.932 6.932 0 010-.255c.007-.38-.138-.751-.43-.992l-1.004-.827a1.125 1.125 0 01-.26-1.43l1.297-2.247a1.125 1.125 0 011.37-.491l1.216.456c.356.133.751.072 1.076-.124.072-.044.146-.086.22-.128.332-.183.582-.495.644-.869l.214-1.28z" />
-            <path strokeLinecap="round" strokeLinejoin="round" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
-          </svg>
-          {t('nav.config')}
-        </button>
-        <button
-          onClick={() => onNavigate('browserpanel')}
-          className={`nav-item w-full ${activeNav === 'browserpanel' ? 'active' : ''}`}
-        >
-          <svg className="w-4 h-4 nav-item__icon" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={1.5}>
-            <circle cx="12" cy="12" r="10" />
-            <path strokeLinecap="round" strokeLinejoin="round" d="M2 12h20M12 2a15.3 15.3 0 014 10 15.3 15.3 0 01-4 10 15.3 15.3 0 01-4-10A15.3 15.3 0 0112 2z" />
-          </svg>
-          {t('nav.browser')}
-        </button>
-        <button
-          onClick={() => onNavigate('logspanel')}
-          className={`nav-item w-full ${activeNav === 'logspanel' ? 'active' : ''}`}
-        >
-          <svg className="w-4 h-4 nav-item__icon" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={1.5}>
-            <path strokeLinecap="round" strokeLinejoin="round" d="M7.5 3.75h9a2.25 2.25 0 012.25 2.25v12a2.25 2.25 0 01-2.25 2.25h-9A2.25 2.25 0 015.25 18V6A2.25 2.25 0 017.5 3.75z" />
-            <path strokeLinecap="round" strokeLinejoin="round" d="M8.25 8.25h7.5M8.25 12h7.5M8.25 15.75h4.5" />
-          </svg>
-          {t('nav.logs')}
-        </button>
-        {FEATURE_APP_UPDATER_UI && (
-          <button
-            onClick={() => onNavigate('updatepanel')}
-            className={`nav-item w-full ${activeNav === 'updatepanel' ? 'active' : ''}`}
-          >
-            <svg className="w-4 h-4 nav-item__icon" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={1.5}>
-              <path strokeLinecap="round" strokeLinejoin="round" d="M12 16.5V3.75m0 0L7.5 8.25M12 3.75l4.5 4.5" />
-              <path strokeLinecap="round" strokeLinejoin="round" d="M3.75 15.75v1.5A2.25 2.25 0 006 19.5h12a2.25 2.25 0 002.25-2.25v-1.5" />
-            </svg>
-            {t('nav.update')}
-          </button>
-        )}
-      </div>
+  // Synchronously reset mouse-move guard and clear hover during render phase,
+  // before DOM commit, so mouseenter events arriving between commit and effect
+  // see the correct state.
+  const prevCollapsedRef = useRef(collapsed);
+  if (prevCollapsedRef.current !== collapsed) {
+    mouseMovedRef.current = false;
+    prevCollapsedRef.current = collapsed;
+  }
+  // Also clear any stale hover state when transitioning to expanded
+  useEffect(() => {
+    if (!collapsed) {
+      setHoveredNav(null);
+    }
+  }, [collapsed]);
 
-      <div className="flex-1" />
+  const handleMouseEnter = useCallback((key: string) => {
+    if (mouseMovedRef.current) {
+      setHoveredNav(key);
+    }
+  }, []);
 
-      {false && <OffloadFilesWidget sessionId={sessionId} />}
+  useEffect(() => {
+    if (!collapsed) return;
+    function onMouseMove() {
+      if (!mouseMovedRef.current) {
+        mouseMovedRef.current = true;
+      }
+    }
+    window.addEventListener('mousemove', onMouseMove, { once: false });
+    return () => window.removeEventListener('mousemove', onMouseMove);
+  }, [collapsed]);
 
-      <div className="pt-4 mt-4 border-t border-border text-xs text-text-muted">
-        <div className="px-2.5">
-          <span>{t('version', { version: appVersion })}</span>
+  const handleNewSession = useCallback(() => {
+    onNavigate('chat');
+    if (onNewSession) {
+      onNewSession();
+    }
+  }, [onNavigate, onNewSession]);
+
+  const toggleAdvancedConfig = () => {
+    setAdvancedConfigOpen(!advancedConfigOpen);
+  };
+
+  const handleLogoClick = () => {
+    if (collapsed && onExpand) {
+      onExpand();
+    } else if (!collapsed && onCollapse) {
+      onCollapse();
+    }
+  };
+
+  const getNavItemLabel = (item: NavItem) => t(item.labelKey);
+
+  // Collapsed mode: 48px icon-only sidebar
+  if (collapsed) {
+    return (
+      <aside ref={sidebarRef} className="sidebar sidebar--collapsed">
+        {/* Logo — SVG already contains gradient background + mark at 28×28 */}
+        <Tooltip text="展开侧边栏" targetRef={logoRef} visible={hoveredNav === 'logo'} />
+        <div
+          ref={logoRef}
+          className="collapsed-logo"
+          onClick={handleLogoClick}
+          onMouseEnter={() => handleMouseEnter('logo')}
+          onMouseLeave={() => setHoveredNav(null)}
+          title="展开侧边栏"
+        >
+          <img src={logoIcon} alt="Logo" width="28" height="28" />
         </div>
+
+        {/* New Chat button */}
+        <Tooltip text="新建会话" targetRef={newChatRef} visible={hoveredNav === 'newchat'} />
+        <button
+          ref={newChatRef}
+          className="collapsed-nav-item"
+          onClick={handleNewSession}
+          onMouseEnter={() => handleMouseEnter('newchat')}
+          onMouseLeave={() => setHoveredNav(null)}
+          title="新建会话"
+        >
+          <img src={plusIcon} alt="" width="16" height="16" />
+        </button>
+
+        {/* Main nav icons */}
+        {mainNavItems.map((item) => (
+          <Tooltip
+            key={item.key}
+            text={getNavItemLabel(item)}
+            targetRef={{ current: navRefs.current.get(item.key) || null }}
+            visible={hoveredNav === item.key}
+          />
+        ))}
+        {mainNavItems.map((item) => (
+          <button
+            key={item.key}
+            ref={(el) => {
+              if (el) navRefs.current.set(item.key, el);
+            }}
+            className={`collapsed-nav-item${activeNav === item.key ? ' collapsed-nav-item--active' : ''}`}
+            onClick={() => onNavigate(item.key)}
+            onMouseEnter={() => handleMouseEnter(item.key)}
+            onMouseLeave={() => setHoveredNav(null)}
+            title={getNavItemLabel(item)}
+          >
+            {item.icon}
+          </button>
+        ))}
+
+        {/* Separator dot */}
+        <div className="collapsed-separator" />
+
+        {/* Settings nav icons */}
+        {settingsNavItems.map((item) => (
+          <Tooltip
+            key={item.key}
+            text={getNavItemLabel(item)}
+            targetRef={{ current: navRefs.current.get(item.key) || null }}
+            visible={hoveredNav === item.key}
+          />
+        ))}
+        {settingsNavItems.map((item) => (
+          <button
+            key={item.key}
+            ref={(el) => {
+              if (el) navRefs.current.set(item.key, el);
+            }}
+            className={`collapsed-nav-item${activeNav === item.key ? ' collapsed-nav-item--active' : ''}`}
+            onClick={() => onNavigate(item.key)}
+            onMouseEnter={() => handleMouseEnter(item.key)}
+            onMouseLeave={() => setHoveredNav(null)}
+            title={getNavItemLabel(item)}
+          >
+            {item.icon}
+          </button>
+        ))}
+
+        {/* Bottom spacer */}
+        <div className="collapsed-spacer" />
+
+        {/* Settings icon */}
+        <Tooltip text="高级配置" targetRef={settingsRef} visible={hoveredNav === 'settings'} />
+        <button
+          ref={settingsRef}
+          className="collapsed-nav-item"
+          onClick={toggleAdvancedConfig}
+          onMouseEnter={() => handleMouseEnter('settings')}
+          onMouseLeave={() => setHoveredNav(null)}
+          title="高级配置"
+        >
+          <img src={advancedConfigIcon} alt="" width="16" height="16" />
+        </button>
+
+        <AdvancedConfigPanel
+          isOpen={advancedConfigOpen}
+          onClose={() => setAdvancedConfigOpen(false)}
+          isConnected={isConnected}
+          buttonRef={advancedBtnRef}
+        />
+      </aside>
+    );
+  }
+
+  // Expanded mode
+  return (
+    <aside className="sidebar">
+      {/* Header Row: Logo + Collapse Button */}
+      <div className="sidebar-header">
+        <div className="sidebar-logo">
+          <img src={logoIcon} alt="Logo" width="28" height="28" />
+        </div>
+        <button
+          className="collapse-btn"
+          title="收起侧边栏"
+          onClick={() => onCollapse?.()}
+        >
+          <img src={collapseIcon} alt="" />
+        </button>
       </div>
+
+      {/* 智能体 Section */}
+      <div className="nav-section">
+        <div className="nav-section-label">智能体</div>
+        <button className="new-chat-btn" onClick={handleNewSession}>
+          <span className="new-chat-btn__left">
+            <img src={plusIcon} alt="" />
+            <span className="new-chat-btn__text">新建会话</span>
+          </span>
+        </button>
+        <nav className="sidebar-nav">
+          {mainNavItems.map((item) => (
+            <button
+              key={item.key}
+              className={`nav-item ${activeNav === item.key ? 'active' : ''}`}
+              onClick={() => onNavigate(item.key)}
+            >
+              <span className="nav-item__icon">{item.icon}</span>
+              <span className="nav-item__text">{t(item.labelKey)}</span>
+            </button>
+          ))}
+        </nav>
+      </div>
+
+      {/* Settings Section */}
+      <div className="nav-section">
+        <div className="nav-section-label">设置</div>
+        <nav className="sidebar-nav">
+          {settingsNavItems.map((item) => (
+            <button
+              key={item.key}
+              className={`nav-item ${activeNav === item.key ? 'active' : ''}`}
+              onClick={() => onNavigate(item.key)}
+            >
+              <span className="nav-item__icon">{item.icon}</span>
+              <span className="nav-item__text">{t(item.labelKey)}</span>
+            </button>
+          ))}
+        </nav>
+      </div>
+
+      {/* User Info Bar - Bottom Row */}
+      <div className="sidebar-bottom">
+        <div className="sidebar-user">
+          <span className="sidebar-user__name">{t('version', { version: appVersion })}</span>
+        </div>
+        <button
+          ref={advancedBtnRef}
+          className="advanced-config-btn"
+          onClick={toggleAdvancedConfig}
+          title="高级配置"
+        >
+          <img src={advancedConfigIcon} alt="" />
+        </button>
+      </div>
+
+      <AdvancedConfigPanel
+        isOpen={advancedConfigOpen}
+        onClose={() => setAdvancedConfigOpen(false)}
+        isConnected={isConnected}
+        buttonRef={advancedBtnRef}
+      />
     </aside>
   );
 }

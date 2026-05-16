@@ -13,7 +13,7 @@ from jiuwenclaw.common.utils import get_cron_jobs_path
 
 
 class CronJobStore:
-    """Persist cron jobs to ~/.jiuwenclaw/agent/home/cron_jobs.json."""
+    """Persist cron jobs to ~/.jiuwenswarm/agent/home/cron_jobs.json."""
 
     def __init__(self, path: Path | None = None) -> None:
         self._path = path or get_cron_jobs_path()

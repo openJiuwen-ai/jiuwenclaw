@@ -15,7 +15,7 @@ import uuid
 
 # --- Early --dotenv parsing (before jiuwenclaw imports) ---
 from jiuwenclaw.dotenv_early import parse_dotenv_early, get_parsed_dotenv
-parse_dotenv_early("jiuwenclaw-tui")
+parse_dotenv_early("jiuwenswarm-tui")
 
 # --- Now safe to import jiuwenclaw modules ---
 from jiuwenclaw.common.e2a.adapters import (
@@ -38,8 +38,8 @@ def write_json_stdout(payload: dict) -> None:
 
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        prog="jiuwenclaw-tui",
-        description="JiuwenClaw CLI 入口（子命令分发）。",
+        prog="jiuwenswarm-tui",
+        description="JiuwenSwarm CLI 入口（子命令分发）。",
     )
     subparsers = parser.add_subparsers(dest="command")
 

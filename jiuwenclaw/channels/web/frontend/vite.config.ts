@@ -13,7 +13,7 @@ interface ErrorWithCode {
 
 /**
  * file-api 使用的项目根目录，需与后端 get_root_dir() 一致，前端编辑的 HEARTBEAT.md 才会被心跳读到。
- * 优先级：环境变量 > 已存在的用户工作区 ~/.jiuwenclaw > 仓库根。
+ * 优先级：环境变量 > 已存在的用户工作区 ~/.jiuwenswarm > 仓库根。
  */
 function resolveProjectRootDir(): string {
   const envRoot = process.env.JIUWENCLAW_ROOT || process.env.JIUWENCLAW_PROJECT_ROOT
@@ -25,18 +25,18 @@ function resolveProjectRootDir(): string {
   const home = process.env.USERPROFILE || process.env.HOME || ''
   if (home) {
     // 优先检查多实例环境变量
-    const envWorkspace = process.env.JIUWENCLAW_DATA_DIR
+    const envWorkspace = process.env.JIUWENSWARM_DATA_DIR
     if (envWorkspace) {
-      console.log('[file-api] 使用 JIUWENCLAW_DATA_DIR:', path.resolve(envWorkspace))
+      console.log('[file-api] 使用 JIUWENSWARM_DATA_DIR:', path.resolve(envWorkspace))
       return path.resolve(envWorkspace)
     }
-    const userWorkspace = path.join(home, '.jiuwenclaw')
+    const userWorkspace = path.join(home, '.jiuwenswarm')
     if (fs.existsSync(userWorkspace)) {
       console.log('[file-api] 使用用户工作区:', path.resolve(userWorkspace))
       return path.resolve(userWorkspace)
     }
   }
-  const repoRoot = path.resolve(__dirname, '../..')
+  const repoRoot = path.resolve(__dirname, '../../../')
   console.log('[file-api] 使用仓库根目录:', repoRoot)
   return repoRoot
 }
@@ -75,7 +75,8 @@ function devWsTrafficLogger(): Plugin {
     name: 'dev-ws-traffic-logger',
     configureServer(server) {
       const projectRootDir = resolveProjectRootDir()
-      const logDir = path.resolve(projectRootDir, '.logs')
+      const agentDir = path.resolve(projectRootDir, 'agent')
+      const logDir = path.resolve(agentDir, '.logs')
       const logFile = path.resolve(logDir, 'ws-dev.log')
       fs.mkdirSync(logDir, { recursive: true })
       // 每次前端 dev 服务启动时清空日志，避免历史数据干扰排查。
@@ -165,9 +166,9 @@ function devFileContentApi(): Plugin {
   const projectRootDir = resolveProjectRootDir()
   const workspaceRootDir = path.resolve(projectRootDir, 'agent')
   const agentTeamsRootDir = path.resolve(projectRootDir, '.agent_teams')
-  const webLogsRootDir = path.resolve(projectRootDir, '.logs')
+  const webLogsRootDir = path.resolve(workspaceRootDir, '.logs')
   const autoHarnessDir = path.resolve(projectRootDir, 'auto-harness')
-  const generateAgentFoldersScriptPath = path.resolve(__dirname, '../scripts/generate-agent-folders.js')
+  const generateAgentFoldersScriptPath = path.resolve(__dirname, '../../../scripts/generate-agent-folders.js')
   // dev 模式默认开启调试视图，与“前端 dev 即调试模式”一致。
   let wsDisableCompress = true
   const isMarkdownFile = (targetPath: string) => {
@@ -389,7 +390,7 @@ function devFileContentApi(): Plugin {
               return
             }
             if (!fs.existsSync(fullPath)) {
-              if (filePath.replace(/\\/g, '/') === 'agent/jiuwenclaw_workspace/agent-data.json') {
+              if (filePath.replace(/\\/g, '/') === 'agent/workspace/agent-data.json') {
                 try {
                   const runResult = spawnSync(process.execPath, [generateAgentFoldersScriptPath], {
                     encoding: 'utf-8',

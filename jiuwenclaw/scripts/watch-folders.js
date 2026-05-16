@@ -22,14 +22,14 @@ generate();
 const chokidar = require('chokidar');
 
 // 优先使用环境变量，支持多实例
-const envWorkspace = process.env.JIUWENCLAW_DATA_DIR;
+const envWorkspace = process.env.JIUWENSWARM_DATA_DIR;
 const homeDir = process.env.USERPROFILE || process.env.HOME || '';
 
 let userAgentDir = '';
 if (envWorkspace) {
   userAgentDir = path.join(envWorkspace, 'agent');
 } else if (homeDir) {
-  userAgentDir = path.join(homeDir, '.jiuwenclaw', 'agent');
+  userAgentDir = path.join(homeDir, '.jiuwenswarm', 'agent');
 }
 
 const fallbackRepoAgentDir = path.join(__dirname, '../resources/agent');

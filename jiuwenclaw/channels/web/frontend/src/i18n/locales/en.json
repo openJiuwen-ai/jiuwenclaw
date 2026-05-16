@@ -807,8 +807,16 @@
   "skills": {
     "title": "Skill Management",
     "subtitle": "Manage and install skills available to the agent.",
+    "tabs": {
+      "mySkills": "My Skills",
+      "marketplace": "Marketplace"
+    },
+    "marketplaceTabs": {
+      "builtin": "Built-in"
+    },
     "actions": {
       "install": "Install",
+      "installing": "Installing...",
       "uninstall": "Uninstall",
       "importLocal": "Import Local Skill",
       "sourceManager": "Source Manager",
@@ -980,6 +988,7 @@
     "importPrompt": "Enter a local skill path on the server (SKILL.md or directory)",
     "uninstallConfirm": "Uninstall {{pluginName}}?",
     "messages": {
+      "installing": "Installing: {{name}}...",
       "installed": "Installed: {{spec}}",
       "imported": "Imported: {{name}}",
       "uninstalled": "Uninstalled: {{pluginName}}",
@@ -1017,7 +1026,7 @@
     "markdownOnly": "Only Markdown/JSON (.md/.mdx/.json) preview is supported",
     "errors": {
       "refreshFailed": "Refresh failed: unable to rebuild the agent file index. Check the generator script logs.",
-      "loadFailed": "Unable to read the agent file list. Check whether agent/jiuwenclaw_workspace/agent-data.json has been generated."
+      "loadFailed": "Unable to read the agent file list. Check whether agent/workspace/agent-data.json has been generated."
     }
   },
   "fileViewer": {
@@ -1152,8 +1161,6 @@
       "enabled": "Enable updater",
       "timeoutSeconds": "Timeout seconds",
       "releaseApiUrl": "Release API URL",
-      "repoOwner": "GitHub owner",
-      "repoName": "GitHub repo",
       "assetPattern": "Installer asset pattern",
       "sha256Pattern": "SHA256 asset pattern"
     }
@@ -1201,7 +1208,7 @@
     "helpTitle": "Usage Guide",
     "help0": "Extension folder must contain rail.py as the entry file",
     "help1": "Rail extension files must inherit from DeepAgentRail or AgentRail base class",
-    "help2": "Extension files are saved to ~/.jiuwenclaw/agent/jiuwenclaw_workspace/extensions/ directory"
+    "help2": "Extension files are saved to ~/.jiuwenswarm/agent/workspace/extensions/ directory"
   },
   "ownerScopes": {
     "title": "Avatar Permission",

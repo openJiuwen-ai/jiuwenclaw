@@ -347,7 +347,7 @@ _CLI_CONFIG_YAML_SETTERS: dict[str, Any] = {
     "permissions_enabled": update_permissions_enabled_in_config,
     "memory_forbidden_enabled": update_memory_forbidden_enabled_in_config,
     "preferred_language": update_preferred_language_in_config,
-    # Auto-Harness config items (stored in ~/.jiuwenclaw/auto-harness/config.yaml)
+    # Auto-Harness config items (stored in ~/.jiuwenswarm/auto-harness/config.yaml)
     "auto_harness_git_user_name": _update_auto_harness_git_user_name,
     "auto_harness_git_user_email": _update_auto_harness_git_user_email,
     "auto_harness_git_fork_owner": _update_auto_harness_git_fork_owner,

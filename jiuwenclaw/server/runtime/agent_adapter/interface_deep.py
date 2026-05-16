@@ -14,6 +14,7 @@ import logging
 import os
 import platform
 import subprocess
+import time
 from contextvars import ContextVar, Token
 from dataclasses import dataclass
 from shutil import which
@@ -131,6 +132,7 @@ from jiuwenclaw.agents.harness.common.memory.config import (
 from jiuwenclaw.agents.harness.common.memory.external_memory_config import is_builtin_memory_allowed
 from jiuwenclaw.agents.harness.common.rails.permissions.tool_permission_context import TOOL_PERMISSION_CHANNEL_ID
 from jiuwenclaw.server.runtime.session.session_metadata import build_server_push_message
+from jiuwenclaw.server.runtime.session.session_history import append_history_record
 from jiuwenclaw.server.runtime.skill.skill_manager import SkillManager
 from jiuwenclaw.agents.harness.common.tools.multimodal_config import (
     apply_audio_model_config_from_yaml,
@@ -2944,6 +2946,7 @@ class JiuWenClawDeepAdapter:
 
         success = True
         updated_todos = None
+        cancelled_tool_results = []
 
         if intent == "pause":
             # 暂停：通过 StreamEventRail 在下一个 model_call/tool_call checkpoint 阻塞
@@ -2970,10 +2973,17 @@ class JiuWenClawDeepAdapter:
             # 1. 通过 rail abort 在 checkpoint 抛 CancelledError，打断当前内层执行
             if self._stream_event_rail is not None:
                 self._stream_event_rail.abort()
+                # 收集被中断的工具执行信息，通知前端更新状态
+                self._stream_event_rail.collect_cancelled_tool_updates(request.session_id)
+                cancelled_tool_results = self._stream_event_rail.get_cancelled_tool_results()
+                self._stream_event_rail.clear_cancelled_tool_results()
             # 2. 终止 DeepAgent 外层 task loop
             if self._instance is not None:
                 await self._instance.abort()
-            # 3. 不清理 todo — 保留给新任务继续
+            # 3. 取消 TaskScheduler 中正在运行的 asyncio.Tasks
+            #    （协作式 abort 只能在 checkpoint 之间生效，无法打断 in-flight HTTP 调用）
+            self._cancel_scheduler_running_tasks()
+            # 4. 不清理 todo — 保留给新任务继续
             logger.info(
                 "[JiuWenClawDeepAdapter] interrupt(supplement): 已停止执行 request_id=%s",
                 request.request_id,
@@ -2988,6 +2998,9 @@ class JiuWenClawDeepAdapter:
             # SessionManager.cancel_session_task 仅管理非流式队列 Task，对流式后台 Task 无效。
             if self._stream_event_rail is not None:
                 self._stream_event_rail.abort()
+                self._stream_event_rail.collect_cancelled_tool_updates(request.session_id)
+                cancelled_tool_results = self._stream_event_rail.get_cancelled_tool_results()
+                self._stream_event_rail.clear_cancelled_tool_results()
                 self._stream_event_rail.reset_for_new_task()
                 logger.info(
                     "[JiuWenClawDeepAdapter] interrupt(cancel): 已设置 abort 并解除 pause 阻塞"
@@ -3051,6 +3064,30 @@ class JiuWenClawDeepAdapter:
         # cancel 后附带更新的 todo 列表，通知前端刷新
         if intent not in ("pause", "resume", "supplement") and updated_todos is not None:
             payload["todos"] = updated_todos
+
+        # cancel 后附带被中断的工具执行结果，通知前端更新状态
+        if cancelled_tool_results:
+            payload["cancelled_tools"] = cancelled_tool_results
+            # 写入历史记录，确保刷新网页后工具状态正确显示
+            for tool_info in cancelled_tool_results:
+                append_history_record(
+                    session_id=request.session_id,
+                    request_id=request.request_id,
+                    channel_id=request.channel_id,
+                    role="assistant",
+                    event_type="chat.tool_result",
+                    content=tool_info.get("result", ""),
+                    timestamp=time.time(),
+                    extra={
+                        "tool_result": {
+                            "tool_name": tool_info.get("tool_name", ""),
+                            "tool_call_id": tool_info.get("tool_call_id", ""),
+                            "result": tool_info.get("result", ""),
+                            "status": tool_info.get("status", "error"),
+                        },
+                    },
+                    mode=request.params.get("mode", "unknown") if isinstance(request.params, dict) else "unknown",
+                )
 
         return AgentResponse(
             request_id=request.request_id,

@@ -1,7 +1,7 @@
 """CLI：将运行时数据初始化到用户数据根目录（与 ``get_user_workspace_dir()`` 一致）。
 
-默认根目录为 ``~/.jiuwenclaw``；若进程环境中已设置 ``JIUWENCLAW_DATA_DIR``（须为可用绝对路径，
-且应在启动本脚本前注入，见 ``jiuwenclaw.utils`` 中的 ``JIUWENCLAW_DATA_DIR``），则初始化到该路径下。
+默认根目录为 ``~/.jiuwenswarm``；若进程环境中已设置 ``JIUWENSWARM_DATA_DIR``（须为可用绝对路径，
+且应在启动本脚本前注入，见 ``jiuwenclaw.utils`` 中的 ``JIUWENSWARM_DATA_DIR``），则初始化到该路径下。
 
 无论是通过 pip/whl 安装，还是在源码目录里直接运行：
 - 运行本脚本会先询问语言偏好（zh/en），写入 config 的 preferred_language；
@@ -10,10 +10,10 @@
   源文件使用 _ZH/_EN 后缀，目标文件不带后缀。
 
 使用方式:
-- jiuwenclaw-init -f: 强制清理，删除整个用户数据根目录后重新初始化
-- jiuwenclaw-init: 保留原有数据，执行迁移合并
-- jiuwenclaw-init --name alice: 创建命名实例 alice
-- jiuwenclaw-init -f --name alice: 强制重建命名实例 alice
+- jiuwenswarm-init -f: 强制清理，删除整个用户数据根目录后重新初始化
+- jiuwenswarm-init: 保留原有数据，执行迁移合并
+- jiuwenswarm-init --name alice: 创建命名实例 alice
+- jiuwenswarm-init -f --name alice: 强制重建命名实例 alice
 """
 
 from __future__ import annotations
@@ -54,18 +54,18 @@ def run_init(force: bool = False, name: Optional[str] = None) -> int:
     if name:
         validation_error = validate_instance_name(name)
         if validation_error:
-            print(f"[jiuwenclaw-init] ERROR: {validation_error}")
+            print(f"[jiuwenswarm-init] ERROR: {validation_error}")
             return 1
 
     # 2. Determine target workspace path and set env var
     if name:
         workspace_path = get_instance_workspace_path(name)
-        print(f"[jiuwenclaw-init] Creating instance: {name}")
-        print(f"[jiuwenclaw-init] Workspace: {workspace_path}")
+        print(f"[jiuwenswarm-init] Creating instance: {name}")
+        print(f"[jiuwenswarm-init] Workspace: {workspace_path}")
     else:
-        workspace_path = get_user_home() / ".jiuwenclaw"
-        print(f"[jiuwenclaw-init] Initializing default workspace")
-        print(f"[jiuwenclaw-init] Workspace: {workspace_path}")
+        workspace_path = get_user_home() / ".jiuwenswarm"
+        print(f"[jiuwenswarm-init] Initializing default workspace")
+        print(f"[jiuwenswarm-init] Workspace: {workspace_path}")
 
     # 3. Check if instance is running (for named instances, always check)
     if name:
@@ -79,15 +79,15 @@ def run_init(force: bool = False, name: Optional[str] = None) -> int:
 
         status = get_instance_status(config)
         if status.running:
-            print(f"[jiuwenclaw-init] ERROR: Instance '{name}' is running (PID={status.pid}).")
-            print(f"[jiuwenclaw-init] Stop it first with: jiuwenclaw-start --stop {name}")
+            print(f"[jiuwenswarm-init] ERROR: Instance '{name}' is running (PID={status.pid}).")
+            print(f"[jiuwenswarm-init] Stop it first with: jiuwenswarm-start --stop {name}")
             return 1
     elif force:
         # For default instance, use get_default_instance_status which includes port detection
         status = get_default_instance_status()
         if status.running:
-            print(f"[jiuwenclaw-init] ERROR: Default instance is running (PID={status.pid or '-'}).")
-            print(f"[jiuwenclaw-init] Stop it first with: jiuwenclaw-start --stop default")
+            print(f"[jiuwenswarm-init] ERROR: Default instance is running (PID={status.pid or '-'}).")
+            print(f"[jiuwenswarm-init] Stop it first with: jiuwenswarm-start --stop default")
             return 1
 
     # 4. Call init_user_workspace with workspace path
@@ -107,19 +107,19 @@ def run_init(force: bool = False, name: Optional[str] = None) -> int:
         config = InstanceConfig(name=name, workspace=workspace_path, ports=ports)
         create_bootstrap_env(config)
 
-        print(f"[jiuwenclaw-init] Instance '{name}' initialized successfully.")
+        print(f"[jiuwenswarm-init] Instance '{name}' initialized successfully.")
         return 0
 
     if target == "cancelled":
         return 1
 
-    print(f"[jiuwenclaw-init] initialized: {target}")
+    print(f"[jiuwenswarm-init] initialized: {target}")
     return 0
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(
-        description="Initialize jiuwenclaw workspace directory (~/.jiuwenclaw)"
+        description="Initialize jiuwenclaw workspace directory (~/.jiuwenswarm)"
     )
     parser.add_argument(
         "-f",

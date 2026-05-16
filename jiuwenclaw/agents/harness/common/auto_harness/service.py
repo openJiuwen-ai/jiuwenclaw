@@ -511,14 +511,14 @@ class AutoHarnessService:
         config.local_repo = str(resolved_local_repo)
         # agent-core still uses config.workspace to scope DeepAgent file tools.
         # Keep it pinned to the repo checkout so assess/plan do not fall back
-        # to JiuwenClaw's user workspace (~/.jiuwenclaw).
+        # to JiuwenSwarm's user workspace (~/.jiuwenswarm).
         config.workspace = str(resolved_local_repo)
         config.repo_url = repo_url
         config.experience_dir = str(self.experience_dir)
         config.pipeline_preference = pipeline_preference if pipeline_preference else EXTENDED_EVOLVE_PIPELINE
         config.optimization_goal = str(optimization_goal or "")
 
-        # Set model from JiuwenClaw
+        # Set model from JiuwenSwarm
         if model is not None:
             config.model = model
         else:

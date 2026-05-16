@@ -24,7 +24,7 @@ from pathlib import Path
 
 # --- Early --dotenv parsing (before jiuwenclaw imports) ---
 from jiuwenclaw.dotenv_early import parse_dotenv_early
-parse_dotenv_early("jiuwenclaw-start")
+parse_dotenv_early("jiuwenswarm-start")
 
 # --- Now safe to import jiuwenclaw modules ---
 from jiuwenclaw.common.utils import get_root_dir, get_user_workspace_dir, is_package_installation
@@ -50,7 +50,7 @@ from jiuwenclaw.instance_manager import (
 
 # Runtime data root:
 # - source mode: repository root
-# - package mode: ~/.jiuwenclaw
+# - package mode: ~/.jiuwenswarm
 DATA_ROOT = get_root_dir()
 
 # Package source root:
@@ -59,7 +59,7 @@ DATA_ROOT = get_root_dir()
 PACKAGE_DIR = Path(__file__).resolve().parent
 
 # Frontend dev project root (contains package.json)
-WEB_DEV_DIR = PACKAGE_DIR / "web"
+WEB_DEV_DIR = PACKAGE_DIR / "channels" / "web" / "frontend"
 
 
 # =============================================================================
@@ -115,7 +115,7 @@ class InstanceCommand:
         self.config = get_instance_config(self.name)
         if self.config is None:
             print(f"[start_services] ERROR: Instance '{self.name}' not found in instances.yaml")
-            print(f"[start_services] Run 'jiuwenclaw-init --name {self.name}' to create it.")
+            print(f"[start_services] Run 'jiuwenswarm-init --name {self.name}' to create it.")
             return 1
 
         # Get current status
@@ -132,7 +132,7 @@ class InstanceCommand:
             return 1
         if not self.config.workspace.exists():
             print(f"[start_services] ERROR: Workspace directory not found: {self.config.workspace}")
-            print(f"[start_services] Run 'jiuwenclaw-init --name {self.name}' to create it.")
+            print(f"[start_services] Run 'jiuwenswarm-init --name {self.name}' to create it.")
             return 1
         return None
 
@@ -407,7 +407,7 @@ def _action_list() -> int:
 
     if not statuses:
         print("[start_services] No instances configured.")
-        print("[start_services] Run 'jiuwenclaw-init' to initialize default instance.")
+        print("[start_services] Run 'jiuwenswarm-init' to initialize default instance.")
         return 0
 
     # Print table header

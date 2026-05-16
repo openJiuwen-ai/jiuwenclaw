@@ -171,7 +171,7 @@ class DiffService:
             get_user_workspace_dir() / ".agent_history" / f"file_ops_{self._agent_id}.json",
         ]
 
-        # session-specific file_ops（如 file_ops_jiuwenclaw_tui_xxx.json）
+        # session-specific file_ops（如 file_ops_jiuwenswarm_tui_xxx.json）
         if session_id:
             for base_dir in (get_agent_workspace_dir(), get_user_workspace_dir()):
                 hist_dir = base_dir / ".agent_history"

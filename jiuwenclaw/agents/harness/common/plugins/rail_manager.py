@@ -464,7 +464,7 @@ class RailManager:
         try:
             module: Any
             if (folder_path / "__init__.py").exists():
-                package_name = f"jiuwenclaw_rail_extension_{name}"
+                package_name = f"jiuwenswarm_rail_extension_{name}"
                 package_spec = importlib.util.spec_from_file_location(
                     package_name,
                     folder_path / "__init__.py",

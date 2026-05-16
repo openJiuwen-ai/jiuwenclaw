@@ -50,7 +50,7 @@ function connectionHint(status: ConnectionStatus): string | null {
     case "reconnecting":
       return "Backend unavailable · retrying connection";
     case "idle":
-      return "Backend unavailable · start jiuwenclaw-gateway or check --url";
+      return "Backend unavailable · start jiuwenswarm-gateway or check --url";
     case "auth_failed":
       return "Authentication failed · check --token";
     case "connected":

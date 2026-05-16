@@ -1426,7 +1426,7 @@ readonly request = async <T = Record<string, unknown>>(
         // 1. Replace $(cat) (no args) with $(cat "filepath") for inline commands
         // 2. Export JIUWENCLAW_SL_FILE so script files can use it too:
         //    input=$(cat "$JIUWENCLAW_SL_FILE")
-        const tmpFile = join(tmpdir(), "jiuwenclaw-sl.json");
+        const tmpFile = join(tmpdir(), "jiuwenswarm-sl.json");
         writeFileSync(tmpFile, jsonInput, "utf8");
         const msysPath = tmpFile.split(sep).join("/").replace(/^([A-Za-z]):/, (_, d) => "/" + d.toLowerCase());
         const patchedCmd = cmd.replace(/\$\(cat\)/g, `$(cat "${msysPath}")`);

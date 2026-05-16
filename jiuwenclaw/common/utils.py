@@ -1,14 +1,14 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 
-"""Path management for JiuWenClaw.
+"""Path management for JiuWenSwarm.
 
-根目录见 ``JIUWENCLAW_DATA_DIR``（默认 ``~/.jiuwenclaw``；可由环境变量 ``JIUWENCLAW_DATA_DIR`` 指定绝对路径）。
+根目录见 ``JIUWENSWARM_DATA_DIR``（默认 ``~/.jiuwenswarm``；可由环境变量 ``JIUWENSWARM_DATA_DIR`` 指定绝对路径）。
 
 Runtime layout:
 - <root>/config/config.yaml
 - <root>/config/.env
 - <root>/agent/home
-- <root>/agent/jiuwenclaw_workspace（DeepAgent 标准工作空间）
+- <root>/agent/workspace（DeepAgent 标准工作空间）
   - memory/
   - skills/
   - todo/
@@ -20,7 +20,7 @@ Runtime layout:
   - HEARTBEAT.md
   - USER.md
 - <root>/agent/sessions
-- <root>/agent/jiuwenclaw_workspace/agent-data.json
+- <root>/agent/workspace/agent-data.json
 - <root>/agent/.checkpoint
 - <root>/agent/.logs（gateway.log / channel.log / agent_server.log / full.log）
 
@@ -186,7 +186,7 @@ class _CompositeFilter(logging.Filter):
 
 
 def _load_logging_config_from_yaml() -> dict[str, Any]:
-    """读取 ~/.jiuwenclaw/config/config.yaml 中的 logging 段（无则空）。"""
+    """读取 ~/.jiuwenswarm/config/config.yaml 中的 logging 段（无则空）。"""
     try:
         cf = get_config_file()
         if not cf.exists():
@@ -277,21 +277,27 @@ def set_user_home(path: Path, initialized: bool = False) -> None:
 
 
 def get_user_workspace_dir() -> Path:
-    """Get the user workspace directory path (~/.jiuwenclaw or custom path).
+    """Get the user workspace directory path (~/.jiuwenswarm or custom path).
 
     Priority:
     1. Cached value (if already set via set_user_workspace_dir or previous call)
-    2. JIUWENCLAW_DATA_DIR environment variable (for multi-instance isolation)
-    3. get_user_home() / ".jiuwenclaw" (default instance)
+    2. JIUWENSWARM_DATA_DIR environment variable (for multi-instance isolation)
+    3. get_user_home() / ".jiuwenswarm" (default instance)
+
+    Also performs one-time migration from ~/.jiuwenclaw/ to ~/.jiuwenswarm/ if needed.
     """
     global _workspace_base_dir
     if _workspace_base_dir is not None:
         return _workspace_base_dir
-    env_workspace = os.getenv("JIUWENCLAW_DATA_DIR")
+    env_workspace = os.getenv("JIUWENSWARM_DATA_DIR")
     if env_workspace:
         _workspace_base_dir = Path(env_workspace)
         return _workspace_base_dir
-    _workspace_base_dir = get_user_home() / ".jiuwenclaw"
+
+    # One-time migration from .jiuwenclaw to .jiuwenswarm
+    _migrate_from_jiuwenclaw_root()
+
+    _workspace_base_dir = get_user_home() / ".jiuwenswarm"
     return _workspace_base_dir
 
 
@@ -381,20 +387,20 @@ def _resolve_preferred_language(
 def prompt_preferred_language() -> Optional[Literal["zh", "en"]]:
     """交互询问语言偏好。仅接受明确选项；空输入、不在列表或取消用语 → 返回 None（调用方应终止 init）。"""
     print()
-    print("[jiuwenclaw-init] ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-    print("[jiuwenclaw-init]  请选择默认语言 / Choose your default language")
-    print("[jiuwenclaw-init] ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-    print("[jiuwenclaw-init]   [1] 中文（简体）")
-    print("[jiuwenclaw-init]       → config: preferred_language: zh")
-    print("[jiuwenclaw-init]   ────────────────────────────────────────────")
-    print("[jiuwenclaw-init]   [2] English")
-    print("[jiuwenclaw-init]       → config: preferred_language: en")
-    print("[jiuwenclaw-init] ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-    print("[jiuwenclaw-init]  须明确选择：1 / 2 / zh / en（无默认语言）")
-    print("[jiuwenclaw-init]  取消：no / n / q / cancel / 取消")
-    print("[jiuwenclaw-init] ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+    print("[jiuwenswarm-init] ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+    print("[jiuwenswarm-init]  请选择默认语言 / Choose your default language")
+    print("[jiuwenswarm-init] ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+    print("[jiuwenswarm-init]   [1] 中文（简体）")
+    print("[jiuwenswarm-init]       → config: preferred_language: zh")
+    print("[jiuwenswarm-init]   ────────────────────────────────────────────")
+    print("[jiuwenswarm-init]   [2] English")
+    print("[jiuwenswarm-init]       → config: preferred_language: en")
+    print("[jiuwenswarm-init] ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+    print("[jiuwenswarm-init]  须明确选择：1 / 2 / zh / en（无默认语言）")
+    print("[jiuwenswarm-init]  取消：no / n / q / cancel / 取消")
+    print("[jiuwenswarm-init] ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
     raw = input(
-        "[jiuwenclaw-init] 请输入选项 (1, 2, zh, en) 或 no 取消: "
+        "[jiuwenswarm-init] 请输入选项 (1, 2, zh, en) 或 no 取消: "
     ).strip().lower()
     if raw in ("no", "n", "q", "quit", "cancel", "取消"):
         return None
@@ -402,7 +408,7 @@ def prompt_preferred_language() -> Optional[Literal["zh", "en"]]:
         return "zh"
     if raw in ("2", "en", "english", "e", "英文"):
         return "en"
-    print("[jiuwenclaw-init] 无效选项；未选择有效语言，初始化已取消（与拒绝 yes/no 相同）。")
+    print("[jiuwenswarm-init] 无效选项；未选择有效语言，初始化已取消（与拒绝 yes/no 相同）。")
     return None
 
 
@@ -414,53 +420,114 @@ def _get_builtin_skill_names() -> set[str]:
     return {item.name for item in builtin_skills_dir.iterdir() if item.is_dir()}
 
 
+def _migrate_from_jiuwenclaw_root() -> bool:
+    """Migrate from legacy ~/.jiuwenclaw/ to ~/.jiuwenswarm/.
+
+    This is a one-time migration that moves the entire root directory.
+    Called at startup before any workspace operations.
+
+    Returns:
+        True if migration was performed, False otherwise.
+    """
+    user_home = get_user_home()
+    old_root = user_home / ".jiuwenclaw"
+    new_root = user_home / ".jiuwenswarm"
+
+    # No migration needed if old doesn't exist or new already exists
+    if not old_root.exists():
+        return False
+    if new_root.exists():
+        # New workspace exists, don't migrate
+        print(f"[migration] Both .jiuwenclaw and .jiuwenswarm exist, skipping migration")
+        return False
+
+    print(f"[migration] Migrating from {old_root} to {new_root}")
+
+    try:
+        shutil.move(str(old_root), str(new_root))
+        print(f"[migration] Migration completed: {old_root} -> {new_root}")
+        return True
+    except OSError as e:
+        print(f"[migration] ERROR: Failed to migrate from .jiuwenclaw to .jiuwenswarm: {e}")
+        return False
+
+
+def _migrate_jiuwenclaw_workspace_to_workspace(workspace_dir: Path) -> None:
+    """Migrate from legacy jiuwenclaw_workspace directory name to workspace.
+
+    Migration:
+    - Old: ~/.jiuwenswarm/agent/jiuwenclaw_workspace/
+    - New: ~/.jiuwenswarm/agent/workspace/
+
+    Args:
+        workspace_dir: Path to workspace root (~/.jiuwenswarm).
+    """
+    old_workspace = workspace_dir / "agent" / "jiuwenclaw_workspace"
+    new_workspace = workspace_dir / "agent" / "workspace"
+
+    if not old_workspace.exists():
+        return
+    if new_workspace.exists():
+        # Both exist - merge carefully
+        print(f"[migration] Both jiuwenclaw_workspace and workspace exist, merging...")
+        for item in old_workspace.iterdir():
+            dest = new_workspace / item.name
+            if item.is_dir():
+                if dest.exists():
+                    # Merge directories
+                    shutil.copytree(item, dest, dirs_exist_ok=True)
+                else:
+                    shutil.copytree(item, dest)
+            else:
+                if not dest.exists():
+                    shutil.copy2(item, dest)
+        # Remove old after successful merge
+        shutil.rmtree(old_workspace)
+        print(f"[migration] Merged and removed: {old_workspace}")
+    else:
+        # Simple rename
+        shutil.move(str(old_workspace), str(new_workspace))
+        print(f"[migration] Renamed: {old_workspace} -> {new_workspace}")
+
+
 def _migrate_legacy_workspace(
     workspace_dir: Path,
     preferred_language: Optional[str] = None,
 ) -> None:
     """Migrate from legacy layout to new DeepAgent workspace layout.
 
-    Migration:
-    - Old: ~/.jiuwenclaw/agent/workspace/ (agent-data.json here)
-    - Old: ~/.jiuwenclaw/agent/home/ (PRINCIPLE.md, TONE.md, HEARTBEAT.md)
-    - Old: ~/.jiuwenclaw/agent/skills/
-    - Old: ~/.jiuwenclaw/agent/memory/
+    This handles VERY old layouts where skills, memory, and home were
+    separate directories outside of the workspace.
 
-    - New: ~/.jiuwenclaw/agent/jiuwenclaw_workspace/ (DeepAgent standard)
+    Migration:
+    - Old: ~/.jiuwenswarm/agent/home/ (PRINCIPLE.md, TONE.md, HEARTBEAT.md)
+    - Old: ~/.jiuwenswarm/agent/skills/
+    - Old: ~/.jiuwenswarm/agent/memory/
+
+    - New: ~/.jiuwenswarm/agent/workspace/ (DeepAgent standard)
 
     Mapping:
-    - agent/workspace/ -> agent/jiuwenclaw_workspace/ (main workspace)
-    - agent/home/HEARTBEAT.md -> agent/jiuwenclaw_workspace/HEARTBEAT.md
-    - agent/skills/ -> agent/jiuwenclaw_workspace/skills/
-    - agent/memory/ -> agent/jiuwenclaw_workspace/memory/
+    - agent/home/HEARTBEAT.md -> agent/workspace/HEARTBEAT.md
+    - agent/skills/ -> agent/workspace/skills/
+    - agent/memory/ -> agent/workspace/memory/
+
+    Note: jiuwenclaw_workspace -> workspace renaming is handled separately by
+    _migrate_jiuwenclaw_workspace_to_workspace.
 
     Args:
-        workspace_dir: Path to workspace root (~/.jiuwenclaw).
+        workspace_dir: Path to workspace root (~/.jiuwenswarm).
         preferred_language: Preferred language for config (zh/en).
     """
     logger.info(f"Migrating from legacy layout: {workspace_dir}")
 
-    old_workspace = workspace_dir / "agent" / "workspace"
     old_home = workspace_dir / "agent" / "home"
     old_skills = workspace_dir / "agent" / "skills"
     old_memory = workspace_dir / "agent" / "memory"
 
-    new_workspace = workspace_dir / "agent" / "jiuwenclaw_workspace"
+    new_workspace = workspace_dir / "agent" / "workspace"
     new_workspace.mkdir(parents=True, exist_ok=True)
 
-    # 1. Migrate old workspace contents
-    if old_workspace.exists():
-        for item in old_workspace.iterdir():
-            dest = new_workspace / item.name
-            if item.is_dir():
-                if dest.exists():
-                    shutil.rmtree(dest)
-                shutil.copytree(item, dest)
-            else:
-                shutil.copy2(item, dest)
-        logger.info(f"Migrated workspace: {old_workspace} -> {new_workspace}")
-
-    # 2. Migrate old home files
+    # 1. Migrate old home files
     if old_home.exists():
         # HEARTBEAT.md -> HEARTBEAT.md (if not exists in new location)
         old_heartbeat = old_home / "HEARTBEAT.md"
@@ -468,7 +535,7 @@ def _migrate_legacy_workspace(
         if old_heartbeat.exists() and not new_heartbeat.exists():
             shutil.copy2(old_heartbeat, new_heartbeat)
             logger.info("Migrated HEARTBEAT.md from home")
-        
+
         # Merge PRINCIPLE.md and TONE.md into SOUL.md
         old_principle = old_home / "PRINCIPLE.md"
         old_tone = old_home / "TONE.md"
@@ -580,9 +647,6 @@ def _migrate_legacy_workspace(
 
     # 6. Clean up old directories after successful migration
     try:
-        if old_workspace.exists():
-            shutil.rmtree(old_workspace)
-            logger.info(f"Removed old workspace: {old_workspace}")
         if old_home.exists():
             shutil.rmtree(old_home)
             logger.info(f"Removed old home: {old_home}")
@@ -612,7 +676,7 @@ def cleanup_team_files(workspace_dir: Path) -> None:
     - Old: {workspace_dir}/agent/team.db-shm (旧版本 team SHM 文件)
 
     Args:
-        workspace_dir: JiuWenClaw 用户工作空间根目录 (~/.jiuwenclaw)
+        workspace_dir: JiuWenClaw 用户工作空间根目录 (~/.jiuwenswarm)
     """
     agent_dir = workspace_dir / "agent"
 
@@ -672,7 +736,11 @@ def prepare_workspace(
         workspace_dir = Path(workspace_dir)
     workspace_dir.mkdir(parents=True, exist_ok=True)
 
-    # Check for legacy workspace migration or cleanup
+    # Migrate from legacy jiuwenclaw_workspace directory name to workspace
+    _migrate_jiuwenclaw_workspace_to_workspace(workspace_dir)
+
+    # Check for legacy workspace migration or cleanup (pre-DeepAgent layout)
+    # These are even older layouts: agent/workspace, agent/home, agent/skills, agent/memory
     old_workspace = workspace_dir / "agent" / "workspace"
     old_home = workspace_dir / "agent" / "home"
     old_skills = workspace_dir / "agent" / "skills"
@@ -681,7 +749,7 @@ def prepare_workspace(
     # Check for legacy directory migration (for start command, overwrite=False)
     # Migration triggers when ANY legacy directory exists, not just old_workspace
     legacy_dirs_exist = (
-        old_workspace.exists() or old_skills.exists() or old_memory.exists()
+        old_home.exists() or old_skills.exists() or old_memory.exists()
     )
 
     if legacy_dirs_exist and not overwrite:
@@ -689,9 +757,6 @@ def prepare_workspace(
     # If overwrite (init command), clean up old legacy directories first
     elif overwrite:
         try:
-            if old_workspace.exists():
-                shutil.rmtree(old_workspace)
-                logger.info(f"Removed old workspace: {old_workspace}")
             if old_home.exists():
                 shutil.rmtree(old_home)
                 logger.info(f"Removed old home: {old_home}")
@@ -761,12 +826,12 @@ def prepare_workspace(
     (agent_root / ".logs").mkdir(parents=True, exist_ok=True)
 
     # ----- DeepAgent workspace (standard DeepAgents schema) -----
-    deepagent_workspace = agent_root / "jiuwenclaw_workspace"
+    deepagent_workspace = agent_root / "workspace"
     agent_skills = deepagent_workspace / "skills"
     agent_memory = deepagent_workspace / "memory"
 
-    template_agent_workspace = template_agent_dir / "jiuwenclaw_workspace"
-    template_agent_memory = template_agent_dir / "jiuwenclaw_workspace" / "memory"
+    template_agent_workspace = template_agent_dir / "workspace"
+    template_agent_memory = template_agent_dir / "workspace" / "memory"
 
     def _copy_dir(
         src_dir: Path,
@@ -852,7 +917,7 @@ def _close_log_handlers() -> None:
 def init_user_workspace(
     overwrite: bool = True, workspace_dir: Optional[Path] = None
 ) -> Path | Literal["cancelled"]:
-    """Initialize ~/.jiuwenclaw from package or source resources.
+    """Initialize ~/.jiuwenswarm from package or source resources.
 
     资源布局:
     - 模板配置:   <package_root>/resources/config.yaml
@@ -860,10 +925,10 @@ def init_user_workspace(
     - 数据模板:   <package_root>/resources/agent（含各技能模板）、skills_state.json
 
     上述内容会被复制到:
-    - ~/.jiuwenclaw/config/config.yaml（含 preferred_language）
-    - ~/.jiuwenclaw/config/builtin_rules.yaml（内置 shell 安全规则模板，与 config 同目录）
-    - ~/.jiuwenclaw/config/.env
-    - ~/.jiuwenclaw/agent/...
+    - ~/.jiuwenswarm/config/config.yaml（含 preferred_language）
+    - ~/.jiuwenswarm/config/builtin_rules.yaml（内置 shell 安全规则模板，与 config 同目录）
+    - ~/.jiuwenswarm/config/.env
+    - ~/.jiuwenswarm/agent/...
 
     注意：PRINCIPLE.md、TONE.md、HEARTBEAT.md 已被 SOUL.md 和新的心跳机制替代，
     不再由 JiuwenClaw 复制到用户工作区。
@@ -883,17 +948,17 @@ def init_user_workspace(
         if overwrite:
             # Force mode: explain both modes and ask for confirmation
             print(
-                f"[jiuwenclaw-init] With -f/--force flag, "
+                f"[jiuwenswarm-init] With -f/--force flag, "
                 f"entire {workspace_dir} will be deleted for clean initialization."
             )
-            print("[jiuwenclaw-init] WARNING: This will delete all historical configuration and memory information.")
-            print("[jiuwenclaw-init] This action cannot be undone.")
+            print("[jiuwenswarm-init] WARNING: This will delete all historical configuration and memory information.")
+            print("[jiuwenswarm-init] This action cannot be undone.")
             confirmation = input(
-                "[jiuwenclaw-init] Do you want to confirm reinitialization? (yes/no): "
+                "[jiuwenswarm-init] Do you want to confirm reinitialization? (yes/no): "
             ).strip().lower()
 
             if confirmation not in ("yes", "y"):
-                print("[jiuwenclaw-init] Initialization cancelled. Exiting.")
+                print("[jiuwenswarm-init] Initialization cancelled. Exiting.")
                 return "cancelled"
 
             # Close all log handlers to release file locks before deleting
@@ -902,28 +967,28 @@ def init_user_workspace(
             # Delete entire workspace directory for clean initialization
             try:
                 shutil.rmtree(workspace_dir)
-                print(f"[jiuwenclaw-init] Removed workspace directory: {workspace_dir}")
+                print(f"[jiuwenswarm-init] Removed workspace directory: {workspace_dir}")
             except OSError as e:
-                print(f"[jiuwenclaw-init] ERROR: Failed to remove workspace: {e}")
+                print(f"[jiuwenswarm-init] ERROR: Failed to remove workspace: {e}")
                 return "cancelled"
         else:
             # Merge mode: inform about preservation
             print(
-                "[jiuwenclaw-init] Without -f/--force flag, "
+                "[jiuwenswarm-init] Without -f/--force flag, "
                 "existing files will be preserved and merged with template."
             )
-            print("[jiuwenclaw-init] This action cannot be undone.")
-            confirmation = input("[jiuwenclaw-init] Do you want to continue? (yes/no): ").strip().lower()
+            print("[jiuwenswarm-init] This action cannot be undone.")
+            confirmation = input("[jiuwenswarm-init] Do you want to continue? (yes/no): ").strip().lower()
 
             if confirmation not in ("yes", "y"):
-                print("[jiuwenclaw-init] Initialization cancelled. Exiting.")
+                print("[jiuwenswarm-init] Initialization cancelled. Exiting.")
                 return "cancelled"
 
     lang = prompt_preferred_language()
     if lang is None:
-        print("[jiuwenclaw-init] Initialization cancelled. Exiting.")
+        print("[jiuwenswarm-init] Initialization cancelled. Exiting.")
         return "cancelled"
-    print(f"[jiuwenclaw-init] 将使用语言 / Language: {lang}")
+    print(f"[jiuwenswarm-init] 将使用语言 / Language: {lang}")
     prepare_workspace(overwrite, preferred_language=lang, workspace_dir=workspace_dir)
 
     return workspace_dir
@@ -937,22 +1002,26 @@ def _resolve_paths() -> None:
         return
 
     workspace_dir = get_user_workspace_dir()
-    # 优先使用已初始化的用户工作区 (~/.jiuwenclaw)，
+
+    # Migrate from legacy jiuwenclaw_workspace directory name to workspace
+    _migrate_jiuwenclaw_workspace_to_workspace(workspace_dir)
+
+    # 优先使用已初始化的用户工作区 (~/.jiuwenswarm)，
     # 保证源码运行与安装包运行后的读写路径完全一致。
     user_config_dir = workspace_dir / "config"
-    user_workspace_dir = workspace_dir / "agent" / "jiuwenclaw_workspace"
+    user_workspace_dir = workspace_dir / "agent" / "workspace"
     if user_config_dir.exists():
         _root_dir = workspace_dir
         _config_dir = user_config_dir
         _workspace_dir = user_workspace_dir
     else:
-        # 尚未初始化 ~/.jiuwenclaw：从包内 resources 直读配置，工作区指向包内 agent/jiuwenclaw_workspace
+        # 尚未初始化 ~/.jiuwenswarm：从包内 resources 直读配置，工作区指向包内 agent/workspace
         package_root = _find_package_root()
         if package_root and (package_root / "resources" / "config.yaml").exists():
             res = package_root / "resources"
             _root_dir = package_root.parent
             _config_dir = res
-            _workspace_dir = res / "agent" / "jiuwenclaw_workspace"
+            _workspace_dir = res / "agent" / "workspace"
             _workspace_dir.mkdir(parents=True, exist_ok=True)
         else:
             source_root = _find_source_root()
@@ -960,7 +1029,7 @@ def _resolve_paths() -> None:
             res = pkg / "resources"
             _root_dir = source_root
             _config_dir = res if (res / "config.yaml").exists() else source_root / "config"
-            _workspace_dir = res / "agent" / "jiuwenclaw_workspace"
+            _workspace_dir = res / "agent" / "workspace"
             _workspace_dir.mkdir(parents=True, exist_ok=True)
 
     _initialized = True
@@ -991,9 +1060,9 @@ def get_agent_workspace_dir() -> Path:
     It contains standard nodes like skills, memory, todo, messages, etc.
 
     Returns:
-        Path to agent workspace: ~/.jiuwenclaw/agent/jiuwenclaw_workspace
+        Path to agent workspace: ~/.jiuwenswarm/agent/workspace
     """
-    return get_agent_root_dir() / "jiuwenclaw_workspace"
+    return get_agent_root_dir() / "workspace"
 
 
 def get_agent_root_dir() -> Path:
@@ -1010,7 +1079,7 @@ def get_agent_memory_dir() -> Path:
     Uses DeepAgent standard workspace location for unified workspace.
 
     Returns:
-        Path to memory directory: ~/.jiuwenclaw/agent/jiuwenclaw_workspace/memory
+        Path to memory directory: ~/.jiuwenswarm/agent/workspace/memory
     """
     return get_agent_workspace_dir() / "memory"
 
@@ -1021,7 +1090,7 @@ def get_agent_skills_dir() -> Path:
     Uses DeepAgent standard workspace location for unified workspace.
 
     Returns:
-        Path to skills directory: ~/.jiuwenclaw/agent/jiuwenclaw_workspace/skills
+        Path to skills directory: ~/.jiuwenswarm/agent/workspace/skills
     """
     return get_agent_workspace_dir() / "skills"
 
@@ -1030,7 +1099,7 @@ def get_interactions_dir() -> Path:
     """Get the interactions directory for pending interaction contexts.
 
     Returns:
-        Path to interactions directory: {workspace}/agent/jiuwenclaw_workspace/interactions
+        Path to interactions directory: {workspace}/agent/workspace/interactions
     """
     return get_agent_workspace_dir() / "interactions"
 
@@ -1044,7 +1113,7 @@ def get_deepagent_todo_dir() -> Path:
     """Get the DeepAgent todo directory path.
 
     Returns:
-        Path to todo directory: ~/.jiuwenclaw/agent/jiuwenclaw_workspace/todo
+        Path to todo directory: ~/.jiuwenswarm/agent/workspace/todo
     """
     return get_agent_workspace_dir() / "todo"
 
@@ -1053,7 +1122,7 @@ def get_deepagent_messages_dir() -> Path:
     """Get the DeepAgent messages directory path.
 
     Returns:
-        Path to messages directory: ~/.jiuwenclaw/agent/jiuwenclaw_workspace/messages
+        Path to messages directory: ~/.jiuwenswarm/agent/workspace/messages
     """
     return get_agent_workspace_dir() / "messages"
 
@@ -1062,7 +1131,7 @@ def get_deepagent_agents_dir() -> Path:
     """Get the DeepAgent agents (sub-agent) directory path.
 
     Returns:
-        Path to agents directory: ~/.jiuwenclaw/agent/jiuwenclaw_workspace/agents
+        Path to agents directory: ~/.jiuwenswarm/agent/workspace/agents
     """
     return get_agent_workspace_dir() / "agents"
 
@@ -1071,7 +1140,7 @@ def get_deepagent_heartbeat_path() -> Path:
     """Get the DeepAgent HEARTBEAT.md file path.
 
     Returns:
-        Path to HEARTBEAT.md: ~/.jiuwenclaw/agent/jiuwenclaw_workspace/HEARTBEAT.md
+        Path to HEARTBEAT.md: ~/.jiuwenswarm/agent/workspace/HEARTBEAT.md
     """
     return get_agent_workspace_dir() / "HEARTBEAT.md"
 
@@ -1080,7 +1149,7 @@ def get_deepagent_agent_md_path() -> Path:
     """Get the DeepAgent AGENT.md file path.
 
     Returns:
-        Path to AGENT.md: ~/.jiuwenclaw/agent/jiuwenclaw_workspace/AGENT.md
+        Path to AGENT.md: ~/.jiuwenswarm/agent/workspace/AGENT.md
     """
     return get_agent_workspace_dir() / "AGENT.md"
 
@@ -1089,7 +1158,7 @@ def get_deepagent_soul_md_path() -> Path:
     """Get the DeepAgent SOUL.md file path.
 
     Returns:
-        Path to SOUL.md: ~/.jiuwenclaw/agent/jiuwenclaw_workspace/SOUL.md
+        Path to SOUL.md: ~/.jiuwenswarm/agent/workspace/SOUL.md
     """
     return get_agent_workspace_dir() / "SOUL.md"
 
@@ -1098,7 +1167,7 @@ def get_deepagent_identity_md_path() -> Path:
     """Get the DeepAgent IDENTITY.md file path.
 
     Returns:
-        Path to IDENTITY.md: ~/.jiuwenclaw/agent/jiuwenclaw_workspace/IDENTITY.md
+        Path to IDENTITY.md: ~/.jiuwenswarm/agent/workspace/IDENTITY.md
     """
     return get_agent_workspace_dir() / "IDENTITY.md"
 
@@ -1107,7 +1176,7 @@ def get_deepagent_user_md_path() -> Path:
     """Get the DeepAgent USER.md file path.
 
     Returns:
-        Path to USER.md: ~/.jiuwenclaw/agent/jiuwenclaw_workspace/USER.md
+        Path to USER.md: ~/.jiuwenswarm/agent/workspace/USER.md
     """
     return get_agent_workspace_dir() / "USER.md"
 
@@ -1115,8 +1184,8 @@ def get_deepagent_user_md_path() -> Path:
 def get_builtin_skills_dir() -> Path:
     """Get the built-in skills directory from package resources."""
     package_root = _find_package_root()
-    # 优先检查 jiuwenclaw_workspace/skills 目录（标准布局）
-    primary_path = package_root / "resources" / "agent" / "jiuwenclaw_workspace" / "skills"
+    # 优先检查 workspace/skills 目录（标准布局）
+    primary_path = package_root / "resources" / "agent" / "workspace" / "skills"
     if primary_path.exists() and primary_path.is_dir():
         return primary_path
     # 回退到 skills 目录
@@ -1132,7 +1201,7 @@ _legacy_migration_done: bool = False
 
 
 def _migrate_legacy_checkpoint_and_logs() -> None:
-    """One-time migration: move ~/.jiuwenclaw/.checkpoint and .logs to ~/.jiuwenclaw/agent/."""
+    """One-time migration: move ~/.jiuwenswarm/.checkpoint and .logs to ~/.jiuwenswarm/agent/."""
     global _legacy_migration_done
     if _legacy_migration_done:
         return
@@ -1277,7 +1346,7 @@ def setup_logger(log_level: Optional[str] = None) -> logging.Logger:
     - ``jiuwenclaw.agents.*`` 或 ``jiuwenclaw.server.*`` → agent_server.log
     - 其余 ``jiuwenclaw.*``（含 ``jiuwenclaw.app``、gateway、evolution、utils 等）→ gateway.log
 
-    所有分类日志同时写入 ``full.log``。输出目录：``~/.jiuwenclaw/agent/.logs/``。
+    所有分类日志同时写入 ``full.log``。输出目录：``~/.jiuwenswarm/agent/.logs/``。
 
     级别由 ``config.yaml`` 的 ``logging`` 段控制；环境变量 ``LOG_LEVEL`` 仅覆盖**控制台**级别
     （``log_level`` 参数为 ``None`` 时）。若传入 ``log_level``（如单测），则控制台与各文件级别均为该值。

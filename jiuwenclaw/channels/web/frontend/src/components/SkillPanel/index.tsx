@@ -3,7 +3,7 @@
  *
  * Skills 管理面板
  */
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from 'react-i18next';
 import { webRequest } from "../../services/webClient";
 import { SourceManagerModal } from "../../features/SourceManagerModal";
@@ -99,6 +99,8 @@ function normalizeSkillItem<T extends SkillItem>(raw: T): T {
 
 export function SkillPanel({ sessionId, onNavigateToConfig }: SkillPanelProps) {
   const { t } = useTranslation();
+  const [activeTab, setActiveTab] = useState<"my" | "marketplace">("my");
+  const [marketplaceSubTab, setMarketplaceSubTab] = useState<"builtin" | "skillnet" | "clawhub" | "teamskill">("builtin");
   const [skills, setSkills] = useState<SkillItem[]>([]);
   const [plugins, setPlugins] = useState<InstalledPluginItem[]>([]);
   const [marketplaces, setMarketplaces] = useState<MarketplaceItem[]>([]);
@@ -108,7 +110,30 @@ export function SkillPanel({ sessionId, onNavigateToConfig }: SkillPanelProps) {
   const [detailState, setDetailState] = useState<LoadState>("idle");
   const [actionTarget, setActionTarget] = useState<string | null>(null);
   const [message, setMessage] = useState<string | null>(null);
-  const [messageType, setMessageType] = useState<"success" | "error" | null>(null);
+  const [messageType, setMessageType] = useState<"success" | "error" | "loading" | null>(null);
+  const messageTimerRef = useRef<number | null>(null);
+
+  useEffect(() => {
+    return () => {
+      if (messageTimerRef.current !== null) {
+        window.clearTimeout(messageTimerRef.current);
+      }
+    };
+  }, []);
+
+  const showMessage = useCallback((type: "success" | "error", text: string) => {
+    if (messageTimerRef.current !== null) {
+      window.clearTimeout(messageTimerRef.current);
+    }
+    const displayText = type === "success" ? `√ ${text}` : text;
+    setMessage(displayText);
+    setMessageType(type);
+    messageTimerRef.current = window.setTimeout(() => {
+      setMessage(null);
+      setMessageType(null);
+      messageTimerRef.current = null;
+    }, 3000);
+  }, []);
   const [sourceModalOpen, setSourceModalOpen] = useState(false);
   const [skillNetModalOpen, setSkillNetModalOpen] = useState(false);
   const [clawHubModalOpen, setClawHubModalOpen] = useState(false);
@@ -183,6 +208,19 @@ export function SkillPanel({ sessionId, onNavigateToConfig }: SkillPanelProps) {
       return a.name.localeCompare(b.name);
     });
   }, [filteredSkills, installedSkillMap]);
+
+  const builtinSkills = useMemo(() => {
+    let filtered = skills.filter((skill) => skill.is_builtin === true);
+    if (search.trim()) {
+      const searchLower = search.toLowerCase();
+      filtered = filtered.filter(
+        (skill) =>
+          skill.name.toLowerCase().includes(searchLower) ||
+          (skill.description && skill.description.toLowerCase().includes(searchLower))
+      );
+    }
+    return filtered;
+  }, [skills, search]);
 
   const fetchMarketplaces = useCallback(async () => {
     try {
@@ -279,8 +317,8 @@ export function SkillPanel({ sessionId, onNavigateToConfig }: SkillPanelProps) {
       if (targetSkill?.is_builtin && targetSkill?.is_builtin_source) {
         const spec = `${skillName}@builtin`;
         setActionTarget(spec);
-        setMessage(null);
-        setMessageType(null);
+        setMessage(t('skills.messages.installing', { name: skillName }));
+        setMessageType("loading");
         try {
           const data = await webRequest<{
             success: boolean;
@@ -290,8 +328,7 @@ export function SkillPanel({ sessionId, onNavigateToConfig }: SkillPanelProps) {
           if (!data.success) {
             throw new Error(data.detail || data.message || t('skills.errors.installFailed'));
           }
-          setMessage(t('skills.messages.installed', { spec }));
-          setMessageType("success");
+          showMessage("success", t('skills.messages.installed', { spec }));
           await fetchSkills();
           if (selectedSkill) {
             await fetchSkillDetail(selectedSkill.name);
@@ -299,8 +336,7 @@ export function SkillPanel({ sessionId, onNavigateToConfig }: SkillPanelProps) {
         } catch (error) {
           console.error(error);
           const errorMessage = error instanceof Error ? error.message : String(error);
-          setMessage(errorMessage || t('skills.errors.installFailedHint'));
-          setMessageType("error");
+          showMessage("error", errorMessage || t('skills.errors.installFailedHint'));
         } finally {
           setActionTarget(null);
         }
@@ -331,8 +367,8 @@ export function SkillPanel({ sessionId, onNavigateToConfig }: SkillPanelProps) {
       if (!spec) return;
 
       setActionTarget(spec);
-      setMessage(null);
-      setMessageType(null);
+      setMessage(t('skills.messages.installing', { name: spec }));
+      setMessageType("loading");
       try {
         const data = await webRequest<{
           success: boolean;
@@ -342,16 +378,14 @@ export function SkillPanel({ sessionId, onNavigateToConfig }: SkillPanelProps) {
         if (!data.success) {
           throw new Error(data.detail || data.message || t('skills.errors.installFailed'));
         }
-        setMessage(t('skills.messages.installed', { spec }));
-        setMessageType("success");
+        showMessage("success", t('skills.messages.installed', { spec }));
         await fetchSkills();
         if (selectedSkill) {
           await fetchSkillDetail(selectedSkill.name);
         }
       } catch (error) {
         console.error(error);
-        setMessage(t('skills.errors.installFailedHint'));
-        setMessageType("error");
+        showMessage("error", t('skills.errors.installFailedHint'));
       } finally {
         setActionTarget(null);
       }
@@ -381,8 +415,7 @@ export function SkillPanel({ sessionId, onNavigateToConfig }: SkillPanelProps) {
       if (!data.success) {
         throw new Error(data.detail || data.message || t('skills.errors.importFailed'));
       }
-      setMessage(t('skills.messages.imported', { name: data.skill?.name || path }));
-      setMessageType("success");
+      showMessage("success", t('skills.messages.imported', { name: data.skill?.name || path }));
       await fetchSkills();
       if (data.skill?.name) {
         await fetchSkillDetail(data.skill.name);
@@ -390,8 +423,7 @@ export function SkillPanel({ sessionId, onNavigateToConfig }: SkillPanelProps) {
     } catch (error) {
       console.error(error);
       const errorMessage = error instanceof Error ? error.message : String(error);
-      setMessage(errorMessage || t('skills.errors.importFailedHint'));
-      setMessageType("error");
+      showMessage("error", errorMessage || t('skills.errors.importFailedHint'));
     } finally {
       setActionTarget(null);
     }
@@ -417,21 +449,45 @@ export function SkillPanel({ sessionId, onNavigateToConfig }: SkillPanelProps) {
         if (!data.success) {
           throw new Error(data.detail || data.message || t('skills.errors.uninstallFailed'));
         }
-        setMessage(t('skills.messages.uninstalled', { pluginName }));
-        setMessageType("success");
+        showMessage("success", t('skills.messages.uninstalled', { pluginName }));
         await fetchSkills();
         handleBackToList();
       } catch (error) {
         console.error(error);
         const errorMessage = error instanceof Error ? error.message : String(error);
-        setMessage(errorMessage || t('skills.errors.uninstallFailedHint'));
-        setMessageType("error");
+        showMessage("error", errorMessage || t('skills.errors.uninstallFailedHint'));
       } finally {
         setActionTarget(null);
       }
     },
     [fetchSkills, handleBackToList, t, withSession]
   );
+
+  const avatarColors = [
+    "bg-red-500",
+    "bg-orange-500",
+    "bg-amber-500",
+    "bg-yellow-500",
+    "bg-lime-500",
+    "bg-green-500",
+    "bg-emerald-500",
+    "bg-teal-500",
+    "bg-cyan-500",
+    "bg-sky-500",
+    "bg-blue-500",
+    "bg-indigo-500",
+    "bg-violet-500",
+    "bg-purple-500",
+    "bg-fuchsia-500",
+    "bg-pink-500",
+    "bg-rose-500",
+  ];
+
+  const getSkillAvatar = (name: string) => {
+    const firstChar = name.charAt(0).toUpperCase();
+    const colorIndex = name.charCodeAt(0) % avatarColors.length;
+    return { firstChar, color: avatarColors[colorIndex] };
+  };
 
   const renderActionButton = (skill: SkillItem) => {
     const plugin = installedSkillMap.get(skill.name);
@@ -440,15 +496,17 @@ export function SkillPanel({ sessionId, onNavigateToConfig }: SkillPanelProps) {
     // 判断条件：is_builtin_source 为 true 且不在已安装列表中
     const isInstalled = installedSkillMap.has(skill.name) || skill.source === "local";
     if (skill.is_builtin_source && !isInstalled) {
+      const isLoading = actionTarget === `${skill.name}@builtin`;
       return (
         <button
           onClick={(event) => {
             event.stopPropagation();
             handleInstall(skill.name);
           }}
-          className={`px-3 py-1.5 rounded-md text-sm transition-colors whitespace-nowrap bg-accent text-white hover:bg-accent-hover`}
+          className="w-[76px] h-[28px] rounded-[24px] text-sm text-[#191919] border border-[#191919] hover:bg-secondary/50 transition-colors whitespace-nowrap"
+          disabled={isLoading}
         >
-          {t('skills.actions.install')}
+          {isLoading ? t('skills.actions.installing') : t('skills.actions.install')}
         </button>
       );
     }
@@ -462,11 +520,7 @@ export function SkillPanel({ sessionId, onNavigateToConfig }: SkillPanelProps) {
             event.stopPropagation();
             handleUninstall(skill.name);
           }}
-          className={`px-3 py-1.5 rounded-md text-sm transition-colors whitespace-nowrap ${
-            isLoading
-              ? "bg-secondary text-text-muted cursor-not-allowed"
-              : "bg-danger text-white hover:bg-danger/90"
-          }`}
+          className="w-[76px] h-[28px] rounded-[24px] text-sm text-[#191919] border border-[#191919] hover:bg-secondary/50 transition-colors whitespace-nowrap"
           disabled={isLoading}
         >
           {t('skills.actions.uninstall')}
@@ -484,11 +538,7 @@ export function SkillPanel({ sessionId, onNavigateToConfig }: SkillPanelProps) {
             event.stopPropagation();
             handleUninstall(pluginName);
           }}
-          className={`px-3 py-1.5 rounded-md text-sm transition-colors whitespace-nowrap ${
-            isLoading
-              ? "bg-secondary text-text-muted cursor-not-allowed"
-              : "bg-danger text-white hover:bg-danger/90"
-          }`}
+          className="w-[76px] h-[28px] rounded-[24px] text-sm text-[#191919] border border-[#191919] hover:bg-secondary/50 transition-colors whitespace-nowrap"
           disabled={isLoading}
         >
           {t('skills.actions.uninstall')}
@@ -505,14 +555,10 @@ export function SkillPanel({ sessionId, onNavigateToConfig }: SkillPanelProps) {
             event.stopPropagation();
             handleInstall(skill.name);
           }}
-          className={`px-3 py-1.5 rounded-md text-sm transition-colors whitespace-nowrap ${
-            isLoading
-              ? "bg-secondary text-text-muted cursor-not-allowed"
-              : "bg-accent text-white hover:bg-accent-hover"
-          }`}
+          className="w-[76px] h-[28px] rounded-[24px] text-sm text-[#191919] border border-[#191919] hover:bg-secondary/50 transition-colors whitespace-nowrap"
           disabled={isLoading}
         >
-          {t('skills.actions.install')}
+          {isLoading ? t('skills.actions.installing') : t('skills.actions.install')}
         </button>
       );
     }
@@ -528,11 +574,7 @@ export function SkillPanel({ sessionId, onNavigateToConfig }: SkillPanelProps) {
             event.stopPropagation();
             handleUninstall(skill.name);
           }}
-          className={`px-3 py-1.5 rounded-md text-sm transition-colors whitespace-nowrap ${
-            isLoading
-              ? "bg-secondary text-text-muted cursor-not-allowed"
-              : "bg-danger text-white hover:bg-danger/90"
-          }`}
+          className="w-[76px] h-[28px] rounded-[24px] text-sm text-[#191919] border border-[#191919] hover:bg-secondary/50 transition-colors whitespace-nowrap"
           disabled={isLoading}
         >
           {t('skills.actions.uninstall')}
@@ -543,7 +585,7 @@ export function SkillPanel({ sessionId, onNavigateToConfig }: SkillPanelProps) {
     // 默认显示内置（兜底）
     return (
       <button
-        className="px-3 py-1.5 rounded-md text-sm bg-secondary text-text-muted cursor-not-allowed whitespace-nowrap"
+        className="px-4 py-2 rounded-2xl text-sm text-text-muted cursor-not-allowed whitespace-nowrap border border-gray-300"
         disabled
       >
         {t('skills.builtIn')}
@@ -571,11 +613,8 @@ export function SkillPanel({ sessionId, onNavigateToConfig }: SkillPanelProps) {
           if (disabled) return;
           handleOpenEvolution(skill.name);
         }}
-        className={`px-3 py-1.5 rounded-md text-sm transition-colors whitespace-nowrap ${
-          disabled
-            ? "bg-secondary text-text-muted cursor-not-allowed"
-            : "bg-secondary text-text hover:bg-card border border-border"
-        }`}
+        className="px-4 py-2 rounded-2xl transition-colors whitespace-nowrap hover:opacity-80"
+        style={{ color: "#0067d1", fontSize: "12px" }}
         disabled={disabled}
       >
         {t('skills.actions.viewEvolution')}
@@ -585,8 +624,13 @@ export function SkillPanel({ sessionId, onNavigateToConfig }: SkillPanelProps) {
 
   return (
     <div className="flex-1 flex flex-col min-w-0 min-h-0">
-      <div className="card flex-1 flex flex-col min-h-0 overflow-hidden">
-        <div className="flex flex-wrap items-start justify-between gap-3">
+      <div className="card flex-1 flex flex-col min-h-0 overflow-hidden relative">
+        {message && messageType === "success" && (
+          <div className="absolute top-3 right-3 z-10 px-4 py-2 rounded-lg text-sm border border-[color:var(--border-ok)] bg-ok-subtle text-ok shadow-lg">
+            {message}
+          </div>
+        )}
+        <div className="flex items-start justify-between gap-3">
           <div>
             <h2 className="text-lg font-semibold">
               {t('skills.title')}
@@ -595,192 +639,372 @@ export function SkillPanel({ sessionId, onNavigateToConfig }: SkillPanelProps) {
               {t('skills.subtitle')}
             </p>
           </div>
-          <div className="flex items-center justify-end gap-2 flex-wrap">
-            <button
-              onClick={() => fetchSkills(true)}
-              className="px-3 py-1.5 rounded-md text-sm bg-secondary text-text-muted hover:text-text hover:bg-card border border-border"
-            >
-              {t('common.refresh')}
-            </button>
-            <button
-              onClick={handleImportLocal}
-              className={`px-3 py-1.5 rounded-md text-sm transition-colors ${
-                actionTarget === "import_local"
-                  ? "bg-secondary text-text-muted cursor-not-allowed"
-                  : "bg-secondary text-text hover:bg-card border border-border"
-              }`}
-              disabled={actionTarget === "import_local"}
-            >
-              {t('skills.actions.importLocal')}
-            </button>
+          <div className="flex items-center gap-3">
             <button
               onClick={() => setSourceModalOpen(true)}
-              className="px-3 py-1.5 rounded-md text-sm bg-accent text-white hover:bg-accent-hover"
+              className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-sm text-text-muted hover:text-text hover:bg-secondary/50 transition-colors"
             >
+              <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={1.5}>
+                <path strokeLinecap="round" strokeLinejoin="round" d="M19.5 14.25v-2.625a3.375 3.375 0 0 0-3.375-3.375h-1.5A1.125 1.125 0 0 1 13.5 7.125v-1.5a3.375 3.375 0 0 0-3.375-3.375H8.25m2.25 0H5.625c-.621 0-1.125.504-1.125 1.125v17.25c0 .621.504 1.125 1.125 1.125h12.75c.621 0 1.125-.504 1.125-1.125V11.25a9 9 0 0 0-9-9Z" />
+              </svg>
               {t('skills.actions.sourceManager')}
             </button>
             <button
-              onClick={() => setSkillNetModalOpen(true)}
-              className="px-3 py-1.5 rounded-md text-sm bg-accent text-white hover:bg-accent-hover"
+              onClick={handleImportLocal}
+              className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-sm transition-colors ${
+                actionTarget === "import_local"
+                  ? "text-text-muted cursor-not-allowed"
+                  : "text-text-muted hover:text-text hover:bg-secondary/50"
+              }`}
+              disabled={actionTarget === "import_local"}
             >
-              {t('skills.skillNet.title')}
+              <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={1.5}>
+                <path strokeLinecap="round" strokeLinejoin="round" d="M3 16.5v2.25A2.25 2.25 0 0 0 5.25 21h13.5A2.25 2.25 0 0 0 21 18.75V16.5m-13.5-9L12 3m0 0 4.5 4.5M12 3v13.5" />
+              </svg>
+              {t('skills.actions.importLocal')}
             </button>
             <button
-              onClick={() => setClawHubModalOpen(true)}
-              className="px-3 py-1.5 rounded-md text-sm bg-accent text-white hover:bg-accent-hover"
+              onClick={() => fetchSkills(true)}
+              className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-sm text-text-muted hover:text-text hover:bg-secondary/50 transition-colors"
             >
-              {t('skills.clawhub.title')}
-            </button>
-            <button
-              onClick={() => setTeamSkillsHubModalOpen(true)}
-              className="px-3 py-1.5 rounded-md text-sm bg-accent text-white hover:bg-accent-hover"
-            >
-              {t('skills.teamskillshub.title')}
+              <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={1.5}>
+                <path strokeLinecap="round" strokeLinejoin="round" d="M16.023 9.348h4.992v-.001M2.985 19.644v-4.992m0 0h4.992m-4.993 0 3.181 3.183a8.25 8.25 0 0 0 13.803-3.7M4.031 9.865a8.25 8.25 0 0 1 13.803-3.7l3.181 3.182m0-4.991v4.99" />
+              </svg>
+              {t('common.refresh')}
             </button>
           </div>
         </div>
 
-        {message && messageType === "error" && (
-          <div className="mt-3 px-3 py-2 rounded-md bg-secondary text-sm text-danger">
-            {message}
-          </div>
-        )}
+        <div className="mt-4 flex items-center gap-1 border-b border-border">
+          <button
+            onClick={() => setActiveTab("my")}
+            className={`px-4 py-2 text-sm font-medium border-b-2 transition-colors -mb-px ${
+              activeTab === "my"
+                ? "border-accent text-accent"
+                : "border-transparent text-text-muted hover:text-text"
+            }`}
+          >
+            {t('skills.tabs.mySkills')}
+          </button>
+          <button
+            onClick={() => setActiveTab("marketplace")}
+            className={`px-4 py-2 text-sm font-medium border-b-2 transition-colors -mb-px ${
+              activeTab === "marketplace"
+                ? "border-accent text-accent"
+                : "border-transparent text-text-muted hover:text-text"
+            }`}
+          >
+            {t('skills.tabs.marketplace')}
+          </button>
+        </div>
 
-        {selectedSkill ? (
-          <div className="mt-4 flex-1 overflow-y-auto">
-            <div className="flex items-center gap-2 mb-3">
+        {activeTab === "marketplace" ? (
+          <>
+            <div className="mt-4 flex items-center justify-between gap-4 border-b border-border">
+              <div className="flex items-center gap-1">
+                <button
+                  onClick={() => setMarketplaceSubTab("builtin")}
+                  className={`px-4 py-2 text-sm font-medium border-b-2 transition-colors -mb-px ${
+                    marketplaceSubTab === "builtin"
+                      ? "border-accent text-accent"
+                      : "border-transparent text-text-muted hover:text-text"
+                  }`}
+                >
+                  {t('skills.marketplaceTabs.builtin')}
+                </button>
               <button
-                onClick={handleBackToList}
-                className="px-3 py-1.5 rounded-md text-sm bg-secondary text-text-muted hover:text-text hover:bg-card border border-border"
+                onClick={() => setMarketplaceSubTab("skillnet")}
+                className={`px-4 py-2 text-sm font-medium border-b-2 transition-colors -mb-px ${
+                  marketplaceSubTab === "skillnet"
+                    ? "border-accent text-accent"
+                    : "border-transparent text-text-muted hover:text-text"
+                }`}
               >
-                {t('skills.actions.backToList')}
+                {t('skills.skillNet.title')}
               </button>
-              <div className="text-sm text-text-muted">
-                {detailState === "loading" && t('skills.detailLoading')}
-                {detailState === "error" && t('skills.detailError')}
+              <button
+                onClick={() => setMarketplaceSubTab("clawhub")}
+                className={`px-4 py-2 text-sm font-medium border-b-2 transition-colors -mb-px ${
+                  marketplaceSubTab === "clawhub"
+                    ? "border-accent text-accent"
+                    : "border-transparent text-text-muted hover:text-text"
+                }`}
+              >
+                {t('skills.clawhub.title')}
+              </button>
+              <button
+                onClick={() => setMarketplaceSubTab("teamskill")}
+                className={`px-4 py-2 text-sm font-medium border-b-2 transition-colors -mb-px ${
+                  marketplaceSubTab === "teamskill"
+                    ? "border-accent text-accent"
+                    : "border-transparent text-text-muted hover:text-text"
+                }`}
+              >
+                {t('skills.teamskillshub.title')}
+              </button>
               </div>
-            </div>
-
-            <div className="rounded-lg border border-border bg-panel p-4">
-              <div className="flex items-start justify-between gap-4">
-                <div>
-                  <div className="text-lg font-semibold text-text-strong">
-                    {selectedSkill.name}
-                  </div>
-                  <div className="text-sm text-text-muted mt-1">
-                    {selectedSkill.description || t('skills.noDescription')}
-                  </div>
-                  <div className="flex flex-wrap gap-2 mt-3 text-xs text-text-muted">
-                    <span className="px-2 py-1 rounded-full bg-secondary border border-border">
-                      {t('skills.sourceLabel')}: {getSourceLabel(selectedSkill.source, t, selectedSkill.is_builtin_source)}
-                    </span>
-                    <span className="px-2 py-1 rounded-full bg-secondary border border-border">
-                      {t('skills.versionLabel')}: {selectedSkill.version || 'unknown'}
-                    </span>
-                    <span className="px-2 py-1 rounded-full bg-secondary border border-border">
-                      {t('skills.authorLabel')}: {selectedSkill.author || 'unknown'}
-                    </span>
-                  </div>
-                </div>
-
-                <div className="flex flex-col items-end gap-2">
-                  {renderActionButton(selectedSkill)}
-                  {renderEvolutionButton(selectedSkill)}
-                </div>
-              </div>
-
-              <div className="mt-4">
-                <div className="text-sm font-medium text-text mb-2">
-                  {t('skills.allowedTools')}
-                </div>
-                <div className="flex flex-wrap gap-2 text-xs text-text-muted">
-                  {selectedSkill.allowed_tools?.length ? (
-                    selectedSkill.allowed_tools.map((tool) => (
-                      <span
-                        key={tool}
-                        className="px-2 py-1 rounded-full bg-secondary border border-border"
-                      >
-                        {tool}
-                      </span>
-                    ))
-                  ) : (
-                    <span className="text-text-muted">{t('skills.unlimited')}</span>
-                  )}
-                </div>
-              </div>
-
-              <div className="mt-4">
-                <div className="text-sm font-medium text-text mb-2">
-                  {t('skills.contentPreview')}
-                </div>
-                <div className="text-sm text-text whitespace-pre-wrap bg-secondary border border-border rounded-md p-3">
-                  {selectedSkill.content || t('skills.noContent')}
-                </div>
-              </div>
-            </div>
-          </div>
-        ) : (
-          <div className="mt-4 flex flex-col flex-1 min-h-0">
-            <div className="flex items-center gap-3 flex-shrink-0">
-              <div className="flex-1 min-w-0">
+              <div className="flex-1">
                 <input
+                  type="text"
                   value={search}
-                  onChange={(event) => setSearch(event.target.value)}
-                  placeholder={t('skills.searchPlaceholder')}
-                  className="w-full px-3 py-2 rounded-md bg-panel border border-border text-sm text-text placeholder:text-text-muted"
+                  onChange={(e) => setSearch(e.target.value)}
+                  placeholder={
+                    marketplaceSubTab === "builtin"
+                      ? t("skills.searchPlaceholder")
+                      : marketplaceSubTab === "skillnet"
+                      ? t("skills.skillNet.searchPlaceholder")
+                      : marketplaceSubTab === "clawhub"
+                      ? t("skills.clawhub.searchPlaceholder")
+                      : t("skills.teamskillshub.searchPlaceholder")
+                  }
+                  className="w-full px-3 py-1.5 rounded-lg text-sm bg-secondary border border-border text-text placeholder:text-text-muted"
                 />
               </div>
-              <div className="text-xs text-text-muted flex-shrink-0">
-                {t('skills.totalCount', { count: visibleSkills.length })}
-              </div>
             </div>
 
-            <div className="mt-4 flex-1 min-h-0 overflow-y-auto space-y-3">
-              {listState === "loading" && (
-                <div className="text-sm text-text-muted">{t('common.loading')}</div>
-              )}
-              {listState === "error" && (
-                <div className="text-sm text-text-muted">
-                  {t('skills.listError')}
+            <div className="mt-4 flex-1 min-h-0 overflow-y-auto">
+              {marketplaceSubTab === "builtin" && (
+                <div className="space-y-3">
+                  {builtinSkills.length === 0 ? (
+                    <div className="text-sm text-text-muted">{t('skills.noMatches')}</div>
+                  ) : (
+                    builtinSkills.map((skill) => {
+                      const avatar = getSkillAvatar(skill.name);
+                      return (
+                        <button
+                          key={skill.name}
+                          onClick={() => handleOpenSkill(skill.name)}
+                          className="w-full text-left p-4 rounded-lg border border-border bg-panel hover:bg-card transition-colors"
+                        >
+                          <div className="flex items-start justify-between gap-4">
+                            <div className="flex items-center gap-3 min-w-0 flex-1">
+                              <div className={`w-10 h-10 rounded-lg ${avatar.color} flex items-center justify-center flex-shrink-0 text-white font-semibold`}>
+                                {avatar.firstChar}
+                              </div>
+                              <div className="min-w-0">
+                                <div className="text-base font-semibold text-text-strong">
+                                  {skill.name}
+                                </div>
+                                <div className="text-sm text-text-muted mt-1 line-clamp-3">
+                                  {skill.description || t('skills.noDescription')}
+                                </div>
+                              </div>
+                            </div>
+                            <div className="flex flex-col items-end gap-2 flex-shrink-0">
+                              {renderActionButton(skill)}
+                            </div>
+                          </div>
+                        </button>
+                      );
+                    })
+                  )}
                 </div>
               )}
-              {listState === "success" && visibleSkills.length === 0 && (
-                <div className="text-sm text-text-muted">{t('skills.noMatches')}</div>
+
+              {marketplaceSubTab === "skillnet" && (
+                <div className="h-full">
+                  <SkillNetSearchModal
+                    open={true}
+                    embedded={true}
+                    sessionId={sessionId}
+                    externalSearchQuery={search}
+                    installedSkillNames={installedSkillNames}
+                    installedSkillOrigins={new Set()}
+                    onClose={() => {}}
+                    onInstalled={(_skillName: string) => {
+                      void fetchSkills();
+                    }}
+                  />
+                </div>
               )}
-                {listState === "success" &&
-                visibleSkills.map((skill) => (
+
+              {marketplaceSubTab === "clawhub" && (
+                <div className="h-full">
+                  <ClawHubSearchModal
+                    open={true}
+                    embedded={true}
+                    sessionId={sessionId}
+                    externalSearchQuery={search}
+                    installedSkillNames={installedSkillNames}
+                    onClose={() => {}}
+                    onInstalled={(_skillName: string) => {
+                      void fetchSkills();
+                    }}
+                  />
+                </div>
+              )}
+
+              {marketplaceSubTab === "teamskill" && (
+                <div className="h-full">
+                  <TeamSkillsHubModal
+                    open={true}
+                    embedded={true}
+                    sessionId={sessionId}
+                    externalSearchQuery={search}
+                    installedSkillNames={installedSkillNames}
+                    onClose={() => {}}
+                    onInstalled={(_skillName: string) => {
+                      void fetchSkills();
+                    }}
+                  />
+                </div>
+              )}
+            </div>
+          </>
+        ) : null}
+
+        {activeTab === "my" ? (
+          <>
+            {message && messageType === "error" && (
+              <div className="mt-3 px-3 py-2 rounded-md bg-secondary text-sm text-danger">
+                {message}
+              </div>
+            )}
+            {selectedSkill ? (
+              <div className="mt-4 flex-1 overflow-y-auto">
+                <div className="flex items-center gap-2 mb-3">
                   <button
-                    key={skill.name}
-                    onClick={() => handleOpenSkill(skill.name)}
-                    className="w-full text-left p-4 rounded-lg border border-border bg-panel hover:bg-card transition-colors"
+                    onClick={handleBackToList}
+                    className="px-4 py-2 rounded-2xl text-sm text-text border border-gray-400 hover:border-gray-600 hover:bg-secondary/50 transition-colors"
                   >
-                    <div className="flex items-start justify-between gap-4">
-                      <div className="min-w-0 flex-1">
-                        <div className="text-base font-semibold text-text-strong">
-                          {skill.name}
-                        </div>
-                        <div className="text-sm text-text-muted mt-1 line-clamp-3">
-                          {skill.description || t('skills.noDescription')}
-                        </div>
-                        <div className="flex flex-wrap gap-2 mt-3 text-xs text-text-muted">
-                          <span className="px-2 py-1 rounded-full bg-secondary border border-border">
-                            {t('skills.sourceLabel')}: {getSourceLabel(skill.source, t, skill.is_builtin_source)}
-                          </span>
-                          <span className="px-2 py-1 rounded-full bg-secondary border border-border">
-                            {t('skills.statusLabel')}: {renderStatus(skill)}
-                          </span>
-                        </div>
+                    {t('skills.actions.backToList')}
+                  </button>
+                  <div className="text-sm text-text-muted">
+                    {detailState === "loading" && t('skills.detailLoading')}
+                    {detailState === "error" && t('skills.detailError')}
+                  </div>
+                </div>
+
+                <div className="rounded-lg border border-border bg-panel p-4">
+                  <div className="flex items-start justify-between gap-4">
+                    <div>
+                      <div className="text-lg font-semibold text-text-strong">
+                        {selectedSkill.name}
                       </div>
-                      <div className="flex flex-col items-end gap-2 flex-shrink-0">
-                        {renderActionButton(skill)}
-                        {renderEvolutionButton(skill)}
+                      <div className="text-sm text-text-muted mt-1">
+                        {selectedSkill.description || t('skills.noDescription')}
+                      </div>
+                      <div className="flex flex-wrap gap-2 mt-3 text-xs text-text-muted">
+                        <span className="px-2 py-1 rounded-full bg-secondary border border-border">
+                          {t('skills.sourceLabel')}: {getSourceLabel(selectedSkill.source, t, selectedSkill.is_builtin_source)}
+                        </span>
+                        <span className="px-2 py-1 rounded-full bg-secondary border border-border">
+                          {t('skills.versionLabel')}: {selectedSkill.version || 'unknown'}
+                        </span>
+                        <span className="px-2 py-1 rounded-full bg-secondary border border-border">
+                          {t('skills.authorLabel')}: {selectedSkill.author || 'unknown'}
+                        </span>
                       </div>
                     </div>
-                  </button>
-                ))}
-            </div>
-          </div>
-        )}
+
+                    <div className="flex flex-col items-end gap-2">
+                      {renderActionButton(selectedSkill)}
+                      {renderEvolutionButton(selectedSkill)}
+                    </div>
+                  </div>
+
+                  <div className="mt-4">
+                    <div className="text-sm font-medium text-text mb-2">
+                      {t('skills.allowedTools')}
+                    </div>
+                    <div className="flex flex-wrap gap-2 text-xs text-text-muted">
+                      {selectedSkill.allowed_tools?.length ? (
+                        selectedSkill.allowed_tools.map((tool) => (
+                          <span
+                            key={tool}
+                            className="px-2 py-1 rounded-full bg-secondary border border-border"
+                          >
+                            {tool}
+                          </span>
+                        ))
+                      ) : (
+                        <span className="text-text-muted">{t('skills.unlimited')}</span>
+                      )}
+                    </div>
+                  </div>
+
+                  <div className="mt-4">
+                    <div className="text-sm font-medium text-text mb-2">
+                      {t('skills.contentPreview')}
+                    </div>
+                    <div className="text-sm text-text whitespace-pre-wrap bg-secondary border border-border rounded-md p-3">
+                      {selectedSkill.content || t('skills.noContent')}
+                    </div>
+                  </div>
+                </div>
+              </div>
+            ) : (
+              <div className="mt-4 flex flex-col flex-1 min-h-0">
+                <div className="flex items-center gap-3 flex-shrink-0">
+                  <div className="flex-1 min-w-0">
+                    <input
+                      value={search}
+                      onChange={(event) => setSearch(event.target.value)}
+                      placeholder={t('skills.searchPlaceholder')}
+                      className="w-full px-3 py-2 rounded-md bg-panel border border-border text-sm text-text placeholder:text-text-muted"
+                    />
+                  </div>
+                  <div className="text-xs text-text-muted flex-shrink-0">
+                    {t('skills.totalCount', { count: visibleSkills.length })}
+                  </div>
+                </div>
+
+                <div className="mt-4 flex-1 min-h-0 overflow-y-auto space-y-3">
+                  {listState === "loading" && (
+                    <div className="text-sm text-text-muted">{t('common.loading')}</div>
+                  )}
+                  {listState === "error" && (
+                    <div className="text-sm text-text-muted">
+                      {t('skills.listError')}
+                    </div>
+                  )}
+                  {listState === "success" && visibleSkills.length === 0 && (
+                    <div className="text-sm text-text-muted">{t('skills.noMatches')}</div>
+                  )}
+                  {listState === "success" &&
+                    visibleSkills.map((skill) => {
+                      const avatar = getSkillAvatar(skill.name);
+                      return (
+                        <button
+                          key={skill.name}
+                          onClick={() => handleOpenSkill(skill.name)}
+                          className="w-full text-left p-4 rounded-lg border border-border bg-panel hover:bg-card transition-colors"
+                        >
+                          <div className="flex items-start justify-between gap-4">
+                            <div className="flex items-center gap-3 min-w-0 flex-1">
+                              <div className={`w-10 h-10 rounded-lg ${avatar.color} flex items-center justify-center flex-shrink-0 text-white font-semibold`}>
+                                {avatar.firstChar}
+                              </div>
+                              <div className="min-w-0">
+                                <div className="text-base font-semibold text-text-strong">
+                                  {skill.name}
+                                </div>
+                                <div className="text-sm text-text-muted mt-1 line-clamp-3">
+                                  {skill.description || t('skills.noDescription')}
+                                </div>
+                                <div className="flex flex-wrap gap-2 mt-3 text-xs text-text-muted">
+                                  <span className="px-2 py-1 rounded-full bg-secondary border border-border">
+                                    {t('skills.sourceLabel')}: {getSourceLabel(skill.source, t, skill.is_builtin_source)}
+                                  </span>
+                                  <span className="px-2 py-1 rounded-full bg-secondary border border-border">
+                                    {t('skills.statusLabel')}: {renderStatus(skill)}
+                                  </span>
+                                </div>
+                              </div>
+                            </div>
+                            <div className="flex flex-col items-end gap-2 flex-shrink-0">
+                              {renderActionButton(skill)}
+                              {renderEvolutionButton(skill)}
+                            </div>
+                          </div>
+                        </button>
+                      );
+                    })}
+                </div>
+              </div>
+            )}
+          </>
+        ) : null}
       </div>
       <SourceManagerModal
         open={sourceModalOpen}

@@ -337,11 +337,22 @@ class MessageHandler(ABC):
 
         网关侧仅取消 ``_stream_sessions[rid] == old_sid`` 的流式任务，并向 AgentServer 发送同 session 的
         ``intent=cancel``，由 AgentServer 继续取消该 session 上的实际执行任务。
+
+        注意：先发送 interrupt 请求到 AgentServer，等待其发送 tool_result 等消息后，
+        再取消网关侧流式任务，确保前端能收到取消状态更新。
         """
         from jiuwenclaw.common.schema.message import Message, ReqMethod
 
+        async def _cancel_tasks(tasks: list[asyncio.Task]) -> None:
+            if not tasks:
+                return
+            for task in tasks:
+                task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+
         self._clear_session_evolution_states(old_sid)
 
+        # 收集需要取消的流式任务（先不取消）
         tasks_to_cancel: list[asyncio.Task] = []
         rids_cancelled: list[str] = []
 
@@ -349,28 +360,15 @@ class MessageHandler(ABC):
             if self._stream_sessions.get(rid) != old_sid:
                 continue
             if not task.done():
-                logger.info(
-                    "[MessageHandler] 取消流式任务: request_id=%s session_id=%s",
-                    rid,
-                    old_sid,
-                )
-                task.cancel()
-                tasks_to_cancel.append(task)
                 rids_cancelled.append(rid)
-
-        if tasks_to_cancel:
-            await asyncio.gather(*tasks_to_cancel, return_exceptions=True)
-            logger.info(
-                "[MessageHandler] 当前 session 流式任务已终止: session_id=%s request_ids=%s",
-                old_sid,
-                rids_cancelled,
-            )
+                tasks_to_cancel.append(task)
 
         if old_sid is None and not rids_cancelled:
             return
 
         sid_for_agent = (old_sid or "").strip()
         if not sid_for_agent:
+            await _cancel_tasks(tasks_to_cancel)
             return
 
         # 即使网关侧已无活跃流式拉取任务（例如 Agent 正在执行 shell/工具），也必须通知 AgentServer，
@@ -419,15 +417,15 @@ class MessageHandler(ABC):
             resp = await self._agent_client.send_request(env_interrupt)
         except Exception as exc:
             logger.warning("[MessageHandler] AgentServer 中断请求失败: %s", exc)
+            await _cancel_tasks(tasks_to_cancel)
             await self._send_interrupt_result_notification(
-                msg.id,
-                msg.channel_id,
-                sid_for_agent,
-                "cancel",
-                message=f"任务终止失败: {exc}",
-                success=False,
+                msg.id, msg.channel_id, sid_for_agent, "cancel",
+                message=f"任务终止失败: {exc}", success=False,
             )
             return
+
+        # AgentServer 中断成功后，取消网关侧流式任务
+        await _cancel_tasks(tasks_to_cancel)
 
         payload = resp.payload if isinstance(resp.payload, dict) else {}
         if payload.get("event_type") == "chat.interrupt_result":
@@ -441,6 +439,11 @@ class MessageHandler(ABC):
                 "[MessageHandler] 已转发 AgentServer 中断结果: request_id=%s ok=%s",
                 resp.request_id,
                 resp.ok,
+            )
+
+            # 发送被中断工具的 tool_result 给前端
+            await self._send_cancelled_tool_results(
+                msg.channel_id, sid_for_agent, payload, msg.metadata
             )
             return
 
@@ -2119,7 +2122,12 @@ class MessageHandler(ABC):
                             timestamp=time.time(),
                         )
                         try:
-                            await self._send_interrupt_to_agent(supplement_env)
+                            resp = await self._agent_client.send_request(supplement_env)
+                            # 发送被中断工具的 tool_result 给前端
+                            payload = resp.payload if isinstance(resp.payload, dict) else {}
+                            await self._send_cancelled_tool_results(
+                                msg.channel_id, msg.session_id, payload, msg.metadata
+                            )
                         except Exception:
                             pass  # 即使失败也继续启动新任务
 
@@ -2513,6 +2521,59 @@ class MessageHandler(ABC):
             payload={"error": str(error)},
             metadata=msg.metadata,
         )
+
+    def _build_tool_result_message(
+        self,
+        channel_id: str,
+        session_id: str,
+        tool_info: dict,
+        metadata: dict | None,
+    ) -> "Message":
+        """Build tool_result message for cancelled tool execution."""
+        from jiuwenclaw.common.schema.message import Message, EventType
+
+        return Message(
+            id=f"tool_result_{int(time.time() * 1000):x}_{secrets.token_hex(3)}",
+            type="event",
+            channel_id=channel_id,
+            session_id=session_id,
+            params={},
+            timestamp=time.time(),
+            ok=True,
+            payload={
+                "tool_result": {
+                    "tool_name": tool_info.get("tool_name", ""),
+                    "tool_call_id": tool_info.get("tool_call_id", ""),
+                    "result": tool_info.get("result", ""),
+                    "status": tool_info.get("status", "error"),
+                },
+            },
+            event_type=EventType.CHAT_TOOL_RESULT,
+            metadata=metadata,
+        )
+
+    async def _send_cancelled_tool_results(
+        self,
+        channel_id: str,
+        session_id: str,
+        payload: dict,
+        metadata: dict | None,
+    ) -> None:
+        """Send cancelled tool results to frontend from interrupt response payload.
+
+        Args:
+            channel_id: Channel ID for the message.
+            session_id: Session ID for the message.
+            payload: Response payload containing cancelled_tools.
+            metadata: Message metadata.
+        """
+        cancelled_tools = payload.get("cancelled_tools", [])
+        for tool_info in cancelled_tools:
+            await self.publish_robot_messages(
+                self._build_tool_result_message(
+                    channel_id, session_id, tool_info, metadata
+                )
+            )
 
     async def start_forwarding(self) -> None:
         """启动入队 -> AgentServer -> 出队 的转发任务."""

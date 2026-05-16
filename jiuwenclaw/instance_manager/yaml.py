@@ -28,17 +28,17 @@ logger = logging.getLogger(__name__)
 
 
 def get_instances_yaml_path() -> Path:
-    """Return path to instances.yaml: ~/.jiuwenclaw/instances.yaml"""
-    return get_user_home() / ".jiuwenclaw" / "instances.yaml"
+    """Return path to instances.yaml: ~/.jiuwenswarm/instances.yaml"""
+    return get_user_home() / ".jiuwenswarm" / "instances.yaml"
 
 
 def get_instances_dir() -> Path:
-    """Return base directory for named instance workspaces: ~/.jiuwenclaw-instances/"""
-    return get_user_home() / ".jiuwenclaw-instances"
+    """Return base directory for named instance workspaces: ~/.jiuwenswarm-instances/"""
+    return get_user_home() / ".jiuwenswarm-instances"
 
 
 def get_instance_workspace_path(name: str) -> Path:
-    """Return workspace path for a named instance: ~/.jiuwenclaw-instances/<name>/"""
+    """Return workspace path for a named instance: ~/.jiuwenswarm-instances/<name>/"""
     return get_instances_dir() / name
 
 
@@ -71,7 +71,7 @@ def _read_yaml_file(path: Path) -> dict:
             f"  Fix suggestions:\n"
             f"    - Check YAML syntax (indentation, quotes, colons)\n"
             f"    - Ensure no duplicate keys\n"
-            f"    - Run 'jiuwenclaw-init' to recreate a valid template"
+            f"    - Run 'jiuwenswarm-init' to recreate a valid template"
         ) from exc
 
     return data
@@ -238,7 +238,7 @@ def create_instances_yaml_template() -> Path:
 # Example:
 # instances:
 #   alice:
-#     # workspace: /custom/path/alice  # optional, defaults to ~/.jiuwenclaw-instances/alice
+#     # workspace: /custom/path/alice  # optional, defaults to ~/.jiuwenswarm-instances/alice
 #     ports:
 #       agent_server: 28092
 #       web: 29000

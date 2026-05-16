@@ -21,7 +21,10 @@ type TeamSkillsHubSkillItem = {
 
 interface TeamSkillsHubModalProps {
   open: boolean;
+  embedded?: boolean;
   sessionId: string;
+  /** 外部传入的搜索关键词 */
+  externalSearchQuery?: string;
   installedSkillNames?: ReadonlySet<string>;
   onClose: () => void;
   onInstalled?: (skillName: string) => void | Promise<void>;
@@ -29,7 +32,9 @@ interface TeamSkillsHubModalProps {
 
 export function TeamSkillsHubModal({
   open,
+  embedded = false,
   sessionId,
+  externalSearchQuery,
   installedSkillNames,
   onClose,
   onInstalled,
@@ -79,6 +84,15 @@ export function TeamSkillsHubModal({
     setInstalledNames(new Set());
     setHubBaseUrl(DEFAULT_TEAMSKILLS_HUB_BASE_URL);
   }, [open]);
+
+  useEffect(() => {
+    if (embedded && externalSearchQuery !== undefined) {
+      setQuery(externalSearchQuery);
+      if (externalSearchQuery.trim()) {
+        handleSearch();
+      }
+    }
+  }, [externalSearchQuery, embedded]);
 
   useEffect(() => {
     if (!open) return;
@@ -177,6 +191,79 @@ export function TeamSkillsHubModal({
 
   if (!open) return null;
 
+  if (embedded) {
+    return (
+      <div className="flex flex-col h-full">
+        <div className="p-4 overflow-auto flex-1 min-h-0">
+          {message && (
+            <div
+              className={`mb-3 px-3 py-2.5 rounded-lg text-sm leading-snug ${
+                message.type === "success"
+                  ? "border border-[color:var(--border-ok)] bg-ok-subtle text-ok"
+                  : "border border-danger/40 bg-danger/10 text-danger"
+              }`}
+            >
+              {message.text}
+            </div>
+          )}
+
+          {loadState === "success" && (
+            <div className="mt-4 flex-1 min-h-0 overflow-y-auto">
+              <div className="space-y-3">
+                {results.length === 0 ? (
+                  <div className="text-sm text-text-muted">{t("skills.teamskillshub.noResults")}</div>
+                ) : (
+                  results.map((item) => {
+                    const isInstalled =
+                      installedNames.has(item.name) || (installedSkillNames?.has(item.name) ?? false);
+                    const isInstalling = installingAssetId === item.asset_id;
+                    return (
+                      <div
+                        key={item.asset_id}
+                        className="p-4 rounded-lg border border-border bg-panel flex items-start justify-between gap-4"
+                      >
+                        <div className="min-w-0 flex-1">
+                          <div className="text-base font-semibold text-text-strong truncate">
+                            {item.name}
+                          </div>
+                          <div className="text-sm text-text-muted mt-1 line-clamp-3">
+                            {item.summary || t("skills.noDescription")}
+                          </div>
+                        </div>
+                        <div className="flex flex-col items-end gap-2 flex-shrink-0">
+                          {isInstalled ? (
+                            <span className="px-4 h-[28px] flex items-center rounded-2xl text-sm whitespace-nowrap border border-[color:var(--border-ok)] bg-ok-subtle text-ok">
+                              {t("skills.status.installed")}
+                            </span>
+                          ) : (
+                            <button
+                              type="button"
+                              onClick={() => void handleInstall(item)}
+                              disabled={isInstalling}
+                              className={`w-[76px] h-[28px] rounded-[24px] text-sm text-[#191919] border border-[#191919] hover:bg-secondary/50 transition-colors whitespace-nowrap ${
+                                isInstalling
+                                  ? "text-text-muted cursor-not-allowed"
+                                  : "text-text"
+                              }`}
+                            >
+                              {isInstalling
+                                ? t("skills.teamskillshub.installing")
+                                : t("skills.actions.install")}
+                            </button>
+                          )}
+                        </div>
+                      </div>
+                    );
+                  })
+                )}
+              </div>
+            </div>
+          )}
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
       <button
@@ -204,7 +291,7 @@ export function TeamSkillsHubModal({
           <button
             type="button"
             onClick={onClose}
-            className="px-3 py-1.5 rounded-md text-sm bg-secondary text-text-muted hover:text-text hover:bg-card border border-border"
+            className="px-4 py-2 rounded-2xl text-sm text-text border border-gray-400 hover:border-gray-600 hover:bg-secondary/50 transition-colors"
           >
             {t("common.close")}
           </button>
@@ -235,10 +322,10 @@ export function TeamSkillsHubModal({
               type="button"
               onClick={() => void handleSearch()}
               disabled={loadState === "loading" || !query.trim()}
-              className={`px-3 py-2 rounded-md text-sm transition-colors ${
+              className={`px-4 py-2 rounded-2xl text-sm transition-colors border border-gray-400 hover:border-gray-600 hover:bg-secondary/50 ${
                 loadState === "loading" || !query.trim()
-                  ? "bg-secondary text-text-muted cursor-not-allowed"
-                  : "bg-accent text-white hover:bg-accent-hover"
+                  ? "text-text-muted cursor-not-allowed"
+                  : "text-text"
               }`}
             >
               {loadState === "loading" ? t("common.loading") : t("skills.teamskillshub.search")}
@@ -272,24 +359,26 @@ export function TeamSkillsHubModal({
                           </div>
                         </div>
                         <div className="flex-shrink-0">
-                          <button
-                            type="button"
-                            onClick={() => void handleInstall(item)}
-                            disabled={isInstalled || isInstalling}
-                            className={`px-3 py-1.5 rounded-md text-sm transition-colors whitespace-nowrap ${
-                              isInstalled
-                                ? "bg-secondary text-text-muted cursor-not-allowed border border-border"
-                                : isInstalling
-                                  ? "bg-secondary text-text-muted cursor-not-allowed"
-                                  : "bg-accent text-white hover:bg-accent-hover"
-                            }`}
-                          >
-                            {isInstalled
-                              ? t("skills.status.installed")
-                              : isInstalling
-                                ? t("skills.teamskillshub.installing")
-                                : t("skills.actions.install")}
-                          </button>
+                          {isInstalled ? (
+                              <span className="px-4 py-2 rounded-2xl text-sm whitespace-nowrap border border-[color:var(--border-ok)] bg-ok-subtle text-ok">
+                                {t("skills.status.installed")}
+                              </span>
+                            ) : (
+                              <button
+                                type="button"
+                                onClick={() => void handleInstall(item)}
+                                disabled={isInstalling}
+                                className={`w-[76px] h-[28px] rounded-[24px] text-sm text-[#191919] border border-[#191919] hover:bg-secondary/50 transition-colors whitespace-nowrap ${
+                                  isInstalling
+                                    ? "text-text-muted cursor-not-allowed"
+                                    : "text-text"
+                                }`}
+                              >
+                                {isInstalling
+                                  ? t("skills.teamskillshub.installing")
+                                  : t("skills.actions.install")}
+                              </button>
+                            )}
                         </div>
                       </div>
                     );

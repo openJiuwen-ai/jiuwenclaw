@@ -146,6 +146,10 @@ class JiuClawStreamEventRail(DeepAgentRail):
         self._stream_tasks: set[asyncio.Task] = set()
         self._main_session: Optional[Session] = None
         self._main_todo_tool: Optional[TodoListTool] = None
+        # Track in-flight tool calls for cancellation status emission
+        self._inflight_tool_calls: dict[str, dict[str, Any]] = {}
+        # Store cancelled tool info for interrupt response
+        self._cancelled_tool_results: list[dict[str, Any]] = []
 
     def init(self, agent: Any) -> None:
         self._deep_agent = agent
@@ -176,6 +180,43 @@ class JiuClawStreamEventRail(DeepAgentRail):
         self._conversation_id = ""
         self._main_session = None
         self._main_todo_tool = None
+
+    def get_cancelled_tool_results(self) -> list[dict[str, Any]]:
+        """Get cancelled tool results collected during interrupt.
+
+        Returns list of tool_result dicts for gateway to forward to frontend.
+        """
+        return list(self._cancelled_tool_results)
+
+    def clear_cancelled_tool_results(self) -> None:
+        """Clear cancelled tool results after they've been retrieved."""
+        self._cancelled_tool_results.clear()
+
+    def collect_cancelled_tool_updates(self, session_id: str = "") -> None:
+        """Collect cancelled tool info for interrupt response.
+
+        Args:
+            session_id: Only collect tools for this session. If empty, collect all.
+        """
+        for tc_id, info in list(self._inflight_tool_calls.items()):
+            # Only collect tools matching the target session
+            if session_id and info.get("session_id") != session_id:
+                continue
+            tc = info.get("tool_call")
+            if tc is None:
+                continue
+            self._cancelled_tool_results.append({
+                "tool_name": getattr(tc, "name", ""),
+                "tool_call_id": tc_id,
+                "result": "[Interrupted] Tool execution cancelled by user.",
+                "status": "error",
+            })
+            self._inflight_tool_calls.pop(tc_id, None)
+        logger.info(
+            "[StreamEventRail] collected %d cancelled tools for session=%s",
+            len(self._cancelled_tool_results),
+            session_id,
+        )
 
     # ------------------------------------------------------------------
     # before_invoke (Outer event on DeepAgent): capture conversation_id
@@ -223,6 +264,14 @@ class JiuClawStreamEventRail(DeepAgentRail):
             tc = ctx.inputs.tool_call
             await self._emit_tool_call(session, tc)
             await self._emit_tool_update(session, tc, status="in_progress")
+            # Track in-flight tool call for cancellation
+            tc_id = getattr(tc, "id", "")
+            if tc_id:
+                self._inflight_tool_calls[tc_id] = {
+                    "tool_call": tc,
+                    "session": session,
+                    "session_id": self._conversation_id,  # conversation_id == session_id
+                }
 
     # ------------------------------------------------------------------
     # after_tool_call: emit tool_result + todo.updated
@@ -233,7 +282,13 @@ class JiuClawStreamEventRail(DeepAgentRail):
         if session is None or not isinstance(ctx.inputs, ToolCallInputs):
             return
 
-        await self._emit_tool_result(session, ctx.inputs.tool_call, ctx.inputs.tool_result)
+        tc = ctx.inputs.tool_call
+        tc_id = getattr(tc, "id", "")
+        # Remove from in-flight tracking on completion
+        if tc_id:
+            self._inflight_tool_calls.pop(tc_id, None)
+
+        await self._emit_tool_result(session, tc, ctx.inputs.tool_result)
 
         tool_name = ctx.inputs.tool_name
         if not self._conversation_id:

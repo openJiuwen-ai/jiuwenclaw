@@ -80,7 +80,7 @@ def get_instance_status(config: InstanceConfig) -> InstanceStatus:
 
 
 def get_default_instance_status() -> InstanceStatus:
-    """Get status of the default instance (workspace at ~/.jiuwenclaw).
+    """Get status of the default instance (workspace at ~/.jiuwenswarm).
 
     The default instance uses base ports (index 0) and standard workspace.
     For default instance, we check port availability to determine running status

@@ -173,7 +173,7 @@ export function SkillEvolutionModal({
         onClick={onClose}
         aria-label={t("skills.evolution.closeAria")}
       />
-      <div className="relative w-full max-w-4xl max-h-[88vh] overflow-hidden rounded-xl border border-border bg-card shadow-2xl animate-rise">
+      <div className="relative w-full max-w-4xl max-h-[88vh] overflow-hidden rounded-[8px] border border-border bg-card shadow-2xl animate-rise">
         <div className="flex items-center justify-between gap-3 px-5 py-3 border-b border-border bg-panel">
           <div>
             <h3 className="text-base font-semibold text-text">
@@ -185,16 +185,22 @@ export function SkillEvolutionModal({
             <button
               type="button"
               onClick={() => void fetchEntries()}
-              className="px-3 py-1.5 rounded-md text-sm bg-secondary text-text-muted hover:text-text hover:bg-card border border-border"
+              className="w-7 h-7 flex items-center justify-center rounded-lg text-text hover:text-text-strong transition-colors"
+              title={t("common.refresh")}
             >
-              {t("common.refresh")}
+              <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+              </svg>
             </button>
             <button
               type="button"
               onClick={onClose}
-              className="px-3 py-1.5 rounded-md text-sm bg-secondary text-text-muted hover:text-text hover:bg-card border border-border"
+              className="w-7 h-7 flex items-center justify-center rounded-lg text-text hover:text-text-strong transition-colors"
+              aria-label={t("skills.evolution.closeAria")}
             >
-              {t("common.close")}
+              <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+              </svg>
             </button>
           </div>
         </div>
@@ -266,9 +272,12 @@ export function SkillEvolutionModal({
                     <button
                       type="button"
                       onClick={() => handleDeleteEntry(entry.id)}
-                      className="px-3 py-1.5 rounded-md text-xs bg-danger text-white hover:bg-danger/90"
+                      className="w-7 h-7 flex items-center justify-center rounded-lg text-danger hover:text-danger/80 transition-colors"
+                      title={t("skills.evolution.actions.delete")}
                     >
-                      {t("skills.evolution.actions.delete")}
+                      <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+                      </svg>
                     </button>
                   </div>
 
@@ -291,10 +300,10 @@ export function SkillEvolutionModal({
             <button
               type="button"
               onClick={handleSave}
-              className={`px-4 py-2 rounded-md text-sm transition-colors ${
+              className={`w-[72px] h-[28px] rounded-[16px] text-sm transition-colors ${
                 saving || !!formatError
-                  ? "bg-secondary text-text-muted cursor-not-allowed"
-                  : "bg-accent text-white hover:bg-accent-hover"
+                  ? "bg-gray-400 text-text-muted cursor-not-allowed"
+                  : "bg-[#191919] text-white hover:bg-[#333333]"
               }`}
               disabled={saving || !!formatError}
             >

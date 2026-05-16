@@ -5,7 +5,7 @@
  */
 
 import { useTranslation } from 'react-i18next';
-import { useSessionStore } from '../../stores';
+import { useSessionStore, useTodoStore, useHarnessStore } from '../../stores';
 import { useEffect, useState } from 'react';
 import { webRequest } from '../../services/webClient';
 import { HeartbeatMessageModal } from '../../features/HeartbeatMessageModal';
@@ -31,6 +31,8 @@ export function ToolPanel() {
     teamTaskEvents,
     teamMembers,
   } = useSessionStore();
+  const { todos } = useTodoStore();
+  const { sessionRuntimePath } = useHarnessStore();
   const [heartbeatModalOpen, setHeartbeatModalOpen] = useState(false);
 
   useEffect(() => {
@@ -76,6 +78,16 @@ export function ToolPanel() {
       }
     };
   }, [isConnected, setMemoryUsage]);
+
+  const hasContent = (() => {
+    if (mode === 'team') return teamMembers.length > 0 || teamTaskEvents.length > 0;
+    if (mode === 'auto_harness') return Boolean(sessionRuntimePath);
+    return todos.length > 0;
+  })();
+
+  if (!hasContent) {
+    return null;
+  }
 
   const hasHeartbeatMessage = Boolean(heartbeatMessage?.trim());
   const heartbeatClassName =

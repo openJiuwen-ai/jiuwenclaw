@@ -3,7 +3,7 @@
 """Early --dotenv/--name parsing for multi-instance isolation.
 
 This module MUST be imported BEFORE any other jiuwenclaw modules,
-because it sets JIUWENCLAW_DATA_DIR environment variable that affects
+because it sets JIUWENSWARM_DATA_DIR environment variable that affects
 path resolution in jiuwenclaw.utils.
 
 Usage in entry point files:
@@ -17,7 +17,7 @@ The parsing happens before any jiuwenclaw imports:
 - sys.argv is scanned for --dotenv <path> and --name <name>
 - If --dotenv found: load that file
 - If --name found (no --dotenv): load instance bootstrap .env
-- JIUWENCLAW_DATA_DIR is injected into os.environ
+- JIUWENSWARM_DATA_DIR is injected into os.environ
 - Then get_user_workspace_dir() returns the correct instance path
 
 IMPORTANT: This ensures module-level code uses correct workspace path.
@@ -54,21 +54,21 @@ def parse_dotenv_early(component_name: str = "jiuwenclaw") -> Path | None:
 
     NOTE: This function does NOT remove arguments from sys.argv.
     - argparse will still see and parse them normally
-    - But JIUWENCLAW_DATA_DIR is set BEFORE module-level code executes
+    - But JIUWENSWARM_DATA_DIR is set BEFORE module-level code executes
 
     Priority:
     1. --dotenv <path>: Use specified file directly
     2. --name <name>: Load instance bootstrap .env from instances.yaml
 
     Args:
-        component_name: Name for warning messages (e.g., "jiuwenclaw-app")
+        component_name: Name for warning messages (e.g., "jiuwenswarm-app")
 
     Returns:
         Path to the loaded .env file if found and loaded, None otherwise
 
     Usage:
         from jiuwenclaw.dotenv_early import parse_dotenv_early
-        parse_dotenv_early("jiuwenclaw-app")
+        parse_dotenv_early("jiuwenswarm-app")
 
         # Now safe to import jiuwenclaw modules
         from jiuwenclaw.common.utils import get_user_workspace_dir
@@ -130,11 +130,11 @@ def _load_bootstrap_by_name_early(name: str, component_name: str) -> Path | None
 
     # Find instances.yaml path (same logic as instance_manager but without imports)
     user_home = os.environ.get("JIUWENCLAW_HOME") or Path.home()
-    yaml_path = Path(user_home) / ".jiuwenclaw" / "instances.yaml"
+    yaml_path = Path(user_home) / ".jiuwenswarm" / "instances.yaml"
 
     if not yaml_path.exists():
         _early_error(component_name, f"instances.yaml not found: {yaml_path}")
-        _early_error(component_name, f"Run 'jiuwenclaw-init --name {name}' to create it.")
+        _early_error(component_name, f"Run 'jiuwenswarm-init --name {name}' to create it.")
         return None
 
     # Parse YAML to find instance workspace (minimal parsing without full imports)
@@ -145,7 +145,7 @@ def _load_bootstrap_by_name_early(name: str, component_name: str) -> Path | None
 
         if name not in instances:
             _early_error(component_name, f"Instance '{name}' not found in instances.yaml")
-            _early_error(component_name, f"Run 'jiuwenclaw-init --name {name}' to create it.")
+            _early_error(component_name, f"Run 'jiuwenswarm-init --name {name}' to create it.")
             return None
 
         inst_data = instances.get(name) or {}
@@ -154,7 +154,7 @@ def _load_bootstrap_by_name_early(name: str, component_name: str) -> Path | None
         if workspace_str:
             workspace = Path(workspace_str).expanduser().resolve()
         else:
-            instances_dir = Path(user_home) / ".jiuwenclaw-instances"
+            instances_dir = Path(user_home) / ".jiuwenswarm-instances"
             workspace = instances_dir / name
 
     except Exception as exc:
@@ -164,7 +164,7 @@ def _load_bootstrap_by_name_early(name: str, component_name: str) -> Path | None
     # Check workspace exists
     if not workspace.exists():
         _early_error(component_name, f"Workspace directory not found: {workspace}")
-        _early_error(component_name, f"Run 'jiuwenclaw-init --name {name}' to create it.")
+        _early_error(component_name, f"Run 'jiuwenswarm-init --name {name}' to create it.")
         return None
 
     # Load bootstrap .env
@@ -197,7 +197,7 @@ def set_component_name(name: str) -> None:
 
     Call this before importing the module if you want custom warnings:
         from jiuwenclaw import dotenv_early
-        dotenv_early.set_component_name("jiuwenclaw-app")
+        dotenv_early.set_component_name("jiuwenswarm-app")
         # Now import triggers parsing with custom name
 
     However, the simpler pattern is to just call parse_dotenv_early() directly.

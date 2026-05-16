@@ -13,7 +13,7 @@ from typing import Any, Callable
 
 # --- Early --dotenv parsing (before jiuwenclaw imports) ---
 from jiuwenclaw.dotenv_early import parse_dotenv_early
-parse_dotenv_early("jiuwenclaw-acp-channel")
+parse_dotenv_early("jiuwenswarm-acp-channel")
 
 # --- Now safe to import jiuwenclaw modules ---
 from jiuwenclaw.gateway.channel_manager.base import BaseChannel, RobotMessageRouter
@@ -1774,7 +1774,7 @@ def main() -> None:
     sys.stdout = sys.stderr
 
     parser = argparse.ArgumentParser(
-        prog="jiuwenclaw-acp",
+        prog="jiuwenswarm-acp",
         description="Start JiuwenClaw ACP stdio entrypoint.",
     )
     parser.add_argument(

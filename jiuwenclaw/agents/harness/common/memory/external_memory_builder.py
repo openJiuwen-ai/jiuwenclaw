@@ -6,7 +6,7 @@ Dispatches on `memory.external.provider`:
   - openjiuwen  -> OpenJiuwenMemoryProvider (builds its own KV/Vector/DB from config)
   - mem0        -> Mem0MemoryProvider
   - openviking  -> OpenVikingMemoryProvider
-  - <plugin>    -> user-installed plugin from ~/.jiuwenclaw/plugins/memory/
+  - <plugin>    -> user-installed plugin from ~/.jiuwenswarm/plugins/memory/
   - ""          -> disabled (returns None)
 
 Any failure returns None — the main flow is never blocked.
@@ -91,8 +91,8 @@ def _build_mem0_provider(ext_cfg: Dict[str, Any]):
 
     mem0_cfg = ext_cfg.get("mem0") or {}
     api_key = mem0_cfg.get("api_key") or os.environ.get("MEM0_API_KEY", "")
-    user_id = mem0_cfg.get("user_id") or os.environ.get("MEM0_USER_ID", "jiuwenclaw-user")
-    agent_id = mem0_cfg.get("agent_id") or os.environ.get("MEM0_AGENT_ID", "jiuwenclaw")
+    user_id = mem0_cfg.get("user_id") or os.environ.get("MEM0_USER_ID", "jiuwenswarm-user")
+    agent_id = mem0_cfg.get("agent_id") or os.environ.get("MEM0_AGENT_ID", "jiuwenswarm")
     rerank = bool(mem0_cfg.get("rerank", True))
 
     provider = Mem0MemoryProvider(

@@ -33,7 +33,7 @@ def create_bootstrap_env(config: InstanceConfig) -> Path:
     """Create bootstrap .env file for an instance.
 
     The bootstrap .env contains:
-    - JIUWENCLAW_DATA_DIR: instance workspace path
+    - JIUWENSWARM_DATA_DIR: instance workspace path
     - JIUWENCLAW_INSTANCE: instance name
     - Port assignments for each service
 
@@ -48,7 +48,7 @@ def create_bootstrap_env(config: InstanceConfig) -> Path:
 
     lines = [
         f"# Bootstrap .env for instance: {config.name}",
-        f"JIUWENCLAW_DATA_DIR={config.workspace}",
+        f"JIUWENSWARM_DATA_DIR={config.workspace}",
         f"JIUWENCLAW_INSTANCE={config.name}",
     ]
 
@@ -107,7 +107,7 @@ def _create_basic_bootstrap_env(
 
     # Get instance index from instances.yaml order
     user_home = os.environ.get("JIUWENCLAW_HOME") or Path.home()
-    yaml_path = Path(user_home) / ".jiuwenclaw" / "instances.yaml"
+    yaml_path = Path(user_home) / ".jiuwenswarm" / "instances.yaml"
 
     try:
         data = yaml.safe_load(yaml_path.read_text(encoding="utf-8"))
@@ -123,7 +123,7 @@ def _create_basic_bootstrap_env(
     bootstrap_env = workspace / ".env"
     lines = [
         f"# Bootstrap .env for instance: {name}",
-        f"JIUWENCLAW_DATA_DIR={workspace}",
+        f"JIUWENSWARM_DATA_DIR={workspace}",
         f"JIUWENCLAW_INSTANCE={name}",
         f"AGENT_SERVER_PORT={ports['agent_server']}",
         f"WEB_PORT={ports['web']}",
@@ -141,7 +141,7 @@ def load_instance_bootstrap_by_name(name: str) -> Path | None:
 
     This function is called from CLI main() when --name is specified
     but --dotenv was not parsed early. It loads the instance's bootstrap
-    .env file to set JIUWENCLAW_DATA_DIR and port environment variables.
+    .env file to set JIUWENSWARM_DATA_DIR and port environment variables.
 
     Args:
         name: Instance name (must exist in instances.yaml)
@@ -179,7 +179,7 @@ def load_instance_bootstrap_by_name(name: str) -> Path | None:
     config = get_instance_config(name)
     if config is None:
         _logger.error("ERROR: Instance '%s' not found in instances.yaml", name)
-        _logger.error("Run 'jiuwenclaw-init --name %s' to create it.", name)
+        _logger.error("Run 'jiuwenswarm-init --name %s' to create it.", name)
         return None
 
     # Check workspace directory exists
@@ -187,7 +187,7 @@ def load_instance_bootstrap_by_name(name: str) -> Path | None:
         _logger.error(
             "ERROR: Workspace directory not found: %s", config.workspace
         )
-        _logger.error("Run 'jiuwenclaw-init --name %s' to create it.", name)
+        _logger.error("Run 'jiuwenswarm-init --name %s' to create it.", name)
         return None
 
     # Get or create bootstrap .env

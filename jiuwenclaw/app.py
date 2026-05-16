@@ -1,14 +1,14 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 """Orchestrate AgentServer + Gateway in two processes (split layout, one command).
 
-Runs ``jiuwenclaw.app_agentserver`` then ``jiuwenclaw.app_gateway`` with the same
+Runs ``jiuwenclaw.server.app_agentserver`` then ``jiuwenclaw.gateway.app_gateway`` with the same
 environment as a normal CLI launch. Web RPC handlers live in ``app_web_handlers``.
 
 Supports ``--dotenv <path>`` for multi-instance isolation.
 """
 
 from __future__ import annotations
-
+import os
 import subprocess
 import sys
 import time
@@ -17,7 +17,7 @@ from dotenv import load_dotenv
 
 # --- Early --dotenv parsing (before jiuwenclaw imports) ---
 from jiuwenclaw.dotenv_early import parse_dotenv_early, get_parsed_dotenv
-parse_dotenv_early("jiuwenclaw-app")
+parse_dotenv_early("jiuwenswarm-app")
 
 # --- Now safe to import jiuwenclaw modules ---
 from jiuwenclaw.common.utils import (
@@ -34,8 +34,8 @@ _parsed_dotenv_path = get_parsed_dotenv()
 
 _workspace_dir = get_user_workspace_dir()
 _config_file = _workspace_dir / "config" / "config.yaml"
-_new_workspace = _workspace_dir / "agent" / "jiuwenclaw_workspace"
-_old_workspace = _workspace_dir / "agent" / "workspace"
+_new_workspace = _workspace_dir / "agent" / "workspace"
+_old_workspace = _workspace_dir / "agent" / "jiuwenclaw_workspace"
 
 # 始终清理 Team 旧版本遗留文件（幂等操作，在 prepare_workspace 之前执行）
 cleanup_team_files(_workspace_dir)
@@ -52,7 +52,7 @@ def main() -> None:
     import argparse
 
     parser = argparse.ArgumentParser(
-        prog="jiuwenclaw-app",
+        prog="jiuwenswarm-app",
         description="Start JiuWenClaw AgentServer + Gateway (split layout, one command).",
     )
     parser.add_argument(
@@ -76,20 +76,29 @@ def main() -> None:
 
     python = sys.executable
 
-    # Build subprocess commands with --dotenv if parsed
-    agent_cmd = [python, "-m", "jiuwenclaw.server.app_agentserver"]
-    gateway_cmd = [python, "-m", "jiuwenclaw.gateway.app_gateway"]
+    # Build subprocess commands – in frozen (PyInstaller) mode use flags
+    # instead of -m which won't work with a bundled executable.
+    if getattr(sys, "frozen", False):
+        agent_cmd = [python, "--desktop-run-agent"]
+        gateway_cmd = [python, "--desktop-run-gateway"]
+    else:
+        agent_cmd = [python, "-m", "jiuwenclaw.server.app_agentserver"]
+        gateway_cmd = [python, "-m", "jiuwenclaw.gateway.app_gateway"]
 
     # Pass --dotenv to subprocesses for multi-instance isolation
     if dotenv_path is not None:
         agent_cmd.extend(["--dotenv", str(dotenv_path)])
         gateway_cmd.extend(["--dotenv", str(dotenv_path)])
 
-    agent = subprocess.Popen(agent_cmd)
+    _popen_kwargs: dict = {}
+    if os.name == "nt":
+        _popen_kwargs["creationflags"] = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+
+    agent = subprocess.Popen(agent_cmd, **_popen_kwargs)
     gateway = None
     try:
         time.sleep(0.4)
-        gateway = subprocess.Popen(gateway_cmd)
+        gateway = subprocess.Popen(gateway_cmd, **_popen_kwargs)
     except Exception:
         if agent.poll() is None:
             agent.terminate()

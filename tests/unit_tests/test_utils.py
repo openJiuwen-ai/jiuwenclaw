@@ -130,30 +130,30 @@ class TestConstants:
         """Test get_user_workspace_dir is defined."""
         assert hasattr(utils, "get_user_workspace_dir")
         assert isinstance(utils.get_user_workspace_dir(), Path)
-        assert ".jiuwenclaw" in str(utils.get_user_workspace_dir())
+        assert ".jiuwenswarm" in str(utils.get_user_workspace_dir())
 
 
 class TestMultiInstanceEnvVars:
     """Test environment variable support for multi-instance isolation (Phase 1)."""
 
     @staticmethod
-    def test_jiuwenclaw_workspace_env_var():
-        """Test JIUWENCLAW_DATA_DIR environment variable overrides default workspace."""
+    def test_workspace_env_var():
+        """Test JIUWENSWARM_DATA_DIR environment variable overrides default workspace."""
         # Reset cache before test - must reset _workspace_base_dir for workspace tests
         setattr(utils, '_workspace_base_dir', None)
         setattr(utils, '_user_home', None)
-        original_env = os.environ.pop("JIUWENCLAW_DATA_DIR", None)
+        original_env = os.environ.pop("JIUWENSWARM_DATA_DIR", None)
         original_home_env = os.environ.pop("JIUWENCLAW_HOME", None)
 
         try:
             # Test default behavior
             default_workspace = utils.get_user_workspace_dir()
-            assert ".jiuwenclaw" in str(default_workspace)
+            assert ".jiuwenswarm" in str(default_workspace)
 
             # Reset cache and set env var
             setattr(utils, '_workspace_base_dir', None)
             setattr(utils, '_user_home', None)
-            os.environ["JIUWENCLAW_DATA_DIR"] = "/custom/workspace/path"
+            os.environ["JIUWENSWARM_DATA_DIR"] = "/custom/workspace/path"
             custom_workspace = utils.get_user_workspace_dir()
             # Use Path comparison for cross-platform compatibility
             assert custom_workspace == Path("/custom/workspace/path")
@@ -161,9 +161,9 @@ class TestMultiInstanceEnvVars:
             # Cleanup
             setattr(utils, '_workspace_base_dir', None)
             setattr(utils, '_user_home', None)
-            os.environ.pop("JIUWENCLAW_DATA_DIR", None)
+            os.environ.pop("JIUWENSWARM_DATA_DIR", None)
             if original_env:
-                os.environ["JIUWENCLAW_DATA_DIR"] = original_env
+                os.environ["JIUWENSWARM_DATA_DIR"] = original_env
             if original_home_env:
                 os.environ["JIUWENCLAW_HOME"] = original_home_env
 
@@ -173,7 +173,7 @@ class TestMultiInstanceEnvVars:
         # Reset cache before test
         setattr(utils, '_user_home', None)
         original_home_env = os.environ.pop("JIUWENCLAW_HOME", None)
-        original_workspace_env = os.environ.pop("JIUWENCLAW_DATA_DIR", None)
+        original_workspace_env = os.environ.pop("JIUWENSWARM_DATA_DIR", None)
 
         try:
             # Set JIUWENCLAW_HOME
@@ -191,38 +191,38 @@ class TestMultiInstanceEnvVars:
             # Cleanup
             setattr(utils, '_user_home', None)
             os.environ.pop("JIUWENCLAW_HOME", None)
-            os.environ.pop("JIUWENCLAW_DATA_DIR", None)
+            os.environ.pop("JIUWENSWARM_DATA_DIR", None)
             if original_home_env:
                 os.environ["JIUWENCLAW_HOME"] = original_home_env
             if original_workspace_env:
-                os.environ["JIUWENCLAW_DATA_DIR"] = original_workspace_env
+                os.environ["JIUWENSWARM_DATA_DIR"] = original_workspace_env
 
     @staticmethod
     def test_workspace_priority_over_home():
-        """Test JIUWENCLAW_DATA_DIR takes priority over JIUWENCLAW_HOME for workspace."""
+        """Test JIUWENSWARM_DATA_DIR takes priority over JIUWENCLAW_HOME for workspace."""
         # Reset both caches - _workspace_base_dir is used by get_user_workspace_dir
         setattr(utils, '_workspace_base_dir', None)
         setattr(utils, '_user_home', None)
         original_home_env = os.environ.pop("JIUWENCLAW_HOME", None)
-        original_workspace_env = os.environ.pop("JIUWENCLAW_DATA_DIR", None)
+        original_workspace_env = os.environ.pop("JIUWENSWARM_DATA_DIR", None)
 
         try:
             # Set both env vars
             os.environ["JIUWENCLAW_HOME"] = "/home/a"
-            os.environ["JIUWENCLAW_DATA_DIR"] = "/workspace/b"
+            os.environ["JIUWENSWARM_DATA_DIR"] = "/workspace/b"
 
-            # Workspace should use JIUWENCLAW_DATA_DIR directly, not derive from HOME
+            # Workspace should use JIUWENSWARM_DATA_DIR directly, not derive from HOME
             workspace = utils.get_user_workspace_dir()
             assert workspace == Path("/workspace/b")
         finally:
             setattr(utils, '_workspace_base_dir', None)
             setattr(utils, '_user_home', None)
             os.environ.pop("JIUWENCLAW_HOME", None)
-            os.environ.pop("JIUWENCLAW_DATA_DIR", None)
+            os.environ.pop("JIUWENSWARM_DATA_DIR", None)
             if original_home_env:
                 os.environ["JIUWENCLAW_HOME"] = original_home_env
             if original_workspace_env:
-                os.environ["JIUWENCLAW_DATA_DIR"] = original_workspace_env
+                os.environ["JIUWENSWARM_DATA_DIR"] = original_workspace_env
 
 
 class TestHardcodedPathsPhase2:
@@ -249,7 +249,7 @@ class TestHardcodedPathsPhase2:
 
     @staticmethod
     def test_task_tools_path_structure():
-        """Test task_tools.py path uses jiuwenclaw_workspace (migrated from legacy workspace)."""
+        """Test task_tools.py path uses workspace (migrated from legacy jiuwenclaw_workspace)."""
         # Reset caches to ensure clean state after previous tests
         setattr(utils, '_user_home', None)
         setattr(utils, '_initialized', False)
@@ -261,7 +261,7 @@ class TestHardcodedPathsPhase2:
         from jiuwenclaw.common.utils import get_user_workspace_dir
 
         workspace = get_user_workspace_dir()
-        expected_path = workspace / "agent" / "jiuwenclaw_workspace" / "task-data.json"
+        expected_path = workspace / "agent" / "workspace" / "task-data.json"
         actual_path = Path(_get_task_data_path())
 
         assert str(actual_path.resolve()) == str(expected_path.resolve()), \
@@ -280,7 +280,7 @@ class TestHardcodedPathsPhase2:
         from jiuwenclaw.common.utils import get_deepagent_user_md_path, get_user_workspace_dir
 
         workspace = get_user_workspace_dir()
-        expected_path = workspace / "agent" / "jiuwenclaw_workspace" / "USER.md"
+        expected_path = workspace / "agent" / "workspace" / "USER.md"
         actual_path = get_deepagent_user_md_path()
 
         assert str(actual_path.resolve()) == str(expected_path.resolve()), \
@@ -300,7 +300,7 @@ class TestAdditionalHardcodedPaths:
         from jiuwenclaw.common.utils import get_user_workspace_dir
 
         workspace = get_user_workspace_dir()
-        expected_path = workspace / "agent" / "jiuwenclaw_workspace" / "extensions"
+        expected_path = workspace / "agent" / "workspace" / "extensions"
         rail_manager = RailManager()
 
         extensions_dir = getattr(rail_manager, '_extensions_dir')
@@ -330,7 +330,7 @@ class TestAdditionalHardcodedPaths:
         from jiuwenclaw.common.utils import get_interactions_dir, get_user_workspace_dir
 
         workspace = get_user_workspace_dir()
-        expected_path = workspace / "agent" / "jiuwenclaw_workspace" / "interactions"
+        expected_path = workspace / "agent" / "workspace" / "interactions"
         actual_path = get_interactions_dir()
 
         assert str(actual_path.resolve()) == str(expected_path.resolve()), \

@@ -94,7 +94,7 @@ uv run pyinstaller scripts/jiuwenclaw.spec
    jiuwenclaw.exe
    ```
 
-4. 应用会启动本地后端与静态前端，并由 pywebview 直接打开无边框桌面窗口；默认不需要再手动打开浏览器。
+4. 应用会启动本地后端与静态前端，并由 pywebview 直接打开桌面窗口；默认不需要再手动打开浏览器。
 
 ## 给 Inno Setup 的产物约定
 
@@ -142,7 +142,7 @@ chmod +x scripts/build-macos.sh
 ## 技术说明
 
 - **Python 运行时**：PyInstaller 将 Python 解释器及依赖打包进桌面分发目录，目标机器无需安装 Python。
-- **桌面窗口**：pywebview 负责加载本地 `http://127.0.0.1:5173` 页面，并提供无边框窗口壳。
+- **桌面窗口**：pywebview 负责加载本地 `http://127.0.0.1:5173` 页面。
 - **Node.js**：前端在构建阶段用 Node 编译，运行时只使用静态文件。
 - **工作区路径**：与 pip 安装一致，使用 `~/.jiuwenclaw` 作为配置与工作区根目录。
 - **安装包制作**：后续使用 Inno Setup 时，请将整个 `dist/jiuwenclaw/` 目录作为安装源，而不是只取单个 exe。

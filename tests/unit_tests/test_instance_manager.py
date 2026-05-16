@@ -359,7 +359,7 @@ class TestBootstrapEnv:
 
         assert env_path.exists()
         content = env_path.read_text()
-        assert "JIUWENCLAW_DATA_DIR" in content
+        assert "JIUWENSWARM_DATA_DIR" in content
         assert "JIUWENCLAW_INSTANCE=alice" in content
         assert "AGENT_SERVER_PORT=19092" in content
 

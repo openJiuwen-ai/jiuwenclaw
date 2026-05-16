@@ -3,7 +3,7 @@
 """External memory configuration helpers.
 
 Reads `memory.external` from config.yaml. For provider=openjiuwen, also
-maps the jiuwenclaw-shaped config (`memory.external.stores` + top-level
+maps the jiuwenswarm-shaped config (`memory.external.stores` + top-level
 `embed`) into the config dict that OpenJiuwenMemoryProvider expects.
 Concrete Store / Embedding instances are built inside the provider — not
 here.
