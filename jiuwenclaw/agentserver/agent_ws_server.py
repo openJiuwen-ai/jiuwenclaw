@@ -18,6 +18,7 @@ from jiuwenclaw.agentserver.tools.acp_output_tools import get_acp_output_manager
 from jiuwenclaw.agentserver.agent_manager import AgentManager
 from jiuwenclaw.utils import (
     FileTransferStartParams,
+    format_session_log,
     get_agent_sessions_dir,
     get_config_file,
     get_multi_tenant_user_workspace_dir,
@@ -370,11 +371,11 @@ class AgentWebSocketServer:
             # 文件传输请求：method 不在 ReqMethod 枚举中，需要特殊处理
             elif env.method in (FILE_TRANSFER_START, FILE_TRANSFER_CHUNK, FILE_TRANSFER_COMPLETE):
                 logger.info(
-                    "[E2A][in] request_id=%s channel=%s method=%s is_stream=%s",
-                    env.request_id,
-                    env.channel,
-                    env.method,
-                    env.is_stream,
+                    format_session_log(
+                        env.session_id,
+                        f"[E2A][in] request_id={env.request_id} channel={env.channel} "
+                        f"method={env.method} is_stream={env.is_stream}",
+                    )
                 )
                 # 直接构造 AgentRequest，不走 e2a_to_agent_request
                 request = AgentRequest(
@@ -389,19 +390,20 @@ class AgentWebSocketServer:
                 )
             else:
                 logger.info(
-                    "[E2A][in] request_id=%s channel=%s method=%s is_stream=%s",
-                    env.request_id,
-                    env.channel,
-                    env.method,
-                    env.is_stream,
+                    format_session_log(
+                        env.session_id,
+                        f"[E2A][in] request_id={env.request_id} channel={env.channel} "
+                        f"method={env.method} is_stream={env.is_stream}",
+                    )
                 )
                 request = e2a_to_agent_request(env)
 
         logger.info(
-            "[AgentWebSocketServer] 收到请求: request_id=%s channel_id=%s is_stream=%s",
-            request.request_id,
-            request.channel_id,
-            request.is_stream,
+            format_session_log(
+                request.session_id,
+                f"[AgentWebSocketServer] 收到请求: request_id={request.request_id} "
+                f"channel_id={request.channel_id} is_stream={request.is_stream}",
+            )
         )
 
         try:
@@ -495,9 +497,10 @@ class AgentWebSocketServer:
                 await self._handle_unary(ws, request, send_lock)
         except Exception as e:
             logger.exception(
-                "[AgentWebSocketServer] 处理请求失败: request_id=%s: %s",
-                request.request_id,
-                e,
+                format_session_log(
+                    request.session_id,
+                    f"[AgentWebSocketServer] 处理请求失败: request_id={request.request_id}: {e}",
+                )
             )
             error_resp = AgentResponse(
                 request_id=request.request_id,
@@ -588,8 +591,10 @@ class AgentWebSocketServer:
         async with send_lock:
             await ws.send(json.dumps(wire, ensure_ascii=False))
         logger.info(
-            "[AgentWebSocketServer] 非流式响应已发送: request_id=%s",
-            request.request_id,
+            format_session_log(
+                request.session_id,
+                f"[AgentWebSocketServer] 非流式响应已发送: request_id={request.request_id}",
+            )
         )
 
     async def _handle_stream(self, ws: Any, request: AgentRequest, send_lock: asyncio.Lock) -> None:
@@ -629,8 +634,10 @@ class AgentWebSocketServer:
                         async with send_lock:
                             await ws.send(json.dumps(wire, ensure_ascii=False))
                         logger.debug(
-                            "[AgentWebSocketServer] keepalive chunk 发送: request_id=%s",
-                            request.request_id,
+                            format_session_log(
+                                request.session_id,
+                                f"[AgentWebSocketServer] keepalive chunk 发送: request_id={request.request_id}",
+                            )
                         )
             except asyncio.CancelledError:
                 pass
@@ -662,9 +669,10 @@ class AgentWebSocketServer:
                     pass
 
         logger.info(
-            "[AgentWebSocketServer] 流式响应已发送: request_id=%s 共 %s 个 chunk",
-            request.request_id,
-            chunk_count,
+            format_session_log(
+                request.session_id,
+                f"[AgentWebSocketServer] 流式响应已发送: request_id={request.request_id} 共 {chunk_count} 个 chunk",
+            )
         )
 
     async def _handle_session_list(self, ws: Any, request: AgentRequest, send_lock: asyncio.Lock) -> None:
@@ -1104,9 +1112,10 @@ class AgentWebSocketServer:
             turns = diff_service.get_turn_diffs(session_id)
 
             logger.info(
-                "[AgentWebSocketServer] command.diff response: session_id=%s turns=%s",
-                session_id,
-                turns,
+                format_session_log(
+                    session_id,
+                    f"[AgentWebSocketServer] command.diff response: turns={turns}",
+                )
             )
 
             resp = AgentResponse(
@@ -1517,14 +1526,18 @@ class AgentWebSocketServer:
             response_kind = str(msg.get("response_kind") or "").strip()
             if response_kind:
                 logger.info(
-                    "[AgentWebSocketServer] send_push response_kind wire sent: channel_id=%s kind=%s",
-                    msg.get("channel_id", ""),
-                    response_kind,
+                    format_session_log(
+                        msg.get("session_id"),
+                        f"[AgentWebSocketServer] send_push response_kind wire sent: "
+                        f"channel_id={msg.get('channel_id', '')} kind={response_kind}",
+                    )
                 )
             else:
                 logger.info(
-                    "[AgentWebSocketServer] send_push 已发送(E2A wire): channel_id=%s",
-                    msg.get("channel_id", ""),
+                    format_session_log(
+                        msg.get("session_id"),
+                        f"[AgentWebSocketServer] send_push 已发送(E2A wire): channel_id={msg.get('channel_id', '')}",
+                    )
                 )
         except Exception as e:
             logger.warning("[AgentWebSocketServer] send_push 失败: %s", e)
@@ -1614,8 +1627,10 @@ class AgentWebSocketServer:
             )
         except Exception as e:
             logger.exception(
-                "[AgentWebSocketServer] 文件传输处理失败: %s",
-                e,
+                format_session_log(
+                    request.session_id,
+                    f"[AgentWebSocketServer] 文件传输处理失败: {e}",
+                )
             )
             resp = AgentResponse(
                 request_id=request.request_id,
@@ -1762,10 +1777,15 @@ class AgentWebSocketServer:
             async with send_lock:
                 await ws.send(json.dumps(wire, ensure_ascii=False))
 
-            logger.info("[AgentServer] session.create completed: session_id=%s", session_id)
+            logger.info(format_session_log(session_id, "[AgentServer] session.create completed"))
 
         except Exception as e:
-            logger.exception("[AgentServer] session.create failed: %s", e)
+            logger.exception(
+                format_session_log(
+                    str(explicit_session_id).strip() if isinstance(explicit_session_id, str) else request.session_id,
+                    f"[AgentServer] session.create failed: {e}",
+                )
+            )
             resp = AgentResponse(
                 request_id=request.request_id,
                 channel_id=request.channel_id,
@@ -1787,7 +1807,13 @@ class AgentWebSocketServer:
             resolve_session_dir_under_root,
         )
 
-        logger.info("[AgentServer] session.delete: request_id=%s", request.request_id)
+        logger.info(
+            format_session_log(
+                str(request.params.get("session_id") or "").strip() \
+                    if isinstance(request.params, dict) else request.session_id,
+                f"[AgentServer] session.delete: request_id={request.request_id}",
+            )
+        )
 
         try:
             params = request.params if isinstance(request.params, dict) else {}
@@ -1841,7 +1867,12 @@ class AgentWebSocketServer:
                             payload={"session_id": safe_sid},
                         )
         except Exception as e:  # noqa: BLE001
-            logger.exception("[AgentServer] session.delete failed: %s", e)
+            logger.exception(
+                format_session_log(
+                    raw_sid,
+                    f"[AgentServer] session.delete failed: {e}",
+                )
+            )
             resp = AgentResponse(
                 request_id=request.request_id,
                 channel_id=request.channel_id,

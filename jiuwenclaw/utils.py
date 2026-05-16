@@ -1481,6 +1481,14 @@ class JsonOnlyFormatter(logging.Formatter):
         return record.getMessage()
 
 
+def format_session_log(session_id: str | None, content: str) -> str:
+    """格式化带 session_id 的日志前缀；缺失 session_id 时保持原文。"""
+    sid = str(session_id or "").strip()
+    if not sid:
+        return content
+    return f"[session={sid}] {content}"
+
+
 def setup_logger(log_level: Optional[str] = None) -> logging.Logger:
     """配置 ``jiuwenclaw`` 根日志：控制台 + 分组件文件 + 汇总 full.log。
 

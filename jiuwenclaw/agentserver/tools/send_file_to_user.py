@@ -25,6 +25,7 @@ from openjiuwen.core.foundation.tool import LocalFunction, Tool, ToolCard
 
 from jiuwenclaw.config import get_file_transfer_config
 from jiuwenclaw.agentserver.file_transfer_manager import get_file_transfer_manager
+from jiuwenclaw.utils import format_session_log
 
 logger = logging.getLogger(__name__)
 
@@ -53,11 +54,11 @@ class SendFileToolkit:
         self.channel_id = channel_id
         self._request_metadata = dict(metadata) if metadata else None
         logger.debug(
-            "[SendFileToolkit] 初始化 request_id=%s session_id=%s channel_id=%s has_metadata=%s",
-            request_id,
-            session_id,
-            channel_id,
-            bool(self._request_metadata),
+            format_session_log(
+                session_id,
+                f"[SendFileToolkit] 初始化 request_id={request_id} "
+                f"channel_id={channel_id} has_metadata={bool(self._request_metadata)}",
+            )
         )
 
     async def send_file(self, abs_file_path_list: Union[List[str], str]) -> str:
@@ -103,10 +104,10 @@ class SendFileToolkit:
             return "\n".join(msg_parts)
 
         logger.info(
-            "[SendFileToolkit] send_file 开始 session_id=%s 有效文件=%d 缺失=%d",
-            self.session_id,
-            len(valid_files),
-            len(missing_files),
+            format_session_log(
+                self.session_id,
+                f"[SendFileToolkit] send_file 开始 有效文件={len(valid_files)} 缺失={len(missing_files)}",
+            )
         )
 
         # 检查是否启用分布式文件传输
@@ -162,9 +163,7 @@ class SendFileToolkit:
             return "\n".join(result_parts)
         except Exception as e:
             logger.exception(
-                "[SendFileToolkit] _send_file_local 失败 session_id=%s error=%s",
-                self.session_id,
-                str(e),
+                format_session_log(self.session_id, f"[SendFileToolkit] _send_file_local 失败 error={str(e)}")
             )
             return f"提交文件失败: {str(e)}"
 

@@ -14,6 +14,8 @@ import asyncio
 import logging
 from typing import Any, Awaitable, Callable
 
+from jiuwenclaw.utils import format_session_log
+
 logger = logging.getLogger(__name__)
 
 
@@ -44,8 +46,10 @@ class SessionManager:
         task = self._session_tasks.get(session_id)
         if task is not None and not task.done():
             logger.info(
-                "[SessionManager] %s取消 session 非流式任务: session_id=%s",
-                log_msg_prefix, session_id,
+                format_session_log(
+                    session_id,
+                    f"[SessionManager] {log_msg_prefix}取消 session 非流式任务",
+                )
             )
             task.cancel()
             try:
@@ -82,7 +86,7 @@ class SessionManager:
                             queue.task_done()
 
                     except asyncio.CancelledError:
-                        logger.info("[SessionManager] Session 任务处理器被取消: session_id=%s", session_id)
+                        logger.info(format_session_log(session_id, "[SessionManager] Session 任务处理器被取消"))
                         break
                     except Exception as e:
                         logger.error("[SessionManager] Session 任务处理器异常: %s", e)
@@ -91,7 +95,7 @@ class SessionManager:
                 self._session_priorities.pop(session_id, None)
                 self._session_tasks.pop(session_id, None)
                 self._session_processors.pop(session_id, None)
-                logger.info("[SessionManager] Session 任务处理器已关闭: session_id=%s", session_id)
+                logger.info(format_session_log(session_id, "[SessionManager] Session 任务处理器已关闭"))
 
             self._session_processors[session_id] = asyncio.create_task(process_session_queue())
 

@@ -19,6 +19,7 @@ from jiuwenclaw.agentserver.team.event_types import (
     get_team_event_type,
     get_event_category,
 )
+from jiuwenclaw.utils import format_session_log
 
 logger = logging.getLogger(__name__)
 
@@ -68,15 +69,12 @@ class TeamMonitorHandler:
             self._event_task = asyncio.create_task(self._collect_events())
 
             logger.info(
-                "[TeamMonitorHandler] Monitor 启动成功: session_id=%s",
-                self._session_id,
+                format_session_log(self._session_id, "[TeamMonitorHandler] Monitor 启动成功")
             )
 
         except Exception as e:
             logger.error(
-                "[TeamMonitorHandler] Monitor 启动失败: session_id=%s, error=%s",
-                self._session_id,
-                e,
+                format_session_log(self._session_id, f"[TeamMonitorHandler] Monitor 启动失败: error={e}")
             )
             raise
 
@@ -97,15 +95,12 @@ class TeamMonitorHandler:
                 await self._monitor.stop()
             except Exception as e:
                 logger.warning(
-                    "[TeamMonitorHandler] Monitor 停止失败: session_id=%s, error=%s",
-                    self._session_id,
-                    e,
+                    format_session_log(self._session_id, f"[TeamMonitorHandler] Monitor 停止失败: error={e}")
                 )
             self._monitor = None
 
         logger.info(
-            "[TeamMonitorHandler] Monitor 已停止: session_id=%s",
-            self._session_id,
+            format_session_log(self._session_id, "[TeamMonitorHandler] Monitor 已停止")
         )
 
     async def _collect_events(self) -> None:
@@ -124,9 +119,7 @@ class TeamMonitorHandler:
 
         except Exception as e:
             logger.error(
-                "[TeamMonitorHandler] 事件收集失败: session_id=%s, error=%s",
-                self._session_id,
-                e,
+                format_session_log(self._session_id, f"[TeamMonitorHandler] 事件收集失败: error={e}")
             )
 
     @staticmethod
@@ -326,9 +319,7 @@ class TeamMonitorHandler:
                 continue
             except Exception as e:
                 logger.error(
-                    "[TeamMonitorHandler] 事件流错误: session_id=%s, error=%s",
-                    self._session_id,
-                    e,
+                    format_session_log(self._session_id, f"[TeamMonitorHandler] 事件流错误: error={e}")
                 )
                 break
 

@@ -37,6 +37,7 @@ from jiuwenclaw.agentserver.tools.deepresearch_tools import (
     push_deepresearch_route,
     reset_deepresearch_route,
 )
+from jiuwenclaw.utils import format_session_log
 
 logger = logging.getLogger(__name__)
 
@@ -452,10 +453,12 @@ class TeamManager:
                         )
                     )
                     logger.info(
-                        "[TeamManager] member context_engine_config.enabled=%s (member_id=%s session_id=%s)",
+                        format_session_log(
+                            session_id,
+                            "[TeamManager] member context_engine_config.enabled=%s (member_id=%s)",
+                        ),
                         _ce_enabled,
                         getattr(agent.card, "id", None),
-                        session_id,
                     )
                     for rail in member_rails:
                         if type(rail).__name__ in RAIL_WHITELIST:
@@ -527,7 +530,7 @@ class TeamManager:
         channel_id: str | None = None,
         request_metadata: dict[str, Any] | None = None,
     ) -> TeamAgent:
-        logger.info("[TeamManager] building TeamAgentSpec: session_id=%s", session_id)
+        logger.info(format_session_log(session_id, "[TeamManager] building TeamAgentSpec: session_id=%s"), session_id)
         spec = self._load_team_spec(session_id)
         deleted_tables, cleared_tables = await self._cleanup_team_runtime_state(spec)
         if deleted_tables or cleared_tables:
@@ -558,9 +561,10 @@ class TeamManager:
             self._copy_global_skills_to_team_shared_dir(spec)
 
             logger.info(
-                "[TeamManager] Team created: session_id=%s, team_name=%s",
-                session_id,
-                spec.team_name,
+                format_session_log(
+                    session_id,
+                    f"[TeamManager] Team created: session_id={session_id} team_name={spec.team_name}"
+                )
             )
             return team_agent
         finally:
@@ -591,15 +595,15 @@ class TeamManager:
     async def interact(self, session_id: str, user_input: str) -> bool:
         team_agent = self._team_agents.get(session_id)
         if team_agent is None:
-            logger.warning("[TeamManager] interact failed, missing team: session_id=%s", session_id)
+            logger.warning(format_session_log(session_id, "[TeamManager] interact failed, missing team"))
             return False
 
         try:
             await team_agent.interact(user_input)
-            logger.debug("[TeamManager] interact sent: session_id=%s", session_id)
+            logger.debug(format_session_log(session_id, "[TeamManager] interact sent"))
             return True
         except Exception as exc:
-            logger.error("[TeamManager] interact failed: session_id=%s, error=%s", session_id, exc)
+            logger.error(format_session_log(session_id, f"[TeamManager] interact failed: error={exc}"))
             return False
 
     async def destroy_team(self, session_id: str) -> bool:
@@ -621,9 +625,7 @@ class TeamManager:
                 pass
             except Exception as exc:
                 logger.warning(
-                    "[TeamManager] stream stop failed: session_id=%s error=%s",
-                    session_id,
-                    exc,
+                    format_session_log(session_id, f"[TeamManager] stream stop failed: error={exc}")
                 )
 
         monitor_handler = self._team_monitors.pop(session_id, None)
@@ -632,9 +634,7 @@ class TeamManager:
                 await monitor_handler.stop()
             except Exception as exc:
                 logger.warning(
-                    "[TeamManager] monitor stop failed: session_id=%s error=%s",
-                    session_id,
-                    exc,
+                    format_session_log(session_id, f"[TeamManager] monitor stop failed: error={exc}")
                 )
 
         team_agent = self._team_agents.pop(session_id, None)
@@ -644,8 +644,7 @@ class TeamManager:
             cleanup_spec = self._load_team_spec(session_id)
             if team_agent is None:
                 logger.info(
-                    "[TeamManager] no in-memory team for session_id=%s, run runtime cleanup fallback only",
-                    session_id,
+                    format_session_log(session_id, "[TeamManager] no in-memory team, run runtime cleanup fallback only")
                 )
                 return False
 
@@ -656,15 +655,11 @@ class TeamManager:
                 reset_session_id(token)
 
             logger.info(
-                "[TeamManager] Team cleaned via core API: session_id=%s cleaned=%s",
-                session_id,
-                cleaned,
+                format_session_log(session_id, f"[TeamManager] Team cleaned via core API: cleaned={cleaned}")
             )
         except Exception as exc:
             logger.error(
-                "[TeamManager] destroy team failed: session_id=%s error=%s",
-                session_id,
-                exc,
+                format_session_log(session_id, f"[TeamManager] destroy team failed: error={exc}")
             )
         finally:
             if cleanup_spec is None:
@@ -672,9 +667,8 @@ class TeamManager:
                     cleanup_spec = self._load_team_spec(session_id)
                 except Exception as exc:
                     logger.warning(
-                        "[TeamManager] failed to rebuild team spec for cleanup: session_id=%s error=%s",
-                        session_id,
-                        exc,
+                        format_session_log(session_id,
+                                           f"[TeamManager] failed to rebuild team spec for cleanup: error={exc}")
                     )
                     cleanup_spec = None
             deleted_tables: list[str] = []
@@ -715,9 +709,7 @@ class TeamManager:
             if task.done():
                 continue
             logger.info(
-                "[TeamManager] %scancel stream task session_id=%s",
-                reason,
-                session_id,
+                format_session_log(session_id, f"[TeamManager] {reason}cancel stream task")
             )
             task.cancel()
         for session_id, task in pending:
@@ -729,9 +721,7 @@ class TeamManager:
                 pass
             except Exception as exc:
                 logger.warning(
-                    "[TeamManager] stream task await after cancel failed session_id=%s: %s",
-                    session_id,
-                    exc,
+                    format_session_log(session_id, f"[TeamManager] stream task await after cancel failed: {exc}")
                 )
         async with self._lock:
             self._stream_tasks.clear()

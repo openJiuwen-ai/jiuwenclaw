@@ -27,7 +27,7 @@ from jiuwenclaw.agentserver.gateway_push import GatewayPushTransport, WebSocketG
 from jiuwenclaw.agentserver.tools.deepresearch_plugin.convert_docx_offline import convert_md_to_docx
 from jiuwenclaw.agentserver.tools.deepresearch_plugin.convert_html_offline import convert_md_to_html
 from jiuwenclaw.agentserver.tools.deepresearch_plugin.report_bundle import build_report_bundle
-from jiuwenclaw.utils import get_agent_workspace_dir, get_logs_dir
+from jiuwenclaw.utils import format_session_log, get_agent_workspace_dir, get_logs_dir
 
 logger = logging.getLogger(__name__)
 SAVE_REPORT_PATH = "workspace/reports"
@@ -763,15 +763,18 @@ class DeepResearchTaskManager:
         task.status = TaskStatus.RUNNING
 
         logger.debug(
-            "[DeepResearchTaskManager] 任务路由信息 task_id=%s channel_id=%s session_id=%s request_id=%s",
-            task_id,
-            task.channel_id,
-            task.session_id,
-            task.request_id,
+            format_session_log(
+                task.session_id,
+                f"[DeepResearchTaskManager] 任务路由信息 task_id={task_id} "
+                f"channel_id={task.channel_id} request_id={task.request_id}",
+            )
         )
 
         logger.info(
-            "[DeepResearchTaskManager] 开始执行任务 task_id=%s query=%s",
+            format_session_log(
+                task.session_id,
+                "[DeepResearchTaskManager] 开始执行任务 task_id=%s query=%s",
+            ),
             task_id,
             query[:80] + "..." if len(query) > 80 else query,
             extra={'user_visible': 'critical'}
@@ -868,7 +871,10 @@ class DeepResearchTaskManager:
                 task.status = TaskStatus.COMPLETED
                 task.result = result
                 logger.info(
-                    "[DeepResearchTaskManager] 任务完成 task_id=%s result=%s",
+                    format_session_log(
+                        task.session_id,
+                        "[DeepResearchTaskManager] 任务完成 task_id=%s result=%s",
+                    ),
                     task_id,
                     result,
                     extra={'user_visible': 'critical'}
@@ -880,7 +886,10 @@ class DeepResearchTaskManager:
             task.status = TaskStatus.CANCELLED
             task.error = "任务已取消"
             logger.info(
-                "[DeepResearchTaskManager] 任务已取消 task_id=%s",
+                format_session_log(
+                    task.session_id,
+                    "[DeepResearchTaskManager] 任务已取消 task_id=%s",
+                ),
                 task_id,
                 extra={'user_visible': 'critical'}
             )
@@ -889,7 +898,10 @@ class DeepResearchTaskManager:
             task.status = TaskStatus.ERROR
             task.error = str(exc)
             logger.exception(
-                "[DeepResearchTaskManager] 任务异常 task_id=%s error=%s",
+                format_session_log(
+                    task.session_id,
+                    "[DeepResearchTaskManager] 任务异常 task_id=%s error=%s",
+                ),
                 task_id,
                 exc,
                 extra={'user_visible': 'critical'}
@@ -935,7 +947,10 @@ class DeepResearchTaskManager:
         }
 
         logger.debug(
-            "[DeepResearchTaskManager] 发送任务完成通知 task_id=%s status=%s",
+            format_session_log(
+                task.session_id,
+                "[DeepResearchTaskManager] 发送任务完成通知 task_id=%s status=%s",
+            ),
             task.task_id,
             payload_status,
         )
@@ -944,7 +959,10 @@ class DeepResearchTaskManager:
             await self._gateway_push.send_push(msg)
         except Exception as exc:
             logger.warning(
-                "[DeepResearchTaskManager] 发送 WebSocket 通知失败 task_id=%s error=%s",
+                format_session_log(
+                    task.session_id,
+                    "[DeepResearchTaskManager] 发送 WebSocket 通知失败 task_id=%s error=%s",
+                ),
                 task.task_id,
                 exc,
             )
@@ -1029,13 +1047,14 @@ class DeepResearchTaskManager:
         self._task_handles[task_id] = task_handle
 
         logger.info(
-            "[DeepResearchTaskManager] 创建深度研究任务：%s task_id=%s query=%s channel_id=%s session_id=%s "
-            "running_count=%d/%d",
+            format_session_log(
+                session_id,
+                "[DeepResearchTaskManager] 创建深度研究任务：%s task_id=%s query=%s channel_id=%s running_count=%d/%d",
+            ),
             file_name,
             task_id,
             query[:80] + "..." if len(query) > 80 else query,
             channel_id,
-            session_id,
             running_count + 1,
             DeepResearchTaskManager.MAX_ACTIVE_TASKS,
             extra={'user_visible': 'critical'}
@@ -1122,8 +1141,11 @@ class DeepResearchTaskManager:
 
         # 4. session_id 不匹配，记录审计日志（包含 channel_id 信息）
         logger.warning(
-            "[DeepResearchTaskManager] 越权访问被阻止 task_id=%s "
-            "task_session=%s caller_session=%s caller_channel=%s",
+            format_session_log(
+                task.session_id,
+                "[DeepResearchTaskManager] 越权访问被阻止 task_id=%s "
+                "task_session=%s caller_session=%s caller_channel=%s",
+            ),
             task.task_id,
             task.session_id,
             caller_session_id,
@@ -1198,20 +1220,32 @@ class DeepResearchTaskManager:
         # 授权校验：只允许任务所有者取消
         if not self._check_task_ownership(task, caller_session_id, caller_channel_id):
             logger.warning(
-                "[DeepResearchTaskManager] 取消任务失败：无权访问 task_id=%s" % task_id
+                format_session_log(
+                    task.session_id,
+                    "[DeepResearchTaskManager] 取消任务失败：无权访问 task_id=%s",
+                ),
+                task_id,
             )
             return False
 
         task_handle = self._task_handles.get(task_id)
         if task_handle is None:
             logger.info(
-                "[DeepResearchTaskManager] 任务已结束，无需取消 task_id=%s" % task_id
+                format_session_log(
+                    task.session_id,
+                    "[DeepResearchTaskManager] 任务已结束，无需取消 task_id=%s",
+                ),
+                task_id,
             )
             return False
 
         if task_handle.done():
             logger.info(
-                "[DeepResearchTaskManager] 任务已完成，无需取消 task_id=%s" % task_id
+                format_session_log(
+                    task.session_id,
+                    "[DeepResearchTaskManager] 任务已完成，无需取消 task_id=%s",
+                ),
+                task_id,
             )
             return False
 
@@ -1219,7 +1253,10 @@ class DeepResearchTaskManager:
         if task.cancel_event:
             task.cancel_event.set()
             logger.info(
-                "[DeepResearchTaskManager] 已设置取消事件 task_id=%s",
+                format_session_log(
+                    task.session_id,
+                    "[DeepResearchTaskManager] 已设置取消事件 task_id=%s",
+                ),
                 task_id,
             )
 
@@ -1230,7 +1267,10 @@ class DeepResearchTaskManager:
             pass
 
         logger.info(
-            "[DeepResearchTaskManager] 已取消任务 task_id=%s",
+            format_session_log(
+                task.session_id,
+                "[DeepResearchTaskManager] 已取消任务 task_id=%s",
+            ),
             task_id,
             extra={'user_visible': 'critical'}
         )
@@ -1330,11 +1370,12 @@ class DeepResearchTaskManager:
         temp_task_id = f"dr_blocking_{time.monotonic_ns()}_{secrets.token_hex(4)}"
 
         logger.info(
-            "[DeepResearchTaskManager] 开始阻塞执行深度研究任务 temp_task_id=%s query=%s "
-            "session_id=%s channel_id=%s",
+            format_session_log(
+                session_id,
+                "[DeepResearchTaskManager] 开始阻塞执行深度研究任务 temp_task_id=%s query=%s channel_id=%s",
+            ),
             temp_task_id,
             query[:80] + "..." if len(query) > 80 else query,
-            session_id,
             channel_id,
             extra={'user_visible': 'critical'}
         )
