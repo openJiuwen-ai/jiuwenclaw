@@ -485,7 +485,7 @@ class VibeSkillChannel(BaseChannel):
         return False
 
     async def _handle_message_send(self, ws: Any, data: dict[str, Any]) -> bool:
-        """处理 message.send 类型的消息，封装为 skilldev.start 并发送到 MessageHandler。"""
+        """处理 message.send 类型的消息，封装为 skilldev.chat 并发送到 MessageHandler。"""
         external_session_id = str(data.get("sessionID") or "").strip()
         parts = data.get("parts", [])
         msg_model = data.get("model")
@@ -524,12 +524,27 @@ class VibeSkillChannel(BaseChannel):
         for part in parts:
             if isinstance(part, dict) and part.get("type") == "toolDefinition":
                 tools.append({
-                    "toolId": part.get("toolId", ""),
+                    "pluginId": part.get("pluginId", ""),
+                    "pluginType": part.get("pluginType", ""),
                     "toolType": part.get("toolType", ""),
-                    "name": part.get("name", ""),
+                    "toolName": part.get("toolName", ""),
                     "description": part.get("description", ""),
-                    "parameters": part.get("parameters", {}),
+                    "arguments": part.get("arguments", {}),
                     "protocol": part.get("protocol", ""),
+                })
+
+        # 提取 agents (agentDefinition parts)
+        agent_definitions = []
+        for part in parts:
+            if isinstance(part, dict) and part.get("type") == "agentDefinition":
+                parameters = part.get("parameters", {})
+                if not isinstance(parameters, dict):
+                    parameters = {}
+                agent_definitions.append({
+                    "agentId": str(part.get("agentId") or part.get("agent_id") or ""),
+                    "name": str(part.get("name") or ""),
+                    "description": str(part.get("description") or ""),
+                    "parameters": parameters,
                 })
 
         session = await self._store.get_or_create(external_id=external_session_id or None)
@@ -543,8 +558,7 @@ class VibeSkillChannel(BaseChannel):
         if session.mode == "Standard":
             return await self._handle_chat_message(ws, data, session, external_session_id)
 
-        # 新一轮 skilldev 执行必须使用新的 assistant message_id；否则同会话同 stage（如 generate）
-        # 会复用 _message_ctx 中已有聚合状态，导致多次 message.send 的产出落在同一 message 下。
+        # 新一轮 skilldev 执行使用新的 assistant message_id
         self._clear_message_context_for_session(session.internal_id)
 
         await self._store.set_state(session.internal_id, VibeSkillSessionState.BUSY)
@@ -568,7 +582,7 @@ class VibeSkillChannel(BaseChannel):
             self._ws_sessions[ws].add(session.internal_id)
             self._session_to_ws[session.internal_id] = ws
 
-        # 构建 skilldev.start 格式的 params
+        # 构建 skilldev.chat 格式的 params
         params: dict[str, Any] = {
             "task_id": session.internal_id,
             "query": query,
@@ -585,6 +599,10 @@ class VibeSkillChannel(BaseChannel):
         # tools (toolDefinition)
         if tools:
             params["tool_spec_files"] = tools
+
+        # agents (agentDefinition)
+        if agent_definitions:
+            params["agent_definitions"] = agent_definitions
 
         # 可选字段
         inbound_agent_id = str(data.get("agent_id") or data.get("agentId") or "").strip()
@@ -618,13 +636,13 @@ class VibeSkillChannel(BaseChannel):
             params=params,
             timestamp=time.time(),
             ok=True,
-            req_method=ReqMethod.SKILLDEV_START,
+            req_method=ReqMethod.SKILLDEV_CHAT,
             is_stream=True,
             metadata=msg_metadata,
         )
 
         logger.info(
-            "[VibeSkillChannel] skilldev.start sent, session_id=%s",
+            "[VibeSkillChannel] skilldev.chat sent, session_id=%s",
             session.internal_id,
         )
         # 直接发送到 MessageHandler
@@ -756,7 +774,7 @@ class VibeSkillChannel(BaseChannel):
         return True
 
     async def _handle_question_replied(self, data: dict[str, Any]) -> bool:
-        """处理 question.replied，封装为 skilldev.respond。"""
+        """处理 question.replied，封装为 skilldev.user_answer。"""
         properties = data.get("properties") if isinstance(data.get("properties"), dict) else data
         session_id = str(properties.get("sessionID") or "").strip()
         request_id = str(properties.get("requestID") or "").strip()
@@ -770,24 +788,24 @@ class VibeSkillChannel(BaseChannel):
         if not internal_id:
             return False
 
-        pending = self._pending_confirms.get(request_id, {})
-        task_id = (
-            str(pending.get("task_id") or "").strip()
-            or str(pending.get("session_id") or "").strip()
-            or internal_id
-        )
-        questions = pending.get("questions", [])
-        answers = self._convert_question_answers(questions, raw_answers)
         self._pending_confirms.pop(request_id, None)
 
-        return self._dispatch_skilldev_respond(
+        answers: list[dict[str, Any]] = []
+        if isinstance(raw_answers, list):
+            for item in raw_answers:
+                if isinstance(item, list):
+                    answers.append({"selected_options": [str(x) for x in item]})
+                else:
+                    answers.append(
+                        {"selected_options": [str(item)]} if item not in (None, "") else {"selected_options": []}
+                    )
+
+        return self._dispatch_skilldev_user_answer(
             internal_id=internal_id,
             external_session_id=session_id,
-            params={
-                "task_id": task_id,
-                "action": "submit",
-                "answers": answers,
-            },
+            sid=session_id,
+            request_id=request_id,
+            answers=answers,
         )
 
     async def _handle_review_replied(self, data: dict[str, Any]) -> bool:
@@ -818,8 +836,6 @@ class VibeSkillChannel(BaseChannel):
             feedback = str(properties.get("feedback") or "").strip()
             if feedback:
                 params["feedback"] = feedback
-            # 清空上下文后由后续 skilldev.agent_* 事件重新分配新 message_id，避免重用 message_id
-            self._pop_message_context_stage(internal_id, "improve")
 
         self._pending_confirms.pop(request_id, None)
         return self._dispatch_skilldev_respond(
@@ -979,124 +995,17 @@ class VibeSkillChannel(BaseChannel):
     def _get_skilldev_event_handlers(self) -> dict[str, Callable[[dict, str | None, str | None], Any]]:
         """共享的 skilldev 事件处理映射。"""
         return {
-            "skilldev.started": self._handle_skilldev_started,
-            "skilldev.stage_changed": self._handle_skilldev_stage_changed,
-            "skilldev.progress": self._handle_skilldev_progress,
             "skilldev.skill_name_ready": self._handle_skilldev_skill_name_ready,
             "skilldev.agent_thinking": self._handle_skilldev_agent_thinking,
             "skilldev.agent_output": self._handle_skilldev_agent_output,
             "skilldev.tool_call": self._handle_skilldev_tool_call,
             "skilldev.tool_result": self._handle_skilldev_tool_result,
-            "skilldev.test_progress": self._handle_skilldev_test_progress,
             "skilldev.todos_update": self._handle_skilldev_todos_update,
             "skilldev.confirm_request": self._handle_skilldev_confirm_request,
-            "skilldev.artifact_ready": self._handle_skilldev_artifact_ready,
-            "skilldev.eval_ready": self._handle_skilldev_eval_ready,
-            "skilldev.validate_result": self._handle_skilldev_validate_result,
-            "skilldev.desc_opt_ready": self._handle_skilldev_desc_opt_ready,
+            "skilldev.ask_user_question": self._handle_skilldev_ask_user_question,
             "skilldev.error": self._handle_skilldev_error,
-            "skilldev.suspended": self._handle_skilldev_suspended,
             "skilldev.completed": self._handle_skilldev_completed,
         }
-
-    async def _handle_skilldev_started(
-        self,
-        payload: dict,
-        external_sid: str | None,
-        session_id: str | None,
-    ) -> list[dict]:
-        """skilldev.started - 任务已开始"""
-        return []
-
-    async def _handle_skilldev_stage_changed(
-        self,
-        payload: dict,
-        external_sid: str | None,
-        session_id: str | None,
-    ) -> list[dict]:
-        """skilldev.stage_changed - 阶段变化"""
-        return []
-
-    async def _handle_skilldev_progress(
-        self,
-        payload: dict,
-        external_sid: str | None,
-        session_id: str | None,
-    ) -> list[dict]:
-        """skilldev.progress - 进度更新（evaluate 阶段）
-
-        逻辑：
-        - eval_name/variant 存在 → 这是 evaluate 阶段的事件
-        - 检查 stage_key 是否存在，不存在 → 第一次来，创建气泡
-        - case_done=True → 序号4（结束），发 message.part.updated 更新气泡"已完成"
-        """
-        if not session_id:
-            return []
-
-        message = str(payload.get("message") or "")
-        eval_name = str(payload.get("eval_name") or "")
-        variant = str(payload.get("variant") or "")
-        case_done = bool(payload.get("case_done", False))
-        completed = payload.get("completed", 0)
-        total = payload.get("total", 0)
-
-        # 没有 eval_name/variant 跳过（可能是其他类型的 progress 事件）
-        if not eval_name or not variant:
-            return []
-
-        stage = f"evaluate_grader/{eval_name}/{variant}"
-
-        # 检查是否是第一次来这个 stage
-        ctx = self._ensure_message_context(session_id, stage)
-        key = (stage, "text")
-        is_first = key not in ctx["part_by_type"]
-
-        # 获取或创建 part
-        part, _ = self._ensure_text_part(session_id, "text", stage)
-        part["completed"] = completed
-        part["total"] = total
-
-        # 序号4: 评估结束，case_done=True → message.part.updated 标记完成
-        if case_done:
-            part = self._append_text_part(session_id, "text", stage)
-            part["completed"] = completed
-            part["total"] = total
-            part["status"] = "done"
-            part["text"] = message
-            return self._prepend_message_announcement(ctx, external_sid, [{
-                "type": "message.part.updated",
-                "properties": self._serialize_part(part, external_sid),
-            }])
-
-        # 序号2: 第一次来这个 stage → message.updated 创建 message（包含 part）
-        if is_first:
-            part["status"] = "running"
-            part["text"] = message
-            ctx["message_announced"] = True
-            return [{
-                "type": "message.updated",
-                "properties": {
-                    "info": {
-                        "id": ctx["message_id"],
-                        "sessionID": external_sid,
-                        "role": "assistant",
-                        "parts": self._serialize_parts(ctx["parts"], external_sid),
-                    }
-                },
-            }]
-
-        # 序号3: 中间消息 → message.part.delta 更新气泡
-        part["text"] = str(part.get("text") or "") + message
-        return self._prepend_message_announcement(ctx, external_sid, [{
-            "type": "message.part.delta",
-            "properties": {
-                "sessionID": external_sid,
-                "messageID": ctx["message_id"],
-                "partID": part["id"],
-                "type": "text",
-                "text": message,
-            },
-        }])
 
     async def _handle_skilldev_skill_name_ready(
         self,
@@ -1122,13 +1031,12 @@ class VibeSkillChannel(BaseChannel):
         external_sid: str | None,
         session_id: str | None,
     ) -> list[dict]:
-        """skilldev.agent_thinking - Agent 思考中"""
-        return self._build_text_stream_events(
+        """skilldev.agent_thinking — 字段仅有 ``delta``，按与上一条流式种类是否同为 thinking 合并或新建 part。"""
+        return self._build_skilldev_agent_delta_events(
             session_id=session_id,
             external_sid=external_sid,
-            payload=payload,
-            part_type="reasoning",
-            text_field="delta",
+            stream_kind="thinking",
+            delta=str(payload.get("delta") or ""),
         )
 
     async def _handle_skilldev_agent_output(
@@ -1137,13 +1045,12 @@ class VibeSkillChannel(BaseChannel):
         external_sid: str | None,
         session_id: str | None,
     ) -> list[dict]:
-        """skilldev.agent_output - Agent 输出"""
-        return self._build_text_stream_events(
+        """skilldev.agent_output — 字段仅有 ``delta``，按与上一条流式种类是否同为 output 合并或新建 part。"""
+        return self._build_skilldev_agent_delta_events(
             session_id=session_id,
             external_sid=external_sid,
-            payload=payload,
-            part_type="text",
-            text_field="delta",
+            stream_kind="output",
+            delta=str(payload.get("delta") or ""),
         )
 
     async def _handle_skilldev_tool_call(
@@ -1155,8 +1062,7 @@ class VibeSkillChannel(BaseChannel):
         """skilldev.tool_call - 工具调用"""
         if not session_id:
             return []
-        stage = payload.get("stage")
-        ctx = self._ensure_message_context(session_id, stage)
+        ctx = self._ensure_message_context(session_id)
         call_id = str(
             payload.get("tool_call_id")
             or payload.get("toolCallId")
@@ -1166,7 +1072,7 @@ class VibeSkillChannel(BaseChannel):
         tool_name = str(payload.get("tool_name") or payload.get("tool") or "").strip()
         tool_input = payload.get("arguments") or payload.get("params") or payload.get("input") or {}
         now_ms = int(time.time() * 1000)
-        part, is_new = self._ensure_tool_part(session_id, call_id, tool_name, stage)
+        part, is_new = self._ensure_tool_part(session_id, call_id, tool_name)
         part["state"] = {
             "status": "running",
             "input": tool_input,
@@ -1183,6 +1089,7 @@ class VibeSkillChannel(BaseChannel):
                     "properties": self._serialize_part(part, external_sid),
                 }
             )
+            ctx["_skilldev_stream_last_kind"] = "tool"
         return self._prepend_message_announcement(ctx, external_sid, responses)
 
     async def _handle_skilldev_tool_result(
@@ -1194,7 +1101,7 @@ class VibeSkillChannel(BaseChannel):
         """skilldev.tool_result - 工具结果"""
         if not session_id:
             return []
-        stage = payload.get("stage")
+        ctx = self._ensure_message_context(session_id)
         call_id = str(
             payload.get("tool_call_id")
             or payload.get("toolCallId")
@@ -1205,7 +1112,7 @@ class VibeSkillChannel(BaseChannel):
         tool_name = str(payload.get("tool_name") or payload.get("tool") or "").strip()
         success = bool(payload.get("success", True))
         result = payload.get("result") or payload.get("output") or ""
-        part, _ = self._ensure_tool_part(session_id, call_id, tool_name, stage)
+        part, _ = self._ensure_tool_part(session_id, call_id, tool_name)
         existing_time = part.get("state", {}).get("time", {})
         existing_start = existing_time.get("start") if existing_time else None
         existing_input = part.get("state", {}).get("input")
@@ -1231,88 +1138,8 @@ class VibeSkillChannel(BaseChannel):
                 "properties": self._serialize_part(part, external_sid),
             }
         )
-        ctx = self._ensure_message_context(session_id, stage)
+        ctx["_skilldev_stream_last_kind"] = "tool"
         return self._prepend_message_announcement(ctx, external_sid, responses)
-
-    async def _handle_skilldev_test_progress(
-        self,
-        payload: dict,
-        external_sid: str | None,
-        session_id: str | None,
-    ) -> list[dict]:
-        """skilldev.test_progress - 测试进度
-
-        逻辑：
-        - case_status 存在 → 序号4（结束），发 message.part.updated 更新气泡"已完成"
-        - 检查 stage_key 是否存在，不存在 → 序号2（第一次来），发 message.part.updated 创建气泡
-        """
-        if not session_id:
-            return []
-
-        message = str(payload.get("message") or "")
-        case_name = str(payload.get("case_name") or "")
-        variant = str(payload.get("variant") or "")
-        case_status = str(payload.get("case_status") or "")
-        completed_count = payload.get("completed", 0)
-        total_tasks = payload.get("total", 0)
-
-        # 没有 case_name/variant 无法标识，跳过
-        if not case_name or not variant:
-            return []
-
-        stage = f"test_run/{case_name}/{variant}"
-
-        # 检查是否是第一次来这个 stage（通过 _message_ctx 中是否有此 stage_key）
-        ctx = self._ensure_message_context(session_id, stage)
-        key = (stage, "text")
-        is_first = key not in ctx["part_by_type"]
-
-        # 获取或创建 part
-        part, _ = self._ensure_text_part(session_id, "text", stage)
-        part["completed"] = completed_count
-        part["total"] = total_tasks
-
-        # 序号4: 测试结束，case_status 存在 → message.part.updated 标记完成
-        if case_status:
-            part = self._append_text_part(session_id, "text", stage)
-            part["completed"] = completed_count
-            part["total"] = total_tasks
-            part["status"] = case_status  # "success" or "failed"
-            part["text"] = message
-            return self._prepend_message_announcement(ctx, external_sid, [{
-                "type": "message.part.updated",
-                "properties": self._serialize_part(part, external_sid),
-            }])
-
-        # 序号2: 第一次来这个 stage（stage_key 不存在）→ message.updated 创建气泡
-        if is_first:
-            part["status"] = "running"
-            part["text"] = message
-            ctx["message_announced"] = True
-            return [{
-                "type": "message.updated",
-                "properties": {
-                    "info": {
-                        "id": ctx["message_id"],
-                        "sessionID": external_sid,
-                        "role": "assistant",
-                        "parts": self._serialize_parts(ctx["parts"], external_sid),
-                    }
-                },
-            }]
-
-        # 序号3: 中间消息 → message.part.delta 更新气泡
-        part["text"] = str(part.get("text") or "") + message
-        return [{
-            "type": "message.part.delta",
-            "properties": {
-                "sessionID": external_sid,
-                "messageID": ctx["message_id"],
-                "partID": part["id"],
-                "type": "text",
-                "text": message,
-            },
-        }]
 
     async def _handle_skilldev_todos_update(
         self,
@@ -1386,7 +1213,21 @@ class VibeSkillChannel(BaseChannel):
                 },
             }]
 
-        raw_questions = payload.get("data", {}).get("questions", [])
+        return []
+
+    async def _handle_skilldev_ask_user_question(
+        self,
+        payload: dict,
+        external_sid: str | None,
+        session_id: str | None,
+    ) -> list[dict]:
+        """skilldev.ask_user_question → question.asked（与原 confirm_request 结构化提问字段一致）。"""
+        if not session_id:
+            return []
+        request_id = str(payload.get("request_id") or f"req_{secrets.token_hex(4)}")
+        task_id = str(payload.get("task_id") or payload.get("session_id") or "").strip() or (session_id or "")
+
+        raw_questions = payload.get("questions", []) if isinstance(payload.get("questions"), list) else []
         questions = []
         for idx, item in enumerate(raw_questions):
             if not isinstance(item, dict):
@@ -1405,13 +1246,16 @@ class VibeSkillChannel(BaseChannel):
                 "question": str(item.get("question") or ""),
                 "header": str(item.get("header") or payload.get("title") or ""),
                 "options": options,
-                "multiple": bool(item.get("multiple") or item.get("allow_multiple") or False),
+                "multiple": bool(
+                    item.get("multi_select")
+                    or item.get("multiple")
+                    or item.get("allow_multiple")
+                    or False
+                ),
             })
         self._pending_confirms[request_id] = {
             "task_id": task_id,
             "session_id": session_id or "",
-            "confirm_type": confirm_type or "question_clarify",
-            "questions": questions,
         }
         return [{
             "type": "question.asked",
@@ -1430,7 +1274,7 @@ class VibeSkillChannel(BaseChannel):
                     }
                     for q in questions
                 ],
-                "tool": payload.get("tool") or confirm_type or "",
+                "tool": str(payload.get("tool") or ""),
             },
         }]
 
@@ -1459,41 +1303,38 @@ class VibeSkillChannel(BaseChannel):
         self.bus.deliver_to_message_handler(msg)
         return True
 
-    async def _handle_skilldev_artifact_ready(
+    def _dispatch_skilldev_user_answer(
         self,
-        payload: dict,
-        external_sid: str | None,
-        session_id: str | None,
-    ) -> list[dict]:
-        """skilldev.artifact_ready - 产物就绪"""
-        return []
-
-    async def _handle_skilldev_eval_ready(
-        self,
-        payload: dict,
-        external_sid: str | None,
-        session_id: str | None,
-    ) -> list[dict]:
-        """skilldev.eval_ready - 评估就绪"""
-        return []
-
-    async def _handle_skilldev_validate_result(
-        self,
-        payload: dict,
-        external_sid: str | None,
-        session_id: str | None,
-    ) -> list[dict]:
-        """skilldev.validate_result - 验证结果"""
-        return []
-
-    async def _handle_skilldev_desc_opt_ready(
-        self,
-        payload: dict,
-        external_sid: str | None,
-        session_id: str | None,
-    ) -> list[dict]:
-        """skilldev.desc_opt_ready - 描述优化就绪"""
-        return []
+        internal_id: str,
+        external_session_id: str,
+        sid: str,
+        request_id: str,
+        answers: list[dict[str, Any]],
+    ) -> bool:
+        msg = Message(
+            id=f"vibeskill-user-answer-{int(time.time() * 1000):x}-{secrets.token_hex(3)}",
+            type="req",
+            channel_id=VIBESKILL_CHANNEL_ID,
+            session_id=internal_id,
+            params={
+                "session_id": sid,
+                "task_id": sid,
+                "request_id": request_id,
+                "source": "ask_tool",
+                "answers": answers,
+            },
+            timestamp=time.time(),
+            ok=True,
+            req_method=ReqMethod.SKILLDEV_USER_ANSWER,
+            is_stream=True,
+            metadata={_VIBESKILL_ORIGINAL_SESSION_ID_KEY: external_session_id} if external_session_id else None,
+        )
+        logger.info(
+            "[VibeSkillChannel] skilldev.user_answer sent, session_id=%s",
+            internal_id,
+        )
+        self.bus.deliver_to_message_handler(msg)
+        return True
 
     async def _handle_skilldev_error(
         self,
@@ -1513,16 +1354,10 @@ class VibeSkillChannel(BaseChannel):
             except Exception:
                 logger.exception("[VibeSkillChannel] set_state error for skilldev.error, session_id=%s", session_id)
 
-        # 发送 message.part.updated，type=text，包含错误信息
         error_text = str(payload.get("error") or payload.get("message") or "skilldev error")
-        text_payload = {"text": error_text}
-        responses.extend(self._build_text_stream_events(
-            session_id=session_id,
-            external_sid=external_sid,
-            payload=text_payload,
-            part_type="text",
-            text_field="text",
-        ))
+        responses.extend(
+            self._emit_skilldev_error_text_part(session_id, external_sid, error_text),
+        )
 
         responses.append({
             "type": "task.error",
@@ -1542,15 +1377,6 @@ class VibeSkillChannel(BaseChannel):
             },
         })
         return responses
-
-    async def _handle_skilldev_suspended(
-        self,
-        payload: dict,
-        external_sid: str | None,
-        session_id: str | None,
-    ) -> list[dict]:
-        """skilldev.suspended - 暂停（不动）"""
-        return []
 
     async def _handle_skilldev_completed(
         self,
@@ -1727,32 +1553,19 @@ class VibeSkillChannel(BaseChannel):
             status.update(extra)
         await self._emit_ws_event(ws, "session.status", {"sessionID": external_sid, "status": status})
 
-    def _pop_message_context_stage(self, session_id: str | None, stage: str) -> None:
-        """丢弃某会话下与 stage 绑定的 assistant message 聚合状态（用于新一轮输出使用新 message_id）。"""
-        sid = str(session_id or "").strip()
-        if not sid:
-            return
-        st = str(stage or "").strip()
-        if not st:
-            return
-        self._message_ctx.pop(f"{sid}:{st}", None)
-
     def _clear_message_context_for_session(self, session_id: str | None) -> None:
-        """移除某 internal session 下全部 assistant message 聚合状态（含 `sid` 与 `sid:*` 键）。"""
+        """移除某 internal session 下的 assistant message 聚合状态。"""
         sid = str(session_id or "").strip()
         if not sid:
+            self._message_ctx.pop("_default", None)
             return
-        prefix = f"{sid}:"
-        for key in list(self._message_ctx.keys()):
-            if key == sid or key.startswith(prefix):
-                self._message_ctx.pop(key, None)
+        self._message_ctx.pop(sid, None)
 
-    def _ensure_message_context(self, session_id: str | None, stage: str | None = None) -> dict[str, Any]:
+    def _ensure_message_context(self, session_id: str | None) -> dict[str, Any]:
         sid = str(session_id or "").strip()
         if not sid:
             sid = "_default"
-        key = f"{sid}:{stage}" if stage else sid
-        ctx = self._message_ctx.get(key)
+        ctx = self._message_ctx.get(sid)
         if ctx is None:
             ctx = {
                 "message_id": f"msg_{secrets.token_hex(6)}",
@@ -1761,23 +1574,15 @@ class VibeSkillChannel(BaseChannel):
                 "tool_parts": {},
                 "message_announced": False,
             }
-            self._message_ctx[key] = ctx
+            self._message_ctx[sid] = ctx
         return ctx
 
     def _ensure_text_part(
-        self, session_id: str | None, part_type: str, stage: str | None = None
+        self, session_id: str | None, part_type: str
     ) -> tuple[dict[str, Any], bool]:
-        """获取或创建 text part.
-
-        当指定 stage 时，按 stage + part_type 组合区分不同并发流的输出。
-        第一次创建该 stage 的 part 时返回 is_new=True。
-
-        Returns:
-            (part, is_new_part): part 对象和是否是新创建的 part
-        """
-        ctx = self._ensure_message_context(session_id, stage)
-        part_key = (stage, part_type) if stage else part_type
-        existing = ctx["part_by_type"].get(part_key)
+        """获取或创建单个 text/reasoning part（按 part_type 去重，用于兜底，chat 等路径）。"""
+        ctx = self._ensure_message_context(session_id)
+        existing = ctx["part_by_type"].get(part_type)
         if existing is not None:
             return existing, False
         part = {
@@ -1787,17 +1592,13 @@ class VibeSkillChannel(BaseChannel):
             "type": part_type,
             "text": "",
         }
-        if stage:
-            part["stage"] = stage
-        ctx["part_by_type"][part_key] = part
+        ctx["part_by_type"][part_type] = part
         ctx["parts"].append(part)
         return part, True
 
-    def _append_text_part(
-        self, session_id: str | None, part_type: str, stage: str | None = None
-    ) -> dict[str, Any]:
-        """始终创建并追加一个新的 text part（不会覆盖 part_by_type）。"""
-        ctx = self._ensure_message_context(session_id, stage)
+    def _append_text_part(self, session_id: str | None, part_type: str) -> dict[str, Any]:
+        """始终创建并追加一个新的 text part（不会写入 part_by_type）。"""
+        ctx = self._ensure_message_context(session_id)
         part = {
             "id": f"prt_{secrets.token_hex(6)}",
             "sessionID": session_id,
@@ -1805,15 +1606,17 @@ class VibeSkillChannel(BaseChannel):
             "type": part_type,
             "text": "",
         }
-        if stage:
-            part["stage"] = stage
         ctx["parts"].append(part)
         return part
 
+    def _append_standalone_text_part(self, session_id: str | None, part_type: str) -> dict[str, Any]:
+        """SkillDev agent 流式专用：追加 text/reasoning part，与同会话 chat 使用的 part_by_type 隔离。"""
+        return self._append_text_part(session_id, part_type)
+
     def _ensure_tool_part(
-        self, session_id: str | None, call_id: str, tool_name: str, stage: str | None = None
+        self, session_id: str | None, call_id: str, tool_name: str
     ) -> tuple[dict[str, Any], bool]:
-        ctx = self._ensure_message_context(session_id, stage)
+        ctx = self._ensure_message_context(session_id)
         existing = ctx["tool_parts"].get(call_id)
         if existing is not None:
             return existing, False
@@ -1826,8 +1629,6 @@ class VibeSkillChannel(BaseChannel):
             "tool": tool_name,
             "state": {},
         }
-        if stage:
-            part["stage"] = stage
         ctx["tool_parts"][call_id] = part
         ctx["parts"].append(part)
         return part, True
@@ -1854,6 +1655,7 @@ class VibeSkillChannel(BaseChannel):
         external_sid: str | None,
         responses: list[dict[str, Any]],
     ) -> list[dict[str, Any]]:
+        """ 创建 message.updated 事件，如果 responses 中没有 message.part.updated 事件。"""
         if not responses:
             return responses
         has_part_event = any(
@@ -1865,42 +1667,83 @@ class VibeSkillChannel(BaseChannel):
             return responses
         return self._ensure_message_announced(ctx, external_sid) + responses
 
-    def _build_text_stream_events(
+    def _build_skilldev_agent_delta_events(
         self,
         session_id: str | None,
         external_sid: str | None,
-        payload: dict[str, Any],
-        part_type: str,
-        text_field: str,
-    ) -> list[dict]:
-        delta = str(payload.get(text_field) or payload.get("text") or "")
-        if not delta:
+        *,
+        stream_kind: str,
+        delta: str,
+    ) -> list[dict[str, Any]]:
+        """skilldev.agent_thinking / agent_output：仅用 delta；与上一条流式种类是否一致决定 delta 拼接或新建 part。"""
+        if not session_id:
             return []
-        stage = payload.get("stage")
-        ctx = self._ensure_message_context(session_id, stage)
-        part, is_new = self._ensure_text_part(session_id, part_type, stage)
-        part["text"] = str(part.get("text") or "") + delta
+        delta_str = str(delta or "")
+        if not delta_str:
+            return []
 
-        responses = []
+        part_type = "reasoning" if stream_kind == "thinking" else "text"
+        ctx = self._ensure_message_context(session_id)
+        last = ctx.get("_skilldev_stream_last_kind")
 
-        # 第一次收到这个 stage 的 part，只发 message.part.updated（避免首段文本重复）
-        if is_new:
-            responses.append({
+        reuse = last == stream_kind
+        active: dict[str, Any] | None = None
+        if reuse:
+            active = (
+                ctx.get("_skilldev_active_reasoning_part")
+                if stream_kind == "thinking"
+                else ctx.get("_skilldev_active_output_part")
+            )
+
+        if active is None:
+            part = self._append_standalone_text_part(session_id, part_type)
+            part["text"] = delta_str
+            ctx["_skilldev_stream_last_kind"] = stream_kind
+            if stream_kind == "thinking":
+                ctx["_skilldev_active_reasoning_part"] = part
+            else:
+                ctx["_skilldev_active_output_part"] = part
+            responses = [{
                 "type": "message.part.updated",
                 "properties": self._serialize_part(part, external_sid),
-            })
-        else:
-            # 后续都用 message.part.delta 更新
-            responses.append({
-                "type": "message.part.delta",
-                "properties": {
-                    "sessionID": external_sid,
-                    "messageID": ctx["message_id"],
-                    "partID": part["id"],
-                    "type": part_type,
-                    "text": delta,
-                },
-            })
+            }]
+            return self._prepend_message_announcement(ctx, external_sid, responses)
+
+        active["text"] = str(active.get("text") or "") + delta_str
+        ctx["_skilldev_stream_last_kind"] = stream_kind
+        responses = [{
+            "type": "message.part.delta",
+            "properties": {
+                "sessionID": external_sid,
+                "messageID": ctx["message_id"],
+                "partID": active["id"],
+                "type": part_type,
+                "text": delta_str,
+            },
+        }]
+        return self._prepend_message_announcement(ctx, external_sid, responses)
+
+    def _emit_skilldev_error_text_part(
+        self,
+        session_id: str | None,
+        external_sid: str | None,
+        text: str,
+    ) -> list[dict[str, Any]]:
+        """错误信息单独 text part，并让后续 agent_output 不会拼接到本条错误内容上。"""
+        if not session_id:
+            return []
+        msg = str(text or "").strip()
+        if not msg:
+            return []
+        ctx = self._ensure_message_context(session_id)
+        part = self._append_standalone_text_part(session_id, "text")
+        part["text"] = msg
+        ctx["_skilldev_stream_last_kind"] = "output"
+        ctx["_skilldev_active_output_part"] = None
+        responses = [{
+            "type": "message.part.updated",
+            "properties": self._serialize_part(part, external_sid),
+        }]
         return self._prepend_message_announcement(ctx, external_sid, responses)
 
     def _serialize_parts(self, parts: list[dict[str, Any]], external_sid: str | None) -> list[dict[str, Any]]:
@@ -2082,15 +1925,14 @@ class VibeSkillChannel(BaseChannel):
 
         # 需要 replay 的事件类型（使用流式处理器处理）
         replayable_event_keys = (
-            "skilldev.progress",
             "skilldev.skill_name_ready",
             "skilldev.agent_thinking",
             "skilldev.agent_output",
             "skilldev.tool_call",
             "skilldev.tool_result",
-            "skilldev.test_progress",
             "skilldev.todos_update",
             "skilldev.confirm_request",
+            "skilldev.ask_user_question",
             "skilldev.error",
             "skilldev.completed",
         )
@@ -2142,12 +1984,27 @@ class VibeSkillChannel(BaseChannel):
                             continue
                         parts.append({
                             "type": "toolDefinition",
-                            "toolId": str(tool_def.get("toolId") or ""),
+                            "pluginId": str(tool_def.get("pluginId") or ""),
+                            "pluginType": str(tool_def.get("pluginType") or ""),
                             "toolType": str(tool_def.get("toolType") or ""),
-                            "name": str(tool_def.get("name") or ""),
+                            "toolName": str(tool_def.get("toolName") or ""),
                             "description": str(tool_def.get("description") or ""),
-                            "parameters": tool_def.get("parameters", {}),
+                            "arguments": tool_def.get("arguments", {}),
                             "protocol": str(tool_def.get("protocol") or ""),
+                        })
+
+                    for agent_def in payload.get("agent_definitions", []) or []:
+                        if not isinstance(agent_def, dict):
+                            continue
+                        parameters = agent_def.get("parameters", {})
+                        if not isinstance(parameters, dict):
+                            parameters = {}
+                        parts.append({
+                            "type": "agentDefinition",
+                            "agentId": str(agent_def.get("agentId") or agent_def.get("agent_id") or ""),
+                            "name": str(agent_def.get("name") or ""),
+                            "description": str(agent_def.get("description") or ""),
+                            "parameters": parameters,
                         })
 
                     messages.append({
@@ -2155,6 +2012,32 @@ class VibeSkillChannel(BaseChannel):
                         "sessionID": session_id,
                         "type": "message.send",
                         "parts": parts,
+                    })
+                    continue
+
+                if event_type == "skilldev.user_answer":
+                    request_id = str(payload.get("request_id") or "").strip()
+                    answers_payload = payload.get("answers", [])
+                    reply_answers: list[list[str]] = []
+                    if isinstance(answers_payload, list):
+                        for ans in answers_payload:
+                            if isinstance(ans, dict):
+                                sel = ans.get("selected_options", [])
+                                if isinstance(sel, list):
+                                    reply_answers.append([str(x) for x in sel])
+                                else:
+                                    reply_answers.append([])
+                            else:
+                                reply_answers.append([])
+                    messages.append({
+                        "role": role,
+                        "sessionID": session_id,
+                        "type": "question.replied",
+                        "properties": {
+                            "sessionID": session_id,
+                            "requestID": request_id,
+                            "answers": reply_answers,
+                        },
                     })
                     continue
 
@@ -2274,6 +2157,19 @@ class VibeSkillChannel(BaseChannel):
                         "questions": data.get("questions", []),
                     })
 
+                if event_type == "skilldev.ask_user_question":
+                    payload = dict(payload)
+                    request_id = str(payload.get("request_id") or f"req_{item.get('seq') or secrets.token_hex(4)}")
+                    payload["request_id"] = request_id
+                    task_sid = str(payload.get("task_id") or payload.get("session_id") or "")
+                    raw_q = payload.get("questions", []) if isinstance(payload.get("questions"), list) else []
+                    pending_confirms.append({
+                        "request_id": request_id,
+                        "task_id": task_sid,
+                        "confirm_type": "question_clarify",
+                        "questions": raw_q,
+                    })
+
                 handler = replayable_handlers.get(event_type)
                 if handler is not None:
                     responses = await handler(payload, session_id, session_id)
@@ -2296,35 +2192,6 @@ class VibeSkillChannel(BaseChannel):
         finally:
             self._message_ctx = replay_ctx_backup
             self._pending_confirms = replay_pending_backup
-
-    def _convert_question_answers(self, questions: list[dict[str, Any]], raw_answers: Any) -> list[dict[str, Any]]:
-        if not isinstance(raw_answers, list):
-            return []
-        mapped: list[dict[str, Any]] = []
-        for idx, answer_item in enumerate(raw_answers):
-            question = questions[idx] if idx < len(questions) else {}
-            question_id = str(question.get("id") or f"q_{idx + 1}")
-            options = question.get("options") if isinstance(question.get("options"), list) else []
-            label_to_id = {
-                str(opt.get("label")): str(opt.get("id"))
-                for opt in options if isinstance(opt, dict)
-            }
-            id_to_label = {opt_id: label for label, opt_id in label_to_id.items()}
-            values = answer_item if isinstance(answer_item, list) else [answer_item]
-            normalized_values: list[str] = []
-            for value in values:
-                text = str(value)
-                # VibeSkill 这里需要向下游提交 label 内容，而非 option id。
-                if text in label_to_id:
-                    normalized_values.append(text)
-                else:
-                    normalized_values.append(id_to_label.get(text, text))
-            answer: Any = normalized_values
-            multiple = bool(question.get("multiple"))
-            if not multiple:
-                answer = normalized_values[0] if normalized_values else ""
-            mapped.append({"question_id": question_id, "answer": answer})
-        return mapped
 
     async def http_handler(
         self,
