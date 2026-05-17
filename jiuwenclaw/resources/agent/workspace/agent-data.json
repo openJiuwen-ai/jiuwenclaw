@@ -686,5 +686,26 @@
       "path": "agent/workspace/skills/teamskill-creator/templates/workflow.md.template",
       "isMarkdown": false
     }
+  ],
+  "workspace/skills/mhqa-rag-optimizer": [
+    {
+      "name": "SKILL.md",
+      "path": "agent/workspace/skills/mhqa-rag-optimizer/SKILL.md",
+      "isMarkdown": true
+    }
+  ],
+  "workspace/skills/mhqa-rag-optimizer/references": [
+    {
+      "name": "acl2025-masking-mhqa.md",
+      "path": "agent/workspace/skills/mhqa-rag-optimizer/references/acl2025-masking-mhqa.md",
+      "isMarkdown": true
+    }
+  ],
+  "workspace/skills/mhqa-rag-optimizer/scripts": [
+    {
+      "name": "permute_and_vote.py",
+      "path": "agent/workspace/skills/mhqa-rag-optimizer/scripts/permute_and_vote.py",
+      "isMarkdown": false
+    }
   ]
 }
