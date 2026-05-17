@@ -28,6 +28,75 @@ llm_logger = logging.getLogger("jiuwenclaw.app")
 _retry_session: ContextVar[Optional[Any]] = ContextVar("retry_session", default=None)
 
 _ORIGINAL_BUILD_REQUEST_PARAMS = None
+_OPENJIUWEN_LOG_HANDLER_PATCHED = False
+
+
+def apply_openjiuwen_safe_log_handler_patch() -> None:
+    """Make openjiuwen log file chmod best-effort (NFS/K8s often disallow chmod)."""
+    global _OPENJIUWEN_LOG_HANDLER_PATCHED
+    if _OPENJIUWEN_LOG_HANDLER_PATCHED:
+        return
+    try:
+        from logging.handlers import RotatingFileHandler
+
+        from openjiuwen.core.common.logging.default import default_impl as impl_mod
+    except ImportError:
+        return
+
+    handler_cls = impl_mod.SafeRotatingFileHandler
+    if getattr(handler_cls, "_jiuwenclaw_chmod_tolerant", False):
+        _OPENJIUWEN_LOG_HANDLER_PATCHED = True
+        return
+
+    def _chmod_best_effort(path: str, mode: int) -> None:
+        try:
+            os.chmod(path, mode)
+        except OSError as exc:
+            llm_logger.debug(
+                "openjiuwen log chmod skipped (path=%s mode=%#o): %s",
+                path,
+                mode,
+                exc,
+            )
+
+    def _patched_init(
+        self,
+        filename: str,
+        *args,
+        log_file_pattern=None,
+        backup_file_pattern=None,
+        **kwargs,
+    ):
+        if log_file_pattern:
+            filename = self._format_filename(filename, log_file_pattern)
+
+        log_dir = os.path.dirname(filename)
+        if log_dir:
+            try:
+                abs_log_dir = os.path.abspath(os.path.expanduser(log_dir))
+                os.makedirs(abs_log_dir, mode=0o750, exist_ok=True)
+            except OSError:
+                pass
+
+        RotatingFileHandler.__init__(self, filename, *args, **kwargs)
+        self.backup_file_pattern = backup_file_pattern or "{baseFilename}.{index}"
+        _chmod_best_effort(self.baseFilename, 0o640)
+
+    def _patched_do_rollover(self) -> None:
+        RotatingFileHandler.doRollover(self)
+        for i in range(self.backupCount, 0, -1):
+            sfn = self.backup_file_pattern.format(
+                baseFilename=self.baseFilename,
+                index=i,
+            )
+            if os.path.exists(sfn):
+                _chmod_best_effort(sfn, 0o440)
+        _chmod_best_effort(self.baseFilename, 0o640)
+
+    handler_cls.__init__ = _patched_init
+    handler_cls.doRollover = _patched_do_rollover
+    handler_cls._jiuwenclaw_chmod_tolerant = True
+    _OPENJIUWEN_LOG_HANDLER_PATCHED = True
 
 
 def configure_openjiuwen_logging_under_jiuwenclaw(subdir: str = "openjiuwen") -> None:
@@ -38,6 +107,7 @@ def configure_openjiuwen_logging_under_jiuwenclaw(subdir: str = "openjiuwen") ->
     helper keeps openjiuwen's existing run/interface/performance layout while
     moving that root to ``<jiuwenclaw logs>/<subdir>``.
     """
+    apply_openjiuwen_safe_log_handler_patch()
     try:
         from openjiuwen.core.common.logging.log_config import (
             configure_log_config,
@@ -783,3 +853,4 @@ def apply_openai_model_client_patch() -> None:
     for _attr in _instance_attrs + _class_attrs:
         if hasattr(RetryMixin, _attr):
             setattr(OpenAIModelClient, _attr, getattr(RetryMixin, _attr))
+

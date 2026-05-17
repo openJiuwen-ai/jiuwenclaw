@@ -9,7 +9,8 @@ COPY . /app/jiuwenclaw/
 ENV PATH=$PATH:/home/app/.local/bin
 
 RUN pip install -e ".[all]" \
-    git+https://gitcode.com/openJiuwen/agent-runtime.git@dev/enterprise_kub#subdirectory=management \
+    git+https://gitcode.com/openJiuwen/agent-runtime.git@develop#subdirectory=foundation \
+    git+https://gitcode.com/openJiuwen/agent-runtime.git@develop#subdirectory=management \
     kubernetes \
     --no-cache-dir \
     -i https://pypi.tuna.tsinghua.edu.cn/simple
