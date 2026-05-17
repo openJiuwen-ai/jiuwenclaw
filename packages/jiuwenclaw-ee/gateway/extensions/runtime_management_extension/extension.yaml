@@ -5,6 +5,6 @@ description: OpenJiuwen Runtime
 author: openjiuwen
 min_jiuwenclaw_version: "0.1.0"
 dependencies:
-  openjiuwen_runtime_management: " @ git+https://gitcode.com/openJiuwen/agent-runtime.git@refs/heads/develop#subdirectory=management"
+  openjiuwen_runtime_management: " @ git+https://gitcode.com/openJiuwen/agent-runtime.git@develop#subdirectory=management"
 config_schema:
   type: object

@@ -10,7 +10,7 @@ requires-python = ">=3.11.4,<3.14"
 license = { text = "Apache-2.0" }
 # 与 extension.yaml 一致。
 dependencies = [
-    "openjiuwen_runtime_management @ git+https://gitcode.com/openJiuwen/agent-runtime.git@refs/heads/develop#subdirectory=management",
+    "openjiuwen_runtime_management @ git+https://gitcode.com/openJiuwen/agent-runtime.git@develop#subdirectory=management",
 ]
 
 [tool.setuptools]
