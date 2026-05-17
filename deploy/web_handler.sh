@@ -5,8 +5,8 @@ deploy_web() {
     local namespace="${DEPLOY_VARS["NAMESPACE"]}"
     local web_name="${DEPLOY_VARS["WEB_NAME"]}"
 
-    render_config_template "${WEB_DEPLOYMENT_TEMPLATE_FILE}" "${WEB_DEPLOYMENT_FILE}" "DEPLOY_VARS"
-    exec_cmd kubectl apply -f ${WEB_DEPLOYMENT_FILE}
+    render_config_template "${WEB_TEMPLATE_FILE}" "${WEB_FILE}" "DEPLOY_VARS"
+    exec_cmd kubectl apply -f ${WEB_FILE}
     wait_k8s_resource_ready "deployment" "${web_name}" "${namespace}"
 }
 

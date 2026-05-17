@@ -36,11 +36,14 @@ GATEWAY_DEPLOYMENT_FILE="${SCRIPT_DIR}/conf/gateway-deployment.yaml"
 GATEWAY_SERVICE_TEMPLATE_FILE="${SCRIPT_DIR}/conf/gateway-service.template.yaml"
 GATEWAY_SERVICE_FILE="${SCRIPT_DIR}/conf/gateway-service.yaml"
 
-WEB_DEPLOYMENT_TEMPLATE_FILE="${SCRIPT_DIR}/conf/web-deployment.template.yaml"
-WEB_DEPLOYMENT_FILE="${SCRIPT_DIR}/conf/web-deployment.yaml"
+WEB_TEMPLATE_FILE="${SCRIPT_DIR}/conf/web.template.yaml"
+WEB_FILE="${SCRIPT_DIR}/conf/web.yaml"
 
 RABBITMQ_TEMPLATE_FILE="${SCRIPT_DIR}/conf/rabbitmq.template.yaml"
 RABBITMQ_FILE="${SCRIPT_DIR}/conf/rabbitmq.yaml"
+
+MANAGER_TEMPLATE_FILE="${SCRIPT_DIR}/conf/manager.template.yaml"
+MANAGER_FILE="${SCRIPT_DIR}/conf/manager.yaml"
 
 NFS_SERVER_TEMPLATE_FILE="${SCRIPT_DIR}/conf/nfs-server.template.yaml"
 NFS_SERVER_FILE="${SCRIPT_DIR}/conf/nfs-server.yaml"
@@ -58,7 +61,7 @@ CMD=""
 
 
 # ==== All available modules ====
-declare -ga ALL_MODULES=("NFS" "RABBITMQ" "YR_CLAW" "GATEWAY" "WEB")
+declare -ga ALL_MODULES=("NFS" "RABBITMQ" "YR_CLAW" "GATEWAY" "WEB" "MANAGER")
 
 declare -ga MODULES=()
 
@@ -90,6 +93,8 @@ declare -A DEPLOY_VARS=(
     ["RABBITMQ_PATH"]="/exports/rabbitmq"
     ["RABBITMQ_USER"]="admin"
     ["RABBITMQ_PASSWORD"]="Rabbitmq@123"
+    ["MANAGER_NAME"]="jiuwenclaw-manager"
+
 )
 
 declare -A OYR_COMPONENTS=(

@@ -12,7 +12,7 @@ parse_args() {
                 CMD="${args[$i]}"
                 i=$((i+1))
                 ;;
-            nfs|rabbitmq|yr_claw|gateway|web)
+            nfs|rabbitmq|yr_claw|gateway|web|manager)
                 MODULES+=("${args[$i]^^}")
                 i=$((i+1))
                 ;;
@@ -74,6 +74,7 @@ Modules (Optional):
   gateway   Gateway service module
   web       Web frontend module
   rabbitmq  RabbitMQ module
+  manager   CLAW Manager module
 
 Options:
   -n NAMESPACE       Specify Kubernetes namespace (defaults to default if unspecified)

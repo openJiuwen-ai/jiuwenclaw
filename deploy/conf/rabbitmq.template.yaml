@@ -2,7 +2,6 @@ apiVersion: v1
 kind: Secret
 metadata:
   name: <<RABBITMQ_NAME>>-secret
-  namespace: <<NAMESPACE>>
 type: Opaque
 data:
   user: <<RABBITMQ_USER>>
@@ -13,7 +12,6 @@ apiVersion: v1
 kind: Service
 metadata:
   name: <<RABBITMQ_NAME>>-headless
-  namespace: <<NAMESPACE>>
 spec:
   clusterIP: None
   selector:
@@ -29,7 +27,6 @@ apiVersion: v1
 kind: Service
 metadata:
   name: <<RABBITMQ_NAME>>-service
-  namespace: <<NAMESPACE>>
 spec:
   type: NodePort
   selector:
@@ -49,7 +46,6 @@ apiVersion: apps/v1
 kind: StatefulSet
 metadata:
   name: <<RABBITMQ_NAME>>
-  namespace: <<NAMESPACE>>
 spec:
   serviceName: <<RABBITMQ_NAME>>-headless
   replicas: 1
@@ -91,9 +87,8 @@ spec:
 apiVersion: v1
 kind: PersistentVolume
 metadata:
-  name: <<RABBITMQ_NAME>>-<<NAMESPACE>>-pv
+  name: <<RABBITMQ_NAME>>-pv
   labels:
-    ns: <<NAMESPACE>>
     app: <<RABBITMQ_NAME>>
 spec:
   capacity:
@@ -115,7 +110,6 @@ apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
   name: <<RABBITMQ_NAME>>-pvc
-  namespace: <<NAMESPACE>>
 spec:
   accessModes:
     - ReadWriteOnce
@@ -125,5 +119,4 @@ spec:
   storageClassName: ""        # 不使用 StorageClass
   selector:
     matchLabels:
-      ns: <<NAMESPACE>>       # 匹配带有此标签的 PV
       app: <<RABBITMQ_NAME>>

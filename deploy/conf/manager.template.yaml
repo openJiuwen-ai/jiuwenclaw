@@ -1,0 +1,25 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: <<MANAGER_NAME>>
+  namespace: <<NAMESPACE>>
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: <<MANAGER_NAME>>
+  template:
+    metadata:
+      labels:
+        app: <<MANAGER_NAME>>
+    spec:
+      containers:
+      - name: manager
+        image: <<MANAGER_IMAGE>>
+        ports:
+        - containerPort: 8765
+        env:
+        - name: CLAWMANAGER_RABBITMQ_URL
+          value: "<<CLAWMANAGER_RABBITMQ_URL>>"
+        - name: CLAWMANAGER_ALLOW_LOCAL_PROVISION
+          value: "true"

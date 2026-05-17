@@ -124,6 +124,31 @@ check_if_nfs_up() {
     DEPLOY_VARS["NFS_SERVER_ADDR"]=${DEPLOY_VARS["MASTER_NODE_IP"]}
 }
 
+check_if_rabbitmq_up() {
+    local name="${DEPLOY_VARS["RABBITMQ_NAME"]}"
+    local user=${DEPLOY_VARS["RABBITMQ_USER"]}
+    local password=${DEPLOY_VARS["RABBITMQ_PASSWORD"]}
+    local url=""
+    local encoded_password=$(urlencode "$password")
+
+    # No external RABBITMQ server
+    if [ -n "${DEPLOY_VARS["RABBITMQ_URL"]:-}" ]; then
+        info "Use external RABBITMQ server"
+        url="${DEPLOY_VARS["RABBITMQ_URL"]}"
+        DEPLOY_VARS["CLAWMANAGER_RABBITMQ_URL"]="amqp://${user}:${encoded_password}@${url}"
+        return
+    fi
+
+    # No Build-In RABBITMQ server
+    if ! check_k8s_resource_exists "statefulset" "${DEPLOY_VARS["RABBITMQ_NAME"]}"; then
+        error "RABBITMQ is not deployed. Please deploy it first with: ./$(basename "$0") up rabbitmq"
+    fi
+
+    info "Use built-in RABBITMQ server"
+    url="${name}-headless.default:5672"
+    DEPLOY_VARS["CLAWMANAGER_RABBITMQ_URL"]="amqp://${user}:${encoded_password}@${url}"
+}
+
 check_vars() {
     local client_type="${DEPLOY_VARS["AGENT_RUNTIME"]}"
 
@@ -170,4 +195,8 @@ check_web_up_dependency(){
 
 check_rabbitmq_up_dependency(){
     check_if_nfs_up
+}
+
+check_manager_up_dependency(){
+    check_if_rabbitmq_up
 }

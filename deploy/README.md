@@ -63,23 +63,29 @@ unzip ***.zip
 
 ```
 ./deploy.sh up nfs          # 部署 NFS 存储模块（基础依赖，只需也只能一次）
+./deploy.sh up rabbitmq     # 部署 RabbitMQ 存储模块（基础依赖，只需也只能一次）
 ./deploy.sh up              # 部署核心服务模块
 ./deploy.sh up web          # 部署 Web 前端模块（可选部署）
+./deploy.sh up manager      # 部署 CLAW-Manager 管理模块（可选部署）
 ```
 
 - 一键卸载
 
 ```
+./deploy.sh down manager    # 卸载 CLAW-Manager 管理模块（按需卸载）
 ./deploy.sh down web        # 卸载 Web 前端模块（按需卸载）
 ./deploy.sh down            # 卸载核心服务模块
+./deploy.sh down rabbitmq   # 卸载 RabbitMQ 存储模块（非必要不卸载）
 ./deploy.sh down nfs        # 卸载 NFS 存储模块（非必要不卸载）
 ```
 - 一键重启
 
 ```
-./deploy.sh restart         # 重启核心服务模块（按需重启）
-./deploy.sh restart web     # 重启 Web 前端模块（按需重启）
-./deploy.sh restart nfs     # 重启 NFS 存储模块（按需重启）
+./deploy.sh restart             # 重启核心服务模块（按需重启）
+./deploy.sh restart web         # 重启 Web 前端模块（按需重启）
+./deploy.sh restart manager     # 重启 CLAW-Manager 管理模块（按需重启）
+./deploy.sh restart rabbitmq    # 重启 RabbitMQ 存储模块（按需重启）
+./deploy.sh restart nfs         # 重启 NFS 存储模块（按需重启）
 ```
 
 ### 参数解析
@@ -105,17 +111,21 @@ unzip ***.zip
 #### 模块列表（选填）
 
 部署工具支持对以下四个独立模块进行精细化管理：
-- `nfs`：NFS存储服务模块（NFS模块只能部署一次，且固定部署在default默认命名空间，自动忽略-n命名空间配置参数）
-- `yr_claw`：OpenYuanRong-CLAW模块
-- `gateway`：Gateway模块
-- `web`：Web前端页面服务模块
+- `nfs`：NFS 存储服务模块（NFS 模块只能部署一次，且固定部署在 default 默认命名空间，自动忽略-n命名空间配置参数）
+- `rabbitmq`：RabbitMQ 存储服务模块（RabbitMQ 模块只能部署一次，且固定部署在 default 默认命名空间，自动忽略-n命名空间配置参数）
+- `yr_claw`：OpenYuanRong-CLAW 模块
+- `gateway`：Gateway 模块
+- `web`：Web 前端页面服务模块
+- `manager`：CLAW-Manager 管理模块
 
 单模块操作示例：
 ```
 ./deploy.sh [操作命令] nfs          # 仅操作 NFS 模块
+./deploy.sh [操作命令] rabbitmq     # 仅操作 RabbitMQ 模块
 ./deploy.sh [操作命令] yr_claw      # 仅操作 OpenYuanRong-CLAW 模块
 ./deploy.sh [操作命令] gateway      # 仅操作 Gateway 模块
 ./deploy.sh [操作命令] web          # 仅操作 Web 模块
+./deploy.sh [操作命令] manager      # 仅操作 CLAW-Manager 模块
 ```
 
 当未指定模块参数时，部署工具根据环境变量 AGENT_RUNTIME 自动操作核心模块组：
@@ -125,6 +135,8 @@ unzip ***.zip
 
 重要约束
 - `NFS 模块`：一个集群仅允许部署一个NFS模块，操作该模块必须显式指定模块参数方可
+- `RabbitMQ 模块`：一个集群仅允许部署一个RabbitMQ模块，操作该模块必须显式指定模块参数方可
+- `CLAW-Manager 模块`：操作该模块必须显式指定模块参数方可
 - `Web 模块`：操作该模块必须显式指定模块参数方可
 - `关联关系`：Web 模块与 Gateway 模块为一对一绑定关系，部署时必须使用相同命名空间（默认 default），否则服务无法互通
 
