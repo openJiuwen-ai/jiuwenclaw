@@ -184,7 +184,8 @@ class JiuWenClaw:
         from jiuwenclaw.agentserver.skilldev.session_history import SkillDevSessionHistoryService
         from jiuwenclaw.utils import get_workspace_dir
 
-        skilldev_base = get_workspace_dir() / "skilldev"
+        # skilldev_base = get_workspace_dir() / "skilldev"
+        skilldev_base = Path(self._workspace_dir) / "skilldev"
         state_store = StateStore(skilldev_base)
         workspace_provider = WorkspaceProvider(skilldev_base)
 

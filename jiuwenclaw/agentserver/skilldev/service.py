@@ -483,14 +483,19 @@ class SkillDevService:
         if not task_id:
             return self._error_chunk(request_id, channel_id, "缺少 task_id 参数")
 
-        state = self._deps.state_store.load_state_sync(task_id)
-        if state is None or not state.zip_path:
-            return self._error_chunk(
-                request_id, channel_id, f"任务 {task_id} 尚未完成打包"
-            )
+        # state = self._deps.state_store.load_state_sync(task_id)
+        # if state is None or not state.zip_path:
+        #     return self._error_chunk(
+        #         request_id, channel_id, f"任务 {task_id} 尚未完成打包"
+        #     )
 
-        zip_path = Path(state.zip_path)
-        if not zip_path.exists():
+        # zip_path = Path(state.zip_path)
+        workspace = self._deps.workspace_provider.get_local_path(task_id)
+        skill_dir = workspace / "output"
+
+        zip_path = next((f for f in skill_dir.iterdir() if f.suffix in (".skill", ".zip")), None)
+
+        if not zip_path:
             return self._error_chunk(request_id, channel_id, "产物文件不存在")
         try:
             upload_file_obs = UploadFileOSMS()
