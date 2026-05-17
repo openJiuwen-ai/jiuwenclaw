@@ -31,6 +31,10 @@ _channel_id_cv: contextvars.ContextVar[str] = contextvars.ContextVar(
     "jiuwenclaw_ask_channel_id",
     default="",
 )
+_event_type_prefix_cv: contextvars.ContextVar[str] = contextvars.ContextVar(
+    "jiuwenclaw_ask_event_type_prefix",
+    default="chat",
+)
 
 
 @contextlib.asynccontextmanager
@@ -40,6 +44,7 @@ async def ask_user_question_request_scope(
     session_id: str,
     stream_request_id: str,
     channel_id: str,
+    event_type_prefix: str = "chat",
 ) -> AsyncIterator[None]:
     """Bind per-request context for AskUserQuestion (push routing / user_answer)."""
     reg = AskUserQuestionRegistry.get_instance()
@@ -51,6 +56,7 @@ async def ask_user_question_request_scope(
     t_sid = _session_id_cv.set(session_id or "")
     t_rid = _stream_request_id_cv.set(stream_request_id or "")
     t_cid = _channel_id_cv.set(channel_id or "")
+    t_prefix = _event_type_prefix_cv.set((event_type_prefix or "chat").strip() or "chat")
     try:
         yield
     finally:
@@ -58,17 +64,19 @@ async def ask_user_question_request_scope(
         _session_id_cv.reset(t_sid)
         _stream_request_id_cv.reset(t_rid)
         _channel_id_cv.reset(t_cid)
+        _event_type_prefix_cv.reset(t_prefix)
         if sr:
             reg.unbind_stream_chat_flags(sr)
 
 
-def get_ask_request_context() -> tuple[bool, str, str, str]:
-    """Return (interactive_ask, session_id, stream_request_id, channel_id)."""
+def get_ask_request_context() -> tuple[bool, str, str, str, str]:
+    """Return (interactive_ask, session_id, stream_request_id, channel_id, event_type_prefix)."""
     return (
         _interactive_ask_cv.get(),
         _session_id_cv.get(),
         _stream_request_id_cv.get(),
         _channel_id_cv.get(),
+        _event_type_prefix_cv.get(),
     )
 
 
@@ -165,7 +173,7 @@ class AskUserQuestionRegistry:
         self._session_interactive_ask.pop(sid, None)
 
     async def wait_for_answer(self, request_id: str, *, timeout: float) -> list[Any]:
-        interactive_ask, session_id, _, _ = get_ask_request_context()
+        interactive_ask, session_id, _, _, _ = get_ask_request_context()
         effective_interactive = interactive_ask
         if not effective_interactive and session_id:
             effective_interactive = self.session_interactive_ask_enabled(session_id)

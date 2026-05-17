@@ -92,6 +92,15 @@ export function InlineQuestionCard({ onSubmit }: InlineQuestionCardProps) {
   const isEvolution = (pendingQuestion?.request_id?.startsWith('skill_evolve_') ||
                        pendingQuestion?.request_id?.startsWith('skill_create_')) ?? false;
   const isAskTool = pendingQuestion?.source === 'ask_tool';
+  const cardTitle = isAskTool
+    ? t('chatUi.inlineQuestion.toolHeader')
+    : isEvolution
+      ? t('chatUi.inlineQuestion.header')
+      : (pendingQuestion?.questions[0]?.header ?? t('chatUi.inlineQuestion.toolHeader'));
+  const entryCountLabel = isEvolution
+    ? t('chatUi.inlineQuestion.entryCount', { count: pendingQuestion?.questions.length ?? 0 })
+    : t('chatUi.inlineQuestion.questionCount', { count: pendingQuestion?.questions.length ?? 0 });
+  const showAcceptAll = isBatch && !submitted && !isEvolution && !isAskTool;
 
   if (!pendingQuestion) {
     return null;
@@ -172,18 +181,18 @@ export function InlineQuestionCard({ onSubmit }: InlineQuestionCardProps) {
               className="text-xs font-semibold"
               style={{ color: isEvolution || isAskTool ? borderColor : 'var(--accent)' }}
             >
-              {pendingQuestion.questions[0]?.header ?? t('chatUi.inlineQuestion.header')}
+              {cardTitle}
             </span>
             {isBatch && (
               <span
                 className="text-xs"
                 style={{ color: 'var(--muted)' }}
               >
-                {t('chatUi.inlineQuestion.entryCount', { count: pendingQuestion.questions.length })}
+                {entryCountLabel}
               </span>
             )}
           </div>
-          {isBatch && !submitted && (
+          {showAcceptAll && (
             <button
               onClick={handleAcceptAll}
               className="text-xs font-medium px-2.5 py-1 rounded-md transition-opacity hover:opacity-80"

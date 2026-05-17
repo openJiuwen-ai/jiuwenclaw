@@ -562,6 +562,7 @@ Approach each task methodically and deliver high-quality results.
         workspace_obj = Workspace(
             root_path=ws,
             language=language,
+            directories=[],
         )
 
         max_iterations = self._resolve_subagent_max_iterations()
@@ -594,6 +595,7 @@ Approach each task methodically and deliver high-quality results.
             rails=rails,
             language=language,
             enable_task_loop=False,
+            auto_create_workspace=False,
         )
 
         self._inherit_tools_for_spawn(spawn_agent)
@@ -699,6 +701,7 @@ Execute the given task using inherited context and available tools.
         workspace_obj = Workspace(
             root_path=ws,
             language=language,
+            directories=[],
         )
 
         max_iterations = self._resolve_subagent_max_iterations()
@@ -730,6 +733,7 @@ Execute the given task using inherited context and available tools.
             rails=rails,
             language=language,
             enable_task_loop=False,
+            auto_create_workspace=False,
         )
 
         self._inherit_tools_for_fork(fork_agent)

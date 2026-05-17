@@ -110,7 +110,7 @@ def resolve_sdk_choice() -> str:
         logger.debug("[SDK] %s not set, using default: %s", _SDK_ENV_VAR, _DEFAULT_SDK)
         return _DEFAULT_SDK
 
-    valid_sdks = {"harness", "pi"}
+    valid_sdks = {"harness", "pi", "skilldev"}
     if raw in valid_sdks:
         logger.info("[SDK] Resolved SDK: %s", raw)
         return raw
@@ -159,12 +159,25 @@ async def create_adapter(
 
         return await asyncio.get_event_loop().run_in_executor(None, import_and_create)
 
+    if sdk_name == "skilldev":
+        import asyncio
+
+        def import_and_create():
+            from jiuwenclaw.agentserver.skilldev_agent.adapter import SkillDevDeepAdapter
+            return SkillDevDeepAdapter(
+                workspace_dir=workspace_dir,
+                agent_id=agent_id,
+                service_id=service_id,
+            )
+
+        return await asyncio.get_event_loop().run_in_executor(None, import_and_create)
+
     if sdk_name == "pi":
         raise NotImplementedError(
             f"SDK '{sdk_name}' is not yet implemented. "
-            f"Currently supported: harness"
+            f"Currently supported: harness, skilldev"
         )
 
     raise RuntimeError(
-        f"Unknown SDK '{sdk_name}'. Supported: harness, pi (reserved)"
+        f"Unknown SDK '{sdk_name}'. Supported: harness, skilldev, pi (reserved)"
     )

@@ -841,6 +841,7 @@
     },
     "inlineQuestion": {
       "header": "Evolution approval",
+      "toolHeader": "Tool approval",
       "selected": "Selected",
       "accept": "Accept",
       "reject": "Reject",
@@ -848,7 +849,8 @@
       "alwaysAllow": "Always allow",
       "acceptAll": "Accept all",
       "submit": "Submit",
-      "entryCount": "{{count}} entries total"
+      "entryCount": "{{count}} entries total",
+      "questionCount": "{{count}} questions total"
     }
   },
   "network": {

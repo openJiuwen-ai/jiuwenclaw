@@ -34,6 +34,10 @@ from jiuwenclaw.schema.message import Message, Mode, ReqMethod
 
 logger = logging.getLogger(__name__)
 
+_CLIENT_SEND_QUEUE_MAX = 256
+_CLIENT_WRITE_LIMIT_BYTES = 1024 * 1024
+_MAX_WS_MESSAGE_BYTES = 4 * 1024 * 1024
+
 # ── 类型别名 ──────────────────────────────────────────────
 # 方法处理器签名: (ws, req_id, params, session_id) -> None
 MethodHandler = Callable[..., Awaitable[None]]
@@ -69,6 +73,8 @@ class WebChannel(BaseChannel):
         self.config: WebChannelConfig = config
         self._server: Any = None
         self._clients: set[Any] = set()
+        self._client_send_queues: dict[Any, asyncio.Queue[str]] = {}
+        self._client_send_tasks: dict[Any, asyncio.Task[None]] = {}
         self._on_message_cb: Callable[[Message], Any] | None = None
         self._method_handlers: dict[str, MethodHandler] = {}
         self._connect_hooks: list[ConnectHook] = []
@@ -127,7 +133,7 @@ class WebChannel(BaseChannel):
             if code:
                 frame["code"] = code
         try:
-            await ws.send(json.dumps(frame, ensure_ascii=False))
+            await self._send_to_client(ws, frame)
         except Exception as e:
             if bool(getattr(ws, "closed", False)):
                 logger.debug("WebChannel send_response skipped on closed websocket: id={} err={}", req_id, e)
@@ -150,7 +156,7 @@ class WebChannel(BaseChannel):
         if stream_id is not None:
             frame["stream_id"] = stream_id
         try:
-            await ws.send(json.dumps(frame, ensure_ascii=False))
+            await self._send_to_client(ws, frame)
         except Exception as e:
             if bool(getattr(ws, "closed", False)):
                 logger.debug("WebChannel send_event skipped on closed websocket: event={} err={}", event, e)
@@ -244,6 +250,9 @@ class WebChannel(BaseChannel):
             process_request=self._process_request,
             ping_interval=20,
             ping_timeout=20,
+            compression=None,
+            max_size=_MAX_WS_MESSAGE_BYTES,
+            write_limit=_CLIENT_WRITE_LIMIT_BYTES,
         )
         self._running = True
         logger.info(
@@ -259,6 +268,7 @@ class WebChannel(BaseChannel):
         if close_tasks:
             await asyncio.gather(*close_tasks, return_exceptions=True)
         self._clients.clear()
+        await self._cleanup_client_send_tasks()
 
         if self._server is not None:
             self._server.close()
@@ -412,6 +422,11 @@ class WebChannel(BaseChannel):
         query = parse_qs(parsed.query)
         remote = getattr(ws, "remote_address", None)
         self._clients.add(ws)
+        queue: asyncio.Queue[str] = asyncio.Queue(maxsize=_CLIENT_SEND_QUEUE_MAX)
+        self._client_send_queues[ws] = queue
+        self._client_send_tasks[ws] = asyncio.create_task(
+            self._client_send_loop(ws, queue)
+        )
         logger.info(f"WebChannel 新连接: remote={remote} query={query}")
 
         # 触发连接钩子（如发送 connection.ack）
@@ -430,6 +445,21 @@ class WebChannel(BaseChannel):
             logger.warning("WebChannel 连接异常: %s", e)
         finally:
             self._clients.discard(ws)
+            queue = self._client_send_queues.pop(ws, None)
+            task = self._client_send_tasks.pop(ws, None)
+            if task is not None:
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
+            if queue is not None:
+                while not queue.empty():
+                    try:
+                        queue.get_nowait()
+                        queue.task_done()
+                    except asyncio.QueueEmpty:
+                        break
             logger.info(f"WebChannel 连接关闭: remote={remote}")
 
     async def _handle_raw_message(self, ws: Any, raw: str, query: dict[str, list[str]]) -> None:
@@ -466,8 +496,8 @@ class WebChannel(BaseChannel):
 
         params = await self._process_files(params, session_id)
 
-        # skilldev.start / skilldev.respond 需走流式路径才能实时推送事件
-        stream_methods = ("skilldev.start", "skilldev.respond")
+        # skilldev.chat / skilldev.start / skilldev.respond 需走流式路径才能实时推送事件
+        stream_methods = ("skilldev.chat", "skilldev.start", "skilldev.respond")
         is_stream = method in stream_methods
 
         user_message = Message(
@@ -529,23 +559,63 @@ class WebChannel(BaseChannel):
                 error=f"unknown method: {method}", code="METHOD_NOT_FOUND",
             )
 
+    async def _send_to_client(self, ws: Any, frame: dict[str, Any]) -> None:
+        data = json.dumps(frame, ensure_ascii=False)
+        queue = self._client_send_queues.get(ws)
+        task = self._client_send_tasks.get(ws)
+        if queue is None or task is None or task.done():
+            await ws.send(data)
+            return
+        await queue.put(data)
+
+    async def _cleanup_client_send_tasks(self) -> None:
+        tasks = list(self._client_send_tasks.values())
+        self._client_send_tasks.clear()
+        self._client_send_queues.clear()
+        for task in tasks:
+            task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+
+    async def _client_send_loop(self, ws: Any, queue: asyncio.Queue[str]) -> None:
+        try:
+            while True:
+                data = await queue.get()
+                try:
+                    await ws.send(data)
+                except Exception as e:
+                    if not bool(getattr(ws, "closed", False)):
+                        logger.warning("WebChannel client send loop failed: %s", e)
+                    break
+                finally:
+                    queue.task_done()
+        except asyncio.CancelledError:
+            pass
+
     async def _broadcast(self, frame: dict[str, Any]) -> None:
         data = json.dumps(frame, ensure_ascii=False)
         if not self._clients:
             return
-        
-        results = await asyncio.gather(
-            *[client.send(data) for client in list(self._clients)],
-            return_exceptions=True,
+
+        _bc_t0 = asyncio.get_event_loop().time()
+        dropped = 0
+        for client, queue in list(self._client_send_queues.items()):
+            if client not in self._clients:
+                continue
+            try:
+                queue.put_nowait(data)
+            except asyncio.QueueFull:
+                dropped += 1
+        _bc_elapsed = (asyncio.get_event_loop().time() - _bc_t0) * 1000
+        logger.info(
+            "[STREAM_DIAG][WebChannel] broadcast clients=%d elapsed=%.1fms len=%d dropped=%d",
+            len(self._clients), _bc_elapsed, len(data), dropped,
         )
-        for idx, res in enumerate(results):
-            if isinstance(res, BaseException):
-                logger.warning(
-                    "WebChannel _broadcast 发送失败 client_index=%s error=%s",
-                    idx,
-                    res,
-                    exc_info=isinstance(res, Exception),
-                )
+        if dropped:
+            logger.warning(
+                "WebChannel client send queue full, dropped messages for %d clients",
+                dropped,
+            )
 
     @staticmethod
     def _parse_req_method(method: str) -> ReqMethod | None:

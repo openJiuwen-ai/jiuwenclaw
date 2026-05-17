@@ -292,7 +292,7 @@ class WebClient {
 
   /**
    * Fire-and-forget: 发送流式请求，不等待 res 帧，结果通过事件监听获取。
-   * 用于 skilldev.start / skilldev.respond 等流式方法。
+   * 用于 skilldev.chat / skilldev.respond 等流式方法。
    */
   async sendStream(
     method: string,

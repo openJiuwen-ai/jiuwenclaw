@@ -130,6 +130,7 @@ _FORWARD_REQ_METHODS = frozenset({
     "extensions.import",
     "extensions.delete",
     "extensions.toggle",
+    "skilldev.chat",
     "skilldev.start",
     "skilldev.respond",
     "skilldev.status",
@@ -140,6 +141,7 @@ _FORWARD_REQ_METHODS = frozenset({
     "skilldev.cancel",
     "skilldev.file.list",
     "skilldev.file.read",
+    "skilldev.user_answer",
     "tools.add",
 })
 
@@ -173,6 +175,7 @@ _FORWARD_NO_LOCAL_HANDLER_METHODS = frozenset({
     "extensions.import",
     "extensions.delete",
     "extensions.toggle",
+    "skilldev.chat",
     "skilldev.start",
     "skilldev.respond",
     "skilldev.status",
@@ -183,6 +186,7 @@ _FORWARD_NO_LOCAL_HANDLER_METHODS = frozenset({
     "skilldev.cancel",
     "skilldev.file.list",
     "skilldev.file.read",
+    "skilldev.user_answer",
     "tools.add",
 })
 
@@ -1273,6 +1277,13 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             payload["request_id"] = request_id
         await channel.send_response(ws, req_id, ok=True, payload=payload)
 
+    async def _skilldev_user_answer(ws, req_id, params, session_id):
+        payload = {"accepted": True, "session_id": session_id}
+        request_id = params.get("request_id") if isinstance(params, dict) else None
+        if isinstance(request_id, str) and request_id:
+            payload["request_id"] = request_id
+        await channel.send_response(ws, req_id, ok=True, payload=payload)
+
     async def _history_get(ws, req_id, params, session_id):
         payload = {"accepted": True, "session_id": session_id}
         if isinstance(params, dict):
@@ -2029,6 +2040,7 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
     channel.register_method("chat.resume", _chat_resume)
     channel.register_method("chat.interrupt", _chat_interrupt)
     channel.register_method("chat.user_answer", _chat_user_answer)
+    channel.register_method("skilldev.user_answer", _skilldev_user_answer)
     channel.register_method("history.get", _history_get)
     channel.register_method("locale.get_conf", _locale_get_conf)
     channel.register_method("locale.set_conf", _locale_set_conf)

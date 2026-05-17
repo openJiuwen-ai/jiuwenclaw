@@ -19,7 +19,9 @@ import type { SkillDevMessage } from '../../stores';
 import type { MediaItem, ToolExecution } from '../../types';
 import '../ChatPanel/ChatPanel.css';
 import { SkillDevQuestionCard } from './SkillDevQuestionCard';
+import { SkillDevAskQuestionCard } from './SkillDevAskQuestionCard';
 import type { ClarifyQuestion, ClarifyAnswer, SkillDevPlan } from '../../types/skilldev';
+import type { AskUserQuestionPayload, UserAnswer } from '../../types';
 import { SkillDevTimeline } from './SkillDevTimeline';
 
 interface SkillDevChatProps {
@@ -46,7 +48,11 @@ interface SkillDevChatProps {
       messageId?: string;
     }
   ) => Promise<void> | void;
-  /** 恢复会话后可继续执行任务（skilldev.start 续跑） */
+  // Agent ask_user_question 卡片
+  pendingQuestion?: AskUserQuestionPayload | null;
+  onSubmitAnswer?: (requestId: string, answers: UserAnswer[], source?: string) => void;
+  onDismissQuestion?: () => void;
+  /** 恢复会话后可继续执行任务（skilldev.chat 续跑） */
   showResumeTask?: boolean;
   onResumeTask?: () => void | Promise<void>;
 }
@@ -124,6 +130,9 @@ export function SkillDevChat({
   isClarifySubmitted,
   onClarifySubmit,
   onConfirm,
+  pendingQuestion,
+  onSubmitAnswer,
+  onDismissQuestion,
   showResumeTask = false,
   onResumeTask,
 }: SkillDevChatProps) {
@@ -461,6 +470,14 @@ export function SkillDevChat({
                 questions={clarifyQuestions}
                 onSubmit={onClarifySubmit}
                 disabled={!isSuspended}
+              />
+            )}
+            {/* Agent ask_user_question 卡片 - 内联展示 */}
+            {pendingQuestion && onSubmitAnswer && (
+              <SkillDevAskQuestionCard
+                question={pendingQuestion}
+                onSubmit={onSubmitAnswer}
+                onDismiss={onDismissQuestion}
               />
             )}
           </>

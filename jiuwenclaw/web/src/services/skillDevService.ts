@@ -1,8 +1,8 @@
 /**
  * SkillDev 服务
  *
- * 与后端 SkillDevService 交互
- * 方法: skilldev.start, skilldev.respond, skilldev.parse_skill, skilldev.status,
+ * 与后端 SkillDevAgent 交互
+ * 方法: skilldev.chat, skilldev.respond, skilldev.parse_skill, skilldev.status,
  *      skilldev.download, skilldev.file.list, skilldev.file.read
  */
 
@@ -24,7 +24,7 @@ export async function startSkillDev(
   params: StartSkillDevParams
 ): Promise<void> {
   await webSendStream(
-    'skilldev.start',
+    'skilldev.chat',
     {
       query: params.query,
       session_id: params.session_id,

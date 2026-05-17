@@ -841,6 +841,7 @@
     },
     "inlineQuestion": {
       "header": "演进审批",
+      "toolHeader": "工具审批",
       "selected": "已选择",
       "accept": "接收",
       "reject": "拒绝",
@@ -848,7 +849,8 @@
       "alwaysAllow": "总是允许",
       "acceptAll": "全部接收",
       "submit": "确认提交",
-      "entryCount": "共 {{count}} 条演进经验"
+      "entryCount": "共 {{count}} 条演进经验",
+      "questionCount": "共 {{count}} 个问题"
     }
   },
   "network": {

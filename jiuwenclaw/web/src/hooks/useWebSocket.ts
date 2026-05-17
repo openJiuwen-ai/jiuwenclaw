@@ -185,6 +185,18 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
   } =
     useSessionStore();
 
+  const deltaBufferRef = useRef('');
+  const deltaRafIdRef = useRef<number | null>(null);
+
+  const flushDeltaBuffer = useCallback(() => {
+    deltaRafIdRef.current = null;
+    const buffered = deltaBufferRef.current;
+    if (!buffered) return;
+
+    deltaBufferRef.current = '';
+    appendStreamContent(buffered);
+  }, [appendStreamContent]);
+
   const handleTtsPlayback = useCallback(
     (messageId: string, content: string) => {
       const sanitized = sanitizeTtsText(content);
@@ -475,7 +487,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
   const startSkillDev = useCallback(
     async (params: SkillDevStartParams) => {
       try {
-        const response = await request<{ task_id: string }>('skilldev.start', params);
+        const response = await request<{ task_id: string }>('skilldev.chat', params);
         return response;
       } catch (error) {
         const webError = error as WebError;
@@ -650,7 +662,8 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
       }),
       webClient.on('chat.delta', ({ payload }) => {
         if (!shouldHandleSessionEvent(payload)) return;
-        
+        console.log(`[STREAM_DIAG][useWebSocket] chat.delta t=${performance.now().toFixed(1)}ms`);
+
         const currentMode = useSessionStore.getState().mode;
         const content = typeof payload.content === 'string' ? payload.content : '';
         
@@ -698,10 +711,19 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
           });
           startStreaming(assistantMsgId);
         }
-        appendStreamContent(content);
+        if (content) {
+          deltaBufferRef.current += content;
+          if (deltaRafIdRef.current === null) {
+            deltaRafIdRef.current = requestAnimationFrame(flushDeltaBuffer);
+          }
+        }
       }),
       webClient.on('chat.final', ({ payload }) => {
         if (!shouldHandleSessionEvent(payload)) return;
+        if (deltaRafIdRef.current !== null) {
+          cancelAnimationFrame(deltaRafIdRef.current);
+        }
+        flushDeltaBuffer();
         
         const currentMode = useSessionStore.getState().mode;
         const content = normalizeFinalContent(payload);
@@ -1234,6 +1256,10 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
 
     return () => {
       unsubs.forEach((fn) => fn());
+      if (deltaRafIdRef.current !== null) {
+        cancelAnimationFrame(deltaRafIdRef.current);
+        flushDeltaBuffer();
+      }
     };
   }, [
     addMessage,
@@ -1241,6 +1267,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
     addToolResult,
     appendStreamContent,
     clearSubtasks,
+    flushDeltaBuffer,
     handleConnectionAck,
     handleTtsPlayback,
     setMode,

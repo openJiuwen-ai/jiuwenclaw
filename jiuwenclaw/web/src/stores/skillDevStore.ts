@@ -18,7 +18,7 @@ import type {
   ClarifyQuestion,
   SkillDevRestoreResult,
 } from '../types/skilldev';
-import type { ToolCall, ToolResult, ToolExecution, MediaItem } from '../types';
+import type { ToolCall, ToolResult, ToolExecution, MediaItem, AskUserQuestionPayload } from '../types';
 
 interface SkillDevStateStore {
   // ========== 核心状态 ==========
@@ -44,6 +44,8 @@ interface SkillDevStateStore {
   // 问题澄清（内联展示，不弹窗）
   clarifyQuestions: ClarifyQuestion[] | null;
   isClarifySubmitted: boolean;
+  // Agent ask_user_question（内联卡片）
+  pendingQuestion: AskUserQuestionPayload | null;
 
   // ========== 中间产物 ==========
   plan: SkillDevPlan | null;
@@ -69,6 +71,7 @@ interface SkillDevStateStore {
 
   setClarifyQuestions: (questions: ClarifyQuestion[] | null) => void;
   setClarifySubmitted: (submitted: boolean) => void;
+  setPendingQuestion: (question: AskUserQuestionPayload | null) => void;
 
   addMessage: (message: SkillDevMessage) => void;
   addThinkingMessage: (delta: string, options?: { timestamp?: string; id?: string }) => void;
@@ -195,6 +198,7 @@ const initialState = {
   currentFile: null,
   clarifyQuestions: null as ClarifyQuestion[] | null,
   isClarifySubmitted: false,
+  pendingQuestion: null as AskUserQuestionPayload | null,
 
   plan: null,
   evalResult: null,
@@ -264,6 +268,7 @@ export const useSkillDevStore = create<SkillDevStateStore>((set, _get) => ({
 
   setClarifyQuestions: (clarifyQuestions) => set({ clarifyQuestions }),
   setClarifySubmitted: (isClarifySubmitted) => set({ isClarifySubmitted }),
+  setPendingQuestion: (pendingQuestion) => set({ pendingQuestion }),
 
   addMessage: (message) =>
     set((state) => ({

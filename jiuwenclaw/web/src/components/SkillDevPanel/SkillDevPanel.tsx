@@ -37,7 +37,7 @@ import type {
   SkillDevRestoreTimelineItem,
   SkillDevRestoreSnapshot,
 } from '../../types/skilldev';
-import type { MediaItem, ToolExecution } from '../../types';
+import type { MediaItem, ToolExecution, AskUserQuestionPayload, UserAnswer } from '../../types';
 
 // 子组件
 import { SkillDevChat } from './SkillDevChat';
@@ -107,6 +107,8 @@ export function SkillDevPanel() {
     setCurrentFile,
     setClarifyQuestions,
     setClarifySubmitted,
+    pendingQuestion,
+    setPendingQuestion,
     updateMessage,
     appendToAgentRunCard,
     finalizeAgentRunCard,
@@ -643,6 +645,34 @@ export function SkillDevPanel() {
     );
   }, [resolveConfirmMessage, setClarifyQuestions, setClarifySubmitted]);
 
+  const handleAskUserQuestion = useCallback((data: AskUserQuestionPayload) => {
+    endThinkingStream();
+    setPendingQuestion(data);
+    setSuspended(true);
+    setProcessing(false);
+  }, [endThinkingStream, setPendingQuestion, setSuspended, setProcessing]);
+
+  const handleSubmitUserAnswer = useCallback(
+    async (requestId: string, answers: UserAnswer[], source?: string) => {
+      try {
+        setPendingQuestion(null);
+        setSuspended(false);
+        setProcessing(true);
+        const sessionId = sessionIdRef.current ?? taskId ?? '';
+        await webClient.request('skilldev.user_answer', {
+          session_id: sessionId,
+          request_id: requestId,
+          answers,
+          ...(source ? { source } : {}),
+        });
+      } catch (err) {
+        setError(err instanceof Error ? err.message : '提交回答失败');
+        setProcessing(false);
+      }
+    },
+    [taskId, setPendingQuestion, setSuspended, setProcessing, setError]
+  );
+
   // 用 ref 保存最新 handler，避免事件监听因依赖变化而反复重注册导致事件丢失
   const handlersRef = useRef({
     handleStarted,
@@ -664,6 +694,7 @@ export function SkillDevPanel() {
     handleCompleted,
     handleToolCall,
     handleToolResult,
+    handleAskUserQuestion,
   });
   useEffect(() => {
     handlersRef.current = {
@@ -672,6 +703,7 @@ export function SkillDevPanel() {
       handleConfirmResolved,
       handleArtifactReady, handleSkillNameReady, handleEvalReady, handleValidateResult, handleDescOptReady,
       handleError, handleSuspended, handleCompleted, handleToolCall, handleToolResult,
+      handleAskUserQuestion,
     };
   });
 
@@ -697,6 +729,7 @@ export function SkillDevPanel() {
       { name: 'skilldev.completed',      key: 'handleCompleted' },
       { name: 'skilldev.tool_call',      key: 'handleToolCall' },
       { name: 'skilldev.tool_result',    key: 'handleToolResult' },
+      { name: 'skilldev.ask_user_question', key: 'handleAskUserQuestion' },
     ];
 
     const unsubs = events.map(({ name, key }) =>
@@ -1297,6 +1330,9 @@ export function SkillDevPanel() {
               isClarifySubmitted={isClarifySubmitted}
               onClarifySubmit={handleClarifySubmit}
               onConfirm={handleConfirm}
+              pendingQuestion={pendingQuestion}
+              onSubmitAnswer={handleSubmitUserAnswer}
+              onDismissQuestion={() => setPendingQuestion(null)}
               showResumeTask={showResumeBanner}
               onResumeTask={handleResumeTask}
             />

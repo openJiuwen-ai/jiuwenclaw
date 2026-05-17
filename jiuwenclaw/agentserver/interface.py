@@ -90,7 +90,8 @@ _TOOL_ROUTES: dict[ReqMethod, str] = {
 
 # SkillDev 请求方法集合（统一委托给 SkillDevService）
 _SKILLDEV_METHODS: frozenset[ReqMethod] = frozenset(
-    m for m in ReqMethod if m.value.startswith("skilldev.")
+    m for m in ReqMethod
+    if m.value.startswith("skilldev.") and m != ReqMethod.SKILLDEV_CANCEL
 )
 
 # Preserve cross-service context-size hints if they are present in request.params.
@@ -155,6 +156,7 @@ class JiuWenClaw:
         service_id: str | None = None,
     ) -> None:
         self._adapter: AgentAdapter | None = None
+        self._skilldev_adapter: AgentAdapter | None = None
         self._sdk_name: str | None = None
         self._agent_id = agent_id
         self._service_id = service_id
@@ -221,6 +223,21 @@ class JiuWenClaw:
             logger.info("[JiuWenClaw] Initialized adapter: sdk=%s, workspace_dir=%s",
                         self._sdk_name, self._workspace_dir)
         return self._adapter
+
+    async def _ensure_skilldev_adapter(self) -> AgentAdapter:
+        """确保 skilldev adapter 已初始化，懒加载创建."""
+        if self._skilldev_adapter is None:
+            self._skilldev_adapter = await create_adapter(
+                "skilldev",
+                workspace_dir=self._workspace_dir,
+                agent_id=self._agent_id,
+                service_id=self._service_id,
+            )
+            if hasattr(self._skilldev_adapter, "set_skill_manager"):
+                self._skilldev_adapter.set_skill_manager(self._skill_manager)
+            logger.info("[JiuWenClaw] Initialized skilldev adapter: workspace_dir=%s",
+                        self._workspace_dir)
+        return self._skilldev_adapter
 
     def _get_tool_manager(self):
         """懒初始化 ``ToolManager``（依赖 ``get_instance`` 上的底层 Agent）。"""
@@ -643,8 +660,11 @@ class JiuWenClaw:
         Returns:
             AgentResponse 包含 interrupt_result 事件数据
         """
-        adapter = await self._ensure_adapter()
-        # 调用 adapter 的 process_interrupt 处理 SDK 特定逻辑（如 pause/resume、todo 标记等）
+        is_skilldev = request.req_method == ReqMethod.SKILLDEV_CANCEL
+        if is_skilldev:
+            adapter = await self._ensure_skilldev_adapter()
+        else:
+            adapter = await self._ensure_adapter()
         response = await adapter.process_interrupt(request)
         intent = request.params.get("intent", "cancel")
 
@@ -673,8 +693,12 @@ class JiuWenClaw:
         """
         adapter = await self._ensure_adapter()
 
-        if request.req_method == ReqMethod.CHAT_CANCEL:
+        if request.req_method in (ReqMethod.CHAT_CANCEL, ReqMethod.SKILLDEV_CANCEL):
             return await self._process_interrupt(request)
+
+        if request.req_method == ReqMethod.SKILLDEV_ANSWER:
+            skilldev_adapter = await self._ensure_skilldev_adapter()
+            return await skilldev_adapter.handle_user_answer(request)
 
         if request.req_method == ReqMethod.CHAT_ANSWER:
             return await adapter.handle_user_answer(request)
@@ -783,6 +807,21 @@ class JiuWenClaw:
 
         支持多 session 并发执行，同 session 内任务按先进后出顺序执行.
         """
+        if request.req_method == ReqMethod.SKILLDEV_CHAT:
+            adapter = await self._ensure_skilldev_adapter()
+            try:
+                async for chunk in adapter.handle_skilldev_chat_stream(request):
+                    yield chunk
+            except Exception as exc:
+                logger.error("[JiuWenClaw] skilldev.chat 流式请求处理失败: %s", exc)
+                yield AgentResponseChunk(
+                    request_id=request.request_id,
+                    channel_id=request.channel_id,
+                    payload={"event_type": "skilldev.error", "error": str(exc)},
+                    is_complete=True,
+                )
+            return
+
         # SkillDev 流式请求：直接委托给 SkillDevService，绕过 ReActAgent
         if request.req_method in _SKILLDEV_METHODS:
             service = self._get_skilldev_service()
@@ -1055,16 +1094,16 @@ class JiuWenClaw:
     async def cancel_inflight_work(self, log_prefix: str = "[gateway disconnect] ") -> None:
         """Gateway 与 AgentServer 的 WebSocket 断开时调用：取消 session 流式任务并中止 adapter 内层循环。"""
         await self._session_manager.cancel_all_session_tasks(log_prefix)
-        adapter = self._adapter
-        if adapter is None:
-            return
-        abort_fn = getattr(adapter, "abort_on_gateway_disconnect", None)
-        if not callable(abort_fn):
-            return
-        try:
-            await abort_fn()
-        except Exception:
-            logger.exception("[JiuWenClaw] adapter.abort_on_gateway_disconnect failed")
+        for adp in (self._adapter, self._skilldev_adapter):
+            if adp is None:
+                continue
+            abort_fn = getattr(adp, "abort_on_gateway_disconnect", None)
+            if not callable(abort_fn):
+                continue
+            try:
+                await abort_fn()
+            except Exception:
+                logger.exception("[JiuWenClaw] adapter.abort_on_gateway_disconnect failed")
 
     async def cleanup(self) -> None:
         """清理资源，准备销毁实例.
@@ -1081,6 +1120,14 @@ class JiuWenClaw:
             except Exception as e:
                 logger.warning("[JiuWenClaw] Adapter cleanup failed: %s", e)
             self._adapter = None
+
+        if self._skilldev_adapter is not None:
+            try:
+                if hasattr(self._skilldev_adapter, "cleanup"):
+                    await self._skilldev_adapter.cleanup()
+            except Exception as e:
+                logger.warning("[JiuWenClaw] SkillDev adapter cleanup failed: %s", e)
+            self._skilldev_adapter = None
 
         self._tool_manager = None
 

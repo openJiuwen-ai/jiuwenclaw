@@ -2396,10 +2396,24 @@ class MessageHandler(ABC):
                     session_id=session_id,
                     metadata=request_metadata,
                 )
-                await self.publish_robot_messages(out)
-                logger.debug(
-                    "[MessageHandler] Stream chunk 已写入 robot_messages: request_id=%s event_type=%s",
-                    chunk.request_id, out.event_type,
+                _pub_t0 = asyncio.get_event_loop().time()
+                payload = chunk.payload if isinstance(chunk.payload, dict) else {}
+                event_type = str(payload.get("event_type") or "")
+                if event_type in {
+                    "chat.delta",
+                    "chat.tool_call",
+                    "chat.tool_calls.delta",
+                    "chat.tool_result",
+                    "todo.updated",
+                }:
+                    self._maybe_update_session_index_on_robot_msg(out)
+                    self._robot_messages.put_nowait(out)
+                else:
+                    await self.publish_robot_messages(out)
+                _pub_elapsed = (asyncio.get_event_loop().time() - _pub_t0) * 1000
+                logger.info(
+                    "[STREAM_DIAG][MsgHandler] published seq=%s rid=%s publish=%.1fms",
+                    getattr(chunk, "sequence", "?"), rid, _pub_elapsed,
                 )
             logger.info(
                 "[MessageHandler] Stream 正常完成: request_id=%s",

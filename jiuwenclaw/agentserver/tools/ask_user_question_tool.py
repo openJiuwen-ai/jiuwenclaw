@@ -153,12 +153,15 @@ def _parse_timeout(timeout: Any) -> float:
     return parsed
 
 
-async def _send_chat_delta(*, stream_request_id: str, channel_id: str, content: str) -> None:
+async def _send_chat_delta(
+    *, stream_request_id: str, channel_id: str, content: str, event_type_prefix: str = "chat"
+) -> None:
+    prefix = (event_type_prefix or "chat").strip() or "chat"
     msg = {
         "request_id": stream_request_id,
         "channel_id": channel_id,
         "payload": {
-            "event_type": "chat.delta",
+            "event_type": f"{prefix}.delta",
             "content": content,
         },
         "is_complete": False,
@@ -168,7 +171,8 @@ async def _send_chat_delta(*, stream_request_id: str, channel_id: str, content: 
 
 
 async def _ask_user_question_impl(questions: Any, timeout: Any = None) -> dict[str, Any]:
-    interactive, session_id, stream_rid, channel_id = get_ask_request_context()
+    interactive, session_id, stream_rid, channel_id, event_type_prefix = get_ask_request_context()
+    event_type_prefix = (event_type_prefix or "chat").strip() or "chat"
     reg = AskUserQuestionRegistry.get_instance()
     if stream_rid and not interactive:
         interactive = reg.stream_interactive_ask_enabled(stream_rid)
@@ -186,7 +190,12 @@ async def _ask_user_question_impl(questions: Any, timeout: Any = None) -> dict[s
     if not interactive:
         formatted = _format_questions_as_text(normalized)
         try:
-            await _send_chat_delta(stream_request_id=stream_rid, channel_id=channel_id, content=formatted)
+            await _send_chat_delta(
+                stream_request_id=stream_rid,
+                channel_id=channel_id,
+                content=formatted,
+                event_type_prefix=event_type_prefix,
+            )
         except Exception as exc:
             logger.exception("[ask_user_question] 纯文本回退 send_push 失败: %s", exc)
             return {
@@ -206,7 +215,7 @@ async def _ask_user_question_impl(questions: Any, timeout: Any = None) -> dict[s
     # 与 wait_for_answer(timeout) 使用同一截止时刻；网关/前端用 expires_at_ms 展示倒计时或「请于 xx 前完成」
     expires_at_ms = int(time.time() * 1000 + float(timeout_sec) * 1000)
     payload: dict[str, Any] = {
-        "event_type": "chat.ask_user_question",
+        "event_type": f"{event_type_prefix}.ask_user_question",
         "request_id": ask_id,
         "source": "ask_tool",
         "questions": normalized,
