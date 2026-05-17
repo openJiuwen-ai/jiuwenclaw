@@ -122,6 +122,7 @@ class ReqMethod(Enum):
 
 # SkillDev 模式请求方法
     SKILLDEV_CHAT = "skilldev.chat"  # 发起用户消息
+    SKILLDEV_START = "skilldev.start"  # 发起用户消息
     SKILLDEV_RESPOND = "skilldev.respond"  # 统一确认入口（后端根据 task_id 当前阶段自动路由）
     SKILLDEV_USER_ANSWER = "skilldev.user_answer"  # 结构化提问（ask_user_question）用户选择
     SKILLDEV_STATUS = "skilldev.status"  # 查询状态（不传 task_id → 返回任务列表）
