@@ -98,16 +98,11 @@ class ExtensionLoader:
 
         pip_extra_args = os.environ.get("PIP_EXTRA_ARGS", "").strip().strip('\'"')
         extra_args = pip_extra_args.split() if pip_extra_args else []
+        force_args = ["--force-reinstall"]
 
         for package, version_spec in dependencies.items():
             package_name = f"{package}{version_spec}" if version_spec else package
-            try:
-                importlib.metadata.version(package)
-                logger.info(f"[ExtensionLoader] 扩展 {root.name} 依赖 {package} 已安装")
-                continue
-            except importlib.metadata.PackageNotFoundError:
-                pass
-
+            # 直接开始安装，不再检查是否已安装
             logger.info(f"[ExtensionLoader] 正在安装扩展 {root.name} 的依赖: {package_name}")
             try:
                 if use_uv:
@@ -119,7 +114,7 @@ class ExtensionLoader:
                     )
                 else:
                     subprocess.check_call(
-                        [sys.executable, "-m", "pip", "install", package_name] + extra_args,
+                        [sys.executable, "-m", "pip", "install", package_name] + force_args + extra_args,
                         stdout=subprocess.DEVNULL,
                         stderr=None,
                         timeout=600,
