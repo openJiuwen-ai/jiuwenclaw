@@ -123,12 +123,20 @@ class WebSocketAgentServerClient(AgentServerClient):
         self._running = False
         # AgentServer send_push：旁路投递，勿进入与 request_id 绑定的 RPC 等待队列
         self._on_server_push: Callable[[dict[str, Any]], Awaitable[None]] | None = None
+        # 连接断开回调，由 Gateway 注册以触发自动重连
+        self._on_disconnect: Callable[[], Awaitable[None]] | None = None
 
     def set_server_push_handler(
         self, handler: Callable[[dict[str, Any]], Awaitable[None]] | None
     ) -> None:
         """注册 Agent 主动推送处理回调（metadata 含 ``E2A_WIRE_SERVER_PUSH_KEY`` 的帧）。"""
         self._on_server_push = handler
+
+    def set_on_disconnect(
+        self, handler: Callable[[], Awaitable[None]] | None
+    ) -> None:
+        """注册连接断开回调，由 Gateway 用于触发自动重连."""
+        self._on_disconnect = handler
 
     def set_or_update_server_config(
         self,
@@ -232,10 +240,26 @@ class WebSocketAgentServerClient(AgentServerClient):
                 except asyncio.CancelledError:
                     break
                 except Exception as e:
+                    from websockets.exceptions import ConnectionClosed
+                    if isinstance(e, ConnectionClosed):
+                        logger.info(
+                            "[WebSocketAgentServerClient] 连接已关闭: code=%s reason=%s",
+                            e.code,
+                            e.reason,
+                        )
+                        break
                     logger.exception("[WebSocketAgentServerClient] 消息接收循环异常: %s", e)
                     await asyncio.sleep(0.1)  # 避免快速循环
         finally:
+            self._running = False
+            self._server_ready = False
             logger.info("[WebSocketAgentServerClient] 消息接收任务已停止")
+            # 通知 Gateway 连接已断开，触发自动重连
+            if self._on_disconnect is not None:
+                try:
+                    await self._on_disconnect()
+                except Exception:
+                    logger.exception("[WebSocketAgentServerClient] on_disconnect 回调异常")
 
     async def disconnect(self) -> None:
         # 停止接收任务

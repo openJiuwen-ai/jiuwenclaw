@@ -778,6 +778,8 @@ async def _run(
 
     max_retries = int(os.getenv("AGENT_CONNECT_RETRY", "20"))
     retry_interval = float(os.getenv("AGENT_CONNECT_RETRY_INTERVAL", "3"))
+    # 每次重连尝试的最大次数（外层 _auto_reconnect 循环负责无限重试）
+    _reconnect_attempts = int(os.getenv("AGENT_RECONNECT_ATTEMPTS", "60"))
 
     agent_server_ext = extension_registry.get_agent_server_client_extension()
     if agent_server_ext is not None:
@@ -785,15 +787,48 @@ async def _run(
         client = agent_server_ext.get_client()
     else:
         client = WebSocketAgentServerClient(ping_interval=20.0, ping_timeout=600.0)
-    await _connect_with_retry(
-        client,
-        agent_server_url,
-        max_retries=max_retries,
-        interval=retry_interval,
-    )
+    # 自动重连：初始连接和 WebSocket 意外断开后均持续尝试重连
+    _reconnect_task: asyncio.Task | None = None
+    _shutting_down = False
+
+    async def _ensure_agent_connected(first_attempt: bool = False) -> None:
+        nonlocal _reconnect_task
+        if not first_attempt:
+            logger.warning("[App] AgentServer 连接已断开，开始重连...")
+        while True:
+            try:
+                await _connect_with_retry(
+                    client,
+                    agent_server_url,
+                    max_retries=_reconnect_attempts,
+                    interval=retry_interval,
+                )
+                logger.info("[App] AgentServer 已连接")
+                return
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception(
+                    "[App] AgentServer 连接失败，%ss 后重试...",
+                    retry_interval,
+                )
+                await asyncio.sleep(retry_interval)
+
+    async def _on_disconnect() -> None:
+        nonlocal _reconnect_task
+        if _shutting_down:
+            return
+        if _reconnect_task is not None and not _reconnect_task.done():
+            _reconnect_task.cancel()
+        _reconnect_task = asyncio.create_task(_ensure_agent_connected())
+
+    client.set_on_disconnect(_on_disconnect)
 
     message_handler = MessageHandler(client)
     await message_handler.start_forwarding()
+
+    # AgentServer 连接放在 web channel 启动之后，避免阻塞前端访问
+    _reconnect_task = asyncio.create_task(_ensure_agent_connected(first_attempt=True))
 
     # IM Pipeline 初始化（数字分身）
     from jiuwenclaw.gateway.im_pipeline.im_inbound import IMInboundPipeline
@@ -976,6 +1011,20 @@ async def _run(
         "Web",
     )
     channel_manager.register_channel_with_inbound(web_channel, web_norm_and_forward)
+
+    # 提前启动 web channel，避免 AgentServer 连接阻塞导致前端无法访问
+    web_task = (
+        asyncio.create_task(web_channel.start(), name="web-channel")
+        if web_channel is not None
+        else None
+    )
+    if web_channel is not None:
+        logger.info(
+            "[App] web channel 已提前启动: Web ws://%s:%s%s",
+            web_host,
+            web_port,
+            web_path,
+        )
 
     acp_inbound_server = _InboundGatewayServer(
         lambda msg: _normalize_and_forward_message(msg, channel_manager)
@@ -1551,17 +1600,9 @@ async def _run(
         gateway_server.wait_until_closed(),
         name="acp-gateway-server",
     )
-    web_task = (
-        asyncio.create_task(web_channel.start(), name="web-channel")
-        if web_channel is not None
-        else None
-    )
     if web_channel is not None:
         logger.info(
-            "[App] started: Web ws://%s:%s%s  AgentServer: %s  Press Ctrl+C to exit.",
-            web_host,
-            web_port,
-            web_path,
+            "[App] started: AgentServer: %s  Press Ctrl+C to exit.",
             agent_server_url,
         )
 
@@ -1669,6 +1710,13 @@ async def _run(
         await channel_manager.stop_dispatch()
         await heartbeat_service.stop()
         await message_handler.stop_forwarding()
+        _shutting_down = True
+        if _reconnect_task is not None and not _reconnect_task.done():
+            _reconnect_task.cancel()
+            try:
+                await _reconnect_task
+            except asyncio.CancelledError:
+                pass
         await client.disconnect()
         logger.info("[App] Gateway stopped")
 
