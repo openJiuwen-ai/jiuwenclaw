@@ -116,6 +116,7 @@ class VibeSkillChannel(BaseChannel):
         self._session_to_ws: dict[str, Any] = {}  # internal_id -> ws
         self._ws_sessions_lock = asyncio.Lock()
         self._clients: set[Any] = set()
+        self._ws_skip_cancel_on_disconnect: set[Any] = set()
         self._on_message_cb: Callable[[Message], Any] | None = None
         self._http_server: asyncio.Server | None = None
         self._ws_server: Any | None = None
@@ -921,6 +922,9 @@ class VibeSkillChannel(BaseChannel):
             responses = await handler(payload, external_sid, msg.session_id)
             for response in responses:
                 await self._send_ws_json(ws, response, source=f"skilldev.{event_type}")
+            if event_type == "skilldev.agent_completed":
+                await self._disconnect_northbound_ws_after_agent_completed(msg.session_id, ws)
+                return True
             if responses:
                 return True
             return False
@@ -1004,6 +1008,7 @@ class VibeSkillChannel(BaseChannel):
             "skilldev.confirm_request": self._handle_skilldev_confirm_request,
             "skilldev.ask_user_question": self._handle_skilldev_ask_user_question,
             "skilldev.error": self._handle_skilldev_error,
+            "skilldev.agent_completed": self._handle_skilldev_agent_completed,
             "skilldev.completed": self._handle_skilldev_completed,
         }
 
@@ -1378,6 +1383,21 @@ class VibeSkillChannel(BaseChannel):
         })
         return responses
 
+    async def _handle_skilldev_agent_completed(
+        self,
+        payload: dict,
+        external_sid: str | None,
+        session_id: str | None,
+    ) -> list[dict]:
+        """skilldev.agent_completed — 单轮 Agent 流式输出结束，无额外北向帧。"""
+        if session_id:
+            ctx = self._message_ctx.get(session_id)
+            if isinstance(ctx, dict):
+                ctx.pop("_skilldev_stream_last_kind", None)
+                ctx.pop("_skilldev_active_reasoning_part", None)
+                ctx.pop("_skilldev_active_output_part", None)
+        return []
+
     async def _handle_skilldev_completed(
         self,
         payload: dict,
@@ -1414,8 +1434,32 @@ class VibeSkillChannel(BaseChannel):
             }
         ]
 
+    async def _disconnect_northbound_ws_after_agent_completed(
+        self,
+        session_id: str | None,
+        ws: Any,
+    ) -> None:
+        """单轮 Agent 结束后主动断开北向 WS；客户端下次会重连再发 message.send 等。"""
+        if ws is None or bool(getattr(ws, "closed", False)):
+            return
+        self._ws_skip_cancel_on_disconnect.add(ws)
+        logger.info(
+            "[VibeSkillChannel] closing northbound WS after skilldev.agent_completed, session_id=%s",
+            str(session_id or "").strip() or "n/a",
+        )
+        try:
+            await ws.close(code=1000, reason="agent_completed")
+        except Exception:
+            logger.exception(
+                "[VibeSkillChannel] close WS after skilldev.agent_completed failed, session_id=%s",
+                str(session_id or "").strip() or "n/a",
+            )
+
     async def cleanup(self, ws: Any) -> None:
         """ws 断开时清理关联的会话映射。"""
+        skip_cancel = ws in self._ws_skip_cancel_on_disconnect
+        if skip_cancel:
+            self._ws_skip_cancel_on_disconnect.discard(ws)
         heartbeat = self._ws_heartbeat_tasks.pop(ws, None)
         if heartbeat and not heartbeat.done():
             heartbeat.cancel()
@@ -1428,6 +1472,8 @@ class VibeSkillChannel(BaseChannel):
         internal_ids = self._ws_sessions.pop(ws, set())
         for sid in internal_ids:
             self._session_to_ws.pop(sid, None)
+            if skip_cancel:
+                continue
             self._clear_message_context_for_session(sid)
             try:
                 state = await self._store.get_state(sid)
