@@ -16,6 +16,7 @@ RUN pip install -e ".[all]" \
     -i https://pypi.tuna.tsinghua.edu.cn/simple
 
 RUN yq -y -i '.dependencies = {}' packages/jiuwenclaw-ee/gateway/extensions/runtime_management_extension/extension.yaml
+RUN yq -y -i '.dependencies = {}' packages/jiuwenclaw-ee/gateway/extensions/agent_client/extension.yaml
 
 RUN mkdir -p /home/app/.jiuwenclaw && printf 'yes\nzh\n' | jiuwenclaw-init
 
