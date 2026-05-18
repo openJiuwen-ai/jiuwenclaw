@@ -5,6 +5,17 @@ from .application_config_schemas import (
     ModelConfigCreateRequest,
     ModelConfigUpdateRequest,
 )
+from .config_effective_policy_schemas import (
+    ConfigDefaultTemplateMappingCreateRequest,
+    ConfigDefaultTemplateMappingUpdateRequest,
+    ConfigEffectiveAgentPolicyCreateRequest,
+    ConfigEffectiveAgentPolicyUpdateRequest,
+    ConfigEffectiveGlobalPolicyCreateRequest,
+    ConfigEffectiveGlobalPolicyUpdateRequest,
+    ConfigEffectiveServicePolicyCreateRequest,
+    ConfigEffectiveServicePolicyUpdateRequest,
+)
+from .template_schemas import ModelTemplateCreateRequest, ModelTemplateUpdateRequest
 from .distributed_service_schemas import (
     AgentServerConfigUpdateRequest,
     InstanceConfigRecord,
@@ -19,6 +30,16 @@ __all__ = [
     "ResourceConfigUpdateRequest",
     "ModelConfigCreateRequest",
     "ModelConfigUpdateRequest",
+    "ModelTemplateCreateRequest",
+    "ModelTemplateUpdateRequest",
+    "ConfigDefaultTemplateMappingCreateRequest",
+    "ConfigDefaultTemplateMappingUpdateRequest",
+    "ConfigEffectiveAgentPolicyCreateRequest",
+    "ConfigEffectiveAgentPolicyUpdateRequest",
+    "ConfigEffectiveGlobalPolicyCreateRequest",
+    "ConfigEffectiveGlobalPolicyUpdateRequest",
+    "ConfigEffectiveServicePolicyCreateRequest",
+    "ConfigEffectiveServicePolicyUpdateRequest",
     "ChannelConfigCreateRequest",
     "ChannelConfigDeactivateRequest",
     "AgentServerConfigUpdateRequest",

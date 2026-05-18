@@ -12,16 +12,44 @@ from pathlib import Path
 from typing import Any
 
 import yaml
-from sqlalchemy.ext.asyncio import AsyncSession
+from openjiuwen_runtime.foundation.db.handler import DBHandler
 
 from jiuwenclaw_manager.config import Settings
-from jiuwenclaw_manager.models.db.instance import InstanceInfo
 from jiuwenclaw_manager.repositories.instance_repo import InstanceRepository, dumps_auth_config
 
 
 def _repo_root() -> Path:
-    # .../claw_manager/src/jiuwenclaw_manager/services/instance_provisioner.py -> repo root
+    # .../claw_manager/src/jiuwenclaw_manager/core/instance_provisioner.py -> repo root
     return Path(__file__).resolve().parents[6]
+
+
+def _resolve_provision_python(repo_root: Path, settings: Settings) -> str:
+    """解析用于拉起 Gateway / AgentServer 的 Python 解释器。
+
+    优先级：``CLAWMANAGER_PROVISION_PYTHON`` > 仓库根 ``.venv`` > 当前进程的 ``sys.executable``。
+    Manager 常在 ``claw_manager/.venv`` 中运行，而 jiuwenclaw 依赖（如 openjiuwen）安装在仓库根 ``.venv``。
+    """
+    if settings.provision_python:
+        explicit = Path(settings.provision_python).expanduser()
+        if not explicit.is_file():
+            raise FileNotFoundError(f"provision_python not found: {explicit}")
+        return str(explicit.resolve())
+
+    if os.name == "nt":
+        venv_candidates = (
+            repo_root / ".venv" / "Scripts" / "python.exe",
+            repo_root / ".venv" / "Scripts" / "python",
+        )
+    else:
+        venv_candidates = (
+            repo_root / ".venv" / "bin" / "python",
+            repo_root / ".venv" / "bin" / "python3",
+        )
+    for candidate in venv_candidates:
+        if candidate.is_file():
+            return str(candidate.resolve())
+
+    return sys.executable
 
 
 def _pick_port() -> int:
@@ -88,7 +116,7 @@ def _child_env_common(
 
 
 async def provision_local_jiuwenclaw(
-    session: AsyncSession,
+    handler: DBHandler,
     settings: Settings,
     *,
     jiuwenclaw_name: str,
@@ -132,32 +160,36 @@ async def provision_local_jiuwenclaw(
     gateway_sid = f"gw-{jiuwenclaw_id}"
     agent_sid = f"as-{jiuwenclaw_id}"
 
-    row = InstanceInfo(
-        jiuwenclaw_id=jiuwenclaw_id,
-        jiuwenclaw_name=jiuwenclaw_name,
-        creator_id=creator_id,
-        description=description,
-        k8s_master_host="local-provision",
-        k8s_auth_type="none",
-        k8s_auth_config=dumps_auth_config({}),
-        k8s_namespace="local",
-        status="active",
-        resource_quota=None,
-        data={
-            "management_api_base": management_api_base,
-            "provision": {
-                "workspace": str(instance_dir),
-                "ports": {"agent_server": agent_port, "web": web_port, "agent_client_rest": rest_port},
+    repo = InstanceRepository(handler)
+    await repo.create(
+        {
+            "jiuwenclaw_id": jiuwenclaw_id,
+            "jiuwenclaw_name": jiuwenclaw_name,
+            "creator_id": creator_id,
+            "description": description,
+            "k8s_master_host": "local-provision",
+            "k8s_auth_type": "none",
+            "k8s_auth_config": dumps_auth_config({}),
+            "k8s_namespace": "local",
+            "status": "active",
+            "resource_quota": None,
+            "data": {
+                "management_api_base": management_api_base,
+                "provision": {
+                    "workspace": str(instance_dir),
+                    "ports": {
+                        "agent_server": agent_port,
+                        "web": web_port,
+                        "agent_client_rest": rest_port,
+                    },
+                },
             },
-        },
-        group_id="default",
-        space_id="default",
+            "group_id": "default",
+            "space_id": "default",
+        }
     )
-    repo = InstanceRepository(session)
-    await repo.create(row)
-    await session.commit()
 
-    py = settings.provision_python or sys.executable
+    py = _resolve_provision_python(repo_root, settings)
     py_path = settings.provision_pythonpath or f"{repo_root}:{repo_root / 'packages'}"
     base_env = _child_env_common(
         settings=settings,
@@ -168,6 +200,8 @@ async def provision_local_jiuwenclaw(
     )
     base_env["PYTHONPATH"] = py_path
     base_env["PYTHONUNBUFFERED"] = "1"
+    base_env["PYTHONUTF8"] = "1"
+    base_env["PYTHONIOENCODING"] = "utf-8"
 
     env_as = dict(base_env)
     env_as["AGENT_SERVER_HOST"] = "127.0.0.1"
@@ -183,44 +217,70 @@ async def provision_local_jiuwenclaw(
     env_gw["JIUWENCLAW_SERVICE_ID"] = gateway_sid
     env_gw["AGENT_CLIENT_REST_ENABLED"] = "true"
 
+    log_dir = instance_dir / "provision_logs"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    log_as = open(  # noqa: SIM115
+        log_dir / "agentserver.log",
+        "a",
+        encoding="utf-8",
+        errors="replace",
+        buffering=1,
+    )
+    log_gw = open(  # noqa: SIM115
+        log_dir / "gateway.log",
+        "a",
+        encoding="utf-8",
+        errors="replace",
+        buffering=1,
+    )
+
     proc_as = subprocess.Popen(
         [py, "-m", "jiuwenclaw.app_agentserver", "--port", str(agent_port)],
         env=env_as,
         cwd=str(repo_root),
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
+        stdout=log_as,
+        stderr=subprocess.STDOUT,
     )
     time.sleep(1.5)
     proc_gw = subprocess.Popen(
         [py, "-m", "jiuwenclaw.app_gateway", "--port", str(web_port), "-u", f"ws://127.0.0.1:{agent_port}"],
         env=env_gw,
         cwd=str(repo_root),
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
+        stdout=log_gw,
+        stderr=subprocess.STDOUT,
     )
 
     full_prov: dict[str, Any] = {
         "workspace": str(instance_dir),
         "ports": {"agent_server": agent_port, "web": web_port, "agent_client_rest": rest_port},
         "pids": {"agentserver": proc_as.pid, "gateway": proc_gw.pid},
+        "python": py,
+        "logs": {
+            "agentserver": str(log_dir / "agentserver.log"),
+            "gateway": str(log_dir / "gateway.log"),
+        },
     }
     await repo.merge_instance_data(jiuwenclaw_id, {"provision": full_prov})
-    await session.commit()
 
     return {
         "jiuwenclaw_id": jiuwenclaw_id,
-        "status": row.status,
+        "status": "active",
         "management_api_base": management_api_base,
         "ports": {"agent_server": agent_port, "web": web_port, "agent_client_rest": rest_port},
         "workspace": str(instance_dir),
         "pids": {"agentserver": proc_as.pid, "gateway": proc_gw.pid},
+        "python": py,
+        "logs": {
+            "agentserver": str(log_dir / "agentserver.log"),
+            "gateway": str(log_dir / "gateway.log"),
+        },
         "rabbitmq_exchange": settings.rabbitmq_exchange,
         "manager_id": settings.manager_id,
     }
 
 
-async def terminate_local_if_present(session: AsyncSession, jiuwenclaw_id: str) -> None:
-    repo = InstanceRepository(session)
+async def terminate_local_if_present(handler: DBHandler, jiuwenclaw_id: str) -> None:
+    repo = InstanceRepository(handler)
     row = await repo.get(jiuwenclaw_id)
     if row is None:
         return

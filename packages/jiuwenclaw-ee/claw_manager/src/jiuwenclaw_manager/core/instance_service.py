@@ -1,4 +1,4 @@
-"""实例域业务逻辑。"""
+﻿"""实例域业务逻辑。"""
 
 from __future__ import annotations
 
@@ -6,9 +6,8 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any
 
-from sqlalchemy.ext.asyncio import AsyncSession
+from openjiuwen_runtime.foundation.db.handler import DBHandler
 
-from jiuwenclaw_manager.models.db.instance import InstanceInfo
 from jiuwenclaw_manager.models.schemas import (
     CreateInstanceBody,
     InstanceDetail,
@@ -29,32 +28,32 @@ def _iso(dt: datetime | None) -> str | None:
 
 
 class InstanceService:
-    def __init__(self, session: AsyncSession) -> None:
-        self._session = session
-        self._repo = InstanceRepository(session)
+    def __init__(self, handler: DBHandler) -> None:
+        self._handler = handler
+        self._repo = InstanceRepository(handler)
 
     async def create(self, body: CreateInstanceBody) -> dict:
         jiuwenclaw_id = f"sp-{uuid.uuid4().hex[:12]}"
         data_dict: dict | None = None
         if body.management_api_base and str(body.management_api_base).strip():
             data_dict = {"management_api_base": str(body.management_api_base).strip().rstrip("/")}
-        row = InstanceInfo(
-            jiuwenclaw_id=jiuwenclaw_id,
-            jiuwenclaw_name=body.jiuwenclaw_name,
-            creator_id=body.creator_id,
-            description=body.description,
-            k8s_master_host=body.k8s_master_host,
-            k8s_auth_type=body.k8s_auth_type,
-            k8s_auth_config=dumps_auth_config(body.k8s_auth_config),
-            k8s_namespace=body.k8s_namespace,
-            status="active",
-            resource_quota=body.resource_quota,
-            data=data_dict,
-            group_id=body.group_id,
-            space_id=body.space_id,
-        )
-        await self._repo.create(row)
-        return {"jiuwenclaw_id": jiuwenclaw_id, "status": row.status}
+        row_data = {
+            "jiuwenclaw_id": jiuwenclaw_id,
+            "jiuwenclaw_name": body.jiuwenclaw_name,
+            "creator_id": body.creator_id,
+            "description": body.description,
+            "k8s_master_host": body.k8s_master_host,
+            "k8s_auth_type": body.k8s_auth_type,
+            "k8s_auth_config": dumps_auth_config(body.k8s_auth_config),
+            "k8s_namespace": body.k8s_namespace,
+            "status": "active",
+            "resource_quota": body.resource_quota,
+            "data": data_dict,
+            "group_id": body.group_id,
+            "space_id": body.space_id,
+        }
+        row = await self._repo.create(row_data)
+        return {"jiuwenclaw_id": jiuwenclaw_id, "status": getattr(row, "status", "active")}
 
     async def list_instances(
         self, *, page: int, page_size: int, status: str | None
@@ -97,13 +96,13 @@ class InstanceService:
         )
 
     async def delete(self, jiuwenclaw_id: str) -> bool:
-        from jiuwenclaw_manager.services.instance_provisioner import terminate_local_if_present
+        from jiuwenclaw_manager.core.instance_provisioner import terminate_local_if_present
 
         row = await self._repo.get(jiuwenclaw_id)
         if row is None:
             return False
-        await terminate_local_if_present(self._session, jiuwenclaw_id)
-        await self._repo.delete(row)
+        await terminate_local_if_present(self._handler, jiuwenclaw_id)
+        await self._repo.delete(jiuwenclaw_id)
         return True
 
     async def services_status(self, jiuwenclaw_id: str) -> ServiceStatusList | None:
@@ -154,18 +153,15 @@ class InstanceService:
         if extra and service_type == "gateway":
             raw_base = extra.get("management_api_base") or extra.get("agent_client_rest_base")
             if isinstance(raw_base, str) and raw_base.strip():
-                inst = await self._repo.get(jiuwenclaw_id)
-                if inst is not None:
-                    md = dict(inst.data or {})
-                    md["management_api_base"] = raw_base.strip().rstrip("/")
-                    inst.data = md
-                    await self._session.flush()
+                await self._repo.merge_instance_data(
+                    jiuwenclaw_id,
+                    {"management_api_base": raw_base.strip().rstrip("/")},
+                )
         return True
 
     async def process_instance_mq_payload(
-            self, payload: dict[str, Any], routing_key: str
+        self, payload: dict[str, Any], routing_key: str
     ) -> None:
-        """处理设计文档 5.2 的 instance.* 事件（RabbitMQ 消息体 + routing_key）。"""
         et = str(payload.get("event_type") or "")
         blob = f"{routing_key} {et}".lower()
         if "heartbeat" in blob:
@@ -175,7 +171,9 @@ class InstanceService:
         elif "online" in blob:
             kind = "online"
         else:
-            raise ValueError(f"unsupported instance event: routing_key={routing_key!r} event_type={et!r}")
+            raise ValueError(
+                f"unsupported instance event: routing_key={routing_key!r} event_type={et!r}"
+            )
 
         jiuwenclaw_id = str(payload.get("jiuwenclaw_id") or "").strip()
         service_id = str(payload.get("service_id") or "").strip()
@@ -207,7 +205,9 @@ class InstanceService:
         if data:
             endpoint = data.get("endpoint") if isinstance(data.get("endpoint"), str) else None
             version = data.get("version") if isinstance(data.get("version"), str) else None
-            capabilities = data.get("capabilities") if isinstance(data.get("capabilities"), dict) else None
+            capabilities = (
+                data.get("capabilities") if isinstance(data.get("capabilities"), dict) else None
+            )
 
         if await self._repo.get(jiuwenclaw_id) is None:
             raise ValueError(f"unknown jiuwenclaw_id={jiuwenclaw_id}")
@@ -218,12 +218,10 @@ class InstanceService:
             )
             return
 
-        # 提前提取条件，避免过多的布尔表达式
         is_heartbeat_or_online = kind in ("heartbeat", "online")
         has_gateway_service = data and service_type == "gateway"
-        has_management_base = (
-                data and
-                (data.get("management_api_base") or data.get("agent_client_rest_base"))
+        has_management_base = data and (
+            data.get("management_api_base") or data.get("agent_client_rest_base")
         )
 
         if is_heartbeat_or_online:
@@ -242,15 +240,15 @@ class InstanceService:
             if has_gateway_service and has_management_base:
                 raw_base = data.get("management_api_base") or data.get("agent_client_rest_base")
                 if isinstance(raw_base, str) and raw_base.strip():
-                    inst = await self._repo.get(jiuwenclaw_id)
-                    if inst is not None:
-                        md = dict(inst.data or {})
-                        md["management_api_base"] = raw_base.strip().rstrip("/")
-                        inst.data = md
-                        await self._session.flush()
+                    await self._repo.merge_instance_data(
+                        jiuwenclaw_id,
+                        {"management_api_base": raw_base.strip().rstrip("/")},
+                    )
             return
 
-    async def patch_instance_data(self, jiuwenclaw_id: str, body: PatchInstanceDataBody) -> InstanceDetail | None:
+    async def patch_instance_data(
+        self, jiuwenclaw_id: str, body: PatchInstanceDataBody
+    ) -> InstanceDetail | None:
         row = await self._repo.merge_instance_data(jiuwenclaw_id, body.data)
         if row is None:
             return None

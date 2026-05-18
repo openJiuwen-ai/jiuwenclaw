@@ -1,36 +1,87 @@
-"""运行时配置（以环境变量为准，与设计文档中的组件选型对齐）。"""
+"""运行时配置（从 .env / 环境变量加载）。"""
 
 from __future__ import annotations
 
+from pathlib import Path
+
+from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+_PKG_ROOT = Path(__file__).resolve().parents[2]
+_ENV_FILE = _PKG_ROOT / ".env"
 
 
 class Settings(BaseSettings):
-    model_config = SettingsConfigDict(env_prefix="CLAWMANAGER_", extra="ignore")
+    model_config = SettingsConfigDict(
+        env_file=str(_ENV_FILE) if _ENV_FILE.is_file() else None,
+        env_file_encoding="utf-8",
+        extra="ignore",
+    )
 
-    host: str = "0.0.0.0"
-    port: int = 8765
-    database_url: str = "sqlite+aiosqlite:///./claw_manager.db"
-    heartbeat_timeout_seconds: int = 30
-    scan_interval_seconds: int = 30
-    rabbitmq_url: str | None = None
-    # 与 Gateway / Agent-Server 发布端约定一致（可用环境变量覆盖）
-    rabbitmq_exchange: str = "jiuwenclaw.events"
-    rabbitmq_routing_key: str = "event.instance.#"
-    rabbitmq_queue_name: str | None = None
-    # 队列名默认 claw_manager_{manager_id}；多副本部署时请为每个进程设置不同 CLAWMANAGER_MANAGER_ID
-    manager_id: str = "default"
-    # 调用组网内 agent_client REST（extensions.agent_client 挂载的 /api/v1/instances/*）
-    upstream_http_timeout_seconds: float = 60.0
-    upstream_api_key: str | None = None
-    # --- 本地拉起 Gateway + AgentServer（仅开发/联调；需显式开启）---
-    allow_local_provision: bool = False
-    provision_workspace_root: str = ".claw_provisioned_instances"
-    provision_python: str | None = None
-    provision_pythonpath: str | None = None
-    provision_repo_root: str | None = None
-    provision_extension_dirs: str | None = None
-    instance_config_template: str | None = None
+    rest_host: str = Field(default="0.0.0.0", validation_alias="CLAW_MANAGER_REST_HOST")
+    rest_port: int = Field(default=8765, validation_alias="CLAW_MANAGER_REST_PORT")
+
+    db_type: str = Field(default="sqlite", validation_alias="CLAW_MANAGER_DB_TYPE")
+    sqlite_path: str = Field(default="claw_manager.db", validation_alias="CLAW_MANAGER_SQLITE_PATH")
+    db_host: str = Field(default="127.0.0.1", validation_alias="CLAW_MANAGER_DB_HOST")
+    db_port: int = Field(default=3306, validation_alias="CLAW_MANAGER_DB_PORT")
+    db_user: str = Field(default="root", validation_alias="CLAW_MANAGER_DB_USER")
+    db_password: str = Field(default="root", validation_alias="CLAW_MANAGER_DB_PASSWORD")
+    db_name: str = Field(default="claw_manager", validation_alias="CLAW_MANAGER_DB_NAME")
+
+    heartbeat_timeout_seconds: int = Field(
+        default=30, validation_alias="CLAWMANAGER_HEARTBEAT_TIMEOUT_SECONDS"
+    )
+    scan_interval_seconds: int = Field(
+        default=30, validation_alias="CLAWMANAGER_SCAN_INTERVAL_SECONDS"
+    )
+    rabbitmq_url: str | None = Field(default=None, validation_alias="CLAWMANAGER_RABBITMQ_URL")
+    rabbitmq_exchange: str = Field(
+        default="jiuwenclaw.events", validation_alias="CLAWMANAGER_RABBITMQ_EXCHANGE"
+    )
+    rabbitmq_routing_key: str = Field(
+        default="event.instance.#", validation_alias="CLAWMANAGER_RABBITMQ_ROUTING_KEY"
+    )
+    rabbitmq_queue_name: str | None = Field(
+        default=None, validation_alias="CLAWMANAGER_RABBITMQ_QUEUE_NAME"
+    )
+    manager_id: str = Field(default="default", validation_alias="CLAWMANAGER_MANAGER_ID")
+    upstream_http_timeout_seconds: float = Field(
+        default=60.0, validation_alias="CLAWMANAGER_UPSTREAM_HTTP_TIMEOUT_SECONDS"
+    )
+    upstream_api_key: str | None = Field(
+        default=None, validation_alias="CLAWMANAGER_UPSTREAM_API_KEY"
+    )
+    allow_local_provision: bool = Field(
+        default=False, validation_alias="CLAWMANAGER_ALLOW_LOCAL_PROVISION"
+    )
+    provision_workspace_root: str = Field(
+        default=".claw_provisioned_instances",
+        validation_alias="CLAWMANAGER_PROVISION_WORKSPACE_ROOT",
+    )
+    provision_python: str | None = Field(
+        default=None, validation_alias="CLAWMANAGER_PROVISION_PYTHON"
+    )
+    provision_pythonpath: str | None = Field(
+        default=None, validation_alias="CLAWMANAGER_PROVISION_PYTHONPATH"
+    )
+    provision_repo_root: str | None = Field(
+        default=None, validation_alias="CLAWMANAGER_PROVISION_REPO_ROOT"
+    )
+    provision_extension_dirs: str | None = Field(
+        default=None, validation_alias="CLAWMANAGER_PROVISION_EXTENSION_DIRS"
+    )
+    instance_config_template: str | None = Field(
+        default=None, validation_alias="CLAWMANAGER_INSTANCE_CONFIG_TEMPLATE"
+    )
+
+    @property
+    def host(self) -> str:
+        return self.rest_host
+
+    @property
+    def port(self) -> int:
+        return self.rest_port
 
 
 settings = Settings()

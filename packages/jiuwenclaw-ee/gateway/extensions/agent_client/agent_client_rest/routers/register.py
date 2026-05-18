@@ -5,6 +5,8 @@ from fastapi import APIRouter, FastAPI
 from .application_config import application_config_router
 from .distributed_service import distributed_service_router
 from .physical_resource import physical_resource_router
+from .config_effective_policy import config_effective_policy_router
+from .template import template_router
 
 api_router = APIRouter()
 
@@ -25,6 +27,16 @@ def router_register(app: FastAPI) -> None:
         application_config_router,
         prefix="",
         tags=["Application Config"],
+    )
+    v1_router.include_router(
+        template_router,
+        prefix="",
+        tags=["Model Templates"],
+    )
+    v1_router.include_router(
+        config_effective_policy_router,
+        prefix="",
+        tags=["Config Effective Policy"],
     )
 
     @api_router.get("/health", tags=["System"])

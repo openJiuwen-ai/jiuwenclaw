@@ -17,6 +17,7 @@ import asyncio
 import json
 import logging
 import os
+import sys
 import inspect
 import time
 import uuid as uuid_module
@@ -47,6 +48,13 @@ from jiuwenclaw.extensions.extension_config_sync import decrypt_extensions_sensi
 from jiuwenclaw.local_env_config import decrypt
 
 apply_openai_model_client_patch()
+
+for _stream in (sys.stdout, sys.stderr):
+    if hasattr(_stream, "reconfigure"):
+        try:
+            _stream.reconfigure(encoding="utf-8", errors="replace")
+        except Exception:
+            pass
 
 # Ensure workspace initialized
 _workspace_dir = get_user_workspace_dir()

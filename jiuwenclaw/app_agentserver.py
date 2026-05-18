@@ -15,6 +15,7 @@ import argparse
 import asyncio
 import logging
 import os
+import sys
 
 from dotenv import load_dotenv
 from openjiuwen.core.common.logging import LogManager
@@ -40,6 +41,13 @@ from jiuwenclaw.utils import (
 )
 
 apply_openai_model_client_patch()
+
+for _stream in (sys.stdout, sys.stderr):
+    if hasattr(_stream, "reconfigure"):
+        try:
+            _stream.reconfigure(encoding="utf-8", errors="replace")
+        except Exception:
+            pass
 
 # Ensure workspace initialized
 _workspace_dir = get_user_workspace_dir()

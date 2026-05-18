@@ -21,6 +21,17 @@ from .physical_resource_models import (
     RESOURCE_CONFIG_TABLE_DEF,
     ResourceConfigInfo,
 )
+from .config_effective_policy_models import (
+    CONFIG_DEFAULT_TEMPLATE_MAPPING_TABLE_DEF,
+    CONFIG_EFFECTIVE_AGENT_POLICY_TABLE_DEF,
+    CONFIG_EFFECTIVE_GLOBAL_POLICY_TABLE_DEF,
+    CONFIG_EFFECTIVE_SERVICE_POLICY_TABLE_DEF,
+    ConfigDefaultTemplateMappingInfo,
+    ConfigEffectiveAgentPolicyInfo,
+    ConfigEffectiveGlobalPolicyInfo,
+    ConfigEffectiveServicePolicyInfo,
+)
+from .template_models import MODEL_TEMPLATE_TABLE_DEF, ModelTemplateInfo
 from .table_init import ALL_TABLE_DEFINITIONS, init_all_tables
 
 __all__ = [
@@ -33,6 +44,16 @@ __all__ = [
     "init_all_tables",
     "MODEL_CONFIG_TABLE_DEF",
     "ModelConfigInfo",
+    "CONFIG_DEFAULT_TEMPLATE_MAPPING_TABLE_DEF",
+    "CONFIG_EFFECTIVE_GLOBAL_POLICY_TABLE_DEF",
+    "CONFIG_EFFECTIVE_SERVICE_POLICY_TABLE_DEF",
+    "CONFIG_EFFECTIVE_AGENT_POLICY_TABLE_DEF",
+    "ConfigDefaultTemplateMappingInfo",
+    "ConfigEffectiveGlobalPolicyInfo",
+    "ConfigEffectiveServicePolicyInfo",
+    "ConfigEffectiveAgentPolicyInfo",
+    "MODEL_TEMPLATE_TABLE_DEF",
+    "ModelTemplateInfo",
     "RESOURCE_CONFIG_TABLE_DEF",
     "ResourceConfigInfo",
     "SERVICE_STATUS_VIEW_TABLE_DEF",

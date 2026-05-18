@@ -1,4 +1,4 @@
-"""实例管理 API（路径与设计文档 4.1 对齐）。"""
+﻿"""实例管理 API（路径与设计文档 4.1 对齐）。"""
 
 from __future__ import annotations
 
@@ -6,9 +6,9 @@ from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
-from sqlalchemy.ext.asyncio import AsyncSession
+from openjiuwen_runtime.foundation.db.handler import DBHandler
 
-from jiuwenclaw_manager.api.deps import get_db
+from jiuwenclaw_manager.routers.deps import get_db_handler
 from jiuwenclaw_manager.config import settings
 from jiuwenclaw_manager.models.schemas import (
     ApiResponse,
@@ -16,10 +16,10 @@ from jiuwenclaw_manager.models.schemas import (
     PatchInstanceDataBody,
     ProvisionLocalInstanceBody,
 )
-from jiuwenclaw_manager.services.instance_provisioner import provision_local_jiuwenclaw
-from jiuwenclaw_manager.services.instance_service import InstanceService
+from jiuwenclaw_manager.core.instance_provisioner import provision_local_jiuwenclaw
+from jiuwenclaw_manager.core.instance_service import InstanceService
 
-router = APIRouter(prefix="/instances", tags=["instances"])
+router = APIRouter(prefix="/instances")
 
 
 class HeartbeatIngestBody(BaseModel):
@@ -35,18 +35,18 @@ class HeartbeatIngestBody(BaseModel):
     data: dict[str, Any] | None = None
 
 
-def _svc(session: AsyncSession) -> InstanceService:
-    return InstanceService(session)
+def _svc(handler: DBHandler) -> InstanceService:
+    return InstanceService(handler)
 
 
 @router.post("/provision-local", response_model=ApiResponse)
 async def provision_local_instance(
     body: ProvisionLocalInstanceBody,
-    session: Annotated[AsyncSession, Depends(get_db)],
+    handler: Annotated[DBHandler, Depends(get_db_handler)],
 ):
     try:
         data = await provision_local_jiuwenclaw(
-            session,
+            handler,
             settings,
             jiuwenclaw_name=body.jiuwenclaw_name,
             creator_id=body.creator_id,
@@ -64,21 +64,21 @@ async def provision_local_instance(
 @router.post("", response_model=ApiResponse)
 async def create_instance(
     body: CreateInstanceBody,
-    session: Annotated[AsyncSession, Depends(get_db)],
+    handler: Annotated[DBHandler, Depends(get_db_handler)],
 ):
-    svc = _svc(session)
+    svc = _svc(handler)
     data = await svc.create(body)
     return ApiResponse(data=data)
 
 
 @router.get("", response_model=ApiResponse)
 async def list_instances(
-    session: Annotated[AsyncSession, Depends(get_db)],
+    handler: Annotated[DBHandler, Depends(get_db_handler)],
     page: int = Query(1, ge=1),
     page_size: int = Query(20, ge=1, le=200),
     status: str | None = None,
 ):
-    svc = _svc(session)
+    svc = _svc(handler)
     data = await svc.list_instances(page=page, page_size=page_size, status=status)
     return ApiResponse(data=data)
 
@@ -87,9 +87,9 @@ async def list_instances(
 async def patch_instance(
     jiuwenclaw_id: str,
     body: PatchInstanceDataBody,
-    session: Annotated[AsyncSession, Depends(get_db)],
+    handler: Annotated[DBHandler, Depends(get_db_handler)],
 ):
-    svc = _svc(session)
+    svc = _svc(handler)
     row = await svc.patch_instance_data(jiuwenclaw_id, body)
     if row is None:
         raise HTTPException(status_code=404, detail="instance not found")
@@ -97,8 +97,10 @@ async def patch_instance(
 
 
 @router.get("/{jiuwenclaw_id}", response_model=ApiResponse)
-async def get_instance(jiuwenclaw_id: str, session: Annotated[AsyncSession, Depends(get_db)]):
-    svc = _svc(session)
+async def get_instance(
+    jiuwenclaw_id: str, handler: Annotated[DBHandler, Depends(get_db_handler)]
+):
+    svc = _svc(handler)
     row = await svc.get(jiuwenclaw_id)
     if row is None:
         raise HTTPException(status_code=404, detail="instance not found")
@@ -108,11 +110,11 @@ async def get_instance(jiuwenclaw_id: str, session: Annotated[AsyncSession, Depe
 @router.delete("/{jiuwenclaw_id}", response_model=ApiResponse)
 async def delete_instance(
     jiuwenclaw_id: str,
-    session: Annotated[AsyncSession, Depends(get_db)],
+    handler: Annotated[DBHandler, Depends(get_db_handler)],
     force: bool = Query(False),
 ):
     _ = force  # 预留：后续对接 K8S 强制回收等
-    svc = _svc(session)
+    svc = _svc(handler)
     ok = await svc.delete(jiuwenclaw_id)
     if not ok:
         raise HTTPException(status_code=404, detail="instance not found")
@@ -120,8 +122,10 @@ async def delete_instance(
 
 
 @router.get("/{jiuwenclaw_id}/services/status", response_model=ApiResponse)
-async def services_status(jiuwenclaw_id: str, session: Annotated[AsyncSession, Depends(get_db)]):
-    svc = _svc(session)
+async def services_status(
+    jiuwenclaw_id: str, handler: Annotated[DBHandler, Depends(get_db_handler)]
+):
+    svc = _svc(handler)
     data = await svc.services_status(jiuwenclaw_id)
     if data is None:
         raise HTTPException(status_code=404, detail="instance not found")
@@ -132,9 +136,9 @@ async def services_status(jiuwenclaw_id: str, session: Annotated[AsyncSession, D
 async def ingest_heartbeat(
     jiuwenclaw_id: str,
     body: HeartbeatIngestBody,
-    session: Annotated[AsyncSession, Depends(get_db)],
+    handler: Annotated[DBHandler, Depends(get_db_handler)],
 ):
-    svc = _svc(session)
+    svc = _svc(handler)
     ok = await svc.apply_heartbeat(
         jiuwenclaw_id=jiuwenclaw_id,
         service_id=body.service_id,

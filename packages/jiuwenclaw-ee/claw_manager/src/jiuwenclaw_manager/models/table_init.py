@@ -1,0 +1,30 @@
+"""Claw Manager 库表初始化（幂等）。"""
+
+from __future__ import annotations
+
+from openjiuwen_runtime.foundation.db.handler import DBHandler
+
+from jiuwenclaw_manager.models.table_defs import (
+    CONFIG_DEFAULT_TEMPLATE_MAPPING_TABLE_DEF,
+    CONFIG_EFFECTIVE_AGENT_POLICY_TABLE_DEF,
+    CONFIG_EFFECTIVE_GLOBAL_POLICY_TABLE_DEF,
+    CONFIG_EFFECTIVE_SERVICE_POLICY_TABLE_DEF,
+    INSTANCE_INFO_TABLE_DEF,
+    MODEL_TEMPLATE_TABLE_DEF,
+    SERVICE_INSTANCE_TABLE_DEF,
+)
+
+ALL_TABLE_DEFINITIONS = (
+    INSTANCE_INFO_TABLE_DEF,
+    SERVICE_INSTANCE_TABLE_DEF,
+    MODEL_TEMPLATE_TABLE_DEF,
+    CONFIG_DEFAULT_TEMPLATE_MAPPING_TABLE_DEF,
+    CONFIG_EFFECTIVE_GLOBAL_POLICY_TABLE_DEF,
+    CONFIG_EFFECTIVE_SERVICE_POLICY_TABLE_DEF,
+    CONFIG_EFFECTIVE_AGENT_POLICY_TABLE_DEF,
+)
+
+
+async def init_all_tables(handler: DBHandler) -> None:
+    for table_def in ALL_TABLE_DEFINITIONS:
+        await handler.init_table(table_def)
