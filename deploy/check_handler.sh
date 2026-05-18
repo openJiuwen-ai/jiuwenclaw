@@ -194,7 +194,31 @@ check_web_up_dependency(){
 }
 
 check_rabbitmq_up_dependency(){
+    local rabbit_path=${DEPLOY_VARS["RABBITMQ_PATH"]}
+    local nfs_dname=${DEPLOY_VARS["NFS_NAME"]}
+
     check_if_nfs_up
+
+    info "Preparing RabbitMQ data directory: ${rabbit_path}"
+    local nfs_pod=$(kubectl get pods -n default -l app=${nfs_dname} -o jsonpath='{.items[0].metadata.name}')
+
+    info "Executing: kubectl exec ${nfs_pod} -- sh -c \"mkdir -p ${rabbit_path}\""
+    kubectl exec ${nfs_pod} -- sh -c "mkdir -p ${rabbit_path}"
+    success "RabbitMQ directory created successfully in NFS Pod!"
+}
+
+check_mysql_up_dependency(){
+    local mysql_path=${DEPLOY_VARS["MYSQL_PATH"]}
+    local nfs_dname=${DEPLOY_VARS["NFS_NAME"]}
+
+    check_if_nfs_up
+
+    info "Preparing MySQL data directory: ${mysql_path}"
+    local nfs_pod=$(kubectl get pods -n default -l app=${nfs_dname} -o jsonpath='{.items[0].metadata.name}')
+
+    info "Executing: kubectl exec ${nfs_pod} -- sh -c \"mkdir -p ${mysql_path}\""
+    kubectl exec ${nfs_pod} -- sh -c "mkdir -p ${mysql_path}"
+    success "MySQL directory created successfully in NFS Pod!"
 }
 
 check_manager_up_dependency(){

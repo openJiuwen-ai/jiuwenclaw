@@ -36,17 +36,20 @@ GATEWAY_DEPLOYMENT_FILE="${SCRIPT_DIR}/conf/gateway-deployment.yaml"
 GATEWAY_SERVICE_TEMPLATE_FILE="${SCRIPT_DIR}/conf/gateway-service.template.yaml"
 GATEWAY_SERVICE_FILE="${SCRIPT_DIR}/conf/gateway-service.yaml"
 
-WEB_TEMPLATE_FILE="${SCRIPT_DIR}/conf/web.template.yaml"
-WEB_FILE="${SCRIPT_DIR}/conf/web.yaml"
+NFS_SERVER_TEMPLATE_FILE="${SCRIPT_DIR}/conf/nfs-server.template.yaml"
+NFS_SERVER_FILE="${SCRIPT_DIR}/conf/nfs-server.yaml"
 
 RABBITMQ_TEMPLATE_FILE="${SCRIPT_DIR}/conf/rabbitmq.template.yaml"
 RABBITMQ_FILE="${SCRIPT_DIR}/conf/rabbitmq.yaml"
 
+MYSQL_TEMPLATE_FILE="${SCRIPT_DIR}/conf/mysql.template.yaml"
+MYSQL_FILE="${SCRIPT_DIR}/conf/mysql.yaml"
+
+WEB_TEMPLATE_FILE="${SCRIPT_DIR}/conf/web.template.yaml"
+WEB_FILE="${SCRIPT_DIR}/conf/web.yaml"
+
 MANAGER_TEMPLATE_FILE="${SCRIPT_DIR}/conf/manager.template.yaml"
 MANAGER_FILE="${SCRIPT_DIR}/conf/manager.yaml"
-
-NFS_SERVER_TEMPLATE_FILE="${SCRIPT_DIR}/conf/nfs-server.template.yaml"
-NFS_SERVER_FILE="${SCRIPT_DIR}/conf/nfs-server.yaml"
 
 PV_TEMPLATE_FILE="${SCRIPT_DIR}/conf/pv-nfs.template.yaml"
 PV_FILE="${SCRIPT_DIR}/conf/pv-nfs.yaml"
@@ -62,7 +65,7 @@ CMD=""
 
 # ==== All available modules ====
 #declare -ga ALL_MODULES=("NFS" "RABBITMQ" "YR_CLAW" "GATEWAY" "WEB" "MANAGER")
-declare -ga ALL_MODULES=("NFS" "RABBITMQ" "GATEWAY" "WEB" "MANAGER")
+declare -ga ALL_MODULES=("NFS" "RABBITMQ" "MYSQL" "GATEWAY" "WEB" "MANAGER")
 
 declare -ga MODULES=()
 
@@ -94,8 +97,11 @@ declare -A DEPLOY_VARS=(
     ["RABBITMQ_PATH"]="/exports/rabbitmq"
     ["RABBITMQ_USER"]="admin"
     ["RABBITMQ_PASSWORD"]="Rabbitmq@123"
+    ["MYSQL_NAME"]="mysql"
+    ["MYSQL_IMAGE"]="mysql:8.0"
+    ["MYSQL_PATH"]="/exports/mysql"
+    ["MYSQL_ROOT_PASSWORD"]="Root@123456"
     ["MANAGER_NAME"]="jiuwenclaw-manager"
-
 )
 
 declare -A OYR_COMPONENTS=(
