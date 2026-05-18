@@ -35,6 +35,8 @@ _CHARSET_META_RE = re.compile(
     rb"""<meta[^>]+charset=["']?\s*([A-Za-z0-9._-]+)""",
     flags=re.IGNORECASE,
 )
+_USER_ERROR_MAX_CHARS = 200
+_BRIEF_MSG_MAX_CHARS = 72
 
 
 def _extract_declared_charset(response: requests.Response) -> str:
@@ -95,12 +97,140 @@ def _decode_response_text(response: requests.Response) -> str:
     return raw.decode("utf-8", errors="replace")
 
 
+def _response_body_preview(response: requests.Response, limit: int = 300) -> str:
+    try:
+        text = _decode_response_text(response)
+    except Exception:
+        text = (response.content or b"")[:limit].decode("utf-8", errors="replace")
+    text = re.sub(r"\s+", " ", (text or "")).strip()
+    if len(text) > limit:
+        return f"{text[:limit]}...[truncated]"
+    return text or "(empty body)"
+
+
+def _clip_user_text(text: str, max_len: int = _USER_ERROR_MAX_CHARS) -> str:
+    text = re.sub(r"\s+", " ", (text or "")).strip()
+    if len(text) <= max_len:
+        return text
+    return f"{text[: max_len - 3]}..."
+
+
+def _clip_brief_detail(text: str, max_len: int = _BRIEF_MSG_MAX_CHARS) -> str:
+    text = re.sub(r"\s+", " ", (text or "")).strip()
+    if len(text) <= max_len:
+        return text
+    return f"{text[: max_len - 3]}..."
+
+
+def _http_status_label(response: requests.Response) -> str:
+    label = f"HTTP {response.status_code}"
+    reason = (response.reason or "").strip()
+    if reason:
+        label = f"{label} {reason}"
+    return label
+
+
+def _brief_fetch_failure(
+    provider: str,
+    *,
+    exc: BaseException | None = None,
+    response: requests.Response | None = None,
+    note: str | None = None,
+) -> str:
+    """Short summary for tool/frontend responses (per-item, before combine)."""
+    if response is not None and response.status_code:
+        if note and "empty" in note.lower():
+            return f"{provider}: {_http_status_label(response)}, empty page"
+        return f"{provider}: {_http_status_label(response)}"
+    if isinstance(exc, requests.exceptions.Timeout):
+        return f"{provider}: request timed out"
+    if isinstance(exc, requests.exceptions.SSLError):
+        detail = _clip_brief_detail(str(exc))
+        return (
+            f"{provider}: SSL error ({detail})"
+            if detail
+            else f"{provider}: SSL error"
+        )
+    if isinstance(exc, requests.exceptions.ConnectionError):
+        detail = _clip_brief_detail(str(exc))
+        return (
+            f"{provider}: connection failed ({detail})"
+            if detail
+            else f"{provider}: connection failed"
+        )
+    if isinstance(exc, requests.exceptions.ProxyError):
+        return f"{provider}: proxy error"
+    if note and "empty" in note.lower():
+        return f"{provider}: empty page"
+    if note and "timed out" in note.lower():
+        return f"{provider}: timed out"
+    if exc is not None:
+        resp = getattr(exc, "response", None)
+        if isinstance(resp, requests.Response) and resp.status_code:
+            return f"{provider}: {_http_status_label(resp)}"
+        detail = _clip_brief_detail(str(exc))
+        name = type(exc).__name__
+        return (
+            f"{provider}: {name} ({detail})" if detail else f"{provider}: {name}"
+        )
+    return f"{provider}: failed"
+
+
+def _combine_brief_failures(
+    failures: list[str], max_len: int = _USER_ERROR_MAX_CHARS
+) -> str:
+    text = "; ".join(dict.fromkeys(f for f in failures if f))
+    if not text:
+        return "all methods failed"
+    return _clip_user_text(text, max_len)
+
+
+def _format_fetch_failure(
+    provider: str,
+    url: str,
+    *,
+    exc: BaseException | None = None,
+    response: requests.Response | None = None,
+    note: str | None = None,
+) -> str:
+    """Build a single-line diagnostic string for server logs."""
+    parts: list[str] = [f"provider={provider}", f"url={url}"]
+    if note:
+        parts.append(f"note={note}")
+    if response is not None:
+        parts.append(f"status_code={response.status_code}")
+        if response.reason:
+            parts.append(f"reason={response.reason}")
+        final_url = response.url or url
+        if final_url != url:
+            parts.append(f"final_url={final_url}")
+        content_type = response.headers.get("Content-Type")
+        if content_type:
+            parts.append(f"content_type={content_type}")
+        if response.status_code >= 400 or note:
+            parts.append(f"body_preview={_response_body_preview(response)!r}")
+    if exc is not None:
+        parts.append(f"error_type={type(exc).__name__}")
+        parts.append(f"error={exc}")
+        resp = getattr(exc, "response", None)
+        if resp is not None and resp is not response:
+            parts.append(f"status_code={resp.status_code}")
+            if resp.reason:
+                parts.append(f"reason={resp.reason}")
+            parts.append(f"body_preview={_response_body_preview(resp)!r}")
+    return "; ".join(parts)
+
+
 def _http_get(url: str, **kwargs) -> requests.Response:
     """Try normal requests first; retry without env proxies on ProxyError."""
     kwargs.setdefault("verify", get_requests_verify())
     try:
         return requests.get(url, **kwargs)
-    except requests.exceptions.ProxyError:
+    except requests.exceptions.ProxyError as exc:
+        logger.warning(
+            "HTTP request hit ProxyError, retrying without env proxies: %s",
+            _format_fetch_failure("http", url, exc=exc),
+        )
         with requests.Session() as session:
             session.trust_env = False
             return session.get(url, **kwargs)
@@ -230,19 +360,43 @@ def _extract_content_with_trafilatura(
     return text, ""
 
 
-def _fetch_direct_sync(url: str, timeout_seconds: int) -> dict[str, Any] | None:
+def _fetch_direct_sync(
+    url: str, timeout_seconds: int
+) -> tuple[dict[str, Any] | None, str | None]:
     """Direct HTTP request with content extraction."""
     try:
         response = _http_get(url, headers=_REQUEST_HEADERS, timeout=timeout_seconds)
 
         if response.status_code >= 400:
-            return None
+            logger.warning(
+                "Direct webpage fetch failed: %s",
+                _format_fetch_failure(
+                    "direct",
+                    url,
+                    response=response,
+                    note="HTTP status indicates failure",
+                ),
+            )
+            return None, _brief_fetch_failure("direct", response=response)
 
         response.raise_for_status()
 
         html = _decode_response_text(response)
         content_type = response.headers.get("Content-Type", "")
         content, title = _extract_content_with_trafilatura(html, url, content_type)
+        if not (content or "").strip():
+            logger.warning(
+                "Direct webpage fetch failed: %s",
+                _format_fetch_failure(
+                    "direct",
+                    url,
+                    response=response,
+                    note="response OK but extracted content is empty",
+                ),
+            )
+            return None, _brief_fetch_failure(
+                "direct", response=response, note="empty content"
+            )
 
         return {
             "url": response.url or url,
@@ -250,22 +404,53 @@ def _fetch_direct_sync(url: str, timeout_seconds: int) -> dict[str, Any] | None:
             "title": title,
             "content": content,
             "provider": "direct",
-        }
-    except Exception:
-        logger.warning("Direct webpage fetch failed", exc_info=True)
-        return None
+        }, None
+    except Exception as exc:
+        response = getattr(exc, "response", None)
+        resp = response if isinstance(response, requests.Response) else None
+        logger.warning(
+            "Direct webpage fetch failed: %s",
+            _format_fetch_failure("direct", url, exc=exc, response=resp),
+            exc_info=True,
+        )
+        return None, _brief_fetch_failure("direct", exc=exc, response=resp)
 
 
-def _fetch_via_jina_sync(url: str, timeout_seconds: int) -> dict[str, Any] | None:
+def _fetch_via_jina_sync(
+    url: str, timeout_seconds: int
+) -> tuple[dict[str, Any] | None, str | None]:
     """Fetch via Jina Reader proxy."""
+    reader_url = f"https://r.jina.ai/{url}"
     try:
-        reader_url = f"https://r.jina.ai/{url}"
         response = _http_get(
             reader_url, headers=_REQUEST_HEADERS, timeout=timeout_seconds
         )
+        if response.status_code >= 400:
+            logger.warning(
+                "Jina proxy webpage fetch failed: %s",
+                _format_fetch_failure(
+                    "jina",
+                    reader_url,
+                    response=response,
+                    note=f"upstream_url={url}",
+                ),
+            )
+            return None, _brief_fetch_failure("jina", response=response)
+
         response.raise_for_status()
 
         content = _decode_response_text(response).strip()
+        if not content:
+            logger.warning(
+                "Jina proxy webpage fetch failed: %s",
+                _format_fetch_failure(
+                    "jina",
+                    reader_url,
+                    response=response,
+                    note=f"upstream_url={url}; empty body from Jina",
+                ),
+            )
+            return None, _brief_fetch_failure("jina", response=response, note="empty")
 
         title = ""
         title_match = re.search(r"^#\s+(.+)$", content, flags=re.MULTILINE)
@@ -274,14 +459,26 @@ def _fetch_via_jina_sync(url: str, timeout_seconds: int) -> dict[str, Any] | Non
 
         return {
             "url": url,
-            "status_code": 200,
+            "status_code": response.status_code,
             "title": title,
             "content": content,
             "provider": "jina",
-        }
-    except Exception:
-        logger.warning("Jina proxy webpage fetch failed", exc_info=True)
-        return None
+        }, None
+    except Exception as exc:
+        response = getattr(exc, "response", None)
+        resp = response if isinstance(response, requests.Response) else None
+        logger.warning(
+            "Jina proxy webpage fetch failed: %s",
+            _format_fetch_failure(
+                "jina",
+                reader_url,
+                exc=exc,
+                response=resp,
+                note=f"upstream_url={url}",
+            ),
+            exc_info=True,
+        )
+        return None, _brief_fetch_failure("jina", exc=exc, response=resp)
 
 
 async def _fetch_webpage_async(
@@ -296,11 +493,19 @@ async def _fetch_webpage_async(
       - If direct succeeded: wait for jina up to 3s, use jina if available, else direct
     """
 
+    failures: list[str] = []
+
     async def fetch_direct():
-        return await asyncio.to_thread(_fetch_direct_sync, url, timeout_seconds)
+        result, err = await asyncio.to_thread(_fetch_direct_sync, url, timeout_seconds)
+        if err:
+            failures.append(err)
+        return result
 
     async def fetch_jina():
-        return await asyncio.to_thread(_fetch_via_jina_sync, url, timeout_seconds)
+        result, err = await asyncio.to_thread(_fetch_via_jina_sync, url, timeout_seconds)
+        if err:
+            failures.append(err)
+        return result
 
     direct_task = asyncio.create_task(fetch_direct())
     jina_task = asyncio.create_task(fetch_jina())
@@ -308,6 +513,7 @@ async def _fetch_webpage_async(
     pending = {direct_task, jina_task}
     direct_result = None
     jina_result = None
+    timed_out = False
 
     try:
         async with asyncio.timeout(overall_timeout):
@@ -336,16 +542,31 @@ async def _fetch_webpage_async(
                                 if jina_result and jina_result.get("content"):
                                     return jina_result
                         except asyncio.TimeoutError:
-                            pass
+                            failures.append("jina: timed out")
 
                         return direct_result
 
     except asyncio.TimeoutError:
-        pass
-    except Exception:
+        timed_out = True
+        failures.append("fetch: timed out")
         logger.warning(
-            "Concurrent webpage fetch failed unexpectedly", exc_info=True
+            "Concurrent webpage fetch timed out: url=%s overall_timeout=%ss timeout_seconds=%ss",
+            url,
+            overall_timeout,
+            timeout_seconds,
         )
+    except Exception as exc:
+        logger.warning(
+            "Concurrent webpage fetch failed unexpectedly: %s",
+            _format_fetch_failure(
+                "concurrent",
+                url,
+                exc=exc,
+                note="unexpected error in fetch coordinator",
+            ),
+            exc_info=True,
+        )
+        failures.append(_brief_fetch_failure("fetch", exc=exc))
     finally:
         for t in [direct_task, jina_task]:
             if not t.done():
@@ -356,7 +577,26 @@ async def _fetch_webpage_async(
     if direct_result and direct_result.get("content"):
         return direct_result
 
-    raise RuntimeError("All fetch methods failed to return content")
+    if timed_out:
+        for t, name in ((direct_task, "direct"), (jina_task, "jina")):
+            if t.done() and not t.cancelled():
+                try:
+                    t.result()
+                except Exception as exc:
+                    logger.warning(
+                        "Webpage fetch task failed after overall timeout (%s): %s",
+                        name,
+                        _format_fetch_failure(
+                            name,
+                            url,
+                            exc=exc,
+                            note="task raised after overall timeout",
+                        ),
+                        exc_info=True,
+                    )
+                    failures.append(_brief_fetch_failure(name, exc=exc))
+
+    raise RuntimeError(_combine_brief_failures(failures))
 
 
 @tool(
@@ -404,7 +644,16 @@ async def mcp_fetch_webpage(
     try:
         data = await _fetch_webpage_async(url, timeout_seconds, overall_timeout)
     except Exception as exc:
-        return f"[ERROR]: failed to fetch webpage: {exc}"
+        logger.error(
+            "mcp_fetch_webpage failed for url=%s (timeout_seconds=%s, overall_timeout=%s): %s",
+            url,
+            timeout_seconds,
+            overall_timeout,
+            exc,
+            exc_info=True,
+        )
+        reason = _clip_user_text(str(exc).strip() or "unknown error")
+        return _clip_user_text(f"[ERROR]: fetch failed ({reason})")
 
     lines = [
         f"URL: {data.get('url', url)}",
