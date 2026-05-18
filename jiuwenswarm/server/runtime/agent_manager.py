@@ -714,7 +714,8 @@ class AgentManager:
             channel_id: str = "",
             mode: str = "agent",
             project_dir: str = None,
-            sub_mode: str = None
+            sub_mode: str = None,
+            request: Any | None = None,
     ) -> "JiuWenSwarm | None":
         """获取 Agent 实例（自动创建）.
 
@@ -725,6 +726,7 @@ class AgentManager:
             mode: 每个模式对应的实例
             project_dir: user project dir (e.g. trusted_dirs[0])
             sub_mode: 子模式
+            request: 可选 AgentRequest，企业版用于模型策略 routing 上下文
 
         Returns:
             JiuWenSwarm | None: Agent 实例
@@ -752,6 +754,25 @@ class AgentManager:
                     **config,
                     **_build_acp_agent_config()
                 }
+            # 企业版：创建 agent 时附带请求级 routing，供模型策略预下发
+            if request is not None and os.getenv("AGENT_RUNTIME", "").strip():
+                try:
+                    from jiuwenswarm.server.runtime.enterprise_config import (
+                        enterprise_policy_enabled,
+                        routing_context_from_request,
+                    )
+
+                    if enterprise_policy_enabled():
+                        config = {
+                            **config,
+                            "enterprise_routing": routing_context_from_request(
+                                request
+                            ).as_dict(),
+                        }
+                except Exception as exc:
+                    logger.warning(
+                        "[AgentManager] enterprise routing context skipped: %s", exc
+                    )
             agent = await self._create_agent(
                 channel_key,
                 mode_key,
@@ -1168,6 +1189,7 @@ class AgentManager:
                 channel_id=channel_id,
                 mode=mode,
                 project_dir=workspace_dir,
+                request=request,
             )
             if agent is None:
                 raise RuntimeError(f"[AgentManager] No agent available for channel {channel_id}")
@@ -1198,6 +1220,7 @@ class AgentManager:
                 channel_id=channel_id,
                 mode=mode,
                 project_dir=workspace_dir,
+                request=request,
             )
             if agent is None:
                 raise RuntimeError(f"[AgentManager] No agent available for channel {channel_id}")

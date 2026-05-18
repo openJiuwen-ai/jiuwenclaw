@@ -37,6 +37,13 @@ def e2a_to_agent_request(env: E2AEnvelope) -> AgentRequest:
     if isinstance(internal, dict) and internal.get("normalize_failed"):
         raise RuntimeError("e2a_to_agent_request called on fallback envelope; use legacy path")
 
+    if env.user_id:
+        ctx.setdefault("user_id", env.user_id)
+    if env.chat_id and "group_id" not in ctx:
+        ctx.setdefault("group_id", env.chat_id)
+    params = dict(env.params or {})
+    if env.user_id and "user_id" not in params:
+        params["user_id"] = env.user_id
     metadata = ctx if ctx else None
     method_str = env.method
     req_method: ReqMethod | None = None
@@ -59,7 +66,7 @@ def e2a_to_agent_request(env: E2AEnvelope) -> AgentRequest:
         service_id=env.service_id,
         agent_id=env.agent_id,
         req_method=req_method,
-        params=dict(env.params or {}),
+        params=params,
         is_stream=bool(env.is_stream),
         timestamp=_e2a_timestamp_to_float(env.timestamp),
         metadata=metadata,

@@ -1022,6 +1022,8 @@ class JiuWenSwarmDeepAdapter:
         self._model_client_config: ModelClientConfig | None = None
         self._model_request_config: ModelRequestConfig | None = None
         self._config_base_cache: dict[str, Any] | None = None
+        self._startup_config_base: dict[str, Any] | None = None
+        self._model_config_source: str = "config.yaml"
         self._config_cache: dict[str, Any] = {}
         self._filesystem_rail: SysOperationRail | None = None
         self._skill_rail: SkillUseRail | None = None
@@ -2570,6 +2572,142 @@ class JiuWenSwarmDeepAdapter:
         if self._audio_model_config is not None:
             return tools
         return [tool for tool in tools if tool.card.name == "audio_metadata"]
+
+    @staticmethod
+    def _mask_model_secret(value: Any) -> str:
+        text = str(value or "").strip()
+        if not text:
+            return "(empty)"
+        if len(text) <= 8:
+            return "***"
+        return f"{text[:4]}***{text[-2:]}"
+
+    def _resolve_default_model_mcc_for_log(self) -> tuple[dict[str, Any], dict[str, str]]:
+        """与 ``_create_model`` 同源解析 default 槽位（``get_default_models`` + react 回退）。"""
+        meta: dict[str, str] = {}
+        config = self._startup_config_base if isinstance(self._startup_config_base, dict) else {}
+        entries = get_default_models(config) if config else []
+        section = entries[0] if entries and isinstance(entries[0], dict) else {}
+        meta["display_name"] = str(section.get("display_name") or "").strip()
+        meta["template_id"] = str(section.get("template_id") or "").strip()
+
+        mcc = dict(section.get("model_client_config") or {})
+        react = config.get("react") if isinstance(config.get("react"), dict) else {}
+        react_mcc = react.get("model_client_config")
+        react_mcc = react_mcc if isinstance(react_mcc, dict) else {}
+
+        if not str(mcc.get("model_name") or "").strip():
+            mcc["model_name"] = (
+                react_mcc.get("model_name")
+                or react.get("model_name")
+                or os.getenv("MODEL_NAME", "")
+                or "gpt-4"
+            )
+        if not str(mcc.get("client_provider") or "").strip():
+            mcc["client_provider"] = (
+                react_mcc.get("client_provider")
+                or os.getenv("MODEL_PROVIDER", "")
+            )
+        if not str(mcc.get("api_base") or "").strip():
+            mcc["api_base"] = react_mcc.get("api_base") or os.getenv("API_BASE", "")
+        if not str(mcc.get("api_key") or "").strip():
+            mcc["api_key"] = react_mcc.get("api_key") or os.getenv("API_KEY", "")
+        return mcc, meta
+
+    def _collect_default_model_log_fields(self) -> dict[str, str]:
+        """收集 default 槽位字段，供启动日志单行输出（空值保留为占位）。"""
+        fields: dict[str, str] = {"source": self._model_config_source}
+
+        if self._model_client_config is not None:
+            mcc_obj = self._model_client_config
+            mcc = {
+                "model_name": getattr(mcc_obj, "model_name", "") or "",
+                "client_provider": getattr(mcc_obj, "client_provider", "")
+                or getattr(mcc_obj, "provider", "")
+                or "",
+                "api_base": getattr(mcc_obj, "api_base", "") or "",
+                "api_key": getattr(mcc_obj, "api_key", ""),
+            }
+            meta = {"display_name": "", "template_id": ""}
+        else:
+            mcc, meta = self._resolve_default_model_mcc_for_log()
+
+        fields["display_name"] = meta.get("display_name", "")
+        fields["template_id"] = meta.get("template_id", "")
+        fields["model_id"] = str(mcc.get("model_name") or "").strip()
+        fields["provider"] = str(
+            mcc.get("client_provider") or mcc.get("provider") or ""
+        ).strip()
+        fields["api_base"] = str(mcc.get("api_base") or "").strip()
+        fields["api_key"] = self._mask_model_secret(mcc.get("api_key"))
+        return fields
+
+    def _format_active_model_startup_log(self) -> str:
+        """仅输出 default 槽位模型配置（启动日志）。"""
+        fields = self._collect_default_model_log_fields()
+        order = (
+            "source",
+            "display_name",
+            "template_id",
+            "model_id",
+            "provider",
+            "api_base",
+            "api_key",
+        )
+
+        def _fmt_value(key: str, value: str) -> str:
+            if key == "api_key":
+                return value or "(empty)"
+            return value if value else "(empty)"
+
+        return "; ".join(f"{key}={_fmt_value(key, fields[key])}" for key in order)
+
+    def _log_active_model_on_startup(self, *, phase: str = "create_instance") -> None:
+        logger.info(
+            "[JiuWenSwarmDeepAdapter] Agent 已启动(%s)，当前使用模型: %s",
+            phase,
+            self._format_active_model_startup_log(),
+        )
+
+    async def _apply_enterprise_model_policy(
+        self,
+        request: AgentRequest | None = None,
+        *,
+        routing: dict[str, Any] | None = None,
+    ) -> bool:
+        """从 Gateway DB 按策略解析模型并应用到当前 Adapter（返回是否已应用）。"""
+        try:
+            from jiuwenswarm.server.runtime.enterprise_config import (
+                apply_effective_models_to_config,
+                enterprise_policy_enabled,
+                resolve_effective_model_slots,
+                routing_context_from_mapping,
+                routing_context_from_request,
+            )
+        except ImportError as exc:
+            logger.warning("[JiuWenSwarmDeepAdapter] enterprise_config unavailable: %s", exc)
+            return False
+
+        if not enterprise_policy_enabled():
+            return False
+
+        if routing is not None:
+            ctx = routing_context_from_mapping(routing)
+        elif request is not None:
+            ctx = routing_context_from_request(request)
+        else:
+            return False
+
+        effective = await resolve_effective_model_slots(ctx)
+        if effective is None:
+            return False
+
+        config_base = apply_effective_models_to_config(get_config(), effective)
+        self._model_config_source = "enterprise_policy+gateway_db"
+        self._refresh_multimodal_configs(config_base)
+        model = self._create_model(config_base)
+        self._apply_model_to_react_agent(model)
+        return True
 
     def _refresh_multimodal_configs(
         self,
@@ -5245,7 +5383,32 @@ class JiuWenSwarmDeepAdapter:
         self._instance_overrides = dict(config or {}) if isinstance(config, dict) else {}
         load_dotenv_runtime(dotenv_path=get_env_file(), override=True)
         config_base = get_config()
+        # 企业版：create_instance 时可带 enterprise_routing 预下发模型配置
+        enterprise_routing = self._instance_overrides.get("enterprise_routing")
+        if isinstance(enterprise_routing, dict) and os.getenv("AGENT_RUNTIME", "").strip():
+            try:
+                from jiuwenswarm.server.runtime.enterprise_config import (
+                    apply_effective_models_to_config,
+                    enterprise_policy_enabled,
+                    resolve_effective_model_slots,
+                    routing_context_from_mapping,
+                )
+
+                if enterprise_policy_enabled():
+                    ctx = routing_context_from_mapping(enterprise_routing)
+                    effective = await resolve_effective_model_slots(ctx)
+                    if effective is not None:
+                        config_base = apply_effective_models_to_config(
+                            config_base, effective
+                        )
+                        self._model_config_source = "enterprise_policy+gateway_db"
+            except Exception as exc:
+                logger.warning(
+                    "[JiuWenSwarmDeepAdapter] enterprise policy on create_instance failed: %s",
+                    exc,
+                )
         self._config_base_cache = config_base.copy()
+        self._startup_config_base = config_base.copy()
         self._refresh_multimodal_configs(config_base)
         config = config_base.get("react", {}).copy()
         self._config_cache = config.copy()
@@ -5266,7 +5429,16 @@ class JiuWenSwarmDeepAdapter:
         if self._skip_own_instance_build():
             return
 
-        model = self._create_model(config_base)
+        self._log_active_model_on_startup(phase=f"create_instance:{mode}")
+        try:
+            model = self._create_model(config_base)
+        except Exception as exc:
+            logger.error(
+                "[JiuWenSwarmDeepAdapter] create_instance 模型初始化失败(%s): %s",
+                mode,
+                exc,
+            )
+            raise
         if self._is_session_scoped_adapter:
             await self._try_init_a2x_client(config_base)
         agent_card = AgentCard(name=self._agent_name, id=_AGENT_CARD_ID)
@@ -8608,6 +8780,7 @@ class JiuWenSwarmDeepAdapter:
         self._runtime_cron_tool_context.remember_current_binding()
         token_cid = TOOL_PERMISSION_CHANNEL_ID.set((request.channel_id or "").strip())
         token_perm = setup_permission_context(request)
+        await self._apply_enterprise_model_policy(request)
         resolved_model = self._resolve_model_for_request(request)
         self._apply_model_to_react_agent(resolved_model)
         self._mark_session_active(session_id)
@@ -9127,7 +9300,8 @@ class JiuWenSwarmDeepAdapter:
         self._runtime_cron_tool_context.remember_current_binding()
         token_cid = TOOL_PERMISSION_CHANNEL_ID.set((request.channel_id or "").strip())
         token_perm = setup_permission_context(request)
-        # 按请求选择模型
+        # 按请求选择模型（企业版可先按策略下发）
+        await self._apply_enterprise_model_policy(request)
         resolved_model = self._resolve_model_for_request(request)
         self._apply_model_to_react_agent(resolved_model)
         self._mark_session_active(session_id)
