@@ -381,6 +381,16 @@ class SkillDevDeepAdapter:
                     "event_type": "skilldev.completed",
                     "task_id": task_id,
                 },
+                is_complete=True,
+            )
+        else:
+            yield AgentResponseChunk(
+                request_id=rid,
+                channel_id=cid,
+                payload={
+                    "event_type": "skilldev.agent_completed",
+                    "task_id": task_id,
+                },
                 is_complete=False,
             )
 
@@ -768,7 +778,7 @@ class SkillDevDeepAdapter:
             if chunk_type == "answer":
                 content = self._extract_answer_content(payload)
                 if has_streamed_content:
-                    return {"event_type": "skilldev.agent_completed"}
+                    return {"event_type": "skilldev.answer_completed"}
                 return {"event_type": "skilldev.agent_output", "delta": content} if content else None
             if chunk_type == "llm_usage":
                 return {"event_type": "chat.usage_metadata", "metadata": payload}
