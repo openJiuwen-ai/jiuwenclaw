@@ -2703,7 +2703,7 @@ class JiuWenSwarmDeepAdapter:
             return False
 
         config_base = apply_effective_models_to_config(get_config(), effective)
-        self._model_config_source = "enterprise_policy+gateway_db"
+        self._model_config_source = "enterprise_policy"
         self._refresh_multimodal_configs(config_base)
         model = self._create_model(config_base)
         self._apply_model_to_react_agent(model)
@@ -5401,7 +5401,7 @@ class JiuWenSwarmDeepAdapter:
                         config_base = apply_effective_models_to_config(
                             config_base, effective
                         )
-                        self._model_config_source = "enterprise_policy+gateway_db"
+                        self._model_config_source = "enterprise_policy"
             except Exception as exc:
                 logger.warning(
                     "[JiuWenSwarmDeepAdapter] enterprise policy on create_instance failed: %s",
@@ -5701,6 +5701,38 @@ class JiuWenSwarmDeepAdapter:
 
         self._config_base_cache = config_base.copy()
         self._refresh_multimodal_configs(config_base)
+
+        if os.getenv("AGENT_RUNTIME", "").strip():
+            try:
+                from jiuwenswarm.server.runtime.enterprise_config import (
+                    apply_effective_models_to_config,
+                    enterprise_policy_enabled,
+                    invalidate_policy_cache,
+                    resolve_effective_model_slots,
+                    reset_store,
+                    routing_context_from_mapping,
+                )
+
+                if enterprise_policy_enabled():
+                    invalidate_policy_cache()
+                    reset_store()
+                    enterprise_routing = self._instance_overrides.get("enterprise_routing")
+                    if isinstance(enterprise_routing, dict):
+                        ctx = routing_context_from_mapping(enterprise_routing)
+                        effective = await resolve_effective_model_slots(ctx)
+                        if effective is not None:
+                            config_base = apply_effective_models_to_config(
+                                config_base, effective
+                            )
+                            self._model_config_source = "enterprise_policy"
+                            self._config_base_cache = config_base.copy()
+                            self._refresh_multimodal_configs(config_base)
+            except Exception as exc:
+                logger.warning(
+                    "[JiuWenSwarmDeepAdapter] enterprise policy on reload failed: %s",
+                    exc,
+                )
+
         self._config_cache = config_base.get("react", {}).copy()
         return config_base
 
