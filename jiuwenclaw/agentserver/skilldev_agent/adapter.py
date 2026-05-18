@@ -346,6 +346,40 @@ class SkillDevDeepAdapter:
         async for chunk in self.process_message_stream_impl(request, inputs):
             yield chunk
 
+        output_dir = task_workspace / "output"
+        skill_files = [
+            f for f in output_dir.iterdir()
+            if f.is_file() and f.suffix in (".skill", ".zip")
+        ] if output_dir.exists() else []
+        if skill_files:
+            for sf in skill_files:
+                yield AgentResponseChunk(
+                    request_id=rid,
+                    channel_id=cid,
+                    payload={
+                        "event_type": "skilldev.artifact_ready",
+                        "task_id": task_id,
+                        "artifact": {
+                            "id": "skill_package",
+                            "name": sf.name,
+                            "type": "skill_package",
+                            "size_bytes": sf.stat().st_size,
+                            "browsable": True,
+                            "downloadable": True,
+                        },
+                    },
+                    is_complete=False,
+                )
+            yield AgentResponseChunk(
+                request_id=rid,
+                channel_id=cid,
+                payload={
+                    "event_type": "skilldev.completed",
+                    "task_id": task_id,
+                },
+                is_complete=False,
+            )
+
     @staticmethod
     def _get_or_create_task_id(request: AgentRequest, params: dict[str, Any]) -> str:
         explicit = params.get("task_id") or params.get("taskId")
@@ -730,7 +764,7 @@ class SkillDevDeepAdapter:
             if chunk_type == "answer":
                 content = self._extract_answer_content(payload)
                 if has_streamed_content:
-                    return {"event_type": "skilldev.completed"}
+                    return {"event_type": "skilldev.agent_completed"}
                 return {"event_type": "skilldev.agent_output", "delta": content} if content else None
             if chunk_type == "llm_usage":
                 return {"event_type": "chat.usage_metadata", "metadata": payload}
