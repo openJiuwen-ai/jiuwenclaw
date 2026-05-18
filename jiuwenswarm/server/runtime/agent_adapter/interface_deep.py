@@ -294,6 +294,11 @@ from jiuwenswarm.agents.harness.common.plugins.rail_manager import get_rail_mana
 from jiuwenswarm.gateway.cron import CronTargetChannel
 from jiuwenswarm.common.schema.agent import AgentRequest, AgentResponse, AgentResponseChunk
 from jiuwenswarm.common.schema.message import ReqMethod
+from jiuwenswarm.server.runtime.skill.skill_whitelist import (
+    SkillWhitelistSynchronizer,
+    is_skill_whitelist_tenant,
+    parse_agent_skill_whitelist,
+)
 from jiuwenswarm.common.utils import (
     get_agent_skills_dir,
     get_agent_workspace_dir,
@@ -302,6 +307,7 @@ from jiuwenswarm.common.utils import (
     get_env_file,
     get_prompt_attachment_dir,
     get_runtime_state_path,
+    get_tenant_agent_skills_dirs,
     reset_free_search_runtime_flags,
 )
 from jiuwenswarm.dotenv_early import load_dotenv_runtime
@@ -1028,6 +1034,7 @@ class JiuWenSwarmDeepAdapter:
         self._config_cache: dict[str, Any] = {}
         self._filesystem_rail: SysOperationRail | None = None
         self._skill_rail: SkillUseRail | None = None
+        self._enabled_skills: list[str] | None = None
         self._stream_event_rail: JiuSwarmStreamEventRail | None = None
         self._task_execution_rail: TaskExecutionRail | None = None
         # Track session IDs currently executing on this adapter instance.
@@ -1204,6 +1211,18 @@ class JiuWenSwarmDeepAdapter:
     def set_skill_manager(self, skill_manager: SkillManager) -> None:
         """Inject shared SkillManager from facade for tool reuse."""
         self._skill_manager = skill_manager
+
+    def _resolve_skill_dirs(self, extra_skill_dir: str | None = None) -> list[str]:
+        """解析 SkillUseRail / evolution 使用的 skills 目录列表."""
+        if is_skill_whitelist_tenant(self._agent_id, self._service_id):
+            skills_dirs = [
+                str(p) for p in get_tenant_agent_skills_dirs(self._service_id, self._agent_id)
+            ]
+        else:
+            skills_dirs = [str(get_agent_skills_dir())]
+        if extra_skill_dir:
+            skills_dirs.append(extra_skill_dir)
+        return skills_dirs
         for adapter in getattr(self, "_session_adapters", {}).values():
             adapter.set_skill_manager(skill_manager)
 
@@ -3594,23 +3613,30 @@ class JiuWenSwarmDeepAdapter:
 
     def _visible_skill_names_for_list_skill(self) -> set[str]:
         """Return the skill names exposed by the matching SkillUseRail setup."""
-        skills_dir = get_agent_skills_dir()
+        skills_dirs = [Path(p) for p in self._resolve_skill_dirs()]
         disabled_skills = set(
             self._skill_manager.list_execution_disabled_skills()
             if self._skill_manager is not None
             else []
         )
+        enabled = self._enabled_skills
+        if is_skill_whitelist_tenant(self._agent_id, self._service_id) and enabled is None:
+            enabled = []
+        enabled_set = set(enabled) if enabled is not None else None
         visible: set[str] = set()
-        try:
-            for child in sorted(skills_dir.iterdir(), key=lambda path: path.name.lower()):
-                if not child.is_dir() or child.name.startswith("_") or child.name.startswith("."):
-                    continue
-                if child.name in disabled_skills:
-                    continue
-                if (child / "SKILL.md").is_file():
-                    visible.add(child.name)
-        except OSError as exc:
-            logger.warning("[JiuWenSwarmDeepAdapter] failed to scan visible skills: %s", exc)
+        for skills_dir in skills_dirs:
+            try:
+                for child in sorted(skills_dir.iterdir(), key=lambda path: path.name.lower()):
+                    if not child.is_dir() or child.name.startswith("_") or child.name.startswith("."):
+                        continue
+                    if child.name in disabled_skills:
+                        continue
+                    if enabled_set is not None and child.name not in enabled_set:
+                        continue
+                    if (child / "SKILL.md").is_file():
+                        visible.add(child.name)
+            except OSError as exc:
+                logger.warning("[JiuWenSwarmDeepAdapter] failed to scan visible skills: %s", exc)
         return visible
 
     @staticmethod
@@ -4184,12 +4210,25 @@ class JiuWenSwarmDeepAdapter:
         try:
             skill_mode = self._resolve_skill_mode(config)
             logger.info("[JiuWenSwarmDeepAdapter] current skill_mode: %s", skill_mode)
-            skill_rail = SkillUseRail(
-                skills_dir=str(get_agent_skills_dir()),
+            skills_dirs = self._resolve_skill_dirs()
+            enabled_skills = self._enabled_skills
+            if is_skill_whitelist_tenant(self._agent_id, self._service_id) and enabled_skills is None:
+                enabled_skills = []
+            skill_rail_kwargs: dict[str, Any] = dict(
+                skills_dir=skills_dirs,
                 skill_mode=skill_mode,
                 include_tools=include_tools,
-                disabled_skills=self._skill_manager.list_execution_disabled_skills(),
+                disabled_skills=self._skill_manager.list_execution_disabled_skills()
+                if self._skill_manager is not None
+                else [],
             )
+            if enabled_skills is not None:
+                skill_rail_kwargs["enabled_skills"] = enabled_skills
+            try:
+                skill_rail = SkillUseRail(**skill_rail_kwargs)
+            except TypeError:
+                skill_rail_kwargs.pop("enabled_skills", None)
+                skill_rail = SkillUseRail(**skill_rail_kwargs)
             logger.info("[JiuWenSwarmDeepAdapter] SkillUseRail create success")
         except Exception as exc:
             logger.warning("[JiuWenSwarmDeepAdapter] SkillUseRail create failed: %s", exc)
@@ -4208,7 +4247,7 @@ class JiuWenSwarmDeepAdapter:
             evolution_auto_save = get_evolution_auto_save_enabled(config)
             model_name = self._default_model_name or config.get("model_name", "gpt-4")
             skill_evolution_rail = SkillEvolutionRail(
-                skills_dir=str(get_agent_skills_dir()),
+                skills_dir=self._resolve_skill_dirs(),
                 llm=self._model,
                 model=model_name,
                 review_runtime=EvolutionReviewRuntime(),
@@ -4250,7 +4289,7 @@ class JiuWenSwarmDeepAdapter:
         )
         await configure_skill_evolution_runtime(
             self._instance,
-            skills_dir=str(get_agent_skills_dir()),
+            skills_dir=self._resolve_skill_dirs(),
             llm=self._model,
             model=self._default_model_name
             or self._config_cache.get("model_name", "gpt-4"),
@@ -4346,8 +4385,9 @@ class JiuWenSwarmDeepAdapter:
                 return None
 
             language = config.get("language", "cn")
+            skills_dirs = self._resolve_skill_dirs()
             rail = SkillCreateRail(
-                skills_dir=str(get_agent_skills_dir()),
+                skills_dir=skills_dirs[0] if skills_dirs else str(get_agent_skills_dir()),
                 auto_trigger=True,  # When skill_create=true, auto_trigger is always true
                 language=language,
             )
@@ -5381,6 +5421,8 @@ class JiuWenSwarmDeepAdapter:
             config: 可选配置，支持以下字段：
                 - agent_name: Agent 名称，默认 "main_agent"。
                 - workspace_dir: 工作区目录，默认 "workspace/agent"。
+                - enabled_skills: Skill 白名单目录名。
+                - request: 可选 AgentRequest（创建时按 params 加载企业配置并合并模型）。
                 - 其余字段透传给 DeepAgentConfig。
             mode: 实例化模式，默认 "agent"，使用 create_deep_agent。
             sub_mode: 子模式
@@ -5409,6 +5451,28 @@ class JiuWenSwarmDeepAdapter:
         self._agent_name = self._instance_overrides.get(
             "agent_name", config.get("agent_name", "main_agent")
         )
+
+        if is_skill_whitelist_tenant(self._agent_id, self._service_id):
+            enterprise_skills: list[dict[str, Any]] = []
+            if self._enterprise_config is not None:
+                enterprise_skills = getattr(self._enterprise_config, "skill_whitelist", None) or []
+            skill_config = parse_agent_skill_whitelist(
+                self._agent_id, self._service_id, enterprise_skills
+            )
+            sync_result = await SkillWhitelistSynchronizer(
+                self._service_id, self._agent_id
+            ).sync(skill_config)
+            if sync_result.errors:
+                logger.warning(
+                    "[SkillWhitelist] sync partial errors: agent_id=%s service_id=%s errors=%s",
+                    self._agent_id,
+                    self._service_id,
+                    sync_result.errors,
+                )
+            if sync_result.enabled_skill_dirs is not None:
+                self._enabled_skills = [
+                    str(name) for name in sync_result.enabled_skill_dirs if str(name).strip()
+                ]
         self._project_dir = self._instance_overrides.get(
             "project_dir", config.get("project_dir")
         )
@@ -8175,12 +8239,13 @@ class JiuWenSwarmDeepAdapter:
 
         stripped = query.strip()
 
+        slash_dirs = self._resolve_skill_dirs()
         slash_result = await handle_evolution_slash_command(
             stripped,
             EvolutionSlashContext(
                 mode=mode,
                 session_id=session_id,
-                skills_dir=str(get_agent_skills_dir()),
+                skills_dir=slash_dirs[0] if slash_dirs else str(get_agent_skills_dir()),
                 evolution_enabled=bool(self._config_cache.get("evolution", {}).get("enabled", False)),
                 language=self._resolve_runtime_language(),
             ),

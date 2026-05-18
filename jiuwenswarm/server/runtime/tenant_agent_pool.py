@@ -145,6 +145,10 @@ class TenantAgentPool:
                 service_id,
             )
             workspace = self._build_workspace_path(service_id, agent_id)
+            if workspace is None:
+                raise ValueError(
+                    f"invalid tenant workspace: agent_id={agent_id!r}, service_id={service_id!r}"
+                )
             manager = AgentManager(
                 agent_id=agent_id,
                 service_id=service_id or "",
