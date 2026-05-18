@@ -419,6 +419,8 @@ class TaskExecutionRail(DeepAgentRail):
         _ACTIVE_TASK_ID.set(None)
         if isinstance(ctx.inputs, InvokeInputs):
             await self._init_task_tracking(ctx.session)
+            parent_request_id = self._extract_request_id(ctx)
+            await self._emit_task_update_event(ctx.session, parent_request_id)
 
     async def before_tool_call(self, ctx: AgentCallbackContext) -> None:
         setattr(ctx, '_tool_start_time', time.time())
@@ -454,6 +456,11 @@ class TaskExecutionRail(DeepAgentRail):
         if tool_name in self.SKILL_STEP_TOOLS:
             await self._start_first_uncompleted_skill_step(ctx)
             # 发送完整任务列表更新（包含 todo + skill_step）
+            parent_request_id = self._extract_request_id(ctx)
+            await self._emit_task_update_event(ctx.session, parent_request_id)
+            return
+
+        if tool_name in self.SKILL_COMPLETE_TOOLS:
             parent_request_id = self._extract_request_id(ctx)
             await self._emit_task_update_event(ctx.session, parent_request_id)
             return

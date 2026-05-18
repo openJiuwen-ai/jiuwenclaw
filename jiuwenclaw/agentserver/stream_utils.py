@@ -322,6 +322,14 @@ def _parse_typed_chunk(chunk: Any, _has_streamed_content: bool) -> dict[str, Any
             "parent_request_id": payload.get("parent_request_id") if isinstance(payload, dict) else None,
         }
 
+    if chunk_type == "artifact.generated":
+        if isinstance(payload, dict):
+            return {
+                "event_type": "artifact.generated",
+                **payload,
+            }
+        return None
+
     if chunk_type == "context.compressed":
         if isinstance(payload, dict):
             return {

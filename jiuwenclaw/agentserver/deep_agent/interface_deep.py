@@ -4719,6 +4719,14 @@ class JiuWenClawDeepAdapter:
                 if chunk_type == "__interaction__":
                     return convert_interactions_to_ask_user_question([payload])
 
+                if chunk_type == "artifact.generated":
+                    if isinstance(payload, dict):
+                        return {
+                            "event_type": "artifact.generated",
+                            **payload,
+                        }
+                    return None
+
                 if chunk_type == "task.start":
                     if isinstance(payload, dict):
                         return {
@@ -4727,6 +4735,20 @@ class JiuWenClawDeepAdapter:
                             "task_content": payload.get("task_content"),
                             "task_index": payload.get("task_index"),
                             "total_tasks": payload.get("total_tasks"),
+                            "parent_request_id": payload.get("parent_request_id"),
+                            "timestamp": payload.get("timestamp"),
+                        }
+                    return None
+
+                if chunk_type == "task.update":
+                    if isinstance(payload, dict):
+                        return {
+                            "event_type": "task.update",
+                            "tasks": payload.get("tasks", []),
+                            "total_tasks": payload.get("total_tasks", 0),
+                            "completed_tasks": payload.get("completed_tasks", 0),
+                            "in_progress_tasks": payload.get("in_progress_tasks", 0),
+                            "pending_tasks": payload.get("pending_tasks", 0),
                             "parent_request_id": payload.get("parent_request_id"),
                             "timestamp": payload.get("timestamp"),
                         }
