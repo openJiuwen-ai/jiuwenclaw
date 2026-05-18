@@ -84,6 +84,7 @@ Surface things the user might not have considered: failure modes, what "done" lo
 
 Follow the anatomy and frontmatter rules above. Self-check before moving on:
 
+- Create or update the skill under the current workspace's `skill/` directory: `<workspace>/skill/<skill-name>/`.
 - `SKILL.md` exists with valid frontmatter (kebab-case name ≤ 30, description ≤ 1024, allowed keys only).
 - Body is under 300 lines; bulky reference material moved to `references/`.
 - No stray files outside the skill folder.
@@ -101,13 +102,13 @@ After drafting, stop and ask:
 
 > "Here are a few test cases and the expectations I'll grade them on. Do these look right?"
 
-Save to `evals/evals.json` (schema in `references/schemas.md`). Test types worth covering: `smoke` (minimal input works), `happy_path` (real user flow), `edge_case` (boundary/error input), `integration` (multi-step end-to-end).
+Save to `<workspace>/evals/evals.json` (schema in `references/schemas.md`). Test types worth covering: `smoke` (minimal input works), `happy_path` (real user flow), `edge_case` (boundary/error input), `integration` (multi-step end-to-end).
 
 ---
 
 ## Step 4: Run the evals
 
-Every test case needs **both** a with-skill run and a baseline (no-skill for new skills, old-skill snapshot for improvements). Never fabricate. Results go in `<skill-name>-workspace/iteration-<N>/eval-<N>/`.
+Every test case needs **both** a with-skill run and a baseline (no-skill for new skills, old-skill snapshot for improvements). Never fabricate. Put all evaluation artifacts under the current workspace's `evals/` directory, for example: `<workspace>/evals/iteration-<N>/eval-<N>/`.
 
 **Subagent execution rules:**
 - **Always pass the workspace path explicitly.** Subagents do not inherit your system prompt and therefore don't know the workspace — state it at the top of the prompt (e.g. `"Workspace: /abs/path/to/workspace. All file reads/writes must stay inside it."`) and use absolute paths for every input/output you reference. The same applies to any subagent you spawn outside the eval flow (grader, description-optimization runs).
@@ -118,7 +119,7 @@ Every test case needs **both** a with-skill run and a baseline (no-skill for new
 
 Process each test case sequentially and completely.
 
-**1.** Write `eval_metadata.json` (`eval-<N>/eval_metadata.json`). Copy the expectations the user already approved — do not re-draft.
+**1.** Write `eval_metadata.json` to `<workspace>/evals/iteration-<N>/eval-<N>/eval_metadata.json`. Copy the expectations the user already approved — do not re-draft.
 ```json
 {
   "eval_id": 0,
@@ -154,11 +155,12 @@ Hard checkpoint — you may not present results until every run has `grading.jso
 1. **Grade each run** via grader subagent (serial). The prompt must tell the subagent to **read `agents/grader.md` first and follow it exactly**. Pass expectations from `eval_metadata.json`, transcript path, outputs dir. Output: `grading.json` per run (schema in `references/schemas.md`).
 2. **Aggregate:**
    ```bash
-   cd ~/.openclaw/workspace/skills/skill-creator && python3 -m scripts.aggregate_benchmark <workspace>/iteration-N --skill-name <name>
+   python3 <skill-dir>/scripts/aggregate_benchmark.py <workspace>/evals/iteration-N --skill-name <name>
    ```
-   Produces `benchmark.json` and `benchmark.md`. Confirm both exist.
+   Resolve `<skill-dir>` to the current `skill-creator` directory you are using for this task.
+   Produces `<workspace>/evals/iteration-N/benchmark.json` and `<workspace>/evals/iteration-N/benchmark.md`. Confirm both exist.
 3. **Surface patterns** from `benchmark.md` — which expectations failed, where variance is high, what the skill cost in time/tokens.
-4. **Present** per test case. Show the user everything in `benchmark.md` — **time and tokens are mandatory columns, not optional**. Pass-rate-only summaries are a bug. Ask "Any feedback?" each time. Finish with the overall summary from `benchmark.md`.
+4. **Present** per test case. Show the user everything in `benchmark.md` — **time and tokens are mandatory columns, not optional**. Pass-rate-only summaries are a bug. You must present the final `benchmark.md` to the user, not just summarize it loosely. Ask "Any feedback?" each time. Finish with the overall summary from `benchmark.md`.
 
 Self-check before presenting: (a) every run dir has `grading.json`, (b) `benchmark.md` exists, (c) you're showing graded scores, not your own judgment, (d) time and tokens are visible for every case. If any are false, go back.
 
@@ -170,7 +172,7 @@ Self-check before presenting: (a) every run dir has `grading.json`, (b) `benchma
 2. Generalize — avoid narrow fixes that only pass the tested examples.
 3. Explain the *why* — don't just add rules.
 4. Bundle repeated work — if every run wrote the same helper, lift it into `scripts/`.
-5. Apply changes and rerun into `iteration-<N+1>/`.
+5. Apply changes and rerun into `<workspace>/evals/iteration-<N+1>/`.
 
 **Exit question (mandatory after every round):** use `ask_user_question` with exactly two options. Do NOT mention packaging — that is Step 7's concern, not this fork's.
 
@@ -190,17 +192,21 @@ Self-check before presenting: (a) every run dir has `grading.json`, (b) `benchma
 
 ---
 
-## Step 7: Packaging 
+## Step 7: Packaging
 
 Run:
 
 ```bash
-python3 -m scripts.package_skill <path/to/skill-folder>
+python3 <skill-dir>/scripts/package_skill.py <workspace>/skill/<skill-name> <workspace>/output
 ```
 
-If you have access to `present_files`, also present the packaged output.
+Resolve `<skill-dir>` to the current `skill-creator` directory you are using for this task.
 
-Self-check before ending the conversation: did `scripts.package_skill` run? If not, run it now.
+Use the skill directory created earlier at `<workspace>/skill/<skill-name>/` and write the final archive to `<workspace>/output/<skill-name>.zip`.
+
+If you have access to `present_files`, also present the packaged output from the workspace `output/` folder.
+
+Self-check before ending the conversation: did `scripts/package_skill.py` run? If not, run it now.
 
 ---
 

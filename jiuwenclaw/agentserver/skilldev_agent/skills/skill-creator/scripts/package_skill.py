@@ -6,8 +6,8 @@ Usage:
     python utils/package_skill.py <path/to/skill-folder> [output-directory]
 
 Example:
-    python utils/package_skill.py skills/public/my-skill
-    python utils/package_skill.py skills/public/my-skill ./dist
+    python utils/package_skill.py ./skill/my-skill
+    python utils/package_skill.py ./skill/my-skill ./output
 """
 
 import fnmatch
@@ -16,7 +16,7 @@ import sys
 import zipfile
 from pathlib import Path
 
-from scripts.quick_validate import validate_skill
+from quick_validate import validate_skill
 
 
 logger = logging.getLogger(__name__)
@@ -26,7 +26,7 @@ EXCLUDE_DIRS = {"__pycache__", "node_modules"}
 EXCLUDE_GLOBS = {"*.pyc"}
 EXCLUDE_FILES = {".DS_Store"}
 # Directories excluded only at the skill root (not when nested deeper).
-ROOT_EXCLUDE_DIRS = {"evals"}
+ROOT_EXCLUDE_DIRS = {"evals", "output"}
 
 
 def should_exclude(rel_path: Path) -> bool:
@@ -50,7 +50,9 @@ def package_skill(skill_path, output_dir=None):
 
     Args:
         skill_path: Path to the skill folder
-        output_dir: Optional output directory for the .zip file (defaults to current directory)
+        output_dir: Optional output directory for the .zip file
+            (defaults to <workspace>/output when skill_path is <workspace>/skill/<name>,
+            otherwise falls back to <current working directory>/output)
 
     Returns:
         Path to the created .zip file, or None if error
@@ -85,23 +87,34 @@ def package_skill(skill_path, output_dir=None):
     skill_name = skill_path.name
     if output_dir:
         output_path = Path(output_dir).resolve()
-        output_path.mkdir(parents=True, exist_ok=True)
     else:
-        output_path = Path.cwd()
+        if skill_path.parent.name == "skill":
+            output_path = (skill_path.parent.parent / "output").resolve()
+        else:
+            output_path = (Path.cwd() / "output").resolve()
+    output_path.mkdir(parents=True, exist_ok=True)
 
     skill_filename = output_path / f"{skill_name}.zip"
+
+    files_to_package = []
+    for file_path in skill_path.rglob('*'):
+        if not file_path.is_file():
+            continue
+        # Zip layout must be:
+        #   <skill-name>.zip
+        #     └── <skill-name>/
+        #         ├── SKILL.md
+        #         └── ...
+        arcname = Path(skill_name) / file_path.relative_to(skill_path)
+        if should_exclude(arcname):
+            logger.info("Skipped: %s", arcname)
+            continue
+        files_to_package.append((file_path, arcname))
 
     # Create the .zip file (zip format)
     try:
         with zipfile.ZipFile(skill_filename, 'w', zipfile.ZIP_DEFLATED) as zipf:
-            # Walk through the skill directory, excluding build artifacts
-            for file_path in skill_path.rglob('*'):
-                if not file_path.is_file():
-                    continue
-                arcname = file_path.relative_to(skill_path.parent)
-                if should_exclude(arcname):
-                    logger.info("Skipped: %s", arcname)
-                    continue
+            for file_path, arcname in files_to_package:
                 zipf.write(file_path, arcname)
                 logger.info("Added: %s", arcname)
 
@@ -117,8 +130,8 @@ def main():
     if len(sys.argv) < 2:
         logger.error("Usage: python utils/package_skill.py <path/to/skill-folder> [output-directory]")
         logger.error("Example:")
-        logger.error("  python utils/package_skill.py skills/public/my-skill")
-        logger.error("  python utils/package_skill.py skills/public/my-skill ./dist")
+        logger.error("  python utils/package_skill.py ./skill/my-skill")
+        logger.error("  python utils/package_skill.py ./skill/my-skill ./output")
         sys.exit(1)
 
     skill_path = sys.argv[1]

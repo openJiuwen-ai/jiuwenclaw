@@ -93,7 +93,7 @@ def load_run_results(benchmark_dir: Path) -> dict:
         metadata_path = eval_dir / "eval_metadata.json"
         if metadata_path.exists():
             try:
-                with open(metadata_path) as mf:
+                with open(metadata_path, encoding="utf-8") as mf:
                     eval_id = json.load(mf).get("eval_id", eval_idx)
             except (json.JSONDecodeError, OSError):
                 eval_id = eval_idx
@@ -118,7 +118,7 @@ def load_run_results(benchmark_dir: Path) -> dict:
             grading_file = config_dir / "grading.json"
 
             try:
-                with open(grading_file) as f:
+                with open(grading_file, encoding="utf-8") as f:
                     grading = json.load(f)
             except json.JSONDecodeError as e:
                 logger.warning("Invalid JSON in %s: %s", grading_file, e)
@@ -140,7 +140,7 @@ def load_run_results(benchmark_dir: Path) -> dict:
             timing_file = config_dir / "timing.json"
             if timing_file.exists():
                 try:
-                    with open(timing_file) as tf:
+                    with open(timing_file, encoding="utf-8") as tf:
                         timing_data = json.load(tf)
                     if result["time_seconds"] == 0.0:
                         result["time_seconds"] = timing_data.get("total_duration_seconds", 0.0)
@@ -405,13 +405,13 @@ def main():
     output_md = output_json.with_suffix(".md")
 
     # Write benchmark.json
-    with open(output_json, "w") as f:
-        json.dump(benchmark, f, indent=2)
+    with open(output_json, "w", encoding="utf-8") as f:
+        json.dump(benchmark, f, indent=2, ensure_ascii=False)
     logger.info("Generated: %s", output_json)
 
     # Write benchmark.md
     markdown = generate_markdown(benchmark)
-    with open(output_md, "w") as f:
+    with open(output_md, "w", encoding="utf-8") as f:
         f.write(markdown)
     logger.info("Generated: %s", output_md)
 
@@ -425,7 +425,7 @@ def main():
         pr = run_summary[config]["pass_rate"]["mean"]
         label = config.replace("_", " ").title()
         logger.info("%s: %.1f%% pass rate", label, pr * 100)
-    logger.info("Delta: %s", delta.get("pass_rate", "—"))
+    logger.info("Delta: %s", delta.get("pass_rate", "-"))
 
 
 if __name__ == "__main__":
