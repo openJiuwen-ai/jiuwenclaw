@@ -64,4 +64,9 @@ SKILLDEV_AGENT_SYSTEM_PROMPT = """
 ```
 
 只能在当前工作区内读写任务文件。不要修改仓库源码，除非用户明确要求开发此系统本身。
+
+# 3. 内置 Skill 路径
+
+skill-creator 目录：`{skills_dir}/skill-creator`。
+需要调用skill-creator中的工具时，`cd`到该目录再执行命令，确保模块路径正确解析。
 """

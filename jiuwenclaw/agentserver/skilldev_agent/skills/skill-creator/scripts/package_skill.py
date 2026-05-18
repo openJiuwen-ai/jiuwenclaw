@@ -16,7 +16,7 @@ import sys
 import zipfile
 from pathlib import Path
 
-from quick_validate import validate_skill
+from scripts.quick_validate import validate_skill
 
 
 logger = logging.getLogger(__name__)

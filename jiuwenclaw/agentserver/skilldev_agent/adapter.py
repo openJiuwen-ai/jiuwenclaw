@@ -127,7 +127,11 @@ class SkillDevDeepAdapter:
                 id="skilldev-agent",
                 description="专用 Skill 生成 Agent",
             ),
-            system_prompt=SKILLDEV_AGENT_SYSTEM_PROMPT.format(workspace=self._workspace_dir, os_type=sys.platform),
+            system_prompt=SKILLDEV_AGENT_SYSTEM_PROMPT.format(
+                workspace=self._workspace_dir,
+                os_type=sys.platform,
+                skills_dir=self._skills_dir,
+            ),
             tools=tool_cards,
             rails=rails,
             enable_task_loop=react_config.get("enable_task_loop", True),
