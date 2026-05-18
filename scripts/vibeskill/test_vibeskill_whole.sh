@@ -1,8 +1,7 @@
 #!/bin/bash
 set -euo pipefail
 
-API_BASE="http://localhost:19002"
-WS_BASE="ws://127.0.0.1:19003"
+API_BASE="${VIBESKILL_HTTP_BASE:-http://localhost:19002}"
 
 echo "========== 0. 预检查 =========="
 if ! curl -sS --max-time 2 "$API_BASE/api/v1/session" -o /dev/null; then
@@ -14,11 +13,11 @@ if ! nc -z 127.0.0.1 19003 >/dev/null 2>&1; then
   exit 1
 fi
 
-echo "========== 1. 创建 Session =========="
+echo "========== 1. 创建 SkillCreate Session =========="
 HTTP_STATUS=$(curl -sS -o /tmp/vibeskill_session_resp.json -w "%{http_code}" \
   -X POST "$API_BASE/api/v1/session" \
   -H "Content-Type: application/json" \
-  -d '{}')
+  -d '{"mode":"SkillCreate"}')
 RESPONSE=$(cat /tmp/vibeskill_session_resp.json)
 echo "HTTP: $HTTP_STATUS"
 echo "Response: $RESPONSE"
@@ -36,16 +35,35 @@ fi
 echo "Session ID: $SESSION_ID"
 
 echo ""
-echo "========== 2. WebSocket message.send 测试 =========="
+echo "========== 2. WebSocket + 导出（收到 task.completed 后 POST /export）=========="
 echo "运行: uv run python scripts/vibeskill/test_ws_whole.py $SESSION_ID"
-uv run python scripts/vibeskill/test_ws_whole.py $SESSION_ID
+VIBESKILL_HTTP_BASE="$API_BASE" uv run python scripts/vibeskill/test_ws_whole.py "$SESSION_ID"
 
 echo ""
-echo "========== 3. skill导出 =========="
-curl -sS -X POST "$API_BASE/api/v1/session/$SESSION_ID/export" \
-  -H "Content-Type: application/json" \
-  -d '{}'
-echo ""
+echo "========== 3. 会话历史 GET /messages（skilldev.restore）=========="
+MSG_HTTP_STATUS=$(curl -sS -o /tmp/vibeskill_messages_resp.json -w "%{http_code}" \
+  -X GET "$API_BASE/api/v1/session/$SESSION_ID/messages")
+MSG_RESPONSE=$(cat /tmp/vibeskill_messages_resp.json)
+echo "messages HTTP: $MSG_HTTP_STATUS"
+echo "messages response (truncated): ${MSG_RESPONSE:0:500}..."
+
+if [[ "$MSG_HTTP_STATUS" != "200" ]]; then
+  echo "ERROR: 获取会话历史失败"
+  exit 1
+fi
+
+python3 -c "
+import json, sys
+data = json.loads(sys.stdin.read())
+total = int(data.get('total') or 0)
+messages = data.get('messages') or []
+types = [str(m.get('type') or '') for m in messages if isinstance(m, dict)]
+if total < 1:
+    raise SystemExit('ERROR: messages.total < 1')
+if 'message.send' not in types:
+    raise SystemExit('ERROR: history missing message.send')
+print(f'OK: messages.total={total}, types sample={types[:8]}')
+" <<< "$MSG_RESPONSE"
 
 echo ""
 echo "========== 4. 列出文件和读取文件 =========="
@@ -94,6 +112,5 @@ if [[ "$FILE_READ_HTTP_STATUS" != "200" ]]; then
   exit 1
 fi
 
-echo ""
 echo ""
 echo "========== 测试完成 =========="

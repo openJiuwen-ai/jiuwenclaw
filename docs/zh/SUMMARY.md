@@ -5,6 +5,7 @@
 - [配置说明](配置信息.md)
 - [使用指南](README.md)
   - [频道](频道.md)
+    - [VibeSkill Channel 架构与接口](VibeSkillChannel架构与接口.md)
     - [Discord](Discord.md)
     - [WhatsApp（中文）](whatsapp.md)
     - [WhatsApp（English）](../en/WhatsApp.md)
@@ -22,4 +23,3 @@
 - [开发实践](开发实践/README.md)
   - [日报生成器开发实践](开发实践/JiuwenClaw日报生成器开发实践.md)
   - [代码审查助手开发实践](开发实践/JiuwenClaw代码审查助手开发实践.md)
-
