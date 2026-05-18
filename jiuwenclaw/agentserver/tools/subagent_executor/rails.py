@@ -7,15 +7,19 @@ Provides message injection and context variable management for fork/spawn agents
 
 from __future__ import annotations
 
+import time
 from typing import TYPE_CHECKING, Any
 
+from openjiuwen.core.session.agent import Session
+from openjiuwen.core.session.stream.base import OutputSchema
 from openjiuwen.core.single_agent.rail.base import (
     AgentCallbackContext,
     ToolCallInputs,
 )
 from openjiuwen.harness.rails.base import DeepAgentRail
+from openjiuwen.harness.workspace.workspace import WorkspaceNode
 
-from jiuwenclaw.utils import logger
+from jiuwenclaw.utils import logger, get_agent_workspace_dir
 from jiuwenclaw.agentserver.tools.subagent_executor.context_vars import (
     set_current_agent_context,
     set_current_agent_subagent_id,
@@ -25,8 +29,9 @@ from jiuwenclaw.agentserver.deep_agent.rails.stream_event_rail import (
     JiuClawStreamEventRail,
 )
 
-if TYPE_CHECKING:
-    from openjiuwen.core.session.agent import Session
+from jiuwenclaw.agentserver.deep_agent.rails.task_execution_rail import (
+    get_current_task_id as get_global_task_id,
+)
 
 if TYPE_CHECKING:
     pass
@@ -115,7 +120,7 @@ class SubagentContextRail(DeepAgentRail):
     - Context variable setup for fork_agent inheritance
     - Stream event emission for tool calls (so frontend can see subagent's tool execution)
     - before_tool_call: sets _current_agent_context and _subagent_parent_session, emits tool_call event
-    - after_tool_call: clears context variables, emits tool_result event
+    - after_tool_call: clears context variables, emits tool_result event, detects artifacts
 
     Does NOT handle pause/abort (those are handled by parent agent's JiuClawStreamEventRail).
 
@@ -130,19 +135,23 @@ class SubagentContextRail(DeepAgentRail):
         self,
         subagent_id: str | None = None,
         parent_session: Session | None = None,
+        workspace: Any | None = None,
     ) -> None:
         """Initialize with optional subagent_id and parent_session for event forwarding.
 
         Args:
             subagent_id: The subagent_id of this agent (e.g., "subagent_1222fc63" or "fork_295a9e7")
             parent_session: The parent session to forward events to (NOT ctx.session which is internal)
+            workspace: Workspace object for resolving paths
         """
         super().__init__()
         self._subagent_id = subagent_id
         self._parent_session = parent_session  # Store parent session for event emission
+        self._workspace = workspace
 
     async def before_tool_call(self, ctx: AgentCallbackContext) -> None:
         """Set context variables for fork_agent to get correct messages and emit tool_call event."""
+        setattr(ctx, '_tool_start_time', time.time())
         # Set current agent context for fork_agent to get correct messages
         # This ensures fork_agent gets messages from the running context
         # (not from storage which may be empty for subagent scenarios)
@@ -172,7 +181,7 @@ class SubagentContextRail(DeepAgentRail):
             await JiuClawStreamEventRail._emit_tool_update(self._parent_session, tc, status="in_progress")
 
     async def after_tool_call(self, ctx: AgentCallbackContext) -> None:
-        """Clear context after tool execution and emit tool_result event."""
+        """Clear context after tool execution, emit tool_result event, and detect artifacts."""
         # Emit tool_result event using stored parent_session
         # Reuse JiuClawStreamEventRail's static method
         if self._parent_session is not None and isinstance(ctx.inputs, ToolCallInputs):
@@ -180,10 +189,64 @@ class SubagentContextRail(DeepAgentRail):
             result = ctx.inputs.tool_result
             await JiuClawStreamEventRail._emit_tool_result(self._parent_session, tc, result)
 
+        # Detect artifacts from tool result and emit artifact.generated message
+        await self._detect_and_emit_artifact_generated(ctx)
+
         # Clear context variables
         set_current_agent_context(None)
         set_current_agent_subagent_id(None)
         set_subagent_parent_session(None)
+
+    async def _detect_and_emit_artifact_generated(self, ctx: AgentCallbackContext) -> None:
+        """Detect artifacts from subagent tool output and emit artifact.generated message.
+
+        Uses shared emit_artifact_generated function for unified artifact handling.
+
+        Args:
+            ctx: Agent callback context
+        """
+        # Import here to avoid circular dependency at module load time
+        from jiuwenclaw.agentserver.deep_agent.artifact_emitter import (
+            emit_artifact_generated,
+            ArtifactEmitContext,
+        )
+
+        if self._parent_session is None or not isinstance(ctx.inputs, ToolCallInputs):
+            return
+
+        artifact_ctx = ArtifactEmitContext(
+            session=self._parent_session,
+            tool_result=ctx.inputs.tool_result,
+            tool_name=ctx.inputs.tool_name,
+            workspace_base=self._get_workspace_base_path(),
+            tool_start_time=getattr(ctx, '_tool_start_time', None),
+            task_id=self._subagent_id or get_global_task_id(),
+            subagent_id=self._subagent_id,
+            log_prefix="[SubagentArtifact]",
+        )
+        
+        await emit_artifact_generated(artifact_ctx)
+
+    def _get_workspace_base_path(self) -> Any | None:
+        """Get workspace base path for path validation.
+
+        Returns:
+            Workspace base path, or None if not available
+        """
+        # Use workspace from rail configuration
+        if self._workspace is not None:
+            try:
+                return self._workspace.get_node_path(WorkspaceNode.TODO)
+            except Exception as e:
+                logger.debug("[SubagentArtifact] Failed to get workspace node path: %s", e)
+                return getattr(self._workspace, 'root_path', None)
+
+        # Fallback to agent workspace
+        try:
+            return get_agent_workspace_dir()
+        except Exception as e:
+            logger.debug("[SubagentArtifact] Failed to get agent workspace dir: %s", e)
+            return None
 
     async def on_model_exception(self, ctx: AgentCallbackContext) -> None:
         """Clear context on exception."""

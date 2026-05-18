@@ -8,6 +8,7 @@ Core executor for fork_agent and spawn_subagent execution.
 from __future__ import annotations
 
 import asyncio
+from pathlib import Path
 from typing import Any, TYPE_CHECKING
 
 from openjiuwen.core.runner import Runner
@@ -126,18 +127,31 @@ class ForkAgentExecutor:
         """Resolve workspace for fork/spawn to match the main agent for the current request.
 
         Order: per-request (same as RuntimePromptRail) > parent DeepAgent workspace > agent root.
+        
+        Validates path existence before returning to prevent runtime errors.
         """
         req_ws = get_effective_request_workspace_dir()
         if isinstance(req_ws, str) and req_ws.strip():
-            return (req_ws.strip(), "effective_request_workspace_dir")
+            ws_path = Path(req_ws.strip())
+            if ws_path.exists() and ws_path.is_dir():
+                return (req_ws.strip(), "effective_request_workspace_dir")
+            logger.warning(
+                "[Subagent] Request workspace path does not exist or not a directory: '%s'",
+                req_ws.strip()
+            )
 
         parent_config = getattr(self._parent_agent, "deep_config", None)
         if parent_config and hasattr(parent_config, "workspace"):
             parent_ws = getattr(parent_config.workspace, "root_path", None)
             if parent_ws:
                 root = str(parent_ws).strip()
-                if root:
+                ws_path = Path(root)
+                if ws_path.exists() and ws_path.is_dir():
                     return (root, "parent_config.workspace.root_path")
+                logger.warning(
+                    "[Subagent] Parent workspace path does not exist or not a directory: '%s'",
+                    root
+                )
 
         return (get_agent_root_dir(), "get_agent_root_dir()")
 
@@ -598,7 +612,11 @@ Approach each task methodically and deliver high-quality results.
                 minimal=True,
             ) or JiuClawContextEngineeringRail(preset=True, minimal=True)
         rails = [
-            SubagentContextRail(subagent_id=task.task_id, parent_session=parent_session),
+            SubagentContextRail(
+                subagent_id=task.task_id,
+                parent_session=parent_session,
+                workspace=workspace_obj,  # Pass workspace for artifact path detection
+            ),
             # active-skill body 的 lift/pin 由 rail.after_tool_call 触发；
             # include_tools/include_skill_body_tools 都关掉：skill_tool/skill_complete
             # 已通过 _inherit_tools_for_spawn 从父 agent 继承，不重复注册。
@@ -747,7 +765,11 @@ Execute the given task using inherited context and available tools.
             ) or JiuClawContextEngineeringRail(preset=True, minimal=True)
         rails = [
             ForkMessageInjectionRail(fork_messages),  # 注入继承的消息
-            SubagentContextRail(subagent_id=task.task_id, parent_session=parent_session),
+            SubagentContextRail(
+                subagent_id=task.task_id,
+                parent_session=parent_session,
+                workspace=workspace_obj,  # Pass workspace for artifact path detection
+            ),
             # 与 spawn 路径同样的 active-skill body lift/pin 接入；
             # fork 继承的 skill_tool/skill_complete 走 _inherit_tools_for_fork。
             SubagentSkillUseRail(

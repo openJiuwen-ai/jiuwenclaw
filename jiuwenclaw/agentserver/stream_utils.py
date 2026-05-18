@@ -305,6 +305,23 @@ def _parse_typed_chunk(chunk: Any, _has_streamed_content: bool) -> dict[str, Any
         )
         return {"event_type": "todo.updated", "todos": todos}
 
+    if chunk_type == "task.update":
+        tasks = (
+            payload.get("tasks", [])
+            if isinstance(payload, dict)
+            else []
+        )
+        return {
+            "event_type": "task.update",
+            "tasks": tasks,
+            "total_tasks": payload.get("total_tasks", len(tasks)) if isinstance(payload, dict) else len(tasks),
+            "completed_tasks": payload.get("completed_tasks", 0) if isinstance(payload, dict) else 0,
+            "in_progress_tasks": payload.get("in_progress_tasks", 0) if isinstance(payload, dict) else 0,
+            "pending_tasks": payload.get("pending_tasks", 0) if isinstance(payload, dict) else 0,
+            "timestamp": payload.get("timestamp") if isinstance(payload, dict) else None,
+            "parent_request_id": payload.get("parent_request_id") if isinstance(payload, dict) else None,
+        }
+
     if chunk_type == "context.compressed":
         if isinstance(payload, dict):
             return {

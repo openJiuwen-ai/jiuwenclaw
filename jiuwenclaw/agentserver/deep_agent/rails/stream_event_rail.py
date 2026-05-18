@@ -42,7 +42,10 @@ from jiuwenclaw.agentserver.tools.subagent_executor import (
     set_current_agent_context,
 )
 
-_TODO_TOOL_NAMES = frozenset(["todo_create", "todo_list", "todo_modify"])
+_TODO_TOOL_NAMES = frozenset([
+    "todo_create", "todo_start", "todo_complete", "todo_complete_batch",
+    "todo_insert", "todo_remove", "todo_modify", "todo_list"
+])
 _DEFAULT_CONTEXT_WINDOW_LIMIT_TOKENS = 128000
 _EARLY_CHECKPOINT_EXTRA_KEY = "_jiuwenclaw_early_checkpoint_done"
 _EARLY_CHECKPOINT_ENV = "JIUWENCLAW_EARLY_CHECKPOINT"

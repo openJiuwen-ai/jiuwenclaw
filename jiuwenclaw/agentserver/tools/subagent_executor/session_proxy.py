@@ -27,13 +27,16 @@ class SubagentSessionProxy:
     - Fork from subagent: sess_xxx_subagent_1222fc63_fork_295a9e7
     """
 
-    # Event types to forward (tool execution + thinking process + permission requests)
+    # Event types to forward (tool execution + thinking process + permission requests + artifacts)
     # Include tool_update for showing tool execution status (in_progress, etc.)
+    # Include artifact.generated for intermediate/final artifact preview
     FORWARD_TYPES = {
         "tool_call", "tool_result", "tool_update",
         "thinking", "llm_reasoning",
         "retry_notification", "chat.ask_user_question",
         "context.compressed",  # Context compression info
+        "artifact.generated",  # Artifact preview (subagent Write tool outputs)
+        "task.start", "task.complete", "task.update",  # Task execution tracking (including full list updates)
     }
     # Event types to suppress (user-facing messages only)
     SUPPRESS_TYPES = {"answer", "complete", "start"}

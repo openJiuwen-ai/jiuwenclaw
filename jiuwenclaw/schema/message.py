@@ -160,6 +160,7 @@ class EventType(Enum):
     CHAT_EVOLUTION_STATUS = "chat.evolution_status"
     CHAT_SUBTASK_UPDATE = "chat.subtask_update"
     TASK_START = "task.start"
+    TASK_UPDATE = "task.update"
     TASK_COMPLETE = "task.complete"
     CHAT_ASK_USER_QUESTION = "chat.ask_user_question"
     CHAT_SESSION_RESULT = "chat.session_result"
