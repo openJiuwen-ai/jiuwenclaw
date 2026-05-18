@@ -2698,6 +2698,7 @@ class JiuWenSwarmDeepAdapter:
             return
         try:
             from jiuwenswarm.server.runtime.enterprise_config import (
+                DEFAULT_AGENT_LOAD_SLOTS,
                 load_effective_enterprise_config,
             )
         except ImportError as exc:
@@ -2706,7 +2707,10 @@ class JiuWenSwarmDeepAdapter:
             )
             return
 
-        loaded = await load_effective_enterprise_config(request)
+        loaded = await load_effective_enterprise_config(
+            request,
+            DEFAULT_AGENT_LOAD_SLOTS,
+        )
         self._enterprise_config = loaded
         if loaded is None:
             p = request.params if isinstance(request.params, dict) else {}

@@ -49,11 +49,11 @@ def sales_ctx() -> RoutingContext:
     )
 
 
-def test_normalize_template_ref_accepts_string_and_list() -> None:
+def test_normalize_template_ref_accepts_list() -> None:
     assert normalize_template_ref(None) == {}
     assert normalize_template_ref(
         {
-            "default_model": "f2222222-2222-4222-8222-222222222202",
+            "default_model": ["f2222222-2222-4222-8222-222222222202"],
             "vision_model": ["f2222222-2222-4222-8222-222222222202"],
             "skill_whitelist": [
                 "a1000001-0000-4000-8000-000000000001",
@@ -68,6 +68,13 @@ def test_normalize_template_ref_accepts_string_and_list() -> None:
             "abc",
         ],
     }
+
+
+def test_normalize_template_ref_rejects_string_slot_value() -> None:
+    with pytest.raises(ValueError, match="must be a list"):
+        normalize_template_ref(
+            {"default_model": "f2222222-2222-4222-8222-222222222202"},
+        )
 
 
 @pytest.mark.asyncio
@@ -315,6 +322,7 @@ async def test_load_effective_config_fills_missing_slots_from_global(
 ) -> None:
     from jiuwenswarm.server.runtime.enterprise_config import gateway_db
     from jiuwenswarm.server.runtime.enterprise_config.loader import (
+        DEFAULT_AGENT_LOAD_SLOTS,
         load_effective_enterprise_config,
     )
     from jiuwenswarm.common.schema.agent import AgentRequest
@@ -410,7 +418,10 @@ async def test_load_effective_config_fills_missing_slots_from_global(
             "user_id": "bob",
         },
     )
-    loaded = await load_effective_enterprise_config(request)
+    loaded = await load_effective_enterprise_config(
+        request,
+        DEFAULT_AGENT_LOAD_SLOTS,
+    )
     assert loaded is not None
     assert loaded.template_ref["default_model"] == [m5]
     assert loaded.template_ref["vision_model"] == [m2]
@@ -427,6 +438,7 @@ async def test_load_effective_config_scopes_global_policy_by_jiuwenclaw_id(
 ) -> None:
     from jiuwenswarm.server.runtime.enterprise_config import gateway_db
     from jiuwenswarm.server.runtime.enterprise_config.loader import (
+        DEFAULT_AGENT_LOAD_SLOTS,
         load_effective_enterprise_config,
     )
     from jiuwenswarm.common.schema.agent import AgentRequest
@@ -486,7 +498,10 @@ async def test_load_effective_config_scopes_global_policy_by_jiuwenclaw_id(
             "user_id": "bob",
         },
     )
-    loaded = await load_effective_enterprise_config(request)
+    loaded = await load_effective_enterprise_config(
+        request,
+        DEFAULT_AGENT_LOAD_SLOTS,
+    )
     assert loaded is not None
     assert loaded.global_policy_id == 4
     assert loaded.template_ref["extension_config"] == [e4]

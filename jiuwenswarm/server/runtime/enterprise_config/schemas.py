@@ -6,6 +6,9 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Any
 
+SERVICE_CONFIG_SLOT = "service_config"
+SERVICE_CONFIG_TABLE = "service_config_template"
+
 
 class TemplateRefSlot(StrEnum):
     """``template_ref`` JSON 键名，与 ``config_default_template_mapping.template_type`` 一致。"""
@@ -16,6 +19,7 @@ class TemplateRefSlot(StrEnum):
     VISION_MODEL = "vision_model"
     SKILL_WHITELIST = "skill_whitelist"
     EXTENSION_CONFIG = "extension_config"
+    SERVICE_CONFIG = "service_config"
 
 
 SLOT_ENTITY_TABLE: dict[TemplateRefSlot, str] = {
@@ -25,6 +29,7 @@ SLOT_ENTITY_TABLE: dict[TemplateRefSlot, str] = {
     TemplateRefSlot.VISION_MODEL: "model_template",
     TemplateRefSlot.SKILL_WHITELIST: "skill_whitelist_template",
     TemplateRefSlot.EXTENSION_CONFIG: "extension_config_template",
+    TemplateRefSlot.SERVICE_CONFIG: "service_config_template",
 }
 
 MODEL_SLOT_KEYS = frozenset({
@@ -34,32 +39,11 @@ MODEL_SLOT_KEYS = frozenset({
     TemplateRefSlot.VISION_MODEL,
 })
 
-SLOT_TO_CONFIG_KEY: dict[TemplateRefSlot, str] = {
-    TemplateRefSlot.DEFAULT_MODEL: "default",
-    TemplateRefSlot.VISION_MODEL: "vision",
-    TemplateRefSlot.AUDIO_MODEL: "audio",
-    TemplateRefSlot.VIDEO_MODEL: "video",
-}
-
-
-def _normalize_slot_refs(raw: Any) -> list[str]:
-    """将单槽位原始值规范为引用字符串列表（兼容历史单字符串写法）。"""
-    if raw is None:
-        return []
-    if isinstance(raw, str):
-        text = raw.strip()
-        return [text] if text else []
-    if isinstance(raw, list):
-        out: list[str] = []
-        for item in raw:
-            if item is None:
-                continue
-            text = str(item).strip()
-            if text:
-                out.append(text)
-        return out
-    text = str(raw).strip()
-    return [text] if text else []
+DEFAULT_AGENT_LOAD_SLOTS = frozenset({
+    *MODEL_SLOT_KEYS,
+    TemplateRefSlot.SKILL_WHITELIST,
+    TemplateRefSlot.EXTENSION_CONFIG,
+})
 
 
 def normalize_template_ref(value: Any) -> dict[str, list[str]]:
@@ -67,13 +51,19 @@ def normalize_template_ref(value: Any) -> dict[str, list[str]]:
     if value is None:
         return {}
     if not isinstance(value, dict):
-        return {}
+        raise ValueError("template_ref must be a JSON object")
     out: dict[str, list[str]] = {}
     for key, raw in value.items():
         slot = str(key).strip()
-        if not slot:
+        if not slot or raw is None:
             continue
-        refs = _normalize_slot_refs(raw)
+        if not isinstance(raw, list):
+            raise ValueError(f"template_ref[{slot!r}] must be a list")
+        refs = [
+            str(item).strip()
+            for item in raw
+            if item is not None and str(item).strip()
+        ]
         if refs:
             out[slot] = refs
     return out
@@ -102,6 +92,7 @@ class EffectiveEnterpriseConfig:
     models: dict[str, list[dict[str, Any]]] = field(default_factory=dict)
     skill_whitelist: list[dict[str, Any]] | None = None
     extension_config: list[dict[str, Any]] | None = None
+    service_config: list[dict[str, Any]] | None = None
     service_policy_id: int | None = None
     agent_policy_id: int | None = None
     global_policy_id: int | None = None
@@ -117,8 +108,22 @@ class EffectiveEnterpriseConfig:
             "models": dict(self.models),
             "skill_whitelist": self.skill_whitelist,
             "extension_config": self.extension_config,
+            "service_config": self.service_config,
             "service_policy_id": self.service_policy_id,
             "agent_policy_id": self.agent_policy_id,
             "global_policy_id": self.global_policy_id,
             "debug": dict(self.debug),
         }
+
+
+__all__ = (
+    "SERVICE_CONFIG_SLOT",
+    "SERVICE_CONFIG_TABLE",
+    "DEFAULT_AGENT_LOAD_SLOTS",
+    "EffectiveEnterpriseConfig",
+    "MODEL_SLOT_KEYS",
+    "RoutingContext",
+    "SLOT_ENTITY_TABLE",
+    "TemplateRefSlot",
+    "normalize_template_ref",
+)
