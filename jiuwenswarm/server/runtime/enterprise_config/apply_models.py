@@ -42,7 +42,12 @@ def apply_enterprise_models_to_config(
     config_base: dict[str, Any],
     enterprise: EffectiveEnterpriseConfig,
 ) -> tuple[dict[str, Any], bool]:
-    """深拷贝 ``config_base`` 并写入企业模型槽位；返回 ``(merged, applied_any)``。"""
+    """深拷贝 ``config_base`` 并写入企业模型槽位；返回 ``(merged, applied_any)``。
+
+    ``template_ref`` 各槽位可解析出多个 ``template_id``，但写入 ``config.yaml`` 兼容结构时，
+    **每个模型槽位仅取列表首项**（第一个有效模板）写入 ``SLOT_TO_CONFIG_KEY`` 对应的 config 键
+    （如 ``default_model`` → ``models.default``）。其余 ``template_id`` 不在此函数中展开。
+    """
     if not enterprise.models:
         return config_base, False
 
@@ -53,11 +58,11 @@ def apply_enterprise_models_to_config(
         merged["models"] = models_section
 
     applied = False
-    default_entries: list[dict[str, Any]] = []
+    default_entry: dict[str, Any] | None = None
 
-    for slot, entity in enterprise.models.items():
-        if not isinstance(entity, dict):
-            continue
+    for slot, entities in enterprise.models.items():
+        if not isinstance(entities, list):
+            entities = [entities] if isinstance(entities, dict) else []
         try:
             slot_key = TemplateRefSlot(slot)
         except ValueError:
@@ -65,30 +70,41 @@ def apply_enterprise_models_to_config(
         config_key = SLOT_TO_CONFIG_KEY.get(slot_key)
         if not config_key:
             continue
-        entry = model_entity_to_config_entry(entity)
-        mcc = entry.get("model_client_config") or {}
-        if not str(mcc.get("model_name") or "").strip():
+
+        entry: dict[str, Any] | None = None
+        for entity in entities:
+            if not isinstance(entity, dict):
+                continue
+            candidate = model_entity_to_config_entry(entity)
+            mcc = candidate.get("model_client_config") or {}
+            if not str(mcc.get("model_name") or "").strip():
+                continue
+            entry = candidate
+            break
+
+        if entry is None:
             continue
 
+        mcc = entry.get("model_client_config") or {}
         models_section[config_key] = {
             "model_client_config": dict(mcc),
             "model_config_obj": dict(entry.get("model_config_obj") or {}),
         }
         if config_key == "default":
-            default_entries.append(entry)
+            default_entry = entry
         applied = True
 
-    if default_entries:
-        models_section["defaults"] = default_entries
-        models_section["default"] = default_entries[0]
+    if default_entry is not None:
+        models_section["defaults"] = [default_entry]
+        models_section["default"] = default_entry
         react = merged.get("react")
         if isinstance(react, dict):
-            mcc = default_entries[0].get("model_client_config") or {}
+            mcc = default_entry.get("model_client_config") or {}
             if mcc.get("model_name"):
                 react["model_name"] = mcc["model_name"]
             if mcc:
                 react["model_client_config"] = dict(mcc)
-            mco = default_entries[0].get("model_config_obj")
+            mco = default_entry.get("model_config_obj")
             if isinstance(mco, dict) and mco:
                 react["model_config_obj"] = dict(mco)
 
