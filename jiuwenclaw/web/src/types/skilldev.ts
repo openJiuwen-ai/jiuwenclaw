@@ -234,7 +234,8 @@ export type SkillDevEventType =
   | 'skilldev.tool_result'
   | 'skilldev.error'
   | 'skilldev.suspended'
-  | 'skilldev.completed';
+  | 'skilldev.completed'
+  | 'skilldev.agent_completed';
 
 /** 开始任务参数 */
 export interface StartSkillDevParams {

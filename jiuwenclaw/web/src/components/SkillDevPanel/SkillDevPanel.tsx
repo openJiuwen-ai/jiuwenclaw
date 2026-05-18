@@ -566,6 +566,12 @@ export function SkillDevPanel() {
     });
   }, [endThinkingStream, setProcessing, setSuspended, setTodos, addMessage, t]);
 
+  const handleAgentCompleted = useCallback((data?: { __restore_ts?: string }) => {
+    endThinkingStream();
+    setProcessing(false);
+    setSuspended(false);
+  }, [endThinkingStream, setProcessing, setSuspended]);
+
   const handleToolCall = useCallback((data: {
     tool_call_id?: string;
     tool_name?: string;
@@ -692,6 +698,7 @@ export function SkillDevPanel() {
     handleError,
     handleSuspended,
     handleCompleted,
+    handleAgentCompleted,
     handleToolCall,
     handleToolResult,
     handleAskUserQuestion,
@@ -702,7 +709,7 @@ export function SkillDevPanel() {
       handleAgentOutput, handleTestProgress, handleTodosUpdate, handleConfirmRequest,
       handleConfirmResolved,
       handleArtifactReady, handleSkillNameReady, handleEvalReady, handleValidateResult, handleDescOptReady,
-      handleError, handleSuspended, handleCompleted, handleToolCall, handleToolResult,
+      handleError, handleSuspended, handleCompleted, handleAgentCompleted, handleToolCall, handleToolResult,
       handleAskUserQuestion,
     };
   });
@@ -727,6 +734,7 @@ export function SkillDevPanel() {
       { name: 'skilldev.error',          key: 'handleError' },
       { name: 'skilldev.suspended',      key: 'handleSuspended' },
       { name: 'skilldev.completed',      key: 'handleCompleted' },
+      { name: 'skilldev.agent_completed', key: 'handleAgentCompleted' },
       { name: 'skilldev.tool_call',      key: 'handleToolCall' },
       { name: 'skilldev.tool_result',    key: 'handleToolResult' },
       { name: 'skilldev.ask_user_question', key: 'handleAskUserQuestion' },
