@@ -1024,6 +1024,7 @@ class JiuWenSwarmDeepAdapter:
         self._config_base_cache: dict[str, Any] | None = None
         self._startup_config_base: dict[str, Any] | None = None
         self._model_config_source: str = "config.yaml"
+        self._enterprise_config: Any = None
         self._config_cache: dict[str, Any] = {}
         self._filesystem_rail: SysOperationRail | None = None
         self._skill_rail: SkillUseRail | None = None
@@ -2669,45 +2670,53 @@ class JiuWenSwarmDeepAdapter:
             self._format_active_model_startup_log(),
         )
 
-    async def _apply_enterprise_model_policy(
-        self,
-        request: AgentRequest | None = None,
-        *,
-        routing: dict[str, Any] | None = None,
-    ) -> bool:
-        """从 Gateway DB 按策略解析模型并应用到当前 Adapter（返回是否已应用）。"""
+    def _merge_enterprise_models_into_config(
+        self, config_base: dict[str, Any]
+    ) -> dict[str, Any]:
+        """若已加载 ``_enterprise_config``，将其模型槽位覆盖到 config 快照上。"""
+        if self._enterprise_config is None:
+            return config_base
+        from jiuwenswarm.server.runtime.enterprise_config.apply_models import (
+            apply_enterprise_models_to_config,
+        )
+
+        merged, applied = apply_enterprise_models_to_config(
+            config_base, self._enterprise_config
+        )
+        if applied:
+            self._model_config_source = "enterprise_policy"
+            logger.info(
+                "[JiuWenSwarmDeepAdapter] using enterprise model config: slots=%s",
+                list(self._enterprise_config.models),
+            )
+        return merged
+
+    async def _load_enterprise_config(self, request: AgentRequest) -> None:
+        """按当前请求的 ``params`` 从 Gateway DB 加载生效企业策略到 ``self._enterprise_config``。"""
+        self._enterprise_config = None
+        if not os.getenv("AGENT_RUNTIME", "").strip():
+            return
         try:
             from jiuwenswarm.server.runtime.enterprise_config import (
-                apply_effective_models_to_config,
-                enterprise_policy_enabled,
-                resolve_effective_model_slots,
-                routing_context_from_mapping,
-                routing_context_from_request,
+                load_effective_enterprise_config,
             )
         except ImportError as exc:
-            logger.warning("[JiuWenSwarmDeepAdapter] enterprise_config unavailable: %s", exc)
-            return False
+            logger.error(
+                "[JiuWenSwarmDeepAdapter] enterprise_config unavailable: %s", exc
+            )
+            return
 
-        if not enterprise_policy_enabled():
-            return False
-
-        if routing is not None:
-            ctx = routing_context_from_mapping(routing)
-        elif request is not None:
-            ctx = routing_context_from_request(request)
-        else:
-            return False
-
-        effective = await resolve_effective_model_slots(ctx)
-        if effective is None:
-            return False
-
-        config_base = apply_effective_models_to_config(get_config(), effective)
-        self._model_config_source = "enterprise_policy"
-        self._refresh_multimodal_configs(config_base)
-        model = self._create_model(config_base)
-        self._apply_model_to_react_agent(model)
-        return True
+        loaded = await load_effective_enterprise_config(request)
+        self._enterprise_config = loaded
+        if loaded is None:
+            p = request.params if isinstance(request.params, dict) else {}
+            logger.warning(
+                "[JiuWenSwarmDeepAdapter] no effective enterprise config loaded "
+                "(group_id=%s bot_id=%s user_id=%s)",
+                p.get("group_id"),
+                p.get("bot_id"),
+                p.get("user_id"),
+            )
 
     def _refresh_multimodal_configs(
         self,
@@ -5383,30 +5392,11 @@ class JiuWenSwarmDeepAdapter:
         self._instance_overrides = dict(config or {}) if isinstance(config, dict) else {}
         load_dotenv_runtime(dotenv_path=get_env_file(), override=True)
         config_base = get_config()
-        # 企业版：create_instance 时可带 enterprise_routing 预下发模型配置
-        enterprise_routing = self._instance_overrides.get("enterprise_routing")
-        if isinstance(enterprise_routing, dict) and os.getenv("AGENT_RUNTIME", "").strip():
-            try:
-                from jiuwenswarm.server.runtime.enterprise_config import (
-                    apply_effective_models_to_config,
-                    enterprise_policy_enabled,
-                    resolve_effective_model_slots,
-                    routing_context_from_mapping,
-                )
-
-                if enterprise_policy_enabled():
-                    ctx = routing_context_from_mapping(enterprise_routing)
-                    effective = await resolve_effective_model_slots(ctx)
-                    if effective is not None:
-                        config_base = apply_effective_models_to_config(
-                            config_base, effective
-                        )
-                        self._model_config_source = "enterprise_policy"
-            except Exception as exc:
-                logger.warning(
-                    "[JiuWenSwarmDeepAdapter] enterprise policy on create_instance failed: %s",
-                    exc,
-                )
+        # 企业版：create_instance 时可带 request，按 params 加载企业配置并合并模型
+        bootstrap_request = self._instance_overrides.pop("request", None)
+        if bootstrap_request is not None and os.getenv("AGENT_RUNTIME", "").strip():
+            await self._load_enterprise_config(bootstrap_request)
+        config_base = self._merge_enterprise_models_into_config(config_base)
         self._config_base_cache = config_base.copy()
         self._startup_config_base = config_base.copy()
         self._refresh_multimodal_configs(config_base)
@@ -5700,38 +5690,9 @@ class JiuWenSwarmDeepAdapter:
             config_base = resolve_env_vars(config_base)
 
         self._config_base_cache = config_base.copy()
+        config_base = self._merge_enterprise_models_into_config(config_base)
+        self._config_base_cache = config_base.copy()
         self._refresh_multimodal_configs(config_base)
-
-        if os.getenv("AGENT_RUNTIME", "").strip():
-            try:
-                from jiuwenswarm.server.runtime.enterprise_config import (
-                    apply_effective_models_to_config,
-                    enterprise_policy_enabled,
-                    invalidate_policy_cache,
-                    resolve_effective_model_slots,
-                    reset_store,
-                    routing_context_from_mapping,
-                )
-
-                if enterprise_policy_enabled():
-                    invalidate_policy_cache()
-                    reset_store()
-                    enterprise_routing = self._instance_overrides.get("enterprise_routing")
-                    if isinstance(enterprise_routing, dict):
-                        ctx = routing_context_from_mapping(enterprise_routing)
-                        effective = await resolve_effective_model_slots(ctx)
-                        if effective is not None:
-                            config_base = apply_effective_models_to_config(
-                                config_base, effective
-                            )
-                            self._model_config_source = "enterprise_policy"
-                            self._config_base_cache = config_base.copy()
-                            self._refresh_multimodal_configs(config_base)
-            except Exception as exc:
-                logger.warning(
-                    "[JiuWenSwarmDeepAdapter] enterprise policy on reload failed: %s",
-                    exc,
-                )
 
         self._config_cache = config_base.get("react", {}).copy()
         return config_base
@@ -8812,7 +8773,6 @@ class JiuWenSwarmDeepAdapter:
         self._runtime_cron_tool_context.remember_current_binding()
         token_cid = TOOL_PERMISSION_CHANNEL_ID.set((request.channel_id or "").strip())
         token_perm = setup_permission_context(request)
-        await self._apply_enterprise_model_policy(request)
         resolved_model = self._resolve_model_for_request(request)
         self._apply_model_to_react_agent(resolved_model)
         self._mark_session_active(session_id)
@@ -9332,8 +9292,7 @@ class JiuWenSwarmDeepAdapter:
         self._runtime_cron_tool_context.remember_current_binding()
         token_cid = TOOL_PERMISSION_CHANNEL_ID.set((request.channel_id or "").strip())
         token_perm = setup_permission_context(request)
-        # 按请求选择模型（企业版可先按策略下发）
-        await self._apply_enterprise_model_policy(request)
+        # 按请求选择模型（企业配置已在 create_instance 合并）
         resolved_model = self._resolve_model_for_request(request)
         self._apply_model_to_react_agent(resolved_model)
         self._mark_session_active(session_id)

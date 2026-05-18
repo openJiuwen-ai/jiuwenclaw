@@ -754,25 +754,9 @@ class AgentManager:
                     **config,
                     **_build_acp_agent_config()
                 }
-            # 企业版：创建 agent 时附带请求级 routing，供模型策略预下发
+            # 企业版：创建 agent 时附带完整 request，供 create_instance 加载企业配置
             if request is not None and os.getenv("AGENT_RUNTIME", "").strip():
-                try:
-                    from jiuwenswarm.server.runtime.enterprise_config import (
-                        enterprise_policy_enabled,
-                        routing_context_from_request,
-                    )
-
-                    if enterprise_policy_enabled():
-                        config = {
-                            **config,
-                            "enterprise_routing": routing_context_from_request(
-                                request
-                            ).as_dict(),
-                        }
-                except Exception as exc:
-                    logger.warning(
-                        "[AgentManager] enterprise routing context skipped: %s", exc
-                    )
+                config = {**config, "request": request}
             agent = await self._create_agent(
                 channel_key,
                 mode_key,
