@@ -61,7 +61,8 @@ CMD=""
 
 
 # ==== All available modules ====
-declare -ga ALL_MODULES=("NFS" "RABBITMQ" "YR_CLAW" "GATEWAY" "WEB" "MANAGER")
+#declare -ga ALL_MODULES=("NFS" "RABBITMQ" "YR_CLAW" "GATEWAY" "WEB" "MANAGER")
+declare -ga ALL_MODULES=("NFS" "RABBITMQ" "GATEWAY" "WEB" "MANAGER")
 
 declare -ga MODULES=()
 
