@@ -1326,7 +1326,7 @@ class VibeSkillChannel(BaseChannel):
             timestamp=time.time(),
             ok=True,
             req_method=ReqMethod.SKILLDEV_USER_ANSWER,
-            is_stream=True,
+            is_stream=False,
             metadata={_VIBESKILL_ORIGINAL_SESSION_ID_KEY: external_session_id} if external_session_id else None,
         )
         logger.info(
@@ -1450,7 +1450,7 @@ class VibeSkillChannel(BaseChannel):
                     timestamp=time.time(),
                     ok=True,
                     req_method=ReqMethod.SKILLDEV_CANCEL,
-                    is_stream=True,
+                    is_stream=False,
                 )
                 logger.info(
                     "[VibeSkillChannel] skilldev.cancel sent, session_id=%s",
