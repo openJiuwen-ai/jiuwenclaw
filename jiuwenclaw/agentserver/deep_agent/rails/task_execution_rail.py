@@ -712,7 +712,7 @@ class TaskExecutionRail(DeepAgentRail):
         await self._emit_task_update_event(ctx.session, parent_request_id)
 
     async def _start_first_uncompleted_skill_step(self, ctx: AgentCallbackContext) -> None:
-        """Read skill_step.md, complete finished tasks, and bind first uncompleted as current."""
+        """Read skill_step.md, complete finished tasks, emit task.start for next uncompleted, bind context."""
         if ctx.session is None:
             return
         session_id = ctx.session.get_session_id()
@@ -749,13 +749,27 @@ class TaskExecutionRail(DeepAgentRail):
                 )
         self._skill_step_started -= set(current_map.keys())
 
-        # Find first uncompleted task and bind context (without emitting task.start)
+        parent_request_id = self._extract_request_id(ctx)
+
+        # First uncompleted step: mark in_progress in memory, emit task.start (before stream chunks
+        # for this step), then bind context via _emit_task_start_event. Keeps _maybe_start_pending_skill_step_task
+        # from double-starting (has_in_progress).
         for task_id, task in current_map.items():
             status = task.get("status", "")
             if status not in ("completed", "cancelled"):
-                full_task_id = f"skill_step:{task_id}"
-                _ACTIVE_TASK_ID.set(full_task_id)
-                self._current_task_id = full_task_id
+                self._skill_step_map[task_id]["status"] = "in_progress"
+                await self._emit_task_start_event(
+                    ctx.session,
+                    task_id,
+                    self._skill_step_map[task_id],
+                    parent_request_id,
+                    source="skill_step",
+                )
+                self._skill_step_started.add(task_id)
+                logger.info(
+                    "==========[TaskExecutionRail] start skill_step task: id=skill_step:%s",
+                    task_id,
+                )
                 return
 
         # No skill_step.md or all tasks completed — clear skill_step context
