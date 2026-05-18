@@ -61,26 +61,40 @@ storage:
   # 对象存储配置（AgentServer 内部使用）
   # ============================================================
   # 存储后端类型：local（本地文件系统）, huawei-obs（华为云OBS）, aliyun-oss（阿里云OSS）
+  # 或自定义类型（需配合 backend_class 配置）
   type: ${STORAGE_TYPE:-local}
 
+  # 自定义 Backend 类路径（可选）
+  # 格式："module_path.ClassName"
+  # 示例："myapp.storage.MyObsBackend"
+  # 当配置此字段时，SDK 会自动加载并注册自定义 Backend 类
+  # backend_class: ${STORAGE_BACKEND_CLASS:-}
+
   # 本地文件系统存储配置（开源版本、开发环境）
+  # SDK 内置 LocalStorageBackend，无需 backend_class 配置
   local:
+    # root_path: ${STORAGE_LOCAL_ROOT_PATH:-/tmp/jiuwenclaw-storage}
+    # 旧字段兼容（已弃用，建议使用 root_path）
     base_dir: ${STORAGE_LOCAL_BASE_DIR:-~/.jiuwenclaw/storage/local}
     upload_dir: ${STORAGE_LOCAL_UPLOAD_DIR:-~/.jiuwenclaw/uploads}
 
   # 华为云 OBS 配置（商用版本、生产环境）
+  # 需用户自行实现 ObsStorageBackend 或配置 backend_class
   huawei_obs:
     access_key: ${OBS_ACCESS_KEY:-}
     secret_key: ${OBS_SECRET_KEY:-}
     endpoint: ${OBS_ENDPOINT:-obs.cn-north-4.myhuaweicloud.com}
     bucket: ${OBS_BUCKET:-}
+    # backend_class: "myapp.storage.ObsStorageBackend"  # 示例
 
   # 阿里云 OSS 配置（商用版本、生产环境）
+  # 需用户自行实现 OssStorageBackend 或配置 backend_class
   aliyun_oss:
     access_key: ${OSS_ACCESS_KEY:-}
     secret_key: ${OSS_SECRET_KEY:-}
     endpoint: ${OSS_ENDPOINT:-oss-cn-hangzhou.aliyuncs.com}
     bucket: ${OSS_BUCKET:-}
+    # backend_class: "myapp.storage.OssStorageBackend"  # 示例
 
 memory:
   # ============================================================

@@ -21,6 +21,7 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
 def _pick_free_port() -> int:
+    """Pick a free port."""
     sock = socket.socket()
     sock.bind(("127.0.0.1", 0))
     port = sock.getsockname()[1]
@@ -82,7 +83,7 @@ async def _wait_for_log(log_path: Path, needle: str, timeout: float = 30.0) -> N
     )
 
 
-async def _wait_for_websocket_ready(url: str, timeout: float = 30.0) -> None:
+async def _wait_for_websocket_ready(url: str, timeout: float = 30.0, log_path: Path | None = None) -> None:
     deadline = asyncio.get_running_loop().time() + timeout
     last_error: Exception | None = None
     while asyncio.get_running_loop().time() < deadline:
@@ -92,8 +93,13 @@ async def _wait_for_websocket_ready(url: str, timeout: float = 30.0) -> None:
         except Exception as exc:  # noqa: BLE001
             last_error = exc
             await asyncio.sleep(0.2)
+    # 添加诊断信息
+    log_text = ""
+    if log_path and log_path.exists():
+        log_text = log_path.read_text(encoding="utf-8", errors="ignore")
     raise AssertionError(
-        f"Timed out waiting for websocket: {url} last_error={last_error}"
+        f"Timed out waiting for websocket: {url} last_error={last_error}\n"
+        f"Log file content:\n{log_text}"
     )
 
 
@@ -130,18 +136,21 @@ async def test_cli_route_system_roundtrip(temp_home: Path, monkeypatch: pytest.M
         env=env,
         log_path=agent_log,
     )
+
     gateway_proc = None
     try:
         await _wait_for_log(agent_log, "ready:", timeout=60)
 
         gateway_proc = _start_process(
-            [sys.executable, "-m", "jiuwenclaw.app_gateway", "--port", str(web_port)],
+            [sys.executable, "-m", "jiuwenclaw.app_gateway"],
             env=env,
             log_path=gateway_log,
         )
+
         await _wait_for_websocket_ready(
             f"ws://127.0.0.1:{gateway_port}/tui",
             timeout=60,
+            log_path=gateway_log,
         )
 
         async with websockets.connect(f"ws://127.0.0.1:{gateway_port}/tui") as ws:

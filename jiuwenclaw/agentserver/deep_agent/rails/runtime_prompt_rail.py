@@ -118,7 +118,13 @@ class RuntimePromptRail(DeepAgentRail):
 
     async def before_model_call(self, ctx: AgentCallbackContext) -> None:
         """每次 model call 注入最新的时间和运行时信息。"""
+        logger.info(
+            "[RuntimePromptRail] before_model_call 开始执行: language=%s channel=%s agent=%s model=%s",
+            self._language, self._channel, self._agent_name, self._model_name
+        )
+
         if not self.system_prompt_builder:
+            logger.warning("[RuntimePromptRail] system_prompt_builder 未初始化，无法注入 section")
             return
 
         now = datetime.now(tz=self._tz)
@@ -177,6 +183,7 @@ class RuntimePromptRail(DeepAgentRail):
             content={"cn": runtime_content, "en": runtime_content},
             priority=95,
         ))
+        logger.info("[RuntimePromptRail] runtime section 已注入")
 
         # 使用多租户感知的方法获取路径
         dirs = self._get_workspace_dirs()
@@ -185,6 +192,17 @@ class RuntimePromptRail(DeepAgentRail):
         memory_dir = dirs["memory"]
         skills_dir = dirs["skills"]
         todo_dir = dirs["todo"]
+
+        #  关键诊断：检查 output_dir ContextVar 的实际值
+        from jiuwenclaw.agentserver.tools.subagent_executor.context_vars import get_effective_request_output_dir
+        actual_output_dir = get_effective_request_output_dir()
+        logger.info(
+            "[RuntimePromptRail]  workspace paths 已获取: "
+            "resolved_workspace=%s | output_dir_from_ContextVar=%s | workspace_dir_from_request=%s",
+            resolved_workspace,
+            actual_output_dir,
+            self._workspace_dir
+        )
 
         if self._language == "cn":
             workspace_content = f"""# 你的家
@@ -209,10 +227,44 @@ class RuntimePromptRail(DeepAgentRail):
 | `{config_dir}/config.yaml` | 配置信息 |
 | `{config_dir}/.env` | 环境变量 |
 
-## 输出文件放置规范
-执行用户任务时产生的生成产物（如代码文件、文档、数据文件等），若用户未指定存放位置，请遵循以下规则：
-- 生成产物必须放在 `{resolved_workspace}` 下合适的位置，根据文件用途和项目结构合理组织路径，\
-便于用户统一管理和访问
+## 文件输出与发送规范
+
+执行用户任务时产生的生成产物（如代码文件、文档、数据文件等），有以下两种存放方式：
+
+### 方式 1：使用 output_dir（推荐）
+
+output_dir 是为每个会话创建的专用输出目录，用于存放需要交付给用户的生成文件。
+
+**优势**：
+- 文件隔离：不同会话的输出文件完全隔离，避免冲突
+- 易于管理：所有输出文件集中在统一目录，便于查找和清理
+- 自动上传：系统会优先从 output_dir 读取文件并上传到对象存储
+
+**使用方法**：
+通过 Python 代码获取 output_dir 路径：
+
+```python
+from jiuwenclaw.agentserver.tools.subagent_executor.context_vars import get_effective_request_output_dir
+
+output_dir = get_effective_request_output_dir()
+if output_dir:
+    # 将输出文件保存到 output_dir
+    file_path = f"{{output_dir}}/result.csv"
+    # 创建文件...
+else:
+    # output_dir 未设置，使用 resolved_workspace 作为备选
+    file_path = f"{{resolved_workspace}}/result.csv"
+```
+
+### 方式 2：保存在 resolved_workspace（通用）
+
+如果需要将生成文件作为项目的一部分（非交付用途），或 output_dir 不可用，可保存到 `{resolved_workspace}`。
+
+- 生成产物必须放在 `{resolved_workspace}` 下合适的位置，根据文件用途和项目结构合理组织路径，便于用户统一管理和访问
+
+**建议**：
+- 需要交付给用户的文件：优先使用 output_dir
+- 项目文件编辑或内部文件：使用 resolved_workspace
 
 ## 文件发送
 
@@ -246,12 +298,44 @@ Be careful with your configuration. If changes are required, remember to restart
 | `{config_dir}/config.yaml` | Config |
 | `{config_dir}/.env` | Environment Variables |
 
-## Output File Placement
-Generated artifacts (code files, documents, data files, etc.) produced during user task execution should \
-follow these placement rules unless the user specifies otherwise:
-- artifacts must be placed in an appropriate location \
-within `{resolved_workspace}`, organized according to file purpose and project structure for \
-unified user management and access
+## File Output and Sending Guidelines
+
+Generated artifacts (code files, documents, data files, etc.) produced during user task execution have two storage options:
+
+### Option 1: Use output_dir (Recommended)
+
+output_dir is a dedicated output directory created for each session, used for storing generated files that need to be delivered to the user.
+
+**Benefits**:
+- File isolation: Output files from different sessions are completely isolated, avoiding conflicts
+- Easy management: All output files are in a unified directory, easy to find and clean up
+- Auto upload: The system prioritizes reading files from output_dir and uploads them to object storage
+
+**Usage**:
+Get the output_dir path via Python code:
+
+```python
+from jiuwenclaw.agentserver.tools.subagent_executor.context_vars import get_effective_request_output_dir
+
+output_dir = get_effective_request_output_dir()
+if output_dir:
+    # Save output files to output_dir
+    file_path = f"{{output_dir}}/result.csv"
+    # Create the file...
+else:
+    # output_dir not set, use resolved_workspace as fallback
+    file_path = "{{resolved_workspace}}/result.csv"
+```
+
+### Option 2: Save to resolved_workspace (General)
+
+If you need to save generated files as part of a project (non-delivery purpose), or output_dir is unavailable, you can save to `{resolved_workspace}`.
+
+- Artifacts must be placed in an appropriate location within `{resolved_workspace}`, organized according to file purpose and project structure for unified user management and access
+
+**Recommendations**:
+- Files to deliver to user: Prefer using output_dir
+- Project file editing or internal files: Use resolved_workspace
 
 ## Sending Files
 
@@ -267,6 +351,12 @@ When the `send_file_to_user` tool is available in your tool list, you **must** p
             content={"cn": workspace_content, "en": workspace_content},
             priority=15,
         ))
+        logger.info(
+            "[RuntimePromptRail]  workspace section 已注入（包含 output_dir 指导）"
+            " | resolved_workspace=%s | output_dir_API返回值=%s",
+            resolved_workspace,
+            actual_output_dir
+        )
 
         self.system_prompt_builder.remove_section("request_system_prompt")
         if self._request_system_prompt:

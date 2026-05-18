@@ -396,6 +396,14 @@ class AgentManager:
         Yields:
             AgentResponseChunk 对象
         """
+        # 诊断日志：确认 AgentManager.process_message_stream 是否被调用
+        logger.info(
+            "[AgentManager] DIAGNOSTIC: process_message_stream 开始执行 "
+            "| request_id=%s | channel=%s | has_metadata=%s",
+            getattr(request, "request_id", ""),
+            getattr(request, "channel_id", ""),
+            bool(getattr(request, "metadata", None)),
+        )
         channel_id = getattr(request, "channel_id", "")
         session_id = getattr(request, "session_id", None)
         params = getattr(request, "params", {}) if isinstance(getattr(request, "params", {}), dict) else {}

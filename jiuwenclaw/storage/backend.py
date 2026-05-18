@@ -48,21 +48,22 @@ class BaseStorageBackend(ABC):
 
     def __init__(self, config: dict):
         """统一初始化入口"""
-        # 1. 配置验证
+        # 1. 日志初始化（最先，供 _validate_config 使用）
+        self.logger = logging.getLogger(self.__class__.__name__)
+
+        # 2. 配置验证
         self.config = self._validate_config(config)
 
-        # 2. 基础属性设置
+        # 3. 基础属性设置
         self.access_key = self.config.get("access_key", "")
         self.secret_key = self.config.get("secret_key", "")
         self.bucket = self.config.get("bucket", "")
         self.endpoint = self.config.get("endpoint", "")
         self.region = self.config.get("region", "")
 
-        # 3. 懒加载客户端
+        # 4. 懒加载客户端
         self._client = None
 
-        # 4. 日志
-        self.logger = logging.getLogger(self.__class__.__name__)
         self.logger.info(f"{self.__class__.__name__} initialized: bucket={self.bucket}")
 
     def _validate_config(self, config: dict) -> dict:

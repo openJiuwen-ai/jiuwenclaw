@@ -40,6 +40,12 @@ _effective_request_workspace_dir: ContextVar[Optional[str]] = ContextVar(
     "effective_request_workspace_dir", default=None
 )
 
+# Per-request output dir for agent file isolation (from metadata.output_dir).
+# Used by send_file_to_user tool and agent to know where to save output files.
+_effective_request_output_dir: ContextVar[Optional[str]] = ContextVar(
+    "effective_request_output_dir", default=None
+)
+
 
 def set_subagent_parent_session(session: Optional["Session"]) -> None:
     """Set the parent session context for subagent execution."""
@@ -101,6 +107,16 @@ def set_effective_request_workspace_dir(workspace_dir: Optional[str]) -> None:
 def get_effective_request_workspace_dir() -> Optional[str]:
     """Workspace dir for the current request, or None if not set."""
     return _effective_request_workspace_dir.get()
+
+
+def set_effective_request_output_dir(output_dir: Optional[str]) -> None:
+    """Store output_dir for the current request (from metadata.output_dir)."""
+    _effective_request_output_dir.set(output_dir)
+
+
+def get_effective_request_output_dir() -> Optional[str]:
+    """Output dir for the current request, or None if not set."""
+    return _effective_request_output_dir.get()
 
 
 def _get_llm_trace_session_id_var() -> ContextVar[str]:

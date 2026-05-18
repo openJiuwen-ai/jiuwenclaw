@@ -639,6 +639,14 @@ class AgentWebSocketServer:
 
     async def _handle_stream(self, ws: Any, request: AgentRequest, send_lock: asyncio.Lock) -> None:
         """流式处理：调用 process_message_stream，逐条发送 E2AResponse 线 JSON。"""
+        # 诊断日志：确认 _handle_stream 是否被调用
+        logger.info(
+            "[AgentWebSocketServer] DIAGNOSTIC: _handle_stream 开始执行 "
+            "| request_id=%s | is_stream=%s | channel=%s",
+            request.request_id,
+            request.is_stream,
+            request.channel_id,
+        )
         channel_id = request.channel_id or "default"
 
         chunk_count = 0

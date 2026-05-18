@@ -96,6 +96,21 @@ class SendFileToolkit:
                 missing_files.append(fp)
                 logger.warning("[SendFileToolkit] 文件不存在: %s", fp)
 
+        #  诊断日志：观察文件路径和 output_dir ContextVar
+        from jiuwenclaw.agentserver.tools.subagent_executor.context_vars import get_effective_request_output_dir
+        actual_output_dir = get_effective_request_output_dir()
+        logger.info(
+            "[SendFileToolkit]  DIAGNOSTIC: 文件发送检查 "
+            "| session_id=%s "
+            "| output_dir_from_ContextVar=%s "
+            "| valid_files=[%s] "
+            "| missing_files=[%s]",
+            self.session_id,
+            actual_output_dir,
+            ", ".join(valid_files),
+            ", ".join(missing_files),
+        )
+
         if not valid_files:
             msg_parts = ["发送文件失败：所有文件均不存在"]
             for mf in missing_files:
@@ -284,10 +299,20 @@ class SendFileToolkit:
             make_tool(
                 name="send_file_to_user",
                 description=(
-                    "【文件发送工具】当需要将生成的文件、导出的数据、创建的文档等发送给用户时使用此工具。"
-                    "使用场景包括：用户请求导出/下载文件、任务完成后需要交付文件、生成报告/文档后发送给用户。"
-                    "参数格式：接受路径数组，路径必须是绝对路径。"
-                    "示例：['/tmp/file1.csv', '/tmp/file2.xlsx']"
+                    "【文件发送工具】当需要将生成的文件、导出的数据、创建的文档等发送给用户时使用此工具。\n"
+                    "\n使用场景：\n"
+                    "- 用户请求导出/下载文件\n"
+                    "- 任务完成后需要交付文件\n"
+                    "- 生成报告/文档后发送给用户\n"
+                    "\n文件保存位置说明：\n"
+                    "- Agent 的当前工作目录 (cwd) 是 effective_project_dir，Agent 可以在其中访问和编辑项目文件\n"
+                    "- 但 Agent 生成的输出文件应保存至 output_dir 目录\n"
+                    "- output_dir 可通过 get_effective_request_output_dir() API 获取，是为每个会话创建的隔离输出目录\n"
+                    "- 建议优先将输出文件保存到 output_dir，确保文件隔离和易于管理\n"
+                    "\n参数格式：\n"
+                    "- 接受路径数组，路径必须是绝对路径\n"
+                    "- 可以接受来自任何位置的文件路径，但建议优先使用 output_dir 中的文件\n"
+                    "- 示例：['{output_dir}/file1.csv', '{output_dir}/file2.xlsx'] 或 ['/project/result.md']"
                 ),
                 input_params={
                     "type": "object",
@@ -296,8 +321,9 @@ class SendFileToolkit:
                             "type": "array",
                             "items": {"type": "string"},
                             "description": (
-                                "要发送的文件绝对路径。"
-                                "必须是数组格式，例如 ['/path/file1.csv', '/path/file2.xlsx']。"
+                                "要发送的文件绝对路径。\n"
+                                "必须是数组格式，例如 ['/path/file1.csv', '/path/file2.xlsx']。\n"
+                                "建议使用 get_effective_request_output_dir() 获取的 output_dir 作为文件保存位置。\n"
                                 "支持任意文件类型（pdf、xlsx、docx、png、zip等）。"
                             ),
                         }

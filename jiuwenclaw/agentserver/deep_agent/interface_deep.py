@@ -2011,6 +2011,18 @@ class JiuWenClawDeepAdapter:
         # 如果你要更新rail，就传一个新的对象；如果不要更新，就不传；如果需要仅卸载，就传原来的rail对象。
         if disabled_tools_rail_newly_created and self._disabled_tools_rail is not None:
             rails_list.append(self._disabled_tools_rail)
+
+        #  诊断日志：观察 rails_list 包含哪些 Rails
+        logger.info(
+            "[JiuWenClawDeepAdapter]  DIAGNOSTIC: rails_list 构建完成 "
+            "| rails_count=%d "
+            "| rails_names=[%s] "
+            "| has_runtime_prompt_rail=%s",
+            len(rails_list),
+            ", ".join(type(r).__name__ for r in rails_list),
+            any(type(r).__name__ == "RuntimePromptRail" for r in rails_list),
+        )
+
         return rails_list
 
     async def _get_tool_cards(self, agent_id: str, *, mode: str = "agent.plan"):
@@ -2426,6 +2438,17 @@ class JiuWenClawDeepAdapter:
             tool_cards=self._tool_cards if self._tool_cards else [],
             rails=rails_list,
         )
+
+        #  诊断日志：观察 Agent.configure() 收到的 rails_list
+        logger.info(
+            "[JiuWenClawDeepAdapter]  DIAGNOSTIC: 准备调用 Agent.configure() "
+            "| rails_count=%d "
+            "| rails_names=[%s] "
+            "| deep_cfg.rails 配置完成",
+            len(rails_list),
+            ", ".join(type(r).__name__ for r in rails_list),
+        )
+
         self._instance.configure(deep_cfg)
 
         logger.info("[JiuWenClawDeepAdapter] 配置已热更新（configure），未重启进程")
@@ -2806,6 +2829,80 @@ class JiuWenClawDeepAdapter:
             set_cwd(resolved_workspace_dir)
         except Exception as exc:
             logger.warning("[JiuWenClawDeepAdapter] set_cwd(%s) failed: %s", resolved_workspace_dir, exc)
+
+        # 设置 output_dir ContextVar（新增）
+        # Agent 可在 effective_project_dir 工作但将输出文件保存至 output_dir
+        from jiuwenclaw.agentserver.tools.subagent_executor.context_vars import (
+            set_effective_request_output_dir,
+            get_effective_request_output_dir,
+        )
+
+        output_dir = md.get("output_dir")
+        if isinstance(output_dir, str) and output_dir.strip():
+            set_effective_request_output_dir(output_dir.strip())
+            logger.info(
+                "[JiuWenClawDeepAdapter] output_dir 设置完成: output_dir=%s "
+                "(effective_project_dir=%s)",
+                output_dir.strip(),
+                resolved_workspace_dir
+            )
+
+            #  方案A：动态更新write_file工具描述，注入output_dir路径
+            # 让Agent在工具选择阶段就能看到推荐的保存位置
+            # 正确模式：ability_manager用tool_name，resource_mgr用tool_card.id
+            try:
+                # Step 1: 从 ability_manager 获取 ToolCard（使用工具名称）
+                tool_card = self._instance.ability_manager.get("write_file")
+                if not tool_card:
+                    logger.warning("[JiuWenClawDeepAdapter] write_file 工具卡片未在 ability_manager 中注册")
+                else:
+                    # Step 2: 使用 tool_card.id 获取 Tool 对象
+                    write_file_tool = Runner.resource_mgr.get_tool(tool_card.id)
+                    if write_file_tool and hasattr(write_file_tool, 'card'):
+                        # 更新工具描述，在参数说明中注入output_dir推荐路径
+                        original_description = write_file_tool.card.description or ""
+                        output_dir_hint = (
+                            f"\n\n推荐保存路径：{output_dir.strip()}\n\n"
+                            f"参数 file_path 推荐使用：{output_dir.strip()}/filename.ext"
+                        )
+
+                        # 创建新的描述（保留原描述 + 添加output_dir提示）
+                        enhanced_description = original_description + output_dir_hint
+
+                        # 更新工具卡片描述
+                        write_file_tool.card.description = enhanced_description
+
+                        logger.info(
+                            "[JiuWenClawDeepAdapter] ✅ write_file工具描述已更新，注入output_dir路径: %s (tool_id=%s)",
+                            output_dir.strip(),
+                            tool_card.id
+                        )
+                    else:
+                        logger.warning(
+                            "[JiuWenClawDeepAdapter] write_file Tool对象未找到 (tool_id=%s)",
+                            tool_card.id
+                        )
+            except Exception as exc:
+                logger.warning(
+                    "[JiuWenClawDeepAdapter] write_file工具描述更新失败: %s",
+                    exc,
+                    exc_info=True  # 打印完整堆栈
+                )
+        else:
+            set_effective_request_output_dir(None)
+
+        #  诊断日志：观察 RuntimePromptRail 实例状态
+        logger.info(
+            "[JiuWenClawDeepAdapter]  DIAGNOSTIC: RuntimePromptRail 状态检查 "
+            "| request_id=%s "
+            "| _runtime_prompt_rail is %s "
+            "| output_dir ContextVar=%s "
+            "| workspace_dir=%s",
+            params.request_id,
+            "None (未创建)" if self._runtime_prompt_rail is None else "已创建",
+            get_effective_request_output_dir(),
+            resolved_workspace_dir,
+        )
 
         if self._runtime_prompt_rail:
             self._runtime_prompt_rail.set_language(resolved_language)

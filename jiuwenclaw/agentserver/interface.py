@@ -131,9 +131,31 @@ def build_user_prompt(
             },
             ensure_ascii=False,
         )
-    # 兼容 files 为 dict 或 list 格式
+
+    # 提取 Agent 需要的文件信息（只保留本地路径和相关元数据，移除 uri）
+    def extract_file_info(file_ref: dict) -> dict:
+        """Extract file information that Agent needs."""
+        info = {}
+        if isinstance(file_ref, dict):
+            # 只保留 Agent 需要的字段
+            if "name" in file_ref:
+                info["name"] = file_ref["name"]
+            if "path" in file_ref:
+                info["path"] = file_ref["path"]
+            if "type" in file_ref:
+                info["type"] = file_ref["type"]
+            # 移除 uri、storage_path 等内部实现细节
+        return info
+
+    # 向后兼容：dict → list 自动转换
+    if isinstance(files, dict):
+        files = list(files.values())
+
+    # 只处理 list 格式
+    files_for_agent = [extract_file_info(f) for f in files if isinstance(f, dict)] if isinstance(files, list) else []
+
     # 空容器统一输出 "{}"（对 Agent 来说空 dict 和空 list 都表示无文件）
-    files_json = json.dumps(files, ensure_ascii=False) if files else "{}"
+    files_json = json.dumps(files_for_agent, ensure_ascii=False) if files_for_agent else "{}"
     payload: dict[str, Any] = {
         "source": channel,
         "preferred_response_language": language,
@@ -458,6 +480,7 @@ class JiuWenClaw:
 
         从 request.params.files 中提取文件引用，下载到本地 workspace，
         并更新 files 字段添加 path 字段供 Agent 访问。
+        同时创建 input_dir 和 output_dir 目录，并将路径写入 request.metadata。
 
         Args:
             request: AgentRequest，会被原地修改
@@ -465,53 +488,160 @@ class JiuWenClaw:
 
         files = request.params.get("files")
         if not files:
+            # 即使没有文件，也需要创建 input/output 目录
+            # 统一提取 chat_id 和 channel_type
+            cleaned_chat_id, channel_type = self._extract_chat_id(request)
+
+            # 提取用户 ID
+            user_id = request.session_id or "default"
+            if request.metadata and isinstance(request.metadata, dict):
+                user_id = request.metadata.get("user_id", user_id)
+
+            # 检测路径重复异常：user_id == chat_id 可能导致重复目录结构
+            if user_id == cleaned_chat_id:
+                logger.warning(
+                    f"[JiuWenClaw] Path duplication detected: user_id == chat_id ({user_id}). "
+                    f"This may cause duplicate directory structure. "
+                    f"Please check frontend data source for user_id and chat_id."
+                )
+
+            # 计算 base_dir（检测对话模式 vs 项目模式）
+            base_dir = Path(self._workspace_dir)  # 对话模式默认值
+            effective_project_dir = None
+            if request.metadata and isinstance(request.metadata, dict):
+                effective_project_dir = request.metadata.get("effective_project_dir")
+
+            if effective_project_dir and effective_project_dir != self._workspace_dir:
+                # 项目模式：使用项目目录作为 base_dir
+                base_dir = Path(effective_project_dir)
+                logger.info(
+                    f"[JiuWenClaw] 项目模式: base_dir={base_dir} "
+                    f"(effective_project_dir={effective_project_dir})"
+                )
+            else:
+                logger.info(f"[JiuWenClaw] 对话模式: base_dir={base_dir}")
+
+            # 创建 input_dir 和 output_dir 目录
+            input_dir = base_dir / "files" / user_id / cleaned_chat_id / "input"
+            output_dir = base_dir / "files" / user_id / cleaned_chat_id / "output"
+
+            try:
+                input_dir.mkdir(parents=True, exist_ok=True)
+                output_dir.mkdir(parents=True, exist_ok=True)
+
+                # 将 input_dir 和 output_dir 写入 request.metadata
+                md = dict(request.metadata) if isinstance(request.metadata, dict) else {}
+                md["input_dir"] = str(input_dir)
+                md["output_dir"] = str(output_dir)
+                request.metadata = md
+
+                logger.info(
+                    f"[JiuWenClaw] 目录创建完成: input_dir={input_dir} output_dir={output_dir}"
+                )
+
+                #  诊断日志：观察 output_dir 写入 metadata 的实际值
+                logger.info(
+                    f"[JiuWenClaw]  DIAGNOSTIC: output_dir 已写入 request.metadata "
+                    f"| request_id={request.request_id} "
+                    f"| metadata.output_dir={request.metadata.get('output_dir')} "
+                    f"| user_id={user_id} chat_id={cleaned_chat_id}"
+                )
+            except Exception as e:
+                logger.error(
+                    f"[JiuWenClaw] 目录创建失败: input_dir={input_dir} output_dir={output_dir} error={e}"
+                )
+            return
+
+        # 向后兼容：dict → list 自动转换
+        if isinstance(files, dict):
+            files = [
+                {"uri": v.get("uri"), "name": v.get("name"), **v}
+                for k, v in files.items() if isinstance(v, dict) and v.get("uri")
+            ]
+            request.params["files"] = files
+            logger.info(f"[JiuWenClaw] 文件格式转换: dict → list (count={len(files)})")
+
+        # 只处理 list 格式
+        if not isinstance(files, list):
+            logger.warning(f"[JiuWenClaw] files 格式不支持: {type(files)}")
             return
 
         # 获取存储服务
         storage = await self._get_storage()
 
-        # 构建本地下载目录：~/.jiuwenclaw/agent/jiuwenclaw_workspace/files/{user_id}/input/
-        # 从 session_id 或 metadata 中提取用户 ID
+        # 统一提取 chat_id 和 channel_type
+        cleaned_chat_id, channel_type = self._extract_chat_id(request)
+
+        # 提取用户 ID
         user_id = request.session_id or "default"
         if request.metadata and isinstance(request.metadata, dict):
             user_id = request.metadata.get("user_id", user_id)
-        input_dir = Path(self._workspace_dir) / "files" / user_id / "input"
-        input_dir.mkdir(parents=True, exist_ok=True)
 
-        # 处理每个文件
-        for file_key, file_ref in files.items():
-            if isinstance(file_ref, dict):
-                uri = file_ref.get("uri")
-                if not uri:
-                    continue
-            elif hasattr(file_ref, 'uri'):
-                uri = file_ref.uri
-            else:
+        # 检测路径重复异常：user_id == chat_id 可能导致重复目录结构
+        if user_id == cleaned_chat_id:
+            logger.warning(
+                f"[JiuWenClaw] Path duplication detected: user_id == chat_id ({user_id}). "
+                f"This may cause duplicate directory structure. "
+                f"Please check frontend data source for user_id and chat_id."
+            )
+
+        # 计算 base_dir（检测对话模式 vs 项目模式）
+        base_dir = Path(self._workspace_dir)  # 对话模式默认值
+        effective_project_dir = None
+        if request.metadata and isinstance(request.metadata, dict):
+            effective_project_dir = request.metadata.get("effective_project_dir")
+
+        if effective_project_dir and effective_project_dir != self._workspace_dir:
+            # 项目模式：使用项目目录作为 base_dir
+            base_dir = Path(effective_project_dir)
+            logger.info(
+                f"[JiuWenClaw] 项目模式: base_dir={base_dir} "
+                f"(effective_project_dir={effective_project_dir})"
+            )
+        else:
+            logger.info(f"[JiuWenClaw] 对话模式: base_dir={base_dir}")
+
+        # 创建 input_dir 和 output_dir 目录
+        input_dir = base_dir / "files" / user_id / cleaned_chat_id / "input"
+        output_dir = base_dir / "files" / user_id / cleaned_chat_id / "output"
+
+        try:
+            input_dir.mkdir(parents=True, exist_ok=True)
+            output_dir.mkdir(parents=True, exist_ok=True)
+
+            # 将 input_dir 和 output_dir 写入 request.metadata
+            md = dict(request.metadata) if isinstance(request.metadata, dict) else {}
+            md["input_dir"] = str(input_dir)
+            md["output_dir"] = str(output_dir)
+            request.metadata = md
+
+            logger.info(
+                f"[JiuWenClaw] 目录创建完成: input_dir={input_dir} output_dir={output_dir}"
+            )
+        except Exception as e:
+            logger.error(
+                f"[JiuWenClaw] 目录创建失败: input_dir={input_dir} output_dir={output_dir} error={e}"
+            )
+            return
+
+        # 处理每个文件（统一为 list 格式）
+        for file_ref in files:
+            if not isinstance(file_ref, dict):
                 continue
 
-            # 构建本地保存路径
-            filename = file_ref.get("name") if isinstance(file_ref, dict) else (file_ref.name or "file")
+            uri = file_ref.get("uri")
+            if not uri:
+                continue
+
+            filename = file_ref.get("name", "file")
             local_path = str(input_dir / filename)
 
             try:
-                # 下载文件
                 await storage.download_file(uri, local_path)
-
-                # 更新 file_ref 添加 path 字段
-                if isinstance(file_ref, dict):
-                    file_ref["path"] = local_path
-                elif hasattr(file_ref, '__dict__'):
-                    # 对于 dataclass，尝试添加 path 属性
-                    if not hasattr(file_ref, 'path'):
-                        file_ref.meta['path'] = local_path
-                    else:
-                        file_ref.path = local_path
-
+                file_ref["path"] = local_path
                 logger.info(f"[JiuWenClaw] 文件已下载: {uri} -> {local_path}")
-
             except Exception as e:
                 logger.error(f"[JiuWenClaw] 文件下载失败: {uri}: {e}")
-                # 继续处理其他文件
                 continue
 
     async def upload_agent_files(
@@ -536,13 +666,8 @@ class JiuWenClaw:
         if not response.payload or not isinstance(response.payload, dict):
             return
 
-        # 检查 payload 中是否有文件信息
-        # 可能的字段：files, output_files, generated_files 等
-        files_data = None
-        for key in ["files", "output_files", "generated_files"]:
-            if key in response.payload:
-                files_data = response.payload[key]
-                break
+        # 检查 payload.files 字段（统一结构）
+        files_data = response.payload.get("files")
 
         if not files_data:
             return
@@ -550,26 +675,28 @@ class JiuWenClaw:
         # 获取存储服务
         storage = await self._get_storage()
 
-        # 处理文件列表
-        if isinstance(files_data, list):
-            files_list = files_data
-        elif isinstance(files_data, dict):
-            files_list = list(files_data.values())
-        else:
+        # 只处理 list 格式
+        if not isinstance(files_data, list):
             return
 
-        # 上传每个文件
-        for file_info in files_list:
-            if isinstance(file_info, dict):
-                local_path = file_info.get("path")
-                if not local_path:
-                    # 尝试其他可能的字段名
-                    local_path = file_info.get("local_path") or file_info.get("file_path")
-            elif hasattr(file_info, 'path'):
-                local_path = file_info.path
-            else:
+        #  诊断日志：观察 Agent 生成的文件路径
+        logger.info(
+            "[JiuWenClaw]  DIAGNOSTIC: Agent 生成的文件列表 "
+            "| request_id=%s "
+            "| files_count=%d "
+            "| file_paths=[%s]",
+            response.request_id,
+            len(files_data),
+            ", ".join(f.get("path", "?") for f in files_data if isinstance(f, dict)),
+        )
+
+        # 上传每个文件，标准化 file_info 结构为 {path, name, uri}
+        for file_info in files_data:
+            if not isinstance(file_info, dict):
                 continue
 
+            # 标准化结构：提取 path（必需字段）
+            local_path = file_info.get("path")
             if not local_path:
                 continue
 
@@ -579,17 +706,14 @@ class JiuWenClaw:
                 continue
 
             try:
-                # 上传文件（使用新的接口签名）
+                # 上传文件
                 uri = await storage.upload_file(local_path, user_id, chat_id, channel_type)
 
-                # 更新 file_info 添加 uri 字段
-                if isinstance(file_info, dict):
-                    file_info["uri"] = uri
-                elif hasattr(file_info, '__dict__'):
-                    if not hasattr(file_info, 'uri'):
-                        file_info.meta['uri'] = uri
-                    else:
-                        file_info.uri = uri
+                # 标准化 file_info 结构
+                file_info["uri"] = uri
+                # 确保 name 字段存在（如果缺失，从 path 中提取）
+                if "name" not in file_info:
+                    file_info["name"] = Path(local_path).name
 
                 logger.info(
                     f"[JiuWenClaw] 文件已上传: {local_path} -> {uri} "
@@ -603,60 +727,57 @@ class JiuWenClaw:
                 )
 
     @staticmethod
-    def _extract_chat_id(request: AgentRequest) -> str:
-        """从请求中提取 chat_id.
+    def _extract_chat_id(request: AgentRequest) -> tuple[str, str]:
+        """从请求中统一提取 chat_id 和 channel_type.
+
+        根据 channel 类型提取对应的 chat_id，并进行清理。
 
         Args:
             request: AgentRequest 请求对象
 
         Returns:
-            提取的 chat_id
+            tuple[str, str]: (cleaned_chat_id, channel_type)
         """
+        from jiuwenclaw.storage.utils import sanitize_chat_id
+
+        # 提取 channel_type
         channel = request.channel_id
+        if not channel:  # 处理 None 和空字符串
+            channel = "unknown"
 
-        # 处理 channel 为空的情况
-        if not channel:
-            return request.session_id or "default"
-
+        # 根据不同 Channel 类型提取 chat_id
         if channel == "web":
             # WebChannel 使用 session_id
-            return request.session_id or "default"
+            raw_chat_id = request.chat_id or request.session_id or request.params.get("session_id", "default")
 
         elif channel == "dingtalk":
-            # DingTalk 使用 chat_id (conversation_id)
-            return request.chat_id or request.session_id or "default"
+            # DingTalk 使用 chat_id 或 conversation_id
+            raw_chat_id = request.params.get("chat_id") or request.params.get("conversation_id", "")
+            if not raw_chat_id:
+                raw_chat_id = request.session_id or "default"
 
         elif channel == "xiaoyi":
-            # XiaoYi 使用 chat_id (session_id)
-            return request.chat_id or request.session_id or "default"
+            # XiaoYi 使用 chat_id 或 session_id
+            raw_chat_id = request.params.get("chat_id") or request.session_id or "default"
 
         elif channel == "wecom":
             # Wecom 优先从 metadata 获取
             if request.metadata and isinstance(request.metadata, dict):
-                wecom_chat_id = request.metadata.get("wecom_chat_id")
-                if wecom_chat_id:
-                    return str(wecom_chat_id)
-            return request.chat_id or request.session_id or "default"
-
+                raw_chat_id = request.metadata.get("wecom_chat_id", "")
+                if not raw_chat_id:
+                    raw_chat_id = request.chat_id or request.session_id or "default"
+            else:
+                raw_chat_id = request.chat_id or request.session_id or "default"
+        elif channel == "officeclaw":
+            raw_chat_id = request.chat_id or request.session_id or request.params.get("session_id", "default")
         else:
             # 其他 channel 默认使用 session_id
-            return request.session_id or "default"
+            raw_chat_id = request.session_id or "default"
 
-    @staticmethod
-    def _extract_channel_type(request: AgentRequest) -> str:
-        """从请求中提取 channel_type.
+        # 清理 chat_id 特殊字符
+        cleaned_chat_id = sanitize_chat_id(raw_chat_id, channel)
 
-        Args:
-            request: AgentRequest 请求对象
-
-        Returns:
-            提取的 channel_type
-        """
-        # 处理 None 和空字符串的情况
-        channel = request.channel_id
-        if not channel:  # 处理 None 和空字符串
-            return "unknown"
-        return channel
+        return cleaned_chat_id, channel
 
     def _build_inputs(self, request: AgentRequest) -> Tuple[dict[str, Any], str]:
         """构建 adapter 所需的 inputs 字典."""
@@ -707,6 +828,9 @@ class JiuWenClaw:
         # 传递 enable_memory 参数
         enable_memory = request.metadata.get("enable_memory", True) if request.metadata else True
         inputs["enable_memory"] = enable_memory
+
+        # 传递 files 参数（直接传递，供 Agent 直接访问）
+        inputs["files"] = request.params.get("files", [])
 
         run = request.params.get("run")
         if run:
@@ -944,11 +1068,11 @@ class JiuWenClaw:
             request.request_id, request.channel_id, session_id, self._sdk_name,
         )
 
-        # 文件预处理：从对象存储下载输入文件到本地 workspace
-        await self.prepare_files_for_agent(request)
-
         inputs, memory_mode, raw_query = self._build_inputs(request)
         self._apply_effective_project_dir_to_request(request, session_id, inputs)
+
+        # 文件预处理：从对象存储下载输入文件到本地 workspace
+        await self.prepare_files_for_agent(request)
 
         # cloud memory: before chat hook
         if memory_mode == "cloud":
@@ -1015,11 +1139,10 @@ class JiuWenClaw:
             if request.metadata and isinstance(request.metadata, dict):
                 user_id = request.metadata.get("user_id", user_id)
 
-            # 提取 chat_id 和 channel_type
-            chat_id = self._extract_chat_id(request)
-            channel_type = self._extract_channel_type(request)
+            # 统一提取 chat_id 和 channel_type
+            cleaned_chat_id, channel_type = self._extract_chat_id(request)
 
-            await self.upload_agent_files(result, user_id, chat_id, channel_type)
+            await self.upload_agent_files(result, user_id, cleaned_chat_id, channel_type)
 
         return result
 
@@ -1030,6 +1153,15 @@ class JiuWenClaw:
 
         支持多 session 并发执行，同 session 内任务按先进后出顺序执行.
         """
+        #  诊断日志：确认 JiuWenClaw.process_message_stream 是否被调用
+        logger.info(
+            "[JiuWenClaw]  DIAGNOSTIC: process_message_stream 入口 "
+            "| request_id=%s | channel=%s | session=%s | has_metadata=%s",
+            request.request_id,
+            request.channel_id,
+            request.session_id,
+            bool(request.metadata),
+        )
         # SkillDev 流式请求：直接委托给 SkillDevService，绕过 ReActAgent
         if request.req_method in _SKILLDEV_METHODS:
             service = self._get_skilldev_service()
@@ -1082,6 +1214,9 @@ class JiuWenClaw:
             extra={'user_visible': 'progress'}
         )
         self._apply_effective_project_dir_to_request(request, session_id, inputs)
+
+        # 文件预处理：从对象存储下载输入文件到本地 workspace
+        await self.prepare_files_for_agent(request)
         rid = request.request_id
         cid = request.channel_id
 
@@ -1132,6 +1267,7 @@ class JiuWenClaw:
         final_answer_content = ""
         final_answer_chunks: list[str] = []
         adapter_emitted_terminal_chunk = False
+        collected_files: list[dict] = []  # 收集 Agent 生成的文件信息
 
         async def run_stream_task():
             try:
@@ -1240,6 +1376,14 @@ class JiuWenClaw:
                                 final_answer_content = str(data.payload.get("content", ""))
                             elif et == "chat.delta":
                                 final_answer_chunks.append(str(data.payload.get("content", "")))
+                            elif et == "chat.file":
+                                # 收集 Agent 生成的文件信息
+                                files_list = data.payload.get("files", [])
+                                if isinstance(files_list, list):
+                                    collected_files.extend(files_list)
+                                    logger.info(
+                                        f"[JiuWenClaw] 收集到文件: request_id={rid} files_count={len(files_list)}"
+                                    )
                         yield data
                     elif isinstance(data, dict) and isinstance(data.get("event_type"), str):
                         et = str(data.get("event_type"))
@@ -1276,6 +1420,14 @@ class JiuWenClaw:
                             final_answer_content = str(data.get("content", ""))
                         elif et == "chat.delta":
                             final_answer_chunks.append(str(data.get("content", "")))
+                        elif et == "chat.file":
+                            # 收集 Agent 生成的文件信息
+                            files_list = data.get("files", [])
+                            if isinstance(files_list, list):
+                                collected_files.extend(files_list)
+                                logger.info(
+                                    f"[JiuWenClaw] 收集到文件: request_id={rid} files_count={len(files_list)}"
+                                )
                         yield AgentResponseChunk(
                             request_id=rid,
                             channel_id=cid,
@@ -1299,6 +1451,48 @@ class JiuWenClaw:
                 extra=request.params,
             )
             await ExtensionRegistry.get_instance().trigger(AgentServerHookEvents.MEMORY_AFTER_CHAT, after_ctx)
+
+        # 文件后处理：上传 Agent 生成的输出文件到对象存储
+        # 从 session_id 或 metadata 中提取用户 ID
+        user_id = request.session_id or "default"
+        if request.metadata and isinstance(request.metadata, dict):
+            user_id = request.metadata.get("user_id", user_id)
+
+        # 统一提取 chat_id 和 channel_type
+        cleaned_chat_id, channel_type = self._extract_chat_id(request)
+
+        # 文件后处理：上传 Agent 生成的输出文件到对象存储
+        if collected_files:
+            virtual_response = AgentResponse(
+                request_id=request.request_id,
+                channel_id=request.channel_id,
+                ok=True,
+                payload={"files": collected_files}
+            )
+
+            logger.info(
+                f"[JiuWenClaw] 开始上传文件: request_id={request.request_id} "
+                f"files_count={len(collected_files)} user_id={user_id} chat_id={cleaned_chat_id}"
+            )
+
+            await self.upload_agent_files(virtual_response, user_id, cleaned_chat_id, channel_type)
+
+            # 上传完成后，发送 chat.file_uploaded 事件（包含 URI）
+            # virtual_response.payload["files"] 现在已包含 uri 字段
+            if virtual_response.payload and virtual_response.payload.get("files"):
+                yield AgentResponseChunk(
+                    request_id=rid,
+                    channel_id=cid,
+                    payload={
+                        "event_type": "chat.file_uploaded",
+                        "files": virtual_response.payload["files"]
+                    },
+                    is_complete=False,
+                )
+                logger.info(
+                    f"[JiuWenClaw] 文件上传完成事件已发送: request_id={request.request_id} "
+                    f"files_count={len(virtual_response.payload['files'])}"
+                )
 
         if not adapter_emitted_terminal_chunk:
             yield AgentResponseChunk(
