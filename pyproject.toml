@@ -40,6 +40,10 @@ dependencies = [
     "trafilatura>=1.6.0",
     # lxml 5.2+ 将 html.clean 拆出；trafilatura/justext 仍依赖 lxml.html.clean
     "lxml_html_clean>=0.4.0",
+    # 安全补丁：以下三项为传递依赖的下限约束，仅用于修复已知 CVE
+    "lxml>=6.1.0",              # 修复 CVE-2026-41066（默认解析器 XXE，可读取本地文件）
+    "pillow>=12.2.0",           # 修复 CVE-2026-40192（FITS 解码器 GZIP 解压炸弹 DoS）
+    "python-multipart>=0.0.27", # 修复 CVE-2026-42561（MultipartParser 资源未限分配 DoS）
     "tree-sitter>=0.25.0,<0.26.0",
     "tree-sitter-bash>=0.25.0,<0.26.0",
     # 缺乏这些包TestTenantAgentPool无法执行

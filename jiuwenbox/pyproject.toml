@@ -15,7 +15,7 @@ dependencies = [
     "httpx>=0.27",
     "fastapi>=0.115",
     "uvicorn[standard]>=0.30",
-    "python-multipart>=0.0.9",
+    "python-multipart>=0.0.27",  # 修复 CVE-2026-42561（MultipartParser 资源未限分配 DoS）
 ]
 
 [project.optional-dependencies]
