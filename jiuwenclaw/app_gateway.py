@@ -64,6 +64,38 @@ logger = logging.getLogger(__name__)
 _PROMPT_IDLE_FINALIZE_SECONDS = 3.0
 
 
+# ── WebSocket Origin 安全校验 ──
+
+def _get_ws_origin(ws: Any) -> str | None:
+    """从 WebSocket 握手请求中提取 Origin 头。"""
+    headers = getattr(ws, "request_headers", None)
+    if headers is not None:
+        try:
+            return str(headers.get("Origin", "")).strip() or None
+        except Exception:
+            return None
+    return None
+
+
+def _is_trusted_origin(origin: str | None, host: str, port: int) -> bool:
+    """判断 Origin 是否受信任。
+
+    受信任的来源：
+    1. 缺省（非浏览器环境，如原生客户端）
+    2. Gateway 服务器自身（同源），含 http/https 两种 scheme
+    """
+    if not origin:
+        return True
+
+    self_origin = f"http://{host}:{port}"
+    self_origin_tls = f"https://{host}:{port}"
+    if origin in (self_origin, self_origin_tls):
+        return True
+
+    logger.warning("[Security] /acp WebSocket Origin 校验未通过: origin=%s", origin)
+    return False
+
+
 def _get_bool_config(
     env_key: str | None,
     cfg_value: Any,
@@ -517,6 +549,15 @@ class GatewayServer:
             await ws.close(code=1008, reason=f"unsupported path: {request_path}")
             return
 
+        # 安全拦截：对 /acp 路由校验 WebSocket Origin 头，防止浏览器跨站攻击
+        if route.channel_id == "acp":
+            origin = _get_ws_origin(ws)
+            if not _is_trusted_origin(origin, self.config.host, self.config.port):
+                logger.warning(
+                    "[GatewayServer] 安全拦截 /acp 连接来源 origin=%s", origin or "(missing)"
+                )
+                ws._acp_untrusted = True  # # pylint: disable=protected-access
+
         self._clients.add(ws)
 
         # connection.ack
@@ -580,6 +621,18 @@ class GatewayServer:
                 )
             )
             return
+
+        # 安全拦截：未通过 Origin 校验的连接，拒绝所有请求
+        if getattr(ws, "_acp_untrusted", False):
+            if route.channel_id == "acp":
+                req_id = data.get("id") if isinstance(data, dict) else None
+                await ws.send(json.dumps(
+                    {"type": "res", "id": req_id, "ok": False, "error": "origin not trusted"},
+                    ensure_ascii=False,
+                ))
+                logger.debug("[GatewayServer] 拒绝未受信来源的请求: origin=untrusted")
+                return
+            # 非 /acp 路由不拦截（如 CLI），走正常流程
 
         if route.channel_id == "acp":
             handled = await self._acp_bridge.handle_jsonrpc_request(ws, data)

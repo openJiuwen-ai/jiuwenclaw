@@ -53,6 +53,36 @@ def _pick_mcp_url(tool_config: dict) -> str:
     return ""
 
 
+_DANGEROUS_ARGS_PATTERN = frozenset({
+    "-e", "--eval", "-c", "--command", "-i",
+    "-m", "--module",
+})
+
+
+def _check_dangerous_args(tool_name: str, args: list) -> None:
+    """拦截包含危险标志的参数，防止通过 args 注入任意代码执行。
+
+    危险标志包括但不限于：-e, --eval, -c, --command, -i, -s, -p 等。
+    这些标志通常用于在命令行直接执行代码或进入交互模式。
+    """
+    if not isinstance(args, list):
+        return
+    for arg in args:
+        arg_str = str(arg).strip()
+        if arg_str in _DANGEROUS_ARGS_PATTERN:
+            raise ValueError(
+                f"安全拦截阻断：工具 '{tool_name}' 的 args 包含危险标志 '{arg_str}'，"
+                "禁止通过参数注入执行任意代码。"
+            )
+        # 处理合并参数如 --eval=code 或 -e=code
+        for dangerous_prefix in ("-e=", "--eval=", "-c=", "--command="):
+            if arg_str.lower().startswith(dangerous_prefix):
+                raise ValueError(
+                    f"安全拦截阻断：工具 '{tool_name}' 的 args 包含危险标志 '{arg_str}'，"
+                    "禁止通过参数注入执行任意代码。"
+                )
+
+
 def _optional_auth_dict(tool_config: dict, key: str) -> dict | None:
     raw = tool_config.get(key)
     if raw is None:
@@ -209,6 +239,8 @@ def create_mcp_tool(config_str: str) -> McpServerConfig:
 
     if not isinstance(args, list):
         raise ValueError(f"工具 '{tool_name}' 的 args 必须是列表类型")
+    # 安全拦截：检查 args 中的危险标志
+    _check_dangerous_args(tool_name, args)
 
     normalized_command = str(command or "").strip()
     _normalize_stdio_command_kind(normalized_command)

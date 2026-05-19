@@ -32,6 +32,30 @@ _REQUEST_SCOPED_OFFICE_CLAW_SERVER_ID = "office-claw-request"
 _OFFICE_CLAW_STDIO_PARAMS: ContextVar[dict[str, Any]] = ContextVar("_OFFICE_CLAW_STDIO_PARAMS", default={})
 
 
+# ── 安全拦截规则 ──
+# 对于从 RPC（如浏览器）提交的 tools.add 请求，这些字段属于绝对禁区。
+# 它们分别对应：子进程执行 (RCE)、工作目录逃逸、环境变量投毒、远端连接 (SSRF)、
+# 认证头/查询参数透传（可用于绕过服务端认证、SSRF 增强、凭证窃取）。
+_RPC_BLOCKED_KEYS = frozenset({
+    "command", "args",
+    "cwd", "env", "url",
+    "auth_headers", "auth_query_params",
+})
+
+
+def _check_mcp_security(tool_name: str, cfg: dict) -> None:
+    """拦截高危 MCP 配置，防止通过非受信渠道注册任意执行权限或远端连接。"""
+    if not isinstance(cfg, dict):
+        return
+    found_keys = set(cfg.keys())
+    dangerous = found_keys.intersection(_RPC_BLOCKED_KEYS)
+    if dangerous:
+        raise ValueError(
+            f"安全拦截阻断：禁止通过非受信渠道注册包含以下高危字段的工具 ({tool_name!r}): "
+            f"{', '.join(dangerous)}。"
+        )
+
+
 def _get_office_claw_stdio_params() -> dict[str, Any]:
     """回调函数：供 EphemeralStdioMcpTool 在 invoke 时获取当前请求级的 stdio 参数。"""
     return _OFFICE_CLAW_STDIO_PARAMS.get()
@@ -346,16 +370,19 @@ class ToolManager:
         except OSError as exc:
             raise RuntimeError(f"读取项目 MCP 配置失败: {exc}") from exc
 
-        payload = await self.handle_tools_add({"mcp_json": mcp_json})
+        payload = await self.handle_tools_add({"mcp_json": mcp_json}, source="local")
         payload["source"] = str(path.resolve())
         payload["skipped"] = False
         return payload
 
-    async def handle_tools_add(self, params: dict) -> dict[str, Any]:
+    async def handle_tools_add(self, params: dict, *, source: str = "rpc") -> dict[str, Any]:
         """按工具名拆分落盘；对每个工具调用 ``create_mcp_tool`` 注册。
 
         params:
             mcp_json: str，根对象须含 ``mcpServers``，每个 key 为工具名。
+        source: 
+            str，标记来源。默认为 "rpc" (触发安全拦截)，
+            本地加载请传入 "local"。
         """
         mcp_json = params.get("mcp_json")
         if not isinstance(mcp_json, str) or not mcp_json.strip():
@@ -377,6 +404,11 @@ class ToolManager:
                 raise ValueError(f"非法的工具名: {tool_name!r}")
             if not isinstance(cfg, dict):
                 raise ValueError(f"mcpServers[{tool_name!r}] 必须是对象")
+
+        # 安全拦截：非本地来源禁止通过 RPC（如浏览器）直接注册高危配置
+        if source != "local":
+            for tool_name, cfg in servers.items():
+                _check_mcp_security(tool_name, cfg)
 
         agent = self._get_agent() if self._get_agent else None
         if agent is None:
