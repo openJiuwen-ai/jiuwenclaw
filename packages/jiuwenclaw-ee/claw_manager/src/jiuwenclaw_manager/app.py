@@ -12,7 +12,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from jiuwenclaw_manager import __version__
 from jiuwenclaw_manager.infrastructure.config import settings
 from jiuwenclaw_manager.infrastructure.gateway_forward import GatewayHttpClient
-from jiuwenclaw_manager.infrastructure.db import database_config_summary, init_database
+from jiuwenclaw_manager.infrastructure.db import create_db_handler, database_config_summary
 from jiuwenclaw_manager.infrastructure.logger import configure_logging, get_logger
 from jiuwenclaw_manager.models.table_init import init_all_tables
 from jiuwenclaw_manager.routers.register import router_register
@@ -24,8 +24,9 @@ _log = get_logger(__name__)
 @asynccontextmanager
 async def lifespan(application: FastAPI):
     configure_logging()
-    db_handler = init_database()
+    db_handler = create_db_handler()
     application.state.db_handler = db_handler
+    await db_handler.init_database()
     await db_handler.connect()
     await init_all_tables(db_handler)
     stop = asyncio.Event()

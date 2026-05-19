@@ -22,7 +22,7 @@ _db_handler: DBHandler | None = None
 
 def get_db_handler() -> DBHandler:
     if _db_handler is None:
-        raise RuntimeError("Database handler is not initialized; call init_database first.")
+        raise RuntimeError("Database handler is not initialized; call create_db_handler first.")
     return _db_handler
 
 
@@ -63,8 +63,8 @@ def _mysql_handler_from_db_cfg(db_cfg: dict[str, Any]) -> MySQLHandler:
         ) from e
 
 
-def init_database() -> DBHandler:
-    """根据 ``config.yaml`` → ``extensions.agent_client_rest.database`` 初始化句柄；未配置 ``db_type`` 时默认 sqlite。"""
+def create_db_handler() -> DBHandler:
+    """根据 ``config.yaml`` → ``extensions.agent_client_rest.database`` 创建并注册句柄；未配置 ``db_type`` 时默认 sqlite。"""
     global _db_handler
 
     cfg = get_config()

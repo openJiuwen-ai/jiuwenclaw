@@ -4,7 +4,7 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 
-from .infrastructure.db import init_database
+from .infrastructure.db import create_db_handler
 from .models.table_init import init_all_tables
 from .routers.register import router_register
 
@@ -12,8 +12,9 @@ from .routers.register import router_register
 def create_app() -> FastAPI:
     @asynccontextmanager
     async def lifespan(app: FastAPI):
-        db_handler = init_database()
+        db_handler = create_db_handler()
         app.state.db_handler = db_handler
+        await db_handler.init_database()
         await db_handler.connect()
         await init_all_tables(db_handler)
         yield
