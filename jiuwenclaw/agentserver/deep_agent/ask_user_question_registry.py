@@ -164,13 +164,15 @@ class AskUserQuestionRegistry:
             )
         self._session_interactive_ask.pop(sid, None)
 
-    async def wait_for_answer(self, request_id: str, *, timeout: float) -> list[Any]:
+    async def wait_for_answer(self, request_id: str, *, timeout: float | None) -> list[Any]:
         interactive_ask, session_id, _, _ = get_ask_request_context()
         effective_interactive = interactive_ask
         if not effective_interactive and session_id:
             effective_interactive = self.session_interactive_ask_enabled(session_id)
         fut = self.register(request_id, session_id if effective_interactive else "")
         try:
+            if timeout is None:
+                return await fut
             return await asyncio.wait_for(fut, timeout=timeout)
         except asyncio.TimeoutError:
             self.cleanup(request_id)
