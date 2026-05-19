@@ -21,6 +21,7 @@ from openjiuwen.harness.rails.interrupt.confirm_rail import (
 
 from jiuwenclaw.agentserver.permissions.core import PermissionEngine, get_permission_engine
 from jiuwenclaw.agentserver.permissions.file_guard import persist_file_operations_allow
+from jiuwenclaw.agentserver.permissions.files.registry import lookup_file_tool_specs
 from jiuwenclaw.agentserver.permissions.models import FileOperation
 from jiuwenclaw.agentserver.permissions.patterns import persist_permission_allow_rule
 from jiuwenclaw.agentserver.permissions.shell_ast import parse_shell_for_permission
@@ -1160,7 +1161,9 @@ class PermissionInterruptRail(ConfirmInterruptRail):
             status="pending",
             kind=self._tool_kind_for_permission(tool_name),
         )
-        title = str(descriptor.get("title") or f"Approve `{tool_name}`")
+        intent_line = self.assistant_intent_first_line(tool_name).strip()
+        base_title = str(descriptor.get("title") or f"Approve `{tool_name}`").strip()
+        title = intent_line or base_title
         if result.reason:
             title = f"{title}: {result.reason}"
 
@@ -1348,6 +1351,44 @@ class PermissionInterruptRail(ConfirmInterruptRail):
             text = text[:max_len].rstrip() + "…"
         return text
 
+    def _tool_args_for_params_preview(self, tool_name: str, tool_args: Any) -> dict[str, Any]:
+        """供「参数」JSON 块：去掉 description 与文件路径类参数（路径由下方 file_operations 展示）。"""
+        if not isinstance(tool_args, dict):
+            return {}
+        name = self._normalize_tool_name(tool_name)
+        out: dict[str, Any] = dict(tool_args)
+        out.pop("description", None)
+        specs = lookup_file_tool_specs(name) or lookup_file_tool_specs(tool_name)
+        if specs:
+            for spec in specs:
+                out.pop(spec.arg_name, None)
+        else:
+            for k in ("file_path", "path", "target_file", "filepath", "local_path"):
+                out.pop(k, None)
+        return out
+
+    @classmethod
+    def assistant_intent_first_line(cls, tool_name: str) -> str:
+        """审批标题 / 首句意图：「助手想要 + 动词 + 名词」式自然语言，与工具名解耦展示。"""
+        if is_shell_permission_tool(tool_name):
+            return "助手想要在你的设备上运行程序指令"
+        if tool_name == "send_file_to_user" or tool_name.startswith("send_file_to_user"):
+            return "助手想要给你发送一个文件"
+        if tool_name == "memory_get":
+            return "助手想要读取你的记忆内容"
+        kind = cls._tool_kind_for_permission(tool_name)
+        if kind == "read":
+            return "助手想要读取你设备上的文件"
+        if kind == "edit":
+            return "助手想要访问你设备上的文件"
+        if kind == "search":
+            return "助手想要检索网络或本地信息"
+        if kind == "fetch":
+            return "助手想要获取网页内容"
+        if kind == "execute":
+            return "助手想要在你的设备上运行程序指令"
+        return "助手想要执行一项需要你授权的操作"
+
     def _build_message(
         self,
         tool_call: Optional[ToolCall],
@@ -1358,31 +1399,32 @@ class PermissionInterruptRail(ConfirmInterruptRail):
         preview = self._build_persist_preview(tool_name, tool_args, result)
         risk = self.build_risk_for_message(tool_name, tool_args, result, preview)
         persist_targets_text = self._format_inline_code_items(preview.targets)
-        target_suffix = ""
-        if is_shell_permission_tool(tool_name) and persist_targets_text:
-            target_suffix = f" {persist_targets_text}"
-        elif preview.file_operations:
-            target_suffix = "文件操作"
-        elif is_shell_permission_tool(tool_name) and preview.disabled_reason:
-            target_suffix = ""
 
-        parts = [
-            f"**工具 `{tool_name}` 需要授权才能执行{target_suffix}**\n\n",
-        ]
+        intent_line = self.assistant_intent_first_line(tool_name)
         description = self._extract_tool_description(tool_args)
+        extras: list[str] = []
         if description:
-            parts.append(f"> 行为意图：{description}\n\n")
+            extras.append(f"{description}")
+        if is_shell_permission_tool(tool_name) and persist_targets_text:
+            extras.append(f"{persist_targets_text}")
+        tool_line = f"工具 `{tool_name}` 需要授权才能执行："
+        parts: list[str] = [f"**{intent_line}**\n\n"]
+        if extras:
+            parts.append(f"**{tool_line}{'；'.join(extras)}**\n\n")
+        else:
+            parts.append(f"**{tool_line}**\n\n")
 
         file_ops = list(result.file_operations or [])
         if file_ops:
-            parts.append(f"> {self._render_file_operations_section(file_ops)}\n\n")
+            parts.append(self._render_file_operations_section(file_ops))
 
         parts.extend([
             f"**风险等级：{risk.get('level', '')}风险**\n\n",
             #f"> {risk.get('explanation', '')}\n\n",
         ])
 
-        # args_preview = self._format_args_preview(tool_args)
+        # preview_args = self._tool_args_for_params_preview(tool_name, tool_args)
+        # args_preview = self._format_args_preview(preview_args)
         # if args_preview and args_preview != "{}":
         #     parts.append(f"参数：\n```json\n{args_preview}\n```\n")
 
@@ -1398,6 +1440,7 @@ class PermissionInterruptRail(ConfirmInterruptRail):
 
     @staticmethod
     def _render_file_operations_section(file_ops: list[FileOperation]) -> str:
+        """纯文本：标题 + 列表，无 Markdown 加粗/行内代码。"""
         if not file_ops:
             return ""
         verb_cn = {"read": "读取", "write": "写入", "exec": "执行"}
@@ -1406,21 +1449,22 @@ class PermissionInterruptRail(ConfirmInterruptRail):
             groups.setdefault(op.source, []).append(op)
 
         order = ["tool_arg", "shlex", "llm", "script_scan"]
-        chunks: list[str] = ["\n\n**需要授权的文件操作：**"]
+        ordered_ops: list[FileOperation] = []
         for src in order:
-            ops = groups.get(src)
-            if not ops:
-                continue
-            for op in ops:
-                verb = verb_cn.get(op.action, op.action)
-                chunks.append(f"\n- {verb} `{op.path}`")
+            ordered_ops.extend(groups.get(src) or [])
         for src, ops in groups.items():
             if src in order:
                 continue
-            for op in ops:
-                verb = verb_cn.get(op.action, op.action)
-                chunks.append(f"\n- {verb} `{op.path}`")
-        return "".join(chunks)
+            ordered_ops.extend(ops)
+
+        lines: list[str] = []
+        for op in ordered_ops:
+            verb = verb_cn.get(op.action, str(op.action))
+            path = str(op.path or "").strip()
+            lines.append(f"- {verb} {path}")
+
+        body = "\n".join(lines)[:4000]
+        return f"涉及的文件操作：\n\n{body}\n\n"
 
     def _build_always_allow_hint(
         self,

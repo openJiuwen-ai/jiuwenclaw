@@ -674,11 +674,14 @@ def test_shell_message_does_not_offer_existing_rule_when_file_guard_asks():
     assert context["would_persist_patterns"] == []
     assert context["file_operations"][0]["path"] == "C:/Users/demo/.jiuwenclaw/b.txt"
     assert "需要授权才能执行 `echo *`" not in message
-    assert "工具 `bash` 需要授权才能执行文件操作" in message
+    assert "工具 `bash` 需要授权才能执行" in message
     assert '选择"总是允许"将写入持久化允许规则：`echo *`' not in message
-    # ``_build_message`` 已不再拼接「总是允许」提示与匹配规则行，仅保留标题/文件操作/风险等级/参数。
-    assert "需要授权的文件操作" in message
-    assert "写入 `C:/Users/demo/.jiuwenclaw/b.txt`" in message
+    # ``_build_message`` 已不再拼接「总是允许」提示与匹配规则行；顺序为意图/工具行、文件操作列表、风险等级。
+    assert "涉及的文件操作" in message
+    assert message.index("涉及的文件操作") < message.index("**风险等级")
+    assert "```json" not in message
+    assert "C:/Users/demo/.jiuwenclaw/b.txt" in message
+    assert "- 写入 C:/Users/demo/.jiuwenclaw/b.txt" in message
     assert "**风险等级：高风险**" in message
 
 
@@ -702,7 +705,8 @@ def test_permission_message_uses_exact_pattern_for_complex_shell_command():
     )
 
     exact_pattern = "if exist a.txt type a.txt else echo missing > a.txt"
-    assert f"工具 `bash` 需要授权才能执行 `{exact_pattern}`" in message
+    assert "工具 `bash` 需要授权才能执行" in message
+    assert exact_pattern in message
     assert context["would_persist_patterns"] == [exact_pattern]
     assert "无法为“总是允许”写入持久化规则" not in message
 
@@ -803,7 +807,8 @@ def test_non_shell_permission_message_uses_low_risk():
     )
 
     assert "**风险等级：低风险**" in message
-    assert "**工具 `Write` 需要授权才能执行**" in message
+    assert "**助手想要执行一项需要你授权的操作**" in message
+    assert "工具 `Write` 需要授权才能执行" in message
 
 
 @pytest.mark.parametrize(
@@ -860,10 +865,11 @@ def test_acp_permission_context_contains_readable_match_and_persist_targets():
     assert request["permissionContext"]["displayMatchedRule"] == "bash.shell_command.ask"
     assert request["permissionContext"]["persistAllowTargets"] == ["python *"]
     assert request["permissionContext"]["toolName"] == "bash"
+    assert request["toolCall"]["title"] == "助手想要在你的设备上运行程序指令"
 
 
 def test_permission_message_omits_description_section_when_blank():
-    """``description`` 缺省 / 空白时，标题段后不经「行为意图」引用块，直接衔接风险等级等正文。"""
+    """无 ``description`` 时：首行为助手意图；第二行为「工具…执行：」；其后为风险等级。"""
     from jiuwenclaw.agentserver.deep_agent.rails.permission_rail import PermissionInterruptRail
 
     rail = PermissionInterruptRail(config={"tools": {"write_file": "guard"}})
@@ -882,7 +888,7 @@ def test_permission_message_omits_description_section_when_blank():
         result,
     )
 
-    title = "**工具 `write_file` 需要授权才能执行**\n\n"
+    title = "**助手想要访问你设备上的文件**\n\n**工具 `write_file` 需要授权才能执行：**\n\n"
     for msg in (msg_no_desc, msg_blank_desc):
         assert title in msg
         _, _, tail = msg.partition(title)

@@ -74,6 +74,37 @@ def build_ask_user_rail() -> Any | None:
     return ask_user_rail
 
 
+def _intent_header_from_permission_message(message: str) -> str | None:
+    """若正文首行是单行 ``**...**``，且为「助手意图」行（非工具行/风险行），返回其中纯文本作审批标题。
+
+    正文首行也可能是加粗的工具授权提示行（以「工具」开头），该段不应当作标题。
+    """
+    if not message or not isinstance(message, str):
+        return None
+    first = message.lstrip("\ufeff").split("\n", 1)[0].strip()
+    if len(first) < 4 or not first.startswith("**") or not first.endswith("**"):
+        return None
+    inner = first[2:-2].strip()
+    if not inner:
+        return None
+    if inner.startswith("工具") or inner.startswith("风险等级"):
+        return None
+    return inner
+
+
+def _header_for_permission_question(message: str, tool_name: str) -> str:
+    """审批卡标题：优先旧版正文首行意图；否则与 ``PermissionInterruptRail.assistant_intent_first_line`` 一致。"""
+    from_message = _intent_header_from_permission_message(message)
+    if from_message:
+        return from_message
+    from jiuwenclaw.agentserver.deep_agent.rails.permission_rail import PermissionInterruptRail
+
+    intent = PermissionInterruptRail.assistant_intent_first_line(tool_name or "").strip()
+    if intent:
+        return intent
+    return f"权限审批: {tool_name}" if tool_name else "权限审批"
+
+
 def convert_interactions_to_ask_user_question(state_outputs: list) -> dict | None:
     """Convert __interaction__ list to frontend chat.ask_user_question format.
 
@@ -133,7 +164,7 @@ def extract_question_from_interaction(payload: Any) -> dict | None:
 
     return {
         "question": message or f"工具 `{tool_name}` 需要授权才能执行",
-        "header": f"权限审批: {tool_name}" if tool_name else "权限审批",
+        "header": _header_for_permission_question(message, tool_name),
         "options": [
             {"label": "本次允许", "description": "仅本次授权执行"},
             {"label": "总是允许", "description": "记住该规则，以后自动放行"},
