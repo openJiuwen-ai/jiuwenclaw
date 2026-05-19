@@ -21,7 +21,7 @@ _db_handler: DBHandler | None = None
 
 def get_db_handler() -> DBHandler:
     if _db_handler is None:
-        raise RuntimeError("Database handler is not initialized; call init_database first.")
+        raise RuntimeError("Database handler is not initialized; call create_db_handler first.")
     return _db_handler
 
 
@@ -52,8 +52,8 @@ def _mysql_handler_from_settings(cfg: Settings) -> MySQLHandler:
         raise ValueError("Invalid MySQL database configuration.") from e
 
 
-def init_database(cfg: Settings | None = None) -> DBHandler:
-    """根据 ``Settings`` / ``.env`` 初始化全局 ``DBHandler``。"""
+def create_db_handler(cfg: Settings | None = None) -> DBHandler:
+    """根据 ``Settings`` / ``.env`` 创建并注册全局 ``DBHandler``。"""
     global _db_handler
 
     active = cfg or settings
