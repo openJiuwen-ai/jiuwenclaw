@@ -1,26 +1,59 @@
+# Headless Service：给 StatefulSet 提供稳定 DNS 域名
+apiVersion: v1
+kind: Service
+metadata:
+  name: <<CLAW_MANAGER_NAME>>-headless
+  namespace: <<NAMESPACE>>
+spec:
+  ports:
+    - port: <<CLAW_MANAGER_REST_PORT>>
+      targetPort: <<CLAW_MANAGER_REST_PORT>>
+  clusterIP: None  # 关键：无头服务，StatefulSet 必须依赖
+  selector:
+    app: <<CLAW_MANAGER_NAME>>
+
+---
+# NodePort Service：供外部连接 CLAW_MANAGER
+apiVersion: v1
+kind: Service
+metadata:
+  name: <<CLAW_MANAGER_NAME>>-nodeport
+  namespace: <<NAMESPACE>>
+spec:
+  type: NodePort
+  ports:
+    - port: <<CLAW_MANAGER_REST_PORT>>       # 集群内部端口
+      targetPort: <<CLAW_MANAGER_REST_PORT>> # 容器端口
+      nodePort: <<CLAW_MANAGER_NODE_PORT>>   # 外部访问端口（30000-32767）
+  selector:
+    app: <<CLAW_MANAGER_NAME>>
+
+---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: <<MANAGER_NAME>>
+  name: <<CLAW_MANAGER_NAME>>
   namespace: <<NAMESPACE>>
 spec:
   replicas: 1
   selector:
     matchLabels:
-      app: <<MANAGER_NAME>>
+      app: <<CLAW_MANAGER_NAME>>
   template:
     metadata:
       labels:
-        app: <<MANAGER_NAME>>
+        app: <<CLAW_MANAGER_NAME>>
     spec:
       containers:
       - name: manager
-        image: <<MANAGER_IMAGE>>
+        image: <<CLAW_MANAGER_IMAGE>>
         ports:
-        - containerPort: 8765
+        - containerPort: <<CLAW_MANAGER_REST_PORT>>
         env:
         - name: CLAWMANAGER_RABBITMQ_URL
           value: "<<CLAWMANAGER_RABBITMQ_URL>>"
+        - name: CLAW_MANAGER_REST_PORT
+          value: "<<CLAW_MANAGER_REST_PORT>>"
         - name: CLAW_MANAGER_DB_TYPE
           value: "<<CLAW_MANAGER_DB_TYPE>>"
         - name: CLAW_MANAGER_SQLITE_PATH

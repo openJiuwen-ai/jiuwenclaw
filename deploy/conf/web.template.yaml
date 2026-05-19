@@ -16,7 +16,7 @@ spec:
         app: <<WEB_NAME>>
     spec:
       # 固定调度到本master节点（运行部署工具的节点）
-      nodeName: ecs-38b3-0002
+      nodeName: <<MASTER_NODE_NAME>>
       securityContext:
         fsGroup: 1000
       containers:

@@ -1,4 +1,4 @@
-# 1. Headless Service：给 StatefulSet 提供稳定 DNS 域名
+# Headless Service：给 StatefulSet 提供稳定 DNS 域名
 apiVersion: v1
 kind: Service
 metadata:
@@ -12,7 +12,7 @@ spec:
     app: <<MYSQL_NAME>>
 
 ---
-# 2. NodePort Service：供外部工具连接 MySQL
+# NodePort Service：供外部工具连接 MySQL
 apiVersion: v1
 kind: Service
 metadata:
@@ -27,7 +27,7 @@ spec:
     app: <<MYSQL_NAME>>
 
 ---
-# 4. StatefulSet：MySQL 有状态应用（稳定网络 + 稳定存储）
+# StatefulSet：MySQL 有状态应用（稳定网络 + 稳定存储）
 apiVersion: apps/v1
 kind: StatefulSet
 metadata:
@@ -77,6 +77,7 @@ spec:
             claimName: <<MYSQL_NAME>>-pvc
 
 ---
+# PV 持久化存储
 apiVersion: v1
 kind: PersistentVolume
 metadata:
@@ -100,7 +101,7 @@ spec:
     - noatime
 
 ---
-# 3. PVC 持久化存储（自动绑定 PV）
+# PVC 持久化存储（自动绑定 PV）
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
