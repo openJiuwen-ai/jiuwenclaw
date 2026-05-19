@@ -21,5 +21,17 @@ spec:
         env:
         - name: CLAWMANAGER_RABBITMQ_URL
           value: "<<CLAWMANAGER_RABBITMQ_URL>>"
-        - name: CLAWMANAGER_ALLOW_LOCAL_PROVISION
-          value: "true"
+        - name: CLAW_MANAGER_DB_TYPE
+          value: "<<CLAW_MANAGER_DB_TYPE>>"
+        - name: CLAW_MANAGER_SQLITE_PATH
+          value: "<<CLAW_MANAGER_SQLITE_PATH>>"
+        - name: CLAW_MANAGER_DB_HOST
+          value: "<<CLAW_MANAGER_DB_HOST>>"
+        - name: CLAW_MANAGER_DB_PORT
+          value: "<<CLAW_MANAGER_DB_PORT>>"
+        - name: CLAW_MANAGER_DB_USER
+          value: "root"
+        - name: CLAW_MANAGER_DB_PASSWORD
+          value: "<<CLAW_MANAGER_DB_PASSWORD>>"
+        - name: CLAW_MANAGER_DB_NAME
+          value: "<<CLAW_MANAGER_DB_NAME>>"

@@ -109,7 +109,7 @@ check_if_yr_claw_up() {
 }
 
 check_if_nfs_up() {
-    # No external NFS server
+    # Check if external NFS server
     if [ -n "${DEPLOY_VARS["NFS_SERVER_ADDR"]:-}" ]; then
         info "Use external NFS server"
         return
@@ -131,7 +131,7 @@ check_if_rabbitmq_up() {
     local url=""
     local encoded_password=$(urlencode "$password")
 
-    # No external RABBITMQ server
+    # Check if external RABBITMQ server
     if [ -n "${DEPLOY_VARS["RABBITMQ_URL"]:-}" ]; then
         info "Use external RABBITMQ server"
         url="${DEPLOY_VARS["RABBITMQ_URL"]}"
@@ -140,13 +140,43 @@ check_if_rabbitmq_up() {
     fi
 
     # No Build-In RABBITMQ server
-    if ! check_k8s_resource_exists "statefulset" "${DEPLOY_VARS["RABBITMQ_NAME"]}"; then
+    if ! check_k8s_resource_exists "statefulset" "${name}"; then
         error "RABBITMQ is not deployed. Please deploy it first with: ./$(basename "$0") up rabbitmq"
     fi
 
     info "Use built-in RABBITMQ server"
     url="${name}-headless.default:5672"
     DEPLOY_VARS["CLAWMANAGER_RABBITMQ_URL"]="amqp://${user}:${encoded_password}@${url}"
+}
+
+check_if_mysql_up() {
+    local name="${DEPLOY_VARS["MYSQL_NAME"]}"
+    local user=${DEPLOY_VARS["RABBITMQ_USER"]}
+    local password=${DEPLOY_VARS["RABBITMQ_PASSWORD"]}
+    local url=""
+    local encoded_password=$(urlencode "$password")
+
+    # Check if external MySQL server
+    if [ -n "${DEPLOY_VARS["MYSQL_HOST"]:-}" ]; then
+        info "Use external MySQL server"
+        DEPLOY_VARS["CLAW_MANAGER_DB_HOST"]=${DEPLOY_VARS["MYSQL_HOST"]}
+        DEPLOY_VARS["CLAW_MANAGER_DB_PORT"]=${DEPLOY_VARS["MYSQL_PORT"]}
+        DEPLOY_VARS["CLAW_MANAGER_DB_USER"]="root"
+        DEPLOY_VARS["CLAW_MANAGER_DB_PASSWORD"]=${DEPLOY_VARS["MYSQL_ROOT_PASSWORD"]}
+    fi
+
+    # No Build-In DB server
+    if ! check_k8s_resource_exists "statefulset" "${name}"; then
+        DEPLOY_VARS["CLAW_MANAGER_DB_TYPE"]="sqlite"
+        warning "DB is not deployed. Use build-in SQLite"
+        return
+    fi
+
+    info "Use built-in DB server"
+    DEPLOY_VARS["CLAW_MANAGER_DB_HOST"]="${name}-headless.default"
+    DEPLOY_VARS["CLAW_MANAGER_DB_PORT"]="3306"
+    DEPLOY_VARS["CLAW_MANAGER_DB_USER"]="root"
+    DEPLOY_VARS["CLAW_MANAGER_DB_PASSWORD"]=${DEPLOY_VARS["MYSQL_ROOT_PASSWORD"]}
 }
 
 check_vars() {
@@ -223,4 +253,5 @@ check_mysql_up_dependency(){
 
 check_manager_up_dependency(){
     check_if_rabbitmq_up
+    check_if_mysql_up
 }
