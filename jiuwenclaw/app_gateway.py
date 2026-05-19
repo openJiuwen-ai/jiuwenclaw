@@ -34,10 +34,7 @@ from jiuwenclaw.jiuwen_core_patch import (
 from jiuwenclaw.utils import (
     get_user_workspace_dir,
     get_env_file,
-    prepare_workspace,
-    cleanup_legacy_flat_agent_dir,
-    update_config,
-    get_multi_tenant_user_workspace_dir,
+    ensure_workspace_initialized,
     migrate_legacy_user_config_if_needed,
 )
 
@@ -51,23 +48,8 @@ from jiuwenclaw.gateway.route_binding import GatewayRouteBinding
 from jiuwenclaw.extensions.extension_config_sync import decrypt_extensions_sensitive_for_agent
 from jiuwenclaw.local_env_config import decrypt
 
-# Ensure workspace initialized
-_workspace_dir = get_user_workspace_dir()
-_config_file = _workspace_dir / "config" / "config.yaml"
-# 多租户路径：service_default/agent_default/agent/jiuwenclaw_workspace
-_multi_tenant_workspace = get_multi_tenant_user_workspace_dir("default", "default")
-if _multi_tenant_workspace:
-    _new_workspace = _multi_tenant_workspace / "agent" / "jiuwenclaw_workspace"
-else:
-    _new_workspace = _workspace_dir / "agent" / "jiuwenclaw_workspace"
-_old_workspace = _workspace_dir / "agent" / "workspace"
-
-# Initialize if config doesn't exist, or if legacy workspace exists but new doesn't (migration)
-if not _config_file.exists() or (_old_workspace.exists() and not _new_workspace.exists()):
-    prepare_workspace(overwrite=False)
-else:
-    update_config()
-    cleanup_legacy_flat_agent_dir(_workspace_dir)
+# 确保工作区已初始化（使用跨进程锁保护并发访问）
+ensure_workspace_initialized(component_name="Gateway")
 
 # Reduce openjiuwen internal logs (keep Gateway logs)
 configure_openjiuwen_logging_under_jiuwenclaw()

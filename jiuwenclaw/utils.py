@@ -43,6 +43,7 @@ import re
 import shutil
 import sys
 import time
+import contextlib
 from collections import OrderedDict
 from dataclasses import dataclass, field
 from logging.handlers import BaseRotatingHandler
@@ -148,6 +149,153 @@ class FileTransferStartParams:
     mime_type: str = ""
     session_id: str = ""
     channel_id: str = ""
+
+
+@contextlib.contextmanager
+def inter_process_lock(
+    lock_file_path: Path,
+    timeout: float = 30.0,
+    poll_interval: float = 0.1,
+    stale_timeout: float = 120.0,
+):
+    """
+    跨进程锁，利用 os.O_CREAT | os.O_EXCL 的原子性。
+
+    用于保护多进程并发访问共享资源（如工作目录初始化）的场景。
+
+    Args:
+        lock_file_path: 锁文件路径
+        timeout: 获取锁的超时时间（秒），超时后抛出 TimeoutError
+        poll_interval: 轮询间隔（秒），用于等待锁释放
+        stale_timeout: 僵尸锁文件的过期时间（秒），超过此时间的锁文件将被清理
+
+    Example:
+        >>> lock_file = workspace_dir / ".init.lock"
+        >>> with inter_process_lock(lock_file, timeout=60.0):
+        >>>     # 临界区代码，只有一个进程可以执行
+        >>>     prepare_workspace(overwrite=False)
+
+    Note:
+        - 僵尸锁清理：如果锁文件存在且超过 stale_timeout 时间未更新，将被自动清理
+          （防止进程崩溃后遗留的死锁）
+        - 锁文件内容：包含当前进程 PID 和获取时间，用于诊断
+        - 异常安全：即使临界区抛出异常，锁文件也会在 finally 中被清理
+    """
+    # Step 1: 检查并清理僵尸锁文件
+    if lock_file_path.exists():
+        try:
+            file_age = time.time() - lock_file_path.stat().st_mtime
+            if file_age > stale_timeout:
+                # 锁文件过期，可能是上一个进程崩溃遗留的僵尸锁
+                lock_file_path.unlink()
+                logger.warning(
+                    f"Removed stale lock file (age={file_age:.1f}s > stale_timeout={stale_timeout}s): {lock_file_path}"
+                )
+        except OSError as e:
+            logger.warning(f"Failed to check/remove stale lock file: {e}")
+
+    # Step 2: 尝试获取锁
+    start_time = time.time()
+    fd = None
+    first_attempt = True
+
+    while True:
+        try:
+            # 尝试排他性地创建文件
+            fd = os.open(str(lock_file_path), os.O_CREAT | os.O_EXCL | os.O_RDWR, mode=0o666)
+            # 成功获取锁，写入当前进程 PID 和时间戳用于诊断
+            if fd is not None:
+                pid_info = f"{os.getpid()}\n{time.time()}\n".encode()
+                os.write(fd, pid_info)
+            logger.info(
+                f"Lock acquired (waited={time.time() - start_time:.2f}s, pid={os.getpid()}): {lock_file_path}"
+            )
+            break
+        except FileExistsError:
+            # 锁已被其他进程占用
+            if first_attempt:
+                logger.info(
+                    f"Lock held by another process, waiting (max_timeout={timeout}s): {lock_file_path}"
+                )
+                first_attempt = False
+
+            elapsed = time.time() - start_time
+            if elapsed > timeout:
+                raise TimeoutError(
+                    f"获取跨进程锁超时 ({elapsed:.1f}s > {timeout}s): {lock_file_path}"
+                ) from None
+            time.sleep(poll_interval)
+
+    try:
+        yield
+    finally:
+        # Step 3: 释放锁：关闭文件描述符并删除锁文件
+        if fd is not None:
+            os.close(fd)
+            try:
+                os.remove(str(lock_file_path))
+                logger.info(f"Lock released: {lock_file_path}")
+            except OSError as e:
+                logger.warning(f"Failed to remove lock file: {e}")
+
+
+def ensure_workspace_initialized(
+    component_name: str = "App",
+    timeout: float = 60.0,
+    stale_timeout: float = 120.0,
+) -> None:
+    """
+    确保工作区已初始化，使用跨进程锁保护并发访问。
+
+    用于多入口应用（app.py、app_agentserver.py、app_gateway.py）的启动初始化。
+    在并发启动场景下，多个进程可能同时尝试初始化工作区，此函数确保只有一个进程执行初始化。
+
+    Args:
+        component_name: 组件名称，用于日志标识（如 "App", "AgentServer", "Gateway"）
+        timeout: 获取锁的超时时间（秒），超时后抛出 TimeoutError
+        stale_timeout: 僵尸锁文件的过期时间（秒），超过此时间的锁文件将被清理
+
+    Example:
+        >>> # 在入口文件中调用
+        >>> ensure_workspace_initialized(component_name="App")
+
+    Note:
+        - 初始化条件：config.yaml 不存在，或旧 workspace 存在但新不存在（迁移场景）
+        - 始终清理 Team 旧版本遗留文件（幂等操作）
+        - 异常安全：即使初始化失败，锁也会被正确释放
+    """
+    _workspace_dir = get_user_workspace_dir()
+    _config_file = _workspace_dir / "config" / "config.yaml"
+    _multi_tenant_workspace = get_multi_tenant_user_workspace_dir("default", "default")
+    if _multi_tenant_workspace:
+        _new_workspace = _multi_tenant_workspace / "agent" / "jiuwenclaw_workspace"
+    else:
+        _new_workspace = _workspace_dir / "agent" / "jiuwenclaw_workspace"
+    _old_workspace = _workspace_dir / "agent" / "workspace"
+
+    # 始终清理 Team 旧版本遗留文件（幂等操作，在 prepare_workspace 之前执行）
+    cleanup_team_files(_workspace_dir)
+
+    # 使用跨进程锁保护初始化过程，防止并发竞争
+    _lock_file = _workspace_dir / ".init.lock"
+    logger.info(f"[{component_name}] Acquiring workspace init lock: {_lock_file}")
+
+    with inter_process_lock(_lock_file, timeout=timeout, stale_timeout=stale_timeout):
+        if not _config_file.exists() or (_old_workspace.exists() and not _new_workspace.exists()):
+            logger.info(
+                f"[{component_name}] Workspace initialization required "
+                f"(config_exists={_config_file.exists()}, "
+                f"legacy_migration={_old_workspace.exists() and not _new_workspace.exists()})"
+            )
+            prepare_workspace(overwrite=False)
+            logger.info(f"[{component_name}] Workspace initialization completed")
+        else:
+            logger.info(f"[{component_name}] Workspace already initialized, updating config")
+            update_config()
+            cleanup_legacy_flat_agent_dir(_workspace_dir)
+            logger.info(f"[{component_name}] Config update completed")
+
+    logger.info(f"[{component_name}] Workspace init lock released, proceeding to start")
 
 
 class SafeRotatingFileHandler(BaseRotatingHandler):

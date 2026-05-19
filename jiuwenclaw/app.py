@@ -14,35 +14,13 @@ import time
 from dotenv import load_dotenv
 
 from jiuwenclaw.utils import (
-    get_user_workspace_dir,
     get_env_file,
-    prepare_workspace,
-    cleanup_team_files,
-    cleanup_legacy_flat_agent_dir,
-    update_config,
-    get_multi_tenant_user_workspace_dir,
+    ensure_workspace_initialized,
 )
 
 
-_workspace_dir = get_user_workspace_dir()
-_config_file = _workspace_dir / "config" / "config.yaml"
-# 多租户路径：service_default/agent_default/agent/jiuwenclaw_workspace
-_multi_tenant_workspace = get_multi_tenant_user_workspace_dir("default", "default")
-if _multi_tenant_workspace:
-    _new_workspace = _multi_tenant_workspace / "agent" / "jiuwenclaw_workspace"
-else:
-    _new_workspace = _workspace_dir / "agent" / "jiuwenclaw_workspace"
-_old_workspace = _workspace_dir / "agent" / "workspace"
-
-# 始终清理 Team 旧版本遗留文件（幂等操作，在 prepare_workspace 之前执行）
-cleanup_team_files(_workspace_dir)
-
-# Initialize if config doesn't exist, or if legacy workspace exists but new doesn't (migration)
-if not _config_file.exists() or (_old_workspace.exists() and not _new_workspace.exists()):
-    prepare_workspace(overwrite=False)
-else:
-    update_config()
-    cleanup_legacy_flat_agent_dir(_workspace_dir)
+# 确保工作区已初始化（使用跨进程锁保护并发访问）
+ensure_workspace_initialized(component_name="App")
 
 load_dotenv(dotenv_path=get_env_file())
 

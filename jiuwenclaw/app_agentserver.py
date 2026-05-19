@@ -15,6 +15,7 @@ import argparse
 import asyncio
 import logging
 import os
+from pathlib import Path
 
 from dotenv import load_dotenv
 from openjiuwen.core.common.logging import LogManager
@@ -24,14 +25,10 @@ from jiuwenclaw.jiuwen_core_patch import (
     configure_openjiuwen_logging_under_jiuwenclaw,
 )
 from jiuwenclaw.utils import (
-    get_user_workspace_dir,
     get_env_file,
-    prepare_workspace,
-    logger,
-    cleanup_legacy_flat_agent_dir,
-    update_config,
-    get_multi_tenant_user_workspace_dir,
+    ensure_workspace_initialized,
     migrate_legacy_user_config_if_needed,
+    logger,
 )
 
 apply_openai_model_client_patch()
@@ -44,23 +41,8 @@ except ImportError:
     # The module will be imported lazily when needed in _run().
     pass
 
-# Ensure workspace initialized
-_workspace_dir = get_user_workspace_dir()
-_config_file = _workspace_dir / "config" / "config.yaml"
-# 多租户路径：service_default/agent_default/agent/jiuwenclaw_workspace
-_multi_tenant_workspace = get_multi_tenant_user_workspace_dir("default", "default")
-if _multi_tenant_workspace:
-    _new_workspace = _multi_tenant_workspace / "agent" / "jiuwenclaw_workspace"
-else:
-    _new_workspace = _workspace_dir / "agent" / "jiuwenclaw_workspace"
-_old_workspace = _workspace_dir / "agent" / "workspace"
-
-# Initialize if config doesn't exist, or if legacy workspace exists but new doesn't (migration)
-if not _config_file.exists() or (_old_workspace.exists() and not _new_workspace.exists()):
-    prepare_workspace(overwrite=False)
-else:
-    update_config()
-    cleanup_legacy_flat_agent_dir(_workspace_dir)
+# 确保工作区已初始化（使用跨进程锁保护并发访问）
+ensure_workspace_initialized(component_name="AgentServer")
 
 configure_openjiuwen_logging_under_jiuwenclaw()
 for _lg in LogManager.get_all_loggers().values():
