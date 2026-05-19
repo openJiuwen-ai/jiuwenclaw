@@ -870,8 +870,11 @@ def _resolve_front_team_agent_spec(
 def _build_modes_team_mapping(front_payload: dict[str, Any]) -> dict[str, Any]:
     agents_raw = _require_dict(front_payload.get("agents"), "agents")
     teams_raw = front_payload.get("team")
-    if not isinstance(teams_raw, list) or not teams_raw:
-        raise ValueError("team must be a non-empty array")
+    if teams_raw is None:
+        return {}  # 无 team 配置是合法的
+    if not isinstance(teams_raw, list):
+        raise ValueError("team must be an array")
+    # 空数组合法：用户可以只配 agents 不配 teams，或删除所有 teams
 
     team_mapping: dict[str, Any] = {}
     seen_team_names: set[str] = set()
