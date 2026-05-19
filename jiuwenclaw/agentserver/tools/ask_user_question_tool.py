@@ -8,6 +8,7 @@ import asyncio
 import json
 import logging
 import os
+import time
 import uuid
 from typing import Any
 
@@ -331,12 +332,24 @@ async def _ask_user_question_impl(questions: Any, timeout: Any = None) -> dict[s
             "answers": [],
         }
     ask_id = f"{ASK_REQUEST_PREFIX}{uuid.uuid4().hex}"
-    payload: dict[str, Any] = {
-        "event_type": "chat.ask_user_question",
-        "request_id": ask_id,
-        "source": "ask_tool",
-        "questions": normalized,
-    }
+    # 与 wait_for_answer(timeout) 使用同一截止时刻；网关/前端用 expires_at_ms 展示倒计时或「请于 xx 前完成」
+    if wait_timeout:
+        expires_at_ms = int(time.time() * 1000 + float(wait_timeout) * 1000)
+        payload: dict[str, Any] = {
+            "event_type": "chat.ask_user_question",
+            "request_id": ask_id,
+            "source": "ask_tool",
+            "questions": normalized,
+            "expires_at_ms": expires_at_ms,
+            "timeout_sec": float(wait_timeout),
+        }
+    else:
+        payload: dict[str, Any] = {
+            "event_type": "chat.ask_user_question",
+            "request_id": ask_id,
+            "source": "ask_tool",
+            "questions": normalized
+        }
     if session_id:
         payload["session_id"] = session_id
 
