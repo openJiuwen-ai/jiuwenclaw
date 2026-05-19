@@ -32,6 +32,7 @@ from jiuwenclaw.agentserver.deep_agent.ask_user_question_registry import (
 )
 from jiuwenclaw.agentserver.deep_agent.rails import JiuClawStreamEventRail
 from jiuwenclaw.agentserver.skilldev.common_utils import safe_extract_zip
+from jiuwenclaw.agentserver.skilldev.utils.download_file_from_url import download_file
 from jiuwenclaw.agentserver.stream_utils import tool_calls_payload_to_json_list
 from jiuwenclaw.agentserver.tools.subagent_executor import init_subagent_executor
 from jiuwenclaw.agentserver.tools.subagent_executor.context_vars import set_effective_request_workspace_dir
@@ -405,14 +406,7 @@ class SkillDevDeepAdapter:
 
     @staticmethod
     def _init_workspace_dirs(task_workspace: Path) -> None:
-        for rel in (
-            "skill",
-            "resources/ref-files",
-            "resources/ref-skills",
-            "resources/available-tools",
-            "evals",
-            "output",
-        ):
+        for rel in ("skill", "evals", "output"):
             (task_workspace / rel).mkdir(parents=True, exist_ok=True)
 
     @staticmethod
@@ -445,6 +439,23 @@ class SkillDevDeepAdapter:
         if not resources:
             return
         dest_dir.mkdir(parents=True, exist_ok=True)
+
+        # 适配小艺：通过 URL 下载文件
+        if resources[0].get("url", ""):
+            for res in resources:
+                name = str(res.get("filename") or res.get("name") or "unknown")
+                suffix = Path(name).suffix.lower()
+                if allowed_suffixes and suffix not in allowed_suffixes:
+                    raise ValueError(f"不支持的文件类型: {name}")
+                download_url = str(res.get("url", ""))
+                if not download_url:
+                    continue
+                file_path = dest_dir / name
+                await download_file(download_url, str(file_path))
+                if suffix in (".zip", ".skill"):
+                    safe_extract_zip(file_path, dest_dir, extract_to_stem_dir=False)
+            return
+
         for res in resources:
             name = str(res.get("filename") or res.get("name") or "unknown")
             suffix = Path(name).suffix.lower()
@@ -463,17 +474,21 @@ class SkillDevDeepAdapter:
         files = params.get("files") or []
         skills = params.get("skill_packages") or params.get("skillPackages") or []
         tools = params.get("tool_spec_files") or params.get("toolSpecFiles") or []
-        if not any((files, skills, tools)):
+        lines: list[str] = []
+        if files:
+            lines.append(f"- 普通参考文件：{task_workspace / 'resources' / 'ref-files'}")
+        if skills:
+            lines.append(f"- 参考 Skill 包：{task_workspace / 'resources' / 'ref-skills'}")
+        if tools:
+            lines.append(f"- 可用工具说明：{task_workspace / 'resources' / 'available-tools'}")
+        if not lines:
             return ""
-        return (
+        header = (
             f"任务 ID：{task_id}\n"
             f"当前 SkillDev 工作区：{task_workspace}\n"
             "用户上传资源已写入：\n"
-            f"- 普通参考文件：{task_workspace / 'resources' / 'ref-files'}\n"
-            f"- 参考 Skill 包：{task_workspace / 'resources' / 'ref-skills'}\n"
-            f"- 可用工具说明：{task_workspace / 'resources' / 'available-tools'}\n"
-            "请在生成 Skill 前按需检查这些目录。"
         )
+        return header + "\n".join(lines) + "\n请在生成 Skill 前按需检查这些目录。"
 
     # ------------------------------------------------------------------
     # interrupt / answer / heartbeat / is_working
