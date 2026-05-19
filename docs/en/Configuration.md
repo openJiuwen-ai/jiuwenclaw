@@ -72,6 +72,7 @@ Edit **`config/config.yaml`** or **`.env`** directly; there is no UI for these.
 | `JIUWENCLAW_CONFIG_DIR` | Custom config directory |
 | `JIUWENCLAW_DATA_DIR` | Absolute path to the user data root (`config/`, `agent/`, `.logs`, etc.). If unset, defaults to `~/.jiuwenclaw`. Set in the shell or service environment **before** starting the process so workspace paths resolve from the first import; defining it only in `config/.env` is often too late for that bootstrap. |
 | `JIUWENCLAW_DISABLE_CRON_TOOLS` | Set to `1` to disable Agent-side cron tool registration and hide cron-tool prompt text |
+| `JIUWENCLAW_ENABLE_JINA_FETCH` | Set to `1` to enable Jina Reader (`r.jina.ai`) parallel fetch in `mcp_fetch_webpage`; otherwise direct HTTP only |
 
 See `.env.template` for more variables.
 

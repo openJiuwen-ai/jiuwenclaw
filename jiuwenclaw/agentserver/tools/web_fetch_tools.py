@@ -7,6 +7,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import re
 from html import unescape
 from typing import Any
@@ -19,6 +20,11 @@ from openjiuwen.core.foundation.tool import ToolCard, tool
 from jiuwenclaw.agentserver.tools.ssl_config import get_requests_verify
 
 logger = logging.getLogger(__name__)
+
+
+def should_use_jina_fetch() -> bool:
+    """Return True when Jina Reader fetch is enabled via env (opt-in)."""
+    return os.getenv("JIUWENCLAW_ENABLE_JINA_FETCH") == "1"
 
 _USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -481,17 +487,56 @@ def _fetch_via_jina_sync(
         return None, _brief_fetch_failure("jina", exc=exc, response=resp)
 
 
+async def _fetch_webpage_direct_only(
+    url: str, timeout_seconds: int, overall_timeout: int
+) -> dict[str, Any]:
+    """Direct HTTP fetch only (Jina disabled via env)."""
+    failures: list[str] = []
+    try:
+        async with asyncio.timeout(overall_timeout):
+            result, err = await asyncio.to_thread(
+                _fetch_direct_sync, url, timeout_seconds
+            )
+            if err:
+                failures.append(err)
+            if result and result.get("content"):
+                return result
+    except asyncio.TimeoutError:
+        failures.append("fetch: timed out")
+        logger.warning(
+            "Direct webpage fetch timed out: url=%s overall_timeout=%ss timeout_seconds=%ss",
+            url,
+            overall_timeout,
+            timeout_seconds,
+        )
+    except Exception as exc:
+        logger.warning(
+            "Direct webpage fetch failed unexpectedly: %s",
+            _format_fetch_failure(
+                "direct",
+                url,
+                exc=exc,
+                note="unexpected error in direct-only fetch",
+            ),
+            exc_info=True,
+        )
+        failures.append(_brief_fetch_failure("direct", exc=exc))
+    raise RuntimeError(_combine_brief_failures(failures))
+
+
 async def _fetch_webpage_async(
     url: str, timeout_seconds: int, overall_timeout: int
 ) -> dict[str, Any]:
     """Concurrent fetch with quality-first fallback strategy.
 
-    Strategy:
+    When ``JIUWENCLAW_ENABLE_JINA_FETCH=1``, strategy:
     - If jina returns first and succeeds: use jina (best quality)
     - If direct returns first:
       - If direct failed (4xx/5xx or no content): wait for jina
-      - If direct succeeded: wait for jina up to 3s, use jina if available, else direct
+      - If direct succeeded: wait for jina up to 1s, use jina if available, else direct
     """
+    if not should_use_jina_fetch():
+        return await _fetch_webpage_direct_only(url, timeout_seconds, overall_timeout)
 
     failures: list[str] = []
 
