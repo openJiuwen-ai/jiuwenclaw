@@ -16,6 +16,7 @@ from ..memory import (
     create_memory_settings,
     is_memory_enabled,
 )
+from ..memory.external_memory_config import is_builtin_memory_allowed
 
 logger = logging.getLogger(__name__)
 
@@ -112,8 +113,12 @@ async def init_memory_manager_async(
     """
     global _global_manager, _global_workspace_dir, _global_settings, _global_agent_id
     
-    if not is_memory_enabled():
-        logger.info("Memory system is disabled")
+    if not is_builtin_memory_allowed():
+        logger.info("Memory system is disabled (engine gate)")
+        return None
+    
+    if not is_memory_enabled("plan"):
+        logger.info("Memory system is disabled (mode gate)")
         return None
     
     if _global_manager is not None and _global_workspace_dir == workspace_dir:
@@ -302,6 +307,8 @@ async def write_memory(
     Returns:
         操作结果字典
     """
+    if not is_builtin_memory_allowed():
+        return {"success": False, "error": "记忆系统已禁用"}
     if is_group_chat_mode():
         return {"success": False, "error": "群聊模式下禁止写入记忆文件"}
     try:
@@ -363,6 +370,8 @@ async def edit_memory(
     Returns:
         操作结果字典
     """
+    if not is_builtin_memory_allowed():
+        return {"success": False, "error": "记忆系统已禁用"}
     if is_group_chat_mode():
         return {"success": False, "error": "群聊模式下禁止编辑记忆文件"}
     try:
@@ -442,6 +451,8 @@ async def read_memory(
     Returns:
         文件内容字典
     """
+    if not is_builtin_memory_allowed():
+        return {"success": False, "path": path, "content": "", "error": "记忆系统已禁用"}
     try:
         is_valid, result = _validate_memory_path(path)
         if not is_valid:

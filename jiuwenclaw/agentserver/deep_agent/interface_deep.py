@@ -2945,44 +2945,47 @@ class JiuWenClawDeepAdapter:
         except ImportError:
             pass
 
-        # 处理两种场景的记忆工具移除：
+        # 处理记忆工具的注册/移除：
+        # 0. engine=none 时全局移除所有记忆工具（优先级最高）
         # 1. 群聊数字分身模式（group_digital_avatar=True + avatar_mode=True）：移除写入工具，但保留读取工具
         # 2. 记忆完全禁用（enable_memory=False + group_digital_avatar=True + avatar_mode=True）：移除所有记忆工具（读取和写入）
-        perm_ctx = TOOL_PERMISSION_CONTEXT.get()
-        if perm_ctx is not None:
-            # 判断是否为群聊数字分身模式
-            is_group_digital_avatar = (
-                    perm_ctx.group_digital_avatar
-                    and perm_ctx.avatar_mode
-            )
+        _all_memory_tools = ("write_memory", "edit_memory", "read_memory", "memory_search", "memory_get")
+        if not is_builtin_memory_allowed(get_config()):
+            for tool_name in _all_memory_tools:
+                try:
+                    self._instance.ability_manager.remove(tool_name)
+                    logger.info("[JiuWenClawDeepAdapter] engine=none，移除记忆工具 %s", tool_name)
+                except Exception:
+                    pass
+        else:
+            perm_ctx = TOOL_PERMISSION_CONTEXT.get()
+            if perm_ctx is not None:
+                is_group_digital_avatar = (
+                        perm_ctx.group_digital_avatar
+                        and perm_ctx.avatar_mode
+                )
 
-            # 判断是否为记忆完全禁用（三个条件同时满足）
-            should_disable_memory = (
-                    not perm_ctx.enable_memory
-                    and perm_ctx.group_digital_avatar
-                    and perm_ctx.avatar_mode
-            )
+                should_disable_memory = (
+                        not perm_ctx.enable_memory
+                        and perm_ctx.group_digital_avatar
+                        and perm_ctx.avatar_mode
+                )
 
-            # 场景2：记忆完全禁用 - 移除所有记忆工具
-            if should_disable_memory:
-                _all_memory_tools = ("write_memory", "edit_memory", "read_memory", "memory_search", "memory_get")
-                for tool_name in _all_memory_tools:
-                    try:
-                        self._instance.ability_manager.remove(tool_name)
-                        logger.info("[JiuWenClawDeepAdapter] 记忆系统已禁用，移除 %s", tool_name)
-                    except Exception:
-                        pass
-            # 场景1：群聊数字分身模式 - 只移除写入工具
-            elif is_group_digital_avatar:
-                for tool_name in ("write_memory", "edit_memory"):
-                    try:
-                        self._instance.ability_manager.remove(tool_name)
-                        logger.info("[JiuWenClawDeepAdapter] 群聊模式下禁止写入记忆，移除 %s", tool_name)
-                    except Exception:
-                        pass
-            # 非群聊数字分身且记忆启用时，恢复写入工具
-            else:
-                if is_builtin_memory_allowed(get_config()):
+                if should_disable_memory:
+                    for tool_name in _all_memory_tools:
+                        try:
+                            self._instance.ability_manager.remove(tool_name)
+                            logger.info("[JiuWenClawDeepAdapter] 记忆系统已禁用，移除 %s", tool_name)
+                        except Exception:
+                            pass
+                elif is_group_digital_avatar:
+                    for tool_name in ("write_memory", "edit_memory"):
+                        try:
+                            self._instance.ability_manager.remove(tool_name)
+                            logger.info("[JiuWenClawDeepAdapter] 群聊模式下禁止写入记忆，移除 %s", tool_name)
+                        except Exception:
+                            pass
+                else:
                     try:
                         from openjiuwen.core.memory.lite.memory_tools import (
                             get_decorated_tools as _get_sdk_memory_tools,
