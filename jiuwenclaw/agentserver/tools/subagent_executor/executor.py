@@ -21,6 +21,7 @@ from openjiuwen.harness.rails.skill_use_rail import SkillUseRail
 from openjiuwen.harness.workspace.workspace import Workspace
 from openjiuwen.core.foundation.llm import Model
 
+from jiuwenclaw.agentserver.stream_utils import parse_stream_chunk
 from jiuwenclaw.agentserver.tools.subagent_models import (
     ForkAgentResult,
     ForkAgentTaskSpec,
@@ -101,8 +102,8 @@ _DEFAULT_SUBAGENT_MAX_ITERATIONS = 15
 class ForkAgentExecutor:
     """Fork agent executor for DeepAgent architecture.
 
-    Uses Runner.run_agent(context=...) to pass fork_messages instead of
-    modifying invoke method (which is inside DeepAgent SDK).
+    Uses Runner.run_agent_streaming(...) so subagent model output is forwarded
+    through the parent session while still returning a collected tool result.
     """
 
     def __init__(
@@ -122,6 +123,53 @@ class ForkAgentExecutor:
         self._model = model
         self._default_role_prompts = default_role_prompts or {}
         self._active_fork_agents: dict[str, Any] = {}  # task_id -> subagent instance
+
+    _FORWARDED_MODEL_EVENTS = {
+        "chat.delta",
+        "chat.reasoning",
+        "chat.tool_calls.delta",
+        "chat.llm_usage",
+    }
+
+    async def _run_agent_streaming_for_result(
+        self,
+        *,
+        agent: DeepAgent,
+        inputs: dict[str, Any],
+        session_proxy: SubagentSessionProxy | None,
+    ) -> tuple[str, Any]:
+        """Run a subagent with SDK streaming while collecting its final result.
+
+        The parent agent already knows how to render SDK model stream events, so this
+        forwards only model-facing chunks and leaves tool events to SubagentContextRail.
+        """
+        streamed_parts: list[str] = []
+        final_text = ""
+        usage = None
+        has_streamed_content = False
+
+        async for chunk in Runner.run_agent_streaming(agent=agent, inputs=inputs):
+            parsed = parse_stream_chunk(chunk, _has_streamed_content=has_streamed_content)
+            if not isinstance(parsed, dict):
+                continue
+
+            event_type = parsed.get("event_type")
+            if session_proxy is not None and event_type in self._FORWARDED_MODEL_EVENTS:
+                await session_proxy.write_stream(chunk)
+
+            if event_type == "chat.delta":
+                content = parsed.get("content", "")
+                if content:
+                    has_streamed_content = True
+                    streamed_parts.append(str(content))
+            elif event_type == "chat.final":
+                content = parsed.get("content", "")
+                if content:
+                    final_text = str(content)
+            elif event_type == "chat.llm_usage":
+                usage = parsed
+
+        return (final_text or "".join(streamed_parts), usage)
 
     def _resolve_subagent_workspace_dir(self) -> tuple[str, str]:
         """Resolve workspace for fork/spawn to match the main agent for the current request.
@@ -364,10 +412,10 @@ Approach each task methodically and deliver high-quality results.
             invoke_inputs = {"query": full_prompt, "conversation_id": session_id}
 
             try:
-                response = await Runner.run_agent(
+                result_text, fork_usage = await self._run_agent_streaming_for_result(
                     agent=fork_agent,
                     inputs=invoke_inputs,
-                    session=session_proxy,
+                    session_proxy=session_proxy,
                 )
             finally:
                 self._active_fork_agents.pop(task.task_id, None)
@@ -375,21 +423,6 @@ Approach each task methodically and deliver high-quality results.
                 llm_trace_var.reset(token_trace_sid)
 
             logger.info(f"[ForkAgent] Execution completed, task_id={task.task_id}")
-
-            # 7. Extract result and usage
-            result_text = ""
-            fork_usage = None
-            if isinstance(response, dict):
-                result_text = response.get("output", "")
-                if isinstance(result_text, dict):
-                    result_text = result_text.get("output", str(result_text))
-                fork_usage = response.get("usage")
-            elif hasattr(response, "content"):
-                result_text = response.content
-            elif hasattr(response, "text"):
-                result_text = response.text
-            else:
-                result_text = str(response)
 
             if fork_usage:
                 logger.info(f"[ForkAgent] task_id={task.task_id} usage: {fork_usage}")
@@ -429,7 +462,7 @@ Approach each task methodically and deliver high-quality results.
         """Execute a spawn subagent task with isolated context.
 
         Key differences from execute_fork:
-        - Uses Runner.run_agent(session=None) for isolated context
+        - Uses Runner.run_agent_streaming(...) for isolated context and live output
         - No fork_messages passed (fresh context)
         - Supports role definition lookup and dynamic role generation
 
@@ -494,10 +527,10 @@ Approach each task methodically and deliver high-quality results.
             invoke_inputs = {"query": full_prompt, "conversation_id": session_id}
 
             try:
-                response = await Runner.run_agent(
+                result_text, spawn_usage = await self._run_agent_streaming_for_result(
                     agent=spawn_agent,
                     inputs=invoke_inputs,
-                    session=session_proxy,
+                    session_proxy=session_proxy,
                 )
             finally:
                 self._active_fork_agents.pop(task.task_id, None)
@@ -505,21 +538,6 @@ Approach each task methodically and deliver high-quality results.
                 llm_trace_var.reset(token_trace_sid)
 
             logger.info(f"[SpawnAgent] Execution completed, task_id={task.task_id}")
-
-            # 9. Extract result and usage
-            result_text = ""
-            spawn_usage = None
-            if isinstance(response, dict):
-                result_text = response.get("output", "")
-                if isinstance(result_text, dict):
-                    result_text = result_text.get("output", str(result_text))
-                spawn_usage = response.get("usage")
-            elif hasattr(response, "content"):
-                result_text = response.content
-            elif hasattr(response, "text"):
-                result_text = response.text
-            else:
-                result_text = str(response)
 
             if spawn_usage:
                 logger.info(f"[SpawnAgent] task_id={task.task_id} usage: {spawn_usage}")

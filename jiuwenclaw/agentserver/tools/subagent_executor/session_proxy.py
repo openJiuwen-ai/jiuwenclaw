@@ -27,12 +27,14 @@ class SubagentSessionProxy:
     - Fork from subagent: sess_xxx_subagent_1222fc63_fork_295a9e7
     """
 
-    # Event types to forward (tool execution + thinking process + permission requests + artifacts)
+    # Event types to forward (model stream + tool execution + thinking process + permission requests + artifacts)
     # Include tool_update for showing tool execution status (in_progress, etc.)
     # Include artifact.generated for intermediate/final artifact preview
     FORWARD_TYPES = {
+        "llm_output", "content_chunk", "llm_reasoning", "llm_usage",
+        "tool_calls.delta",
         "tool_call", "tool_result", "tool_update",
-        "thinking", "llm_reasoning",
+        "thinking",
         "retry_notification", "chat.ask_user_question",
         "context.compressed",  # Context compression info
         "artifact.generated",  # Artifact preview (subagent Write tool outputs)
@@ -64,14 +66,19 @@ class SubagentSessionProxy:
             event_type = data.type
             output_data = data
         elif isinstance(data, dict):
-            event_type = data.get("type", "unknown")
+            event_type = data.get("type") or data.get("event_type", "unknown")
+            payload = (
+                data.get("payload")
+                if "payload" in data
+                else {k: v for k, v in data.items() if k not in {"type", "index"}}
+            )
             output_data = OutputSchema(
                 type=event_type,
                 index=data.get("index", 0),
-                payload=data.get("payload", {}),
+                payload=payload or {},
             )
 
-        # Only forward tool execution events
+        # Forward model/tool/progress events that the parent stream already knows how to render.
         if event_type in self.FORWARD_TYPES:
             await self._parent.write_stream(output_data)
         elif event_type in self.SUPPRESS_TYPES:
