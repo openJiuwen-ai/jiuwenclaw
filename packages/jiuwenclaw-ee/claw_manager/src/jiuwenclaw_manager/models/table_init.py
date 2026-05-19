@@ -4,15 +4,17 @@ from __future__ import annotations
 
 from openjiuwen_runtime.foundation.db.handler import DBHandler
 
-from jiuwenclaw_manager.models.table_defs import (
+from jiuwenclaw_manager.models.config_effective_policy_models import (
     CONFIG_DEFAULT_TEMPLATE_MAPPING_TABLE_DEF,
     CONFIG_EFFECTIVE_AGENT_POLICY_TABLE_DEF,
     CONFIG_EFFECTIVE_GLOBAL_POLICY_TABLE_DEF,
     CONFIG_EFFECTIVE_SERVICE_POLICY_TABLE_DEF,
+)
+from jiuwenclaw_manager.models.instance_models import (
     INSTANCE_INFO_TABLE_DEF,
-    MODEL_TEMPLATE_TABLE_DEF,
     SERVICE_INSTANCE_TABLE_DEF,
 )
+from jiuwenclaw_manager.models.template_models import MODEL_TEMPLATE_TABLE_DEF
 
 ALL_TABLE_DEFINITIONS = (
     INSTANCE_INFO_TABLE_DEF,

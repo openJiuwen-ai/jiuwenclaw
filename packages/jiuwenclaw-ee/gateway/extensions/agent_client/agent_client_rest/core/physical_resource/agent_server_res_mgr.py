@@ -12,7 +12,7 @@ from typing import Any
 
 from openjiuwen_runtime.foundation.db.handler import DBHandler
 
-from ..utils import format_ts, utc_now
+from ...infrastructure.utils import format_ts, utc_now
 from ...models.physical_resource_models import (
     RESOURCE_CONFIG_TABLE_DEF,
 )

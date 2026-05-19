@@ -9,7 +9,7 @@ from typing import Any
 
 from openjiuwen_runtime.foundation.db.handler import DBHandler
 
-from ..utils import format_ts, utc_now
+from ...infrastructure.utils import format_ts, utc_now
 from ...models.template_models import MODEL_TEMPLATE_TABLE_DEF
 from ...schemas.template_schemas import (
     ModelTemplateCreateRequest,

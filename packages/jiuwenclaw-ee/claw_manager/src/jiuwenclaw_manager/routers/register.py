@@ -2,19 +2,30 @@ from __future__ import annotations
 
 from fastapi import APIRouter, FastAPI
 
-from .config_effective_policy import router as config_effective_policy_router
-from .instances import router as instances_router
-from .template import router as model_templates_router
+from .config_effective_policy_routers import config_effective_policy_router
+from .instance_routers import instance_router
+from .template_routers import templates_router
 
 api_router = APIRouter()
+
+INSTANCES_PREFIX = "/instances"
 
 
 def router_register(app: FastAPI) -> None:
     v1_router = APIRouter(prefix="/v1")
-    v1_router.include_router(instances_router, tags=["Instances"])
-    v1_router.include_router(model_templates_router, tags=["Model Templates"])
+    v1_router.include_router(
+        instance_router,
+        prefix=INSTANCES_PREFIX,
+        tags=["Instances"],
+    )
+    v1_router.include_router(
+        templates_router,
+        prefix=INSTANCES_PREFIX,
+        tags=["Model Templates"],
+    )
     v1_router.include_router(
         config_effective_policy_router,
+        prefix=INSTANCES_PREFIX,
         tags=["Config Effective Policy"],
     )
 

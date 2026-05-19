@@ -14,7 +14,7 @@ from typing import Any
 
 from openjiuwen_runtime.foundation.db.handler import DBHandler
 
-from ..utils import format_ts, utc_now
+from ...infrastructure.utils import format_ts, utc_now
 from ...models.config_effective_policy_models import (
     CONFIG_EFFECTIVE_GLOBAL_POLICY_TABLE_DEF,
 )

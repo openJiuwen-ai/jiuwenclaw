@@ -23,7 +23,7 @@ from .distributed_service_schemas import (
     SessionAffinityPolicyUpdateRequest,
     TenantIsolationPolicyUpdateRequest,
 )
-from .common import ResponseModel
+from .common_schemas import ResponseModel
 
 __all__ = [
     "ResourceConfigRecord",

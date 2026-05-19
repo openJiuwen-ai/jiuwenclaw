@@ -1,6 +1,3 @@
-"""Pydantic / ORM 模型导出。"""
+"""Pydantic 与 TableDefinition 模型。"""
 
-from jiuwenclaw_manager.models.db.base import Base
-from jiuwenclaw_manager.models.db.instance import InstanceInfo, ServiceInstance
-
-__all__ = ("Base", "InstanceInfo", "ServiceInstance")
+__all__: tuple[str, ...] = ()

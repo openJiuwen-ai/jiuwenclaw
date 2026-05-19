@@ -1,4 +1,4 @@
-﻿"""RabbitMQ 消费者：订阅设计文档 5.2 的 instance.* 事件，写入心跳与上下线状态。"""
+"""RabbitMQ 消费者：订阅设计文档 5.2 的 instance.* 事件，写入心跳与上下线状态。"""
 
 from __future__ import annotations
 
@@ -7,8 +7,8 @@ from typing import Any
 from openjiuwen_runtime.foundation.db.handler import DBHandler
 from openjiuwen_runtime.foundation.messaging import consume_topic_json_forever
 
-from jiuwenclaw_manager.config import settings
-from jiuwenclaw_manager.core.instance_service import InstanceService
+from jiuwenclaw_manager.infrastructure.config import settings
+from jiuwenclaw_manager.core.instance import InstanceService
 from jiuwenclaw_manager.infrastructure.logger import get_logger
 
 _log = get_logger(__name__)

@@ -4,7 +4,7 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 
-from .db import init_database
+from .infrastructure.db import init_database
 from .models.table_init import init_all_tables
 from .routers.register import router_register
 

@@ -67,7 +67,7 @@ class ManagerClient:
             raise ValueError("jiuwenclaw_id 不能为空")
 
     def _url(self, path: str) -> str:
-        return f"{self._base}/api/v1/{self._jid}{path}"
+        return f"{self._base}/api/v1/instances/{self._jid}{path}"
 
     def request(
         self,

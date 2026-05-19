@@ -10,8 +10,9 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from jiuwenclaw_manager import __version__
-from jiuwenclaw_manager.config import settings
-from jiuwenclaw_manager.db import database_config_summary, init_database
+from jiuwenclaw_manager.infrastructure.config import settings
+from jiuwenclaw_manager.infrastructure.gateway_forward import GatewayHttpClient
+from jiuwenclaw_manager.infrastructure.db import database_config_summary, init_database
 from jiuwenclaw_manager.infrastructure.logger import configure_logging, get_logger
 from jiuwenclaw_manager.models.table_init import init_all_tables
 from jiuwenclaw_manager.routers.register import router_register
@@ -34,8 +35,7 @@ async def lifespan(application: FastAPI):
         from jiuwenclaw_manager.consumers.event_consumer import start_consumer
 
         consumer_task = asyncio.create_task(start_consumer(db_handler))
-    timeout = httpx.Timeout(settings.upstream_http_timeout_seconds)
-    application.state.http_client = httpx.AsyncClient(timeout=timeout)
+    GatewayHttpClient.init(timeout=httpx.Timeout(settings.upstream_http_timeout_seconds))
     _log.info(
         "startup",
         version=__version__,
@@ -56,7 +56,7 @@ async def lifespan(application: FastAPI):
             await consumer_task
         except asyncio.CancelledError:
             pass
-    await application.state.http_client.aclose()
+    await GatewayHttpClient.close()
     await db_handler.disconnect()
     _log.info("shutdown")
 

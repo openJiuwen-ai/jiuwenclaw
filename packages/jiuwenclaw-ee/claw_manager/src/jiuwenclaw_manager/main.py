@@ -6,7 +6,7 @@ from __future__ import annotations
 def main() -> None:
     import uvicorn
 
-    from jiuwenclaw_manager.config import settings
+    from jiuwenclaw_manager.infrastructure.config import settings
 
     uvicorn.run(
         "jiuwenclaw_manager.app:app",

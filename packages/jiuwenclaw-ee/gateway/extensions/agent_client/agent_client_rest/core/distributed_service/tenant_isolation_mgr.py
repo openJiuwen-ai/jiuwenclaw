@@ -11,7 +11,7 @@ from typing import Any
 
 from openjiuwen_runtime.foundation.db.handler import DBHandler
 
-from ..utils import utc_now
+from ...infrastructure.utils import utc_now
 from ...models.distributed_service_models import (
     TENANT_ISOLATION_POLICY_TABLE_DEF,
     TenantIsolationPolicyInfo,

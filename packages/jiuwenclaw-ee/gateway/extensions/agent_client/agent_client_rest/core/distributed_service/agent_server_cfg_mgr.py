@@ -11,7 +11,7 @@ from typing import Any
 
 from openjiuwen_runtime.foundation.db.handler import DBHandler
 
-from ..utils import format_ts, utc_now
+from ...infrastructure.utils import format_ts, utc_now
 from ...models.distributed_service_models import (
     INSTANCE_CONFIG_TABLE_DEF,
 )

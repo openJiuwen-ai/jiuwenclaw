@@ -2,17 +2,17 @@ from __future__ import annotations
 
 from fastapi import APIRouter, FastAPI
 
-from .application_config import application_config_router
-from .distributed_service import distributed_service_router
-from .physical_resource import physical_resource_router
-from .config_effective_policy import config_effective_policy_router
-from .template import template_router
+from .application_config_routers import application_config_router
+from .distributed_service_routers import distributed_service_router
+from .physical_resource_routers import physical_resource_router
+from .config_effective_policy_routers import config_effective_policy_router
+from .template_routers import template_router
 
 api_router = APIRouter()
 
 
 def router_register(app: FastAPI) -> None:
-    v1_router = APIRouter(prefix="/v1/instances")
+    v1_router = APIRouter(prefix="/v1")
     v1_router.include_router(
         physical_resource_router,
         prefix="",
@@ -39,10 +39,9 @@ def router_register(app: FastAPI) -> None:
         tags=["Config Effective Policy"],
     )
 
-    @api_router.get("/health", tags=["System"])
+    @v1_router.get("/health", tags=["System"])
     async def health_check() -> dict[str, str]:
         return {"status": "ok"}
-
     api_router.include_router(v1_router)
     app.include_router(api_router, prefix="/api")
 
@@ -51,5 +50,5 @@ def router_register(app: FastAPI) -> None:
         return {
             "message": "Agent Client REST API",
             "docs": "/docs",
-            "health": "/api/health",
+            "health": "/api/v1/health",
         }

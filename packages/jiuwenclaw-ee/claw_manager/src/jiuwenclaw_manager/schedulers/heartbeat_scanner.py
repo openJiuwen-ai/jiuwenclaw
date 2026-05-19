@@ -7,10 +7,10 @@ from datetime import datetime, timedelta, timezone
 
 from openjiuwen_runtime.foundation.db.handler import DBHandler
 
-from jiuwenclaw_manager.config import settings
-from jiuwenclaw_manager.core.utils import utc_now
+from jiuwenclaw_manager.infrastructure.config import settings
+from jiuwenclaw_manager.infrastructure.utils import utc_now
 from jiuwenclaw_manager.infrastructure.logger import get_logger
-from jiuwenclaw_manager.models.table_defs.instance_models import SERVICE_INSTANCE_TABLE_DEF
+from jiuwenclaw_manager.models.instance_models import SERVICE_INSTANCE_TABLE_DEF
 
 _log = get_logger(__name__)
 _TABLE = SERVICE_INSTANCE_TABLE_DEF.table_name
