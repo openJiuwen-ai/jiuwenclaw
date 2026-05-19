@@ -42,10 +42,7 @@ from jiuwenclaw.agentserver.tools.subagent_executor.context_vars import (
     get_subagent_parent_session,
     _get_llm_trace_session_id_var,
 )
-from jiuwenclaw.agentserver.plan_todo_context import (
-    pop_subscope,
-    push_subscope,
-)
+
 from jiuwenclaw.agentserver.tools.subagent_executor.session_proxy import SubagentSessionProxy
 from jiuwenclaw.agentserver.tools.subagent_executor.rails import (
     ForkMessageInjectionRail,
@@ -401,12 +398,6 @@ Approach each task methodically and deliver high-quality results.
             llm_trace_var = _get_llm_trace_session_id_var()
             token_trace_sid = llm_trace_var.set(trace_session_id)
 
-            # 5b. Isolate skill_step plan file under this fork's sub_scope.
-            # task.task_id is unique per fork (`fork_agent_xxxxxxxx`), so
-            # sibling forks each persist to their own skill_step__{...}.md
-            # and don't share idx space / locks / op_result bus.
-            token_subscope = push_subscope(task.task_id)
-
             # 6. Execute fork agent
             session_id = task.task_id
             invoke_inputs = {"query": full_prompt, "conversation_id": session_id}
@@ -419,7 +410,6 @@ Approach each task methodically and deliver high-quality results.
                 )
             finally:
                 self._active_fork_agents.pop(task.task_id, None)
-                pop_subscope(token_subscope)
                 llm_trace_var.reset(token_trace_sid)
 
             logger.info(f"[ForkAgent] Execution completed, task_id={task.task_id}")
@@ -516,12 +506,6 @@ Approach each task methodically and deliver high-quality results.
             llm_trace_var = _get_llm_trace_session_id_var()
             token_trace_sid = llm_trace_var.set(trace_session_id)
 
-            # 7b. Isolate skill_step plan file under this spawn's sub_scope.
-            # task.task_id (`subagent_xxxxxxxx`) is unique per spawn call,
-            # so the subagent's `skill_step(action="create")` writes to its
-            # own skill_step__{...}.md instead of clashing with the parent's.
-            token_subscope = push_subscope(task.task_id)
-
             # 8. Execute with isolated context
             session_id = task.task_id
             invoke_inputs = {"query": full_prompt, "conversation_id": session_id}
@@ -534,7 +518,6 @@ Approach each task methodically and deliver high-quality results.
                 )
             finally:
                 self._active_fork_agents.pop(task.task_id, None)
-                pop_subscope(token_subscope)
                 llm_trace_var.reset(token_trace_sid)
 
             logger.info(f"[SpawnAgent] Execution completed, task_id={task.task_id}")

@@ -1,37 +1,21 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 
-"""SkillComplianceRail — event-driven SKILL execution state machine.
+"""SkillComplianceRail — lightweight SKILL execution state rail.
 
-Replaces the previous polling design. State changes happen on five observable
-tool-call events; non-skill_step tools touch nothing.
+After removing the legacy step-planning toolchain, this rail only tracks whether
+an SKILL.md body is active for the current session. It no longer reads or writes
+any step-plan file and no longer exposes intermediate planning phases.
 
 Phases (per session):
-    IDLE          — no SKILL active
-    WAITING_PLAN  — SKILL.md loaded, no skill_step plan yet
-    IN_PROGRESS   — plan exists, executing
-    DONE          — all skill_step items complete; awaiting skill_complete
+    IDLE    — no SKILL active
+    ACTIVE  — SKILL.md loaded and being followed until skill_complete
 
-Transitions are driven by:
-    skill_tool body load       -> IDLE -> WAITING_PLAN | IN_PROGRESS | DONE
-                                  (one disk read here to detect existing plan)
-    TodoOpResult.kind=CREATE   -> WAITING_PLAN -> IN_PROGRESS
-    TodoOpResult.kind=COMPLETE -> IN_PROGRESS -> DONE  (when all_completed)
-    TodoOpResult.kind=REMOVE   -> IN_PROGRESS -> WAITING_PLAN  (when total_count==0)
-    skill_complete             -> any -> IDLE  (also clears skill_step.md)
-
-Phase observation is published via ``get_session_phase`` /
-``get_session_active_skill`` (consumed by SkillProtocolPromptRail).
-Step-skip detection (model-text scan) and mcp_exec_command failure recovery
-are orthogonal and remain in this rail.
-
-after_tool_call: 当 ``skill_tool`` 成功返回后激活。
-上游 ``openjiuwen.SkillUseRail`` 会先 (a) 把全文写入 session
-``active_skill_bodies`` state，(b) 把 ``tool_msg.content`` 替换成
-``[SKILL LOADED]`` stub 并把 ``metadata['is_skill_body']`` 翻为 False、
-设置 ``original_is_skill_body=True``。本 rail 通过这两个标记位识别
-「上游已 stub 化」的场景，并从 session active state 反查真正的 SKILL.md
-全文用于 bash 命令解析与 active_skill_content；当上游因
-``max_active_skill_bodies<=0`` 等原因未 stub 化时，回退用 tool_msg.content。
+The rail still keeps the useful safeguards from the old implementation:
+- read the real SKILL.md body from ``active_skill_bodies`` when SkillUseRail stubs
+  the tool message;
+- parse bash blocks for mcp_exec_command failure recovery;
+- detect obvious model-text step skips;
+- reset the active skill on ``skill_complete`` or after repeated no-tool turns.
 """
 
 from __future__ import annotations
@@ -45,12 +29,6 @@ from typing import Any, List, Optional
 from openjiuwen.core.single_agent.rail.base import AgentCallbackContext
 from openjiuwen.harness.rails.base import DeepAgentRail
 
-from jiuwenclaw.agentserver.tools.todo_toolkits import (
-    TaskStatus,
-    TodoOpKind,
-    TodoOpResult,
-    consume_last_op_result,
-)
 from jiuwenclaw.config import get_config
 from jiuwenclaw.utils import logger
 
@@ -78,9 +56,7 @@ _current_session_var: contextvars.ContextVar[Optional[str]] = contextvars.Contex
 
 class SkillPhase(str, Enum):
     IDLE = "idle"
-    WAITING_PLAN = "waiting_plan"
-    IN_PROGRESS = "in_progress"
-    DONE = "done"
+    ACTIVE = "active"
 
 
 @dataclass
@@ -98,22 +74,6 @@ class _SkillSessionState:
         self.__init__()
 
 
-# Process-local in-memory state. Intentionally NOT persisted:
-#
-# - On process restart, ``_sessions`` is empty. If a session was mid-skill when
-#   the process died, the rail has no record. Behavior:
-#   * If the LLM next calls ``skill_tool`` to (re)load SKILL.md, ``_activate_skill``
-#     reads ``skill_step.md`` from disk and rebuilds the correct phase.
-#   * If the LLM does NOT reload and goes straight to other tools, the rail is
-#     fully no-op for this session and the system prompt carries no SKILL
-#     constraint section. The skill execution context is silently lost. This is
-#     accepted as the cost of avoiding cross-process persistence; rare in
-#     practice (LLMs reload when context is missing).
-#
-# - Cross-process: if two processes serve the same ``session_id`` (not the
-#   normal deployment), each maintains its own ``_sessions`` entry. The disk
-#   file (``skill_step.md``) is the only shared truth; phase divergence is
-#   bounded — the next ``skill_tool`` load resyncs from disk.
 _sessions: dict[str, _SkillSessionState] = {}
 
 
@@ -126,7 +86,7 @@ def _get_or_create_state(session_id: str) -> _SkillSessionState:
 
 
 def get_session_phase(session_id: str) -> SkillPhase:
-    """Public read-side: SkillProtocolPromptRail consumes this."""
+    """Public read-side retained for compatibility with old imports."""
     if not session_id:
         return SkillPhase.IDLE
     state = _sessions.get(session_id)
@@ -134,7 +94,7 @@ def get_session_phase(session_id: str) -> SkillPhase:
 
 
 def get_session_active_skill(session_id: str) -> Optional[str]:
-    """Public read-side: SkillProtocolPromptRail consumes this."""
+    """Public read-side retained for compatibility with old imports."""
     if not session_id:
         return None
     state = _sessions.get(session_id)
@@ -170,68 +130,10 @@ def _extract_session_id(ctx: AgentCallbackContext) -> Optional[str]:
     return str(conv_id) if conv_id else None
 
 
-def _read_initial_phase_from_disk(session_id: str) -> SkillPhase:
-    """Detect existing skill_step.md state at SKILL.md load time. The ONLY
-    disk read in this rail outside script-failure detection."""
-    if not session_id:
-        return SkillPhase.WAITING_PLAN
-    try:
-        from jiuwenclaw.agentserver.tools.skill_step_toolkit import SkillStepToolkit
-        tasks = SkillStepToolkit(session_id=session_id).load_tasks()
-    except Exception as exc:
-        logger.debug("[SkillComplianceRail] initial phase read failed: %s", exc)
-        return SkillPhase.WAITING_PLAN
-    if not tasks:
-        return SkillPhase.WAITING_PLAN
-    if all(t.status == TaskStatus.COMPLETED for t in tasks):
-        return SkillPhase.DONE
-    return SkillPhase.IN_PROGRESS
-
-
-def _resolve_todo_file_path(session_id: str) -> Optional[str]:
-    try:
-        from jiuwenclaw.agentserver.tools.skill_step_toolkit import SkillStepToolkit
-        _, path = SkillStepToolkit(session_id=session_id).resolve_todo_path()
-        return str(path)
-    except Exception as exc:
-        logger.debug("[SkillComplianceRail] resolve_todo_file_path failed: %s", exc)
-        return None
-
-
-def _clear_skill_step_file(session_id: str, skill_name: str) -> bool:
-    """Remove skill_step.md after skill_complete to prevent stale-plan misread
-    when the next SKILL.md is loaded on this session."""
-    if not session_id:
-        return False
-    try:
-        from jiuwenclaw.agentserver.tools.skill_step_toolkit import SkillStepToolkit
-        removed = SkillStepToolkit(session_id=session_id).clear_tasks()
-    except Exception as exc:
-        logger.warning(
-            "[SkillComplianceRail] clear skill_step.md failed (session=%s skill=%s): %s",
-            session_id, skill_name, exc,
-        )
-        return False
-    if removed:
-        logger.info(
-            "[SkillComplianceRail] cleared skill_step.md after skill_complete(%s) session=%s",
-            skill_name, session_id,
-        )
-    return removed
-
-
 def _read_skill_body_from_session(
     ctx: AgentCallbackContext, skill_name: str, relative_file_path: str,
 ) -> Optional[str]:
-    """Read the full SKILL.md body recorded by openjiuwen SkillUseRail.
-
-    SkillUseRail runs before this rail and (a) writes the full body into
-    ``session.get_state("active_skill_bodies")[key]``, then (b) replaces
-    ``tool_msg.content`` with a short ``[SKILL LOADED] ...`` stub and flips
-    ``metadata['is_skill_body']`` to False. To get the real body for bash-block
-    parsing and active_skill_content, we must read it from session state, not
-    from ``tool_msg.content``.
-    """
+    """Read the full SKILL.md body recorded by openjiuwen SkillUseRail."""
     try:
         from openjiuwen.core.context_engine.active_skill_bodies import (
             ACTIVE_SKILL_BODIES_STATE_KEY,
@@ -256,112 +158,27 @@ def _read_skill_body_from_session(
         return None
 
 
-# ---------------- directive builders (one per transition kind) ----------------
-
-def _build_load_directive(
-    lang: str, phase: SkillPhase, skill_name: str, session_id: str,
-) -> str:
-    """Phase-state notice on SKILL.md load.
-
-    Conveys current runtime phase and the next required action for that phase.
-    Behavior rules (how to break down, how to mark complete, etc.) are defined
-    once in SkillProtocolPromptRail's protocol section — not duplicated here.
-    """
-    todo_path = _resolve_todo_file_path(session_id)
-    if lang == "zh":
-        path_line = f"，追踪文件：{todo_path}" if todo_path else ""
-        if phase == SkillPhase.WAITING_PLAN:
-            next_action = (
-                "下一步：调用 `skill_step(action=\"create\", tasks=[...])` 建立路线图。"
-                "粒度按需：线性、章节边界清晰的技能可只建 1 项作占位（如 "
-                f"`tasks=[\"执行 {skill_name}\"]`）；"
-                "包含循环/分支/多工具长 stage 时再按需拆成多项。"
-            )
-        elif phase == SkillPhase.IN_PROGRESS:
-            next_action = (
-                "下一步：调用 `skill_step(action=\"list\")` 核对计划是否对应当前 SKILL.md；"
-                "若不对应，先 `skill_step(action=\"remove\")` 清空再 `skill_step(action=\"create\")` 重建。"
-            )
-        else:  # DONE
-            next_action = (
-                f"下一步：若延续先前任务，直接 `skill_complete(skill_name=\"{skill_name}\")` 收尾；"
-                f"若是新一轮执行，先 `skill_step(action=\"remove\")` 清空再 `skill_step(action=\"create\")` 重建。"
-            )
-        phase_label = {
-            SkillPhase.WAITING_PLAN: "未建立 skill_step 计划",
-            SkillPhase.IN_PROGRESS: "已存在 skill_step 计划（执行中）",
-            SkillPhase.DONE: "skill_step 计划已全部完成",
-        }[phase]
-        return f"\n\n[Skill {skill_name} 状态] {phase_label}{path_line}。{next_action}\n"
-    path_line = f", tracking file: {todo_path}" if todo_path else ""
-    if phase == SkillPhase.WAITING_PLAN:
-        next_action = (
-            "Next: call `skill_step(action=\"create\", tasks=[...])` to build the roadmap. "
-            "Granularity is on demand: for a linear skill with clear chapter boundaries, a single "
-            f"placeholder item is fine (e.g. `tasks=[\"run {skill_name}\"]`); split into multiple items "
-            "only when the skill has loops, branches, or multi-tool long stages worth tracking separately."
-        )
-    elif phase == SkillPhase.IN_PROGRESS:
-        next_action = (
-            "Next: call `skill_step(action=\"list\")` to verify the plan matches the current SKILL.md; "
-            "if it does not, `skill_step(action=\"remove\")` to clear and `skill_step(action=\"create\")` to rebuild."
-        )
-    else:  # DONE
-        next_action = (
-            f"Next: if continuing previous work, call `skill_complete(skill_name=\"{skill_name}\")` to finalize; "
-            f"if starting a new run, `skill_step(action=\"remove\")` then `skill_step(action=\"create\")` a fresh plan."
-        )
-    phase_label = {
-        SkillPhase.WAITING_PLAN: "no skill_step plan",
-        SkillPhase.IN_PROGRESS: "skill_step plan in progress",
-        SkillPhase.DONE: "skill_step plan complete",
-    }[phase]
-    return f"\n\n[Skill {skill_name} status] {phase_label}{path_line}. {next_action}\n"
-
-
-def _build_plan_created_directive(lang: str, skill_name: str, total: int) -> str:
+def _build_load_directive(lang: str, skill_name: str) -> str:
     if lang == "zh":
         return (
-            f"\n\n[skill_step 计划已建立 · {total} 项] 现在请按顺序从第 1 项开始执行。"
-            f"完成单步用 `skill_step(action=\"complete\", idx=..., result=...)`；"
-            f"若多个连续步骤都已实际完成，优先用 `skill_step(action=\"complete_batch\", indices=[...], results=[...])` 一次性收尾。\n"
+            f"\n\n[Skill {skill_name} 已激活] 请严格按照 SKILL.md 的步骤顺序执行。"
+            "每次行动前声明当前步骤；遇到用户确认/审批点必须等待用户回复；"
+            f"完成整个技能流程后调用 `skill_complete(skill_name=\"{skill_name}\")` 收尾。\n"
         )
     return (
-        f"\n\n[skill_step plan created · {total} items] Execute items in order, starting from item 1. "
-        f"Use `skill_step(action=\"complete\", idx=..., result=...)` for a single finished item; "
-        f"prefer `skill_step(action=\"complete_batch\", indices=[...], results=[...])` to close out several "
-        f"already-finished contiguous items in one call.\n"
+        f"\n\n[Skill {skill_name} active] Follow SKILL.md in order. "
+        "Declare the current step before each action, wait at user approval gates, "
+        f"and call `skill_complete(skill_name=\"{skill_name}\")` when the full skill flow is done.\n"
     )
 
-
-def _build_all_done_directive(lang: str, skill_name: str) -> str:
-    if lang == "zh":
-        return (
-            f"\n\n[技能 {skill_name} · 全部完成] 立即调用 "
-            f"`skill_complete(skill_name=\"{skill_name}\")` 收尾。\n"
-        )
-    return (
-        f"\n\n[Skill {skill_name} · all done] Call "
-        f"`skill_complete(skill_name=\"{skill_name}\")` to finalize.\n"
-    )
-
-
-def _build_plan_emptied_directive(lang: str, skill_name: str) -> str:
-    if lang == "zh":
-        return f"\n\n[skill_step 计划已清空] 进入 WAITING_PLAN 阶段。\n"
-    return f"\n\n[skill_step plan emptied] Now WAITING_PLAN.\n"
-
-
-# ---------------- the rail ---------------------------------------------------
 
 class SkillComplianceRail(DeepAgentRail):
-    """Event-driven SKILL execution state machine (per-session)."""
+    """Lightweight SKILL execution state rail (per session)."""
 
     priority = 30
 
     def __init__(self, session_id: Optional[str] = None) -> None:
         super().__init__()
-        # team 场景由 build_member_rails 预绑定；主 agent 从 ctx 解析。
         self._preset_session_id: Optional[str] = session_id
 
     def _resolve_session_id(self, ctx: AgentCallbackContext) -> str:
@@ -387,7 +204,6 @@ class SkillComplianceRail(DeepAgentRail):
                 logger.debug("[SkillComplianceRail] parse tc.arguments failed: %s", exc)
         return default
 
-    # -- step-skip detection (model-text, no IO) --
     def _check_step_skip(self, state: _SkillSessionState, ai_content: str) -> None:
         if state.phase == SkillPhase.IDLE or not ai_content:
             return
@@ -413,14 +229,14 @@ class SkillComplianceRail(DeepAgentRail):
                         state.pending_skip_warning = (
                             f"⚠️ 你从 Stage {state.last_declared_step} "
                             f"跳到了 Stage {current}，跳过了 {skipped}。"
-                            f"请确认 SKILL.md 是否允许跳过这些步骤。"
-                            f"如果不允许，请立即回退执行被跳过的步骤。"
+                            "请确认 SKILL.md 是否允许跳过这些步骤。"
+                            "如果不允许，请立即回退执行被跳过的步骤。"
                         )
                     else:
                         state.pending_skip_warning = (
                             f"⚠️ You jumped from Stage {state.last_declared_step} "
                             f"to Stage {current}, skipping {skipped}. "
-                            f"Verify SKILL.md allows skipping these. If not, go back and execute them now."
+                            "Verify SKILL.md allows skipping these. If not, go back and execute them now."
                         )
                     logger.warning(
                         "[SkillComplianceRail] step skip warned %s -> %s (skipped %s)",
@@ -430,12 +246,12 @@ class SkillComplianceRail(DeepAgentRail):
                 if lang == "zh":
                     state.pending_skip_warning = (
                         f"[步骤跳跃拦截] 已警告过但你仍然跳过了 {skipped}。\n"
-                        f"请重新阅读 SKILL.md，从被跳过的步骤开始执行。"
+                        "请重新阅读 SKILL.md，从被跳过的步骤开始执行。"
                     )
                 else:
                     state.pending_skip_warning = (
                         f"[Step skip blocked] You were warned but still skipped {skipped}.\n"
-                        f"Re-read SKILL.md and execute the skipped stages."
+                        "Re-read SKILL.md and execute the skipped stages."
                     )
                 logger.warning(
                     "[SkillComplianceRail] step skip blocked (post-warning) %s -> %s",
@@ -447,12 +263,11 @@ class SkillComplianceRail(DeepAgentRail):
         state.pending_skip_warning = None
         state.last_declared_step = current
 
-    # -- transition handlers --
     def _activate_skill(
         self, state: _SkillSessionState, skill_name: str,
         skill_content: str, tool_msg: Any, session_id: str,
     ) -> None:
-        state.phase = _read_initial_phase_from_disk(session_id)
+        state.phase = SkillPhase.ACTIVE
         state.active_skill = skill_name
         state.active_skill_content = skill_content
         state.skill_bash_commands = _parse_skill_bash_commands(skill_content)
@@ -464,8 +279,7 @@ class SkillComplianceRail(DeepAgentRail):
             "[SkillComplianceRail] activated '%s' phase=%s bash=%d session=%s",
             skill_name, state.phase.value, len(state.skill_bash_commands), session_id,
         )
-        directive = _build_load_directive(_resolve_lang(), state.phase, skill_name, session_id)
-        tool_msg.content = _str_content(tool_msg) + directive
+        tool_msg.content = _str_content(tool_msg) + _build_load_directive(_resolve_lang(), skill_name)
 
     def _handle_skill_complete(
         self, state: _SkillSessionState, skill_name: str, session_id: str,
@@ -477,43 +291,6 @@ class SkillComplianceRail(DeepAgentRail):
             skill_name, session_id,
         )
         state.reset()
-        _clear_skill_step_file(session_id, skill_name)
-
-    def _apply_op_result(
-        self, state: _SkillSessionState, op: TodoOpResult, tool_msg: Any,
-    ) -> None:
-        """Phase transitions driven by TodoOpResult (only on op.success)."""
-        if not op.success or state.phase == SkillPhase.IDLE:
-            return
-        lang = _resolve_lang()
-        skill_name = state.active_skill or ""
-        prev = state.phase
-
-        if op.kind == TodoOpKind.CREATE:
-            if prev == SkillPhase.WAITING_PLAN and op.total_count > 0:
-                state.phase = SkillPhase.IN_PROGRESS
-                tool_msg.content = _str_content(tool_msg) + _build_plan_created_directive(
-                    lang, skill_name, op.total_count,
-                )
-        elif op.kind == TodoOpKind.COMPLETE:
-            if prev == SkillPhase.IN_PROGRESS and op.all_completed:
-                state.phase = SkillPhase.DONE
-                tool_msg.content = _str_content(tool_msg) + _build_all_done_directive(
-                    lang, skill_name,
-                )
-        elif op.kind == TodoOpKind.REMOVE:
-            if prev == SkillPhase.IN_PROGRESS and op.total_count == 0:
-                state.phase = SkillPhase.WAITING_PLAN
-                tool_msg.content = _str_content(tool_msg) + _build_plan_emptied_directive(
-                    lang, skill_name,
-                )
-        # INSERT / START never change phase; no directive.
-
-        if prev != state.phase:
-            logger.info(
-                "[SkillComplianceRail] phase %s -> %s (op=%s skill=%s)",
-                prev.value, state.phase.value, op.kind.value, skill_name,
-            )
 
     def _handle_tool_event(
         self, state: _SkillSessionState, tc: Any, tool_msg: Any,
@@ -530,8 +307,6 @@ class SkillComplianceRail(DeepAgentRail):
 
         if tool_name == "skill_tool":
             meta = getattr(tool_msg, "metadata", None) or {}
-            # 同时认 is_skill_body（上游未 stub 化的场景，如 max_active_skill_bodies<=0）
-            # 与 original_is_skill_body（上游 SkillUseRail 已 stub 化并翻字段后留下的痕迹）
             if not (meta.get("is_skill_body") or meta.get("original_is_skill_body")):
                 return
             skill_name = (
@@ -540,28 +315,12 @@ class SkillComplianceRail(DeepAgentRail):
             if not skill_name:
                 return
             rel_path = str(meta.get("relative_file_path") or "SKILL.md")
-            # 优先从 session active state 反查真正的 SKILL.md 全文；
-            # 上游 SkillUseRail.record_active_skill_body 会在 stub 化前写入。
-            body = _read_skill_body_from_session(ctx, skill_name, rel_path) \
-                   or _str_content(tool_msg)
+            body = _read_skill_body_from_session(ctx, skill_name, rel_path) or _str_content(tool_msg)
             if not body.strip():
                 return
             self._activate_skill(state, skill_name, body, tool_msg, session_id)
             return
 
-        if tool_name == "skill_step":
-            op = consume_last_op_result(session_id)
-            if op is None:
-                # skill_step(action="list") is read-only (no publish), or the toolkit
-                # somehow didn't publish. No state change.
-                return
-            self._apply_op_result(state, op, tool_msg)
-            return
-
-        # Any other tool: rail does nothing structural here. Step-skip warnings
-        # and script-failure recovery are appended downstream in after_tool_call.
-
-    # -- script failure recovery (orthogonal) --
     def _detect_script_failure(
         self, state: _SkillSessionState, tc: Any, tool_msg: Any,
     ) -> None:
@@ -592,12 +351,12 @@ class SkillComplianceRail(DeepAgentRail):
             recovery = (
                 f"\n\n[SKILL 脚本失败] 禁止自行决定跳过该步骤或后续步骤；"
                 f"必须先尝试修复（如安装缺失依赖、修正参数）后重试 `{matching_cmd}`，"
-                f"修复失败则询问用户如何处理，等待用户指示后再继续。"
+                "修复失败则询问用户如何处理，等待用户指示后再继续。"
             )
         else:
             recovery = (
-                f"\n\n[SKILL script failed] Do NOT skip this step or any subsequent step on your own. "
-                f"First attempt to fix the issue (e.g. install missing dependencies, correct parameters) "
+                "\n\n[SKILL script failed] Do NOT skip this step or any subsequent step on your own. "
+                "First attempt to fix the issue (e.g. install missing dependencies, correct parameters) "
                 f"and retry `{matching_cmd}`. If the fix fails, ask the user how to proceed and wait."
             )
         tool_msg.content = content + recovery
@@ -606,7 +365,6 @@ class SkillComplianceRail(DeepAgentRail):
             matching_cmd,
         )
 
-    # -- lifecycle hooks --
     async def before_invoke(self, ctx: AgentCallbackContext) -> None:
         session_id = self._resolve_session_id(ctx)
         _current_session_var.set(session_id)
@@ -660,7 +418,6 @@ class SkillComplianceRail(DeepAgentRail):
         except Exception as exc:
             logger.warning("[SkillComplianceRail] handle tool event failed: %s", exc)
 
-        # Consume any pending step-skip warning from the prior model_call.
         if state.pending_skip_warning:
             tool_msg.content = _str_content(tool_msg) + f"\n{state.pending_skip_warning}"
             state.pending_skip_warning = None

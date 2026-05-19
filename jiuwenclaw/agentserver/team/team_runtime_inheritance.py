@@ -96,8 +96,8 @@ class MemberRailConfig:
         channel: 渠道设置（使用真实 channel_id）。
         agent_name: 成员名称。
         model_name: 模型名称。
-        session_id: team 会话 id，注入给 SkillComplianceRail 以对齐 skill_step facade 的
-            skill_step.md 路径；未传入时 rail 内部会回退到 ctx.conversation_id 或 "default"。
+        session_id: team 会话 id，注入给 SkillComplianceRail 以对齐技能执行上下文；
+        未传入时 rail 内部会回退到 ctx.conversation_id 或 "default"。
         member_id: team 成员 id，用于流事件 rail 与日志标识。
         context_engine_enabled: 是否挂载上下文工程 rail；Team 默认开启。
         react_config: 与主 agent 一致的 ``react`` 配置片段；默认预置链 B

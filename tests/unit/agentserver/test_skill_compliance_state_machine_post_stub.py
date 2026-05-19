@@ -15,27 +15,23 @@ is exactly the regression these tests guard against.
 from __future__ import annotations
 
 from types import SimpleNamespace
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 import pytest
 
-from jiuwenclaw.agentserver.deep_agent.rails import skill_compliance_rail as rail_mod
 from jiuwenclaw.agentserver.deep_agent.rails.skill_compliance_rail import (
     SkillComplianceRail,
     SkillPhase,
     _SkillSessionState,
     _sessions,
 )
-from jiuwenclaw.agentserver.tools import todo_toolkits
 
 
 @pytest.fixture(autouse=True)
 def _clean_state():
     _sessions.clear()
-    todo_toolkits._last_op_result.clear()
     yield
     _sessions.clear()
-    todo_toolkits._last_op_result.clear()
 
 
 def _set_phase(session_id, phase, skill="demo"):
@@ -80,7 +76,6 @@ def test_activates_when_metadata_already_stubbed():
     active state for bash-block parsing, (3) append the load directive.
     """
     from openjiuwen.core.context_engine.active_skill_bodies import (
-        ACTIVE_SKILL_BODIES_STATE_KEY,
         _state_key,
         normalize_skill_relative_file_path,
     )
@@ -119,13 +114,11 @@ def test_activates_when_metadata_already_stubbed():
     }
     ctx = _mk_ctx(mock_session)
 
-    with patch.object(rail_mod, "_read_initial_phase_from_disk",
-                      return_value=SkillPhase.WAITING_PLAN):
-        rail._handle_tool_event(
-            state, tc, tool_msg, "skill_tool", sid, ctx=ctx,
-        )
+    rail._handle_tool_event(
+        state, tc, tool_msg, "skill_tool", sid, ctx=ctx,
+    )
 
-    assert state.phase == SkillPhase.WAITING_PLAN
+    assert state.phase == SkillPhase.ACTIVE
     assert state.active_skill == "pdf"
     assert state.active_skill_content == full_body
     # Critical: bash command parsed from full body, not the stub.
@@ -156,13 +149,11 @@ def test_falls_back_to_tool_msg_when_session_state_missing():
     })
     ctx = _mk_ctx(session=None)
 
-    with patch.object(rail_mod, "_read_initial_phase_from_disk",
-                      return_value=SkillPhase.WAITING_PLAN):
-        rail._handle_tool_event(
-            state, tc, tool_msg, "skill_tool", sid, ctx=ctx,
-        )
+    rail._handle_tool_event(
+        state, tc, tool_msg, "skill_tool", sid, ctx=ctx,
+    )
 
-    assert state.phase == SkillPhase.WAITING_PLAN
+    assert state.phase == SkillPhase.ACTIVE
     assert state.active_skill == "pdf"
     assert state.skill_bash_commands == []
     # Load directive still appended.

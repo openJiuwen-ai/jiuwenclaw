@@ -482,7 +482,7 @@ class TodoToolkit:
                 self._save_tasks(new_tasks)
                 msg = f"Created {len(new_tasks)} todo tasks."
                 # Insert-into-empty is semantically a create — publish CREATE so
-                # the rail's WAITING_PLAN→IN_PROGRESS transition fires.
+                # the task execution rail can observe the todo status transition.
                 self._publish(TodoOpKind.CREATE, True, msg, new_tasks)
                 return self._append_todo_list(msg)
             new_tasks = [
