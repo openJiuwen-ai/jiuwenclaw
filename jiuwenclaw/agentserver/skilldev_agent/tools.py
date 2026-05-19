@@ -62,5 +62,5 @@ def build_skilldev_tools(
             get_ask_user_question_tool(),
         ]
     )
-    tools.extend([fork_agent, spawn_subagent])
+    # tools.extend([fork_agent, spawn_subagent])
     return tools

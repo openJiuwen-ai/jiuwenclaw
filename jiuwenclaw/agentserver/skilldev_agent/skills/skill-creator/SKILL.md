@@ -110,12 +110,14 @@ Save to `<workspace>/evals/evals.json` (schema in `references/schemas.md`). Test
 
 Every test case needs **both** a with-skill run and a baseline (no-skill for new skills, old-skill snapshot for improvements). Never fabricate. Put all evaluation artifacts under the current workspace's `evals/` directory, for example: `<workspace>/evals/iteration-<N>/eval-<N>/`.
 
-**Subagent execution rules:**
-- **Always pass the workspace path explicitly.** Subagents do not inherit your system prompt and therefore don't know the workspace — state it at the top of the prompt and use absolute paths for every input/output you reference. The same applies to any subagent you spawn outside the eval flow (grader, description-optimization runs).
-- Include in the prompt: *"You are running non-interactively — no human will provide stdin. Feed expected inputs via heredoc/pipe. Never leave a command waiting for stdin."*
-- Prefer isolated subagents for runs; only fork (inherit parent context) when the subtask genuinely needs the full conversation.
+**Execution via task_tool:**
+- Use `task_tool` to delegate runs and grading to dedicated subagents. Two subagent types are available:
+  - `skill_executor` — runs a single test case (with or without a Skill loaded)
+  - `grader` — evaluates execution results against expectations, produces `grading.json`
+- **Always use absolute paths** in `task_description`. Subagents do not inherit your system prompt and don't know the workspace — every input/output path you reference must be absolute.
+- The same rule applies to any subagent you spawn outside the eval flow (description-optimization runs, etc.).
 
-### 4a: Per test case — write metadata, run both configs, capture timing
+### 4a: Per test case — write metadata, run both configs
 
 Process each test case sequentially and completely.
 
@@ -129,39 +131,44 @@ Process each test case sequentially and completely.
 }
 ```
 
-**2.** Run with-skill subagent. Pass skill path, task prompt, input files, output dir (`with_skill/outputs/`).
-
-**3.** **Immediately** save `with_skill/timing.json` using the values from the subagent's task notification. This data cannot be recovered later.
-```json
-{ "total_tokens": 84852, "duration_ms": 23332, "total_duration_seconds": 23.3 }
+**2.** Run with-skill via `task_tool`:
 ```
+task_tool(
+  subagent_type="skill_executor",
+  task_description="workspace: <abs-workspace>\noutput_dir: <abs-path>/with_skill/outputs\nprompt: <task prompt>\nskill_path: <abs-skill-path>\ninput_files: [<abs-path>, ...]"
+)
+```
+The executor saves all outputs to `output_dir` and writes `metrics.json` inside it.
 
-**Never fabricate timing.** Fabricated timing poisons every downstream comparison and makes the whole eval untrustworthy.
-
-**4.** Run baseline subagent:
-- **New skill:** same prompt without the skill path → `without_skill/outputs/`.
-- **Improving a skill:** snapshot the old skill first, run with the snapshot → `old_skill/outputs/`. Do NOT run a no-skill baseline — compare old vs new.
-
-**5.** **Immediately** save the baseline `timing.json`.
+**3.** Run baseline via `task_tool(subagent_type="skill_executor")`:
+- **New skill:** same prompt, omit `skill_path` → `without_skill/outputs/`.
+- **Improving a skill:** snapshot the old skill first, pass the snapshot as `skill_path` → `old_skill/outputs/`. Do NOT run a no-skill baseline — compare old vs new.
 
 If a run fails: diagnose and retry. Do not proceed with missing runs.
 
-**Parallel execution:** you may fan out all runs in parallel (e.g. 6 subagents at once for 3 cases × 2 configs) — but each task notification carries its own `total_tokens` / `duration_ms`, and **every per-task timing must be written to its run's `timing.json` before grading or aggregation starts**. The common failure mode is collecting only one aggregate number and losing the per-run breakdown — once the notifications are gone, the data is gone. If you can't reliably attribute each notification back to its run directory, run them serially instead.
+**Parallel execution:** you may fan out all runs in parallel (e.g. 6 `task_tool` calls at once for 3 cases × 2 configs). If you can't reliably attribute each return back to its run directory, run them serially instead.
 
 ### 4b: Grade, aggregate, present
 
 Hard checkpoint — you may not present results until every run has `grading.json` and `benchmark.md` exists.
 
-1. **Grade each run** via grader subagent (serial). The prompt must tell the subagent to **read `agents/grader.md` first and follow it exactly**. Pass expectations from `eval_metadata.json`, transcript path, outputs dir. Output: `grading.json` per run (schema in `references/schemas.md`).
+1. **Grade each run** via `task_tool` (serial):
+   ```
+   task_tool(
+     subagent_type="grader",
+     task_description="expectations: [\"...\", ...]\ntranscript_path: <abs-path>/with_skill/transcript.md\noutputs_dir: <abs-path>/with_skill/outputs\ngrading_output_path: <abs-path>/with_skill/grading.json"
+   )
+   ```
+   The grader subagent has built-in grading logic — do NOT tell it to read `agents/grader.md`. Pass expectations from `eval_metadata.json`, transcript path, outputs dir. Output: `grading.json` per run (schema in `references/schemas.md`).
 2. **Aggregate:** `cd` into the skill-creator directory so `-m scripts.xxx` resolves.
    ```bash
    cd "<skill-creator-dir>" && python3 -m scripts.aggregate_benchmark <workspace>/iteration-N --skill-name <name>
    ```
    Produces `benchmark.json` and `benchmark.md`. Confirm both exist.
-3. **Surface patterns** from `benchmark.md` — which expectations failed, where variance is high, what the skill cost in time/tokens.
-4. **Present** per test case. Show the user everything in `benchmark.md` — **time and tokens are mandatory columns, not optional**. Pass-rate-only summaries are a bug. You must present the final `benchmark.md` to the user, not just summarize it loosely. Ask "Any feedback?" each time. Finish with the overall summary from `benchmark.md`.
+3. **Surface patterns** from `benchmark.md` — which expectations failed, where variance is high.
+4. **Present** per test case. Show the user everything in `benchmark.md`. You must present the final `benchmark.md` to the user, not just summarize it loosely. Ask "Any feedback?" each time. Finish with the overall summary from `benchmark.md`.
 
-Self-check before presenting: (a) every run dir has `grading.json`, (b) `benchmark.md` exists, (c) you're showing graded scores, not your own judgment, (d) time and tokens are visible for every case. If any are false, go back.
+Self-check before presenting: (a) every run dir has `grading.json`, (b) `benchmark.md` exists, (c) you're showing graded scores, not your own judgment. If any are false, go back.
 
 ---
 

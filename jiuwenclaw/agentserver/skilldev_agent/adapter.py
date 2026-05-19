@@ -41,6 +41,7 @@ from jiuwenclaw.schema.agent import AgentRequest, AgentResponse, AgentResponseCh
 from jiuwenclaw.utils import get_agent_workspace_dir
 
 from jiuwenclaw.agentserver.skilldev_agent.prompts import SKILLDEV_AGENT_SYSTEM_PROMPT
+from jiuwenclaw.agentserver.skilldev_agent.subagents import build_skilldev_subagents
 from jiuwenclaw.agentserver.skilldev_agent.tools import build_skilldev_tools
 from jiuwenclaw.agentserver.skilldev_agent.rails.context_engineering_rail import SkillDevContextEngineeringRail
 
@@ -79,6 +80,29 @@ class SkillDevDeepAdapter:
     def set_skill_manager(self, manager) -> None:
         self._skill_manager = manager
 
+    def _teardown_old_instance(self) -> None:
+        """Remove stale tools from the global registry before rebuilding."""
+        from openjiuwen.core.runner.runner import Runner
+
+        # Force-remove the task_tool by its deterministic ID regardless of
+        # whether self._instance is set or _registered_rails has been populated.
+        # tool_id pattern: "task_tool_{agent_card.id}" (see build_tool_card + SubagentRail)
+        task_tool_id = "task_tool_skilldev-agent"
+        try:
+            Runner.resource_mgr.remove_tool(task_tool_id)
+        except Exception:
+            pass
+
+        # Also attempt rail-based cleanup if old instance is available
+        if self._instance is not None:
+            for rail in getattr(self._instance, '_registered_rails', []):
+                if hasattr(rail, 'uninit'):
+                    try:
+                        rail.uninit(self._instance)
+                    except Exception:
+                        pass
+            self._instance = None
+
     async def update_workspace(self, workspace_dir: str | Path) -> None:
         """Switch to a task-scoped workspace and rebuild the agent if needed."""
         resolved = str(Path(workspace_dir))
@@ -89,6 +113,8 @@ class SkillDevDeepAdapter:
 
     async def create_instance(self, config: dict[str, Any] | None = None, *, mode: str = "claw") -> None:
         """Create the dedicated SkillDev DeepAgent."""
+        self._teardown_old_instance()
+
         config_base = config or get_config()
         self._last_config = config_base
         react_config = dict(config_base.get("react", {}))
@@ -121,6 +147,12 @@ class SkillDevDeepAdapter:
         ]
 
         Path(self._workspace_dir).mkdir(parents=True, exist_ok=True)
+        subagents = build_skilldev_subagents(
+            self._model,
+            language=react_config.get("language", "cn"),
+            sys_operation=sys_operation,
+            agent_id=self._agent_id,
+        )
         self._instance = create_deep_agent(
             model=self._model,
             card=AgentCard(
@@ -134,6 +166,7 @@ class SkillDevDeepAdapter:
                 skills_dir=self._skills_dir,
             ),
             tools=tool_cards,
+            subagents=subagents,
             rails=rails,
             enable_task_loop=react_config.get("enable_task_loop", True),
             max_iterations=react_config.get("max_iterations", 200),
@@ -798,6 +831,9 @@ class SkillDevDeepAdapter:
             if chunk_type == "llm_usage":
                 return {"event_type": "chat.usage_metadata", "metadata": payload}
             if chunk_type == "tool_calls.delta":
+                # Disabled: frontend does not consume streaming tool_call deltas yet.
+                # To re-enable, remove the early return below.
+                return None
                 if isinstance(payload, dict):
                     tc_list = tool_calls_payload_to_json_list(payload.get("tool_calls", []))
                     result = {

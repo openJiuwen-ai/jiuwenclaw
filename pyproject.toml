@@ -112,6 +112,11 @@ jiuwenclaw = [
     "web_enterprise/node_modules/*",
 ]
 
+[tool.uv]
+override-dependencies = [
+    "openjiuwen @ git+https://gitcode.com/openJiuwen/agent-core.git@v0.1.10.post4",
+]
+
 [tool.uv.sources]
 jiuwenclaw-tui = { path = "./packages/jiuwenclaw-tui" }
 openjiuwen = { git = "https://gitcode.com/openJiuwen/agent-core.git", tag = "v0.1.10.post4" }
