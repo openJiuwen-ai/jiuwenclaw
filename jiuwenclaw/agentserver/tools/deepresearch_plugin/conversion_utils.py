@@ -21,6 +21,7 @@ SAFE_FILENAME_RE = re.compile(r"[^\w.-]+", re.UNICODE)
 NUMBERED_HEADING_RE = re.compile(
     r"^(?P<indent>\s{0,3})(?P<number>\d+(?:\.\d+)*)(?:\.\s+|\s+)(?P<title>.+?)\s*$"
 )
+LIST_ITEM_RE = re.compile(r"^\s{0,3}(?:[-*+]\s+|\d+\.\s+)")
 SENTENCE_END_RE = re.compile(r"[。！？?!…]$")
 
 CITATION_RE = re.compile(r"\[\[(\d+)\]\]\((https?://[^\s)]+(?:\([^\s)]+\)[^\s)]*)*)\)")
@@ -32,6 +33,11 @@ REFERENCE_LINE_RE = re.compile(r"^(?P<indent>\s*)\[(\d+)\]\.\s+(.*)$", re.MULTIL
 CENTER_CAPTION_RE = re.compile(
     r'<div\s+style="text-align:\s*center;?">',
     flags=re.IGNORECASE,
+)
+LEGACY_FONT_CAPTION_LINE_RE = re.compile(
+    r'^[ \t]*<font\b[^>]*\bsize\s*=\s*["\']?2["\']?[^>]*>(?P<body>.*?)</font>'
+    r'(?P<citations>(?:<sup class="citation">.*?</sup>)*)[ \t]*$',
+    flags=re.IGNORECASE | re.MULTILINE,
 )
 EXTERNAL_LINK_RE = re.compile(
     r'<a\s+([^>]*?)href="(https?://[^"]+)"(?![^>]*\btarget=)([^>]*)>',
@@ -372,6 +378,44 @@ def fix_center_caption_blocks(text: str) -> str:
     return CENTER_CAPTION_RE.sub('<div class="figure-caption" markdown="1">', text)
 
 
+def normalize_legacy_font_caption_blocks(text: str) -> str:
+    """Rewrite legacy font-based captions into block-level caption containers."""
+
+    def _replace(match: re.Match[str]) -> str:
+        body = match.group("body").strip()
+        citations = match.group("citations").strip()
+        caption_content = f"{body}{citations}"
+        return f'\n<div class="figure-caption" markdown="1">\n{caption_content}\n</div>\n'
+
+    return LEGACY_FONT_CAPTION_LINE_RE.sub(_replace, text)
+
+
+def normalize_list_boundaries(text: str) -> str:
+    """Insert a blank line before list items when the source omits one."""
+    block_prefixes = ("#", ">", "|", "```", "<div", "<ul", "<ol", "<li")
+
+    def _needs_blank_line_before_list(current_line: str, previous_line: str) -> bool:
+        previous = previous_line.strip()
+        if not LIST_ITEM_RE.match(current_line):
+            return False
+        if not previous:
+            return False
+        if LIST_ITEM_RE.match(previous_line):
+            return False
+        return not previous.startswith(block_prefixes)
+
+    lines = text.split("\n")
+    normalized: list[str] = []
+
+    for line in lines:
+        previous_line = normalized[-1] if normalized else ""
+        if _needs_blank_line_before_list(line, previous_line):
+            normalized.append("")
+        normalized.append(line)
+
+    return "\n".join(normalized)
+
+
 def strip_mermaid_blocks(text: str) -> str:
     """Remove Mermaid fenced code blocks and adjacent figure captions.
 
@@ -406,6 +450,8 @@ def preprocess_markdown_text(text: str) -> str:
     text = normalize_pipe_tables(text)
     text = normalize_reference_lines(text)
     text = fix_center_caption_blocks(text)
+    text = normalize_legacy_font_caption_blocks(text)
+    text = normalize_list_boundaries(text)
     return strip_mermaid_blocks(text)
 
 
@@ -453,6 +499,8 @@ def preprocess_markdown_text_for_docx(text: str) -> str:
     text = normalize_reference_lines(text)
     text = _filter_remote_urls_for_ssrf(text)
     text = fix_center_caption_blocks(text)
+    text = normalize_legacy_font_caption_blocks(text)
+    text = normalize_list_boundaries(text)
     return strip_mermaid_blocks(text)
 
 

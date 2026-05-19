@@ -89,6 +89,8 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         }}
 
         .figure-caption {{
+            display: block;
+            width: 100%;
             text-align: center;
             color: var(--muted);
             font-size: 0.95rem;
@@ -140,18 +142,21 @@ HTML_TEMPLATE = """<!DOCTYPE html>
 
         table {{
             border-collapse: collapse;
-            width: 100%;
-            margin: 16px 0 24px;
-            display: block;
-            overflow-x: auto;
-            white-space: nowrap;
+            width: fit-content;
+            max-width: 100%;
+            margin: 16px auto 24px;
+            display: table;
         }}
 
         th, td {{
             border: 1px solid var(--border);
             padding: 10px 12px;
-            text-align: left;
+            text-align: center;
             vertical-align: top;
+        }}
+
+        th[style], td[style] {{
+            text-align: center !important;
         }}
 
         th {{
