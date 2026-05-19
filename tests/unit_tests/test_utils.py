@@ -2,8 +2,10 @@
 
 """Unit tests for utils module."""
 
+import logging
 import os
 import sys
+import tempfile
 from pathlib import Path
 from unittest.mock import patch
 
@@ -98,6 +100,32 @@ class TestLoggerSetup:
         handler_types = [type(h).__name__ for h in logger.handlers]
         assert "StreamHandler" in handler_types
         assert handler_types.count("SafeRotatingFileHandler") == 5
+
+    @staticmethod
+    def test_safe_rotating_file_handler_rollover():
+        """Rollover copies backup and truncates active log without logging errors."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            logpath = Path(tmpdir) / "full.log"
+            handler = utils.SafeRotatingFileHandler(
+                str(logpath),
+                maxBytes=80,
+                backupCount=3,
+                encoding="utf-8",
+            )
+            handler.setFormatter(logging.Formatter("%(message)s"))
+            logger = logging.getLogger("jiuwenclaw.test.rollover")
+            logger.handlers.clear()
+            logger.propagate = False
+            logger.addHandler(handler)
+            logger.setLevel(logging.INFO)
+
+            for _ in range(30):
+                logger.info("x" * 20)
+
+            handler.close()
+            backups = list(Path(tmpdir).glob("full_*.log"))
+            assert backups, "expected timestamped backup after rollover"
+            assert logpath.stat().st_size < 80, "active log should be truncated after rollover"
 
 
 class TestUserWorkspace:

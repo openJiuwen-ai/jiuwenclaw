@@ -48,7 +48,7 @@ from collections import OrderedDict
 from dataclasses import dataclass, field
 from logging.handlers import BaseRotatingHandler
 from pathlib import Path
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Dict, Literal, Optional
 
 import yaml
@@ -333,7 +333,7 @@ class SafeRotatingFileHandler(BaseRotatingHandler):
         """
         base_path = Path(self.baseFilename)
 
-        timestamp = datetime.datetime.now(tz=datetime.timezone.utc).strftime("%Y%m%d_%H%M%S")
+        timestamp = datetime.now(tz=timezone.utc).strftime("%Y%m%d_%H%M%S")
         backup_filename = base_path.parent / f"{base_path.stem}_{timestamp}{base_path.suffix}"
 
         try:
