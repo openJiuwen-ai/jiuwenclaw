@@ -1,6 +1,6 @@
 # Skill self-evolution
 
-Most agents **freeze** skills after deployment: tool errors become log lines; user corrections do not change behavior. JiuwenClaw uses the **openJiuwen evolution stack** with **`SkillCallOperator`** to unify skill reads/writes and evolution, plus **signal detection** that turns failures and user corrections into updates stored in **`evolutions.json`** and merged back into **`SKILL.md`** when appropriate.
+Most agents **freeze** skills after deployment: tool errors become log lines; user corrections do not change behavior. JiuwenSwarm uses the **openJiuwen evolution stack** with **`SkillCallOperator`** to unify skill reads/writes and evolution, plus **signal detection** that turns failures and user corrections into updates stored in **`evolutions.json`** and merged back into **`SKILL.md`** when appropriate.
 
 ## Core components
 
@@ -170,7 +170,7 @@ Example:
 Location:
 
 ```
-~/.jiuwenclaw/workspace/agent/skills/<skill_name>/
+~/.jiuwenswarm/workspace/agent/skills/<skill_name>/
 ├── SKILL.md
 ├── evolutions.json
 └── ...

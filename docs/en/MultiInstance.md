@@ -1,6 +1,6 @@
 # Multi-Instance Operation
 
-Run multiple independent JiuwenClaw instances on the same machine, each with isolated workspace, configuration, and ports.
+Run multiple independent JiuwenSwarm instances on the same machine, each with isolated workspace, configuration, and ports.
 
 ## Use Cases
 
@@ -29,7 +29,7 @@ Each instance has independent:
 - Length: 1-64 characters
 - Allowed characters: letters, digits, underscore, hyphen
 - Cannot start with `.`
-- Reserved names: `default`, `config`, `tmp`, `jiuwenclaw`, `all`
+- Reserved names: `default`, `config`, `tmp`, `jiuwenswarm`, `all`
 
 ---
 
@@ -37,19 +37,19 @@ Each instance has independent:
 
 ### instances.yaml
 
-Location: `~/.jiuwenclaw/instances.yaml` (or repository root)
+Location: `~/.jiuwenswarm/instances.yaml` (or repository root)
 
 ```yaml
 instances:
   dev:
-    workspace: ~/.jiuwenclaw_dev
+    workspace: ~/.jiuwenswarm_dev
     ports:
       agent_server: 19092
       web: 20000
       gateway: 20001
       frontend: 6173
   prod:
-    workspace: ~/.jiuwenclaw_prod
+    workspace: ~/.jiuwenswarm_prod
     ports:
       agent_server: 20092
       web: 21000
@@ -72,16 +72,16 @@ Default port = base port + instance index × 1000
 
 ## Commands
 
-### jiuwenclaw-init --name
+### jiuwenswarm-init --name
 
 Create a named instance:
 
 ```bash
 # Create dev instance
-jiuwenclaw-init --name dev
+jiuwenswarm-init --name dev
 
 # Create prod instance with specified workspace
-jiuwenclaw-init --name prod --workspace ~/.jiuwenclaw_prod
+jiuwenswarm-init --name prod --workspace ~/.jiuwenswarm_prod
 ```
 
 This will:
@@ -90,33 +90,33 @@ This will:
 3. Update `instances.yaml` configuration
 4. Allocate ports (auto or manual)
 
-### jiuwenclaw-start Management Commands
+### jiuwenswarm-start Management Commands
 
 ```bash
 # List all instance statuses
-jiuwenclaw-start --list
+jiuwenswarm-start --list
 
 # Output example:
 # INSTANCE     STATUS     PID     WORKSPACE                               PORTS
 # --------------------------------------------------------------------------------
-# default      running    12345   ~/.jiuwenclaw                           as:18092,w:19000,g:19001,f:5173
-# dev          stopped    -       ~/.jiuwenclaw_dev                       as:19092,w:20000,g:20001,f:6173
-# prod         stopped    -       ~/.jiuwenclaw_prod                      as:20092,w:21000,g:21001,f:7173
+# default      running    12345   ~/.jiuwenswarm                           as:18092,w:19000,g:19001,f:5173
+# dev          stopped    -       ~/.jiuwenswarm_dev                       as:19092,w:20000,g:20001,f:6173
+# prod         stopped    -       ~/.jiuwenswarm_prod                      as:20092,w:21000,g:21001,f:7173
 
 # Show specific instance details
-jiuwenclaw-start --status dev
+jiuwenswarm-start --status dev
 
 # Start named instance
-jiuwenclaw-start --name dev
-jiuwenclaw-start --name dev app    # Start backend only
-jiuwenclaw-start --name dev web    # Start web service only
+jiuwenswarm-start --name dev
+jiuwenswarm-start --name dev app    # Start backend only
+jiuwenswarm-start --name dev web    # Start web service only
 
 # Stop instance
-jiuwenclaw-start --stop dev
+jiuwenswarm-start --stop dev
 
 # Restart instance
-jiuwenclaw-start --restart dev
-jiuwenclaw-start --restart dev --mode app
+jiuwenswarm-start --restart dev
+jiuwenswarm-start --restart dev --mode app
 ```
 
 ---
@@ -144,15 +144,15 @@ If lock conflict occurs during startup:
 
 | Variable | Description |
 |----------|-------------|
-| `JIUWENCLAW_DATA_DIR` | Override data root directory (affects instances.yaml location) |
-| `JIUWENCLAW_CONFIG_DIR` | Override configuration directory |
+| `JIUWENSWARM_DATA_DIR` | Override data root directory (affects instances.yaml location) |
+| `JIUWENSWARM_CONFIG_DIR` | Override configuration directory |
 
 Use `--dotenv` at startup to specify instance-specific config:
 
 ```bash
 # Internal mechanism: bootstrap .env is auto-loaded when starting named instance
-jiuwenclaw-start --name dev
-# Equivalent to loading ~/.jiuwenclaw_dev/.env
+jiuwenswarm-start --name dev
+# Equivalent to loading ~/.jiuwenswarm_dev/.env
 ```
 
 ---
@@ -177,7 +177,7 @@ Avoid port conflicts:
 
 ```bash
 # Check port usage
-jiuwenclaw-start --status dev
+jiuwenswarm-start --status dev
 # System auto-detects and reports conflicts
 ```
 
@@ -200,7 +200,7 @@ MODEL_NAME="gpt-4"
 Instance workspace contains all Agent runtime data:
 
 ```
-~/.jiuwenclaw_dev/
+~/.jiuwenswarm_dev/
 ├── .env                # Instance config
 ├── .instance.pid       # Process management
 ├── .instance.lock      # Startup lock
@@ -221,13 +221,13 @@ Instance workspace contains all Agent runtime data:
 Manually remove workspace directory and instances.yaml entry:
 
 ```bash
-rm -rf ~/.jiuwenclaw_dev
-# Edit ~/.jiuwenclaw/instances.yaml to remove corresponding entry
+rm -rf ~/.jiuwenswarm_dev
+# Edit ~/.jiuwenswarm/instances.yaml to remove corresponding entry
 ```
 
 ### Q: Difference between default and named instances?
 
-- **Default instance**: Started without `--name`, uses `~/.jiuwenclaw/` workspace
+- **Default instance**: Started without `--name`, uses `~/.jiuwenswarm/` workspace
 - **Named instance**: Specified via `--name`, uses independent workspace and ports
 
 ### Q: Can instances share configuration?
@@ -235,7 +235,7 @@ rm -rf ~/.jiuwenclaw_dev
 Yes. Reference shared config in instance `.env`:
 
 ```bash
-# ~/.jiuwenclaw_dev/.env
-source ~/.jiuwenclaw/.env  # Shared base config
+# ~/.jiuwenswarm_dev/.env
+source ~/.jiuwenswarm/.env  # Shared base config
 MODEL_NAME="special-model" # Instance-specific override
 ```

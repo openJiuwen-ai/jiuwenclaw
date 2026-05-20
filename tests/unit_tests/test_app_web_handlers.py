@@ -2,7 +2,7 @@
 
 import pytest
 
-from jiuwenclaw.gateway.channel_manager.web.app_web_handlers import WebHandlersBindParams, _register_web_handlers
+from jiuwenswarm.gateway.channel_manager.web.app_web_handlers import WebHandlersBindParams, _register_web_handlers
 
 
 class FakeWebChannel:
@@ -36,12 +36,12 @@ async def test_config_set_routes_team_payload_to_modes_team_helper(monkeypatch):
 
     _register_web_handlers(WebHandlersBindParams(channel=channel))
 
-    monkeypatch.setattr("jiuwenclaw.gateway.channel_manager.web.app_web_handlers.get_config_raw",
+    monkeypatch.setattr("jiuwenswarm.gateway.channel_manager.web.app_web_handlers.get_config_raw",
                         lambda: {"preferred_language": "zh"})
-    monkeypatch.setattr("jiuwenclaw.gateway.channel_manager.web.app_web_handlers.get_config",
+    monkeypatch.setattr("jiuwenswarm.gateway.channel_manager.web.app_web_handlers.get_config",
                         lambda: {"modes": {"team": {}}})
     monkeypatch.setattr(
-        "jiuwenclaw.gateway.channel_manager.web.app_web_handlers.replace_teams_in_config",
+        "jiuwenswarm.gateway.channel_manager.web.app_web_handlers.replace_teams_in_config",
         lambda payload: recorded.append(payload),
     )
 
@@ -71,10 +71,10 @@ async def test_config_set_returns_bad_request_when_team_payload_is_invalid(monke
 
     _register_web_handlers(WebHandlersBindParams(channel=channel))
 
-    monkeypatch.setattr("jiuwenclaw.gateway.channel_manager.web.app_web_handlers.get_config_raw",
+    monkeypatch.setattr("jiuwenswarm.gateway.channel_manager.web.app_web_handlers.get_config_raw",
                         lambda: {"preferred_language": "zh"})
     monkeypatch.setattr(
-        "jiuwenclaw.gateway.channel_manager.web.app_web_handlers.replace_teams_in_config",
+        "jiuwenswarm.gateway.channel_manager.web.app_web_handlers.replace_teams_in_config",
         lambda payload: (_ for _ in ()).throw(ValueError("duplicate team_name: alpha_team")),
     )
 

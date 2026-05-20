@@ -1508,7 +1508,7 @@ wheels = [
 
 [[package]]
 name = "jiuwenswarm"
-version = "0.1.11"
+version = "0.2.0"
 source = { editable = "." }
 dependencies = [
     { name = "a2a-sdk", extra = ["http-server"] },
@@ -1597,7 +1597,7 @@ requires-dist = [
     { name = "lark-oapi", specifier = ">=1.5.3" },
     { name = "loguru", specifier = ">=0.7.3" },
     { name = "mutagen", specifier = ">=1.47.0" },
-    { name = "openjiuwen", git = "https://gitcode.com/openJiuwen/agent-core.git?rev=develop" },
+    { name = "openjiuwen", specifier = "==0.1.13" },
     { name = "openjiuwen", extras = ["postgres", "zmq"], marker = "extra == 'distribute'" },
     { name = "opentelemetry-api", specifier = ">=1.25.0" },
     { name = "opentelemetry-exporter-otlp-proto-grpc", specifier = ">=1.25.0" },
@@ -1644,7 +1644,7 @@ test = [
 
 [[package]]
 name = "jiuwenswarm-tui"
-version = "0.1.11"
+version = "0.2.0"
 source = { directory = "packages/jiuwenswarm-tui" }
 
 [[package]]
@@ -2332,8 +2332,8 @@ wheels = [
 
 [[package]]
 name = "openjiuwen"
-version = "0.1.12"
-source = { git = "https://gitcode.com/openJiuwen/agent-core.git?rev=develop#30e894061ef93aec9bbd379ab7e1e4dab0eb5e1a" }
+version = "0.1.13"
+source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "aiofiles" },
     { name = "aiohttp" },
@@ -2368,6 +2368,10 @@ dependencies = [
     { name = "tenacity" },
     { name = "tiktoken" },
     { name = "transformers" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/7c/4c/ae3551ac2755ee9b8303af4154200ee7b91eab96c3384d367c5935287a18/openjiuwen-0.1.13.tar.gz", hash = "sha256:bf264409852a74d926b241eff1993a2e13998f65134f5e3243ba8d332c47913b", size = 2432054, upload-time = "2026-05-18T04:03:26.459Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/91/12/1e929776db67979f25176d8747a47a121e4706ea1e3461c4db8ef9c557e6/openjiuwen-0.1.13-py3-none-any.whl", hash = "sha256:7562b6770a2bbf9c8ef06d70761d708306f7cf5ec01090845c7a24267632a76f", size = 3252035, upload-time = "2026-05-18T04:03:24.447Z" },
 ]
 
 [package.optional-dependencies]

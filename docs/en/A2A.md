@@ -2,7 +2,7 @@
 
 This page explains the Gateway-side **A2A Server** (`A2AChannel`): implementation location, configuration, mapping to internal `Message`/E2A, and local verification commands. For outbound A2A (agent calling external services), see section 7.
 
-> **Implementation**: `jiuwenclaw/channel/a2a_channel.py` (`A2AChannel` + `a2a-sdk`). **Entrypoint process**: `python -m jiuwenclaw.app_gateway` (registered and started in `jiuwenclaw/app_gateway.py`). In case of mismatch, source code is the source of truth.
+> **Implementation**: `jiuwenswarm/channel/a2a_channel.py` (`A2AChannel` + `a2a-sdk`). **Entrypoint process**: `python -m jiuwenswarm.app_gateway` (registered and started in `jiuwenswarm/app_gateway.py`). In case of mismatch, source code is the source of truth.
 
 ---
 
@@ -11,10 +11,10 @@ This page explains the Gateway-side **A2A Server** (`A2AChannel`): implementatio
 | Location | Role |
 |------|------|
 | **docs/en/A2A.md** (this page) | Integration and dev debugging: modules, config, mapping, verification |
-| `jiuwenclaw/channel/a2a_channel.py` | A2A HTTP service, `AgentCard`, request/response to `Message` conversion |
-| `jiuwenclaw/app_gateway.py` | Env loading, `A2AChannel` construction, `channel_manager.register_channel` |
-| `jiuwenclaw/gateway/message_handler.py` | Gateway↔AgentServer E2A exchange and internal `Message` orchestration |
-| `jiuwenclaw/gateway/channel_manager.py` | Channel registration and `robot_messages` → `Channel.send` dispatch |
+| `jiuwenswarm/channel/a2a_channel.py` | A2A HTTP service, `AgentCard`, request/response to `Message` conversion |
+| `jiuwenswarm/app_gateway.py` | Env loading, `A2AChannel` construction, `channel_manager.register_channel` |
+| `jiuwenswarm/gateway/message_handler.py` | Gateway↔AgentServer E2A exchange and internal `Message` orchestration |
+| `jiuwenswarm/gateway/channel_manager.py` | Channel registration and `robot_messages` → `Channel.send` dispatch |
 | [E2A-protocol.md](E2A-protocol.md) | Inner protocol between Gateway and AgentServer |
 
 ---
@@ -32,13 +32,13 @@ This page explains the Gateway-side **A2A Server** (`A2AChannel`): implementatio
 |------|-----|-----|-------------|
 | Bindings | `WEB_HOST` / `WEB_PORT` / `WEB_PATH` | `ACP_GATEWAY_*` | `A2A_SERVER_*` |
 | Config source | Env + CLI (`--host`, etc.) | Env only | Env only |
-| `.env` loading | `app_gateway` calls `load_dotenv(get_env_file())`, i.e. `~/.jiuwenclaw/config/.env` | same | same |
+| `.env` loading | `app_gateway` calls `load_dotenv(get_env_file())`, i.e. `~/.jiuwenswarm/config/.env` | same | same |
 
 ---
 
 ## 3. Environment Variables (Gateway)
 
-Set these in `~/.jiuwenclaw/config/.env` or process environment (read by `app_gateway.py`):
+Set these in `~/.jiuwenswarm/config/.env` or process environment (read by `app_gateway.py`):
 
 | Variable | Default | Notes |
 |------|------|------|
@@ -49,8 +49,8 @@ Set these in `~/.jiuwenclaw/config/.env` or process environment (read by `app_ga
 | `A2A_SERVER_PROTOCOL_VERSION` | `1.0.0` | written into `AgentCard.AgentInterface.protocol_version` |
 | `A2A_SERVER_CARD_PATH` | `/.well-known/agent-card.json` | Agent Card path |
 | `A2A_SERVER_EXTENDED_CARD_PATH` | `/agent/authenticatedExtendedCard` | Extended Card path |
-| `A2A_SERVER_APP_NAME` | `JiuwenClaw Gateway A2A Server` | Agent Card `name` |
-| `A2A_SERVER_APP_DESCRIPTION` | `A2A ingress for JiuwenClaw Gateway` | Agent Card `description` |
+| `A2A_SERVER_APP_NAME` | `JiuwenSwarm Gateway A2A Server` | Agent Card `name` |
+| `A2A_SERVER_APP_DESCRIPTION` | `A2A ingress for JiuwenSwarm Gateway` | Agent Card `description` |
 | `A2A_SERVER_APP_VERSION` | `0.1.0` | Agent Card `version` |
 
 AgentServer connectivity still follows existing gateway config (for example `AGENT_SERVER_URL`) and is independent from the A2A listening endpoint.
@@ -142,4 +142,4 @@ Start both AgentServer and Gateway, and ensure `A2A_SERVER_ENABLED=true`.
 ## 9. Known Extension Points
 
 - Authentication, rate limit, timeout, and observability metrics are better enforced by gateway or upstream proxy, while keeping `A2AChannel` focused on protocol/message mapping.
-- If `jiuwenclaw/resources/.env.template` does not include A2A/ACP keys, append them manually in local `.env` (consistent with section 2).
+- If `jiuwenswarm/resources/.env.template` does not include A2A/ACP keys, append them manually in local `.env` (consistent with section 2).

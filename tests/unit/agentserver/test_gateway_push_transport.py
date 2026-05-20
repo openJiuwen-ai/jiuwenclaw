@@ -6,7 +6,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from jiuwenclaw.server.gateway_push.transport import WebSocketGatewayPushTransport
+from jiuwenswarm.server.gateway_push.transport import WebSocketGatewayPushTransport
 
 
 @pytest.mark.asyncio
@@ -20,7 +20,7 @@ async def test_websocket_gateway_push_transport_forwards_to_ws_server(monkeypatc
             return fake_server_instance
 
     fake_module = types.SimpleNamespace(AgentWebSocketServer=_FakeAgentWebSocketServer)
-    monkeypatch.setitem(sys.modules, "jiuwenclaw.server.agent_ws_server", fake_module)
+    monkeypatch.setitem(sys.modules, "jiuwenswarm.server.agent_ws_server", fake_module)
 
     transport = WebSocketGatewayPushTransport()
     msg = {

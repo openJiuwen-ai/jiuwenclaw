@@ -4,8 +4,8 @@
 
 import pytest
 
-from jiuwenclaw.common.schema.agent import AgentRequest, AgentResponse, AgentResponseChunk
-from jiuwenclaw.common.schema.message import ReqMethod, EventType, Mode, Message
+from jiuwenswarm.common.schema.agent import AgentRequest, AgentResponse, AgentResponseChunk
+from jiuwenswarm.common.schema.message import ReqMethod, EventType, Mode, Message
 
 
 class TestReqMethod:

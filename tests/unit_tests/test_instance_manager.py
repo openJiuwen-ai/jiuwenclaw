@@ -21,7 +21,7 @@ from unittest.mock import patch, MagicMock
 
 import pytest
 
-from jiuwenclaw.instance_manager import (
+from jiuwenswarm.instance_manager import (
     InstanceConfig,
     InstanceLock,
     InstanceStatus,
@@ -64,7 +64,7 @@ def _try_acquire_lock_for_multiprocess(workspace_str: str) -> bool:
 
     This must be at module level to be pickleable for multiprocessing.
     """
-    from jiuwenclaw.instance_manager import (
+    from jiuwenswarm.instance_manager import (
         InstanceConfig as _InstanceConfig,
         InstanceLock as _InstanceLock,
     )
@@ -360,7 +360,7 @@ class TestBootstrapEnv:
         assert env_path.exists()
         content = env_path.read_text()
         assert "JIUWENSWARM_DATA_DIR" in content
-        assert "JIUWENCLAW_INSTANCE=alice" in content
+        assert "JIUWENSWARM_INSTANCE=alice" in content
         assert "AGENT_SERVER_PORT=19092" in content
 
 
@@ -371,7 +371,7 @@ class TestInstancesYaml:
     def test_create_instances_yaml_template(tmp_path):
         """Test creating instances.yaml template."""
         with patch(
-            "jiuwenclaw.instance_manager.yaml.get_instances_yaml_path",
+            "jiuwenswarm.instance_manager.yaml.get_instances_yaml_path",
             return_value=tmp_path / "instances.yaml",
         ):
             path = create_instances_yaml_template()
@@ -384,7 +384,7 @@ class TestInstancesYaml:
         """Test loading nonexistent instances.yaml."""
         yaml_path = tmp_path / "instances.yaml"
         with patch(
-            "jiuwenclaw.instance_manager.yaml.get_instances_yaml_path",
+            "jiuwenswarm.instance_manager.yaml.get_instances_yaml_path",
             return_value=yaml_path,
         ):
             data = load_instances_yaml()
@@ -395,7 +395,7 @@ class TestInstancesYaml:
         """Test saving and loading instances.yaml."""
         yaml_path = tmp_path / "instances.yaml"
         with patch(
-            "jiuwenclaw.instance_manager.yaml.get_instances_yaml_path",
+            "jiuwenswarm.instance_manager.yaml.get_instances_yaml_path",
             return_value=yaml_path,
         ):
             data = {
@@ -418,7 +418,7 @@ class TestGetInstanceConfig:
         yaml_path = tmp_path / "instances.yaml"
         yaml_path.write_text("instances: {}\n", encoding="utf-8")
         with patch(
-            "jiuwenclaw.instance_manager.yaml.get_instances_yaml_path",
+            "jiuwenswarm.instance_manager.yaml.get_instances_yaml_path",
             return_value=yaml_path,
         ):
             config = get_instance_config("nonexistent")
@@ -430,7 +430,7 @@ class TestGetInstanceConfig:
         yaml_path = tmp_path / "instances.yaml"
         yaml_path.write_text("instances:\n  alice: {}\n", encoding="utf-8")
         with patch(
-            "jiuwenclaw.instance_manager.yaml.get_instances_yaml_path",
+            "jiuwenswarm.instance_manager.yaml.get_instances_yaml_path",
             return_value=yaml_path,
         ):
             config = get_instance_config("alice")
@@ -448,7 +448,7 @@ class TestCollectAllPorts:
         """Test collecting default instance ports."""
         yaml_path = Path("/nonexistent")
         with patch(
-            "jiuwenclaw.instance_manager.yaml.get_instances_yaml_path",
+            "jiuwenswarm.instance_manager.yaml.get_instances_yaml_path",
             return_value=yaml_path,
         ):
             ports = collect_all_ports()
@@ -461,7 +461,7 @@ class TestCollectAllPorts:
         """Test collecting ports excluding a specific instance."""
         yaml_path = Path("/nonexistent")
         with patch(
-            "jiuwenclaw.instance_manager.yaml.get_instances_yaml_path",
+            "jiuwenswarm.instance_manager.yaml.get_instances_yaml_path",
             return_value=yaml_path,
         ):
             ports = collect_all_ports(exclude_name="default")
@@ -477,7 +477,7 @@ class TestListAllInstances:
         """Test listing with no instances.yaml."""
         yaml_path = tmp_path / "instances.yaml"
         with patch(
-            "jiuwenclaw.instance_manager.yaml.get_instances_yaml_path",
+            "jiuwenswarm.instance_manager.yaml.get_instances_yaml_path",
             return_value=yaml_path,
         ):
             statuses = list_all_instances(include_default=True)
@@ -490,7 +490,7 @@ class TestListAllInstances:
         """Test listing without default instance."""
         yaml_path = tmp_path / "instances.yaml"
         with patch(
-            "jiuwenclaw.instance_manager.yaml.get_instances_yaml_path",
+            "jiuwenswarm.instance_manager.yaml.get_instances_yaml_path",
             return_value=yaml_path,
         ):
             statuses = list_all_instances(include_default=False)
@@ -510,7 +510,7 @@ class TestInstancesYamlError:
             encoding="utf-8",
         )
         with patch(
-            "jiuwenclaw.instance_manager.yaml.get_instances_yaml_path",
+            "jiuwenswarm.instance_manager.yaml.get_instances_yaml_path",
             return_value=yaml_path,
         ):
             data = load_instances_yaml()
@@ -522,7 +522,7 @@ class TestInstancesYamlError:
         """Test missing file returns empty structure."""
         yaml_path = tmp_path / "nonexistent.yaml"
         with patch(
-            "jiuwenclaw.instance_manager.yaml.get_instances_yaml_path",
+            "jiuwenswarm.instance_manager.yaml.get_instances_yaml_path",
             return_value=yaml_path,
         ):
             data = load_instances_yaml()
@@ -538,7 +538,7 @@ class TestInstancesYamlError:
             encoding="utf-8",
         )
         with patch(
-            "jiuwenclaw.instance_manager.yaml.get_instances_yaml_path",
+            "jiuwenswarm.instance_manager.yaml.get_instances_yaml_path",
             return_value=yaml_path,
         ):
             with pytest.raises(InstancesYamlError) as exc_info:
@@ -553,7 +553,7 @@ class TestInstancesYamlError:
         yaml_path = tmp_path / "instances.yaml"
         yaml_path.write_text("other_key: value\n", encoding="utf-8")
         with patch(
-            "jiuwenclaw.instance_manager.yaml.get_instances_yaml_path",
+            "jiuwenswarm.instance_manager.yaml.get_instances_yaml_path",
             return_value=yaml_path,
         ):
             with pytest.raises(InstancesYamlError) as exc_info:
@@ -569,7 +569,7 @@ class TestInstancesYamlError:
             encoding="utf-8",
         )
         with patch(
-            "jiuwenclaw.instance_manager.yaml.get_instances_yaml_path",
+            "jiuwenswarm.instance_manager.yaml.get_instances_yaml_path",
             return_value=yaml_path,
         ):
             with pytest.raises(InstancesYamlError) as exc_info:
@@ -586,7 +586,7 @@ class TestInstancesYamlError:
             encoding="utf-8",
         )
         with patch(
-            "jiuwenclaw.instance_manager.yaml.get_instances_yaml_path",
+            "jiuwenswarm.instance_manager.yaml.get_instances_yaml_path",
             return_value=yaml_path,
         ):
             with pytest.raises(InstancesYamlError) as exc_info:
@@ -602,7 +602,7 @@ class TestInstancesYamlError:
             encoding="utf-8",
         )
         with patch(
-            "jiuwenclaw.instance_manager.yaml.get_instances_yaml_path",
+            "jiuwenswarm.instance_manager.yaml.get_instances_yaml_path",
             return_value=yaml_path,
         ):
             with pytest.raises(InstancesYamlError) as exc_info:
@@ -619,7 +619,7 @@ class TestInstancesYamlError:
             encoding="utf-8",
         )
         with patch(
-            "jiuwenclaw.instance_manager.yaml.get_instances_yaml_path",
+            "jiuwenswarm.instance_manager.yaml.get_instances_yaml_path",
             return_value=yaml_path,
         ):
             with pytest.raises(InstancesYamlError) as exc_info:
@@ -635,7 +635,7 @@ class TestInstancesYamlError:
             encoding="utf-8",
         )
         with patch(
-            "jiuwenclaw.instance_manager.yaml.get_instances_yaml_path",
+            "jiuwenswarm.instance_manager.yaml.get_instances_yaml_path",
             return_value=yaml_path,
         ):
             with pytest.raises(InstancesYamlError) as exc_info:
@@ -654,7 +654,7 @@ class TestInstancesYamlError:
             encoding="utf-8",
         )
         with patch(
-            "jiuwenclaw.instance_manager.yaml.get_instances_yaml_path",
+            "jiuwenswarm.instance_manager.yaml.get_instances_yaml_path",
             return_value=yaml_path,
         ):
             with pytest.raises(InstancesYamlError) as exc_info:
@@ -670,7 +670,7 @@ class TestInstancesYamlError:
             encoding="utf-8",
         )
         with patch(
-            "jiuwenclaw.instance_manager.yaml.get_instances_yaml_path",
+            "jiuwenswarm.instance_manager.yaml.get_instances_yaml_path",
             return_value=yaml_path,
         ):
             with pytest.raises(InstancesYamlError) as exc_info:
@@ -686,7 +686,7 @@ class TestInstancesYamlError:
             encoding="utf-8",
         )
         with patch(
-            "jiuwenclaw.instance_manager.yaml.get_instances_yaml_path",
+            "jiuwenswarm.instance_manager.yaml.get_instances_yaml_path",
             return_value=yaml_path,
         ):
             with pytest.raises(InstancesYamlError) as exc_info:

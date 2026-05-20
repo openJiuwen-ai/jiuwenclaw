@@ -1,6 +1,6 @@
 # Memory
 
-Memory gives JiuwenClaw **persistent, cross-session recall**: important facts are written to files and retrieved with semantic search (plus optional BM25).
+Memory gives JiuwenSwarm **persistent, cross-session recall**: important facts are written to files and retrieved with semantic search (plus optional BM25).
 
 **External Memory Providers**, supporting third-party memory services (OpenJiuwen LTM, Mem0, OpenViking) or custom plugins.
 
@@ -66,10 +66,10 @@ memory:
 
 | Provider | Description | Required Config |
 |----------|-------------|-----------------|
-| `openjiuwen` | Local long-term memory (KV + Vector + DB) | None (uses default ~/.jiuwenclaw/memory/ltm) |
+| `openjiuwen` | Local long-term memory (KV + Vector + DB) | None (uses default ~/.jiuwenswarm/memory/ltm) |
 | `mem0` | Cloud fact extraction & semantic retrieval | `api_key` (from mem0.ai) |
 | `openviking` | ByteDance context database | `endpoint`, `api_key` |
-| `<plugin-name>` | Custom plugin | ~/.jiuwenclaw/plugins/memory/<name>/ |
+| `<plugin-name>` | Custom plugin | ~/.jiuwenswarm/plugins/memory/<name>/ |
 
 #### External Memory Environment Variables
 
@@ -151,7 +151,7 @@ Memory is plain Markdown; the agent uses file tools:
 
 ## Dreaming: Sleep-Time Memory Consolidation
 
-In addition to in-session writes by the agent, JiuwenClaw provides **Dreaming**: a sleep-time mechanism that periodically scans past sessions during idle time, calls an LLM to extract content worth keeping long-term, and writes the result to persistent memory files. Agent and Code modes share the same pipeline.
+In addition to in-session writes by the agent, JiuwenSwarm provides **Dreaming**: a sleep-time mechanism that periodically scans past sessions during idle time, calls an LLM to extract content worth keeping long-term, and writes the result to persistent memory files. Agent and Code modes share the same pipeline.
 
 | Mode | Extraction target | Output |
 |------|-------------------|--------|

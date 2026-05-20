@@ -24,9 +24,14 @@ Executed locally in the terminal UI, not through Gateway control pipeline.
 | `/workspace` | Manage trusted directories (see below) |
 | `/teamskills` | TeamSkills Hub publish/delete (`publish`/`delete`) |
 | `/export` | Export current conversation to file or clipboard (see below) |
-| `/status` | Show jiuwenclaw status overview, usage, config (see below) |
+| `/status` | Show jiuwenswarm status overview, usage, config (see below) |
 | `/statusline` | Configure the TUI footer status bar with a custom command (see below) |
 | `/permissions` | Manage tool permissions (`allow`/`ask`/`deny`) |
+| `/evolve` | Trigger skill self-evolution for one skill (see below) |
+| `/evolve_list` | Show one skill's evolution records (see below) |
+| `/evolve_simplify` | Simplify and consolidate one skill's evolution records (see below) |
+| `/evolve_rebuild` | Rebuild `SKILL.md` from archives and evolution records (see below) |
+| `/sandbox` | Set sandbox mode (see below) |
 
 > Note: `/mode` controlled switching logic is primarily on Gateway side, see "`/mode` and `/switch`" below.
 
@@ -50,6 +55,7 @@ Identified by Gateway and forwarded to AgentServer and other backend capabilitie
 | `/branch` | Create a branch session from current conversation point (see below) |
 | `/rewind` | Rewind conversation to before a specific turn (see below) |
 | `/memory` | Memory management (see below) |
+| `/cron` | Scheduled task (cron job) management (see below) |
 
 ---
 
@@ -71,7 +77,7 @@ Manages directories AI can access for file read, edit, and execute operations.
 
 #### Concepts
 
-- **System default workspace**: Fixed path `~/.jiuwenclaw/agent/jiuwenclaw_workspace`, always available
+- **System default workspace**: Fixed path `~/.jiuwenswarm/agent/jiuwenswarm_workspace`, always available
 - **Trusted directories (`trusted_dirs`)**: User-authorized accessible directories, managed by TUI, passed to backend Agent
 
 #### Control Logic
@@ -195,6 +201,39 @@ Manages directories AI can access for file read, edit, and execute operations.
   - Changes are written to `config.yaml` under `mcp.servers`;
   - After write, Agent config reload is triggered, and runtime MCP server bindings are synced accordingly.
 
+### `/evolve*` (Skill Self-Evolution)
+
+These commands are registered and parsed by the TUI, then forwarded as slash text through the normal chat channel. The actual evolution logic runs on the Agent / Team backend:
+
+- Agent mode: handled by `SkillEvolutionRail`; only `agent.plan` is supported.
+- Team mode: handled by `TeamSkillEvolutionRail` for team skill evolution.
+- Code mode and `agent.fast` do not support these commands.
+
+#### Subcommands
+
+| Command | Description |
+|---|---|
+| `/evolve <skill_name> [user_query]` | Trigger evolution for one skill. `agent.plan` scans the current conversation for tool failures and user corrections; Team mode requires `user_query`. |
+| `/evolve_list <skill_name> [--sort score]` | Show one skill's evolution records with count, average score, usage/feedback stats, section, and content preview. |
+| `/evolve_simplify <skill_name> [user_intent]` | Generate an approval-gated cleanup plan to merge duplicates, split long records, or remove low-value records. Trailing text is passed to the backend as intent. |
+| `/evolve_rebuild <skill_name> [user_intent]` | Generate a rebuild follow-up prompt and continue as a normal Agent / Team task to rebuild `SKILL.md`. |
+
+#### Approval Flow
+
+- `/evolve` and `/evolve_simplify` do not silently write changes; the backend pushes a confirmation question and the TUI waits for approval.
+- Accepting persists/solidifies the generated records; rejecting discards this generation.
+- Accepted Team skill evolution syncs the team skill directory.
+- While evolution or approval is pending, supplemental user input is queued and sent after evolution completes.
+
+#### Examples
+
+```bash
+/evolve pptx improve export error handling
+/evolve_list pptx --sort score
+/evolve_simplify pptx merge duplicate export-failure records
+/evolve_rebuild pptx strengthen Troubleshooting and Examples
+```
+
 ### `/branch` (Branch Session)
 
 - Usage: `/branch [name]`.
@@ -268,6 +307,46 @@ Manages directories AI can access for file read, edit, and execute operations.
   - `/memory toggle memory_enabled` — Toggle the master memory switch
   - `/memory open` — View memory directory paths
 
+### `/cron` (Scheduled Task Management)
+
+Manage cron jobs via RPC calls to the backend `CronController`, sharing the same backend logic and data store with the Web UI.
+
+- Alias: `/crontab`
+- Subcommands:
+
+| Command | Description |
+|---|---|
+| `/cron` or `/cron list` | List all cron jobs |
+| `/cron add name=<name> cron_expr=<expression> description=<desc> [other params]` | Create a new cron job |
+| `/cron update <job_id> key=value ...` | Update specific fields of a job |
+| `/cron delete <job_id>` | Delete a job |
+| `/cron toggle <job_id> <on or off>` | Enable or disable a job |
+| `/cron run <job_id>` | Run a job immediately |
+| `/cron preview <job_id>` | Preview upcoming execution times for a job |
+
+- `add` parameters:
+
+| Parameter | Required | Description |
+|---|---|---|
+| `name` | Yes | Job name |
+| `cron_expr` | Yes | Cron expression, supports two formats: 5-field (min hour day month dow) or 7-field Quartz (sec min hour day month dow year). 5-field is auto-converted to 7-field (second=0, year=*). Examples: daily 9am = `0 9 * * *` (5-field) or `0 0 9 * * ? *` (7-field) |
+| `description` | Yes | Job description — the input prompt the Agent receives when executing |
+| `targets` | No | Push channel, default `tui`; options: `tui`, `web`, `feishu`, `whatsapp`, `wecom`, `xiaoyi`, `wechat`, or `feishu_enterprise:<app_id>` |
+| `timezone` | No | IANA timezone, default `Asia/Shanghai` |
+| `mode` | No | Execution mode: `agent` (default, suitable for simple reminder-type tasks) or `plan` (for more complex reasoning tasks, allowing the Agent to plan the steps first before executing) |
+| `wake_offset_seconds` | No | Wake-up offset in seconds, default 300 |
+| `delete_after_run` | No | Auto-delete after one run, default false |
+
+- `add` examples:
+  - `/cron add name=minute-test cron_expr="0 * * * *" description="Tell me the current time" targets=tui`
+  - `/cron add name=morning-brief cron_expr="0 9 * * *" description="Generate today's morning briefing" targets=tui mode=plan`
+  - `/cron add name=reminder cron_expr="0 30 17 29 4 ? 2026" description="Don't forget the meeting" targets=tui delete_after_run=true`
+  - `/cron add name=weekly-report cron_expr="0 9 * * 1" description="Generate weekly report" targets=web`
+
+- `update` usage: Only pass the fields you want to change, e.g., `/cron update <id> name=new-name enabled=false`
+- `list` display: sequence number, full job ID, name, cron expression, enabled status, description snippet
+- `preview` display: wake_at and push_at timestamps for each upcoming execution
+
 ### `/skills` (Skills Management)
 
 Manage skills lifecycle: listing, installing, uninstalling, and marketplace source management.
@@ -292,7 +371,7 @@ Manage skills lifecycle: listing, installing, uninstalling, and marketplace sour
 - **Marketplace source**: A remote repository (typically a Git URL) that hosts available skills. Each source has a name, URL, and enabled/disabled state.
 - **Spec**: The install identifier format `<skill>@<marketplace>` used when installing from a marketplace; for builtin skills, omit `@` and the system auto-detects as `@builtin`.
 - **Local install**: Use `/skills install <path>` to install from a local directory (must contain `SKILL.md`) or remote archive URL; paths/URLs are auto-detected and routed to the local import flow.
-- **Install location**: The directory where a skill is stored after installation (`~/.jiuwenclaw/agent/jiuwenclaw_workspace/skills/`).
+- **Install location**: The directory where a skill is stored after installation (`~/.jiuwenswarm/agent/jiuwenswarm_workspace/skills/`).
 - **Source tag**: Each skill in the list is tagged with its source: `[builtin]` = builtin, `[local]` = imported, `[project]` or marketplace name = other.
 
 #### Grouped List Display
@@ -387,9 +466,45 @@ Timestamp format: `YYYY-MM-DD-HHmmss`.
 - `/export my-chat` — Save to `my-chat.txt` in workspace
 - `/export 2026-05-09-debug-session.txt` — Save with explicit timestamp name
 
+### `/sandbox` (Sandbox Mode Management)
+
+Enter / leave jiuwenbox sandbox mode and tune its runtime policy. Calls `command.sandbox` on the agent server.
+
+#### Subcommands
+
+| Command | Description |
+|---|---|
+| `/sandbox` or `/sandbox status` | Show current runtime (`enabled`, `excluded_commands`, `files.allow_write`, `files.deny_write`) |
+| `/sandbox enable` | Enter sandbox mode (spawns jiuwenbox if needed, rebuilds agent) |
+| `/sandbox disable` | Leave sandbox mode (rebuilds agent; stops jiuwenbox only if jiuwenswarm started it) |
+| `/sandbox exclude add <pattern>` | Add a shell glob whose matches run locally instead of in the sandbox |
+| `/sandbox exclude remove <pattern>` | Remove a pattern |
+| `/sandbox exclude list` | List current `excluded_commands` |
+| `/sandbox files allow <path> [perm]` | Allow writing `<path>` inside the sandbox |
+| `/sandbox files deny <path>` | Deny writing `<path>` inside the sandbox |
+| `/sandbox files remove <path>` | Remove `<path>` from the user-configured allow & deny sets |
+| `/sandbox files list` | List effective `allow_write` / `deny_write` |
+| `/sandbox help` | Print usage |
+
+#### Concepts
+
+- **Platform support**: `/sandbox` is Linux-only (jiuwenbox depends on Linux kernel features such as bwrap, Landlock, and Linux namespaces). On a Windows or macOS agent-server, every `/sandbox` sub-command returns a `SANDBOX_BAD_REQUEST` error. If the TUI runs on Windows/macOS but the agent-server is on a Linux host, the command works — what matters is the agent-server's platform.
+- **Effective write policy**: `files.allow_write` / `files.deny_write` in the status panel show the merged view of auto-managed and user-configured entries. Auto-managed entries are server-injected (intrinsic files such as `AGENT.md`, `HEARTBEAT.md`, `IDENTITY.md`, `SOUL.md`, `USER.md`, the `memory/daily_memory/` directory, and depending on the mode, `project_dir` and `config/config.yaml`) and cannot be removed via `/sandbox files remove`.
+- **preserve_file_sharing_mode**: Controlled by jiuwenswarm config, not by `/sandbox`. Only `mount` is supported: intrinsic files and `project_dir` are bind-mounted into the sandbox and `project_dir/config/config.yaml` is explicitly added to `deny_write`. Writing any other value into config.yaml is rejected by the server.
+- **excluded_commands**: Match the full command string (not just `argv[0]`); a match makes that tool call run on the host, effectively granting the command's side effects to the local environment.
+- **Add / remove are strict**: `exclude add` rejects a pattern that is already in the list; `exclude remove` rejects a pattern that is not in the list. `files allow|deny` rejects a path that is already in the same bucket, and rejects a path that exists in the opposite bucket (allow vs deny conflict) — run `files remove` first if you want to flip it. `files remove` rejects paths that have no matching user-configured entry.
+- **enable / disable**: Triggers an agent rebuild. The response lists `rebuilt_modes` (typically `agent.*` / `code.*`) and the jiuwenbox endpoint.
+
+#### Examples
+
+- `/sandbox enable` — turn on sandbox mode
+- `/sandbox status` — see runtime + effective files
+- `/sandbox files allow ./tmp/ 0777` — let the sandbox write into `./tmp/` with mode 0777
+- `/sandbox exclude add "git *"` — let `git` run on the host instead of inside the sandbox
+
 ### `/status` (Show Status)
 
-Display jiuwenclaw runtime status: overview, usage statistics, or config editor.
+Display jiuwenswarm runtime status: overview, usage statistics, or config editor.
 
 #### Usage
 
@@ -477,7 +592,7 @@ The command receives the following JSON data on each execution:
 | `mode` | Current mode (`agent.plan` / `agent.fast` / `code.plan` / `code.normal` / `team`) |
 | `model` | Current model name |
 | `provider` | Model provider |
-| `version` | jiuwenclaw version |
+| `version` | jiuwenswarm version |
 | `connection` | Connection status (`idle` / `connecting` / `connected` / `reconnecting` / `auth_failed`) |
 | `theme` | Current theme name |
 | `accent_color` | Current accent color name |
@@ -549,7 +664,7 @@ Use the following template to write commands. `input=$(cat)` reads JSON into a v
 - **Timeout protection**: Individual executions timeout after 3 seconds; no impact on subsequent polls.
 - **Output limit**: Command output over 10KB is truncated; display width auto-fits the TUI terminal width.
 - **Failure silence**: Command execution failures don't show errors; previous successful output is kept or the bar hides.
-- **Persistence**: Configuration is saved in `~/.jiuwenclaw-tui/config.json` under the `statusLine` field; restored on TUI restart.
+- **Persistence**: Configuration is saved in `~/.jiuwenswarm-tui/config.json` under the `statusLine` field; restored on TUI restart.
 - **Alias**: `/sl`
 - **Windows adaptation**: The system automatically replaces `$(cat)` with reading from a temp file; the user's command format remains unchanged. Git Bash's `usr\bin` must be in the system PATH.
 

@@ -1,6 +1,6 @@
 ## CLI / channel control commands
 
-JiuwenClaw supports **special prefix commands** to control sessions and modes. Common ones:
+JiuwenSwarm supports **special prefix commands** to control sessions and modes. Common ones:
 
 - `/new_session`: start a new `session_id` for the current channel
 - `/mode plan`, `/mode fast`, `/mode team`, `/mode code`: switch the channel's working mode
@@ -88,7 +88,7 @@ The Gateway will:
 
 ### 3. TUI: `/workspace_dir` — workspace path for outbound requests
 
-**Scope:** terminal UI (`jiuwenclaw-tui`) only; parsed locally, not by the Gateway control pipeline.
+**Scope:** terminal UI (`jiuwenswarm-tui`) only; parsed locally, not by the Gateway control pipeline.
 
 **Behavior**
 
@@ -99,7 +99,7 @@ The Gateway will:
 
 **Persistence**
 
-- Stored as a single-line file: **`~/.jiuwenclaw/tui-workspace-dir`**.
+- Stored as a single-line file: **`~/.jiuwenswarm/tui-workspace-dir`**.
 
 **Gateway / Agent**
 

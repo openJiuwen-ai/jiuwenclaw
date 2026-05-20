@@ -8,13 +8,16 @@ import logging
 import os
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from pydantic import ValidationError
 
 from jiuwenbox.logging_config import configure_logging
 from jiuwenbox import __version__
+from jiuwenbox.server.audit_logger import AuditLogger
 from jiuwenbox.server.sandbox_manager import (
     SandboxManager,
     SandboxNotFoundError,
@@ -22,6 +25,16 @@ from jiuwenbox.server.sandbox_manager import (
 )
 from jiuwenbox.server.proxy_manager import ProxyManager
 from jiuwenbox.server.policy_engine import PolicyValidationError
+from jiuwenbox.server.runtime.process import enable_child_subreaper
+
+# Operator-facing env: when set, the audit JSONL is persisted to this
+# directory using a ``{sandbox_id}-{ts}.audit.log`` filename per sandbox.
+# Raw daemon / background-exec stdout/stderr is NOT persisted any more
+# (the historical ``runtime.log`` files were removed); the audit log is
+# the single source of truth and already carries truncated per-command
+# stdout/stderr. The launcher (``jiuwenbox-server --save-logs DIR``)
+# normalizes the value to an absolute path and writes it back here.
+ENV_SAVE_LOGS_DIR = "JIUWENBOX_SAVE_LOGS_DIR"
 
 configure_logging()
 logger = logging.getLogger(__name__)
@@ -109,10 +122,63 @@ def _configure_loop_default_executor() -> None:
     )
 
 
+def _build_sandbox_manager() -> SandboxManager:
+    """Construct the global ``SandboxManager``, honoring ``--save-logs DIR``.
+
+    Behaviour matrix:
+
+    - ``JIUWENBOX_SAVE_LOGS_DIR`` **set**: the audit logger uses that
+      directory with the ``timestamped`` filename strategy so each
+      sandbox produces a stable, identifiable file:
+
+        - ``{sandbox_id}-{ts}.audit.log``  (structured JSONL)
+
+      Files are kept after the sandbox is destroyed.
+
+    - ``JIUWENBOX_SAVE_LOGS_DIR`` **unset** (default): no log files are
+      written at all. Audit events still flow through the standard
+      Python logger at ``DEBUG`` level, and sandbox daemon /
+      background-exec stdout/stderr are routed to ``/dev/null`` by
+      :class:`ProcessRuntime`. Opt in via ``--save-logs DIR``.
+
+    Note: the historical per-sandbox ``runtime.log`` and ``runtime.bg-N.log``
+    files were removed; raw stdout/stderr is no longer persisted. The
+    structured audit log already carries the truncated stdout/stderr of
+    every ``exec`` call, which is enough for routine debugging.
+    """
+    save_dir_raw = os.environ.get(ENV_SAVE_LOGS_DIR)
+    if not save_dir_raw:
+        # Single, prominent breadcrumb: ops should immediately know why
+        # ``/api/v1/sandboxes/{id}/logs`` returns empty bodies.
+        logger.info(
+            "Audit log persistence is disabled (default). Pass "
+            "--save-logs DIR or set %s to capture the per-sandbox "
+            "audit JSONL.",
+            ENV_SAVE_LOGS_DIR,
+        )
+        return SandboxManager()
+    save_dir = Path(save_dir_raw).expanduser()
+    try:
+        save_dir.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        # Fall back to defaults rather than crashing the server: the user
+        # can fix the path and restart. We log loudly so the misconfig
+        # does not silently degrade to "no logs".
+        logger.error(
+            "Cannot create %s=%s (%s); falling back to disabled log persistence",
+            ENV_SAVE_LOGS_DIR, save_dir_raw, exc,
+        )
+        return SandboxManager()
+    logger.info("Per-sandbox audit log will be saved under %s", save_dir)
+    return SandboxManager(
+        audit_logger=AuditLogger(log_dir=save_dir, filename_strategy="timestamped"),
+    )
+
+
 def get_sandbox_manager() -> SandboxManager:
     global _sandbox_manager
     if _sandbox_manager is None:
-        _sandbox_manager = SandboxManager()
+        _sandbox_manager = _build_sandbox_manager()
     return _sandbox_manager
 
 
@@ -121,6 +187,39 @@ def get_proxy_manager() -> ProxyManager:
     if _proxy_manager is None:
         _proxy_manager = ProxyManager()
     return _proxy_manager
+
+
+def _chmod_uds_socket_if_any() -> None:
+    """启动后给 UDS socket 文件打权限位.
+
+    背景: uvicorn 自己创建 UDS 时不暴露 ``--uds-mode`` flag, 落地权限完全由
+    进程 umask 决定 (典型容器内 root umask=022 -> 0755), 这对宿主机非 root
+    用户经常不够友好。launcher 会把 socket 路径写进 ``JIUWENBOX_UDS_PATH``;
+    本函数在 lifespan startup 阶段读一次 ``JIUWENBOX_UDS_MODE`` (默认 0666)
+    做一次同步 ``chmod``。socket 文件由 uvicorn 在监听阶段已经创建, 这里
+    无需 polling。任何失败仅 warn, 不阻塞服务起动。
+    """
+    uds_path = os.environ.get("JIUWENBOX_UDS_PATH")
+    if not uds_path:
+        return
+    mode_str = os.environ.get("JIUWENBOX_UDS_MODE", "0666")
+    try:
+        mode_value = int(mode_str, 8)
+    except ValueError as exc:
+        logger.warning(
+            "Ignoring invalid JIUWENBOX_UDS_MODE=%r (%s); UDS socket %s keeps "
+            "uvicorn default permissions",
+            mode_str, exc, uds_path,
+        )
+        return
+    try:
+        os.chmod(uds_path, mode_value)
+    except FileNotFoundError:
+        logger.warning("UDS path %s missing before chmod", uds_path)
+    except OSError as exc:
+        logger.warning("UDS chmod %s failed: %s", uds_path, exc)
+    else:
+        logger.info("UDS socket %s chmod to %s", uds_path, mode_str)
 
 
 @asynccontextmanager
@@ -133,13 +232,81 @@ async def lifespan(_application: FastAPI):
     # already benefits from the larger executor.
     _raise_open_file_limit()
     _configure_loop_default_executor()
-    _sandbox_manager = SandboxManager()
+    # Become the subreaper for our descendant tree *before* any sandbox
+    # spawns bwrap. PR_SET_CHILD_SUBREAPER only affects *future* children,
+    # so doing it here (after the loop is up but before SandboxManager
+    # might create a runtime that spawns bwrap) is the earliest safe point.
+    # No-op on non-Linux / when prctl is denied; logs internally.
+    enable_child_subreaper()
+    _sandbox_manager = _build_sandbox_manager()
     _proxy_manager = ProxyManager()
+    # Wire the SIGCHLD-driven zombie reaper onto the running uvicorn loop.
+    # This must happen after ``_build_sandbox_manager`` (so a runtime is
+    # constructed and can publish its ``register_zombie_reaper`` method)
+    # but before ``_proxy_manager.start`` (which may itself fork helper
+    # processes whose orphans we now want reaped). Failure is non-fatal:
+    # the manager logs and the server keeps running; zombies just won't
+    # be cleaned up automatically until the next ``stop()``/``cleanup()``.
+    try:
+        loop = asyncio.get_running_loop()
+        _sandbox_manager.register_zombie_reaper(loop)
+    except Exception:  # noqa: BLE001
+        logger.exception(
+            "register_zombie_reaper failed during lifespan startup; bwrap "
+            "<defunct> processes may accumulate under the box-server pid",
+        )
     logger.info("box-server started (version %s)", __version__)
     await _proxy_manager.start()
-    yield
-    await _proxy_manager.stop()
-    logger.info("box-server shutting down")
+    # 在 proxy 起来之后、yield (接受请求) 之前给 UDS 打权限: 此刻 uvicorn 已
+    # 经 bind 并 listen 完成, socket inode 必然存在; 改 mode 不会和首个请求
+    # 抢时序。
+    _chmod_uds_socket_if_any()
+    try:
+        yield
+    finally:
+        # Stop proxies first so any in-flight clients are torn down before we
+        # wipe sandbox descriptors. All steps below are best-effort: a failure
+        # here cannot abort uvicorn's shutdown sequence so we just log and
+        # continue.
+        try:
+            await _proxy_manager.stop()
+        except Exception:  # noqa: BLE001
+            logger.exception("proxy_manager.stop failed during lifespan shutdown")
+        # Tear down every live sandbox before exiting. Without this, each
+        # sandbox-daemon.py (spawned with ``start_new_session=True`` so it owns
+        # its session/pgrp) would be reparented to init when uvicorn dies and
+        # keep running indefinitely. ``shutdown_all_sandboxes`` routes through
+        # ``runtime.cleanup`` which sends SIGTERM/SIGKILL to the daemon's pgrp
+        # and wipes netns / launcher dirs.
+        try:
+            if _sandbox_manager is not None:
+                await _sandbox_manager.shutdown_all_sandboxes()
+        except Exception:  # noqa: BLE001
+            logger.exception(
+                "sandbox_manager.shutdown_all_sandboxes failed during lifespan shutdown",
+            )
+        try:
+            # Wipe state_dir / policies_dir contents so the next jiuwenbox boot
+            # starts with an empty registry instead of resurrecting descriptors
+            # whose backing bubblewrap / netns state no longer exists.
+            if _sandbox_manager is not None:
+                _sandbox_manager.clear_persistent_state()
+        except Exception:  # noqa: BLE001
+            logger.exception(
+                "sandbox_manager.clear_persistent_state failed during lifespan shutdown",
+            )
+        # Remove the SIGCHLD handler last so any zombies generated by the
+        # teardown above (sandbox shutdown sends SIGTERM/SIGKILL to the
+        # daemon pgrp, which produces a fresh batch of SIGCHLDs) are still
+        # reaped by the handler we are about to remove.
+        try:
+            if _sandbox_manager is not None:
+                _sandbox_manager.unregister_zombie_reaper()
+        except Exception:  # noqa: BLE001
+            logger.exception(
+                "sandbox_manager.unregister_zombie_reaper failed during lifespan shutdown",
+            )
+        logger.info("box-server shutting down")
 
 
 def create_app() -> FastAPI:
@@ -168,6 +335,16 @@ def create_app() -> FastAPI:
 
     @application.exception_handler(PolicyValidationError)
     async def policy_validation_error_handler(request: Request, exc: PolicyValidationError):
+        return JSONResponse(status_code=400, content={"error": str(exc)})
+
+    @application.exception_handler(ValidationError)
+    async def pydantic_validation_error_handler(request: Request, exc: ValidationError):
+        # Pydantic ``ValidationError`` raised inside a route handler (e.g. when
+        # ``SecurityPolicy.model_validate`` rejects a payload from
+        # ``_resolve_effective_policy``) would otherwise hit the catch-all
+        # ``Exception`` handler below and surface as a 500. Surface it as 400
+        # so policy authors see the validation message via the standard error
+        # envelope used by ``PolicyValidationError``.
         return JSONResponse(status_code=400, content={"error": str(exc)})
 
     @application.exception_handler(Exception)

@@ -57,34 +57,38 @@ sudo apt-get update
 sudo apt-get install -y bubblewrap iproute2 iptables nftables python3-pip python3-venv nodejs
 ```
 
-## Install
+## Install From Source
 
 ```bash
-cd jiuwenclaw/jiuwenbox
-python3 -m venv .venv
+cd jiuwenswarm/jiuwenbox
+uv venv
 source .venv/bin/activate
-python3 -m pip install --upgrade pip build
+uv sync
+uv pip install --upgrade pip build
 python3 -m build --wheel
-python3 -m pip install dist/jiuwenbox-*.whl
+uv pip install ./dist/jiuwenbox*.whl
 ```
 
 ## Start The Server
 
 ### Local Start
 
-Set the default policy path and start the installed service with `python -m`:
+Set the default policy path and start the installed service via the venv
+Python:
 
 ```bash
-export JIUWENBOX_POLICY_PATH="$(pwd)/configs/default-policy.yaml"
-sudo -E .venv/bin/python -m uvicorn jiuwenbox.server.app:app --host 0.0.0.0 --port 8321 --log-level debug
+sudo env \
+  JIUWENBOX_POLICY_PATH="$(pwd)/configs/default-policy.yaml" \
+  ./.venv/bin/python -m uvicorn jiuwenbox.server.app:app --host 0.0.0.0 --port 8321 --log-level debug
 ```
 
 Use another policy or port by changing the environment variable or uvicorn
 arguments:
 
 ```bash
-export JIUWENBOX_POLICY_PATH="$(pwd)/configs/jiuwenclaw-policy.yaml"
-sudo -E .venv/bin/python -m uvicorn jiuwenbox.server.app:app --host 0.0.0.0 --port 9000 --log-level debug
+sudo env \
+  JIUWENBOX_POLICY_PATH="$(pwd)/configs/jiuwenswarm-policy.yaml" \
+  ./.venv/bin/python -m uvicorn jiuwenbox.server.app:app --host 0.0.0.0 --port 9000 --log-level debug
 ```
 
 The selected policy path is read from:
@@ -105,7 +109,7 @@ JIUWENBOX_PORT=9000
 Build the image:
 
 ```bash
-cd jiuwenclaw/jiuwenbox/scripts
+cd jiuwenswarm/jiuwenbox/scripts
 sudo ./build_docker.sh
 ```
 
@@ -114,6 +118,157 @@ Run with the default policy:
 ```bash
 sudo ./run_docker.sh
 ```
+
+### Unix Domain Socket Deployment
+
+The management HTTP API can be served over a Unix Domain Socket instead of
+TCP (one-of-two per process). HTTP/1.1 framing, routes and payloads stay
+identical; only the transport changes. UDS is useful for same-host agents,
+filesystem-permission-based access control, and avoiding loopback port
+conflicts.
+
+Listen address is controlled by a single env var:
+
+```bash
+JIUWENBOX_LISTEN=tcp://0.0.0.0:8321               # default, historical behavior
+JIUWENBOX_LISTEN=unix:///run/jiuwenbox/jiuwenbox.sock  # switch to UDS (absolute path required)
+```
+
+Start locally on UDS (same two rules as the ⚠️ in *Local Start*:
+`sudo env` for envs, absolute `./.venv/bin/` paths for binaries):
+
+```bash
+sudo env \
+  JIUWENBOX_POLICY_PATH="$(pwd)/configs/default-policy.yaml" \
+  JIUWENBOX_LISTEN=unix:///run/jiuwenbox/jiuwenbox.sock \
+  ./.venv/bin/python -m jiuwenbox.server.launcher
+
+# or, with the entry script installed by uv sync / pip install:
+sudo env JIUWENBOX_LISTEN=unix:///run/jiuwenbox/jiuwenbox.sock \
+  ./.venv/bin/jiuwenbox-server
+```
+
+Docker deployment on UDS:
+
+```bash
+mkdir -p /tmp/jiuwenbox-sock
+
+sudo env \
+  JIUWENBOX_LISTEN=unix:///run/jiuwenbox/jiuwenbox.sock \
+  JIUWENBOX_UDS_HOST_DIR=/tmp/jiuwenbox-sock \
+  ./run_docker.sh configs/default-policy.yaml
+```
+
+`run_docker.sh` skips the management-API TCP port mapping under UDS mode and
+bind-mounts the host socket directory into the container; **the proxy port
+`${JIUWENBOX_PROXY_PORT:-8322}` is still mapped as TCP** because the
+Inference Privacy Proxy is an independent TCP listener.
+
+Reach the server:
+
+```bash
+curl --unix-socket /tmp/jiuwenbox-sock/jiuwenbox.sock http://localhost/health
+jiuwenbox --base-url unix:///tmp/jiuwenbox-sock/jiuwenbox.sock health
+JIUWENBOX_URL=unix:///tmp/jiuwenbox-sock/jiuwenbox.sock jiuwenbox sandbox ls
+
+# pytest in dual transport mode (operator launches the matching server first)
+pytest tests/integration --server-endpoint=tcp://127.0.0.1:8321
+pytest tests/integration --server-endpoint=unix:///tmp/jiuwenbox-sock/jiuwenbox.sock
+```
+
+UDS-related env vars:
+
+| Variable | Default | Notes |
+| --- | --- | --- |
+| `JIUWENBOX_LISTEN` | `tcp://0.0.0.0:8321` | Management API listen URI; accepts `tcp://host:port` or `unix:///abs/socket/path`. Under UDS mode `JIUWENBOX_PORT` is ignored. |
+| `JIUWENBOX_UDS_MODE` | `0666` | UDS socket file permissions (octal string). The Docker default is permissive so a non-root host user can connect; for multi-tenant / hardened deployments set `0660` and pass `docker run --user $(id -u):$(id -g)`. |
+| `JIUWENBOX_UDS_HOST_DIR` | `/tmp/jiuwenbox-sock` | Host directory bind-mounted by `run_docker.sh` to expose the socket. |
+| `JIUWENBOX_UDS_CONTAINER_DIR` | `/run/jiuwenbox` | Container-side mount point; must match the directory in `JIUWENBOX_LISTEN`'s socket path. |
+
+### Persisting the audit log (`--save-logs DIR`)
+
+**By default jiuwenbox writes no log files at all.** Audit events
+surface only on the standard Python logger at ``DEBUG`` level, sandbox
+daemon and background-exec stdout/stderr go straight to ``/dev/null``,
+and ``/api/v1/sandboxes/{id}/logs`` returns the empty string. This
+keeps a fresh install from creating files under ``$HOME`` and prevents
+long-running servers from filling the disk silently.
+
+Pass `--save-logs DIR` (or set `JIUWENBOX_SAVE_LOGS_DIR=DIR`) to opt
+into per-sandbox **audit log** persistence. Files are **kept after the
+sandbox is gone**, which is the shape you want for offline inspection,
+log shipping, or postmortem debugging.
+
+> Note: the historical per-sandbox `runtime.log` and `runtime.bg-N.log`
+> files (raw daemon and background-exec stdout/stderr) were removed.
+> The audit log already carries the truncated per-command stdout/stderr,
+> which has proven to be enough for routine debugging while letting us
+> drop a class of "two files for the same thing" foot-guns. If you do
+> need the full raw byte stream, run the container with `docker run -it`
+> so the bwrap output streams to your terminal.
+
+Every operation produces **a single row** in the audit JSONL, emitted
+after the call returns so the payload carries both intent (command,
+path) and outcome (exit_code, stdout/stderr, error). Reading just the
+audit file is enough to answer "did this command succeed?":
+
+| `event_type` | Key fields |
+| --- | --- |
+| `exec_command` | `command`, `workdir`, `background?`, `ok`, `exit_code`, `stdout`, `stderr`, `duration_ms`, `error?` (stdout/stderr are tail-truncated to 4 KiB; overflow is annotated `[truncated, total N chars]`. Background exec records `started`/`pid` instead of `exit_code`/`stdout`/`stderr`.) |
+| `file_transfer` | `direction` (upload/download), `sandbox_path`, `size`, `ok`, `duration_ms`, `path` (`ipc` vs `exec_fallback`), `error?` |
+
+The filename layout is `{sandbox_id}-{ISO8601-basic-timestamp}.audit.log`.
+The timestamp is captured the first time a given sandbox writes an
+audit event and reused for the rest of that sandbox's lifetime:
+
+```
+<DIR>/
+  └── 9284a4bf-870-20260515T112345.audit.log   # structured JSONL
+```
+
+The basic ISO 8601 layout (`%Y%m%dT%H%M%S`) sorts lexicographically
+the same way it sorts chronologically; combined with the sandbox_id
+prefix, `ls 9284a4bf-870-*` gives you every audit file for that
+sandbox in boot order.
+
+Local launch:
+
+```bash
+sudo env \
+  JIUWENBOX_POLICY_PATH="$(pwd)/configs/default-policy.yaml" \
+  ./.venv/bin/jiuwenbox-server --save-logs /var/log/jiuwenbox
+
+# Equivalent via env:
+sudo env \
+  JIUWENBOX_POLICY_PATH="$(pwd)/configs/default-policy.yaml" \
+  JIUWENBOX_SAVE_LOGS_DIR=/var/log/jiuwenbox \
+  ./.venv/bin/jiuwenbox-server
+```
+
+Docker launch: pass `--save-logs DIR` (or set
+`JIUWENBOX_SAVE_LOGS_HOST_DIR=DIR`) and `run_docker.sh` will bind-mount
+`DIR` onto `JIUWENBOX_SAVE_LOGS_CONTAINER_DIR` (default
+`/var/log/jiuwenbox`) and inject `JIUWENBOX_SAVE_LOGS_DIR=<container
+path>` into the launcher — no `Dockerfile` change required. The CLI
+flag and the env var are equivalent; the flag wins when both are
+present:
+
+```bash
+# CLI flag (recommended)
+sudo ./run_docker.sh --save-logs /tmp/jiuwenbox-logs
+
+# Equivalent env-var form (kept for backward compatibility)
+sudo env JIUWENBOX_SAVE_LOGS_HOST_DIR=/tmp/jiuwenbox-logs ./run_docker.sh
+
+ls /tmp/jiuwenbox-logs
+# 9284a4bf-870-20260515T112345.audit.log
+```
+
+| Variable | Default | Notes |
+| --- | --- | --- |
+| `JIUWENBOX_SAVE_LOGS_DIR` | _unset_ | Target audit-log directory inside the container/process. Unset means **no log files at all** (the new default — see above). The launcher resolves `--save-logs` / the env to an absolute path before writing this back. |
+| `JIUWENBOX_SAVE_LOGS_HOST_DIR` | _unset_ | `run_docker.sh` only: host-side directory (env-var form of `--save-logs DIR`). Empty disables persistence. When set, the script `mkdir -p`s it, bind-mounts it into the container, and exports `JIUWENBOX_SAVE_LOGS_DIR`. |
+| `JIUWENBOX_SAVE_LOGS_CONTAINER_DIR` | `/var/log/jiuwenbox` | `run_docker.sh` mount point inside the container. Override only if something else already owns this path inside the image. |
 
 ## Policy Files
 
@@ -262,6 +417,83 @@ network:
       - 22
 ```
 
+## Enabling jiuwenbox from jiuwenswarm's config file
+
+jiuwenswarm decides **whether the sandbox is on, which jiuwenbox to talk to, whether to spawn its own jiuwenbox subprocess, and which policy file to use** via the `sandbox` section of its `config.yaml`. The TUI's `/sandbox` command writes back to the same section, so you can also pre-populate it by hand.
+
+### Configuration schema
+
+```yaml
+sandbox:
+  # -- Endpoint & type --
+  url: "http://127.0.0.1:8321"      # jiuwenbox HTTP endpoint; TCP uses http://, UDS uses unix:///abs/socket/path
+  type: "jiuwenbox"                 # sandbox provider name; currently only "jiuwenbox"
+
+  # -- Startup & policy --
+  startup_mode: "internal"          # internal = agent-server spawns jiuwenbox-server; external = you start it yourself
+  policy_file: "code-agent-policy.yaml"   # bare name -> jiuwenbox/configs/<name>; otherwise an absolute / explicit path
+  preserve_file_sharing_mode: "mount"     # only `mount` is supported; any other value is rejected
+
+  # -- Runtime (also managed by the /sandbox TUI command) --
+  enabled: true                     # whether sandbox mode is on
+  excluded_commands:                # shell globs whose matches run locally instead of in the sandbox
+    - "git *"
+  files:                            # user-configured write policy; auto-managed paths are injected by the server, no need to repeat them here
+    allow: []
+    deny: []
+```
+
+Field reference:
+
+| Field | Values | Default | Notes |
+| --- | --- | --- | --- |
+| `sandbox.url` | URL string | `http://127.0.0.1:8321` | jiuwenbox management API endpoint. TCP: `http://host:port`; UDS: `unix:///abs/socket/path` (mirrors `JIUWENBOX_LISTEN`). |
+| `sandbox.type` | string | `jiuwenbox` | Sandbox provider name. Currently jiuwenswarm only wires up `jiuwenbox`. |
+| `sandbox.startup_mode` | `internal` / `external` | `internal` | `internal`: agent-server spawns `jiuwenbox-server` at boot and persists the effective `url` (auto-picks a free port if the configured one is busy). `external`: agent-server never touches jiuwenbox; you must start it yourself per the top of this README. |
+| `sandbox.policy_file` | filename or path | `code-agent-policy.yaml` | Bare filename → resolved relative to `jiuwenbox/configs/`; otherwise expanded (`~`, `$VAR`) and used verbatim. **Only honored under `startup_mode=internal`**; in `external` mode the policy is chosen by whoever started jiuwenbox-server (via `JIUWENBOX_DEFAULT_POLICY_PATH`). |
+| `sandbox.preserve_file_sharing_mode` | `mount` | `mount` | Intrinsic files (`AGENT.md` etc.) and `project_dir` are bind-mounted, with `project_dir/config/config.yaml` auto-added to `deny_write`. Writing any other value is rejected. |
+| `sandbox.enabled` | bool | `false` | When true, agent rebuilds route tools through the sandbox provider; toggled by `/sandbox enable`. |
+| `sandbox.excluded_commands` | list[str] | `[]` | Shell globs matched against the **full command string**; a match makes that single call run locally instead of in the sandbox. |
+| `sandbox.files.allow` / `sandbox.files.deny` | list | `[]` | User-configured write policy. The effective set shown by `/sandbox status` is `auto_managed ∪ user_configured`; see [the `/sandbox` design doc](../../agent-core/docs/en/2.Development%20Guide/Sandbox%20and%20sandbox%20command.md). |
+
+### Two typical deployment shapes
+
+#### Shape A: `startup_mode: internal` (agent-server spawns jiuwenbox for you)
+
+Good for local development and single-host deployments. Drop this into `config.yaml`:
+
+```yaml
+sandbox:
+  url: "http://127.0.0.1:8321"
+  type: "jiuwenbox"
+  startup_mode: "internal"
+  policy_file: "code-agent-policy.yaml"   # picked up from jiuwenbox/configs/
+  enabled: true
+```
+
+At boot the agent-server will:
+
+1. Resolve `policy_file` to a host absolute path (bare name → `jiuwenbox/configs/<name>`; otherwise expand `~` / `$VAR` and use as-is).
+2. Probe the port in `url`; if taken, switch to a free one and persist the new `url` back into `config.yaml`, so `/sandbox status` shows the real port.
+3. Spawn `jiuwenbox-server` with the resolved policy path. On failure, agent-server logs the last 10 lines of stderr; you can retry from the TUI via `/sandbox enable`.
+
+#### Shape B: `startup_mode: external` (you start jiuwenbox-server yourself)
+
+Good when jiuwenbox lives on a different host / container, or when jiuwenswarm should never escalate to root. Example:
+
+```yaml
+sandbox:
+  url: "http://10.0.0.5:8321"   # or unix:///run/jiuwenbox/jiuwenbox.sock
+  type: "jiuwenbox"
+  startup_mode: "external"
+  enabled: true
+```
+
+Under this mode agent-server **does not** try to spawn jiuwenbox, and `sandbox.policy_file` has **no effect** (the policy is whatever you passed to `jiuwenbox-server` via `JIUWENBOX_DEFAULT_POLICY_PATH`). See [`Start The Server`](#start-the-server) and [`Unix Domain Socket Deployment`](#unix-domain-socket-deployment) above for how to start jiuwenbox-server in TCP or UDS mode.
+
+For cross-host setups, the jiuwenbox host has to be able to reach jiuwenswarm's intrinsic agent files on the same host paths: `preserve_file_sharing_mode` is now fixed to `mount`, so jiuwenswarm bind-mounts the intrinsic files (`AGENT.md`, `HEARTBEAT.md`, `IDENTITY.md`, `SOUL.md`, `USER.md`, `memory/daily_memory/`) and `project_dir` into the sandbox. Make the relevant directories visible on the jiuwenbox machine (via shared filesystem, container volume, etc.) and confirm the policy allows writes into them (the bundled `jiuwenbox/configs/code-agent-policy.yaml` already does).
+
+
 ## Inference Privacy Proxy
 
 The inference privacy proxy enables secure LLM API access from edge servers:
@@ -336,7 +568,7 @@ Client request:  POST http://127.0.0.1:8322/custom/v1/chat/completions -H "Autho
 Proxy forwards:  POST http://192.168.1.100:9000/v1/chat/completions    -H "Authorization: Bearer sk_sandbox_managed_custom_key"
 ```
 
-#### jiuwenclaw Configuration Example
+#### jiuwenswarm Configuration Example
 
 | Config    | Old Value                     | New Value                          |
 | --------- | ----------------------------- | ---------------------------------- |
@@ -345,12 +577,29 @@ Proxy forwards:  POST http://192.168.1.100:9000/v1/chat/completions    -H "Autho
 
 ## Run Integration Tests
 
-Run one policy-specific integration suite:
+`./tests/test.sh default` runs `test_server_api_default.py` and
+`test_cli_default.py` together, exercising both the server HTTP API and the
+jiuwenbox CLI. Use `--server-endpoint=URI` to switch between transports;
+**the transport is inferred from the URI shape**, so there's no separate
+flag to maintain in sync:
 
 ```bash
-./tests/test.sh default # jiuwenbox runs the service using default-policy.yaml as the security policy.
-./tests/test.sh yuanrong # jiuwenbox runs the service using yuanrong.yaml with proxy enabled on port 8322.
+# TCP (default, equivalent to --server-endpoint=http://127.0.0.1:8321; the
+# server should be launched with default-policy.yaml as its security policy)
+./tests/test.sh default
+
+# Custom TCP listener (a bare host:port gets http:// prepended automatically)
+./tests/test.sh default --server-endpoint=http://127.0.0.1:18321
+./tests/test.sh default --server-endpoint=127.0.0.1:18321
+
+# UDS: pass the absolute socket path as a unix:// URL
+./tests/test.sh default --server-endpoint=unix:///tmp/jiuwenbox.sock
+./tests/test.sh default --server-endpoint=unix:///tmp/jiuwenbox-sock/jiuwenbox.sock
 ```
+
+`test.sh` does **not** start the server; launch jiuwenbox first on the
+selected transport (TCP with `JIUWENBOX_LISTEN=tcp://0.0.0.0:8321` or a
+custom port, UDS with `JIUWENBOX_LISTEN=unix:///...`).
 
 Run specific test-case:
 
@@ -403,6 +652,49 @@ export JIUWENBOX_TEST_LLM_MODEL="YOUR_MODEL"
 - Command stderr is returned as command output by the `/exec` API; server-side
   diagnostics should use debug logging when they would otherwise pollute
   command stderr.
+
+## CLI
+
+`jiuwenbox` ships a single-file Python CLI client wrapping the HTTP API
+documented in [`docs/jiuwenbox_server_api.md`](docs/jiuwenbox_server_api.md).
+
+After `pip install` it is exposed as the `jiuwenbox` executable; from source
+you can also run it as `python -m jiuwenbox.cli.jiuwenbox`.
+
+```bash
+# Health
+jiuwenbox health
+
+# Sandbox lifecycle
+ID=$(jiuwenbox sandbox create --output plain)
+jiuwenbox sandbox exec "$ID" -- python3 -c 'print("hi")'
+jiuwenbox sandbox upload "$ID" ./data.csv /tmp/data.csv
+jiuwenbox sandbox download "$ID" /tmp/result.json - | jq .
+jiuwenbox sandbox ls --output table
+jiuwenbox sandbox rm "$ID" --yes
+
+# Policy
+jiuwenbox policy get "$ID"
+
+# Proxies
+jiuwenbox proxy create --prefix /openai --target https://api.openai.com --api-key sk-xxx
+jiuwenbox proxy logs openai --lines 50
+```
+
+Global flags:
+
+| Flag | Default | Env var | Description |
+| --- | --- | --- | --- |
+| `--base-url` | `http://127.0.0.1:8321` | `JIUWENBOX_URL` | Server endpoint. Accepts `http://host:port` or `unix:///abs/socket/path` |
+| `--timeout` | `30` | `JIUWENBOX_TIMEOUT` | HTTP timeout seconds |
+| `--output / -o` | `json` | – | `json` \| `table` \| `plain` |
+| `--verbose / -v` | off | – | Debug logging on stderr |
+| `--no-color` | off | `NO_COLOR` | Disable ANSI colors on stderr |
+
+Exit codes: `0` success / sandbox exec returned 0, `1` HTTP 4xx/5xx, `2`
+connection failure, `3` local argument or file error, `130` Ctrl+C; the
+`sandbox exec` subcommand transparently propagates the in-sandbox process
+exit code.
 
 ## License
 

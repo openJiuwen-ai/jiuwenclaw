@@ -22,9 +22,9 @@ from openjiuwen.core.single_agent.rail.base import (
     AgentRail,
     ToolCallInputs,
 )
-from jiuwenclaw.server.runtime.agent_adapter import interface_deep as deep_interface_module
-from jiuwenclaw.server.runtime.agent_adapter.interface_deep import JiuWenClawDeepAdapter
-from jiuwenclaw.common.schema.agent import AgentRequest
+from jiuwenswarm.server.runtime.agent_adapter import interface_deep as deep_interface_module
+from jiuwenswarm.server.runtime.agent_adapter.interface_deep import JiuWenClawDeepAdapter
+from jiuwenswarm.common.schema.agent import AgentRequest
 
 
 class MockLLMModel:

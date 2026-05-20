@@ -2,8 +2,8 @@
 """Test-wide hooks for the unit_tests tree.
 
 `agentserver/memory/test_external_memory_*.py` must patch
-`jiuwenclaw.utils.get_config_file` and `get_agent_workspace_dir` before
-importing the modules under test (so `jiuwenclaw.agentserver.memory.config` sees
+`jiuwenswarm.utils.get_config_file` and `get_agent_workspace_dir` before
+importing the modules under test (so `jiuwenswarm.agentserver.memory.config` sees
 a stable path at import). Those two files are collected early (under
 `agentserver/...`), and their import-time patch would otherwise leak: other
 modules then hit ``Path / "memory"`` with a ``str`` path or, after switching to
@@ -21,7 +21,7 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
-import jiuwenclaw.common.utils as _utils
+import jiuwenswarm.common.utils as _utils
 
 _REAL_GET_CONFIG_FILE = _utils.get_config_file
 _REAL_GET_AGENT_WORKSPACE_DIR = _utils.get_agent_workspace_dir

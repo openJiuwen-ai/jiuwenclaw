@@ -1,10 +1,10 @@
 # Channels — unified chat hub
 
-**Channels** are how JiuwenClaw connects to chat platforms. **HarmonyOS Xiaoyi**, **Feishu (Lark)**, and more are supported, with more coming. You can talk to JiuwenClaw from **Feishu**, **Xiaoyi on Harmony devices**, and others.
+**Channels** are how JiuwenSwarm connects to chat platforms. **HarmonyOS Xiaoyi**, **Feishu (Lark)**, and more are supported, with more coming. You can talk to JiuwenSwarm from **Feishu**, **Xiaoyi on Harmony devices**, and others.
 
 ## Digital Avatar
 
-JiuwenClaw supports **Group Digital Avatar** on **Feishu** and **WeCom** channels. When enabled, the bot acts as a designated user's "digital avatar" in group chats — it automatically identifies messages relevant to that user and replies on their behalf in first person. For personal action items such as to-dos and reminders, the avatar sends the reply as a private message to the user while posting a brief confirmation in the group. Irrelevant messages are filtered out automatically, saving Agent resources.
+JiuwenSwarm supports **Group Digital Avatar** on **Feishu** and **WeCom** channels. When enabled, the bot acts as a designated user's "digital avatar" in group chats — it automatically identifies messages relevant to that user and replies on their behalf in first person. For personal action items such as to-dos and reminders, the avatar sends the reply as a private message to the user while posting a brief confirmation in the group. Irrelevant messages are filtered out automatically, saving Agent resources.
 
 This feature is disabled by default. See the configuration instructions under each channel below.
 
@@ -12,7 +12,7 @@ Configure channels in either of two ways:
 
 * **Web UI (recommended)** — In the app, open **Agent** / **Channels**, then fill in the channel form.
 
-* **Edit `config.yaml` manually** — Usually `~/.jiuwenclaw/config/config.yaml` (created on first `jiuwenclaw-start`). Set `enabled: true` and credentials; save to auto-reload without a full restart.
+* **Edit `config.yaml` manually** — Usually `~/.jiuwenswarm/config/config.yaml` (created on first `jiuwenswarm-start`). Set `enabled: true` and credentials; save to auto-reload without a full restart.
 
   
 
@@ -22,11 +22,11 @@ Configure channels in either of two ways:
 
 ## 1. Create a Xiaoyi agent
 
-Create a **JiuwenClaw-mode** agent on the [Xiaoyi Open Platform](https://developer.huawei.com/consumer/cn/hag/abilityportal/#/) to connect to your JiuwenClaw service.
+Create a **JiuwenSwarm-mode** agent on the [Xiaoyi Open Platform](https://developer.huawei.com/consumer/cn/hag/abilityportal/#/) to connect to your JiuwenSwarm service.
 
 ![Xiaoyi open platform](../assets/images/小艺开放平台.png)
 
-Step 1: create a JiuwenClaw-mode agent.
+Step 1: create a JiuwenSwarm-mode agent.
 
 ![Create Xiaoyi agent](../assets/images/小艺创建智能体.png)
 
@@ -60,11 +60,11 @@ Fill in the opening lines and click publish.
 
 ## 2. Bind the channel
 
-**Option A**: Paste **AK**, **SK**, and **agentId** from the platform into the Xiaoyi channel in JiuwenClaw, enable, and save.
+**Option A**: Paste **AK**, **SK**, and **agentId** from the platform into the Xiaoyi channel in JiuwenSwarm, enable, and save.
 
 ![Enable Xiaoyi channel](../assets/images/小艺频道开启.png)
 
-**Option B**: Edit `~/.jiuwenclaw/config/config.yaml`:
+**Option B**: Edit `~/.jiuwenswarm/config/config.yaml`:
 
 ``````
 channels:
@@ -77,7 +77,7 @@ channels:
     enabled: true
 ``````
 
-If the service is already running it reloads; otherwise run `jiuwenclaw-start`.
+If the service is already running it reloads; otherwise run `jiuwenswarm-start`.
 
 ## 3. Chat
 
@@ -112,7 +112,7 @@ Option 2: On a Harmony phone, open the published agent in the Xiaoyi app.
 ## 3. Save app credentials
 1. Open the Feishu bot admin.
 
-2. Copy **App ID** and **App Secret** into JiuwenClaw’s Feishu channel, enable, and save.
+2. Copy **App ID** and **App Secret** into JiuwenSwarm’s Feishu channel, enable, and save.
 
    ![Feishu tokens](../assets/images/feishu_app_token.png)
 
@@ -153,7 +153,7 @@ Option 2: On a Harmony phone, open the published agent in the Xiaoyi app.
 
 ![Feishu group](../assets/images/feishu_chat.png)
 
-## 8. Enable Feishu channel in JiuwenClaw
+## 8. Enable Feishu channel in JiuwenSwarm
 Start the web UI, open **Channels → Feishu**, enable, and paste **App ID** and **App Secret**.
 
 ## 9. Enable Group Digital Avatar (optional)
@@ -168,7 +168,7 @@ After completing the basic Feishu bot setup, you can enable the digital avatar f
 
 ### Configuration steps
 
-1. In the JiuwenClaw channel management page, open the Feishu channel settings and enable the **`group_digital_avatar`** toggle. Configure **`my_user_id`** and **`bot_name`**.
+1. In the JiuwenSwarm channel management page, open the Feishu channel settings and enable the **`group_digital_avatar`** toggle. Configure **`my_user_id`** and **`bot_name`**.
 
    ![Feishu digital avatar toggle](../assets/images/feishu_group_avatar.png)
 
@@ -189,7 +189,7 @@ After completing the basic Feishu bot setup, you can enable the digital avatar f
 
    ![Feishu digital avatar permissions](../assets/images/feishu_group_avatar_permission.png)
 
-You can also configure via `~/.jiuwenclaw/config/config.yaml`:
+You can also configure via `~/.jiuwenswarm/config/config.yaml`:
 
 ``````
 channels:
@@ -240,11 +240,11 @@ permissions:
 
 ## 10. Multiple Feishu bots (`feishu_enterprise`)
 
-Use `channels.feishu_enterprise` when one JiuwenClaw instance must serve **multiple Feishu apps** (multiple bots).
+Use `channels.feishu_enterprise` when one JiuwenSwarm instance must serve **multiple Feishu apps** (multiple bots).
 
 Each bot is a separate channel; `channel_id` looks like `feishu_enterprise:<app_id>`.
 
-Configure only via `~/.jiuwenclaw/config/config.yaml`:
+Configure only via `~/.jiuwenswarm/config/config.yaml`:
 
 ``````
 channels:
@@ -306,7 +306,7 @@ channels:
 
 ### Step 2: App info
 
-- Name, e.g. `JiuwenClaw`
+- Name, e.g. `JiuwenSwarm`
 - Type: **Bot**
 
 ![DingTalk create](../assets/images/dingding_create_app.png)
@@ -347,11 +347,11 @@ Under **Permissions**, enable as needed, e.g.:
 > After publishing, search the bot name in DingTalk to add it to chats.
 
 
-## 5. Configure DingTalk in JiuwenClaw
+## 5. Configure DingTalk in JiuwenSwarm
 
 Copy **Client ID** and **Client Secret** from **Credentials**.
 
-In JiuwenClaw **Channels → DingTalk**, enable and paste **client_id** / **client_secret**, then save.
+In JiuwenSwarm **Channels → DingTalk**, enable and paste **client_id** / **client_secret**, then save.
 
 ![DingTalk channel](../assets/images/dingding_channel_enable.png)
 
@@ -375,11 +375,11 @@ In JiuwenClaw **Channels → DingTalk**, enable and paste **client_id** / **clie
 
    ![WeCom long connection](../assets/images/wecom/5_选择长连接.png)
 
-4. After creation, save **Bot ID** and **Secret** for JiuwenClaw.
+4. After creation, save **Bot ID** and **Secret** for JiuwenSwarm.
 
-## 2. Link JiuwenClaw
+## 2. Link JiuwenSwarm
 
-1. In JiuwenClaw, open **Channels** → **WeCom**.
+1. In JiuwenSwarm, open **Channels** → **WeCom**.
 
 2. Enter **bot id** and **secret**, then save.
 
@@ -410,12 +410,12 @@ After completing the basic WeCom bot setup, you can enable the digital avatar fe
 
 ### Prerequisites
 
-- WeCom bot has been created and linked to JiuwenClaw
+- WeCom bot has been created and linked to JiuwenSwarm
 - Bot has been added to the target group: open WeCom, enter the group, tap add member → **Group bots** → **Smart bot**, and search for your app
 
 ### Configuration steps
 
-1. In the JiuwenClaw channel management page, open the WeCom channel settings and enable the **`group_digital_avatar`** toggle. Configure **`my_user_id`** and **`bot_name`**. Before enabling the digital avatar, you need to have a private chat with the robot once; otherwise, an error message `[AiBotSDK] [WARN] Reply ack error` will be reported.
+1. In the JiuwenSwarm channel management page, open the WeCom channel settings and enable the **`group_digital_avatar`** toggle. Configure **`my_user_id`** and **`bot_name`**. Before enabling the digital avatar, you need to have a private chat with the robot once; otherwise, an error message `[AiBotSDK] [WARN] Reply ack error` will be reported.
 
    ![WeCom digital avatar toggle](../assets/images/wecom/14_group_avatar.png)
 
@@ -436,7 +436,7 @@ After completing the basic WeCom bot setup, you can enable the digital avatar fe
 
    ![WeCom digital avatar permissions](../assets/images/wecom/15_group_avatar_permission.png)
 
-You can also configure via `~/.jiuwenclaw/config/config.yaml`:
+You can also configure via `~/.jiuwenswarm/config/config.yaml`:
 
 ``````
 channels:
@@ -492,8 +492,8 @@ Step 2: send `/newbot` and follow prompts.
 
 You will set:
 
-- **Display name** (e.g. `JiuwenClaw Bot`)
-- **Username** (must end with `bot`, e.g. `jiuwenclaw_bot`)
+- **Display name** (e.g. `JiuwenSwarm Bot`)
+- **Username** (must end with `bot`, e.g. `jiuwenswarm_bot`)
 
 ![BotFather token](../assets/images/Telegram获取BotToken.png)
 
@@ -511,7 +511,7 @@ Open **Agent / Channels** → Telegram, paste **Bot Token**, enable, save.
 
 **Option B: `config.yaml`**
 
-Edit `~/.jiuwenclaw/config/config.yaml`:
+Edit `~/.jiuwenswarm/config/config.yaml`:
 
 ``````
 channels:
@@ -523,7 +523,7 @@ channels:
     enabled: true
 ``````
 
-Reload or start `jiuwenclaw-start`.
+Reload or start `jiuwenswarm-start`.
 
 ## 3. Options
 
@@ -582,7 +582,7 @@ Discord is supported. Configure in **Channel management** or edit `config.yaml`.
 - `allow_from`
 - `enabled`
 
-Example `~/.jiuwenclaw/config/config.yaml`:
+Example `~/.jiuwenswarm/config/config.yaml`:
 
 ``````
 channels:
@@ -600,7 +600,7 @@ channels:
 1. Create a bot in the Discord Developer Portal; copy `bot_token`.
 2. Enable **Message Content Intent** for the bot.
 3. Invite the bot to the server with channel permissions.
-4. Fill JiuwenClaw and set `enabled: true`.
+4. Fill JiuwenSwarm and set `enabled: true`.
 
 ## Fields
 
@@ -634,9 +634,9 @@ channels:
 
 ### Step 2: Connect via WeChat QR Scan
 
-- In the latest JiuwenClaw frontend, go to **Channels** -> **WeChat**, enable WeChat configuration, and click **Save**. A QR code will be displayed.
+- In the latest JiuwenSwarm frontend, go to **Channels** -> **WeChat**, enable WeChat configuration, and click **Save**. A QR code will be displayed.
 
-![jiuwenclaw_enable_wechat](../assets/images/jiuwenclaw_enable_wechat.png)
+![jiuwenswarm_enable_wechat](../assets/images/jiuwenswarm_enable_wechat.png)
 
 - On your phone, open WeChat and go to **+** -> **Start Scanning**, scan the QR code generated in the previous step to finish the connection.
 

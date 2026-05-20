@@ -26,6 +26,10 @@ dev = [
     "ruff>=0.6",
 ]
 
+[project.scripts]
+jiuwenbox = "jiuwenbox.cli.jiuwenbox:main"
+jiuwenbox-server = "jiuwenbox.server.launcher:main"
+
 [tool.setuptools.packages.find]
 where = ["src"]
 include = ["jiuwenbox*"]

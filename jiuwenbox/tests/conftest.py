@@ -17,7 +17,10 @@ def pytest_addoption(parser):
         "--server-endpoint",
         action="store",
         default=None,
-        help="Server endpoint (host:port or URL). Default: 127.0.0.1:8321",
+        help=(
+            "Server endpoint. Accepts 'host:port', 'http://host:port', or "
+            "'unix:///abs/socket/path'. Default: 127.0.0.1:8321"
+        ),
     )
     parser.addoption(
         "--proxy-port",
@@ -46,14 +49,30 @@ def pytest_addoption(parser):
     )
 
 
-@pytest.fixture
-def server_endpoint(pytestconfig) -> str:
-    """Server endpoint as host:port or URL string."""
+def _is_uds_endpoint(endpoint: str) -> bool:
+    """Whether ``endpoint`` 指向 Unix Domain Socket (scheme ``unix://``)."""
+    return endpoint.startswith("unix://")
+
+
+def _resolve_raw_endpoint(pytestconfig) -> str:
     return (
         pytestconfig.getoption("server_endpoint")
         or os.environ.get("JIUWENBOX_TEST_SERVER")
         or "127.0.0.1:8321"
     )
+
+
+def _normalize_endpoint_url(endpoint: str) -> str:
+    """Turn ``host:port`` / ``http://host:port`` / ``unix:///path`` 一律转成完整 URL."""
+    if "://" in endpoint:
+        return endpoint
+    return f"http://{endpoint}"
+
+
+@pytest.fixture
+def server_endpoint(pytestconfig) -> str:
+    """Server endpoint as host:port, http(s)://... or unix:///abs/path string."""
+    return _resolve_raw_endpoint(pytestconfig)
 
 
 @pytest.fixture
@@ -67,7 +86,17 @@ def proxy_port(pytestconfig) -> int:
 
 @pytest.fixture
 def server_host_port(server_endpoint):
-    """Parse server_endpoint into (host, port) tuple."""
+    """Parse server_endpoint into (host, port) tuple.
+
+    UDS 端点没有 host/port 概念 (socket 文件本身就是 listener); 需要它的
+    fixture (proxy / docker-gateway 探测等) 在 UDS 模式下统一 ``skip``,
+    避免在源头解析阶段抛 ``ValueError``。
+    """
+    if _is_uds_endpoint(server_endpoint):
+        pytest.skip(
+            "fixture requires TCP endpoint; server is configured for UDS "
+            f"({server_endpoint!r})",
+        )
     endpoint = server_endpoint
     if "://" in endpoint:
         endpoint = endpoint.split("://", 1)[1]
@@ -77,29 +106,29 @@ def server_host_port(server_endpoint):
 
 @pytest.fixture
 def server_url(server_endpoint):
-    """Server endpoint as full URL."""
-    return server_endpoint if "://" in server_endpoint else f"http://{server_endpoint}"
+    """Server endpoint as full URL.
+
+    TCP 端点补 ``http://`` 前缀; UDS 端点 (``unix:///path``) 直接透传——
+    下游 httpx fixture 与 jiuwenbox CLI 的 ``--base-url`` 都识别这种 scheme。
+    """
+    return _normalize_endpoint_url(server_endpoint)
 
 
 @pytest.fixture(scope="session")
 def server_url_session(pytestconfig):
-    """Session-scoped server URL."""
-    endpoint = (
-        pytestconfig.getoption("server_endpoint")
-        or os.environ.get("JIUWENBOX_TEST_SERVER")
-        or "127.0.0.1:8321"
-    )
-    return endpoint if "://" in endpoint else f"http://{endpoint}"
+    """Session-scoped server URL (与 :func:`server_url` 同语义)."""
+    return _normalize_endpoint_url(_resolve_raw_endpoint(pytestconfig))
 
 
 @pytest.fixture(scope="session")
 def server_host_port_session(pytestconfig):
-    """Session-scoped parsed host and port."""
-    endpoint = (
-        pytestconfig.getoption("server_endpoint")
-        or os.environ.get("JIUWENBOX_TEST_SERVER")
-        or "127.0.0.1:8321"
-    )
+    """Session-scoped parsed host and port (UDS 模式 skip)."""
+    endpoint = _resolve_raw_endpoint(pytestconfig)
+    if _is_uds_endpoint(endpoint):
+        pytest.skip(
+            "fixture requires TCP endpoint; server is configured for UDS "
+            f"({endpoint!r})",
+        )
     if "://" in endpoint:
         endpoint = endpoint.split("://", 1)[1]
     host, port = endpoint.rsplit(":", 1)

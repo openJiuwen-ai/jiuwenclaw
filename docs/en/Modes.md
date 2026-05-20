@@ -1,6 +1,6 @@
 # Modes
 
-JiuwenClaw supports multiple runtime modes, each with its own tool set, permission policy, and memory behavior. Users can switch modes during a conversation using the `/mode` command.
+JiuwenSwarm supports multiple runtime modes, each with its own tool set, permission policy, and memory behavior. Users can switch modes during a conversation using the `/mode` command.
 
 ---
 

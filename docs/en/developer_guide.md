@@ -1,6 +1,6 @@
 # Developer Guide
 
-This document is intended for developers of the JiuwenClaw project, covering how to set up a development environment from source and run tests.
+This document is intended for developers of the JiuwenSwarm project, covering how to set up a development environment from source and run tests.
 
 ## Prerequisites
 
@@ -15,8 +15,8 @@ This document is intended for developers of the JiuwenClaw project, covering how
 ## 1. Clone the Repository
 
 ```bash
-git clone <repository-url> jiuwenclaw
-cd jiuwenclaw
+git clone <repository-url> jiuwenswarm
+cd jiuwenswarm
 ```
 
 ## 2. Set Up Development Environment with `uv`
@@ -53,7 +53,7 @@ source .venv/bin/activate
 
 ### Run uv Sync
 
-Run the following command in the project root directory `jiuwenclaw/`:
+Run the following command in the project root directory `jiuwenswarm/`:
 
 ```bash
 uv sync
@@ -89,8 +89,8 @@ Once the environment is set up, you can start developing the source code and tes
 ### Project Structure Overview
 
 ```
-jiuwenclaw/
-├── jiuwenclaw/           # Project source code
+jiuwenswarm/
+├── jiuwenswarm/           # Project source code
 ├── tests/
 │   ├── unit_tests/       # Unit tests
 │   ├── system_tests/     # System tests
@@ -121,8 +121,8 @@ After modifying code, you need to build and verify according to the type of chan
 After modifying backend Python code, run the following commands to reinitialize and start the service:
 
 ```bash
-uv run jiuwenclaw-init
-uv run jiuwenclaw-start
+uv run jiuwenswarm-init
+uv run jiuwenswarm-start
 ```
 
 #### Frontend Code Changes
@@ -230,8 +230,8 @@ The project contains two independent wheel packages:
 
 | Package | Description | Config File |
 |---------|-------------|-------------|
-| `jiuwenclaw` | Backend service main package (includes Web frontend build artifacts) | `pyproject.toml` |
-| `jiuwenclaw-tui` | TUI terminal interface sidecar package (includes Bun-compiled native binaries) | `packages/jiuwenclaw-tui/pyproject.toml` |
+| `jiuwenswarm` | Backend service main package (includes Web frontend build artifacts) | `pyproject.toml` |
+| `jiuwenswarm-tui` | TUI terminal interface sidecar package (includes Bun-compiled native binaries) | `packages/jiuwenswarm-tui/pyproject.toml` |
 
 #### 6.1.1 Build All (Recommended)
 
@@ -243,13 +243,13 @@ bash scripts/build.sh
 ```
 
 The script will execute the following steps in order:
-1. Build the Web frontend (runs `npm run build` in `jiuwenclaw/channels/web/frontend`)
-2. Build the main package `jiuwenclaw.whl`
-3. If `bun` is detected, continue to build the TUI native binary and `jiuwenclaw-tui.whl`
+1. Build the Web frontend (runs `npm run build` in `jiuwenswarm/channels/web/frontend`)
+2. Build the main package `jiuwenswarm.whl`
+3. If `bun` is detected, continue to build the TUI native binary and `jiuwenswarm-tui.whl`
 
 Artifacts are output to two directories:
-- `./dist/jiuwenclaw-<version>-py3-none-any.whl` (main package)
-- `./packages/jiuwenclaw-tui/dist/jiuwenclaw_tui-<version>-<platform>.whl` (TUI sidecar package)
+- `./dist/jiuwenswarm-<version>-py3-none-any.whl` (main package)
+- `./packages/jiuwenswarm-tui/dist/jiuwenswarm_tui-<version>-<platform>.whl` (TUI sidecar package)
 
 ### 6.2 Desktop EXE / DMG Packaging
 
@@ -274,7 +274,7 @@ scripts\build-exe.bat
 .\scripts\build-exe.ps1
 ```
 
-Output: `dist\jiuwenclaw\jiuwenclaw.exe`
+Output: `dist\jiuwenswarm\jiuwenswarm.exe`
 
 #### 6.2.3 macOS Packaging (DMG)
 
@@ -285,7 +285,7 @@ bash scripts/build-macos.sh
 The script will execute the following steps in order:
 1. Install Python dependencies (`uv sync --extra dev`)
 2. Build the Web frontend (`npm run build`)
-3. Package with PyInstaller to generate `JiuwenClaw.app`
+3. Package with PyInstaller to generate `JiuwenSwarm.app`
 4. Create a DMG installer image using `hdiutil`
 
-Output: `dist/JiuwenClaw-<version>.dmg`
+Output: `dist/JiuwenSwarm-<version>.dmg`

@@ -3,8 +3,8 @@ import json
 
 import pytest
 
-from jiuwenclaw.server import agent_ws_server as agent_ws_server_module
-from jiuwenclaw.common.schema.agent import AgentRequest, AgentResponseChunk
+from jiuwenswarm.server import agent_ws_server as agent_ws_server_module
+from jiuwenswarm.common.schema.agent import AgentRequest, AgentResponseChunk
 
 
 class FakeWebSocket:
@@ -192,8 +192,8 @@ def test_handle_stream_accepts_code_team_sub_mode(monkeypatch):
 
 
 def test_agent_manager_creates_code_adapter_for_code_team(monkeypatch):
-    from jiuwenclaw.server.runtime import agent_manager as agent_manager_module
-    from jiuwenclaw.server.runtime.agent_adapter import interface as interface_module
+    from jiuwenswarm.server.runtime import agent_manager as agent_manager_module
+    from jiuwenswarm.server.runtime.agent_adapter import interface as interface_module
 
     calls = []
 

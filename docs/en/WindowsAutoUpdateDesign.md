@@ -1,6 +1,6 @@
 # Windows Auto-Update Design
 
-This document describes the minimum viable auto-update solution for JiuwenClaw on Windows desktop. The goal is to prioritize stability over seamless upgrades.
+This document describes the minimum viable auto-update solution for JiuwenSwarm on Windows desktop. The goal is to prioritize stability over seamless upgrades.
 
 ## Scope
 
@@ -8,7 +8,7 @@ This document describes the minimum viable auto-update solution for JiuwenClaw o
 - Automatic update check on startup
 - Manual update check via the sidebar "Update" page
 - Update source: GitHub Releases
-- Download artifact: Inno Setup installer `jiuwenclaw-setup-<version>.exe`
+- Download artifact: Inno Setup installer `jiuwenswarm-setup-<version>.exe`
 - After download, an external helper script performs a silent install and restarts the application
 
 ## Out of Scope
@@ -25,7 +25,7 @@ This document describes the minimum viable auto-update solution for JiuwenClaw o
 2. The backend requests the GitHub Releases API for the latest release
 3. If a new version is found, it records the latest version, publish date, release notes, and installer download URL
 4. The user clicks "Download Update" on the Update page
-5. The backend downloads the installer to `%USERPROFILE%\\.jiuwenclaw\\.updates` in the background
+5. The backend downloads the installer to `%USERPROFILE%\\.jiuwenswarm\\.updates` in the background
 6. After download completes, the frontend calls the pywebview API to trigger installation
 7. The desktop process writes a temporary `cmd` helper script that waits for the current process to exit
 8. The helper runs the Inno Setup installer silently, then restarts the application
@@ -53,10 +53,10 @@ Update settings are in the `updater` section of `config.yaml`:
 updater:
   enabled: true
   repo_owner: CharlieZhao95
-  repo_name: jiuwenclaw
+  repo_name: jiuwenswarm
   release_api_url: ""
-  asset_name_pattern: "jiuwenclaw-setup-{version}.exe"
-  sha256_name_pattern: "jiuwenclaw-setup-{version}.exe.sha256"
+  asset_name_pattern: "jiuwenswarm-setup-{version}.exe"
+  sha256_name_pattern: "jiuwenswarm-setup-{version}.exe.sha256"
   timeout_seconds: 20
 ```
 
@@ -94,4 +94,4 @@ When the desktop process receives an install request from the frontend:
 /VERYSILENT /SUPPRESSMSGBOXES /NORESTART /SP- /CLOSEAPPLICATIONS
 ```
 
-4. After installation completes, it restarts `jiuwenclaw.exe`
+4. After installation completes, it restarts `jiuwenswarm.exe`

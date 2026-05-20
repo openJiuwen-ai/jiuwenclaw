@@ -4,13 +4,13 @@ from typing import Any
 
 import pytest
 
-from jiuwenclaw.gateway.app_gateway import (
+from jiuwenswarm.gateway.app_gateway import (
     GatewayServer,
     GatewayServerConfig,
     RouteConfig,
     _normalize_gateway_message,
 )
-from jiuwenclaw.common.schema.message import EventType, Message, ReqMethod
+from jiuwenswarm.common.schema.message import EventType, Message, ReqMethod
 
 
 class DummyBus:
@@ -127,7 +127,7 @@ async def test_gateway_server_initialize_returns_current_acp_capabilities():
     assert frame["id"] == 1
     result = frame["result"]
     assert result["protocolVersion"] == 1
-    assert result["agentInfo"]["name"] == "jiuwenclaw"
+    assert result["agentInfo"]["name"] == "jiuwenswarm"
     assert result["agentCapabilities"] == {
         "loadSession": False,
         "promptCapabilities": {
@@ -489,7 +489,7 @@ async def test_gateway_server_defers_end_turn_until_pending_client_rpc_resolves(
 async def test_gateway_server_expired_pending_rpc_does_not_block_end_turn(monkeypatch):
     server = build_server()
     ws = FakeWebSocket()
-    monkeypatch.setattr("jiuwenclaw.gateway.channel_manager.protocol.acp.acp_connect._ACP_PENDING_RPC_TIMEOUT_SECONDS",
+    monkeypatch.setattr("jiuwenswarm.gateway.channel_manager.protocol.acp.acp_connect._ACP_PENDING_RPC_TIMEOUT_SECONDS",
                         -1.0)
 
     async def on_message(msg):
@@ -1124,7 +1124,7 @@ async def test_gateway_server_prompt_result_echoes_user_message_id():
 
 @pytest.mark.asyncio
 async def test_gateway_server_does_not_end_turn_from_chat_final_before_late_tool_result(monkeypatch):
-    import jiuwenclaw.gateway.app_gateway as gateway_module
+    import jiuwenswarm.gateway.app_gateway as gateway_module
 
     monkeypatch.setattr(gateway_module, "_PROMPT_IDLE_FINALIZE_SECONDS", 0.01)
     server = build_server()
@@ -1376,7 +1376,7 @@ async def test_gateway_server_emits_todo_update_then_waits_for_idle():
 
 @pytest.mark.asyncio
 async def test_gateway_server_delta_only_does_not_trigger_idle_finalize(monkeypatch):
-    import jiuwenclaw.gateway.app_gateway as gateway_module
+    import jiuwenswarm.gateway.app_gateway as gateway_module
 
     monkeypatch.setattr(gateway_module, "_PROMPT_IDLE_FINALIZE_SECONDS", 0.01)
     server = build_server()

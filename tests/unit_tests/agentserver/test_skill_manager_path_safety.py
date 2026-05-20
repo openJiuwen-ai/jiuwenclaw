@@ -2,7 +2,7 @@ import shutil
 
 import pytest
 
-from jiuwenclaw.server.runtime.skill.skill_manager import (
+from jiuwenswarm.server.runtime.skill.skill_manager import (
     SkillManager,
     _safe_child_path,
     _safe_path_name,

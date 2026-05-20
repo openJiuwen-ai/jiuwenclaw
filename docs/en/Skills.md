@@ -8,7 +8,7 @@
 
 **Definition:**
 
-A Skill is a module that extends JiuwenClaw with specific capabilities. You can think of it as an **installable, manageable, reusable capability package**.
+A Skill is a module that extends JiuwenSwarm with specific capabilities. You can think of it as an **installable, manageable, reusable capability package**.
 
 Like apps on a phone extend device capabilities, skills extend the agent’s capability boundaries.
 ![Skill list](../assets/images/技能列表与检索.png)
@@ -52,7 +52,7 @@ User request → agent identifies need → load matched skill → execute workfl
 
 **Skill sources:**
 
-JiuwenClaw supports multiple sources:
+JiuwenSwarm supports multiple sources:
 
 | Source | Description | Characteristics |
 |------|------|------|
@@ -74,7 +74,7 @@ Whether skills come from built-in packages, SkillNet, ClawHub, third-party marke
 
 #### Built-in skills
 
-Built-in skills are skill resources packaged with JiuwenClaw.
+Built-in skills are skill resources packaged with JiuwenSwarm.
 
 1. **Install**
 
@@ -195,7 +195,7 @@ Best for:
    Copy skill folder into:
 
    ```text
-   C:\Users\<username>\.jiuwenclaw\service_default\agent_default\jiuwenclaw_workspace\skills\
+   C:\Users\<username>\.jiuwenswarm\service_default\agent_default\jiuwenswarm_workspace\skills\
    ```
 
 4. **Verify**
@@ -313,7 +313,7 @@ The agent lists installed skill names, sources, versions, and related info.
 **Method 3: File path**
 
 ```text
-C:\Users\<username>\.jiuwenclaw\service_default\agent_default\jiuwenclaw_workspace\skills\
+C:\Users\<username>\.jiuwenswarm\service_default\agent_default\jiuwenswarm_workspace\skills\
 ```
 
 Each subfolder is one skill.
@@ -547,7 +547,7 @@ Done:
 
 | Possible cause | Resolution |
 |----------|----------|
-| Service not restarted | Restart JiuwenClaw |
+| Service not restarted | Restart JiuwenSwarm |
 | Wrong install path | Verify skill file path |
 | Missing SKILL.md | Ensure skill folder has SKILL.md |
 
@@ -614,7 +614,7 @@ my-custom-skill/
 
 **Core `SKILL.md` content:**
 
-You can let JiuwenClaw help you generate it. **`YAML frontmatter` between the first `---` and second `---` declares metadata**; Markdown after the second `---` is the **skill body**—the instructions the Agent follows. Example:
+You can let JiuwenSwarm help you generate it. **`YAML frontmatter` between the first `---` and second `---` declares metadata**; Markdown after the second `---` is the **skill body**—the instructions the Agent follows. Example:
 
 ```markdown
 ---
@@ -652,9 +652,9 @@ When this skill is selected, follow the instructions below.
 
 #### Modify an existing skill
 
-1. **Modify an existing skill through JiuwenClaw**
+1. **Modify an existing skill through JiuwenSwarm**
 
-   Talk to JiuwenClaw directly, for example: "Help me optimize the xxx skill and add xxx capability."
+   Talk to JiuwenSwarm directly, for example: "Help me optimize the xxx skill and add xxx capability."
 
 ### Example: Optimize the weather skill by adding UV index display
 
@@ -662,7 +662,7 @@ When this skill is selected, follow the instructions below.
 The output only includes basic items such as temperature, wind speed, precipitation probability, and clothing advice.
 ![Skill effect](../assets/images/skill首次效果.png)
 
-### Through chat with JiuwenClaw: "Optimize the weather skill and add UV intensity display", the skill is updated
+### Through chat with JiuwenSwarm: "Optimize the weather skill and add UV intensity display", the skill is updated
 ![Skill improved](../assets/images/skill优化完成.png)
 
 ### After optimization
@@ -673,6 +673,6 @@ When you call it again, the output includes not only temperature and wind speed,
 ---
 
 *Document version: v1.0*  
-*Audience: JiuwenClaw users*  
+*Audience: JiuwenSwarm users*  
 *Last updated: 2026-05-11*  
 *Simplified Chinese: [技能](../zh/技能.md)*

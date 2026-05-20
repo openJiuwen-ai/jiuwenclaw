@@ -3,8 +3,8 @@ import time
 
 import pytest
 
-from jiuwenclaw.gateway.channel_manager.protocol.a2a.a2a_connect import A2AChannel, A2AChannelConfig
-from jiuwenclaw.common.schema.message import EventType, Message
+from jiuwenswarm.gateway.channel_manager.protocol.a2a.a2a_connect import A2AChannel, A2AChannelConfig
+from jiuwenswarm.common.schema.message import EventType, Message
 
 
 class DummyBus:

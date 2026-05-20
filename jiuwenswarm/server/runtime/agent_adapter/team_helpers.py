@@ -1,0 +1,1177 @@
+# Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
+
+"""Team agent streaming helpers."""
+
+from __future__ import annotations
+
+import asyncio
+import logging
+import time
+from typing import Any, AsyncIterator
+
+from openjiuwen.agent_teams.runtime import RunActionKind
+from openjiuwen.agent_teams.schema.team import TeamRole
+from openjiuwen.core.runner import Runner
+from openjiuwen.harness import DeepAgent
+
+from jiuwenswarm.agents.harness.team import get_team_manager
+from jiuwenswarm.server.runtime.session.session_metadata import (
+    build_server_push_message,
+    get_session_metadata,
+    update_session_metadata,
+)
+from jiuwenswarm.agents.harness.team.monitor_handler import TeamMonitorHandler
+from jiuwenswarm.server.utils.stream_utils import parse_stream_chunk
+from jiuwenswarm.common.schema.agent import AgentResponseChunk
+from jiuwenswarm.server.runtime.agent_adapter.evolution_helpers import (
+    EvolutionPushContext,
+    TEAM_EVOLUTION_EVENT_TIMEOUT_SEC,
+    TEAM_EVOLUTION_HIDDEN_STAGE,
+    TEAM_EVOLUTION_IDLE_SLEEP_SEC,
+    TEAM_EVOLUTION_START_MESSAGE,
+    TEAM_EVOLUTION_START_STAGE,
+    broadcast_evolution_progress,
+    build_evolution_status_update,
+    event_type,
+    evolution_outcome_from_event,
+    extract_evolution_request_id,
+    group_evolution_approvals,
+    is_evolution_started_progress,
+    is_evolution_outcome_event,
+    make_team_evolution_cycle_request_id,
+    push_evolution_event,
+    push_evolution_status,
+    team_evolution_end_update,
+    team_evolution_terminal_progress,
+)
+
+logger = logging.getLogger(__name__)
+
+_pending_waiters: dict[tuple[str, str], list[tuple[str, asyncio.Queue]]] = {}
+_TEAM_CREATE_KINDS = {
+    RunActionKind.CREATE.value,
+    RunActionKind.NEW_TEAM_IN_SESSION.value,
+}
+_HIDE_DM_PREFIX = "/hide_dm"
+
+
+def _extract_hide_dm_directive(query: str) -> tuple[str, bool]:
+    """Strip a leading ``/hide_dm`` directive from the first team query.
+
+    Returns the cleaned query and whether the directive was present.
+    """
+    stripped = query.lstrip()
+    if not stripped.startswith(_HIDE_DM_PREFIX):
+        return query, False
+    remainder = stripped[len(_HIDE_DM_PREFIX):]
+    if remainder and not remainder[0].isspace():
+        return query, False
+    return remainder.lstrip(), True
+
+
+def sync_team_identity_metadata(
+    *,
+    channel_id: str | None,
+    session_id: str,
+    mode: str,
+    ready_team_name: str,
+    activation_kind: str | None,
+) -> None:
+    """Persist team identity only for newly created team sessions."""
+    metadata = get_session_metadata(session_id)
+    existing_team_name = str(metadata.get("team_name") or "").strip()
+    normalized_kind = str(activation_kind or "").strip()
+    if normalized_kind not in _TEAM_CREATE_KINDS:
+        return
+
+    if existing_team_name and existing_team_name != ready_team_name:
+        logger.warning(
+            "[TeamHelpers] team session identity mismatch, keep existing metadata: "
+            "session_id=%s existing_team_name=%s new_team_name=%s activation_kind=%s",
+            session_id,
+            existing_team_name,
+            ready_team_name,
+            normalized_kind,
+        )
+        return
+
+    update_session_metadata(
+        session_id=session_id,
+        channel_id=_resolve_channel_id(channel_id),
+        mode=mode,
+        team_name=ready_team_name,
+    )
+
+
+def _resolve_channel_id(channel_id: str | None) -> str:
+    return str(channel_id or "default").strip() or "default"
+
+
+async def ensure_monitor_for_active_runtime(
+    channel_id: str | None,
+    session_id: str,
+    team_name: str,
+    hide_dm: bool = False,
+) -> None:
+    """Attach TeamMonitorHandler using the public Runner team monitor accessor."""
+    tm = get_team_manager(channel_id)
+    existing = tm.get_monitor(session_id)
+    if existing is not None and existing.is_running:
+        return
+
+    monitor = await Runner.get_agent_team_monitor(
+        team_name=team_name,
+        session_id=session_id,
+        hide_dm=hide_dm,
+    )
+    if monitor is None:
+        logger.warning(
+            "[TeamHelpers] active team monitor unavailable: channel_id=%s session_id=%s team_name=%s",
+            _resolve_channel_id(channel_id),
+            session_id,
+            team_name,
+        )
+        return
+
+    monitor_handler = TeamMonitorHandler(monitor, session_id)
+    try:
+        await monitor_handler.start()
+        tm.register_monitor(session_id, monitor_handler)
+        logger.info(
+            "[TeamHelpers] Monitor started from public runner API: channel_id=%s session_id=%s team_name=%s",
+            _resolve_channel_id(channel_id),
+            session_id,
+            team_name,
+        )
+        if monitor_handler.is_running:
+            asyncio.create_task(
+                _consume_monitor_events(
+                    channel_id,
+                    session_id,
+                    monitor_handler,
+                )
+            )
+    except Exception as exc:
+        logger.warning("[TeamHelpers] Monitor start failed from public runner API: %s", exc)
+
+
+def _broadcast_event(
+    channel_id: str | None, session_id: str, event: dict[str, Any]
+) -> None:
+    """Broadcast an event to all request queues waiting on the same channel/session."""
+    waiter_key = (_resolve_channel_id(channel_id), session_id)
+    waiters = _pending_waiters.get(waiter_key, [])
+    for request_id, queue in waiters:
+        try:
+            queue.put_nowait(dict(event))
+        except Exception:
+            logger.debug(
+                "[TeamHelpers] broadcast failed: channel_id=%s session_id=%s request_id=%s",
+                waiter_key[0],
+                session_id,
+                request_id,
+            )
+
+
+def _approval_chunk_from_event(evt: Any) -> dict[str, Any] | None:
+    parsed = parse_stream_chunk(evt)
+    if not isinstance(parsed, dict) or parsed.get("event_type") != "chat.ask_user_question":
+        return None
+    request_id = parsed.get("request_id")
+    questions = parsed.get("questions")
+    if not isinstance(request_id, str) or not request_id.strip():
+        return None
+    if not isinstance(questions, list) or not questions:
+        return None
+    return parsed
+
+
+def _approval_result_from_event_or_items(
+    *,
+    skill_name: str,
+    event: Any,
+    items: list[Any],
+    no_changes_output: str,
+    invalid_output: str,
+) -> dict[str, Any]:
+    approval_chunk = _approval_chunk_from_event(event)
+    if approval_chunk is not None:
+        questions = approval_chunk.get("questions", [])
+        return {
+            "output": f"Skill '{skill_name}' 演进请求已生成，请在审批弹框中确认。",
+            "result_type": "answer",
+            "approval_chunks": [approval_chunk],
+            "question_count": len(questions),
+        }
+    if not items:
+        return {
+            "output": no_changes_output,
+            "result_type": "answer",
+        }
+    return {"output": invalid_output, "result_type": "error"}
+
+
+def _is_leader_output(chunk: Any) -> bool:
+    """Return whether a team OutputSchema chunk should be shown to claw users."""
+    chunk_type = getattr(chunk, "type", None)
+    if chunk_type == "team.runtime_ready":
+        return True
+
+    role = getattr(chunk, "role", None)
+    if role is None:
+        return True
+    if role == TeamRole.LEADER:
+        return True
+
+    role_value = getattr(role, "value", role)
+    return str(role_value).strip().lower() == TeamRole.LEADER.value
+
+
+def _team_processing_done_chunk(
+    request_id: str,
+    channel_id: str | None,
+    session_id: str,
+) -> AgentResponseChunk:
+    return AgentResponseChunk(
+        request_id=request_id,
+        channel_id=channel_id,
+        payload={
+            "event_type": "chat.processing_status",
+            "session_id": session_id,
+            "is_processing": False,
+            "is_complete": True,
+        },
+        is_complete=False,
+    )
+
+
+def _group_team_evolution_approvals(
+    session_id: str,
+    events: list[Any],
+) -> tuple[dict[str, list[Any]], list[str]]:
+    def _warn_missing_request_id(warn_session_id: str) -> None:
+        logger.warning(
+            "[TeamHelpers] team evolution approval missing request_id: session_id=%s",
+            warn_session_id,
+        )
+
+    return group_evolution_approvals(
+        session_id,
+        events,
+        warn_missing_request_id=_warn_missing_request_id,
+    )
+
+
+def ensure_team_evolution_watcher(
+    channel_id: str | None,
+    session_id: str,
+    *,
+    source: str = "unknown",
+) -> None:
+    """Launch the per-session team evolution monitor once the team session is ready."""
+    tm = get_team_manager(channel_id)
+    watcher = tm.get_team_evolution_watcher(session_id)
+    if watcher is not None and not watcher.done():
+        logger.info(
+            "[TeamHelpers] evolution monitor already running: channel_id=%s session_id=%s source=%s",
+            channel_id,
+            session_id,
+            source,
+        )
+        return
+
+    rail = tm.get_team_skill_rail(session_id)
+    if rail is None:
+        logger.warning(
+            "[TeamHelpers] no TeamSkillEvolutionRail found, evolution watcher launch deferred: session_id=%s source=%s",
+            session_id,
+            source,
+        )
+        return
+    if not getattr(rail, "auto_scan", True):
+        logger.info(
+            "[TeamHelpers] evolution monitor skipped because auto_scan is disabled: "
+            "channel_id=%s session_id=%s source=%s",
+            channel_id,
+            session_id,
+            source,
+        )
+        return
+
+    logger.info(
+        "[TeamHelpers] launching evolution monitor: channel_id=%s session_id=%s source=%s",
+        channel_id,
+        session_id,
+        source,
+    )
+    task = asyncio.create_task(
+        _watch_team_evolution_and_push(channel_id, session_id, rail)
+    )
+    setattr(task, "_team_channel_id", channel_id)
+    setattr(task, "_team_session_id", session_id)
+    task.add_done_callback(_on_team_watcher_done)
+    tm.register_team_evolution_watcher(session_id, task)
+
+
+async def _resolve_team_rebuild_followup(
+    channel_id: str | None,
+    session_id: str,
+    query: str,
+) -> tuple[str | None, str | None]:
+    """Resolve /evolve_rebuild into a followup prompt for the team session."""
+    stripped = str(query or "").strip()
+    if not stripped.startswith("/evolve_rebuild"):
+        return None, None
+
+    tm = get_team_manager(channel_id)
+    rail = tm.get_team_skill_rail(session_id)
+    if rail is None:
+        return None, "团队技能重建不可用：未找到 TeamSkillEvolutionRail。"
+
+    store = rail.store
+    parts = stripped.split(maxsplit=2)
+    skill_name = parts[1] if len(parts) > 1 else ""
+    user_intent = parts[2] if len(parts) > 2 else None
+
+    if not skill_name:
+        return None, "请指定 Skill 名称：`/evolve_rebuild <skill_name> [user_intent]`"
+
+    if not store.skill_exists(skill_name):
+        available = "、".join(store.list_skill_names()) or "（无可用 Skill）"
+        return None, f"未找到 Skill '{skill_name}'。当前可用：{available}"
+
+    try:
+        followup_prompt = await rail.request_rebuild(skill_name, user_intent)
+    except Exception as exc:
+        logger.warning("[TeamHelpers] evolve_rebuild failed: session_id=%s error=%s", session_id, exc)
+        return None, f"团队技能重建分析失败：{exc}"
+
+    if not followup_prompt:
+        return None, f"Skill '{skill_name}' 未生成可执行的重建指令。"
+
+    return followup_prompt, None
+
+
+async def _handle_team_evolve_list_command(
+    channel_id: str | None,
+    session_id: str,
+    query: str,
+) -> dict[str, Any] | None:
+    """Handle /evolve_list directly against the team skill store."""
+    stripped = str(query or "").strip()
+    if not stripped.startswith("/evolve_list"):
+        return None
+
+    tm = get_team_manager(channel_id)
+    rail = tm.get_team_skill_rail(session_id)
+    if rail is None:
+        return {
+            "output": "团队技能演进记录不可用：未找到 TeamSkillEvolutionRail。",
+            "result_type": "error",
+        }
+
+    store = rail.store
+    parts = stripped.split()
+    skill_name = parts[1] if len(parts) > 1 else ""
+    if not skill_name or skill_name.startswith("--"):
+        return {
+            "output": "请指定 Skill 名称：`/evolve_list <skill_name>`",
+            "result_type": "error",
+        }
+
+    if not store.skill_exists(skill_name):
+        available = "、".join(store.list_skill_names()) or "（无可用 Skill）"
+        return {
+            "output": f"未找到 Skill '{skill_name}'。当前可用：{available}",
+            "result_type": "error",
+        }
+
+    records = await store.get_records_by_score(skill_name)
+    if not records:
+        return {
+            "output": f"Skill '{skill_name}' 暂无演进经验。",
+            "result_type": "answer",
+        }
+
+    avg_score = sum(r.score for r in records) / len(records)
+    lines = [
+        f'📊 Skill "{skill_name}" — 经验库摘要\n',
+        f"共 {len(records)} 条经验 | 平均分：{avg_score:.2f}\n",
+        "| # | Score | Used | Effect | Section | Content (preview) |",
+        "|---|---:|---|---|---|---|",
+    ]
+    for i, record in enumerate(records, 1):
+        stats = record.usage_stats
+        if stats:
+            used_str = (
+                f"{stats.times_used}/{stats.times_presented}"
+                if stats.times_presented
+                else "0/0"
+            )
+            effect_str = f"+{stats.times_positive}/-{stats.times_negative}"
+        else:
+            used_str = "0/0"
+            effect_str = "+0/-0"
+        section = str(record.change.section).replace("|", "\\|")
+        preview = record.change.content.split("\n")[0][:40].replace("|", "\\|")
+        lines.append(
+            f"| {i} | {record.score:.2f} | {used_str} | {effect_str} | {section} | {preview} |"
+        )
+
+    lines.append(f"\n提示：使用 /evolve_simplify {skill_name} 执行智能整理")
+    return {
+        "output": "\n".join(lines),
+        "result_type": "answer",
+    }
+
+
+async def _handle_team_slash_command(
+    channel_id: str | None,
+    session_id: str,
+    query: str,
+) -> dict[str, Any] | None:
+    """Handle team-only slash commands before entering the team stream."""
+    evolve_list_result = await _handle_team_evolve_list_command(channel_id, session_id, query)
+    if evolve_list_result is not None:
+        return evolve_list_result
+
+    stripped = str(query or "").strip()
+    if not (
+        stripped.startswith("/evolve_simplify")
+        or stripped == "/evolve"
+        or stripped.startswith("/evolve ")
+    ):
+        return None
+
+    tm = get_team_manager(channel_id)
+    rail = tm.get_team_skill_rail(session_id)
+    if rail is None:
+        return {
+            "output": "团队技能演进不可用：未找到 TeamSkillEvolutionRail。",
+            "result_type": "error",
+        }
+
+    store = rail.store
+
+    if stripped.startswith("/evolve_simplify"):
+        parts = stripped.split(maxsplit=2)
+        skill_name = parts[1] if len(parts) > 1 else ""
+        user_intent = parts[2] if len(parts) > 2 else None
+
+        if not skill_name:
+            return {
+                "output": "请指定 Skill 名称：`/evolve_simplify <skill_name> [user_intent]`",
+                "result_type": "error",
+            }
+
+        if not store.skill_exists(skill_name):
+            available = "、".join(store.list_skill_names()) or "（无可用 Skill）"
+            return {
+                "output": f"未找到 Skill '{skill_name}'。当前可用：{available}",
+                "result_type": "error",
+            }
+
+        try:
+            simplify_result = await rail.request_simplify(skill_name, user_intent)
+        except Exception as exc:
+            logger.warning(
+                "[TeamHelpers] evolve_simplify failed: session_id=%s error=%s",
+                session_id,
+                exc,
+            )
+            return {
+                "output": f"团队技能整理分析失败：{exc}",
+                "result_type": "error",
+            }
+
+        return _approval_result_from_event_or_items(
+            skill_name=skill_name,
+            event=getattr(simplify_result, "approval_event", None),
+            items=list(getattr(simplify_result, "actions", []) or []),
+            no_changes_output=f"Skill '{skill_name}' 经验库状态良好，无需整理。",
+            invalid_output=f"Skill '{skill_name}' 精简方案已生成，但审批事件为空或格式无效。",
+        )
+
+    parts = stripped.split(maxsplit=2)
+    if len(parts) < 2:
+        return {
+            "output": "请补充演进意图：`/evolve <skill_name> <user_query>`",
+            "result_type": "error",
+        }
+
+    skill_name = parts[1].strip()
+    user_query = parts[2].strip() if len(parts) > 2 else ""
+
+    if not store.skill_exists(skill_name):
+        available = "、".join(store.list_skill_names()) or "（无可用 Skill）"
+        return {
+            "output": f"未找到 Skill '{skill_name}'。当前可用：{available}",
+            "result_type": "error",
+        }
+
+    if not user_query:
+        return {
+            "output": "请补充演进意图：`/evolve <skill_name> <user_query>`",
+            "result_type": "error",
+        }
+
+    try:
+        evolve_result = await rail.request_user_evolution(skill_name, user_query)
+    except Exception as exc:
+        logger.warning(
+            "[TeamHelpers] evolve failed: session_id=%s error=%s",
+            session_id,
+            exc,
+        )
+        return {
+            "output": f"团队技能演进请求失败：{exc}",
+            "result_type": "error",
+        }
+
+    if isinstance(evolve_result, str) and evolve_result.strip():
+        return {
+            "output": f"Skill '{skill_name}' 演进请求已提交，请等待审批。",
+            "result_type": "answer",
+        }
+    return _approval_result_from_event_or_items(
+        skill_name=skill_name,
+        event=getattr(evolve_result, "approval_event", None),
+        items=list(getattr(evolve_result, "records", []) or []),
+        no_changes_output=f"Skill '{skill_name}' 未生成新的团队技能演进经验。",
+        invalid_output=f"Skill '{skill_name}' 已生成团队技能演进经验，但审批事件为空或格式无效。",
+    )
+
+
+async def process_team_message_stream(
+    request: Any,
+    inputs: dict[str, Any],
+    deep_agent: DeepAgent,
+) -> AsyncIterator[AgentResponseChunk]:
+    """Process a team-mode streaming request."""
+    session_id = request.session_id or "default"
+    rid = request.request_id
+    channel_id = request.channel_id
+
+    team_manager = get_team_manager(channel_id)
+    query = inputs.get("query", "")
+    is_first_request = not team_manager.has_stream_task(session_id)
+    request_queue: asyncio.Queue | None = None
+
+    hide_dm = False
+    if is_first_request:
+        query, hide_dm = _extract_hide_dm_directive(str(query or ""))
+        if hide_dm:
+            logger.info(
+                "[TeamHelpers] hide_dm directive captured for first team request: "
+                "channel_id=%s session_id=%s",
+                _resolve_channel_id(channel_id),
+                session_id,
+            )
+
+    slash_result = await _handle_team_slash_command(
+        channel_id,
+        session_id,
+        str(query or ""),
+    )
+    if slash_result is not None:
+        approval_chunks = slash_result.get("approval_chunks")
+        if isinstance(approval_chunks, list) and approval_chunks:
+            for chunk in approval_chunks:
+                yield AgentResponseChunk(
+                    request_id=rid,
+                    channel_id=channel_id,
+                    payload=chunk,
+                    is_complete=False,
+                )
+            yield _team_processing_done_chunk(rid, channel_id, session_id)
+            yield AgentResponseChunk(
+                request_id=rid,
+                channel_id=channel_id,
+                payload={"event_type": "chat.done"},
+                is_complete=True,
+            )
+            return
+
+        result_type = str(slash_result.get("result_type", "answer")).strip().lower()
+        content = str(slash_result.get("output", ""))
+        payload = (
+            {"event_type": "chat.error", "error": content}
+            if result_type == "error"
+            else {"event_type": "chat.final", "content": content}
+        )
+        yield AgentResponseChunk(
+            request_id=rid,
+            channel_id=channel_id,
+            payload=payload,
+            is_complete=False,
+        )
+        yield _team_processing_done_chunk(rid, channel_id, session_id)
+        yield AgentResponseChunk(
+            request_id=rid,
+            channel_id=channel_id,
+            payload=None,
+            is_complete=True,
+        )
+        return
+
+    try:
+        if deep_agent is None:
+            raise RuntimeError("DeepAgent not initialized")
+        team_spec = await team_manager.get_enriched_team_spec(
+            session_id=session_id,
+            deep_agent=deep_agent,
+            request_id=rid,
+            channel_id=channel_id,
+            request_metadata=request.metadata,
+        )
+    except Exception as exc:
+        logger.exception("[TeamHelpers] TeamAgent create failed: %s", exc)
+        yield AgentResponseChunk(
+            request_id=rid,
+            channel_id=channel_id,
+            payload={"event_type": "chat.error", "error": str(exc)},
+            is_complete=False,
+        )
+        yield AgentResponseChunk(
+            request_id=rid,
+            channel_id=channel_id,
+            payload=None,
+            is_complete=True,
+        )
+        return
+
+    team_name = team_spec.team_name
+
+    followup_prompt, rebuild_error = await _resolve_team_rebuild_followup(
+        channel_id,
+        session_id,
+        str(query or ""),
+    )
+    if rebuild_error is not None:
+        yield AgentResponseChunk(
+            request_id=rid,
+            channel_id=channel_id,
+            payload={"event_type": "chat.error", "error": rebuild_error},
+            is_complete=False,
+        )
+        yield AgentResponseChunk(
+            request_id=rid,
+            channel_id=channel_id,
+            payload=None,
+            is_complete=True,
+        )
+        return
+    if followup_prompt is not None:
+        query = followup_prompt
+
+    try:
+        if is_first_request:
+            team_manager.ensure_team_shared_skills_initialized(team_spec)
+            await team_manager.prepare_runtime_activation(session_id, team_name)
+            request_queue = asyncio.Queue()
+            waiter_key = (_resolve_channel_id(channel_id), session_id)
+            if waiter_key not in _pending_waiters:
+                _pending_waiters[waiter_key] = []
+            _pending_waiters[waiter_key].append((rid, request_queue))
+            logger.info(
+                "[TeamHelpers] first team request: channel_id=%s session_id=%s",
+                waiter_key[0],
+                session_id,
+            )
+
+            stream_task = asyncio.create_task(
+                _consume_stream_with_query(
+                    channel_id,
+                    session_id,
+                    team_spec,
+                    query,
+                    hide_dm=hide_dm,
+                )
+            )
+            team_manager.register_stream_task(session_id, stream_task)
+        else:
+            logger.info(
+                "[TeamHelpers] follow-up team request: channel_id=%s session_id=%s",
+                _resolve_channel_id(channel_id),
+                session_id,
+            )
+            if query:
+                success = await team_manager.interact(session_id, query)
+                if not success:
+                    yield AgentResponseChunk(
+                        request_id=rid,
+                        channel_id=channel_id,
+                        payload={
+                            "event_type": "chat.error",
+                            "error": "interact failed",
+                        },
+                        is_complete=False,
+                    )
+                    yield AgentResponseChunk(
+                        request_id=rid,
+                        channel_id=channel_id,
+                        payload=None,
+                        is_complete=True,
+                    )
+                    return
+
+            logger.info(
+                "[TeamHelpers] follow-up request submitted without waiter: channel_id=%s session_id=%s request_id=%s",
+                _resolve_channel_id(channel_id),
+                session_id,
+                rid,
+            )
+            yield AgentResponseChunk(
+                request_id=rid,
+                channel_id=channel_id,
+                payload=None,
+                is_complete=True,
+            )
+            return
+
+        try:
+            while team_manager.has_stream_task(session_id):
+                if request_queue is None:
+                    break
+                try:
+                    event = await asyncio.wait_for(request_queue.get(), timeout=0.1)
+                    yield AgentResponseChunk(
+                        request_id=rid,
+                        channel_id=channel_id,
+                        payload=event,
+                        is_complete=False,
+                    )
+                    if (
+                        isinstance(event, dict)
+                        and event.get("event_type") == "team.error"
+                    ):
+                        break
+                except asyncio.TimeoutError:
+                    if not team_manager.has_stream_task(session_id):
+                        break
+                    continue
+        except asyncio.CancelledError:
+            logger.info(
+                "[TeamHelpers] event stream cancelled: channel_id=%s session_id=%s request_id=%s",
+                _resolve_channel_id(channel_id),
+                session_id,
+                rid,
+            )
+            raise
+        except Exception as exc:
+            logger.exception(
+                "[TeamHelpers] event stream failed: channel_id=%s session_id=%s error=%s",
+                _resolve_channel_id(channel_id),
+                session_id,
+                exc,
+            )
+            yield AgentResponseChunk(
+                request_id=rid,
+                channel_id=channel_id,
+                payload={"event_type": "chat.error", "error": str(exc)},
+                is_complete=False,
+            )
+
+        yield AgentResponseChunk(
+            request_id=rid,
+            channel_id=channel_id,
+            payload=None,
+            is_complete=True,
+        )
+    finally:
+        if request_queue is not None:
+            waiter_key = (_resolve_channel_id(channel_id), session_id)
+            waiters = _pending_waiters.get(waiter_key, [])
+            _pending_waiters[waiter_key] = [
+                (req_id, queue) for req_id, queue in waiters if req_id != rid
+            ]
+            if not _pending_waiters.get(waiter_key, []):
+                _pending_waiters.pop(waiter_key, None)
+                logger.info(
+                    "[TeamHelpers] cleared waiter set: channel_id=%s session_id=%s",
+                    waiter_key[0],
+                    session_id,
+                )
+
+
+async def _consume_stream_with_query(
+    channel_id: str | None,
+    session_id: str,
+    team_spec: Any,
+    initial_query: str,
+    hide_dm: bool = False,
+) -> None:
+    """Consume the team stream in the background and broadcast parsed events."""
+    received_chunks = 0
+    try:
+        logger.info(
+            "[TeamHelpers] stream started: channel_id=%s session_id=%s",
+            _resolve_channel_id(channel_id),
+            session_id,
+        )
+        async for chunk in Runner.run_agent_team_streaming(
+            agent_team=team_spec,
+            inputs={"query": initial_query},
+            session=session_id,
+        ):
+            received_chunks += 1
+            if not _is_leader_output(chunk):
+                continue
+            parsed = parse_stream_chunk(chunk)
+            if parsed is not None:
+                if parsed.get("event_type") == "team.runtime_ready":
+                    ready_team_name = str(parsed.get("team_name") or team_spec.team_name)
+                    activation_kind = str(parsed.get("activation_kind") or "").strip()
+                    sync_team_identity_metadata(
+                        channel_id=channel_id,
+                        session_id=session_id,
+                        mode="team",
+                        ready_team_name=ready_team_name,
+                        activation_kind=activation_kind,
+                    )
+                    tm = get_team_manager(channel_id)
+                    tm.commit_runtime_ready(session_id, ready_team_name)
+                    await tm.attach_distributed_hooks_for_runner_runtime(
+                        team_name=ready_team_name,
+                        session_id=session_id,
+                        channel_id=channel_id,
+                    )
+                    await ensure_monitor_for_active_runtime(
+                        channel_id,
+                        session_id,
+                        ready_team_name,
+                        hide_dm=hide_dm,
+                    )
+                    ensure_team_evolution_watcher(
+                        channel_id,
+                        session_id,
+                        source="runtime_ready",
+                    )
+                _broadcast_event(channel_id, session_id, parsed)
+
+        # If stream ended without any chunks, broadcast an error event
+        if received_chunks == 0:
+            logger.warning(
+                "[TeamHelpers] stream ended with no output: channel_id=%s session_id=%s",
+                _resolve_channel_id(channel_id),
+                session_id,
+            )
+            _broadcast_event(
+                channel_id,
+                session_id,
+                {
+                    "event_type": "team.error",
+                    "error": "Team stream ended with no output (possible pool/DB inconsistency or internal error)",
+                    "session_id": session_id,
+                },
+            )
+        else:
+            logger.info(
+                "[TeamHelpers] stream ended: channel_id=%s session_id=%s chunks=%s",
+                _resolve_channel_id(channel_id),
+                session_id,
+                received_chunks,
+            )
+    except asyncio.CancelledError:
+        logger.info(
+            "[TeamHelpers] stream cancelled: channel_id=%s session_id=%s",
+            _resolve_channel_id(channel_id),
+            session_id,
+        )
+        raise
+    except Exception as exc:
+        logger.error(
+            "[TeamHelpers] stream failed: channel_id=%s session_id=%s error=%s",
+            _resolve_channel_id(channel_id),
+            session_id,
+            exc,
+            exc_info=True,
+        )
+        _broadcast_event(
+            channel_id,
+            session_id,
+            {
+                "event_type": "team.error",
+                "error": str(exc),
+                "session_id": session_id,
+            },
+        )
+    finally:
+        get_team_manager(channel_id).clear_pending_runtime(session_id)
+        get_team_manager(channel_id).pop_stream_task(session_id)
+
+
+async def _consume_monitor_events(
+    channel_id: str | None,
+    session_id: str,
+    monitor_handler: TeamMonitorHandler,
+) -> None:
+    """Consume monitor events in the background and broadcast them."""
+    try:
+        logger.info(
+            "[TeamHelpers] monitor event loop started: channel_id=%s session_id=%s",
+            _resolve_channel_id(channel_id),
+            session_id,
+        )
+        async for event in monitor_handler.events():
+            _broadcast_event(channel_id, session_id, event)
+
+        logger.info(
+            "[TeamHelpers] monitor event loop ended: channel_id=%s session_id=%s",
+            _resolve_channel_id(channel_id),
+            session_id,
+        )
+    except asyncio.CancelledError:
+        logger.info(
+            "[TeamHelpers] monitor event loop cancelled: channel_id=%s session_id=%s",
+            _resolve_channel_id(channel_id),
+            session_id,
+        )
+        raise
+    except Exception as exc:
+        logger.error(
+            "[TeamHelpers] monitor event loop failed: channel_id=%s session_id=%s error=%s",
+            _resolve_channel_id(channel_id),
+            session_id,
+            exc,
+        )
+
+
+def _on_team_watcher_done(task: asyncio.Task) -> None:
+    """Callback when a team evolution monitor task completes."""
+    channel_id = getattr(task, "_team_channel_id", None)
+    session_id = getattr(task, "_team_session_id", None)
+    if isinstance(session_id, str):
+        get_team_manager(channel_id).pop_team_evolution_watcher(session_id)
+
+    if task.cancelled():
+        return
+
+    exc = task.exception()
+    if exc is not None:
+        logger.warning("[TeamHelpers] evolution monitor task exception: %s", exc)
+
+
+async def _watch_team_evolution_and_push(
+    channel_id: str | None,
+    session_id: str,
+    rail: Any,
+) -> None:
+    """Monitor TeamSkillEvolutionRail and push stable status/approval events for every evolution cycle."""
+    from jiuwenswarm.server.gateway_push import WebSocketGatewayPushTransport
+
+    push_context = EvolutionPushContext(
+        transport=WebSocketGatewayPushTransport(),
+        channel_id=channel_id,
+        session_id=session_id,
+    )
+    seen_request_ids: set[str] = set()
+    closed_request_ids: set[str] = set()
+    fallback_cycle_index = 0
+    active_cycle_request_id: str | None = None
+
+    async def _cleanup_rail() -> None:
+        cleanup = getattr(rail, "cleanup_background_tasks", None)
+        if cleanup is None:
+            return
+        try:
+            result = cleanup()
+            if asyncio.iscoroutine(result):
+                await result
+        except Exception as exc:
+            logger.warning(
+                "[TeamHelpers] evolution cleanup failed: session_id=%s error=%s",
+                session_id,
+                exc,
+            )
+
+    try:
+        last_event_at = time.monotonic()
+        while True:
+            if not getattr(rail, "auto_scan", True):
+                if active_cycle_request_id is not None:
+                    await push_evolution_status(
+                        push_context,
+                        build_evolution_status_update(
+                            request_id=active_cycle_request_id,
+                            status="end",
+                            stage=TEAM_EVOLUTION_HIDDEN_STAGE,
+                            message="",
+                        ),
+                        build_server_push_message,
+                    )
+                await _cleanup_rail()
+                return
+
+            events = await rail.drain_pending_approval_events(wait=False) or []
+            if not events:
+                if active_cycle_request_id is not None:
+                    idle_for = time.monotonic() - last_event_at
+                    if idle_for >= TEAM_EVOLUTION_EVENT_TIMEOUT_SEC:
+                        logger.warning(
+                            "[TeamHelpers] evolution monitor timed out: session_id=%s "
+                            "request_id=%s idle_for=%.1fs",
+                            session_id,
+                            active_cycle_request_id,
+                            idle_for,
+                        )
+                        await push_evolution_status(
+                            push_context,
+                            build_evolution_status_update(
+                                request_id=active_cycle_request_id,
+                                status="end",
+                                stage=TEAM_EVOLUTION_HIDDEN_STAGE,
+                                message=(
+                                    "Team skill evolution analysis timed out after "
+                                    f"{TEAM_EVOLUTION_EVENT_TIMEOUT_SEC:.0f}s without host events"
+                                ),
+                            ),
+                            build_server_push_message,
+                        )
+                        await _cleanup_rail()
+                        return
+                await asyncio.sleep(TEAM_EVOLUTION_IDLE_SLEEP_SEC)
+                continue
+            last_event_at = time.monotonic()
+
+            await broadcast_evolution_progress(
+                channel_id,
+                session_id,
+                events,
+                parse_stream_chunk=parse_stream_chunk,
+                broadcast_event=_broadcast_event,
+            )
+
+            grouped_approvals, _ = _group_team_evolution_approvals(session_id, events)
+            outcomes = [
+                evolution_outcome_from_event(evt)
+                for evt in events
+                if is_evolution_outcome_event(evt)
+            ]
+            terminal_progress = []
+            for evt in events:
+                terminal = team_evolution_terminal_progress(evt)
+                if terminal is not None:
+                    terminal_progress.append(terminal)
+
+            if active_cycle_request_id is None:
+                first_request_id = next(iter(grouped_approvals), None)
+                if first_request_id is None:
+                    first_request_id = None
+                    for evt in events:
+                        request_id = extract_evolution_request_id(evt)
+                        if request_id:
+                            first_request_id = request_id
+                            break
+                if first_request_id is None:
+                    if any(is_evolution_started_progress(evt) for evt in events):
+                        fallback_cycle_index += 1
+                        first_request_id = make_team_evolution_cycle_request_id(
+                            session_id,
+                            fallback_cycle_index,
+                        )
+                    else:
+                        continue
+                if first_request_id not in closed_request_ids:
+                    active_cycle_request_id = first_request_id
+                    await push_evolution_status(
+                        push_context,
+                        build_evolution_status_update(
+                            request_id=active_cycle_request_id,
+                            status="start",
+                            stage=TEAM_EVOLUTION_START_STAGE,
+                            message=TEAM_EVOLUTION_START_MESSAGE,
+                        ),
+                        build_server_push_message,
+                    )
+
+            if active_cycle_request_id is None:
+                continue
+
+            for request_id, approval_events in grouped_approvals.items():
+                if request_id in closed_request_ids:
+                    continue
+                if active_cycle_request_id != request_id:
+                    active_cycle_request_id = request_id
+                    await push_evolution_status(
+                        push_context,
+                        build_evolution_status_update(
+                            request_id=active_cycle_request_id,
+                            status="start",
+                            stage=TEAM_EVOLUTION_START_STAGE,
+                            message=TEAM_EVOLUTION_START_MESSAGE,
+                        ),
+                        build_server_push_message,
+                    )
+                if request_id in seen_request_ids:
+                    logger.debug(
+                        "[TeamHelpers] skip duplicated team evolution approval batch: session_id=%s request_id=%s",
+                        session_id,
+                        request_id,
+                    )
+                    continue
+                seen_request_ids.add(request_id)
+                for evt in approval_events:
+                    try:
+                        await push_evolution_event(
+                            push_context,
+                            request_id,
+                            evt,
+                            build_server_push_message,
+                        )
+                    except Exception as exc:
+                        logger.warning(
+                            "[TeamHelpers] push approval failed for request_id=%s event_type=%s error=%s",
+                            request_id,
+                            event_type(evt) or "unknown",
+                            exc,
+                        )
+                await push_evolution_status(
+                    push_context,
+                    build_evolution_status_update(
+                        request_id=request_id,
+                        status="end",
+                        stage="approval_required",
+                        message="Team skill evolution proposal is awaiting approval",
+                    ),
+                    build_server_push_message,
+                )
+                closed_request_ids.add(request_id)
+                active_cycle_request_id = None
+
+            terminal = None
+            if outcomes:
+                outcome = outcomes[-1]
+                terminal = {
+                    "status": str(outcome.get("status") or "completed"),
+                    "stage": str(outcome.get("status") or "completed"),
+                    "message": str(outcome.get("message") or ""),
+                }
+            elif terminal_progress:
+                terminal = terminal_progress[-1]
+
+            if terminal is not None and active_cycle_request_id is not None:
+                await push_evolution_status(
+                    push_context,
+                    team_evolution_end_update(active_cycle_request_id, terminal),
+                    build_server_push_message,
+                )
+                closed_request_ids.add(active_cycle_request_id)
+                active_cycle_request_id = None
+    except Exception as exc:
+        logger.warning("[TeamHelpers] evolution monitor failed: %s", exc)
+        try:
+            if active_cycle_request_id is None:
+                return
+            await push_evolution_status(
+                push_context,
+                build_evolution_status_update(
+                    request_id=active_cycle_request_id,
+                    status="end",
+                    stage=TEAM_EVOLUTION_HIDDEN_STAGE,
+                    message=f"团队技能演进分析失败: {exc}",
+                ),
+                build_server_push_message,
+            )
+        except Exception as push_exc:
+            logger.warning("[TeamHelpers] push status notification failed: %s", push_exc)

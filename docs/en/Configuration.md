@@ -1,8 +1,8 @@
 # Configuration Information
 
-JiuwenClaw configuration serves as the foundational setup for your interactions with the agent. Proper configuration allows you to connect to various model services, enable multimodal capabilities, integrate third-party services, and adjust system behavior parameters.
+JiuwenSwarm configuration serves as the foundational setup for your interactions with the agent. Proper configuration allows you to connect to various model services, enable multimodal capabilities, integrate third-party services, and adjust system behavior parameters.
 
-This document details each configuration option in the JiuwenClaw frontend panel to help you get started quickly and fully leverage the system's capabilities.
+This document details each configuration option in the JiuwenSwarm frontend panel to help you get started quickly and fully leverage the system's capabilities.
 
 ---
 
@@ -27,11 +27,11 @@ The configuration panel contains the following main sections:
 
 ## 2. Model Configuration
 
-> Before using JiuwenClaw, you must obtain an API key from your chosen model provider. Visit the provider's official website and follow instructions to apply for an API key.
+> Before using JiuwenSwarm, you must obtain an API key from your chosen model provider. Visit the provider's official website and follow instructions to apply for an API key.
 
 ### 2.1 Supported Model Types
 
-JiuwenClaw supports multiple model types to meet diverse scenario requirements:
+JiuwenSwarm supports multiple model types to meet diverse scenario requirements:
 
 | Model Type       | Purpose                                                                 | Capability Requirements                                                                 | Required |
 | ---------------- | ----------------------------------------------------------------------- | ---------------------------------------------------------------------------------------- | -------- |
@@ -95,7 +95,7 @@ The first item in the list is the default model; you can drag to reorder or clic
 
 ### 2.4 Multimodal Model Usage Examples
 
-Once video, audio, or vision models are configured, JiuwenClaw enables corresponding multimodal features automatically.
+Once video, audio, or vision models are configured, JiuwenSwarm enables corresponding multimodal features automatically.
 
 #### Video Model
 
@@ -108,13 +108,13 @@ model: GLM-4.6V-Flash11
 model_provider: ZhiPu
 ```
 
-When you send a video file to JiuwenClaw, the system will invoke the video model for analysis:
+When you send a video file to JiuwenSwarm, the system will invoke the video model for analysis:
 
 ```
 User: Analyze this video and list the main scenes.
 [Attachment: meeting_recording.mp4]
 
-JiuwenClaw: Based on video analysis, the main scenes are:
+JiuwenSwarm: Based on video analysis, the main scenes are:
 1. Opening remarks (0:00–2:30)
 2. Project progress report (2:30–8:15)
 3. Issue discussion (8:15–12:00)
@@ -140,7 +140,7 @@ When you send an audio file, the system will invoke the audio model for speech r
 User: Transcribe this audio recording.
 [Attachment: voice_message.m4a]
 
-JiuwenClaw: Transcription:
+JiuwenSwarm: Transcription:
 "Project review meeting at 3 PM tomorrow in Conference Room B. Please prepare materials in advance..."
 ```
 
@@ -161,7 +161,7 @@ model_provider: ZhiPu
 User: Extract data from the table in this image.
 [Attachment: data_chart.png]
 
-JiuwenClaw: Extracted sales data:
+JiuwenSwarm: Extracted sales data:
 - January: 1.2M
 - February: 1.35M
 - March: 1.48M
@@ -186,7 +186,7 @@ When you request image generation, the system will invoke the image generation m
 ```
 User: Generate an image of a beach at sunset.
 
-JiuwenClaw: [Generated image]
+JiuwenSwarm: [Generated image]
 Generated an image of a beach at sunset, golden sunlight sparkling on the shimmering sea...
 ```
 
@@ -194,7 +194,7 @@ Generated an image of a beach at sunset, golden sunlight sparkling on the shimme
 
 ## 3. Embedding Configuration
 
-Embedding models convert text into vector representations and form the core of JiuwenClaw's memory system for semantic retrieval.
+Embedding models convert text into vector representations and form the core of JiuwenSwarm's memory system for semantic retrieval.
 
 ### 3.1 Purpose
 
@@ -243,7 +243,7 @@ This section mirrors **§1.4** and **§1.5** for readers who jump here first. Al
 
 ## 5. Self-Evolution Configuration
 
-Self-evolution controls the automatic improvement of JiuwenClaw's Skills.
+Self-evolution controls the automatic improvement of JiuwenSwarm's Skills.
 
 ![Self-Evolution Configuration Example](../assets/images/config_self_evolve.png)
 

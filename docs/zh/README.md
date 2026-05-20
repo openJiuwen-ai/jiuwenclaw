@@ -1,6 +1,6 @@
 # 使用指南
 
-这里汇总 JiuwenClaw 的常用使用说明与功能文档。
+这里汇总 JiuwenSwarm 的常用使用说明与功能文档。
 
 - 从零开始安装与启动：见 [安装指南](安装指南.md)
 - 从零开始安装与启动：见 [快速开始](Quickstart.md) / [TUI 模式](Quickstart_tui.md)；终端命令与 Code 模式详解见 [TUI 使用指南](TUI使用指南.md)
@@ -38,5 +38,5 @@
 
 开发实践：
 
-- [JiuwenClaw 代码审查助手](开发实践/JiuwenClaw代码审查助手开发实践.md)
-- [JiuwenClaw 日报生成器](开发实践/JiuwenClaw日报生成器开发实践.md)
+- [JiuwenSwarm 代码审查助手](开发实践/JiuwenSwarm代码审查助手开发实践.md)
+- [JiuwenSwarm 日报生成器](开发实践/JiuwenSwarm日报生成器开发实践.md)

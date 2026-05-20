@@ -112,7 +112,7 @@ def _install_agent_core_stubs():
     vk_mod.OpenVikingMemoryProvider = _FakeVikingProvider
 
 
-def _install_jiuwenclaw_stubs():
+def _install_jiuwenswarm_stubs():
     ruamel = _ensure_module("ruamel")
     ruamel_yaml = _ensure_module("ruamel.yaml")
     ruamel.yaml = ruamel_yaml
@@ -136,12 +136,12 @@ def _install_jiuwenclaw_stubs():
     def _get_agent_workspace_dir():
         return Path("/tmp/test_workspace")
 
-    # Load the real jiuwenclaw.utils (do NOT replace it in sys.modules —
+    # Load the real jiuwenswarm.utils (do NOT replace it in sys.modules —
     # that leaks str-returning stubs into every later test in the session).
     # Patch only the two attrs we need; the module-scoped autouse fixture
     # in this package's conftest.py restores them after this module's tests
     # finish.
-    import jiuwenclaw.common.utils as utils_stub
+    import jiuwenswarm.common.utils as utils_stub
     utils_stub.get_config_file = _get_config_file
     utils_stub.get_agent_workspace_dir = _get_agent_workspace_dir
 
@@ -175,16 +175,16 @@ _saved_sys_modules: dict = {
     name: sys.modules[name] for name in _AGENT_CORE_STUB_MODULES if name in sys.modules
 }
 
-# Save real jiuwenclaw.common.utils callables before patching
-import jiuwenclaw.common.utils as _utils_mod
+# Save real jiuwenswarm.common.utils callables before patching
+import jiuwenswarm.common.utils as _utils_mod
 _saved_utils_get_config_file = _utils_mod.get_config_file
 _saved_utils_get_agent_workspace_dir = _utils_mod.get_agent_workspace_dir
 
-_install_jiuwenclaw_stubs()
+_install_jiuwenswarm_stubs()
 _install_agent_core_stubs()
 
-from jiuwenclaw.agents.harness.common.memory import external_memory_builder as emb  # noqa: E402
-from jiuwenclaw.agents.harness.common.memory import external_memory_config as emc  # noqa: E402
+from jiuwenswarm.agents.harness.common.memory import external_memory_builder as emb  # noqa: E402
+from jiuwenswarm.agents.harness.common.memory import external_memory_config as emc  # noqa: E402
 
 
 # Immediately restore real modules/utils so other test modules can collect.
@@ -219,7 +219,7 @@ def _isolate_agent_core_stubs():
     saved_utils_wd = _utils_mod.get_agent_workspace_dir
 
     _install_agent_core_stubs()
-    _install_jiuwenclaw_stubs()
+    _install_jiuwenswarm_stubs()
     yield
 
     for (mod_name, attr_name), val in saved_attrs.items():

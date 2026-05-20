@@ -13,7 +13,7 @@ pytestmark = [pytest.mark.integration, pytest.mark.system]
 
 _BOOTSTRAP_PATH = (
         Path(__file__).resolve().parents[2]
-        / "jiuwenclaw"
+        / "jiuwenswarm"
         / "agents"
         / "harness"
         / "team"
@@ -110,7 +110,7 @@ async def test_teammate_bootstrap_replaces_card_using_local_dataset_service_id(
     _install_fake_openjiuwen_schema(monkeypatch)
     monkeypatch.setattr(bootstrap_module, "processed_message_ids", set(), raising=False)
     monkeypatch.setattr(
-        "jiuwenclaw.common.config.get_config",
+        "jiuwenswarm.common.config.get_config",
         lambda: {"team": {"runtime": {"mode": "distributed", "role": "teammate"}}},
     )
     monkeypatch.setattr(bootstrap_module, "_apply_leader_route_from_envelope", lambda *_a, **_k: True)
@@ -160,7 +160,7 @@ async def test_teammate_bootstrap_raises_when_local_dataset_service_id_missing(
     _install_fake_openjiuwen_schema(monkeypatch)
     monkeypatch.setattr(bootstrap_module, "processed_message_ids", set(), raising=False)
     monkeypatch.setattr(
-        "jiuwenclaw.common.config.get_config",
+        "jiuwenswarm.common.config.get_config",
         lambda: {"team": {"runtime": {"mode": "distributed", "role": "teammate"}}},
     )
     monkeypatch.setattr(bootstrap_module, "_apply_leader_route_from_envelope", lambda *_a, **_k: True)
@@ -202,7 +202,7 @@ async def test_teammate_bootstrap_raises_when_local_a2x_client_missing(
     _install_fake_openjiuwen_schema(monkeypatch)
     monkeypatch.setattr(bootstrap_module, "processed_message_ids", set(), raising=False)
     monkeypatch.setattr(
-        "jiuwenclaw.common.config.get_config",
+        "jiuwenswarm.common.config.get_config",
         lambda: {"team": {"runtime": {"mode": "distributed", "role": "teammate"}}},
     )
     monkeypatch.setattr(bootstrap_module, "_apply_leader_route_from_envelope", lambda *_a, **_k: True)

@@ -3,7 +3,7 @@
 set -euo pipefail
 
 SERVER_IP="${SERVER_IP:-}"
-DEFAULT_TEAM_WORKSPACE="${JIUWEN_TEAM_WORKSPACE_ROOT:-/tmp/jiuwenclaw/shared_workspace/jiuwen_team}"
+DEFAULT_TEAM_WORKSPACE="${JIUWEN_TEAM_WORKSPACE_ROOT:-/tmp/jiuwenswarm/shared_workspace/jiuwen_team}"
 EXPORT_DIR="${EXPORT_DIR:-${DEFAULT_TEAM_WORKSPACE}}"
 MOUNT_POINT="${MOUNT_POINT:-${DEFAULT_TEAM_WORKSPACE}}"
 MOUNT_POINTS=()
@@ -40,7 +40,7 @@ Options:
   --clean-all-server-entries    Remove all /etc/fstab nfs4 lines that start with <server-ip>:
 
 Defaults:
-  mount/export path: ${JIUWEN_TEAM_WORKSPACE_ROOT:-/tmp/jiuwenclaw/shared_workspace/jiuwen_team}
+  mount/export path: ${JIUWEN_TEAM_WORKSPACE_ROOT:-/tmp/jiuwenswarm/shared_workspace/jiuwen_team}
 EOF
       exit 0
       ;;

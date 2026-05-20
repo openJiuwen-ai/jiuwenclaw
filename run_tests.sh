@@ -83,7 +83,7 @@ PYTEST_CMD="pytest $VERBOSE"
 # Add coverage
 if [[ "$COVERAGE_REPORT" == "html" ]]; then
     echo -e "${YELLOW}Generating HTML coverage report...${NC}"
-    PYTEST_CMD="$PYTEST_CMD --cov=jiuwenclaw --cov-report=html --cov-report=term-missing"
+    PYTEST_CMD="$PYTEST_CMD --cov=jiuwenswarm --cov-report=html --cov-report=term-missing"
 fi
 
 # Add parallel execution

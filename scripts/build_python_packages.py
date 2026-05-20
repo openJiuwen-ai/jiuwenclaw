@@ -12,7 +12,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 SIDECAR_ROOT = ROOT / "packages" / "jiuwenswarm-tui"
 SIDE_CAR_DIST = SIDECAR_ROOT / "dist"
-TUI_ROOT = ROOT / "jiuwenclaw" / "channels" / "tui" / "frontend"
+TUI_ROOT = ROOT / "jiuwenswarm" / "channels" / "tui" / "frontend"
 
 TUI_TARGETS = {
     "linux-x64": "linux_x86_64",
@@ -38,7 +38,7 @@ def remove_path(path: Path) -> None:
 
 
 def clean_root() -> None:
-    for relative in ("build", "jiuwenclaw.egg-info"):
+    for relative in ("build", "jiuwenswarm.egg-info"):
         remove_path(ROOT / relative)
 
 
@@ -77,10 +77,10 @@ def ensure_js_dependencies(install: bool) -> None:
         raise SystemExit(
             "\n".join(
                 [
-                    "missing JavaScript dependencies for jiuwenclaw/channels/tui/frontend",
+                    "missing JavaScript dependencies for jiuwenswarm/channels/tui/frontend",
                     f"expected: {node_modules}",
                     "run one of:",
-                    "  cd jiuwenclaw/channels/tui/frontend && npm install",
+                    "  cd jiuwenswarm/channels/tui/frontend && npm install",
                     "  python scripts/build_python_packages.py --install-js-deps",
                 ]
             )
@@ -132,7 +132,7 @@ def main() -> None:
     parser.add_argument(
         "--skip-root",
         action="store_true",
-        help="Skip building the main jiuwenclaw wheel",
+        help="Skip building the main jiuwenswarm wheel",
     )
     parser.add_argument(
         "--skip-sidecar",
@@ -147,7 +147,7 @@ def main() -> None:
     parser.add_argument(
         "--install-js-deps",
         action="store_true",
-        help="Install jiuwenclaw/channels/tui/frontend JavaScript dependencies if node_modules is missing",
+        help="Install jiuwenswarm/channels/tui/frontend JavaScript dependencies if node_modules is missing",
     )
     args = parser.parse_args()
     targets = resolve_requested_targets(args.target)

@@ -13,9 +13,9 @@ This guide explains how to build a desktop app with **uv**, **PyInstaller**, and
 
 | Path | Role |
 |------|------|
-| `scripts/jiuwenclaw.spec` | PyInstaller spec |
-| `scripts/jiuwenclaw_exe_entry.py` | Exe entry (desktop mode + subcommands) |
-| `jiuwenclaw/desktop_app.py` | pywebview window and local server |
+| `scripts/jiuwenswarm.spec` | PyInstaller spec |
+| `scripts/jiuwenswarm_exe_entry.py` | Exe entry (desktop mode + subcommands) |
+| `jiuwenswarm/channels/desktop/desktop_app.py` | pywebview window and local server |
 | `scripts/build-exe.ps1` | One-shot build (PowerShell) |
 | `scripts/build-exe.bat` | One-shot build (batch) |
 | `scripts/build-macos.sh` | macOS `.app` + `.dmg` |
@@ -49,21 +49,21 @@ uv sync --extra dev
 #### 2. Build the web UI
 
 ```bash
-cd jiuwenclaw/channels/web/frontend
+cd jiuwenswarm/channels/web/frontend
 npm install
 npm run build
 cd ../..
 ```
 
-Static files land in `jiuwenclaw/channels/web/frontend/dist`.
+Static files land in `jiuwenswarm/channels/web/frontend/dist`.
 
 #### 3. PyInstaller
 
 ```bash
-uv run pyinstaller scripts/jiuwenclaw.spec
+uv run pyinstaller scripts/jiuwenswarm.spec
 ```
 
-Output: `dist/jiuwenclaw/`, main binary `dist/jiuwenclaw/jiuwenclaw.exe`.
+Output: `dist/jiuwenswarm/`, main binary `dist/jiuwenswarm/jiuwenswarm.exe`.
 
 ## Using the Windows build
 
@@ -72,35 +72,35 @@ Output: `dist/jiuwenclaw/`, main binary `dist/jiuwenclaw/jiuwenclaw.exe`.
 1. **Initialize** (required once):
 
    ```bash
-   jiuwenclaw.exe init
+   jiuwenswarm.exe init
    ```
 
-   Creates `~/.jiuwenclaw` config and workspace.
+   Creates `~/.jiuwenswarm` config and workspace.
 
-2. **Configure**: edit `%USERPROFILE%\.jiuwenclaw\.env` (`API_KEY`, `MODEL_PROVIDER`, …).
+2. **Configure**: edit `%USERPROFILE%\.jiuwenswarm\.env` (`API_KEY`, `MODEL_PROVIDER`, …).
 
 3. **Start**:
 
    ```bash
-   jiuwenclaw.exe
+   jiuwenswarm.exe
    ```
 
    Starts backend + static UI in a borderless pywebview window (default `http://127.0.0.1:5173`); you usually do not open a separate browser.
 
 ## Inno Setup notes
 
-- Package the whole `dist/jiuwenclaw/` directory.
-- Entry point: `dist/jiuwenclaw/jiuwenclaw.exe`.
-- Run `jiuwenclaw.exe init` from the installer finish page if needed.
-- User data lives under `%USERPROFILE%\.jiuwenclaw` — do not delete on uninstall by default.
-- Share one `.ico` between `jiuwenclaw.spec` and Inno Setup if you add an icon.
+- Package the whole `dist/jiuwenswarm/` directory.
+- Entry point: `dist/jiuwenswarm/jiuwenswarm.exe`.
+- Run `jiuwenswarm.exe init` from the installer finish page if needed.
+- User data lives under `%USERPROFILE%\.jiuwenswarm` — do not delete on uninstall by default.
+- Share one `.ico` between `jiuwenswarm.spec` and Inno Setup if you add an icon.
 
 ### Subcommands
 
 | Command | Role |
 |---------|------|
-| `jiuwenclaw.exe` | Start desktop app |
-| `jiuwenclaw.exe init` | Initialize workspace |
+| `jiuwenswarm.exe` | Start desktop app |
+| `jiuwenswarm.exe init` | Initialize workspace |
 
 ## macOS
 
@@ -109,7 +109,7 @@ chmod +x scripts/build-macos.sh
 ./scripts/build-macos.sh
 ```
 
-Produces `dist/JiuwenClaw.app` and `dist/JiuwenClaw-<version>.dmg`.
+Produces `dist/JiuwenSwarm.app` and `dist/JiuwenSwarm-<version>.dmg`.
 
 - Open the `.app` or mount the `.dmg` and drag to **Applications**.
 - Not codesigned/notarized — fine for local testing; for distribution add `.icns`, signing, and notarization.
@@ -120,19 +120,19 @@ Produces `dist/JiuwenClaw.app` and `dist/JiuwenClaw-<version>.dmg`.
 - **Python**: Bundled by PyInstaller; end users do not install Python.
 - **pywebview**: Loads local `http://127.0.0.1:5173`.
 - **Node**: Only for building the React app; runtime uses static files.
-- **Workspace**: Same as pip install — `~/.jiuwenclaw`.
-- **Inno**: Ship the full `dist/jiuwenclaw/` tree, not a single exe only.
+- **Workspace**: Same as pip install — `~/.jiuwenswarm`.
+- **Inno**: Ship the full `dist/jiuwenswarm/` tree, not a single exe only.
 - **DMG**: Script may include an **Applications** shortcut for drag install.
 
 ## Troubleshooting
 
 ### Missing `web/dist`
 
-Run `cd jiuwenclaw/channels/web/frontend && npm run build`.
+Run `cd jiuwenswarm/channels/web/frontend && npm run build`.
 
 ### `ModuleNotFoundError` at runtime
 
-Add missing modules to `hiddenimports` in `scripts/jiuwenclaw.spec` and rebuild.
+Add missing modules to `hiddenimports` in `scripts/jiuwenswarm.spec` and rebuild.
 
 ### Large bundle
 

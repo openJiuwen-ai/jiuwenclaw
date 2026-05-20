@@ -89,7 +89,7 @@ Open **Heartbeat** in the sidebar to:
 ## 5. FAQ
 
 **Q: I edited `heartbeat` in `config.yaml` but nothing changed.**  
-A: Config is read at startup. If you use the web panel, it rewrites YAML and restarts the heartbeat service. If you edit YAML by hand, restart the app (e.g. `jiuwenclaw-web`).
+A: Config is read at startup. If you use the web panel, it rewrites YAML and restarts the heartbeat service. If you edit YAML by hand, restart the app (e.g. `jiuwenswarm-web`).
 
 **Q: Heartbeats only during work hours?**  
 A: Set `heartbeat.active_hours.start` / `end`, e.g. `09:00`–`18:00`.
@@ -98,13 +98,13 @@ A: Set `heartbeat.active_hours.start` / `end`, e.g. `09:00`–`18:00`.
 A: Set `HEARTBEAT_TIMEOUT` (seconds). On timeout the beat is marked failed and a WARNING is logged.
 
 **Q: Where must `HEARTBEAT.md` live?**
-A: At the DeepAgent workspace root: `~/.jiuwenclaw/agent/jiuwenclaw_workspace/HEARTBEAT.md` (in installed mode) or `jiuwenclaw/resources/agent/jiuwenclaw_workspace/HEARTBEAT.md` (in source mode). Otherwise it is treated as no custom tasks.
+A: At the DeepAgent workspace root: `~/.jiuwenswarm/agent/jiuwenswarm_workspace/HEARTBEAT.md` (in installed mode) or `jiuwenswarm/resources/agent/jiuwenswarm_workspace/HEARTBEAT.md` (in source mode). Otherwise it is treated as no custom tasks.
 
 ---
 
 ## 6. Code index
 
-- Service: `jiuwenclaw/gateway/heartbeat.py` (`GatewayHeartbeatService`, `HeartbeatConfig`).
+- Service: `jiuwenswarm/gateway/heartbeat.py` (`GatewayHeartbeatService`, `HeartbeatConfig`).
 - Config: `config/config.py` (`update_heartbeat_in_config`); `app.py` builds `HeartbeatConfig` from YAML + env.
-- Agent: `jiuwenclaw/server/runtime/agent_adapter/interface.py` reads `HEARTBEAT.md` when `request.params` indicates heartbeat.
-- Web: `jiuwenclaw/channels/web/frontend/src/components/HeartbeatPanel/`, `heartbeat.get_conf` / `heartbeat.set_conf`, `heartbeat.relay`.
+- Agent: `jiuwenswarm/server/runtime/agent_adapter/interface.py` reads `HEARTBEAT.md` when `request.params` indicates heartbeat.
+- Web: `jiuwenswarm/channels/web/frontend/src/components/HeartbeatPanel/`, `heartbeat.get_conf` / `heartbeat.set_conf`, `heartbeat.relay`.

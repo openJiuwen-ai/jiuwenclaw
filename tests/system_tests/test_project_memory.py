@@ -14,20 +14,20 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from jiuwenclaw.server.runtime.agent_adapter.interface_code import JiuwenClawCodeAdapter
-from jiuwenclaw.server.runtime.agent_adapter.interface_deep import JiuWenClawDeepAdapter
-from jiuwenclaw.agents.harness.common.rails.project_memory import (
+from jiuwenswarm.server.runtime.agent_adapter.interface_code import JiuwenClawCodeAdapter
+from jiuwenswarm.server.runtime.agent_adapter.interface_deep import JiuWenClawDeepAdapter
+from jiuwenswarm.agents.harness.common.rails.project_memory import (
     SECTION_NAME,
     clear_project_memory_cache,
     discover_and_load_memory_files,
     merge_memory_content,
 )
-from jiuwenclaw.agents.harness.common.rails.project_memory.files import (
+from jiuwenswarm.agents.harness.common.rails.project_memory.files import (
     GitWorktreeInfo,
     LoadedMemoryFile,
     PRIORITY,
 )
-from jiuwenclaw.agents.harness.common.rails import (
+from jiuwenswarm.agents.harness.common.rails import (
     ProjectMemoryRail,
 )
 
@@ -77,7 +77,7 @@ class TestProjectMemoryRailEndToEnd:
     """Full rail lifecycle with real filesystem."""
 
     @pytest.mark.asyncio
-    async def test_rail_loads_jiuwenclaw_md_and_injects_section(self):
+    async def test_rail_loads_jiuwenswarm_md_and_injects_section(self):
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
             _touch(root, ".git/HEAD", "")
@@ -163,7 +163,7 @@ class TestProjectMemoryRailEndToEnd:
             _touch(root, ".git/HEAD", "")
             _touch(extra, "JIUWENCLAW.md", "EXTRA-PROJECT-RULE")
 
-            monkeypatch.setenv("JIUWENCLAW_ADDITIONAL_DIRECTORIES", str(extra))
+            monkeypatch.setenv("JIUWENSWARM_ADDITIONAL_DIRECTORIES", str(extra))
             clear_project_memory_cache()
 
             rail = ProjectMemoryRail(
@@ -186,7 +186,7 @@ class TestProjectMemoryRailEndToEnd:
 class TestProjectMemoryFileDiscovery:
     """Core discover_and_load_memory_files with real filesystem."""
 
-    def test_discovery_finds_jiuwenclaw_md(self):
+    def test_discovery_finds_jiuwenswarm_md(self):
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
             _touch(root, ".git/HEAD", "")
@@ -317,7 +317,7 @@ class TestCodeModeIntegration:
             tempfile.TemporaryDirectory() as extra2,
         ):
             monkeypatch.setenv(
-                "JIUWENCLAW_ADDITIONAL_DIRECTORIES",
+                "JIUWENSWARM_ADDITIONAL_DIRECTORIES",
                 str(extra1) + os.pathsep + str(extra2),
             )
 

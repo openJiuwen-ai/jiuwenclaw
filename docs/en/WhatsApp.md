@@ -4,13 +4,13 @@ This guide describes the WhatsApp integration currently implemented in this repo
 
 ## Architecture
 
-JiuwenClaw does not talk to WhatsApp directly from Python.
+JiuwenSwarm does not talk to WhatsApp directly from Python.
 
 `WhatsApp app` <-> `Baileys bridge (Node.js)` <-> `WhatsAppChannel (Python)`
 
 - Bridge WebSocket default: `ws://127.0.0.1:19600/ws`
-- Bridge script: `jiuwenclaw/scripts/whatsapp-bridge.js`
-- Python channel: `jiuwenclaw/channel/whatsapp_channel.py`
+- Bridge script: `jiuwenswarm/scripts/whatsapp-bridge.js`
+- Python channel: `jiuwenswarm/channel/whatsapp_channel.py`
 - Runtime config: `channels.whatsapp` in `config.yaml`
 
 ## What This Repo Implements
@@ -80,16 +80,16 @@ The distinction matters:
 
 ## Prerequisites
 
-- Python environment that can run `python -m jiuwenclaw.app`
+- Python environment that can run `python -m jiuwenswarm.app`
 - Node.js 20+ and npm
 - A WhatsApp account with Linked Devices enabled
 
 ## 1. Install Bridge Dependencies
 
-Run inside the inner project folder that contains `jiuwenclaw/package.json`:
+Run inside the inner project folder that contains `jiuwenswarm/package.json`:
 
 ```powershell
-cd C:\Users\chiak\OneDrive\Desktop\jiuwenclaw\jiuwenclaw
+cd C:\Users\chiak\OneDrive\Desktop\jiuwenswarm\jiuwenswarm
 npm install
 ```
 
@@ -103,7 +103,7 @@ npm install @whiskeysockets/baileys ws pino qrcode-terminal
 
 Edit your runtime config file:
 
-`C:\Users\chiak\.jiuwenclaw\config\config.yaml`
+`C:\Users\chiak\.jiuwenswarm\config\config.yaml`
 
 Under `channels:` use:
 
@@ -115,7 +115,7 @@ Under `channels:` use:
     enable_streaming: true
     auto_start_bridge: false
     bridge_command: node scripts/whatsapp-bridge.js
-    bridge_workdir: C:/Users/chiak/OneDrive/Desktop/jiuwenclaw/jiuwenclaw
+    bridge_workdir: C:/Users/chiak/OneDrive/Desktop/jiuwenswarm/jiuwenswarm
     enabled: true
 ```
 
@@ -134,7 +134,7 @@ Open two terminals unless you use `auto_start_bridge: true`.
 Terminal A, bridge:
 
 ```powershell
-cd C:\Users\chiak\OneDrive\Desktop\jiuwenclaw\jiuwenclaw
+cd C:\Users\chiak\OneDrive\Desktop\jiuwenswarm\jiuwenswarm
 npm run whatsapp:bridge
 ```
 
@@ -145,8 +145,8 @@ Expected line:
 Terminal B, app:
 
 ```powershell
-cd C:\Users\chiak\OneDrive\Desktop\jiuwenclaw
-python -m jiuwenclaw.app
+cd C:\Users\chiak\OneDrive\Desktop\jiuwenswarm
+python -m jiuwenswarm.app
 ```
 
 Expected behavior:
@@ -167,7 +167,7 @@ Then scan the QR code from Terminal A.
 
 Auth state is stored at:
 
-`jiuwenclaw/jiuwenclaw/workspace/.whatsapp-auth`
+`jiuwenswarm/jiuwenswarm/workspace/.whatsapp-auth`
 
 If the account is already linked, QR may not appear.
 
@@ -197,7 +197,7 @@ API_BASE=https://your-real-openai-compatible-endpoint/v1
 API_KEY=your-real-key
 ```
 
-Restart `python -m jiuwenclaw.app` after updating `.env`.
+Restart `python -m jiuwenswarm.app` after updating `.env`.
 
 ## Troubleshooting
 
@@ -205,13 +205,13 @@ Restart `python -m jiuwenclaw.app` after updating `.env`.
 
 You ran `npm` in the wrong folder. Use:
 
-`C:\Users\chiak\OneDrive\Desktop\jiuwenclaw\jiuwenclaw`
+`C:\Users\chiak\OneDrive\Desktop\jiuwenswarm\jiuwenswarm`
 
 ### Bridge starts but no QR
 
 1. Stop any old bridge processes that may still be holding the port or auth session.
 2. Delete auth state to force relinking:
-   `jiuwenclaw/jiuwenclaw/workspace/.whatsapp-auth`
+   `jiuwenswarm/jiuwenswarm/workspace/.whatsapp-auth`
 3. Start the bridge again and wait for `QR received`.
 
 ### App connects to bridge but cannot send

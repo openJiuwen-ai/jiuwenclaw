@@ -2,7 +2,7 @@
 
 """Unit tests for the replace_all merge helper preserving YAML env-var placeholders."""
 
-from jiuwenclaw.gateway.channel_manager.web.app_web_handlers import _merge_models_for_replace_all, _values_match
+from jiuwenswarm.gateway.channel_manager.web.app_web_handlers import _merge_models_for_replace_all, _values_match
 
 
 class _StubCrypto:

@@ -1,6 +1,6 @@
 # 包含 package resources 目录
-recursive-include jiuwenclaw/resources *
+recursive-include jiuwenswarm/resources *
 
 # 排除 node_modules，避免打包进 wheel
-prune jiuwenclaw/channels/web/frontend/node_modules
+prune jiuwenswarm/channels/web/frontend/node_modules
 global-exclude node_modules

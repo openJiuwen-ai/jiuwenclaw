@@ -1,6 +1,6 @@
 <div align="center">
 
-# JiuwenClaw
+# JiuwenSwarm
 
 > Your On-Call AI Butler — Bringing Intelligence to Your Fingertips
 
@@ -12,12 +12,12 @@
 
 ## 🌟 Overview
 
-**JiuwenClaw** is an intelligent AI Agent built in Python. True to its name — "Claw" symbolizes precise reach and connection — it extends the power of large language models directly to your fingertips through the communication apps you already use every day.
+**JiuwenSwarm** is an intelligent AI Agent built in Python. As its name suggests, “Swarm” symbolizes multiple intelligent agents working together as efficiently as a swarm of bees, evolving autonomously and accelerating the era of “collective intelligence” in earnest.
 
 ### ✨ Key Features
 
 - **Ecosystem Compatible**: Full support for **Huawei Cloud MaaS** and other mainstream model platforms
-- **Seamless Integration**: Native integration with the **Xiaoyi Open Platform**, enabling Huawei phone users to invoke JiuwenClaw directly through the Xiaoyi assistant
+- **Seamless Integration**: Native integration with the **Xiaoyi Open Platform**, enabling Huawei phone users to invoke JiuwenSwarm directly through the Xiaoyi assistant
 - **Flexible Deployment**: Self-hosted deployment with full data sovereignty
 - **Multi-Platform Access**: Interact via web interface, messaging apps, and more
 
@@ -27,11 +27,11 @@
 
 ### 🤝 Your Personal Task Butler
 
-Whether dealing with task additions, mid-flow interruptions, or shifting requirements, JiuwenClaw understands your intent precisely — intelligently scheduling and executing tasks in an orderly, stress-free manner.
+Whether dealing with task additions, mid-flow interruptions, or shifting requirements, JiuwenSwarm understands your intent precisely — intelligently scheduling and executing tasks in an orderly, stress-free manner.
 
 ### 🔄 Autonomous Evolution
 
-When you express dissatisfaction or an error occurs, JiuwenClaw automatically refines the relevant skills based on your feedback — continuously improving, always working in your best interest.
+When you express dissatisfaction or an error occurs, JiuwenSwarm automatically refines the relevant skills based on your feedback — continuously improving, always working in your best interest.
 
 
 <p align="center">
@@ -40,28 +40,28 @@ When you express dissatisfaction or an error occurs, JiuwenClaw automatically re
 
 ## ⚠️ Version Upgrade Notice
 
-If you're upgrading from an older version, check the changelog for any breaking changes. You **must** reinitialize JiuwenClaw if a breaking change is indicated. The service will fail to start without reinitialization.
+If you're upgrading from an older version, check the changelog for any breaking changes. You **must** reinitialize JiuwenSwarm if a breaking change is indicated. The service will fail to start without reinitialization.
 
 ### Backup Before Upgrading
 
 | Data Type | Source Path | Description |
 |-----------|-------------|-------------|
-| Memory Data | `.jiuwenclaw/workspace/agent/memory` | All your conversation memories |
-| Custom Skills | `.jiuwenclaw/workspace/agent/skills` | Your custom agent skills |
-| Configuration | `.jiuwenclaw/config` | Your app settings |
+| Memory Data | `.jiuwenswarm/workspace/agent/memory` | All your conversation memories |
+| Custom Skills | `.jiuwenswarm/workspace/agent/skills` | Your custom agent skills |
+| Configuration | `.jiuwenswarm/config` | Your app settings |
 
 ### Migration Steps
 
-After upgrading and running `jiuwenclaw-init`, manually migrate your data:
+After upgrading and running `jiuwenswarm-init`, manually migrate your data:
 
 1. **Copy Memory:**
    ```bash
-   cp -r .jiuwenclaw/workspace/agent/memory .jiuwenclaw/agent/memory
+   cp -r .jiuwenswarm/workspace/agent/memory .jiuwenswarm/agent/memory
    ```
 
 2. **Copy Skills:**
    ```bash
-   cp -r .jiuwenclaw/workspace/agent/skills .jiuwenclaw/agent/skills
+   cp -r .jiuwenswarm/workspace/agent/skills .jiuwenswarm/agent/skills
    ```
 
 ## 🚀 Getting Started
@@ -69,21 +69,21 @@ After upgrading and running `jiuwenclaw-init`, manually migrate your data:
 ### 📦 Installation
 
 ```bash
-# Install JiuwenClaw
-pip install jiuwenclaw
+# Install JiuwenSwarm
+pip install jiuwenswarm
 
-# Initialize JiuwenClaw (first-time setup or after upgrading)
+# Initialize JiuwenSwarm (first-time setup or after upgrading)
 # ⚠️ Remember to backup your data before running this command
-jiuwenclaw-init
+jiuwenswarm-init
 
-# Start JiuwenClaw
-jiuwenclaw-start
+# Start JiuwenSwarm
+jiuwenswarm-start
 
-# Install JiuwenClaw-tui
-pip install jiuwenclaw-tui
+# Install JiuwenSwarm-tui
+pip install jiuwenswarm-tui
 
-# Start JiuwenClaw-tui
-jiuwenclaw-tui
+# Start JiuwenSwarm-tui
+jiuwenswarm-tui
 ```
 
 ### 💬 How to Use
@@ -93,20 +93,20 @@ jiuwenclaw-tui
 | Method             | Description                                                  |
 | ------------------ | ------------------------------------------------------------ |
 | **Web Frontend**   | After starting the service, visit `http://localhost:5173` to chat directly in your browser |
-| **Xiaoyi Channel** | Huawei phone users can invoke Xiaoyi to talk with JiuwenClaw directly |
-| **Lark Channel** | Once configured, chat with JiuwenClaw seamlessly inside Lark |
+| **Xiaoyi Channel** | Huawei phone users can invoke Xiaoyi to talk with JiuwenSwarm directly |
+| **Lark Channel** | Once configured, chat with JiuwenSwarm seamlessly inside Lark |
 
 #### 2️⃣ Scheduled Tasks
 
-Set up heartbeat tasks with your to-do items, and JiuwenClaw will wake up on schedule to execute them automatically — making your time management smarter and more effortless.
+Set up heartbeat tasks with your to-do items, and JiuwenSwarm will wake up on schedule to execute them automatically — making your time management smarter and more effortless.
 
 ## 📚 Documentation
 
 | Document | Description |
 | :--------------------------------------------------- | :------------------------------------------------------- |
 | [📖 Install guide](docs/en/InstallGuide.md)          | Full installation paths (pip, source, conda, Docker)     |
-| [📖 Quick Start](docs/en/Quickstart.md) | Get up and running with JiuwenClaw in 5 minutes |
-| [📖 Quick Start (TUI)](docs/en/Quickstart_tui.md) | Get up and running with JiuwenClaw-tui in 5 minutes |
+| [📖 Quick Start](docs/en/Quickstart.md) | Get up and running with JiuwenSwarm in 5 minutes |
+| [📖 Quick Start (TUI)](docs/en/Quickstart_tui.md) | Get up and running with JiuwenSwarm-tui in 5 minutes |
 | [⚙️ Configuration & Workspace](docs/en/Configuration.md) | Environment setup and workspace management |
 | [📁 Workspace Structure](docs/en/Agent.md) | workspace directory layout, presets, and dynamic content |
 | [🔄 Modes](docs/en/Modes.md) | PLAN / AGENT / CODE / TEAM mode switching and configuration |
@@ -156,5 +156,5 @@ This project is licensed under the **Apache License 2.0**. See the [LICENSE](LIC
 
 <p align="center">
   <strong>Making intelligence accessible. Making life simpler.</strong><br>
-  <sub>✨ JiuwenClaw — Your Personal AI Assistant ✨</sub>
+  <sub>✨ JiuwenSwarm — Your Personal AI Assistant ✨</sub>
 </p>

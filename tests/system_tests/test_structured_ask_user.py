@@ -23,13 +23,13 @@ from openjiuwen.core.single_agent.interrupt.response import (
 )
 from openjiuwen.harness.rails.interrupt.ask_user_rail import AskUserPayload
 
-from jiuwenclaw.agents.harness.common.rails.ask_user_rail import (
+from jiuwenswarm.agents.harness.common.rails.ask_user_rail import (
     EXTENDED_INPUT_PARAMS_CN,
     EXTENDED_INPUT_PARAMS_EN,
     StructuredAskUserRail,
     StructuredAskUserTool,
 )
-from jiuwenclaw.agents.harness.common.rails.interrupt.interrupt_helpers import (
+from jiuwenswarm.agents.harness.common.rails.interrupt.interrupt_helpers import (
     _extract_questions_from_value,
     convert_interactions_to_ask_user_question,
 )
@@ -113,7 +113,7 @@ class TestStructuredAskUserToolSchema:
         `header`, `options`, `multi_select`.
         """
 
-        from jiuwenclaw.agents.harness.common.rails.ask_user_rail import (
+        from jiuwenswarm.agents.harness.common.rails.ask_user_rail import (
             _QUESTIONS_ITEM_SCHEMA,
         )
         props = _QUESTIONS_ITEM_SCHEMA["properties"]
@@ -532,7 +532,7 @@ class TestStructuredAskUserRailResolveInterrupt:
 
 _INIT_PROMPTS_TS_PATH = (
     Path(__file__).parent.parent.parent
-    / "jiuwenclaw"
+    / "jiuwenswarm"
     / "cli"
     / "src"
     / "core"

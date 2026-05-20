@@ -13,7 +13,7 @@ if errorlevel 1 exit /b 1
 
 echo.
 echo [2/3] 构建前端...
-cd jiuwenclaw\channels\web\frontend
+cd jiuwenswarm\channels\web\frontend
 call npm install
 if errorlevel 1 (cd ..\.. & exit /b 1)
 call npm run build
@@ -22,11 +22,11 @@ cd ..\..
 
 echo.
 echo [3/3] 执行 PyInstaller 打包...
-call uv run pyinstaller scripts\jiuwenclaw.spec
+call uv run pyinstaller scripts\jiuwenswarm.spec
 if errorlevel 1 exit /b 1
 
 echo.
 echo === 打包完成 ===
-echo 桌面版目录: %cd%\dist\jiuwenclaw
-echo 主程序: %cd%\dist\jiuwenclaw\jiuwenclaw.exe
+echo 桌面版目录: %cd%\dist\jiuwenswarm
+echo 主程序: %cd%\dist\jiuwenswarm\jiuwenswarm.exe
 pause

@@ -2,10 +2,10 @@ import asyncio
 
 import pytest
 
-from jiuwenclaw.common.e2a.gateway_normalize import e2a_from_agent_fields
-from jiuwenclaw.common.e2a.wire_codec import encode_agent_chunk_for_wire
-from jiuwenclaw.gateway.routing.agent_client import WebSocketAgentServerClient
-from jiuwenclaw.common.schema.agent import AgentResponseChunk
+from jiuwenswarm.common.e2a.gateway_normalize import e2a_from_agent_fields
+from jiuwenswarm.common.e2a.wire_codec import encode_agent_chunk_for_wire
+from jiuwenswarm.gateway.routing.agent_client import WebSocketAgentServerClient
+from jiuwenswarm.common.schema.agent import AgentResponseChunk
 
 
 class FakeWebSocket:
@@ -33,7 +33,7 @@ async def test_send_request_stream_keeps_tail_window_for_processing_status(monke
     client.set_ws_for_test(FakeWebSocket())
 
     monkeypatch.setattr(
-        "jiuwenclaw.gateway.routing.agent_client._STREAM_TRAILING_MESSAGE_GRACE_SECONDS",
+        "jiuwenswarm.gateway.routing.agent_client._STREAM_TRAILING_MESSAGE_GRACE_SECONDS",
         0.05,
     )
 
@@ -107,7 +107,7 @@ async def test_send_request_stream_absorbs_duplicate_complete_frames(monkeypatch
     client.set_ws_for_test(FakeWebSocket())
 
     monkeypatch.setattr(
-        "jiuwenclaw.gateway.routing.agent_client._STREAM_TRAILING_MESSAGE_GRACE_SECONDS",
+        "jiuwenswarm.gateway.routing.agent_client._STREAM_TRAILING_MESSAGE_GRACE_SECONDS",
         0.05,
     )
 

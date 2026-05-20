@@ -7,9 +7,9 @@ from openjiuwen.core.foundation.llm import Model
 from openjiuwen.core.single_agent.rail.base import AgentCallbackContext
 from openjiuwen.harness.prompts import PromptSection, SystemPromptBuilder
 
-from jiuwenclaw.server.runtime.agent_adapter.interface_deep import JiuWenClawDeepAdapter
-from jiuwenclaw.agents.harness.common.prompt.prompt_builder import build_identity_prompt
-from jiuwenclaw.agents.harness.common.rails.runtime_prompt_rail import RuntimePromptRail
+from jiuwenswarm.server.runtime.agent_adapter.interface_deep import JiuWenClawDeepAdapter
+from jiuwenswarm.agents.harness.common.prompt.prompt_builder import build_identity_prompt
+from jiuwenswarm.agents.harness.common.rails.runtime_prompt_rail import RuntimePromptRail
 
 
 class _TestableJiuWenClawDeepAdapter(JiuWenClawDeepAdapter):
@@ -104,11 +104,11 @@ def test_deep_adapter_subagents_includes_optional_browser_and_configured_researc
         patch.object(adapter, "_resolve_runtime_language", return_value="cn"),
         patch.object(adapter, "_browser_runtime_enabled", return_value=True),
         patch(
-            "jiuwenclaw.server.runtime.agent_adapter.interface_deep.build_research_agent_config",
+            "jiuwenswarm.server.runtime.agent_adapter.interface_deep.build_research_agent_config",
             return_value="research_spec",
         ) as mock_research,
         patch(
-            "jiuwenclaw.server.runtime.agent_adapter.interface_deep.build_browser_agent_config",
+            "jiuwenswarm.server.runtime.agent_adapter.interface_deep.build_browser_agent_config",
             return_value="browser_spec",
         ) as mock_browser,
     ):
@@ -139,11 +139,11 @@ def test_deep_adapter_subagents_omits_research_without_explicit_enable():
         patch.object(adapter, "_resolve_runtime_language", return_value="cn"),
         patch.object(adapter, "_browser_runtime_enabled", return_value=True),
         patch(
-            "jiuwenclaw.server.runtime.agent_adapter.interface_deep.build_research_agent_config",
+            "jiuwenswarm.server.runtime.agent_adapter.interface_deep.build_research_agent_config",
             return_value="research_spec",
         ) as mock_research,
         patch(
-            "jiuwenclaw.server.runtime.agent_adapter.interface_deep.build_browser_agent_config",
+            "jiuwenswarm.server.runtime.agent_adapter.interface_deep.build_browser_agent_config",
             return_value="browser_spec",
         ) as mock_browser,
     ):

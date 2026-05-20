@@ -3,9 +3,11 @@
 
 import copy
 import logging
+import posixpath
 import socket
 import textwrap
 import time
+import uuid
 from pathlib import Path
 
 import httpx
@@ -78,11 +80,54 @@ class SandboxTrackingClient:
         return suffix or None
 
 
+_UDS_SCHEME = "unix://"
+# httpx UDS transport 仍要求一个合法 absolute base_url 才能拼相对路径; 实际
+# 请求由 socket transport 接管, 这个 host 字段不会被解析。与
+# ``tests/integration/conftest.py`` 中的 ``_UDS_PLACEHOLDER_BASE_URL`` 保持一致。
+_UDS_PLACEHOLDER_BASE_URL = "http://jiuwenbox"
+
+
+def _is_uds_endpoint(endpoint: str) -> bool:
+    return endpoint.startswith(_UDS_SCHEME)
+
+
 def _normalize_endpoint(endpoint: str) -> str:
     return endpoint if "://" in endpoint else f"http://{endpoint}"
 
 
+def _build_httpx_client(endpoint: str, *, timeout: float = 30.0) -> httpx.Client:
+    """按 endpoint scheme 构造 httpx.Client (与 conftest._build_httpx_client 同语义).
+
+    存在的原因: 本文件原先有一份本地 ``client`` fixture, 覆盖了 conftest 里
+    UDS-aware 的版本。保留本地 fixture 是为了让用例显式可见, 但实现委托给
+    这个工厂, 避免再写一份 base_url + transport 的分叉逻辑。
+    """
+    if _is_uds_endpoint(endpoint):
+        uds_path = endpoint[len(_UDS_SCHEME):]
+        if not uds_path.startswith("/"):
+            raise ValueError(f"unix endpoint requires absolute path: {endpoint!r}")
+        return httpx.Client(
+            transport=httpx.HTTPTransport(uds=uds_path),
+            base_url=_UDS_PLACEHOLDER_BASE_URL,
+            timeout=timeout,
+        )
+    return httpx.Client(base_url=_normalize_endpoint(endpoint), timeout=timeout)
+
+
 def _sandbox_health_url(server_endpoint: str) -> str:
+    """构造一个"从沙箱内 urlopen 回服务端 /health"的 URL.
+
+    这个 helper 只在两处用到, 都是"isolated 沙箱不能反向连服务端"类的网络
+    隔离断言。UDS 模式下服务端根本没暴露 TCP listener, 沙箱无论隔离与否
+    都拿不到一个可拨号的 host:port, 该断言失去意义—— ``pytest.skip`` 而
+    不是返回一个 ``unix://`` URL (urllib 会以 ``unknown url type`` 提前
+    报错, 看上去像通过了, 实际并未验证隔离)。
+    """
+    if _is_uds_endpoint(server_endpoint):
+        pytest.skip(
+            "sandbox-to-host TCP isolation test needs a TCP server endpoint; "
+            f"got {server_endpoint!r}"
+        )
     return f"{_normalize_endpoint(server_endpoint).rstrip('/')}/health"
 
 
@@ -252,7 +297,7 @@ def _has_arg_pair(args: list[str], flag: str, value: str) -> bool:
 
 @pytest.fixture
 def client(server_endpoint):
-    with httpx.Client(base_url=_normalize_endpoint(server_endpoint), timeout=30.0) as external:
+    with _build_httpx_client(server_endpoint, timeout=30.0) as external:
         tracking = SandboxTrackingClient(external)
         try:
             yield tracking
@@ -2855,3 +2900,1194 @@ class TestSandboxListing:
         resp = client.get("/api/v1/sandboxes")
         assert resp.status_code == 200
         assert len(resp.json()) == 3
+
+
+def _run_python(client, sandbox_id: str, source: str, *, timeout: int = 10):
+    """Run a snippet of Python in the sandbox and return the parsed exec result."""
+    response = client.post(
+        f"/api/v1/sandboxes/{sandbox_id}/exec",
+        json={
+            "command": ["python3", "-c", source],
+            "timeout_seconds": timeout,
+        },
+    )
+    assert response.status_code == 200, response.text
+    return response.json()
+
+
+# bind_root_entries fixture layout. Each entry is (relative path, contents):
+#   * subdirs are auto-created
+#   * regular files get the listed bytes written verbatim
+#   * dot-prefixed names exercise ``include_hidden`` semantics
+# The mirror of this layout lives on the box-server's filesystem (not on the
+# pytest host) because the box-server typically runs inside Docker and the
+# test process runs outside; see ``_seed_bind_root_entries_host_tree`` for the
+# rationale.
+_BIND_ROOT_ENTRIES_LAYOUT: list[tuple[str, str]] = [
+    ("file1.txt", "hello-file1"),
+    ("nested_dir/inner.txt", "hello-inner"),
+    (".hidden.txt", "secret"),
+    ("skip_me/sentinel", "x"),
+]
+
+
+def _seed_bind_root_entries_host_tree(
+    client,
+    tracked_ids: list[str],
+    *,
+    fixture_label: str,
+) -> str:
+    """Seed a fixed bind_root_entries layout on the box-server's filesystem.
+
+    The integration suite typically runs the box-server inside Docker while
+    the pytest process runs on the host, so ``tmp_path`` is not visible to
+    ``bind_root_entries`` (which resolves paths in the box-server's mount
+    namespace). To work around that we spin up a short-lived "setup sandbox"
+    with ``/tmp`` bind-mounted to ``/host-tmp rw`` and seed the fixture there
+    via a single ``exec`` Python script. The fixture directory lives under
+    the box-server's ``/tmp`` and is returned as an absolute host path that
+    can be plugged directly into ``bind_root_entries.host_root``.
+    """
+    fixture_dir_name = f"jiuwenbox-bind-root-entries-{fixture_label}-{uuid.uuid4().hex[:8]}"
+    sandbox_setup_root = f"/host-tmp/{fixture_dir_name}"
+    server_host_root = f"/tmp/{fixture_dir_name}"
+
+    setup_resp = client.post(
+        "/api/v1/sandboxes",
+        json={
+            "policy_mode": "override",
+            "policy": _with_runtime_support({
+                "name": f"bind-root-entries-setup-{fixture_label}",
+                "filesystem_policy": {
+                    "read_only": ["/usr", "/lib", "/lib64", "/etc", "/opt"],
+                    "read_write": ["/tmp", "/host-tmp"],
+                    "bind_mounts": [{
+                        "host_path": "/tmp",
+                        "sandbox_path": "/host-tmp",
+                        "mode": "rw",
+                    }],
+                },
+                "landlock": {"compatibility": "disabled"},
+                "network": {"mode": "host"},
+            }),
+        },
+    )
+    assert setup_resp.status_code == 201, setup_resp.text
+    setup_id = setup_resp.json()["id"]
+    tracked_ids.append(setup_id)
+
+    seed_script = textwrap.dedent(
+        f"""
+        import os
+        import sys
+
+        root = {sandbox_setup_root!r}
+        layout = {_BIND_ROOT_ENTRIES_LAYOUT!r}
+
+        os.makedirs(root, exist_ok=True)
+        os.chmod(root, 0o755)
+        for relpath, content in layout:
+            target = os.path.join(root, relpath)
+            os.makedirs(os.path.dirname(target), exist_ok=True)
+            with open(target, "w") as fh:
+                fh.write(content)
+            os.chmod(target, 0o644)
+        sys.exit(0)
+        """
+    ).strip()
+
+    seed_result = _run_python(client, setup_id, seed_script, timeout=15)
+    assert seed_result["exit_code"] == 0, seed_result
+
+    # Tear the setup sandbox down right away; we keep the seeded files on the
+    # box-server's /tmp until the cleanup fixture removes them. Keeping the
+    # setup sandbox alive for the duration of the test would mean holding the
+    # rw bind on /tmp open, which a stricter policy could legitimately reject.
+    delete_resp = client.delete(f"/api/v1/sandboxes/{setup_id}")
+    assert delete_resp.status_code in (200, 202, 204), delete_resp.text
+    try:
+        tracked_ids.remove(setup_id)
+    except ValueError:
+        pass
+
+    return server_host_root
+
+
+def _cleanup_bind_root_entries_host_tree(
+    client,
+    tracked_ids: list[str],
+    server_host_root: str,
+) -> None:
+    """Best-effort removal of files seeded into the box-server's /tmp."""
+    if not server_host_root.startswith("/tmp/"):
+        return
+    cleanup_resp = client.post(
+        "/api/v1/sandboxes",
+        json={
+            "policy_mode": "override",
+            "policy": _with_runtime_support({
+                "name": "bind-root-entries-cleanup",
+                "filesystem_policy": {
+                    "read_only": ["/usr", "/lib", "/lib64", "/etc", "/opt"],
+                    "read_write": ["/tmp", "/host-tmp"],
+                    "bind_mounts": [{
+                        "host_path": "/tmp",
+                        "sandbox_path": "/host-tmp",
+                        "mode": "rw",
+                    }],
+                },
+                "landlock": {"compatibility": "disabled"},
+                "network": {"mode": "host"},
+            }),
+        },
+    )
+    if cleanup_resp.status_code != 201:
+        logger.warning(
+            "bind_root_entries cleanup: failed to start cleanup sandbox (%s)",
+            cleanup_resp.text,
+        )
+        return
+    cleanup_id = cleanup_resp.json()["id"]
+    tracked_ids.append(cleanup_id)
+    try:
+        in_sandbox = posixpath.join("/host-tmp", server_host_root[len("/tmp/"):])
+        client.post(
+            f"/api/v1/sandboxes/{cleanup_id}/exec",
+            json={
+                "command": ["rm", "-rf", in_sandbox],
+                "timeout_seconds": 10,
+            },
+        )
+    finally:
+        client.delete(f"/api/v1/sandboxes/{cleanup_id}")
+        try:
+            tracked_ids.remove(cleanup_id)
+        except ValueError:
+            pass
+
+
+@pytest.fixture
+def bind_root_entries_host_tree(client, request):
+    """Yield an absolute host_root path on the box-server's filesystem.
+
+    Each test gets a uniquely-named directory under the box-server's ``/tmp``
+    seeded with ``_BIND_ROOT_ENTRIES_LAYOUT``. Cleanup is best-effort: even
+    if the test crashes we run a cleanup sandbox to ``rm -rf`` the seeded
+    directory so the box-server's /tmp doesn't accumulate test debris across
+    sessions.
+    """
+    label = request.node.name.replace("test_", "")[:16]
+    tracked: list[str] = []
+    host_root = _seed_bind_root_entries_host_tree(
+        client, tracked, fixture_label=label,
+    )
+    try:
+        yield host_root
+    finally:
+        _cleanup_bind_root_entries_host_tree(client, tracked, host_root)
+
+
+class TestBindRootEntries:
+    """End-to-end coverage for the ``filesystem_policy.bind_root_entries`` field.
+
+    Each child entry (regular file or subdirectory) directly under ``host_root``
+    is bind-mounted into ``sandbox_path/<child_name>`` with the configured
+    uniform ``mode``. Hidden entries and excluded basenames are filtered out.
+    These tests run against the default jiuwenbox server (which loads
+    ``configs/default-policy.yaml``) but always supply their own
+    ``filesystem_policy`` in the request, with ``_with_runtime_support`` layering
+    the system bind_mounts and directories on top for a runnable rootfs.
+    """
+
+    @staticmethod
+    def test_bind_root_entries_ro_default_lists_visible_children(
+        client,
+        create_sandbox_with_policy,
+        bind_root_entries_host_tree,
+    ):
+        host_root = bind_root_entries_host_tree
+        sandbox = create_sandbox_with_policy(
+            name_prefix="bind-root-entries-ro",
+            policy={
+                "name": "bind-root-entries-ro-policy",
+                "filesystem_policy": {
+                    "read_only": ["/usr", "/lib", "/lib64", "/etc", "/opt"],
+                    "read_write": ["/tmp"],
+                    "bind_root_entries": [{
+                        "host_root": host_root,
+                        "sandbox_path": "/mnt/data",
+                        "mode": "ro",
+                    }],
+                },
+                "landlock": {"compatibility": "disabled"},
+                "network": {"mode": "host"},
+            },
+        )
+
+        listing = _run_python(
+            client,
+            sandbox["id"],
+            "import os; print('\\n'.join(sorted(os.listdir('/mnt/data'))))",
+        )
+        assert listing["exit_code"] == 0, listing
+        visible = listing["stdout"].splitlines()
+        assert visible == ["file1.txt", "nested_dir", "skip_me"], visible
+        assert ".hidden.txt" not in visible
+
+        for path, expected in [
+            ("/mnt/data/file1.txt", "hello-file1"),
+            ("/mnt/data/nested_dir/inner.txt", "hello-inner"),
+        ]:
+            result = _run_python(
+                client,
+                sandbox["id"],
+                f"print(open({path!r}).read())",
+            )
+            assert result["exit_code"] == 0, result
+            assert result["stdout"].rstrip("\n") == expected, result
+
+        write_attempt = _run_python(
+            client,
+            sandbox["id"],
+            "open('/mnt/data/file1.txt', 'w').write('nope')",
+        )
+        assert write_attempt["exit_code"] != 0, write_attempt
+        combined = (write_attempt["stdout"] + write_attempt["stderr"]).lower()
+        assert any(
+            marker in combined
+            for marker in ("read-only", "readonly", "erofs", "permission denied")
+        ), write_attempt
+
+    @staticmethod
+    def test_bind_root_entries_rw_allows_writes(
+        client,
+        create_sandbox_with_policy,
+        bind_root_entries_host_tree,
+    ):
+        host_root = bind_root_entries_host_tree
+        sandbox = create_sandbox_with_policy(
+            name_prefix="bind-root-entries-rw",
+            policy={
+                "name": "bind-root-entries-rw-policy",
+                "filesystem_policy": {
+                    "read_only": ["/usr", "/lib", "/lib64", "/etc", "/opt"],
+                    "read_write": ["/tmp", "/mnt/data"],
+                    "bind_root_entries": [{
+                        "host_root": host_root,
+                        "sandbox_path": "/mnt/data",
+                        "mode": "rw",
+                    }],
+                },
+                "landlock": {"compatibility": "disabled"},
+                "network": {"mode": "host"},
+            },
+        )
+
+        overwrite = _run_python(
+            client,
+            sandbox["id"],
+            "open('/mnt/data/file1.txt', 'w').write('rewritten')",
+        )
+        assert overwrite["exit_code"] == 0, overwrite
+        read_back = _run_python(
+            client,
+            sandbox["id"],
+            "print(open('/mnt/data/file1.txt').read())",
+        )
+        assert read_back["exit_code"] == 0, read_back
+        assert read_back["stdout"].rstrip("\n") == "rewritten", read_back
+
+        nested_write = _run_python(
+            client,
+            sandbox["id"],
+            (
+                "open('/mnt/data/nested_dir/new.txt', 'w').write('new-content'); "
+                "print(open('/mnt/data/nested_dir/new.txt').read())"
+            ),
+        )
+        assert nested_write["exit_code"] == 0, nested_write
+        assert nested_write["stdout"].rstrip("\n") == "new-content", nested_write
+
+        # Round-trip the writes through a separate verification sandbox so we
+        # confirm the bind actually shares the host inode rather than landing
+        # on a tmpfs unique to this sandbox.
+        verify_sandbox = create_sandbox_with_policy(
+            name_prefix="bind-root-entries-rw-verify",
+            policy={
+                "name": "bind-root-entries-rw-verify-policy",
+                "filesystem_policy": {
+                    "read_only": ["/usr", "/lib", "/lib64", "/etc", "/opt"],
+                    "read_write": ["/tmp"],
+                    "bind_mounts": [{
+                        "host_path": host_root,
+                        "sandbox_path": "/mnt/host-view",
+                        "mode": "ro",
+                    }],
+                },
+                "landlock": {"compatibility": "disabled"},
+                "network": {"mode": "host"},
+            },
+        )
+        verify_one = _run_python(
+            client,
+            verify_sandbox["id"],
+            "print(open('/mnt/host-view/file1.txt').read())",
+        )
+        assert verify_one["exit_code"] == 0, verify_one
+        assert verify_one["stdout"].rstrip("\n") == "rewritten", verify_one
+        verify_two = _run_python(
+            client,
+            verify_sandbox["id"],
+            "print(open('/mnt/host-view/nested_dir/new.txt').read())",
+        )
+        assert verify_two["exit_code"] == 0, verify_two
+        assert verify_two["stdout"].rstrip("\n") == "new-content", verify_two
+
+    @staticmethod
+    def test_bind_root_entries_exclude_and_include_hidden(
+        client,
+        create_sandbox_with_policy,
+        bind_root_entries_host_tree,
+    ):
+        host_root = bind_root_entries_host_tree
+        sandbox = create_sandbox_with_policy(
+            name_prefix="bind-root-entries-filter",
+            policy={
+                "name": "bind-root-entries-filter-policy",
+                "filesystem_policy": {
+                    "read_only": ["/usr", "/lib", "/lib64", "/etc", "/opt"],
+                    "read_write": ["/tmp"],
+                    "bind_root_entries": [{
+                        "host_root": host_root,
+                        "sandbox_path": "/mnt/data",
+                        "mode": "ro",
+                        "include_hidden": True,
+                        # ``*.txt`` should drop ``file1.txt`` and ``.hidden.txt``
+                        # so we get a clean assertion that hidden inclusion and
+                        # fnmatch exclusion compose as expected.
+                        "exclude": ["skip_me", "*.txt"],
+                    }],
+                },
+                "landlock": {"compatibility": "disabled"},
+                "network": {"mode": "host"},
+            },
+        )
+
+        listing = _run_python(
+            client,
+            sandbox["id"],
+            "import os; print('\\n'.join(sorted(os.listdir('/mnt/data'))))",
+        )
+        assert listing["exit_code"] == 0, listing
+        visible = listing["stdout"].splitlines()
+        # ``nested_dir`` is the only child not caught by either exclude pattern.
+        assert visible == ["nested_dir"], visible
+
+    @staticmethod
+    def test_bind_root_entries_missing_host_root_is_noop(
+        client,
+        create_sandbox_with_policy,
+    ):
+        # Pick a box-server-side path that is guaranteed not to exist. We use
+        # /tmp/<uuid> rather than tmp_path because tmp_path lives on the pytest
+        # host while the box-server typically runs inside Docker - the two
+        # processes see different /tmp filesystems and we want this assertion
+        # to be independent of that topology.
+        missing = f"/tmp/jiuwenbox-bind-root-entries-missing-{uuid.uuid4().hex}"
+        sandbox = create_sandbox_with_policy(
+            name_prefix="bind-root-entries-missing",
+            policy={
+                "name": "bind-root-entries-missing-policy",
+                "filesystem_policy": {
+                    "read_only": ["/usr", "/lib", "/lib64", "/etc", "/opt"],
+                    "read_write": ["/tmp"],
+                    "bind_root_entries": [{
+                        "host_root": missing,
+                        "sandbox_path": "/mnt/data",
+                        "mode": "ro",
+                    }],
+                },
+                "landlock": {"compatibility": "disabled"},
+                "network": {"mode": "host"},
+            },
+        )
+        assert sandbox["phase"] == "ready", sandbox
+
+        probe = _run_python(
+            client,
+            sandbox["id"],
+            (
+                "import os; "
+                "print('exists=', os.path.exists('/mnt/data')); "
+                "print('contents=', sorted(os.listdir('/mnt/data')) "
+                "  if os.path.isdir('/mnt/data') else [])"
+            ),
+        )
+        assert probe["exit_code"] == 0, probe
+        lines = probe["stdout"].splitlines()
+        # Either the parent dir was never created (no children to mount) or it
+        # exists but is empty. Both outcomes are acceptable; what matters is
+        # that the sandbox came up cleanly and host_root absence didn't error.
+        assert lines[0] in ("exists= False", "exists= True"), probe
+        assert lines[1] == "contents= []", probe
+
+    @staticmethod
+    def test_policy_api_round_trips_bind_root_entries(
+        client,
+        create_sandbox_with_policy,
+        bind_root_entries_host_tree,
+    ):
+        host_root = bind_root_entries_host_tree
+        nested_host_root = f"{host_root}/nested_dir"
+        sandbox = create_sandbox_with_policy(
+            name_prefix="bind-root-entries-roundtrip",
+            policy={
+                "name": "bind-root-entries-roundtrip-policy",
+                "filesystem_policy": {
+                    "read_only": ["/usr", "/lib", "/lib64", "/etc", "/opt"],
+                    "read_write": ["/tmp"],
+                    "bind_root_entries": [
+                        {
+                            "host_root": host_root,
+                            "sandbox_path": "/mnt/data",
+                            "mode": "ro",
+                        },
+                        {
+                            "host_root": nested_host_root,
+                            "sandbox_path": "/mnt/nested",
+                            "mode": "rw",
+                            "include_hidden": True,
+                            "exclude": ["skip_me"],
+                        },
+                    ],
+                },
+                "landlock": {"compatibility": "disabled"},
+                "network": {"mode": "host"},
+            },
+        )
+
+        resp = client.get(f"/api/v1/policies/{sandbox['id']}")
+        assert resp.status_code == 200, resp.text
+        data = resp.json()
+        round_tripped = data["filesystem_policy"]["bind_root_entries"]
+        assert round_tripped == [
+            {
+                "host_root": host_root,
+                "sandbox_path": "/mnt/data",
+                "mode": "ro",
+                "include_hidden": False,
+                "exclude": [],
+            },
+            {
+                "host_root": nested_host_root,
+                "sandbox_path": "/mnt/nested",
+                "mode": "rw",
+                "include_hidden": True,
+                "exclude": ["skip_me"],
+            },
+        ], round_tripped
+
+    @staticmethod
+    def test_bind_mount_rejects_star_host_path(client):
+        resp = client.post(
+            "/api/v1/sandboxes",
+            json={
+                "policy": {
+                    "name": "bind-mount-star-rejected",
+                    "filesystem_policy": {
+                        "bind_mounts": [{
+                            "host_path": "*",
+                            "sandbox_path": "/mnt/all",
+                            "mode": "ro",
+                        }],
+                    },
+                    "network": {"mode": "host"},
+                },
+            },
+        )
+        assert resp.status_code == 400, resp.text
+        body = resp.json()
+        message = body.get("error") or body.get("detail") or ""
+        assert "bind_root_entries" in message, body
+
+    @staticmethod
+    def test_bind_root_entries_root_with_overriding_rw_bind_mount(
+        client,
+        create_sandbox_with_policy,
+    ):
+        """``bind_root_entries`` covers the whole host root ``/`` read-only,
+        then ``bind_mounts`` re-mounts ``/app/build`` at the *same* path with
+        read-write permissions.
+
+        Layering order inside bwrap:
+
+        1. ``--ro-bind`` for each immediate child of host ``/`` at sandbox
+           ``/<child>`` (emitted by ``bind_root_entries``). The kernel
+           pseudo filesystems (``proc``, ``dev``, ``sys``, ``run``) and the
+           bwrap-managed scratch dirs (``tmp``, ``home``) are excluded so
+           we don't shadow bwrap's own ``--proc`` / ``--dev`` mounts or the
+           ``directories`` block injected by ``_with_runtime_support``.
+        2. ``--bind /app/build /app/build`` (emitted by ``bind_mounts``)
+           overlays the rw mount on top of the ro ``/app`` bind at the very
+           same sandbox path.
+
+        The net effect is: the entire rootfs (including ``/app``,
+        ``/app/pyproject.toml``, ``/usr``, ``/etc``, ...) is ro, but
+        ``/app/build`` is writable. We deliberately use the same
+        ``host_path`` and ``sandbox_path`` for the rw overlay so the test
+        mirrors a real "ro by default, selected rw" mount strategy rather
+        than aliasing ``/app/build`` to an unrelated backing directory.
+        """
+        # /app exists in the box-server's image (Dockerfile WORKDIR=/app)
+        # but /app/build does not. We need it to exist on the host so
+        # ``bind_mounts`` can resolve it. Use a privileged setup sandbox
+        # that rw-binds host /app into the sandbox and creates the dir
+        # there. Run as root so the dir creation and chmod succeed; chmod
+        # 0o0777 + 0o0666 ensures the subsequent unprivileged test sandbox
+        # (uid 65534) can both read the seeded binary and write fresh
+        # files.
+        setup_resp = client.post(
+            "/api/v1/sandboxes",
+            json={
+                "policy_mode": "override",
+                "policy": _with_runtime_support({
+                    "name": "bind-root-entries-app-build-setup",
+                    "filesystem_policy": {
+                        "bind_mounts": [{
+                            "host_path": "/app",
+                            "sandbox_path": "/app",
+                            "mode": "rw",
+                        }],
+                    },
+                    "process": {
+                        "run_as_user": "root",
+                        "run_as_group": "root",
+                    },
+                    "landlock": {"compatibility": "disabled"},
+                    "network": {"mode": "host"},
+                }),
+            },
+        )
+        assert setup_resp.status_code == 201, setup_resp.text
+        setup_id = setup_resp.json()["id"]
+        try:
+            seed_script = textwrap.dedent(
+                """
+                import os
+                os.makedirs("/app/build", exist_ok=True)
+                os.chmod("/app/build", 0o0777)
+                with open("/app/build/binary", "w") as fh:
+                    fh.write("v1-from-host")
+                os.chmod("/app/build/binary", 0o0666)
+                """
+            ).strip()
+            seed_result = _run_python(client, setup_id, seed_script, timeout=15)
+            assert seed_result["exit_code"] == 0, seed_result
+        finally:
+            client.delete(f"/api/v1/sandboxes/{setup_id}")
+
+        try:
+            sandbox = create_sandbox_with_policy(
+                name_prefix="bind-root-entries-app-build-rw-overlay",
+                policy={
+                    "name": "bind-root-entries-app-build-rw-overlay-policy",
+                    "filesystem_policy": {
+                        # Mount every immediate child of host / at the
+                        # corresponding sandbox path read-only. /app is one
+                        # of those children and lands recursively at sandbox
+                        # /app (including /app/build) as ro. Kernel pseudo
+                        # filesystems and bwrap-managed scratch dirs are
+                        # excluded so they don't clobber bwrap's own
+                        # --proc/--dev/--tmpfs setup.
+                        "bind_root_entries": [{
+                            "host_root": "/",
+                            "sandbox_path": "/",
+                            "mode": "ro",
+                            "exclude": [
+                                "proc",
+                                "dev",
+                                "sys",
+                                "run",
+                                "tmp",
+                                "home",
+                            ],
+                        }],
+                        # Re-mount /app/build at the *same* sandbox path
+                        # with rw permissions. bwrap layers this --bind on
+                        # top of the earlier --ro-bind /app, so /app/build
+                        # becomes writable while the rest of /app (e.g.
+                        # /app/pyproject.toml) and the rest of the rootfs
+                        # (e.g. /etc/passwd, /usr/bin/python3) stay
+                        # read-only.
+                        "bind_mounts": [{
+                            "host_path": "/app/build",
+                            "sandbox_path": "/app/build",
+                            "mode": "rw",
+                        }],
+                    },
+                    "landlock": {"compatibility": "disabled"},
+                    "network": {"mode": "host"},
+                },
+            )
+            assert sandbox["phase"] == "ready", sandbox
+
+            # /app/pyproject.toml is one of the children that bind_root_entries
+            # mounted ro. Reading it confirms the ro side of /app is wired up.
+            read_pyproject = _run_python(
+                client,
+                sandbox["id"],
+                "import os; print(os.path.isfile('/app/pyproject.toml'))",
+            )
+            assert read_pyproject["exit_code"] == 0, read_pyproject
+            assert read_pyproject["stdout"].rstrip("\n") == "True", read_pyproject
+
+            # Writing to a file inside /app but outside /app/build must fail
+            # because that path is still ro from bind_root_entries.
+            write_pyproject = _run_python(
+                client,
+                sandbox["id"],
+                "open('/app/pyproject.toml', 'w').write('nope')",
+            )
+            assert write_pyproject["exit_code"] != 0, write_pyproject
+            combined = (
+                write_pyproject["stdout"] + write_pyproject["stderr"]
+            ).lower()
+            assert any(
+                marker in combined
+                for marker in ("read-only", "readonly", "erofs", "permission denied")
+            ), write_pyproject
+
+            # /app/build is the rw overlay. The pre-seeded binary file must
+            # round-trip from the host through the rw bind, and the sandbox
+            # must be able to add a fresh file there.
+            read_existing = _run_python(
+                client,
+                sandbox["id"],
+                "print(open('/app/build/binary').read())",
+            )
+            assert read_existing["exit_code"] == 0, read_existing
+            assert read_existing["stdout"].rstrip("\n") == "v1-from-host", read_existing
+
+            write_new = _run_python(
+                client,
+                sandbox["id"],
+                (
+                    "open('/app/build/new.txt', 'w').write('v2-from-sandbox'); "
+                    "print(open('/app/build/new.txt').read())"
+                ),
+            )
+            assert write_new["exit_code"] == 0, write_new
+            assert write_new["stdout"].rstrip("\n") == "v2-from-sandbox", write_new
+
+            # Independent verification: a fresh sandbox that only ro-binds
+            # host /app/build observes the same file the test sandbox just
+            # wrote, proving the rw bind shares the host inode rather than a
+            # per-sandbox tmpfs.
+            verify_sandbox = create_sandbox_with_policy(
+                name_prefix="bind-root-entries-app-build-verify",
+                policy={
+                    "name": "bind-root-entries-app-build-verify-policy",
+                    "filesystem_policy": {
+                        "bind_mounts": [{
+                            "host_path": "/app/build",
+                            "sandbox_path": "/mnt/build-view",
+                            "mode": "ro",
+                        }],
+                    },
+                    "landlock": {"compatibility": "disabled"},
+                    "network": {"mode": "host"},
+                },
+            )
+            verify = _run_python(
+                client,
+                verify_sandbox["id"],
+                "print(open('/mnt/build-view/new.txt').read())",
+            )
+            assert verify["exit_code"] == 0, verify
+            assert verify["stdout"].rstrip("\n") == "v2-from-sandbox", verify
+        finally:
+            # Best-effort cleanup: remove /app/build so the box-server's
+            # /app doesn't accumulate state between test runs. Needs the
+            # same privileged setup as the seed step.
+            cleanup_resp = client.post(
+                "/api/v1/sandboxes",
+                json={
+                    "policy_mode": "override",
+                    "policy": _with_runtime_support({
+                        "name": "bind-root-entries-app-build-cleanup",
+                        "filesystem_policy": {
+                            "bind_mounts": [{
+                                "host_path": "/app",
+                                "sandbox_path": "/app",
+                                "mode": "rw",
+                            }],
+                        },
+                        "process": {
+                            "run_as_user": "root",
+                            "run_as_group": "root",
+                        },
+                        "landlock": {"compatibility": "disabled"},
+                        "network": {"mode": "host"},
+                    }),
+                },
+            )
+            if cleanup_resp.status_code == 201:
+                cleanup_id = cleanup_resp.json()["id"]
+                try:
+                    client.post(
+                        f"/api/v1/sandboxes/{cleanup_id}/exec",
+                        json={
+                            "command": ["rm", "-rf", "/app/build"],
+                            "timeout_seconds": 10,
+                        },
+                    )
+                finally:
+                    client.delete(f"/api/v1/sandboxes/{cleanup_id}")
+
+
+# ---------------------------------------------------------------------------
+# Cgroup policy field
+# ---------------------------------------------------------------------------
+
+
+_CGROUP_PROBE_POLICY: dict[str, object] = {
+    "name": "cgroup-probe",
+    "filesystem_policy": {
+        "read_only": ["/usr", "/lib", "/lib64", "/etc", "/opt"],
+        "read_write": ["/tmp"],
+    },
+    "landlock": {"compatibility": "disabled"},
+    "network": {"mode": "host"},
+    "cgroup": {"pids_max": 1024},
+}
+
+# Module-level cache for the cgroup-probe result. The first ``_cgroup_supported``
+# fixture invocation pays the one-time cost of creating a sandbox with a real
+# cgroup policy; subsequent invocations short-circuit on the cached verdict so
+# we don't slow the rest of the suite down. ``None`` means "not probed yet";
+# ``True`` / ``False`` is the cached verdict.
+_cgroup_probe_cached: bool | None = None
+_cgroup_probe_skip_reason: str | None = None
+
+
+def _is_cgroup_unsupported_error(text: str) -> bool:
+    """Return True when ``text`` looks like a cgroup-not-writable diagnostic.
+
+    Both the runtime layer and the cgroup backend wrap the underlying
+    ``CgroupSetupError`` into different strings (``RuntimeError`` from
+    ``ProcessRuntime.create``, plain ``CgroupSetupError`` from the backend
+    helper). Matching the lowercased message keeps the probe robust against
+    future wording changes.
+    """
+    lowered = (text or "").lower()
+    return "cgroup" in lowered and (
+        "cgroupsetuperror" in lowered
+        or "no writable cgroup backend" in lowered
+        or "failed to apply cgroup limits" in lowered
+        or "failed to write" in lowered
+        or "failed to create" in lowered
+        or "failed to enable controllers" in lowered
+        or "permission denied" in lowered
+    )
+
+
+class TestCgroupPolicy:
+    """End-to-end coverage for the ``cgroup`` policy field.
+
+    Tests are split into two groups:
+
+    - Group A is independent of cgroup availability and exercises Pydantic
+      validation plus the "no cgroup field -> skip" early-exit. Every test
+      in this group must pass even on hosts without a writable cgroup tree.
+    - Group B exercises actual kernel enforcement (memory.max, pids.max,
+      cpu.max) and depends on ``_cgroup_supported`` to skip when the host
+      lacks a writable cgroup backend.
+    """
+
+    # ------------------------------------------------------------------
+    # Group A: cgroup-independent
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _expect_no_limit_policy(extra_cgroup: dict | None) -> dict:
+        """Build a policy dict whose ``cgroup`` part should be a no-op.
+
+        ``extra_cgroup`` lets each test pick the exact equivalent form
+        (omitted, ``{}``, all-null) we want to assert is treated the same
+        way as the others.
+        """
+        policy: dict[str, object] = {
+            "name": "cgroup-skip",
+            "filesystem_policy": {
+                "read_only": ["/usr", "/lib", "/lib64", "/etc", "/opt"],
+                "read_write": ["/tmp"],
+            },
+            "landlock": {"compatibility": "disabled"},
+            "network": {"mode": "host"},
+        }
+        if extra_cgroup is not None:
+            policy["cgroup"] = extra_cgroup
+        return policy
+
+    @staticmethod
+    def _assert_skip_path_runs_cleanly(client, sandbox_id: str) -> None:
+        """Allocate 64MB inside the sandbox to prove no cgroup limit is in
+        play. We don't push to 128MB to avoid spurious OOM on CI machines
+        whose docker containers are constrained by the *parent* cgroup.
+        """
+        result = _run_python(
+            client,
+            sandbox_id,
+            (
+                "import sys; "
+                "buf = bytearray(64 * 1024 * 1024); "
+                "print('len=', len(buf), 'last=', buf[-1])"
+            ),
+            timeout=15,
+        )
+        assert result["exit_code"] == 0, result
+        assert "len= 67108864" in result["stdout"], result
+
+    @staticmethod
+    def test_no_cgroup_field_skips_setup_entirely(client, create_sandbox_with_policy):
+        sandbox = create_sandbox_with_policy(
+            name_prefix="cgroup-skip-noField",
+            policy=TestCgroupPolicy._expect_no_limit_policy(None),
+        )
+        TestCgroupPolicy._assert_skip_path_runs_cleanly(client, sandbox["id"])
+
+    @staticmethod
+    def test_empty_cgroup_field_skips_setup(client, create_sandbox_with_policy):
+        sandbox = create_sandbox_with_policy(
+            name_prefix="cgroup-skip-empty",
+            policy=TestCgroupPolicy._expect_no_limit_policy({}),
+        )
+        TestCgroupPolicy._assert_skip_path_runs_cleanly(client, sandbox["id"])
+
+    @staticmethod
+    def test_all_null_cgroup_field_skips_setup(client, create_sandbox_with_policy):
+        sandbox = create_sandbox_with_policy(
+            name_prefix="cgroup-skip-allNull",
+            policy=TestCgroupPolicy._expect_no_limit_policy({
+                "memory_max": None,
+                "cpu_max": None,
+                "pids_max": None,
+            }),
+        )
+        TestCgroupPolicy._assert_skip_path_runs_cleanly(client, sandbox["id"])
+
+    @staticmethod
+    def test_cgroup_rejects_invalid_memory_max(client):
+        resp = client.post(
+            "/api/v1/sandboxes",
+            json={
+                "policy_mode": "override",
+                "policy": _with_runtime_support({
+                    "name": "cgroup-invalid-memory",
+                    "filesystem_policy": {
+                        "read_only": ["/usr", "/lib", "/lib64", "/etc", "/opt"],
+                        "read_write": ["/tmp"],
+                    },
+                    "landlock": {"compatibility": "disabled"},
+                    "network": {"mode": "host"},
+                    "cgroup": {"memory_max": "not-a-size"},
+                }),
+            },
+        )
+        assert resp.status_code == 400, resp.text
+        body = resp.json()
+        message = body.get("error") or body.get("detail") or ""
+        assert "memory_max" in message, body
+
+    @staticmethod
+    def test_cgroup_rejects_invalid_cpu_max(client):
+        resp = client.post(
+            "/api/v1/sandboxes",
+            json={
+                "policy_mode": "override",
+                "policy": _with_runtime_support({
+                    "name": "cgroup-invalid-cpu",
+                    "filesystem_policy": {
+                        "read_only": ["/usr", "/lib", "/lib64", "/etc", "/opt"],
+                        "read_write": ["/tmp"],
+                    },
+                    "landlock": {"compatibility": "disabled"},
+                    "network": {"mode": "host"},
+                    "cgroup": {"cpu_max": "weird"},
+                }),
+            },
+        )
+        assert resp.status_code == 400, resp.text
+        body = resp.json()
+        message = body.get("error") or body.get("detail") or ""
+        assert "cpu_max" in message, body
+
+    @staticmethod
+    def test_cgroup_rejects_invalid_pids_max(client):
+        resp = client.post(
+            "/api/v1/sandboxes",
+            json={
+                "policy_mode": "override",
+                "policy": _with_runtime_support({
+                    "name": "cgroup-invalid-pids",
+                    "filesystem_policy": {
+                        "read_only": ["/usr", "/lib", "/lib64", "/etc", "/opt"],
+                        "read_write": ["/tmp"],
+                    },
+                    "landlock": {"compatibility": "disabled"},
+                    "network": {"mode": "host"},
+                    "cgroup": {"pids_max": -1},
+                }),
+            },
+        )
+        assert resp.status_code == 400, resp.text
+        body = resp.json()
+        message = body.get("error") or body.get("detail") or ""
+        assert "pids_max" in message, body
+
+    # ------------------------------------------------------------------
+    # Group B: requires a writable cgroup backend
+    # ------------------------------------------------------------------
+
+    @pytest.fixture
+    def _cgroup_supported(self, client):
+        """Probe the box-server for a writable cgroup backend by trying to
+        create a sandbox with a minimal cgroup policy.
+
+        The probe result is cached at module level (``_cgroup_probe_cached``)
+        so only the first test in the group actually pays the
+        sandbox-create cost; subsequent tests short-circuit on the cached
+        verdict. We can't use ``scope="class"`` here because ``client``
+        is function-scoped (pytest ``ScopeMismatch``), and we don't want
+        to broaden the client fixture's scope just for this probe.
+        """
+        global _cgroup_probe_cached, _cgroup_probe_skip_reason
+        if _cgroup_probe_cached is False:
+            pytest.skip(_cgroup_probe_skip_reason or "cgroup not writable")
+        if _cgroup_probe_cached is None:
+            resp = client.post(
+                "/api/v1/sandboxes",
+                json={
+                    "policy_mode": "override",
+                    "policy": _with_runtime_support(_CGROUP_PROBE_POLICY),
+                },
+            )
+            if resp.status_code == 201:
+                sandbox_id = resp.json()["id"]
+                client.delete(f"/api/v1/sandboxes/{sandbox_id}")
+                _cgroup_probe_cached = True
+            else:
+                _cgroup_probe_cached = False
+                if resp.status_code >= 500 and _is_cgroup_unsupported_error(resp.text):
+                    _cgroup_probe_skip_reason = (
+                        "cgroup not writable in this environment"
+                    )
+                else:
+                    _cgroup_probe_skip_reason = (
+                        f"cgroup probe sandbox failed to start "
+                        f"(status={resp.status_code}): {resp.text}"
+                    )
+                pytest.skip(_cgroup_probe_skip_reason)
+        return True
+
+    @staticmethod
+    def test_cgroup_policy_round_trips_via_api(
+        client,
+        _cgroup_supported,
+        create_sandbox_with_policy,
+    ):
+        sandbox = create_sandbox_with_policy(
+            name_prefix="cgroup-roundtrip",
+            policy={
+                "name": "cgroup-roundtrip-policy",
+                "filesystem_policy": {
+                    "read_only": ["/usr", "/lib", "/lib64", "/etc", "/opt"],
+                    "read_write": ["/tmp"],
+                },
+                "landlock": {"compatibility": "disabled"},
+                "network": {"mode": "host"},
+                "cgroup": {
+                    "memory_max": "256M",
+                    "cpu_max": "0.5",
+                    "pids_max": 64,
+                },
+            },
+        )
+
+        resp = client.get(f"/api/v1/policies/{sandbox['id']}")
+        assert resp.status_code == 200, resp.text
+        cgroup_data = resp.json().get("cgroup")
+        assert cgroup_data is not None, resp.text
+        assert cgroup_data["memory_max"] == 256 * 1024 * 1024, cgroup_data
+        # ``cpu_max`` is a Python tuple internally; FastAPI serializes it
+        # as a 2-element list.
+        assert cgroup_data["cpu_max"] == [50000, 100000], cgroup_data
+        assert cgroup_data["pids_max"] == 64, cgroup_data
+
+    @staticmethod
+    def test_cgroup_memory_max_kills_offending_process(
+        client,
+        _cgroup_supported,
+        create_sandbox_with_policy,
+    ):
+        sandbox = create_sandbox_with_policy(
+            name_prefix="cgroup-memory-limit",
+            policy={
+                "name": "cgroup-memory-policy",
+                "filesystem_policy": {
+                    "read_only": ["/usr", "/lib", "/lib64", "/etc", "/opt"],
+                    "read_write": ["/tmp"],
+                },
+                "landlock": {"compatibility": "disabled"},
+                "network": {"mode": "host"},
+                "cgroup": {"memory_max": "32M"},
+            },
+        )
+        # Allocate 128MB - 4x the 32M cap. Touching the buffer forces real
+        # page allocation so the OOM killer (cgroup v2) or memory.failcnt
+        # (cgroup v1) actually fires. Without the touch the kernel might
+        # only reserve virtual address space.
+        result = _run_python(
+            client,
+            sandbox["id"],
+            (
+                "buf = bytearray(128 * 1024 * 1024); "
+                "buf[::4096] = b'x' * (len(buf) // 4096); "
+                "print('survived')"
+            ),
+            timeout=30,
+        )
+        assert result["exit_code"] != 0, result
+        assert "survived" not in result["stdout"], result
+        combined = (result["stdout"] + result["stderr"]).lower()
+        # The python process is either killed by SIGKILL (OOM kill) or
+        # raises MemoryError before printing "survived"; both outcomes
+        # confirm memory_max enforcement.
+        assert (
+            "memoryerror" in combined
+            or "killed" in combined
+            or "cannot allocate memory" in combined
+            or result["exit_code"] < 0
+            or result["exit_code"] == 137  # 128 + SIGKILL
+            or result["exit_code"] == 9
+        ), result
+
+    @staticmethod
+    def test_cgroup_pids_max_limits_fork_count(
+        client,
+        _cgroup_supported,
+        create_sandbox_with_policy,
+    ):
+        sandbox = create_sandbox_with_policy(
+            name_prefix="cgroup-pids-limit",
+            policy={
+                "name": "cgroup-pids-policy",
+                "filesystem_policy": {
+                    "read_only": ["/usr", "/lib", "/lib64", "/etc", "/opt"],
+                    "read_write": ["/tmp"],
+                },
+                "landlock": {"compatibility": "disabled"},
+                "network": {"mode": "host"},
+                "cgroup": {"pids_max": 5},
+            },
+        )
+        # Try to fork 32 children. With pids_max=5 the cgroup should reject
+        # at least one fork with EAGAIN well before we get to 32. We catch
+        # OSError so the script prints how many succeeded before bailing.
+        script = textwrap.dedent(
+            """
+            import os
+            import sys
+            import time
+
+            children = []
+            try:
+                for _ in range(32):
+                    pid = os.fork()
+                    if pid == 0:
+                        time.sleep(2)
+                        os._exit(0)
+                    children.append(pid)
+            except OSError as exc:
+                print('blocked_after=', len(children), 'errno=', exc.errno)
+            else:
+                print('blocked_after=', len(children), 'errno= none')
+            finally:
+                for pid in children:
+                    try:
+                        os.kill(pid, 9)
+                        os.waitpid(pid, 0)
+                    except OSError:
+                        pass
+            sys.exit(0)
+            """
+        ).strip()
+        result = _run_python(client, sandbox["id"], script, timeout=20)
+        assert result["exit_code"] == 0, result
+        stdout = result["stdout"]
+        # The exact threshold depends on whether the parent process and
+        # any helper threads count toward pids_max, but in every realistic
+        # case at least a few forks must fail before we reach 32.
+        assert "errno= 11" in stdout or "errno= 35" in stdout, result
+        # Extract ``blocked_after=`` value and assert it's well below 32.
+        marker = "blocked_after="
+        idx = stdout.find(marker)
+        assert idx >= 0, result
+        blocked_value = stdout[idx + len(marker):].split()[0]
+        assert int(blocked_value) < 32, result
+
+    @staticmethod
+    def test_cgroup_cpu_max_throttles_busy_loop(
+        client,
+        _cgroup_supported,
+        create_sandbox_with_policy,
+    ):
+        sandbox = create_sandbox_with_policy(
+            name_prefix="cgroup-cpu-throttle",
+            policy={
+                "name": "cgroup-cpu-policy",
+                "filesystem_policy": {
+                    "read_only": ["/usr", "/lib", "/lib64", "/etc", "/opt"],
+                    "read_write": ["/tmp"],
+                },
+                "landlock": {"compatibility": "disabled"},
+                "network": {"mode": "host"},
+                "cgroup": {"cpu_max": "0.1"},
+            },
+        )
+        # Spin for ~2 seconds of wall-clock time and report how much CPU
+        # time we actually got. With cpu_max=0.1 cores, process_time
+        # should be ~10% of wall-clock or less; we assert <30% to leave a
+        # generous margin for measurement noise on busy CI hosts.
+        script = textwrap.dedent(
+            """
+            import time
+
+            target_wall = 2.0
+            start_wall = time.monotonic()
+            start_cpu = time.process_time()
+            while time.monotonic() - start_wall < target_wall:
+                pass
+            wall = time.monotonic() - start_wall
+            cpu = time.process_time() - start_cpu
+            print('wall=', wall)
+            print('cpu=', cpu)
+            print('ratio=', cpu / wall if wall > 0 else 0)
+            """
+        ).strip()
+        result = _run_python(client, sandbox["id"], script, timeout=20)
+        assert result["exit_code"] == 0, result
+        ratio_line = next(
+            (line for line in result["stdout"].splitlines() if line.startswith("ratio=")),
+            "",
+        )
+        assert ratio_line, result
+        try:
+            ratio_value = float(ratio_line.split("=", 1)[1].strip())
+        except ValueError:
+            pytest.fail(f"unparseable ratio line: {ratio_line!r}; full: {result}")
+        # Heuristic threshold. cpu_max=0.1 caps CPU usage at ~10% on a
+        # single core; on multi-core busy CI hosts ratios slightly above
+        # 0.1 are tolerable, but anything north of 0.3 indicates the
+        # cgroup didn't actually throttle the process.
+        assert ratio_value < 0.3, (ratio_value, result)

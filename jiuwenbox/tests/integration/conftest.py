@@ -90,13 +90,40 @@ class SandboxTrackingClient:
         return suffix or None
 
 
+_UDS_SCHEME = "unix://"
+# httpx 在用 UDS transport 时仍需要一个合法 absolute base_url 才能拼相对路径;
+# 实际请求路由完全走 socket transport, 不读 host。
+_UDS_PLACEHOLDER_BASE_URL = "http://jiuwenbox"
+
+
 def _normalize_endpoint(endpoint: str) -> str:
     return endpoint if "://" in endpoint else f"http://{endpoint}"
 
 
+def _build_httpx_client(endpoint: str, *, timeout: float = 30.0) -> httpx.Client:
+    """按 endpoint scheme 构造 httpx.Client (UDS / TCP 统一入口).
+
+    ``unix:///abs/path`` 走 :class:`httpx.HTTPTransport` 的 ``uds=...``;
+    其它形式走 base_url 模式。两种模式对 ``SandboxTrackingClient`` 透明,
+    因此 ``test_server_api_default.py`` 业务断言一行不用改。
+    """
+    if endpoint.startswith(_UDS_SCHEME):
+        uds_path = endpoint[len(_UDS_SCHEME):]
+        if not uds_path.startswith("/"):
+            raise ValueError(
+                f"unix endpoint requires absolute path: {endpoint!r}",
+            )
+        return httpx.Client(
+            transport=httpx.HTTPTransport(uds=uds_path),
+            base_url=_UDS_PLACEHOLDER_BASE_URL,
+            timeout=timeout,
+        )
+    return httpx.Client(base_url=_normalize_endpoint(endpoint), timeout=timeout)
+
+
 @pytest.fixture
 def client(server_endpoint):
-    with httpx.Client(base_url=_normalize_endpoint(server_endpoint), timeout=30.0) as external:
+    with _build_httpx_client(server_endpoint, timeout=30.0) as external:
         tracking = SandboxTrackingClient(external)
         try:
             yield tracking
@@ -256,6 +283,14 @@ def docker_gateway_ip(
     Raises:
         RuntimeError: If API server unreachable or topology detection fails
     """
+    if server_url_session.startswith(_UDS_SCHEME):
+        # Docker-gateway 探测 + IPP 端口联通性测试天然依赖 TCP listener; UDS
+        # 模式下整套 proxy/IPP 用例都该 skip, 在源头一次性 skip 简化下游。
+        pytest.skip(
+            "docker gateway detection requires a TCP server endpoint; "
+            f"got {server_url_session!r}",
+        )
+
     port = http_target_port
     
     logger.info("[docker_gateway_ip] Starting checks")

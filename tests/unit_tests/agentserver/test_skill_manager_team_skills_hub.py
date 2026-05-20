@@ -5,7 +5,7 @@ import zipfile
 
 import pytest
 
-from jiuwenclaw.server.runtime.skill.skill_manager import SkillManager
+from jiuwenswarm.server.runtime.skill.skill_manager import SkillManager
 
 _TEAM_SKILLS_HUB_ZIP_URL = "https://openjiuwen-market.obs.ap-southeast-1.myhuaweicloud.com/plugins/demo.zip"
 

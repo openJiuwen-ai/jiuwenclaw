@@ -291,3 +291,25 @@ network:
 
     # TCP destination ports blocked for inbound traffic. Block rules take precedence.
     blocked_ports: []
+
+# ---------------------------------------------------------------------------
+# Cgroup resource limits (optional)
+# ---------------------------------------------------------------------------
+# Per-sandbox cgroup limits. All three fields default to null which means
+# "no limit". Omitting the ``cgroup`` block entirely, or leaving every
+# field unset/null, causes jiuwenbox to *skip* cgroup setup completely so
+# this default policy still runs on hosts without a writable cgroup tree.
+#
+# Cgroup v2 is preferred. v1 is used as a fallback when v2 is unavailable.
+# If at least one field is non-null and neither backend is writable,
+# sandbox creation fails with a CgroupSetupError.
+#
+# Accepted formats:
+#   memory_max: integer bytes (e.g. 268435456) or string with binary unit
+#     suffix B/K/KB/KiB/M/MB/MiB/G/GB/GiB/T/TB/TiB (e.g. "256M", "1G").
+#   cpu_max: fractional cores (e.g. 0.5 = half a core, 2.0 = two cores)
+#     or "<quota_us> <period_us>" pair (e.g. "50000 100000"). "max" or null
+#     means no limit.
+#   pids_max: positive integer cap on processes/threads (e.g. 256). "max"
+#     or null means no limit.
+cgroup: {}

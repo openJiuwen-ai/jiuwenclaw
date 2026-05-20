@@ -4,13 +4,13 @@ set -euo pipefail
 
 CLIENT_IP="${CLIENT_IP:-}"
 CLIENT_IPS=()
-DEFAULT_TEAM_WORKSPACE="${JIUWEN_TEAM_WORKSPACE_ROOT:-/tmp/jiuwenclaw/shared_workspace/jiuwen_team}"
+DEFAULT_TEAM_WORKSPACE="${JIUWEN_TEAM_WORKSPACE_ROOT:-/tmp/jiuwenswarm/shared_workspace/jiuwen_team}"
 EXPORT_DIR="${EXPORT_DIR:-${DEFAULT_TEAM_WORKSPACE}}"
 MOUNT_POINT="${MOUNT_POINT:-${DEFAULT_TEAM_WORKSPACE}}"
 EXPORT_DIRS=()
 MOUNT_POINTS=()
 FSID="${FSID:-1002}"
-EXPORTS_FILE="/etc/exports.d/jiuwenclaw.exports"
+EXPORTS_FILE="/etc/exports.d/jiuwenswarm.exports"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -42,7 +42,7 @@ Options:
   --fsid <id>            Base NFS filesystem id. Each export increments from this base. Default: 1002
 
 Defaults:
-  export/mount path: ${JIUWEN_TEAM_WORKSPACE_ROOT:-/tmp/jiuwenclaw/shared_workspace/jiuwen_team}
+  export/mount path: ${JIUWEN_TEAM_WORKSPACE_ROOT:-/tmp/jiuwenswarm/shared_workspace/jiuwen_team}
 EOF
       exit 0
       ;;

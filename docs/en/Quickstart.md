@@ -6,7 +6,7 @@
 
 ### Prerequisites
 
-Before installing JiuwenClaw, ensure your system meets the following requirements:
+Before installing JiuwenSwarm, ensure your system meets the following requirements:
 
 | Dependency | Version | Description |
 |------------|---------|-------------|
@@ -26,32 +26,32 @@ node --version
 
 ```bash
 # Create virtual environment
-python -m venv jiuwenclaw
+python -m venv jiuwenswarm
 
 # Activate virtual environment
 # Windows:
-jiuwenclaw\Scripts\activate
+jiuwenswarm\Scripts\activate
 # Linux/Mac:
-source jiuwenclaw/bin/activate
+source jiuwenswarm/bin/activate
 
-# Install JiuwenClaw
-pip install jiuwenclaw
+# Install JiuwenSwarm
+pip install jiuwenswarm
 ```
 
 ## Start Service
 
 ```bash
 # Initialize (first run)
-jiuwenclaw-init
+jiuwenswarm-init
 
 # Start service
-jiuwenclaw-start
+jiuwenswarm-start
 ```
 
 After successful startup, the terminal will display backend service status:
 
 ```
-[INFO] Starting JiuwenClaw server...
+[INFO] Starting JiuwenSwarm server...
 [INFO] API server running at http://localhost:8000
 [INFO] Web server running at http://localhost:5173
 ```
@@ -64,21 +64,21 @@ For remote access, run the following commands:
 
 ```bash
 # Start web service
-jiuwenclaw-web --host 0.0.0.0 --port <custom-port>
+jiuwenswarm-web --host 0.0.0.0 --port <custom-port>
 
 # Start backend service
-jiuwenclaw-app
+jiuwenswarm-app
 ```
 
 ## Configure Model
 
 In the left sidebar of the Web UI, find "Configuration" and enter the configuration page:
 
-![](../assets/images/jiuwenclaw_configuration_Info.png)
+![](../assets/images/jiuwenswarm_configuration_Info.png)
 
 Complete the following basic configuration, then click "Save" in the top right:
 
-![](../assets/images/jiuwenclaw_config_api.png)
+![](../assets/images/jiuwenswarm_config_api.png)
 
 **Configuration Items:**
 
@@ -106,24 +106,24 @@ After filling in the configuration, click the "Test" button to verify model avai
 
 In the left sidebar of the Web UI, find "Chat" and enter your question to start:
 
-![](../assets/images/jiuwenclaw_example.png)
+![](../assets/images/jiuwenswarm_example.png)
 
 ## Session Management
 
 Click the "+" button below to clear the current session and start a new one:
 
-![](../assets/images/jiuwenclaw_new_session.png)
+![](../assets/images/jiuwenswarm_new_session.png)
 
 Page display after clearing:
 
-![](../assets/images/jiuwenclaw_clear_session.png)
+![](../assets/images/jiuwenswarm_clear_session.png)
 
 **When to clear a session?**
 
 <<<<<<< HEAD
-  Navigate to the frontend directory `jiuwenclaw/channels/web/frontend` and install dependencies:
+  Navigate to the frontend directory `jiuwenswarm/channels/web/frontend` and install dependencies:
   ```bash
-  cd jiuwenclaw/channels/web/frontend
+  cd jiuwenswarm/channels/web/frontend
   npm install
   ```
 =======
@@ -146,7 +146,7 @@ Page display after clearing:
 
 ## Clear Memory
 
-When you need JiuwenClaw to forget all conversation history and user information, you can clear memory files.
+When you need JiuwenSwarm to forget all conversation history and user information, you can clear memory files.
 
 > **⚠️ Risk Warning:** Clearing memory is **permanent**, deleted memory files **cannot be recovered**. Before proceeding, confirm:
 > - Whether important memories are backed up
@@ -170,11 +170,11 @@ When you need JiuwenClaw to forget all conversation history and user information
 Memory files are stored in `{workspace_dir}/memory/` directory:
 
 **Method 1: Delete via Agent**
-Tell JiuwenClaw: "Please delete all memory files" or "Clear my memory", Agent will call file tools to delete files in the memory directory.
-![](../assets/images/jiuwenclaw_delete_memory.png)
+Tell JiuwenSwarm: "Please delete all memory files" or "Clear my memory", Agent will call file tools to delete files in the memory directory.
+![](../assets/images/jiuwenswarm_delete_memory.png)
 
 **Method 2: Manual Delete**
-Stop JiuwenClaw service, then directly delete all Markdown files in the `memory/` directory.
-![](../assets/images/jiuwenclaw_memory.png)
+Stop JiuwenSwarm service, then directly delete all Markdown files in the `memory/` directory.
+![](../assets/images/jiuwenswarm_memory.png)
 
 > ⚠️ **Note**: Memory cannot be recovered after clearing, proceed with caution. Regularly backup important memory files.

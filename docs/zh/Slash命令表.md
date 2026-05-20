@@ -24,9 +24,14 @@
 | `/workspace` | 管理可信目录（见下文） |
 | `/teamskills` | TeamSkills 管理（`init/validate/pack/info/search/list/install/uninstall/config/publish/delete`） |
 | `/export` | 导出当前会话到文件或剪贴板（见下文） |
-| `/status` | 查看 jiuwenclaw 运行状态概览、用量统计、配置编辑（见下文） |
+| `/status` | 查看 jiuwenswarm 运行状态概览、用量统计、配置编辑（见下文） |
 | `/statusline` | 配置 TUI 底部状态栏的自定义命令（见下文） |
 | `/permissions` | 管理工具权限（`allow`/`ask`/`deny`） |
+| `/evolve` | Skill 自演进入口：触发 Skill 演进（见下文） |
+| `/evolve_list` | 查看某个 Skill 的演进经验库（见下文） |
+| `/evolve_simplify` | 整理、合并某个 Skill 的演进经验（见下文） |
+| `/evolve_rebuild` | 基于归档与演进记录重建 `SKILL.md`（见下文） |
+| `/sandbox` | 设置沙箱模式（见下文） |
 
 > 说明：`/mode` 的受控切换逻辑以 Gateway 侧行为为主，详见下文「`/mode` 与 `/switch`」。
 
@@ -50,6 +55,7 @@
 | `/branch` | 从当前对话点创建分支会话（见下文） |
 | `/rewind` | 回退对话到指定轮次之前（见下文） |
 | `/memory` | 记忆管理（见下文） |
+| `/cron` | 定时任务管理（见下文） |
 
 ---
 
@@ -71,7 +77,7 @@
 
 #### 概念说明
 
-- **系统默认工作空间（workspace）**：固定路径 `~/.jiuwenclaw/agent/jiuwenclaw_workspace`，始终可用
+- **系统默认工作空间（workspace）**：固定路径 `~/.jiuwenswarm/agent/jiuwenswarm_workspace`，始终可用
 - **可信目录（trusted_dirs）**：用户授权的可访问目录，由 TUI 管理，传递给后端 Agent
 
 #### 控制逻辑
@@ -80,7 +86,7 @@
    - 选择「信任」：将当前目录添加为可信目录
    - 选择「不信任」：仅使用默认工作空间
 
-2. **会话级管理**：可信目录会持久化到./jiuwenclaw-tui/config.json文件里
+2. **会话级管理**：可信目录会持久化到./jiuwenswarm-tui/config.json文件里
 
 3. **后端传递**：TUI 通过请求参数 `trusted_dirs` 传递可信目录列表，Agent 据此限制文件操作范围
 
@@ -217,6 +223,39 @@
   - `delete` 走 TeamSkills Hub 原生删除接口 `DELETE /api/v1/plugins/{skill_id}/versions/{version}`；
   - `--token` 与 `--system-token` 互斥，且必须二选一。
 
+### `/evolve*`（Skill 自演进）
+
+这组命令由 TUI 本地注册并解析，随后通过普通聊天通道把 slash 文本转发给后端。实际演进逻辑在 Agent / Team 侧完成：
+
+- Agent 模式：由 `SkillEvolutionRail` 处理，仅 `agent.plan` 可用。
+- Team 模式：由 `TeamSkillEvolutionRail` 处理，用于团队技能演进。
+- Code 模式与 `agent.fast` 不支持这组命令。
+
+#### 子命令
+
+| 命令 | 说明 |
+|---|---|
+| `/evolve <skill_name> [user_query]` | 为指定 Skill 触发演进。`agent.plan` 会扫描当前会话中的工具失败、用户纠错等信号；Team 模式必须提供 `user_query`。 |
+| `/evolve_list <skill_name> [--sort score]` | 按分数查看某个 Skill 的演进经验，展示记录数、平均分、使用/反馈统计、section 与内容预览。 |
+| `/evolve_simplify <skill_name> [user_intent]` | 生成经验库整理方案，用于合并重复经验、拆分过长经验或清理低价值经验；尾随文本会作为整理意图传入后端。 |
+| `/evolve_rebuild <skill_name> [user_intent]` | 生成重建 `SKILL.md` 的 follow-up prompt，并继续作为一次普通 Agent / Team 任务执行。 |
+
+#### 审批流程
+
+- `/evolve` 和 `/evolve_simplify` 不会直接落盘覆盖内容；后端会推送确认问题，TUI 进入等待确认状态。
+- 接收后，后端接受本次演进记录并写入/固化；拒绝后丢弃本次生成内容。
+- Team 技能演进接收后会同步团队技能目录。
+- 演进或审批未完成时，用户补充的新输入会先排队，等待演进完成后再继续发送。
+
+#### 示例
+
+```bash
+/evolve pptx 修复导出失败时的错误处理
+/evolve_list pptx --sort score
+/evolve_simplify pptx 合并重复的导出失败经验
+/evolve_rebuild pptx 强化 Troubleshooting 和 Examples
+```
+
 ### `/branch`（分支会话）
 
 - 用法：`/branch [name]`。
@@ -290,6 +329,46 @@
   - `/memory toggle memory_enabled` — 切换记忆总开关
   - `/memory open` — 查看记忆目录路径
 
+### `/cron`（定时任务管理）
+
+管理定时任务（Cron Job），通过 RPC 调用后端 `CronController`，与 Web 端共用同一套后端逻辑和数据存储。
+
+- 别名：`/crontab`
+- 子命令：
+
+| 命令 | 说明 |
+|---|---|
+| `/cron` 或 `/cron list` | 列出所有定时任务 |
+| `/cron add name=<名称> cron_expr=<表达式> description=<描述> [其他参数]` | 新增定时任务 |
+| `/cron update <job_id> key=value ...` | 更新指定任务的部分字段 |
+| `/cron delete <job_id>` | 删除指定任务 |
+| `/cron toggle <job_id> <on或off>` | 启用或禁用指定任务 |
+| `/cron run <job_id>` | 立即执行指定任务 |
+| `/cron preview <job_id>` | 预览任务接下来几次执行时间 |
+
+- `add` 参数：
+
+| 参数 | 必填 | 说明 |
+|---|---|---|
+| `name` | 是 | 任务名称 |
+| `cron_expr` | 是 | Cron 表达式，支持两种格式：5 字段（分 时 日 月 周）或 7 字段 Quartz（秒 分 时 日 月 周 年）。5 字段会自动转换为 7 字段（补 second=0, year=*）。示例：每天 9 点 = `0 9 * * *`（5 字段）或 `0 0 9 * * ? *`（7 字段） |
+| `description` | 是 | 任务描述，即 Agent 执行时收到的输入指令 |
+| `targets` | 否 | 推送渠道，默认 `tui`；可选：`tui`、`web`、`feishu`、`whatsapp`、`wecom`、`xiaoyi`、`wechat` 或 `feishu_enterprise:<app_id>` |
+| `timezone` | 否 | IANA 时区，默认 `Asia/Shanghai` |
+| `mode` | 否 | 执行模式：`agent`（默认，适用于简单提醒类任务）或 `plan`（较复杂的推理任务，让Agent先规划步骤再执行） |
+| `wake_offset_seconds` | 否 | 提前唤醒秒数，默认 300 |
+| `delete_after_run` | 否 | 执行一次后自动删除，默认 false |
+
+- `add` 示例：
+  - `/cron add name=每分钟测试 cron_expr="0 * * * *" description="告诉我现在几点了" targets=tui`
+  - `/cron add name=晨报 cron_expr="0 9 * * *" description="生成今日晨报摘要" targets=tui mode=plan`
+  - `/cron add name=提醒 cron_expr="0 30 17 29 4 ? 2026" description="别忘了开会" targets=tui delete_after_run=true`
+  - `/cron add name=每周一报 cron_expr="0 9 * * 1" description="生成本周周报" targets=web`
+
+- `update` 用法：只需传入要修改的字段，如 `/cron update <id> name=新名称 enabled=false`
+- `list` 显示内容：序号、完整 job ID、名称、cron 表达式、启用状态、描述摘要
+- `preview` 显示内容：每次执行计划的唤醒时间和推送时间
+
 ### `/skills`（技能管理）
 
 管理技能的完整生命周期：列表查看、安装、卸载以及市场源管理。
@@ -314,7 +393,7 @@
 - **市场源（Marketplace source）**：托管可用技能的远程仓库（通常为 Git URL），每个源包含名称、URL 和启用/禁用状态。
 - **规格标识（Spec）**：从市场源安装时使用的标识格式 `<技能名>@<市场源名>`；内置技能安装时可不带 `@`，自动识别为 `@builtin`。
 - **本地安装（Local install）**：通过 `/skills install <path>` 将本地目录（需包含 `SKILL.md`）或远程归档 URL 安装为自定义技能；路径/URL 会自动识别并走本地导入流程。
-- **安装位置（Install location）**：技能安装后的存储目录（`~/.jiuwenclaw/agent/jiuwenclaw_workspace/skills/`）。
+- **安装位置（Install location）**：技能安装后的存储目录（`~/.jiuwenswarm/agent/jiuwenswarm_workspace/skills/`）。
 - **来源标签（Source tag）**：列表中每项技能标注来源，`[builtin]` 表示内置、`[local]` 表示本地导入、`[project]` 或市场源名表示其他来源。
 
 #### 列表分组展示
@@ -404,9 +483,45 @@
 - `/export my-chat` — 保存到工作空间下的 `my-chat.txt`
 - `/export 2026-05-09-debug-session.txt` — 使用显式时间戳文件名保存
 
+### `/sandbox`（沙箱模式管理）
+
+进入/离开 jiuwenbox 沙箱模式，并调整其运行时策略。通过 `command.sandbox` 与 agent-server 交互。
+
+#### 子命令
+
+| 命令 | 说明 |
+|---|---|
+| `/sandbox` 或 `/sandbox status` | 显示当前 runtime（`enabled`、`excluded_commands`、`files.allow_write`、`files.deny_write`） |
+| `/sandbox enable` | 进入沙箱模式（需要时启动 jiuwenbox，并重建 agent） |
+| `/sandbox disable` | 离开沙箱模式（重建 agent；jiuwenbox 只在 jiuwenswarm 启动时才停掉） |
+| `/sandbox exclude add <pattern>` | 加入一条 shell glob，命中后在本地而非沙箱内执行 |
+| `/sandbox exclude remove <pattern>` | 移除一条 pattern |
+| `/sandbox exclude list` | 列出当前 `excluded_commands` |
+| `/sandbox files allow <path> [perm]` | 允许沙箱内写 `<path>` |
+| `/sandbox files deny <path>` | 拒绝沙箱内写 `<path>` |
+| `/sandbox files remove <path>` | 从 user-configured allow & deny 中移除该 path |
+| `/sandbox files list` | 列出生效的 `allow_write` / `deny_write` |
+| `/sandbox help` | 打印用法 |
+
+#### 概念说明
+
+- **平台限制**：`/sandbox` 仅支持 Linux 平台（jiuwenbox 依赖 bwrap / Landlock / Linux namespace 等内核能力）。 在 Windows / macOS 上运行的 agent-server 收到任何 `/sandbox` 子命令都会返回 `SANDBOX_BAD_REQUEST` 错误；如果 TUI 在 Mac/Windows 上、agent-server 在 Linux 主机上，是支持的（看 agent-server 所在主机的平台）。
+- **生效写入策略**：状态面板里的 `files.allow_write` / `files.deny_write` 是 auto-managed 与 user-configured 合并后的视图。auto-managed 条目由服务端自动注入（intrinsic 文件 `AGENT.md`、`HEARTBEAT.md`、`IDENTITY.md`、`SOUL.md`、`USER.md`，`memory/daily_memory/` 目录，以及按 mode 决定的 `project_dir` 与 `config/config.yaml`），不能通过 `/sandbox files remove` 移除。
+- **preserve_file_sharing_mode**：由 jiuwenswarm 配置决定，不通过 `/sandbox` 切换。仅支持 `mount`：intrinsic 文件与 `project_dir` 通过 bind mount 注入沙箱，`project_dir/config/config.yaml` 会显式加进 `deny_write`；yaml 里写入其它值会被服务端拒绝。
+- **excluded_commands**：按完整命令字符串匹配（不是只看 `argv[0]`），命中后该次调用穿透到本地，相当于把对应命令的副作用授权给本地环境。
+- **add / remove 的去重与冲突**：`exclude add` 在已存在同名 pattern 时报错；`exclude remove` 在不存在该 pattern 时报错。`files allow|deny` 在同一 bucket 已有同 path 时报错，在对侧 bucket（allow vs deny）已登记同 path 时也报错，需要先 `files remove` 再 add；`files remove` 在用户配置里找不到该 path 时报错。
+- **enable / disable**：会触发 agent 重建，响应里会列出 `rebuilt_modes`（典型 `agent.*` / `code.*`）和 jiuwenbox 端点。
+
+#### 示例
+
+- `/sandbox enable` — 打开沙箱模式
+- `/sandbox status` — 查看 runtime 与生效路径
+- `/sandbox files allow ./tmp/ 0777` — 允许沙箱以 0777 写入 `./tmp/`
+- `/sandbox exclude add "git *"` — 让 `git` 命令穿透到本地执行，不进沙箱
+
 ### `/status`（查看运行状态）
 
-显示 jiuwenclaw 运行状态概览、用量统计或配置编辑界面。
+显示 jiuwenswarm 运行状态概览、用量统计或配置编辑界面。
 
 #### 子命令
 
@@ -488,7 +603,7 @@
 | `mode` | 当前模式（`agent.plan` / `agent.fast` / `code.plan` / `code.normal` / `team`） |
 | `model` | 当前模型名称 |
 | `provider` | 模型提供商 |
-| `version` | jiuwenclaw 版本号 |
+| `version` | jiuwenswarm 版本号 |
 | `connection` | 连接状态（`idle` / `connecting` / `connected` / `reconnecting` / `auth_failed`） |
 | `theme` | 当前主题名 |
 | `accent_color` | 当前强调色名 |
@@ -560,7 +675,7 @@
 - **超时保护**：单次执行超时 3 秒后自动终止，不影响后续轮询。
 - **输出限制**：命令输出超过 10KB 时截断；显示宽度自动适配 TUI 终端宽度。
 - **故障静默**：命令执行失败时不显示错误，保持上一次成功输出或隐藏状态栏。
-- **持久化**：配置保存在 `~/.jiuwenclaw-tui/config.json` 的 `statusLine` 字段，重启 TUI 后自动恢复。
+- **持久化**：配置保存在 `~/.jiuwenswarm-tui/config.json` 的 `statusLine` 字段，重启 TUI 后自动恢复。
 - **别名**：`/sl`
 - **Windows 适配**：系统自动将 `$(cat)` 替换为读取临时文件，用户命令格式不变；需确保 Git Bash 的 `usr\bin` 在系统 PATH 中。
 
@@ -585,5 +700,3 @@
 | `/btw`         | 提问      |
 | `/export`      | 导出相关文件  |
 | `/permissions` | 权限管理    |
-
-

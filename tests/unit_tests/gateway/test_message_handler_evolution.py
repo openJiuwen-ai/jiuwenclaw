@@ -2,7 +2,9 @@ from types import SimpleNamespace
 
 import pytest
 
-from jiuwenclaw.gateway.message_handler.message_handler import MessageHandler
+from jiuwenswarm.common.schema import Message
+from jiuwenswarm.common.schema.message import ReqMethod
+from jiuwenswarm.gateway.message_handler.message_handler import MessageHandler
 
 
 class _FakeAgentClient:
@@ -75,6 +77,34 @@ class _TestMessageHandler(MessageHandler):
     def pop_user_message_nowait(self):
         user_messages = getattr(self, "_user_messages")
         return user_messages.get_nowait()
+
+    def should_emit_processing_status_for_stream(self, msg: Message) -> bool:
+        return self._should_emit_processing_status_for_stream(msg)
+
+
+def _message(req_method: ReqMethod) -> Message:
+    return Message(
+        id="req-1",
+        type="req",
+        channel_id="web",
+        session_id="sess-1",
+        params={},
+        timestamp=0,
+        ok=True,
+        req_method=req_method,
+        is_stream=True,
+    )
+
+
+def test_processing_status_is_only_emitted_for_chat_streams():
+    handler = _TestMessageHandler.create()
+
+    assert handler.should_emit_processing_status_for_stream(
+        _message(ReqMethod.CHAT_SEND)
+    ) is True
+    assert handler.should_emit_processing_status_for_stream(
+        _message(ReqMethod.HISTORY_GET)
+    ) is False
 
 
 @pytest.mark.asyncio

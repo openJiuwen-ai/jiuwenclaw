@@ -7,7 +7,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from jiuwenclaw.server import app_agentserver
+from jiuwenswarm.server import app_agentserver
 
 
 async def _run_agentserver_for_test(host: str, port: int) -> None:
@@ -56,19 +56,19 @@ async def test_run_does_not_delete_agent_teams_directory(monkeypatch: pytest.Mon
     monkeypatch.setattr(app_agentserver.asyncio, "Event", _FakeEvent)
     monkeypatch.setattr("shutil.rmtree", _fake_rmtree)
     monkeypatch.setattr(
-        "jiuwenclaw.agents.harness.team.remote_member_bootstrap.run_teammate_bootstrap_daemon",
+        "jiuwenswarm.agents.harness.team.remote_member_bootstrap.run_teammate_bootstrap_daemon",
         _fake_bootstrap_daemon,
     )
     monkeypatch.setattr(
-        "jiuwenclaw.server.agent_ws_server.AgentWebSocketServer.get_instance",
+        "jiuwenswarm.server.agent_ws_server.AgentWebSocketServer.get_instance",
         staticmethod(lambda **_kwargs: _FakeServer()),
     )
     monkeypatch.setattr(
-        "jiuwenclaw.extensions.registry.ExtensionRegistry.create_instance",
+        "jiuwenswarm.extensions.registry.ExtensionRegistry.create_instance",
         staticmethod(lambda **_kwargs: object()),
     )
     monkeypatch.setattr(
-        "jiuwenclaw.extensions.manager.ExtensionManager",
+        "jiuwenswarm.extensions.manager.ExtensionManager",
         _FakeExtensionManager,
     )
     monkeypatch.setattr(

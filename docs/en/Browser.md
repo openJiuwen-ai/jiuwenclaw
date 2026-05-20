@@ -38,7 +38,7 @@ Install Chrome first.
 
 ### Step 2: Open the browser service panel
 
-1. Open the JiuwenClaw web UI.
+1. Open the JiuwenSwarm web UI.
 
 ![Browser panel](../assets/images/browser1.png)
 
@@ -179,13 +179,13 @@ BROWSER_ALLOW_SHORT_TIMEOUT_OVERRIDE=0
 ## 7. Code index
 
 ### Frontend
-- `jiuwenclaw/channels/web/frontend/src/components/BrowserPanel/index.tsx` — path, save, start service.
+- `jiuwenswarm/channels/web/frontend/src/components/BrowserPanel/index.tsx` — path, save, start service.
 
 ### Backend
 - `app.py` — `path.get`, `path.set`, `browser.start`, etc.
-- `jiuwenclaw/agents/harness/common/tools/browser_start_client.py` — Chrome launch from `config.yaml`.
-- `jiuwenclaw/agents/harness/common/tools/browser_tools.py` — MCP client, auto-start wrapper.
-- `jiuwenclaw/agents/harness/common/tools/browser-move/src/playwright_runtime_mcp_server.py` — MCP server.
+- `jiuwenswarm/agents/harness/common/tools/browser_start_client.py` — Chrome launch from `config.yaml`.
+- `jiuwenswarm/agents/harness/common/tools/browser_tools.py` — MCP client, auto-start wrapper.
+- `jiuwenswarm/agents/harness/common/tools/browser-move/src/playwright_runtime_mcp_server.py` — MCP server.
 - `.../playwright_runtime/runtime.py`, `service.py`, `agents.py`, `config.py` — runtime orchestration.
 
 ### Config

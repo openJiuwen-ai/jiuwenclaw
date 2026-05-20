@@ -23,15 +23,15 @@ description: 运行 JiuwenClaw Web UI 端到端测试并收集截图、日志、
 常用命令：
 
 ```bash
-export JIUWENCLAW_E2E_PYTHON=.venv/bin/python
-"$JIUWENCLAW_E2E_PYTHON" -m pip install -e ".[e2e]"
-"$JIUWENCLAW_E2E_PYTHON" -m playwright install chromium
+export JIUWENSWARM_E2E_PYTHON=.venv/bin/python
+"$JIUWENSWARM_E2E_PYTHON" -m pip install -e ".[e2e]"
+"$JIUWENSWARM_E2E_PYTHON" -m playwright install chromium
 ```
 
 ## 解释器选择
 
 1. `--runtime-python`
-2. 环境变量 `JIUWENCLAW_E2E_PYTHON`
+2. 环境变量 `JIUWENSWARM_E2E_PYTHON`
 3. `./.venv/bin/python`
 4. 当前解释器
 
@@ -57,14 +57,14 @@ python3 tests/ui_e2e/cron_ui_report.py --build
 ```bash
 python3 -m tests.ui_e2e.run_suite \
   --build \
-  --runtime-python "$JIUWENCLAW_E2E_PYTHON" \
+  --runtime-python "$JIUWENSWARM_E2E_PYTHON" \
   --report-root /tmp/ui-e2e-suite
 ```
 
 ```bash
 python3 tests/ui_e2e/cron_ui_report.py \
   --build \
-  --runtime-python "$JIUWENCLAW_E2E_PYTHON" \
+  --runtime-python "$JIUWENSWARM_E2E_PYTHON" \
   --report-dir /tmp/cron-ui-report
 ```
 

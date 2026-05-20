@@ -1,6 +1,6 @@
 # User guide
 
-This section collects common usage notes and feature documentation for JiuwenClaw.
+This section collects common usage notes and feature documentation for JiuwenSwarm.
 
 - Installation: [Install guide](InstallGuide.md)
 - Install and run from scratch: [Quick start](Quickstart.md) / [TUI mode](Quickstart_tui.md)
@@ -38,5 +38,5 @@ Topic guides:
 
 Development practices:
 
-- [JiuwenClaw Code Review Assistant](development-practices/JiuwenClaw-Code-Review-Assistant.md)
-- [JiuwenClaw Daily Report Generator](development-practices/JiuwenClaw-Daily-Report-Generator.md)
+- [JiuwenSwarm Code Review Assistant](development-practices/JiuwenSwarm-Code-Review-Assistant.md)
+- [JiuwenSwarm Daily Report Generator](development-practices/JiuwenSwarm-Daily-Report-Generator.md)

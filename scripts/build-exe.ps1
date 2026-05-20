@@ -15,9 +15,9 @@ uv sync --extra dev
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
 # 2. Build frontend
-Write-Host "`n[2/4] Building frontend (jiuwenclaw/channels/web/frontend)..." -ForegroundColor Yellow
-Push-Location (Join-Path $ProjectRoot "jiuwenclaw\channels\web\frontend")
-$WebDist = Join-Path $ProjectRoot "jiuwenclaw\channels\web\dist"
+Write-Host "`n[2/4] Building frontend (jiuwenswarm/channels/web/frontend)..." -ForegroundColor Yellow
+Push-Location (Join-Path $ProjectRoot "jiuwenswarm\channels\web\frontend")
+$WebDist = Join-Path $ProjectRoot "jiuwenswarm\channels\web\dist"
 if (Test-Path $WebDist) { Remove-Item $WebDist -Recurse -Force }
 npm install
 if ($LASTEXITCODE -ne 0) { Pop-Location; exit $LASTEXITCODE }
@@ -27,7 +27,7 @@ Pop-Location
 
 # 3. Run PyInstaller
 Write-Host "`n[3/4] Running PyInstaller..." -ForegroundColor Yellow
-uv run pyinstaller scripts\jiuwenclaw.spec --noconfirm
+uv run pyinstaller scripts\jiuwenswarm.spec --noconfirm
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
 # 4. Build installer (Inno Setup)

@@ -1,6 +1,6 @@
 # Windows 自动更新设计
 
-本文档描述 JiuwenClaw 在 Windows 桌面版上的最小可用自动更新方案。目标是优先保证稳定性，而不是追求无感升级。
+本文档描述 JiuwenSwarm 在 Windows 桌面版上的最小可用自动更新方案。目标是优先保证稳定性，而不是追求无感升级。
 
 ## 目标范围
 
@@ -8,7 +8,7 @@
 - 启动时自动检查一次更新
 - 用户可在左侧栏 `更新` 页面手动检查更新
 - 更新源直接使用 GitHub Release
-- 下载产物为 Inno Setup 安装包 `jiuwenclaw-setup-<version>.exe`
+- 下载产物为 Inno Setup 安装包 `jiuwenswarm-setup-<version>.exe`
 - 下载完成后由外部 helper 脚本静默安装并重启应用
 
 ## 不做的能力
@@ -25,7 +25,7 @@
 2. 后端请求 GitHub Releases API 获取最新 release
 3. 若发现新版本，则记录最新版本、发布时间、说明和安装包下载地址
 4. 用户在 `更新` 页点击 `下载更新`
-5. 后端后台下载安装包到 `%USERPROFILE%\\.jiuwenclaw\\.updates`
+5. 后端后台下载安装包到 `%USERPROFILE%\\.jiuwenswarm\\.updates`
 6. 下载完成后，前端调用 pywebview API 触发安装
 7. 桌面进程写入临时 `cmd` helper，等待当前进程退出
 8. helper 静默执行 Inno Setup 安装包，然后重启应用
@@ -53,10 +53,10 @@ https://api.github.com/repos/{owner}/{repo}/releases/latest
 updater:
   enabled: true
   repo_owner: CharlieZhao95
-  repo_name: jiuwenclaw
+  repo_name: jiuwenswarm
   release_api_url: ""
-  asset_name_pattern: "jiuwenclaw-setup-{version}.exe"
-  sha256_name_pattern: "jiuwenclaw-setup-{version}.exe.sha256"
+  asset_name_pattern: "jiuwenswarm-setup-{version}.exe"
+  sha256_name_pattern: "jiuwenswarm-setup-{version}.exe.sha256"
   timeout_seconds: 20
 ```
 
@@ -94,4 +94,4 @@ updater:
 /VERYSILENT /SUPPRESSMSGBOXES /NORESTART /SP- /CLOSEAPPLICATIONS
 ```
 
-4. 安装完成后重新启动 `jiuwenclaw.exe`
+4. 安装完成后重新启动 `jiuwenswarm.exe`

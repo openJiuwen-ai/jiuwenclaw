@@ -7,7 +7,7 @@ from types import SimpleNamespace
 from openjiuwen.core.foundation.tool import LocalFunction, ToolCard
 from openjiuwen.core.single_agent.ability_manager import AbilityManager
 
-from jiuwenclaw.agents.harness.team.team_manager import TeamManager
+from jiuwenswarm.agents.harness.team.team_manager import TeamManager
 
 
 class _FakeResourceManager:
@@ -65,15 +65,15 @@ class _FakeSendFileToolkit:
 def test_register_member_runtime_tools_adds_cron_and_send_file(monkeypatch):
     resource_mgr = _FakeResourceManager()
     monkeypatch.setattr(
-        "jiuwenclaw.agents.harness.common.tools.cron.cron_runtime.CronRuntimeBridge",
+        "jiuwenswarm.agents.harness.common.tools.cron.cron_runtime.CronRuntimeBridge",
         _FakeCronRuntimeBridge,
     )
     monkeypatch.setattr(
-        "jiuwenclaw.agents.harness.common.tools.send_file_to_user.SendFileToolkit",
+        "jiuwenswarm.agents.harness.common.tools.send_file_to_user.SendFileToolkit",
         _FakeSendFileToolkit,
     )
     monkeypatch.setattr(
-        "jiuwenclaw.agents.harness.team.team_manager.get_config",
+        "jiuwenswarm.agents.harness.team.team_manager.get_config",
         lambda: {"channels": {"web": {"send_file_allowed": True}}},
     )
     monkeypatch.setattr(

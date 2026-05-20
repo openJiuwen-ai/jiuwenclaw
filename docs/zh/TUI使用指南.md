@@ -1,7 +1,7 @@
-# JiuwenClaw TUI 使用指南
+# JiuwenSwarm TUI 使用指南
 
-> 本文档面向 **JiuwenClaw 终端界面（`jiuwenclaw-tui` / `jiuwenclaw-cli`）** 用户，结构与 [Claude Code CLI 参考](https://code.claude.com/docs/zh-CN/cli-reference) 类似：先列 **CLI 启动参数**，再列 **Slash 命令**，接着是 **工具参考** 与 **交互模式**，并对 **Code 模式** 做重点说明。  
-> 行为以仓库代码为准：`jiuwenclaw/cli/src/index.ts`、`jiuwenclaw/cli/src/core/commands/registry.ts` 及各 `builtins/*.ts`。
+> 本文档面向 **JiuwenSwarm 终端界面（`jiuwenswarm-tui` / `jiuwenswarm-cli`）** 用户，结构与 [Claude Code CLI 参考](https://code.claude.com/docs/zh-CN/cli-reference) 类似：先列 **CLI 启动参数**，再列 **Slash 命令**，接着是 **工具参考** 与 **交互模式**，并对 **Code 模式** 做重点说明。  
+> 行为以仓库代码为准：`jiuwenswarm/cli/src/index.ts`、`jiuwenswarm/cli/src/core/commands/registry.ts` 及各 `builtins/*.ts`。
 
 ---
 
@@ -18,21 +18,21 @@
 
 | 方式 | 说明 |
 |------|------|
-| `jiuwenclaw-tui` | 通过 `jiuwenclaw-tui` PyPI 包启动时，由包装器拉起对应平台的二进制（见 `packages/jiuwenclaw-tui`）。 |
-| `jiuwenclaw-cli` | 源码/开发路径下，在 `jiuwenclaw/cli` 执行 `npm run dev` 或 `npm run start` 后使用 `jiuwenclaw-cli`（见 `package.json` 的 `bin`）。 |
+| `jiuwenswarm-tui` | 通过 `jiuwenswarm-tui` PyPI 包启动时，由包装器拉起对应平台的二进制（见 `packages/jiuwenswarm-tui`）。 |
+| `jiuwenswarm-cli` | 源码/开发路径下，在 `jiuwenswarm/cli` 执行 `npm run dev` 或 `npm run start` 后使用 `jiuwenswarm-cli`（见 `package.json` 的 `bin`）。 |
 
-以下 **命令行标志** 由 `jiuwenclaw/cli/src/index.ts` 中的 `parseArgs` 定义：
+以下 **命令行标志** 由 `jiuwenswarm/cli/src/index.ts` 中的 `parseArgs` 定义：
 
 | 标志 | 说明 | 默认值 | 示例 |
 |------|------|--------|------|
-| `--url <url>` | Gateway 的 CLI WebSocket 地址 | `ws://127.0.0.1:19001/tui` | `jiuwenclaw-cli --url ws://192.168.1.10:19001/tui` |
-| `--session <id>` | 启动时恢复指定会话 ID | 无 | `jiuwenclaw-cli --session abc-123` |
-| `--token <token>` | 鉴权令牌（若 Gateway 需要） | 空字符串 | `jiuwenclaw-cli --token YOUR_TOKEN` |
-| `-h`, `--help` | 打印帮助并退出 | - | `jiuwenclaw-cli -h` |
+| `--url <url>` | Gateway 的 CLI WebSocket 地址 | `ws://127.0.0.1:19001/tui` | `jiuwenswarm-cli --url ws://192.168.1.10:19001/tui` |
+| `--session <id>` | 启动时恢复指定会话 ID | 无 | `jiuwenswarm-cli --session abc-123` |
+| `--token <token>` | 鉴权令牌（若 Gateway 需要） | 空字符串 | `jiuwenswarm-cli --token YOUR_TOKEN` |
+| `-h`, `--help` | 打印帮助并退出 | - | `jiuwenswarm-cli -h` |
 
 ### 启动后界面
 
-- **欢迎区**：ASCII 标题、版本、当前 Provider / Model / Mode；窄终端下为精简布局（`jiuwenclaw/cli/src/ui/welcome.ts`）。
+- **欢迎区**：ASCII 标题、版本、当前 Provider / Model / Mode；窄终端下为精简布局（`jiuwenswarm/cli/src/ui/welcome.ts`）。
 - **连接提示**：未连上后端时会提示检查 Gateway 或 `--url`；鉴权失败时提示检查 `--token`。
 - **ripgrep 提示**：若本机未安装 `rg`，会提示安装以优化文件搜索。
 
@@ -49,7 +49,7 @@
 
 当前 **已注册** 的顶层命令来自 `createBuiltinCommands()`（`registry.ts`），按名称排序如下表。
 
-> **与文档 [Slash命令表.md](Slash命令表.md) 的差异**：`jiuwenclaw/cli/src/core/commands/builtins/` 下另有 **`switch.ts`（`/switch`）**、**`cancel.ts`（`/cancel`）**、**`new.ts`（`/new` 独立建会话）**、**`sessions.ts`（会话列表 RPC）** 等实现，但 **当前 `registry.ts` 未注册**这些顶层命令，输入后会得到 `Unknown command`。中断任务请优先使用 **`Ctrl+C`**（第一次中断，连按两次退出）。Gateway 侧受控指令仍以 `jiuwenclaw/gateway/slash_command.py` 与 Slash命令表为准。
+> **与文档 [Slash命令表.md](Slash命令表.md) 的差异**：`jiuwenswarm/cli/src/core/commands/builtins/` 下另有 **`switch.ts`（`/switch`）**、**`cancel.ts`（`/cancel`）**、**`new.ts`（`/new` 独立建会话）**、**`sessions.ts`（会话列表 RPC）** 等实现，但 **当前 `registry.ts` 未注册**这些顶层命令，输入后会得到 `Unknown command`。中断任务请优先使用 **`Ctrl+C`**（第一次中断，连按两次退出）。Gateway 侧受控指令仍以 `jiuwenswarm/gateway/slash_command.py` 与 Slash命令表为准。
 
 ### 命令总表
 
@@ -66,10 +66,10 @@
 | `/config` | `/settings`, `/setting` | 查看/设置后端配置 | `/config`、`/config get`、`/config set key value` | 全部 |
 | `/context` | - | 查看上下文窗口占用与 Token 用量明细 | `/context` | 全部 |
 | `/diff` | - | 查看本会话按轮次的文件改动 | `/diff` | 全部 |
-| `/evolve` | - | 触发技能演进或列出待处理（转发为聊天内容） | `/evolve`、`/evolve list` | 全部 |
-| `/evolve_list` | - | 列出某技能的演进条目 | `/evolve_list myskill --sort score` | 全部 |
-| `/evolve_rebuild` | - | 从归档重建 SKILL.md | `/evolve_rebuild myskill` | 全部 |
-| `/evolve_simplify` | - | 简化演进经验 | `/evolve_simplify myskill --dry-run` | 全部 |
+| `/evolve` | - | 触发技能演进 | `/evolve myskill 修正错误处理` | `agent.plan` / `team`（见下） |
+| `/evolve_list` | - | 列出某技能的演进条目 | `/evolve_list myskill --sort score` | `agent.plan` / `team` |
+| `/evolve_rebuild` | - | 从归档与演进记录重建 SKILL.md | `/evolve_rebuild myskill 强化错误处理` | `agent.plan` / `team` |
+| `/evolve_simplify` | - | 整理、合并某技能的演进经验 | `/evolve_simplify myskill 合并重复经验` | `agent.plan` / `team` |
 | `/init` | - | 在 **Code 模式** 下初始化 `JIUWENCLAW.md` / `JIUWENCLAW.local.md` | `/init` | **仅 `code.*`** |
 | `/mcp` | - | 管理 MCP 服务 | `/mcp list`、`/mcp add ...` | 全部 |
 | `/mode` | - | 切换或查看模式 | `/mode`、`/mode code` | 全部 |
@@ -77,7 +77,6 @@
 | `/plan` | - | 进入当前模式族的 plan 子模式，或发送规划请求 | `/plan`、`/plan open`、`/plan 迁移步骤` | 非 `team` |
 | `/rename` | - | 查看/重命名/清空当前会话标题 | `/rename`、`/rename 标题`、`/rename clear` | 全部 |
 | `/resume` | `/continue` | 列出或恢复历史会话；无参 `/resume` 与 `/continue` 在 TUI 中可打开交互列表（见下） | `/resume list`、`/resume <id>` | 全部 |
-| `/session` | `/remote`, `/sessions` | 查看远程会话 URL、二维码等（`/sessions` 为别名，与 `/session` 相同） | `/session` | 全部 |
 | `/skills` | - | 技能与市场源管理 | `/skills`、`/skills install ...` | 全部 |
 | `/teamskills` | - | TeamSkills Hub（初始化、校验、打包、搜索、安装等） | `/teamskills list` | 全部 |
 | `/model` | - | 查看/新增/切换模型 | `/model`、`/model add name k=v` | 全部 |
@@ -87,6 +86,7 @@
 | `/branch` | `/fork` | 从当前对话点创建分支会话 | `/branch fix-login-bug` | 全部 |
 | `/rewind` | `/checkpoint` | 回退对话到指定轮次之前 | `/rewind 2` | 全部 |
 | `/memory` | `/mem` | 记忆管理（状态、文件、开关、目录） | `/memory status` | 全部 |
+| `/sandbox` | - | 进出沙箱模式 / 管理 excluded_commands / files | `/sandbox enable`、`/sandbox status`、`/sandbox files allow ./tmp/` | 全部 |
 
 #### `/resume` 与 `/continue` 在 TUI 中的特殊行为
 
@@ -107,7 +107,7 @@
 
 #### `/workspace`（可信目录）
 
-- 系统默认工作空间：`~/.jiuwenclaw/agent/jiuwenclaw_workspace`（始终可用）。
+- 系统默认工作空间：`~/.jiuwenswarm/agent/jiuwenswarm_workspace`（始终可用）。
 - `add`：默认路径为当前工作目录；成功后会 `command.add_dir` 同步到服务端并 `remember: true`。
 - `set`：重置为单个可信目录；若已有列表会二次确认。
 - 详见 [Slash命令表.md](Slash命令表.md) 的 `/workspace` 小节。
@@ -162,6 +162,30 @@
 
 - **`/skills`**：默认等价 `list`；子命令含 `install`、`uninstall`、`marketplace`、`use` 等；部分长操作有 120s 超时（见 `skills.ts`）。
 - **`/teamskills`**：无子命令时打印用法提示；支持 `init`、`validate`、`pack`、`info`、`search`、`list`、`install`、`uninstall`、`config`、`publish`、`delete`（见 `teamskills.ts` 与 Slash命令表）。
+
+#### `/evolve*`（Skill 自演进）
+
+这组命令在 TUI 本地注册（`evolve.ts`），但业务逻辑不在前端执行：TUI 只做必要参数校验，然后通过 `sendMessage(...)` 把原始 slash 文本发给后端。后端在 Agent / Team 流程中拦截并调用 SkillEvolutionRail / TeamSkillEvolutionRail。
+
+| 命令 | 用途 | 行为要点 |
+|------|------|----------|
+| `/evolve <skill_name> [user_query]` | 为单个 Skill 生成演进记录 | `agent.plan` 下会先扫描当前会话中的工具失败和用户纠错信号；若没有信号且未给 `user_query`，返回“未发现明确演进信号”。Team 模式必须提供 `<user_query>`。 |
+| `/evolve_list <skill_name> [--sort score]` | 查看某 Skill 的经验库 | 展示记录数、平均分、使用/反馈统计、目标 section 与内容预览；当前实现按 score 获取记录。 |
+| `/evolve_simplify <skill_name> [user_intent]` | 智能整理经验库 | 生成可审批的整理方案，用于合并、拆分或清理演进经验。尾随文本会作为整理意图传给后端，不是独立 CLI flag。 |
+| `/evolve_rebuild <skill_name> [user_intent]` | 重建 SKILL.md | 由后端生成 follow-up prompt，并继续作为普通 Agent / Team 任务执行，用归档历史与演进记录重建 Skill 文档。 |
+
+适用条件：
+
+- `agent.plan`：用于单 Agent Skill 自演进；其它 Agent / Code 子模式不处理这组命令。
+- `team`：使用团队技能演进 rail；`/evolve <skill_name> <user_query>`、`/evolve_list`、`/evolve_simplify`、`/evolve_rebuild` 可用。
+
+审批与状态：
+
+- `/evolve` 和 `/evolve_simplify` 生成变更后不会静默写入，会推送 `chat.ask_user_question`，TUI 进入确认态，用户确认后才由后端接受或丢弃记录。
+- Team 技能演进确认后会同步团队技能；拒绝则丢弃本次生成内容。
+- 后端推送 `chat.evolution_status` 时，TUI 会把演进状态标记为 running / idle；演进或审批未完成时补充输入会先排队，等待演进完成后再发送。
+
+更多机制说明见 [Skill 自演进](Skill自演进.md)。
 
 #### `/plan`
 
@@ -224,6 +248,21 @@
   - `toggle [key]` — 切换记忆开关；无参数时列出可切换项（`memory_enabled`、`memory_proactive`、`memory_forbidden_enabled`）。
   - `open` — 显示记忆系统各目录路径。
 - 示例：`/memory status`、`/memory toggle memory_enabled`、`/memory edit memory/MEMORY.md`。
+
+#### `/sandbox`（沙箱模式管理）
+
+- 平台限制：仅在 Linux 上的 agent-server 可用；Windows / macOS 的 agent-server 收到 `/sandbox` 命令会直接返回错误。TUI 本身跑在哪个平台不影响——只要 agent-server 在 Linux 上即可。
+- 子命令：`status`（默认）/ `enable` / `disable` / `exclude add|remove|list` / `files allow|deny|remove|list` / `help`。
+- `enable` 行为：必要时启动 jiuwenbox（已有 endpoint 则复用），随后触发 agent 重建；响应面板会显示 `rebuilt_modes` 与 jiuwenbox 端点。
+- `disable` 行为：重建 agent；只有 jiuwenswarm 自己启动的 jiuwenbox 才会被停掉，外部 endpoint 会显式保留。
+- 状态面板字段：
+  - `enabled` — 当前开关。
+  - `excluded_commands` — 命中后穿透到本地执行的 shell glob 列表。
+  - `files.allow_write` / `files.deny_write` — 生效（auto-managed ∪ user-configured，去重）的写入策略。
+- 自动配置路径：文件 `AGENT.md`、`HEARTBEAT.md`、`IDENTITY.md`、`SOUL.md`、`USER.md`，目录 `memory/daily_memory/`，以及 `project_dir`（allow_write）与 `project_dir/config/config.yaml`（deny_write）。`preserve_file_sharing_mode` 仅支持 `mount`。
+- `excluded_commands` 的匹配：按完整命令字符串匹配，不仅看 `argv[0]`；写 glob 时要把参数也覆盖进去（例如 `"git *"` 而不是 `git`）。本质等同于沙箱穿透口，不要对 `rm -rf` / `curl` 这类高风险命令使用。
+- add / remove 严格校验：`exclude add` 已存在 pattern、`exclude remove` 不存在 pattern 都会报错；`files allow|deny` 在同 bucket 已有 path 或对侧 bucket 已有 path（allow/deny 冲突）会报错，先 `files remove` 再 add；`files remove` 没匹配到也会报错。避免"看起来执行了实际什么也没改"。
+- 示例：`/sandbox enable`、`/sandbox status`、`/sandbox files allow ./tmp/ 0777`、`/sandbox exclude add "git *"`。
 
 #### `/clear` 与忙状态
 
@@ -370,9 +409,9 @@
 
 | 问题 | 建议 |
 |------|------|
-| `jiuwenclaw-cli requires an interactive TTY` | 在真实终端中运行，勿用管道代替 |
+| `jiuwenswarm-cli requires an interactive TTY` | 在真实终端中运行，勿用管道代替 |
 | `Authentication failed` | 检查 `--token` |
-| `Backend unavailable` | 启动 `jiuwenclaw-gateway` 或修正 `--url` |
+| `Backend unavailable` | 启动 `jiuwenswarm-gateway` 或修正 `--url` |
 | `Unknown command: /xxx` | 该构建未注册该命令；用 `/help` 查看当前可用列表，或对照本文「命令总表」与 `registry.ts` |
 | `/copy` 失败 | 当前系统无剪贴板集成；Linux 需常见剪贴板工具 |
 

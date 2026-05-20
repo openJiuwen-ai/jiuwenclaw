@@ -2,15 +2,15 @@
 
 Agent 系统普遍存在一个问题：能力定义一旦写好，就基本不会再变了。工具调用出错，记录一条日志；用户反馈说理解有误，下次还是同样的逻辑。能力的上限，从部署那天就已经固定了。
 
-JiuwenClaw 基于 **openJiuwen 自演进框架**，以 `SkillCallOperator` 算子统一管理所有 Skills 的读写与演进分发。在此基础上，系统内置了一套演进信号检测机制，持续监听执行过程和对话内容，将真实使用中遇到的问题转化为 Skills 的改进输入。
+JiuwenSwarm 基于 **openJiuwen 自演进框架**，以 `SkillCallOperator` 算子统一管理所有 Skills 的读写与演进分发。在此基础上，系统内置了一套演进信号检测机制，持续监听执行过程和对话内容，将真实使用中遇到的问题转化为 Skills 的改进输入。
 
 ## 核心组件
 
 ### SkillCallOperator
 
-SkillCallOperator 是 JiuwenClaw 基于 openJiuwen 框架实现的 Operator 算子，负责 Skills 的统一管理。
+SkillCallOperator 是 JiuwenSwarm 基于 openJiuwen 框架实现的 Operator 算子，负责 Skills 的统一管理。
 
-作为 JiuwenClaw 与 Skills 交互的核心入口，它承担以下职责：
+作为 JiuwenSwarm 与 Skills 交互的核心入口，它承担以下职责：
 - 读取 Skill 定义（SKILL.md）
 - 执行 Skill 指令
 - 自动加载 Skill 积累的演进经验
@@ -19,7 +19,7 @@ SkillCallOperator 是 JiuwenClaw 基于 openJiuwen 框架实现的 Operator 算�
 
 ### SkillOptimizer
 
-SkillOptimizer 是 JiuwenClaw 基于 openJiuwen 框架实现的 Optimizer 优化器，负责驱动整个 Skill 演进流程。
+SkillOptimizer 是 JiuwenSwarm 基于 openJiuwen 框架实现的 Optimizer 优化器，负责驱动整个 Skill 演进流程。
 
 它的核心工作包括：
 1. **接收信号**：从 SignalDetector 接收异常信号，理解当前 Skill 遇到了什么问题
@@ -187,7 +187,7 @@ User: 不对，我说的是查询上海不是北京
 
 ## 如何使用
 
-使用 JiuwenClaw 时，你可以通过以下方式与 Skill 演进功能交互：
+使用 JiuwenSwarm 时，你可以通过以下方式与 Skill 演进功能交互：
 
 ### 自演进配置开关
 
@@ -240,7 +240,7 @@ skill 自动演进功能通过在配置信息中开启自演进配置项 `evolut
 **目录位置：**
 
 ```
-~/.jiuwenclaw/workspace/agent/skills/<skill_name>/
+~/.jiuwenswarm/workspace/agent/skills/<skill_name>/
 ├── SKILL.md           # Skill 源文档
 ├── evolutions.json    # 演进经验记录 ← 在这里编辑
 └── ...

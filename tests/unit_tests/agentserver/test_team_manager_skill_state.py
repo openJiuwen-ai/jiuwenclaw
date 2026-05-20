@@ -8,7 +8,7 @@ from types import SimpleNamespace
 
 from openjiuwen.agent_teams.schema.blueprint import TeamAgentSpec
 
-from jiuwenclaw.agents.harness.team.team_manager import TeamManager
+from jiuwenswarm.agents.harness.team.team_manager import TeamManager
 
 
 def test_member_skill_state_inherits_marketplaces_and_rebuilds_installed_skills(monkeypatch, tmp_path):
@@ -38,15 +38,15 @@ def test_member_skill_state_inherits_marketplaces_and_rebuilds_installed_skills(
     )
 
     monkeypatch.setattr(
-        "jiuwenclaw.agents.harness.team.team_manager.get_agent_skills_dir",
+        "jiuwenswarm.agents.harness.team.team_manager.get_agent_skills_dir",
         lambda: global_skills_dir,
     )
     monkeypatch.setattr(
-        "jiuwenclaw.agents.harness.team.team_runtime_inheritance.build_member_rails",
+        "jiuwenswarm.agents.harness.team.team_runtime_inheritance.build_member_rails",
         lambda **kwargs: [],
     )
     monkeypatch.setattr(
-        "jiuwenclaw.agents.harness.common.plugins.rail_manager.get_rail_manager",
+        "jiuwenswarm.agents.harness.common.plugins.rail_manager.get_rail_manager",
         lambda: type(
             "_DummyRailManager",
             (),
@@ -128,15 +128,15 @@ def test_code_team_customizer_applies_code_profile_to_member(monkeypatch, tmp_pa
         encoding="utf-8",
     )
     monkeypatch.setattr(
-        "jiuwenclaw.agents.harness.team.team_manager.get_agent_skills_dir",
+        "jiuwenswarm.agents.harness.team.team_manager.get_agent_skills_dir",
         lambda: global_skills_dir,
     )
     monkeypatch.setattr(
-        "jiuwenclaw.agents.harness.team.team_manager.build_member_rails",
+        "jiuwenswarm.agents.harness.team.team_manager.build_member_rails",
         lambda **kwargs: [],
     )
     monkeypatch.setattr(
-        "jiuwenclaw.agents.harness.common.plugins.rail_manager.get_rail_manager",
+        "jiuwenswarm.agents.harness.common.plugins.rail_manager.get_rail_manager",
         lambda: type(
             "_DummyRailManager",
             (),
@@ -153,7 +153,7 @@ def test_code_team_customizer_applies_code_profile_to_member(monkeypatch, tmp_pa
         calls.append({"agent": agent, **kwargs})
 
     monkeypatch.setattr(
-        "jiuwenclaw.server.runtime.agent_adapter.interface_code.configure_code_team_member_agent",
+        "jiuwenswarm.server.runtime.agent_adapter.interface_code.configure_code_team_member_agent",
         fake_configure_code_member,
     )
 
@@ -169,8 +169,8 @@ def test_code_team_customizer_applies_code_profile_to_member(monkeypatch, tmp_pa
     parent_project = tmp_path / "project"
     parent_project.mkdir()
     parent_agent = SimpleNamespace(
-        _jiuwenclaw_adapter_mode="code",
-        _jiuwenclaw_code_project_dir=str(parent_project),
+        _jiuwenswarm_adapter_mode="code",
+        _jiuwenswarm_code_project_dir=str(parent_project),
         deep_config=SimpleNamespace(
             workspace=SimpleNamespace(root_path=str(parent_project)),
             sys_operation=None,
@@ -226,7 +226,7 @@ def test_code_team_customizer_applies_code_profile_to_member(monkeypatch, tmp_pa
 
 def test_configure_code_team_member_uses_relative_coding_memory_path(monkeypatch, tmp_path):
     """code.team members should register workspace directories with relative paths."""
-    from jiuwenclaw.server.runtime.agent_adapter import interface_code
+    from jiuwenswarm.server.runtime.agent_adapter import interface_code
 
     global_workspace = tmp_path / "global_agent_workspace"
     member_workspace = tmp_path / "member_workspace"
@@ -304,7 +304,7 @@ def test_configure_code_team_member_uses_relative_coding_memory_path(monkeypatch
         add_rail=lambda rail: None,
     )
     parent_agent = SimpleNamespace(
-        _jiuwenclaw_code_project_dir=str(parent_project),
+        _jiuwenswarm_code_project_dir=str(parent_project),
         deep_config=SimpleNamespace(workspace=SimpleNamespace(root_path=str(parent_project))),
     )
 

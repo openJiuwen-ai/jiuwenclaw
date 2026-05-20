@@ -1,6 +1,6 @@
 # 开发者指南
 
-本文档面向 JiuwenClaw 项目的开发者，介绍如何从源码搭建开发环境并运行测试。
+本文档面向 JiuwenSwarm 项目的开发者，介绍如何从源码搭建开发环境并运行测试。
 
 ## 环境要求
 
@@ -15,8 +15,8 @@
 ## 1. 克隆项目
 
 ```bash
-git clone <repository-url> jiuwenclaw
-cd jiuwenclaw
+git clone <repository-url> jiuwenswarm
+cd jiuwenswarm
 ```
 
 ## 2. 使用 `uv` 搭建开发环境
@@ -53,7 +53,7 @@ source .venv/bin/activate
 
 ### 执行 uv 同步操作
 
-在项目根目录 `jiuwenclaw/` 执行：
+在项目根目录 `jiuwenswarm/` 执行：
 
 ```bash
 uv sync
@@ -89,8 +89,8 @@ bun --version
 ### 项目结构概览
 
 ```
-jiuwenclaw/
-├── jiuwenclaw/           # 项目源码
+jiuwenswarm/
+├── jiuwenswarm/           # 项目源码
 ├── tests/
 │   ├── unit_tests/       # 单元测试
 │   ├── system_tests/     # 系统测试
@@ -121,8 +121,8 @@ uv add --dev pytest-cov pytest-asyncio
 修改后端 Python 代码后，执行以下命令重新初始化并启动服务：
 
 ```bash
-uv run jiuwenclaw-init
-uv run jiuwenclaw-start
+uv run jiuwenswarm-init
+uv run jiuwenswarm-start
 ```
 
 #### 前端代码修改
@@ -230,8 +230,8 @@ node --version
 
 | 包名 | 说明 | 配置文件 |
 |------|------|----------|
-| `jiuwenclaw` | 后端服务主包（含 Web 前端构建产物） | `pyproject.toml` |
-| `jiuwenclaw-tui` | TUI 终端界面 sidecar 包（含 Bun 编译的原生二进制） | `packages/jiuwenclaw-tui/pyproject.toml` |
+| `jiuwenswarm` | 后端服务主包（含 Web 前端构建产物） | `pyproject.toml` |
+| `jiuwenswarm-tui` | TUI 终端界面 sidecar 包（含 Bun 编译的原生二进制） | `packages/jiuwenswarm-tui/pyproject.toml` |
 
 #### 6.1.1 一键构建全部（推荐）
 
@@ -243,13 +243,13 @@ bash scripts/build.sh
 ```
 
 该脚本会依次执行：
-1. 编译 Web 前端（`jiuwenclaw/channels/web/frontend` 目录下执行 `npm run build`）
-2. 构建主包 `jiuwenclaw.whl`
-3. 如果检测到 `bun` 命令，继续构建 TUI 原生二进制和 `jiuwenclaw-tui.whl`
+1. 编译 Web 前端（`jiuwenswarm/channels/web/frontend` 目录下执行 `npm run build`）
+2. 构建主包 `jiuwenswarm.whl`
+3. 如果检测到 `bun` 命令，继续构建 TUI 原生二进制和 `jiuwenswarm-tui.whl`
 
 产物输出到两个目录：
-- `./dist/jiuwenclaw-<version>-py3-none-any.whl`（主包）
-- `./packages/jiuwenclaw-tui/dist/jiuwenclaw_tui-<version>-<platform>.whl`（TUI sidecar 包）
+- `./dist/jiuwenswarm-<version>-py3-none-any.whl`（主包）
+- `./packages/jiuwenswarm-tui/dist/jiuwenswarm_tui-<version>-<platform>.whl`（TUI sidecar 包）
 
 ### 6.2 桌面版 EXE / DMG 打包
 
@@ -274,7 +274,7 @@ scripts\build-exe.bat
 .\scripts\build-exe.ps1
 ```
 
-产物目录：`dist\jiuwenclaw\jiuwenclaw.exe`
+产物目录：`dist\jiuwenswarm\jiuwenswarm.exe`
 
 #### 6.2.3 macOS 平台打包（DMG）
 
@@ -285,7 +285,7 @@ bash scripts/build-macos.sh
 该脚本会依次执行：
 1. 安装 Python 依赖（`uv sync --extra dev`）
 2. 编译 Web 前端（`npm run build`）
-3. PyInstaller 打包生成 `JiuwenClaw.app`
+3. PyInstaller 打包生成 `JiuwenSwarm.app`
 4. 使用 `hdiutil` 创建 DMG 安装镜像
 
-产物：`dist/JiuwenClaw-<version>.dmg`
+产物：`dist/JiuwenSwarm-<version>.dmg`

@@ -1,6 +1,6 @@
 # Context compression & offload
 
-Long chats hit **context window limits**: the model slows, forgets early details, or makes mistakes on dense material. JiuwenClaw uses openJiuwen’s **context offload** to **archive bulky content** when counts or token thresholds are exceeded—like clearing a cluttered desk: large or secondary material is summarized and indexed with `[[OFFLOAD:...]]` markers so the active window stays focused.
+Long chats hit **context window limits**: the model slows, forgets early details, or makes mistakes on dense material. JiuwenSwarm uses openJiuwen’s **context offload** to **archive bulky content** when counts or token thresholds are exceeded—like clearing a cluttered desk: large or secondary material is summarized and indexed with `[[OFFLOAD:...]]` markers so the active window stays focused.
 
 ## Configuration (high level)
 

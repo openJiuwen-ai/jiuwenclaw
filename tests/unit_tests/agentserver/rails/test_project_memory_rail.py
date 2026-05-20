@@ -1,6 +1,6 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
-"""Unit tests for ProjectMemoryRail (jiuwenclaw product-side)."""
+"""Unit tests for ProjectMemoryRail (jiuwenswarm product-side)."""
 from __future__ import annotations
 
 import tempfile
@@ -11,12 +11,12 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from jiuwenclaw.agents.harness.common.rails import project_memory_rail as _rail_mod
-from jiuwenclaw.agents.harness.common.rails.project_memory import SECTION_NAME
-from jiuwenclaw.agents.harness.common.rails.project_memory import (
+from jiuwenswarm.agents.harness.common.rails import project_memory_rail as _rail_mod
+from jiuwenswarm.agents.harness.common.rails.project_memory import SECTION_NAME
+from jiuwenswarm.agents.harness.common.rails.project_memory import (
     files as _files_mod,
 )
-from jiuwenclaw.agents.harness.common.rails.project_memory_rail import (
+from jiuwenswarm.agents.harness.common.rails.project_memory_rail import (
     ProjectMemoryRail,
 )
 
@@ -62,7 +62,7 @@ def _make_agent_with_builder() -> MagicMock:
 
 
 @pytest.mark.asyncio
-async def test_loads_jiuwenclaw_md_from_root():
+async def test_loads_jiuwenswarm_md_from_root():
     with tempfile.TemporaryDirectory() as td:
         root = Path(td)
         _touch(root, ".git/HEAD", "")

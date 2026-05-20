@@ -2,7 +2,7 @@
 ; 用法: "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" scripts\installer.iss
 
 #define MyAppName "JiuwenSwarm"
-#define MyAppVersion "0.1.11"
+#define MyAppVersion "0.2.0"
 #define MyAppPublisher "openJiuwen"
 #define MyAppExeName "jiuwenswarm.exe"
 #define MyAppURL "https://openjiuwen.com"
@@ -18,7 +18,7 @@ DefaultGroupName={#MyAppName}
 DisableProgramGroupPage=yes
 OutputDir=..\dist
 OutputBaseFilename=JiuwenSwarm-setup-{#MyAppVersion}
-SetupIconFile=..\jiuwenclaw\channels\web\frontend\public\logo.ico
+SetupIconFile=..\jiuwenswarm\channels\web\frontend\public\logo.ico
 UninstallDisplayIcon={app}\jiuwenswarm.exe
 Compression=lzma2/normal
 SolidCompression=yes
@@ -44,4 +44,5 @@ Name: "{group}\{cm:UninstallProgram,{#MyAppName}}"; Filename: "{uninstallexe}"
 Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; Tasks: desktopicon
 
 [Run]
-Filename: "{app}\{#MyAppExeName}"; Description: "{cm:LaunchProgram,{#MyAppName}}"; Flags: nowait postinstall skipifsilent
+; shellexec 让程序通过 ShellExecute 启动，正确处理 UAC 权限请求
+Filename: "{app}\{#MyAppExeName}"; Description: "{cm:LaunchProgram,{#MyAppName}}"; Flags: nowait postinstall skipifsilent shellexec

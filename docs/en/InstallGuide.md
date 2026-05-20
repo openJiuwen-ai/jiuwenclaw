@@ -1,12 +1,12 @@
-# JiuwenClaw install guide
+# JiuwenSwarm install guide
 
-> **Important:** Finishing installation does not mean the app is ready to use. You must complete model configuration first. See [Configuration](https://gitcode.com/openJiuwen/jiuwenclaw/blob/develop/docs/en/Configuration.md) ([Chinese](https://gitcode.com/openJiuwen/jiuwenclaw/blob/develop/docs/zh/%E9%85%8D%E7%BD%AE%E4%BF%A1%E6%81%AF.md)) for model setup.
+> **Important:** Finishing installation does not mean the app is ready to use. You must complete model configuration first. See [Configuration](https://gitcode.com/openJiuwen/jiuwenswarm/blob/develop/docs/en/Configuration.md) ([Chinese](https://gitcode.com/openJiuwen/jiuwenswarm/blob/develop/docs/zh/%E9%85%8D%E7%BD%AE%E4%BF%A1%E6%81%AF.md)) for model setup.
 
 ---
 
 ## Prerequisites
 
-Before installing JiuwenClaw, make sure your system meets the following requirements:
+Before installing JiuwenSwarm, make sure your system meets the following requirements:
 
 | Dependency | Version | Notes |
 |------------|---------|-------|
@@ -43,28 +43,28 @@ git --version
 
 ```bash
 # Create a virtual environment (recommended)
-python -m venv jiuwenclaw-env
+python -m venv jiuwenswarm-env
 
 # Activate the virtual environment
 # Windows:
-jiuwenclaw-env\Scripts\activate
+jiuwenswarm-env\Scripts\activate
 # macOS/Linux:
-source jiuwenclaw-env/bin/activate
+source jiuwenswarm-env/bin/activate
 
-# Install JiuwenClaw
-pip install jiuwenclaw
+# Install JiuwenSwarm
+pip install jiuwenswarm
 ```
 
 #### 2. First launch
 
 ```bash
-# Initialize JiuwenClaw (first run)
-jiuwenclaw-init
-# Start JiuwenClaw
-jiuwenclaw-start
+# Initialize JiuwenSwarm (first run)
+jiuwenswarm-init
+# Start JiuwenSwarm
+jiuwenswarm-start
 ```
 
-After the first start, the app creates the config directory `~/.jiuwenclaw/`.
+After the first start, the app creates the config directory `~/.jiuwenswarm/`.
 
 #### 3. Post-start verification
 
@@ -79,15 +79,15 @@ After a successful start, verify the installation:
 
 ![Example: Web UI connected with a successful verification chat](../assets/images/天气.png)
 
-> 💡 **Tip:** If the Web UI does not load, check `~/.jiuwenclaw/logs/` for errors.
+> 💡 **Tip:** If the Web UI does not load, check `~/.jiuwenswarm/logs/` for errors.
 
 #### 4. Restarting the service
 
-If you closed JiuwenClaw and want to run it again:
+If you closed JiuwenSwarm and want to run it again:
 
 ```bash
 # Start again
-jiuwenclaw-start
+jiuwenswarm-start
 ```
 
 ---
@@ -108,10 +108,10 @@ uv --version
 
 ```bash
 # Clone the repository
-git clone https://gitcode.com/openJiuwen/jiuwenclaw.git
+git clone https://gitcode.com/openJiuwen/jiuwenswarm.git
 
 # Enter project directory
-cd jiuwenclaw
+cd jiuwenswarm
 
 # Create venv and install dependencies with uv
 uv venv
@@ -123,8 +123,8 @@ uv pip install -e .
 > ⚠️ **Important:** With a source (editable) install you must build the front end manually, or startup will fail with `dist directory not found`.
 
 ```bash
-# Enter front-end directory (repo root is jiuwenclaw)
-cd jiuwenclaw/channels/web
+# Enter front-end directory (repo root is jiuwenswarm)
+cd jiuwenswarm/channels/web
 
 # Install front-end dependencies
 npm install
@@ -134,9 +134,9 @@ npm run build
 
 # Copy build output into the user workspace
 # Windows:
-xcopy /E /I dist %USERPROFILE%\.jiuwenclaw\channels\web\frontend\dist
+xcopy /E /I dist %USERPROFILE%\.jiuwenswarm\channels\web\frontend\dist
 # macOS/Linux:
-cp -r dist ~/.jiuwenclaw/channels/web/frontend/dist
+cp -r dist ~/.jiuwenswarm/channels/web/frontend/dist
 
 # Back to repo root
 cd ..
@@ -146,7 +146,7 @@ cd ..
 
 - `uv pip install -e .` is an editable install that points at your source tree.
 - `web/dist` is ignored by `.gitignore` and is not shipped in the repo.
-- You must build and copy artifacts to `~/.jiuwenclaw/channels/web/frontend/dist`.
+- You must build and copy artifacts to `~/.jiuwenswarm/channels/web/frontend/dist`.
 
 #### 4. First launch
 
@@ -157,10 +157,10 @@ cd ..
 # macOS/Linux:
 source .venv/bin/activate
 
-# Initialize JiuwenClaw (first run)
-jiuwenclaw-init
+# Initialize JiuwenSwarm (first run)
+jiuwenswarm-init
 # Start
-jiuwenclaw-start
+jiuwenswarm-start
 ```
 
 #### 5. Post-start verification (same as Option 1)
@@ -171,7 +171,7 @@ Use the checklist under [Post-start verification](#3-post-start-verification).
 
 ```bash
 # After activating the virtual environment
-jiuwenclaw-start
+jiuwenswarm-start
 ```
 
 ---
@@ -192,24 +192,24 @@ conda --version
 
 ```bash
 # Create environment
-conda create -n jiuwenclaw python=3.11
+conda create -n jiuwenswarm python=3.11
 
 # Initialize conda (first time)
 conda init
 # After init, close the window and open a new session before activate
 
 # Activate environment
-conda activate jiuwenclaw
+conda activate jiuwenswarm
 ```
 
 #### 3. Clone and install
 
 ```bash
 # Clone the repository
-git clone https://gitcode.com/openJiuwen/jiuwenclaw.git
+git clone https://gitcode.com/openJiuwen/jiuwenswarm.git
 
 # Enter project directory
-cd jiuwenclaw
+cd jiuwenswarm
 
 # Install dependencies
 pip install -e .
@@ -220,8 +220,8 @@ pip install -e .
 > ⚠️ **Important:** With a source (editable) install you must build the front end manually, or startup will fail with `dist directory not found`.
 
 ```bash
-# Enter front-end directory (repo root is jiuwenclaw)
-cd jiuwenclaw/channels/web
+# Enter front-end directory (repo root is jiuwenswarm)
+cd jiuwenswarm/channels/web
 
 # Install front-end dependencies
 npm install
@@ -231,9 +231,9 @@ npm run build
 
 # Copy build output into the user workspace
 # Windows:
-xcopy /E /I dist %USERPROFILE%\.jiuwenclaw\channels\web\frontend\dist
+xcopy /E /I dist %USERPROFILE%\.jiuwenswarm\channels\web\frontend\dist
 # macOS/Linux:
-cp -r dist ~/.jiuwenclaw/channels/web/frontend/dist
+cp -r dist ~/.jiuwenswarm/channels/web/frontend/dist
 
 # Back to repo root
 cd ..
@@ -243,15 +243,15 @@ cd ..
 
 - `pip install -e .` is an editable install that points at your source tree.
 - `web/dist` is ignored by `.gitignore` and is not shipped in the repo.
-- You must build and copy artifacts to `~/.jiuwenclaw/channels/web/frontend/dist`.
+- You must build and copy artifacts to `~/.jiuwenswarm/channels/web/frontend/dist`.
 
 #### 5. First launch
 
 ```bash
-# Initialize JiuwenClaw (first run)
-jiuwenclaw-init
+# Initialize JiuwenSwarm (first run)
+jiuwenswarm-init
 # Start
-jiuwenclaw-start
+jiuwenswarm-start
 ```
 
 #### 6. Post-start verification (same as Option 1)
@@ -262,8 +262,8 @@ Use the checklist under [Post-start verification](#3-post-start-verification).
 
 ```bash
 # Activate environment, then start
-conda activate jiuwenclaw
-jiuwenclaw-start
+conda activate jiuwenswarm
+jiuwenswarm-start
 ```
 
 ---
@@ -284,14 +284,14 @@ jiuwenclaw-start
 ```bash
 # Activate your virtual environment
 # Then upgrade
-pip install --upgrade jiuwenclaw
+pip install --upgrade jiuwenswarm
 ```
 
 #### Source install upgrade
 
 ```bash
 # Enter project directory
-cd jiuwenclaw
+cd jiuwenswarm
 
 # Pull latest
 git pull
@@ -300,15 +300,15 @@ git pull
 pip install -e .
 
 # Rebuild the front end (if it was updated)
-cd jiuwenclaw/channels/web
+cd jiuwenswarm/channels/web
 npm install
 npm run build
 
 # Copy build output
 # Windows:
-xcopy /E /I dist %USERPROFILE%\.jiuwenclaw\channels\web\frontend\dist
+xcopy /E /I dist %USERPROFILE%\.jiuwenswarm\channels\web\frontend\dist
 # macOS/Linux:
-cp -r dist ~/.jiuwenclaw/channels/web/frontend/dist
+cp -r dist ~/.jiuwenswarm/channels/web/frontend/dist
 
 cd ..
 ```
@@ -325,20 +325,20 @@ cd ..
 
 ```bash
 # Back up the whole config and data directory
-xcopy "%USERPROFILE%\.jiuwenclaw" "%USERPROFILE%\.jiuwenclaw_backup" /E /I
+xcopy "%USERPROFILE%\.jiuwenswarm" "%USERPROFILE%\.jiuwenswarm_backup" /E /I
 
 # Or with PowerShell (recommended)
-Copy-Item -Path "$env:USERPROFILE\.jiuwenclaw" -Destination "$env:USERPROFILE\.jiuwenclaw_backup" -Recurse
+Copy-Item -Path "$env:USERPROFILE\.jiuwenswarm" -Destination "$env:USERPROFILE\.jiuwenswarm_backup" -Recurse
 ```
 
 **macOS/Linux:**
 
 ```bash
 # Back up the whole config and data directory
-cp -r ~/.jiuwenclaw ~/.jiuwenclaw_backup
+cp -r ~/.jiuwenswarm ~/.jiuwenswarm_backup
 
 # Or with rsync (recommended; preserves permissions)
-rsync -av ~/.jiuwenclaw ~/.jiuwenclaw_backup
+rsync -av ~/.jiuwenswarm ~/.jiuwenswarm_backup
 ```
 
 **What to back up:**
@@ -354,11 +354,11 @@ rsync -av ~/.jiuwenclaw ~/.jiuwenclaw_backup
 
 #### 2. Perform the upgrade
 
-Pick the steps that match how you installed JiuwenClaw:
+Pick the steps that match how you installed JiuwenSwarm:
 
 ##### pip install upgrade
 
-Follow the same steps as [Routine version upgrade – pip install upgrade](#pip-install-upgrade) (activate your virtual environment, then run `pip install --upgrade jiuwenclaw`).
+Follow the same steps as [Routine version upgrade – pip install upgrade](#pip-install-upgrade) (activate your virtual environment, then run `pip install --upgrade jiuwenswarm`).
 
 ##### Source install upgrade
 
@@ -375,7 +375,7 @@ After upgrading, migrate data so config and stores match the new version.
 cat docs/config_template.yaml
 
 # Or read the changelog
-# https://gitcode.com/openJiuwen/jiuwenclaw/blob/develop/docs/CHANGELOG.md
+# https://gitcode.com/openJiuwen/jiuwenswarm/blob/develop/docs/CHANGELOG.md
 ```
 
 ##### Step 2: Migrate configuration
@@ -391,7 +391,7 @@ cat docs/config_template.yaml
 
    ```bash
    # Back up the new default config
-   cp ~/.jiuwenclaw/config/config.yaml ~/.jiuwenclaw/config/config.yaml.new
+   cp ~/.jiuwenswarm/config/config.yaml ~/.jiuwenswarm/config/config.yaml.new
 
    # Restore from backup (use with care)
    # Prefer diff/merge in an editor instead of blind overwrite
@@ -412,20 +412,20 @@ Memory is usually backward compatible; still verify:
 
 ```bash
 # Inspect memory layout
-ls ~/.jiuwenclaw/agent/memory/
+ls ~/.jiuwenswarm/agent/memory/
 
 # If something looks wrong, restore from backup
-cp -r ~/.jiuwenclaw_backup/agent/memory/* ~/.jiuwenclaw/agent/memory/
+cp -r ~/.jiuwenswarm_backup/agent/memory/* ~/.jiuwenswarm/agent/memory/
 ```
 
 ##### Step 4: Verify migration
 
 ```bash
 # Start the service
-jiuwenclaw-start
+jiuwenswarm-start
 
 # Watch logs for config errors
-# Logs: ~/.jiuwenclaw/logs/
+# Logs: ~/.jiuwenswarm/logs/
 ```
 
 **Migration checklist:**
@@ -451,22 +451,22 @@ Install Node.js 18.x or newer.
 ### Q: How do I check the installed version?
 
 ```bash
-jiuwenclaw --version
+jiuwenswarm --version
 ```
 
 ### Q: How do I uninstall?
 
 ```bash
-pip uninstall jiuwenclaw
+pip uninstall jiuwenswarm
 ```
 
 ---
 
 ## Related links
 
-- **Repository:** https://gitcode.com/openJiuwen/jiuwenclaw
-- **Issues:** https://gitcode.com/openJiuwen/jiuwenclaw/issues
-- **Docs:** https://gitcode.com/openJiuwen/jiuwenclaw/tree/develop/docs
+- **Repository:** https://gitcode.com/openJiuwen/jiuwenswarm
+- **Issues:** https://gitcode.com/openJiuwen/jiuwenswarm/issues
+- **Docs:** https://gitcode.com/openJiuwen/jiuwenswarm/tree/develop/docs
 
 ---
 

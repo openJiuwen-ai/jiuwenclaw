@@ -4,11 +4,11 @@
 
 import time
 
-from jiuwenclaw.server.utils.utils import get_chat_id
-from jiuwenclaw.common.e2a.agent_compat import e2a_to_agent_request
-from jiuwenclaw.common.e2a.gateway_normalize import message_to_e2a_or_fallback
-from jiuwenclaw.common.schema.agent import AgentRequest
-from jiuwenclaw.common.schema.message import Message, ReqMethod
+from jiuwenswarm.server.utils.utils import get_chat_id
+from jiuwenswarm.common.e2a.agent_compat import e2a_to_agent_request
+from jiuwenswarm.common.e2a.gateway_normalize import message_to_e2a_or_fallback
+from jiuwenswarm.common.schema.agent import AgentRequest
+from jiuwenswarm.common.schema.message import Message, ReqMethod
 
 
 def test_feishu_channel_to_agentserver_chat_id():

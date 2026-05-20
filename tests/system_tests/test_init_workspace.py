@@ -30,15 +30,21 @@ def temp_home() -> Generator[Path, None, None]:
 
 
 @pytest.fixture
-def clean_environment(temp_home: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def interactive_mode(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Force _is_interactive() to return True so tests hit the interactive branch."""
+    monkeypatch.setattr("jiuwenswarm.common.utils._is_interactive", lambda: True)
+
+
+@pytest.fixture
+def clean_environment(temp_home: Path, monkeypatch: pytest.MonkeyPatch, interactive_mode: None) -> None:
     """Set up a clean environment for testing initialization."""
     # Override HOME to use temporary directory
     monkeypatch.setenv("HOME", str(temp_home))
     # Clear any cached configuration
-    monkeypatch.delenv("JIUWENCLAW_CONFIG_DIR", raising=False)
+    monkeypatch.delenv("JIUWENSWARM_CONFIG_DIR", raising=False)
 
     # Reset module-level caches in utils.py
-    import jiuwenclaw.common.utils as utils_module
+    import jiuwenswarm.common.utils as utils_module
     monkeypatch.setattr(utils_module, "_initialized", False)
     monkeypatch.setattr(utils_module, "_config_dir", None)
     monkeypatch.setattr(utils_module, "_workspace_dir", None)
@@ -51,7 +57,7 @@ class TestResolvePreferredLanguage:
     @staticmethod
     def test_resolve_explicit_language(temp_home: Path, clean_environment: None):
         """Test _resolve_preferred_language with explicit language parameter."""
-        from jiuwenclaw.common.utils import _resolve_preferred_language
+        from jiuwenswarm.common.utils import _resolve_preferred_language
 
         workspace_dir = temp_home / ".jiuwenswarm"
         workspace_dir.mkdir(parents=True, exist_ok=True)
@@ -69,7 +75,7 @@ class TestResolvePreferredLanguage:
     @staticmethod
     def test_resolve_default_to_zh(temp_home: Path, clean_environment: None):
         """Test _resolve_preferred_language defaults to 'zh' when no config exists."""
-        from jiuwenclaw.common.utils import _resolve_preferred_language
+        from jiuwenswarm.common.utils import _resolve_preferred_language
 
         workspace_dir = temp_home / ".jiuwenswarm"
         workspace_dir.mkdir(parents=True, exist_ok=True)
@@ -88,7 +94,7 @@ class TestPromptPreferredLanguage:
     @staticmethod
     def test_prompt_select_chinese(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture):
         """Test prompt_preferred_language with Chinese selection."""
-        from jiuwenclaw.common.utils import prompt_preferred_language
+        from jiuwenswarm.common.utils import prompt_preferred_language
 
         # Simulate user selecting Chinese (option 1)
         monkeypatch.setattr("builtins.input", lambda _: "1")
@@ -97,9 +103,13 @@ class TestPromptPreferredLanguage:
         assert result == "zh"
 
     @staticmethod
-    def test_prompt_select_english(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture):
+    def test_prompt_select_english(
+        monkeypatch: pytest.MonkeyPatch,
+        interactive_mode: None,
+        capsys: pytest.CaptureFixture,
+    ):
         """Test prompt_preferred_language with English selection."""
-        from jiuwenclaw.common.utils import prompt_preferred_language
+        from jiuwenswarm.common.utils import prompt_preferred_language
 
         # Simulate user selecting English (option 2)
         monkeypatch.setattr("builtins.input", lambda _: "2")
@@ -110,52 +120,56 @@ class TestPromptPreferredLanguage:
     @staticmethod
     def test_prompt_select_zh_alias(monkeypatch: pytest.MonkeyPatch):
         """Test prompt_preferred_language with 'zh' alias."""
-        from jiuwenclaw.common.utils import prompt_preferred_language
+        from jiuwenswarm.common.utils import prompt_preferred_language
 
         monkeypatch.setattr("builtins.input", lambda _: "zh")
         result = prompt_preferred_language()
         assert result == "zh"
 
     @staticmethod
-    def test_prompt_select_en_alias(monkeypatch: pytest.MonkeyPatch):
+    def test_prompt_select_en_alias(monkeypatch: pytest.MonkeyPatch, interactive_mode: None):
         """Test prompt_preferred_language with 'en' alias."""
-        from jiuwenclaw.common.utils import prompt_preferred_language
+        from jiuwenswarm.common.utils import prompt_preferred_language
 
         monkeypatch.setattr("builtins.input", lambda _: "en")
         result = prompt_preferred_language()
         assert result == "en"
 
     @staticmethod
-    def test_prompt_cancel_with_no(monkeypatch: pytest.MonkeyPatch):
+    def test_prompt_cancel_with_no(monkeypatch: pytest.MonkeyPatch, interactive_mode: None):
         """Test prompt_preferred_language cancellation with 'no'."""
-        from jiuwenclaw.common.utils import prompt_preferred_language
+        from jiuwenswarm.common.utils import prompt_preferred_language
 
         monkeypatch.setattr("builtins.input", lambda _: "no")
         result = prompt_preferred_language()
         assert result is None
 
     @staticmethod
-    def test_prompt_cancel_with_n(monkeypatch: pytest.MonkeyPatch):
+    def test_prompt_cancel_with_n(monkeypatch: pytest.MonkeyPatch, interactive_mode: None):
         """Test prompt_preferred_language cancellation with 'n'."""
-        from jiuwenclaw.common.utils import prompt_preferred_language
+        from jiuwenswarm.common.utils import prompt_preferred_language
 
         monkeypatch.setattr("builtins.input", lambda _: "n")
         result = prompt_preferred_language()
         assert result is None
 
     @staticmethod
-    def test_prompt_cancel_with_q(monkeypatch: pytest.MonkeyPatch):
+    def test_prompt_cancel_with_q(monkeypatch: pytest.MonkeyPatch, interactive_mode: None):
         """Test prompt_preferred_language cancellation with 'q'."""
-        from jiuwenclaw.common.utils import prompt_preferred_language
+        from jiuwenswarm.common.utils import prompt_preferred_language
 
         monkeypatch.setattr("builtins.input", lambda _: "q")
         result = prompt_preferred_language()
         assert result is None
 
     @staticmethod
-    def test_prompt_invalid_input_returns_none(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture):
+    def test_prompt_invalid_input_returns_none(
+        monkeypatch: pytest.MonkeyPatch,
+        interactive_mode: None,
+        capsys: pytest.CaptureFixture,
+    ):
         """Test prompt_preferred_language with invalid input."""
-        from jiuwenclaw.common.utils import prompt_preferred_language
+        from jiuwenswarm.common.utils import prompt_preferred_language
 
         # Simulate invalid input
         monkeypatch.setattr("builtins.input", lambda _: "invalid")
@@ -169,7 +183,7 @@ class TestInitUserWorkspace:
     @staticmethod
     def test_init_user_workspace_first_time(temp_home: Path, clean_environment: None, monkeypatch: pytest.MonkeyPatch):
         """Test init_user_workspace on first run (no existing workspace)."""
-        from jiuwenclaw.common.utils import init_user_workspace
+        from jiuwenswarm.common.utils import init_user_workspace
 
         # Simulate user selecting Chinese
         monkeypatch.setattr("builtins.input", lambda _: "1")
@@ -190,7 +204,7 @@ class TestInitUserWorkspace:
     def test_init_user_workspace_cancel_language_selection(temp_home: Path, clean_environment: None,
                                                            monkeypatch: pytest.MonkeyPatch):
         """Test init_user_workspace cancellation during language selection."""
-        from jiuwenclaw.common.utils import init_user_workspace
+        from jiuwenswarm.common.utils import init_user_workspace
 
         # Simulate user cancelling language selection
         monkeypatch.setattr("builtins.input", lambda _: "cancel")
@@ -207,7 +221,7 @@ class TestInitWorkspaceMain:
     def test_main_successful_init(clean_environment: None, monkeypatch: pytest.MonkeyPatch,
                                   capsys: pytest.CaptureFixture):
         """Test main function with successful initialization."""
-        from jiuwenclaw.init_workspace import run_init
+        from jiuwenswarm.init_workspace import run_init
 
         # Simulate user selecting Chinese
         monkeypatch.setattr("builtins.input", lambda _: "1")
@@ -226,7 +240,7 @@ class TestInitWorkspaceMain:
     @staticmethod
     def test_main_cancelled_init(clean_environment: None, monkeypatch: pytest.MonkeyPatch):
         """Test main function with cancelled initialization."""
-        from jiuwenclaw.init_workspace import run_init
+        from jiuwenswarm.init_workspace import run_init
 
         # Simulate user cancelling
         monkeypatch.setattr("builtins.input", lambda _: "cancelled")
@@ -238,7 +252,7 @@ class TestInitWorkspaceMain:
     @staticmethod
     def test_main_force_init(clean_environment: None, monkeypatch: pytest.MonkeyPatch):
         """Test main function with -f flag for force initialization."""
-        from jiuwenclaw.init_workspace import run_init
+        from jiuwenswarm.init_workspace import run_init
 
         # Simulate user confirming force init and selecting Chinese
         def mock_input(prompt):

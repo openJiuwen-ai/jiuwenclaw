@@ -11,7 +11,7 @@ Slash-prefixed commands (`/`) are currently implemented in multiple places:
 
 - **Gateway**: `MessageHandler._handle_channel_control` handles `/new_session`, `/mode …`, etc. on controlled channels, deciding whether to **intercept and NOT forward to Agent**.
 - **IM Pipeline / Channels**: e.g. `gateway/im_pipeline/im_inbound.py` maintains its own control message set; Feishu/WeCom channels may have text-based checks that **diverge from the main logic**.
-- **CLI TUI**: `jiuwenclaw/channels/tui/frontend/src/core/commands/` has a local registry; some commands call the backend via WebSocket, others are purely local.
+- **CLI TUI**: `jiuwenswarm/channels/tui/frontend/src/core/commands/` has a local registry; some commands call the backend via WebSocket, others are purely local.
 
 Without clear layering and a single source of truth, the project risks: **semantic inconsistencies for the same command name, documentation-code drift, and duplicated parsing logic in new channels.**
 
@@ -72,7 +72,7 @@ Without clear layering and a single source of truth, the project risks: **semant
 
 ### 4.1 Module Location (Proposed)
 
-- **Python side**: Implemented as `jiuwenclaw/gateway/slash_command.py` (controlled channel parsing, `CONTROL_MESSAGE_TEXTS`, first-batch command metadata `FIRST_BATCH_REGISTRY`). May evolve into `channel_control_slash.py` etc.
+- **Python side**: Implemented as `jiuwenswarm/gateway/slash_command.py` (controlled channel parsing, `CONTROL_MESSAGE_TEXTS`, first-batch command metadata `FIRST_BATCH_REGISTRY`). May evolve into `channel_control_slash.py` etc.
   - **Data**: The set of controlled commands, match rules (exact / prefix / no-multi-line), metadata (description, whether to forward to Agent).
   - **Pure functions**: Given a channel type and user text, return a **structured decision** (not hit / hit & valid / hit & invalid). **No IO** in SSOT module (no `create_task` for notifications).
 - **Naming suggestion**: If only containing Category A, the module name should avoid suggesting "all product slashes", preventing future contributors from stuffing Category B logic into the Gateway.

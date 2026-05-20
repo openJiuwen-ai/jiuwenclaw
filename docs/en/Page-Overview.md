@@ -1,4 +1,4 @@
-# JiuwenClaw page overview (web)
+# JiuwenSwarm page overview (web)
 
 > **Goal:** Help you understand the web UI structure, where features live, and how to interact with them. This is a foundation for deeper use.
 >
@@ -8,7 +8,7 @@
 
 ## Overall layout
 
-The JiuwenClaw web app uses a classic three-column layout—common in professional tools and dev platforms—so information stays organized and actions are easy to reach.
+The JiuwenSwarm web app uses a classic three-column layout—common in professional tools and dev platforms—so information stays organized and actions are easy to reach.
 
 ### Layout at a glance
 
@@ -18,7 +18,7 @@ The JiuwenClaw web app uses a classic three-column layout—common in profession
 | Main workspace | Center | Chat, task execution, controls |
 | Right info panel | Right edge | Status, task list, system info |
 
-![JiuwenClaw web UI: three-column layout](../assets/images/jiuwenclaw布局概览.png)
+![JiuwenSwarm web UI: three-column layout](../assets/images/jiuwenswarm布局概览.png)
 
 ### Layout notes
 
@@ -53,9 +53,9 @@ The left bar is the main entry to features.
 
 - **Where:** **bottom-left** of the nav
 
-![JiuwenClaw version in the web UI](../assets/images/jiuwenclaw版本号.png)
+![JiuwenSwarm version in the web UI](../assets/images/jiuwenswarm版本号.png)
 
-- **What:** current JiuwenClaw version
+- **What:** current JiuwenSwarm version
 - **Why:** identify builds when reporting issues or checking compatibility
 
 > **Note:** Some advanced features need the right permissions or config.
@@ -68,7 +68,7 @@ This is where most interaction happens.
 
 ### 1. Chat view
 
-The primary surface for talking to JiuwenClaw.
+The primary surface for talking to JiuwenSwarm.
 
 **Input**
 
@@ -80,11 +80,11 @@ The primary surface for talking to JiuwenClaw.
 - **AI reply:** final answer and intermediate steps when shown
 - **Tool calls:** tools the agent used and their results
 
-![JiuwenClaw chat: messages, reply, and tools](../assets/images/jiuwenclaw显示内容.png)
+![JiuwenSwarm chat: messages, reply, and tools](../assets/images/jiuwenswarm显示内容.png)
 
 ### 2. Execution modes
 
-JiuwenClaw offers three execution modes. Pick the one that fits the task. Names in the app follow the UI (English strings are typically *Planning mode*, *Performance mode*, and *Cluster mode* in `en.json`).
+JiuwenSwarm offers three execution modes. Pick the one that fits the task. Names in the app follow the UI (English strings are typically *Planning mode*, *Performance mode*, and *Cluster mode* in `en.json`).
 
 > **Scope of this page:** only switching modes **in the app**. It does not cover changing config files or environment variables; for that, see [Configuration](Configuration.md).
 
@@ -99,7 +99,7 @@ JiuwenClaw offers three execution modes. Pick the one that fits the task. Names 
 - Choose the mode in the **input area** of the main chat.
 - Modes change how the agent plans and runs; in **Cluster mode** you can usually see how work is split and parallel work (as the UI shows).
 
-![Execution mode selector](../assets/images/jiuwenclaw执行模式.png)
+![Execution mode selector](../assets/images/jiuwenswarm执行模式.png)
 
 ### 3. Task control bar
 
@@ -112,13 +112,13 @@ While a task is **running**, you can often **manually** control the current run 
 | **Cancelled** | Stopped; the same user instruction will not continue | Usually nothing more for that run; you can send a new input |
 
 **Running (example)**  
-![Task running](../assets/images/jiuwenclaw处理中.png)
+![Task running](../assets/images/jiuwenswarm处理中.png)
 
 **Paused (example)**  
-![Task paused](../assets/images/jiuwenclaw暂停.png)
+![Task paused](../assets/images/jiuwenswarm暂停.png)
 
 **Cancelled (example)**  
-![Task cancelled](../assets/images/jiuwenclaw取消.png)
+![Task cancelled](../assets/images/jiuwenswarm取消.png)
 
 ---
 
@@ -134,7 +134,7 @@ The right side shows system status and supporting context.
 | **Language** | UI language (e.g. Chinese / English) |
 | **Theme** | Light / dark / system |
 
-![Status and auxiliary area](../assets/images/jiuwenclaw辅助信息展示.png)
+![Status and auxiliary area](../assets/images/jiuwenswarm辅助信息展示.png)
 
 ### 2. Info panel
 

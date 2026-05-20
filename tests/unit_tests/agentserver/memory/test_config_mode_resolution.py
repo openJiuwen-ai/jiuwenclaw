@@ -13,7 +13,7 @@ import pytest
 
 # ---------------------------------------------------------------------------
 # Inline copy of the resolver logic to avoid heavy imports.
-# Mirror of jiuwenclaw/agentserver/memory/config.py — keep in sync.
+# Mirror of jiuwenswarm/agentserver/memory/config.py — keep in sync.
 # ---------------------------------------------------------------------------
 
 def _resolve_mode_memory(mode: str, config: Optional[Dict[str, Any]]) -> Dict[str, Any]:
@@ -51,7 +51,7 @@ def is_proactive_memory(mode: str, config: Optional[Dict[str, Any]] = None) -> b
 
 @pytest.fixture
 def cfg() -> Dict[str, Any]:
-    """A config shaped like the real config.yaml — matches what jiuwenclaw ships."""
+    """A config shaped like the real config.yaml — matches what jiuwenswarm ships."""
     return {
         "modes": {
             "agent": {

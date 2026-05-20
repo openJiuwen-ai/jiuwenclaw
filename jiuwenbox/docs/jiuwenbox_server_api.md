@@ -4,13 +4,74 @@
 
 ## 基础信息
 
-### 默认地址
+> **下文所有 `requests.get("http://127.0.0.1:8321/...")` 代码示例的 URL
+> 路径不变**；切到 Unix Domain Socket 部署时只需把 base URL 替换成
+> "本节通用接入示例" 中的 UDS client 即可。状态码、错误格式、所有请求 /
+> 响应字段在两种传输方式下完全一致。
+
+### TCP 监听（默认）
+
+uvicorn 直接 bind `0.0.0.0:8321`，外部走 IP:Port 访问：
 
 ```text
 http://127.0.0.1:8321
 ```
 
+### Unix Domain Socket 监听
+
+适用于同主机 agent 进程访问、或需要靠文件系统权限做访问控制的场景。
+启动方式见仓库根的 [`README_CN.md`](../README_CN.md#通过-unix-domain-socket-部署)
+"通过 Unix Domain Socket 部署" 一节；典型 endpoint：
+
+```text
+unix:///tmp/jiuwenbox-sock/jiuwenbox.sock     # 宿主机视角的 socket 文件
+unix:///run/jiuwenbox/jiuwenbox.sock          # 容器内 uvicorn 绑定的路径
+```
+
+服务端单进程一次只绑一种 listener；并发提供 TCP + UDS 需要部署两份 jiuwenbox。
+
 业务接口统一使用 `/api/v1` 前缀，健康检查接口为 `/health`。
+
+### 通用接入示例
+
+以下三种方式分别通过 TCP 与 UDS 访问同一个 `/health`，请求行为完全等价；
+本文后续小节里 `http://127.0.0.1:8321/...` 形式的示例只需照此替换 base URL。
+
+curl：
+
+```bash
+# TCP
+curl http://127.0.0.1:8321/health
+
+# UDS
+curl --unix-socket /tmp/jiuwenbox-sock/jiuwenbox.sock http://localhost/health
+```
+
+Python（`requests` 库本身不原生支持 UDS，UDS 路径推荐 `httpx` 或
+[`requests-unixsocket`](https://pypi.org/project/requests-unixsocket/)）：
+
+```python
+# TCP
+import requests
+resp = requests.get("http://127.0.0.1:8321/health", timeout=30)
+
+# UDS
+import httpx
+transport = httpx.HTTPTransport(uds="/tmp/jiuwenbox-sock/jiuwenbox.sock")
+with httpx.Client(transport=transport, base_url="http://jiuwenbox", timeout=30) as client:
+    resp = client.get("/health")
+```
+
+jiuwenbox CLI：
+
+```bash
+# TCP (默认)
+jiuwenbox health
+
+# UDS
+jiuwenbox --base-url unix:///tmp/jiuwenbox-sock/jiuwenbox.sock health
+JIUWENBOX_URL=unix:///tmp/jiuwenbox-sock/jiuwenbox.sock jiuwenbox health
+```
 
 ### 请求与响应约定
 
@@ -159,7 +220,6 @@ print(resp.json())
 
 | 字段 | 类型 | 必填 | 说明 |
 | --- | --- | --- | --- |
-| `command` | string[] | 否 | 兼容字段，当前生命周期进程不会使用该命令 |
 | `workdir` | string/null | 否 | 兼容字段 |
 | `env` | object | 否 | 沙箱公共环境变量 |
 | `policy` | object/null | 否 | 覆盖或追加的 policy 数据 |
@@ -972,6 +1032,5 @@ print(resp.text)
 
 ## 说明
 
-- `sandbox.create` 仍接受 `command` 和 `workdir` 字段，但当前生命周期持有进程为服务内部 daemon，这两个字段不会出现在 `SandboxRef` 返回体中。
 - `sandbox.exec` 和 `sandbox.exec_background` 中的 `workdir`、`env`、`timeout_seconds` 仍然有效。
 - 文档示例中的时间、PID、ID 仅为示意。
