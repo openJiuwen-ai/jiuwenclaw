@@ -1041,6 +1041,168 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
           useChatStore.getState().setUsageSummary(targetId, usage);
         }
       }),
+}),
+      webClient.on('harness.message', ({ payload }) => {
+        if (!shouldHandleSessionEvent(payload)) return;
+        const content = typeof payload.content === 'string' ? payload.content : '';
+        const stage = typeof payload.stage === 'string' ? payload.stage : undefined;
+
+        const metadata = (payload as { metadata?: { is_security_alert?: boolean } }).metadata;
+        if (metadata?.is_security_alert) {
+          window.dispatchEvent(new CustomEvent('security-alert', {
+            detail: { message: content }
+          }));
+        }
+
+        useHarnessStore.getState().addHarnessMessage(content, stage);
+
+        // Pipeline start message contains stages array: { content, pipeline, stages: [{slot, display_name}] }
+        const rawStages = payload.stages;
+        if (Array.isArray(rawStages) && rawStages.length > 0) {
+          const stages: { slot: string; display_name: string }[] = [];
+          for (const s of rawStages) {
+            if (typeof s === 'object' && s !== null) {
+              const obj = s as Record<string, unknown>;
+              const slot = typeof obj.slot === 'string' ? obj.slot : '';
+              const displayName = typeof obj.display_name === 'string' ? obj.display_name : '';
+              if (slot) stages.push({ slot, display_name: displayName || slot });
+            }
+          }
+          if (stages.length > 0) useHarnessStore.getState().setStageDefinitions(stages);
+        }
+
+        // Mark stage as running (skip pipeline start message which has stages array)
+        if (stage && !rawStages) {
+          const existingStage = useHarnessStore.getState().stageResults.find(s => s.stage === stage);
+          if (existingStage?.status !== 'running') {
+            useHarnessStore.getState().updateStageResult({ stage, status: 'running', messages: [], metrics: {} });
+          }
+        }
+
+        addMessage({
+          id: `harness-msg-${Date.now()}`,
+          role: 'system',
+          content,
+          timestamp: new Date().toISOString(),
+          isHarnessMessage: true,
+        });
+      }),
+      webClient.on('harness.stage_result', ({ payload }) => {
+        if (!shouldHandleSessionEvent(payload)) return;
+        const stage = typeof payload.stage === 'string' ? payload.stage : '';
+        const status = typeof payload.status === 'string' ? payload.status : 'success';
+        const error = typeof payload.error === 'string' ? payload.error : undefined;
+        const messages = Array.isArray(payload.messages) ? payload.messages.filter((m) => typeof m === 'string') : [];
+        const metrics = typeof payload.metrics === 'object' && payload.metrics !== null && !Array.isArray(payload.metrics)
+          ? payload.metrics as Record<string, unknown>
+          : {};
+        const scope = typeof payload.scope === 'string' ? payload.scope : '';
+        const extensionName = typeof payload.extension_name === 'string' ? payload.extension_name : '';
+        const extensionStage = typeof payload.extension_stage === 'string' ? payload.extension_stage : '';
+        const parentStage = typeof payload.parent_stage === 'string' ? payload.parent_stage : '';
+        const taskId = typeof payload.task_id === 'string' ? payload.task_id : undefined;
+        if (scope === 'extension' && extensionName) {
+          useHarnessStore.getState().updateExtensionProgress({
+            extensionName,
+            taskId,
+            parentStage: parentStage || stage,
+            extensionStage,
+            status: status as 'running' | 'success' | 'failed' | 'timeout' | 'pending' | 'waiting' | 'skipped' | 'rejected',
+            error,
+            messages,
+          });
+        }
+        if (stage) {
+          useHarnessStore.getState().updateStageResult({
+            stage,
+            status: status as 'running' | 'success' | 'failed' | 'timeout' | 'pending',
+            error,
+            messages,
+            metrics,
+          });
+          if (status === 'failed' && error) {
+            addMessage({
+              id: `harness-error-${Date.now()}`,
+              role: 'system',
+              content: `Stage ${stage} failed: ${error}`,
+              timestamp: new Date().toISOString(),
+            });
+          }
+        } else {
+          console.warn('[harness.stage_result] No stage field in payload, skipping update');
+        }
+      }),
+      webClient.on('harness.extension_ready', ({ payload }) => {
+        if (!shouldHandleSessionEvent(payload)) return;
+        const extensionName = typeof payload.extension_name === 'string' ? payload.extension_name : '';
+        const runtimePath = typeof payload.runtime_path === 'string' ? payload.runtime_path : '';
+        const sessionRuntimePath = typeof payload.session_runtime_path === 'string' ? payload.session_runtime_path : runtimePath;
+        const extensionRuntimePath = typeof payload.extension_runtime_path === 'string' ? payload.extension_runtime_path : '';
+        const configPath = typeof payload.config_path === 'string' ? payload.config_path : '';
+        const runtimeExtensions = Array.isArray(payload.runtime_extensions)
+          ? payload.runtime_extensions
+              .filter((item) => typeof item === 'object' && item !== null)
+              .map((item) => {
+                const obj = item as Record<string, unknown>;
+                return {
+                  extensionName: typeof obj.extension_name === 'string' ? obj.extension_name : '',
+                  runtimePath: typeof obj.runtime_path === 'string' ? obj.runtime_path : '',
+                  configPath: typeof obj.config_path === 'string' ? obj.config_path : '',
+                };
+              })
+              .filter((item) => item.extensionName && item.runtimePath)
+          : [];
+        const verifyReport = typeof payload.verify_report === 'object' && payload.verify_report !== null && !Array.isArray(payload.verify_report)
+          ? payload.verify_report as Record<string, unknown>
+          : {};
+        const componentsSummary = typeof payload.components_summary === 'object' && payload.components_summary !== null && !Array.isArray(payload.components_summary)
+          ? payload.components_summary as Record<string, unknown>
+          : {};
+
+        useHarnessStore.getState().setExtensionReady({
+          extensionName,
+          runtimePath,
+          sessionRuntimePath,
+          extensionRuntimePath,
+          configPath,
+          runtimeExtensions,
+          verifyReport,
+          componentsSummary,
+        });
+      }),
+      webClient.on('harness.activate_interaction', ({ payload }) => {
+        if (!shouldHandleSessionEvent(payload)) return;
+        const interactionId = typeof payload.interaction_id === 'string' ? payload.interaction_id : '';
+        const extensionName = typeof payload.extension_name === 'string' ? payload.extension_name : '';
+        const runtimePath = typeof payload.runtime_path === 'string' ? payload.runtime_path : '';
+        const options: string[] = Array.isArray(payload.options) ? payload.options : ['accept', 'reject'];
+
+        useHarnessStore.getState().setActivateInteraction({
+          interactionId,
+          extensionName,
+          runtimePath,
+          options,
+          pending: true,
+        });
+        setPendingQuestion({
+          request_id: interactionId,
+          source: 'activate_confirm',
+          questions: [{
+            header: '扩展激活确认',
+            question: `是否激活扩展 **${extensionName}**？`,
+            options: options.map((opt: string) => ({
+              label: opt === 'accept' ? '激活' : opt === 'reject' ? '拒绝' : opt,
+              description: '',
+            })),
+          }],
+        });
+      }),
+webClient.on('harness.session_finished', ({ payload }) => {
+        if (!shouldHandleSessionEvent(payload)) return;
+        setProcessing(false);
+        setThinking(false);
+        useHarnessStore.getState().setHarnessRunning(false);
+      }),
     ];
 
     return () => {

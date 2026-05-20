@@ -112,6 +112,36 @@ def test_interface_deep_parse_stream_chunk_preserves_tool_update():
     }
 
 
+def test_interface_deep_parse_stream_chunk_preserves_message_metadata():
+    """Test that metadata field is preserved in message type for security alerts."""
+    parsed = parse_stream_chunk(
+        types.SimpleNamespace(
+            type="message",
+            payload={
+                "role": "system",
+                "content": "[WARNING] API key/secret detected in read_file result.",
+                "metadata": {
+                    "is_security_alert": True,
+                    "level": "warning",
+                    "alert_type": "api_key_leakage",
+                    "display_mode": "popup",
+                    "rail": "ApikeyguardalertRail",
+                },
+            },
+        )
+    )
+
+    assert parsed["event_type"] == "chat.message"
+    assert parsed["content"] == "[WARNING] API key/secret detected in read_file result."
+    assert parsed["role"] == "system"
+    assert "metadata" in parsed
+    assert parsed["metadata"]["is_security_alert"] is True
+    assert parsed["metadata"]["level"] == "warning"
+    assert parsed["metadata"]["alert_type"] == "api_key_leakage"
+    assert parsed["metadata"]["display_mode"] == "popup"
+    assert parsed["metadata"]["rail"] == "ApikeyguardalertRail"
+
+
 @pytest.mark.asyncio
 async def test_handle_initialize_uses_agent_manager_capabilities(monkeypatch):
     server = AgentWebSocketServerHarness()

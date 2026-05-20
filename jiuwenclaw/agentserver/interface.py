@@ -865,19 +865,21 @@ class JiuWenClaw:
         selected_options = answer.get("selected_options", []) if isinstance(answer, dict) else []
         custom_input = answer.get("custom_input", "") if isinstance(answer, dict) else ""
 
-        if "本次允许" in selected_options:
+        value = selected_options[0] if selected_options else ""
+
+        if value in ("approve", "本次允许", "Approve"):
             confirm_payload = {"approved": True, "auto_confirm": False, "feedback": ""}
-        elif "总是允许" in selected_options:
+        elif value in ("always_allow", "总是允许", "Always Allow"):
             confirm_payload = {
                 "approved": True,
                 "auto_confirm": True,
                 "persist_allow": True,
                 "feedback": "",
             }
-        elif "拒绝" in selected_options:
+        elif value in ("reject", "拒绝", "Reject"):
             confirm_payload = {"approved": False, "auto_confirm": False, "feedback": custom_input or "用户拒绝"}
         else:
-            confirm_payload = {"approved": False, "auto_confirm": False, "feedback": "未知选项"}
+            confirm_payload = {"approved": False, "auto_confirm": False, "feedback": f"未知选项: {value}"}
 
         interactive_input.update(request_id, confirm_payload)
         logger.info(

@@ -147,20 +147,31 @@ def extract_question_from_interaction(payload: Any) -> dict | None:
 
     tool_name = ""
     message = ""
+    ui_options = None
 
     if hasattr(payload, 'value'):
         value_obj = payload.value
         message = getattr(value_obj, 'message', '') or getattr(value_obj, 'question', '')
         tool_name = getattr(value_obj, 'tool_name', '')
+        ui_options = getattr(value_obj, 'ui_options', None)
     elif isinstance(payload, dict):
         value_obj = payload.get('value', {})
         if isinstance(value_obj, dict):
             message = value_obj.get('message', '') or value_obj.get('question', '')
             tool_name = value_obj.get('tool_name', '')
+            ui_options = value_obj.get('ui_options', None)
         else:
             message = payload.get('message', '') or payload.get('question', '')
     else:
         return None
+
+    if ui_options and isinstance(ui_options, list) and len(ui_options) > 0:
+        return {
+            "question": message or f"工具 `{tool_name}` 需要授权才能执行",
+            "header": f"权限审批: {tool_name}" if tool_name else "权限审批",
+            "options": ui_options,
+            "multi_select": False,
+        }
 
     return {
         "question": message or f"工具 `{tool_name}` 需要授权才能执行",

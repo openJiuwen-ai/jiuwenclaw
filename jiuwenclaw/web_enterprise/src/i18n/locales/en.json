@@ -951,6 +951,7 @@
     "heartbeatTitle": "Heartbeat message",
     "heartbeatClose": "Close",
     "heartbeatViewFull": "Click to view full message",
+    "securityAlertTitle": "Security Alert",
     "noContent": "No details",
     "restarting": "Restarting service",
     "restartSuccess": "Restart successful",

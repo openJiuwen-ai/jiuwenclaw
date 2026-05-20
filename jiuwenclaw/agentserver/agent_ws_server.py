@@ -1572,10 +1572,17 @@ class AgentWebSocketServer:
 
             manager = get_rail_manager()
 
-            # 1. 更新配置文件中的启用状态
+            # 1. 确保 agent 实例已设置（用于热更新）
+            agent = self._agent_manager.get_agent_nowait()
+            if agent is not None:
+                agent_instance = agent.get_instance()
+                if agent_instance is not None:
+                    manager.set_agent_instance(agent_instance)
+
+            # 2. 更新配置文件中的启用状态
             extension = manager.toggle_extension(name, enabled)
 
-            # 2. 触发热更新：根据 enabled 状态注册或注销 rail
+            # 3. 触发热更新：根据 enabled 状态注册或注销 rail
             await manager.hot_reload_rail(name, enabled)
 
             resp = AgentResponse(

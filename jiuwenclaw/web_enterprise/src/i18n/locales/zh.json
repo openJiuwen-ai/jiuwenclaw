@@ -951,6 +951,7 @@
     "heartbeatTitle": "心跳消息",
     "heartbeatClose": "关闭",
     "heartbeatViewFull": "点击查看完整心跳消息",
+    "securityAlertTitle": "安全警告",
     "noContent": "无详细内容",
     "restarting": "正在重启服务",
     "restartSuccess": "重启成功",

@@ -242,6 +242,8 @@ function AppContent() {
   const [heartbeatToastVisible, setHeartbeatToastVisible] = useState(false);
   const [heartbeatToastMessage, setHeartbeatToastMessage] = useState('');
   const [heartbeatModalOpen, setHeartbeatModalOpen] = useState(false);
+  const [securityAlertVisible, setSecurityAlertVisible] = useState(false);
+  const [securityAlertContent, setSecurityAlertContent] = useState('');
   const [hasVisitedSkills, setHasVisitedSkills] = useState(false);
   const [hasVisitedChannels, setHasVisitedChannels] = useState(false);
   const startupUpdateCheckRef = useRef(false);
@@ -435,6 +437,27 @@ function AppContent() {
       window.clearTimeout(heartbeatToastTimerRef.current);
       heartbeatToastTimerRef.current = null;
     }
+  }, []);
+
+  const securityAlertTimerRef = useRef<number | null>(null);
+
+  useEffect(() => {
+    const handleSecurityAlert = (e: CustomEvent) => {
+      setSecurityAlertContent(e.detail.message);
+      setSecurityAlertVisible(true);
+      if (securityAlertTimerRef.current) {
+        clearTimeout(securityAlertTimerRef.current);
+      }
+      securityAlertTimerRef.current = setTimeout(() => {
+        setSecurityAlertVisible(false);
+        securityAlertTimerRef.current = null;
+      }, 5000);
+    };
+    window.addEventListener('security-alert', handleSecurityAlert as EventListener);
+    return () => {
+      window.removeEventListener('security-alert', handleSecurityAlert as EventListener);
+      if (securityAlertTimerRef.current) clearTimeout(securityAlertTimerRef.current);
+    };
   }, []);
 
   const validateModelConfig = useCallback(
@@ -1213,6 +1236,38 @@ function AppContent() {
                 {heartbeatToastPreview}
               </span>
             </button>
+          </div>
+        </div>
+      )}
+
+      {/* 安全警告提示 */}
+      {securityAlertVisible && (
+        <div className="app-toast-wrapper app-toast-wrapper--top">
+          <div className="app-heartbeat-toast animate-rise">
+            <div className="app-heartbeat-toast__header">
+              <div className="app-heartbeat-toast__title">
+                <span>⚠️</span>
+                <span className="text-xs font-medium text-text">{t('app.securityAlertTitle')}</span>
+              </div>
+              <button
+                type="button"
+                onClick={() => {
+                  setSecurityAlertVisible(false);
+                  if (securityAlertTimerRef.current) {
+                    clearTimeout(securityAlertTimerRef.current);
+                    securityAlertTimerRef.current = null;
+                  }
+                }}
+                className="app-heartbeat-toast__close"
+              >
+                <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2}>
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
+                </svg>
+              </button>
+            </div>
+            <div className="app-heartbeat-toast__content text-sm">
+              {securityAlertContent}
+            </div>
           </div>
         </div>
       )}
