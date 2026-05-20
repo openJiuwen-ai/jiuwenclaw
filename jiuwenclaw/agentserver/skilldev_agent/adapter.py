@@ -73,6 +73,7 @@ class SkillDevDeepAdapter:
         self._last_config: dict[str, Any] | None = None
         self._skills_dir: str = str(BUILTIN_SKILLS_DIR)
         self._task_locks: dict[str, asyncio.Lock] = {}
+        self._stale_instance_ids: set[str] = set()
 
     def get_instance(self):
         return self._instance
@@ -80,28 +81,23 @@ class SkillDevDeepAdapter:
     def set_skill_manager(self, manager) -> None:
         self._skill_manager = manager
 
-    def _teardown_old_instance(self) -> None:
-        """Remove stale tools from the global registry before rebuilding."""
+    def _cleanup_stale_instances(self) -> None:
+        """Remove TaskTool registrations for instances no longer in use.
+
+        Called after a task completes, so the running task's own TaskTool
+        is never removed while still needed.
+        """
+        if not self._stale_instance_ids:
+            return
         from openjiuwen.core.runner.runner import Runner
 
-        # Force-remove the task_tool by its deterministic ID regardless of
-        # whether self._instance is set or _registered_rails has been populated.
-        # tool_id pattern: "task_tool_{agent_card.id}" (see build_tool_card + SubagentRail)
-        task_tool_id = "task_tool_skilldev-agent"
-        try:
-            Runner.resource_mgr.remove_tool(task_tool_id)
-        except Exception:
-            pass
-
-        # Also attempt rail-based cleanup if old instance is available
-        if self._instance is not None:
-            for rail in getattr(self._instance, '_registered_rails', []):
-                if hasattr(rail, 'uninit'):
-                    try:
-                        rail.uninit(self._instance)
-                    except Exception:
-                        pass
-            self._instance = None
+        for card_id in list(self._stale_instance_ids):
+            task_tool_id = f"task_tool_{card_id}"
+            try:
+                Runner.resource_mgr.remove_tool(task_tool_id)
+            except Exception:
+                pass
+            self._stale_instance_ids.discard(card_id)
 
     async def update_workspace(self, workspace_dir: str | Path) -> None:
         """Switch to a task-scoped workspace and rebuild the agent if needed."""
@@ -113,7 +109,10 @@ class SkillDevDeepAdapter:
 
     async def create_instance(self, config: dict[str, Any] | None = None, *, mode: str = "claw") -> None:
         """Create the dedicated SkillDev DeepAgent."""
-        self._teardown_old_instance()
+        if self._instance is not None:
+            old_card_id = getattr(getattr(self._instance, 'card', None), 'id', None)
+            if old_card_id:
+                self._stale_instance_ids.add(old_card_id)
 
         config_base = config or get_config()
         self._last_config = config_base
@@ -153,11 +152,12 @@ class SkillDevDeepAdapter:
             sys_operation=sys_operation,
             agent_id=self._agent_id,
         )
+        instance_id = uuid.uuid4().hex[:8]
         self._instance = create_deep_agent(
             model=self._model,
             card=AgentCard(
                 name="skilldev-agent",
-                id="skilldev-agent",
+                id=f"skilldev-agent-{instance_id}",
                 description="专用 Skill 生成 Agent",
             ),
             system_prompt=SKILLDEV_AGENT_SYSTEM_PROMPT.format(
@@ -350,8 +350,11 @@ class SkillDevDeepAdapter:
         task_id = self._get_or_create_task_id(request, params)
         lock = self._task_locks.setdefault(task_id, asyncio.Lock())
         async with lock:
-            async for chunk in self._handle_chat_locked(request, params, task_id):
-                yield chunk
+            try:
+                async for chunk in self._handle_chat_locked(request, params, task_id):
+                    yield chunk
+            finally:
+                self._cleanup_stale_instances()
 
     async def _handle_chat_locked(
         self,
@@ -622,7 +625,7 @@ class SkillDevDeepAdapter:
             id=sysop_id,
             mode=OperationMode.LOCAL,
             work_config=LocalWorkConfig(
-                sandbox_root=[str(self._workspace_dir), str(self._skills_dir)],
+                sandbox_root=[str(self._base_workspace_dir), str(self._skills_dir)],
                 restrict_to_sandbox=True,
                 shell_allowlist=[
                     # basic shell
