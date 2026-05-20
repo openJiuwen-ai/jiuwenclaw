@@ -110,7 +110,8 @@ memory:
   #                    AND modes.agent.<当前 mode>.memory.enabled=true
   # ============================================================
 
-  mode: ${MEMORY_MODE:-local}            # 内置记忆存储位置：local | cloud
+  mode: ${MEMORY_MODE:-local}            # 内置记忆存储位置：local | wiki | cloud
+  # wiki - 使用子agent对记忆文件进行索引，不需要embedding
   # 记忆引擎总开关：builtin | external | both | none
   #   builtin  — 仅内置记忆（默认，兼容旧配置）
   #   external — 仅外接记忆（LTM / 插件）

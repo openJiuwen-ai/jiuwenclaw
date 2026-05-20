@@ -175,12 +175,34 @@ def is_memory_path(rel_path: str) -> bool:
     basename = os.path.basename(rel_path).lower()
     if basename in ("memory.md", "memory"):
         return True
-    
+
     parts = rel_path.replace("\\", "/").split("/")
     if "memory" in [p.lower() for p in parts]:
         return True
-    
+
     return False
+
+
+def is_daily_memory_file(rel_path: str) -> bool:
+    """Check if path is a daily memory file (YYYY-MM-DD.md) under memory/daily_memory/."""
+    basename = os.path.basename(rel_path)
+    if not re.match(r'^\d{4}-\d{2}-\d{2}\.md$', basename):
+        return False
+    parts = rel_path.replace("\\", "/").split("/")
+    return "daily_memory" in [p.lower() for p in parts]
+
+
+def list_daily_memory_files(
+    workspace_dir: str,
+) -> List[str]:
+    """List only daily memory files (memory/daily_memory/YYYY-MM-DD.md) in workspace."""
+    files = []
+    daily_memory_dir = os.path.join(workspace_dir, "memory", "daily_memory")
+    if os.path.isdir(daily_memory_dir):
+        for f in os.listdir(daily_memory_dir):
+            if re.match(r'^\d{4}-\d{2}-\d{2}\.md$', f):
+                files.append(os.path.join(daily_memory_dir, f))
+    return sorted(set(files))
 
 
 def normalize_extra_memory_paths(

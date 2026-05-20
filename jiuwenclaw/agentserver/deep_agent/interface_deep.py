@@ -1620,6 +1620,7 @@ class JiuWenClawDeepAdapter:
             has_model = embed_config.get("embed_model") if isinstance(embed_config, dict) else None
             if not all([has_api_key, has_base_url, has_model]):
                 logger.warning("[JiuWenClawDeepAdapter] MemoryRail create failed: No available embedding config")
+                return None
             self._is_proactive_memory = is_proactive_memory(mode, config)
             memory_rail = MemoryRail(
                 embedding_config=EmbeddingConfig(
@@ -3041,7 +3042,8 @@ class JiuWenClawDeepAdapter:
         # 0. engine=none 时全局移除所有记忆工具（优先级最高）
         # 1. 群聊数字分身模式（group_digital_avatar=True + avatar_mode=True）：移除写入工具，但保留读取工具
         # 2. 记忆完全禁用（enable_memory=False + group_digital_avatar=True + avatar_mode=True）：移除所有记忆工具（读取和写入）
-        _all_memory_tools = ("write_memory", "edit_memory", "read_memory", "memory_search", "memory_get")
+        _all_memory_tools = ("write_memory", "edit_memory", "read_memory", "memory_search",\
+             "memory_get", "memory_index")
         if not is_builtin_memory_allowed(get_config()):
             for tool_name in _all_memory_tools:
                 try:
@@ -3051,6 +3053,8 @@ class JiuWenClawDeepAdapter:
                     pass
         else:
             perm_ctx = TOOL_PERMISSION_CONTEXT.get()
+            is_group_digital_avatar = False
+            should_disable_memory = False
             if perm_ctx is not None:
                 is_group_digital_avatar = (
                         perm_ctx.group_digital_avatar
@@ -3063,32 +3067,41 @@ class JiuWenClawDeepAdapter:
                         and perm_ctx.avatar_mode
                 )
 
-                if should_disable_memory:
-                    for tool_name in _all_memory_tools:
-                        try:
-                            self._instance.ability_manager.remove(tool_name)
-                            logger.info("[JiuWenClawDeepAdapter] 记忆系统已禁用，移除 %s", tool_name)
-                        except Exception:
-                            pass
-                elif is_group_digital_avatar:
-                    for tool_name in ("write_memory", "edit_memory"):
-                        try:
-                            self._instance.ability_manager.remove(tool_name)
-                            logger.info("[JiuWenClawDeepAdapter] 群聊模式下禁止写入记忆，移除 %s", tool_name)
-                        except Exception:
-                            pass
-                else:
+            # 场景2：记忆完全禁用 - 移除所有记忆工具
+            if should_disable_memory:
+                _all_memory_tools = ("write_memory", "edit_memory", "read_memory", "memory_search",\
+                     "memory_get", "memory_index")
+                for tool_name in _all_memory_tools:
                     try:
-                        from openjiuwen.core.memory.lite.memory_tools import (
-                            get_decorated_tools as _get_sdk_memory_tools,
-                        )
-                        for tool in _get_sdk_memory_tools():
-                            name = getattr(getattr(tool, "card", None), "name", "")
-                            if name in ("write_memory", "edit_memory"):
-                                self._instance.ability_manager.add(tool.card)
+                        self._instance.ability_manager.remove(tool_name)
+                        logger.info("[JiuWenClawDeepAdapter] 记忆系统已禁用，移除 %s", tool_name)
+                    except Exception:
+                        pass
+            # 场景1：群聊数字分身模式 - 只移除写入工具
+            elif is_group_digital_avatar:
+                for tool_name in ("write_memory", "edit_memory"):
+                    try:
+                        self._instance.ability_manager.remove(tool_name)
+                        logger.info("[JiuWenClawDeepAdapter] 群聊模式下禁止写入记忆，移除 %s", tool_name)
+                    except Exception:
+                        pass
+            # 非群聊数字分身且记忆启用时，恢复写入工具
+            else:
+                if is_builtin_memory_allowed(get_config()):
+                    try:
+                        _mem_mode = get_memory_mode(get_config())
+                        if _mem_mode == "wiki":
+                            from jiuwenclaw.agentserver.tools.memory_tools import (
+                                get_decorated_tools as _get_custom_memory_tools,
+                            )
+                            for tool in _get_custom_memory_tools():
+                                name = getattr(getattr(tool, "card", None), "name", "")
+                                if name in ("memory_index", "memory_search"):
+                                    Runner.resource_mgr.add_tool(tool)
+                                    self._instance.ability_manager.add(tool.card)
                     except ImportError:
                         logger.warning(
-                            "[JiuWenClawDeepAdapter] 恢复写入记忆工具失败，SDK memory_tools 不可用"
+                            "[JiuWenClawDeepAdapter] 恢复记忆工具失败，memory_tools 不可用"
                         )
 
     @staticmethod
@@ -5009,8 +5022,48 @@ class JiuWenClawDeepAdapter:
 
     async def _handle_memory_rail_by_config(self, mode: str):
         config = get_config()
-        if get_memory_mode(config) == "local":
-            # 引擎门禁：memory.engine 未放行内置时，等同于禁用
+        memory_mode = get_memory_mode(config)
+
+        if memory_mode == "wiki":
+            from jiuwenclaw.agentserver.tools.memory_tools import (
+                init_memory_manager_async,
+                get_decorated_tools as _get_wiki_memory_tools,
+            )
+            from openjiuwen.harness.prompts.sections.memory import build_memory_section
+
+            await init_memory_manager_async(
+                workspace_dir=str(get_agent_workspace_dir()),
+                agent_id="default",
+                memory_mode=mode,
+            )
+
+            if self._instance.system_prompt_builder is not None:
+                resolved_language = self._instance.system_prompt_builder.language or "cn"
+                is_proactive = is_proactive_memory(mode, config)
+                memory_section = build_memory_section(
+                    language=resolved_language,
+                    read_only=False,
+                    is_proactive=is_proactive,
+                )
+                if memory_section is not None:
+                    self._instance.system_prompt_builder.remove_section("memory")
+                    self._instance.system_prompt_builder.add_section(memory_section)
+
+            for tool in _get_wiki_memory_tools():
+                tool_card = getattr(tool, "card", None)
+                if tool_card is None:
+                    continue
+                name = getattr(tool_card, "name", "")
+                if name in ("memory_index", "memory_search"):
+                    existing = Runner.resource_mgr.get_tool(tool_card.id)
+                    if existing is None:
+                        Runner.resource_mgr.add_tool(tool)
+                    self._instance.ability_manager.add(tool_card)
+
+            logger.info("[JiuWenClawDeepAdapter] Wiki memory initialized for %s mode", mode)
+            return
+
+        if memory_mode == "local":
             builtin_on = is_builtin_memory_allowed(config) and is_memory_enabled(mode, config)
             if builtin_on:
                 # 开启记忆
@@ -5028,10 +5081,31 @@ class JiuWenClawDeepAdapter:
                 if self._memory_rail is not None:
                     await self._instance.register_rail(self._memory_rail)
                     logger.info(f"[JiuWenClawDeepAdapter] MemoryRail registered for {mode} mode")
-            elif not builtin_on and self._memory_rail is not None:
-                await self._instance.unregister_rail(self._memory_rail)
-                self._memory_rail = None
-                logger.info(f"[JiuWenClawDeepAdapter] MemoryRail unregistered for {mode} mode")
+                else:
+                    logger.warning(
+                        "[JiuWenClawDeepAdapter] MemoryRail build failed for %s mode, "
+                        "check embed config (embed_api_key/embed_base_url/embed_model)",
+                        mode,
+                    )
+            else:
+                if not is_builtin_memory_allowed(config):
+                    logger.warning(
+                        "[JiuWenClawDeepAdapter] memory.mode=local but memory.engine=%r "
+                        "(need 'builtin' or 'both'). "
+                        "Set memory.engine=builtin in config.yaml or MEMORY_ENGINE=builtin env var.",
+                        (config or {}).get("memory", {}).get("engine", "builtin")
+                         if isinstance(config, dict) else "unknown",
+                    )
+                if not is_memory_enabled(mode, config):
+                    logger.warning(
+                        "[JiuWenClawDeepAdapter] memory.mode=local but modes.agent.%s.memory.enabled is false. "
+                        "Set modes.agent.%s.memory.enabled=true in config.yaml.",
+                        mode, mode,
+                    )
+                if self._memory_rail is not None:
+                    await self._instance.unregister_rail(self._memory_rail)
+                    self._memory_rail = None
+                    logger.info(f"[JiuWenClawDeepAdapter] MemoryRail unregistered for {mode} mode")
 
     def _build_external_memory_rail(self):
         from jiuwenclaw.agentserver.memory.external_memory_builder import (

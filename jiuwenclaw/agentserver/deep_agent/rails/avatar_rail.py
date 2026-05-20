@@ -156,7 +156,7 @@ class AvatarPromptRail(DeepAgentRail):
         # 场景2：记忆完全禁用 - 禁止读取和写入
         if should_disable_memory:
             all_memory_tools = frozenset({
-                "write_memory", "edit_memory", "read_memory", "memory_search", "memory_get"
+                "write_memory", "edit_memory", "read_memory", "memory_search", "memory_get", "memory_index"
             })
             if tool_name in all_memory_tools:
                 self._reject_tool(ctx, "[PERMISSION_DENIED] 记忆系统已禁用，禁止访问")

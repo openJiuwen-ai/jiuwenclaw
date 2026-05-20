@@ -4,24 +4,27 @@
 
 import asyncio
 import contextvars
-import logging
 import os
 import re
 from typing import Optional, Dict, Any, List
 
 from openjiuwen.core.foundation.tool.tool import tool
 
+from jiuwenclaw.utils import logger
+
 from ..memory import (
     MemoryIndexManager,
+    MemoryWikiManager,
     MemorySettings,
+    WikiMemorySettings,
     create_memory_settings,
+    create_wiki_memory_settings,
     is_memory_enabled,
+    get_memory_mode,
+    DEFAULT_WORKSPACE_DIR,
 )
 from ..memory.external_memory_config import is_builtin_memory_allowed
 
-logger = logging.getLogger(__name__)
-
-# 群聊模式标记：群聊中禁止 write_memory / edit_memory
 _GROUP_CHAT_MODE: contextvars.ContextVar[bool] = contextvars.ContextVar(
     "group_chat_mode", default=False,
 )
@@ -35,9 +38,10 @@ def is_group_chat_mode() -> bool:
     return _GROUP_CHAT_MODE.get()
 
 
-_global_manager: Optional[MemoryIndexManager] = None
+_global_manager: Optional[MemoryIndexManager | MemoryWikiManager] = None
 _global_workspace_dir: str = "."
 _global_settings: Optional[MemorySettings] = None
+_global_wiki_settings: Optional[WikiMemorySettings] = None
 _global_agent_id: str = "default"
 
 
@@ -86,7 +90,7 @@ def _validate_memory_path(path: str) -> tuple[bool, str]:
 
 
 def set_global_memory_manager(
-    manager: Optional[MemoryIndexManager],
+    manager: Optional[MemoryIndexManager | MemoryWikiManager],
     workspace_dir: str = ".",
     settings: Optional[MemorySettings] = None,
     agent_id: str = "default"
@@ -101,70 +105,105 @@ def set_global_memory_manager(
 
 async def init_memory_manager_async(
     workspace_dir: str = ".",
-    agent_id: str = "default"
-) -> Optional[MemoryIndexManager]:
-    """初始化记忆管理器（带文件监控）.
-    
+    agent_id: str = "default",
+    memory_mode: str = "plan",
+) -> Optional[MemoryIndexManager | MemoryWikiManager]:
+    """初始化记忆管理器。
+
     Args:
         workspace_dir: 工作区目录
         agent_id: Agent ID
-    
+        memory_mode: 记忆模式
+
     Returns:
         MemoryIndexManager 实例，如果 memory 未启用则返回 None
     """
-    global _global_manager, _global_workspace_dir, _global_settings, _global_agent_id
-    
+    global _global_manager, _global_workspace_dir, _global_settings, _global_agent_id, _global_wiki_settings
+
     if not is_builtin_memory_allowed():
         logger.info("Memory system is disabled (engine gate)")
         return None
-    
-    if not is_memory_enabled("plan"):
-        logger.info("Memory system is disabled (mode gate)")
+
+    if not is_memory_enabled(memory_mode):
+        logger.info("[MemoryTools] Memory system is disabled")
         return None
     
     if _global_manager is not None and _global_workspace_dir == workspace_dir:
         return _global_manager
     
     settings = create_memory_settings(workspace_dir)
+    mem_mode = get_memory_mode()
     
     _global_workspace_dir = workspace_dir
     _global_settings = settings
     _global_agent_id = agent_id
     
     try:
-        _global_manager = await MemoryIndexManager.get(
-            agent_id=agent_id,
-            workspace_dir=workspace_dir,
-            settings=settings
-        )
+        if mem_mode == "wiki":
+            _global_wiki_settings = create_wiki_memory_settings()
+            _global_manager = await MemoryWikiManager.get(
+                agent_id=agent_id,
+                workspace_dir=workspace_dir,
+                settings=settings,
+                max_iterations=_global_wiki_settings.max_iterations,
+                query_timeout_s=_global_wiki_settings.query_timeout_s,
+                language=_global_wiki_settings.language,
+            )
+        else:
+            _global_manager = await MemoryIndexManager.get(
+                agent_id=agent_id,
+                workspace_dir=workspace_dir,
+                settings=settings
+            )
         
         if _global_manager:
-            logger.info(f"Memory manager initialized for: {workspace_dir}")
+            logger.info(f"[MemoryTools] Memory manager initialized ({mem_mode}) for: {workspace_dir}")
         
         return _global_manager
         
     except Exception as e:
-        logger.error(f"Failed to initialize memory manager: {e}")
+        logger.error(f"[MemoryTools] Failed to initialize memory manager: {e}")
         return None
 
 
 async def _ensure_global_manager() -> bool:
-    """Ensure global memory manager is initialized."""
-    global _global_manager, _global_settings, _global_workspace_dir, _global_agent_id
+    global _global_manager, _global_settings, _global_workspace_dir, _global_agent_id, _global_wiki_settings
     
     if _global_manager is not None:
         return True
     
     try:
-        _global_settings = _global_settings or MemorySettings()
-        _global_manager = await MemoryIndexManager.get(
-            agent_id=_global_agent_id,
-            workspace_dir=_global_workspace_dir,
-            settings=_global_settings
-        )
-        return True
+        mode = get_memory_mode()
+        if _global_workspace_dir == ".":
+            from jiuwenclaw.utils import get_agent_workspace_dir
+            workspace_dir = str(get_agent_workspace_dir())
+            _global_workspace_dir = workspace_dir
+        else:
+            workspace_dir = _global_workspace_dir or DEFAULT_WORKSPACE_DIR
+
+        _global_settings = _global_settings or create_memory_settings(workspace_dir=workspace_dir)
+        logger.info(f"[MemoryTools] _ensure_global_manager: workspace_dir={workspace_dir}, mode={mode}")
+        if mode == "wiki":
+            _global_wiki_settings = create_wiki_memory_settings()
+            _global_manager = await MemoryWikiManager.get(
+                agent_id=_global_agent_id,
+                workspace_dir=workspace_dir,
+                settings=_global_settings,
+                max_iterations=_global_wiki_settings.max_iterations,
+                query_timeout_s=_global_wiki_settings.query_timeout_s,
+                language=_global_wiki_settings.language,
+            )
+        else:
+            _global_manager = await MemoryIndexManager.get(
+                agent_id=_global_agent_id,
+                workspace_dir=workspace_dir,
+                settings=_global_settings
+            )
+        if _global_manager is None:
+            logger.warning("[MemoryTools] _ensure_global_manager: manager is None after init")
+        return _global_manager is not None
     except Exception as e:
-        logger.error(f"Failed to initialize global memory manager: {e}")
+        logger.error(f"[MemoryTools] Failed to initialize global memory manager: {e}", exc_info=True)
         return False
 
 
@@ -230,11 +269,142 @@ async def memory_search(
         }
         
     except Exception as e:
-        logger.error(f"Memory search failed: {e}")
+        logger.error(f"[MemoryTools] Memory search failed: {e}")
         return {
             "results": [],
             "disabled": True,
             "error": str(e)
+        }
+
+
+@tool(
+    name="memory_index",
+    description="在写入或编辑每日记忆文件（memory/daily_memory/YYYY-MM-DD.md）后调用此工具，对该文件执行记忆索引。\
+        注意：只能索引每日记忆文件（格式为 YYYY-MM-DD.md），USER.md 和 MEMORY.md 不需要索引，它们已经直接加载在上下文中。",
+)
+async def memory_index(
+    path: str,
+) -> Dict[str, Any]:
+    """在写入或编辑每日记忆文件后调用此工具，对该文件执行记忆索引。
+    只能索引每日记忆文件（memory/daily_memory/YYYY-MM-DD.md 格式）。USER.md 和 MEMORY.md 不需要索引。
+
+    Args:
+        path: 刚被修改的每日记忆文件路径（格式必须为 memory/daily_memory/YYYY-MM-DD.md，如 memory/daily_memory/2026-05-14.md）
+
+    Returns:
+        操作结果字典
+    """
+    if not is_builtin_memory_allowed():
+        return {"success": False, "error": "记忆系统已禁用"}
+    try:
+        await _ensure_global_manager()
+
+        if not _global_manager:
+            mem_mode = get_memory_mode()
+            return {
+                "success": False,
+                "error": (
+                    f"记忆管理器未初始化（当前模式: {mem_mode}）。"
+                    "可能原因：1) LLM 模型配置不完整（wiki 模式需要 models.default 配置）；"
+                    "2) 记忆功能未启用（检查 modes 配置中 memory.enabled 是否为 true）；"
+                    "3) MEMORY_ENGINE 环境变量设为 none。"
+                ),
+            }
+
+        if isinstance(_global_manager, MemoryIndexManager):
+            _global_manager.dirty = True
+            try:
+                await _global_manager.sync(reason="memory_index_tool")
+            except Exception as sync_err:
+                logger.warning(f"[MemoryTools] local mode sync failed: {sync_err}")
+            return {
+                "success": True,
+                "path": path,
+                "message": "local 模式下已触发同步索引，文件变更将被自动处理。",
+            }
+
+        if not hasattr(_global_manager, 'notify_change'):
+            return {
+                "success": False,
+                "error": "记忆管理器不支持索引操作（缺少 notify_change 方法）。",
+            }
+
+        normalized = path.replace("\\", "/")
+        if ".." in normalized or normalized.startswith("/"):
+            return {
+                "success": False,
+                "path": path,
+                "error": "Invalid path: directory traversal not allowed",
+            }
+
+        if not os.path.isabs(path):
+            abs_path = os.path.join(_global_workspace_dir, path)
+        else:
+            abs_path = path
+
+        if not os.path.isfile(abs_path):
+            return {
+                "success": False,
+                "path": path,
+                "error": f"File not found: {path}",
+            }
+
+        basename = os.path.basename(abs_path)
+        if not re.match(r'^\d{4}-\d{2}-\d{2}\.md$', basename):
+            return {
+                "success": False,
+                "path": path,
+                "error": (
+                    f"不支持索引文件 {basename}。"
+                    "只能索引每日记忆文件（格式为 YYYY-MM-DD.md，如 2026-05-14.md）。"
+                    "USER.md 和 MEMORY.md 已经直接加载在上下文中，不需要索引。"
+                ),
+            }
+
+        try:
+            result = await _global_manager.notify_change(abs_path)
+        except Exception as e:
+            logger.warning(f"[MemoryTools] notify_change failed for {path}: {e}")
+            return {
+                "success": False,
+                "path": path,
+                "error": str(e),
+            }
+
+        if not result.get("success"):
+            return {
+                "success": False,
+                "path": path,
+                "error": result.get("error", "Unknown error"),
+            }
+
+        status = result.get("status", "indexed")
+        if status == "unchanged":
+            return {
+                "success": True,
+                "path": path,
+                "message": "文件内容未变化，无需重新索引。",
+            }
+
+        if status == "queued":
+            return {
+                "success": True,
+                "path": path,
+                "message": "索引任务已提交，正在后台异步建立索引。",
+            }
+
+        return {
+            "success": True,
+            "path": path,
+            "message": "索引完成，该记忆文件已成功建立索引。",
+        }
+
+    except Exception as e:
+        logger.error(f"[MemoryTools] memory_index failed: {e}")
+        return {
+            "success": False,
+            "path": path,
+            "error": str(e),
         }
 
 
@@ -282,7 +452,7 @@ async def memory_get(
         }
         
     except Exception as e:
-        logger.error(f"Memory get failed: {e}")
+        logger.error(f"[MemoryTools] Memory get failed: {e}")
         return {
             "path": path,
             "text": "",
@@ -350,7 +520,7 @@ async def write_memory(
         }
         
     except Exception as e:
-        logger.error(f"Write failed: {e}")
+        logger.error(f"[MemoryTools] Write failed: {e}")
         return {
             "success": False,
             "path": path,
@@ -438,7 +608,7 @@ async def edit_memory(
         }
         
     except Exception as e:
-        logger.error(f"Edit failed: {e}")
+        logger.error(f"[MemoryTools] Edit failed: {e}")
         return {
             "success": False,
             "path": path,
@@ -525,7 +695,7 @@ async def read_memory(
         }
         
     except Exception as e:
-        logger.error(f"Read failed: {e}")
+        logger.error(f"[MemoryTools] Read failed: {e}")
         return {
             "success": False,
             "path": path,
@@ -535,5 +705,7 @@ async def read_memory(
 
 
 def get_decorated_tools() -> List:
-    """获取使用 @tool 装饰器的工具列表"""
+    mode = get_memory_mode()
+    if mode == "wiki":
+        return [memory_search, memory_index, memory_get, write_memory, edit_memory, read_memory]
     return [memory_search, memory_get, write_memory, edit_memory, read_memory]

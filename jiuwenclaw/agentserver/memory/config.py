@@ -6,14 +6,12 @@ Uses merged runtime config (package template + user ``config/config.yaml`` overr
 same as ``jiuwenclaw.config.get_config``. Embedding API settings are in the ``embed`` section.
 """
 
-import logging
 from typing import Any, Optional, Dict, List
 from dataclasses import dataclass, field
 
 from jiuwenclaw.config import get_config
 from jiuwenclaw.utils import get_agent_workspace_dir
-
-logger = logging.getLogger(__name__)
+from jiuwenclaw.utils import logger
 
 DEFAULT_WORKSPACE_DIR = str(get_agent_workspace_dir())
 
@@ -26,12 +24,24 @@ def clear_config_cache() -> None:
     _config_cache = None
 
 
+def _ensure_dotenv_loaded() -> None:
+    """确保 .env 文件中的变量已加载到 os.environ，避免 load_dotenv 尚未执行导致配置为空。"""
+    try:
+        from dotenv import load_dotenv
+        from jiuwenclaw.utils import get_env_file
+        load_dotenv(dotenv_path=get_env_file(), override=False)
+    except Exception as e:
+        logger.debug("Failed to load .env file: %s", e)
+
+
 def _load_config() -> Dict[str, Any]:
     """加载包内模板与用户 override 合并后的配置（与 ``get_config()`` 一致）。"""
     global _config_cache
 
     if _config_cache is not None:
         return _config_cache
+
+    _ensure_dotenv_loaded()
 
     try:
         cfg = get_config()
@@ -221,8 +231,58 @@ def is_proactive_memory(mode: str, config: Optional[Dict[str, Any]] = None) -> b
         return False
 
 
+@dataclass
+class WikiMemorySettings:
+    """Wiki mode specific settings for memory indexing and querying."""
+    max_iterations: int = 10
+    index_debounce_ms: int = 3000
+    query_timeout_s: int = 60
+    language: Optional[str] = None
+
+
+def create_wiki_memory_settings(
+    config: Optional[Dict[str, Any]] = None,
+) -> WikiMemorySettings:
+    config = config or _load_config()
+    memory_config = config.get("memory", {})
+    wiki_config = memory_config.get("wiki", {})
+
+    return WikiMemorySettings(
+        max_iterations=wiki_config.get("max_iterations", 10),
+        index_debounce_ms=wiki_config.get("index_debounce_ms", 3000),
+        query_timeout_s=wiki_config.get("query_timeout_s", 60),
+        language=wiki_config.get("language"),
+    )
+
+
+def _is_embed_config_valid(config: Optional[Dict[str, Any]] = None) -> bool:
+    """检查 embedding 配置是否完整（api_key、base_url、model 三项均非空）。"""
+    cfg = config if config is not None else _load_config()
+    embed_cfg = cfg.get("embed", {}) if isinstance(cfg, dict) else {}
+    if not isinstance(embed_cfg, dict):
+        return False
+    return all([
+        embed_cfg.get("embed_api_key"),
+        embed_cfg.get("embed_base_url"),
+        embed_cfg.get("embed_model"),
+    ])
+
+
 def get_memory_mode(config: Optional[Dict[str, Any]] = None) -> str:
-    """读取 ``memory.mode``：``cloud`` 或 ``local``（默认）。"""
-    memory_cfg = (config or {}).get("memory", {})
-    mode = str(memory_cfg.get("mode") or "local").strip().lower()
-    return "cloud" if mode == "cloud" else "local"
+    """读取 ``memory.mode``：``local`` 或 ``wiki``（默认）。
+
+    local 模式依赖 embedding 配置，若配置不完整则自动回退到 wiki 并输出警告日志。
+    """
+    cfg = config if config is not None else _load_config()
+    memory_cfg = cfg.get("memory", {}) if isinstance(cfg, dict) else {}
+    mode = str(memory_cfg.get("mode") or "wiki").strip().lower()
+    if mode == "local":
+        if _is_embed_config_valid(cfg):
+            return "local"
+        logger.warning(
+            "[MemoryConfig] memory.mode 为 local 但 embedding 配置不完整"
+            "（缺少 embed_api_key / embed_base_url / embed_model），"
+            "自动回退到 wiki 模式"
+        )
+        return "wiki"
+    return mode

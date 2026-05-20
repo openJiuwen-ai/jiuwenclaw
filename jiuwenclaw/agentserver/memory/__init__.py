@@ -10,9 +10,12 @@ from .types import (
     FileEntry,
 )
 from .manager import MemoryIndexManager, get_memory_manager, clear_memory_manager_cache
+from .wiki_manager import MemoryWikiManager
 from .config import (
     MemorySettings,
+    WikiMemorySettings,
     create_memory_settings,
+    create_wiki_memory_settings,
     is_memory_enabled,
     get_memory_mode,
     get_embed_config,
@@ -32,18 +35,22 @@ from .internal import (
     estimate_tokens,
     ensure_dir,
     list_memory_files,
+    list_daily_memory_files,
     build_file_entry,
     chunk_markdown,
     hash_text,
     build_fts_query,
     bm25_rank_to_score,
     is_memory_path,
+    is_daily_memory_file,
     normalize_extra_memory_paths,
 )
 
 __all__ = [
     "MemoryIndexManager",
+    "MemoryWikiManager",
     "MemorySettings",
+    "WikiMemorySettings",
     "get_memory_manager",
     "clear_memory_manager_cache",
     "EmbeddingProvider",
@@ -61,8 +68,11 @@ __all__ = [
     "build_fts_query",
     "bm25_rank_to_score",
     "is_memory_path",
+    "is_daily_memory_file",
+    "list_daily_memory_files",
     "normalize_extra_memory_paths",
     "create_memory_settings",
+    "create_wiki_memory_settings",
     "is_memory_enabled",
     "get_memory_mode",
     "get_embed_config",

@@ -102,6 +102,7 @@ class RuntimePromptRail(DeepAgentRail):
                     "config": str(base_workspace / "config"),
                     "workspace": self._workspace_dir or str(workspace_root), # 优先使用请求中的 workspace_dir
                     "memory": str(workspace_root / "memory"),
+                    "daily_memory": str(workspace_root / "memory" / "daily_memory"),
                     "skills": ", ".join(str(d) for d in get_shared_agent_skills_dirs())
                     if get_shared_agent_skills_dirs() else str(workspace_root / "skills"),
                     "todo": str(workspace_root / "todo"),
@@ -112,6 +113,7 @@ class RuntimePromptRail(DeepAgentRail):
             "config": str(get_user_workspace_dir() / "config"),
             "workspace": self._workspace_dir or str(get_agent_workspace_dir()),
             "memory": str(get_agent_memory_dir()),
+            "daily_memory": str(get_agent_memory_dir() / "daily_memory"),
             "skills": ", ".join(str(d) for d in get_agent_registered_skill_dirs()),
             "todo": str(get_deepagent_todo_dir()),
         }
@@ -190,6 +192,7 @@ class RuntimePromptRail(DeepAgentRail):
         config_dir = dirs["config"]
         resolved_workspace = dirs["workspace"]
         memory_dir = dirs["memory"]
+        daily_memory_dir = dirs["daily_memory"]
         skills_dir = dirs["skills"]
         todo_dir = dirs["todo"]
 
@@ -214,7 +217,8 @@ class RuntimePromptRail(DeepAgentRail):
 |------|------|----------|
 | `{config_dir}` | 配置信息 | 不要轻易改动，错误配置可能导致异常 |
 | `{resolved_workspace}` | 身份与任务信息 | 可适当更新，以更好地服务用户 |
-| `{memory_dir}` | 持久化记忆 | 将其视为你记忆的一部分，随时查阅 |
+| `{memory_dir}` | 持久化记忆（含 USER.md、MEMORY.md） | 将其视为你记忆的一部分，随时查阅 |
+| `{daily_memory_dir}` | 每日记忆文件（YYYY-MM-DD.md） | 每天的记忆记录存放在此，新增/编辑后需调用 memory_index 索引 |
 | `{skills_dir}` | 技能库 | 可随时翻阅、调用，不可修改 |
 | `{todo_dir}` | 待办事项 | 记录用户请求的任务，每次请求后会更新 |
 
@@ -285,7 +289,8 @@ internal directory names or implementation details to the user unless necessary 
 |------|---------|------------|
 | `{config_dir}` | Configuration | Do not modify lightly; bad config can cause failures |
 | `{resolved_workspace}` | Identity and task info | You may update this to better serve your user |
-| `{memory_dir}` | Persistent memory | Treat it as part of your memory; consult it anytime |
+| `{memory_dir}` | Persistent memory (USER.md, MEMORY.md) | Treat it as part of your memory; consult it anytime |
+| `{daily_memory_dir}` | Daily memory files (YYYY-MM-DD.md) | Daily memory records; call memory_index after creating/editing |
 | `{skills_dir}` | Skill library | Read and invoke freely; do not modify |
 | `{todo_dir}` | Todo list | Records tasks from user requests; updated after each request |
 
