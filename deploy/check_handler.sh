@@ -163,11 +163,16 @@ check_if_mysql_up() {
         DEPLOY_VARS["CLAW_MANAGER_DB_PORT"]=${DEPLOY_VARS["MYSQL_PORT"]}
         DEPLOY_VARS["CLAW_MANAGER_DB_USER"]="root"
         DEPLOY_VARS["CLAW_MANAGER_DB_PASSWORD"]=${DEPLOY_VARS["MYSQL_ROOT_PASSWORD"]}
+        DEPLOY_VARS["GATEWAY_DB_HOST"]=${DEPLOY_VARS["MYSQL_HOST"]}
+        DEPLOY_VARS["GATEWAY_DB_PORT"]=${DEPLOY_VARS["MYSQL_PORT"]}
+        DEPLOY_VARS["GATEWAY_DB_USER"]="root"
+        DEPLOY_VARS["GATEWAY_DB_PASSWORD"]=${DEPLOY_VARS["MYSQL_ROOT_PASSWORD"]}
     fi
 
     # No Build-In DB server
     if ! check_k8s_resource_exists "statefulset" "${name}"; then
         DEPLOY_VARS["CLAW_MANAGER_DB_TYPE"]="sqlite"
+        DEPLOY_VARS["GATEWAY_DB_TYPE"]="sqlite"
         warning "DB is not deployed. Use build-in SQLite"
         return
     fi
@@ -177,6 +182,10 @@ check_if_mysql_up() {
     DEPLOY_VARS["CLAW_MANAGER_DB_PORT"]="3306"
     DEPLOY_VARS["CLAW_MANAGER_DB_USER"]="root"
     DEPLOY_VARS["CLAW_MANAGER_DB_PASSWORD"]=${DEPLOY_VARS["MYSQL_ROOT_PASSWORD"]}
+    DEPLOY_VARS["GATEWAY_DB_HOST"]="${name}-headless.default"
+    DEPLOY_VARS["GATEWAY_DB_PORT"]="3306"
+    DEPLOY_VARS["GATEWAY_DB_USER"]="root"
+    DEPLOY_VARS["GATEWAY_DB_PASSWORD"]=${DEPLOY_VARS["MYSQL_ROOT_PASSWORD"]}
 }
 
 check_vars() {
@@ -215,6 +224,7 @@ check_yr_claw_up_dependency(){
 
 check_gateway_up_dependency(){
     check_if_nfs_up
+    check_if_mysql_up
 }
 
 check_web_up_dependency(){

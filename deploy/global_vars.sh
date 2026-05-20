@@ -85,6 +85,13 @@ declare -A DEPLOY_VARS=(
     ["GATEWAY_ENV_FILE_NAME"]="jiuwenclaw-gateway-env"
     ["GATEWAY_WEBSOCKET_PORT"]="19000"
     ["GATEWAY_REST_PORT"]="18080"
+    ["GATEWAY_DB_TYPE"]="mysql"
+    ["GATEWAY_SQLITE_PATH"]="openjiuwen_gateway.db"
+    ["GATEWAY_DB_HOST"]="mysql-headless"
+    ["GATEWAY_DB_PORT"]="3306"
+    ["GATEWAY_DB_USER"]="root"
+    ["GATEWAY_DB_PASSWORD"]="Root@123456"
+    ["GATEWAY_DB_NAME"]="openjiuwen_gateway"
     ["NFS_NAME"]="nfs-server"
     ["NFS_IMAGE"]="itsthenetwork/nfs-server-alpine:12"
     ["NFS_HOST_PATH"]="/data/nfs"
@@ -113,7 +120,6 @@ declare -A DEPLOY_VARS=(
     ["CLAW_MANAGER_DB_USER"]="root"
     ["CLAW_MANAGER_DB_PASSWORD"]="Root@123456"
     ["CLAW_MANAGER_DB_NAME"]="claw_manager"
-
 )
 
 declare -A OYR_COMPONENTS=(
