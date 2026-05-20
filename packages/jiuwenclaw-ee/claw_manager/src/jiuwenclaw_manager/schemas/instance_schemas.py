@@ -29,7 +29,7 @@ class PatchInstanceDataBody(BaseModel):
 
 
 class ProvisionLocalInstanceBody(BaseModel):
-    """本地拉起 Gateway + AgentServer（需 CLAWMANAGER_ALLOW_LOCAL_PROVISION=true 且配置 RabbitMQ）。"""
+    """本地拉起 Gateway + AgentServer（需 MANAGER_ALLOW_LOCAL_PROVISION=true 且配置 RabbitMQ）。"""
 
     jiuwenclaw_name: str = Field(default="local-instance", max_length=128)
     creator_id: str = Field(default="system", max_length=64)

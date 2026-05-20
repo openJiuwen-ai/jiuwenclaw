@@ -23,6 +23,10 @@ from jiuwenclaw_manager.schemas.config_effective_policy_schemas import (
 _TEMPLATE_MAPPING_TABLE = CONFIG_DEFAULT_TEMPLATE_MAPPING_TABLE_DEF.table_name
 
 _ALLOWED_TEMPLATE_TYPES = frozenset({
+    "default_model",
+    "video_model",
+    "audio_model",
+    "vision_model",
     "model",
     "channel",
     "skill_whitelist",
@@ -101,6 +105,7 @@ def _row_to_out(row: Any) -> ConfigDefaultTemplateMappingOut:
         jiuwenclaw_id=row.jiuwenclaw_id,
         user_id=row.user_id,
         group_id=row.group_id,
+        priority=row.priority,
         template_id=row.template_id,
         template_type=row.template_type,
         enabled=row.enabled,
@@ -131,6 +136,7 @@ class ConfigDefaultTemplateMappingService:
             "jiuwenclaw_id": row["jiuwenclaw_id"],
             "user_id": row.get("user_id"),
             "group_id": row.get("group_id"),
+            "priority": row["priority"],
             "template_id": row["template_id"],
             "template_type": row["template_type"],
             "enabled": row.get("enabled", True),
@@ -158,6 +164,7 @@ class ConfigDefaultTemplateMappingService:
             "jiuwenclaw_id": normalized,
             "user_id": user_id,
             "group_id": group_id,
+            "priority": body.priority,
             "template_id": template_id,
             "template_type": template_type,
             "enabled": body.enabled,

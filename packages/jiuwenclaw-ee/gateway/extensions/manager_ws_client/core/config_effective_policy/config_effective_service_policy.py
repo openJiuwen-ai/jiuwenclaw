@@ -17,6 +17,10 @@ from ...schemas.config_effective_policy_schemas import (
     ConfigEffectiveServicePolicyUpdateRequest,
 )
 from .config_default_template_mapping import resolve_jiuwenclaw_id
+from .template_ref import (
+    apply_template_ref_to_updates,
+    read_template_ref_from_policy_dict,
+)
 
 _TABLE = CONFIG_EFFECTIVE_SERVICE_POLICY_TABLE_DEF.table_name
 
@@ -53,6 +57,7 @@ async def update_config_effective_service_policy_record(
     if not updates:
         raise ValueError("请求未包含任何可更新的业务字段")
 
+    updates = apply_template_ref_to_updates(updates, existing_row=existing)
     updates["updated_at"] = utc_now()
     updated = await handler.update(_TABLE, {"id": policy_id}, updates)
     if updated is None:
@@ -109,10 +114,7 @@ async def apply_config_effective_service_policy_sync(
             "jiuwenclaw_id": jiuwenclaw_id,
             "priority": int(policy["priority"]),
             "match_expr": policy.get("match_expr"),
-            "default_model": policy.get("default_model"),
-            "video_model": policy.get("video_model"),
-            "audio_model": policy.get("audio_model"),
-            "vision_model": policy.get("vision_model"),
+            "template_ref": read_template_ref_from_policy_dict(policy),
             "enabled": bool(policy.get("enabled", True)),
             "data": policy.get("data"),
             "created_at": _parse_iso_datetime(policy.get("created_at")) or now,

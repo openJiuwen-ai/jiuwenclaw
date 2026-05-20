@@ -131,6 +131,13 @@ def _require_id(data: dict[str, Any], label: str) -> int:
     return int(raw)
 
 
+def _require_template_id(data: dict[str, Any], label: str) -> str:
+    raw = data.get("template_id")
+    if raw is None or not str(raw).strip():
+        raise ManagerApiError("POST", label, 200, f"响应缺少 template_id: {data!r}")
+    return str(raw).strip()
+
+
 def _model_templates() -> list[tuple[str, dict[str, Any]]]:
     return [
         (
@@ -235,16 +242,16 @@ def seed_demo_config(client: ManagerClient) -> dict[str, Any]:
     result: dict[str, Any] = {"jiuwenclaw_id": client._jid, "model_templates": {}}
 
     print("[1/5] 创建 model_template（T1–T5）")
-    template_ids: list[int] = []
+    template_ids: list[str] = []
     for label, body in _model_templates():
         row = client.post("/model-templates", body)
-        tid = _require_id(row, "/model-templates")
+        tid = _require_template_id(row, "/model-templates")
         template_ids.append(tid)
         key = f"t{len(template_ids)}"
         result["model_templates"][key] = tid
-        print(f"  [{key}] {label} -> id={tid}")
+        print(f"  [{key}] {label} -> template_id={tid}")
 
-    t1, t2, t3, t4, t5 = (str(i) for i in template_ids)
+    t1, t2, t3, t4, t5 = template_ids
     group_map_default_model = f"${{group::g_demo_sales}} or {t1}"
 
     print("[2/5] 创建 service-policies")
@@ -254,8 +261,10 @@ def seed_demo_config(client: ManagerClient) -> dict[str, Any]:
             "service_id": "${group_id}::${bot_id}",
             "priority": 100,
             "match_expr": "group_id == 'g_demo_sales'",
-            "default_model": t2,
-            "vision_model": t2,
+            "template_ref": {
+                "default_model": t2,
+                "vision_model": t2,
+            },
             "enabled": True,
             "data": {
                 "note": "服务策略匹配仅看 match_expr；service_id 仅为业务标识"
@@ -272,7 +281,7 @@ def seed_demo_config(client: ManagerClient) -> dict[str, Any]:
             "service_id": "${group_id}::${bot_id}",
             "priority": 10,
             "match_expr": "group_id == 'g_demo_sales'",
-            "default_model": t1,
+            "template_ref": {"default_model": t1},
             "enabled": True,
             "data": {},
         },
@@ -289,8 +298,10 @@ def seed_demo_config(client: ManagerClient) -> dict[str, Any]:
             "service_policy_id": sales_id,
             "priority": 100,
             "match_expr": "user_id == 'alice'",
-            "default_model": t3,
-            "vision_model": t3,
+            "template_ref": {
+                "default_model": t3,
+                "vision_model": t3,
+            },
             "enabled": True,
             "data": {
                 "demo_context": {
@@ -312,10 +323,10 @@ def seed_demo_config(client: ManagerClient) -> dict[str, Any]:
             "service_policy_id": sales_id,
             "priority": 0,
             "match_expr": "",
-            "default_model": group_map_default_model,
+            "template_ref": {"default_model": group_map_default_model},
             "enabled": True,
             "data": {
-                "remark": f"group:: 仅按 group_id 查步骤 5.2；or 右侧 {t1} 为 T1 的 model_template.id 回退"
+                "remark": f"group:: 仅按 group_id 查步骤 5.2；or 右侧 {t1} 为 T1 的 template_id 回退"
             },
         },
     )
@@ -327,10 +338,13 @@ def seed_demo_config(client: ManagerClient) -> dict[str, Any]:
     global_row = _upsert_global_policy(
         client,
         {
-            "default_model": t1,
-            "video_model": t1,
-            "audio_model": t1,
-            "vision_model": t1,
+            "priority": 0,
+            "template_ref": {
+                "default_model": t1,
+                "video_model": t1,
+                "audio_model": t1,
+                "vision_model": t1,
+            },
             "enabled": True,
             "data": {},
         },
@@ -345,10 +359,11 @@ def seed_demo_config(client: ManagerClient) -> dict[str, Any]:
         {
             "user_id": "carol",
             "group_id": None,
+            "priority": 0,
             "template_id": t4,
-            "template_type": "model",
+            "template_type": "default_model",
             "enabled": True,
-            "data": {"remark": "未命中 Agent/服务策略时的用户级默认"},
+            "data": {"remark": "未命中 Agent/服务策略时的用户级 default_model 映射"},
         },
     )
     carol_map_id = _require_id(carol_map, "mapping/carol")
@@ -360,10 +375,11 @@ def seed_demo_config(client: ManagerClient) -> dict[str, Any]:
         {
             "user_id": None,
             "group_id": "g_demo_sales",
+            "priority": 0,
             "template_id": t5,
-            "template_type": "model",
+            "template_type": "default_model",
             "enabled": True,
-            "data": {"remark": "组级默认映射，与 T2 服务级默认区分"},
+            "data": {"remark": "组级 default_model 映射，供 3.2 ${group::g_demo_sales} 解析"},
         },
     )
     group_map_id = _require_id(group_map, "mapping/group")

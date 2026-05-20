@@ -18,16 +18,16 @@ class Settings(BaseSettings):
         extra="ignore",
     )
 
-    rest_host: str = Field(default="0.0.0.0", validation_alias="CLAW_MANAGER_REST_HOST")
-    rest_port: int = Field(default=8765, validation_alias="CLAW_MANAGER_REST_PORT")
+    rest_host: str = Field(default="0.0.0.0", validation_alias="MANAGER_REST_HOST")
+    rest_port: int = Field(default=8765, validation_alias="MANAGER_REST_PORT")
 
-    db_type: str = Field(default="sqlite", validation_alias="CLAW_MANAGER_DB_TYPE")
-    sqlite_path: str = Field(default="claw_manager.db", validation_alias="CLAW_MANAGER_SQLITE_PATH")
-    db_host: str = Field(default="127.0.0.1", validation_alias="CLAW_MANAGER_DB_HOST")
-    db_port: int = Field(default=3306, validation_alias="CLAW_MANAGER_DB_PORT")
-    db_user: str = Field(default="root", validation_alias="CLAW_MANAGER_DB_USER")
-    db_password: str = Field(default="root", validation_alias="CLAW_MANAGER_DB_PASSWORD")
-    db_name: str = Field(default="claw_manager", validation_alias="CLAW_MANAGER_DB_NAME")
+    db_type: str = Field(default="sqlite", validation_alias="MANAGER_DB_TYPE")
+    sqlite_path: str = Field(default="claw_manager.db", validation_alias="MANAGER_SQLITE_PATH")
+    db_host: str = Field(default="127.0.0.1", validation_alias="MANAGER_DB_HOST")
+    db_port: int = Field(default=3306, validation_alias="MANAGER_DB_PORT")
+    db_user: str = Field(default="root", validation_alias="MANAGER_DB_USER")
+    db_password: str = Field(default="root", validation_alias="MANAGER_DB_PASSWORD")
+    db_name: str = Field(default="claw_manager", validation_alias="MANAGER_DB_NAME")
 
     heartbeat_timeout_seconds: int = Field(
         default=30, validation_alias="CLAWMANAGER_HEARTBEAT_TIMEOUT_SECONDS"
@@ -35,7 +35,7 @@ class Settings(BaseSettings):
     scan_interval_seconds: int = Field(
         default=30, validation_alias="CLAWMANAGER_SCAN_INTERVAL_SECONDS"
     )
-    rabbitmq_url: str | None = Field(default=None, validation_alias="CLAWMANAGER_RABBITMQ_URL")
+    rabbitmq_url: str | None = Field(default=None, validation_alias="MANAGER_RABBITMQ_URL")
     rabbitmq_exchange: str = Field(
         default="jiuwenclaw.events", validation_alias="CLAWMANAGER_RABBITMQ_EXCHANGE"
     )
@@ -45,15 +45,15 @@ class Settings(BaseSettings):
     rabbitmq_queue_name: str | None = Field(
         default=None, validation_alias="CLAWMANAGER_RABBITMQ_QUEUE_NAME"
     )
-    manager_id: str = Field(default="default", validation_alias="CLAWMANAGER_MANAGER_ID")
+    manager_id: str = Field(default="default", validation_alias="MANAGER_MANAGER_ID")
     upstream_http_timeout_seconds: float = Field(
         default=60.0, validation_alias="CLAWMANAGER_UPSTREAM_HTTP_TIMEOUT_SECONDS"
     )
     upstream_api_key: str | None = Field(
-        default=None, validation_alias="CLAWMANAGER_UPSTREAM_API_KEY"
+        default=None, validation_alias="MANAGER_UPSTREAM_API_KEY"
     )
     allow_local_provision: bool = Field(
-        default=False, validation_alias="CLAWMANAGER_ALLOW_LOCAL_PROVISION"
+        default=False, validation_alias="MANAGER_ALLOW_LOCAL_PROVISION"
     )
     provision_workspace_root: str = Field(
         default=".claw_provisioned_instances",

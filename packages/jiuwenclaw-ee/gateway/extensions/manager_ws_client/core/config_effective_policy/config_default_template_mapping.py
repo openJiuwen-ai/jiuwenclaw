@@ -21,6 +21,10 @@ from ...schemas.config_effective_policy_schemas import (
 _TABLE = CONFIG_DEFAULT_TEMPLATE_MAPPING_TABLE_DEF.table_name
 
 _ALLOWED_TEMPLATE_TYPES = frozenset({
+    "default_model",
+    "video_model",
+    "audio_model",
+    "vision_model",
     "model",
     "channel",
     "skill_whitelist",
@@ -162,6 +166,7 @@ async def apply_config_default_template_mapping_sync(
             "jiuwenclaw_id": jiuwenclaw_id,
             "user_id": user_id,
             "group_id": group_id,
+            "priority": int(mapping.get("priority", 0)),
             "template_id": template_id,
             "template_type": template_type,
             "enabled": bool(mapping.get("enabled", True)),

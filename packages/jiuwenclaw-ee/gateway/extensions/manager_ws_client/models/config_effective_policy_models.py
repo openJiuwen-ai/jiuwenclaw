@@ -21,6 +21,7 @@ class ConfigDefaultTemplateMappingInfo(BaseModel):
     jiuwenclaw_id: str
     user_id: str | None
     group_id: str | None
+    priority: int
     template_id: str
     template_type: str
     enabled: bool
@@ -43,11 +44,8 @@ CONFIG_EFFECTIVE_GLOBAL_POLICY_TABLE_DEF = TableDefinition(
             nullable=False,
         ),
         ColumnDefinition("jiuwenclaw_id", "string", length=64, nullable=False),
-        ColumnDefinition("default_model", "string", length=128, nullable=True),
-        ColumnDefinition("video_model", "string", length=128, nullable=True),
-        ColumnDefinition("audio_model", "string", length=128, nullable=True),
-        ColumnDefinition("vision_model", "string", length=128, nullable=True),
-        ColumnDefinition("channel_ids", "json", nullable=False),
+        ColumnDefinition("priority", "integer", nullable=False),
+        ColumnDefinition("template_ref", "json", nullable=False),
         ColumnDefinition("enabled", "boolean", nullable=False, default=True),
         ColumnDefinition("data", "json", nullable=True),
         ColumnDefinition("created_at", "datetime", nullable=False),
@@ -74,10 +72,7 @@ CONFIG_EFFECTIVE_SERVICE_POLICY_TABLE_DEF = TableDefinition(
         ColumnDefinition("jiuwenclaw_id", "string", length=64, nullable=False),
         ColumnDefinition("priority", "integer", nullable=False),
         ColumnDefinition("match_expr", "string", length=8192, nullable=True),
-        ColumnDefinition("default_model", "string", length=128, nullable=True),
-        ColumnDefinition("video_model", "string", length=128, nullable=True),
-        ColumnDefinition("audio_model", "string", length=128, nullable=True),
-        ColumnDefinition("vision_model", "string", length=128, nullable=True),
+        ColumnDefinition("template_ref", "json", nullable=False),
         ColumnDefinition("enabled", "boolean", nullable=False, default=True),
         ColumnDefinition("data", "json", nullable=True),
         ColumnDefinition("created_at", "datetime", nullable=False),
@@ -105,10 +100,7 @@ CONFIG_EFFECTIVE_AGENT_POLICY_TABLE_DEF = TableDefinition(
         ColumnDefinition("service_policy_id", "integer", nullable=False),
         ColumnDefinition("priority", "integer", nullable=False, default=0),
         ColumnDefinition("match_expr", "string", length=8192, nullable=True),
-        ColumnDefinition("default_model", "string", length=128, nullable=True),
-        ColumnDefinition("video_model", "string", length=128, nullable=True),
-        ColumnDefinition("audio_model", "string", length=128, nullable=True),
-        ColumnDefinition("vision_model", "string", length=128, nullable=True),
+        ColumnDefinition("template_ref", "json", nullable=False),
         ColumnDefinition("enabled", "boolean", nullable=False, default=True),
         ColumnDefinition("data", "json", nullable=True),
         ColumnDefinition("created_at", "datetime", nullable=False),
@@ -135,7 +127,8 @@ CONFIG_DEFAULT_TEMPLATE_MAPPING_TABLE_DEF = TableDefinition(
         ColumnDefinition("jiuwenclaw_id", "string", length=64, nullable=False),
         ColumnDefinition("user_id", "string", length=512, nullable=True),
         ColumnDefinition("group_id", "string", length=512, nullable=True),
-        ColumnDefinition("template_id", "string", length=512, nullable=False),
+        ColumnDefinition("priority", "integer", nullable=False),
+        ColumnDefinition("template_id", "string", length=100, nullable=False),
         ColumnDefinition("template_type", "string", length=512, nullable=False),
         ColumnDefinition("enabled", "boolean", nullable=False, default=True),
         ColumnDefinition("data", "json", nullable=True),

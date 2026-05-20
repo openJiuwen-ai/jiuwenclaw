@@ -17,14 +17,12 @@ from ...schemas.config_effective_policy_schemas import (
     ConfigEffectiveGlobalPolicyUpdateRequest,
 )
 from .config_default_template_mapping import resolve_jiuwenclaw_id
+from .template_ref import (
+    apply_template_ref_to_updates,
+    read_template_ref_from_policy_dict,
+)
 
 _TABLE = CONFIG_EFFECTIVE_GLOBAL_POLICY_TABLE_DEF.table_name
-
-
-def _normalize_channel_ids(value: list[str]) -> list[str]:
-    if not isinstance(value, list):
-        raise ValueError("channel_ids must be a list")
-    return [str(item).strip() for item in value if str(item).strip()]
 
 
 async def _ensure_unique_jiuwenclaw_id(
@@ -72,12 +70,11 @@ async def update_config_effective_global_policy_record(
         return None
 
     updates = request.model_dump(exclude_unset=True)
-    if "channel_ids" in updates and updates["channel_ids"] is not None:
-        updates["channel_ids"] = _normalize_channel_ids(updates["channel_ids"])
 
     if not updates:
         raise ValueError("请求未包含任何可更新的业务字段")
 
+    updates = apply_template_ref_to_updates(updates, existing_row=existing)
     updates["updated_at"] = utc_now()
     updated = await handler.update(_TABLE, {"id": policy_id}, updates)
     if updated is None:
@@ -126,20 +123,11 @@ async def apply_config_effective_global_policy_sync(
             )
         await _ensure_unique_jiuwenclaw_id(handler, jiuwenclaw_id)
 
-        channel_ids = policy.get("channel_ids", [])
-        if channel_ids is None:
-            channel_ids = []
-        if not isinstance(channel_ids, list):
-            raise ValueError("channel_ids must be a list")
-
         now = utc_now()
         row_data: dict[str, Any] = {
             "jiuwenclaw_id": jiuwenclaw_id,
-            "default_model": policy.get("default_model"),
-            "video_model": policy.get("video_model"),
-            "audio_model": policy.get("audio_model"),
-            "vision_model": policy.get("vision_model"),
-            "channel_ids": _normalize_channel_ids(channel_ids),
+            "priority": int(policy.get("priority", 0)),
+            "template_ref": read_template_ref_from_policy_dict(policy),
             "enabled": bool(policy.get("enabled", True)),
             "data": policy.get("data"),
             "created_at": _parse_iso_datetime(policy.get("created_at")) or now,

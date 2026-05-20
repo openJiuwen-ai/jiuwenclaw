@@ -112,14 +112,14 @@ declare -A DEPLOY_VARS=(
     ["MYSQL_ROOT_PASSWORD"]="Root@123456"
     ["CLAW_MANAGER_NAME"]="jiuwenclaw-manager"
     ["CLAW_MANAGER_NODE_PORT"]="30086"
-    ["CLAW_MANAGER_REST_PORT"]="8765"
-    ["CLAW_MANAGER_DB_TYPE"]="mysql"
-    ["CLAW_MANAGER_SQLITE_PATH"]="claw_manager.db"
-    ["CLAW_MANAGER_DB_HOST"]="mysql-headless"
-    ["CLAW_MANAGER_DB_PORT"]="3306"
-    ["CLAW_MANAGER_DB_USER"]="root"
-    ["CLAW_MANAGER_DB_PASSWORD"]="Root@123456"
-    ["CLAW_MANAGER_DB_NAME"]="claw_manager"
+    ["MANAGER_REST_PORT"]="8765"
+    ["MANAGER_DB_TYPE"]="mysql"
+    ["MANAGER_SQLITE_PATH"]="claw_manager.db"
+    ["MANAGER_DB_HOST"]="mysql-headless"
+    ["MANAGER_DB_PORT"]="3306"
+    ["MANAGER_DB_USER"]="root"
+    ["MANAGER_DB_PASSWORD"]="Root@123456"
+    ["MANAGER_DB_NAME"]="claw_manager"
 )
 
 declare -A OYR_COMPONENTS=(

@@ -12,7 +12,7 @@ from jiuwenclaw_manager.schemas.template_schemas import (
     ModelTemplateOut,
     ModelTemplateUpdateBody,
 )
-from jiuwenclaw_manager.infrastructure.utils import utc_now
+from jiuwenclaw_manager.infrastructure.utils import new_template_id, utc_now
 from jiuwenclaw_manager.manager_ws_server import ManagerWsServer
 from jiuwenclaw_manager.manager_ws_server.server import push_to_instance
 from jiuwenclaw_manager.models.template_models import MODEL_TEMPLATE_TABLE_DEF
@@ -28,7 +28,7 @@ async def push_model_template_op(
     op: str,
     *,
     template: dict[str, Any] | None = None,
-    template_id: int | None = None,
+    template_id: str | None = None,
     updates: dict[str, Any] | None = None,
     server: ManagerWsServer | None = None,
 ) -> dict[str, Any]:
@@ -50,8 +50,17 @@ async def push_model_template_op(
     )
 
 
-def _template_pk(jiuwenclaw_id: str, template_id: int) -> dict[str, Any]:
-    return {"jiuwenclaw_id": jiuwenclaw_id, "id": template_id}
+def _template_pk(jiuwenclaw_id: str, template_id: str) -> dict[str, Any]:
+    return {"jiuwenclaw_id": jiuwenclaw_id, "template_id": template_id.strip()}
+
+
+def _normalize_template_id(template_id: str) -> str:
+    normalized = template_id.strip()
+    if not normalized:
+        raise ValueError("template_id is required")
+    if len(normalized) > 100:
+        raise ValueError("template_id must be at most 100 characters")
+    return normalized
 
 
 def _iso(dt: datetime | None) -> str | None:
@@ -98,6 +107,7 @@ def _row_to_out(row: Any) -> ModelTemplateOut:
         model_tags = list(model_tags) if model_tags else None
     return ModelTemplateOut(
         id=row.id,
+        template_id=str(row.template_id),
         jiuwenclaw_id=row.jiuwenclaw_id,
         display_name=row.display_name,
         description=row.description,
@@ -134,7 +144,7 @@ class ModelTemplateService:
         return normalized
 
     async def _db_update_template(
-        self, jiuwenclaw_id: str, template_id: int, updates: dict[str, Any]
+        self, jiuwenclaw_id: str, template_id: str, updates: dict[str, Any]
     ) -> Any | None:
         if not updates:
             return await self._handler.get(
@@ -146,14 +156,15 @@ class ModelTemplateService:
             _MODEL_TEMPLATE_TABLE, _template_pk(jiuwenclaw_id, template_id), payload
         )
 
-    async def _db_delete_template(self, jiuwenclaw_id: str, template_id: int) -> bool:
+    async def _db_delete_template(self, jiuwenclaw_id: str, template_id: str) -> bool:
         return await self._handler.delete(
             _MODEL_TEMPLATE_TABLE, _template_pk(jiuwenclaw_id, template_id)
         )
 
     def _template_dict_for_push(self, row: dict[str, Any], *, now: datetime) -> dict[str, Any]:
-        """构建经 WebSocket 下发给 Gateway 的 template 对象（不含 id，由 Gateway 自增）。"""
+        """构建经 WebSocket 下发给 Gateway 的 template 对象（含 template_id UUID）。"""
         return {
+            "template_id": row["template_id"],
             "jiuwenclaw_id": row["jiuwenclaw_id"],
             "display_name": row["display_name"],
             "description": row.get("description"),
@@ -176,10 +187,11 @@ class ModelTemplateService:
         }
 
     def _build_row_for_create(
-        self, normalized: str, body: ModelTemplateCreateBody
+        self, normalized: str, body: ModelTemplateCreateBody, *, template_id: str
     ) -> dict[str, Any]:
         model_type = _validate_model_type(body.model_type)
         return {
+            "template_id": template_id,
             "jiuwenclaw_id": normalized,
             "display_name": body.display_name.strip(),
             "description": body.description,
@@ -207,8 +219,8 @@ class ModelTemplateService:
         ws_server: ManagerWsServer | None = None,
     ) -> ModelTemplateOut:
         normalized = await self._validate_jiuwenclaw_id(jiuwenclaw_id)
-        _validate_model_type(body.model_type)
-        row = self._build_row_for_create(normalized, body)
+        template_uuid = new_template_id()
+        row = self._build_row_for_create(normalized, body, template_id=template_uuid)
         now = utc_now()
         payload = dict(row)
         payload.setdefault("created_at", now)
@@ -222,11 +234,10 @@ class ModelTemplateService:
         created = await self._handler.create(_MODEL_TEMPLATE_TABLE, payload)
         return _row_to_out(created)
 
-    async def get(self, jiuwenclaw_id: str, template_id: int) -> ModelTemplateOut | None:
+    async def get(self, jiuwenclaw_id: str, template_id: str) -> ModelTemplateOut | None:
         normalized = await self._validate_jiuwenclaw_id(jiuwenclaw_id)
-        row = await self._handler.get(
-            _MODEL_TEMPLATE_TABLE, _template_pk(normalized, template_id)
-        )
+        tid = _normalize_template_id(template_id)
+        row = await self._handler.get(_MODEL_TEMPLATE_TABLE, _template_pk(normalized, tid))
         if row is None:
             return None
         return _row_to_out(row)
@@ -282,12 +293,13 @@ class ModelTemplateService:
     async def update(
         self,
         jiuwenclaw_id: str,
-        template_id: int,
+        template_id: str,
         body: ModelTemplateUpdateBody,
         *,
         ws_server: ManagerWsServer | None = None,
     ) -> ModelTemplateOut | None:
         normalized = await self._validate_jiuwenclaw_id(jiuwenclaw_id)
+        tid = _normalize_template_id(template_id)
 
         updates = body.model_dump(exclude_unset=True)
         if "model_type" in updates and updates["model_type"] is not None:
@@ -303,12 +315,12 @@ class ModelTemplateService:
 
         if not updates:
             row = await self._handler.get(
-                _MODEL_TEMPLATE_TABLE, _template_pk(normalized, template_id)
+                _MODEL_TEMPLATE_TABLE, _template_pk(normalized, tid)
             )
             return _row_to_out(row) if row is not None else None
 
         existing = await self._handler.get(
-            _MODEL_TEMPLATE_TABLE, _template_pk(normalized, template_id)
+            _MODEL_TEMPLATE_TABLE, _template_pk(normalized, tid)
         )
         if existing is None:
             return None
@@ -316,11 +328,11 @@ class ModelTemplateService:
         await push_model_template_op(
             normalized,
             "update",
-            template_id=template_id,
+            template_id=tid,
             updates=updates,
             server=ws_server,
         )
-        row = await self._db_update_template(normalized, template_id, updates)
+        row = await self._db_update_template(normalized, tid, updates)
         if row is None:
             return None
         return _row_to_out(row)
@@ -328,20 +340,21 @@ class ModelTemplateService:
     async def delete(
         self,
         jiuwenclaw_id: str,
-        template_id: int,
+        template_id: str,
         *,
         ws_server: ManagerWsServer | None = None,
     ) -> bool:
         normalized = await self._validate_jiuwenclaw_id(jiuwenclaw_id)
+        tid = _normalize_template_id(template_id)
         row = await self._handler.get(
-            _MODEL_TEMPLATE_TABLE, _template_pk(normalized, template_id)
+            _MODEL_TEMPLATE_TABLE, _template_pk(normalized, tid)
         )
         if row is None:
             return False
         await push_model_template_op(
             normalized,
             "delete",
-            template_id=template_id,
+            template_id=tid,
             server=ws_server,
         )
-        return await self._db_delete_template(normalized, template_id)
+        return await self._db_delete_template(normalized, tid)

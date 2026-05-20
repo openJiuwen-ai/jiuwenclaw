@@ -6,8 +6,8 @@ metadata:
   namespace: <<NAMESPACE>>
 spec:
   ports:
-    - port: <<CLAW_MANAGER_REST_PORT>>
-      targetPort: <<CLAW_MANAGER_REST_PORT>>
+    - port: <<MANAGER_REST_PORT>>
+      targetPort: <<MANAGER_REST_PORT>>
   clusterIP: None  # 关键：无头服务，StatefulSet 必须依赖
   selector:
     app: <<CLAW_MANAGER_NAME>>
@@ -22,8 +22,8 @@ metadata:
 spec:
   type: NodePort
   ports:
-    - port: <<CLAW_MANAGER_REST_PORT>>       # 集群内部端口
-      targetPort: <<CLAW_MANAGER_REST_PORT>> # 容器端口
+    - port: <<MANAGER_REST_PORT>>       # 集群内部端口
+      targetPort: <<MANAGER_REST_PORT>> # 容器端口
       nodePort: <<CLAW_MANAGER_NODE_PORT>>   # 外部访问端口（30000-32767）
   selector:
     app: <<CLAW_MANAGER_NAME>>
@@ -48,23 +48,23 @@ spec:
       - name: manager
         image: <<CLAW_MANAGER_IMAGE>>
         ports:
-        - containerPort: <<CLAW_MANAGER_REST_PORT>>
+        - containerPort: <<MANAGER_REST_PORT>>
         env:
-        - name: CLAWMANAGER_RABBITMQ_URL
-          value: "<<CLAWMANAGER_RABBITMQ_URL>>"
-        - name: CLAW_MANAGER_REST_PORT
-          value: "<<CLAW_MANAGER_REST_PORT>>"
-        - name: CLAW_MANAGER_DB_TYPE
-          value: "<<CLAW_MANAGER_DB_TYPE>>"
-        - name: CLAW_MANAGER_SQLITE_PATH
-          value: "<<CLAW_MANAGER_SQLITE_PATH>>"
-        - name: CLAW_MANAGER_DB_HOST
-          value: "<<CLAW_MANAGER_DB_HOST>>"
-        - name: CLAW_MANAGER_DB_PORT
-          value: "<<CLAW_MANAGER_DB_PORT>>"
-        - name: CLAW_MANAGER_DB_USER
+        - name: MANAGER_RABBITMQ_URL
+          value: "<<MANAGER_RABBITMQ_URL>>"
+        - name: MANAGER_REST_PORT
+          value: "<<MANAGER_REST_PORT>>"
+        - name: MANAGER_DB_TYPE
+          value: "<<MANAGER_DB_TYPE>>"
+        - name: MANAGER_SQLITE_PATH
+          value: "<<MANAGER_SQLITE_PATH>>"
+        - name: MANAGER_DB_HOST
+          value: "<<MANAGER_DB_HOST>>"
+        - name: MANAGER_DB_PORT
+          value: "<<MANAGER_DB_PORT>>"
+        - name: MANAGER_DB_USER
           value: "root"
-        - name: CLAW_MANAGER_DB_PASSWORD
-          value: "<<CLAW_MANAGER_DB_PASSWORD>>"
-        - name: CLAW_MANAGER_DB_NAME
-          value: "<<CLAW_MANAGER_DB_NAME>>"
+        - name: MANAGER_DB_PASSWORD
+          value: "<<MANAGER_DB_PASSWORD>>"
+        - name: MANAGER_DB_NAME
+          value: "<<MANAGER_DB_NAME>>"

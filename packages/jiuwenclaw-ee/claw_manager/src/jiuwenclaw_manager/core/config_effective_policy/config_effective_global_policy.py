@@ -14,6 +14,11 @@ from jiuwenclaw_manager.manager_ws_server.server import push_to_instance
 from jiuwenclaw_manager.models.config_effective_policy_models import (
     CONFIG_EFFECTIVE_GLOBAL_POLICY_TABLE_DEF,
 )
+from jiuwenclaw_manager.core.config_effective_policy.template_ref import (
+    apply_template_ref_to_updates,
+    normalize_template_ref,
+    read_template_ref_from_row,
+)
 from jiuwenclaw_manager.schemas.config_effective_policy_schemas import (
     ConfigEffectiveGlobalPolicyCreateBody,
     ConfigEffectiveGlobalPolicyOut,
@@ -62,24 +67,12 @@ def _iso(dt: datetime | None) -> str | None:
     return dt.isoformat().replace("+00:00", "Z")
 
 
-def _normalize_channel_ids(value: list[str]) -> list[str]:
-    if not isinstance(value, list):
-        raise ValueError("channel_ids must be a list")
-    return [str(item).strip() for item in value if str(item).strip()]
-
-
 def _row_to_out(row: Any) -> ConfigEffectiveGlobalPolicyOut:
-    channel_ids = row.channel_ids
-    if not isinstance(channel_ids, list):
-        channel_ids = list(channel_ids) if channel_ids else []
     return ConfigEffectiveGlobalPolicyOut(
         id=row.id,
         jiuwenclaw_id=row.jiuwenclaw_id,
-        default_model=row.default_model,
-        video_model=row.video_model,
-        audio_model=row.audio_model,
-        vision_model=row.vision_model,
-        channel_ids=channel_ids,
+        priority=row.priority,
+        template_ref=read_template_ref_from_row(row),
         enabled=row.enabled,
         data=row.data,
         created_at=_iso(row.created_at),
@@ -125,11 +118,8 @@ class ConfigEffectiveGlobalPolicyService:
         """构建经 WebSocket 下发给 Gateway 的 policy 对象（不含 id，由 Gateway 自增）。"""
         return {
             "jiuwenclaw_id": row["jiuwenclaw_id"],
-            "default_model": row.get("default_model"),
-            "video_model": row.get("video_model"),
-            "audio_model": row.get("audio_model"),
-            "vision_model": row.get("vision_model"),
-            "channel_ids": row.get("channel_ids", []),
+            "priority": row["priority"],
+            "template_ref": row.get("template_ref") or {},
             "enabled": row.get("enabled", True),
             "data": row.get("data"),
             "created_at": _iso(row.get("created_at") or now),
@@ -145,16 +135,12 @@ class ConfigEffectiveGlobalPolicyService:
     ) -> ConfigEffectiveGlobalPolicyOut:
         normalized = await self._validate_jiuwenclaw_id(jiuwenclaw_id)
         await self._ensure_unique_jiuwenclaw_id(normalized)
-        channel_ids = _normalize_channel_ids(body.channel_ids)
 
         now = utc_now()
         row = {
             "jiuwenclaw_id": normalized,
-            "default_model": body.default_model,
-            "video_model": body.video_model,
-            "audio_model": body.audio_model,
-            "vision_model": body.vision_model,
-            "channel_ids": channel_ids,
+            "priority": body.priority,
+            "template_ref": normalize_template_ref(body.template_ref),
             "enabled": body.enabled,
             "data": body.data,
             "created_at": now,
@@ -231,8 +217,6 @@ class ConfigEffectiveGlobalPolicyService:
         normalized = await self._validate_jiuwenclaw_id(jiuwenclaw_id)
 
         updates = body.model_dump(exclude_unset=True)
-        if "channel_ids" in updates and updates["channel_ids"] is not None:
-            updates["channel_ids"] = _normalize_channel_ids(updates["channel_ids"])
 
         row = await self._handler.get(
             _GLOBAL_POLICY_TABLE, _global_policy_pk(normalized, policy_id)
@@ -242,6 +226,8 @@ class ConfigEffectiveGlobalPolicyService:
 
         if not updates:
             return _row_to_out(row)
+
+        updates = apply_template_ref_to_updates(updates, existing_row=row)
 
         await push_config_effective_global_policy_op(
             normalized,

@@ -73,7 +73,7 @@ async def list_model_templates(
 @templates_router.get("/{jiuwenclaw_id}/model-templates/{template_id}", response_model=ResponseModel)
 async def get_model_template(
     jiuwenclaw_id: str,
-    template_id: int,
+    template_id: str,
     handler: Annotated[DBHandler, Depends(get_db_handler)],
 ):
     svc = _svc(handler)
@@ -89,7 +89,7 @@ async def get_model_template(
 @templates_router.put("/{jiuwenclaw_id}/model-templates/{template_id}", response_model=ResponseModel)
 async def update_model_template(
     jiuwenclaw_id: str,
-    template_id: int,
+    template_id: str,
     body: ModelTemplateUpdateBody,
     request: Request,
     handler: Annotated[DBHandler, Depends(get_db_handler)],
@@ -112,7 +112,7 @@ async def update_model_template(
 @templates_router.delete("/{jiuwenclaw_id}/model-templates/{template_id}", response_model=ResponseModel)
 async def delete_model_template(
     jiuwenclaw_id: str,
-    template_id: int,
+    template_id: str,
     request: Request,
     handler: Annotated[DBHandler, Depends(get_db_handler)],
 ):
@@ -125,4 +125,6 @@ async def delete_model_template(
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     if not ok:
         raise HTTPException(status_code=404, detail="model template not found")
-    return ResponseModel(code=200, message="success", data={"deleted": True, "id": template_id})
+    return ResponseModel(
+        code=200, message="success", data={"deleted": True, "template_id": template_id}
+    )

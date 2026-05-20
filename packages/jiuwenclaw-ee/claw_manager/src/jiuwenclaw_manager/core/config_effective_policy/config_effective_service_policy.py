@@ -14,6 +14,11 @@ from jiuwenclaw_manager.manager_ws_server.server import push_to_instance
 from jiuwenclaw_manager.models.config_effective_policy_models import (
     CONFIG_EFFECTIVE_SERVICE_POLICY_TABLE_DEF,
 )
+from jiuwenclaw_manager.core.config_effective_policy.template_ref import (
+    apply_template_ref_to_updates,
+    normalize_template_ref,
+    read_template_ref_from_row,
+)
 from jiuwenclaw_manager.schemas.config_effective_policy_schemas import (
     ConfigEffectiveServicePolicyCreateBody,
     ConfigEffectiveServicePolicyOut,
@@ -69,10 +74,7 @@ def _row_to_out(row: Any) -> ConfigEffectiveServicePolicyOut:
         jiuwenclaw_id=row.jiuwenclaw_id,
         priority=row.priority,
         match_expr=row.match_expr,
-        default_model=row.default_model,
-        video_model=row.video_model,
-        audio_model=row.audio_model,
-        vision_model=row.vision_model,
+        template_ref=read_template_ref_from_row(row),
         enabled=row.enabled,
         data=row.data,
         created_at=_iso(row.created_at),
@@ -100,10 +102,7 @@ class ConfigEffectiveServicePolicyService:
             "service_id": row["service_id"],
             "priority": row["priority"],
             "match_expr": row.get("match_expr"),
-            "default_model": row.get("default_model"),
-            "video_model": row.get("video_model"),
-            "audio_model": row.get("audio_model"),
-            "vision_model": row.get("vision_model"),
+            "template_ref": row.get("template_ref") or {},
             "enabled": row.get("enabled", True),
             "data": row.get("data"),
             "created_at": _iso(row.get("created_at") or now),
@@ -125,10 +124,7 @@ class ConfigEffectiveServicePolicyService:
             "jiuwenclaw_id": normalized,
             "priority": body.priority,
             "match_expr": body.match_expr,
-            "default_model": body.default_model,
-            "video_model": body.video_model,
-            "audio_model": body.audio_model,
-            "vision_model": body.vision_model,
+            "template_ref": normalize_template_ref(body.template_ref),
             "enabled": body.enabled,
             "data": body.data,
             "created_at": now,
@@ -218,6 +214,8 @@ class ConfigEffectiveServicePolicyService:
 
         if not updates:
             return _row_to_out(row)
+
+        updates = apply_template_ref_to_updates(updates, existing_row=row)
 
         await push_config_effective_service_policy_op(
             normalized,

@@ -135,7 +135,7 @@ check_if_rabbitmq_up() {
     if [ -n "${DEPLOY_VARS["RABBITMQ_URL"]:-}" ]; then
         info "Use external RABBITMQ server"
         url="${DEPLOY_VARS["RABBITMQ_URL"]}"
-        DEPLOY_VARS["CLAWMANAGER_RABBITMQ_URL"]="amqp://${user}:${encoded_password}@${url}"
+        DEPLOY_VARS["MANAGER_RABBITMQ_URL"]="amqp://${user}:${encoded_password}@${url}"
         return
     fi
 
@@ -146,7 +146,7 @@ check_if_rabbitmq_up() {
 
     info "Use built-in RABBITMQ server"
     url="${name}-headless.default:5672"
-    DEPLOY_VARS["CLAWMANAGER_RABBITMQ_URL"]="amqp://${user}:${encoded_password}@${url}"
+    DEPLOY_VARS["MANAGER_RABBITMQ_URL"]="amqp://${user}:${encoded_password}@${url}"
 }
 
 check_if_mysql_up() {
@@ -159,10 +159,10 @@ check_if_mysql_up() {
     # Check if external MySQL server
     if [ -n "${DEPLOY_VARS["MYSQL_HOST"]:-}" ]; then
         info "Use external MySQL server"
-        DEPLOY_VARS["CLAW_MANAGER_DB_HOST"]=${DEPLOY_VARS["MYSQL_HOST"]}
-        DEPLOY_VARS["CLAW_MANAGER_DB_PORT"]=${DEPLOY_VARS["MYSQL_PORT"]}
-        DEPLOY_VARS["CLAW_MANAGER_DB_USER"]="root"
-        DEPLOY_VARS["CLAW_MANAGER_DB_PASSWORD"]=${DEPLOY_VARS["MYSQL_ROOT_PASSWORD"]}
+        DEPLOY_VARS["MANAGER_DB_HOST"]=${DEPLOY_VARS["MYSQL_HOST"]}
+        DEPLOY_VARS["MANAGER_DB_PORT"]=${DEPLOY_VARS["MYSQL_PORT"]}
+        DEPLOY_VARS["MANAGER_DB_USER"]="root"
+        DEPLOY_VARS["MANAGER_DB_PASSWORD"]=${DEPLOY_VARS["MYSQL_ROOT_PASSWORD"]}
         DEPLOY_VARS["GATEWAY_DB_HOST"]=${DEPLOY_VARS["MYSQL_HOST"]}
         DEPLOY_VARS["GATEWAY_DB_PORT"]=${DEPLOY_VARS["MYSQL_PORT"]}
         DEPLOY_VARS["GATEWAY_DB_USER"]="root"
@@ -171,17 +171,17 @@ check_if_mysql_up() {
 
     # No Build-In DB server
     if ! check_k8s_resource_exists "statefulset" "${name}"; then
-        DEPLOY_VARS["CLAW_MANAGER_DB_TYPE"]="sqlite"
+        DEPLOY_VARS["MANAGER_DB_TYPE"]="sqlite"
         DEPLOY_VARS["GATEWAY_DB_TYPE"]="sqlite"
         warning "DB is not deployed. Use build-in SQLite"
         return
     fi
 
     info "Use built-in DB server"
-    DEPLOY_VARS["CLAW_MANAGER_DB_HOST"]="${name}-headless.default"
-    DEPLOY_VARS["CLAW_MANAGER_DB_PORT"]="3306"
-    DEPLOY_VARS["CLAW_MANAGER_DB_USER"]="root"
-    DEPLOY_VARS["CLAW_MANAGER_DB_PASSWORD"]=${DEPLOY_VARS["MYSQL_ROOT_PASSWORD"]}
+    DEPLOY_VARS["MANAGER_DB_HOST"]="${name}-headless.default"
+    DEPLOY_VARS["MANAGER_DB_PORT"]="3306"
+    DEPLOY_VARS["MANAGER_DB_USER"]="root"
+    DEPLOY_VARS["MANAGER_DB_PASSWORD"]=${DEPLOY_VARS["MYSQL_ROOT_PASSWORD"]}
     DEPLOY_VARS["GATEWAY_DB_HOST"]="${name}-headless.default"
     DEPLOY_VARS["GATEWAY_DB_PORT"]="3306"
     DEPLOY_VARS["GATEWAY_DB_USER"]="root"

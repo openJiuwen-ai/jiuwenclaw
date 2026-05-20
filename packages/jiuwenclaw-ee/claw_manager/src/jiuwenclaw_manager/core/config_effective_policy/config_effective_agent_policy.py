@@ -15,6 +15,11 @@ from jiuwenclaw_manager.models.config_effective_policy_models import (
     CONFIG_EFFECTIVE_AGENT_POLICY_TABLE_DEF,
     CONFIG_EFFECTIVE_SERVICE_POLICY_TABLE_DEF,
 )
+from jiuwenclaw_manager.core.config_effective_policy.template_ref import (
+    apply_template_ref_to_updates,
+    normalize_template_ref,
+    read_template_ref_from_row,
+)
 from jiuwenclaw_manager.schemas.config_effective_policy_schemas import (
     ConfigEffectiveAgentPolicyCreateBody,
     ConfigEffectiveAgentPolicyOut,
@@ -72,10 +77,7 @@ def _row_to_out(row: Any) -> ConfigEffectiveAgentPolicyOut:
         service_policy_id=row.service_policy_id,
         priority=row.priority,
         match_expr=row.match_expr,
-        default_model=row.default_model,
-        video_model=row.video_model,
-        audio_model=row.audio_model,
-        vision_model=row.vision_model,
+        template_ref=read_template_ref_from_row(row),
         enabled=row.enabled,
         data=row.data,
         created_at=_iso(row.created_at),
@@ -117,10 +119,7 @@ class ConfigEffectiveAgentPolicyService:
             "service_policy_id": row["service_policy_id"],
             "priority": row.get("priority", 0),
             "match_expr": row.get("match_expr"),
-            "default_model": row.get("default_model"),
-            "video_model": row.get("video_model"),
-            "audio_model": row.get("audio_model"),
-            "vision_model": row.get("vision_model"),
+            "template_ref": row.get("template_ref") or {},
             "enabled": row.get("enabled", True),
             "data": row.get("data"),
             "created_at": _iso(row.get("created_at") or now),
@@ -147,10 +146,7 @@ class ConfigEffectiveAgentPolicyService:
             "service_policy_id": body.service_policy_id,
             "priority": body.priority,
             "match_expr": body.match_expr,
-            "default_model": body.default_model,
-            "video_model": body.video_model,
-            "audio_model": body.audio_model,
-            "vision_model": body.vision_model,
+            "template_ref": normalize_template_ref(body.template_ref),
             "enabled": body.enabled,
             "data": body.data,
             "created_at": now,
@@ -251,6 +247,8 @@ class ConfigEffectiveAgentPolicyService:
 
         if not updates:
             return _row_to_out(row)
+
+        updates = apply_template_ref_to_updates(updates, existing_row=row)
 
         await push_config_effective_agent_policy_op(
             normalized,

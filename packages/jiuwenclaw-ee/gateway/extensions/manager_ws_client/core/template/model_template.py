@@ -25,6 +25,15 @@ def resolve_jiuwenclaw_id() -> str:
     return instance_id
 
 
+def _normalize_template_id(template_id: Any) -> str:
+    normalized = str(template_id or "").strip()
+    if not normalized:
+        raise ValueError("template_id is required")
+    if len(normalized) > 100:
+        raise ValueError("template_id must be at most 100 characters")
+    return normalized
+
+
 def _validate_model_type(value: str | list[str]) -> str | list[str]:
     if isinstance(value, str):
         if value not in _ALLOWED_MODEL_TYPES:
@@ -46,10 +55,11 @@ def _validate_model_type(value: str | list[str]) -> str | list[str]:
 
 async def _get_row_for_instance(
     handler: DBHandler,
-    template_id: int,
+    template_id: str,
     jiuwenclaw_id: str,
 ) -> Any | None:
-    row = await handler.get(_TABLE, {"id": template_id})
+    tid = _normalize_template_id(template_id)
+    row = await handler.get(_TABLE, {"template_id": tid})
     if row is None:
         return None
     if getattr(row, "jiuwenclaw_id", None) != jiuwenclaw_id:
@@ -59,11 +69,12 @@ async def _get_row_for_instance(
 
 async def update_model_template(
     handler: DBHandler,
-    template_id: int,
+    template_id: str,
     request: ModelTemplateUpdateRequest,
 ) -> dict[str, Any] | None:
     jiuwenclaw_id = resolve_jiuwenclaw_id()
-    existing = await _get_row_for_instance(handler, template_id, jiuwenclaw_id)
+    tid = _normalize_template_id(template_id)
+    existing = await _get_row_for_instance(handler, tid, jiuwenclaw_id)
     if existing is None:
         return None
 
@@ -83,18 +94,19 @@ async def update_model_template(
         raise ValueError("请求未包含任何可更新的业务字段")
 
     updates["updated_at"] = utc_now()
-    updated = await handler.update(_TABLE, {"id": template_id}, updates)
+    updated = await handler.update(_TABLE, {"template_id": tid}, updates)
     if updated is None:
         return None
-    return {"id": getattr(updated, "id")}
+    return {"template_id": str(getattr(updated, "template_id", tid))}
 
 
-async def delete_model_template(handler: DBHandler, template_id: int) -> bool:
+async def delete_model_template(handler: DBHandler, template_id: str) -> bool:
     jiuwenclaw_id = resolve_jiuwenclaw_id()
-    existing = await _get_row_for_instance(handler, template_id, jiuwenclaw_id)
+    tid = _normalize_template_id(template_id)
+    existing = await _get_row_for_instance(handler, tid, jiuwenclaw_id)
     if existing is None:
         return False
-    return await handler.delete(_TABLE, {"id": template_id})
+    return await handler.delete(_TABLE, {"template_id": tid})
 
 
 def _parse_iso_datetime(value: Any) -> Any:
@@ -123,9 +135,11 @@ async def apply_model_template_sync(
         template = payload.get("template")
         if not isinstance(template, dict):
             raise ValueError("model_templates.create requires template object")
+        template_uuid = _normalize_template_id(template.get("template_id"))
         model_type = _validate_model_type(template["model_type"])
         now = utc_now()
         row_data: dict[str, Any] = {
+            "template_id": template_uuid,
             "jiuwenclaw_id": jiuwenclaw_id,
             "display_name": str(template["display_name"]).strip(),
             "description": template.get("description"),
@@ -146,11 +160,8 @@ async def apply_model_template_sync(
             "created_at": _parse_iso_datetime(template.get("created_at")) or now,
             "updated_at": _parse_iso_datetime(template.get("updated_at")) or now,
         }
-        created = await handler.create(_TABLE, row_data)
-        new_id = int(getattr(created, "id", 0) or 0)
-        if new_id < 1:
-            raise ValueError("model_templates.create: database did not return template id")
-        return {"template_id": new_id}
+        await handler.create(_TABLE, row_data)
+        return {"template_id": template_uuid}
 
     if op == "update":
         template_id = payload.get("template_id")
@@ -160,18 +171,20 @@ async def apply_model_template_sync(
         if not isinstance(updates, dict) or not updates:
             raise ValueError("model_templates.update requires non-empty updates")
         req = ModelTemplateUpdateRequest.model_validate(updates)
-        row = await update_model_template(handler, int(template_id), req)
+        tid = _normalize_template_id(template_id)
+        row = await update_model_template(handler, tid, req)
         if row is None:
-            raise ValueError(f"model template id={template_id} not found")
+            raise ValueError(f"model template template_id={tid!r} not found")
         return None
 
     if op == "delete":
         template_id = payload.get("template_id")
         if template_id is None:
             raise ValueError("model_templates.delete requires template_id")
-        deleted = await delete_model_template(handler, int(template_id))
+        tid = _normalize_template_id(template_id)
+        deleted = await delete_model_template(handler, tid)
         if not deleted:
-            raise ValueError(f"model template id={template_id} not found")
+            raise ValueError(f"model template template_id={tid!r} not found")
         return None
 
     raise ValueError(f"unsupported model_templates.op: {op!r}")
