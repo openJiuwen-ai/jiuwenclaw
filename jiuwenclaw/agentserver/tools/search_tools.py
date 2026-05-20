@@ -625,6 +625,54 @@ def _jina_search_sync(query: str, timeout_seconds: int) -> dict[str, Any]:
     return {"provider": "jina", "answer": (answer or "").strip(), "urls": urls}
 
 
+def _bocha_search_sync(
+    query: str, max_results: int, timeout_seconds: int
+) -> dict[str, Any]:
+    bocha_key = os.environ.get("BOCHA_API_KEY", "")
+    if not bocha_key:
+        raise ValueError("BOCHA_API_KEY is not set")
+
+    response = _http_request(
+        "POST",
+        os.environ.get("BOCHA_API_URL", "https://api.bocha.cn/v1/web-search"),
+        headers={"Authorization": f"Bearer {bocha_key}", "Content-Type": "application/json"},
+        json={"query": query, "summary": True, "count": max_results},
+        timeout=timeout_seconds,
+    )
+    response.raise_for_status()
+    data = response.json()
+
+    urls: list[str] = []
+    for container in (
+        data.get("data", {}).get("webPages", {}).get("value"),
+        data.get("webPages", {}).get("value"),
+        data.get("data", {}).get("results"),
+        data.get("results"),
+    ):
+        if not isinstance(container, list):
+            continue
+        for item in container[:max_results]:
+            if isinstance(item, dict):
+                maybe_url = item.get("url") or item.get("link")
+                if maybe_url:
+                    urls.append(str(maybe_url))
+        if urls:
+            break
+
+    answer = ""
+    for value in (
+        data.get("summary"),
+        data.get("answer"),
+        data.get("data", {}).get("summary"),
+        data.get("data", {}).get("answer"),
+    ):
+        if isinstance(value, str) and value.strip():
+            answer = value.strip()
+            break
+
+    return {"provider": "bocha", "answer": answer, "urls": urls[:max_results]}
+
+
 @tool(
     name="mcp_free_search",
     description=(
@@ -675,8 +723,8 @@ async def mcp_free_search(
 @tool(
     name="mcp_paid_search",
     description=(
-        "Paid search via Petal/Perplexity/SERPER/JINA. "
-        "provider=auto|petal|perplexity|serper|jina."
+        "Paid search via Petal/Bocha/Perplexity/SERPER/JINA. "
+        "provider=auto|petal|bocha|perplexity|serper|jina."
     ),
 )
 async def mcp_paid_search(
@@ -690,14 +738,20 @@ async def mcp_paid_search(
         return "[ERROR]: query cannot be empty."
 
     provider = (provider or "auto").strip().lower()
-    if provider not in {"auto", "jina", "serper", "perplexity", "petal"}:
-        return "[ERROR]: provider must be one of auto|petal|jina|serper|perplexity."
+    if provider not in {"auto", "bocha", "jina", "serper", "perplexity", "petal"}:
+        return (
+            "[ERROR]: provider must be one of "
+            "auto|petal|bocha|jina|serper|perplexity."
+        )
 
     timeout_seconds = max(10, min(timeout_seconds, 120))
     max_results = max(1, min(max_results, 20))
 
     runners = {
         "petal": lambda: _petal_search_sync(
+            query=query, max_results=max_results, timeout_seconds=timeout_seconds
+        ),
+        "bocha": lambda: _bocha_search_sync(
             query=query, max_results=max_results, timeout_seconds=timeout_seconds
         ),
         "jina": lambda: _jina_search_sync(query=query, timeout_seconds=timeout_seconds),
@@ -711,7 +765,7 @@ async def mcp_paid_search(
     order = (
         [provider]
         if provider != "auto"
-        else ["perplexity", "serper", "jina", "petal"]
+        else ["perplexity", "bocha", "serper", "jina", "petal"]
     )
 
     errors: list[str] = []

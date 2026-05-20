@@ -260,6 +260,7 @@ def create_mcp_tool(config_str: str) -> McpServerConfig:
 def _has_paid_search_api_key() -> bool:
     """Check if any paid search API key is configured."""
     return any([
+        os.environ.get("BOCHA_API_KEY"),
         os.environ.get("PERPLEXITY_API_KEY"),
         os.environ.get("SERPER_API_KEY"),
         os.environ.get("JINA_API_KEY"),

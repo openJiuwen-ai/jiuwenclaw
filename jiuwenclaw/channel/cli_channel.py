@@ -163,6 +163,7 @@ _CLI_CONFIG_SET_ENV_MAP = {
     "embed_api_base": "EMBED_API_BASE",
     "embed_model": "EMBED_MODEL",
     "jina_api_key": "JINA_API_KEY",
+    "bocha_api_key": "BOCHA_API_KEY",
     "serper_api_key": "SERPER_API_KEY",
     "perplexity_api_key": "PERPLEXITY_API_KEY",
     "github_token": "GITHUB_TOKEN",
@@ -247,6 +248,8 @@ def _build_config_schema() -> list[dict]:
          "source": "env", "default": empty},
         # Search & External
         {"key": "jina_api_key", "label": "Jina API Key", "group": "Search & External", "type": "password",
+         "sensitive": True, "source": "env", "default": empty},
+        {"key": "bocha_api_key", "label": "Bocha API Key", "group": "Search & External", "type": "password",
          "sensitive": True, "source": "env", "default": empty},
         {"key": "serper_api_key", "label": "Serper API Key", "group": "Search & External", "type": "password",
          "sensitive": True, "source": "env", "default": empty},
