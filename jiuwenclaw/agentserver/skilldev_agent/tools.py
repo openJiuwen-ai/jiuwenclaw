@@ -26,6 +26,9 @@ from jiuwenclaw.agentserver.tools.harness_named_web_tools import (
     JiuwenHarnessFreeSearchTool,
 )
 from jiuwenclaw.agentserver.tools.subagent_tools import fork_agent, spawn_subagent
+from jiuwenclaw.agentserver.skilldev_agent.meta_tools.function_call_tool import (
+    get_function_call_tool,
+)
 
 HARNESS_TOOL_CLASSES = {
     "file_read": ReadFileTool,
@@ -62,5 +65,5 @@ def build_skilldev_tools(
             get_ask_user_question_tool(),
         ]
     )
-    # tools.extend([fork_agent, spawn_subagent])
+    tools.extend([get_function_call_tool()])
     return tools

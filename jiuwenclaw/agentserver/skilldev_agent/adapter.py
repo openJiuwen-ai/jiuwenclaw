@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import json
 import logging
 import sys
 import uuid
@@ -43,6 +44,12 @@ from jiuwenclaw.utils import get_agent_workspace_dir
 from jiuwenclaw.agentserver.skilldev_agent.prompts import SKILLDEV_AGENT_SYSTEM_PROMPT
 from jiuwenclaw.agentserver.skilldev_agent.subagents import build_skilldev_subagents
 from jiuwenclaw.agentserver.skilldev_agent.tools import build_skilldev_tools
+from jiuwenclaw.agentserver.skilldev_agent.meta_tools.external_tool_registry import (
+    format_tool_usage_hint,
+    iter_tool_definitions_from_json,
+    write_tool_spec_file,
+    write_tool_usage_catalog,
+)
 from jiuwenclaw.agentserver.skilldev_agent.rails.context_engineering_rail import SkillDevContextEngineeringRail
 
 logger = logging.getLogger(__name__)
@@ -464,11 +471,36 @@ class SkillDevDeepAdapter:
             extract_zip_to_subdir=True,
             allowed_suffixes=(".zip", ".skill"),
         )
-        await SkillDevDeepAdapter._write_resource_group(
+        await SkillDevDeepAdapter._write_tool_spec_files(
             params.get("tool_spec_files") or params.get("toolSpecFiles") or [],
             task_workspace / "resources" / "available-tools",
-            extract_zip_to_subdir=False,
         )
+
+    @staticmethod
+    async def _write_tool_spec_files(resources: list[dict[str, Any]], dest_dir: Path) -> None:
+        """Write uploaded tool specs as ``<pluginId>__<toolName>.json`` per tool."""
+        if not resources:
+            return
+        dest_dir.mkdir(parents=True, exist_ok=True)
+        for res in resources:
+            content_b64 = res.get("base64Data") or res.get("base64") or ""
+            if content_b64:
+                try:
+                    raw_bytes = base64.b64decode(content_b64)
+                    parsed = json.loads(raw_bytes.decode("utf-8"))
+                except Exception as exc:
+                    fname = res.get("filename", "?")
+                    raise ValueError(f"工具定义文件 [{fname}] 解析失败: {exc}") from exc
+                for tool_def in iter_tool_definitions_from_json(parsed):
+                    write_tool_spec_file(dest_dir, tool_def)
+            elif res.get("protocol") or res.get("pluginId") or res.get("toolId"):
+                write_tool_spec_file(dest_dir, res)
+            else:
+                logger.warning(
+                    "[SkillDevDeepAdapter] skip tool_spec entry without base64 or pluginId: %s",
+                    res.get("filename", res),
+                )
+        write_tool_usage_catalog(dest_dir)
 
     @staticmethod
     async def _write_resource_group(
@@ -530,7 +562,11 @@ class SkillDevDeepAdapter:
             f"当前 SkillDev 工作区：{task_workspace}\n"
             "用户上传资源已写入：\n"
         )
-        return header + "\n".join(lines) + "\n请在生成 Skill 前按需检查这些目录。"
+        parts = [header + "\n".join(lines)]
+        if tools:
+            parts.append(format_tool_usage_hint())
+        parts.append("请在生成 Skill 前按需检查上述资源。")
+        return "\n".join(parts)
 
     # ------------------------------------------------------------------
     # interrupt / answer / heartbeat / is_working

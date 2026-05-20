@@ -26,6 +26,9 @@ from jiuwenclaw.agentserver.tools.harness_named_web_tools import (
     JiuwenHarnessFetchWebpageTool,
     JiuwenHarnessFreeSearchTool,
 )
+from jiuwenclaw.agentserver.skilldev_agent.meta_tools.function_call_tool import (
+    get_function_call_tool,
+)
 
 
 DESCRIPTION_CN = (
@@ -217,6 +220,9 @@ def _build_executor_tools(
         JiuwenHarnessFreeSearchTool(language=language, agent_id=agent_id).card,
         WebPaidSearchTool(language=language, agent_id=agent_id).card,
         JiuwenHarnessFetchWebpageTool(language=language, agent_id=agent_id).card,
+        # Reuse parent's registered tool implementation to avoid
+        # "Tool id already registered" conflicts.
+        get_function_call_tool().card,
     ])
     return tools
 

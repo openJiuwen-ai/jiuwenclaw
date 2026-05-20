@@ -27,7 +27,41 @@ SKILLDEV_AGENT_SYSTEM_PROMPT = """
 
 当 Skill 依赖外部 API、规范或实时资料时，使用 web search/fetch 获取信息，并把稳定参考沉淀到 `references/`。
 
-## 1.6 运行环境
+## 1.6 外部工具（用户上传）
+
+当用户在 `resources/available-tools/` 上传了工具定义时，每个工具落盘为 `<pluginId>__<toolName>.json`，并自动生成 `tool_usage.json`。
+
+**开发阶段试调**（`function_call_tool`，三字段均必填；`pluginId`、`toolName`、`arguments` 均从 `tool_usage.json` 读取，勿臆造）：
+```json
+{{"pluginId": "<插件ID>", "toolName": "<工具名>", "arguments": {{}}}}
+```
+无参工具用空对象 `{{}}`；有参时按 `tool_usage.json` 中该工具的 `parameters` 填写键值。
+
+**沉淀到 Skill 包（生成/更新 skill 时必做）**
+
+凡在 `skill/SKILL.md` 的 `metadata.tools` 中声明的外部工具，须将对应插件定义复制进 Skill 目录，供打包与运行时查阅：
+
+1. 创建目录 `skill/references/tools/`（若不存在）。
+2. 对 `metadata.tools` 中每一项，从 `resources/available-tools/<pluginId>__<toolName>.json` **原样复制**到 `skill/references/tools/<pluginId>__<toolName>.json`（文件名与源文件一致，勿改名、勿改内容）。
+3. 仅复制本 Skill **实际使用**的工具，不要复制 `available-tools/` 中未列入 `metadata.tools` 的其它工具。
+4. 若源文件不存在，先核对 `tool_usage.json` 与 `metadata.tools` 是否一致，勿臆造 JSON。
+
+**写入 skill/SKILL.md 的 frontmatter**（有外部工具时必须包含，按 `tool_usage.json` 填写 pluginId/toolName）：
+```yaml
+---
+name: <kebab-case-name>
+description: <何时触发、解决什么问题；专注用户意图与边界，不必罗列 toolName（由 metadata.tools 声明）>
+allowed-tools: function_call_tool(*)
+metadata:
+  tools:
+    - pluginId: <插件ID>
+      toolName: <工具名>
+---
+```
+
+SKILL.md 正文说明如何通过 `function_call_tool` 调用，**不要**写 `python xxx.py` 脚本命令。
+
+## 1.7 运行环境
 
 当前运行平台：`{os_type}`
 
@@ -55,10 +89,13 @@ SKILLDEV_AGENT_SYSTEM_PROMPT = """
 ```text
 {workspace}/
 ├── skill/
+│   ├── SKILL.md
+│   └── references/
+│       └── tools/          ← 本 Skill 使用的外部工具定义（<pluginId>__<toolName>.json）
 ├── resources/
 │   ├── ref-files/
 │   ├── ref-skills/
-│   └── available-tools/
+│   └── available-tools/    ← 用户上传的原始工具定义（开发试调用）
 ├── evals/
 └── output/
 ```
