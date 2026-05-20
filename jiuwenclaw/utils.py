@@ -2052,6 +2052,45 @@ class JsonUserVisibleFormatter(jsonlogger.JsonFormatter if jsonlogger else loggi
                 except Exception:
                     pass  # 保持原格式
 
+        # 添加进程ID和lineno字段（始终添加）
+        # 创建有序字典以保证字段顺序：timestamp → process → level → user_tag → logger → lineno → message → 其他字段
+        ordered_record = OrderedDict()
+
+        # 按顺序添加字段
+        if 'timestamp' in log_record:
+            ordered_record['timestamp'] = log_record['timestamp']
+
+        ordered_record['process'] = record.process
+
+        if 'level' in log_record:
+            ordered_record['level'] = log_record['level']
+
+        # 处理 user_tag 字段（从record的user_tag属性添加到JSON输出）
+        # user_tag需要在logger之前
+        user_tag = getattr(record, 'user_tag', None)
+        if user_tag is not None and user_tag != '':
+            # user_tag 是 "[USER] " 或 "[USER_PROGRESS] "
+            ordered_record['user_tag'] = user_tag
+        # 当 user_tag 为空字符串时，不添加该字段（保持JSON清洁）
+
+        if 'logger' in log_record:
+            ordered_record['logger'] = log_record['logger']
+
+        # lineno字段在logger之后
+        ordered_record['lineno'] = record.lineno
+
+        if 'message' in log_record:
+            ordered_record['message'] = log_record['message']
+
+        # 添加其他字段（exc_info、component等）
+        for key, value in log_record.items():
+            if key not in ordered_record:
+                ordered_record[key] = value
+
+        # 替换原log_record为有序字典
+        log_record.clear()
+        log_record.update(ordered_record)
+
         # 添加组件分类字段
         if self.include_component:
             log_record['component'] = _log_component_from_logger_name(record.name)
@@ -2379,6 +2418,9 @@ def setup_logger(log_level: Optional[str] = None) -> logging.Logger:
     json_config = _resolve_json_config() if log_format in ('json', 'dual') else {}
 
     # 根据format选择Formatter
+    # 文本格式字符串（进程ID和行号始终显示）
+    text_fmt = "%(asctime)s.%(msecs)03d [%(process)d] %(levelname)s %(user_tag)s%(name)s:%(lineno)d: %(message)s"
+
     if log_format in ('json', 'dual'):
         # JSON 格式使用 JsonUserVisibleFormatter，动态读取配置参数
         json_formatter = JsonUserVisibleFormatter(
@@ -2389,13 +2431,13 @@ def setup_logger(log_level: Optional[str] = None) -> logging.Logger:
         )
         # 文本格式用于 dual 模式或作为 fallback
         text_formatter = logging.Formatter(
-            fmt="%(asctime)s.%(msecs)03d %(levelname)s %(user_tag)s%(name)s: %(message)s",
+            fmt=text_fmt,
             datefmt="%Y-%m-%d %H:%M:%S",
         )
     else:
         # 文本格式使用标准 Formatter + UserVisibleTagFilter
         text_formatter = logging.Formatter(
-            fmt="%(asctime)s.%(msecs)03d %(levelname)s %(user_tag)s%(name)s: %(message)s",
+            fmt=text_fmt,
             datefmt="%Y-%m-%d %H:%M:%S",
         )
         json_formatter = None
