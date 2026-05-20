@@ -81,6 +81,7 @@ class SkillDevDeepAdapter:
         self._skills_dir: str = str(BUILTIN_SKILLS_DIR)
         self._task_locks: dict[str, asyncio.Lock] = {}
         self._stale_instance_ids: set[str] = set()
+        self._task_id: str | None = None
 
     def get_instance(self):
         return self._instance
@@ -130,7 +131,7 @@ class SkillDevDeepAdapter:
         tools = build_skilldev_tools(
             sys_operation=sys_operation,
             language=react_config.get("language", "cn"),
-            agent_id=self._agent_id,
+            agent_id=f"skilldev-agent-{self._task_id or 'default'}",
         )
 
         tool_cards = self._register_tools(tools)
@@ -157,14 +158,13 @@ class SkillDevDeepAdapter:
             self._model,
             language=react_config.get("language", "cn"),
             sys_operation=sys_operation,
-            agent_id=self._agent_id,
+            agent_id=f"skilldev-agent-{self._task_id or 'default'}",
         )
-        instance_id = uuid.uuid4().hex[:8]
         self._instance = create_deep_agent(
             model=self._model,
             card=AgentCard(
                 name="skilldev-agent",
-                id=f"skilldev-agent-{instance_id}",
+                id=f"skilldev-agent-{self._task_id or 'default'}",
                 description="专用 Skill 生成 Agent",
             ),
             system_prompt=SKILLDEV_AGENT_SYSTEM_PROMPT.format(
@@ -361,6 +361,7 @@ class SkillDevDeepAdapter:
         """
         params = request.params if isinstance(request.params, dict) else {}
         task_id = self._get_or_create_task_id(request, params)
+        self._task_id = task_id
         lock = self._task_locks.setdefault(task_id, asyncio.Lock())
         async with lock:
             try:
@@ -669,18 +670,16 @@ class SkillDevDeepAdapter:
         return f"todo_{raw_id}"
 
     def _create_or_update_sys_operation(self) -> SysOperation:
-        sysop_id = f"skilldev_agent_{self._agent_id or 'default'}"
-        if Runner.resource_mgr.get_sys_operation(sysop_id) is not None:
-            try:
-                Runner.resource_mgr.remove_sys_operation(sysop_id)
-            except Exception as exc:
-                logger.warning("[SkillDevDeepAdapter] remove sys_operation failed: %s", exc)
+        sysop_id = f"skilldev_agent_{self._agent_id or 'default'}_{self._task_id or 'default'}"
+        sys_operation = Runner.resource_mgr.get_sys_operation(sysop_id)
+        if sys_operation is not None:
+            return sys_operation
 
         sysop_card = SysOperationCard(
             id=sysop_id,
             mode=OperationMode.LOCAL,
             work_config=LocalWorkConfig(
-                sandbox_root=[str(self._base_workspace_dir), str(self._skills_dir)],
+                sandbox_root=[str(self._workspace_dir), str(self._skills_dir)],
                 restrict_to_sandbox=True,
                 shell_allowlist=[
                     # basic shell
@@ -793,7 +792,7 @@ class SkillDevDeepAdapter:
                 try:
                     Runner.resource_mgr.remove_tool(card.id)
                 except Exception:
-                    logger.debug("Failed to remove existing tool %s, re-registering anyway", card.id)
+                    logger.info("Failed to remove existing tool %s, re-registering anyway", card.id)
                 Runner.resource_mgr.add_tool(tool)
             tool_cards.append(card)
         return tool_cards
