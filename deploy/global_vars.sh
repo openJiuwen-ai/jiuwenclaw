@@ -45,6 +45,9 @@ RABBITMQ_FILE="${SCRIPT_DIR}/conf/rabbitmq.yaml"
 MYSQL_TEMPLATE_FILE="${SCRIPT_DIR}/conf/mysql.template.yaml"
 MYSQL_FILE="${SCRIPT_DIR}/conf/mysql.yaml"
 
+POSTGRES_TEMPLATE_FILE="${SCRIPT_DIR}/conf/postgresql.template.yaml"
+POSTGRES_FILE="${SCRIPT_DIR}/conf/postgresql.yaml"
+
 WEB_TEMPLATE_FILE="${SCRIPT_DIR}/conf/web.template.yaml"
 WEB_FILE="${SCRIPT_DIR}/conf/web.yaml"
 
@@ -103,6 +106,10 @@ declare -A DEPLOY_VARS=(
     ["MYSQL_IMAGE"]="mysql:8.0"
     ["MYSQL_PATH"]="/exports/mysql"
     ["MYSQL_ROOT_PASSWORD"]="Root@123456"
+    ["POSTGRES_NAME"]="postgresql"
+    ["POSTGRES_IMAGE"]="postgres:16"
+    ["POSTGRES_PATH"]="/exports/postgresql"
+    ["POSTGRES_PASSWORD"]="Root@123456"
     ["CLAW_MANAGER_NAME"]="jiuwenclaw-manager"
     ["CLAW_MANAGER_NODE_PORT"]="30086"
     ["CLAW_MANAGER_REST_PORT"]="8765"

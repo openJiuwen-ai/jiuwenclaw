@@ -15,6 +15,7 @@ source "gateway_handler.sh"
 source "web_handler.sh"
 source "rabbitmq_handler.sh"
 source "mysql_handler.sh"
+source "postgresql_handler.sh"
 source "manager_handler.sh"
 
 

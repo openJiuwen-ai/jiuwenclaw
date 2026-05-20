@@ -251,7 +251,48 @@ check_mysql_up_dependency(){
     success "MySQL directory created successfully in NFS Pod!"
 }
 
+check_if_postgresql_up() {
+    local name="${DEPLOY_VARS["POSTGRES_NAME"]}"
+
+    # Check if external PostgreSQL server
+    if [ -n "${DEPLOY_VARS["POSTGRES_HOST"]:-}" ]; then
+        info "Use external PostgreSQL server"
+        DEPLOY_VARS["CLAW_MANAGER_DB_HOST"]=${DEPLOY_VARS["POSTGRES_HOST"]}
+        DEPLOY_VARS["CLAW_MANAGER_DB_PORT"]=${DEPLOY_VARS["POSTGRES_PORT"]}
+        DEPLOY_VARS["CLAW_MANAGER_DB_USER"]="postgres"
+        DEPLOY_VARS["CLAW_MANAGER_DB_PASSWORD"]=${DEPLOY_VARS["POSTGRES_PASSWORD"]}
+        return
+    fi
+
+    # No Build-In DB server
+    if ! check_k8s_resource_exists "statefulset" "${name}"; then
+        DEPLOY_VARS["CLAW_MANAGER_DB_TYPE"]="sqlite"
+        warning "DB is not deployed. Use build-in SQLite"
+        return
+    fi
+
+    info "Use built-in PostgreSQL server"
+    DEPLOY_VARS["CLAW_MANAGER_DB_HOST"]="${name}-headless.default"
+    DEPLOY_VARS["CLAW_MANAGER_DB_PORT"]="5432"
+    DEPLOY_VARS["CLAW_MANAGER_DB_USER"]="postgres"
+    DEPLOY_VARS["CLAW_MANAGER_DB_PASSWORD"]=${DEPLOY_VARS["POSTGRES_PASSWORD"]}
+}
+
+check_postgresql_up_dependency(){
+    local pg_path=${DEPLOY_VARS["POSTGRES_PATH"]}
+    local nfs_dname=${DEPLOY_VARS["NFS_NAME"]}
+
+    check_if_nfs_up
+
+    info "Preparing PostgreSQL data directory: ${pg_path}"
+    local nfs_pod=$(kubectl get pods -n default -l app=${nfs_dname} -o jsonpath='{.items[0].metadata.name}')
+
+    info "Executing: kubectl exec ${nfs_pod} -- sh -c \"mkdir -p ${pg_path}\""
+    kubectl exec ${nfs_pod} -- sh -c "mkdir -p ${pg_path}"
+    success "PostgreSQL directory created successfully in NFS Pod!"
+}
+
 check_manager_up_dependency(){
     check_if_rabbitmq_up
-    check_if_mysql_up
+    check_if_postgresql_up
 }

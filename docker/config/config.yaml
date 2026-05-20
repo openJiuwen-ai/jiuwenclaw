@@ -37,7 +37,7 @@ extensions:
     database:
       db_type: ${AGENT_CLIENT_DB_TYPE:-sqlite}
       sqlite_path: ${AGENT_CLIENT_SQLITE_PATH:-}
-      # 关系型库连接参数（mysql 等）
+      # 关系型库连接参数（mysql / postgresql 等）
       db:
         host: ${DB_HOST:-localhost}
         port: ${DB_PORT:-3306}
