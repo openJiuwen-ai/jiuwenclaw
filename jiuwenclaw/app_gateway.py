@@ -812,6 +812,7 @@ async def _run(
     from jiuwenclaw.gateway.cron import CronController, CronJobStore, CronSchedulerService
     from jiuwenclaw.gateway.heartbeat import GatewayHeartbeatService, HeartbeatConfig
     from jiuwenclaw.gateway.message_handler import MessageHandler
+    from jiuwenclaw.extensions.redis import init_gateway_redis_from_config, shutdown_gateway_redis
     from jiuwenclaw.app_web_handlers import (
         WebHandlersBindParams,
         _DummyBus,
@@ -899,6 +900,8 @@ async def _run(
         heartbeat_cfg = None
         channels_cfg = None
         sync_config_cfg = None
+
+    await init_gateway_redis_from_config(dict(full_cfg or {}))
 
     # 配置解密后存储在内存中
     env_dict = {}
@@ -1810,6 +1813,7 @@ async def _run(
             await heartbeat_service.stop()
         await message_handler.stop_forwarding()
         await extension_manager.shutdown_all_extensions()
+        await shutdown_gateway_redis()
         await client.disconnect()
         logger.info("[App] Gateway stopped")
 

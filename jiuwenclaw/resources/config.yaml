@@ -350,6 +350,18 @@ task_memory:
   retrieval_algo: ACE
   summary_algo: ACE
 
+# ========== Redis（分布式 Gateway：状态存储 / Pub/Sub / Leader；standalone 下不连接）==========
+redis:
+  host: ${REDIS_HOST:-localhost}
+  port: ${REDIS_PORT:-6379}
+  password: ${REDIS_PASSWORD:-}
+  db: ${REDIS_DB:-0}
+  key_prefix: ${REDIS_KEY_PREFIX:-jiuwenclaw:}
+  pool_size: ${REDIS_POOL_SIZE:-10}
+  connect_timeout: ${REDIS_CONNECT_TIMEOUT:-5}
+  operation_timeout: ${REDIS_OPERATION_TIMEOUT:-10}
+  health_check_interval: ${REDIS_HEALTH_CHECK_INTERVAL:-30}
+
 gateway:
   # AgentServer client mode.
   # websocket: default ws client
@@ -369,6 +381,11 @@ gateway:
   # remote：Gateway 在本地维护最多 10 条会话索引，适用于 Gateway 与 Agent 分机部署时。
   # 分机部署时请设置为 remote，否则 session.list 将读取网关本机目录（通常为空）。
   web_session_storage: local
+
+  # ========== 分布式部署（standalone：默认，行为与仅单机一致；distributed：连接 Redis）==========
+  deployment_mode: ${DEPLOYMENT_MODE:-standalone}
+  # 分布式下用于实例标识；空则启动时自动生成（见 gateway-reliability-enhancement-design §3.2）
+  instance_id: ${GATEWAY_INSTANCE_ID:-}
 
 heartbeat:
   # 心跳间隔（秒），默认 60
