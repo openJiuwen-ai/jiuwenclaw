@@ -25,8 +25,11 @@ spec:
           # command: ["/bin/sh"]
           # args: ["-c", "sleep infinity"]
           ports:
-            - name: http
-              containerPort: 19000
+            - name: websocket
+              containerPort: <<GATEWAY_WEBSOCKET_PORT>>
+              protocol: TCP
+            - name: rest
+              containerPort: <<GATEWAY_REST_PORT>>
               protocol: TCP
           envFrom: []
           volumeMounts:

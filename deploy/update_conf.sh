@@ -12,4 +12,4 @@ yq eval '.gateway.session_map_scope = "<<GATEWAY_SESSION_MAP_SCOPE>>"' -i "${DES
 yq eval '.channels.feishu = {}' -i "${DEST_FILE}"
 yq eval '.extensions.extension_dirs = "/app/jiuwenclaw/packages/jiuwenclaw-ee/gateway/extensions"' -i "${DEST_FILE}"
 yq eval '.extensions.agent_client_rest.host = "${AGENT_CLIENT_REST_HOST:-0.0.0.0}"' -i "${DEST_FILE}"
-
+yq eval '.extensions.agent_client_rest.port = "<<GATEWAY_REST_PORT>>"' -i "${DEST_FILE}"

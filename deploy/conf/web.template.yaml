@@ -34,7 +34,7 @@ spec:
             - name: JIUWENCLAW_WEB_PORT
               value: "5173"
             - name: JIUWENCLAW_WEB_PROXY_TARGET
-              value: "http://<<GATEWAY_NAME>>:19000"
+              value: "http://<<GATEWAY_NAME>>:<<GATEWAY_WEBSOCKET_PORT>>"
           securityContext:
             allowPrivilegeEscalation: false
             runAsNonRoot: true
