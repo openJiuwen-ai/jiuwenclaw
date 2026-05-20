@@ -3,8 +3,8 @@
 多模态工具配置管理模块
 
 配置优先级:
-1. models.{audio/vision/video}.model_config
-2. embed.{audio_model/video_model/vision_model} 和 embed.embed_api_key/embed_api_base
+1. models.{audio/vision/video/image_gen}.model_config
+2. embed.{audio_model/video_model/vision_model/image_gen_model} 和 embed.embed_api_key/embed_api_base
 3. 环境变量 MODEL_NAME, API_KEY, API_BASE
 """
 import os
@@ -31,7 +31,7 @@ def _get_model_config(config_base: dict[str, Any], model_type: str) -> dict[str,
 
     Args:
         config_base: 配置字典
-        model_type: 模型类型，如 'audio', 'vision', 'video'
+        model_type: 模型类型，如 'audio', 'vision', 'video', 'image_gen'
 
     Returns:
         模型配置字典
@@ -65,6 +65,7 @@ _EMBED_MODEL_KEY_MAP = {
     "audio": "audio_model",
     "vision": "vision_model",
     "video": "video_model",
+    "image_gen": "image_gen_model",
 }
 
 
@@ -78,7 +79,7 @@ def dedicated_multimodal_model_configured(
     （``apply_*_model_config_from_yaml`` 仍可能回落到 embed / 主 API 写环境变量，与是否注册工具无关。）
     与 ``get_mcp_tools`` 在无付费搜索 key 时不注册 ``mcp_paid_search`` 同理。
     """
-    if model_type not in ("audio", "vision", "video"):
+    if model_type not in ("audio", "vision", "video", "image_gen"):
         return False
     if not isinstance(config_base, dict):
         return False
@@ -93,7 +94,7 @@ def _get_embed_model_name(embed_cfg: dict[str, Any], model_type: str) -> str:
 
     Args:
         embed_cfg: embed 配置字典
-        model_type: 模型类型，如 'audio', 'vision', 'video'
+        model_type: 模型类型，如 'audio', 'vision', 'video', 'image_gen'
 
     Returns:
         模型名称字符串
@@ -250,3 +251,51 @@ def apply_video_model_config_from_yaml(config_base: dict[str, Any] | None) -> No
         os.environ["VIDEO_MODEL_NAME"] = model_name
     if provider:
         os.environ["VIDEO_PROVIDER"] = provider
+
+
+def apply_image_gen_model_config_from_yaml(config_base: dict[str, Any] | None) -> None:
+    """
+    从 config.yaml 读取图像生成模型配置并设置环境变量
+
+    配置优先级:
+    1. models.image_gen.model_config
+    2. embed.image_gen_model + embed.embed_api_key/embed_api_base
+    3. 环境变量 MODEL_NAME, API_KEY, API_BASE
+    """
+    if not isinstance(config_base, dict):
+        return
+
+    mc = _get_model_config(config_base, "image_gen")
+    embed_cfg = _get_embed_config(config_base)
+
+    api_key = str(mc.get("api_key") or "").strip()
+    api_base = str(mc.get("api_base") or "").strip()
+    model_name = str(mc.get("model_name") or mc.get("model") or "").strip()
+    provider = str(mc.get("model_provider") or mc.get("client_provider") or "").strip()
+    strict = _parse_bool(mc.get("strict"), default=False)
+
+    if not strict:
+        if not api_key:
+            api_key = str(
+                embed_cfg.get("embed_api_key") or os.getenv("API_KEY", "")
+            ).strip()
+        if not api_base:
+            api_base = str(
+                embed_cfg.get("embed_api_base") or os.getenv("API_BASE", "")
+            ).strip()
+        if not model_name:
+            model_name = (
+                _get_embed_model_name(embed_cfg, "image_gen")
+                or os.getenv("MODEL_NAME", "").strip()
+            )
+        if not provider:
+            provider = os.getenv("MODEL_PROVIDER", "").strip()
+
+    if api_key:
+        os.environ["IMAGE_GEN_API_KEY"] = api_key
+    if api_base:
+        os.environ["IMAGE_GEN_API_BASE"] = api_base
+    if model_name:
+        os.environ["IMAGE_GEN_MODEL_NAME"] = model_name
+    if provider:
+        os.environ["IMAGE_GEN_PROVIDER"] = provider

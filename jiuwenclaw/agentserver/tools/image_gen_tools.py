@@ -1,0 +1,315 @@
+# coding: utf-8
+# Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
+
+from __future__ import annotations
+
+import base64
+import logging
+import os
+import re
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any
+import requests
+from openjiuwen.core.foundation.llm import Model, UserMessage
+from openjiuwen.core.foundation.llm.schema.config import ModelClientConfig, ModelRequestConfig
+from openjiuwen.core.foundation.tool import tool
+
+from jiuwenclaw.agentserver.tools.multimodal_config import apply_image_gen_model_config_from_yaml
+from jiuwenclaw.agentserver.tools.ssl_config import get_requests_verify
+from jiuwenclaw.config import get_config
+from jiuwenclaw.utils import get_agent_workspace_dir, get_config_file
+
+
+logger = logging.getLogger(__name__)
+
+_DEFAULT_SIZE = "1920*1080"
+_OUTPUT_SUBDIR = "generated_images"
+
+
+def _get_image_gen_credentials() -> tuple[str, str, str, str]:
+    api_key = os.environ.get("IMAGE_GEN_API_KEY", "").strip()
+    api_base = os.environ.get("IMAGE_GEN_API_BASE", "").strip()
+    model_name = os.environ.get("IMAGE_GEN_MODEL_NAME", "").strip()
+    provider = os.environ.get("IMAGE_GEN_PROVIDER", "").strip() or "DashScope"
+    return api_key, api_base, model_name, provider
+
+
+def _make_missing_key_error() -> str:
+    return (
+        "[ERROR]: IMAGE_GEN_API_KEY is not configured for text-to-image. "
+        f"Set models.image_gen.model_client_config.api_key in {get_config_file()} "
+        "or configure image_gen_api_key via Web/CLI config."
+    )
+
+
+def _make_incomplete_config_error() -> str:
+    return (
+        "[ERROR]: IMAGE_GEN_API_BASE and IMAGE_GEN_MODEL_NAME are required when "
+        "IMAGE_GEN_API_KEY is set for text-to-image."
+    )
+
+
+def _sanitize_filename_part(value: str, max_len: int = 48) -> str:
+    cleaned = re.sub(r"[^\w\-]+", "_", value.strip(), flags=re.UNICODE)
+    cleaned = cleaned.strip("_")
+    if not cleaned:
+        return "image"
+    return cleaned[:max_len]
+
+
+def _output_dir() -> Path:
+    out = get_agent_workspace_dir() / _OUTPUT_SUBDIR
+    out.mkdir(parents=True, exist_ok=True)
+    return out
+
+
+def _download_image(url: str, dest: Path, timeout: int = 120) -> None:
+    response = requests.get(url, timeout=timeout, verify=get_requests_verify())
+    response.raise_for_status()
+    dest.write_bytes(response.content)
+
+
+def _write_base64_image(data: str, dest: Path) -> None:
+    payload = data.strip()
+    if payload.startswith("data:") and "," in payload:
+        payload = payload.split(",", 1)[1]
+    dest.write_bytes(base64.b64decode(payload))
+
+
+def _append_url_or_b64(items: list[dict[str, Any]], url: Any, b64: Any = None) -> None:
+    url_s = str(url or "").strip()
+    b64_s = str(b64 or "").strip()
+    if url_s or b64_s:
+        items.append({"url": url_s, "b64_json": b64_s})
+
+
+def _extend_from_image_list(items: list[dict[str, Any]], block: Any) -> None:
+    if not isinstance(block, list):
+        return
+    for entry in block:
+        if isinstance(entry, str):
+            text = entry.strip()
+            if text.startswith("data:") and "," in text:
+                _append_url_or_b64(items, None, text.split(",", 1)[1])
+            elif text.startswith("http://") or text.startswith("https://"):
+                _append_url_or_b64(items, text)
+            elif text:
+                _append_url_or_b64(items, None, text)
+        elif isinstance(entry, dict):
+            url = entry.get("url") or entry.get("image")
+            b64 = entry.get("b64_json") or entry.get("b64") or entry.get("image_base64")
+            _append_url_or_b64(items, url, b64)
+        else:
+            url = getattr(entry, "url", None) or getattr(entry, "image", None)
+            b64 = (
+                getattr(entry, "b64_json", None)
+                or getattr(entry, "b64", None)
+                or getattr(entry, "image_base64", None)
+            )
+            _append_url_or_b64(items, url, b64)
+
+
+def _try_model_dump(response: Any) -> dict[str, Any] | None:
+    """Best-effort pydantic model_dump; returns None when unavailable or failing."""
+    dump_fn = getattr(response, "model_dump", None)
+    if not callable(dump_fn):
+        return None
+    try:
+        dumped = dump_fn()
+    except (TypeError, ValueError, AttributeError) as exc:
+        logger.debug("[text_to_image] model_dump failed: %s", exc)
+        return None
+    return dumped if isinstance(dumped, dict) else None
+
+
+def _extend_from_nested_output(items: list[dict[str, Any]], node: Any) -> None:
+    if node is None:
+        return
+    if isinstance(node, list):
+        _extend_from_image_list(items, node)
+        return
+    if isinstance(node, dict):
+        if node.get("url") or node.get("b64_json") or node.get("image"):
+            items.append(
+                {
+                    "url": str(node.get("url") or node.get("image") or "").strip(),
+                    "b64_json": str(
+                        node.get("b64_json") or node.get("b64") or node.get("image_base64") or ""
+                    ).strip(),
+                }
+            )
+        for key in ("results", "data", "images", "choices"):
+            _extend_from_nested_output(items, node.get(key))
+        output = node.get("output")
+        if isinstance(output, dict):
+            _extend_from_nested_output(items, output.get("results"))
+            for choice in output.get("choices") or []:
+                if not isinstance(choice, dict):
+                    continue
+                message = choice.get("message") or {}
+                if isinstance(message, dict):
+                    _extend_from_nested_output(items, message.get("content"))
+        return
+    message = getattr(node, "output", None)
+    if message is not None and message is not node:
+        _extend_from_nested_output(items, message)
+
+
+def _iter_response_image_items(response: Any) -> list[dict[str, Any]]:
+    """Normalize openjiuwen ImageGenerationResponse and vendor payloads to url/b64 items."""
+    items: list[dict[str, Any]] = []
+
+    # openjiuwen ImageGenerationResponse: images / images_base64 are List[str]
+    _extend_from_image_list(items, getattr(response, "images", None))
+    _extend_from_image_list(items, getattr(response, "images_base64", None))
+
+    data = getattr(response, "data", None)
+    if isinstance(data, list):
+        _extend_from_image_list(items, data)
+
+    if not items:
+        _extend_from_nested_output(items, response)
+
+    if not items:
+        dumped = _try_model_dump(response)
+        if dumped:
+            _extend_from_image_list(items, dumped.get("images"))
+            _extend_from_image_list(items, dumped.get("images_base64"))
+            _extend_from_image_list(items, dumped.get("data"))
+            _extend_from_nested_output(items, dumped)
+
+    return items
+
+
+def _describe_response_for_error(response: Any) -> str:
+    dumped = _try_model_dump(response)
+    if dumped is not None:
+        return str(dumped)[:500]
+    return repr(response)[:500]
+
+
+def _save_generated_images(response: Any, *, prompt: str) -> list[Path]:
+    items = _iter_response_image_items(response)
+    if not items:
+        raise ValueError(
+            "Image generation API returned no image data. "
+            f"Response preview: {_describe_response_for_error(response)}"
+        )
+
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+    slug = _sanitize_filename_part(prompt)
+    saved: list[Path] = []
+    out_dir = _output_dir()
+
+    for idx, item in enumerate(items, start=1):
+        url = str(item.get("url") or "").strip()
+        b64 = str(item.get("b64_json") or item.get("b64") or "").strip()
+        suffix = f"{stamp}_{slug}_{idx}"
+        dest = out_dir / f"{suffix}.png"
+
+        if url:
+            _download_image(url, dest)
+            if dest.stat().st_size == 0:
+                raise ValueError(f"Downloaded empty image from URL: {url}")
+            saved.append(dest.resolve())
+            continue
+        if b64:
+            _write_base64_image(b64, dest)
+            saved.append(dest.resolve())
+            continue
+
+    if not saved:
+        raise ValueError("Image generation response did not contain url or base64 payloads.")
+    return saved
+
+
+def _build_image_gen_model(api_key: str, api_base: str, model_name: str, provider: str) -> Model:
+    model_client_config = ModelClientConfig(
+        client_provider=provider,
+        api_key=api_key,
+        api_base=api_base,
+        verify_ssl=False,
+        timeout=1800.0,
+    )
+    model_request_config = ModelRequestConfig(model=model_name)
+    return Model(
+        model_client_config=model_client_config,
+        model_config=model_request_config,
+    )
+
+
+async def _text_to_image_impl(inputs: dict[str, Any]) -> str:
+    apply_image_gen_model_config_from_yaml(get_config())
+    api_key, api_base, model_name, provider = _get_image_gen_credentials()
+    if not api_key:
+        return _make_missing_key_error()
+    if not api_base or not model_name:
+        return _make_incomplete_config_error()
+
+    prompt = str(inputs.get("prompt", "") or "").strip()
+    if not prompt:
+        return "[ERROR]: prompt cannot be empty."
+
+    size = str(inputs.get("size", _DEFAULT_SIZE) or _DEFAULT_SIZE).strip()
+    negative_prompt = inputs.get("negative_prompt")
+    n_raw = inputs.get("n", 1)
+    try:
+        n = max(1, min(int(n_raw), 4))
+    except (TypeError, ValueError):
+        n = 1
+
+    gen_kwargs: dict[str, Any] = {
+        "size": size,
+        "n": n,
+        "prompt_extend": bool(inputs.get("prompt_extend", True)),
+        "watermark": bool(inputs.get("watermark", False)),
+    }
+    if negative_prompt is not None and str(negative_prompt).strip():
+        gen_kwargs["negative_prompt"] = str(negative_prompt).strip()
+    if "seed" in inputs:
+        try:
+            gen_kwargs["seed"] = int(inputs["seed"])
+        except (TypeError, ValueError):
+            pass
+
+    model = _build_image_gen_model(api_key, api_base, model_name, provider)
+    logger.info(
+        "[text_to_image] model=%s provider=%s api_base=%s size=%s n=%s",
+        model_name,
+        provider,
+        api_base,
+        size,
+        n,
+    )
+    response = await model.generate_image(
+        messages=[UserMessage(content=prompt)],
+        model=model_name,
+        **gen_kwargs,
+    )
+    paths = _save_generated_images(response, prompt=prompt)
+    lines = [
+        f"Generated {len(paths)} image(s) from prompt.",
+        "Local file paths (use for attachments or send_file):",
+    ]
+    lines.extend(f"- {path}" for path in paths)
+    return "\n".join(lines)
+
+
+@tool(
+    name="text_to_image",
+    description=(
+        "Generate images from a text prompt (text-to-image). "
+        "Use when the user asks to create, draw, or generate pictures from description. "
+        "Input: prompt (required text description); optional size (e.g. 1920*1080), "
+        "negative_prompt, n (image count). "
+        "Output: local file path(s) under the agent workspace generated_images directory."
+    ),
+)
+async def text_to_image(inputs: dict[str, Any], **kwargs) -> str:
+    _ = kwargs
+    try:
+        return await _text_to_image_impl(inputs or {})
+    except Exception as exc:
+        logger.warning("[text_to_image] failed: %s", exc, exc_info=True)
+        return f"[ERROR]: text-to-image failed: {exc}"

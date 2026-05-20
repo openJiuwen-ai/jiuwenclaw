@@ -126,10 +126,12 @@ from jiuwenclaw.agentserver.cron_config import should_register_cron_tools
 from jiuwenclaw.agentserver.skill_manager import SkillManager, enabled_skills_from_environ
 from jiuwenclaw.agentserver.tools.multimodal_config import (
     apply_audio_model_config_from_yaml,
+    apply_image_gen_model_config_from_yaml,
     apply_video_model_config_from_yaml,
     apply_vision_model_config_from_yaml,
     dedicated_multimodal_model_configured,
 )
+from jiuwenclaw.agentserver.tools.image_gen_tools import text_to_image
 from jiuwenclaw.agentserver.tools.video_tools import video_understanding
 from jiuwenclaw.agentserver.tools.harness_named_web_tools import build_jiuwen_harness_named_web_tools
 
@@ -656,6 +658,7 @@ class JiuWenClawDeepAdapter:
         self._vision_tools_registered: bool = False
         self._audio_tools_registered: bool = False
         self._video_tool_registered: bool = False
+        self._image_gen_tool_registered: bool = False
         self._model: Model | None = None
         self._model_client_config: ModelClientConfig | None = None
         self._model_request_config: ModelRequestConfig | None = None
@@ -687,6 +690,7 @@ class JiuWenClawDeepAdapter:
         self._vision_model_config: VisionModelConfig | None = None
         self._audio_model_config: AudioModelConfig | None = None
         self._video_model_config: bool = False
+        self._image_gen_enabled: bool = False
         self._vision_tools: list[Any] = []
         self._audio_tools: list[Any] = []
         self._instance_overrides: dict[str, Any] = {}
@@ -1020,6 +1024,26 @@ class JiuWenClawDeepAdapter:
             return False
         return True
 
+    @staticmethod
+    def _build_image_gen_enabled(config_base: dict[str, Any]) -> bool:
+        """Whether text_to_image should be registered for this runtime."""
+        apply_image_gen_model_config_from_yaml(config_base)
+        if not dedicated_multimodal_model_configured(config_base, "image_gen"):
+            logger.info(
+                "[JiuWenClawDeepAdapter] skip text_to_image: models.image_gen has no "
+                "dedicated api_key in config.yaml"
+            )
+            return False
+        api_key = str(os.getenv("IMAGE_GEN_API_KEY", "")).strip()
+        api_base = str(os.getenv("IMAGE_GEN_API_BASE", "")).strip()
+        model_name = str(os.getenv("IMAGE_GEN_MODEL_NAME", "")).strip()
+        if not api_key or not api_base or not model_name:
+            logger.info(
+                "[JiuWenClawDeepAdapter] text_to_image skipped: incomplete config"
+            )
+            return False
+        return True
+
     def _iter_runtime_audio_tools(self, agent_id: str | None) -> list[Any]:
         """可注册的音频工具：须先在 config 中为 ``models.audio`` 配置独立 ``api_key``。
 
@@ -1061,6 +1085,7 @@ class JiuWenClawDeepAdapter:
         self._vision_model_config = self._build_vision_model_config(config_base)
         self._audio_model_config = self._build_audio_model_config(config_base)
         self._video_model_config = self._build_video_model_config(config_base)
+        self._image_gen_enabled = self._build_image_gen_enabled(config_base)
 
         for tool in self._vision_tools:
             tool.vision_model_config = self._vision_model_config
@@ -1179,6 +1204,14 @@ class JiuWenClawDeepAdapter:
             enabled=bool(self._video_model_config),
             create_fn=lambda: [video_understanding],
             warn_label="video tool",
+        )
+
+        _, self._image_gen_tool_registered = self._sync_tool_group(
+            current_tools=[text_to_image],
+            registered=self._image_gen_tool_registered,
+            enabled=bool(self._image_gen_enabled),
+            create_fn=lambda: [text_to_image],
+            warn_label="text_to_image tool",
         )
 
     def _sync_paid_search_tool_for_runtime(self) -> None:
@@ -2105,6 +2138,18 @@ class JiuWenClawDeepAdapter:
             except Exception as exc:
                 logger.warning(
                     "[JiuWenClawDeepAdapter] video tool registration failed: %s",
+                    exc,
+                )
+
+        self._image_gen_tool_registered = False
+        if self._image_gen_enabled:
+            try:
+                Runner.resource_mgr.add_tool(text_to_image)
+                tool_cards.append(text_to_image.card)
+                self._image_gen_tool_registered = True
+            except Exception as exc:
+                logger.warning(
+                    "[JiuWenClawDeepAdapter] text_to_image registration failed: %s",
                     exc,
                 )
 

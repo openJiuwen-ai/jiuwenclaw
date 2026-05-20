@@ -429,6 +429,7 @@
       "modelVideo": { "label": "视频模型", "hint": "视频理解（可选）" },
       "modelAudio": { "label": "音频模型", "hint": "语音识别（可选）" },
       "modelVision": { "label": "视觉模型", "hint": "图像理解（可选）" },
+      "modelImageGen": { "label": "图像生成模型", "hint": "文生图（可选）" },
       "model": { "label": "模型配置", "hint": "模型服务与鉴权参数" },
       "embed": { "label": "Embed配置", "hint": "Embed 服务与鉴权参数" },
       "thirdParty": { "label": "第三方服务配置", "hint": "API Key 配置" },

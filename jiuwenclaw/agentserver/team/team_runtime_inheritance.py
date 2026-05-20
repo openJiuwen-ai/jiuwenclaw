@@ -57,6 +57,7 @@ TOOL_WHITELIST = frozenset({
     "audio_question_answering",
     "audio_metadata",
     "video_understanding",
+    "text_to_image",
     "search_skill",
     "install_skill",
     "uninstall_skill",

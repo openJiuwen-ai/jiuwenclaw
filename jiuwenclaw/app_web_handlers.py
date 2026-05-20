@@ -188,7 +188,7 @@ _FORWARD_NO_LOCAL_HANDLER_METHODS = frozenset({
 })
 
 # 配置信息：config.get 返回、config.set 可修改的键（前端 param 名 -> 环境变量名）
-# default 模型 + video/audio/vision 多模型
+# default 模型 + video/audio/vision/image_gen 多模型
 _CONFIG_SET_ENV_MAP = {
     # default 模型（主对话）
     "model_provider": "MODEL_PROVIDER",
@@ -210,6 +210,11 @@ _CONFIG_SET_ENV_MAP = {
     "vision_api_key": "VISION_API_KEY",
     "vision_model": "VISION_MODEL_NAME",
     "vision_provider": "VISION_PROVIDER",
+    # image_gen 模型
+    "image_gen_api_base": "IMAGE_GEN_API_BASE",
+    "image_gen_api_key": "IMAGE_GEN_API_KEY",
+    "image_gen_model": "IMAGE_GEN_MODEL_NAME",
+    "image_gen_provider": "IMAGE_GEN_PROVIDER",
     # 其他
     "email_address": "EMAIL_ADDRESS",
     "email_token": "EMAIL_TOKEN",

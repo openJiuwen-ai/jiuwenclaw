@@ -901,10 +901,11 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
       }),
       webClient.on('chat.processing_status', (event: WsEvent) => {
         if (!shouldHandleSessionEvent(event.payload)) return;
-        if (!shouldHandleCurrentRequestEvent(event)) return;
+        const isProcessingNow = Boolean(event.payload.is_processing);
+        // 结束态按 session 生效：权限确认会换 perm-* request_id，旧 chat-* 的 false 不能丢弃。
+        if (isProcessingNow && !shouldHandleCurrentRequestEvent(event)) return;
         if (shouldDropDuplicatedEvent('chat.processing_status', event.payload)) return;
         const procRid = typeof event.request_id === 'string' ? event.request_id.trim() : '';
-        const isProcessingNow = Boolean(event.payload.is_processing);
         if (
           isProcessingNow &&
           procRid &&

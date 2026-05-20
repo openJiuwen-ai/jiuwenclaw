@@ -36,6 +36,7 @@ const MODEL_DEFAULT_KEYS = new Set(["api_base", "api_key", "model", "model_provi
 const MODEL_VIDEO_KEYS = new Set(["video_api_base", "video_api_key", "video_model", "video_provider"]);
 const MODEL_AUDIO_KEYS = new Set(["audio_api_base", "audio_api_key", "audio_model", "audio_provider"]);
 const MODEL_VISION_KEYS = new Set(["vision_api_base", "vision_api_key", "vision_model", "vision_provider"]);
+const MODEL_IMAGE_GEN_KEYS = new Set(["image_gen_api_base", "image_gen_api_key", "image_gen_model", "image_gen_provider"]);
 const EMBED_KEYS = new Set(["embed_api_base", "embed_api_key", "embed_model"]);
 const EMAIL_KEYS = new Set(["email_address", "email_token"]);
 const THIRD_PARTY_API_KEYS = new Set([
@@ -67,6 +68,7 @@ function classifyKey(key: string): string {
   if (MODEL_VIDEO_KEYS.has(key)) return "model_video";
   if (MODEL_AUDIO_KEYS.has(key)) return "model_audio";
   if (MODEL_VISION_KEYS.has(key)) return "model_vision";
+  if (MODEL_IMAGE_GEN_KEYS.has(key)) return "model_image_gen";
   if (EMBED_KEYS.has(key)) return "embed";
   if (THIRD_PARTY_API_KEYS.has(key)) return "third_party_api";
   if (EMAIL_KEYS.has(key)) return "email";
@@ -80,7 +82,7 @@ function classifyKey(key: string): string {
   return "other";
 }
 
-const MODEL_GROUP_TAGS = new Set(["model_default", "model_video", "model_audio", "model_vision"]);
+const MODEL_GROUP_TAGS = new Set(["model_default", "model_video", "model_audio", "model_vision", "model_image_gen"]);
 
 function getGroupIcon(tag: string) {
   if (MODEL_GROUP_TAGS.has(tag)) {
@@ -165,6 +167,7 @@ function getGroupToneClass(tag: string): string {
   if (tag === "model_video") return "text-violet-500 bg-violet-500/10 border-violet-500/20";
   if (tag === "model_audio") return "text-orange-500 bg-orange-500/10 border-orange-500/20";
   if (tag === "model_vision") return "text-teal-500 bg-teal-500/10 border-teal-500/20";
+  if (tag === "model_image_gen") return "text-rose-500 bg-rose-500/10 border-rose-500/20";
   if (tag === "embed") return "text-cyan-500 bg-cyan-500/10 border-cyan-500/20";
   if (tag === "third_party_api") return "text-indigo-500 bg-indigo-500/10 border-indigo-500/20";
   if (tag === "free_search") return "text-lime-500 bg-lime-500/10 border-lime-500/20";
@@ -183,6 +186,7 @@ function getNestedModelStyle(tag: string): string {
   if (tag === "model_video") return "border-l-2 border-l-violet-500/60 bg-violet-500/[0.06]";
   if (tag === "model_audio") return "border-l-2 border-l-orange-500/60 bg-orange-500/[0.06]";
   if (tag === "model_vision") return "border-l-2 border-l-teal-500/60 bg-teal-500/[0.06]";
+  if (tag === "model_image_gen") return "border-l-2 border-l-rose-500/60 bg-rose-500/[0.06]";
   if (tag === "context_engine") return "border-l-2 border-l-sky-500/60 bg-sky-500/[0.06]";
   if (tag === "permissions") return "border-l-2 border-l-rose-500/60 bg-rose-500/[0.06]";
   return "border-l-2 border-l-border bg-secondary/20";
@@ -245,16 +249,17 @@ function getGroupMeta(t: (key: string) => string): Record<string, { label: strin
     model_video: { label: t('config.groups.modelVideo.label'), order: 1, hint: t('config.groups.modelVideo.hint') },
     model_audio: { label: t('config.groups.modelAudio.label'), order: 2, hint: t('config.groups.modelAudio.hint') },
     model_vision: { label: t('config.groups.modelVision.label'), order: 3, hint: t('config.groups.modelVision.hint') },
-    embed: { label: t('config.groups.embed.label'), order: 4, hint: t('config.groups.embed.hint') },
-    third_party_api: { label: t('config.groups.thirdParty.label'), order: 5, hint: t('config.groups.thirdParty.hint') },
-    free_search: { label: t('config.groups.freeSearch.label'), order: 6, hint: t('config.groups.freeSearch.hint') },
-    evolution: { label: t('config.groups.evolution.label'), order: 7, hint: t('config.groups.evolution.hint') },
-    deepsearch: { label: t('config.groups.deepResearch.label'), order: 8, hint: t('config.groups.deepResearch.hint') },
-    context_engine: { label: t('config.groups.contextEngine.label'), order: 9, hint: t('config.groups.contextEngine.hint') },
-    permissions: { label: t('config.groups.permissions.label'), order: 10, hint: t('config.groups.permissions.hint') },
-    memory: { label: t('config.groups.memory.label'), order: 11, hint: t('config.groups.memory.hint') },
-    email: { label: t('config.groups.email.label'), order: 12, hint: t('config.groups.email.hint') },
-    other: { label: t('config.groups.other.label'), order: 13, hint: t('config.groups.other.hint') },
+    model_image_gen: { label: t('config.groups.modelImageGen.label'), order: 4, hint: t('config.groups.modelImageGen.hint') },
+    embed: { label: t('config.groups.embed.label'), order: 5, hint: t('config.groups.embed.hint') },
+    third_party_api: { label: t('config.groups.thirdParty.label'), order: 6, hint: t('config.groups.thirdParty.hint') },
+    free_search: { label: t('config.groups.freeSearch.label'), order: 7, hint: t('config.groups.freeSearch.hint') },
+    evolution: { label: t('config.groups.evolution.label'), order: 8, hint: t('config.groups.evolution.hint') },
+    deepsearch: { label: t('config.groups.deepResearch.label'), order: 9, hint: t('config.groups.deepResearch.hint') },
+    context_engine: { label: t('config.groups.contextEngine.label'), order: 10, hint: t('config.groups.contextEngine.hint') },
+    permissions: { label: t('config.groups.permissions.label'), order: 11, hint: t('config.groups.permissions.hint') },
+    memory: { label: t('config.groups.memory.label'), order: 12, hint: t('config.groups.memory.hint') },
+    email: { label: t('config.groups.email.label'), order: 13, hint: t('config.groups.email.hint') },
+    other: { label: t('config.groups.other.label'), order: 14, hint: t('config.groups.other.hint') },
   };
 }
 
@@ -313,7 +318,7 @@ const KEY_SORT_PRIORITY: Record<string, number> = {
 
 function getKeyDisplayLabel(key: string, t: (key: string) => string): string {
   if (KEY_DISPLAY_I18N[key]) return t(KEY_DISPLAY_I18N[key]);
-  const m = key.match(/^(video|audio|vision)_(.+)$/);
+  const m = key.match(/^(video|audio|vision|image_gen)_(.+)$/);
   if (m) return m[2];
   return getBooleanKeyLabel(key, t) ?? key;
 }
@@ -438,7 +443,7 @@ function GroupSection({
                         >
                           <option value="" disabled>{t('config.selectModelProvider')}</option>
                           <option value="OpenAI">OpenAI</option>
-                          {!key.includes('video_') && !key.includes('audio_') && !key.includes('vision_') && (
+                          {!key.includes('video_') && !key.includes('audio_') && !key.includes('vision_') && !key.includes('image_gen_') && (
                             <>
                               <option value="DashScope">DashScope</option>
                               <option value="SiliconFlow">SiliconFlow</option>

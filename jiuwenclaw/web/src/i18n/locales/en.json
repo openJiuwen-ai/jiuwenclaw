@@ -444,6 +444,7 @@
       "modelVideo": { "label": "Video Model", "hint": "Video understanding/generation model (optional)" },
       "modelAudio": { "label": "Audio Model", "hint": "Speech recognition/synthesis model (optional)" },
       "modelVision": { "label": "Vision Model", "hint": "Image understanding model (optional)" },
+      "modelImageGen": { "label": "Image Generation Model", "hint": "Text-to-image (optional)" },
       "model": { "label": "Model Configuration", "hint": "Model service and authentication settings" },
       "embed": { "label": "Embed Configuration", "hint": "Embed service and authentication settings" },
       "thirdParty": { "label": "Third-Party Services", "hint": "API key settings" },

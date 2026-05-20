@@ -1005,6 +1005,10 @@ async def _run(
             "VISION_MODEL_NAME",
             "VISION_API_BASE",
             "VISION_API_KEY",
+            "IMAGE_GEN_PROVIDER",
+            "IMAGE_GEN_MODEL_NAME",
+            "IMAGE_GEN_API_BASE",
+            "IMAGE_GEN_API_KEY",
         }
         try:
             client.set_or_update_server_config(

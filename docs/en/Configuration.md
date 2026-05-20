@@ -26,6 +26,10 @@ These can be changed in the web app; values are written back to `.env` or config
 | `video_model` | `VIDEO_MODEL_NAME` | Video processing model |
 | `audio_model` | `AUDIO_MODEL_NAME` | Audio processing model |
 | `vision_model` | `VISION_MODEL_NAME` | Vision model |
+| `image_gen_model` | `IMAGE_GEN_MODEL_NAME` | Text-to-image model |
+| `image_gen_api_base` | `IMAGE_GEN_API_BASE` | Text-to-image API base URL |
+| `image_gen_api_key` | `IMAGE_GEN_API_KEY` | Text-to-image API key |
+| `image_gen_provider` | `IMAGE_GEN_PROVIDER` | Text-to-image provider |
 | `jina_api_key` | `JINA_API_KEY` | Jina search API key |
 | `serper_api_key` | `SERPER_API_KEY` | Serper search API key |
 | `perplexity_api_key` | `PERPLEXITY_API_KEY` | Perplexity API key |

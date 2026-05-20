@@ -15,7 +15,7 @@ export interface ModelListPayload {
 }
 
 /** Reserved keys under config.yaml `models` for multimodal profiles; configure via /config, not via /model switch */
-const RESERVED_MULTIMODAL_MODEL_KEYS = new Set(["video", "audio", "vision"]);
+const RESERVED_MULTIMODAL_MODEL_KEYS = new Set(["video", "audio", "vision", "image_gen"]);
 
 export function isReservedMultimodalModelKey(name: string): boolean {
   return RESERVED_MULTIMODAL_MODEL_KEYS.has(name.trim().toLowerCase());
@@ -97,7 +97,7 @@ export function createModelCommand(): SlashCommand {
             ctx.addItem(
               addInfo(
                 ctx.sessionId,
-                "video, audio, and vision are not offered as the default chat model here (multimodal-only). To configure them, use /config edit → Vision / Audio / Video, or /config set on keys such as vision_model, audio_model, video_model.",
+                "video, audio, vision, and image_gen are not offered as the default chat model here (multimodal-only). To configure them, use /config edit → Vision / Audio / Video / ImageGen, or /config set on keys such as vision_model, audio_model, video_model, image_gen_model.",
                 "m",
               ),
             );
@@ -127,7 +127,7 @@ export function createModelCommand(): SlashCommand {
           ctx.addItem(
             addError(
               ctx.sessionId,
-              "Cannot use /model to select video, audio, or vision as the default chat model. Configure multimodal APIs in /config edit (Vision / Audio / Video) or /config set (e.g. vision_model, audio_model, video_model).",
+              "Cannot use /model to select video, audio, vision, or image_gen as the default chat model. Configure multimodal APIs in /config edit (Vision / Audio / Video / ImageGen) or /config set (e.g. vision_model, audio_model, video_model, image_gen_model).",
             ),
           );
           return;

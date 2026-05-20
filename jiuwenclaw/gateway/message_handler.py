@@ -387,6 +387,43 @@ class MessageHandler(ABC):
             )
             await self.publish_robot_messages(status_msg)
 
+    def _session_has_stream_tasks(self, session_id: str | None) -> bool:
+        """Whether the session still has in-flight gateway stream tasks."""
+        if not self._stream_tasks:
+            return False
+        if session_id is None:
+            return True
+        return any(
+            self._stream_sessions.get(rid) == session_id for rid in self._stream_tasks
+        )
+
+    async def _cancel_stream_tasks_for_session(
+        self,
+        session_id: str | None,
+        *,
+        reason: str = "",
+    ) -> list[str]:
+        """Cancel in-flight stream tasks bound to one session."""
+        tasks_to_cancel: list[asyncio.Task] = []
+        rids_cancelled: list[str] = []
+        for rid, task in list(self._stream_tasks.items()):
+            if self._stream_sessions.get(rid) != session_id:
+                continue
+            if task.done():
+                continue
+            logger.info(
+                "[MessageHandler] %s取消流式任务: request_id=%s session_id=%s",
+                reason,
+                rid,
+                session_id,
+            )
+            task.cancel()
+            tasks_to_cancel.append(task)
+            rids_cancelled.append(rid)
+        if tasks_to_cancel:
+            await asyncio.gather(*tasks_to_cancel, return_exceptions=True)
+        return rids_cancelled
+
     async def _cancel_agent_work_for_session(self, msg: "Message", old_sid: str | None) -> None:
         """取消指定 session 的网关流式任务，并向 AgentServer 发送 CHAT_CANCEL（与 Web chat.interrupt intent=cancel 对齐）。
 
@@ -2316,6 +2353,14 @@ class MessageHandler(ABC):
                 stream_rid = env.request_id or msg.id
                 try:
                     if env.is_stream:
+                        params = msg.params if isinstance(msg.params, dict) else {}
+                        if params.get("answers"):
+                            # 权限确认 / 自进化作答会再起一条流（如 perm-*），先结束同 session 旧流，
+                            # 避免旧 chat-* 流收尾时无法下发 is_processing=false。
+                            await self._cancel_stream_tasks_for_session(
+                                msg.session_id,
+                                reason="interactive resume: ",
+                            )
                         # 流式处理：启动后台任务，支持多任务并发
                         # 通知前端新任务开始处理
                         await self._send_processing_status(
@@ -2464,15 +2509,21 @@ class MessageHandler(ABC):
                 "[MessageHandler] Stream 任务状态已清理: request_id=%s",
                 rid,
             )
-            # 所有流式任务正常结束后，通知前端全部处理完成
-            # 只有当 AgentServer 没有发送过 processing_status=false 时才发送
-            if not cancelled and not self._stream_tasks and not has_processing_status_false:
+            # 当前 session 的全部流式任务正常结束后，通知前端处理完成。
+            # 按 session 判断（非全局 _stream_tasks），避免 perm-* 收尾时仍有未清理的 chat-* 任务占位。
+            # 仅当 AgentServer 未在本流中发送过 processing_status=false 时才补发。
+            if (
+                not cancelled
+                and not self._session_has_stream_tasks(session_id)
+                and not has_processing_status_false
+            ):
                 await self._send_processing_status(
                     rid, session_id, channel_id, is_processing=False,
                 )
                 logger.info(
-                    "[MessageHandler] 所有流式任务已完成，已发送 is_processing=false: session_id=%s",
+                    "[MessageHandler] 所有流式任务已完成，已发送 is_processing=false: session_id=%s request_id=%s",
                     session_id,
+                    rid,
                 )
 
     async def _handle_file_transfer_event(

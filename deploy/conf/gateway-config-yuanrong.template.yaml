@@ -63,6 +63,16 @@ models:
         timeout: 1800
       model_config_obj:
         temperature: 0.6
+  image_gen:
+      model_client_config:
+        api_base: ${IMAGE_GEN_API_BASE}
+        api_key: ${IMAGE_GEN_API_KEY}
+        model_name: ${IMAGE_GEN_MODEL_NAME:-}
+        client_provider: ${IMAGE_GEN_PROVIDER}
+        timeout: 1800
+        verify_ssl: false
+      model_config_obj:
+        temperature: 0.6
 
 telemetry:
   enabled: false                    # 总开关（环境变量 OTEL_ENABLED 优先）

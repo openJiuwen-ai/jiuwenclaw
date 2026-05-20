@@ -879,7 +879,7 @@ export class AppScreen implements Component, Focusable {
         this.state.addItem(
           addInfo(
             snapshot.sessionId,
-            "video, audio, and vision are not offered as the default chat model here (multimodal-only). To configure them, use /config edit → Vision / Audio / Video, or /config set on keys such as vision_model, audio_model, video_model.",
+            "video, audio, vision, and image_gen are not offered as the default chat model here (multimodal-only). To configure them, use /config edit → Vision / Audio / Video / ImageGen, or /config set on keys such as vision_model, audio_model, video_model, image_gen_model.",
             "m",
           ),
         );
@@ -926,7 +926,7 @@ export class AppScreen implements Component, Focusable {
       this.state.addItem(
         addError(
           this.state.getSnapshot().sessionId,
-          "Cannot select video, audio, or vision as the default chat model. Configure multimodal APIs in /config edit (Vision / Audio / Video) or /config set (e.g. vision_model, audio_model, video_model).",
+          "Cannot select video, audio, vision, or image_gen as the default chat model. Configure multimodal APIs in /config edit (Vision / Audio / Video / ImageGen) or /config set (e.g. vision_model, audio_model, video_model, image_gen_model).",
         ),
       );
       this.tui.requestRender();
