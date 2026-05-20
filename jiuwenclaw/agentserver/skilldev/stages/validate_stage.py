@@ -14,6 +14,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
 from pathlib import Path
@@ -38,15 +39,15 @@ class ValidateStageHandler(StageHandler):
     async def execute(self, ctx: SkillDevContext) -> StageResult:
         skill_md_path = ctx.workspace / "skill" / "SKILL.md"
 
-        if not skill_md_path.exists():
+        if not await asyncio.to_thread(skill_md_path.exists):
             return await self._handle_failure(
                 ctx, "SKILL.md 未生成"
             )
 
-        _, description, _ = parse_skill_frontmatter(skill_md_path)
+        _, description, _ = await asyncio.to_thread(parse_skill_frontmatter, skill_md_path)
         ctx.state.plan["description"] = description
 
-        valid, message = validate_skill_md(skill_md_path)
+        valid, message = await asyncio.to_thread(validate_skill_md, skill_md_path)
         await ctx.emit(
             SkillDevEventType.VALIDATE_RESULT, {"valid": valid, "message": message}
         )

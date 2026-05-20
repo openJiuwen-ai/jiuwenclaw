@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
@@ -628,7 +629,7 @@ async def register_browser_runtime_mcp_server(agent: Any, *, tag: str = "agent.m
             return True
 
         try:
-            auto_url = _ensure_local_server_started("sse")
+            auto_url = await asyncio.to_thread(_ensure_local_server_started, "sse")
             sse_cfg = _build_sse_fallback_config(cfg, server_url=auto_url)
             ok, auto_sse_err = await _register_once(sse_cfg)
             if ok:
@@ -645,7 +646,7 @@ async def register_browser_runtime_mcp_server(agent: Any, *, tag: str = "agent.m
 
     if cfg.client_type == "sse":
         try:
-            auto_url = _ensure_local_server_started("sse")
+            auto_url = await asyncio.to_thread(_ensure_local_server_started, "sse")
             retry_cfg = _build_sse_retry_config(cfg, auto_url)
             ok, retry_err = await _register_once(retry_cfg)
             if ok:
@@ -655,7 +656,7 @@ async def register_browser_runtime_mcp_server(agent: Any, *, tag: str = "agent.m
             error_text = f"{error_text} | {exc}".strip(" |")
     elif _normalize_client_type(cfg.client_type) == "streamable-http":
         try:
-            auto_url = _ensure_local_server_started("streamable-http")
+            auto_url = await asyncio.to_thread(_ensure_local_server_started, "streamable-http")
             retry_cfg = _build_streamable_http_config(cfg, auto_url)
             ok, retry_err = await _register_once(retry_cfg)
             if ok:

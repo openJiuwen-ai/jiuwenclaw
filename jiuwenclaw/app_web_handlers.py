@@ -1105,7 +1105,7 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
                 project_dir=init_project_dir,
             )
         except Exception as exc:  # noqa: BLE001
-            shutil.rmtree(session_dir, ignore_errors=True)
+            await asyncio.to_thread(shutil.rmtree, session_dir, ignore_errors=True)
             logger.warning("[session.create] init_session_metadata 失败，已清理目录: %s", exc)
             await channel.send_response(
                 ws,
@@ -1183,7 +1183,7 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
                 ws, req_id, ok=False, error="session is not a directory", code="BAD_REQUEST",
             )
             return
-        shutil.rmtree(session_dir)
+        await asyncio.to_thread(shutil.rmtree, session_dir)
         await channel.send_response(
             ws, req_id, ok=True, payload={"session_id": safe_sid}
         )

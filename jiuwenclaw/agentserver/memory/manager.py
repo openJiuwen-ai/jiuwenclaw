@@ -134,7 +134,7 @@ class MemoryIndexManager:
             self._event_loop = None
 
         self.db_path = self._resolve_db_path()
-        self.db = self._open_database(self.db_path)
+        self.db = await asyncio.to_thread(self._open_database, self.db_path)
         self._ensure_schema()
         await self._initialize_provider()
         await self._load_vector_extension()

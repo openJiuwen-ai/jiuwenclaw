@@ -2,6 +2,7 @@
 
 """Memory tools for JiuWenClaw - Using @tool decorator for openjiuwen."""
 
+import asyncio
 import contextvars
 import logging
 import os
@@ -325,14 +326,18 @@ async def write_memory(
         
         parent_dir = os.path.dirname(full_path)
         if parent_dir:
-            os.makedirs(parent_dir, exist_ok=True)
+            await asyncio.to_thread(os.makedirs, parent_dir, exist_ok=True)
         
-        file_existed = os.path.exists(full_path)
+        file_existed = await asyncio.to_thread(os.path.exists, full_path)
         
         mode = "a" if append else "w"
-        with open(full_path, mode, encoding="utf-8") as f:
-            f.write(content)
-            f.write("\n")
+        
+        def _write_file():
+            with open(full_path, mode, encoding="utf-8") as f:
+                f.write(content)
+                f.write("\n")
+        
+        await asyncio.to_thread(_write_file)
 
         logger.info(f"{'Appended to' if append else 'Wrote'} file: {resolved_path}", extra={'user_visible': 'critical'})
 
@@ -386,15 +391,18 @@ async def edit_memory(
         resolved_path = result
         full_path = os.path.join(_global_workspace_dir, resolved_path)
         
-        if not os.path.exists(full_path):
+        if not await asyncio.to_thread(os.path.exists, full_path):
             return {
                 "success": False,
                 "path": path,
                 "error": f"File not found: {path}"
             }
         
-        with open(full_path, "r", encoding="utf-8") as f:
-            content = f.read()
+        def _read_content():
+            with open(full_path, "r", encoding="utf-8") as f:
+                return f.read()
+        
+        content = await asyncio.to_thread(_read_content)
         
         if oldText not in content:
             return {
@@ -413,9 +421,12 @@ async def edit_memory(
         
         new_content = content.replace(oldText, newText, 1)
 
-        with open(full_path, "w", encoding="utf-8") as f:
-            f.write(new_content)
-            f.write("\n")
+        def _write_content():
+            with open(full_path, "w", encoding="utf-8") as f:
+                f.write(new_content)
+                f.write("\n")
+
+        await asyncio.to_thread(_write_content)
 
         logger.info(f"Edited file: {resolved_path}", extra={'user_visible': 'critical'})
 
@@ -466,7 +477,7 @@ async def read_memory(
         resolved_path = result
         full_path = os.path.join(_global_workspace_dir, resolved_path)
         
-        if not os.path.exists(full_path):
+        if not await asyncio.to_thread(os.path.exists, full_path):
             return {
                 "success": False,
                 "path": path,
@@ -474,7 +485,7 @@ async def read_memory(
                 "error": f"File not found: {path}"
             }
         
-        if not os.path.isfile(full_path):
+        if not await asyncio.to_thread(os.path.isfile, full_path):
             return {
                 "success": False,
                 "path": path,
@@ -482,8 +493,11 @@ async def read_memory(
                 "error": f"Not a file: {path}"
             }
         
-        with open(full_path, "r", encoding="utf-8", errors="replace") as f:
-            lines = f.readlines()
+        def _read_lines():
+            with open(full_path, "r", encoding="utf-8", errors="replace") as f:
+                return f.readlines()
+        
+        lines = await asyncio.to_thread(_read_lines)
         
         total_lines = len(lines)
         

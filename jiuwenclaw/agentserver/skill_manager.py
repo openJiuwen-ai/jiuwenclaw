@@ -289,6 +289,10 @@ def _safe_rmtree(path: Path) -> bool:
     return False
 
 
+async def _async_safe_rmtree(path: Path) -> bool:
+    return await asyncio.to_thread(_safe_rmtree, path)
+
+
 class SkillManager:
     """Skill 管理器，对应 skills.* 请求方法."""
 
@@ -654,8 +658,8 @@ class SkillManager:
                     extra={'user_visible': 'critical'}
                 )
                 return {"success": False, "detail": f"skill {plugin_name} 已存在"}
-            _safe_rmtree(dest)
-        shutil.copytree(plugin_src, dest)
+            await _async_safe_rmtree(dest)
+        await asyncio.to_thread(shutil.copytree, plugin_src, dest)
 
         # 解析元数据并记录（添加 installed_at 时间戳）
         from datetime import datetime, timezone
@@ -726,7 +730,7 @@ class SkillManager:
 
         # 复制技能到用户目录
         try:
-            shutil.copytree(src, dest)
+            await asyncio.to_thread(shutil.copytree, src, dest)
         except Exception as exc:
             logger.error("安装内置技能失败: %s", exc)
             return {"success": False, "detail": f"安装失败: {exc}"}
@@ -1154,18 +1158,18 @@ class SkillManager:
                                 "detail": f"技能 {slug} 已安装",
                                 "detail_key": "skills.clawhub.errors.skillAlreadyInstalled",
                             }
-                        _safe_rmtree(dest)
+                        await _async_safe_rmtree(dest)
 
                     # 复制到 skills 目录
-                    shutil.copytree(skill_dir, dest)
+                    await asyncio.to_thread(shutil.copytree, skill_dir, dest)
                     for mirror_root in self._get_mirror_skills_dirs():
                         mirror_dest = _safe_child_path(mirror_root, slug, "skill")
                         if mirror_dest.exists():
                             if not force:
                                 continue
-                            _safe_rmtree(mirror_dest)
+                            await _async_safe_rmtree(mirror_dest)
                         mirror_root.mkdir(parents=True, exist_ok=True)
-                        shutil.copytree(skill_dir, mirror_dest)
+                        await asyncio.to_thread(shutil.copytree, skill_dir, mirror_dest)
 
                     # 记录安装信息
                     skill_name = meta.get("name", slug)
@@ -1188,7 +1192,7 @@ class SkillManager:
                         }
                     )
                     self._refresh_agent_data_indexes()
-                    _safe_rmtree(skill_dir)
+                    await _async_safe_rmtree(skill_dir)
 
                     logger.info(
                         f"[SkillManager] ClawHub下载成功: slug={slug} name={skill_name}",
@@ -1328,17 +1332,17 @@ class SkillManager:
                 if dest.exists():
                     if not force:
                         return {"success": False, "detail": f"技能 {skill_name} 已安装"}
-                    _safe_rmtree(dest)
+                    await _async_safe_rmtree(dest)
 
-                shutil.copytree(skill_dir, dest)
+                await asyncio.to_thread(shutil.copytree, skill_dir, dest)
                 for mirror_root in self._get_mirror_skills_dirs():
                     mirror_dest = mirror_root / skill_name
                     if mirror_dest.exists():
                         if not force:
                             continue
-                        _safe_rmtree(mirror_dest)
+                        await _async_safe_rmtree(mirror_dest)
                     mirror_root.mkdir(parents=True, exist_ok=True)
-                    shutil.copytree(skill_dir, mirror_dest)
+                    await asyncio.to_thread(shutil.copytree, skill_dir, mirror_dest)
 
                 installed_at = datetime.now(timezone.utc).isoformat()
                 self._add_local_skill(
@@ -1609,13 +1613,13 @@ class SkillManager:
                     )
                     return {"success": False, "detail": "内置技能不允许删除"}
 
-        _safe_rmtree(dest)
+        await _async_safe_rmtree(dest)
 
         # 处理 mirror 根目录中的技能
         for mirror_root in self._get_mirror_skills_dirs():
             mirror_dest = _safe_child_path(mirror_root, dest.name, "skill")
             if mirror_dest.exists() and mirror_dest.is_dir():
-                _safe_rmtree(mirror_dest)
+                await _async_safe_rmtree(mirror_dest)
 
         self._remove_installed_plugin(name)
         self._remove_local_skill(name)
@@ -1653,7 +1657,7 @@ class SkillManager:
                 logger.error("remote archive import failed: %s", exc)
                 return {"success": False, "detail": str(exc)[:500]}
 
-        return self._import_local_from_path(Path(raw_path), force=force, origin=str(raw_path))
+        return await asyncio.to_thread(self._import_local_from_path, Path(raw_path), force=force, origin=str(raw_path))
 
     def _import_local_from_path(self, src: Path, *, force: bool, origin: str) -> dict[str, Any]:
         logger.info(
@@ -1826,7 +1830,7 @@ class SkillManager:
             repo_dir = _safe_child_path(self._marketplace_dir, name, "marketplace")
             if repo_dir.exists() and repo_dir.is_dir():
                 try:
-                    _safe_rmtree(repo_dir)
+                    await _async_safe_rmtree(repo_dir)
                     cache_removed = True
                 except Exception as exc:
                     logger.warning("删除 marketplace 缓存失败: %s", exc)
@@ -1889,7 +1893,7 @@ class SkillManager:
         repo_dir = _safe_child_path(self._marketplace_dir, name, "marketplace")
         cache_removed = False
         if repo_dir.exists() and repo_dir.is_dir():
-            cache_removed = _safe_rmtree(repo_dir)
+            cache_removed = await _async_safe_rmtree(repo_dir)
             if not cache_removed:
                 return {"success": False, "name": name, "enabled": True, "detail": "删除本地缓存失败"}
 

@@ -1932,7 +1932,7 @@ class AgentWebSocketServer:
                             payload={"error": "session is not a directory", "code": "BAD_REQUEST"},
                         )
                     else:
-                        shutil.rmtree(session_dir)
+                        await asyncio.to_thread(shutil.rmtree, session_dir)
                         resp = AgentResponse(
                             request_id=request.request_id,
                             channel_id=request.channel_id,

@@ -261,6 +261,19 @@ _ACP_BLOCKED_DEFAULT_TOOL_NAMES = frozenset(
 
 
 @dataclass(slots=True)
+class _AgentInitContext:
+    """`_init_agent_instance_sync` 的具名入参封装（DeepAgent 实例初始化上下文）。"""
+
+    config: dict[str, Any]
+    config_base: dict[str, Any]
+    mode: str
+    model: Model
+    agent_card: AgentCard
+    tool_cards: list[Any]
+    extra_skill_dir: str | None = None
+
+
+@dataclass(slots=True)
 class _RuntimeConfigParams:
     """`_update_runtime_config` 的具名入参封装（会话、模式与请求级上下文）。"""
 
@@ -2167,7 +2180,8 @@ class JiuWenClawDeepAdapter:
                 )
 
         # 小艺手机端工具：由 channels.xiaoyi.phone_tools_enabled 控制
-        config_base = get_config()
+        loop = asyncio.get_running_loop()
+        config_base = await loop.run_in_executor(None, get_config)
         xiaoyi_phone_tools_enabled = (
             config_base.get("channels", {}).get("xiaoyi", {}).get("phone_tools_enabled", False)
         )
@@ -2255,6 +2269,58 @@ class JiuWenClawDeepAdapter:
         """Backward-compatible no-op hook for tests and legacy call sites."""
         return None
 
+    def _init_agent_instance_sync(self, ctx: _AgentInitContext) -> None:
+        """同步执行 agent 实例初始化的重操作（在独立线程中执行，避免阻塞 event loop）。
+
+        包含 _build_agent_rails（磁盘 I/O 读取技能文件）、_create_sys_operation、
+        create_deep_agent / create_code_agent 等耗时同步调用。
+        """
+        rails_list = self._build_agent_rails(
+            ctx.config, ctx.config_base, mode=ctx.mode,
+            extra_skill_dir=ctx.extra_skill_dir,
+        )
+
+        sys_operation = self._create_sys_operation()
+        if sys_operation is None:
+            raise RuntimeError("sys_operation is not available, maybe task is not running")
+
+        self._sys_operation = sys_operation
+        configured_subagents = self._build_configured_subagents(ctx.model, ctx.config, ctx.config_base)
+        common_kwargs = dict(
+            model=ctx.model,
+            card=ctx.agent_card,
+            system_prompt=build_identity_prompt(
+                mode="agent.fast",
+                language=self._resolve_prompt_language(),
+                channel=(
+                    "acp" if self._is_acp_tool_profile(self._instance_overrides)
+                    else self._resolve_prompt_channel()
+                ),
+            ),
+            tools=ctx.tool_cards if ctx.tool_cards else [],
+            subagents=configured_subagents,
+            rails=rails_list if rails_list else [],
+            enable_task_loop=ctx.config.get("enable_task_loop", True),
+            max_iterations=ctx.config.get("max_iterations", 15),
+            workspace=Workspace(
+                root_path=self._workspace_dir or "./",
+                language=self._resolve_runtime_language(),
+            ),
+            sys_operation=sys_operation,
+            language=self._resolve_runtime_language(),
+        )
+
+        if ctx.mode == "code":
+            self._instance = create_code_agent(**common_kwargs)
+        else:
+            self._instance = create_deep_agent(
+                **common_kwargs,
+                context_engine_config=_deep_agent_context_engine_config(ctx.config),
+                vision_model_config=self._vision_model_config,
+                audio_model_config=self._audio_model_config,
+                completion_timeout=ctx.config.get("completion_timeout", 21600.0),
+            )
+
     async def create_instance(self, config: dict[str, Any] | None = None, *, mode: str = "agent.plan") -> None:
         """初始化 DeepAgent 实例.
 
@@ -2268,7 +2334,8 @@ class JiuWenClawDeepAdapter:
         await self.set_checkpoint()
 
         self._instance_overrides = dict(config or {}) if isinstance(config, dict) else {}
-        config_base = get_config()
+        loop = asyncio.get_running_loop()
+        config_base = await loop.run_in_executor(None, get_config)
         self._refresh_multimodal_configs(config_base)
         config = config_base.get('react', {}).copy()
         self._config_cache = config.copy()
@@ -2313,58 +2380,25 @@ class JiuWenClawDeepAdapter:
         except Exception as exc:
             logger.warning("[JiuWenClawDeepAdapter] hook trigger failed: %s", exc)
 
-        rails_list = self._build_agent_rails(
-            config, config_base, mode=mode,
-            extra_skill_dir=extra_skill_dir,
+        await loop.run_in_executor(
+            None,
+            lambda: self._init_agent_instance_sync(_AgentInitContext(
+                config=config,
+                config_base=config_base,
+                mode=mode,
+                model=model,
+                agent_card=agent_card,
+                tool_cards=tool_cards,
+                extra_skill_dir=extra_skill_dir,
+            )),
         )
-
-        sys_operation = self._create_sys_operation()
-        if sys_operation is None:
-            raise RuntimeError("sys_operation is not available, maybe task is not running")
-
-        self._sys_operation = sys_operation
-        configured_subagents = self._build_configured_subagents(model, config, config_base)
-        common_kwargs = dict(
-            model=model,
-            card=agent_card,
-            system_prompt=build_identity_prompt(
-                mode="agent.fast",
-                language=self._resolve_prompt_language(),
-                channel=(
-                    "acp" if self._is_acp_tool_profile(self._instance_overrides)
-                    else self._resolve_prompt_channel()
-                ),
-            ),
-            tools=tool_cards if tool_cards else [],
-            subagents=configured_subagents,
-            rails=rails_list if rails_list else [],
-            enable_task_loop=config.get("enable_task_loop", True),
-            max_iterations=config.get("max_iterations", 15),
-            workspace=Workspace(
-                root_path=self._workspace_dir or "./",
-                language=self._resolve_runtime_language(),
-            ),
-            sys_operation=sys_operation,
-            language=self._resolve_runtime_language(),
-        )
-
-        if mode == "code":
-            self._instance = create_code_agent(**common_kwargs)
-        else:
-            self._instance = create_deep_agent(
-                **common_kwargs,
-                context_engine_config=_deep_agent_context_engine_config(config),
-                vision_model_config=self._vision_model_config,
-                audio_model_config=self._audio_model_config,
-                completion_timeout=config.get("completion_timeout", 21600.0),
-            )
         logger.info("[JiuWenClawDeepAdapter] 初始化完成: agent_name=%s", self._agent_name)
 
         # 动态加载用户自定义的 Rail 扩展
         await self.load_user_rails()
 
         # Initialize fork_agent tools
-        self._init_subagent_tools()
+        await loop.run_in_executor(None, self._init_subagent_tools)
 
     def _init_subagent_tools(self) -> None:
         """Initialize fork_agent and spawn_subagent tools for creating subagents."""
