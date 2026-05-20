@@ -72,6 +72,8 @@ interface SkillDevStateStore {
   setClarifyQuestions: (questions: ClarifyQuestion[] | null) => void;
   setClarifySubmitted: (submitted: boolean) => void;
   setPendingQuestion: (question: AskUserQuestionPayload | null) => void;
+  /** 终止任务时清理挂起的交互（审批卡片 / ask_user_question） */
+  dismissPendingInteraction: () => void;
 
   addMessage: (message: SkillDevMessage) => void;
   addThinkingMessage: (delta: string, options?: { timestamp?: string; id?: string }) => void;
@@ -269,6 +271,33 @@ export const useSkillDevStore = create<SkillDevStateStore>((set, _get) => ({
   setClarifyQuestions: (clarifyQuestions) => set({ clarifyQuestions }),
   setClarifySubmitted: (isClarifySubmitted) => set({ isClarifySubmitted }),
   setPendingQuestion: (pendingQuestion) => set({ pendingQuestion }),
+
+  dismissPendingInteraction: () =>
+    set((state) => {
+      const now = new Date().toISOString();
+      const messages = state.messages.map((msg) => {
+        if (msg.type !== 'confirm_request') {
+          return msg;
+        }
+        return {
+          ...msg,
+          type: 'confirm_resolved' as const,
+          content: `${msg.content}\n\n（任务已终止）`,
+          metadata: {
+            ...msg.metadata,
+            resolvedAction: 'cancelled',
+            resolvedAt: now,
+          },
+        };
+      });
+      return {
+        messages,
+        pendingQuestion: null,
+        clarifyQuestions: null,
+        isClarifySubmitted: false,
+        isSuspended: false,
+      };
+    }),
 
   addMessage: (message) =>
     set((state) => ({

@@ -110,6 +110,10 @@ class JiuClawStreamEventRail(DeepAgentRail):
     def reset_abort(self) -> None:
         self._abort_requested = False
 
+    @property
+    def abort_requested(self) -> bool:
+        return self._abort_requested
+
     # ------------------------------------------------------------------
     # before_invoke (Outer event on DeepAgent): capture conversation_id
     # ------------------------------------------------------------------

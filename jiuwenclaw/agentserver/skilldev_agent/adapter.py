@@ -241,9 +241,13 @@ class SkillDevDeepAdapter:
                 event_type_prefix="skilldev",
             ):
                 async for chunk in Runner.run_agent_streaming(self._instance, inputs):
+                    if self._is_stream_aborted():
+                        break
                     if not (hasattr(chunk, "type") and hasattr(chunk, "payload")):
                         parsed = self._parse_stream_chunk(chunk, has_streamed_content=has_streamed_content)
                         if parsed is not None:
+                            if self._is_stream_aborted():
+                                break
                             if accumulated_text:
                                 yield _make_chunk(
                                     _add_task_id({"event_type": "skilldev.agent_output", "delta": accumulated_text})
@@ -256,6 +260,8 @@ class SkillDevDeepAdapter:
 
                     chunk_type = chunk.type
                     payload = chunk.payload
+                    if self._is_stream_aborted():
+                        break
 
                     if chunk_type == "llm_usage":
                         yield _make_chunk(
@@ -530,6 +536,19 @@ class SkillDevDeepAdapter:
     # interrupt / answer / heartbeat / is_working
     # ------------------------------------------------------------------
 
+    def _cancel_ask_user_for_request(self, request: AgentRequest) -> None:
+        """取消挂起的 ask_user_question（注册时使用 todo_ 前缀 session）。"""
+        registry = AskUserQuestionRegistry.get_instance()
+        sid = str(request.session_id or "").strip()
+        if not sid:
+            return
+        registry.cancel_for_session(sid)
+        registry.cancel_for_session(self._make_todo_session_id(sid))
+
+    def _is_stream_aborted(self) -> bool:
+        rail = self._stream_event_rail
+        return rail is not None and bool(getattr(rail, "abort_requested", False))
+
     async def process_interrupt(self, request: AgentRequest) -> AgentResponse:
         intent = request.params.get("intent", "cancel") if isinstance(request.params, dict) else "cancel"
         updated_todos = None
@@ -544,21 +563,21 @@ class SkillDevDeepAdapter:
                 self._stream_event_rail.abort()
             if self._instance is not None:
                 await self._instance.abort()
-            AskUserQuestionRegistry.get_instance().cancel_for_session(str(request.session_id or ""))
+            self._cancel_ask_user_for_request(request)
             message = "任务已切换"
         else:
             if self._stream_event_rail is not None:
                 self._stream_event_rail.abort()
             if self._instance is not None:
                 await self._instance.abort()
-            AskUserQuestionRegistry.get_instance().cancel_for_session(str(request.session_id or ""))
+            self._cancel_ask_user_for_request(request)
             if request.session_id:
                 updated_todos = await self._cancel_pending_todos(
                     self._make_todo_session_id(str(request.session_id))
                 )
             message = "任务已取消"
         payload = {
-            "event_type": "skilldev.interrupt_result",
+            "event_type": "chat.interrupt_result",
             "intent": intent,
             "success": True,
             "message": message,
@@ -889,8 +908,12 @@ class SkillDevDeepAdapter:
                     result_payload = {"result": str(payload)}
                 return with_task_id({"event_type": "skilldev.tool_result", **result_payload})
             if chunk_type == "chat.ask_user_question":
+                if self._is_stream_aborted():
+                    return None
                 return {"event_type": "skilldev.ask_user_question", **(payload if isinstance(payload, dict) else {})}
             if chunk_type == "__interaction__":
+                if self._is_stream_aborted():
+                    return None
                 from jiuwenclaw.agentserver.deep_agent.interrupt.interrupt_helpers import (
                     convert_interactions_to_ask_user_question,
                 )

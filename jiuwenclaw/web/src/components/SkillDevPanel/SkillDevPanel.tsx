@@ -74,6 +74,8 @@ export function SkillDevPanel() {
   const hasTaskStartedRef = useRef(false);
   // TEST_RUN 阶段：stage key → message ID 映射，用于将 AGENT_OUTPUT 路由到对应 case 卡片
   const caseCardIdMapRef = useRef<Map<string, string>>(new Map());
+  /** 终止后为 true，忽略迟到的流式事件（如 ask_user_question / confirm_request） */
+  const taskCancelledRef = useRef(false);
 
   // Store 状态
   const {
@@ -118,6 +120,7 @@ export function SkillDevPanel() {
     resolveConfirmMessage,
     endThinkingStream,
     hydrateFromSkillDevRestore,
+    dismissPendingInteraction,
   } = useSkillDevStore();
 
   // ========== 事件处理 ==========
@@ -140,6 +143,7 @@ export function SkillDevPanel() {
 
   const handleStarted = useCallback((data: { task_id: string; __restore_ts?: string }) => {
     const ts = eventTimestamp(data);
+    taskCancelledRef.current = false;
     sessionIdRef.current = data.task_id;
     hasTaskStartedRef.current = true;
     setTaskId(data.task_id);
@@ -740,9 +744,31 @@ export function SkillDevPanel() {
       { name: 'skilldev.ask_user_question', key: 'handleAskUserQuestion' },
     ];
 
+    const handleInterruptResult = (payload: unknown) => {
+      const data = payload as { session_id?: string; intent?: string; success?: boolean };
+      const sid = sessionIdRef.current ?? useSkillDevStore.getState().taskId;
+      if (sid && data.session_id && data.session_id !== sid) {
+        return;
+      }
+      if (data.intent === 'cancel' && data.success !== false) {
+        taskCancelledRef.current = true;
+        dismissPendingInteraction();
+        setProcessing(false);
+        setSuspended(false);
+      }
+    };
+
     const unsubs = events.map(({ name, key }) =>
       webClient.on(name, ({ payload }) => {
+        if (taskCancelledRef.current) {
+          return;
+        }
         (handlersRef.current[key] as (d: unknown) => void)(payload);
+      })
+    );
+    unsubs.push(
+      webClient.on('chat.interrupt_result', ({ payload }) => {
+        handleInterruptResult(payload);
       })
     );
 
@@ -942,6 +968,7 @@ export function SkillDevPanel() {
     if (!tid) return;
     try {
       setShowResumeBanner(false);
+      taskCancelledRef.current = false;
       setProcessing(true);
       setSuspended(false);
       await startSkillDev({
@@ -985,6 +1012,7 @@ export function SkillDevPanel() {
 
       const sessionId = getOrCreateSessionId();
       setTaskId(sessionId);
+      taskCancelledRef.current = false;
       await startSkillDev({
         query: inputValue,
         session_id: sessionId,
@@ -1198,6 +1226,7 @@ export function SkillDevPanel() {
   );
 
   const handleReset = useCallback(() => {
+    taskCancelledRef.current = false;
     sessionIdRef.current = null;
     testProgressIdRef.current = null;
     hasTaskStartedRef.current = false;
@@ -1211,25 +1240,23 @@ export function SkillDevPanel() {
   const handleCancel = useCallback(async () => {
     if (!taskId) return;
 
+    const sessionId = sessionIdRef.current ?? taskId;
+
     // 确认对话框
     const confirmed = window.confirm(t('skilldev.cancelConfirm', '确定要终止当前任务吗？'));
     if (!confirmed) return;
 
-    console.log('[SkillDevPanel] Cancelling task:', taskId);
+    console.log('[SkillDevPanel] Cancelling task:', taskId, 'session:', sessionId);
     try {
-      const message = await cancelSkillDev(taskId);
-      console.log('[SkillDevPanel] Cancel response:', message);
-      // 根据后端返回的消息判断是否真的取消了任务
-      // 注意：后端取消是异步的（在下一阶段边界才真正停止）
-      const isActuallyCancelled = message.includes('取消信号已发送');
+      taskCancelledRef.current = true;
+      dismissPendingInteraction();
+      await cancelSkillDev(sessionId);
       setProcessing(false);
       setSuspended(false);
       addMessage({
         id: `cancelled-${Date.now()}`,
         role: 'system',
-        content: isActuallyCancelled
-          ? t('skilldev.taskCancelled')
-          : t('skilldev.taskNotRunning', { message }),
+        content: t('skilldev.taskCancelled'),
         type: 'text',
         timestamp: new Date().toISOString(),
       });
@@ -1246,7 +1273,7 @@ export function SkillDevPanel() {
         timestamp: new Date().toISOString(),
       });
     }
-  }, [taskId, setProcessing, setSuspended, addMessage, setError, t]);
+  }, [taskId, dismissPendingInteraction, setProcessing, setSuspended, addMessage, setError, t]);
 
   // 加载文件树
   useEffect(() => {

@@ -1745,6 +1745,7 @@ class MessageHandler(ABC):
             ReqMethod.CHAT_SEND.value,
             ReqMethod.CHAT_RESUME.value,
             ReqMethod.CHAT_CANCEL.value,
+            ReqMethod.SKILLDEV_CANCEL.value,
             ReqMethod.CHAT_ANSWER.value,
             # session.create/delete 需 await，避免与后续入队消息（含 remote 下 session.list）竞态
             ReqMethod.SESSION_CREATE.value,
@@ -2084,11 +2085,23 @@ class MessageHandler(ABC):
                             )
                     continue
 
-                if msg.req_method == ReqMethod.CHAT_CANCEL:
+                if msg.req_method in (ReqMethod.CHAT_CANCEL, ReqMethod.SKILLDEV_CANCEL):
                     logger.info(
-                        "[MessageHandler] 收到中断请求: id=%s channel_id=%s",
-                        msg.id, msg.channel_id,
+                        "[MessageHandler] 收到中断请求: id=%s channel_id=%s method=%s",
+                        msg.id, msg.channel_id, msg.req_method,
                     )
+                    # skilldev.cancel 仅支持取消当前任务，与 chat.interrupt intent=cancel 对齐
+                    if msg.req_method == ReqMethod.SKILLDEV_CANCEL:
+                        params = dict(msg.params or {})
+                        params.setdefault("intent", "cancel")
+                        sid = params.get("session_id") or params.get("task_id") or msg.session_id
+                        if isinstance(sid, str) and sid.strip():
+                            msg.session_id = sid.strip()
+                            params["session_id"] = sid.strip()
+                        msg.params = params
+                        await self._cancel_agent_work_for_session(msg, msg.session_id)
+                        continue
+
                     new_input = (msg.params or {}).get("new_input")
                     has_new_input = isinstance(new_input, str) and new_input.strip()
                     raw_attachments = (msg.params or {}).get("attachments")

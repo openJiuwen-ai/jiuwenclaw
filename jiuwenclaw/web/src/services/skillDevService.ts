@@ -188,17 +188,13 @@ export async function readSkillDevFile(
 }
 
 /**
- * 取消任务
- * @returns 返回后端消息，用于区分"已取消"和"任务未运行"等情况
+ * 取消任务（走 chat.interrupt → interface._process_interrupt → skilldev adapter）
  */
-export async function cancelSkillDev(taskId: string): Promise<string> {
-  const result = await webRequest<{ ok?: boolean; message?: string }>('skilldev.cancel', { task_id: taskId });
-  console.log('[cancelSkillDev] response:', result);
-  // 后端返回 payload 包含 {ok: true, message: "..."}
-  if (!result.ok) {
-    throw new Error(result.message || 'Cancel failed');
-  }
-  return result.message || '';
+export async function cancelSkillDev(sessionId: string): Promise<void> {
+  await webRequest<{ accepted?: boolean }>('chat.interrupt', {
+    session_id: sessionId,
+    intent: 'cancel',
+  });
 }
 
 /**

@@ -644,6 +644,14 @@ class JiuWenClaw:
             metadata=request.metadata,
         )
 
+    @staticmethod
+    def _skilldev_adapter_has_active_work(adapter: AgentAdapter) -> bool:
+        """SkillDev 流式任务是否在运行（用于 chat.interrupt 路由到 skilldev adapter）。"""
+        return (
+            getattr(adapter, "_stream_event_rail", None) is not None
+            or getattr(adapter, "_instance", None) is not None
+        )
+
     async def _process_interrupt(self, request: AgentRequest) -> AgentResponse:
         """处理 interrupt 请求.
 
@@ -662,6 +670,10 @@ class JiuWenClaw:
             AgentResponse 包含 interrupt_result 事件数据
         """
         is_skilldev = request.req_method == ReqMethod.SKILLDEV_CANCEL
+        if not is_skilldev and request.req_method == ReqMethod.CHAT_CANCEL:
+            skilldev_adapter = self._skilldev_adapter
+            if skilldev_adapter is not None and self._skilldev_adapter_has_active_work(skilldev_adapter):
+                is_skilldev = True
         if is_skilldev:
             adapter = await self._ensure_skilldev_adapter()
         else:
