@@ -53,6 +53,7 @@ AGENTS.md
 .traerules
 workspace/agent-data.json
 *.iml
+.cursor
 
 # reference
 reference/

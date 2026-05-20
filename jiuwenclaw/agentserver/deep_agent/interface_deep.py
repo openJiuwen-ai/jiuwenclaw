@@ -231,6 +231,19 @@ _LLM_TRACE_MODEL_NAME: ContextVar[str] = ContextVar(
     default="",
 )
 
+
+def _reset_llm_trace_tokens(
+    token_sid: Token,
+    token_rid: Token,
+    token_iter: Token,
+    token_model: Token,
+) -> None:
+    _LLM_TRACE_SESSION_ID.reset(token_sid)
+    _LLM_TRACE_REQUEST_ID.reset(token_rid)
+    _LLM_TRACE_ITERATION.reset(token_iter)
+    _LLM_TRACE_MODEL_NAME.reset(token_model)
+
+
 _REASONING_TRACE_LOG_BATCH = 5
 _LLM_IO_TRACE_PATCH_APPLIED = False
 
@@ -3908,6 +3921,7 @@ class JiuWenClawDeepAdapter:
             else:
                 content = slash_result.get("output", str(slash_result))
                 payload = {"content": content}
+            _reset_llm_trace_tokens(token_trace_sid, token_trace_rid, token_trace_iter, token_trace_model)
             return AgentResponse(
                 request_id=request.request_id,
                 channel_id=request.channel_id,
@@ -3953,10 +3967,7 @@ class JiuWenClawDeepAdapter:
             TOOL_PERMISSION_CHANNEL_ID.reset(token_cid)
             cleanup_permission_context(token_perm)
             self._reset_runtime_cron_context(cron_context_tokens)
-            _LLM_TRACE_SESSION_ID.reset(token_trace_sid)
-            _LLM_TRACE_REQUEST_ID.reset(token_trace_rid)
-            _LLM_TRACE_ITERATION.reset(token_trace_iter)
-            _LLM_TRACE_MODEL_NAME.reset(token_trace_model)
+            _reset_llm_trace_tokens(token_trace_sid, token_trace_rid, token_trace_iter, token_trace_model)
             if request.request_id:
                 self._untrack_session_toolkit(request.request_id)
 
@@ -4015,10 +4026,7 @@ class JiuWenClawDeepAdapter:
 
             async for chunk in process_team_message_stream(request, inputs, self._instance):
                 yield chunk
-            _LLM_TRACE_SESSION_ID.reset(token_trace_sid)
-            _LLM_TRACE_REQUEST_ID.reset(token_trace_rid)
-            _LLM_TRACE_ITERATION.reset(token_trace_iter)
-            _LLM_TRACE_MODEL_NAME.reset(token_trace_model)
+            _reset_llm_trace_tokens(token_trace_sid, token_trace_rid, token_trace_iter, token_trace_model)
             return
 
         # 拦截斜杠命令
@@ -4053,6 +4061,7 @@ class JiuWenClawDeepAdapter:
                     payload={"event_type": "chat.final", "content": content},
                     is_complete=True,
                 )
+            _reset_llm_trace_tokens(token_trace_sid, token_trace_rid, token_trace_iter, token_trace_model)
             return
 
         if self._plain_chat_should_clear_stale_interrupt(request):
@@ -4449,10 +4458,7 @@ class JiuWenClawDeepAdapter:
             TOOL_PERMISSION_CHANNEL_ID.reset(token_cid)
             cleanup_permission_context(token_perm)
             self._reset_runtime_cron_context(cron_context_tokens)
-            _LLM_TRACE_SESSION_ID.reset(token_trace_sid)
-            _LLM_TRACE_REQUEST_ID.reset(token_trace_rid)
-            _LLM_TRACE_ITERATION.reset(token_trace_iter)
-            _LLM_TRACE_MODEL_NAME.reset(token_trace_model)
+            _reset_llm_trace_tokens(token_trace_sid, token_trace_rid, token_trace_iter, token_trace_model)
             if rid:
                 self._untrack_session_toolkit(rid)
 

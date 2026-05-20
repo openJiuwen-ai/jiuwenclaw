@@ -35,6 +35,7 @@ from jiuwenclaw.e2a.constants import (
     E2A_SOURCE_PROTOCOL_E2A,
 )
 from jiuwenclaw.e2a.models import E2AEnvelope, E2AProvenance, E2AResponse, utc_now_iso
+from jiuwenclaw.interface_resp import InterfaceRespLog, _ws_peer
 from jiuwenclaw.schema.message import EventType, Message, Mode, ReqMethod
 
 logger = logging.getLogger(__name__)
@@ -223,6 +224,9 @@ class AcpGatewayBridge:
 
     def cleanup(self, ws: Any) -> None:
         """Clean up pending client RPC entries associated with a disconnected ws."""
+        for request_id, ctx in list(self._request_ctx_by_request_id.items()):
+            if ctx.client_ws is ws:
+                self._clear_request_context(request_id, ctx.session_id)
         stale = [
             jsonrpc_id
             for jsonrpc_id, entry in self._pending_client_rpc_session_by_id.items()
@@ -243,11 +247,13 @@ class AcpGatewayBridge:
         try:
             if method == "initialize":
                 await self._send_raw_jsonrpc_result(ws, rpc_id, build_acp_initialize_result())
+                self._log_acp_rpc_once(ws, method=method, session_id=None, rpc_id=rpc_id)
                 return True
             if method == "session/new":
                 session_id = str(params.get("sessionId") or f"acp_{uuid.uuid4().hex[:12]}").strip()
                 self._bind_session(ws, session_id)
                 await self._send_raw_jsonrpc_result(ws, rpc_id, build_acp_session_new_result(session_id))
+                self._log_acp_rpc_once(ws, method=method, session_id=session_id, rpc_id=rpc_id)
                 return True
             if method == "session/prompt":
                 session_id = str(params.get("sessionId") or "").strip()
@@ -291,7 +297,7 @@ class AcpGatewayBridge:
                 if session_id:
                     request_id = self._active_prompt_request_by_session.pop(session_id, None)
                     if request_id is not None:
-                        ctx = self._request_ctx_by_request_id.pop(request_id, None)
+                        ctx = self._request_ctx_by_request_id.get(request_id)
                         if ctx is not None:
                             await self._send_raw_jsonrpc_result(
                                 ws,
@@ -301,7 +307,9 @@ class AcpGatewayBridge:
                                     user_message_id=ctx.user_message_id,
                                 ),
                             )
+                        self._clear_request_context(request_id, session_id)
                 await self._send_raw_jsonrpc_result(ws, rpc_id, None)
+                self._log_acp_rpc_once(ws, method=method, session_id=session_id or None, rpc_id=rpc_id)
                 return True
             if method == "session/list":
                 await self._send_raw_jsonrpc_result(
@@ -309,6 +317,7 @@ class AcpGatewayBridge:
                     rpc_id,
                     build_acp_session_list_result(sorted(self._known_sessions)),
                 )
+                self._log_acp_rpc_once(ws, method=method, session_id=None, rpc_id=rpc_id)
                 return True
             if method == "session/load":
                 await self._send_raw_jsonrpc_error(
@@ -566,6 +575,35 @@ class AcpGatewayBridge:
                 ),
             )
             self._clear_request_context(request_id, sid)
+
+    @staticmethod
+    def _gateway_path(ws: Any) -> str:
+        raw = getattr(ws, "path", None) or "/acp"
+        p = str(raw).strip() or "/acp"
+        return p if p.startswith("/") else f"/{p}"
+
+    def _log_acp_rpc_once(
+        self,
+        ws: Any,
+        *,
+        method: str,
+        session_id: str | None,
+        rpc_id: str | int | None,
+        ok: bool = True,
+        status_code: str = "200",
+    ) -> None:
+        src, peer, host, hdr = _ws_peer(ws)
+        path = self._gateway_path(ws)
+        InterfaceRespLog.start(
+            method_path=f"ACP {method}",
+            src=src,
+            peer=peer,
+            host=host,
+            session_id=session_id,
+            rid=str(rpc_id) if rpc_id is not None else None,
+            header_rid=hdr,
+            info={"kind": "gateway", "protocol": "acp", "channel_id": self._channel_id, "path": path},
+        ).set_result(ok=ok, status_code=status_code).write()
 
     def _clear_request_context(self, request_id: str, session_id: str) -> None:
         ctx = self._request_ctx_by_request_id.pop(request_id, None)

@@ -2512,6 +2512,13 @@ def setup_logger(log_level: Optional[str] = None) -> logging.Logger:
         stream_handler.addFilter(privacy_filter)
         root.addHandler(stream_handler)
 
+    try:
+        from jiuwenclaw.interface_resp import ensure_interface_logger
+
+        ensure_interface_logger()
+    except Exception:
+        logger.debug("interface.log handler setup skipped", exc_info=True)
+
     return root
 
 

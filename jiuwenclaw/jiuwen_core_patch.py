@@ -27,6 +27,7 @@ llm_logger = logging.getLogger("jiuwenclaw.app")
 # Set by react_agent._call_llm_stream before calling llm.stream/invoke.
 _retry_session: ContextVar[Optional[Any]] = ContextVar("retry_session", default=None)
 
+
 _ORIGINAL_BUILD_REQUEST_PARAMS = None
 
 
@@ -289,77 +290,83 @@ class RetryMixin:
         """带重试的 invoke 包装器。
         max_attempts 表示纯重试次数，不包含首次正常调用。
         """
-        cfg = self._get_retry_config()
-        if not cfg.enabled:
-            llm_logger.info("LLM invoke 未启用重试，直接返回结果")
-            return await invoke_func(*args, **kwargs)
+        from jiuwenclaw.interface_resp import track_llm_resp
 
-        last_error = None
-        for attempt in range(cfg.max_attempts + 1):
-            try:
+        async with track_llm_resp(self, streaming=False):
+            cfg = self._get_retry_config()
+            if not cfg.enabled:
+                llm_logger.info("LLM invoke 未启用重试，直接返回结果")
                 return await invoke_func(*args, **kwargs)
-            except Exception as e:
-                last_error = e
-                if not self._is_retryable_error(e, cfg):
+
+            last_error = None
+            for attempt in range(cfg.max_attempts + 1):
+                try:
+                    return await invoke_func(*args, **kwargs)
+                except Exception as e:
+                    last_error = e
+                    if not self._is_retryable_error(e, cfg):
+                        reason = self._classify_error(e, cfg)
+                        details = self._extract_error_details(e)
+                        llm_logger.error(f"LLM invoke 不可重试 [{reason}] [{details}], details: {e}")
+                        raise
                     reason = self._classify_error(e, cfg)
                     details = self._extract_error_details(e)
-                    llm_logger.error(f"LLM invoke 不可重试 [{reason}] [{details}], details: {e}")
-                    raise
-                reason = self._classify_error(e, cfg)
-                details = self._extract_error_details(e)
-                backoff = self._calculate_backoff(attempt, e, cfg)
-                if attempt >= cfg.max_attempts:
-                    break
-                llm_logger.warning(f"LLM invoke 失败 [{reason}] [{details}]，将在 {backoff:.1f}s 后重试, "
-                    f"(第 {attempt + 1} 次重试 / 共 {cfg.max_attempts} 次): {e}")
-                await self._notify_retry_start(reason, attempt + 1, cfg.max_attempts, backoff)
-                await asyncio.sleep(backoff)
+                    backoff = self._calculate_backoff(attempt, e, cfg)
+                    if attempt >= cfg.max_attempts:
+                        break
+                    llm_logger.warning(f"LLM invoke 失败 [{reason}] [{details}]，将在 {backoff:.1f}s 后重试, "
+                        f"(第 {attempt + 1} 次重试 / 共 {cfg.max_attempts} 次): {e}")
+                    await self._notify_retry_start(reason, attempt + 1, cfg.max_attempts, backoff)
+                    await asyncio.sleep(backoff)
 
-        reason = self._classify_error(last_error, cfg)
-        details = self._extract_error_details(last_error)
-        llm_logger.error(f"LLM invoke 重试次数耗尽 [{reason}] [{details}]，已执行 {cfg.max_attempts} 次重试）: {last_error}")
-        await self._notify_retry_end()
-        raise last_error
+            reason = self._classify_error(last_error, cfg)
+            details = self._extract_error_details(last_error)
+            llm_logger.error(f"LLM invoke 重试次数耗尽 [{reason}] [{details}]，已执行 {cfg.max_attempts} 次重试）: {last_error}")
+            await self._notify_retry_end()
+            raise last_error
 
     async def _stream_with_retry(self, stream_func, *args, **kwargs):
         """带重试的 stream 包装器。
         max_attempts 表示纯重试次数，不包含首次正常调用。。
         """
-        cfg = self._get_retry_config()
-        if not cfg.enabled:
-            llm_logger.info("LLM stream 未启用重试机制")
-            async for chunk in stream_func(*args, **kwargs):
-                yield chunk
-            return
+        from jiuwenclaw.interface_resp import track_llm_resp
 
-        last_error = None
-        for attempt in range(cfg.max_attempts + 1):
-            try:
+        async with track_llm_resp(self, streaming=True):
+            cfg = self._get_retry_config()
+            if not cfg.enabled:
+                llm_logger.info("LLM stream 未启用重试机制")
                 async for chunk in stream_func(*args, **kwargs):
                     yield chunk
-                return  # 流式成功完成
-            except Exception as e:
-                last_error = e
-                if not self._is_retryable_error(e, cfg):
+                return
+
+            last_error = None
+            for attempt in range(cfg.max_attempts + 1):
+                try:
+                    async for chunk in stream_func(*args, **kwargs):
+                        yield chunk
+                    return  # 流式成功完成
+                except Exception as e:
+                    last_error = e
+                    if not self._is_retryable_error(e, cfg):
+                        reason = self._classify_error(e, cfg)
+                        details = self._extract_error_details(e)
+                        llm_logger.info(f"LLM stream 不可重试 [{reason}] [{details}], details: {e}")
+                        raise
                     reason = self._classify_error(e, cfg)
                     details = self._extract_error_details(e)
-                    llm_logger.info(f"LLM stream 不可重试 [{reason}] [{details}], details: {e}")
-                    raise
-                reason = self._classify_error(e, cfg)
-                details = self._extract_error_details(e)
-                backoff = self._calculate_backoff(attempt, e, cfg)
-                if attempt >= cfg.max_attempts:
-                    break
-                llm_logger.warning(f"LLM stream 失败 [{reason}] [{details}]，将在 {backoff:.1f}s 后重试 "
-                    f"(第 {attempt + 1} 次重试 / 共 {cfg.max_attempts} 次): {e}")
-                await self._notify_retry_start(reason, attempt + 1, cfg.max_attempts, backoff)
-                await asyncio.sleep(backoff)
+                    backoff = self._calculate_backoff(attempt, e, cfg)
+                    if attempt >= cfg.max_attempts:
+                        break
+                    llm_logger.warning(f"LLM stream 失败 [{reason}] [{details}]，将在 {backoff:.1f}s 后重试 "
+                        f"(第 {attempt + 1} 次重试 / 共 {cfg.max_attempts} 次): {e}")
+                    await self._notify_retry_start(reason, attempt + 1, cfg.max_attempts, backoff)
+                    await asyncio.sleep(backoff)
 
-        reason = self._classify_error(last_error, cfg)
-        details = self._extract_error_details(last_error)
-        llm_logger.error(f"LLM stream 重试次数耗尽 [{reason}] [{details}]，已尝试{cfg.max_attempts} 次重试）: {last_error}")
-        await self._notify_retry_end()
-        raise last_error
+            reason = self._classify_error(last_error, cfg)
+            details = self._extract_error_details(last_error)
+            llm_logger.error(f"LLM stream 重试次数耗尽 [{reason}] [{details}]，已尝试{cfg.max_attempts} 次重试）: {last_error}")
+            await self._notify_retry_end()
+            raise last_error
 
 
 def _patched_build_request_params(self, *, stream: bool, **kwargs) -> dict:
@@ -788,3 +795,31 @@ def apply_openai_model_client_patch() -> None:
     for _attr in _instance_attrs + _class_attrs:
         if hasattr(RetryMixin, _attr):
             setattr(OpenAIModelClient, _attr, getattr(RetryMixin, _attr))
+
+    apply_tool_invoke_interface_log()
+
+
+def apply_tool_invoke_interface_log() -> None:
+    """Log tool execution as RESP lines in ``interface.log`` (runtime path: AbilityManager)."""
+    from jiuwenclaw.interface_resp import session_id_from_context, track_tool_resp
+
+    try:
+        from openjiuwen.core.single_agent.ability_manager import AbilityManager
+    except Exception:
+        llm_logger.debug("AbilityManager tool interface log patch skipped")
+        return
+
+    _execute = AbilityManager._execute_single_tool_call  # pylint: disable=protected-access
+    if getattr(_execute, "_jiuwen_interface_log_patched", False):
+        return
+
+    _orig_execute = _execute
+
+    async def _patched_execute(self, tool_call, session, tag=None):
+        tool_name = str(getattr(tool_call, "name", "") or "unknown")
+        sid = session_id_from_context(session) or None
+        async with track_tool_resp(tool_name, session_id=sid):
+            return await _orig_execute(self, tool_call, session, tag=tag)
+
+    _patched_execute._jiuwen_interface_log_patched = True  # type: ignore[attr-defined]  # pylint: disable=protected-access
+    AbilityManager._execute_single_tool_call = _patched_execute  # pylint: disable=protected-access

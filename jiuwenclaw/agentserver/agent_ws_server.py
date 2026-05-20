@@ -449,9 +449,22 @@ class AgentWebSocketServer:
             request.is_stream,
         )
 
-        try:
-            from jiuwenclaw.schema.message import ReqMethod
+        from jiuwenclaw.interface_resp import maybe_track_e2a_resp
 
+        async with maybe_track_e2a_resp(
+            ws,
+            req_method=request.req_method,
+            params=request.params if isinstance(request.params, dict) else None,
+            request_id=request.request_id,
+            channel_id=request.channel_id or "",
+            session_id=request.session_id,
+        ):
+            await self._handle_agent_request_body(ws, request, send_lock)
+
+    async def _handle_agent_request_body(self, ws: Any, request: Any, send_lock: asyncio.Lock) -> None:
+        from jiuwenclaw.schema.message import ReqMethod
+
+        try:
             if request.channel_id == "acp" and request.req_method != ReqMethod.INITIALIZE:
                 metadata = dict(request.metadata or {})
                 ws_caps = self._get_ws_acp_client_capabilities(ws)
