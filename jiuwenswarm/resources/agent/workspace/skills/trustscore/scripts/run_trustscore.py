@@ -11,6 +11,7 @@ import re
 import string
 import sys
 from collections import Counter
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -20,6 +21,14 @@ CHOICE_LABELS = ["A", "B", "C", "D", "E"]
 
 logger = logging.getLogger("trustscore")
 result_logger = logging.getLogger("trustscore.result")
+
+
+@dataclass(frozen=True)
+class DistractorRequest:
+    question: str
+    answer: str
+    model: str
+    count: int
 
 
 def configure_logging() -> None:
@@ -175,10 +184,7 @@ def generate_paraphrases(
 
 def generate_distractors(
     client: Any,
-    question: str,
-    answer: str,
-    model: str,
-    count: int,
+    request: DistractorRequest,
     base_model: type[Any],
 ) -> list[str]:
     class DistractorResponse(base_model):  # type: ignore[valid-type, misc]
@@ -190,13 +196,13 @@ def generate_distractors(
         "distinct from the answer."
     )
     user_prompt = (
-        f"For the question-answer pair below, generate {count} unique distractors. "
+        f"For the question-answer pair below, generate {request.count} unique distractors. "
         "Return only the structured distractors list.\n\n"
-        f"Q: {question}\n"
-        f"A: {answer}"
+        f"Q: {request.question}\n"
+        f"A: {request.answer}"
     )
     completion = client.beta.chat.completions.parse(
-        model=model,
+        model=request.model,
         messages=[
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_prompt},
@@ -204,7 +210,7 @@ def generate_distractors(
         response_format=DistractorResponse,
     )
     parsed = completion.choices[0].message.parsed
-    return unique_items(parsed.distractors, forbidden={normalize_answer(answer)})
+    return unique_items(parsed.distractors, forbidden={normalize_answer(request.answer)})
 
 
 def generate_mcqs(
@@ -302,10 +308,12 @@ def run_trustscore(args: argparse.Namespace) -> dict[str, Any]:
     )
     distractors = generate_distractors(
         client,
-        question,
-        answer,
-        args.generator_model,
-        args.distractor_num,
+        DistractorRequest(
+            question=question,
+            answer=answer,
+            model=args.generator_model,
+            count=args.distractor_num,
+        ),
         BaseModel,
     )
     question_pool = unique_items([question] + paraphrases)
