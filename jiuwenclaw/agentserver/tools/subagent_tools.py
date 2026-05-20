@@ -157,6 +157,25 @@ async def get_fork_messages() -> list[Any]:
             # Filter out SystemMessage
             filtered_messages = [m for m in messages if not isinstance(m, SystemMessage)]
 
+            # Filter out active skill body pins injected by context engine.
+            # Fork agent should NOT inherit the full skill body (~62K chars) from parent:
+            # - Fork instruction already contains actionable specifications
+            # - Fork agent can reload skills via skill_tool() if it needs the full body
+            pin_count = 0
+            clean_messages = []
+            for m in filtered_messages:
+                meta = getattr(m, "metadata", None) or {}
+                if meta.get("active_skill_pin"):
+                    pin_count += 1
+                else:
+                    clean_messages.append(m)
+            if pin_count:
+                logger.info(
+                    f"[ForkAgent] Filtered out {pin_count} active_skill_pin message(s) "
+                    f"from fork context"
+                )
+            filtered_messages = clean_messages
+
             # Remove the last AssistantMessage if it has tool_calls
             # This is the current pending fork_agent call which has no ToolMessage yet
             # Including it would cause _fix_incomplete_tool_context to add placeholders
