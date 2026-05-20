@@ -7,22 +7,17 @@ from typing import Any
 
 from openjiuwen_runtime.foundation.db.handler import DBHandler
 
-from jiuwenclaw_manager.infrastructure.gateway_forward import (
-    EnterpriseGatewayForward,
-    forward_headers,
-    forward_upstream_data,
-    forward_upstream_data_or_none,
-    normalize_list_page,
-)
 from jiuwenclaw_manager.core.instance.instance_service import get_instance_row
 from jiuwenclaw_manager.infrastructure.utils import utc_now
+from jiuwenclaw_manager.manager_ws_server import ManagerWsServer
+from jiuwenclaw_manager.manager_ws_server.server import push_to_instance
+from jiuwenclaw_manager.models.config_effective_policy_models import (
+    CONFIG_DEFAULT_TEMPLATE_MAPPING_TABLE_DEF,
+)
 from jiuwenclaw_manager.schemas.config_effective_policy_schemas import (
     ConfigDefaultTemplateMappingCreateBody,
     ConfigDefaultTemplateMappingOut,
     ConfigDefaultTemplateMappingUpdateBody,
-)
-from jiuwenclaw_manager.models.config_effective_policy_models import (
-    CONFIG_DEFAULT_TEMPLATE_MAPPING_TABLE_DEF,
 )
 
 _TEMPLATE_MAPPING_TABLE = CONFIG_DEFAULT_TEMPLATE_MAPPING_TABLE_DEF.table_name
@@ -33,6 +28,33 @@ _ALLOWED_TEMPLATE_TYPES = frozenset({
     "skill_whitelist",
     "service_resource",
 })
+
+
+async def push_config_default_template_mapping_op(
+    jiuwenclaw_id: str,
+    op: str,
+    *,
+    mapping: dict[str, Any] | None = None,
+    mapping_id: int | None = None,
+    updates: dict[str, Any] | None = None,
+    server: ManagerWsServer | None = None,
+) -> dict[str, Any]:
+    """推送默认模板映射变更（``config.config_default_template_mappings``），返回 config.ack payload。"""
+    payload: dict[str, Any] = {
+        "op": op,
+        "jiuwenclaw_id": jiuwenclaw_id,
+    }
+    if mapping is not None:
+        payload["mapping"] = mapping
+    if mapping_id is not None:
+        payload["mapping_id"] = mapping_id
+    if updates is not None:
+        payload["updates"] = updates
+    return await push_to_instance(
+        jiuwenclaw_id,
+        config={"config_default_template_mappings": payload},
+        server=server,
+    )
 
 
 def _mapping_pk(jiuwenclaw_id: str, mapping_id: int) -> dict[str, Any]:
@@ -63,7 +85,9 @@ def _validate_template_type(template_type: str) -> str:
     return normalized
 
 
-def _validate_dimension_keys(user_id: str | None, group_id: str | None) -> tuple[str | None, str | None]:
+def _validate_dimension_keys(
+    user_id: str | None, group_id: str | None
+) -> tuple[str | None, str | None]:
     uid = _optional_key(user_id)
     gid = _optional_key(group_id)
     if uid is None and gid is None:
@@ -86,20 +110,9 @@ def _row_to_out(row: Any) -> ConfigDefaultTemplateMappingOut:
     )
 
 
-def _out_from_gateway(data: dict[str, Any]) -> ConfigDefaultTemplateMappingOut:
-    return ConfigDefaultTemplateMappingOut.model_validate(data)
-
-
 class ConfigDefaultTemplateMappingService:
-    def __init__(
-        self,
-        handler: DBHandler,
-        extra_headers: dict[str, str] | None = None,
-    ) -> None:
+    def __init__(self, handler: DBHandler) -> None:
         self._handler = handler
-        self._gw = EnterpriseGatewayForward(
-            handler, extra_headers=extra_headers or forward_headers()
-        )
 
     async def _validate_jiuwenclaw_id(self, jiuwenclaw_id: str) -> str:
         normalized = jiuwenclaw_id.strip()
@@ -110,8 +123,28 @@ class ConfigDefaultTemplateMappingService:
             raise ValueError(f"unknown jiuwenclaw_id={normalized!r}")
         return normalized
 
+    def _mapping_dict_for_push(
+        self, row: dict[str, Any], *, now: datetime
+    ) -> dict[str, Any]:
+        """构建经 WebSocket 下发给 Gateway 的 mapping 对象（不含 id，由 Gateway 自增）。"""
+        return {
+            "jiuwenclaw_id": row["jiuwenclaw_id"],
+            "user_id": row.get("user_id"),
+            "group_id": row.get("group_id"),
+            "template_id": row["template_id"],
+            "template_type": row["template_type"],
+            "enabled": row.get("enabled", True),
+            "data": row.get("data"),
+            "created_at": _iso(row.get("created_at") or now),
+            "updated_at": _iso(row.get("updated_at") or now),
+        }
+
     async def create(
-        self, jiuwenclaw_id: str, body: ConfigDefaultTemplateMappingCreateBody
+        self,
+        jiuwenclaw_id: str,
+        body: ConfigDefaultTemplateMappingCreateBody,
+        *,
+        ws_server: ManagerWsServer | None = None,
     ) -> ConfigDefaultTemplateMappingOut:
         normalized = await self._validate_jiuwenclaw_id(jiuwenclaw_id)
         user_id, group_id = _validate_dimension_keys(body.user_id, body.group_id)
@@ -120,17 +153,8 @@ class ConfigDefaultTemplateMappingService:
         if not template_id:
             raise ValueError("template_id is required")
 
-        gw_data = forward_upstream_data(
-            await self._gw.create_template_mapping(
-                normalized, body.model_dump(mode="json")
-            )
-        )
-        if not isinstance(gw_data, dict) or gw_data.get("id") is None:
-            raise ValueError("gateway create template mapping returned no id")
-
         now = utc_now()
-        payload = {
-            "id": int(gw_data["id"]),
+        row = {
             "jiuwenclaw_id": normalized,
             "user_id": user_id,
             "group_id": group_id,
@@ -141,6 +165,24 @@ class ConfigDefaultTemplateMappingService:
             "created_at": now,
             "updated_at": now,
         }
+        ack = await push_config_default_template_mapping_op(
+            normalized,
+            "create",
+            mapping=self._mapping_dict_for_push(row, now=now),
+            server=ws_server,
+        )
+        ack_result = ack.get("result") if isinstance(ack, dict) else None
+        mapping_id: int | None = None
+        if isinstance(ack_result, dict):
+            raw_id = ack_result.get("mapping_id")
+            if raw_id is not None:
+                mapping_id = int(raw_id)
+        if mapping_id is None or mapping_id < 1:
+            raise ValueError(
+                "gateway config_default_template_mappings.create returned no mapping_id"
+            )
+
+        payload = {**row, "id": mapping_id}
         created = await self._handler.create(_TEMPLATE_MAPPING_TABLE, payload)
         return _row_to_out(created)
 
@@ -148,14 +190,12 @@ class ConfigDefaultTemplateMappingService:
         self, jiuwenclaw_id: str, mapping_id: int
     ) -> ConfigDefaultTemplateMappingOut | None:
         normalized = await self._validate_jiuwenclaw_id(jiuwenclaw_id)
-        gw_data = forward_upstream_data_or_none(
-            await self._gw.get_template_mapping(normalized, mapping_id)
+        row = await self._handler.get(
+            _TEMPLATE_MAPPING_TABLE, _mapping_pk(normalized, mapping_id)
         )
-        if gw_data is None:
+        if row is None:
             return None
-        if not isinstance(gw_data, dict):
-            raise ValueError("invalid gateway response for template mapping")
-        return _out_from_gateway(gw_data)
+        return _row_to_out(row)
 
     async def list_mappings(
         self,
@@ -175,27 +215,38 @@ class ConfigDefaultTemplateMappingService:
 
         page = max(page, 1)
         page_size = min(max(page_size, 1), 200)
-        gw_data = forward_upstream_data(
-            await self._gw.list_template_mappings(
-                normalized,
-                user_id=_optional_key(user_id),
-                group_id=_optional_key(group_id),
-                template_type=template_type,
-                template_id=template_id.strip() if template_id else None,
-                enabled=enabled,
-                page_num=page,
-                page_size=page_size,
-            )
+        filters: dict[str, Any] = {"jiuwenclaw_id": normalized}
+        if user_id:
+            filters["user_id"] = _optional_key(user_id)
+        if group_id:
+            filters["group_id"] = _optional_key(group_id)
+        if template_type:
+            filters["template_type"] = template_type
+        if template_id:
+            filters["template_id"] = template_id.strip()
+        if enabled is not None:
+            filters["enabled"] = enabled
+
+        offset = (page - 1) * page_size
+        rows = await self._handler.list_records(
+            _TEMPLATE_MAPPING_TABLE, filters, limit=page_size, offset=offset
         )
-        if not isinstance(gw_data, dict):
-            return normalize_list_page(None, page=page, page_size=page_size)
-        return normalize_list_page(gw_data, page=page, page_size=page_size)
+        total = await self._handler.count_records(_TEMPLATE_MAPPING_TABLE, filters)
+        items = [_row_to_out(r).model_dump(mode="json") for r in rows]
+        return {
+            "items": items,
+            "total": total,
+            "page": page,
+            "page_size": page_size,
+        }
 
     async def update(
         self,
         jiuwenclaw_id: str,
         mapping_id: int,
         body: ConfigDefaultTemplateMappingUpdateBody,
+        *,
+        ws_server: ManagerWsServer | None = None,
     ) -> ConfigDefaultTemplateMappingOut | None:
         normalized = await self._validate_jiuwenclaw_id(jiuwenclaw_id)
 
@@ -214,39 +265,53 @@ class ConfigDefaultTemplateMappingService:
         row = await self._handler.get(
             _TEMPLATE_MAPPING_TABLE, _mapping_pk(normalized, mapping_id)
         )
-        merged_user = updates.get("user_id", row.user_id if row else None)
-        merged_group = updates.get("group_id", row.group_id if row else None)
-        _validate_dimension_keys(merged_user, merged_group)
-
-        gw_data = forward_upstream_data_or_none(
-            await self._gw.update_template_mapping(normalized, mapping_id, updates)
-        )
-        if gw_data is None:
+        if row is None:
             return None
 
-        if updates:
-            updates = dict(updates)
-            updates["updated_at"] = utc_now()
-            updated = await self._handler.update(
-                _TEMPLATE_MAPPING_TABLE,
-                _mapping_pk(normalized, mapping_id),
-                updates,
-            )
-        else:
-            updated = row
+        merged_user = updates.get("user_id", row.user_id)
+        merged_group = updates.get("group_id", row.group_id)
+        _validate_dimension_keys(merged_user, merged_group)
+
+        if not updates:
+            return _row_to_out(row)
+
+        await push_config_default_template_mapping_op(
+            normalized,
+            "update",
+            mapping_id=mapping_id,
+            updates=updates,
+            server=ws_server,
+        )
+        payload = dict(updates)
+        payload["updated_at"] = utc_now()
+        updated = await self._handler.update(
+            _TEMPLATE_MAPPING_TABLE,
+            _mapping_pk(normalized, mapping_id),
+            payload,
+        )
         if updated is None:
-            if not isinstance(gw_data, dict):
-                raise ValueError("invalid gateway response for template mapping")
-            return _out_from_gateway(gw_data)
+            return None
         return _row_to_out(updated)
 
-    async def delete(self, jiuwenclaw_id: str, mapping_id: int) -> bool:
+    async def delete(
+        self,
+        jiuwenclaw_id: str,
+        mapping_id: int,
+        *,
+        ws_server: ManagerWsServer | None = None,
+    ) -> bool:
         normalized = await self._validate_jiuwenclaw_id(jiuwenclaw_id)
-        gw_data = forward_upstream_data_or_none(
-            await self._gw.delete_template_mapping(normalized, mapping_id)
+        row = await self._handler.get(
+            _TEMPLATE_MAPPING_TABLE, _mapping_pk(normalized, mapping_id)
         )
-        if gw_data is None:
+        if row is None:
             return False
+        await push_config_default_template_mapping_op(
+            normalized,
+            "delete",
+            mapping_id=mapping_id,
+            server=ws_server,
+        )
         return await self._handler.delete(
             _TEMPLATE_MAPPING_TABLE, _mapping_pk(normalized, mapping_id)
         )

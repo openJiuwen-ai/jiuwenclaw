@@ -75,6 +75,16 @@ class Settings(BaseSettings):
         default=None, validation_alias="CLAWMANAGER_INSTANCE_CONFIG_TEMPLATE"
     )
 
+    manager_ws_enabled: bool = Field(
+        default=True, validation_alias="MANAGER_WS_ENABLED"
+    )
+    manager_ws_host: str = Field(
+        default="127.0.0.1", validation_alias="MANAGER_WS_HOST"
+    )
+    manager_ws_port: int = Field(
+        default=8766, validation_alias="MANAGER_WS_PORT"
+    )
+
     @property
     def host(self) -> str:
         return self.rest_host

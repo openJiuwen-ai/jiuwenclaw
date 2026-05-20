@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from openjiuwen_runtime.foundation.db.handler import DBHandler
 
 from jiuwenclaw_manager.infrastructure.db import get_db_handler
@@ -14,8 +14,13 @@ from jiuwenclaw_manager.schemas.template_schemas import (
     ModelTemplateUpdateBody,
 )
 from jiuwenclaw_manager.core.template.model_template import ModelTemplateService
+from jiuwenclaw_manager.manager_ws_server import ManagerWsServer
 
 templates_router = APIRouter()
+
+
+def _ws_server_from_request(request: Request) -> ManagerWsServer | None:
+    return getattr(request.app.state, "manager_ws_server", None)
 
 
 def _svc(handler: DBHandler) -> ModelTemplateService:
@@ -26,11 +31,14 @@ def _svc(handler: DBHandler) -> ModelTemplateService:
 async def create_model_template(
     jiuwenclaw_id: str,
     body: ModelTemplateCreateBody,
+    request: Request,
     handler: Annotated[DBHandler, Depends(get_db_handler)],
 ):
     svc = _svc(handler)
     try:
-        data = await svc.create(jiuwenclaw_id, body)
+        data = await svc.create(
+            jiuwenclaw_id, body, ws_server=_ws_server_from_request(request)
+        )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return ResponseModel(code=200, message="success", data=data.model_dump())
@@ -83,11 +91,17 @@ async def update_model_template(
     jiuwenclaw_id: str,
     template_id: int,
     body: ModelTemplateUpdateBody,
+    request: Request,
     handler: Annotated[DBHandler, Depends(get_db_handler)],
 ):
     svc = _svc(handler)
     try:
-        row = await svc.update(jiuwenclaw_id, template_id, body)
+        row = await svc.update(
+            jiuwenclaw_id,
+            template_id,
+            body,
+            ws_server=_ws_server_from_request(request),
+        )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     if row is None:
@@ -99,11 +113,14 @@ async def update_model_template(
 async def delete_model_template(
     jiuwenclaw_id: str,
     template_id: int,
+    request: Request,
     handler: Annotated[DBHandler, Depends(get_db_handler)],
 ):
     svc = _svc(handler)
     try:
-        ok = await svc.delete(jiuwenclaw_id, template_id)
+        ok = await svc.delete(
+            jiuwenclaw_id, template_id, ws_server=_ws_server_from_request(request)
+        )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     if not ok:

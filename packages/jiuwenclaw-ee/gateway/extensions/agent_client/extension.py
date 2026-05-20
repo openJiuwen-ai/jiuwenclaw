@@ -30,6 +30,10 @@ class AgentClientRestExtension(BaseExtension):
                 "FastAPI extension requires uvicorn. Please install extension dependencies first."
             ) from exc
 
+        from .agent_client_rest.infrastructure.db import ensure_db_handler_ready
+
+        await ensure_db_handler_ready()
+
         app = create_app()
         uvicorn_config = uvicorn.Config(
             app=app,
@@ -79,9 +83,10 @@ def _resolve_rest_config() -> tuple[bool, str, int]:
 
 
 async def register_extensions(registry: ExtensionRegistry) -> list[Any]:
-    register_claw_manager_dmq_hooks(registry)
+    # register_claw_manager_dmq_hooks(registry)
     loaded: list[Any] = [ClawManagerDmqLifecycleExtension()]
     enabled, host, port = _resolve_rest_config()
+    enabled = False
     if enabled:
         rest = AgentClientRestExtension(host=host, port=port)
         await rest.initialize(registry.config)

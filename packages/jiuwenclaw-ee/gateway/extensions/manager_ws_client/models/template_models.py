@@ -1,12 +1,46 @@
-"""模型模板 model_template 表定义（id 自增主键，与 Gateway 侧 id 独立）。"""
+# coding: utf-8
+# Copyright (c) Huawei Technologies Co., Ltd. 2026-2026. All rights reserved
+
+"""模型模板表 model_template（与 Claw Manager 企业级数据模型对齐）。"""
 
 from __future__ import annotations
 
+from datetime import datetime
+from typing import Any
+
+from pydantic import BaseModel
 from openjiuwen_runtime.foundation.db.table_def import (
     ColumnDefinition,
     IndexDefinition,
     TableDefinition,
 )
+
+
+class ModelTemplateInfo(BaseModel):
+    id: int
+    jiuwenclaw_id: str
+    display_name: str
+    description: str | None
+    model_type: Any
+    model_tags: list[Any] | None
+    api_base: str
+    api_key: str
+    model_id: str
+    model_provider: str
+    parameters: dict[str, Any] | None
+    timeout: int
+    retry_count: int
+    enable_streaming: bool
+    enable_function_calling: bool
+    verify_ssl: bool
+    enabled: bool
+    data: dict[str, Any] | None
+    created_at: datetime
+    updated_at: datetime
+
+    class Config:
+        from_attributes = True
+
 
 MODEL_TEMPLATE_TABLE_DEF = TableDefinition(
     table_name="model_template",

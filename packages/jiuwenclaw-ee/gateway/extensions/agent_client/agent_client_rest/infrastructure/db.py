@@ -22,8 +22,24 @@ _db_handler: DBHandler | None = None
 
 def get_db_handler() -> DBHandler:
     if _db_handler is None:
-        raise RuntimeError("Database handler is not initialized; call create_db_handler first.")
+        raise RuntimeError("Database handler is not initialized; call ensure_db_handler_ready first.")
     return _db_handler
+
+
+async def ensure_db_handler_ready() -> DBHandler:
+    """创建并连接 DB（幂等）。供 agent_client_rest lifespan 使用。"""
+    global _db_handler
+    if _db_handler is not None:
+        return _db_handler
+
+    handler = create_db_handler()
+    await handler.init_database()
+    await handler.connect()
+    from ..models.table_init import init_all_tables
+
+    await init_all_tables(handler)
+    logger.info("[agent_client_rest] database handler ready")
+    return handler
 
 
 def _sqlite_handler_from_db_cfg(db_cfg: dict[str, Any]) -> SQLiteHandler:

@@ -13,18 +13,41 @@ from jiuwenclaw_manager.schemas.template_schemas import (
     ModelTemplateUpdateBody,
 )
 from jiuwenclaw_manager.infrastructure.utils import utc_now
+from jiuwenclaw_manager.manager_ws_server import ManagerWsServer
+from jiuwenclaw_manager.manager_ws_server.server import push_to_instance
 from jiuwenclaw_manager.models.template_models import MODEL_TEMPLATE_TABLE_DEF
 from jiuwenclaw_manager.core.instance.instance_service import get_instance_row
-from jiuwenclaw_manager.infrastructure.gateway_forward import (
-    EnterpriseGatewayForward,
-    forward_headers,
-    forward_upstream_data,
-    forward_upstream_data_or_none,
-    normalize_list_page,
-)
 
 _ALLOWED_MODEL_TYPES = frozenset({"default", "video", "audio", "vision"})
 _MODEL_TEMPLATE_TABLE = MODEL_TEMPLATE_TABLE_DEF.table_name
+_LIST_ALL_CAP = 10_000
+
+
+async def push_model_template_op(
+    jiuwenclaw_id: str,
+    op: str,
+    *,
+    template: dict[str, Any] | None = None,
+    template_id: int | None = None,
+    updates: dict[str, Any] | None = None,
+    server: ManagerWsServer | None = None,
+) -> dict[str, Any]:
+    """推送模型模板变更（``config.model_templates``），返回 config.ack payload。"""
+    payload: dict[str, Any] = {
+        "op": op,
+        "jiuwenclaw_id": jiuwenclaw_id,
+    }
+    if template is not None:
+        payload["template"] = template
+    if template_id is not None:
+        payload["template_id"] = template_id
+    if updates is not None:
+        payload["updates"] = updates
+    return await push_to_instance(
+        jiuwenclaw_id,
+        config={"model_templates": payload},
+        server=server,
+    )
 
 
 def _template_pk(jiuwenclaw_id: str, template_id: int) -> dict[str, Any]:
@@ -58,6 +81,14 @@ def _validate_model_type(value: str | list[str]) -> str | list[str]:
     raise ValueError("model_type must be a string or a list of strings")
 
 
+def _matches_model_type(row_model_type: Any, filter_type: str) -> bool:
+    if isinstance(row_model_type, str):
+        return row_model_type == filter_type
+    if isinstance(row_model_type, list):
+        return filter_type in row_model_type
+    return str(row_model_type) == filter_type
+
+
 def _row_to_out(row: Any) -> ModelTemplateOut:
     model_type = row.model_type
     if not isinstance(model_type, (str, list)):
@@ -89,20 +120,9 @@ def _row_to_out(row: Any) -> ModelTemplateOut:
     )
 
 
-def _out_from_gateway(data: dict[str, Any]) -> ModelTemplateOut:
-    return ModelTemplateOut.model_validate(data)
-
-
 class ModelTemplateService:
-    def __init__(
-        self,
-        handler: DBHandler,
-        extra_headers: dict[str, str] | None = None,
-    ) -> None:
+    def __init__(self, handler: DBHandler) -> None:
         self._handler = handler
-        self._gw = EnterpriseGatewayForward(
-            handler, extra_headers=extra_headers or forward_headers()
-        )
 
     async def _validate_jiuwenclaw_id(self, jiuwenclaw_id: str) -> str:
         normalized = jiuwenclaw_id.strip()
@@ -131,12 +151,35 @@ class ModelTemplateService:
             _MODEL_TEMPLATE_TABLE, _template_pk(jiuwenclaw_id, template_id)
         )
 
+    def _template_dict_for_push(self, row: dict[str, Any], *, now: datetime) -> dict[str, Any]:
+        """构建经 WebSocket 下发给 Gateway 的 template 对象（不含 id，由 Gateway 自增）。"""
+        return {
+            "jiuwenclaw_id": row["jiuwenclaw_id"],
+            "display_name": row["display_name"],
+            "description": row.get("description"),
+            "model_type": row["model_type"],
+            "model_tags": row.get("model_tags"),
+            "api_base": row["api_base"],
+            "api_key": row["api_key"],
+            "model_id": row["model_id"],
+            "model_provider": row["model_provider"],
+            "parameters": row.get("parameters"),
+            "timeout": row.get("timeout"),
+            "retry_count": row.get("retry_count"),
+            "enable_streaming": row.get("enable_streaming"),
+            "enable_function_calling": row.get("enable_function_calling"),
+            "verify_ssl": row.get("verify_ssl"),
+            "enabled": row.get("enabled"),
+            "data": row.get("data"),
+            "created_at": _iso(row.get("created_at") or now),
+            "updated_at": _iso(row.get("updated_at") or now),
+        }
+
     def _build_row_for_create(
-        self, normalized: str, body: ModelTemplateCreateBody, *, template_id: int
+        self, normalized: str, body: ModelTemplateCreateBody
     ) -> dict[str, Any]:
         model_type = _validate_model_type(body.model_type)
         return {
-            "id": template_id,
             "jiuwenclaw_id": normalized,
             "display_name": body.display_name.strip(),
             "description": body.description,
@@ -156,36 +199,37 @@ class ModelTemplateService:
             "data": body.data,
         }
 
-    async def create(self, jiuwenclaw_id: str, body: ModelTemplateCreateBody) -> ModelTemplateOut:
+    async def create(
+        self,
+        jiuwenclaw_id: str,
+        body: ModelTemplateCreateBody,
+        *,
+        ws_server: ManagerWsServer | None = None,
+    ) -> ModelTemplateOut:
         normalized = await self._validate_jiuwenclaw_id(jiuwenclaw_id)
         _validate_model_type(body.model_type)
-        gw_data = forward_upstream_data(
-            await self._gw.create_model_template(
-                normalized, body.model_dump(mode="json")
-            )
-        )
-        if not isinstance(gw_data, dict) or gw_data.get("id") is None:
-            raise ValueError("gateway create model template returned no id")
-        row = self._build_row_for_create(
-            normalized, body, template_id=int(gw_data["id"])
-        )
+        row = self._build_row_for_create(normalized, body)
         now = utc_now()
         payload = dict(row)
         payload.setdefault("created_at", now)
         payload.setdefault("updated_at", now)
+        await push_model_template_op(
+            normalized,
+            "create",
+            template=self._template_dict_for_push(payload, now=now),
+            server=ws_server,
+        )
         created = await self._handler.create(_MODEL_TEMPLATE_TABLE, payload)
         return _row_to_out(created)
 
     async def get(self, jiuwenclaw_id: str, template_id: int) -> ModelTemplateOut | None:
         normalized = await self._validate_jiuwenclaw_id(jiuwenclaw_id)
-        gw_data = forward_upstream_data_or_none(
-            await self._gw.get_model_template(normalized, template_id)
+        row = await self._handler.get(
+            _MODEL_TEMPLATE_TABLE, _template_pk(normalized, template_id)
         )
-        if gw_data is None:
+        if row is None:
             return None
-        if not isinstance(gw_data, dict):
-            raise ValueError("invalid gateway response for model template")
-        return _out_from_gateway(gw_data)
+        return _row_to_out(row)
 
     async def list_templates(
         self,
@@ -199,21 +243,49 @@ class ModelTemplateService:
         normalized = await self._validate_jiuwenclaw_id(jiuwenclaw_id)
         page = max(page, 1)
         page_size = min(max(page_size, 1), 200)
-        gw_data = forward_upstream_data(
-            await self._gw.list_model_templates(
-                normalized,
-                enabled=enabled,
-                model_type=model_type,
-                page_num=page,
-                page_size=page_size,
+        filters: dict[str, Any] = {"jiuwenclaw_id": normalized}
+        if enabled is not None:
+            filters["enabled"] = enabled
+
+        if model_type:
+            rows = await self._handler.list_records(
+                _MODEL_TEMPLATE_TABLE, filters, limit=_LIST_ALL_CAP, offset=0
             )
+            items = [
+                _row_to_out(r).model_dump(mode="json")
+                for r in rows
+                if _matches_model_type(getattr(r, "model_type", None), model_type)
+            ]
+            total = len(items)
+            offset = (page - 1) * page_size
+            page_items = items[offset : offset + page_size]
+            return {
+                "items": page_items,
+                "total": total,
+                "page": page,
+                "page_size": page_size,
+            }
+
+        offset = (page - 1) * page_size
+        rows = await self._handler.list_records(
+            _MODEL_TEMPLATE_TABLE, filters, limit=page_size, offset=offset
         )
-        if not isinstance(gw_data, dict):
-            return normalize_list_page(None, page=page, page_size=page_size)
-        return normalize_list_page(gw_data, page=page, page_size=page_size)
+        total = await self._handler.count_records(_MODEL_TEMPLATE_TABLE, filters)
+        items = [_row_to_out(r).model_dump(mode="json") for r in rows]
+        return {
+            "items": items,
+            "total": total,
+            "page": page,
+            "page_size": page_size,
+        }
 
     async def update(
-        self, jiuwenclaw_id: str, template_id: int, body: ModelTemplateUpdateBody
+        self,
+        jiuwenclaw_id: str,
+        template_id: int,
+        body: ModelTemplateUpdateBody,
+        *,
+        ws_server: ManagerWsServer | None = None,
     ) -> ModelTemplateOut | None:
         normalized = await self._validate_jiuwenclaw_id(jiuwenclaw_id)
 
@@ -229,26 +301,47 @@ class ModelTemplateService:
         if "model_provider" in updates and updates["model_provider"] is not None:
             updates["model_provider"] = updates["model_provider"].strip()
 
-        gw_data = forward_upstream_data_or_none(
-            await self._gw.update_model_template(
-                normalized, template_id, updates
+        if not updates:
+            row = await self._handler.get(
+                _MODEL_TEMPLATE_TABLE, _template_pk(normalized, template_id)
             )
+            return _row_to_out(row) if row is not None else None
+
+        existing = await self._handler.get(
+            _MODEL_TEMPLATE_TABLE, _template_pk(normalized, template_id)
         )
-        if gw_data is None:
+        if existing is None:
             return None
 
+        await push_model_template_op(
+            normalized,
+            "update",
+            template_id=template_id,
+            updates=updates,
+            server=ws_server,
+        )
         row = await self._db_update_template(normalized, template_id, updates)
         if row is None:
-            if not isinstance(gw_data, dict):
-                raise ValueError("invalid gateway response for model template")
-            return _out_from_gateway(gw_data)
+            return None
         return _row_to_out(row)
 
-    async def delete(self, jiuwenclaw_id: str, template_id: int) -> bool:
+    async def delete(
+        self,
+        jiuwenclaw_id: str,
+        template_id: int,
+        *,
+        ws_server: ManagerWsServer | None = None,
+    ) -> bool:
         normalized = await self._validate_jiuwenclaw_id(jiuwenclaw_id)
-        gw_data = forward_upstream_data_or_none(
-            await self._gw.delete_model_template(normalized, template_id)
+        row = await self._handler.get(
+            _MODEL_TEMPLATE_TABLE, _template_pk(normalized, template_id)
         )
-        if gw_data is None:
+        if row is None:
             return False
+        await push_model_template_op(
+            normalized,
+            "delete",
+            template_id=template_id,
+            server=ws_server,
+        )
         return await self._db_delete_template(normalized, template_id)

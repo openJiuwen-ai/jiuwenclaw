@@ -4,21 +4,17 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 
-from .infrastructure.db import create_db_handler
-from .models.table_init import init_all_tables
+from .infrastructure.db import ensure_db_handler_ready, get_db_handler
 from .routers.register import router_register
 
 
 def create_app() -> FastAPI:
     @asynccontextmanager
     async def lifespan(app: FastAPI):
-        db_handler = create_db_handler()
+        db_handler = await ensure_db_handler_ready()
         app.state.db_handler = db_handler
-        await db_handler.init_database()
-        await db_handler.connect()
-        await init_all_tables(db_handler)
         yield
-        await db_handler.disconnect()
+        await get_db_handler().disconnect()
 
     app = FastAPI(
         title="Agent Client REST API",
