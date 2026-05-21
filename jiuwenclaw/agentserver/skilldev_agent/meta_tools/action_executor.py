@@ -113,20 +113,20 @@ def call_action_executor_api(
 ) -> dict[str, Any]:
     """Invoke the action executor gateway and return a structured result dict."""
     _ensure_env_loaded()
-    secret_key = os.getenv("SECRET_KEY") or ""
+    secret_key = os.getenv("PLUGIN_SECRET_KEY") or ""
     if not secret_key:
         return {
             "success": False,
-            "error": "缺少环境变量 SECRET_KEY，无法调用外部工具",
+            "error": "缺少环境变量 PLUGIN_SECRET_KEY，无法调用外部工具",
         }
 
     proto = (protocol or "REST").upper()
     if proto == "REST":
-        url = os.getenv("RESTFUL_URL") or ""
-        env_hint = "RESTFUL_URL"
+        url = os.getenv("PLUGIN_RESTFUL_URL") or ""
+        env_hint = "PLUGIN_RESTFUL_URL"
     else:
-        url = os.getenv("WS_URL") or ""
-        env_hint = "WS_URL"
+        url = os.getenv("PLUGIN_WS_URL") or ""
+        env_hint = "PLUGIN_WS_URL"
 
     if not url:
         return {

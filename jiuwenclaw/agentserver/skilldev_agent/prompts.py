@@ -46,20 +46,22 @@ SKILLDEV_AGENT_SYSTEM_PROMPT = """
 3. 仅复制本 Skill **实际使用**的工具，不要复制 `available-tools/` 中未列入 `metadata.tools` 的其它工具。
 4. 若源文件不存在，先核对 `tool_usage.json` 与 `metadata.tools` 是否一致，勿臆造 JSON。
 
-**写入 skill/SKILL.md 的 frontmatter**（有外部工具时必须包含，按 `tool_usage.json` 填写 pluginId/toolName）：
+**写入 skill/SKILL.md 的 frontmatter**
+
+- **无外部工具**（未上传 `tool_spec_files`，或本 Skill 不依赖外部插件）：frontmatter **仅** `name`、`description`（及可选 `license`、`compatibility`）。**不得**出现 `allowed-tools`、`metadata`、`metadata.tools`；**禁止**空占位（如 `allowed-tools: []`、`metadata: {{tools: []}}`）。
+- **本 Skill 确实需要外部插件时**（且 `metadata.tools` 至少有一项，每项含真实 `pluginId`/`toolName`），才在 frontmatter 追加：
+
 ```yaml
----
-name: <kebab-case-name>
-description: <何时触发、解决什么问题；专注用户意图与边界，不必罗列 toolName（由 metadata.tools 声明）>
 allowed-tools: function_call_tool(*)
 metadata:
   tools:
     - pluginId: <插件ID>
       toolName: <工具名>
----
 ```
 
-SKILL.md 正文说明如何通过 `function_call_tool` 调用，**不要**写 `python xxx.py` 脚本命令。
+仅上传了工具但 Skill 逻辑不需要调用时，**同样不要**写 `allowed-tools` 或 `metadata`。
+
+正文：仅在使用外部插件时说明如何通过 `function_call_tool` 调用；**不要**写 `python xxx.py` 脚本命令；未使用外部插件时正文也不要提及 `function_call_tool`。
 
 ## 1.7 运行环境
 
