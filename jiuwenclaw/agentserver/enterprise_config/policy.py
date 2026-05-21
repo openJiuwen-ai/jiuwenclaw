@@ -178,10 +178,10 @@ def _template_to_model_section(template: dict[str, Any]) -> dict[str, Any]:
         parameters = {}
     temperature = parameters.get("temperature", 0.95)
     model_name = str(template.get("model_id") or "").strip()
-    display_name = str(template.get("display_name") or "").strip()
+    template_name = str(template.get("template_name") or "").strip()
     template_id = template.get("id")
     return {
-        "display_name": display_name,
+        "template_name": template_name,
         "template_id": str(template_id) if template_id is not None else "",
         "model_client_config": {
             "api_base": template.get("api_base", ""),

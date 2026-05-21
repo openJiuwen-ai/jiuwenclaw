@@ -18,6 +18,9 @@ from ..core.config_effective_policy.config_effective_global_policy import (
 from ..core.config_effective_policy.config_effective_service_policy import (
     apply_config_effective_service_policy_sync,
 )
+from ..core.template.extension_config_template import (
+    apply_extension_config_template_sync,
+)
 from ..core.template.model_template import apply_model_template_sync
 from ..infrastructure.db import ensure_db_handler_ready
 
@@ -25,6 +28,12 @@ logger = logging.getLogger(__name__)
 
 
 async def apply_config_push(config: dict[str, Any]) -> dict[str, Any] | None:
+    extension_config_templates = config.get("extension_config_templates")
+    if isinstance(extension_config_templates, dict) and extension_config_templates.get(
+        "op"
+    ):
+        return await _apply_extension_config_templates(extension_config_templates)
+
     model_templates = config.get("model_templates")
     if isinstance(model_templates, dict) and model_templates.get("op"):
         return await _apply_model_templates(model_templates)
@@ -45,6 +54,25 @@ async def apply_config_push(config: dict[str, Any]) -> dict[str, Any] | None:
     if isinstance(service_policies, dict) and service_policies.get("op"):
         return await _apply_config_effective_service_policies(service_policies)
     return None
+
+
+async def _apply_extension_config_templates(
+    payload: dict[str, Any],
+) -> dict[str, Any] | None:
+    op = str(payload.get("op") or "").strip()
+    if not op:
+        raise ValueError("extension_config_templates.op is required")
+
+    handler = await ensure_db_handler_ready()
+    result = await apply_extension_config_template_sync(handler, op, payload)
+    logger.info(
+        "[ManagerWsClient] extension_config_templates sync op=%s template_id=%s",
+        op,
+        (result or {}).get("template_id")
+        or payload.get("template_id")
+        or (payload.get("template") or {}).get("template_id"),
+    )
+    return result
 
 
 async def _apply_model_templates(payload: dict[str, Any]) -> dict[str, Any] | None:

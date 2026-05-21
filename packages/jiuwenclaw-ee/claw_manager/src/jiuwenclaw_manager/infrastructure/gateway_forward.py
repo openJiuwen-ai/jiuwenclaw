@@ -171,56 +171,7 @@ class GatewayForwardService:
 class EnterpriseGatewayForward(GatewayForwardService):
     """企业级配置（模型模板、配置生效策略等）转发。"""
 
-    # --- model_template ---
-
-    async def create_model_template(
-        self, jiuwenclaw_id: str, body: dict[str, Any]
-    ) -> dict[str, Any]:
-        return await self._request(
-            "POST", jiuwenclaw_id, "/model-templates", json_body=body
-        )
-
-    async def list_model_templates(
-        self,
-        jiuwenclaw_id: str,
-        *,
-        enabled: bool | None = None,
-        model_type: str | None = None,
-        page_size: int = 20,
-        page_num: int = 1,
-    ) -> dict[str, Any]:
-        params: dict[str, Any] = {"page_size": page_size, "page_num": page_num}
-        if model_type is not None:
-            params["model_type"] = model_type
-        if enabled is not None:
-            params["enabled"] = enabled
-        return await self._request(
-            "GET", jiuwenclaw_id, "/model-templates", params=params
-        )
-
-    async def get_model_template(
-        self, jiuwenclaw_id: str, template_id: str
-    ) -> dict[str, Any]:
-        return await self._request(
-            "GET", jiuwenclaw_id, f"/model-templates/{template_id}"
-        )
-
-    async def update_model_template(
-        self, jiuwenclaw_id: str, template_id: str, body: dict[str, Any]
-    ) -> dict[str, Any]:
-        return await self._request(
-            "PUT",
-            jiuwenclaw_id,
-            f"/model-templates/{template_id}",
-            json_body=body,
-        )
-
-    async def delete_model_template(
-        self, jiuwenclaw_id: str, template_id: str
-    ) -> dict[str, Any]:
-        return await self._request(
-            "DELETE", jiuwenclaw_id, f"/model-templates/{template_id}"
-        )
+    # --- model_template（由 Claw Manager 全局 API 管理，不经 Gateway HTTP 转发） ---
 
     # --- config_default_template_mapping ---
 

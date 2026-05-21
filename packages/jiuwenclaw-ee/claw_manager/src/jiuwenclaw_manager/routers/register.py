@@ -2,10 +2,10 @@ from __future__ import annotations
 
 import os
 
-from fastapi import APIRouter, FastAPI, Request
+from fastapi import APIRouter, FastAPI
 
 from jiuwenclaw_manager.infrastructure.config import settings
-from jiuwenclaw_manager.manager_ws_server import ManagerWsServer
+from jiuwenclaw_manager.manager_ws_server import get_manager_ws_server
 
 from .config_effective_policy_routers import config_effective_policy_router
 from .instance_routers import instance_router
@@ -23,11 +23,7 @@ def router_register(app: FastAPI) -> None:
         prefix=INSTANCES_PREFIX,
         tags=["Instances"],
     )
-    v1_router.include_router(
-        templates_router,
-        prefix=INSTANCES_PREFIX,
-        tags=["Model Templates"],
-    )
+    v1_router.include_router(templates_router, tags=["Templates"])
     v1_router.include_router(
         config_effective_policy_router,
         prefix=INSTANCES_PREFIX,
@@ -39,10 +35,8 @@ def router_register(app: FastAPI) -> None:
         return {"status": "ok"}
 
     @api_router.get("/manager-ws/status", tags=["System"])
-    async def manager_ws_status(request: Request) -> dict:
-        server: ManagerWsServer | None = getattr(
-            request.app.state, "manager_ws_server", None
-        )
+    async def manager_ws_status() -> dict:
+        server = get_manager_ws_server()
         if server is None:
             return {
                 "enabled": settings.manager_ws_enabled,

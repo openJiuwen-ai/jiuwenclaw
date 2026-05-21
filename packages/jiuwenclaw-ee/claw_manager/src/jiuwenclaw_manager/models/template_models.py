@@ -1,4 +1,4 @@
-"""模型模板 model_template 表定义（id 自增主键；对外引用 template_id UUID）。"""
+"""模板表定义：model_template、extension_config_template（id 自增主键；对外引用 template_id UUID）。"""
 
 from __future__ import annotations
 
@@ -19,8 +19,7 @@ MODEL_TEMPLATE_TABLE_DEF = TableDefinition(
             nullable=False,
         ),
         ColumnDefinition("template_id", "string", length=100, nullable=False),
-        ColumnDefinition("jiuwenclaw_id", "string", length=64, nullable=False),
-        ColumnDefinition("display_name", "string", length=128, nullable=False),
+        ColumnDefinition("template_name", "string", length=128, nullable=False),
         ColumnDefinition("description", "string", length=512, nullable=True),
         ColumnDefinition("model_type", "json", nullable=False),
         ColumnDefinition("model_tags", "json", nullable=True),
@@ -41,7 +40,36 @@ MODEL_TEMPLATE_TABLE_DEF = TableDefinition(
     ],
     indexes=[
         IndexDefinition(["template_id"], unique=True),
-        IndexDefinition(["jiuwenclaw_id"], unique=False),
         IndexDefinition(["enabled"], unique=False),
+    ],
+)
+
+EXTENSION_CONFIG_TEMPLATE_TABLE_DEF = TableDefinition(
+    table_name="extension_config_template",
+    columns=[
+        ColumnDefinition(
+            "id",
+            "integer",
+            primary_key=True,
+            autoincrement=True,
+            nullable=False,
+        ),
+        ColumnDefinition("template_id", "string", length=100, nullable=False),
+        ColumnDefinition("template_name", "string", length=128, nullable=False),
+        ColumnDefinition("description", "string", length=512, nullable=True),
+        ColumnDefinition("component", "string", length=32, nullable=False),
+        ColumnDefinition("hook_type", "string", length=32, nullable=False),
+        ColumnDefinition("hook_config", "json", nullable=False),
+        ColumnDefinition("custom_config", "json", nullable=True),
+        ColumnDefinition("enabled", "boolean", nullable=False, default=True),
+        ColumnDefinition("data", "json", nullable=True),
+        ColumnDefinition("created_at", "datetime", nullable=False),
+        ColumnDefinition("updated_at", "datetime", nullable=False),
+    ],
+    indexes=[
+        IndexDefinition(["template_id"], unique=True),
+        IndexDefinition(["enabled"], unique=False),
+        IndexDefinition(["component"], unique=False),
+        IndexDefinition(["hook_type"], unique=False),
     ],
 )

@@ -4,11 +4,10 @@ from __future__ import annotations
 
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, HTTPException, Query
 from openjiuwen_runtime.foundation.db.handler import DBHandler
 
 from jiuwenclaw_manager.infrastructure.db import get_db_handler
-from jiuwenclaw_manager.manager_ws_server import ManagerWsServer
 from jiuwenclaw_manager.schemas.common_schemas import ResponseModel
 from jiuwenclaw_manager.schemas.config_effective_policy_schemas import (
     ConfigDefaultTemplateMappingCreateBody,
@@ -38,22 +37,15 @@ def _mapping_svc(handler: DBHandler) -> ConfigDefaultTemplateMappingService:
     return ConfigDefaultTemplateMappingService(handler)
 
 
-def _ws_server_from_request(request: Request) -> ManagerWsServer | None:
-    return getattr(request.app.state, "manager_ws_server", None)
-
-
 @mapping_router.post("", response_model=ResponseModel)
 async def create_template_mapping(
     jiuwenclaw_id: str,
     body: ConfigDefaultTemplateMappingCreateBody,
-    request: Request,
     handler: Annotated[DBHandler, Depends(get_db_handler)],
 ):
     svc = _mapping_svc(handler)
     try:
-        data = await svc.create(
-            jiuwenclaw_id, body, ws_server=_ws_server_from_request(request)
-        )
+        data = await svc.create(jiuwenclaw_id, body)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return ResponseModel(code=200, message="success", data=data.model_dump())
@@ -112,17 +104,11 @@ async def update_template_mapping(
     jiuwenclaw_id: str,
     mapping_id: int,
     body: ConfigDefaultTemplateMappingUpdateBody,
-    request: Request,
     handler: Annotated[DBHandler, Depends(get_db_handler)],
 ):
     svc = _mapping_svc(handler)
     try:
-        row = await svc.update(
-            jiuwenclaw_id,
-            mapping_id,
-            body,
-            ws_server=_ws_server_from_request(request),
-        )
+        row = await svc.update(jiuwenclaw_id, mapping_id, body)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     if row is None:
@@ -134,14 +120,11 @@ async def update_template_mapping(
 async def delete_template_mapping(
     jiuwenclaw_id: str,
     mapping_id: int,
-    request: Request,
     handler: Annotated[DBHandler, Depends(get_db_handler)],
 ):
     svc = _mapping_svc(handler)
     try:
-        ok = await svc.delete(
-            jiuwenclaw_id, mapping_id, ws_server=_ws_server_from_request(request)
-        )
+        ok = await svc.delete(jiuwenclaw_id, mapping_id)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     if not ok:
@@ -163,14 +146,11 @@ def _global_svc(handler: DBHandler) -> ConfigEffectiveGlobalPolicyService:
 async def create_global_policy(
     jiuwenclaw_id: str,
     body: ConfigEffectiveGlobalPolicyCreateBody,
-    request: Request,
     handler: Annotated[DBHandler, Depends(get_db_handler)],
 ):
     svc = _global_svc(handler)
     try:
-        data = await svc.create(
-            jiuwenclaw_id, body, ws_server=_ws_server_from_request(request)
-        )
+        data = await svc.create(jiuwenclaw_id, body)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return ResponseModel(code=200, message="success", data=data.model_dump())
@@ -218,17 +198,11 @@ async def update_global_policy(
     jiuwenclaw_id: str,
     policy_id: int,
     body: ConfigEffectiveGlobalPolicyUpdateBody,
-    request: Request,
     handler: Annotated[DBHandler, Depends(get_db_handler)],
 ):
     svc = _global_svc(handler)
     try:
-        row = await svc.update(
-            jiuwenclaw_id,
-            policy_id,
-            body,
-            ws_server=_ws_server_from_request(request),
-        )
+        row = await svc.update(jiuwenclaw_id, policy_id, body)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     if row is None:
@@ -240,14 +214,11 @@ async def update_global_policy(
 async def delete_global_policy(
     jiuwenclaw_id: str,
     policy_id: int,
-    request: Request,
     handler: Annotated[DBHandler, Depends(get_db_handler)],
 ):
     svc = _global_svc(handler)
     try:
-        ok = await svc.delete(
-            jiuwenclaw_id, policy_id, ws_server=_ws_server_from_request(request)
-        )
+        ok = await svc.delete(jiuwenclaw_id, policy_id)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     if not ok:
@@ -269,14 +240,11 @@ def _service_svc(handler: DBHandler) -> ConfigEffectiveServicePolicyService:
 async def create_service_policy(
     jiuwenclaw_id: str,
     body: ConfigEffectiveServicePolicyCreateBody,
-    request: Request,
     handler: Annotated[DBHandler, Depends(get_db_handler)],
 ):
     svc = _service_svc(handler)
     try:
-        data = await svc.create(
-            jiuwenclaw_id, body, ws_server=_ws_server_from_request(request)
-        )
+        data = await svc.create(jiuwenclaw_id, body)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return ResponseModel(code=200, message="success", data=data.model_dump())
@@ -324,17 +292,11 @@ async def update_service_policy(
     jiuwenclaw_id: str,
     policy_id: int,
     body: ConfigEffectiveServicePolicyUpdateBody,
-    request: Request,
     handler: Annotated[DBHandler, Depends(get_db_handler)],
 ):
     svc = _service_svc(handler)
     try:
-        row = await svc.update(
-            jiuwenclaw_id,
-            policy_id,
-            body,
-            ws_server=_ws_server_from_request(request),
-        )
+        row = await svc.update(jiuwenclaw_id, policy_id, body)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     if row is None:
@@ -346,14 +308,11 @@ async def update_service_policy(
 async def delete_service_policy(
     jiuwenclaw_id: str,
     policy_id: int,
-    request: Request,
     handler: Annotated[DBHandler, Depends(get_db_handler)],
 ):
     svc = _service_svc(handler)
     try:
-        ok = await svc.delete(
-            jiuwenclaw_id, policy_id, ws_server=_ws_server_from_request(request)
-        )
+        ok = await svc.delete(jiuwenclaw_id, policy_id)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     if not ok:
@@ -376,14 +335,11 @@ def _agent_svc(handler: DBHandler) -> ConfigEffectiveAgentPolicyService:
 async def create_agent_policy(
     jiuwenclaw_id: str,
     body: ConfigEffectiveAgentPolicyCreateBody,
-    request: Request,
     handler: Annotated[DBHandler, Depends(get_db_handler)],
 ):
     svc = _agent_svc(handler)
     try:
-        data = await svc.create(
-            jiuwenclaw_id, body, ws_server=_ws_server_from_request(request)
-        )
+        data = await svc.create(jiuwenclaw_id, body)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return ResponseModel(code=200, message="success", data=data.model_dump())
@@ -433,17 +389,11 @@ async def update_agent_policy(
     jiuwenclaw_id: str,
     policy_id: int,
     body: ConfigEffectiveAgentPolicyUpdateBody,
-    request: Request,
     handler: Annotated[DBHandler, Depends(get_db_handler)],
 ):
     svc = _agent_svc(handler)
     try:
-        row = await svc.update(
-            jiuwenclaw_id,
-            policy_id,
-            body,
-            ws_server=_ws_server_from_request(request),
-        )
+        row = await svc.update(jiuwenclaw_id, policy_id, body)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     if row is None:
@@ -455,14 +405,11 @@ async def update_agent_policy(
 async def delete_agent_policy(
     jiuwenclaw_id: str,
     policy_id: int,
-    request: Request,
     handler: Annotated[DBHandler, Depends(get_db_handler)],
 ):
     svc = _agent_svc(handler)
     try:
-        ok = await svc.delete(
-            jiuwenclaw_id, policy_id, ws_server=_ws_server_from_request(request)
-        )
+        ok = await svc.delete(jiuwenclaw_id, policy_id)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     if not ok:
