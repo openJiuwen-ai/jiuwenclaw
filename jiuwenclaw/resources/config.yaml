@@ -782,3 +782,39 @@ enable_petal_web_search: true
 
 # DeepResearch 工具：默认开启
 enable_deepresearch: true
+
+# ========== Sandbox（jiuwenbox 沙箱集成）==========
+#
+# 该段控制 agent-server 在构建 SysOperationCard 时是否走沙箱模式连接 jiuwenbox。
+#
+# 重要约束（本版本）:
+# - 当前 agent-server 不负责拉起 jiuwenbox 子进程; jiuwenbox 由外部启动并自管
+#   policy（典型方式: 容器化部署见 claw2b/jiuwenbox/docker/Dockerfile, 或手动
+#   ``python -m jiuwenbox.server.launcher`` 监听 ``url`` 所示端口）。
+# - ``startup_mode`` 仅接受 ``internal``。其语义是 "使用本配置中的 url 端点
+#   连接由外部启动的 jiuwenbox"; 留 ``external`` 不实现避免歧义。任何其它取值
+#   会让 ``get_sandbox_endpoint`` 抛 ValueError 并阻止 sandbox 模式生效。
+# - ``preserve_file_sharing_mode`` 仅接受 ``mount``（固有 agent 文件 / daily_memory
+#   / project_dir 通过 bind_mount 直接挂载, 沙箱内外实时同步）。
+# - ``enabled`` 必须为 true 且 ``url`` / ``type`` 均非空时, 才会构造沙箱
+#   SysOperationCard; 否则回落到本地模式 (与不配置 sandbox 段等价)。
+sandbox:
+  # 是否启用沙箱模式; 关闭后即使 url/type 配齐也走本地模式。
+  enabled: false
+  # jiuwenbox HTTP base URL（外部启动的 jiuwenbox-server 监听地址）。
+  url: http://127.0.0.1:8321
+  # provider 名称, 当前固定 jiuwenbox。
+  type: jiuwenbox
+  # 启动模式: 仅支持 internal (语义见上方注释)。
+  startup_mode: internal
+  # 固有文件共享方式: 仅支持 mount。
+  preserve_file_sharing_mode: mount
+  # 命令 glob 列表; 命中的命令会绕过沙箱在本地执行（注意会丢失沙箱隔离, 慎用）。
+  excluded_commands: []
+  # 文件读写策略（host 上的路径会被 bind 进沙箱）:
+  # - allow: 每项为 path 字符串或 {path, permissions} dict; 允许沙箱 rw 访问。
+  # - deny:  同上结构; 强制 ro, 防止沙箱内 agent 写改（读不被屏蔽）。
+  # jiuwenclaw 自己的 config.yaml 会被自动加入 deny, 无需在此显式列出。
+  files:
+    allow: []
+    deny: []
