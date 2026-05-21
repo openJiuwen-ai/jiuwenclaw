@@ -479,7 +479,7 @@ class VibeSkillChannel(BaseChannel):
         if msg_type == "question.replied":
             return await self._handle_question_replied(data)
         if msg_type == "review.replied":
-            return await self._handle_review_replied(data)
+            return await self._handle_review_replied(ws, data)
         if msg_type == "desc_optimize.replied":
             return await self._handle_desc_optimize_replied(data)
         if msg_type == "test.replied":
@@ -805,6 +805,7 @@ class VibeSkillChannel(BaseChannel):
             return False
 
         self._pending_confirms.pop(request_id, None)
+        self._clear_message_context_for_session(internal_id)
 
         answers: list[dict[str, Any]] = []
         if isinstance(raw_answers, list):
@@ -824,8 +825,18 @@ class VibeSkillChannel(BaseChannel):
             answers=answers,
         )
 
-    async def _handle_review_replied(self, data: dict[str, Any]) -> bool:
-        """处理 review.replied，封装为 skilldev.respond。"""
+    @staticmethod
+    def _build_review_replied_skilldev_chat_query(accept: bool, feedback: str) -> str:
+        """根据审阅结果组装 skilldev.chat 的 query。"""
+        if accept:
+            return "用户审阅后通过评测"
+        query = "用户审阅后给出反馈"
+        if feedback:
+            query = f"{query}：{feedback}"
+        return query
+
+    async def _handle_review_replied(self, ws: Any, data: dict[str, Any]) -> bool:
+        """处理 review.replied，封装为 skilldev.chat。"""
         properties = data.get("properties") if isinstance(data.get("properties"), dict) else data
         session_id = str(properties.get("sessionID") or "").strip()
         request_id = str(properties.get("id") or "").strip()
@@ -845,20 +856,65 @@ class VibeSkillChannel(BaseChannel):
             or internal_id
         )
         accept = bool(properties.get("accept", False))
-        action = "accept" if accept else "improve"
-
-        params: dict[str, Any] = {"task_id": task_id, "action": action}
-        if action == "improve":
-            feedback = str(properties.get("feedback") or "").strip()
-            if feedback:
-                params["feedback"] = feedback
+        feedback = str(properties.get("feedback") or "").strip()
 
         self._pending_confirms.pop(request_id, None)
-        return self._dispatch_skilldev_respond(
-            internal_id=internal_id,
-            external_session_id=session_id,
-            params=params,
+
+        session_obj = await self._store.get_session(internal_id)
+        if session_obj and session_obj.mode == "Standard":
+            return False
+
+        external_session_id = session_id
+        if session_obj and session_obj.external_id:
+            external_session_id = session_obj.external_id
+
+        self._clear_message_context_for_session(internal_id)
+
+        await self._store.set_state(internal_id, VibeSkillSessionState.BUSY)
+        logger.info(
+            "[VibeSkillChannel] session state -> busy, source=review.replied, session_id=%s",
+            internal_id,
         )
+        await self._emit_session_status(
+            ws=ws,
+            external_sid=external_session_id or internal_id,
+            status_type=VibeSkillSessionState.BUSY.value,
+        )
+
+        async with self._ws_sessions_lock:
+            if ws not in self._ws_sessions:
+                self._ws_sessions[ws] = set()
+            self._ws_sessions[ws].add(internal_id)
+            self._session_to_ws[internal_id] = ws
+
+        params: dict[str, Any] = {
+            "task_id": task_id,
+            "query": self._build_review_replied_skilldev_chat_query(accept, feedback),
+        }
+
+        metadata_dict: dict[str, str] = {}
+        if external_session_id:
+            metadata_dict[_VIBESKILL_ORIGINAL_SESSION_ID_KEY] = external_session_id
+
+        msg = Message(
+            id=f"vibeskill-review-{int(time.time() * 1000):x}-{secrets.token_hex(3)}",
+            type="req",
+            channel_id=VIBESKILL_CHANNEL_ID,
+            session_id=internal_id,
+            params=params,
+            timestamp=time.time(),
+            ok=True,
+            req_method=ReqMethod.SKILLDEV_CHAT,
+            is_stream=True,
+            metadata=metadata_dict if metadata_dict else None,
+        )
+        logger.info(
+            "[VibeSkillChannel] skilldev.chat sent (review.replied), session_id=%s accept=%s",
+            internal_id,
+            accept,
+        )
+        self.bus.deliver_to_message_handler(msg)
+        return True
 
     async def _handle_desc_optimize_replied(self, data: dict[str, Any]) -> bool:
         """处理 desc_optimize.replied，封装为 skilldev.respond。"""

@@ -143,7 +143,7 @@ ws://127.0.0.1:19003/api/v1/messages?sessionID={sessionID}
 | `message.send` | `sessionID`, `parts`, `model`, `agent`, `agent_id`/`agentId`, `system` | `SKILLDEV_CHAT` 或 `CHAT_SEND` | 核心发送入口，按 session mode 分流；SkillCreate 每轮会先清空 `_message_ctx` |
 | `skill.parse` | `sessionID`, `url`, `filename`（可包在 `properties` 内） | `SKILLDEV_PARSE_SKILL` | 导入 skill 压缩包到任务工作区，仅 SkillCreate 模式 |
 | `question.replied` | `sessionID`, `requestID`, `answers`（可包在 `properties` 内） | `SKILLDEV_USER_ANSWER` | 回答结构化提问（`skilldev.ask_user_question`） |
-| `review.replied` | `sessionID`, `id`, `accept`, `feedback` | `SKILLDEV_RESPOND` | 评审接受（`action=accept`）或继续改进（`action=improve`） |
+| `review.replied` | `sessionID`, `id`, `accept`, `feedback` | `SKILLDEV_CHAT` | 审阅结果仅写入 `params.query`（通过/反馈文案） |
 | `desc_optimize.replied` | `sessionID`, `id`, `accept` | `SKILLDEV_RESPOND` | 描述优化确认（`action=skip` 或 `optimize`） |
 | `test.replied` | `sessionID`, `id`, `accept` | `SKILLDEV_RESPOND` | 是否进入测试设计（`action=test_design` 或 `skip_tests`） |
 
@@ -373,7 +373,7 @@ sequenceDiagram
     MH-->>VC: Message(type=event)
     VC-->>FE: message.* / todo.updated / question.asked / review.asked
     FE->>VC: question.replied / review.replied / test.replied
-    VC->>MH: Message(req_method=skilldev.user_answer 或 skilldev.respond)
+    VC->>MH: Message(req_method=skilldev.user_answer 或 skilldev.chat/respond)
     AS-->>MH: skilldev.completed
     VC-->>FE: task.completed + session.status completed
 ```
@@ -382,7 +382,7 @@ sequenceDiagram
 
 - `message.send` 后是否先收到 `session.status busy`。
 - 流式输出是否包含 `message.updated` 和后续 part 事件；多轮 `message.send` 是否使用不同的 `messageID`。
-- `question.asked`（来自 `skilldev.ask_user_question`）回填 `question.replied` 是否走 `skilldev.user_answer`；`review.asked` 等是否走 `skilldev.respond`。
+- `question.asked`（来自 `skilldev.ask_user_question`）回填 `question.replied` 是否走 `skilldev.user_answer`；`review.replied` 是否走 `skilldev.chat`（审阅结果写入 `query`）；其它确认是否仍走 `skilldev.respond`。
 - `skilldev.completed` 是否转换为 `task.completed` 与 `session.status completed`。
 - WebSocket 断开时，busy session 是否会恢复 idle，并发送 `skilldev.cancel`。
 
@@ -487,7 +487,7 @@ WebSocket 断开时，`cleanup(ws)` 会执行：
 | WS 建连 | 连接 `/api/v1/messages?sessionID=...` | 收到 `server.connected` 与周期 heartbeat |
 | SkillCreate 发送 | WS 发 `message.send` | 内部走 `skilldev.chat`，前端收到 busy、message/todo/confirm 事件 |
 | Standard 发送 | Standard session 发 `message.send` | 内部走 `chat.send`，前端收到 chat 流式与 `task.completed` |
-| 确认回填 | 收到 `question.asked` 后发 `question.replied` | 内部走 `skilldev.user_answer`；review/desc/test 走 `skilldev.respond` |
+| 确认回填 | 收到 `question.asked` 后发 `question.replied` | `question` 走 `skilldev.user_answer`；`review` 走 `skilldev.chat`；desc/test 走 `skilldev.respond` |
 | 历史消息 | `GET /session/{id}/messages` | 经 `skilldev.restore` 返回可回放的前端消息列表 |
 | 文件树 | `GET /session/{id}/file` | 返回 `FileTreeNode[]`，目录和文件结构正确 |
 | 文件内容 | `GET /session/{id}/file/content?path=...` | 返回 text content |
@@ -500,7 +500,7 @@ WebSocket 断开时，`cleanup(ws)` 会执行：
 - VibeSkill Channel 是独立 HTTP + WebSocket 服务，不走 `GatewayServer` 的 `/tui` 或 `/acp` 路由。
 - REST 主要处理会话、文件、导出等同步操作；WebSocket 处理对话和流式事件。
 - `SkillCreate` 和 `Standard` 是两套不同后端路径（`skilldev.chat` vs `chat.send`），分流点在 session 的 `mode`。
-- 结构化提问（`question.asked`）与评审/测试确认（`review.asked` 等）分别对应 `skilldev.user_answer` 与 `skilldev.respond`。
+- 结构化提问（`question.asked`）对应 `skilldev.user_answer`；评审确认（`review.replied`）对应 `skilldev.chat`；描述优化/测试确认仍走 `skilldev.respond`。
 - 前端只感知 `sessionID`，Channel 与 MessageHandler 共同处理内外 ID 映射。
 - 出站不是简单透传，Channel 会把 `skilldev.*` / `chat.*` 事件聚合成前端需要的 `message.*`、`todo.updated`、`*.asked`、`task.completed` 等事件。
 - 当前部分 REST 是占位实现，测试时应区分“已接 AgentServer”的接口和“固定响应”的接口。

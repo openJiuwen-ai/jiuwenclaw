@@ -6,7 +6,7 @@
 
 结束条件：收到 ``session.status`` 且 ``status.type == completed``（对应 skilldev.completed）。
 **当且仅当**收到 ``task.completed`` 时调用 ``POST /session/{id}/export``。
-``question.replied`` 走 ``skilldev.user_answer``；review/desc_optimize/test 走 ``skilldev.respond``。
+``question.replied`` 走 ``skilldev.user_answer``；``review.replied`` 走 ``skilldev.chat``；desc_optimize/test 走 ``skilldev.respond``。
 """
 
 from __future__ import annotations
@@ -134,7 +134,7 @@ async def _send_auto_replies(ws: aiohttp.ClientWebSocketResponse, msg_type: str,
             },
         }
         await ws.send_str(json.dumps(reply_msg, ensure_ascii=False))
-        logger.info("sent review.replied (skilldev.respond) id=%s accept=true", rid)
+        logger.info("sent review.replied (skilldev.chat) id=%s accept=true", rid)
         return True
 
     if msg_type == "desc_optimize.asked":
