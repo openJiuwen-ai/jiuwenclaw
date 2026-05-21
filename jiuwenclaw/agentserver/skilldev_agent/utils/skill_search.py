@@ -103,9 +103,10 @@ def search_skills(query):
 
         if response_data.get("errorCode") == "0" and "content" in response_data and "skills" in response_data["content"]:
             formatted_data = format_skill_data(response_data["content"]["skills"])
-            for idx, skill in enumerate(formatted_data):
-                if skill.get("skillId") in ("find_skills", "skill-creator"):
-                    formatted_data.pop(idx)
+            formatted_data = [
+                skill for skill in formatted_data
+                if skill.get("skillId") not in ("find-skills", "skill-creator")
+            ]
             logger.debug("[SkillSearch] skill列表: %s", json.dumps(formatted_data, indent=2, ensure_ascii=False))
             return formatted_data
         else:

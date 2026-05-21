@@ -383,20 +383,19 @@ class SkillDevDeepAdapter:
         if params.get("enable_skill_search"):
             from skilldev_agent.utils.skill_search import search_skills
             skills = search_skills(params.get("query"))
-            yield AgentResponseChunk(
-                request_id=rid,
-                channel_id=cid,
-                payload={
-                    "event_type": "skilldev.search_results", 
-                    "properties": {
+            if skills:
+                yield AgentResponseChunk(
+                    request_id=rid,
+                    channel_id=cid,
+                    payload={
+                        "event_type": "skilldev.search_results", 
                         "skillList": skills,
                         "num": len(skills),
                         "total": len(skills),
-                    }
-                },
-                is_complete=False,
-            )
-            return
+                    },
+                    is_complete=False,
+                )
+                return
 
         # 初始化工作区，写入上传资源，写入搜索到的技能
         task_workspace = Path(self._base_workspace_dir) / "skilldev" / task_id
@@ -450,6 +449,30 @@ class SkillDevDeepAdapter:
                 is_complete=True,
             )
         else:
+            benchmark, report, iteration = self._get_review_benchmark(task_workspace)
+            if benchmark and report and iteration:
+                yield AgentResponseChunk(
+                    request_id=rid,
+                    channel_id=cid,
+                    payload={
+                        "event_type": "skilldev.confirm_request",
+                        "confirm_type": "review",
+                        "title": "评测结果审阅",
+                        "message": "请审阅评测结果并决定下一步。",
+                        "data": {
+                            "benchmark": benchmark,
+                            "report": report,
+                            "iteration": iteration,
+                        },
+                        "actions": [
+                            {"id": "accept", "label": "通过，继续", "style": "primary"},
+                            {"id": "improve", "label": "继续改进", "style": "secondary"},
+                        ],
+                        "task_id": task_id,
+                    },
+                    is_complete=False,
+                )
+
             yield AgentResponseChunk(
                 request_id=rid,
                 channel_id=cid,
@@ -468,6 +491,48 @@ class SkillDevDeepAdapter:
         if request.session_id:
             return str(request.session_id)
         return uuid.uuid4().hex
+
+    @staticmethod
+    def _get_review_benchmark(
+        task_workspace: Path,
+    ) -> tuple[dict[str, Any] | None, str | None, int]:
+        """Load the latest benchmark.json / benchmark.md from the evals dir.
+
+        Returns (benchmark_dict, report_markdown, iteration_number).
+        """
+        evals_dir = task_workspace / "evals"
+
+        iter_dirs = [
+            d for d in evals_dir.iterdir()
+            if d.is_dir() and d.name.startswith("iteration-")
+        ] if evals_dir.is_dir() else []
+
+        if iter_dirs:
+            def _iter_num(d: Path) -> int:
+                try:
+                    return int(d.name.split("-", 1)[1])
+                except (IndexError, ValueError):
+                    return -1
+
+            latest = max(iter_dirs, key=_iter_num)
+            iteration = _iter_num(latest)
+            target_dir = latest
+        else:
+            iteration = 0
+            target_dir = evals_dir
+
+        benchmark: dict[str, Any] | None = None
+        report: str | None = None
+
+        bm_json = target_dir / "benchmark.json"
+        if bm_json.is_file():
+            benchmark = json.loads(bm_json.read_text(encoding="utf-8"))
+
+        bm_md = target_dir / "benchmark.md"
+        if bm_md.is_file():
+            report = bm_md.read_text(encoding="utf-8")
+
+        return benchmark, report, iteration
 
     @staticmethod
     def _init_workspace_dirs(task_workspace: Path) -> None:
@@ -948,6 +1013,7 @@ class SkillDevDeepAdapter:
                 if isinstance(tool_info, dict):
                     tc_payload["tool_call_id"] = tool_info.get("id") or tool_info.get("tool_call_id")
                     tc_payload["tool_name"] = tool_info.get("name") or tool_info.get("tool_name")
+                    tc_payload["tool_name"] = "sub_agent" if tc_payload["tool_name"] == "task_tool" else tc_payload["tool_name"]
                     tc_payload["arguments"] = tool_info.get("arguments") or tool_info.get("args")
                 else:
                     tc_payload["tool_call"] = tool_info
@@ -966,6 +1032,7 @@ class SkillDevDeepAdapter:
                     }
                     if isinstance(result_info, dict):
                         result_payload["tool_name"] = result_info.get("tool_name") or result_info.get("name")
+                        result_payload["tool_name"] = "sub_agent" if result_payload["tool_name"] == "task_tool" else result_payload["tool_name"]
                         result_payload["tool_call_id"] = (
                             result_info.get("tool_call_id") or result_info.get("toolCallId")
                         )
