@@ -1,6 +1,6 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 
-from typing import TYPE_CHECKING, Any, Callable, Type
+from typing import TYPE_CHECKING, Any, Awaitable, Callable, Type
 
 from openjiuwen.core.runner.callback.framework import AsyncCallbackFramework
 
@@ -10,7 +10,7 @@ from jiuwenclaw.extensions.sdk.agent_server_client import AgentServerClientExten
 from jiuwenclaw.extensions.sdk.crypto_utility import CryptoUtility
 from jiuwenclaw.extensions.sdk.llm_base_model_client import LlmBaseModelClient, create_delegating_client
 from jiuwenclaw.extensions.sdk.telemetry_provider import TelemetryProviderExtension
-from jiuwenclaw.extensions.types import ExtensionConfig
+from jiuwenclaw.extensions.types import ExtensionConfig, WsHandlerContext, WsHandlerEntry
 
 if TYPE_CHECKING:
     from jiuwenclaw.gateway.agent_client import AgentServerClient
@@ -32,6 +32,7 @@ class ExtensionRegistry:
         self.callback_framework = callback_framework
         self._config = ExtensionConfig(config=config, logger=logger)
         self._extension_local_tool_entries: list[ExtensionLocalToolEntry] = []
+        self._ws_handlers: dict[str, WsHandlerEntry] = {}  # method -> entry 映射
 
     @classmethod
     def get_instance(cls) -> "ExtensionRegistry":
@@ -136,6 +137,74 @@ class ExtensionRegistry:
                 source_id=sid,
             )
         )
+
+    def register_ws_handler(
+        self,
+        method: str,
+        handler: Callable[..., Awaitable[dict]],
+    ) -> None:
+        """
+        注册自定义 WebSocket 请求处理器（单步响应）。
+
+        Args:
+            method: 请求方法名，点号分隔命名空间（如 "myapp.sync_data"）
+            handler: 异步处理函数，接收 WsHandlerContext，返回 payload dict
+
+        Raises:
+            ValueError: method 为空或格式不合法
+            RuntimeError: method 已存在（与 ReqMethod 或其他扩展冲突）
+            TypeError: handler 不是 callable
+        """
+        # 1. 验证 method 格式
+        if not method or not isinstance(method, str):
+            raise ValueError("method must be a non-empty string")
+
+        method = method.strip()
+        if not method:
+            raise ValueError("method must be a non-empty string")
+
+        # 2. 验证 handler 是 callable
+        if not callable(handler):
+            raise TypeError("register_ws_handler: handler must be callable")
+
+        # 3. 检查与 ReqMethod 冲突
+        from jiuwenclaw.schema.message import ReqMethod
+        try:
+            ReqMethod(method)
+            # 如果能成功创建 ReqMethod，说明是内置方法，禁止注册
+            raise RuntimeError(
+                f"method '{method}' conflicts with built-in ReqMethod"
+            )
+        except ValueError:
+            # 不是 ReqMethod，允许注册
+            pass
+
+        # 4. 检查与其他扩展冲突
+        if method in self._ws_handlers:
+            existing = self._ws_handlers[method]
+            raise RuntimeError(
+                f"method '{method}' already registered by extension '{existing.source_id}'"
+            )
+
+        # 5. 注册
+        self._ws_handlers[method] = WsHandlerEntry(
+            method=method,
+            handler=handler,
+            source_id="",
+            is_stream=False,
+        )
+        self._config.logger.info(
+            "[ExtensionRegistry] WebSocket handler registered: method=%s",
+            method,
+        )
+
+    def get_ws_handler(self, method: str) -> WsHandlerEntry | None:
+        """根据 method 查找已注册的处理器。"""
+        return self._ws_handlers.get(method)
+
+    def list_ws_handlers(self) -> list[WsHandlerEntry]:
+        """列出所有已注册的自定义处理器。"""
+        return list(self._ws_handlers.values())
 
     def register_model(self, name: str, model_cls: Type[LlmBaseModelClient]) -> None:
         if not name:

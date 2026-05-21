@@ -43,6 +43,7 @@ from jiuwenclaw.e2a.wire_codec import (
 )
 from jiuwenclaw.schema.agent import AgentRequest, AgentResponse, AgentResponseChunk
 from jiuwenclaw.schema.hook_event import AgentServerHookEvents
+from jiuwenclaw.extensions.types import WsHandlerContext
 from jiuwenclaw.agentserver.extensions import get_rail_manager
 from jiuwenclaw.agentserver.permissions.patterns import persist_cli_trusted_directory
 from jiuwenclaw.schema.hooks_context import (
@@ -363,6 +364,18 @@ class AgentWebSocketServer:
                         t.cancel()
                 await asyncio.gather(*tasks, return_exceptions=True)
 
+    @staticmethod
+    def _get_custom_ws_handler(method: str):
+        """检查 method 是否为已注册的自定义 WebSocket 处理器。"""
+        if not method:
+            return None
+        try:
+            from jiuwenclaw.extensions.registry import ExtensionRegistry
+            return ExtensionRegistry.get_instance().get_ws_handler(method)
+        except RuntimeError:
+            # ExtensionRegistry 未初始化
+            return None
+
     async def _handle_message(self, ws: Any, raw: str | bytes, send_lock: asyncio.Lock) -> None:
         """解析一条 JSON 请求并分发到 IAgentServer 处理."""
         try:
@@ -440,7 +453,23 @@ class AgentWebSocketServer:
                     env.method,
                     env.is_stream,
                 )
-                request = e2a_to_agent_request(env)
+                # 检查是否为自定义 WebSocket 处理器
+                raw_method = env.method or ""
+                custom_entry = self._get_custom_ws_handler(raw_method)
+                if custom_entry:
+                    # 自定义处理器：直接构造 AgentRequest，不需要 ReqMethod
+                    request = AgentRequest(
+                        request_id=env.request_id or "",
+                        channel_id=env.channel or "",
+                        session_id=env.session_id,
+                        req_method=None,
+                        params=dict(env.params or {}),
+                        is_stream=False,
+                        timestamp=0.0,
+                        metadata={"_custom_ws_handler_entry": custom_entry},
+                    )
+                else:
+                    request = e2a_to_agent_request(env)
 
         logger.info(
             "[AgentWebSocketServer] 收到请求: request_id=%s channel_id=%s is_stream=%s",
@@ -473,6 +502,24 @@ class AgentWebSocketServer:
                     ws_caps or self._agent_manager.get_client_capabilities("acp"),
                 )
                 request.metadata = metadata
+
+            # 检查是否为自定义 WebSocket 处理器（在 ReqMethod 路由之前）
+            from jiuwenclaw.extensions.types import WsHandlerEntry
+
+            custom_entry_from_meta = request.metadata.get("_custom_ws_handler_entry") if request.metadata else None
+            if isinstance(custom_entry_from_meta, WsHandlerEntry):
+                ctx = WsHandlerContext(
+                    request_id=request.request_id,
+                    channel_id=request.channel_id,
+                    session_id=request.session_id,
+                    params=request.params,
+                    metadata=request.metadata,
+                )
+                # 清除内部标记
+                if request.metadata:
+                    request.metadata.pop("_custom_ws_handler_entry", None)
+                await self._handle_custom_ws_handler(ws, request, custom_entry_from_meta, ctx, send_lock)
+                return
 
             await self._trigger_before_chat_request_hook(request)
 
@@ -617,6 +664,53 @@ class AgentWebSocketServer:
         )
 
         await ExtensionRegistry.get_instance().trigger(AgentServerHookEvents.BEFORE_CHAT_REQUEST, ctx)
+
+    async def _handle_custom_ws_handler(
+        self,
+        ws: Any,
+        request: AgentRequest,
+        entry,  # WsHandlerEntry
+        ctx: WsHandlerContext,
+        send_lock: asyncio.Lock,
+    ) -> None:
+        """调用自定义 WebSocket 处理器并返回响应。"""
+        logger.info(
+            "[AgentWebSocketServer] 调用自定义处理器: method=%s request_id=%s",
+            entry.method,
+            request.request_id,
+        )
+
+        try:
+            payload = await entry.handler(ctx)
+            resp = AgentResponse(
+                request_id=request.request_id,
+                channel_id=request.channel_id,
+                ok=True,
+                payload=payload,
+                metadata=ctx.response_metadata,
+            )
+        except Exception as e:
+            logger.exception(
+                "[AgentWebSocketServer] 自定义处理器异常: method=%s request_id=%s: %s",
+                entry.method,
+                request.request_id,
+                e,
+            )
+            resp = AgentResponse(
+                request_id=request.request_id,
+                channel_id=request.channel_id,
+                ok=False,
+                payload={"error": str(e), "error_type": type(e).__name__},
+            )
+
+        wire = encode_agent_response_for_wire(resp, response_id=request.request_id)
+        async with send_lock:
+            await ws.send(json.dumps(wire, ensure_ascii=False))
+        logger.info(
+            "[AgentWebSocketServer] 自定义处理器响应已发送: request_id=%s ok=%s",
+            request.request_id,
+            resp.ok,
+        )
 
     async def _handle_unary(self, ws: Any, request: AgentRequest, send_lock: asyncio.Lock) -> None:
         """非流式处理：调用 process_message，返回一条 E2AResponse 线 JSON。"""
