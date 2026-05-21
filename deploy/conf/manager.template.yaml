@@ -1,54 +1,62 @@
-# Headless Service：给 StatefulSet 提供稳定 DNS 域名
+# Service：提供稳定 DNS 域名, 供集群内部访问
 apiVersion: v1
 kind: Service
 metadata:
-  name: <<CLAW_MANAGER_NAME>>-headless
+  name: <<MANAGER_NAME>>
   namespace: <<NAMESPACE>>
 spec:
-  ports:
-    - port: <<MANAGER_REST_PORT>>
-      targetPort: <<MANAGER_REST_PORT>>
-  clusterIP: None  # 关键：无头服务，StatefulSet 必须依赖
   selector:
-    app: <<CLAW_MANAGER_NAME>>
+    app: <<MANAGER_NAME>>
+  ports:
+    - name: rest
+      port: <<MANAGER_REST_PORT>>
+      targetPort: <<MANAGER_REST_PORT>>
+    - name: websocket
+      port: <<MANAGER_WS_PORT>>
+      targetPort: <<MANAGER_WS_PORT>>
+  type: ClusterIP                             # 集群内部访问，不需要外网
 
 ---
-# NodePort Service：供外部连接 CLAW_MANAGER
+# NodePort Service：供集群外部连接
 apiVersion: v1
 kind: Service
 metadata:
-  name: <<CLAW_MANAGER_NAME>>-nodeport
+  name: <<MANAGER_NAME>>-nodeport
   namespace: <<NAMESPACE>>
 spec:
   type: NodePort
   ports:
-    - port: <<MANAGER_REST_PORT>>       # 集群内部端口
+    - name: rest
+      port: <<MANAGER_REST_PORT>>       # 集群内部端口
       targetPort: <<MANAGER_REST_PORT>> # 容器端口
-      nodePort: <<CLAW_MANAGER_NODE_PORT>>   # 外部访问端口（30000-32767）
+      nodePort: <<MANAGER_NODE_PORT>>   # 外部访问端口（30000-32767）
   selector:
-    app: <<CLAW_MANAGER_NAME>>
+    app: <<MANAGER_NAME>>
 
 ---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: <<CLAW_MANAGER_NAME>>
+  name: <<MANAGER_NAME>>
   namespace: <<NAMESPACE>>
 spec:
   replicas: 1
   selector:
     matchLabels:
-      app: <<CLAW_MANAGER_NAME>>
+      app: <<MANAGER_NAME>>
   template:
     metadata:
       labels:
-        app: <<CLAW_MANAGER_NAME>>
+        app: <<MANAGER_NAME>>
     spec:
       containers:
       - name: manager
-        image: <<CLAW_MANAGER_IMAGE>>
+        image: <<MANAGER_IMAGE>>
         ports:
-        - containerPort: <<MANAGER_REST_PORT>>
+        - name: rest
+          containerPort: <<MANAGER_REST_PORT>>
+        - name: websocket
+          containerPort: <<MANAGER_WS_PORT>>
         env:
         - name: MANAGER_RABBITMQ_URL
           value: "<<MANAGER_RABBITMQ_URL>>"
@@ -68,3 +76,9 @@ spec:
           value: "<<MANAGER_DB_PASSWORD>>"
         - name: MANAGER_DB_NAME
           value: "<<MANAGER_DB_NAME>>"
+        - name: MANAGER_WS_ENABLED
+          value: "true"
+        - name: MANAGER_WS_HOST
+          value: "0.0.0.0"
+        - name: MANAGER_WS_PORT
+          value: "<<MANAGER_WS_PORT>>"
