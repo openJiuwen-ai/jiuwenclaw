@@ -304,5 +304,5 @@ check_postgresql_up_dependency(){
 
 check_manager_up_dependency(){
     check_if_rabbitmq_up
-    check_if_postgresql_up
+    check_if_mysql_up
 }
