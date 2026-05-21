@@ -29,6 +29,7 @@ from jiuwenclaw.agentserver.tools.subagent_tools import fork_agent, spawn_subage
 from jiuwenclaw.agentserver.skilldev_agent.meta_tools.agent_as_skill_tool import (
     get_agent_as_skill_tool,
 )
+from jiuwenclaw.agentserver.skilldev_agent.meta_tools.exec_tool import get_exec_tool
 from jiuwenclaw.agentserver.skilldev_agent.meta_tools.function_call_tool import (
     get_function_call_tool,
 )
@@ -66,6 +67,7 @@ def build_skilldev_tools(
             WebPaidSearchTool(language=language, agent_id=agent_id),
             JiuwenHarnessFetchWebpageTool(language=language, agent_id=agent_id),
             get_ask_user_question_tool(),
+            get_exec_tool(),
         ]
     )
     tools.extend([get_function_call_tool(), get_agent_as_skill_tool()])
