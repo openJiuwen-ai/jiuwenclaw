@@ -376,21 +376,36 @@ class SkillDevDeepAdapter:
         params: dict[str, Any],
         task_id: str,
     ) -> AsyncIterator[AgentResponseChunk]:
-        task_workspace = Path(self._base_workspace_dir) / "skilldev" / task_id
-        self._init_workspace_dirs(task_workspace)
-        await self._write_uploaded_resources(task_workspace, params)
-        await self.update_workspace(task_workspace)
-
         rid = request.request_id
         cid = request.channel_id
 
-        yield AgentResponseChunk(
-            request_id=rid,
-            channel_id=cid,
-            payload={"event_type": "skilldev.started", "task_id": task_id},
-            is_complete=False,
-        )
+        # 如果需要进行skill检索，则检索skill并返回
+        if params.get("enable_skill_search"):
+            from skilldev_agent.utils.skill_search import search_skills
+            skills = search_skills(params.get("query"))
+            yield AgentResponseChunk(
+                request_id=rid,
+                channel_id=cid,
+                payload={
+                    "event_type": "skilldev.search_results", 
+                    "properties": {
+                        "skillList": skills,
+                        "num": len(skills),
+                        "total": len(skills),
+                    }
+                },
+                is_complete=False,
+            )
+            return
 
+        # 初始化工作区，写入上传资源，写入搜索到的技能
+        task_workspace = Path(self._base_workspace_dir) / "skilldev" / task_id
+        self._init_workspace_dirs(task_workspace)
+        await self._write_uploaded_resources(task_workspace, params)
+        if params.get("skillSearched"):
+            await self._write_skill_searched(task_workspace, params.get("skillSearched"))
+        await self.update_workspace(task_workspace)
+        
         query = str(params.get("message") or params.get("query") or "")
         resource_hint = self._build_resource_hint(task_workspace, params, task_id)
         raw_session_id = str(request.session_id or task_id)
@@ -504,6 +519,24 @@ class SkillDevDeepAdapter:
         write_tool_usage_catalog(dest_dir)
 
     @staticmethod
+    async def _write_skill_searched(task_workspace: Path, skill_searched: dict[str, Any]) -> None:
+        """Download a skill selected from search results into ref-skills."""
+        skill_name = skill_searched.get("skillName", "unknown")
+        url = skill_searched.get("url", "")
+        if not url:
+            logger.warning("[SkillDevDeepAdapter] skillSearched missing url: %s", skill_searched)
+            return
+
+        dest_dir = task_workspace / "resources" / "ref-skills"
+        dest_dir.mkdir(parents=True, exist_ok=True)
+
+        suffix = Path(url).suffix.lower() or ".skill"
+        file_path = dest_dir / f"{skill_name}{suffix}"
+        await download_file(url, str(file_path))
+        if suffix in (".zip", ".skill"):
+            safe_extract_zip(file_path, dest_dir, extract_to_stem_dir=False)
+
+    @staticmethod
     async def _write_resource_group(
         resources: list[dict[str, Any]],
         dest_dir: Path,
@@ -567,6 +600,9 @@ class SkillDevDeepAdapter:
         if tools:
             parts.append(format_tool_usage_hint())
         parts.append("请在生成 Skill 前按需检查上述资源。")
+        if params.get("skillSearched"):
+            skill_name = params.get('skillSearched', {}).get('skillName')
+            parts.append(f"用户明确指明要参考 {task_workspace / 'resources' / 'ref-skills'} 中的{skill_name}技能，请在生成前仔细阅读该技能，并结合用户需求，生成新的Skill")
         return "\n".join(parts)
 
     # ------------------------------------------------------------------
