@@ -1,4 +1,4 @@
-"""Claw Manager 数据库句柄（SQLiteHandler / MySQLHandler）；配置来自 .env。"""
+"""Claw Manager 数据库句柄（SQLiteHandler / MySQLHandler / PostgreSQLHandler）；配置来自 .env。"""
 
 from __future__ import annotations
 
@@ -7,6 +7,7 @@ from typing import Any
 
 from openjiuwen_runtime.foundation.db.handler import DBHandler
 from openjiuwen_runtime.foundation.db.mysql_handler import MySQLHandler
+from openjiuwen_runtime.foundation.db.postgresql_handler import PostgreSQLHandler
 from openjiuwen_runtime.foundation.db.sqlite_handler import SQLiteHandler
 
 from jiuwenclaw_manager.infrastructure.config import Settings, settings
@@ -52,6 +53,23 @@ def _mysql_handler_from_settings(cfg: Settings) -> MySQLHandler:
         raise ValueError("Invalid MySQL database configuration.") from e
 
 
+def _pg_handler_from_settings(cfg: Settings) -> PostgreSQLHandler:
+    try:
+        return PostgreSQLHandler(
+            host=str(cfg.db_host).strip(),
+            port=int(cfg.db_port),
+            user=str(cfg.db_user).strip(),
+            password=str(cfg.db_password),
+            database=str(cfg.db_name).strip(),
+        )
+    except (TypeError, ValueError) as e:
+        logger.exception(
+            "Invalid PostgreSQL database configuration "
+            "(CLAW_MANAGER_DB_HOST/PORT/USER/PASSWORD/NAME)."
+        )
+        raise ValueError("Invalid PostgreSQL database configuration.") from e
+
+
 def create_db_handler(cfg: Settings | None = None) -> DBHandler:
     """根据 ``Settings`` / ``.env`` 创建并注册全局 ``DBHandler``。"""
     global _db_handler
@@ -64,8 +82,12 @@ def create_db_handler(cfg: Settings | None = None) -> DBHandler:
         _db_handler = _sqlite_handler_from_settings(active)
     elif db_type == "mysql":
         _db_handler = _mysql_handler_from_settings(active)
+    elif db_type in ("postgresql", "postgres", "pg"):
+        _db_handler = _pg_handler_from_settings(active)
     else:
-        raise ValueError(f"Unsupported db_type: {db_type}. Use 'sqlite' or 'mysql'.")
+        raise ValueError(
+            f"Unsupported db_type: {db_type}. Use 'sqlite', 'mysql' or 'postgresql'."
+        )
 
     return _db_handler
 
