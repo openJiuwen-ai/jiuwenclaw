@@ -4,24 +4,17 @@
 
 from __future__ import annotations
 
-import sys
 from pathlib import Path
 from typing import Any
 
 from openjiuwen_runtime.foundation.db.handler import DBHandler
 from openjiuwen_runtime.foundation.db.mysql_handler import MySQLHandler
+from openjiuwen_runtime.foundation.db.postgresql_handler import PostgreSQLHandler
 from openjiuwen_runtime.foundation.db.sqlite_handler import SQLiteHandler
 from openjiuwen_runtime.foundation.log import get_logger
 
 from jiuwenclaw.config import get_config
 from jiuwenclaw.utils import get_user_workspace_dir
-
-# 将 common 包加入 sys.path 以便导入 PostgreSQLHandler
-_COMMON_ROOT = str(Path(__file__).resolve().parents[7])
-if _COMMON_ROOT not in sys.path:
-    sys.path.insert(0, _COMMON_ROOT)
-
-from common.db.postgresql_handler import PostgreSQLHandler  # noqa: E402
 
 logger = get_logger(__name__)
 
