@@ -37,12 +37,31 @@ async def lifespan(application: FastAPI):
 
         consumer_task = asyncio.create_task(start_consumer(db_handler))
     GatewayHttpClient.init(timeout=httpx.Timeout(settings.upstream_http_timeout_seconds))
+    manager_ws_server = None
+    if settings.manager_ws_enabled:
+        from jiuwenclaw_manager.manager_ws_server import ManagerWsServer
+
+        manager_ws_server = ManagerWsServer(
+            host=settings.manager_ws_host,
+            port=settings.manager_ws_port,
+            manager_id=settings.manager_id,
+        )
+        await manager_ws_server.start()
+        application.state.manager_ws_server = manager_ws_server
+        from jiuwenclaw_manager.manager_ws_server.server import set_manager_ws_server
+
+        set_manager_ws_server(manager_ws_server)
     _log.info(
         "startup",
         version=__version__,
         db=database_config_summary(),
         rabbitmq=bool(settings.rabbitmq_url),
         rabbitmq_url=settings.rabbitmq_url,
+        manager_ws=(
+            f"ws://{settings.manager_ws_host}:{settings.manager_ws_port}"
+            if settings.manager_ws_enabled
+            else None
+        ),
     )
     yield
     stop.set()
@@ -57,6 +76,11 @@ async def lifespan(application: FastAPI):
             await consumer_task
         except asyncio.CancelledError:
             pass
+    if manager_ws_server is not None:
+        from jiuwenclaw_manager.manager_ws_server.server import set_manager_ws_server
+
+        set_manager_ws_server(None)
+        await manager_ws_server.stop()
     await GatewayHttpClient.close()
     await db_handler.disconnect()
     _log.info("shutdown")

@@ -47,6 +47,7 @@ class ModelTemplateUpdateBody(BaseModel):
 
 class ModelTemplateOut(BaseModel):
     id: int
+    template_id: str
     jiuwenclaw_id: str
     display_name: str
     description: str | None

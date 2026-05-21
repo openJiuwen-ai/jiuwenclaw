@@ -7,27 +7,54 @@ from typing import Any
 
 from openjiuwen_runtime.foundation.db.handler import DBHandler
 
-from jiuwenclaw_manager.infrastructure.gateway_forward import (
-    EnterpriseGatewayForward,
-    forward_headers,
-    forward_upstream_data,
-    forward_upstream_data_or_none,
-    normalize_list_page,
-)
 from jiuwenclaw_manager.core.instance.instance_service import get_instance_row
 from jiuwenclaw_manager.infrastructure.utils import utc_now
+from jiuwenclaw_manager.manager_ws_server import ManagerWsServer
+from jiuwenclaw_manager.manager_ws_server.server import push_to_instance
+from jiuwenclaw_manager.models.config_effective_policy_models import (
+    CONFIG_EFFECTIVE_AGENT_POLICY_TABLE_DEF,
+    CONFIG_EFFECTIVE_SERVICE_POLICY_TABLE_DEF,
+)
+from jiuwenclaw_manager.core.config_effective_policy.template_ref import (
+    apply_template_ref_to_updates,
+    normalize_template_ref,
+    read_template_ref_from_row,
+)
 from jiuwenclaw_manager.schemas.config_effective_policy_schemas import (
     ConfigEffectiveAgentPolicyCreateBody,
     ConfigEffectiveAgentPolicyOut,
     ConfigEffectiveAgentPolicyUpdateBody,
 )
-from jiuwenclaw_manager.models.config_effective_policy_models import (
-    CONFIG_EFFECTIVE_AGENT_POLICY_TABLE_DEF,
-    CONFIG_EFFECTIVE_SERVICE_POLICY_TABLE_DEF,
-)
 
 _AGENT_POLICY_TABLE = CONFIG_EFFECTIVE_AGENT_POLICY_TABLE_DEF.table_name
 _SERVICE_POLICY_TABLE = CONFIG_EFFECTIVE_SERVICE_POLICY_TABLE_DEF.table_name
+
+
+async def push_config_effective_agent_policy_op(
+    jiuwenclaw_id: str,
+    op: str,
+    *,
+    policy: dict[str, Any] | None = None,
+    policy_id: int | None = None,
+    updates: dict[str, Any] | None = None,
+    server: ManagerWsServer | None = None,
+) -> dict[str, Any]:
+    """推送 Agent 层级配置生效策略变更（``config.config_effective_agent_policies``），返回 config.ack payload。"""
+    payload: dict[str, Any] = {
+        "op": op,
+        "jiuwenclaw_id": jiuwenclaw_id,
+    }
+    if policy is not None:
+        payload["policy"] = policy
+    if policy_id is not None:
+        payload["policy_id"] = policy_id
+    if updates is not None:
+        payload["updates"] = updates
+    return await push_to_instance(
+        jiuwenclaw_id,
+        config={"config_effective_agent_policies": payload},
+        server=server,
+    )
 
 
 def _agent_policy_pk(jiuwenclaw_id: str, policy_id: int) -> dict[str, Any]:
@@ -50,10 +77,7 @@ def _row_to_out(row: Any) -> ConfigEffectiveAgentPolicyOut:
         service_policy_id=row.service_policy_id,
         priority=row.priority,
         match_expr=row.match_expr,
-        default_model=row.default_model,
-        video_model=row.video_model,
-        audio_model=row.audio_model,
-        vision_model=row.vision_model,
+        template_ref=read_template_ref_from_row(row),
         enabled=row.enabled,
         data=row.data,
         created_at=_iso(row.created_at),
@@ -61,20 +85,9 @@ def _row_to_out(row: Any) -> ConfigEffectiveAgentPolicyOut:
     )
 
 
-def _out_from_gateway(data: dict[str, Any]) -> ConfigEffectiveAgentPolicyOut:
-    return ConfigEffectiveAgentPolicyOut.model_validate(data)
-
-
 class ConfigEffectiveAgentPolicyService:
-    def __init__(
-        self,
-        handler: DBHandler,
-        extra_headers: dict[str, str] | None = None,
-    ) -> None:
+    def __init__(self, handler: DBHandler) -> None:
         self._handler = handler
-        self._gw = EnterpriseGatewayForward(
-            handler, extra_headers=extra_headers or forward_headers()
-        )
 
     async def _validate_jiuwenclaw_id(self, jiuwenclaw_id: str) -> str:
         normalized = jiuwenclaw_id.strip()
@@ -91,10 +104,6 @@ class ConfigEffectiveAgentPolicyService:
         jiuwenclaw_id: str,
         service_policy_id: int,
     ) -> None:
-        inst = await get_instance_row(self._handler, jiuwenclaw_id.strip())
-        if inst is None:
-            raise ValueError(f"unknown jiuwenclaw_id={jiuwenclaw_id!r}")
-
         sp = await self._handler.get(
             _SERVICE_POLICY_TABLE,
             {"jiuwenclaw_id": jiuwenclaw_id.strip(), "id": service_policy_id},
@@ -102,8 +111,27 @@ class ConfigEffectiveAgentPolicyService:
         if sp is None:
             raise ValueError(f"unknown service_policy_id={service_policy_id}")
 
+    def _policy_dict_for_push(self, row: dict[str, Any], *, now: datetime) -> dict[str, Any]:
+        """构建经 WebSocket 下发给 Gateway 的 policy 对象（不含 id，由 Gateway 自增）。"""
+        return {
+            "jiuwenclaw_id": row["jiuwenclaw_id"],
+            "agent_id": row["agent_id"],
+            "service_policy_id": row["service_policy_id"],
+            "priority": row.get("priority", 0),
+            "match_expr": row.get("match_expr"),
+            "template_ref": row.get("template_ref") or {},
+            "enabled": row.get("enabled", True),
+            "data": row.get("data"),
+            "created_at": _iso(row.get("created_at") or now),
+            "updated_at": _iso(row.get("updated_at") or now),
+        }
+
     async def create(
-        self, jiuwenclaw_id: str, body: ConfigEffectiveAgentPolicyCreateBody
+        self,
+        jiuwenclaw_id: str,
+        body: ConfigEffectiveAgentPolicyCreateBody,
+        *,
+        ws_server: ManagerWsServer | None = None,
     ) -> ConfigEffectiveAgentPolicyOut:
         normalized = await self._validate_jiuwenclaw_id(jiuwenclaw_id)
         await self._validate_parent_refs(
@@ -111,31 +139,37 @@ class ConfigEffectiveAgentPolicyService:
             service_policy_id=body.service_policy_id,
         )
 
-        gw_data = forward_upstream_data(
-            await self._gw.create_agent_policy(
-                normalized, body.model_dump(mode="json")
-            )
-        )
-        if not isinstance(gw_data, dict) or gw_data.get("id") is None:
-            raise ValueError("gateway create agent policy returned no id")
-
         now = utc_now()
-        payload = {
-            "id": int(gw_data["id"]),
+        row = {
             "agent_id": body.agent_id.strip(),
             "jiuwenclaw_id": normalized,
             "service_policy_id": body.service_policy_id,
             "priority": body.priority,
             "match_expr": body.match_expr,
-            "default_model": body.default_model,
-            "video_model": body.video_model,
-            "audio_model": body.audio_model,
-            "vision_model": body.vision_model,
+            "template_ref": normalize_template_ref(body.template_ref),
             "enabled": body.enabled,
             "data": body.data,
             "created_at": now,
             "updated_at": now,
         }
+        ack = await push_config_effective_agent_policy_op(
+            normalized,
+            "create",
+            policy=self._policy_dict_for_push(row, now=now),
+            server=ws_server,
+        )
+        ack_result = ack.get("result") if isinstance(ack, dict) else None
+        policy_id: int | None = None
+        if isinstance(ack_result, dict):
+            raw_id = ack_result.get("policy_id")
+            if raw_id is not None:
+                policy_id = int(raw_id)
+        if policy_id is None or policy_id < 1:
+            raise ValueError(
+                "gateway config_effective_agent_policies.create returned no policy_id"
+            )
+
+        payload = {**row, "id": policy_id}
         created = await self._handler.create(_AGENT_POLICY_TABLE, payload)
         return _row_to_out(created)
 
@@ -143,14 +177,12 @@ class ConfigEffectiveAgentPolicyService:
         self, jiuwenclaw_id: str, policy_id: int
     ) -> ConfigEffectiveAgentPolicyOut | None:
         normalized = await self._validate_jiuwenclaw_id(jiuwenclaw_id)
-        gw_data = forward_upstream_data_or_none(
-            await self._gw.get_agent_policy(normalized, policy_id)
+        row = await self._handler.get(
+            _AGENT_POLICY_TABLE, _agent_policy_pk(normalized, policy_id)
         )
-        if gw_data is None:
+        if row is None:
             return None
-        if not isinstance(gw_data, dict):
-            raise ValueError("invalid gateway response for agent policy")
-        return _out_from_gateway(gw_data)
+        return _row_to_out(row)
 
     async def list_policies(
         self,
@@ -164,24 +196,32 @@ class ConfigEffectiveAgentPolicyService:
         normalized = await self._validate_jiuwenclaw_id(jiuwenclaw_id)
         page = max(page, 1)
         page_size = min(max(page_size, 1), 200)
-        gw_data = forward_upstream_data(
-            await self._gw.list_agent_policies(
-                normalized,
-                service_policy_id=service_policy_id,
-                enabled=enabled,
-                page_num=page,
-                page_size=page_size,
-            )
+        filters: dict[str, Any] = {"jiuwenclaw_id": normalized}
+        if service_policy_id is not None:
+            filters["service_policy_id"] = service_policy_id
+        if enabled is not None:
+            filters["enabled"] = enabled
+
+        offset = (page - 1) * page_size
+        rows = await self._handler.list_records(
+            _AGENT_POLICY_TABLE, filters, limit=page_size, offset=offset
         )
-        if not isinstance(gw_data, dict):
-            return normalize_list_page(None, page=page, page_size=page_size)
-        return normalize_list_page(gw_data, page=page, page_size=page_size)
+        total = await self._handler.count_records(_AGENT_POLICY_TABLE, filters)
+        items = [_row_to_out(r).model_dump(mode="json") for r in rows]
+        return {
+            "items": items,
+            "total": total,
+            "page": page,
+            "page_size": page_size,
+        }
 
     async def update(
         self,
         jiuwenclaw_id: str,
         policy_id: int,
         body: ConfigEffectiveAgentPolicyUpdateBody,
+        *,
+        ws_server: ManagerWsServer | None = None,
     ) -> ConfigEffectiveAgentPolicyOut | None:
         normalized = await self._validate_jiuwenclaw_id(jiuwenclaw_id)
 
@@ -189,12 +229,15 @@ class ConfigEffectiveAgentPolicyService:
         row = await self._handler.get(
             _AGENT_POLICY_TABLE, _agent_policy_pk(normalized, policy_id)
         )
-        next_jiuwenclaw_id = row.jiuwenclaw_id if row else normalized
-        next_service_policy_id = updates.get(
-            "service_policy_id", row.service_policy_id if row else None
-        )
+        if row is None:
+            return None
+
+        next_jiuwenclaw_id = row.jiuwenclaw_id
+        next_service_policy_id = updates.get("service_policy_id", row.service_policy_id)
         if "agent_id" in updates and updates["agent_id"] is not None:
             updates["agent_id"] = updates["agent_id"].strip()
+            if not updates["agent_id"]:
+                raise ValueError("agent_id cannot be empty")
 
         if "service_policy_id" in updates and next_service_policy_id is not None:
             await self._validate_parent_refs(
@@ -202,35 +245,48 @@ class ConfigEffectiveAgentPolicyService:
                 service_policy_id=next_service_policy_id,
             )
 
-        gw_data = forward_upstream_data_or_none(
-            await self._gw.update_agent_policy(normalized, policy_id, updates)
-        )
-        if gw_data is None:
-            return None
+        if not updates:
+            return _row_to_out(row)
 
-        if updates:
-            updates = dict(updates)
-            updates["updated_at"] = utc_now()
-            updated = await self._handler.update(
-                _AGENT_POLICY_TABLE,
-                _agent_policy_pk(normalized, policy_id),
-                updates,
-            )
-        else:
-            updated = row
+        updates = apply_template_ref_to_updates(updates, existing_row=row)
+
+        await push_config_effective_agent_policy_op(
+            normalized,
+            "update",
+            policy_id=policy_id,
+            updates=updates,
+            server=ws_server,
+        )
+        payload = dict(updates)
+        payload["updated_at"] = utc_now()
+        updated = await self._handler.update(
+            _AGENT_POLICY_TABLE,
+            _agent_policy_pk(normalized, policy_id),
+            payload,
+        )
         if updated is None:
-            if not isinstance(gw_data, dict):
-                raise ValueError("invalid gateway response for agent policy")
-            return _out_from_gateway(gw_data)
+            return None
         return _row_to_out(updated)
 
-    async def delete(self, jiuwenclaw_id: str, policy_id: int) -> bool:
+    async def delete(
+        self,
+        jiuwenclaw_id: str,
+        policy_id: int,
+        *,
+        ws_server: ManagerWsServer | None = None,
+    ) -> bool:
         normalized = await self._validate_jiuwenclaw_id(jiuwenclaw_id)
-        gw_data = forward_upstream_data_or_none(
-            await self._gw.delete_agent_policy(normalized, policy_id)
+        row = await self._handler.get(
+            _AGENT_POLICY_TABLE, _agent_policy_pk(normalized, policy_id)
         )
-        if gw_data is None:
+        if row is None:
             return False
+        await push_config_effective_agent_policy_op(
+            normalized,
+            "delete",
+            policy_id=policy_id,
+            server=ws_server,
+        )
         return await self._handler.delete(
             _AGENT_POLICY_TABLE, _agent_policy_pk(normalized, policy_id)
         )

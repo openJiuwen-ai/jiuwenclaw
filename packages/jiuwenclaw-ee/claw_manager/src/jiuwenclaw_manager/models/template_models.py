@@ -1,4 +1,4 @@
-"""模型模板 model_template 表定义（复合主键 jiuwenclaw_id + id）。"""
+"""模型模板 model_template 表定义（id 自增主键；对外引用 template_id UUID）。"""
 
 from __future__ import annotations
 
@@ -11,14 +11,15 @@ from openjiuwen_runtime.foundation.db.table_def import (
 MODEL_TEMPLATE_TABLE_DEF = TableDefinition(
     table_name="model_template",
     columns=[
-        ColumnDefinition("jiuwenclaw_id", "string", length=64, primary_key=True, nullable=False),
         ColumnDefinition(
             "id",
             "integer",
             primary_key=True,
-            autoincrement=False,
+            autoincrement=True,
             nullable=False,
         ),
+        ColumnDefinition("template_id", "string", length=100, nullable=False),
+        ColumnDefinition("jiuwenclaw_id", "string", length=64, nullable=False),
         ColumnDefinition("display_name", "string", length=128, nullable=False),
         ColumnDefinition("description", "string", length=512, nullable=True),
         ColumnDefinition("model_type", "json", nullable=False),
@@ -39,6 +40,7 @@ MODEL_TEMPLATE_TABLE_DEF = TableDefinition(
         ColumnDefinition("updated_at", "datetime", nullable=False),
     ],
     indexes=[
+        IndexDefinition(["template_id"], unique=True),
         IndexDefinition(["jiuwenclaw_id"], unique=False),
         IndexDefinition(["enabled"], unique=False),
     ],

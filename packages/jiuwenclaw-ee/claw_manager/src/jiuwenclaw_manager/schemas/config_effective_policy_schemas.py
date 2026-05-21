@@ -14,10 +14,10 @@ class ConfigEffectiveAgentPolicyCreateBody(BaseModel):
     service_policy_id: int
     priority: int = Field(default=0)
     match_expr: str | None = None
-    default_model: str | None = Field(default=None, max_length=128)
-    video_model: str | None = Field(default=None, max_length=128)
-    audio_model: str | None = Field(default=None, max_length=128)
-    vision_model: str | None = Field(default=None, max_length=128)
+    template_ref: dict[str, str] = Field(
+        default_factory=dict,
+        description="槽位名 -> template_id 或 ${user::…}/${group::…} or <template_id>",
+    )
     enabled: bool = True
     data: dict[str, Any] | None = None
 
@@ -27,10 +27,7 @@ class ConfigEffectiveAgentPolicyUpdateBody(BaseModel):
     service_policy_id: int | None = None
     priority: int | None = None
     match_expr: str | None = None
-    default_model: str | None = Field(default=None, max_length=128)
-    video_model: str | None = Field(default=None, max_length=128)
-    audio_model: str | None = Field(default=None, max_length=128)
-    vision_model: str | None = Field(default=None, max_length=128)
+    template_ref: dict[str, str] | None = None
     enabled: bool | None = None
     data: dict[str, Any] | None = None
 
@@ -42,10 +39,7 @@ class ConfigEffectiveAgentPolicyOut(BaseModel):
     service_policy_id: int
     priority: int
     match_expr: str | None
-    default_model: str | None
-    video_model: str | None
-    audio_model: str | None
-    vision_model: str | None
+    template_ref: dict[str, str]
     enabled: bool
     data: dict[str, Any] | None
     created_at: str | None
@@ -58,10 +52,7 @@ class ConfigEffectiveServicePolicyCreateBody(BaseModel):
     service_id: str = Field(..., max_length=512)
     priority: int
     match_expr: str | None = None
-    default_model: str | None = Field(default=None, max_length=128)
-    video_model: str | None = Field(default=None, max_length=128)
-    audio_model: str | None = Field(default=None, max_length=128)
-    vision_model: str | None = Field(default=None, max_length=128)
+    template_ref: dict[str, str] = Field(default_factory=dict)
     enabled: bool = True
     data: dict[str, Any] | None = None
 
@@ -70,10 +61,7 @@ class ConfigEffectiveServicePolicyUpdateBody(BaseModel):
     service_id: str | None = Field(default=None, max_length=512)
     priority: int | None = None
     match_expr: str | None = None
-    default_model: str | None = Field(default=None, max_length=128)
-    video_model: str | None = Field(default=None, max_length=128)
-    audio_model: str | None = Field(default=None, max_length=128)
-    vision_model: str | None = Field(default=None, max_length=128)
+    template_ref: dict[str, str] | None = None
     enabled: bool | None = None
     data: dict[str, Any] | None = None
 
@@ -84,10 +72,7 @@ class ConfigEffectiveServicePolicyOut(BaseModel):
     jiuwenclaw_id: str
     priority: int
     match_expr: str | None
-    default_model: str | None
-    video_model: str | None
-    audio_model: str | None
-    vision_model: str | None
+    template_ref: dict[str, str]
     enabled: bool
     data: dict[str, Any] | None
     created_at: str | None
@@ -97,24 +82,15 @@ class ConfigEffectiveServicePolicyOut(BaseModel):
 # --- config_effective_global_policy ---
 
 class ConfigEffectiveGlobalPolicyCreateBody(BaseModel):
-    channel_ids: list[str] = Field(
-        default_factory=list,
-        description="启用的 channel_template.id 列表；省略或 [] 表示不绑定通道模板",
-    )
-    default_model: str | None = Field(default=None, max_length=128)
-    video_model: str | None = Field(default=None, max_length=128)
-    audio_model: str | None = Field(default=None, max_length=128)
-    vision_model: str | None = Field(default=None, max_length=128)
+    priority: int = 0
+    template_ref: dict[str, str] = Field(default_factory=dict)
     enabled: bool = True
     data: dict[str, Any] | None = None
 
 
 class ConfigEffectiveGlobalPolicyUpdateBody(BaseModel):
-    channel_ids: list[str] | None = None
-    default_model: str | None = Field(default=None, max_length=128)
-    video_model: str | None = Field(default=None, max_length=128)
-    audio_model: str | None = Field(default=None, max_length=128)
-    vision_model: str | None = Field(default=None, max_length=128)
+    priority: int | None = None
+    template_ref: dict[str, str] | None = None
     enabled: bool | None = None
     data: dict[str, Any] | None = None
 
@@ -122,11 +98,8 @@ class ConfigEffectiveGlobalPolicyUpdateBody(BaseModel):
 class ConfigEffectiveGlobalPolicyOut(BaseModel):
     id: int
     jiuwenclaw_id: str
-    default_model: str | None
-    video_model: str | None
-    audio_model: str | None
-    vision_model: str | None
-    channel_ids: list[str]
+    priority: int
+    template_ref: dict[str, str]
     enabled: bool
     data: dict[str, Any] | None
     created_at: str | None
@@ -138,7 +111,8 @@ class ConfigEffectiveGlobalPolicyOut(BaseModel):
 class ConfigDefaultTemplateMappingCreateBody(BaseModel):
     user_id: str | None = Field(default=None, max_length=512)
     group_id: str | None = Field(default=None, max_length=512)
-    template_id: str = Field(..., max_length=512)
+    priority: int = 0
+    template_id: str = Field(..., max_length=100, min_length=1)
     template_type: str = Field(..., max_length=512)
     enabled: bool = True
     data: dict[str, Any] | None = None
@@ -147,7 +121,8 @@ class ConfigDefaultTemplateMappingCreateBody(BaseModel):
 class ConfigDefaultTemplateMappingUpdateBody(BaseModel):
     user_id: str | None = Field(default=None, max_length=512)
     group_id: str | None = Field(default=None, max_length=512)
-    template_id: str | None = Field(default=None, max_length=512)
+    priority: int | None = None
+    template_id: str | None = Field(default=None, max_length=100, min_length=1)
     template_type: str | None = Field(default=None, max_length=512)
     enabled: bool | None = None
     data: dict[str, Any] | None = None
@@ -158,6 +133,7 @@ class ConfigDefaultTemplateMappingOut(BaseModel):
     jiuwenclaw_id: str
     user_id: str | None
     group_id: str | None
+    priority: int
     template_id: str
     template_type: str
     enabled: bool

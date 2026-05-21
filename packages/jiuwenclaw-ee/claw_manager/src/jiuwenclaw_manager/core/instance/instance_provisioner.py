@@ -113,8 +113,8 @@ def _child_env_common(
     out["JIUWENCLAW_DATA_DIR"] = str(instance_dir.resolve())
     out["JIUWENCLAW_CONFIG_DIR"] = str((instance_dir / "config").resolve())
     out["EXTENSION_DIRS"] = extension_dirs
-    out["CLAWMANAGER_RABBITMQ_URL"] = settings.rabbitmq_url or ""
-    out["CLAWMANAGER_MANAGER_ID"] = settings.manager_id
+    out["MANAGER_RABBITMQ_URL"] = settings.rabbitmq_url or ""
+    out["MANAGER_MANAGER_ID"] = settings.manager_id
     out["JIUWENCLAW_PROVISIONED_INSTANCE_ID"] = jiuwenclaw_id
     out["MANAGEMENT_API_BASE"] = management_api_base
     return out
@@ -129,9 +129,9 @@ async def provision_local_jiuwenclaw(
     description: str | None,
 ) -> dict[str, Any]:
     if not settings.allow_local_provision:
-        raise ValueError("local provision disabled (set CLAWMANAGER_ALLOW_LOCAL_PROVISION=true)")
+        raise ValueError("local provision disabled (set MANAGER_ALLOW_LOCAL_PROVISION=true)")
     if not settings.rabbitmq_url:
-        raise ValueError("CLAWMANAGER_RABBITMQ_URL is required for heartbeat consumption")
+        raise ValueError("MANAGER_RABBITMQ_URL is required for heartbeat consumption")
 
     repo_root = Path(settings.provision_repo_root or _repo_root()).resolve()
     gateway_ext = (repo_root / "packages" / "jiuwenclaw-ee" / "gateway" / "extensions").resolve()

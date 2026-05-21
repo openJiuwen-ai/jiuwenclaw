@@ -7,25 +7,52 @@ from typing import Any
 
 from openjiuwen_runtime.foundation.db.handler import DBHandler
 
-from jiuwenclaw_manager.infrastructure.gateway_forward import (
-    EnterpriseGatewayForward,
-    forward_headers,
-    forward_upstream_data,
-    forward_upstream_data_or_none,
-    normalize_list_page,
-)
 from jiuwenclaw_manager.core.instance.instance_service import get_instance_row
 from jiuwenclaw_manager.infrastructure.utils import utc_now
+from jiuwenclaw_manager.manager_ws_server import ManagerWsServer
+from jiuwenclaw_manager.manager_ws_server.server import push_to_instance
+from jiuwenclaw_manager.models.config_effective_policy_models import (
+    CONFIG_EFFECTIVE_GLOBAL_POLICY_TABLE_DEF,
+)
+from jiuwenclaw_manager.core.config_effective_policy.template_ref import (
+    apply_template_ref_to_updates,
+    normalize_template_ref,
+    read_template_ref_from_row,
+)
 from jiuwenclaw_manager.schemas.config_effective_policy_schemas import (
     ConfigEffectiveGlobalPolicyCreateBody,
     ConfigEffectiveGlobalPolicyOut,
     ConfigEffectiveGlobalPolicyUpdateBody,
 )
-from jiuwenclaw_manager.models.config_effective_policy_models import (
-    CONFIG_EFFECTIVE_GLOBAL_POLICY_TABLE_DEF,
-)
 
 _GLOBAL_POLICY_TABLE = CONFIG_EFFECTIVE_GLOBAL_POLICY_TABLE_DEF.table_name
+
+
+async def push_config_effective_global_policy_op(
+    jiuwenclaw_id: str,
+    op: str,
+    *,
+    policy: dict[str, Any] | None = None,
+    policy_id: int | None = None,
+    updates: dict[str, Any] | None = None,
+    server: ManagerWsServer | None = None,
+) -> dict[str, Any]:
+    """推送全局兜底配置生效策略变更（``config.config_effective_global_policies``），返回 config.ack payload。"""
+    payload: dict[str, Any] = {
+        "op": op,
+        "jiuwenclaw_id": jiuwenclaw_id,
+    }
+    if policy is not None:
+        payload["policy"] = policy
+    if policy_id is not None:
+        payload["policy_id"] = policy_id
+    if updates is not None:
+        payload["updates"] = updates
+    return await push_to_instance(
+        jiuwenclaw_id,
+        config={"config_effective_global_policies": payload},
+        server=server,
+    )
 
 
 def _global_policy_pk(jiuwenclaw_id: str, policy_id: int) -> dict[str, Any]:
@@ -40,24 +67,12 @@ def _iso(dt: datetime | None) -> str | None:
     return dt.isoformat().replace("+00:00", "Z")
 
 
-def _normalize_channel_ids(value: list[str]) -> list[str]:
-    if not isinstance(value, list):
-        raise ValueError("channel_ids must be a list")
-    return [str(item).strip() for item in value if str(item).strip()]
-
-
 def _row_to_out(row: Any) -> ConfigEffectiveGlobalPolicyOut:
-    channel_ids = row.channel_ids
-    if not isinstance(channel_ids, list):
-        channel_ids = list(channel_ids) if channel_ids else []
     return ConfigEffectiveGlobalPolicyOut(
         id=row.id,
         jiuwenclaw_id=row.jiuwenclaw_id,
-        default_model=row.default_model,
-        video_model=row.video_model,
-        audio_model=row.audio_model,
-        vision_model=row.vision_model,
-        channel_ids=channel_ids,
+        priority=row.priority,
+        template_ref=read_template_ref_from_row(row),
         enabled=row.enabled,
         data=row.data,
         created_at=_iso(row.created_at),
@@ -65,20 +80,9 @@ def _row_to_out(row: Any) -> ConfigEffectiveGlobalPolicyOut:
     )
 
 
-def _out_from_gateway(data: dict[str, Any]) -> ConfigEffectiveGlobalPolicyOut:
-    return ConfigEffectiveGlobalPolicyOut.model_validate(data)
-
-
 class ConfigEffectiveGlobalPolicyService:
-    def __init__(
-        self,
-        handler: DBHandler,
-        extra_headers: dict[str, str] | None = None,
-    ) -> None:
+    def __init__(self, handler: DBHandler) -> None:
         self._handler = handler
-        self._gw = EnterpriseGatewayForward(
-            handler, extra_headers=extra_headers or forward_headers()
-        )
 
     async def _validate_jiuwenclaw_id(self, jiuwenclaw_id: str) -> str:
         normalized = jiuwenclaw_id.strip()
@@ -110,35 +114,56 @@ class ConfigEffectiveGlobalPolicyService:
             f"global policy for jiuwenclaw_id={jiuwenclaw_id!r} already exists (id={existing.id})"
         )
 
+    def _policy_dict_for_push(self, row: dict[str, Any], *, now: datetime) -> dict[str, Any]:
+        """构建经 WebSocket 下发给 Gateway 的 policy 对象（不含 id，由 Gateway 自增）。"""
+        return {
+            "jiuwenclaw_id": row["jiuwenclaw_id"],
+            "priority": row["priority"],
+            "template_ref": row.get("template_ref") or {},
+            "enabled": row.get("enabled", True),
+            "data": row.get("data"),
+            "created_at": _iso(row.get("created_at") or now),
+            "updated_at": _iso(row.get("updated_at") or now),
+        }
+
     async def create(
-        self, jiuwenclaw_id: str, body: ConfigEffectiveGlobalPolicyCreateBody
+        self,
+        jiuwenclaw_id: str,
+        body: ConfigEffectiveGlobalPolicyCreateBody,
+        *,
+        ws_server: ManagerWsServer | None = None,
     ) -> ConfigEffectiveGlobalPolicyOut:
         normalized = await self._validate_jiuwenclaw_id(jiuwenclaw_id)
         await self._ensure_unique_jiuwenclaw_id(normalized)
-        channel_ids = _normalize_channel_ids(body.channel_ids)
-
-        gw_data = forward_upstream_data(
-            await self._gw.create_global_policy(
-                normalized, body.model_dump(mode="json")
-            )
-        )
-        if not isinstance(gw_data, dict) or gw_data.get("id") is None:
-            raise ValueError("gateway create global policy returned no id")
 
         now = utc_now()
-        payload = {
-            "id": int(gw_data["id"]),
+        row = {
             "jiuwenclaw_id": normalized,
-            "default_model": body.default_model,
-            "video_model": body.video_model,
-            "audio_model": body.audio_model,
-            "vision_model": body.vision_model,
-            "channel_ids": channel_ids,
+            "priority": body.priority,
+            "template_ref": normalize_template_ref(body.template_ref),
             "enabled": body.enabled,
             "data": body.data,
             "created_at": now,
             "updated_at": now,
         }
+        ack = await push_config_effective_global_policy_op(
+            normalized,
+            "create",
+            policy=self._policy_dict_for_push(row, now=now),
+            server=ws_server,
+        )
+        ack_result = ack.get("result") if isinstance(ack, dict) else None
+        policy_id: int | None = None
+        if isinstance(ack_result, dict):
+            raw_id = ack_result.get("policy_id")
+            if raw_id is not None:
+                policy_id = int(raw_id)
+        if policy_id is None or policy_id < 1:
+            raise ValueError(
+                "gateway config_effective_global_policies.create returned no policy_id"
+            )
+
+        payload = {**row, "id": policy_id}
         created = await self._handler.create(_GLOBAL_POLICY_TABLE, payload)
         return _row_to_out(created)
 
@@ -146,14 +171,12 @@ class ConfigEffectiveGlobalPolicyService:
         self, jiuwenclaw_id: str, policy_id: int
     ) -> ConfigEffectiveGlobalPolicyOut | None:
         normalized = await self._validate_jiuwenclaw_id(jiuwenclaw_id)
-        gw_data = forward_upstream_data_or_none(
-            await self._gw.get_global_policy(normalized, policy_id)
+        row = await self._handler.get(
+            _GLOBAL_POLICY_TABLE, _global_policy_pk(normalized, policy_id)
         )
-        if gw_data is None:
+        if row is None:
             return None
-        if not isinstance(gw_data, dict):
-            raise ValueError("invalid gateway response for global policy")
-        return _out_from_gateway(gw_data)
+        return _row_to_out(row)
 
     async def list_policies(
         self,
@@ -166,61 +189,83 @@ class ConfigEffectiveGlobalPolicyService:
         normalized = await self._validate_jiuwenclaw_id(jiuwenclaw_id)
         page = max(page, 1)
         page_size = min(max(page_size, 1), 200)
-        gw_data = forward_upstream_data(
-            await self._gw.list_global_policies(
-                normalized,
-                enabled=enabled,
-                page_num=page,
-                page_size=page_size,
-            )
+        filters: dict[str, Any] = {"jiuwenclaw_id": normalized}
+        if enabled is not None:
+            filters["enabled"] = enabled
+
+        offset = (page - 1) * page_size
+        rows = await self._handler.list_records(
+            _GLOBAL_POLICY_TABLE, filters, limit=page_size, offset=offset
         )
-        if not isinstance(gw_data, dict):
-            return normalize_list_page(None, page=page, page_size=page_size)
-        return normalize_list_page(gw_data, page=page, page_size=page_size)
+        total = await self._handler.count_records(_GLOBAL_POLICY_TABLE, filters)
+        items = [_row_to_out(r).model_dump(mode="json") for r in rows]
+        return {
+            "items": items,
+            "total": total,
+            "page": page,
+            "page_size": page_size,
+        }
 
     async def update(
         self,
         jiuwenclaw_id: str,
         policy_id: int,
         body: ConfigEffectiveGlobalPolicyUpdateBody,
+        *,
+        ws_server: ManagerWsServer | None = None,
     ) -> ConfigEffectiveGlobalPolicyOut | None:
         normalized = await self._validate_jiuwenclaw_id(jiuwenclaw_id)
 
         updates = body.model_dump(exclude_unset=True)
-        if "channel_ids" in updates and updates["channel_ids"] is not None:
-            updates["channel_ids"] = _normalize_channel_ids(updates["channel_ids"])
 
-        gw_data = forward_upstream_data_or_none(
-            await self._gw.update_global_policy(normalized, policy_id, updates)
+        row = await self._handler.get(
+            _GLOBAL_POLICY_TABLE, _global_policy_pk(normalized, policy_id)
         )
-        if gw_data is None:
+        if row is None:
             return None
 
-        if updates:
-            updates = dict(updates)
-            updates["updated_at"] = utc_now()
-            updated = await self._handler.update(
-                _GLOBAL_POLICY_TABLE,
-                _global_policy_pk(normalized, policy_id),
-                updates,
-            )
-        else:
-            updated = await self._handler.get(
-                _GLOBAL_POLICY_TABLE, _global_policy_pk(normalized, policy_id)
-            )
+        if not updates:
+            return _row_to_out(row)
+
+        updates = apply_template_ref_to_updates(updates, existing_row=row)
+
+        await push_config_effective_global_policy_op(
+            normalized,
+            "update",
+            policy_id=policy_id,
+            updates=updates,
+            server=ws_server,
+        )
+        payload = dict(updates)
+        payload["updated_at"] = utc_now()
+        updated = await self._handler.update(
+            _GLOBAL_POLICY_TABLE,
+            _global_policy_pk(normalized, policy_id),
+            payload,
+        )
         if updated is None:
-            if not isinstance(gw_data, dict):
-                raise ValueError("invalid gateway response for global policy")
-            return _out_from_gateway(gw_data)
+            return None
         return _row_to_out(updated)
 
-    async def delete(self, jiuwenclaw_id: str, policy_id: int) -> bool:
+    async def delete(
+        self,
+        jiuwenclaw_id: str,
+        policy_id: int,
+        *,
+        ws_server: ManagerWsServer | None = None,
+    ) -> bool:
         normalized = await self._validate_jiuwenclaw_id(jiuwenclaw_id)
-        gw_data = forward_upstream_data_or_none(
-            await self._gw.delete_global_policy(normalized, policy_id)
+        row = await self._handler.get(
+            _GLOBAL_POLICY_TABLE, _global_policy_pk(normalized, policy_id)
         )
-        if gw_data is None:
+        if row is None:
             return False
+        await push_config_effective_global_policy_op(
+            normalized,
+            "delete",
+            policy_id=policy_id,
+            server=ws_server,
+        )
         return await self._handler.delete(
             _GLOBAL_POLICY_TABLE, _global_policy_pk(normalized, policy_id)
         )

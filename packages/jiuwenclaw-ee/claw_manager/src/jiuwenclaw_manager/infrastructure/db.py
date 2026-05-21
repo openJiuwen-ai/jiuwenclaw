@@ -48,7 +48,7 @@ def _mysql_handler_from_settings(cfg: Settings) -> MySQLHandler:
     except (TypeError, ValueError) as e:
         logger.exception(
             "Invalid MySQL database configuration "
-            "(CLAW_MANAGER_DB_HOST/PORT/USER/PASSWORD/NAME)."
+            "(MANAGER_DB_HOST/PORT/USER/PASSWORD/NAME)."
         )
         raise ValueError("Invalid MySQL database configuration.") from e
 

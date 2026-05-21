@@ -2,12 +2,18 @@
 
 from __future__ import annotations
 
+import uuid
 from datetime import datetime, timezone
 from typing import Any
 
 
 def utc_now() -> datetime:
     return datetime.now(timezone.utc)
+
+
+def new_template_id() -> str:
+    """生成模板对外引用 UUID（v4）。"""
+    return str(uuid.uuid4())
 
 
 def format_ts(val: Any) -> str:

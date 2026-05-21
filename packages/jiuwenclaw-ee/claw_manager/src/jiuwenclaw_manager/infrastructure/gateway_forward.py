@@ -208,14 +208,14 @@ class EnterpriseGatewayForward(GatewayForwardService):
         )
 
     async def get_model_template(
-        self, jiuwenclaw_id: str, template_id: int
+        self, jiuwenclaw_id: str, template_id: str
     ) -> dict[str, Any]:
         return await self._request(
             "GET", jiuwenclaw_id, f"/model-templates/{template_id}"
         )
 
     async def update_model_template(
-        self, jiuwenclaw_id: str, template_id: int, body: dict[str, Any]
+        self, jiuwenclaw_id: str, template_id: str, body: dict[str, Any]
     ) -> dict[str, Any]:
         return await self._request(
             "PUT",
@@ -225,7 +225,7 @@ class EnterpriseGatewayForward(GatewayForwardService):
         )
 
     async def delete_model_template(
-        self, jiuwenclaw_id: str, template_id: int
+        self, jiuwenclaw_id: str, template_id: str
     ) -> dict[str, Any]:
         return await self._request(
             "DELETE", jiuwenclaw_id, f"/model-templates/{template_id}"

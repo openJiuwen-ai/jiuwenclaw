@@ -55,6 +55,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+redis = ["redis>=5.0.0"]
 desktop = ["pywebview>=5.4"]
 dev = ["pyinstaller>=6.0.0", "pywebview>=5.4"]
 tui = ["jiuwenclaw-tui==0.1.10"]
@@ -68,6 +69,9 @@ test = [
     "coverage>=7.7.1",
     "pyyaml>=6.0",
 ]
+
+[project.entry-points."jiuwenclaw.gateway.redis"]
+redis = "jiuwenclaw.extensions.redis.redis_client:RedisClient"
 
 [project.scripts]
 jiuwenclaw-app = "jiuwenclaw.app:main"

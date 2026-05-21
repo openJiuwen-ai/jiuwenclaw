@@ -18,7 +18,7 @@ async def start_consumer(handler: DBHandler) -> None:
     """阻塞消费 AMQP 消息，直到任务被 cancel（由 FastAPI lifespan 在进程退出时触发）。"""
     url = settings.rabbitmq_url
     if not url:
-        _log.info("rabbitmq_consumer_skipped", reason="CLAWMANAGER_RABBITMQ_URL unset")
+        _log.info("rabbitmq_consumer_skipped", reason="MANAGER_RABBITMQ_URL unset")
         return
 
     queue_name = settings.rabbitmq_queue_name or f"claw_manager_{settings.manager_id}"
