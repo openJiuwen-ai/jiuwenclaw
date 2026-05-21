@@ -2167,6 +2167,68 @@ class AgentWebSocketServer:
         return payload
 
     @staticmethod
+    async def _pre_check_mcp_server(server_payload: dict[str, Any]) -> tuple[bool, str]:
+        """Try a temporary connection to verify the MCP server is reachable.
+
+        Uses ``logging.disable(CRITICAL)`` to silence the SDK's verbose
+        "Failed to parse JSONRPC message" tracebacks and wraps everything
+        in tight timeouts so a broken server cannot block the caller.
+
+        Returns ``(ok, message)``.
+        """
+        import logging as _logging
+        from openjiuwen.core.foundation.tool import McpServerConfig
+        from openjiuwen.core.runner.resources_manager.tool_manager import ToolMgr
+
+        name = server_payload.get("name", "")
+        transport = server_payload.get("transport", "")
+
+        # Build McpServerConfig (same logic as _fetch_mcp_tools_from_config)
+        payload: dict[str, Any] = {"server_name": name, "client_type": transport}
+        if transport == "stdio":
+            command = server_payload.get("command", "")
+            if not command:
+                return True, "skipped: no command"
+            params: dict[str, Any] = {"command": command}
+            if isinstance(server_payload.get("args"), list):
+                params["args"] = [str(x) for x in server_payload["args"]]
+            if isinstance(server_payload.get("cwd"), str) and server_payload["cwd"].strip():
+                params["cwd"] = server_payload["cwd"].strip()
+            if isinstance(server_payload.get("env"), dict):
+                params["env"] = {str(k): str(v) for k, v in server_payload["env"].items()}
+            payload["server_path"] = f"stdio://{name}"
+            payload["params"] = params
+        else:
+            url = server_payload.get("url", "")
+            if not url:
+                return True, "skipped: no url"
+            payload["server_path"] = url
+            params = {}
+            if isinstance(server_payload.get("headers"), dict):
+                params["headers"] = {str(k): str(v) for k, v in server_payload["headers"].items()}
+            if params:
+                payload["params"] = params
+
+        cfg = McpServerConfig(**payload)
+        client = ToolMgr._create_client(cfg)
+        _logging.disable(_logging.CRITICAL)
+        try:
+            connected = await asyncio.wait_for(client.connect(), timeout=15.0)
+            if not connected:
+                return False, f"{name} ({transport}) pre-check failed: connection refused"
+            return True, f"{name} ({transport}) pre-check passed"
+        except asyncio.TimeoutError:
+            return False, f"{name} ({transport}) pre-check failed: connection timed out"
+        except Exception as exc:
+            return False, f"{name} ({transport}) pre-check failed: {exc}"
+        finally:
+            _logging.disable(_logging.NOTSET)
+            try:
+                await asyncio.wait_for(client.disconnect(), timeout=5.0)
+            except (asyncio.TimeoutError, Exception):
+                pass
+
+    @staticmethod
     async def _fetch_mcp_tools_from_config(entry: dict[str, Any]) -> list[dict[str, Any]]:
         """Create a temporary MCP connection from config entry and list tools."""
         from openjiuwen.core.foundation.tool import McpServerConfig
@@ -2360,28 +2422,63 @@ class AgentWebSocketServer:
                     )
             elif action == "add":
                 server_payload = self._normalize_mcp_add_payload(params)
-                _, created = upsert_mcp_server_in_config(server_payload)
-                applied = True
-                error_message = ""
-                try:
-                    await self._agent_manager.reload_agents_config(get_config(), None)
-                except Exception as reload_exc:  # noqa: BLE001
-                    applied = False
-                    error_message = str(reload_exc)
-                    logger.warning("[command.mcp] reload after add failed: %s", reload_exc)
-                resp_payload: dict[str, Any] = {
-                    "type": "added" if created else "updated",
-                    "name": server_payload["name"],
-                    "applied": applied,
-                }
-                if error_message:
-                    resp_payload["error"] = error_message
-                resp = AgentResponse(
-                    request_id=request.request_id,
-                    channel_id=request.channel_id,
-                    ok=True,
-                    payload=resp_payload,
-                )
+
+                # Pre-check: only validate when stdio args contain a local file
+                # path (e.g. "node /path/to/server.js").  Skip for package
+                # managers like npx which may need to download first.
+                pre_check_failed = False
+                if bool(server_payload.get("enabled", True)):
+                    _need_pre_check = False
+                    if server_payload.get("transport") == "stdio":
+                        _args = server_payload.get("args")
+                        if isinstance(_args, list):
+                            _need_pre_check = any(
+                                isinstance(a, str)
+                                and (a.startswith(("/", "./", "../"))
+                                     or a.endswith((".js", ".mjs", ".json", ".py")))
+                                for a in _args
+                            )
+                    if _need_pre_check:
+                        check_ok, check_msg = await self._pre_check_mcp_server(server_payload)
+                        if not check_ok:
+                            logger.warning("[command.mcp] add pre-check failed: %s", check_msg)
+                            resp = AgentResponse(
+                                request_id=request.request_id,
+                                channel_id=request.channel_id,
+                                ok=False,
+                                payload={
+                                    "type": "add_failed",
+                                    "name": server_payload["name"],
+                                    "error": check_msg,
+                                },
+                            )
+                            pre_check_failed = True
+                        else:
+                            logger.info("[command.mcp] add pre-check ok: %s", check_msg)
+
+                if not pre_check_failed:
+                    _, created = upsert_mcp_server_in_config(server_payload)
+                    applied = True
+                    error_message = ""
+                    try:
+                        await self._agent_manager.reload_agents_config(get_config(), None)
+                    except Exception as reload_exc:  # noqa: BLE001
+                        applied = False
+                        error_message = str(reload_exc)
+                        logger.warning("[command.mcp] reload after add failed: %s", reload_exc)
+                    resp_payload: dict[str, Any] = {
+                        "type": "added" if created else "updated",
+                        "name": server_payload["name"],
+                        "applied": applied,
+                    }
+                    if error_message:
+                        resp_payload["error"] = error_message
+                    resp = AgentResponse(
+                        request_id=request.request_id,
+                        channel_id=request.channel_id,
+                        ok=True,
+                        payload=resp_payload,
+                    )
             elif action in {"enable", "disable"}:
                 name = str(params.get("name", "")).strip()
                 if not name:
@@ -3303,7 +3400,7 @@ class AgentWebSocketServer:
                 settings_sources.append(config_path)
 
                 # Memory diagnostics — use the actual workspace dir (trusted_dir or cwd), 
-                # same as ProjectMemoryRail, so we detect JIUWENCLAW.md where /init creates it.
+                # same as ProjectMemoryRail, so we detect JIUWESWARM.md where /init creates it.
                 params = request.params or {}
                 workspace_dir = str(params.get("cwd", "") or os.getcwd())
                 trusted_dirs = params.get("trusted_dirs")

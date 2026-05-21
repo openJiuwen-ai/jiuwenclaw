@@ -1159,6 +1159,10 @@ export function SkillPanel({ sessionId, onNavigateToConfig }: SkillPanelProps) {
         onClose={() => setSourceModalOpen(false)}
         currentSource={onlineSource}
         onSourceChange={(source) => setOnlineSource(source)}
+        onNavigateToConfig={() => {
+          setSourceModalOpen(false);
+          onNavigateToConfig?.();
+        }}
       />
       <SkillNetSearchModal
         open={skillNetModalOpen}

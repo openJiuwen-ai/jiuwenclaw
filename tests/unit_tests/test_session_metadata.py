@@ -331,6 +331,23 @@ class TestGetAllSessionsMetadata:
         assert total == 0
         assert sessions == []
 
+    @staticmethod
+    def test_excludes_heartbeat_sessions(sessions_dir):
+        from jiuwenswarm.server.runtime.session.session_metadata import (
+            init_session_metadata,
+            get_all_sessions_metadata,
+        )
+
+        init_session_metadata(session_id="sess_a")
+        init_session_metadata(session_id="heartbeat_abc123_deadbeef")
+        init_session_metadata(session_id="sess_b")
+
+        sessions, total = get_all_sessions_metadata(limit=20)
+        assert total == 2
+        ids = {s["session_id"] for s in sessions}
+        assert ids == {"sess_a", "sess_b"}
+        assert len(sessions) == 2
+
 
 # ===========================================================================
 # _read_metadata 容错

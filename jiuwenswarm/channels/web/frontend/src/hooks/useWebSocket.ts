@@ -966,6 +966,8 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
         if (shouldDropDuplicatedEvent('chat.processing_status', payload)) return;
         // 切换模式时忽略处理状态更新
         if (useChatStore.getState().switchingMode) return;
+        // 加载历史消息时忽略处理状态更新
+        if (useChatStore.getState().isLoadingHistory) return;
         // 如果 interrupt_result 指示任务已完成，忽略 processing_status=true
         const { interruptResult } = useChatStore.getState();
         if (interruptResult && interruptResult.intent === 'resume' && interruptResult.success && interruptResult.has_active_task === false) {

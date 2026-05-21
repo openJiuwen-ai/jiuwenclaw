@@ -24,8 +24,10 @@ from jiuwenswarm.agents.harness.team.monitor_handler import TeamMonitorHandler
 from jiuwenswarm.server.utils.stream_utils import parse_stream_chunk
 from jiuwenswarm.common.schema.agent import AgentResponseChunk
 from jiuwenswarm.server.runtime.agent_adapter.evolution_helpers import (
+    EvolutionProgressStatus,
     EvolutionPushContext,
     TEAM_EVOLUTION_EVENT_TIMEOUT_SEC,
+    TEAM_EVOLUTION_HIDDEN_TERMINAL_STAGES,
     TEAM_EVOLUTION_HIDDEN_STAGE,
     TEAM_EVOLUTION_IDLE_SLEEP_SEC,
     TEAM_EVOLUTION_START_MESSAGE,
@@ -34,15 +36,18 @@ from jiuwenswarm.server.runtime.agent_adapter.evolution_helpers import (
     build_evolution_status_update,
     event_type,
     evolution_outcome_from_event,
+    evolution_progress_status_from_event,
     extract_evolution_request_id,
     group_evolution_approvals,
-    is_evolution_started_progress,
     is_evolution_outcome_event,
     make_team_evolution_cycle_request_id,
+    progress_for_request,
     push_evolution_event,
     push_evolution_status,
     team_evolution_end_update,
-    team_evolution_terminal_progress,
+    terminal_progress_from_events,
+    terminal_stage,
+    visible_evolution_progress_from_events,
 )
 
 logger = logging.getLogger(__name__)
@@ -985,6 +990,30 @@ async def _watch_team_evolution_and_push(
                 exc,
             )
 
+    async def _push_cycle_start(
+        request_id: str,
+        progress_statuses: list[EvolutionProgressStatus],
+    ) -> bool:
+        if request_id in closed_request_ids:
+            return False
+        request_progress = progress_for_request(progress_statuses, request_id)
+        first_progress = request_progress[0] if request_progress else None
+        await push_evolution_status(
+            push_context,
+            build_evolution_status_update(
+                request_id=request_id,
+                status="start",
+                stage=first_progress.stage if first_progress else TEAM_EVOLUTION_START_STAGE,
+                message=(
+                    first_progress.message
+                    if first_progress
+                    else TEAM_EVOLUTION_START_MESSAGE
+                ),
+            ),
+            build_server_push_message,
+        )
+        return True
+
     try:
         last_event_at = time.monotonic()
         while True:
@@ -1048,23 +1077,50 @@ async def _watch_team_evolution_and_push(
                 for evt in events
                 if is_evolution_outcome_event(evt)
             ]
-            terminal_progress = []
-            for evt in events:
-                terminal = team_evolution_terminal_progress(evt)
-                if terminal is not None:
-                    terminal_progress.append(terminal)
+            terminal_progress = terminal_progress_from_events(events)
+            visible_progress_statuses = visible_evolution_progress_from_events(events)
+            just_started = False
 
             if active_cycle_request_id is None:
                 first_request_id = next(iter(grouped_approvals), None)
                 if first_request_id is None:
-                    first_request_id = None
+                    for progress_status in visible_progress_statuses:
+                        if progress_status.request_id:
+                            first_request_id = progress_status.request_id
+                            break
+                if first_request_id is None:
                     for evt in events:
+                        if evolution_progress_status_from_event(evt) is not None:
+                            continue
                         request_id = extract_evolution_request_id(evt)
                         if request_id:
                             first_request_id = request_id
                             break
                 if first_request_id is None:
-                    if any(is_evolution_started_progress(evt) for evt in events):
+                    for terminal_request_id, terminal in terminal_progress:
+                        if (
+                            terminal_request_id
+                            or terminal_stage(terminal)
+                            not in TEAM_EVOLUTION_HIDDEN_TERMINAL_STAGES
+                        ):
+                            first_request_id = terminal_request_id
+                            break
+                if first_request_id is None:
+                    if any(
+                        progress_status.request_id is None
+                        for progress_status in visible_progress_statuses
+                    ):
+                        fallback_cycle_index += 1
+                        first_request_id = make_team_evolution_cycle_request_id(
+                            session_id,
+                            fallback_cycle_index,
+                        )
+                    elif any(
+                        terminal_request_id is None
+                        and terminal_stage(terminal)
+                        not in TEAM_EVOLUTION_HIDDEN_TERMINAL_STAGES
+                        for terminal_request_id, terminal in terminal_progress
+                    ):
                         fallback_cycle_index += 1
                         first_request_id = make_team_evolution_cycle_request_id(
                             session_id,
@@ -1072,37 +1128,43 @@ async def _watch_team_evolution_and_push(
                         )
                     else:
                         continue
-                if first_request_id not in closed_request_ids:
+                if await _push_cycle_start(first_request_id, visible_progress_statuses):
                     active_cycle_request_id = first_request_id
-                    await push_evolution_status(
-                        push_context,
-                        build_evolution_status_update(
-                            request_id=active_cycle_request_id,
-                            status="start",
-                            stage=TEAM_EVOLUTION_START_STAGE,
-                            message=TEAM_EVOLUTION_START_MESSAGE,
-                        ),
-                        build_server_push_message,
-                    )
+                    just_started = True
 
             if active_cycle_request_id is None:
                 continue
+
+            active_progress_statuses = progress_for_request(
+                visible_progress_statuses,
+                active_cycle_request_id,
+            )
+            progress_statuses_to_push = (
+                active_progress_statuses[1:]
+                if just_started
+                else active_progress_statuses
+            )
+            for progress_status in progress_statuses_to_push:
+                if progress_status.terminal:
+                    continue
+                await push_evolution_status(
+                    push_context,
+                    build_evolution_status_update(
+                        request_id=active_cycle_request_id,
+                        status="progress",
+                        stage=progress_status.stage,
+                        message=progress_status.message,
+                    ),
+                    build_server_push_message,
+                )
 
             for request_id, approval_events in grouped_approvals.items():
                 if request_id in closed_request_ids:
                     continue
                 if active_cycle_request_id != request_id:
+                    if not await _push_cycle_start(request_id, visible_progress_statuses):
+                        continue
                     active_cycle_request_id = request_id
-                    await push_evolution_status(
-                        push_context,
-                        build_evolution_status_update(
-                            request_id=active_cycle_request_id,
-                            status="start",
-                            stage=TEAM_EVOLUTION_START_STAGE,
-                            message=TEAM_EVOLUTION_START_MESSAGE,
-                        ),
-                        build_server_push_message,
-                    )
                 if request_id in seen_request_ids:
                     logger.debug(
                         "[TeamHelpers] skip duplicated team evolution approval batch: session_id=%s request_id=%s",
@@ -1148,7 +1210,15 @@ async def _watch_team_evolution_and_push(
                     "message": str(outcome.get("message") or ""),
                 }
             elif terminal_progress:
-                terminal = terminal_progress[-1]
+                for terminal_request_id, candidate_terminal in terminal_progress:
+                    if active_cycle_request_id is None:
+                        continue
+                    if (
+                        terminal_request_id is not None
+                        and terminal_request_id != active_cycle_request_id
+                    ):
+                        continue
+                    terminal = candidate_terminal
 
             if terminal is not None and active_cycle_request_id is not None:
                 await push_evolution_status(

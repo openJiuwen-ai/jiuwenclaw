@@ -41,52 +41,6 @@
   font-size: 0.75rem;
 }
 
-.toolpanel-status-card__heartbeat {
-  border-radius: var(--radius-md);
-  border: 1px solid;
-  padding: 0.5rem 0.625rem;
-  font-size: 0.75rem;
-  line-height: 1.35;
-}
-
-.toolpanel-status-card__heartbeat-row {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 0.5rem;
-}
-
-.toolpanel-status-card__heartbeat-row + .toolpanel-status-card__heartbeat-row {
-  margin-top: 0.25rem;
-}
-
-.toolpanel-status-card__heartbeat-value {
-  text-align: right;
-  overflow-wrap: anywhere;
-  word-break: break-word;
-  font-size: inherit;
-  opacity: 0.8;
-}
-
-.toolpanel-status-card__heartbeat-link {
-  text-align: right;
-  overflow-wrap: anywhere;
-  word-break: break-word;
-  font-size: inherit;
-  opacity: 0.9;
-  color: inherit;
-  text-decoration: underline;
-  text-underline-offset: 2px;
-  background: transparent;
-  border: 0;
-  padding: 0;
-  cursor: pointer;
-}
-
-.toolpanel-status-card__heartbeat-link:hover {
-  opacity: 1;
-}
-
 /* ===========================
    Harness Extension Tree
    =========================== */

@@ -12,7 +12,6 @@ classifiers = [
     "License :: OSI Approved :: Apache Software License",
 ]
 dependencies = [
-    "a2a-sdk[http-server]==1.0.0a0",
     "chromadb>=1.5.0",
     "ruamel.yaml>=0.18.0",
     "lark-oapi>=1.5.3",
@@ -46,6 +45,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+a2a = ["a2a-sdk[http-server]==1.0.0"]
 desktop = ["pywebview>=5.4"]
 dev = ["pyinstaller>=6.0.0", "pywebview>=5.4"]
 tui = ["jiuwenswarm-tui==0.2.0"]
@@ -56,6 +56,7 @@ shell-ast = [
 ]
 # Same packages as [dependency-groups] test (pip install -e ".[test]")
 test = [
+    "a2a-sdk[http-server]==1.0.0",
     "pytest>=8.3.5",
     "pytest-asyncio>=1.0.0",
     "pytest-html>=4.1.1",
@@ -75,6 +76,7 @@ jiuwenswarm-init = "jiuwenswarm.init_workspace:main"
 jiuwenswarm-desktop = "jiuwenswarm.channels.desktop.desktop_app:main"
 jiuwenswarm-tui = "jiuwenswarm.channels.acp.app_acp:main"
 jiuwenswarm-acp = "jiuwenswarm.gateway.channel_manager.protocol.acp.acp_connect:main"
+jiuwenswarm-acp-chat = "jiuwenswarm.acp.cli:main"
 jiuwenbox = "jiuwenbox.cli.jiuwenbox:main"
 jiuwenbox-server = "jiuwenbox.server.launcher:main"
 
@@ -119,6 +121,7 @@ dev = [
 ]
 # Testing (keep in sync with optional-dependencies.test)
 test = [
+    "a2a-sdk[http-server]==1.0.0",
     "pytest>=8.3.5",
     "pytest-asyncio>=1.0.0",
     "pytest-html>=4.1.1",

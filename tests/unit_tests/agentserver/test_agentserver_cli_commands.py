@@ -270,6 +270,16 @@ async def test_handle_command_mcp_add_triggers_reload(server, fake_ws, monkeypat
     )
     monkeypatch.setattr(agent_ws_server_module, "get_config", lambda: {"mcp": {"servers": []}})
 
+    # Mock pre-check so it does not attempt a real MCP connection.
+    async def _pre_check_ok(_payload):
+        return True, "pre-check ok"
+
+    monkeypatch.setattr(
+        agent_ws_server_module.AgentWebSocketServer,
+        "_pre_check_mcp_server",
+        staticmethod(_pre_check_ok),
+    )
+
     called = {"reload": 0}
 
     async def _reload(_config, _env):

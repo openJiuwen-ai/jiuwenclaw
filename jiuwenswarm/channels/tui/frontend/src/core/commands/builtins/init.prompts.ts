@@ -3,8 +3,8 @@ import type { CommandContext } from "../types.js";
 export type ScopeKey = "project" | "personal" | "both";
 
 export interface ExistingFiles {
-  jiuwenclawMd: boolean;
-  jiuwenclawLocalMd: boolean;
+  jiuwenswarmMd: boolean;
+  jiuwenswarmLocalMd: boolean;
   claudeMd: boolean;
   claudeLocalMd: boolean;
   agentsMd: boolean;
@@ -45,7 +45,7 @@ export function buildInitPrompt(args: BuildInitPromptArgs): string {
 
 function buildInitPromptEn({ rootDir, scopeKey, existing }: BuildInitPromptArgs): string {
   const scopeLine = SCOPE_DESCRIPTION_EN[scopeKey];
-  return `Set up a minimal JIUWENCLAW.md (team-shared) and optionally JIUWENCLAW.local.md (personal) for this repository.
+  return `Set up a minimal JIUWENSWARM.md (team-shared) and optionally JIUWENSWARM.local.md (personal) for this repository.
 
 These files are auto-loaded into every coding-mode session by ProjectMemoryRail, so they must be CONCISE — only include what the assistant would get wrong without them.
 
@@ -55,8 +55,8 @@ These files are auto-loaded into every coding-mode session by ProjectMemoryRail,
    Never use relative paths. When writing or editing, always construct \`${rootDir}/<filename>\`.
 2. **Do NOT use the \`coding_memory_read\` / \`coding_memory_write\` / \`coding_memory_edit\` tools in this command.** Those are for session-level auto-memory, a different system. /init produces static project documents via the file write tools only.
 3. **Existing files pre-detected in workspace root**:
-  - JIUWENCLAW.md: ${yesNo(existing.jiuwenclawMd)} ${existing.jiuwenclawMd ? "— you MUST read it first, propose a diff, then use `ask_user` with `questions` to ask the user whether to apply. Example: `ask_user(query='Update JIUWENCLAW.md?', questions=[{question: 'JIUWENCLAW.md already exists. What would you like to do?', header: 'Update', options: [{label: 'Apply update', description: 'Merge the proposed changes into the existing file'}, {label: 'Skip (keep current)', description: 'Leave the file unchanged and continue'}], multi_select: false}])`. If user chooses 'Apply update', use Edit to apply the diff; if 'Skip', leave the file unchanged and continue. NEVER silently overwrite." : ""}
-   - JIUWENCLAW.local.md: ${yesNo(existing.jiuwenclawLocalMd)} ${existing.jiuwenclawLocalMd ? "— propose additions via Edit only, never overwrite." : ""}
+  - JIUWENSWARM.md: ${yesNo(existing.jiuwenswarmMd)} ${existing.jiuwenswarmMd ? "— you MUST read it first, propose a diff, then use `ask_user` with `questions` to ask the user whether to apply. Example: `ask_user(query='Update JIUWENSWARM.md?', questions=[{question: 'JIUWENSWARM.md already exists. What would you like to do?', header: 'Update', options: [{label: 'Apply update', description: 'Merge the proposed changes into the existing file'}, {label: 'Skip (keep current)', description: 'Leave the file unchanged and continue'}], multi_select: false}])`. If user chooses 'Apply update', use Edit to apply the diff; if 'Skip', leave the file unchanged and continue. NEVER silently overwrite." : ""}
+   - JIUWENSWARM.local.md: ${yesNo(existing.jiuwenswarmLocalMd)} ${existing.jiuwenswarmLocalMd ? "— propose additions via Edit only, never overwrite." : ""}
    - Legacy reference files (do NOT delete or rewrite; you may link to them): CLAUDE.md=${yesNo(existing.claudeMd)}, CLAUDE.local.md=${yesNo(existing.claudeLocalMd)}, AGENTS.md=${yesNo(existing.agentsMd)}, OPENJIUWEN.md=${yesNo(existing.openjiuwenMd)}, .cursorrules=${yesNo(existing.cursorRules)}, .github/copilot-instructions.md=${yesNo(existing.copilotInstructions)}
 4. **When the explore sub-agent runs bash commands**, always prefix with \`cd ${rootDir} && ...\` or use \`git -C ${rootDir}\` — sub-agent CWD is not guaranteed to equal \`${rootDir}\`.
 5. **Always prefer \`task_tool\` with \`subagent_type: "explore_agent"\` when it is available.** If \`task_tool\` is unavailable for this turn, silently FALL BACK to \`glob\` / \`grep\` / \`read_file\` / \`bash\` yourself.
@@ -77,7 +77,7 @@ task_description: |
     - Manifests: package.json, Cargo.toml, pyproject.toml, go.mod, pom.xml, build.gradle*, setup.py
     - Docs: README.*, CONTRIBUTING.*, ARCHITECTURE.*, docs/
     - Build/CI: Makefile, justfile, .github/workflows/*, .gitlab-ci.yml, azure-pipelines.yml
-    - AI tool configs: JIUWENCLAW.md, CLAUDE.md, AGENTS.md, OPENJIUWEN.md,
+    - AI tool configs: JIUWENSWARM.md, CLAUDE.md, AGENTS.md, OPENJIUWEN.md,
                        .jiuwen/rules/*, .claude/rules/*, .cursor/rules/*,
                        .cursorrules, .github/copilot-instructions.md,
                        .windsurfrules, .clinerules, .mcp.json
@@ -126,19 +126,19 @@ For scope \`project\` / \`both\`: ask about team practices —
 For scope \`personal\` / \`both\`: ask about the user —
   role, familiarity with this codebase, sandbox URLs / accounts, communication preferences, specific tooling setup on their machine.
 
-**Synthesize a proposal** combining Step 2 findings and Step 3 answers. Because skills and hooks are outside the current scope, ALL items become JIUWENCLAW.md notes (team) or JIUWENCLAW.local.md notes (personal). Present as a plain-text list, one line per item, grouped by target file. Ask for confirmation before proceeding.
+**Synthesize a proposal** combining Step 2 findings and Step 3 answers. Because skills and hooks are outside the current scope, ALL items become JIUWENSWARM.md notes (team) or JIUWENSWARM.local.md notes (personal). Present as a plain-text list, one line per item, grouped by target file. Ask for confirmation before proceeding.
 
 **Build the preference queue** from the accepted proposal:
-\`[{type: "note", target: "JIUWENCLAW.md" | "JIUWENCLAW.local.md", content: "..."}]\`
+\`[{type: "note", target: "JIUWENSWARM.md" | "JIUWENSWARM.local.md", content: "..."}]\`
 Steps 4–5 consume this queue.
 
-## Step 4: Write JIUWENCLAW.md (if scope is project or both)
+## Step 4: Write JIUWENSWARM.md (if scope is project or both)
 
-Target: \`${rootDir}/JIUWENCLAW.md\`
+Target: \`${rootDir}/JIUWENSWARM.md\`
 
-${existing.jiuwenclawMd ? "File EXISTS — read it, propose a merged diff, use `ask_user` with `questions` to get user confirmation (options: 'Apply update' / 'Skip (keep current)'), then apply via Edit if confirmed. DO NOT use Write to overwrite silently." : "File is absent — use Write to create it."}
+${existing.jiuwenswarmMd ? "File EXISTS — read it, propose a merged diff, use `ask_user` with `questions` to get user confirmation (options: 'Apply update' / 'Skip (keep current)'), then apply via Edit if confirmed. DO NOT use Write to overwrite silently." : "File is absent — use Write to create it."}
 
-Consume queue entries whose \`target == "JIUWENCLAW.md"\`.
+Consume queue entries whose \`target == "JIUWENSWARM.md"\`.
 
 **Content test**: for each candidate line, ask "Would removing this cause the assistant to make mistakes?" If no, cut.
 
@@ -168,22 +168,22 @@ Consume queue entries whose \`target == "JIUWENCLAW.md"\`.
 
 **Prefix** the file with:
 \`\`\`
-# JIUWENCLAW.md
+# JIUWENSWARM.md
 
-This file provides guidance to JiuwenClaw (and any compatible AI coding assistant) when working with code in this repository.
+This file provides guidance to JiuwenSwarm (and any compatible AI coding assistant) when working with code in this repository.
 \`\`\`
 
-For monorepos: mention that subdirectory \`JIUWENCLAW.md\` is supported — ProjectMemoryRail walks up from cwd, so per-package docs are welcome.
+For monorepos: mention that subdirectory \`JIUWENSWARM.md\` is supported — ProjectMemoryRail walks up from cwd, so per-package docs are welcome.
 
 For rule organization at team scale: suggest creating \`.jiuwen/rules/<topic>.md\` — these are auto-scanned, and may use frontmatter \`paths:\` to scope rules by the current working subtree / workspace.
 
-## Step 5: Write JIUWENCLAW.local.md (if scope is personal or both)
+## Step 5: Write JIUWENSWARM.local.md (if scope is personal or both)
 
-Target: \`${rootDir}/JIUWENCLAW.local.md\`
+Target: \`${rootDir}/JIUWENSWARM.local.md\`
 
-${existing.jiuwenclawLocalMd ? "File EXISTS — propose additions via Edit, never overwrite." : "File is absent — use Write to create it."}
+${existing.jiuwenswarmLocalMd ? "File EXISTS — propose additions via Edit, never overwrite." : "File is absent — use Write to create it."}
 
-Consume queue entries whose \`target == "JIUWENCLAW.local.md"\`.
+Consume queue entries whose \`target == "JIUWENSWARM.local.md"\`.
 
 Include: user's role, familiarity, personal URLs / accounts, communication preferences, tool setup specific to the user's machine.
 
@@ -191,7 +191,7 @@ Include: user's role, familiarity, personal URLs / accounts, communication prefe
   1. Read \`.gitignore\` if it exists (use absolute path).
   2. Check whether each of the two lines below is already present (exact line match).
   3. Append only the missing ones:
-       - \`JIUWENCLAW.local.md\`
+       - \`JIUWENSWARM.local.md\`
        - \`.jiuwen/settings.local.json\`
   4. If \`.gitignore\` does not exist, create it with those two lines.
 
@@ -207,7 +207,7 @@ Remind the user:
 Then suggest optimizations as a short checklist, only those relevant to this repo:
 - If tests are missing / sparse: suggest setting up a framework so the assistant can verify its own changes.
 - If no formatter / lint config was found: suggest adding one with a one-line reason.
-- If Step 2 found legacy AI config files (CLAUDE.md, AGENTS.md, etc.) not referenced in JIUWENCLAW.md: suggest consolidating via plain links or follow-up cleanup.
+- If Step 2 found legacy AI config files (CLAUDE.md, AGENTS.md, etc.) not referenced in JIUWENSWARM.md: suggest consolidating via plain links or follow-up cleanup.
 - **Always include**: "Run \`/compact\` after reviewing to trim this init session from history."
 `;
 }
@@ -218,7 +218,7 @@ Then suggest optimizations as a short checklist, only those relevant to this rep
 
 function buildInitPromptZh({ rootDir, scopeKey, existing }: BuildInitPromptArgs): string {
   const scopeLine = SCOPE_DESCRIPTION_ZH[scopeKey];
-  return `为本仓库生成一份最小可用的 JIUWENCLAW.md（团队共享）与可选的 JIUWENCLAW.local.md（个人私有）。
+  return `为本仓库生成一份最小可用的 JIUWENSWARM.md（团队共享）与可选的 JIUWENSWARM.local.md（个人私有）。
 这些文件会被 ProjectMemoryRail 自动注入到每一轮 coding 模式会话的 system prompt，因此必须**精简** —— 只写"不写就会出错"的信息。
 
 ## 关键约束（必读，不可违反）
@@ -227,8 +227,8 @@ function buildInitPromptZh({ rootDir, scopeKey, existing }: BuildInitPromptArgs)
    永远不要用相对路径。写入或编辑时总是构造 \`${rootDir}/<文件名>\`。
 2. **禁止使用 \`coding_memory_read\` / \`coding_memory_write\` / \`coding_memory_edit\` 工具。** 那是会话级自动记忆，和 /init 是两套系统。/init 只通过文件写入工具产出静态项目文档。
 3. **工作区根目录现有文件（已预探测）**：
-   - JIUWENCLAW.md：${yesNoZh(existing.jiuwenclawMd)} ${existing.jiuwenclawMd ? "—— 必须先读取、生成 diff，然后用 \`ask_user\` 的 \`questions\` 参数让用户选择。示例：\`ask_user(query='更新 JIUWENCLAW.md？', questions=[{question: 'JIUWENCLAW.md 已存在，你想怎么处理？', header: '更新', options: [{label: '应用更新', description: '把提议的变更合并到现有文件'}, {label: '跳过（保留当前）', description: '保持文件不变，继续后续步骤'}], multi_select: false}])\`。若用户选「应用更新」，用 Edit 执行 diff；若选「跳过」，保持文件不变继续。严禁静默覆盖。" : ""}
-   - JIUWENCLAW.local.md：${yesNoZh(existing.jiuwenclawLocalMd)} ${existing.jiuwenclawLocalMd ? "— 只能通过 Edit 追加，不要覆盖。" : ""}
+   - JIUWENSWARM.md：${yesNoZh(existing.jiuwenswarmMd)} ${existing.jiuwenswarmMd ? "—— 必须先读取、生成 diff，然后用 \`ask_user\` 的 \`questions\` 参数让用户选择。示例：\`ask_user(query='更新 JIUWENSWARM.md？', questions=[{question: 'JIUWENSWARM.md 已存在，你想怎么处理？', header: '更新', options: [{label: '应用更新', description: '把提议的变更合并到现有文件'}, {label: '跳过（保留当前）', description: '保持文件不变，继续后续步骤'}], multi_select: false}])\`。若用户选「应用更新」，用 Edit 执行 diff；若选「跳过」，保持文件不变继续。严禁静默覆盖。" : ""}
+   - JIUWENSWARM.local.md：${yesNoZh(existing.jiuwenswarmLocalMd)} ${existing.jiuwenswarmLocalMd ? "— 只能通过 Edit 追加，不要覆盖。" : ""}
    - 遗留参考文件（不要删改，可用 markdown 链接引用）：CLAUDE.md=${yesNoZh(existing.claudeMd)}, CLAUDE.local.md=${yesNoZh(existing.claudeLocalMd)}, AGENTS.md=${yesNoZh(existing.agentsMd)}, OPENJIUWEN.md=${yesNoZh(existing.openjiuwenMd)}, .cursorrules=${yesNoZh(existing.cursorRules)}, .github/copilot-instructions.md=${yesNoZh(existing.copilotInstructions)}
 4. **子代理 bash 命令必须加前缀**：\`cd ${rootDir} && ...\` 或用 \`git -C ${rootDir}\`，因为子代理的 CWD 不保证等于 \`${rootDir}\`。
 5. **只要可用，始终优先使用 \`task_tool\` 且 \`subagent_type: "explore_agent"\`。** 若本轮工具列表里没有 \`task_tool\`，就静默降级为用 \`glob\` / \`grep\` / \`read_file\` / \`bash\` 自行探索。
@@ -249,7 +249,7 @@ task_description: |
     - 清单：package.json, Cargo.toml, pyproject.toml, go.mod, pom.xml, build.gradle*, setup.py
     - 文档：README.*, CONTRIBUTING.*, ARCHITECTURE.*, docs/
     - 构建/CI：Makefile, justfile, .github/workflows/*, .gitlab-ci.yml, azure-pipelines.yml
-    - AI 配置：JIUWENCLAW.md, CLAUDE.md, AGENTS.md, OPENJIUWEN.md,
+    - AI 配置：JIUWENSWARM.md, CLAUDE.md, AGENTS.md, OPENJIUWEN.md,
               .jiuwen/rules/*, .claude/rules/*, .cursor/rules/*,
               .cursorrules, .github/copilot-instructions.md,
               .windsurfrules, .clinerules, .mcp.json
@@ -297,19 +297,19 @@ ask_user(
 对 \`personal\` / \`both\` 范围：询问用户 —
   角色、对本仓库的熟悉度、沙箱 URL / 账号、沟通偏好、本机工具链特殊设置。
 
-**合成提案**：把步骤 2 的发现和步骤 3 的回答整合。当前方案不支持 Skills 和 Hooks，所有条目一律归为 JIUWENCLAW.md（团队）或 JIUWENCLAW.local.md（个人）的记录项。用纯文本列表呈现，按目标文件分组。请求用户确认后再写文件。
+**合成提案**：把步骤 2 的发现和步骤 3 的回答整合。当前方案不支持 Skills 和 Hooks，所有条目一律归为 JIUWENSWARM.md（团队）或 JIUWENSWARM.local.md（个人）的记录项。用纯文本列表呈现，按目标文件分组。请求用户确认后再写文件。
 
 **构造偏好队列**：
-\`[{type: "note", target: "JIUWENCLAW.md" | "JIUWENCLAW.local.md", content: "..."}]\`
+\`[{type: "note", target: "JIUWENSWARM.md" | "JIUWENSWARM.local.md", content: "..."}]\`
 后续写文件步骤会消费此队列。
 
-## 步骤 4：写 JIUWENCLAW.md（当范围是 project 或 both）
+## 步骤 4：写 JIUWENSWARM.md（当范围是 project 或 both）
 
-目标：\`${rootDir}/JIUWENCLAW.md\`
+目标：\`${rootDir}/JIUWENSWARM.md\`
 
-${existing.jiuwenclawMd ? "文件已存在 —— 先读取，生成合并 diff，用 \`ask_user\` 的 \`questions\` 参数获取用户确认（选项：「应用更新」 / 「跳过（保留当前）」），确认后用 Edit 应用。绝不要用 Write 静默覆盖。" : "文件不存在 —— 用 Write 创建。"}
+${existing.jiuwenswarmMd ? "文件已存在 —— 先读取，生成合并 diff，用 \`ask_user\` 的 \`questions\` 参数获取用户确认（选项：「应用更新」 / 「跳过（保留当前）」），确认后用 Edit 应用。绝不要用 Write 静默覆盖。" : "文件不存在 —— 用 Write 创建。"}
 
-消费队列中 \`target == "JIUWENCLAW.md"\` 的条目。
+消费队列中 \`target == "JIUWENSWARM.md"\` 的条目。
 
 **内容筛选测试**：对每行候选，自问"去掉这行会不会让助手犯错？" 不会就删掉。
 
@@ -339,22 +339,22 @@ ${existing.jiuwenclawMd ? "文件已存在 —— 先读取，生成合并 diff�
 
 **文件开头**统一加：
 \`\`\`
-# JIUWENCLAW.md
+# JIUWENSWARM.md
 
-This file provides guidance to JiuwenClaw (and any compatible AI coding assistant) when working with code in this repository.
+This file provides guidance to JiuwenSwarm (and any compatible AI coding assistant) when working with code in this repository.
 \`\`\`
 
-对 monorepo：说明支持子目录放独立的 \`JIUWENCLAW.md\` —— ProjectMemoryRail 从 cwd 向上遍历加载。
+对 monorepo：说明支持子目录放独立的 \`JIUWENSWARM.md\` —— ProjectMemoryRail 从 cwd 向上遍历加载。
 
 对团队规模较大的项目：建议把按主题拆分的规则放到 \`.jiuwen/rules/<topic>.md\` —— 当前运行时会自动加载这些规则，并支持用 \`paths:\` frontmatter 按当前工作目录 / workspace 所在子树限定作用域。
 
-## 步骤 5：写 JIUWENCLAW.local.md（当范围是 personal 或 both）
+## 步骤 5：写 JIUWENSWARM.local.md（当范围是 personal 或 both）
 
-目标：\`${rootDir}/JIUWENCLAW.local.md\`
+目标：\`${rootDir}/JIUWENSWARM.local.md\`
 
-${existing.jiuwenclawLocalMd ? "文件已存在 —— 通过 Edit 追加内容，不要覆盖。" : "文件不存在 —— 用 Write 创建。"}
+${existing.jiuwenswarmLocalMd ? "文件已存在 —— 通过 Edit 追加内容，不要覆盖。" : "文件不存在 —— 用 Write 创建。"}
 
-消费队列中 \`target == "JIUWENCLAW.local.md"\` 的条目。
+消费队列中 \`target == "JIUWENSWARM.local.md"\` 的条目。
 
 包含：用户的角色、对仓库的熟悉程度、个人 URL / 账号、沟通偏好、本机特有工具链配置。
 
@@ -362,7 +362,7 @@ ${existing.jiuwenclawLocalMd ? "文件已存在 —— 通过 Edit 追加内容�
   1. 若 \`.gitignore\` 存在先读取（用绝对路径）；
   2. 检查下面两行是否已存在（整行精确匹配）；
   3. 仅追加缺失的：
-       - \`JIUWENCLAW.local.md\`
+       - \`JIUWENSWARM.local.md\`
        - \`.jiuwen/settings.local.json\`
   4. 若 \`.gitignore\` 不存在，就创建并写入这两行。
 
@@ -378,7 +378,7 @@ ${existing.jiuwenclawLocalMd ? "文件已存在 —— 通过 Edit 追加内容�
 然后给一个短清单（只写与当前仓库相关的）：
 - 若测试缺失 / 稀疏：建议引入测试框架，助手才能自证修改。
 - 若没有 formatter / lint 配置：建议添加，并说明一行理由。
-- 若步骤 2 发现了 JIUWENCLAW.md 中未引用的遗留 AI 配置文件（CLAUDE.md、AGENTS.md 等）：建议以普通链接方式提示用户后续合并。
+- 若步骤 2 发现了 JIUWENSWARM.md 中未引用的遗留 AI 配置文件（CLAUDE.md、AGENTS.md 等）：建议以普通链接方式提示用户后续合并。
 - **总是包含**："检查完后运行 \`/compact\` 可把这段初始化会话从历史中精简掉。"
 `;
 }
@@ -388,14 +388,14 @@ ${existing.jiuwenclawLocalMd ? "文件已存在 —— 通过 Edit 追加内容�
 // ---------------------------------------------------------------------------
 
 const SCOPE_DESCRIPTION_EN: Record<ScopeKey, string> = {
-  project: "write only JIUWENCLAW.md (run Step 4).",
-  personal: "write only JIUWENCLAW.local.md (run Step 5).",
+  project: "write only JIUWENSWARM.md (run Step 4).",
+  personal: "write only JIUWENSWARM.local.md (run Step 5).",
   both: "write both files (run Step 4 and Step 5).",
 };
 
 const SCOPE_DESCRIPTION_ZH: Record<ScopeKey, string> = {
-  project: "只写 JIUWENCLAW.md（执行步骤 4）。",
-  personal: "只写 JIUWENCLAW.local.md（执行步骤 5）。",
+  project: "只写 JIUWENSWARM.md（执行步骤 4）。",
+  personal: "只写 JIUWENSWARM.local.md（执行步骤 5）。",
   both: "两份都写（步骤 4 和步骤 5 都执行）。",
 };
 

@@ -109,7 +109,23 @@ export interface AppSnapshot {
   modelInfo: { provider: string; model: string; version: string };
   sessionTitle: string;
   statusLineText: string | null;
-  memoryWarnings: { path: string; kind: string; char_count: number; threshold: number; message: string }[];
+  memoryWarnings: {
+    path: string;
+    kind: string;
+    char_count: number;
+    threshold: number;
+    message: string;
+  }[];
+}
+
+function formatElapsed(ms: number): string {
+  if (!Number.isFinite(ms) || ms < 0) {
+    return "0s";
+  }
+  const totalSeconds = Math.max(0, Math.floor(ms / 1000));
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+  return minutes > 0 ? `${minutes}m ${seconds}s` : `${seconds}s`;
 }
 
 export class CliPiAppState {
@@ -130,13 +146,11 @@ export class CliPiAppState {
   private collapsedToolGroupIds = new Set<string>();
   private streamingState: StreamingState = StreamingState.Idle;
   private pendingQuestion: PendingQuestion | null = null;
-  private localPendingQuestion:
-    | {
-        requestId: string;
-        resolve: (answers: UserAnswer[]) => void;
-        reject: (error: Error) => void;
-      }
-    | null = null;
+  private localPendingQuestion: {
+    requestId: string;
+    resolve: (answers: UserAnswer[]) => void;
+    reject: (error: Error) => void;
+  } | null = null;
   private lastError: string | null = null;
   private activeSubtasks = new Map<string, SubtaskState>();
   private todos: TodoItem[] = [];
@@ -169,12 +183,20 @@ export class CliPiAppState {
     model: "",
     version: "",
   };
-  private memoryWarnings: { path: string; kind: string; char_count: number; threshold: number; message: string }[] = [];
+  private memoryWarnings: {
+    path: string;
+    kind: string;
+    char_count: number;
+    threshold: number;
+    message: string;
+  }[] = [];
   private memoryRefreshTimer: ReturnType<typeof setInterval> | null = null;
   /** 当 closeUi 中 cancelBeforeExit 调 cancel({showNotice:false}) 时置 true，抑制 chat.interrupt_result 的 UI 通知。 */
   private suppressInterruptResult = false;
   /** 本地中断请求标志，cancel() 调用时立即置 true，用于 long-running 命令的中断检测。 */
   private interruptRequested = false;
+  /** 当前回合的起始时间戳，用于在回合结束时计算执行耗时。 */
+  private turnStartedAt: number | null = null;
   private readonly eventDelegate: AppEventDelegate = {
     getConnectionStatus: () => this.connectionStatus,
     getSessionId: () => this.sessionId,
@@ -271,11 +293,23 @@ export class CliPiAppState {
       const u = usage as Record<string, unknown>;
       const entry: ModelUsageEntry = {
         model: key,
-        input_tokens: (existing?.input_tokens ?? 0) + (typeof u.input_tokens === "number" ? u.input_tokens : 0),
-        output_tokens: (existing?.output_tokens ?? 0) + (typeof u.output_tokens === "number" ? u.output_tokens : 0),
-        total_tokens: (existing?.total_tokens ?? 0) + (typeof u.total_tokens === "number" ? u.total_tokens : 0),
+        input_tokens:
+          (existing?.input_tokens ?? 0) + (typeof u.input_tokens === "number" ? u.input_tokens : 0),
+        output_tokens:
+          (existing?.output_tokens ?? 0) +
+          (typeof u.output_tokens === "number" ? u.output_tokens : 0),
+        total_tokens:
+          (existing?.total_tokens ?? 0) + (typeof u.total_tokens === "number" ? u.total_tokens : 0),
       };
       this.usageByModel.set(key, entry);
+    },
+    addWorkedForEntry: () => {
+      if (this.turnStartedAt === null) return;
+      const elapsed = Date.now() - this.turnStartedAt;
+      this.turnStartedAt = null;
+      this.addItem(
+        addInfo(this.sessionId, `Worked for ${formatElapsed(elapsed)}`, undefined, { view: "dim" }),
+      );
     },
   };
 
@@ -342,16 +376,24 @@ export class CliPiAppState {
         this.request<Record<string, unknown>>("memory.status", { detailed: true }),
       ]);
       const config =
-        configPayload.status === "fulfilled" && configPayload.value && typeof configPayload.value === "object"
+        configPayload.status === "fulfilled" &&
+        configPayload.value &&
+        typeof configPayload.value === "object"
           ? (configPayload.value as Record<string, unknown>)
           : {};
       const modelsResult =
-        modelsPayload.status === "fulfilled" && modelsPayload.value && typeof modelsPayload.value === "object"
+        modelsPayload.status === "fulfilled" &&
+        modelsPayload.value &&
+        typeof modelsPayload.value === "object"
           ? (modelsPayload.value as Record<string, unknown>)
           : {};
       const activeModelName = String(modelsResult.active_model ?? "").trim();
-      const models = Array.isArray(modelsResult.models) ? (modelsResult.models as Record<string, unknown>[]) : [];
-      const activeModel = activeModelName ? models.find((m) => m.model_name === activeModelName) : models[0];
+      const models = Array.isArray(modelsResult.models)
+        ? (modelsResult.models as Record<string, unknown>[])
+        : [];
+      const activeModel = activeModelName
+        ? models.find((m) => m.model_name === activeModelName)
+        : models[0];
       this.modelInfo = {
         provider: String(activeModel?.model_provider ?? config.model_provider ?? ""),
         model: activeModelName || String(config.model ?? ""),
@@ -359,11 +401,19 @@ export class CliPiAppState {
       };
 
       const memoryResult =
-        memoryPayload.status === "fulfilled" && memoryPayload.value && typeof memoryPayload.value === "object"
+        memoryPayload.status === "fulfilled" &&
+        memoryPayload.value &&
+        typeof memoryPayload.value === "object"
           ? (memoryPayload.value as Record<string, unknown>)
           : {};
       const largeFiles = Array.isArray(memoryResult.large_files)
-        ? (memoryResult.large_files as { path: string; kind: string; char_count: number; threshold: number; message: string }[])
+        ? (memoryResult.large_files as {
+            path: string;
+            kind: string;
+            char_count: number;
+            threshold: number;
+            message: string;
+          }[])
         : [];
       this.memoryWarnings = largeFiles;
 
@@ -379,10 +429,18 @@ export class CliPiAppState {
     this.memoryRefreshTimer = setInterval(async () => {
       try {
         const memoryResult = await this.request<Record<string, unknown>>(
-          "memory.status", { detailed: true }, 10_000,
+          "memory.status",
+          { detailed: true },
+          10_000,
         );
         const largeFiles = Array.isArray(memoryResult.large_files)
-          ? (memoryResult.large_files as { path: string; kind: string; char_count: number; threshold: number; message: string }[])
+          ? (memoryResult.large_files as {
+              path: string;
+              kind: string;
+              char_count: number;
+              threshold: number;
+              message: string;
+            }[])
           : [];
         this.memoryWarnings = largeFiles;
         this.emitChange();
@@ -424,8 +482,7 @@ export class CliPiAppState {
       hasRunningTools ||
       hasActiveSubtasks ||
       this.evolutionStatus === "running" ||
-      (isTeamMode(this.mode) &&
-        isTeamWorking(this.teamMemberEvents, this.teamMessageEvents));
+      (isTeamMode(this.mode) && isTeamWorking(this.teamMemberEvents, this.teamMessageEvents));
     return {
       connectionStatus: this.connectionStatus,
       sessionId: this.sessionId,
@@ -568,7 +625,11 @@ export class CliPiAppState {
     this._getInputValueRef = ref;
   }
 
-  readonly sendEventOnly = (method: string, params: Record<string, unknown>, isStream = false): string => {
+  readonly sendEventOnly = (
+    method: string,
+    params: Record<string, unknown>,
+    isStream = false,
+  ): string => {
     const id = `tui_${Date.now().toString(16)}_${Math.random().toString(36).slice(2, 6)}`;
     const trustedDirs = getTrustedDirs();
     const workspaceDir = trustedDirs[0] || process.cwd();
@@ -587,7 +648,7 @@ export class CliPiAppState {
     return id;
   };
 
-readonly request = async <T = Record<string, unknown>>(
+  readonly request = async <T = Record<string, unknown>>(
     method: string,
     params: Record<string, unknown>,
     timeoutMs?: number,
@@ -595,12 +656,17 @@ readonly request = async <T = Record<string, unknown>>(
     const id = `tui_${Date.now().toString(16)}_${Math.random().toString(36).slice(2, 6)}`;
     const trustedDirs = getTrustedDirs();
     const workspaceDir = trustedDirs[0] || process.cwd();
-    const response = await this.wsClient.request(id, method, {
-      ...params,
-      session_id: params.session_id ?? this.sessionId,
-      ...(trustedDirs.length > 0 ? { trusted_dirs: trustedDirs } : {}),
-      ...(workspaceDir ? { cwd: workspaceDir } : {}),
-    }, timeoutMs ?? 30000);
+    const response = await this.wsClient.request(
+      id,
+      method,
+      {
+        ...params,
+        session_id: params.session_id ?? this.sessionId,
+        ...(trustedDirs.length > 0 ? { trusted_dirs: trustedDirs } : {}),
+        ...(workspaceDir ? { cwd: workspaceDir } : {}),
+      },
+      timeoutMs ?? 30000,
+    );
     return response.payload as T;
   };
 
@@ -618,10 +684,9 @@ readonly request = async <T = Record<string, unknown>>(
   readonly safeFetchSessionTitle = (sessionId: string): void => {
     void (async () => {
       try {
-        const meta = await this.request<{ session_id: string; title: string }>(
-          "session.rename",
-          { session_id: sessionId },
-        );
+        const meta = await this.request<{ session_id: string; title: string }>("session.rename", {
+          session_id: sessionId,
+        });
         this.setSessionTitle(meta.title || "");
       } catch {
         // 标题获取失败不影响核心功能
@@ -757,12 +822,16 @@ readonly request = async <T = Record<string, unknown>>(
     if (this.streamingState !== StreamingState.Idle) {
       this.sendEventOnly("chat.interrupt", { intent: "cancel" });
     }
-    const requestId = this.sendEventOnly("chat.send", {
-      content,
-      query: content,
-      mode,
-      ...(attachments?.length ? { attachments } : {}),
-    }, true);
+    const requestId = this.sendEventOnly(
+      "chat.send",
+      {
+        content,
+        query: content,
+        mode,
+        ...(attachments?.length ? { attachments } : {}),
+      },
+      true,
+    );
     this.lastError = null;
     if (options?.logAsUser !== false) {
       this.entries = [
@@ -777,6 +846,7 @@ readonly request = async <T = Record<string, unknown>>(
       ];
     }
     this.streamingState = StreamingState.Responding;
+    this.turnStartedAt = Date.now();
     this.emitChange();
     return requestId;
   };
@@ -847,13 +917,17 @@ readonly request = async <T = Record<string, unknown>>(
     }
     const source = this.pendingQuestion.source;
     if (source === "permission_interrupt" || source === "ask_user_interrupt") {
-      this.sendEventOnly("chat.send", {
-        query: "",
-        request_id: this.pendingQuestion.requestId,
-        answers,
-        source,
-        mode: this.mode,
-      }, true);
+      this.sendEventOnly(
+        "chat.send",
+        {
+          query: "",
+          request_id: this.pendingQuestion.requestId,
+          answers,
+          source,
+          mode: this.mode,
+        },
+        true,
+      );
     } else {
       this.sendEventOnly("chat.user_answer", {
         request_id: this.pendingQuestion.requestId,
@@ -1024,11 +1098,7 @@ readonly request = async <T = Record<string, unknown>>(
     if (!entries || entries.length === 0) return;
 
     // 找最后一个实质 user message
-    const nonSyntheticTags = [
-      "<local-command-stdout>",
-      "<bash-stdout>",
-      "<task-notification>",
-    ];
+    const nonSyntheticTags = ["<local-command-stdout>", "<bash-stdout>", "<task-notification>"];
     let lastUserIdx = -1;
     for (let i = entries.length - 1; i >= 0; i--) {
       const e = entries[i];
@@ -1363,7 +1433,120 @@ readonly request = async <T = Record<string, unknown>>(
       existing.requestId ?? requestId,
       nextTool,
     );
+    this.applyTodoToolResult(nextTool);
     this.scheduleToolTimeoutCheck();
+  }
+
+  private applyTodoToolResult(tool: ToolCallDisplay): void {
+    if (tool.status !== "completed" || tool.isError) {
+      return;
+    }
+    const args = tool.arguments;
+    if (!args || typeof args !== "object" || Array.isArray(args)) {
+      return;
+    }
+    const record = args as Record<string, unknown>;
+    if (tool.name === "todo_create") {
+      this.applyTodoCreateArgs(record);
+      return;
+    }
+    if (tool.name === "todo_modify") {
+      this.applyTodoModifyArgs(record);
+    }
+  }
+
+  private applyTodoCreateArgs(args: Record<string, unknown>): void {
+    const tasks = Array.isArray(args.tasks) ? args.tasks : [];
+    const nowIso = new Date().toISOString();
+    const nextTodos = tasks
+      .filter((task): task is Record<string, unknown> => {
+        return Boolean(task && typeof task === "object" && !Array.isArray(task));
+      })
+      .map((task, index): TodoItem | null => {
+        const id = typeof task.id === "string" ? task.id : "";
+        if (!id) {
+          return null;
+        }
+        const status = this.normalizeTodoStatus(task.status) ?? "pending";
+        return {
+          id,
+          content: typeof task.content === "string" ? task.content : id,
+          activeForm: typeof task.activeForm === "string" ? task.activeForm : "",
+          status: task.status === undefined && index === 0 ? "in_progress" : status,
+          createdAt: nowIso,
+          updatedAt: nowIso,
+        };
+      })
+      .filter((todo): todo is TodoItem => todo !== null);
+    if (nextTodos.length > 0) {
+      this.todos = nextTodos;
+    }
+  }
+
+  private applyTodoModifyArgs(args: Record<string, unknown>): void {
+    const action = typeof args.action === "string" ? args.action : "update";
+    if (action === "delete") {
+      const ids = new Set(
+        (Array.isArray(args.ids) ? args.ids : []).filter(
+          (id): id is string => typeof id === "string",
+        ),
+      );
+      if (ids.size > 0) {
+        this.todos = this.todos.filter((todo) => !ids.has(todo.id));
+      }
+      return;
+    }
+    if (action !== "update") {
+      return;
+    }
+    const updates = Array.isArray(args.todos) ? args.todos : [];
+    const byId = new Map(this.todos.map((todo) => [todo.id, todo]));
+    const nowIso = new Date().toISOString();
+    for (const update of updates) {
+      if (!update || typeof update !== "object" || Array.isArray(update)) {
+        continue;
+      }
+      const item = update as Record<string, unknown>;
+      const id = typeof item.id === "string" ? item.id : "";
+      if (!id) {
+        continue;
+      }
+      const status = this.normalizeTodoStatus(item.status);
+      if (status === null) {
+        byId.delete(id);
+        continue;
+      }
+      const current = byId.get(id);
+      if (!current) {
+        continue;
+      }
+      byId.set(id, {
+        ...current,
+        content: typeof item.content === "string" ? item.content : current.content,
+        activeForm: typeof item.activeForm === "string" ? item.activeForm : current.activeForm,
+        status: status ?? current.status,
+        updatedAt: nowIso,
+      });
+    }
+    this.todos = [...byId.values()];
+  }
+
+  private normalizeTodoStatus(status: unknown): TodoItem["status"] | null | undefined {
+    if (status === undefined) {
+      return undefined;
+    }
+    if (
+      status === "deleted" ||
+      status === "delete" ||
+      status === "cancelled" ||
+      status === "canceled"
+    ) {
+      return null;
+    }
+    if (status === "in_progress" || status === "completed" || status === "pending") {
+      return status;
+    }
+    return undefined;
   }
 
   private addSyntheticToolExecution(
@@ -1418,7 +1601,6 @@ readonly request = async <T = Record<string, unknown>>(
     this.startStatusLinePoll();
   }
 
-  
   private buildStatusLineJsonInput(): Record<string, unknown> {
     const snapshot = this.getSnapshot();
     const usage = this.getUsageSummary();
@@ -1477,28 +1659,41 @@ readonly request = async <T = Record<string, unknown>>(
         //    input=$(cat "$JIUWENSWARM_SL_FILE")
         const tmpFile = join(tmpdir(), "jiuwenswarm-sl.json");
         writeFileSync(tmpFile, jsonInput, "utf8");
-        const msysPath = tmpFile.split(sep).join("/").replace(/^([A-Za-z]):/, (_, d) => "/" + d.toLowerCase());
+        const msysPath = tmpFile
+          .split(sep)
+          .join("/")
+          .replace(/^([A-Za-z]):/, (_, d) => "/" + d.toLowerCase());
         const patchedCmd = cmd.replace(/\$\(cat\)/g, `$(cat "${msysPath}")`);
         const fullCmd = `export JIUWENSWARM_SL_FILE="${msysPath}"; ${patchedCmd}`;
 
-        const child = execFile("sh", ["-c", fullCmd], { timeout: 3_000, maxBuffer: 10_240, cwd: process.cwd() }, (err, stdout) => {
-          if (err) return;
-          const text = stdout.trim();
-          if (text !== this.statusLineText) {
-            this.statusLineText = text || null;
-            this.emitChange();
-          }
-        });
+        const child = execFile(
+          "sh",
+          ["-c", fullCmd],
+          { timeout: 3_000, maxBuffer: 10_240, cwd: process.cwd() },
+          (err, stdout) => {
+            if (err) return;
+            const text = stdout.trim();
+            if (text !== this.statusLineText) {
+              this.statusLineText = text || null;
+              this.emitChange();
+            }
+          },
+        );
       } else {
         // On POSIX, stdin piping works correctly in sh -c.
-        const child = execFile("sh", ["-c", cmd], { timeout: 3_000, maxBuffer: 10_240 }, (err, stdout) => {
-          if (err) return;
-          const text = stdout.trim();
-          if (text !== this.statusLineText) {
-            this.statusLineText = text || null;
-            this.emitChange();
-          }
-        });
+        const child = execFile(
+          "sh",
+          ["-c", cmd],
+          { timeout: 3_000, maxBuffer: 10_240 },
+          (err, stdout) => {
+            if (err) return;
+            const text = stdout.trim();
+            if (text !== this.statusLineText) {
+              this.statusLineText = text || null;
+              this.emitChange();
+            }
+          },
+        );
         child.stdin?.end(jsonInput);
       }
     } catch {

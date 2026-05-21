@@ -262,6 +262,11 @@ class JiuWenClaw:
         await adapter.create_instance(config, mode=mode, sub_mode=sub_mode)
         logger.info("[JiuWenClaw] Agent instance created: sdk=%s, mode=%s, sub_mode=%s", self._sdk_name, mode, sub_mode)
 
+        sm = self._session_manager
+        if hasattr(adapter, "try_start_dreaming"):
+            asyncio.create_task(adapter.try_start_dreaming(
+                busy_checker=lambda: sm.has_active_tasks(),))
+
     async def reload_agent_config(
             self,
             config_base: dict[str, Any] | None = None,
@@ -274,8 +279,14 @@ class JiuWenClaw:
             env_overrides: 可选的环境变量增量；仅覆盖请求中出现的 key。
         """
         adapter = self._ensure_adapter()
+        if hasattr(adapter, "try_stop_dreaming"):
+            await adapter.try_stop_dreaming()
         await adapter.reload_agent_config(config_base, env_overrides)
         logger.info("[JiuWenClaw] Agent config reloaded: sdk=%s", self._sdk_name)
+        if hasattr(adapter, "try_start_dreaming"):
+            sm = self._session_manager
+            asyncio.create_task(adapter.try_start_dreaming(
+                busy_checker=lambda: sm.has_active_tasks(),))
 
     def _build_inputs(self, request: AgentRequest) -> Tuple[dict[str, Any], str, str]:
         """构建 adapter 所需的 inputs 字典."""

@@ -2,7 +2,7 @@
 
 This page explains the Gateway-side **A2A Server** (`A2AChannel`): implementation location, configuration, mapping to internal `Message`/E2A, and local verification commands. For outbound A2A (agent calling external services), see section 7.
 
-> **Implementation**: `jiuwenswarm/channel/a2a_channel.py` (`A2AChannel` + `a2a-sdk`). **Entrypoint process**: `python -m jiuwenswarm.app_gateway` (registered and started in `jiuwenswarm/app_gateway.py`). In case of mismatch, source code is the source of truth.
+> **Implementation**: `jiuwenswarm/gateway/channel_manager/protocol/a2a/a2a_connect.py` (`A2AChannel` + `a2a-sdk`). **Entrypoint process**: `python -m jiuwenswarm.gateway.app_gateway` (registered and started in `jiuwenswarm/gateway/app_gateway.py`). In case of mismatch, source code is the source of truth.
 
 ---
 
@@ -11,10 +11,10 @@ This page explains the Gateway-side **A2A Server** (`A2AChannel`): implementatio
 | Location | Role |
 |------|------|
 | **docs/en/A2A.md** (this page) | Integration and dev debugging: modules, config, mapping, verification |
-| `jiuwenswarm/channel/a2a_channel.py` | A2A HTTP service, `AgentCard`, request/response to `Message` conversion |
-| `jiuwenswarm/app_gateway.py` | Env loading, `A2AChannel` construction, `channel_manager.register_channel` |
-| `jiuwenswarm/gateway/message_handler.py` | Gateway↔AgentServer E2A exchange and internal `Message` orchestration |
-| `jiuwenswarm/gateway/channel_manager.py` | Channel registration and `robot_messages` → `Channel.send` dispatch |
+| `jiuwenswarm/gateway/channel_manager/protocol/a2a/a2a_connect.py` | A2A HTTP service, `AgentCard`, request/response to `Message` conversion |
+| `jiuwenswarm/gateway/app_gateway.py` | Env loading, `A2AChannel` construction, `channel_manager.register_channel` |
+| `jiuwenswarm/gateway/message_handler/message_handler.py` | Gateway↔AgentServer E2A exchange and internal `Message` orchestration |
+| `jiuwenswarm/gateway/channel_manager/channel_manager.py` | Channel registration and `robot_messages` → `Channel.send` dispatch |
 | [E2A-protocol.md](E2A-protocol.md) | Inner protocol between Gateway and AgentServer |
 
 ---
@@ -40,6 +40,14 @@ This page explains the Gateway-side **A2A Server** (`A2AChannel`): implementatio
 
 Set these in `~/.jiuwenswarm/config/.env` or process environment (read by `app_gateway.py`):
 
+Before enabling A2A, make sure the optional dependency is installed:
+
+```bash
+pip install "jiuwenswarm[a2a]"
+# or (repo/dev environment)
+uv sync --extra a2a
+```
+
 | Variable | Default | Notes |
 |------|------|------|
 | `A2A_SERVER_ENABLED` | disabled when unset | `1` / `true` / `yes` / `on` enable it |
@@ -54,6 +62,8 @@ Set these in `~/.jiuwenswarm/config/.env` or process environment (read by `app_g
 | `A2A_SERVER_APP_VERSION` | `0.1.0` | Agent Card `version` |
 
 AgentServer connectivity still follows existing gateway config (for example `AGENT_SERVER_URL`) and is independent from the A2A listening endpoint.
+
+When `A2A_SERVER_ENABLED=true` but `jiuwenswarm[a2a]` (or `uv sync --extra a2a`) is not installed, Gateway startup remains non-blocking; A2A channel startup failure is reported in logs with actionable install hints.
 
 ---
 

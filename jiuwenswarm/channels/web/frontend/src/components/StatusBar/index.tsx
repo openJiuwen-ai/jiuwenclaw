@@ -12,17 +12,19 @@ import './StatusBar.css';
 interface StatusBarProps {
   onCancel?: () => void;
   teamMode?: boolean;
+  isLoadingHistory?: boolean;
 }
 
-export function StatusBar({ onCancel, teamMode = false }: StatusBarProps) {
+export function StatusBar({ onCancel, teamMode = false, isLoadingHistory: propIsLoadingHistory }: StatusBarProps) {
   const { t } = useTranslation();
-  const { isProcessing, isPaused, pausedTask, interruptResult, switchingMode } = useChatStore();
-  const showExec = (isProcessing || isPaused) && !switchingMode;
+  const { isProcessing, isPaused, pausedTask, interruptResult, switchingMode, isLoadingHistory: storeIsLoadingHistory } = useChatStore();
+  const isLoadingHistory = propIsLoadingHistory ?? storeIsLoadingHistory;
+  const showExec = (isProcessing || isPaused) && !switchingMode && !isLoadingHistory;
   /** 有中断结果文案时，统一只显示居中的横条（任务已暂停/恢复/取消/切换/已中断） */
-  const showInterruptBarOnly = Boolean(interruptResult?.message);
+  const showInterruptBarOnly = Boolean(interruptResult?.message) && !isLoadingHistory;
 
   return (
-    <div className="statusbar-root">
+    <div className={`statusbar-root ${isLoadingHistory ? 'opacity-0 pointer-events-none' : ''}`}>
       <div className="statusbar-center">
         {showInterruptBarOnly && !teamMode ? (
           <div

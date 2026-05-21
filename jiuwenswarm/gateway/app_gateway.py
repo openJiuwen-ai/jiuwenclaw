@@ -1096,6 +1096,22 @@ async def _run(
     )
     channel_manager.register_channel(a2a_channel)
     a2a_task = asyncio.create_task(a2a_channel.start(), name="a2a-channel")
+    if a2a_server_enabled:
+        # Keep gateway startup non-blocking; surface background A2A boot failures with actionable logs.
+        def _on_a2a_task_done(task: asyncio.Task) -> None:
+            try:
+                task.result()
+            except asyncio.CancelledError:
+                return
+            except Exception as exc:  # noqa: BLE001
+                logger.error(
+                    "[App] A2A server failed to start: %s. "
+                    "If A2A is enabled, install optional dependency with "
+                    "`uv sync --extra a2a` or `pip install \"jiuwenswarm[a2a]\"`.",
+                    exc,
+                )
+
+        a2a_task.add_done_callback(_on_a2a_task_done)
 
     feishu_channel = None
     feishu_task = None
@@ -1712,6 +1728,7 @@ async def _run(
         await heartbeat_service.stop()
         await message_handler.stop_forwarding()
         await client.disconnect()
+
         logger.info("[App] Gateway stopped")
 
 

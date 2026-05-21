@@ -56,6 +56,7 @@ from jiuwenswarm.agents.harness.common.rails import (
 )
 from jiuwenswarm.agents.harness.common.memory.config import get_memory_mode
 from jiuwenswarm.agents.harness.common.tools import SkillToolkit
+from jiuwenswarm.agents.harness.common.tools.acp_chat import acp_chat
 from jiuwenswarm.common.config import get_config
 from jiuwenswarm.common.utils import get_agent_workspace_dir
 
@@ -86,6 +87,7 @@ _TOOL_BUILD_NAMES: dict[str, str] = {
     "web_paid_search": "_build_paid_search_tool",
     "user_todos": "_build_user_todos_tool",
     "skill_toolkit": "_build_skill_toolkit",
+    "acp_chat": "_build_acp_chat_tool",
 }
 
 
@@ -163,6 +165,8 @@ class JiuwenClawCodeAdapter(JiuWenClawDeepAdapter):
         # _agent_workspace_dir: agent 数据存储路径，始终指向系统 workspace，
         # 用于 coding_memory、todo文件等不应写入用户项目目录的数据。
         self._agent_workspace_dir = str(get_agent_workspace_dir())
+
+        self._dreaming_mode = "code"
 
         model = self._create_model(config_base)
         agent_card = AgentCard(name=self._agent_name, id='jiuwenswarm')
@@ -464,10 +468,10 @@ class JiuwenClawCodeAdapter(JiuWenClawDeepAdapter):
             return None
 
     def _build_project_memory_rail(self) -> ProjectMemoryRail | None:
-        """Build ProjectMemoryRail to auto-load JIUWENCLAW.md / CLAUDE.md etc.
+        """Build ProjectMemoryRail to auto-load JIUWENSWARM.md / CLAUDE.md etc.
 
         Code 模式专属 — 始终挂载。
-        确保能检索到 /init 命令创建 JIUWENCLAW.md 的目录（当前工作目录）。
+        确保能检索到 /init 命令创建 JIUWENSWARM.md 的目录（当前工作目录）。
         """
         try:
             workspace = self._project_dir or self._workspace_dir or "./"
@@ -760,7 +764,7 @@ class JiuwenClawCodeAdapter(JiuWenClawDeepAdapter):
         if self._project_memory_rail is not None:
             self._project_memory_rail.set_language(resolved_language)
             # trusted_dirs 来自 CLI 端的 trusted_dirs / workspace-dir，
-            # 包含用户项目目录（即 /init 写 JIUWENCLAW.md 的目录）
+            # 包含用户项目目录（即 /init 写 JIUWENSWARM.md 的目录）
             if runtime_config.trusted_dirs:
                 self._project_memory_rail.set_additional_directories(
                     runtime_config.trusted_dirs,
@@ -889,6 +893,14 @@ class JiuwenClawCodeAdapter(JiuWenClawDeepAdapter):
         except Exception as exc:
             logger.warning("[JiuwenClawCodeAdapter] skill_toolkit build failed: %s", exc)
             return None
+
+    def _build_acp_chat_tool(self, agent_id: str) -> Any | None:
+        """Register acp_chat when at least one external ACP profile is configured."""
+        acp_cfg = get_config().get("acp_agents")
+        if not isinstance(acp_cfg, dict) or not acp_cfg:
+            logger.info("[JiuwenClawCodeAdapter] acp_chat skipped: no acp_agents configured")
+            return None
+        return acp_chat
 
     def merge_member_mcp_configs(self, agent: Any, config_base: dict[str, Any]) -> int:
         """Merge enabled code-mode MCP configs into a team member agent."""

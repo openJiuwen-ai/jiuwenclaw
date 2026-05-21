@@ -151,3 +151,7 @@ class SessionManager:
             session_id in self._session_processors
             and not self._session_processors[session_id].done()
         )
+
+    def has_active_tasks(self) -> bool:
+        """是否有活跃的 session 任务（供 dreaming busy_checker 使用）。"""
+        return any(t is not None and not t.done() for t in self._session_tasks.values())

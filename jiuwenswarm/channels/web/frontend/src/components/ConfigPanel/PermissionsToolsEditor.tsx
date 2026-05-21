@@ -46,6 +46,7 @@ export function PermissionsToolsEditor({ isConnected }: PermissionsToolsEditorPr
   const [loading, setLoading] = useState(false);
   const [busyKey, setBusyKey] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [addError, setAddError] = useState<string | null>(null);
   const [newName, setNewName] = useState("");
   const [newLevel, setNewLevel] = useState<PermLevel>("ask");
 
@@ -53,11 +54,13 @@ export function PermissionsToolsEditor({ isConnected }: PermissionsToolsEditorPr
     () => Object.entries(tools).sort(([a], [b]) => a.localeCompare(b)),
     [tools]
   );
+  const normalizedToolNames = useMemo(() => new Set(Object.keys(tools).map((name) => name.trim())), [tools]);
 
   const load = useCallback(async () => {
     if (!isConnected) return;
     setLoading(true);
     setError(null);
+    setAddError(null);
     try {
       const data = await webRequest<Record<string, unknown>>("permissions.tools.get", {});
       setTools(parseToolsFromPayload(data));
@@ -77,6 +80,7 @@ export function PermissionsToolsEditor({ isConnected }: PermissionsToolsEditorPr
     if (!isConnected || !tool) return;
     setBusyKey(tool);
     setError(null);
+    setAddError(null);
     try {
       const data = await webRequest<Record<string, unknown>>("permissions.tools.update", {
         tool,
@@ -96,6 +100,7 @@ export function PermissionsToolsEditor({ isConnected }: PermissionsToolsEditorPr
     if (!window.confirm(t("config.permissionsTools.deleteConfirm", { tool }))) return;
     setBusyKey(tool);
     setError(null);
+    setAddError(null);
     try {
       const data = await webRequest<Record<string, unknown>>("permissions.tools.delete", { tool });
       setTools(parseToolsFromPayload(data));
@@ -110,8 +115,13 @@ export function PermissionsToolsEditor({ isConnected }: PermissionsToolsEditorPr
   const handleAdd = async () => {
     const name = newName.trim();
     if (!isConnected || !name) return;
+    if (normalizedToolNames.has(name)) {
+      setAddError(t("config.permissionsTools.duplicateTool", { tool: name }));
+      return;
+    }
     setBusyKey("__add__");
     setError(null);
+    setAddError(null);
     try {
       const data = await webRequest<Record<string, unknown>>("permissions.tools.update", {
         tool: name,
@@ -122,7 +132,7 @@ export function PermissionsToolsEditor({ isConnected }: PermissionsToolsEditorPr
       setNewLevel("ask");
     } catch (e) {
       const msg = e instanceof Error ? e.message : t("config.permissionsTools.saveFailed");
-      setError(msg);
+      setAddError(msg);
     } finally {
       setBusyKey(null);
     }
@@ -227,11 +237,21 @@ export function PermissionsToolsEditor({ isConnected }: PermissionsToolsEditorPr
             <input
               type="text"
               value={newName}
-              onChange={(e) => setNewName(e.target.value)}
+              onChange={(e) => {
+                setNewName(e.target.value);
+                if (addError) setAddError(null);
+              }}
               placeholder={t("config.permissionsTools.toolPlaceholder")}
               disabled={!isConnected || busyKey === "__add__"}
-              className="w-full rounded-md border border-border bg-bg px-2 py-1.5 text-[13px] outline-none focus:border-accent mono"
+              className={`w-full rounded-md border bg-bg px-2 py-1.5 text-[13px] outline-none focus:border-accent mono ${
+                addError ? "border-danger" : "border-border"
+              }`}
             />
+            {addError ? (
+              <p className="mt-1 text-[10px] text-danger break-words" role="alert">
+                {addError}
+              </p>
+            ) : null}
           </div>
           <div>
             <label className="block text-[10px] text-text-muted mb-1">{t("config.permissionsTools.colLevel")}</label>

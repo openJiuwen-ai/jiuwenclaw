@@ -75,6 +75,8 @@ def test_map_a2a_parts_to_params_text_and_files():
 
 
 def test_message_to_a2a_parts_filters_completion_sentinel_text():
+    pytest.importorskip("a2a.types")
+
     msg = Message(
         id="r1",
         type="event",
@@ -92,6 +94,8 @@ def test_message_to_a2a_parts_filters_completion_sentinel_text():
 
 
 def test_message_to_a2a_parts_maps_tool_events():
+    pytest.importorskip("a2a.types")
+
     tool_call_msg = Message(
         id="r2",
         type="event",

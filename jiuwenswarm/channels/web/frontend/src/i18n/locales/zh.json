@@ -74,13 +74,16 @@
     "pause": "暂停",
     "resume": "恢复",
     "processing": "处理中...",
-    "evolving": "后台技能演进中...",
+    "evolving": "正在检测是否需要技能演进...",
     "evolutionStages": {
-      "collecting": "后台技能演进中...",
-      "detecting": "正在检测演进信号...",
-      "generating": "正在生成演进经验...",
+      "collecting": "正在准备技能演进检测...",
+      "detecting": "正在检测是否需要技能演进...",
+      "generating": "检测到信号，正在生成演进经验...",
       "awaitingApproval": "演进经验已生成，等待审批...",
       "noEvolutionGenerated": "无演进生成",
+      "noEvolutionNoSkill": "未生成演进经验：未识别到相关技能",
+      "noEvolutionNoSignal": "未生成演进经验：未发现可沉淀的改进点",
+      "noEvolutionNoRecords": "未生成演进经验：未生成可保存的经验",
       "completed": "技能演进已完成",
       "timedOut": "技能演进已超时",
       "failed": "技能演进失败"
@@ -140,6 +143,7 @@
     "stageFailed": "失败",
     "stageRunning": "执行中",
     "stagePending": "等待中",
+    "stageMessage": "消息",
     "inputPlaceholder": "输入优化目标...",
     "stages": {
       "assess": "评估当前状态",
@@ -161,9 +165,6 @@
     "status": "状态",
     "contextCompression": "上下文窗口",
     "memoryUsage": "内存占用",
-    "message": "消息",
-    "time": "时间",
-    "heartbeatClick": "心跳消息，点击查看",
     "poweredBy": "Powered by openJiuwen",
     "noExtension": "暂无扩展文件",
     "refreshFiles": "刷新",
@@ -272,7 +273,13 @@
     }
   },
   "sessionSidebar": {
-    "newSession": "新会话"
+    "newSession": "新会话",
+    "advancedConfig": "高级配置",
+    "expandSidebar": "展开侧边栏",
+    "collapseSidebar": "收起侧边栏",
+    "connectionStatus": "连接状态",
+    "language": "语言",
+    "appearance": "外观"
   },
   "heartbeat": {
     "title": "心跳管理",
@@ -355,6 +362,13 @@
       "label": "状态",
       "enabled": "已启用",
       "disabled": "已禁用"
+    },
+    "skillnet": {
+      "usageNoticeTitle": "提示",
+      "usageNotice1": "SkillNet 在线搜索走公网服务，若出现超时或失败，可能是网络拥堵或服务繁忙，请稍后再试。",
+      "usageNotice2": "从 SkillNet 安装技能时，文件实际从 GitHub 下载，<strong>请保证运行 JiuwenClaw 的环境能访问 GitHub</strong>（网络、代理等）。",
+      "usageNotice3": "从 GitHub 拉取依赖其 API：未认证（匿名）约 60 次/小时/本机 IP；若安装失败并提示限流，请隔一段时间再试。如需提高速率限制，请在<configLink>配置页面</configLink>中配置 github_token。",
+      "configPageLinkAria": "前往配置页面"
     }
   },
   "channels": {
@@ -570,7 +584,9 @@
       "referencedBy": "被 {{count}} 个 Agent 引用",
       "deleteConfirmTitle": "确认删除模型？",
       "deleteConfirmMessage": "确定要删除模型 \"{{modelName}}\" 吗？",
-      "deleteConfirmMessageSimple": "模型 \"{{modelName}}\" 正在被 {{count}} 个 Agent 引用，删除后相关 Agent 将无法使用该模型。"
+      "deleteConfirmMessageSimple": "模型 \"{{modelName}}\" 正在被 {{count}} 个 Agent 引用，删除后相关 Agent 将无法使用该模型。",
+      "referenceLostWarning": "Agent引用模型丢失警告",
+      "notSelected": "未选择模型"
     },
     "agentList": {
       "addAgent": "添加Agent",
@@ -642,13 +658,14 @@
       "levelDeny": "拒绝 (deny)",
       "delete": "删除",
       "deleteConfirm": "确定从 permissions.tools 中删除「{{tool}}」吗？",
-      "invalidValue": "配置值非标准格式，选择策略后将写回为合法值。当前：{{raw}}",
-      "addTitle": "添加整工具规则",
-      "toolPlaceholder": "例如 mcp_exec_command",
-      "add": "添加",
-      "loadFailed": "加载工具权限失败",
-      "saveFailed": "保存失败"
-    },
+        "invalidValue": "配置值非标准格式，选择策略后将写回为合法值。当前：{{raw}}",
+        "addTitle": "添加整工具规则",
+        "toolPlaceholder": "例如 mcp_exec_command",
+        "duplicateTool": "工具已存在：{{tool}}",
+        "add": "添加",
+        "loadFailed": "加载工具权限失败",
+        "saveFailed": "保存失败"
+      },
     "errors": {
       "requiredModelFields": "模型配置为必填：{{fields}}。请完整填写后再保存并重启。",
       "saveFailed": "保存失败，请稍后重试",

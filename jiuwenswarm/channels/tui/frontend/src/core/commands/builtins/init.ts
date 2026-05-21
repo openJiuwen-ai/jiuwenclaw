@@ -25,13 +25,13 @@ function getScopeOptions(lang: "zh" | "en"): ScopeOption[] {
     return [
       {
         key: "project",
-        label: "团队共享 (JIUWENCLAW.md)",
+        label: "团队共享 (JIUWENSWARM.md)",
         description:
           "签入版本库，供团队共用 —— 架构说明、编码规范、常用命令、CI 约定等。",
       },
       {
         key: "personal",
-        label: "个人私有 (JIUWENCLAW.local.md)",
+        label: "个人私有 (JIUWENSWARM.local.md)",
         description:
           "只属于你自己，加入 .gitignore —— 个人偏好、沙箱地址、私有凭据、工作习惯。",
       },
@@ -45,13 +45,13 @@ function getScopeOptions(lang: "zh" | "en"): ScopeOption[] {
   return [
     {
       key: "project",
-      label: "Team-shared (JIUWENCLAW.md)",
+      label: "Team-shared (JIUWENSWARM.md)",
       description:
         "Checked into source control — architecture, coding standards, common commands, CI conventions.",
     },
     {
       key: "personal",
-      label: "Personal (JIUWENCLAW.local.md)",
+      label: "Personal (JIUWENSWARM.local.md)",
       description:
         "Private to you, gitignored — preferences, sandbox URLs, credentials, workflow quirks.",
     },
@@ -71,7 +71,7 @@ export function createInitCommand(): SlashCommand {
   return {
     name: "init",
     description:
-      "Initialize project AI collaboration config (generates JIUWENCLAW.md, optionally JIUWENCLAW.local.md)",
+      "Initialize project AI collaboration config (generates JIUWENSWARM.md, optionally JIUWENSWARM.local.md)",
     usage: "/init",
     example: "/init",
     kind: CommandKind.BUILT_IN,
@@ -139,8 +139,8 @@ export function createInitCommand(): SlashCommand {
               header: language === "zh" ? "范围" : "Scope",
               question:
                 language === "zh"
-                  ? "要设置哪些 JIUWENCLAW 文件？"
-                  : "Which JIUWENCLAW files would you like to set up?",
+                  ? "要设置哪些 JIUWENSWARM 文件？"
+                  : "Which JIUWENSWARM files would you like to set up?",
               options: scopeOptions.map((o) => ({
                 label: o.label,
                 description: o.description,
@@ -178,8 +178,8 @@ export function createInitCommand(): SlashCommand {
 
       // ---- Pre-detect existing memory / legacy AI config files ----
       const existing: ExistingFiles = {
-        jiuwenclawMd: existsSync(join(rootDir, "JIUWENCLAW.md")),
-        jiuwenclawLocalMd: existsSync(join(rootDir, "JIUWENCLAW.local.md")),
+        jiuwenswarmMd: existsSync(join(rootDir, "JIUWENSWARM.md")),
+        jiuwenswarmLocalMd: existsSync(join(rootDir, "JIUWENSWARM.local.md")),
         claudeMd: existsSync(join(rootDir, "CLAUDE.md")),
         claudeLocalMd: existsSync(join(rootDir, "CLAUDE.local.md")),
         agentsMd: existsSync(join(rootDir, "AGENTS.md")),

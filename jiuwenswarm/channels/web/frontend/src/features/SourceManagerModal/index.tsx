@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
-import { useTranslation } from "react-i18next";
+import { Trans, useTranslation } from "react-i18next";
 import { webRequest } from "../../services/webClient";
 
 type SourceType = "skillnet" | "clawhub";
@@ -10,6 +10,7 @@ interface SourceManagerModalProps {
   onClose: () => void;
   onSourceChange?: (source: SourceType) => void;
   currentSource?: SourceType;
+  onNavigateToConfig?: () => void;
 }
 
 export function SourceManagerModal({
@@ -18,6 +19,7 @@ export function SourceManagerModal({
   onClose,
   onSourceChange,
   currentSource = "skillnet",
+  onNavigateToConfig,
 }: SourceManagerModalProps) {
   const { t } = useTranslation();
   const [selectedSource, setSelectedSource] = useState<SourceType>(currentSource);
@@ -216,10 +218,37 @@ export function SourceManagerModal({
 
           {selectedSource === "skillnet" && (
             <div className="rounded-lg border border-border bg-panel p-4">
-              <div className="text-sm font-medium text-text mb-2">{t("sourceManager.skillnetInfo")}</div>
-              <p className="text-xs text-text-muted">
-                {t("sourceManager.skillnetInfoDesc")}
-              </p>
+              <div className="font-medium text-text mb-2">
+                {t("sourceManager.skillnet.usageNoticeTitle")}
+              </div>
+              <ul className="list-disc pl-4 space-y-1 text-xs text-text-muted">
+                <li>{t("sourceManager.skillnet.usageNotice1")}</li>
+                <li>
+                  <Trans
+                    i18nKey="sourceManager.skillnet.usageNotice2"
+                    components={{
+                      strong: (
+                        <strong className="font-semibold text-text" />
+                      ),
+                    }}
+                  />
+                </li>
+                <li>
+                  <Trans
+                    i18nKey="sourceManager.skillnet.usageNotice3"
+                    components={{
+                      configLink: (
+                        <button
+                          type="button"
+                          aria-label={t("sourceManager.skillnet.configPageLinkAria")}
+                          onClick={() => onNavigateToConfig?.()}
+                          className="inline p-0 m-0 align-baseline border-0 bg-transparent cursor-pointer font-medium text-accent underline decoration-accent/35 underline-offset-2 hover:text-accent-hover hover:decoration-accent/60"
+                        />
+                      ),
+                    }}
+                  />
+                </li>
+              </ul>
             </div>
           )}
         </div>

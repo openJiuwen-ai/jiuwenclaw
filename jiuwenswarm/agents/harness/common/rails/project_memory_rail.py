@@ -36,13 +36,13 @@ if TYPE_CHECKING:
 class ProjectMemoryRail(DeepAgentRail):
     """Auto-load project memory files and inject them into the system prompt.
 
-    Loaded sources (all read-only; only ``JIUWENCLAW.md`` and
-    ``JIUWENCLAW.local.md`` are written by ``/init``):
+    Loaded sources (all read-only; only ``JIUWENSWARM.md`` and
+    ``JIUWENSWARM.local.md`` are written by ``/init``):
 
-    * **Project root**: ``JIUWENCLAW.md``, ``JIUWENCLAW.local.md``,
-      ``.jiuwen/JIUWENCLAW.md``, ``.jiuwen/rules/*.md``
-    * **User level**: ``~/.jiuwen/JIUWENCLAW.md``, ``~/.jiuwen/rules/*.md``
-    * **Managed**: ``/etc/jiuwen/JIUWENCLAW.md``, ``/etc/jiuwen/rules/*.md``
+    * **Project root**: ``JIUWENSWARM.md``, ``JIUWENSWARM.local.md``,
+      ``.jiuwen/JIUWENSWARM.md``, ``.jiuwen/rules/*.md``
+    * **User level**: ``~/.jiuwen/JIUWENSWARM.md``, ``~/.jiuwen/rules/*.md``
+    * **Managed**: ``/etc/jiuwen/JIUWENSWARM.md``, ``/etc/jiuwen/rules/*.md``
     * **Additional dirs**: explicit project-memory directories passed to the rail
 
     Priority (low -> high): ``managed < user < project (root -> cwd) < local``.
@@ -128,7 +128,7 @@ class ProjectMemoryRail(DeepAgentRail):
 
         Called by the adapter when ``trusted_dirs`` arrives from the client,
         ensuring the rail always searches the directory where /init wrote
-        JIUWENCLAW.md (typically the CLI process's cwd, which differs from
+        JIUWENSWARM.md (typically the CLI process's cwd, which differs from
         the AgentServer process cwd).
         """
         extra = tuple(dirs or ())

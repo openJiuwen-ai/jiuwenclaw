@@ -127,7 +127,7 @@ function StageItem({ stageLabel, status, isCurrent, metrics, messages, error, ch
           )}
           {visibleMessages.length > 0 && (
             <div className="harness-stage-messages">
-              <strong>{t('toolPanel.message')}:</strong>
+              <strong>{t('autoHarness.stageMessage')}:</strong>
               <ul>
                 {visibleMessages.map((msg, idx) => (
                   <li key={idx}>{msg}</li>

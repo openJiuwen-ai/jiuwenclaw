@@ -45,6 +45,7 @@ def test_filter_inheritable_ability_cards_includes_extended_claw_tools():
                 _make_tool_card("audio_metadata"),
                 _make_tool_card("user_todos"),
                 _make_tool_card("task_tool"),
+                _make_tool_card("acp_chat"),
                 _make_tool_card("send_file_to_user"),
             ]
         )
@@ -53,6 +54,7 @@ def test_filter_inheritable_ability_cards_includes_extended_claw_tools():
     inherited = filter_inheritable_ability_cards(main_agent)
     inherited_names = {card.name for card in inherited}
 
+    assert "acp_chat" in inherited_names
     assert "visual_question_answering" in inherited_names
     assert "audio_question_answering" in inherited_names
     assert "audio_metadata" in inherited_names

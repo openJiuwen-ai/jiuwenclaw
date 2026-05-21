@@ -146,6 +146,109 @@ async def test_normal_evolution_watcher_uses_delivery_context_metadata(monkeypat
 
 
 @pytest.mark.asyncio
+async def test_normal_evolution_watcher_does_not_push_status_without_sdk_events(monkeypatch):
+    _FakeTransport.pushes = []
+    rail = _FakeEvolutionRail([])
+    adapter = _TestAdapter.build_with_rail(rail)
+
+    monkeypatch.setattr(
+        "jiuwenswarm.server.gateway_push.WebSocketGatewayPushTransport",
+        _FakeTransport,
+    )
+    monkeypatch.setattr(interface_deep_module, "TEAM_EVOLUTION_IDLE_SLEEP_SEC", 0.001)
+    monkeypatch.setattr(interface_deep_module, "TEAM_EVOLUTION_EVENT_TIMEOUT_SEC", 0.01)
+
+    await adapter.watch_evolution_and_push("stream-rid", "web", "sess-no-events")
+
+    assert _FakeTransport.pushes == []
+    assert rail.drain_waits
+    assert rail.cleanup_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_normal_evolution_watcher_maps_sdk_progress_stages(monkeypatch):
+    _FakeTransport.pushes = []
+    rail = _FakeEvolutionRail(
+        [
+            [_progress_event("detecting", stage="detecting_signals")],
+            [_progress_event("generating", stage="generating_updates")],
+            [_outcome_event("completed", "done")],
+        ]
+    )
+    adapter = _TestAdapter.build_with_rail(rail)
+
+    monkeypatch.setattr(
+        "jiuwenswarm.server.gateway_push.WebSocketGatewayPushTransport",
+        _FakeTransport,
+    )
+
+    await adapter.watch_evolution_and_push("stream-rid", "web", "sess-sdk-stages")
+
+    status_pushes = [
+        push for push in _FakeTransport.pushes
+        if push["payload"]["event_type"] == "chat.evolution_status"
+    ]
+    assert [push["payload"]["status"] for push in status_pushes] == [
+        "start",
+        "end",
+    ]
+    assert [push["payload"]["stage"] for push in status_pushes] == [
+        "generating",
+        "completed",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_normal_evolution_watcher_ends_on_cancelled_progress(monkeypatch):
+    _FakeTransport.pushes = []
+    rail = _FakeEvolutionRail([[_progress_event("no skill usage detected", stage="cancelled")]])
+    adapter = _TestAdapter.build_with_rail(rail)
+
+    monkeypatch.setattr(
+        "jiuwenswarm.server.gateway_push.WebSocketGatewayPushTransport",
+        _FakeTransport,
+    )
+    monkeypatch.setattr(interface_deep_module, "TEAM_EVOLUTION_IDLE_SLEEP_SEC", 0.001)
+    monkeypatch.setattr(interface_deep_module, "TEAM_EVOLUTION_EVENT_TIMEOUT_SEC", 0.01)
+
+    await adapter.watch_evolution_and_push("stream-rid", "web", "sess-sdk-cancelled")
+
+    status_pushes = [
+        push for push in _FakeTransport.pushes
+        if push["payload"]["event_type"] == "chat.evolution_status"
+    ]
+    assert status_pushes == []
+    assert rail.cleanup_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_normal_evolution_watcher_ends_on_auto_approved_progress(monkeypatch):
+    _FakeTransport.pushes = []
+    rail = _FakeEvolutionRail([[_progress_event("auto saved", stage="auto_approved")]])
+    adapter = _TestAdapter.build_with_rail(rail)
+
+    monkeypatch.setattr(
+        "jiuwenswarm.server.gateway_push.WebSocketGatewayPushTransport",
+        _FakeTransport,
+    )
+    monkeypatch.setattr(interface_deep_module, "TEAM_EVOLUTION_IDLE_SLEEP_SEC", 0.001)
+    monkeypatch.setattr(interface_deep_module, "TEAM_EVOLUTION_EVENT_TIMEOUT_SEC", 0.01)
+
+    await adapter.watch_evolution_and_push("stream-rid", "web", "sess-sdk-auto")
+
+    status_pushes = [
+        push for push in _FakeTransport.pushes
+        if push["payload"]["event_type"] == "chat.evolution_status"
+    ]
+    assert [push["payload"]["status"] for push in status_pushes] == ["start", "end"]
+    assert [push["payload"]["stage"] for push in status_pushes] == [
+        "completed",
+        "completed",
+    ]
+    assert rail.cleanup_calls == 1
+
+
+@pytest.mark.asyncio
 async def test_normal_evolution_watcher_reads_outcome_status_from_metadata(monkeypatch):
     _FakeTransport.pushes = []
     adapter = _TestAdapter.build_with_rail(
@@ -163,8 +266,7 @@ async def test_normal_evolution_watcher_reads_outcome_status_from_metadata(monke
         push for push in _FakeTransport.pushes
         if push["payload"]["event_type"] == "chat.evolution_status"
     ]
-    assert [push["payload"]["status"] for push in status_pushes] == ["start", "end"]
-    assert status_pushes[-1]["payload"]["stage"] == "hidden"
+    assert status_pushes == []
 
 
 @pytest.mark.asyncio
@@ -187,13 +289,14 @@ async def test_normal_evolution_watcher_pushes_passive_progress_before_approval(
 
     event_types = [push["payload"]["event_type"] for push in _FakeTransport.pushes]
     assert event_types == [
-        "chat.evolution_status",
         "chat.reasoning",
+        "chat.evolution_status",
         "chat.ask_user_question",
         "chat.evolution_status",
     ]
-    assert _FakeTransport.pushes[0]["payload"]["status"] == "start"
-    assert _FakeTransport.pushes[1]["payload"]["content"] == "evolution progress"
+    assert _FakeTransport.pushes[0]["payload"]["content"] == "evolution progress"
+    assert _FakeTransport.pushes[1]["payload"]["status"] == "start"
+    assert _FakeTransport.pushes[1]["payload"]["stage"] == "approval_required"
     assert _FakeTransport.pushes[2]["payload"]["request_id"] == "skill_evolve_progress_req"
     assert _FakeTransport.pushes[3]["payload"]["status"] == "end"
     assert _FakeTransport.pushes[3]["payload"]["stage"] == "approval_required"
@@ -221,9 +324,7 @@ async def test_normal_evolution_watcher_times_out_after_idle_progress(monkeypatc
         push for push in _FakeTransport.pushes
         if push["payload"]["event_type"] == "chat.evolution_status"
     ]
-    assert [push["payload"]["status"] for push in status_pushes] == ["start", "end"]
-    assert status_pushes[-1]["payload"]["stage"] == "hidden"
-    assert "timed out" in status_pushes[-1]["payload"]["message"]
+    assert status_pushes == []
     assert rail.cleanup_calls == 1
 
 
@@ -245,8 +346,7 @@ async def test_normal_evolution_watcher_hides_timed_out_terminal_progress(monkey
         push for push in _FakeTransport.pushes
         if push["payload"]["event_type"] == "chat.evolution_status"
     ]
-    assert [push["payload"]["status"] for push in status_pushes] == ["start", "end"]
-    assert status_pushes[-1]["payload"]["stage"] == "hidden"
+    assert status_pushes == []
 
 
 @pytest.mark.asyncio

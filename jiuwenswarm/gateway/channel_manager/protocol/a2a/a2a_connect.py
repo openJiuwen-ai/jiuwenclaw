@@ -13,6 +13,13 @@ from jiuwenswarm.common.schema.message import EventType, Message, ReqMethod
 logger = logging.getLogger(__name__)
 
 
+def _raise_missing_a2a_sdk(exc: ImportError) -> None:
+    raise RuntimeError(
+        "A2A server is enabled but optional dependency `a2a-sdk[http-server]` is not installed. "
+        "Install with `pip install .[a2a]` or `uv sync --extra a2a`."
+    ) from exc
+
+
 @dataclass
 class A2AChannelConfig:
     enabled: bool = False
@@ -194,10 +201,13 @@ class A2AChannel(BaseChannel):
             logger.info("[A2AChannel] disabled by config")
             return
 
-        from a2a.server.apps import A2AFastAPIApplication
-        from a2a.server.request_handlers import DefaultRequestHandler
-        from a2a.server.tasks import InMemoryPushNotificationConfigStore, InMemoryTaskStore
-        from a2a.types import AgentCapabilities, AgentCard, AgentInterface, AgentSkill
+        try:
+            from a2a.server.apps import A2AFastAPIApplication
+            from a2a.server.request_handlers import DefaultRequestHandler
+            from a2a.server.tasks import InMemoryPushNotificationConfigStore, InMemoryTaskStore
+            from a2a.types import AgentCapabilities, AgentCard, AgentInterface, AgentSkill
+        except ImportError as exc:
+            _raise_missing_a2a_sdk(exc)
         import uvicorn
 
         agent_card = AgentCard(

@@ -11,13 +11,23 @@ from pathlib import Path
 
 # frozen（PyInstaller 打包）模式下，macOS 双击 .app 启动时 cwd 为 "/"，
 # 导致 openjiuwen 的默认日志路径 "./logs/" 解析为 "/logs/"（只读）。
-# 在任何业务 import 之前，将 cwd 切换到用户可写目录。
+# 在任何业务 import 之前，将 cwd 切换到用户数据目录 ~/.jiuwenswarm，
+# 让 openjiuwen 的相对日志路径落到 <data>/logs/，与项目其它运行时数据同根。
 if getattr(sys, "frozen", False):
     _ORIGINAL_CWD = os.getcwd()
+    _data_dir_env = os.environ.get("JIUWENSWARM_DATA_DIR")
+    if _data_dir_env:
+        _target_cwd = Path(_data_dir_env).expanduser()
+    else:
+        _target_cwd = Path(os.path.expanduser("~")) / ".jiuwenswarm"
     try:
-        os.chdir(os.path.expanduser("~"))
+        _target_cwd.mkdir(parents=True, exist_ok=True)
+        os.chdir(str(_target_cwd))
     except OSError:
-        pass
+        try:
+            os.chdir(os.path.expanduser("~"))
+        except OSError:
+            pass
 
     # 设置 UTF-8 编码，避免 bash 操作乱码
     os.environ["PYTHONIOENCODING"] = "utf-8"

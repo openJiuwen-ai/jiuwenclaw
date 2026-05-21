@@ -167,10 +167,10 @@
 ### `/init`（项目初始化）
 
 - 用法：`/init`（无参数）。
-- 功能：初始化项目 AI 协作配置，生成 `JIUWENCLAW.md` 和可选的 `JIUWENCLAW.local.md`。
+- 功能：初始化项目 AI 协作配置，生成 `JIUWENSWARM.md` 和可选的 `JIUWENSWARM.local.md`。
 - 适用范围：仅在 `code` 模式下运行。
 - 流程：
-  1. 选择范围：`团队共享`（JIUWENCLAW.md）、`个人私有`（JIUWENCLAW.local.md）或 `都要`。
+  1. 选择范围：`团队共享`（JIUWENSWARM.md）、`个人私有`（JIUWENSWARM.local.md）或 `都要`。
   2. 检测已有配置：自动检测 `CLAUDE.md`、`.cursorrules`、`copilot-instructions.md` 等文件。
   3. 生成配置：根据选择生成项目配置文件。
 - 自动模式切换：若当前处于 `code.plan` 模式，会自动切换到 `code.normal` 以便写入文件。

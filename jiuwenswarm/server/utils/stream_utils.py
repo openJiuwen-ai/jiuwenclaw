@@ -69,9 +69,12 @@ def _parse_dict_chunk(chunk: dict[str, Any], _has_streamed_content: bool) -> dic
         }
 
     if "content" in chunk:
+        content = chunk.get("content", "")
+        if not content or not content.strip():
+            return None
         return {
             "event_type": "chat.delta" if not _has_streamed_content else "chat.final",
-            "content": chunk.get("content", ""),
+            "content": content,
         }
 
     if "output" in chunk:
@@ -81,9 +84,12 @@ def _parse_dict_chunk(chunk: dict[str, Any], _has_streamed_content: bool) -> dic
                 "event_type": "chat.error",
                 "error": chunk.get("output", ""),
             }
+        output = chunk.get("output", "")
+        if not output or not output.strip():
+            return None
         return {
             "event_type": "chat.delta" if not _has_streamed_content else "chat.final",
-            "content": chunk.get("output", ""),
+            "content": output,
         }
 
     return chunk
@@ -132,7 +138,7 @@ def _parse_typed_chunk(chunk: Any, _has_streamed_content: bool) -> dict[str, Any
             if isinstance(payload, dict)
             else str(payload)
         )
-        if not content:
+        if not content or not content.strip():
             return None
         return {"event_type": "chat.delta", "content": content}
 
@@ -142,7 +148,7 @@ def _parse_typed_chunk(chunk: Any, _has_streamed_content: bool) -> dict[str, Any
             if isinstance(payload, dict)
             else str(payload)
         )
-        if not content:
+        if not content or not content.strip():
             return None
         return {"event_type": "chat.reasoning", "content": content}
 
@@ -152,7 +158,7 @@ def _parse_typed_chunk(chunk: Any, _has_streamed_content: bool) -> dict[str, Any
             if isinstance(payload, dict)
             else str(payload)
         )
-        if not content:
+        if not content or not content.strip():
             return None
         return {"event_type": "chat.delta", "content": content}
 
@@ -178,11 +184,11 @@ def _parse_typed_chunk(chunk: Any, _has_streamed_content: bool) -> dict[str, Any
             content = str(payload)
             is_chunked = False
 
+        if not content or not content.strip():
+            return None
+
         if _has_streamed_content and not is_chunked:
             return {"event_type": "chat.final", "content": content}
-
-        if not content:
-            return None
         if is_chunked:
             return {"event_type": "chat.delta", "content": content}
         return {"event_type": "chat.final", "content": content}
@@ -266,8 +272,8 @@ def _parse_typed_chunk(chunk: Any, _has_streamed_content: bool) -> dict[str, Any
             return {
                 "event_type": "context.compressed",
                 "rate": payload.get("rate", 0),
-                "before_compressed": payload.get("before_compressed"),
-                "after_compressed": payload.get("after_compressed"),
+                "before_compressed": payload.get("before_compressed") or 0,
+                "after_compressed": payload.get("after_compressed") or 0,
             }
 
     if isinstance(payload, dict):

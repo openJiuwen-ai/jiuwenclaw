@@ -35,9 +35,13 @@ export function renderTodoList(
   todos: TodoItem[],
   width: number,
   collapsed: boolean = false,
-  animationPhase: number = 0
+  animationPhase: number = 0,
 ): string[] {
   if (todos.length === 0) {
+    return [];
+  }
+
+  if (todos.every((todo) => todo.status === "completed")) {
     return [];
   }
 
@@ -61,10 +65,6 @@ export function renderTodoList(
     return [padToWidth(headerLine, width), " ".repeat(width)];
   }
 
-  if (todos.every((todo) => todo.status === "completed")) {
-    return [padToWidth(palette.text.secondary("Todo"), width), " ".repeat(width)];
-  }
-
   const ordered = [
     ...todos.filter((todo) => todo.status === "in_progress"),
     ...todos.filter((todo) => todo.status === "pending"),
@@ -80,9 +80,5 @@ export function renderTodoList(
     selectListTheme,
   );
 
-  return [
-    padToWidth(headerLine, width),
-    ...list.render(width),
-    " ".repeat(width),
-  ];
+  return [padToWidth(headerLine, width), ...list.render(width), " ".repeat(width)];
 }

@@ -103,6 +103,8 @@ export interface AppEventDelegate {
   tryAutoRestoreAfterCancel(): Promise<void>;
   /** 累加 chat.usage_summary 事件的 token/cost 数据（按 model 分桶）。 */
   appendUsageSummary(usage: Record<string, unknown>, model?: string): void;
+  /** 回合结束时记录执行耗时条目到对话区。 */
+  addWorkedForEntry(): void;
 }
 
 function _handleSwitchModeToolResult(
@@ -372,6 +374,7 @@ function handleFinal(
         ],
   );
   delegate.setStreamingState(StreamingState.Idle);
+  delegate.addWorkedForEntry();
   return true;
 }
 
@@ -409,6 +412,7 @@ function handleError(
   });
   delegate.setLastError(message);
   delegate.setStreamingState(StreamingState.Idle);
+  delegate.addWorkedForEntry();
   return true;
 }
 
@@ -793,6 +797,7 @@ export function handleIncomingFrame(delegate: AppEventDelegate, frame: EventFram
       );
       if (payload.is_processing !== true) {
         delegate.getActiveSubtasks().clear();
+        delegate.setTodos([]);
         delegate.setEvolutionStatus("idle");
         delegate.clearInterruptRequested();
       }

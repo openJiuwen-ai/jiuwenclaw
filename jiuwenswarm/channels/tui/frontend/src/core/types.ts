@@ -28,7 +28,7 @@ export interface SystemMeta {
 }
 
 export interface InfoMeta {
-  view?: "help" | "list" | "kv";
+  view?: "help" | "list" | "kv" | "dim";
   title?: string;
   items?: Array<{ label: string; value?: string; description?: string }>;
   groups?: Array<{

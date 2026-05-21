@@ -76,7 +76,7 @@ def _validate_edit_path(raw_path: str, workspace: str, project_dir: str | None =
         return (True, abs_path)
 
     basename = os.path.basename(abs_path)
-    if basename in ("JIUWENCLAW.md", "JIUWENCLAW.local.md"):
+    if basename in ("JIUWENSWARM.md", "JIUWENSWARM.local.md"):
         parent = os.path.dirname(abs_path)
         workspace_norm = os.path.normpath(workspace)
         if parent == workspace_norm:

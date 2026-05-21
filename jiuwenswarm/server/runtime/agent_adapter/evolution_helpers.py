@@ -15,12 +15,38 @@ TEAM_EVOLUTION_EVENT_TIMEOUT_SEC = 900.0
 TEAM_EVOLUTION_START_STAGE = "collecting"
 TEAM_EVOLUTION_START_MESSAGE = "Running team skill evolution analysis..."
 TEAM_EVOLUTION_NOOP_STAGE = "no_evolution_generated"
+TEAM_EVOLUTION_NOOP_NO_SKILL_STAGE = "no_evolution_no_skill"
+TEAM_EVOLUTION_NOOP_NO_SIGNAL_STAGE = "no_evolution_no_signal"
+TEAM_EVOLUTION_NOOP_NO_RECORDS_STAGE = "no_evolution_no_records"
 TEAM_EVOLUTION_HIDDEN_STAGE = "hidden"
 TEAM_EVOLUTION_NOOP_MARKERS = (
     "no existing skill found",
     "no evolution signals detected",
     "no evolution records generated",
 )
+TEAM_EVOLUTION_NO_SKILL_MARKERS = (
+    "no skill usage",
+    "no existing skill",
+    "no regular skill could be attributed",
+    "no team/swarm skill",
+)
+TEAM_EVOLUTION_NO_SIGNAL_MARKERS = (
+    "no actionable evolution signals detected",
+    "no evolution signals detected",
+)
+TEAM_EVOLUTION_NOOP_STAGES = {
+    TEAM_EVOLUTION_NOOP_STAGE,
+    TEAM_EVOLUTION_NOOP_NO_SKILL_STAGE,
+    TEAM_EVOLUTION_NOOP_NO_SIGNAL_STAGE,
+    TEAM_EVOLUTION_NOOP_NO_RECORDS_STAGE,
+}
+TEAM_EVOLUTION_HIDDEN_TERMINAL_STAGES = {TEAM_EVOLUTION_HIDDEN_STAGE, "failed", "timed_out"}
+TEAM_EVOLUTION_VISIBLE_PROGRESS_STAGES = {
+    "generating",
+    "approval_required",
+    "completed",
+    *TEAM_EVOLUTION_NOOP_STAGES,
+}
 
 
 @dataclass(frozen=True)
@@ -36,6 +62,36 @@ class EvolutionStatusUpdate:
     status: str
     stage: str
     message: str = ""
+
+
+@dataclass(frozen=True)
+class EvolutionProgressStatus:
+    stage: str
+    message: str = ""
+    request_id: str | None = None
+    terminal: bool = False
+
+
+_SDK_PROGRESS_STAGE_MAP = {
+    "started": "detecting",
+    "detecting_signals": "detecting",
+    "staging": "generating",
+    "generating_updates": "generating",
+    "approval_required": "approval_required",
+    "auto_approved": "completed",
+    "cancelled": TEAM_EVOLUTION_HIDDEN_STAGE,
+    "completed": "completed",
+    "failed": "failed",
+    "timed_out": "timed_out",
+}
+
+_SDK_PROGRESS_TERMINAL_STAGES = {
+    "auto_approved",
+    "cancelled",
+    "completed",
+    "failed",
+    "timed_out",
+}
 
 
 def event_payload_dict(evt: Any) -> dict[str, Any]:
@@ -84,7 +140,10 @@ def evolution_outcome_from_event(evt: Any) -> dict[str, str]:
         return {"status": "completed", "message": str(payload)}
     meta = payload.get("_evolution_meta")
     meta_status = meta.get("status") if isinstance(meta, dict) else None
-    status = str(payload.get("status") or meta_status or "completed").strip().lower() or "completed"
+    status = (
+        str(payload.get("status") or meta_status or "completed").strip().lower()
+        or "completed"
+    )
     message = str(payload.get("message") or payload.get("content") or "")
     return {"status": status, "message": message}
 
@@ -92,36 +151,124 @@ def evolution_outcome_from_event(evt: Any) -> dict[str, str]:
 def extract_evolution_request_id(evt: Any) -> str | None:
     payload = event_payload_dict(evt)
     request_id = payload.get("request_id")
+    if not request_id:
+        meta = payload.get("_evolution_meta")
+        if isinstance(meta, dict):
+            request_id = meta.get("request_id")
     if isinstance(request_id, str):
         request_id = request_id.strip()
     return request_id or None
 
 
-def is_evolution_started_progress(evt: Any) -> bool:
+def evolution_progress_status_from_event(evt: Any) -> EvolutionProgressStatus | None:
     payload = event_payload_dict(evt)
     meta = payload.get("_evolution_meta")
     if not isinstance(meta, dict):
-        return False
+        return None
     event_kind = str(meta.get("event_kind") or "").strip().lower()
-    stage = str(payload.get("stage") or meta.get("stage") or "").strip().lower()
-    return event_kind == "progress" and stage == "started"
+    if event_kind != "progress":
+        return None
+    raw_stage = str(payload.get("stage") or meta.get("stage") or "").strip().lower()
+    if not raw_stage:
+        return None
+    message = str(payload.get("message") or payload.get("content") or "").strip()
+    noop_stage = _noop_stage_from_message(message.lower())
+    stage = (
+        noop_stage
+        if raw_stage != "cancelled" and noop_stage is not None
+        else _SDK_PROGRESS_STAGE_MAP.get(raw_stage, raw_stage)
+    )
+    return EvolutionProgressStatus(
+        stage=stage,
+        message=message,
+        request_id=extract_evolution_request_id(evt),
+        terminal=raw_stage in _SDK_PROGRESS_TERMINAL_STAGES,
+    )
+
+
+def visible_evolution_progress_from_events(events: list[Any]) -> list[EvolutionProgressStatus]:
+    return [
+        progress
+        for progress in (evolution_progress_status_from_event(evt) for evt in events)
+        if progress is not None and progress.stage in TEAM_EVOLUTION_VISIBLE_PROGRESS_STAGES
+    ]
+
+
+def progress_for_request(
+    progress_statuses: list[EvolutionProgressStatus],
+    request_id: str,
+) -> list[EvolutionProgressStatus]:
+    return [
+        progress
+        for progress in progress_statuses
+        if progress.request_id is None or progress.request_id == request_id
+    ]
+
+
+def terminal_stage(terminal: dict[str, str]) -> str:
+    return str(terminal.get("stage") or terminal.get("status") or "").strip().lower()
+
+
+def terminal_progress_from_events(events: list[Any]) -> list[tuple[str | None, dict[str, str]]]:
+    terminal_progress: list[tuple[str | None, dict[str, str]]] = []
+    for evt in events:
+        terminal = team_evolution_terminal_progress(evt)
+        if terminal is not None:
+            terminal_progress.append((extract_evolution_request_id(evt), terminal))
+    return terminal_progress
+
+
+def _noop_stage_from_message(message_lower: str) -> str | None:
+    if any(marker in message_lower for marker in TEAM_EVOLUTION_NO_SKILL_MARKERS):
+        return TEAM_EVOLUTION_NOOP_NO_SKILL_STAGE
+    if any(marker in message_lower for marker in TEAM_EVOLUTION_NO_SIGNAL_MARKERS):
+        return TEAM_EVOLUTION_NOOP_NO_SIGNAL_STAGE
+    if "no evolution records generated" in message_lower:
+        return TEAM_EVOLUTION_NOOP_NO_RECORDS_STAGE
+    if any(marker in message_lower for marker in TEAM_EVOLUTION_NOOP_MARKERS):
+        return TEAM_EVOLUTION_NOOP_STAGE
+    return None
 
 
 def team_evolution_terminal_progress(evt: Any) -> dict[str, str] | None:
     payload = event_payload_dict(evt)
+    progress = evolution_progress_status_from_event(evt)
+    if (
+        progress is not None
+        and progress.terminal
+        and progress.stage == TEAM_EVOLUTION_HIDDEN_STAGE
+    ):
+        return {
+            "status": progress.stage,
+            "stage": progress.stage,
+            "message": progress.message,
+        }
+    message = str(payload.get("message") or payload.get("content") or "")
+    message_lower = message.lower()
+    noop_stage = _noop_stage_from_message(message_lower)
+    if noop_stage is not None:
+        return {
+            "status": "completed",
+            "stage": noop_stage,
+            "message": message or "No evolution generated",
+        }
+    if progress is not None and progress.terminal:
+        if progress.stage == TEAM_EVOLUTION_NOOP_STAGE:
+            return {
+                "status": "completed",
+                "stage": TEAM_EVOLUTION_NOOP_STAGE,
+                "message": progress.message or "No evolution generated",
+            }
+        return {
+            "status": progress.stage,
+            "stage": progress.stage,
+            "message": progress.message,
+        }
     meta = payload.get("_evolution_meta")
     meta_status = meta.get("status") if isinstance(meta, dict) else None
     meta_stage = meta.get("stage") if isinstance(meta, dict) else None
     status = str(payload.get("status") or meta_status or "").strip().lower()
     stage = str(payload.get("stage") or meta_stage or "").strip().lower()
-    message = str(payload.get("message") or payload.get("content") or "")
-    message_lower = message.lower()
-    if any(marker in message_lower for marker in TEAM_EVOLUTION_NOOP_MARKERS):
-        return {
-            "status": "completed",
-            "stage": TEAM_EVOLUTION_NOOP_STAGE,
-            "message": message or "No evolution generated",
-        }
     if status == "end" or stage in {"completed", "failed", "timed_out"}:
         return {
             "status": status or "end",
@@ -165,7 +312,7 @@ def team_evolution_end_update(
             stage=TEAM_EVOLUTION_HIDDEN_STAGE,
             message=message,
         )
-    if stage == TEAM_EVOLUTION_NOOP_STAGE:
+    if stage in TEAM_EVOLUTION_NOOP_STAGES:
         return build_evolution_status_update(
             request_id=request_id,
             status="end",

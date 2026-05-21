@@ -14,8 +14,7 @@ import json
 import re
 from typing import Any, List, Optional
 
-import tiktoken
-from openjiuwen.core.context_engine.schema.messages import OffloadMixin
+from openjiuwen.core.context_engine.context.context_utils import ContextUtils
 from openjiuwen.core.foundation.llm import (
     AssistantMessage,
     ToolMessage,
@@ -35,7 +34,7 @@ from openjiuwen.harness.workspace.workspace import WorkspaceNode
 
 from jiuwenswarm.common.utils import logger
 
-_TODO_TOOL_NAMES = frozenset(["todo_create", "todo_list", "todo_modify"])
+_TODO_TOOL_NAMES = frozenset(["todo_create", "todo_get", "todo_list", "todo_modify"])
 
 
 def _structured_tool_result_payload(result: Any) -> Any | None:
@@ -294,10 +293,10 @@ class JiuClawStreamEventRail(DeepAgentRail):
         if not self._conversation_id:
             return
         if tool_name in _TODO_TOOL_NAMES:
-            # Subagent tool calls have a different session object than _main_session.
-            # Only emit todo.updated for the main agent's calls.
-            if self._main_session is None or session is not self._main_session:
-                return
+            # Emit the main-agent todo snapshot after every todo tool call.  The
+            # todo tool itself is loaded from the main workspace below, so this
+            # stays authoritative even when a resumed/supplement turn uses a
+            # different stream session object.
             await self._emit_todo_updated(session, self._conversation_id)
 
     # ------------------------------------------------------------------
@@ -396,9 +395,6 @@ class JiuClawStreamEventRail(DeepAgentRail):
             )
             return
 
-        if not todos_data:
-            return
-
         todos = self._format_todos_for_frontend(todos_data)
 
         try:
@@ -481,38 +477,6 @@ class JiuClawStreamEventRail(DeepAgentRail):
     @staticmethod
     async def _emit_context_compression(ctx: AgentCallbackContext) -> None:
         """Emit context compression stats based on raw_total_tokens and current context tokens."""
-        _model_token = {
-
-            "glm-5": 200000,
-            "glm-4-long": 200000,
-            "glm-4": 128000,
-            "glm-4-9b-chat-1m": 1048576,
-
-            # OpenAI GPT
-            "gpt-5.4": 1100000,
-            "gpt-4o": 128000,
-            "gpt-4o-mini": 128000,
-            "gpt-4-turbo": 128000,
-            "gpt-3.5-turbo": 16384,
-
-            # DeepSeek
-            "deepseek-v3": 128000,
-            "deepseek-chat": 65536,
-
-            # Anthropic Claude
-            "claude-opus-4.6": 1000000,
-            "claude-sonnet-4.6": 1000000,
-            "claude-haiku-4.6": 200000,
-
-            # Google Gemini
-            "gemini-3.1-pro": 2000000,
-            "gemini-2.5-pro": 1000000,
-            "gemini-2.5-flash": 1000000,
-
-            # Meta Llama (开源)
-            "llama-4-maverick": 1000000,
-            "llama-4-scout": 10000000,
-        }
         session = ctx.session
         if session is None:
             return
@@ -532,8 +496,9 @@ class JiuClawStreamEventRail(DeepAgentRail):
             logger.debug("Failed to get model_name from ctx.agent", exc_info=True)
 
         try:
-            # raw_total_tokens: model max context window
-            raw_total_tokens = _model_token.get(model_name, 0)
+            # raw_total_tokens: model max context window — use agent-core's resolver
+            # with built-in dict + 200000 fallback (never returns 0)
+            raw_total_tokens = ContextUtils.resolve_context_max(model_name=model_name)
 
             # current_context_tokens: actual usage from usage_metadata
             response = ctx.inputs.response

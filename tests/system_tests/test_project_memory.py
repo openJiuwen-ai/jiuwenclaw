@@ -81,7 +81,7 @@ class TestProjectMemoryRailEndToEnd:
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
             _touch(root, ".git/HEAD", "")
-            _touch(root, "JIUWENCLAW.md", "# test\nPROJECT-RULE-1\n")
+            _touch(root, "JIUWENSWARM.md", "# test\nPROJECT-RULE-1\n")
 
             rail = ProjectMemoryRail(workspace=str(root), language="en")
             agent = _make_agent_with_builder()
@@ -100,7 +100,7 @@ class TestProjectMemoryRailEndToEnd:
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
             _touch(root, ".git/HEAD", "")
-            _touch(root, "JIUWENCLAW.md", "VERSION-1")
+            _touch(root, "JIUWENSWARM.md", "VERSION-1")
 
             rail = ProjectMemoryRail(workspace=str(root), language="en")
             agent = _make_agent_with_builder()
@@ -109,7 +109,7 @@ class TestProjectMemoryRailEndToEnd:
             body1 = agent.system_prompt_builder.added_sections[-1].content["en"]
             assert "VERSION-1" in body1
 
-            _touch(root, "JIUWENCLAW.md", "VERSION-2")
+            _touch(root, "JIUWENSWARM.md", "VERSION-2")
             clear_project_memory_cache(str(root))
             await rail.before_model_call(ctx=MagicMock())
             body2 = agent.system_prompt_builder.added_sections[-1].content["en"]
@@ -121,7 +121,7 @@ class TestProjectMemoryRailEndToEnd:
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
             _touch(root, ".git/HEAD", "")
-            _touch(root, "JIUWENCLAW.md", "BEFORE-UNINIT")
+            _touch(root, "JIUWENSWARM.md", "BEFORE-UNINIT")
 
             rail = ProjectMemoryRail(workspace=str(root), language="en")
             agent = _make_agent_with_builder()
@@ -161,7 +161,7 @@ class TestProjectMemoryRailEndToEnd:
             root = Path(td)
             extra = Path(extra_td)
             _touch(root, ".git/HEAD", "")
-            _touch(extra, "JIUWENCLAW.md", "EXTRA-PROJECT-RULE")
+            _touch(extra, "JIUWENSWARM.md", "EXTRA-PROJECT-RULE")
 
             monkeypatch.setenv("JIUWENSWARM_ADDITIONAL_DIRECTORIES", str(extra))
             clear_project_memory_cache()
@@ -190,7 +190,7 @@ class TestProjectMemoryFileDiscovery:
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
             _touch(root, ".git/HEAD", "")
-            _touch(root, "JIUWENCLAW.md", "DISCOVERY-CONTENT")
+            _touch(root, "JIUWENSWARM.md", "DISCOVERY-CONTENT")
 
             files = discover_and_load_memory_files(workspace=str(root))
             assert any("DISCOVERY-CONTENT" in f.content for f in files)
@@ -199,7 +199,7 @@ class TestProjectMemoryFileDiscovery:
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
             _touch(root, ".git/HEAD", "")
-            _touch(root, "JIUWENCLAW.md", "ROOT-RULE")
+            _touch(root, "JIUWENSWARM.md", "ROOT-RULE")
             sub = root / "src" / "feature"
             sub.mkdir(parents=True)
 
@@ -213,8 +213,8 @@ class TestProjectMemoryFileDiscovery:
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
             _touch(root, ".git/HEAD", "")
-            _touch(root, "JIUWENCLAW.md", "PROJECT-LINE")
-            _touch(root, "JIUWENCLAW.local.md", "LOCAL-LINE")
+            _touch(root, "JIUWENSWARM.md", "PROJECT-LINE")
+            _touch(root, "JIUWENSWARM.local.md", "LOCAL-LINE")
 
             files = discover_and_load_memory_files(workspace=str(root))
             merged = merge_memory_content(files)
@@ -239,7 +239,7 @@ class TestProjectMemoryFileDiscovery:
             _touch(root, ".jiuwen/rules/shared.md", "SHARED-RULE")
             _touch(
                 root,
-                "JIUWENCLAW.md",
+                "JIUWENSWARM.md",
                 "ROOT-LINE\n@include .jiuwen/rules/shared.md\nTAIL-LINE\n",
             )
 
@@ -534,11 +534,11 @@ class TestProjectMemoryMergeContent:
         # it appends per-file headers. Two different paths produce two sections.
         files = [
             LoadedMemoryFile(
-                path="/a/JIUWENCLAW.md", kind="project", content="SAME-CONTENT",
+                path="/a/JIUWENSWARM.md", kind="project", content="SAME-CONTENT",
                 priority=PRIORITY["project"],
             ),
             LoadedMemoryFile(
-                path="/b/JIUWENCLAW.md", kind="project", content="SAME-CONTENT",
+                path="/b/JIUWENSWARM.md", kind="project", content="SAME-CONTENT",
                 priority=PRIORITY["project"],
             ),
         ]
@@ -546,8 +546,8 @@ class TestProjectMemoryMergeContent:
         merged = merge_memory_content(files)
         # Both files appear in merge with their own headers
         assert "SAME-CONTENT" in merged
-        assert "/a/JIUWENCLAW.md" in merged
-        assert "/b/JIUWENCLAW.md" in merged
+        assert "/a/JIUWENSWARM.md" in merged
+        assert "/b/JIUWENSWARM.md" in merged
 
 
 # =====================================================================
@@ -603,7 +603,7 @@ class TestProjectMemoryRailCacheInvalidation:
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
             _touch(root, ".git/HEAD", "")
-            _touch(root, "JIUWENCLAW.md", "ORIGINAL-CONTENT")
+            _touch(root, "JIUWENSWARM.md", "ORIGINAL-CONTENT")
 
             rail = ProjectMemoryRail(workspace=str(root), language="en")
             agent = _make_agent_with_builder()
@@ -621,7 +621,7 @@ class TestProjectMemoryRailCacheInvalidation:
             await rail.after_tool_call(ctx)
 
             # Modify file on disk
-            _touch(root, "JIUWENCLAW.md", "UPDATED-CONTENT")
+            _touch(root, "JIUWENSWARM.md", "UPDATED-CONTENT")
 
             # Reload after invalidation
             await rail.before_model_call(ctx=MagicMock())
@@ -634,7 +634,7 @@ class TestProjectMemoryRailCacheInvalidation:
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
             _touch(root, ".git/HEAD", "")
-            _touch(root, "JIUWENCLAW.md", "STABLE-CONTENT")
+            _touch(root, "JIUWENSWARM.md", "STABLE-CONTENT")
 
             rail = ProjectMemoryRail(workspace=str(root), language="en")
             agent = _make_agent_with_builder()
@@ -652,7 +652,7 @@ class TestProjectMemoryRailCacheInvalidation:
             await rail.after_tool_call(ctx)
 
             # Modify file on disk (this happens outside the tool call)
-            _touch(root, "JIUWENCLAW.md", "CHANGED-CONTENT")
+            _touch(root, "JIUWENSWARM.md", "CHANGED-CONTENT")
 
             # The cache snapshot check may still pick up the change,
             # but the explicit after_tool_call for read_file should not have
@@ -679,7 +679,7 @@ class TestProjectMemoryRailLanguagePropagation:
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
             _touch(root, ".git/HEAD", "")
-            _touch(root, "JIUWENCLAW.md", "BODY-CONTENT")
+            _touch(root, "JIUWENSWARM.md", "BODY-CONTENT")
 
             # Start with Chinese
             rail = ProjectMemoryRail(workspace=str(root), language="cn")

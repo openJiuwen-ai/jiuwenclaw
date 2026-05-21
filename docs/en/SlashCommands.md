@@ -167,10 +167,10 @@ Manages directories AI can access for file read, edit, and execute operations.
 ### `/init` (Project Initialization)
 
 - Usage: `/init` (no parameters).
-- Function: Initialize project AI collaboration config, generates `JIUWENCLAW.md` and optionally `JIUWENCLAW.local.md`.
+- Function: Initialize project AI collaboration config, generates `JIUWENSWARM.md` and optionally `JIUWENSWARM.local.md`.
 - Scope: Only runs in `code` mode.
 - Flow:
-  1. Select scope: `Team-shared` (JIUWENCLAW.md), `Personal` (JIUWENCLAW.local.md), or `Both`.
+  1. Select scope: `Team-shared` (JIUWENSWARM.md), `Personal` (JIUWENSWARM.local.md), or `Both`.
   2. Detect existing configs: Auto-detect `CLAUDE.md`, `.cursorrules`, `copilot-instructions.md` etc.
   3. Generate configs: Create project config files based on selection.
 - Auto mode switch: If in `code.plan`, auto-switches to `code.normal` for write permission.

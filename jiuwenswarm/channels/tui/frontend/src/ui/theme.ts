@@ -83,7 +83,7 @@ const THEME_DEFINITIONS: Record<"light" | "dark", ThemeDefinition> = {
     textSubtle: "#afafaf",
     textAccent: "#5769f7",
     textUser: "#2563eb",
-    textAssistant: "#000000",
+    textAssistant: "#d0d0d0",
     textThinking: "#966c1e",
     textSystem: "#666666",
     textInfo: "#5769f7",

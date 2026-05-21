@@ -74,13 +74,16 @@
     "pause": "Pause",
     "resume": "Resume",
     "processing": "Processing...",
-    "evolving": "Background skill evolution in progress...",
+    "evolving": "Checking whether skill evolution is needed...",
     "evolutionStages": {
-      "collecting": "Background skill evolution in progress...",
-      "detecting": "Detecting evolution signals...",
-      "generating": "Generating evolution experience...",
+      "collecting": "Preparing skill evolution check...",
+      "detecting": "Checking whether skill evolution is needed...",
+      "generating": "Signal detected, generating evolution experience...",
       "awaitingApproval": "Evolution proposal ready, awaiting approval...",
       "noEvolutionGenerated": "No evolution generated",
+      "noEvolutionNoSkill": "No evolution generated: no related skill found",
+      "noEvolutionNoSignal": "No evolution generated: no durable improvement found",
+      "noEvolutionNoRecords": "No evolution generated: no savable experience produced",
       "completed": "Skill evolution completed",
       "timedOut": "Skill evolution timed out",
       "failed": "Skill evolution failed"
@@ -140,6 +143,7 @@
     "stageFailed": "Failed",
     "stageRunning": "Running",
     "stagePending": "Pending",
+    "stageMessage": "Message",
     "inputPlaceholder": "Enter optimization goal...",
     "stages": {
       "assess": "Assess",
@@ -161,9 +165,6 @@
     "status": "Status",
     "contextCompression": "Context window",
     "memoryUsage": "Memory usage",
-    "message": "Message",
-    "time": "Time",
-    "heartbeatClick": "Heartbeat message, click to view",
     "poweredBy": "Powered by openJiuwen",
     "noExtension": "No extension files available",
     "refreshFiles": "Refresh",
@@ -272,7 +273,13 @@
     }
   },
   "sessionSidebar": {
-    "newSession": "New session"
+    "newSession": "New session",
+    "advancedConfig": "Advanced Config",
+    "expandSidebar": "Expand Sidebar",
+    "collapseSidebar": "Collapse Sidebar",
+    "connectionStatus": "Connection Status",
+    "language": "Language",
+    "appearance": "Appearance"
   },
   "heartbeat": {
     "title": "Heartbeat Management",
@@ -356,6 +363,13 @@
       "enabled": "Enabled",
       "disabled": "Disabled",
       "expired": "Expired"
+    },
+    "skillnet": {
+      "usageNoticeTitle": "Notes",
+      "usageNotice1": "SkillNet search uses a public service; timeouts or errors may be due to network congestion or server load—try again later.",
+      "usageNotice2": "Installing a skill downloads files from GitHub. <strong>Ensure the machine running JiuwenClaw can reach GitHub</strong> (network / proxy).",
+      "usageNotice3": "GitHub's API limits anonymous (unauthenticated) use to about 60 requests per hour per IP. If install fails with rate limiting, wait and retry later. For increased rate limits, configure github_token on the <configLink>configuration page</configLink>.",
+      "configPageLinkAria": "Go to configuration page"
     }
   },
   "channels": {
@@ -571,7 +585,9 @@
       "referencedBy": "Referenced by {{count}} Agent(s)",
       "deleteConfirmTitle": "Delete Model?",
       "deleteConfirmMessage": "Are you sure you want to delete model \"{{modelName}}\"?",
-      "deleteConfirmMessageSimple": "Model \"{{modelName}}\" is referenced by {{count}} Agent(s). After deletion, related Agents will no longer be able to use this model."
+      "deleteConfirmMessageSimple": "Model \"{{modelName}}\" is referenced by {{count}} Agent(s). After deletion, related Agents will no longer be able to use this model.",
+      "referenceLostWarning": "Model Reference Lost Warning",
+      "notSelected": "No model selected"
     },
     "agentList": {
       "addAgent": "Add Agent",
@@ -643,13 +659,14 @@
       "levelDeny": "Deny",
       "delete": "Remove",
       "deleteConfirm": "Remove “{{tool}}” from permissions.tools?",
-      "invalidValue": "Non-standard value; choosing a policy will rewrite it. Current: {{raw}}",
-      "addTitle": "Add per-tool rule",
-      "toolPlaceholder": "e.g. mcp_exec_command",
-      "add": "Add",
-      "loadFailed": "Failed to load tool permissions",
-      "saveFailed": "Save failed"
-    },
+        "invalidValue": "Non-standard value; choosing a policy will rewrite it. Current: {{raw}}",
+        "addTitle": "Add per-tool rule",
+        "toolPlaceholder": "e.g. mcp_exec_command",
+        "duplicateTool": "Tool already exists: {{tool}}",
+        "add": "Add",
+        "loadFailed": "Failed to load tool permissions",
+        "saveFailed": "Save failed"
+      },
     "errors": {
       "requiredModelFields": "These model fields are required: {{fields}}. Complete them before saving and restarting.",
       "saveFailed": "Save failed, please try again later",

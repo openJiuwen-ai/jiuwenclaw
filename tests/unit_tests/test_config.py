@@ -271,11 +271,9 @@ modes:
         assert "*id" not in saved_text
         raw = yaml.safe_load(saved_text)
         saved = raw["modes"]["team"]["alpha_team"]
-        assert saved["teammate"] == {
-            "member_name": "alpha_team_teammate",
-            "display_name": "alpha_team teammate",
-            "persona": "Handle analysis and execution",
-        }
+        # teammate 字段（与 agents 同级）已废弃，不再写入 config.yaml
+        assert "teammate" not in saved
+        # agents.teammate 仍保留
         assert saved["agents"]["teammate"]["skills"] == ["coding"]
         assert saved["agents"]["teammate"] is not saved["agents"]["coder"]
 
@@ -351,3 +349,52 @@ modes:
 
         with pytest.raises(ValueError, match="duplicate member_name"):
             replace_teams_in_config(payload)
+
+    @staticmethod
+    def test_replace_teams_in_config_deletes_modes_team_when_empty(
+        monkeypatch: pytest.MonkeyPatch,
+        temp_config_file: Path,
+    ):
+        temp_config_file.write_text(
+            """
+channels:
+  web:
+    enabled: true
+modes:
+  team:
+    existing_team:
+      team_name: existing_team
+""",
+            encoding="utf-8",
+        )
+        monkeypatch.setattr("jiuwenswarm.common.config._CONFIG_YAML_PATH", temp_config_file)
+
+        # 空 team 数组应该删除 modes.team 配置项
+        replace_teams_in_config({"agents": {}, "team": []})
+
+        raw = yaml.safe_load(temp_config_file.read_text(encoding="utf-8"))
+        assert "team" not in raw["modes"]
+
+    @staticmethod
+    def test_replace_teams_in_config_no_change_when_modes_team_missing(
+        monkeypatch: pytest.MonkeyPatch,
+        temp_config_file: Path,
+    ):
+        temp_config_file.write_text(
+            """
+channels:
+  web:
+    enabled: true
+modes:
+  agent:
+    fast: {}
+""",
+            encoding="utf-8",
+        )
+        monkeypatch.setattr("jiuwenswarm.common.config._CONFIG_YAML_PATH", temp_config_file)
+
+        # 空 team 数组，且 modes.team 不存在，不应报错
+        replace_teams_in_config({"agents": {}, "team": []})
+
+        raw = yaml.safe_load(temp_config_file.read_text(encoding="utf-8"))
+        assert "team" not in raw["modes"]

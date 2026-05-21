@@ -57,12 +57,12 @@ PROJECT_ROOT_MARKERS: tuple[str, ...] = (
 )
 
 PROJECT_MEMORY_FILES: tuple[tuple[str, str], ...] = (
-    ("JIUWENCLAW.md", "project"),
-    (".jiuwen/JIUWENCLAW.md", "project"),
+    ("JIUWENSWARM.md", "project"),
+    (".jiuwen/JIUWENSWARM.md", "project"),
 )
 
 LOCAL_MEMORY_FILES: tuple[tuple[str, str], ...] = (
-    ("JIUWENCLAW.local.md", "local"),
+    ("JIUWENSWARM.local.md", "local"),
 )
 
 PROJECT_MEMORY_GLOBS: tuple[str, ...] = (
@@ -70,7 +70,7 @@ PROJECT_MEMORY_GLOBS: tuple[str, ...] = (
 )
 
 USER_MEMORY_FILES: tuple[str, ...] = (
-    "~/.jiuwen/JIUWENCLAW.md",
+    "~/.jiuwen/JIUWENSWARM.md",
 )
 
 USER_MEMORY_GLOBS: tuple[str, ...] = (
@@ -78,7 +78,7 @@ USER_MEMORY_GLOBS: tuple[str, ...] = (
 )
 
 MANAGED_MEMORY_FILES: tuple[str, ...] = (
-    "/etc/jiuwen/JIUWENCLAW.md",
+    "/etc/jiuwen/JIUWENSWARM.md",
 )
 
 MANAGED_MEMORY_GLOBS: tuple[str, ...] = (

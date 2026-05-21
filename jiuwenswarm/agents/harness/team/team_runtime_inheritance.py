@@ -121,6 +121,7 @@ TOOL_WHITELIST = frozenset({
     "skill_toolkit",
     "enter_worktree",
     "exit_worktree",
+    "acp_chat",
 })
 
 

@@ -194,19 +194,9 @@ function AppContent() {
   /** 为 true 表示刚从「会话列表」恢复；history 为空时在 useEffect 的 onEmpty 中提示一次 */
   const historyRestoreFromPanelHintRef = useRef(false);
 
-  const disposeInFlightHistoryHandles = useCallback(() => {
-    historyLoadingMoreRef.current = false;
-    historyRestoreHandleRef.current?.dispose();
-    historyRestoreHandleRef.current = null;
-    historyPageHandleRef.current?.dispose();
-    historyPageHandleRef.current = null;
-  }, []);
-
   useEffect(() => {
     sessionIdRef.current = sessionId;
   }, [sessionId]);
-
-  useEffect(() => () => disposeInFlightHistoryHandles(), [disposeInFlightHistoryHandles]);
 
   const { setCurrentSession, setSessions, setAvailableModels, setMode, mode, heartbeatMessage, heartbeatUpdatedAt, teamTaskEvents, teamMembers } = useSessionStore();
   const {
@@ -217,10 +207,23 @@ function AppContent() {
     addToolResult,
     prependMessages,
     isProcessing,
+    isLoadingHistory,
     setProcessing,
     setThinking,
+    setLoadingHistory,
     setPaused,
   } = useChatStore();
+
+  const disposeInFlightHistoryHandles = useCallback(() => {
+    historyLoadingMoreRef.current = false;
+    setLoadingHistory(false);
+    historyRestoreHandleRef.current?.dispose();
+    historyRestoreHandleRef.current = null;
+    historyPageHandleRef.current?.dispose();
+    historyPageHandleRef.current = null;
+  }, [setLoadingHistory]);
+
+  useEffect(() => () => disposeInFlightHistoryHandles(), [disposeInFlightHistoryHandles]);
   const { todos, clearTodos } = useTodoStore();
   const { extensionReady, reset: resetHarnessStore } = useHarnessStore();
 
@@ -578,11 +581,13 @@ function AppContent() {
     setHistoryPagerMeta(null);
     setHistoryLoadingMore(false);
     
+    setLoadingHistory(true);
     // 开始历史会话加载
     const restoreHandle = beginHistoryRestore({
       sessionId: sessionId,
       onReady: (messages, totalPages) => {
         if (sessionIdRef.current !== sessionId) {
+          setLoadingHistory(false);
           return;
         }
         historyRestoreFromPanelHintRef.current = false;
@@ -592,12 +597,14 @@ function AppContent() {
           loadedPages: 1,
           totalPages: totalPages ?? 1,
         });
+        setLoadingHistory(false);
         queueMicrotask(() => {
           historyRestoreHandleRef.current = null;
         });
       },
       onEmpty: (emptyTotalPages) => {
         if (sessionIdRef.current !== sessionId) {
+          setLoadingHistory(false);
           return;
         }
         clearMessages();
@@ -614,6 +621,7 @@ function AppContent() {
             timestamp: new Date().toISOString(),
           });
         }
+        setLoadingHistory(false);
         historyRestoreHandleRef.current = null;
       },
       onToolReplay: (items) => {
@@ -694,6 +702,7 @@ function AppContent() {
       },
       onError: (message) => {
         console.warn('[history.restore]', message);
+        setLoadingHistory(false);
       },
     });
     historyRestoreHandleRef.current = restoreHandle;
@@ -712,6 +721,7 @@ function AppContent() {
         // 发生错误时，设置 historyPagerMeta 为 null，显示欢迎信息
         setHistoryPagerMeta(null);
         console.error('Failed to load history:', error);
+        setLoadingHistory(false);
         // 忽略 "invalid page_idx or session history not found" 错误，因为这是新会话的正常情况
         const errorMessage = error instanceof Error ? error.message : String(error);
         if (sessionIdRef.current === sessionId && !errorMessage.includes('invalid page_idx or session history not found')) {
@@ -737,6 +747,7 @@ function AppContent() {
     clearMessages,
     clearSubtasks,
     disposeInFlightHistoryHandles,
+    setLoadingHistory,
   ]);
 
   // 新建会话：立即生成可用的 session_id，避免停留在 'new' 导致无法发送消息
@@ -885,10 +896,12 @@ function AppContent() {
     const finishLoadingMore = () => {
       historyLoadingMoreRef.current = false;
       setHistoryLoadingMore(false);
+      setLoadingHistory(false);
     };
 
     historyLoadingMoreRef.current = true;
     setHistoryLoadingMore(true);
+    setLoadingHistory(true);
     const pageHandle = fetchHistoryPage({
       sessionId: sid,
       pageIdx: nextPage,
@@ -1144,6 +1157,7 @@ function AppContent() {
                   <StatusBar
                     onCancel={mode === 'team' ? undefined : handleCancel}
                     teamMode={mode === 'team'}
+                    isLoadingHistory={isLoadingHistory}
                   />
                 )}
               </div>
@@ -1156,10 +1170,11 @@ function AppContent() {
 
             {/* StatusBar - 当没有右侧面板时，单独显示在底部 */}
             {!toolPanelHasContent && (
-              <div className="card">
+              <div className={`transition-opacity duration-200 ${isLoadingHistory ? 'opacity-0 pointer-events-none' : ''}`}>
                 <StatusBar
                   onCancel={mode === 'team' ? undefined : handleCancel}
                   teamMode={mode === 'team'}
+                  isLoadingHistory={isLoadingHistory}
                 />
               </div>
             )}

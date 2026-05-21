@@ -55,6 +55,7 @@ interface ChatState {
   messages: Message[];
   isProcessing: boolean;
   isThinking: boolean;  // 思考中状态（显示闪烁动画）
+  isLoadingHistory: boolean;  // 正在加载历史消息
   evolutionStatus: EvolutionStatusPayload | null;
   isPaused: boolean;    // 任务是否暂停
   pausedTask: string | null;  // 暂停的任务描述
@@ -86,6 +87,7 @@ interface ChatState {
   stopStreaming: (streamKey?: string) => void;
   setProcessing: (status: boolean) => void;
   setThinking: (status: boolean) => void;
+  setLoadingHistory: (status: boolean) => void;
   setEvolutionStatus: (status: EvolutionStatusPayload | null) => void;
   setPaused: (paused: boolean, task?: string | null) => void;
   setInterruptResult: (result: InterruptResultPayload | null) => void;
@@ -116,6 +118,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
   messages: [],
   isProcessing: false,
   isThinking: false,
+  isLoadingHistory: false,
   evolutionStatus: null,
   isPaused: false,
   pausedTask: null,
@@ -196,6 +199,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
   setThinking: (status) => {
     set({ isThinking: status });
+  },
+
+  setLoadingHistory: (status) => {
+    set({ isLoadingHistory: status });
   },
 
   setEvolutionStatus: (status) => {

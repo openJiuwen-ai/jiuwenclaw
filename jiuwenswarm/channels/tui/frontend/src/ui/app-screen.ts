@@ -535,8 +535,9 @@ export class AppScreen implements Component, Focusable {
     this.editor.onChange = () => {
       this.tui.requestRender();
     };
-    this.editor.onSubmit = (value) => {
-      void this.handleSubmit(value);
+    this.editor.onSubmit = async (value) => {
+      void await this.handleSubmit(value);
+      void await this.commands.refreshSkills(this.state.getCommandContext());
     };
     this.unsubscribe = this.state.onChange(() => {
       this.handleStateChange();

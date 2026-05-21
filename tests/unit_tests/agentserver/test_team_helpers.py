@@ -245,12 +245,220 @@ async def test_team_evolution_monitor_starts_cycle_for_started_progress_without_
         push for push in _FakeTransport.pushes
         if push["payload"]["event_type"] == "chat.evolution_status"
     ]
-    assert [push["payload"]["status"] for push in status_pushes] == ["start", "end"]
-    assert {push["request_id"] for push in status_pushes} == {
-        "team_evolve_sess-progress_1"
-    }
-    assert status_pushes[0]["payload"]["stage"] == "collecting"
-    assert status_pushes[-1]["payload"]["stage"] == "hidden"
+    assert status_pushes == []
+
+
+@pytest.mark.anyio
+async def test_team_evolution_monitor_maps_sdk_progress_stages(monkeypatch):
+    _FakeTransport.pushes = []
+    detecting_event = SimpleNamespace(
+        type="llm_reasoning",
+        payload={
+            "_evolution_meta": {
+                "event_kind": "progress",
+                "stage": "detecting_signals",
+                "request_id": "team_skill_evolve_stages",
+            },
+            "request_id": "team_skill_evolve_stages",
+            "content": "[Team Skill Evolution] detecting",
+        },
+    )
+    generating_event = SimpleNamespace(
+        type="llm_reasoning",
+        payload={
+            "_evolution_meta": {
+                "event_kind": "progress",
+                "stage": "generating_updates",
+                "request_id": "team_skill_evolve_stages",
+            },
+            "request_id": "team_skill_evolve_stages",
+            "content": "[Team Skill Evolution] generating",
+        },
+    )
+    outcome_event = SimpleNamespace(
+        type="llm_reasoning",
+        payload={
+            "_evolution_meta": {"event_kind": "outcome", "status": "completed"},
+            "request_id": "team_skill_evolve_stages",
+            "content": "done",
+        },
+    )
+    rail = _FakeRail([[detecting_event], [generating_event], [outcome_event]], pending_first=False)
+
+    monkeypatch.setattr(
+        "jiuwenswarm.server.gateway_push.WebSocketGatewayPushTransport",
+        _FakeTransport,
+    )
+    monkeypatch.setattr(team_helpers, "parse_stream_chunk", lambda evt: None)
+
+    task = asyncio.create_task(
+        _TeamHelpersTestApi.watch_team_evolution_and_push("web", "sess-stages", rail)
+    )
+    await asyncio.sleep(0.05)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    status_pushes = [
+        push for push in _FakeTransport.pushes
+        if push["payload"]["event_type"] == "chat.evolution_status"
+    ]
+    assert [push["payload"]["status"] for push in status_pushes] == [
+        "start",
+        "end",
+    ]
+    assert [push["payload"]["stage"] for push in status_pushes] == [
+        "generating",
+        "completed",
+    ]
+    assert {push["request_id"] for push in status_pushes} == {"team_skill_evolve_stages"}
+
+
+@pytest.mark.anyio
+async def test_team_evolution_monitor_uses_meta_request_id_and_ends_on_cancelled(monkeypatch):
+    _FakeTransport.pushes = []
+    detecting_event = SimpleNamespace(
+        type="llm_reasoning",
+        payload={
+            "_evolution_meta": {
+                "event_kind": "progress",
+                "stage": "detecting_signals",
+                "request_id": "team_skill_evolve_meta",
+            },
+            "content": "[Team Skill Evolution] detecting",
+        },
+    )
+    generating_event = SimpleNamespace(
+        type="llm_reasoning",
+        payload={
+            "_evolution_meta": {
+                "event_kind": "progress",
+                "stage": "generating_updates",
+                "request_id": "team_skill_evolve_meta",
+            },
+            "content": "[Team Skill Evolution] generating",
+        },
+    )
+    cancelled_event = SimpleNamespace(
+        type="llm_reasoning",
+        payload={
+            "_evolution_meta": {
+                "event_kind": "progress",
+                "stage": "cancelled",
+                "request_id": "team_skill_evolve_meta",
+            },
+            "content": "no actionable evolution signals detected",
+        },
+    )
+    rail = _FakeRail(
+        [[detecting_event], [generating_event], [cancelled_event]],
+        pending_first=False,
+    )
+
+    monkeypatch.setattr(
+        "jiuwenswarm.server.gateway_push.WebSocketGatewayPushTransport",
+        _FakeTransport,
+    )
+    monkeypatch.setattr(team_helpers, "parse_stream_chunk", lambda evt: None)
+
+    task = asyncio.create_task(
+        _TeamHelpersTestApi.watch_team_evolution_and_push("web", "sess-meta", rail)
+    )
+    await asyncio.sleep(0.05)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    status_pushes = [
+        push for push in _FakeTransport.pushes
+        if push["payload"]["event_type"] == "chat.evolution_status"
+    ]
+    assert [push["payload"]["status"] for push in status_pushes] == [
+        "start",
+        "end",
+    ]
+    assert [push["payload"]["stage"] for push in status_pushes] == [
+        "generating",
+        "hidden",
+    ]
+    assert {push["request_id"] for push in status_pushes} == {"team_skill_evolve_meta"}
+
+
+@pytest.mark.anyio
+async def test_team_evolution_monitor_filters_progress_by_request_id(monkeypatch):
+    _FakeTransport.pushes = []
+    request_a_detecting = SimpleNamespace(
+        type="llm_reasoning",
+        payload={
+            "_evolution_meta": {
+                "event_kind": "progress",
+                "stage": "detecting_signals",
+                "request_id": "team_skill_evolve_a",
+            },
+            "content": "[Team Skill Evolution] detecting A",
+        },
+    )
+    request_b_generating = SimpleNamespace(
+        type="llm_reasoning",
+        payload={
+            "_evolution_meta": {
+                "event_kind": "progress",
+                "stage": "generating_updates",
+                "request_id": "team_skill_evolve_b",
+            },
+            "content": "[Team Skill Evolution] generating B",
+        },
+    )
+    request_a_generating = SimpleNamespace(
+        type="llm_reasoning",
+        payload={
+            "_evolution_meta": {
+                "event_kind": "progress",
+                "stage": "generating_updates",
+                "request_id": "team_skill_evolve_a",
+            },
+            "content": "[Team Skill Evolution] generating A",
+        },
+    )
+    request_a_completed = SimpleNamespace(
+        type="llm_reasoning",
+        payload={
+            "_evolution_meta": {
+                "event_kind": "progress",
+                "stage": "completed",
+                "request_id": "team_skill_evolve_a",
+            },
+            "content": "done A",
+        },
+    )
+    rail = _FakeRail(
+        [[request_a_detecting], [request_a_generating, request_b_generating], [request_a_completed]],
+        pending_first=False,
+    )
+
+    monkeypatch.setattr(
+        "jiuwenswarm.server.gateway_push.WebSocketGatewayPushTransport",
+        _FakeTransport,
+    )
+    monkeypatch.setattr(team_helpers, "parse_stream_chunk", lambda evt: None)
+
+    task = asyncio.create_task(
+        _TeamHelpersTestApi.watch_team_evolution_and_push("web", "sess-filter", rail)
+    )
+    await asyncio.sleep(0.05)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    status_pushes = [
+        push for push in _FakeTransport.pushes
+        if push["payload"]["event_type"] == "chat.evolution_status"
+    ]
+    assert [(push["request_id"], push["payload"]["status"], push["payload"]["stage"]) for push in status_pushes] == [
+        ("team_skill_evolve_a", "start", "generating"),
+        ("team_skill_evolve_a", "end", "completed"),
+    ]
+    assert all("generating B" not in push["payload"].get("message", "") for push in status_pushes)
 
 
 @pytest.mark.anyio
@@ -377,7 +585,8 @@ async def test_team_evolution_monitor_maps_noop_progress_to_no_evolution_generat
         push for push in _FakeTransport.pushes
         if push["payload"]["event_type"] == "chat.evolution_status"
     ]
-    assert status_pushes == []
+    assert [push["payload"]["status"] for push in status_pushes] == ["start", "end"]
+    assert status_pushes[-1]["payload"]["stage"] == "no_evolution_no_signal"
 
 
 @pytest.mark.anyio

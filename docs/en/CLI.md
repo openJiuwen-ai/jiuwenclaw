@@ -1,94 +1,192 @@
-## CLI / channel control commands
+## CLI / Channel Control Commands
 
-JiuwenSwarm supports **special prefix commands** to control sessions and modes. Common ones:
-
-- `/new_session`: start a new `session_id` for the current channel
-- `/mode plan`, `/mode fast`, `/mode team`, `/mode code`: switch the channel's working mode
-
-These are handled in the Gateway **`MessageHandler`** and **are not** sent to the agent.
+JiuwenSwarm supports **special prefix commands** to control sessions and modes. These commands are parsed by the Gateway's `MessageHandler` and **are not sent to the Agent**.
 
 ---
 
-### 1. `/new_session` — new session id
+### Supported Channels
+
+The following IM channels support control commands:
+
+- `feishu`
+- `xiaoyi`
+- `dingtalk`
+- `whatsapp`
+- `wechat`
+
+---
+
+### 1. `/new_session` — New Session ID
 
 **Behavior**
 
-- For supported channels (`feishu` / `xiaoyi` / `dingtalk` / `whatsapp` / `wecom` / `wechat`), generates a new `session_id`, e.g.:  
-  - `feishu_<ms hex>_<random hex>`
-  - `xiaoyi_<ms hex>_<random hex>`
-  - `dingtalk_<ms hex>_<random hex>`
-  - `whatsapp_<ms hex>_<random hex>`
-  - `wecom_<ms hex>_<random hex>`
-  - `wechat_<ms hex>_<random hex>`
-- Later messages on that channel use this id, so a new folder appears under `workspace/session/`.
+- Generates a new `session_id` for the current channel, formatted as `{channel_type}_{ms_timestamp_hex}_{random_hex}`
+- All subsequent chat messages from this channel will be forced to use the new `session_id`
 
 **Usage**
 
 Send in a supported channel:
 
-  ```text
-  /new_session
-  ```
-![](../assets/images/命令行解析.jpg)
+```text
+/new_session
+```
+
+![](../assets/images/命令行解析.png)
 
 The Gateway will:
-
-  1. Intercept (not forwarded to the agent)
-  2. Generate a new `session_id` for that `channel_id`
-  3. Reply with a system message, e.g.  
-     `session_id updated to feishu_17f2b4b32e0_ab12cd`
-
-**Notes**
-
-- `/new_session` only changes **future** message binding; the directory is created when the session is actually used (todo, files, etc.).
+1. Intercept this message (not forwarded to the Agent)
+2. Cancel any tasks currently running in the session
+3. Generate a new `session_id` for that `channel_id`
+4. Reply with a system message, e.g.: `[Received CLI command], session_id changed to feishu_17f2b4b32e0_ab12cd`
 
 ---
 
-### 2. `/mode` — channel mode (`plan` / `fast` / `code` / `team`)
+### 2. `/mode` — Switch Channel Mode
 
 **Behavior**
 
-- Sets a logical **mode** for the channel:
-  - `plan`: planning, explanation, decomposition (default)
-  - `fast`: more hands-on execution
-  - `code`: code generation and execution mode (defaults to `code.normal`; use `/mode code.plan` for code planning)
-  - `team`: team mode
-- You can also specify sub-modes directly:
-  - `agent.plan` or `plan` → Agent Plan mode
-  - `agent.fast` or `fast` → Agent Fast mode
-  - `code.plan` → Code Plan mode
-  - `code.normal` or `code` → Code Normal mode
-  - `team` → Team mode
-- Mode is passed in `params["mode"]` for prompt construction.
+Sets the working mode for the current channel. The Agent uses this when constructing prompts and behavior strategies.
+
+**Primary Modes (mapped to secondary modes):**
+
+| Command | Maps to | Description |
+|---------|---------|-------------|
+| `/mode agent` | `agent.plan` | Agent mode, planning/explanation/decomposition |
+| `/mode code` | `code.normal` | Code mode, Agent interacts via code execution tools |
+| `/mode team` | `team` | Team mode |
+
+**Direct Secondary Modes:**
+
+| Command | Description |
+|---------|-------------|
+| `/mode agent.plan` | Agent mode + planning style (default) |
+| `/mode agent.fast` | Agent mode + auto-execution style |
+| `/mode code.plan` | Code mode + planning style |
+| `/mode code.normal` | Code mode + direct execution style (default) |
+| `/mode code.team` | Code mode + team style |
 
 **Usage**
 
-  ```text
-  /mode plan
-  ```
+```text
+/mode agent
+```
 
-  or
+or
 
-  ```text
-  /mode fast
-  ```
+```text
+/mode code.plan
+```
 
 The Gateway will:
-
-  1. Treat as control, not forward to the agent
-  2. Update `ChannelControlState.mode`
-  3. Reply e.g. `mode updated to fast`
-
-**Scope**
-
-- Stored **per channel** (`channel_id` → `mode`). All later messages on that channel use the current mode.
-- Initial value can come from `default_mode` in config; `MessageHandler` reads it on startup.
+1. Intercept this message
+2. Cancel tasks in the current session (if mode changes)
+3. Update `ChannelControlState.mode`
+4. Reply with a system message, e.g.: `[Received CLI command], mode changed to code.plan`
 
 ---
 
-### 3. TUI: `/workspace_dir` — workspace path for outbound requests
+### 3. `/switch` — Switch Secondary Mode
 
-**Scope:** terminal UI (`jiuwenswarm-tui`) only; parsed locally, not by the Gateway control pipeline.
+**Behavior**
+
+Switches secondary style within the current primary mode, more concise than `/mode`.
+
+| Command | When in agent mode | When in code mode |
+|---------|--------------------|--------------------|
+| `/switch plan` | → `agent.plan` | → `code.plan` |
+| `/switch fast` | → `agent.fast` | Not supported |
+| `/switch normal` | Not supported | → `code.normal` |
+| `/switch team` | Not supported | → `code.team` |
+
+**Usage**
+
+```text
+/switch plan
+```
+
+---
+
+### 4. `/skills list` — List Available Skills
+
+**Behavior**
+
+Queries the currently available skill list.
+
+**Usage**
+
+```text
+/skills list
+```
+
+The Gateway will call `skills.list` and reply with the skill list as a notification.
+
+---
+
+### 5. `/branch` — Fork Session
+
+**Behavior**
+
+Forks a new session from the current one, preserving the original conversation history. Useful for exploring new directions without affecting the original session.
+
+**Usage**
+
+```text
+/branch
+```
+
+Or with a custom name:
+
+```text
+/branch fix login issue
+```
+
+The Gateway will:
+1. Call `session.fork` to create a new session
+2. Switch to the new session
+3. Reply with a message, e.g.: `[Received /branch command] Session "fix login issue" forked, now switched to new session.`
+
+---
+
+### 6. `/rewind` — Rewind Conversation
+
+**Behavior**
+
+Rewinds the current session to a specified turn, deleting that turn and all subsequent conversation records.
+
+**Usage**
+
+First send the rewind request:
+
+```text
+/rewind 3
+```
+
+The Gateway will reply with a confirmation prompt:
+
+```
+[Received /rewind 3 command] Confirm rewind to turn 3?
+This operation is irreversible and will delete turn 3 and all subsequent conversations.
+Please reply /rewind confirm 3 to confirm, or /rewind cancel to cancel.
+Note: Rewind does not affect manually edited files or commands executed via bash.
+```
+
+Confirm execution:
+
+```text
+/rewind confirm 3
+```
+
+Cancel operation:
+
+```text
+/rewind cancel
+```
+
+---
+
+### 7. TUI: `/workspace_dir` — Workspace Path for Outbound Requests
+
+**Scope:** Terminal UI (`jiuwenswarm-tui`) only; parsed locally, not by the Gateway control pipeline.
 
 **Behavior**
 
@@ -107,7 +205,7 @@ The Gateway will:
 
 ---
 
-### 4. `/compact` — context compression
+### 8. `/compact` — Context Compression
 
 **Scope:** TUI only; triggers context compression via AgentServer.
 
@@ -118,9 +216,9 @@ The Gateway will:
 
 **Usage**
 
-  ```text
-  /compact
-  ```
+```text
+/compact
+```
 
 **Return Values**
 
@@ -128,3 +226,10 @@ The Gateway will:
 - `compressed`: Compression successful, displays token count before/after compression and savings percentage.
 - `noop`: No compression needed, context is already optimized.
 
+---
+
+### Configuration Notes
+
+- Mode is stored **per channel** (`channel_id` → `mode`). All subsequent messages on that channel will automatically include the current mode.
+- `default_mode` can be set in `config.yaml` as the initial value; `MessageHandler` reads it on startup.
+- `/new_session` and `/mode` changes will automatically cancel tasks currently running in the session.

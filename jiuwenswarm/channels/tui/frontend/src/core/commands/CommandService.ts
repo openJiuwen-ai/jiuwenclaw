@@ -130,9 +130,6 @@ export class CommandService {
   }
 
   async execute(raw: string, ctx: CommandContext): Promise<void> {
-    // Refresh the installed-skills cache on every execution for /<skill-name> autocompletion
-    await this.refreshSkills(ctx);
-
     const parsed = parseSlashCommand(raw.trim(), this.getAll());
     const command = parsed.command;
     if (!command) {
@@ -148,6 +145,11 @@ export class CommandService {
           const query = parsed.args
             .replace(new RegExp(`^${skillName.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\s*`, "i"), "")
             .trim();
+          if (!query) {
+            const message = "Usage: /<skill-name> <query>"
+            ctx.addItem(makeItem(ctx.sessionId, "error", message));
+            return;
+          }
           try {
             await useSubCommand.action(ctx, `${skillName}, ${query}`);
           } catch (error) {

@@ -722,6 +722,7 @@ function MultiModelSection({
   isConnected,
   agents,
   onDeleteModel,
+  onClearExternalError,
   t,
 }: {
   models: ModelEntry[];
@@ -730,6 +731,7 @@ function MultiModelSection({
   isConnected: boolean;
   agents?: AgentEntry[];
   onDeleteModel?: (idx: number, modelName: string, references: string[]) => void;
+  onClearExternalError?: () => void;
   t: (key: string, options?: Record<string, unknown>) => string;
 }) {
   const [validatingModel, setValidatingModel] = useState<string | null>(null);
@@ -741,6 +743,29 @@ function MultiModelSection({
   });
   const [localError, setLocalError] = useState<string | null>(null);
   const [validateToast, setValidateToast] = useState<{ show: boolean; success: boolean; message: string }>({ show: false, success: true, message: "" });
+
+  const resetNewModelDraft = () => {
+    setNewModel({ model_name: "", api_base: "", api_key: "", model_provider: "OpenAI", alias: "" });
+    setLocalError(null);
+  };
+
+  const handleCancelAddNew = () => {
+    setAddingNew(false);
+    resetNewModelDraft();
+    onClearExternalError?.();
+  };
+
+  const handleStartAddNew = () => {
+    resetNewModelDraft();
+    setAddingNew(true);
+    onClearExternalError?.();
+  };
+
+  const handleNewModelChange = (field: keyof ModelEntry, value: string) => {
+    setLocalError(null);
+    onClearExternalError?.();
+    setNewModel((prev) => ({ ...prev, [field]: value }));
+  };
 
   const getModelAgentReferences = (modelName: string, modelProvider: string, modelApiBase: string): string[] => {
     if (!agents) return [];
@@ -776,6 +801,7 @@ function MultiModelSection({
   };
 
   const updateModel = (idx: number, field: keyof ModelEntry, value: string) => {
+    onClearExternalError?.();
     // 字段长度校验
     const lengthErrorKey = getFieldLengthErrorKey(field, value);
     if (lengthErrorKey) {
@@ -1110,7 +1136,7 @@ function MultiModelSection({
               {field === "model_provider" ? (
                 <select
                   value={newModel[field]}
-                  onChange={(e) => setNewModel((p) => ({ ...p, [field]: e.target.value }))}
+                  onChange={(e) => handleNewModelChange(field, e.target.value)}
                   className="flex-1 rounded border border-border bg-bg px-2 py-1 text-text text-xs"
                 >
                   <option value="" disabled>{t("config.selectModelProvider")}</option>
@@ -1120,7 +1146,7 @@ function MultiModelSection({
                 <input
                   type={field === "api_key" ? "password" : "text"}
                   value={newModel[field] ?? ""}
-                  onChange={(e) => setNewModel((p) => ({ ...p, [field]: e.target.value }))}
+                  onChange={(e) => handleNewModelChange(field, e.target.value)}
                   className="flex-1 rounded border border-border bg-bg px-2 py-1 text-text text-xs"
                   placeholder={field === "model_name" ? "e.g. gpt-4o" : field === "api_key" ? t("config.modelList.apiKeyPlaceholder") : ""}
                 />
@@ -1128,14 +1154,21 @@ function MultiModelSection({
             </div>
           ))}
           <div className="flex justify-end gap-2 pt-1">
-            <button type="button" onClick={() => setAddingNew(false)} className="btn !px-3 !py-1 text-xs">{t("common.cancel")}</button>
-            <button type="button" onClick={handleAddNew} disabled={!newModel.model_name.trim()} className="btn primary !px-3 !py-1 text-xs">{t("common.confirm")}</button>
+            <button type="button" onClick={handleCancelAddNew} className="btn !px-3 !py-1 text-xs">{t("common.cancel")}</button>
+            <button
+              type="button"
+              onClick={handleAddNew}
+              disabled={!newModel.model_name.trim() || !newModel.api_base.trim() || !newModel.api_key.trim() || !newModel.model_provider.trim()}
+              className="btn primary !px-3 !py-1 text-xs"
+            >
+              {t("common.confirm")}
+            </button>
           </div>
         </div>
       ) : (
         <button
           type="button"
-          onClick={() => setAddingNew(true)}
+          onClick={handleStartAddNew}
           className="w-full rounded-lg border border-dashed border-border py-2 text-xs text-text-muted hover:bg-secondary/40 hover:border-accent/40"
         >
           + {t("config.modelList.addModel")}
@@ -2197,6 +2230,7 @@ export function ConfigPanel({
   const [configTab, setConfigTab] = useState<ConfigMainTab>("model");
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [modelError, setModelError] = useState<string | null>(null);
   const [deleteAgentConfirm, setDeleteAgentConfirm] = useState<{ idx: number; agentName: string; references: string[] } | null>(null);
   const [deleteModelConfirm, setDeleteModelConfirm] = useState<{ idx: number; modelName: string; references: string[] } | null>(null);
   const [deleteTeamConfirm, setDeleteTeamConfirm] = useState<{ idx: number; teamName: string } | null>(null);
@@ -2243,7 +2277,7 @@ export function ConfigPanel({
           }
         }
       }
-      setDraftModels(next);
+      handleModelsChange(next);
     }
     setDeleteModelConfirm(null);
   };
@@ -2318,10 +2352,12 @@ export function ConfigPanel({
   useEffect(() => {
     setDraftValues(normalizedConfig);
     setError(null);
+    setModelError(null);
   }, [normalizedConfig]);
 
   useEffect(() => {
     setDraftModels(storeAvailableModels.map((m) => ({ ...m, alias: m.alias || "" })));
+    setModelError(null);
   }, [storeAvailableModels]);
 
   const agentsFromConfig = useMemo<AgentEntry[]>(() => {
@@ -2483,6 +2519,12 @@ export function ConfigPanel({
     return () => cancelAnimationFrame(raf);
   }, [groups, initialExpandGroupTag]);
 
+  useEffect(() => {
+    if (configTab !== "model" && modelError) {
+      setModelError(null);
+    }
+  }, [configTab, modelError]);
+
   const totalItems = useMemo(() => groups.reduce((sum, group) => sum + group.keys.length, 0), [groups]);
   const topLevelGroupCount = groups.length;
   const hasConfigChanges = useMemo(() => {
@@ -2518,6 +2560,49 @@ export function ConfigPanel({
     () => draftModels.some((m) => !m.api_base.trim()),
     [draftModels],
   );
+
+  const agentModelReferencesLost = useMemo(() => {
+    if (!hasModelChanges) return [];
+    const lostReferences: { agentName: string; originalModel: string; newModel: string; changedFields: string[] }[] = [];
+    for (const agent of draftAgents) {
+      const matchedModel = draftModels.find(
+        (m) => m.model_name === agent.model.model
+          && m.model_provider === agent.model.provider
+          && m.api_base === agent.model.api_base
+      );
+      const originalMatched = storeAvailableModels.find(
+        (m) => m.model_name === agent.model.model
+          && m.model_provider === agent.model.provider
+          && m.api_base === agent.model.api_base
+      );
+      if (!matchedModel) {
+        if (originalMatched) {
+          lostReferences.push({
+            agentName: agent.name,
+            originalModel: `${originalMatched.model_name} (${originalMatched.model_provider})`,
+            newModel: agent.model.model ? `${agent.model.model} (${agent.model.provider})` : t('config.model.notSelected'),
+            changedFields: ['model_removed'],
+          });
+        }
+      } else if (originalMatched) {
+        const changedFields: string[] = [];
+        if (matchedModel.api_key !== originalMatched.api_key) changedFields.push('api_key');
+        if (matchedModel.alias !== originalMatched.alias) changedFields.push('alias');
+        if (matchedModel.is_default !== originalMatched.is_default) changedFields.push('is_default');
+        if (matchedModel.temperature !== originalMatched.temperature) changedFields.push('temperature');
+        if (matchedModel.timeout !== originalMatched.timeout) changedFields.push('timeout');
+        if (changedFields.length > 0) {
+          lostReferences.push({
+            agentName: agent.name,
+            originalModel: `${originalMatched.model_name} (${originalMatched.model_provider})`,
+            newModel: `${matchedModel.model_name} (${matchedModel.model_provider}) - ${changedFields.join(', ')} changed`,
+            changedFields,
+          });
+        }
+      }
+    }
+    return lostReferences;
+  }, [hasModelChanges, draftAgents, draftModels, storeAvailableModels, t]);
 
   const hasAgentsTeamsValidationError = useMemo(() => {
     for (const agent of draftAgents) {
@@ -2555,6 +2640,17 @@ export function ConfigPanel({
     if (error) {
       setError(null);
     }
+    if (modelError) {
+      setModelError(null);
+    }
+  };
+
+  const handleModelsChange = (models: ModelEntry[]) => {
+    setDraftModels(models);
+    setModelError(null);
+    if (error) {
+      setError(null);
+    }
   };
 
   const handleCancel = () => {
@@ -2566,21 +2662,25 @@ export function ConfigPanel({
     setDraftTeams(cached?.teams || []);
     setAgentsTeamsEdited(false);
     setError(null);
+    setModelError(null);
   };
 
 
   const handleSaveAndRestart = async () => {
     if (!hasChanges || saving) return;
     if (hasMissingRequiredModelFields) {
-      setError(t('config.errors.requiredModelFields', { fields: missingRequiredModelFields.join('、') }));
+      setConfigTab("model");
+      setModelError(t('config.errors.requiredModelFields', { fields: missingRequiredModelFields.join('、') }));
       return;
     }
     if (hasMissingModelApiKey) {
-      setError(t('config.modelList.apiKeyRequired'));
+      setConfigTab("model");
+      setModelError(t('config.modelList.apiKeyRequired'));
       return;
     }
     if (hasMissingModelApiBase) {
-      setError(t('config.modelList.apiBaseRequired'));
+      setConfigTab("model");
+      setModelError(t('config.modelList.apiBaseRequired'));
       return;
     }
     // alias 唯一性校验
@@ -2589,12 +2689,14 @@ export function ConfigPanel({
       const a = (m.alias || "").trim();
       if (!a) continue;
       if (aliasSeen.has(a)) {
-        setError(`Alias '${a}' is used by multiple models`);
+        setConfigTab("model");
+        setModelError(`Alias '${a}' is used by multiple models`);
         return;
       }
       aliasSeen.set(a, m.model_name);
       if (draftModels.some((other) => other !== m && other.model_name === a)) {
-        setError(`Alias '${a}' conflicts with model name '${a}'`);
+        setConfigTab("model");
+        setModelError(`Alias '${a}' conflicts with model name '${a}'`);
         return;
       }
     }
@@ -2602,30 +2704,36 @@ export function ConfigPanel({
     // 字段长度校验
     for (const m of draftModels) {
       if ((m.model_name || "").length > MAX_MODEL_NAME_LENGTH) {
-        setError(t("config.modelList.modelNameTooLong"));
+        setConfigTab("model");
+        setModelError(t("config.modelList.modelNameTooLong"));
         return;
       }
       if ((m.alias || "").length > MAX_ALIAS_LENGTH) {
-        setError(t("config.modelList.aliasTooLong"));
+        setConfigTab("model");
+        setModelError(t("config.modelList.aliasTooLong"));
         return;
       }
       if ((m.api_base || "").length > MAX_API_BASE_LENGTH) {
-        setError(t("config.modelList.apiBaseTooLong"));
+        setConfigTab("model");
+        setModelError(t("config.modelList.apiBaseTooLong"));
         return;
       }
       if ((m.api_key || "").length > MAX_API_KEY_LENGTH) {
-        setError(t("config.modelList.apiKeyTooLong"));
+        setConfigTab("model");
+        setModelError(t("config.modelList.apiKeyTooLong"));
         return;
       }
       // api_base URL 格式校验
       if (m.api_base && !validateBaseUrl(m.api_base)) {
-        setError(t("config.modelList.apiBaseUrlInvalid"));
+        setConfigTab("model");
+        setModelError(t("config.modelList.apiBaseUrlInvalid"));
         return;
       }
     }
 
     setSaving(true);
     setError(null);
+    setModelError(null);
     try {
       // 先保存多模型变更——若此步骤失败，后续成功弹窗不会弹出
       // 走 replace_all 一次性原子提交完整列表：避免按 model_name/index 多步 save+remove
@@ -2702,7 +2810,7 @@ export function ConfigPanel({
             <button
               type="button"
               onClick={() => void handleSaveAndRestart()}
-              disabled={!hasChanges || saving || hasMissingRequiredModelFields || hasMissingModelApiKey || hasMissingModelApiBase || hasAgentsTeamsValidationError || (isProcessing && mode !== 'team')}
+              disabled={!hasChanges || saving || hasMissingRequiredModelFields || hasMissingModelApiKey || hasMissingModelApiBase || hasAgentsTeamsValidationError || agentModelReferencesLost.length > 0 || (isProcessing && mode !== 'team')}
               className="btn primary !px-3 !py-1.5 disabled:opacity-50 disabled:cursor-not-allowed"
             >
               {saving ? t('common.saving') : t('common.save')}
@@ -2714,19 +2822,14 @@ export function ConfigPanel({
             {error}
           </div>
         ) : null}
-        {!error && hasMissingRequiredModelFields ? (
-          <div className="mb-4 rounded-md border border-[var(--border-danger)] bg-danger-subtle px-3 py-2 text-sm text-danger">
-            {t('config.requiredIncomplete')}: {missingRequiredModelFields.join('、')}
-          </div>
-        ) : null}
-        {!error && hasMissingModelApiBase ? (
-          <div className="mb-4 rounded-md border border-[var(--border-danger)] bg-danger-subtle px-3 py-2 text-sm text-danger">
-            {t('config.modelList.apiBaseRequired')}
-          </div>
-        ) : null}
         {!error && hasAgentsTeamsValidationError ? (
           <div className="mb-4 rounded-md border border-[var(--border-danger)] bg-danger-subtle px-3 py-2 text-sm text-danger">
             {t('config.agentsTeamsValidationError')}
+          </div>
+        ) : null}
+        {!error && agentModelReferencesLost.length > 0 ? (
+          <div className="mb-4 rounded-md border border-amber-500 bg-amber-50 dark:bg-amber-900/20 px-3 py-2 text-sm text-amber-700 dark:text-amber-300">
+            {t('config.model.referenceLostWarning')}: {agentModelReferencesLost.map((r) => r.agentName).join(', ')}
           </div>
         ) : null}
 
@@ -2759,6 +2862,26 @@ export function ConfigPanel({
             <div className="flex-1 min-h-0 overflow-auto pr-1 space-y-3 pt-1">
               {configTab === "model" ? (
                 <div role="tabpanel" aria-labelledby="config-tab-model" className="space-y-3 pb-2">
+                  {modelError ? (
+                    <div className="rounded-md border border-[var(--border-danger)] bg-danger-subtle px-3 py-2 text-sm text-danger">
+                      {modelError}
+                    </div>
+                  ) : null}
+                  {!modelError && hasMissingRequiredModelFields ? (
+                    <div className="rounded-md border border-[var(--border-danger)] bg-danger-subtle px-3 py-2 text-sm text-danger">
+                      {t('config.requiredIncomplete')}: {missingRequiredModelFields.join('、')}
+                    </div>
+                  ) : null}
+                  {!modelError && hasMissingModelApiKey ? (
+                    <div className="rounded-md border border-[var(--border-danger)] bg-danger-subtle px-3 py-2 text-sm text-danger">
+                      {t('config.modelList.apiKeyRequired')}
+                    </div>
+                  ) : null}
+                  {!modelError && hasMissingModelApiBase ? (
+                    <div className="rounded-md border border-[var(--border-danger)] bg-danger-subtle px-3 py-2 text-sm text-danger">
+                      {t('config.modelList.apiBaseRequired')}
+                    </div>
+                  ) : null}
                   <div
                     id="config-group-model_default"
                     className="rounded-xl border border-border bg-card/70 backdrop-blur-sm overflow-hidden shadow-sm"
@@ -2770,11 +2893,12 @@ export function ConfigPanel({
                     <div className="p-3">
                       <MultiModelSection
                         models={draftModels}
-                        onModelsChange={setDraftModels}
+                        onModelsChange={handleModelsChange}
                         onModelValidate={onModelValidate}
                         isConnected={isConnected}
                         agents={draftAgents}
                         onDeleteModel={handleDeleteModel}
+                        onClearExternalError={() => setModelError(null)}
                         t={t}
                       />
                     </div>
@@ -3061,6 +3185,7 @@ export function ConfigPanel({
           </div>
         </div>
       )}
+
     </div>
   );
 }

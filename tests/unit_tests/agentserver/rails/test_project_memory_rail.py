@@ -66,7 +66,7 @@ async def test_loads_jiuwenswarm_md_from_root():
     with tempfile.TemporaryDirectory() as td:
         root = Path(td)
         _touch(root, ".git/HEAD", "")
-        _touch(root, "JIUWENCLAW.md", "# test\nPROJECT RULE 1\n")
+        _touch(root, "JIUWENSWARM.md", "# test\nPROJECT RULE 1\n")
 
         rail = ProjectMemoryRail(workspace=str(root), language="en")
         agent = _make_agent_with_builder()
@@ -86,7 +86,7 @@ async def test_section_is_bilingual_with_localized_headers():
     with tempfile.TemporaryDirectory() as td:
         root = Path(td)
         _touch(root, ".git/HEAD", "")
-        _touch(root, "JIUWENCLAW.md", "BODY")
+        _touch(root, "JIUWENSWARM.md", "BODY")
 
         rail = ProjectMemoryRail(workspace=str(root), language="en")
         agent = _make_agent_with_builder()
@@ -103,8 +103,8 @@ async def test_merges_nested_project_memory_files():
     with tempfile.TemporaryDirectory() as td:
         root = Path(td)
         _touch(root, ".git/HEAD", "")
-        _touch(root, "JIUWENCLAW.md", "JIUWEN-CONTENT")
-        _touch(root, ".jiuwen/JIUWENCLAW.md", "NESTED-JIUWEN-CONTENT")
+        _touch(root, "JIUWENSWARM.md", "JIUWEN-CONTENT")
+        _touch(root, ".jiuwen/JIUWENSWARM.md", "NESTED-JIUWEN-CONTENT")
 
         rail = ProjectMemoryRail(workspace=str(root), language="cn")
         agent = _make_agent_with_builder()
@@ -121,8 +121,8 @@ async def test_local_takes_highest_priority_position():
     with tempfile.TemporaryDirectory() as td:
         root = Path(td)
         _touch(root, ".git/HEAD", "")
-        _touch(root, "JIUWENCLAW.md", "PROJECT-LINE")
-        _touch(root, "JIUWENCLAW.local.md", "LOCAL-LINE")
+        _touch(root, "JIUWENSWARM.md", "PROJECT-LINE")
+        _touch(root, "JIUWENSWARM.local.md", "LOCAL-LINE")
 
         rail = ProjectMemoryRail(workspace=str(root), language="en")
         agent = _make_agent_with_builder()
@@ -156,7 +156,7 @@ async def test_walk_up_from_subdir():
     with tempfile.TemporaryDirectory() as td:
         root = Path(td)
         _touch(root, ".git/HEAD", "")
-        _touch(root, "JIUWENCLAW.md", "ROOT-RULE")
+        _touch(root, "JIUWENSWARM.md", "ROOT-RULE")
         sub = root / "src" / "feature"
         sub.mkdir(parents=True)
 
@@ -174,7 +174,7 @@ async def test_refreshes_after_file_change():
     with tempfile.TemporaryDirectory() as td:
         root = Path(td)
         _touch(root, ".git/HEAD", "")
-        _touch(root, "JIUWENCLAW.md", "VERSION-1")
+        _touch(root, "JIUWENSWARM.md", "VERSION-1")
 
         rail = ProjectMemoryRail(workspace=str(root), language="en")
         agent = _make_agent_with_builder()
@@ -183,7 +183,7 @@ async def test_refreshes_after_file_change():
         body1 = agent.system_prompt_builder.added_sections[-1].content["en"]
         assert "VERSION-1" in body1
 
-        _touch(root, "JIUWENCLAW.md", "VERSION-2")
+        _touch(root, "JIUWENSWARM.md", "VERSION-2")
         await rail.before_model_call(ctx=MagicMock())
         body2 = agent.system_prompt_builder.added_sections[-1].content["en"]
         assert "VERSION-2" in body2
@@ -236,7 +236,7 @@ async def test_supports_include_directives():
         _touch(root, ".jiuwen/rules/shared.md", "SHARED-RULE")
         _touch(
             root,
-            "JIUWENCLAW.md",
+            "JIUWENSWARM.md",
             "ROOT-LINE\n@include .jiuwen/rules/shared.md\nTAIL-LINE\n",
         )
 
@@ -328,7 +328,7 @@ async def test_frontmatter_stripped():
         _touch(root, ".git/HEAD", "")
         _touch(
             root,
-            "JIUWENCLAW.md",
+            "JIUWENSWARM.md",
             "---\npaths: 'src/**'\nversion: 1\n---\nBODY-ONLY\n",
         )
 
@@ -348,7 +348,7 @@ async def test_frontmatter_at_end_of_file_stripped():
     with tempfile.TemporaryDirectory() as td:
         root = Path(td)
         _touch(root, ".git/HEAD", "")
-        _touch(root, "JIUWENCLAW.md", "---\nkey: v\n---")
+        _touch(root, "JIUWENSWARM.md", "---\nkey: v\n---")
 
         rail = ProjectMemoryRail(workspace=str(root), language="en")
         agent = _make_agent_with_builder()
@@ -367,7 +367,7 @@ async def test_uninit_clears_section():
     with tempfile.TemporaryDirectory() as td:
         root = Path(td)
         _touch(root, ".git/HEAD", "")
-        _touch(root, "JIUWENCLAW.md", "BEFORE-UNINIT")
+        _touch(root, "JIUWENSWARM.md", "BEFORE-UNINIT")
 
         rail = ProjectMemoryRail(workspace=str(root), language="en")
         agent = _make_agent_with_builder()
@@ -396,7 +396,7 @@ async def test_set_language_switches_active_language():
     with tempfile.TemporaryDirectory() as td:
         root = Path(td)
         _touch(root, ".git/HEAD", "")
-        _touch(root, "JIUWENCLAW.md", "BODY")
+        _touch(root, "JIUWENSWARM.md", "BODY")
 
         rail = ProjectMemoryRail(workspace=str(root), language="cn")
         rail.set_language("en")
@@ -418,14 +418,14 @@ async def test_loads_user_and_managed_rules(monkeypatch):
         user_root = Path(user_td)
         managed_root = Path(managed_td)
         _touch(root, ".git/HEAD", "")
-        _touch(user_root, "JIUWENCLAW.md", "USER-MEMORY")
+        _touch(user_root, "JIUWENSWARM.md", "USER-MEMORY")
         _touch(user_root, "rules/user_rule.md", "USER-RULE")
-        _touch(managed_root, "JIUWENCLAW.md", "MANAGED-MEMORY")
+        _touch(managed_root, "JIUWENSWARM.md", "MANAGED-MEMORY")
         _touch(managed_root, "rules/managed_rule.md", "MANAGED-RULE")
 
-        monkeypatch.setattr(_files_mod, "USER_MEMORY_FILES", (str(user_root / "JIUWENCLAW.md"),))
+        monkeypatch.setattr(_files_mod, "USER_MEMORY_FILES", (str(user_root / "JIUWENSWARM.md"),))
         monkeypatch.setattr(_files_mod, "USER_MEMORY_GLOBS", (str(user_root / "rules" / "*.md"),))
-        monkeypatch.setattr(_files_mod, "MANAGED_MEMORY_FILES", (str(managed_root / "JIUWENCLAW.md"),))
+        monkeypatch.setattr(_files_mod, "MANAGED_MEMORY_FILES", (str(managed_root / "JIUWENSWARM.md"),))
         monkeypatch.setattr(_files_mod, "MANAGED_MEMORY_GLOBS", (str(managed_root / "rules" / "*.md"),))
         _files_mod.clear_project_memory_cache()
 
@@ -447,7 +447,7 @@ async def test_additional_directories_load_project_memory():
         root = Path(td)
         extra = Path(extra_td)
         _touch(root, ".git/HEAD", "")
-        _touch(extra, "JIUWENCLAW.md", "EXTRA-PROJECT-RULE")
+        _touch(extra, "JIUWENSWARM.md", "EXTRA-PROJECT-RULE")
 
         rail = ProjectMemoryRail(
             workspace=str(root),
@@ -474,7 +474,7 @@ async def test_additional_directories_relative_to_workspace():
         root = base / "repo"
         extra = base / "shared-memory"
         _touch(root, ".git/HEAD", "")
-        _touch(extra, "JIUWENCLAW.md", "RELATIVE-EXTRA-RULE")
+        _touch(extra, "JIUWENSWARM.md", "RELATIVE-EXTRA-RULE")
 
         rail = ProjectMemoryRail(
             workspace=str(root),
@@ -494,7 +494,7 @@ async def test_b1_parent_set_workspace_does_not_break_path_resolution():
     with tempfile.TemporaryDirectory() as td:
         root = Path(td)
         _touch(root, ".git/HEAD", "")
-        _touch(root, "JIUWENCLAW.md", "STILL-WORKING")
+        _touch(root, "JIUWENSWARM.md", "STILL-WORKING")
 
         rail = ProjectMemoryRail(workspace="/nonexistent-stub-path", language="en")
         rail.set_workspace(_FakeWorkspace(root_path=str(root)))  # type: ignore[arg-type]
@@ -516,7 +516,7 @@ async def test_b1_no_workspace_falls_back_to_constructor_path():
     with tempfile.TemporaryDirectory() as td:
         root = Path(td)
         _touch(root, ".git/HEAD", "")
-        _touch(root, "JIUWENCLAW.md", "FROM-CTOR-PATH")
+        _touch(root, "JIUWENSWARM.md", "FROM-CTOR-PATH")
 
         rail = ProjectMemoryRail(workspace=str(root), language="en")
         assert rail.workspace is None
@@ -536,9 +536,9 @@ async def test_nested_worktree_skips_canonical_project_but_keeps_local(monkeypat
         worktree = canonical / ".jiuwen" / "worktrees" / "feature"
         _touch(canonical, ".git/HEAD", "")
         _touch(worktree, ".git/HEAD", "")
-        _touch(canonical, "JIUWENCLAW.md", "CANONICAL-PROJECT")
-        _touch(canonical, "JIUWENCLAW.local.md", "CANONICAL-LOCAL")
-        _touch(worktree, "JIUWENCLAW.md", "WORKTREE-PROJECT")
+        _touch(canonical, "JIUWENSWARM.md", "CANONICAL-PROJECT")
+        _touch(canonical, "JIUWENSWARM.local.md", "CANONICAL-LOCAL")
+        _touch(worktree, "JIUWENSWARM.md", "WORKTREE-PROJECT")
 
         monkeypatch.setattr(
             _files_mod,

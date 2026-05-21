@@ -134,6 +134,7 @@ from jiuwenswarm.server.runtime.skill.skill_manager import SkillManager
 from jiuwenswarm.server.runtime.agent_adapter.evolution_helpers import (
     EvolutionPushContext,
     TEAM_EVOLUTION_EVENT_TIMEOUT_SEC,
+    TEAM_EVOLUTION_HIDDEN_TERMINAL_STAGES,
     TEAM_EVOLUTION_IDLE_SLEEP_SEC,
     build_evolution_status_update,
     evolution_outcome_from_event,
@@ -143,6 +144,8 @@ from jiuwenswarm.server.runtime.agent_adapter.evolution_helpers import (
     push_evolution_progress,
     push_evolution_status,
     team_evolution_terminal_progress,
+    terminal_stage,
+    visible_evolution_progress_from_events,
 )
 from jiuwenswarm.agents.harness.common.tools.multimodal_config import (
     apply_audio_model_config_from_yaml,
@@ -158,6 +161,7 @@ from jiuwenswarm.agents.harness.common.tools import SendFileToolkit, SkillToolki
 from jiuwenswarm.agents.harness.common.tools.wiki_tools import wiki_ingest, wiki_query, wiki_lint
 from jiuwenswarm.agents.harness.common.tools.acp_output_tools import get_tools as get_acp_output_tools
 from jiuwenswarm.agents.harness.common.tools.multi_session_toolkits import MultiSessionToolkit
+from jiuwenswarm.agents.harness.common.tools.acp_chat import acp_chat
 from jiuwenswarm.agents.harness.common.tools.xiaoyi_phone_tools import (
     get_user_location,
     create_note,
@@ -501,6 +505,8 @@ class JiuWenClawDeepAdapter:
         self._registered_mcp_server_ids: set[str] = set()
         self._registered_mcp_servers: dict[str, McpServerConfig] = {}
         self._auto_harness_service: Optional[AutoHarnessService] = None
+        self._dreaming_started = False
+        self._dreaming_mode: str = "agent"
 
     def set_skill_manager(self, skill_manager: SkillManager) -> None:
         """Inject shared SkillManager from facade for tool reuse."""
@@ -2336,6 +2342,17 @@ class JiuWenClawDeepAdapter:
         except Exception as exc:
             logger.warning("[JiuWenClawDeepAdapter] skill tools registration failed: %s", exc)
 
+        # acp_chat: forward prompts to external stdio ACP agents (see acp_agents in config.yaml)
+        try:
+            acp_cfg = get_config().get("acp_agents")
+            if isinstance(acp_cfg, dict) and acp_cfg:
+                if not Runner.resource_mgr.get_tool(acp_chat.card.id):
+                    Runner.resource_mgr.add_tool(acp_chat)
+                tool_cards.append(acp_chat.card)
+                logger.info("[JiuWenClawDeepAdapter] acp_chat tool registered")
+        except Exception as exc:
+            logger.warning("[JiuWenClawDeepAdapter] acp_chat registration failed: %s", exc)
+
         return tool_cards
 
     def _build_cron_tools(self) -> list[Any]:
@@ -2366,6 +2383,7 @@ class JiuWenClawDeepAdapter:
         """
         await self.set_checkpoint()
 
+        self._dreaming_mode = mode if mode and mode.startswith("agent") else "agent"
         self._instance_overrides = dict(config or {}) if isinstance(config, dict) else {}
         load_dotenv(dotenv_path=get_env_file(), override=True)
         config_base = get_config()
@@ -4482,6 +4500,8 @@ class JiuWenClawDeepAdapter:
                         if isinstance(chunk.payload, dict)
                         else str(chunk.payload)
                     )
+                    if not content or not content.strip():
+                        continue
                     yield AgentResponseChunk(
                         request_id=rid,
                         channel_id=cid,
@@ -4491,6 +4511,13 @@ class JiuWenClawDeepAdapter:
                     continue
 
                 if chunk_type == "llm_output":
+                    content = (
+                        chunk.payload.get("content", "")
+                        if isinstance(chunk.payload, dict)
+                        else str(chunk.payload)
+                    )
+                    if not content or not content.strip():
+                        continue
                     has_streamed_content = True
                     if accumulated_reasoning:
                         yield AgentResponseChunk(
@@ -4503,11 +4530,6 @@ class JiuWenClawDeepAdapter:
                             is_complete=False,
                         )
                         accumulated_reasoning = ""
-                    content = (
-                        chunk.payload.get("content", "")
-                        if isinstance(chunk.payload, dict)
-                        else str(chunk.payload)
-                    )
                     yield AgentResponseChunk(
                         request_id=rid,
                         channel_id=cid,
@@ -4699,7 +4721,7 @@ class JiuWenClawDeepAdapter:
                     content = (
                         payload.get("content", "") if isinstance(payload, dict) else str(payload)
                     )
-                    if not content:
+                    if not content or not content.strip():
                         return None
                     return {"event_type": "chat.delta", "content": content}
 
@@ -4709,7 +4731,7 @@ class JiuWenClawDeepAdapter:
                         if isinstance(payload, dict)
                         else str(payload)
                     )
-                    if not content:
+                    if not content or not content.strip():
                         return None
                     return {"event_type": "chat.reasoning", "content": content}
 
@@ -4717,7 +4739,7 @@ class JiuWenClawDeepAdapter:
                     content = (
                         payload.get("content", "") if isinstance(payload, dict) else str(payload)
                     )
-                    if not content:
+                    if not content or not content.strip():
                         return None
                     return {"event_type": "chat.delta", "content": content}
 
@@ -4739,11 +4761,11 @@ class JiuWenClawDeepAdapter:
                         content = str(payload)
                         is_chunked = False
 
+                    if not content or not content.strip():
+                        return None
+
                     if _has_streamed_content and not is_chunked:
                         return {"event_type": "chat.final", "content": content}
-
-                    if not content:
-                        return None
                     if is_chunked:
                         return {"event_type": "chat.delta", "content": content}
                     return {"event_type": "chat.final", "content": content}
@@ -4822,8 +4844,8 @@ class JiuWenClawDeepAdapter:
                         return {
                             "event_type": "context.compressed",
                             "rate": payload.get("rate", 0),
-                            "before_compressed": payload.get("before_compressed"),
-                            "after_compressed": payload.get("after_compressed"),
+                            "before_compressed": payload.get("before_compressed") or 0,
+                            "after_compressed": payload.get("after_compressed") or 0,
                         }
                     return {"event_type": "context.compressed", "rate": 0}
 
@@ -4949,10 +4971,10 @@ class JiuWenClawDeepAdapter:
                     if "traceId" in payload or "invokeId" in payload:
                         return None
                     content = payload.get("content") or payload.get("output")
-                    if not content:
-                        return None
                 else:
                     content = str(payload)
+                if not content or not content.strip():
+                    return None
                 return {"event_type": "chat.delta", "content": content}
 
             if isinstance(chunk, dict):
@@ -5418,14 +5440,15 @@ class JiuWenClawDeepAdapter:
             if not getattr(self._skill_evolution_rail, "auto_scan", True):
                 return
 
-            await _push_status("start", "collecting", "Running evolution analysis...")
+            active = False
             last_event_at = time.monotonic()
 
             while True:
                 if self._skill_evolution_rail is None:
                     return
                 if not getattr(self._skill_evolution_rail, "auto_scan", True):
-                    await _push_status("end", "hidden", "")
+                    if active:
+                        await _push_status("end", "hidden", "")
                     await _cleanup_rail()
                     return
 
@@ -5433,10 +5456,6 @@ class JiuWenClawDeepAdapter:
                 if not events:
                     idle_for = time.monotonic() - last_event_at
                     if idle_for >= TEAM_EVOLUTION_EVENT_TIMEOUT_SEC:
-                        message = (
-                            f"Evolution analysis timed out after "
-                            f"{TEAM_EVOLUTION_EVENT_TIMEOUT_SEC:.0f}s without host events"
-                        )
                         logger.warning(
                             "[JiuWenClawDeepAdapter] evolution watcher timed out: "
                             "request_id=%s session_id=%s idle_for=%.1fs",
@@ -5444,12 +5463,26 @@ class JiuWenClawDeepAdapter:
                             session_id,
                             idle_for,
                         )
-                        await _push_status("end", "hidden", message)
+                        if active:
+                            message = (
+                                f"Evolution analysis timed out after "
+                                f"{TEAM_EVOLUTION_EVENT_TIMEOUT_SEC:.0f}s without host events"
+                            )
+                            await _push_status("end", "hidden", message)
                         await _cleanup_rail()
                         return
                     await asyncio.sleep(TEAM_EVOLUTION_IDLE_SLEEP_SEC)
                     continue
                 last_event_at = time.monotonic()
+
+                visible_progress_statuses = visible_evolution_progress_from_events(events)
+                just_started = False
+                if not active and visible_progress_statuses:
+                    start_stage = visible_progress_statuses[0].stage
+                    start_message = visible_progress_statuses[0].message
+                    await _push_status("start", start_stage, start_message)
+                    active = True
+                    just_started = True
 
                 await push_evolution_progress(
                     push_context,
@@ -5459,8 +5492,21 @@ class JiuWenClawDeepAdapter:
                     build_push_message=build_server_push_message,
                 )
 
+                progress_statuses_to_push = (
+                    visible_progress_statuses[1:]
+                    if just_started
+                    else visible_progress_statuses
+                )
+                for progress_status in progress_statuses_to_push:
+                    if progress_status.terminal:
+                        continue
+                    await _push_status("progress", progress_status.stage, progress_status.message)
+
                 approval_events = [evt for evt in events if is_evolution_approval_event(evt)]
                 if approval_events:
+                    if not active:
+                        await _push_status("start", "approval_required", "")
+                        active = True
                     for evt in approval_events:
                         await _push_approval(evt)
                     await _push_status("end", "approval_required", "")
@@ -5473,6 +5519,9 @@ class JiuWenClawDeepAdapter:
                     if is_evolution_outcome_event(evt)
                 ]
                 if outcomes:
+                    if not active:
+                        await _cleanup_rail()
+                        return
                     outcome = outcomes[-1]
                     stage = str(outcome.get("status") or "completed").strip().lower()
                     message = str(outcome.get("message") or "")
@@ -5494,12 +5543,22 @@ class JiuWenClawDeepAdapter:
                 ]
                 if terminal_progress:
                     terminal = terminal_progress[-1]
-                    terminal_stage = str(terminal.get("stage") or "no_evolution_generated")
-                    if terminal_stage in {"failed", "timed_out"}:
-                        terminal_stage = "hidden"
+                    end_stage = terminal_stage(terminal) or "no_evolution_generated"
+                    if end_stage in TEAM_EVOLUTION_HIDDEN_TERMINAL_STAGES:
+                        end_stage = "hidden"
+                    if not active and end_stage == "hidden":
+                        await _cleanup_rail()
+                        return
+                    if not active:
+                        await _push_status(
+                            "start",
+                            end_stage,
+                            str(terminal.get("message") or ""),
+                        )
+                        active = True
                     await _push_status(
                         "end",
-                        terminal_stage,
+                        end_stage,
                         str(terminal.get("message") or ""),
                     )
                     await _cleanup_rail()
@@ -5526,3 +5585,45 @@ class JiuWenClawDeepAdapter:
             task.result()
         except Exception as exc:
             logger.warning("[JiuWenClawDeepAdapter] evolution watcher task exception: %s", exc)
+
+    @staticmethod
+    def _is_approval_event(evt) -> bool:
+        """Check whether an OutputSchema event is an approval request."""
+        evt_type = getattr(evt, "type", "")
+        if evt_type == "chat.ask_user_question":
+            return True
+        if hasattr(evt, "payload") and isinstance(evt.payload, dict):
+            return evt.payload.get("event_type") == "chat.ask_user_question"
+        return False
+
+    async def try_start_dreaming(self, busy_checker: Callable[[], bool] | None = None) -> None:
+        if self._dreaming_started:
+            return
+        try:
+            from jiuwenclaw.agents.harness.common.memory.dreaming import start_dreaming
+            from jiuwenclaw.common.utils import get_agent_sessions_dir
+            sessions_dir = str(get_agent_sessions_dir() or "")
+            mode = getattr(self, "_dreaming_mode", "agent")
+            output_name = "memory" if mode == "agent" else "coding_memory"
+            base_dir = getattr(self, "_agent_workspace_dir", None) or self._workspace_dir
+            output_dir = os.path.join(base_dir, output_name)
+            orch = await start_dreaming(
+                sessions_dir=sessions_dir,
+                output_dir=output_dir,
+                mode=mode,
+                busy_checker=busy_checker,
+            )
+            self._dreaming_started = orch is not None
+        except Exception as exc:
+            logger.warning("[JiuWenClawDeepAdapter] start_dreaming failed: %s", exc)
+
+    async def try_stop_dreaming(self) -> None:
+        if not self._dreaming_started:
+            return
+        try:
+            from jiuwenclaw.agents.harness.common.memory.dreaming import stop_dreaming
+            mode = getattr(self, "_dreaming_mode", "agent")
+            await stop_dreaming(mode=mode)
+            self._dreaming_started = False
+        except Exception as exc:
+            logger.warning("[JiuWenClawDeepAdapter] stop_dreaming failed: %s", exc)

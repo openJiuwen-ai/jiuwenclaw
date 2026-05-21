@@ -31,10 +31,11 @@ export function shouldGapAfterEntry(entry: HistoryItem, compact: boolean): boole
     case "thinking":
       return !compact;
     case "system":
-    case "info":
     case "diff":
     case "command_echo":
       return false;
+    case "info":
+      return entry.meta?.view === "dim";
   }
 }
 

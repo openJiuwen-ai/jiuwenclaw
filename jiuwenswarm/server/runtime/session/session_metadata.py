@@ -27,6 +27,8 @@ _CACHE_LOCK = threading.Lock()
 
 # 会话标题自动生成的截取长度
 _TITLE_MAX_LEN = 50
+# 心跳任务会话目录前缀，不参与 session.list 等列表展示
+_HEARTBEAT_SESSION_PREFIX = "heartbeat_"
 _DELIVERY_KIND_SERVER_PUSH = "server_push"
 
 
@@ -393,6 +395,8 @@ def get_all_sessions_metadata(
             continue
 
         session_id = session_dir.name
+        if session_id.startswith(_HEARTBEAT_SESSION_PREFIX):
+            continue
         metadata = _read_metadata(session_id)
 
         if not metadata:

@@ -87,10 +87,11 @@ export class InfoMessageComponent implements Component {
       return renderGroupedHelpView(width, meta);
     }
 
+    const textColor = meta?.view === "dim" ? palette.text.dim : palette.text.info;
     const lines: string[] = [];
     const innerWidth = Math.max(1, width);
     const title = meta?.title ?? this.entry.content;
-    lines.push(...renderWrappedText(innerWidth, `· ${title}`, palette.text.info));
+    lines.push(...renderWrappedText(innerWidth, `· ${title}`, textColor));
     if (this.entry.mediaItems?.length) {
       lines.push(...renderMediaItems(width, this.entry.mediaItems));
     }

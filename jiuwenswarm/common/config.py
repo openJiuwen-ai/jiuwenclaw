@@ -874,8 +874,10 @@ def _resolve_front_team_agent_spec(
 def _build_modes_team_mapping(front_payload: dict[str, Any]) -> dict[str, Any]:
     agents_raw = _require_dict(front_payload.get("agents"), "agents")
     teams_raw = front_payload.get("team")
-    if not isinstance(teams_raw, list) or not teams_raw:
-        raise ValueError("team must be a non-empty array")
+    if teams_raw is None:
+        return {}
+    if not isinstance(teams_raw, list):
+        raise ValueError("team must be an array")
 
     team_mapping: dict[str, Any] = {}
     seen_team_names: set[str] = set()
@@ -910,11 +912,6 @@ def _build_modes_team_mapping(front_payload: dict[str, Any]) -> dict[str, Any]:
         teammate_agent_spec: dict[str, Any] | None = None
         if teammate_raw is not None:
             teammate_raw = _require_dict(teammate_raw, f"team[{team_index}].teammate")
-            transformed_team["teammate"] = {
-                key: teammate_raw[key]
-                for key in ("member_name", "display_name", "persona", "prompt_hint")
-                if key in teammate_raw
-            }
             teammate_agent_spec = _resolve_front_team_agent_spec(
                 agents_raw,
                 teammate_raw.get("agent_key"),
@@ -976,10 +973,23 @@ def replace_teams_in_config(front_payload: dict[str, Any]) -> None:
     """Replace ``modes.team`` using the frontend team-editor payload.
 
     Keep legacy top-level ``team`` config intact for backward compatibility.
+
+    If team array is empty, delete ``modes.team`` from config.
     """
     if not isinstance(front_payload, dict):
         raise ValueError("payload must be an object")
 
+    teams_raw = front_payload.get("team")
+
+    # 空数组：删除 modes.team 配置项
+    if isinstance(teams_raw, list) and not teams_raw:
+        data = _load_yaml_round_trip(_CONFIG_YAML_PATH)
+        if "modes" in data and isinstance(data["modes"], dict) and "team" in data["modes"]:
+            del data["modes"]["team"]
+            _dump_yaml_round_trip(_CONFIG_YAML_PATH, data)
+        return
+
+    # 非空数组：正常构建并保存
     team_mapping = _build_modes_team_mapping(front_payload)
 
     data = _load_yaml_round_trip(_CONFIG_YAML_PATH)

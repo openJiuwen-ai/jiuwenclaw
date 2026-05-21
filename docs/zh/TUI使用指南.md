@@ -70,7 +70,7 @@
 | `/evolve_list` | - | 列出某技能的演进条目 | `/evolve_list myskill --sort score` | `agent.plan` / `team` |
 | `/evolve_rebuild` | - | 从归档与演进记录重建 SKILL.md | `/evolve_rebuild myskill 强化错误处理` | `agent.plan` / `team` |
 | `/evolve_simplify` | - | 整理、合并某技能的演进经验 | `/evolve_simplify myskill 合并重复经验` | `agent.plan` / `team` |
-| `/init` | - | 在 **Code 模式** 下初始化 `JIUWENCLAW.md` / `JIUWENCLAW.local.md` | `/init` | **仅 `code.*`** |
+| `/init` | - | 在 **Code 模式** 下初始化 `JIUWENSWARM.md` / `JIUWENSWARM.local.md` | `/init` | **仅 `code.*`** |
 | `/mcp` | - | 管理 MCP 服务 | `/mcp list`、`/mcp add ...` | 全部 |
 | `/mode` | - | 切换或查看模式 | `/mode`、`/mode code` | 全部 |
 | `/permissions` | - | 设置 `permissions.tools` 中单工具的 allow/ask/deny | `/permissions ask write_file` | 全部 |
@@ -117,7 +117,7 @@
 - 必须在 `code.*` 下执行；否则提示先 `/mode code`。
 - 若当前为 `code.plan`，会自动切到 `code.normal` 以便写文件。
 - 需能解析工作目录：优先 `trustedDirs[0]`，否则 `process.cwd()`；无法解析时提示先 `/workspace set <path>`。
-- 交互选择范围：团队共享 `JIUWENCLAW.md`、个人 `JIUWENCLAW.local.md` 或两者；然后向后端发送编排提示（`logAsUser: false`）。
+- 交互选择范围：团队共享 `JIUWENSWARM.md`、个人 `JIUWENSWARM.local.md` 或两者；然后向后端发送编排提示（`logAsUser: false`）。
 - 详见 [Slash命令表.md](Slash命令表.md) 与源码 `init.ts`。
 
 #### `/diff` 与 `/compact`
@@ -373,7 +373,7 @@
 2. **划定可信目录**  
    ` /workspace add .` 或 ` /workspace set /path/to/repo`，确保 Agent 文件工具允许访问你的工程树。
 3. **（可选）项目级说明文件**  
-   在 `code.*` 下执行 ` /init`，按提示选择团队/个人/两者，生成 `JIUWENCLAW.md` 等；若从 `code.plan` 开始，命令会自动切到 `code.normal` 以便写入。
+   在 `code.*` 下执行 ` /init`，按提示选择团队/个人/两者，生成 `JIUWENSWARM.md` 等；若从 `code.plan` 开始，命令会自动切到 `code.normal` 以便写入。
 4. **日常编码对话**  
    直接描述需求；模型会通过白名单工具与编码记忆完成任务。
 5. **查看本轮改动**  

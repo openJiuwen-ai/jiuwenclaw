@@ -32,6 +32,62 @@ def test_evolution_helpers_parse_approval_and_outcome_events():
     assert evolution_helpers.extract_evolution_request_id(approval) == "team_skill_evolve_req1"
 
 
+def test_evolution_helpers_extract_request_id_from_evolution_meta():
+    progress = SimpleNamespace(
+        type="llm_reasoning",
+        payload={
+            "_evolution_meta": {
+                "event_kind": "progress",
+                "stage": "generating_updates",
+                "request_id": "team_skill_evolve_meta",
+            },
+            "content": "[Team Skill Evolution] generating",
+        },
+    )
+
+    assert evolution_helpers.extract_evolution_request_id(progress) == "team_skill_evolve_meta"
+
+
+@pytest.mark.parametrize(
+    ("raw_stage", "expected_stage", "expected_terminal"),
+    [
+        ("started", "detecting", False),
+        ("detecting_signals", "detecting", False),
+        ("staging", "generating", False),
+        ("generating_updates", "generating", False),
+        ("approval_required", "approval_required", False),
+        ("auto_approved", "completed", True),
+        ("cancelled", "hidden", True),
+        ("completed", "completed", True),
+        ("failed", "failed", True),
+    ],
+)
+def test_evolution_helpers_normalize_sdk_progress_stages(
+    raw_stage: str,
+    expected_stage: str,
+    expected_terminal: bool,
+):
+    progress = SimpleNamespace(
+        type="llm_reasoning",
+        payload={
+            "_evolution_meta": {
+                "event_kind": "progress",
+                "stage": raw_stage,
+                "request_id": "skill_evolve_req1",
+            },
+            "content": f"[Skill Evolution] {raw_stage}",
+        },
+    )
+
+    status = evolution_helpers.evolution_progress_status_from_event(progress)
+
+    assert status is not None
+    assert status.stage == expected_stage
+    assert status.message == f"[Skill Evolution] {raw_stage}"
+    assert status.request_id == "skill_evolve_req1"
+    assert status.terminal is expected_terminal
+
+
 @pytest.mark.parametrize("stage", ["failed", "timed_out"])
 def test_evolution_helpers_hide_failed_and_timed_out_team_status_updates(stage: str):
     update = evolution_helpers.team_evolution_end_update(
@@ -62,12 +118,62 @@ def test_evolution_helpers_map_noop_progress_to_no_evolution_generated():
 
     assert terminal == {
         "status": "completed",
-        "stage": "no_evolution_generated",
+        "stage": "no_evolution_no_signal",
         "message": "No evolution signals detected",
     }
     assert update.status == "end"
-    assert update.stage == "no_evolution_generated"
+    assert update.stage == "no_evolution_no_signal"
     assert update.message == "No evolution signals detected"
+
+
+@pytest.mark.parametrize(
+    ("content", "expected_stage"),
+    [
+        ("no skill usage of a regular skill detected", "no_evolution_no_skill"),
+        ("no actionable evolution signals detected", "no_evolution_no_signal"),
+        ("no evolution records generated", "no_evolution_no_records"),
+    ],
+)
+def test_evolution_helpers_map_noop_reasons_to_specific_stages(
+    content: str,
+    expected_stage: str,
+):
+    progress = SimpleNamespace(
+        type="llm_reasoning",
+        payload={
+            "_evolution_meta": {"event_kind": "progress", "stage": "completed"},
+            "content": content,
+        },
+    )
+
+    terminal = evolution_helpers.team_evolution_terminal_progress(progress)
+
+    assert terminal is not None
+    assert terminal["stage"] == expected_stage
+
+
+def test_evolution_helpers_map_cancelled_progress_to_hidden():
+    progress = SimpleNamespace(
+        type="llm_reasoning",
+        payload={
+            "_evolution_meta": {"event_kind": "progress", "stage": "cancelled"},
+            "content": "no skill usage of a regular skill detected",
+        },
+    )
+
+    terminal = evolution_helpers.team_evolution_terminal_progress(progress)
+    update = evolution_helpers.team_evolution_end_update(
+        "skill_evolve_req1",
+        terminal,
+    )
+
+    assert terminal == {
+        "status": "hidden",
+        "stage": "hidden",
+        "message": "no skill usage of a regular skill detected",
+    }
+    assert update.status == "end"
+    assert update.stage == "hidden"
 
 
 def test_evolution_helpers_group_approvals_skips_missing_request_ids():

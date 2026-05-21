@@ -6,9 +6,8 @@
 
 import { useTranslation } from 'react-i18next';
 import { useSessionStore } from '../../stores';
-import { useEffect, useState } from 'react';
+import { useEffect } from 'react';
 import { webRequest } from '../../services/webClient';
-import { HeartbeatMessageModal } from '../../features/HeartbeatMessageModal';
 import { TodoList } from '../TodoList';
 import { TeamArea } from '../TeamArea';
 import { TeamTaskEvents } from '../TeamTaskEvents';
@@ -24,14 +23,10 @@ export function ToolPanel() {
     isConnected,
     memoryUsage,
     setMemoryUsage,
-    heartbeatState,
-    heartbeatMessage,
-    heartbeatUpdatedAt,
     mode,
     teamTaskEvents,
     teamMembers,
   } = useSessionStore();
-  const [heartbeatModalOpen, setHeartbeatModalOpen] = useState(false);
 
   useEffect(() => {
     if (!isConnected) {
@@ -77,26 +72,6 @@ export function ToolPanel() {
     };
   }, [isConnected, setMemoryUsage]);
 
-  const hasHeartbeatMessage = Boolean(heartbeatMessage?.trim());
-  const heartbeatClassName =
-    heartbeatState === 'ok' || hasHeartbeatMessage
-      ? 'text-ok border-[var(--border-ok)] bg-ok-subtle'
-      : heartbeatState === 'alert'
-        ? 'text-danger border-[var(--border-danger)] bg-danger-subtle'
-        : 'text-text-muted border-border bg-secondary/40';
-
-  const heartbeatDetail = heartbeatUpdatedAt
-    ? new Date(heartbeatUpdatedAt).toLocaleTimeString(undefined, { hour12: false })
-    : '--:--:--';
-  const truncateMessage = (msg: string, maxLen: number = 10) => {
-    const trimmed = msg.trim();
-    if (trimmed.length <= maxLen) return trimmed;
-    return `${trimmed.slice(0, maxLen)}...`;
-  };
-  const heartbeatDisplayMessage = !heartbeatMessage
-    ? 'HEARTBEAT_UNKNOWN'
-    : truncateMessage(heartbeatMessage);
-  const canOpenHeartbeatModal = Boolean(heartbeatMessage);
   const memoryDisplay =
     memoryUsage.rssMb == null
       ? '--'
@@ -175,31 +150,6 @@ export function ToolPanel() {
               <span className="text-text-muted">{t('toolPanel.memoryUsage')}</span>
               <span className="mono text-text">{memoryDisplay}</span>
             </div>
-
-            <div className={`toolpanel-status-card__heartbeat ${heartbeatClassName}`}>
-              <div className="toolpanel-status-card__heartbeat-row">
-                <span>{t('toolPanel.message')}</span>
-                {canOpenHeartbeatModal ? (
-                  <button
-                    type="button"
-                    className="toolpanel-status-card__heartbeat-link mono"
-                    onClick={() => setHeartbeatModalOpen(true)}
-                  >
-                    {heartbeatDisplayMessage}
-                  </button>
-                ) : (
-                  <span className="toolpanel-status-card__heartbeat-value mono">
-                    {heartbeatDisplayMessage}
-                  </span>
-                )}
-              </div>
-              <div className="toolpanel-status-card__heartbeat-row">
-                <span>{t('toolPanel.time')}</span>
-                <span className="toolpanel-status-card__heartbeat-value mono">
-                  {heartbeatDetail}
-                </span>
-              </div>
-            </div>
           </div>
         </div>
 
@@ -213,11 +163,6 @@ export function ToolPanel() {
           </div>
         </div>
       </div>
-      <HeartbeatMessageModal
-        open={heartbeatModalOpen}
-        message={heartbeatMessage ?? ''}
-        onClose={() => setHeartbeatModalOpen(false)}
-      />
     </div>
   );
 }
