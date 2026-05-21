@@ -102,7 +102,7 @@ def search_skills(query):
             return None
 
         if response_data.get("errorCode") == "0" and "content" in response_data and "skills" in response_data["content"]:
-            formatted_data = format_skill_data(response_data["content"]["skills"])
+            formatted_data = response_data["content"]["skills"]
             formatted_data = [
                 skill for skill in formatted_data
                 if skill.get("skillId") not in ("find-skills", "skill-creator")

@@ -51,6 +51,7 @@ from jiuwenclaw.agentserver.skilldev_agent.meta_tools.external_tool_registry imp
     write_tool_usage_catalog,
 )
 from jiuwenclaw.agentserver.skilldev_agent.rails.context_engineering_rail import SkillDevContextEngineeringRail
+from jiuwenclaw.agentserver.skilldev_agent.utils.skill_search import search_skills
 
 logger = logging.getLogger(__name__)
 
@@ -381,7 +382,6 @@ class SkillDevDeepAdapter:
 
         # 如果需要进行skill检索，则检索skill并返回
         if params.get("enable_skill_search"):
-            from skilldev_agent.utils.skill_search import search_skills
             skills = search_skills(params.get("query"))
             if skills:
                 yield AgentResponseChunk(
