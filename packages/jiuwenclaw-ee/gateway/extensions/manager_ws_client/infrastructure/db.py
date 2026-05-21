@@ -1,6 +1,6 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2026-2026. All rights reserved
 
-"""Manager WS Client 数据库句柄；配置来自 .env / 环境变量（见 .env.example）。"""
+"""Manager WS Client 数据库句柄；配置来自仓库根 .env / 环境变量（见仓库根 .env.example）。"""
 
 from __future__ import annotations
 

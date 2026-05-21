@@ -1,3 +1,4 @@
+# Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 """Policy API routes (static policies only)."""
 
 from __future__ import annotations
@@ -7,9 +8,11 @@ import logging
 from fastapi import APIRouter
 from fastapi.responses import JSONResponse
 
+from jiuwenbox.logging_config import configure_logging
+
 router = APIRouter(tags=["policies"])
 
-logging.basicConfig(level=logging.INFO)
+configure_logging()
 logger = logging.getLogger(__name__)
 
 

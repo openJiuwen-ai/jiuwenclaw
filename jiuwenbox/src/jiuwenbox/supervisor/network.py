@@ -1,3 +1,4 @@
+# Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 """Network isolation via iptables rules inside an unshared network namespace.
 
 This module configures iptables rules within a sandbox network namespace.
@@ -7,18 +8,40 @@ from __future__ import annotations
 
 import ipaddress
 import logging
+import shutil
 import socket
 import subprocess
 from dataclasses import dataclass, field
+from functools import lru_cache
 
+from jiuwenbox.logging_config import configure_logging
 from jiuwenbox.models.policy import NetworkPolicy, NetworkMode, NetworkRulePolicy
 
-logging.basicConfig(level=logging.INFO)
+configure_logging()
 logger = logging.getLogger(__name__)
 
-IP_BINARY = "/usr/sbin/ip"
-IPTABLES_BINARY = "/usr/sbin/iptables"
-IP6TABLES_BINARY = "/usr/sbin/ip6tables"
+IP_BINARY = "ip"
+IPTABLES_BINARY = "iptables"
+IP6TABLES_BINARY = "ip6tables"
+IPTABLES_LEGACY_BINARY = "iptables-legacy"
+IP6TABLES_LEGACY_BINARY = "ip6tables-legacy"
+IPTABLES_NFT_BINARY = "iptables-nft"
+IP6TABLES_NFT_BINARY = "ip6tables-nft"
+
+
+class NetworkSetupError(RuntimeError):
+    """Raised when required network isolation setup fails."""
+
+
+def _format_command_error(cmd: list[str], result: subprocess.CompletedProcess) -> str:
+    details = [
+        f"Command '{' '.join(cmd)}' failed with exit code {result.returncode}.",
+    ]
+    if result.stderr:
+        details.append(f"stderr: {result.stderr.strip()}")
+    if result.stdout:
+        details.append(f"stdout: {result.stdout.strip()}")
+    return " ".join(details)
 
 
 @dataclass
@@ -91,6 +114,79 @@ def build_network_rules(policy: NetworkRulePolicy) -> ResolvedNetworkRules:
     return rules
 
 
+def _existing_binaries(paths: tuple[str, ...]) -> list[str]:
+    result: list[str] = []
+    for path in paths:
+        if path in result:
+            continue
+        if path.startswith("/") and not shutil.which(path):
+            continue
+        result.append(path)
+    return result
+
+
+def _iptables_candidates(ip_version: int) -> list[str]:
+    if ip_version == 6:
+        return _existing_binaries((
+            IP6TABLES_BINARY,
+            IP6TABLES_NFT_BINARY,
+            IP6TABLES_LEGACY_BINARY,
+        ))
+    return _existing_binaries((
+        IPTABLES_BINARY,
+        IPTABLES_NFT_BINARY,
+        IPTABLES_LEGACY_BINARY,
+    ))
+
+
+def _run_iptables_binary(
+    binary: str,
+    args: list[str],
+    *,
+    check: bool = True,
+    namespace: str | None = None,
+) -> subprocess.CompletedProcess:
+    cmd = [binary] + args
+    if namespace:
+        cmd = [IP_BINARY, "netns", "exec", namespace, *cmd]
+    logger.debug("%s: %s", binary, " ".join(cmd))
+    result = subprocess.run(cmd, capture_output=True, text=True, check=False)
+    if check and result.returncode != 0:
+        raise NetworkSetupError(_format_command_error(cmd, result))
+    return result
+
+
+@lru_cache(maxsize=128)
+def _select_iptables_binary(ip_version: int, namespace: str | None = None) -> str:
+    """Return a working iptables backend for the target namespace.
+
+    Some distributions default iptables to the nf_tables backend,
+    while older or constrained kernels only support legacy xtables. Probe both
+    and keep the sandbox creation failure explicit if neither backend works.
+    """
+    failures: list[str] = []
+    for binary in _iptables_candidates(ip_version):
+        result = _run_iptables_binary(
+            binary,
+            ["-L", "OUTPUT", "-n"],
+            check=False,
+            namespace=namespace,
+        )
+        if result.returncode == 0:
+            return binary
+        failures.append(_format_command_error(
+            [IP_BINARY, "netns", "exec", namespace, binary, "-L", "OUTPUT", "-n"]
+            if namespace
+            else [binary, "-L", "OUTPUT", "-n"],
+            result,
+        ))
+
+    family = "IPv6" if ip_version == 6 else "IPv4"
+    target = f" in netns {namespace}" if namespace else ""
+    detail = " ".join(failures) if failures else "No iptables binary found."
+    raise NetworkSetupError(f"No working {family} iptables backend{target}. {detail}")
+
+
 def _run_iptables(
     args: list[str],
     check: bool = True,
@@ -98,12 +194,23 @@ def _run_iptables(
     ip_version: int = 4,
 ) -> subprocess.CompletedProcess:
     """Run an iptables/ip6tables command."""
-    binary = IP6TABLES_BINARY if ip_version == 6 else IPTABLES_BINARY
-    cmd = [binary] + args
-    if namespace:
-        cmd = [IP_BINARY, "netns", "exec", namespace, *cmd]
-    logger.debug("%s: %s", binary, " ".join(cmd))
-    return subprocess.run(cmd, capture_output=True, text=True, check=check)
+    binary = _select_iptables_binary(ip_version, namespace)
+    return _run_iptables_binary(binary, args, check=check, namespace=namespace)
+
+
+def run_iptables(
+    args: list[str],
+    check: bool = True,
+    namespace: str | None = None,
+    ip_version: int = 4,
+) -> subprocess.CompletedProcess:
+    """Run an iptables/ip6tables command for callers outside this module."""
+    return _run_iptables(
+        args,
+        check=check,
+        namespace=namespace,
+        ip_version=ip_version,
+    )
 
 
 def _ip_version(value: str) -> int:
@@ -118,11 +225,15 @@ def _run_iptables_for_ip(
     namespace: str | None = None,
 ) -> subprocess.CompletedProcess:
     """Run a firewall rule in the table matching the IP/CIDR version."""
+    ip_version = _ip_version(ip_value)
+    if ip_version == 6 and not _ip6tables_available(namespace):
+        return subprocess.CompletedProcess(args=[], returncode=0, stdout="", stderr="")
+
     return _run_iptables(
         args,
         check=check,
         namespace=namespace,
-        ip_version=_ip_version(ip_value),
+        ip_version=ip_version,
     )
 
 
@@ -133,7 +244,31 @@ def _run_iptables_both(
 ) -> None:
     """Run a protocol-agnostic firewall rule for both IPv4 and IPv6."""
     _run_iptables(args, check=check, namespace=namespace, ip_version=4)
-    _run_iptables(args, check=check, namespace=namespace, ip_version=6)
+    if _ip6tables_available(namespace):
+        _run_iptables(args, check=check, namespace=namespace, ip_version=6)
+
+
+@lru_cache(maxsize=128)
+def _ip6tables_available(namespace: str | None = None) -> bool:
+    """Return whether ip6tables can manage rules in the target namespace."""
+    try:
+        result = _run_iptables(
+            ["-L", "OUTPUT", "-n"],
+            check=False,
+            namespace=namespace,
+            ip_version=6,
+        )
+    except (OSError, NetworkSetupError) as exc:
+        logger.warning("Skipping IPv6 firewall rules because ip6tables is unavailable: %s", exc)
+        return False
+
+    if result.returncode == 0:
+        return True
+
+    target = f" in netns {namespace}" if namespace else ""
+    stderr = result.stderr.strip() or result.stdout.strip() or f"exit code {result.returncode}"
+    logger.warning("Skipping IPv6 firewall rules%s because ip6tables is unavailable: %s", target, stderr)
+    return False
 
 
 def _run_ip(

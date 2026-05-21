@@ -1,21 +1,34 @@
-# Policy schema version. Currently only version 1 is supported.
-version: 1
+# Yuanrong (Edge/Remote) configuration.
+# This file extends the default policy with inference privacy proxy enabled.
+# The proxy runs on the edge server and routes LLM API requests.
 
-# Human-readable policy name shown by the server policy API.
-name: "server-default"
+version: 1
+name: "yuanrong-default"
 
 # Host directory used for server-managed sandbox backing storage.
-sandbox_workspace: "/tmp/sandbox"
+sandbox_workspace: "/sandbox"
 
 # Filesystem access rules. Paths are sandbox-visible absolute paths.
 filesystem_policy:
+  # Lifecycle directories to create for the sandbox and bind into the sandbox path.
+  # Items may be either:
+  #   - "/path": create a server-managed directory with default permissions
+  #   - path: "/path"
+  #     permissions: "0755"  # optional octal permissions applied on the backing directory
+  # The permissions value may be quoted or numeric, but quoted octal strings are recommended.
+  # Paths must be absolute sandbox-visible paths. Directories persist for the sandbox
+  # lifecycle and are removed when the sandbox is deleted. Access is still controlled
+  # by the directory permissions and Landlock.
   directories:
+    - path: "/home"
+      permissions: "0777"
     - path: "/tmp"
       permissions: "1777"
 
   # Read-only paths inside the sandbox. These entries grant read permission only;
   # they do not mount host paths by themselves.
   read_only:
+    - "/"
     - "/bin"
     - "/sbin"
     - "/usr"
@@ -27,8 +40,8 @@ filesystem_policy:
   # Read-write paths inside the sandbox. Use directories or bind_mounts to make
   # these paths exist in the sandbox.
   read_write:
+    - "/home"
     - "/tmp"
-    - "/home/USER/.jiuwenclaw"
 
   # Extra bind mounts from host into sandbox.
   # Each item uses:
@@ -66,15 +79,22 @@ filesystem_policy:
     - host_path: "/etc/ssl/certs"
       sandbox_path: "/etc/ssl/certs"
       mode: "ro"
-    - host_path: "/etc/ssl/openssl.cnf"
-      sandbox_path: "/etc/ssl/openssl.cnf"
+    - host_path: "/etc/pki"
+      sandbox_path: "/etc/pki"
       mode: "ro"
     - host_path: "/opt"
       sandbox_path: "/opt"
       mode: "ro"
-    - host_path: "/home/USER/.jiuwenclaw"
-      sandbox_path: "/home/USER/.jiuwenclaw"
-      mode: "rw"
+
+  # Device nodes to expose inside the sandbox with bwrap --dev-bind.
+  # Each item uses:
+  #   host_path: absolute device path on the host
+  #   sandbox_path: absolute path visible inside the sandbox
+  device:
+    - host_path: "/dev/urandom"
+      sandbox_path: "/dev/urandom"
+    - host_path: "/dev/null"
+      sandbox_path: "/dev/null"
 
 # Process identity inside the sandbox.
 process:
@@ -89,7 +109,7 @@ namespace:
   # user:
   #   true: create a new user namespace
   #   false: reuse the current user namespace
-  user: false
+  user: true
 
   # pid:
   #   true: create a new PID namespace
@@ -129,36 +149,68 @@ landlock:
 
 # Seccomp syscall filtering.
 syscall:
-  # Syscall names to block. Leave empty to disable explicit syscall blocking.
-  blocked:
-    - "kexec_load"
-    - "kexec_file_load"
-    - "reboot"
-    - "pivot_root"
-    - "swapon"
-    - "swapoff"
-    - "nfsservctl"
-    - "lookup_dcookie"
-    - "ptrace"
-    - "mount"
-    - "umount2"
-    - "unshare"
-    - "setns"
-    - "userfaultfd"
-    - "perf_event_open"
-    - "bpf"
-    - "add_key"
-    - "request_key"
-    - "keyctl"
-    - "io_uring_setup"
-    - "io_uring_enter"
-    - "io_uring_register"
-    - "open_by_handle_at"
-    - "name_to_handle_at"
-    - "init_module"
-    - "finit_module"
-    - "delete_module"
-    - "acct"
+  # Syscall names to block on x86_64. Leave empty to disable explicit syscall blocking.
+  x86_64:
+    blocked:
+      - "kexec_load"
+      - "kexec_file_load"
+      - "reboot"
+      - "pivot_root"
+      - "swapon"
+      - "swapoff"
+      - "nfsservctl"
+      - "lookup_dcookie"
+      - "ptrace"
+      - "mount"
+      - "umount2"
+      - "unshare"
+      - "setns"
+      - "userfaultfd"
+      - "perf_event_open"
+      - "bpf"
+      - "add_key"
+      - "request_key"
+      - "keyctl"
+      - "io_uring_setup"
+      - "io_uring_enter"
+      - "io_uring_register"
+      - "open_by_handle_at"
+      - "name_to_handle_at"
+      - "init_module"
+      - "finit_module"
+      - "delete_module"
+      - "acct"
+  # Syscall names to block on arm64/aarch64.
+  arm64:
+    blocked:
+      - "kexec_load"
+      - "kexec_file_load"
+      - "reboot"
+      - "pivot_root"
+      - "swapon"
+      - "swapoff"
+      - "nfsservctl"
+      - "lookup_dcookie"
+      - "ptrace"
+      - "mount"
+      - "umount2"
+      - "unshare"
+      - "setns"
+      - "userfaultfd"
+      - "perf_event_open"
+      - "bpf"
+      - "add_key"
+      - "request_key"
+      - "keyctl"
+      - "io_uring_setup"
+      - "io_uring_enter"
+      - "io_uring_register"
+      - "open_by_handle_at"
+      - "name_to_handle_at"
+      - "init_module"
+      - "finit_module"
+      - "delete_module"
+      - "acct"
 
 # Network policy. Egress controls outbound traffic; ingress controls inbound traffic.
 network:
@@ -227,8 +279,54 @@ network:
 
     # TCP destination ports allowed for inbound traffic when default is deny.
     allowed_ports:
-      - 8080
+      - 8322
 
     # TCP destination ports blocked for inbound traffic. Block rules take precedence.
     blocked_ports:
       - 22
+
+# Inference privacy proxy configuration.
+# Single listen_port. Each route defines a path prefix representing a forward rule.
+#
+# The proxy runs on the edge server. Clients connect to:
+#   http://<listening_host>:<listening_port>/<path_prefix>/<api_path>
+#     ==>
+#   <target_endpoint>/<api_path>
+#
+# API key injection:
+#   OpenAI format:    "Authorization: Bearer <placeholder>"
+#     ==> "Authorization: Bearer sk_sandbox_managed_key"
+#   Anthropic format: "X-Api-Key: <placeholder>"
+#     ==> "X-Api-Key: sk_sandbox_managed_key"
+#
+# Example jiuwenclaw config:
+#   api_base: http://192.168.1.100:9000/v1/   ==>  http://127.0.0.1:8322/llm_proxy/v1/
+#   api_key:  sk-real_key   ==>  sk-fake_key
+
+inference_privacy_proxies:
+  listen_host: "0.0.0.0"  # MUST, bind to all interfaces for edge server access
+  listen_port: 8322  # MUST, set to enable proxy. 0 or omit to disable.
+  
+  # OPTIONAL: here starts example forwarding rule.
+  # routes can be configured with REST API dynamically instead.
+  routes:
+    # example OpenAI API route
+    - path_prefix: "openai"
+      target_endpoint: "https://api.openai.com"
+      api_key: "sk_sandbox_managed_key"  # Set your sandbox-managed API key here
+      # example:
+      # curl -X POST http://127.0.0.1:8322/openai/v1/chat/completions \
+      #   -H "Authorization: Bearer sk_fake_key" ...
+      # ==> https://api.openai.com/v1/chat/completions \
+      #   -H "Authorization: Bearer sk_sandbox_managed_key" ...
+
+    # example Custom LLM endpoint
+    - path_prefix: "custom"
+      target_endpoint: "http://192.168.1.100:9000"
+      api_key: "sk_sandbox_managed_key"
+      skip_cert_verify: false # for self_signed cert server, debug only
+      # example:
+      # curl -X POST http://127.0.0.1:8322/custom/v1/chat/completions \
+      #   -H "Authorization: Bearer sk_fake_key" ...
+      # ==> http://192.168.1.100:9000/v1/chat/completions
+      #   -H "Authorization: Bearer sk_sandbox_managed_key" ...

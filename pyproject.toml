@@ -52,6 +52,7 @@ dependencies = [
     "openjiuwen_deepsearch @ git+https://gitcode.com/openJiuwen/deepsearch.git@enterprise_dev",
     "pypandoc",
     "markdown",
+    "jiuwenclaw-manager",
 ]
 
 [project.optional-dependencies]

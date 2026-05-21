@@ -6,7 +6,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 
 class ModelTemplateUpdateRequest(BaseModel):
-    display_name: str | None = Field(default=None, max_length=128)
+    template_name: str | None = Field(default=None, max_length=128)
     description: str | None = Field(default=None, max_length=512)
     model_type: str | list[str] | None = None
     model_tags: list[str] | None = None
@@ -20,5 +20,16 @@ class ModelTemplateUpdateRequest(BaseModel):
     enable_streaming: bool | None = None
     enable_function_calling: bool | None = None
     verify_ssl: bool | None = None
+    enabled: bool | None = None
+    data: dict[str, Any] | None = None
+
+
+class ExtensionConfigTemplateUpdateRequest(BaseModel):
+    template_name: str | None = Field(default=None, max_length=128)
+    description: str | None = Field(default=None, max_length=512)
+    component: str | None = Field(default=None, max_length=32)
+    hook_type: str | None = Field(default=None, max_length=32)
+    hook_config: dict[str, Any] | None = None
+    custom_config: dict[str, Any] | None = None
     enabled: bool | None = None
     data: dict[str, Any] | None = None

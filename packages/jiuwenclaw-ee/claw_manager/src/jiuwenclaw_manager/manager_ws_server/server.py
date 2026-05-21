@@ -7,6 +7,7 @@ import json
 import os
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from collections.abc import Callable
 from typing import Any
 
 from jiuwenclaw_manager.infrastructure.logger import get_logger
@@ -314,6 +315,13 @@ def get_manager_ws_server() -> ManagerWsServer | None:
     return _ws_server
 
 
+def _require_ws_server() -> ManagerWsServer:
+    ws_server = get_manager_ws_server()
+    if ws_server is None:
+        raise ValueError("manager_ws_server is not running")
+    return ws_server
+
+
 def _revision_now() -> str:
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
@@ -323,12 +331,9 @@ async def push_to_instance(
     *,
     config: dict[str, Any],
     revision: str | None = None,
-    server: ManagerWsServer | None = None,
 ) -> dict[str, Any]:
     """向已注册 ``instance_id`` 的 Gateway 连接推送 config.push，等待 ack 并返回 ack payload。"""
-    ws_server = server if server is not None else _ws_server
-    if ws_server is None:
-        raise ValueError("manager_ws_server is not running")
+    ws_server = _require_ws_server()
     rev = revision or _revision_now()
     try:
         return await ws_server.push_config_to_instance_and_wait_ack(
@@ -345,3 +350,80 @@ async def push_to_instance(
                 "ensure manager_ws_client is connected (restart gateway after claw-manager restart)"
             ) from exc
         raise
+
+
+def _no_gateway_connected_error() -> ValueError:
+    return ValueError(
+        "no gateway websocket connected; registered_instances=[]; "
+        "ensure each gateway manager_ws_client is connected "
+        "(restart gateway after claw-manager restart)"
+    )
+
+
+def _adapt_payload_for_instance(
+    instance_id: str,
+    payload: dict[str, Any],
+) -> dict[str, Any]:
+    """为指定实例复制 payload，并写入顶层 ``jiuwenclaw_id``。"""
+    body = dict(payload)
+    body["jiuwenclaw_id"] = instance_id
+    return body
+
+
+async def push_config_op(
+    instance_id: str,
+    config_section: str,
+    payload: dict[str, Any],
+    *,
+    revision: str | None = None,
+) -> dict[str, Any]:
+    """向指定 ``instance_id`` 的 Gateway 推送配置变更（``config[config_section] = payload``）。"""
+    normalized = str(instance_id or "").strip()
+    if not normalized:
+        raise ValueError("instance_id is required")
+    section = str(config_section or "").strip()
+    if not section:
+        raise ValueError("config_section is required")
+    body = dict(payload)
+    body["jiuwenclaw_id"] = normalized
+    return await push_to_instance(
+        normalized,
+        config={section: body},
+        revision=revision,
+    )
+
+
+async def push_config_op_to_all(
+    config_section: str,
+    payload: dict[str, Any],
+    *,
+    adapt_payload: Callable[[str, dict[str, Any]], dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    """向所有已注册 Gateway 下发配置变更（逐实例独立 revision 等待 ack）。"""
+    ws_server = _require_ws_server()
+    instance_ids = await ws_server.list_registered_instance_ids()
+    if not instance_ids:
+        raise _no_gateway_connected_error()
+
+    section = str(config_section or "").strip()
+    if not section:
+        raise ValueError("config_section is required")
+
+    base_rev = _revision_now()
+    last_ack: dict[str, Any] | None = None
+    for iid in instance_ids:
+        if adapt_payload is not None:
+            body = adapt_payload(iid, payload)
+        else:
+            body = _adapt_payload_for_instance(iid, payload)
+        last_ack = await push_config_op(
+            iid,
+            section,
+            body,
+            revision=f"{base_rev}:{iid}",
+        )
+    return {
+        "pushed_instances": instance_ids,
+        "pushed_count": len(instance_ids),
+        "last_ack": last_ack,
+    }

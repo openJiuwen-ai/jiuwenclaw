@@ -31,11 +31,6 @@ async def lifespan(application: FastAPI):
     await init_all_tables(db_handler)
     stop = asyncio.Event()
     scan_task = asyncio.create_task(run_heartbeat_scan_loop(stop, db_handler))
-    consumer_task: asyncio.Task[None] | None = None
-    if settings.rabbitmq_url:
-        from jiuwenclaw_manager.consumers.event_consumer import start_consumer
-
-        consumer_task = asyncio.create_task(start_consumer(db_handler))
     GatewayHttpClient.init(timeout=httpx.Timeout(settings.upstream_http_timeout_seconds))
     manager_ws_server = None
     if settings.manager_ws_enabled:
@@ -44,10 +39,8 @@ async def lifespan(application: FastAPI):
         manager_ws_server = ManagerWsServer(
             host=settings.manager_ws_host,
             port=settings.manager_ws_port,
-            manager_id=settings.manager_id,
         )
         await manager_ws_server.start()
-        application.state.manager_ws_server = manager_ws_server
         from jiuwenclaw_manager.manager_ws_server.server import set_manager_ws_server
 
         set_manager_ws_server(manager_ws_server)
@@ -55,8 +48,6 @@ async def lifespan(application: FastAPI):
         "startup",
         version=__version__,
         db=database_config_summary(),
-        rabbitmq=bool(settings.rabbitmq_url),
-        rabbitmq_url=settings.rabbitmq_url,
         manager_ws=(
             f"ws://{settings.manager_ws_host}:{settings.manager_ws_port}"
             if settings.manager_ws_enabled
@@ -70,12 +61,6 @@ async def lifespan(application: FastAPI):
         await scan_task
     except asyncio.CancelledError:
         pass
-    if consumer_task is not None:
-        consumer_task.cancel()
-        try:
-            await consumer_task
-        except asyncio.CancelledError:
-            pass
     if manager_ws_server is not None:
         from jiuwenclaw_manager.manager_ws_server.server import set_manager_ws_server
 
