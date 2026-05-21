@@ -41,6 +41,7 @@ from jiuwenclaw.e2a.wire_codec import (
     encode_agent_response_for_wire,
     encode_json_parse_error_wire,
 )
+from jiuwenclaw.request_ext import lift_from_metadata as _tp_lift, reset_ext as _tp_reset
 from jiuwenclaw.schema.agent import AgentRequest, AgentResponse, AgentResponseChunk
 from jiuwenclaw.schema.hook_event import AgentServerHookEvents
 from jiuwenclaw.agentserver.extensions import get_rail_manager
@@ -431,6 +432,7 @@ class AgentWebSocketServer:
             request.is_stream,
         )
 
+        _ext_token = _tp_lift(request.metadata)
         try:
             from jiuwenclaw.schema.message import ReqMethod
 
@@ -537,6 +539,8 @@ class AgentWebSocketServer:
             )
             async with send_lock:
                 await ws.send(json.dumps(wire, ensure_ascii=False))
+        finally:
+            _tp_reset(_ext_token)
 
     @staticmethod
     async def _trigger_before_ws_server_start_hook() -> None:

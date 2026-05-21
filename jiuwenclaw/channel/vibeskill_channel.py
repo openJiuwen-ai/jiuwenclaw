@@ -25,6 +25,11 @@ from jiuwenclaw.channel.vibeskill_session import (
 )
 
 from jiuwenclaw.channel.vibeskill_file_utils import skilldev_tree_to_file_tree_nodes
+from jiuwenclaw.request_ext import (
+    attach_to_metadata as _ext_attach,
+    build_ext_from_source as _ext_build,
+    set_current as _ext_set,
+)
 from jiuwenclaw.schema.message import Message, ReqMethod
 
 logger = logging.getLogger(__name__)
@@ -174,7 +179,16 @@ class VibeSkillChannel(BaseChannel):
                     await ws.close(code=1008, reason="authentication failed")
                     return
                 logger.info("[Auth] ws check ok")
-                
+
+            # 抽取扩展字段（按 JIUWENCLAW_REQUEST_EXT_FORWARD_HEADERS）写入 ContextVar。
+            # 本 WS 连接的所有 Message 构造在同一 asyncio 任务内可通过
+            # attach_to_metadata() 自动附到 metadata。
+            try:
+                _conn_ext = _ext_build(dict(request.headers)) or _ext_build(query_params)
+            except Exception:
+                _conn_ext = None
+            _ext_set(_conn_ext)
+
             self._clients.add(ws)
             logger.info(f"[VibeSkillChannel] Clients: {len(self._clients)}")
 
@@ -551,7 +565,7 @@ class VibeSkillChannel(BaseChannel):
         metadata_dict = {}
         if external_session_id:
             metadata_dict[_VIBESKILL_ORIGINAL_SESSION_ID_KEY] = external_session_id
-        msg_metadata = metadata_dict if metadata_dict else None
+        msg_metadata = _ext_attach(metadata_dict if metadata_dict else None)
 
         # 构建 Message 并直接发送到 MessageHandler
         msg = Message(
@@ -608,7 +622,7 @@ class VibeSkillChannel(BaseChannel):
             ok=True,
             req_method=ReqMethod.SKILLDEV_PARSE_SKILL,
             is_stream=True,
-            metadata={_VIBESKILL_ORIGINAL_SESSION_ID_KEY: session_id},
+            metadata=_ext_attach({_VIBESKILL_ORIGINAL_SESSION_ID_KEY: session_id}),
         )
         logger.info(
             "[VibeSkillChannel] skilldev.parse_skill sent, session_id=%s",
@@ -679,7 +693,9 @@ class VibeSkillChannel(BaseChannel):
         if agent:
             params["agent"] = agent
 
-        msg_metadata = {_VIBESKILL_ORIGINAL_SESSION_ID_KEY: external_session_id} if external_session_id else None
+        msg_metadata = _ext_attach(
+            {_VIBESKILL_ORIGINAL_SESSION_ID_KEY: external_session_id} if external_session_id else None
+        )
 
         # 构建 Message 并通过 MessageHandler 发送到 AgentServer
         msg = Message(
@@ -1379,7 +1395,9 @@ class VibeSkillChannel(BaseChannel):
             ok=True,
             req_method=ReqMethod.SKILLDEV_RESPOND,
             is_stream=True,
-            metadata={_VIBESKILL_ORIGINAL_SESSION_ID_KEY: external_session_id} if external_session_id else None,
+            metadata=_ext_attach(
+                {_VIBESKILL_ORIGINAL_SESSION_ID_KEY: external_session_id} if external_session_id else None
+            ),
         )
         logger.info(
             "[VibeSkillChannel] skilldev.respond sent, session_id=%s",
@@ -1554,6 +1572,7 @@ class VibeSkillChannel(BaseChannel):
                     ok=True,
                     req_method=ReqMethod.SKILLDEV_CANCEL,
                     is_stream=True,
+                    metadata=_ext_attach(None),
                 )
                 logger.info(
                     "[VibeSkillChannel] skilldev.cancel sent, session_id=%s",

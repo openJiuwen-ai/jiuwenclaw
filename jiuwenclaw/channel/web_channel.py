@@ -24,6 +24,11 @@ import aiohttp
 from jiuwenclaw.agentserver.session_metadata import get_resolved_project_dir
 from jiuwenclaw.utils import get_agent_sessions_dir
 from jiuwenclaw.channel.base import BaseChannel, ChannelMetadata, RobotMessageRouter
+from jiuwenclaw.request_ext import (
+    attach_to_metadata as _ext_attach,
+    build_ext_from_source as _ext_build,
+    set_current as _ext_set,
+)
 from jiuwenclaw.security.ws_origin import (
     extract_handshake_request,
     forbidden_origin_response,
@@ -431,6 +436,13 @@ class WebChannel(BaseChannel):
         self._clients.add(ws)
         logger.info(f"WebChannel 新连接: remote={remote} query={query}")
 
+        # 抽取扩展字段（按 JIUWENCLAW_REQUEST_EXT_FORWARD_HEADERS）写入 ContextVar。
+        try:
+            _conn_ext = _ext_build(query)
+        except Exception:
+            _conn_ext = None
+        _ext_set(_conn_ext)
+
         # 触发连接钩子（如发送 connection.ack）
         for hook in self._connect_hooks:
             try:
@@ -500,7 +512,7 @@ class WebChannel(BaseChannel):
             req_method=self._parse_req_method(method),
             mode=self._parse_mode(params.get("mode")),
             is_stream=is_stream,
-            metadata={"query": query, "method": method},
+            metadata=_ext_attach({"query": query, "method": method}),
         )
 
         # 发布到 route 或回调
