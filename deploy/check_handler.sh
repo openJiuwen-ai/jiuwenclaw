@@ -267,25 +267,34 @@ check_if_postgresql_up() {
     # Check if external PostgreSQL server
     if [ -n "${DEPLOY_VARS["POSTGRES_HOST"]:-}" ]; then
         info "Use external PostgreSQL server"
-        DEPLOY_VARS["CLAW_MANAGER_DB_HOST"]=${DEPLOY_VARS["POSTGRES_HOST"]}
-        DEPLOY_VARS["CLAW_MANAGER_DB_PORT"]=${DEPLOY_VARS["POSTGRES_PORT"]}
-        DEPLOY_VARS["CLAW_MANAGER_DB_USER"]="postgres"
-        DEPLOY_VARS["CLAW_MANAGER_DB_PASSWORD"]=${DEPLOY_VARS["POSTGRES_PASSWORD"]}
+        DEPLOY_VARS["MANAGER_DB_HOST"]=${DEPLOY_VARS["POSTGRES_HOST"]}
+        DEPLOY_VARS["MANAGER_DB_PORT"]=${DEPLOY_VARS["POSTGRES_PORT"]}
+        DEPLOY_VARS["MANAGER_DB_USER"]="postgres"
+        DEPLOY_VARS["MANAGER_DB_PASSWORD"]=${DEPLOY_VARS["POSTGRES_PASSWORD"]}
+        DEPLOY_VARS["GATEWAY_DB_HOST"]=${DEPLOY_VARS["POSTGRES_HOST"]}
+        DEPLOY_VARS["GATEWAY_DB_PORT"]=${DEPLOY_VARS["POSTGRES_PORT"]}
+        DEPLOY_VARS["GATEWAY_DB_USER"]="postgres"
+        DEPLOY_VARS["GATEWAY_DB_PASSWORD"]=${DEPLOY_VARS["POSTGRES_PASSWORD"]}
         return
     fi
 
     # No Build-In DB server
     if ! check_k8s_resource_exists "statefulset" "${name}"; then
-        DEPLOY_VARS["CLAW_MANAGER_DB_TYPE"]="sqlite"
+        DEPLOY_VARS["MANAGER_DB_TYPE"]="sqlite"
+        DEPLOY_VARS["GATEWAY_DB_TYPE"]="sqlite"
         warning "DB is not deployed. Use build-in SQLite"
         return
     fi
 
     info "Use built-in PostgreSQL server"
-    DEPLOY_VARS["CLAW_MANAGER_DB_HOST"]="${name}-headless.default"
-    DEPLOY_VARS["CLAW_MANAGER_DB_PORT"]="5432"
-    DEPLOY_VARS["CLAW_MANAGER_DB_USER"]="postgres"
-    DEPLOY_VARS["CLAW_MANAGER_DB_PASSWORD"]=${DEPLOY_VARS["POSTGRES_PASSWORD"]}
+    DEPLOY_VARS["MANAGER_DB_HOST"]="${name}-headless.default"
+    DEPLOY_VARS["MANAGER_DB_PORT"]="5432"
+    DEPLOY_VARS["MANAGER_DB_USER"]="postgres"
+    DEPLOY_VARS["MANAGER_DB_PASSWORD"]=${DEPLOY_VARS["POSTGRES_PASSWORD"]}
+    DEPLOY_VARS["GATEWAY_DB_HOST"]="${name}-headless.default"
+    DEPLOY_VARS["GATEWAY_DB_PORT"]="5432"
+    DEPLOY_VARS["GATEWAY_DB_USER"]="postgres"
+    DEPLOY_VARS["GATEWAY_DB_PASSWORD"]=${DEPLOY_VARS["POSTGRES_PASSWORD"]}
 }
 
 check_postgresql_up_dependency(){
