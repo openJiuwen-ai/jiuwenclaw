@@ -22,7 +22,7 @@ instance_router = APIRouter()
 
 
 class HeartbeatIngestBody(BaseModel):
-    """与 RabbitMQ 消息体字段对齐；REST 入口便于联调，生产可由 consumer 调用同一服务层。"""
+    """实例服务心跳上报 REST 入口。"""
 
     service_id: str
     service_type: str
