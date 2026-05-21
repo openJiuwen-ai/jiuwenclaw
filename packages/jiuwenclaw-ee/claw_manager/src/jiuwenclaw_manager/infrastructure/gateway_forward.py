@@ -73,15 +73,6 @@ class GatewayHttpClient:
             cls._client = None
 
 
-def forward_headers() -> dict[str, str]:
-    from jiuwenclaw_manager.infrastructure.config import settings
-
-    hdrs: dict[str, str] = {}
-    if settings.upstream_api_key:
-        hdrs["Authorization"] = f"Bearer {settings.upstream_api_key}"
-    return hdrs
-
-
 def _forward_error_detail(out: dict[str, Any]) -> Any:
     upstream = out.get("upstream")
     if isinstance(upstream, dict):

@@ -1,34 +1,25 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2026-2026. All rights reserved
 
-"""manager_ws_client 运行时配置（从扩展目录或实例目录的 .env 加载）。"""
+"""manager_ws_client 运行时配置（从仓库根 .env 加载）。"""
 
 from __future__ import annotations
 
-import os
 from pathlib import Path
 
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-_EXT_ROOT = Path(__file__).resolve().parents[1]
-_ENV_FILE = _EXT_ROOT / ".env"
-
 
 def load_manager_ws_client_env() -> None:
-    """以 ``manager_ws_client/.env`` 为准加载 DB 配置（覆盖进程已有同名变量）。"""
+    """从仓库根 ``.env`` 加载（优先 cwd，兼容 venv 安装布局）。"""
     try:
         from dotenv import load_dotenv
     except ImportError:
         return
 
-    if _ENV_FILE.is_file():
-        load_dotenv(_ENV_FILE, override=True)
-
-    data_dir = os.getenv("JIUWENCLAW_DATA_DIR", "").strip()
-    if data_dir:
-        instance_env = Path(data_dir) / ".env"
-        if instance_env.is_file():
-            load_dotenv(instance_env, override=True)
+    env_path = Path.cwd() / ".env"
+    if env_path.is_file():
+        load_dotenv(env_path, override=True)
 
 
 class Settings(BaseSettings):

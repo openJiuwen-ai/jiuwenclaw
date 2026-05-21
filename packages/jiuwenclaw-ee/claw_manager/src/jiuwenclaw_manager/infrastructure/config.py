@@ -7,13 +7,19 @@ from pathlib import Path
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-_PKG_ROOT = Path(__file__).resolve().parents[3]
-_ENV_FILE = _PKG_ROOT / ".env"
+
+def _resolve_env_files() -> tuple[str | Path, ...]:
+    """解析可用的 .env 路径（优先 cwd，兼容 venv 安装布局）。"""
+    candidates: list[Path] = [Path.cwd() / ".env"]
+    here = Path(__file__).resolve()
+    for depth in (5, 6):
+        candidates.append(here.parents[depth] / ".env")
+    return tuple(p for p in candidates if p.is_file())
 
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
-        env_file=str(_ENV_FILE) if _ENV_FILE.is_file() else None,
+        env_file=_resolve_env_files() or None,
         env_file_encoding="utf-8",
         extra="ignore",
     )
@@ -35,22 +41,8 @@ class Settings(BaseSettings):
     scan_interval_seconds: int = Field(
         default=30, validation_alias="CLAWMANAGER_SCAN_INTERVAL_SECONDS"
     )
-    rabbitmq_url: str | None = Field(default=None, validation_alias="MANAGER_RABBITMQ_URL")
-    rabbitmq_exchange: str = Field(
-        default="jiuwenclaw.events", validation_alias="CLAWMANAGER_RABBITMQ_EXCHANGE"
-    )
-    rabbitmq_routing_key: str = Field(
-        default="event.instance.#", validation_alias="CLAWMANAGER_RABBITMQ_ROUTING_KEY"
-    )
-    rabbitmq_queue_name: str | None = Field(
-        default=None, validation_alias="CLAWMANAGER_RABBITMQ_QUEUE_NAME"
-    )
-    manager_id: str = Field(default="default", validation_alias="MANAGER_MANAGER_ID")
     upstream_http_timeout_seconds: float = Field(
         default=60.0, validation_alias="CLAWMANAGER_UPSTREAM_HTTP_TIMEOUT_SECONDS"
-    )
-    upstream_api_key: str | None = Field(
-        default=None, validation_alias="MANAGER_UPSTREAM_API_KEY"
     )
     allow_local_provision: bool = Field(
         default=False, validation_alias="MANAGER_ALLOW_LOCAL_PROVISION"
