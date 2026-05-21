@@ -1,7 +1,7 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2026-2026. All rights reserved
 
-"""模型模板表 model_template（与 Claw Manager 企业级数据模型对齐）。"""
+"""模板表：model_template、extension_config_template（与 Claw Manager 企业级数据模型对齐）。"""
 
 from __future__ import annotations
 
@@ -20,7 +20,7 @@ class ModelTemplateInfo(BaseModel):
     id: int
     template_id: str
     jiuwenclaw_id: str
-    display_name: str
+    template_name: str
     description: str | None
     model_type: Any
     model_tags: list[Any] | None
@@ -55,7 +55,7 @@ MODEL_TEMPLATE_TABLE_DEF = TableDefinition(
         ),
         ColumnDefinition("template_id", "string", length=100, nullable=False),
         ColumnDefinition("jiuwenclaw_id", "string", length=64, nullable=False),
-        ColumnDefinition("display_name", "string", length=128, nullable=False),
+        ColumnDefinition("template_name", "string", length=128, nullable=False),
         ColumnDefinition("description", "string", length=512, nullable=True),
         ColumnDefinition("model_type", "json", nullable=False),
         ColumnDefinition("model_tags", "json", nullable=True),
@@ -78,5 +78,54 @@ MODEL_TEMPLATE_TABLE_DEF = TableDefinition(
         IndexDefinition(["template_id"], unique=True),
         IndexDefinition(["jiuwenclaw_id"], unique=False),
         IndexDefinition(["enabled"], unique=False),
+    ],
+)
+
+
+class ExtensionConfigTemplateInfo(BaseModel):
+    id: int
+    template_id: str
+    template_name: str
+    description: str | None
+    component: str
+    hook_type: str
+    hook_config: dict[str, Any]
+    custom_config: dict[str, Any] | None
+    enabled: bool
+    data: dict[str, Any] | None
+    created_at: datetime
+    updated_at: datetime
+
+    class Config:
+        from_attributes = True
+
+
+EXTENSION_CONFIG_TEMPLATE_TABLE_DEF = TableDefinition(
+    table_name="extension_config_template",
+    columns=[
+        ColumnDefinition(
+            "id",
+            "integer",
+            primary_key=True,
+            autoincrement=True,
+            nullable=False,
+        ),
+        ColumnDefinition("template_id", "string", length=100, nullable=False),
+        ColumnDefinition("template_name", "string", length=128, nullable=False),
+        ColumnDefinition("description", "string", length=512, nullable=True),
+        ColumnDefinition("component", "string", length=32, nullable=False),
+        ColumnDefinition("hook_type", "string", length=32, nullable=False),
+        ColumnDefinition("hook_config", "json", nullable=False),
+        ColumnDefinition("custom_config", "json", nullable=True),
+        ColumnDefinition("enabled", "boolean", nullable=False, default=True),
+        ColumnDefinition("data", "json", nullable=True),
+        ColumnDefinition("created_at", "datetime", nullable=False),
+        ColumnDefinition("updated_at", "datetime", nullable=False),
+    ],
+    indexes=[
+        IndexDefinition(["template_id"], unique=True),
+        IndexDefinition(["enabled"], unique=False),
+        IndexDefinition(["component"], unique=False),
+        IndexDefinition(["hook_type"], unique=False),
     ],
 )

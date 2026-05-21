@@ -9,8 +9,7 @@ from openjiuwen_runtime.foundation.db.handler import DBHandler
 
 from jiuwenclaw_manager.core.instance.instance_service import get_instance_row
 from jiuwenclaw_manager.infrastructure.utils import utc_now
-from jiuwenclaw_manager.manager_ws_server import ManagerWsServer
-from jiuwenclaw_manager.manager_ws_server.server import push_to_instance
+from jiuwenclaw_manager.manager_ws_server.server import push_config_op
 from jiuwenclaw_manager.models.config_effective_policy_models import (
     CONFIG_DEFAULT_TEMPLATE_MAPPING_TABLE_DEF,
 )
@@ -41,7 +40,6 @@ async def push_config_default_template_mapping_op(
     mapping: dict[str, Any] | None = None,
     mapping_id: int | None = None,
     updates: dict[str, Any] | None = None,
-    server: ManagerWsServer | None = None,
 ) -> dict[str, Any]:
     """推送默认模板映射变更（``config.config_default_template_mappings``），返回 config.ack payload。"""
     payload: dict[str, Any] = {
@@ -54,10 +52,10 @@ async def push_config_default_template_mapping_op(
         payload["mapping_id"] = mapping_id
     if updates is not None:
         payload["updates"] = updates
-    return await push_to_instance(
+    return await push_config_op(
         jiuwenclaw_id,
-        config={"config_default_template_mappings": payload},
-        server=server,
+        "config_default_template_mappings",
+        payload,
     )
 
 
@@ -149,8 +147,6 @@ class ConfigDefaultTemplateMappingService:
         self,
         jiuwenclaw_id: str,
         body: ConfigDefaultTemplateMappingCreateBody,
-        *,
-        ws_server: ManagerWsServer | None = None,
     ) -> ConfigDefaultTemplateMappingOut:
         normalized = await self._validate_jiuwenclaw_id(jiuwenclaw_id)
         user_id, group_id = _validate_dimension_keys(body.user_id, body.group_id)
@@ -176,7 +172,6 @@ class ConfigDefaultTemplateMappingService:
             normalized,
             "create",
             mapping=self._mapping_dict_for_push(row, now=now),
-            server=ws_server,
         )
         ack_result = ack.get("result") if isinstance(ack, dict) else None
         mapping_id: int | None = None
@@ -252,8 +247,6 @@ class ConfigDefaultTemplateMappingService:
         jiuwenclaw_id: str,
         mapping_id: int,
         body: ConfigDefaultTemplateMappingUpdateBody,
-        *,
-        ws_server: ManagerWsServer | None = None,
     ) -> ConfigDefaultTemplateMappingOut | None:
         normalized = await self._validate_jiuwenclaw_id(jiuwenclaw_id)
 
@@ -287,7 +280,6 @@ class ConfigDefaultTemplateMappingService:
             "update",
             mapping_id=mapping_id,
             updates=updates,
-            server=ws_server,
         )
         payload = dict(updates)
         payload["updated_at"] = utc_now()
@@ -304,8 +296,6 @@ class ConfigDefaultTemplateMappingService:
         self,
         jiuwenclaw_id: str,
         mapping_id: int,
-        *,
-        ws_server: ManagerWsServer | None = None,
     ) -> bool:
         normalized = await self._validate_jiuwenclaw_id(jiuwenclaw_id)
         row = await self._handler.get(
@@ -317,7 +307,6 @@ class ConfigDefaultTemplateMappingService:
             normalized,
             "delete",
             mapping_id=mapping_id,
-            server=ws_server,
         )
         return await self._handler.delete(
             _TEMPLATE_MAPPING_TABLE, _mapping_pk(normalized, mapping_id)

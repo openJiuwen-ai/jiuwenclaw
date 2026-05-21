@@ -12,6 +12,8 @@ from jiuwenclaw_manager.manager_ws_server.protocol import (
 from jiuwenclaw_manager.manager_ws_server.server import (
     ManagerWsServer,
     get_manager_ws_server,
+    push_config_op,
+    push_config_op_to_all,
     push_to_instance,
     set_manager_ws_server,
 )
@@ -19,6 +21,8 @@ from jiuwenclaw_manager.manager_ws_server.server import (
 __all__ = [
     "ManagerWsServer",
     "get_manager_ws_server",
+    "push_config_op",
+    "push_config_op_to_all",
     "push_to_instance",
     "set_manager_ws_server",
     "EVENT_CONNECTION_ACK",

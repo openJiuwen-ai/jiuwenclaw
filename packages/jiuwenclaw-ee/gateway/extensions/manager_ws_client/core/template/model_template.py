@@ -81,8 +81,8 @@ async def update_model_template(
     updates = request.model_dump(exclude_unset=True)
     if "model_type" in updates and updates["model_type"] is not None:
         updates["model_type"] = _validate_model_type(updates["model_type"])
-    if "display_name" in updates and updates["display_name"] is not None:
-        updates["display_name"] = updates["display_name"].strip()
+    if "template_name" in updates and updates["template_name"] is not None:
+        updates["template_name"] = updates["template_name"].strip()
     if "api_base" in updates and updates["api_base"] is not None:
         updates["api_base"] = updates["api_base"].strip()
     if "model_id" in updates and updates["model_id"] is not None:
@@ -141,7 +141,7 @@ async def apply_model_template_sync(
         row_data: dict[str, Any] = {
             "template_id": template_uuid,
             "jiuwenclaw_id": jiuwenclaw_id,
-            "display_name": str(template["display_name"]).strip(),
+            "template_name": str(template["template_name"]).strip(),
             "description": template.get("description"),
             "model_type": model_type,
             "model_tags": template.get("model_tags"),

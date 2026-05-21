@@ -9,8 +9,7 @@ from openjiuwen_runtime.foundation.db.handler import DBHandler
 
 from jiuwenclaw_manager.core.instance.instance_service import get_instance_row
 from jiuwenclaw_manager.infrastructure.utils import utc_now
-from jiuwenclaw_manager.manager_ws_server import ManagerWsServer
-from jiuwenclaw_manager.manager_ws_server.server import push_to_instance
+from jiuwenclaw_manager.manager_ws_server.server import push_config_op
 from jiuwenclaw_manager.models.config_effective_policy_models import (
     CONFIG_EFFECTIVE_GLOBAL_POLICY_TABLE_DEF,
 )
@@ -35,7 +34,6 @@ async def push_config_effective_global_policy_op(
     policy: dict[str, Any] | None = None,
     policy_id: int | None = None,
     updates: dict[str, Any] | None = None,
-    server: ManagerWsServer | None = None,
 ) -> dict[str, Any]:
     """推送全局兜底配置生效策略变更（``config.config_effective_global_policies``），返回 config.ack payload。"""
     payload: dict[str, Any] = {
@@ -48,10 +46,10 @@ async def push_config_effective_global_policy_op(
         payload["policy_id"] = policy_id
     if updates is not None:
         payload["updates"] = updates
-    return await push_to_instance(
+    return await push_config_op(
         jiuwenclaw_id,
-        config={"config_effective_global_policies": payload},
-        server=server,
+        "config_effective_global_policies",
+        payload,
     )
 
 
@@ -130,8 +128,6 @@ class ConfigEffectiveGlobalPolicyService:
         self,
         jiuwenclaw_id: str,
         body: ConfigEffectiveGlobalPolicyCreateBody,
-        *,
-        ws_server: ManagerWsServer | None = None,
     ) -> ConfigEffectiveGlobalPolicyOut:
         normalized = await self._validate_jiuwenclaw_id(jiuwenclaw_id)
         await self._ensure_unique_jiuwenclaw_id(normalized)
@@ -150,7 +146,6 @@ class ConfigEffectiveGlobalPolicyService:
             normalized,
             "create",
             policy=self._policy_dict_for_push(row, now=now),
-            server=ws_server,
         )
         ack_result = ack.get("result") if isinstance(ack, dict) else None
         policy_id: int | None = None
@@ -211,8 +206,6 @@ class ConfigEffectiveGlobalPolicyService:
         jiuwenclaw_id: str,
         policy_id: int,
         body: ConfigEffectiveGlobalPolicyUpdateBody,
-        *,
-        ws_server: ManagerWsServer | None = None,
     ) -> ConfigEffectiveGlobalPolicyOut | None:
         normalized = await self._validate_jiuwenclaw_id(jiuwenclaw_id)
 
@@ -234,7 +227,6 @@ class ConfigEffectiveGlobalPolicyService:
             "update",
             policy_id=policy_id,
             updates=updates,
-            server=ws_server,
         )
         payload = dict(updates)
         payload["updated_at"] = utc_now()
@@ -251,8 +243,6 @@ class ConfigEffectiveGlobalPolicyService:
         self,
         jiuwenclaw_id: str,
         policy_id: int,
-        *,
-        ws_server: ManagerWsServer | None = None,
     ) -> bool:
         normalized = await self._validate_jiuwenclaw_id(jiuwenclaw_id)
         row = await self._handler.get(
@@ -264,7 +254,6 @@ class ConfigEffectiveGlobalPolicyService:
             normalized,
             "delete",
             policy_id=policy_id,
-            server=ws_server,
         )
         return await self._handler.delete(
             _GLOBAL_POLICY_TABLE, _global_policy_pk(normalized, policy_id)

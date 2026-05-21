@@ -9,11 +9,12 @@
 
 执行顺序（与文档一致，跳过步骤 0 provision）：
 
-1. 五条 ``model_template``（T1–T5）
-2. 两条 ``config-effective/service-policies``
-3. 两条 ``config-effective/agent-policies``（依赖上一步销售服务策略 id）
-4. ``config-effective/global-policies``（每实例唯一；已存在则 PUT 更新）
-5. 两条 ``config-default-template-mappings``
+1. 五条 ``model_template``（T1–T5；每次执行均新建，``template_name`` 可重复）
+2. 四条 ``extension-config-templates``（E1–E4；每次执行均新建）
+3. 两条 ``config-effective/service-policies``
+4. 两条 ``config-effective/agent-policies``（依赖上一步销售服务策略 id）
+5. ``config-effective/global-policies``（每实例唯一；已存在则 PUT 更新）
+6. 两条 ``config-default-template-mappings``
 
 典型用法（PowerShell 一行）::
 
@@ -32,21 +33,10 @@ from typing import Any
 
 try:
     import httpx
-except ImportError as exc:  # pragma: no cover
-    raise SystemExit(
-        "缺少 httpx，请在 claw_manager 目录执行: uv sync\n"
-        "或: pip install httpx"
-    ) from exc
-
-_DEMO_TEMPLATE_NAMES = frozenset(
-    {
-        "全局兜底-经济型",
-        "销售组-标准型",
-        "VIP-加强对话",
-        "Carol 默认映射模型",
-        "销售组映射专用",
-    }
-)
+except ImportError as _httpx_import_error:  # pragma: no cover
+    httpx = None  # type: ignore[assignment,misc]
+else:
+    _httpx_import_error = None
 
 
 class ManagerApiError(RuntimeError):
@@ -58,6 +48,10 @@ class ManagerApiError(RuntimeError):
         self.detail = detail
 
 
+class SeedDemoConfigError(RuntimeError):
+    """演示种子数据写入前置条件不满足或业务校验失败。"""
+
+
 class ManagerClient:
     def __init__(self, base_url: str, jiuwenclaw_id: str, *, timeout: float = 120.0) -> None:
         self._base = base_url.rstrip("/")
@@ -66,7 +60,19 @@ class ManagerClient:
         if not self._jid:
             raise ValueError("jiuwenclaw_id 不能为空")
 
+    @property
+    def jiuwenclaw_id(self) -> str:
+        return self._jid
+
+    @property
+    def base_url(self) -> str:
+        return self._base
+
     def _url(self, path: str) -> str:
+        if path.startswith("/model-templates") or path.startswith(
+            "/extension-config-templates"
+        ):
+            return f"{self._base}/api/v1{path}"
         return f"{self._base}/api/v1/instances/{self._jid}{path}"
 
     def request(
@@ -143,7 +149,7 @@ def _model_templates() -> list[tuple[str, dict[str, Any]]]:
         (
             "T1 全局兜底-经济型",
             {
-                "display_name": "全局兜底-经济型",
+                "template_name": "全局兜底-经济型",
                 "description": "无服务/Agent 命中时使用",
                 "model_type": "default",
                 "model_tags": ["chat"],
@@ -159,7 +165,7 @@ def _model_templates() -> list[tuple[str, dict[str, Any]]]:
         (
             "T2 销售组-标准型",
             {
-                "display_name": "销售组-标准型",
+                "template_name": "销售组-标准型",
                 "model_type": "default",
                 "api_base": "https://api.openai.com/v1",
                 "api_key": "sk-demo-sales",
@@ -172,7 +178,7 @@ def _model_templates() -> list[tuple[str, dict[str, Any]]]:
         (
             "T3 VIP-加强对话",
             {
-                "display_name": "VIP-加强对话",
+                "template_name": "VIP-加强对话",
                 "model_type": ["default", "vision"],
                 "model_tags": ["chat", "vision"],
                 "api_base": "https://api.openai.com/v1",
@@ -186,7 +192,7 @@ def _model_templates() -> list[tuple[str, dict[str, Any]]]:
         (
             "T4 Carol 默认映射模型",
             {
-                "display_name": "Carol 默认映射模型",
+                "template_name": "Carol 默认映射模型",
                 "model_type": "default",
                 "api_base": "https://api.deepseek.com/v1",
                 "api_key": "sk-demo-carol",
@@ -199,7 +205,7 @@ def _model_templates() -> list[tuple[str, dict[str, Any]]]:
         (
             "T5 销售组映射专用",
             {
-                "display_name": "销售组映射专用",
+                "template_name": "销售组映射专用",
                 "model_type": "default",
                 "api_base": "https://api.openai.com/v1",
                 "api_key": "sk-demo-group-map",
@@ -212,15 +218,74 @@ def _model_templates() -> list[tuple[str, dict[str, Any]]]:
     ]
 
 
-def _ensure_fresh_instance(client: ManagerClient) -> None:
-    existing = client.list_items("/model-templates")
-    names = {str(row.get("display_name") or "") for row in existing}
-    overlap = names & _DEMO_TEMPLATE_NAMES
-    if overlap:
-        raise SystemExit(
-            f"实例 {client._jid!r} 已存在演示模型模板 {sorted(overlap)!r}。\n"
-            "请在全新 provision 实例上重试，或先手动删除相关配置后再运行本脚本。"
-        )
+def _extension_config_templates() -> list[tuple[str, dict[str, Any]]]:
+    return [
+        (
+            "E1 Gateway 请求前鉴权",
+            {
+                "template_name": "Gateway 请求前鉴权",
+                "description": "请求前参数校验与权限检查（gateway）",
+                "component": "gateway",
+                "hook_type": "pre_request",
+                "hook_config": {
+                    "handler": "hooks.auth.pre_request",
+                    "params": {"require_token": True, "allowed_roles": ["user", "admin"]},
+                },
+                "custom_config": {"auth_header": "Authorization"},
+                "enabled": True,
+                "data": {"demo": "e1"},
+            },
+        ),
+        (
+            "E2 Gateway 请求后日志",
+            {
+                "template_name": "Gateway 请求后日志",
+                "description": "请求完成后记录访问日志（gateway）",
+                "component": "gateway",
+                "hook_type": "post_request",
+                "hook_config": {
+                    "handler": "hooks.logging.post_request",
+                    "params": {"log_level": "info", "include_body": False},
+                },
+                "custom_config": {},
+                "enabled": True,
+                "data": {"demo": "e2"},
+            },
+        ),
+        (
+            "E3 Agent Server 错误恢复",
+            {
+                "template_name": "Agent Server 错误恢复",
+                "description": "请求失败时告警与降级（agent_server）",
+                "component": "agent_server",
+                "hook_type": "error",
+                "hook_config": {
+                    "handler": "hooks.recovery.on_error",
+                    "params": {"notify_channel": "demo-alerts", "max_retries": 1},
+                },
+                "custom_config": {"fallback_message": "服务暂时不可用，请稍后重试"},
+                "enabled": True,
+                "data": {"demo": "e3"},
+            },
+        ),
+        (
+            "E4 Gateway 定时清理",
+            {
+                "template_name": "Gateway 定时清理",
+                "description": "定时清理临时缓存与会话残留（gateway）",
+                "component": "gateway",
+                "hook_type": "schedule",
+                "hook_config": {
+                    "handler": "hooks.maintenance.cleanup",
+                    "schedule": "0 */5 * * *",
+                    "params": {"ttl_seconds": 3600},
+                },
+                "custom_config": {"workspace": "demo"},
+                "enabled": True,
+                "data": {"demo": "e4"},
+            },
+        ),
+    ]
 
 
 def _upsert_global_policy(client: ManagerClient, body: dict[str, Any]) -> dict[str, Any]:
@@ -231,17 +296,22 @@ def _upsert_global_policy(client: ManagerClient, body: dict[str, Any]) -> dict[s
             raise
     rows = client.list_items("/config-effective/global-policies", page_size=5)
     if not rows:
-        raise SystemExit("全局策略创建失败且列表为空，请检查 Manager / Gateway 日志。") from None
+        raise SeedDemoConfigError(
+            "全局策略创建失败且列表为空，请检查 Manager / Gateway 日志。"
+        )
     policy_id = int(rows[0]["id"])
     print(f"  [global] 已存在，PUT 更新 id={policy_id}")
     return client.put(f"/config-effective/global-policies/{policy_id}", body)
 
 
 def seed_demo_config(client: ManagerClient) -> dict[str, Any]:
-    _ensure_fresh_instance(client)
-    result: dict[str, Any] = {"jiuwenclaw_id": client._jid, "model_templates": {}}
+    result: dict[str, Any] = {
+        "jiuwenclaw_id": client.jiuwenclaw_id,
+        "model_templates": {},
+        "extension_config_templates": {},
+    }
 
-    print("[1/5] 创建 model_template（T1–T5）")
+    print("[1/6] 创建 model_template（T1–T5）")
     template_ids: list[str] = []
     for label, body in _model_templates():
         row = client.post("/model-templates", body)
@@ -254,7 +324,25 @@ def seed_demo_config(client: ManagerClient) -> dict[str, Any]:
     t1, t2, t3, t4, t5 = template_ids
     group_map_default_model = f"${{group::g_demo_sales}} or {t1}"
 
-    print("[2/5] 创建 service-policies")
+    print("[2/6] 创建 extension-config-templates（E1–E4）")
+    extension_ids: list[str] = []
+    for label, body in _extension_config_templates():
+        row = client.post("/extension-config-templates", body)
+        tid = _require_template_id(row, "/extension-config-templates")
+        extension_ids.append(tid)
+        key = f"e{len(extension_ids)}"
+        result["extension_config_templates"][key] = tid
+        print(f"  [{key}] {label} -> template_id={tid}")
+
+    e1, e2, e3, e4 = extension_ids
+    result["extension_template_id_literals"] = {
+        "e1": e1,
+        "e2": e2,
+        "e3": e3,
+        "e4": e4,
+    }
+
+    print("[3/6] 创建 service-policies")
     sales = client.post(
         "/config-effective/service-policies",
         {
@@ -290,7 +378,7 @@ def seed_demo_config(client: ManagerClient) -> dict[str, Any]:
     result["service_policy_fallback_id"] = fallback_id
     print(f"  [2.2] 低优先级兜底 -> id={fallback_id} (default_model={t1})")
 
-    print("[3/5] 创建 agent-policies")
+    print("[4/6] 创建 agent-policies")
     vip = client.post(
         "/config-effective/agent-policies",
         {
@@ -334,7 +422,7 @@ def seed_demo_config(client: ManagerClient) -> dict[str, Any]:
     result["agent_policy_mapping_id"] = mapping_id
     print(f"  [3.2] 组映射表达式 -> id={mapping_id} (default_model={group_map_default_model})")
 
-    print("[4/5] 创建 / 更新 global-policies")
+    print("[5/6] 创建 / 更新 global-policies")
     global_row = _upsert_global_policy(
         client,
         {
@@ -353,7 +441,7 @@ def seed_demo_config(client: ManagerClient) -> dict[str, Any]:
     result["global_policy_id"] = global_id
     print(f"  [4] 全局兜底 -> id={global_id} (四槽位={t1})")
 
-    print("[5/5] 创建 config-default-template-mappings")
+    print("[6/6] 创建 config-default-template-mappings")
     carol_map = client.post(
         "/config-default-template-mappings",
         {
@@ -418,12 +506,22 @@ def _parse_args() -> argparse.Namespace:
 
 
 def main() -> None:
+    if _httpx_import_error is not None:
+        print(
+            "缺少 httpx，请在 claw_manager 目录执行: uv sync\n或: pip install httpx",
+            file=sys.stderr,
+        )
+        raise SystemExit(1) from _httpx_import_error
+
     args = _parse_args()
     client = ManagerClient(args.manager_base, args.jiuwenclaw_id, timeout=args.timeout)
-    print(f"[seed] jiuwenclaw_id={client._jid} manager={client._base}")
+    print(f"[seed] jiuwenclaw_id={client.jiuwenclaw_id} manager={client.base_url}")
 
     try:
         summary = seed_demo_config(client)
+    except SeedDemoConfigError as exc:
+        print(f"[failed] {exc}", file=sys.stderr)
+        raise SystemExit(1) from exc
     except ManagerApiError as exc:
         print(f"[failed] {exc}", file=sys.stderr)
         raise SystemExit(1) from exc

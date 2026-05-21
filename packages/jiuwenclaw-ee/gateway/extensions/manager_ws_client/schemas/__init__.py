@@ -8,7 +8,10 @@ from .config_effective_policy_schemas import (
     ConfigEffectiveServicePolicyCreateRequest,
     ConfigEffectiveServicePolicyUpdateRequest,
 )
-from .template_schemas import ModelTemplateUpdateRequest
+from .template_schemas import (
+    ExtensionConfigTemplateUpdateRequest,
+    ModelTemplateUpdateRequest,
+)
 
 __all__ = (
     "ConfigDefaultTemplateMappingCreateRequest",
@@ -20,4 +23,5 @@ __all__ = (
     "ConfigEffectiveServicePolicyCreateRequest",
     "ConfigEffectiveServicePolicyUpdateRequest",
     "ModelTemplateUpdateRequest",
+    "ExtensionConfigTemplateUpdateRequest",
 )

@@ -23,6 +23,9 @@ from jiuwenclaw_manager.schemas.instance_schemas import (
     ServiceStatusList,
 )
 from jiuwenclaw_manager.schemas.template_schemas import (
+    ExtensionConfigTemplateCreateBody,
+    ExtensionConfigTemplateOut,
+    ExtensionConfigTemplateUpdateBody,
     ModelTemplateCreateBody,
     ModelTemplateOut,
     ModelTemplateUpdateBody,
@@ -40,6 +43,9 @@ __all__ = (
     "ModelTemplateCreateBody",
     "ModelTemplateUpdateBody",
     "ModelTemplateOut",
+    "ExtensionConfigTemplateCreateBody",
+    "ExtensionConfigTemplateUpdateBody",
+    "ExtensionConfigTemplateOut",
     "ConfigEffectiveAgentPolicyCreateBody",
     "ConfigEffectiveAgentPolicyUpdateBody",
     "ConfigEffectiveAgentPolicyOut",

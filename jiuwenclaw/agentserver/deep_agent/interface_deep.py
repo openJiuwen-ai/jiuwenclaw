@@ -2161,7 +2161,7 @@ class JiuWenClawDeepAdapter:
         config = self._startup_config_base if isinstance(self._startup_config_base, dict) else {}
         entries = get_default_models(config) if config else []
         section = entries[0] if entries and isinstance(entries[0], dict) else {}
-        meta["display_name"] = str(section.get("display_name") or "").strip()
+        meta["template_name"] = str(section.get("template_name") or "").strip()
         meta["template_id"] = str(section.get("template_id") or "").strip()
 
         mcc = dict(section.get("model_client_config") or {})
@@ -2201,11 +2201,11 @@ class JiuWenClawDeepAdapter:
                 "api_base": getattr(mcc_obj, "api_base", "") or "",
                 "api_key": getattr(mcc_obj, "api_key", ""),
             }
-            meta = {"display_name": "", "template_id": ""}
+            meta = {"template_name": "", "template_id": ""}
         else:
             mcc, meta = self._resolve_default_model_mcc_for_log()
 
-        fields["display_name"] = meta.get("display_name", "")
+        fields["template_name"] = meta.get("template_name", "")
         fields["template_id"] = meta.get("template_id", "")
         fields["model_id"] = str(mcc.get("model_name") or "").strip()
         fields["provider"] = str(
@@ -2220,7 +2220,7 @@ class JiuWenClawDeepAdapter:
         fields = self._collect_default_model_log_fields()
         order = (
             "source",
-            "display_name",
+            "template_name",
             "template_id",
             "model_id",
             "provider",

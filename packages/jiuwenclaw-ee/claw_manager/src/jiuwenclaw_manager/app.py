@@ -41,7 +41,6 @@ async def lifespan(application: FastAPI):
             port=settings.manager_ws_port,
         )
         await manager_ws_server.start()
-        application.state.manager_ws_server = manager_ws_server
         from jiuwenclaw_manager.manager_ws_server.server import set_manager_ws_server
 
         set_manager_ws_server(manager_ws_server)
