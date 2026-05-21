@@ -26,6 +26,9 @@ from jiuwenclaw.agentserver.tools.harness_named_web_tools import (
     JiuwenHarnessFreeSearchTool,
 )
 from jiuwenclaw.agentserver.tools.subagent_tools import fork_agent, spawn_subagent
+from jiuwenclaw.agentserver.skilldev_agent.meta_tools.agent_as_skill_tool import (
+    get_agent_as_skill_tool,
+)
 from jiuwenclaw.agentserver.skilldev_agent.meta_tools.function_call_tool import (
     get_function_call_tool,
 )
@@ -65,5 +68,5 @@ def build_skilldev_tools(
             get_ask_user_question_tool(),
         ]
     )
-    tools.extend([get_function_call_tool()])
+    tools.extend([get_function_call_tool(), get_agent_as_skill_tool()])
     return tools
