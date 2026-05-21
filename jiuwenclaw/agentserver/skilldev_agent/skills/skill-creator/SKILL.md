@@ -21,12 +21,11 @@ Your TODO plan should mirror this workflow with one task per phase — at minimu
 
 **Hard rules — violating any of these is a bug:**
 1. Don't write before talking to the user.
-2. Every draft must include both `SKILL.md` and `module.json`.
-3. Don't ignore security red lines: no dangerous commands, hardcoded credentials, or path traversal in the skill body, scripts, or module config.
-4. Don't skip the eval consent question (Step 3).
-5. Don't skip grading/aggregation — runs without `grading.json` and `benchmark.md` are worthless.
-6. Don't skip the description optimization consent question (Step 6).
-7. Don't skip packaging (Step 7).
+2. Don't ignore security red lines: no dangerous commands, hardcoded credentials, or path traversal in the skill body or scripts.
+3. Don't skip the eval consent question (Step 3).
+4. Don't skip grading/aggregation — runs without `grading.json` and `benchmark.md` are worthless.
+5. Don't skip the description optimization consent question (Step 6).
+6. Don't skip packaging (Step 7).
 
 Self-check at every checkpoint: if you're about to move past one of these without the explicit confirmation or artifact, **stop and go back**.
 
@@ -37,7 +36,6 @@ Self-check at every checkpoint: if you're about to move past one of these withou
 ```text
 skill-name/
 ├── SKILL.md       required — YAML frontmatter + instructions
-├── module.json    required — HarmonyOS runtime config
 ├── scripts/       optional — deterministic or repeated operations
 ├── references/    optional — load-on-demand domain docs, schemas, API details
 └── assets/        optional — templates, icons, fonts used in outputs
@@ -55,21 +53,6 @@ description: Imperative description of when to trigger and what to do.
 - `name`: kebab-case, lowercase letters / digits / hyphens only, ≤ 64 chars.
 - `description`: This is the **only triggering mechanism** — all "when to use" guidance goes here, not the body. Chinese SHOULD be ≤ 256 chars and MUST be ≤ 512 chars; English SHOULD be ≤ 512 chars and MUST be ≤ 1024 chars. Make it slightly pushy: instead of `"Builds dashboards for internal data"`, write `"Builds dashboards for internal data. Use whenever the user mentions dashboards, metrics, or wants to display company data — even if they don't say 'dashboard' explicitly."`
 - Allowed keys only: `name`, `description`, `license`, `allowed-tools`, `metadata`, `compatibility`. No duplicates.
-
-### module.json — hard constraints
-
-Every skill must include a minimal HarmonyOS `module.json`:
-
-```json
-{
-  "version": "1.0.0",
-  "toolDependencies": []
-}
-```
-
-- `version`: required Semver string, e.g. `1.0.0`.
-- `toolDependencies`: platform-registered Function or CLI tools only. Do not list built-in tools (`exec`, `invoke`, `read`, `write`, `web_search`, `web_fetch`, `load_skill`) or private scripts.
-- Optional fields: `availableOn`, `abilityName`, `visibility`, `srcEntries`, `permissions`, `requestPermissions`, `minAPIVersion`, `targetAPIVersion`. Read `references/module-json.md` before filling any optional field.
 
 ### Progressive disclosure
 
@@ -103,10 +86,10 @@ Surface things the user might not have considered: failure modes, what "done" lo
 Follow the anatomy and frontmatter rules above. Self-check before moving on:
 
 - Create or update the skill under the current workspace's `skill/` directory: `<workspace>/skill/<skill-name>/`.
-- `SKILL.md` exists with valid frontmatter (name matches directory, description ≤ 1024, allowed keys only).
-- `module.json` exists with valid Semver `version` and only real platform tools in `toolDependencies`.
-- Body is under 300 lines; bulky reference material moved to `references/`.
-- Security validation passes: no dangerous commands, hardcoded credentials, or path traversal in the skill body, scripts, or module config.
+- `SKILL.md` exists with valid frontmatter (name matches directory, description within language-specific limits, allowed keys only).
+- Body structure can reference these sections as needed: domain knowledge, tool definitions, exemplar playbook, SOP, safety red lines, and human collaboration.
+- Body is under 500 lines; bulky reference material moved to `references/`.
+- Security validation passes: no dangerous commands, hardcoded credentials, or path traversal in the skill body or scripts. 
 - No stray files outside the skill folder.
 
 ---
@@ -236,5 +219,4 @@ Self-check before ending the conversation: did `scripts/package_skill.py` run? I
 
 - `agents/grader.md` — grading expectations against outputs
 - `references/description-optimization.md` — full description optimization process
-- `references/module-json.md` — HarmonyOS module.json field rules
 - `references/schemas.md` — JSON schemas for evals.json, grading.json, etc.

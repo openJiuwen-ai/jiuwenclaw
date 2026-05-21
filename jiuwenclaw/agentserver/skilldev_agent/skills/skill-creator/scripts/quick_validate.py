@@ -4,7 +4,6 @@ Quick validation script for skills - minimal version
 """
 
 import logging
-import json
 import re
 import sys
 from pathlib import Path
@@ -14,18 +13,6 @@ import yaml
 
 logger = logging.getLogger(__name__)
 
-AVAILABLE_ON = {
-    "phone",
-    "tablet",
-    "pc",
-    "wearable",
-    "car",
-    "tv",
-    "cloud",
-    "cloudSandbox",
-    "localSandbox",
-}
-BUILTIN_TOOLS = {"exec", "invoke", "read", "write", "web_search", "web_fetch", "load_skill"}
 DANGEROUS_PATTERNS = [
     (re.compile(r"\brm\s+-[^\n]*r[^\n]*f\s+/"), "rm -rf /"),
     (re.compile(r"\bchmod\s+777\b"), "chmod 777"),
@@ -36,6 +23,8 @@ CREDENTIAL_PATTERNS = [
     re.compile(r"(?i)\b(api[_-]?key|secret|token|password)\b\s*[:=]\s*['\"][^'\"\n]{8,}['\"]"),
     re.compile(r"\bsk-[A-Za-z0-9_-]{16,}\b"),
 ]
+TOOL_NAME_PATTERN = re.compile(r"toolName(?:\*\*)?\s*:\s*`?([^\s`，,;]+)`?", re.IGNORECASE)
+VALID_TOOL_NAME_PATTERN = re.compile(r"^[a-zA-Z0-9_-]{1,64}$")
 
 
 def validate_skill(skill_path):
@@ -58,6 +47,11 @@ def validate_skill(skill_path):
         return False, "Invalid frontmatter format"
 
     frontmatter_text = match.group(1)
+    body = content[match.end():].lstrip("\n")
+
+    duplicate_key = find_duplicate_frontmatter_key(frontmatter_text)
+    if duplicate_key:
+        return False, f"Duplicate key in SKILL.md frontmatter: {duplicate_key}"
 
     # Parse YAML frontmatter
     try:
@@ -89,30 +83,51 @@ def validate_skill(skill_path):
     if not isinstance(name, str):
         return False, f"Name must be a string, got {type(name).__name__}"
     name = name.strip()
-    if name:
-        # Check naming convention (kebab-case: lowercase with hyphens)
-        if not re.match(r'^[a-z0-9-]+$', name):
-            return False, f"Name '{name}' should be kebab-case (lowercase letters, digits, and hyphens only)"
-        if name.startswith('-') or name.endswith('-') or '--' in name:
-            return False, f"Name '{name}' cannot start/end with hyphen or contain consecutive hyphens"
-        # Check name length
-        if len(name) > 64:
-            return False, f"Name is too long ({len(name)} characters). Maximum is 64 characters."
-        if name != skill_path.name:
-            return False, f"Name '{name}' must match directory name '{skill_path.name}'"
+    if not name:
+        return False, "Name cannot be empty"
+    # Check naming convention (kebab-case: lowercase with hyphens)
+    if not re.match(r'^[a-z0-9-]+$', name):
+        return False, f"Name '{name}' should be kebab-case (lowercase letters, digits, and hyphens only)"
+    if name.startswith('-') or name.endswith('-') or '--' in name:
+        return False, f"Name '{name}' cannot start/end with hyphen or contain consecutive hyphens"
+    # Check name length
+    if len(name) > 64:
+        return False, f"Name is too long ({len(name)} characters). Maximum is 64 characters."
+    if name != skill_path.name:
+        return False, f"Name '{name}' must match directory name '{skill_path.name}'"
 
     # Extract and validate description
     description = frontmatter.get('description', '')
     if not isinstance(description, str):
         return False, f"Description must be a string, got {type(description).__name__}"
     description = description.strip()
-    if description:
-        # Check for angle brackets
-        if '<' in description or '>' in description:
-            return False, "Description cannot contain angle brackets (< or >)"
-        # Check description length (max 1024 characters per spec)
-        if len(description) > 1024:
-            return False, f"Description is too long ({len(description)} characters). Maximum is 1024 characters."
+    if not description:
+        return False, "Description cannot be empty"
+    # Check for angle brackets
+    if '<' in description or '>' in description:
+        return False, "Description cannot contain angle brackets (< or >)"
+    max_description_chars = 512 if contains_cjk(description) else 1024
+    if len(description) > max_description_chars:
+        return False, (
+            f"Description is too long ({len(description)} characters). "
+            f"Maximum is {max_description_chars} characters."
+        )
+
+    license_value = frontmatter.get('license')
+    if license_value is not None and not isinstance(license_value, str):
+        return False, f"License must be a string, got {type(license_value).__name__}"
+
+    allowed_tools = frontmatter.get('allowed-tools')
+    if allowed_tools is not None and not isinstance(allowed_tools, str):
+        return False, f"allowed-tools must be a string, got {type(allowed_tools).__name__}"
+
+    metadata = frontmatter.get('metadata')
+    if metadata is not None:
+        if not isinstance(metadata, dict):
+            return False, f"Metadata must be a dictionary, got {type(metadata).__name__}"
+        for key, value in metadata.items():
+            if not isinstance(key, str) or not isinstance(value, str):
+                return False, "Metadata keys and values must be strings"
 
     # Validate compatibility field if present (optional)
     compatibility = frontmatter.get('compatibility', '')
@@ -122,64 +137,52 @@ def validate_skill(skill_path):
         if len(compatibility) > 500:
             return False, f"Compatibility is too long ({len(compatibility)} characters). Maximum is 500 characters."
 
-    module_json = skill_path / "module.json"
-    if not module_json.exists():
-        return False, "module.json not found"
+    body_lines = body.splitlines()
+    if not body.strip():
+        return False, "SKILL.md body cannot be empty"
+    if len(body_lines) > 500:
+        return False, f"SKILL.md body is too long ({len(body_lines)} lines). Maximum is 500 lines."
 
-    try:
-        module = json.loads(module_json.read_text(encoding="utf-8"))
-    except json.JSONDecodeError as e:
-        return False, f"Invalid JSON in module.json: {e}"
-    if not isinstance(module, dict):
-        return False, "module.json must be a JSON object"
-
-    version = module.get("version")
-    if not isinstance(version, str) or not re.match(r"^\d+\.\d+\.\d+$", version):
-        return False, "module.json version must be a Semver string like 1.0.0"
-
-    available_on = module.get("availableOn", [])
-    if available_on and (
-        not isinstance(available_on, list)
-        or any(item not in AVAILABLE_ON for item in available_on)
-    ):
-        return False, "module.json availableOn contains invalid value(s)"
-
-    tool_dependencies = module.get("toolDependencies", [])
-    if not isinstance(tool_dependencies, list) or not all(isinstance(item, str) for item in tool_dependencies):
-        return False, "module.json toolDependencies must be a string array"
-    invalid_tool_names = [
-        item for item in tool_dependencies
-        if item in BUILTIN_TOOLS or not re.match(r"^[a-zA-Z0-9_-]{1,64}$", item)
-    ]
+    invalid_tool_names = find_invalid_tool_names(body)
     if invalid_tool_names:
-        return False, f"Invalid toolDependencies: {', '.join(invalid_tool_names)}"
+        return False, f"Invalid toolName value(s): {', '.join(invalid_tool_names)}"
 
-    min_api = module.get("minAPIVersion")
-    target_api = module.get("targetAPIVersion")
-    if min_api is not None and not isinstance(min_api, int):
-        return False, "module.json minAPIVersion must be an integer"
-    if target_api is not None and not isinstance(target_api, int):
-        return False, "module.json targetAPIVersion must be an integer"
-    if min_api is not None and target_api is not None and target_api < min_api:
-        return False, "module.json targetAPIVersion must be >= minAPIVersion"
-
-    src_entries = module.get("srcEntries", [])
-    if not isinstance(src_entries, list) or len(src_entries) > 100:
-        return False, "module.json srcEntries must be an array with at most 100 entries"
-    for entry in src_entries:
-        if not isinstance(entry, str) or not entry.startswith(f"{skill_path.name}/scripts/"):
-            return False, "module.json srcEntries must point under <skill-name>/scripts/"
-        if ".." in Path(entry).parts:
-            return False, "module.json srcEntries cannot contain path traversal"
-
-    security_valid, security_message = validate_static_security(skill_path, content, module_json.read_text(encoding="utf-8"))
+    security_valid, security_message = validate_static_security(skill_path, content)
     if not security_valid:
         return False, security_message
 
     return True, "Skill is valid!"
 
 
-def validate_static_security(skill_path, skill_content, module_content):
+def find_duplicate_frontmatter_key(frontmatter_text):
+    """Return the first duplicate top-level YAML key, if any."""
+    seen = set()
+    for line in frontmatter_text.splitlines():
+        match = re.match(r"^([A-Za-z0-9_-]+)\s*:", line)
+        if not match:
+            continue
+        key = match.group(1)
+        if key in seen:
+            return key
+        seen.add(key)
+    return None
+
+
+def contains_cjk(text):
+    """Detect CJK characters for the stricter Chinese description limit."""
+    return any("\u4e00" <= char <= "\u9fff" for char in text)
+
+
+def find_invalid_tool_names(body):
+    """Find Markdown toolName entries that violate the tool name format."""
+    invalid = []
+    for tool_name in TOOL_NAME_PATTERN.findall(body):
+        if not VALID_TOOL_NAME_PATTERN.match(tool_name):
+            invalid.append(tool_name)
+    return invalid
+
+
+def validate_static_security(skill_path, skill_content):
     """Run lightweight static security checks before packaging."""
     credential_files = [(skill_path / "SKILL.md", skill_content)]
     script_files = []
@@ -194,7 +197,7 @@ def validate_static_security(skill_path, skill_content, module_content):
                 script_files.append((script_path, text))
                 credential_files.append((script_path, text))
 
-    for file_path, _ in credential_files + [(skill_path / "module.json", module_content)]:
+    for file_path, _ in credential_files:
         rel_path = file_path.relative_to(skill_path)
         if ".." in rel_path.parts:
             return False, f"Path traversal detected: {rel_path}"
