@@ -111,6 +111,16 @@ class VibeSkillSessionStore:
             return internal_id
         return None
 
+    async def resolve_session(self, session_id: str) -> VibeSkillSession | None:
+        """通过外部或内部 session ID 解析已有 session；不存在则返回 None。"""
+        sid = str(session_id or "").strip()
+        if not sid:
+            return None
+        internal_id = await self.resolve_internal(sid)
+        if internal_id:
+            return self._sessions.get(internal_id)
+        return self._sessions.get(sid)
+
     async def resolve_external(self, internal_id: str) -> str | None:
         """内部 ID → 外部 ID。"""
         session = self._sessions.get(internal_id)

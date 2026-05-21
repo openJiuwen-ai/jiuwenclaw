@@ -234,10 +234,12 @@ class VibeSkillChannel(BaseChannel):
             session_ids = [str(s).strip() for s in query_params.get("sessionID", []) if str(s).strip()]
             if session_ids:
                 session_id = session_ids[0]
-                internal_id = await self._store.resolve_internal(session_id)
-                if not internal_id:
-                    session = await self._store.get_or_create(external_id=session_id)
-                    internal_id = session.internal_id
+                session = await self._store.resolve_session(session_id)
+                if not session:
+                    self._clients.discard(ws)
+                    await ws.close(code=1008, reason="session_not_found")
+                    return
+                internal_id = session.internal_id
                 async with self._ws_sessions_lock:
                     if ws not in self._ws_sessions:
                         self._ws_sessions[ws] = set()
@@ -548,7 +550,24 @@ class VibeSkillChannel(BaseChannel):
                     "parameters": parameters,
                 })
 
-        session = await self._store.get_or_create(external_id=external_session_id or None)
+        session: VibeSkillSession | None = None
+        if external_session_id:
+            session = await self._store.resolve_session(external_session_id)
+            if not session:
+                await self._send_ws_res_error(
+                    ws, data, "session_not_found", source="message.send.session_not_found"
+                )
+                return True
+        else:
+            bound = self._ws_sessions.get(ws)
+            if bound:
+                internal_id = sorted(bound)[0]
+                session = await self._store.get_session(internal_id)
+            if not session:
+                await self._send_ws_res_error(
+                    ws, data, "missing_session_id", source="message.send.missing_session_id"
+                )
+                return True
 
         if external_session_id and not session.external_id:
             await self._store.bind_external(session.internal_id, external_session_id)
@@ -1474,41 +1493,80 @@ class VibeSkillChannel(BaseChannel):
             self._session_to_ws.pop(sid, None)
             if skip_cancel:
                 continue
-            self._clear_message_context_for_session(sid)
-            try:
-                state = await self._store.get_state(sid)
-                if state == VibeSkillSessionState.BUSY:
-                    await self._store.set_state(sid, VibeSkillSessionState.IDLE)
-                    logger.info(
-                        "[VibeSkillChannel] WS disconnected, session state busy -> idle, session_id=%s",
-                        sid,
-                    )
-            except Exception:
-                logger.exception("[VibeSkillChannel] cleanup set_state failed, session_id=%s", sid)
+            session_obj = await self._store.get_session(sid)
+            mode = session_obj.mode if session_obj else "SkillCreate"
+            await self._cancel_session_via_message_handler(sid, source="ws.disconnect", mode=mode)
 
-            try:
-                cancel_msg = Message(
-                    id=f"vibeskill-ws-disconnect-cancel-{int(time.time() * 1000):x}-{secrets.token_hex(3)}",
-                    type="req",
-                    channel_id=VIBESKILL_CHANNEL_ID,
-                    session_id=sid,
-                    params={"task_id": sid, "session_id": sid},
-                    timestamp=time.time(),
-                    ok=True,
-                    req_method=ReqMethod.SKILLDEV_CANCEL,
-                    is_stream=False,
-                )
+    def _get_active_ws_for_session(self, internal_id: str) -> Any | None:
+        """返回 session 当前绑定的未关闭 WebSocket，不存在则返回 None。"""
+        sid = str(internal_id or "").strip()
+        if not sid:
+            return None
+        ws = self._session_to_ws.get(sid)
+        if ws is None or bool(getattr(ws, "closed", False)):
+            return None
+        return ws
+
+    async def _cancel_session_via_message_handler(
+        self,
+        internal_id: str,
+        *,
+        source: str,
+        mode: str = "SkillCreate",
+    ) -> None:
+        """清理流式上下文、busy→idle，经 MessageHandler 派发取消（与 message.send 入站 method 对称）。"""
+        sid = str(internal_id or "").strip()
+        if not sid:
+            return
+        self._clear_message_context_for_session(sid)
+        try:
+            state = await self._store.get_state(sid)
+            if state == VibeSkillSessionState.BUSY:
+                await self._store.set_state(sid, VibeSkillSessionState.IDLE)
                 logger.info(
-                    "[VibeSkillChannel] skilldev.cancel sent, session_id=%s",
+                    "[VibeSkillChannel] session state -> idle, source=%s, session_id=%s",
+                    source,
                     sid,
                 )
-                self.bus.deliver_to_message_handler(cancel_msg)
-                logger.info(
-                    "[VibeSkillChannel] WS disconnected, dispatched skilldev.cancel, task_id=%s",
-                    sid,
-                )
-            except Exception:
-                logger.exception("[VibeSkillChannel] cleanup dispatch skilldev.cancel failed, session_id=%s", sid)
+        except Exception:
+            logger.exception("[VibeSkillChannel] set_state failed, source=%s, session_id=%s", source, sid)
+
+        if mode == "Standard":
+            req_method = ReqMethod.CHAT_CANCEL
+            params: dict[str, Any] = {"intent": "cancel", "session_id": sid}
+            cancel_method_label = "chat.interrupt"
+        else:
+            req_method = ReqMethod.SKILLDEV_CANCEL
+            params = {"task_id": sid, "session_id": sid, "intent": "cancel"}
+            cancel_method_label = "skilldev.cancel"
+
+        try:
+            cancel_msg = Message(
+                id=f"vibeskill-{source}-{int(time.time() * 1000):x}-{secrets.token_hex(3)}",
+                type="req",
+                channel_id=VIBESKILL_CHANNEL_ID,
+                session_id=sid,
+                params=params,
+                timestamp=time.time(),
+                ok=True,
+                req_method=req_method,
+                is_stream=False,
+            )
+            logger.info(
+                "[VibeSkillChannel] %s sent, source=%s, session_id=%s, mode=%s",
+                cancel_method_label,
+                source,
+                sid,
+                mode,
+            )
+            self.bus.deliver_to_message_handler(cancel_msg)
+        except Exception:
+            logger.exception(
+                "[VibeSkillChannel] dispatch %s failed, source=%s, session_id=%s",
+                cancel_method_label,
+                source,
+                sid,
+            )
 
     async def _resolve_external_session_id(
         self,
@@ -1527,6 +1585,25 @@ class VibeSkillChannel(BaseChannel):
             return original
 
         return await self._store.resolve_external(sid)
+
+    async def _send_ws_res_error(
+        self,
+        ws: Any,
+        data: dict[str, Any] | None,
+        error: str,
+        *,
+        source: str,
+    ) -> None:
+        await self._send_ws_json(
+            ws,
+            {
+                "type": "res",
+                "id": str((data or {}).get("id") or "").strip(),
+                "ok": False,
+                "error": error,
+            },
+            source=source,
+        )
 
     async def _send_ws_json(self, ws: Any, payload: dict[str, Any], source: str) -> None:
         payload_str = json.dumps(payload, ensure_ascii=False)
@@ -2491,17 +2568,18 @@ class VibeSkillChannel(BaseChannel):
         if not internal_id:
             internal_id = session_id
 
-        state = await self._store.get_state(internal_id)
         session_obj = await self._store.get_session(internal_id)
+        if not session_obj:
+            return self._json_response(404, {"error": "session_not_found"})
 
         response_data = {
             "sessionID": session_id,
             "time": {
-                "created": int((session_obj.created_at if session_obj else time.time()) * 1000),
-                "updated": int((session_obj.updated_at if session_obj else time.time()) * 1000),
+                "created": int(session_obj.created_at * 1000),
+                "updated": int(session_obj.updated_at * 1000),
             },
             "status": {
-                "sessionStatus": state.value,
+                "sessionStatus": session_obj.state.value,
                 "sandboxStatus": "none",
             },
         }
@@ -2513,30 +2591,29 @@ class VibeSkillChannel(BaseChannel):
         return self._json_response(200, response_data)
 
     async def _handle_http_session_abort(self, session_id: str) -> tuple[int, dict, bytes]:
-        """POST /api/v1/session/{id}/abort - 中止 AI 处理。"""
+        """POST /api/v1/session/{id}/abort - 中止 AI 处理。
+
+        要求该 session 仍有活跃的北向 WebSocket；取消路径与 WS 断连一致（SKILLDEV_CANCEL + MessageHandler）。
+        """
         internal_id = await self._store.resolve_internal(session_id)
         if not internal_id:
             internal_id = session_id
 
-        request_id = f"vibeskill-session-abort-{int(time.time() * 1000):x}-{secrets.token_hex(3)}"
+        session_obj = await self._store.get_session(internal_id)
+        if not session_obj:
+            return self._json_response(404, {"error": "session_not_found"})
 
-        env = e2a_from_agent_fields(
-            request_id=request_id,
-            channel_id=VIBESKILL_CHANNEL_ID,
-            session_id=internal_id,
-            req_method=ReqMethod.CHAT_CANCEL,
-            params={"session_id": internal_id},
-            is_stream=False,
-            timestamp=time.time(),
-        )
+        if self._get_active_ws_for_session(internal_id) is None:
+            return self._json_response(
+                400,
+                {"error": "websocket_not_connected", "message": "WebSocket connection does not exist"},
+            )
 
-        await self._send_agent_request(env)
-        await self._store.set_state(internal_id, VibeSkillSessionState.IDLE)
-        logger.info(
-            "[VibeSkillChannel] session state -> idle, source=http.session.abort, session_id=%s",
+        await self._cancel_session_via_message_handler(
             internal_id,
+            source="http.session.abort",
+            mode=session_obj.mode,
         )
-
         return self._json_response(200, {"aborted": True})
 
     async def _handle_http_session_message(self, session_id: str, headers: dict) -> tuple[int, dict, bytes]:

@@ -238,7 +238,7 @@ SkillDev 事件映射：
 | `POST` | `/api/v1/session` | 已实现 | 创建会话，body 可传 `{"mode":"SkillCreate"}` 或 `{"mode":"Standard"}` |
 | `GET` | `/api/v1/session/{sessionID}` | 已实现 | 查询 session 状态 |
 | `DELETE` | `/api/v1/session/{sessionID}` | 已实现 | 删除本地 session 记录 |
-| `POST` | `/api/v1/session/{sessionID}/abort` | 已实现 | 发送 `chat.cancel` 到 AgentServer，并将本地状态置为 idle |
+| `POST` | `/api/v1/session/{sessionID}/abort` | 已实现 | 要求北向 WS 仍连接；SkillCreate 经 MessageHandler 派发 `skilldev.cancel`，Standard 派发 `chat.interrupt`（`CHAT_CANCEL`）；无 WS 时返回 400 `websocket_not_connected` |
 | `GET` | `/api/v1/session/{sessionID}/messages` | 已实现 | 调用 `skilldev.restore`，将 `timeline_items` 反转为前端消息列表 |
 | `POST` | `/api/v1/session/{sessionID}/summarize` | 占位 | 当前返回 `202 {"triggered":true}` |
 
@@ -460,7 +460,9 @@ WebSocket 断开时，`cleanup(ws)` 会执行：
 2. 移除 `ws -> session` 与 `session -> ws` 绑定。
 3. 清理该 session 的 `_message_ctx`。
 4. 如果 session 仍是 `busy`，本地置为 `idle`。
-5. 向 MessageHandler 派发 `ReqMethod.SKILLDEV_CANCEL`，参数包含 `task_id` 与 `session_id`。
+5. 按 session `mode` 向 MessageHandler 派发取消：SkillCreate → `SKILLDEV_CANCEL`（`task_id` + `session_id`）；Standard → `CHAT_CANCEL` / `chat.interrupt`（`intent=cancel`）。
+
+`POST .../abort` 与断连共用上述逻辑，且要求北向 WS 仍连接。
 
 这部分是测试长任务中断、浏览器刷新、网络断连时必须关注的链路。
 
@@ -490,7 +492,7 @@ WebSocket 断开时，`cleanup(ws)` 会执行：
 | 文件树 | `GET /session/{id}/file` | 返回 `FileTreeNode[]`，目录和文件结构正确 |
 | 文件内容 | `GET /session/{id}/file/content?path=...` | 返回 text content |
 | 导出 | `POST /session/{id}/export` | 返回 `exportId/url/mimeType/exportedAt` |
-| 断连取消 | busy 时关闭 WS | 本地状态 idle，并派发 `skilldev.cancel` |
+| 断连/abort 取消 | busy 时关闭 WS 或 `POST .../abort`（需 WS 在线） | 本地 idle；SkillCreate 派发 `skilldev.cancel`，Standard 派发 `chat.interrupt` |
 | 占位接口 | find/vcs/version/summarize | 返回当前占位结构，不应 500 |
 
 ## 10. 串讲时的关键结论
