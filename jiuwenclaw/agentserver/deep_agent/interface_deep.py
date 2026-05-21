@@ -40,15 +40,6 @@ from openjiuwen.core.session.interaction.interactive_input import InteractiveInp
 from openjiuwen.core.single_agent import AgentCard, ReActAgentConfig, create_agent_session
 from openjiuwen.core.sys_operation import (
     SysOperation,
-    SysOperationCard,
-    OperationMode,
-    LocalWorkConfig,
-    SandboxGatewayConfig,
-)
-from openjiuwen.core.sys_operation.config import (
-    SandboxIsolationConfig,
-    PreDeployLauncherConfig,
-    ContainerScope
 )
 from openjiuwen.harness import (
     AudioModelConfig,
@@ -172,7 +163,17 @@ from jiuwenclaw.agentserver.tools.xiaoyi_phone_tools import (
     xiaoyi_gui_agent,
     image_reading,
 )
-from jiuwenclaw.config import get_config, get_default_models, resolve_env_vars
+from jiuwenclaw.config import (
+    get_config,
+    get_default_models,
+    get_sandbox_endpoint,
+    get_sandbox_runtime,
+    resolve_env_vars,
+)
+from jiuwenclaw.agentserver.deep_agent.sysop_builder import (
+    create_local_sysop_card,
+    create_sandbox_sysop_card,
+)
 from jiuwenclaw.agentserver.stream_content_sanitize import strip_inline_tool_protocol
 from jiuwenclaw.agentserver.stream_utils import tool_calls_payload_to_json_list
 from jiuwenclaw.agentserver.extensions import get_rail_manager
@@ -191,7 +192,6 @@ from jiuwenclaw.local_env_config import set_local_config
 load_dotenv(dotenv_path=get_env_file())
 
 _react_config = get_config().get("react", {})
-_sandbox_config = get_config().get("sandbox", {})
 
 _CRON_TOOL_CHANNEL_ID: ContextVar[str] = ContextVar(
     "cron_tool_channel_id",
@@ -1346,31 +1346,39 @@ class JiuWenClawDeepAdapter:
         return rail
 
     def _create_sys_operation(self) -> SysOperation | None:
-        """Create a sys operation with workspace as working directory."""
+        """Create a sys operation with workspace as working directory.
+
+        是否走沙箱由 ``config.yaml::sandbox.enabled`` 决定（同时要求
+        ``sandbox.url`` / ``sandbox.type`` 已配置）。其他 sandbox 字段
+        (``excluded_commands`` / ``files``) 透传给 ``create_sandbox_sysop_card``
+        写入 ``launcher_config.extra_params``。
+
+        注意: 每次都从 ``get_sandbox_endpoint`` / ``get_sandbox_runtime`` 读最新
+        sandbox 配置（不再依赖模块导入期快照），用户改 config.yaml 后重启
+        agent-server 即可生效。``startup_mode`` 的合法性校验由 getter 完成。
+
+        当前 claw2b 不负责拉起 jiuwenbox，``startup_mode`` 仅支持 ``internal``,
+        表示 “使用 ``sandbox.url`` 配置的端点连接由外部启动的 jiuwenbox”。
+        """
         try:
-            sandbox_url = _sandbox_config.get("url", None)
-            sandbox_type = _sandbox_config.get("type", None)
+            endpoint = get_sandbox_endpoint()
+            runtime = get_sandbox_runtime()
             work_dir = self._workspace_dir or str(get_agent_root_dir())
-            if sandbox_url and sandbox_type:
-                gateway_config = SandboxGatewayConfig(
-                    isolation=SandboxIsolationConfig(container_scope=ContainerScope.SYSTEM),
-                    launcher_config=PreDeployLauncherConfig(
-                        base_url=sandbox_url,
-                        sandbox_type=sandbox_type,
-                        idle_ttl_seconds=600,
-                    ),
-                    timeout_seconds=30,
-                )
-                sysop_card = SysOperationCard(
-                    mode=OperationMode.SANDBOX,
-                    work_config=LocalWorkConfig(work_dir=work_dir, shell_allowlist=None),
-                    gateway_config=gateway_config,
+            sandbox_url = endpoint.get("url") or ""
+            sandbox_type = endpoint.get("type") or ""
+            if runtime.get("enabled") and sandbox_url and sandbox_type:
+                sysop_card = create_sandbox_sysop_card(
+                    sandbox_url,
+                    sandbox_type,
+                    files_runtime=runtime.get("files"),
+                    excluded_commands=runtime.get("excluded_commands"),
+                    project_dir=self._workspace_dir,
                 )
             else:
-                sysop_card = SysOperationCard(
-                    mode=OperationMode.LOCAL,
-                    work_config=LocalWorkConfig(work_dir=work_dir, shell_allowlist=None),
-                )
+                sysop_card = create_local_sysop_card(work_dir=work_dir)
+            if sysop_card is None:
+                logger.warning("[JiuWenClawDeepAdapter] add sys_operation failed: sysop_card is None")
+                return None
             result = Runner.resource_mgr.add_sys_operation(sysop_card)
             if result.is_err():
                 logger.warning("[JiuWenClawDeepAdapter] add sys_operation failed: %s", result.msg())
