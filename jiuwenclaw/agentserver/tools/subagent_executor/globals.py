@@ -24,7 +24,7 @@ def init_subagent_executor(
     parent_agent: DeepAgent,
     model: Model,
     default_role_prompts: dict[str, str] | None = None,
-) -> None:
+) -> ForkAgentExecutor:
     """Initialize the subagent executor with parent agent and model.
 
     Args:
@@ -39,3 +39,4 @@ def init_subagent_executor(
         default_role_prompts=default_role_prompts,
     )
     logger.info("[Subagent] Initialized subagent executor")
+    return _executor

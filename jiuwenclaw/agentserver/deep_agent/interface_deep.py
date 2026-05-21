@@ -734,6 +734,7 @@ class JiuWenClawDeepAdapter:
         self._model_cache: dict[str, Model] = {}
         self._default_model_name: str = ""
         self._multi_session_toolkit: MultiSessionToolkit | None = None
+        self._fork_agent_executor: Any = None
         # request_id -> toolkit；session_id -> 关联的 request_id 集合（interrupt 时按会话精确取消）
         self._request_session_toolkits: dict[str, MultiSessionToolkit] = {}
         self._session_toolkit_requests: dict[str, set[str]] = {}
@@ -2409,7 +2410,7 @@ class JiuWenClawDeepAdapter:
             from jiuwenclaw.agentserver.tools.subagent_tools import fork_agent, spawn_subagent
 
             # Initialize the subagent executor with parent agent and model
-            init_subagent_executor(
+            self._fork_agent_executor = init_subagent_executor(
                 self._instance,
                 model=self._model,  # Pass the model instance
                 default_role_prompts=None,  # Can be customized later
@@ -2434,6 +2435,31 @@ class JiuWenClawDeepAdapter:
             logger.info("[JiuWenClawDeepAdapter] Fork agent and spawn_subagent tools initialized")
         except Exception as exc:
             logger.warning("[JiuWenClawDeepAdapter] Failed to initialize subagent tools: %s", exc)
+
+    def _get_fork_agent_executor(self) -> Any | None:
+        """Return this adapter's subagent executor without crossing agent instances."""
+        executor = getattr(self, "_fork_agent_executor", None)
+        if executor is not None:
+            return executor
+
+        try:
+            from jiuwenclaw.agentserver.tools.subagent_executor import get_fork_agent_executor
+
+            executor = get_fork_agent_executor()
+        except Exception as exc:
+            logger.debug("[JiuWenClawDeepAdapter] get fork agent executor failed: %s", exc)
+            return None
+
+        if executor is None:
+            return None
+        parent_agent = getattr(executor, "_parent_agent", None)
+        if self._instance is not None and parent_agent is not self._instance:
+            logger.debug(
+                "[JiuWenClawDeepAdapter] Skip fork executor from another parent agent during interrupt"
+            )
+            return None
+        self._fork_agent_executor = executor
+        return executor
 
     async def load_user_rails(self) -> None:
         """动态加载用户自定义的 Rail 扩展."""
@@ -3189,12 +3215,14 @@ class JiuWenClawDeepAdapter:
                 await self._instance.abort()
             # 3. 取消当前会话关联的 MultiSessionToolkit 子任务（按 request 跟踪，避免误停其它会话）
             await self._cancel_session_toolkits(request.session_id, "interrupt(supplement): ")
+            # 4. 终止 fork_agent / spawn_subagent 派生出的活跃子 Agent
+            await self._abort_active_subagents(f"interrupt({intent}) request_id={request.request_id}")
             AskUserQuestionRegistry.get_instance().cancel_for_session(str(request.session_id or ""))
             await self._clear_session_persisted_interrupt_state(
                 request.session_id,
                 reason="interrupt(supplement)",
             )
-            # 4. 不清理 todo — 保留给新任务继续
+            # 5. 不清理 todo — 保留给新任务继续
             logger.info(
                 "[JiuWenClawDeepAdapter] interrupt(supplement): 已停止执行 request_id=%s",
                 request.request_id,
@@ -3214,12 +3242,14 @@ class JiuWenClawDeepAdapter:
                 request.session_id,
                 f"interrupt(cancel) request_id={request.request_id}: ",
             )
+            # 4. 终止 fork_agent / spawn_subagent 派生出的活跃子 Agent
+            await self._abort_active_subagents(f"interrupt({intent}) request_id={request.request_id}")
             AskUserQuestionRegistry.get_instance().cancel_for_session(str(request.session_id or ""))
             await self._clear_session_persisted_interrupt_state(
                 request.session_id,
                 reason="interrupt(cancel)",
             )
-            # 4. 将未完成的 todo 项标记为 cancelled，并获取更新后的 todo 列表
+            # 5. 将未完成的 todo 项标记为 cancelled，并获取更新后的 todo 列表
             updated_todos = None
             if request.session_id:
                 try:
@@ -3277,6 +3307,35 @@ class JiuWenClawDeepAdapter:
             return False
         return True
 
+    async def _abort_active_subagents(self, reason: str) -> int:
+        """Propagate interrupt cancellation to active fork/spawn subagents."""
+        executor = self._get_fork_agent_executor()
+        if executor is None:
+            return 0
+
+        abort_method = getattr(executor, "abort_active_subagents", None)
+        if not callable(abort_method):
+            logger.warning(
+                "[JiuWenClawDeepAdapter] fork agent executor has no abort_active_subagents method"
+            )
+            return 0
+
+        try:
+            aborted_count = await abort_method(reason=reason)
+            logger.info(
+                "[JiuWenClawDeepAdapter] %s: aborted active subagents count=%d",
+                reason,
+                aborted_count,
+            )
+            return aborted_count
+        except Exception as exc:
+            logger.warning(
+                "[JiuWenClawDeepAdapter] %s: abort active subagents failed error=%s",
+                reason,
+                exc,
+            )
+            return 0
+
     async def _clear_session_persisted_interrupt_state(
         self,
         session_id: str | None,
@@ -3320,6 +3379,7 @@ class JiuWenClawDeepAdapter:
                 )
         for sid in list(self._session_toolkit_requests.keys()):
             await self._cancel_session_toolkits(sid, "gateway_disconnect: ")
+        await self._abort_active_subagents("gateway_disconnect")
 
     def _track_session_toolkit(
         self,

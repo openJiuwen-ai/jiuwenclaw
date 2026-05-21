@@ -8,6 +8,7 @@ Core executor for fork_agent and spawn_subagent execution.
 from __future__ import annotations
 
 import asyncio
+import inspect
 from pathlib import Path
 from typing import Any, TYPE_CHECKING
 
@@ -54,6 +55,7 @@ from jiuwenclaw.agentserver.tools.subagent_executor.skill_use_rail_subagent impo
 
 # Default timeout for subagent execution
 _DEFAULT_TIMEOUT_SECONDS = 600.0
+_SUBAGENT_ABORT_TIMEOUT_SECONDS = 30.0
 
 # Default excluded tools for spawn/fork agents
 EXCLUDED_TOOLS_SPAWN = {
@@ -167,6 +169,74 @@ class ForkAgentExecutor:
                 usage = parsed
 
         return (final_text or "".join(streamed_parts), usage)
+
+    async def abort_active_subagents(
+        self,
+        reason: str | None = None,
+        timeout_seconds: float = _SUBAGENT_ABORT_TIMEOUT_SECONDS,
+    ) -> int:
+        """Abort all currently running fork/spawn subagents."""
+        active_agents = dict(self._active_fork_agents)
+        if not active_agents:
+            return 0
+
+        timeout_seconds = max(float(timeout_seconds), 0.1)
+        logger.info(
+            "[ForkAgentExecutor] Aborting active subagents, count=%d, timeout=%s, reason=%s",
+            len(active_agents),
+            timeout_seconds,
+            reason or "",
+        )
+        abort_tasks = [
+            asyncio.create_task(
+                self._abort_one_active_subagent(
+                    task_id,
+                    agent,
+                    timeout_seconds=timeout_seconds,
+                    reason=reason,
+                )
+            )
+            for task_id, agent in active_agents.items()
+        ]
+        await asyncio.gather(*abort_tasks, return_exceptions=True)
+
+        return len(active_agents)
+
+    async def _abort_one_active_subagent(
+        self,
+        task_id: str,
+        agent: Any,
+        *,
+        timeout_seconds: float,
+        reason: str | None,
+    ) -> None:
+        try:
+            abort = getattr(agent, "abort", None)
+            if callable(abort):
+                result = abort()
+                if inspect.isawaitable(result):
+                    await asyncio.wait_for(result, timeout=timeout_seconds)
+                logger.info("[ForkAgentExecutor] Aborted subagent task_id=%s", task_id)
+            else:
+                logger.warning(
+                    "[ForkAgentExecutor] Active subagent has no abort method, task_id=%s",
+                    task_id,
+                )
+        except asyncio.TimeoutError:
+            logger.warning(
+                "[ForkAgentExecutor] Timed out aborting subagent task_id=%s timeout=%s reason=%s",
+                task_id,
+                timeout_seconds,
+                reason or "",
+            )
+        except Exception as exc:
+            logger.warning(
+                "[ForkAgentExecutor] Failed to abort subagent task_id=%s error=%s",
+                task_id,
+                exc,
+            )
+        finally:
+            self._active_fork_agents.pop(task_id, None)
 
     def _resolve_subagent_workspace_dir(self) -> tuple[str, str]:
         """Resolve workspace for fork/spawn to match the main agent for the current request.
