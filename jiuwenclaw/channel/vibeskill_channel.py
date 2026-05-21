@@ -484,29 +484,26 @@ class VibeSkillChannel(BaseChannel):
             return await self._handle_desc_optimize_replied(data)
         if msg_type == "test.replied":
             return await self._handle_test_replied(data)
+        if msg_type == "skillSearch.replied":
+            return await self._handle_skill_search_replied(ws, data)
 
         return False
 
-    async def _handle_message_send(self, ws: Any, data: dict[str, Any]) -> bool:
-        """处理 message.send 类型的消息，封装为 skilldev.chat 并发送到 MessageHandler。"""
-        external_session_id = str(data.get("sessionID") or "").strip()
-        parts = data.get("parts", [])
-        msg_model = data.get("model")
-        agent = data.get("agent", "coder")
-        system_prompt = data.get("system")
-        request_id = f"vibeskill-{int(time.time() * 1000):x}-{secrets.token_hex(3)}"
-
-        # 提取 query (text parts)
+    def _extract_parts_to_skilldev_params(self, parts: list[Any]) -> dict[str, Any]:
+        """从 message.send / skillSearch.replied 的 parts 提取 skilldev.chat params 字段。"""
         query = ""
-        for part in parts:
-            if isinstance(part, dict) and part.get("type") == "text":
-                query += str(part.get("text") or "")
+        files: list[dict[str, Any]] = []
+        skill_packages: list[dict[str, Any]] = []
+        tools: list[dict[str, Any]] = []
+        agent_definitions: list[dict[str, Any]] = []
 
-        # 提取 files 和 skill_packages (file parts)
-        files = []
-        skill_packages = []
         for part in parts:
-            if isinstance(part, dict) and part.get("type") == "file":
+            if not isinstance(part, dict):
+                continue
+            part_type = str(part.get("type") or "").strip()
+            if part_type == "text":
+                query += str(part.get("text") or "")
+            elif part_type == "file":
                 file_info = {
                     "filename": part.get("filename", ""),
                     "url": part.get("url", ""),
@@ -514,18 +511,13 @@ class VibeSkillChannel(BaseChannel):
                 }
                 resource_type = part.get("resourceType", "")
                 if resource_type == "skill":
-                    # skill 文件作为 skill_packages
                     skill_packages.append({
                         "filename": part.get("filename", ""),
                         "url": part.get("url", ""),
                     })
                 else:
                     files.append(file_info)
-
-        # 提取 tools (toolDefinition parts)
-        tools = []
-        for part in parts:
-            if isinstance(part, dict) and part.get("type") == "toolDefinition":
+            elif part_type == "toolDefinition":
                 tools.append({
                     "pluginId": part.get("pluginId", ""),
                     "pluginType": part.get("pluginType", ""),
@@ -535,11 +527,7 @@ class VibeSkillChannel(BaseChannel):
                     "arguments": part.get("arguments", {}),
                     "protocol": part.get("protocol", ""),
                 })
-
-        # 提取 agents (agentDefinition parts)
-        agent_definitions = []
-        for part in parts:
-            if isinstance(part, dict) and part.get("type") == "agentDefinition":
+            elif part_type == "agentDefinition":
                 parameters = part.get("parameters", {})
                 if not isinstance(parameters, dict):
                     parameters = {}
@@ -549,6 +537,28 @@ class VibeSkillChannel(BaseChannel):
                     "description": str(part.get("description") or ""),
                     "parameters": parameters,
                 })
+
+        params: dict[str, Any] = {}
+        if query:
+            params["query"] = query
+        if files:
+            params["files"] = files
+        if skill_packages:
+            params["skill_packages"] = skill_packages
+        if tools:
+            params["tool_spec_files"] = tools
+        if agent_definitions:
+            params["agent_definitions"] = agent_definitions
+        return params
+
+    async def _handle_message_send(self, ws: Any, data: dict[str, Any]) -> bool:
+        """处理 message.send 类型的消息，封装为 skilldev.chat 并发送到 MessageHandler。"""
+        external_session_id = str(data.get("sessionID") or "").strip()
+        parts = data.get("parts", []) if isinstance(data.get("parts"), list) else []
+        msg_model = data.get("model")
+        agent = data.get("agent", "coder")
+        system_prompt = data.get("system")
+        request_id = f"vibeskill-{int(time.time() * 1000):x}-{secrets.token_hex(3)}"
 
         session: VibeSkillSession | None = None
         if external_session_id:
@@ -603,26 +613,12 @@ class VibeSkillChannel(BaseChannel):
             self._session_to_ws[session.internal_id] = ws
 
         # 构建 skilldev.chat 格式的 params
-        params: dict[str, Any] = {
-            "task_id": session.internal_id,
-            "query": query,
-        }
+        params: dict[str, Any] = {"task_id": session.internal_id, **self._extract_parts_to_skilldev_params(parts)}
+        if "query" not in params:
+            params["query"] = ""
 
-        # files (非 skill 的文件)
-        if files:
-            params["files"] = files
-
-        # skill_packages
-        if skill_packages:
-            params["skill_packages"] = skill_packages
-
-        # tools (toolDefinition)
-        if tools:
-            params["tool_spec_files"] = tools
-
-        # agents (agentDefinition)
-        if agent_definitions:
-            params["agent_definitions"] = agent_definitions
+        if "skillSearch" in data:
+            params["enable_skill_search"] = bool(data.get("skillSearch"))
 
         # 可选字段
         inbound_agent_id = str(data.get("agent_id") or data.get("agentId") or "").strip()
@@ -916,6 +912,90 @@ class VibeSkillChannel(BaseChannel):
             params={"task_id": session_id, "action": action},
         )
 
+    async def _handle_skill_search_replied(self, ws: Any, data: dict[str, Any]) -> bool:
+        """处理 skillSearch.replied，封装为 skilldev.chat 并发送到 MessageHandler。"""
+        properties = data.get("properties") if isinstance(data.get("properties"), dict) else data
+        session_id = str(properties.get("sessionID") or "").strip()
+        action = str(properties.get("action") or "").strip().lower()
+        if action not in ("ignore", "select"):
+            return False
+
+        parts = properties.get("parts", []) if isinstance(properties.get("parts"), list) else []
+        request_id = f"vibeskill-skill-search-{int(time.time() * 1000):x}-{secrets.token_hex(3)}"
+
+        internal_id = await self._store.resolve_internal(session_id) if session_id else None
+        if not internal_id and session_id:
+            internal_id = session_id
+        if not internal_id:
+            return False
+
+        session_obj = await self._store.get_session(internal_id)
+        if session_obj and session_obj.mode == "Standard":
+            return False
+
+        external_session_id = session_id
+        if session_obj and session_obj.external_id:
+            external_session_id = session_obj.external_id
+
+        self._clear_message_context_for_session(internal_id)
+
+        await self._store.set_state(internal_id, VibeSkillSessionState.BUSY)
+        logger.info(
+            "[VibeSkillChannel] session state -> busy, source=skillSearch.replied, session_id=%s",
+            internal_id,
+        )
+        await self._emit_session_status(
+            ws=ws,
+            external_sid=external_session_id or internal_id,
+            status_type=VibeSkillSessionState.BUSY.value,
+        )
+
+        async with self._ws_sessions_lock:
+            if ws not in self._ws_sessions:
+                self._ws_sessions[ws] = set()
+            self._ws_sessions[ws].add(internal_id)
+            self._session_to_ws[internal_id] = ws
+
+        params: dict[str, Any] = {
+            "task_id": internal_id,
+            **self._extract_parts_to_skilldev_params(parts),
+        }
+        if "query" not in params:
+            params["query"] = ""
+
+        if action == "select":
+            skill = properties.get("skill")
+            if isinstance(skill, dict) and skill:
+                params["skill_searched"] = {
+                    "skillName": str(skill.get("skillName") or skill.get("skill_name") or ""),
+                    "url": str(skill.get("url") or ""),
+                }
+
+        metadata_dict: dict[str, str] = {}
+        if external_session_id:
+            metadata_dict[_VIBESKILL_ORIGINAL_SESSION_ID_KEY] = external_session_id
+        msg_metadata = metadata_dict if metadata_dict else None
+
+        msg = Message(
+            id=request_id,
+            type="req",
+            channel_id=VIBESKILL_CHANNEL_ID,
+            session_id=internal_id,
+            params=params,
+            timestamp=time.time(),
+            ok=True,
+            req_method=ReqMethod.SKILLDEV_CHAT,
+            is_stream=True,
+            metadata=msg_metadata,
+        )
+        logger.info(
+            "[VibeSkillChannel] skilldev.chat sent (skillSearch.replied), session_id=%s action=%s",
+            internal_id,
+            action,
+        )
+        self.bus.deliver_to_message_handler(msg)
+        return True
+
     async def outbound_intercept(self, msg: Message, ws: Any) -> bool:
         """拦截 AgentServer 出站消息，转换为 VibeSkill 流式事件。"""
         if msg.type != "event":
@@ -1026,6 +1106,7 @@ class VibeSkillChannel(BaseChannel):
             "skilldev.todos_update": self._handle_skilldev_todos_update,
             "skilldev.confirm_request": self._handle_skilldev_confirm_request,
             "skilldev.ask_user_question": self._handle_skilldev_ask_user_question,
+            "skilldev.search_results": self._handle_skilldev_search_results,
             "skilldev.error": self._handle_skilldev_error,
             "skilldev.agent_completed": self._handle_skilldev_agent_completed,
             "skilldev.completed": self._handle_skilldev_completed,
@@ -1299,6 +1380,34 @@ class VibeSkillChannel(BaseChannel):
                     for q in questions
                 ],
                 "tool": str(payload.get("tool") or ""),
+            },
+        }]
+
+    async def _handle_skilldev_search_results(
+        self,
+        payload: dict,
+        external_sid: str | None,
+        session_id: str | None,
+    ) -> list[dict]:
+        """skilldev.search_results → skillSearch.asked（检索结果呈现）。"""
+        request_id = str(
+            payload.get("request_id") or payload.get("id") or f"req_{secrets.token_hex(4)}"
+        ).strip()
+        skill_list = payload.get("skillList")
+        if skill_list is None:
+            skill_list = payload.get("skill_list", [])
+        if not isinstance(skill_list, list):
+            skill_list = []
+        num = payload.get("num", 0)
+        total = payload.get("total", 0)
+        return [{
+            "type": "skillSearch.asked",
+            "properties": {
+                "id": request_id,
+                "sessionID": external_sid or session_id,
+                "skillList": skill_list,
+                "num": num,
+                "total": total,
             },
         }]
 
