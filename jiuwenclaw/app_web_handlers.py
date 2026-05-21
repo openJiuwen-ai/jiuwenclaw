@@ -183,7 +183,6 @@ _FORWARD_NO_LOCAL_HANDLER_METHODS = frozenset({
     "skilldev.restore",
     "skilldev.parse_skill",
     "skilldev.download",
-    "skilldev.cancel",
     "skilldev.file.list",
     "skilldev.file.read",
     "skilldev.user_answer",
@@ -1270,6 +1269,21 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             payload["intent"] = intent
         await channel.send_response(ws, req_id, ok=True, payload=payload)
 
+    async def _skilldev_cancel(ws, req_id, params, session_id):
+        sid = session_id
+        task_id = None
+        if isinstance(params, dict):
+            raw_sid = params.get("session_id")
+            if isinstance(raw_sid, str) and raw_sid.strip():
+                sid = raw_sid.strip()
+            raw_task = params.get("task_id")
+            if isinstance(raw_task, str) and raw_task.strip():
+                task_id = raw_task.strip()
+        payload: dict = {"accepted": True, "session_id": sid}
+        if task_id:
+            payload["task_id"] = task_id
+        await channel.send_response(ws, req_id, ok=True, payload=payload)
+
     async def _chat_user_answer(ws, req_id, params, session_id):
         payload = {"accepted": True, "session_id": session_id}
         request_id = params.get("request_id") if isinstance(params, dict) else None
@@ -2039,6 +2053,7 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
     channel.register_method("chat.send", _chat_send)
     channel.register_method("chat.resume", _chat_resume)
     channel.register_method("chat.interrupt", _chat_interrupt)
+    channel.register_method("skilldev.cancel", _skilldev_cancel)
     channel.register_method("chat.user_answer", _chat_user_answer)
     channel.register_method("skilldev.user_answer", _skilldev_user_answer)
     channel.register_method("history.get", _history_get)

@@ -614,7 +614,7 @@ class SkillDevDeepAdapter:
                 )
             message = "任务已取消"
         payload = {
-            "event_type": "chat.interrupt_result",
+            "event_type": "skilldev.interrupt_result",
             "intent": intent,
             "success": True,
             "message": message,

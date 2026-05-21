@@ -767,7 +767,7 @@ export function SkillDevPanel() {
       })
     );
     unsubs.push(
-      webClient.on('chat.interrupt_result', ({ payload }) => {
+      webClient.on('skilldev.interrupt_result', ({ payload }) => {
         handleInterruptResult(payload);
       })
     );
@@ -1250,7 +1250,7 @@ export function SkillDevPanel() {
     try {
       taskCancelledRef.current = true;
       dismissPendingInteraction();
-      await cancelSkillDev(sessionId);
+      await cancelSkillDev({ session_id: sessionId, task_id: taskId });
       setProcessing(false);
       setSuspended(false);
       addMessage({

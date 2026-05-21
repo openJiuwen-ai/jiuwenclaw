@@ -188,12 +188,17 @@ export async function readSkillDevFile(
 }
 
 /**
- * 取消任务（走 chat.interrupt → interface._process_interrupt → skilldev adapter）
+ * 取消任务（skilldev.cancel → gateway → interface._process_interrupt → skilldev adapter）
  */
-export async function cancelSkillDev(sessionId: string): Promise<void> {
-  await webRequest<{ accepted?: boolean }>('chat.interrupt', {
+export async function cancelSkillDev(params: {
+  session_id: string;
+  task_id?: string;
+}): Promise<void> {
+  const sessionId = params.session_id;
+  const taskId = params.task_id ?? sessionId;
+  await webRequest<{ accepted?: boolean }>('skilldev.cancel', {
     session_id: sessionId,
-    intent: 'cancel',
+    task_id: taskId,
   });
 }
 

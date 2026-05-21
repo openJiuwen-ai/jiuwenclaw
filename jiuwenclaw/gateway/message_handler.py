@@ -396,9 +396,15 @@ class MessageHandler(ABC):
         if tasks_to_cancel:
             await asyncio.gather(*tasks_to_cancel, return_exceptions=True)
 
+        result_event_type = (
+            "skilldev.interrupt_result"
+            if msg.req_method == ReqMethod.SKILLDEV_CANCEL
+            else "chat.interrupt_result"
+        )
         for rid in rids_cancelled:
             await self._send_interrupt_result_notification(
                 rid, msg.channel_id, old_sid, "cancel",
+                result_event_type=result_event_type,
             )
 
         if old_sid is None and not rids_cancelled:
@@ -411,18 +417,29 @@ class MessageHandler(ABC):
         # 即使网关侧已无活跃流式拉取任务（例如 Agent 正在执行 shell/工具），也必须通知 AgentServer，
         # 否则仅断开 CLI WebSocket 无法停止已派发的工作。
 
+        agent_cancel_method = (
+            ReqMethod.SKILLDEV_CANCEL
+            if msg.req_method == ReqMethod.SKILLDEV_CANCEL
+            else ReqMethod.CHAT_CANCEL
+        )
+        cancel_params: dict[str, Any] = {
+            "intent": "cancel",
+            "session_id": sid_for_agent,
+        }
+        if agent_cancel_method == ReqMethod.SKILLDEV_CANCEL:
+            task_id = (msg.params or {}).get("task_id") or sid_for_agent
+            if isinstance(task_id, str) and task_id.strip():
+                cancel_params["task_id"] = task_id.strip()
+
         cancel_req = Message(
             id=f"interrupt_{int(time.time() * 1000):x}_{secrets.token_hex(3)}",
             type="req",
             channel_id=msg.channel_id,
             session_id=sid_for_agent,
-            params={
-                "intent": "cancel",
-                "session_id": sid_for_agent,
-            },
+            params=cancel_params,
             timestamp=time.time(),
             ok=True,
-            req_method=ReqMethod.CHAT_CANCEL,
+            req_method=agent_cancel_method,
             metadata=msg.metadata,
             provider=getattr(msg, "provider", None),
             chat_id=getattr(msg, "chat_id", None),
@@ -2856,6 +2873,8 @@ class MessageHandler(ABC):
         session_id: str | None,
         intent: str,
         message: str | None = None,
+        *,
+        result_event_type: str = "chat.interrupt_result",
     ) -> None:
         """发送 interrupt_result 事件到前端（pause / resume 等）."""
         from jiuwenclaw.schema.message import Message, EventType
@@ -2866,6 +2885,7 @@ class MessageHandler(ABC):
             "cancel": "任务已取消",
             "supplement": "任务已切换",
         }
+        is_skilldev_result = result_event_type.startswith("skilldev.")
         notify_msg = Message(
             id=request_id,
             type="event",
@@ -2875,12 +2895,12 @@ class MessageHandler(ABC):
             timestamp=time.time(),
             ok=True,
             payload={
-                "event_type": "chat.interrupt_result",
+                "event_type": result_event_type,
                 "intent": intent,
                 "success": True,
                 "message": message or messages_map.get(intent, "任务已中断"),
             },
-            event_type=EventType.CHAT_INTERRUPT_RESULT,
+            event_type=None if is_skilldev_result else EventType.CHAT_INTERRUPT_RESULT,
             metadata=None,
         )
         await self.publish_robot_messages(notify_msg)
