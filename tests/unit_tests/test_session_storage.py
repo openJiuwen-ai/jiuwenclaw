@@ -3,9 +3,23 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from unittest.mock import patch
+from typing import TYPE_CHECKING
 
 import pytest
+
+if TYPE_CHECKING:
+    from jiuwenclaw.gateway.session_map import Session
+
+
+def _make_session(session_id: str, agent_id: str | None = None) -> Session:
+    from jiuwenclaw.gateway.session_map import Session, invoke_ids_from_session_id_string
+
+    svc, derived_aid = invoke_ids_from_session_id_string(session_id)
+    return Session(
+        session_id=session_id,
+        service_id=svc,
+        agent_id=agent_id if agent_id is not None else derived_aid,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -46,10 +60,10 @@ class TestLocalSessionStorageBasic:
         store_path = storage_dir / "session_map_default.json"
         storage = LocalSessionStorage(store_path=store_path)
 
-        storage.set("key1", "sess_001")
+        storage.set("key1", _make_session("sess_001"))
         result = storage.get("key1")
         assert result is not None
-        assert result == "sess_001"
+        assert result.session_id == "sess_001"
 
     @staticmethod
     def test_get_nonexistent(storage_dir):
@@ -69,7 +83,7 @@ class TestLocalSessionStorageBasic:
         store_path = storage_dir / "session_map_default.json"
         storage = LocalSessionStorage(store_path=store_path)
 
-        storage.set("key1", "sess_001")
+        storage.set("key1", _make_session("sess_001"))
         storage.remove("key1")
         assert storage.get("key1") is None
 
@@ -81,12 +95,12 @@ class TestLocalSessionStorageBasic:
         store_path = storage_dir / "session_map_default.json"
         storage = LocalSessionStorage(store_path=store_path)
 
-        storage.set("key1", "sess_001")
-        storage.set("key2", "sess_002")
+        storage.set("key1", _make_session("sess_001"))
+        storage.set("key2", _make_session("sess_002"))
         all_data = storage.get_all()
         assert len(all_data) == 2
-        assert all_data["key1"] == "sess_001"
-        assert all_data["key2"] == "sess_002"
+        assert all_data["key1"].session_id == "sess_001"
+        assert all_data["key2"].session_id == "sess_002"
 
 
 # ---------------------------------------------------------------------------
@@ -104,15 +118,12 @@ class TestLocalSessionStoragePersist:
         store_path = storage_dir / "session_map_default.json"
         storage = LocalSessionStorage(store_path=store_path)
 
-        # 设置多条数据
-        storage.set("key1", "sess_001")
-        storage.set("key2", "sess_002")
+        storage.set("key1", _make_session("sess_001"))
+        storage.set("key2", _make_session("sess_002"))
 
-        # 只保存 sess_001（实际上 set 已经自动保存了）
-        # 验证文件内容
         with open(store_path, "r", encoding="utf-8") as f:
             data = json.load(f)
-        assert data["key1"] == "sess_001"
+        assert data["key1"]["session_id"] == "sess_001"
 
     @staticmethod
     def test_save_nonexistent_session(storage_dir):
@@ -122,8 +133,7 @@ class TestLocalSessionStoragePersist:
         store_path = storage_dir / "session_map_default.json"
         storage = LocalSessionStorage(store_path=store_path)
 
-        # 不应抛出异常
-        storage.save("nonexistent_session_id")
+        storage.save(_make_session("orphan_not_in_mapping"))
 
     @staticmethod
     def test_load_from_existing_file(storage_dir):
@@ -141,7 +151,7 @@ class TestLocalSessionStoragePersist:
 
         result = storage.get("key1")
         assert result is not None
-        assert result == "sess_old"
+        assert result.session_id == "sess_old"
 
 
 # ---------------------------------------------------------------------------
@@ -175,15 +185,11 @@ class TestSessionMapWithStorage:
         store_path = storage_dir / "session_map_default.json"
         storage = LocalSessionStorage(store_path=store_path)
 
-        # 模拟 SessionMap 的 get_session 逻辑
-        from jiuwenclaw.gateway.session_map import SessionMap, SessionMapScope
-
         identity_key = "provider1::chat1::bot1"
         session_id = "provider1::chat1::bot1::ts1::suffix1"
-        storage.set(identity_key, session_id)
+        storage.set(identity_key, _make_session(session_id))
 
-        # 验证持久化
         storage2 = LocalSessionStorage(store_path=store_path)
         result = storage2.get(identity_key)
         assert result is not None
-        assert result == session_id
+        assert result.session_id == session_id

@@ -1,6 +1,6 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2026-2026. All rights reserved
 
-"""Manager WS Client 通用工具函数。"""
+"""Gateway 扩展基础设施工具函数。"""
 
 from __future__ import annotations
 

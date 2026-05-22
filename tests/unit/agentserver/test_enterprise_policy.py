@@ -10,11 +10,12 @@ import pytest
 from jiuwenclaw.agentserver.enterprise_config.expressions import (
     agent_rule_matches,
     evaluate_match_expr,
-    resolve_model_slot_ref,
-    service_rule_matches,
+    resolve_template_slot_ref,
     substitute_template,
 )
-from jiuwenclaw.agentserver.enterprise_config.routing import RoutingContext
+from jiuwenclaw.agentserver.enterprise_config.schemas import RoutingContext
+
+_FALLBACK_TEMPLATE_ID = "11111111-1111-4111-8111-111111111111"
 
 
 class _MappingStore:
@@ -38,12 +39,9 @@ class _MappingStore:
 @pytest.fixture
 def sales_ctx() -> RoutingContext:
     return RoutingContext(
-        jiuwenclaw_id="sp-demo",
         group_id="g_demo_sales",
         bot_id="bot_main",
         user_id="alice",
-        service_id="g_demo_sales::bot_main",
-        agent_id="alice",
     )
 
 
@@ -60,7 +58,7 @@ def test_service_rule_priority_match(sales_ctx: RoutingContext) -> None:
         "priority": 100,
         "match_expr": "group_id == 'g_demo_sales'",
     }
-    assert service_rule_matches(rule, sales_ctx) is True
+    assert evaluate_match_expr(rule.get("match_expr"), sales_ctx) is True
 
 
 def test_service_rule_empty_match_expr_matches_any_group(
@@ -72,13 +70,9 @@ def test_service_rule_empty_match_expr_matches_any_group(
         "priority": 100,
         "match_expr": "",
     }
-    unknown = replace(
-        sales_ctx,
-        group_id="g_unknown",
-        service_id="g_unknown::bot_main",
-    )
-    assert service_rule_matches(rule, sales_ctx) is True
-    assert service_rule_matches(rule, unknown) is True
+    unknown = replace(sales_ctx, group_id="g_unknown")
+    assert evaluate_match_expr(rule.get("match_expr"), sales_ctx) is True
+    assert evaluate_match_expr(rule.get("match_expr"), unknown) is True
 
 
 def test_service_rule_ignores_service_id_field(sales_ctx: RoutingContext) -> None:
@@ -86,7 +80,7 @@ def test_service_rule_ignores_service_id_field(sales_ctx: RoutingContext) -> Non
         "service_id": "fixed::wrong",
         "match_expr": "group_id == 'g_demo_sales'",
     }
-    assert service_rule_matches(rule, sales_ctx) is True
+    assert evaluate_match_expr(rule.get("match_expr"), sales_ctx) is True
 
 
 def test_service_rule_service_id_template_does_not_imply_match(
@@ -96,7 +90,7 @@ def test_service_rule_service_id_template_does_not_imply_match(
         "service_id": "${group_id}::${bot_id}",
         "match_expr": "group_id == 'g_unknown'",
     }
-    assert service_rule_matches(rule, sales_ctx) is False
+    assert evaluate_match_expr(rule.get("match_expr"), sales_ctx) is False
 
 
 def test_service_rule_sales_group_only(sales_ctx: RoutingContext) -> None:
@@ -105,13 +99,9 @@ def test_service_rule_sales_group_only(sales_ctx: RoutingContext) -> None:
         "priority": 100,
         "match_expr": "group_id == 'g_demo_sales'",
     }
-    unknown = replace(
-        sales_ctx,
-        group_id="g_unknown",
-        service_id="g_unknown::bot_main",
-    )
-    assert service_rule_matches(rule, sales_ctx) is True
-    assert service_rule_matches(rule, unknown) is False
+    unknown = replace(sales_ctx, group_id="g_unknown")
+    assert evaluate_match_expr(rule.get("match_expr"), sales_ctx) is True
+    assert evaluate_match_expr(rule.get("match_expr"), unknown) is False
 
 
 def test_agent_rule_user_match(sales_ctx: RoutingContext) -> None:
@@ -129,101 +119,113 @@ def test_match_expr_empty_is_true(sales_ctx: RoutingContext) -> None:
 
 
 @pytest.mark.asyncio
-async def test_resolve_model_slot_ref_mapping_or_fallback(
-    sales_ctx: RoutingContext,
+async def test_resolve_template_slot_ref_mapping_or_fallback(
+    sales_ctx: RoutingContext, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    async def _lookup(
-        jiuwenclaw_id: str,
+    async def _list_records(
+        table: str,
         *,
-        user_id: str | None = None,
-        group_id: str | None = None,
-    ) -> str | None:
-        if group_id == "g_demo_sales":
-            return "2"
-        return None
+        filters: dict | None = None,
+        order_by: str = "",
+    ) -> list[dict]:
+        if table == "config_default_template_mapping" and (filters or {}).get("group_id") == "g_demo_sales":
+            return [{"template_id": "2"}]
+        return []
 
-    store = _MappingStore(_lookup)
-    ref = await resolve_model_slot_ref(
-        "${group::g_demo_sales} or 1",
+    from jiuwenclaw.agentserver.enterprise_config import gateway_db
+
+    monkeypatch.setattr(gateway_db, "list_records", _list_records)
+
+    ref = await resolve_template_slot_ref(
+        f"${{group::g_demo_sales}} or {_FALLBACK_TEMPLATE_ID}",
         sales_ctx,
-        store=store,
     )
     assert ref == "2"
 
-    async def _lookup_user_only(
-        jiuwenclaw_id: str,
+    async def _list_records_user(
+        table: str,
         *,
-        user_id: str | None = None,
-        group_id: str | None = None,
-    ) -> str | None:
-        if user_id == "carol":
-            return "4"
-        return None
+        filters: dict | None = None,
+        order_by: str = "",
+    ) -> list[dict]:
+        if table == "config_default_template_mapping" and (filters or {}).get("user_id") == "carol":
+            return [{"template_id": "4"}]
+        return []
 
-    ref_user = await resolve_model_slot_ref(
-        "${user::carol} or 1",
-        replace(sales_ctx, user_id="carol", agent_id="carol"),
-        store=_MappingStore(_lookup_user_only),
+    monkeypatch.setattr(gateway_db, "list_records", _list_records_user)
+    ref_user = await resolve_template_slot_ref(
+        f"${{user::carol}} or {_FALLBACK_TEMPLATE_ID}",
+        replace(sales_ctx, user_id="carol"),
     )
     assert ref_user == "4"
 
 
 @pytest.mark.asyncio
-async def test_resolve_model_slot_ref_rejects_nested_and_ambiguous(
-    sales_ctx: RoutingContext,
+async def test_resolve_template_slot_ref_rejects_nested_and_ambiguous(
+    sales_ctx: RoutingContext, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    async def _lookup(*_args: object, **_kwargs: object) -> str | None:
-        return "2"
+    from jiuwenclaw.agentserver.enterprise_config import gateway_db
 
-    store = _MappingStore(_lookup)
+    async def _list_records(*_args: object, **_kwargs: object) -> list[dict]:
+        return [{"template_id": "2"}]
+
+    monkeypatch.setattr(gateway_db, "list_records", _list_records)
 
     assert (
-        await resolve_model_slot_ref(
-            "${group::${group_id}} or 1",
+        await resolve_template_slot_ref(
+            f"${{group::${{group_id}}}} or {_FALLBACK_TEMPLATE_ID}",
             sales_ctx,
-            store=store,
         )
-        == "1"
+        == _FALLBACK_TEMPLATE_ID
     )
     assert (
-        await resolve_model_slot_ref(
-            "${g_demo_sales} or 1",
+        await resolve_template_slot_ref(
+            f"${{g_demo_sales}} or {_FALLBACK_TEMPLATE_ID}",
             sales_ctx,
-            store=store,
         )
-        == "1"
+        == _FALLBACK_TEMPLATE_ID
     )
     assert (
-        await resolve_model_slot_ref(
-            "${group_id} or 1",
+        await resolve_template_slot_ref(
+            f"${{group_id}} or {_FALLBACK_TEMPLATE_ID}",
             sales_ctx,
-            store=store,
         )
-        == "1"
+        == _FALLBACK_TEMPLATE_ID
     )
-    async def _lookup_carol(jiuwenclaw_id: str, *, user_id: str | None = None, **_: object) -> str | None:
-        return "99" if user_id == "carol" else None
 
-    ref = await resolve_model_slot_ref(
-        "${user_id} or 4",
-        replace(sales_ctx, user_id="carol"),
-        store=_MappingStore(_lookup_carol),
+    async def _list_records_carol(
+        table: str,
+        *,
+        filters: dict | None = None,
+        **_: object,
+    ) -> list[dict]:
+        if table == "config_default_template_mapping" and (filters or {}).get("user_id") == "carol":
+            return [{"template_id": "99"}]
+        return []
+
+    monkeypatch.setattr(gateway_db, "list_records", _list_records_carol)
+    assert (
+        await resolve_template_slot_ref(
+            f"${{user_id}} or 44444444-4444-4444-8444-444444444444",
+            replace(sales_ctx, user_id="carol"),
+        )
+        == "44444444-4444-4444-8444-444444444444"
     )
-    assert ref == "4"
 
 
 @pytest.mark.asyncio
-async def test_resolve_model_slot_ref_or_literal_when_no_mapping(
-    sales_ctx: RoutingContext,
+async def test_resolve_template_slot_ref_or_literal_when_no_mapping(
+    sales_ctx: RoutingContext, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    async def _lookup(*_args: object, **_kwargs: object) -> str | None:
-        return None
+    async def _list_records(*_args: object, **_kwargs: object) -> list[dict]:
+        return []
 
-    store = _MappingStore(_lookup)
+    from jiuwenclaw.agentserver.enterprise_config import gateway_db
 
-    ref = await resolve_model_slot_ref(
-        "${group::g_demo_sales} or 1",
+    monkeypatch.setattr(gateway_db, "list_records", _list_records)
+
+    ref = await resolve_template_slot_ref(
+        f"${{group::g_demo_sales}} or {_FALLBACK_TEMPLATE_ID}",
         sales_ctx,
-        store=store,
     )
-    assert ref == "1"
+    assert ref == _FALLBACK_TEMPLATE_ID
