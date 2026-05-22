@@ -97,7 +97,8 @@ class RetryMixin:
         "connection refused", "readtimeout", "timeout",
         "operation timed out", "500", "502", "503", "504",
         "too many requests", "响应超时", "timed out", "timeout",
-        "connection failed", "connection closed unexpectedly", "WebSocket connection closed"
+        "connection failed", "connection closed unexpectedly", "WebSocket connection closed",
+        "async stream error"
     )
 
     _NON_RETRYABLE_KEYWORDS = (
@@ -110,6 +111,7 @@ class RetryMixin:
         "model config error",
         "model invoke parameter error",
         "model client_config is invalid",
+        "async invoke error"
     )
 
     def _resolve_stream_timeout(self, timeout: Optional[float]) -> float:
@@ -126,25 +128,27 @@ class RetryMixin:
         """分类错误原因，返回可读描述。"""
         error_msg = str(exc).lower()
 
-        if any(kw in error_msg for kw in ("429", "rate_limit", "rate limit")):
+        if any(kw.lower() in error_msg for kw in ("429", "rate_limit", "rate limit")):
             return "HTTP 429 限流"
 
-        if any(kw in error_msg for kw in ("500",)):
+        if any(kw.lower() in error_msg for kw in ("500",)):
             return "HTTP 500 服务端错误"
-        if any(kw in error_msg for kw in ("502",)):
+        if any(kw.lower() in error_msg for kw in ("502",)):
             return "HTTP 502 网关错误"
-        if any(kw in error_msg for kw in ("503",)):
+        if any(kw.lower() in error_msg for kw in ("503",)):
             return "HTTP 503 服务不可用"
-        if any(kw in error_msg for kw in ("504",)):
+        if any(kw.lower() in error_msg for kw in ("504",)):
             return "HTTP 504 网关超时"
 
-        if any(kw in error_msg for kw in ("readtimeout", "timeout", "operation timed out")):
+        if any(kw.lower() in error_msg for kw in ("readtimeout", "timeout", "operation timed out")):
             return "请求超时"
         # pylint: disable=complicate-comprehension
-        if any(kw in error_msg for kw in ("connection error", "connecttimeout", "connect error",
+        if any(kw.lower() in error_msg for kw in ("connection error", "connecttimeout", "connect error",
                                             "network is unreachable", "connection reset", "broken pipe",
                                             "connection refused")):  # pylint: disable=complicate-comprehension
             return "连接错误"
+        if any(kw.lower() in error_msg for kw in ("forbidden",)):
+            return "禁止访问"
 
         return "未知错误"
 
@@ -222,13 +226,13 @@ class RetryMixin:
         """
         error_msg = str(exc).lower()
 
-        if any(kw in error_msg for kw in self._NON_RETRYABLE_KEYWORDS):
+        if any(kw.lower in error_msg for kw in self._NON_RETRYABLE_KEYWORDS):
             return False
 
-        if any(kw in error_msg for kw in ("429", "rate_limit", "rate limit")):
+        if any(kw.lower in error_msg for kw in ("429", "rate_limit", "rate limit")):
             return cfg.retry_on_rate_limit
 
-        if any(kw in error_msg for kw in self._RETRYABLE_KEYWORDS):
+        if any(kw.lower in error_msg for kw in self._RETRYABLE_KEYWORDS):
             return True
 
         return False
