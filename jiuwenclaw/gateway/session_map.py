@@ -1,12 +1,16 @@
 from __future__ import annotations
 
-import json
 import secrets
 import time
 from enum import Enum
-from pathlib import Path
 
-from jiuwenclaw.utils import get_checkpoint_dir, logger
+from jiuwenclaw.utils import logger
+from jiuwenclaw.extensions.redis.redis_runtime import get_declared_deployment_mode
+from jiuwenclaw.gateway.session_storage import (
+    LocalSessionStorage,
+    RedisSessionStorage,
+    SessionStorage,
+)
 
 
 class SessionMapScope(str, Enum):
@@ -48,32 +52,21 @@ def _make_session_id(
 
 
 class SessionMap:
-    """Map stable identity (per config scope) -> rotating agent ``session_id``."""
+    """Map stable identity (per config scope) -> rotating agent ``session_id``.
+
+    支持两种部署模式:
+    - standalone (单机模式): 所有读写走本地文件
+    - distributed (主备模式): 所有读写走 Redis
+    """
 
     def __init__(self, *, scope: SessionMapScope | None = None) -> None:
         self._scope = scope if scope is not None else load_session_map_scope()
-        self._store_path: Path = get_checkpoint_dir() / "session_map.json"
-        self._mapping: dict[str, str] = {}
-        self._load()
+        self._storage: SessionStorage
 
-    def _load(self) -> None:
-        try:
-            if not self._store_path.exists():
-                return
-            with open(self._store_path, "r", encoding="utf-8") as f:
-                data = json.load(f)
-            if isinstance(data, dict):
-                self._mapping = {str(k): str(v) for k, v in data.items() if isinstance(v, str) and v}
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("SessionMap load failed: %s", exc)
-
-    def _save(self) -> None:
-        try:
-            self._store_path.parent.mkdir(parents=True, exist_ok=True)
-            with open(self._store_path, "w", encoding="utf-8") as f:
-                json.dump(self._mapping, f, ensure_ascii=False, indent=2)
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("SessionMap save failed: %s", exc)
+        if get_declared_deployment_mode() == "standalone":
+            self._storage = LocalSessionStorage()
+        else:
+            self._storage = RedisSessionStorage()
 
     def get_identity_key(
         self,
@@ -82,7 +75,6 @@ class SessionMap:
         bot_id: str,
         user_id: str,
     ) -> str:
-        """Return the stable identity key for the configured scope."""
         if self._scope == SessionMapScope.PER_CHAT_BOT:
             return f"{provider}::{chat_id}::{bot_id}"
         return f"{provider}::{chat_id}::{bot_id}::{user_id}"
@@ -97,13 +89,13 @@ class SessionMap:
         rotate: bool = False,
     ) -> str:
         key = self.get_identity_key(provider, chat_id, bot_id, user_id)
-        existing = self._mapping.get(key)
+        existing = self._storage.get(key)
+
         if existing and not rotate:
             return existing
 
         sid = _make_session_id(self._scope, provider, chat_id, bot_id, user_id)
         if existing == sid:
             return sid
-        self._mapping[key] = sid
-        self._save()
+        self._storage.set(key, sid)
         return sid

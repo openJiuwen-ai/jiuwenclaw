@@ -351,11 +351,14 @@ task_memory:
   summary_algo: ACE
 
 # ========== Redis（分布式 Gateway：状态存储 / Pub/Sub / Leader；standalone 下不连接）==========
+# 通过 gateway.deployment_mode 控制：standalone（不连接）/ distributed（连接 Redis）
 redis:
   host: ${REDIS_HOST:-localhost}
   port: ${REDIS_PORT:-6379}
   password: ${REDIS_PASSWORD:-}
   db: ${REDIS_DB:-0}
+  # Session 数据过期时间（秒）
+  session_ttl: ${REDIS_SESSION_TTL:-604800}
   key_prefix: ${REDIS_KEY_PREFIX:-jiuwenclaw:}
   pool_size: ${REDIS_POOL_SIZE:-10}
   connect_timeout: ${REDIS_CONNECT_TIMEOUT:-5}
