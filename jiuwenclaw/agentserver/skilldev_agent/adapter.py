@@ -402,8 +402,8 @@ class SkillDevDeepAdapter:
         task_workspace = Path(self._base_workspace_dir) / "skilldev" / task_id
         self._init_workspace_dirs(task_workspace)
         await self._write_uploaded_resources(task_workspace, params)
-        if params.get("skillSearched"):
-            await self._write_skill_searched(task_workspace, params.get("skillSearched"))
+        if params.get("skill_searched"):
+            await self._write_skill_searched(task_workspace, params.get("skill_searched"))
         await self.update_workspace(task_workspace)
         
         query = str(params.get("message") or params.get("query") or "")
@@ -590,13 +590,16 @@ class SkillDevDeepAdapter:
         skill_name = skill_searched.get("skillName", "unknown")
         url = skill_searched.get("url", "")
         if not url:
-            logger.warning("[SkillDevDeepAdapter] skillSearched missing url: %s", skill_searched)
+            logger.warning("[SkillDevDeepAdapter] skill_searched missing url: %s", skill_searched)
             return
 
         dest_dir = task_workspace / "resources" / "ref-skills"
         dest_dir.mkdir(parents=True, exist_ok=True)
-
         suffix = Path(url).suffix.lower() or ".skill"
+        if ".skill" in suffix:
+            suffix = ".skill"
+        elif ".zip" in suffix:
+            suffix = ".zip"
         file_path = dest_dir / f"{skill_name}{suffix}"
         await download_file(url, str(file_path))
         if suffix in (".zip", ".skill"):
@@ -666,8 +669,8 @@ class SkillDevDeepAdapter:
         if tools:
             parts.append(format_tool_usage_hint())
         parts.append("请在生成 Skill 前按需检查上述资源。")
-        if params.get("skillSearched"):
-            skill_name = params.get('skillSearched', {}).get('skillName')
+        if params.get("skill_searched"):
+            skill_name = params.get('skill_searched', {}).get('skillName')
             parts.append(f"用户明确指明要参考 {task_workspace / 'resources' / 'ref-skills'} 中的{skill_name}技能，请在生成前仔细阅读该技能，并结合用户需求，生成新的Skill")
         return "\n".join(parts)
 
