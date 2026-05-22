@@ -39,6 +39,11 @@ class TenantAgentPool:
             cls._instance = cls()
         return cls._instance
 
+    @classmethod
+    def peek_instance(cls) -> "TenantAgentPool | None":
+        """返回已初始化的单例；若尚未创建则返回 None（不触发构造）。"""
+        return cls._instance
+
     # pylint: disable=protected-access
     @classmethod
     def reset_instance(cls) -> None:

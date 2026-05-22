@@ -1509,6 +1509,18 @@ class JiuWenClaw:
     def get_instance(self):
         return self._adapter._instance
 
+    def get_registered_tools_catalog(self) -> list[dict[str, str]]:
+        """枚举当前实例已注册工具（name / description / short_description）。"""
+        from jiuwenclaw.agentserver.tool_catalog import get_registered_tools_catalog
+
+        instance = self.get_instance()
+        if instance is None:
+            return []
+        ability_manager = getattr(instance, "ability_manager", None)
+        if ability_manager is None and callable(getattr(instance, "list", None)):
+            ability_manager = instance
+        return get_registered_tools_catalog(ability_manager)
+
     # ---------- 资源清理 ----------
 
     async def cancel_inflight_work(self, log_prefix: str = "[gateway disconnect] ") -> None:
