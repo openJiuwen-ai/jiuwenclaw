@@ -7,28 +7,28 @@ description: Create new skills, modify and improve existing skills, and measure 
 
 A skill for creating new skills and iteratively improving them.
 
-The flow:
+The default flow:
 
-1. **Talk to the user first** — understand what they want before writing anything.
-2. Write draft skill files.
-3. **Ask the user if they want evals** — get explicit consent.
-4. If yes: visibly propose test cases in the assistant message, wait for user approval, then run with-skill and baseline, grade with the `grader` subagent, aggregate via `scripts.aggregate_benchmark`, present results.
-5. Iterate. At the end of each round, ask the user via `ask_user_question`: *continue improving* or *move on to the next step*. Do NOT mention packaging at this point.
-6. **Ask the user whether to optimize the description** — get explicit consent. Mandatory gate.
-7. **Package the skill** — always execute.
+1. **Talk to the user first** - understand what they want before writing anything.
+2. **Write or update the skill files** - keep the skill focused, safe, and consistent with the workspace.
+3. **Package the skill** - always execute once the skill files are ready.
 
-Your TODO plan should mirror this workflow with one task per phase — at minimum: capture intent, draft skill files, eval consent, run & grade evals, iterate, description-optimization consent, package. Do not collapse evaluation and iteration into a single "run evals or package" task; they are distinct phases with their own checkpoints.
+Optional branches:
+
+- **Evaluations are opt-in only.** If the user explicitly asks to test, evaluate, benchmark, compare, or iterate using eval results, read `references/evaluation.md` and follow it exactly.
+- **Description optimization is opt-in only.** If the user explicitly asks to optimize the skill description or improve triggering accuracy, read `references/description-optimization.md` and follow it exactly.
+- If an optional branch changes the skill files, package the skill again before ending.
+
+Your TODO plan should mirror the active workflow:
+
+- Default work: capture intent, write or update skill files, package.
+- Add evaluation tasks only when the user explicitly requested evals or benchmark-style testing.
+- Add description-optimization tasks only when the user explicitly requested trigger or description optimization.
 
 **Hard rules — violating any of these is a bug:**
 1. Don't write before talking to the user.
 2. Don't ignore security red lines: no dangerous commands, hardcoded credentials, or path traversal in the skill body or scripts.
-3. Don't skip the eval consent question (Step 3).
-4. Don't hide generated eval cases in thinking or tool-only output. The user must see and approve them before any eval run starts.
-5. Don't skip grading/aggregation — runs without `grading.json` and `benchmark.md` are worthless.
-6. Don't skip the description optimization consent question (Step 6).
-7. Don't skip packaging (Step 7).
-
-Self-check at every checkpoint: if you're about to move past one of these without the explicit confirmation or artifact, **stop and go back**.
+3. Don't skip packaging.
 
 ---
 
@@ -95,143 +95,7 @@ Follow the anatomy and frontmatter rules above. Self-check before moving on:
 
 ---
 
-## Step 3: Ask about evals, then visibly propose test cases
-
-After drafting, stop and ask:
-
-> "The skill draft is ready. Would you like me to run evaluations to test it?"
-
-- **No** → skip to Step 6 (Step 5 is bypassed since there are no eval results to iterate on).
-- **Yes** → generate 2–3 realistic test prompts, each with objectively verifiable expectations, and show them in the visible assistant message. Do not put the cases only in hidden thinking, a tool call, or a file. Present prompts and expectations together:
-
-> "Here are a few test cases and the expectations I'll grade them on. Do these look right?"
-
-Wait for the user's explicit approval before running anything. If they request changes, revise the cases visibly and ask again. Only after approval, save the approved cases to `<workspace>/evals/evals.json` (schema in `references/schemas.md`). Test types worth covering: `smoke` (minimal input works), `happy_path` (real user flow), `edge_case` (boundary/error input), `integration` (multi-step end-to-end).
-
----
-
-## Step 4: Run the evals
-
-Every approved test case needs **both** a with-skill run and a baseline (no-skill for new skills, old-skill snapshot for improvements). Never fabricate. Put all evaluation artifacts under the current workspace's `evals/` directory using exactly this layout:
-
-```text
-<workspace>/evals/
-├── evals.json
-└── iteration-<N>/
-    ├── benchmark.json
-    ├── benchmark.md
-    └── eval-<N>/
-        ├── eval_metadata.json
-        ├── with_skill/
-        │   ├── transcript.md
-        │   ├── grading.json
-        │   └── outputs/
-        │       └── metrics.json
-        └── without_skill/ or old_skill/
-            ├── transcript.md
-            ├── grading.json
-            └── outputs/
-                └── metrics.json
-```
-
-**Execution via task_tool:**
-- Use `task_tool` to delegate runs and grading to dedicated subagents. Two subagent types are available:
-  - `skill_executor` — runs a single test case (with or without a Skill loaded)
-  - `grader` — evaluates execution results against expectations, produces `grading.json`
-- **Always use absolute paths** in `task_description`. Subagents do not inherit your system prompt and don't know the workspace — every input/output path you reference must be absolute.
-- The same rule applies to any subagent you spawn outside the eval flow (description-optimization runs, etc.).
-
-### 4a: Prepare metadata, then run all configs in parallel
-
-Process each test case parallely:
-
-**1.** Write `eval_metadata.json` to `<workspace>/evals/iteration-<N>/eval-<N>/eval_metadata.json`. Copy the expectations the user already approved — do not re-draft.
-```json
-{
-  "eval_id": 0,
-  "eval_name": "descriptive-name-here",
-  "prompt": "The user's task prompt",
-  "expectations": []
-}
-```
-
-**2.** Run with-skill via `task_tool`:
-```
-task_tool(
-  subagent_type="skill_executor",
-  task_description="workspace: <workspace>\nrun_dir: <workspace>/evals/iteration-<N>/eval-<N>/with_skill\noutput_dir: <workspace>/evals/iteration-<N>/eval-<N>/with_skill/outputs\ntranscript_path: <workspace>/evals/iteration-<N>/eval-<N>/with_skill/transcript.md\nmetrics_path: <workspace>/evals/iteration-<N>/eval-<N>/with_skill/outputs/metrics.json\nprompt: <task prompt>\nskill_path: <workspace>/skill/<skill-name>\ninput_files: [<workspace>/path/to/input, ...]"
-)
-```
-
-Run baseline via `task_tool(subagent_type="skill_executor")` with the same artifact contract:
-- **New skill:** same prompt, omit `skill_path` → `without_skill/outputs/`.
-- **Improving a skill:** snapshot the old skill first, pass the snapshot as `skill_path` → `old_skill/outputs/`. Do NOT run a no-skill baseline — compare old vs new.
-
-For a new-skill baseline:
-```
-task_tool(
-  subagent_type="skill_executor",
-  task_description="workspace: <workspace>\nrun_dir: <workspace>/evals/iteration-<N>/eval-<N>/without_skill\noutput_dir: <workspace>/evals/iteration-<N>/eval-<N>/without_skill/outputs\ntranscript_path: <workspace>/evals/iteration-<N>/eval-<N>/without_skill/transcript.md\nmetrics_path: <workspace>/evals/iteration-<N>/eval-<N>/without_skill/outputs/metrics.json\nprompt: <task prompt>\ninput_files: [<workspace>/path/to/input, ...]"
-)
-```
-For an improvement baseline, use `old_skill` in the paths and add `skill_path: <workspace>/snapshots/<skill-name>-old`.
-
-If a run fails: diagnose and retry. Do not proceed with missing runs.
-
-After the executor batch finishes, verify every config directory has `transcript.md`, `outputs/`, and `outputs/metrics.json`. If any required artifact is missing or in the wrong place, fix/rerun that config before grading.
-
-### 4b: Grade in parallel, aggregate, present
-
-Hard checkpoint — you may not present results until every run has `grading.json` and `benchmark.md` exists.
-
-1. **Grade every run** via `task_tool`. Launch all grader tasks in parallel after all executor artifacts pass the layout check:
-   ```
-   task_tool(
-     subagent_type="grader",
-     task_description="expectations: [\"...\", ...]\ntranscript_path: <workspace>/evals/iteration-<N>/eval-<N>/with_skill/transcript.md\noutputs_dir: <workspace>/evals/iteration-<N>/eval-<N>/with_skill/outputs\ngrading_output_path: <workspace>/evals/iteration-<N>/eval-<N>/with_skill/grading.json"
-   )
-   ```
-   Pass expectations from `eval_metadata.json`, transcript path, outputs dir. Output: `grading.json` per run (schema in `references/schemas.md`).
-   After the grader batch finishes, verify every config directory has `grading.json`.
-2. **Aggregate:** `cd` into the skill-creator directory so `-m scripts.xxx` resolves.
-   ```bash
-   cd "<skill-creator-dir>" && python3 -m scripts.aggregate_benchmark <workspace>/evals/iteration-N --skill-name <name>
-   ```
-   Produces `benchmark.json` and `benchmark.md`. Confirm both exist.
-3. **Surface patterns** from `benchmark.md` — which expectations failed, where variance is high.
-4. **Present** per test case. Show the user everything in `benchmark.md`. You must present the final `benchmark.md` to the user, not just summarize it loosely. Ask "Any feedback?" each time. Finish with the overall summary from `benchmark.md`.
-
-Self-check before presenting: (a) every run dir has `grading.json`, (b) `benchmark.md` exists, (c) you're showing graded scores, not your own judgment. If any are false, go back.
-
----
-
-## Step 5: Improve and iterate
-
-1. Read **transcripts**, not just final outputs — trim unproductive steps the skill caused.
-2. Generalize — avoid narrow fixes that only pass the tested examples.
-3. Explain the *why* — don't just add rules.
-4. Bundle repeated work — if every run wrote the same helper, lift it into `scripts/`.
-5. Apply changes and rerun into `<workspace>/evals/iteration-<N+1>/`.
-
-**Exit question (mandatory after every round):** use `ask_user_question` with exactly two options. Do NOT mention packaging — that is Step 7's concern, not this fork's.
-
-1. **Continue improving** — go back to substep 5.
-2. **Move on to the next step** — exit Step 5 and enter Step 6.
-
----
-
-## Step 6: Description optimization
-
-**Mandatory consent gate** — runs immediately after exiting Step 5 (or after the user declines evals in Step 3). Use `ask_user_question`:
-
-> "Would you like me to optimize the skill's description for better triggering accuracy?"
-
-- **Yes** → **read `references/description-optimization.md` now, before anything else.** It contains the full protocol — query generation, review, agent-driven eval loop, trigger detection, scoring. Don't improvise from memory. When the protocol finishes, continue to packaging.
-- **No** → continue to packaging.
-
----
-
-## Step 7: Packaging
+## Step 3: Packaging
 
 Run Bash:
 
@@ -245,7 +109,12 @@ Self-check before ending the conversation: did `scripts/package_skill.py` run? I
 
 ---
 
-## Reference files
+## Optional Workflows
 
-- `references/description-optimization.md` — full description optimization process
-- `references/schemas.md` — JSON schemas for evals.json, grading.json, etc.
+- `references/evaluation.md` - full opt-in evaluation and benchmark process.
+- `references/description-optimization.md` - full opt-in description optimization process.
+- `references/schemas.md` - JSON schemas for evals.json, grading.json, etc.
+
+If the user explicitly requested evals, run the evaluation workflow after drafting and before final packaging. If eval-driven iteration changes files, repeat evaluation steps as needed and package after the last change.
+
+If the user explicitly requested description optimization, run the description-optimization workflow after the skill draft is coherent and before final packaging. Package after any description change.
