@@ -90,11 +90,26 @@ def _materialize_instance_config(
     if not isinstance(db, dict):
         db = {}
         ac["database"] = db
+
+    # 支持通过环境变量配置数据库类型
+    db_type = os.getenv("JIUWENCLAW_GATEWAY_DB_TYPE", "mysql").strip().lower()
+    if db_type == "mysql":
+        db["db_type"] = "mysql"
+        db["db"] = {
+            "host": os.getenv("DB_HOST", os.getenv("JIUWENCLAW_GATEWAY_DB_HOST", "localhost")),
+            "port": int(os.getenv("DB_PORT", os.getenv("JIUWENCLAW_GATEWAY_DB_PORT", "3306"))),
+            "user": os.getenv("DB_USER", os.getenv("JIUWENCLAW_GATEWAY_DB_USER", "root")),
+            "password": os.getenv("DB_PASSWORD", os.getenv("JIUWENCLAW_GATEWAY_DB_PASSWORD", "123456")),
+            "db_name": os.getenv("DB_NAME", os.getenv("JIUWENCLAW_GATEWAY_DB_NAME", "openjiuwen_gateway")),
+        }
+    else:
+        # 默认使用 SQLite
+        db["db_type"] = "sqlite"
+        db["sqlite_path"] = str(agent_sqlite.resolve())
+
     # 保留模板中的 enabled: ${AGENT_CLIENT_REST_ENABLED:-true}，便于 AgentServer 进程关闭 REST、仅 Gateway 监听端口
     ac["host"] = "127.0.0.1"
     ac["port"] = rest_port
-    db["db_type"] = "sqlite"
-    db["sqlite_path"] = str(agent_sqlite.resolve())
     (cfg_dir / "config.yaml").write_text(
         yaml.safe_dump(raw, allow_unicode=True, sort_keys=False),
         encoding="utf-8",
@@ -115,6 +130,28 @@ def _child_env_common(
     out["EXTENSION_DIRS"] = extension_dirs
     out["JIUWENCLAW_PROVISIONED_INSTANCE_ID"] = jiuwenclaw_id
     out["MANAGEMENT_API_BASE"] = management_api_base
+
+    db_type = os.getenv("JIUWENCLAW_GATEWAY_DB_TYPE", "mysql").strip().lower()
+    out["JIUWENCLAW_GATEWAY_DB_TYPE"] = db_type
+    out["AGENT_CLIENT_DB_TYPE"] = db_type
+    out["MANAGER_WS_CLIENT_DB_TYPE"] = db_type
+    if db_type == "mysql":
+        host = os.getenv("DB_HOST", os.getenv("JIUWENCLAW_GATEWAY_DB_HOST", "localhost"))
+        port = os.getenv("DB_PORT", os.getenv("JIUWENCLAW_GATEWAY_DB_PORT", "3306"))
+        user = os.getenv("DB_USER", os.getenv("JIUWENCLAW_GATEWAY_DB_USER", "root"))
+        password = os.getenv("DB_PASSWORD", os.getenv("JIUWENCLAW_GATEWAY_DB_PASSWORD", "123456"))
+        db_name = os.getenv("DB_NAME", os.getenv("JIUWENCLAW_GATEWAY_DB_NAME", "openjiuwen_gateway"))
+        out["DB_HOST"] = host
+        out["DB_PORT"] = str(port)
+        out["DB_USER"] = user
+        out["DB_PASSWORD"] = password
+        out["DB_NAME"] = db_name
+        out["JIUWENCLAW_GATEWAY_DB_HOST"] = host
+        out["JIUWENCLAW_GATEWAY_DB_PORT"] = str(port)
+        out["JIUWENCLAW_GATEWAY_DB_USER"] = user
+        out["JIUWENCLAW_GATEWAY_DB_PASSWORD"] = password
+        out["JIUWENCLAW_GATEWAY_DB_NAME"] = db_name
+
     return out
 
 

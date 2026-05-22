@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 from typing import Any
 
@@ -69,8 +70,6 @@ def routing_context_from_request(request: AgentRequest) -> RoutingContext:
         user_id,
     )
 
-    import os
-
     jiuwenclaw_id = os.getenv("JIUWENCLAW_PROVISIONED_INSTANCE_ID", "").strip()
 
     return RoutingContext(
@@ -84,8 +83,6 @@ def routing_context_from_request(request: AgentRequest) -> RoutingContext:
 
 
 def routing_context_from_mapping(data: dict[str, Any]) -> RoutingContext:
-    import os
-
     jiuwenclaw_id = _str_field(
         data.get("jiuwenclaw_id"),
         os.getenv("JIUWENCLAW_PROVISIONED_INSTANCE_ID", ""),

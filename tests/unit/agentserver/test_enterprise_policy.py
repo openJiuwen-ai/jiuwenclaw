@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
+from typing import Any
 
 import pytest
 
@@ -14,6 +15,24 @@ from jiuwenclaw.agentserver.enterprise_config.expressions import (
     substitute_template,
 )
 from jiuwenclaw.agentserver.enterprise_config.routing import RoutingContext
+
+
+class _MappingStore:
+    """测试用的映射 store，模拟模板映射查询。"""
+
+    def __init__(self, lookup_fn: Any) -> None:
+        self._lookup_fn = lookup_fn
+
+    async def lookup_template_mapping_ref(
+        self,
+        jiuwenclaw_id: str,
+        *,
+        user_id: str | None = None,
+        group_id: str | None = None,
+    ) -> str | None:
+        return await self._lookup_fn(
+            jiuwenclaw_id, user_id=user_id, group_id=group_id
+        )
 
 
 @pytest.fixture
@@ -111,7 +130,7 @@ def test_match_expr_empty_is_true(sales_ctx: RoutingContext) -> None:
 
 @pytest.mark.asyncio
 async def test_resolve_model_slot_ref_mapping_or_fallback(
-    sales_ctx: RoutingContext, monkeypatch: pytest.MonkeyPatch
+    sales_ctx: RoutingContext,
 ) -> None:
     async def _lookup(
         jiuwenclaw_id: str,
@@ -123,14 +142,11 @@ async def test_resolve_model_slot_ref_mapping_or_fallback(
             return "2"
         return None
 
-    from jiuwenclaw.agentserver.enterprise_config import gateway_db
-
-    monkeypatch.setattr(gateway_db, "lookup_model_template_mapping_ref", _lookup)
-
+    store = _MappingStore(_lookup)
     ref = await resolve_model_slot_ref(
         "${group::g_demo_sales} or 1",
         sales_ctx,
-        jiuwenclaw_id="sp-demo",
+        store=store,
     )
     assert ref == "2"
 
@@ -144,31 +160,28 @@ async def test_resolve_model_slot_ref_mapping_or_fallback(
             return "4"
         return None
 
-    monkeypatch.setattr(gateway_db, "lookup_model_template_mapping_ref", _lookup_user_only)
     ref_user = await resolve_model_slot_ref(
         "${user::carol} or 1",
         replace(sales_ctx, user_id="carol", agent_id="carol"),
-        jiuwenclaw_id="sp-demo",
+        store=_MappingStore(_lookup_user_only),
     )
     assert ref_user == "4"
 
 
 @pytest.mark.asyncio
 async def test_resolve_model_slot_ref_rejects_nested_and_ambiguous(
-    sales_ctx: RoutingContext, monkeypatch: pytest.MonkeyPatch
+    sales_ctx: RoutingContext,
 ) -> None:
-    from jiuwenclaw.agentserver.enterprise_config import gateway_db
-
     async def _lookup(*_args: object, **_kwargs: object) -> str | None:
         return "2"
 
-    monkeypatch.setattr(gateway_db, "lookup_model_template_mapping_ref", _lookup)
+    store = _MappingStore(_lookup)
 
     assert (
         await resolve_model_slot_ref(
             "${group::${group_id}} or 1",
             sales_ctx,
-            jiuwenclaw_id="sp-demo",
+            store=store,
         )
         == "1"
     )
@@ -176,7 +189,7 @@ async def test_resolve_model_slot_ref_rejects_nested_and_ambiguous(
         await resolve_model_slot_ref(
             "${g_demo_sales} or 1",
             sales_ctx,
-            jiuwenclaw_id="sp-demo",
+            store=store,
         )
         == "1"
     )
@@ -184,38 +197,33 @@ async def test_resolve_model_slot_ref_rejects_nested_and_ambiguous(
         await resolve_model_slot_ref(
             "${group_id} or 1",
             sales_ctx,
-            jiuwenclaw_id="sp-demo",
+            store=store,
         )
         == "1"
     )
     async def _lookup_carol(jiuwenclaw_id: str, *, user_id: str | None = None, **_: object) -> str | None:
         return "99" if user_id == "carol" else None
 
-    monkeypatch.setattr(gateway_db, "lookup_model_template_mapping_ref", _lookup_carol)
-    assert (
-        await resolve_model_slot_ref(
-            "${user_id} or 4",
-            replace(sales_ctx, user_id="carol"),
-            jiuwenclaw_id="sp-demo",
-        )
-        == "4"
+    ref = await resolve_model_slot_ref(
+        "${user_id} or 4",
+        replace(sales_ctx, user_id="carol"),
+        store=_MappingStore(_lookup_carol),
     )
+    assert ref == "4"
 
 
 @pytest.mark.asyncio
 async def test_resolve_model_slot_ref_or_literal_when_no_mapping(
-    sales_ctx: RoutingContext, monkeypatch: pytest.MonkeyPatch
+    sales_ctx: RoutingContext,
 ) -> None:
     async def _lookup(*_args: object, **_kwargs: object) -> str | None:
         return None
 
-    from jiuwenclaw.agentserver.enterprise_config import gateway_db
-
-    monkeypatch.setattr(gateway_db, "lookup_model_template_mapping_ref", _lookup)
+    store = _MappingStore(_lookup)
 
     ref = await resolve_model_slot_ref(
         "${group::g_demo_sales} or 1",
         sales_ctx,
-        jiuwenclaw_id="sp-demo",
+        store=store,
     )
     assert ref == "1"
