@@ -48,6 +48,8 @@ class RuntimePromptRail(DeepAgentRail):
         workspace_dir: Optional[str] = None,
         agent_id: Optional[str] = None,
         service_id: Optional[str] = None,
+        request_identify: str = "",
+        request_soul: str = "",
     ) -> None:
         super().__init__()
         self.system_prompt_builder = None
@@ -60,6 +62,8 @@ class RuntimePromptRail(DeepAgentRail):
         self._agent_id = agent_id
         self._service_id = service_id
         self._request_system_prompt: str = ""
+        self._request_identify: str = request_identify.strip() if request_identify else ""
+        self._request_soul: str = request_soul.strip() if request_soul else ""
 
     def init(self, agent) -> None:
         """从 agent 获取 system_prompt_builder 引用。"""
@@ -90,6 +94,16 @@ class RuntimePromptRail(DeepAgentRail):
         """per-request 更新 system prompt 追加内容。"""
         value = prompt.strip() if isinstance(prompt, str) else ""
         self._request_system_prompt = value
+
+    def set_request_identify(self, identify: Optional[str]) -> None:
+        """per-request 更新身份信息（覆盖 IDENTITY.md）。"""
+        value = identify.strip() if identify else ""
+        self._request_identify = value
+
+    def set_request_soul(self, soul: Optional[str]) -> None:
+        """per-request 更新灵魂/性格描述（覆盖 SOUL.md）。"""
+        value = soul.strip() if soul else ""
+        self._request_soul = value
 
     def _get_workspace_dirs(self) -> dict[str, str]:
         """获取工作空间目录路径，支持多租户。"""
@@ -138,8 +152,8 @@ class RuntimePromptRail(DeepAgentRail):
                 f"# 当前日期与时间\n\n"
                 f"- 当前时间：{now_str}\n"
                 f"- 当前年份：{current_year}\n"
-                "- 当用户询问“最新、当前、今年、本年、实时、近期”等信息并需要搜索时，"
-                "搜索 query 必须优先使用当前年份或日期"
+                '- 当用户询问"最新、当前、今年、本年、实时、近期"等信息并需要搜索时，'
+                '搜索 query 必须优先使用当前年份或日期'
             )
         else:
             time_content = (
@@ -158,6 +172,7 @@ class RuntimePromptRail(DeepAgentRail):
 
         plat = f"{platform.system()} {platform.machine()}"
         python_ver = platform.python_version()
+        os_type = platform.system().lower()
 
         if self._language == "cn":
             runtime_content = (
@@ -167,7 +182,24 @@ class RuntimePromptRail(DeepAgentRail):
                 f"- 模型：{self._model_name}\n"
                 f"- Agent：{self._agent_name}\n"
                 f"- 频道：{self._channel}\n"
-                f"- 语言：{self._language}"
+                f"- 语言：{self._language}\n"
+                "\n## 命令语法规范\n"
+                f"当前运行平台：`{os_type}`\n\n"
+                "**重要提示**：必须严格使用与当前平台匹配的命令语法，切勿使用其他平台的命令格式。\n\n"
+                "常见命令差异对照：\n\n"
+                "| 操作 | Windows (`win32`/`win64`) | Linux/macOS (`linux`/`darwin`) |\n"
+                "|------|---------------------------|-------------------------------|\n"
+                "| 创建目录 | `mkdir folder` 或 PowerShell "
+                "`New-Item -ItemType Directory -Path folder` | `mkdir -p folder` |\n"
+                "| 查看文件 | `type file.txt` 或 PowerShell `Get-Content file.txt` | `cat file.txt` |\n"
+                "| 列出文件 | `dir` 或 PowerShell `Get-ChildItem` | `ls -la` |\n"
+                "| 删除文件 | `del file.txt` 或 PowerShell `Remove-Item file.txt` | `rm file.txt` |\n"
+                "| 删除目录 | `rmdir folder` 或 PowerShell `Remove-Item -Recurse folder` | `rm -rf folder` |\n"
+                "| 查找文件 | `dir /s pattern` 或 PowerShell "
+                "`Get-ChildItem -Recurse -Filter pattern` | `find . -name pattern` |\n\n"
+                "**特别注意**：Windows 的 `mkdir` 不支持 `-p` 参数！在 Windows 上使用 `mkdir -p folder` 会错误创建名为 `-p` 的目录。"
+                "如需创建嵌套目录，请使用 PowerShell `New-Item -ItemType Directory -Path \"parent/child\" -Force`，"
+                "或使用 cmd 分步创建 `mkdir parent && mkdir parent\\child`。"
             )
         else:
             runtime_content = (
@@ -177,7 +209,27 @@ class RuntimePromptRail(DeepAgentRail):
                 f"- Model: {self._model_name}\n"
                 f"- Agent: {self._agent_name}\n"
                 f"- Channel: {self._channel}\n"
-                f"- Language: {self._language}"
+                f"- Language: {self._language}\n"
+                "\n## Command Syntax\n"
+                f"Current platform: `{os_type}`\n\n"
+                "**Important**: You MUST strictly use command syntax matching the current platform. "
+                "Never use command formats from other platforms.\n\n"
+                "Common command differences:\n\n"
+                "| Operation | Windows (`win32`/`win64`) | Linux/macOS (`linux`/`darwin`) |\n"
+                "|-----------|---------------------------|-------------------------------|\n"
+                "| Create directory | `mkdir folder` or PowerShell "
+                "`New-Item -ItemType Directory -Path folder` | `mkdir -p folder` |\n"
+                "| View file | `type file.txt` or PowerShell `Get-Content file.txt` | `cat file.txt` |\n"
+                "| List files | `dir` or PowerShell `Get-ChildItem` | `ls -la` |\n"
+                "| Delete file | `del file.txt` or PowerShell `Remove-Item file.txt` | `rm file.txt` |\n"
+                "| Delete directory | `rmdir folder` or PowerShell `Remove-Item -Recurse folder` | `rm -rf folder` |\n"
+                "| Find file | `dir /s pattern` or PowerShell "
+                "`Get-ChildItem -Recurse -Filter pattern` | `find . -name pattern` |\n\n"
+                "**WARNING**: Windows `mkdir` does NOT support the `-p` flag! "
+                "Using `mkdir -p folder` on Windows will incorrectly create a directory named `-p`. "
+                'To create nested directories on Windows, use either PowerShell '
+                '`New-Item -ItemType Directory -Path "parent/child" -Force` '
+                "or cmd with step-by-step creation `mkdir parent && mkdir parent\\child`."
             )
 
         self.system_prompt_builder.add_section(PromptSection(
@@ -186,6 +238,8 @@ class RuntimePromptRail(DeepAgentRail):
             priority=95,
         ))
         logger.info("[RuntimePromptRail] runtime section 已注入")
+
+        # soul / identify 由 JiuClawContextEngineeringRail 写入 context 段（## SOUL / ## IDENTITY）
 
         # 使用多租户感知的方法获取路径
         dirs = self._get_workspace_dirs()

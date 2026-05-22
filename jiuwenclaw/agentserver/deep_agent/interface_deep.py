@@ -109,6 +109,10 @@ from jiuwenclaw.agentserver.deep_agent.rails import (
     SkillProtocolPromptRail,
     TaskExecutionRail,
 )
+from jiuwenclaw.agentserver.deep_agent.rails.context_engineering_rail_ext import (
+    normalize_identify_override,
+    normalize_soul_override,
+)
 from jiuwenclaw.agentserver.deep_agent.rails.disabled_tools_rail import DisabledToolsRail
 from jiuwenclaw.agentserver.deep_agent.rails.permission_rail import clear_session_interrupt_state
 from jiuwenclaw.agentserver.deep_agent.rails.task_execution_rail import get_current_task_id
@@ -283,16 +287,40 @@ class _RuntimeConfigParams:
     channel_id: str | None = None
     request_metadata: dict[str, Any] | None = None
     request_system_prompt: str | None = None
+    request_identify: str | None = None
+    request_soul: str | None = None
+
+    @classmethod
+    def _read_param_str(cls, params: Any, *keys: str) -> str | None:
+        """Read a non-empty string param; whitespace-only values are treated as absent."""
+        if not isinstance(params, dict):
+            return None
+        for key in keys:
+            raw = params.get(key)
+            if isinstance(raw, str):
+                value = raw.strip()
+                if value:
+                    return value
+            elif raw is not None and not isinstance(raw, (dict, list)):
+                value = str(raw).strip()
+                if value:
+                    return value
+        return None
 
     @classmethod
     def from_agent_request(cls, request: AgentRequest, mode: str) -> Self:
+        params = request.params if isinstance(request.params, dict) else {}
         return cls(
             session_id=request.session_id,
             mode=mode,
             request_id=request.request_id,
             channel_id=request.channel_id,
             request_metadata=request.metadata,
-            request_system_prompt=request.params.get("system_prompt"),
+            request_system_prompt=cls._read_param_str(params, "system_prompt", "systemPrompt"),
+            request_identify=normalize_identify_override(
+                cls._read_param_str(params, "identify", "identity", "IDENTITY"),
+            ),
+            request_soul=normalize_soul_override(cls._read_param_str(params, "soul", "SOUL")),
         )
 
 
@@ -3038,6 +3066,21 @@ class JiuWenClawDeepAdapter:
             self._runtime_prompt_rail.set_workspace_dir(resolved_workspace_dir)
 
         await self._update_rails_for_mode(params.mode)
+
+        if self._context_engineering_rail is not None:
+            if hasattr(self._context_engineering_rail, "set_request_identify"):
+                self._context_engineering_rail.set_request_identify(params.request_identify)
+            if hasattr(self._context_engineering_rail, "set_request_soul"):
+                self._context_engineering_rail.set_request_soul(params.request_soul)
+        logger.info(
+            "[JiuWenClawDeepAdapter] request soul/identify overrides: "
+            "request_id=%s identify_len=%s soul_len=%s context_rail=%s context_enabled=%s",
+            params.request_id,
+            len((params.request_identify or "")),
+            len((params.request_soul or "")),
+            type(self._context_engineering_rail).__name__ if self._context_engineering_rail else None,
+            bool(self._config_cache.get("context_engine_config", {}).get("enabled", False)),
+        )
         await self._update_tools_for_mode(params.mode, params.session_id, params.request_id)
         await self._update_session_tools(params.session_id, params.request_id, channel_id=params.channel_id)
         self._refresh_acp_runtime_tools(

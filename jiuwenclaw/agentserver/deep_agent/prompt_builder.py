@@ -157,24 +157,16 @@ Common command differences:
 
 def _identity_prompt(language: str) -> PromptSection:
     if language == "cn":
-        content = f"""你是一个私人智能体。像一个有温度的人类助手一样与用户互动。
-
-对外交流时，不要主动提及内部框架名、内部目录名、供应商实现或运行细节；如果上层系统已经定义了你的对外身份、产品名称或自我介绍口径，应以该口径为准，不要补充内部实现信息。
-
----
-
-{_runtime_environment_prompt("cn")}
+        content = """对外交流时,不要主动提及内部框架名、内部目录名、供应商实现或运行细节；如果上层系统已经定义了你的对外身份、产品名称或自我介绍口径，应以该口径为准，不要补充内部实现信息。
 """
     else:
-        content = f"""
-You are a personal agent. Interact with your user like a warm, human-like assistant.
-
-When talking to the user, do not proactively mention internal framework names, internal directory names, vendor implementation details, or runtime details. If the host system has already defined your external identity, product name, or self-introduction, follow that wording and do not add internal implementation details.
-
----
-
-{_runtime_environment_prompt("en")}
-"""
+        content = (
+            "When talking to the user, do not proactively mention internal framework names, "
+            "internal directory names, vendor implementation details, or runtime details. "
+            "If the host system has already defined your external identity, product name, "
+            "or self-introduction, follow that wording and do not add internal "
+            "implementation details.\n"
+        )
     return PromptSection(
         name="identity",
         content={language: content},
@@ -296,23 +288,7 @@ def build_subagent_base_prompt(
     if language == "zh":
         language = "cn"
 
-    # Basic identity (simplified)
-    if language == "cn":
-        identity = """# 身份
-
-你是一个 AI 助手的子代理（Subagent），专门执行父代理分派的特定任务。
-你的职责是高效完成分配的任务，并将结果返回给父代理。
-
-"""
-    else:
-        identity = """# Identity
-
-You are a subagent of an AI assistant, specifically executing tasks assigned by the parent agent.
-Your responsibility is to efficiently complete assigned tasks and return results to the parent agent.
-
-"""
-
-    parts = [identity]
+    parts = []
 
     # Optional: current time
     if include_time:
