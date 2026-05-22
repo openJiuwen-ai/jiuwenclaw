@@ -1666,6 +1666,13 @@ async def _run(
 
     await channel_manager.start_dispatch()
     await cron_scheduler.start()
+
+    # ---------- LeaderElection 初始化 ----------
+    from jiuwenclaw.gateway.leader_election import LeaderElection
+
+    leader_election = LeaderElection.get_instance()
+    await leader_election.start()
+
     # 先同步完成监听绑定，避免 IDE/ACP 子进程在端口尚未就绪时连接导致多次重试。
     logger.info("[App] about to call gateway_server.start()")
     try:
@@ -1812,6 +1819,7 @@ async def _run(
         if heartbeat_enabled:
             await heartbeat_service.stop()
         await message_handler.stop_forwarding()
+        await leader_election.stop()
         await extension_manager.shutdown_all_extensions()
         await shutdown_gateway_redis()
         await client.disconnect()
