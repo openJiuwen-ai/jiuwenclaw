@@ -27,6 +27,10 @@ from jiuwenclaw.agentserver.tools.subagent_executor.context_vars import (
 
 logger = logging.getLogger(__name__)
 
+_DEVICE_PLUGIN_UNSUPPORTED_MSG = (
+    "当前不支持pluginType为Device的端插件调用，请到真机进行测试"
+)
+
 
 def _resolve_workspace_dir() -> str | None:
     return get_effective_request_workspace_dir()
@@ -99,6 +103,16 @@ async def _function_call_tool_impl(**inputs: Any) -> dict[str, Any]:
                 f"可用工具: {', '.join(available) or '（无）'}"
             ),
             "tools_dir": str(tools_dir),
+        }
+
+    if spec.plugin_type == "Device":
+        return {
+            "success": False,
+            "error": _DEVICE_PLUGIN_UNSUPPORTED_MSG,
+            "summary": _DEVICE_PLUGIN_UNSUPPORTED_MSG,
+            "pluginId": plugin_id,
+            "toolName": tool_name,
+            "pluginType": spec.plugin_type,
         }
 
     try:

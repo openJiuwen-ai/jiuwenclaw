@@ -35,6 +35,7 @@ class ExternalToolSpec:
     tool_name: str
     description: str
     protocol: str
+    plugin_type: str = ""
     parameters: dict[str, Any] = field(default_factory=dict)
     source_file: str = ""
 
@@ -73,13 +74,16 @@ class ExternalToolSpec:
         }
 
     def to_definition_dict(self) -> dict[str, Any]:
-        return {
+        out: dict[str, Any] = {
             "pluginId": self.plugin_id,
             "toolName": self.tool_name,
             "description": self.description,
             "protocol": self.protocol,
             "arguments": self.parameters,
         }
+        if self.plugin_type:
+            out["pluginType"] = self.plugin_type
+        return out
 
     def to_usage_catalog_entry(self) -> dict[str, Any]:
         """Entry for ``tool_usage.json`` — how to invoke via ``function_call_tool``."""
@@ -94,6 +98,7 @@ class ExternalToolSpec:
         return {
             "pluginId": self.plugin_id,
             "toolName": self.tool_name,
+            "pluginType": self.plugin_type,
             "description": self.description,
             "protocol": self.protocol,
             "parameters": self.parameter_summary(),
@@ -131,6 +136,7 @@ def normalize_tool_definition(raw: dict[str, Any], *, source_file: str = "") -> 
         return None
     description = str(raw.get("description") or "").strip()
     protocol = str(raw.get("protocol") or "REST").strip().upper() or "REST"
+    plugin_type = str(raw.get("pluginType") or raw.get("plugin_type") or "").strip()
     parameters = raw.get("arguments") or raw.get("parameters") or {}
     if not isinstance(parameters, dict):
         parameters = {}
@@ -139,6 +145,7 @@ def normalize_tool_definition(raw: dict[str, Any], *, source_file: str = "") -> 
         tool_name=tool_name,
         description=description,
         protocol=protocol,
+        plugin_type=plugin_type,
         parameters=parameters,
         source_file=source_file,
     )
