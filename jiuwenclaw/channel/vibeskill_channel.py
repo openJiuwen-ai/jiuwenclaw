@@ -2920,9 +2920,9 @@ class VibeSkillChannel(BaseChannel):
 
     async def _handle_http_session_delete(self, session_id: str) -> tuple[int, dict, bytes]:
         """DELETE /api/v1/session/{id} - 删除会话。"""
-        internal_id = await self._store.resolve_internal(session_id)
-        if internal_id:
-            await self._store.delete_session(internal_id)
+        session_obj = await self._store.resolve_session(session_id)
+        if session_obj:
+            await self._store.delete_session(session_obj.internal_id)
         return self._json_response(200, {"deleted": True})
 
     async def _handle_http_file_list(self, session_id: str, headers: dict) -> tuple[int, dict, bytes]:
