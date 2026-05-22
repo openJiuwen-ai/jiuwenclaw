@@ -12,9 +12,13 @@ Example:
 
 import fnmatch
 import logging
+import re
+import shutil
 import sys
 import zipfile
 from pathlib import Path
+
+import yaml
 
 from scripts.quick_validate import validate_skill
 
@@ -23,10 +27,20 @@ logger = logging.getLogger(__name__)
 
 # Patterns to exclude when packaging skills.
 EXCLUDE_DIRS = {"__pycache__", "node_modules"}
-EXCLUDE_GLOBS = {"*.pyc"}
+EXCLUDE_GLOBS = {"*.pyc", "*.swp"}
 EXCLUDE_FILES = {".DS_Store"}
 # Directories excluded only at the skill root (not when nested deeper).
 ROOT_EXCLUDE_DIRS = {"evals", "output"}
+
+
+def load_frontmatter(skill_path: Path) -> dict:
+    """Load SKILL.md YAML frontmatter."""
+    content = (skill_path / "SKILL.md").read_text(encoding="utf-8")
+    match = re.match(r"^---\n(.*?)\n---", content, re.DOTALL)
+    if not match:
+        return {}
+    frontmatter = yaml.safe_load(match.group(1))
+    return frontmatter if isinstance(frontmatter, dict) else {}
 
 
 def should_exclude(rel_path: Path) -> bool:
@@ -42,6 +56,96 @@ def should_exclude(rel_path: Path) -> bool:
     if name in EXCLUDE_FILES:
         return True
     return any(fnmatch.fnmatch(name, pat) for pat in EXCLUDE_GLOBS)
+
+
+def workspace_for_skill(skill_path: Path) -> Path:
+    """Return <workspace> for <workspace>/skill/<skill-name>, else use parent."""
+    if skill_path.parent.name == "skill":
+        return skill_path.parent.parent
+    return skill_path.parent
+
+
+def has_dependency(metadata: dict, keys: tuple[str, ...]) -> bool:
+    """Return whether any metadata key declares a non-empty dependency list."""
+    for key in keys:
+        value = metadata.get(key)
+        if value:
+            return True
+    return False
+
+
+def collect_tool_sources(metadata: dict, workspace_path: Path) -> tuple[list[tuple[Path, Path]], list[str]]:
+    """Build source/destination pairs for declared external dependencies."""
+    reference_path = Path("reference")
+    source_pairs = []
+    errors = []
+
+    tools = metadata.get("tools") or []
+    if tools:
+        if not isinstance(tools, list):
+            errors.append("metadata.tools must be a list")
+        else:
+            for index, tool in enumerate(tools, start=1):
+                if not isinstance(tool, dict):
+                    errors.append(f"metadata.tools[{index}] must be a mapping")
+                    continue
+                plugin_id = str(tool.get("pluginId") or tool.get("plugin_id") or "").strip()
+                tool_name = str(tool.get("toolName") or tool.get("tool_name") or "").strip()
+                if not plugin_id or not tool_name:
+                    errors.append(
+                        f"metadata.tools[{index}] must include pluginId and toolName"
+                    )
+                    continue
+                filename = f"{plugin_id}__{tool_name}.json"
+                source_pairs.append((
+                    workspace_path / "references" / "available-tools" / filename,
+                    reference_path / "available-tools" / filename,
+                ))
+
+    if has_dependency(metadata, ("agents", "agent_tools", "agentTools")):
+        source_pairs.append((
+            workspace_path / "references" / "agents" / "available_agents.json",
+            reference_path / "agents" / "available_agents.json",
+        ))
+
+    if has_dependency(metadata, ("clis", "cli_tools", "cliTools")):
+        source_pairs.append((
+            workspace_path / "references" / "clis" / "available_clis.json",
+            reference_path / "clis" / "available_clis.json",
+        ))
+
+    return source_pairs, errors
+
+
+def copy_dependency_references(skill_path: Path) -> bool:
+    """Copy declared external dependency JSON files into the skill before zipping."""
+    metadata = load_frontmatter(skill_path).get("metadata") or {}
+    if not isinstance(metadata, dict):
+        logger.error("metadata in SKILL.md frontmatter must be a mapping")
+        return False
+
+    workspace_path = workspace_for_skill(skill_path)
+    source_pairs, errors = collect_tool_sources(metadata, workspace_path)
+    if errors:
+        for error in errors:
+            logger.error(error)
+        return False
+    if not source_pairs:
+        return True
+
+    missing = [source for source, _ in source_pairs if not source.exists()]
+    if missing:
+        for source in missing:
+            logger.error("Dependency reference not found: %s", source)
+        return False
+
+    for source, rel_dest in source_pairs:
+        dest = skill_path / rel_dest
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source, dest)
+        logger.info("Copied dependency reference: %s", dest.relative_to(skill_path))
+
+    return True
 
 
 def package_skill(skill_path, output_dir=None):
@@ -82,6 +186,11 @@ def package_skill(skill_path, output_dir=None):
         logger.error("Please fix the validation errors before packaging.")
         return None
     logger.info("%s", message)
+
+    logger.info("Copying declared dependency references...")
+    if not copy_dependency_references(skill_path):
+        logger.error("Please fix dependency reference errors before packaging.")
+        return None
 
     # Determine output location
     skill_name = skill_path.name

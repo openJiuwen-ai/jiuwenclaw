@@ -14,10 +14,10 @@ import yaml
 logger = logging.getLogger(__name__)
 
 DANGEROUS_PATTERNS = [
-    (re.compile(r"\brm\s+-[^\n]*r[^\n]*f\s+/"), "rm -rf /"),
-    (re.compile(r"\bchmod\s+777\b"), "chmod 777"),
-    (re.compile(r"\bcurl\b[^\n|]*\|\s*(?:sh|bash)\b"), "curl | sh/bash"),
-    (re.compile(r"\beval\s*\("), "eval(...)"),
+    (re.compile(r"\brm\s+-[^\n]*r[^\n]*f\s+/"), "forced recursive root deletion"),
+    (re.compile(r"\bchmod\s+777\b"), "world-writable permissions"),
+    (re.compile(r"\bcurl\b[^\n|]*\|\s*(?:sh|bash)\b"), "piped remote shell execution"),
+    (re.compile(r"\beval\s*\("), "dynamic eval execution"),
 ]
 CREDENTIAL_PATTERNS = [
     re.compile(r"(?i)\b(api[_-]?key|secret|token|password)\b\s*[:=]\s*['\"][^'\"\n]{8,}['\"]"),

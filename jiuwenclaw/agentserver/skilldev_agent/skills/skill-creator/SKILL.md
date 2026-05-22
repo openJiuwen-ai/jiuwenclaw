@@ -54,6 +54,8 @@ description: Imperative description of when to trigger and what to do.
 - `name`: kebab-case, lowercase letters / digits / hyphens only, ≤ 64 chars.
 - `description`: This is the **only triggering mechanism** — all "when to use" guidance goes here, not the body. Chinese SHOULD be ≤ 256 chars and MUST be ≤ 512 chars; English SHOULD be ≤ 512 chars and MUST be ≤ 1024 chars. Make it slightly pushy: instead of `"Builds dashboards for internal data"`, write `"Builds dashboards for internal data. Use whenever the user mentions dashboards, metrics, or wants to display company data — even if they don't say 'dashboard' explicitly."`
 - Allowed keys only: `name`, `description`, `license`, `allowed-tools`, `metadata`, `compatibility`. No duplicates.
+- External dependencies belong in `metadata`: `metadata.tools` for function tools, `metadata.agents` for agent tools, and `metadata.clis` for CLI tools. Tool entries must include `pluginId` and `toolName`.
+- If the skill uses function tools, agent tools, or CLI tools, read the matching usage reference before writing instructions and include one concrete example instruction sentence in the skill body.
 
 ### Progressive disclosure
 
@@ -61,6 +63,7 @@ description: Imperative description of when to trigger and what to do.
 - Body is loaded on trigger — keep it under ~300 lines.
 - Large reference material (API specs, schemas, variant docs) lives in `references/` and is read on demand. For multi-domain skills, split by variant (`aws.md`, `gcp.md`, …).
 - Repeated, deterministic, error-prone operations belong in `scripts/`.
+- Packaged external dependency definitions are copied into `reference/` automatically by the packager.
 
 ### Writing principles
 
@@ -88,6 +91,9 @@ Follow the anatomy and frontmatter rules above. Self-check before moving on:
 
 - Create or update the skill under the current workspace's `skill/` directory: `<workspace>/skill/<skill-name>/`.
 - `SKILL.md` exists with valid frontmatter (name matches directory, description within language-specific limits, allowed keys only).
+- If the skill declares `metadata.tools`, read `references/usage_tools.md` and add one example sentence showing the `function_call_tool` call shape.
+- If the skill declares `metadata.agents`, read `references/usage_agents.md` and add one example sentence showing the `agent_as_a_tool` call shape.
+- If the skill declares `metadata.clis`, read `references/usage_clis.md` and add one example sentence showing the `exec` command shape.
 - Body structure can reference these sections as needed: domain knowledge, tool definitions, exemplar playbook, SOP, safety red lines, and human collaboration.
 - Body is under 500 lines; bulky reference material moved to `references/`.
 - Security validation passes: no dangerous commands, hardcoded credentials, or path traversal in the skill body or scripts.
@@ -102,6 +108,14 @@ Run Bash:
 ```bash
 cd "<skill-creator-dir>" && python3 -m scripts.package_skill <workspace>/skill/<skill-name> <workspace>/output
 ```
+
+Before creating the zip, `scripts/package_skill.py` copies declared external dependency JSON files into `<workspace>/skill/<skill-name>/reference/`:
+
+- Each `metadata.tools` entry is copied from `<workspace>/references/available-tools/<pluginId>__<toolName>.json` to `reference/available-tools/`.
+- If `metadata.agents` is non-empty, `<workspace>/references/agents/available_agents.json` is copied to `reference/agents/`.
+- If `metadata.clis` is non-empty, `<workspace>/references/clis/available_clis.json` is copied to `reference/clis/`.
+
+If a declared dependency source file is missing, packaging fails. Fix the metadata or source JSON instead of inventing replacement files.
 
 If you have access to `present_files`, also present the packaged output from the workspace `output/` folder.
 
