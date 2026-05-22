@@ -7,11 +7,9 @@
 
 from __future__ import annotations
 
-import hashlib
 import json
 import logging
 import os
-import threading
 from typing import Any, AsyncIterator, Optional
 
 from openjiuwen_runtime.management.session.access import Access
@@ -48,42 +46,22 @@ from jiuwenclaw.e2a.wire_codec import (
     parse_agent_server_wire_chunk,
 )
 from jiuwenclaw.gateway.agent_client import AgentServerClient, _wire_request_id_key
-from jiuwenclaw.gateway.session_map import load_session_map_scope
 from jiuwenclaw.schema import AgentRequest
 from jiuwenclaw.schema.agent import AgentResponse, AgentResponseChunk
 
 logger = logging.getLogger(__name__)
 
-_session_id_lock = threading.Lock()
-_session_id_to_service_pair: dict[str, tuple[str, str | None]] = {}
 
-
-def _md5_chat_bot_id(chat_id: str, bot_id: str) -> str:
-    return hashlib.md5("::".join((chat_id, bot_id)).encode("utf-8")).hexdigest()
-
-
-def _session_id_to_invoke_ids(session_id: str) -> tuple[str, str | None]:
-    """将网关 session_id 转为 invoker 的 (service_id, agent_id/space_id)。"""
-    with _session_id_lock:
-        cached = _session_id_to_service_pair.get(session_id)
-        if cached:
-            return cached
-
-    _ = load_session_map_scope()
-
-    parts = session_id.split("::")
-    if len(parts) == 6:
-        _provider, chat_id, bot_id, user_id, _ts, _suffix = parts
-        pair = (_md5_chat_bot_id(chat_id, bot_id), user_id)
-    elif len(parts) == 5:
-        _provider, chat_id, bot_id, _ts, _suffix = parts
-        pair = (_md5_chat_bot_id(chat_id, bot_id), None)
-    else:
-        pair = (hashlib.md5(session_id.encode("utf-8")).hexdigest(), None)
-
-    with _session_id_lock:
-        _session_id_to_service_pair.setdefault(session_id, pair)
-        return _session_id_to_service_pair[session_id]
+def _resolve_invoke_ids_from_request(msg: AgentRequest) -> tuple[str, str | None]:
+    """Require gateway-filled ``service_id`` / ``agent_id`` (no session_id parsing fallback)."""
+    svc = str(msg.service_id or "").strip()
+    if not svc:
+        raise ValueError(
+            "RuntimeManagementAgentClient requires AgentRequest.service_id "
+            "(set gateway-side, e.g. SessionMap path)"
+        )
+    ag = str(msg.agent_id or "").strip()
+    return svc, ag if ag else None
 
 
 class _SessionRequest(ISessionRequest):
@@ -92,7 +70,7 @@ class _SessionRequest(ISessionRequest):
     def __init__(self, msg: AgentRequest, envelope: E2AEnvelope) -> None:
         self._req = msg
         self._envelope = envelope
-        service_id, agent_id = _session_id_to_invoke_ids(self._req.session_id or "")
+        service_id, agent_id = _resolve_invoke_ids_from_request(self._req)
         self._service_id = service_id
         self._req.service_id = service_id
         self._req.agent_id = agent_id or ""

@@ -63,6 +63,9 @@ class ChannelMode(str, Enum):
 class ChannelControlState:
     session_id: str | None = None
     mode: ChannelMode = ChannelMode.AGENT_PLAN
+    # SessionMap + Yuanrong: filled when channel uses SessionMap stable identity
+    service_id: str | None = None
+    agent_id: str | None = None
 
 
 @dataclass
@@ -268,7 +271,10 @@ class MessageHandler(ABC):
         state = self._get_channel_default_state(ch)
         identity_key = self._extract_identity_tuple(msg)
         if identity_key and self._channel_id_matches_session_map_types(str(ch or "")):
-            state.session_id = self._session_map.get_session_id(*identity_key)
+            sess = self._session_map.get_session(*identity_key)
+            state.session_id = sess.session_id
+            state.service_id = sess.service_id
+            state.agent_id = sess.agent_id
         self._channel_states[key] = state
         return state
 
@@ -556,9 +562,14 @@ class MessageHandler(ABC):
             cid = str(getattr(msg, "channel_id", "") or "")
             identity_key = self._extract_identity_tuple(msg)
             if identity_key and self._channel_id_matches_session_map_types(cid):
-                new_sid = self._session_map.get_session_id(*identity_key, rotate=True)
+                sess = self._session_map.get_session(*identity_key, rotate=True)
+                new_sid = sess.session_id
+                state.service_id = sess.service_id
+                state.agent_id = sess.agent_id
             else:
                 new_sid = self._generate_channel_session_id(channel_type)
+                state.service_id = None
+                state.agent_id = None
             state.session_id = new_sid
             asyncio.create_task(
                 self._new_session_cancel_and_notice(
@@ -964,11 +975,24 @@ class MessageHandler(ABC):
         cid = str(getattr(msg, "channel_id", "") or "")
         identity_key = self._extract_identity_tuple(msg)
         if identity_key and self._channel_id_matches_session_map_types(cid):
-            sid = self._session_map.get_session_id(*identity_key)
-            state.session_id = sid
-            msg.session_id = sid
+            sess = self._session_map.get_session(*identity_key)
+            state.session_id = sess.session_id
+            state.service_id = sess.service_id
+            state.agent_id = sess.agent_id
+            msg.session_id = sess.session_id
+            if msg.params is None:
+                msg.params = {}
+            if isinstance(msg.params, dict):
+                msg.params["service_id"] = sess.service_id
+                if sess.agent_id:
+                    msg.params["agent_id"] = sess.agent_id
+                else:
+                    msg.params.pop("agent_id", None)
         elif state.session_id:
             msg.session_id = state.session_id
+            if isinstance(msg.params, dict):
+                msg.params.pop("service_id", None)
+                msg.params.pop("agent_id", None)
 
         # 将 mode 写入 params，后续 E2A / Agent 侧从 params["mode"] 读取
         if msg.params is None:
@@ -2641,6 +2665,9 @@ class MessageHandler(ABC):
         if not files:
             return env
 
+        _ft_svc = str(env.service_id or "").strip()
+        _ft_ag = str(env.agent_id or "").strip()
+
         # 构建 send_callback：使用 agent_client 的 file_transfer 方法
         async def send_callback(method: str, ft_params: dict[str, Any]) -> dict[str, Any]:
             """文件传输回调函数，通过 agent_client 发送传输消息."""
@@ -2655,6 +2682,8 @@ class MessageHandler(ABC):
                     mime_type=ft_params.get("mime_type", ""),
                     session_id=ft_params.get("session_id", "") or env.session_id or "",
                     channel_id=env.channel or "",
+                    service_id=str(ft_params.get("service_id") or _ft_svc or ""),
+                    agent_id=str(ft_params.get("agent_id") or _ft_ag or ""),
                 )
                 return await self._agent_client.file_transfer_start(start_params)
             elif method == FILE_TRANSFER_CHUNK:
@@ -2664,12 +2693,16 @@ class MessageHandler(ABC):
                     base64_data=ft_params.get("base64_data", ""),
                     chunk_size=ft_params.get("chunk_size", 0),
                     channel_id=env.channel or "",
+                    service_id=str(ft_params.get("service_id") or _ft_svc or ""),
+                    agent_id=str(ft_params.get("agent_id") or _ft_ag or ""),
                 )
             elif method == FILE_TRANSFER_COMPLETE:
                 return await self._agent_client.file_transfer_complete(
                     transfer_id=ft_params.get("transfer_id", ""),
                     sha256=ft_params.get("sha256", ""),
                     channel_id=env.channel or "",
+                    service_id=str(ft_params.get("service_id") or _ft_svc or ""),
+                    agent_id=str(ft_params.get("agent_id") or _ft_ag or ""),
                 )
             else:
                 return {"accepted": False, "error": f"unknown method: {method}"}
@@ -2696,6 +2729,8 @@ class MessageHandler(ABC):
                         session_id=env.session_id or "",
                         channel_id=env.channel or "",
                         request_id=env.request_id or "",
+                        service_id=_ft_svc,
+                        agent_id=_ft_ag,
                     )
 
                     if result.get("success"):

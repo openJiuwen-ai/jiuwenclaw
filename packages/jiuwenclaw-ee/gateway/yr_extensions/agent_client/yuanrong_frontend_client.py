@@ -4,7 +4,6 @@ import asyncio
 import hashlib
 import json
 import logging
-import threading
 import time
 import urllib.error
 import urllib.parse
@@ -19,8 +18,7 @@ from jiuwenclaw.e2a.constants import (
 from jiuwenclaw.e2a.agent_compat import e2a_to_agent_request
 from jiuwenclaw.e2a.models import E2AEnvelope
 from jiuwenclaw.gateway.agent_client import AgentServerClient
-from jiuwenclaw.gateway.session_map import load_session_map_scope
-from jiuwenclaw.schema.agent import AgentResponse, AgentResponseChunk
+from jiuwenclaw.schema.agent import AgentRequest, AgentResponse, AgentResponseChunk
 from jiuwenclaw.utils import FileTransferStartParams
 
 logger = logging.getLogger(__name__)
@@ -43,8 +41,6 @@ class YuanrongFrontendAgentClient(AgentServerClient):
         self._invoke_timeout_s = float(invoke_timeout_s)
         self._connected = False
         self._server_ready = False
-        self._session_instance_map: dict[str, tuple[str, str | None]] = {}
-        self._session_instance_lock = threading.Lock()
 
     def set_or_update_server_config(
         self,
@@ -95,40 +91,26 @@ class YuanrongFrontendAgentClient(AgentServerClient):
         return {"content": payload}
 
     @staticmethod
-    def _md5_id(*parts: str) -> str:
-        return hashlib.md5("::".join(parts).encode("utf-8")).hexdigest()
+    def invoke_ids_from_agent_request(request: AgentRequest) -> tuple[str, str | None]:
+        """Require gateway-filled ``service_id`` / ``agent_id`` (no session_id parsing fallback)."""
+        svc = str(request.service_id or "").strip()
+        if not svc:
+            raise ValueError(
+                "YuanrongFrontendAgentClient requires envelope.service_id "
+                "(set gateway-side, e.g. SessionMap or file-transfer plumbing)"
+            )
+        ag = str(request.agent_id or "").strip()
+        return svc, ag if ag else None
 
-    def _session_id_to_invoke_ids(self, session_id: str) -> tuple[str, str | None]:
-        with self._session_instance_lock:
-            cached = self._session_instance_map.get(session_id)
-            if cached:
-                return cached
-
-        # SessionMap-generated ids:
-        # per_chat_bot: provider::chat::bot::ts::suffix
-        # per_chat_bot_user: provider::chat::bot::user::ts::suffix
-        # For non-standard ids, fallback to md5(session_id) + no space_id.
-        _ = load_session_map_scope()
-        parts = session_id.split("::")
-        if len(parts) == 6:
-            _provider, chat_id, bot_id, user_id, _ts, _suffix = parts
-            pair = (self._md5_id(chat_id, bot_id), user_id)
-        elif len(parts) == 5:
-            _provider, chat_id, bot_id, _ts, _suffix = parts
-            pair = (self._md5_id(chat_id, bot_id), None)
-        else:
-            pair = (hashlib.md5(session_id.encode("utf-8")).hexdigest(), None)
-
-        with self._session_instance_lock:
-            self._session_instance_map.setdefault(session_id, pair)
-            return self._session_instance_map[session_id]
+    def _resolve_invoke_ids(self, request: AgentRequest) -> tuple[str, str | None]:
+        return type(self).invoke_ids_from_agent_request(request)
 
     def _invoke_url(self) -> str:
         urn = urllib.parse.quote(self._function_version_urn, safe="")
         return f"{self._frontend_endpoint}/serverless/v1/functions/{urn}/invocations"
 
-    def _do_invoke(self, payload: dict[str, Any], session_id: str) -> tuple[int, str]:
-        service_id, agent_id = self._session_id_to_invoke_ids(session_id or "")
+    def _do_invoke(self, payload: dict[str, Any], invoke_ids: tuple[str, str | None]) -> tuple[int, str]:
+        service_id, agent_id = invoke_ids
         headers = {
             "Content-Type": "application/json",
             "X-Instance-Session": json.dumps(
@@ -173,11 +155,11 @@ class YuanrongFrontendAgentClient(AgentServerClient):
     def _do_invoke_stream(
         self,
         payload: dict[str, Any],
-        session_id: str,
+        invoke_ids: tuple[str, str | None],
         out_queue: "asyncio.Queue[tuple[str, str | None]]",
         loop: asyncio.AbstractEventLoop,
     ) -> None:
-        service_id, agent_id = self._session_id_to_invoke_ids(session_id or "")
+        service_id, agent_id = invoke_ids
         headers = {
             "Content-Type": "application/json",
             "Accept": "text/event-stream",
@@ -236,7 +218,8 @@ class YuanrongFrontendAgentClient(AgentServerClient):
             "timestamp": request.timestamp,
             "metadata": request.metadata,
         }
-        status, body = await asyncio.to_thread(self._do_invoke, payload, request.session_id or "")
+        invoke_ids = self._resolve_invoke_ids(request)
+        status, body = await asyncio.to_thread(self._do_invoke, payload, invoke_ids)
         try:
             parsed = json.loads(body) if body else {}
         except Exception:
@@ -259,6 +242,13 @@ class YuanrongFrontendAgentClient(AgentServerClient):
     ) -> dict[str, Any]:
         """Send FILE_TRANSFER_START (compatible with WebSocketAgentServerClient)."""
         self._ensure_connected()
+        svc = str(params.service_id or "").strip()
+        if not svc:
+            raise ValueError(
+                "FileTransferStartParams.service_id is required for Yuanrong file transfer "
+                "(gateway must set it, e.g. from SessionMap / file-transfer callback)"
+            )
+        ag = str(params.agent_id or "").strip()
         envelope = E2AEnvelope(
             request_id=f"ft_start_{params.transfer_id}",
             channel=params.channel_id,
@@ -274,6 +264,8 @@ class YuanrongFrontendAgentClient(AgentServerClient):
                 "mime_type": params.mime_type,
             },
             session_id=params.session_id,
+            service_id=svc,
+            agent_id=ag if ag else None,
             is_stream=False,
         )
         resp = await self.send_request(envelope)
@@ -288,9 +280,19 @@ class YuanrongFrontendAgentClient(AgentServerClient):
         base64_data: str,
         chunk_size: int,
         channel_id: str = "",
+        *,
+        service_id: str = "",
+        agent_id: str = "",
     ) -> dict[str, Any]:
         """Send FILE_TRANSFER_CHUNK (compatible with WebSocketAgentServerClient)."""
         self._ensure_connected()
+        svc = str(service_id or "").strip()
+        if not svc:
+            raise ValueError(
+                "service_id is required for Yuanrong file_transfer_chunk "
+                "(pass through from gateway file-transfer callback)"
+            )
+        ag = str(agent_id or "").strip()
         envelope = E2AEnvelope(
             request_id=f"ft_chunk_{transfer_id}_{chunk_index}",
             channel=channel_id,
@@ -302,6 +304,8 @@ class YuanrongFrontendAgentClient(AgentServerClient):
                 "base64_data": base64_data,
                 "chunk_size": chunk_size,
             },
+            service_id=svc,
+            agent_id=ag if ag else None,
             is_stream=False,
         )
         resp = await self.send_request(envelope)
@@ -314,9 +318,19 @@ class YuanrongFrontendAgentClient(AgentServerClient):
         transfer_id: str,
         sha256: str,
         channel_id: str = "",
+        *,
+        service_id: str = "",
+        agent_id: str = "",
     ) -> dict[str, Any]:
         """Send FILE_TRANSFER_COMPLETE (compatible with WebSocketAgentServerClient)."""
         self._ensure_connected()
+        svc = str(service_id or "").strip()
+        if not svc:
+            raise ValueError(
+                "service_id is required for Yuanrong file_transfer_complete "
+                "(pass through from gateway file-transfer callback)"
+            )
+        ag = str(agent_id or "").strip()
         envelope = E2AEnvelope(
             request_id=f"ft_complete_{transfer_id}",
             channel=channel_id,
@@ -326,6 +340,8 @@ class YuanrongFrontendAgentClient(AgentServerClient):
                 "transfer_id": transfer_id,
                 "sha256": sha256,
             },
+            service_id=svc,
+            agent_id=ag if ag else None,
             is_stream=False,
         )
         resp = await self.send_request(envelope)
@@ -338,6 +354,9 @@ class YuanrongFrontendAgentClient(AgentServerClient):
         file_path: str,
         session_id: str = "",
         channel_id: str = "",
+        *,
+        service_id: str = "",
+        agent_id: str = "",
     ) -> dict[str, Any]:
         """Send a local file to AgentServer via file.transfer.* RPCs (chunked)."""
         from pathlib import Path
@@ -371,6 +390,8 @@ class YuanrongFrontendAgentClient(AgentServerClient):
             chunk_size=chunk_size,
             session_id=session_id,
             channel_id=channel_id,
+            service_id=service_id,
+            agent_id=agent_id,
         )
         start_resp = await self.file_transfer_start(start_params)
         if not start_resp.get("accepted"):
@@ -391,6 +412,8 @@ class YuanrongFrontendAgentClient(AgentServerClient):
                 base64_data=b64_data,
                 chunk_size=len(chunk_data),
                 channel_id=channel_id,
+                service_id=service_id,
+                agent_id=agent_id,
             )
             if not chunk_resp.get("accepted"):
                 logger.warning(
@@ -404,6 +427,8 @@ class YuanrongFrontendAgentClient(AgentServerClient):
             transfer_id=transfer_id,
             sha256=sha256,
             channel_id=channel_id,
+            service_id=service_id,
+            agent_id=agent_id,
         )
         return complete_resp
 
@@ -423,8 +448,9 @@ class YuanrongFrontendAgentClient(AgentServerClient):
 
         loop = asyncio.get_running_loop()
         queue: asyncio.Queue[tuple[str, str | None]] = asyncio.Queue()
+        invoke_ids = self._resolve_invoke_ids(request)
         reader_task = asyncio.create_task(
-            asyncio.to_thread(self._do_invoke_stream, payload, request.session_id or "", queue, loop)
+            asyncio.to_thread(self._do_invoke_stream, payload, invoke_ids, queue, loop)
         )
         sse_buffer = ""
         try:
