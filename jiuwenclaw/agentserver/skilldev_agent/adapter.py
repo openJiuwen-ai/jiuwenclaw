@@ -43,6 +43,10 @@ from jiuwenclaw.utils import get_agent_workspace_dir
 
 from jiuwenclaw.agentserver.skilldev_agent.prompts import SKILLDEV_AGENT_SYSTEM_PROMPT
 from jiuwenclaw.agentserver.skilldev_agent.subagents import build_skilldev_subagents
+from jiuwenclaw.agentserver.skilldev_agent.subagents.skill_naming import (
+    is_first_task_input,
+    resolve_skill_name_for_first_input,
+)
 from jiuwenclaw.agentserver.skilldev_agent.tools import build_skilldev_tools
 from jiuwenclaw.agentserver.skilldev_agent.meta_tools.external_tool_registry import (
     format_tool_usage_hint,
@@ -379,6 +383,30 @@ class SkillDevDeepAdapter:
     ) -> AsyncIterator[AgentResponseChunk]:
         rid = request.request_id
         cid = request.channel_id
+        query = str(params.get("message") or params.get("query") or "")
+        task_workspace = Path(self._base_workspace_dir) / "skilldev" / task_id
+
+        skill_name: str | None = None
+        if is_first_task_input(task_workspace):
+            if self._model is None:
+                self._model = self._create_model(self._last_config or get_config())
+            skill_name = await resolve_skill_name_for_first_input(
+                self._model,
+                workspace=task_workspace,
+                user_query=query,
+                task_id=task_id,
+            )
+        if skill_name:
+            yield AgentResponseChunk(
+                request_id=rid,
+                channel_id=cid,
+                payload={
+                    "event_type": "skilldev.skill_name_ready",
+                    "task_id": task_id,
+                    "skill_name": skill_name,
+                },
+                is_complete=False,
+            )
 
         # 如果需要进行skill检索，则检索skill并返回
         if params.get("enable_skill_search"):
@@ -399,19 +427,25 @@ class SkillDevDeepAdapter:
             logger.info("[session=%s] [SkillDevDeepAdapter] 没有搜索到技能", task_id)
 
         # 初始化工作区，写入上传资源，写入搜索到的技能
-        task_workspace = Path(self._base_workspace_dir) / "skilldev" / task_id
         self._init_workspace_dirs(task_workspace)
         await self._write_uploaded_resources(task_workspace, params)
         if params.get("skill_searched"):
             await self._write_skill_searched(task_workspace, params.get("skill_searched"))
         await self.update_workspace(task_workspace)
-        
-        query = str(params.get("message") or params.get("query") or "")
+
         resource_hint = self._build_resource_hint(task_workspace, params, task_id)
         raw_session_id = str(request.session_id or task_id)
+        combined_query = query
+        if skill_name:
+            combined_query = (
+                f"{query}\n\n"
+                f"当前 Skill 标识名（已确定，后续 SKILL.md frontmatter 的 name 须与此一致）：{skill_name}"
+            )
+        if resource_hint:
+            combined_query = f"{combined_query}\n\n{resource_hint}"
         inputs = {
             "conversation_id": self._make_todo_session_id(raw_session_id),
-            "query": f"{query}\n\n{resource_hint}" if resource_hint else query,
+            "query": combined_query,
         }
         async for chunk in self.process_message_stream_impl(request, inputs):
             yield chunk
