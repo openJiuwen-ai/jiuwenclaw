@@ -487,12 +487,19 @@ const applyConfigSaveUiState = useCallback((appliedWithoutRestart: boolean) => {
 
   const buildAgentsTeamsFlatConfig = useCallback((payload: AgentsTeamsSavePayload) => {
     const updates: Record<string, string> = {};
+    const agentCount = Object.keys(payload.agents).length;
     Object.entries(payload.agents).forEach(([name, agent], idx) => {
       updates[`agent_name_${idx}`] = name;
       updates[`agent_model_${idx}`] = agent.model.model;
       updates[`agent_skills_${idx}`] = agent.skills.join(',');
       updates[`agent_completion_timeout_${idx}`] = String(agent.completion_timeout);
     });
+    for (let i = agentCount; i < 10; i++) {
+      updates[`agent_name_${i}`] = "";
+      updates[`agent_model_${i}`] = "";
+      updates[`agent_skills_${i}`] = "";
+      updates[`agent_completion_timeout_${i}`] = "";
+    }
     payload.team.forEach((team, idx) => {
       updates[`team_name_${idx}`] = team.team_name;
       updates[`team_lifecycle_${idx}`] = team.lifecycle;
@@ -507,6 +514,18 @@ const applyConfigSaveUiState = useCallback((appliedWithoutRestart: boolean) => {
         ? JSON.stringify(team.predefined_members)
         : "";
     });
+for (let i = payload.team.length; i < 10; i++) {
+      updates[`team_name_${i}`] = "";
+      updates[`team_lifecycle_${i}`] = "";
+      updates[`team_teammate_mode_${i}`] = "";
+      updates[`team_spawn_mode_${i}`] = "";
+      updates[`team_leader_member_name_${i}`] = "";
+      updates[`team_leader_display_name_${i}`] = "";
+      updates[`team_leader_persona_${i}`] = "";
+      updates[`team_leader_agent_key_${i}`] = "";
+      updates[`team_teammate_agent_key_${i}`] = "";
+      updates[`team_predefined_members_${i}`] = "";
+    }
     return updates;
   }, []);
 

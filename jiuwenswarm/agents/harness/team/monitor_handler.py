@@ -336,10 +336,10 @@ class TeamMonitorHandler:
         return self._monitor.team_id if self._monitor else None
 
     async def get_team_snapshot(self) -> dict[str, Any] | None:
-        """获取当前团队状态快照，用于刷新后恢复成员列表。
+        """获取当前团队状态快照，用于刷新后恢复成员列表和任务列表。
 
         Returns:
-            包含 members 列表和 team_id 的字典，如果 monitor 未运行则返回 None。
+            包含 members 列表、tasks 列表和 team_id 的字典，如果 monitor 未运行则返回 None。
         """
         if self._monitor is None:
             return None
@@ -350,6 +350,7 @@ class TeamMonitorHandler:
             leader_name = team_info.leader_member_name if team_info else None
             if leader_name:
                 members = [m for m in members if m.member_name != leader_name]
+            tasks = await self._monitor.get_tasks() or []
             return {
                 "members": [
                     {
@@ -360,6 +361,18 @@ class TeamMonitorHandler:
                         "mode": m.mode,
                     }
                     for m in members
+                ],
+                "tasks": [
+                    {
+                        "task_id": t.task_id,
+                        "team_name": t.team_name,
+                        "title": t.title,
+                        "content": t.content,
+                        "status": t.status,
+                        "assignee": t.assignee,
+                        "updated_at": t.updated_at,
+                    }
+                    for t in tasks
                 ],
                 "team_id": self._monitor.team_id,
             }

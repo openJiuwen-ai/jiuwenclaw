@@ -196,9 +196,13 @@ export function SkillPanel({ sessionId, onNavigateToConfig }: SkillPanelProps) {
   }, [skills]);
 
   const filteredSkills = useMemo(() => {
+    let result = skills;
+    if (activeTab === "my") {
+      result = result.filter((skill) => installedSkillMap.has(skill.name) || skill.source === "local");
+    }
     const keyword = search.trim().toLowerCase();
-    if (!keyword) return skills;
-    return skills.filter((skill) => {
+    if (!keyword) return result;
+    return result.filter((skill) => {
       const haystack = [
         skill.name,
         skill.description,
@@ -209,7 +213,7 @@ export function SkillPanel({ sessionId, onNavigateToConfig }: SkillPanelProps) {
         .toLowerCase();
       return haystack.includes(keyword);
     });
-  }, [skills, search]);
+  }, [skills, search, activeTab, installedSkillMap]);
 
   const visibleSkills = useMemo(() => {
     // 只显示已安装的技能（需手动安装后才会显示）
@@ -845,7 +849,7 @@ export function SkillPanel({ sessionId, onNavigateToConfig }: SkillPanelProps) {
                       return (
                         <button
                           key={skill.name}
-                          onClick={viewMode === "list" ? () => handleOpenSkill(skill.name) : undefined}
+                          onClick={() => handleOpenSkill(skill.name)}
                           className={`text-left border border-border bg-panel hover:bg-card transition-colors ${viewMode === "grid" ? "rounded-[8px] p-4 flex flex-col" : "w-full rounded-lg p-4"}`}
                           style={viewMode === "grid" ? { width: "496px", height: "168px", flexShrink: 0 } : undefined}
                         >
@@ -948,6 +952,7 @@ export function SkillPanel({ sessionId, onNavigateToConfig }: SkillPanelProps) {
                     sessionId={sessionId}
                     externalSearchQuery={debouncedSearch}
                     installedSkillNames={installedSkillNames}
+                    installedSkillOrigins={installedSkillOrigins}
                     viewMode={viewMode}
                     onClose={() => {}}
                     onInstalled={(_skillName: string) => {
@@ -1079,7 +1084,7 @@ export function SkillPanel({ sessionId, onNavigateToConfig }: SkillPanelProps) {
                       return (
                         <button
                           key={skill.name}
-                          onClick={viewMode === "list" ? () => handleOpenSkill(skill.name) : undefined}
+                          onClick={() => handleOpenSkill(skill.name)}
                           className={`text-left border border-border bg-panel hover:bg-card transition-colors ${viewMode === "grid" ? "rounded-[8px] p-4 flex flex-col" : "w-full rounded-lg p-4"}`}
                           style={viewMode === "grid" ? { width: "496px", height: "168px", flexShrink: 0 } : undefined}
                         >
@@ -1182,6 +1187,7 @@ export function SkillPanel({ sessionId, onNavigateToConfig }: SkillPanelProps) {
         open={clawHubModalOpen}
         sessionId={sessionId}
         installedSkillNames={installedSkillNames}
+        installedSkillOrigins={installedSkillOrigins}
         onClose={() => setClawHubModalOpen(false)}
         onInstalled={async () => {
           await fetchSkills();

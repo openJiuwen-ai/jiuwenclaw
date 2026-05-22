@@ -1776,7 +1776,7 @@ class AgentWebSocketServer:
                 request_id=request.request_id,
                 channel_id=channel_id,
                 ok=True,
-                payload={"members": [], "team_id": None},
+                payload={"members": [], "tasks": [], "team_id": None},
             )
             wire = encode_agent_response_for_wire(resp, response_id=request.request_id)
             async with send_lock:
@@ -1789,7 +1789,7 @@ class AgentWebSocketServer:
                 request_id=request.request_id,
                 channel_id=channel_id,
                 ok=True,
-                payload=snapshot or {"members": [], "team_id": None},
+                payload=snapshot or {"members": [], "tasks": [], "team_id": None},
             )
         except Exception as e:
             logger.warning("[AgentWebSocketServer] team.snapshot failed: %s", e)
@@ -1797,7 +1797,7 @@ class AgentWebSocketServer:
                 request_id=request.request_id,
                 channel_id=channel_id,
                 ok=True,
-                payload={"members": [], "team_id": None},
+                payload={"members": [], "tasks": [], "team_id": None},
             )
 
         wire = encode_agent_response_for_wire(resp, response_id=request.request_id)

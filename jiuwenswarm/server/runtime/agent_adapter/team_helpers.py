@@ -232,6 +232,27 @@ def _is_leader_output(chunk: Any) -> bool:
     return str(role_value).strip().lower() == TeamRole.LEADER.value
 
 
+def _is_teammate_output(chunk: Any) -> bool:
+    """Return whether a team OutputSchema chunk is from a teammate."""
+    role = getattr(chunk, "role", None)
+    if role is None:
+        return False
+    if role == TeamRole.TEAMMATE:
+        return True
+    role_value = getattr(role, "value", role)
+    return str(role_value).strip().lower() == TeamRole.TEAMMATE.value
+
+
+def _enrich_teammate_event(parsed: dict[str, Any], chunk: Any) -> dict[str, Any]:
+    """Enrich a parsed teammate event with role and source_member for frontend display."""
+    parsed["role"] = TeamRole.TEAMMATE.value
+    # TeamOutputSchema uses source_member (not member_name) for the member identifier
+    source_member = getattr(chunk, "source_member", None)
+    if source_member:
+        parsed["member_name"] = str(source_member)
+    return parsed
+
+
 def _team_processing_done_chunk(
     request_id: str,
     channel_id: str | None,
@@ -832,10 +853,14 @@ async def _consume_stream_with_query(
             session=session_id,
         ):
             received_chunks += 1
-            if not _is_leader_output(chunk):
+            is_leader = _is_leader_output(chunk)
+            is_teammate = _is_teammate_output(chunk)
+            if not is_leader and not is_teammate:
                 continue
             parsed = parse_stream_chunk(chunk)
             if parsed is not None:
+                if is_teammate:
+                    parsed = _enrich_teammate_event(parsed, chunk)
                 if parsed.get("event_type") == "team.runtime_ready":
                     ready_team_name = str(parsed.get("team_name") or team_spec.team_name)
                     activation_kind = str(parsed.get("activation_kind") or "").strip()

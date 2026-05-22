@@ -662,7 +662,7 @@
       "kvCacheAffinity": "算力亲和（KV 释放）"
     },
     "permissionsTools": {
-      "title": "整工具防护（permissions.tools）",
+      "title": "工具防护（permissions.tools）",
       "subtitle": "按工具名设置 allow / ask / deny，立即写入配置并热更新；不含基于 pattern 的规则。",
       "refresh": "刷新列表",
       "refreshing": "加载中…",

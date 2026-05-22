@@ -1126,7 +1126,7 @@ async def test_process_team_message_stream_does_not_emit_evolution_status_for_no
 
 
 @pytest.mark.anyio
-async def test_consume_stream_with_query_broadcasts_only_leader_team_outputs(monkeypatch):
+async def test_consume_stream_with_query_broadcasts_leader_and_teammate_outputs(monkeypatch):
     broadcasted: list[dict] = []
     ready_calls: list[tuple[str, str]] = []
 
@@ -1149,6 +1149,7 @@ async def test_consume_stream_with_query_broadcasts_only_leader_team_outputs(mon
             type="answer",
             payload={"output": {"output": "teammate answer"}, "result_type": "answer"},
             role=TeamRole.TEAMMATE,
+            source_member="analyst",
         )
         yield SimpleNamespace(
             type="answer",
@@ -1210,8 +1211,13 @@ async def test_consume_stream_with_query_broadcasts_only_leader_team_outputs(mon
     assert [event["event_type"] for event in broadcasted] == [
         "team.runtime_ready",
         "chat.final",
+        "chat.final",
     ]
     assert broadcasted[1]["content"] == "leader answer"
+    # Teammate event includes role and member_name
+    assert broadcasted[2]["content"] == "teammate answer"
+    assert broadcasted[2]["role"] == TeamRole.TEAMMATE.value
+    assert broadcasted[2]["member_name"] == "analyst"
 
 
 def test_extract_hide_dm_directive_strips_prefix_and_flags():
