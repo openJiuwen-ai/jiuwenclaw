@@ -869,7 +869,7 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
         if max_tokens_bounds is None:
             max_tokens_bounds = {
                 "infimum_max_tokens": 1,
-                "supremum_max_tokens": 16,
+                "supremum_max_tokens": 256,
             }
 
         if isinstance(max_tokens_bounds, dict):
@@ -971,6 +971,22 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
         has_valid_response = (isinstance(content, str) and content.strip()) or (
                 isinstance(reasoning_content, str) and reasoning_content.strip()
         )
+        if not has_valid_response:
+            try:
+                resp = await test_invoke(supremum_max_tokens)
+                if hasattr(resp, "content"):
+                    content = resp.content
+                elif isinstance(resp, dict):
+                    content = resp.get("content", "")
+                else:
+                    content = str(resp)
+                reasoning_content = getattr(resp, "reasoning_content", None) if hasattr(resp, "reasoning_content") else None
+                has_valid_response = (isinstance(content, str) and content.strip()) or (
+                    isinstance(reasoning_content, str) and reasoning_content.strip()
+                )
+            except Exception:  # noqa: BLE001
+                pass
+
         if not has_valid_response:
             await channel.send_response(
                 ws, req_id, ok=False,
