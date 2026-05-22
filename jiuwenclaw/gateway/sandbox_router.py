@@ -6,9 +6,10 @@ from collections import deque
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Protocol
+from typing import Any
 
 from jiuwenclaw.config import get_config
+from jiuwenclaw.gateway.sandbox_client import SandboxClient, SandboxConfig
 from jiuwenclaw.e2a.models import E2AEnvelope
 from jiuwenclaw.gateway.agent_client import AgentServerClient
 from jiuwenclaw.schema.agent import AgentResponse, AgentResponseChunk
@@ -23,17 +24,6 @@ class SandboxStatus(str, Enum):
     TERMINATED = "terminated"
 
 
-class SandboxClient(Protocol):
-    async def create_sandbox(self) -> Any:
-        ...
-
-    async def delete_sandbox(self, sandbox_id: str) -> Any:
-        ...
-
-    async def close(self) -> None:
-        ...
-
-
 @dataclass
 class SandboxRuntime:
     routing_key: str
@@ -44,52 +34,6 @@ class SandboxRuntime:
     created_at: float = field(default_factory=time.time)
     last_active_at: float = field(default_factory=time.time)
     metadata: dict[str, Any] = field(default_factory=dict)
-
-
-class SandboxHttpClient:
-    """这里未来将替换为绿区的SandboxClient实现"""
-
-    def __init__(
-        self,
-        *,
-        api_base: str,
-        template_id: str | None = None,
-        duration_seconds: int | None = None,
-        timeout_seconds: float = 120.0,
-        metadata: dict[str, Any] | None = None,
-    ) -> None:
-        self._api_base = api_base.rstrip("/")
-        self._template_id = template_id
-        self._duration_seconds = duration_seconds
-        self._metadata = dict(metadata or {})
-        import httpx
-
-        self._client = httpx.AsyncClient(timeout=timeout_seconds)
-
-    async def create_sandbox(self) -> str:
-        headers = {}
-        if self._template_id:
-            headers["x-sandbox-template-id"] = self._template_id
-        body: dict[str, Any] = {}
-        if self._template_id:
-            body["templateId"] = self._template_id
-        if self._duration_seconds is not None:
-            body["duration"] = {"durationInSeconds": self._duration_seconds}
-        if self._metadata:
-            body["metadata"] = self._metadata
-        resp = await self._client.post(f"{self._api_base}/api/v1/sandboxes", json=body, headers=headers)
-        resp.raise_for_status()
-        data = resp.json()
-        sandbox_id = str(data.get("sandboxId") or data.get("sandbox_id") or data.get("id") or "").strip()
-        return sandbox_id
-
-    async def delete_sandbox(self, sandbox_id: str) -> None:
-        resp = await self._client.delete(f"{self._api_base}/api/v1/sandboxes/{sandbox_id}")
-        if resp.status_code not in (200, 202, 204, 404):
-            resp.raise_for_status()
-
-    async def close(self) -> None:
-        await self._client.aclose()
 
 
 class SandboxRouterAgentClient(AgentServerClient):
@@ -185,14 +129,21 @@ class SandboxRouterAgentClient(AgentServerClient):
         self._server_env = dict(env) if env else None
 
     async def send_request(self, envelope: E2AEnvelope) -> AgentResponse:
-        runtime = await self._acquire_runtime(envelope)
+        try:
+            runtime = await self._acquire_runtime(envelope)
+        except ValueError as exc:
+            return self._routing_error_response(envelope, str(exc))
         try:
             return await runtime.agent_client.send_request(envelope)
         finally:
             await self._mark_task_done(runtime)
 
     async def send_request_stream(self, envelope: E2AEnvelope) -> AsyncIterator[AgentResponseChunk]:
-        runtime = await self._acquire_runtime(envelope)
+        try:
+            runtime = await self._acquire_runtime(envelope)
+        except ValueError as exc:
+            yield self._routing_error_chunk(envelope, str(exc))
+            return
         try:
             async for chunk in runtime.agent_client.send_request_stream(envelope):
                 yield chunk
@@ -206,8 +157,23 @@ class SandboxRouterAgentClient(AgentServerClient):
         sid = str(session_id or "").strip()
         if sid:
             return f"vibeskill:session:{sid}"
-        rid = f"missing-{int(time.time() * 1000):x}"
-        return f"vibeskill:session:{rid}"
+        raise ValueError("user_id or session_id is required for sandbox routing")
+
+    def _routing_error_response(self, envelope: E2AEnvelope, message: str) -> AgentResponse:
+        return AgentResponse(
+            request_id=str(envelope.request_id),
+            channel_id=str(envelope.channel or ""),
+            ok=False,
+            payload={"error": message},
+        )
+
+    def _routing_error_chunk(self, envelope: E2AEnvelope, message: str) -> AgentResponseChunk:
+        return AgentResponseChunk(
+            request_id=str(envelope.request_id),
+            channel_id=str(envelope.channel or ""),
+            payload={"error": message},
+            is_complete=True,
+        )
 
     async def _acquire_runtime(self, envelope: E2AEnvelope) -> SandboxRuntime:
         routing_key = self._routing_key(envelope.user_id, envelope.session_id)
@@ -243,7 +209,9 @@ class SandboxRouterAgentClient(AgentServerClient):
             try:
                 sandbox_client = self._get_sandbox_client()
                 result = await sandbox_client.create_sandbox()
-                sandbox_id = self._extract_sandbox_id(result)
+                if not result.success:
+                    raise RuntimeError(result.error or "create_sandbox failed")
+                sandbox_id = str(result.output or "").strip()
                 if not sandbox_id:
                     raise RuntimeError("create_sandbox returned empty sandbox_id")
                 metadata = {
@@ -403,19 +371,33 @@ class SandboxRouterAgentClient(AgentServerClient):
             sandbox_client_cfg.get("duration_seconds")
             or sandbox_client_cfg.get("sandbox_default_duration_seconds")
         )
+        duration_seconds = self._optional_int(duration_raw)
         sandbox_metadata = sandbox_client_cfg.get("metadata")
-        self._sandbox_client = SandboxHttpClient(
+        metadata: dict[str, str] = {}
+        if isinstance(sandbox_metadata, dict):
+            metadata = {str(k): str(v) for k, v in sandbox_metadata.items()}
+        config = SandboxConfig(
             api_base=api_base,
-            template_id=sandbox_client_cfg.get("template_id")
-            or sandbox_client_cfg.get("sandbox_default_template_id"),
-            duration_seconds=self._optional_int(duration_raw),
-            timeout_seconds=float(
-                sandbox_client_cfg.get("timeout_seconds")
-                or sandbox_client_cfg.get("sandbox_api_timeout_seconds")
-                or 120.0
+            template_id=str(
+                sandbox_client_cfg.get("template_id")
+                or sandbox_client_cfg.get("sandbox_default_template_id")
+                or ""
             ),
-            metadata=sandbox_metadata if isinstance(sandbox_metadata, dict) else None,
+            duration_seconds=duration_seconds if duration_seconds is not None else 900,
+            timeout_seconds=int(
+                float(
+                    sandbox_client_cfg.get("timeout_seconds")
+                    or sandbox_client_cfg.get("sandbox_api_timeout_seconds")
+                    or 120.0
+                )
+            ),
+            metadata=metadata,
+            command_timeout_seconds=int(
+                sandbox_client_cfg.get("command_timeout_seconds") or 60
+            ),
+            code_timeout_seconds=int(sandbox_client_cfg.get("code_timeout_seconds") or 60),
         )
+        self._sandbox_client = SandboxClient(config)
         return self._sandbox_client
 
     @staticmethod
@@ -447,24 +429,3 @@ class SandboxRouterAgentClient(AgentServerClient):
             if not waiter.done():
                 waiter.set_result(None)
                 return
-
-    @staticmethod
-    def _extract_sandbox_id(result: Any) -> str | None:
-        if isinstance(result, str):
-            return result.strip() or None
-        for attr in ("sandbox_id", "sandboxId", "id"):
-            value = getattr(result, attr, None)
-            if value:
-                return str(value).strip()
-        if isinstance(result, dict):
-            for key in ("sandbox_id", "sandboxId", "id"):
-                value = result.get(key)
-                if value:
-                    return str(value).strip()
-            payload = result.get("payload")
-            if isinstance(payload, dict):
-                return SandboxRouterAgentClient._extract_sandbox_id(payload)
-        payload = getattr(result, "payload", None)
-        if isinstance(payload, dict):
-            return SandboxRouterAgentClient._extract_sandbox_id(payload)
-        return None
