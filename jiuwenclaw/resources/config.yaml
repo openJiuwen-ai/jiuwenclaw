@@ -369,6 +369,29 @@ gateway:
   # 分机部署时请设置为 remote，否则 session.list 将读取网关本机目录（通常为空）。
   web_session_storage: local
 
+  # VibeSkill Sandbox 路由配置。
+  # 默认关闭，关闭时仍使用现有单 AgentServerClient 行为。
+  # 开启后，Gateway 会按 user_id/session_id 为 VibeSkill 请求分配 sandbox runtime。
+  # 注意：当前真实 sandbox agent 反向建链逻辑尚未实现；
+  # 开启后必须配置 sandbox_client.api_base，
+  # 且请求进入 sandbox 路由时会在缺少反向建链实现的情况下返回明确错误。
+  sandbox_routing:
+    enabled: false
+    max_sandboxes: 4
+    queue_enabled: true
+    queue_max_size: 100
+    queue_timeout_seconds: 60
+    idle_timeout_seconds: 300
+    idle_check_interval_seconds: 30
+
+  # Sandbox Manager 客户端配置，仅在 gateway.sandbox_routing.enabled=true 时生效。
+  sandbox_client:
+    api_base: ${SANDBOX_API_BASE:-}
+    template_id: ${SANDBOX_TEMPLATE_ID:-}
+    duration_seconds: ${SANDBOX_DURATION_SECONDS:-900}
+    timeout_seconds: ${SANDBOX_TIMEOUT_SECONDS:-120}
+    metadata: {}
+
 heartbeat:
   # 心跳间隔（秒），默认 60
   every: 3600
@@ -752,4 +775,3 @@ modes:
 enable_petal_web_search: true
 
 enable_deepresearch: true
-

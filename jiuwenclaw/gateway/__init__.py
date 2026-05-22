@@ -12,6 +12,7 @@ from jiuwenclaw.gateway.heartbeat import (
     IHeartbeat,
 )
 from jiuwenclaw.gateway.message_handler import MessageHandler
+from jiuwenclaw.gateway.sandbox_router import SandboxRouterAgentClient
 
 __all__ = [
     "AgentServerClient",
@@ -23,4 +24,5 @@ __all__ = [
     "HeartbeatConfig",
     "IHeartbeat",
     "MessageHandler",
+    "SandboxRouterAgentClient",
 ]

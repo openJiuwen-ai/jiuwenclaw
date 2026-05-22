@@ -145,6 +145,14 @@ class VibeSkillSessionStore:
         """获取 session 对象。"""
         return self._sessions.get(internal_id)
 
+    def get_user_id(self, internal_id: str) -> str | None:
+        """Return the routing user_id for a VibeSkill session."""
+        session = self._sessions.get(internal_id)
+        if not session:
+            return None
+        user_id = str((session.metadata or {}).get("user_id") or "").strip()
+        return user_id or None
+
     async def list_sessions(self) -> list[VibeSkillSession]:
         """列出所有 session。"""
         return list(self._sessions.values())
