@@ -1037,7 +1037,8 @@ class SkillDevDeepAdapter:
                 if isinstance(tool_info, dict):
                     tc_payload["tool_call_id"] = tool_info.get("id") or tool_info.get("tool_call_id")
                     tc_payload["tool_name"] = tool_info.get("name") or tool_info.get("tool_name")
-                    tc_payload["tool_name"] = "sub_agent" if tc_payload["tool_name"] == "task_tool" else tc_payload["tool_name"]
+                    tool_name_map = {"task_tool": "sub_agent", "skill_tool": "skill_load", "skill_complete": "skill_unload", "free_search": "web_search"}
+                    tc_payload["tool_name"] = tool_name_map.get(tc_payload["tool_name"], tc_payload["tool_name"])
                     tc_payload["arguments"] = tool_info.get("arguments") or tool_info.get("args")
                 else:
                     tc_payload["tool_call"] = tool_info
@@ -1056,7 +1057,8 @@ class SkillDevDeepAdapter:
                     }
                     if isinstance(result_info, dict):
                         result_payload["tool_name"] = result_info.get("tool_name") or result_info.get("name")
-                        result_payload["tool_name"] = "sub_agent" if result_payload["tool_name"] == "task_tool" else result_payload["tool_name"]
+                        tool_name_map = {"task_tool": "sub_agent", "skill_tool": "skill_load", "skill_complete": "skill_unload", "free_search": "web_search"}
+                        result_payload["tool_name"] = tool_name_map.get(result_payload["tool_name"], result_payload["tool_name"])
                         result_payload["tool_call_id"] = (
                             result_info.get("tool_call_id") or result_info.get("toolCallId")
                         )
