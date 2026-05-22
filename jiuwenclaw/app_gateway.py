@@ -800,21 +800,49 @@ async def _run(
     # ---------- Telemetry 初始化 ----------
     init_telemetry()
 
+    startup_cfg: dict[str, Any] = {}
+    try:
+        startup_cfg = get_config()
+    except Exception as e:  # noqa: BLE001
+        logger.warning("[App] failed to read startup config from config.yaml: %s", e)
+
+    def _cfg_bool(value: Any, default: bool = False) -> bool:
+        if isinstance(value, bool):
+            return value
+        if value is None:
+            return default
+        return str(value).strip().lower() in {"1", "true", "yes", "on"}
+
+    gateway_cfg = startup_cfg.get("gateway") if isinstance(startup_cfg.get("gateway"), dict) else {}
+    sandbox_routing_cfg = (
+        gateway_cfg.get("sandbox_routing")
+        if isinstance(gateway_cfg.get("sandbox_routing"), dict)
+        else {}
+    )
+    sandbox_routing_enabled = _cfg_bool(sandbox_routing_cfg.get("enabled"), False)
+
     max_retries = int(os.getenv("AGENT_CONNECT_RETRY", "20"))
     retry_interval = float(os.getenv("AGENT_CONNECT_RETRY_INTERVAL", "3"))
 
-    agent_server_ext = extension_registry.get_agent_server_client_extension()
-    if agent_server_ext is not None:
-        logger.info("[App] using extension AgentServerClient: %s", agent_server_ext.metadata.name)
-        client = agent_server_ext.get_client()
+    if sandbox_routing_enabled:
+        from jiuwenclaw.gateway.sandbox_router import SandboxRouterAgentClient
+
+        client = SandboxRouterAgentClient()
+        await client.connect(agent_server_url)
+        logger.info("[App] sandbox routing enabled for VibeSkill; default WebSocketAgentServerClient is not used")
     else:
-        client = WebSocketAgentServerClient(ping_interval=20.0, ping_timeout=600.0)
-    await _connect_with_retry(
-        client,
-        agent_server_url,
-        max_retries=max_retries,
-        interval=retry_interval,
-    )
+        agent_server_ext = extension_registry.get_agent_server_client_extension()
+        if agent_server_ext is not None:
+            logger.info("[App] using extension AgentServerClient: %s", agent_server_ext.metadata.name)
+            client = agent_server_ext.get_client()
+        else:
+            client = WebSocketAgentServerClient(ping_interval=20.0, ping_timeout=600.0)
+        await _connect_with_retry(
+            client,
+            agent_server_url,
+            max_retries=max_retries,
+            interval=retry_interval,
+        )
 
     message_handler = MessageHandler(client)
     await message_handler.start_forwarding()
