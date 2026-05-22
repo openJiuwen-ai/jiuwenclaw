@@ -5,16 +5,28 @@
 注意：工具权限护栏已切换为 openjiuwen 实现；此处保留同名导出以维持兼容。
 """
 
-from openjiuwen.harness.rails.security.tool_security_rail import PermissionInterruptRail
+try:
+    from openjiuwen.harness.rails.security.tool_security_rail import PermissionInterruptRail
+except (ImportError, ModuleNotFoundError):
+    try:
+        from openjiuwen.harness.rails import SecurityRail as PermissionInterruptRail
+    except ImportError:
+        PermissionInterruptRail = None
 from jiuwenswarm.agents.harness.common.rails.avatar_rail import AvatarPromptRail
 from jiuwenswarm.agents.harness.common.rails.project_memory_rail import ProjectMemoryRail
 from jiuwenswarm.agents.harness.common.rails.response_prompt_rail import ResponsePromptRail
 from jiuwenswarm.agents.harness.common.rails.runtime_prompt_rail import RuntimePromptRail
-from jiuwenswarm.agents.harness.team.rails.team_member_skill_toolkit_rail import (
-    MemberSkillToolkitRail,
-)
+try:
+    from jiuwenswarm.agents.harness.team.rails.team_member_skill_toolkit_rail import (
+        MemberSkillToolkitRail,
+    )
+except ModuleNotFoundError:
+    MemberSkillToolkitRail = None
 from jiuwenswarm.agents.harness.common.rails.ask_user_rail import StructuredAskUserRail
 from jiuwenswarm.agents.harness.common.rails.stream_event_rail import JiuClawStreamEventRail
+from jiuwenswarm.agents.harness.common.rails.security_review_and_skill_rail import (
+    SecurityReviewAndSkillRail,
+)
 
 __all__ = [
     "JiuClawStreamEventRail",
@@ -25,4 +37,5 @@ __all__ = [
     "RuntimePromptRail",
     "MemberSkillToolkitRail",
     "StructuredAskUserRail",
+    "SecurityReviewAndSkillRail",
 ]

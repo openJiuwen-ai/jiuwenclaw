@@ -15,6 +15,7 @@ import os
 import platform
 import subprocess
 import time
+import uuid
 from contextvars import ContextVar, Token
 from dataclasses import dataclass
 from shutil import which
@@ -52,10 +53,16 @@ from openjiuwen.harness.rails import (
     SkillEvolutionRail,
     SkillCreateRail,
     SubagentRail,
-    SysOperationRail,
-    HeartbeatRail,
     MemoryRail
 )
+try:
+    from openjiuwen.harness.rails import SysOperationRail
+except ImportError:
+    SysOperationRail = None
+try:
+    from openjiuwen.harness.rails import HeartbeatRail
+except ImportError:
+    HeartbeatRail = None
 from openjiuwen.harness.rails.context_engineer.context_assemble_rail import ContextAssembleRail
 from openjiuwen.harness.rails.context_engineer.context_processor_rail import ContextProcessorRail
 from openjiuwen.agent_evolving.signal import SignalDetector
@@ -93,13 +100,31 @@ except ImportError:  # Compatibility with older agent-core versions.
 from openjiuwen.harness.schema.task import TodoStatus
 from openjiuwen.harness.workspace.workspace import Workspace, WorkspaceNode
 
-from jiuwenswarm.agents.harness.team.a2x.a2x_registry_runtime import (
-    init_a2x_client,
-    register_blank_agent_if_teammate,
-    resolve_a2x_config,
-)
+try:
+    from jiuwenswarm.agents.harness.team.a2x.a2x_registry_runtime import (
+        init_a2x_client,
+        register_blank_agent_if_teammate,
+        resolve_a2x_config,
+    )
+except ModuleNotFoundError:
+    async def init_a2x_client(config_base: dict[str, Any]) -> tuple[Any, dict[str, Any]]:
+        raise RuntimeError("A2X registry runtime is unavailable")
+
+    async def register_blank_agent_if_teammate(
+        client: Any,
+        a2x_config: dict[str, Any],
+        *,
+        source: str,
+    ) -> None:
+        return None
+
+    def resolve_a2x_config(config_base: dict[str, Any]) -> dict[str, Any]:
+        return {}
 from jiuwenswarm.agents.harness.common.tools.cron.cron_runtime import CronRuntimeBridge
-from jiuwenswarm.agents.harness.common.auto_harness import AutoHarnessService
+try:
+    from jiuwenswarm.agents.harness.common.auto_harness import AutoHarnessService
+except (ImportError, ModuleNotFoundError):
+    AutoHarnessService = None
 from jiuwenswarm.agents.harness.common.rails.interrupt.interrupt_helpers import (
     build_permission_rail,
     convert_interactions_to_ask_user_question,
@@ -113,7 +138,18 @@ from jiuwenswarm.agents.harness.common.rails import (
     JiuClawStreamEventRail,
     ResponsePromptRail,
     RuntimePromptRail,
+    SecurityReviewAndSkillRail,
 )
+from jiuwenswarm.agents.harness.common.security_review.rule_applicator import (
+    SecurityRuleApplicationError,
+    apply_security_rule_candidate,
+)
+from jiuwenswarm.agents.harness.common.security_review.skill_applicator import (
+    SecuritySkillApplicationError,
+    apply_security_evolution_candidate,
+    apply_security_skill_candidate,
+)
+from jiuwenswarm.agents.harness.common.security_review.skill_state import collect_skill_state
 from jiuwenswarm.agents.harness.common.rails.permissions.owner_scopes import (
     TOOL_PERMISSION_CONTEXT,
     setup_permission_context,
@@ -269,6 +305,16 @@ def _get_skill_create_enabled(config: dict[str, Any] | None) -> bool:
     if env_skill_create is not None:
         return env_skill_create.lower() in ("true", "1", "yes")
     return (config or {}).get("evolution", {}).get("skill_create", False)
+
+
+def _security_review_config(config: dict[str, Any] | None) -> dict[str, Any]:
+    """Resolve SecurityReviewAndSkillRail config with env override, like skill evolution."""
+    raw = (config or {}).get("security_review", {})
+    resolved = dict(raw) if isinstance(raw, dict) else {}
+    env_enabled = os.getenv("SECURITY_REVIEW_ENABLED")
+    if env_enabled is not None:
+        resolved["enabled"] = env_enabled.lower() in ("true", "1", "yes")
+    return resolved
 
 
 def init_permission_engine(*_args: Any, **_kwargs: Any) -> None:
@@ -467,6 +513,7 @@ class JiuWenClawDeepAdapter:
         self._runtime_prompt_rail: RuntimePromptRail | None = None
         self._response_prompt_rail: ResponsePromptRail | None = None
         self._security_rail: SecurityRail | None = None
+        self._security_review_rail: SecurityReviewAndSkillRail | None = None
         self._memory_rail: MemoryRail | None = None
         self._external_memory_rail: Any = None
         self._external_memory_rail_registered: bool = False
@@ -478,6 +525,7 @@ class JiuWenClawDeepAdapter:
         self._avatar_rail: Any = None
         self._tool_cards = None
         self._evolution_watcher_tasks: set[asyncio.Task] = set()
+        self._security_review_watcher_tasks: set[asyncio.Task] = set()
         self._sys_operation = None
         self._sys_operation_card: SysOperationCard | None = None
         self._vision_model_config: VisionModelConfig | None = None
@@ -495,6 +543,9 @@ class JiuWenClawDeepAdapter:
         self._a2x_config: dict[str, Any] = {}
         self._a2x_blank_service_id: str = ""
         self._a2x_blank_dataset: str = ""
+        self._security_review_pending_candidates: dict[str, dict[str, Any]] = {}
+        self._security_review_approved_candidates: list[dict[str, Any]] = []
+        self._security_review_rejected_candidates: list[dict[str, Any]] = []
         self._cron_runtime = CronRuntimeBridge()
         self._runtime_cron_tool_context = _RuntimeCronToolContext(
             tool_scope=f"runtime_{id(self):x}",
@@ -1892,6 +1943,47 @@ class JiuWenClawDeepAdapter:
             security_prompt_rail = None
         return security_prompt_rail
 
+    def _build_security_review_rail(
+        self, config: dict[str, Any],
+    ) -> SecurityReviewAndSkillRail | None:
+        """Build SecurityReviewAndSkillRail when explicitly enabled."""
+        security_review_config = _security_review_config(config)
+        if not security_review_config.get("enabled", False):
+            return None
+
+        try:
+            rail = SecurityReviewAndSkillRail(config=security_review_config)
+            rail.update_llm(self._model)
+            rail.set_context_providers(
+                message_provider=self._collect_messages_for_evolve,
+                skill_state_provider=lambda: collect_skill_state(get_agent_skills_dir()),
+            )
+            logger.info("[JiuWenClawDeepAdapter] SecurityReviewAndSkillRail create success")
+        except Exception as exc:
+            logger.warning(
+                "[JiuWenClawDeepAdapter] SecurityReviewAndSkillRail create failed: %s", exc
+            )
+            rail = None
+        return rail
+
+    def _update_security_review_rail(self, config: dict[str, Any]) -> None:
+        """Update SecurityReviewAndSkillRail in place, or create/drop it by config."""
+        security_review_config = _security_review_config(config)
+        if not security_review_config.get("enabled", False):
+            self._security_review_rail = None
+            return
+
+        if self._security_review_rail is None:
+            self._security_review_rail = self._build_security_review_rail(config)
+            return
+
+        self._security_review_rail.update_config(security_review_config)
+        self._security_review_rail.update_llm(self._model)
+        self._security_review_rail.set_context_providers(
+            message_provider=self._collect_messages_for_evolve,
+            skill_state_provider=lambda: collect_skill_state(get_agent_skills_dir()),
+        )
+
     def _build_memory_rail(self, mode: str) -> MemoryRail | None:
         try:
             config = get_config()
@@ -1984,6 +2076,11 @@ class JiuWenClawDeepAdapter:
             _RailBuildInfo("_stream_event_rail", self._build_stream_event_rail),
             _RailBuildInfo("_task_planning_rail", self._build_task_planning_rail),
             _RailBuildInfo("_security_rail", self._build_security_rail),
+            _RailBuildInfo(
+                "_security_review_rail",
+                self._build_security_review_rail,
+                {"config": config},
+            ),
             _RailBuildInfo("_heartbeat_rail", self._build_heartbeat_rail),
             _RailBuildInfo("_avatar_rail", self._build_avatar_rail),
             _RailBuildInfo("_subagent_rail", self._build_subagent_rail),
@@ -2172,6 +2269,8 @@ class JiuWenClawDeepAdapter:
                     False,
                 )
 
+        self._update_security_review_rail(config)
+
         self._skill_rail = self._build_skill_rail(
             config,
             include_tools=self._skill_include_tools_for_profile(),
@@ -2185,6 +2284,8 @@ class JiuWenClawDeepAdapter:
         rails_list = []
         if self._skill_rail is not None:
             rails_list.append(self._skill_rail)
+        if self._security_review_rail is not None:
+            rails_list.append(self._security_review_rail)
         if self._context_assemble_rail is not None:
             rails_list.append(self._context_assemble_rail)
         if self._context_processor_rail is not None:
@@ -3394,6 +3495,8 @@ class JiuWenClawDeepAdapter:
             resolved = await self._handle_governance_approval(request_id, answers, "simplify")
         elif request_id.startswith("skill_evolve_"):
             resolved = await self._handle_evolution_approval(request_id, answers)
+        elif request_id.startswith("security_review_"):
+            resolved = self._handle_security_review_approval(request_id, answers)
 
         return AgentResponse(
             request_id=request.request_id,
@@ -3445,6 +3548,52 @@ class JiuWenClawDeepAdapter:
             await rail.on_reject(request_id)
             logger.info("[JiuWenClaw] evolution approval rejected: request_id=%s", request_id)
 
+        return True
+
+    def _handle_security_review_approval(self, request_id: str, answers: list) -> bool:
+        candidate = self._security_review_pending_candidates.pop(request_id, None)
+        if candidate is None:
+            logger.warning("[JiuWenClaw] security review approval failed: %s", request_id)
+            return False
+
+        accepted = any(
+            isinstance(ans, dict) and "接收" in ans.get("selected_options", []) for ans in answers
+        )
+        if accepted:
+            approved = dict(candidate)
+            if candidate.get("type") == "security_rule":
+                try:
+                    approved["application"] = apply_security_rule_candidate(candidate)
+                except SecurityRuleApplicationError as exc:
+                    logger.warning("[JiuWenClaw] security rule candidate apply failed: %s", exc)
+                    approved["application"] = {
+                        "applied": False,
+                        "target": "permissions.rules",
+                        "error": str(exc),
+                    }
+            elif candidate.get("type") == "security_skill":
+                try:
+                    approved["application"] = apply_security_skill_candidate(candidate)
+                except SecuritySkillApplicationError as exc:
+                    logger.warning("[JiuWenClaw] security skill candidate apply failed: %s", exc)
+                    approved["application"] = {
+                        "applied": False,
+                        "target": "skills",
+                        "error": str(exc),
+                    }
+            elif candidate.get("type") == "security_evolution":
+                try:
+                    approved["application"] = apply_security_evolution_candidate(candidate)
+                except SecuritySkillApplicationError as exc:
+                    logger.warning("[JiuWenClaw] security evolution candidate apply failed: %s", exc)
+                    approved["application"] = {
+                        "applied": False,
+                        "target": "skills",
+                        "error": str(exc),
+                    }
+            self._security_review_approved_candidates.append(approved)
+        else:
+            self._security_review_rejected_candidates.append(candidate)
         return True
 
     # ------------------------------------------------------------------
@@ -4360,6 +4509,17 @@ class JiuWenClawDeepAdapter:
 
         # Auto-Harness 模式处理
         if mode == "auto_harness":
+            if AutoHarnessService is None:
+                yield AgentResponseChunk(
+                    request_id=request.request_id,
+                    channel_id=request.channel_id,
+                    payload={
+                        "event_type": "chat.error",
+                        "error": "auto_harness runtime is unavailable",
+                    },
+                    is_complete=True,
+                )
+                return
             if self._auto_harness_service is None:
                 self._auto_harness_service = AutoHarnessService(
                     self._stream_event_rail,
@@ -4653,6 +4813,22 @@ class JiuWenClawDeepAdapter:
                 )
                 task.add_done_callback(self._on_evolution_watcher_done)
                 self._evolution_watcher_tasks.add(task)
+
+            if self._security_review_rail is not None:
+                await self._security_review_rail.process_pending_reviews(wait=False)
+                candidates = self._security_review_rail.drain_candidates(session_id=session_id)
+                for payload in self._security_review_candidates_to_chunks(candidates):
+                    yield AgentResponseChunk(
+                        request_id=rid,
+                        channel_id=cid,
+                        payload=payload,
+                        is_complete=False,
+                    )
+                task = asyncio.create_task(
+                    self._watch_security_review_and_push(rid, cid, session_id)
+                )
+                task.add_done_callback(self._on_security_review_watcher_done)
+                self._security_review_watcher_tasks.add(task)
         except asyncio.CancelledError:
             logger.info(
                 "[JiuWenClawDeepAdapter] 流式任务被取消: request_id=%s session_id=%s",
@@ -4711,6 +4887,36 @@ class JiuWenClawDeepAdapter:
             payload=None,
             is_complete=True,
         )
+
+    def _security_review_candidates_to_chunks(
+        self, candidates: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        """Convert security review candidates into approval question chunks."""
+        chunks: list[dict[str, Any]] = []
+        for index, candidate in enumerate(candidates):
+            request_id = f"security_review_{index}_{uuid.uuid4().hex[:8]}"
+            self._security_review_pending_candidates[request_id] = candidate
+            question = {
+                "header": "安全演进审批",
+                "question": (
+                    "检测到安全自演进候选：\n\n"
+                    f"类型：{candidate.get('type', 'unknown')}\n"
+                    f"内容：{json.dumps(candidate, ensure_ascii=False)[:1000]}"
+                ),
+                "options": [
+                    {"label": "接收", "description": "保留此安全演进候选"},
+                    {"label": "拒绝", "description": "丢弃此安全演进候选"},
+                ],
+                "multi_select": False,
+            }
+            chunks.append(
+                {
+                    "event_type": "chat.ask_user_question",
+                    "request_id": request_id,
+                    "questions": [question],
+                }
+            )
+        return chunks
 
     @staticmethod
     def _parse_stream_chunk(
@@ -5617,6 +5823,39 @@ class JiuWenClawDeepAdapter:
             task.result()
         except Exception as exc:
             logger.warning("[JiuWenClawDeepAdapter] evolution watcher task exception: %s", exc)
+
+    async def _watch_security_review_and_push(self, rid: str, cid: str, session_id: str) -> None:
+        """Wait for background security review and push approval events."""
+        from jiuwenswarm.server.gateway_push import WebSocketGatewayPushTransport
+
+        if self._security_review_rail is None:
+            return
+
+        await self._security_review_rail.wait_for_background_reviews()
+        candidates = self._security_review_rail.drain_candidates(session_id=session_id)
+        if not candidates:
+            return
+
+        transport = WebSocketGatewayPushTransport()
+        for payload in self._security_review_candidates_to_chunks(candidates):
+            await transport.send_push(
+                {
+                    "request_id": rid,
+                    "channel_id": cid,
+                    "session_id": session_id,
+                    "payload": payload,
+                }
+            )
+
+    def _on_security_review_watcher_done(self, task: asyncio.Task) -> None:
+        self._security_review_watcher_tasks.discard(task)
+        try:
+            task.result()
+        except Exception as exc:
+            logger.warning(
+                "[JiuWenClawDeepAdapter] security review watcher task exception: %s",
+                exc,
+            )
 
     @staticmethod
     def _is_approval_event(evt) -> bool:

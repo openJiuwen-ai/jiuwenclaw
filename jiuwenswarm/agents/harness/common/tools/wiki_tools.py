@@ -20,7 +20,10 @@ from openjiuwen.core.session.agent import Session
 from openjiuwen.harness.deep_agent import DeepAgent
 from openjiuwen.harness.factory import create_deep_agent
 from openjiuwen.harness.prompts import resolve_language
-from openjiuwen.harness.rails import SysOperationRail
+try:
+    from openjiuwen.harness.rails import SysOperationRail
+except ImportError:
+    SysOperationRail = None
 from openjiuwen.harness.schema.config import SubAgentConfig
 from jiuwenswarm.common.config import get_config
 from jiuwenswarm.common.utils import get_agent_workspace_dir
@@ -199,7 +202,12 @@ class LLMWiki:
             resolved_language, DEFAULT_WIKI_AGENT_SYSTEM_PROMPT["cn"]
         )
         final_tools = tools if tools is not None else []
-        final_rails = rails if rails is not None else [SysOperationRail()]
+        if rails is not None:
+            final_rails = rails
+        elif SysOperationRail is not None:
+            final_rails = [SysOperationRail()]
+        else:
+            final_rails = []
 
         self.agent = create_deep_agent(
             model=model,
