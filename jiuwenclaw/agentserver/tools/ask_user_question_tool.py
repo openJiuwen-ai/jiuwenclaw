@@ -327,9 +327,13 @@ async def _ask_user_question_impl(questions: Any, timeout: Any = None) -> dict[s
         formatted = _format_questions_as_text(normalized)
         return {
             "status": "text_only",
-            "message": "当前未开启引导式交互；问题已由工具结果展示。请结束本步、待用户下一条消息中直接回复。",
+            "message": (
+                "当前未开启引导式交互；问题已展示在对话正文中。"
+                "本轮将在此结束，请等待用户在下一条消息中直接回复，勿自行推断或代选答案。"
+            ),
             "formatted_questions": formatted,
             "answers": [],
+            "stop_agent_turn": True,
         }
     ask_id = f"{ASK_REQUEST_PREFIX}{uuid.uuid4().hex}"
     # 与 wait_for_answer(timeout) 使用同一截止时刻；网关/前端用 expires_at_ms 展示倒计时或「请于 xx 前完成」
@@ -390,8 +394,9 @@ _ASK_TOOL_CARD = ToolCard(
     name="ask_user_question",
     description=(
         "向用户展示一组带选项的结构化问题（可多题），并阻塞等待用户选择。"
-        "仅当引导/交互已开启时推送选择 UI；未开启时不推送 chat.delta（由对话流展示），" 
-        "由用户在下一条消息中自由回复。questions 为 JSON 数组，每项含 question、"
+        "仅当引导/交互已开启时推送选择 UI；未开启时返回 text_only、将问题写入正文并"
+        "强制结束本轮 agent（禁止继续推理或代选答案），由用户在下一条消息中回复。"
+        "questions 为 JSON 数组，每项含 question、"
         "options[{label, description?, id?}]、可选 header、multi_select；"
         "可选 preview{text,title?,format?,editable?,outline_ref?,meta?} "
         "用于大纲等 Markdown 审阅（将注入 outline_confirm / outline_use_edited 选项）。"

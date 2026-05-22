@@ -33,6 +33,10 @@ from openjiuwen.harness.rails.base import DeepAgentRail
 from openjiuwen.harness.tools.todo import TodoStatus, TodoListTool
 from openjiuwen.harness.workspace.workspace import WorkspaceNode
 
+from jiuwenclaw.agentserver.tools.ask_user_question_turn_stop import (
+    extract_text_only_stop_payload,
+    is_ask_user_question_tool_name,
+)
 from jiuwenclaw.config import get_config
 from jiuwenclaw.utils import fix_json_arguments, logger
 
@@ -242,6 +246,27 @@ class JiuClawStreamEventRail(DeepAgentRail):
         await self._emit_tool_result(session, ctx.inputs.tool_call, ctx.inputs.tool_result)
 
         tool_name = ctx.inputs.tool_name
+        if is_ask_user_question_tool_name(tool_name):
+            stop_payload = extract_text_only_stop_payload(ctx.inputs.tool_result)
+            if stop_payload is not None:
+                formatted = stop_payload["formatted_questions"]
+                await self._emit_user_visible_text(session, formatted)
+                ctx.request_force_finish(
+                    {
+                        "output": formatted,
+                        "result_type": "answer",
+                        "ask_user_question": {
+                            "status": stop_payload["status"],
+                            "awaiting_user_reply": True,
+                        },
+                    },
+                )
+                logger.info(
+                    "[StreamEventRail] ask_user_question text_only: force-finish turn "
+                    "(interactive_ask disabled, awaiting next user message)",
+                )
+                return
+
         if tool_name in _TODO_TOOL_NAMES and self._conversation_id:
             await self._emit_todo_updated(ctx.agent, session, self._conversation_id)
 
@@ -280,6 +305,23 @@ class JiuClawStreamEventRail(DeepAgentRail):
             )
         except Exception:
             logger.debug("tool_call emit failed", exc_info=True)
+
+    @staticmethod
+    async def _emit_user_visible_text(session: Session, content: str) -> None:
+        """Emit assistant-visible text when ask_user_question ends the turn in text_only mode."""
+        text = str(content or "").strip()
+        if not text:
+            return
+        try:
+            await session.write_stream(
+                OutputSchema(
+                    type="llm_output",
+                    index=0,
+                    payload={"content": text, "result_type": "answer"},
+                )
+            )
+        except Exception:
+            logger.debug("ask_user_question user-visible text emit failed", exc_info=True)
 
     @staticmethod
     async def _emit_tool_result(session: Session, tool_call: Any, result: Any) -> None:
