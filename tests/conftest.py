@@ -59,6 +59,7 @@ def _install_openjiuwen_deepsearch_stubs() -> None:
         "openjiuwen_deepsearch.framework.openjiuwen.agent",
         "openjiuwen_deepsearch.utils",
         "openjiuwen_deepsearch.utils.log_utils",
+        "openjiuwen_deepsearch.utils.constants_utils",
     ]:
         ensure_package(package_name)
 
@@ -129,6 +130,23 @@ def _install_openjiuwen_deepsearch_stubs() -> None:
 
     log_manager_module.LogManager = LogManager
     sys.modules[log_manager_module.__name__] = log_manager_module
+
+    constants_utils_module = types.ModuleType(
+        "openjiuwen_deepsearch.utils.constants_utils.search_engine_constants"
+    )
+    
+    class SearchEngine(Enum):
+        TAVILY = "tavily"
+        GOOGLE = "google"
+        XUNFEI = "xunfei"
+        PETAL = "petal"
+        BOCHA = "bocha"
+        JINA = "jina"
+        PERPLEXITY = "perplexity"
+        SERPER = "serper"
+
+    constants_utils_module.SearchEngine = SearchEngine
+    sys.modules[constants_utils_module.__name__] = constants_utils_module
 
 
 if not _stdlib_bz2_available():

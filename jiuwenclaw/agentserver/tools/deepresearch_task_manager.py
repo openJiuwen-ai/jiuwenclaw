@@ -20,6 +20,7 @@ from openjiuwen_deepsearch.config.config import Config
 from openjiuwen_deepsearch.config.method import ExecutionMethod
 from openjiuwen_deepsearch.framework.openjiuwen.agent.agent_factory import AgentFactory
 from openjiuwen_deepsearch.framework.openjiuwen.agent.workflow import parse_endnode_content
+from openjiuwen_deepsearch.utils.constants_utils.search_engine_constants import SearchEngine
 from openjiuwen_deepsearch.utils.log_utils.log_common import session_id_ctx
 from openjiuwen_deepsearch.utils.log_utils.log_manager import LogManager
 
@@ -136,6 +137,37 @@ class DeepResearchTaskManager:
         return f"{trimmed}/v1/ai-tools/web-search"
 
     @staticmethod
+    def _detect_configured_search_engines() -> Dict[str, str]:
+        """自动识别环境变量中已配置的检索引擎.
+        
+        返回：
+            Dict[str, str]: 引擎名字 -> API key 的映射，例如 {"jina": "sk-xxx", "bocha": "sk-yyy"}
+        """
+        configured_engines = {}
+        
+        # SerpAPI 搜索引擎
+        serper_api_key = os.environ.get("SERPER_API_KEY", "").strip()
+        if serper_api_key:
+            configured_engines[SearchEngine.SERPER.value] = serper_api_key
+
+        # JINA 搜索引擎
+        jina_api_key = os.environ.get("JINA_API_KEY", "").strip()
+        if jina_api_key:
+            configured_engines[SearchEngine.JINA.value] = jina_api_key
+
+        # 博查搜索引擎
+        bocha_api_key = os.environ.get("BOCHA_API_KEY", "").strip()
+        if bocha_api_key:
+            configured_engines[SearchEngine.BOCHA.value] = bocha_api_key
+
+        # Perplexity 搜索引擎
+        perplexity_api_key = os.environ.get("PERPLEXITY_API_KEY", "").strip()
+        if perplexity_api_key:
+            configured_engines[SearchEngine.PERPLEXITY.value] = perplexity_api_key
+        
+        return configured_engines
+
+    @staticmethod
     def _load_config() -> Dict[str, str]:
         """从环境变量加载 DeepSearch 配置.
 
@@ -166,14 +198,33 @@ class DeepResearchTaskManager:
                 or os.environ.get("API_KEY", "").strip()
         )
 
-        web_search_engine_name = os.environ.get("WEB_SEARCH_ENGINE_NAME", "petal").strip()
-        web_search_api_key = (os.environ.get("WEB_SEARCH_API_KEY")
-                              or os.environ.get("OPENAI_DEFAULT_HEADERS")
-                              or os.environ.get("default_headers", "")
-                              ).strip()
-        web_search_url = (os.environ.get("WEB_SEARCH_URL")
-                          or DeepResearchTaskManager._resolve_petal_search_url()
-                          ).strip()
+        # 自动识别已配置的检索引擎
+        configured_engines = DeepResearchTaskManager._detect_configured_search_engines()
+
+        # 确定搜索引擎名称：WEB_SEARCH_ENGINE_NAME > 已配置搜索引擎 > petal
+        web_search_engine_name = os.environ.get("WEB_SEARCH_ENGINE_NAME", "").strip()
+        if not web_search_engine_name and configured_engines:
+            # 使用第一个已配置的搜索引擎
+            web_search_engine_name = next(iter(configured_engines.keys()))
+        if not web_search_engine_name:
+            web_search_engine_name = SearchEngine.PETAL.value
+
+        # 确定搜索引擎 API Key：WEB_SEARCH_API_KEY > 已配置搜索引擎的 API Key > OPENAI_DEFAULT_HEADERS/default_headers
+        web_search_api_key = os.environ.get("WEB_SEARCH_API_KEY", "").strip()
+        if not web_search_api_key and configured_engines and web_search_engine_name in configured_engines:
+            # 使用对应引擎的 API Key
+            web_search_api_key = configured_engines[web_search_engine_name]
+        if not web_search_api_key:
+            # Fallback 到 OPENAI_DEFAULT_HEADERS 或 default_headers
+            web_search_api_key = (
+                os.environ.get("OPENAI_DEFAULT_HEADERS")
+                or os.environ.get("default_headers", "")
+            ).strip()
+        
+        web_search_url = os.environ.get("WEB_SEARCH_URL", "").strip()
+        if not web_search_url and web_search_engine_name == SearchEngine.PETAL.value:
+            web_search_url = DeepResearchTaskManager._resolve_petal_search_url()
+
         execution_method = os.environ.get("EXECUTION_METHOD", "parallel").strip()
 
         config = {
