@@ -608,7 +608,7 @@ channels:
 #     pattern: string or re:...
 #     action: allow | deny
 permissions:
-  enabled: true
+  enabled: ${PERMISSIONS_ENABLED:-true}
   # Default permission for tools not listed below.
   defaults: ask
 
