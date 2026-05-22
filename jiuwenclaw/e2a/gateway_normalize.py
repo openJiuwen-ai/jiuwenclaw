@@ -55,7 +55,6 @@ def message_to_legacy_agent_dict(msg: "Message") -> dict[str, Any]:
         "request_id": msg.id,
         "channel_id": msg.channel_id,
         "session_id": msg.session_id,
-        "user_id": msg.user_id,
         "req_method": rm_val,
         "params": dict(msg.params or {}),
         "is_stream": bool(msg.is_stream),
@@ -103,7 +102,6 @@ def build_fallback_e2a(legacy: dict[str, Any]) -> E2AEnvelope:
         request_id=rid or None,
         channel=str(legacy.get("channel_id") or "") or None,
         session_id=legacy.get("session_id"),
-        user_id=legacy.get("user_id"),
         method=None,
         params={},
         is_stream=bool(legacy.get("is_stream", False)),
@@ -117,7 +115,6 @@ def message_to_e2a(msg: "Message") -> E2AEnvelope:
         "request_id": msg.id,
         "channel_id": msg.channel_id,
         "session_id": msg.session_id,
-        "user_id": msg.user_id,
         "chat_id": msg.chat_id,
         "params": dict(msg.params or {}),
         "is_stream": bool(msg.is_stream),
@@ -200,14 +197,12 @@ def e2a_from_agent_fields(
     is_stream: bool = False,
     timestamp: float = 0.0,
     metadata: dict[str, Any] | None = None,
-    user_id: str | None = None,
 ) -> E2AEnvelope:
     """由与 AgentRequest 相同的字段构造 E2A（heartbeat / cron / app 管理请求等）。"""
     d: dict[str, Any] = {
         "request_id": request_id,
         "channel_id": channel_id,
         "session_id": session_id,
-        "user_id": user_id,
         "params": dict(params or {}),
         "is_stream": is_stream,
         "timestamp": timestamp,

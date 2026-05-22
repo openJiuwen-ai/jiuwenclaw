@@ -167,7 +167,9 @@ class MessageHandler(ABC):
         self._get_config_raw = get_config_raw
         self._update_channel_in_config = update_channel_in_config
 
-        if hasattr(self._agent_client, "set_server_push_handler"):
+        from jiuwenclaw.gateway.agent_client import WebSocketAgentServerClient
+
+        if isinstance(self._agent_client, WebSocketAgentServerClient):
             self._agent_client.set_server_push_handler(self._handle_agent_server_push)
 
         # 文件传输处理器（延迟初始化）
@@ -1320,7 +1322,7 @@ class MessageHandler(ABC):
         merged_content = f"{prefix} {cleaned_content}".strip()
         return cls._resolve_at_file_references(merged_content, cwd=cwd)
 
-    async def create_agent_session(self, session_id: str, *, user_id: str | None = None) -> str:
+    async def create_agent_session(self, session_id: str) -> str:
         from jiuwenclaw.e2a.gateway_normalize import e2a_from_agent_fields
         from jiuwenclaw.schema.message import ReqMethod
 
@@ -1332,7 +1334,6 @@ class MessageHandler(ABC):
             params={"session_id": session_id},
             is_stream=False,
             timestamp=time.time(),
-            user_id=user_id,
         )
         resp = await self._agent_client.send_request(env)
         if not resp.ok:
@@ -1345,13 +1346,7 @@ class MessageHandler(ABC):
             raise RuntimeError("vibeskill session.create returned empty session_id")
         return resolved_str
 
-    async def register_skill(
-        self,
-        session_id: str,
-        skill_url: str,
-        *,
-        user_id: str | None = None,
-    ) -> dict[str, Any]:
+    async def register_skill(self, session_id: str, skill_url: str) -> dict[str, Any]:
         """通过 AgentServer 将远程 skill 包注册到当前 session 的 workspace。
 
         仅支持 Standard mode session。
@@ -1372,7 +1367,6 @@ class MessageHandler(ABC):
             },
             is_stream=False,
             timestamp=time.time(),
-            user_id=user_id,
         )
         resp = await self._agent_client.send_request(env)
         if not resp.ok:
@@ -2697,7 +2691,6 @@ class MessageHandler(ABC):
                     mime_type=ft_params.get("mime_type", ""),
                     session_id=ft_params.get("session_id", "") or env.session_id or "",
                     channel_id=env.channel or "",
-                    user_id=env.user_id or "",
                 )
                 return await self._agent_client.file_transfer_start(start_params)
             elif method == FILE_TRANSFER_CHUNK:

@@ -38,25 +38,6 @@ def test_message_to_e2a_or_fallback_basic():
     assert env.channel_context.get("method") == "chat.send"
 
 
-def test_message_to_e2a_preserves_user_id():
-    msg = Message(
-        id="r-user",
-        type="req",
-        channel_id="vibeskill",
-        session_id="s-user",
-        user_id="user-1",
-        params={"query": "hi"},
-        timestamp=time.time(),
-        ok=True,
-        req_method=ReqMethod.CHAT_SEND,
-        is_stream=True,
-    )
-
-    env = message_to_e2a_or_fallback(msg)
-
-    assert env.user_id == "user-1"
-
-
 def test_envelope_from_dict_merges_metadata_when_channel_context_nonempty():
     """telemetry 等先写入 channel_context 时，顶层 metadata 仍须并入，以便 AgentRequest.metadata 含 wecom_chat_id。"""
     env = E2AEnvelope.from_dict(

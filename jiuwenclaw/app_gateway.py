@@ -800,58 +800,21 @@ async def _run(
     # ---------- Telemetry 初始化 ----------
     init_telemetry()
 
-    startup_cfg: dict[str, Any] = {}
-    try:
-        startup_cfg = get_config()
-    except Exception as e:  # noqa: BLE001
-        logger.warning("[App] failed to read startup config from config.yaml: %s", e)
-
-    def _cfg_bool(value: Any, default: bool = False) -> bool:
-        if isinstance(value, bool):
-            return value
-        if value is None:
-            return default
-        return str(value).strip().lower() in {"1", "true", "yes", "on"}
-
-    gateway_cfg = startup_cfg.get("gateway") if isinstance(startup_cfg.get("gateway"), dict) else {}
-    sandbox_routing_cfg = (
-        gateway_cfg.get("sandbox_routing")
-        if isinstance(gateway_cfg.get("sandbox_routing"), dict)
-        else {}
-    )
-    sandbox_routing_enabled = _cfg_bool(sandbox_routing_cfg.get("enabled"), False)
-    sandbox_info_http_server = None
-
     max_retries = int(os.getenv("AGENT_CONNECT_RETRY", "20"))
     retry_interval = float(os.getenv("AGENT_CONNECT_RETRY_INTERVAL", "3"))
 
-    if sandbox_routing_enabled:
-        from jiuwenclaw.gateway.sandbox_router import SandboxRouterAgentClient
-        from jiuwenclaw.sandbox.sandbox_info_http import SANDBOX_INFO_HTTP_PORT, SandboxInfoHttpServer
-
-        client = SandboxRouterAgentClient()
-        await client.connect(agent_server_url)
-        logger.info("[App] sandbox routing enabled for VibeSkill; default WebSocketAgentServerClient is not used")
-        sandbox_info_http_server = SandboxInfoHttpServer()
-        await sandbox_info_http_server.start()
-        logger.info(
-            "[App] sandbox info HTTP started: http://%s:%d/api/v1/sandboxes",
-            sandbox_info_http_server.listen_host,
-            SANDBOX_INFO_HTTP_PORT,
-        )
+    agent_server_ext = extension_registry.get_agent_server_client_extension()
+    if agent_server_ext is not None:
+        logger.info("[App] using extension AgentServerClient: %s", agent_server_ext.metadata.name)
+        client = agent_server_ext.get_client()
     else:
-        agent_server_ext = extension_registry.get_agent_server_client_extension()
-        if agent_server_ext is not None:
-            logger.info("[App] using extension AgentServerClient: %s", agent_server_ext.metadata.name)
-            client = agent_server_ext.get_client()
-        else:
-            client = WebSocketAgentServerClient(ping_interval=20.0, ping_timeout=600.0)
-        await _connect_with_retry(
-            client,
-            agent_server_url,
-            max_retries=max_retries,
-            interval=retry_interval,
-        )
+        client = WebSocketAgentServerClient(ping_interval=20.0, ping_timeout=600.0)
+    await _connect_with_retry(
+        client,
+        agent_server_url,
+        max_retries=max_retries,
+        interval=retry_interval,
+    )
 
     message_handler = MessageHandler(client)
     await message_handler.start_forwarding()
@@ -1748,8 +1711,6 @@ async def _run(
                 pass
             await wechat_channel.stop()
 
-        if sandbox_info_http_server is not None:
-            await sandbox_info_http_server.stop()
         await cron_scheduler.stop()
         await channel_manager.stop_dispatch()
         if heartbeat_enabled:

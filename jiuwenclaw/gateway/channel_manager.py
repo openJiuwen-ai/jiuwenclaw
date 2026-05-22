@@ -90,19 +90,13 @@ class ChannelManager(ABC):
         """将消息交给 MessageHandler（供自定义入站路径使用）。"""
         self._message_handler.handle_message(msg)
 
-    async def create_agent_session(self, session_id: str, *, user_id: str | None = None) -> str:
+    async def create_agent_session(self, session_id: str) -> str:
         """通过 MessageHandler 创建 agent session。"""
-        return await self._message_handler.create_agent_session(session_id, user_id=user_id)
+        return await self._message_handler.create_agent_session(session_id)
 
-    async def register_skill(
-        self,
-        session_id: str,
-        skill_url: str,
-        *,
-        user_id: str | None = None,
-    ) -> dict[str, Any]:
+    async def register_skill(self, session_id: str, skill_url: str) -> dict[str, Any]:
         """通过 MessageHandler 将远程 skill 包注册到 session workspace。"""
-        return await self._message_handler.register_skill(session_id, skill_url, user_id=user_id)
+        return await self._message_handler.register_skill(session_id, skill_url)
 
     def unregister_channel(self, channel_id: str) -> None:
         """注销指定 Channel."""

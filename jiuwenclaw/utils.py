@@ -73,7 +73,6 @@ class FileTransferStartParams:
     mime_type: str = ""
     session_id: str = ""
     channel_id: str = ""
-    user_id: str = ""
 
 
 class SafeRotatingFileHandler(BaseRotatingHandler):
@@ -1780,7 +1779,6 @@ class FileTransferStartParams:
     mime_type: str = ""
     session_id: str = ""
     channel_id: str = ""
-    user_id: str = ""
 
 
 @dataclass
