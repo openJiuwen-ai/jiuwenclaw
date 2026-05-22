@@ -90,9 +90,9 @@ Session Store 由每个 `VibeSkillChannel` 实例独立持有，不是全局单�
 
 | 状态 | 含义 | 典型触发 |
 |------|------|----------|
-| `idle` | 空闲 | 新建、取消、错误恢复、Standard chat final/cancel |
-| `busy` | 正在处理 | 收到 `message.send` |
-| `completed` | SkillDev 任务完成 | 收到 `skilldev.completed` |
+| `idle` | 空闲 | 新建、单轮结束等待用户（`skilldev.agent_completed`）、取消、错误恢复、Standard chat final/cancel |
+| `busy` | 正在处理 | 收到 `message.send` / `review.replied` 等 |
+| `completed` | SkillDev 任务完成 | 收到 `skilldev.completed`（产物就绪） |
 | `retry` | 可重试状态 | 设计上预留 |
 
 会话模式：
@@ -155,6 +155,7 @@ ws://127.0.0.1:19003/api/v1/messages?sessionID={sessionID}
 | `file` | `filename`, `url`, `mime`, `resourceType` | 普通文件进入 `params.files`；`resourceType=skill` 进入 `params.skill_packages` |
 | `toolDefinition` | `pluginId`, `pluginType`, `toolType`, `toolName`, `description`, `arguments`, `protocol` | 进入 `params.tool_spec_files` |
 | `agentDefinition` | `agentId`, `name`, `description`, `parameters` | 进入 `params.agent_definitions` |
+| `cliDefinition` | `name`, `version`, `description`, `executeSide`, `requirePermissions`, `inputSchema`, `outputSchema` | 进入 `params.cli_definitions` |
 
 SkillCreate 模式 `message.send` 示例：
 
@@ -178,7 +179,7 @@ req_method = skilldev.chat
 session_id = internal_id
 params.task_id = internal_id
 params.query = parts 中所有 text 拼接
-params.files / skill_packages / tool_spec_files / agent_definitions = 按 part 类型填充
+params.files / skill_packages / tool_spec_files / agent_definitions / cli_definitions = 按 part 类型填充
 params.agent_id = 可选，来自 message 顶层 agent_id 或 agentId
 metadata.vibeskill_original_session_id = external sessionID
 is_stream = true
@@ -210,6 +211,7 @@ SkillDev 事件映射：
 | `skilldev.todos_update` | `todo.updated` | Todo 列表更新 |
 | `skilldev.ask_user_question` | `question.asked` | 结构化澄清提问（`questions` 列表） |
 | `skilldev.confirm_request` | `review.asked` / `desc_optimize.asked` / `test.asked` | 按 `confirm_type` 分流：`review` / `desc_optimize_confirm` / `skip_tests_confirm` |
+| `skilldev.agent_completed` | `session.status` | 单轮 Agent 结束、等待用户确认，状态置为 idle，随后关闭北向 WS |
 | `skilldev.error` | `message.*` + `task.error` + `session.status` | 输出错误文本 part，状态置为 idle |
 | `skilldev.completed` | `task.completed` + `session.status` | 状态置为 completed |
 

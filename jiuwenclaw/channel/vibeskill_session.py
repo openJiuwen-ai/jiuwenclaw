@@ -41,10 +41,11 @@ class VibeSkillSessionStore:
 
     Session 状态转换：
         idle ──(message.send)──► busy
-        busy ──(task.completed)──► completed
+        busy ──(skilldev.agent_completed)──► idle
+        busy ──(skilldev.completed)──► completed
         completed ──(message.send)──► busy
         busy ──(chat.final/cancel)──► idle
-        busy ──(error)──► retry
+        busy ──(skilldev.error)──► idle
         retry ──(message.send)──► busy
     """
 

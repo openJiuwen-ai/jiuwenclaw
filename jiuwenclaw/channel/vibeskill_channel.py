@@ -496,6 +496,7 @@ class VibeSkillChannel(BaseChannel):
         skill_packages: list[dict[str, Any]] = []
         tools: list[dict[str, Any]] = []
         agent_definitions: list[dict[str, Any]] = []
+        cli_definitions: list[dict[str, Any]] = []
 
         for part in parts:
             if not isinstance(part, dict):
@@ -537,6 +538,25 @@ class VibeSkillChannel(BaseChannel):
                     "description": str(part.get("description") or ""),
                     "parameters": parameters,
                 })
+            elif part_type == "cliDefinition":
+                input_schema = part.get("inputSchema") or part.get("input_schema") or {}
+                if not isinstance(input_schema, dict):
+                    input_schema = {}
+                output_schema = part.get("outputSchema") or part.get("output_schema") or {}
+                if not isinstance(output_schema, dict):
+                    output_schema = {}
+                require_permissions = part.get("requirePermissions") or part.get("require_permissions") or []
+                if not isinstance(require_permissions, list):
+                    require_permissions = []
+                cli_definitions.append({
+                    "name": str(part.get("name") or ""),
+                    "version": str(part.get("version") or ""),
+                    "description": str(part.get("description") or ""),
+                    "executeSide": str(part.get("executeSide") or part.get("execute_side") or ""),
+                    "requirePermissions": require_permissions,
+                    "inputSchema": input_schema,
+                    "outputSchema": output_schema,
+                })
 
         params: dict[str, Any] = {}
         if query:
@@ -549,6 +569,8 @@ class VibeSkillChannel(BaseChannel):
             params["tool_spec_files"] = tools
         if agent_definitions:
             params["agent_definitions"] = agent_definitions
+        if cli_definitions:
+            params["cli_definitions"] = cli_definitions
         return params
 
     async def _handle_message_send(self, ws: Any, data: dict[str, Any]) -> bool:
@@ -1573,14 +1595,33 @@ class VibeSkillChannel(BaseChannel):
         external_sid: str | None,
         session_id: str | None,
     ) -> list[dict]:
-        """skilldev.agent_completed — 单轮 Agent 流式输出结束，无额外北向帧。"""
+        """skilldev.agent_completed — 单轮 Agent 结束，等待用户确认时置 idle 并推送 session.status。"""
         if session_id:
+            try:
+                await self._store.set_state(session_id, VibeSkillSessionState.IDLE)
+                logger.info(
+                    "[VibeSkillChannel] session state -> idle, source=skilldev.agent_completed, session_id=%s",
+                    session_id,
+                )
+            except Exception:
+                logger.exception(
+                    "[VibeSkillChannel] set_state error for skilldev.agent_completed, session_id=%s",
+                    session_id,
+                )
             ctx = self._message_ctx.get(session_id)
             if isinstance(ctx, dict):
                 ctx.pop("_skilldev_stream_last_kind", None)
                 ctx.pop("_skilldev_active_reasoning_part", None)
                 ctx.pop("_skilldev_active_output_part", None)
-        return []
+        if not external_sid:
+            return []
+        return [{
+            "type": "session.status",
+            "properties": {
+                "sessionID": external_sid,
+                "status": {"type": "idle"},
+            },
+        }]
 
     async def _handle_skilldev_completed(
         self,
@@ -2293,6 +2334,31 @@ class VibeSkillChannel(BaseChannel):
                             "name": str(agent_def.get("name") or ""),
                             "description": str(agent_def.get("description") or ""),
                             "parameters": parameters,
+                        })
+
+                    for cli_def in payload.get("cli_definitions", []) or []:
+                        if not isinstance(cli_def, dict):
+                            continue
+                        input_schema = cli_def.get("inputSchema") or cli_def.get("input_schema") or {}
+                        if not isinstance(input_schema, dict):
+                            input_schema = {}
+                        output_schema = cli_def.get("outputSchema") or cli_def.get("output_schema") or {}
+                        if not isinstance(output_schema, dict):
+                            output_schema = {}
+                        require_permissions = (
+                            cli_def.get("requirePermissions") or cli_def.get("require_permissions") or []
+                        )
+                        if not isinstance(require_permissions, list):
+                            require_permissions = []
+                        parts.append({
+                            "type": "cliDefinition",
+                            "name": str(cli_def.get("name") or ""),
+                            "version": str(cli_def.get("version") or ""),
+                            "description": str(cli_def.get("description") or ""),
+                            "executeSide": str(cli_def.get("executeSide") or cli_def.get("execute_side") or ""),
+                            "requirePermissions": require_permissions,
+                            "inputSchema": input_schema,
+                            "outputSchema": output_schema,
                         })
 
                     messages.append({
