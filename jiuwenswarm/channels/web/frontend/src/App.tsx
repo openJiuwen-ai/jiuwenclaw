@@ -44,6 +44,23 @@ import './App.css';
 
 type MainNavKey = 'chat' | 'skills' | 'agents' | 'teams' | 'sessions' | 'heartbeat' | 'cron' | 'channels' | 'extensions' | 'configpanel' | 'logspanel' | 'browserpanel' | 'updatepanel';
 
+type AgentsTeamsSavePayload = {
+  agents: Record<string, {
+    model: { provider: string; api_base: string; api_key: string; model: string };
+    skills: string[];
+    completion_timeout: number;
+  }>;
+  team: Array<{
+    team_name: string;
+    lifecycle: string;
+    teammate_mode: string;
+    spawn_mode: string;
+    leader: { member_name: string; display_name: string; persona: string; agent_key: string };
+    teammate: { agent_key: string };
+    predefined_members: Array<{ member_name: string; display_name: string; persona: string; prompt_hint: string; agent_key: string }>;
+  }>;
+};
+
 // 错误边界组件
 interface ErrorBoundaryState {
   hasError: boolean;
@@ -443,34 +460,12 @@ function AppContent() {
     }
   }, [clearRestartAutoCloseTimer, closeRestartModal, request]);
 
-  const handleAgentsTeamsSave = useCallback(async (payload: {
-    agents: Record<string, {
-      model: { provider: string; api_base: string; api_key: string; model: string };
-      skills: string[];
-      max_iterations: number;
-      completion_timeout: number;
-    }>;
-    team: Array<{
-      team_name: string;
-      lifecycle: string;
-      teammate_mode: string;
-      spawn_mode: string;
-      leader: { member_name: string; display_name: string; persona: string; agent_key: string };
-      teammate: { agent_key: string };
-      predefined_members: Array<{ member_name: string; display_name: string; persona: string; prompt_hint: string; agent_key: string }>;
-    }>;
-  }) => {
-    const result = await request<{ updated?: string[]; applied_without_restart?: boolean }>(
-      'config.set',
-      payload as unknown as Record<string, string>
-    );
-    // 更新前端配置缓存
+  const buildAgentsTeamsFlatConfig = useCallback((payload: AgentsTeamsSavePayload) => {
     const updates: Record<string, string> = {};
     Object.entries(payload.agents).forEach(([name, agent], idx) => {
       updates[`agent_name_${idx}`] = name;
       updates[`agent_model_${idx}`] = agent.model.model;
       updates[`agent_skills_${idx}`] = agent.skills.join(',');
-      updates[`agent_max_iterations_${idx}`] = String(agent.max_iterations);
       updates[`agent_completion_timeout_${idx}`] = String(agent.completion_timeout);
     });
     payload.team.forEach((team, idx) => {
@@ -483,13 +478,32 @@ function AppContent() {
       updates[`team_leader_persona_${idx}`] = team.leader.persona;
       updates[`team_leader_agent_key_${idx}`] = team.leader.agent_key;
       updates[`team_teammate_agent_key_${idx}`] = team.teammate.agent_key;
-      // 保存 predefined_members
-      if (team.predefined_members && team.predefined_members.length > 0) {
-        updates[`team_predefined_members_${idx}`] = JSON.stringify(team.predefined_members);
-      } else {
-        updates[`team_predefined_members_${idx}`] = "";
-      }
+      updates[`team_predefined_members_${idx}`] = team.predefined_members?.length
+        ? JSON.stringify(team.predefined_members)
+        : "";
     });
+    for (let i = payload.team.length; i < 10; i++) {
+      updates[`team_name_${i}`] = "";
+      updates[`team_lifecycle_${i}`] = "";
+      updates[`team_teammate_mode_${i}`] = "";
+      updates[`team_spawn_mode_${i}`] = "";
+      updates[`team_leader_member_name_${i}`] = "";
+      updates[`team_leader_display_name_${i}`] = "";
+      updates[`team_leader_persona_${i}`] = "";
+      updates[`team_leader_agent_key_${i}`] = "";
+      updates[`team_teammate_agent_key_${i}`] = "";
+      updates[`team_predefined_members_${i}`] = "";
+    }
+    return updates;
+  }, []);
+
+  const handleAgentsTeamsSave = useCallback(async (payload: AgentsTeamsSavePayload) => {
+    const result = await request<{ updated?: string[]; applied_without_restart?: boolean }>(
+      'config.set',
+      payload as unknown as Record<string, string>
+    );
+    // 更新前端配置缓存
+    const updates = buildAgentsTeamsFlatConfig(payload);
     setServerConfig((prev: Record<string, unknown> | null) => ({ ...prev, ...updates }));
     setConfigError(null);
     setRestartModalOpen(true);

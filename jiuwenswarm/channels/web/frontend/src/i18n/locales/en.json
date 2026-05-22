@@ -651,7 +651,7 @@
       "kvCacheAffinity": "Compute affinity (KV cache release)"
     },
     "permissionsTools": {
-      "title": "Per-tool guardrail (permissions.tools)",
+      "title": "Tool Guardrail (permissions.tools)",
       "subtitle": "Set allow / ask / deny per tool name; writes config and hot-reloads. Pattern-based rules are not managed here.",
       "refresh": "Refresh",
       "refreshing": "Loading…",

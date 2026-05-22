@@ -102,7 +102,6 @@ interface AgentEntry {
   name: string;
   model: AgentModel;
   skills: string[];
-  max_iterations: number;
   completion_timeout: number;
 }
 
@@ -157,7 +156,6 @@ interface ConfigPanelProps {
     agents: Record<string, {
       model: { provider: string; api_base: string; api_key: string; model: string };
       skills: string[];
-      max_iterations: number;
       completion_timeout: number;
     }>;
     team: Array<{
@@ -225,7 +223,7 @@ function getFieldLengthErrorKey(field: keyof ModelEntry, value: string): string 
       return null;
   }
 }
-const AGENT_KEYS = new Set(["name", "model", "skills", "max_iterations", "completion_timeout"]);
+const AGENT_KEYS = new Set(["name", "model", "skills", "completion_timeout"]);
 const TEAM_KEYS = new Set(["team_name", "lifecycle", "teammate_mode", "spawn_mode"]);
 const FREE_SEARCH_BOOLEAN_KEYS = new Set(["free_search_ddg_enabled", "free_search_bing_enabled"]);
 const FREE_SEARCH_KEYS = new Set([...FREE_SEARCH_BOOLEAN_KEYS]);
@@ -460,7 +458,6 @@ const KEY_DISPLAY_I18N: Record<string, string> = {
   name: "config.keys.agentName",
   model: "config.keys.agentModel",
   skills: "config.keys.agentSkills",
-  max_iterations: "config.keys.agentMaxIterations",
   completion_timeout: "config.keys.agentCompletionTimeout",
 };
 const KEY_PLACEHOLDER_I18N: Record<string, string> = {
@@ -480,8 +477,7 @@ const KEY_SORT_PRIORITY: Record<string, number> = {
   memory_forbidden_description: 1,
   model: 0,
   skills: 1,
-  max_iterations: 2,
-  completion_timeout: 3,
+  completion_timeout: 2,
 };
 
 function getKeyDisplayLabel(key: string, t: (key: string) => string): string {
@@ -533,9 +529,8 @@ function GroupSection({
   };
 
   const nestedStyle = nested ? getNestedModelStyle(group.tag) : "";
-  const headerClass = `w-full flex items-center justify-between transition-colors text-sm ${
-    showNestedChrome ? `py-2 pr-3 pl-4 ${nestedStyle} hover:opacity-90` : "px-4 py-3 bg-secondary/30"
-  } ${alwaysExpanded ? "" : showNestedChrome ? "" : "hover:bg-secondary/60"}`;
+  const headerClass = `w-full flex items-center justify-between transition-colors text-sm ${showNestedChrome ? `py-2 pr-3 pl-4 ${nestedStyle} hover:opacity-90` : "px-4 py-3 bg-secondary/30"
+    } ${alwaysExpanded ? "" : showNestedChrome ? "" : "hover:bg-secondary/60"}`;
 
   const headerInner = (
     <>
@@ -568,10 +563,10 @@ function GroupSection({
     <div
       id={`config-group-${group.tag}`}
       className={
-      showNestedChrome
-        ? "rounded-r-md overflow-hidden border border-border/50"
-        : "rounded-xl border border-border bg-card/70 backdrop-blur-sm overflow-hidden shadow-sm"
-    }
+        showNestedChrome
+          ? "rounded-r-md overflow-hidden border border-border/50"
+          : "rounded-xl border border-border bg-card/70 backdrop-blur-sm overflow-hidden shadow-sm"
+      }
     >
       {alwaysExpanded ? (
         <div className={headerClass} role="presentation">
@@ -584,128 +579,123 @@ function GroupSection({
       )}
       {isOpen && (
         <>
-        <table className="w-full text-sm border-t border-border">
-          <tbody>
-            {group.keys.map(([key, value]) => (
-              <tr key={key} className="border-t border-border first:border-t-0 even:bg-secondary/10 hover:bg-secondary/25 transition-colors">
-                <td className="px-4 py-2.5 align-middle text-xs text-text-muted w-[32%]" title={key}>
-                  <div className="mono">{getKeyDisplayLabel(key, t)}</div>
-                  {getKeyLabelHintText(key, t) ? (
-                    <div className="mt-1 text-[11px] leading-4 text-text-muted">
-                      {getKeyLabelHintText(key, t)}
-                    </div>
-                  ) : null}
-                </td>
-                <td className="px-4 py-2.5 break-all text-[13px] align-middle">
-                  {isBooleanKey(key) ? (
-                    <div className="flex items-center gap-2">
-                      <span
-                        className={`inline-flex w-3 justify-center shrink-0 font-semibold leading-none select-none ${
-                          isRequiredModelField(key) ? "text-danger" : "text-transparent"
-                        }`}
-                        aria-hidden="true"
-                      >
-                        *
-                      </span>
-                      <div className="h-[calc(1.25rem+16px)] flex items-center">
-                        <button
-                          type="button"
-                          role="switch"
-                          aria-checked={parseBoolValue(draftValues[key] ?? value)}
-                          onClick={() => onChange(key, parseBoolValue(draftValues[key] ?? value) ? "false" : "true")}
-                          title={getBooleanKeyLabel(key, t) ?? key}
-                          className={`relative inline-flex h-5 w-9 flex-shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 focus:outline-none ${
-                            parseBoolValue(draftValues[key] ?? value) ? "bg-ok" : "bg-secondary"
-                          }`}
-                        >
-                          <span
-                            className={`pointer-events-none inline-block h-4 w-4 transform rounded-full bg-white shadow transition duration-200 ${
-                              parseBoolValue(draftValues[key] ?? value) ? "translate-x-4" : "translate-x-0"
+          <table className="w-full text-sm border-t border-border">
+            <tbody>
+              {group.keys.map(([key, value]) => (
+                <tr key={key} className="border-t border-border first:border-t-0 even:bg-secondary/10 hover:bg-secondary/25 transition-colors">
+                  <td className="px-4 py-2.5 align-middle text-xs text-text-muted w-[32%]" title={key}>
+                    <div className="mono">{getKeyDisplayLabel(key, t)}</div>
+                    {getKeyLabelHintText(key, t) ? (
+                      <div className="mt-1 text-[11px] leading-4 text-text-muted">
+                        {getKeyLabelHintText(key, t)}
+                      </div>
+                    ) : null}
+                  </td>
+                  <td className="px-4 py-2.5 break-all text-[13px] align-middle">
+                    {isBooleanKey(key) ? (
+                      <div className="flex items-center gap-2">
+                        <span
+                          className={`inline-flex w-3 justify-center shrink-0 font-semibold leading-none select-none ${isRequiredModelField(key) ? "text-danger" : "text-transparent"
                             }`}
-                          />
-                        </button>
-                      </div>
-                    </div>
-                  ) : isProviderKey(key) ? (
-                    <div className="flex items-center gap-2">
-                      <span
-                        className={`inline-flex w-3 justify-center shrink-0 font-semibold leading-none select-none ${
-                          isRequiredModelField(key) ? "text-danger" : "text-transparent"
-                        }`}
-                        aria-hidden="true"
-                      >
-                        *
-                      </span>
-                      <div className="flex-1">
-                        <select
-                          value={draftValues[key] ?? value}
-                          onChange={(e) => onChange(key, e.target.value)}
-                          className="w-full rounded-md border border-border bg-bg px-3 py-2 text-[13px] outline-none focus:border-accent"
+                          aria-hidden="true"
                         >
-                          <option value="" disabled>{t('config.selectModelProvider')}</option>
-                          <option value="OpenAI">OpenAI</option>
-                          {!key.includes('video_') && !key.includes('audio_') && !key.includes('vision_') && (
-                            <>
-                              <option value="DashScope">DashScope</option>
-                              <option value="SiliconFlow">SiliconFlow</option>
-                              <option value="InferenceAffinity">InferenceAffinity</option>
-                              <option value="DeepSeek">DeepSeek</option>
-                            </>
-                          )}
-                        </select>
-                      </div>
-                    </div>
-                  ) : (
-                    <div className="flex items-center gap-2">
-                      <span
-                        className={`inline-flex w-3 justify-center shrink-0 font-semibold leading-none select-none ${
-                          isRequiredModelField(key) ? "text-danger" : "text-transparent"
-                        }`}
-                        aria-hidden="true"
-                      >
-                        *
-                      </span>
-                      <div className="relative flex-1">
-                        <input
-                          type={isSensitiveKey(key) && !visibleFields[key] ? "password" : "text"}
-                          value={draftValues[key] ?? value}
-                          onChange={(e) => onChange(key, e.target.value)}
-                          placeholder={KEY_PLACEHOLDER_I18N[key] ? t(KEY_PLACEHOLDER_I18N[key]) : t('config.enterValue')}
-                          className={`w-full rounded-md border border-border bg-bg px-3 py-2 text-[13px] outline-none focus:border-accent ${isSensitiveKey(key) ? "pr-10" : ""}`}
-                        />
-                        {isSensitiveKey(key) ? (
+                          *
+                        </span>
+                        <div className="h-[calc(1.25rem+16px)] flex items-center">
                           <button
                             type="button"
-                            onClick={() => toggleFieldVisible(key)}
-                            className="absolute inset-y-0 right-0 flex items-center justify-center w-9 text-text-muted hover:text-text transition-colors"
-                            aria-label={visibleFields[key] ? t('config.hideValue') : t('config.showValue')}
-                            title={visibleFields[key] ? t('config.hideValue') : t('config.showValue')}
+                            role="switch"
+                            aria-checked={parseBoolValue(draftValues[key] ?? value)}
+                            onClick={() => onChange(key, parseBoolValue(draftValues[key] ?? value) ? "false" : "true")}
+                            title={getBooleanKeyLabel(key, t) ?? key}
+                            className={`relative inline-flex h-5 w-9 flex-shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 focus:outline-none ${parseBoolValue(draftValues[key] ?? value) ? "bg-ok" : "bg-secondary"
+                              }`}
                           >
-                            {visibleFields[key] ? (
-                              <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.8}>
-                                <path strokeLinecap="round" strokeLinejoin="round" d="M3 3l18 18" />
-                                <path strokeLinecap="round" strokeLinejoin="round" d="M10.58 10.58A2 2 0 0013.42 13.42" />
-                                <path strokeLinecap="round" strokeLinejoin="round" d="M9.88 5.09A10.94 10.94 0 0112 4.9c5.05 0 9.27 3.11 10.5 7.5a11.6 11.6 0 01-3.06 4.88" />
-                                <path strokeLinecap="round" strokeLinejoin="round" d="M6.61 6.61A11.6 11.6 0 001.5 12.4c.53 1.9 1.63 3.56 3.11 4.79" />
-                                <path strokeLinecap="round" strokeLinejoin="round" d="M14.12 14.12a3 3 0 01-4.24-4.24" />
-                              </svg>
-                            ) : (
-                              <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.8}>
-                                <path strokeLinecap="round" strokeLinejoin="round" d="M1.5 12s3.75-7.5 10.5-7.5S22.5 12 22.5 12s-3.75 7.5-10.5 7.5S1.5 12 1.5 12z" />
-                                <circle cx="12" cy="12" r="3" />
-                              </svg>
-                            )}
+                            <span
+                              className={`pointer-events-none inline-block h-4 w-4 transform rounded-full bg-white shadow transition duration-200 ${parseBoolValue(draftValues[key] ?? value) ? "translate-x-4" : "translate-x-0"
+                                }`}
+                            />
                           </button>
-                        ) : null}
+                        </div>
                       </div>
-                    </div>
-                  )}
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-        {afterTable}
+                    ) : isProviderKey(key) ? (
+                      <div className="flex items-center gap-2">
+                        <span
+                          className={`inline-flex w-3 justify-center shrink-0 font-semibold leading-none select-none ${isRequiredModelField(key) ? "text-danger" : "text-transparent"
+                            }`}
+                          aria-hidden="true"
+                        >
+                          *
+                        </span>
+                        <div className="flex-1">
+                          <select
+                            value={draftValues[key] ?? value}
+                            onChange={(e) => onChange(key, e.target.value)}
+                            className="w-full rounded-md border border-border bg-bg px-3 py-2 text-[13px] outline-none focus:border-accent"
+                          >
+                            <option value="" disabled>{t('config.selectModelProvider')}</option>
+                            <option value="OpenAI">OpenAI</option>
+                            {!key.includes('video_') && !key.includes('audio_') && !key.includes('vision_') && (
+                              <>
+                                <option value="DashScope">DashScope</option>
+                                <option value="SiliconFlow">SiliconFlow</option>
+                                <option value="InferenceAffinity">InferenceAffinity</option>
+                                <option value="DeepSeek">DeepSeek</option>
+                              </>
+                            )}
+                          </select>
+                        </div>
+                      </div>
+                    ) : (
+                      <div className="flex items-center gap-2">
+                        <span
+                          className={`inline-flex w-3 justify-center shrink-0 font-semibold leading-none select-none ${isRequiredModelField(key) ? "text-danger" : "text-transparent"
+                            }`}
+                          aria-hidden="true"
+                        >
+                          *
+                        </span>
+                        <div className="relative flex-1">
+                          <input
+                            type={isSensitiveKey(key) && !visibleFields[key] ? "password" : "text"}
+                            value={draftValues[key] ?? value}
+                            onChange={(e) => onChange(key, e.target.value)}
+                            placeholder={KEY_PLACEHOLDER_I18N[key] ? t(KEY_PLACEHOLDER_I18N[key]) : t('config.enterValue')}
+                            className={`w-full rounded-md border border-border bg-bg px-3 py-2 text-[13px] outline-none focus:border-accent ${isSensitiveKey(key) ? "pr-10" : ""}`}
+                          />
+                          {isSensitiveKey(key) ? (
+                            <button
+                              type="button"
+                              onClick={() => toggleFieldVisible(key)}
+                              className="absolute inset-y-0 right-0 flex items-center justify-center w-9 text-text-muted hover:text-text transition-colors"
+                              aria-label={visibleFields[key] ? t('config.hideValue') : t('config.showValue')}
+                              title={visibleFields[key] ? t('config.hideValue') : t('config.showValue')}
+                            >
+                              {visibleFields[key] ? (
+                                <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.8}>
+                                  <path strokeLinecap="round" strokeLinejoin="round" d="M3 3l18 18" />
+                                  <path strokeLinecap="round" strokeLinejoin="round" d="M10.58 10.58A2 2 0 0013.42 13.42" />
+                                  <path strokeLinecap="round" strokeLinejoin="round" d="M9.88 5.09A10.94 10.94 0 0112 4.9c5.05 0 9.27 3.11 10.5 7.5a11.6 11.6 0 01-3.06 4.88" />
+                                  <path strokeLinecap="round" strokeLinejoin="round" d="M6.61 6.61A11.6 11.6 0 001.5 12.4c.53 1.9 1.63 3.56 3.11 4.79" />
+                                  <path strokeLinecap="round" strokeLinejoin="round" d="M14.12 14.12a3 3 0 01-4.24-4.24" />
+                                </svg>
+                              ) : (
+                                <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.8}>
+                                  <path strokeLinecap="round" strokeLinejoin="round" d="M1.5 12s3.75-7.5 10.5-7.5S22.5 12 22.5 12s-3.75 7.5-10.5 7.5S1.5 12 1.5 12z" />
+                                  <circle cx="12" cy="12" r="3" />
+                                </svg>
+                              )}
+                            </button>
+                          ) : null}
+                        </div>
+                      </div>
+                    )}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+          {afterTable}
         </>
       )}
     </div>
@@ -771,9 +761,9 @@ function MultiModelSection({
     if (!agents) return [];
     const references: string[] = [];
     agents.forEach((agent) => {
-      if (agent.model.model === modelName && 
-          agent.model.provider === modelProvider && 
-          agent.model.api_base === modelApiBase) {
+      if (agent.model.model === modelName &&
+        agent.model.provider === modelProvider &&
+        agent.model.api_base === modelApiBase) {
         references.push(agent.name);
       }
     });
@@ -982,199 +972,198 @@ function MultiModelSection({
     <>
       <div className="space-y-2">
         {localError && (
-        <div className="rounded-md border border-[var(--border-danger)] bg-danger-subtle px-3 py-2 text-xs text-danger">
-          {localError}
-        </div>
-      )}
-      {validateToast.show && (
-        <div
-          className={`fixed top-4 left-1/2 -translate-x-1/2 z-50 px-6 py-3 rounded-xl shadow-lg flex items-center gap-3 animate-fade-in ${
-            validateToast.success ? "bg-ok-subtle border border-ok text-ok" : "bg-danger-subtle border border-danger text-danger"
-          }`}
-        >
-          {validateToast.success ? (
-            <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2}>
-              <path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" />
-            </svg>
-          ) : (
-            <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2}>
-              <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
-            </svg>
-          )}
-          <span className="font-medium">{validateToast.message}</span>
-        </div>
-      )}
-      {models.map((model, idx) => {
-        const isExpanded = expandedIdx === idx;
-        const vr = validateResults[model.model_name];
-        const isDefault = model.is_default !== false;
-        const isPrimaryDefault = idx === 0;
-        // 同名模型计数，用于区分显示
-        const sameNameIndices = models.reduce<number[]>((acc, m, i) => {
-          if (m.model_name === model.model_name) acc.push(i);
-          return acc;
-        }, []);
-        const sameNameCount = sameNameIndices.length;
-        const displayName = sameNameCount > 1
-          ? `${model.model_name} #${sameNameIndices.indexOf(idx) + 1}`
-          : model.model_name;
-        return (
-          <div key={idx} className="rounded-lg border border-border bg-secondary/20">
-            <div className="flex items-center justify-between px-3 py-2 gap-2">
-              <button
-                type="button"
-                className="flex items-center gap-2 text-sm font-medium text-text truncate flex-1 text-left"
-                onClick={() => setExpandedIdx(isExpanded ? null : idx)}
-              >
-                <svg className={`w-3 h-3 transition-transform shrink-0 ${isExpanded ? "rotate-90" : ""}`} fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2}>
-                  <path strokeLinecap="round" strokeLinejoin="round" d="M9 5l7 7-7 7" />
-                </svg>
-                <span className="truncate">{displayName || t("config.modelList.untitled")}</span>
-                {isPrimaryDefault && (
-                  <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-accent/15 text-accent border border-accent/30">{t("config.modelList.primaryDefault")}</span>
-                )}
-                {!isPrimaryDefault && isDefault && sameNameCount > 1 && (
-                  <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-secondary/40 text-text-muted border border-border">{t("config.modelList.groupDefault")}</span>
-                )}
-                {vr === "ok" && (
-                  <span className="w-5 h-5 rounded-full bg-ok-subtle text-ok flex items-center justify-center">
-                    <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={3}>
-                      <path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" />
-                    </svg>
-                  </span>
-                )}
-                {vr === "err" && (
-                  <span className="w-5 h-5 rounded-full bg-danger-subtle text-danger flex items-center justify-center">
-                    <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={3}>
-                      <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
-                    </svg>
-                  </span>
-                )}
-              </button>
-              <div className="flex items-center gap-1.5 shrink-0">
-                {!isPrimaryDefault && (
+          <div className="rounded-md border border-[var(--border-danger)] bg-danger-subtle px-3 py-2 text-xs text-danger">
+            {localError}
+          </div>
+        )}
+        {validateToast.show && (
+          <div
+            className={`fixed top-4 left-1/2 -translate-x-1/2 z-50 px-6 py-3 rounded-xl shadow-lg flex items-center gap-3 animate-fade-in ${validateToast.success ? "bg-ok-subtle border border-ok text-ok" : "bg-danger-subtle border border-danger text-danger"
+              }`}
+          >
+            {validateToast.success ? (
+              <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2}>
+                <path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" />
+              </svg>
+            ) : (
+              <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2}>
+                <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
+              </svg>
+            )}
+            <span className="font-medium">{validateToast.message}</span>
+          </div>
+        )}
+        {models.map((model, idx) => {
+          const isExpanded = expandedIdx === idx;
+          const vr = validateResults[model.model_name];
+          const isDefault = model.is_default !== false;
+          const isPrimaryDefault = idx === 0;
+          // 同名模型计数，用于区分显示
+          const sameNameIndices = models.reduce<number[]>((acc, m, i) => {
+            if (m.model_name === model.model_name) acc.push(i);
+            return acc;
+          }, []);
+          const sameNameCount = sameNameIndices.length;
+          const displayName = sameNameCount > 1
+            ? `${model.model_name} #${sameNameIndices.indexOf(idx) + 1}`
+            : model.model_name;
+          return (
+            <div key={idx} className="rounded-lg border border-border bg-secondary/20">
+              <div className="flex items-center justify-between px-3 py-2 gap-2">
+                <button
+                  type="button"
+                  className="flex items-center gap-2 text-sm font-medium text-text truncate flex-1 text-left"
+                  onClick={() => setExpandedIdx(isExpanded ? null : idx)}
+                >
+                  <svg className={`w-3 h-3 transition-transform shrink-0 ${isExpanded ? "rotate-90" : ""}`} fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2}>
+                    <path strokeLinecap="round" strokeLinejoin="round" d="M9 5l7 7-7 7" />
+                  </svg>
+                  <span className="truncate">{displayName || t("config.modelList.untitled")}</span>
+                  {isPrimaryDefault && (
+                    <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-accent/15 text-accent border border-accent/30">{t("config.modelList.primaryDefault")}</span>
+                  )}
+                  {!isPrimaryDefault && isDefault && sameNameCount > 1 && (
+                    <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-secondary/40 text-text-muted border border-border">{t("config.modelList.groupDefault")}</span>
+                  )}
+                  {vr === "ok" && (
+                    <span className="w-5 h-5 rounded-full bg-ok-subtle text-ok flex items-center justify-center">
+                      <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={3}>
+                        <path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" />
+                      </svg>
+                    </span>
+                  )}
+                  {vr === "err" && (
+                    <span className="w-5 h-5 rounded-full bg-danger-subtle text-danger flex items-center justify-center">
+                      <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={3}>
+                        <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
+                      </svg>
+                    </span>
+                  )}
+                </button>
+                <div className="flex items-center gap-1.5 shrink-0">
+                  {!isPrimaryDefault && (
+                    <button
+                      type="button"
+                      onClick={() => handleSetActive(idx)}
+                      className="text-[11px] px-2 py-0.5 rounded border border-border hover:bg-secondary/60"
+                    >
+                      {t("config.modelList.setPrimaryDefault")}
+                    </button>
+                  )}
                   <button
                     type="button"
-                    onClick={() => handleSetActive(idx)}
-                    className="text-[11px] px-2 py-0.5 rounded border border-border hover:bg-secondary/60"
+                    onClick={() => handleValidate(model)}
+                    disabled={!isConnected || validatingModel === model.model_name}
+                    className="text-[11px] px-2 py-0.5 rounded border border-border hover:bg-secondary/60 disabled:opacity-40"
                   >
-                    {t("config.modelList.setPrimaryDefault")}
+                    {validatingModel === model.model_name ? "..." : t("config.validateModel.button")}
                   </button>
-                )}
-                <button
-                  type="button"
-                  onClick={() => handleValidate(model)}
-                  disabled={!isConnected || validatingModel === model.model_name}
-                  className="text-[11px] px-2 py-0.5 rounded border border-border hover:bg-secondary/60 disabled:opacity-40"
-                >
-                  {validatingModel === model.model_name ? "..." : t("config.validateModel.button")}
-                </button>
-                <button
-                  type="button"
-                  onClick={() => removeModel(idx)}
-                  disabled={models.length <= 1}
-                  className="text-[11px] px-2 py-0.5 rounded border border-border hover:bg-danger-subtle hover:text-danger disabled:opacity-40"
-                >
-                  {t("config.modelList.removeModel")}
-                </button>
-              </div>
-            </div>
-            {isExpanded && (
-              <div className="border-t border-border px-3 py-2 space-y-2">
-                {(["model_name", "alias", "api_base", "api_key", "model_provider"] as const).map((field) => (
-                  <div key={field} className="flex items-center gap-2 text-xs">
-                    <label className="w-28 text-text-muted shrink-0">
-                      {field}{["api_key", "api_base", "model_name", "model_provider"].includes(field) && <span className="text-danger ml-0.5">*</span>}
-                    </label>
-                    {field === "model_provider" ? (
-                      <select
-                        value={models[idx]?.[field] ?? ""}
-                        onChange={(e) => updateModel(idx, field, e.target.value)}
-                        className="flex-1 rounded border border-border bg-bg px-2 py-1 text-text text-xs"
-                      >
-                        <option value="" disabled>{t("config.selectModelProvider")}</option>
-                        {MODEL_PROVIDER_OPTIONS.map((p) => <option key={p} value={p}>{p}</option>)}
-                      </select>
-                    ) : (
-                      <input
-                        type={field === "api_key" ? "password" : "text"}
-                        value={models[idx]?.[field] ?? ""}
-                        onChange={(e) => updateModel(idx, field, e.target.value)}
-                        className="flex-1 rounded border border-border bg-bg px-2 py-1 text-text text-xs"
-                        placeholder={field === "api_key" ? t("config.modelList.apiKeyPlaceholder") : ""}
-                      />
-                    )}
-                  </div>
-                ))}
-                {/* is_default 勾选框 */}
-                <div className="flex items-center gap-2 text-xs">
-                  <label className="w-28 text-text-muted shrink-0">{t("config.modelList.isDefault")}</label>
-                  <input
-                    type="checkbox"
-                    checked={isDefault}
-                    onChange={() => handleToggleDefault(idx)}
-                    disabled={sameNameCount <= 1}
-                    className="rounded border-border"
-                  />
-                  {sameNameCount <= 1 && (
-                    <span className="text-text-muted text-[10px]">{t("config.modelList.onlyOneInGroup")}</span>
-                  )}
+                  <button
+                    type="button"
+                    onClick={() => removeModel(idx)}
+                    disabled={models.length <= 1}
+                    className="text-[11px] px-2 py-0.5 rounded border border-border hover:bg-danger-subtle hover:text-danger disabled:opacity-40"
+                  >
+                    {t("config.modelList.removeModel")}
+                  </button>
                 </div>
               </div>
-            )}
-          </div>
-        );
-      })}
-
-      {addingNew ? (
-        <div className="rounded-lg border border-accent/40 bg-accent/5 px-3 py-2 space-y-2">
-          {(["model_name", "alias", "api_base", "api_key", "model_provider"] as const).map((field) => (
-            <div key={field} className="flex items-center gap-2 text-xs">
-              <label className="w-28 text-text-muted shrink-0">
-                {field}{["api_key", "api_base", "model_name", "model_provider"].includes(field) && <span className="text-danger ml-0.5">*</span>}
-              </label>
-              {field === "model_provider" ? (
-                <select
-                  value={newModel[field]}
-                  onChange={(e) => handleNewModelChange(field, e.target.value)}
-                  className="flex-1 rounded border border-border bg-bg px-2 py-1 text-text text-xs"
-                >
-                  <option value="" disabled>{t("config.selectModelProvider")}</option>
-                  {MODEL_PROVIDER_OPTIONS.map((p) => <option key={p} value={p}>{p}</option>)}
-                </select>
-              ) : (
-                <input
-                  type={field === "api_key" ? "password" : "text"}
-                  value={newModel[field] ?? ""}
-                  onChange={(e) => handleNewModelChange(field, e.target.value)}
-                  className="flex-1 rounded border border-border bg-bg px-2 py-1 text-text text-xs"
-                  placeholder={field === "model_name" ? "e.g. gpt-4o" : field === "api_key" ? t("config.modelList.apiKeyPlaceholder") : ""}
-                />
+              {isExpanded && (
+                <div className="border-t border-border px-3 py-2 space-y-2">
+                  {(["model_name", "alias", "api_base", "api_key", "model_provider"] as const).map((field) => (
+                    <div key={field} className="flex items-center gap-2 text-xs">
+                      <label className="w-28 text-text-muted shrink-0">
+                        {field}{["api_key", "api_base", "model_name", "model_provider"].includes(field) && <span className="text-danger ml-0.5">*</span>}
+                      </label>
+                      {field === "model_provider" ? (
+                        <select
+                          value={models[idx]?.[field] ?? ""}
+                          onChange={(e) => updateModel(idx, field, e.target.value)}
+                          className="flex-1 rounded border border-border bg-bg px-2 py-1 text-text text-xs"
+                        >
+                          <option value="" disabled>{t("config.selectModelProvider")}</option>
+                          {MODEL_PROVIDER_OPTIONS.map((p) => <option key={p} value={p}>{p}</option>)}
+                        </select>
+                      ) : (
+                        <input
+                          type={field === "api_key" ? "password" : "text"}
+                          value={models[idx]?.[field] ?? ""}
+                          onChange={(e) => updateModel(idx, field, e.target.value)}
+                          className="flex-1 rounded border border-border bg-bg px-2 py-1 text-text text-xs"
+                          placeholder={field === "api_key" ? t("config.modelList.apiKeyPlaceholder") : ""}
+                        />
+                      )}
+                    </div>
+                  ))}
+                  {/* is_default 勾选框 */}
+                  <div className="flex items-center gap-2 text-xs">
+                    <label className="w-28 text-text-muted shrink-0">{t("config.modelList.isDefault")}</label>
+                    <input
+                      type="checkbox"
+                      checked={isDefault}
+                      onChange={() => handleToggleDefault(idx)}
+                      disabled={sameNameCount <= 1}
+                      className="rounded border-border"
+                    />
+                    {sameNameCount <= 1 && (
+                      <span className="text-text-muted text-[10px]">{t("config.modelList.onlyOneInGroup")}</span>
+                    )}
+                  </div>
+                </div>
               )}
             </div>
-          ))}
-          <div className="flex justify-end gap-2 pt-1">
-            <button type="button" onClick={handleCancelAddNew} className="btn !px-3 !py-1 text-xs">{t("common.cancel")}</button>
-            <button
-              type="button"
-              onClick={handleAddNew}
-              disabled={!newModel.model_name.trim() || !newModel.api_base.trim() || !newModel.api_key.trim() || !newModel.model_provider.trim()}
-              className="btn primary !px-3 !py-1 text-xs"
-            >
-              {t("common.confirm")}
-            </button>
+          );
+        })}
+
+        {addingNew ? (
+          <div className="rounded-lg border border-accent/40 bg-accent/5 px-3 py-2 space-y-2">
+            {(["model_name", "alias", "api_base", "api_key", "model_provider"] as const).map((field) => (
+              <div key={field} className="flex items-center gap-2 text-xs">
+                <label className="w-28 text-text-muted shrink-0">
+                  {field}{["api_key", "api_base", "model_name", "model_provider"].includes(field) && <span className="text-danger ml-0.5">*</span>}
+                </label>
+                {field === "model_provider" ? (
+                  <select
+                    value={newModel[field]}
+                    onChange={(e) => handleNewModelChange(field, e.target.value)}
+                    className="flex-1 rounded border border-border bg-bg px-2 py-1 text-text text-xs"
+                  >
+                    <option value="" disabled>{t("config.selectModelProvider")}</option>
+                    {MODEL_PROVIDER_OPTIONS.map((p) => <option key={p} value={p}>{p}</option>)}
+                  </select>
+                ) : (
+                  <input
+                    type={field === "api_key" ? "password" : "text"}
+                    value={newModel[field] ?? ""}
+                    onChange={(e) => handleNewModelChange(field, e.target.value)}
+                    className="flex-1 rounded border border-border bg-bg px-2 py-1 text-text text-xs"
+                    placeholder={field === "model_name" ? "e.g. gpt-4o" : field === "api_key" ? t("config.modelList.apiKeyPlaceholder") : ""}
+                  />
+                )}
+              </div>
+            ))}
+            <div className="flex justify-end gap-2 pt-1">
+              <button type="button" onClick={handleCancelAddNew} className="btn !px-3 !py-1 text-xs">{t("common.cancel")}</button>
+              <button
+                type="button"
+                onClick={handleAddNew}
+                disabled={!newModel.model_name.trim() || !newModel.api_base.trim() || !newModel.api_key.trim() || !newModel.model_provider.trim()}
+                className="btn primary !px-3 !py-1 text-xs"
+              >
+                {t("common.confirm")}
+              </button>
+            </div>
           </div>
-        </div>
-      ) : (
-        <button
-          type="button"
-          onClick={handleStartAddNew}
-          className="w-full rounded-lg border border-dashed border-border py-2 text-xs text-text-muted hover:bg-secondary/40 hover:border-accent/40"
-        >
-          + {t("config.modelList.addModel")}
-        </button>
-      )}
-    </div>
+        ) : (
+          <button
+            type="button"
+            onClick={handleStartAddNew}
+            className="w-full rounded-lg border border-dashed border-border py-2 text-xs text-text-muted hover:bg-secondary/40 hover:border-accent/40"
+          >
+            + {t("config.modelList.addModel")}
+          </button>
+        )}
+      </div>
     </>
   );
 }
@@ -1203,7 +1192,6 @@ function MultiAgentSection({
     name: "",
     model: { provider: "", api_base: "", api_key: "", model: "" },
     skills: [],
-    max_iterations: 200,
     completion_timeout: 600,
   });
 
@@ -1231,9 +1219,9 @@ function MultiAgentSection({
     const references: string[] = [];
     agents.forEach((agent, agentIdx) => {
       if (agentIdx === excludeIdx) return;
-      if (agent.model.model === modelName && 
-          agent.model.provider === modelProvider && 
-          agent.model.api_base === modelApiBase) {
+      if (agent.model.model === modelName &&
+        agent.model.provider === modelProvider &&
+        agent.model.api_base === modelApiBase) {
         references.push(agent.name);
       }
     });
@@ -1308,17 +1296,16 @@ function MultiAgentSection({
     onAgentsChange([...agents, { ...newAgent, name }]);
     setExpandedIdx(agents.length);
     setAddingNew(false);
-    setNewAgent({ name: "", model: { provider: "", api_base: "", api_key: "", model: "" }, skills: [], max_iterations: 200, completion_timeout: 600 });
+    setNewAgent({ name: "", model: { provider: "", api_base: "", api_key: "", model: "" }, skills: [], completion_timeout: 600 });
   };
 
-  const agentFields: (keyof AgentEntry)[] = ["name", "skills", "max_iterations", "completion_timeout"];
+  const agentFields: (keyof AgentEntry)[] = ["name", "skills", "completion_timeout"];
 
   const getAgentFieldLabel = (field: string): string => {
     const labels: Record<string, string> = {
       name: t("config.keys.agentName"),
       model: t("config.keys.agentModel"),
       skills: t("config.keys.agentSkills"),
-      max_iterations: t("config.keys.agentMaxIterations"),
       completion_timeout: t("config.keys.agentCompletionTimeout"),
     };
     return labels[field] || field;
@@ -1399,18 +1386,6 @@ function MultiAgentSection({
                           onAgentsChange(copy);
                         }}
                         placeholder={t("config.keys.agentSkillsPlaceholder")}
-                      />
-                    ) : field === "max_iterations" ? (
-                      <input
-                        type="number"
-                        step="1"
-                        min="1"
-                        value={agent[field] ?? 1}
-                        onChange={(e) => {
-                          const v = parseInt(e.target.value.replace(/^0+/, '') || '1');
-                          updateAgentField(idx, field, v > 0 ? v : 1);
-                        }}
-                        className="flex-1 rounded border border-border bg-bg px-2 py-1 text-text text-xs"
                       />
                     ) : field === "completion_timeout" ? (
                       <input
@@ -1506,18 +1481,6 @@ function MultiAgentSection({
                   selected={newAgent.skills || []}
                   onChange={(selected) => setNewAgent((p) => ({ ...p, skills: selected }))}
                   placeholder={t("config.keys.agentSkillsPlaceholder")}
-                />
-              ) : field === "max_iterations" ? (
-                <input
-                  type="number"
-                  step="1"
-                  min="1"
-                  value={newAgent[field] ?? 1}
-                  onChange={(e) => {
-                    const v = parseInt(e.target.value.replace(/^0+/, '') || '1');
-                    setNewAgent((p) => ({ ...p, [field]: v > 0 ? v : 1 }));
-                  }}
-                  className="flex-1 rounded border border-border bg-bg px-2 py-1 text-text text-xs"
                 />
               ) : field === "completion_timeout" ? (
                 <input
@@ -2200,7 +2163,7 @@ export function ConfigPanel({
     return next;
   });
   const [draftModels, setDraftModels] = useState<ModelEntry[]>(() => storeAvailableModels.map((m) => ({ ...m })));
-  
+
   // 仅缓存当前页面未保存的 agents 和 teams 草稿；后端配置始终是页面初始化来源。
   const saveCachedAgentsTeams = (agents: AgentEntry[], teams: TeamEntry[]) => {
     try {
@@ -2378,8 +2341,7 @@ export function ConfigPanel({
           model: matchedModel.model_name || "",
         } : { provider: "", api_base: "", api_key: "", model: modelName },
         skills: (normalizedConfig[`agent_skills_${i}`] || normalizedConfig[`agent_${i}_skills`] || "").split(/[,，]/).map((s: string) => s.trim()).filter(Boolean),
-        max_iterations: Math.max(1, Number(normalizedConfig[`agent_max_iterations_${i}`]) || Number(normalizedConfig[`agent_${i}_max_iterations`]) || 200),
-        completion_timeout: Number(normalizedConfig[`agent_completion_timeout_${i}`]) || Number(normalizedConfig[`agent_${i}_completion_timeout`]) || 600,
+        completion_timeout: Number(normalizedConfig[`agent_completion_timeout_${i}`]) ?? Number(normalizedConfig[`agent_${i}_completion_timeout`]) ?? 600,
       });
     }
     return agents;
@@ -2754,7 +2716,6 @@ export function ConfigPanel({
         const agentsPayload: Record<string, {
           model: { provider: string; api_base: string; api_key: string; model: string };
           skills: string[];
-          max_iterations: number;
           completion_timeout: number;
         }> = {};
         for (const agent of draftAgents) {
@@ -2762,7 +2723,6 @@ export function ConfigPanel({
           agentsPayload[agent.name] = {
             model: { ...agent.model },
             skills: agent.skills,
-            max_iterations: agent.max_iterations,
             completion_timeout: agent.completion_timeout,
           };
         }

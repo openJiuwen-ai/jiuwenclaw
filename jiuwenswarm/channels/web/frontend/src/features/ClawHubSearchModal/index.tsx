@@ -50,6 +50,8 @@ interface ClawHubSearchModalProps {
   externalSearchQuery?: string;
   /** 当前已安装技能名（用于判断是否已安装） */
   installedSkillNames?: ReadonlySet<string>;
+  /** 已安装技能的来源标识（规范化），用于精确匹配 ClawHub slug */
+  installedSkillOrigins?: ReadonlySet<string>;
   /** 视图模式：列表或平铺 */
   viewMode?: "list" | "grid";
   onClose: () => void;
@@ -62,6 +64,7 @@ export function ClawHubSearchModal({
   sessionId,
   externalSearchQuery,
   installedSkillNames,
+  installedSkillOrigins,
   viewMode = "list",
   onClose,
   onInstalled,
@@ -321,7 +324,7 @@ export function ClawHubSearchModal({
                 <div className="text-sm text-text-muted">{t("skills.clawhub.noResults")}</div>
               ) : (
                 results.map((item) => {
-                  const isInstalled = installedSkillNames?.has(item.slug) ?? false;
+                  const isInstalled = installedSlugs.has(item.slug) || (installedSkillNames?.has(item.slug) ?? false) || (installedSkillNames?.has(item.display_name) ?? false) || (installedSkillOrigins?.has(`clawhub:${item.slug}`) ?? false);
                   const isInstalling = installingSlug === item.slug;
                   const avatar = getSkillAvatar(item.display_name || item.slug);
                   return (
@@ -586,7 +589,7 @@ export function ClawHubSearchModal({
                 ) : (
                   results.map((item) => {
                     // 使用本地状态判断是否已安装（刚安装的会立即更新）
-                    const isInstalled = installedSlugs.has(item.slug) || (installedSkillNames?.has(item.slug) ?? false);
+                    const isInstalled = installedSlugs.has(item.slug) || (installedSkillNames?.has(item.slug) ?? false) || (installedSkillNames?.has(item.display_name) ?? false) || (installedSkillOrigins?.has(`clawhub:${item.slug}`) ?? false);
                     const isInstalling = installingSlug === item.slug;
                     const avatar = getSkillAvatar(item.display_name || item.slug);
                     return (
