@@ -557,6 +557,20 @@ class SkillDevDeepAdapter:
             params.get("tool_spec_files") or params.get("toolSpecFiles") or [],
             task_workspace / "resources" / "available-tools",
         )
+        agent_definitions = params.get("agent_definitions") or params.get("agentDefinitions")
+        if agent_definitions:
+            agents_dir = task_workspace / "resources" / "agents"
+            agents_dir.mkdir(parents=True, exist_ok=True)
+            (agents_dir / "available_agents.json").write_text(
+                json.dumps(agent_definitions, ensure_ascii=False, indent=2), encoding="utf-8"
+            )
+        cli_definitions = params.get("cli_definitions") or params.get("cliDefinitions")
+        if cli_definitions:
+            clis_dir = task_workspace / "resources" / "clis"
+            clis_dir.mkdir(parents=True, exist_ok=True)
+            (clis_dir / "available_clis.json").write_text(
+                json.dumps(cli_definitions, ensure_ascii=False, indent=2), encoding="utf-8"
+            )
 
     @staticmethod
     async def _write_tool_spec_files(resources: list[dict[str, Any]], dest_dir: Path) -> None:
@@ -651,6 +665,8 @@ class SkillDevDeepAdapter:
         files = params.get("files") or []
         skills = params.get("skill_packages") or params.get("skillPackages") or []
         tools = params.get("tool_spec_files") or params.get("toolSpecFiles") or []
+        agents = params.get("agent_definitions") or params.get("agentDefinitions")
+        clis = params.get("cli_definitions") or params.get("cliDefinitions")
         lines: list[str] = []
         if files:
             lines.append(f"- 普通参考文件：{task_workspace / 'resources' / 'ref-files'}")
@@ -658,6 +674,10 @@ class SkillDevDeepAdapter:
             lines.append(f"- 参考 Skill 包：{task_workspace / 'resources' / 'ref-skills'}")
         if tools:
             lines.append(f"- 可用工具说明：{task_workspace / 'resources' / 'available-tools'}")
+        if agents:
+            lines.append(f"- 可用 Agent 定义：{task_workspace / 'resources' / 'agents' / 'available_agents.json'}")
+        if clis:
+            lines.append(f"- 可用 CLI 定义：{task_workspace / 'resources' / 'clis' / 'available_clis.json'}")
         if not lines:
             return ""
         header = (
