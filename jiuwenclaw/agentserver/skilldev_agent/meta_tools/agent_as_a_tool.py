@@ -73,21 +73,21 @@ def _build_input_params(language: str = "cn") -> Dict[str, Any]:
     }
 
 
-def _build_agent_as_skill_card(
+def _build_agent_as_a_tool_card(
     *,
     agent_id: Optional[str] = None,
     language: str = "cn",
 ) -> ToolCard:
     lang = "cn" if language in ("cn", "zh") else "en"
     return ToolCard(
-        id="agent_as_skill_default",
-        name="agent_as_skill_tool",
+        id="agent_as_a_tool_default",
+        name="agent_as_a_tool",
         description=_DESCRIPTIONS[lang],
         input_params=_build_input_params(language),
     )
 
 
-class AgentAsSkillTool(Tool):
+class AgentAsATool(Tool):
     """Wraps external agent invocation as an openjiuwen Tool."""
 
     def __init__(
@@ -97,7 +97,7 @@ class AgentAsSkillTool(Tool):
         language: str = "cn",
         card: Optional[ToolCard] = None,
     ) -> None:
-        super().__init__(card or _build_agent_as_skill_card(agent_id=agent_id, language=language))
+        super().__init__(card or _build_agent_as_a_tool_card(agent_id=agent_id, language=language))
         base_url = (os.environ.get(_AGENT_RUNTIME_BASEURL_ENV) or "").strip()
         if not base_url:
             raise ValueError(
@@ -143,17 +143,17 @@ class AgentAsSkillTool(Tool):
         raise build_error(StatusCode.TOOL_STREAM_NOT_SUPPORTED, card=self._card)
 
 
-def get_agent_as_skill_tool() -> AgentAsSkillTool:
-    """Factory: 返回默认配置的 AgentAsSkillTool 实例（card.id=agent_as_skill_default）.
+def get_agent_as_a_tool() -> AgentAsATool:
+    """Factory: 返回默认配置的 AgentAsSkillTool 实例（card.id=agent_as_a_tool_default）.
 
     与 ``get_function_call_tool`` 一致：父 agent 用本工厂注册 Tool 实例，
     子 agent 引用 ``.card`` 共享同一 card.id 以避免重复注册冲突。
     """
-    return AgentAsSkillTool()
+    return AgentAsATool()
 
 
 __all__ = [
-    "AgentAsSkillTool",
-    "_build_agent_as_skill_card",
-    "get_agent_as_skill_tool",
+    "AgentAsATool",
+    "_build_agent_as_a_tool_card",
+    "get_agent_as_a_tool",
 ]

@@ -26,8 +26,8 @@ from jiuwenclaw.agentserver.tools.harness_named_web_tools import (
     JiuwenHarnessFetchWebpageTool,
     JiuwenHarnessFreeSearchTool,
 )
-from jiuwenclaw.agentserver.skilldev_agent.meta_tools.agent_as_skill_tool import (
-    get_agent_as_skill_tool,
+from jiuwenclaw.agentserver.skilldev_agent.meta_tools.agent_as_a_tool import (
+    get_agent_as_a_tool,
 )
 from jiuwenclaw.agentserver.skilldev_agent.meta_tools.function_call_tool import (
     get_function_call_tool,
@@ -226,7 +226,7 @@ def _build_executor_tools(
         # Reuse parent's registered tool implementation to avoid
         # "Tool id already registered" conflicts.
         get_function_call_tool().card,
-        get_agent_as_skill_tool().card,
+        get_agent_as_a_tool().card,
     ])
     return tools
 
