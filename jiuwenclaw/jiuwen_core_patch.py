@@ -112,6 +112,15 @@ class RetryMixin:
         "model client_config is invalid",
     )
 
+    def _resolve_stream_timeout(self, timeout: Optional[float]) -> float:
+        """Streaming: call arg > stream_timeout (if set) > timeout."""
+        if timeout is not None:
+            return timeout
+        stream_timeout = getattr(self.model_client_config, "stream_timeout", None)
+        if stream_timeout is not None and stream_timeout > 0:
+            return stream_timeout
+        return self.model_client_config.timeout
+
     @classmethod
     def _classify_error(cls, exc: Exception, cfg: LlmRetryConfig) -> str:
         """分类错误原因，返回可读描述。"""
@@ -656,7 +665,7 @@ class PatchOpenAIModelClient(RetryMixin, OpenAIModelClient):
             max_tokens=max_tokens,
             stop=stop,
             output_parser=output_parser,
-            timeout=timeout,
+            timeout=self._resolve_stream_timeout(timeout),
             **kwargs,
         ):
             yield chunk
@@ -719,7 +728,7 @@ class PatchSiliconFlowModelClient(RetryMixin, SiliconFlowModelClient):
             max_tokens=max_tokens,
             stop=stop,
             output_parser=output_parser,
-            timeout=timeout,
+            timeout=self._resolve_stream_timeout(timeout),
             **kwargs,
         ):
             yield chunk
@@ -750,7 +759,7 @@ def apply_siliconflow_model_client_patch() -> None:
     SiliconFlowModelClient.stream = _impl["stream"]
 
     _instance_attrs = (
-        '_stream_with_retry', '_invoke_with_retry',
+        '_stream_with_retry', '_invoke_with_retry', '_resolve_stream_timeout',
         '_classify_error', '_is_retryable_error', '_calculate_backoff',
         '_notify_retry_start', '_notify_retry_end', '_get_retry_config',
     )
@@ -782,7 +791,7 @@ def apply_openai_model_client_patch() -> None:
     _patch_railed_model_call_session()
     _static_attrs = ('_extract_error_details', '_extract_retry_after', '_raise_mock_error')
     _instance_attrs = (
-        '_stream_with_retry', '_invoke_with_retry',
+        '_stream_with_retry', '_invoke_with_retry', '_resolve_stream_timeout',
         '_classify_error', '_is_retryable_error', '_calculate_backoff',
         '_notify_retry_start', '_notify_retry_end', '_get_retry_config',
     )

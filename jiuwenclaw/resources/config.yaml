@@ -177,57 +177,67 @@ memory:
       db_type: sqlite
       db_path: ${MEMORY_DB_PATH:-}                       # 默认 ~/.jiuwenclaw/memory/ltm/ltm.db
 
+# models.*.model_client_config 超时说明：
+#   timeout — 非流式 invoke；流式未配置 stream_timeout 时也使用此值（整包响应上限）
+#   stream_timeout — 可选，仅 stream 使用；未配置则回退 timeout
+#     （httpx read：等首包 / chunk 间最长空闲，不是 SSE 整段总时长上限）
 models:
   default:
-      model_client_config:
-        api_base: ${API_BASE}
-        api_key: ${API_KEY}
-        model_name: ${MODEL_NAME:-xiaomi/mimo-v2-omni}
-        client_provider: ${MODEL_PROVIDER}
-        timeout: 1800
-        verify_ssl: false
-      model_config_obj:
-        temperature: 0.6
+    model_client_config:
+      api_base: ${API_BASE}
+      api_key: ${API_KEY}
+      model_name: ${MODEL_NAME:-xiaomi/mimo-v2-omni}
+      client_provider: ${MODEL_PROVIDER}
+      timeout: 1800
+      stream_timeout: 60       # 可选，仅流式
+      max_retries: 1           # OpenAI SDK 内部 HTTP 重试；0=关闭
+      verify_ssl: false
+    model_config_obj:
+      temperature: 0.6
   video:
-      model_client_config:
-        api_base: ${VIDEO_API_BASE}
-        api_key: ${VIDEO_API_KEY}
-        model_name: ${VIDEO_MODEL_NAME:-xiaomi/mimo-v2-omni}
-        client_provider: ${VIDEO_PROVIDER}
-        timeout: 1800
-        verify_ssl: false
-      model_config_obj:
-        temperature: 0.6
+    model_client_config:
+      api_base: ${VIDEO_API_BASE}
+      api_key: ${VIDEO_API_KEY}
+      model_name: ${VIDEO_MODEL_NAME:-xiaomi/mimo-v2-omni}
+      client_provider: ${VIDEO_PROVIDER}
+      timeout: 1800
+      max_retries: 1
+      verify_ssl: false
+    model_config_obj:
+      temperature: 0.6
   audio:
-      model_client_config:
-        api_base: ${AUDIO_API_BASE}
-        api_key: ${AUDIO_API_KEY}
-        model_name: ${AUDIO_MODEL_NAME:-openai/gpt-4o-audio-preview}
-        client_provider: ${AUDIO_PROVIDER}
-        verify_ssl: false
-        timeout: 1800
-      model_config_obj:
-        temperature: 0.6
+    model_client_config:
+      api_base: ${AUDIO_API_BASE}
+      api_key: ${AUDIO_API_KEY}
+      model_name: ${AUDIO_MODEL_NAME:-openai/gpt-4o-audio-preview}
+      client_provider: ${AUDIO_PROVIDER}
+      verify_ssl: false
+      timeout: 1800
+      max_retries: 1
+    model_config_obj:
+      temperature: 0.6
   vision:
-      model_client_config:
-        api_base: ${VISION_API_BASE}
-        api_key: ${VISION_API_KEY}
-        model_name: ${VISION_MODEL_NAME:-bytedance-seed/seed-2.0-mini}
-        client_provider: ${VISION_PROVIDER}
-        verify_ssl: false
-        timeout: 1800
-      model_config_obj:
-        temperature: 0.6
+    model_client_config:
+      api_base: ${VISION_API_BASE}
+      api_key: ${VISION_API_KEY}
+      model_name: ${VISION_MODEL_NAME:-bytedance-seed/seed-2.0-mini}
+      client_provider: ${VISION_PROVIDER}
+      verify_ssl: false
+      timeout: 1800
+      max_retries: 1
+    model_config_obj:
+      temperature: 0.6
   image_gen:
-      model_client_config:
-        api_base: ${IMAGE_GEN_API_BASE}
-        api_key: ${IMAGE_GEN_API_KEY}
-        model_name: ${IMAGE_GEN_MODEL_NAME:-}
-        client_provider: ${IMAGE_GEN_PROVIDER}
-        timeout: 1800
-        verify_ssl: false
-      model_config_obj:
-        temperature: 0.6
+    model_client_config:
+      api_base: ${IMAGE_GEN_API_BASE}
+      api_key: ${IMAGE_GEN_API_KEY}
+      model_name: ${IMAGE_GEN_MODEL_NAME:-}
+      client_provider: ${IMAGE_GEN_PROVIDER}
+      timeout: 1800
+      max_retries: 1
+      verify_ssl: false
+    model_config_obj:
+      temperature: 0.6
 
 telemetry:
   enabled: false                    # 总开关（环境变量 OTEL_ENABLED 优先）
@@ -409,10 +419,10 @@ react:
     enabled: false             # true = 启用在线 Skills 自演进
     auto_scan: false           # true = 每轮对话后自动扫描（建议先用手动 /evolve）
     skill_base_dir: "agent/skills"  # Skill 根目录
-  # LLM 调用重试配置
+  # LLM 调用重试配置（应用层；OpenAI SDK 重试见 models.*.model_client_config.max_retries）
   llm_retry:
     enabled: true              # 重试开关
-    max_attempts: 3            # 最大尝试次数（含首次）
+    max_attempts: 3            # 失败后额外重试次数（不含首次）
     initial_backoff: 10.0      # 初始等待时间（秒）
     max_backoff: 60.0          # 最大等待时间（秒）
     backoff_factor: 2.0        # 等待倍率

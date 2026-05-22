@@ -625,6 +625,7 @@ def get_default_models(config: dict[str, Any] | None = None) -> list[dict[str, A
             "model_name": os.getenv("MODEL_NAME", ""),
             "client_provider": os.getenv("MODEL_PROVIDER", ""),
             "timeout": 1800,
+            "max_retries": 1,
             "verify_ssl": False,
         },
         "model_config_obj": {"temperature": 0.95},
