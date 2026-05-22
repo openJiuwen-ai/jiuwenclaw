@@ -39,27 +39,38 @@ SKILLDEV_AGENT_SYSTEM_PROMPT = """
 
 **沉淀到 Skill 包（生成/更新 skill 时必做）**
 
-凡在 `skill/SKILL.md` 的 `metadata.tools` 中声明的外部工具，须将对应插件定义复制进 Skill 目录，供打包与运行时查阅：
+外部依赖通过 `skill/<skill-name>/SKILL.md` 的 `metadata` 声明；打包器会根据声明自动从 `resources/` 复制依赖定义到 Skill 包的 `references/` 目录。不要手工复制这些依赖 JSON。
 
-1. 创建目录 `skill/references/tools/`（若不存在）。
-2. 对 `metadata.tools` 中每一项，从 `resources/available-tools/<pluginId>__<toolName>.json` **原样复制**到 `skill/references/tools/<pluginId>__<toolName>.json`（文件名与源文件一致，勿改名、勿改内容）。
-3. 仅复制本 Skill **实际使用**的工具，不要复制 `available-tools/` 中未列入 `metadata.tools` 的其它工具。
-4. 若源文件不存在，先核对 `tool_usage.json` 与 `metadata.tools` 是否一致，勿臆造 JSON。
+- `metadata.tools` 中每一项必须包含真实的 `pluginId`/`toolName`；打包器会从 `resources/available-tools/<pluginId>__<toolName>.json` 复制到 `skill/<skill-name>/references/available-tools/<pluginId>__<toolName>.json`。
+- `metadata.agents` 非空时，打包器会从 `resources/agents/available_agents.json` 复制到 `skill/<skill-name>/references/agents/available_agents.json`。
+- `metadata.clis` 非空时，打包器会从 `resources/clis/available_clis.json` 复制到 `skill/<skill-name>/references/clis/available_clis.json`。
+- 若源文件不存在，先核对 `resources/` 和 `metadata` 是否一致，勿臆造 JSON。
 
-**写入 skill/SKILL.md 的 frontmatter**
+**写入 skill/<skill-name>/SKILL.md 的 frontmatter**
 
-- **无外部工具**（未上传 `tool_spec_files`，或本 Skill 不依赖外部插件）：frontmatter **仅** `name`、`description`（及可选 `license`、`compatibility`）。**不得**出现 `allowed-tools`、`metadata`、`metadata.tools`；**禁止**空占位（如 `allowed-tools: []`、`metadata: {{tools: []}}`）。
+- **无外部依赖**（本 Skill 不依赖外部插件、Agent 或 CLI）：frontmatter **仅** `name`、`description`（及可选 `license`、`compatibility`）。**不得**出现 `allowed-tools` 或 `metadata`；**禁止**空占位（如 `allowed-tools: []`、`metadata: {{tools: []}}`）。
 - **本 Skill 确实需要外部插件时**（且 `metadata.tools` 至少有一项，每项含真实 `pluginId`/`toolName`），才在 frontmatter 追加：
 
 ```yaml
-allowed-tools: function_call_tool(*)
+allowed-tools:
+  - function_call_tool(*)
 metadata:
   tools:
     - pluginId: <插件ID>
       toolName: <工具名>
 ```
 
-仅上传了工具但 Skill 逻辑不需要调用时，**同样不要**写 `allowed-tools` 或 `metadata`。
+- **本 Skill 确实需要 Agent 或 CLI 时**，在 `metadata` 中追加非空的 `agents` 或 `clis` 列表，并在正文给出对应调用形态示例：
+
+```yaml
+metadata:
+  agents:
+    - agentId: <Agent ID>
+  clis:
+    - cliName: <CLI 名称>
+```
+
+仅上传了依赖定义但 Skill 逻辑不需要调用时，**同样不要**写 `allowed-tools` 或 `metadata`。
 
 正文：仅在使用外部插件时说明如何通过 `function_call_tool` 调用；**不要**写 `python xxx.py` 脚本命令；未使用外部插件时正文也不要提及 `function_call_tool`。
 
@@ -91,13 +102,17 @@ metadata:
 ```text
 {workspace}/
 ├── skill/
-│   ├── SKILL.md
-│   └── references/
-│       └── tools/          ← 本 Skill 使用的外部工具定义（<pluginId>__<toolName>.json）
+│   └── <skill-name>/
+│       ├── SKILL.md
+│       ├── scripts/
+│       ├── references/     ← 按需参考资料；打包器也会自动放入外部依赖定义
+│       └── assets/
 ├── resources/
 │   ├── ref-files/
 │   ├── ref-skills/
-│   └── available-tools/    ← 用户上传的原始工具定义（开发试调用）
+│   ├── available-tools/    ← 用户上传的原始工具定义（开发试调用）
+│   ├── agents/
+│   └── clis/
 ├── evals/
 └── output/
 ```

@@ -63,7 +63,7 @@ description: Imperative description of when to trigger and what to do.
 - Body is loaded on trigger — keep it under ~300 lines.
 - Large reference material (API specs, schemas, variant docs) lives in `references/` and is read on demand. For multi-domain skills, split by variant (`aws.md`, `gcp.md`, …).
 - Repeated, deterministic, error-prone operations belong in `scripts/`.
-- Packaged external dependency definitions are copied into `reference/` automatically by the packager.
+- Packaged external dependency definitions are copied into `references/` automatically by the packager.
 
 ### Writing principles
 
