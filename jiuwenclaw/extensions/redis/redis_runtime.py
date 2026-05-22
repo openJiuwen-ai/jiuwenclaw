@@ -1,5 +1,5 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
-"""Gateway 进程内 Redis 生命周期：配置解析、连接、健康检查、Pub/Sub 监听（§3.3.4）。
+"""Gateway 进程内 Redis 生命周期：配置解析、连接、健康检查（§3.3.4）。
 
 ``deployment_mode=standalone`` 或未成功连上 Redis 时，不创建客户端；业务模块可通过
 ``get_gateway_redis_client()`` 判空后回退本地实现。
@@ -19,7 +19,6 @@ from jiuwenclaw.extensions.redis.redis_client import RedisConfig
 
 logger = logging.getLogger(__name__)
 
-# §3.3.7：完整频道名为 ``{key_prefix}gateway:cron_changes``，由 RedisClient.effective_key 拼接。
 _GATEWAY_REDIS_EP_GROUP = "jiuwenclaw.gateway.redis"
 _DEFAULT_GATEWAY_REDIS_EP_NAME = "redis"
 
@@ -54,9 +53,6 @@ def _load_gateway_redis_client_class():
     return getattr(module, "RedisClient")
 
 
-# Cron 变更通知频道（相对名，经 ``RedisConfig.effective_key`` 加前缀）。
-_CRON_CHANGES_CHANNEL_REL = "gateway:cron_changes"
-
 _MAX_START_PINGS = 3
 _MAX_CONSECUTIVE_HEALTH_FAILURES = 3
 
@@ -68,7 +64,6 @@ _redis_degraded: bool = False
 _consecutive_ping_failures: int = 0
 
 _health_task: asyncio.Task[None] | None = None
-_pubsub_task: asyncio.Task[None] | None = None
 _shutdown_sentinel: asyncio.Event | None = None
 
 
@@ -136,26 +131,11 @@ async def _health_loop(interval_s: float) -> None:
             )
 
 
-async def _pubsub_loop_relative_channel(relative_channel: str) -> None:
-    """relative_channel 如 ``gateway:cron_changes``，再经 key_prefix 拼完整名。"""
-    client = _redis_client
-    if client is None:
-        return
-    try:
-        async for payload in client.subscribe(relative_channel):
-            if _shutdown_sentinel is not None and _shutdown_sentinel.is_set():
-                break
-            log_line = payload if len(payload) <= 2000 else f"{payload[:2000]}...<truncated>"
-            logger.info("[GatewayRedis] pub/sub %s: %s", relative_channel, log_line)
-    except Exception:  # noqa: BLE001  # CancelledError 非 Exception 子类，不会被本分支捕获
-        logger.exception("[GatewayRedis] pub/sub listener exited: %s", relative_channel)
-
-
 async def init_gateway_redis_from_config(full_cfg: dict[str, Any] | None) -> None:
     """在读取完整 ``get_config()`` 后调用；失败时按 §3.3.6 降级为无 Redis。"""
     global _redis_client, _declared_deployment_mode, _effective_distributed_redis
     global _gateway_instance_id, _redis_degraded, _consecutive_ping_failures
-    global _health_task, _pubsub_task, _shutdown_sentinel
+    global _health_task, _shutdown_sentinel
 
     await shutdown_gateway_redis()
 
@@ -216,17 +196,11 @@ async def init_gateway_redis_from_config(full_cfg: dict[str, Any] | None) -> Non
     interval = float(r_cfg.health_check_interval)
     _health_task = asyncio.create_task(_health_loop(interval), name="gateway-redis-health")
 
-    _pubsub_task = asyncio.create_task(
-        _pubsub_loop_relative_channel(_CRON_CHANGES_CHANNEL_REL),
-        name="gateway-redis-pubsub",
-    )
-
 
 async def shutdown_gateway_redis() -> None:
     global _redis_client
     global _effective_distributed_redis
     global _health_task
-    global _pubsub_task
     global _shutdown_sentinel
     global _redis_degraded
     global _consecutive_ping_failures
@@ -234,17 +208,15 @@ async def shutdown_gateway_redis() -> None:
     if _shutdown_sentinel is not None and not _shutdown_sentinel.is_set():
         _shutdown_sentinel.set()
 
-    for t in (_pubsub_task, _health_task):
-        if t is not None and not t.done():
-            t.cancel()
-            try:
-                await t
-            except asyncio.CancelledError:
-                pass
-            except Exception as exc:  # noqa: BLE001
-                logger.debug("[GatewayRedis] task join: %s", exc)
+    if _health_task is not None and not _health_task.done():
+        _health_task.cancel()
+        try:
+            await _health_task
+        except asyncio.CancelledError:
+            pass
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("[GatewayRedis] task join: %s", exc)
     _health_task = None
-    _pubsub_task = None
     _shutdown_sentinel = None
 
     if _redis_client is not None:

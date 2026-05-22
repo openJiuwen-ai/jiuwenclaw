@@ -877,15 +877,6 @@ async def _run(
     message_handler.set_inbound_pipeline(im_inbound)
     message_handler.set_outbound_pipeline(im_outbound)
 
-    cron_store = CronJobStore(path=get_user_workspace_dir() / "gateway" / "cron_jobs.json")
-    cron_scheduler = CronSchedulerService(
-        store=cron_store,
-        agent_client=client,
-        message_handler=message_handler,
-    )
-    cron_controller = CronController.get_instance(store=cron_store, scheduler=cron_scheduler)
-    message_handler.set_cron_controller(cron_controller)
-
     full_cfg: dict[str, Any] = {}
     heartbeat_cfg: dict | None = None
     channels_cfg: dict | None = None
@@ -902,6 +893,17 @@ async def _run(
         sync_config_cfg = None
 
     await init_gateway_redis_from_config(dict(full_cfg or {}))
+
+    from jiuwenclaw.gateway.cron.factory import create_gateway_cron_store
+
+    cron_store = await create_gateway_cron_store()
+    cron_scheduler = CronSchedulerService(
+        store=cron_store,
+        agent_client=client,
+        message_handler=message_handler,
+    )
+    cron_controller = CronController.get_instance(store=cron_store, scheduler=cron_scheduler)
+    message_handler.set_cron_controller(cron_controller)
 
     # 配置解密后存储在内存中
     env_dict = {}
