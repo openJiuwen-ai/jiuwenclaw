@@ -95,6 +95,17 @@ async def _delete_channel_config_record(
     return await handler.delete(_TABLE, {"channel_id": channel_id})
 
 
+async def list_active_channel_config_rows(handler: DBHandler) -> list[dict[str, Any]]:
+    """冷启动全量：返回 ``status=active`` 的 ``channel_config`` 行（与 WS 写库行格式一致）。"""
+    rows = await handler.list_records(_TABLE, {})
+    result: list[dict[str, Any]] = []
+    for row in rows:
+        record = _channel_row_to_dict(row)
+        if str(record.get("status") or "").strip().lower() == "active":
+            result.append(record)
+    return result
+
+
 async def apply_channel_config_sync(
     handler: DBHandler,
     op: str,

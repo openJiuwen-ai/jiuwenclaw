@@ -1,7 +1,7 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 
 import asyncio
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
@@ -11,6 +11,7 @@ from jiuwenclaw.gateway.channel_config_overlay import (
     apply_channel_change_to_runtime,
     build_channels_from_db_rows,
     channel_config_overlay_enabled,
+    fetch_active_channel_config_rows,
     merge_channels_with_db,
     register_channel_config_reload,
     trigger_channel_config_reload,
@@ -172,6 +173,36 @@ async def test_trigger_reload_serializes_concurrent_calls():
         await register_channel_config_reload(None)
 
     assert peak == 1
+
+
+@pytest.mark.asyncio
+async def test_fetch_active_rows_delegates_to_db_loader():
+    active_rows = [
+        {
+            "channel_id": "feishu-1",
+            "channel_name": "Feishu",
+            "channel_type": "feishu",
+            "bot_id": "feishu",
+            "config": {"app_id": "x"},
+            "status": "active",
+        }
+    ]
+    with patch(
+        "jiuwenclaw.gateway.channel_config_overlay.load_active_channel_config_rows",
+        new=AsyncMock(return_value=active_rows),
+    ) as loader:
+        rows = await fetch_active_channel_config_rows()
+    loader.assert_awaited_once()
+    assert rows == active_rows
+
+
+@pytest.mark.asyncio
+async def test_fetch_active_rows_empty_when_loader_fails():
+    with patch(
+        "jiuwenclaw.gateway.channel_config_overlay.load_active_channel_config_rows",
+        new=AsyncMock(return_value=[]),
+    ):
+        assert await fetch_active_channel_config_rows() == []
 
 
 def test_build_ignores_yaml_base():

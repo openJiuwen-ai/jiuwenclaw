@@ -1,11 +1,11 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
-"""从 Gateway ``agent_client.db`` 的 ``channel_config`` 表构建运行时 ``channels`` 配置。
+"""从 Gateway ``channel_config`` 表（manager_ws_client ``DBHandler``）构建运行时 ``channels``。
 
 企业实例在启用 overlay 时 **仅以 DB 为准**：``status=active`` 行重建 ``channels.*``，
 不合并、不保留 ``config.yaml`` 中的 IM 通道段；不写回 yaml。
 
 热加载：WebSocket 写库后携带 ``ChannelConfigChange`` 增量 patch 内存 ``channels``，避免每次
-全表读库；冷启动仍全量读 DB。
+全表读库；冷启动经 ``channel_config_db`` 全量读库（与 WS 写库同栈）。
 """
 
 from __future__ import annotations
@@ -19,9 +19,7 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any, Literal
 
-import aiosqlite
-
-from jiuwenclaw.agentserver.enterprise_config.gateway_db import resolve_gateway_db_path
+from jiuwenclaw.gateway.channel_config_db import load_active_channel_config_rows
 from jiuwenclaw.utils import logger
 
 ChannelChangeOp = Literal["upsert", "remove"]
@@ -147,35 +145,9 @@ def channel_config_overlay_enabled() -> bool:
     return _gateway_deployment_mode() == "distributed"
 
 
-def _row_to_dict(row: aiosqlite.Row) -> dict[str, Any]:
-    out: dict[str, Any] = {}
-    for key in row.keys():
-        value = row[key]
-        if key == "config" and isinstance(value, str):
-            try:
-                out[key] = json.loads(value)
-            except json.JSONDecodeError:
-                out[key] = value
-        else:
-            out[key] = value
-    return out
-
-
 async def fetch_active_channel_config_rows() -> list[dict[str, Any]]:
-    """读取 ``channel_config`` 表中所有 active 行（冷启动全量）。"""
-    db_path = resolve_gateway_db_path()
-    if not db_path:
-        return []
-
-    sql = (
-        "SELECT channel_id, channel_name, channel_type, bot_id, config, status "
-        "FROM channel_config WHERE lower(status) = 'active'"
-    )
-    async with aiosqlite.connect(db_path) as conn:
-        conn.row_factory = aiosqlite.Row
-        async with conn.execute(sql) as cursor:
-            rows = await cursor.fetchall()
-    return [_row_to_dict(r) for r in rows]
+    """读取 ``channel_config`` 表中所有 active 行（冷启动全量，``DBHandler``）。"""
+    return await load_active_channel_config_rows()
 
 
 def _extract_channel_payload(row: dict[str, Any]) -> dict[str, Any]:
