@@ -61,6 +61,7 @@ interface ChatState {
   pausedTask: string | null;  // 暂停的任务描述
   interruptResult: InterruptResultPayload | null;  // 最近的中断结果
   switchingMode: boolean;  // 是否正在切换模式
+  isNewSession: boolean;  // 是否刚创建新会话（跳过历史加载）
   currentStreamContent: string;
   currentStreamId: string | null;
   streamBuffers: Map<string, string>;
@@ -92,6 +93,7 @@ interface ChatState {
   setPaused: (paused: boolean, task?: string | null) => void;
   setInterruptResult: (result: InterruptResultPayload | null) => void;
   setSwitchingMode: (switching: boolean) => void;
+  setNewSession: (isNew: boolean) => void;
   addToolCall: (toolCall: ToolCall, options?: { startedAt?: string }) => void;
   addToolResult: (toolResult: ToolResult, options?: { updatedAt?: string }) => void;
   markTimedOutExecutions: () => void;
@@ -124,6 +126,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
   pausedTask: null,
   interruptResult: null,
   switchingMode: false,
+  isNewSession: false,
   currentStreamContent: '',
   currentStreamId: null,
   streamBuffers: new Map(),
@@ -247,7 +250,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
   setSwitchingMode: (switching) => {
     // 切换模式时，同时重置所有相关状态
     if (switching) {
-      set({ 
+      set({
         switchingMode: true,
         isProcessing: false,
         isPaused: false,
@@ -257,6 +260,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
     } else {
       set({ switchingMode: false });
     }
+  },
+
+  setNewSession: (isNew) => {
+    set({ isNewSession: isNew });
   },
 
   addToolCall: (toolCall, options) => {

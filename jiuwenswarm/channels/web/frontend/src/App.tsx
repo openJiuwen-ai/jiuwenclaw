@@ -598,7 +598,16 @@ function AppContent() {
     
     // 仅处理以 sess_ 开头的会话 ID
     if (!sessionId.startsWith('sess_')) return;
-    
+
+    // 新建会话时跳过历史加载
+    const isNew = useChatStore.getState().isNewSession;
+    if (isNew) {
+      useChatStore.getState().setNewSession(false);
+      setHistoryPagerMeta(null);  // 新会话无历史，不显示分页栏
+      setLoadingHistory(false);
+      return;
+    }
+
     // 清理之前的历史加载句柄
     disposeInFlightHistoryHandles();
     setHistoryPagerMeta(null);
@@ -780,6 +789,7 @@ function AppContent() {
     }
     // 切换模式/新建会话时直接设置状态，避免闪现
     useChatStore.getState().setSwitchingMode(true);
+    useChatStore.getState().setNewSession(true);  // 标记新建会话，跳过历史加载
     useChatStore.getState().setInterruptResult(null);
     useChatStore.getState().setProcessing(false);
     useChatStore.getState().setThinking(false);
