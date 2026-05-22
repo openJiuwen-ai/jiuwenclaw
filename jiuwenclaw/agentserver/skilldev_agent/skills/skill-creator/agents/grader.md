@@ -89,10 +89,9 @@ Save results to `{outputs_dir}/../grading.json` (sibling to outputs_dir).
 
 **When uncertain**: The burden of proof to pass is on the expectation.
 
-### Step 8: Read Executor Metrics and Timing
+### Step 8: Read Executor Metrics
 
-1. If `{outputs_dir}/metrics.json` exists, read it and include in grading output
-2. If `{outputs_dir}/../timing.json` exists, read it and include timing data
+If `{outputs_dir}/metrics.json` exists, read it and include it in the grading output. Match the output format below.
 
 ## Output Format
 
@@ -134,11 +133,6 @@ Write a JSON file with this structure:
     "errors_encountered": 0,
     "output_chars": 12450,
     "transcript_chars": 3200
-  },
-  "timing": {
-    "executor_duration_seconds": 165.0,
-    "grader_duration_seconds": 26.0,
-    "total_duration_seconds": 191.0
   },
   "claims": [
     {
@@ -186,11 +180,8 @@ Write a JSON file with this structure:
   - **total**: Total expectations evaluated
   - **pass_rate**: Fraction passed (0.0 to 1.0)
 - **execution_metrics**: Copied from executor's metrics.json (if available)
-  - **output_chars**: Total character count of output files (proxy for tokens)
+  - **output_chars**: Total character count of output files
   - **transcript_chars**: Character count of transcript
-- **timing**: Wall clock timing from timing.json (if available)
-  - **executor_duration_seconds**: Time spent in executor subagent
-  - **total_duration_seconds**: Total elapsed time for the run
 - **claims**: Extracted and verified claims from the output
   - **claim**: The statement being verified
   - **type**: "factual", "process", or "quality"

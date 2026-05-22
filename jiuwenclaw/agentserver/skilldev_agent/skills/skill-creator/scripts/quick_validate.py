@@ -23,13 +23,9 @@ CREDENTIAL_PATTERNS = [
     re.compile(r"(?i)\b(api[_-]?key|secret|token|password)\b\s*[:=]\s*['\"][^'\"\n]{8,}['\"]"),
     re.compile(r"\bsk-[A-Za-z0-9_-]{16,}\b"),
 ]
-TOOL_NAME_PATTERN = re.compile(r"toolName(?:\*\*)?\s*:\s*`?([^\s`，,;]+)`?", re.IGNORECASE)
-VALID_TOOL_NAME_PATTERN = re.compile(r"^[a-zA-Z0-9_-]{1,64}$")
-
-
 def validate_skill(skill_path):
     """Basic validation of a skill"""
-    skill_path = Path(skill_path)
+    skill_path = Path(skill_path).resolve()
 
     # Check SKILL.md exists
     skill_md = skill_path / 'SKILL.md'
@@ -113,39 +109,11 @@ def validate_skill(skill_path):
             f"Maximum is {max_description_chars} characters."
         )
 
-    license_value = frontmatter.get('license')
-    if license_value is not None and not isinstance(license_value, str):
-        return False, f"License must be a string, got {type(license_value).__name__}"
-
-    allowed_tools = frontmatter.get('allowed-tools')
-    if allowed_tools is not None and not isinstance(allowed_tools, str):
-        return False, f"allowed-tools must be a string, got {type(allowed_tools).__name__}"
-
-    metadata = frontmatter.get('metadata')
-    if metadata is not None:
-        if not isinstance(metadata, dict):
-            return False, f"Metadata must be a dictionary, got {type(metadata).__name__}"
-        for key, value in metadata.items():
-            if not isinstance(key, str) or not isinstance(value, str):
-                return False, "Metadata keys and values must be strings"
-
-    # Validate compatibility field if present (optional)
-    compatibility = frontmatter.get('compatibility', '')
-    if compatibility:
-        if not isinstance(compatibility, str):
-            return False, f"Compatibility must be a string, got {type(compatibility).__name__}"
-        if len(compatibility) > 500:
-            return False, f"Compatibility is too long ({len(compatibility)} characters). Maximum is 500 characters."
-
     body_lines = body.splitlines()
     if not body.strip():
         return False, "SKILL.md body cannot be empty"
     if len(body_lines) > 500:
         return False, f"SKILL.md body is too long ({len(body_lines)} lines). Maximum is 500 lines."
-
-    invalid_tool_names = find_invalid_tool_names(body)
-    if invalid_tool_names:
-        return False, f"Invalid toolName value(s): {', '.join(invalid_tool_names)}"
 
     security_valid, security_message = validate_static_security(skill_path, content)
     if not security_valid:
@@ -171,15 +139,6 @@ def find_duplicate_frontmatter_key(frontmatter_text):
 def contains_cjk(text):
     """Detect CJK characters for the stricter Chinese description limit."""
     return any("\u4e00" <= char <= "\u9fff" for char in text)
-
-
-def find_invalid_tool_names(body):
-    """Find Markdown toolName entries that violate the tool name format."""
-    invalid = []
-    for tool_name in TOOL_NAME_PATTERN.findall(body):
-        if not VALID_TOOL_NAME_PATTERN.match(tool_name):
-            invalid.append(tool_name)
-    return invalid
 
 
 def validate_static_security(skill_path, skill_content):
