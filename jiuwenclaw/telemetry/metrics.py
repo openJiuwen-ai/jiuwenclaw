@@ -10,8 +10,6 @@ from opentelemetry import metrics
 from opentelemetry.metrics import CallbackOptions, Observation
 from opentelemetry.sdk.resources import Resource
 
-from jiuwenclaw.telemetry.attributes import JIUWENCLAW_CLAW_ID
-
 _meter = metrics.get_meter("jiuwenclaw")
 _session_active_observer: Callable[[], int] | None = None
 
@@ -20,19 +18,16 @@ _resource: Resource | None = None
 
 
 def set_resource(resource: Resource | None) -> None:
-    """设置 Resource 引用，用于从 Resource 获取 claw_id."""
+    """设置 Resource 引用，用于从 Resource 获取属性."""
     global _resource
     _resource = resource
 
 
 def _with_resource_labels(attrs: dict) -> dict:
-    """将 claw.id 注入到 metric attributes 中（从 Resource 获取）."""
+    """将 Resource 中的所有属性注入到 metric attributes 中."""
     result = dict(attrs)
     if _resource is not None:
-        # 从 Resource.attributes 获取 claw_id
-        claw_id = _resource.attributes.get(JIUWENCLAW_CLAW_ID)
-        if claw_id is not None:
-            result[JIUWENCLAW_CLAW_ID] = claw_id
+        result.update(_resource.attributes)
     return result
 
 
@@ -52,12 +47,10 @@ def _observe_session_active(_options: CallbackOptions) -> Iterable[Observation]:
     except Exception:
         return []
 
-    # Add claw.id to attributes
+    # 将 Resource 中的属性添加到 attributes 中
     attrs = {}
     if _resource is not None:
-        claw_id = _resource.attributes.get(JIUWENCLAW_CLAW_ID)
-        if claw_id is not None:
-            attrs[JIUWENCLAW_CLAW_ID] = claw_id
+        attrs.update(_resource.attributes)
 
     return [Observation(active_sessions, attributes=attrs)]
 
@@ -171,14 +164,12 @@ def _observe_queue_depth(_options: CallbackOptions) -> Iterable[Observation]:
         return []
     try:
         observations = observer()
-        # Wrap each Observation with claw.id
+        # 将 Resource 中的属性注入到每个 Observation 中
         wrapped = []
         for obs in observations:
             attrs = dict(obs.attributes or {})
             if _resource is not None:
-                claw_id = _resource.attributes.get(JIUWENCLAW_CLAW_ID)
-                if claw_id is not None:
-                    attrs[JIUWENCLAW_CLAW_ID] = claw_id
+                attrs.update(_resource.attributes)
             wrapped.append(Observation(obs.value, attributes=attrs))
         return wrapped
     except Exception:

@@ -54,7 +54,7 @@ def init_providers(cfg: TelemetryConfig) -> ProviderBundle:
 
     # 将 Resource 传递给 metrics 模块，用于获取 claw_id
     from jiuwenclaw.telemetry.metrics import set_resource
-    set_resource(bundle.resource)
+    set_resource(bundle.resource)  # 以 bundle 中的 Resource 为准，覆盖默认值
 
     return bundle
 
@@ -68,7 +68,7 @@ def build_default_providers(cfg: TelemetryConfig) -> ProviderBundle:
     if cfg.claw_id is not None:
         resource_attrs[JIUWENCLAW_CLAW_ID] = cfg.claw_id
 
-    resource = Resource.create(resource_attrs)
+    resource = Resource(resource_attrs)
 
     tracer_provider = _build_tracer_provider(cfg, resource)
     meter_provider = _build_meter_provider(cfg, resource)
