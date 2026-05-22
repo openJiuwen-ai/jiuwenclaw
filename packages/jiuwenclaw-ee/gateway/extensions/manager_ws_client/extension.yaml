@@ -5,7 +5,7 @@ description: Gateway-only WebSocket client for Claw Manager config.push (agent_s
 author: openjiuwen
 min_jiuwenclaw_version: "0.1.0"
 dependencies:
-  websockets: ">=12.0"
+  websockets: ">=12.0,<16"
   pydantic-settings: ">=2.0"
   python-dotenv: ">=1.0"
 

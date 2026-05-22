@@ -19,7 +19,7 @@ dependencies = [
     "openjiuwen @ git+https://gitcode.com/openJiuwen/agent-core.git@enterprise-dev",
     "pip==26.0.1",
     "pgvector>=0.4.2",
-    "websockets>=12.0",
+    "websockets>=12.0,<16",
     "psutil>=7.2.2",
     "aiosqlite>=0.22.1",
     "croniter>=2.0.0",
