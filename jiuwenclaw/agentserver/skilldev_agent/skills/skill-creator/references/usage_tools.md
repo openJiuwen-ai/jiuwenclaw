@@ -71,6 +71,9 @@ arguments schema 使用 OpenAI 工具参数兼容写法：
 ```
 
 Generated:
+Call the function_call_tool tool to execute:
+```
     function_call_tool(pluginId="plugin_001", toolName="weather_query", arguments={"city": "北京"})
+```
 
 ​

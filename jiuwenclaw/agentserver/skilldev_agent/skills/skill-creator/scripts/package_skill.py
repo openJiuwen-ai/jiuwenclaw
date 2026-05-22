@@ -76,7 +76,7 @@ def has_dependency(metadata: dict, keys: tuple[str, ...]) -> bool:
 
 def collect_tool_sources(metadata: dict, workspace_path: Path) -> tuple[list[tuple[Path, Path]], list[str]]:
     """Build source/destination pairs for declared external dependencies."""
-    reference_path = Path("reference")
+    reference_path = Path("references")
     source_pairs = []
     errors = []
 

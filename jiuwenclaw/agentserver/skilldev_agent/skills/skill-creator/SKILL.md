@@ -89,7 +89,7 @@ Surface things the user might not have considered: failure modes, what "done" lo
 
 Follow the anatomy and frontmatter rules above. Self-check before moving on:
 
-- Create or update the skill under the current workspace's `skill/` directory: `<workspace>/skill/<skill-name>/`.
+- Create or update the skill under the current workspace's `skill/<skill-name>` directory: `<workspace>/skill/<skill-name>/`.
 - `SKILL.md` exists with valid frontmatter (name matches directory, description within language-specific limits, allowed keys only).
 - If the skill declares `metadata.tools`, read `references/usage_tools.md` and add one example sentence showing the `function_call_tool` call shape.
 - If the skill declares `metadata.agents`, read `references/usage_agents.md` and add one example sentence showing the `agent_as_a_tool` call shape.
@@ -108,12 +108,6 @@ Run Bash:
 ```bash
 cd "<skill-creator-dir>" && python3 -m scripts.package_skill <workspace>/skill/<skill-name> <workspace>/output
 ```
-
-Before creating the zip, `scripts/package_skill.py` copies declared external dependency JSON files into `<workspace>/skill/<skill-name>/reference/`:
-
-- Each `metadata.tools` entry is copied from `<workspace>/references/available-tools/<pluginId>__<toolName>.json` to `reference/available-tools/`.
-- If `metadata.agents` is non-empty, `<workspace>/references/agents/available_agents.json` is copied to `reference/agents/`.
-- If `metadata.clis` is non-empty, `<workspace>/references/clis/available_clis.json` is copied to `reference/clis/`.
 
 If a declared dependency source file is missing, packaging fails. Fix the metadata or source JSON instead of inventing replacement files.
 

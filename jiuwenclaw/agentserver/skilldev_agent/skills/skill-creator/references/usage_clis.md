@@ -43,7 +43,8 @@ cliDefinition:
 ```
 
 Generated:
-
+Call the exec tool to execute:
+```
     exec(command: `ohos-bm install --module "${module}"`)
-
+```
 Append `--force` only when overwriting an existing install.
