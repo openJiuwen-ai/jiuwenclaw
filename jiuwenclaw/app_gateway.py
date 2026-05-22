@@ -954,7 +954,14 @@ async def _run(
         logger.info("[App] Heartbeat service disabled by config")
 
     initial_channels_conf: dict = channels_cfg if isinstance(channels_cfg, dict) else {}
-    channel_manager = ChannelManager(message_handler, config=initial_channels_conf)
+    from jiuwenclaw.gateway.channel_config_overlay import channel_config_overlay_enabled
+
+    _channel_db_overlay = channel_config_overlay_enabled()
+    # distributed：channel_config DB；standalone：yaml 直传。
+    if _channel_db_overlay:
+        channel_manager = ChannelManager(message_handler, config={})
+    else:
+        channel_manager = ChannelManager(message_handler, config=initial_channels_conf)
     updater_service = WindowsUpdaterService()
 
     async def _on_config_saved(
@@ -1664,7 +1671,41 @@ async def _run(
                 logger.info("[App] channels.wechat missing or invalid, WechatChannel disabled")
 
     channel_manager.set_config_callback(_apply_channel_config)
-    await channel_manager.set_config(initial_channels_conf)
+    if _channel_db_overlay:
+        from jiuwenclaw.gateway.channel_config_overlay import (
+            ChannelConfigChange,
+            apply_channel_change_to_runtime,
+            apply_channel_config_db_overlay,
+            register_channel_config_reload,
+        )
+
+        async def _reload_channels_from_db(
+            change: ChannelConfigChange | None = None,
+        ) -> None:
+            """REST 写库后：优先用变更增量 patch；无变更信息时回退全量读 DB。"""
+            try:
+                if change is not None:
+                    current = channel_manager.get_channels_config()
+                    channels = apply_channel_change_to_runtime(current, change)
+                    logger.info(
+                        "[App] channels patched incrementally op=%s channel_id=%s",
+                        change.op,
+                        change.row.get("channel_id"),
+                    )
+                else:
+                    channels, _ = await apply_channel_config_db_overlay()
+                    logger.info("[App] channels reloaded from channel_config DB (full)")
+                await channel_manager.set_config(channels)
+            except Exception:  # noqa: BLE001
+                logger.exception("[App] channel_config reload failed")
+
+        await register_channel_config_reload(_reload_channels_from_db)
+        channels_for_runtime, applied = await apply_channel_config_db_overlay()
+        if applied:
+            logger.info("[App] initial channels loaded from channel_config DB (db-only)")
+        await channel_manager.set_config(channels_for_runtime)
+    else:
+        await channel_manager.set_config(initial_channels_conf)
 
     await channel_manager.start_dispatch()
     await cron_scheduler.start()

@@ -1,4 +1,4 @@
-# Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
+# Copyright (c) Huawei Technologies Co., Ltd. 2026-2026. All rights reserved.
 """将 Claw Manager config.push 按 key 路由到各业务同步处理器。"""
 
 from __future__ import annotations
@@ -6,6 +6,7 @@ from __future__ import annotations
 import logging
 from typing import Any
 
+from ..core.application_config.channel_config import apply_channel_config_sync
 from ..core.config_effective_policy.config_default_template_mapping import (
     apply_config_default_template_mapping_sync,
 )
@@ -28,6 +29,10 @@ logger = logging.getLogger(__name__)
 
 
 async def apply_config_push(config: dict[str, Any]) -> dict[str, Any] | None:
+    channel_config = config.get("channel_config")
+    if isinstance(channel_config, dict) and channel_config.get("op"):
+        return await _apply_channel_config(channel_config)
+
     extension_config_templates = config.get("extension_config_templates")
     if isinstance(extension_config_templates, dict) and extension_config_templates.get(
         "op"
@@ -54,6 +59,21 @@ async def apply_config_push(config: dict[str, Any]) -> dict[str, Any] | None:
     if isinstance(service_policies, dict) and service_policies.get("op"):
         return await _apply_config_effective_service_policies(service_policies)
     return None
+
+
+async def _apply_channel_config(payload: dict[str, Any]) -> dict[str, Any] | None:
+    op = str(payload.get("op") or "").strip()
+    if not op:
+        raise ValueError("channel_config.op is required")
+
+    handler = await ensure_db_handler_ready()
+    result = await apply_channel_config_sync(handler, op, payload)
+    logger.info(
+        "[ManagerWsClient] channel_config sync op=%s channel_id=%s",
+        op,
+        (result or {}).get("channel_id") or payload.get("channel_id"),
+    )
+    return result
 
 
 async def _apply_extension_config_templates(
