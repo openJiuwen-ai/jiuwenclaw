@@ -382,7 +382,7 @@ class SkillDevDeepAdapter:
 
         # 如果需要进行skill检索，则检索skill并返回
         if params.get("enable_skill_search"):
-            skills = search_skills(params.get("query"))
+            skills, total = search_skills(params.get("query"))
             if skills:
                 yield AgentResponseChunk(
                     request_id=rid,
@@ -391,11 +391,12 @@ class SkillDevDeepAdapter:
                         "event_type": "skilldev.search_results", 
                         "skillList": skills,
                         "num": len(skills),
-                        "total": len(skills),
+                        "total": total,
                     },
                     is_complete=False,
                 )
                 return
+            logger.info("[session=%s] [SkillDevDeepAdapter] 没有搜索到技能", task_id)
 
         # 初始化工作区，写入上传资源，写入搜索到的技能
         task_workspace = Path(self._base_workspace_dir) / "skilldev" / task_id

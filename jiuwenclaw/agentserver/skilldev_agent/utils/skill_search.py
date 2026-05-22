@@ -67,12 +67,12 @@ def search_skills(query):
     raw = os.getenv("SKILL_SEARCH_ENV_CONFIG", "")
     if not raw:
         logger.error("[SkillSearch] 环境变量 SKILL_SEARCH_ENV_CONFIG 未设置")
-        return None
+        return None, 0
     try:
         env_config = json.loads(raw)
     except json.JSONDecodeError as e:
         logger.error("[SkillSearch] SKILL_SEARCH_ENV_CONFIG JSON 解析失败: %s", e)
-        return None
+        return None, 0
     api_url = env_config["url"]
 
     trace_id = str(uuid.uuid4())
@@ -99,7 +99,7 @@ def search_skills(query):
             response_data = response.json()
         except json.JSONDecodeError as e:
             logger.error("[SkillSearch] JSON解析失败: %s, 原始内容: %s", e, response.text)
-            return None
+            return None, 0
 
         if response_data.get("errorCode") == "0" and "content" in response_data and "skills" in response_data["content"]:
             formatted_data = response_data["content"]["skills"]
@@ -107,22 +107,23 @@ def search_skills(query):
                 skill for skill in formatted_data
                 if skill.get("skillId") not in ("find-skills", "skill-creator")
             ]
+            total = response_data["content"]["total"]
             logger.debug("[SkillSearch] skill列表: %s", json.dumps(formatted_data, indent=2, ensure_ascii=False))
-            return formatted_data
+            return formatted_data, total
         else:
             logger.warning("[SkillSearch] 响应数据格式异常，未找到skill列表, 原始响应: %s",
                            json.dumps(response_data, indent=2, ensure_ascii=False))
-            return None
+            return None, 0
 
     except requests.exceptions.Timeout:
         logger.error("[SkillSearch] Request timed out (30s)")
-        return None
+        return None, 0
     except requests.exceptions.RequestException as e:
         logger.error("[SkillSearch] HTTP请求异常: %s", e)
-        return None
+        return None, 0
     except Exception as e:
         logger.error("[SkillSearch] 未知错误: %s", e)
-        return None
+        return None, 0
 
 
 def parse_args():
