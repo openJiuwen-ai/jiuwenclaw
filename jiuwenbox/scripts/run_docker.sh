@@ -229,6 +229,7 @@ docker run -itd \
     --cap-add=NET_ADMIN \
     --security-opt seccomp=unconfined \
     --security-opt apparmor=unconfined \
+    --security-opt systempaths=unconfined \
     --cgroupns=host \
     -v /sys/fs/cgroup:/sys/fs/cgroup:rw \
     "${DOCKER_PORT_ARGS[@]}" \
