@@ -3,7 +3,7 @@ requires = ["setuptools>=61.0"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "jiuwenclaw"
+name = "jiuwenswarm"
 version = "0.1.10"
 description = "JiuwenClaw"
 requires-python = ">=3.11.4,<3.14"
