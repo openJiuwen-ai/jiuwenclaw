@@ -19,14 +19,26 @@ from __future__ import annotations
 import json
 import os
 import logging
+import time
 from typing import Any, List, Union
 
 from openjiuwen.core.foundation.tool import LocalFunction, Tool, ToolCard
 
-from jiuwenclaw.config import get_file_transfer_config
 from jiuwenclaw.agentserver.file_transfer_manager import get_file_transfer_manager
+from jiuwenclaw.agentserver.session_history import append_history_record
+from jiuwenclaw.config import get_file_transfer_config
 
 logger = logging.getLogger(__name__)
+
+
+def _build_files_payload(valid_files: list[str]) -> list[dict[str, str]]:
+    return [
+        {
+            "path": file_path,
+            "name": os.path.basename(file_path),
+        }
+        for file_path in valid_files
+    ]
 
 
 class SendFileToolkit:
@@ -131,6 +143,44 @@ class SendFileToolkit:
         else:
             return await self._send_file_local(valid_files, missing_files)
 
+    async def _emit_chat_file(self, valid_files: list[str]) -> None:
+        """Push authoritative chat.file after paths are validated on disk."""
+        if not valid_files:
+            return
+        files_payload = _build_files_payload(valid_files)
+        from jiuwenclaw.agentserver.agent_ws_server import AgentWebSocketServer
+
+        server = AgentWebSocketServer.get_instance()
+        msg: dict[str, Any] = {
+            "request_id": self.request_id,
+            "channel_id": self.channel_id,
+            "session_id": self.session_id,
+            "payload": {
+                "event_type": "chat.file",
+                "files": files_payload,
+            },
+            "is_complete": False,
+        }
+        if self._request_metadata:
+            msg["metadata"] = dict(self._request_metadata)
+        await server.send_push(msg)
+        logger.info(
+            "[SendFileToolkit] chat.file 已推送 request_id=%s file_count=%d paths=%s",
+            self.request_id,
+            len(valid_files),
+            valid_files,
+        )
+        append_history_record(
+            session_id=self.session_id,
+            request_id=self.request_id,
+            channel_id=self.channel_id,
+            role="assistant",
+            content="",
+            timestamp=time.time(),
+            event_type="chat.file",
+            extra={"files": files_payload},
+        )
+
     async def _send_file_local(
         self,
         valid_files: List[str],
@@ -146,29 +196,7 @@ class SendFileToolkit:
             结果消息
         """
         try:
-            # Lazy import to avoid circular import
-            from jiuwenclaw.agentserver.agent_ws_server import AgentWebSocketServer
-            server = AgentWebSocketServer.get_instance()
-            files_payload = [
-                {
-                    "path": file_path,
-                    "name": os.path.basename(file_path),
-                }
-                for file_path in valid_files
-            ]
-            msg = {
-                "request_id": self.request_id,
-                "channel_id": self.channel_id,
-                "session_id": self.session_id,
-                "payload": {
-                    "event_type": "chat.file",
-                    "files": files_payload,
-                },
-                "is_complete": False,
-            }
-            if self._request_metadata:
-                msg["metadata"] = dict(self._request_metadata)
-            await server.send_push(msg)
+            await self._emit_chat_file(valid_files)
             result_parts = [f"成功发送 {len(valid_files)} 个文件"]
             if missing_files:
                 result_parts.append("以下文件不存在，未发送：")
