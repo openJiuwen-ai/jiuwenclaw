@@ -19,6 +19,14 @@ from jiuwenswarm.common.utils import get_config_dir, get_config_file
 
 _CONFIG_MODULE_DIR = Path(__file__).parent
 _CONFIG_YAML_PATH = get_config_file()
+SECURITY_REVIEW_CONFIG_FLAGS = frozenset({
+    "enabled",
+    "runtime_advice",
+    "async_review",
+    "evolve_security_skills",
+    "propose_policy_rules",
+    "timely_tool_failure_review",
+})
 
 # Check if user workspace exists and use it if configured via env
 _user_config = os.getenv("JIUWENSWARM_CONFIG_DIR")
@@ -247,6 +255,25 @@ def update_kv_cache_affinity_enabled_in_config(value: bool) -> None:
     if "context_engine_config" not in react:
         react["context_engine_config"] = {}
     react["context_engine_config"]["enable_kv_cache_release"] = value
+    _dump_yaml_round_trip(_CONFIG_YAML_PATH, data)
+
+
+def update_security_review_enabled_in_config(value: bool) -> None:
+    """更新 react.security_review.enabled（任务中安全监督开关）并写回。"""
+    update_security_review_config_flag("enabled", value)
+
+
+def update_security_review_config_flag(key: str, value: bool) -> None:
+    """更新 react.security_review 下允许前端控制的布尔开关并写回。"""
+    if key not in SECURITY_REVIEW_CONFIG_FLAGS:
+        raise ValueError(f"Unsupported security_review config flag: {key}")
+    data = _load_yaml_round_trip(_CONFIG_YAML_PATH)
+    if "react" not in data:
+        data["react"] = {}
+    react = data["react"]
+    if "security_review" not in react:
+        react["security_review"] = {}
+    react["security_review"][key] = value
     _dump_yaml_round_trip(_CONFIG_YAML_PATH, data)
 
 

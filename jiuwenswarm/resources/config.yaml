@@ -271,6 +271,24 @@ react:
     auto_scan: false           # true = 每轮对话后自动扫描（建议先用手动 /evolve）
     skill_create: false        # true = 注册 SkillCreateRail（单 agent）及 TeamSkillCreateRail（leader）
     skill_base_dir: "agent/skills"  # Skill 根目录
+  # 任务中安全监督与安全专项演进候选。默认关闭；启用后只在 Runner 回调热路径做有界分类与计数。
+  security_review:
+    enabled: false
+    runtime_advice: true
+    async_review: true
+    evolve_security_skills: true
+    propose_policy_rules: true
+    ring_buffer_size: 128
+    max_sessions: 128
+    max_event_chars: 2048
+    max_reviews_per_session: 2
+    async_queue_size: 1
+    min_review_interval_iterations: 3
+    repeated_tool_failure_threshold: 2
+    timely_tool_failure_review: true
+    high_risk_advice_threshold: 1
+    repeated_permission_denied_threshold: 2
+    repeated_blocked_command_threshold: 2
   a2x_registry:
     base_url: "http://127.0.0.1:8000"
     timeout: 30.0

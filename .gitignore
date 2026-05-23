@@ -57,6 +57,7 @@ workspace/agent-data.json
 reference/
 openspec/
 docs/ai/
+docs/superpowers/
 
 # logs
 logs/
