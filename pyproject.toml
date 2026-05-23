@@ -53,6 +53,8 @@ dependencies = [
     "openjiuwen_deepsearch>=0.1.4",
     "pypandoc",
     "markdown",
+    "httpx>=0.28.1",
+    "PyJWT>=2.12.1",
 ]
 
 [project.optional-dependencies]
