@@ -10,6 +10,8 @@ from typing import Any
 
 from jiuwenclaw.config import get_config
 from jiuwenclaw.gateway.sandbox_client import SandboxClient, SandboxConfig
+from jiuwenclaw.sandbox.claw_api_key import get_claw_api_key
+from jiuwenclaw.sandbox.sandbox_dcs_store import SandboxDcsConfig, SandboxDcsStore
 from jiuwenclaw.e2a.models import E2AEnvelope
 from jiuwenclaw.gateway.agent_client import AgentServerClient
 from jiuwenclaw.schema.agent import AgentResponse, AgentResponseChunk
@@ -54,6 +56,7 @@ class SandboxRouterAgentClient(AgentServerClient):
             else {}
         )
         self._sandbox_client: SandboxClient | None = None
+        self._dcs_store: SandboxDcsStore | None = None
         max_sandboxes_value = (
             max_sandboxes
             if max_sandboxes is not None
@@ -118,6 +121,8 @@ class SandboxRouterAgentClient(AgentServerClient):
             await self._terminate_runtime(routing_key)
         if self._sandbox_client is not None:
             await self._sandbox_client.close()
+        if self._dcs_store is not None:
+            await self._dcs_store.close()
 
     def set_or_update_server_config(
         self,
@@ -206,6 +211,7 @@ class SandboxRouterAgentClient(AgentServerClient):
             async with self._pool_lock:
                 self._creating_count += 1
             sandbox_id: str | None = None
+            dcs_registered = False
             try:
                 sandbox_client = self._get_sandbox_client()
                 result = await sandbox_client.create_sandbox()
@@ -214,10 +220,13 @@ class SandboxRouterAgentClient(AgentServerClient):
                 sandbox_id = str(result.output or "").strip()
                 if not sandbox_id:
                     raise RuntimeError("create_sandbox returned empty sandbox_id")
+                registration = await self._register_sandbox_record(sandbox_id)
+                dcs_registered = bool(registration.get("api_key"))
                 metadata = {
                     "routing_key": routing_key,
                     "user_id": user_id,
                     "session_id": session_id,
+                    **registration,
                 }
                 agent_client = await self._wait_agent_connected(sandbox_id, routing_key, metadata)
                 if self._server_config:
@@ -235,6 +244,8 @@ class SandboxRouterAgentClient(AgentServerClient):
                 return runtime
             except Exception:
                 if sandbox_id:
+                    if dcs_registered:
+                        await self._delete_sandbox_dcs_record(sandbox_id)
                     try:
                         await self._get_sandbox_client().delete_sandbox(sandbox_id)
                     except Exception:  # noqa: BLE001
@@ -332,12 +343,52 @@ class SandboxRouterAgentClient(AgentServerClient):
             await self._disconnect_agent_client(runtime.sandbox_id, runtime.agent_client)
         finally:
             try:
+                await self._delete_sandbox_dcs_record(runtime.sandbox_id)
                 await self._get_sandbox_client().delete_sandbox(runtime.sandbox_id)
             finally:
                 async with self._pool_lock:
                     runtime.status = SandboxStatus.TERMINATED
                     self._runtimes.pop(routing_key, None)
                 self._notify_next_waiter()
+
+    async def _register_sandbox_record(self, sandbox_id: str) -> dict[str, str]:
+        store = self._get_dcs_store()
+        if store is None:
+            return {"sandbox_id": sandbox_id}
+        api_key = get_claw_api_key()
+        record = await store.save_sandbox(sandbox_id, api_key=api_key)
+        return {
+            "sandbox_id": record.sandbox_id,
+            "api_key": record.api_key,
+            "created_at": record.created_at,
+        }
+
+    async def _delete_sandbox_dcs_record(self, sandbox_id: str) -> None:
+        store = self._get_dcs_store()
+        if store is None:
+            return
+        try:
+            await store.delete_sandbox(sandbox_id)
+        except Exception:  # noqa: BLE001
+            logger.exception("Failed to delete sandbox DCS record: %s", sandbox_id)
+
+    def _get_dcs_store(self) -> SandboxDcsStore | None:
+        if self._dcs_store is not None:
+            return self._dcs_store if self._dcs_store.enabled else None
+        gateway_cfg = self._gateway_config()
+        dcs_cfg = (
+            gateway_cfg.get("sandbox_dcs")
+            if isinstance(gateway_cfg.get("sandbox_dcs"), dict)
+            else {}
+        )
+        config = SandboxDcsConfig.from_dict(dcs_cfg)
+        if not config.enabled:
+            self._dcs_store = SandboxDcsStore(config)
+            return None
+        if not config.url:
+            raise RuntimeError("gateway.sandbox_dcs.enabled=true requires gateway.sandbox_dcs.url")
+        self._dcs_store = SandboxDcsStore(config)
+        return self._dcs_store
 
     async def _wait_agent_connected(
         self,
