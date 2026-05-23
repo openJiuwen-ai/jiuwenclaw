@@ -7,6 +7,7 @@ from typing import Any
 
 import redis.asyncio as redis
 
+from jiuwenclaw.sandbox.open_ability import OpenAbilityConfig, OpenAbilityEndpoint
 from jiuwenclaw.utils import logger
 
 
@@ -117,8 +118,7 @@ class SandboxDcsStore:
     async def get_sandbox(self, sandbox_id: str) -> SandboxDcsRecord | None:
         if not self._config.enabled:
             return None
-        client = await self.ensure_connected()
-        data = await client.hgetall(self._record_key(sandbox_id))
+        data = await self._load_record_fields(sandbox_id)
         if not data:
             return None
         sandbox_value = str(data.get("sandbox_id") or sandbox_id).strip()
@@ -131,6 +131,45 @@ class SandboxDcsStore:
             api_key=api_key,
             created_at=created_at,
         )
+
+    async def get_openability_endpoint(
+        self,
+        sandbox_id: str,
+        *,
+        open_ability_config: OpenAbilityConfig | None = None,
+    ) -> OpenAbilityEndpoint | None:
+        if not self._config.enabled:
+            return None
+        data = await self._load_record_fields(sandbox_id)
+        if not data:
+            return None
+        cfg = open_ability_config or OpenAbilityConfig()
+        host = _first_non_empty(data, cfg.host_fields)
+        port_raw = _first_non_empty(data, cfg.port_fields)
+        if not host or not port_raw:
+            return None
+        try:
+            port = int(str(port_raw).strip())
+        except ValueError:
+            return None
+        if port <= 0 or port > 65535:
+            return None
+        return OpenAbilityEndpoint(host=host, port=port)
+
+    async def _load_record_fields(self, sandbox_id: str) -> dict[str, str]:
+        client = await self.ensure_connected()
+        data = await client.hgetall(self._record_key(sandbox_id))
+        if not data:
+            return {}
+        return {str(key): str(value) for key, value in data.items()}
+
+
+def _first_non_empty(data: dict[str, str], field_names: tuple[str, ...]) -> str:
+    for name in field_names:
+        value = str(data.get(name) or "").strip()
+        if value:
+            return value
+    return ""
 
 
 def _cfg_bool(value: Any, default: bool = False) -> bool:

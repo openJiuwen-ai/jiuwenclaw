@@ -94,20 +94,19 @@ Router 维护的 runtime 信息包括：
 
 队列、上限、identity、runtime 复用等逻辑都放在 Router 中，不放进 SandboxClient。
 
-### 2.6 未确定连接协议的扩展点
+### 2.6 OpenAbility WebSocket 建链
 
-沙箱 agent 的真实反向建链协议尚未确定，Router 在创建和删除 runtime 时预留了内部扩展点：
+沙箱创建并写入 DCS 后，Gateway 不再等待 Agent 反向连入，而是：
+
+1. 从 DCS 按 `sandbox_id` 轮询读取 OpenAbility 的 `ip`/`port`（字段名可配置）。
+2. 主动连接 OpenAbility WebSocket（`WebSocketAgentServerClient`），由该服务转发与沙箱内 AgentServer 的 WS 事件。
 
 ```python
-_wait_agent_connected(sandbox_id, routing_key, metadata) -> AgentServerClient
+_connect_open_ability_client(sandbox_id, routing_key, metadata) -> AgentServerClient
 _disconnect_agent_client(sandbox_id, agent_client) -> None
 ```
 
-当前实现状态：
-
-- 测试中通过测试子类覆盖 `_wait_agent_connected` 来模拟 sandbox agent client。
-- 生产路径如果开启 Router 但真实建链逻辑尚未实现，会在创建 sandbox 后返回明确错误：`sandbox agent connection is not configured`。
-- 该错误是预期行为，表示不会静默退回共享 AgentClient。
+需同时开启 `gateway.sandbox_dcs.enabled=true`，并配置 `gateway.open_ability`。
 
 ## 3. 配置与运行状态
 
@@ -185,5 +184,5 @@ uv run --no-sync pytest -o addopts='' \
 下一阶段应优先补齐真实反向建链逻辑：
 
 1. 明确沙箱内 Agent 主动连回 Gateway 的协议与鉴权信息。
-2. 实现 Router 内部 `_wait_agent_connected`，将反向连接绑定到 `sandbox_id` 和 `routing_key`。
+2. 按 OpenAbility 协议完善 `_connect_open_ability_client`（鉴权头、路径、就绪判断等）。
 3. 在 Router 开启模式下跑通 VibeSkill 到 sandbox agent 的端到端请求。

@@ -13,7 +13,13 @@ from jiuwenclaw.gateway.sandbox_client import SandboxClient, SandboxConfig
 from jiuwenclaw.sandbox.claw_api_key import get_claw_api_key
 from jiuwenclaw.sandbox.sandbox_dcs_store import SandboxDcsConfig, SandboxDcsStore
 from jiuwenclaw.e2a.models import E2AEnvelope
-from jiuwenclaw.gateway.agent_client import AgentServerClient
+from jiuwenclaw.gateway.agent_client import AgentServerClient, WebSocketAgentServerClient
+from jiuwenclaw.sandbox.open_ability import (
+    OpenAbilityConfig,
+    OpenAbilityEndpoint,
+    build_openability_ws_uri,
+    redact_openability_ws_uri,
+)
 from jiuwenclaw.schema.agent import AgentResponse, AgentResponseChunk
 from jiuwenclaw.utils import logger
 
@@ -228,7 +234,7 @@ class SandboxRouterAgentClient(AgentServerClient):
                     "session_id": session_id,
                     **registration,
                 }
-                agent_client = await self._wait_agent_connected(sandbox_id, routing_key, metadata)
+                agent_client = await self._connect_open_ability_client(sandbox_id, routing_key, metadata)
                 if self._server_config:
                     agent_client.set_or_update_server_config(config=self._server_config, env=self._server_env)
                 runtime = SandboxRuntime(
@@ -390,13 +396,71 @@ class SandboxRouterAgentClient(AgentServerClient):
         self._dcs_store = SandboxDcsStore(config)
         return self._dcs_store
 
-    async def _wait_agent_connected(
+    async def _connect_open_ability_client(
         self,
         sandbox_id: str,
         routing_key: str,
         metadata: dict[str, Any],
     ) -> AgentServerClient:
-        raise RuntimeError("sandbox agent connection is not configured")
+        store = self._get_dcs_store()
+        if store is None:
+            raise RuntimeError(
+                "gateway.sandbox_dcs.enabled=true is required to resolve OpenAbility endpoint"
+            )
+        open_ability_cfg = self._openability_config()
+        endpoint = await self._wait_openability_endpoint(
+            store,
+            sandbox_id,
+            open_ability_config=open_ability_cfg,
+        )
+        api_key = str(metadata.get("api_key") or "").strip()
+        ws_uri = build_openability_ws_uri(
+            endpoint,
+            sandbox_id=sandbox_id,
+            api_key=api_key,
+            config=open_ability_cfg,
+        )
+        client = WebSocketAgentServerClient()
+        logger.info(
+            "Connecting OpenAbility WebSocket for sandbox_id=%s routing_key=%s uri=%s",
+            sandbox_id,
+            routing_key,
+            redact_openability_ws_uri(ws_uri),
+        )
+        await asyncio.wait_for(
+            client.connect(ws_uri),
+            timeout=open_ability_cfg.connect_timeout_seconds,
+        )
+        return client
+
+    async def _wait_openability_endpoint(
+        self,
+        store: SandboxDcsStore,
+        sandbox_id: str,
+        *,
+        open_ability_config: OpenAbilityConfig,
+    ) -> OpenAbilityEndpoint:
+        deadline = time.time() + open_ability_config.readiness_timeout_seconds
+        while time.time() < deadline:
+            endpoint = await store.get_openability_endpoint(
+                sandbox_id,
+                open_ability_config=open_ability_config,
+            )
+            if endpoint is not None:
+                return endpoint
+            await asyncio.sleep(open_ability_config.readiness_poll_interval_seconds)
+        raise RuntimeError(
+            f"OpenAbility endpoint not found in DCS for sandbox_id={sandbox_id}"
+        )
+
+    def _openability_config(self) -> OpenAbilityConfig:
+        gateway_cfg = self._gateway_config()
+        open_ability_cfg = (
+            gateway_cfg.get("open_ability")
+            if isinstance(gateway_cfg.get("open_ability"), dict)
+            else {}
+        )
+        return OpenAbilityConfig.from_dict(open_ability_cfg)
 
     async def _disconnect_agent_client(self, sandbox_id: str, agent_client: AgentServerClient | None) -> None:
         if agent_client is not None:
