@@ -18,7 +18,12 @@ from jiuwenclaw.telemetry.attributes import (
     JIUWENCLAW_SESSION_ID,
 )
 from jiuwenclaw.telemetry.context_propagation import inject_trace_context
-from jiuwenclaw.telemetry.metrics import add_request_count, add_request_error_count, record_request_duration
+from jiuwenclaw.telemetry.metrics import (
+    _identity_span_attrs,
+    add_request_count,
+    add_request_error_count,
+    record_request_duration,
+)
 
 _tracer = trace.get_tracer("jiuwenclaw.entry")
 
@@ -48,14 +53,16 @@ def instrument_entry() -> None:
         session_id,
         request_metadata: dict[str, Any] | None = None,
     ):
+        attrs = {
+            JIUWENCLAW_CHANNEL_ID: env.channel or "",
+            JIUWENCLAW_SESSION_ID: session_id or "",
+            JIUWENCLAW_REQUEST_ID: env.request_id or "",
+            GEN_AI_SPAN_TYPE: "workflow",
+        }
+        attrs.update(_identity_span_attrs())
         with _tracer.start_as_current_span(
             "channel.request",
-            attributes={
-                JIUWENCLAW_CHANNEL_ID: env.channel or "",
-                JIUWENCLAW_SESSION_ID: session_id or "",
-                JIUWENCLAW_REQUEST_ID: env.request_id or "",
-                GEN_AI_SPAN_TYPE: "workflow",
-            },
+            attributes=attrs,
         ) as span:
             # Re-inject after span is created so the correct trace_id is propagated
             inject_trace_context(env.channel_context)

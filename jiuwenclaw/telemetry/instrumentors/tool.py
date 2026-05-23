@@ -23,7 +23,12 @@ from jiuwenclaw.telemetry.attributes import (
     JIUWENCLAW_REQUEST_ID,
     JIUWENCLAW_SESSION_ID,
 )
-from jiuwenclaw.telemetry.metrics import add_tool_call_count, add_tool_error_count, record_tool_duration
+from jiuwenclaw.telemetry.metrics import (
+    _identity_span_attrs,
+    add_tool_call_count,
+    add_tool_error_count,
+    record_tool_duration,
+)
 
 _tracer = trace.get_tracer("jiuwenclaw.tool")
 
@@ -51,17 +56,19 @@ def instrument_tools() -> None:
         arguments = getattr(tool_call, "arguments", {})
 
         parent_ctx = getattr(self, "otel_agent_ctx", None)
+        attrs = {
+            GEN_AI_TOOL_NAME: tool_name,
+            GEN_AI_TOOL_CALL_ID: tool_call_id,
+            GEN_AI_SPAN_TYPE: "tool",
+            JIUWENCLAW_SESSION_ID: session_id,
+            JIUWENCLAW_CHANNEL_ID: channel_id,
+            JIUWENCLAW_REQUEST_ID: request_id,
+        }
+        attrs.update(_identity_span_attrs())
         span = _tracer.start_span(
             f"gen_ai.tool.execute: {tool_name}",
             context=parent_ctx,
-            attributes={
-                GEN_AI_TOOL_NAME: tool_name,
-                GEN_AI_TOOL_CALL_ID: tool_call_id,
-                GEN_AI_SPAN_TYPE: "tool",
-                JIUWENCLAW_SESSION_ID: session_id,
-                JIUWENCLAW_CHANNEL_ID: channel_id,
-                JIUWENCLAW_REQUEST_ID: request_id,
-            },
+            attributes=attrs,
         )
         span.add_event("tool.arguments", {"arguments": str(arguments)[:4096]})
         _active_tool_spans[tool_call_id] = (span, time.monotonic(), channel_id)

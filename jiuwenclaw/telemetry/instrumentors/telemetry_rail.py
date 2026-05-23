@@ -71,6 +71,7 @@ from jiuwenclaw.telemetry.attributes import (
     GEN_AI_TOOL_RESULT,
 )
 from jiuwenclaw.telemetry.metrics import (
+    _identity_span_attrs,
     agent_duration,
     llm_call_count,
     llm_duration,
@@ -277,6 +278,7 @@ class TelemetryRail(DeepAgentRail):
             JIUWENCLAW_CHANNEL_ID: req_ctx["channel_id"],
             JIUWENCLAW_REQUEST_ID: req_ctx["request_id"],
         }
+        attrs.update(_identity_span_attrs())
 
         # Start span with extracted parent context (for cross-WebSocket propagation)
         agent_span = _tracer.start_span(
@@ -375,6 +377,7 @@ class TelemetryRail(DeepAgentRail):
             JIUWENCLAW_CHANNEL_ID: req_ctx["channel_id"],
             JIUWENCLAW_REQUEST_ID: req_ctx["request_id"],
         }
+        attrs.update(_identity_span_attrs())
 
         if temperature is not None:
             attrs[GEN_AI_REQUEST_TEMPERATURE] = float(temperature)
@@ -566,6 +569,7 @@ class TelemetryRail(DeepAgentRail):
             JIUWENCLAW_CHANNEL_ID: req_ctx["channel_id"],
             JIUWENCLAW_REQUEST_ID: req_ctx["request_id"],
         }
+        attrs.update(_identity_span_attrs())
 
         # Use the current OTel context — supports sub-agent / handoff nesting automatically.
         span = _tracer.start_span(

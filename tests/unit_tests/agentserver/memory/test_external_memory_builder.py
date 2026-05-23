@@ -6,6 +6,7 @@ Covers the dispatch table in build_external_memory_rail() by stubbing the
 agent-core provider / rail classes via sys.modules before import.
 """
 
+import importlib
 import sys
 from pathlib import Path
 from types import ModuleType
@@ -74,41 +75,66 @@ class _FakeVikingProvider:
         return _FakeVikingProvider.available
 
 
-def _ensure_module(name: str) -> ModuleType:
+def _ensure_stub_module(name: str) -> ModuleType:
+    """Create stub module only if the real package is NOT installed.
+
+    This prevents test stubs from overriding the real openjiuwen package
+    when it's available in the environment.
+    """
+    # First try to import the real module
+    try:
+        importlib.import_module(name)
+        return sys.modules[name]
+    except ImportError:
+        pass
+
+    # Check if already stubbed
     mod = sys.modules.get(name)
-    if mod is None:
-        mod = ModuleType(name)
-        sys.modules[name] = mod
+    if mod is not None:
+        return mod
+
+    # Create stub only for missing modules
+    mod = ModuleType(name)
+    mod.__path__ = []  # Mark as package
+    sys.modules[name] = mod
     return mod
 
 
 def _install_agent_core_stubs():
+    # First ensure the real openjiuwen package is imported (if available)
+    try:
+        importlib.import_module("openjiuwen")
+        importlib.import_module("openjiuwen.core")
+    except ImportError:
+        # If openjiuwen is not installed, create top-level stubs
+        for pkg in ["openjiuwen", "openjiuwen.core"]:
+            _ensure_stub_module(pkg)
+
+    # Only stub specific submodules that may not exist in all openjiuwen versions
     for pkg in [
-        "openjiuwen",
-        "openjiuwen.core",
         "openjiuwen.core.memory",
         "openjiuwen.core.memory.external",
         "openjiuwen.harness",
         "openjiuwen.harness.rails",
     ]:
-        _ensure_module(pkg)
+        _ensure_stub_module(pkg)
 
-    rail_mod = _ensure_module("openjiuwen.harness.rails.external_memory_rail")
+    rail_mod = _ensure_stub_module("openjiuwen.harness.rails.external_memory_rail")
     rail_mod.ExternalMemoryRail = _FakeRail
 
-    oj_mod = _ensure_module("openjiuwen.core.memory.external.openjiuwen_memory_provider")
+    oj_mod = _ensure_stub_module("openjiuwen.core.memory.external.openjiuwen_memory_provider")
     oj_mod.OpenJiuwenMemoryProvider = _FakeOpenjiuwenProvider
 
-    mem0_mod = _ensure_module("openjiuwen.core.memory.external.mem0_provider")
+    mem0_mod = _ensure_stub_module("openjiuwen.core.memory.external.mem0_provider")
     mem0_mod.Mem0MemoryProvider = _FakeMem0Provider
 
-    vk_mod = _ensure_module("openjiuwen.core.memory.external.openviking_memory_provider")
+    vk_mod = _ensure_stub_module("openjiuwen.core.memory.external.openviking_memory_provider")
     vk_mod.OpenVikingMemoryProvider = _FakeVikingProvider
 
 
 def _install_jiuwenclaw_stubs():
-    ruamel = _ensure_module("ruamel")
-    ruamel_yaml = _ensure_module("ruamel.yaml")
+    ruamel = _ensure_stub_module("ruamel")
+    ruamel_yaml = _ensure_stub_module("ruamel.yaml")
     ruamel.yaml = ruamel_yaml
     if not hasattr(ruamel_yaml, "YAML"):
         class _YAML:

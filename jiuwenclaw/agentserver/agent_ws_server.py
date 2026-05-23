@@ -313,6 +313,22 @@ class AgentWebSocketServer:
         self._current_ws = ws
         self._current_send_lock = send_lock
 
+        # 触发身份获取（在发送 connection.ack 之前）
+        try:
+            from jiuwenclaw.extensions.identity_provider import IdentityStore
+            identity = await IdentityStore.get_instance().fetch_and_store()
+            if identity is not None:
+                logger.info(
+                    "[AgentWebSocketServer] 身份信息已获取: user_id=%s domain_id=%s app_id=%s",
+                    identity.user_id,
+                    identity.domain_id,
+                    identity.app_id,
+                )
+            else:
+                logger.debug("[AgentWebSocketServer] 未获取到身份信息（无 provider 或获取失败）")
+        except Exception as e:
+            logger.warning("[AgentWebSocketServer] 身份获取异常: %s", e)
+
         # 发送 connection.ack 事件，通知 Gateway 服务端已就绪
         try:
             ack_frame = {

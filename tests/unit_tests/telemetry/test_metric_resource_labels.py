@@ -1,19 +1,20 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 
-"""Unit tests for metric resource labels injection."""
+"""Unit tests for metric common labels injection."""
 
 import pytest
 from opentelemetry.metrics import Observation
 from opentelemetry.sdk.resources import Resource, SERVICE_NAME
 
+from jiuwenclaw.extensions.identity_provider import IdentityInfo, IdentityStore
 from jiuwenclaw.telemetry.attributes import JIUWENCLAW_CLAW_ID
 from jiuwenclaw.telemetry.metrics import (
-    _with_resource_labels,
-    _observe_session_active,
     _observe_queue_depth,
+    _observe_session_active,
+    _with_resource_labels,
+    set_queue_depth_observer,
     set_resource,
     set_session_active_observer,
-    set_queue_depth_observer,
 )
 
 
@@ -21,17 +22,26 @@ class TestResourceLabelsInjection:
     """Test _with_resource_labels and set_resource."""
 
     @staticmethod
+    def teardown_method() -> None:
+        """Reset global state changed by metric label tests."""
+        set_resource(None)
+        set_session_active_observer(None)
+        set_queue_depth_observer(None)
+        IdentityStore.reset_instance()
+
+    @staticmethod
     def test_with_resource_labels_basic() -> None:
-        """Basic label injection with service_name only."""
+        """Basic label injection without claw_id."""
         resource = Resource({SERVICE_NAME: "test-service"})
         set_resource(resource)
         result = _with_resource_labels({"key": "value"})
         assert result["key"] == "value"
-        assert result[SERVICE_NAME] == "test-service"
+        # SERVICE_NAME is NOT injected into metric attributes (only claw_id is)
+        assert SERVICE_NAME not in result
 
     @staticmethod
     def test_with_resource_labels_with_claw_id() -> None:
-        """Label injection with both service_name and claw_id."""
+        """Label injection with claw_id (not SERVICE_NAME)."""
         resource = Resource({
             SERVICE_NAME: "test-service",
             JIUWENCLAW_CLAW_ID: "claw-123",
@@ -40,7 +50,8 @@ class TestResourceLabelsInjection:
         result = _with_resource_labels({"key": "value"})
         assert result[JIUWENCLAW_CLAW_ID] == "claw-123"
         assert result["key"] == "value"
-        assert result[SERVICE_NAME] == "test-service"
+        # SERVICE_NAME is NOT injected into metric attributes
+        assert SERVICE_NAME not in result
 
     @staticmethod
     def test_with_resource_labels_preserves_existing_attrs() -> None:
@@ -60,7 +71,7 @@ class TestResourceLabelsInjection:
 
     @staticmethod
     def test_with_resource_labels_empty_attrs() -> None:
-        """Empty attrs dict should only have resource attributes."""
+        """Empty attrs dict should only have claw_id (not SERVICE_NAME)."""
         resource = Resource({
             SERVICE_NAME: "test-service",
             JIUWENCLAW_CLAW_ID: "claw-123",
@@ -68,8 +79,9 @@ class TestResourceLabelsInjection:
         set_resource(resource)
         result = _with_resource_labels({})
         assert result[JIUWENCLAW_CLAW_ID] == "claw-123"
-        assert result[SERVICE_NAME] == "test-service"
-        assert len(result) == 2
+        # SERVICE_NAME is NOT injected into metric attributes
+        assert SERVICE_NAME not in result
+        assert len(result) == 1
 
     @staticmethod
     def test_set_resource_updates_globals() -> None:
@@ -92,45 +104,62 @@ class TestResourceLabelsInjection:
         """None resource should not add any resource labels."""
         set_resource(None)
         result = _with_resource_labels({"key": "value"})
+        assert JIUWENCLAW_CLAW_ID not in result
         assert result["key"] == "value"
 
     @staticmethod
-    def test_with_resource_labels_no_telemetry_sdk_attrs() -> None:
-        """Resource should NOT contain telemetry SDK attributes."""
-        resource = Resource({
-            SERVICE_NAME: "test-service",
-            JIUWENCLAW_CLAW_ID: "claw-123",
-        })
-        set_resource(resource)
-        result = _with_resource_labels({})
-        # 不应包含 telemetry SDK 自动注入的属性
-        assert "telemetry_sdk_language" not in result
-        assert "telemetry_sdk_name" not in result
-        assert "telemetry_sdk_version" not in result
+    def test_with_resource_labels_injects_complete_identity() -> None:
+        """Complete identity should be added to common metric labels."""
+        store = IdentityStore.get_instance()
+        store.set_test_state(identity=IdentityInfo(
+            user_id="user-123",
+            domain_id="domain-abc",
+            app_id="app-xyz",
+        ))
+
+        result = _with_resource_labels({"key": "value"})
+
+        assert result["key"] == "value"
+        assert result["user_id"] == "user-123"
+        assert result["domain_id"] == "domain-abc"
+        assert result["app_id"] == "app-xyz"
 
     @staticmethod
-    def test_with_resource_labels_multiple_attrs() -> None:
-        """Multiple resource attributes should all be injected."""
-        resource = Resource({
-            SERVICE_NAME: "test-service",
-            JIUWENCLAW_CLAW_ID: "claw-123",
-            "application_id": "app-id-123",
-            "user_id": "user-id-123",
-        })
-        set_resource(resource)
-        result = _with_resource_labels({"key": "value"})
-        assert result[SERVICE_NAME] == "test-service"
-        assert result[JIUWENCLAW_CLAW_ID] == "claw-123"
-        assert result["application_id"] == "app-id-123"
-        assert result["user_id"] == "user-id-123"
+    def test_with_resource_labels_omits_none_identity_fields() -> None:
+        """Partial identity should only add non-None metric labels."""
+        store = IdentityStore.get_instance()
+        store.set_test_state(identity=IdentityInfo(user_id="user-123", app_id="app-xyz"))
+
+        result = _with_resource_labels({})
+
+        assert result["user_id"] == "user-123"
+        assert "domain_id" not in result
+        assert result["app_id"] == "app-xyz"
+
+    @staticmethod
+    def test_with_resource_labels_omits_identity_when_missing() -> None:
+        """Missing identity should not add identity metric labels."""
+        result = _with_resource_labels({})
+
+        assert "user_id" not in result
+        assert "domain_id" not in result
+        assert "app_id" not in result
 
 
 class TestSessionActiveObserver:
     """Test _observe_session_active with resource labels."""
 
     @staticmethod
+    def teardown_method() -> None:
+        """Reset global state changed by metric label tests."""
+        set_resource(None)
+        set_session_active_observer(None)
+        set_queue_depth_observer(None)
+        IdentityStore.reset_instance()
+
+    @staticmethod
     def test_observe_session_active_with_resource() -> None:
-        """Session active observation should include resource labels."""
+        """Session active observation should include claw_id (not SERVICE_NAME)."""
         resource = Resource({
             SERVICE_NAME: "test-service",
             JIUWENCLAW_CLAW_ID: "claw-123",
@@ -143,7 +172,8 @@ class TestSessionActiveObserver:
         obs = observations[0]
         assert obs.value == 5
         assert obs.attributes[JIUWENCLAW_CLAW_ID] == "claw-123"
-        assert obs.attributes[SERVICE_NAME] == "test-service"
+        # SERVICE_NAME is NOT injected into metric attributes
+        assert SERVICE_NAME not in obs.attributes
 
     @staticmethod
     def test_observe_session_active_no_resource() -> None:
@@ -167,13 +197,40 @@ class TestSessionActiveObserver:
         observations = list(_observe_session_active(None))
         assert observations == []
 
+    @staticmethod
+    def test_observe_session_active_injects_identity_labels() -> None:
+        """Session active gauge observations should include identity labels."""
+        store = IdentityStore.get_instance()
+        store.set_test_state(identity=IdentityInfo(
+            user_id="user-123",
+            domain_id="domain-abc",
+            app_id="app-xyz",
+        ))
+        set_session_active_observer(lambda: 2)
+
+        result = list(_observe_session_active(None))
+
+        assert len(result) == 1
+        assert result[0].value == 2
+        assert result[0].attributes["user_id"] == "user-123"
+        assert result[0].attributes["domain_id"] == "domain-abc"
+        assert result[0].attributes["app_id"] == "app-xyz"
+
 
 class TestQueueDepthObserver:
     """Test _observe_queue_depth with resource labels."""
 
     @staticmethod
+    def teardown_method() -> None:
+        """Reset global state changed by metric label tests."""
+        set_resource(None)
+        set_session_active_observer(None)
+        set_queue_depth_observer(None)
+        IdentityStore.reset_instance()
+
+    @staticmethod
     def test_observe_queue_depth_with_resource() -> None:
-        """Queue depth observation should include resource labels."""
+        """Queue depth observation should include claw_id (not SERVICE_NAME)."""
         resource = Resource({
             SERVICE_NAME: "test-service",
             JIUWENCLAW_CLAW_ID: "claw-123",
@@ -187,7 +244,8 @@ class TestQueueDepthObserver:
         assert obs.value == 10
         assert obs.attributes["queue"] == "main"
         assert obs.attributes[JIUWENCLAW_CLAW_ID] == "claw-123"
-        assert obs.attributes[SERVICE_NAME] == "test-service"
+        # SERVICE_NAME is NOT injected into metric attributes
+        assert SERVICE_NAME not in obs.attributes
 
     @staticmethod
     def test_observe_queue_depth_no_resource() -> None:
@@ -217,3 +275,25 @@ class TestQueueDepthObserver:
 
         observations = list(_observe_queue_depth(None))
         assert observations == []
+
+    @staticmethod
+    def test_observe_queue_depth_preserves_queue_and_injects_identity_labels() -> None:
+        """Queue depth gauge observations should preserve queue and add identity."""
+        store = IdentityStore.get_instance()
+        store.set_test_state(identity=IdentityInfo(
+            user_id="user-123",
+            domain_id="domain-abc",
+            app_id="app-xyz",
+        ))
+        set_queue_depth_observer(
+            lambda: [Observation(3, attributes={"queue": "user"})],
+        )
+
+        result = list(_observe_queue_depth(None))
+
+        assert len(result) == 1
+        assert result[0].value == 3
+        assert result[0].attributes["queue"] == "user"
+        assert result[0].attributes["user_id"] == "user-123"
+        assert result[0].attributes["domain_id"] == "domain-abc"
+        assert result[0].attributes["app_id"] == "app-xyz"

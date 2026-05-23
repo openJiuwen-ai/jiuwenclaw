@@ -28,6 +28,30 @@ from jiuwenclaw.agentserver.agent_adapters import (
     resolve_sdk_choice,
 )
 from jiuwenclaw.agentserver.memory.config import get_memory_mode
+
+
+logger = logging.getLogger(__name__)
+
+
+def _truncate_for_log(text: str, max_len: int = 200) -> str:
+    """截断文本用于日志输出.
+
+    Args:
+        text: 原始文本
+        max_len: 最大长度，默认200字符
+
+    Returns:
+        截断后的文本，超过max_len时保留开头和结尾，中间显示截断信息
+    """
+    if not text:
+        return ""
+    if len(text) <= max_len:
+        return text
+    # 保留开头150字符 + 截断标记 + 结尾50字符
+    head_len = 150
+    tail_len = 50
+    truncated_count = len(text) - max_len
+    return f"{text[:head_len]}...[truncated {truncated_count} chars]{text[-tail_len:]}"
 from jiuwenclaw.agentserver.session_history import append_history_record
 from jiuwenclaw.agentserver.session_manager import SessionManager
 from jiuwenclaw.agentserver.session_metadata import (
@@ -53,8 +77,6 @@ from jiuwenclaw.utils import (
 )
 
 load_dotenv(dotenv_path=get_env_file())
-
-logger = logging.getLogger(__name__)
 
 # _session_project_dir 进程内缓存上限（超出则淘汰最久未访问；磁盘 metadata 仍为权威来源）
 _SESSION_PROJECT_DIR_CACHE_MAX = 4096
@@ -1053,6 +1075,12 @@ class JiuWenClaw:
 
         session_id = self._session_manager.get_session_id(request.session_id)
         query = request.params.get("query", "")
+        # 记录用户问题到日志
+        logger.info(
+            "[JiuWenClaw] 用户问题: %s",
+            _truncate_for_log(query),
+            extra={'user_visible': 'critical'}
+        )
         append_history_record(
             session_id=session_id,
             request_id=request.request_id,
@@ -1109,6 +1137,12 @@ class JiuWenClaw:
         if result.ok and result.payload.get("content"):
             content = result.payload["content"]
             content_str = content if isinstance(content, str) else str(content)
+            # 记录Agent回答到日志
+            logger.info(
+                "[JiuWenClaw] Agent回答: %s",
+                _truncate_for_log(content_str),
+                extra={'user_visible': 'critical'}
+            )
             append_history_record(
                 session_id=session_id,
                 request_id=request.request_id,
@@ -1188,6 +1222,12 @@ class JiuWenClaw:
 
         session_id = self._session_manager.get_session_id(request.session_id)
         query = request.params.get("query", "")
+        # 记录用户问题到日志
+        logger.info(
+            "[JiuWenClaw] 用户问题: %s",
+            _truncate_for_log(query),
+            extra={'user_visible': 'critical'}
+        )
 
         mode = request.params.get("mode", "") if isinstance(request.params, dict) else ""
         team_flag = request.params.get("team", False) if isinstance(request.params, dict) else False
@@ -1439,6 +1479,16 @@ class JiuWenClaw:
         except asyncio.CancelledError:
             logger.info("[JiuWenClaw] 流式处理被中断: request_id=%s", rid)
             raise
+
+        # 记录Agent回答到日志（流式delta合并，仅在无chat.final事件时）
+        if not final_answer_content and final_answer_chunks:
+            delta_content = "".join(final_answer_chunks)
+            if delta_content:
+                logger.info(
+                    "[JiuWenClaw] Agent回答: %s",
+                    _truncate_for_log(delta_content),
+                    extra={'user_visible': 'critical'}
+                )
 
         # cloud memory: after chat hook
         if memory_mode == "cloud":

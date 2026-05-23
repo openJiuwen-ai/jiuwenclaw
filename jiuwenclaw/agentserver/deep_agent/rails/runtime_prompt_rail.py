@@ -261,6 +261,29 @@ class RuntimePromptRail(DeepAgentRail):
             self._workspace_dir
         )
 
+        # ⭐ 方案B：根据 actual_output_dir 是否有值，生成不同的指导内容
+        # 直接给出路径值，不指导 Agent 调用 API（与方案A形成双重保障）
+        if actual_output_dir:
+            # 有值：直接给出 output_dir 路径
+            output_dir_guidance_cn = f"当前会话的 output_dir 路径：`{actual_output_dir}`"
+            output_dir_example_cn = f"{actual_output_dir}/filename.ext"
+            output_dir_guidance_en = f"Current session output_dir path: `{actual_output_dir}`"
+            output_dir_example_en = f"{actual_output_dir}/filename.ext"
+            logger.info(
+                "[RuntimePromptRail] ⭐ output_dir 有值，直接注入路径: %s",
+                actual_output_dir
+            )
+        else:
+            # 无值：明确告知未设置，使用 resolved_workspace
+            output_dir_guidance_cn = f"output_dir 未设置，使用 resolved_workspace：`{resolved_workspace}`"
+            output_dir_example_cn = f"{resolved_workspace}/filename.ext"
+            output_dir_guidance_en = f"output_dir not set, use resolved_workspace: `{resolved_workspace}`"
+            output_dir_example_en = f"{resolved_workspace}/filename.ext"
+            logger.info(
+                "[RuntimePromptRail] ⭐ output_dir 为 None，使用 resolved_workspace 备选: %s",
+                resolved_workspace
+            )
+
         if self._language == "cn":
             workspace_content = f"""# 你的家
 
@@ -287,41 +310,20 @@ class RuntimePromptRail(DeepAgentRail):
 
 ## 文件输出与发送规范
 
-执行用户任务时产生的生成产物（如代码文件、文档、数据文件等），有以下两种存放方式：
+执行用户任务时产生的生成产物（如代码文件、文档、数据文件等），按以下规则选择存放位置：
 
-### 方式 1：使用 output_dir（推荐）
+### 需要交付给用户的文件
 
-output_dir 是为每个会话创建的专用输出目录，用于存放需要交付给用户的生成文件。
+{output_dir_guidance_cn}
 
-**优势**：
-- 文件隔离：不同会话的输出文件完全隔离，避免冲突
-- 易于管理：所有输出文件集中在统一目录，便于查找和清理
-- 自动上传：系统会优先从 output_dir 读取文件并上传到对象存储
+直接使用上述路径创建文件，例如：`{output_dir_example_cn}`
 
-**使用方法**：
-通过 Python 代码获取 output_dir 路径：
+### 项目文件编辑或内部文件
 
-```python
-from jiuwenclaw.agentserver.tools.subagent_executor.context_vars import get_effective_request_output_dir
-
-output_dir = get_effective_request_output_dir()
-if output_dir:
-    # 将输出文件保存到 output_dir
-    file_path = f"{{output_dir}}/result.csv"
-    # 创建文件...
-else:
-    # output_dir 未设置，使用 resolved_workspace 作为备选
-    file_path = f"{{resolved_workspace}}/result.csv"
-```
-
-### 方式 2：保存在 resolved_workspace（通用）
-
-如果需要将生成文件作为项目的一部分（非交付用途），或 output_dir 不可用，可保存到 `{resolved_workspace}`。
-
-- 生成产物必须放在 `{resolved_workspace}` 下合适的位置，根据文件用途和项目结构合理组织路径，便于用户统一管理和访问
+使用 resolved_workspace：`{resolved_workspace}`
 
 **建议**：
-- 需要交付给用户的文件：优先使用 output_dir
+- 需要交付给用户的文件：使用上述 output_dir 路径
 - 项目文件编辑或内部文件：使用 resolved_workspace
 
 ## 文件发送
@@ -359,41 +361,20 @@ Be careful with your configuration. If changes are required, remember to restart
 
 ## File Output and Sending Guidelines
 
-Generated artifacts (code files, documents, data files, etc.) produced during user task execution have two storage options:
+Generated artifacts (code files, documents, data files, etc.) produced during user task execution should be stored according to the following rules:
 
-### Option 1: Use output_dir (Recommended)
+### Files to Deliver to User
 
-output_dir is a dedicated output directory created for each session, used for storing generated files that need to be delivered to the user.
+{output_dir_guidance_en}
 
-**Benefits**:
-- File isolation: Output files from different sessions are completely isolated, avoiding conflicts
-- Easy management: All output files are in a unified directory, easy to find and clean up
-- Auto upload: The system prioritizes reading files from output_dir and uploads them to object storage
+Directly use the above path to create files, e.g.: `{output_dir_example_en}`
 
-**Usage**:
-Get the output_dir path via Python code:
+### Project File Editing or Internal Files
 
-```python
-from jiuwenclaw.agentserver.tools.subagent_executor.context_vars import get_effective_request_output_dir
-
-output_dir = get_effective_request_output_dir()
-if output_dir:
-    # Save output files to output_dir
-    file_path = f"{{output_dir}}/result.csv"
-    # Create the file...
-else:
-    # output_dir not set, use resolved_workspace as fallback
-    file_path = "{{resolved_workspace}}/result.csv"
-```
-
-### Option 2: Save to resolved_workspace (General)
-
-If you need to save generated files as part of a project (non-delivery purpose), or output_dir is unavailable, you can save to `{resolved_workspace}`.
-
-- Artifacts must be placed in an appropriate location within `{resolved_workspace}`, organized according to file purpose and project structure for unified user management and access
+Use resolved_workspace: `{resolved_workspace}`
 
 **Recommendations**:
-- Files to deliver to user: Prefer using output_dir
+- Files to deliver to user: Use the output_dir path above
 - Project file editing or internal files: Use resolved_workspace
 
 ## Sending Files

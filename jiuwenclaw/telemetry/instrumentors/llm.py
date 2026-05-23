@@ -33,7 +33,7 @@ from jiuwenclaw.telemetry.attributes import (
     JIUWENCLAW_REQUEST_ID,
     JIUWENCLAW_SESSION_ID,
 )
-from jiuwenclaw.telemetry.metrics import add_llm_call_count, add_token_usage, record_llm_duration
+from jiuwenclaw.telemetry.metrics import _identity_span_attrs, add_llm_call_count, add_token_usage, record_llm_duration
 
 _tracer = trace.get_tracer("jiuwenclaw.llm")
 
@@ -76,6 +76,7 @@ def instrument_llm() -> None:
             JIUWENCLAW_CHANNEL_ID: channel_id,
             JIUWENCLAW_REQUEST_ID: request_id,
         }
+        span_attrs.update(_identity_span_attrs())
         if temperature is not None:
             span_attrs[GEN_AI_REQUEST_TEMPERATURE] = float(temperature)
         if top_p is not None:

@@ -10,6 +10,9 @@ from opentelemetry import metrics
 from opentelemetry.metrics import CallbackOptions, Observation
 from opentelemetry.sdk.resources import Resource
 
+from jiuwenclaw.extensions.identity_provider import IdentityStore
+from jiuwenclaw.telemetry.attributes import JIUWENCLAW_CLAW_ID
+
 _meter = metrics.get_meter("jiuwenclaw")
 _session_active_observer: Callable[[], int] | None = None
 
@@ -23,12 +26,74 @@ def set_resource(resource: Resource | None) -> None:
     _resource = resource
 
 
-def _with_resource_labels(attrs: dict) -> dict:
-    """将 Resource 中的所有属性注入到 metric attributes 中."""
-    result = dict(attrs)
+def _resource_metric_labels() -> dict:
+    """Build Resource-derived metric attributes."""
+    labels = {}
     if _resource is not None:
-        result.update(_resource.attributes)
+        claw_id = _resource.attributes.get(JIUWENCLAW_CLAW_ID)
+        if claw_id is not None:
+            labels[JIUWENCLAW_CLAW_ID] = claw_id
+    return labels
+
+
+def _identity_metric_labels() -> dict:
+    """Build IdentityStore-derived metric attributes."""
+    try:
+        identity = IdentityStore.get_instance().get_identity()
+    except Exception:
+        return {}
+
+    if identity is None:
+        return {}
+
+    labels = {}
+    if identity.user_id is not None:
+        labels["user_id"] = identity.user_id
+    if identity.domain_id is not None:
+        labels["domain_id"] = identity.domain_id
+    if identity.app_id is not None:
+        labels["app_id"] = identity.app_id
+    return labels
+
+
+def _identity_span_attrs() -> dict[str, str]:
+    """Return identity attributes for spans (user.id/domain.id/app.id).
+
+    Reads from IdentityStore singleton. Only adds attributes when values
+    are non-None to avoid empty/null dimensions (consistent with metrics).
+
+    Returns:
+        dict with 'user.id', 'domain.id', 'app.id' keys (only non-None values)
+    """
+    try:
+        identity = IdentityStore.get_instance().get_identity()
+    except Exception:
+        return {}
+
+    if identity is None:
+        return {}
+
+    attrs = {}
+    if identity.user_id is not None:
+        attrs["user.id"] = identity.user_id
+    if identity.domain_id is not None:
+        attrs["domain.id"] = identity.domain_id
+    if identity.app_id is not None:
+        attrs["app.id"] = identity.app_id
+    return attrs
+
+
+def _with_common_labels(attrs: dict) -> dict:
+    """Inject common Resource and identity labels into metric attributes."""
+    result = dict(attrs)
+    result.update(_resource_metric_labels())
+    result.update(_identity_metric_labels())
     return result
+
+
+def _with_resource_labels(attrs: dict) -> dict:
+    """Compatibility wrapper for common metric labels injection."""
+    return _with_common_labels(attrs)
 
 
 def set_session_active_observer(observer: Callable[[], int] | None) -> None:
@@ -47,12 +112,7 @@ def _observe_session_active(_options: CallbackOptions) -> Iterable[Observation]:
     except Exception:
         return []
 
-    # 将 Resource 中的属性添加到 attributes 中
-    attrs = {}
-    if _resource is not None:
-        attrs.update(_resource.attributes)
-
-    return [Observation(active_sessions, attributes=attrs)]
+    return [Observation(active_sessions, attributes=_with_common_labels({}))]
 
 # --- Histograms ---
 request_duration = _meter.create_histogram(
@@ -164,12 +224,10 @@ def _observe_queue_depth(_options: CallbackOptions) -> Iterable[Observation]:
         return []
     try:
         observations = observer()
-        # 将 Resource 中的属性注入到每个 Observation 中
+        # Wrap each Observation with common labels.
         wrapped = []
         for obs in observations:
-            attrs = dict(obs.attributes or {})
-            if _resource is not None:
-                attrs.update(_resource.attributes)
+            attrs = _with_common_labels(dict(obs.attributes or {}))
             wrapped.append(Observation(obs.value, attributes=attrs))
         return wrapped
     except Exception:

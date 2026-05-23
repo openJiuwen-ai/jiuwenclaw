@@ -400,7 +400,7 @@ def _log_component_from_logger_name(name: str) -> str:
         return "permissions"
     if name.startswith("jiuwenclaw.agentserver"):
         return "agent_server"
-    return "gateway"
+    return name
 
 
 class _ComponentNameFilter(logging.Filter):
@@ -2073,6 +2073,16 @@ class JsonUserVisibleFormatter(jsonlogger.JsonFormatter if jsonlogger else loggi
             ordered_record['user_tag'] = user_tag
         # 当 user_tag 为空字符串时，不添加该字段（保持JSON清洁）
 
+        # 添加身份字段（user_id、domain_id、app_id）
+        # 身份字段在 user_tag 之后，logger 之前
+        # 始终输出身份字段（null 值便于日志聚合分析）
+        user_id = getattr(record, 'user_id', None)
+        domain_id = getattr(record, 'domain_id', None)
+        app_id = getattr(record, 'app_id', None)
+        ordered_record['user_id'] = user_id
+        ordered_record['domain_id'] = domain_id
+        ordered_record['app_id'] = app_id
+
         if 'logger' in log_record:
             ordered_record['logger'] = log_record['logger']
 
@@ -2083,8 +2093,11 @@ class JsonUserVisibleFormatter(jsonlogger.JsonFormatter if jsonlogger else loggi
             ordered_record['message'] = log_record['message']
 
         # 添加其他字段（exc_info、component等）
+        identity_keys = {'user_id', 'domain_id', 'app_id'}
         for key, value in log_record.items():
             if key not in ordered_record:
+                if key in identity_keys and value is None:
+                    continue
                 ordered_record[key] = value
 
         # 替换原log_record为有序字典
@@ -2175,6 +2188,72 @@ class UserVisibleTagFilter(logging.Filter):
             record.user_tag = ""
 
         return True
+
+
+class IdentityFieldFilter(logging.Filter):
+    """身份信息字段过滤器。
+
+    自动为每条日志添加 user_id、domain_id、app_id 字段。
+    从 IdentityStore 单例读取当前身份信息。
+
+    使用方式：
+        自动应用于所有 Handler，无需手动调用。
+    """
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        """添加身份字段到 LogRecord。
+
+        Args:
+            record: 日志记录对象。
+
+        Returns:
+            bool: 总是返回 True（不过滤日志，仅添加字段）。
+        """
+        from jiuwenclaw.extensions.identity_provider import IdentityStore
+
+        identity = IdentityStore.get_instance().get_identity()
+        if identity is not None:
+            record.user_id = identity.user_id
+            record.domain_id = identity.domain_id
+            record.app_id = identity.app_id
+        else:
+            record.user_id = None
+            record.domain_id = None
+            record.app_id = None
+        return True
+
+
+class IdentityTextFormatter(logging.Formatter):
+    """支持身份字段的文本格式 Formatter。
+
+    在文本日志中添加身份字段（user_id、domain_id、app_id），
+    仅在有值时输出，格式为：user_id=xxx domain_id=xxx app_id=xxx
+    """
+
+    def format(self, record: logging.LogRecord) -> str:
+        """格式化日志记录，添加身份字段。
+
+        Args:
+            record: 日志记录对象。
+
+        Returns:
+            str: 格式化后的日志字符串。
+        """
+        # 构建身份字段字符串（始终输出，便于日志聚合分析）
+        identity_parts = []
+        user_id = getattr(record, 'user_id', None)
+        domain_id = getattr(record, 'domain_id', None)
+        app_id = getattr(record, 'app_id', None)
+
+        # 使用 "null" 表示空值，保持格式一致性
+        identity_parts.append(f"user_id={user_id if user_id is not None else 'null'}")
+        identity_parts.append(f"domain_id={domain_id if domain_id is not None else 'null'}")
+        identity_parts.append(f"app_id={app_id if app_id is not None else 'null'}")
+
+        # 将身份字段字符串添加到 record，供格式化使用
+        record.identity = " " + " ".join(identity_parts) + " "
+
+        return super().format(record)
 
 
 def _resolve_json_config() -> Dict[str, Any]:
@@ -2418,8 +2497,11 @@ def setup_logger(log_level: Optional[str] = None) -> logging.Logger:
     json_config = _resolve_json_config() if log_format in ('json', 'dual') else {}
 
     # 根据format选择Formatter
-    # 文本格式字符串（进程ID和行号始终显示）
-    text_fmt = "%(asctime)s.%(msecs)03d [%(process)d] %(levelname)s %(user_tag)s%(name)s:%(lineno)d: %(message)s"
+    # 文本格式字符串（进程ID和行号始终显示，身份字段在 user_tag 之后）
+    text_fmt = (
+        "%(asctime)s.%(msecs)03d [%(process)d] %(levelname)s "
+        "%(identity)s%(user_tag)s%(name)s:%(lineno)d: %(message)s"
+    )
 
     if log_format in ('json', 'dual'):
         # JSON 格式使用 JsonUserVisibleFormatter，动态读取配置参数
@@ -2430,13 +2512,13 @@ def setup_logger(log_level: Optional[str] = None) -> logging.Logger:
             exc_info_style=json_config.get('exc_info_style', 'simple')
         )
         # 文本格式用于 dual 模式或作为 fallback
-        text_formatter = logging.Formatter(
+        text_formatter = IdentityTextFormatter(
             fmt=text_fmt,
             datefmt="%Y-%m-%d %H:%M:%S",
         )
     else:
-        # 文本格式使用标准 Formatter + UserVisibleTagFilter
-        text_formatter = logging.Formatter(
+        # 文本格式使用 IdentityTextFormatter + UserVisibleTagFilter
+        text_formatter = IdentityTextFormatter(
             fmt=text_fmt,
             datefmt="%Y-%m-%d %H:%M:%S",
         )
@@ -2483,6 +2565,9 @@ def setup_logger(log_level: Optional[str] = None) -> logging.Logger:
             h.setFormatter(text_formatter)
 
         h.addFilter(privacy_filter)
+
+        # 为所有文件 handler 添加 IdentityFieldFilter（自动添加身份字段）
+        h.addFilter(IdentityFieldFilter())
 
         # 为所有文件 handler 添加 UserVisibleTagFilter（仅在 text/dual 模式下）
         if tag_config:
@@ -2551,6 +2636,8 @@ def setup_logger(log_level: Optional[str] = None) -> logging.Logger:
             if tag_config:
                 stream_handler.addFilter(UserVisibleTagFilter(tag_config))
 
+        # 控制台也添加 IdentityFieldFilter
+        stream_handler.addFilter(IdentityFieldFilter())
         stream_handler.addFilter(privacy_filter)
         root.addHandler(stream_handler)
 

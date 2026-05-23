@@ -134,6 +134,10 @@ telemetry:
 
 ### 5.1 指标总览
 
+除各指标表内列出的专属 Labels 外，所有 20 个指标在身份信息可用时都会额外携带公共身份 Labels：
+`jiuwenclaw.user.id`、`jiuwenclaw.domain.id`、`jiuwenclaw.app.id`。
+这些值来自连接身份扩展模块的 `IdentityStore`；无身份、身份获取失败、或字段为 `None` 时，不输出对应 Label。
+
 | 指标名 | 类型 | 单位 | 触发时机 | Labels | 指标来源 | 说明 |
 |---|---|---|---|---|---|---|
 | `jiuwenclaw.request.duration` | Histogram | `s` | 每次入口请求结束时记录 | `jiuwenclaw.channel.id` | `gateway` | 请求端到端时延 |
@@ -161,6 +165,9 @@ telemetry:
 
 | Label | 所属指标 | 取值说明 |
 |---|---|---|
+| `jiuwenclaw.user.id` | 全部 20 个指标 | 连接身份扩展模块获取的 `user_id`；缺失时不输出该 Label |
+| `jiuwenclaw.domain.id` | 全部 20 个指标 | 连接身份扩展模块获取的 `domain_id`；缺失时不输出该 Label |
+| `jiuwenclaw.app.id` | 全部 20 个指标 | 连接身份扩展模块获取的 `app_id`；缺失时不输出该 Label |
 | `jiuwenclaw.channel.id` | `jiuwenclaw.request.duration` `jiuwenclaw.request.count` `jiuwenclaw.request.error.count` `jiuwenclaw.agent.duration` `gen_ai.client.operation.duration` `gen_ai.client.operation.count` `gen_ai.client.token.usage` `gen_ai.tool.duration` `gen_ai.tool.call.count` `gen_ai.tool.error.count` `jiuwenclaw.queue.enqueued` `jiuwenclaw.queue.dequeued` `jiuwenclaw.queue.wait_duration` `jiuwenclaw.message.processed` | 渠道 ID，如 `web`、`feishu`、`wecom`；缺失时为空串 |
 | `jiuwenclaw.agent.name` | `jiuwenclaw.agent.duration` | Agent 名称；缺失时为空串 |
 | `gen_ai.request.model` | `gen_ai.client.operation.duration` `gen_ai.client.operation.count` `gen_ai.client.token.usage` | LLM 模型名，如配置中的 `model_name` |
@@ -198,6 +205,7 @@ telemetry:
 > **注入机制**：
 > - **Resource 层**：在 `provider.py` 的 `build_default_providers()` 中通过 `Resource.create(resource_attrs)` 设置，所有 Span 和 Metric 自动关联 Resource
 > - **Metric Attributes 层**：`jiuwenclaw.claw.id` 会额外注入到每个 metric 数据点的 attributes 中（从 Resource 获取），便于在 Metric 后端按实例聚合查询
+> - **Identity Metric Attributes 层**：`jiuwenclaw.user.id`、`jiuwenclaw.domain.id`、`jiuwenclaw.app.id` 会从 `IdentityStore` 读取并注入到所有 metric 数据点中
 > - `service.name` 不注入到 metric attributes，仅通过 Resource 关联
 
 ### 5.5 代码来源

@@ -98,6 +98,30 @@ class ExtensionRegistry:
         ext = self._crypto_tool
         return ext.get_crypto() if ext is not None else None
 
+    def register_identity_provider(self, provider: Any) -> None:
+        """注册身份信息提供者。
+
+        业务层在启动时调用此方法注册 IdentityProviderBase 实现类。
+
+        Args:
+            provider: IdentityProviderBase 的业务层实现实例。
+        """
+        from jiuwenclaw.extensions.identity_provider import IdentityStore
+        IdentityStore.get_instance().register_provider(provider)
+        self._config.logger.info(
+            "[ExtensionRegistry] 已注册身份提供者: %s", type(provider).__name__
+        )
+
+    @staticmethod
+    def get_identity_provider() -> Any | None:
+        """获取已注册的身份信息提供者。
+
+        Returns:
+            IdentityProviderBase | None: 已注册的身份提供者，未注册时返回 None。
+        """
+        from jiuwenclaw.extensions.identity_provider import IdentityStore
+        return IdentityStore.get_instance().get_provider()
+
     @property
     def extension_local_tool_entries(self) -> list[ExtensionLocalToolEntry]:
         return self._extension_local_tool_entries

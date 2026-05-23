@@ -21,7 +21,7 @@ from jiuwenclaw.telemetry.attributes import (
     JIUWENCLAW_SESSION_ID,
 )
 from jiuwenclaw.telemetry.context_propagation import extract_trace_context
-from jiuwenclaw.telemetry.metrics import record_agent_duration
+from jiuwenclaw.telemetry.metrics import _identity_span_attrs, record_agent_duration
 
 _tracer = trace.get_tracer("jiuwenclaw.agent")
 
@@ -116,7 +116,7 @@ def _store_agent_ctx(
 
 
 def _build_attrs(agent_server, request) -> dict[str, Any]:
-    return {
+    attrs = {
         JIUWENCLAW_AGENT_NAME: getattr(agent_server, "_agent_name", ""),
         JIUWENCLAW_SESSION_ID: request.session_id or "",
         JIUWENCLAW_CHANNEL_ID: request.channel_id or "",
@@ -125,3 +125,5 @@ def _build_attrs(agent_server, request) -> dict[str, Any]:
         GEN_AI_CONVERSATION_ID: request.session_id or "",
         GEN_AI_SPAN_TYPE: "agent",
     }
+    attrs.update(_identity_span_attrs())
+    return attrs

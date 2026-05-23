@@ -15,6 +15,7 @@ from jiuwenclaw.e2a.models import E2AEnvelope
 from jiuwenclaw.gateway.agent_client import AgentServerClient
 from jiuwenclaw.schema.agent import AgentResponse, AgentResponseChunk
 from jiuwenclaw.telemetry.context_propagation import inject_trace_context
+from jiuwenclaw.telemetry.metrics import _identity_span_attrs
 
 _tracer = trace.get_tracer("jiuwenclaw.gateway.agent_client")
 GATEWAY_CLIENT_INSTRUMENTED_ATTR = "_jiuwenclaw_gateway_client_instrumented"
@@ -200,4 +201,5 @@ def _build_attrs(target_uri: str | None, envelope: E2AEnvelope, is_stream: bool)
     if parsed and parsed.scheme:
         attrs["network.protocol.name"] = "websocket" if parsed.scheme in ("ws", "wss") else parsed.scheme
 
+    attrs.update(_identity_span_attrs())
     return attrs
