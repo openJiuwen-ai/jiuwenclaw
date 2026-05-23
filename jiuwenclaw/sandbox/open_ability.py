@@ -18,16 +18,12 @@ class OpenAbilityConfig:
     connect_timeout_seconds: float = 10.0
     readiness_poll_interval_seconds: float = 0.5
     readiness_timeout_seconds: float = 60.0
-    host_fields: tuple[str, ...] = ("ip", "host", "openability_ip")
-    port_fields: tuple[str, ...] = ("port", "openability_port")
     api_key_query_param: str = "api_key"
     sandbox_id_query_param: str = "sandbox_id"
 
     @classmethod
     def from_dict(cls, raw: dict[str, Any] | None) -> OpenAbilityConfig:
         cfg = raw if isinstance(raw, dict) else {}
-        host_fields = _as_field_tuple(cfg.get("host_fields"), ("ip", "host", "openability_ip"))
-        port_fields = _as_field_tuple(cfg.get("port_fields"), ("port", "openability_port"))
         return cls(
             ws_path=str(cfg.get("ws_path") or "/ws"),
             use_tls=_cfg_bool(cfg.get("use_tls"), False),
@@ -36,8 +32,6 @@ class OpenAbilityConfig:
                 cfg.get("readiness_poll_interval_seconds") or 0.5
             ),
             readiness_timeout_seconds=float(cfg.get("readiness_timeout_seconds") or 60.0),
-            host_fields=host_fields,
-            port_fields=port_fields,
             api_key_query_param=str(cfg.get("api_key_query_param") or "api_key"),
             sandbox_id_query_param=str(cfg.get("sandbox_id_query_param") or "sandbox_id"),
         )
@@ -75,15 +69,6 @@ def redact_openability_ws_uri(uri: str) -> str:
         else:
             pairs.append(item)
     return urlunsplit((parts.scheme, parts.netloc, parts.path, "&".join(pairs), parts.fragment))
-
-
-def _as_field_tuple(value: Any, default: tuple[str, ...]) -> tuple[str, ...]:
-    if isinstance(value, (list, tuple)):
-        fields = tuple(str(item).strip() for item in value if str(item).strip())
-        return fields or default
-    if isinstance(value, str) and value.strip():
-        return (value.strip(),)
-    return default
 
 
 def _cfg_bool(value: Any, default: bool = False) -> bool:

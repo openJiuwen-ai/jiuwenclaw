@@ -372,8 +372,7 @@ gateway:
   # VibeSkill Sandbox 路由配置。
   # 默认关闭，关闭时仍使用现有单 AgentServerClient 行为。
   # 开启后，Gateway 会按 user_id/session_id 为 VibeSkill 请求分配 sandbox runtime。
-  # 开启后必须配置 sandbox_client.api_base；
-  # 并启用 sandbox_dcs，由 DCS 提供 OpenAbility 的 ip/port，Gateway 主动连 OpenAbility 转发 AgentServer WS。
+  # 开启后必须配置 sandbox_client.api_base 与环境变量 SANDBOX_DCS_URL（DCS 读写 API Key / OpenAbility 地址）。
   sandbox_routing:
     enabled: false
     max_sandboxes: 4
@@ -391,26 +390,14 @@ gateway:
     timeout_seconds: ${SANDBOX_TIMEOUT_SECONDS:-120}
     metadata: {}
 
-  # 沙箱创建后写入 DCS（Redis）的配置，仅在 gateway.sandbox_routing.enabled=true 时生效。
-  # 使用 redis-py 连接华为云 DCS 等 Redis 兼容服务。
-  sandbox_dcs:
-    enabled: false
-    url: ${SANDBOX_DCS_REDIS_URL:-redis://127.0.0.1:6379/0}
-    key_prefix: claw:sandbox:
-    ttl_seconds: ${SANDBOX_DCS_TTL_SECONDS:-0}
-    socket_timeout_seconds: 5
-    socket_connect_timeout_seconds: 5
-
   # OpenAbility 微服务：Gateway 主动建立 WebSocket，转发与沙箱内 AgentServer 的 WS 事件。
-  # ip/port 从 DCS 同 sandbox_id 的 hash 中读取（字段名见 host_fields/port_fields，由沙箱侧写入）。
+  # ip/port 从 DCS 固定 key jiuwen:sandboxToOA:{sandbox_id} 读取，value 为 {ip}:{port}。
   open_ability:
     ws_path: /ws
     use_tls: false
     connect_timeout_seconds: 10
     readiness_poll_interval_seconds: 0.5
     readiness_timeout_seconds: 60
-    host_fields: [ip, host, openability_ip]
-    port_fields: [port, openability_port]
     api_key_query_param: api_key
     sandbox_id_query_param: sandbox_id
 
