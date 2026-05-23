@@ -8,7 +8,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any
 
-from jiuwenclaw.gateway.sandbox_client import SandboxClient, SandboxConfig
+from jiuwenclaw.sandbox.sandbox_client import SandboxClient, SandboxConfig
 from jiuwenclaw.sandbox.claw_api_key import get_claw_api_key
 from jiuwenclaw.sandbox.sandbox_routing_settings import SandboxRoutingSettings
 from jiuwenclaw.sandbox.sandbox_dcs_store import SandboxDcsStore

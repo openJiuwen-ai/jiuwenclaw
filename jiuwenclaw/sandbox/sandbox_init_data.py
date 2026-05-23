@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING
 from jiuwenclaw.utils import logger
 
 if TYPE_CHECKING:
-    from jiuwenclaw.gateway.sandbox_client import SandboxClient
+    from jiuwenclaw.sandbox.sandbox_client import SandboxClient
 
 SANDBOX_INIT_DATA_PATH_ENV = "SANDBOX_INIT_DATA_PATH"
 DEFAULT_SANDBOX_INIT_DATA_PATH = "/home/sandbox/init_data.json"

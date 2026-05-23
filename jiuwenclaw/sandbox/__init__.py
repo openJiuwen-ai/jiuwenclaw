@@ -1,4 +1,5 @@
 from jiuwenclaw.sandbox.claw_api_key import get_claw_api_key
+from jiuwenclaw.sandbox.sandbox_client import ExecutionResult, SandboxClient, SandboxConfig
 from jiuwenclaw.sandbox.sandbox_routing_settings import (
     SandboxRoutingSettings,
     sandbox_routing_enabled,
@@ -16,11 +17,14 @@ from jiuwenclaw.sandbox.sandbox_init_data import (
 
 __all__ = [
     "DEFAULT_SANDBOX_INIT_DATA_PATH",
+    "ExecutionResult",
     "OpenAbilityConfig",
     "OpenAbilityEndpoint",
     "SANDBOX_INIT_DATA_PATH_ENV",
     "SandboxDcsConfig",
     "SandboxDcsRecord",
+    "SandboxClient",
+    "SandboxConfig",
     "SandboxDcsStore",
     "SandboxRoutingSettings",
     "build_sandbox_init_data_payload",
