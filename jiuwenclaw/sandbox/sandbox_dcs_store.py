@@ -11,20 +11,39 @@ from jiuwenclaw.utils import logger
 
 _DCS_SOCKET_TIMEOUT_SECONDS = 5.0
 _DCS_TTL_SECONDS = 0
+_DCS_DEFAULT_PORT = 2881
+_DCS_DB = 0
+
+
+def _env_int(name: str, *, default: int) -> int:
+    raw = os.environ.get(name, "").strip()
+    if not raw:
+        return default
+    return int(raw)
 
 
 @dataclass(frozen=True)
 class SandboxDcsConfig:
-    url: str
+    host: str
+    port: int
+    username: str | None = None
+    password: str | None = None
 
     @classmethod
     def from_env(cls) -> SandboxDcsConfig:
-        url = os.environ.get("SANDBOX_DCS_URL", "").strip()
-        if not url:
+        host = os.environ.get("SANDBOX_DCS_HOST", "").strip()
+        if not host:
             raise RuntimeError(
-                "SANDBOX_DCS_URL environment variable is required when sandbox routing is enabled"
+                "SANDBOX_DCS_HOST environment variable is required when sandbox routing is enabled"
             )
-        return cls(url=url)
+        username = os.environ.get("SANDBOX_DCS_USERNAME", "").strip() or None
+        password = os.environ.get("SANDBOX_DCS_PASSWORD", "").strip() or None
+        return cls(
+            host=host,
+            port=_env_int("SANDBOX_DCS_PORT", default=_DCS_DEFAULT_PORT),
+            username=username,
+            password=password,
+        )
 
 
 @dataclass(frozen=True)
@@ -44,14 +63,22 @@ class SandboxDcsStore:
     def from_env(cls) -> SandboxDcsStore:
         return cls(SandboxDcsConfig.from_env())
 
+    def _create_redis_client(self) -> redis.Redis:
+        return redis.Redis(
+            host=self._config.host,
+            port=self._config.port,
+            db=_DCS_DB,
+            username=self._config.username,
+            password=self._config.password,
+            ssl=False,
+            decode_responses=True,
+            socket_timeout=_DCS_SOCKET_TIMEOUT_SECONDS,
+            socket_connect_timeout=_DCS_SOCKET_TIMEOUT_SECONDS,
+        )
+
     async def ensure_connected(self) -> redis.Redis:
         if self._client is None:
-            self._client = redis.from_url(
-                self._config.url,
-                decode_responses=True,
-                socket_timeout=_DCS_SOCKET_TIMEOUT_SECONDS,
-                socket_connect_timeout=_DCS_SOCKET_TIMEOUT_SECONDS,
-            )
+            self._client = self._create_redis_client()
         return self._client
 
     async def close(self) -> None:
