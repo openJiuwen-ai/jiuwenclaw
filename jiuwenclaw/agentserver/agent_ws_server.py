@@ -57,7 +57,7 @@ from jiuwenclaw.security.ws_origin import (
     get_header_value,
     is_allowed_browser_origin,
 )
-
+from jiuwenclaw.agentserver.open_ability_utils import oa_wait_connection_ack, get_oa_auth_headers
 
 logger = logging.getLogger(__name__)
 
@@ -96,28 +96,44 @@ class AgentWebSocketServer:
     - 例外：首帧 ``connection.ack`` 仍为 ``type/event`` 事件帧
 
     支持 send_push：推送帧亦为 E2AResponse 线格式（由 chunk 编码）。
+
+    【OA 模式】当配置 AS_OA_WEBSOCKET_URL 环境变量时，AgentServer 作为客户端主动连接 OpenAbility，
+    而非作为服务端监听端口。OpenAbility 负责转发 Gateway 和 AgentServer 之间的消息。
     """
 
     _instance: ClassVar[AgentWebSocketServer | None] = None
 
     def __init__(
-        self,
-        host: str = "127.0.0.1",
-        port: int = 18000,
-        *,
-        ping_interval: float | None = 30.0,
-        ping_timeout: float | None = 300.0,
+            self,
+            host: str = "127.0.0.1",
+            port: int = 18000,
+            *,
+            ping_interval: float | None = 30.0,
+            ping_timeout: float | None = 300.0,
     ) -> None:
         self._host = host
         self._port = port
         self._ping_interval = ping_interval
         self._ping_timeout = ping_timeout
         self._server: Any = None
-        # 当前 Gateway 连接，用于 send_push 主动推送
+        # 当前 Gateway/OpenAbility 连接，用于 send_push 主动推送
         self._current_ws: Any = None
         self._current_send_lock: asyncio.Lock | None = None
         self._acp_client_capabilities_by_ws: dict[int, dict[str, Any]] = {}
-        self._agent_manager = None # TenantAgentPool 实例
+        self._agent_manager = None  # TenantAgentPool 实例
+
+        # OA 模式相关
+        self._oa_ws_uri: str | None = os.getenv("AS_OA_WEBSOCKET_URL", "").strip() or None
+        self._oa_mode: bool = self._oa_ws_uri is not None
+        self._oa_connect_retry_interval: float = float(os.getenv("OA_RETRY_INTERVAL", "3.0"))  # 默认3秒快速重连
+        self._oa_connect_max_retries: int = int(os.getenv("OA_MAX_RETRIES", "0"))  # 0 表示无限重试
+        self._oa_receiver_task: asyncio.Task | None = None
+        self._oa_running: bool = False
+        self._oa_heartbeat_interval: float = float(os.getenv("OA_HEARTBEAT_INTERVAL", "30.0"))  # 应用层心跳间隔
+        self._oa_heartbeat_task: asyncio.Task | None = None
+        self._oa_message_task: asyncio.Task | None = None  # 消息接收任务
+        self._oa_connection_active: asyncio.Event = asyncio.Event()  # 连接状态事件
+
         get_acp_output_manager().set_send_push_callback(
             lambda msg: asyncio.create_task(self.send_push(msg))
         )
@@ -143,12 +159,12 @@ class AgentWebSocketServer:
 
     @classmethod
     def get_instance(
-        cls,
-        *,
-        host: str = "127.0.0.1",
-        port: int = 18000,
-        ping_interval: float | None = 30.0,
-        ping_timeout: float | None = 300.0,
+            cls,
+            *,
+            host: str = "127.0.0.1",
+            port: int = 18000,
+            ping_interval: float | None = 30.0,
+            ping_timeout: float | None = 300.0,
     ) -> "AgentWebSocketServer":
         """返回多例实例。
 
@@ -177,24 +193,80 @@ class AgentWebSocketServer:
     def port(self) -> int:
         return self._port
 
+    def _wrap_oa_message(self, payload: dict[str, Any], msg_type: str = "MESSAGE") -> dict[str, Any]:
+        """OA 模式：将业务消息包装为 OA 格式。
+
+        OA 消息格式: {"msgType": "", "msgDetail": <业务消息>}
+
+        Args:
+            payload: 业务消息内容
+            msg_type: 消息类型，默认为 "response"
+
+        Returns:
+            OA 格式的消息字典
+        """
+        from jiuwenclaw.agentserver.utils import get_sandbox_id
+        if not self._oa_mode:
+            return payload
+        return {
+            "msgType": msg_type,
+            "msgDetail": payload,
+            "sandboxId": get_sandbox_id(),
+        }
+
+    async def _send_message(
+            self,
+            ws: Any,
+            payload: dict[str, Any],
+            send_lock: asyncio.Lock,
+            msg_type: str = "MESSAGE",
+    ) -> None:
+        """OA 模式：发送消息，自动处理格式转换。
+
+        Args:
+            ws: WebSocket 连接
+            payload: 业务消息内容
+            send_lock: 发送锁
+            msg_type: 消息类型
+        """
+        message = self._wrap_oa_message(payload, msg_type)
+        async with send_lock:
+            await ws.send(json.dumps(message, ensure_ascii=False))
+
     # ---------- 生命周期 ----------
 
     async def start(self) -> None:
-        """启动 WebSocket 服务端，开始监听连接。优先使用 legacy.server.serve 以与 Gateway 的 legacy client 握手兼容."""
+        """启动 WebSocket 服务端或连接到 OpenAbility。
+
+        如果配置了 AS_OA_WEBSOCKET_URL 环境变量，则作为客户端主动连接 OpenAbility；
+        否则作为服务端监听端口，等待 Gateway 连接。
+        """
         await self._trigger_before_ws_server_start_hook()
         # 初始化 TenantAgentPool
         if self._agent_manager is None:
             self._agent_manager = TenantAgentPool.get_instance()
             logger.info("[AgentWebSocketServer] 已初始化 TenantAgentPool")
 
-        if self._server is not None:
-            logger.warning("[AgentWebSocketServer] 服务端已在运行")
-            return
-
         # 启动文件传输管理器的清理任务
         ft_manager = get_file_transfer_manager()
         if ft_manager.enabled:
             await ft_manager.start_cleanup_task()
+
+        if self._oa_mode:
+            # OA 模式：作为客户端主动连接 OpenAbility
+            logger.info("[AgentWebSocketServer] OA 模式启用，将主动连接 OpenAbility: %s", self._oa_ws_uri)
+            self._oa_running = True
+            self._oa_receiver_task = asyncio.create_task(self._oa_connection_loop())
+            logger.info("[AgentWebSocketServer] OA 连接任务已启动")
+        else:
+            # 传统模式：作为服务端监听端口
+            await self._start_server_mode()
+
+    async def _start_server_mode(self) -> None:
+        """传统模式：启动 WebSocket 服务端监听连接。"""
+        if self._server is not None:
+            logger.warning("[AgentWebSocketServer] 服务端已在运行")
+            return
 
         try:
             from websockets.legacy.server import serve as legacy_serve
@@ -220,11 +292,255 @@ class AgentWebSocketServer:
             "[AgentWebSocketServer] 已启动: ws://%s:%s", self._host, self._port
         )
 
+    async def _oa_heartbeat_loop(self, ws: Any, send_lock: asyncio.Lock) -> None:
+        """OA 模式：应用层心跳，每隔 30 秒发送一次心跳消息。
+
+        同时监听连接状态，快速感知断开。
+        """
+        missed_heartbeats = 0
+        max_missed_heartbeats = 3  # 允许最多3次发送失败
+
+        try:
+            while self._oa_running and self._current_ws is ws:
+                await asyncio.sleep(self._oa_heartbeat_interval)
+
+                if not self._oa_running or self._current_ws is not ws:
+                    break
+
+                try:
+                    heartbeat_msg = {
+                        "msgType": "HEARTBEAT",
+                        "msgDetail": {},
+                    }
+                    async with send_lock:
+                        await asyncio.wait_for(
+                            ws.send(json.dumps(heartbeat_msg, ensure_ascii=False)),
+                            timeout=5.0  # 发送超时5秒
+                        )
+                    logger.debug("[AgentWebSocketServer] -> OpenAbility 发送心跳消息")
+                    missed_heartbeats = 0  # 重置失败计数
+                except websockets.exceptions.ConnectionClosed:
+                    logger.debug("[AgentWebSocketServer] -> OpenAbility 心跳发送失败，连接已关闭")
+                    break
+                except Exception as e:
+                    missed_heartbeats += 1
+                    logger.warning(
+                        "[AgentWebSocketServer] -> OpenAbility 发送心跳消息失败 (%d/%d): %s",
+                        missed_heartbeats, max_missed_heartbeats, e
+                    )
+                    if missed_heartbeats >= max_missed_heartbeats:
+                        logger.error(
+                            "[AgentWebSocketServer] -> OpenAbility 心跳连续失败%d次，判定连接断开",
+                            max_missed_heartbeats
+                        )
+                        try:
+                            await ws.close()
+                        except Exception:
+                            pass
+                        break
+        except asyncio.CancelledError:
+            logger.debug("[AgentWebSocketServer] -> OpenAbility 心跳任务被取消")
+            raise
+        except Exception as e:
+            logger.exception("[AgentWebSocketServer] -> OpenAbility 心跳循环异常: %s", e)
+
+    async def _oa_receive_loop(self, ws: Any, send_lock: asyncio.Lock) -> None:
+        """OA 模式：消息接收循环，与心跳并行运行。"""
+        try:
+            async for raw in ws:
+                try:
+                    await self._handle_message(ws, raw, send_lock)
+                except Exception as e:
+                    logger.exception("[AgentWebSocketServer] 处理 OA 消息异常: %s", e)
+        except websockets.exceptions.ConnectionClosed as e:
+            logger.warning("[AgentWebSocketServer] OA 消息接收循环检测到连接关闭: %s", e)
+            raise  # 重新抛出以便上层处理
+        except asyncio.CancelledError:
+            logger.debug("[AgentWebSocketServer] OA 消息接收任务被取消")
+            raise
+        except Exception as e:
+            logger.exception("[AgentWebSocketServer] OA 消息接收循环异常: %s", e)
+            raise
+
+    async def _oa_run_connection(self, ws: Any) -> None:
+        """运行单个 OA 连接，并行执行心跳和消息接收。"""
+        send_lock = asyncio.Lock()
+        self._current_ws = ws
+        self._current_send_lock = send_lock
+        self._oa_connection_active.set()  # 标记连接激活
+
+        # 启动心跳和消息接收任务
+        heartbeat_task = asyncio.create_task(
+            self._oa_heartbeat_loop(ws, send_lock),
+            name="oa-heartbeat"
+        )
+        receive_task = asyncio.create_task(
+            self._oa_receive_loop(ws, send_lock),
+            name="oa-receive"
+        )
+
+        try:
+            # 等待任一任务完成（通常是接收任务因连接断开而结束）
+            done, pending = await asyncio.wait(
+                [heartbeat_task, receive_task],
+                return_when=asyncio.FIRST_COMPLETED
+            )
+
+            # 取消剩余任务
+            for task in pending:
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
+
+            # 检查是否有异常
+            for task in done:
+                exc = task.exception()
+                if exc and not isinstance(exc, (asyncio.CancelledError, websockets.exceptions.ConnectionClosed)):
+                    logger.error("[AgentWebSocketServer] OA 连接任务异常: %s", exc)
+                    raise exc
+
+        finally:
+            self._oa_connection_active.clear()  # 标记连接断开
+            self._current_ws = None
+            self._current_send_lock = None
+    async def _oa_connection_loop(self) -> None:
+        """OA 模式：维护与 OpenAbility 的长连接，自动重连。
+
+        设计原则：
+        1. 快速重连：默认3秒间隔，尽快恢复服务
+        2. 保障模型服务：连接断开不立即停止模型推理，只影响消息收发
+        3. 状态恢复：重连后恢复消息处理能力
+        """
+        import websockets
+        from websockets.legacy.client import connect as legacy_connect
+
+        retry_count = 0
+        first_connect = True
+
+        while self._oa_running:
+            ws = None
+            try:
+                logger.info(
+                    "[AgentWebSocketServer] 正在连接 OpenAbility: %s (重试次数: %d)",
+                    self._oa_ws_uri, retry_count
+                )
+                # 获取鉴权 headers
+                auth_headers = get_oa_auth_headers()
+                if auth_headers:
+                    logger.info("[AgentWebSocketServer] 连接 OpenAbility 使用鉴权 headers")
+                else:
+                    logger.warning(
+                        "[AgentWebSocketServer] 未配置鉴权 headers，需要配置 x-api-key 和 x-sandbox-id"
+                    )
+
+                # 建立 WebSocket 连接
+                try:
+                    connect_fn = legacy_connect
+                except ImportError:
+                    connect_fn = websockets.connect
+
+                # 使用较短的连接超时，快速失败
+                ws = await asyncio.wait_for(
+                    connect_fn(
+                        self._oa_ws_uri,
+                        ping_interval=self._ping_interval,
+                        ping_timeout=self._ping_timeout,
+                        additional_headers=auth_headers,
+                    ),
+                    timeout=10.0
+                )
+
+                logger.info("[AgentWebSocketServer] WebSocket 连接已建立，等待 OpenAbility 建连确认...")
+
+                # 等待 OA 返回第一条建连成功消息
+                if not await oa_wait_connection_ack(ws, timeout=10.0):
+                    await ws.close()
+                    raise RuntimeError("OpenAbility 建连确认失败")
+
+                logger.info("[AgentWebSocketServer] OpenAbility 连接已确认，开始业务处理")
+                retry_count = 0  # 重置重试计数
+
+                # 首次连接时触发启动钩子
+                if first_connect:
+                    await self._trigger_agent_server_started_hook()
+                    # 发送 INIT 消息，携带 apiKey 和 sandboxId
+                    try:
+                        auth_headers = get_oa_auth_headers()
+                        init_msg = {
+                            "msgType": "INIT",
+                            "apiKey": auth_headers.get("x-api-key"),
+                            "sandboxId": auth_headers.get("x-sandbox-id"),
+                            "msgDetail": {}
+                        }
+                        await ws.send(json.dumps(init_msg, ensure_ascii=False))
+                        logger.info("[AgentWebSocketServer] 已发送 INIT 消息到 OpenAbility")
+                    except Exception as e:
+                        logger.warning("[AgentWebSocketServer] 发送 INIT 消息失败: %s", e)
+
+                    first_connect = False
+                else:
+                    # 重连成功后记录恢复日志
+                    logger.info("[AgentWebSocketServer] OpenAbility 连接已恢复，模型服务继续运行")
+
+                # 运行连接（心跳 + 消息接收）
+                await self._oa_run_connection(ws)
+
+            except websockets.exceptions.ConnectionClosed as e:
+                logger.warning("[AgentWebSocketServer] OA 连接关闭: code=%s, reason=%s", e.code, e.reason)
+            except asyncio.TimeoutError:
+                logger.error("[AgentWebSocketServer] OA 连接超时")
+            except Exception as e:
+                logger.exception("[AgentWebSocketServer] OA 连接异常: %s", e)
+            finally:
+                # 关闭 WebSocket 连接
+                if ws is not None:
+                    try:
+                        await ws.close()
+                    except Exception:
+                        pass
+
+            # 检查是否需要重连
+            if not self._oa_running:
+                break
+
+            retry_count += 1
+            if 0 < self._oa_connect_max_retries < retry_count:
+                logger.error("[AgentWebSocketServer] OpenAbility 连接重试次数超过上限，放弃")
+                break
+
+            # 指数退避：前3次快速重连(3秒)，之后逐渐增加，最大60秒
+            if retry_count <= 3:
+                delay = self._oa_connect_retry_interval
+            else:
+                delay = min(self._oa_connect_retry_interval * (2 ** (retry_count - 3)), 60.0)
+
+            logger.info("[AgentWebSocketServer] %.1f秒后尝试重连 OpenAbility...", delay)
+            await asyncio.sleep(delay)
+
+        # 循环结束，统一清理资源
+        logger.info("[AgentWebSocketServer] OpenAbility 连接循环已停止，清理资源...")
+        self._oa_connection_active.clear()
+        try:
+            await self._agent_manager.cancel_all_inflight_work(
+                reason="OpenAbility 连接循环已停止",
+            )
+        except Exception as e:
+            logger.exception("[AgentWebSocketServer] 清理 TenantAgentPool 任务失败: %s", e)
+        try:
+            from jiuwenclaw.agentserver.team import get_team_manager
+            await get_team_manager().cancel_all_stream_tasks(
+                reason="OpenAbility 连接循环已停止",
+            )
+        except Exception as e:
+            logger.exception("[AgentWebSocketServer] 清理 Team stream 任务失败: %s", e)
+
     async def _process_request(self, *args: Any) -> Any:
         """在握手阶段执行 Origin 校验，兼容 legacy/new websockets APIs。"""
         path, request_headers = extract_handshake_request(args)
         origin = get_header_value(request_headers, "Origin")
-        
+
         # 如果配置了 AGENT_RUNTIME，则允许所有连接（非浏览器场景）
         AGENT_RUNTIME = os.getenv("AGENT_RUNTIME", "").strip()
         if AGENT_RUNTIME:
@@ -235,7 +551,7 @@ class AgentWebSocketServer:
                 AGENT_RUNTIME,
             )
             return None
-        
+
         allowed = is_allowed_browser_origin(origin)
         logger.info(
             "[AgentWebSocketServer] 握手检查 path=%s origin=%s allowed=%s",
@@ -254,18 +570,61 @@ class AgentWebSocketServer:
         return forbidden_origin_response(args)
 
     async def stop(self) -> None:
-        """停止 WebSocket 服务端."""
+        """停止 WebSocket 服务端或 OA 客户端连接。"""
         # 停止文件传输管理器的清理任务
         ft_manager = get_file_transfer_manager()
         if ft_manager.enabled:
             await ft_manager.stop_cleanup_task()
 
-        if self._server is None:
-            return
-        self._server.close()
-        await self._server.wait_closed()
-        self._server = None
-        logger.info("[AgentWebSocketServer] 已停止")
+        if self._oa_mode:
+            # OA 模式：停止连接循环
+            self._oa_running = False
+            self._oa_connection_active.clear()  # 标记连接断开
+
+            # 关闭当前连接（这会导致消息接收任务结束）
+            if self._current_ws is not None:
+                try:
+                    await self._current_ws.close()
+                except Exception as e:
+                    logger.warning("[AgentWebSocketServer] 关闭 OA 连接时异常: %s", e)
+                finally:
+                    self._current_ws = None
+                    self._current_send_lock = None
+
+            # 停止连接循环任务
+            if self._oa_receiver_task and not self._oa_receiver_task.done():
+                self._oa_receiver_task.cancel()
+                try:
+                    await self._oa_receiver_task
+                except asyncio.CancelledError:
+                    pass
+                self._oa_receiver_task = None
+
+            # 注意：重连时不取消进行中的模型推理任务
+            # 只有 stop() 被调用时（服务关闭）才清理
+            try:
+                await self._agent_manager.cancel_all_inflight_work(
+                    reason="[AgentServer 停止] ",
+                )
+            except Exception:
+                pass
+            try:
+                from jiuwenclaw.agentserver.team import get_team_manager
+                await get_team_manager().cancel_all_stream_tasks(
+                    reason="[AgentServer 停止] ",
+                )
+            except Exception:
+                pass
+
+            logger.info("[AgentWebSocketServer] OA 模式已停止")
+        else:
+            # 传统模式：停止服务端
+            if self._server is None:
+                return
+            self._server.close()
+            await self._server.wait_closed()
+            self._server = None
+            logger.info("[AgentWebSocketServer] 已停止")
 
     # ---------- 连接处理 ----------
 
@@ -332,21 +691,34 @@ class AgentWebSocketServer:
                 await asyncio.gather(*tasks, return_exceptions=True)
 
     async def _handle_message(self, ws: Any, raw: str | bytes, send_lock: asyncio.Lock) -> None:
-        """解析一条 JSON 请求并分发到 IAgentServer 处理."""
+        """解析一条 JSON 请求并分发到 IAgentServer 处理.
+
+        支持两种消息格式：
+        1. 传统格式（E2A信封）：直接解析为业务消息
+        2. OA 格式：{"msgType": "", "msgDetail": <业务消息>}，提取 msgDetail 后解析
+        """
         try:
             data = json.loads(raw)
             logger.info(
                 "[AgentWebSocketServer] inbound raw payload: %s",
                 data,
             )
+
+            # OA 模式下消息格式转换
+            if self._oa_mode:
+                msg_detail = data.get("msgDetail")
+                if isinstance(msg_detail, dict):
+                    data = msg_detail
+                elif isinstance(msg_detail, str):
+                    parsed = json.loads(msg_detail)
+                    data = parsed
         except json.JSONDecodeError as e:
             wire = encode_json_parse_error_wire(
                 request_id="",
                 channel_id="",
                 message=f"JSON 解析失败: {e}",
             )
-            async with send_lock:
-                await ws.send(json.dumps(wire, ensure_ascii=False))
+            await self._send_message(ws, wire, send_lock)
             return
 
         try:
@@ -511,8 +883,7 @@ class AgentWebSocketServer:
             wire = encode_agent_response_for_wire(
                 error_resp, response_id=request.request_id
             )
-            async with send_lock:
-                await ws.send(json.dumps(wire, ensure_ascii=False))
+            await self._send_message(ws, wire, send_lock)
 
     @staticmethod
     async def _trigger_before_ws_server_start_hook() -> None:
@@ -523,7 +894,6 @@ class AgentWebSocketServer:
         ctx = AgentWsServerStartHookContext(skills_dir=str(get_agent_skills_dir()))
         await ExtensionRegistry.get_instance().trigger(AgentServerHookEvents.BEFORE_WS_SERVER_START, ctx)
 
-
     @staticmethod
     async def _trigger_agent_server_started_hook() -> None:
         """在agentserver启动成功触发扩展；未初始化 ExtensionRegistry 时跳过。"""
@@ -532,7 +902,6 @@ class AgentWebSocketServer:
 
         ctx = AgentWsServerStartHookContext(skills_dir=str(get_agent_skills_dir()))
         await ExtensionRegistry.get_instance().trigger(AgentServerHookEvents.AGENT_SERVER_STARTED, ctx)
-
 
     @staticmethod
     def _should_trigger_before_chat_request_hook(request: AgentRequest) -> bool:
@@ -588,8 +957,7 @@ class AgentWebSocketServer:
         resp = await self._agent_manager.process_message(request)
 
         wire = encode_agent_response_for_wire(resp, response_id=request.request_id)
-        async with send_lock:
-            await ws.send(json.dumps(wire, ensure_ascii=False))
+        await self._send_message(ws, wire, send_lock)
         logger.info(
             format_session_log(
                 request.session_id,
@@ -655,8 +1023,7 @@ class AgentWebSocketServer:
                     response_id=request.request_id,
                     sequence=chunk_count - 1,
                 )
-                async with send_lock:
-                    await ws.send(json.dumps(wire, ensure_ascii=False))
+                await self._send_message(ws, wire, send_lock)
                 # 清除 event，让心跳任务重新开始计时
                 heartbeat_event.clear()
         finally:
@@ -714,7 +1081,7 @@ class AgentWebSocketServer:
         )
         wire = encode_agent_response_for_wire(resp, response_id=request.request_id)
         async with send_lock:
-            await ws.send(json.dumps(wire, ensure_ascii=False))
+            await self._send_message(ws, wire, send_lock)
 
     async def _handle_session_rename(self, ws: Any, request: AgentRequest, send_lock: asyncio.Lock) -> None:
         """处理 session.rename：与 CLI Gateway 本地回退共用 apply_session_rename。"""
@@ -745,7 +1112,7 @@ class AgentWebSocketServer:
             )
         wire = encode_agent_response_for_wire(resp, response_id=request.request_id)
         async with send_lock:
-            await ws.send(json.dumps(wire, ensure_ascii=False))
+            await self._send_message(ws, wire, send_lock)
 
     async def _handle_permissions_config(self, ws: Any, request: AgentRequest, send_lock: asyncio.Lock) -> None:
         """处理 permissions.* E2A 请求（与 Web ``register_method`` 同名 method）。"""
@@ -754,7 +1121,7 @@ class AgentWebSocketServer:
         resp = dispatch_permissions_config_request(request)
         wire = encode_agent_response_for_wire(resp, response_id=request.request_id)
         async with send_lock:
-            await ws.send(json.dumps(wire, ensure_ascii=False))
+            await self._send_message(ws, wire, send_lock)
 
     async def _handle_history_get(self, ws: Any, request: AgentRequest, send_lock: asyncio.Lock) -> None:
         params = request.params if isinstance(request.params, dict) else {}
@@ -777,7 +1144,7 @@ class AgentWebSocketServer:
             )
         wire = encode_agent_response_for_wire(resp, response_id=request.request_id)
         async with send_lock:
-            await ws.send(json.dumps(wire, ensure_ascii=False))
+            await self._send_message(ws, wire, send_lock)
 
     async def _handle_history_get_stream(self, ws: Any, request: AgentRequest, send_lock: asyncio.Lock) -> None:
         params = request.params if isinstance(request.params, dict) else {}
@@ -800,7 +1167,7 @@ class AgentWebSocketServer:
                 sequence=0,
             )
             async with send_lock:
-                await ws.send(json.dumps(wire, ensure_ascii=False))
+                await self._send_message(ws, wire, send_lock)
             return
 
         messages = data.get("messages", [])
@@ -825,7 +1192,7 @@ class AgentWebSocketServer:
                     sequence=seq,
                 )
                 async with send_lock:
-                    await ws.send(json.dumps(wire, ensure_ascii=False))
+                    await self._send_message(ws, wire, send_lock)
 
         done_chunk = AgentResponseChunk(
             request_id=request.request_id,
@@ -854,7 +1221,7 @@ class AgentWebSocketServer:
             remember = params.get("remember", False)
             persist: dict[str, Any]
             if directory_path is None or (
-                isinstance(directory_path, str) and not directory_path.strip()
+                    isinstance(directory_path, str) and not directory_path.strip()
             ):
                 persist = {"ok": False, "error": "path is required"}
             else:
@@ -879,7 +1246,7 @@ class AgentWebSocketServer:
             )
         wire = encode_agent_response_for_wire(resp, response_id=request.request_id)
         async with send_lock:
-            await ws.send(json.dumps(wire, ensure_ascii=False))
+            await self._send_message(ws, wire, send_lock)
 
     async def _handle_command_chrome(self, ws: Any, request: AgentRequest, send_lock: asyncio.Lock) -> None:
         try:
@@ -899,7 +1266,7 @@ class AgentWebSocketServer:
             )
         wire = encode_agent_response_for_wire(resp, response_id=request.request_id)
         async with send_lock:
-            await ws.send(json.dumps(wire, ensure_ascii=False))
+            await self._send_message(ws, wire, send_lock)
 
     async def _handle_command_ls(self, ws: Any, request: AgentRequest, send_lock: asyncio.Lock) -> None:
         from datetime import datetime
@@ -927,7 +1294,7 @@ class AgentWebSocketServer:
                 )
                 wire = encode_agent_response_for_wire(resp, response_id=request.request_id)
                 async with send_lock:
-                    await ws.send(json.dumps(wire, ensure_ascii=False))
+                    await self._send_message(ws, wire, send_lock)
                 return
 
             entries = []
@@ -968,7 +1335,7 @@ class AgentWebSocketServer:
             )
         wire = encode_agent_response_for_wire(resp, response_id=request.request_id)
         async with send_lock:
-            await ws.send(json.dumps(wire, ensure_ascii=False))
+            await self._send_message(ws, wire, send_lock)
 
     async def _handle_command_view(self, ws: Any, request: AgentRequest, send_lock: asyncio.Lock) -> None:
         from jiuwenclaw.agentserver.session_metadata import get_resolved_project_dir
@@ -989,7 +1356,7 @@ class AgentWebSocketServer:
                 )
                 wire = encode_agent_response_for_wire(resp, response_id=request.request_id)
                 async with send_lock:
-                    await ws.send(json.dumps(wire, ensure_ascii=False))
+                    await self._send_message(ws, wire, send_lock)
                 return
 
             session_id = request.session_id or "default"
@@ -1007,7 +1374,7 @@ class AgentWebSocketServer:
                 )
                 wire = encode_agent_response_for_wire(resp, response_id=request.request_id)
                 async with send_lock:
-                    await ws.send(json.dumps(wire, ensure_ascii=False))
+                    await self._send_message(ws, wire, send_lock)
                 return
 
             if not target_path.is_file():
@@ -1019,7 +1386,7 @@ class AgentWebSocketServer:
                 )
                 wire = encode_agent_response_for_wire(resp, response_id=request.request_id)
                 async with send_lock:
-                    await ws.send(json.dumps(wire, ensure_ascii=False))
+                    await self._send_message(ws, wire, send_lock)
                 return
 
             try:
@@ -1034,7 +1401,7 @@ class AgentWebSocketServer:
                 )
                 wire = encode_agent_response_for_wire(resp, response_id=request.request_id)
                 async with send_lock:
-                    await ws.send(json.dumps(wire, ensure_ascii=False))
+                    await self._send_message(ws, wire, send_lock)
                 return
 
             start_idx = max(0, from_line - 1)
@@ -1055,7 +1422,7 @@ class AgentWebSocketServer:
                 f"📊 总行数: {len(all_lines)}, 显示: {len(selected_lines)} 行 "
                 f"(第 {start_idx + 1}-{end_idx} 行)"
             )
-            
+
             content = f"```\n{numbered_content}\n```{summary}"
             resp = AgentResponse(
                 request_id=request.request_id,
@@ -1079,7 +1446,7 @@ class AgentWebSocketServer:
             )
         wire = encode_agent_response_for_wire(resp, response_id=request.request_id)
         async with send_lock:
-            await ws.send(json.dumps(wire, ensure_ascii=False))
+            await self._send_message(ws, wire, send_lock)
 
     async def _handle_command_compact(self, ws: Any, request: AgentRequest, send_lock: asyncio.Lock) -> None:
         try:
@@ -1101,7 +1468,7 @@ class AgentWebSocketServer:
             )
         wire = encode_agent_response_for_wire(resp, response_id=request.request_id)
         async with send_lock:
-            await ws.send(json.dumps(wire, ensure_ascii=False))
+            await self._send_message(ws, wire, send_lock)
 
     async def _handle_command_diff(self, ws: Any, request: AgentRequest, send_lock: asyncio.Lock) -> None:
         from jiuwenclaw.agentserver.diff_service import get_diff_service
@@ -1137,7 +1504,7 @@ class AgentWebSocketServer:
             )
         wire = encode_agent_response_for_wire(resp, response_id=request.request_id)
         async with send_lock:
-            await ws.send(json.dumps(wire, ensure_ascii=False))
+            await self._send_message(ws, wire, send_lock)
 
     async def _handle_command_model(self, ws: Any, request: AgentRequest, send_lock: asyncio.Lock) -> None:
         try:
@@ -1219,7 +1586,7 @@ class AgentWebSocketServer:
             )
         wire = encode_agent_response_for_wire(resp, response_id=request.request_id)
         async with send_lock:
-            await ws.send(json.dumps(wire, ensure_ascii=False))
+            await self._send_message(ws, wire, send_lock)
 
     async def _handle_command_resume(self, ws: Any, request: AgentRequest, send_lock: asyncio.Lock) -> None:
         try:
@@ -1247,7 +1614,7 @@ class AgentWebSocketServer:
             )
         wire = encode_agent_response_for_wire(resp, response_id=request.request_id)
         async with send_lock:
-            await ws.send(json.dumps(wire, ensure_ascii=False))
+            await self._send_message(ws, wire, send_lock)
 
     async def _handle_command_session(self, ws: Any, request: AgentRequest, send_lock: asyncio.Lock) -> None:
         try:
@@ -1272,7 +1639,7 @@ class AgentWebSocketServer:
             )
         wire = encode_agent_response_for_wire(resp, response_id=request.request_id)
         async with send_lock:
-            await ws.send(json.dumps(wire, ensure_ascii=False))
+            await self._send_message(ws, wire, send_lock)
 
     async def _handle_browser_start(self, ws: Any, request: AgentRequest, send_lock: asyncio.Lock) -> None:
         """启动浏览器并返回执行结果（returncode）。"""
@@ -1298,7 +1665,7 @@ class AgentWebSocketServer:
 
         wire = encode_agent_response_for_wire(resp, response_id=request.request_id)
         async with send_lock:
-            await ws.send(json.dumps(wire, ensure_ascii=False))
+            await self._send_message(ws, wire, send_lock)
 
     async def _handle_browser_runtime_restart(self, ws: Any, request: AgentRequest, send_lock: asyncio.Lock) -> None:
         try:
@@ -1322,7 +1689,7 @@ class AgentWebSocketServer:
 
         wire = encode_agent_response_for_wire(resp, response_id=request.request_id)
         async with send_lock:
-            await ws.send(json.dumps(wire, ensure_ascii=False))
+            await self._send_message(ws, wire, send_lock)
 
     async def _handle_config_cache_clear(self, ws: Any, request: AgentRequest, send_lock: asyncio.Lock) -> None:
         try:
@@ -1346,7 +1713,7 @@ class AgentWebSocketServer:
 
         wire = encode_agent_response_for_wire(resp, response_id=request.request_id)
         async with send_lock:
-            await ws.send(json.dumps(wire, ensure_ascii=False))
+            await self._send_message(ws, wire, send_lock)
 
     async def _handle_agent_reload_config(self, ws: Any, request: AgentRequest, send_lock: asyncio.Lock) -> None:
         try:
@@ -1375,7 +1742,7 @@ class AgentWebSocketServer:
 
         wire = encode_agent_response_for_wire(resp, response_id=request.request_id)
         async with send_lock:
-            await ws.send(json.dumps(wire, ensure_ascii=False))
+            await self._send_message(ws, wire, send_lock)
 
     async def _handle_extensions_list(self, ws: Any, request: AgentRequest, send_lock: asyncio.Lock) -> None:
         """获取所有 Rail 扩展列表."""
@@ -1400,7 +1767,7 @@ class AgentWebSocketServer:
 
         wire = encode_agent_response_for_wire(resp, response_id=request.request_id)
         async with send_lock:
-            await ws.send(json.dumps(wire, ensure_ascii=False))
+            await self._send_message(ws, wire, send_lock)
 
     async def _handle_extensions_import(self, ws: Any, request: AgentRequest, send_lock: asyncio.Lock) -> None:
         """导入新的 Rail 扩展（文件夹结构）."""
@@ -1435,7 +1802,7 @@ class AgentWebSocketServer:
 
         wire = encode_agent_response_for_wire(resp, response_id=request.request_id)
         async with send_lock:
-            await ws.send(json.dumps(wire, ensure_ascii=False))
+            await self._send_message(ws, wire, send_lock)
 
     async def _handle_extensions_delete(self, ws: Any, request: AgentRequest, send_lock: asyncio.Lock) -> None:
         """删除 Rail 扩展."""
@@ -1466,7 +1833,7 @@ class AgentWebSocketServer:
 
         wire = encode_agent_response_for_wire(resp, response_id=request.request_id)
         async with send_lock:
-            await ws.send(json.dumps(wire, ensure_ascii=False))
+            await self._send_message(ws, wire, send_lock)
 
     async def _handle_extensions_toggle(self, ws: Any, request: AgentRequest, send_lock: asyncio.Lock) -> None:
         """切换 Rail 扩展的启用状态，并触发热更新."""
@@ -1555,7 +1922,7 @@ class AgentWebSocketServer:
     # =========================================================================
 
     async def _handle_file_transfer(
-        self, ws: Any, request: AgentRequest, send_lock: asyncio.Lock
+            self, ws: Any, request: AgentRequest, send_lock: asyncio.Lock
     ) -> None:
         """处理文件传输请求（Gateway -> AgentServer）.
 
@@ -1583,7 +1950,7 @@ class AgentWebSocketServer:
             )
             wire = encode_agent_response_for_wire(resp, response_id=request.request_id)
             async with send_lock:
-                await ws.send(json.dumps(wire, ensure_ascii=False))
+                await self._send_message(ws, wire, send_lock)
             return
 
         try:
@@ -1644,8 +2011,8 @@ class AgentWebSocketServer:
 
         wire = encode_agent_response_for_wire(resp, response_id=request.request_id)
         async with send_lock:
-            await ws.send(json.dumps(wire, ensure_ascii=False))
-            
+            await self._send_message(ws, wire, send_lock)
+
     @staticmethod
     def get_conversation_history(session_id: str, page_idx: int) -> dict[str, Any] | None:
         # 按照 session_id 和分页消息获取历史记录
@@ -1684,7 +2051,7 @@ class AgentWebSocketServer:
         }
 
     async def _handle_initialize(
-        self, ws: Any, request: AgentRequest, send_lock: asyncio.Lock
+            self, ws: Any, request: AgentRequest, send_lock: asyncio.Lock
     ) -> None:
         """处理 initialize 方法（非流式）.
 
@@ -1728,7 +2095,7 @@ class AgentWebSocketServer:
             )
             wire = encode_agent_response_for_wire(resp, response_id=request.request_id)
             async with send_lock:
-                await ws.send(json.dumps(wire, ensure_ascii=False))
+                await self._send_message(ws, wire, send_lock)
 
             logger.info("[AgentServer] initialize completed: capabilities=%s", capabilities)
 
@@ -1742,10 +2109,10 @@ class AgentWebSocketServer:
             )
             wire = encode_agent_response_for_wire(resp, response_id=request.request_id)
             async with send_lock:
-                await ws.send(json.dumps(wire, ensure_ascii=False))
+                await self._send_message(ws, wire, send_lock)
 
     async def _handle_session_create(
-        self, ws: Any, request: AgentRequest, send_lock: asyncio.Lock
+            self, ws: Any, request: AgentRequest, send_lock: asyncio.Lock
     ) -> None:
         """处理 session.create 方法.
 
@@ -1775,7 +2142,7 @@ class AgentWebSocketServer:
             )
             wire = encode_agent_response_for_wire(resp, response_id=request.request_id)
             async with send_lock:
-                await ws.send(json.dumps(wire, ensure_ascii=False))
+                await self._send_message(ws, wire, send_lock)
 
             logger.info(format_session_log(session_id, "[AgentServer] session.create completed"))
 
@@ -1794,10 +2161,10 @@ class AgentWebSocketServer:
             )
             wire = encode_agent_response_for_wire(resp, response_id=request.request_id)
             async with send_lock:
-                await ws.send(json.dumps(wire, ensure_ascii=False))
+                await self._send_message(ws, wire, send_lock)
 
     async def _handle_session_delete(
-        self, ws: Any, request: AgentRequest, send_lock: asyncio.Lock
+            self, ws: Any, request: AgentRequest, send_lock: asyncio.Lock
     ) -> None:
         """处理 session.delete 请求：删除 Agent 本机 sessions 目录下的会话目录。"""
         import shutil
@@ -1882,13 +2249,13 @@ class AgentWebSocketServer:
 
         wire = encode_agent_response_for_wire(resp, response_id=request.request_id)
         async with send_lock:
-            await ws.send(json.dumps(wire, ensure_ascii=False))
+            await self._send_message(ws, wire, send_lock)
 
     async def _handle_acp_tool_response(
-        self,
-        ws: Any,
-        request: AgentRequest,
-        send_lock: asyncio.Lock,
+            self,
+            ws: Any,
+            request: AgentRequest,
+            send_lock: asyncio.Lock,
     ) -> None:
         params = request.params if isinstance(request.params, dict) else {}
         jsonrpc_id = params.get("jsonrpc_id")
@@ -1923,13 +2290,13 @@ class AgentWebSocketServer:
 
         wire = encode_agent_response_for_wire(resp, response_id=request.request_id)
         async with send_lock:
-            await ws.send(json.dumps(wire, ensure_ascii=False))
+            await self._send_message(ws, wire, send_lock)
 
     async def handle_acp_tool_response_for_test(
-        self,
-        ws: Any,
-        request: AgentRequest,
-        send_lock: asyncio.Lock,
+            self,
+            ws: Any,
+            request: AgentRequest,
+            send_lock: asyncio.Lock,
     ) -> None:
         """Public test helper that delegates to ACP tool-response handling."""
         await self._handle_acp_tool_response(ws, request, send_lock)

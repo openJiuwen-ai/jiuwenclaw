@@ -89,7 +89,12 @@ async def _run(host: str, port: int) -> None:
     from jiuwenclaw.extensions.registry import ExtensionRegistry
     from jiuwenclaw.telemetry import init_telemetry
 
-    logger.info("[AgentServer] starting: ws://%s:%s", host, port)
+    # 检查是否启用 OA 模式
+    oa_ws_url = os.getenv("OA_WEBSOCKET_URL", "").strip()
+    if oa_ws_url:
+        logger.info("[AgentServer] starting in OA mode, will connect to: %s", oa_ws_url)
+    else:
+        logger.info("[AgentServer] starting: ws://%s:%s", host, port)
 
     from jiuwenclaw.agentserver.session_metadata import remove_team_mode_session_dirs_at_startup
 
@@ -119,7 +124,10 @@ async def _run(host: str, port: int) -> None:
     )
     await server.start()
 
-    logger.info("[AgentServer] ready: ws://%s:%s  Ctrl+C to stop", host, port)
+    if oa_ws_url:
+        logger.info("[AgentServer] ready in OA mode  Ctrl+C to stop")
+    else:
+        logger.info("[AgentServer] ready: ws://%s:%s  Ctrl+C to stop", host, port)
 
     stop_event = asyncio.Event()
 
@@ -148,7 +156,7 @@ async def _run(host: str, port: int) -> None:
 def main() -> None:
     parser = argparse.ArgumentParser(
         prog="jiuwenclaw-agentserver",
-        description="Start JiuwenClaw AgentServer (standalone process for Gateway to connect).",
+        description="Start JiuwenClaw AgentServer (standalone process for Gateway to connect, or OA client mode).",
     )
     parser.add_argument(
         "--port",
@@ -156,9 +164,21 @@ def main() -> None:
         type=int,
         default=None,
         metavar="PORT",
-        help="Bind port (default: AGENT_SERVER_PORT env or 18092).",
+        help="Bind port (default: AGENT_SERVER_PORT env or 18092). Ignored in OA mode.",
+    )
+    parser.add_argument(
+        "--oa-url",
+        "-o",
+        type=str,
+        default=None,
+        metavar="URL",
+        help="Agent server 连 OA WebSocket URL (e.g., ws://xxx). Overrides OA_WEBSOCKET_URL env.",
     )
     args = parser.parse_args()
+
+    # 如果命令行指定了 OA URL，设置到环境变量
+    if args.oa_url:
+        os.environ["OA_WEBSOCKET_URL"] = args.oa_url
 
     host = os.getenv("AGENT_SERVER_HOST", "127.0.0.1")
     port = args.port
