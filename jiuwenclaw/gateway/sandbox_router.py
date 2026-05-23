@@ -365,7 +365,8 @@ class SandboxRouterAgentClient(AgentServerClient):
         record = await store.save_sandbox(sandbox_id, api_key=api_key)
         return {
             "sandbox_id": record.sandbox_id,
-            "api_key": record.api_key,
+            "api_key": api_key,
+            "api_key_sha256": record.api_key_sha256,
             "created_at": record.created_at,
         }
 

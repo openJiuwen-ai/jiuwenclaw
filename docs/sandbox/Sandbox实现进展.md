@@ -98,8 +98,9 @@ Router 维护的 runtime 信息包括：
 
 沙箱创建并写入 DCS 后，Gateway 不再等待 Agent 反向连入，而是：
 
-1. 从 DCS 按 `sandbox_id` 轮询读取 OpenAbility 的 `ip`/`port`（字段名可配置）。
-2. 主动连接 OpenAbility WebSocket（`WebSocketAgentServerClient`），由该服务转发与沙箱内 AgentServer 的 WS 事件。
+1. 向 DCS 写入：`key=sandbox_id`，`value={"api_key_sha256","created_at"}`（明文 API Key 不落库）。
+2. 从 DCS `key={sandbox_id}:openability` 的 hash 轮询读取 OpenAbility 的 `ip`/`port`。
+3. 主动连接 OpenAbility WebSocket（`WebSocketAgentServerClient`），由该服务转发与沙箱内 AgentServer 的 WS 事件。
 
 ```python
 _connect_open_ability_client(sandbox_id, routing_key, metadata) -> AgentServerClient

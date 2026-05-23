@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import json
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -15,7 +17,8 @@ from jiuwenclaw.utils import logger
 class SandboxDcsConfig:
     enabled: bool = False
     url: str = "redis://127.0.0.1:6379/0"
-    key_prefix: str = "claw:sandbox:"
+    key_prefix: str = ""
+    open_ability_key_suffix: str = ":openability"
     ttl_seconds: int = 0
     socket_timeout_seconds: float = 5.0
     socket_connect_timeout_seconds: float = 5.0
@@ -28,7 +31,8 @@ class SandboxDcsConfig:
         return cls(
             enabled=_cfg_bool(cfg.get("enabled"), False),
             url=str(cfg.get("url") or cfg.get("redis_url") or "redis://127.0.0.1:6379/0").strip(),
-            key_prefix=str(cfg.get("key_prefix") or "claw:sandbox:"),
+            key_prefix=str(cfg.get("key_prefix") or ""),
+            open_ability_key_suffix=str(cfg.get("open_ability_key_suffix") or ":openability"),
             ttl_seconds=max(0, ttl_seconds),
             socket_timeout_seconds=float(cfg.get("socket_timeout_seconds") or 5.0),
             socket_connect_timeout_seconds=float(cfg.get("socket_connect_timeout_seconds") or 5.0),
@@ -38,7 +42,7 @@ class SandboxDcsConfig:
 @dataclass(frozen=True)
 class SandboxDcsRecord:
     sandbox_id: str
-    api_key: str
+    api_key_sha256: str
     created_at: str
 
 
@@ -68,11 +72,43 @@ class SandboxDcsStore:
             await self._client.aclose()
             self._client = None
 
-    def _record_key(self, sandbox_id: str) -> str:
+    def _sandbox_key(self, sandbox_id: str) -> str:
         prefix = self._config.key_prefix
-        if not prefix.endswith(":"):
+        if prefix and not prefix.endswith(":"):
             prefix = f"{prefix}:"
         return f"{prefix}{sandbox_id}"
+
+    def _openability_key(self, sandbox_id: str) -> str:
+        return f"{self._sandbox_key(sandbox_id)}{self._config.open_ability_key_suffix}"
+
+    @staticmethod
+    def _hash_api_key(api_key: str) -> str:
+        return hashlib.sha256(api_key.encode("utf-8")).hexdigest()
+
+    @staticmethod
+    def _encode_record_value(api_key_sha256: str, created_at: str) -> str:
+        return json.dumps(
+            {"api_key_sha256": api_key_sha256, "created_at": created_at},
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+
+    @staticmethod
+    def _decode_record_value(raw: str) -> dict[str, str] | None:
+        text = str(raw or "").strip()
+        if not text:
+            return None
+        try:
+            data = json.loads(text)
+        except json.JSONDecodeError:
+            return None
+        if not isinstance(data, dict):
+            return None
+        api_key_sha256 = str(data.get("api_key_sha256") or "").strip()
+        created_at = str(data.get("created_at") or "").strip()
+        if not api_key_sha256 or not created_at:
+            return None
+        return {"api_key_sha256": api_key_sha256, "created_at": created_at}
 
     async def save_sandbox(
         self,
@@ -86,25 +122,19 @@ class SandboxDcsStore:
         client = await self.ensure_connected()
         created_ts = created_at if created_at is not None else time.time()
         created_at_text = datetime.fromtimestamp(created_ts, tz=timezone.utc).isoformat()
+        api_key_sha256 = self._hash_api_key(api_key)
         record = SandboxDcsRecord(
             sandbox_id=sandbox_id,
-            api_key=api_key,
+            api_key_sha256=api_key_sha256,
             created_at=created_at_text,
         )
-        key = self._record_key(sandbox_id)
-        await client.hset(
-            key,
-            mapping={
-                "sandbox_id": record.sandbox_id,
-                "api_key": record.api_key,
-                "created_at": record.created_at,
-            },
-        )
+        key = self._sandbox_key(sandbox_id)
+        await client.set(key, self._encode_record_value(api_key_sha256, created_at_text))
         if self._config.ttl_seconds > 0:
             await client.expire(key, self._config.ttl_seconds)
         logger.info(
-            "Saved sandbox record to DCS: sandbox_id=%s created_at=%s",
-            sandbox_id,
+            "Saved sandbox record to DCS: key=%s created_at=%s",
+            key,
             created_at_text,
         )
         return record
@@ -113,23 +143,22 @@ class SandboxDcsStore:
         if not self._config.enabled:
             return
         client = await self.ensure_connected()
-        await client.delete(self._record_key(sandbox_id))
+        await client.delete(self._sandbox_key(sandbox_id), self._openability_key(sandbox_id))
 
     async def get_sandbox(self, sandbox_id: str) -> SandboxDcsRecord | None:
         if not self._config.enabled:
             return None
-        data = await self._load_record_fields(sandbox_id)
-        if not data:
+        client = await self.ensure_connected()
+        raw = await client.get(self._sandbox_key(sandbox_id))
+        if raw is None:
             return None
-        sandbox_value = str(data.get("sandbox_id") or sandbox_id).strip()
-        api_key = str(data.get("api_key") or "").strip()
-        created_at = str(data.get("created_at") or "").strip()
-        if not api_key or not created_at:
+        parsed = self._decode_record_value(raw)
+        if parsed is None:
             return None
         return SandboxDcsRecord(
-            sandbox_id=sandbox_value,
-            api_key=api_key,
-            created_at=created_at,
+            sandbox_id=sandbox_id,
+            api_key_sha256=parsed["api_key_sha256"],
+            created_at=parsed["created_at"],
         )
 
     async def get_openability_endpoint(
@@ -140,12 +169,14 @@ class SandboxDcsStore:
     ) -> OpenAbilityEndpoint | None:
         if not self._config.enabled:
             return None
-        data = await self._load_record_fields(sandbox_id)
+        client = await self.ensure_connected()
+        data = await client.hgetall(self._openability_key(sandbox_id))
         if not data:
             return None
+        fields = {str(key): str(value) for key, value in data.items()}
         cfg = open_ability_config or OpenAbilityConfig()
-        host = _first_non_empty(data, cfg.host_fields)
-        port_raw = _first_non_empty(data, cfg.port_fields)
+        host = _first_non_empty(fields, cfg.host_fields)
+        port_raw = _first_non_empty(fields, cfg.port_fields)
         if not host or not port_raw:
             return None
         try:
@@ -155,13 +186,6 @@ class SandboxDcsStore:
         if port <= 0 or port > 65535:
             return None
         return OpenAbilityEndpoint(host=host, port=port)
-
-    async def _load_record_fields(self, sandbox_id: str) -> dict[str, str]:
-        client = await self.ensure_connected()
-        data = await client.hgetall(self._record_key(sandbox_id))
-        if not data:
-            return {}
-        return {str(key): str(value) for key, value in data.items()}
 
 
 def _first_non_empty(data: dict[str, str], field_names: tuple[str, ...]) -> str:
