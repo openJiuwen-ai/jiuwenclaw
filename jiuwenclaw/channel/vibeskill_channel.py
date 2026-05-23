@@ -80,6 +80,27 @@ def _configure_interface_log_path() -> None:
 
 _configure_interface_log_path()
 
+_IMPORT_TYPE_VIBE = "vibeImport"
+_IMPORT_TYPE_DIRECT = "directImport"
+_VALID_MESSAGE_SEND_IMPORT_TYPES = frozenset({_IMPORT_TYPE_VIBE, _IMPORT_TYPE_DIRECT})
+
+
+def _resolve_message_send_import_type(data: dict[str, Any]) -> str:
+    """message.send 的 importType，默认 vibeImport。"""
+    raw = data.get("importType")
+    if raw is None:
+        return _IMPORT_TYPE_VIBE
+    value = str(raw).strip()
+    if value in _VALID_MESSAGE_SEND_IMPORT_TYPES:
+        return value
+    if value:
+        logger.warning(
+            "[VibeSkillChannel] invalid importType=%r, using %s",
+            raw,
+            _IMPORT_TYPE_VIBE,
+        )
+    return _IMPORT_TYPE_VIBE
+
 
 @dataclass
 class VibeSkillConfig:
@@ -641,6 +662,8 @@ class VibeSkillChannel(BaseChannel):
 
         if "skillSearch" in data:
             params["enable_skill_search"] = bool(data.get("skillSearch"))
+
+        params["import_type"] = _resolve_message_send_import_type(data)
 
         # 可选字段
         inbound_agent_id = str(data.get("agent_id") or data.get("agentId") or "").strip()
