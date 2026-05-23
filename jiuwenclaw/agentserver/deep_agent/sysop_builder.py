@@ -15,15 +15,20 @@ IDENTITY.md / SOUL.md / USER.md) 与 ``daily_memory`` 目录通过 ``bind_mounts
 无需上传。 类型别名 :data:`PreserveFileSharingMode` 收窄为 ``Literal["mount"]``,
 将来若引入新模式 (例如 overlay) 时再扩成 union。
 
-关于 "project_dir":
+关于沙箱"主写入根":
 
-- ``build_filesystem_policy`` 默认会把 ``project_dir`` 以 rw 模式 bind 进沙箱,
-  同名同路径; 同时把该目录登记进 allow 列表方便用户/前端展示。 未传时回落到
-  ``JIUWENCLAW_SANDBOX_PROJECT_DIR`` 环境变量, 再回落到 ``Path.cwd()``.
-- 同时, jiuwenclaw 自己的 ``config.yaml`` (含模型 API key 等敏感凭据) 永远会
-  作为 auto-deny (``bind_mount rw`` + ``read_only`` patch, 末尾 bwrap
-  ``--remount-ro``) 加入策略, 防止 sandbox 内的 agent 写改它; 读不被屏蔽
-  (这是 ``files.deny`` 的 deny_write 语义)。
+- 本工程 (deep agent / 通用形态) **不会自动**把任何"主写入根"挂进沙箱:
+  历史上 ``build_filesystem_policy`` 会把 ``project_dir`` / cwd / 环境变量
+  指向的目录以 rw 模式 bind 进沙箱; 现已删除该行为, 沙箱里只剩
+  intrinsic 文件 (AGENT/HEARTBEAT/IDENTITY/SOUL/USER.md) +
+  ``daily_memory`` + ``agent_skills`` + 用户显式 ``files.allow`` 这几类。
+  想让沙箱里访问额外 host 路径请通过 ``JIUWENCLAW_SANDBOX_FILES_ALLOW``
+  显式声明, 而不是依赖 cwd/workspace 自动暴露。
+- jiuwenclaw 自己的 ``config.yaml`` (含模型 API key 等敏感凭据) **不会**
+  被挂进沙箱 (历史版本曾以 ro intrinsic 形式挂进去, 现已移除); 沙箱里
+  根本看不到这个文件, 任何沙箱内子工具都无法读取/泄露其中的凭据。
+  jiuwenclaw 主进程在沙箱外部已经把 config.yaml 加载到内存, 沙箱跑命令
+  / code 执行不需要原始文件存在。
 
 关于 ``files.allow`` / ``files.deny`` 的对称设计:
 
@@ -46,7 +51,6 @@ IDENTITY.md / SOUL.md / USER.md) 与 ``daily_memory`` 目录通过 ``bind_mounts
 from __future__ import annotations
 
 import logging
-import os
 from pathlib import Path
 from typing import Any, Literal
 
@@ -64,7 +68,7 @@ from openjiuwen.core.sys_operation.config import (
 
 from jiuwenclaw.utils import (
     get_agent_memory_dir,
-    get_config_file,
+    get_agent_skills_dir,
     get_deepagent_agent_md_path,
     get_deepagent_heartbeat_path,
     get_deepagent_identity_md_path,
@@ -79,7 +83,10 @@ PreserveFileSharingMode = Literal["mount"]
 _PRESERVE_FILE_SHARING_MODE: PreserveFileSharingMode = "mount"
 
 
-_INTRINSIC_FILE_PATH_FUNCS = (
+# Read-write intrinsic 文件: deep agent 在沙箱里持续读写的 markdown state 文件.
+# 这些路径由 _record_rw_bind 处理 (mode=rw + 0666), 不存在时由 _ensure_intrinsic_file
+# 自动 touch 空文件.
+_INTRINSIC_RW_FILE_PATH_FUNCS = (
     get_deepagent_agent_md_path,
     get_deepagent_heartbeat_path,
     get_deepagent_identity_md_path,
@@ -130,127 +137,119 @@ def _ensure_intrinsic_file(path: Path) -> bool:
         return False
 
 
-def _ensure_intrinsic_dir(path: Path) -> bool:
-    """确保固有目录存在; 不存在则 ``mkdir -p``。返回是否就绪可用。"""
-    try:
-        path.mkdir(parents=True, exist_ok=True)
-        if not path.is_dir():
-            logger.warning(
-                "[sysop_builder] intrinsic path %s exists but is not a directory; "
-                "skipping from sandbox bind/upload list",
-                path,
-            )
-            return False
-        return True
-    except OSError as exc:
-        logger.warning(
-            "[sysop_builder] could not ensure intrinsic dir %s: %s; "
-            "skipping from sandbox bind/upload list",
-            path,
-            exc,
-        )
-        return False
-
-
 def _collect_intrinsic_targets() -> tuple[list[str], list[str]]:
-    """收集 deep agent 固有文件路径与目录路径 (host 上的绝对路径).
+    """收集 deep agent 固有路径 (host 上的绝对路径), 分 rw_files / rw_dirs 返回.
 
-    会对每个解析到的路径做存在性检查; 不存在则创建空文件 / 空目录,
-    保证下游 bind_mount 时 host_path 一定存在。 创建失败的条目会被静默剔除,
-    避免污染 sandbox 启动路径。
+    分类规则:
+
+    - **rw_files** (``mode=rw``, ``0666``): agent 在沙箱里持续读写的 state 文件
+      (``_INTRINSIC_RW_FILE_PATH_FUNCS``). 不存在时由 :func:`_ensure_intrinsic_file`
+      自动 touch 空文件, 保证 bwrap ``--bind`` 的 host_src 存在。
+    - **rw_dirs** (``mode=rw``, ``0777``): agent 需要读写的目录 (``daily_memory``).
+      **不自动创建**——host 上不存在 (例如该 agent 还没生成过 daily_memory)
+      时, 跳过该条目, 不进沙箱 bind list, 也不主动 ``mkdir``。 这样可避免:
+      (a) 因 ``get_agent_memory_dir()`` 解析出意外路径而误建目录;
+      (b) 用户清理本地 memory 后, sandbox 启动反而把它静默重建。
+
+    解析或副作用失败的条目都被静默剔除, 防止污染 sandbox 启动路径。
+
+    历史: 曾返回 3-tuple, 第三段是 ``ro_files`` (装 ``config.yaml`` 等敏感凭据
+    走 ``mode=ro`` bind 进沙箱); 现已删除 ro intrinsic 通道, ``config.yaml``
+    根本不进沙箱, 因此回到 2-tuple。
 
     Returns:
-        ``(file_paths, dir_paths)``; 解析或创建失败的条目均跳过。
+        ``(rw_files, rw_dirs)``.
     """
-    file_paths: list[str] = []
-    dir_paths: list[str] = []
+    rw_files: list[str] = []
+    rw_dirs: list[str] = []
 
-    for func in _INTRINSIC_FILE_PATH_FUNCS:
+    for func in _INTRINSIC_RW_FILE_PATH_FUNCS:
         try:
             raw = func()
         except Exception as exc:  # noqa: BLE001
-            logger.debug("[sysop_builder] intrinsic file path func failed: %s", exc)
+            logger.debug(
+                "[sysop_builder] intrinsic rw file path func failed: %s", exc,
+            )
             continue
         if raw is None:
             continue
         path = Path(raw)
         if _ensure_intrinsic_file(path):
-            file_paths.append(str(path))
+            rw_files.append(str(path))
 
     try:
         daily_memory = Path(get_agent_memory_dir()) / "daily_memory"
     except Exception as exc:  # noqa: BLE001
         logger.debug("[sysop_builder] daily_memory dir resolve failed: %s", exc)
     else:
-        if _ensure_intrinsic_dir(daily_memory):
-            dir_paths.append(str(daily_memory))
+        # mount 前显式检查 host 上是否存在 daily_memory 目录; 不存在则跳过, 不
+        # 自动 ``mkdir``。 bwrap 在 ``--bind`` 时要求 host_src 必须存在, 这里
+        # 提前剔掉避免后续沙箱启动失败; 同时拒绝"沙箱启动反而把已被用户清理
+        # 的 memory 目录静默重建"的行为。
+        if daily_memory.is_dir():
+            rw_dirs.append(str(daily_memory))
+        else:
+            logger.info(
+                "[sysop_builder] daily_memory %s does not exist on host; "
+                "skipping from sandbox bind list (mount only when present)",
+                daily_memory,
+            )
 
-    return file_paths, dir_paths
+    return rw_files, rw_dirs
 
 
-def _resolve_project_dir(override: str | Path | None) -> Path | None:
-    """Resolve the host directory to bind into the sandbox as ``rw``.
+def _resolve_agent_skills_dir() -> Path | None:
+    """Resolve the package-bundled built-in skills dir for sandbox mounting.
 
-    Priority:
-      1. ``override`` argument (caller-supplied; typically the adapter's
-         ``self._workspace_dir`` / ``trusted_dirs[0]``).
-      2. ``JIUWENCLAW_SANDBOX_PROJECT_DIR`` env (allows operations to pin a
-         project dir without code changes).
-      3. ``Path.cwd()``: the process working directory at the time
-         ``build_filesystem_policy`` is called.
+    :func:`get_agent_skills_dir` returns the path under
+    ``~/.jiuwenclaw/agent/jiuwenclaw_workspace/skills`` (single-tenant
+    layout). The sandboxed agent both reads bundled skill templates and
+    may mutate / install new skills under this directory at runtime, so
+    :func:`build_filesystem_policy` binds it rw (intentionally **not**
+    added to ``filesystem_policy.read_only``). Mutations therefore
+    propagate back to the host install, which is by design for the
+    skills lifecycle.
 
-    Returns ``None`` when the resolved path doesn't exist, isn't a directory,
-    or is the filesystem root (we refuse to ``rw``-bind ``/``; that would
-    expose every other host file the user didn't intend to share).
+    Returns ``None`` when:
+      - resolution itself raises (broken install / unusual layout);
+      - the resolved path doesn't exist on disk;
+      - the resolved path exists but isn't a directory.
+
+    A ``None`` return is treated by ``build_filesystem_policy`` as "skip
+    silently" (development checkouts without the skills dir provisioned
+    will keep working; the sandbox just won't see the built-in skills,
+    same as before this hook was added).
     """
-    candidates: list[Path] = []
-    if override is not None:
-        candidates.append(Path(override))
-    env_override = os.getenv("JIUWENCLAW_SANDBOX_PROJECT_DIR")
-    if env_override:
-        candidates.append(Path(env_override))
-    candidates.append(Path.cwd())
-
-    for cand in candidates:
-        try:
-            resolved = cand.expanduser().resolve()
-        except OSError as exc:
-            logger.debug(
-                "[sysop_builder] project_dir candidate %s could not be resolved: %s",
-                cand, exc,
-            )
-            continue
-        if not resolved.is_dir():
-            logger.debug(
-                "[sysop_builder] project_dir candidate %s is not a directory; skipping",
-                resolved,
-            )
-            continue
-        if resolved == Path(resolved.anchor):
-            logger.warning(
-                "[sysop_builder] refusing to mount filesystem root %s as rw "
-                "project directory; pick a more specific cwd or set "
-                "JIUWENCLAW_SANDBOX_PROJECT_DIR",
-                resolved,
-            )
-            return None
-        return resolved
-    return None
+    try:
+        raw = get_agent_skills_dir()
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("[sysop_builder] builtin skills dir resolve failed: %s", exc)
+        return None
+    try:
+        resolved = Path(raw).expanduser().resolve()
+    except OSError as exc:
+        logger.debug(
+            "[sysop_builder] builtin skills dir %s could not be resolved: %s",
+            raw, exc,
+        )
+        return None
+    if not resolved.is_dir():
+        logger.debug(
+            "[sysop_builder] builtin skills dir %s is not a directory; skipping",
+            resolved,
+        )
+        return None
+    return resolved
 
 
 def build_filesystem_policy(
     files_runtime: dict[str, Any] | None,
-    *,
-    project_dir: str | Path | None = None,
 ) -> tuple[dict[str, Any], list[dict[str, str]]]:
     """组装 jiuwenbox 沙箱的 filesystem policy.
 
     Args:
         files_runtime: ``config.yaml::sandbox.files`` 的字典，可能包含
             ``allow`` / ``deny`` 列表（项支持 str 或 {path, permissions} 形式）
-        project_dir: 当前工程目录的覆盖值, 缺省时回落到 :func:`_resolve_project_dir`
-            (优先级 override -> 环境变量 -> ``cwd``). 解析成功时会作为 ``rw``
-            bind mount 进沙箱; 解析失败 (例如指向 ``/``) 时静默跳过。
 
     Returns:
         ``(policy_dict, upload_list)``:
@@ -286,7 +285,7 @@ def build_filesystem_policy(
         is_dir: bool,
         permissions: str,
     ) -> None:
-        """Register an rw bind mount (used by intrinsic / project-dir paths).
+        """Register an rw bind mount (used by intrinsic / agent_skills paths).
 
         We deliberately do NOT also append the path to ``allow_files`` /
         ``allow_dirs``: jiuwenbox's policy validator rejects any
@@ -295,7 +294,7 @@ def build_filesystem_policy(
 
         ``permissions`` is intentionally unused -- bind mounts carry their
         own mode; the previous ``permissions`` value is kept in the signature
-        so the callers (intrinsic / intrinsic-dir / project-dir) stay
+        so the callers (intrinsic-file / intrinsic-dir / agent_skills) stay
         symmetric and self-documenting at the call site.
         """
         del permissions  # retained on the signature for caller-side symmetry
@@ -329,10 +328,10 @@ def build_filesystem_policy(
     for path in intrinsic_dirs:
         _record_rw_bind(path, path, is_dir=True, permissions="0777")
 
-    resolved_project = _resolve_project_dir(project_dir)
-    if resolved_project is not None:
-        project_str = str(resolved_project)
-        _record_rw_bind(project_str, project_str, is_dir=True, permissions="0777")
+    agent_skills = _resolve_agent_skills_dir()
+    if agent_skills is not None:
+        skills_str = str(agent_skills)
+        _record_rw_bind(skills_str, skills_str, is_dir=True, permissions="0777")
 
     for entry in files_runtime.get("allow") or []:
         normalized = _normalize_fs_entry(entry, default_permissions="0666")
@@ -354,17 +353,10 @@ def build_filesystem_policy(
         if path not in read_write_promote:
             read_write_promote.append(path)
 
-    # jiuwenclaw 自己的 config.yaml 永远 deny_write: 文件里有模型 API key 等凭据。
-    try:
-        config_yaml_path = str(Path(get_config_file()).expanduser().resolve())
-        if config_yaml_path and Path(config_yaml_path).exists():
-            _record_user_deny_bind(config_yaml_path, config_yaml_path)
-    except Exception as exc:  # noqa: BLE001
-        logger.warning(
-            "[sysop_builder] could not resolve config.yaml for auto deny: %s",
-            exc,
-        )
-
+    # 注意: jiuwenclaw 自己的 ``config.yaml`` (含模型 API key) 不会被自动挂进
+    # 沙箱 — 没有任何 intrinsic ro 通道把它带进去, 沙箱内根本看不到该文件。
+    # 用户若显式把 ``config.yaml`` 写进 ``files.allow`` 才会暴露 (此时由用户负
+    # 责理解后果); 不在 deny 里特殊处理。
     for entry in files_runtime.get("deny") or []:
         normalized = _normalize_fs_entry(entry, default_permissions="0000")
         if normalized is None:
@@ -398,19 +390,26 @@ def create_sandbox_sysop_card(
     *,
     files_runtime: dict[str, Any] | None = None,
     excluded_commands: list[str] | None = None,
-    idle_ttl_seconds: int = 600,
-    project_dir: str | Path | None = None,
+    idle_ttl_seconds: int | None = None,
+    idle_check_interval: int | None = None,
 ) -> SysOperationCard | None:
     """构造 jiuwenbox 沙箱模式 SysOperationCard.
 
     Args:
         sandbox_url: jiuwenbox HTTP 服务的 base url, 例如 ``http://127.0.0.1:8321``
         sandbox_type: jiuwenbox provider 名, 通常为 ``jiuwenbox``
-        files_runtime: ``config.yaml::sandbox.files`` 字典, 含 allow/deny
+        files_runtime: ``sandbox.files`` 字典, 含 allow/deny (来源现在是 env var,
+            见 :func:`get_sandbox_runtime`)
         excluded_commands: 命令 glob 列表; 命中时 provider 直接走本地
-        idle_ttl_seconds: 沙箱空闲超时
-        project_dir: 透传给 :func:`build_filesystem_policy` 的工程目录覆盖值;
-            ``None`` 时由其内部回落到 ``cwd``.
+        idle_ttl_seconds: 沙箱空闲超时 (秒). 默认 ``None`` 表示不进行 idle 驱逐;
+            jiuwenbox provider 会把它转成 ``timeout.idle_timeout`` 注入到
+            ``create_sandbox`` 的 policy 中。 历史上默认 600s, 切换到 env var
+            驱动后改为 ``None`` (不淘汰), 与 ``TimeoutPolicy.idle_timeout`` 的
+            默认语义保持一致。
+        idle_check_interval: idle reaper 轮询间隔 (秒). 默认 ``None`` 让
+            jiuwenbox 服务端使用自身默认值 (``TimeoutPolicy.idle_check_interval``,
+            目前为 60s); jiuwenbox provider 会把它转成
+            ``timeout.idle_check_interval`` 注入到 policy 中。
 
     Returns:
         构造成功返回 ``SysOperationCard``; 失败 (``build_filesystem_policy``
@@ -428,10 +427,7 @@ def create_sandbox_sysop_card(
         )
 
     try:
-        policy, upload_list = build_filesystem_policy(
-            files_runtime,
-            project_dir=project_dir,
-        )
+        policy, upload_list = build_filesystem_policy(files_runtime)
         extra_params: dict[str, Any] = {
             "policy": policy,
             "policy_mode": "append",
@@ -441,6 +437,14 @@ def create_sandbox_sysop_card(
             "preserve_file_sharing_mode": _PRESERVE_FILE_SHARING_MODE,
             "preserve_files_upload": upload_list,
         }
+        # ``idle_check_interval`` 走 ``extra_params`` 而非 ``launcher_config`` 上
+        # 的独立字段, 这样不需要给 ``SandboxLauncherConfig`` 加 jiuwenbox 私有的
+        # schema —— ``idle_check_interval`` 是 jiuwenbox 服务端 reaper 轮询间隔,
+        # 别的 provider 用不到, 只在 jiuwenbox provider 里读出来 PUT 到
+        # ``/api/v1/timeout``。 ``None`` 时不写入 extra_params, 让 provider 端
+        # 走 "缺省即沿用 server 默认值" 的语义。
+        if idle_check_interval is not None:
+            extra_params["idle_check_interval"] = idle_check_interval
 
         gateway_config = SandboxGatewayConfig(
             isolation=SandboxIsolationConfig(container_scope=ContainerScope.SYSTEM),
@@ -461,7 +465,8 @@ def create_sandbox_sysop_card(
         fs_policy = policy.get("filesystem_policy", {}) if isinstance(policy, dict) else {}
         logger.info(
             "[sysop_builder] sandbox SysOperationCard created:\n"
-            "  base_url=%s sandbox_type=%s idle_ttl=%ds\n"
+            "  base_url=%s sandbox_type=%s\n"
+            "  idle_ttl=%s idle_check_interval=%s\n"
             "  preserve_file_sharing_mode=%s\n"
             "  excluded_commands(%d)=%s\n"
             "  filesystem_policy.files(%d)=%s\n"
@@ -474,6 +479,7 @@ def create_sandbox_sysop_card(
             sandbox_url,
             sandbox_type,
             idle_ttl_seconds,
+            idle_check_interval,
             _PRESERVE_FILE_SHARING_MODE,
             len(extra_params["excluded_commands"]),
             extra_params["excluded_commands"] or "[]",

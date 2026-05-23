@@ -1325,17 +1325,21 @@ class JiuWenClawDeepAdapter:
     def _create_sys_operation(self) -> SysOperation | None:
         """Create a sys operation with workspace as working directory.
 
-        是否走沙箱由 ``config.yaml::sandbox.enabled`` 决定（同时要求
-        ``sandbox.url`` / ``sandbox.type`` 已配置）。其他 sandbox 字段
-        (``excluded_commands`` / ``files``) 透传给 ``create_sandbox_sysop_card``
-        写入 ``launcher_config.extra_params``。
+        是否走沙箱由 ``JIUWENCLAW_SANDBOX_ENABLED`` 决定（同时要求
+        ``JIUWENCLAW_SANDBOX_URL`` / ``JIUWENCLAW_SANDBOX_TYPE`` 已配置）。
+        其他 sandbox 字段 (``excluded_commands`` / ``files`` /
+        ``idle_ttl_seconds`` / ``idle_check_interval``) 透传给
+        ``create_sandbox_sysop_card``, 分别写入 ``launcher_config.extra_params``
+        与 ``launcher_config`` 上的同名字段。
 
         注意: 每次都从 ``get_sandbox_endpoint`` / ``get_sandbox_runtime`` 读最新
-        sandbox 配置（不再依赖模块导入期快照），用户改 config.yaml 后重启
-        agent-server 即可生效。``startup_mode`` 的合法性校验由 getter 完成。
+        sandbox 配置 (现已切换到 ``JIUWENCLAW_SANDBOX_*`` 环境变量驱动, 不再
+        读 ``config.yaml::sandbox``); 改 env 后重启 agent-server 即可生效。
+        ``startup_mode`` 的合法性校验由 getter 完成。
 
-        当前 claw2b 不负责拉起 jiuwenbox，``startup_mode`` 仅支持 ``internal``,
-        表示 “使用 ``sandbox.url`` 配置的端点连接由外部启动的 jiuwenbox”。
+        当前 claw2b 不负责拉起 jiuwenbox，``startup_mode`` 仅支持 ``external``,
+        表示 “使用 ``JIUWENCLAW_SANDBOX_URL`` 配置的端点连接由外部启动的 jiuwenbox”
+        (在 K8s / 企业部署里 jiuwenbox-server 由 Deployment / sidecar 独立托管)。
         """
         try:
             endpoint = get_sandbox_endpoint()
@@ -1343,15 +1347,48 @@ class JiuWenClawDeepAdapter:
             work_dir = self._workspace_dir or str(get_agent_root_dir())
             sandbox_url = endpoint.get("url") or ""
             sandbox_type = endpoint.get("type") or ""
-            if runtime.get("enabled") and sandbox_url and sandbox_type:
+            sandbox_enabled = bool(runtime.get("enabled"))
+            if sandbox_enabled and sandbox_url and sandbox_type:
+                logger.info(
+                    "[JiuWenClawDeepAdapter] sandbox mode: url=%s type=%s "
+                    "startup_mode=%s idle_ttl_seconds=%s idle_check_interval=%s",
+                    sandbox_url,
+                    sandbox_type,
+                    endpoint.get("startup_mode"),
+                    runtime.get("idle_ttl_seconds"),
+                    runtime.get("idle_check_interval"),
+                )
                 sysop_card = create_sandbox_sysop_card(
                     sandbox_url,
                     sandbox_type,
                     files_runtime=runtime.get("files"),
                     excluded_commands=runtime.get("excluded_commands"),
-                    project_dir=self._workspace_dir,
+                    idle_ttl_seconds=runtime.get("idle_ttl_seconds"),
+                    idle_check_interval=runtime.get("idle_check_interval"),
                 )
             else:
+                # 用户经常踩这种坑: ``JIUWENCLAW_SANDBOX_ENABLED=true`` 但漏配
+                # ``URL`` (或历史上漏配 ``TYPE``, 现在 TYPE 已经默认 ``jiuwenbox``).
+                # 此时静默走 local 模式, 现象上跟"完全没启用 sandbox"一样, 难
+                # 排查, 这里把缺哪个 env 直接打 warn 出来。
+                if sandbox_enabled and not (sandbox_url and sandbox_type):
+                    missing = []
+                    if not sandbox_url:
+                        missing.append("JIUWENCLAW_SANDBOX_URL")
+                    if not sandbox_type:
+                        # TYPE 已有默认值, 真触发说明用户显式设了空串, 罕见
+                        missing.append("JIUWENCLAW_SANDBOX_TYPE")
+                    logger.warning(
+                        "[JiuWenClawDeepAdapter] sandbox enabled but missing %s; "
+                        "falling back to local sys_operation. set the env var(s) "
+                        "and restart agent-server to actually use jiuwenbox.",
+                        ", ".join(missing),
+                    )
+                else:
+                    logger.info(
+                        "[JiuWenClawDeepAdapter] local mode (sandbox %s)",
+                        "disabled" if not sandbox_enabled else "url/type empty",
+                    )
                 sysop_card = create_local_sysop_card(work_dir=work_dir)
             if sysop_card is None:
                 logger.warning("[JiuWenClawDeepAdapter] add sys_operation failed: sysop_card is None")

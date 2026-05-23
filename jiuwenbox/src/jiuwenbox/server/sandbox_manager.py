@@ -45,7 +45,7 @@ def _truncate_for_audit(text: str | None, *, limit: int = _AUDIT_OUTPUT_LIMIT) -
 
 from jiuwenbox.logging_config import configure_logging
 from jiuwenbox.models.common import AuditEventType
-from jiuwenbox.models.policy import SecurityPolicy
+from jiuwenbox.models.policy import SecurityPolicy, TimeoutPolicy
 from jiuwenbox.models.sandbox import (
     BackgroundExecResult,
     ExecResult,
@@ -121,6 +121,10 @@ class SandboxManager:
         self._lock = asyncio.Lock()
         self._sandboxes: dict[str, SandboxRef] = {}
         self._policies: dict[str, SecurityPolicy] = {}
+        # 空闲沙箱淘汰: 后台 reaper task 句柄 + stop event。``None`` 表示当前没有
+        # reaper 在跑 (idle_timeout 未配置 / 已被禁用 / 服务尚未 startup)。
+        self._idle_reaper_task: asyncio.Task | None = None
+        self._idle_reaper_stop: asyncio.Event | None = None
         # Sandbox state is treated as ephemeral: jiuwenbox starts up with an empty
         # registry, regardless of any leftover files under ``state_dir`` /
         # ``policies_dir``. The dirs themselves are recreated above so subsequent
@@ -253,6 +257,193 @@ class SandboxManager:
                     sandbox_id,
                 )
 
+    def start_idle_reaper(self) -> None:
+        """Spin up the background idle-sandbox reaper task if configured.
+
+        Reads ``self.policy.timeout``; if ``idle_timeout`` is ``None`` or
+        ``<= 0`` (the default), the feature is disabled and this method is
+        a no-op. Otherwise a single asyncio task runs forever in the
+        background polling every ``idle_check_interval`` seconds and
+        deletes any sandbox whose ``last_active_at`` is older than
+        ``idle_timeout``.
+
+        Must be called from inside the running event loop (e.g. the
+        FastAPI lifespan startup hook). Safe to call multiple times --
+        subsequent calls become no-ops when a reaper is already running.
+        """
+        timeout_cfg = self.policy.timeout
+        if timeout_cfg.idle_timeout is None:
+            return
+        if self._idle_reaper_task is not None and not self._idle_reaper_task.done():
+            return
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            logger.warning(
+                "start_idle_reaper called outside a running event loop; "
+                "idle sandbox reaping will not be active",
+            )
+            return
+        self._idle_reaper_stop = asyncio.Event()
+        self._idle_reaper_task = loop.create_task(
+            self._idle_reaper_loop(
+                idle_timeout=timeout_cfg.idle_timeout,
+                check_interval=timeout_cfg.idle_check_interval,
+                stop_event=self._idle_reaper_stop,
+            ),
+            name="jiuwenbox-idle-reaper",
+        )
+        logger.info(
+            "idle reaper started: idle_timeout=%.1fs check_interval=%.1fs",
+            timeout_cfg.idle_timeout,
+            timeout_cfg.idle_check_interval,
+        )
+
+    async def update_timeout_policy(
+        self,
+        new_timeout: TimeoutPolicy,
+    ) -> TimeoutPolicy:
+        """Replace the server-level ``timeout`` policy and restart the reaper.
+
+        Atomically: stops the currently running reaper (if any), swaps in
+        ``new_timeout`` on the root policy, then starts a fresh reaper using
+        the new values. The new reaper only actually launches when
+        ``idle_timeout`` is configured (``not None``); otherwise the call
+        leaves no reaper running. Returns the resulting ``TimeoutPolicy`` so
+        callers (e.g. the PUT route) can echo back the canonical state.
+
+        This only mutates the *root* policy used by the reaper; per-sandbox
+        policies cached in ``self._policies`` are unaffected (timeout has no
+        bearing on sandbox isolation anyway).
+
+        Idempotency: if ``new_timeout`` 与当前 ``self.policy.timeout`` 字段值
+        完全一致 *且* 已有活着的 reaper task (或两者都为 ``None`` 即"禁用且
+        未运行"), 直接 no-op 返回, 不做 stop/start。 这一短路对反复调用
+        ``PUT /api/v1/timeout`` 写入同一组值的客户端 (典型场景: 每次创建
+        沙箱前都重申 idle 配置) 至关重要 —— 否则 ``stop_idle_reaper`` 要等
+        当前 reaper 从 ``stop_event.wait(timeout=check_interval)`` 这一觉
+        醒过来 (最坏 5s 兜底超时), 整个 PUT 调用会平白多出几秒延迟, 把
+        沙箱创建链路一起拖慢。
+        """
+        if new_timeout == self.policy.timeout:
+            reaper_alive = (
+                self._idle_reaper_task is not None
+                and not self._idle_reaper_task.done()
+            )
+            # ``idle_timeout is None`` 时 ``start_idle_reaper`` 永远是 no-op,
+            # 所以 "无 reaper" 与 "禁用" 等价, 同样可以短路掉。
+            if reaper_alive or new_timeout.idle_timeout is None:
+                return self.policy.timeout
+        # Stop first so the old reaper -- which captured the previous
+        # idle_timeout / idle_check_interval by value when it was launched --
+        # does not race the new one.
+        await self.stop_idle_reaper()
+        self.policy = self.policy.model_copy(update={"timeout": new_timeout})
+        self.start_idle_reaper()
+        return self.policy.timeout
+
+    async def stop_idle_reaper(self) -> None:
+        """Signal the reaper to exit and await its termination.
+
+        Called from the lifespan shutdown hook *before*
+        :meth:`shutdown_all_sandboxes` so the reaper cannot race with
+        explicit teardown (the reaper holds ``self._lock`` briefly when
+        sampling, and ``delete_sandbox`` also grabs it -- letting the
+        reaper run during shutdown would interleave their work and waste
+        time deleting things that are about to be deleted anyway).
+        """
+        task = self._idle_reaper_task
+        stop_event = self._idle_reaper_stop
+        if task is None or stop_event is None:
+            return
+        stop_event.set()
+        try:
+            await asyncio.wait_for(task, timeout=5.0)
+        except asyncio.TimeoutError:
+            logger.warning("idle reaper did not stop within 5s; cancelling")
+            task.cancel()
+            try:
+                await task
+            except (asyncio.CancelledError, Exception):  # noqa: BLE001
+                pass
+        except Exception:  # noqa: BLE001
+            logger.exception("idle reaper raised on shutdown")
+        finally:
+            self._idle_reaper_task = None
+            self._idle_reaper_stop = None
+
+    async def _idle_reaper_loop(
+        self,
+        *,
+        idle_timeout: float,
+        check_interval: float,
+        stop_event: asyncio.Event,
+    ) -> None:
+        """Per-``check_interval`` poll: delete sandboxes idle longer than
+        ``idle_timeout``.
+
+        Idleness is measured against ``last_active_at`` (in-memory only),
+        falling back to ``started_at`` / ``created_at`` for sandboxes that
+        somehow have no recorded activity yet. ``DELETING`` / ``STOPPED``
+        sandboxes are skipped because they are either already on the way
+        out or carry no live daemon to reap. Per-sandbox failures are
+        swallowed (logged with stack trace) so a single broken sandbox
+        cannot stall the entire reaper.
+        """
+        while True:
+            try:
+                await asyncio.wait_for(stop_event.wait(), timeout=check_interval)
+                # Stop event fired -> exit cleanly.
+                return
+            except asyncio.TimeoutError:
+                pass
+
+            now = datetime.now(timezone.utc)
+            cutoff = now.timestamp() - idle_timeout
+            async with self._lock:
+                expired_ids: list[str] = []
+                for sid, ref in self._sandboxes.items():
+                    # Only consider READY sandboxes: PROVISIONING is still
+                    # spinning up its bwrap / daemon (user code hasn't had a
+                    # chance to touch it yet, so an idle judgment would be
+                    # bogus); DELETING/STOPPED/ERROR have no live daemon to
+                    # reap.
+                    if ref.phase != SandboxPhase.READY:
+                        continue
+                    reference_ts = ref.last_active_at or ref.started_at or ref.created_at
+                    if reference_ts.tzinfo is None:
+                        # SandboxRef.created_at uses datetime.now() (naive) by
+                        # default; coerce to UTC so the comparison is well-defined.
+                        reference_ts = reference_ts.replace(tzinfo=timezone.utc)
+                    if reference_ts.timestamp() < cutoff:
+                        expired_ids.append(sid)
+
+            if not expired_ids:
+                continue
+
+            logger.info(
+                "idle reaper: deleting %d sandbox(es) idle > %.1fs: %s",
+                len(expired_ids),
+                idle_timeout,
+                expired_ids,
+            )
+            for sid in expired_ids:
+                try:
+                    self.audit.log(
+                        AuditEventType.SANDBOX_DELETED,
+                        sid,
+                        reason="idle_timeout",
+                        idle_timeout_seconds=idle_timeout,
+                    )
+                    await self.delete_sandbox(sid)
+                except SandboxNotFoundError:
+                    # Raced with an external delete; treat as a clean teardown.
+                    continue
+                except Exception:  # noqa: BLE001
+                    logger.exception(
+                        "idle reaper: delete_sandbox(%s) failed", sid,
+                    )
+
     def register_zombie_reaper(
         self,
         loop: asyncio.AbstractEventLoop | None = None,
@@ -293,6 +484,17 @@ class SandboxManager:
         if ref is None:
             raise SandboxNotFoundError(f"Sandbox '{sandbox_id}' not found")
         return ref
+
+    @staticmethod
+    def _mark_active(ref: SandboxRef) -> None:
+        """Stamp ``ref.last_active_at`` with the current UTC time.
+
+        Caller must already hold ``self._lock`` (typical pattern: call this
+        right after the phase==READY check inside the same ``async with``
+        block, so the timestamp is established before the IO call leaves the
+        lock and races with the idle reaper).
+        """
+        ref.last_active_at = datetime.now(timezone.utc)
 
     async def create_sandbox(
         self,
@@ -339,7 +541,11 @@ class SandboxManager:
                 else:
                     ref.phase = SandboxPhase.READY
                     ref.pid = pid
-                    ref.started_at = datetime.now(timezone.utc)
+                    now = datetime.now(timezone.utc)
+                    ref.started_at = now
+                    # 沙箱刚创建即视为最近一次活跃, 避免在第一次 exec 到来之前就被
+                    # reaper 当成 idle 误杀 (理论上不会, 但显式初始化更直白)。
+                    ref.last_active_at = now
                     self._save_state(ref)
             if cleanup_after_create:
                 await self.runtime.cleanup(sandbox_id)
@@ -403,7 +609,9 @@ class SandboxManager:
             )
             ref.phase = SandboxPhase.READY
             ref.pid = pid
-            ref.started_at = datetime.now(timezone.utc)
+            now = datetime.now(timezone.utc)
+            ref.started_at = now
+            ref.last_active_at = now
             ref.error_message = None
         except Exception as e:
             logger.error("Failed to start sandbox %s: %s", sandbox_id, e, exc_info=True)
@@ -461,6 +669,7 @@ class SandboxManager:
                 raise SandboxStateError(
                     f"Cannot exec in sandbox '{sandbox_id}': state is {ref.phase.value}"
                 )
+            self._mark_active(ref)
 
         # One audit row per exec, emitted **after** the runtime returns so
         # the payload covers both intent (command/workdir) and outcome
@@ -514,6 +723,7 @@ class SandboxManager:
                 raise SandboxStateError(
                     f"Cannot exec in sandbox '{sandbox_id}': state is {ref.phase.value}"
                 )
+            self._mark_active(ref)
 
         # Background exec returns a "started yes/no + pid" envelope
         # rather than stdout/stderr — the raw byte stream is dropped
@@ -569,6 +779,7 @@ class SandboxManager:
                 raise SandboxStateError(
                     f"Cannot upload to sandbox '{sandbox_id}': state is {ref.phase.value}"
                 )
+            self._mark_active(ref)
 
         # One audit row per upload, emitted after the call returns so the
         # payload covers both intent (path/size) and outcome (ok, error,
@@ -697,6 +908,7 @@ class SandboxManager:
                 raise SandboxStateError(
                     f"Cannot download from sandbox '{sandbox_id}': state is {ref.phase.value}"
                 )
+            self._mark_active(ref)
 
         # Mirror of ``upload_file_to_sandbox``: a single post-result row
         # carrying intent + outcome. ``size`` is filled in on success
@@ -811,6 +1023,7 @@ class SandboxManager:
                 raise SandboxStateError(
                     f"Cannot list files in sandbox '{sandbox_id}': state is {ref.phase.value}"
                 )
+            self._mark_active(ref)
 
         # Fast path: ask the daemon to walk the directory in-process.
         # Saves the python3 cold start and the fork+exec that the legacy

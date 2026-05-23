@@ -790,34 +790,46 @@ enable_deepresearch: true
 #
 # 该段控制 agent-server 在构建 SysOperationCard 时是否走沙箱模式连接 jiuwenbox。
 #
+# **本版本: sandbox 配置已整段切换到环境变量驱动**。 ``config.yaml::sandbox``
+# 段保留只是为了让旧配置文件不报错; agent-server 在读取 sandbox 时**完全不
+# 看本段**, 一切以 ``JIUWENCLAW_SANDBOX_*`` 环境变量为准 (见 ``jiuwenclaw/
+# config.py`` 顶部的 env 列表)。 K8s / 企业部署直接通过 ConfigMap / Deployment
+# env 注入即可。
+#
 # 重要约束（本版本）:
 # - 当前 agent-server 不负责拉起 jiuwenbox 子进程; jiuwenbox 由外部启动并自管
 #   policy（典型方式: 容器化部署见 claw2b/jiuwenbox/docker/Dockerfile, 或手动
 #   ``python -m jiuwenbox.server.launcher`` 监听 ``url`` 所示端口）。
-# - ``startup_mode`` 仅接受 ``internal``。其语义是 "使用本配置中的 url 端点
-#   连接由外部启动的 jiuwenbox"; 留 ``external`` 不实现避免歧义。任何其它取值
-#   会让 ``get_sandbox_endpoint`` 抛 ValueError 并阻止 sandbox 模式生效。
-# - ``preserve_file_sharing_mode`` 仅接受 ``mount``（固有 agent 文件 / daily_memory
-#   / project_dir 通过 bind_mount 直接挂载, 沙箱内外实时同步）。
-# - ``enabled`` 必须为 true 且 ``url`` / ``type`` 均非空时, 才会构造沙箱
-#   SysOperationCard; 否则回落到本地模式 (与不配置 sandbox 段等价)。
+# - ``JIUWENCLAW_SANDBOX_STARTUP_MODE`` 仅接受 ``external`` (默认值)。其语义是
+#   "使用 ``JIUWENCLAW_SANDBOX_URL`` 端点连接由外部启动的 jiuwenbox";
+#   ``internal`` (agent-server 自动 spawn jiuwenbox) 不在本工程实现, 任何其它
+#   取值会让 ``get_sandbox_endpoint`` 抛 ValueError 并阻止 sandbox 模式生效。
+# - ``JIUWENCLAW_SANDBOX_PRESERVE_FILE_SHARING_MODE`` 仅接受 ``mount`` (固有
+#   agent 文件 / daily_memory / agent_skills 通过 bind_mount 直接挂载, 沙箱
+#   内外实时同步)。
+# - ``JIUWENCLAW_SANDBOX_ENABLED`` 必须为 true 且 ``URL`` / ``TYPE`` 均非空时,
+#   才会构造沙箱 SysOperationCard; 否则回落到本地模式 (与不配置 sandbox 等价)。
+#
+# 下方占位 yaml 仅为旧用户视觉对照, 不会被读取 — 真正的取值请去 env 改。
 sandbox:
-  # 是否启用沙箱模式; 关闭后即使 url/type 配齐也走本地模式。
+  # [DEPRECATED — env: JIUWENCLAW_SANDBOX_ENABLED]
   enabled: false
-  # jiuwenbox HTTP base URL（外部启动的 jiuwenbox-server 监听地址）。
+  # [DEPRECATED — env: JIUWENCLAW_SANDBOX_URL]
   url: http://127.0.0.1:8321
-  # provider 名称, 当前固定 jiuwenbox。
+  # [DEPRECATED — env: JIUWENCLAW_SANDBOX_TYPE]
   type: jiuwenbox
-  # 启动模式: 仅支持 internal (语义见上方注释)。
-  startup_mode: internal
-  # 固有文件共享方式: 仅支持 mount。
+  # [DEPRECATED — env: JIUWENCLAW_SANDBOX_STARTUP_MODE; 仅支持 external]
+  startup_mode: external
+  # [DEPRECATED — env: JIUWENCLAW_SANDBOX_PRESERVE_FILE_SHARING_MODE]
   preserve_file_sharing_mode: mount
-  # 命令 glob 列表; 命中的命令会绕过沙箱在本地执行（注意会丢失沙箱隔离, 慎用）。
+  # [DEPRECATED — env: JIUWENCLAW_SANDBOX_EXCLUDED_COMMANDS]
   excluded_commands: []
   # 文件读写策略（host 上的路径会被 bind 进沙箱）:
-  # - allow: 每项为 path 字符串或 {path, permissions} dict; 允许沙箱 rw 访问。
-  # - deny:  同上结构; 强制 ro, 防止沙箱内 agent 写改（读不被屏蔽）。
-  # jiuwenclaw 自己的 config.yaml 会被自动加入 deny, 无需在此显式列出。
+  # - [DEPRECATED — env: JIUWENCLAW_SANDBOX_FILES_ALLOW] 每项为 path 字符串或
+  #   {path, permissions} dict; 允许沙箱 rw 访问。
+  # - [DEPRECATED — env: JIUWENCLAW_SANDBOX_FILES_DENY] 同上结构; 强制 ro,
+  #   防止沙箱内 agent 写改（读不被屏蔽）。
+  # jiuwenclaw 自己的 config.yaml 会自动作为 ro intrinsic 资源挂载, 无需显式列出。
   files:
     allow: []
     deny: []

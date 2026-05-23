@@ -255,6 +255,15 @@ async def lifespan(_application: FastAPI):
             "register_zombie_reaper failed during lifespan startup; bwrap "
             "<defunct> processes may accumulate under the box-server pid",
         )
+    # 起 idle sandbox reaper: 只在 root policy 的 ``timeout.idle_timeout`` 显式
+    # 配置时生效, 否则是 no-op (默认禁用), 跟未引入本特性前行为完全等价。
+    try:
+        _sandbox_manager.start_idle_reaper()
+    except Exception:  # noqa: BLE001
+        logger.exception(
+            "start_idle_reaper failed during lifespan startup; idle sandboxes "
+            "will not be auto-reaped",
+        )
     logger.info("box-server started (version %s)", __version__)
     await _proxy_manager.start()
     # 在 proxy 起来之后、yield (接受请求) 之前给 UDS 打权限: 此刻 uvicorn 已
@@ -272,6 +281,18 @@ async def lifespan(_application: FastAPI):
             await _proxy_manager.stop()
         except Exception:  # noqa: BLE001
             logger.exception("proxy_manager.stop failed during lifespan shutdown")
+        # Stop the idle reaper *before* shutdown_all_sandboxes so the reaper
+        # cannot race with the explicit teardown below (both grab
+        # ``manager._lock`` and call ``delete_sandbox``; letting them
+        # interleave just wastes time deleting things that are about to be
+        # deleted anyway).
+        try:
+            if _sandbox_manager is not None:
+                await _sandbox_manager.stop_idle_reaper()
+        except Exception:  # noqa: BLE001
+            logger.exception(
+                "sandbox_manager.stop_idle_reaper failed during lifespan shutdown",
+            )
         # Tear down every live sandbox before exiting. Without this, each
         # sandbox-daemon.py (spawned with ``start_new_session=True`` so it owns
         # its session/pgrp) would be reparented to init when uvicorn dies and

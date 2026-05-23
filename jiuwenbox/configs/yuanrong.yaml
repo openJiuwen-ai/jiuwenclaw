@@ -299,7 +299,7 @@ network:
 #   Anthropic format: "X-Api-Key: <placeholder>"
 #     ==> "X-Api-Key: sk_sandbox_managed_key"
 #
-# Example jiuwenclaw config:
+# Example jiuwenswarm config:
 #   api_base: http://192.168.1.100:9000/v1/   ==>  http://127.0.0.1:8322/llm_proxy/v1/
 #   api_key:  sk-real_key   ==>  sk-fake_key
 

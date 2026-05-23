@@ -630,6 +630,85 @@ class CgroupPolicy(BaseModel):
         )
 
 
+class TimeoutPolicy(BaseModel):
+    """jiuwenbox 服务端的空闲沙箱淘汰配置.
+
+    本字段仅在 server 启动时加载的根 policy (``SandboxManager.policy``) 上生效,
+    用于驱动后台 reaper task; per-sandbox policy 上的同名字段不会影响沙箱隔离
+    (不下传到 bwrap / landlock / cgroup), 仅用于配置回显。
+
+    Fields:
+        idle_timeout: 沙箱最大空闲时长 (秒). ``None`` 或 ``<= 0`` 表示禁用淘汰
+            (默认禁用, 与未配置 timeout 字段时行为完全一致)。
+        idle_check_interval: reaper 轮询间隔 (秒). 必须 ``> 0``。
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    idle_timeout: float | None = None
+    idle_check_interval: float = 60.0
+
+    @field_validator("idle_timeout", mode="before")
+    @classmethod
+    def normalize_idle_timeout(cls, value: object) -> float | None:
+        if value is None:
+            return None
+        if isinstance(value, bool):
+            raise ValueError("idle_timeout must be a number, not a boolean")
+        if isinstance(value, (int, float)):
+            number = float(value)
+        elif isinstance(value, str):
+            text = value.strip()
+            if not text:
+                return None
+            try:
+                number = float(text)
+            except ValueError as exc:
+                raise ValueError(
+                    f"idle_timeout must parse as a number of seconds, got {value!r}"
+                ) from exc
+        else:
+            raise ValueError(
+                f"idle_timeout must be number or string, got {type(value).__name__}"
+            )
+        if number <= 0:
+            # Treat 0 / negative as "disabled" so users can flip the feature
+            # off without removing the whole key from their YAML.
+            return None
+        return number
+
+    @field_validator("idle_check_interval", mode="before")
+    @classmethod
+    def normalize_idle_check_interval(cls, value: object) -> float:
+        if value is None:
+            return 60.0
+        if isinstance(value, bool):
+            raise ValueError(
+                "idle_check_interval must be a positive number, not a boolean"
+            )
+        if isinstance(value, (int, float)):
+            number = float(value)
+        elif isinstance(value, str):
+            text = value.strip()
+            if not text:
+                return 60.0
+            try:
+                number = float(text)
+            except ValueError as exc:
+                raise ValueError(
+                    f"idle_check_interval must parse as a number of seconds, "
+                    f"got {value!r}"
+                ) from exc
+        else:
+            raise ValueError(
+                f"idle_check_interval must be number or string, "
+                f"got {type(value).__name__}"
+            )
+        if number <= 0:
+            raise ValueError("idle_check_interval must be > 0")
+        return number
+
+
 class SecurityPolicy(BaseModel):
     """Complete static security policy for a sandbox."""
 
@@ -644,6 +723,7 @@ class SecurityPolicy(BaseModel):
     syscall: SyscallPolicy = Field(default_factory=SyscallPolicy)
     network: NetworkPolicy = Field(default_factory=NetworkPolicy)
     cgroup: CgroupPolicy = Field(default_factory=CgroupPolicy)
+    timeout: TimeoutPolicy = Field(default_factory=TimeoutPolicy)
     inference_privacy_proxies: InferencePrivacyProxyPolicy = Field(default_factory=InferencePrivacyProxyPolicy)
 
     def tostring(self) -> str:
