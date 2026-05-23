@@ -144,7 +144,7 @@ class ForkAgentExecutor:
         """
         streamed_parts: list[str] = []
         final_text = ""
-        usage = None
+        usage = {}
         has_streamed_content = False
 
         async for chunk in Runner.run_agent_streaming(agent=agent, inputs=inputs):
@@ -166,7 +166,17 @@ class ForkAgentExecutor:
                 if content:
                     final_text = str(content)
             elif event_type == "chat.llm_usage":
-                usage = parsed
+                # 提取 usage_metadata 中的字段
+                usage_meta = parsed.get("usage_metadata", {}) if isinstance(parsed, dict) else {}
+                if isinstance(usage_meta, dict):
+                    usage = {
+                        "input_tokens": usage_meta.get("input_tokens", 0) or 0,
+                        "output_tokens": usage_meta.get("output_tokens", 0) or 0,
+                        "total_tokens": usage_meta.get("total_tokens", 0) or 0,
+                        "input_cost": usage_meta.get("input_cost", 0.0) or 0.0,
+                        "output_cost": usage_meta.get("output_cost", 0.0) or 0.0,
+                        "total_cost": usage_meta.get("total_cost", 0.0) or 0.0,
+                    }
 
         return (final_text or "".join(streamed_parts), usage)
 

@@ -77,7 +77,7 @@ class SubagentResult(BaseModel):
     result: str | None = None
     error: str | None = None
     output_files: list[str] = Field(default_factory=list)
-    usage: dict[str, int] | None = None
+    usage: dict[str, Any] | None = None  # 支持 int 和 float 类型（tokens 和 costs）
 
 
 class ForkAgentTaskSpec(BaseModel):
@@ -113,4 +113,4 @@ class ForkAgentResult(BaseModel):
     result: str | None = None
     error: str | None = None
     output_files: list[str] = Field(default_factory=list)
-    usage: dict[str, int] | None = None
+    usage: dict[str, Any] | None = None  # 支持 int 和 float 类型（tokens 和 costs）
