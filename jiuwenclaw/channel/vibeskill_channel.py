@@ -622,6 +622,10 @@ class VibeSkillChannel(BaseChannel):
                 )
                 return True
 
+        session_user_id = self._session_user_id(session.internal_id)
+        if session_user_id and not self._store.get_user_id(session.internal_id):
+            await self._store.set_metadata(session.internal_id, {"user_id": session_user_id})
+
         if external_session_id and not session.external_id:
             await self._store.bind_external(session.internal_id, external_session_id)
         elif not external_session_id and session.external_id:
@@ -700,6 +704,7 @@ class VibeSkillChannel(BaseChannel):
             req_method=ReqMethod.SKILLDEV_CHAT,
             is_stream=True,
             metadata=msg_metadata,
+            user_id=session_user_id,
         )
 
         logger.info(
@@ -744,6 +749,7 @@ class VibeSkillChannel(BaseChannel):
             req_method=ReqMethod.SKILLDEV_PARSE_SKILL,
             is_stream=True,
             metadata={_VIBESKILL_ORIGINAL_SESSION_ID_KEY: session_id},
+            user_id=self._session_user_id(internal_id),
         )
         logger.info(
             "[VibeSkillChannel] skilldev.parse_skill sent, session_id=%s",
@@ -828,6 +834,7 @@ class VibeSkillChannel(BaseChannel):
             req_method=ReqMethod.CHAT_SEND,
             is_stream=True,
             metadata=msg_metadata,
+            user_id=self._session_user_id(session.internal_id),
         )
 
         self.bus.deliver_to_message_handler(msg)
@@ -1529,6 +1536,7 @@ class VibeSkillChannel(BaseChannel):
             req_method=ReqMethod.SKILLDEV_RESPOND,
             is_stream=True,
             metadata={_VIBESKILL_ORIGINAL_SESSION_ID_KEY: external_session_id} if external_session_id else None,
+            user_id=self._session_user_id(internal_id),
         )
         logger.info(
             "[VibeSkillChannel] skilldev.respond sent, session_id=%s",
@@ -1562,6 +1570,7 @@ class VibeSkillChannel(BaseChannel):
             req_method=ReqMethod.SKILLDEV_USER_ANSWER,
             is_stream=False,
             metadata={_VIBESKILL_ORIGINAL_SESSION_ID_KEY: external_session_id} if external_session_id else None,
+            user_id=self._session_user_id(internal_id),
         )
         logger.info(
             "[VibeSkillChannel] skilldev.user_answer sent, session_id=%s",
@@ -2697,6 +2706,12 @@ class VibeSkillChannel(BaseChannel):
         body = json.dumps(data, ensure_ascii=False)
         return (status, {"Content-Type": "application/json", "Connection": "close"}, body.encode("utf-8"))
 
+    def _session_user_id(self, internal_id: str | None) -> str | None:
+        sid = str(internal_id or "").strip()
+        if not sid:
+            return None
+        return self._store.get_user_id(sid) or sid
+
     async def _send_agent_request(self, env) -> Any:
         """发送请求到 AgentServer 并返回响应。"""
         return await self._agent_client.send_request(env)
@@ -2708,10 +2723,12 @@ class VibeSkillChannel(BaseChannel):
         """
         # 解析请求体，获取 mode
         mode = "SkillCreate"  # 默认值
+        requested_user_id = ""
         if body:
             try:
                 req_body = json.loads(body.decode("utf-8"))
                 mode = str(req_body.get("mode", "SkillCreate")).strip()
+                requested_user_id = str(req_body.get("user_id") or req_body.get("userId") or "").strip()
             except (json.JSONDecodeError, UnicodeDecodeError):
                 pass  # 使用默认值
 
@@ -2721,11 +2738,13 @@ class VibeSkillChannel(BaseChannel):
 
         if mode == "Standard":
             # 创建 jiuwenclaw 标准 session
-            return await self._create_standard_session()
+            return await self._create_standard_session(requested_user_id)
 
         # 创建 VibeSkill session（SkillCreate 模式）
         session = await self._store.get_or_create(external_id=None, mode=mode)
         session_id = session.internal_id
+        user_id = requested_user_id or session_id
+        await self._store.set_metadata(session_id, {"user_id": user_id})
 
         response_data = {
             "sessionID": session_id,
@@ -2740,7 +2759,7 @@ class VibeSkillChannel(BaseChannel):
         }
         return self._json_response(200, response_data)
 
-    async def _create_standard_session(self) -> tuple[int, dict, bytes]:
+    async def _create_standard_session(self, requested_user_id: str = "") -> tuple[int, dict, bytes]:
         """创建 jiuwenclaw 标准 session（Standard mode）。
 
         通过 MessageHandler._create_agent_session 创建物理 session，
@@ -2750,13 +2769,15 @@ class VibeSkillChannel(BaseChannel):
         ts = format(int(time.time() * 1000), "x")
         suffix = secrets.token_hex(3)
         session_id = f"sess_{ts}_{suffix}"
+        user_id = str(requested_user_id or session_id).strip()
 
         # 通过 ChannelManager.create_agent_session 创建 session
         channel_manager = cast("ChannelManager", self.bus)
-        internal_id = await channel_manager.create_agent_session(session_id)
+        internal_id = await channel_manager.create_agent_session(session_id, user_id=user_id)
 
         # 存储到本地 _store，标记为 Standard mode
         await self._store.get_or_create(external_id=None, internal_id=session_id, mode="Standard")
+        await self._store.set_metadata(session_id, {"user_id": user_id})
 
         # HTTP 200 返回 response
         response_data = {
@@ -2812,7 +2833,11 @@ class VibeSkillChannel(BaseChannel):
             skill_url = skill.get("url", "").strip()
             if not skill_url:
                 return self._json_response(400, {"error": "Missing url in skills"})
-            await channel_manager.register_skill(session_id, skill_url)
+            await channel_manager.register_skill(
+                session_id,
+                skill_url,
+                user_id=self._session_user_id(internal_id),
+            )
 
         return self._json_response(200, {"registered": True})
 
@@ -2892,6 +2917,7 @@ class VibeSkillChannel(BaseChannel):
                 params={"task_id": internal_id},
                 is_stream=False,
                 timestamp=time.time(),
+                user_id=self._session_user_id(internal_id),
             )
 
             resp = await self._send_agent_request(env)
@@ -2960,6 +2986,7 @@ class VibeSkillChannel(BaseChannel):
             params={"task_id": session_id, "session_id": internal_id},
             is_stream=False,
             timestamp=time.time(),
+            user_id=self._session_user_id(internal_id),
         )
         logger.info(
             "[VibeSkillChannel] skilldev.file.list sent, session_id=%s",
@@ -3007,6 +3034,7 @@ class VibeSkillChannel(BaseChannel):
             params={"task_id": session_id, "path": file_path, "session_id": internal_id},
             is_stream=False,
             timestamp=time.time(),
+            user_id=self._session_user_id(internal_id),
         )
         logger.info(
             "[VibeSkillChannel] skilldev.file.read sent, session_id=%s",
@@ -3089,14 +3117,16 @@ class VibeSkillChannel(BaseChannel):
         except json.JSONDecodeError:
             return self._json_response(400, {"error": "Invalid JSON"})
         request_id = f"vibeskill-export-{int(time.time() * 1000):x}-{secrets.token_hex(3)}"
+        internal_id = await self._store.resolve_internal(session_id) or session_id
         env = e2a_from_agent_fields(
             request_id=request_id,
             channel_id=VIBESKILL_CHANNEL_ID,
-            session_id=session_id,
+            session_id=internal_id,
             req_method=ReqMethod.SKILLDEV_DOWNLOAD,
             params={"task_id": session_id},
             is_stream=False,
             timestamp=time.time(),
+            user_id=self._session_user_id(internal_id),
         )
         logger.info(
             "[VibeSkillChannel] skilldev.download sent, session_id=%s",
