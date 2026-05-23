@@ -23,8 +23,121 @@ from jiuwenclaw.utils import get_agent_workspace_dir, get_config_file
 
 logger = logging.getLogger(__name__)
 
-_DEFAULT_SIZE = "1920*1080"
+_DEFAULT_SIZE_DASHSCOPE = "1920*1080"
+_DEFAULT_SIZE_OPENAI = "1024x1024"
+_DEFAULT_SIZE_HUAWEI_MAAS = "1024x1024"
+_SIZE_DIMENSIONS_RE = re.compile(r"^(\d+)\s*[*xX×]\s*(\d+)$")
+_OPENAI_STANDARD_SIZES = frozenset({(1024, 1024), (1792, 1024), (1024, 1792)})
+_DASHSCOPE_PROVIDER_NAMES = frozenset({"dashscope"})
+_HUAWEI_MAAS_API_MARKERS = ("modelarts-maas.com", "modelarts-maas.cn")
 _OUTPUT_SUBDIR = "generated_images"
+
+
+def _is_dashscope_provider(provider: str) -> bool:
+    return provider.strip().lower() in _DASHSCOPE_PROVIDER_NAMES
+
+
+def _is_huawei_maas_api_base(api_base: str) -> bool:
+    base = (api_base or "").lower()
+    if any(marker in base for marker in _HUAWEI_MAAS_API_MARKERS):
+        return True
+    return "modelarts" in base and "maas" in base
+
+
+def _is_huawei_maas_config(provider: str, api_base: str) -> bool:
+    """Huawei MaaS image API is OpenAI-path compatible; detect by api_base."""
+    _ = provider
+    return _is_huawei_maas_api_base(api_base)
+
+
+def _default_size_for_provider(provider: str, api_base: str = "") -> str:
+    if _is_dashscope_provider(provider):
+        return _DEFAULT_SIZE_DASHSCOPE
+    if _is_huawei_maas_config(provider, api_base):
+        return _DEFAULT_SIZE_HUAWEI_MAAS
+    return _DEFAULT_SIZE_OPENAI
+
+
+def _map_to_openai_compatible_size(width: int, height: int) -> str:
+    """Map arbitrary dimensions to common OpenAI-compatible size enums."""
+    if (width, height) in _OPENAI_STANDARD_SIZES:
+        return f"{width}x{height}"
+    if width == height:
+        return _DEFAULT_SIZE_OPENAI
+    if width > height:
+        return "1792x1024"
+    return "1024x1792"
+
+
+def normalize_image_size(
+    size: str | None,
+    provider: str,
+    *,
+    api_base: str = "",
+) -> str:
+    """Normalize size for DashScope (*), Huawei MaaS (pass-through x), or OpenAI enums."""
+    raw = str(size or "").strip()
+    if not raw:
+        return _default_size_for_provider(provider, api_base)
+
+    match = _SIZE_DIMENSIONS_RE.match(raw)
+    if not match:
+        return raw
+
+    width, height = int(match.group(1)), int(match.group(2))
+    if _is_dashscope_provider(provider):
+        return f"{width}*{height}"
+    if _is_huawei_maas_config(provider, api_base):
+        return f"{width}x{height}"
+    return _map_to_openai_compatible_size(width, height)
+
+
+def _parse_optional_seed(inputs: dict[str, Any]) -> int | None:
+    """Parse seed from tool inputs; ignore invalid values with a debug log."""
+    if "seed" not in inputs:
+        return None
+    raw = inputs["seed"]
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        logger.debug("[text_to_image] ignoring invalid seed value: %r", raw)
+        return None
+
+
+def _build_image_gen_kwargs(
+    provider: str,
+    inputs: dict[str, Any],
+    *,
+    size: str,
+    n: int,
+    api_base: str = "",
+) -> dict[str, Any]:
+    gen_kwargs: dict[str, Any] = {
+        "size": normalize_image_size(size, provider, api_base=api_base),
+        "n": n,
+    }
+    if _is_huawei_maas_config(provider, api_base):
+        # Huawei MaaS: single image, b64_json only; supports seed/watermark.
+        gen_kwargs["n"] = 1
+        gen_kwargs["response_format"] = "b64_json"
+        gen_kwargs["watermark"] = bool(inputs.get("watermark", False))
+        seed = _parse_optional_seed(inputs)
+        if seed is not None:
+            gen_kwargs["seed"] = seed
+        return gen_kwargs
+
+    if not _is_dashscope_provider(provider):
+        return gen_kwargs
+
+    gen_kwargs["prompt_extend"] = bool(inputs.get("prompt_extend", True))
+    gen_kwargs["watermark"] = bool(inputs.get("watermark", False))
+    negative_prompt = inputs.get("negative_prompt")
+    if negative_prompt is not None and str(negative_prompt).strip():
+        gen_kwargs["negative_prompt"] = str(negative_prompt).strip()
+    seed = _parse_optional_seed(inputs)
+    if seed is not None:
+        gen_kwargs["seed"] = seed
+    return gen_kwargs
 
 
 def _get_image_gen_credentials() -> tuple[str, str, str, str]:
@@ -251,27 +364,20 @@ async def _text_to_image_impl(inputs: dict[str, Any]) -> str:
     if not prompt:
         return "[ERROR]: prompt cannot be empty."
 
-    size = str(inputs.get("size", _DEFAULT_SIZE) or _DEFAULT_SIZE).strip()
-    negative_prompt = inputs.get("negative_prompt")
+    size_raw = str(inputs.get("size") or "").strip()
     n_raw = inputs.get("n", 1)
     try:
         n = max(1, min(int(n_raw), 4))
     except (TypeError, ValueError):
         n = 1
 
-    gen_kwargs: dict[str, Any] = {
-        "size": size,
-        "n": n,
-        "prompt_extend": bool(inputs.get("prompt_extend", True)),
-        "watermark": bool(inputs.get("watermark", False)),
-    }
-    if negative_prompt is not None and str(negative_prompt).strip():
-        gen_kwargs["negative_prompt"] = str(negative_prompt).strip()
-    if "seed" in inputs:
-        try:
-            gen_kwargs["seed"] = int(inputs["seed"])
-        except (TypeError, ValueError):
-            pass
+    gen_kwargs = _build_image_gen_kwargs(
+        provider,
+        inputs,
+        size=size_raw or _default_size_for_provider(provider, api_base),
+        n=n,
+        api_base=api_base,
+    )
 
     model = _build_image_gen_model(api_key, api_base, model_name, provider)
     logger.info(
@@ -279,7 +385,7 @@ async def _text_to_image_impl(inputs: dict[str, Any]) -> str:
         model_name,
         provider,
         api_base,
-        size,
+        gen_kwargs.get("size"),
         n,
     )
     response = await model.generate_image(
@@ -301,8 +407,10 @@ async def _text_to_image_impl(inputs: dict[str, Any]) -> str:
     description=(
         "Generate images from a text prompt (text-to-image). "
         "Use when the user asks to create, draw, or generate pictures from description. "
-        "Input: prompt (required text description); optional size (e.g. 1920*1080), "
-        "negative_prompt, n (image count). "
+        "Input: prompt (required text description); optional size "
+        "(DashScope: 1920*1080; OpenAI/Huawei MaaS: 1024x1024 — * and x separators accepted), "
+        "negative_prompt, n (image count; DashScope-only: prompt_extend; "
+        "Huawei MaaS/OpenAI-compatible: watermark, seed). "
         "Output: local file path(s) under the agent workspace generated_images directory."
     ),
 )

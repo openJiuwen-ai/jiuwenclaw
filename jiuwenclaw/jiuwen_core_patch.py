@@ -15,6 +15,8 @@ from openjiuwen.core.common.security.url_utils import UrlUtils
 from openjiuwen.core.foundation.llm.schema.config import ModelClientConfig
 from openjiuwen.core.foundation.llm.model_clients.openai_model_client import \
     AssistantMessageChunk, OpenAIModelClient, ToolCall, UsageMetadata
+from openjiuwen.core.foundation.llm.schema import ImageGenerationResponse
+from openjiuwen.core.foundation.llm.schema.message import UserMessage
 
 from openjiuwen.core.foundation.llm.model_clients.siliconflow_model_client import (
     SiliconFlowModelClient,
@@ -29,6 +31,38 @@ _retry_session: ContextVar[Optional[Any]] = ContextVar("retry_session", default=
 
 
 _ORIGINAL_BUILD_REQUEST_PARAMS = None
+_ORIGINAL_GENERATE_IMAGE = None
+
+_HUAWEI_MAAS_API_MARKERS = (
+    "modelarts-maas.com",
+    "modelarts-maas.cn",
+)
+
+
+def _is_huawei_maas_api_base(api_base: str) -> bool:
+    """Detect Huawei Cloud ModelArts MaaS image/chat endpoints."""
+    base = (api_base or "").lower()
+    if any(marker in base for marker in _HUAWEI_MAAS_API_MARKERS):
+        return True
+    return "modelarts" in base and "maas" in base
+
+
+def _strip_b64_data_uri_prefix(value: str) -> str:
+    """Huawei MaaS may return ``data:image/...;base64,<payload>`` in b64_json."""
+    text = str(value or "").strip()
+    if text.startswith("data:") and "," in text:
+        return text.split(",", 1)[1]
+    return text
+
+
+def _normalize_huawei_image_size(size: str | None) -> str | None:
+    """Huawei MaaS uses ``WxH``; accept ``*`` / ``×`` separators from tool input."""
+    if size is None:
+        return None
+    text = str(size).strip()
+    if not text:
+        return None
+    return text.replace("*", "x").replace("×", "x")
 
 
 def configure_openjiuwen_logging_under_jiuwenclaw(subdir: str = "openjiuwen") -> None:
@@ -674,6 +708,69 @@ class PatchOpenAIModelClient(RetryMixin, OpenAIModelClient):
         ):
             yield chunk
 
+    async def generate_image(
+        self,
+        messages: list[UserMessage],
+        *,
+        model: str | None = None,
+        size: str | None = "1664*928",
+        negative_prompt: str | None = None,
+        n: int | None = 1,
+        prompt_extend: bool = True,
+        watermark: bool = False,
+        seed: int = 0,
+        **kwargs: Any,
+    ) -> ImageGenerationResponse:
+        """OpenAI-compatible image generation with Huawei MaaS request/response quirks."""
+        api_base = getattr(self.model_client_config, "api_base", "") or ""
+        is_huawei_maas = _is_huawei_maas_api_base(api_base)
+
+        call_kwargs = dict(kwargs)
+        call_size = size
+        call_n = n
+        call_negative_prompt = negative_prompt
+
+        if is_huawei_maas:
+            call_size = _normalize_huawei_image_size(size)
+            call_n = 1
+            call_negative_prompt = None
+            call_kwargs.pop("prompt_extend", None)
+            call_kwargs.pop("negative_prompt", None)
+            call_kwargs.setdefault("response_format", "b64_json")
+            call_kwargs["watermark"] = watermark
+            if seed:
+                call_kwargs["seed"] = seed
+
+        if is_huawei_maas:
+            # Upstream only forwards vendor extras via **kwargs; keep wire params there.
+            result = await _ORIGINAL_GENERATE_IMAGE(
+                self,
+                messages,
+                model=model,
+                size=call_size,
+                n=call_n,
+                **call_kwargs,
+            )
+        else:
+            result = await _ORIGINAL_GENERATE_IMAGE(
+                self,
+                messages,
+                model=model,
+                size=call_size,
+                negative_prompt=call_negative_prompt,
+                n=call_n,
+                prompt_extend=prompt_extend,
+                watermark=watermark,
+                seed=seed,
+                **call_kwargs,
+            )
+
+        if not is_huawei_maas or not result.images_base64:
+            return result
+
+        cleaned_b64 = [_strip_b64_data_uri_prefix(item) for item in result.images_base64]
+        return result.model_copy(update={"images_base64": cleaned_b64})
+
 
 class PatchSiliconFlowModelClient(RetryMixin, SiliconFlowModelClient):
     """带重试的 SiliconFlowModelClient。结构同 OpenAI，包装原始方法即可。"""
@@ -781,9 +878,11 @@ def apply_siliconflow_model_client_patch() -> None:
 
 def apply_openai_model_client_patch() -> None:
     """Monkey-patch upstream OpenAIModelClient with JiuwenClaw SSL/headers/stream behavior."""
-    global _ORIGINAL_BUILD_REQUEST_PARAMS
+    global _ORIGINAL_BUILD_REQUEST_PARAMS, _ORIGINAL_GENERATE_IMAGE
     if _ORIGINAL_BUILD_REQUEST_PARAMS is None:
         _ORIGINAL_BUILD_REQUEST_PARAMS = OpenAIModelClient._build_request_params
+    if _ORIGINAL_GENERATE_IMAGE is None:
+        _ORIGINAL_GENERATE_IMAGE = OpenAIModelClient.generate_image
 
     _impl = PatchOpenAIModelClient.__dict__
     setattr(OpenAIModelClient, "_create_async_openai_client", _impl["_create_async_openai_client"])
@@ -792,6 +891,7 @@ def apply_openai_model_client_patch() -> None:
 
     OpenAIModelClient.invoke = PatchOpenAIModelClient.invoke
     OpenAIModelClient.stream = PatchOpenAIModelClient.stream
+    OpenAIModelClient.generate_image = _impl["generate_image"]
     _patch_railed_model_call_session()
     _static_attrs = ('_extract_error_details', '_extract_retry_after', '_raise_mock_error')
     _instance_attrs = (
