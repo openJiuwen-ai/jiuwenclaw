@@ -1711,10 +1711,15 @@ async def _run(
     await cron_scheduler.start()
 
     # ---------- LeaderElection 初始化 ----------
-    from jiuwenclaw.gateway.leader_election import LeaderElection
-
-    leader_election = LeaderElection.get_instance()
-    await leader_election.start()
+    leader_election = None
+    config = get_config()
+    deployment_mode = str((config.get("gateway") or {}).get("deployment_mode", "standalone")).strip().lower()
+    if deployment_mode != "standalone":
+        from jiuwenclaw.gateway.leader_election import LeaderElection
+        leader_election = LeaderElection.get_instance()
+        await leader_election.start()
+    else:
+        logger.info("[App] standalone mode, skip LeaderElection")
 
     # 先同步完成监听绑定，避免 IDE/ACP 子进程在端口尚未就绪时连接导致多次重试。
     logger.info("[App] about to call gateway_server.start()")
@@ -1862,7 +1867,8 @@ async def _run(
         if heartbeat_enabled:
             await heartbeat_service.stop()
         await message_handler.stop_forwarding()
-        await leader_election.stop()
+        if leader_election is not None:
+            await leader_election.stop()
         await extension_manager.shutdown_all_extensions()
         await shutdown_gateway_redis()
         await client.disconnect()
