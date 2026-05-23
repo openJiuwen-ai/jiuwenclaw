@@ -46,6 +46,12 @@ export interface WebConnectOptions {
   apiBase?: string;
   model?: string;
   projectPath?: string;
+  /** 请求扩展字段：user_id（透传，可为空字符串忽略）。 */
+  userId?: string;
+  /** 请求扩展字段：group_id（透传，可为空字符串忽略）。 */
+  groupId?: string;
+  /** 自定义请求扩展字段，键名按 forward_headers 白名单与后端约定。 */
+  extraFields?: Record<string, string>;
 }
 
 export interface WebError extends Error {
