@@ -76,7 +76,10 @@ class SandboxClient:
         remote_path: str,
         sandbox_id: str,
     ) -> ExecutionResult:
-        return self._placeholder_result("upload_file")
+        return ExecutionResult(
+            success=True,
+            output=f"placeholder upload_file: {local_path} -> {remote_path} (sandbox_id={sandbox_id})",
+        )
 
     async def download_file(
         self,

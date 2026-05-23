@@ -12,6 +12,7 @@ from jiuwenclaw.config import get_config
 from jiuwenclaw.gateway.sandbox_client import SandboxClient, SandboxConfig
 from jiuwenclaw.sandbox.claw_api_key import get_claw_api_key
 from jiuwenclaw.sandbox.sandbox_dcs_store import SandboxDcsConfig, SandboxDcsStore
+from jiuwenclaw.sandbox.sandbox_init_data import upload_sandbox_init_data
 from jiuwenclaw.e2a.models import E2AEnvelope
 from jiuwenclaw.gateway.agent_client import AgentServerClient, WebSocketAgentServerClient
 from jiuwenclaw.sandbox.open_ability import (
@@ -363,12 +364,21 @@ class SandboxRouterAgentClient(AgentServerClient):
             return {"sandbox_id": sandbox_id}
         api_key = get_claw_api_key()
         record = await store.save_sandbox(sandbox_id, api_key=api_key)
+        await self._upload_sandbox_init_data(sandbox_id, api_key)
         return {
             "sandbox_id": record.sandbox_id,
             "api_key": api_key,
             "api_key_sha256": record.api_key_sha256,
             "created_at": record.created_at,
         }
+
+    async def _upload_sandbox_init_data(self, sandbox_id: str, api_key: str) -> None:
+        sandbox_client = self._get_sandbox_client()
+        await upload_sandbox_init_data(
+            sandbox_client,
+            sandbox_id=sandbox_id,
+            api_key=api_key,
+        )
 
     async def _delete_sandbox_dcs_record(self, sandbox_id: str) -> None:
         store = self._get_dcs_store()
