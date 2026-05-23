@@ -1,120 +1,114 @@
 # AGENT Definition Usage
-Translate agentDefinition entries from `<workspace>/resources/agents/available_agents.json` into `agent_as_a_tool(agentId = "", query="", filesInfo = [])` calls in the new skill.
+
+Translate agentDefinition entries from `<workspace>/resources/agents/available_agents.json` into `agent_as_a_tool(agentId="", query="", filesInfo=[])` calls in the new skill.
+
+## Metadata Note
+
+If the skill uses agent dependencies, declare them in `SKILL.md` frontmatter so packaging can copy the source definitions:
+
+```yaml
+metadata:
+  agents:
+    - agentId: "aaabbbccc"
+```
+
+Only declare agents the skill actually calls. Do not add empty placeholders. `agentId` must match the source definition exactly.
 
 ## Input shape
+
+`agent_as_a_tool` input is a JSON object with exactly these fields:
+
 ```json
 {
-  "agentId": "string",
-  "name": "string",
-  "description": "string",
+  "agentId": "aaabbbccc",
+  "query": "查询北京三日游玩攻略",
+  "filesInfo": []
+}
+```
+
+`filesInfo` is an array of file metadata objects. Use `[]` when no files need to be forwarded.
+
+Build `query` and `filesInfo` from the `agentDefinition.parameters` JSON Schema.
+
+## agentDefinition fields
+
+Read the source agent definitions from `<workspace>/resources/agents/available_agents.json`:
+
+```json
+{
+  "agentId": "aaabbbccc",
+  "name": "travelAgent",
+  "description": "查询出行相关资讯与方案",
   "parameters": {
     "type": "object",
-    "properties": {},
-    "required": []
+    "properties": {
+      "query": {
+        "type": "string",
+        "description": "用户查询问题内容"
+      },
+      "filesInfo": {
+        "type": "Array<Object>",
+        "description": "附带的文件资料信息"
+      }
+    },
+    "required": [
+      "query"
+    ]
   }
 }
 ```
 
-### 字段说明
-|字段|必填|说明|
-| ---- | ---- | ---- |
-|agentId|是|Agent唯一标识，调用入参匹配该值|
-|name|否|Agent业务名称|
-|description|是|Agent能力描述|
-|parameters|是|入参JSON Schema，兼容OpenAI参数格式|
-|properties|是|参数属性定义|
-|required|是|标记必填参数名数组|
+Field notes:
 
-### 标准参数释义
-- query：字符串类型，用户实际查询指令内容
-- filesInfo：对象数组类型，关联上传文件信息集合
-```json
-{
-  "agentId": "string",
-  "name": "string",
-  "description": "string",
-  "parameters": {
-    "type": "object",
-    "properties": {},
-    "required": []
-  }
-}
-```
-
-### 字段说明
-|字段|必填|说明|
-| ---- | ---- | ---- |
-|agentId|是|Agent唯一标识，调用入参匹配该值|
-|name|否|Agent业务名称|
-|description|是|Agent能力描述|
-|parameters|是|入参JSON Schema，兼容OpenAI参数格式|
-|properties|是|参数属性定义|
-|required|是|标记必填参数名数组|
-
-### 标准参数释义
-- query：字符串类型，用户实际查询指令内容
-- filesInfo：对象数组类型，关联上传文件信息集合
+| Field | Required | How to use it |
+| --- | --- | --- |
+| `agentId` | Yes | Copy exactly into `agent_as_a_tool.agentId`. |
+| `name` | No | Human-readable agent name; do not use as the call identifier. |
+| `description` | Yes | Use to decide when delegation is appropriate. |
+| `parameters` | Yes | JSON Schema used to construct `query`, `filesInfo`, and any required call inputs. |
+| `parameters.properties.query` | Usually | User task content to pass as `agent_as_a_tool.query`. |
+| `parameters.properties.filesInfo` | Usually | File metadata to pass as `agent_as_a_tool.filesInfo`; use `[]` when no files are needed. |
+| `parameters.required` | Yes | Required fields that must be present before calling. |
 
 ## Safety
-- 严格依据入参`agentId`匹配调用对象，不可篡改标识
-- 必填参数必须传值，缺失则无法正常发起Agent调用
-- 文件信息按需传入，无文件场景默认空数组`[]`
-- 严格依据入参`agentId`匹配调用对象，不可篡改标识
-- 必填参数必须传值，缺失则无法正常发起Agent调用
-- 文件信息按需传入，无文件场景默认空数组`[]`
+
+- Copy `agentId` exactly; never use `name` as the call identifier.
+- Make `query` self-contained with the user's task, constraints, and expected output.
+- Pass `filesInfo=[]` when no task-relevant files need to be forwarded.
+- Include only task-relevant file metadata in `filesInfo`.
+- Include all required fields from `agentDefinition.parameters.required`.
+- Ask the user when a required value is missing and cannot be safely inferred.
 
 ## Example
-### 原始Agent定义
+
+agentDefinition:
+
 ```json
 {
-    "agentId": "aaabbbccc",
-    "name": "travelAgent",
-    "description": "查询出行相关资讯与方案",
-    "parameters": {
-        "type": "object",
-        "properties": {
-            "query": {
-                "type": "string",
-                "description": "用户查询问题内容"
-            },
-            "filesInfo": {
-                "type": "Array<Object>",
-                "description": "附带的文件资料信息"
-            }
-        },
-        "required": [
-            "query"
-        ]
-    }
-}
-```
-### 原始Agent定义
-```json
-{
-    "agentId": "aaabbbccc",
-    "name": "travelAgent",
-    "description": "查询出行相关资讯与方案",
-    "parameters": {
-        "type": "object",
-        "properties": {
-            "query": {
-                "type": "string",
-                "description": "用户查询问题内容"
-            },
-            "filesInfo": {
-                "type": "Array<Object>",
-                "description": "附带的文件资料信息"
-            }
-        },
-        "required": [
-            "query"
-        ]
-    }
+  "agentId": "aaabbbccc",
+  "name": "travelAgent",
+  "description": "查询出行相关资讯与方案",
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "query": {
+        "type": "string",
+        "description": "用户查询问题内容"
+      },
+      "filesInfo": {
+        "type": "Array<Object>",
+        "description": "附带的文件资料信息"
+      }
+    },
+    "required": [
+      "query"
+    ]
+  }
 }
 ```
 
 Generated:
 Call the agent_as_a_tool tool to execute:
 ```
-agent_as_a_tool(agentId = "aaabbbccc", query="查询北京三日游玩攻略", filesInfo = [])
+    agent_as_a_tool(agentId="aaabbbccc", query="查询北京三日游玩攻略", filesInfo=[])
 ```

@@ -99,7 +99,7 @@ def collect_tool_sources(metadata: dict, workspace_path: Path) -> tuple[list[tup
                 filename = f"{plugin_id}__{tool_name}.json"
                 source_pairs.append((
                     workspace_path / "resources" / "available-tools" / filename,
-                    reference_path / "available-tools" / filename,
+                    reference_path / "tools" / filename,
                 ))
 
     if has_dependency(metadata, ("agents", "agent_tools", "agentTools")):
