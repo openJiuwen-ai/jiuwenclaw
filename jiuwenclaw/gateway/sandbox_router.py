@@ -14,7 +14,8 @@ from jiuwenclaw.sandbox.sandbox_routing_settings import SandboxRoutingSettings
 from jiuwenclaw.sandbox.sandbox_dcs_store import SandboxDcsStore
 from jiuwenclaw.sandbox.sandbox_init_data import upload_sandbox_init_data
 from jiuwenclaw.e2a.models import E2AEnvelope
-from jiuwenclaw.gateway.agent_client import AgentServerClient, WebSocketAgentServerClient
+from jiuwenclaw.gateway.agent_client import AgentServerClient
+from jiuwenclaw.gateway.open_ability_client import OpenAbilityWebSocketClient
 from jiuwenclaw.sandbox.open_ability import (
     OpenAbilityConfig,
     OpenAbilityEndpoint,
@@ -378,7 +379,7 @@ class SandboxRouterAgentClient(AgentServerClient):
         open_ability_cfg = self._get_open_ability_config()
         endpoint = await self._wait_openability_endpoint(store, sandbox_id, open_ability_cfg)
         ws_uri = build_openability_ws_uri(endpoint, ws_path=open_ability_cfg.ws_path)
-        client = WebSocketAgentServerClient()
+        client = OpenAbilityWebSocketClient(sandbox_id=sandbox_id)
         logger.info(
             "Connecting OpenAbility WebSocket for sandbox_id=%s routing_key=%s uri=%s",
             sandbox_id,

@@ -96,14 +96,26 @@ Router 维护的 runtime 信息包括：
 
 ### 2.6 OpenAbility WebSocket 建链
 
-沙箱创建并写入 DCS 后，Gateway 不再等待 Agent 反向连入，而是：
+沙箱创建并写入 DCS 后：
 
 1. 向 DCS 写入：`key=jiuwen:sandboxApiKey:{sandbox_id}`，`value=API Key 的 SHA256`（明文 API Key 不落库）。
 2. 从 DCS `key=jiuwen:sandboxToOA:{sandbox_id}` 轮询读取 OpenAbility 地址，`value={ip}:{port}`。
-3. 主动连接 OpenAbility WebSocket（`WebSocketAgentServerClient`），由该服务转发与沙箱内 AgentServer 的 WS 事件。
+3. 使用 `GATEWAY_TO_OA_WS_PATH` 拼出 `ws://{ip}:{port}{path}`，由 **`OpenAbilityWebSocketClient`** 主动连接 OpenAbility（无鉴权、无 `connection.ack` 首帧）。
+4. OA 按外层帧中的 `sandboxId` 转发至沙箱内 AgentServer；内层仍为 E2A 线协议。
+
+**Gateway ↔ OpenAbility 线格式**（一条 WebSocket Text 帧 = 一个 JSON 对象）：
+
+```json
+{
+  "sandboxId": "sb-xxx",
+  "msgDetail": "<json.dumps(E2AEnvelope 或 E2AResponse)>"
+}
+```
+
+实现：`jiuwenclaw/gateway/open_ability_wire.py`（wrap/unwrap）、`jiuwenclaw/gateway/open_ability_client.py`。
 
 ```python
-_connect_open_ability_client(sandbox_id, routing_key, metadata) -> AgentServerClient
+_connect_open_ability_client(sandbox_id, routing_key, metadata) -> OpenAbilityWebSocketClient
 _disconnect_agent_client(sandbox_id, agent_client) -> None
 ```
 
@@ -128,14 +140,6 @@ SandboxClient 固定：`duration_seconds=3600`，`timeout_seconds=120`，`metada
 
 OpenAbility 固定：`use_tls=false`，`connect_timeout_seconds=10`，`readiness_poll_interval_seconds=0.5`，`readiness_timeout_seconds=60`。
 
-## 4. 当前未完成项
-
-以下部分仍等待沙箱反向建链穿刺结果：
-
-- 沙箱内 Agent 如何主动连接回 Gateway。
-- Gateway 如何将 `sandbox_id` / `routing_key` 与反向连接绑定。
-- Router 内部真实反向建链方法的生产实现。
-- 真实 sandbox agent 建链后的端到端请求和流式响应验证。
 
 ## 5. 已覆盖测试
 
@@ -160,14 +164,12 @@ OpenAbility 固定：`use_tls=false`，`connect_timeout_seconds=10`，`readiness
 ```bash
 uv run --no-sync pytest -o addopts='' \
   tests/unit_tests/channel/test_vibeskill_session_store.py \
-  tests/unit_tests/gateway/test_sandbox_router.py \
+  tests/unit_tests/gateway/test_sandbox_router_init_data.py \
+  tests/unit_tests/gateway/test_open_ability_wire.py \
+  tests/unit_tests/gateway/test_open_ability_client.py \
   tests/unit_tests/e2a/test_gateway_normalize.py
 ```
 
 ## 6. 下一步
 
-下一阶段应优先补齐真实反向建链逻辑：
-
-1. 明确沙箱内 Agent 主动连回 Gateway 的协议与鉴权信息。
-2. 按 OpenAbility 协议完善 `_connect_open_ability_client`（鉴权头、路径、就绪判断等）。
-3. 在 Router 开启模式下跑通 VibeSkill 到 sandbox agent 的端到端请求。
+1. 在 Router 开启模式下，对接真实 OpenAbility + 沙箱 AgentServer，跑通 VibeSkill 端到端请求。
