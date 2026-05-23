@@ -8,9 +8,9 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any
 
-from jiuwenclaw.config import get_config
 from jiuwenclaw.gateway.sandbox_client import SandboxClient, SandboxConfig
 from jiuwenclaw.sandbox.claw_api_key import get_claw_api_key
+from jiuwenclaw.sandbox.sandbox_routing_settings import SandboxRoutingSettings
 from jiuwenclaw.sandbox.sandbox_dcs_store import SandboxDcsStore
 from jiuwenclaw.sandbox.sandbox_init_data import upload_sandbox_init_data
 from jiuwenclaw.e2a.models import E2AEnvelope
@@ -19,7 +19,6 @@ from jiuwenclaw.sandbox.open_ability import (
     OpenAbilityConfig,
     OpenAbilityEndpoint,
     build_openability_ws_uri,
-    redact_openability_ws_uri,
 )
 from jiuwenclaw.schema.agent import AgentResponse, AgentResponseChunk
 from jiuwenclaw.utils import logger
@@ -50,58 +49,38 @@ class SandboxRouterAgentClient(AgentServerClient):
         self,
         *,
         max_sandboxes: int | None = None,
-        queue_enabled: bool | None = None,
         queue_max_size: int | None = None,
         queue_timeout_seconds: float | None = None,
         idle_timeout_seconds: float | None = None,
         idle_check_interval_seconds: float | None = None,
     ) -> None:
-        gateway_cfg = self._gateway_config()
-        sandbox_routing_cfg = (
-            gateway_cfg.get("sandbox_routing")
-            if isinstance(gateway_cfg.get("sandbox_routing"), dict)
-            else {}
-        )
+        settings = SandboxRoutingSettings.from_env()
         self._sandbox_client: SandboxClient | None = None
         self._dcs_store: SandboxDcsStore | None = None
-        max_sandboxes_value = (
-            max_sandboxes
-            if max_sandboxes is not None
-            else sandbox_routing_cfg.get("max_sandboxes")
-            or 4
+        self._open_ability_config: OpenAbilityConfig | None = None
+        self._max_sandboxes = max(
+            1,
+            int(max_sandboxes if max_sandboxes is not None else settings.max_sandboxes),
         )
-        self._max_sandboxes = max(1, int(max_sandboxes_value))
-        self._queue_enabled = self._cfg_bool(
-            queue_enabled if queue_enabled is not None else sandbox_routing_cfg.get("queue_enabled"),
-            True,
+        self._queue_enabled = True
+        self._queue_max_size = max(
+            1,
+            int(queue_max_size if queue_max_size is not None else settings.queue_max_size),
         )
-        queue_max_size_value = (
-            queue_max_size
-            if queue_max_size is not None
-            else sandbox_routing_cfg.get("queue_max_size")
-            or 100
-        )
-        self._queue_max_size = max(1, int(queue_max_size_value))
         self._queue_timeout_seconds = float(
             queue_timeout_seconds
             if queue_timeout_seconds is not None
-            else sandbox_routing_cfg.get("queue_timeout_seconds")
-            or 60.0
+            else settings.queue_timeout_seconds
         )
         self._idle_timeout_seconds = float(
             idle_timeout_seconds
             if idle_timeout_seconds is not None
-            else sandbox_routing_cfg.get("idle_timeout_seconds")
-            or 300.0
+            else settings.idle_timeout_seconds
         )
-        self._idle_check_interval_seconds = max(
-            30.0,
-            float(
-                idle_check_interval_seconds
-                if idle_check_interval_seconds is not None
-                else sandbox_routing_cfg.get("idle_check_interval_seconds")
-                or 30.0
-            ),
+        self._idle_check_interval_seconds = float(
+            idle_check_interval_seconds
+            if idle_check_interval_seconds is not None
+            else settings.idle_check_interval_seconds
         )
         self._runtimes: dict[str, SandboxRuntime] = {}
         self._locks: dict[str, asyncio.Lock] = {}
@@ -396,25 +375,15 @@ class SandboxRouterAgentClient(AgentServerClient):
         metadata: dict[str, Any],
     ) -> AgentServerClient:
         store = self._get_dcs_store()
-        open_ability_cfg = self._openability_config()
-        endpoint = await self._wait_openability_endpoint(
-            store,
-            sandbox_id,
-            open_ability_config=open_ability_cfg,
-        )
-        api_key = str(metadata.get("api_key") or "").strip()
-        ws_uri = build_openability_ws_uri(
-            endpoint,
-            sandbox_id=sandbox_id,
-            api_key=api_key,
-            config=open_ability_cfg,
-        )
+        open_ability_cfg = self._get_open_ability_config()
+        endpoint = await self._wait_openability_endpoint(store, sandbox_id, open_ability_cfg)
+        ws_uri = build_openability_ws_uri(endpoint, ws_path=open_ability_cfg.ws_path)
         client = WebSocketAgentServerClient()
         logger.info(
             "Connecting OpenAbility WebSocket for sandbox_id=%s routing_key=%s uri=%s",
             sandbox_id,
             routing_key,
-            redact_openability_ws_uri(ws_uri),
+            ws_uri,
         )
         await asyncio.wait_for(
             client.connect(ws_uri),
@@ -426,7 +395,6 @@ class SandboxRouterAgentClient(AgentServerClient):
         self,
         store: SandboxDcsStore,
         sandbox_id: str,
-        *,
         open_ability_config: OpenAbilityConfig,
     ) -> OpenAbilityEndpoint:
         deadline = time.time() + open_ability_config.readiness_timeout_seconds
@@ -439,90 +407,19 @@ class SandboxRouterAgentClient(AgentServerClient):
             f"OpenAbility endpoint not found in DCS for sandbox_id={sandbox_id}"
         )
 
-    def _openability_config(self) -> OpenAbilityConfig:
-        gateway_cfg = self._gateway_config()
-        open_ability_cfg = (
-            gateway_cfg.get("open_ability")
-            if isinstance(gateway_cfg.get("open_ability"), dict)
-            else {}
-        )
-        return OpenAbilityConfig.from_dict(open_ability_cfg)
+    def _get_open_ability_config(self) -> OpenAbilityConfig:
+        if self._open_ability_config is None:
+            self._open_ability_config = OpenAbilityConfig.from_env()
+        return self._open_ability_config
 
     async def _disconnect_agent_client(self, sandbox_id: str, agent_client: AgentServerClient | None) -> None:
         if agent_client is not None:
             await agent_client.disconnect()
 
     def _get_sandbox_client(self) -> SandboxClient:
-        if self._sandbox_client is not None:
-            return self._sandbox_client
-        gateway_cfg = self._gateway_config()
-        sandbox_client_cfg = (
-            gateway_cfg.get("sandbox_client")
-            if isinstance(gateway_cfg.get("sandbox_client"), dict)
-            else {}
-        )
-        api_base = str(
-            sandbox_client_cfg.get("api_base")
-            or sandbox_client_cfg.get("sandbox_manager_base_url")
-            or ""
-        ).strip()
-        if not api_base:
-            raise RuntimeError("gateway.sandbox_routing.enabled=true requires gateway.sandbox_client.api_base")
-        duration_raw = (
-            sandbox_client_cfg.get("duration_seconds")
-            or sandbox_client_cfg.get("sandbox_default_duration_seconds")
-        )
-        duration_seconds = self._optional_int(duration_raw)
-        sandbox_metadata = sandbox_client_cfg.get("metadata")
-        metadata: dict[str, str] = {}
-        if isinstance(sandbox_metadata, dict):
-            metadata = {str(k): str(v) for k, v in sandbox_metadata.items()}
-        config = SandboxConfig(
-            api_base=api_base,
-            template_id=str(
-                sandbox_client_cfg.get("template_id")
-                or sandbox_client_cfg.get("sandbox_default_template_id")
-                or ""
-            ),
-            duration_seconds=duration_seconds if duration_seconds is not None else 900,
-            timeout_seconds=int(
-                float(
-                    sandbox_client_cfg.get("timeout_seconds")
-                    or sandbox_client_cfg.get("sandbox_api_timeout_seconds")
-                    or 120.0
-                )
-            ),
-            metadata=metadata,
-            command_timeout_seconds=int(
-                sandbox_client_cfg.get("command_timeout_seconds") or 60
-            ),
-            code_timeout_seconds=int(sandbox_client_cfg.get("code_timeout_seconds") or 60),
-        )
-        self._sandbox_client = SandboxClient(config)
+        if self._sandbox_client is None:
+            self._sandbox_client = SandboxClient(SandboxConfig.from_env())
         return self._sandbox_client
-
-    @staticmethod
-    def _gateway_config() -> dict[str, Any]:
-        cfg = get_config()
-        gateway_cfg = cfg.get("gateway") if isinstance(cfg.get("gateway"), dict) else {}
-        return gateway_cfg
-
-    @staticmethod
-    def _cfg_bool(value: Any, default: bool = False) -> bool:
-        if isinstance(value, bool):
-            return value
-        if value is None:
-            return default
-        return str(value).strip().lower() in {"1", "true", "yes", "on"}
-
-    @staticmethod
-    def _optional_int(value: Any) -> int | None:
-        if value is None:
-            return None
-        raw = str(value).strip()
-        if not raw:
-            return None
-        return int(raw)
 
     def _notify_next_waiter(self) -> None:
         while self._waiters:

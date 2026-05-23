@@ -107,42 +107,26 @@ _connect_open_ability_client(sandbox_id, routing_key, metadata) -> AgentServerCl
 _disconnect_agent_client(sandbox_id, agent_client) -> None
 ```
 
-需配置环境变量 `SANDBOX_DCS_URL`，并配置 `gateway.open_ability`（随 `sandbox_routing.enabled` 一并生效）。
-
 ## 3. 配置与运行状态
 
-新增配置开关：
+通过环境变量 `SANDBOX_ENABLE=true/false` 开关沙箱路由。默认关闭，Gateway 使用原有 `WebSocketAgentServerClient`；开启时使用 `SandboxRouterAgentClient`。
 
-```yaml
-gateway:
-  sandbox_routing:
-    enabled: false
-```
+路由相关环境变量：
 
-默认关闭，因此不会影响现有单 AgentClient 行为。关闭时 Gateway 使用原有 `WebSocketAgentServerClient`；开启时 Gateway 使用 `SandboxRouterAgentClient`，不创建默认 `WebSocketAgentServerClient` 作为兜底。
+| 变量 | 说明 | 默认 |
+|------|------|------|
+| `SANDBOX_ENABLE` | 是否开启沙箱路由 | `false` |
+| `SANDBOX_MAX_NUM` | 同时存在的沙箱 runtime 上限 | `10` |
+| `SANDBOX_MAX_QUEUE_SIZE` | 达上限时 FIFO 等待队列长度 | `100` |
+| `SANDBOX_IDLE_TIMEOUT_SECONDS` | 空闲沙箱自动回收时间（秒） | `300` |
 
-开启 Router 时需要配置 sandbox client：
+固定：`queue_enabled=true`（始终排队）、`queue_timeout_seconds=60`、`idle_check_interval_seconds=30`。
 
-```yaml
-gateway:
-  sandbox_routing:
-    enabled: true
-    max_sandboxes: 4
-    queue_enabled: true
-    queue_max_size: 100
-    queue_timeout_seconds: 60
-    idle_timeout_seconds: 300
-    idle_check_interval_seconds: 30
+开启时另需：`SANDBOX_API_BASE`、`SANDBOX_TEMPLATE_ID`、`SANDBOX_DCS_URL`、`GATEWAY_TO_OA_WS_PATH`。
 
-  sandbox_client:
-    api_base: "http://127.0.0.1:8000"
-    template_id: "your-template-id"
-    duration_seconds: 900
-    timeout_seconds: 120
-    metadata: {}
-```
+SandboxClient 固定：`duration_seconds=3600`，`timeout_seconds=120`，`metadata={}`。
 
-如果 `gateway.sandbox_routing.enabled=true` 但未配置 `gateway.sandbox_client.api_base`，首次创建 sandbox runtime 时会返回配置缺失错误。
+OpenAbility 固定：`use_tls=false`，`connect_timeout_seconds=10`，`readiness_poll_interval_seconds=0.5`，`readiness_timeout_seconds=60`。
 
 ## 4. 当前未完成项
 

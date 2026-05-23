@@ -813,18 +813,12 @@ async def _run(
             return default
         return str(value).strip().lower() in {"1", "true", "yes", "on"}
 
-    gateway_cfg = startup_cfg.get("gateway") if isinstance(startup_cfg.get("gateway"), dict) else {}
-    sandbox_routing_cfg = (
-        gateway_cfg.get("sandbox_routing")
-        if isinstance(gateway_cfg.get("sandbox_routing"), dict)
-        else {}
-    )
-    sandbox_routing_enabled = _cfg_bool(sandbox_routing_cfg.get("enabled"), False)
+    from jiuwenclaw.sandbox.sandbox_routing_settings import sandbox_routing_enabled
 
     max_retries = int(os.getenv("AGENT_CONNECT_RETRY", "20"))
     retry_interval = float(os.getenv("AGENT_CONNECT_RETRY_INTERVAL", "3"))
 
-    if sandbox_routing_enabled:
+    if sandbox_routing_enabled():
         from jiuwenclaw.gateway.sandbox_router import SandboxRouterAgentClient
 
         client = SandboxRouterAgentClient()

@@ -1,20 +1,44 @@
 from __future__ import annotations
 
+import os
 from dataclasses import asdict, dataclass, field
 from typing import Any, Dict, Optional
 
 import httpx
+
+_SANDBOX_DURATION_SECONDS = 3600
+_SANDBOX_TIMEOUT_SECONDS = 120
 
 
 @dataclass
 class SandboxConfig:
     api_base: str
     template_id: str
-    duration_seconds: int = 900
-    timeout_seconds: int = 120
+    duration_seconds: int = _SANDBOX_DURATION_SECONDS
+    timeout_seconds: int = _SANDBOX_TIMEOUT_SECONDS
     metadata: dict[str, str] = field(default_factory=dict)
     command_timeout_seconds: int = 60
     code_timeout_seconds: int = 60
+
+    @classmethod
+    def from_env(cls) -> SandboxConfig:
+        api_base = os.environ.get("SANDBOX_API_BASE", "").strip()
+        if not api_base:
+            raise RuntimeError(
+                "SANDBOX_API_BASE environment variable is required when sandbox routing is enabled"
+            )
+        template_id = os.environ.get("SANDBOX_TEMPLATE_ID", "").strip()
+        if not template_id:
+            raise RuntimeError(
+                "SANDBOX_TEMPLATE_ID environment variable is required when sandbox routing is enabled"
+            )
+        return cls(
+            api_base=api_base,
+            template_id=template_id,
+            duration_seconds=_SANDBOX_DURATION_SECONDS,
+            timeout_seconds=_SANDBOX_TIMEOUT_SECONDS,
+            metadata={},
+        )
 
 
 @dataclass
