@@ -55,6 +55,51 @@ function skillDevResumeEligible(snapshot: SkillDevRestoreSnapshot): boolean {
   return true;
 }
 
+/** SkillDev adapter 对 Todo 使用 todo_{taskId}，与 UI 上的 taskId 需等价匹配 */
+function normalizeSkillDevScopeId(id: string): string {
+  const trimmed = id.trim();
+  return trimmed.startsWith('todo_') ? trimmed.slice(5) : trimmed;
+}
+
+function skillDevScopeIdsMatch(activeId: string, eventScopeId: string): boolean {
+  const a = activeId.trim();
+  const e = eventScopeId.trim();
+  if (!a || !e) return false;
+  if (a === e) return true;
+  const na = normalizeSkillDevScopeId(a);
+  const ne = normalizeSkillDevScopeId(e);
+  return na === ne;
+}
+
+/** 登记需丢弃流式事件的 task / session（含 todo_ 变体） */
+function addIgnoredTaskScope(target: Set<string>, id: string): void {
+  const trimmed = id.trim();
+  if (!trimmed) return;
+  target.add(trimmed);
+  const normalized = normalizeSkillDevScopeId(trimmed);
+  target.add(normalized);
+  if (!trimmed.startsWith('todo_')) {
+    target.add(`todo_${normalized}`);
+  }
+}
+
+function removeIgnoredTaskScope(target: Set<string>, id: string): void {
+  const trimmed = id.trim();
+  if (!trimmed) return;
+  const normalized = normalizeSkillDevScopeId(trimmed);
+  target.delete(trimmed);
+  target.delete(normalized);
+  target.delete(`todo_${normalized}`);
+}
+
+function isTaskScopeIgnored(target: Set<string>, id: string | null | undefined): boolean {
+  if (!id?.trim()) return false;
+  const trimmed = id.trim();
+  if (target.has(trimmed)) return true;
+  const normalized = normalizeSkillDevScopeId(trimmed);
+  return target.has(normalized) || target.has(`todo_${normalized}`);
+}
+
 export function SkillDevPanel() {
   const { t } = useTranslation();
 
@@ -74,8 +119,41 @@ export function SkillDevPanel() {
   const hasTaskStartedRef = useRef(false);
   // TEST_RUN 阶段：stage key → message ID 映射，用于将 AGENT_OUTPUT 路由到对应 case 卡片
   const caseCardIdMapRef = useRef<Map<string, string>>(new Map());
-  /** 终止后为 true，忽略迟到的流式事件（如 ask_user_question / confirm_request） */
-  const taskCancelledRef = useRef(false);
+  /** 当前 UI 绑定的 task_id，用于过滤其它任务/会话的迟到事件 */
+  const activeTaskIdRef = useRef<string | null>(null);
+  /** 新建/切换任务后需忽略的旧 task_id（后端未终止时仍会推流） */
+  const ignoredTaskIdsRef = useRef<Set<string>>(new Set());
+  /** 每次发起新 run 递增；用于丢弃上一轮 cancel 的迟到 interrupt_result */
+  const runEpochRef = useRef(0);
+  const pendingCancelEpochRef = useRef<number | null>(null);
+
+  const shouldAcceptSkillDevEvent = useCallback((payload: unknown): boolean => {
+    const activeId = activeTaskIdRef.current;
+    if (!activeId) {
+      return false;
+    }
+    // 已终止/已新建替换的任务：丢弃该 scope 下所有迟到事件（含无 task_id 的 chunk）
+    if (isTaskScopeIgnored(ignoredTaskIdsRef.current, activeId)) {
+      return false;
+    }
+    if (!payload || typeof payload !== 'object') {
+      return false;
+    }
+    const data = payload as { task_id?: string; session_id?: string };
+    const eventTaskId =
+      typeof data.task_id === 'string' && data.task_id.trim()
+        ? data.task_id.trim()
+        : typeof data.session_id === 'string' && data.session_id.trim()
+          ? data.session_id.trim()
+          : '';
+    if (eventTaskId && isTaskScopeIgnored(ignoredTaskIdsRef.current, eventTaskId)) {
+      return false;
+    }
+    if (eventTaskId && !skillDevScopeIdsMatch(activeId, eventTaskId)) {
+      return false;
+    }
+    return true;
+  }, []);
 
   // Store 状态
   const {
@@ -143,7 +221,9 @@ export function SkillDevPanel() {
 
   const handleStarted = useCallback((data: { task_id: string; __restore_ts?: string }) => {
     const ts = eventTimestamp(data);
-    taskCancelledRef.current = false;
+    pendingCancelEpochRef.current = null;
+    activeTaskIdRef.current = data.task_id;
+    removeIgnoredTaskScope(ignoredTaskIdsRef.current, data.task_id);
     sessionIdRef.current = data.task_id;
     hasTaskStartedRef.current = true;
     setTaskId(data.task_id);
@@ -745,13 +825,28 @@ export function SkillDevPanel() {
     ];
 
     const handleInterruptResult = (payload: unknown) => {
+      if (!shouldAcceptSkillDevEvent(payload)) {
+        return;
+      }
       const data = payload as { session_id?: string; intent?: string; success?: boolean };
       const sid = sessionIdRef.current ?? useSkillDevStore.getState().taskId;
       if (sid && data.session_id && data.session_id !== sid) {
         return;
       }
       if (data.intent === 'cancel' && data.success !== false) {
-        taskCancelledRef.current = true;
+        const pendingEpoch = pendingCancelEpochRef.current;
+        if (pendingEpoch === null || pendingEpoch !== runEpochRef.current) {
+          return;
+        }
+        pendingCancelEpochRef.current = null;
+        const tid = useSkillDevStore.getState().taskId;
+        if (tid) {
+          addIgnoredTaskScope(ignoredTaskIdsRef.current, tid);
+        }
+        if (sid) {
+          addIgnoredTaskScope(ignoredTaskIdsRef.current, sid);
+        }
+        endThinkingStream();
         dismissPendingInteraction();
         setProcessing(false);
         setSuspended(false);
@@ -760,7 +855,7 @@ export function SkillDevPanel() {
 
     const unsubs = events.map(({ name, key }) =>
       webClient.on(name, ({ payload }) => {
-        if (taskCancelledRef.current) {
+        if (!shouldAcceptSkillDevEvent(payload)) {
           return;
         }
         (handlersRef.current[key] as (d: unknown) => void)(payload);
@@ -937,6 +1032,9 @@ export function SkillDevPanel() {
         return;
       }
       hydrateFromSkillDevRestore(restored as SkillDevRestoreResult);
+      activeTaskIdRef.current = restored.task_id;
+      removeIgnoredTaskScope(ignoredTaskIdsRef.current, restored.task_id);
+      pendingCancelEpochRef.current = null;
       sessionIdRef.current = restored.task_id;
       hasTaskStartedRef.current = true;
       testProgressIdRef.current = null;
@@ -968,7 +1066,10 @@ export function SkillDevPanel() {
     if (!tid) return;
     try {
       setShowResumeBanner(false);
-      taskCancelledRef.current = false;
+      runEpochRef.current += 1;
+      pendingCancelEpochRef.current = null;
+      activeTaskIdRef.current = tid;
+      removeIgnoredTaskScope(ignoredTaskIdsRef.current, tid);
       setProcessing(true);
       setSuspended(false);
       await startSkillDev({
@@ -1011,8 +1112,13 @@ export function SkillDevPanel() {
       });
 
       const sessionId = getOrCreateSessionId();
+      runEpochRef.current += 1;
+      pendingCancelEpochRef.current = null;
+      activeTaskIdRef.current = sessionId;
+      removeIgnoredTaskScope(ignoredTaskIdsRef.current, sessionId);
       setTaskId(sessionId);
-      taskCancelledRef.current = false;
+      setProcessing(true);
+      setSuspended(false);
       await startSkillDev({
         query: inputValue,
         session_id: sessionId,
@@ -1022,9 +1128,10 @@ export function SkillDevPanel() {
       });
       setInputValue('');
     } catch (err) {
+      setProcessing(false);
       setError(err instanceof Error ? err.message : 'Unknown error');
     }
-  }, [inputValue, setQuery, addMessage, setError, setTaskId, getOrCreateSessionId]);
+  }, [inputValue, setQuery, addMessage, setError, setTaskId, setProcessing, setSuspended, getOrCreateSessionId]);
 
   const handleImportSkill = useCallback(async (file: MediaItem) => {
     if (hasTaskStartedRef.current) {
@@ -1053,6 +1160,8 @@ export function SkillDevPanel() {
         responseTaskId: result?.task_id,
         message: result?.message,
       });
+      activeTaskIdRef.current = result.task_id;
+      removeIgnoredTaskScope(ignoredTaskIdsRef.current, result.task_id);
       setTaskId(result.task_id);
       fileBrowserLoaded.current = false;
       if (activeTab === 'files') {
@@ -1225,8 +1334,33 @@ export function SkillDevPanel() {
     [taskId, setError]
   );
 
-  const handleReset = useCallback(() => {
-    taskCancelledRef.current = false;
+  const handleReset = useCallback(async () => {
+    const prevTaskId = useSkillDevStore.getState().taskId;
+    const prevSessionId = sessionIdRef.current ?? prevTaskId;
+    const wasActive =
+      useSkillDevStore.getState().isProcessing || useSkillDevStore.getState().isSuspended;
+
+    if (prevTaskId) {
+      addIgnoredTaskScope(ignoredTaskIdsRef.current, prevTaskId);
+    }
+    if (prevSessionId && prevSessionId !== prevTaskId) {
+      addIgnoredTaskScope(ignoredTaskIdsRef.current, prevSessionId);
+    }
+
+    if (prevTaskId && wasActive) {
+      try {
+        await cancelSkillDev({
+          session_id: prevSessionId ?? prevTaskId,
+          task_id: prevTaskId,
+        });
+      } catch (err) {
+        console.warn('[SkillDevPanel] cancel on new task failed:', err);
+      }
+    }
+
+    runEpochRef.current += 1;
+    pendingCancelEpochRef.current = null;
+    activeTaskIdRef.current = null;
     sessionIdRef.current = null;
     testProgressIdRef.current = null;
     hasTaskStartedRef.current = false;
@@ -1248,7 +1382,10 @@ export function SkillDevPanel() {
 
     console.log('[SkillDevPanel] Cancelling task:', taskId, 'session:', sessionId);
     try {
-      taskCancelledRef.current = true;
+      pendingCancelEpochRef.current = runEpochRef.current;
+      addIgnoredTaskScope(ignoredTaskIdsRef.current, taskId);
+      addIgnoredTaskScope(ignoredTaskIdsRef.current, sessionId);
+      endThinkingStream();
       dismissPendingInteraction();
       await cancelSkillDev({ session_id: sessionId, task_id: taskId });
       setProcessing(false);
@@ -1261,6 +1398,7 @@ export function SkillDevPanel() {
         timestamp: new Date().toISOString(),
       });
     } catch (err) {
+      pendingCancelEpochRef.current = null;
       const errorMsg = err instanceof Error ? err.message : 'Cancel failed';
       console.error('[SkillDevPanel] Cancel error:', err);
       setError(errorMsg);
@@ -1273,7 +1411,7 @@ export function SkillDevPanel() {
         timestamp: new Date().toISOString(),
       });
     }
-  }, [taskId, dismissPendingInteraction, setProcessing, setSuspended, addMessage, setError, t]);
+  }, [taskId, dismissPendingInteraction, endThinkingStream, setProcessing, setSuspended, addMessage, setError, t]);
 
   // 加载文件树
   useEffect(() => {
@@ -1337,14 +1475,12 @@ export function SkillDevPanel() {
               {t('skilldev.cancelTask')}
             </button>
           )}
-          {taskId && (
-            <button
-              onClick={handleReset}
-              className="px-3 py-1.5 text-sm text-text-muted bg-secondary border border-border rounded-md hover:bg-accent hover:text-white hover:border-accent transition-all duration-200 shadow-sm hover:shadow"
-            >
-              {t('skilldev.newTask')}
-            </button>
-          )}
+          <button
+            onClick={() => void handleReset()}
+            className="px-3 py-1.5 text-sm text-text-muted bg-secondary border border-border rounded-md hover:bg-accent hover:text-white hover:border-accent transition-all duration-200 shadow-sm hover:shadow"
+          >
+            {t('skilldev.newTask')}
+          </button>
         </div>
 
         {/* 内容区域 */}

@@ -386,6 +386,13 @@ class SkillDevDeepAdapter:
         query = str(params.get("message") or params.get("query") or "")
         task_workspace = Path(self._base_workspace_dir) / "skilldev" / task_id
 
+        yield AgentResponseChunk(
+            request_id=rid,
+            channel_id=cid,
+            payload={"event_type": "skilldev.started", "task_id": task_id},
+            is_complete=False,
+        )
+
         skill_name: str | None = None
         if is_first_task_input(task_workspace):
             if self._model is None:
