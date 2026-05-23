@@ -1075,6 +1075,7 @@ class VibeSkillChannel(BaseChannel):
             skill = properties.get("skill")
             if isinstance(skill, dict) and skill:
                 params["skill_searched"] = {
+                    "skillId": str(skill.get("skillId") or skill.get("skill_id") or ""),
                     "skillName": str(skill.get("skillName") or skill.get("skill_name") or ""),
                     "url": str(skill.get("url") or ""),
                 }

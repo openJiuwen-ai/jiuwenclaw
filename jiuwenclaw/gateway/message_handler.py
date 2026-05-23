@@ -2298,23 +2298,24 @@ class MessageHandler(ABC):
                 )
                 # remote 模式：用户 chat.send 时在网关索引记录 role=user 预览
                 self._maybe_update_session_index_on_user_msg(msg)
-                agent_msg = await self._prepare_agent_dispatch_message(msg)
-                await self._trigger_before_chat_request_hook(agent_msg)
-                env = self.message_to_e2a(agent_msg)
-
-                # 分布式文件传输：将 Gateway 本地文件传输到 AgentServer
+                stream_rid = msg.id
                 try:
-                    if self._should_transfer_files(env):
-                        env = await self._transfer_files_to_agent_server(env, msg)
-                except Exception as e:
-                    logger.exception(
-                        "[MessageHandler] 文件传输过程异常: request_id=%s error=%s, 继续使用原路径",
-                        env.request_id,
-                        e,
-                    )
+                    agent_msg = await self._prepare_agent_dispatch_message(msg)
+                    await self._trigger_before_chat_request_hook(agent_msg)
+                    env = self.message_to_e2a(agent_msg)
 
-                stream_rid = env.request_id or msg.id
-                try:
+                    # 分布式文件传输：将 Gateway 本地文件传输到 AgentServer
+                    try:
+                        if self._should_transfer_files(env):
+                            env = await self._transfer_files_to_agent_server(env, msg)
+                    except Exception as e:
+                        logger.exception(
+                            "[MessageHandler] 文件传输过程异常: request_id=%s error=%s, 继续使用原路径",
+                            env.request_id,
+                            e,
+                        )
+
+                    stream_rid = env.request_id or msg.id
                     if env.is_stream:
                         # 流式处理：启动后台任务，支持多任务并发
                         # 通知前端新任务开始处理
@@ -2350,12 +2351,17 @@ class MessageHandler(ABC):
                     else:
                         await self._process_non_stream_request(msg, env)
                 except Exception as e:
-                    logger.exception("AgentServer send_request failed for %s: %s", msg.id, e)
+                    logger.exception(
+                        "[MessageHandler] 发往 AgentServer 失败: id=%s channel_id=%s",
+                        msg.id,
+                        msg.channel_id,
+                    )
                     err_msg = self._build_error_out_message(msg, e)
                     await self.publish_robot_messages(err_msg)
                     logger.info(
-                            "[MessageHandler] 错误响应已写入 robot_messages: id=%s channel_id=%s",
-                        msg.id, msg.channel_id,
+                        "[MessageHandler] 错误响应已写入 robot_messages: id=%s channel_id=%s",
+                        msg.id,
+                        msg.channel_id,
                     )
             except asyncio.CancelledError:
                 break
@@ -2942,7 +2948,26 @@ class MessageHandler(ABC):
         await self.publish_robot_messages(status_msg)
 
     def _build_error_out_message(self, msg: "Message", error: Exception) -> "Message":
-        from jiuwenclaw.schema.message import Message
+        from jiuwenclaw.schema.message import EventType, Message
+
+        error_text = str(error)
+        if str(msg.channel_id or "").strip() == _VIBESKILL_CHANNEL_ID:
+            return Message(
+                id=msg.id,
+                type="event",
+                channel_id=msg.channel_id,
+                session_id=msg.session_id,
+                params={},
+                timestamp=time.time(),
+                ok=False,
+                payload={
+                    "event_type": EventType.SKILLDEV_ERROR.value,
+                    "error": error_text,
+                    "message": error_text,
+                },
+                event_type=EventType.SKILLDEV_ERROR,
+                metadata=msg.metadata,
+            )
 
         return Message(
             id=msg.id,
@@ -2952,7 +2977,7 @@ class MessageHandler(ABC):
             params={},
             timestamp=time.time(),
             ok=False,
-            payload={"error": str(error)},
+            payload={"error": error_text},
             metadata=msg.metadata,
         )
 
