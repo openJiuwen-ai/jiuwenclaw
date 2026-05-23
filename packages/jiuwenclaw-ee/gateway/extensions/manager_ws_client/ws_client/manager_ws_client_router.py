@@ -4,9 +4,11 @@
 from __future__ import annotations
 
 import logging
+from pathlib import Path
 from typing import Any
 
-from ..core.application_config.channel_config import apply_channel_config_sync
+from ..infrastructure.db import Database
+
 from ..core.config_effective_policy.config_default_template_mapping import (
     apply_config_default_template_mapping_sync,
 )
@@ -23,9 +25,14 @@ from ..core.template.extension_config_template import (
     apply_extension_config_template_sync,
 )
 from ..core.template.model_template import apply_model_template_sync
-from ..infrastructure.db import ensure_db_handler_ready
 
 logger = logging.getLogger(__name__)
+
+_GATEWAY_DB = Database(relative_root=Path(__file__).resolve().parents[1])
+
+
+async def _ensure_db_handler():
+    return await _GATEWAY_DB.ensure_ready(log_prefix="manager_ws_client")
 
 
 async def apply_config_push(config: dict[str, Any]) -> dict[str, Any] | None:
@@ -83,7 +90,7 @@ async def _apply_extension_config_templates(
     if not op:
         raise ValueError("extension_config_templates.op is required")
 
-    handler = await ensure_db_handler_ready()
+    handler = await _ensure_db_handler()
     result = await apply_extension_config_template_sync(handler, op, payload)
     logger.info(
         "[ManagerWsClient] extension_config_templates sync op=%s template_id=%s",
@@ -100,7 +107,7 @@ async def _apply_model_templates(payload: dict[str, Any]) -> dict[str, Any] | No
     if not op:
         raise ValueError("model_templates.op is required")
 
-    handler = await ensure_db_handler_ready()
+    handler = await _ensure_db_handler()
     result = await apply_model_template_sync(handler, op, payload)
     logger.info(
         "[ManagerWsClient] model_templates sync op=%s template_id=%s",
@@ -119,7 +126,7 @@ async def _apply_config_default_template_mappings(
     if not op:
         raise ValueError("config_default_template_mappings.op is required")
 
-    handler = await ensure_db_handler_ready()
+    handler = await _ensure_db_handler()
     result = await apply_config_default_template_mapping_sync(handler, op, payload)
     logger.info(
         "[ManagerWsClient] config_default_template_mappings sync op=%s mapping_id=%s",
@@ -138,7 +145,7 @@ async def _apply_config_effective_agent_policies(
     if not op:
         raise ValueError("config_effective_agent_policies.op is required")
 
-    handler = await ensure_db_handler_ready()
+    handler = await _ensure_db_handler()
     result = await apply_config_effective_agent_policy_sync(handler, op, payload)
     logger.info(
         "[ManagerWsClient] config_effective_agent_policies sync op=%s policy_id=%s",
@@ -157,7 +164,7 @@ async def _apply_config_effective_global_policies(
     if not op:
         raise ValueError("config_effective_global_policies.op is required")
 
-    handler = await ensure_db_handler_ready()
+    handler = await _ensure_db_handler()
     result = await apply_config_effective_global_policy_sync(handler, op, payload)
     logger.info(
         "[ManagerWsClient] config_effective_global_policies sync op=%s policy_id=%s",
@@ -176,7 +183,7 @@ async def _apply_config_effective_service_policies(
     if not op:
         raise ValueError("config_effective_service_policies.op is required")
 
-    handler = await ensure_db_handler_ready()
+    handler = await _ensure_db_handler()
     result = await apply_config_effective_service_policy_sync(handler, op, payload)
     logger.info(
         "[ManagerWsClient] config_effective_service_policies sync op=%s policy_id=%s",

@@ -269,23 +269,7 @@ class AgentManager:
                 **_build_acp_agent_config()
             }
         if request is not None:
-            try:
-                from jiuwenclaw.agentserver.enterprise_config import (
-                    enterprise_policy_enabled,
-                    routing_context_from_request,
-                )
-
-                if enterprise_policy_enabled():
-                    config = {
-                        **config,
-                        "enterprise_routing": routing_context_from_request(
-                            request
-                        ).as_dict(),
-                    }
-            except Exception as exc:
-                logger.warning(
-                    "[AgentManager] enterprise routing context skipped: %s", exc
-                )
+            config = {**config, "request": request}
         await self._create_agent(channel_id, mode, effective_session_id, config)
         return self.agents.get(channel_id, {}).get(mode, {}).get(effective_session_id)
 
