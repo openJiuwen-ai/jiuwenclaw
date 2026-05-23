@@ -109,3 +109,32 @@ Call the function_call_tool tool to execute:
 ```
     function_call_tool(pluginId="plugin_001", toolName="weather_query", arguments={"city": "北京"})
 ```
+
+## Generating the tool-definitions entry
+
+Inside the skill body's single **tool definitions** section (see SKILL.md → Writing principles), each function tool becomes a `### Function: <toolName>（平台注册）` sub-block. 
+
+Mapping rules:
+
+| JSON field | Markdown field |
+|------------|----------------|
+| `toolName` | `### Function: <toolName>（平台注册）` heading + `- **toolName**` |
+| `description` | `- **description**` |
+| `arguments` | `- **参数**: （由平台自动注入）` |
+| (n/a) | `- **约束**` |
+| (n/a) | `- **语义**` |
+
+- `- **参数**` 不要内联 JSON schema，运行时会注入。
+- `- **约束**` 仅在工具有顺序、幂等性或前置条件时写。
+- `- **语义**` 仅在触发措辞会路由到不同工具时写（如"删除" vs "取消"）。
+
+Example — given the `weather_query` JSON above, generate:
+
+```markdown
+### Function: weather_query（平台注册）
+- **toolName**: weather_query
+- **description**: 查询指定城市的实时天气信息
+- **参数**: （由平台自动注入）
+```
+
+No 约束 / 语义 line because the definition implies no special preconditions or trigger-phrase routing.

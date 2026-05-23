@@ -32,7 +32,21 @@ Your TODO plan should mirror the active workflow:
 
 ---
 
-## Skill anatomy
+## Step 1: Capture intent
+
+Before writing anything, extract what you can from the conversation — tools used, steps taken, corrections made — then fill gaps:
+
+1. What should this skill do? When should it trigger?
+2. What's the expected output?
+3. Edge cases, input formats, dependencies?
+
+Surface things the user might not have considered: failure modes, what "done" looks like. Research similar skills if useful. Only move on once aligned.
+
+---
+
+## Step 2: Write the skill files
+
+###  Skill anatomy
 
 ```text
 skill-name/
@@ -70,22 +84,15 @@ description: Imperative description of when to trigger and what to do.
 - Imperative form. No "this skill will…".
 - Give the model a mental model and judgment criteria, not a script.
 - Include examples where they clarify behavior.
+- Body structure can reference these sections as needed: domain knowledge, tool definitions, exemplar playbook, SOP, safety red lines, and human collaboration.
 
----
+### Device-side `scripts/` generation gate
 
-## Step 1: Capture intent
+A skill executes on the device when:
+- `metadata.clis` is non-empty, OR
+- any entry in `metadata.tools` has `pluginType: Device`.
 
-Before writing anything, extract what you can from the conversation — tools used, steps taken, corrections made — then fill gaps:
-
-1. What should this skill do? When should it trigger?
-2. What's the expected output?
-3. Edge cases, input formats, dependencies?
-
-Surface things the user might not have considered: failure modes, what "done" looks like. Research similar skills if useful. Only move on once aligned.
-
----
-
-## Step 2: Write the skill files
+Device-side skills must not generate `scripts/` by default. If a script is genuinely required after evaluation, call `ask_user_question` to confirm with the user that the skill includes a Python script, running it on the device will be slow, and let them choose to proceed with generation or adjust the feature. Only generate the script after explicit confirmation.
 
 Follow the anatomy and frontmatter rules above. Self-check before moving on:
 
@@ -94,7 +101,7 @@ Follow the anatomy and frontmatter rules above. Self-check before moving on:
 - If the skill declares `metadata.tools`, read `references/usage_tools.md` and add one example sentence showing the `function_call_tool` call shape.
 - If the skill declares `metadata.agents`, read `references/usage_agents.md` and add one example sentence showing the `agent_as_a_tool` call shape.
 - If the skill declares `metadata.clis`, read `references/usage_clis.md` and add one example sentence showing the `exec` command shape.
-- Body structure can reference these sections as needed: domain knowledge, tool definitions, exemplar playbook, SOP, safety red lines, and human collaboration.
+- If the skill declares any of `metadata.tools` / `metadata.agents` / `metadata.clis`, the body must include a single **tool definitions** section listing every registered tool.
 - Body is under 500 lines; bulky reference material moved to `references/`.
 - Security validation passes: no dangerous commands, hardcoded credentials, or path traversal in the skill body or scripts.
 - No stray files outside the skill folder.

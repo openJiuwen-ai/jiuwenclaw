@@ -112,3 +112,31 @@ Call the agent_as_a_tool tool to execute:
 ```
     agent_as_a_tool(agentId="aaabbbccc", query="查询北京三日游玩攻略", filesInfo=[])
 ```
+
+## Generating the tool-definitions entry
+
+Agent tools sit in the skill body's single **tool definitions** section. Each agent becomes a `### Function: <name>（平台注册）` sub-block.
+
+Mapping rules:
+
+| JSON field | Markdown field |
+|------------|----------------|
+| `name` (或缺失时用 `agentId`) | `### Function: <name>（平台注册）` heading |
+| `agentId` | `- **toolName**: <agentId>` |
+| `description` | `- **description**` |
+| `parameters` | `- **参数**: （由平台自动注入）` |
+| (n/a) | `- **约束**` |
+| (n/a) | `- **语义**` |
+
+- `- **toolName**` 必须填 `agentId`，运行时按它路由。
+- `- **参数**` 不要内联 JSON schema。
+- `- **约束**` 仅在有顺序或前置条件时写。
+- `- **语义**` 仅在触发措辞会路由到不同 agent 时写。
+
+Example — given the `travelAgent` definition above, generate:
+
+```markdown
+### Function: travelAgent（平台注册）
+- **toolName**: aaabbbccc
+- **description**: 查询出行相关资讯与方案
+- **参数**: （由平台自动注入）
