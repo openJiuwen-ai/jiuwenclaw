@@ -54,8 +54,17 @@ from jiuwenclaw.agentserver.skilldev_agent.meta_tools.external_tool_registry imp
     write_tool_spec_file,
     write_tool_usage_catalog,
 )
+from jiuwenclaw.agentserver.skilldev_agent.utils.direct_import import (
+    build_direct_import_fix_query,
+    collect_skill_packages,
+    extract_packages_to_skill_dir,
+    find_skill_root,
+    package_validated_skill,
+    validate_direct_import_skill,
+)
 from jiuwenclaw.agentserver.skilldev_agent.rails.context_engineering_rail import SkillDevContextEngineeringRail
 from jiuwenclaw.agentserver.skilldev_agent.utils.skill_search import search_skills
+from jiuwenclaw.agentserver.skilldev.stages.validate_stage import parse_skill_frontmatter
 
 logger = logging.getLogger(__name__)
 
@@ -393,6 +402,21 @@ class SkillDevDeepAdapter:
             is_complete=False,
         )
 
+        import_type = str(
+            params.get("import_type") or params.get("importType") or "vibeImport"
+        ).strip()
+        if import_type == "directImport":
+            async for chunk in self._handle_direct_import(
+                request=request,
+                params=params,
+                task_id=task_id,
+                task_workspace=task_workspace,
+                rid=rid,
+                cid=cid,
+            ):
+                yield chunk
+            return
+
         skill_name: str | None = None
         if is_first_task_input(task_workspace):
             if self._model is None:
@@ -456,7 +480,141 @@ class SkillDevDeepAdapter:
         }
         async for chunk in self.process_message_stream_impl(request, inputs):
             yield chunk
-        
+
+        async for chunk in self._finalize_skilldev_run(
+            task_workspace=task_workspace,
+            task_id=task_id,
+            rid=rid,
+            cid=cid,
+            auto_package_if_valid=False,
+        ):
+            yield chunk
+
+    async def _handle_direct_import(
+        self,
+        *,
+        request: AgentRequest,
+        params: dict[str, Any],
+        task_id: str,
+        task_workspace: Path,
+        rid: str,
+        cid: str,
+    ) -> AsyncIterator[AgentResponseChunk]:
+        query = str(params.get("message") or params.get("query") or "")
+        skill_dir = task_workspace / "skill"
+        self._init_workspace_dirs(task_workspace)
+
+        packages = collect_skill_packages(params)
+        try:
+            if packages:
+                await extract_packages_to_skill_dir(skill_dir, packages)
+            elif not find_skill_root(skill_dir):
+                async for chunk in self._yield_skilldev_error(
+                    rid, cid, "directImport 缺少 skill 压缩包，且工作区中无已导入的 SKILL.md"
+                ):
+                    yield chunk
+                return
+        except Exception as exc:
+            logger.warning(
+                "[session=%s] [SkillDevDeepAdapter] directImport extract failed: %s",
+                task_id,
+                exc,
+            )
+            async for chunk in self._yield_skilldev_error(rid, cid, str(exc)):
+                yield chunk
+            return
+
+        skill_root = find_skill_root(skill_dir)
+        if skill_root is None or not (skill_root / "SKILL.md").is_file():
+            async for chunk in self._yield_skilldev_error(
+                rid, cid, "解压后未找到 SKILL.md"
+            ):
+                yield chunk
+            return
+
+        skill_name, _, _ = parse_skill_frontmatter(skill_root / "SKILL.md")
+        if skill_name:
+            yield AgentResponseChunk(
+                request_id=rid,
+                channel_id=cid,
+                payload={
+                    "event_type": "skilldev.skill_name_ready",
+                    "task_id": task_id,
+                    "skill_name": skill_name,
+                },
+                is_complete=False,
+            )
+
+        valid, validation_message = validate_direct_import_skill(skill_root)
+        yield AgentResponseChunk(
+            request_id=rid,
+            channel_id=cid,
+            payload={
+                "event_type": "skilldev.validate_result",
+                "valid": valid,
+                "message": validation_message,
+                "task_id": task_id,
+            },
+            is_complete=False,
+        )
+
+        await self.update_workspace(task_workspace)
+
+        if valid:
+            yield AgentResponseChunk(
+                request_id=rid,
+                channel_id=cid,
+                payload={
+                    "event_type": "skilldev.agent_output",
+                    "delta": "您上传的skill符合规范，可直接上架使用",
+                    "task_id": task_id,
+                },
+                is_complete=False,
+            )
+            output_dir = task_workspace / "output"
+            packaged = package_validated_skill(skill_root, output_dir)
+            if packaged is None:
+                async for chunk in self._yield_skilldev_error(
+                    rid, cid, "Skill 打包失败，请检查工作区与依赖引用"
+                ):
+                    yield chunk
+                return
+            async for chunk in self._yield_packaged_skill_completion(
+                task_id=task_id,
+                rid=rid,
+                cid=cid,
+                packaged_files=[packaged],
+            ):
+                yield chunk
+            return
+
+        combined_query = build_direct_import_fix_query(query, validation_message)
+        raw_session_id = str(request.session_id or task_id)
+        inputs = {
+            "conversation_id": self._make_todo_session_id(raw_session_id),
+            "query": combined_query,
+        }
+        async for chunk in self.process_message_stream_impl(request, inputs):
+            yield chunk
+
+        async for chunk in self._finalize_skilldev_run(
+            task_workspace=task_workspace,
+            task_id=task_id,
+            rid=rid,
+            cid=cid,
+            auto_package_if_valid=True,
+        ):
+            yield chunk
+
+    async def _finalize_skilldev_run(
+        self,
+        *,
+        task_workspace: Path,
+        task_id: str,
+        rid: str,
+        cid: str,
+        auto_package_if_valid: bool,
+    ) -> AsyncIterator[AgentResponseChunk]:
         benchmark, report, iteration = self._get_review_benchmark(task_workspace)
         if benchmark and report and iteration:
             logger.info("[session=%s] [SkillDevDeepAdapter] 评测结果审阅: %s", task_id, iteration)
@@ -481,51 +639,91 @@ class SkillDevDeepAdapter:
                 },
                 is_complete=False,
             )
-            return 
+            return
 
         output_dir = task_workspace / "output"
         skill_files = [
             f for f in output_dir.iterdir()
             if f.is_file() and f.suffix in (".skill", ".zip")
         ] if output_dir.exists() else []
+
+        if not skill_files and auto_package_if_valid:
+            skill_root = find_skill_root(task_workspace / "skill")
+            if skill_root is not None:
+                valid, _ = validate_direct_import_skill(skill_root)
+                if valid:
+                    packaged = package_validated_skill(skill_root, output_dir)
+                    if packaged is not None:
+                        skill_files = [packaged]
+
         if skill_files:
-            for sf in skill_files:
-                yield AgentResponseChunk(
-                    request_id=rid,
-                    channel_id=cid,
-                    payload={
-                        "event_type": "skilldev.artifact_ready",
-                        "task_id": task_id,
-                        "artifact": {
-                            "id": "skill_package",
-                            "name": sf.name,
-                            "type": "skill_package",
-                            "size_bytes": sf.stat().st_size,
-                            "browsable": True,
-                            "downloadable": True,
-                        },
+            async for chunk in self._yield_packaged_skill_completion(
+                task_id=task_id,
+                rid=rid,
+                cid=cid,
+                packaged_files=skill_files,
+            ):
+                yield chunk
+            return
+
+        yield AgentResponseChunk(
+            request_id=rid,
+            channel_id=cid,
+            payload={
+                "event_type": "skilldev.agent_completed",
+                "task_id": task_id,
+            },
+            is_complete=False,
+        )
+
+    async def _yield_packaged_skill_completion(
+        self,
+        *,
+        task_id: str,
+        rid: str,
+        cid: str,
+        packaged_files: list[Path],
+    ) -> AsyncIterator[AgentResponseChunk]:
+        for sf in packaged_files:
+            yield AgentResponseChunk(
+                request_id=rid,
+                channel_id=cid,
+                payload={
+                    "event_type": "skilldev.artifact_ready",
+                    "task_id": task_id,
+                    "artifact": {
+                        "id": "skill_package",
+                        "name": sf.name,
+                        "type": "skill_package",
+                        "size_bytes": sf.stat().st_size,
+                        "browsable": True,
+                        "downloadable": True,
                     },
-                    is_complete=False,
-                )
-            yield AgentResponseChunk(
-                request_id=rid,
-                channel_id=cid,
-                payload={
-                    "event_type": "skilldev.completed",
-                    "task_id": task_id,
-                },
-                is_complete=True,
-            )
-        else:
-            yield AgentResponseChunk(
-                request_id=rid,
-                channel_id=cid,
-                payload={
-                    "event_type": "skilldev.agent_completed",
-                    "task_id": task_id,
                 },
                 is_complete=False,
             )
+        yield AgentResponseChunk(
+            request_id=rid,
+            channel_id=cid,
+            payload={
+                "event_type": "skilldev.completed",
+                "task_id": task_id,
+            },
+            is_complete=True,
+        )
+
+    async def _yield_skilldev_error(
+        self,
+        rid: str,
+        cid: str,
+        error: str,
+    ) -> AsyncIterator[AgentResponseChunk]:
+        yield AgentResponseChunk(
+            request_id=rid,
+            channel_id=cid,
+            payload={"event_type": "skilldev.error", "error": error},
+            is_complete=True,
+        )
 
     @staticmethod
     def _get_or_create_task_id(request: AgentRequest, params: dict[str, Any]) -> str:
