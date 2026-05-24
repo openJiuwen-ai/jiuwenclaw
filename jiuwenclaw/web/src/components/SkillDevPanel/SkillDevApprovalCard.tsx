@@ -22,7 +22,7 @@ import type { SkillDevPlan, SkillDevReport, ClarifyAnswer } from '../../types/sk
 interface BmRun {
   eval_id: number;
   eval_name: string;
-  configuration: 'with_skill' | 'baseline';
+  configuration: 'with_skill' | 'without_skill';
   run_number: number;
   result: { pass_rate: number; time_seconds: number; tokens: number };
   expectations: { text: string; passed: boolean; evidence?: string }[];
@@ -292,24 +292,24 @@ export function SkillDevApprovalCard({
       runs?: BmRun[];
       run_summary?: {
         with_skill?: { pass_rate?: { mean?: number }; run_count?: number; fully_passed_count?: number };
-        baseline?: { pass_rate?: { mean?: number } };
+        without_skill?: { pass_rate?: { mean?: number } };
         delta?: { pass_rate?: string; time_seconds?: string };
       };
     } | undefined;
     const withSkill = bm?.run_summary?.with_skill;
-    const baseline = bm?.run_summary?.baseline;
+    const without_skill = bm?.run_summary?.without_skill;
     const delta = bm?.run_summary?.delta;
     const passRate = withSkill?.pass_rate?.mean != null
       ? Math.round(withSkill.pass_rate.mean * 100)
       : null;
-    const baselinePassRate = baseline?.pass_rate?.mean != null
-      ? Math.round(baseline.pass_rate.mean * 100)
+    const withoutSkillPassRate = without_skill?.pass_rate?.mean != null
+      ? Math.round(without_skill.pass_rate.mean * 100)
       : null;
     const runCount: number = withSkill?.run_count ?? 0;
 
-    // 按 eval_name 分组，每个 case 持有 with_skill / baseline 两条记录
+    // 按 eval_name 分组，每个 case 持有 with_skill / without_skill 两条记录
     const rawRuns: BmRun[] = Array.isArray(bm?.runs) ? bm!.runs : [];
-    const byCase = new Map<string, { with_skill?: BmRun; baseline?: BmRun }>();
+    const byCase = new Map<string, { with_skill?: BmRun; without_skill?: BmRun }>();
     for (const run of rawRuns) {
       if (!byCase.has(run.eval_name)) byCase.set(run.eval_name, {});
       (byCase.get(run.eval_name) as Record<string, BmRun>)[run.configuration] = run;
@@ -382,16 +382,16 @@ export function SkillDevApprovalCard({
               <div className="flex-1 text-center">
                 <p
                   className="text-2xl font-bold"
-                  style={{ color: baselinePassRate == null ? 'var(--text-muted)' : baselinePassRate >= 70 ? 'var(--success)' : baselinePassRate >= 40 ? 'var(--warning)' : 'var(--danger)' }}
+                  style={{ color: withoutSkillPassRate == null ? 'var(--text-muted)' : withoutSkillPassRate >= 70 ? 'var(--success)' : withoutSkillPassRate >= 40 ? 'var(--warning)' : 'var(--danger)' }}
                 >
-                  {baselinePassRate != null ? `${baselinePassRate}%` : '—'}
+                  {withoutSkillPassRate != null ? `${withoutSkillPassRate}%` : '—'}
                 </p>
-                <p className="text-xs text-text-muted mt-0.5">baseline 测试案例平均完成度</p>
+                <p className="text-xs text-text-muted mt-0.5">without_skill 测试案例平均完成度</p>
               </div>
               <div className="flex-1 text-center">
                 {(() => {
                   const deltaStr = delta?.pass_rate;
-                  const computedDelta = passRate != null && baselinePassRate != null ? passRate - baselinePassRate : null;
+                  const computedDelta = passRate != null && withoutSkillPassRate != null ? passRate - withoutSkillPassRate : null;
                   const label = deltaStr ?? (computedDelta != null ? `${computedDelta >= 0 ? '+' : ''}${computedDelta}%` : '—');
                   const isPositive = deltaStr ? deltaStr.startsWith('+') : (computedDelta != null ? computedDelta > 0 : null);
                   const color = isPositive === true ? 'var(--success)' : isPositive === false ? 'var(--danger)' : 'var(--text-muted)';
@@ -420,13 +420,13 @@ export function SkillDevApprovalCard({
                 style={{ gridTemplateColumns: '1fr 72px 72px 52px', backgroundColor: 'var(--secondary)', borderBottom: '1px solid var(--border)', color: 'var(--text-muted)' }}>
                 <span>用例</span>
                 <span className="text-center">with_skill</span>
-                <span className="text-center">baseline</span>
+                <span className="text-center">without_skill</span>
                 <span className="text-center">Δ</span>
               </div>
               {/* 逐行 */}
               {Array.from(byCase.entries()).map(([caseName, pair]) => {
                 const ws = pair.with_skill;
-                const bl = pair.baseline;
+                const bl = pair.without_skill;
                 const wsRate = ws?.result?.pass_rate ?? null;
                 const blRate = bl?.result?.pass_rate ?? null;
                 const diffNum = wsRate != null && blRate != null ? wsRate - blRate : null;
@@ -476,7 +476,7 @@ export function SkillDevApprovalCard({
                           style={{ gridTemplateColumns: '1fr 88px 88px', backgroundColor: 'var(--secondary)', borderBottom: '1px solid var(--border)', color: 'var(--text-muted)' }}>
                           <span>验证条件</span>
                           <span className="text-center">with_skill</span>
-                          <span className="text-center">baseline</span>
+                          <span className="text-center">without_skill</span>
                         </div>
                         {/* 逐条 expectation */}
                         {Array.from({ length: totalExp }).map((_, i) => {
@@ -510,7 +510,7 @@ export function SkillDevApprovalCard({
                                   ? <span className="font-bold text-sm" style={{ color: wsExp.passed ? 'var(--success)' : 'var(--danger)' }}>{wsExp.passed ? '✓' : '✗'}</span>
                                   : <span style={{ color: 'var(--text-muted)' }}>—</span>}
                               </div>
-                              {/* baseline 结果 */}
+                              {/* without_skill 结果 */}
                               <div className="flex items-start justify-center pt-0.5">
                                 {blExp
                                   ? <span className="font-bold text-sm" style={{ color: blExp.passed ? 'var(--success)' : 'var(--danger)' }}>{blExp.passed ? '✓' : '✗'}</span>

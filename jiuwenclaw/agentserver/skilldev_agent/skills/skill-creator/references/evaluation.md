@@ -185,9 +185,10 @@ When the benchmark identifies useful improvements:
 4. Bundle repeated work. If every run wrote the same helper, lift it into `scripts/`.
 5. Apply changes and rerun into `<workspace>/evals/iteration-<N+1>/`.
 
-After every evaluation round, ask the user how to proceed. If `ask_user_question` is available, use exactly two options:
+After every evaluation round, ask the user how to proceed. Provide exactly two options:
 
 1. **Continue improving** - apply another improvement round and rerun evals.
 2. **Finish and package** - exit the evaluation workflow and return to packaging.
 
-If `ask_user_question` is not available, ask the same question directly in the assistant message.
+**DO NOT USE** `ask_user_question` tool, ask the question directly in the assistant message.
+**DO NOT USE** `ask_user_question` tool, ask the question directly in the assistant message.

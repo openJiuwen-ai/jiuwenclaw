@@ -456,6 +456,32 @@ class SkillDevDeepAdapter:
         }
         async for chunk in self.process_message_stream_impl(request, inputs):
             yield chunk
+        
+        benchmark, report, iteration = self._get_review_benchmark(task_workspace)
+        if benchmark and report and iteration:
+            logger.info("[session=%s] [SkillDevDeepAdapter] 评测结果审阅: %s", task_id, iteration)
+            yield AgentResponseChunk(
+                request_id=rid,
+                channel_id=cid,
+                payload={
+                    "event_type": "skilldev.confirm_request",
+                    "confirm_type": "review",
+                    "title": "评测结果审阅",
+                    "message": "请审阅评测结果并决定下一步。",
+                    "data": {
+                        "benchmark": benchmark,
+                        "report": report,
+                        "iteration": iteration,
+                    },
+                    "actions": [
+                        {"id": "accept", "label": "通过，继续", "style": "primary"},
+                        {"id": "improve", "label": "继续改进", "style": "secondary"},
+                    ],
+                    "task_id": task_id,
+                },
+                is_complete=False,
+            )
+            return 
 
         output_dir = task_workspace / "output"
         skill_files = [
@@ -491,30 +517,6 @@ class SkillDevDeepAdapter:
                 is_complete=True,
             )
         else:
-            benchmark, report, iteration = self._get_review_benchmark(task_workspace)
-            if benchmark and report and iteration:
-                yield AgentResponseChunk(
-                    request_id=rid,
-                    channel_id=cid,
-                    payload={
-                        "event_type": "skilldev.confirm_request",
-                        "confirm_type": "review",
-                        "title": "评测结果审阅",
-                        "message": "请审阅评测结果并决定下一步。",
-                        "data": {
-                            "benchmark": benchmark,
-                            "report": report,
-                            "iteration": iteration,
-                        },
-                        "actions": [
-                            {"id": "accept", "label": "通过，继续", "style": "primary"},
-                            {"id": "improve", "label": "继续改进", "style": "secondary"},
-                        ],
-                        "task_id": task_id,
-                    },
-                    is_complete=False,
-                )
-
             yield AgentResponseChunk(
                 request_id=rid,
                 channel_id=cid,
@@ -569,6 +571,13 @@ class SkillDevDeepAdapter:
         bm_json = target_dir / "benchmark.json"
         if bm_json.is_file():
             benchmark = json.loads(bm_json.read_text(encoding="utf-8"))
+            if benchmark.get("reviewed"):
+                return None, None, -1
+            updated = {**benchmark, "reviewed": True}
+            bm_json.write_text(
+                json.dumps(updated, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
 
         bm_md = target_dir / "benchmark.md"
         if bm_md.is_file():
@@ -642,7 +651,7 @@ class SkillDevDeepAdapter:
     @staticmethod
     async def _write_skill_searched(task_workspace: Path, skill_searched: dict[str, Any]) -> None:
         """Download a skill selected from search results into ref-skills."""
-        skill_name = skill_searched.get("skillName", "unknown")
+        skill_name = skill_searched.get("skillId") or skill_searched.get("skillName") or "unknown"
         url = skill_searched.get("url", "")
         if not url:
             logger.warning("[SkillDevDeepAdapter] skill_searched missing url: %s", skill_searched)
@@ -731,7 +740,7 @@ class SkillDevDeepAdapter:
             parts.append(format_tool_usage_hint())
         parts.append("请在生成 Skill 前按需检查上述资源。")
         if params.get("skill_searched"):
-            skill_name = params.get('skill_searched', {}).get('skillName')
+            skill_name = params.get('skill_searched', {}).get('skillId') or params.get('skill_searched', {}).get('skillName')
             parts.append(f"用户明确指明要参考 {task_workspace / 'resources' / 'ref-skills'} 中的{skill_name}技能，请在生成前仔细阅读该技能，并结合用户需求，生成新的Skill")
         return "\n".join(parts)
 

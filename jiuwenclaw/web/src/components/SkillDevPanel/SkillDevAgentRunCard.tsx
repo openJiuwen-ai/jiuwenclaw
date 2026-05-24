@@ -60,7 +60,7 @@ export function SkillDevAgentRunCard({ message }: SkillDevAgentRunCardProps) {
           </span>
         ) : (
           <span className="shrink-0 px-1.5 py-0.5 text-xs rounded bg-hover text-text-muted border border-border">
-            baseline
+            without_skill
           </span>
         )}
 
