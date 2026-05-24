@@ -260,13 +260,13 @@ class RetryMixin:
         """
         error_msg = str(exc).lower()
 
-        if any(kw.lower in error_msg for kw in self._NON_RETRYABLE_KEYWORDS):
+        if any(kw.lower() in error_msg for kw in self._NON_RETRYABLE_KEYWORDS):
             return False
 
-        if any(kw.lower in error_msg for kw in ("429", "rate_limit", "rate limit")):
+        if any(kw.lower() in error_msg for kw in ("429", "rate_limit", "rate limit")):
             return cfg.retry_on_rate_limit
 
-        if any(kw.lower in error_msg for kw in self._RETRYABLE_KEYWORDS):
+        if any(kw.lower() in error_msg for kw in self._RETRYABLE_KEYWORDS):
             return True
 
         return False
