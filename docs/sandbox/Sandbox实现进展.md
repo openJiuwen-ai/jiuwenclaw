@@ -145,7 +145,7 @@ _disconnect_agent_client(sandbox_id, agent_client) -> None
 
 固定：`queue_enabled=true`（始终排队）、`queue_timeout_seconds=60`、`idle_check_interval_seconds=30`。
 
-开启时另需：`SANDBOX_API_BASE`、`SANDBOX_TEMPLATE_ID`、`SANDBOX_DCS_HOST`、`SANDBOX_DCS_PORT`、`SANDBOX_DCS_USERNAME`、`SANDBOX_DCS_PASSWORD`、`GATEWAY_TO_OA_WS_PATH`。
+开启时另需：`SANDBOX_API_BASE`、`SANDBOX_TEMPLATE_ID`、`SANDBOX_DCS_HOST`、`SANDBOX_DCS_PORT`、`SANDBOX_DCS_PASSWORD`、`GATEWAY_TO_OA_WS_PATH`。
 
 可选：`SANDBOX_INIT_DATA_PATH` — 沙箱内 `init_data.json` 上传路径；Gateway 与 AgentServer 均读取此变量，默认 `/home/sandbox/init_data.json`。
 

@@ -4,15 +4,14 @@ import hashlib
 import os
 from dataclasses import dataclass
 
-import redis.asyncio as redis
+from redis.asyncio.cluster import RedisCluster
 
 from jiuwenclaw.sandbox.open_ability import OpenAbilityEndpoint
 from jiuwenclaw.utils import logger
 
-_DCS_SOCKET_TIMEOUT_SECONDS = 5.0
+_DCS_SOCKET_CONNECT_TIMEOUT_SECONDS = 1.0
 _DCS_TTL_SECONDS = 0
 _DCS_DEFAULT_PORT = 2881
-_DCS_DB = 0
 
 
 def _env_int(name: str, *, default: int) -> int:
@@ -26,7 +25,6 @@ def _env_int(name: str, *, default: int) -> int:
 class SandboxDcsConfig:
     host: str
     port: int
-    username: str | None = None
     password: str | None = None
 
     @classmethod
@@ -36,12 +34,10 @@ class SandboxDcsConfig:
             raise RuntimeError(
                 "SANDBOX_DCS_HOST environment variable is required when sandbox routing is enabled"
             )
-        username = os.environ.get("SANDBOX_DCS_USERNAME", "").strip() or None
         password = os.environ.get("SANDBOX_DCS_PASSWORD", "").strip() or None
         return cls(
             host=host,
             port=_env_int("SANDBOX_DCS_PORT", default=_DCS_DEFAULT_PORT),
-            username=username,
             password=password,
         )
 
@@ -53,30 +49,27 @@ class SandboxDcsRecord:
 
 
 class SandboxDcsStore:
-    """Persist sandbox metadata to Huawei DCS (Redis-compatible) via redis-py."""
+    """Persist sandbox metadata to Huawei DCS (Redis Cluster) via redis-py."""
 
     def __init__(self, config: SandboxDcsConfig) -> None:
         self._config = config
-        self._client: redis.Redis | None = None
+        self._client: RedisCluster | None = None
 
     @classmethod
     def from_env(cls) -> SandboxDcsStore:
         return cls(SandboxDcsConfig.from_env())
 
-    def _create_redis_client(self) -> redis.Redis:
-        return redis.Redis(
+    def _create_redis_client(self) -> RedisCluster:
+        return RedisCluster(
             host=self._config.host,
             port=self._config.port,
-            db=_DCS_DB,
-            username=self._config.username,
             password=self._config.password,
-            ssl=False,
             decode_responses=True,
-            socket_timeout=_DCS_SOCKET_TIMEOUT_SECONDS,
-            socket_connect_timeout=_DCS_SOCKET_TIMEOUT_SECONDS,
+            require_full_coverage=False,
+            socket_connect_timeout=_DCS_SOCKET_CONNECT_TIMEOUT_SECONDS,
         )
 
-    async def ensure_connected(self) -> redis.Redis:
+    async def ensure_connected(self) -> RedisCluster:
         if self._client is None:
             self._client = self._create_redis_client()
         return self._client
