@@ -881,8 +881,8 @@ class VibeSkillChannel(BaseChannel):
     def _build_review_replied_skilldev_chat_query(accept: bool, feedback: str) -> str:
         """根据审阅结果组装 skilldev.chat 的 query。"""
         if accept:
-            return "用户审阅后通过评测"
-        query = "用户审阅后给出反馈"
+            return "已对测试结果进行审阅，无需进行迭代优化，请进行下一步操作"
+        query = "请根据测试结果以及反馈意见继续改进生成的skill，反馈意见如下"
         if feedback:
             query = f"{query}：{feedback}"
         return query
