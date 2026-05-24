@@ -9,16 +9,17 @@
 
 执行顺序（与文档一致，跳过步骤 0 provision）：
 
-1. 五条 ``model_template``（T1–T5；每次执行均新建，``template_name`` 可重复）
+1. 五条 ``model_template``（M1–M5；每次执行均新建，``template_name`` 可重复）
 2. 四条 ``extension-config-templates``（E1–E4；每次执行均新建）
-3. 两条 ``config-effective/service-policies``
-4. 两条 ``config-effective/agent-policies``（依赖上一步销售服务策略 id）
-5. ``config-effective/global-policies``（每实例唯一；已存在则 PUT 更新）
-6. 两条 ``config-default-template-mappings``
+3. 三条 ``skill-whitelist-templates``（W1–W3；每次执行均新建）
+4. 两条 ``config-effective/service-policies``（``template_ref`` 含模型 / 白名单 / 扩展配置槽位）
+5. 两条 ``config-effective/agent-policies``（依赖上一步销售服务策略 id）
+6. ``config-effective/global-policies``（每实例唯一；已存在则 PUT 更新）
+7. 两条 ``config-default-template-mappings``
 
 典型用法（PowerShell 一行）::
 
-    uv run python packages/jiuwenclaw-ee/claw_manager/scripts/seed_enterprise_demo_config.py sp-xxxxxxxxxxxx
+    uv run python packages/jiuwenclaw-ee/claw_manager/scripts/enterprise_config_demo_data_config.py sp-xxxxxxxxxxxx
 
 可选环境变量 ``CLAWMANAGER_BASE_URL`` 覆盖 Manager 根地址。
 """
@@ -27,9 +28,12 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import os
 import sys
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 try:
     import httpx
@@ -37,6 +41,22 @@ except ImportError as _httpx_import_error:  # pragma: no cover
     httpx = None  # type: ignore[assignment,misc]
 else:
     _httpx_import_error = None
+
+
+def _configure_cli_logging() -> None:
+    """INFO 走 stdout，ERROR 走 stderr。"""
+    root = logging.getLogger()
+    root.handlers.clear()
+    root.setLevel(logging.INFO)
+    fmt = logging.Formatter("%(message)s")
+    out = logging.StreamHandler(sys.stdout)
+    out.setLevel(logging.INFO)
+    out.setFormatter(fmt)
+    err = logging.StreamHandler(sys.stderr)
+    err.setLevel(logging.ERROR)
+    err.setFormatter(fmt)
+    root.addHandler(out)
+    root.addHandler(err)
 
 
 class ManagerApiError(RuntimeError):
@@ -71,7 +91,7 @@ class ManagerClient:
     def _url(self, path: str) -> str:
         if path.startswith("/model-templates") or path.startswith(
             "/extension-config-templates"
-        ):
+        ) or path.startswith("/skill-whitelist-templates"):
             return f"{self._base}/api/v1{path}"
         return f"{self._base}/api/v1/instances/{self._jid}{path}"
 
@@ -147,7 +167,7 @@ def _require_template_id(data: dict[str, Any], label: str) -> str:
 def _model_templates() -> list[tuple[str, dict[str, Any]]]:
     return [
         (
-            "T1 全局兜底-经济型",
+            "M1 全局兜底-经济型",
             {
                 "template_name": "全局兜底-经济型",
                 "description": "无服务/Agent 命中时使用",
@@ -163,7 +183,7 @@ def _model_templates() -> list[tuple[str, dict[str, Any]]]:
             },
         ),
         (
-            "T2 销售组-标准型",
+            "M2 销售组-标准型",
             {
                 "template_name": "销售组-标准型",
                 "model_type": "default",
@@ -176,7 +196,7 @@ def _model_templates() -> list[tuple[str, dict[str, Any]]]:
             },
         ),
         (
-            "T3 VIP-加强对话",
+            "M3 VIP-加强对话",
             {
                 "template_name": "VIP-加强对话",
                 "model_type": ["default", "vision"],
@@ -190,7 +210,7 @@ def _model_templates() -> list[tuple[str, dict[str, Any]]]:
             },
         ),
         (
-            "T4 Carol 默认映射模型",
+            "M4 Carol 默认映射模型",
             {
                 "template_name": "Carol 默认映射模型",
                 "model_type": "default",
@@ -203,7 +223,7 @@ def _model_templates() -> list[tuple[str, dict[str, Any]]]:
             },
         ),
         (
-            "T5 销售组映射专用",
+            "M5 销售组映射专用",
             {
                 "template_name": "销售组映射专用",
                 "model_type": "default",
@@ -288,6 +308,47 @@ def _extension_config_templates() -> list[tuple[str, dict[str, Any]]]:
     ]
 
 
+def _skill_whitelist_templates() -> list[tuple[str, dict[str, Any]]]:
+    return [
+        (
+            "W1 销售组-天气 Skill",
+            {
+                "template_name": "销售组-天气 Skill",
+                "description": "销售通道允许 search/weather",
+                "skill_id": "search/weather",
+                "skill_version": "1.2.0",
+                "skill_source": "https://skillhub.example.com/",
+                "enabled": True,
+                "data": {"demo": "w1"},
+            },
+        ),
+        (
+            "W2 销售组-CRM Skill",
+            {
+                "template_name": "销售组-CRM Skill",
+                "description": "销售通道允许 crm/lead_lookup",
+                "skill_id": "crm/lead_lookup",
+                "skill_version": "2.0.1",
+                "skill_source": "https://skillhub.example.com/",
+                "enabled": True,
+                "data": {"demo": "w2"},
+            },
+        ),
+        (
+            "W3 全局兜底 Skill",
+            {
+                "template_name": "全局兜底 Skill",
+                "description": "未命中服务策略时的最小 Skill 白名单",
+                "skill_id": "search/weather",
+                "skill_version": "1.0.0",
+                "skill_source": "https://skillhub.example.com/",
+                "enabled": True,
+                "data": {"demo": "w3"},
+            },
+        ),
+    ]
+
+
 def _upsert_global_policy(client: ManagerClient, body: dict[str, Any]) -> dict[str, Any]:
     try:
         return client.post("/config-effective/global-policies", body)
@@ -300,7 +361,7 @@ def _upsert_global_policy(client: ManagerClient, body: dict[str, Any]) -> dict[s
             "全局策略创建失败且列表为空，请检查 Manager / Gateway 日志。"
         )
     policy_id = int(rows[0]["id"])
-    print(f"  [global] 已存在，PUT 更新 id={policy_id}")
+    logger.info("  [global] 已存在，PUT 更新 id=%s", policy_id)
     return client.put(f"/config-effective/global-policies/{policy_id}", body)
 
 
@@ -309,22 +370,23 @@ def seed_demo_config(client: ManagerClient) -> dict[str, Any]:
         "jiuwenclaw_id": client.jiuwenclaw_id,
         "model_templates": {},
         "extension_config_templates": {},
+        "skill_whitelist_templates": {},
     }
 
-    print("[1/6] 创建 model_template（T1–T5）")
+    logger.info("[1/7] 创建 model_template（M1–M5）")
     template_ids: list[str] = []
     for label, body in _model_templates():
         row = client.post("/model-templates", body)
         tid = _require_template_id(row, "/model-templates")
         template_ids.append(tid)
-        key = f"t{len(template_ids)}"
+        key = f"m{len(template_ids)}"
         result["model_templates"][key] = tid
-        print(f"  [{key}] {label} -> template_id={tid}")
+        logger.info("  [%s] %s -> template_id=%s", key, label, tid)
 
-    t1, t2, t3, t4, t5 = template_ids
-    group_map_default_model = f"${{group::g_demo_sales}} or {t1}"
+    m1, m2, m3, m4, m5 = template_ids
+    group_map_default_model = f"${{group::g_demo_sales}} or {m1}"
 
-    print("[2/6] 创建 extension-config-templates（E1–E4）")
+    logger.info("[2/7] 创建 extension-config-templates（E1–E4）")
     extension_ids: list[str] = []
     for label, body in _extension_config_templates():
         row = client.post("/extension-config-templates", body)
@@ -332,7 +394,7 @@ def seed_demo_config(client: ManagerClient) -> dict[str, Any]:
         extension_ids.append(tid)
         key = f"e{len(extension_ids)}"
         result["extension_config_templates"][key] = tid
-        print(f"  [{key}] {label} -> template_id={tid}")
+        logger.info("  [%s] %s -> template_id=%s", key, label, tid)
 
     e1, e2, e3, e4 = extension_ids
     result["extension_template_id_literals"] = {
@@ -342,7 +404,24 @@ def seed_demo_config(client: ManagerClient) -> dict[str, Any]:
         "e4": e4,
     }
 
-    print("[3/6] 创建 service-policies")
+    logger.info("[3/7] 创建 skill-whitelist-templates（W1–W3）")
+    whitelist_ids: list[str] = []
+    for label, body in _skill_whitelist_templates():
+        row = client.post("/skill-whitelist-templates", body)
+        tid = _require_template_id(row, "/skill-whitelist-templates")
+        whitelist_ids.append(tid)
+        key = f"w{len(whitelist_ids)}"
+        result["skill_whitelist_templates"][key] = tid
+        logger.info("  [%s] %s -> template_id=%s", key, label, tid)
+
+    w1, w2, w3 = whitelist_ids
+    result["skill_whitelist_template_id_literals"] = {
+        "w1": w1,
+        "w2": w2,
+        "w3": w3,
+    }
+
+    logger.info("[4/7] 创建 service-policies")
     sales = client.post(
         "/config-effective/service-policies",
         {
@@ -350,8 +429,10 @@ def seed_demo_config(client: ManagerClient) -> dict[str, Any]:
             "priority": 100,
             "match_expr": "group_id == 'g_demo_sales'",
             "template_ref": {
-                "default_model": t2,
-                "vision_model": t2,
+                "default_model": [m2],
+                "vision_model": [m2],
+                "skill_whitelist": [w1, w2],
+                "extension_config": [e1, e2],
             },
             "enabled": True,
             "data": {
@@ -361,7 +442,15 @@ def seed_demo_config(client: ManagerClient) -> dict[str, Any]:
     )
     sales_id = _require_id(sales, "service-policies/sales")
     result["service_policy_sales_id"] = sales_id
-    print(f"  [2.1] 销售通道 priority=100 -> id={sales_id} (default_model={t2})")
+    logger.info(
+        "  [2.1] 销售通道 priority=100 -> id=%s (default_model=%s, skills=%s,%s, ext=%s,%s)",
+        sales_id,
+        m2,
+        w1,
+        w2,
+        e1,
+        e2,
+    )
 
     fallback = client.post(
         "/config-effective/service-policies",
@@ -369,16 +458,16 @@ def seed_demo_config(client: ManagerClient) -> dict[str, Any]:
             "service_id": "${group_id}::${bot_id}",
             "priority": 10,
             "match_expr": "group_id == 'g_demo_sales'",
-            "template_ref": {"default_model": t1},
+            "template_ref": {"default_model": [m1]},
             "enabled": True,
             "data": {},
         },
     )
     fallback_id = _require_id(fallback, "service-policies/fallback")
     result["service_policy_fallback_id"] = fallback_id
-    print(f"  [2.2] 低优先级兜底 -> id={fallback_id} (default_model={t1})")
+    logger.info("  [2.2] 低优先级兜底 -> id=%s (default_model=%s)", fallback_id, m1)
 
-    print("[4/6] 创建 agent-policies")
+    logger.info("[5/7] 创建 agent-policies")
     vip = client.post(
         "/config-effective/agent-policies",
         {
@@ -387,8 +476,10 @@ def seed_demo_config(client: ManagerClient) -> dict[str, Any]:
             "priority": 100,
             "match_expr": "user_id == 'alice'",
             "template_ref": {
-                "default_model": t3,
-                "vision_model": t3,
+                "default_model": [m3],
+                "vision_model": [m3],
+                "skill_whitelist": [w1],
+                "extension_config": [e3],
             },
             "enabled": True,
             "data": {
@@ -402,7 +493,13 @@ def seed_demo_config(client: ManagerClient) -> dict[str, Any]:
     )
     vip_id = _require_id(vip, "agent-policies/vip")
     result["agent_policy_vip_id"] = vip_id
-    print(f"  [3.1] VIP alice -> id={vip_id} (default_model={t3})")
+    logger.info(
+        "  [3.1] VIP alice -> id=%s (default_model=%s, skill=%s, ext=%s)",
+        vip_id,
+        m3,
+        w1,
+        e3,
+    )
 
     mapping_rule = client.post(
         "/config-effective/agent-policies",
@@ -411,27 +508,33 @@ def seed_demo_config(client: ManagerClient) -> dict[str, Any]:
             "service_policy_id": sales_id,
             "priority": 0,
             "match_expr": "",
-            "template_ref": {"default_model": group_map_default_model},
+            "template_ref": {"default_model": [group_map_default_model]},
             "enabled": True,
             "data": {
-                "remark": f"group:: 仅按 group_id 查步骤 5.2；or 右侧 {t1} 为 T1 的 template_id 回退"
+                "remark": f"group:: 仅按 group_id 查步骤 5.2；or 右侧 {m1} 为 M1 的 template_id 回退"
             },
         },
     )
     mapping_id = _require_id(mapping_rule, "agent-policies/mapping")
     result["agent_policy_mapping_id"] = mapping_id
-    print(f"  [3.2] 组映射表达式 -> id={mapping_id} (default_model={group_map_default_model})")
+    logger.info(
+        "  [3.2] 组映射表达式 -> id=%s (default_model=%s)",
+        mapping_id,
+        group_map_default_model,
+    )
 
-    print("[5/6] 创建 / 更新 global-policies")
+    logger.info("[6/7] 创建 / 更新 global-policies")
     global_row = _upsert_global_policy(
         client,
         {
             "priority": 0,
             "template_ref": {
-                "default_model": t1,
-                "video_model": t1,
-                "audio_model": t1,
-                "vision_model": t1,
+                "default_model": [m1],
+                "video_model": [m1],
+                "audio_model": [m1],
+                "vision_model": [m1],
+                "skill_whitelist": [w3],
+                "extension_config": [e4],
             },
             "enabled": True,
             "data": {},
@@ -439,16 +542,22 @@ def seed_demo_config(client: ManagerClient) -> dict[str, Any]:
     )
     global_id = _require_id(global_row, "global-policies")
     result["global_policy_id"] = global_id
-    print(f"  [4] 全局兜底 -> id={global_id} (四槽位={t1})")
+    logger.info(
+        "  [4] 全局兜底 -> id=%s (四槽位=%s, skill=%s, ext=%s)",
+        global_id,
+        m1,
+        w3,
+        e4,
+    )
 
-    print("[6/6] 创建 config-default-template-mappings")
+    logger.info("[7/7] 创建 config-default-template-mappings")
     carol_map = client.post(
         "/config-default-template-mappings",
         {
             "user_id": "carol",
             "group_id": None,
             "priority": 0,
-            "template_id": t4,
+            "template_id": m4,
             "template_type": "default_model",
             "enabled": True,
             "data": {"remark": "未命中 Agent/服务策略时的用户级 default_model 映射"},
@@ -456,7 +565,7 @@ def seed_demo_config(client: ManagerClient) -> dict[str, Any]:
     )
     carol_map_id = _require_id(carol_map, "mapping/carol")
     result["mapping_carol_id"] = carol_map_id
-    print(f"  [5.1] user carol -> template_id={t4} (id={carol_map_id})")
+    logger.info("  [5.1] user carol -> template_id=%s (id=%s)", m4, carol_map_id)
 
     group_map = client.post(
         "/config-default-template-mappings",
@@ -464,7 +573,7 @@ def seed_demo_config(client: ManagerClient) -> dict[str, Any]:
             "user_id": None,
             "group_id": "g_demo_sales",
             "priority": 0,
-            "template_id": t5,
+            "template_id": m5,
             "template_type": "default_model",
             "enabled": True,
             "data": {"remark": "组级 default_model 映射，供 3.2 ${group::g_demo_sales} 解析"},
@@ -472,9 +581,9 @@ def seed_demo_config(client: ManagerClient) -> dict[str, Any]:
     )
     group_map_id = _require_id(group_map, "mapping/group")
     result["mapping_group_id"] = group_map_id
-    print(f"  [5.2] group g_demo_sales -> template_id={t5} (id={group_map_id})")
+    logger.info("  [5.2] group g_demo_sales -> template_id=%s (id=%s)", m5, group_map_id)
 
-    result["template_id_literals"] = {"t1": t1, "t2": t2, "t3": t3, "t4": t4, "t5": t5}
+    result["template_id_literals"] = {"m1": m1, "m2": m2, "m3": m3, "m4": m4, "m5": m5}
     return result
 
 
@@ -506,46 +615,61 @@ def _parse_args() -> argparse.Namespace:
 
 
 def main() -> None:
+    _configure_cli_logging()
     if _httpx_import_error is not None:
-        print(
-            "缺少 httpx，请在 claw_manager 目录执行: uv sync\n或: pip install httpx",
-            file=sys.stderr,
+        logger.error(
+            "缺少 httpx，请在 claw_manager 目录执行: uv sync\n或: pip install httpx"
         )
-        raise SystemExit(1) from _httpx_import_error
+        sys.exit(1)
 
     args = _parse_args()
     client = ManagerClient(args.manager_base, args.jiuwenclaw_id, timeout=args.timeout)
-    print(f"[seed] jiuwenclaw_id={client.jiuwenclaw_id} manager={client.base_url}")
+    logger.info("[seed] jiuwenclaw_id=%s manager=%s", client.jiuwenclaw_id, client.base_url)
 
     try:
         summary = seed_demo_config(client)
     except SeedDemoConfigError as exc:
-        print(f"[failed] {exc}", file=sys.stderr)
+        logger.error("[failed] %s", exc)
         raise SystemExit(1) from exc
     except ManagerApiError as exc:
-        print(f"[failed] {exc}", file=sys.stderr)
+        logger.error("[failed] %s", exc)
         raise SystemExit(1) from exc
     except httpx.ConnectError as exc:
-        print(f"[connect-failed] {exc}", file=sys.stderr)
-        print(
-            f"请确认 Claw Manager 已在 {args.manager_base} 启动，且实例 {args.jiuwenclaw_id} 已 provision。",
-            file=sys.stderr,
+        logger.error("[connect-failed] %s", exc)
+        logger.error(
+            "请确认 Claw Manager 已在 %s 启动，且实例 %s 已 provision。",
+            args.manager_base,
+            args.jiuwenclaw_id,
         )
         raise SystemExit(1) from exc
 
-    print("\n[done] 演示配置已写入。预期解析：")
-    print("  alice + g_demo_sales::bot_main -> T3 (VIP)")
-    print("  bob   + g_demo_sales::bot_main -> T5 (Agent 3.2 + 映射 5.2)")
-    print("  g_unknown::bot_main              -> T1 (全局兜底)")
-    print("\n联调聊天（将 {{WEB_PORT}} 换为 provision 返回的 ports.web）：")
-    print(
-        "  uv run python packages/jiuwenclaw-ee/claw_manager/scripts/send_enterprise_chat.py "
+    logger.info("")
+    logger.info("[done] 演示配置已写入。预期解析（各模型槽位可不同）：")
+    logger.info("  alice + g_demo_sales::bot_main")
+    logger.info("    default/vision -> M3 VIP-加强对话 (Agent 3.1)")
+    logger.info("    video/audio -> M1 全局兜底-经济型 (全局 4 回填)")
+    logger.info(
+        "    skills=[W1 销售组-天气 Skill]; ext=E3 Agent Server 错误恢复（覆盖服务 E1+E2）"
+    )
+    logger.info("  bob   + g_demo_sales::bot_main")
+    logger.info("    default -> M5 销售组映射专用 (Agent 3.2 + 映射 5.2)")
+    logger.info("    vision -> M2 销售组-标准型 (继承服务 2.1)")
+    logger.info("    video/audio -> M1 全局兜底-经济型 (全局 4 回填)")
+    logger.info("    skills=[W1 销售组-天气 Skill, W2 销售组-CRM Skill] 继承服务级")
+    logger.info("    ext=E1 Gateway 请求前鉴权 + E2 Gateway 请求后日志（继承服务 2.1）")
+    logger.info("  g_unknown::bot_main")
+    logger.info("    default/vision/video/audio -> M1 全局兜底-经济型 (全局兜底)")
+    logger.info("    skill=W3 全局兜底 Skill; ext=E4 Gateway 定时清理")
+    logger.info("")
+    logger.info("联调聊天（将 {WEB_PORT} 换为 provision 返回的 ports.web）：")
+    logger.info(
+        "  uv run python packages/jiuwenclaw-ee/claw_manager/scripts/enterprise_config_chat.py "
         "--group-id g_demo_sales --bot-id bot_main --user-id alice "
         "--web-port {WEB_PORT}"
     )
 
     if args.json_out:
-        print(json.dumps(summary, ensure_ascii=False, indent=2))
+        logger.info("%s", json.dumps(summary, ensure_ascii=False, indent=2))
 
 
 if __name__ == "__main__":

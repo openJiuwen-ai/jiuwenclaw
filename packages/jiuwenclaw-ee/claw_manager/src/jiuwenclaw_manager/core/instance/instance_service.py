@@ -37,7 +37,11 @@ async def create_instance_row(handler: DBHandler, row_data: dict[str, Any]) -> A
     payload = dict(row_data)
     payload.setdefault("created_at", now)
     payload.setdefault("updated_at", now)
-    return await handler.create(_INSTANCE_TABLE, payload)
+    row = await handler.create(_INSTANCE_TABLE, payload)
+    jid = str(payload.get("jiuwenclaw_id") or getattr(row, "jiuwenclaw_id", "") or "").strip()
+    if jid:
+        await register_default_service_instances(handler, jid)
+    return row
 
 
 async def get_instance_row(handler: DBHandler, jiuwenclaw_id: str) -> Any | None:
@@ -91,6 +95,132 @@ async def list_instance_services(handler: DBHandler, jiuwenclaw_id: str) -> Sequ
         limit=10_000,
         offset=0,
     )
+
+
+async def get_jiuwenclaw_id_by_service_id(
+    handler: DBHandler,
+    service_id: str,
+    *,
+    service_type: str | None = None,
+) -> str | None:
+    """按 ``service_id`` 从 ``service_instance`` 表解析创建实例时登记的 ``jiuwenclaw_id``。"""
+    sid = str(service_id or "").strip()
+    if not sid:
+        return None
+    rows = await handler.list_records(_SERVICE_TABLE, {"service_id": sid}, limit=10, offset=0)
+    if not rows:
+        return None
+    st_filter = (service_type or "").strip().lower() or None
+    if st_filter:
+        rows = [
+            row
+            for row in rows
+            if str(getattr(row, "service_type", "") or "").strip().lower() == st_filter
+        ]
+    if not rows:
+        return None
+    if len(rows) > 1:
+        return None
+    jid = str(getattr(rows[0], "jiuwenclaw_id", "") or "").strip()
+    if not jid:
+        return None
+    parent = await get_instance_row(handler, jid)
+    return jid if parent is not None else None
+
+
+async def ensure_service_instance(
+    handler: DBHandler,
+    *,
+    jiuwenclaw_id: str,
+    service_id: str,
+    service_type: str,
+    component_role: str,
+    manager_id: str = "default",
+) -> Any:
+    """创建/更新 ``service_instance`` 行，登记 ``service_id`` ↔ ``jiuwenclaw_id`` 映射。"""
+    jid = str(jiuwenclaw_id or "").strip()
+    sid = str(service_id or "").strip()
+    if not jid or not sid:
+        raise ValueError("jiuwenclaw_id and service_id are required")
+    rows = await handler.list_records(
+        _SERVICE_TABLE,
+        {"jiuwenclaw_id": jid, "service_id": sid},
+        limit=1,
+        offset=0,
+    )
+    now = utc_now()
+    if rows:
+        row_id = int(getattr(rows[0], "id"))
+        return await handler.update(
+            _SERVICE_TABLE,
+            {"id": row_id},
+            {
+                "service_type": service_type,
+                "component_role": component_role,
+                "manager_id": manager_id,
+                "status": "pending",
+                "updated_at": now,
+            },
+        )
+    return await handler.create(
+        _SERVICE_TABLE,
+        {
+            "jiuwenclaw_id": jid,
+            "service_id": sid,
+            "service_type": service_type,
+            "component_role": component_role,
+            "manager_id": manager_id,
+            "endpoint": None,
+            "version": None,
+            "capabilities": None,
+            "data": None,
+            "status": "pending",
+            "last_heartbeat": None,
+            "created_at": now,
+            "updated_at": now,
+        },
+    )
+
+
+async def register_default_service_instances(
+    handler: DBHandler,
+    jiuwenclaw_id: str,
+    *,
+    manager_id: str = "default",
+) -> None:
+    """为实例登记默认 Gateway / AgentServer ``service_id``（与 provision 环境变量一致）。"""
+    jid = str(jiuwenclaw_id or "").strip()
+    if not jid:
+        return
+    await ensure_service_instance(
+        handler,
+        jiuwenclaw_id=jid,
+        service_id=f"gw-{jid}",
+        service_type="gateway",
+        component_role="gateway",
+        manager_id=manager_id,
+    )
+    await ensure_service_instance(
+        handler,
+        jiuwenclaw_id=jid,
+        service_id=f"as-{jid}",
+        service_type="agent_server",
+        component_role="agent_server",
+        manager_id=manager_id,
+    )
+
+
+async def backfill_service_instances(handler: DBHandler) -> int:
+    """为已有 ``instance_info`` 实例补写默认 ``service_instance`` 映射，返回处理实例数。"""
+    rows, _ = await list_instance_rows(handler, status=None, offset=0, limit=10_000)
+    count = 0
+    for row in rows:
+        jid = str(getattr(row, "jiuwenclaw_id", "") or "").strip()
+        if not jid:
+            continue
+        await register_default_service_instances(handler, jid)
+        count += 1
+    return count
 
 
 async def upsert_service_heartbeat(

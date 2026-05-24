@@ -1,4 +1,4 @@
-"""模板 API 请求/响应模型：model_template、extension_config_template。"""
+"""模板 API 请求/响应模型：model_template、extension_config_template、skill_whitelist_template。"""
 
 from __future__ import annotations
 
@@ -115,6 +115,48 @@ class ExtensionConfigTemplateOut(BaseModel):
     hook_type: str
     hook_config: dict[str, Any]
     custom_config: dict[str, Any] | None
+    enabled: bool
+    data: dict[str, Any] | None
+    created_at: str | None
+    updated_at: str | None
+
+
+class SkillWhitelistTemplateCreateBody(BaseModel):
+    template_name: str = Field(..., max_length=128)
+    description: str | None = Field(default=None, max_length=512)
+    skill_id: str = Field(..., max_length=512)
+    skill_version: str = Field(..., max_length=64)
+    skill_source: str = Field(..., max_length=512)
+    enabled: bool = True
+    data: dict[str, Any] | None = None
+
+
+class SkillWhitelistTemplateUpdateBody(BaseModel):
+    template_name: str | None = Field(default=None, max_length=128)
+    description: str | None = Field(default=None, max_length=512)
+    skill_id: str | None = Field(default=None, max_length=512)
+    skill_version: str | None = Field(default=None, max_length=64)
+    skill_source: str | None = Field(default=None, max_length=512)
+    enabled: bool | None = None
+    data: dict[str, Any] | None = None
+
+
+class SkillWhitelistTemplateListQuery(BaseModel):
+    page: int = Field(1, ge=1)
+    page_size: int = Field(20, ge=1, le=200)
+    enabled: bool | None = None
+    skill_id: str | None = Field(default=None, max_length=512)
+    skill_source: str | None = Field(default=None, max_length=512)
+
+
+class SkillWhitelistTemplateOut(BaseModel):
+    id: int
+    template_id: str
+    template_name: str
+    description: str | None
+    skill_id: str
+    skill_version: str
+    skill_source: str
     enabled: bool
     data: dict[str, Any] | None
     created_at: str | None

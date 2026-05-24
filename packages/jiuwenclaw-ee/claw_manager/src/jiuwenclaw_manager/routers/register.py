@@ -41,16 +41,16 @@ def router_register(app: FastAPI) -> None:
             return {
                 "enabled": settings.manager_ws_enabled,
                 "running": False,
-                "registered_instances": [],
+                "registered_jiuwenclaw_ids": [],
                 "pid": os.getpid(),
             }
-        registered = await server.list_registered_instance_ids()
+        registered = await server.list_registered_jiuwenclaw_ids()
         return {
             "enabled": True,
             "running": True,
             "host": server.host,
             "port": server.port,
-            "registered_instances": registered,
+            "registered_jiuwenclaw_ids": registered,
             "pid": os.getpid(),
         }
 

@@ -100,7 +100,7 @@ class ConfigEffectiveServicePolicyService:
             "service_id": row["service_id"],
             "priority": row["priority"],
             "match_expr": row.get("match_expr"),
-            "template_ref": row.get("template_ref") or {},
+            "template_ref": normalize_template_ref(row.get("template_ref")),
             "enabled": row.get("enabled", True),
             "data": row.get("data"),
             "created_at": _iso(row.get("created_at") or now),

@@ -4,25 +4,17 @@
 
 from __future__ import annotations
 
-import os
 from datetime import datetime
 from typing import Any
 
 from openjiuwen_runtime.foundation.db.handler import DBHandler
 
-from ...infrastructure.utils import utc_now
+from ...infrastructure.utils import assert_jiuwenclaw_id_matches_payload, require_jiuwenclaw_id, utc_now
 from ...models.template_models import MODEL_TEMPLATE_TABLE_DEF
 from ...schemas.template_schemas import ModelTemplateUpdateRequest
 
 _TABLE = MODEL_TEMPLATE_TABLE_DEF.table_name
 _ALLOWED_MODEL_TYPES = frozenset({"default", "video", "audio", "vision"})
-
-
-def resolve_jiuwenclaw_id() -> str:
-    instance_id = os.getenv("JIUWENCLAW_PROVISIONED_INSTANCE_ID", "").strip()
-    if not instance_id:
-        raise ValueError("JIUWENCLAW_PROVISIONED_INSTANCE_ID is not set")
-    return instance_id
 
 
 def _normalize_template_id(template_id: Any) -> str:
@@ -72,7 +64,7 @@ async def update_model_template(
     template_id: str,
     request: ModelTemplateUpdateRequest,
 ) -> dict[str, Any] | None:
-    jiuwenclaw_id = resolve_jiuwenclaw_id()
+    jiuwenclaw_id = require_jiuwenclaw_id()
     tid = _normalize_template_id(template_id)
     existing = await _get_row_for_instance(handler, tid, jiuwenclaw_id)
     if existing is None:
@@ -101,7 +93,7 @@ async def update_model_template(
 
 
 async def delete_model_template(handler: DBHandler, template_id: str) -> bool:
-    jiuwenclaw_id = resolve_jiuwenclaw_id()
+    jiuwenclaw_id = require_jiuwenclaw_id()
     tid = _normalize_template_id(template_id)
     existing = await _get_row_for_instance(handler, tid, jiuwenclaw_id)
     if existing is None:
@@ -124,12 +116,7 @@ async def apply_model_template_sync(
     payload: dict[str, Any],
 ) -> dict[str, Any] | None:
     """应用 Claw Manager 经 WebSocket 下发的 model_templates 变更。"""
-    jiuwenclaw_id = resolve_jiuwenclaw_id()
-    payload_jid = str(payload.get("jiuwenclaw_id") or "").strip()
-    if payload_jid and payload_jid != jiuwenclaw_id:
-        raise ValueError(
-            f"jiuwenclaw_id mismatch: push={payload_jid!r} env={jiuwenclaw_id!r}"
-        )
+    jiuwenclaw_id = assert_jiuwenclaw_id_matches_payload(payload)
 
     if op == "create":
         template = payload.get("template")

@@ -10,10 +10,14 @@ import pytest
 from jiuwenclaw.agentserver.enterprise_config.expressions import (
     agent_rule_matches,
     evaluate_match_expr,
+    resolve_slot_template_id_map,
     resolve_template_slot_ref,
     substitute_template,
 )
-from jiuwenclaw.agentserver.enterprise_config.schemas import RoutingContext
+from jiuwenclaw.agentserver.enterprise_config.schemas import (
+    RoutingContext,
+    normalize_template_ref,
+)
 
 _FALLBACK_TEMPLATE_ID = "11111111-1111-4111-8111-111111111111"
 
@@ -43,6 +47,55 @@ def sales_ctx() -> RoutingContext:
         bot_id="bot_main",
         user_id="alice",
     )
+
+
+def test_normalize_template_ref_accepts_string_and_list() -> None:
+    assert normalize_template_ref(None) == {}
+    assert normalize_template_ref(
+        {
+            "default_model": "f2222222-2222-4222-8222-222222222202",
+            "vision_model": ["f2222222-2222-4222-8222-222222222202"],
+            "skill_whitelist": [
+                "a1000001-0000-4000-8000-000000000001",
+                "abc",
+            ],
+        }
+    ) == {
+        "default_model": ["f2222222-2222-4222-8222-222222222202"],
+        "vision_model": ["f2222222-2222-4222-8222-222222222202"],
+        "skill_whitelist": [
+            "a1000001-0000-4000-8000-000000000001",
+            "abc",
+        ],
+    }
+
+
+@pytest.mark.asyncio
+async def test_resolve_slot_template_id_map_resolves_each_array_item(
+    sales_ctx: RoutingContext, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def _list_records(*_args: object, **_kwargs: object) -> list[dict]:
+        return []
+
+    from jiuwenclaw.agentserver.enterprise_config import gateway_db
+
+    monkeypatch.setattr(gateway_db, "list_records", _list_records)
+
+    refs = {
+        "default_model": [f"${{group::g_demo_sales}} or {_FALLBACK_TEMPLATE_ID}"],
+        "skill_whitelist": [
+            "a1000001-0000-4000-8000-000000000001",
+            "abc",
+        ],
+    }
+    resolved = await resolve_slot_template_id_map(refs, sales_ctx)
+    assert resolved == {
+        "default_model": [_FALLBACK_TEMPLATE_ID],
+        "skill_whitelist": [
+            "a1000001-0000-4000-8000-000000000001",
+            "abc",
+        ],
+    }
 
 
 def test_substitute_service_id(sales_ctx: RoutingContext) -> None:
@@ -229,3 +282,211 @@ async def test_resolve_template_slot_ref_or_literal_when_no_mapping(
         sales_ctx,
     )
     assert ref == _FALLBACK_TEMPLATE_ID
+
+
+def test_fill_missing_template_ref_slots() -> None:
+    from jiuwenclaw.agentserver.enterprise_config.loader import (
+        fill_missing_template_ref_slots,
+    )
+
+    merged = {
+        "default_model": ["m3"],
+        "vision_model": ["m2"],
+    }
+    global_refs = {
+        "default_model": ["m1"],
+        "video_model": ["m1"],
+        "audio_model": ["m1"],
+        "skill_whitelist": ["w3"],
+    }
+    out = fill_missing_template_ref_slots(merged, global_refs)
+    assert out == {
+        "default_model": ["m3"],
+        "vision_model": ["m2"],
+        "video_model": ["m1"],
+        "audio_model": ["m1"],
+        "skill_whitelist": ["w3"],
+    }
+
+
+@pytest.mark.asyncio
+async def test_load_effective_config_fills_missing_slots_from_global(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from jiuwenclaw.agentserver.enterprise_config import gateway_db
+    from jiuwenclaw.agentserver.enterprise_config.loader import (
+        load_effective_enterprise_config,
+    )
+    from jiuwenclaw.schema.agent import AgentRequest
+
+    monkeypatch.setenv("JIUWENCLAW_PROVISIONED_INSTANCE_ID", "sp-demo")
+
+    m2 = "22222222-2222-4222-8222-222222222222"
+    m5 = "55555555-5555-4555-8555-555555555555"
+    m1 = "11111111-1111-4111-8111-111111111111"
+    w1, w2, w3 = "w1", "w2", "w3"
+    e1, e2, e4 = "e1", "e2", "e4"
+    jid = "sp-demo"
+
+    async def _list_records(
+        table: str,
+        *,
+        filters: dict | None = None,
+        order_by: str = "",
+    ) -> list[dict]:
+        scoped = gateway_db.apply_instance_scope(table, dict(filters or {}))
+        if table == "config_effective_service_policy":
+            if scoped.get("jiuwenclaw_id") not in (None, jid):
+                return []
+            return [
+                {
+                    "id": 1,
+                    "jiuwenclaw_id": jid,
+                    "match_expr": "group_id == 'g_demo_sales'",
+                    "template_ref": {
+                        "default_model": [m2],
+                        "vision_model": [m2],
+                        "skill_whitelist": [w1, w2],
+                        "extension_config": [e1, e2],
+                    },
+                }
+            ]
+        if table == "config_effective_agent_policy":
+            if scoped.get("jiuwenclaw_id") not in (None, jid):
+                return []
+            return [
+                {
+                    "id": 10,
+                    "jiuwenclaw_id": jid,
+                    "agent_id": "${user_id}",
+                    "match_expr": "",
+                    "template_ref": {
+                        "default_model": [f"${{group::g_demo_sales}} or {m1}"],
+                    },
+                }
+            ]
+        if table == "config_effective_global_policy":
+            if scoped.get("jiuwenclaw_id") == jid:
+                return [
+                    {
+                        "id": 99,
+                        "jiuwenclaw_id": jid,
+                        "template_ref": {
+                            "default_model": [m1],
+                            "vision_model": [m1],
+                            "video_model": [m1],
+                            "audio_model": [m1],
+                            "skill_whitelist": [w3],
+                            "extension_config": [e4],
+                        },
+                    }
+                ]
+            if scoped.get("jiuwenclaw_id") == "sp-other":
+                return [
+                    {
+                        "id": 1,
+                        "jiuwenclaw_id": "sp-other",
+                        "template_ref": {"extension_config": ["e3-old"]},
+                    }
+                ]
+            return []
+        if table == "config_default_template_mapping":
+            if scoped.get("group_id") == "g_demo_sales":
+                return [{"template_id": m5}]
+        return []
+
+    async def _fetch_template_by_slot(slot: str, template_id: str) -> dict | None:
+        return {"template_id": template_id, "model_id": template_id, "slot": slot}
+
+    monkeypatch.setattr(gateway_db, "list_records", _list_records)
+    monkeypatch.setattr(gateway_db, "fetch_template_by_slot", _fetch_template_by_slot)
+
+    request = AgentRequest(
+        request_id="req-test-bob",
+        params={
+            "group_id": "g_demo_sales",
+            "bot_id": "bot_main",
+            "user_id": "bob",
+        },
+    )
+    loaded = await load_effective_enterprise_config(request)
+    assert loaded is not None
+    assert loaded.template_ref["default_model"] == [m5]
+    assert loaded.template_ref["vision_model"] == [m2]
+    assert loaded.template_ref["video_model"] == [m1]
+    assert loaded.template_ref["audio_model"] == [m1]
+    assert loaded.template_ref["skill_whitelist"] == [w1, w2]
+    assert loaded.template_ref["extension_config"] == [e1, e2]
+    assert loaded.global_policy_id == 99
+
+
+@pytest.mark.asyncio
+async def test_load_effective_config_scopes_global_policy_by_jiuwenclaw_id(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from jiuwenclaw.agentserver.enterprise_config import gateway_db
+    from jiuwenclaw.agentserver.enterprise_config.loader import (
+        load_effective_enterprise_config,
+    )
+    from jiuwenclaw.schema.agent import AgentRequest
+
+    monkeypatch.setenv("JIUWENCLAW_PROVISIONED_INSTANCE_ID", "sp-current")
+    e4 = "44444444-4444-4444-8444-444444444444"
+    e3_old = "33333333-3333-4333-8333-333333333333"
+    m1 = "11111111-1111-4111-8111-111111111111"
+    w3 = "w3"
+
+    async def _list_records(
+        table: str,
+        *,
+        filters: dict | None = None,
+        order_by: str = "",
+    ) -> list[dict]:
+        scoped = gateway_db.apply_instance_scope(table, dict(filters or {}))
+        if table == "config_effective_service_policy":
+            return []
+        if table == "config_effective_global_policy":
+            jid = scoped.get("jiuwenclaw_id")
+            if jid == "sp-current":
+                return [
+                    {
+                        "id": 4,
+                        "jiuwenclaw_id": "sp-current",
+                        "template_ref": {
+                            "default_model": [m1],
+                            "vision_model": [m1],
+                            "video_model": [m1],
+                            "audio_model": [m1],
+                            "skill_whitelist": [w3],
+                            "extension_config": [e4],
+                        },
+                    }
+                ]
+            return []
+        return []
+
+    async def _fetch_template_by_slot(slot: str, template_id: str) -> dict | None:
+        return {
+            "template_id": template_id,
+            "template_name": "Gateway 定时清理" if template_id == e4 else "Agent Server 错误恢复",
+            "component": "gateway" if template_id == e4 else "agent_server",
+            "slot": slot,
+        }
+
+    monkeypatch.setattr(gateway_db, "list_records", _list_records)
+    monkeypatch.setattr(gateway_db, "fetch_template_by_slot", _fetch_template_by_slot)
+
+    request = AgentRequest(
+        request_id="req-test-unknown",
+        params={
+            "group_id": "g_unknown",
+            "bot_id": "bot_main",
+            "user_id": "bob",
+        },
+    )
+    loaded = await load_effective_enterprise_config(request)
+    assert loaded is not None
+    assert loaded.global_policy_id == 4
+    assert loaded.template_ref["extension_config"] == [e4]
+    assert loaded.extension_config is not None
+    assert loaded.extension_config[0]["template_name"] == "Gateway 定时清理"

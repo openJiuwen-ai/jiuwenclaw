@@ -17,12 +17,39 @@ from .schemas import (
 )
 
 
-def merge_dict(*layers: dict[str, str]) -> dict[str, str]:
-    """按参数顺序从左到右合并多个字典，后出现的键覆盖先前的同名键。"""
-    merged: dict[str, str] = {}
+def merge_template_ref(*layers: dict[str, list[str]]) -> dict[str, list[str]]:
+    """按参数顺序从左到右合并 ``template_ref``；后出现的槽位整组覆盖先前的同名槽位。"""
+    merged: dict[str, list[str]] = {}
     for layer in layers:
         merged.update(layer)
     return merged
+
+
+def fill_missing_template_ref_slots(
+    merged: dict[str, list[str]],
+    fallback: dict[str, list[str]],
+) -> dict[str, list[str]]:
+    """将 ``fallback`` 中尚未出现在 ``merged`` 的槽位补入（用于全局兜底按槽位回填）。"""
+    if not fallback:
+        return merged
+    out = dict(merged)
+    for slot, refs in fallback.items():
+        if slot not in out:
+            out[slot] = refs
+    return out
+
+
+async def _fetch_global_policy_refs() -> tuple[dict[str, Any] | None, dict[str, list[str]]]:
+    filters: dict[str, Any] = {"enabled": True}
+    global_rows = await gateway_db.list_records(
+        "config_effective_global_policy",
+        filters=filters,
+        order_by="priority DESC",
+    )
+    if not global_rows:
+        return None, {}
+    matched_global = global_rows[0]
+    return matched_global, normalize_template_ref(matched_global.get("template_ref"))
 
 
 def routing_context_from_request(request: AgentRequest) -> RoutingContext:
@@ -49,8 +76,8 @@ async def load_effective_enterprise_config(
 
     matched_service: dict[str, Any] | None = None
     matched_agent: dict[str, Any] | None = None
-    matched_global: dict[str, Any] | None = None
-    merged_refs: dict[str, str] = {}
+    matched_global, global_refs = await _fetch_global_policy_refs()
+    merged_refs: dict[str, list[str]] = {}
 
     for rule in service_rules:
         if expressions.evaluate_match_expr(rule.get("match_expr"), ctx):
@@ -68,20 +95,14 @@ async def load_effective_enterprise_config(
         for rule in agent_rules:
             if expressions.agent_rule_matches(rule, ctx):
                 matched_agent = rule
-                merged_refs = merge_dict(
+                merged_refs = merge_template_ref(
                     merged_refs,
                     normalize_template_ref(rule.get("template_ref")),
                 )
                 break
+        merged_refs = fill_missing_template_ref_slots(merged_refs, global_refs)
     else:
-        global_rows = await gateway_db.list_records(
-            "config_effective_global_policy",
-            filters={"enabled": True},
-            order_by="priority DESC",
-        )
-        if global_rows:
-            matched_global = global_rows[0]
-            merged_refs = normalize_template_ref(matched_global.get("template_ref"))
+        merged_refs = global_refs
 
     if not merged_refs:
         logger.warning(
@@ -112,27 +133,33 @@ async def load_effective_enterprise_config(
         global_policy=matched_global,
         debug={
             "raw_template_ref": merged_refs,
+            "jiuwenclaw_id": gateway_db.resolve_jiuwenclaw_id(),
             "group_id": ctx.group_id,
             "bot_id": ctx.bot_id,
             "user_id": ctx.user_id,
         },
     )
 
-    for slot, template_id in slot_template_id_map.items():
-        entity = await gateway_db.fetch_template_by_slot(slot, template_id)
-        if entity is None:
-            logger.warning(
-                "[enterprise_config] template not found: slot=%r template_id=%r",
-                slot,
-                template_id,
-            )
+    for slot, template_ids in slot_template_id_map.items():
+        entities: list[dict[str, Any]] = []
+        for template_id in template_ids:
+            entity = await gateway_db.fetch_template_by_slot(slot, template_id)
+            if entity is None:
+                logger.warning(
+                    "[enterprise_config] template not found: slot=%r template_id=%r",
+                    slot,
+                    template_id,
+                )
+                continue
+            entities.append(entity)
+        if not entities:
             continue
         if slot in MODEL_SLOT_KEYS:
-            result.models[slot] = entity
+            result.models[slot] = entities
         elif slot == TemplateRefSlot.SKILL_WHITELIST:
-            result.skill_whitelist = entity
+            result.skill_whitelist = entities
         elif slot == TemplateRefSlot.EXTENSION_CONFIG:
-            result.extension_config = entity
+            result.extension_config = entities
 
     if (
         not result.models
@@ -148,14 +175,7 @@ async def load_effective_enterprise_config(
         return None
 
     logger.info(
-        "[enterprise_config] loaded enterprise config: models=%s skill_whitelist=%s "
-        "extension_config=%s service_policy=%s agent_policy=%s global_policy=%s ctx=%s",
-        list(result.models),
-        result.skill_whitelist is not None,
-        result.extension_config is not None,
-        result.service_policy_id,
-        result.agent_policy_id,
-        result.global_policy_id,
-        ctx.as_dict(),
+        "[enterprise_config] loaded enterprise config: %s",
+        result.as_dict(),
     )
     return result

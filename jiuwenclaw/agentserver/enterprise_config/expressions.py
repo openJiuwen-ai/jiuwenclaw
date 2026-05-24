@@ -112,36 +112,52 @@ async def resolve_template_slot_ref(
 
 
 async def resolve_slot_template_id_map(
-    refs: dict[str, str],
+    refs: dict[str, list[str]],
     ctx: RoutingContext,
-) -> dict[str, str]:
-    """将合并后的 ``template_ref``（槽位 -> 原始引用）解析为槽位 -> ``template_id``。
+) -> dict[str, list[str]]:
+    """将合并后的 ``template_ref``（槽位 -> 原始引用列表）解析为槽位 -> ``template_id`` 列表。
 
     入参举例::
 
         refs = {
-            "default_model": "${group::g_demo_sales} or f1111111-1111-4111-8111-111111111111",
-            "vision_model": "f2222222-2222-4222-8222-222222222202",
+            "default_model": [
+                "${group::g_demo_sales} or f1111111-1111-4111-8111-111111111111",
+            ],
+            "vision_model": ["f2222222-2222-4222-8222-222222222202"],
+            "skill_whitelist": [
+                "a1000001-0000-4000-8000-000000000001",
+                "abc",
+            ],
         }
         ctx = RoutingContext(group_id="g_demo_sales", bot_id="bot_main", user_id="alice")
 
     返回值举例::
 
         {
-            "default_model": "f5555555-5555-4555-8555-555555555505",
-            "vision_model": "f2222222-2222-4222-8222-222222222202",
+            "default_model": ["f5555555-5555-4555-8555-555555555505"],
+            "vision_model": ["f2222222-2222-4222-8222-222222222202"],
+            "skill_whitelist": [
+                "a1000001-0000-4000-8000-000000000001",
+                "abc",
+            ],
         }
         {}  # 各槽位均解析失败时
     """
-    slot_template_id_map: dict[str, str] = {}
-    for slot, raw in refs.items():
-        template_id = await resolve_template_slot_ref(
-            raw,
-            ctx,
-            template_type=slot,
-        )
-        if template_id:
-            slot_template_id_map[slot] = template_id
+    slot_template_id_map: dict[str, list[str]] = {}
+    for slot, raw_list in refs.items():
+        resolved: list[str] = []
+        seen: set[str] = set()
+        for raw in raw_list:
+            template_id = await resolve_template_slot_ref(
+                raw,
+                ctx,
+                template_type=slot,
+            )
+            if template_id and template_id not in seen:
+                seen.add(template_id)
+                resolved.append(template_id)
+        if resolved:
+            slot_template_id_map[slot] = resolved
     return slot_template_id_map
 
 

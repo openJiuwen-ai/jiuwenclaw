@@ -6,7 +6,7 @@ from __future__ import annotations
 from typing import Any
 
 from jiuwenclaw_manager.manager_ws_server import ManagerWsServer
-from jiuwenclaw_manager.manager_ws_server.server import push_to_instance
+from jiuwenclaw_manager.manager_ws_server.server import push_to_jiuwenclaw
 
 
 async def push_channel_config_op(
@@ -23,7 +23,7 @@ async def push_channel_config_op(
         payload["channel"] = channel
     if channel_id is not None:
         payload["channel_id"] = channel_id
-    return await push_to_instance(
+    return await push_to_jiuwenclaw(
         jiuwenclaw_id,
         config={"channel_config": payload},
         server=server,

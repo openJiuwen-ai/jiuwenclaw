@@ -10,6 +10,7 @@ from collections.abc import Awaitable, Callable
 from typing import Any
 from urllib.parse import urlsplit
 
+from ..infrastructure.utils import set_jiuwenclaw_id
 from .protocol import (
     EVENT_CONNECTION_ACK,
     EVENT_REGISTER_ACK,
@@ -42,16 +43,14 @@ class ManagerWsClient:
     def __init__(
         self,
         *,
-        instance_id: str,
         service_type: str = "gateway",
-        service_id: str | None = None,
+        service_id: str,
         ping_interval: float | None = 30.0,
         ping_timeout: float | None = 300.0,
         on_config_push: ManagerWsConfigPushHandler | None = None,
     ) -> None:
-        self._instance_id = instance_id
         self._service_type = (service_type or "gateway").strip() or "gateway"
-        self._service_id = service_id or instance_id
+        self._service_id = (service_id or "").strip() or "gateway-1"
         self._ping_interval = ping_interval
         self._ping_timeout = ping_timeout
         self._on_config_push = on_config_push
@@ -82,6 +81,7 @@ class ManagerWsClient:
     async def disconnect(self) -> None:
         self._running = False
         self._ready = False
+        set_jiuwenclaw_id(None)
         if self._ws is not None:
             try:
                 await self._ws.close()
@@ -106,12 +106,13 @@ class ManagerWsClient:
                 raise
             except Exception as exc:  # noqa: BLE001
                 logger.warning(
-                    "[ManagerWsClient] session ended instance_id=%s, retry in %ss: %s",
-                    self._instance_id,
+                    "[ManagerWsClient] session ended service_id=%s, retry in %ss: %s",
+                    self._service_id,
                     retry_interval,
                     exc,
                 )
             self._ready = False
+            set_jiuwenclaw_id(None)
             if self._ws is not None:
                 try:
                     await self._ws.close()
@@ -145,8 +146,8 @@ class ManagerWsClient:
             if not await self._handshake(ws):
                 raise RuntimeError("manager ws handshake failed")
             logger.info(
-                "[ManagerWsClient] session active instance_id=%s uri=%s",
-                self._instance_id,
+                "[ManagerWsClient] session active service_id=%s uri=%s",
+                self._service_id,
                 uri,
             )
             await self._recv_loop(ws)
@@ -167,7 +168,6 @@ class ManagerWsClient:
             logger.warning("[ManagerWsClient] unexpected first frame: %s", data.get("type"))
 
         reg = build_register(
-            instance_id=self._instance_id,
             service_type=self._service_type,
             service_id=self._service_id,
         )
@@ -187,17 +187,16 @@ class ManagerWsClient:
                 f"event={reg_data.get('event')!r}"
             )
         ack_payload = reg_data.get("payload") if isinstance(reg_data.get("payload"), dict) else {}
-        if str(ack_payload.get("instance_id") or "") != self._instance_id:
-            raise RuntimeError(
-                f"manager ws register.ack instance_id mismatch: "
-                f"expected {self._instance_id!r}, got {ack_payload.get('instance_id')!r}"
-            )
+        ack_jiuwenclaw_id = str(ack_payload.get("jiuwenclaw_id") or "").strip()
+        if not ack_jiuwenclaw_id:
+            raise RuntimeError("manager ws register.ack missing jiuwenclaw_id")
+        set_jiuwenclaw_id(ack_jiuwenclaw_id)
 
         self._ready = True
         logger.info(
-            "[ManagerWsClient] registered instance_id=%s service_type=%s service_id=%s "
+            "[ManagerWsClient] registered jiuwenclaw_id=%s service_type=%s service_id=%s "
             "(register.ack ok)",
-            self._instance_id,
+            ack_jiuwenclaw_id,
             self._service_type,
             self._service_id,
         )

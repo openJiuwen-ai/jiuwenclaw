@@ -14,11 +14,12 @@ EVENT_CONNECTION_ACK = "connection.ack"
 EVENT_REGISTER_ACK = "register.ack"
 
 
-def build_register_ack(*, instance_id: str) -> dict[str, Any]:
+def build_register_ack(*, jiuwenclaw_id: str) -> dict[str, Any]:
+    jid = str(jiuwenclaw_id or "").strip()
     return {
         "type": FRAME_TYPE_EVENT,
         "event": EVENT_REGISTER_ACK,
-        "payload": {"status": "ok", "instance_id": instance_id},
+        "payload": {"status": "ok", "jiuwenclaw_id": jid},
     }
 
 

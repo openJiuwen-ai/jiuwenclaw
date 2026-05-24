@@ -14,7 +14,7 @@ from jiuwenclaw_manager.manager_ws_server.server import (
     get_manager_ws_server,
     push_config_op,
     push_config_op_to_all,
-    push_to_instance,
+    push_to_jiuwenclaw,
     set_manager_ws_server,
 )
 
@@ -23,7 +23,7 @@ __all__ = [
     "get_manager_ws_server",
     "push_config_op",
     "push_config_op_to_all",
-    "push_to_instance",
+    "push_to_jiuwenclaw",
     "set_manager_ws_server",
     "EVENT_CONNECTION_ACK",
     "FRAME_TYPE_CONFIG_ACK",

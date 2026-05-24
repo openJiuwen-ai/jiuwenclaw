@@ -1,4 +1,4 @@
-"""模板表定义：model_template、extension_config_template（id 自增主键；对外引用 template_id UUID）。"""
+"""模板表定义：model_template、extension_config_template、skill_whitelist_template（id 自增主键；对外引用 template_id UUID）。"""
 
 from __future__ import annotations
 
@@ -71,5 +71,33 @@ EXTENSION_CONFIG_TEMPLATE_TABLE_DEF = TableDefinition(
         IndexDefinition(["enabled"], unique=False),
         IndexDefinition(["component"], unique=False),
         IndexDefinition(["hook_type"], unique=False),
+    ],
+)
+
+SKILL_WHITELIST_TEMPLATE_TABLE_DEF = TableDefinition(
+    table_name="skill_whitelist_template",
+    columns=[
+        ColumnDefinition(
+            "id",
+            "integer",
+            primary_key=True,
+            autoincrement=True,
+            nullable=False,
+        ),
+        ColumnDefinition("template_id", "string", length=100, nullable=False),
+        ColumnDefinition("template_name", "string", length=128, nullable=False),
+        ColumnDefinition("description", "string", length=512, nullable=True),
+        ColumnDefinition("skill_id", "string", length=512, nullable=False),
+        ColumnDefinition("skill_version", "string", length=64, nullable=False),
+        ColumnDefinition("skill_source", "string", length=512, nullable=False),
+        ColumnDefinition("enabled", "boolean", nullable=False, default=True),
+        ColumnDefinition("data", "json", nullable=True),
+        ColumnDefinition("created_at", "datetime", nullable=False),
+        ColumnDefinition("updated_at", "datetime", nullable=False),
+    ],
+    indexes=[
+        IndexDefinition(["template_id"], unique=True),
+        IndexDefinition(["enabled"], unique=False),
+        IndexDefinition(["skill_id"], unique=False),
     ],
 )

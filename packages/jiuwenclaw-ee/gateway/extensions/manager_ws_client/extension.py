@@ -47,11 +47,6 @@ def _resolve_enabled_and_uri() -> tuple[bool, str]:
     return enabled, uri
 
 
-def _resolve_instance_id() -> str | None:
-    iid = os.getenv("JIUWENCLAW_PROVISIONED_INSTANCE_ID", "").strip()
-    return iid or None
-
-
 def _resolve_ws_service_identity() -> tuple[str, str]:
     """解析本进程的 WS 注册身份（与 provision 的 gw-/as- service_id 对齐）。"""
     service_id = os.getenv("JIUWENCLAW_SERVICE_ID", "gateway-1").strip() or "gateway-1"
@@ -158,16 +153,7 @@ async def register_extensions(registry: ExtensionRegistry) -> list[ManagerWsClie
         )
         return []
 
-    instance_id = _resolve_instance_id()
-    if instance_id is None:
-        logger.info(
-            "[ManagerWsClient] JIUWENCLAW_PROVISIONED_INSTANCE_ID unset; "
-            "using instance_id=local-dev for manager ws register"
-        )
-        instance_id = "local-dev"
-
     _client = ManagerWsClient(
-        instance_id=instance_id,
         service_type=service_type,
         service_id=service_id,
         on_config_push=_on_config_push,

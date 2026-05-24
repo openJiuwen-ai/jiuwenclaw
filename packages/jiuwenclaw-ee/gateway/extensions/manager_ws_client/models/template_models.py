@@ -129,3 +129,49 @@ EXTENSION_CONFIG_TEMPLATE_TABLE_DEF = TableDefinition(
         IndexDefinition(["hook_type"], unique=False),
     ],
 )
+
+
+class SkillWhitelistTemplateInfo(BaseModel):
+    id: int
+    template_id: str
+    template_name: str
+    description: str | None
+    skill_id: str
+    skill_version: str
+    skill_source: str
+    enabled: bool
+    data: dict[str, Any] | None
+    created_at: datetime
+    updated_at: datetime
+
+    class Config:
+        from_attributes = True
+
+
+SKILL_WHITELIST_TEMPLATE_TABLE_DEF = TableDefinition(
+    table_name="skill_whitelist_template",
+    columns=[
+        ColumnDefinition(
+            "id",
+            "integer",
+            primary_key=True,
+            autoincrement=True,
+            nullable=False,
+        ),
+        ColumnDefinition("template_id", "string", length=100, nullable=False),
+        ColumnDefinition("template_name", "string", length=128, nullable=False),
+        ColumnDefinition("description", "string", length=512, nullable=True),
+        ColumnDefinition("skill_id", "string", length=512, nullable=False),
+        ColumnDefinition("skill_version", "string", length=64, nullable=False),
+        ColumnDefinition("skill_source", "string", length=512, nullable=False),
+        ColumnDefinition("enabled", "boolean", nullable=False, default=True),
+        ColumnDefinition("data", "json", nullable=True),
+        ColumnDefinition("created_at", "datetime", nullable=False),
+        ColumnDefinition("updated_at", "datetime", nullable=False),
+    ],
+    indexes=[
+        IndexDefinition(["template_id"], unique=True),
+        IndexDefinition(["enabled"], unique=False),
+        IndexDefinition(["skill_id"], unique=False),
+    ],
+)

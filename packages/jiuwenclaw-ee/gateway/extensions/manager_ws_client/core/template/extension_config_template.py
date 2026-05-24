@@ -4,26 +4,18 @@
 
 from __future__ import annotations
 
-import os
 from datetime import datetime
 from typing import Any
 
 from openjiuwen_runtime.foundation.db.handler import DBHandler
 
-from ...infrastructure.utils import utc_now
+from ...infrastructure.utils import assert_jiuwenclaw_id_matches_payload, require_jiuwenclaw_id, utc_now
 from ...models.template_models import EXTENSION_CONFIG_TEMPLATE_TABLE_DEF
 from ...schemas.template_schemas import ExtensionConfigTemplateUpdateRequest
 
 _TABLE = EXTENSION_CONFIG_TEMPLATE_TABLE_DEF.table_name
 _ALLOWED_COMPONENTS = frozenset({"gateway", "agent_server"})
 _ALLOWED_HOOK_TYPES = frozenset({"pre_request", "post_request", "error", "schedule"})
-
-
-def resolve_jiuwenclaw_id() -> str:
-    instance_id = os.getenv("JIUWENCLAW_PROVISIONED_INSTANCE_ID", "").strip()
-    if not instance_id:
-        raise ValueError("JIUWENCLAW_PROVISIONED_INSTANCE_ID is not set")
-    return instance_id
 
 
 def _normalize_template_id(template_id: Any) -> str:
@@ -131,12 +123,7 @@ async def apply_extension_config_template_sync(
     payload: dict[str, Any],
 ) -> dict[str, Any] | None:
     """应用 Claw Manager 经 WebSocket 下发的 extension_config_templates 变更。"""
-    jiuwenclaw_id = resolve_jiuwenclaw_id()
-    payload_jid = str(payload.get("jiuwenclaw_id") or "").strip()
-    if payload_jid and payload_jid != jiuwenclaw_id:
-        raise ValueError(
-            f"jiuwenclaw_id mismatch: push={payload_jid!r} env={jiuwenclaw_id!r}"
-        )
+    assert_jiuwenclaw_id_matches_payload(payload)
 
     if op == "create":
         template = payload.get("template")

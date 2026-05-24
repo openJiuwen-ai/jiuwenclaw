@@ -25,6 +25,9 @@ from ..core.template.extension_config_template import (
     apply_extension_config_template_sync,
 )
 from ..core.template.model_template import apply_model_template_sync
+from ..core.template.skill_whitelist_template import (
+    apply_skill_whitelist_template_sync,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -45,6 +48,12 @@ async def apply_config_push(config: dict[str, Any]) -> dict[str, Any] | None:
         "op"
     ):
         return await _apply_extension_config_templates(extension_config_templates)
+
+    skill_whitelist_templates = config.get("skill_whitelist_templates")
+    if isinstance(skill_whitelist_templates, dict) and skill_whitelist_templates.get(
+        "op"
+    ):
+        return await _apply_skill_whitelist_templates(skill_whitelist_templates)
 
     model_templates = config.get("model_templates")
     if isinstance(model_templates, dict) and model_templates.get("op"):
@@ -94,6 +103,25 @@ async def _apply_extension_config_templates(
     result = await apply_extension_config_template_sync(handler, op, payload)
     logger.info(
         "[ManagerWsClient] extension_config_templates sync op=%s template_id=%s",
+        op,
+        (result or {}).get("template_id")
+        or payload.get("template_id")
+        or (payload.get("template") or {}).get("template_id"),
+    )
+    return result
+
+
+async def _apply_skill_whitelist_templates(
+    payload: dict[str, Any],
+) -> dict[str, Any] | None:
+    op = str(payload.get("op") or "").strip()
+    if not op:
+        raise ValueError("skill_whitelist_templates.op is required")
+
+    handler = await _ensure_db_handler()
+    result = await apply_skill_whitelist_template_sync(handler, op, payload)
+    logger.info(
+        "[ManagerWsClient] skill_whitelist_templates sync op=%s template_id=%s",
         op,
         (result or {}).get("template_id")
         or payload.get("template_id")

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import importlib
 import json
+import os
 from typing import Any
 
 from jiuwenclaw.gateway.channel_config_db import (
@@ -14,6 +15,14 @@ from jiuwenclaw.gateway.channel_config_db import (
 from jiuwenclaw.utils import logger
 
 from .schemas import SLOT_ENTITY_TABLE, TemplateRefSlot
+
+_INSTANCE_SCOPED_TABLES = frozenset({
+    "config_effective_service_policy",
+    "config_effective_agent_policy",
+    "config_effective_global_policy",
+    "config_default_template_mapping",
+    "model_template",
+})
 
 
 def _load_database_class() -> type:
@@ -27,6 +36,23 @@ def _load_database_class() -> type:
 
 # Gateway 与 AgentServer 企业配置共用同一库连接（进程内单例）
 _gateway_database = _load_database_class()()
+
+
+def resolve_jiuwenclaw_id() -> str | None:
+    """从环境变量读取当前实例 id；未设置时返回 ``None``（分布式 Gateway 无此变量时不做实例隔离）。"""
+    instance_id = os.getenv("JIUWENCLAW_PROVISIONED_INSTANCE_ID", "").strip()
+    return instance_id or None
+
+
+def apply_instance_scope(table: str, filters: dict[str, Any]) -> dict[str, Any]:
+    """为策略/映射/模型表查询附加 ``jiuwenclaw_id`` 隔离条件（供读库与测试复用）。"""
+    query = dict(filters)
+    if table not in _INSTANCE_SCOPED_TABLES:
+        return query
+    jiuwenclaw_id = resolve_jiuwenclaw_id()
+    if jiuwenclaw_id:
+        query["jiuwenclaw_id"] = jiuwenclaw_id
+    return query
 
 
 def _parse_json_string(value: str) -> Any:
@@ -90,7 +116,12 @@ def _sort_by_order(rows: list[dict[str, Any]], order_by: str) -> list[dict[str, 
     return sorted(rows, key=_key, reverse=reverse)
 
 
-__all__ = ("fetch_template_by_slot", "list_records")
+__all__ = (
+    "apply_instance_scope",
+    "fetch_template_by_slot",
+    "list_records",
+    "resolve_jiuwenclaw_id",
+)
 
 
 async def fetch_template_by_slot(
@@ -110,8 +141,10 @@ async def fetch_template_by_slot(
     if not ref:
         return None
     filters: dict[str, Any] = {"enabled": True, "template_id": ref}
-    if table == "extension_config_template":
-        filters["component"] = "agent_server"
+    if table == "model_template":
+        jiuwenclaw_id = resolve_jiuwenclaw_id()
+        if jiuwenclaw_id:
+            filters["jiuwenclaw_id"] = jiuwenclaw_id
     rows = await list_records(table, filters=filters)
     return rows[0] if rows else None
 
@@ -122,8 +155,8 @@ async def list_records(
     filters: dict[str, Any] | None = None,
     order_by: str = "",
 ) -> list[dict[str, Any]]:
-    """列表查询；``filters`` 含 ``enabled`` 等条件。"""
-    query = dict(filters or {})
+    """列表查询；``filters`` 含 ``enabled`` 等条件。策略/映射/模型表自动按 ``jiuwenclaw_id`` 隔离。"""
+    query = apply_instance_scope(table, dict(filters or {}))
 
     try:
         handler = await _gateway_database.ensure_ready(log_prefix="enterprise_config")

@@ -1,6 +1,4 @@
-# Copyright (c) Huawei Technologies Co., Ltd. 2026-2026. All rights reserved
-
-"""配置生效策略 ``template_ref`` 字段归一化（与 Claw Manager 对齐）。"""
+"""配置生效策略 ``template_ref`` 字段归一化（无 core/schemas 依赖，供 Pydantic 与业务层共用）。"""
 
 from __future__ import annotations
 
@@ -54,46 +52,14 @@ def normalize_template_ref(value: Any) -> dict[str, list[str]]:
 
 
 def coerce_template_ref(value: Any) -> dict[str, list[str]]:
+    """Pydantic 入参校验：``None`` 视为 ``{}``，其余走 ``normalize_template_ref``。"""
     if value is None:
         return {}
     return normalize_template_ref(value)
 
 
 def coerce_template_ref_optional(value: Any) -> dict[str, list[str]] | None:
+    """Pydantic 入参校验：保留 ``None``，否则规范为 ``dict[str, list[str]]``。"""
     if value is None:
         return None
     return normalize_template_ref(value)
-
-
-def read_template_ref_from_policy_dict(policy: dict[str, Any]) -> dict[str, list[str]]:
-    return normalize_template_ref(policy.get("template_ref"))
-
-
-def merge_template_ref(
-    base: dict[str, list[str]],
-    patch: Any,
-) -> dict[str, list[str]]:
-    merged = dict(base)
-    merged.update(normalize_template_ref(patch))
-    return merged
-
-
-def read_template_ref_from_row(row: Any) -> dict[str, list[str]]:
-    raw = getattr(row, "template_ref", None)
-    if isinstance(raw, dict):
-        return normalize_template_ref(raw)
-    return {}
-
-
-def apply_template_ref_to_updates(
-    updates: dict[str, Any],
-    *,
-    existing_row: Any | None,
-) -> dict[str, Any]:
-    payload = dict(updates)
-    if "template_ref" not in payload:
-        return payload
-    patch = payload.pop("template_ref")
-    base = read_template_ref_from_row(existing_row) if existing_row is not None else {}
-    payload["template_ref"] = merge_template_ref(base, patch)
-    return payload

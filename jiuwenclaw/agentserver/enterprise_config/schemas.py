@@ -42,22 +42,40 @@ SLOT_TO_CONFIG_KEY: dict[TemplateRefSlot, str] = {
 }
 
 
-def normalize_template_ref(value: Any) -> dict[str, str]:
-    """将 ``template_ref`` 规范为 ``{slot: ref_string}``；空值键省略。"""
+def _normalize_slot_refs(raw: Any) -> list[str]:
+    """将单槽位原始值规范为引用字符串列表（兼容历史单字符串写法）。"""
+    if raw is None:
+        return []
+    if isinstance(raw, str):
+        text = raw.strip()
+        return [text] if text else []
+    if isinstance(raw, list):
+        out: list[str] = []
+        for item in raw:
+            if item is None:
+                continue
+            text = str(item).strip()
+            if text:
+                out.append(text)
+        return out
+    text = str(raw).strip()
+    return [text] if text else []
+
+
+def normalize_template_ref(value: Any) -> dict[str, list[str]]:
+    """将 ``template_ref`` 规范为 ``{slot: [ref_string, ...]}``；空值键省略。"""
     if value is None:
         return {}
     if not isinstance(value, dict):
         return {}
-    out: dict[str, str] = {}
+    out: dict[str, list[str]] = {}
     for key, raw in value.items():
         slot = str(key).strip()
         if not slot:
             continue
-        if raw is None:
-            continue
-        text = str(raw).strip()
-        if text:
-            out[slot] = text
+        refs = _normalize_slot_refs(raw)
+        if refs:
+            out[slot] = refs
     return out
 
 
@@ -80,10 +98,10 @@ class EffectiveEnterpriseConfig:
     """单次路由上下文下解析完成的企业级配置快照。"""
 
     routing: RoutingContext
-    template_ref: dict[str, str] = field(default_factory=dict)
-    models: dict[str, dict[str, Any]] = field(default_factory=dict)
-    skill_whitelist: dict[str, Any] | None = None
-    extension_config: dict[str, Any] | None = None
+    template_ref: dict[str, list[str]] = field(default_factory=dict)
+    models: dict[str, list[dict[str, Any]]] = field(default_factory=dict)
+    skill_whitelist: list[dict[str, Any]] | None = None
+    extension_config: list[dict[str, Any]] | None = None
     service_policy_id: int | None = None
     agent_policy_id: int | None = None
     global_policy_id: int | None = None

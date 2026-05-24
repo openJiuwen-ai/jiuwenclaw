@@ -2208,7 +2208,13 @@ class JiuWenClawDeepAdapter:
             template_id = ""
             model_name = ""
 
-            entity = enterprise_models.get(slot.value)
+            slot_entities = enterprise_models.get(slot.value)
+            entity: dict[str, Any] | None = None
+            if isinstance(slot_entities, list) and slot_entities:
+                first = slot_entities[0]
+                entity = first if isinstance(first, dict) else None
+            elif isinstance(slot_entities, dict):
+                entity = slot_entities
             if isinstance(entity, dict):
                 template_name = str(entity.get("template_name") or "").strip()
                 template_id = str(entity.get("template_id") or "").strip()

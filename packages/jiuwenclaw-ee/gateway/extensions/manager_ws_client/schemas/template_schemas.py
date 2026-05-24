@@ -33,3 +33,13 @@ class ExtensionConfigTemplateUpdateRequest(BaseModel):
     custom_config: dict[str, Any] | None = None
     enabled: bool | None = None
     data: dict[str, Any] | None = None
+
+
+class SkillWhitelistTemplateUpdateRequest(BaseModel):
+    template_name: str | None = Field(default=None, max_length=128)
+    description: str | None = Field(default=None, max_length=512)
+    skill_id: str | None = Field(default=None, max_length=512)
+    skill_version: str | None = Field(default=None, max_length=64)
+    skill_source: str | None = Field(default=None, max_length=512)
+    enabled: bool | None = None
+    data: dict[str, Any] | None = None
