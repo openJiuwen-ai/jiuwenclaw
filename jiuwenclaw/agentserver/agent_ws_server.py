@@ -57,7 +57,11 @@ from jiuwenclaw.security.ws_origin import (
     get_header_value,
     is_allowed_browser_origin,
 )
-from jiuwenclaw.agentserver.open_ability_utils import oa_wait_connection_ack, get_oa_auth_headers
+from jiuwenclaw.agentserver.open_ability_utils import (
+    oa_wait_connection_ack,
+    get_oa_auth_headers,
+    init_oa_message
+)
 
 logger = logging.getLogger(__name__)
 
@@ -200,19 +204,14 @@ class AgentWebSocketServer:
 
         Args:
             payload: 业务消息内容
-            msg_type: 消息类型，默认为 "response"
+            msg_type: 消息类型，默认为 "MESSAGE"
 
         Returns:
             OA 格式的消息字典
         """
-        from jiuwenclaw.agentserver.utils import get_sandbox_id
         if not self._oa_mode:
             return payload
-        return {
-            "msgType": msg_type,
-            "msgDetail": payload,
-            "sandboxId": get_sandbox_id(),
-        }
+        return init_oa_message(msg_type, payload)
 
     async def _send_message(
             self,
@@ -297,6 +296,7 @@ class AgentWebSocketServer:
 
         同时监听连接状态，快速感知断开。
         """
+        import websockets
         missed_heartbeats = 0
         max_missed_heartbeats = 3  # 允许最多3次发送失败
 
@@ -308,10 +308,7 @@ class AgentWebSocketServer:
                     break
 
                 try:
-                    heartbeat_msg = {
-                        "msgType": "HEARTBEAT",
-                        "msgDetail": {},
-                    }
+                    heartbeat_msg = init_oa_message("HEARTBEAT")
                     async with send_lock:
                         await asyncio.wait_for(
                             ws.send(json.dumps(heartbeat_msg, ensure_ascii=False)),
@@ -346,6 +343,7 @@ class AgentWebSocketServer:
 
     async def _oa_receive_loop(self, ws: Any, send_lock: asyncio.Lock) -> None:
         """OA 模式：消息接收循环，与心跳并行运行。"""
+        import websockets
         try:
             async for raw in ws:
                 try:
@@ -364,6 +362,7 @@ class AgentWebSocketServer:
 
     async def _oa_run_connection(self, ws: Any) -> None:
         """运行单个 OA 连接，并行执行心跳和消息接收。"""
+        import websockets
         send_lock = asyncio.Lock()
         self._current_ws = ws
         self._current_send_lock = send_lock
@@ -405,6 +404,7 @@ class AgentWebSocketServer:
             self._oa_connection_active.clear()  # 标记连接断开
             self._current_ws = None
             self._current_send_lock = None
+
     async def _oa_connection_loop(self) -> None:
         """OA 模式：维护与 OpenAbility 的长连接，自动重连。
 
@@ -467,13 +467,7 @@ class AgentWebSocketServer:
                     await self._trigger_agent_server_started_hook()
                     # 发送 INIT 消息，携带 apiKey 和 sandboxId
                     try:
-                        auth_headers = get_oa_auth_headers()
-                        init_msg = {
-                            "msgType": "INIT",
-                            "apiKey": auth_headers.get("x-api-key"),
-                            "sandboxId": auth_headers.get("x-sandbox-id"),
-                            "msgDetail": {}
-                        }
+                        init_msg = init_oa_message("INIT")
                         await ws.send(json.dumps(init_msg, ensure_ascii=False))
                         logger.info("[AgentWebSocketServer] 已发送 INIT 消息到 OpenAbility")
                     except Exception as e:
@@ -488,7 +482,7 @@ class AgentWebSocketServer:
                 await self._oa_run_connection(ws)
 
             except websockets.exceptions.ConnectionClosed as e:
-                logger.warning("[AgentWebSocketServer] OA 连接关闭: code=%s, reason=%s", e.code, e.reason)
+                logger.warning("[AgentWebSocketServer] OA 连接关闭: %s", e)
             except asyncio.TimeoutError:
                 logger.error("[AgentWebSocketServer] OA 连接超时")
             except Exception as e:
