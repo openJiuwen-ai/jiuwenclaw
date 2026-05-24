@@ -717,31 +717,40 @@ class SkillDevDeepAdapter:
         tools = params.get("tool_spec_files") or params.get("toolSpecFiles") or []
         agents = params.get("agent_definitions") or params.get("agentDefinitions")
         clis = params.get("cli_definitions") or params.get("cliDefinitions")
-        lines: list[str] = []
+        resource_lines: list[str] = []
         if files:
-            lines.append(f"- 普通参考文件：{task_workspace / 'resources' / 'ref-files'}")
+            resource_lines.append(f"- 普通参考文件：{task_workspace / 'resources' / 'ref-files'}")
         if skills:
-            lines.append(f"- 参考 Skill 包：{task_workspace / 'resources' / 'ref-skills'}")
+            resource_lines.append(f"- 参考 Skill 包：{task_workspace / 'resources' / 'ref-skills'}")
         if tools:
-            lines.append(f"- 可用工具说明：{task_workspace / 'resources' / 'available-tools'}")
+            resource_lines.append(f"- 可用工具说明：{task_workspace / 'resources' / 'available-tools'}")
         if agents:
-            lines.append(f"- 可用 Agent 定义：{task_workspace / 'resources' / 'agents' / 'available_agents.json'}")
+            resource_lines.append(f"- 可用 Agent 定义：{task_workspace / 'resources' / 'agents' / 'available_agents.json'}")
         if clis:
-            lines.append(f"- 可用 CLI 定义：{task_workspace / 'resources' / 'clis' / 'available_clis.json'}")
-        if not lines:
+            resource_lines.append(f"- 可用 CLI 定义：{task_workspace / 'resources' / 'clis' / 'available_clis.json'}")
+
+        skill_searched = params.get("skill_searched")
+        if not resource_lines and not skill_searched:
             return ""
-        header = (
-            f"任务 ID：{task_id}\n"
-            f"当前 SkillDev 工作区：{task_workspace}\n"
-            "用户上传资源已写入：\n"
-        )
-        parts = [header + "\n".join(lines)]
-        if tools:
-            parts.append(format_tool_usage_hint())
+
+        parts: list[str] = []
+        if resource_lines:
+            header = (
+                f"任务 ID：{task_id}\n"
+                f"当前 SkillDev 工作区：{task_workspace}\n"
+                "用户上传资源已写入：\n"
+            )
+            parts.append(header + "\n".join(resource_lines))
+            if tools:
+                parts.append(format_tool_usage_hint())
+        if skill_searched:
+            skill_name = skill_searched.get("skillId") or skill_searched.get("skillName") or "未知"
+            ref_skills_dir = task_workspace / "resources" / "ref-skills"
+            parts.append(
+                f"用户明确指明要参考 {ref_skills_dir} 中的{skill_name}技能，"
+                "请在生成前仔细阅读该技能，并结合用户需求，生成新的Skill"
+            )
         parts.append("请在生成 Skill 前按需检查上述资源。")
-        if params.get("skill_searched"):
-            skill_name = params.get('skill_searched', {}).get('skillId') or params.get('skill_searched', {}).get('skillName')
-            parts.append(f"用户明确指明要参考 {task_workspace / 'resources' / 'ref-skills'} 中的{skill_name}技能，请在生成前仔细阅读该技能，并结合用户需求，生成新的Skill")
         return "\n".join(parts)
 
     # ------------------------------------------------------------------
