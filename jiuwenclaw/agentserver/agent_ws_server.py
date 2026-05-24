@@ -228,8 +228,8 @@ class AgentWebSocketServer:
             send_lock: 发送锁
             msg_type: 消息类型
         """
-        message = self._wrap_oa_message(payload, msg_type)
         async with send_lock:
+            message = self._wrap_oa_message(payload, msg_type)
             await ws.send(json.dumps(message, ensure_ascii=False))
 
     # ---------- 生命周期 ----------
@@ -1074,8 +1074,7 @@ class AgentWebSocketServer:
             metadata=request.metadata,
         )
         wire = encode_agent_response_for_wire(resp, response_id=request.request_id)
-        async with send_lock:
-            await self._send_message(ws, wire, send_lock)
+        await self._send_message(ws, wire, send_lock)
 
     async def _handle_session_rename(self, ws: Any, request: AgentRequest, send_lock: asyncio.Lock) -> None:
         """处理 session.rename：与 CLI Gateway 本地回退共用 apply_session_rename。"""
@@ -1105,8 +1104,7 @@ class AgentWebSocketServer:
                 metadata=request.metadata,
             )
         wire = encode_agent_response_for_wire(resp, response_id=request.request_id)
-        async with send_lock:
-            await self._send_message(ws, wire, send_lock)
+        await self._send_message(ws, wire, send_lock)
 
     async def _handle_permissions_config(self, ws: Any, request: AgentRequest, send_lock: asyncio.Lock) -> None:
         """处理 permissions.* E2A 请求（与 Web ``register_method`` 同名 method）。"""
@@ -1114,8 +1112,7 @@ class AgentWebSocketServer:
 
         resp = dispatch_permissions_config_request(request)
         wire = encode_agent_response_for_wire(resp, response_id=request.request_id)
-        async with send_lock:
-            await self._send_message(ws, wire, send_lock)
+        await self._send_message(ws, wire, send_lock)
 
     async def _handle_history_get(self, ws: Any, request: AgentRequest, send_lock: asyncio.Lock) -> None:
         params = request.params if isinstance(request.params, dict) else {}
@@ -1137,8 +1134,7 @@ class AgentWebSocketServer:
                 payload=data,
             )
         wire = encode_agent_response_for_wire(resp, response_id=request.request_id)
-        async with send_lock:
-            await self._send_message(ws, wire, send_lock)
+        await self._send_message(ws, wire, send_lock)
 
     async def _handle_history_get_stream(self, ws: Any, request: AgentRequest, send_lock: asyncio.Lock) -> None:
         params = request.params if isinstance(request.params, dict) else {}
@@ -1160,8 +1156,7 @@ class AgentWebSocketServer:
                 response_id=request.request_id,
                 sequence=0,
             )
-            async with send_lock:
-                await self._send_message(ws, wire, send_lock)
+            await self._send_message(ws, wire, send_lock)
             return
 
         messages = data.get("messages", [])
@@ -1185,8 +1180,7 @@ class AgentWebSocketServer:
                     response_id=request.request_id,
                     sequence=seq,
                 )
-                async with send_lock:
-                    await self._send_message(ws, wire, send_lock)
+                await self._send_message(ws, wire, send_lock)
 
         done_chunk = AgentResponseChunk(
             request_id=request.request_id,
@@ -1239,8 +1233,7 @@ class AgentWebSocketServer:
                 payload={"error": str(e)},
             )
         wire = encode_agent_response_for_wire(resp, response_id=request.request_id)
-        async with send_lock:
-            await self._send_message(ws, wire, send_lock)
+        await self._send_message(ws, wire, send_lock)
 
     async def _handle_command_chrome(self, ws: Any, request: AgentRequest, send_lock: asyncio.Lock) -> None:
         try:
@@ -1259,8 +1252,7 @@ class AgentWebSocketServer:
                 payload={"error": str(e)},
             )
         wire = encode_agent_response_for_wire(resp, response_id=request.request_id)
-        async with send_lock:
-            await self._send_message(ws, wire, send_lock)
+        await self._send_message(ws, wire, send_lock)
 
     async def _handle_command_ls(self, ws: Any, request: AgentRequest, send_lock: asyncio.Lock) -> None:
         from datetime import datetime
@@ -1287,8 +1279,7 @@ class AgentWebSocketServer:
                     payload={"error": "Path outside workspace"},
                 )
                 wire = encode_agent_response_for_wire(resp, response_id=request.request_id)
-                async with send_lock:
-                    await self._send_message(ws, wire, send_lock)
+                await self._send_message(ws, wire, send_lock)
                 return
 
             entries = []
@@ -1328,8 +1319,7 @@ class AgentWebSocketServer:
                 payload={"error": str(e)},
             )
         wire = encode_agent_response_for_wire(resp, response_id=request.request_id)
-        async with send_lock:
-            await self._send_message(ws, wire, send_lock)
+        await self._send_message(ws, wire, send_lock)
 
     async def _handle_command_view(self, ws: Any, request: AgentRequest, send_lock: asyncio.Lock) -> None:
         from jiuwenclaw.agentserver.session_metadata import get_resolved_project_dir
@@ -1349,8 +1339,7 @@ class AgentWebSocketServer:
                     payload={"error": "Missing path parameter"},
                 )
                 wire = encode_agent_response_for_wire(resp, response_id=request.request_id)
-                async with send_lock:
-                    await self._send_message(ws, wire, send_lock)
+                await self._send_message(ws, wire, send_lock)
                 return
 
             session_id = request.session_id or "default"
@@ -1367,8 +1356,7 @@ class AgentWebSocketServer:
                     payload={"error": "Path outside workspace"},
                 )
                 wire = encode_agent_response_for_wire(resp, response_id=request.request_id)
-                async with send_lock:
-                    await self._send_message(ws, wire, send_lock)
+                await self._send_message(ws, wire, send_lock)
                 return
 
             if not target_path.is_file():
@@ -1379,8 +1367,7 @@ class AgentWebSocketServer:
                     payload={"error": f"Not a file: {relative_path}"},
                 )
                 wire = encode_agent_response_for_wire(resp, response_id=request.request_id)
-                async with send_lock:
-                    await self._send_message(ws, wire, send_lock)
+                await self._send_message(ws, wire, send_lock)
                 return
 
             try:
@@ -1394,8 +1381,7 @@ class AgentWebSocketServer:
                     payload={"error": "Binary file, cannot display"},
                 )
                 wire = encode_agent_response_for_wire(resp, response_id=request.request_id)
-                async with send_lock:
-                    await self._send_message(ws, wire, send_lock)
+                await self._send_message(ws, wire, send_lock)
                 return
 
             start_idx = max(0, from_line - 1)
@@ -1439,8 +1425,7 @@ class AgentWebSocketServer:
                 payload={"error": str(e)},
             )
         wire = encode_agent_response_for_wire(resp, response_id=request.request_id)
-        async with send_lock:
-            await self._send_message(ws, wire, send_lock)
+        await self._send_message(ws, wire, send_lock)
 
     async def _handle_command_compact(self, ws: Any, request: AgentRequest, send_lock: asyncio.Lock) -> None:
         try:
@@ -1461,8 +1446,7 @@ class AgentWebSocketServer:
                 payload={"error": str(e)},
             )
         wire = encode_agent_response_for_wire(resp, response_id=request.request_id)
-        async with send_lock:
-            await self._send_message(ws, wire, send_lock)
+        await self._send_message(ws, wire, send_lock)
 
     async def _handle_command_diff(self, ws: Any, request: AgentRequest, send_lock: asyncio.Lock) -> None:
         from jiuwenclaw.agentserver.diff_service import get_diff_service
@@ -1497,8 +1481,7 @@ class AgentWebSocketServer:
                 payload={"error": str(e)},
             )
         wire = encode_agent_response_for_wire(resp, response_id=request.request_id)
-        async with send_lock:
-            await self._send_message(ws, wire, send_lock)
+        await self._send_message(ws, wire, send_lock)
 
     async def _handle_command_model(self, ws: Any, request: AgentRequest, send_lock: asyncio.Lock) -> None:
         try:
@@ -1579,8 +1562,7 @@ class AgentWebSocketServer:
                 payload={"error": str(e)},
             )
         wire = encode_agent_response_for_wire(resp, response_id=request.request_id)
-        async with send_lock:
-            await self._send_message(ws, wire, send_lock)
+        await self._send_message(ws, wire, send_lock)
 
     async def _handle_command_resume(self, ws: Any, request: AgentRequest, send_lock: asyncio.Lock) -> None:
         try:
@@ -1607,8 +1589,7 @@ class AgentWebSocketServer:
                 payload={"error": str(e)},
             )
         wire = encode_agent_response_for_wire(resp, response_id=request.request_id)
-        async with send_lock:
-            await self._send_message(ws, wire, send_lock)
+        await self._send_message(ws, wire, send_lock)
 
     async def _handle_command_session(self, ws: Any, request: AgentRequest, send_lock: asyncio.Lock) -> None:
         try:
@@ -1632,8 +1613,7 @@ class AgentWebSocketServer:
                 payload={"error": str(e)},
             )
         wire = encode_agent_response_for_wire(resp, response_id=request.request_id)
-        async with send_lock:
-            await self._send_message(ws, wire, send_lock)
+        await self._send_message(ws, wire, send_lock)
 
     async def _handle_browser_start(self, ws: Any, request: AgentRequest, send_lock: asyncio.Lock) -> None:
         """启动浏览器并返回执行结果（returncode）。"""
@@ -1658,8 +1638,7 @@ class AgentWebSocketServer:
             )
 
         wire = encode_agent_response_for_wire(resp, response_id=request.request_id)
-        async with send_lock:
-            await self._send_message(ws, wire, send_lock)
+        await self._send_message(ws, wire, send_lock)
 
     async def _handle_browser_runtime_restart(self, ws: Any, request: AgentRequest, send_lock: asyncio.Lock) -> None:
         try:
@@ -1682,8 +1661,7 @@ class AgentWebSocketServer:
             )
 
         wire = encode_agent_response_for_wire(resp, response_id=request.request_id)
-        async with send_lock:
-            await self._send_message(ws, wire, send_lock)
+        await self._send_message(ws, wire, send_lock)
 
     async def _handle_config_cache_clear(self, ws: Any, request: AgentRequest, send_lock: asyncio.Lock) -> None:
         try:
@@ -1706,8 +1684,7 @@ class AgentWebSocketServer:
             )
 
         wire = encode_agent_response_for_wire(resp, response_id=request.request_id)
-        async with send_lock:
-            await self._send_message(ws, wire, send_lock)
+        await self._send_message(ws, wire, send_lock)
 
     async def _handle_agent_reload_config(self, ws: Any, request: AgentRequest, send_lock: asyncio.Lock) -> None:
         try:
@@ -1735,8 +1712,7 @@ class AgentWebSocketServer:
             )
 
         wire = encode_agent_response_for_wire(resp, response_id=request.request_id)
-        async with send_lock:
-            await self._send_message(ws, wire, send_lock)
+        await self._send_message(ws, wire, send_lock)
 
     async def _handle_extensions_list(self, ws: Any, request: AgentRequest, send_lock: asyncio.Lock) -> None:
         """获取所有 Rail 扩展列表."""
@@ -1760,8 +1736,7 @@ class AgentWebSocketServer:
             )
 
         wire = encode_agent_response_for_wire(resp, response_id=request.request_id)
-        async with send_lock:
-            await self._send_message(ws, wire, send_lock)
+        await self._send_message(ws, wire, send_lock)
 
     async def _handle_extensions_import(self, ws: Any, request: AgentRequest, send_lock: asyncio.Lock) -> None:
         """导入新的 Rail 扩展（文件夹结构）."""
@@ -1795,8 +1770,7 @@ class AgentWebSocketServer:
             )
 
         wire = encode_agent_response_for_wire(resp, response_id=request.request_id)
-        async with send_lock:
-            await self._send_message(ws, wire, send_lock)
+        await self._send_message(ws, wire, send_lock)
 
     async def _handle_extensions_delete(self, ws: Any, request: AgentRequest, send_lock: asyncio.Lock) -> None:
         """删除 Rail 扩展."""
@@ -1826,8 +1800,7 @@ class AgentWebSocketServer:
             )
 
         wire = encode_agent_response_for_wire(resp, response_id=request.request_id)
-        async with send_lock:
-            await self._send_message(ws, wire, send_lock)
+        await self._send_message(ws, wire, send_lock)
 
     async def _handle_extensions_toggle(self, ws: Any, request: AgentRequest, send_lock: asyncio.Lock) -> None:
         """切换 Rail 扩展的启用状态，并触发热更新."""
@@ -1943,8 +1916,7 @@ class AgentWebSocketServer:
                 },
             )
             wire = encode_agent_response_for_wire(resp, response_id=request.request_id)
-            async with send_lock:
-                await self._send_message(ws, wire, send_lock)
+            await self._send_message(ws, wire, send_lock)
             return
 
         try:
@@ -2004,8 +1976,7 @@ class AgentWebSocketServer:
             )
 
         wire = encode_agent_response_for_wire(resp, response_id=request.request_id)
-        async with send_lock:
-            await self._send_message(ws, wire, send_lock)
+        await self._send_message(ws, wire, send_lock)
 
     @staticmethod
     def get_conversation_history(session_id: str, page_idx: int) -> dict[str, Any] | None:
@@ -2088,8 +2059,7 @@ class AgentWebSocketServer:
                 payload=capabilities,
             )
             wire = encode_agent_response_for_wire(resp, response_id=request.request_id)
-            async with send_lock:
-                await self._send_message(ws, wire, send_lock)
+            await self._send_message(ws, wire, send_lock)
 
             logger.info("[AgentServer] initialize completed: capabilities=%s", capabilities)
 
@@ -2102,8 +2072,7 @@ class AgentWebSocketServer:
                 payload={"error": str(e)},
             )
             wire = encode_agent_response_for_wire(resp, response_id=request.request_id)
-            async with send_lock:
-                await self._send_message(ws, wire, send_lock)
+            await self._send_message(ws, wire, send_lock)
 
     async def _handle_session_create(
             self, ws: Any, request: AgentRequest, send_lock: asyncio.Lock
@@ -2135,8 +2104,7 @@ class AgentWebSocketServer:
                 payload=build_acp_session_new_result(session_id),
             )
             wire = encode_agent_response_for_wire(resp, response_id=request.request_id)
-            async with send_lock:
-                await self._send_message(ws, wire, send_lock)
+            await self._send_message(ws, wire, send_lock)
 
             logger.info(format_session_log(session_id, "[AgentServer] session.create completed"))
 
@@ -2154,8 +2122,7 @@ class AgentWebSocketServer:
                 payload={"error": str(e)},
             )
             wire = encode_agent_response_for_wire(resp, response_id=request.request_id)
-            async with send_lock:
-                await self._send_message(ws, wire, send_lock)
+            await self._send_message(ws, wire, send_lock)
 
     async def _handle_session_delete(
             self, ws: Any, request: AgentRequest, send_lock: asyncio.Lock
@@ -2242,8 +2209,7 @@ class AgentWebSocketServer:
             )
 
         wire = encode_agent_response_for_wire(resp, response_id=request.request_id)
-        async with send_lock:
-            await self._send_message(ws, wire, send_lock)
+        await self._send_message(ws, wire, send_lock)
 
     async def _handle_acp_tool_response(
             self,
@@ -2283,8 +2249,7 @@ class AgentWebSocketServer:
             )
 
         wire = encode_agent_response_for_wire(resp, response_id=request.request_id)
-        async with send_lock:
-            await self._send_message(ws, wire, send_lock)
+        await self._send_message(ws, wire, send_lock)
 
     async def handle_acp_tool_response_for_test(
             self,
