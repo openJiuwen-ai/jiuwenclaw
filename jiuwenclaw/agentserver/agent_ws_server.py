@@ -447,7 +447,7 @@ class AgentWebSocketServer:
                         self._oa_ws_uri,
                         ping_interval=self._ping_interval,
                         ping_timeout=self._ping_timeout,
-                        additional_headers=auth_headers,
+                        extra_headers=auth_headers,
                     ),
                     timeout=10.0
                 )
