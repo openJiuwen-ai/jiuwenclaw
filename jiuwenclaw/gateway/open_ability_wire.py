@@ -1,11 +1,23 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 
-"""OpenAbility WebSocket 外层帧：sandboxId + msgDetail（内层 E2A JSON 字符串）。"""
+"""OpenAbility WebSocket 线格式。
+
+出站（Gateway → OA）：``sandboxId`` + ``msgDetail``（内层 E2A JSON 字符串），建连时带 ``x-hag-trace-id``。
+入站（OA → Gateway）：裸内层 E2A JSON 字符串（原 ``msgDetail`` 字段值），需 ``json.loads`` 为 dict。
+"""
 
 from __future__ import annotations
 
 import json
 from typing import Any
+
+OPEN_ABILITY_TRACE_HEADER = "x-hag-trace-id"
+OPEN_ABILITY_GATEWAY_TRACE_ID = "jiuwen-gateway"
+
+
+def open_ability_connect_headers() -> dict[str, str]:
+    """Gateway 连接 OpenAbility 时使用的 WebSocket 握手请求头。"""
+    return {OPEN_ABILITY_TRACE_HEADER: OPEN_ABILITY_GATEWAY_TRACE_ID}
 
 
 def wrap_openability_message(sandbox_id: str, detail: dict[str, Any]) -> dict[str, Any]:
@@ -19,47 +31,23 @@ def wrap_openability_message(sandbox_id: str, detail: dict[str, Any]) -> dict[st
     }
 
 
-def _parse_msg_detail(raw: Any) -> dict[str, Any]:
-    if isinstance(raw, dict):
-        return dict(raw)
-    if isinstance(raw, str):
-        text = raw.strip()
+def parse_openability_inbound_message(data: Any) -> dict[str, Any]:
+    """解析 OpenAbility 入站帧：裸 E2A JSON 字符串 → dict（原 msgDetail 内容）。"""
+    if isinstance(data, bytes):
+        data = data.decode("utf-8")
+    if isinstance(data, str):
+        text = data.strip()
         if not text:
-            raise ValueError("unwrap_openability_message: msgDetail is empty")
+            raise ValueError("parse_openability_inbound_message: frame is empty")
         parsed = json.loads(text)
         if not isinstance(parsed, dict):
-            raise ValueError("unwrap_openability_message: msgDetail JSON must be an object")
-        return parsed
-    raise ValueError(
-        f"unwrap_openability_message: msgDetail must be str or dict, got {type(raw).__name__}"
-    )
-
-
-def unwrap_openability_message(
-    data: dict[str, Any],
-    *,
-    expected_sandbox_id: str | None = None,
-) -> dict[str, Any]:
-    """解析 OpenAbility 外层帧，返回内层 E2A 线 dict。"""
-    if not isinstance(data, dict):
-        raise ValueError("unwrap_openability_message: frame must be a dict")
-
-    sandbox_id = data.get("sandboxId")
-    if sandbox_id is None:
-        sandbox_id = data.get("sandbox_id")
-    sid = str(sandbox_id or "").strip()
-    if not sid:
-        raise ValueError("unwrap_openability_message: sandboxId is required")
-
-    if expected_sandbox_id is not None:
-        expected = str(expected_sandbox_id).strip()
-        if expected and sid != expected:
             raise ValueError(
-                f"unwrap_openability_message: sandboxId mismatch "
-                f"(expected={expected!r}, got={sid!r})"
+                "parse_openability_inbound_message: JSON must decode to an object"
             )
-
-    if "msgDetail" not in data:
-        raise ValueError("unwrap_openability_message: msgDetail is required")
-
-    return _parse_msg_detail(data["msgDetail"])
+        return parsed
+    if isinstance(data, dict):
+        return dict(data)
+    raise ValueError(
+        f"parse_openability_inbound_message: frame must be str or dict, "
+        f"got {type(data).__name__}"
+    )

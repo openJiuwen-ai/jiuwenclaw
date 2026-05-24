@@ -19,7 +19,8 @@ from jiuwenclaw.e2a.wire_codec import (
 )
 from jiuwenclaw.gateway.agent_client import AgentServerClient
 from jiuwenclaw.gateway.open_ability_wire import (
-    unwrap_openability_message,
+    open_ability_connect_headers,
+    parse_openability_inbound_message,
     wrap_openability_message,
 )
 from jiuwenclaw.schema.agent import AgentResponse, AgentResponseChunk
@@ -64,9 +65,9 @@ class OpenAbilityWebSocketClient(AgentServerClient):
     """
     与 OpenAbility 的 WebSocket 客户端（独立实现，不修改 agent_client.py）。
 
-    外层帧：``{"sandboxId": "...", "msgDetail": "<E2A JSON string>"}``
-    内层 ``msgDetail`` 与直连 AgentServer 的 E2A 线协议一致。
-    建连后无 ``connection.ack``，即可收发。
+    出站外层帧：``{"sandboxId": "...", "msgDetail": "<E2A JSON string>"}``；
+    入站为裸 E2A JSON 字符串（与 ``msgDetail`` 字段值一致），接收后解析为 dict。
+    建连时携带 ``x-hag-trace-id: jiuwen-gateway``；建连后无 ``connection.ack``，即可收发。
     """
 
     def __init__(
@@ -118,11 +119,8 @@ class OpenAbilityWebSocketClient(AgentServerClient):
         outer = wrap_openability_message(self._sandbox_id, detail)
         return json.dumps(outer, ensure_ascii=False)
 
-    def _decode_inbound(self, frame: dict[str, Any]) -> dict[str, Any]:
-        return unwrap_openability_message(
-            frame,
-            expected_sandbox_id=self._sandbox_id,
-        )
+    def _decode_inbound(self, frame: Any) -> dict[str, Any]:
+        return parse_openability_inbound_message(frame)
 
     async def connect(self, uri: str) -> None:
         if self._ws is not None:
@@ -130,14 +128,17 @@ class OpenAbilityWebSocketClient(AgentServerClient):
         logger.info("%s 正在连接: %s sandbox_id=%s", _LOG_LABEL, uri, self._sandbox_id)
         self._uri = uri
         origin = _build_ws_origin(uri)
+        trace_headers = open_ability_connect_headers()
         try:
             from websockets.legacy.client import connect as legacy_connect
 
             connect_fn = legacy_connect
+            header_kwarg = {"extra_headers": trace_headers}
         except ImportError:
             import websockets
 
             connect_fn = websockets.connect
+            header_kwarg = {"additional_headers": trace_headers}
         self._ws = await connect_fn(
             uri,
             origin=origin,
@@ -145,6 +146,7 @@ class OpenAbilityWebSocketClient(AgentServerClient):
             ping_timeout=self._ping_timeout,
             close_timeout=5.0,
             max_size=_WS_MAX_SIZE,
+            **header_kwarg,
         )
         self._server_ready = True
         logger.info("%s 已连接（无 connection.ack）: %s", _LOG_LABEL, uri)
@@ -178,15 +180,22 @@ class OpenAbilityWebSocketClient(AgentServerClient):
             while self._running and self._ws is not None:
                 try:
                     raw = await self._ws.recv()
-                    frame = json.loads(raw)
                     try:
-                        data = self._decode_inbound(frame)
+                        data = self._decode_inbound(raw)
                     except ValueError as decode_err:
+                        frame_preview: Any
+                        if isinstance(raw, (str, bytes)):
+                            text = raw.decode("utf-8") if isinstance(raw, bytes) else raw
+                            frame_preview = text[:160]
+                        elif isinstance(raw, dict):
+                            frame_preview = list(raw.keys())[:8]
+                        else:
+                            frame_preview = type(raw).__name__
                         logger.warning(
-                            "%s 入站帧解包失败: %s frame_keys=%s",
+                            "%s 入站帧解包失败: %s frame_preview=%s",
                             _LOG_LABEL,
                             decode_err,
-                            list(frame.keys())[:8] if isinstance(frame, dict) else None,
+                            frame_preview,
                         )
                         continue
                     meta = data.get("metadata")

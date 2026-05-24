@@ -36,7 +36,7 @@
 - metadata
 - created_at / updated_at
 
-`get_or_create`、`bind_external`、`set_state`、`set_metadata`、`delete_session` 保持内存 API 行为。Gateway 重启后不恢复 VibeSkill session 映射，调用方需要重新创建 session。
+`get_or_create`、`bind_external`、`set_state`、`set_metadata`、`delete_session` 保持内存 API 行为。Gateway 重启后不能恢复 VibeSkill session 映射，调用方需要重新创建 session。
 
 ### 2.3 消息 identity 透传
 
@@ -94,25 +94,36 @@ Router 维护的 runtime 信息包括：
 
 队列、上限、identity、runtime 复用等逻辑都放在 Router 中，不放进 SandboxClient。
 
-### 2.6 OpenAbility WebSocket 建链
+### 2.6 沙箱注册（DCS + init_data.json）
 
-沙箱创建并写入 DCS 后：
+完整顺序：`create_sandbox` 成功 → DCS 写入 API Key 哈希 → 上传 `init_data.json` → OpenAbility 建链与通信（§2.7）。
+
+`create_sandbox` 成功后，Router 在 `_register_sandbox_record` 中按顺序完成注册：
 
 1. 向 DCS 写入：`key=jiuwen:sandboxApiKey:{sandbox_id}`，`value=API Key 的 SHA256`（明文 API Key 不落库）。
-2. 从 DCS `key=jiuwen:sandboxToOA:{sandbox_id}` 轮询读取 OpenAbility 地址，`value={ip}:{port}`。
-3. 使用 `GATEWAY_TO_OA_WS_PATH` 拼出 `ws://{ip}:{port}{path}`，由 **`OpenAbilityWebSocketClient`** 主动连接 OpenAbility（无鉴权、无 `connection.ack` 首帧）。
-4. OA 按外层帧中的 `sandboxId` 转发至沙箱内 AgentServer；内层仍为 E2A 线协议。
+2. 向沙箱内上传 `init_data.json`（默认 `/home/sandbox/init_data.json`），payload 为 `{"apiKey": "<Claw API Key>", "sandboxId": "<sandbox_id>"}`；经本地临时文件 + `SandboxClient.upload_file(...)` 写入。
+3. 任一步失败则 sandbox 注册失败，后续不会建 OA WebSocket。
 
-**Gateway ↔ OpenAbility 线格式**（一条 WebSocket Text 帧 = 一个 JSON 对象）：
+实现：`jiuwenclaw/sandbox/sandbox_dcs_store.py`（DCS）、`jiuwenclaw/sandbox/sandbox_init_data.py`（`upload_sandbox_init_data`）；Router 入口：`SandboxRouterAgentClient._register_sandbox_record`。
 
-```json
-{
-  "sandboxId": "sb-xxx",
-  "msgDetail": "<json.dumps(E2AEnvelope 或 E2AResponse)>"
-}
-```
+沙箱内 AgentServer 通过环境变量 `SANDBOX_INIT_DATA_PATH` 指定读取路径（与 Gateway 侧默认路径一致）；未配置时使用 `/home/sandbox/init_data.json`。
 
-实现：`jiuwenclaw/gateway/open_ability_wire.py`（wrap/unwrap）、`jiuwenclaw/gateway/open_ability_client.py`。
+### 2.7 OpenAbility WebSocket 建链与通信
+
+注册（DCS + `init_data.json`）完成后，Router 通过 **`OpenAbilityWebSocketClient`** 与 OpenAbility 建链并收发 E2A 业务消息。
+
+**建链**（`_connect_open_ability_client`）：
+
+1. 从 DCS `key=jiuwen:sandboxToOA:{sandbox_id}` 轮询读取 OpenAbility 地址，`value={ip}:{port}`。
+2. 使用 `GATEWAY_TO_OA_WS_PATH` 拼出 `ws://{ip}:{port}{path}`，Gateway 主动连接 OpenAbility（无鉴权、无 `connection.ack` 首帧）；建连握手带 `x-hag-trace-id: jiuwen-gateway`。
+
+**通信**（一条 WebSocket Text 帧 = 一次 JSON 载荷；经 OA 转发至沙箱内 AgentServer，内层仍为 E2A 线协议）：
+
+- **Gateway → OA（出站）**：外层帧 `{"sandboxId": "sb-xxx", "msgDetail": "<json.dumps(E2A...)>"}`。
+- **OA → Gateway（入站）**：裸 E2A JSON 字符串（原 `msgDetail` 字段值），Gateway 侧 `json.loads` 为 dict；无 `sandboxId`/`msgDetail` 外层。
+- 入站内容与直连 AgentServer 的 E2A 线 JSON 一致，解析一次即可；出站多一层 `sandboxId` + `msgDetail` 封装。
+
+实现：`jiuwenclaw/gateway/open_ability_wire.py`（wrap / parse_inbound）、`jiuwenclaw/gateway/open_ability_client.py`（建链、`send_request` / `send_request_stream`）。
 
 ```python
 _connect_open_ability_client(sandbox_id, routing_key, metadata) -> OpenAbilityWebSocketClient
@@ -136,6 +147,8 @@ _disconnect_agent_client(sandbox_id, agent_client) -> None
 
 开启时另需：`SANDBOX_API_BASE`、`SANDBOX_TEMPLATE_ID`、`SANDBOX_DCS_HOST`、`SANDBOX_DCS_PORT`、`SANDBOX_DCS_USERNAME`、`SANDBOX_DCS_PASSWORD`、`GATEWAY_TO_OA_WS_PATH`。
 
+可选：`SANDBOX_INIT_DATA_PATH` — 沙箱内 `init_data.json` 上传路径；Gateway 与 AgentServer 均读取此变量，默认 `/home/sandbox/init_data.json`。
+
 SandboxClient 固定：`duration_seconds=3600`，`timeout_seconds=120`，`metadata={}`。
 
 OpenAbility 固定：`use_tls=false`，`connect_timeout_seconds=10`，`readiness_poll_interval_seconds=0.5`，`readiness_timeout_seconds=60`。
@@ -158,6 +171,8 @@ OpenAbility 固定：`use_tls=false`，`connect_timeout_seconds=10`，`readiness
 - runtime 进入 IDLE 且等待队列非空时立即清理。
 - `task_count` 在成功、异常、流式取消路径回落。
 - idle timeout 只回收 `task_count == 0` 的 runtime。
+- 沙箱注册时 DCS 写入后上传 `init_data.json`（`test_sandbox_router_init_data`）。
+- `init_data.json` 序列化、路径与 `upload_file` 调用（`test_sandbox_init_data`、`test_sandbox_client_upload`）。
 
 可运行的目标测试：
 
@@ -165,6 +180,8 @@ OpenAbility 固定：`use_tls=false`，`connect_timeout_seconds=10`，`readiness
 uv run --no-sync pytest -o addopts='' \
   tests/unit_tests/channel/test_vibeskill_session_store.py \
   tests/unit_tests/gateway/test_sandbox_router_init_data.py \
+  tests/unit_tests/sandbox/test_sandbox_init_data.py \
+  tests/unit_tests/sandbox/test_sandbox_client_upload.py \
   tests/unit_tests/gateway/test_open_ability_wire.py \
   tests/unit_tests/gateway/test_open_ability_client.py \
   tests/unit_tests/e2a/test_gateway_normalize.py
