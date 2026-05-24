@@ -451,25 +451,22 @@ class AgentWebSocketServer:
                     ),
                     timeout=10.0
                 )
-
-                logger.info("[AgentWebSocketServer] WebSocket 连接已建立，等待 OpenAbility 建连确认...")
-
-                # 等待 OA 返回第一条建连成功消息
-                if not await oa_wait_connection_ack(ws, timeout=10.0):
-                    await ws.close()
-                    raise RuntimeError("OpenAbility 建连确认失败")
-
-                logger.info("[AgentWebSocketServer] OpenAbility 连接已确认，开始业务处理")
                 retry_count = 0  # 重置重试计数
 
                 # 首次连接时触发启动钩子
                 if first_connect:
+                    logger.info("[AgentWebSocketServer] WebSocket 连接已建立，等待 OpenAbility 建连确认...")
                     await self._trigger_agent_server_started_hook()
                     # 发送 INIT 消息，携带 apiKey 和 sandboxId
                     try:
                         init_msg = init_oa_message("INIT")
                         await ws.send(json.dumps(init_msg, ensure_ascii=False))
                         logger.info("[AgentWebSocketServer] 已发送 INIT 消息到 OpenAbility")
+                        # 等待 OA 返回第一条建连成功消息
+                        if not await oa_wait_connection_ack(ws, timeout=10.0):
+                            await ws.close()
+                            raise RuntimeError("OpenAbility 建连确认失败")
+                        logger.info("[AgentWebSocketServer] OpenAbility 连接已确认，开始业务处理")
                     except Exception as e:
                         logger.warning("[AgentWebSocketServer] 发送 INIT 消息失败: %s", e)
 

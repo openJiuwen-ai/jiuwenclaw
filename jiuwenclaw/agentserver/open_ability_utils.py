@@ -1,12 +1,10 @@
 # Copyright (c) Huawei Technologies, Co., Ltd. 2025. All rights reserved.
 """OpenAbility消息处理、鉴权工具类"""
+import os
 import asyncio
 import json
 import logging
-import jiuwenclaw.agentserver.utils as sandbox_init
 from typing import Any
-
-from jiuwenclaw.schema.agent import AgentRequest
 
 logger = logging.getLogger(__name__)
 
@@ -53,8 +51,8 @@ def get_sandbox_init_data():
     try:
         with open(init_path, "r", encoding="utf-8") as file:
             init_data = json.load(file)
-            _SANDBOX_ID = init_data.get("apiKey")
-            _API_KEY = init_data.get("sandboxId")
+            _SANDBOX_ID = init_data.get("sandboxId")
+            _API_KEY = init_data.get("apiKey")
     except Exception as e:
         logger.error("[SandboxInitData] 初始化数据获取失败：%s", e)
 
