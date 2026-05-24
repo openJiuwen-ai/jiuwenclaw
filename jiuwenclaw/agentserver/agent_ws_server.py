@@ -101,7 +101,7 @@ class AgentWebSocketServer:
 
     支持 send_push：推送帧亦为 E2AResponse 线格式（由 chunk 编码）。
 
-    【OA 模式】当配置 AS_OA_WEBSOCKET_URL 环境变量时，AgentServer 作为客户端主动连接 OpenAbility，
+    【OA 模式】当配置 AGENTSERVER_TO_OA_WS_URL 环境变量时，AgentServer 作为客户端主动连接 OpenAbility，
     而非作为服务端监听端口。OpenAbility 负责转发 Gateway 和 AgentServer 之间的消息。
     """
 
@@ -127,13 +127,13 @@ class AgentWebSocketServer:
         self._agent_manager = None  # TenantAgentPool 实例
 
         # OA 模式相关
-        self._oa_ws_uri: str | None = os.getenv("AS_OA_WEBSOCKET_URL", "").strip() or None
+        self._oa_ws_uri: str | None = os.getenv("AGENTSERVER_TO_OA_WS_URL", "").strip() or None
         self._oa_mode: bool = self._oa_ws_uri is not None
-        self._oa_connect_retry_interval: float = float(os.getenv("OA_RETRY_INTERVAL", "3.0"))  # 默认3秒快速重连
-        self._oa_connect_max_retries: int = int(os.getenv("OA_MAX_RETRIES", "0"))  # 0 表示无限重试
+        self._oa_connect_retry_interval: float = float(os.getenv("AGENTSERVER_TO_OA_RETRY_INTERVAL", "3.0"))  # 默认3秒快速重连
+        self._oa_connect_max_retries: int = int(os.getenv("AGENTSERVER_TO_OA_MAX_RETRIES", "0"))  # 0 表示无限重试
         self._oa_receiver_task: asyncio.Task | None = None
         self._oa_running: bool = False
-        self._oa_heartbeat_interval: float = float(os.getenv("OA_HEARTBEAT_INTERVAL", "30.0"))  # 应用层心跳间隔
+        self._oa_heartbeat_interval: float = float(os.getenv("AGENTSERVER_TO_OA_HB_INTERVAL", "30.0"))  # 应用层心跳间隔
         self._oa_heartbeat_task: asyncio.Task | None = None
         self._oa_message_task: asyncio.Task | None = None  # 消息接收任务
         self._oa_connection_active: asyncio.Event = asyncio.Event()  # 连接状态事件
@@ -237,7 +237,7 @@ class AgentWebSocketServer:
     async def start(self) -> None:
         """启动 WebSocket 服务端或连接到 OpenAbility。
 
-        如果配置了 AS_OA_WEBSOCKET_URL 环境变量，则作为客户端主动连接 OpenAbility；
+        如果配置了 AGENTSERVER_TO_OA_WS_URL 环境变量，则作为客户端主动连接 OpenAbility；
         否则作为服务端监听端口，等待 Gateway 连接。
         """
         await self._trigger_before_ws_server_start_hook()

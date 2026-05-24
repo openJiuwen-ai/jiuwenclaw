@@ -90,7 +90,7 @@ async def _run(host: str, port: int) -> None:
     from jiuwenclaw.telemetry import init_telemetry
 
     # 检查是否启用 OA 模式
-    oa_ws_url = os.getenv("OA_WEBSOCKET_URL", "").strip()
+    oa_ws_url = os.getenv("AGENTSERVER_TO_OA_WS_URL", "").strip()
     if oa_ws_url:
         logger.info("[AgentServer] starting in OA mode, will connect to: %s", oa_ws_url)
     else:
@@ -172,13 +172,13 @@ def main() -> None:
         type=str,
         default=None,
         metavar="URL",
-        help="Agent server 连 OA WebSocket URL (e.g., ws://xxx). Overrides OA_WEBSOCKET_URL env.",
+        help="Agent server 连 OA WebSocket URL (e.g., ws://xxx). Overrides AGENTSERVER_TO_OA_WS_URL env.",
     )
     args = parser.parse_args()
 
     # 如果命令行指定了 OA URL，设置到环境变量
     if args.oa_url:
-        os.environ["OA_WEBSOCKET_URL"] = args.oa_url
+        os.environ["AGENTSERVER_TO_OA_WS_URL"] = args.oa_url
 
     host = os.getenv("AGENT_SERVER_HOST", "127.0.0.1")
     port = args.port
