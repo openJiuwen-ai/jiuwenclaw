@@ -5,7 +5,7 @@ __pycache__/
 *.pyd
 *.so
 .Python
-.venv/
+.venv*
 venv/
 env/
 ENV/
@@ -54,6 +54,7 @@ AGENTS.md
 workspace/agent-data.json
 *.iml
 .cursor
+.VSCodeCounter/
 
 # reference
 reference/
