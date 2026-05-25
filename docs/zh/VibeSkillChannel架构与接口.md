@@ -215,13 +215,25 @@ SkillDev 事件映射：
 | `skilldev.error` | `message.*` + `task.error` + `session.status` | 输出错误文本 part，状态置为 idle |
 | `skilldev.completed` | `task.completed` + `session.status` | 状态置为 completed |
 
-通用 chat 事件映射：
+通用 chat 事件映射（Standard 模式）：
 
 | AgentServer 事件 | 前端事件 | 说明 |
 |------------------|----------|------|
 | `chat.delta` | `message.part.delta` | 标准对话流式增量 |
 | `chat.final` | `message.updated` + `task.completed` | 标准对话结束，Standard session 置为 idle |
-| `chat.cancel` | 状态置为 idle | 用于取消后的状态恢复 |
+| `chat.error` | `message.updated`(error part) + `task.error` + `task.completed` + `session.status idle` | 错误收口；error 文本若过长会被截断为 `_CHAT_ERROR_MAX_TEXT_LEN` |
+| `chat.tool_call` | `message.part.updated`（tool part, status=running） | 工具调用开始；`tool_call.function.arguments` 若为 JSON 字符串会被解析进 `state.input` |
+| `chat.tool_result` | `message.part.updated`（tool part, status=completed/error） | 工具结果，含 `state.output`（来自 payload.result） |
+| `chat.ask_user_question` | `question.asked` | 结构化提问；Standard 模式登记 `dispatch="chat"`，后续 `question.replied` 经 `chat.user_answer` 回写 |
+| `chat.interrupt_result` | 状态置为 idle（仅当 `intent="cancel"`） | 取消/暂停/恢复结果；pause/resume 不会改变 session 状态。历史代码里曾用 `chat.cancel` 字符串匹配，目前两者都识别 |
+
+`question.replied` 的回写路径：
+
+- SkillCreate session → `skilldev.user_answer`（`SKILLDEV_USER_ANSWER`）；
+- Standard session → `chat.user_answer`（`CHAT_ANSWER`）。
+
+路由依据为 `VibeSkillSession.mode`，`_pending_confirms[request_id].dispatch` 字段仅做一致性校验，
+不一致时记 warning 并以 `session.mode` 为准。
 
 消息聚合规则：
 

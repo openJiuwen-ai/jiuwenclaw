@@ -89,6 +89,11 @@ _VALID_MESSAGE_SEND_IMPORT_TYPES = frozenset({_IMPORT_TYPE_VIBE, _IMPORT_TYPE_DI
 _CHAT_ERROR_MAX_TEXT_LEN = 4096
 _CHAT_ERROR_TRUNCATION_SUFFIX = "...(truncated)"
 
+# chat.interrupt_result 在历史代码里曾被以 "chat.cancel" 字符串匹配，但 AgentServer 实际下发的
+# event_type 始终是 "chat.interrupt_result"（intent in cancel/pause/resume/supplement）。为避免
+# 行为悄悄退化，这里把两种命名都视为同一事件并集中处理。
+_CHAT_INTERRUPT_RESULT_EVENT_TYPES = frozenset({"chat.interrupt_result", "chat.cancel"})
+
 
 def _resolve_message_send_import_type(data: dict[str, Any]) -> str:
     """message.send 的 importType，默认 vibeImport。"""
@@ -847,7 +852,14 @@ class VibeSkillChannel(BaseChannel):
         return True
 
     async def _handle_question_replied(self, data: dict[str, Any]) -> bool:
-        """处理 question.replied，封装为 skilldev.user_answer。"""
+        """处理 question.replied，回写到 AgentServer。
+
+        - Standard mode（``chat.ask_user_question`` 发起）→ ``chat.user_answer``（CHAT_ANSWER）；
+        - SkillCreate mode（``skilldev.ask_user_question`` 发起）→ ``skilldev.user_answer``。
+
+        会话 mode 优先用 ``VibeSkillSession.mode``；该 mode 与 ``_pending_confirms`` 中
+        登记的 ``dispatch`` 字段必须一致，不一致时记 warning 并以 session.mode 为准。
+        """
         properties = data.get("properties") if isinstance(data.get("properties"), dict) else data
         session_id = str(properties.get("sessionID") or "").strip()
         request_id = str(properties.get("requestID") or "").strip()
@@ -861,7 +873,7 @@ class VibeSkillChannel(BaseChannel):
         if not internal_id:
             return False
 
-        self._pending_confirms.pop(request_id, None)
+        pending = self._pending_confirms.pop(request_id, None)
         self._clear_message_context_for_session(internal_id)
 
         answers: list[dict[str, Any]] = []
@@ -873,6 +885,28 @@ class VibeSkillChannel(BaseChannel):
                     answers.append(
                         {"selected_options": [str(item)]} if item not in (None, "") else {"selected_options": []}
                     )
+
+        session_obj = await self._store.get_session(internal_id)
+        session_mode = session_obj.mode if session_obj else None
+        pending_dispatch = str((pending or {}).get("dispatch") or "").strip() if pending else ""
+        if pending_dispatch and session_mode:
+            expected = "chat" if session_mode == "Standard" else "skilldev"
+            if pending_dispatch != expected:
+                logger.warning(
+                    "[VibeSkillChannel] question.replied dispatch mismatch, "
+                    "session_mode=%s pending_dispatch=%s; using session_mode",
+                    session_mode,
+                    pending_dispatch,
+                )
+
+        if session_mode == "Standard":
+            return self._dispatch_chat_user_answer(
+                internal_id=internal_id,
+                external_session_id=session_id,
+                sid=session_id,
+                request_id=request_id,
+                answers=answers,
+            )
 
         return self._dispatch_skilldev_user_answer(
             internal_id=internal_id,
@@ -1143,14 +1177,25 @@ class VibeSkillChannel(BaseChannel):
             return False
 
         # 通用 chat 事件处理
-        if event_type in ("chat.final", "chat.cancel"):
-            if msg.session_id:
+        #
+        # 注意：``chat.cancel`` 在 AgentServer 端并不存在，真实事件名是 ``chat.interrupt_result``
+        # （见 ``EventType.CHAT_INTERRUPT_RESULT``）。这里把两种命名都视为"取消/暂停/恢复"的统一
+        # 信号，仅在 ``intent`` 表明任务确实结束（cancel）时将 Standard session 置 IDLE，避免把
+        # pause/resume 也误判为任务结束。
+        if event_type == "chat.final" or event_type in _CHAT_INTERRUPT_RESULT_EVENT_TYPES:
+            intent = str(payload.get("intent") or "").strip().lower()
+            is_terminal = (
+                event_type == "chat.final"
+                or intent in ("", "cancel")  # 无 intent 时按历史行为兜底置 idle
+            )
+            if msg.session_id and is_terminal:
                 session_obj = await self._store.get_session(msg.session_id)
                 if session_obj and session_obj.mode == "Standard":
                     await self._store.set_state(msg.session_id, VibeSkillSessionState.IDLE)
                     logger.info(
-                        "[VibeSkillChannel] session state -> idle, source=%s, session_id=%s",
+                        "[VibeSkillChannel] session state -> idle, source=%s, intent=%s, session_id=%s",
                         event_type,
+                        intent or "n/a",
                         msg.session_id,
                     )
 
@@ -1237,6 +1282,26 @@ class VibeSkillChannel(BaseChannel):
             for response in responses:
                 await self._send_ws_json(ws, response, source="chat.error")
             return True
+
+        if event_type == "chat.tool_call":
+            responses = await self._handle_chat_tool_call(payload, external_sid, msg.session_id)
+            for response in responses:
+                await self._send_ws_json(ws, response, source="chat.tool_call")
+            return bool(responses)
+
+        if event_type == "chat.tool_result":
+            responses = await self._handle_chat_tool_result(payload, external_sid, msg.session_id)
+            for response in responses:
+                await self._send_ws_json(ws, response, source="chat.tool_result")
+            return bool(responses)
+
+        if event_type == "chat.ask_user_question":
+            responses = await self._handle_chat_ask_user_question(
+                payload, external_sid, msg.session_id,
+            )
+            for response in responses:
+                await self._send_ws_json(ws, response, source="chat.ask_user_question")
+            return bool(responses)
 
         return False
 
@@ -1472,17 +1537,60 @@ class VibeSkillChannel(BaseChannel):
         session_id: str | None,
     ) -> list[dict]:
         """skilldev.ask_user_question → question.asked（与原 confirm_request 结构化提问字段一致）。"""
+        return self._build_ask_user_question_response(
+            payload,
+            external_sid,
+            session_id,
+            dispatch="skilldev",
+        )
+
+    async def _handle_chat_ask_user_question(
+        self,
+        payload: dict,
+        external_sid: str | None,
+        session_id: str | None,
+    ) -> list[dict]:
+        """chat.ask_user_question → question.asked（Standard 模式下结构化提问入口）。
+
+        相比 ``skilldev.ask_user_question``，仅在 ``_pending_confirms`` 中额外记录
+        ``dispatch="chat"``，以便后续 ``question.replied`` 走 ``chat.user_answer``
+        而不是 ``skilldev.user_answer``。
+        """
+        return self._build_ask_user_question_response(
+            payload,
+            external_sid,
+            session_id,
+            dispatch="chat",
+            source=str(payload.get("source") or "").strip() or None,
+        )
+
+    def _build_ask_user_question_response(
+        self,
+        payload: dict,
+        external_sid: str | None,
+        session_id: str | None,
+        *,
+        dispatch: str,
+        source: str | None = None,
+    ) -> list[dict]:
+        """共享的 ask_user_question → question.asked 构造逻辑。
+
+        - ``dispatch`` 决定 ``question.replied`` 的回写路径：``skilldev`` → SKILLDEV_USER_ANSWER，
+          ``chat`` → CHAT_ANSWER（chat.user_answer）。
+        - ``source`` 用来区分 ``ask_tool`` / ``permission_interrupt`` 等子类型，
+          目前仅用于诊断 / 后续扩展，不改变回写路径。
+        """
         if not session_id:
             return []
         request_id = str(payload.get("request_id") or f"req_{secrets.token_hex(4)}")
         task_id = str(payload.get("task_id") or payload.get("session_id") or "").strip() or (session_id or "")
 
         raw_questions = payload.get("questions", []) if isinstance(payload.get("questions"), list) else []
-        questions = []
+        questions: list[dict[str, Any]] = []
         for idx, item in enumerate(raw_questions):
             if not isinstance(item, dict):
                 continue
-            options = []
+            options: list[dict[str, Any]] = []
             for option in item.get("options", []) or []:
                 if not isinstance(option, dict):
                     continue
@@ -1506,6 +1614,8 @@ class VibeSkillChannel(BaseChannel):
         self._pending_confirms[request_id] = {
             "task_id": task_id,
             "session_id": session_id or "",
+            "dispatch": dispatch,
+            "source": source or "",
         }
         return [{
             "type": "question.asked",
@@ -1527,6 +1637,91 @@ class VibeSkillChannel(BaseChannel):
                 "tool": str(payload.get("tool") or ""),
             },
         }]
+
+    async def _handle_chat_tool_call(
+        self,
+        payload: dict,
+        external_sid: str | None,
+        session_id: str | None,
+    ) -> list[dict]:
+        """chat.tool_call → message.part.updated（tool part, running）。
+
+        AgentServer 的 chat.tool_call payload 形如::
+
+            {
+                "event_type": "chat.tool_call",
+                "tool_call": {
+                    "id": "<call_id>",
+                    "function": {"name": "<tool_name>", "arguments": "<json string>"},
+                    ...
+                },
+                "task_id": "<optional>",
+            }
+
+        ``arguments`` 通常是 JSON 字符串；解析失败时保留原始字符串放在 ``_raw_arguments`` 里，
+        前端仍可读到工具名与原始参数串，避免静默丢失。
+        """
+        if not session_id:
+            return []
+        tool_call_obj = payload.get("tool_call")
+        if not isinstance(tool_call_obj, dict):
+            return []
+        fn = tool_call_obj.get("function") if isinstance(tool_call_obj.get("function"), dict) else {}
+        args_raw = (fn or {}).get("arguments")
+        if args_raw is None:
+            args_raw = tool_call_obj.get("arguments")
+        tool_input: Any
+        if isinstance(args_raw, str) and args_raw.strip():
+            try:
+                tool_input = json.loads(args_raw)
+            except (ValueError, TypeError):
+                tool_input = {"_raw_arguments": args_raw}
+        elif isinstance(args_raw, (dict, list)):
+            tool_input = args_raw
+        else:
+            tool_input = {}
+
+        normalized = {
+            "tool_call_id": (
+                tool_call_obj.get("id")
+                or tool_call_obj.get("tool_call_id")
+                or tool_call_obj.get("callID")
+            ),
+            "tool_name": (fn or {}).get("name") or tool_call_obj.get("name"),
+            "arguments": tool_input,
+            "title": payload.get("title"),
+            "metadata": payload.get("metadata", {}),
+        }
+        return await self._handle_skilldev_tool_call(normalized, external_sid, session_id)
+
+    async def _handle_chat_tool_result(
+        self,
+        payload: dict,
+        external_sid: str | None,
+        session_id: str | None,
+    ) -> list[dict]:
+        """chat.tool_result → message.part.updated（tool part, completed/error）。
+
+        chat.tool_result payload 字段是扁平的（``result`` / ``tool_name`` / ``tool_call_id``
+        / 可选 ``raw_output``，见 ``agentserver/stream_utils.py``）；skilldev 端有等价处理。
+        这里做一次字段名归一化后复用 ``_handle_skilldev_tool_result``，避免实现漂移。
+        """
+        if not session_id:
+            return []
+        normalized = {
+            "tool_call_id": (
+                payload.get("tool_call_id")
+                or payload.get("toolCallId")
+                or payload.get("callID")
+            ),
+            "tool_name": payload.get("tool_name") or payload.get("name"),
+            "result": payload.get("result"),
+            "raw_output": payload.get("raw_output"),
+            "success": payload.get("success", True),
+            "title": payload.get("title"),
+            "metadata": payload.get("metadata", {}),
+        }
+        return await self._handle_skilldev_tool_result(normalized, external_sid, session_id)
 
     async def _handle_skilldev_search_results(
         self,
@@ -1612,6 +1807,46 @@ class VibeSkillChannel(BaseChannel):
         logger.info(
             "[VibeSkillChannel] skilldev.user_answer sent, session_id=%s",
             internal_id,
+        )
+        self.bus.deliver_to_message_handler(msg)
+        return True
+
+    def _dispatch_chat_user_answer(
+        self,
+        internal_id: str,
+        external_session_id: str,
+        sid: str,
+        request_id: str,
+        answers: list[dict[str, Any]],
+    ) -> bool:
+        """Standard 模式下 ``question.replied`` 的回写：派发 CHAT_ANSWER（``chat.user_answer``）。
+
+        params 字段与前端 ``request('chat.user_answer', {...})`` 一致：
+        ``session_id`` / ``request_id`` / ``answers``。``answers`` 仍沿用
+        ``{"selected_options": [...]}`` 的结构，与 ask_user_question_tool 在 Registry
+        中等待的反序列化格式对齐（同时也是 SkillCreate 路径长期使用的格式）。
+        """
+        msg = Message(
+            id=f"vibeskill-chat-user-answer-{int(time.time() * 1000):x}-{secrets.token_hex(3)}",
+            type="req",
+            channel_id=VIBESKILL_CHANNEL_ID,
+            session_id=internal_id,
+            params={
+                "session_id": sid or internal_id,
+                "request_id": request_id,
+                "answers": answers,
+            },
+            timestamp=time.time(),
+            ok=True,
+            req_method=ReqMethod.CHAT_ANSWER,
+            is_stream=False,
+            metadata={_VIBESKILL_ORIGINAL_SESSION_ID_KEY: external_session_id} if external_session_id else None,
+            user_id=self._session_user_id(internal_id),
+        )
+        logger.info(
+            "[VibeSkillChannel] chat.user_answer sent, session_id=%s request_id=%s",
+            internal_id,
+            request_id,
         )
         self.bus.deliver_to_message_handler(msg)
         return True
