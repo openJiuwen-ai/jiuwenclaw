@@ -1,3 +1,42 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: jiuwenclaw-gateway-sa
+  namespace: <<NAMESPACE>>
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: jiuwenclaw-agentserver-creator
+  namespace: <<NAMESPACE>>
+rules:
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch", "create", "delete"]
+  - apiGroups: [""]
+    resources: ["pods/log"]
+    verbs: ["get"]
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
+    verbs: ["get", "list", "watch"]
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: jiuwenclaw-gateway-agentserver-binding
+  namespace: <<NAMESPACE>>
+subjects:
+  - kind: ServiceAccount
+    name: <<GATEWAY_SERVICE_ACCOUNT>>
+    namespace: <<NAMESPACE>>
+roleRef:
+  kind: Role
+  name: jiuwenclaw-agentserver-creator
+  apiGroup: rbac.authorization.k8s.io
+
+---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -56,3 +95,21 @@ spec:
             items:
               - key: config.yaml
                 path: config.yaml
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: <<GATEWAY_NAME>>
+  namespace: <<NAMESPACE>>
+spec:
+  selector:
+    app: <<GATEWAY_NAME>>                     # 必须匹配你的 gateway pod 的标签
+  ports:
+    - name: websocket
+      port: <<GATEWAY_WEBSOCKET_PORT>>         # Service 端口
+      targetPort: <<GATEWAY_WEBSOCKET_PORT>>   # 容器端口
+    - name: rest
+      port: <<GATEWAY_REST_PORT>>             # Service 端口
+      targetPort: <<GATEWAY_REST_PORT>>       # 容器端口
+  type: ClusterIP                             # 集群内部访问，不需要外网

@@ -6,7 +6,7 @@ deploy_manager() {
     local manager_name="${DEPLOY_VARS["MANAGER_NAME"]}"
 
     render_config_template "${MANAGER_TEMPLATE_FILE}" "${MANAGER_FILE}" "DEPLOY_VARS"
-    enable_dev_mode_if_needed ${MANAGER_FILE}
+    enable_dev_mode_if_needed ${MANAGER_FILE} ${DEPLOY_VARS["MANAGER_DEV_IMAGE"]}
     exec_cmd kubectl apply -f ${MANAGER_FILE}
     wait_k8s_resource_ready "deployment" "${manager_name}" "${namespace}"
 }
