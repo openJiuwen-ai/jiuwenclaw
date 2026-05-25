@@ -41,6 +41,7 @@ from jiuwenclaw.e2a.wire_codec import (
     encode_agent_response_for_wire,
     encode_json_parse_error_wire,
 )
+from jiuwenclaw.request_ext import lift_from_metadata as _tp_lift, reset_ext as _tp_reset
 from jiuwenclaw.schema.agent import AgentRequest, AgentResponse, AgentResponseChunk
 from jiuwenclaw.schema.hook_event import AgentServerHookEvents
 from jiuwenclaw.extensions.types import WsHandlerContext
@@ -48,6 +49,7 @@ from jiuwenclaw.agentserver.extensions import get_rail_manager
 from jiuwenclaw.agentserver.permissions.patterns import persist_cli_trusted_directory
 from jiuwenclaw.schema.hooks_context import (
     AgentServerChatHookContext,
+    AgentServerListeningHookContext,
     AgentWsServerStartHookContext,
     AgentReloadConfigHookContext,
 )
@@ -261,6 +263,7 @@ class AgentWebSocketServer:
             "[AgentWebSocketServer] 已启动: ws://%s:%s", self._host, self._port,
             extra={'user_visible': 'progress'},
         )
+        await self._trigger_agent_server_listening_hook()
 
     async def _process_request(self, *args: Any) -> Any:
         """在握手阶段执行 Origin 校验，兼容 legacy/new websockets APIs。"""
@@ -507,6 +510,7 @@ class AgentWebSocketServer:
             await self._handle_agent_request_body(ws, request, send_lock)
 
     async def _handle_agent_request_body(self, ws: Any, request: Any, send_lock: asyncio.Lock) -> None:
+        _ext_token = _tp_lift(request.metadata)
         from jiuwenclaw.schema.message import ReqMethod
 
         try:
@@ -631,6 +635,8 @@ class AgentWebSocketServer:
             )
             async with send_lock:
                 await ws.send(json.dumps(wire, ensure_ascii=False))
+        finally:
+            _tp_reset(_ext_token)
 
     @staticmethod
     async def _trigger_before_ws_server_start_hook() -> None:
@@ -641,6 +647,19 @@ class AgentWebSocketServer:
         ctx = AgentWsServerStartHookContext(skills_dir=str(get_agent_skills_dir()))
         await ExtensionRegistry.get_instance().trigger(AgentServerHookEvents.BEFORE_WS_SERVER_START, ctx)
 
+    async def _trigger_agent_server_listening_hook(self) -> None:
+        """listen 成功后触发一次（供 Claw Manager DMQ 等扩展使用，非每连接一次）。"""
+        from jiuwenclaw.extensions.registry import ExtensionRegistry
+        from jiuwenclaw.utils import get_agent_skills_dir
+
+        ctx = AgentServerListeningHookContext(
+            skills_dir=str(get_agent_skills_dir()),
+            host=str(self._host),
+            port=int(self._port),
+        )
+        await ExtensionRegistry.get_instance().trigger(
+            AgentServerHookEvents.AGENT_SERVER_LISTENING, ctx
+        )
 
     @staticmethod
     async def _trigger_agent_server_started_hook() -> None:

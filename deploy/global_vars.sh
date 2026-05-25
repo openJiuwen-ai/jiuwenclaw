@@ -36,11 +36,23 @@ GATEWAY_DEPLOYMENT_FILE="${SCRIPT_DIR}/conf/gateway-deployment.yaml"
 GATEWAY_SERVICE_TEMPLATE_FILE="${SCRIPT_DIR}/conf/gateway-service.template.yaml"
 GATEWAY_SERVICE_FILE="${SCRIPT_DIR}/conf/gateway-service.yaml"
 
-WEB_DEPLOYMENT_TEMPLATE_FILE="${SCRIPT_DIR}/conf/web-deployment.template.yaml"
-WEB_DEPLOYMENT_FILE="${SCRIPT_DIR}/conf/web-deployment.yaml"
+NFS_TEMPLATE_FILE="${SCRIPT_DIR}/conf/nfs.template.yaml"
+NFS_FILE="${SCRIPT_DIR}/conf/nfs.yaml"
 
-NFS_SERVER_TEMPLATE_FILE="${SCRIPT_DIR}/conf/nfs-server.template.yaml"
-NFS_SERVER_FILE="${SCRIPT_DIR}/conf/nfs-server.yaml"
+RABBITMQ_TEMPLATE_FILE="${SCRIPT_DIR}/conf/rabbitmq.template.yaml"
+RABBITMQ_FILE="${SCRIPT_DIR}/conf/rabbitmq.yaml"
+
+MYSQL_TEMPLATE_FILE="${SCRIPT_DIR}/conf/mysql.template.yaml"
+MYSQL_FILE="${SCRIPT_DIR}/conf/mysql.yaml"
+
+POSTGRES_TEMPLATE_FILE="${SCRIPT_DIR}/conf/postgresql.template.yaml"
+POSTGRES_FILE="${SCRIPT_DIR}/conf/postgresql.yaml"
+
+WEB_TEMPLATE_FILE="${SCRIPT_DIR}/conf/web.template.yaml"
+WEB_FILE="${SCRIPT_DIR}/conf/web.yaml"
+
+MANAGER_TEMPLATE_FILE="${SCRIPT_DIR}/conf/manager.template.yaml"
+MANAGER_FILE="${SCRIPT_DIR}/conf/manager.yaml"
 
 PV_TEMPLATE_FILE="${SCRIPT_DIR}/conf/pv-nfs.template.yaml"
 PV_FILE="${SCRIPT_DIR}/conf/pv-nfs.yaml"
@@ -55,7 +67,8 @@ CMD=""
 
 
 # ==== All available modules ====
-declare -ga ALL_MODULES=("NFS" "YR_CLAW" "GATEWAY" "WEB")
+#declare -ga ALL_MODULES=("NFS" "RABBITMQ" "YR_CLAW" "GATEWAY" "WEB" "MANAGER")
+declare -ga ALL_MODULES=("NFS" "RABBITMQ" "MYSQL" "GATEWAY" "WEB" "MANAGER")
 
 declare -ga MODULES=()
 
@@ -73,6 +86,15 @@ declare -A DEPLOY_VARS=(
     ["GATEWAY_SERVICE_ACCOUNT"]="jiuwenclaw-gateway-sa"
     ["GATEWAY_CONFIG_MAP_NAME"]="jiuwenclaw-gateway-config"
     ["GATEWAY_ENV_FILE_NAME"]="jiuwenclaw-gateway-env"
+    ["GATEWAY_WEBSOCKET_PORT"]="19000"
+    ["GATEWAY_REST_PORT"]="18080"
+    ["GATEWAY_DB_TYPE"]="mysql"
+    ["GATEWAY_SQLITE_PATH"]="openjiuwen_gateway.db"
+    ["GATEWAY_DB_HOST"]="mysql-headless"
+    ["GATEWAY_DB_PORT"]="3306"
+    ["GATEWAY_DB_USER"]="root"
+    ["GATEWAY_DB_PASSWORD"]="Root@123456"
+    ["GATEWAY_DB_NAME"]="openjiuwen_gateway"
     ["NFS_NAME"]="nfs-server"
     ["NFS_IMAGE"]="itsthenetwork/nfs-server-alpine:12"
     ["NFS_HOST_PATH"]="/data/nfs"
@@ -82,6 +104,30 @@ declare -A DEPLOY_VARS=(
     ["AGENT_SERVER_POD_NAME"]="jiuwenclaw-agentserver"
     ["WEB_NAME"]="jiuwenclaw-web"
     ["WEB_HOST_PORT"]="8080"
+    ["RABBITMQ_NAME"]="rabbitmq"
+    ["RABBITMQ_IMAGE"]="rabbitmq:3.9.22-management"
+    ["RABBITMQ_PATH"]="/exports/rabbitmq"
+    ["RABBITMQ_USER"]="admin"
+    ["RABBITMQ_PASSWORD"]="Rabbitmq@123"
+    ["MYSQL_NAME"]="mysql"
+    ["MYSQL_IMAGE"]="mysql:8.0"
+    ["MYSQL_PATH"]="/exports/mysql"
+    ["MYSQL_ROOT_PASSWORD"]="Root@123456"
+    ["POSTGRES_NAME"]="postgresql"
+    ["POSTGRES_IMAGE"]="postgres:16"
+    ["POSTGRES_PATH"]="/exports/postgresql"
+    ["POSTGRES_PASSWORD"]="Root@123456"    
+    ["MANAGER_NAME"]="jiuwenclaw-manager"
+    ["MANAGER_NODE_PORT"]="30086"
+    ["MANAGER_REST_PORT"]="8765"
+    ["MANAGER_WS_PORT"]="8766"
+    ["MANAGER_DB_TYPE"]="mysql"
+    ["MANAGER_SQLITE_PATH"]="claw_manager.db"
+    ["MANAGER_DB_HOST"]="mysql-headless"
+    ["MANAGER_DB_PORT"]="3306"
+    ["MANAGER_DB_USER"]="root"
+    ["MANAGER_DB_PASSWORD"]="Root@123456"
+    ["MANAGER_DB_NAME"]="claw_manager"
 )
 
 declare -A OYR_COMPONENTS=(

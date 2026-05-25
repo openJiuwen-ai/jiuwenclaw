@@ -2,12 +2,13 @@
 
 import copy
 import logging
+import json
 import os
 import sys
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional
 
 import yaml
 from ruamel.yaml import YAML
@@ -20,6 +21,8 @@ from jiuwenclaw.utils import (
     resolve_env_vars,
     resolve_shipped_template_config_path,
 )
+
+from jiuwenclaw.local_env_config import get_local_config
 
 _logger = logging.getLogger(__name__)
 _logged_template_config_path = False
@@ -922,3 +925,334 @@ def update_file_transfer_in_config(updates: dict[str, Any]) -> None:
         section[key] = value
     _dump_yaml_round_trip(_current_config_yaml_path(), data)
     clear_file_transfer_config_cache()
+
+
+# =====================================================================
+# Sandbox 配置读取（环境变量驱动；不再读取 config.yaml::sandbox）
+#
+# 历史上 claw2b 的 sandbox 段挂在 ``config.yaml::sandbox`` 顶层。出于
+# enterprise / K8s 部署场景 (operator 通过 ConfigMap / Deployment env
+# 注入), 现已**整段切换到环境变量**, ``config.yaml::sandbox`` 内容**完全
+# 不再被读取**——保留这一段 yaml 不会影响行为, 但也不再生效;
+# 想启用 sandbox 必须设置对应的 ``JIUWENCLAW_SANDBOX_*`` 环境变量。
+#
+# 环境变量映射 (前缀全部 ``JIUWENCLAW_SANDBOX_``):
+#
+#   ENABLED                       (bool: ``1/0/true/false/yes/no/on/off``,
+#                                   缺省/空 = false)
+#   URL                           (str, 例如 ``http://127.0.0.1:8321``)
+#   TYPE                          (str, sandbox provider 名; 缺省/空回落到
+#                                   ``jiuwenbox`` —— 这是项目里唯一注册的
+#                                   provider, 显式覆盖只有自定义 provider 时才用)
+#   STARTUP_MODE                  (str, 仅接受 ``external``; 非法抛 ValueError)
+#   PRESERVE_FILE_SHARING_MODE    (str, 仅接受 ``mount``; 缺省回落 ``mount``)
+#   EXCLUDED_COMMANDS             (str: JSON 数组 ``["ls", "cat"]`` 或
+#                                   :func:`os.pathsep` (linux ``:``) 分隔
+#                                   ``ls:cat``; 空值 = 空 list)
+#   FILES_ALLOW                   (str: JSON 数组, 元素可以是 path 字符串
+#                                   或 ``{path, permissions}`` 对象;
+#                                   也接受 :func:`os.pathsep` 分隔的
+#                                   纯字符串路径列表)
+#   FILES_DENY                    (str: 同 FILES_ALLOW 格式)
+#   IDLE_TTL_SECONDS              (int 秒数; ``<= 0`` / 空 = None = 禁用淘汰)
+#   IDLE_CHECK_INTERVAL           (int 秒数; ``<= 0`` / 空 = None = 让
+#                                   jiuwenbox 服务端用自身默认值)
+#
+# 注意:
+#   - ``startup_mode`` 仅接受 ``external``，``internal`` 之类抛 ``ValueError``。
+#     ``external`` 表示 “使用 ``URL`` 端点连接由外部启动的 jiuwenbox”
+#     (claw2b 不负责拉起 jiuwenbox; 在 K8s / 企业部署里 jiuwenbox-server 由
+#     Deployment / sidecar 等独立托管)。
+#   - 不引入 ``policy_file`` 字段 (jiuwenbox 自管 policy)。
+#   - 不引入任何 ``update_sandbox_*`` 写回函数 (无 ``/sandbox`` 命令调用方)。
+#   - ``IDLE_TTL_SECONDS`` / ``IDLE_CHECK_INTERVAL`` 经
+#     :func:`create_sandbox_sysop_card` 透传给 jiuwenbox provider, 由其
+#     ``PUT /api/v1/timeout`` 写到 jiuwenbox server 根 policy 上 (per-sandbox
+#     policy 的 ``timeout`` 子段不驱动 reaper, 必须改根 policy 才能生效)。
+# =====================================================================
+
+_SANDBOX_ENV_PREFIX: str = "JIUWENCLAW_SANDBOX_"
+
+_VALID_SANDBOX_STARTUP_MODES: tuple[str, ...] = ("external",)
+_DEFAULT_SANDBOX_STARTUP_MODE: str = "external"
+
+_VALID_PRESERVE_FILE_SHARING_MODES: tuple[str, ...] = ("mount",)
+_DEFAULT_PRESERVE_FILE_SHARING_MODE: str = "mount"
+
+# 唯一已注册的 sandbox provider 名。 历史上 ``JIUWENCLAW_SANDBOX_TYPE`` 必填,
+# 用户漏配就会让 ``_create_sys_operation`` 静默回落到 local 模式 (现象: "我开了
+# sandbox 怎么没连"); 改为空时回落到 ``jiuwenbox``。
+_DEFAULT_SANDBOX_TYPE: str = "jiuwenbox"
+
+_SANDBOX_RUNTIME_DEFAULTS: dict[str, Any] = {
+    "enabled": False,
+    "excluded_commands": [],
+    "files": {"allow": [], "deny": []},
+    "idle_ttl_seconds": None,
+    "idle_check_interval": None,
+}
+_SANDBOX_RUNTIME_KEYS: tuple[str, ...] = tuple(_SANDBOX_RUNTIME_DEFAULTS.keys())
+
+
+def _read_sandbox_env(suffix: str) -> str | None:
+    """读取 ``JIUWENCLAW_SANDBOX_<suffix>`` 环境变量.
+
+    优先经 :func:`get_local_config` (走 agentserver 进程内 ENV_CONFIG_DICT
+    + os.environ + 解密钩子), 与项目内其它 env 读取保持一致。
+    返回 ``None`` 表示未设置或空字符串。
+    """
+    name = _SANDBOX_ENV_PREFIX + suffix
+    value = get_local_config(name)
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None
+
+
+_TRUE_VALUES: frozenset[str] = frozenset({"1", "true", "yes", "y", "on", "t"})
+_FALSE_VALUES: frozenset[str] = frozenset({"0", "false", "no", "n", "off", "f"})
+
+
+def _coerce_bool_env(raw: str | None, *, env_name: str, default: bool = False) -> bool:
+    """把环境变量字符串解析为 bool. 未设置 / 空 → ``default``; 非法值抛 ValueError."""
+    if raw is None:
+        return default
+    text = raw.strip().lower()
+    if not text:
+        return default
+    if text in _TRUE_VALUES:
+        return True
+    if text in _FALSE_VALUES:
+        return False
+    raise ValueError(
+        f"{env_name} must be a boolean string ({sorted(_TRUE_VALUES | _FALSE_VALUES)}), "
+        f"got {raw!r}",
+    )
+
+
+def _coerce_optional_positive_int(
+    value: Any, *, env_name: str, allow_zero: bool = False,
+) -> Optional[int]:
+    """把 env / yaml 来的 idle 配置值归一化为 ``Optional[int]``.
+
+    - ``None`` / 缺失 / 空字符串 → ``None``。
+    - ``int`` / 数字字符串 → ``int(value)``; ``allow_zero=False`` 时 ``<= 0``
+      也归一化为 ``None`` (避免后续负值流到 jiuwenbox 端引发歧义)。
+    - 其它 (``bool`` / 不可解析字符串等) → ``ValueError``。
+    """
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        # bool 是 int 子类, 必须先排掉; ``True`` -> 1 这种隐式转换在配置文件里
+        # 几乎肯定是误写, 不要静默放行。
+        raise ValueError(f"{env_name} must be a number, not a boolean")
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return None
+        try:
+            number = int(text)
+        except ValueError:
+            try:
+                number = int(float(text))
+            except ValueError as exc:
+                raise ValueError(
+                    f"{env_name} must parse as an integer of seconds, got {value!r}"
+                ) from exc
+    elif isinstance(value, (int, float)):
+        number = int(value)
+    else:
+        raise ValueError(
+            f"{env_name} must be number or string, got {type(value).__name__}"
+        )
+    if not allow_zero and number <= 0:
+        return None
+    return number
+
+
+def _parse_list_env(raw: str | None, *, env_name: str) -> list[Any]:
+    """把 env 里的列表型 sandbox 配置解析成 Python list.
+
+    支持两种形态 (优先级):
+
+    1. **JSON 数组** (推荐): 字符串首字符为 ``[``, 整体 ``json.loads`` 解析.
+       元素可以是 ``str`` 或 ``{"path": "...", "permissions": "..."}`` 这种
+       与 ``files.allow`` / ``files.deny`` 对应的 dict。
+    2. **:os.pathsep 分隔的纯字符串**: 例如 ``/etc/foo:/etc/bar``。 适合
+       ``EXCLUDED_COMMANDS`` 与简单路径场景, dict 形态的 ``permissions``
+       不便表达。
+
+    空字符串 / ``None`` → 返回空 list。 JSON 解析失败时回退到分隔符模式;
+    若 JSON 形态明显 (以 ``[`` 开头) 但解析失败, 抛 ``ValueError`` 让用户
+    知道是 JSON 写错而不是悄悄变成单字符串。
+    """
+    if raw is None:
+        return []
+    text = raw.strip()
+    if not text:
+        return []
+    if text.startswith("["):
+        try:
+            parsed = json.loads(text)
+        except json.JSONDecodeError as exc:
+            raise ValueError(
+                f"{env_name} starts with '[' but is not valid JSON: {exc}"
+            ) from exc
+        if not isinstance(parsed, list):
+            raise ValueError(f"{env_name} JSON must be an array, got {type(parsed).__name__}")
+        return parsed
+    return [piece for piece in (p.strip() for p in text.split(os.pathsep)) if piece]
+
+
+def _normalize_sandbox_startup_mode(value: Any) -> str:
+    """归一化 ``sandbox.startup_mode``.
+
+    - ``None`` / 空字符串 → 返回默认 ``external``；
+    - ``"external"`` (大小写不敏感, 前后空格) → 返回 ``"external"``；
+    - 其它任何取值 (含 ``internal``) → 抛 ``ValueError``。
+
+    显式拒绝 ``internal``: claw2b 在 K8s / 企业部署中, jiuwenbox-server 由
+    Deployment / sidecar 等外部进程独立托管, agent-server 完全不 spawn 它,
+    只通过 ``JIUWENCLAW_SANDBOX_URL`` 健康检查 + HTTP 调用。 这就是 jiuwenbox
+    README 中 ``external`` 的定义; ``internal`` (agent-server 自动拉起
+    jiuwenbox 子进程) 在本工程内不实现, 留下名字徒增歧义, 故 schema 收窄。
+    """
+    if value is None:
+        return _DEFAULT_SANDBOX_STARTUP_MODE
+    text = str(value).strip().lower()
+    if not text:
+        return _DEFAULT_SANDBOX_STARTUP_MODE
+    if text not in _VALID_SANDBOX_STARTUP_MODES:
+        raise ValueError(
+            f"JIUWENCLAW_SANDBOX_STARTUP_MODE must be one of "
+            f"{_VALID_SANDBOX_STARTUP_MODES}, got {value!r}",
+        )
+    return text
+
+
+def _normalize_preserve_file_sharing_mode(value: Any) -> str | None:
+    """归一化 ``sandbox.preserve_file_sharing_mode``.
+
+    - ``None`` / 空字符串 → 返回 ``None`` (表示 “未配置”, 调用方按默认 ``mount`` 处理);
+    - ``"mount"`` (大小写不敏感, 前后空格) → 返回 ``"mount"``;
+    - 其它任何取值 → 抛 ``ValueError``。
+    """
+    if value is None:
+        return None
+    text = str(value).strip().lower()
+    if not text:
+        return None
+    if text not in _VALID_PRESERVE_FILE_SHARING_MODES:
+        raise ValueError(
+            f"JIUWENCLAW_SANDBOX_PRESERVE_FILE_SHARING_MODE must be one of "
+            f"{_VALID_PRESERVE_FILE_SHARING_MODES}, got {value!r}",
+        )
+    return text
+
+
+def _ensure_sandbox_runtime_shape(runtime: Any) -> dict[str, Any]:
+    """填充 sandbox runtime 缺省字段，返回归一化后的 dict（不写盘）。
+
+    ``runtime`` 由 :func:`get_sandbox_runtime` 从 env var 拼装而成；保留
+    ``Any`` 入参类型只是让本函数对历史 yaml 输入也能容错 (传 ``None`` /
+    非 dict 时返回纯默认值)。
+    """
+    base = {
+        k: (list(v) if isinstance(v, list) else dict(v) if isinstance(v, dict) else v)
+        for k, v in _SANDBOX_RUNTIME_DEFAULTS.items()
+    }
+    if not isinstance(runtime, dict):
+        return base
+    out = dict(base)
+    if "enabled" in runtime:
+        out["enabled"] = bool(runtime["enabled"])
+    raw_excluded = runtime.get("excluded_commands")
+    if isinstance(raw_excluded, list):
+        out["excluded_commands"] = [str(p) for p in raw_excluded if str(p).strip()]
+    files = runtime.get("files")
+    if isinstance(files, dict):
+        allow = files.get("allow")
+        deny = files.get("deny")
+        out["files"] = {
+            "allow": list(allow) if isinstance(allow, list) else [],
+            "deny": list(deny) if isinstance(deny, list) else [],
+        }
+    if "idle_ttl_seconds" in runtime:
+        # ``<= 0`` 归一化成 ``None`` (= 禁用淘汰), 与 jiuwenbox server 端
+        # ``TimeoutPolicy.idle_timeout`` 的语义对齐。
+        out["idle_ttl_seconds"] = _coerce_optional_positive_int(
+            runtime["idle_ttl_seconds"],
+            env_name="JIUWENCLAW_SANDBOX_IDLE_TTL_SECONDS",
+        )
+    if "idle_check_interval" in runtime:
+        out["idle_check_interval"] = _coerce_optional_positive_int(
+            runtime["idle_check_interval"],
+            env_name="JIUWENCLAW_SANDBOX_IDLE_CHECK_INTERVAL",
+        )
+    return out
+
+
+def get_sandbox_endpoint() -> dict[str, Any]:
+    """从 env var 返回 sandbox 接入端点配置.
+
+    Reads:
+        - ``JIUWENCLAW_SANDBOX_URL``
+        - ``JIUWENCLAW_SANDBOX_TYPE`` (default ``jiuwenbox`` —— 项目内唯一
+          已注册的 provider; 不必显式设)
+        - ``JIUWENCLAW_SANDBOX_STARTUP_MODE`` (default ``external``,
+          非法值抛 ``ValueError``)
+        - ``JIUWENCLAW_SANDBOX_PRESERVE_FILE_SHARING_MODE`` (default
+          ``mount``)
+
+    返回 key 与历史调用方契约保持一致 (``url`` / ``type`` / ``startup_mode`` /
+    ``preserve_file_sharing_mode``), 让 ``interface_deep.py`` 等调用方
+    无需改动。
+    """
+    mode = _normalize_preserve_file_sharing_mode(_read_sandbox_env("PRESERVE_FILE_SHARING_MODE"))
+    return {
+        "url": _read_sandbox_env("URL") or "",
+        "type": _read_sandbox_env("TYPE") or _DEFAULT_SANDBOX_TYPE,
+        "startup_mode": _normalize_sandbox_startup_mode(_read_sandbox_env("STARTUP_MODE")),
+        "preserve_file_sharing_mode": mode or _DEFAULT_PRESERVE_FILE_SHARING_MODE,
+    }
+
+
+def get_sandbox_runtime() -> dict[str, Any]:
+    """从 env var 返回 sandbox runtime 配置 (含缺省字段填充)。
+
+    Reads:
+        - ``JIUWENCLAW_SANDBOX_ENABLED`` (bool, 默认 false)
+        - ``JIUWENCLAW_SANDBOX_EXCLUDED_COMMANDS`` (JSON 数组 / 分隔列表)
+        - ``JIUWENCLAW_SANDBOX_FILES_ALLOW``  (JSON 数组 / 分隔列表)
+        - ``JIUWENCLAW_SANDBOX_FILES_DENY``   (JSON 数组 / 分隔列表)
+        - ``JIUWENCLAW_SANDBOX_IDLE_TTL_SECONDS`` (int seconds; ``<=0`` 视作禁用)
+        - ``JIUWENCLAW_SANDBOX_IDLE_CHECK_INTERVAL`` (int seconds; ``<=0`` 视作未配置)
+
+    返回结构与历史 ``config.yaml::sandbox`` runtime 完全相同 (含
+    ``files: {allow, deny}`` 子结构), 让下游 ``interface_deep.py`` /
+    ``sysop_builder.py`` 不感知配置源切换。
+    """
+    raw: dict[str, Any] = {
+        "enabled": _coerce_bool_env(
+            _read_sandbox_env("ENABLED"),
+            env_name="JIUWENCLAW_SANDBOX_ENABLED",
+            default=False,
+        ),
+        "excluded_commands": _parse_list_env(
+            _read_sandbox_env("EXCLUDED_COMMANDS"),
+            env_name="JIUWENCLAW_SANDBOX_EXCLUDED_COMMANDS",
+        ),
+        "files": {
+            "allow": _parse_list_env(
+                _read_sandbox_env("FILES_ALLOW"),
+                env_name="JIUWENCLAW_SANDBOX_FILES_ALLOW",
+            ),
+            "deny": _parse_list_env(
+                _read_sandbox_env("FILES_DENY"),
+                env_name="JIUWENCLAW_SANDBOX_FILES_DENY",
+            ),
+        },
+        "idle_ttl_seconds": _read_sandbox_env("IDLE_TTL_SECONDS"),
+        "idle_check_interval": _read_sandbox_env("IDLE_CHECK_INTERVAL"),
+    }
+    return _ensure_sandbox_runtime_shape(raw)

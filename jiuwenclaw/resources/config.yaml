@@ -31,7 +31,7 @@ logging:
   console_enabled: true   # 控制台日志开关（true：启用终端输出；false：关闭终端输出）
   file_enabled: true      # 文件日志开关（true：启用文件输出含 permissions.log；false：关闭文件输出）
 
-  
+
   # JSON 格式详细配置（⚠️ 配置项已添加，功能待实现）
   json:
     # 时间戳格式
@@ -456,6 +456,21 @@ task_memory:
   retrieval_algo: ACE
   summary_algo: ACE
 
+# ========== Redis（分布式 Gateway：状态存储 / Pub/Sub / Leader；standalone 下不连接）==========
+# 通过 gateway.deployment_mode 控制：standalone（不连接）/ distributed（连接 Redis）
+redis:
+  host: ${REDIS_HOST:-localhost}
+  port: ${REDIS_PORT:-6379}
+  password: ${REDIS_PASSWORD:-}
+  db: ${REDIS_DB:-0}
+  # Session 数据过期时间（秒）
+  session_ttl: ${REDIS_SESSION_TTL:-604800}
+  key_prefix: ${REDIS_KEY_PREFIX:-jiuwenclaw:}
+  pool_size: ${REDIS_POOL_SIZE:-10}
+  connect_timeout: ${REDIS_CONNECT_TIMEOUT:-5}
+  operation_timeout: ${REDIS_OPERATION_TIMEOUT:-10}
+  health_check_interval: ${REDIS_HEALTH_CHECK_INTERVAL:-30}
+
 gateway:
   # AgentServer client mode.
   # websocket: default ws client
@@ -475,6 +490,11 @@ gateway:
   # remote：Gateway 在本地维护最多 10 条会话索引，适用于 Gateway 与 Agent 分机部署时。
   # 分机部署时请设置为 remote，否则 session.list 将读取网关本机目录（通常为空）。
   web_session_storage: local
+
+  # ========== 分布式部署（standalone：默认，行为与仅单机一致；distributed：连接 Redis）==========
+  deployment_mode: ${DEPLOYMENT_MODE:-standalone}
+  # 分布式下用于实例标识；空则启动时自动生成（见 gateway-reliability-enhancement-design §3.2）
+  instance_id: ${GATEWAY_INSTANCE_ID:-}
 
 heartbeat:
   # 心跳间隔（秒），默认 60
@@ -798,11 +818,22 @@ extensions:
    # 扩展包搜索目录（字符串），用 ';' 分割多个目录：
    # EXTENSION_DIRS="E:/a;D:/b"; 默认会加载仓库根目录 extensions
    extension_dirs: ${EXTENSION_DIRS:-extensions}
-   # 外置扩展 agent_client REST 监听（与 docker/extensions/agent_client 配套）；本地开发可通过环境变量覆盖
+   # 外置扩展 agent_client REST 监听（实现位于 packages/jiuwenclaw-ee/gateway/extensions/agent_client/agent_client_rest）；本地开发可通过环境变量覆盖
    agent_client_rest:
      enabled: ${AGENT_CLIENT_REST_ENABLED:-true}
      host: ${AGENT_CLIENT_REST_HOST:-127.0.0.1}
      port: ${AGENT_CLIENT_REST_PORT:-18080}
+     # Agent Client REST 持久化库
+     database:
+       db_type: ${AGENT_CLIENT_DB_TYPE:-sqlite}
+       sqlite_path: ${AGENT_CLIENT_SQLITE_PATH:-}
+       # 关系型库连接参数（mysql / postgresql 等）
+       db:
+         host: ${DB_HOST:-localhost}
+         port: ${DB_PORT:-3306}
+         user: ${DB_USER:-root}
+         password: ${DB_PASSWORD:-root}
+         db_name: ${DB_NAME:-openjiuwen_gateway}
 
 team:
   team_name: jiuwen_team
@@ -860,3 +891,51 @@ enable_petal_web_search: true
 
 # DeepResearch 工具：默认开启
 enable_deepresearch: true
+
+# ========== Sandbox（jiuwenbox 沙箱集成）==========
+#
+# 该段控制 agent-server 在构建 SysOperationCard 时是否走沙箱模式连接 jiuwenbox。
+#
+# **本版本: sandbox 配置已整段切换到环境变量驱动**。 ``config.yaml::sandbox``
+# 段保留只是为了让旧配置文件不报错; agent-server 在读取 sandbox 时**完全不
+# 看本段**, 一切以 ``JIUWENCLAW_SANDBOX_*`` 环境变量为准 (见 ``jiuwenclaw/
+# config.py`` 顶部的 env 列表)。 K8s / 企业部署直接通过 ConfigMap / Deployment
+# env 注入即可。
+#
+# 重要约束（本版本）:
+# - 当前 agent-server 不负责拉起 jiuwenbox 子进程; jiuwenbox 由外部启动并自管
+#   policy（典型方式: 容器化部署见 claw2b/jiuwenbox/docker/Dockerfile, 或手动
+#   ``python -m jiuwenbox.server.launcher`` 监听 ``url`` 所示端口）。
+# - ``JIUWENCLAW_SANDBOX_STARTUP_MODE`` 仅接受 ``external`` (默认值)。其语义是
+#   "使用 ``JIUWENCLAW_SANDBOX_URL`` 端点连接由外部启动的 jiuwenbox";
+#   ``internal`` (agent-server 自动 spawn jiuwenbox) 不在本工程实现, 任何其它
+#   取值会让 ``get_sandbox_endpoint`` 抛 ValueError 并阻止 sandbox 模式生效。
+# - ``JIUWENCLAW_SANDBOX_PRESERVE_FILE_SHARING_MODE`` 仅接受 ``mount`` (固有
+#   agent 文件 / daily_memory / agent_skills 通过 bind_mount 直接挂载, 沙箱
+#   内外实时同步)。
+# - ``JIUWENCLAW_SANDBOX_ENABLED`` 必须为 true 且 ``URL`` / ``TYPE`` 均非空时,
+#   才会构造沙箱 SysOperationCard; 否则回落到本地模式 (与不配置 sandbox 等价)。
+#
+# 下方占位 yaml 仅为旧用户视觉对照, 不会被读取 — 真正的取值请去 env 改。
+sandbox:
+  # [DEPRECATED — env: JIUWENCLAW_SANDBOX_ENABLED]
+  enabled: false
+  # [DEPRECATED — env: JIUWENCLAW_SANDBOX_URL]
+  url: http://127.0.0.1:8321
+  # [DEPRECATED — env: JIUWENCLAW_SANDBOX_TYPE]
+  type: jiuwenbox
+  # [DEPRECATED — env: JIUWENCLAW_SANDBOX_STARTUP_MODE; 仅支持 external]
+  startup_mode: external
+  # [DEPRECATED — env: JIUWENCLAW_SANDBOX_PRESERVE_FILE_SHARING_MODE]
+  preserve_file_sharing_mode: mount
+  # [DEPRECATED — env: JIUWENCLAW_SANDBOX_EXCLUDED_COMMANDS]
+  excluded_commands: []
+  # 文件读写策略（host 上的路径会被 bind 进沙箱）:
+  # - [DEPRECATED — env: JIUWENCLAW_SANDBOX_FILES_ALLOW] 每项为 path 字符串或
+  #   {path, permissions} dict; 允许沙箱 rw 访问。
+  # - [DEPRECATED — env: JIUWENCLAW_SANDBOX_FILES_DENY] 同上结构; 强制 ro,
+  #   防止沙箱内 agent 写改（读不被屏蔽）。
+  # jiuwenclaw 自己的 config.yaml 会自动作为 ro intrinsic 资源挂载, 无需显式列出。
+  files:
+    allow: []
+    deny: []

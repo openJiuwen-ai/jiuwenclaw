@@ -1,0 +1,182 @@
+{
+  "common": {
+    "ok": "OK",
+    "cancel": "Cancel",
+    "save": "Save",
+    "delete": "Delete",
+    "edit": "Edit",
+    "create": "Create",
+    "search": "Search",
+    "refresh": "Refresh",
+    "loading": "Loading…",
+    "empty": "No data",
+    "yes": "Yes",
+    "no": "No",
+    "enabled": "Enabled",
+    "disabled": "Disabled",
+    "detail": "Detail",
+    "view": "View",
+    "actions": "Actions",
+    "all": "All",
+    "confirm": "Confirm",
+    "submit": "Submit"
+  },
+  "brand": {
+    "title": "JiuwenClaw",
+    "sub": "Claw Manager"
+  },
+  "nav": {
+    "platform": "Platform",
+    "overview": "Overview",
+    "topology": "Topology",
+    "config": "Global Config",
+    "modelTemplates": "Model Templates",
+    "extensionTemplates": "Extension Templates",
+    "policies": "Instance Policies"
+  },
+  "connection": {
+    "ok": "Connected",
+    "fail": "Disconnected",
+    "checking": "Checking"
+  },
+  "overview": {
+    "title": "Overview",
+    "subtitle": "Health and topology summary of the management plane",
+    "managerHealth": "Manager Health",
+    "managerWs": "Manager WebSocket",
+    "totalInstances": "Total Instances",
+    "activeServices": "Online Services",
+    "registeredOnWs": "Instances on WS",
+    "wsListening": "Listening at",
+    "wsPid": "Manager PID",
+    "noInstances": "No instance yet. Create one in Topology."
+  },
+  "topology": {
+    "title": "Service Topology",
+    "subtitle": "View each Gateway group and the AgentServers it manages",
+    "createInstance": "Create Instance",
+    "provisionLocal": "Provision Locally",
+    "instanceStatus": "Status",
+    "namespace": "Namespace",
+    "group": "Group",
+    "space": "Space",
+    "gateway": "Gateway",
+    "agentServer": "AgentServer",
+    "otherService": "Other",
+    "viewDetail": "Detail",
+    "managePolicies": "Policies",
+    "noServices": "No Gateway / AgentServer yet (awaiting heartbeats)",
+    "lastHeartbeat": "Last heartbeat",
+    "endpoint": "Endpoint",
+    "version": "Version",
+    "deleteConfirm": "Delete this instance? All its service_instance rows will be removed.",
+    "filterStatus": "Filter by status"
+  },
+  "instanceForm": {
+    "name": "Instance Name",
+    "description": "Description",
+    "k8sMasterHost": "K8S Master Host",
+    "k8sAuthType": "K8S Auth Type",
+    "k8sNamespace": "K8S Namespace",
+    "k8sAuthConfig": "K8S Auth Config (JSON)",
+    "resourceQuota": "Resource Quota (JSON, optional)",
+    "managementApiBase": "Management API Base",
+    "creatorId": "Creator ID",
+    "groupId": "Group ID",
+    "spaceId": "Space ID",
+    "provisionLocalTitle": "Provision Gateway + AgentServer locally",
+    "provisionLocalDesc": "Requires MANAGER_ALLOW_LOCAL_PROVISION=true"
+  },
+  "instanceDetail": {
+    "title": "Instance Detail",
+    "services": "Managed Services",
+    "extraData": "Extra Data (instance_info.data)",
+    "editData": "Edit extra data",
+    "back": "Back to Topology"
+  },
+  "modelTemplate": {
+    "title": "Model Templates",
+    "subtitle": "Reusable model templates referenced by instance policies",
+    "new": "New Template",
+    "edit": "Edit Template",
+    "templateName": "Template Name",
+    "modelType": "Model Type",
+    "modelTypeHint": "e.g. default / video / audio / vision (comma-separated)",
+    "modelTags": "Tags",
+    "modelTagsHint": "Comma-separated, e.g. fast,zh,qa",
+    "apiBase": "API Base",
+    "apiKey": "API Key",
+    "modelId": "Model ID",
+    "modelProvider": "Provider",
+    "parameters": "Parameters (JSON)",
+    "timeout": "Timeout (s)",
+    "retryCount": "Retries",
+    "enableStreaming": "Streaming",
+    "enableFunctionCalling": "Function Calling",
+    "verifySsl": "Verify SSL",
+    "filterType": "Filter by type",
+    "deleteConfirm": "Delete this model template? It may be referenced by instance policies."
+  },
+  "extensionTemplate": {
+    "title": "Extension Templates",
+    "subtitle": "Hook / extension config templates for Gateway & AgentServer",
+    "new": "New Template",
+    "edit": "Edit Template",
+    "component": "Component",
+    "componentHint": "gateway / agent_server",
+    "hookType": "Hook Type",
+    "hookTypeHint": "pre_request / post_request / error / schedule",
+    "hookConfig": "Hook Config (JSON)",
+    "customConfig": "Custom Config (JSON, optional)",
+    "deleteConfirm": "Delete this extension template?"
+  },
+  "policies": {
+    "title": "Instance Policies",
+    "subtitle": "Per-instance Default Mapping / Global / Service / Agent policies",
+    "selectInstance": "Select instance",
+    "noInstanceHint": "No instance yet — create one under \"Topology\" first",
+    "tabs": {
+      "mapping": "Default Mapping",
+      "global": "Global",
+      "service": "Service",
+      "agent": "Agent"
+    },
+    "mapping": {
+      "new": "New Mapping",
+      "templateType": "Template Type",
+      "templateTypeHint": "default_model / video_model / audio_model / vision_model / skill_whitelist / channel / service_resource",
+      "templateId": "Template ID",
+      "userId": "User ID",
+      "groupId": "Group ID",
+      "priority": "Priority"
+    },
+    "global": {
+      "new": "New Global Policy",
+      "priority": "Priority",
+      "templateRef": "Template Ref (JSON)",
+      "templateRefHint": "slot → template_id or ${user::…}/${group::…} or <template_id>"
+    },
+    "service": {
+      "new": "New Service Policy",
+      "serviceId": "Service ID",
+      "matchExpr": "Match Expression"
+    },
+    "agent": {
+      "new": "New Agent Policy",
+      "agentId": "Agent ID",
+      "servicePolicyId": "Service Policy ID"
+    },
+    "deleteConfirm": "Delete this policy? Effective for Gateway immediately."
+  },
+  "errors": {
+    "loadFailed": "Load failed: {{detail}}",
+    "saveFailed": "Save failed: {{detail}}",
+    "deleteFailed": "Delete failed: {{detail}}",
+    "invalidJson": "Invalid JSON: {{detail}}"
+  },
+  "success": {
+    "saved": "Saved",
+    "deleted": "Deleted",
+    "created": "Created"
+  }
+}

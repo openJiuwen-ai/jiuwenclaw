@@ -1,15 +1,21 @@
 from __future__ import annotations
 
 import hashlib
-import json
 import secrets
 import time
 from dataclasses import dataclass
 from enum import Enum
-from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING
 
-from jiuwenclaw.utils import get_checkpoint_dir, logger
+from jiuwenclaw.extensions.redis.redis_runtime import get_declared_deployment_mode
+from jiuwenclaw.gateway.session_storage import (
+    LocalSessionStorage,
+    RedisSessionStorage,
+    SessionStorage,
+)
+
+if TYPE_CHECKING:
+    pass
 
 
 class SessionMapScope(str, Enum):
@@ -29,9 +35,11 @@ def load_session_map_scope() -> SessionMapScope:
         raw = str((get_config().get("gateway") or {}).get("session_map_scope") or default.value).strip().lower()
         return SessionMapScope(raw)
     except ValueError:
+        from jiuwenclaw.utils import logger
         logger.warning("Unknown gateway.session_map_scope %r, using %s", raw, default.value)
         return default
     except Exception as exc:  # noqa: BLE001
+        from jiuwenclaw.utils import logger
         logger.warning("SessionMap scope load failed, using %s: %s", default.value, exc)
         return default
 
@@ -134,36 +142,12 @@ class SessionMap:
 
     def __init__(self, *, scope: SessionMapScope | None = None) -> None:
         self._scope = scope if scope is not None else load_session_map_scope()
-        self._store_path: Path = get_checkpoint_dir() / "session_map.json"
-        self._sessions: dict[str, Session] = {}
-        self._load()
+        self._storage: SessionStorage
 
-    def _load(self) -> None:
-        try:
-            if not self._store_path.exists():
-                return
-            with open(self._store_path, "r", encoding="utf-8") as f:
-                data = json.load(f)
-            if not isinstance(data, dict):
-                return
-            loaded: dict[str, Session] = {}
-            for k, v in data.items():
-                key = str(k)
-                sess = _session_from_stored_value(v)
-                if sess:
-                    loaded[key] = sess
-            self._sessions = loaded
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("SessionMap load failed: %s", exc)
-
-    def _save(self) -> None:
-        try:
-            self._store_path.parent.mkdir(parents=True, exist_ok=True)
-            out = {k: _session_to_json_dict(sess) for k, sess in self._sessions.items()}
-            with open(self._store_path, "w", encoding="utf-8") as f:
-                json.dump(out, f, ensure_ascii=False, indent=2)
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("SessionMap save failed: %s", exc)
+        if get_declared_deployment_mode() == "standalone":
+            self._storage = LocalSessionStorage()
+        else:
+            self._storage = RedisSessionStorage()
 
     def get_identity_key(
         self,
@@ -187,13 +171,12 @@ class SessionMap:
         rotate: bool = False,
     ) -> Session:
         key = self.get_identity_key(provider, chat_id, bot_id, user_id)
-        existing = self._sessions.get(key)
+        existing = self._storage.get(key)
         if existing and not rotate:
             return existing
 
         svc, aid = invoke_ids_from_identity(chat_id, bot_id, user_id, self._scope)
         new_sid = _make_session_id(self._scope, provider, chat_id, bot_id, user_id)
         sess = Session(session_id=new_sid, service_id=svc, agent_id=aid)
-        self._sessions[key] = sess
-        self._save()
+        self._storage.set(key, sess)
         return sess

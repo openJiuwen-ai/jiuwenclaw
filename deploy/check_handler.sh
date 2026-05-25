@@ -14,7 +14,7 @@ check_cmds() {
         check_cmd helm
     fi
 
-    for cmd in docker python3 jq yq mount.nfs
+    for cmd in docker python3 jq yq mount.nfs base64
     do
         check_cmd ${cmd}
     done
@@ -109,7 +109,7 @@ check_if_yr_claw_up() {
 }
 
 check_if_nfs_up() {
-    # No external NFS server
+    # Check if external NFS server
     if [ -n "${DEPLOY_VARS["NFS_SERVER_ADDR"]:-}" ]; then
         info "Use external NFS server"
         return
@@ -122,6 +122,70 @@ check_if_nfs_up() {
 
     info "Use built-in NFS server"
     DEPLOY_VARS["NFS_SERVER_ADDR"]=${DEPLOY_VARS["MASTER_NODE_IP"]}
+}
+
+check_if_rabbitmq_up() {
+    local name="${DEPLOY_VARS["RABBITMQ_NAME"]}"
+    local user=${DEPLOY_VARS["RABBITMQ_USER"]}
+    local password=${DEPLOY_VARS["RABBITMQ_PASSWORD"]}
+    local url=""
+    local encoded_password=$(urlencode "$password")
+
+    # Check if external RABBITMQ server
+    if [ -n "${DEPLOY_VARS["RABBITMQ_URL"]:-}" ]; then
+        info "Use external RABBITMQ server"
+        url="${DEPLOY_VARS["RABBITMQ_URL"]}"
+        DEPLOY_VARS["MANAGER_RABBITMQ_URL"]="amqp://${user}:${encoded_password}@${url}"
+        return
+    fi
+
+    # No Build-In RABBITMQ server
+    if ! check_k8s_resource_exists "statefulset" "${name}"; then
+        error "RABBITMQ is not deployed. Please deploy it first with: ./$(basename "$0") up rabbitmq"
+    fi
+
+    info "Use built-in RABBITMQ server"
+    url="${name}-headless.default:5672"
+    DEPLOY_VARS["MANAGER_RABBITMQ_URL"]="amqp://${user}:${encoded_password}@${url}"
+}
+
+check_if_mysql_up() {
+    local name="${DEPLOY_VARS["MYSQL_NAME"]}"
+    local user=${DEPLOY_VARS["RABBITMQ_USER"]}
+    local password=${DEPLOY_VARS["RABBITMQ_PASSWORD"]}
+    local url=""
+    local encoded_password=$(urlencode "$password")
+
+    # Check if external MySQL server
+    if [ -n "${DEPLOY_VARS["MYSQL_HOST"]:-}" ]; then
+        info "Use external MySQL server"
+        DEPLOY_VARS["MANAGER_DB_HOST"]=${DEPLOY_VARS["MYSQL_HOST"]}
+        DEPLOY_VARS["MANAGER_DB_PORT"]=${DEPLOY_VARS["MYSQL_PORT"]}
+        DEPLOY_VARS["MANAGER_DB_USER"]="root"
+        DEPLOY_VARS["MANAGER_DB_PASSWORD"]=${DEPLOY_VARS["MYSQL_ROOT_PASSWORD"]}
+        DEPLOY_VARS["GATEWAY_DB_HOST"]=${DEPLOY_VARS["MYSQL_HOST"]}
+        DEPLOY_VARS["GATEWAY_DB_PORT"]=${DEPLOY_VARS["MYSQL_PORT"]}
+        DEPLOY_VARS["GATEWAY_DB_USER"]="root"
+        DEPLOY_VARS["GATEWAY_DB_PASSWORD"]=${DEPLOY_VARS["MYSQL_ROOT_PASSWORD"]}
+    fi
+
+    # No Build-In DB server
+    if ! check_k8s_resource_exists "statefulset" "${name}"; then
+        DEPLOY_VARS["MANAGER_DB_TYPE"]="sqlite"
+        DEPLOY_VARS["GATEWAY_DB_TYPE"]="sqlite"
+        warning "DB is not deployed. Use build-in SQLite"
+        return
+    fi
+
+    info "Use built-in DB server"
+    DEPLOY_VARS["MANAGER_DB_HOST"]="${name}-headless.default"
+    DEPLOY_VARS["MANAGER_DB_PORT"]="3306"
+    DEPLOY_VARS["MANAGER_DB_USER"]="root"
+    DEPLOY_VARS["MANAGER_DB_PASSWORD"]=${DEPLOY_VARS["MYSQL_ROOT_PASSWORD"]}
+    DEPLOY_VARS["GATEWAY_DB_HOST"]="${name}-headless.default"
+    DEPLOY_VARS["GATEWAY_DB_PORT"]="3306"
+    DEPLOY_VARS["GATEWAY_DB_USER"]="root"
+    DEPLOY_VARS["GATEWAY_DB_PASSWORD"]=${DEPLOY_VARS["MYSQL_ROOT_PASSWORD"]}
 }
 
 check_vars() {
@@ -160,10 +224,94 @@ check_yr_claw_up_dependency(){
 
 check_gateway_up_dependency(){
     check_if_nfs_up
+    check_if_mysql_up
 }
 
 check_web_up_dependency(){
     if ! check_k8s_resource_exists "deployment" "${DEPLOY_VARS["GATEWAY_NAME"]}" "${DEPLOY_VARS["NAMESPACE"]}"; then
         error "GATEWAY is not deployed. Please deploy it first with: ./$(basename "$0") up gateway"
     fi
+}
+
+check_rabbitmq_up_dependency(){
+    local rabbit_path=${DEPLOY_VARS["RABBITMQ_PATH"]}
+    local nfs_dname=${DEPLOY_VARS["NFS_NAME"]}
+
+    check_if_nfs_up
+
+    info "Preparing RabbitMQ data directory: ${rabbit_path}"
+    local nfs_pod=$(kubectl get pods -n default -l app=${nfs_dname} -o jsonpath='{.items[0].metadata.name}')
+
+    info "Executing: kubectl exec ${nfs_pod} -- sh -c \"mkdir -p ${rabbit_path}\""
+    kubectl exec ${nfs_pod} -- sh -c "mkdir -p ${rabbit_path}"
+    success "RabbitMQ directory created successfully in NFS Pod!"
+}
+
+check_mysql_up_dependency(){
+    local mysql_path=${DEPLOY_VARS["MYSQL_PATH"]}
+    local nfs_dname=${DEPLOY_VARS["NFS_NAME"]}
+
+    check_if_nfs_up
+
+    info "Preparing MySQL data directory: ${mysql_path}"
+    local nfs_pod=$(kubectl get pods -n default -l app=${nfs_dname} -o jsonpath='{.items[0].metadata.name}')
+
+    info "Executing: kubectl exec ${nfs_pod} -- sh -c \"mkdir -p ${mysql_path}\""
+    kubectl exec ${nfs_pod} -- sh -c "mkdir -p ${mysql_path}"
+    success "MySQL directory created successfully in NFS Pod!"
+}
+
+check_if_postgresql_up() {
+    local name="${DEPLOY_VARS["POSTGRES_NAME"]}"
+
+    # Check if external PostgreSQL server
+    if [ -n "${DEPLOY_VARS["POSTGRES_HOST"]:-}" ]; then
+        info "Use external PostgreSQL server"
+        DEPLOY_VARS["MANAGER_DB_HOST"]=${DEPLOY_VARS["POSTGRES_HOST"]}
+        DEPLOY_VARS["MANAGER_DB_PORT"]=${DEPLOY_VARS["POSTGRES_PORT"]}
+        DEPLOY_VARS["MANAGER_DB_USER"]="postgres"
+        DEPLOY_VARS["MANAGER_DB_PASSWORD"]=${DEPLOY_VARS["POSTGRES_PASSWORD"]}
+        DEPLOY_VARS["GATEWAY_DB_HOST"]=${DEPLOY_VARS["POSTGRES_HOST"]}
+        DEPLOY_VARS["GATEWAY_DB_PORT"]=${DEPLOY_VARS["POSTGRES_PORT"]}
+        DEPLOY_VARS["GATEWAY_DB_USER"]="postgres"
+        DEPLOY_VARS["GATEWAY_DB_PASSWORD"]=${DEPLOY_VARS["POSTGRES_PASSWORD"]}
+        return
+    fi
+
+    # No Build-In DB server
+    if ! check_k8s_resource_exists "statefulset" "${name}"; then
+        DEPLOY_VARS["MANAGER_DB_TYPE"]="sqlite"
+        DEPLOY_VARS["GATEWAY_DB_TYPE"]="sqlite"
+        warning "DB is not deployed. Use build-in SQLite"
+        return
+    fi
+
+    info "Use built-in PostgreSQL server"
+    DEPLOY_VARS["MANAGER_DB_HOST"]="${name}-headless.default"
+    DEPLOY_VARS["MANAGER_DB_PORT"]="5432"
+    DEPLOY_VARS["MANAGER_DB_USER"]="postgres"
+    DEPLOY_VARS["MANAGER_DB_PASSWORD"]=${DEPLOY_VARS["POSTGRES_PASSWORD"]}
+    DEPLOY_VARS["GATEWAY_DB_HOST"]="${name}-headless.default"
+    DEPLOY_VARS["GATEWAY_DB_PORT"]="5432"
+    DEPLOY_VARS["GATEWAY_DB_USER"]="postgres"
+    DEPLOY_VARS["GATEWAY_DB_PASSWORD"]=${DEPLOY_VARS["POSTGRES_PASSWORD"]}
+}
+
+check_postgresql_up_dependency(){
+    local pg_path=${DEPLOY_VARS["POSTGRES_PATH"]}
+    local nfs_dname=${DEPLOY_VARS["NFS_NAME"]}
+
+    check_if_nfs_up
+
+    info "Preparing PostgreSQL data directory: ${pg_path}"
+    local nfs_pod=$(kubectl get pods -n default -l app=${nfs_dname} -o jsonpath='{.items[0].metadata.name}')
+
+    info "Executing: kubectl exec ${nfs_pod} -- sh -c \"mkdir -p ${pg_path}\""
+    kubectl exec ${nfs_pod} -- sh -c "mkdir -p ${pg_path}"
+    success "PostgreSQL directory created successfully in NFS Pod!"
+}
+
+check_manager_up_dependency(){
+    check_if_rabbitmq_up
+    check_if_mysql_up
 }

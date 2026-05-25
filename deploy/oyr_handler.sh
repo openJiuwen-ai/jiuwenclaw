@@ -198,7 +198,7 @@ register_oyr_func() {
     success "Serverless function created successfully! function_id: ${DEPLOY_VARS["FUNCTION_ID"]}"
 }
 
-deploy_oyr() {
+deploy_yr_claw() {
     install_pv_pvc
     install_oyr
     create_func_pool
@@ -215,7 +215,7 @@ wait_oyr_terminated() {
     done
 }
 
-uninstall_oyr() {
+uninstall_yr_claw() {
     local namespace="${DEPLOY_VARS["NAMESPACE"]}"
 
     info "Starting to uninstall openyuanrong..."

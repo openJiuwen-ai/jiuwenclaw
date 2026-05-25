@@ -11,7 +11,7 @@ from zoneinfo import ZoneInfo
 
 from jiuwenclaw.gateway.agent_client import AgentServerClient
 from jiuwenclaw.gateway.cron.models import CronJob, CronRunState
-from jiuwenclaw.gateway.cron.store import CronJobStore
+from jiuwenclaw.gateway.cron.store_base import CronJobStoreBackend
 from jiuwenclaw.gateway.message_handler import MessageHandler
 from jiuwenclaw.e2a.gateway_normalize import e2a_from_agent_fields
 from jiuwenclaw.schema.message import EventType, Message, ReqMethod
@@ -76,7 +76,7 @@ class CronSchedulerService:
     def __init__(
         self,
         *,
-        store: CronJobStore,
+        store: CronJobStoreBackend,
         agent_client: AgentServerClient,
         message_handler: MessageHandler,
         now_fn: Callable[[], float] = _now_utc_ts,
@@ -95,28 +95,27 @@ class CronSchedulerService:
         self._seq = 0
         self._runs: dict[str, CronRunState] = {}  # run_id -> state
         self._run_tasks: dict[str, asyncio.Task] = {}
-        self._last_store_mtime: float = 0.0
+        self._last_store_revision: int = 0
         self._store_poll_interval: float = 5.0  # seconds
 
-    def _get_store_mtime(self) -> float:
-        """Return mtime of the cron_jobs.json file, or 0.0 if unavailable."""
+    async def _get_store_revision(self) -> int:
         try:
-            return self._store.path.stat().st_mtime
-        except OSError:
-            return 0.0
+            return await self._store.get_revision()
+        except Exception:
+            return 0
 
-    def _sync_store_mtime(self) -> None:
-        """Snapshot current store file mtime to avoid redundant reloads."""
-        self._last_store_mtime = self._get_store_mtime()
+    async def _sync_store_revision(self) -> None:
+        """Snapshot current store revision to avoid redundant reloads."""
+        self._last_store_revision = await self._get_store_revision()
 
     async def _check_store_changed(self) -> bool:
-        """If cron_jobs.json was modified externally, reload and return True."""
-        mtime = self._get_store_mtime()
-        if mtime and mtime != self._last_store_mtime and self._last_store_mtime != 0.0:
+        """If store was modified externally, reload and return True."""
+        rev = await self._get_store_revision()
+        if rev and rev != self._last_store_revision and self._last_store_revision != 0:
             logger.info(
-                "[Cron] store file changed (mtime %.3f -> %.3f), reloading",
-                self._last_store_mtime,
-                mtime,
+                "[Cron] store changed (revision %s -> %s), reloading",
+                self._last_store_revision,
+                rev,
             )
             await self.reload()
             return True
@@ -189,7 +188,7 @@ class CronSchedulerService:
             self._schedule_event(wake_dt, "wake", job.id, run_id)
             self._schedule_event(push_dt, "push", job.id, run_id)
 
-        self._sync_store_mtime()
+        await self._sync_store_revision()
         self._reload_event.set()
 
     async def trigger_run_now(self, job_id: str) -> str:

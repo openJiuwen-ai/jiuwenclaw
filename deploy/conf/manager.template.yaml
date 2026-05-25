@@ -1,0 +1,84 @@
+# Service：提供稳定 DNS 域名, 供集群内部访问
+apiVersion: v1
+kind: Service
+metadata:
+  name: <<MANAGER_NAME>>
+  namespace: <<NAMESPACE>>
+spec:
+  selector:
+    app: <<MANAGER_NAME>>
+  ports:
+    - name: rest
+      port: <<MANAGER_REST_PORT>>
+      targetPort: <<MANAGER_REST_PORT>>
+    - name: websocket
+      port: <<MANAGER_WS_PORT>>
+      targetPort: <<MANAGER_WS_PORT>>
+  type: ClusterIP                             # 集群内部访问，不需要外网
+
+---
+# NodePort Service：供集群外部连接
+apiVersion: v1
+kind: Service
+metadata:
+  name: <<MANAGER_NAME>>-nodeport
+  namespace: <<NAMESPACE>>
+spec:
+  type: NodePort
+  ports:
+    - name: rest
+      port: <<MANAGER_REST_PORT>>       # 集群内部端口
+      targetPort: <<MANAGER_REST_PORT>> # 容器端口
+      nodePort: <<MANAGER_NODE_PORT>>   # 外部访问端口（30000-32767）
+  selector:
+    app: <<MANAGER_NAME>>
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: <<MANAGER_NAME>>
+  namespace: <<NAMESPACE>>
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: <<MANAGER_NAME>>
+  template:
+    metadata:
+      labels:
+        app: <<MANAGER_NAME>>
+    spec:
+      containers:
+      - name: manager
+        image: <<MANAGER_IMAGE>>
+        ports:
+        - name: rest
+          containerPort: <<MANAGER_REST_PORT>>
+        - name: websocket
+          containerPort: <<MANAGER_WS_PORT>>
+        env:
+        - name: MANAGER_RABBITMQ_URL
+          value: "<<MANAGER_RABBITMQ_URL>>"
+        - name: MANAGER_REST_PORT
+          value: "<<MANAGER_REST_PORT>>"
+        - name: MANAGER_DB_TYPE
+          value: "<<MANAGER_DB_TYPE>>"
+        - name: MANAGER_SQLITE_PATH
+          value: "<<MANAGER_SQLITE_PATH>>"
+        - name: MANAGER_DB_HOST
+          value: "<<MANAGER_DB_HOST>>"
+        - name: MANAGER_DB_PORT
+          value: "<<MANAGER_DB_PORT>>"
+        - name: MANAGER_DB_USER
+          value: "root"
+        - name: MANAGER_DB_PASSWORD
+          value: "<<MANAGER_DB_PASSWORD>>"
+        - name: MANAGER_DB_NAME
+          value: "<<MANAGER_DB_NAME>>"
+        - name: MANAGER_WS_ENABLED
+          value: "true"
+        - name: MANAGER_WS_HOST
+          value: "0.0.0.0"
+        - name: MANAGER_WS_PORT
+          value: "<<MANAGER_WS_PORT>>"

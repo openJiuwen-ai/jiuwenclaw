@@ -8,6 +8,17 @@ models:
       model_name: ${MODEL_NAME}
       client_provider: ${MODEL_PROVIDER}
 
+redis:
+  host: ${REDIS_HOST:-localhost}
+  port: ${REDIS_PORT:-6379}
+  password: ${REDIS_PASSWORD:-}
+  db: ${REDIS_DB:-0}
+  key_prefix: ${REDIS_KEY_PREFIX:-jiuwenclaw:}
+  pool_size: ${REDIS_POOL_SIZE:-10}
+  connect_timeout: ${REDIS_CONNECT_TIMEOUT:-5}
+  operation_timeout: ${REDIS_OPERATION_TIMEOUT:-10}
+  health_check_interval: ${REDIS_HEALTH_CHECK_INTERVAL:-30}
+
 gateway:
   agent_client:
     type: yuanrong
@@ -16,6 +27,8 @@ gateway:
     concurrency: ${YR_FRONTEND_CONCURRENCY:-1}
     invoke_timeout_s: ${YR_INVOKE_TIMEOUT_S:-60}
   session_map_scope: per_chat_bot_user
+  deployment_mode: ${DEPLOYMENT_MODE:-standalone}
+  instance_id: ${GATEWAY_INSTANCE_ID:-}
 
 channels:
   feishu_enterprise:
@@ -28,9 +41,19 @@ channels:
       allow_from: []
 
 extensions:
-  extension_dirs: ${EXTENSION_DIRS:-/app/jiuwenclaw/extensions}
-  # docker/extensions/agent_client REST（FastAPI）；由环境变量覆盖，未设置则用默认值
+  extension_dirs: ${EXTENSION_DIRS:-/app/jiuwenclaw/packages/jiuwenclaw-ee/gateway/extensions}
   agent_client_rest:
     enabled: ${AGENT_CLIENT_REST_ENABLED:-true}
     host: ${AGENT_CLIENT_REST_HOST:-0.0.0.0}
     port: ${AGENT_CLIENT_REST_PORT:-18080}
+    # Agent Client REST 持久化库
+    database:
+      db_type: ${AGENT_CLIENT_DB_TYPE:-sqlite}
+      sqlite_path: ${AGENT_CLIENT_SQLITE_PATH:-}
+      # 关系型库连接参数（mysql / postgresql 等）
+      db:
+        host: ${DB_HOST:-localhost}
+        port: ${DB_PORT:-3306}
+        user: ${DB_USER:-root}
+        password: ${DB_PASSWORD:-root}
+        db_name: ${DB_NAME:-openjiuwen_gateway}

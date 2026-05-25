@@ -17,6 +17,7 @@ import asyncio
 import json
 import logging
 import os
+import sys
 import inspect
 import time
 import uuid as uuid_module
@@ -842,6 +843,7 @@ async def _run(
     from jiuwenclaw.gateway.cron import CronController, CronJobStore, CronSchedulerService
     from jiuwenclaw.gateway.heartbeat import GatewayHeartbeatService, HeartbeatConfig
     from jiuwenclaw.gateway.message_handler import MessageHandler
+    from jiuwenclaw.extensions.redis import init_gateway_redis_from_config, shutdown_gateway_redis
     from jiuwenclaw.app_web_handlers import (
         WebHandlersBindParams,
         _DummyBus,
@@ -906,15 +908,6 @@ async def _run(
     message_handler.set_inbound_pipeline(im_inbound)
     message_handler.set_outbound_pipeline(im_outbound)
 
-    cron_store = CronJobStore(path=get_user_workspace_dir() / "gateway" / "cron_jobs.json")
-    cron_scheduler = CronSchedulerService(
-        store=cron_store,
-        agent_client=client,
-        message_handler=message_handler,
-    )
-    cron_controller = CronController.get_instance(store=cron_store, scheduler=cron_scheduler)
-    message_handler.set_cron_controller(cron_controller)
-
     full_cfg: dict[str, Any] = {}
     heartbeat_cfg: dict | None = None
     channels_cfg: dict | None = None
@@ -929,6 +922,19 @@ async def _run(
         heartbeat_cfg = None
         channels_cfg = None
         sync_config_cfg = None
+
+    await init_gateway_redis_from_config(dict(full_cfg or {}))
+
+    from jiuwenclaw.gateway.cron.factory import create_gateway_cron_store
+
+    cron_store = await create_gateway_cron_store()
+    cron_scheduler = CronSchedulerService(
+        store=cron_store,
+        agent_client=client,
+        message_handler=message_handler,
+    )
+    cron_controller = CronController.get_instance(store=cron_store, scheduler=cron_scheduler)
+    message_handler.set_cron_controller(cron_controller)
 
     # 配置解密后存储在内存中
     env_dict = {}
@@ -979,7 +985,14 @@ async def _run(
         logger.info("[App] Heartbeat service disabled by config")
 
     initial_channels_conf: dict = channels_cfg if isinstance(channels_cfg, dict) else {}
-    channel_manager = ChannelManager(message_handler, config=initial_channels_conf)
+    from jiuwenclaw.gateway.channel_config_overlay import channel_config_overlay_enabled
+
+    _channel_db_overlay = channel_config_overlay_enabled()
+    # distributed：channel_config DB；standalone：yaml 直传。
+    if _channel_db_overlay:
+        channel_manager = ChannelManager(message_handler, config={})
+    else:
+        channel_manager = ChannelManager(message_handler, config=initial_channels_conf)
     updater_service = WindowsUpdaterService()
 
     async def _on_config_saved(
@@ -1693,10 +1706,56 @@ async def _run(
                 logger.info("[App] channels.wechat missing or invalid, WechatChannel disabled")
 
     channel_manager.set_config_callback(_apply_channel_config)
-    await channel_manager.set_config(initial_channels_conf)
+    if _channel_db_overlay:
+        from jiuwenclaw.gateway.channel_config_overlay import (
+            ChannelConfigChange,
+            apply_channel_change_to_runtime,
+            apply_channel_config_db_overlay,
+            register_channel_config_reload,
+        )
+
+        async def _reload_channels_from_db(
+            change: ChannelConfigChange | None = None,
+        ) -> None:
+            """REST 写库后：优先用变更增量 patch；无变更信息时回退全量读 DB。"""
+            try:
+                if change is not None:
+                    current = channel_manager.get_channels_config()
+                    channels = apply_channel_change_to_runtime(current, change)
+                    logger.info(
+                        "[App] channels patched incrementally op=%s channel_id=%s",
+                        change.op,
+                        change.row.get("channel_id"),
+                    )
+                else:
+                    channels, _ = await apply_channel_config_db_overlay()
+                    logger.info("[App] channels reloaded from channel_config DB (full)")
+                await channel_manager.set_config(channels)
+            except Exception:  # noqa: BLE001
+                logger.exception("[App] channel_config reload failed")
+
+        await register_channel_config_reload(_reload_channels_from_db)
+        channels_for_runtime, applied = await apply_channel_config_db_overlay()
+        if applied:
+            logger.info("[App] initial channels loaded from channel_config DB (db-only)")
+        await channel_manager.set_config(channels_for_runtime)
+    else:
+        await channel_manager.set_config(initial_channels_conf)
 
     await channel_manager.start_dispatch()
     await cron_scheduler.start()
+
+    # ---------- LeaderElection 初始化 ----------
+    leader_election = None
+    config = get_config()
+    deployment_mode = str((config.get("gateway") or {}).get("deployment_mode", "standalone")).strip().lower()
+    if deployment_mode != "standalone":
+        from jiuwenclaw.gateway.leader_election import LeaderElection
+        leader_election = LeaderElection.get_instance()
+        await leader_election.start()
+    else:
+        logger.info("[App] standalone mode, skip LeaderElection")
+
     # 先同步完成监听绑定，避免 IDE/ACP 子进程在端口尚未就绪时连接导致多次重试。
     logger.info("[App] about to call gateway_server.start()")
     try:
@@ -1843,6 +1902,10 @@ async def _run(
         if heartbeat_enabled:
             await heartbeat_service.stop()
         await message_handler.stop_forwarding()
+        if leader_election is not None:
+            await leader_election.stop()
+        await extension_manager.shutdown_all_extensions()
+        await shutdown_gateway_redis()
         await client.disconnect()
         logger.info("[App] Gateway stopped")
 

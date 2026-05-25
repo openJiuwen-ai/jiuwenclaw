@@ -23,7 +23,13 @@ import {
  	ToolCall,
   UsageSummary,
 } from '../types';
-import { useChatStore, useTodoStore, useSessionStore } from '../stores';
+import {
+  useChatStore,
+  useTodoStore,
+  useSessionStore,
+  useExtSettingsStore,
+  extSettingsToQueryFields,
+} from '../stores';
 import { webClient } from '../services/webClient';
 import i18n from '../i18n';
 import {
@@ -1235,12 +1241,18 @@ webClient.on('harness.session_finished', ({ payload }) => {
   ]);
 
   useEffect(() => {
+    const ext = useExtSettingsStore.getState();
+    const extQuery = extSettingsToQueryFields(ext);
+    const { user_id: _uid, group_id: _gid, ...extraFields } = extQuery;
     const connectOptions: WebConnectOptions = {
       provider,
       apiKey,
       apiBase,
       model,
       projectPath,
+      userId: ext.userId || undefined,
+      groupId: ext.groupId || undefined,
+      extraFields: Object.keys(extraFields).length > 0 ? extraFields : undefined,
     };
     void webClient.connect(connectOptions).catch((error) => {
       const webError = error as WebError;
@@ -1275,15 +1287,22 @@ webClient.on('harness.session_finished', ({ payload }) => {
   ]);
 
   useEffect(() => {
-    const connectOptions: WebConnectOptions = {
-      provider,
-      apiKey,
-      apiBase,
-      model,
-      projectPath,
-    };
     const reconnectByDebugToggle = () => {
-      void webClient.disconnect('debug mode toggled').then(() => {
+      // 重连时从 store 拉最新 ext 设置（保存按钮也会派发本事件触发）。
+      const ext = useExtSettingsStore.getState();
+      const extQuery = extSettingsToQueryFields(ext);
+      const { user_id: _uid, group_id: _gid, ...extraFields } = extQuery;
+      const connectOptions: WebConnectOptions = {
+        provider,
+        apiKey,
+        apiBase,
+        model,
+        projectPath,
+        userId: ext.userId || undefined,
+        groupId: ext.groupId || undefined,
+        extraFields: Object.keys(extraFields).length > 0 ? extraFields : undefined,
+      };
+      void webClient.disconnect('ext settings or debug mode changed').then(() => {
         void webClient.connect(connectOptions).catch((error) => {
           const webError = error as WebError;
           setConnectionStats({ lastError: webError.message });

@@ -135,22 +135,6 @@ class LoggingLevels:
     agent_server: int
     full: int
 
-
-@dataclass
-class FileTransferStartParams:
-    """文件传输开始参数（用于封装多参数方法调用）."""
-
-    transfer_id: str
-    filename: str
-    file_size: int
-    sha256: str
-    total_chunks: int
-    chunk_size: int
-    mime_type: str = ""
-    session_id: str = ""
-    channel_id: str = ""
-
-
 @contextlib.contextmanager
 def inter_process_lock(
     lock_file_path: Path,
@@ -2586,7 +2570,7 @@ def setup_logger(log_level: Optional[str] = None) -> logging.Logger:
             _CompositeFilter([_ComponentNameFilter("agent_server"), _ComponentNameFilter("permissions")]))
         _add_rotating("full.log", levels.full, None)
         permissions_formatter = JsonOnlyFormatter()
-        _add_rotating("permissions.log", levels.agent_server, 
+        _add_rotating("permissions.log", levels.agent_server,
                       _ComponentNameFilter("permissions"), permissions_formatter)
 
     elif log_format == 'json':
@@ -2594,12 +2578,12 @@ def setup_logger(log_level: Optional[str] = None) -> logging.Logger:
         _add_rotating("gateway.json", levels.gateway, _ComponentNameFilter("gateway"), use_json=True)
         _add_rotating("channel.json", levels.channel, _ComponentNameFilter("channel"), use_json=True)
         _add_rotating("agent_server.json", levels.agent_server,
-            _CompositeFilter([_ComponentNameFilter("agent_server"), 
+            _CompositeFilter([_ComponentNameFilter("agent_server"),
                               _ComponentNameFilter("permissions")]), use_json=True)
         _add_rotating("full.json", levels.full, None, use_json=True)
         # permissions.log 保持特殊处理（使用JsonOnlyFormatter）
         permissions_formatter = JsonOnlyFormatter()
-        _add_rotating("permissions.log", levels.agent_server, 
+        _add_rotating("permissions.log", levels.agent_server,
                       _ComponentNameFilter("permissions"), permissions_formatter)
 
     elif log_format == 'dual':
@@ -2611,14 +2595,14 @@ def setup_logger(log_level: Optional[str] = None) -> logging.Logger:
             _CompositeFilter([_ComponentNameFilter("agent_server"), _ComponentNameFilter("permissions")]))
         _add_rotating("full.log", levels.full, None)
         permissions_formatter = JsonOnlyFormatter()
-        _add_rotating("permissions.log", levels.agent_server, 
+        _add_rotating("permissions.log", levels.agent_server,
                       _ComponentNameFilter("permissions"), permissions_formatter)
 
         # .json文件（JSON格式）
         _add_rotating("gateway.json", levels.gateway, _ComponentNameFilter("gateway"), use_json=True)
         _add_rotating("channel.json", levels.channel, _ComponentNameFilter("channel"), use_json=True)
         _add_rotating("agent_server.json", levels.agent_server,
-            _CompositeFilter([_ComponentNameFilter("agent_server"), 
+            _CompositeFilter([_ComponentNameFilter("agent_server"),
                               _ComponentNameFilter("permissions")]), use_json=True)
         _add_rotating("full.json", levels.full, None, use_json=True)
 
@@ -2886,6 +2870,7 @@ def fix_json_arguments(arguments: str | dict) -> str | dict:
 @dataclass
 class FileTransferStartParams:
     """文件传输开始参数（用于封装多参数方法调用）."""
+
     transfer_id: str
     filename: str
     file_size: int
@@ -2895,6 +2880,8 @@ class FileTransferStartParams:
     mime_type: str = ""
     session_id: str = ""
     channel_id: str = ""
+    service_id: str = ""
+    agent_id: str = ""
 
 
 @dataclass

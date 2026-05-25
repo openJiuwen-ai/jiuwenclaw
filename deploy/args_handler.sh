@@ -12,7 +12,8 @@ parse_args() {
                 CMD="${args[$i]}"
                 i=$((i+1))
                 ;;
-            nfs|yr_claw|gateway|web)
+            #nfs|rabbitmq|yr_claw|gateway|web|manager)
+            nfs|rabbitmq|mysql|gateway|web|manager)
                 MODULES+=("${args[$i]^^}")
                 i=$((i+1))
                 ;;
@@ -58,7 +59,6 @@ process_modules() {
 }
 
 # Print help info and exit
-# Print help info and exit
 print_help() {
     cat << EOF
 Usage: ./$(basename "$0") [COMMAND] [MODULES...] [OPTIONS]
@@ -70,9 +70,11 @@ Commands (Required):
 
 Modules (Optional):
   nfs       NFS service module (deploys to default namespace, ignores -n parameter)
-  yr_claw   OpenYuanRong CLAW module
+  rabbitmq  RabbitMQ module (deploys to default namespace, ignores -n parameter)
+  mysql     MySQL module (deploys to default namespace, ignores -n parameter)
   gateway   Gateway service module
   web       Web frontend module
+  manager   CLAW Manager module
 
 Options:
   -n NAMESPACE       Specify Kubernetes namespace (defaults to default if unspecified)

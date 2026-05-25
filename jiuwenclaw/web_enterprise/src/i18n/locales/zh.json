@@ -11,7 +11,23 @@
     "error": "错误",
     "ok": "确定",
     "and": "和",
-    "modify": "修改"
+    "modify": "修改",
+    "delete": "删除"
+  },
+  "extSettings": {
+    "title": "请求扩展字段",
+    "subtitle": "用户身份与自定义字段，将随每次会话连接透传给后端",
+    "userIdLabel": "User ID",
+    "userIdPlaceholder": "可选",
+    "groupIdLabel": "Group ID",
+    "groupIdPlaceholder": "可选",
+    "customKvLabel": "自定义键值对",
+    "customKvHint": "Key 限制在白名单内",
+    "customKvEmpty": "暂无自定义键值对",
+    "customKvValuePlaceholder": "填写字段值",
+    "addRow": "添加",
+    "saveHint": "保存后将自动重连以应用",
+    "save": "保存并应用"
   },
   "nav": {
     "chat": "对话",

@@ -16,6 +16,7 @@ import asyncio
 import logging
 import os
 from pathlib import Path
+import sys
 
 from dotenv import load_dotenv
 from openjiuwen.core.common.logging import LogManager
@@ -132,7 +133,23 @@ async def _run(host: str, port: int) -> None:
         pass
     finally:
         logger.info("[AgentServer] stopping…")
+        await extension_manager.shutdown_all_extensions()
         await server.stop()
+        # jiuwenbox 服务端没有 idle TTL, 本进程退出后已创建的 sandbox 会在 jiuwenbox
+        # 一侧持续占用直到 jiuwenbox 自己重启。在此处主动 DELETE 掉本进程缓存里的
+        # sandbox 列表; 走线程是因为底层 httpx 是同步 API, 不能直接堵 event loop。
+        # cleanup 自身已经吞了所有异常并永不抛, 外层 try/except 只是再加一道防线,
+        # 兜住 import 阶段 (例如 venv 损坏) 这种极端情况。
+        try:
+            from jiuwenclaw.agentserver.sandbox_lifecycle import (
+                shutdown_jiuwenbox_sandboxes,
+            )
+
+            await asyncio.to_thread(shutdown_jiuwenbox_sandboxes)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "[AgentServer] jiuwenbox sandbox cleanup failed: %s", exc,
+            )
         logger.info("[AgentServer] stopped")
 
 

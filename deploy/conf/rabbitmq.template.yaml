@@ -1,0 +1,122 @@
+apiVersion: v1
+kind: Secret
+metadata:
+  name: <<RABBITMQ_NAME>>-secret
+type: Opaque
+data:
+  user: <<RABBITMQ_USER>>
+  pass: <<RABBITMQ_PASSWORD>>
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: <<RABBITMQ_NAME>>-headless
+spec:
+  clusterIP: None
+  selector:
+    app: <<RABBITMQ_NAME>>
+  ports:
+    - name: amqp
+      port: 5672
+    - name: management
+      port: 15672
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: <<RABBITMQ_NAME>>-service
+spec:
+  type: NodePort
+  selector:
+    app: <<RABBITMQ_NAME>>
+  ports:
+    - name: amqp
+      port: 5672
+      targetPort: 5672
+      nodePort: 30073
+    - name: management
+      port: 15672
+      targetPort: 15672
+      nodePort: 30072
+
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: <<RABBITMQ_NAME>>
+spec:
+  serviceName: <<RABBITMQ_NAME>>-headless
+  replicas: 1
+  selector:
+    matchLabels:
+      app: <<RABBITMQ_NAME>>
+  template:
+    metadata:
+      labels:
+        app: <<RABBITMQ_NAME>>
+    spec:
+      containers:
+      - name: <<RABBITMQ_NAME>>
+        image: <<RABBITMQ_IMAGE>>
+        ports:
+        - name: amqp
+          containerPort: 5672
+        - name: management
+          containerPort: 15672
+        env:
+        - name: RABBITMQ_DEFAULT_USER
+          valueFrom:
+            secretKeyRef:
+              name: <<RABBITMQ_NAME>>-secret
+              key: user
+        - name: RABBITMQ_DEFAULT_PASS
+          valueFrom:
+            secretKeyRef:
+              name: <<RABBITMQ_NAME>>-secret
+              key: pass
+        volumeMounts:
+        - name: <<RABBITMQ_NAME>>-data
+          mountPath: /var/lib/rabbitmq
+      volumes:
+          - name: <<RABBITMQ_NAME>>-data
+            persistentVolumeClaim:
+              claimName: <<RABBITMQ_NAME>>-pvc
+---
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: <<RABBITMQ_NAME>>-pv
+  labels:
+    app: <<RABBITMQ_NAME>>
+spec:
+  capacity:
+    storage: 100Gi
+  accessModes:
+    - ReadWriteOnce                       
+  persistentVolumeReclaimPolicy: Retain   
+  storageClassName: ""                    # 不使用 StorageClass
+  nfs:
+    server: <<NFS_SERVER_ADDR>>           # NFS 服务器地址
+    path: /rabbitmq                       # NFS 共享路径
+    readOnly: false
+  mountOptions:
+    - nfsvers=4
+    - hard
+    - noatime
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: <<RABBITMQ_NAME>>-pvc
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 10Gi
+  storageClassName: ""        # 不使用 StorageClass
+  selector:
+    matchLabels:
+      app: <<RABBITMQ_NAME>>

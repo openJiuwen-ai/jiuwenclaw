@@ -116,10 +116,15 @@ def message_to_e2a(msg: "Message") -> E2AEnvelope:
         "channel_id": msg.channel_id,
         "session_id": msg.session_id,
         "chat_id": msg.chat_id,
+        "user_id": msg.user_id,
         "params": dict(msg.params or {}),
         "is_stream": bool(msg.is_stream),
         "timestamp": msg.timestamp,
     }
+    if getattr(msg, "bot_id", None):
+        params = d["params"]
+        if isinstance(params, dict) and "bot_id" not in params:
+            params["bot_id"] = msg.bot_id
     if msg.req_method is not None:
         d["method"] = msg.req_method.value
     # 合并 metadata 和独立字段（enable_memory, group_digital_avatar 等）

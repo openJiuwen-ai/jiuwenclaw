@@ -4,6 +4,7 @@ import { useSpeechRecognition } from '../../hooks';
 import { stopAllTts } from '../../utils';
 import { useChatStore, useSessionStore } from '../../stores';
 import { AgentMode } from '../../types';
+import { ExtSettingsControl } from '../ExtSettingsModal';
 import clsx from 'clsx';
 
 interface InputAreaProps {
@@ -343,6 +344,8 @@ export function InputArea({
         </div>
 
         <div className="chat-input-actions">
+          <ExtSettingsControl />
+
           <button
             type="button"
             onClick={handleNewSession}
