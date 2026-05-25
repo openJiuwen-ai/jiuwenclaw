@@ -592,7 +592,7 @@
       "deleteConfirmTitle": "确认删除模型？",
       "deleteConfirmMessage": "确定要删除模型 \"{{modelName}}\" 吗？",
       "deleteConfirmMessageSimple": "模型 \"{{modelName}}\" 正在被 {{count}} 个 Agent 引用，删除后相关 Agent 将无法使用该模型。",
-      "referenceLostWarning": "Agent引用模型丢失警告",
+      "referenceLostWarning": "Agent引用模型丢失警告，请重新配置Agent模型",
       "notSelected": "未选择模型"
     },
     "agentList": {

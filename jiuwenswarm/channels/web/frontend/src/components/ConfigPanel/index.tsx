@@ -1355,7 +1355,7 @@ function MultiAgentSection({
                     onChange={(e) => handleModelSelect(idx, e.target.value)}
                     className="flex-1 rounded border border-border bg-bg px-2 py-1 text-text text-xs"
                   >
-                    <option value="">-- Select Model --</option>
+                    <option value="" disabled>-- Select Model --</option>
                     {availableModels.map((m, mi) => {
                       const sameNameModels = availableModels.filter((x) => x.model_name === m.model_name);
                       const sameNameCount = sameNameModels.length;
@@ -1456,7 +1456,7 @@ function MultiAgentSection({
               }}
               className="flex-1 rounded border border-border bg-bg px-2 py-1 text-text text-xs"
             >
-              <option value="">-- Select Model --</option>
+              <option value="" disabled>-- Select Model --</option>
               {availableModels.map((m, mi) => {
                 const sameNameModels = availableModels.filter((x) => x.model_name === m.model_name);
                 const sameNameCount = sameNameModels.length;
@@ -2184,7 +2184,6 @@ export function ConfigPanel({
   const [draftAgents, setDraftAgents] = useState<AgentEntry[]>([]);
   const [draftTeams, setDraftTeams] = useState<TeamEntry[]>([]);
   const [agentsTeamsEdited, setAgentsTeamsEdited] = useState(false);
-  const [agentsTeamsValidationAttempted, setAgentsTeamsValidationAttempted] = useState(false);
   const [configTab, setConfigTab] = useState<ConfigMainTab>("model");
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -2197,7 +2196,6 @@ export function ConfigPanel({
 
   const markAgentsTeamsEdited = () => {
     setAgentsTeamsEdited(true);
-    setAgentsTeamsValidationAttempted(false);
     setError(null);
   };
 
@@ -2317,7 +2315,6 @@ export function ConfigPanel({
     setDraftValues(normalizedConfig);
     setError(null);
     setModelError(null);
-    setAgentsTeamsValidationAttempted(false);
   }, [normalizedConfig]);
 
   useEffect(() => {
@@ -2565,6 +2562,11 @@ export function ConfigPanel({
     return lostReferences;
   }, [hasModelChanges, draftAgents, draftModels, storeAvailableModels, t]);
 
+  const hasDuplicateAgentNames = useMemo(() => {
+    const names = draftAgents.map((a) => a.name.trim()).filter(Boolean);
+    return new Set(names).size !== names.length;
+  }, [draftAgents]);
+
   const hasAgentsTeamsValidationError = useMemo(() => {
     for (const agent of draftAgents) {
       if (!agent.name.trim()) return true;
@@ -2622,7 +2624,6 @@ export function ConfigPanel({
     setDraftTeams(teamsFromConfig);
     clearCachedAgentsTeams();
     setAgentsTeamsEdited(false);
-    setAgentsTeamsValidationAttempted(false);
     setError(null);
     setModelError(null);
   };
@@ -2695,7 +2696,6 @@ export function ConfigPanel({
 
     if (hasAgentsTeamsValidationError) {
       setConfigTab("agent");
-      setAgentsTeamsValidationAttempted(true);
       setError(t('config.agentsTeamsValidationError'));
       return;
     }
@@ -2735,7 +2735,6 @@ export function ConfigPanel({
         // 保存成功后清除 localStorage 缓存
         clearCachedAgentsTeams();
         setAgentsTeamsEdited(false);
-        setAgentsTeamsValidationAttempted(false);
       }
       // 只有当有普通配置或模型变更时，才保存并弹窗
       if (hasConfigChanges || hasModelChanges) {
@@ -2786,16 +2785,24 @@ export function ConfigPanel({
             {error}
           </div>
         ) : null}
-        {!error && agentsTeamsValidationAttempted && hasAgentsTeamsValidationError ? (
-          <div className="mb-4 rounded-md border border-[var(--border-danger)] bg-danger-subtle px-3 py-2 text-sm text-danger">
-            {t('config.agentsTeamsValidationError')}
-          </div>
-        ) : null}
         {!error && agentModelReferencesLost.length > 0 ? (
           <div className="mb-4 rounded-md border border-amber-500 bg-amber-50 dark:bg-amber-900/20 px-3 py-2 text-sm text-amber-700 dark:text-amber-300">
             {t('config.model.referenceLostWarning')}: {agentModelReferencesLost.map((r) => r.agentName).join(', ')}
           </div>
         ) : null}
+        {!error && hasDuplicateAgentNames ? (
+          <div className="mb-4 rounded-md border border-[var(--border-danger)] bg-danger-subtle px-3 py-2 text-sm text-danger">
+            {t('config.agentList.duplicateName')}
+          </div>
+        ) : null
+        }
+        {
+          !error && hasAgentsTeamsChanges && hasAgentsTeamsValidationError ? (
+            <div className="mb-4 rounded-md border border-[var(--border-danger)] bg-danger-subtle px-3 py-2 text-sm text-danger">
+              {t('config.agentsTeamsValidationError')}
+            </div>
+          ) : null
+        }
 
         {!groups.length ? (
           <div className="text-sm text-text-muted flex-1 min-h-0">

@@ -593,7 +593,7 @@
       "deleteConfirmTitle": "Delete Model?",
       "deleteConfirmMessage": "Are you sure you want to delete model \"{{modelName}}\"?",
       "deleteConfirmMessageSimple": "Model \"{{modelName}}\" is referenced by {{count}} Agent(s). After deletion, related Agents will no longer be able to use this model.",
-      "referenceLostWarning": "Model Reference Lost Warning",
+      "referenceLostWarning": "Model Reference Lost Warning, please reconfigure the Agent model",
       "notSelected": "No model selected"
     },
     "agentList": {
