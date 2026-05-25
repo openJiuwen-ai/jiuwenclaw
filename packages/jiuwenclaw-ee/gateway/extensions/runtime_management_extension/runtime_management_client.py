@@ -119,9 +119,15 @@ def _resolve_invoke_ids_from_request(msg: AgentRequest) -> tuple[str, str | None
 class _SessionRequest(ISessionRequest):
     """ISessionRequest 实现。"""
 
-    def __init__(self, msg: AgentRequest, envelope: E2AEnvelope) -> None:
+    def __init__(
+        self,
+        msg: AgentRequest,
+        envelope: E2AEnvelope,
+        service_template: Optional[dict[str, Any]] = None,
+    ) -> None:
         self._req = msg
         self._envelope = envelope
+        self._service_template = service_template
         service_id, agent_id = _resolve_invoke_ids_from_request(self._req)
         self._service_id = service_id
         self._req.service_id = service_id
@@ -152,6 +158,10 @@ class _SessionRequest(ISessionRequest):
     @property
     def raw_msg(self) -> Any:
         return json.dumps(self._envelope.to_dict(), ensure_ascii=False)
+
+    @property
+    def service_template(self) -> Optional[dict[str, Any]]:
+        return self._service_template
 
 
 class E2aEnvelopResponseParser(IResponseParser):
@@ -391,8 +401,24 @@ class RuntimeManagementAgentClient(AgentServerClient):
         """发送非流式请求。"""
         self._ensure_connected()
         request = e2a_to_agent_request(envelope)
-        await load_effective_service_config_for_request(request)
-        session_request = _SessionRequest(request, envelope)
+        
+        # 加载服务配置
+        service_template = None
+        loaded = await load_effective_service_config_for_request(request)
+        if loaded is not None:
+            # 从 loaded 中直接获取 service_id
+            service_id = getattr(loaded, "service_id", None)
+            logger.info("[RuntimeManagementAgentClient] loaded config: service_id=%s", service_id)
+            
+            entities = loaded.service_config or []
+            if entities:
+                service_template = entities[0]
+                logger.info(
+                    "[RuntimeManagementAgentClient] service_template keys: %s",
+                    list(service_template.keys()) if isinstance(service_template, dict) else None,
+                )
+        
+        session_request = _SessionRequest(request, envelope, service_template=service_template)
 
         try:
             async for chunk in self._access.send_message(session_request):
@@ -411,8 +437,24 @@ class RuntimeManagementAgentClient(AgentServerClient):
         """发送流式请求。"""
         self._ensure_connected()
         request = e2a_to_agent_request(envelope)
-        await load_effective_service_config_for_request(request)
-        session_request = _SessionRequest(request, envelope)
+        
+        # 加载服务配置
+        service_template = None
+        loaded = await load_effective_service_config_for_request(request)
+        if loaded is not None:
+            # 从 loaded 中直接获取 service_id
+            service_id = getattr(loaded, "service_id", None)
+            logger.info("[RuntimeManagementAgentClient] loaded config: service_id=%s", service_id)
+            
+            entities = loaded.service_config or []
+            if entities:
+                service_template = entities[0]
+                logger.info(
+                    "[RuntimeManagementAgentClient] service_template keys: %s",
+                    list(service_template.keys()) if isinstance(service_template, dict) else None,
+                )
+        
+        session_request = _SessionRequest(request, envelope, service_template=service_template)
 
         try:
             async for chunk in self._access.send_message(session_request):
