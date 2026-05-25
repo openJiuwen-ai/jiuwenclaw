@@ -2661,7 +2661,10 @@ class AsyncLRUCache:
         self._lock = asyncio.Lock()
 
     async def get(self, key: str) -> Any | None:
-        """获取缓存值，如果不存在或已过期则返回 None."""
+        """获取缓存值，如果不存在或已过期则返回 None.
+
+        命中时会刷新访问时间（滑动过期：自最后一次 get/put 起算 ttl）。
+        """
         async with self._lock:
             if key not in self._cache:
                 return None
@@ -2671,7 +2674,8 @@ class AsyncLRUCache:
                 self._cache.pop(key, None)
                 return None
 
-            # 移动到末尾（最近使用）
+            # 刷新访问时间并移动到末尾（最近使用）
+            self._cache[key] = (value, time.time())
             self._cache.move_to_end(key)
             return value
 
@@ -2685,6 +2689,24 @@ class AsyncLRUCache:
                 self._cache.popitem(last=False)
 
             self._cache[key] = (value, time.time())
+
+    async def touch_if_same(self, key: str, value: Any) -> bool:
+        """若 key 存在且缓存值与 value 为同一对象，则刷新访问时间.
+
+        用于请求结束时续约 TTL，避免无条件 put 用旧实例覆盖并发创建的新实例。
+        同一对象仍挂在 cache 上时，即使时间戳已过期也会续期（执行期间无 get 触达）。
+        """
+        async with self._lock:
+            if key not in self._cache:
+                return False
+
+            cached_value, _timestamp = self._cache[key]
+            if cached_value is not value:
+                return False
+
+            self._cache[key] = (value, time.time())
+            self._cache.move_to_end(key)
+            return True
 
     async def remove(self, key: str) -> None:
         """删除缓存项."""

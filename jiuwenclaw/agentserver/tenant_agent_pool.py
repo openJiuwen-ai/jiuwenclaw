@@ -224,7 +224,7 @@ class TenantAgentPool:
         Returns:
             AgentManager 实例
         """
-        cache_key = f"{agent_id}_{service_id}"
+        cache_key = self._build_cache_key(agent_id, service_id)
         lock = self._get_lock(cache_key)
 
         async with lock:
@@ -283,7 +283,7 @@ class TenantAgentPool:
         Returns:
             AgentManager 实例或 None
         """
-        cache_key = f"{agent_id}_{service_id}"
+        cache_key = self._build_cache_key(agent_id, service_id)
         try:
             loop = asyncio.get_running_loop()
             future = asyncio.run_coroutine_threadsafe(
@@ -294,20 +294,53 @@ class TenantAgentPool:
         except Exception:
             return None
 
+    @staticmethod
+    def _build_cache_key(agent_id: str, service_id: str | None) -> str:
+        return f"{agent_id}_{service_id}"
+
+    async def _refresh_agent_manager_cache(
+            self,
+            cache_key: str,
+            agent_manager: Any,
+    ) -> None:
+        """请求结束后刷新 LRU 时间戳，避免长任务执行期间 AgentManager 被 TTL 淘汰."""
+        if agent_manager is None:
+            return
+        try:
+            refreshed = await self._agent_wrappers.touch_if_same(cache_key, agent_manager)
+            if not refreshed:
+                logger.debug(
+                    "[TenantAgentPool] skip cache refresh for key=%s: entry replaced or expired",
+                    cache_key,
+                )
+        except Exception:
+            logger.exception(
+                "[TenantAgentPool] failed to refresh AgentManager cache for key=%s",
+                cache_key,
+            )
+
     async def process_message(self, request: AgentRequest) -> AgentResponse:
         """处理非流式请求."""
         agent_id, service_id = self.extract_ids(request)
+        cache_key = self._build_cache_key(agent_id, service_id)
         agent_manager = await self._ensure_agent_manager(agent_id, service_id)
-        return await agent_manager.process_message(request)
+        try:
+            return await agent_manager.process_message(request)
+        finally:
+            await self._refresh_agent_manager_cache(cache_key, agent_manager)
 
     async def process_message_stream(
             self, request: AgentRequest
     ):
         """处理流式请求."""
         agent_id, service_id = self.extract_ids(request)
+        cache_key = self._build_cache_key(agent_id, service_id)
         agent_manager = await self._ensure_agent_manager(agent_id, service_id)
-        async for chunk in agent_manager.process_message_stream(request):
-            yield chunk
+        try:
+            async for chunk in agent_manager.process_message_stream(request):
+                yield chunk
+        finally:
+            await self._refresh_agent_manager_cache(cache_key, agent_manager)
 
     @staticmethod
     def extract_ids(request: AgentRequest):
