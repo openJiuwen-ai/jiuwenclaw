@@ -70,6 +70,12 @@ def _trusted_cat_cafe_stdio_roots() -> list[Path]:
             roots.append(Path(raw).expanduser().resolve())
         except OSError:
             pass
+    mcp_cwd = (os.getenv("OFFICE_CLAW_MCP_CWD") or "").strip()
+    if mcp_cwd:
+        try:
+            roots.append(Path(mcp_cwd).expanduser().resolve())
+        except OSError as e:
+            pass
     try:
         roots.append((Path.home() / ".office-claw").resolve())
     except OSError:
