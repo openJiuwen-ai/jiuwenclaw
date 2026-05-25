@@ -1735,6 +1735,17 @@ async def _run(
                 cron_scheduler.set_active(False)
 
         leader_election.register_callback(_cron_on_role_change)
+
+        # 主备切换回调：升为 PRIMARY 时清理旧主遗留的所有 Pod，再由 autoscale 自动重建
+        if hasattr(client, "purge_all_pods"):
+            async def _session_on_role_change(role: Role) -> None:
+                if role == Role.PRIMARY:
+                    logger.info("[App] 角色切换为 PRIMARY，开始清理旧主遗留的所有 Pod")
+                    await client.purge_all_pods()
+                else:
+                    logger.info("[App] 角色切换为 STANDBY")
+            leader_election.register_callback(_session_on_role_change)
+
         await leader_election.start()
     else:
         logger.info("[App] standalone mode, skip LeaderElection")

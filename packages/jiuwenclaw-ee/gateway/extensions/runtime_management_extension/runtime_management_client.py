@@ -359,6 +359,20 @@ class RuntimeManagementAgentClient(AgentServerClient):
         )
         self._connected = True
 
+    async def purge_all_pods(self) -> None:
+        """主备切换时调用：清空当前进程持有的所有 Pod，但不停 ServiceManager。"""
+        if not self._connected:
+            logger.warning("[RuntimeManagementAgentClient] purge_all_pods skipped: not connected")
+            return
+        try:
+            result = await self._access.purge_all_pods()
+            logger.info(
+                "[RuntimeManagementAgentClient] purge_all_pods done: deleted=%s failed=%s",
+                result.deleted_count, len(result.failed),
+            )
+        except Exception as exc:
+            logger.exception("[RuntimeManagementAgentClient] purge_all_pods failed: %s", exc)
+
     async def disconnect(self) -> None:
         """断开连接并清理资源。"""
         try:
