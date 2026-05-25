@@ -92,6 +92,20 @@ class Database:
             logger.exception("Invalid MySQL database configuration.")
             raise ValueError("Invalid MySQL database configuration.") from e
 
+    def _create_pg_handler(self) -> PostgreSQLHandler:
+        cfg = self.settings
+        try:
+            return PostgreSQLHandler(
+                host=str(cfg.gateway_db_host).strip(),
+                port=int(cfg.gateway_db_port),
+                user=str(cfg.gateway_db_user).strip(),
+                password=str(cfg.gateway_db_password),
+                database=str(cfg.gateway_db_name).strip(),
+            )
+        except (TypeError, ValueError) as e:
+            logger.exception("Invalid PostgreSQL database configuration.")
+            raise ValueError("Invalid PostgreSQL database configuration.") from e
+
     def create_handler(self) -> DBHandler:
         """根据配置创建 ``DBHandler`` 并缓存在本实例上。"""
         if self._handler is not None:
@@ -105,8 +119,12 @@ class Database:
             self._handler = self._create_sqlite_handler()
         elif db_type == "mysql":
             self._handler = self._create_mysql_handler()
+        elif db_type in ("postgresql", "postgres", "pg"):
+            self._handler = self._create_pg_handler()
         else:
-            raise ValueError(f"Unsupported db_type: {db_type}. Use 'sqlite' or 'mysql'.")
+            raise ValueError(
+                f"Unsupported db_type: {db_type}. Use 'sqlite', 'mysql' or 'postgresql'."
+            )
 
         return self._handler
 
