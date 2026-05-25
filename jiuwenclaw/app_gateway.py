@@ -1715,8 +1715,26 @@ async def _run(
     config = get_config()
     deployment_mode = str((config.get("gateway") or {}).get("deployment_mode", "standalone")).strip().lower()
     if deployment_mode != "standalone":
-        from jiuwenclaw.gateway.leader_election import LeaderElection
+        from jiuwenclaw.gateway.leader_election import LeaderElection, Role
+
         leader_election = LeaderElection.get_instance()
+
+        # 选主结果未知前先把 cron 设为 STANDBY，避免短暂窗口内非 PRIMARY 进程触发任务；
+        # cron_scheduler.start() 已在前面跑过，loop 已存活，set_active(False) 仅让它跳过事件处理。
+        cron_scheduler.set_active(False)
+
+        async def _cron_on_role_change(role: Role) -> None:
+            if role == Role.PRIMARY:
+                # 顺序：先 reload 重建事件队列，再激活，避免 loop 抢先消费旧事件。
+                try:
+                    await cron_scheduler.reload()
+                except Exception:
+                    logger.exception("[App] cron reload on promotion failed")
+                cron_scheduler.set_active(True)
+            else:
+                cron_scheduler.set_active(False)
+
+        leader_election.register_callback(_cron_on_role_change)
         await leader_election.start()
     else:
         logger.info("[App] standalone mode, skip LeaderElection")

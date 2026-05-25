@@ -189,8 +189,9 @@ def substitute_template(template: str, ctx: RoutingContext) -> str:
 def agent_rule_matches(rule: dict[str, Any], ctx: RoutingContext) -> bool:
     """判断 Agent 策略行是否命中当前路由上下文。
 
-    若配置了 ``agent_id``（可为 ``${user_id}`` 等模板），须与 ``ctx.user_id`` 一致；
-    再求值 ``match_expr``（空表达式视为全匹配）。
+    **匹配以 ``match_expr`` 为准**（空表达式视为全匹配）。``agent_id`` 为
+    ``${user_id}`` 等模板时，解析结果须与 ``ctx.user_id`` 一致；**固定字面量**
+    ``agent_id`` 仅作路由标识，不参与匹配过滤。
 
     入参举例::
 
@@ -203,16 +204,13 @@ def agent_rule_matches(rule: dict[str, Any], ctx: RoutingContext) -> bool:
 
     返回值举例::
 
-        True  # ``agent_id`` 与 ``match_expr`` 均满足
+        True  # 模板 ``agent_id`` 与 ``match_expr`` 均满足
         False  # ``ctx.user_id="bob"`` 或 ``match_expr`` 比较为假
     """
     raw_agent_id = str(rule.get("agent_id") or "").strip()
-    if raw_agent_id:
-        if "${" in raw_agent_id:
-            resolved = substitute_template(raw_agent_id, ctx)
-            if resolved and resolved != ctx.user_id:
-                return False
-        elif raw_agent_id != ctx.user_id:
+    if raw_agent_id and "${" in raw_agent_id:
+        resolved = substitute_template(raw_agent_id, ctx)
+        if resolved and resolved != ctx.user_id:
             return False
     return evaluate_match_expr(rule.get("match_expr"), ctx)
 

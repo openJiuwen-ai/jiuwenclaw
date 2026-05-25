@@ -563,14 +563,14 @@ def seed_demo_config(client: ManagerClient) -> dict[str, Any]:
     mapping_rule = client.post(
         "/config-effective/agent-policies",
         {
-            "agent_id": "${user_id}",
+            "agent_id": "default_agent_id_1",
             "service_policy_id": sales_id,
             "priority": 0,
             "match_expr": "",
             "template_ref": {"default_model": [group_map_default_model]},
             "enabled": True,
             "data": {
-                "remark": f"group:: 仅按 group_id 查步骤 5.2；or 右侧 {m1} 为 M1 的 template_id 回退"
+                "remark": "固定 agent_id；匹配仅看 match_expr；group:: 查映射 5.2"
             },
         },
     )
