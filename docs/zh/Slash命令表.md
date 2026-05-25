@@ -32,6 +32,7 @@
 | `/evolve_simplify` | 整理、合并某个 Skill 的演进经验（见下文） |
 | `/evolve_rebuild` | 基于归档与演进记录重建 `SKILL.md`（见下文） |
 | `/sandbox` | 设置沙箱模式（见下文） |
+| `/auto-harness` | Auto-Harness 任务管理（`run`/`schedule`，见下文） |
 
 > 说明：`/mode` 的受控切换逻辑以 Gateway 侧行为为主，详见下文「`/mode` 与 `/switch`」。
 
@@ -690,6 +691,75 @@
   }
 }
 ```
+
+### `/auto-harness`（Auto-Harness 任务管理）
+
+管理 Auto-Harness 任务的创建、执行与监控。Auto-Harness 通过自动化 Pipeline 生成 harness 扩展包，支持两种 Pipeline 类型：
+
+- **optimize_expert_harness**（后端值 `extended_evolve_pipeline`）：生成本地 harness 扩展包
+- **optimize_meta_harness**（后端值 `meta_evolve_pipeline`）：提交 PR（需配置 git）
+
+Pipeline 执行过程中，扩展包**默认自动激活生效**，无需用户手动确认。日志中会展示 `harness.extension_ready`（扩展已就绪，显示目录与组件信息）和 `harness.activate_interaction`（激活确认提示）事件。
+
+#### 配置要求
+
+使用 `optimize_meta_harness` Pipeline 需配置以下字段（通过 `/config edit` 或 `/status config` 编辑）：
+
+| 字段 | 必填 | 说明 |
+|---|---|---|
+| `git.user_name` | 是 | Git commit 用户名 |
+| `git.user_email` | 是 | Git commit 箱 |
+| `git.fork_owner` | 是 | Fork 仓库所有者（如 `SnapeK`） |
+| `gitcode.access_token` | 否 | GitCode API Token（也可通过环境变量 `GITCODE_ACCESS_TOKEN` 提供） |
+
+若配置不完整，创建任务时会提示缺失字段。
+
+#### 子命令
+
+| 命令 | 说明 |
+|---|---|
+| `/auto-harness run [--pipeline <pipeline>] <query>` | 执行一次性 Auto-Harness 任务 |
+| `/auto-harness schedule start --interval <hours> [--pipeline <pipeline>] <query>` | 创建定时任务 |
+| `/auto-harness schedule list` | 列出所有任务 |
+| `/auto-harness schedule status <task_id>` | 查看任务详情 |
+| `/auto-harness schedule logs <task_id> [--history <n>]` | 查看任务执行日志 |
+| `/auto-harness schedule cancel <task_id>` | 取消任务 |
+| `/auto-harness schedule delete <task_id>` | 删除任务 |
+
+#### `/auto-harness run`（一次性执行）
+
+- 用法：`/auto-harness run [--pipeline <pipeline>] <query>`
+- 流程：
+  1. 若未指定 pipeline，交互式选择 Pipeline 类型
+  2. 若选择 `optimize_meta_harness`，自动检查 git 配置是否完整
+  3. 创建并执行一次性任务
+  4. 自动进入实时日志跟踪模式（类似 `tail -f`）
+- 示例：
+  - `/auto-harness run 优化数据库查询性能` — 未指定 pipeline，交互选择
+  - `/auto-harness run --pipeline optimize_expert_harness 优化上下文压缩能力` — 指定 pipeline
+
+#### `/auto-harness schedule start`（创建定时任务）
+
+- 用法：`/auto-harness schedule start --interval <hours> [--pipeline <pipeline>] <query>`
+- 参数：
+  - `--interval` / `-i`（必填）：执行间隔（小时），可选值 `1`、`2`、`4`、`8`、`12`、`24`
+  - `--pipeline` / `-p`（可选）：Pipeline 类型，未指定时交互选择
+  - `<query>`（必填）：优化目标描述
+- 流程：
+  1. 若未指定 pipeline，交互式选择
+  2. 若选择 `optimize_meta_harness`，检查 git 配置
+  3. 交互确认是否立即执行一次
+  4. 创建定时任务
+- 示例：
+  - `/auto-harness schedule start --interval 4 优化上下文压缩能力`
+  - `/auto-harness schedule start -i 2 -p optimize_meta_harness 提交数据库优化PR`
+
+#### `/auto-harness schedule logs`（查看执行日志）
+
+- 用法：`/auto-harness schedule logs <task_id> [--history <n>]`
+- 模式：
+  - 默认：实时跟踪当前运行日志（`tail -f` 模式），支持 Ctrl+C 中断
+  - `--history <n>`：查看历史执行日志（`view` 模式，`n` 为历史索引，0 为最近一次）
 
 ---
 

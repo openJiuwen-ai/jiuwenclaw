@@ -118,10 +118,11 @@ function getPipelineCompletions(_partial: string, parts: string[]): string[] {
 
 // Helper functions
 
-function parseScheduleStartArgs(args: string): { interval: number; pipeline: string; query: string } {
+function parseScheduleStartArgs(args: string): { interval: number; pipeline: string; query: string; rawInterval: string } {
   const parts = parseArgs(args);
 
   let interval = 0;
+  let rawInterval = "";
   let pipeline = "";
   let queryParts: string[] = [];
   let i = 0;
@@ -130,7 +131,8 @@ function parseScheduleStartArgs(args: string): { interval: number; pipeline: str
     if (parts[i] === "--interval" || parts[i] === "-i") {
       i++;
       if (i < parts.length) {
-        interval = parseInt(parts[i], 10) || 0;
+        rawInterval = parts[i];
+        interval = Number(parts[i]);
         i++;
       }
     } else if (parts[i] === "--pipeline" || parts[i] === "-p") {
@@ -147,6 +149,7 @@ function parseScheduleStartArgs(args: string): { interval: number; pipeline: str
 
   return {
     interval,
+    rawInterval,
     pipeline,
     query: queryParts.join(" "),
   };
@@ -262,9 +265,11 @@ const scheduleStartCommand: SlashCommand = {
   action: async (ctx, args) => {
     const parsed = parseScheduleStartArgs(args);
 
-    if (!parsed.interval || parsed.interval < 1) {
+    if (!parsed.rawInterval || !/^\d+$/.test(parsed.rawInterval) || parsed.interval < 1) {
       ctx.addItem(
-        addError(ctx.sessionId, "用法: /auto-harness schedule start --interval <hours> [--pipeline <pipeline>] <query>\npipeline: optimize_expert_harness (生成扩展包), optimize_meta_harness (提交 PR)")
+        addError(ctx.sessionId, parsed.rawInterval
+          ? `间隔必须为正整数（当前值: ${parsed.rawInterval}）`
+          : "用法: /auto-harness schedule start --interval <hours> [--pipeline <pipeline>] <query>\npipeline: optimize_expert_harness (生成扩展包), optimize_meta_harness (提交 PR)")
       );
       return;
     }
@@ -810,7 +815,7 @@ async function streamCurrentLogs(
   }
 
   if (pollCount >= maxPolls) {
-    ctx.addItem(addInfo(ctx.sessionId, `\n【日志跟踪超时终止】`));
+    ctx.addItem(addInfo(ctx.sessionId, `\n【日志跟踪退出，可再次调用指令查看。】`));
   } else {
     ctx.addItem(addInfo(ctx.sessionId, `\n【日志跟踪完成: ${executionId}】`));
   }

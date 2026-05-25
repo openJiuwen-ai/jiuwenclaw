@@ -607,7 +607,7 @@ class AutoHarnessService:
         # config.yaml so that GitOperations.push() uses a named remote instead
         # of a raw URL. The named remote is added in clone_or_update_repo().
         if not config.git_base_branch:
-            config.git_base_branch = "develop"
+            config.git_base_branch = "develop-auto-harness"
         if not config.git_remote:
             config.git_remote = "origin"
 

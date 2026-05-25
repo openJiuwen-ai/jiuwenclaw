@@ -32,6 +32,7 @@ Executed locally in the terminal UI, not through Gateway control pipeline.
 | `/evolve_simplify` | Simplify and consolidate one skill's evolution records (see below) |
 | `/evolve_rebuild` | Rebuild `SKILL.md` from archives and evolution records (see below) |
 | `/sandbox` | Set sandbox mode (see below) |
+| `/auto-harness` | Auto-Harness task management (`run`/`schedule`, see below) |
 
 > Note: `/mode` controlled switching logic is primarily on Gateway side, see "`/mode` and `/switch`" below.
 
@@ -679,6 +680,75 @@ Use the following template to write commands. `input=$(cat)` reads JSON into a v
   }
 }
 ```
+
+### `/auto-harness` (Auto-Harness Task Management)
+
+Manage Auto-Harness task creation, execution, and monitoring. Auto-Harness generates harness extension packages via automated pipelines, supporting two pipeline types:
+
+- **optimize_expert_harness** (backend value `extended_evolve_pipeline`): Generate a local harness extension package
+- **optimize_meta_harness** (backend value `meta_evolve_pipeline`): Submit PR (requires git config)
+
+During pipeline execution, extension packages are **activated automatically by default** — no manual user confirmation is needed. Logs display `harness.extension_ready` (extension ready, showing directory and component info) and `harness.activate_interaction` (activation confirmation prompt) events.
+
+#### Configuration Requirements
+
+Using the `optimize_meta_harness` pipeline requires the following fields to be configured (via `/config edit` or `/status config`):
+
+| Field | Required | Description |
+|---|---|---|
+| `git.user_name` | Yes | Git commit username |
+| `git.user_email` | Yes | Git commit email |
+| `git.fork_owner` | Yes | Fork repository owner (e.g., `SnapeK`) |
+| `gitcode.access_token` | No | GitCode API token (can also be provided via environment variable `GITCODE_ACCESS_TOKEN`) |
+
+If configuration is incomplete, the task creation will prompt the missing fields.
+
+#### Subcommands
+
+| Command | Description |
+|---|---|
+| `/auto-harness run [--pipeline <pipeline>] <query>` | Execute a one-time Auto-Harness task |
+| `/auto-harness schedule start --interval <hours> [--pipeline <pipeline>] <query>` | Create a scheduled task |
+| `/auto-harness schedule list` | List all tasks |
+| `/auto-harness schedule status <task_id>` | View task details |
+| `/auto-harness schedule logs <task_id> [--history <n>]` | View task execution logs |
+| `/auto-harness schedule cancel <task_id>` | Cancel a task |
+| `/auto-harness schedule delete <task_id>` | Delete a task |
+
+#### `/auto-harness run` (One-time Execution)
+
+- Usage: `/auto-harness run [--pipeline <pipeline>] <query>`
+- Flow:
+  1. If pipeline is not specified, interactively select the pipeline type
+  2. If `optimize_meta_harness` is selected, automatically check git config completeness
+  3. Create and execute a one-time task
+  4. Automatically enter real-time log streaming mode (similar to `tail -f`)
+- Examples:
+  - `/auto-harness run Optimize database query performance` — No pipeline specified, interactive selection
+  - `/auto-harness run --pipeline optimize_expert_harness Optimize context compression` — Specify pipeline
+
+#### `/auto-harness schedule start` (Create Scheduled Task)
+
+- Usage: `/auto-harness schedule start --interval <hours> [--pipeline <pipeline>] <query>`
+- Parameters:
+  - `--interval` / `-i` (required): Execution interval in hours; options: `1`, `2`, `4`, `8`, `12`, `24`
+  - `--pipeline` / `-p` (optional): Pipeline type; interactively selected if not specified
+  - `<query>` (required): Optimization target description
+- Flow:
+  1. If pipeline is not specified, interactively select
+  2. If `optimize_meta_harness` is selected, check git config
+  3. Interactively confirm whether to run immediately
+  4. Create the scheduled task
+- Examples:
+  - `/auto-harness schedule start --interval 4 Optimize context compression`
+  - `/auto-harness schedule start -i 2 -p optimize_meta_harness Submit database optimization PR`
+
+#### `/auto-harness schedule logs` (View Execution Logs)
+
+- Usage: `/auto-harness schedule logs <task_id> [--history <n>]`
+- Modes:
+  - Default: Stream current running logs in real-time (`tail -f` mode); Ctrl+C to interrupt
+  - `--history <n>`: View historical execution logs (`view` mode, `n` is the history index, 0 = most recent)
 
 ---
 
