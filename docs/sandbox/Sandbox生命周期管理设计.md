@@ -350,7 +350,7 @@ sequenceDiagram
 ```yaml
 gateway:
   routing:
-    idle_timeout_seconds: 300  # 空闲5分钟后销毁
+    idle_timeout_seconds: 600  # 空闲10分钟后销毁
     idle_check_interval_seconds: 30  # 每30秒检查一次
 ```
 

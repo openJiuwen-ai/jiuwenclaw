@@ -1,292 +1,706 @@
-"""SkillCreate 端到端 WebSocket 联调：message.send → skilldev.chat，自动应答确认事件。
+"""SkillCreate 端到端 WebSocket 联调（交互模式）。
 
-用法（需已创建 SkillCreate session，通常由 test_vibeskill_whole.sh 调用）::
+按照当前 ``skilldev_agent`` 的事件协议工作：
 
-    uv run python scripts/vibeskill/test_ws_whole.py <sessionID>
+- 通过 ``message.send`` 触发 ``skilldev.chat``；
+- 实时在终端展示 agent 流式输出 / 工具调用 / Todo / 阶段进度；
+- 遇到需要用户决策的事件（``question.asked`` / ``review.asked`` /
+  ``desc_optimize.asked`` / ``test.asked`` / ``skillSearch.asked``）时，
+  在命令行交互提示，由用户输入决定回复内容，再发送对应的 ``*.replied``；
+- 收到 ``task.completed`` 时调用 ``POST /api/v1/session/{id}/export`` 触发导出；
+- 收到 ``session.status`` 且 ``status.type == completed`` 时正常退出。
 
-结束条件：收到 ``session.status`` 且 ``status.type == completed``（对应 skilldev.completed）。
-**当且仅当**收到 ``task.completed`` 时调用 ``POST /session/{id}/export``。
-``question.replied`` 走 ``skilldev.user_answer``；``review.replied`` 走 ``skilldev.chat``；desc_optimize/test 走 ``skilldev.respond``。
+当 ``skilldev.agent_completed`` 触发后服务端会主动断开北向 WebSocket，本脚本会自动
+重连，并把用户尚未发送的回复在重连后投递到新连接。
+
+用法::
+
+    uv run python scripts/vibeskill/test_ws_whole.py [sessionID] [--query ...]
+
+如果不提供 ``sessionID`` 或显式传 ``--create``，脚本会自动 ``POST /api/v1/session``
+创建一个 ``mode=SkillCreate`` 的会话再开始联调。
 """
 
 from __future__ import annotations
 
+import argparse
 import asyncio
 import json
 import logging
 import os
 import sys
+from typing import Any
 
 import aiohttp
 
 
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("skilldev.cli")
 
-session_id = sys.argv[1] if len(sys.argv) > 1 else ""
 HTTP_BASE = os.environ.get("VIBESKILL_HTTP_BASE", "http://127.0.0.1:19002")
-
-
-_SKIP_OPTION_LABELS = frozenset({"继续迭代", "继续改进", "是，进行评估测试"})
-_PREFER_OPTION_SUBSTRINGS = (
-    "否",
-    "不进行评估",
-    "不进行",
-    "跳过",
-    "下一步",
-    "进入下一",
-    "move on",
-    "完成",
-    "结束",
-    "不再",
-    "接受",
-    "确认",
-    "打包",
-    "导出",
+WS_BASE = os.environ.get(
+    "VIBESKILL_WS_BASE",
+    "ws://127.0.0.1:19003/api/v1/messages",
 )
+DEFAULT_QUERY = os.environ.get(
+    "VIBESKILL_DEFAULT_QUERY",
+    "创建一个大数乘法的skill",
+)
+DEFAULT_MODEL: dict[str, str] = {
+    "providerID": os.environ.get("VIBESKILL_PROVIDER_ID", "llm_OpenAI"),
+    "modelID": os.environ.get("VIBESKILL_MODEL_ID", "deepseek-v3-250324"),
+}
+
+RECV_TIMEOUT = float(os.environ.get("VIBESKILL_RECV_TIMEOUT", "300"))
+MAX_CONSECUTIVE_TIMEOUTS = int(os.environ.get("VIBESKILL_MAX_TIMEOUTS", "12"))
 
 
-def _should_skip_auto_option(label: str) -> bool:
-    text = label.strip()
-    if not text:
-        return True
-    if text in _SKIP_OPTION_LABELS:
-        return True
-    lower = text.lower()
-    if "继续迭代" in text or "继续改进" in text:
-        return True
-    if "continue" in lower and ("improv" in lower or "iterat" in lower):
-        return True
-    if "评估测试" in text or "进行评估" in text:
-        # Keep「否 / 不…」decline options; skip affirmative eval choices.
-        if text.startswith("否") or text.startswith("不") or "跳过" in text:
-            return False
-        return True
-    return False
+# ---------------------------------------------------------------------------
+# Pretty terminal printing
+# ---------------------------------------------------------------------------
+
+class StreamPrinter:
+    """跟踪当前正在流式输出的 part，保证 delta 拼接显示，并在切换时换行。"""
+
+    def __init__(self) -> None:
+        self._current_part_id: str | None = None
+        self._current_kind: str | None = None
+
+    def _flush_current(self) -> None:
+        if self._current_part_id is not None:
+            print("", flush=True)
+        self._current_part_id = None
+        self._current_kind = None
+
+    def stream_text(self, part_id: str, kind: str, text: str) -> None:
+        if not text:
+            return
+        if part_id != self._current_part_id or kind != self._current_kind:
+            self._flush_current()
+            prefix = "[think] " if kind == "reasoning" else "[agent] "
+            print(prefix, end="", flush=True)
+            self._current_part_id = part_id
+            self._current_kind = kind
+        print(text, end="", flush=True)
+
+    def line(self, text: str = "") -> None:
+        self._flush_current()
+        if text:
+            print(text, flush=True)
 
 
-def _pick_option_label(options: list) -> str:
-    """Pick an option for automated E2E; skip「继续迭代」and eval-test consent."""
-    labels: list[str] = []
-    for opt in options:
-        if not isinstance(opt, dict):
-            continue
-        label = str(opt.get("label") or "").strip()
-        if label:
-            labels.append(label)
-    if not labels:
-        return ""
+# ---------------------------------------------------------------------------
+# HTTP helpers
+# ---------------------------------------------------------------------------
 
-    for prefer in _PREFER_OPTION_SUBSTRINGS:
-        for label in labels:
-            if _should_skip_auto_option(label):
-                continue
-            if prefer.lower() in label.lower():
-                return label
-
-    for label in labels:
-        if not _should_skip_auto_option(label):
-            return label
-
-    # All options are skip-only (e.g. single「继续迭代」): use last option if any.
-    return labels[-1]
-
-
-def _build_auto_answers(questions: list[dict]) -> list[list[str]]:
-    """为 question.asked 自动选择选项（跳过「继续迭代」「进行评估测试」等）。"""
-    answers: list[list[str]] = []
-    for q in questions:
-        options = q.get("options", []) if isinstance(q, dict) else []
-        label = _pick_option_label(options if isinstance(options, list) else [])
-        answers.append([label] if label else [])
-    return answers
-
-
-async def _send_auto_replies(ws: aiohttp.ClientWebSocketResponse, msg_type: str, props: dict) -> bool:
-    """对 question/review/desc_optimize/test.asked 自动回填；已发送则返回 True。"""
-    if msg_type == "question.asked":
-        qid = str(props.get("id") or "")
-        questions = props.get("questions", [])
-        answers = _build_auto_answers(questions if isinstance(questions, list) else [])
-        reply_msg = {
-            "type": "question.replied",
-            "properties": {
-                "sessionID": session_id,
-                "requestID": qid,
-                "answers": answers,
-            },
-        }
-        await ws.send_str(json.dumps(reply_msg, ensure_ascii=False))
-        logger.info(
-            "sent question.replied (skilldev.user_answer) requestID=%s answers=%s",
-            qid,
-            answers,
-        )
-        return True
-
-    if msg_type == "review.asked":
-        rid = str(props.get("id") or "")
-        reply_msg = {
-            "type": "review.replied",
-            "properties": {
-                "id": rid,
-                "sessionID": session_id,
-                "accept": True,
-            },
-        }
-        await ws.send_str(json.dumps(reply_msg, ensure_ascii=False))
-        logger.info("sent review.replied (skilldev.chat) id=%s accept=true", rid)
-        return True
-
-    if msg_type == "desc_optimize.asked":
-        did = str(props.get("id") or "")
-        reply_msg = {
-            "type": "desc_optimize.replied",
-            "properties": {
-                "id": did,
-                "sessionID": session_id,
-                "accept": False,
-            },
-        }
-        await ws.send_str(json.dumps(reply_msg, ensure_ascii=False))
-        logger.info("sent desc_optimize.replied (skilldev.respond) id=%s accept=false", did)
-        return True
-
-    if msg_type == "test.asked":
-        tid = str(props.get("id") or "")
-        reply_msg = {
-            "type": "test.replied",
-            "properties": {
-                "id": tid,
-                "sessionID": session_id,
-                "accept": True,
-            },
-        }
-        await ws.send_str(json.dumps(reply_msg, ensure_ascii=False))
-        logger.info("sent test.replied (skilldev.respond) id=%s accept=true", tid)
-        return True
-
-    return False
-
-
-async def _export_skill(http_session: aiohttp.ClientSession) -> dict:
-    """收到 task.completed 后导出 skill 产物。"""
-    url = f"{HTTP_BASE}/api/v1/session/{session_id}/export"
-    async with http_session.post(url, json={}) as resp:
+async def _create_session(http: aiohttp.ClientSession) -> str:
+    url = f"{HTTP_BASE}/api/v1/session"
+    async with http.post(url, json={"mode": "SkillCreate"}) as resp:
         body = await resp.json()
         if resp.status not in (200, 201):
-            raise AssertionError(f"export failed HTTP {resp.status}: {body}")
+            raise SystemExit(f"create session failed HTTP {resp.status}: {body}")
+        sid = str(body.get("sessionID") or "").strip()
+        if not sid:
+            raise SystemExit(f"create session missing sessionID: {body}")
+        return sid
+
+
+async def _export_skill(http: aiohttp.ClientSession, session_id: str) -> dict[str, Any]:
+    url = f"{HTTP_BASE}/api/v1/session/{session_id}/export"
+    async with http.post(url, json={}) as resp:
+        body = await resp.json()
+        if resp.status not in (200, 201):
+            logger.warning("export failed HTTP %s: %s", resp.status, body)
+            return body if isinstance(body, dict) else {}
         logger.info("export response: %s", json.dumps(body, ensure_ascii=False))
         return body if isinstance(body, dict) else {}
 
 
-async def test() -> None:
-    if not str(session_id or "").strip():
-        raise SystemExit("usage: test_ws_whole.py <sessionID>")
+# ---------------------------------------------------------------------------
+# Interactive prompts
+# ---------------------------------------------------------------------------
 
-    uri = f"ws://127.0.0.1:19003/api/v1/messages?sessionID={session_id}"
-    logger.info("Connecting to %s", uri)
+async def _ainput(prompt: str) -> str:
+    """协程友好的 ``input()``。"""
+    return await asyncio.to_thread(input, prompt)
 
-    pipeline_completed = False
-    task_completed_seen = False
-    export_done = False
-    recv_timeout = 300.0
-    max_consecutive_timeouts = 12
-    consecutive_timeouts = 0
 
-    async with aiohttp.ClientSession() as http_session:
-        async with http_session.ws_connect(uri) as ws:
-            logger.info("connected, sessionId: %s", session_id)
+def _print_question_options(options: list[Any]) -> list[str]:
+    labels: list[str] = []
+    for idx, opt in enumerate(options):
+        if not isinstance(opt, dict):
+            continue
+        label = str(opt.get("label") or "").strip()
+        desc = str(opt.get("description") or "").strip()
+        labels.append(label)
+        suffix = f" — {desc}" if desc else ""
+        print(f"    [{idx + 1}] {label}{suffix}", flush=True)
+    return labels
 
-            msg = await ws.receive()
-            logger.info("ack: %s", msg.data)
 
+async def _prompt_question_answers(questions: list[Any]) -> list[list[str]]:
+    print("\n>>> Agent 请你回答以下问题：", flush=True)
+    answers: list[list[str]] = []
+    for q_idx, q in enumerate(questions):
+        if not isinstance(q, dict):
+            answers.append([])
+            continue
+        question_text = str(q.get("question") or "").strip()
+        header = str(q.get("header") or "").strip()
+        options_raw = q.get("options", []) if isinstance(q.get("options"), list) else []
+        multiple = bool(q.get("multiple"))
+
+        print(f"\n  Q{q_idx + 1}. {question_text}", flush=True)
+        if header:
+            print(f"     ({header})", flush=True)
+        labels = _print_question_options(options_raw)
+
+        hint = (
+            "    多选请用逗号分隔编号；回车默认第一项；输入文本则按原样作为回答："
+            if multiple
+            else "    输入编号或自定义文本（回车默认第一项）："
+        )
+        raw = (await _ainput(hint)).strip()
+
+        if not raw:
+            answers.append(labels[:1])
+            continue
+
+        token_text = raw.replace(",", " ").replace("，", " ")
+        tokens = [t for t in token_text.split() if t]
+        is_all_digits = bool(tokens) and all(t.isdigit() for t in tokens)
+        if is_all_digits and labels:
+            picks: list[str] = []
+            for token in tokens:
+                idx = int(token) - 1
+                if 0 <= idx < len(labels):
+                    picks.append(labels[idx])
+            if not multiple:
+                picks = picks[:1]
+            answers.append(picks if picks else labels[:1])
+        else:
+            answers.append([raw])
+
+    return answers
+
+
+async def _prompt_review(report: str, iteration: Any) -> tuple[bool, str]:
+    print(f"\n>>> 评测结果审阅（iteration={iteration}）", flush=True)
+    if report:
+        snippet = report if len(report) <= 1200 else report[:1200] + "\n...（已截断）..."
+        print("--- benchmark report ---", flush=True)
+        print(snippet, flush=True)
+        print("------------------------", flush=True)
+    print("  [1] 通过，进入下一步", flush=True)
+    print("  [2] 继续改进（可选填反馈意见）", flush=True)
+    raw = (await _ainput("    选择（默认 1）：")).strip()
+    if raw in ("", "1"):
+        return True, ""
+    feedback = (await _ainput("    反馈意见（可空）：")).strip()
+    return False, feedback
+
+
+async def _prompt_yes_no(prompt: str, default_yes: bool = True) -> bool:
+    suffix = " [Y/n]: " if default_yes else " [y/N]: "
+    raw = (await _ainput(prompt + suffix)).strip().lower()
+    if not raw:
+        return default_yes
+    return raw in ("y", "yes", "是", "1", "true")
+
+
+async def _prompt_skill_search(skill_list: list[Any]) -> tuple[str, dict[str, Any] | None]:
+    print("\n>>> Agent 搜索到以下可参考 skill：", flush=True)
+    for idx, sk in enumerate(skill_list):
+        if not isinstance(sk, dict):
+            continue
+        name = sk.get("skillName") or sk.get("skill_name") or sk.get("skillId") or "(unnamed)"
+        desc = str(sk.get("description") or "").strip()
+        suffix = f" — {desc}" if desc else ""
+        print(f"  [{idx + 1}] {name}{suffix}", flush=True)
+    print("  [0] 忽略，继续自行创建", flush=True)
+    raw = (await _ainput("    选择（默认 0）：")).strip()
+    if raw and raw != "0":
+        try:
+            idx = int(raw) - 1
+        except ValueError:
+            idx = -1
+        if 0 <= idx < len(skill_list) and isinstance(skill_list[idx], dict):
+            return "select", dict(skill_list[idx])
+    return "ignore", None
+
+
+# ---------------------------------------------------------------------------
+# Reply builders
+# ---------------------------------------------------------------------------
+
+def _build_question_reply(session_id: str, request_id: str, answers: list[list[str]]) -> dict[str, Any]:
+    return {
+        "type": "question.replied",
+        "properties": {
+            "sessionID": session_id,
+            "requestID": request_id,
+            "answers": answers,
+        },
+    }
+
+
+def _build_review_reply(session_id: str, request_id: str, accept: bool, feedback: str) -> dict[str, Any]:
+    props: dict[str, Any] = {
+        "id": request_id,
+        "sessionID": session_id,
+        "accept": accept,
+    }
+    if feedback:
+        props["feedback"] = feedback
+    return {"type": "review.replied", "properties": props}
+
+
+def _build_desc_optimize_reply(session_id: str, request_id: str, accept: bool) -> dict[str, Any]:
+    return {
+        "type": "desc_optimize.replied",
+        "properties": {"id": request_id, "sessionID": session_id, "accept": accept},
+    }
+
+
+def _build_test_reply(session_id: str, request_id: str, accept: bool) -> dict[str, Any]:
+    return {
+        "type": "test.replied",
+        "properties": {"id": request_id, "sessionID": session_id, "accept": accept},
+    }
+
+
+def _build_skill_search_reply(
+    session_id: str,
+    action: str,
+    skill: dict[str, Any] | None,
+    query: str,
+) -> dict[str, Any]:
+    props: dict[str, Any] = {
+        "sessionID": session_id,
+        "action": action,
+        "parts": [{"type": "text", "text": query}],
+    }
+    if action == "select" and skill:
+        props["skill"] = {
+            "skillId": str(skill.get("skillId") or skill.get("skill_id") or ""),
+            "skillName": str(skill.get("skillName") or skill.get("skill_name") or ""),
+            "url": str(skill.get("url") or ""),
+        }
+    return {"type": "skillSearch.replied", "properties": props}
+
+
+# ---------------------------------------------------------------------------
+# Event handlers (display + interactive)
+# ---------------------------------------------------------------------------
+
+class SessionRunner:
+    def __init__(self, session_id: str, initial_query: str) -> None:
+        self.session_id = session_id
+        self.initial_query = initial_query
+        self.printer = StreamPrinter()
+        self.task_completed_seen = False
+        self.export_done = False
+        self.session_completed = False
+        self._initial_sent = False
+        self._pending_reply: dict[str, Any] | None = None
+        self._tool_logged: dict[str, str] = {}
+
+    # ----------------- WS connection lifecycle -----------------
+
+    async def run(self, http: aiohttp.ClientSession) -> None:
+        uri = f"{WS_BASE}?sessionID={self.session_id}"
+        reconnect_attempt = 0
+        max_reconnect = int(os.environ.get("VIBESKILL_MAX_RECONNECT", "10"))
+
+        while not self.session_completed:
+            logger.info("connecting WS %s", uri)
+            try:
+                async with http.ws_connect(uri, heartbeat=30) as ws:
+                    reconnect_attempt = 0
+                    await self._on_connected(ws)
+                    await self._receive_loop(ws, http)
+            except aiohttp.ClientError as exc:
+                logger.warning("ws connect error: %s", exc)
+
+            if self.session_completed:
+                break
+
+            reconnect_attempt += 1
+            if reconnect_attempt > max_reconnect:
+                raise AssertionError(
+                    f"WS reconnect exceeded {max_reconnect} attempts before completion"
+                )
+            backoff = min(1.0 * reconnect_attempt, 5.0)
+            self.printer.line(f"[ws] disconnected, reconnecting in {backoff:.1f}s...")
+            await asyncio.sleep(backoff)
+
+    async def _on_connected(self, ws: aiohttp.ClientWebSocketResponse) -> None:
+        ack = await ws.receive()
+        if ack.type == aiohttp.WSMsgType.TEXT:
+            logger.info("server hello: %s", ack.data)
+
+        if not self._initial_sent:
             send_msg = {
                 "type": "message.send",
-                "sessionID": session_id,
-                "parts": [{"type": "text", "text": "创建一个大数乘法的skill"}],
-                "model": {"providerID": "llm_OpenAI", "modelID": "deepseek-v3-250324"},
+                "sessionID": self.session_id,
+                "parts": [{"type": "text", "text": self.initial_query}],
+                "model": DEFAULT_MODEL,
                 "agent": "coder",
             }
             await ws.send_str(json.dumps(send_msg, ensure_ascii=False))
-            logger.info("sent message.send (maps to skilldev.chat)")
+            self._initial_sent = True
+            logger.info("sent message.send query=%r", self.initial_query)
+            self.printer.line(f"[you] {self.initial_query}")
 
-            while True:
-                try:
-                    msg = await asyncio.wait_for(ws.receive(), timeout=recv_timeout)
-                    consecutive_timeouts = 0
-                except asyncio.TimeoutError:
-                    consecutive_timeouts += 1
-                    logger.warning(
-                        "timeout waiting for message (%d/%d)",
-                        consecutive_timeouts,
-                        max_consecutive_timeouts,
+        if self._pending_reply is not None:
+            await ws.send_str(json.dumps(self._pending_reply, ensure_ascii=False))
+            logger.info("re-sent pending reply: %s", self._pending_reply.get("type"))
+            self._pending_reply = None
+
+    async def _receive_loop(
+        self, ws: aiohttp.ClientWebSocketResponse, http: aiohttp.ClientSession
+    ) -> None:
+        consecutive_timeouts = 0
+        while True:
+            try:
+                msg = await asyncio.wait_for(ws.receive(), timeout=RECV_TIMEOUT)
+                consecutive_timeouts = 0
+            except asyncio.TimeoutError:
+                consecutive_timeouts += 1
+                logger.warning(
+                    "recv timeout %d/%d", consecutive_timeouts, MAX_CONSECUTIVE_TIMEOUTS
+                )
+                if consecutive_timeouts >= MAX_CONSECUTIVE_TIMEOUTS:
+                    raise AssertionError(
+                        f"stopped: too many consecutive recv timeouts "
+                        f"(session_completed={self.session_completed})"
                     )
-                    if consecutive_timeouts >= max_consecutive_timeouts:
-                        raise AssertionError(
-                            "stopped: too many consecutive receive timeouts "
-                            f"(pipeline_completed={pipeline_completed})"
-                        )
+                continue
 
-                if msg.type == aiohttp.WSMsgType.CLOSED:
-                    raise AssertionError("WebSocket closed before session.status completed")
+            if msg.type in (
+                aiohttp.WSMsgType.CLOSED,
+                aiohttp.WSMsgType.CLOSING,
+                aiohttp.WSMsgType.CLOSE,
+            ):
+                logger.info("ws closed by server (code=%s)", msg.data)
+                return
+            if msg.type == aiohttp.WSMsgType.ERROR:
+                logger.warning("ws error frame: %s", ws.exception())
+                return
+            if msg.type != aiohttp.WSMsgType.TEXT:
+                continue
 
-                if msg.type != aiohttp.WSMsgType.TEXT:
-                    continue
+            try:
+                data = json.loads(msg.data)
+            except json.JSONDecodeError:
+                logger.debug("non-json frame ignored: %r", msg.data[:200])
+                continue
 
-                try:
-                    data = json.loads(msg.data)
-                except json.JSONDecodeError:
-                    logger.debug("skip non-json frame")
-                    continue
+            await self._dispatch_event(ws, http, data)
+            if self.session_completed:
+                return
 
-                msg_type = str(data.get("type") or "")
-                props = data.get("properties") if isinstance(data.get("properties"), dict) else {}
+    # ----------------- event dispatch -----------------
 
-                if msg_type == "todo.updated":
-                    continue
+    async def _dispatch_event(
+        self,
+        ws: aiohttp.ClientWebSocketResponse,
+        http: aiohttp.ClientSession,
+        data: dict[str, Any],
+    ) -> None:
+        mtype = str(data.get("type") or "")
+        props = data.get("properties") if isinstance(data.get("properties"), dict) else {}
 
-                if msg_type == "task.error":
-                    err = str(props.get("error") or "unknown")
-                    raise AssertionError(f"task.error: {err}")
+        if mtype == "session.updated":
+            title = str(props.get("title") or "").strip()
+            if title:
+                self.printer.line(f"[skill name] {title}")
+            return
 
-                if msg_type == "task.completed":
-                    task_completed_seen = True
-                    logger.info("received task.completed")
-                    if not export_done:
-                        await _export_skill(http_session)
-                        export_done = True
-                    continue
+        if mtype == "session.status":
+            status = props.get("status") if isinstance(props.get("status"), dict) else {}
+            stype = str(status.get("type") or "").strip()
+            if stype == "completed":
+                self.session_completed = True
+                self.printer.line("[session.status] completed")
+            elif stype == "busy":
+                logger.debug("session.status busy")
+            elif stype == "idle":
+                logger.debug("session.status idle (agent paused, awaiting user)")
+            return
 
-                if msg_type == "session.status":
-                    status = props.get("status") if isinstance(props.get("status"), dict) else {}
-                    status_type = str(status.get("type") or "").strip()
-                    if status_type == "busy":
-                        logger.info("session.status busy")
-                        continue
-                    if status_type == "completed":
-                        pipeline_completed = True
-                        logger.info("received session.status completed, stop")
-                        break
+        if mtype == "task.error":
+            err = str(props.get("error") or props.get("message") or "unknown")
+            self.printer.line(f"[error] {err}")
+            raise AssertionError(f"task.error: {err}")
 
-                if await _send_auto_replies(ws, msg_type, props):
-                    continue
+        if mtype == "task.completed":
+            self.task_completed_seen = True
+            self.printer.line("[task.completed] exporting skill artifact ...")
+            if not self.export_done:
+                await _export_skill(http, self.session_id)
+                self.export_done = True
+            return
 
-    if not task_completed_seen:
-        raise AssertionError("did not receive task.completed")
-    if not export_done:
-        raise AssertionError("export was not triggered after task.completed")
-    if not pipeline_completed:
-        raise AssertionError("did not receive session.status completed")
+        if mtype == "todo.updated":
+            self._print_todos(props.get("todos", []))
+            return
+
+        if mtype == "message.updated":
+            return  # purely a message-frame announcement; nothing to render
+
+        if mtype == "message.part.updated":
+            self._handle_part_updated(props)
+            return
+
+        if mtype == "message.part.delta":
+            self._handle_part_delta(props)
+            return
+
+        if mtype == "question.asked":
+            await self._handle_question_asked(ws, props)
+            return
+
+        if mtype == "review.asked":
+            await self._handle_review_asked(ws, props)
+            return
+
+        if mtype == "desc_optimize.asked":
+            await self._handle_desc_optimize_asked(ws, props)
+            return
+
+        if mtype == "test.asked":
+            await self._handle_test_asked(ws, props)
+            return
+
+        if mtype == "skillSearch.asked":
+            await self._handle_skill_search_asked(ws, props)
+            return
+
+        logger.debug("unhandled type=%s", mtype)
+
+    # ----------------- display helpers -----------------
+
+    def _print_todos(self, todos: Any) -> None:
+        if not isinstance(todos, list) or not todos:
+            return
+        self.printer.line("[todos]")
+        marks = {"completed": "x", "in_progress": "~", "cancelled": "-", "pending": " "}
+        for todo in todos:
+            if not isinstance(todo, dict):
+                continue
+            status = str(todo.get("status") or "pending")
+            label = str(todo.get("label") or todo.get("content") or "").strip()
+            mark = marks.get(status, "?")
+            print(f"  [{mark}] {label}", flush=True)
+
+    def _handle_part_updated(self, props: dict[str, Any]) -> None:
+        part_type = str(props.get("type") or "").strip()
+        part_id = str(props.get("partID") or props.get("id") or "").strip()
+        if part_type in ("text", "reasoning"):
+            text = str(props.get("text") or "")
+            self.printer.stream_text(part_id, part_type, text)
+            return
+        if part_type == "tool":
+            self._print_tool_part(part_id, props)
+            return
+
+    def _handle_part_delta(self, props: dict[str, Any]) -> None:
+        part_type = str(props.get("type") or "").strip() or "text"
+        part_id = str(props.get("partID") or props.get("id") or "").strip()
+        text = str(props.get("text") or "")
+        if not text:
+            return
+        if part_type in ("text", "reasoning"):
+            self.printer.stream_text(part_id, part_type, text)
+
+    def _print_tool_part(self, part_id: str, props: dict[str, Any]) -> None:
+        tool_name = str(props.get("tool") or props.get("name") or "").strip() or "tool"
+        state = props.get("state") if isinstance(props.get("state"), dict) else {}
+        status = str(state.get("status") or "").strip()
+        title = str(state.get("title") or "").strip()
+        signature = f"{tool_name}::{status}"
+        if self._tool_logged.get(part_id) == signature:
+            return
+        self._tool_logged[part_id] = signature
+        line = f"[tool] {tool_name}"
+        if status:
+            line += f" [{status}]"
+        if title:
+            line += f" — {title}"
+        self.printer.line(line)
+
+        if status in ("completed", "error"):
+            output = state.get("output")
+            if output is not None:
+                rendered = (
+                    output if isinstance(output, str) else json.dumps(output, ensure_ascii=False)
+                )
+                if len(rendered) > 400:
+                    rendered = rendered[:400] + "...(truncated)"
+                print(f"       output: {rendered}", flush=True)
+
+    # ----------------- interactive replies -----------------
+
+    async def _send_or_queue(
+        self, ws: aiohttp.ClientWebSocketResponse, reply: dict[str, Any]
+    ) -> None:
+        try:
+            if ws.closed:
+                raise aiohttp.ClientError("ws already closed before send")
+            await ws.send_str(json.dumps(reply, ensure_ascii=False))
+            logger.info("sent %s", reply.get("type"))
+        except (aiohttp.ClientError, ConnectionResetError, RuntimeError) as exc:
+            logger.warning(
+                "send %s failed (%s); queueing for reconnect",
+                reply.get("type"),
+                exc,
+            )
+            self._pending_reply = reply
+
+    async def _handle_question_asked(
+        self, ws: aiohttp.ClientWebSocketResponse, props: dict[str, Any]
+    ) -> None:
+        request_id = str(props.get("id") or "")
+        questions = props.get("questions", []) if isinstance(props.get("questions"), list) else []
+        self.printer.line()
+        answers = await _prompt_question_answers(questions)
+        await self._send_or_queue(
+            ws, _build_question_reply(self.session_id, request_id, answers)
+        )
+
+    async def _handle_review_asked(
+        self, ws: aiohttp.ClientWebSocketResponse, props: dict[str, Any]
+    ) -> None:
+        request_id = str(props.get("id") or "")
+        report = str(props.get("report") or "").strip()
+        iteration = props.get("iteration")
+        self.printer.line()
+        accept, feedback = await _prompt_review(report, iteration)
+        await self._send_or_queue(
+            ws,
+            _build_review_reply(self.session_id, request_id, accept, feedback),
+        )
+
+    async def _handle_desc_optimize_asked(
+        self, ws: aiohttp.ClientWebSocketResponse, props: dict[str, Any]
+    ) -> None:
+        request_id = str(props.get("id") or "")
+        current = str(props.get("current_description") or "").strip()
+        self.printer.line()
+        print(">>> 是否跳过对描述的进一步优化？", flush=True)
+        if current:
+            print(f"  当前描述：{current}", flush=True)
+        accept = await _prompt_yes_no("  跳过描述优化", default_yes=True)
+        await self._send_or_queue(
+            ws, _build_desc_optimize_reply(self.session_id, request_id, accept)
+        )
+
+    async def _handle_test_asked(
+        self, ws: aiohttp.ClientWebSocketResponse, props: dict[str, Any]
+    ) -> None:
+        request_id = str(props.get("id") or "")
+        info = str(props.get("message") or "").strip()
+        self.printer.line()
+        print(">>> 是否进入评估测试设计阶段？", flush=True)
+        if info:
+            print(f"  {info}", flush=True)
+        accept = await _prompt_yes_no("  进行评估测试", default_yes=True)
+        await self._send_or_queue(
+            ws, _build_test_reply(self.session_id, request_id, accept)
+        )
+
+    async def _handle_skill_search_asked(
+        self, ws: aiohttp.ClientWebSocketResponse, props: dict[str, Any]
+    ) -> None:
+        skill_list = props.get("skillList") or props.get("skill_list") or []
+        if not isinstance(skill_list, list):
+            skill_list = []
+        self.printer.line()
+        action, skill = await _prompt_skill_search(skill_list)
+        await self._send_or_queue(
+            ws,
+            _build_skill_search_reply(
+                self.session_id, action, skill, self.initial_query
+            ),
+        )
+
+
+# ---------------------------------------------------------------------------
+# Entry point
+# ---------------------------------------------------------------------------
+
+def _parse_args(argv: list[str]) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description=__doc__,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    parser.add_argument(
+        "session_id",
+        nargs="?",
+        default="",
+        help="已创建的 SkillCreate session ID；留空将自动创建一个新 session",
+    )
+    parser.add_argument(
+        "--query",
+        default="",
+        help=f"首条 message.send 的 query（默认: {DEFAULT_QUERY!r}）",
+    )
+    parser.add_argument(
+        "--no-prompt-query",
+        action="store_true",
+        help="不在脚本开始时提示输入 query，直接使用 --query 或默认值",
+    )
+    parser.add_argument(
+        "--create",
+        action="store_true",
+        help="即使传入了 session_id 也忽略，强制创建新的 SkillCreate session",
+    )
+    return parser.parse_args(argv)
+
+
+async def _resolve_query(args: argparse.Namespace) -> str:
+    query = (args.query or "").strip()
+    if query:
+        return query
+    if args.no_prompt_query:
+        return DEFAULT_QUERY
+    try:
+        entered = (
+            await _ainput(f"请输入初始 query（回车使用默认 {DEFAULT_QUERY!r}）：")
+        ).strip()
+    except EOFError:
+        entered = ""
+    return entered or DEFAULT_QUERY
+
+
+async def main(args: argparse.Namespace) -> None:
+    async with aiohttp.ClientSession() as http:
+        session_id = "" if args.create else (args.session_id or "").strip()
+        if not session_id:
+            session_id = await _create_session(http)
+            print(f"[created session] {session_id}", flush=True)
+
+        query = await _resolve_query(args)
+        runner = SessionRunner(session_id, query)
+        await runner.run(http)
+
+        if not runner.task_completed_seen:
+            logger.warning("未收到 task.completed，导出未被触发")
+        if not runner.session_completed:
+            logger.warning("未收到 session.status completed")
 
 
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO, format="%(levelname)s | %(message)s")
     try:
-        asyncio.run(test())
-        logger.info("PASS: SkillCreate pipeline completed")
+        asyncio.run(main(_parse_args(sys.argv[1:])))
+        logger.info("Done.")
     except AssertionError as exc:
         logger.error("%s", exc)
         sys.exit(1)
-    except Exception as exc:
+    except KeyboardInterrupt:
+        logger.warning("interrupted by user")
+        sys.exit(130)
+    except Exception as exc:  # pragma: no cover - top-level debug aid
         logger.exception("unexpected error: %s", exc)
         sys.exit(1)

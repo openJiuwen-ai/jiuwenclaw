@@ -29,7 +29,7 @@ from jiuwenclaw.schema.agent import AgentResponse, AgentResponseChunk
 logger = logging.getLogger(__name__)
 _LOG_LABEL = "[OpenAbilityWebSocketClient]"
 _STREAM_TRAILING_MESSAGE_GRACE_SECONDS = 0.7
-_UNARY_REQUEST_TIMEOUT_SECONDS = 60.0
+_DEFAULT_UNARY_REQUEST_TIMEOUT_SECONDS = 600.0
 _WS_MAX_SIZE = 8 * 2**20
 
 
@@ -76,6 +76,7 @@ class OpenAbilityWebSocketClient(AgentServerClient):
         *,
         ping_interval: float | None = 30.0,
         ping_timeout: float | None = 300.0,
+        request_timeout_seconds: float = _DEFAULT_UNARY_REQUEST_TIMEOUT_SECONDS,
     ) -> None:
         sid = str(sandbox_id or "").strip()
         if not sid:
@@ -86,6 +87,11 @@ class OpenAbilityWebSocketClient(AgentServerClient):
         self._lock = asyncio.Lock()
         self._ping_interval = ping_interval
         self._ping_timeout = ping_timeout
+        self._request_timeout_seconds = float(
+            request_timeout_seconds
+            if request_timeout_seconds and request_timeout_seconds > 0
+            else _DEFAULT_UNARY_REQUEST_TIMEOUT_SECONDS
+        )
         self._server_ready = False
         self._message_queues: dict[str, asyncio.Queue] = {}
         self._queue_lock = asyncio.Lock()
@@ -264,12 +270,12 @@ class OpenAbilityWebSocketClient(AgentServerClient):
                 await self._send_wire_payload(payload)
             try:
                 data = await asyncio.wait_for(
-                    queue.get(), timeout=_UNARY_REQUEST_TIMEOUT_SECONDS
+                    queue.get(), timeout=self._request_timeout_seconds
                 )
             except asyncio.TimeoutError as e:
                 raise RuntimeError(
                     f"OpenAbility 非流式请求超时 (request_id={rid}, "
-                    f"timeout={_UNARY_REQUEST_TIMEOUT_SECONDS}s)"
+                    f"timeout={self._request_timeout_seconds}s)"
                 ) from e
             return parse_agent_server_wire_unary(data)
         finally:

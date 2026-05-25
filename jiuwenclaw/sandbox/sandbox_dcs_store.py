@@ -10,7 +10,7 @@ from jiuwenclaw.sandbox.open_ability import OpenAbilityEndpoint
 from jiuwenclaw.utils import logger
 
 _DCS_SOCKET_CONNECT_TIMEOUT_SECONDS = 1.0
-_DCS_TTL_SECONDS = 0
+_DCS_DEFAULT_TTL_SECONDS = 86400
 _DCS_DEFAULT_PORT = 2881
 
 
@@ -26,6 +26,7 @@ class SandboxDcsConfig:
     host: str
     port: int
     password: str | None = None
+    ttl_seconds: int = _DCS_DEFAULT_TTL_SECONDS
 
     @classmethod
     def from_env(cls) -> SandboxDcsConfig:
@@ -39,6 +40,9 @@ class SandboxDcsConfig:
             host=host,
             port=_env_int("SANDBOX_DCS_PORT", default=_DCS_DEFAULT_PORT),
             password=password,
+            ttl_seconds=_env_int(
+                "SANDBOX_DCS_TTL_SECONDS", default=_DCS_DEFAULT_TTL_SECONDS
+            ),
         )
 
 
@@ -132,8 +136,9 @@ class SandboxDcsStore:
         )
         key = self._api_key_key(sandbox_id)
         await client.set(key, api_key_sha256)
-        if _DCS_TTL_SECONDS > 0:
-            await client.expire(key, _DCS_TTL_SECONDS)
+        ttl_seconds = self._config.ttl_seconds
+        if ttl_seconds > 0:
+            await client.expire(key, ttl_seconds)
         logger.info("Saved sandbox API key hash to DCS: key=%s", key)
         return record
 

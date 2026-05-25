@@ -7,6 +7,7 @@ _OA_USE_TLS = False
 _OA_CONNECT_TIMEOUT_SECONDS = 10.0
 _OA_READINESS_POLL_INTERVAL_SECONDS = 0.5
 _OA_READINESS_TIMEOUT_SECONDS = 60.0
+_OA_REQUEST_TIMEOUT_SECONDS = 600.0
 
 
 @dataclass(frozen=True)
@@ -22,6 +23,7 @@ class OpenAbilityConfig:
     connect_timeout_seconds: float = _OA_CONNECT_TIMEOUT_SECONDS
     readiness_poll_interval_seconds: float = _OA_READINESS_POLL_INTERVAL_SECONDS
     readiness_timeout_seconds: float = _OA_READINESS_TIMEOUT_SECONDS
+    request_timeout_seconds: float = _OA_REQUEST_TIMEOUT_SECONDS
 
     @classmethod
     def from_env(cls) -> OpenAbilityConfig:
@@ -30,7 +32,24 @@ class OpenAbilityConfig:
             raise RuntimeError(
                 "GATEWAY_TO_OA_WS_PATH environment variable is required when sandbox routing is enabled"
             )
-        return cls(ws_path=ws_path)
+        request_timeout_seconds = _env_float(
+            "SANDBOX_TO_OA_REQUEST_TIMEOUT_SECONDS",
+            default=_OA_REQUEST_TIMEOUT_SECONDS,
+        )
+        return cls(
+            ws_path=ws_path,
+            request_timeout_seconds=max(1.0, request_timeout_seconds),
+        )
+
+
+def _env_float(name: str, *, default: float) -> float:
+    raw = os.environ.get(name)
+    if raw is None or not str(raw).strip():
+        return default
+    try:
+        return float(str(raw).strip())
+    except ValueError:
+        return default
 
 
 def build_openability_ws_uri(endpoint: OpenAbilityEndpoint, *, ws_path: str) -> str:

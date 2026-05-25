@@ -379,7 +379,10 @@ class SandboxRouterAgentClient(AgentServerClient):
         open_ability_cfg = self._get_open_ability_config()
         endpoint = await self._wait_openability_endpoint(store, sandbox_id, open_ability_cfg)
         ws_uri = build_openability_ws_uri(endpoint, ws_path=open_ability_cfg.ws_path)
-        client = OpenAbilityWebSocketClient(sandbox_id=sandbox_id)
+        client = OpenAbilityWebSocketClient(
+            sandbox_id=sandbox_id,
+            request_timeout_seconds=open_ability_cfg.request_timeout_seconds,
+        )
         logger.info(
             "Connecting OpenAbility WebSocket for sandbox_id=%s routing_key=%s uri=%s",
             sandbox_id,

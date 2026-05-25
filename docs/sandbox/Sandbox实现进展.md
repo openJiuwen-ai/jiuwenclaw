@@ -141,7 +141,9 @@ _disconnect_agent_client(sandbox_id, agent_client) -> None
 | `SANDBOX_ENABLE` | 是否开启沙箱路由 | `false` |
 | `SANDBOX_MAX_NUM` | 同时存在的沙箱 runtime 上限 | `10` |
 | `SANDBOX_MAX_QUEUE_SIZE` | 达上限时 FIFO 等待队列长度 | `100` |
-| `SANDBOX_IDLE_TIMEOUT_SECONDS` | 空闲沙箱自动回收时间（秒） | `300` |
+| `SANDBOX_IDLE_TIMEOUT_SECONDS` | 空闲沙箱自动回收时间（秒） | `600` |
+| `SANDBOX_DURATION_SECONDS` | 沙箱在远端的存活时长（秒），创建/续期时传给沙箱服务 | `3600` |
+| `SANDBOX_TO_OA_REQUEST_TIMEOUT_SECONDS` | Gateway → OpenAbility 单次（非流式）请求应答超时（秒） | `600` |
 
 固定：`queue_enabled=true`（始终排队）、`queue_timeout_seconds=60`、`idle_check_interval_seconds=30`。
 
@@ -149,7 +151,9 @@ _disconnect_agent_client(sandbox_id, agent_client) -> None
 
 可选：`SANDBOX_INIT_DATA_PATH` — 沙箱内 `init_data.json` 上传路径；Gateway 与 AgentServer 均读取此变量，默认 `/home/sandbox/init_data.json`。
 
-SandboxClient 固定：`duration_seconds=3600`，`timeout_seconds=120`，`metadata={}`。
+可选：`SANDBOX_DCS_TTL_SECONDS` — 写入 DCS 的 sandbox API key 哈希记录的过期时间（秒），默认 `86400`（一天）；设置为 `0` 表示不设置过期时间。
+
+SandboxClient 固定：`timeout_seconds=120`，`metadata={}`。
 
 OpenAbility 固定：`use_tls=false`，`connect_timeout_seconds=10`，`readiness_poll_interval_seconds=0.5`，`readiness_timeout_seconds=60`。
 

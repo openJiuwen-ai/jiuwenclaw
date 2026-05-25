@@ -32,10 +32,13 @@ class SandboxConfig:
             raise RuntimeError(
                 "SANDBOX_TEMPLATE_ID environment variable is required when sandbox routing is enabled"
             )
+        duration_seconds = _env_int(
+            "SANDBOX_DURATION_SECONDS", default=_SANDBOX_DURATION_SECONDS
+        )
         return cls(
             api_base=api_base,
             template_id=template_id,
-            duration_seconds=_SANDBOX_DURATION_SECONDS,
+            duration_seconds=max(1, duration_seconds),
             timeout_seconds=_SANDBOX_TIMEOUT_SECONDS,
             metadata={},
         )
@@ -127,3 +130,13 @@ class SandboxClient:
             success=False,
             error=f"SandboxClient placeholder: {method} not implemented",
         )
+
+
+def _env_int(name: str, *, default: int) -> int:
+    raw = os.environ.get(name)
+    if raw is None or not str(raw).strip():
+        return default
+    try:
+        return int(str(raw).strip())
+    except ValueError:
+        return default
