@@ -154,6 +154,26 @@ class RedisClient:
         r = self._connection()
         return await r.get(self._cfg.effective_key(key))
 
+    async def mget(self, keys: list[str]) -> list[str | None]:
+        r = self._connection()
+        if not keys:
+            return []
+        effective_keys = [self._cfg.effective_key(key) for key in keys]
+        values = await r.mget(effective_keys)
+        return list(values) if values else []
+
+    async def scan_keys(self, pattern: str) -> list[str]:
+        r = self._connection()
+        effective_pattern = self._cfg.effective_key(pattern)
+        key_prefix = self._cfg.key_prefix or ""
+        keys: list[str] = []
+        async for raw_key in r.scan_iter(match=effective_pattern):
+            key = raw_key.decode("utf-8") if isinstance(raw_key, bytes) else str(raw_key)
+            if key_prefix and key.startswith(key_prefix):
+                key = key[len(key_prefix):]
+            keys.append(key)
+        return keys
+
     async def set(self, key: str, value: Any, ttl_seconds: int | None = None) -> bool:
         r = self._connection()
         v = value if isinstance(value, str) else str(value)

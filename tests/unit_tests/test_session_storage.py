@@ -3,11 +3,16 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 import pytest
 
+from jiuwenclaw.gateway.message_handler import MessageHandler
+from jiuwenclaw.gateway.session_map import SessionMap
+from jiuwenclaw.gateway.session_storage import RedisSessionStorage
+
 if TYPE_CHECKING:
+    from jiuwenclaw.gateway.agent_client import AgentServerClient
     from jiuwenclaw.gateway.session_map import Session
 
 
@@ -20,6 +25,73 @@ def _make_session(session_id: str, agent_id: str | None = None) -> Session:
         service_id=svc,
         agent_id=agent_id if agent_id is not None else derived_aid,
     )
+
+
+class _AsyncDictRedis:
+    def __init__(self) -> None:
+        self._data: dict[str, str] = {}
+
+    async def seed(self, key: str, value: str) -> None:
+        self._data[key] = value
+
+    def peek(self, key: str) -> str | None:
+        return self._data.get(key)
+
+    async def get(self, key: str) -> str | None:
+        return self._data.get(key)
+
+    async def set(self, key: str, value: str, ttl_seconds: int | None = None) -> bool:
+        self._data[key] = value
+        return True
+
+    async def delete(self, key: str) -> bool:
+        return self._data.pop(key, None) is not None
+
+    async def mget(self, keys: list[str]) -> list[str | None]:
+        return [self._data.get(key) for key in keys]
+
+    async def scan_keys(self, pattern: str) -> list[str]:
+        if pattern.endswith("*"):
+            prefix = pattern[:-1]
+            return [key for key in self._data if key.startswith(prefix)]
+        return [key for key in self._data if key == pattern]
+
+
+class _TestRedisSessionStorage(RedisSessionStorage):
+    def __init__(self, redis_client: _AsyncDictRedis, claw_id: str) -> None:
+        super().__init__()
+        self._redis = redis_client
+        self._claw_id = claw_id
+
+    async def seed_session(self, identity_key: str, raw_session: dict[str, str | None]) -> None:
+        assert self._redis is not None
+        await self._redis.set(self._redis_key(identity_key), json.dumps(raw_session))
+
+    def has_identity_key(self, identity_key: str) -> bool:
+        return bool(self._redis and self._redis.peek(self._redis_key(identity_key)))
+
+
+class _TestSessionMap(SessionMap):
+    def __init__(self, storage: _TestRedisSessionStorage) -> None:
+        super().__init__()
+        self._storage = storage
+
+
+class _TestMessageHandler(MessageHandler):
+    @classmethod
+    def build(cls, shared_redis: _AsyncDictRedis, claw_id: str):
+        cls._instance = None
+        handler = cls(cast("AgentServerClient", object()))
+        storage = _TestRedisSessionStorage(shared_redis, claw_id)
+        handler._session_map = _TestSessionMap(storage)
+        return handler
+
+    def apply_channel_state_for_test(self, msg) -> None:
+        self._apply_channel_state(msg)
+
+    @classmethod
+    def reset(cls) -> None:
+        cls._instance = None
 
 
 # ---------------------------------------------------------------------------
@@ -193,3 +265,63 @@ class TestSessionMapWithStorage:
         result = storage2.get(identity_key)
         assert result is not None
         assert result.session_id == session_id
+
+
+@pytest.mark.asyncio
+async def test_redis_session_storage_fetches_existing_session_without_local_cache() -> None:
+    from jiuwenclaw.gateway.session_map import invoke_service_id
+
+    test_storage = _TestRedisSessionStorage(_AsyncDictRedis(), "gateway-1")
+    storage = test_storage
+
+    identity_key = "feishu::chat-1::bot-1"
+    raw_session = {
+        "session_id": "feishu::chat-1::bot-1::abc123::def456",
+        "service_id": invoke_service_id("chat-1", "bot-1"),
+        "agent_id": None,
+    }
+    await test_storage.seed_session(identity_key, raw_session)
+
+    session = storage.get(identity_key)
+
+    assert session is not None
+    assert session.session_id == raw_session["session_id"]
+    assert storage.get_all()[identity_key].session_id == raw_session["session_id"]
+
+
+def test_message_handler_reuses_redis_backed_session_after_failover() -> None:
+    from jiuwenclaw.schema.message import Message, ReqMethod
+
+    shared_redis = _AsyncDictRedis()
+
+    def _make_feishu_message() -> Message:
+        return Message(
+            id="req-1",
+            type="req",
+            channel_id="feishu",
+            session_id="external-chat-1",
+            params={"query": "你好"},
+            timestamp=123.0,
+            ok=True,
+            req_method=ReqMethod.CHAT_SEND,
+            provider="feishu",
+            chat_id="chat-1",
+            bot_id="bot-1",
+            user_id="user-1",
+        )
+
+    primary_handler = _TestMessageHandler.build(shared_redis, "gateway-1")
+    first_msg = _make_feishu_message()
+    primary_handler.apply_channel_state_for_test(first_msg)
+    first_session_id = first_msg.session_id
+
+    assert _TestRedisSessionStorage(shared_redis, "gateway-1").has_identity_key("feishu::chat-1::bot-1")
+
+    standby_promoted_handler = _TestMessageHandler.build(shared_redis, "gateway-1")
+    second_msg = _make_feishu_message()
+    standby_promoted_handler.reload_session_map()
+    standby_promoted_handler.apply_channel_state_for_test(second_msg)
+
+    assert second_msg.session_id == first_session_id
+
+    _TestMessageHandler.reset()

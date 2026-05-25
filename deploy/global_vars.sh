@@ -27,14 +27,8 @@ GATEWAY_CONFIG_FILE="${SCRIPT_DIR}/conf/gateway-config.yaml"
 GATEWAY_ENV_TEMPLATE_FILE="${SCRIPT_DIR}/conf/gateway.template.env"
 GATEWAY_ENV_FILE="${SCRIPT_DIR}/conf/gateway.env"
 
-GATEWAY_RBAC_TEMPLATE_FILE="${SCRIPT_DIR}/conf/gateway-rbac.template.yaml"
-GATEWAY_RBAC_FILE="${SCRIPT_DIR}/conf/gateway-rbac.yaml"
-
-GATEWAY_DEPLOYMENT_TEMPLATE_FILE="${SCRIPT_DIR}/conf/gateway-deployment.template.yaml"
-GATEWAY_DEPLOYMENT_FILE="${SCRIPT_DIR}/conf/gateway-deployment.yaml"
-
-GATEWAY_SERVICE_TEMPLATE_FILE="${SCRIPT_DIR}/conf/gateway-service.template.yaml"
-GATEWAY_SERVICE_FILE="${SCRIPT_DIR}/conf/gateway-service.yaml"
+GATEWAY_TEMPLATE_FILE="${SCRIPT_DIR}/conf/gateway.template.yaml"
+GATEWAY_FILE="${SCRIPT_DIR}/conf/gateway.yaml"
 
 NFS_TEMPLATE_FILE="${SCRIPT_DIR}/conf/nfs.template.yaml"
 NFS_FILE="${SCRIPT_DIR}/conf/nfs.yaml"

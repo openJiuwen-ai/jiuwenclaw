@@ -40,80 +40,56 @@ gen_gateway_config_file() {
     success "ConfigMap file generation completed: ${GATEWAY_CONFIG_FILE}"
 }
 
-gen_gateway_deploy_file() {
+gen_gateway_file() {
     local client_type="${DEPLOY_VARS["AGENT_RUNTIME"]}"
     local mode="${DEPLOY_VARS["MODE"]}"
     local master_label=$(kubectl get node ${DEPLOY_VARS["MASTER_NODE_NAME"]} -o jsonpath='{.metadata.labels}' | grep -Eo 'node-role\.kubernetes\.io/(master|control-plane)' | head -1)
 
     # Render base template: adapt for yuanrong product mode
-    render_config_template "${GATEWAY_DEPLOYMENT_TEMPLATE_FILE}" "${GATEWAY_DEPLOYMENT_FILE}" "DEPLOY_VARS"
-
-    if [ "${mode}" == "dev" ]; then
-        # Override image with dev image
-        yq eval ".spec.template.spec.containers[0].image = \"${DEPLOY_VARS["GATEWAY_DEV_IMAGE"]}\"" -i "${GATEWAY_DEPLOYMENT_FILE}"
-
-        # Force pod to be scheduled on current master node
-        yq eval ".spec.template.spec.nodeName = \"${DEPLOY_VARS["MASTER_NODE_NAME"]}\"" -i "${GATEWAY_DEPLOYMENT_FILE}"
-
-        # Mount host source code directory into container
-        yq eval '
-            .spec.template.spec.containers[0].volumeMounts += [{
-                "name": "host-code",
-                "mountPath": "/app/jiuwenclaw"
-            }]
-        ' -i "${GATEWAY_DEPLOYMENT_FILE}"
-
-        yq eval '
-            .spec.template.spec.volumes += [{
-                "name": "host-code",
-                "hostPath": {
-                    "path": "'"${DEPLOY_VARS["HOST_CODE_PATH"]}"'",
-                    "type": "Directory"
-                }
-            }]
-        ' -i "${GATEWAY_DEPLOYMENT_FILE}"
-    fi
+    render_config_template "${GATEWAY_TEMPLATE_FILE}" "${GATEWAY_FILE}" "DEPLOY_VARS"
+    enable_dev_mode_if_needed ${GATEWAY_FILE} ${DEPLOY_VARS["GATEWAY_DEV_IMAGE"]}
 
     if [ "${client_type}" == "jiuwen" ]; then
         # Bind dedicated ServiceAccount to grant pod creation privileges
-        yq eval ".spec.template.spec.serviceAccountName = \"${DEPLOY_VARS["GATEWAY_SERVICE_ACCOUNT"]}\"" -i "${GATEWAY_DEPLOYMENT_FILE}"
+        yq eval 'select(.kind == "Deployment").spec.template.spec.serviceAccountName = "'"${DEPLOY_VARS["GATEWAY_SERVICE_ACCOUNT"]}"'"' -i "${GATEWAY_FILE}"
 
         # Override image with rt image
-        yq eval ".spec.template.spec.containers[0].image = \"${DEPLOY_VARS["GATEWAY_RT_IMAGE"]}\"" -i "${GATEWAY_DEPLOYMENT_FILE}"
+        yq eval 'select(.kind == "Deployment").spec.template.spec.containers[0].image = "'"${DEPLOY_VARS["GATEWAY_RT_IMAGE"]}"'"' -i "${GATEWAY_FILE}"
 
         # Inject environment variables via ConfigMap binding
         yq eval '
-            .spec.template.spec.containers[0].envFrom += [{
+            select(.kind == "Deployment").spec.template.spec.containers[0].envFrom += [{
                 "configMapRef": {
                     "name": "'"${DEPLOY_VARS["GATEWAY_ENV_FILE_NAME"]}"'"
                 }
             }]
-        ' -i "${GATEWAY_DEPLOYMENT_FILE}"
+        ' -i "${GATEWAY_FILE}"
 
         if [[ "${mode}" != "dev" ]] && if_any_nodes_gateway_label; then
             # Automatically create nodeSelector and set gateway=enable
-            yq eval '.spec.template.spec.nodeSelector |= {"gateway": "enable"}' -i "${GATEWAY_DEPLOYMENT_FILE}"
+            yq eval 'select(.kind == "Deployment").spec.template.spec.nodeSelector |= {"gateway": "enable"}' -i "${GATEWAY_FILE}"
         fi
     fi
 
     if [ "${mode}" == "dev" ] || [ "${client_type}" == "jiuwen" ]; then
          # Security context adaptation for root user
-        yq eval ".spec.template.spec.securityContext.fsGroup = 0" -i "${GATEWAY_DEPLOYMENT_FILE}"
-        yq eval ".spec.template.spec.containers[0].securityContext.allowPrivilegeEscalation = true" -i "${GATEWAY_DEPLOYMENT_FILE}"
-        yq eval ".spec.template.spec.containers[0].securityContext.runAsNonRoot = false" -i "${GATEWAY_DEPLOYMENT_FILE}"
-        yq eval ".spec.template.spec.containers[0].securityContext.runAsUser = 0" -i "${GATEWAY_DEPLOYMENT_FILE}"
-        yq eval ".spec.template.spec.containers[0].securityContext.runAsGroup = 0" -i "${GATEWAY_DEPLOYMENT_FILE}"
+        yq eval 'select(.kind == "Deployment").spec.template.spec.securityContext.fsGroup = 0' -i "${GATEWAY_FILE}"
+        yq eval 'select(.kind == "Deployment").spec.template.spec.containers[0].securityContext.allowPrivilegeEscalation = true' -i "${GATEWAY_FILE}"
+        yq eval 'select(.kind == "Deployment").spec.template.spec.containers[0].securityContext.runAsNonRoot = false' -i "${GATEWAY_FILE}"
+        yq eval 'select(.kind == "Deployment").spec.template.spec.containers[0].securityContext.runAsUser = 0' -i "${GATEWAY_FILE}"
+        yq eval 'select(.kind == "Deployment").spec.template.spec.containers[0].securityContext.runAsGroup = 0' -i "${GATEWAY_FILE}"
 
         # configuration file adaptation for root user
-        yq eval '.spec.template.spec.containers[0].volumeMounts[0].mountPath = "/root/.jiuwenclaw/config/config.yaml"' -i "${GATEWAY_DEPLOYMENT_FILE}"
+        yq eval 'select(.kind == "Deployment").spec.template.spec.containers[0].volumeMounts[0].mountPath = "/root/.jiuwenclaw/config/config.yaml"' -i "${GATEWAY_FILE}"
     fi
 
-    success "Gateway deployment file generation completed: ${GATEWAY_DEPLOYMENT_FILE}"
+    success "Gateway file generation completed: ${GATEWAY_FILE}"
 }
 
 deploy_gateway() {
     local client_type="${DEPLOY_VARS["AGENT_RUNTIME"]}"
     local conf_name="${DEPLOY_VARS["GATEWAY_CONFIG_MAP_NAME"]}"
+    local env_name="${DEPLOY_VARS["GATEWAY_ENV_FILE_NAME"]}"
     local namespace="${DEPLOY_VARS["NAMESPACE"]}"
 
     # create configMap from config.yaml
@@ -125,20 +101,13 @@ deploy_gateway() {
     # create configMap from gateway.env
     if [ "${client_type}" == "jiuwen" ]; then
         render_config_template "${GATEWAY_ENV_TEMPLATE_FILE}" "${GATEWAY_ENV_FILE}" "DEPLOY_VARS"
-        exec_cmd kubectl create configmap -n ${namespace} ${DEPLOY_VARS["GATEWAY_ENV_FILE_NAME"]} --from-env-file=${GATEWAY_ENV_FILE}
-
-        # Create and apply Gateway RBAC resources for pod creation permissions
-        render_config_template "${GATEWAY_RBAC_TEMPLATE_FILE}" "${GATEWAY_RBAC_FILE}" "DEPLOY_VARS"
-        exec_cmd kubectl apply -f ${GATEWAY_RBAC_FILE}
+        exec_cmd kubectl create configmap -n ${namespace} ${env_name} --from-env-file=${GATEWAY_ENV_FILE}
     fi
 
     # start gateway
-    gen_gateway_deploy_file
-    exec_cmd kubectl apply -f ${GATEWAY_DEPLOYMENT_FILE}
+    gen_gateway_file
+    exec_cmd kubectl apply -f ${GATEWAY_FILE}
     wait_k8s_resource_ready "deployment" "${DEPLOY_VARS["GATEWAY_NAME"]}" "${namespace}"
-
-    render_config_template "${GATEWAY_SERVICE_TEMPLATE_FILE}" "${GATEWAY_SERVICE_FILE}" "DEPLOY_VARS"
-    exec_cmd kubectl apply -f ${GATEWAY_SERVICE_FILE}
 }
 
 
@@ -148,15 +117,11 @@ uninstall_gateway() {
     local conf_name="${DEPLOY_VARS["GATEWAY_CONFIG_MAP_NAME"]}"
     local env_name="${DEPLOY_VARS["GATEWAY_ENV_FILE_NAME"]}"
 
-    delete_k8s_resource "service" "${gateway_name}" "${namespace}"
-
-    delete_k8s_resource "deployment" "${gateway_name}" "${namespace}"
+    exec_cmd kubectl delete -f ${GATEWAY_FILE}
     wait_pod_terminated "${gateway_name}" "${namespace}"
-
     delete_k8s_resource "configmap" "${conf_name}" "${namespace}"
 
     if [ "${DEPLOY_VARS["AGENT_RUNTIME"]}" == "jiuwen" ]; then
-        exec_cmd kubectl delete -f ${GATEWAY_RBAC_FILE} false
         delete_k8s_resource "configmap" "${env_name}" "${namespace}"
     fi
 }

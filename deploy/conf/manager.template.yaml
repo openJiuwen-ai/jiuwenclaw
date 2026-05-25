@@ -51,7 +51,7 @@ spec:
     spec:
       containers:
       - name: manager
-        image: <<MANAGER_IMAGE>>
+        image: <<MANAGER_PRODUCT_IMAGE>>
         ports:
         - name: rest
           containerPort: <<MANAGER_REST_PORT>>
