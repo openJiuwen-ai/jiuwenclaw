@@ -7,11 +7,12 @@
 
 from __future__ import annotations
 
+import asyncio
 import importlib
 import json
 import logging
 import os
-from typing import Any, AsyncIterator, Optional
+from typing import Any, AsyncIterator, Callable, Optional
 
 from openjiuwen_runtime.management.session.access import Access
 from openjiuwen_runtime.management.session.dual_queue import PriorityDualAsyncQueues
@@ -224,17 +225,19 @@ class RuntimeManagementAgentClient(AgentServerClient):
 
         class _Factory(IServiceInstanceFactory):
             async def new_service(
-                    self, response_parser: IResponseParser
+                    self, response_parser: IResponseParser, service_template: Optional[dict[str, Any]] = None
             ) -> IServiceHandler:
+                cfg = service_template or {}
+
                 k8s = K8sServiceHandler(
-                    agent_image,
+                    cfg["agent_image"] if "agent_image" in cfg else agent_image,
                     name_prefix="jiuwenclaw",
-                    namespace=namespace,
-                    pod_name=container_name,
-                    container_name=container_name,
-                    container_port=container_port,
-                    port_name=port_name,
-                    image_pull_policy=image_pull_policy,
+                    namespace=cfg["namespace"] if "namespace" in cfg else namespace,
+                    pod_name=cfg["pod_name"] if "pod_name" in cfg else container_name,
+                    container_name=cfg["container_name"] if "container_name" in cfg else container_name,
+                    container_port=int(cfg["container_port"]) if "container_port" in cfg else container_port,
+                    port_name=cfg["port_name"] if "port_name" in cfg else port_name,
+                    image_pull_policy=cfg["image_pull_policy"] if "image_pull_policy" in cfg else image_pull_policy,
                     env_vars={
                         "AGENT_SERVER_HOST": "0.0.0.0",
                         "AGENT_RUNTIME": agent_runtime,
@@ -247,25 +250,25 @@ class RuntimeManagementAgentClient(AgentServerClient):
                         "AGENT_RUNTIME": agent_runtime,
                     },
                     kubeconfig=kubeconfig,
-                    readiness_initial_delay=readiness_initial_delay,
-                    readiness_period=readiness_period,
-                    ready_timeout=ready_timeout,
-                    ready_poll_interval=ready_poll_interval,
-                    nfs_server=nfs_server,
-                    nfs_path=nfs_path,
-                    nfs_mount_path=nfs_mount_path,
-                    cpu_request=cpu_request,
-                    memory_request=memory_request,
-                    cpu_limit=cpu_limit,
-                    memory_limit=memory_limit,
+                    readiness_initial_delay=int(cfg["readiness_initial_delay"]) if "readiness_initial_delay" in cfg else readiness_initial_delay,
+                    readiness_period=int(cfg["readiness_period"]) if "readiness_period" in cfg else readiness_period,
+                    ready_timeout=int(cfg["ready_timeout"]) if "ready_timeout" in cfg else ready_timeout,
+                    ready_poll_interval=int(cfg["ready_poll_interval"]) if "ready_poll_interval" in cfg else ready_poll_interval,
+                    nfs_server=cfg.get("nfs_server") if "nfs_server" in cfg else nfs_server,
+                    nfs_path=cfg.get("nfs_path") if "nfs_path" in cfg else nfs_path,
+                    nfs_mount_path=cfg.get("nfs_mount_path") if "nfs_mount_path" in cfg else nfs_mount_path,
+                    cpu_request=cfg.get("cpu_request") if "cpu_request" in cfg else cpu_request,
+                    memory_request=cfg.get("memory_request") if "memory_request" in cfg else memory_request,
+                    cpu_limit=cfg.get("cpu_limit") if "cpu_limit" in cfg else cpu_limit,
+                    memory_limit=cfg.get("memory_limit") if "memory_limit" in cfg else memory_limit,
                 )
                 ch = WSServiceMessageChannel(
-                    target_port=container_port,
+                    target_port=int(cfg["container_port"]) if "container_port" in cfg else container_port,
                     invoke_path="",
                     ws_use_tls=False,
                 )
                 return ServiceHandler(
-                    total_concurrency=service_concurrency,
+                    total_concurrency=int(cfg["service_concurrency"]) if "service_concurrency" in cfg else service_concurrency,
                     message_channel=ch,
                     response_parser=response_parser,
                     deploy_controller=K8sDeployController(k8s),
@@ -273,17 +276,20 @@ class RuntimeManagementAgentClient(AgentServerClient):
 
         dual_q: PriorityDualAsyncQueues[QueueItem] = PriorityDualAsyncQueues(1000, 100)
         factory = _Factory()
-        sm = ServiceManager(
-            service_factory=factory,
-            dual_queue=dual_q,
-            timer=Timer(),
-            service_concurrency=service_concurrency,
-            min_idle_services=min_idle_services,
-            max_services=max_services,
-            autoscale_interval=autoscale_interval,
-            service_idle_ttl=service_ttl,
-        )
-        self._access: Any = Access(sm)
+
+        def create_service_manager() -> ServiceManager:
+            return ServiceManager(
+                service_factory=factory,
+                dual_queue=dual_q,
+                timer=Timer(),
+                service_concurrency=service_concurrency,
+                min_idle_services=min_idle_services,
+                max_services=max_services,
+                autoscale_interval=autoscale_interval,
+                service_idle_ttl=service_ttl,
+            )
+
+        self._access: Any = Access(create_service_manager)
         self._connected = False
 
     def set_or_update_server_config(
@@ -292,7 +298,25 @@ class RuntimeManagementAgentClient(AgentServerClient):
         config: dict[str, Any],
         env: dict[str, str] | None = None,
     ) -> None:
-        return None
+        """触发热更新配置。"""
+        if not self._connected or not hasattr(self, "_access"):
+            logger.warning("[RuntimeManagementAgentClient] not connected, skip config update")
+            return
+
+        try:
+            loop = asyncio.get_running_loop()
+            # 直接调用 update_config 并创建任务（不等待完成）
+            loop.create_task(
+                self._access.update_config(),
+                name="runtime-mgmt-config-update"
+            )
+            logger.info("[RuntimeManagementAgentClient] config update triggered")
+        except RuntimeError:
+            logger.warning(
+                "[RuntimeManagementAgentClient] no running event loop, config update skipped"
+            )
+        except Exception as exc:
+            logger.exception("[RuntimeManagementAgentClient] failed to trigger config update: %s", exc)
 
     async def connect(self, uri: str) -> None:
         """建立连接并初始化 Access。"""
