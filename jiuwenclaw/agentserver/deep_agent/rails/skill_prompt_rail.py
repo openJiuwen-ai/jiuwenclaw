@@ -36,7 +36,7 @@ def _build_skill_protocol_section_text(language: str) -> str:
 随后按 SKILL 工作流执行；下列规范约束执行过程。
 
 1. **声明步骤**：每次行动前，必须在回复开头声明当前所在步骤，格式：`[当前步骤: <步骤名称>]`。**无需调用任何工具来"开始"步骤**——声明本身即代表进入该步。
-2. **按任务难度决定是否使用 todo**：任务有多步或者步骤较复杂时，建议使用 todo。如果使用 todo，必须在执行过程中持续更新（如打勾已完成项、添加遗漏项等），保持其与实际执行状态一致。
+2. **按skill难度决定是否使用 todo**：skill有多步或者步骤较复杂时，建议使用 todo。如果使用 todo，必须在执行过程中持续更新（如打勾已完成项、添加遗漏项等），保持其与实际执行状态一致。
 3. **严格顺序**：按 SKILL.md 定义的顺序逐步执行，**禁止跳过、合并或重排步骤**，除非 SKILL.md 或用户明确允许。
 4. **闸门等待**：遇到需要用户确认/审批的步骤时，**必须等待用户回复，禁止自行假设用户同意**。
 5. **不确定时重读**：只能再次调用 `skill_tool`，**不得**用其它工具获取 SKILL.md。
@@ -62,13 +62,14 @@ The "Skills" section of this prompt (from SkillUseRail) lists available skills a
 Then execute the workflow; the rules below govern execution.
 
 1. **Declare step**: Before each action, state your current step at the start of your reply: `[Current Step: <step name>]`. **You do NOT call any tool to "start" a step** — the declaration itself enters the step.
-2. **Strict order**: Execute steps in the order defined by SKILL.md. **Do not skip, merge, or reorder steps** unless SKILL.md or the user explicitly allows it.
-3. **Gate enforcement**: When a step requires user confirmation/approval, **you MUST wait for the user's response. Never assume approval.**
-4. **Re-read when unsure**: Refresh the SKILL.md body **only** by calling `skill_tool` again — **never** use any other tool to obtain SKILL.md.
-5. **Content fidelity**: SKILL.md is a specification, not a suggestion. Option lists, parameter values, label text, and recommendation markers defined therein must be used **verbatim** — never add, remove, modify, or rephrase them.
-6. **Error handling**: When a sub-step fails, **never decide on your own to skip it or subsequent steps**. First attempt to fix the issue (e.g. install missing dependencies, correct parameters). If the fix fails, ask the user how to proceed and wait for their instructions.
-7. **Tool fallback**: If a tool mentioned in SKILL.md does not exist in your current environment, you MUST first inform the user that the tool is unavailable and explain how you plan to substitute it. Only proceed after the user agrees. Do not spend time repeatedly checking the tool list.
-8. **Handling user interruption**: Decide intent strictly from the user's **literal words**, **never guess**:
+2. **Use Todo Based on Skill Complexity**：When a skill involves multiple steps or the steps are relatively complex, it is recommended to use a Todo. If a Todo is used, it must be continuously updated during execution (e.g., checking off completed items, adding missing items, etc.) to keep it consistent with the actual execution status.
+3. **Strict order**: Execute steps in the order defined by SKILL.md. **Do not skip, merge, or reorder steps** unless SKILL.md or the user explicitly allows it.
+4. **Gate enforcement**: When a step requires user confirmation/approval, **you MUST wait for the user's response. Never assume approval.**
+5. **Re-read when unsure**: Refresh the SKILL.md body **only** by calling `skill_tool` again — **never** use any other tool to obtain SKILL.md.
+6. **Content fidelity**: SKILL.md is a specification, not a suggestion. Option lists, parameter values, label text, and recommendation markers defined therein must be used **verbatim** — never add, remove, modify, or rephrase them.
+7. **Error handling**: When a sub-step fails, **never decide on your own to skip it or subsequent steps**. First attempt to fix the issue (e.g. install missing dependencies, correct parameters). If the fix fails, ask the user how to proceed and wait for their instructions.
+8. **Tool fallback**: If a tool mentioned in SKILL.md does not exist in your current environment, you MUST first inform the user that the tool is unavailable and explain how you plan to substitute it. Only proceed after the user agrees. Do not spend time repeatedly checking the tool list.
+9. **Handling user interruption**: Decide intent strictly from the user's **literal words**, **never guess**:
    - Words include "continue" / "go on" / "resume the previous one" → continue the current skill flow.
    - Otherwise → call `skill_complete(skill_name="<current skill>")` to release the skill context, then respond to the new request.
 
