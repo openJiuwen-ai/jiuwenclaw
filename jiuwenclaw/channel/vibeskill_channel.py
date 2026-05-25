@@ -2951,6 +2951,9 @@ class VibeSkillChannel(BaseChannel):
         if request_path.startswith("/api/v1/session/") and request_path.endswith("/file/content") and method == "GET":
             session_id = request_path.split("/api/v1/session/", 1)[-1].replace("/file/content", "")
             return await self._handle_http_file_content(session_id, headers, path_str)
+        if request_path.startswith("/api/v1/session/") and request_path.endswith("/file/content") and method == "PUT":
+            session_id = request_path.split("/api/v1/session/", 1)[-1].replace("/file/content", "")
+            return await self._handle_http_file_content_write(session_id, headers, path_str, body)
         if request_path.startswith("/api/v1/session/") and request_path.endswith("/abort") and method == "POST":
             session_id = request_path.replace("/api/v1/session/", "").replace("/abort", "")
             return await self._handle_http_session_abort(session_id)
@@ -3380,6 +3383,103 @@ class VibeSkillChannel(BaseChannel):
             "encoding": "utf8",
             "mimeType": "text/plain",
         }
+        return self._json_response(200, out)
+
+    async def _handle_http_file_content_write(
+        self,
+        session_id: str,
+        headers: dict,
+        raw_request_path: str,
+        body: bytes,
+    ) -> tuple[int, dict, bytes]:
+        """PUT .../file/content?path= — skilldev.file.write，覆盖写入文本文件。
+
+        请求体对齐 opencode FileContent schema：``{"content": "..."}``。
+        响应体：成功返回 ``{"ok": True, "path": "...", "size": ...}``，
+        失败返回 ``{"ok": False, "error": "..."}``。
+        """
+        parsed = urlparse(raw_request_path)
+        qs = parse_qs(parsed.query)
+
+        def _q(name: str, default: str) -> str:
+            vals = qs.get(name)
+            if vals and str(vals[0]).strip():
+                return str(vals[0]).strip()
+            return default
+
+        file_path = _q("path", "")
+        if not file_path:
+            return self._json_response(
+                400, {"ok": False, "error": "path query parameter is required"}
+            )
+
+        try:
+            req_body = json.loads(body.decode("utf-8")) if body else {}
+        except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+            return self._json_response(400, {"ok": False, "error": f"invalid JSON body: {exc}"})
+
+        if not isinstance(req_body, dict):
+            return self._json_response(
+                400, {"ok": False, "error": "request body must be a JSON object"}
+            )
+
+        if "content" not in req_body:
+            return self._json_response(
+                400, {"ok": False, "error": "content field is required"}
+            )
+
+        content = req_body.get("content")
+        if not isinstance(content, str):
+            return self._json_response(
+                400, {"ok": False, "error": "content must be a string"}
+            )
+
+        internal_id = await self._store.resolve_internal(session_id) or session_id
+        request_id = f"vibeskill-file-write-{int(time.time() * 1000):x}-{secrets.token_hex(3)}"
+        env = e2a_from_agent_fields(
+            request_id=request_id,
+            channel_id=VIBESKILL_CHANNEL_ID,
+            session_id=internal_id,
+            req_method=ReqMethod.SKILLDEV_FILE_WRITE,
+            params={
+                "task_id": session_id,
+                "path": file_path,
+                "content": content,
+                "session_id": internal_id,
+            },
+            is_stream=False,
+            timestamp=time.time(),
+            user_id=self._session_user_id(internal_id),
+        )
+        logger.info(
+            "[VibeSkillChannel] skilldev.file.write sent, session_id=%s path=%s size=%d",
+            internal_id,
+            file_path,
+            len(content),
+        )
+        resp = await self._send_agent_request(env)
+        if not resp or not getattr(resp, "ok", False):
+            pl = dict(resp.payload) if resp and isinstance(resp.payload, dict) else {}
+            err = str(pl.get("error") or "request failed")
+            return self._json_response(502, {"ok": False, "error": err})
+
+        payload = dict(resp.payload) if isinstance(resp.payload, dict) else {}
+        if payload.get("event_type") == "skilldev.error":
+            return self._json_response(
+                400, {"ok": False, "error": str(payload.get("error") or "skilldev.error")}
+            )
+        if not payload.get("ok", False):
+            return self._json_response(
+                400, {"ok": False, "error": str(payload.get("error") or "failed")}
+            )
+
+        out: dict[str, Any] = {
+            "ok": True,
+            "path": str(payload.get("path") or file_path),
+        }
+        size = payload.get("size")
+        if size is not None:
+            out["size"] = size
         return self._json_response(200, out)
 
     async def _handle_http_file_status(self, session_id: str, headers: dict) -> tuple[int, dict, bytes]:

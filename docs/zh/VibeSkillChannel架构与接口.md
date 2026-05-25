@@ -296,6 +296,7 @@ Standard 模式会额外调用 `ChannelManager.create_agent_session()`，再由 
 |------|------|------|------|
 | `GET` | `/api/v1/session/{sessionID}/file` | 已实现 | 调用 `skilldev.file.list`，返回前端 `FileTreeNode[]` |
 | `GET` | `/api/v1/session/{sessionID}/file/content?path={path}` | 已实现 | 调用 `skilldev.file.read`，返回文本内容 |
+| `PUT` | `/api/v1/session/{sessionID}/file/content?path={path}` | 已实现 | 调用 `skilldev.file.write`，覆盖写入文本文件 |
 | `GET` | `/api/v1/session/{sessionID}/file/status` | 占位 | 当前返回空数组 |
 
 文件树转换规则：
@@ -315,6 +316,26 @@ Standard 模式会额外调用 `ChannelManager.create_agent_session()`，再由 
   "mimeType": "text/plain"
 }
 ```
+
+文件写入请求体（对齐 opencode FileContent schema）：
+
+```json
+{
+  "content": "#!/usr/bin/env python3\n..."
+}
+```
+
+文件写入响应：
+
+```json
+{
+  "ok": true,
+  "path": "...",
+  "size": 123
+}
+```
+
+写入失败时返回 `{"ok": false, "error": "..."}`，HTTP 状态码 400/502 视错误来源而定。
 
 ### 5.3 搜索、VCS 与版本接口
 

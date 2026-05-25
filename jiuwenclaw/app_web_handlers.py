@@ -141,6 +141,7 @@ _FORWARD_REQ_METHODS = frozenset({
     "skilldev.cancel",
     "skilldev.file.list",
     "skilldev.file.read",
+    "skilldev.file.write",
     "skilldev.user_answer",
     "tools.add",
 })
@@ -185,6 +186,7 @@ _FORWARD_NO_LOCAL_HANDLER_METHODS = frozenset({
     "skilldev.download",
     "skilldev.file.list",
     "skilldev.file.read",
+    "skilldev.file.write",
     "skilldev.user_answer",
     "tools.add",
 })
