@@ -97,6 +97,8 @@ class CronSchedulerService:
         self._run_tasks: dict[str, asyncio.Task] = {}
         self._last_store_revision: int = 0
         self._store_poll_interval: float = 5.0  # seconds
+        # 分布式部署下由 LeaderElection 控制：STANDBY 期间 loop 自旋但不消费事件
+        self._active: bool = True
 
     async def _get_store_revision(self) -> int:
         try:
@@ -123,6 +125,35 @@ class CronSchedulerService:
 
     def is_running(self) -> bool:
         return self._running
+
+    def is_active(self) -> bool:
+        return self._active
+
+    def set_active(self, active: bool) -> None:
+        """启用或暂停调度。失活时取消在飞行的 run 任务并清空事件，避免被旧事件唤醒后误触发；
+        晋升为 PRIMARY 时由调用方在 ``set_active(True)`` 之前先 ``await reload()``，重新加载最新 jobs。
+        """
+        active = bool(active)
+        if self._active == active:
+            return
+        self._active = active
+        if active:
+            logger.info("[Cron] scheduler activated (PRIMARY)")
+        else:
+            logger.info(
+                "[Cron] scheduler deactivated (STANDBY); cancelling %d in-flight run(s), clearing events",
+                sum(1 for t in self._run_tasks.values() if not t.done()),
+            )
+            for t in list(self._run_tasks.values()):
+                if not t.done():
+                    t.cancel()
+            self._run_tasks.clear()
+            self._events.clear()
+            self._runs.clear()
+            self._seq = 0
+            self._last_store_revision = 0
+        # 无论激活/失活都唤醒一次 loop，让它立刻看到新状态
+        self._reload_event.set()
 
     async def start(self) -> None:
         if self._running:
@@ -233,6 +264,17 @@ class CronSchedulerService:
     async def _loop(self) -> None:
         while self._running:
             try:
+                if not self._active:
+                    self._reload_event.clear()
+                    try:
+                        await asyncio.wait_for(
+                            self._reload_event.wait(),
+                            timeout=self._store_poll_interval,
+                        )
+                    except asyncio.TimeoutError:
+                        pass
+                    continue
+
                 if not self._events:
                     self._reload_event.clear()
                     try:
