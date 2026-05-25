@@ -3,12 +3,40 @@
 import { addError, addInfo, parseArgs } from "../helpers.js";
 import { CommandKind, type SlashCommand, type CommandContext } from "../types.js";
 
-// Pipeline options
-export const PIPELINE_OPTIONS = {
-  extended_evolve_pipeline: { display: "extended_evolve_pipeline", desc: "生成 harness package" },
-  meta_evolve_pipeline: { display: "meta_evolve_pipeline", desc: "生成 harness package + 提交 PR（需配置 git）" },
+// Pipeline options: friendly display names → backend values
+export const PIPELINE_DISPLAY_NAMES = {
+  optimize_expert_harness: { backend: "extended_evolve_pipeline", display: "生成扩展包", desc: "生成本地 harness package" },
+  optimize_meta_harness: { backend: "meta_evolve_pipeline", display: "提交优化代码", desc: "提交 PR（需配置 git）" },
 };
-export const PIPELINE_VALUES = Object.keys(PIPELINE_OPTIONS);
+export const PIPELINE_DISPLAY_KEYS = Object.keys(PIPELINE_DISPLAY_NAMES);
+
+// Backend pipeline values (for validation after resolving)
+export const PIPELINE_BACKEND_VALUES = Object.values(PIPELINE_DISPLAY_NAMES).map(v => v.backend);
+
+// Resolve friendly display name to backend value
+export function resolvePipelineName(name: string): string {
+  if (name in PIPELINE_DISPLAY_NAMES) return PIPELINE_DISPLAY_NAMES[name as keyof typeof PIPELINE_DISPLAY_NAMES].backend;
+  // Already a backend value (passed directly) — accept it
+  if (PIPELINE_BACKEND_VALUES.includes(name)) return name;
+  return name;
+}
+
+// Aliases for backward compat with completion/validation logic
+export const PIPELINE_OPTIONS = PIPELINE_DISPLAY_NAMES;
+export const PIPELINE_VALUES = PIPELINE_DISPLAY_KEYS;
+
+// Get display-friendly label for a pipeline (accepts both friendly and backend names)
+export function pipelineDisplayLabel(name: string): string {
+  // Friendly name directly
+  if (name in PIPELINE_DISPLAY_NAMES) {
+    return `${name} (${PIPELINE_DISPLAY_NAMES[name as keyof typeof PIPELINE_DISPLAY_NAMES].display})`;
+  }
+  // Backend name — reverse lookup
+  for (const [key, val] of Object.entries(PIPELINE_DISPLAY_NAMES)) {
+    if (val.backend === name) return `${key} (${val.display})`;
+  }
+  return name;
+}
 
 // Interval options
 export const INTERVAL_OPTIONS = {
@@ -236,7 +264,7 @@ const scheduleStartCommand: SlashCommand = {
 
     if (!parsed.interval || parsed.interval < 1) {
       ctx.addItem(
-        addError(ctx.sessionId, "用法: /auto-harness schedule start --interval <hours> [--pipeline <pipeline>] <query>\npipeline: extended_evolve_pipeline, meta_evolve_pipeline")
+        addError(ctx.sessionId, "用法: /auto-harness schedule start --interval <hours> [--pipeline <pipeline>] <query>\npipeline: optimize_expert_harness (生成扩展包), optimize_meta_harness (提交 PR)")
       );
       return;
     }
@@ -257,8 +285,8 @@ const scheduleStartCommand: SlashCommand = {
             header: "Pipeline",
             question: "请选择 Pipeline 类型:",
             options: [
-              { label: "extended_evolve_pipeline", description: PIPELINE_OPTIONS.extended_evolve_pipeline.desc },
-              { label: "meta_evolve_pipeline", description: PIPELINE_OPTIONS.meta_evolve_pipeline.desc },
+              { label: "optimize_expert_harness", description: PIPELINE_DISPLAY_NAMES.optimize_expert_harness.desc },
+              { label: "optimize_meta_harness", description: PIPELINE_DISPLAY_NAMES.optimize_meta_harness.desc },
             ],
           },
         ]);
@@ -270,23 +298,24 @@ const scheduleStartCommand: SlashCommand = {
       }
     }
 
-    // Validate pipeline value
-    if (!PIPELINE_VALUES.includes(pipeline)) {
+    // Validate pipeline value (accept both friendly and backend names)
+    const resolvedPipeline = resolvePipelineName(pipeline);
+    if (!PIPELINE_BACKEND_VALUES.includes(resolvedPipeline)) {
       ctx.addItem(
-        addError(ctx.sessionId, `无效的 pipeline: ${pipeline}\n可选值: ${PIPELINE_VALUES.join(", ")}`)
+        addError(ctx.sessionId, `无效的 pipeline: ${pipeline}\n可选值: ${PIPELINE_DISPLAY_KEYS.join(", ")}`)
       );
       return;
     }
 
-    // For meta_evolve_pipeline, check git config
-    if (pipeline === "meta_evolve_pipeline") {
+    // For optimize_meta_harness, check git config
+    if (resolvedPipeline === "meta_evolve_pipeline") {
       const configCheck = await ctx.request<{ valid: boolean; missing_fields?: Array<{ id: string; prompt: string }> }>("schedule.check_config", {});
 
       const missingFields = configCheck.missing_fields as Array<{ id: string; prompt: string }> | undefined;
       if (missingFields && missingFields.length > 0) {
         const missingList = missingFields.map(f => `  - ${f.prompt}`).join("\n");
         ctx.addItem(
-          addInfo(ctx.sessionId, `meta_evolve_pipeline 需要配置 git 信息:\n${missingList}\n\n请使用 /config edit 配置这些字段后重试`)
+          addInfo(ctx.sessionId, `optimize_meta_harness 需要配置 git 信息:\n${missingList}\n\n请使用 /config edit 配置这些字段后重试`)
         );
         return;
       }
@@ -314,7 +343,7 @@ const scheduleStartCommand: SlashCommand = {
     const result = await ctx.request<{ error?: string; task_id?: string; next_run_time?: string }>("schedule.create", {
       interval_hours: parsed.interval,
       query: parsed.query,
-      pipeline: pipeline,
+      pipeline: resolvedPipeline,
       run_immediately: run_immediately,
     });
 
@@ -328,7 +357,7 @@ const scheduleStartCommand: SlashCommand = {
     ctx.addItem(
       addInfo(
         ctx.sessionId,
-        `\n定时任务已创建\nID: ${result.task_id}\nPipeline: ${pipeline}\n下次执行: ${formatLocalTime(result.next_run_time)}\n间隔: 每 ${parsed.interval} 小时${run_immediately ? "\n(已立即执行一次)" : ""}\n`
+        `\n定时任务已创建\nID: ${result.task_id}\nPipeline: ${pipelineDisplayLabel(pipeline)}\n下次执行: ${formatLocalTime(result.next_run_time)}\n间隔: 每 ${parsed.interval} 小时${run_immediately ? "\n(已立即执行一次)" : ""}\n`
       )
     );
   },
@@ -357,7 +386,7 @@ const scheduleListCommand: SlashCommand = {
                          task.status === "cancelled" ? "[已取消]" : "[已完成]";
       const isOneTime = task.is_one_time ? "[一次性]" : "";
       const queryPreview = task.query.length > 50 ? task.query.substring(0, 50) + "..." : task.query;
-      const pipelineInfo = task.pipeline ? `Pipeline: ${task.pipeline}` : "";
+      const pipelineInfo = task.pipeline ? `Pipeline: ${pipelineDisplayLabel(task.pipeline)}` : "";
       lines.push(
         `${statusEmoji}${isOneTime} ${task.task_id} - ${queryPreview}`
       );
@@ -418,7 +447,7 @@ const scheduleStatusCommand: SlashCommand = {
     lines.push(`目标: ${result.query}`);
     lines.push(`状态: ${result.status}`);
     if (result.pipeline) {
-      lines.push(`Pipeline: ${result.pipeline}`);
+      lines.push(`Pipeline: ${pipelineDisplayLabel(result.pipeline)}`);
     }
     if (isOneTime) {
       lines.push(`类型: 一次性任务`);
@@ -596,10 +625,20 @@ interface LogEntry {
   results_count?: number;
   // Extension-level fields (from harness.stage_result with scope='extension')
   scope?: string;              // 'extension' indicates extension-level event
-  extension_name?: string;     // Extension name (e.g., context_fencing)
-  extension_stage?: string;    // 'implement_ext' | 'verify_ext' | 'activate_ext'
-  parent_stage?: string;       // Parent stage (e.g., 'build_verify')
+  extension_name?: string;     // Extension name (e.g., context_fencing, merged_extensions)
+  extension_stage?: string;    // 'implement_ext' | 'verify_ext' | 'activate_ext' | 'merge_ext'
+  parent_stage?: string;       // Parent stage (e.g., 'build_verify', 'activate')
   task_id?: string;            // Task ID for extension
+  // Extension ready fields (harness.extension_ready)
+  runtime_path?: string;       // Runtime extension directory path
+  extension_runtime_path?: string;
+  config_path?: string;
+  runtime_extensions?: Array<{ extension_name: string; runtime_path: string; config_path: string }>;
+  components_summary?: { rails?: number; tools?: number; skills?: number };
+  // Activate interaction fields (harness.activate_interaction)
+  interaction_type?: string;
+  interaction_id?: string;
+  options?: string[];
   // Stage result messages
   messages?: string[];
   metrics?: Record<string, unknown>;
@@ -879,7 +918,7 @@ async function readFullHistoryLogs(
  * Merges streaming chunks (chat.delta, chat.reasoning) into complete messages.
  */
 interface ParsedLogSection {
-  type: "assistant" | "stage" | "status" | "error" | "info" | "pipeline" | "session_finished";
+  type: "assistant" | "stage" | "status" | "error" | "info" | "pipeline" | "session_finished" | "extension_ready" | "activate_interaction";
   content: string;
   stage?: string;
   status?: string;
@@ -898,6 +937,12 @@ interface ParsedLogSection {
   // Stage messages (for meta_evolve_pipeline CI fix tracking)
   stage_messages?: string[];
   ci_fix_count?: number;
+  // Extension ready info (harness.extension_ready)
+  extension_name?: string;
+  runtime_path?: string;
+  components_summary?: { rails?: number; tools?: number; skills?: number };
+  // Activate interaction info (harness.activate_interaction)
+  interaction_id?: string;
 }
 
 // ANSI color codes for log display differentiation
@@ -913,6 +958,7 @@ const ANSI = {
   dimGray: "\x1b[38;5;240m", // 更暗的灰色 (256-color mode)
   lightBlue: "\x1b[94m",    // AI 消息 - 浅蓝色 (bright blue)
   bold: "\x1b[1m",
+  underline: "\x1b[4m",
   reset: "\x1b[0m",
 };
 
@@ -1175,7 +1221,7 @@ function formatLogSection(section: ParsedLogSection, detailed: boolean = false):
 
     case "pipeline":
       const stagesDisplay = section.stages?.map((s) => s.display_name).join(" → ") || "";
-      return `\n${createBox(`Pipeline: ${section.pipeline || "unknown"}`, `流程: ${stagesDisplay}`, ANSI.cyan)}\n`;
+      return `\n${createBox(`Pipeline: ${pipelineDisplayLabel(section.pipeline || "unknown")}`, `流程: ${stagesDisplay}`, ANSI.cyan)}\n`;
 
     case "stage":
       const stageDisplayName = section.stages?.find((s) => s.slot === section.stage)?.display_name || section.stage || "?";
@@ -1187,9 +1233,6 @@ function formatLogSection(section: ParsedLogSection, detailed: boolean = false):
         const statusText = section.status === "success" ? "完成" : section.status === "failed" ? "失败" : section.status;
 
         let detailLines: string[] = [];
-        if (section.stage === 'build_verify' && section.extension_order && section.extensions_by_name) {
-          detailLines.push(formatExtensionStatusMatrix(section.extension_order, section.extensions_by_name));
-        }
         if (section.stage === 'assess' && section.stage_messages) {
           const gapList = formatGapList(section.stage_messages);
           if (gapList) detailLines.push(gapList);
@@ -1207,6 +1250,15 @@ function formatLogSection(section: ParsedLogSection, detailed: boolean = false):
           if (formattedMsgs) detailLines.push(formattedMsgs);
           if (section.ci_fix_count && section.ci_fix_count > 0) {
             detailLines.push(`  🔄 修复循环: ${section.ci_fix_count} 次`);
+          }
+        }
+        // Extension status matrix shown AFTER stage-specific content, only when extensions have progress
+        if (section.extension_order && section.extensions_by_name && section.extension_order.length > 0) {
+          const hasProgress = Object.values(section.extensions_by_name).some(
+            ext => ext.implementStatus !== 'pending' || ext.verifyStatus !== 'pending'
+          );
+          if (hasProgress) {
+            detailLines.push(formatExtensionStatusMatrix(section.extension_order, section.extensions_by_name));
           }
         }
 
@@ -1242,7 +1294,7 @@ function formatLogSection(section: ParsedLogSection, detailed: boolean = false):
     case "session_finished":
       const finishedIcon = section.status === "success" ? "🎉" : "⚠️";
       const finishedColor = section.status === "success" ? ANSI.green : ANSI.yellow;
-      return `\n${createBox(`${finishedIcon} ${section.content}`, `Pipeline: ${section.pipeline || "unknown"}`, finishedColor)}\n`;
+      return `\n${createBox(`${finishedIcon} ${section.content}`, `Pipeline: ${pipelineDisplayLabel(section.pipeline || "unknown")}`, finishedColor)}\n`;
 
     case "status":
       return `${ANSI.blue}▶ ${section.content}${ANSI.reset}`;
@@ -1252,6 +1304,27 @@ function formatLogSection(section: ParsedLogSection, detailed: boolean = false):
 
     case "info":
       return `${ANSI.gray}  · ${section.content}${ANSI.reset}`;
+
+    case "extension_ready":
+      const extReadyLines: string[] = [];
+      extReadyLines.push(`${ANSI.green}${ANSI.bold}📦 ${section.content}${ANSI.reset}`);
+      if (section.runtime_path) {
+        extReadyLines.push(`  目录: ${ANSI.cyan}${ANSI.underline}${section.runtime_path}${ANSI.reset}`);
+      }
+      if (section.components_summary) {
+        const cs = section.components_summary;
+        const parts: string[] = [];
+        if (cs.rails && cs.rails > 0) parts.push(`${ANSI.cyan}${cs.rails} rails${ANSI.reset}`);
+        if (cs.tools && cs.tools > 0) parts.push(`${ANSI.yellow}${cs.tools} tools${ANSI.reset}`);
+        if (cs.skills && cs.skills > 0) parts.push(`${ANSI.magenta}${cs.skills} skills${ANSI.reset}`);
+        if (parts.length > 0) {
+          extReadyLines.push(`  组件: ${parts.join(' ')}`);
+        }
+      }
+      return extReadyLines.join('\n');
+
+    case "activate_interaction":
+      return `${ANSI.yellow}${ANSI.bold}⏳ ${section.content}${ANSI.reset}`;
 
     default:
       return null;
@@ -1272,11 +1345,11 @@ function formatStageProgress(
   // Calculate progress
   const completedCount = completedStages?.length || 0;
   const total = stages.length;
-  const percent = Math.round((completedCount / total) * 100);
+  const percent = Math.min(100, Math.round((completedCount / total) * 100));
 
-  // Create progress bar (fixed 50 chars for consistent look)
+  // Create progress bar (fixed 80 chars for consistent look)
   const barLength = 80;
-  const filledLength = Math.round((completedCount / total) * barLength);
+  const filledLength = Math.min(barLength, Math.round((completedCount / total) * barLength));
   const bar = `${ANSI.green}${"█".repeat(filledLength)}${ANSI.reset}${ANSI.gray}${"░".repeat(barLength - filledLength)}${ANSI.reset}`;
 
   // Create stage status line with icons and names
@@ -1402,13 +1475,38 @@ function parseAndAggregateLogs(
         // Check if this is an extension-level event (scope === 'extension')
         const scope = log.scope || '';
         const extName = log.extension_name;
+        const extStage = log.extension_stage || '';
+
+        // Handle merge_ext: merged_extensions is a container, not a design extension
+        // Show merge status as standalone info line, not full stage render
+        if (extStage === 'merge_ext' && extName === 'merged_extensions') {
+          const mergeStatus = log.status || 'pending';
+          const mergeText = mergeStatus === 'success' ? '✅ 合并扩展完成' : mergeStatus === 'failed' ? '❌ 合并扩展失败' : '⏳ 合并扩展进行中';
+          sections.push({
+            type: "info",
+            content: mergeText,
+          });
+          break;
+        }
 
         if (scope === 'extension' && extName) {
           // Extension-level progress update
-          const extStage = log.extension_stage || '';
           const extStatus = (log.status || 'pending') as ExtensionProgressStatus;
 
-          // Add to extension order if new
+          // Skip merged_extensions from extension matrix (it's a merge container)
+          // Show activation status as info line, not full stage render
+          if (extName === 'merged_extensions') {
+            if (extStage === 'activate_ext') {
+              const actText = extStatus === 'success' ? '✅ 激活合并扩展完成' : extStatus === 'failed' ? '❌ 激活合并扩展失败' : '⏳ 激活合并扩展进行中';
+              sections.push({
+                type: "info",
+                content: actText,
+              });
+            }
+            break;
+          }
+
+          // Add to extension order if new (only design extensions, not merged)
           if (!extensionOrder.includes(extName)) {
             extensionOrder.push(extName);
           }
@@ -1432,13 +1530,36 @@ function parseAndAggregateLogs(
 
           extensionsByName[extName] = existing;
 
-          // Don't output section for extension-level events (will show in stage completion)
+          // Output section showing updated extension status matrix
+          // Deep-copy extensionsByName so each section captures the state at that point,
+          // not the final state (all sections share the same mutable dict otherwise)
+          const extensionsSnapshot: Record<string, ExtensionProgressInfo> = {};
+          for (const [key, val] of Object.entries(extensionsByName)) {
+            extensionsSnapshot[key] = { ...val };
+          }
+          sections.push({
+            type: "stage",
+            content: `扩展 ${extName} ${extStage} ${extStatus}`,
+            stage: log.stage || log.parent_stage || currentStage || "",
+            status: extStatus,
+            stages: pipelineInfo?.stages,
+            completed_stages: [...completedStages],
+            extension_order: [...extensionOrder],
+            extensions_by_name: extensionsSnapshot,
+            gap_count: gapCount,
+          });
           break;
         }
 
-        // Track completed stage (only for stage-level events)
-        if (log.stage) {
+        // Track completed stage (only for stage-level events, deduplicate)
+        if (log.stage && !completedStages.includes(log.stage)) {
           completedStages.push(log.stage);
+        }
+
+        // For activate stage: skip "running" status (merge/interaction sub-events handle display)
+        // Only show the final "success" completion
+        if (log.stage === 'activate' && log.status === 'running' && !scope) {
+          break;
         }
 
         // For meta_evolve_pipeline: track CI fix count from messages
@@ -1478,6 +1599,11 @@ function parseAndAggregateLogs(
           }
         }
 
+        // Deep-copy extension info so each section captures state at that point
+        const stageExtSnapshot: Record<string, ExtensionProgressInfo> = {};
+        for (const [key, val] of Object.entries(extensionsByName)) {
+          stageExtSnapshot[key] = { ...val };
+        }
         sections.push({
           type: "stage",
           content: `阶段完成: ${log.stage || "unknown"}`,
@@ -1485,9 +1611,9 @@ function parseAndAggregateLogs(
           status: log.status,
           stages: pipelineInfo?.stages,
           completed_stages: [...completedStages],
-          // Include extension info for display
-          extension_order: extensionOrder.length > 0 ? extensionOrder : undefined,
-          extensions_by_name: Object.keys(extensionsByName).length > 0 ? extensionsByName : undefined,
+          // Include extension info for display (snapshot at this point)
+          extension_order: [...extensionOrder],
+          extensions_by_name: stageExtSnapshot,
           // Include gap count for inline progress bar
           gap_count: gapCount,
           stage_messages: stageMessages.length > 0 ? stageMessages : undefined,
@@ -1501,6 +1627,46 @@ function parseAndAggregateLogs(
           content: log.status === "success" ? "任务执行成功" : `任务执行${log.status || "完成"}`,
           status: log.status,
           pipeline: log.pipeline,
+        });
+        break;
+
+      case "harness.extension_ready":
+        // Extension ready: show directory structure and components summary
+        const extReadyName = log.extension_name || "unknown";
+        const compSummary = log.components_summary;
+        const compParts: string[] = [];
+        if (compSummary) {
+          if (compSummary.rails && compSummary.rails > 0) compParts.push(`${compSummary.rails} rails`);
+          if (compSummary.tools && compSummary.tools > 0) compParts.push(`${compSummary.tools} tools`);
+          if (compSummary.skills && compSummary.skills > 0) compParts.push(`${compSummary.skills} skills`);
+        }
+        const compDisplay = compParts.length > 0 ? compParts.join(', ') : '无组件';
+        sections.push({
+          type: "extension_ready",
+          content: `扩展 ${extReadyName} 已就绪`,
+          stage: currentStage || "activate",
+          extension_name: extReadyName,
+          runtime_path: log.extension_runtime_path || log.runtime_path,
+          components_summary: compSummary,
+        });
+        // Also show components count as info line
+        if (compParts.length > 0) {
+          sections.push({
+            type: "info",
+            content: `📦 ${extReadyName}: ${compDisplay}`,
+          });
+        }
+        break;
+
+      case "harness.activate_interaction":
+        // Activation interaction prompt — show what's being activated
+        const actExtName = log.extension_name || "unknown";
+        sections.push({
+          type: "activate_interaction",
+          content: `等待激活确认: ${actExtName}`,
+          stage: currentStage || "activate",
+          interaction_id: log.interaction_id,
+          extension_name: actExtName,
         });
         break;
 
@@ -1648,7 +1814,7 @@ const runCommand: SlashCommand = {
 
     if (!parsed.query) {
       ctx.addItem(
-        addError(ctx.sessionId, "用法: /auto-harness run [--pipeline <pipeline>] <query>\npipeline: extended_evolve_pipeline (仅生成 package), meta_evolve_pipeline (生成 package + 提交 PR)")
+        addError(ctx.sessionId, "用法: /auto-harness run [--pipeline <pipeline>] <query>\npipeline: optimize_expert_harness (生成扩展包), optimize_meta_harness (提交 PR)")
       );
       return;
     }
@@ -1662,8 +1828,8 @@ const runCommand: SlashCommand = {
             header: "Pipeline",
             question: "请选择 Pipeline 类型:",
             options: [
-              { label: "extended_evolve_pipeline", description: PIPELINE_OPTIONS.extended_evolve_pipeline.desc },
-              { label: "meta_evolve_pipeline", description: PIPELINE_OPTIONS.meta_evolve_pipeline.desc },
+              { label: "optimize_expert_harness", description: PIPELINE_DISPLAY_NAMES.optimize_expert_harness.desc },
+              { label: "optimize_meta_harness", description: PIPELINE_DISPLAY_NAMES.optimize_meta_harness.desc },
             ],
           },
         ]);
@@ -1675,34 +1841,35 @@ const runCommand: SlashCommand = {
       }
     }
 
-    // Validate pipeline value
-    if (!PIPELINE_VALUES.includes(pipeline)) {
+    // Validate pipeline value (accept both friendly and backend names)
+    const resolvedPipeline = resolvePipelineName(pipeline);
+    if (!PIPELINE_BACKEND_VALUES.includes(resolvedPipeline)) {
       ctx.addItem(
-        addError(ctx.sessionId, `无效的 pipeline: ${pipeline}\n可选值: ${PIPELINE_VALUES.join(", ")}`)
+        addError(ctx.sessionId, `无效的 pipeline: ${pipeline}\n可选值: ${PIPELINE_DISPLAY_KEYS.join(", ")}`)
       );
       return;
     }
 
-    // For meta_evolve_pipeline, check git config
-    if (pipeline === "meta_evolve_pipeline") {
+    // For optimize_meta_harness, check git config
+    if (resolvedPipeline === "meta_evolve_pipeline") {
       const configCheck = await ctx.request<{ valid: boolean; missing_fields?: Array<{ id: string; prompt: string }> }>("schedule.check_config", {});
 
       const missingFields = configCheck.missing_fields as Array<{ id: string; prompt: string }> | undefined;
       if (missingFields && missingFields.length > 0) {
         const missingList = missingFields.map(f => `  - ${f.prompt}`).join("\n");
         ctx.addItem(
-          addInfo(ctx.sessionId, `meta_evolve_pipeline 需要配置 git 信息:\n${missingList}\n\n请使用 /config edit 配置这些字段后重试`)
+          addInfo(ctx.sessionId, `optimize_meta_harness 需要配置 git 信息:\n${missingList}\n\n请使用 /config edit 配置这些字段后重试`)
         );
         return;
       }
     }
 
-    ctx.addItem(addInfo(ctx.sessionId, `\n正在创建一次性任务...\nPipeline: ${pipeline}\n`, "i"));
+    ctx.addItem(addInfo(ctx.sessionId, `\n正在创建一次性任务...\nPipeline: ${pipelineDisplayLabel(pipeline)}\n`, "i"));
 
     // Create and execute one-time task
     const result = await ctx.request<{ error?: string; task_id?: string; status?: string; message?: string }>("schedule.run", {
       query: parsed.query,
-      pipeline: pipeline,
+      pipeline: resolvedPipeline,
     });
 
     if (result.error) {
@@ -1713,7 +1880,7 @@ const runCommand: SlashCommand = {
     }
 
     ctx.addItem(
-      addInfo(ctx.sessionId, `\n一次性任务已创建并开始执行\nID: ${result.task_id}\nPipeline: ${pipeline}\n状态: ${result.status}\n`)
+      addInfo(ctx.sessionId, `\n一次性任务已创建并开始执行\nID: ${result.task_id}\nPipeline: ${pipelineDisplayLabel(pipeline)}\n状态: ${result.status}\n`)
     );
 
     // Start streaming logs

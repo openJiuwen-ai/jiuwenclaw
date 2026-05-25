@@ -4389,7 +4389,7 @@ class JiuWenClawDeepAdapter:
                 return
 
             async for chunk in self._auto_harness_service.run(
-                request, session_id, rid, query, model=resolved_model
+                request, session_id, rid, query=query, model=resolved_model
             ):
                 yield chunk
             return

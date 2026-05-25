@@ -342,8 +342,9 @@ class Scheduler:
             )
 
             # Execute via service.run() - service already has agent set
+            # Auto-accept interactions: scheduled runs have no interactive channel
             async for chunk in self._service.run(
-                request, session_id, execution_id, query, model=model
+                request, session_id, execution_id, query=query, model=model, auto_accept=True
             ):
                 if chunk.payload:
                     # Skip context compression events - not needed in logs

@@ -42,6 +42,7 @@ from jiuwenswarm.common.utils import get_user_workspace_dir
 logger = logging.getLogger(__name__)
 
 # Auto-Harness config file path
+_DEFAULT_REPO_URL = "https://gitcode.com/openJiuwen/agent-core.git"
 _AUTO_HARNESS_CONFIG_DIR = get_user_workspace_dir() / "auto-harness"
 _AUTO_HARNESS_CONFIG_FILE = _AUTO_HARNESS_CONFIG_DIR / "config.yaml"
 _AUTO_HARNESS_LOCAL_REPO = _AUTO_HARNESS_CONFIG_DIR / "repo" / "openJiuwen--agent-core"
@@ -75,9 +76,15 @@ def _get_auto_harness_config() -> dict[str, Any]:
 
     # Ensure local_repo is a string (not Path object which causes YAML serialization issues)
     local_repo = config.get("local_repo")
+    repo_url = config.get("repo_url")
     if not local_repo:
         config["local_repo"] = str(_AUTO_HARNESS_LOCAL_REPO)
         needs_save = True
+
+    if not repo_url:
+        config["repo_url"] = str(_DEFAULT_REPO_URL)
+        needs_save = True
+
     elif hasattr(local_repo, "__fspath__"):  # Path-like object
         config["local_repo"] = str(local_repo)
         needs_save = True

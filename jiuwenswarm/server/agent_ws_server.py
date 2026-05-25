@@ -4183,11 +4183,14 @@ class AgentWebSocketServer:
 
         try:
             # Get or create the agent instance (auto-create if not exists)
-            channel_id = request.channel_id or "default"
+            mode, sub_mode = _apply_resolved_mode_to_request(request)
+            agent_mode = "agent" if mode == "auto_harness" else mode
+            channel_id = request.channel_id or "web"
             agent = await self._agent_manager.get_agent(
                 channel_id=channel_id,
-                mode="agent",
+                mode=agent_mode,
                 project_dir=resolve_request_project_dir(request),
+                sub_mode=sub_mode
             )
             agent_instance = None
             if agent is not None:
@@ -4249,7 +4252,14 @@ class AgentWebSocketServer:
         try:
             # Get or create the agent instance (auto-create if not exists)
             channel_id = request.channel_id or "default"
-            agent = await self._agent_manager.get_agent(channel_id=channel_id, mode="agent")
+            mode, sub_mode = _apply_resolved_mode_to_request(request)
+            agent_mode = "agent" if mode == "auto_harness" else mode
+            agent = await self._agent_manager.get_agent(
+                channel_id=channel_id,
+                project_dir=resolve_request_project_dir(request),
+                mode=agent_mode,
+                sub_mode=sub_mode
+            )
             agent_instance = None
             if agent is not None:
                 agent_instance = agent.get_instance()
@@ -4434,10 +4444,14 @@ class AgentWebSocketServer:
             # For actions that need agent: get agent and set on service (similar to _handle_command_compact)
             needs_agent = action in ("create", "run", "cancel", "delete")
             if needs_agent:
+                mode, sub_mode = _apply_resolved_mode_to_request(request)
+                agent_mode = "agent" if mode == "auto_harness" else mode
                 agent = await self._agent_manager.get_agent(
-                    channel_id=request.channel_id or "web",
-                    mode="agent",
+                    channel_id=request.channel_id or "tui",
+                    mode=agent_mode,
                     project_dir=resolve_request_project_dir(request),
+                    sub_mode=sub_mode
+
                 )
                 if agent is None:
                     raise ValueError("Failed to get agent for schedule request")

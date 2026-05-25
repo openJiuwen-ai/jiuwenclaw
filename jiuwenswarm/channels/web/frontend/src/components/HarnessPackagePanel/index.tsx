@@ -61,7 +61,7 @@ export function HarnessPackagePanel({ sessionId }: HarnessPackagePanelProps) {
   const [deactivatingAll, setDeactivatingAll] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
-  // Fetch packages on mount
+  // Fetch packages from cache (initial load)
   const fetchPackages = useCallback(async () => {
     setLoadingPackages(true);
     setLoadError(null);
@@ -74,15 +74,34 @@ export function HarnessPackagePanel({ sessionId }: HarnessPackagePanelProps) {
         payload.native_version || { id: 'native', extension_name: 'Native Agent', is_active: true },
         activeIds
       );
-      // Set default selection to 'native'
-      setSelectedPackageId('native');
     } catch (err) {
       console.error('Failed to fetch packages:', err);
       setLoadError(err instanceof Error ? err.message : t('harnessPackage.loadPackagesFailed'));
     } finally {
       setLoadingPackages(false);
     }
-  }, [setLoadingPackages, setPackages, setSelectedPackageId, t]);
+  }, [setLoadingPackages, setPackages, t]);
+
+  // Re-scan packages directory (refresh button)
+  const scanPackages = useCallback(async () => {
+    setLoadingPackages(true);
+    setLoadError(null);
+
+    try {
+      const payload = await webRequest<PackagesPayload>('harness.packages.scan', undefined);
+      const activeIds = payload.active_package_ids || [];
+      setPackages(
+        payload.packages || [],
+        payload.native_version || { id: 'native', extension_name: 'Native Agent', is_active: true },
+        activeIds
+      );
+    } catch (err) {
+      console.error('Failed to scan packages:', err);
+      setLoadError(err instanceof Error ? err.message : t('harnessPackage.loadPackagesFailed'));
+    } finally {
+      setLoadingPackages(false);
+    }
+  }, [setLoadingPackages, setPackages, t]);
 
   useEffect(() => {
     fetchPackages();
@@ -525,7 +544,7 @@ export function HarnessPackagePanel({ sessionId }: HarnessPackagePanelProps) {
         <div className="harness-package-panel__header-actions">
           <button
             type="button"
-            onClick={fetchPackages}
+            onClick={scanPackages}
             className="harness-package-panel__refresh-btn"
             disabled={loadingPackages}
           >

@@ -1133,8 +1133,10 @@ class AutoHarnessService:
         request: Any,
         session_id: str,
         request_id: str,
-        query: str,
+        *,
+        query: str = "",
         model: Optional[Model] = None,
+        auto_accept: bool = False,
     ) -> AsyncIterator[AgentResponseChunk]:
         """Run auto_harness session and stream chunks as WebSocket events.
 
@@ -1240,7 +1242,7 @@ class AutoHarnessService:
                 """Produce chunks from orchestrator stream."""
                 try:
                     async for chunk in orchestrator.run_session_stream(tasks=tasks):
-                        if cancelled:
+                        if cancelled or active_run.cancelled:
                             logger.info(
                                 "[AutoHarnessService] Stream cancelled, stopping producer"
                             )
@@ -1291,7 +1293,7 @@ class AutoHarnessService:
             # out-of-band resume signal; this original stream stays open.
             try:
                 async for response_chunk, should_suspend in self._consume_stream(
-                    active_run, rid, cid,
+                    active_run, rid, cid, auto_accept=auto_accept,
                 ):
                     if should_suspend:
                         active_run.suspended = True
@@ -1472,8 +1474,16 @@ class AutoHarnessService:
         active_run: ActiveAutoHarnessRun,
         request_id: str,
         channel_id: Optional[str],
+        auto_accept: bool = False,
     ) -> AsyncIterator[tuple[AgentResponseChunk, bool]]:
-        """Consume stream queue, yielding (chunk, should_suspend) pairs."""
+        """Consume stream queue, yielding (chunk, should_suspend) pairs.
+
+        Args:
+            auto_accept: When True, automatically resolve __interaction__
+                chunks by calling orchestrator.run_session_stream() with
+                accept message, instead of suspending for external resume.
+                Used by scheduler runs that don't have interactive channels.
+        """
         queue = active_run.stream_queue
         if queue is None:
             return
@@ -1485,6 +1495,12 @@ class AutoHarnessService:
                     timeout=0.1,
                 )
             except asyncio.TimeoutError:
+                if active_run.cancelled:
+                    logger.info(
+                        "[AutoHarnessService] Consumer detected cancellation, breaking, session=%s",
+                        active_run.session_id,
+                    )
+                    break
                 if producer_task.done():
                     logger.info(
                         "[AutoHarnessService] Producer done while queue idle, session=%s",
@@ -1529,6 +1545,22 @@ class AutoHarnessService:
                     if isinstance(interaction_id, str) and interaction_id:
                         active_run.pending_interaction_id = interaction_id
 
+                    # Auto-accept: resolve interaction without suspending
+                    if auto_accept and active_run.orchestrator is not None:
+                        logger.info(
+                            "[AutoHarnessService] Auto-accepting interaction %s, session=%s",
+                            interaction_id, active_run.session_id,
+                        )
+                        active_run.orchestrator.run_session_stream(
+                            message={
+                                "interaction_id": interaction_id or "",
+                                "action": "accept",
+                                "feedback": "",
+                            }
+                        )
+                        # Do NOT yield as should_suspend; continue consuming
+                        is_interaction = False
+
             for response_chunk in self._map_chunk_to_response(
                 chunk,
                 request_id,
@@ -1541,6 +1573,13 @@ class AutoHarnessService:
                 active_run.completed = True
                 logger.info(
                     "[AutoHarnessService] Consumer received terminal event, session=%s",
+                    active_run.session_id,
+                )
+                break
+
+            if active_run.cancelled:
+                logger.info(
+                    "[AutoHarnessService] Consumer cancelled during processing, session=%s",
                     active_run.session_id,
                 )
                 break

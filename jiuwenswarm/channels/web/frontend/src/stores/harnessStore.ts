@@ -457,11 +457,14 @@ export const useHarnessStore = create<HarnessState>((set, get) => ({
   },
 
   setPackages: (packages, nativeVersion, activeIds) => {
+    const currentSelection = get().selectedPackageId;
+    const allIds = ['native', ...packages.map(p => p.id)];
+    const newSelection = (currentSelection && allIds.includes(currentSelection)) ? currentSelection : 'native';
     set({
       packages,
       nativeVersion,
       activePackageIds: activeIds,
-      selectedPackageId: null,
+      selectedPackageId: newSelection,
     });
   },
 
