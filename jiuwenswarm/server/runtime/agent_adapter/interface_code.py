@@ -146,6 +146,22 @@ class JiuwenClawCodeAdapter(JiuWenClawDeepAdapter):
         """Code mode always uses English for runtime language."""
         return "en"
 
+    def _resolve_output_language(self) -> str:
+        """Resolve user's preferred output language for runtime_state display.
+
+        Distinct from prompt/runtime language (always "en" in code mode).
+        Returns the normalized language code ("cn"/"en") based on
+        config.yaml preferred_language, so the Language section injected
+        by RuntimePromptRail can instruct the LLM to respond in the
+        user's chosen language.
+        """
+        from openjiuwen.harness.prompts import resolve_language
+        config_base = get_config()
+        raw = str(config_base.get("preferred_language", "zh")).strip().lower()
+        if raw == "zh":
+            raw = "cn"
+        return resolve_language(raw)
+
     # ─── 初始化 ──────────────────────────────
 
     async def create_instance(self, config: dict[str, Any] | None = None, *,
@@ -782,7 +798,7 @@ class JiuwenClawCodeAdapter(JiuWenClawDeepAdapter):
             )
         self._write_runtime_state(
             mode=runtime_config.mode,
-            language=resolved_language,
+            language=self._resolve_output_language(),
             channel=resolved_channel,
             project_dir=runtime_config.project_dir
             or runtime_config.cwd

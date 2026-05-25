@@ -24,6 +24,8 @@ from jiuwenswarm.common.utils import get_agent_workspace_dir
 
 _CN_WEEKDAYS = ["星期一", "星期二", "星期三", "星期四", "星期五", "星期六", "星期日"]
 
+_LANGUAGE_NAMES = {"cn": "Chinese", "zh": "Chinese", "en": "English"}
+
 
 class RuntimePromptRail(DeepAgentRail):
     """在 before_model_call 中注入时间及运行时状态文件路径。"""
@@ -57,6 +59,7 @@ class RuntimePromptRail(DeepAgentRail):
         if self.system_prompt_builder is not None:
             self.system_prompt_builder.remove_section("time")
             self.system_prompt_builder.remove_section("runtime")
+            self.system_prompt_builder.remove_section("language_output")
             self.system_prompt_builder.remove_section("env")
             self.system_prompt_builder.remove_section("git_status")
             self.system_prompt_builder.remove_section("browser_tool_policy")
@@ -195,6 +198,23 @@ class RuntimePromptRail(DeepAgentRail):
             name="runtime",
             content={"cn": runtime_content, "en": runtime_content},
             priority=95,
+        ))
+
+        # ── Language output constraint (injected near end, like Claude Code) ──
+        self.system_prompt_builder.remove_section("language_output")
+        language_name = _LANGUAGE_NAMES.get(language_val, language_val)
+        language_output_content = (
+            "# Language\n\n"
+            f"Always respond in {language_name}. "
+            f"Use {language_name} for all explanations, comments, "
+            f"and communications with the user. "
+            f"Technical terms and code identifiers should remain "
+            f"in their original form."
+        )
+        self.system_prompt_builder.add_section(PromptSection(
+            name="language_output",
+            content={"cn": language_output_content, "en": language_output_content},
+            priority=93,
         ))
 
         # ── Platform / OS environment section ──
