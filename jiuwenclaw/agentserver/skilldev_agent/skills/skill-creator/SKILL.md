@@ -95,7 +95,7 @@ A skill executes on the device when:
 
 Device-side skills must not generate `scripts/` by default. If a script is genuinely required after evaluation, call `ask_user_question` to confirm with the user that the skill includes a Python script, running it on the device will be slow, and let them choose to proceed with generation or adjust the feature. Only generate the script after explicit confirmation.
 
-Follow the anatomy and frontmatter rules above. Self-check before moving on:
+### Self-check before moving on
 
 - Create or update the skill under the current workspace's `skill/<skill-name>` directory: `<workspace>/skill/<skill-name>/`.
 - `SKILL.md` exists with valid frontmatter (name matches directory, description within language-specific limits, allowed keys only).
