@@ -23,7 +23,6 @@ import {
   downloadSkillDevArtifact,
   triggerDownload,
   cancelSkillDev,
-  parseSkillPackage,
 } from '../../services/skillDevService';
 import type {
   SkillDevTodo,
@@ -1150,38 +1149,41 @@ export function SkillDevPanel() {
     }
     try {
       const sessionId = getOrCreateSessionId();
-      console.info('[SkillDevPanel] import skill selected', {
+      const query = t('skilldev.importSkillDirectImportQuery', { name: file.filename });
+      console.info('[SkillDevPanel] directImport skill selected', {
         filename: file?.filename,
         sessionId,
-        taskId: taskId || undefined,
       });
-      const result = await parseSkillPackage(sessionId, file, taskId || undefined);
-      console.info('[SkillDevPanel] import skill request succeeded', {
-        responseTaskId: result?.task_id,
-        message: result?.message,
-      });
-      activeTaskIdRef.current = result.task_id;
-      removeIgnoredTaskScope(ignoredTaskIdsRef.current, result.task_id);
-      setTaskId(result.task_id);
-      fileBrowserLoaded.current = false;
-      if (activeTab === 'files') {
-        const tree = await getSkillDevFileTree(result.task_id);
-        setFileTree(tree);
-        fileBrowserLoaded.current = true;
-      }
       addMessage({
         id: `import-skill-${Date.now()}`,
-        role: 'system',
-        content: result.message || t('skilldev.importSkillSuccess', { name: file.filename }),
+        role: 'user',
+        content: query,
         type: 'text',
         timestamp: new Date().toISOString(),
       });
+      runEpochRef.current += 1;
+      pendingCancelEpochRef.current = null;
+      activeTaskIdRef.current = sessionId;
+      removeIgnoredTaskScope(ignoredTaskIdsRef.current, sessionId);
+      setTaskId(sessionId);
+      setQuery(query);
+      setProcessing(true);
+      setSuspended(false);
+      fileBrowserLoaded.current = false;
+      await startSkillDev({
+        query,
+        session_id: sessionId,
+        skill_packages: [file],
+        import_type: 'directImport',
+        importType: 'directImport',
+      });
     } catch (err) {
       const errorMsg = err instanceof Error ? err.message : t('skilldev.importSkillFailed');
-      console.error('[SkillDevPanel] import skill request failed', {
+      console.error('[SkillDevPanel] directImport skill request failed', {
         error: err,
         errorMsg,
       });
+      setProcessing(false);
       setError(errorMsg);
       addMessage({
         id: `import-skill-error-${Date.now()}`,
@@ -1191,7 +1193,16 @@ export function SkillDevPanel() {
         timestamp: new Date().toISOString(),
       });
     }
-  }, [activeTab, addMessage, getOrCreateSessionId, setFileTree, setTaskId, t, taskId]);
+  }, [
+    addMessage,
+    getOrCreateSessionId,
+    setError,
+    setProcessing,
+    setQuery,
+    setSuspended,
+    setTaskId,
+    t,
+  ]);
 
   const handleConfirm = useCallback(
     async (

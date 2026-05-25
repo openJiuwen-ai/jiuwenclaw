@@ -405,7 +405,7 @@ class SkillDevDeepAdapter:
         import_type = str(
             params.get("import_type") or params.get("importType") or "vibeImport"
         ).strip()
-        if import_type == "directImport":
+        if import_type == "directImport" and is_first_task_input(task_workspace):
             async for chunk in self._handle_direct_import(
                 request=request,
                 params=params,
@@ -561,6 +561,14 @@ class SkillDevDeepAdapter:
         await self.update_workspace(task_workspace)
 
         if valid:
+            output_dir = task_workspace / "output"
+            packaged = package_validated_skill(skill_root, output_dir)
+            if packaged is None:
+                async for chunk in self._yield_skilldev_error(
+                    rid, cid, "Skill 打包失败，请检查工作区与依赖引用"
+                ):
+                    yield chunk
+                return
             yield AgentResponseChunk(
                 request_id=rid,
                 channel_id=cid,
@@ -571,14 +579,6 @@ class SkillDevDeepAdapter:
                 },
                 is_complete=False,
             )
-            output_dir = task_workspace / "output"
-            packaged = package_validated_skill(skill_root, output_dir)
-            if packaged is None:
-                async for chunk in self._yield_skilldev_error(
-                    rid, cid, "Skill 打包失败，请检查工作区与依赖引用"
-                ):
-                    yield chunk
-                return
             async for chunk in self._yield_packaged_skill_completion(
                 task_id=task_id,
                 rid=rid,

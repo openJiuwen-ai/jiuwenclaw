@@ -237,6 +237,9 @@ export type SkillDevEventType =
   | 'skilldev.completed'
   | 'skilldev.agent_completed';
 
+/** Skill 导入模式（与小艺 message.send importType 对齐） */
+export type SkillDevImportType = 'vibeImport' | 'directImport';
+
 /** 开始任务参数 */
 export interface StartSkillDevParams {
   query: string;
@@ -247,6 +250,10 @@ export interface StartSkillDevParams {
   skill_packages?: MediaItem[];
   /** 用户上传的工具/API 说明文件（与 files 分列，后端写入 workspace/resources/tool_specs/） */
   tool_spec_files?: MediaItem[];
+  /** directImport：解压校验后打包或 Agent 修复；默认 vibeImport */
+  import_type?: SkillDevImportType;
+  /** import_type 的 camelCase 别名，与小艺协议一致 */
+  importType?: SkillDevImportType;
   [key: string]: unknown;
 }
 

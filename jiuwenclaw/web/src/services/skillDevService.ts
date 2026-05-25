@@ -23,6 +23,7 @@ import type { MediaItem } from '../types';
 export async function startSkillDev(
   params: StartSkillDevParams
 ): Promise<void> {
+  const importType = params.import_type ?? params.importType;
   await webSendStream(
     'skilldev.chat',
     {
@@ -32,6 +33,7 @@ export async function startSkillDev(
       files: params.files,
       skill_packages: params.skill_packages,
       tool_spec_files: params.tool_spec_files,
+      ...(importType ? { import_type: importType, importType } : {}),
     }
   );
 }

@@ -292,10 +292,10 @@ def package_validated_skill(skill_root: Path, output_dir: Path) -> Path | None:
     if not skill_md.is_file():
         logger.error("[directImport] package failed: SKILL.md missing in %s", skill_root)
         return None
-
-    if not _copy_dependency_references(skill_root):
-        logger.error("[directImport] package failed: dependency references missing")
-        return None
+    #
+    # if not _copy_dependency_references(skill_root):
+    #     logger.error("[directImport] package failed: dependency references missing")
+    #     return None
 
     output_dir.mkdir(parents=True, exist_ok=True)
     skill_name = skill_root.name
