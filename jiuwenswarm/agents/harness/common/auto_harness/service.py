@@ -37,6 +37,9 @@ from openjiuwen.auto_harness import (
     AutoHarnessOrchestrator,
     create_auto_harness_orchestrator,
 )
+from openjiuwen.auto_harness.infra.git_auth import (
+    build_git_auth_env,
+)
 from openjiuwen.auto_harness.schema import (
     ExtensionDesign,
     OptimizationTask,
@@ -410,6 +413,7 @@ class AutoHarnessService:
         self,
         args: list[str],
         cwd: Optional[Path] = None,
+        env: Optional[dict[str, str]] = None,
     ) -> tuple[int, str, str]:
         """Run a git command asynchronously."""
         try:
@@ -417,6 +421,7 @@ class AutoHarnessService:
                 "git",
                 *args,
                 cwd=str(cwd) if cwd else None,
+                env=env,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
             )
@@ -434,10 +439,28 @@ class AutoHarnessService:
             )
             return (1, "", str(exc))
 
-    async def clone_or_update_repo(self, repo_url: str) -> Path:
-        """Clone or update remote repository to local cache (per §5.5)."""
+    async def clone_or_update_repo(
+        self,
+        repo_url: str,
+        harness_config: Optional[AutoHarnessConfig] = None,
+    ) -> Path:
+        """Clone or update remote repository to local cache."""
+        # Derive git settings from harness_config
+        cfg = harness_config
+        git_remote_name = cfg.git_remote if cfg else ""
+        gitcode_username = cfg.resolve_gitcode_username() if cfg else ""
+        gitcode_token = cfg.resolve_gitcode_token() if cfg else ""
+        git_user_name = cfg.git_user_name if cfg else ""
+        git_user_email = cfg.git_user_email if cfg else ""
+
         repo_name = self._extract_repo_name(repo_url)
         local_path = self.repo_cache_dir / repo_name
+
+        # Build auth env for git commands that need credentials
+        git_env = build_git_auth_env(
+            username=gitcode_username,
+            token=gitcode_token,
+        ) if gitcode_username and gitcode_token else None
 
         if local_path.exists() and (local_path / ".git").exists():
             # Update existing repository: fetch + reset (per §5.5)
@@ -467,9 +490,63 @@ class AutoHarnessService:
 
             ret, _, stderr = await self._run_git_command(
                 ["clone", repo_url, str(local_path)],
+                env=git_env,
             )
             if ret != 0:
                 raise RuntimeError(f"Failed to clone repository {repo_url}: {stderr}")
+
+        # Ensure the named fork remote exists (e.g. "autoharness").
+        # GitOperations.push() pushes to the fork remote, so it must point
+        # to the fork repo, not the upstream repo.
+        fork_owner = cfg.fork_owner if cfg else ""
+        upstream_owner = cfg.upstream_owner if cfg else ""
+        if git_remote_name and git_remote_name != "origin":
+            # Derive fork URL from repo_url by replacing upstream_owner
+            # with fork_owner. If they are the same, reuse repo_url directly.
+            fork_url = repo_url
+            if fork_owner and upstream_owner and fork_owner != upstream_owner:
+                fork_url = repo_url.replace(
+                    f"/{upstream_owner}/",
+                    f"/{fork_owner}/",
+                )
+
+            # Check if the remote already exists
+            ret, stdout, _ = await self._run_git_command(
+                ["remote"],
+                cwd=local_path,
+            )
+            existing_remotes = stdout.strip().splitlines() if ret == 0 else []
+
+            if git_remote_name in existing_remotes:
+                # Update the remote URL to the fork URL
+                await self._run_git_command(
+                    ["remote", "set-url", git_remote_name, fork_url],
+                    cwd=local_path,
+                )
+            else:
+                # Add the named remote pointing to the fork
+                await self._run_git_command(
+                    ["remote", "add", git_remote_name, fork_url],
+                    cwd=local_path,
+                )
+            logger.info(
+                "[AutoHarnessService] Ensured remote '%s' -> %s",
+                git_remote_name,
+                fork_url,
+            )
+
+        # Configure git user identity in the local repo so commits have
+        # proper authorship even on servers without global git config.
+        if git_user_name:
+            await self._run_git_command(
+                ["config", "user.name", git_user_name],
+                cwd=local_path,
+            )
+        if git_user_email:
+            await self._run_git_command(
+                ["config", "user.email", git_user_email],
+                cwd=local_path,
+            )
 
         return local_path
 
@@ -526,9 +603,13 @@ class AutoHarnessService:
 
         # Derive git settings from repo_url. Preserve git.base_branch from
         # config.yaml so local Auto-Harness runs can target feature branches.
+        # Preserve git_remote as the named remote (e.g. "autoharness") from
+        # config.yaml so that GitOperations.push() uses a named remote instead
+        # of a raw URL. The named remote is added in clone_or_update_repo().
         if not config.git_base_branch:
             config.git_base_branch = "develop"
-        config.git_remote = repo_url
+        if not config.git_remote:
+            config.git_remote = "origin"
 
         # Parse upstream owner/repo from URL
         repo_name = self._extract_repo_name(repo_url)
@@ -992,7 +1073,10 @@ class AutoHarnessService:
                 if self._base_config and self._base_config.repo_url
                 else _DEFAULT_REPO_URL
             )
-            local_repo = await self.clone_or_update_repo(repo_url)
+            local_repo = await self.clone_or_update_repo(
+                repo_url,
+                harness_config=self._base_config,
+            )
             config = self.build_auto_harness_config(
                 repo_url,
                 local_repo,
@@ -1202,7 +1286,10 @@ class AutoHarnessService:
         pipeline_preference = params.get("pipeline_preference")
         try:
             # Clone/update repository
-            local_repo = await self.clone_or_update_repo(repo_url)
+            local_repo = await self.clone_or_update_repo(
+                repo_url,
+                harness_config=self._base_config,
+            )
             logger.info("[AutoHarnessService] Repo ready at: %s", local_repo)
 
             # Build config with per-request overrides
