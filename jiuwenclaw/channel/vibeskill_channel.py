@@ -84,6 +84,11 @@ _IMPORT_TYPE_VIBE = "vibeImport"
 _IMPORT_TYPE_DIRECT = "directImport"
 _VALID_MESSAGE_SEND_IMPORT_TYPES = frozenset({_IMPORT_TYPE_VIBE, _IMPORT_TYPE_DIRECT})
 
+# chat.error 的 error payload 可能极大（例如 harness adapter 将整段 model response dump 进 error），
+# 对外发送前截断，避免把 WS 写爆 / 撑爆前端展示。
+_CHAT_ERROR_MAX_TEXT_LEN = 4096
+_CHAT_ERROR_TRUNCATION_SUFFIX = "...(truncated)"
+
 
 def _resolve_message_send_import_type(data: dict[str, Any]) -> str:
     """message.send 的 importType，默认 vibeImport。"""
@@ -1202,6 +1207,37 @@ class VibeSkillChannel(BaseChannel):
             )
             return True
 
+        if event_type == "chat.error":
+            raw_error = payload.get("error") or payload.get("message") or "chat error"
+            error_text = str(raw_error)
+            if len(error_text) > _CHAT_ERROR_MAX_TEXT_LEN:
+                error_text = (
+                    error_text[:_CHAT_ERROR_MAX_TEXT_LEN] + _CHAT_ERROR_TRUNCATION_SUFFIX
+                )
+
+            if msg.session_id:
+                try:
+                    await self._store.set_state(msg.session_id, VibeSkillSessionState.IDLE)
+                    logger.info(
+                        "[VibeSkillChannel] session state -> idle, source=chat.error, session_id=%s",
+                        msg.session_id,
+                    )
+                except Exception:
+                    logger.exception(
+                        "[VibeSkillChannel] set_state error for chat.error, session_id=%s",
+                        msg.session_id,
+                    )
+
+            responses = self._build_error_responses(
+                msg.session_id,
+                external_sid,
+                error_text,
+                include_task_completed=True,
+            )
+            for response in responses:
+                await self._send_ws_json(ws, response, source="chat.error")
+            return True
+
         return False
 
     def _get_skilldev_event_handlers(self) -> dict[str, Callable[[dict, str | None, str | None], Any]]:
@@ -1587,7 +1623,6 @@ class VibeSkillChannel(BaseChannel):
         session_id: str | None,
     ) -> list[dict]:
         """skilldev.error - 错误"""
-        responses: list[dict] = []
         if session_id:
             try:
                 await self._store.set_state(session_id, VibeSkillSessionState.IDLE)
@@ -1599,28 +1634,7 @@ class VibeSkillChannel(BaseChannel):
                 logger.exception("[VibeSkillChannel] set_state error for skilldev.error, session_id=%s", session_id)
 
         error_text = str(payload.get("error") or payload.get("message") or "skilldev error")
-        responses.extend(
-            self._emit_skilldev_error_text_part(session_id, external_sid, error_text),
-        )
-
-        responses.append({
-            "type": "task.error",
-            "properties": {
-                "error": error_text,
-            },
-        })
-
-        responses.append({
-            "type": "session.status",
-            "properties": {
-                "sessionID": external_sid,
-                "status": {
-                    "type": "idle",
-                    "message": error_text,
-                },
-            },
-        })
-        return responses
+        return self._build_error_responses(session_id, external_sid, error_text)
 
     async def _handle_skilldev_agent_completed(
         self,
@@ -2107,6 +2121,49 @@ class VibeSkillChannel(BaseChannel):
             "properties": self._serialize_part(part, external_sid),
         }]
         return self._prepend_message_announcement(ctx, external_sid, responses)
+
+    def _build_error_responses(
+        self,
+        session_id: str | None,
+        external_sid: str | None,
+        error_text: str,
+        *,
+        include_task_completed: bool = False,
+    ) -> list[dict[str, Any]]:
+        """统一构造错误收口事件序列：``message.updated``（错误文本 part）+ ``task.error``
+        [+ ``task.completed``] + ``session.status`` idle。
+
+        - ``skilldev.error`` 通用错误收口（SkillCreate 模式）：不发 ``task.completed``，
+          由后续 ``skilldev.completed`` / ``skilldev.agent_completed`` 自行收口；
+        - ``chat.error``（Standard / 通用 chat 路径）：需要追加 ``task.completed`` 让前端
+          spinner / busy 状态退出。
+        """
+        responses: list[dict[str, Any]] = []
+        responses.extend(
+            self._emit_skilldev_error_text_part(session_id, external_sid, error_text),
+        )
+        responses.append({
+            "type": "task.error",
+            "properties": {
+                "error": error_text,
+            },
+        })
+        if include_task_completed:
+            responses.append({
+                "type": "task.completed",
+                "properties": {},
+            })
+        responses.append({
+            "type": "session.status",
+            "properties": {
+                "sessionID": external_sid,
+                "status": {
+                    "type": "idle",
+                    "message": error_text,
+                },
+            },
+        })
+        return responses
 
     def _serialize_parts(self, parts: list[dict[str, Any]], external_sid: str | None) -> list[dict[str, Any]]:
         return [self._serialize_part(part, external_sid) for part in parts]
