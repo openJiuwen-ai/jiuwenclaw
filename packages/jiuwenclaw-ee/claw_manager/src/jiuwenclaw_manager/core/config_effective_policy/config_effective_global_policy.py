@@ -117,7 +117,7 @@ class ConfigEffectiveGlobalPolicyService:
         return {
             "jiuwenclaw_id": row["jiuwenclaw_id"],
             "priority": row["priority"],
-            "template_ref": row.get("template_ref") or {},
+            "template_ref": normalize_template_ref(row.get("template_ref")),
             "enabled": row.get("enabled", True),
             "data": row.get("data"),
             "created_at": _iso(row.get("created_at") or now),

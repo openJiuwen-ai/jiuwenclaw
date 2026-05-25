@@ -1,23 +1,11 @@
-"""从 Gateway 本地库解析企业级模型模板与配置生效策略。"""
+"""从 Gateway 本地库解析企业级配置生效策略与模板。"""
 
-from jiuwenclaw.agentserver.enterprise_config.policy import (
-    EffectiveModelSlots,
-    apply_effective_models_to_config,
-    enterprise_policy_enabled,
-    resolve_effective_model_slots,
-)
-from jiuwenclaw.agentserver.enterprise_config.routing import (
-    RoutingContext,
-    routing_context_from_mapping,
-    routing_context_from_request,
+from jiuwenclaw.agentserver.enterprise_config.loader import (
+    DEFAULT_AGENT_LOAD_SLOTS,
+    load_effective_enterprise_config,
 )
 
 __all__ = [
-    "EffectiveModelSlots",
-    "RoutingContext",
-    "apply_effective_models_to_config",
-    "enterprise_policy_enabled",
-    "resolve_effective_model_slots",
-    "routing_context_from_mapping",
-    "routing_context_from_request",
+    "DEFAULT_AGENT_LOAD_SLOTS",
+    "load_effective_enterprise_config",
 ]

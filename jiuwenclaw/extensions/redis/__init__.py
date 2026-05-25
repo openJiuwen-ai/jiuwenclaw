@@ -3,8 +3,8 @@
 
 from jiuwenclaw.extensions.redis.redis_client import RedisClient, RedisConfig
 from jiuwenclaw.extensions.redis.redis_keys import (
-    cron_changes_pubsub_channel,
     cron_jobs_hash_key,
+    cron_jobs_hash_rel,
     leader_lock_key,
     session_map_hash_key,
 )
@@ -21,8 +21,8 @@ from jiuwenclaw.extensions.redis.redis_runtime import (
 __all__ = [
     "RedisClient",
     "RedisConfig",
-    "cron_changes_pubsub_channel",
     "cron_jobs_hash_key",
+    "cron_jobs_hash_rel",
     "get_declared_deployment_mode",
     "get_effective_distributed_redis_active",
     "get_gateway_instance_id",

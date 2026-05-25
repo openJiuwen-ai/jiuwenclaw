@@ -1,0 +1,182 @@
+{
+  "common": {
+    "ok": "确定",
+    "cancel": "取消",
+    "save": "保存",
+    "delete": "删除",
+    "edit": "编辑",
+    "create": "新建",
+    "search": "搜索",
+    "refresh": "刷新",
+    "loading": "加载中…",
+    "empty": "暂无数据",
+    "yes": "是",
+    "no": "否",
+    "enabled": "已启用",
+    "disabled": "已禁用",
+    "detail": "详情",
+    "view": "查看",
+    "actions": "操作",
+    "all": "全部",
+    "confirm": "确认",
+    "submit": "提交"
+  },
+  "brand": {
+    "title": "JiuwenClaw",
+    "sub": "Claw Manager"
+  },
+  "nav": {
+    "platform": "平台",
+    "overview": "总览",
+    "topology": "服务组网",
+    "config": "全局配置",
+    "modelTemplates": "模型模板",
+    "extensionTemplates": "扩展配置模板",
+    "policies": "实例策略"
+  },
+  "connection": {
+    "ok": "已连接",
+    "fail": "未连接",
+    "checking": "检测中"
+  },
+  "overview": {
+    "title": "总览",
+    "subtitle": "实时查看管理面与组网整体健康状态",
+    "managerHealth": "Manager 健康",
+    "managerWs": "Manager WebSocket",
+    "totalInstances": "组网实例总数",
+    "activeServices": "在线服务数",
+    "registeredOnWs": "已注册到 WS 的实例",
+    "wsListening": "监听地址",
+    "wsPid": "Manager PID",
+    "noInstances": "暂未发现组网实例，可在「服务组网」中新建。"
+  },
+  "topology": {
+    "title": "服务组网关系",
+    "subtitle": "查看每组 Gateway 及其管理的 AgentServer 与服务状态",
+    "createInstance": "新建组网实例",
+    "provisionLocal": "本地一键拉起",
+    "instanceStatus": "实例状态",
+    "namespace": "命名空间",
+    "group": "Group",
+    "space": "Space",
+    "gateway": "Gateway",
+    "agentServer": "AgentServer",
+    "otherService": "其他服务",
+    "viewDetail": "实例详情",
+    "managePolicies": "策略管理",
+    "noServices": "暂未发现 Gateway / AgentServer 服务（等待心跳上报）",
+    "lastHeartbeat": "最近心跳",
+    "endpoint": "Endpoint",
+    "version": "版本",
+    "deleteConfirm": "确认删除该组网实例？将一并清理其下所有 service_instance 心跳数据。",
+    "filterStatus": "按状态过滤"
+  },
+  "instanceForm": {
+    "name": "实例名称",
+    "description": "描述",
+    "k8sMasterHost": "K8S Master 地址",
+    "k8sAuthType": "K8S 认证方式",
+    "k8sNamespace": "K8S 命名空间",
+    "k8sAuthConfig": "K8S 认证配置 (JSON)",
+    "resourceQuota": "资源配额 (JSON, 可选)",
+    "managementApiBase": "Management API 基地址",
+    "creatorId": "创建人 ID",
+    "groupId": "Group ID",
+    "spaceId": "Space ID",
+    "provisionLocalTitle": "本地拉起一套 Gateway + AgentServer",
+    "provisionLocalDesc": "适用于 MANAGER_ALLOW_LOCAL_PROVISION=true 的本地开发模式"
+  },
+  "instanceDetail": {
+    "title": "实例详情",
+    "services": "纳管服务列表",
+    "extraData": "扩展数据 (instance_info.data)",
+    "editData": "编辑扩展数据",
+    "back": "返回组网拓扑"
+  },
+  "modelTemplate": {
+    "title": "模型模板",
+    "subtitle": "维护可被组网实例引用的模型模板（多模态、provider、参数等）",
+    "new": "新建模型模板",
+    "edit": "编辑模型模板",
+    "templateName": "模板名称",
+    "modelType": "模型类型",
+    "modelTypeHint": "如 default / video / audio / vision，可填多个用逗号分隔",
+    "modelTags": "模型标签",
+    "modelTagsHint": "逗号分隔，例如 fast,zh,qa",
+    "apiBase": "API Base",
+    "apiKey": "API Key",
+    "modelId": "Model ID",
+    "modelProvider": "Provider",
+    "parameters": "参数 (JSON)",
+    "timeout": "超时（秒）",
+    "retryCount": "重试次数",
+    "enableStreaming": "启用流式",
+    "enableFunctionCalling": "启用 Function Calling",
+    "verifySsl": "校验 SSL",
+    "filterType": "按类型筛选",
+    "deleteConfirm": "确认删除该模型模板？该模板可能被多个实例策略引用，请确认无副作用。"
+  },
+  "extensionTemplate": {
+    "title": "扩展配置模板",
+    "subtitle": "Gateway / AgentServer 上的钩子与扩展配置模板",
+    "new": "新建扩展模板",
+    "edit": "编辑扩展模板",
+    "component": "目标组件",
+    "componentHint": "gateway / agent_server",
+    "hookType": "钩子类型",
+    "hookTypeHint": "pre_request / post_request / error / schedule",
+    "hookConfig": "钩子配置 (JSON)",
+    "customConfig": "自定义配置 (JSON, 可选)",
+    "deleteConfirm": "确认删除该扩展模板？"
+  },
+  "policies": {
+    "title": "实例策略",
+    "subtitle": "按所选实例隔离的「默认映射 / 全局 / 服务 / Agent」四层策略",
+    "selectInstance": "选择组网实例",
+    "noInstanceHint": "暂无组网实例，请先在「服务组网」中新建",
+    "tabs": {
+      "mapping": "默认模板映射",
+      "global": "全局兜底",
+      "service": "服务层级",
+      "agent": "Agent 层级"
+    },
+    "mapping": {
+      "new": "新建映射",
+      "templateType": "模板类型",
+      "templateTypeHint": "default_model / video_model / audio_model / vision_model / skill_whitelist / channel / service_resource",
+      "templateId": "Template ID",
+      "userId": "User ID",
+      "groupId": "Group ID",
+      "priority": "优先级"
+    },
+    "global": {
+      "new": "新建全局策略",
+      "priority": "优先级",
+      "templateRef": "模板引用 (JSON)",
+      "templateRefHint": "槽位名 → template_id 或 ${user::…}/${group::…} 或 <template_id>"
+    },
+    "service": {
+      "new": "新建服务策略",
+      "serviceId": "服务 ID",
+      "matchExpr": "匹配表达式"
+    },
+    "agent": {
+      "new": "新建 Agent 策略",
+      "agentId": "Agent ID",
+      "servicePolicyId": "关联服务策略 ID"
+    },
+    "deleteConfirm": "确认删除该策略？删除后将立即影响 Gateway 的配置生效。"
+  },
+  "errors": {
+    "loadFailed": "加载失败：{{detail}}",
+    "saveFailed": "保存失败：{{detail}}",
+    "deleteFailed": "删除失败：{{detail}}",
+    "invalidJson": "JSON 格式不正确：{{detail}}"
+  },
+  "success": {
+    "saved": "保存成功",
+    "deleted": "删除成功",
+    "created": "创建成功"
+  }
+}

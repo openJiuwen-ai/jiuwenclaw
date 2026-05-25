@@ -17,16 +17,15 @@ EVENT_REGISTER_ACK = "register.ack"
 
 def build_register(
     *,
-    instance_id: str,
     service_type: str = "gateway",
-    service_id: str | None = None,
+    service_id: str,
 ) -> dict[str, Any]:
+    sid = str(service_id or "").strip()
     return {
         "type": FRAME_TYPE_REGISTER,
         "payload": {
-            "instance_id": instance_id,
             "service_type": service_type,
-            "service_id": service_id or instance_id,
+            "service_id": sid,
         },
     }
 

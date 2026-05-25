@@ -313,3 +313,24 @@ network:
 #   pids_max: positive integer cap on processes/threads (e.g. 256). "max"
 #     or null means no limit.
 cgroup: {}
+
+# Idle sandbox reaping (jiuwenbox 服务端行为, 不下传到 bwrap / landlock / cgroup).
+#
+# 仅在 server 启动时加载的根 policy 上生效; per-sandbox policy 上的同名字段不会
+# 影响沙箱隔离, 也不会改变正在运行的沙箱的淘汰判定。
+#
+# 字段:
+#   idle_timeout: 沙箱最大空闲时长 (秒). null / 0 / 负值 = 禁用淘汰 (默认).
+#                 "空闲" = 自最后一次 exec / file IO / 列目录 等 API 调用以来的时长;
+#                 单纯查询接口 (get_sandbox / list_sandboxes / get_logs) 不会刷新计时器.
+#   idle_check_interval: reaper 轮询间隔 (秒). 必须 > 0, 默认 60.
+#
+# 行为: 默认禁用. 显式配置 idle_timeout 后, 后台 task 每隔 idle_check_interval
+#       秒扫一次, 超时的沙箱直接走 delete_sandbox (跟 ``DELETE /sandboxes/{id}``
+#       同一路径), 审计日志会带 ``reason: idle_timeout``.
+#
+# 示例:
+#   timeout:
+#     idle_timeout: 1800       # 30 分钟无活动即淘汰
+#     idle_check_interval: 60  # 每分钟扫一次
+timeout: {}

@@ -10,7 +10,9 @@ from datetime import datetime, timezone
 from collections.abc import Callable
 from typing import Any
 
+from jiuwenclaw_manager.infrastructure.db import get_db_handler
 from jiuwenclaw_manager.infrastructure.logger import get_logger
+from jiuwenclaw_manager.core.instance.instance_service import get_jiuwenclaw_id_by_service_id
 from jiuwenclaw_manager.manager_ws_server.protocol import (
     FRAME_TYPE_CONFIG_ACK,
     FRAME_TYPE_REGISTER,
@@ -26,7 +28,7 @@ logger = get_logger(__name__)
 @dataclass
 class _ConnectedClient:
     ws: Any
-    instance_id: str
+    jiuwenclaw_id: str
     service_type: str
     service_id: str
     send_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
@@ -109,20 +111,20 @@ class ManagerWsServer:
             self._clients.clear()
         logger.info("[ManagerWsServer] stopped")
 
-    async def list_registered_instance_ids(self) -> list[str]:
-        """返回当前已注册连接的 instance_id 列表（去重）。"""
+    async def list_registered_jiuwenclaw_ids(self) -> list[str]:
+        """返回当前已注册连接的 ``jiuwenclaw_id`` 列表（去重）。"""
         async with self._clients_lock:
-            return sorted({c.instance_id for c in self._clients.values()})
+            return sorted({c.jiuwenclaw_id for c in self._clients.values()})
 
-    async def push_config_to_instance(
+    async def push_config_to_jiuwenclaw(
         self,
-        instance_id: str,
+        jiuwenclaw_id: str,
         *,
         revision: str,
         config: dict[str, Any],
         service_type: str | None = "gateway",
     ) -> int:
-        """向指定 instance_id 的已注册连接下发配置，返回成功发送的连接数。
+        """向指定 ``jiuwenclaw_id`` 的已注册连接下发配置，返回成功发送的连接数。
 
         默认仅推送给 ``service_type=gateway``，避免同实例下 agent_server 等进程重复写入 Gateway 库。
         """
@@ -131,12 +133,13 @@ class ManagerWsServer:
         sent = 0
         st_filter = (service_type or "").strip().lower() or None
         async with self._clients_lock:
-            targets = [
-                c
-                for c in self._clients.values()
-                if c.instance_id == instance_id
-                and (st_filter is None or c.service_type.lower() == st_filter)
-            ]
+            targets = []
+            for client in self._clients.values():
+                if client.jiuwenclaw_id != jiuwenclaw_id:
+                    continue
+                if st_filter is not None and client.service_type.lower() != st_filter:
+                    continue
+                targets.append(client)
         for client in targets:
             try:
                 async with client.send_lock:
@@ -144,16 +147,16 @@ class ManagerWsServer:
                 sent += 1
             except Exception as exc:  # noqa: BLE001
                 logger.warning(
-                    "[ManagerWsServer] push failed instance_id=%s service_id=%s: %s",
-                    instance_id,
+                    "[ManagerWsServer] push failed jiuwenclaw_id=%s service_id=%s: %s",
+                    jiuwenclaw_id,
                     client.service_id,
                     exc,
                 )
         return sent
 
-    async def push_config_to_instance_and_wait_ack(
+    async def push_config_to_jiuwenclaw_and_wait_ack(
         self,
-        instance_id: str,
+        jiuwenclaw_id: str,
         *,
         revision: str,
         config: dict[str, Any],
@@ -164,17 +167,17 @@ class ManagerWsServer:
         async with self._pending_acks_lock:
             self._pending_acks[revision] = pending
         try:
-            sent = await self.push_config_to_instance(
-                instance_id,
+            sent = await self.push_config_to_jiuwenclaw(
+                jiuwenclaw_id,
                 revision=revision,
                 config=config,
                 service_type="gateway",
             )
             if sent < 1:
-                registered = await self.list_registered_instance_ids()
+                registered = await self.list_registered_jiuwenclaw_ids()
                 raise ValueError(
-                    f"no gateway websocket connected for instance_id={instance_id!r}; "
-                    f"registered_instances={registered}; "
+                    f"no gateway websocket connected for jiuwenclaw_id={jiuwenclaw_id!r}; "
+                    f"registered_jiuwenclaw_ids={registered}; "
                     "ensure gateway manager_ws_client is connected "
                     "(restart gateway after claw-manager restart)"
                 )
@@ -270,32 +273,50 @@ class ManagerWsServer:
             await ws.send(json.dumps(err, ensure_ascii=False))
             return
 
-        instance_id = str(payload.get("instance_id") or "").strip()
         service_type = str(payload.get("service_type") or "gateway").strip()
         service_id = str(payload.get("service_id") or "").strip()
-        if not instance_id:
-            err = build_error("register requires instance_id")
+        if not service_id:
+            err = build_error("register requires service_id")
+            await ws.send(json.dumps(err, ensure_ascii=False))
+            return
+
+        try:
+            handler = get_db_handler()
+            jiuwenclaw_id = await get_jiuwenclaw_id_by_service_id(
+                handler,
+                service_id,
+                service_type=service_type,
+            )
+        except RuntimeError as exc:
+            err = build_error(f"manager database unavailable: {exc}")
+            await ws.send(json.dumps(err, ensure_ascii=False))
+            return
+        if not jiuwenclaw_id:
+            err = build_error(
+                f"unknown service_id={service_id!r} for service_type={service_type!r}; "
+                "ensure jiuwenclaw instance and service_instance mapping exist"
+            )
             await ws.send(json.dumps(err, ensure_ascii=False))
             return
 
         client = _ConnectedClient(
             ws=ws,
-            instance_id=instance_id,
+            jiuwenclaw_id=jiuwenclaw_id,
             service_type=service_type,
-            service_id=service_id or instance_id,
+            service_id=service_id,
         )
         async with self._clients_lock:
             self._clients[key] = client
         try:
-            ack = build_register_ack(instance_id=instance_id)
+            ack = build_register_ack(jiuwenclaw_id=jiuwenclaw_id)
             await ws.send(json.dumps(ack, ensure_ascii=False))
         except Exception as exc:  # noqa: BLE001
             logger.warning("[ManagerWsServer] register.ack failed: %s", exc)
-        registered = await self.list_registered_instance_ids()
+        registered = await self.list_registered_jiuwenclaw_ids()
         logger.info(
-            "[ManagerWsServer] registered instance_id=%s service_type=%s service_id=%s "
-            "active_instances=%s pid=%s",
-            instance_id,
+            "[ManagerWsServer] registered jiuwenclaw_id=%s service_type=%s service_id=%s "
+            "active_jiuwenclaw_ids=%s pid=%s",
+            jiuwenclaw_id,
             service_type,
             client.service_id,
             registered,
@@ -326,27 +347,27 @@ def _revision_now() -> str:
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
-async def push_to_instance(
-    instance_id: str,
+async def push_to_jiuwenclaw(
+    jiuwenclaw_id: str,
     *,
     config: dict[str, Any],
     revision: str | None = None,
 ) -> dict[str, Any]:
-    """向已注册 ``instance_id`` 的 Gateway 连接推送 config.push，等待 ack 并返回 ack payload。"""
+    """向已注册 ``jiuwenclaw_id`` 的 Gateway 连接推送 config.push，等待 ack 并返回 ack payload。"""
     ws_server = _require_ws_server()
     rev = revision or _revision_now()
     try:
-        return await ws_server.push_config_to_instance_and_wait_ack(
-            instance_id,
+        return await ws_server.push_config_to_jiuwenclaw_and_wait_ack(
+            jiuwenclaw_id,
             revision=rev,
             config=config,
         )
     except ValueError as exc:
         if "no gateway websocket connected" in str(exc):
-            registered = await ws_server.list_registered_instance_ids()
+            registered = await ws_server.list_registered_jiuwenclaw_ids()
             raise ValueError(
-                f"no gateway websocket connected for instance_id={instance_id!r}; "
-                f"registered_instances={registered}; "
+                f"no gateway websocket connected for jiuwenclaw_id={jiuwenclaw_id!r}; "
+                f"registered_jiuwenclaw_ids={registered}; "
                 "ensure manager_ws_client is connected (restart gateway after claw-manager restart)"
             ) from exc
         raise
@@ -354,39 +375,39 @@ async def push_to_instance(
 
 def _no_gateway_connected_error() -> ValueError:
     return ValueError(
-        "no gateway websocket connected; registered_instances=[]; "
+        "no gateway websocket connected; registered_jiuwenclaw_ids=[]; "
         "ensure each gateway manager_ws_client is connected "
         "(restart gateway after claw-manager restart)"
     )
 
 
-def _adapt_payload_for_instance(
-    instance_id: str,
+def _adapt_payload_for_jiuwenclaw(
+    jiuwenclaw_id: str,
     payload: dict[str, Any],
 ) -> dict[str, Any]:
     """为指定实例复制 payload，并写入顶层 ``jiuwenclaw_id``。"""
     body = dict(payload)
-    body["jiuwenclaw_id"] = instance_id
+    body["jiuwenclaw_id"] = jiuwenclaw_id
     return body
 
 
 async def push_config_op(
-    instance_id: str,
+    jiuwenclaw_id: str,
     config_section: str,
     payload: dict[str, Any],
     *,
     revision: str | None = None,
 ) -> dict[str, Any]:
-    """向指定 ``instance_id`` 的 Gateway 推送配置变更（``config[config_section] = payload``）。"""
-    normalized = str(instance_id or "").strip()
+    """向指定 ``jiuwenclaw_id`` 的 Gateway 推送配置变更（``config[config_section] = payload``）。"""
+    normalized = str(jiuwenclaw_id or "").strip()
     if not normalized:
-        raise ValueError("instance_id is required")
+        raise ValueError("jiuwenclaw_id is required")
     section = str(config_section or "").strip()
     if not section:
         raise ValueError("config_section is required")
     body = dict(payload)
     body["jiuwenclaw_id"] = normalized
-    return await push_to_instance(
+    return await push_to_jiuwenclaw(
         normalized,
         config={section: body},
         revision=revision,
@@ -401,8 +422,8 @@ async def push_config_op_to_all(
 ) -> dict[str, Any]:
     """向所有已注册 Gateway 下发配置变更（逐实例独立 revision 等待 ack）。"""
     ws_server = _require_ws_server()
-    instance_ids = await ws_server.list_registered_instance_ids()
-    if not instance_ids:
+    jiuwenclaw_ids = await ws_server.list_registered_jiuwenclaw_ids()
+    if not jiuwenclaw_ids:
         raise _no_gateway_connected_error()
 
     section = str(config_section or "").strip()
@@ -411,19 +432,19 @@ async def push_config_op_to_all(
 
     base_rev = _revision_now()
     last_ack: dict[str, Any] | None = None
-    for iid in instance_ids:
+    for jid in jiuwenclaw_ids:
         if adapt_payload is not None:
-            body = adapt_payload(iid, payload)
+            body = adapt_payload(jid, payload)
         else:
-            body = _adapt_payload_for_instance(iid, payload)
+            body = _adapt_payload_for_jiuwenclaw(jid, payload)
         last_ack = await push_config_op(
-            iid,
+            jid,
             section,
             body,
-            revision=f"{base_rev}:{iid}",
+            revision=f"{base_rev}:{jid}",
         )
     return {
-        "pushed_instances": instance_ids,
-        "pushed_count": len(instance_ids),
+        "pushed_jiuwenclaw_ids": jiuwenclaw_ids,
+        "pushed_count": len(jiuwenclaw_ids),
         "last_ack": last_ack,
     }

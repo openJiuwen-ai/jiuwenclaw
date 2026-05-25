@@ -4,13 +4,16 @@
 
 from __future__ import annotations
 
-import os
 from datetime import datetime
 from typing import Any
 
 from openjiuwen_runtime.foundation.db.handler import DBHandler
 
-from ...infrastructure.utils import utc_now
+from ...infrastructure.utils import (
+    assert_jiuwenclaw_id_matches_payload,
+    require_jiuwenclaw_id,
+    utc_now,
+)
 from ...models.config_effective_policy_models import (
     CONFIG_DEFAULT_TEMPLATE_MAPPING_TABLE_DEF,
 )
@@ -25,18 +28,9 @@ _ALLOWED_TEMPLATE_TYPES = frozenset({
     "video_model",
     "audio_model",
     "vision_model",
-    "model",
-    "channel",
     "skill_whitelist",
-    "service_resource",
+    "extension_config",
 })
-
-
-def resolve_jiuwenclaw_id() -> str:
-    instance_id = os.getenv("JIUWENCLAW_PROVISIONED_INSTANCE_ID", "").strip()
-    if not instance_id:
-        raise ValueError("JIUWENCLAW_PROVISIONED_INSTANCE_ID is not set")
-    return instance_id
 
 
 def _optional_key(value: str | None) -> str | None:
@@ -83,7 +77,7 @@ async def update_config_default_template_mapping_record(
     mapping_id: int,
     request: ConfigDefaultTemplateMappingUpdateRequest,
 ) -> dict[str, Any] | None:
-    jiuwenclaw_id = resolve_jiuwenclaw_id()
+    jiuwenclaw_id = require_jiuwenclaw_id()
     existing = await _get_row_for_instance(handler, mapping_id, jiuwenclaw_id)
     if existing is None:
         return None
@@ -118,7 +112,7 @@ async def delete_config_default_template_mapping_record(
     handler: DBHandler,
     mapping_id: int,
 ) -> bool:
-    jiuwenclaw_id = resolve_jiuwenclaw_id()
+    jiuwenclaw_id = require_jiuwenclaw_id()
     existing = await _get_row_for_instance(handler, mapping_id, jiuwenclaw_id)
     if existing is None:
         return False
@@ -140,12 +134,7 @@ async def apply_config_default_template_mapping_sync(
     payload: dict[str, Any],
 ) -> dict[str, Any] | None:
     """应用 Claw Manager 经 WebSocket 下发的 config_default_template_mappings 变更。"""
-    jiuwenclaw_id = resolve_jiuwenclaw_id()
-    payload_jid = str(payload.get("jiuwenclaw_id") or "").strip()
-    if payload_jid and payload_jid != jiuwenclaw_id:
-        raise ValueError(
-            f"jiuwenclaw_id mismatch: push={payload_jid!r} env={jiuwenclaw_id!r}"
-        )
+    jiuwenclaw_id = assert_jiuwenclaw_id_matches_payload(payload)
 
     if op == "create":
         mapping = payload.get("mapping")

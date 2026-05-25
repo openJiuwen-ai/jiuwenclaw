@@ -180,6 +180,8 @@ Python：`jiuwenclaw.e2a.merge_params_to_acp_prompt(envelope)`。
 | `request_id` | `request_id` |
 | `channel_id` | `channel` |
 | `session_id` | `session_id` |
+| `service_id` | `service_id`（可选；网关在使用 SessionMap 的受控通道上可填充，与 `session_id` 同源，供元戎 HTTP、Runtime Management 等运行时路由） |
+| `agent_id` | `agent_id`（可选；同上；WebSocket AgentServer 可忽略） |
 | `req_method` | `method` |
 | `params` | `params` |
 | `is_stream` | `is_stream` |

@@ -952,6 +952,195 @@ class TestPolicyAPI:
         assert SANDBOX_WORKSPACE in resp.json()["error"]
 
 
+@pytest.fixture
+def restore_timeout(client):
+    """Snapshot the server-level timeout config and restore it on teardown.
+
+    Required because integration tests share one jiuwenbox-server process
+    for the whole session: a test that mutates ``mgr.policy.timeout`` must
+    not leak that state into the next test (in particular, leaving an
+    aggressive idle_timeout active would silently reap sandboxes created
+    by unrelated tests).
+
+    Yields the captured snapshot so the test can sanity-check the starting
+    state if it cares.
+    """
+    snapshot_resp = client.get("/api/v1/timeout")
+    assert snapshot_resp.status_code == 200, snapshot_resp.text
+    snapshot = snapshot_resp.json()
+    try:
+        yield snapshot
+    finally:
+        # ``idle_timeout`` may legitimately be ``None`` (= reaping disabled),
+        # which the PUT endpoint accepts. ``idle_check_interval`` is always
+        # numeric on the manager side, so the restore body is unambiguous.
+        client.put("/api/v1/timeout", json={
+            "idle_timeout": snapshot["idle_timeout"],
+            "idle_check_interval": snapshot["idle_check_interval"],
+        })
+
+
+class TestTimeoutAPI:
+    """Cover the ``GET /timeout`` / ``PUT /timeout`` administrative endpoints
+    that drive the server-level idle-sandbox reaper.
+
+    Each test takes the ``restore_timeout`` fixture so the global
+    ``mgr.policy.timeout`` is rolled back even when the test asserts halfway
+    through.
+    """
+
+    @staticmethod
+    def test_get_timeout_returns_current_config(client, restore_timeout):
+        resp = client.get("/api/v1/timeout")
+        assert resp.status_code == 200
+        data = resp.json()
+        # Schema only: don't hardcode "reaping disabled by default" because
+        # ``default-policy.yaml`` could legitimately be changed to opt in.
+        assert set(data.keys()) == {"idle_timeout", "idle_check_interval"}
+        assert data["idle_check_interval"] is not None
+        assert data["idle_check_interval"] > 0
+        if data["idle_timeout"] is not None:
+            assert data["idle_timeout"] > 0
+
+    @staticmethod
+    def test_put_timeout_full_update_round_trips(client, restore_timeout):
+        resp = client.put("/api/v1/timeout", json={
+            "idle_timeout": 600,
+            "idle_check_interval": 30,
+        })
+        assert resp.status_code == 200, resp.text
+        assert resp.json() == {"idle_timeout": 600.0, "idle_check_interval": 30.0}
+        # GET must reflect the PUT immediately (single in-memory source of truth).
+        assert client.get("/api/v1/timeout").json() == {
+            "idle_timeout": 600.0,
+            "idle_check_interval": 30.0,
+        }
+
+    @staticmethod
+    def test_put_timeout_partial_updates_only_idle_timeout(client, restore_timeout):
+        client.put("/api/v1/timeout", json={
+            "idle_timeout": 600,
+            "idle_check_interval": 30,
+        })
+        # Omit ``idle_check_interval`` -> server keeps the prior value.
+        resp = client.put("/api/v1/timeout", json={"idle_timeout": 1200})
+        assert resp.status_code == 200, resp.text
+        data = resp.json()
+        assert data["idle_timeout"] == 1200.0
+        assert data["idle_check_interval"] == 30.0
+
+    @staticmethod
+    def test_put_timeout_partial_updates_only_idle_check_interval(
+        client, restore_timeout,
+    ):
+        client.put("/api/v1/timeout", json={
+            "idle_timeout": 600,
+            "idle_check_interval": 30,
+        })
+        resp = client.put("/api/v1/timeout", json={"idle_check_interval": 120})
+        assert resp.status_code == 200, resp.text
+        data = resp.json()
+        assert data["idle_timeout"] == 600.0
+        assert data["idle_check_interval"] == 120.0
+
+    @staticmethod
+    def test_put_timeout_disables_reaping_via_null(client, restore_timeout):
+        client.put("/api/v1/timeout", json={
+            "idle_timeout": 600,
+            "idle_check_interval": 30,
+        })
+        # Explicit null -> reaping disabled, but check_interval is preserved.
+        resp = client.put("/api/v1/timeout", json={"idle_timeout": None})
+        assert resp.status_code == 200, resp.text
+        data = resp.json()
+        assert data["idle_timeout"] is None
+        assert data["idle_check_interval"] == 30.0
+
+    @staticmethod
+    def test_put_timeout_disables_reaping_via_zero(client, restore_timeout):
+        # Zero / negative idle_timeout is normalized to None by TimeoutPolicy
+        # (lets operators flip the feature off without removing the key).
+        client.put("/api/v1/timeout", json={
+            "idle_timeout": 600,
+            "idle_check_interval": 30,
+        })
+        resp = client.put("/api/v1/timeout", json={"idle_timeout": 0})
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["idle_timeout"] is None
+
+    @staticmethod
+    def test_put_timeout_rejects_non_positive_check_interval(
+        client, restore_timeout,
+    ):
+        for bad in (0, -1, -0.5):
+            resp = client.put(
+                "/api/v1/timeout", json={"idle_check_interval": bad},
+            )
+            assert resp.status_code == 400, (bad, resp.text)
+
+    @staticmethod
+    def test_put_timeout_rejects_null_check_interval(client, restore_timeout):
+        # ``idle_check_interval: null`` is ambiguous: omitting the key already
+        # means "don't touch this field", so an explicit null can only mean
+        # "set it to None" -- which TimeoutPolicy forbids. Reject up-front
+        # with a 400 instead of leaking a generic pydantic ValidationError.
+        resp = client.put(
+            "/api/v1/timeout", json={"idle_check_interval": None},
+        )
+        assert resp.status_code == 400
+
+    @staticmethod
+    def test_put_timeout_empty_body_is_noop(client, restore_timeout):
+        before = client.get("/api/v1/timeout").json()
+        resp = client.put("/api/v1/timeout", json={})
+        assert resp.status_code == 200, resp.text
+        assert resp.json() == before
+        assert client.get("/api/v1/timeout").json() == before
+
+    @staticmethod
+    def test_timeout_reaper_deletes_idle_sandbox_end_to_end(
+        client, restore_timeout,
+    ):
+        """End-to-end: configure aggressive timeout, observe reaper deleting
+        an untouched sandbox.
+
+        Uses ``idle_timeout=1.5s`` / ``idle_check_interval=0.5s`` so the
+        whole test finishes well under 10s. The sandbox is intentionally
+        *not* touched after creation -- any exec / file IO would refresh
+        ``last_active_at`` and reset the clock.
+        """
+        resp = client.put("/api/v1/timeout", json={
+            "idle_timeout": 1.5,
+            "idle_check_interval": 0.5,
+        })
+        assert resp.status_code == 200, resp.text
+
+        create = client.post("/api/v1/sandboxes", json={})
+        assert create.status_code == 201, create.text
+        sandbox_id = create.json()["id"]
+        # Sanity: sandbox visible right after create.
+        listing = client.get("/api/v1/sandboxes").json()
+        assert any(item["id"] == sandbox_id for item in listing), listing
+
+        # idle_timeout (1.5s) + worst-case check_interval delay (0.5s) +
+        # generous slack for ProcessRuntime.cleanup -> 8s deadline.
+        deadline = time.monotonic() + 8.0
+        reaped = False
+        while time.monotonic() < deadline:
+            still_present = any(
+                item["id"] == sandbox_id
+                for item in client.get("/api/v1/sandboxes").json()
+            )
+            if not still_present:
+                reaped = True
+                break
+            time.sleep(0.25)
+        assert reaped, (
+            f"reaper did not delete idle sandbox {sandbox_id} within 8s "
+            f"(idle_timeout=1.5s, idle_check_interval=0.5s)"
+        )
+
+
 class TestPolicyEnforcement:
     @staticmethod
     def test_filesystem_read_write_rule_allows_upload_and_download(

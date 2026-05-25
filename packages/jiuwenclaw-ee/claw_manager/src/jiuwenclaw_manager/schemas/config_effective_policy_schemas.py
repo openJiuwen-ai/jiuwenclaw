@@ -2,9 +2,20 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Annotated, Any
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, BeforeValidator
+
+from jiuwenclaw_manager.infrastructure.template_ref import (
+    coerce_template_ref,
+    coerce_template_ref_optional,
+)
+
+TemplateRefField = Annotated[dict[str, list[str]], BeforeValidator(coerce_template_ref)]
+OptionalTemplateRefField = Annotated[
+    dict[str, list[str]] | None,
+    BeforeValidator(coerce_template_ref_optional),
+]
 
 
 # --- config_effective_agent_policy ---
@@ -14,9 +25,9 @@ class ConfigEffectiveAgentPolicyCreateBody(BaseModel):
     service_policy_id: int
     priority: int = Field(default=0)
     match_expr: str | None = None
-    template_ref: dict[str, str] = Field(
+    template_ref: TemplateRefField = Field(
         default_factory=dict,
-        description="槽位名 -> template_id 或 ${user::…}/${group::…} or <template_id>",
+        description="槽位名 -> template_id 数组；元素可为 UUID 或 ${user::…}/${group::…} or <template_id>",
     )
     enabled: bool = True
     data: dict[str, Any] | None = None
@@ -27,7 +38,7 @@ class ConfigEffectiveAgentPolicyUpdateBody(BaseModel):
     service_policy_id: int | None = None
     priority: int | None = None
     match_expr: str | None = None
-    template_ref: dict[str, str] | None = None
+    template_ref: OptionalTemplateRefField = None
     enabled: bool | None = None
     data: dict[str, Any] | None = None
 
@@ -39,7 +50,7 @@ class ConfigEffectiveAgentPolicyOut(BaseModel):
     service_policy_id: int
     priority: int
     match_expr: str | None
-    template_ref: dict[str, str]
+    template_ref: dict[str, list[str]]
     enabled: bool
     data: dict[str, Any] | None
     created_at: str | None
@@ -52,7 +63,7 @@ class ConfigEffectiveServicePolicyCreateBody(BaseModel):
     service_id: str = Field(..., max_length=512)
     priority: int
     match_expr: str | None = None
-    template_ref: dict[str, str] = Field(default_factory=dict)
+    template_ref: TemplateRefField = Field(default_factory=dict)
     enabled: bool = True
     data: dict[str, Any] | None = None
 
@@ -61,7 +72,7 @@ class ConfigEffectiveServicePolicyUpdateBody(BaseModel):
     service_id: str | None = Field(default=None, max_length=512)
     priority: int | None = None
     match_expr: str | None = None
-    template_ref: dict[str, str] | None = None
+    template_ref: OptionalTemplateRefField = None
     enabled: bool | None = None
     data: dict[str, Any] | None = None
 
@@ -72,7 +83,7 @@ class ConfigEffectiveServicePolicyOut(BaseModel):
     jiuwenclaw_id: str
     priority: int
     match_expr: str | None
-    template_ref: dict[str, str]
+    template_ref: dict[str, list[str]]
     enabled: bool
     data: dict[str, Any] | None
     created_at: str | None
@@ -83,14 +94,14 @@ class ConfigEffectiveServicePolicyOut(BaseModel):
 
 class ConfigEffectiveGlobalPolicyCreateBody(BaseModel):
     priority: int = 0
-    template_ref: dict[str, str] = Field(default_factory=dict)
+    template_ref: TemplateRefField = Field(default_factory=dict)
     enabled: bool = True
     data: dict[str, Any] | None = None
 
 
 class ConfigEffectiveGlobalPolicyUpdateBody(BaseModel):
     priority: int | None = None
-    template_ref: dict[str, str] | None = None
+    template_ref: OptionalTemplateRefField = None
     enabled: bool | None = None
     data: dict[str, Any] | None = None
 
@@ -99,7 +110,7 @@ class ConfigEffectiveGlobalPolicyOut(BaseModel):
     id: int
     jiuwenclaw_id: str
     priority: int
-    template_ref: dict[str, str]
+    template_ref: dict[str, list[str]]
     enabled: bool
     data: dict[str, Any] | None
     created_at: str | None

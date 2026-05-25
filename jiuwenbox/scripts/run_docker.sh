@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
-set -euo pipefail
+set -euox pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
@@ -225,10 +225,12 @@ echo
 
 docker run -itd \
     --name "$CONTAINER_NAME" \
+    --restart=unless-stopped \
     --cap-add=SYS_ADMIN \
     --cap-add=NET_ADMIN \
     --security-opt seccomp=unconfined \
     --security-opt apparmor=unconfined \
+    --security-opt systempaths=unconfined \
     --cgroupns=host \
     -v /sys/fs/cgroup:/sys/fs/cgroup:rw \
     "${DOCKER_PORT_ARGS[@]}" \

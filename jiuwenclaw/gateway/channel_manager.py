@@ -143,6 +143,10 @@ class ChannelManager(ABC):
 
     # ----- 配置管理接口 -----
 
+    def get_channels_config(self) -> dict[str, Any]:
+        """返回当前 IM ``channels`` 配置浅拷贝（顶层 key 为 channel_type）。"""
+        return dict(self._config)
+
     def get_conf(self, channel_id: str) -> dict[str, Any]:
         """返回指定 channel_id 的配置浅拷贝；不存在则返回空 dict."""
         conf = self._config.get(channel_id)

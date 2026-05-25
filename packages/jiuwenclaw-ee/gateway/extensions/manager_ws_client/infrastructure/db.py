@@ -1,6 +1,6 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2026-2026. All rights reserved
 
-"""Manager WS Client 数据库句柄；配置来自仓库根 .env / 环境变量（见仓库根 .env.example）。"""
+"""通用 ``DBHandler`` 生命周期（由 ``Settings`` / 环境变量驱动）。"""
 
 from __future__ import annotations
 
@@ -14,121 +14,130 @@ from openjiuwen_runtime.foundation.db.postgresql_handler import PostgreSQLHandle
 from openjiuwen_runtime.foundation.db.sqlite_handler import SQLiteHandler
 from openjiuwen_runtime.foundation.log import get_logger
 
+from ..models.table_init import init_all_tables
 from .config import Settings, get_settings
-
-_EXT_ROOT = Path(__file__).resolve().parents[1]
 
 logger = get_logger(__name__)
 
-_db_handler: DBHandler | None = None
 
+class Database:
+    """数据库连接：解析路径、创建 ``DBHandler``、初始化并连接（幂等）。"""
 
-def get_db_handler() -> DBHandler:
-    if _db_handler is None:
-        raise RuntimeError("Database handler is not initialized; call ensure_db_handler_ready first.")
-    return _db_handler
+    def __init__(
+        self,
+        cfg: Settings | None = None,
+        *,
+        relative_root: Path | None = None,
+    ) -> None:
+        self._cfg = cfg
+        self._relative_root = relative_root
+        self._handler: DBHandler | None = None
+        self.tables_registered = False
 
+    @property
+    def settings(self) -> Settings:
+        return self._cfg or get_settings()
 
-def _resolve_sqlite_path(cfg: Settings) -> Path:
-    raw_path = Path(cfg.sqlite_path.strip()).expanduser()
-    if raw_path.is_absolute():
+    @property
+    def handler(self) -> DBHandler:
+        if self._handler is None:
+            raise RuntimeError(
+                "Database handler is not initialized; call ensure_ready first."
+            )
+        return self._handler
+
+    def resolve_sqlite_path(self) -> Path:
+        cfg = self.settings
+        raw_path = Path(cfg.gateway_sqlite_path.strip()).expanduser()
+        if raw_path.is_absolute():
+            return raw_path.resolve()
+
+        data_dir = os.getenv("JIUWENCLAW_DATA_DIR", "").strip()
+        if data_dir:
+            return (Path(data_dir) / raw_path).resolve()
+
+        if self._relative_root is not None:
+            return (self._relative_root / raw_path).resolve()
+
         return raw_path.resolve()
 
-    data_dir = os.getenv("JIUWENCLAW_DATA_DIR", "").strip()
-    if data_dir:
-        return (Path(data_dir) / raw_path).resolve()
+    def config_summary(self) -> dict[str, Any]:
+        cfg = self.settings
+        db_type = str(cfg.gateway_db_type or "").strip().lower() or "sqlite"
+        if db_type == "sqlite":
+            return {"db_type": db_type, "sqlite_path": str(self.resolve_sqlite_path())}
+        return {
+            "db_type": db_type,
+            "host": cfg.gateway_db_host,
+            "port": cfg.gateway_db_port,
+            "database": cfg.gateway_db_name,
+        }
 
-    return (_EXT_ROOT / raw_path).resolve()
+    def _create_sqlite_handler(self) -> SQLiteHandler:
+        db_path = self.resolve_sqlite_path()
+        db_path.parent.mkdir(parents=True, exist_ok=True)
+        return SQLiteHandler(str(db_path.as_posix()))
 
+    def _create_mysql_handler(self) -> MySQLHandler:
+        cfg = self.settings
+        try:
+            return MySQLHandler(
+                host=str(cfg.gateway_db_host).strip(),
+                port=int(cfg.gateway_db_port),
+                user=str(cfg.gateway_db_user).strip(),
+                password=str(cfg.gateway_db_password),
+                database=str(cfg.gateway_db_name).strip(),
+            )
+        except (TypeError, ValueError) as e:
+            logger.exception("Invalid MySQL database configuration.")
+            raise ValueError("Invalid MySQL database configuration.") from e
 
-def _sqlite_handler_from_settings(cfg: Settings) -> SQLiteHandler:
-    db_path = _resolve_sqlite_path(cfg)
-    db_path.parent.mkdir(parents=True, exist_ok=True)
-    return SQLiteHandler(str(db_path.as_posix()))
+    def create_handler(self) -> DBHandler:
+        """根据配置创建 ``DBHandler`` 并缓存在本实例上。"""
+        if self._handler is not None:
+            return self._handler
 
+        cfg = self.settings
+        db_type = str(cfg.gateway_db_type or "").strip().lower() or "sqlite"
+        logger.info("Using database: %s", db_type)
 
-def _mysql_handler_from_settings(cfg: Settings) -> MySQLHandler:
-    try:
-        return MySQLHandler(
-            host=str(cfg.db_host).strip(),
-            port=int(cfg.db_port),
-            user=str(cfg.db_user).strip(),
-            password=str(cfg.db_password),
-            database=str(cfg.db_name).strip(),
-        )
-    except (TypeError, ValueError) as e:
-        logger.exception(
-            "Invalid MySQL database configuration "
-            "(MANAGER_WS_CLIENT_DB_HOST/PORT/USER/PASSWORD/NAME)."
-        )
-        raise ValueError("Invalid MySQL database configuration.") from e
+        if db_type == "sqlite":
+            self._handler = self._create_sqlite_handler()
+        elif db_type == "mysql":
+            self._handler = self._create_mysql_handler()
+        else:
+            raise ValueError(f"Unsupported db_type: {db_type}. Use 'sqlite' or 'mysql'.")
 
+        return self._handler
 
-def _pg_handler_from_settings(cfg: Settings) -> PostgreSQLHandler:
-    try:
-        return PostgreSQLHandler(
-            host=str(cfg.db_host).strip(),
-            port=int(cfg.db_port),
-            user=str(cfg.db_user).strip(),
-            password=str(cfg.db_password),
-            database=str(cfg.db_name).strip(),
-        )
-    except (TypeError, ValueError) as e:
-        logger.exception(
-            "Invalid PostgreSQL database configuration "
-            "(MANAGER_WS_CLIENT_DB_HOST/PORT/USER/PASSWORD/NAME)."
-        )
-        raise ValueError("Invalid PostgreSQL database configuration.") from e
+    async def ensure_ready(
+        self,
+        *,
+        log_prefix: str = "",
+    ) -> DBHandler:
+        """连接数据库并注册 Gateway 表定义（进程内幂等）。"""
+        if self._handler is not None:
+            return self._handler
 
+        handler = self.create_handler()
+        await handler.init_database()
+        await handler.connect()
 
-def create_db_handler(cfg: Settings | None = None) -> DBHandler:
-    """根据 ``Settings`` / ``.env`` 创建并注册全局 ``DBHandler``。"""
-    global _db_handler
+        if not self.tables_registered:
+            await init_all_tables(handler)
+            self.tables_registered = True
 
-    active = cfg or get_settings()
-    db_type = str(active.db_type or "").strip().lower() or "sqlite"
-    logger.info("Using database: %s", db_type)
+        prefix = f"[{log_prefix}] " if log_prefix else ""
+        logger.info("%sdatabase handler ready: %s", prefix, self.config_summary())
+        return handler
 
-    if db_type == "sqlite":
-        _db_handler = _sqlite_handler_from_settings(active)
-    elif db_type == "mysql":
-        _db_handler = _mysql_handler_from_settings(active)
-    elif db_type in ("postgresql", "postgres", "pg"):
-        _db_handler = _pg_handler_from_settings(active)
-    else:
-        raise ValueError(f"Unsupported db_type: {db_type}. Use 'sqlite', 'mysql' or 'postgresql'.")
-
-    return _db_handler
-
-
-def database_config_summary(cfg: Settings | None = None) -> dict[str, Any]:
-    active = cfg or get_settings()
-    db_type = str(active.db_type or "").strip().lower() or "sqlite"
-    if db_type == "sqlite":
-        return {"db_type": db_type, "sqlite_path": str(_resolve_sqlite_path(active))}
-    return {
-        "db_type": db_type,
-        "host": active.db_host,
-        "port": active.db_port,
-        "database": active.db_name,
-    }
-
-
-async def ensure_db_handler_ready() -> DBHandler:
-    """创建并连接 DB（幂等）。供 manager_ws_client/ws_client manager_ws_client_router 使用。"""
-    global _db_handler
-
-    if _db_handler is not None:
-        return _db_handler
-
-    handler = create_db_handler(get_settings())
-    await handler.init_database()
-    await handler.connect()
-    from ..models.table_init import init_all_tables
-
-    await init_all_tables(handler)
-    logger.info(
-        "[manager_ws_client] database handler ready: %s",
-        database_config_summary(),
-    )
-    return handler
+    async def close(self) -> None:
+        """断开连接并释放 handler（CLI / 短生命周期脚本应在 event loop 关闭前调用）。"""
+        if self._handler is None:
+            return
+        try:
+            await self._handler.disconnect()
+        except Exception as exc:
+            logger.warning("database disconnect error: %s", exc)
+        finally:
+            self._handler = None

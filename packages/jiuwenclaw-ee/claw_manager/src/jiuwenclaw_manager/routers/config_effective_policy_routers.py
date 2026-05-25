@@ -61,7 +61,10 @@ async def list_template_mappings(
     group_id: str | None = Query(default=None, description="按 group_id 精确筛选"),
     template_type: str | None = Query(
         default=None,
-        description="模板类型：default_model / video_model / audio_model / vision_model / skill_whitelist / channel / service_resource",
+        description=(
+            "模板类型：default_model / video_model / audio_model / "
+            "vision_model / skill_whitelist / extension_config"
+        ),
     ),
     template_id: str | None = Query(default=None, description="按 template_id 精确筛选"),
     enabled: bool | None = None,

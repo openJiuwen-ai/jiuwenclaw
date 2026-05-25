@@ -7,11 +7,10 @@
 
 from __future__ import annotations
 
-import hashlib
+import importlib
 import json
 import logging
 import os
-import threading
 from typing import Any, AsyncIterator, Optional
 
 from openjiuwen_runtime.management.session.access import Access
@@ -48,42 +47,77 @@ from jiuwenclaw.e2a.wire_codec import (
     parse_agent_server_wire_chunk,
 )
 from jiuwenclaw.gateway.agent_client import AgentServerClient, _wire_request_id_key
-from jiuwenclaw.gateway.session_map import load_session_map_scope
 from jiuwenclaw.schema import AgentRequest
 from jiuwenclaw.schema.agent import AgentResponse, AgentResponseChunk
 
 logger = logging.getLogger(__name__)
 
-_session_id_lock = threading.Lock()
-_session_id_to_service_pair: dict[str, tuple[str, str | None]] = {}
+_load_effective_enterprise_config: Any | None = None
+_service_config_slot: Any | None = None
 
 
-def _md5_chat_bot_id(chat_id: str, bot_id: str) -> str:
-    return hashlib.md5("::".join((chat_id, bot_id)).encode("utf-8")).hexdigest()
+def _ensure_enterprise_config_loader() -> tuple[Any, Any]:
+    global _load_effective_enterprise_config, _service_config_slot
+    if _load_effective_enterprise_config is not None and _service_config_slot is not None:
+        return _load_effective_enterprise_config, _service_config_slot
+
+    from jiuwenclaw.gateway.channel_config_db import (
+        _EXT_PKG,
+        _ensure_extension_package,
+        _resolve_manager_ws_client_root,
+    )
+
+    ext_root = _resolve_manager_ws_client_root()
+    if ext_root is None:
+        raise ImportError("manager_ws_client extension not found")
+    _ensure_extension_package(ext_root)
+    loader_mod = importlib.import_module(f"{_EXT_PKG}.core.enterprise_config.loader")
+    schemas_mod = importlib.import_module(f"{_EXT_PKG}.core.enterprise_config.schemas")
+    _load_effective_enterprise_config = loader_mod.load_effective_enterprise_config
+    _service_config_slot = schemas_mod.TemplateRefSlot.SERVICE_CONFIG
+    return _load_effective_enterprise_config, _service_config_slot
 
 
-def _session_id_to_invoke_ids(session_id: str) -> tuple[str, str | None]:
-    """将网关 session_id 转为 invoker 的 (service_id, agent_id/space_id)。"""
-    with _session_id_lock:
-        cached = _session_id_to_service_pair.get(session_id)
-        if cached:
-            return cached
+async def load_effective_service_config_for_request(request: AgentRequest) -> Any | None:
+    """按当前请求路由上下文加载 ``service_config`` 槽位（与 ``send_request`` 入口一致）。"""
+    try:
+        load_fn, service_config_slot = _ensure_enterprise_config_loader()
+        loaded = await load_fn(request, [service_config_slot])
+    except Exception as exc:
+        logger.warning(
+            "[RuntimeManagementAgentClient] load service_config failed: %s",
+            exc,
+        )
+        return None
 
-    _ = load_session_map_scope()
+    if loaded is None:
+        logger.warning("[RuntimeManagementAgentClient] no service_config loaded")
+        return None
 
-    parts = session_id.split("::")
-    if len(parts) == 6:
-        _provider, chat_id, bot_id, user_id, _ts, _suffix = parts
-        pair = (_md5_chat_bot_id(chat_id, bot_id), user_id)
-    elif len(parts) == 5:
-        _provider, chat_id, bot_id, _ts, _suffix = parts
-        pair = (_md5_chat_bot_id(chat_id, bot_id), None)
-    else:
-        pair = (hashlib.md5(session_id.encode("utf-8")).hexdigest(), None)
+    entities = loaded.service_config or []
+    if entities:
+        first = entities[0]
+        logger.info(
+            "[RuntimeManagementAgentClient] service_config loaded: "
+            "template_name=%s template_id=%s min_idle_services=%s max_services=%s",
+            first.get("template_name"),
+            first.get("template_id"),
+            first.get("min_idle_services"),
+            first.get("max_services"),
+        )
+    return loaded
 
-    with _session_id_lock:
-        _session_id_to_service_pair.setdefault(session_id, pair)
-        return _session_id_to_service_pair[session_id]
+
+def _resolve_invoke_ids_from_request(msg: AgentRequest) -> tuple[str, str | None]:
+    """Require gateway-filled ``service_id`` / ``agent_id`` (no session_id parsing fallback)."""
+    svc = str(msg.service_id or "").strip()
+    if not svc:
+        raise ValueError(
+            "RuntimeManagementAgentClient requires AgentRequest.service_id "
+            "(set gateway-side, e.g. SessionMap path)"
+        )
+    ag = str(msg.agent_id or "").strip()
+    return svc, ag if ag else None
 
 
 class _SessionRequest(ISessionRequest):
@@ -92,7 +126,7 @@ class _SessionRequest(ISessionRequest):
     def __init__(self, msg: AgentRequest, envelope: E2AEnvelope) -> None:
         self._req = msg
         self._envelope = envelope
-        service_id, agent_id = _session_id_to_invoke_ids(self._req.session_id or "")
+        service_id, agent_id = _resolve_invoke_ids_from_request(self._req)
         self._service_id = service_id
         self._req.service_id = service_id
         self._req.agent_id = agent_id or ""
@@ -324,6 +358,7 @@ class RuntimeManagementAgentClient(AgentServerClient):
         """发送非流式请求。"""
         self._ensure_connected()
         request = e2a_to_agent_request(envelope)
+        await load_effective_service_config_for_request(request)
         session_request = _SessionRequest(request, envelope)
 
         try:
@@ -343,6 +378,7 @@ class RuntimeManagementAgentClient(AgentServerClient):
         """发送流式请求。"""
         self._ensure_connected()
         request = e2a_to_agent_request(envelope)
+        await load_effective_service_config_for_request(request)
         session_request = _SessionRequest(request, envelope)
 
         try:

@@ -11,7 +11,8 @@ ENV PATH=$PATH:/home/app/.local/bin
 RUN pip install -e ".[all]" \
     git+https://gitcode.com/openJiuwen/agent-runtime.git@develop#subdirectory=foundation \
     git+https://gitcode.com/openJiuwen/agent-runtime.git@develop#subdirectory=management \
-    kubernetes \
+    kubernetes==35.0.0 \
+    kubernetes_asyncio==35.0.0 \
     --no-cache-dir \
     -i https://pypi.tuna.tsinghua.edu.cn/simple
 

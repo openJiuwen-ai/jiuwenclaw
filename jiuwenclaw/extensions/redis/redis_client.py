@@ -54,17 +54,22 @@ class RedisConfig:
     operation_timeout: float = 10.0
     health_check_interval: int = 30
 
+    @staticmethod
+    def _normalize_password(value: Any) -> str | None:
+        """处理 YAML 解析后的密码值（false/0 等应视为无密码）。"""
+        if value is None or value is False:
+            return None
+        if isinstance(value, str) and value.strip() == "":
+            return None
+        return str(value)
+
     @classmethod
     def from_mapping(cls, data: dict[str, Any] | None) -> RedisConfig:
         m = data or {}
         kp = str(m.get("key_prefix") if m.get("key_prefix") is not None else "jiuwenclaw:")
         if kp and not kp.endswith(":"):
             kp = f"{kp}:"
-        pw = m.get("password")
-        if pw is not None and str(pw).strip() == "":
-            pw = None
-        elif pw is not None:
-            pw = str(pw)
+        pw = cls._normalize_password(m.get("password"))
         return cls(
             host=str(m.get("host") if m.get("host") is not None else "localhost"),
             port=_coerce_int(m.get("port"), 6379),

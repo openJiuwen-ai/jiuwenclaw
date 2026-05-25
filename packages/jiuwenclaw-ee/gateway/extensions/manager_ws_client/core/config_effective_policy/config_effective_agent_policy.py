@@ -9,7 +9,7 @@ from typing import Any
 
 from openjiuwen_runtime.foundation.db.handler import DBHandler
 
-from ...infrastructure.utils import utc_now
+from ...infrastructure.utils import assert_jiuwenclaw_id_matches_payload, require_jiuwenclaw_id, utc_now
 from ...models.config_effective_policy_models import (
     CONFIG_EFFECTIVE_AGENT_POLICY_TABLE_DEF,
     CONFIG_EFFECTIVE_SERVICE_POLICY_TABLE_DEF,
@@ -17,10 +17,9 @@ from ...models.config_effective_policy_models import (
 from ...schemas.config_effective_policy_schemas import (
     ConfigEffectiveAgentPolicyUpdateRequest,
 )
-from .config_default_template_mapping import resolve_jiuwenclaw_id
-from .template_ref import (
+from ...infrastructure.utils import (
     apply_template_ref_to_updates,
-    read_template_ref_from_policy_dict,
+    normalize_template_ref,
 )
 
 _AGENT_TABLE = CONFIG_EFFECTIVE_AGENT_POLICY_TABLE_DEF.table_name
@@ -60,7 +59,7 @@ async def update_config_effective_agent_policy_record(
     policy_id: int,
     request: ConfigEffectiveAgentPolicyUpdateRequest,
 ) -> dict[str, Any] | None:
-    jiuwenclaw_id = resolve_jiuwenclaw_id()
+    jiuwenclaw_id = require_jiuwenclaw_id()
     existing = await _get_row_for_instance(handler, policy_id, jiuwenclaw_id)
     if existing is None:
         return None
@@ -96,7 +95,7 @@ async def delete_config_effective_agent_policy_record(
     handler: DBHandler,
     policy_id: int,
 ) -> bool:
-    jiuwenclaw_id = resolve_jiuwenclaw_id()
+    jiuwenclaw_id = require_jiuwenclaw_id()
     existing = await _get_row_for_instance(handler, policy_id, jiuwenclaw_id)
     if existing is None:
         return False
@@ -118,12 +117,7 @@ async def apply_config_effective_agent_policy_sync(
     payload: dict[str, Any],
 ) -> dict[str, Any] | None:
     """应用 Claw Manager 经 WebSocket 下发的 config_effective_agent_policies 变更。"""
-    jiuwenclaw_id = resolve_jiuwenclaw_id()
-    payload_jid = str(payload.get("jiuwenclaw_id") or "").strip()
-    if payload_jid and payload_jid != jiuwenclaw_id:
-        raise ValueError(
-            f"jiuwenclaw_id mismatch: push={payload_jid!r} env={jiuwenclaw_id!r}"
-        )
+    jiuwenclaw_id = assert_jiuwenclaw_id_matches_payload(payload)
 
     if op == "create":
         policy = payload.get("policy")
@@ -148,7 +142,7 @@ async def apply_config_effective_agent_policy_sync(
             "service_policy_id": service_policy_id,
             "priority": int(policy.get("priority", 0)),
             "match_expr": policy.get("match_expr"),
-            "template_ref": read_template_ref_from_policy_dict(policy),
+            "template_ref": normalize_template_ref(policy.get("template_ref")),
             "enabled": bool(policy.get("enabled", True)),
             "data": policy.get("data"),
             "created_at": _parse_iso_datetime(policy.get("created_at")) or now,

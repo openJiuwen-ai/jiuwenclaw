@@ -1,15 +1,28 @@
 from __future__ import annotations
 
-from typing import Any
+from typing import Annotated, Any
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, BeforeValidator
+
+from ..infrastructure.utils import normalize_template_ref
+
+TemplateRefField = Annotated[
+    dict[str, list[str]],
+    BeforeValidator(lambda value: {} if value is None else normalize_template_ref(value)),
+]
+OptionalTemplateRefField = Annotated[
+    dict[str, list[str]] | None,
+    BeforeValidator(
+        lambda value: None if value is None else normalize_template_ref(value)
+    ),
+]
 
 
 class ConfigEffectiveServicePolicyUpdateRequest(BaseModel):
     service_id: str | None = Field(default=None, max_length=512)
     priority: int | None = None
     match_expr: str | None = None
-    template_ref: dict[str, str] | None = None
+    template_ref: OptionalTemplateRefField = None
     enabled: bool | None = None
     data: dict[str, Any] | None = None
 
@@ -22,14 +35,14 @@ class ConfigEffectiveServicePolicyCreateRequest(BaseModel):
     service_id: str = Field(..., max_length=512, min_length=1)
     priority: int
     match_expr: str | None = None
-    template_ref: dict[str, str] = Field(default_factory=dict)
+    template_ref: TemplateRefField = Field(default_factory=dict)
     enabled: bool = True
     data: dict[str, Any] | None = None
 
 
 class ConfigEffectiveGlobalPolicyUpdateRequest(BaseModel):
     priority: int | None = None
-    template_ref: dict[str, str] | None = None
+    template_ref: OptionalTemplateRefField = None
     enabled: bool | None = None
     data: dict[str, Any] | None = None
 
@@ -38,7 +51,7 @@ class ConfigEffectiveGlobalPolicyCreateRequest(BaseModel):
     """创建全局兜底配置生效策略（WebSocket 同步用，每实例至多一条）。"""
 
     priority: int = 0
-    template_ref: dict[str, str] = Field(default_factory=dict)
+    template_ref: TemplateRefField = Field(default_factory=dict)
     enabled: bool = True
     data: dict[str, Any] | None = None
 
@@ -58,7 +71,7 @@ class ConfigEffectiveAgentPolicyUpdateRequest(BaseModel):
     service_policy_id: int | None = None
     priority: int | None = None
     match_expr: str | None = None
-    template_ref: dict[str, str] | None = None
+    template_ref: OptionalTemplateRefField = None
     enabled: bool | None = None
     data: dict[str, Any] | None = None
 
@@ -72,7 +85,7 @@ class ConfigEffectiveAgentPolicyCreateRequest(BaseModel):
     service_policy_id: int
     priority: int = 0
     match_expr: str | None = None
-    template_ref: dict[str, str] = Field(default_factory=dict)
+    template_ref: TemplateRefField = Field(default_factory=dict)
     enabled: bool = True
     data: dict[str, Any] | None = None
 

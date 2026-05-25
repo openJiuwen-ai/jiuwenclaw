@@ -13,7 +13,7 @@ from jiuwenclaw.gateway.cron.models import (
     upgrade_bare_feishu_target_for_multi_bot_config,
 )
 from jiuwenclaw.gateway.cron.scheduler import CronSchedulerService, _cron_next_push_dt
-from jiuwenclaw.gateway.cron.store import CronJobStore
+from jiuwenclaw.gateway.cron.store_base import CronJobStoreBackend
 
 
 class CronController:
@@ -21,7 +21,7 @@ class CronController:
 
     _instance: ClassVar[CronController | None] = None
 
-    def __init__(self, *, store: CronJobStore, scheduler: CronSchedulerService) -> None:
+    def __init__(self, *, store: CronJobStoreBackend, scheduler: CronSchedulerService) -> None:
         self._store = store
         self._scheduler = scheduler
         self._target_channel: CronTargetChannel | None = None
@@ -33,7 +33,7 @@ class CronController:
     def get_instance(
         cls,
         *,
-        store: CronJobStore | None = None,
+        store: CronJobStoreBackend | None = None,
         scheduler: CronSchedulerService | None = None,
     ) -> CronController:
         """Return the singleton instance.

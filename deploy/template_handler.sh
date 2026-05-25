@@ -60,4 +60,42 @@ render_config_template(){
     success "Generated config file: ${destfile}"
 }
 
+enable_dev_mode_if_needed() {
+    local mode="${DEPLOY_VARS["MODE"]}"
+    local file="${MANAGER_FILE}"
 
+    if [ "${mode}" != "dev" ]; then
+        return
+    fi
+
+    # Override image with dev image
+    yq eval 'select(.kind == "Deployment").spec.template.spec.containers[0].image = "'"${DEPLOY_VARS["MANAGER_DEV_IMAGE"]}"'"' -i "${file}"
+
+    # Force pod to be scheduled on current master node
+    yq eval 'select(.kind == "Deployment").spec.template.spec.nodeName = "'"${DEPLOY_VARS["MASTER_NODE_NAME"]}"'"' -i "${file}"
+
+    # Mount host source code directory into container
+    yq eval '
+        select(.kind == "Deployment").spec.template.spec.containers[0].volumeMounts += [{
+            "name": "host-code",
+            "mountPath": "/app/jiuwenclaw"
+        }]
+    ' -i "${file}"
+
+    yq eval '
+        select(.kind == "Deployment").spec.template.spec.volumes += [{
+            "name": "host-code",
+            "hostPath": {
+                "path": "'"${DEPLOY_VARS["HOST_CODE_PATH"]}"'",
+                "type": "Directory"
+            }
+        }]
+    ' -i "${file}"
+
+    # Security context adaptation for root user
+    yq eval 'select(.kind == "Deployment").spec.template.spec.securityContext.fsGroup = 0' -i "${file}"
+    yq eval 'select(.kind == "Deployment").spec.template.spec.containers[0].securityContext.allowPrivilegeEscalation = true' -i "${file}"
+    yq eval 'select(.kind == "Deployment").spec.template.spec.containers[0].securityContext.runAsNonRoot = false' -i "${file}"
+    yq eval 'select(.kind == "Deployment").spec.template.spec.containers[0].securityContext.runAsUser = 0' -i "${file}"
+    yq eval 'select(.kind == "Deployment").spec.template.spec.containers[0].securityContext.runAsGroup = 0' -i "${file}"
+}
