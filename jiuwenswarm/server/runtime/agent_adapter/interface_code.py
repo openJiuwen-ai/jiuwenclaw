@@ -45,10 +45,13 @@ from openjiuwen.harness.workspace.workspace import Workspace
 
 from jiuwenswarm.server.runtime.agent_adapter.interface_deep import (
     JiuWenClawDeepAdapter,
+    _CRON_TOOL_CHANNEL_ID,
     parse_int,
 )
 from jiuwenswarm.agents.harness.common.rails.interrupt.interrupt_helpers import build_permission_rail
-from jiuwenswarm.agents.harness.common.prompt.prompt_builder import build_identity_prompt
+from jiuwenswarm.agents.harness.code.prompt.code_prompt_builder import (
+    build_code_system_prompt,
+)
 from jiuwenswarm.agents.harness.common.rails import (
     ProjectMemoryRail,
     StructuredAskUserRail,
@@ -132,6 +135,17 @@ class JiuwenClawCodeAdapter(JiuWenClawDeepAdapter):
         self._coding_memory_rail: CodingMemoryRail | None = None
         self._worktree_rail: WorktreeRail | None = None
 
+    # ─── Language override ────────────────────────
+
+    @staticmethod
+    def _resolve_prompt_language() -> str:
+        """Code mode always uses English for system prompts."""
+        return "en"
+
+    def _resolve_runtime_language(self) -> str:
+        """Code mode always uses English for runtime language."""
+        return "en"
+
     # ─── 初始化 ──────────────────────────────
 
     async def create_instance(self, config: dict[str, Any] | None = None, *,
@@ -189,14 +203,7 @@ class JiuwenClawCodeAdapter(JiuWenClawDeepAdapter):
         self._instance = create_deep_agent(
             model=model,
             card=agent_card,
-            system_prompt=build_identity_prompt(
-                mode="agent.fast",
-                language=self._resolve_prompt_language(),
-                channel=(
-                    "acp" if self._is_acp_tool_profile(self._instance_overrides)
-                    else self._resolve_prompt_channel()
-                ),
-            ),
+            system_prompt=build_code_system_prompt(),
             tools=tool_cards if tool_cards else [],
             subagents=configured_subagents,
             rails=rails_list if rails_list else [],
@@ -447,7 +454,6 @@ class JiuwenClawCodeAdapter(JiuWenClawDeepAdapter):
                 logger.warning("[JiuwenClawCodeAdapter] CodingMemoryRail: no embedding config, skipping")
                 return None
 
-            language = config.get("preferred_language", "zh")
             _project_name = os.path.basename(self._project_dir) if self._project_dir else "default"
             coding_memory_dir = os.path.join(self._agent_workspace_dir, "coding_memory", _project_name)
             os.makedirs(coding_memory_dir, exist_ok=True)
@@ -459,7 +465,7 @@ class JiuwenClawCodeAdapter(JiuWenClawDeepAdapter):
                     base_url=embed_config.get("embed_base_url"),
                     api_key=embed_config.get("embed_api_key"),
                 ),
-                language="cn" if language == "zh" else "en",
+                language="en",
             )
             # 缓存实例，供 code_agent 复用
             self._coding_memory_rail = coding_memory_rail
@@ -765,13 +771,24 @@ class JiuwenClawCodeAdapter(JiuWenClawDeepAdapter):
                                self._resolve_prompt_channel(runtime_config.session_id) or "web").strip() or "web"
         if self._runtime_prompt_rail:
             self._runtime_prompt_rail.set_language(resolved_language)
+            self._runtime_prompt_rail.set_force_english(True)
             self._runtime_prompt_rail.set_channel(resolved_channel)
+            self._runtime_prompt_rail.set_model_name(self._resolve_model_name())
+            self._runtime_prompt_rail.set_mode(runtime_config.mode)
             self._runtime_prompt_rail.set_trusted_dirs(runtime_config.trusted_dirs)
             self._runtime_prompt_rail.set_runtime_paths(
                 cwd=runtime_config.cwd,
                 project_dir=runtime_config.project_dir or self._project_dir,
             )
-        self._write_runtime_state(mode=runtime_config.mode, language=resolved_language, channel=resolved_channel)
+        self._write_runtime_state(
+            mode=runtime_config.mode,
+            language=resolved_language,
+            channel=resolved_channel,
+            project_dir=runtime_config.project_dir
+            or runtime_config.cwd
+            or self._project_dir
+            or self._workspace_dir,
+        )
 
         # ProjectMemoryRail 语言同步 + trusted_dirs 注入
         if self._project_memory_rail is not None:
@@ -798,6 +815,22 @@ class JiuwenClawCodeAdapter(JiuWenClawDeepAdapter):
             runtime_config.request_metadata,
         )
         self._update_prompt_for_mode(runtime_config.mode, resolved_language)
+
+        # user_todos channel_id per-request sync
+        try:
+            from jiuwenswarm.agents.harness.common.tools.user_todo_tool import (
+                get_decorated_tools as _get_user_todo_tools,
+                set_global_workspace_dir as _set_user_todo_workspace,
+                set_global_channel_id as _set_user_todo_channel_id,
+            )
+            _set_user_todo_workspace(self._agent_workspace_dir)
+            _set_user_todo_channel_id(_CRON_TOOL_CHANNEL_ID.get())
+            for tool in _get_user_todo_tools():
+                if not Runner.resource_mgr.get_tool(tool.card.id):
+                    Runner.resource_mgr.add_tool(tool)
+                self._instance.ability_manager.add(tool.card)
+        except ImportError:
+            pass
 
     # ─── Tools 构建 ──────────────────────────
 

@@ -135,61 +135,108 @@ class JiuClawStreamEventRail(DeepAgentRail):
 
     priority = 80
 
+    # Key used in ctx.extra to carry session_id from before_invoke to checkpoints.
+    # ctx.extra persists across all events within a single invoke, so sub-agent
+    # checkpoints inherit the parent's session_id (correct: parent abort → sub stops).
+    _SID_KEY = "__jiuwenswarm_session_id__"
+
     def __init__(self) -> None:
         super().__init__()
         self._deep_agent: Optional[Any] = None
-        self._pause_event = asyncio.Event()
-        self._pause_event.set()
-        self._abort_requested = False
-        self._conversation_id: str = ""
+        # Per-session pause/abort state.  Keyed by session_id (conversation_id).
+        # Shared adapter instances serve multiple concurrent sessions; scalar state
+        # would cause cross-session contamination (session A cancel kills session B).
+        self._abort_requested: dict[str, bool] = {}
+        self._pause_events: dict[str, asyncio.Event] = {}
+        # Per-session conversation context
+        self._conversation_ids: dict[str, str] = {}
+        self._main_sessions: dict[str, Session] = {}
         self._stream_tasks: set[asyncio.Task] = set()
-        self._main_session: Optional[Session] = None
+        # Shared across sessions (same workspace → same tool instance)
         self._main_todo_tool: Optional[TodoListTool] = None
         # Track in-flight tool calls for cancellation status emission
         self._inflight_tool_calls: dict[str, dict[str, Any]] = {}
-        # Store cancelled tool info for interrupt response
-        self._cancelled_tool_results: list[dict[str, Any]] = []
+        # Store cancelled tool info for interrupt response (per-session to avoid
+        # cross-session leakage in concurrent collect→get→clear sequences).
+        self._cancelled_tool_results: dict[str, list[dict[str, Any]]] = {}
 
     def init(self, agent: Any) -> None:
         self._deep_agent = agent
 
     # -- pause / resume / abort API for interface.py --
+    # All methods accept session_id to scope state per-session on shared adapters.
 
-    def pause(self) -> None:
-        self._pause_event.clear()
+    def _get_pause_event(self, sid: str) -> asyncio.Event:
+        """Lazily get/create pause event for a session. Created events start in set (unpaused)."""
+        event = self._pause_events.get(sid)
+        if event is None:
+            event = asyncio.Event()
+            event.set()
+            self._pause_events[sid] = event
+        return event
 
-    def resume(self) -> None:
-        self._abort_requested = False
-        self._pause_event.set()
+    def pause(self, session_id: str = "") -> None:
+        sid = session_id or "default"
+        self._get_pause_event(sid).clear()
 
-    def abort(self) -> None:
-        self._abort_requested = True
-        self._pause_event.set()
+    def resume(self, session_id: str = "") -> None:
+        sid = session_id or "default"
+        self._abort_requested.pop(sid, None)
+        self._get_pause_event(sid).set()
 
-    def reset_abort(self) -> None:
-        self._abort_requested = False
+    def abort(self, session_id: str = "") -> None:
+        sid = session_id or "default"
+        self._abort_requested[sid] = True
+        self._get_pause_event(sid).set()
 
-    def reset_for_new_task(self) -> None:
+    def reset_abort(self, session_id: str = "") -> None:
+        sid = session_id or "default"
+        self._abort_requested.pop(sid, None)
+
+    def reset_for_new_task(self, session_id: str = "") -> None:
         """Unblock the pause event for the next task without touching the abort flag.
 
         Called on cancel so that a new task can start without being stuck at
-        the _pause_event.wait() checkpoint.
+        the _pause_event.wait() checkpoint. The abort flag is intentionally
+        NOT cleared here — it must remain True until the next task's
+        process_message_*_impl calls reset_abort() at entry, ensuring the
+        in-flight checkpoint (before_model_call / before_tool_call) can still
+        observe the flag and raise CancelledError.
         """
-        self._pause_event.set()
-        self._conversation_id = ""
-        self._main_session = None
-        self._main_todo_tool = None
+        sid = session_id or "default"
+        self._get_pause_event(sid).set()
+        self._conversation_ids.pop(sid, None)
+        self._main_sessions.pop(sid, None)
 
-    def get_cancelled_tool_results(self) -> list[dict[str, Any]]:
+    def cleanup_session(self, session_id: str = "") -> None:
+        """Remove ALL per-session state for *session_id*.
+
+        Called by the adapter when the last task for a session completes
+        (Counter drops to 0). Prevents unbounded growth of the per-session
+        dicts on long-lived adapters serving many unique sessions.
+        """
+        sid = session_id or "default"
+        self._abort_requested.pop(sid, None)
+        self._pause_events.pop(sid, None)
+        self._conversation_ids.pop(sid, None)
+        self._main_sessions.pop(sid, None)
+        self._cancelled_tool_results.pop(sid, None)
+
+    def get_cancelled_tool_results(self, session_id: str = "") -> list[dict[str, Any]]:
         """Get cancelled tool results collected during interrupt.
+
+        Args:
+            session_id: Return results for this session only.
 
         Returns list of tool_result dicts for gateway to forward to frontend.
         """
-        return list(self._cancelled_tool_results)
+        sid = session_id or "default"
+        return list(self._cancelled_tool_results.get(sid, []))
 
-    def clear_cancelled_tool_results(self) -> None:
+    def clear_cancelled_tool_results(self, session_id: str = "") -> None:
         """Clear cancelled tool results after they've been retrieved."""
-        self._cancelled_tool_results.clear()
+        sid = session_id or "default"
+        self._cancelled_tool_results.pop(sid, None)
 
     def collect_cancelled_tool_updates(self, session_id: str = "") -> None:
         """Collect cancelled tool info for interrupt response.
@@ -197,6 +244,8 @@ class JiuClawStreamEventRail(DeepAgentRail):
         Args:
             session_id: Only collect tools for this session. If empty, collect all.
         """
+        sid = session_id or "default"
+        bucket = self._cancelled_tool_results.setdefault(sid, [])
         for tc_id, info in list(self._inflight_tool_calls.items()):
             # Only collect tools matching the target session
             if session_id and info.get("session_id") != session_id:
@@ -204,7 +253,7 @@ class JiuClawStreamEventRail(DeepAgentRail):
             tc = info.get("tool_call")
             if tc is None:
                 continue
-            self._cancelled_tool_results.append({
+            bucket.append({
                 "tool_name": getattr(tc, "name", ""),
                 "tool_call_id": tc_id,
                 "result": "[Interrupted] Tool execution cancelled by user.",
@@ -213,7 +262,7 @@ class JiuClawStreamEventRail(DeepAgentRail):
             self._inflight_tool_calls.pop(tc_id, None)
         logger.info(
             "[StreamEventRail] collected %d cancelled tools for session=%s",
-            len(self._cancelled_tool_results),
+            len(bucket),
             session_id,
         )
 
@@ -229,18 +278,30 @@ class JiuClawStreamEventRail(DeepAgentRail):
         # on conv_id naming conventions.
         if ctx.session is None:
             return
-        new_id = ctx.inputs.conversation_id or ""
-        if new_id:
-            self._conversation_id = new_id
-        self._main_session = ctx.session
+        # Use the real conversation_id as the session key; fall back to "default"
+        # only for the pause/abort state lookup key (sid).  Do NOT store the
+        # "default" sentinel as a conversation_id value — after_tool_call uses
+        # truthiness to decide whether to emit todo.updated, and a literal
+        # "default" would trigger _emit_todo_updated with a bogus session key.
+        raw_conv_id = ctx.inputs.conversation_id or ""
+        sid = raw_conv_id or "default"
+        if raw_conv_id:
+            self._conversation_ids[sid] = raw_conv_id
+        self._main_sessions[sid] = ctx.session
+        # Carry session_id through ctx.extra so checkpoints (before_model_call,
+        # before_tool_call) within this invoke can look up per-session state.
+        # Sub-agents inherit this from the parent's invoke since they don't
+        # fire their own before_invoke (ctx.session is None → early return above).
+        ctx.extra[self._SID_KEY] = sid
 
     # ------------------------------------------------------------------
     # before_model_call: pause check + context fix + compression info
     # ------------------------------------------------------------------
 
     async def before_model_call(self, ctx: AgentCallbackContext) -> None:
-        await self._pause_event.wait()
-        if self._abort_requested:
+        sid = ctx.extra.get(self._SID_KEY, "") or "default"
+        await self._get_pause_event(sid).wait()
+        if self._abort_requested.get(sid, False):
             raise asyncio.CancelledError("Agent abort requested")
 
         if ctx.context is not None:
@@ -254,8 +315,9 @@ class JiuClawStreamEventRail(DeepAgentRail):
     # ------------------------------------------------------------------
 
     async def before_tool_call(self, ctx: AgentCallbackContext) -> None:
-        await self._pause_event.wait()
-        if self._abort_requested:
+        sid = ctx.extra.get(self._SID_KEY, "") or "default"
+        await self._get_pause_event(sid).wait()
+        if self._abort_requested.get(sid, False):
             raise asyncio.CancelledError("Agent abort requested")
 
         session = ctx.session
@@ -269,7 +331,7 @@ class JiuClawStreamEventRail(DeepAgentRail):
                 self._inflight_tool_calls[tc_id] = {
                     "tool_call": tc,
                     "session": session,
-                    "session_id": self._conversation_id,  # conversation_id == session_id
+                    "session_id": sid,
                 }
 
     # ------------------------------------------------------------------
@@ -290,14 +352,16 @@ class JiuClawStreamEventRail(DeepAgentRail):
         await self._emit_tool_result(session, tc, ctx.inputs.tool_result)
 
         tool_name = ctx.inputs.tool_name
-        if not self._conversation_id:
+        sid = ctx.extra.get(self._SID_KEY, "") or "default"
+        conv_id = self._conversation_ids.get(sid, "")
+        if not conv_id:
             return
         if tool_name in _TODO_TOOL_NAMES:
             # Emit the main-agent todo snapshot after every todo tool call.  The
             # todo tool itself is loaded from the main workspace below, so this
             # stays authoritative even when a resumed/supplement turn uses a
             # different stream session object.
-            await self._emit_todo_updated(session, self._conversation_id)
+            await self._emit_todo_updated(session, conv_id)
 
     # ------------------------------------------------------------------
     # on_model_exception: attempt context repair

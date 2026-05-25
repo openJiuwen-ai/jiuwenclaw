@@ -9,6 +9,7 @@ sees the current values without needing to call any tool.
 from __future__ import annotations
 
 import os
+import sys
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
@@ -17,7 +18,7 @@ import yaml
 from openjiuwen.core.single_agent.rail.base import AgentCallbackContext
 from openjiuwen.harness.prompts import PromptSection
 from openjiuwen.harness.rails.base import DeepAgentRail
-from jiuwenswarm.common.utils import get_config_dir
+from jiuwenswarm.common.utils import get_config_dir, logger
 
 from jiuwenswarm.common.utils import get_agent_workspace_dir
 
@@ -45,6 +46,7 @@ class RuntimePromptRail(DeepAgentRail):
         self._project_dir: str | None = None
         self._model_name: str = ""
         self._mode: str = ""
+        self._force_english: bool = False
 
     def init(self, agent) -> None:
         """从 agent 获取 system_prompt_builder 引用。"""
@@ -55,6 +57,8 @@ class RuntimePromptRail(DeepAgentRail):
         if self.system_prompt_builder is not None:
             self.system_prompt_builder.remove_section("time")
             self.system_prompt_builder.remove_section("runtime")
+            self.system_prompt_builder.remove_section("env")
+            self.system_prompt_builder.remove_section("git_status")
             self.system_prompt_builder.remove_section("browser_tool_policy")
             self.system_prompt_builder.remove_section("trusted_dirs_policy")
         self.system_prompt_builder = None
@@ -87,6 +91,10 @@ class RuntimePromptRail(DeepAgentRail):
     def set_mode(self, mode: str) -> None:
         """per-request 更新运行模式，作为文件读取失败时的兜底。"""
         self._mode = mode or ""
+
+    def set_force_english(self, force: bool) -> None:
+        """Force English-only injected sections regardless of language (code mode)."""
+        self._force_english = force
 
     @staticmethod
     def _existing_dirs(paths: list[str] | None) -> list[str]:
@@ -124,7 +132,7 @@ class RuntimePromptRail(DeepAgentRail):
         current_year = now.strftime("%Y")
         weekday_cn = _CN_WEEKDAYS[now.weekday()]
 
-        if self._language == "cn":
+        if not self._force_english and self._language == "cn":
             time_content = (
                 f"# 当前日期与时间\n\n"
                 f"- 当前时间：{now_str}（{weekday_cn}）\n"
@@ -161,7 +169,7 @@ class RuntimePromptRail(DeepAgentRail):
         language_val = (runtime_state.get("language") or self._language or "unknown").strip()
         channel = (runtime_state.get("channel") or self._channel or "unknown").strip()
 
-        if self._language == "cn":
+        if not self._force_english and self._language == "cn":
             runtime_content = (
                 "# 运行时状态\n\n"
                 f"- 当前模型：{model}\n"
@@ -189,18 +197,113 @@ class RuntimePromptRail(DeepAgentRail):
             priority=95,
         ))
 
+        # ── Platform / OS environment section ──
+        os_type = sys.platform
+        shell_path = os.environ.get("SHELL", "")
+        shell_name = os.path.basename(shell_path) if shell_path else "unknown"
+        import platform as plat
+        os_version = f"{plat.system()} {plat.release()}"
+
+        if not self._force_english and self._language == "cn":
+            env_content = (
+                "# 运行环境\n\n"
+                f"- 当前运行平台：`{os_type}`\n"
+                f"- Shell：{shell_name}\n"
+                f"- OS 版本：{os_version}\n\n"
+                "## 平台命令差异（仅在必须使用 shell 时参考）\n\n"
+                "以下命令差异仅适用于测试、构建、git、包管理、运行脚本等必须调用 shell 的场景。"
+                "文件读取、编辑、搜索仍应优先使用专用工具。\n\n"
+                "| 操作 | Windows (`win32`/`win64`) | Linux/macOS (`linux`/`darwin`) |\n"
+                "|------|---------------------------|-------------------------------|\n"
+                "| 创建目录 | `mkdir folder` 或 PowerShell "
+                "`New-Item -ItemType Directory -Path folder` "
+                "| `mkdir -p folder` |\n"
+                "| 删除文件 | `del file.txt` 或 PowerShell `Remove-Item file.txt` | `rm file.txt` |\n"
+                "| 删除目录 | `rmdir folder` 或 PowerShell `Remove-Item -Recurse folder` | `rm -rf folder` |\n"
+                "| 查找文件 | `dir /s pattern` 或 PowerShell "
+                "`Get-ChildItem -Recurse -Filter pattern` "
+                "| `find . -name pattern` |\n\n"
+                "**特别注意**：Windows 的 `mkdir` 不支持 `-p` 参数！"
+                "在 Windows 上使用 `mkdir -p folder` 会错误创建名为 `-p` 的目录。"
+                "如需创建嵌套目录，请使用 PowerShell `New-Item -ItemType Directory -Path \"parent/child\" -Force`，"
+                "或使用 cmd 分步创建 `mkdir parent && mkdir parent\\child`。"
+            )
+        else:
+            env_content = (
+                "# Environment\n\n"
+                f"- Current platform: `{os_type}`\n"
+                f"- Shell: {shell_name}\n"
+                f"- OS Version: {os_version}\n\n"
+                "## Platform Command Differences (only when shell is required)\n\n"
+                "The following command differences apply only to scenarios where shell execution is required "
+                "(testing, builds, git, package management, running scripts). "
+                "File reading, editing, and searching should still prefer dedicated tools.\n\n"
+                "| Operation | Windows (`win32`/`win64`) | Linux/macOS (`linux`/`darwin`) |\n"
+                "|-----------|---------------------------|-------------------------------|\n"
+                "| Create directory | `mkdir folder` or PowerShell "
+                "`New-Item -ItemType Directory -Path folder` "
+                "| `mkdir -p folder` |\n"
+                "| Delete file | `del file.txt` or PowerShell `Remove-Item file.txt` | `rm file.txt` |\n"
+                "| Delete directory | `rmdir folder` or PowerShell `Remove-Item -Recurse folder` | `rm -rf folder` |\n"
+                "| Find file | `dir /s pattern` or PowerShell "
+                "`Get-ChildItem -Recurse -Filter pattern` "
+                "| `find . -name pattern` |\n\n"
+                "**WARNING**: Windows `mkdir` does NOT support the `-p` flag! "
+                "Using `mkdir -p folder` on Windows will incorrectly create a directory named `-p`. "
+                "To create nested directories on Windows, use either PowerShell "
+                "`New-Item -ItemType Directory -Path \"parent/child\" -Force` "
+                "or cmd with step-by-step creation `mkdir parent && mkdir parent\\\\child`."
+            )
+
+        self.system_prompt_builder.add_section(PromptSection(
+            name="env",
+            content={"cn": env_content, "en": env_content},
+            priority=89,
+        ))
+
+        # ── Git status section ──
+        self.system_prompt_builder.remove_section("git_status")
+        git_branch = str(runtime_state.get("git_branch") or "").strip()
+        if git_branch and git_branch != "N/A":
+            git_main_branch = str(runtime_state.get("git_main_branch") or "").strip()
+            git_status_text = str(runtime_state.get("git_status") or "").strip()
+            git_recent_commits = str(runtime_state.get("git_recent_commits") or "").strip()
+            git_user = str(runtime_state.get("git_user") or "").strip()
+
+            git_lines = [
+                "This is the git status at the start of the conversation. "
+                "Note that this status is a snapshot in time, and will not update during the conversation.",
+                f"Current branch: {git_branch}",
+            ]
+            if git_main_branch:
+                git_lines.append(
+                    f"Main branch (you will usually use this for PRs): {git_main_branch}"
+                )
+            if git_user:
+                git_lines.append(f"Git user: {git_user}")
+            git_lines.append(f"Status:\n{git_status_text or '(clean)'}")
+            git_lines.append(f"Recent commits:\n{git_recent_commits or '(none)'}")
+
+            git_content = "\n\n".join(git_lines)
+
+            self.system_prompt_builder.add_section(PromptSection(
+                name="git_status",
+                content={"cn": git_content, "en": git_content},
+                priority=87,
+            ))
+
         self.system_prompt_builder.remove_section("browser_tool_policy")
         if self._channel == "web":
             browser_tool_policy = (
                 "# Browser Tool Policy\n\n"
                 "- For browser tasks such as opening pages, navigation, clicking, typing, login, screenshots, "
-                "page inspection, or extracting data from a live website, use `task_tool` with "
+                "page inspection, or extracting data from a live website, use `spawn_sub_agent` with "
                 '`subagent_type` set to `"browser_agent"` and put the full browser objective in '
                 "`task_description`.\n"
                 "- Do not use bash, execute_code, subprocess, shell commands, or direct Chrome/Edge launches "
                 "for browser automation.\n"
-                "- If `task_tool` or `browser_agent` is unavailable, say that the browser subagent is unavailable "
-                "before trying to start a browser through commands."
+                "- If `spawn_sub_agent` or `browser_agent` is unavailable, say that the browser "
+                "subagent is unavailable before trying to start a browser through commands."
             )
             self.system_prompt_builder.add_section(PromptSection(
                 name="browser_tool_policy",
@@ -208,6 +311,7 @@ class RuntimePromptRail(DeepAgentRail):
                 priority=98,
             ))
 
+        self.system_prompt_builder.remove_section("trusted_dirs_policy")
         if self._channel == "tui":
             # Trusted directories policy for TUI mode
             trusted_dirs = self._existing_dirs(self._trusted_dirs)
@@ -223,13 +327,14 @@ class RuntimePromptRail(DeepAgentRail):
                     path for path in trusted_dirs
                     if not self._same_path(path, project_dir)
                 ]
-                other_dirs_display = ", ".join(other_dirs) if other_dirs else "无"
-                if self._language == "cn":
+                cn_dirs_display = ", ".join(other_dirs) if other_dirs else "无"
+                en_dirs_display = ", ".join(other_dirs) if other_dirs else "none"
+                if not self._force_english and self._language == "cn":
                     trusted_dirs_content = (
                         "# 工作目录策略\n\n"
                         f"- 系统目录（不要在其中查找或运行项目文件）：{workspace_dir}\n"
                         f"- 当前项目目录（你正在工作的项目，查询文件、运行测试、执行命令等均应在此目录下进行）：{project_dir}\n"
-                        f"- 其他可访问目录（可读写其中的资源，但不是当前项目目录）：{other_dirs_display}\n\n"
+                        f"- 其他可访问目录（可读写其中的资源，但不是当前项目目录）：{cn_dirs_display}\n\n"
                         "重要规则：\n"
                         "- 命令执行工具（mcp_exec_command）默认的工作目录是系统目录，"
                         "如果你要在项目目录下执行命令，必须将工具的 workdir 参数设置为当前项目目录，"
@@ -247,7 +352,7 @@ class RuntimePromptRail(DeepAgentRail):
                         f"- Current project directory (the project you are working on; "
                         f"all file queries, test runs, command execution should happen here): {project_dir}\n"
                         f"- Other accessible directories (read/write allowed, but not the current project): "
-                        f"{other_dirs_display}\n\n"
+                        f"{en_dirs_display}\n\n"
                         "Important rules:\n"
                         "- The command execution tool (mcp_exec_command) defaults its working directory "
                         "to the system directory. When you need to execute commands in the project directory, "

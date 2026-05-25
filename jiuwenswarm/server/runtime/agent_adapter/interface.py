@@ -566,14 +566,17 @@ class JiuWenClaw:
             await self._session_manager.cancel_session_task(session_id, "interrupt(supplement): ")
             return response
 
-        # cancel: 仅取消当前 session 的任务，避免误伤其它并发会话
+        # cancel: 先调用 adapter.process_interrupt（此时 session 仍在 _active_session_ids 中，
+        # guard 能通过），再 cancel_session_task（其 finally 会把 session 从 _active_session_ids 移除）。
+        # 顺序不能反，否则 process_interrupt 的 session guard 会误判为 "not active" 而跳过 abort。
+        response = await adapter.process_interrupt(request)
         await self._session_manager.cancel_session_task(session_id, f"interrupt(intent={intent}): ")
         await self._cancel_team_work_for_session(
             session_id,
             request.channel_id,
             log_prefix=f"interrupt(intent={intent}): ",
         )
-        return await adapter.process_interrupt(request)
+        return response
 
     @staticmethod
     def _build_interrupt_result_response(

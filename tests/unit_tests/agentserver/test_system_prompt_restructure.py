@@ -8,7 +8,7 @@ from openjiuwen.core.single_agent.rail.base import AgentCallbackContext
 from openjiuwen.harness.prompts import PromptSection, SystemPromptBuilder
 
 from jiuwenswarm.server.runtime.agent_adapter.interface_deep import JiuWenClawDeepAdapter
-from jiuwenswarm.agents.harness.common.prompt.prompt_builder import build_identity_prompt
+from jiuwenswarm.agents.harness.common.prompt.prompt_builder import build_agent_identity_prompt
 from jiuwenswarm.agents.harness.common.rails.runtime_prompt_rail import RuntimePromptRail
 
 
@@ -25,8 +25,8 @@ class _TestableJiuWenClawDeepAdapter(JiuWenClawDeepAdapter):
         return self._build_configured_subagents(model, config, config_base)
 
 
-def test_build_identity_prompt_contains_identity_section_only():
-    prompt = build_identity_prompt(mode="agent.fast", language="zh", channel="web")
+def test_build_agent_identity_prompt_contains_identity_section_only():
+    prompt = build_agent_identity_prompt(language="zh")
 
     assert "# 你的家" in prompt
     assert "# 消息说明" not in prompt

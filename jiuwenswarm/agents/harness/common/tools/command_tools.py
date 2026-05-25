@@ -387,6 +387,11 @@ def _run_command_sync(
     plan, use_shell, resolved_shell = _resolve_execution_plan(command, shell_type)
     # bash/sh on Windows output UTF-8; cmd/PowerShell use system code page.
     encoding = _resolve_encoding(resolved_shell)
+    popen_kw = {}
+    if os.name != "nt":
+        _jw_start_new_session = os.getenv("JW_START_NEW_SESSION", "true").strip().lower()
+        if _jw_start_new_session not in ("0", "false", "no", "off"):
+            popen_kw["start_new_session"] = True
     result = subprocess.run(
         plan,
         shell=use_shell,
@@ -396,6 +401,7 @@ def _run_command_sync(
         errors='replace',
         capture_output=True,
         timeout=timeout_seconds,
+        **popen_kw,
     )
     return result, resolved_shell
 
@@ -410,6 +416,11 @@ def _run_command_background(
     error_msg is None on success.
     """
     plan, use_shell, resolved_shell = _resolve_execution_plan(command, shell_type)
+    popen_kw = {}
+    if os.name != "nt":
+        _jw_start_new_session = os.getenv("JW_START_NEW_SESSION", "true").strip().lower()
+        if _jw_start_new_session not in ("0", "false", "no", "off"):
+            popen_kw["start_new_session"] = True
     proc = subprocess.Popen(
         plan,
         shell=use_shell,
@@ -418,6 +429,7 @@ def _run_command_background(
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
         text=True,
+        **popen_kw,
     )
     try:
         exit_code = proc.wait(timeout=grace_seconds)
@@ -467,7 +479,7 @@ async def mcp_exec_command(
     except (TypeError, ValueError):
         timeout_seconds = 300
     try:
-        max_timeout_seconds = int(os.getenv("MCP_EXEC_COMMAND_MAX_TIMEOUT_SECONDS") or "3600")
+        max_timeout_seconds = int(os.getenv("MCP_EXEC_COMMAND_MAX_TIMEOUT_SECONDS") or "600")
     except ValueError:
         max_timeout_seconds = 3600
     max_timeout_seconds = max(1, max_timeout_seconds)
