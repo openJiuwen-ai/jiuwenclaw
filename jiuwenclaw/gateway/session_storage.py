@@ -134,6 +134,7 @@ class RedisSessionStorage(SessionStorage):
         """获取 claw_id，从配置文件 instance_id 字段读取。"""
         try:
             from jiuwenclaw.config import get_config
+
             val = (get_config().get("gateway") or {}).get("instance_id")
             if val and str(val).strip():
                 return str(val).strip()
@@ -149,6 +150,29 @@ class RedisSessionStorage(SessionStorage):
 
     def _redis_key(self, identity_key: str) -> str:
         return f"session_map:{self._claw_id}:{identity_key}"
+
+    @staticmethod
+    def _run_awaitable(awaitable: Any) -> Any:
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            return asyncio.run(awaitable)
+
+        result: dict[str, Any] = {}
+        error: dict[str, BaseException] = {}
+
+        def _runner() -> None:
+            try:
+                result["value"] = asyncio.run(awaitable)
+            except BaseException as exc:  # noqa: BLE001
+                error["exc"] = exc
+
+        thread = threading.Thread(target=_runner, daemon=True)
+        thread.start()
+        thread.join()
+        if "exc" in error:
+            raise error["exc"]
+        return result.get("value")
 
     def _session_to_json(self, session: "Session") -> str:
         """将 Session 序列化为 JSON 字符串。"""
@@ -173,21 +197,30 @@ class RedisSessionStorage(SessionStorage):
 
     def load(self) -> None:
         """从 Redis 加载所有数据到内存."""
-        redis = self._get_redis()
-        if redis is None:
-            return
         try:
-            keys = asyncio.run(redis.scan_iter(f"session_map:{self._claw_id}:*"))
-            if keys:
-                values = asyncio.run(redis.mget(keys))
-                prefix_len = len(f"session_map:{self._claw_id}:")
-                with self._lock:
-                    for key, value in zip(keys, values):
-                        if value:
-                            identity_key = key[prefix_len:]
-                            sess = self._session_from_json(value)
-                            if sess:
-                                self._mapping[identity_key] = sess
+            redis = self._get_redis()
+            if redis is None:
+                return
+
+            prefix = f"session_map:{self._claw_id}:"
+            keys = self._run_awaitable(redis.scan_keys(f"{prefix}*")) or []
+            values = self._run_awaitable(redis.mget(keys)) or []
+
+            loaded_mapping: dict[str, Session] = {}
+            for key, value in zip(keys, values):
+                if not value:
+                    continue
+                raw_key = str(key)
+                if not raw_key.startswith(prefix):
+                    continue
+                identity_key = raw_key[len(prefix):]
+                if not identity_key:
+                    continue
+                sess = self._session_from_json(value)
+                if sess is not None:
+                    loaded_mapping[identity_key] = sess
+            with self._lock:
+                self._mapping = loaded_mapping
         except Exception as exc:  # noqa: BLE001
             logger.warning("[RedisSessionStorage] load 失败: %s", exc)
 
@@ -205,13 +238,31 @@ class RedisSessionStorage(SessionStorage):
         if identity_key is None:
             return
         try:
-            asyncio.run(redis.set(self._redis_key(identity_key), self._session_to_json(session), ttl_seconds=self._ttl))
+            self._run_awaitable(
+                redis.set(self._redis_key(identity_key), self._session_to_json(session), ttl_seconds=self._ttl)
+            )
         except Exception as exc:  # noqa: BLE001
             logger.warning("[RedisSessionStorage] save 失败: %s", exc)
 
     def get(self, identity_key: str) -> "Session | None":
         with self._lock:
-            return self._mapping.get(identity_key)
+            cached = self._mapping.get(identity_key)
+        if cached is not None:
+            return cached
+
+        try:
+            redis = self._get_redis()
+            if redis is None:
+                return None
+
+            sess = self._session_from_json(self._run_awaitable(redis.get(self._redis_key(identity_key))))
+            if sess is not None:
+                with self._lock:
+                    self._mapping[identity_key] = sess
+            return sess
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[RedisSessionStorage] get 失败: %s", exc)
+            return None
 
     def set(self, identity_key: str, session: "Session") -> None:
         with self._lock:
@@ -225,7 +276,7 @@ class RedisSessionStorage(SessionStorage):
                 del self._mapping[identity_key]
         if redis is not None:
             try:
-                asyncio.run(redis.delete(self._redis_key(identity_key)))
+                self._run_awaitable(redis.delete(self._redis_key(identity_key)))
             except Exception as exc:  # noqa: BLE001
                 logger.warning("[RedisSessionStorage] remove 失败: %s", exc)
 

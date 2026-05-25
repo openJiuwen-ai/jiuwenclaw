@@ -1716,8 +1716,15 @@ async def _run(
     deployment_mode = str((config.get("gateway") or {}).get("deployment_mode", "standalone")).strip().lower()
     if deployment_mode != "standalone":
         from jiuwenclaw.gateway.leader_election import LeaderElection, Role
-
+        
         leader_election = LeaderElection.get_instance()
+
+        async def _reload_session_map_on_leader_change(role: Role) -> None:
+            if role == Role.PRIMARY:
+                logger.info("[App] PRIMARY elected, reloading session map from Redis")
+                message_handler.reload_session_map()
+
+        leader_election.register_callback(_reload_session_map_on_leader_change)
 
         # 选主结果未知前先把 cron 设为 STANDBY，避免短暂窗口内非 PRIMARY 进程触发任务；
         # cron_scheduler.start() 已在前面跑过，loop 已存活，set_active(False) 仅让它跳过事件处理。
