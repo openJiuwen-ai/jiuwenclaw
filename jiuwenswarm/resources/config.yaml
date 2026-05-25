@@ -758,7 +758,7 @@ modes:
       spawn_mode: inprocess
 
       leader:
-        member_name: team_leader
+        member_name: team-leader
         display_name: 团队领导
         persona: "天才项目管理专家，擅长任务分解和团队协调"
 
