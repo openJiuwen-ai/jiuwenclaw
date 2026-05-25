@@ -24,13 +24,45 @@ from jiuwenclaw.agentserver.tools.subagent_models import (
 from jiuwenclaw.utils import logger
 
 
+# Hint appended to subagent tool results to guide the LLM toward stopping
+# after receiving the delegated task's output, rather than continuing to
+# call more tools or re-delegate the same task.
+_SUBAGENT_STOP_HINT = (
+    "\n\n[SYSTEM] The delegated task is complete. "
+    "You should now summarize this result to the user and finish your turn. "
+    "Do NOT call fork_agent or spawn_subagent again for this task."
+)
+
+
+def _wrap_subagent_result(result_dict: dict[str, Any]) -> dict[str, Any]:
+    """Append a stop hint to the subagent result so the LLM knows to stop.
+
+    The hint is added to the ``result`` field (for success) or ``error`` field
+    (for failure) so it appears in the tool_result message visible to the LLM.
+    Covers all branches including empty result / empty error.
+    """
+    if result_dict.get("success"):
+        # Success path: append hint to result (even if empty/None)
+        existing = result_dict.get("result") or ""
+        result_dict["result"] = existing + _SUBAGENT_STOP_HINT
+    else:
+        # Failure path: append hint to error (even if empty/None)
+        existing = result_dict.get("error") or ""
+        result_dict["error"] = existing + _SUBAGENT_STOP_HINT
+    return result_dict
+
+
 @tool(
     name="fork_agent",
     description=(
         "Create fork subAgent inheriting parent Agent's context. **Do NOT use by default** unless "
         "you need shared context (e.g., parallel tasks with consistent document understanding). "
         "Use spawn_subagent (isolated) for normal tasks. Fork inherits parent history which may "
-        "contaminate subAgent reasoning."
+        "contaminate subAgent reasoning.\n\n"
+        "**IMPORTANT**: After receiving the fork_agent result, you MUST summarize the result to the "
+        "user and STOP. Do NOT call fork_agent or spawn_subagent again on the same task. The "
+        "subagent has already completed its work — your job is to present the findings, not to "
+        "re-delegate or continue processing."
     ),
 )
 async def fork_agent(
@@ -56,7 +88,7 @@ async def fork_agent(
     """
     executor = get_fork_agent_executor()
     if executor is None:
-        return {"success": False, "error": "Fork agent tools not initialized"}
+        return _wrap_subagent_result({"success": False, "error": "Fork agent tools not initialized"})
 
     parent_session: Session | None = get_subagent_parent_session()
 
@@ -72,7 +104,7 @@ async def fork_agent(
         task, fork_messages=fork_messages, parent_session=parent_session
     )
 
-    return result.model_dump()
+    return _wrap_subagent_result(result.model_dump())
 
 
 @tool(
@@ -81,7 +113,11 @@ async def fork_agent(
         "Spawn a subagent to execute a task with isolated context. **Default choice** for "
         "most tasks. The subagent has full Agent capabilities: multi-round reasoning, tool calls, "
         "skill loading. Use fork_agent only when you need shared context (parallel tasks with "
-        "consistent document understanding)."
+        "consistent document understanding).\n\n"
+        "**IMPORTANT**: After receiving the spawn_subagent result, you MUST summarize the result to "
+        "the user and STOP. Do NOT call fork_agent or spawn_subagent again on the same task. The "
+        "subagent has already completed its work — your job is to present the findings, not to "
+        "re-delegate or continue processing."
     ),
 )
 async def spawn_subagent(
@@ -111,7 +147,7 @@ async def spawn_subagent(
     """
     executor = get_fork_agent_executor()
     if executor is None:
-        return {"success": False, "error": "Subagent tools not initialized"}
+        return _wrap_subagent_result({"success": False, "error": "Subagent tools not initialized"})
 
     parent_session: Session | None = get_subagent_parent_session()
 
@@ -125,7 +161,7 @@ async def spawn_subagent(
         task, parent_session=parent_session
     )
 
-    return result.model_dump()
+    return _wrap_subagent_result(result.model_dump())
 
 
 async def get_fork_messages() -> list[Any]:

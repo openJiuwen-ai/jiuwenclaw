@@ -130,6 +130,39 @@ class ForkAgentExecutor:
         "chat.llm_usage",
     }
 
+    @staticmethod
+    def _sanitize_usage(usage: dict[str, Any] | None) -> dict[str, Any] | None:
+        """Normalize usage dict to a format compatible with ForkAgentResult / SubagentResult.
+
+        _run_agent_streaming_for_result may return the raw SDK event dict
+        (containing ``event_type``, ``usage_metadata``, ``result_type``) instead
+        of the extracted ``{input_tokens, output_tokens, ...}`` format when the
+        ``chat.llm_usage`` branch is not hit or the chunk shape differs from
+        expectations.  This helper detects the raw format and extracts the
+        metadata so that Pydantic validation never fails on the Result model.
+        """
+        if usage is None or not usage:
+            return usage
+
+        # Already in extracted format (has numeric token fields)
+        if "input_tokens" in usage and isinstance(usage.get("input_tokens"), (int, float)):
+            return usage
+
+        # Raw SDK event format: {"event_type": "chat.llm_usage", "usage_metadata": {...}, ...}
+        usage_meta = usage.get("usage_metadata")
+        if isinstance(usage_meta, dict):
+            return {
+                "input_tokens": usage_meta.get("input_tokens", 0) or 0,
+                "output_tokens": usage_meta.get("output_tokens", 0) or 0,
+                "total_tokens": usage_meta.get("total_tokens", 0) or 0,
+                "input_cost": usage_meta.get("input_cost", 0.0) or 0.0,
+                "output_cost": usage_meta.get("output_cost", 0.0) or 0.0,
+                "total_cost": usage_meta.get("total_cost", 0.0) or 0.0,
+            }
+
+        # Unknown shape — return as-is (best-effort)
+        return usage
+
     async def _run_agent_streaming_for_result(
         self,
         *,
@@ -165,9 +198,28 @@ class ForkAgentExecutor:
                 content = parsed.get("content", "")
                 if content:
                     final_text = str(content)
-            elif event_type == "chat.llm_usage":
+            elif event_type in ("chat.llm_usage", "llm_usage"):
                 # 提取 usage_metadata 中的字段
+                # chat.llm_usage: parsed has top-level usage_metadata dict
+                # llm_usage: same structure but without chat. prefix
                 usage_meta = parsed.get("usage_metadata", {}) if isinstance(parsed, dict) else {}
+                if isinstance(usage_meta, dict):
+                    usage = {
+                        "input_tokens": usage_meta.get("input_tokens", 0) or 0,
+                        "output_tokens": usage_meta.get("output_tokens", 0) or 0,
+                        "total_tokens": usage_meta.get("total_tokens", 0) or 0,
+                        "input_cost": usage_meta.get("input_cost", 0.0) or 0.0,
+                        "output_cost": usage_meta.get("output_cost", 0.0) or 0.0,
+                        "total_cost": usage_meta.get("total_cost", 0.0) or 0.0,
+                    }
+            elif event_type == "chat.usage_metadata":
+                # interface_deep emits this with data nested under "metadata" key
+                # metadata may itself contain usage_metadata dict
+                raw_meta = parsed.get("metadata", {}) if isinstance(parsed, dict) else {}
+                if not isinstance(raw_meta, dict):
+                    raw_meta = {}
+                # Try nested usage_metadata first, then treat metadata itself as usage
+                usage_meta = raw_meta.get("usage_metadata", raw_meta)
                 if isinstance(usage_meta, dict):
                     usage = {
                         "input_tokens": usage_meta.get("input_tokens", 0) or 0,
@@ -494,6 +546,8 @@ Approach each task methodically and deliver high-quality results.
 
             logger.info(f"[ForkAgent] Execution completed, task_id={task.task_id}")
 
+            fork_usage = self._sanitize_usage(fork_usage)
+
             if fork_usage:
                 logger.info(f"[ForkAgent] task_id={task.task_id} usage: {fork_usage}")
 
@@ -601,6 +655,8 @@ Approach each task methodically and deliver high-quality results.
                 llm_trace_var.reset(token_trace_sid)
 
             logger.info(f"[SpawnAgent] Execution completed, task_id={task.task_id}")
+
+            spawn_usage = self._sanitize_usage(spawn_usage)
 
             if spawn_usage:
                 logger.info(f"[SpawnAgent] task_id={task.task_id} usage: {spawn_usage}")
