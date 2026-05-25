@@ -581,10 +581,14 @@ export const useSkillDevStore = create<SkillDevStateStore>((set, _get) => ({
   hydrateFromSkillDevRestore: (result) =>
     set((state) => {
       const snapshot = result.snapshot;
+      const agentStage =
+        snapshot.runner === 'agent' && snapshot.status
+          ? snapshot.status
+          : snapshot.stage;
       return {
         ...initialState,
         taskId: snapshot.task_id,
-        stage: snapshot.stage,
+        stage: agentStage as typeof initialState.stage,
         mode: snapshot.mode ?? state.mode,
         iteration: typeof snapshot.iteration === 'number' ? snapshot.iteration : 0,
         isSuspended: Boolean(snapshot.is_suspended),

@@ -23,7 +23,22 @@ export type SkillDevStage =
   | 'desc_optimize_confirm'
   | 'desc_optimize'
   | 'completed'
-  | 'error';
+  | 'error'
+  /** Agent 模式任务状态（非 Pipeline stage） */
+  | 'active'
+  | 'idle'
+  | 'pending_interaction'
+  | 'cancelled'
+  | 'agent';
+
+/** Agent 任务状态 */
+export type AgentTaskStatus =
+  | 'active'
+  | 'idle'
+  | 'pending_interaction'
+  | 'completed'
+  | 'error'
+  | 'cancelled';
 
 /** 任务模式 */
 export type SkillDevTaskMode = 'create' | 'create_with_resources' | 'modify';
@@ -180,6 +195,11 @@ export interface SkillDevSessionSummary {
   updated_at: string;
   created_at: string;
   is_suspended: boolean;
+  runner?: 'pipeline' | 'agent';
+  status?: AgentTaskStatus;
+  status_label?: string;
+  title?: string;
+  todo_progress?: string;
 }
 
 export interface SkillDevRestoreSnapshot {
@@ -189,7 +209,7 @@ export interface SkillDevRestoreSnapshot {
   iteration?: number;
   is_suspended: boolean;
   is_processing: boolean;
-  /** 恢复后可传给 skilldev.start 续跑的原始 query */
+  /** 恢复后可传给 skilldev.chat 续跑的原始 query */
   query?: string;
   todos: SkillDevTodo[];
   artifacts: SkillDevArtifact[];
@@ -197,6 +217,8 @@ export interface SkillDevRestoreSnapshot {
   updated_at?: string;
   error?: string | null;
   pending_confirm?: ConfirmRequest | null;
+  runner?: 'pipeline' | 'agent';
+  status?: AgentTaskStatus;
 }
 
 export interface SkillDevRestoreTimelineItem {
@@ -212,6 +234,7 @@ export interface SkillDevRestoreResult {
   snapshot: SkillDevRestoreSnapshot;
   timeline_items: SkillDevRestoreTimelineItem[];
   version: string;
+  runner?: 'pipeline' | 'agent';
 }
 
 /** SkillDev 事件类型 */

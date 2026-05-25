@@ -49,7 +49,19 @@ export function SkillDevSessionsTab(props: SkillDevSessionsTabProps) {
                   }`}
                 >
                   <div className="text-xs text-text-muted break-all">{session.task_id}</div>
-                  <div className="mt-1 text-sm text-text">阶段：{session.stage}</div>
+                  {session.title ? (
+                    <div className="mt-1 text-sm text-text truncate" title={session.title}>
+                      {session.title}
+                    </div>
+                  ) : null}
+                  <div className="mt-1 text-sm text-text">
+                    {session.runner === 'agent'
+                      ? `状态：${session.status_label ?? session.status ?? session.stage}`
+                      : `阶段：${session.stage}`}
+                    {session.todo_progress ? (
+                      <span className="text-text-muted"> · {session.todo_progress}</span>
+                    ) : null}
+                  </div>
                   <div className="mt-1 text-xs text-text-muted">更新时间：{session.updated_at || '-'}</div>
                   <div className="mt-2 flex items-center justify-between">
                     <span

@@ -228,6 +228,11 @@ class JiuWenClaw:
     async def _ensure_skilldev_adapter(self) -> AgentAdapter:
         """确保 skilldev adapter 已初始化，懒加载创建."""
         if self._skilldev_adapter is None:
+            from pathlib import Path
+
+            from jiuwenclaw.agentserver.skilldev import StateStore
+            from jiuwenclaw.agentserver.skilldev.session_history import SkillDevSessionHistoryService
+
             self._skilldev_adapter = await create_adapter(
                 "skilldev",
                 workspace_dir=self._workspace_dir,
@@ -236,6 +241,14 @@ class JiuWenClaw:
             )
             if hasattr(self._skilldev_adapter, "set_skill_manager"):
                 self._skilldev_adapter.set_skill_manager(self._skill_manager)
+            skilldev_base = Path(self._workspace_dir) / "skilldev"
+            state_store = StateStore(skilldev_base)
+            session_history = SkillDevSessionHistoryService(
+                base_dir=skilldev_base,
+                state_store=state_store,
+            )
+            if hasattr(self._skilldev_adapter, "set_session_history"):
+                self._skilldev_adapter.set_session_history(session_history)
             logger.info("[JiuWenClaw] Initialized skilldev adapter: workspace_dir=%s",
                         self._workspace_dir)
         return self._skilldev_adapter

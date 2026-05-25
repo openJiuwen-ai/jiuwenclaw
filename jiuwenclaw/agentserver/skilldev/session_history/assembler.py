@@ -40,7 +40,7 @@ def build_restore_payload(
         SkillDevStage.ERROR,
     } and not is_suspended
 
-    timeline_items = _normalize_timeline(events)
+    timeline_items = normalize_timeline(events)
     pending_confirm = _resolve_pending_confirm(timeline_items)
     snapshot = {
         "task_id": task_id,
@@ -75,10 +75,10 @@ def _resolve_restore_query(
         if isinstance(q, str):
             return q
     for event in reversed(events):
-        if event.event_type != "skilldev.user_start":
+        if event.event_type not in ("skilldev.user_start", "skilldev.user_chat"):
             continue
         payload = event.payload or {}
-        q = payload.get("query")
+        q = payload.get("query") or payload.get("message")
         if isinstance(q, str):
             return q
     return ""
@@ -97,6 +97,11 @@ def _collect_artifacts_from_events(events: list[SkillDevSessionEventRecord]) -> 
             continue
         latest_by_id[aid] = artifact
     return list(latest_by_id.values())
+
+
+def normalize_timeline(events: list[SkillDevSessionEventRecord]) -> list[dict[str, Any]]:
+    """将事件列表规范为 restore 用 timeline_items（Pipeline / Agent / 小艺共用）."""
+    return _normalize_timeline(events)
 
 
 def _normalize_timeline(events: list[SkillDevSessionEventRecord]) -> list[dict[str, Any]]:

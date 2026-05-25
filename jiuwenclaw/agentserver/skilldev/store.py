@@ -13,6 +13,7 @@ from __future__ import annotations
 import json
 import logging
 from pathlib import Path
+from typing import Any
 
 from jiuwenclaw.agentserver.skilldev.schema import SkillDevState
 
@@ -69,11 +70,38 @@ class StateStore:
 
     def load_state_sync(self, task_id: str) -> SkillDevState | None:
         """同步版 load_state，供非 async 上下文使用（如 status 查询）."""
+        data = self.load_checkpoint_dict(task_id)
+        if data is None:
+            return None
+        if str(data.get("runner") or "") == "agent":
+            return None
+        return SkillDevState.from_checkpoint_dict(data)
+
+    def load_checkpoint_dict(self, task_id: str) -> dict[str, Any] | None:
+        """读取 state.json 原始字典（Pipeline / Agent 通用）."""
         state_file = self._state_file(task_id)
         if not state_file.exists():
             return None
         data = json.loads(state_file.read_text(encoding="utf-8"))
-        return SkillDevState.from_checkpoint_dict(data)
+        if not isinstance(data, dict):
+            return None
+        return data
+
+    def save_checkpoint_dict(self, task_id: str, data: dict[str, Any]) -> None:
+        """写入 state.json（Agent checkpoint 或 Pipeline 字典）."""
+        state_file = self._state_file(task_id)
+        state_file.parent.mkdir(parents=True, exist_ok=True)
+        state_file.write_text(
+            json.dumps(data, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        logger.debug(
+            "[session=%s] [StateStore] checkpoint dict saved: runner=%s status=%s stage=%s",
+            task_id,
+            data.get("runner", "pipeline"),
+            data.get("status"),
+            data.get("stage"),
+        )
 
     def list_tasks(self) -> list[str]:
         """列出所有存在 checkpoint 的 task_id."""

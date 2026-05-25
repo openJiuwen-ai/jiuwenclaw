@@ -45,10 +45,15 @@ import { SkillDevArtifacts } from './SkillDevArtifacts';
 import { SkillDevFileBrowser } from './SkillDevFileBrowser';
 import { SkillDevSessionsTab } from './SkillDevSessionsTab';
 
-/** 恢复后的会话是否允许展示「继续任务」（续跑 skilldev.start） */
+/** 恢复后的会话是否允许展示「继续任务」（续跑 skilldev.chat） */
 function skillDevResumeEligible(snapshot: SkillDevRestoreSnapshot): boolean {
-  // 只有真正等待用户确认（存在 pending_confirm）时，不展示“继续任务”
   if (snapshot.is_suspended && snapshot.pending_confirm) return false;
+  if (snapshot.runner === 'agent' || snapshot.status) {
+    const status = snapshot.status ?? snapshot.stage;
+    if (status === 'completed' || status === 'error' || status === 'cancelled') return false;
+    if (status === 'pending_interaction') return false;
+    return status === 'idle' || status === 'active';
+  }
   const st = String(snapshot.stage);
   if (st === 'completed' || st === 'error') return false;
   return true;
@@ -876,11 +881,12 @@ export function SkillDevPanel() {
       return Date.parse(a.timestamp) - Date.parse(b.timestamp);
     });
     for (const item of ordered) {
-      if (item.event_type === 'skilldev.user_start') {
-        const query = typeof item.payload.query === 'string' ? item.payload.query : '';
+      if (item.event_type === 'skilldev.user_start' || item.event_type === 'skilldev.user_chat') {
+        const queryRaw = item.payload.query ?? item.payload.message;
+        const query = typeof queryRaw === 'string' ? queryRaw : '';
         if (query.trim()) {
           addMessage({
-            id: `restore-user-start-${item.seq}`,
+            id: `restore-user-${item.event_type}-${item.seq}`,
             role: 'user',
             content: query,
             type: 'text',
@@ -1001,6 +1007,12 @@ export function SkillDevPanel() {
           break;
         case 'skilldev.tool_result':
           handlersRef.current.handleToolResult(payload as Record<string, unknown>);
+          break;
+        case 'skilldev.ask_user_question':
+          handlersRef.current.handleAskUserQuestion(payload as unknown as AskUserQuestionPayload);
+          break;
+        case 'skilldev.agent_completed':
+          handlersRef.current.handleAgentCompleted(payload as { __restore_ts?: string });
           break;
         default:
           break;

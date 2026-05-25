@@ -63,6 +63,8 @@ from jiuwenclaw.agentserver.skilldev_agent.utils.direct_import import (
     validate_direct_import_skill,
 )
 from jiuwenclaw.agentserver.skilldev_agent.rails.context_engineering_rail import SkillDevContextEngineeringRail
+from jiuwenclaw.agentserver.skilldev.session_history.service import SkillDevSessionHistoryService
+from jiuwenclaw.agentserver.skilldev_agent.utils.session_recorder import AgentSessionRecorder
 from jiuwenclaw.agentserver.skilldev_agent.utils.skill_search import search_skills
 from jiuwenclaw.agentserver.skilldev.stages.validate_stage import parse_skill_frontmatter
 
@@ -96,12 +98,31 @@ class SkillDevDeepAdapter:
         self._task_locks: dict[str, asyncio.Lock] = {}
         self._stale_instance_ids: set[str] = set()
         self._task_id: str | None = None
+        self._session_history: SkillDevSessionHistoryService | None = None
 
     def get_instance(self):
         return self._instance
 
     def set_skill_manager(self, manager) -> None:
         self._skill_manager = manager
+
+    def set_session_history(self, service: SkillDevSessionHistoryService | None) -> None:
+        self._session_history = service
+
+    def _session_recorder(self) -> AgentSessionRecorder | None:
+        if self._session_history is None:
+            return None
+        return AgentSessionRecorder(self._session_history)
+
+    @staticmethod
+    def _track_chunk(
+        recorder: AgentSessionRecorder | None,
+        task_id: str,
+        chunk: AgentResponseChunk,
+    ) -> AgentResponseChunk:
+        if recorder is not None:
+            recorder.record_chunk(task_id=task_id, chunk=chunk)
+        return chunk
 
     def _cleanup_stale_instances(self) -> None:
         """Remove TaskTool registrations for instances no longer in use.
@@ -390,10 +411,43 @@ class SkillDevDeepAdapter:
         params: dict[str, Any],
         task_id: str,
     ) -> AsyncIterator[AgentResponseChunk]:
+        task_workspace = Path(self._base_workspace_dir) / "skilldev" / task_id
+        recorder = self._session_recorder()
+        raw_session_id = str(request.session_id or task_id)
+        conversation_id = self._make_todo_session_id(raw_session_id)
+        persist_error: str | None = None
+        try:
+            if recorder is not None:
+                recorder.begin_round(
+                    task_id=task_id,
+                    params=params,
+                    session_id=raw_session_id,
+                    is_first=is_first_task_input(task_workspace),
+                )
+            async for chunk in self._iter_chat_locked(request, params, task_id, task_workspace):
+                yield self._track_chunk(recorder, task_id, chunk)
+        except Exception as exc:
+            persist_error = str(exc)
+            raise
+        finally:
+            if recorder is not None:
+                recorder.finalize(
+                    task_id=task_id,
+                    task_workspace=task_workspace,
+                    conversation_id=conversation_id,
+                    error=persist_error,
+                )
+
+    async def _iter_chat_locked(
+        self,
+        request: AgentRequest,
+        params: dict[str, Any],
+        task_id: str,
+        task_workspace: Path,
+    ) -> AsyncIterator[AgentResponseChunk]:
         rid = request.request_id
         cid = request.channel_id
         query = str(params.get("message") or params.get("query") or "")
-        task_workspace = Path(self._base_workspace_dir) / "skilldev" / task_id
 
         yield AgentResponseChunk(
             request_id=rid,
@@ -1016,6 +1070,30 @@ class SkillDevDeepAdapter:
         request_id = str(params.get("request_id", ""))
         answers = params.get("answers", [])
         source = str(params.get("source", ""))
+        task_id = str(
+            params.get("task_id")
+            or params.get("taskId")
+            or request.session_id
+            or ""
+        ).strip()
+        recorder = self._session_recorder()
+        if recorder is not None and task_id:
+            recorder.record_user_answer(
+                task_id=task_id,
+                payload={
+                    "request_id": request_id,
+                    "answers": answers,
+                    "task_id": task_id,
+                    "session_id": str(request.session_id or task_id),
+                },
+            )
+            task_workspace = Path(self._base_workspace_dir) / "skilldev" / task_id
+            raw_session_id = str(request.session_id or task_id)
+            recorder.finalize(
+                task_id=task_id,
+                task_workspace=task_workspace,
+                conversation_id=self._make_todo_session_id(raw_session_id),
+            )
         resolved = False
         if source == "ask_tool" or request_id.startswith(ASK_REQUEST_PREFIX):
             resolved = AskUserQuestionRegistry.get_instance().resolve(request_id, answers)

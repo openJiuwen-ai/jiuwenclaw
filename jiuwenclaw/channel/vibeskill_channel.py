@@ -2459,6 +2459,19 @@ class VibeSkillChannel(BaseChannel):
                     })
                     continue
 
+                if event_type == "skilldev.user_chat":
+                    query = str(payload.get("message") or payload.get("query") or "")
+                    chat_parts: list[dict[str, Any]] = []
+                    if query:
+                        chat_parts.append({"type": "text", "text": query})
+                    messages.append({
+                        "role": role,
+                        "sessionID": session_id,
+                        "type": "message.send",
+                        "parts": chat_parts,
+                    })
+                    continue
+
                 if event_type == "skilldev.user_answer":
                     request_id = str(payload.get("request_id") or "").strip()
                     answers_payload = payload.get("answers", [])
