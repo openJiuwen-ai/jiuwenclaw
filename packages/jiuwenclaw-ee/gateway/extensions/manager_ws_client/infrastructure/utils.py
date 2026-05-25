@@ -9,6 +9,16 @@ from typing import Any
 
 _jiuwenclaw_id: str | None = None
 
+KNOWN_SLOT_KEYS = frozenset({
+    "default_model",
+    "video_model",
+    "audio_model",
+    "vision_model",
+    "skill_whitelist",
+    "extension_config",
+    "service_config",
+})
+
 
 def set_jiuwenclaw_id(jiuwenclaw_id: str | None) -> None:
     """由 ``manager_ws_client`` 在 register.ack 成功后写入当前实例 id。"""
@@ -67,3 +77,69 @@ def format_ts(val: Any) -> str:
             dt = dt.replace(tzinfo=timezone.utc)
         return dt.isoformat()
     return str(val)
+
+
+def normalize_template_ref(value: Any) -> dict[str, list[str]]:
+    """将 ``template_ref`` 规范为 ``{slot: [ref_string, ...]}``；空值键省略。"""
+    if value is None:
+        return {}
+    if not isinstance(value, dict):
+        raise ValueError("template_ref must be a JSON object")
+    out: dict[str, list[str]] = {}
+    for key, raw in value.items():
+        slot = str(key).strip()
+        if not slot or raw is None:
+            continue
+        if not isinstance(raw, list):
+            raise ValueError(f"template_ref[{slot!r}] must be a list")
+        refs = [
+            str(item).strip()
+            for item in raw
+            if item is not None and str(item).strip()
+        ]
+        if refs:
+            out[slot] = refs
+    return out
+
+
+def merge_template_ref(*layers: dict[str, list[str]]) -> dict[str, list[str]]:
+    """按参数顺序从左到右合并 ``template_ref``；后出现的槽位整组覆盖先前的同名槽位。"""
+    merged: dict[str, list[str]] = {}
+    for layer in layers:
+        merged.update(layer)
+    return merged
+
+
+def fill_missing_template_ref_slots(
+    merged: dict[str, list[str]],
+    fallback: dict[str, list[str]],
+) -> dict[str, list[str]]:
+    """将 ``fallback`` 中尚未出现在 ``merged`` 的槽位补入（用于全局兜底按槽位回填）。"""
+    if not fallback:
+        return merged
+    out = dict(merged)
+    for slot, refs in fallback.items():
+        if slot not in out:
+            out[slot] = refs
+    return out
+
+
+def read_template_ref_from_row(row: Any) -> dict[str, list[str]]:
+    raw = getattr(row, "template_ref", None)
+    if isinstance(raw, dict):
+        return normalize_template_ref(raw)
+    return {}
+
+
+def apply_template_ref_to_updates(
+    updates: dict[str, Any],
+    *,
+    existing_row: Any | None,
+) -> dict[str, Any]:
+    payload = dict(updates)
+    if "template_ref" not in payload:
+        return payload
+    patch = payload.pop("template_ref")
+    base = read_template_ref_from_row(existing_row) if existing_row is not None else {}
+    payload["template_ref"] = merge_template_ref(base, normalize_template_ref(patch))
+    return payload

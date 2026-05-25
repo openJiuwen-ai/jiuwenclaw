@@ -12,10 +12,11 @@
 1. 五条 ``model_template``（M1–M5；每次执行均新建，``template_name`` 可重复）
 2. 四条 ``extension-config-templates``（E1–E4；每次执行均新建）
 3. 三条 ``skill-whitelist-templates``（W1–W3；每次执行均新建）
-4. 两条 ``config-effective/service-policies``（``template_ref`` 含模型 / 白名单 / 扩展配置槽位）
-5. 两条 ``config-effective/agent-policies``（依赖上一步销售服务策略 id）
-6. ``config-effective/global-policies``（每实例唯一；已存在则 PUT 更新）
-7. 两条 ``config-default-template-mappings``
+4. 两条 ``service-config-templates``（S1–S2；每次执行均新建）
+5. 两条 ``config-effective/service-policies``（``template_ref`` 含模型 / 白名单 / 扩展 / 服务配置槽位）
+6. 两条 ``config-effective/agent-policies``（依赖上一步销售服务策略 id）
+7. ``config-effective/global-policies``（每实例唯一；已存在则 PUT 更新）
+8. 两条 ``config-default-template-mappings``
 
 典型用法（PowerShell 一行）::
 
@@ -89,9 +90,12 @@ class ManagerClient:
         return self._base
 
     def _url(self, path: str) -> str:
-        if path.startswith("/model-templates") or path.startswith(
-            "/extension-config-templates"
-        ) or path.startswith("/skill-whitelist-templates"):
+        if path.startswith((
+            "/model-templates",
+            "/extension-config-templates",
+            "/skill-whitelist-templates",
+            "/service-config-templates",
+        )):
             return f"{self._base}/api/v1{path}"
         return f"{self._base}/api/v1/instances/{self._jid}{path}"
 
@@ -349,6 +353,42 @@ def _skill_whitelist_templates() -> list[tuple[str, dict[str, Any]]]:
     ]
 
 
+def _service_config_templates() -> list[tuple[str, dict[str, Any]]]:
+    return [
+        (
+            "S1 销售组 AgentServer 池",
+            {
+                "template_name": "销售组 AgentServer 池",
+                "description": "销售通道 g_demo_sales 使用的 AgentServer 动态池",
+                "agent_image": "jiuwenclaw/agent-server:latest",
+                "namespace": "jiuwenclaw",
+                "container_name": "agent-server",
+                "container_port": 8080,
+                "min_idle_services": 2,
+                "max_services": 10,
+                "service_concurrency": 5,
+                "enabled": True,
+                "data": {"demo": "s1"},
+            },
+        ),
+        (
+            "S2 全局兜底 AgentServer 池",
+            {
+                "template_name": "全局兜底 AgentServer 池",
+                "description": "未命中服务策略时的最小 AgentServer 池",
+                "agent_image": "jiuwenclaw/agent-server:latest",
+                "namespace": "jiuwenclaw",
+                "container_name": "agent-server",
+                "container_port": 8080,
+                "min_idle_services": 1,
+                "max_services": 5,
+                "enabled": True,
+                "data": {"demo": "s2"},
+            },
+        ),
+    ]
+
+
 def _upsert_global_policy(client: ManagerClient, body: dict[str, Any]) -> dict[str, Any]:
     try:
         return client.post("/config-effective/global-policies", body)
@@ -371,9 +411,10 @@ def seed_demo_config(client: ManagerClient) -> dict[str, Any]:
         "model_templates": {},
         "extension_config_templates": {},
         "skill_whitelist_templates": {},
+        "service_config_templates": {},
     }
 
-    logger.info("[1/7] 创建 model_template（M1–M5）")
+    logger.info("[1/8] 创建 model_template（M1–M5）")
     template_ids: list[str] = []
     for label, body in _model_templates():
         row = client.post("/model-templates", body)
@@ -386,7 +427,7 @@ def seed_demo_config(client: ManagerClient) -> dict[str, Any]:
     m1, m2, m3, m4, m5 = template_ids
     group_map_default_model = f"${{group::g_demo_sales}} or {m1}"
 
-    logger.info("[2/7] 创建 extension-config-templates（E1–E4）")
+    logger.info("[2/8] 创建 extension-config-templates（E1–E4）")
     extension_ids: list[str] = []
     for label, body in _extension_config_templates():
         row = client.post("/extension-config-templates", body)
@@ -404,7 +445,7 @@ def seed_demo_config(client: ManagerClient) -> dict[str, Any]:
         "e4": e4,
     }
 
-    logger.info("[3/7] 创建 skill-whitelist-templates（W1–W3）")
+    logger.info("[3/8] 创建 skill-whitelist-templates（W1–W3）")
     whitelist_ids: list[str] = []
     for label, body in _skill_whitelist_templates():
         row = client.post("/skill-whitelist-templates", body)
@@ -421,7 +462,23 @@ def seed_demo_config(client: ManagerClient) -> dict[str, Any]:
         "w3": w3,
     }
 
-    logger.info("[4/7] 创建 service-policies")
+    logger.info("[4/8] 创建 service-config-templates（S1–S2）")
+    service_config_ids: list[str] = []
+    for label, body in _service_config_templates():
+        row = client.post("/service-config-templates", body)
+        tid = _require_template_id(row, "/service-config-templates")
+        service_config_ids.append(tid)
+        key = f"s{len(service_config_ids)}"
+        result["service_config_templates"][key] = tid
+        logger.info("  [%s] %s -> template_id=%s", key, label, tid)
+
+    s1, s2 = service_config_ids
+    result["service_config_template_id_literals"] = {
+        "s1": s1,
+        "s2": s2,
+    }
+
+    logger.info("[5/8] 创建 service-policies")
     sales = client.post(
         "/config-effective/service-policies",
         {
@@ -433,6 +490,7 @@ def seed_demo_config(client: ManagerClient) -> dict[str, Any]:
                 "vision_model": [m2],
                 "skill_whitelist": [w1, w2],
                 "extension_config": [e1, e2],
+                "service_config": [s1],
             },
             "enabled": True,
             "data": {
@@ -443,13 +501,14 @@ def seed_demo_config(client: ManagerClient) -> dict[str, Any]:
     sales_id = _require_id(sales, "service-policies/sales")
     result["service_policy_sales_id"] = sales_id
     logger.info(
-        "  [2.1] 销售通道 priority=100 -> id=%s (default_model=%s, skills=%s,%s, ext=%s,%s)",
+        "  [2.1] 销售通道 priority=100 -> id=%s (default_model=%s, skills=%s,%s, ext=%s,%s, service=%s)",
         sales_id,
         m2,
         w1,
         w2,
         e1,
         e2,
+        s1,
     )
 
     fallback = client.post(
@@ -467,7 +526,7 @@ def seed_demo_config(client: ManagerClient) -> dict[str, Any]:
     result["service_policy_fallback_id"] = fallback_id
     logger.info("  [2.2] 低优先级兜底 -> id=%s (default_model=%s)", fallback_id, m1)
 
-    logger.info("[5/7] 创建 agent-policies")
+    logger.info("[6/8] 创建 agent-policies")
     vip = client.post(
         "/config-effective/agent-policies",
         {
@@ -523,7 +582,7 @@ def seed_demo_config(client: ManagerClient) -> dict[str, Any]:
         group_map_default_model,
     )
 
-    logger.info("[6/7] 创建 / 更新 global-policies")
+    logger.info("[7/8] 创建 / 更新 global-policies")
     global_row = _upsert_global_policy(
         client,
         {
@@ -535,6 +594,7 @@ def seed_demo_config(client: ManagerClient) -> dict[str, Any]:
                 "vision_model": [m1],
                 "skill_whitelist": [w3],
                 "extension_config": [e4],
+                "service_config": [s2],
             },
             "enabled": True,
             "data": {},
@@ -543,14 +603,15 @@ def seed_demo_config(client: ManagerClient) -> dict[str, Any]:
     global_id = _require_id(global_row, "global-policies")
     result["global_policy_id"] = global_id
     logger.info(
-        "  [4] 全局兜底 -> id=%s (四槽位=%s, skill=%s, ext=%s)",
+        "  [4] 全局兜底 -> id=%s (四槽位=%s, skill=%s, ext=%s, service=%s)",
         global_id,
         m1,
         w3,
         e4,
+        s2,
     )
 
-    logger.info("[7/7] 创建 config-default-template-mappings")
+    logger.info("[8/8] 创建 config-default-template-mappings")
     carol_map = client.post(
         "/config-default-template-mappings",
         {
@@ -661,7 +722,14 @@ def main() -> None:
     logger.info("    default/vision/video/audio -> M1 全局兜底-经济型 (全局兜底)")
     logger.info("    skill=W3 全局兜底 Skill; ext=E4 Gateway 定时清理")
     logger.info("")
-    logger.info("联调聊天（将 {WEB_PORT} 换为 provision 返回的 ports.web）：")
+    logger.info("Gateway Runtime service_config 验证（§7）：")
+    logger.info(
+        "  uv run python packages/jiuwenclaw-ee/claw_manager/scripts/enterprise_runtime_service_config.py "
+        "--all-scenarios %s",
+        summary.get("jiuwenclaw_id", "{JIUWENCLAW_ID}"),
+    )
+    logger.info("")
+    logger.info("AgentServer 聊天联调（§6）：")
     logger.info(
         "  uv run python packages/jiuwenclaw-ee/claw_manager/scripts/enterprise_config_chat.py "
         "--group-id g_demo_sales --bot-id bot_main --user-id alice "

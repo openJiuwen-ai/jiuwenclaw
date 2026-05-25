@@ -2179,10 +2179,10 @@ class JiuWenClawDeepAdapter:
 
     def _log_active_model_on_startup(self, *, phase: str = "create_instance") -> None:
         """记录四类模型槽位的 source / template_name / template_id / model_name（启动日志）。"""
-        from jiuwenclaw.agentserver.enterprise_config.schemas import (
+        from jiuwenclaw.agentserver.enterprise_config.apply_models import (
             SLOT_TO_CONFIG_KEY,
-            TemplateRefSlot,
         )
+        from jiuwenclaw.agentserver.enterprise_config.loader import TemplateRefSlot
 
         empty = "(empty)"
         config = self._startup_config_base if isinstance(self._startup_config_base, dict) else {}
@@ -2275,13 +2275,17 @@ class JiuWenClawDeepAdapter:
         self._enterprise_config = None
         try:
             from jiuwenclaw.agentserver.enterprise_config import (
+                DEFAULT_AGENT_LOAD_SLOTS,
                 load_effective_enterprise_config,
             )
         except ImportError as exc:
             logger.error("[JiuWenClawDeepAdapter] enterprise_config unavailable: %s", exc)
             return
 
-        loaded = await load_effective_enterprise_config(request)
+        loaded = await load_effective_enterprise_config(
+            request,
+            DEFAULT_AGENT_LOAD_SLOTS,
+        )
         self._enterprise_config = loaded
         if loaded is None:
             p = request.params

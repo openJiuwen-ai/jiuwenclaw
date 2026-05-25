@@ -5,11 +5,17 @@ from __future__ import annotations
 import copy
 from typing import Any
 
-from .schemas import (
+from .loader import (
     EffectiveEnterpriseConfig,
-    SLOT_TO_CONFIG_KEY,
     TemplateRefSlot,
 )
+
+SLOT_TO_CONFIG_KEY: dict[TemplateRefSlot, str] = {
+    TemplateRefSlot.DEFAULT_MODEL: "default",
+    TemplateRefSlot.VISION_MODEL: "vision",
+    TemplateRefSlot.AUDIO_MODEL: "audio",
+    TemplateRefSlot.VIDEO_MODEL: "video",
+}
 
 
 def model_entity_to_config_entry(entity: dict[str, Any]) -> dict[str, Any]:

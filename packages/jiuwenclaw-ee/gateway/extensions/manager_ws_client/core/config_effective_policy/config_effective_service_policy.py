@@ -16,9 +16,9 @@ from ...models.config_effective_policy_models import (
 from ...schemas.config_effective_policy_schemas import (
     ConfigEffectiveServicePolicyUpdateRequest,
 )
-from .template_ref import (
+from ...infrastructure.utils import (
     apply_template_ref_to_updates,
-    read_template_ref_from_policy_dict,
+    normalize_template_ref,
 )
 
 _TABLE = CONFIG_EFFECTIVE_SERVICE_POLICY_TABLE_DEF.table_name
@@ -108,7 +108,7 @@ async def apply_config_effective_service_policy_sync(
             "jiuwenclaw_id": jiuwenclaw_id,
             "priority": int(policy["priority"]),
             "match_expr": policy.get("match_expr"),
-            "template_ref": read_template_ref_from_policy_dict(policy),
+            "template_ref": normalize_template_ref(policy.get("template_ref")),
             "enabled": bool(policy.get("enabled", True)),
             "data": policy.get("data"),
             "created_at": _parse_iso_datetime(policy.get("created_at")) or now,

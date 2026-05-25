@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+import importlib
 import json
 import logging
 import os
@@ -50,6 +51,61 @@ from jiuwenclaw.schema import AgentRequest
 from jiuwenclaw.schema.agent import AgentResponse, AgentResponseChunk
 
 logger = logging.getLogger(__name__)
+
+_load_effective_enterprise_config: Any | None = None
+_service_config_slot: Any | None = None
+
+
+def _ensure_enterprise_config_loader() -> tuple[Any, Any]:
+    global _load_effective_enterprise_config, _service_config_slot
+    if _load_effective_enterprise_config is not None and _service_config_slot is not None:
+        return _load_effective_enterprise_config, _service_config_slot
+
+    from jiuwenclaw.gateway.channel_config_db import (
+        _EXT_PKG,
+        _ensure_extension_package,
+        _resolve_manager_ws_client_root,
+    )
+
+    ext_root = _resolve_manager_ws_client_root()
+    if ext_root is None:
+        raise ImportError("manager_ws_client extension not found")
+    _ensure_extension_package(ext_root)
+    loader_mod = importlib.import_module(f"{_EXT_PKG}.core.enterprise_config.loader")
+    schemas_mod = importlib.import_module(f"{_EXT_PKG}.core.enterprise_config.schemas")
+    _load_effective_enterprise_config = loader_mod.load_effective_enterprise_config
+    _service_config_slot = schemas_mod.TemplateRefSlot.SERVICE_CONFIG
+    return _load_effective_enterprise_config, _service_config_slot
+
+
+async def load_effective_service_config_for_request(request: AgentRequest) -> Any | None:
+    """按当前请求路由上下文加载 ``service_config`` 槽位（与 ``send_request`` 入口一致）。"""
+    try:
+        load_fn, service_config_slot = _ensure_enterprise_config_loader()
+        loaded = await load_fn(request, [service_config_slot])
+    except Exception as exc:
+        logger.warning(
+            "[RuntimeManagementAgentClient] load service_config failed: %s",
+            exc,
+        )
+        return None
+
+    if loaded is None:
+        logger.warning("[RuntimeManagementAgentClient] no service_config loaded")
+        return None
+
+    entities = loaded.service_config or []
+    if entities:
+        first = entities[0]
+        logger.info(
+            "[RuntimeManagementAgentClient] service_config loaded: "
+            "template_name=%s template_id=%s min_idle_services=%s max_services=%s",
+            first.get("template_name"),
+            first.get("template_id"),
+            first.get("min_idle_services"),
+            first.get("max_services"),
+        )
+    return loaded
 
 
 def _resolve_invoke_ids_from_request(msg: AgentRequest) -> tuple[str, str | None]:
@@ -302,6 +358,7 @@ class RuntimeManagementAgentClient(AgentServerClient):
         """发送非流式请求。"""
         self._ensure_connected()
         request = e2a_to_agent_request(envelope)
+        await load_effective_service_config_for_request(request)
         session_request = _SessionRequest(request, envelope)
 
         try:
@@ -321,6 +378,7 @@ class RuntimeManagementAgentClient(AgentServerClient):
         """发送流式请求。"""
         self._ensure_connected()
         request = e2a_to_agent_request(envelope)
+        await load_effective_service_config_for_request(request)
         session_request = _SessionRequest(request, envelope)
 
         try:

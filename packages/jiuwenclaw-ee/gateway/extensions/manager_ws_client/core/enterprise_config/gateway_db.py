@@ -1,20 +1,23 @@
+# Copyright (c) Huawei Technologies Co., Ltd. 2026-2026. All rights reserved
+
 """Gateway 本地库：连接管理与企业配置读库（``GATEWAY_*`` / ``manager_ws_client.infrastructure``）。"""
 
 from __future__ import annotations
 
-import importlib
 import json
-import os
+from collections.abc import Callable
+from pathlib import Path
 from typing import Any
 
-from jiuwenclaw.gateway.channel_config_db import (
-    _EXT_PKG,
-    _ensure_extension_package,
-    _resolve_manager_ws_client_root,
-)
-from jiuwenclaw.utils import logger
+from openjiuwen_runtime.foundation.log import get_logger
 
+from ...infrastructure.db import Database
+from ...infrastructure.utils import resolve_jiuwenclaw_id as _default_resolve_jiuwenclaw_id
 from .schemas import SLOT_ENTITY_TABLE, TemplateRefSlot
+
+logger = get_logger(__name__)
+
+_db = Database(relative_root=Path(__file__).resolve().parents[2])
 
 _INSTANCE_SCOPED_TABLES = frozenset({
     "config_effective_service_policy",
@@ -24,24 +27,17 @@ _INSTANCE_SCOPED_TABLES = frozenset({
     "model_template",
 })
 
+_jiuwenclaw_id_resolver: Callable[[], str | None] = _default_resolve_jiuwenclaw_id
 
-def _load_database_class() -> type:
-    """经扩展命名空间加载 ``Database``（不修改 ``sys.path``）。"""
-    ext_root = _resolve_manager_ws_client_root()
-    if ext_root is None:
-        raise ImportError("manager_ws_client extension not found")
-    _ensure_extension_package(ext_root)
-    db_mod = importlib.import_module(f"{_EXT_PKG}.infrastructure.db")
-    return db_mod.Database
 
-# Gateway 与 AgentServer 企业配置共用同一库连接（进程内单例）
-_gateway_database = _load_database_class()()
+def set_resolve_jiuwenclaw_id(resolver: Callable[[], str | None]) -> None:
+    """注入 ``jiuwenclaw_id`` 解析函数（Gateway / AgentServer 可各自注册实现）。"""
+    global _jiuwenclaw_id_resolver
+    _jiuwenclaw_id_resolver = resolver
 
 
 def resolve_jiuwenclaw_id() -> str | None:
-    """从环境变量读取当前实例 id；未设置时返回 ``None``（分布式 Gateway 无此变量时不做实例隔离）。"""
-    instance_id = os.getenv("JIUWENCLAW_PROVISIONED_INSTANCE_ID", "").strip()
-    return instance_id or None
+    return _jiuwenclaw_id_resolver()
 
 
 def apply_instance_scope(table: str, filters: dict[str, Any]) -> dict[str, Any]:
@@ -116,14 +112,6 @@ def _sort_by_order(rows: list[dict[str, Any]], order_by: str) -> list[dict[str, 
     return sorted(rows, key=_key, reverse=reverse)
 
 
-__all__ = (
-    "apply_instance_scope",
-    "fetch_template_by_slot",
-    "list_records",
-    "resolve_jiuwenclaw_id",
-)
-
-
 async def fetch_template_by_slot(
     slot: str,
     template_id: str,
@@ -159,10 +147,19 @@ async def list_records(
     query = apply_instance_scope(table, dict(filters or {}))
 
     try:
-        handler = await _gateway_database.ensure_ready(log_prefix="enterprise_config")
+        handler = await _db.ensure_ready(log_prefix="enterprise_config")
         rows = await handler.list_records(table, query, limit=10_000, offset=0)
         result = [_row_to_dict(r) for r in rows]
         return _sort_by_order(result, order_by) if order_by else result
     except Exception as exc:
         logger.warning("[enterprise_config] query %s failed: %s", table, exc)
         return []
+
+
+__all__ = (
+    "apply_instance_scope",
+    "fetch_template_by_slot",
+    "list_records",
+    "resolve_jiuwenclaw_id",
+    "set_resolve_jiuwenclaw_id",
+)

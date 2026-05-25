@@ -5,19 +5,46 @@ from __future__ import annotations
 from dataclasses import replace
 from typing import Any
 
+import importlib
+
 import pytest
 
-from jiuwenclaw.agentserver.enterprise_config.expressions import (
-    agent_rule_matches,
-    evaluate_match_expr,
-    resolve_slot_template_id_map,
-    resolve_template_slot_ref,
-    substitute_template,
+from jiuwenclaw.gateway.channel_config_db import (
+    _EXT_PKG,
+    _ensure_extension_package,
+    _resolve_manager_ws_client_root,
 )
-from jiuwenclaw.agentserver.enterprise_config.schemas import (
-    RoutingContext,
-    normalize_template_ref,
+
+
+def _load_manager_ws_utils() -> Any:
+    ext_root = _resolve_manager_ws_client_root()
+    if ext_root is None:
+        raise ImportError("manager_ws_client extension not found")
+    _ensure_extension_package(ext_root)
+    return importlib.import_module(f"{_EXT_PKG}.infrastructure.utils")
+
+
+from jiuwenclaw.agentserver.enterprise_config.loader import (
+    DEFAULT_AGENT_LOAD_SLOTS,
+    gateway_db,
+    load_effective_enterprise_config,
+    schemas,
 )
+from jiuwenclaw.schema.agent import AgentRequest
+
+_utils = _load_manager_ws_utils()
+expressions = importlib.import_module(
+    f"{_EXT_PKG}.core.enterprise_config.expressions"
+)
+
+RoutingContext = schemas.RoutingContext
+normalize_template_ref = _utils.normalize_template_ref
+fill_missing_template_ref_slots = _utils.fill_missing_template_ref_slots
+agent_rule_matches = expressions.agent_rule_matches
+evaluate_match_expr = expressions.evaluate_match_expr
+resolve_slot_template_id_map = expressions.resolve_slot_template_id_map
+resolve_template_slot_ref = expressions.resolve_template_slot_ref
+substitute_template = expressions.substitute_template
 
 _FALLBACK_TEMPLATE_ID = "11111111-1111-4111-8111-111111111111"
 
@@ -49,11 +76,11 @@ def sales_ctx() -> RoutingContext:
     )
 
 
-def test_normalize_template_ref_accepts_string_and_list() -> None:
+def test_normalize_template_ref_accepts_list() -> None:
     assert normalize_template_ref(None) == {}
     assert normalize_template_ref(
         {
-            "default_model": "f2222222-2222-4222-8222-222222222202",
+            "default_model": ["f2222222-2222-4222-8222-222222222202"],
             "vision_model": ["f2222222-2222-4222-8222-222222222202"],
             "skill_whitelist": [
                 "a1000001-0000-4000-8000-000000000001",
@@ -70,14 +97,19 @@ def test_normalize_template_ref_accepts_string_and_list() -> None:
     }
 
 
+def test_normalize_template_ref_rejects_string_slot_value() -> None:
+    with pytest.raises(ValueError, match="must be a list"):
+        normalize_template_ref(
+            {"default_model": "f2222222-2222-4222-8222-222222222202"},
+        )
+
+
 @pytest.mark.asyncio
 async def test_resolve_slot_template_id_map_resolves_each_array_item(
     sales_ctx: RoutingContext, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     async def _list_records(*_args: object, **_kwargs: object) -> list[dict]:
         return []
-
-    from jiuwenclaw.agentserver.enterprise_config import gateway_db
 
     monkeypatch.setattr(gateway_db, "list_records", _list_records)
 
@@ -185,8 +217,6 @@ async def test_resolve_template_slot_ref_mapping_or_fallback(
             return [{"template_id": "2"}]
         return []
 
-    from jiuwenclaw.agentserver.enterprise_config import gateway_db
-
     monkeypatch.setattr(gateway_db, "list_records", _list_records)
 
     ref = await resolve_template_slot_ref(
@@ -217,8 +247,6 @@ async def test_resolve_template_slot_ref_mapping_or_fallback(
 async def test_resolve_template_slot_ref_rejects_nested_and_ambiguous(
     sales_ctx: RoutingContext, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from jiuwenclaw.agentserver.enterprise_config import gateway_db
-
     async def _list_records(*_args: object, **_kwargs: object) -> list[dict]:
         return [{"template_id": "2"}]
 
@@ -273,8 +301,6 @@ async def test_resolve_template_slot_ref_or_literal_when_no_mapping(
     async def _list_records(*_args: object, **_kwargs: object) -> list[dict]:
         return []
 
-    from jiuwenclaw.agentserver.enterprise_config import gateway_db
-
     monkeypatch.setattr(gateway_db, "list_records", _list_records)
 
     ref = await resolve_template_slot_ref(
@@ -285,10 +311,6 @@ async def test_resolve_template_slot_ref_or_literal_when_no_mapping(
 
 
 def test_fill_missing_template_ref_slots() -> None:
-    from jiuwenclaw.agentserver.enterprise_config.loader import (
-        fill_missing_template_ref_slots,
-    )
-
     merged = {
         "default_model": ["m3"],
         "vision_model": ["m2"],
@@ -313,12 +335,6 @@ def test_fill_missing_template_ref_slots() -> None:
 async def test_load_effective_config_fills_missing_slots_from_global(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from jiuwenclaw.agentserver.enterprise_config import gateway_db
-    from jiuwenclaw.agentserver.enterprise_config.loader import (
-        load_effective_enterprise_config,
-    )
-    from jiuwenclaw.schema.agent import AgentRequest
-
     monkeypatch.setenv("JIUWENCLAW_PROVISIONED_INSTANCE_ID", "sp-demo")
 
     m2 = "22222222-2222-4222-8222-222222222222"
@@ -409,7 +425,10 @@ async def test_load_effective_config_fills_missing_slots_from_global(
             "user_id": "bob",
         },
     )
-    loaded = await load_effective_enterprise_config(request)
+    loaded = await load_effective_enterprise_config(
+        request,
+        DEFAULT_AGENT_LOAD_SLOTS,
+    )
     assert loaded is not None
     assert loaded.template_ref["default_model"] == [m5]
     assert loaded.template_ref["vision_model"] == [m2]
@@ -424,12 +443,6 @@ async def test_load_effective_config_fills_missing_slots_from_global(
 async def test_load_effective_config_scopes_global_policy_by_jiuwenclaw_id(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from jiuwenclaw.agentserver.enterprise_config import gateway_db
-    from jiuwenclaw.agentserver.enterprise_config.loader import (
-        load_effective_enterprise_config,
-    )
-    from jiuwenclaw.schema.agent import AgentRequest
-
     monkeypatch.setenv("JIUWENCLAW_PROVISIONED_INSTANCE_ID", "sp-current")
     e4 = "44444444-4444-4444-8444-444444444444"
     e3_old = "33333333-3333-4333-8333-333333333333"
@@ -484,7 +497,10 @@ async def test_load_effective_config_scopes_global_policy_by_jiuwenclaw_id(
             "user_id": "bob",
         },
     )
-    loaded = await load_effective_enterprise_config(request)
+    loaded = await load_effective_enterprise_config(
+        request,
+        DEFAULT_AGENT_LOAD_SLOTS,
+    )
     assert loaded is not None
     assert loaded.global_policy_id == 4
     assert loaded.template_ref["extension_config"] == [e4]

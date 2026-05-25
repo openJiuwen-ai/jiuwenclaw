@@ -1,4 +1,6 @@
-"""模板 CRUD API：model_template、extension_config_template、skill_whitelist_template（全局模板，变更同步至所有已连接 Gateway）。"""
+"""模板 CRUD API：model_template、extension_config_template、skill_whitelist_template、
+service_config_template（全局模板，变更同步至所有已连接 Gateway）。
+"""
 
 from __future__ import annotations
 
@@ -11,6 +13,9 @@ from jiuwenclaw_manager.core.template.extension_config_template import (
     ExtensionConfigTemplateService,
 )
 from jiuwenclaw_manager.core.template.model_template import ModelTemplateService
+from jiuwenclaw_manager.core.template.service_config_template import (
+    ServiceConfigTemplateService,
+)
 from jiuwenclaw_manager.core.template.skill_whitelist_template import (
     SkillWhitelistTemplateService,
 )
@@ -22,6 +27,9 @@ from jiuwenclaw_manager.schemas.template_schemas import (
     ExtensionConfigTemplateUpdateBody,
     ModelTemplateCreateBody,
     ModelTemplateUpdateBody,
+    ServiceConfigTemplateCreateBody,
+    ServiceConfigTemplateListQuery,
+    ServiceConfigTemplateUpdateBody,
     SkillWhitelistTemplateCreateBody,
     SkillWhitelistTemplateListQuery,
     SkillWhitelistTemplateUpdateBody,
@@ -40,6 +48,10 @@ def _extension_config_template_svc(handler: DBHandler) -> ExtensionConfigTemplat
 
 def _skill_whitelist_template_svc(handler: DBHandler) -> SkillWhitelistTemplateService:
     return SkillWhitelistTemplateService(handler)
+
+
+def _service_config_template_svc(handler: DBHandler) -> ServiceConfigTemplateService:
+    return ServiceConfigTemplateService(handler)
 
 
 # --- model_template ---
@@ -303,6 +315,94 @@ async def delete_skill_whitelist_template(
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     if not ok:
         raise HTTPException(status_code=404, detail="skill whitelist template not found")
+    return ResponseModel(
+        code=200, message="success", data={"deleted": True, "template_id": template_id}
+    )
+
+
+# --- service_config_template ---
+
+
+@templates_router.post("/service-config-templates", response_model=ResponseModel)
+async def create_service_config_template(
+    body: ServiceConfigTemplateCreateBody,
+    handler: Annotated[DBHandler, Depends(get_db_handler)],
+):
+    svc = _service_config_template_svc(handler)
+    try:
+        data = await svc.create(body)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return ResponseModel(code=200, message="success", data=data.model_dump())
+
+
+@templates_router.get("/service-config-templates", response_model=ResponseModel)
+async def list_service_config_templates(
+    handler: Annotated[DBHandler, Depends(get_db_handler)],
+    query: Annotated[ServiceConfigTemplateListQuery, Query()],
+):
+    svc = _service_config_template_svc(handler)
+    try:
+        data = await svc.list_templates(
+            page=query.page,
+            page_size=query.page_size,
+            enabled=query.enabled,
+            namespace=query.namespace,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return ResponseModel(code=200, message="success", data=data)
+
+
+@templates_router.get(
+    "/service-config-templates/{template_id}", response_model=ResponseModel
+)
+async def get_service_config_template(
+    template_id: str,
+    handler: Annotated[DBHandler, Depends(get_db_handler)],
+):
+    svc = _service_config_template_svc(handler)
+    try:
+        row = await svc.get(template_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if row is None:
+        raise HTTPException(status_code=404, detail="service config template not found")
+    return ResponseModel(code=200, message="success", data=row.model_dump())
+
+
+@templates_router.put(
+    "/service-config-templates/{template_id}", response_model=ResponseModel
+)
+async def update_service_config_template(
+    template_id: str,
+    body: ServiceConfigTemplateUpdateBody,
+    handler: Annotated[DBHandler, Depends(get_db_handler)],
+):
+    svc = _service_config_template_svc(handler)
+    try:
+        row = await svc.update(template_id, body)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if row is None:
+        raise HTTPException(status_code=404, detail="service config template not found")
+    return ResponseModel(code=200, message="success", data=row.model_dump())
+
+
+@templates_router.delete(
+    "/service-config-templates/{template_id}", response_model=ResponseModel
+)
+async def delete_service_config_template(
+    template_id: str,
+    handler: Annotated[DBHandler, Depends(get_db_handler)],
+):
+    svc = _service_config_template_svc(handler)
+    try:
+        ok = await svc.delete(template_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if not ok:
+        raise HTTPException(status_code=404, detail="service config template not found")
     return ResponseModel(
         code=200, message="success", data={"deleted": True, "template_id": template_id}
     )

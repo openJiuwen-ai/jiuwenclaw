@@ -17,9 +17,9 @@ from ...models.config_effective_policy_models import (
 from ...schemas.config_effective_policy_schemas import (
     ConfigEffectiveAgentPolicyUpdateRequest,
 )
-from .template_ref import (
+from ...infrastructure.utils import (
     apply_template_ref_to_updates,
-    read_template_ref_from_policy_dict,
+    normalize_template_ref,
 )
 
 _AGENT_TABLE = CONFIG_EFFECTIVE_AGENT_POLICY_TABLE_DEF.table_name
@@ -142,7 +142,7 @@ async def apply_config_effective_agent_policy_sync(
             "service_policy_id": service_policy_id,
             "priority": int(policy.get("priority", 0)),
             "match_expr": policy.get("match_expr"),
-            "template_ref": read_template_ref_from_policy_dict(policy),
+            "template_ref": normalize_template_ref(policy.get("template_ref")),
             "enabled": bool(policy.get("enabled", True)),
             "data": policy.get("data"),
             "created_at": _parse_iso_datetime(policy.get("created_at")) or now,

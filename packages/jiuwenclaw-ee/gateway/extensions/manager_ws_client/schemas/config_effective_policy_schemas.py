@@ -4,15 +4,17 @@ from typing import Annotated, Any
 
 from pydantic import BaseModel, ConfigDict, Field, BeforeValidator
 
-from ..core.config_effective_policy.template_ref import (
-    coerce_template_ref,
-    coerce_template_ref_optional,
-)
+from ..infrastructure.utils import normalize_template_ref
 
-TemplateRefField = Annotated[dict[str, list[str]], BeforeValidator(coerce_template_ref)]
+TemplateRefField = Annotated[
+    dict[str, list[str]],
+    BeforeValidator(lambda value: {} if value is None else normalize_template_ref(value)),
+]
 OptionalTemplateRefField = Annotated[
     dict[str, list[str]] | None,
-    BeforeValidator(coerce_template_ref_optional),
+    BeforeValidator(
+        lambda value: None if value is None else normalize_template_ref(value)
+    ),
 ]
 
 

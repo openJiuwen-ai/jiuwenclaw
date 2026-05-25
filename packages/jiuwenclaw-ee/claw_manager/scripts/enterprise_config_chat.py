@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
-"""配置完成后，经 Gateway WebChannel 发送一条用户聊天请求（验证企业策略 / 模型 / Skill 白名单 / 扩展配置）。
+"""配置完成后，经 Gateway WebChannel 发送一条用户聊天请求（验证 AgentServer 侧企业策略 / 模型 / Skill / 扩展配置）。
 
 依赖：主仓库已安装 ``websockets``（``uv sync`` 或 ``pip install websockets``）。
 
@@ -18,6 +18,8 @@
     # g_unknown → 四模型槽位均为 M1；Skill W3；扩展 E4
     uv run python .../enterprise_config_chat.py \\
         --group-id g_unknown --bot-id bot_main --user-id bob --web-port 19234
+
+``service_config`` 由 Gateway Runtime 加载，请用 ``enterprise_runtime_service_config.py`` 验证（见数据模型 §7）。
 
 也可把 provision-local 的 JSON 响应存为文件后自动读端口（同样放末尾）::
 
@@ -130,6 +132,9 @@ def _log_demo_expectation(group_id: str, user_id: str) -> None:
     logger.info(
         "[expect] 可在 AgentServer 日志中查找 "
         "[enterprise_config] loaded enterprise config 确认各槽位 template_ref"
+    )
+    logger.info(
+        "[expect] service_config 由 Gateway Runtime 验证，见 enterprise_runtime_service_config.py"
     )
 
 

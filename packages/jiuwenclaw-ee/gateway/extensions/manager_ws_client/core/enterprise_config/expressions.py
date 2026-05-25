@@ -1,3 +1,5 @@
+# Copyright (c) Huawei Technologies Co., Ltd. 2026-2026. All rights reserved
+
 """策略表达式求值（``match_expr``；Agent 规则另可校验 ``agent_id`` 模板）。"""
 
 from __future__ import annotations
@@ -7,11 +9,16 @@ import json
 import re
 from typing import Any
 
-from jiuwenclaw.agentserver.enterprise_config.schemas import RoutingContext, TemplateRefSlot
+from . import gateway_db
+from .schemas import RoutingContext, TemplateRefSlot
 
 _VAR_PATTERN = re.compile(r"\$\{(\w+)\}")
 _OR_SPLIT_PATTERN = re.compile(r"\s+or\s+", flags=re.IGNORECASE)
 _MAPPING_DIM_PATTERN = re.compile(r"^\$\{(user|group)::([^}]+)\}$", re.IGNORECASE)
+
+
+async def _list_records(*args: Any, **kwargs: Any) -> list[dict[str, Any]]:
+    return await gateway_db.list_records(*args, **kwargs)
 
 
 async def _lookup_mapping_by_part(
@@ -34,8 +41,6 @@ async def _lookup_mapping_by_part(
         "f5555555-5555-4555-8555-555555555505"  # 映射表命中
         None  # 非 ``${user::}`` / ``${group::}`` 格式，或库中无启用映射行
     """
-    from . import gateway_db
-
     dim_match = _MAPPING_DIM_PATTERN.fullmatch(part.strip())
     if not dim_match:
         return None
@@ -54,7 +59,7 @@ async def _lookup_mapping_by_part(
     else:
         base_filters["group_id"] = key
 
-    rows = await gateway_db.list_records(
+    rows = await _list_records(
         "config_default_template_mapping",
         filters=base_filters,
         order_by="priority DESC",
@@ -339,3 +344,12 @@ def _safe_eval_value(node: ast.AST, env: dict[str, str]) -> Any:
             return env[node.id]
         raise ValueError(f"unknown name: {node.id}")
     raise ValueError("unsupported expression node")
+
+
+__all__ = (
+    "agent_rule_matches",
+    "evaluate_match_expr",
+    "resolve_slot_template_id_map",
+    "resolve_template_slot_ref",
+    "substitute_template",
+)

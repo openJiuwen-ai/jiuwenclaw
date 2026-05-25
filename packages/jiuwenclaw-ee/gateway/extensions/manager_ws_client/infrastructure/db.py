@@ -130,3 +130,14 @@ class Database:
         prefix = f"[{log_prefix}] " if log_prefix else ""
         logger.info("%sdatabase handler ready: %s", prefix, self.config_summary())
         return handler
+
+    async def close(self) -> None:
+        """断开连接并释放 handler（CLI / 短生命周期脚本应在 event loop 关闭前调用）。"""
+        if self._handler is None:
+            return
+        try:
+            await self._handler.disconnect()
+        except Exception as exc:
+            logger.warning("database disconnect error: %s", exc)
+        finally:
+            self._handler = None
