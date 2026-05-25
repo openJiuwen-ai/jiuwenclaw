@@ -42,22 +42,31 @@ if getattr(sys, "frozen", False):
             pass
 
     # Windows: 防止 subprocess 弹出控制台窗口（console=False 编译时 git 等命令会弹出黑框）
-    # Monkey-patch asyncio.create_subprocess_exec，自动添加 CREATE_NO_WINDOW 标志
+    # Monkey-patch asyncio.create_subprocess_exec 和 subprocess.Popen，
+    # 自动添加 CREATE_NO_WINDOW 标志
     if os.name == "nt":
         import asyncio
         import subprocess
 
+        _CREATE_NO_WINDOW = subprocess.CREATE_NO_WINDOW
+
         _original_create_subprocess_exec = asyncio.create_subprocess_exec
 
         def _patched_create_subprocess_exec(*args, creationflags=0, **kwargs):
-            # 合并 CREATE_NO_WINDOW，不覆盖用户指定的其他标志
             return _original_create_subprocess_exec(
                 *args,
-                creationflags=creationflags | subprocess.CREATE_NO_WINDOW,
+                creationflags=creationflags | _CREATE_NO_WINDOW,
                 **kwargs,
             )
 
         asyncio.create_subprocess_exec = _patched_create_subprocess_exec
+
+        _original_popen_init = subprocess.Popen.__init__
+
+        def _patched_popen_init(self, *args, creationflags=0, **kwargs):
+            _original_popen_init(self, *args, creationflags=creationflags | _CREATE_NO_WINDOW, **kwargs)
+
+        subprocess.Popen.__init__ = _patched_popen_init
 
 _DESKTOP_RUN_AGENT = "--desktop-run-agent"
 _DESKTOP_RUN_GATEWAY = "--desktop-run-gateway"
