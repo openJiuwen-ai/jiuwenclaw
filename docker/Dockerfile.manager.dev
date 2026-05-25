@@ -1,0 +1,14 @@
+ARG BASE_IMAGE
+FROM ${BASE_IMAGE}
+
+WORKDIR /app/jiuwenclaw
+COPY . /app/jiuwenclaw/
+
+ENV PATH=$PATH:/home/app/.local/bin
+
+RUN pip install -e "./packages/jiuwenclaw-ee/claw_manager" -i https://pypi.tuna.tsinghua.edu.cn/simple
+
+EXPOSE 8765
+
+CMD ["jiuwenclaw-manager"]
+
