@@ -63,6 +63,8 @@ from jiuwenclaw.agentserver.open_ability_utils import (
     init_oa_message
 )
 
+from jiuwenclaw.sandbox import sandbox_routing_enabled
+
 logger = logging.getLogger(__name__)
 
 # 流式处理心跳间隔：当 Agent 处理时间超过此阈值时，发送心跳 chunk 保持 WebSocket 连接活跃
@@ -128,7 +130,7 @@ class AgentWebSocketServer:
 
         # OA 模式相关
         self._oa_ws_uri: str | None = os.getenv("AGENTSERVER_TO_OA_WS_URL", "").strip() or None
-        self._oa_mode: bool = self._oa_ws_uri is not None
+        self._oa_mode: bool = sandbox_routing_enabled()
         self._oa_connect_retry_interval: float = float(os.getenv("AGENTSERVER_TO_OA_RETRY_INTERVAL", "3.0"))  # 默认3秒快速重连
         self._oa_connect_max_retries: int = int(os.getenv("AGENTSERVER_TO_OA_MAX_RETRIES", "0"))  # 0 表示无限重试
         self._oa_receiver_task: asyncio.Task | None = None
@@ -251,7 +253,7 @@ class AgentWebSocketServer:
         if ft_manager.enabled:
             await ft_manager.start_cleanup_task()
 
-        if self._oa_mode:
+        if self._oa_mode and self._oa_ws_uri is not None:
             # OA 模式：作为客户端主动连接 OpenAbility
             logger.info("[AgentWebSocketServer] OA 模式启用，将主动连接 OpenAbility: %s", self._oa_ws_uri)
             self._oa_running = True
@@ -467,10 +469,9 @@ class AgentWebSocketServer:
                             await ws.close()
                             raise RuntimeError("OpenAbility 建连确认失败")
                         logger.info("[AgentWebSocketServer] OpenAbility 连接已确认，开始业务处理")
+                        first_connect = False
                     except Exception as e:
                         logger.warning("[AgentWebSocketServer] 发送 INIT 消息失败: %s", e)
-
-                    first_connect = False
                 else:
                     # 重连成功后记录恢复日志
                     logger.info("[AgentWebSocketServer] OpenAbility 连接已恢复，模型服务继续运行")

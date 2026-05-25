@@ -4,6 +4,7 @@ import os
 import asyncio
 import json
 import logging
+import time
 from typing import Any
 
 logger = logging.getLogger(__name__)
@@ -76,27 +77,66 @@ def init_oa_message(msg_type, data=None):
     }
 
 
-def get_oa_auth_headers() -> dict[str, str]:
-    """从环境变量获取 OA 鉴权 headers。
+def get_oa_auth_headers(
+    retry_interval: float = 3.0,
+) -> dict[str, str]:
+    """从环境变量获取 OA 鉴权 headers，无限轮询直到获取全。
+
+    注意：此函数会阻塞直到获取到所有必需的鉴权信息。
 
     支持的配置：
     - x-api-key
     - x-sandbox-id
     - x-request-from
-    - x-request-from
+    - x-hag-trace-id
+
+    Args:
+        retry_interval: 重试间隔秒数，默认3秒
+
+    Returns:
+        包含鉴权信息的 headers 字典
     """
     headers: dict[str, str] = {}
+    attempt = 0
 
-    api_key = get_api_key()
-    if api_key:
-        headers["x-api-key"] = api_key
-    else:
-        logger.warning("[AgentWebSocketServer] OpenAbility 未配置 x-api-key")
-    sandbox_id = get_sandbox_id()
-    if sandbox_id:
-        headers["x-sandbox-id"] = sandbox_id
-    else:
-        logger.warning("[AgentWebSocketServer] OpenAbility 未配置 x-sandbox-id")
-    headers["x-request-from"] = "jiuwenclaw"
-    headers["x-hag-trace-id"] = "rytest001"
-    return headers
+    while True:
+        api_key = get_api_key()
+        sandbox_id = get_sandbox_id()
+
+        if api_key and sandbox_id:
+            # 获取到所有必需的 headers
+            headers["x-api-key"] = api_key
+            headers["x-sandbox-id"] = sandbox_id
+            headers["x-request-from"] = "jiuwenclaw"
+            headers["x-hag-trace-id"] = "rytest001"
+            if attempt > 0:
+                logger.info(
+                    "[AgentWebSocketServer] 成功获取 OpenAbility 鉴权 headers (等待 %d 秒)",
+                    attempt * retry_interval
+                )
+            return headers
+
+        # 记录缺少的配置
+        missing = []
+        if not api_key:
+            missing.append("x-api-key")
+        if not sandbox_id:
+            missing.append("x-sandbox-id")
+
+        if attempt == 0:
+            logger.warning(
+                "[AgentWebSocketServer] OpenAbility 鉴权信息不完整，开始轮询等待: %s",
+                ", ".join(missing)
+            )
+        else:
+            # 每10秒记录一次日志
+            if attempt % 10 == 0:
+                logger.info(
+                    "[AgentWebSocketServer] 等待 OpenAbility 鉴权信息中 (%d 秒): %s",
+                    attempt * retry_interval,
+                    ", ".join(missing)
+                )
+
+        # 等待后重试
+        time.sleep(retry_interval)
+        attempt += 1
