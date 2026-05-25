@@ -2483,6 +2483,73 @@ export function ConfigPanel({
     }
   }, [configTab, modelError]);
 
+  useEffect(() => {
+    if (draftModels.length !== storeAvailableModels.length) return;
+    
+    const modelChanges: Array<{
+      oldModel: { model_name: string; model_provider: string; api_base: string };
+      newModel: { model_name: string; model_provider: string; api_base: string };
+    }> = [];
+    
+    for (let i = 0; i < draftModels.length; i++) {
+      const dm = draftModels[i];
+      const om = storeAvailableModels[i];
+      if (!om) continue;
+      
+      const matchingFieldsChanged = 
+        dm.model_name !== om.model_name || 
+        dm.model_provider !== om.model_provider || 
+        dm.api_base !== om.api_base;
+      
+      if (matchingFieldsChanged) {
+        modelChanges.push({
+          oldModel: {
+            model_name: om.model_name,
+            model_provider: om.model_provider,
+            api_base: om.api_base,
+          },
+          newModel: {
+            model_name: dm.model_name,
+            model_provider: dm.model_provider,
+            api_base: dm.api_base,
+          },
+        });
+      }
+    }
+    
+    if (modelChanges.length === 0) return;
+    
+    setDraftAgents((prevAgents) => {
+      let hasUpdates = false;
+      const updatedAgents = prevAgents.map((agent) => {
+        for (const change of modelChanges) {
+          if (
+            agent.model.model === change.oldModel.model_name &&
+            agent.model.provider === change.oldModel.model_provider &&
+            agent.model.api_base === change.oldModel.api_base
+          ) {
+            hasUpdates = true;
+            return {
+              ...agent,
+              model: {
+                ...agent.model,
+                model: change.newModel.model_name,
+                provider: change.newModel.model_provider,
+                api_base: change.newModel.api_base,
+              },
+            };
+          }
+        }
+        return agent;
+      });
+      
+      if (hasUpdates) {
+        setAgentsTeamsEdited(true);
+      }
+      return updatedAgents;
+    });
+  }, [draftModels, storeAvailableModels]);
+
   const totalItems = useMemo(() => groups.reduce((sum, group) => sum + group.keys.length, 0), [groups]);
   const topLevelGroupCount = groups.length;
   const hasConfigChanges = useMemo(() => {
@@ -2519,84 +2586,10 @@ export function ConfigPanel({
     [draftModels],
   );
 
-  const agentModelReferencesLost = useMemo(() => {
-    if (!hasModelChanges) return [];
-    const lostReferences: { agentName: string; originalModel: string; newModel: string; changedFields: string[] }[] = [];
-    for (const agent of draftAgents) {
-      const matchedModel = draftModels.find(
-        (m) => m.model_name === agent.model.model
-          && m.model_provider === agent.model.provider
-          && m.api_base === agent.model.api_base
-      );
-      const originalMatched = storeAvailableModels.find(
-        (m) => m.model_name === agent.model.model
-          && m.model_provider === agent.model.provider
-          && m.api_base === agent.model.api_base
-      );
-      if (!matchedModel) {
-        if (originalMatched) {
-          lostReferences.push({
-            agentName: agent.name,
-            originalModel: `${originalMatched.model_name} (${originalMatched.model_provider})`,
-            newModel: agent.model.model ? `${agent.model.model} (${agent.model.provider})` : t('config.model.notSelected'),
-            changedFields: ['model_removed'],
-          });
-        }
-      } else if (originalMatched) {
-        const changedFields: string[] = [];
-        if (matchedModel.api_key !== originalMatched.api_key) changedFields.push('api_key');
-        if (matchedModel.alias !== originalMatched.alias) changedFields.push('alias');
-        if (matchedModel.is_default !== originalMatched.is_default) changedFields.push('is_default');
-        if (matchedModel.temperature !== originalMatched.temperature) changedFields.push('temperature');
-        if (matchedModel.timeout !== originalMatched.timeout) changedFields.push('timeout');
-        if (changedFields.length > 0) {
-          lostReferences.push({
-            agentName: agent.name,
-            originalModel: `${originalMatched.model_name} (${originalMatched.model_provider})`,
-            newModel: `${matchedModel.model_name} (${matchedModel.model_provider}) - ${changedFields.join(', ')} changed`,
-            changedFields,
-          });
-        }
-      }
-    }
-    return lostReferences;
-  }, [hasModelChanges, draftAgents, draftModels, storeAvailableModels, t]);
-
   const hasDuplicateAgentNames = useMemo(() => {
     const names = draftAgents.map((a) => a.name.trim()).filter(Boolean);
     return new Set(names).size !== names.length;
   }, [draftAgents]);
-
-  const hasAgentsTeamsValidationError = useMemo(() => {
-    for (const agent of draftAgents) {
-      if (!agent.name.trim()) return true;
-      if (!agent.model.provider.trim()) return true;
-      if (!agent.model.api_base.trim()) return true;
-      if (!agent.model.api_key.trim()) return true;
-      if (!agent.model.model.trim()) return true;
-    }
-    for (const team of draftTeams) {
-      if (!team.team_name.trim()) return true;
-      if (!team.lifecycle?.trim()) return true;
-      if (!team.teammate_mode?.trim()) return true;
-      if (!team.spawn_mode?.trim()) return true;
-      if (!team.leader?.member_name?.trim()) return true;
-      if (!team.leader?.display_name?.trim()) return true;
-      if (!team.leader?.persona?.trim()) return true;
-      if (!team.leader?.agent_key?.trim()) return true;
-      if (!team.teammate?.agent_key?.trim()) return true;
-      const leaderName = team.leader?.member_name?.trim().toLowerCase() || '';
-      for (const member of team.predefined_members || []) {
-        if (!member.member_name.trim()) return true;
-        if (!/^[a-zA-Z0-9_]+$/.test(member.member_name)) return true;
-        if (!member.display_name?.trim()) return true;
-        if (!member.persona?.trim()) return true;
-        if (!member.agent_key?.trim()) return true;
-        if (member.member_name.trim().toLowerCase() === leaderName) return true;
-      }
-    }
-    return false;
-  }, [draftAgents, draftTeams]);
 
   const handleFieldChange = (key: string, value: string) => {
     setDraftValues((prev) => ({ ...prev, [key]: value }));
@@ -2694,12 +2687,6 @@ export function ConfigPanel({
       }
     }
 
-    if (hasAgentsTeamsValidationError) {
-      setConfigTab("agent");
-      setError(t('config.agentsTeamsValidationError'));
-      return;
-    }
-
     setSaving(true);
     setError(null);
     setModelError(null);
@@ -2773,7 +2760,7 @@ export function ConfigPanel({
             <button
               type="button"
               onClick={() => void handleSaveAndRestart()}
-              disabled={!hasChanges || saving || hasMissingRequiredModelFields || hasMissingModelApiKey || hasMissingModelApiBase || agentModelReferencesLost.length > 0 || (isProcessing && mode !== 'team')}
+              disabled={!hasChanges || saving || hasMissingRequiredModelFields || hasMissingModelApiKey || hasMissingModelApiBase || (isProcessing && mode !== 'team')}
               className="btn primary !px-3 !py-1.5 disabled:opacity-50 disabled:cursor-not-allowed"
             >
               {saving ? t('common.saving') : t('common.save')}
@@ -2785,23 +2772,11 @@ export function ConfigPanel({
             {error}
           </div>
         ) : null}
-        {!error && agentModelReferencesLost.length > 0 ? (
-          <div className="mb-4 rounded-md border border-amber-500 bg-amber-50 dark:bg-amber-900/20 px-3 py-2 text-sm text-amber-700 dark:text-amber-300">
-            {t('config.model.referenceLostWarning')}: {agentModelReferencesLost.map((r) => r.agentName).join(', ')}
-          </div>
-        ) : null}
         {!error && hasDuplicateAgentNames ? (
           <div className="mb-4 rounded-md border border-[var(--border-danger)] bg-danger-subtle px-3 py-2 text-sm text-danger">
             {t('config.agentList.duplicateName')}
           </div>
         ) : null
-        }
-        {
-          !error && hasAgentsTeamsChanges && hasAgentsTeamsValidationError ? (
-            <div className="mb-4 rounded-md border border-[var(--border-danger)] bg-danger-subtle px-3 py-2 text-sm text-danger">
-              {t('config.agentsTeamsValidationError')}
-            </div>
-          ) : null
         }
 
         {!groups.length ? (
@@ -3056,9 +3031,7 @@ export function ConfigPanel({
                 {t("config.model.deleteConfirmTitle")}
               </h3>
               <p className="text-sm text-text-muted mb-5">
-                {deleteModelConfirm.references.length > 0
-                  ? t("config.model.deleteConfirmMessageSimple", { modelName: deleteModelConfirm.modelName, count: deleteModelConfirm.references.length })
-                  : t("config.model.deleteConfirmMessage", { modelName: deleteModelConfirm.modelName })}
+                {t("config.model.deleteConfirmMessage", { modelName: deleteModelConfirm.modelName })}
               </p>
               <div className="flex gap-2">
                 <button
