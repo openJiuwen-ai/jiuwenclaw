@@ -96,14 +96,9 @@ async def load_effective_service_config_for_request(request: AgentRequest) -> An
 
     entities = loaded.service_config or []
     if entities:
-        first = entities[0]
         logger.info(
-            "[RuntimeManagementAgentClient] service_config loaded: "
-            "template_name=%s template_id=%s min_idle_services=%s max_services=%s",
-            first.get("template_name"),
-            first.get("template_id"),
-            first.get("min_idle_services"),
-            first.get("max_services"),
+            "[RuntimeManagementAgentClient] service_config loaded: %s",
+            entities,
         )
     return loaded
 

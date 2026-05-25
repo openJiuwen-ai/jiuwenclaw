@@ -26,6 +26,7 @@ def _load_manager_ws_utils() -> Any:
 
 from jiuwenclaw.agentserver.enterprise_config.loader import (
     DEFAULT_AGENT_LOAD_SLOTS,
+    TemplateRefSlot,
     gateway_db,
     load_effective_enterprise_config,
     schemas,
@@ -135,6 +136,10 @@ def test_substitute_service_id(sales_ctx: RoutingContext) -> None:
         substitute_template("${group_id}::${bot_id}", sales_ctx)
         == "g_demo_sales::bot_main"
     )
+    assert (
+        substitute_template("${group_id} : : ${bot_id}", sales_ctx)
+        == "g_demo_sales : : bot_main"
+    )
 
 
 def test_service_rule_priority_match(sales_ctx: RoutingContext) -> None:
@@ -196,6 +201,15 @@ def test_agent_rule_user_match(sales_ctx: RoutingContext) -> None:
     }
     assert agent_rule_matches(rule, sales_ctx) is True
     assert agent_rule_matches(rule, replace(sales_ctx, user_id="bob")) is False
+
+
+def test_agent_rule_fixed_agent_id_does_not_filter_match(sales_ctx: RoutingContext) -> None:
+    rule = {
+        "agent_id": "default_agent_id_1",
+        "match_expr": "",
+    }
+    assert agent_rule_matches(rule, sales_ctx) is True
+    assert agent_rule_matches(rule, replace(sales_ctx, user_id="bob")) is True
 
 
 def test_match_expr_empty_is_true(sales_ctx: RoutingContext) -> None:
@@ -506,3 +520,98 @@ async def test_load_effective_config_scopes_global_policy_by_jiuwenclaw_id(
     assert loaded.template_ref["extension_config"] == [e4]
     assert loaded.extension_config is not None
     assert loaded.extension_config[0]["template_name"] == "Gateway 定时清理"
+
+
+@pytest.mark.asyncio
+async def test_load_service_config_returns_resolved_service_and_agent_id(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("JIUWENCLAW_PROVISIONED_INSTANCE_ID", "sp-demo")
+    s1 = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+    jid = "sp-demo"
+
+    async def _list_records(
+        table: str,
+        *,
+        filters: dict | None = None,
+        order_by: str = "",
+    ) -> list[dict]:
+        scoped = gateway_db.apply_instance_scope(table, dict(filters or {}))
+        if table == "config_effective_service_policy":
+            if scoped.get("jiuwenclaw_id") not in (None, jid):
+                return []
+            return [
+                {
+                    "id": 1,
+                    "jiuwenclaw_id": jid,
+                    "service_id": "${group_id}::${bot_id}",
+                    "match_expr": "group_id == 'g_demo_sales'",
+                    "template_ref": {"service_config": [s1]},
+                }
+            ]
+        if table == "config_effective_agent_policy":
+            if scoped.get("jiuwenclaw_id") not in (None, jid):
+                return []
+            return [
+                {
+                    "id": 10,
+                    "jiuwenclaw_id": jid,
+                    "agent_id": "${user_id}",
+                    "match_expr": "user_id == 'alice'",
+                    "template_ref": {},
+                }
+            ]
+        if table == "config_effective_global_policy":
+            if scoped.get("jiuwenclaw_id") == jid:
+                return [
+                    {
+                        "id": 99,
+                        "jiuwenclaw_id": jid,
+                        "template_ref": {"service_config": ["global-s2"]},
+                    }
+                ]
+            return []
+        return []
+
+    async def _fetch_template_by_slot(slot: str, template_id: str) -> dict | None:
+        return {
+            "template_id": template_id,
+            "template_name": "demo-pool",
+            "min_idle_services": 2,
+            "max_services": 10,
+        }
+
+    monkeypatch.setattr(gateway_db, "list_records", _list_records)
+    monkeypatch.setattr(gateway_db, "fetch_template_by_slot", _fetch_template_by_slot)
+
+    alice_request = AgentRequest(
+        request_id="req-alice",
+        params={
+            "group_id": "g_demo_sales",
+            "bot_id": "bot_main",
+            "user_id": "alice",
+        },
+    )
+    alice_loaded = await load_effective_enterprise_config(
+        alice_request,
+        [TemplateRefSlot.SERVICE_CONFIG],
+    )
+    assert alice_loaded is not None
+    assert alice_loaded.service_id == "g_demo_sales::bot_main"
+    assert alice_loaded.agent_id == "alice"
+
+    bob_request = AgentRequest(
+        request_id="req-bob",
+        params={
+            "group_id": "g_demo_sales",
+            "bot_id": "bot_main",
+            "user_id": "bob",
+        },
+    )
+    bob_loaded = await load_effective_enterprise_config(
+        bob_request,
+        [TemplateRefSlot.SERVICE_CONFIG],
+    )
+    assert bob_loaded is not None
+    assert bob_loaded.service_id == "g_demo_sales::bot_main"
+    assert bob_loaded.agent_id is None

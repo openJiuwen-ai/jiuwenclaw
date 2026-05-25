@@ -170,6 +170,22 @@ async def _fetch_slot_entities(
     return entities
 
 
+def _resolve_policy_field(
+    policy: dict[str, Any] | None,
+    field: str,
+    ctx: RoutingContext,
+) -> str | None:
+    if not policy:
+        return None
+    raw = str(policy.get(field) or "").strip()
+    if not raw:
+        return None
+    if "${" in raw:
+        resolved = expressions.substitute_template(raw, ctx)
+        return resolved or None
+    return raw
+
+
 async def load_effective_enterprise_config(
     request: Any,
     slots: Collection[TemplateRefSlot],
@@ -211,6 +227,20 @@ async def load_effective_enterprise_config(
         )
         return None
 
+    resolved_service_id: str | None = None
+    resolved_agent_id: str | None = None
+    if TemplateRefSlot.SERVICE_CONFIG in load_slots:
+        resolved_service_id = _resolve_policy_field(
+            match.matched_service,
+            "service_id",
+            ctx,
+        )
+        resolved_agent_id = _resolve_policy_field(
+            match.matched_agent,
+            "agent_id",
+            ctx,
+        )
+
     result = EffectiveEnterpriseConfig(
         routing=ctx,
         template_ref=slot_template_id_map,
@@ -223,6 +253,8 @@ async def load_effective_enterprise_config(
         global_policy_id=(
             int(match.matched_global["id"]) if match.matched_global else None
         ),
+        service_id=resolved_service_id,
+        agent_id=resolved_agent_id,
         service_policy=match.matched_service,
         agent_policy=match.matched_agent,
         global_policy=match.matched_global,
