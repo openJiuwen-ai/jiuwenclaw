@@ -43,6 +43,10 @@ def test_save_generated_images_from_url_strings(tmp_path, monkeypatch) -> None:
         lambda: tmp_path,
     )
     monkeypatch.setattr(
+        "jiuwenclaw.agentserver.tools.image_gen_tools.get_effective_request_workspace_dir",
+        lambda: None,
+    )
+    monkeypatch.setattr(
         "jiuwenclaw.agentserver.tools.image_gen_tools._download_image",
         lambda url, dest, timeout=120: dest.write_bytes(b"png-bytes"),
     )
@@ -51,3 +55,22 @@ def test_save_generated_images_from_url_strings(tmp_path, monkeypatch) -> None:
     assert len(paths) == 1
     assert paths[0].exists()
     assert paths[0].read_bytes() == b"png-bytes"
+    assert paths[0].parent == (tmp_path / "generated_images").resolve()
+
+
+def test_save_generated_images_uses_effective_project_dir(tmp_path, monkeypatch) -> None:
+    project_dir = tmp_path / "workspace" / "20260525143022"
+    expected_dir = project_dir / "generated_images"
+    monkeypatch.setattr(
+        "jiuwenclaw.agentserver.tools.image_gen_tools.get_effective_request_workspace_dir",
+        lambda: str(project_dir),
+    )
+    monkeypatch.setattr(
+        "jiuwenclaw.agentserver.tools.image_gen_tools._download_image",
+        lambda url, dest, timeout=120: dest.write_bytes(b"png-bytes"),
+    )
+    response = SimpleNamespace(images=["https://example.com/x.png"], images_base64=[])
+    paths = _save_generated_images(response, prompt="hero cat")
+    assert len(paths) == 1
+    assert paths[0].parent == expected_dir.resolve()
+    assert paths[0].exists()

@@ -17,6 +17,9 @@ from openjiuwen.core.foundation.tool import tool
 
 from jiuwenclaw.agentserver.tools.multimodal_config import apply_image_gen_model_config_from_yaml
 from jiuwenclaw.agentserver.tools.ssl_config import get_requests_verify
+from jiuwenclaw.agentserver.tools.subagent_executor.context_vars import (
+    get_effective_request_workspace_dir,
+)
 from jiuwenclaw.config import get_config
 from jiuwenclaw.utils import get_agent_workspace_dir, get_config_file
 
@@ -172,7 +175,12 @@ def _sanitize_filename_part(value: str, max_len: int = 48) -> str:
 
 
 def _output_dir() -> Path:
-    out = get_agent_workspace_dir() / _OUTPUT_SUBDIR
+    """Resolve save directory: effective_project_dir/generated_images, else agent workspace."""
+    request_workspace = get_effective_request_workspace_dir()
+    if request_workspace and str(request_workspace).strip():
+        out = Path(str(request_workspace).strip()) / _OUTPUT_SUBDIR
+    else:
+        out = get_agent_workspace_dir() / _OUTPUT_SUBDIR
     out.mkdir(parents=True, exist_ok=True)
     return out
 
@@ -411,7 +419,9 @@ async def _text_to_image_impl(inputs: dict[str, Any]) -> str:
         "(DashScope: 1920*1080; OpenAI/Huawei MaaS: 1024x1024 — * and x separators accepted), "
         "negative_prompt, n (image count; DashScope-only: prompt_extend; "
         "Huawei MaaS/OpenAI-compatible: watermark, seed). "
-        "Output: local file path(s) under the agent workspace generated_images directory."
+        "Output: local file path(s). When effective_project_dir is active, images are saved "
+        "under effective_project_dir/generated_images/; otherwise under the agent workspace "
+        "generated_images directory."
     ),
 )
 async def text_to_image(inputs: dict[str, Any], **kwargs) -> str:
