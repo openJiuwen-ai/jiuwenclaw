@@ -2597,12 +2597,31 @@ class VibeSkillChannel(BaseChannel):
             if key in replayable_event_keys
         }
 
+        # 用户输入事件标记一次 Agent 回合开始：恢复时需要清理上一轮 assistant
+        # message 聚合状态，使下一轮流式事件落到新的 message_id 上，避免多轮
+        # Agent 对话被合并成同一条 assistant message。
+        round_boundary_user_events = (
+            "skilldev.user_start",
+            "skilldev.user_chat",
+            "skilldev.user_answer",
+            "skilldev.user_respond",
+        )
+
         try:
             for item in timeline_items:
                 source = item.get("source", "assistant")
                 event_type = item.get("event_type", "")
                 payload = item.get("payload", {}) or {}
                 role = "user" if source == "user" else "assistant"
+
+                if event_type in round_boundary_user_events:
+                    self._clear_message_context_for_session(session_id)
+
+                # skilldev.agent_completed：Agent 单轮结束（Agent 模式专有）。
+                # 仅用于划分回合，不向客户端补发 session.status / 关 WS 等副作用。
+                # 实际清理放在下一条用户输入事件处统一处理。
+                if event_type == "skilldev.agent_completed":
+                    continue
 
                 # 1. skilldev.user_start → message.send
                 if event_type == "skilldev.user_start":
