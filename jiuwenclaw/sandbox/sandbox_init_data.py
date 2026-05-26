@@ -13,6 +13,7 @@ if TYPE_CHECKING:
 
 SANDBOX_INIT_DATA_PATH_ENV = "SANDBOX_INIT_DATA_PATH"
 DEFAULT_SANDBOX_INIT_DATA_PATH = "/home/sandbox/init_data.json"
+SANDBOX_REMOTE_PATH_PREFIX = "/home/sandbox/"
 
 
 def get_sandbox_init_data_path() -> str:
@@ -20,6 +21,20 @@ def get_sandbox_init_data_path() -> str:
     if raw:
         return raw
     return DEFAULT_SANDBOX_INIT_DATA_PATH
+
+
+def strip_sandbox_remote_path_prefix(path: str) -> str:
+    """Strip the ``/home/sandbox/`` prefix from a sandbox-side path.
+
+    ``SandboxClient.upload_file`` expects ``remote_path`` to be relative to the
+    sandbox's home directory, while ``SANDBOX_INIT_DATA_PATH`` is configured as
+    an absolute path (so AgentServer inside the sandbox can read it directly).
+    Strip the well-known prefix before invoking ``upload_file``.
+    """
+
+    if path.startswith(SANDBOX_REMOTE_PATH_PREFIX):
+        return path[len(SANDBOX_REMOTE_PATH_PREFIX):]
+    return path
 
 
 def build_sandbox_init_data_payload(*, api_key: str, sandbox_id: str) -> dict[str, str]:
@@ -44,6 +59,9 @@ async def upload_sandbox_init_data(
     target_path = (remote_path or get_sandbox_init_data_path()).strip()
     if not target_path:
         raise ValueError("sandbox init data remote path is empty")
+    upload_path = strip_sandbox_remote_path_prefix(target_path)
+    if not upload_path:
+        raise ValueError("sandbox init data upload path is empty after prefix strip")
     content = serialize_sandbox_init_data(api_key=api_key, sandbox_id=sandbox_id)
     local_path: str | None = None
     try:
@@ -57,15 +75,16 @@ async def upload_sandbox_init_data(
             local_path = handle.name
         result = await sandbox_client.upload_file(
             local_path,
-            target_path,
+            upload_path,
             sandbox_id,
         )
         if not result.success:
             raise RuntimeError(result.error or "upload_file failed for sandbox init data")
         logger.info(
-            "Uploaded sandbox init data for sandbox_id=%s remote_path=%s",
+            "Uploaded sandbox init data for sandbox_id=%s remote_path=%s upload_path=%s",
             sandbox_id,
             target_path,
+            upload_path,
         )
     finally:
         if local_path:
