@@ -18,6 +18,7 @@
 - skilldev.cancel    → 取消任务
 - skilldev.file.list → 获取文件树
 - skilldev.file.read → 读取文件内容
+- skilldev.file.write → 修改工作区文件内容
 """
 
 from __future__ import annotations
@@ -42,7 +43,7 @@ from jiuwenclaw.agentserver.skilldev.schema import (
     SkillDevState,
     SkillDevStage,
 )
-from jiuwenclaw.agentserver.skilldev.common_utils import safe_extract_zip
+from jiuwenclaw.agentserver.skilldev.common_utils import safe_extract_zip, repack_skill_dir
 from jiuwenclaw.agentserver.skilldev.stages.validate_stage import parse_skill_frontmatter
 from jiuwenclaw.agentserver.skilldev.utils.download_file_from_url import download_file
 
@@ -68,6 +69,7 @@ _METHOD_DISPATCH = {
     ReqMethod.SKILLDEV_CANCEL: "_handle_cancel",
     ReqMethod.SKILLDEV_FILE_LIST: "_handle_file_list",
     ReqMethod.SKILLDEV_FILE_READ: "_handle_file_read",
+    ReqMethod.SKILLDEV_FILE_WRITE: "_handle_file_write",
 }
 
 
@@ -617,6 +619,176 @@ class SkillDevService:
             payload={"ok": True, "path": file_path, "content": content},
             is_complete=True,
         )
+
+    # ------------------------------------------------------------------
+    # skilldev.file.write — 修改工作区文件内容
+    # ------------------------------------------------------------------
+
+    _MAX_FILE_CONTENT_SIZE = 1_048_576  # 1MB
+
+    def _handle_file_write(
+        self, params: dict, request_id: str, channel_id: str, session_id: str
+    ) -> AgentResponseChunk:
+        task_id = params.get("task_id")
+        file_path = params.get("path", "")
+        content = params.get("content")
+
+        if not task_id or not file_path:
+            return self._rpc_error_chunk(
+                request_id, channel_id, "缺少 task_id 或 path 参数"
+            )
+        if content is None:
+            return self._rpc_error_chunk(
+                request_id, channel_id, "缺少 content 参数"
+            )
+        if len(content) > self._MAX_FILE_CONTENT_SIZE:
+            return self._rpc_error_chunk(
+                request_id, channel_id,
+                f"文件内容超过大小限制 ({self._MAX_FILE_CONTENT_SIZE} 字符)"
+            )
+
+        workspace = self._deps.workspace_provider.get_local_path(task_id)
+        skill_dir = workspace / "skill"
+        full_path = (skill_dir / file_path).resolve()
+
+        if not str(full_path).startswith(str(skill_dir.resolve())):
+            return self._rpc_error_chunk(
+                request_id, channel_id, "路径非法：不能访问工作区外的文件"
+            )
+
+        if not full_path.exists() or not full_path.is_file():
+            return self._rpc_error_chunk(
+                request_id, channel_id, f"文件不存在: {file_path}"
+            )
+
+        try:
+            full_path.read_text(encoding="utf-8")
+        except UnicodeDecodeError:
+            return self._rpc_error_chunk(
+                request_id, channel_id, "不支持修改二进制文件"
+            )
+
+        # 如果修改的是 SKILL.md，写入前校验内容格式
+        if full_path.name == "SKILL.md":
+            validation_error = self._validate_skill_md_content(content)
+            if validation_error:
+                return self._rpc_error_chunk(request_id, channel_id, validation_error)
+
+        full_path.write_text(content, encoding="utf-8")
+
+        repackaged = False
+        output_dir = workspace / "output"
+        if output_dir.exists():
+            try:
+                _, renamed_to = repack_skill_dir(skill_dir, output_dir, session_id=task_id)
+                repackaged = True
+                if renamed_to and "/" in file_path:
+                    parts = file_path.split("/", 1)
+                    file_path = f"{renamed_to}/{parts[1]}"
+            except Exception as exc:
+                logger.warning(
+                    "[session=%s] [SkillDevService] 重新打包失败: %s", task_id, exc
+                )
+
+        return AgentResponseChunk(
+            request_id=request_id,
+            channel_id=channel_id,
+            payload={
+                "ok": True,
+                "path": file_path,
+                "size": len(content),
+                "repackaged": repackaged,
+            },
+            is_complete=True,
+        )
+
+    # ------------------------------------------------------------------
+    # SKILL.md 内容校验
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _rpc_error_chunk(
+        request_id: str, channel_id: str, message: str
+    ) -> AgentResponseChunk:
+        """用于非流式 RPC 请求的错误响应（不含 event_type，确保 gateway 返回 type=res）."""
+        return AgentResponseChunk(
+            request_id=request_id,
+            channel_id=channel_id,
+            payload={"ok": False, "error": message},
+            is_complete=True,
+        )
+
+    @staticmethod
+    def _validate_skill_md_content(content: str) -> str | None:
+        """校验 SKILL.md 内容格式，返回错误信息或 None（通过）."""
+        import re
+
+        from jiuwenclaw.agentserver.memory.internal import estimate_tokens
+        from jiuwenclaw.agentserver.skilldev.utils.skill_description_fix import (
+            normalize_skill_description,
+            parse_frontmatter,
+        )
+
+        # frontmatter 格式校验
+        if not content.startswith("---"):
+            return "SKILL.md 缺少 YAML frontmatter（应以 --- 开头）"
+        match = re.match(r"^---\n(.*?)\n---\n?(.*)", content, re.DOTALL)
+        if not match:
+            return "SKILL.md frontmatter 格式无效（缺少闭合 ---）"
+
+        frontmatter = parse_frontmatter(match.group(1))
+        body = match.group(2)
+
+        errors: list[str] = []
+
+        # name 校验
+        name = str(frontmatter.get("name") or "").strip()
+        skill_name_pattern = re.compile(r"^[a-zA-Z0-9_-]{1,64}$")
+        if not name:
+            errors.append("frontmatter 缺少必填字段 name")
+        else:
+            if not skill_name_pattern.match(name):
+                errors.append(
+                    f"skill-name '{name}' 不符合规范：仅允许 [a-zA-Z0-9_-]，长度 1-64"
+                )
+            if name.startswith("-") or name.endswith("-") or "--" in name:
+                errors.append(
+                    f"skill-name '{name}' 不能以 '-' 开头/结尾或包含连续 '--'"
+                )
+
+        # description 校验
+        description = normalize_skill_description(
+            str(frontmatter.get("description") or "")
+        )
+        if not description:
+            errors.append("description 不能为空")
+        else:
+            is_cjk = any("\u4e00" <= c <= "\u9fff" for c in description)
+            max_chars = 256 if is_cjk else 512
+            if len(description) > max_chars:
+                errors.append(
+                    f"description 字符数超限（{len(description)} > {max_chars}）"
+                )
+            desc_tokens = estimate_tokens(description)
+            if desc_tokens > 300:
+                errors.append(
+                    f"description token 数超限（约 {desc_tokens} > 300）"
+                )
+
+        # body 校验
+        if not body.strip():
+            errors.append("SKILL.md 正文不能为空")
+        else:
+            body_lines = body.splitlines()
+            if len(body_lines) > 500:
+                errors.append(f"正文行数超限（{len(body_lines)} > 500）")
+            body_tokens = estimate_tokens(body)
+            if body_tokens > 5000:
+                errors.append(f"正文 token 数超限（约 {body_tokens} > 5000）")
+
+        if errors:
+            return "SKILL.md 校验失败:\n" + "\n".join(f"- {e}" for e in errors)
+        return None
 
     # ------------------------------------------------------------------
     # 工具函数

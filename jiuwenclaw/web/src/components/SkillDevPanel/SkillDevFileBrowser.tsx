@@ -1,8 +1,8 @@
 /**
- * SkillDevFileBrowser - 文件浏览器组件
+ * SkillDevFileBrowser - 文件浏览器组件（支持编辑和保存）
  */
 
-import { useState } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { useTranslation } from 'react-i18next';
 import type { FileTreeNode } from '../../types/skilldev';
 
@@ -10,15 +10,58 @@ interface SkillDevFileBrowserProps {
   fileTree: FileTreeNode[];
   currentFile: { path: string; content: string } | null;
   onFileSelect: (path: string) => void;
+  onFileSave?: (path: string, content: string) => Promise<void>;
 }
 
 export function SkillDevFileBrowser({
   fileTree,
   currentFile,
   onFileSelect,
+  onFileSave,
 }: SkillDevFileBrowserProps) {
   const { t } = useTranslation();
   const [expandedDirs, setExpandedDirs] = useState<Set<string>>(new Set());
+  const [editContent, setEditContent] = useState('');
+  const [isDirty, setIsDirty] = useState(false);
+  const [isSaving, setIsSaving] = useState(false);
+  const [saveError, setSaveError] = useState<string | null>(null);
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
+
+  useEffect(() => {
+    if (currentFile) {
+      setEditContent(currentFile.content);
+      setIsDirty(false);
+      setSaveError(null);
+    }
+  }, [currentFile?.path, currentFile?.content]);
+
+  const handleContentChange = (value: string) => {
+    setEditContent(value);
+    setIsDirty(value !== currentFile?.content);
+    if (saveError) setSaveError(null);
+  };
+
+  const handleSave = async () => {
+    if (!currentFile || !onFileSave) return;
+    setIsSaving(true);
+    setSaveError(null);
+    try {
+      await onFileSave(currentFile.path, editContent);
+      setIsDirty(false);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : '保存失败';
+      setSaveError(message);
+    } finally {
+      setIsSaving(false);
+    }
+  };
+
+  const handleKeyDown = (e: React.KeyboardEvent) => {
+    if ((e.ctrlKey || e.metaKey) && e.key === 's') {
+      e.preventDefault();
+      handleSave();
+    }
+  };
 
   const toggleDir = (path: string) => {
     const newExpanded = new Set(expandedDirs);
@@ -125,12 +168,38 @@ export function SkillDevFileBrowser({
       <div className="flex-1 bg-bg overflow-auto">
         {currentFile ? (
           <div className="h-full flex flex-col">
-            <div className="px-4 py-2 border-b border-border bg-secondary">
-              <p className="text-sm font-medium text-text">{currentFile.path}</p>
+            <div className="px-4 py-2 border-b border-border bg-secondary flex items-center justify-between">
+              <p className="text-sm font-medium text-text">
+                {currentFile.path}
+                {isDirty && <span className="ml-2 text-warning text-xs">(未保存)</span>}
+              </p>
+              {onFileSave && (
+                <button
+                  onClick={handleSave}
+                  disabled={!isDirty || isSaving}
+                  className={`px-4 py-1.5 text-sm font-medium rounded transition-colors ${
+                    isDirty
+                      ? 'bg-blue-600 text-white hover:bg-blue-700 shadow-md'
+                      : 'bg-gray-200 text-gray-400 cursor-not-allowed'
+                  }`}
+                >
+                  {isSaving ? '保存中...' : '保存'}
+                </button>
+              )}
             </div>
-            <pre className="flex-1 p-4 text-sm font-mono text-text overflow-auto whitespace-pre-wrap">
-              {currentFile.content}
-            </pre>
+            {saveError && (
+              <div className="px-4 py-2 bg-red-50 border-b border-red-200 text-red-700 text-sm whitespace-pre-wrap">
+                {saveError}
+              </div>
+            )}
+            <textarea
+              ref={textareaRef}
+              value={editContent}
+              onChange={(e) => handleContentChange(e.target.value)}
+              onKeyDown={handleKeyDown}
+              className="flex-1 p-4 text-sm font-mono text-text bg-bg resize-none outline-none w-full"
+              spellCheck={false}
+            />
           </div>
         ) : (
           <div className="h-full flex items-center justify-center text-text-muted">

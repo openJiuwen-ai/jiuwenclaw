@@ -20,6 +20,7 @@ import {
   restoreSkillDevSession,
   getSkillDevFileTree,
   readSkillDevFile,
+  writeSkillDevFile,
   downloadSkillDevArtifact,
   triggerDownload,
   cancelSkillDev,
@@ -654,7 +655,7 @@ export function SkillDevPanel() {
     });
   }, [endThinkingStream, setProcessing, setSuspended, setTodos, addMessage, t]);
 
-  const handleAgentCompleted = useCallback((data?: { __restore_ts?: string }) => {
+  const handleAgentCompleted = useCallback((_data?: { __restore_ts?: string }) => {
     endThinkingStream();
     setProcessing(false);
     setSuspended(false);
@@ -1343,6 +1344,25 @@ export function SkillDevPanel() {
     [taskId, setCurrentFile]
   );
 
+  const handleFileSave = useCallback(
+    async (path: string, content: string) => {
+      if (!taskId) return;
+      const result = await writeSkillDevFile(taskId, path, content);
+      if (result && (result as any).ok === false) {
+        throw new Error((result as any).error || '保存失败');
+      }
+      if (result) {
+        const newPath = result.path || path;
+        setCurrentFile({ path: newPath, content });
+        if (newPath !== path) {
+          fileBrowserLoaded.current = false;
+          void handleLoadFileTree();
+        }
+      }
+    },
+    [taskId, setCurrentFile, handleLoadFileTree]
+  );
+
   const handleDownload = useCallback(
     async () => {
       if (!taskId) return;
@@ -1535,6 +1555,7 @@ export function SkillDevPanel() {
               fileTree={fileTree}
               currentFile={currentFile}
               onFileSelect={handleFileSelect}
+              onFileSave={handleFileSave}
             />
           ) : (
             <SkillDevSessionsTab

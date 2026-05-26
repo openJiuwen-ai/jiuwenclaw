@@ -3,7 +3,7 @@
  *
  * 与后端 SkillDevAgent 交互
  * 方法: skilldev.chat, skilldev.respond, skilldev.parse_skill, skilldev.status,
- *      skilldev.download, skilldev.file.list, skilldev.file.read
+ *      skilldev.download, skilldev.file.list, skilldev.file.read, skilldev.file.write
  */
 
 import { webRequest, webSendStream } from './webClient';
@@ -184,6 +184,22 @@ export async function readSkillDevFile(
   const result = await webRequest<{ path: string; content: string }>(
     'skilldev.file.read',
     { task_id: taskId, path }
+  );
+
+  return result;
+}
+
+/**
+ * 修改工作区文件内容
+ */
+export async function writeSkillDevFile(
+  taskId: string,
+  path: string,
+  content: string
+): Promise<{ path: string; size: number; repackaged: boolean }> {
+  const result = await webRequest<{ path: string; size: number; repackaged: boolean }>(
+    'skilldev.file.write',
+    { task_id: taskId, path, content }
   );
 
   return result;
