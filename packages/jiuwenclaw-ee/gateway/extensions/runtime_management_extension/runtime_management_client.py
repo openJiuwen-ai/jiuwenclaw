@@ -287,11 +287,17 @@ class RuntimeManagementAgentClient(AgentServerClient):
                     invoke_path="",
                     ws_use_tls=False,
                 )
+
+                # 从 service_template 中提取 service_id，如果存在则使用，否则让 ServiceHandler 自动生成 UUID
+                handler_service_id = cfg.get("service_id") if isinstance(cfg, dict) else None
+
                 return ServiceHandler(
+                    service_id=handler_service_id,
                     total_concurrency=int(cfg["service_concurrency"]) if "service_concurrency" in cfg else service_concurrency,
                     message_channel=ch,
                     response_parser=response_parser,
                     deploy_controller=K8sDeployController(k8s),
+                    service_template=service_template,
                 )
 
         dual_q: PriorityDualAsyncQueues[QueueItem] = PriorityDualAsyncQueues(1000, 100)
@@ -416,10 +422,15 @@ class RuntimeManagementAgentClient(AgentServerClient):
         service_template = None
         loaded = await load_effective_service_config_for_request(request)
         if loaded is not None:
-            # 从 loaded 中直接获取 service_id
+            # 从 loaded 中获取 service_id 和 agent_id
             service_id = getattr(loaded, "service_id", None)
-            logger.info("[RuntimeManagementAgentClient] loaded config: service_id=%s", service_id)
-
+            agent_id = getattr(loaded, "agent_id", None)
+            logger.info(
+                "[RuntimeManagementAgentClient] loaded config: service_id=%s agent_id=%s",
+                service_id,
+                agent_id,
+            )
+            
             entities = loaded.service_config or []
             if entities:
                 service_template = entities[0]
@@ -437,6 +448,15 @@ class RuntimeManagementAgentClient(AgentServerClient):
                     "[RuntimeManagementAgentClient] extension_config attached: %s",
                     ext_config,
                 )
+
+
+            # 如果从数据库中匹配到了 service_id 或 agent_id，覆盖 request 中的值
+            if service_id:
+                request.service_id = service_id
+                service_template = service_template or {"service_id": service_id}
+            if agent_id:
+                request.agent_id = agent_id
+                service_template = service_template or {"agent_id": agent_id}
 
         session_request = _SessionRequest(request, envelope, service_template=service_template)
 
@@ -462,10 +482,15 @@ class RuntimeManagementAgentClient(AgentServerClient):
         service_template = None
         loaded = await load_effective_service_config_for_request(request)
         if loaded is not None:
-            # 从 loaded 中直接获取 service_id
+            # 从 loaded 中获取 service_id 和 agent_id
             service_id = getattr(loaded, "service_id", None)
-            logger.info("[RuntimeManagementAgentClient] loaded config: service_id=%s", service_id)
-
+            agent_id = getattr(loaded, "agent_id", None)
+            logger.info(
+                "[RuntimeManagementAgentClient] loaded config: service_id=%s agent_id=%s",
+                service_id,
+                agent_id,
+            )
+            
             entities = loaded.service_config or []
             if entities:
                 service_template = entities[0]
@@ -483,6 +508,13 @@ class RuntimeManagementAgentClient(AgentServerClient):
                     "[RuntimeManagementAgentClient] extension_config attached: %s",
                     ext_config,
                 )
+
+
+            # 如果从配置中获取到了 service_id 或 agent_id，覆盖 request 中的值
+            if service_id:
+                request.service_id = service_id
+            if agent_id:
+                request.agent_id = agent_id
 
         session_request = _SessionRequest(request, envelope, service_template=service_template)
 
