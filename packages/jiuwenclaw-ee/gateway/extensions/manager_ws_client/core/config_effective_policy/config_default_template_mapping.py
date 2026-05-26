@@ -11,7 +11,7 @@ from openjiuwen_runtime.foundation.db.handler import DBHandler
 
 from ...infrastructure.utils import (
     assert_jiuwenclaw_id_matches_payload,
-    require_jiuwenclaw_id,
+    get_jiuwenclaw_id,
     utc_now,
 )
 from ...models.config_effective_policy_models import (
@@ -77,7 +77,7 @@ async def update_config_default_template_mapping_record(
     mapping_id: int,
     request: ConfigDefaultTemplateMappingUpdateRequest,
 ) -> dict[str, Any] | None:
-    jiuwenclaw_id = require_jiuwenclaw_id()
+    jiuwenclaw_id = get_jiuwenclaw_id()
     existing = await _get_row_for_instance(handler, mapping_id, jiuwenclaw_id)
     if existing is None:
         return None
@@ -112,7 +112,7 @@ async def delete_config_default_template_mapping_record(
     handler: DBHandler,
     mapping_id: int,
 ) -> bool:
-    jiuwenclaw_id = require_jiuwenclaw_id()
+    jiuwenclaw_id = get_jiuwenclaw_id()
     existing = await _get_row_for_instance(handler, mapping_id, jiuwenclaw_id)
     if existing is None:
         return False

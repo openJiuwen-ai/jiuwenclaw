@@ -21,7 +21,6 @@ from openjiuwen_runtime.foundation.db.table_def import (
 class ModelTemplateInfo(BaseModel):
     id: int
     template_id: str
-    jiuwenclaw_id: str
     template_name: str
     description: str | None
     model_type: Any
@@ -56,7 +55,6 @@ MODEL_TEMPLATE_TABLE_DEF = TableDefinition(
             nullable=False,
         ),
         ColumnDefinition("template_id", "string", length=100, nullable=False),
-        ColumnDefinition("jiuwenclaw_id", "string", length=64, nullable=False),
         ColumnDefinition("template_name", "string", length=128, nullable=False),
         ColumnDefinition("description", "string", length=512, nullable=True),
         ColumnDefinition("model_type", "json", nullable=False),
@@ -78,7 +76,6 @@ MODEL_TEMPLATE_TABLE_DEF = TableDefinition(
     ],
     indexes=[
         IndexDefinition(["template_id"], unique=True),
-        IndexDefinition(["jiuwenclaw_id"], unique=False),
         IndexDefinition(["enabled"], unique=False),
     ],
 )

@@ -15,7 +15,8 @@ from ...infrastructure.utils import (
     merge_template_ref,
     normalize_template_ref,
 )
-from . import expressions, gateway_db
+from . import expressions
+from .gateway_db import GatewayDb
 from .schemas import (
     MODEL_SLOT_KEYS,
     EffectiveEnterpriseConfig,
@@ -28,7 +29,7 @@ logger = get_logger(__name__)
 
 async def _fetch_global_policy_refs() -> tuple[dict[str, Any] | None, dict[str, list[str]]]:
     filters: dict[str, Any] = {"enabled": True}
-    global_rows = await gateway_db.list_records(
+    global_rows = await GatewayDb.current().list_records(
         "config_effective_global_policy",
         filters=filters,
         order_by="priority DESC",
@@ -48,7 +49,7 @@ class _PolicyMatchResult:
 
 
 async def _resolve_policy_match(ctx: RoutingContext) -> _PolicyMatchResult:
-    service_rules = await gateway_db.list_records(
+    service_rules = await GatewayDb.current().list_records(
         "config_effective_service_policy",
         filters={"enabled": True},
         order_by="priority DESC",
@@ -67,7 +68,7 @@ async def _resolve_policy_match(ctx: RoutingContext) -> _PolicyMatchResult:
 
     if matched_service is not None:
         sp_id = int(matched_service["id"])
-        agent_rules = await gateway_db.list_records(
+        agent_rules = await GatewayDb.current().list_records(
             "config_effective_agent_policy",
             filters={"enabled": True, "service_policy_id": sp_id},
             order_by="priority DESC",
@@ -156,7 +157,7 @@ async def _fetch_slot_entities(
 ) -> list[dict[str, Any]]:
     entities: list[dict[str, Any]] = []
     for template_id in template_ids:
-        entity = await gateway_db.fetch_template_by_slot(slot, template_id)
+        entity = await GatewayDb.current().fetch_template_by_slot(slot, template_id)
         if entity is None:
             logger.warning(
                 "[enterprise_config] template not found: slot=%r template_id=%r",
