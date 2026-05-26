@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import time
 from collections import deque
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any
@@ -92,6 +92,11 @@ class SandboxRouterAgentClient(AgentServerClient):
         self._server_env: dict[str, str] | None = None
         self._idle_task: asyncio.Task | None = None
         self._closed = False
+        # AgentServer 主动推送（含 chat/skilldev ask_user_question）的下行处理器；
+        # 每条 OA 物理连接独立持有，需在创建 client 时传递。
+        self._on_server_push: (
+            Callable[[dict[str, Any]], Awaitable[None]] | None
+        ) = None
 
     async def connect(self, uri: str) -> None:
         self._ensure_idle_task()
@@ -119,6 +124,21 @@ class SandboxRouterAgentClient(AgentServerClient):
     ) -> None:
         self._server_config = dict(config or {})
         self._server_env = dict(env) if env else None
+
+    def set_server_push_handler(
+        self,
+        handler: Callable[[dict[str, Any]], Awaitable[None]] | None,
+    ) -> None:
+        """注册 AgentServer ``send_push`` 下行处理器，并下发到已建好的所有 OA client。
+
+        MessageHandler 仅在 __init__ 时给 router 调用一次；之后每条 OA 物理连接
+        在 ``_connect_open_ability_client`` 中创建时统一沿用当前 handler。
+        """
+        self._on_server_push = handler
+        for runtime in self._runtimes.values():
+            ac = runtime.agent_client
+            if hasattr(ac, "set_server_push_handler"):
+                ac.set_server_push_handler(handler)
 
     async def send_request(self, envelope: E2AEnvelope) -> AgentResponse:
         try:
@@ -383,6 +403,8 @@ class SandboxRouterAgentClient(AgentServerClient):
             sandbox_id=sandbox_id,
             request_timeout_seconds=open_ability_cfg.request_timeout_seconds,
         )
+        if self._on_server_push is not None:
+            client.set_server_push_handler(self._on_server_push)
         logger.info(
             "Connecting OpenAbility WebSocket for sandbox_id=%s routing_key=%s uri=%s",
             sandbox_id,
