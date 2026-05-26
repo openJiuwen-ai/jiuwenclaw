@@ -16,6 +16,7 @@ logger = logging.getLogger(__name__)
 AVAILABLE_TOOLS_REL = Path("resources") / "available-tools"
 TOOL_USAGE_FILENAME = "tool_usage.json"
 _TOOL_SPEC_FILENAME_RE = re.compile(r"^(.+)__(.+)\.json$", re.IGNORECASE)
+_TOOL_SPEC_TRANSPORT_KEYS = frozenset({"filename", "base64Data", "base64", "name", "url", "mime"})
 
 
 @dataclass(frozen=True)
@@ -116,6 +117,24 @@ def sanitize_tool_spec_segment(value: str) -> str:
     return "".join(c if c.isalnum() or c in "-_" else "_" for c in value.strip())
 
 
+def resolve_tool_spec_identity(raw: dict[str, Any]) -> tuple[str, str]:
+    """Resolve plugin id and tool name from an uploaded tool definition."""
+    plugin_id = str(
+        raw.get("pluginId")
+        or raw.get("bundleName")
+        or raw.get("toolId")
+        or raw.get("plugin_id")
+        or ""
+    ).strip()
+    tool_name = str(raw.get("toolName") or raw.get("name") or "").strip()
+    return plugin_id, tool_name
+
+
+def tool_spec_payload(raw: dict[str, Any]) -> dict[str, Any]:
+    """Strip transport-only fields; keep the uploaded tool definition as-is."""
+    return {k: v for k, v in raw.items() if k not in _TOOL_SPEC_TRANSPORT_KEYS}
+
+
 def tool_spec_filename(plugin_id: str, tool_name: str) -> str:
     """Canonical on-disk name: ``<pluginId>__<toolName>.json``."""
     safe_plugin = sanitize_tool_spec_segment(plugin_id)
@@ -128,10 +147,7 @@ def tool_spec_filename(plugin_id: str, tool_name: str) -> str:
 def normalize_tool_definition(raw: dict[str, Any], *, source_file: str = "") -> ExternalToolSpec | None:
     if not isinstance(raw, dict):
         return None
-    plugin_id = str(
-        raw.get("pluginId") or raw.get("toolId") or raw.get("plugin_id") or ""
-    ).strip()
-    tool_name = str(raw.get("toolName") or raw.get("name") or "").strip()
+    plugin_id, tool_name = resolve_tool_spec_identity(raw)
     if not plugin_id or not tool_name:
         return None
     description = str(raw.get("description") or "").strip()
@@ -160,14 +176,14 @@ def iter_tool_definitions_from_json(data: Any) -> list[dict[str, Any]]:
 
 
 def write_tool_spec_file(dest_dir: Path, tool_def: dict[str, Any]) -> Path:
-    """Write one tool definition to ``<pluginId>__<toolName>.json``."""
-    spec = normalize_tool_definition(tool_def)
-    if spec is None:
-        raise ValueError("工具定义缺少 pluginId 与 toolName")
+    """Write one tool definition to ``<pluginId>__<toolName>.json`` (pass-through payload)."""
+    plugin_id, tool_name = resolve_tool_spec_identity(tool_def)
+    if not plugin_id or not tool_name:
+        raise ValueError("工具定义缺少 pluginId/bundleName 与 toolName")
     dest_dir.mkdir(parents=True, exist_ok=True)
-    out_path = dest_dir / tool_spec_filename(spec.plugin_id, spec.tool_name)
+    out_path = dest_dir / tool_spec_filename(plugin_id, tool_name)
     out_path.write_text(
-        json.dumps(spec.to_definition_dict(), ensure_ascii=False, indent=2),
+        json.dumps(tool_spec_payload(tool_def), ensure_ascii=False, indent=2),
         encoding="utf-8",
     )
     return out_path

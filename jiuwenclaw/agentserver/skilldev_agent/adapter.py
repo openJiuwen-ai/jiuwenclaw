@@ -51,6 +51,7 @@ from jiuwenclaw.agentserver.skilldev_agent.tools import build_skilldev_tools
 from jiuwenclaw.agentserver.skilldev_agent.meta_tools.external_tool_registry import (
     format_tool_usage_hint,
     iter_tool_definitions_from_json,
+    resolve_tool_spec_identity,
     write_tool_spec_file,
     write_tool_usage_catalog,
 )
@@ -876,7 +877,7 @@ class SkillDevDeepAdapter:
 
     @staticmethod
     async def _write_tool_spec_files(resources: list[dict[str, Any]], dest_dir: Path) -> None:
-        """Write uploaded tool specs as ``<pluginId>__<toolName>.json`` per tool."""
+        """Write uploaded tool specs as ``<pluginId>__<toolName>.json`` (pass-through)."""
         if not resources:
             return
         dest_dir.mkdir(parents=True, exist_ok=True)
@@ -891,13 +892,16 @@ class SkillDevDeepAdapter:
                     raise ValueError(f"工具定义文件 [{fname}] 解析失败: {exc}") from exc
                 for tool_def in iter_tool_definitions_from_json(parsed):
                     write_tool_spec_file(dest_dir, tool_def)
-            elif res.get("protocol") or res.get("pluginId") or res.get("toolId"):
-                write_tool_spec_file(dest_dir, res)
             else:
-                logger.warning(
-                    "[SkillDevDeepAdapter] skip tool_spec entry without base64 or pluginId: %s",
-                    res.get("filename", res),
-                )
+                plugin_id, tool_name = resolve_tool_spec_identity(res)
+                if plugin_id and tool_name:
+                    write_tool_spec_file(dest_dir, res)
+                else:
+                    logger.warning(
+                        "[SkillDevDeepAdapter] skip tool_spec entry without base64 or "
+                        "pluginId/bundleName+toolName: %s",
+                        res.get("filename", res),
+                    )
         write_tool_usage_catalog(dest_dir)
 
     @staticmethod
