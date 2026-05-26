@@ -52,6 +52,8 @@ json-repair>=0.55.0
 # ============================================================
 python-dateutil>=2.9.0.post0
 croniter>=2.0.0
+# OhOS 无系统 IANA 时区库；ZoneInfo("Asia/Shanghai") 等需 tzdata
+tzdata>=2024.1
 
 # ============================================================
 # 日志和监控
@@ -100,9 +102,12 @@ docx2txt>=0.8
 # ============================================================
 # 网页内容抽取（默认 WebFetch 工具依赖）
 # ============================================================
-trafilatura>=1.6.0
+trafilatura>=1.6.0,<2
 # lxml 5.2+ 将 html.clean 拆出；trafilatura/justext 仍依赖 lxml.html.clean
-lxml_html_clean>=0.4.0
+# 1.x 要求 lxml>=5.2.2，可命中本地预编 wheel (lxml-6.1.0)；
+# 2.x 强制 lxml>=6.1.1 会触发源码编译（鸿蒙缺 libxml2 dev，失败）
+# lxml_html_clean 0.4.5 要求 lxml>=6.1.1；锁定到 0.4.4 以兼容本地 lxml 6.1.0 预编 wheel
+lxml_html_clean>=0.4.0,<0.4.5
 
 # ============================================================
 # openjiuwen 核心 Agent 运行时

@@ -39,6 +39,7 @@ pnpm-debug.log*
 .env
 .env_personal
 !.env.example
+sitepatch/toolchain.env
 
 # IDE / Editor
 .vscode/
@@ -69,6 +70,7 @@ workspace/session
 workspace/agent/memory/*.db
 workspace/agent/memory/*.db-shm
 workspace/agent/memory/*.db-wal
+.cache/ohos-manifests/
 
 jiuwenclaw/agentserver/tools/browser-move/.browser
 jiuwenclaw/agentserver/tools/browser-move/.browser-profiles
