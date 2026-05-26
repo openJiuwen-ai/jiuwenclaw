@@ -1753,6 +1753,35 @@ async def _run(
                     logger.info("[App] 角色切换为 STANDBY")
             leader_election.register_callback(_session_on_role_change)
 
+        # 选主感知：ManagerWsClient 仅在 PRIMARY 节点连接 Claw Manager；
+        # STANDBY 不连，避免与 Manager 建立无意义的会话（共享 MySQL 已保证配置一致）。
+        # EE 扩展缺失（OSS 部署）时静默忽略。
+        import importlib
+
+        async def _manager_ws_on_role_change(role: Role) -> None:
+            try:
+                mod = importlib.import_module(
+                    "jiuwenclaw.loaded_extension.manager_ws_client.extension"
+                )
+            except Exception:  # noqa: BLE001
+                return
+            fn_name = (
+                "start_manager_ws_connect"
+                if role == Role.PRIMARY
+                else "stop_manager_ws_connect"
+            )
+            fn = getattr(mod, fn_name, None)
+            if not callable(fn):
+                return
+            try:
+                ret = fn()
+                if asyncio.iscoroutine(ret):
+                    await ret
+            except Exception:  # noqa: BLE001
+                logger.exception("[App] manager_ws_client.%s failed", fn_name)
+
+        leader_election.register_callback(_manager_ws_on_role_change)
+
         await leader_election.start()
     else:
         logger.info("[App] standalone mode, skip LeaderElection")

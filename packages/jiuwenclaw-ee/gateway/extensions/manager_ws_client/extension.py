@@ -83,24 +83,50 @@ class ManagerWsClientExtension(BaseExtension):
         self._client = client
 
     async def initialize(self, config: ExtensionConfig) -> None:
+        # distributed 模式：STANDBY 默认不连 Manager；由 app_gateway 在选主成功后
+        # 通过 start_manager_ws_connect() 触发连接，避免备实例与 Manager 建立无意义会话。
+        if _is_distributed_deployment():
+            logger.info(
+                "[ManagerWsClient] distributed deployment: defer connect until elected PRIMARY"
+            )
+            return
         _schedule_manager_ws_connect()
 
     async def shutdown(self) -> None:
-        global _connect_task
-        if _connect_task is not None and not _connect_task.done():
-            _connect_task.cancel()
-            try:
-                await _connect_task
-            except asyncio.CancelledError:
-                pass
-            _connect_task = None
-        try:
-            await self._client.disconnect()
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("[ManagerWsClient] shutdown error: %s", exc)
+        await stop_manager_ws_connect()
 
     def get_client(self) -> ManagerWsClient:
         return self._client
+
+
+def _is_distributed_deployment() -> bool:
+    gw_cfg = get_config().get("gateway") or {}
+    mode = str(gw_cfg.get("deployment_mode", "standalone")).strip().lower()
+    return mode != "standalone"
+
+
+def start_manager_ws_connect() -> None:
+    """外部入口：触发连接 Manager（幂等）。distributed 模式由 LeaderElection 选主后调用。"""
+    _schedule_manager_ws_connect()
+
+
+async def stop_manager_ws_connect() -> None:
+    """外部入口：取消连接任务并断开 client（幂等）。distributed 模式失主时调用。"""
+    global _connect_task
+    if _connect_task is not None and not _connect_task.done():
+        _connect_task.cancel()
+        try:
+            await _connect_task
+        except asyncio.CancelledError:
+            pass
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[ManagerWsClient] connect task await error: %s", exc)
+        _connect_task = None
+    if _client is not None:
+        try:
+            await _client.disconnect()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[ManagerWsClient] disconnect error: %s", exc)
 
 
 def _schedule_manager_ws_connect() -> None:
