@@ -80,10 +80,12 @@ def _ensure_enterprise_config_loader() -> tuple[Any, Any]:
 
 
 async def load_effective_service_config_for_request(request: AgentRequest) -> Any | None:
-    """按当前请求路由上下文加载 ``service_config`` 槽位（与 ``send_request`` 入口一致）。"""
+    """按当前请求路由上下文加载 ``service_config`` 与 ``extension_config`` 槽位。"""
     try:
         load_fn, service_config_slot = _ensure_enterprise_config_loader()
-        loaded = await load_fn(request, [service_config_slot])
+        # 同时加载 service_config 和 extension_config
+        from jiuwenclaw.gateway.extensions.manager_ws_client.core.enterprise_config.schemas import TemplateRefSlot
+        loaded = await load_fn(request, [service_config_slot, TemplateRefSlot.EXTENSION_CONFIG])
     except Exception as exc:
         logger.warning(
             "[RuntimeManagementAgentClient] load service_config failed: %s",
@@ -409,7 +411,7 @@ class RuntimeManagementAgentClient(AgentServerClient):
         """发送非流式请求。"""
         self._ensure_connected()
         request = e2a_to_agent_request(envelope)
-        
+
         # 加载服务配置
         service_template = None
         loaded = await load_effective_service_config_for_request(request)
@@ -417,7 +419,7 @@ class RuntimeManagementAgentClient(AgentServerClient):
             # 从 loaded 中直接获取 service_id
             service_id = getattr(loaded, "service_id", None)
             logger.info("[RuntimeManagementAgentClient] loaded config: service_id=%s", service_id)
-            
+
             entities = loaded.service_config or []
             if entities:
                 service_template = entities[0]
@@ -425,7 +427,17 @@ class RuntimeManagementAgentClient(AgentServerClient):
                     "[RuntimeManagementAgentClient] service_template keys: %s",
                     list(service_template.keys()) if isinstance(service_template, dict) else None,
                 )
-        
+
+            # 将扩展配置附加到 envelope.channel_context
+            ext_config = getattr(loaded, "extension_config", None)
+            if ext_config:
+                envelope.channel_context = envelope.channel_context or {}
+                envelope.channel_context["extension_config"] = ext_config
+                logger.info(
+                    "[RuntimeManagementAgentClient] extension_config attached: %s",
+                    ext_config,
+                )
+
         session_request = _SessionRequest(request, envelope, service_template=service_template)
 
         try:
@@ -445,7 +457,7 @@ class RuntimeManagementAgentClient(AgentServerClient):
         """发送流式请求。"""
         self._ensure_connected()
         request = e2a_to_agent_request(envelope)
-        
+
         # 加载服务配置
         service_template = None
         loaded = await load_effective_service_config_for_request(request)
@@ -453,7 +465,7 @@ class RuntimeManagementAgentClient(AgentServerClient):
             # 从 loaded 中直接获取 service_id
             service_id = getattr(loaded, "service_id", None)
             logger.info("[RuntimeManagementAgentClient] loaded config: service_id=%s", service_id)
-            
+
             entities = loaded.service_config or []
             if entities:
                 service_template = entities[0]
@@ -461,7 +473,17 @@ class RuntimeManagementAgentClient(AgentServerClient):
                     "[RuntimeManagementAgentClient] service_template keys: %s",
                     list(service_template.keys()) if isinstance(service_template, dict) else None,
                 )
-        
+
+            # 将扩展配置附加到 envelope.channel_context
+            ext_config = getattr(loaded, "extension_config", None)
+            if ext_config:
+                envelope.channel_context = envelope.channel_context or {}
+                envelope.channel_context["extension_config"] = ext_config
+                logger.info(
+                    "[RuntimeManagementAgentClient] extension_config attached: %s",
+                    ext_config,
+                )
+
         session_request = _SessionRequest(request, envelope, service_template=service_template)
 
         try:

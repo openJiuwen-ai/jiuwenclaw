@@ -18,7 +18,7 @@ import time
 from collections import OrderedDict
 from pathlib import Path
 from typing import Any, AsyncIterator, Tuple
-
+from contextvars import ContextVar
 from dotenv import load_dotenv
 
 from jiuwenclaw.agentserver.agent_adapters import (
@@ -50,6 +50,7 @@ from jiuwenclaw.utils import (
     get_env_file,
     get_user_workspace_dir,
 )
+
 
 load_dotenv(dotenv_path=get_env_file())
 
@@ -470,6 +471,10 @@ class JiuWenClaw:
         # 传递 enable_memory 参数
         enable_memory = request.metadata.get("enable_memory", True) if request.metadata else True
         inputs["enable_memory"] = enable_memory
+
+        # 传递 extension_config（供 Rails 消费）
+        if request.metadata and "extension_config" in request.metadata:
+            inputs["extension_config"] = request.metadata["extension_config"]
 
         run = request.params.get("run")
         if run:

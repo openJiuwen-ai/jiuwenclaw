@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import importlib
 import os
 from contextvars import ContextVar, Token
 from dataclasses import dataclass
@@ -1534,6 +1535,61 @@ class JiuWenClawDeepAdapter:
             rail = None
         return rail
 
+    @staticmethod
+    def _build_extension_config_debug_rail() -> Any | None:
+        """Build ExtensionConfigDebugRail for extension config end-to-end debugging."""
+        try:
+            from jiuwenclaw.agentserver.deep_agent.rails.extension_config_debug_rail import (
+                ExtensionConfigDebugRail,
+            )
+            rail = ExtensionConfigDebugRail()
+            logger.info("[JiuWenClawDeepAdapter] ExtensionConfigDebugRail create success")
+        except Exception as exc:
+            logger.warning("[JiuWenClawDeepAdapter] ExtensionConfigDebugRail create failed: %s", exc)
+            rail = None
+        return rail
+
+    @staticmethod
+    def _load_extra_rails_from_env() -> list[Any]:
+        """Load extra DeepAgentRails from AGENT_EXTRA_RAILS env var.
+
+        Env format (semicolon-separated module paths):
+            AGENT_EXTRA_RAILS=path.to.module1;path.to.module2
+
+        Each module must expose a ``register_rails()`` function that returns
+        a list of DeepAgentRail instances.
+        """
+        env_value = os.getenv("AGENT_EXTRA_RAILS", "").strip()
+        if not env_value:
+            return []
+
+        extra_rails: list[Any] = []
+        for module_path in [p.strip() for p in env_value.split(";") if p.strip()]:
+            try:
+                mod = importlib.import_module(module_path)
+                register_fn = getattr(mod, "register_rails", None)
+                if register_fn is None:
+                    logger.warning(
+                        "[JiuWenClawDeepAdapter] Extra rail module '%s' has no register_rails(), skipping",
+                        module_path,
+                    )
+                    continue
+                rails = register_fn()
+                if rails:
+                    if not isinstance(rails, list):
+                        rails = [rails]
+                    extra_rails.extend(rails)
+                    logger.info(
+                        "[JiuWenClawDeepAdapter] Loaded %d rail(s) from '%s'",
+                        len(rails), module_path,
+                    )
+            except Exception as exc:
+                logger.warning(
+                    "[JiuWenClawDeepAdapter] Failed to load extra rails from '%s': %s",
+                    module_path, exc,
+                )
+        return extra_rails
+
     def _build_task_planning_rail(self) -> TaskPlanningRail | None:
         """Build TaskPlanningRail."""
         try:
@@ -1773,6 +1829,8 @@ class JiuWenClawDeepAdapter:
                 self._build_runtime_prompt_rail,
                 {"custom_home_dir": custom_home_dir},
             ),
+            # an example to use extension rail
+            # _RailBuildInfo("_extension_config_debug_rail", self._build_extension_config_debug_rail),
             _RailBuildInfo("_response_prompt_rail", self._build_response_prompt_rail),
             _RailBuildInfo("_task_execution_rail", self._build_task_execution_rail),
             _RailBuildInfo("_stream_event_rail", self._build_stream_event_rail),
@@ -1844,6 +1902,14 @@ class JiuWenClawDeepAdapter:
                 logger.warning("[JiuWenClawDeepAdapter] Rail %s build returned None", info.attr_name)
         logger.info("[JiuWenClawDeepAdapter] Total rails built: %d, rail names: %s", len(rails_list),
                     [type(r).__name__ for r in rails_list])
+
+        # 从环境变量加载额外 Rails（非侵入式扩展）
+        extra_rails = self._load_extra_rails_from_env()
+        if extra_rails:
+            rails_list.extend(extra_rails)
+            logger.info("[JiuWenClawDeepAdapter] Extra rails loaded from env: %s",
+                        [type(r).__name__ for r in extra_rails])
+
         if self._task_execution_rail is None:
             logger.warning("[JiuWenClawDeepAdapter] TaskExecutionRail missing after _build_agent_rails")
         else:
