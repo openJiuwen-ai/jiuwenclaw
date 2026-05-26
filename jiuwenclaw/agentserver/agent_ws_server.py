@@ -985,8 +985,7 @@ class AgentWebSocketServer:
                             response_id=request.request_id,
                             sequence=-1,  # 心跳使用特殊序列号 -1
                         )
-                        async with send_lock:
-                            await ws.send(json.dumps(wire, ensure_ascii=False))
+                        await self._send_message(ws, wire, send_lock)
                         logger.debug(
                             format_session_log(
                                 request.session_id,
@@ -1191,8 +1190,7 @@ class AgentWebSocketServer:
             response_id=request.request_id,
             sequence=done_seq,
         )
-        async with send_lock:
-            await ws.send(json.dumps(wire_done, ensure_ascii=False))
+        await self._send_message(ws, wire_done, send_lock)
 
     async def _handle_command_add_dir(self, ws: Any, request: AgentRequest, send_lock: asyncio.Lock) -> None:
         try:
@@ -1830,8 +1828,7 @@ class AgentWebSocketServer:
             )
 
         wire = encode_agent_response_for_wire(resp, response_id=request.request_id)
-        async with send_lock:
-            await ws.send(json.dumps(wire, ensure_ascii=False))
+        await self._send_message(ws, wire, send_lock)
 
     async def send_push(self, msg) -> None:
         """AgentServer 主动向 Gateway 推送消息。
@@ -1847,8 +1844,7 @@ class AgentWebSocketServer:
 
         try:
             wire = build_server_push_wire(msg)
-            async with self._current_send_lock:
-                await self._current_ws.send(json.dumps(wire, ensure_ascii=False))
+            await self._send_message(self._current_send_lock, wire, self._current_send_lock)
             response_kind = str(msg.get("response_kind") or "").strip()
             if response_kind:
                 logger.info(
