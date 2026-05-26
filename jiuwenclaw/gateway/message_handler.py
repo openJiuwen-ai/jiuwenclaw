@@ -1050,7 +1050,9 @@ class MessageHandler(ABC):
             return True
         return cls._is_session_map_style_session_id(sid)
 
-    async def _ensure_acp_agent_session(self, session_id: str) -> str:
+    async def _ensure_acp_agent_session(
+        self, session_id: str, *, user_id: str | None = None
+    ) -> str:
         from jiuwenclaw.e2a.gateway_normalize import e2a_from_agent_fields
         from jiuwenclaw.schema.message import ReqMethod
 
@@ -1062,6 +1064,7 @@ class MessageHandler(ABC):
             params={"session_id": session_id},
             is_stream=False,
             timestamp=time.time(),
+            user_id=user_id,
         )
         resp = await self._agent_client.send_request(env)
         if not resp.ok:
@@ -1077,6 +1080,8 @@ class MessageHandler(ABC):
     async def _resolve_acp_internal_session_id(
         self,
         external_session_id: str | None,
+        *,
+        user_id: str | None = None,
     ) -> tuple[str | None, bool]:
         external = str(external_session_id or "").strip()
         if not external:
@@ -1096,7 +1101,7 @@ class MessageHandler(ABC):
                 if self._is_known_jiuwenclaw_session_id(external)
                 else self._generate_channel_session_id(_ACP_CHANNEL_ID)
             )
-            ensured = await self._ensure_acp_agent_session(desired)
+            ensured = await self._ensure_acp_agent_session(desired, user_id=user_id)
             self._acp_session_aliases[external] = ensured
             return ensured, ensured != external
 
@@ -1106,7 +1111,9 @@ class MessageHandler(ABC):
         if msg.channel_id == _ACP_CHANNEL_ID:
             if msg.req_method in (ReqMethod.INITIALIZE, ReqMethod.SESSION_CREATE):
                 return msg
-            internal_session_id, aliased = await self._resolve_acp_internal_session_id(msg.session_id)
+            internal_session_id, aliased = await self._resolve_acp_internal_session_id(
+                msg.session_id, user_id=msg.user_id
+            )
             if not internal_session_id:
                 return msg
             params = dict(msg.params or {})
@@ -1124,7 +1131,9 @@ class MessageHandler(ABC):
         if msg.channel_id == _VIBESKILL_CHANNEL_ID:
             if msg.req_method in (ReqMethod.INITIALIZE, ReqMethod.SESSION_CREATE):
                 return msg
-            internal_session_id, aliased = await self._resolve_vibeskill_internal_session_id(msg.session_id)
+            internal_session_id, aliased = await self._resolve_vibeskill_internal_session_id(
+                msg.session_id, user_id=msg.user_id
+            )
             if not internal_session_id:
                 return msg
             params = dict(msg.params or {})
@@ -1383,6 +1392,8 @@ class MessageHandler(ABC):
     async def _resolve_vibeskill_internal_session_id(
         self,
         external_session_id: str | None,
+        *,
+        user_id: str | None = None,
     ) -> tuple[str | None, bool]:
         external = str(external_session_id or "").strip()
         if not external:
@@ -1402,7 +1413,7 @@ class MessageHandler(ABC):
                 if self._is_known_jiuwenclaw_session_id(external)
                 else self._generate_channel_session_id(_VIBESKILL_CHANNEL_ID)
             )
-            ensured = await self.create_agent_session(desired)
+            ensured = await self.create_agent_session(desired, user_id=user_id)
             self._vibeskill_session_aliases[external] = ensured
             return ensured, ensured != external
 
