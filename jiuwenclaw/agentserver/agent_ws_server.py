@@ -316,10 +316,10 @@ class AgentWebSocketServer:
                             ws.send(json.dumps(heartbeat_msg, ensure_ascii=False)),
                             timeout=5.0  # 发送超时5秒
                         )
-                    logger.debug("[AgentWebSocketServer] -> OpenAbility 发送心跳消息")
+                    logger.info("[AgentWebSocketServer] -> OpenAbility 发送心跳消息")
                     missed_heartbeats = 0  # 重置失败计数
                 except websockets.exceptions.ConnectionClosed:
-                    logger.debug("[AgentWebSocketServer] -> OpenAbility 心跳发送失败，连接已关闭")
+                    logger.warning("[AgentWebSocketServer] -> OpenAbility 心跳发送失败，连接已关闭")
                     break
                 except Exception as e:
                     missed_heartbeats += 1
@@ -338,7 +338,7 @@ class AgentWebSocketServer:
                             pass
                         break
         except asyncio.CancelledError:
-            logger.debug("[AgentWebSocketServer] -> OpenAbility 心跳任务被取消")
+            logger.warning("[AgentWebSocketServer] -> OpenAbility 心跳任务被取消")
             raise
         except Exception as e:
             logger.exception("[AgentWebSocketServer] -> OpenAbility 心跳循环异常: %s", e)
@@ -356,7 +356,7 @@ class AgentWebSocketServer:
             logger.warning("[AgentWebSocketServer] OA 消息接收循环检测到连接关闭: %s", e)
             raise  # 重新抛出以便上层处理
         except asyncio.CancelledError:
-            logger.debug("[AgentWebSocketServer] OA 消息接收任务被取消")
+            logger.warning("[AgentWebSocketServer] OA 消息接收任务被取消")
             raise
         except Exception as e:
             logger.exception("[AgentWebSocketServer] OA 消息接收循环异常: %s", e)
@@ -430,12 +430,6 @@ class AgentWebSocketServer:
                 )
                 # 获取鉴权 headers
                 auth_headers = get_oa_auth_headers()
-                if auth_headers:
-                    logger.info("[AgentWebSocketServer] 连接 OpenAbility 使用鉴权 headers")
-                else:
-                    logger.warning(
-                        "[AgentWebSocketServer] 未配置鉴权 headers，需要配置 x-api-key 和 x-sandbox-id"
-                    )
 
                 # 建立 WebSocket 连接
                 try:
