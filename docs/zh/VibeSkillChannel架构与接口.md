@@ -153,8 +153,8 @@ ws://127.0.0.1:19003/api/v1/messages?sessionID={sessionID}
 |-----------|------|----------|
 | `text` | `text` | 拼接为 `params.query` |
 | `file` | `filename`, `url`, `mime`, `resourceType` | 普通文件进入 `params.files`；`resourceType=skill` 进入 `params.skill_packages` |
-| `toolDefinition` | `pluginId`, `pluginType`, `toolType`, `toolName`, `description`, `arguments`, `protocol` | 进入 `params.tool_spec_files` |
-| `agentDefinition` | `agentId`, `name`, `description`, `parameters` | 进入 `params.agent_definitions` |
+| `toolDefinition` | `bundleName`, `pluginType`, `toolType`, `toolName`, `description`, `arguments`, `outputSchema`, `protocol`, `deviceCommand` | 进入 `params.tool_spec_files`（`bundleName` 兼容旧字段 `pluginId`；`deviceCommand` 原值透传） |
+| `agentDefinition` | `agentId`, `name`, `description`, `parameters`, `outputSchema` | 进入 `params.agent_definitions` |
 | `cliDefinition` | `name`, `version`, `description`, `executeSide`, `requirePermissions`, `inputSchema`, `outputSchema` | 进入 `params.cli_definitions` |
 
 SkillCreate 模式 `message.send` 示例：

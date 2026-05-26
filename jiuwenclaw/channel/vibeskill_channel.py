@@ -550,24 +550,33 @@ class VibeSkillChannel(BaseChannel):
                 else:
                     files.append(file_info)
             elif part_type == "toolDefinition":
+                tool_output_schema = part.get("outputSchema") or part.get("output_schema") or {}
+                if not isinstance(tool_output_schema, dict):
+                    tool_output_schema = {}
                 tools.append({
-                    "pluginId": part.get("pluginId", ""),
+                    "bundleName": part.get("bundleName") or part.get("pluginId") or "",
                     "pluginType": part.get("pluginType", ""),
                     "toolType": part.get("toolType", ""),
                     "toolName": part.get("toolName", ""),
                     "description": part.get("description", ""),
                     "arguments": part.get("arguments", {}),
+                    "outputSchema": tool_output_schema,
                     "protocol": part.get("protocol", ""),
+                    "deviceCommand": part.get("deviceCommand"),
                 })
             elif part_type == "agentDefinition":
                 parameters = part.get("parameters", {})
                 if not isinstance(parameters, dict):
                     parameters = {}
+                agent_output_schema = part.get("outputSchema") or part.get("output_schema") or {}
+                if not isinstance(agent_output_schema, dict):
+                    agent_output_schema = {}
                 agent_definitions.append({
                     "agentId": str(part.get("agentId") or part.get("agent_id") or ""),
                     "name": str(part.get("name") or ""),
                     "description": str(part.get("description") or ""),
                     "parameters": parameters,
+                    "outputSchema": agent_output_schema,
                 })
             elif part_type == "cliDefinition":
                 input_schema = part.get("inputSchema") or part.get("input_schema") or {}
@@ -2655,15 +2664,24 @@ class VibeSkillChannel(BaseChannel):
                     for tool_def in payload.get("tool_spec_files", []) or []:
                         if not isinstance(tool_def, dict):
                             continue
+                        tool_output_schema = (
+                            tool_def.get("outputSchema") or tool_def.get("output_schema") or {}
+                        )
+                        if not isinstance(tool_output_schema, dict):
+                            tool_output_schema = {}
                         parts.append({
                             "type": "toolDefinition",
-                            "pluginId": str(tool_def.get("pluginId") or ""),
+                            "bundleName": str(
+                                tool_def.get("bundleName") or tool_def.get("pluginId") or ""
+                            ),
                             "pluginType": str(tool_def.get("pluginType") or ""),
                             "toolType": str(tool_def.get("toolType") or ""),
                             "toolName": str(tool_def.get("toolName") or ""),
                             "description": str(tool_def.get("description") or ""),
                             "arguments": tool_def.get("arguments", {}),
+                            "outputSchema": tool_output_schema,
                             "protocol": str(tool_def.get("protocol") or ""),
+                            "deviceCommand": tool_def.get("deviceCommand"),
                         })
 
                     for agent_def in payload.get("agent_definitions", []) or []:
@@ -2672,12 +2690,18 @@ class VibeSkillChannel(BaseChannel):
                         parameters = agent_def.get("parameters", {})
                         if not isinstance(parameters, dict):
                             parameters = {}
+                        agent_output_schema = (
+                            agent_def.get("outputSchema") or agent_def.get("output_schema") or {}
+                        )
+                        if not isinstance(agent_output_schema, dict):
+                            agent_output_schema = {}
                         parts.append({
                             "type": "agentDefinition",
                             "agentId": str(agent_def.get("agentId") or agent_def.get("agent_id") or ""),
                             "name": str(agent_def.get("name") or ""),
                             "description": str(agent_def.get("description") or ""),
                             "parameters": parameters,
+                            "outputSchema": agent_output_schema,
                         })
 
                     for cli_def in payload.get("cli_definitions", []) or []:
