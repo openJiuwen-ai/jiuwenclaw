@@ -85,10 +85,12 @@ def _parse_dict_chunk(chunk: dict[str, Any], _has_streamed_content: bool) -> dic
         }
 
     if "content" in chunk:
-        return {
-            "event_type": "chat.delta" if not _has_streamed_content else "chat.final",
-            "content": chunk.get("content", ""),
-        }
+        if _has_streamed_content:
+            return None
+        text = str(chunk.get("content", "") or "")
+        if not text:
+            return None
+        return {"event_type": "chat.delta", "content": text}
 
     if "output" in chunk:
         result_type = chunk.get("result_type", "")
@@ -107,10 +109,12 @@ def _parse_dict_chunk(chunk: dict[str, Any], _has_streamed_content: bool) -> dic
                 "event_type": "chat.error",
                 "error": output.get("output", ""),
             }
-        return {
-            "event_type": "chat.delta" if not _has_streamed_content else "chat.final",
-            "content": chunk.get("output", ""),
-        }
+        if _has_streamed_content:
+            return None
+        text = str(chunk.get("output", "") or "")
+        if not text:
+            return None
+        return {"event_type": "chat.delta", "content": text}
 
     return chunk
 
@@ -210,9 +214,7 @@ def _parse_typed_chunk(chunk: Any, _has_streamed_content: bool) -> dict[str, Any
         content = strip_inline_tool_protocol(content)
 
         if _has_streamed_content and not is_chunked:
-            # Keep chat.final as a completion marker when the final answer text
-            # has already been streamed via chat.delta.
-            return {"event_type": "chat.final", "content": ""}
+            return None
 
         if not content:
             return None
@@ -436,16 +438,20 @@ def _parse_response_chunk(chunk: Any, _has_streamed_content: bool) -> dict[str, 
                     "event_type": "chat.error",
                     "error": output.get("output", ""),
                 }
-            return {
-                "event_type": "chat.delta" if not _has_streamed_content else "chat.final",
-                "content": payload.get("output", ""),
-            }
+            if _has_streamed_content:
+                return None
+            text = str(payload.get("output", "") or "")
+            if not text:
+                return None
+            return {"event_type": "chat.delta", "content": text}
 
         if "content" in payload:
-            return {
-                "event_type": "chat.delta" if not _has_streamed_content else "chat.final",
-                "content": payload.get("content", ""),
-            }
+            if _has_streamed_content:
+                return None
+            text = str(payload.get("content", "") or "")
+            if not text:
+                return None
+            return {"event_type": "chat.delta", "content": text}
 
         return payload
 

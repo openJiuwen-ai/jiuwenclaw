@@ -115,6 +115,9 @@ class JiuClawStreamEventRail(DeepAgentRail):
     def pause(self) -> None:
         self._pause_event.clear()
 
+    def is_paused(self) -> bool:
+        return not self._pause_event.is_set()
+
     def resume(self) -> None:
         self._abort_requested = False
         self._pause_event.set()
@@ -243,14 +246,14 @@ class JiuClawStreamEventRail(DeepAgentRail):
         if session is None or not isinstance(ctx.inputs, ToolCallInputs):
             return
 
-        await self._emit_tool_result(session, ctx.inputs.tool_call, ctx.inputs.tool_result)
-
         tool_name = ctx.inputs.tool_name
         if is_ask_user_question_tool_name(tool_name):
             stop_payload = extract_text_only_stop_payload(ctx.inputs.tool_result)
             if stop_payload is not None:
                 formatted = stop_payload["formatted_questions"]
+                # 必须先于 tool_result 下发选项文案，否则上层在 tool_result 处 break 会漏掉 llm_output。
                 await self._emit_user_visible_text(session, formatted)
+                await self._emit_tool_result(session, ctx.inputs.tool_call, ctx.inputs.tool_result)
                 ctx.request_force_finish(
                     {
                         "output": formatted,
@@ -261,11 +264,10 @@ class JiuClawStreamEventRail(DeepAgentRail):
                         },
                     },
                 )
-                logger.info(
-                    "[StreamEventRail] ask_user_question text_only: force-finish turn "
-                    "(interactive_ask disabled, awaiting next user message)",
-                )
+                self.pause()
                 return
+
+        await self._emit_tool_result(session, ctx.inputs.tool_call, ctx.inputs.tool_result)
 
         if tool_name in _TODO_TOOL_NAMES and self._conversation_id:
             await self._emit_todo_updated(ctx.agent, session, self._conversation_id)

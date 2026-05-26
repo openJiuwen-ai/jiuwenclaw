@@ -4643,7 +4643,7 @@ class JiuWenClawDeepAdapter:
             yield AgentResponseChunk(
                 request_id=rid,
                 channel_id=cid,
-                payload={"event_type": "chat.invocation_paused", "awaiting_user_input": True},
+                payload={"is_complete": True},
                 is_complete=True,
             )
         else:
@@ -4844,16 +4844,13 @@ class JiuWenClawDeepAdapter:
                     content = strip_inline_tool_protocol(content)
 
                     if _has_streamed_content and not is_chunked:
-                        # When llm_output has already streamed the full user-facing text,
-                        # keep chat.final as a completion marker only to avoid duplicating
-                        # the final answer block downstream.
                         log_chat_final(
                             session_id=_LLM_TRACE_SESSION_ID.get(),
                             request_id=_LLM_TRACE_REQUEST_ID.get(),
                             iteration=_LLM_TRACE_ITERATION.get(),
                             model_name=_LLM_TRACE_MODEL_NAME.get(),
                         )
-                        return {"event_type": "chat.final", "content": ""}
+                        return None
 
                     if not content:
                         return None
