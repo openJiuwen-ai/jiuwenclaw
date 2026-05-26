@@ -44,6 +44,7 @@ import logging
 from logging.handlers import BaseRotatingHandler
 from ruamel.yaml import YAML
 from ruamel.yaml.comments import CommentedMap
+from jiuwenclaw.agentserver.open_ability_utils import get_oa_auth_headers
 
 _LOG_FILE_MAX_BYTES = 20 * 1024 * 1024
 _LOG_FILE_BACKUP_COUNT = 20
@@ -1819,3 +1820,27 @@ def guess_mime_type(filename: str) -> str:
     """
     mime_type, _ = mimetypes.guess_type(filename)
     return mime_type or "application/octet-stream"
+
+
+def build_default_headers() -> dict[str, str] | None:
+    """构建 HTTP 请求的默认头。
+
+    从环境变量 ``default_headers`` 读取 JSON 对象作为基础头；
+    若 ``SANDBOX_ENABLE`` 为 true，则通过 open_ability_utils 获取沙箱认证头。
+    """
+    default_headers = os.getenv("default_headers", None)
+    try:
+        default_headers = json.loads(default_headers) if default_headers else None
+    except json.decoder.JSONDecodeError:
+        default_headers = None
+
+    sandbox_enable = os.getenv("SANDBOX_ENABLE", "").strip().lower()
+    if sandbox_enable == "true":
+        oa_headers = get_oa_auth_headers()
+        oa_headers["Accept"] = "text/event-stream"
+        if default_headers:
+            default_headers.update(oa_headers)
+        else:
+            default_headers = oa_headers
+
+    return default_headers

@@ -1,5 +1,5 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
-import json
+from jiuwenclaw.utils import build_default_headers
 import os
 import asyncio
 import logging
@@ -389,12 +389,7 @@ class PatchOpenAIModelClient(RetryMixin, OpenAIModelClient):
             final_timeout,
             self.model_client_config.max_retries
         )
-        default_headers = os.getenv("default_headers", None)
-        try:
-            default_headers = json.loads(default_headers) if default_headers else None
-        except json.decoder.JSONDecodeError as error:
-            llm_logger.warning(f"Model default headers parse failed: {error}")
-            default_headers = None
+        default_headers = build_default_headers()
         return AsyncOpenAI(
             api_key=self.model_client_config.api_key,
             base_url=self.model_client_config.api_base,

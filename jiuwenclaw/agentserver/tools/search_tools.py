@@ -18,6 +18,7 @@ import requests
 from openjiuwen.core.foundation.tool import tool
 
 from jiuwenclaw.agentserver.tools.ssl_config import get_requests_verify
+from jiuwenclaw.utils import build_default_headers
 
 logger = logging.getLogger(__name__)
 
@@ -382,18 +383,12 @@ def _resolve_petal_search_url() -> str:
 
 def _load_llm_default_headers() -> dict[str, str]:
     """Same JSON object as LLM client (e.g. Authorization); env name ``default_headers``."""
-    raw = os.environ.get("default_headers", "").strip()
-    if not raw:
-        raise ValueError(
-            "default_headers is not set (use the same JSON headers as the LLM, e.g. Authorization)"
-        )
-    try:
-        parsed = json.loads(raw)
-    except json.JSONDecodeError as exc:
-        raise ValueError(f"default_headers is not valid JSON: {exc}") from exc
-    if not isinstance(parsed, dict):
+    headers = build_default_headers()
+    if not headers:
+        raise ValueError("default_headers is not set (use the same JSON headers as the LLM, e.g. Authorization)")
+    if not isinstance(headers, dict):
         raise ValueError("default_headers must be a JSON object")
-    return {str(k): str(v) for k, v in parsed.items() if v is not None}
+    return {str(k): str(v) for k, v in headers.items() if v is not None}
 
 
 def enable_petal_search() -> bool:
@@ -416,14 +411,8 @@ def enable_petal_search() -> bool:
     ).strip()
     if not api_base:
         return False
-    raw = os.environ.get("default_headers", "").strip()
-    if not raw:
-        return False
-    try:
-        parsed = json.loads(raw)
-    except json.JSONDecodeError:
-        return False
-    return isinstance(parsed, dict)
+    parsed = build_default_headers()
+    return parsed is not None and isinstance(parsed, dict)
 
 
 # Align with common search-record assembly (title / url / content); avoid huge tool payloads.

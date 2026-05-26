@@ -8,11 +8,11 @@
 from __future__ import annotations
 
 import asyncio
-import json
 import os
 from typing import Any
 
 import requests
+from jiuwenclaw.utils import build_default_headers
 from openjiuwen.core.foundation.tool import tool
 
 from jiuwenclaw.agentserver.tools.ssl_config import get_requests_verify
@@ -44,18 +44,12 @@ def _resolve_petal_search_url() -> str:
 
 def _load_llm_default_headers() -> dict[str, str]:
     """与 LLM 客户端一致的 JSON 头（如 Authorization）；环境变量名 ``default_headers``。"""
-    raw = os.environ.get("default_headers", "").strip()
-    if not raw:
-        raise ValueError(
-            "default_headers is not set (use the same JSON headers as the LLM, e.g. Authorization)"
-        )
-    try:
-        parsed = json.loads(raw)
-    except json.JSONDecodeError as exc:
-        raise ValueError(f"default_headers is not valid JSON: {exc}") from exc
-    if not isinstance(parsed, dict):
+    headers = build_default_headers()
+    if not headers:
+        raise ValueError("default_headers is not set (use the same JSON headers as the LLM, e.g. Authorization)")
+    if not isinstance(headers, dict):
         raise ValueError("default_headers must be a JSON object")
-    return {str(k): str(v) for k, v in parsed.items() if v is not None}
+    return {str(k): str(v) for k, v in headers.items() if v is not None}
 
 
 def _petal_http_request(method: str, url: str, **kwargs: Any) -> requests.Response:
