@@ -180,3 +180,7 @@ class SessionMap:
         sess = Session(session_id=new_sid, service_id=svc, agent_id=aid)
         self._storage.set(key, sess)
         return sess
+
+    def reload(self) -> None:
+        """Reload all sessions from storage backend (called when promoted to PRIMARY)."""
+        self._storage.load()

@@ -1716,8 +1716,15 @@ async def _run(
     deployment_mode = str((config.get("gateway") or {}).get("deployment_mode", "standalone")).strip().lower()
     if deployment_mode != "standalone":
         from jiuwenclaw.gateway.leader_election import LeaderElection, Role
-
+        
         leader_election = LeaderElection.get_instance()
+
+        async def _reload_session_map_on_leader_change(role: Role) -> None:
+            if role == Role.PRIMARY:
+                logger.info("[App] PRIMARY elected, reloading session map from Redis")
+                message_handler.reload_session_map()
+
+        leader_election.register_callback(_reload_session_map_on_leader_change)
 
         # 选主结果未知前先把 cron 设为 STANDBY，避免短暂窗口内非 PRIMARY 进程触发任务；
         # cron_scheduler.start() 已在前面跑过，loop 已存活，set_active(False) 仅让它跳过事件处理。
@@ -1735,6 +1742,17 @@ async def _run(
                 cron_scheduler.set_active(False)
 
         leader_election.register_callback(_cron_on_role_change)
+
+        # 主备切换回调：升为 PRIMARY 时清理旧主遗留的所有 Pod，再由 autoscale 自动重建
+        if hasattr(client, "purge_all_pods"):
+            async def _session_on_role_change(role: Role) -> None:
+                if role == Role.PRIMARY:
+                    logger.info("[App] 角色切换为 PRIMARY，开始清理旧主遗留的所有 Pod")
+                    await client.purge_all_pods()
+                else:
+                    logger.info("[App] 角色切换为 STANDBY")
+            leader_election.register_callback(_session_on_role_change)
+
         await leader_election.start()
     else:
         logger.info("[App] standalone mode, skip LeaderElection")

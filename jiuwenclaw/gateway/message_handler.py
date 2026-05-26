@@ -184,6 +184,10 @@ class MessageHandler(ABC):
     def set_outbound_pipeline(self, pipeline: Any) -> None:
         self._outbound_pipeline = pipeline
 
+    def reload_session_map(self) -> None:
+        """Reload distributed SessionMap cache after leader switchover."""
+        self._session_map.reload()
+
     @classmethod
     def get_instance(cls, agent_client: "AgentServerClient | None" = None) -> "MessageHandler":
         """获取单例实例。
