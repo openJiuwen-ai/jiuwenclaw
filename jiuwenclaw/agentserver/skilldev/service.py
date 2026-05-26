@@ -30,7 +30,7 @@ import os
 import secrets
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import AsyncIterator, TypeAlias
+from typing import AsyncIterator
 
 from jiuwenclaw.schema.agent import AgentRequest, AgentResponseChunk
 from jiuwenclaw.schema.message import ReqMethod
@@ -45,17 +45,15 @@ from jiuwenclaw.agentserver.skilldev.schema import (
 from jiuwenclaw.agentserver.skilldev.common_utils import safe_extract_zip
 from jiuwenclaw.agentserver.skilldev.stages.validate_stage import parse_skill_frontmatter
 from jiuwenclaw.agentserver.skilldev.utils.download_file_from_url import download_file
-from jiuwenclaw.agentserver.skilldev.utils.upload_file_obs import UploadFileOSMS
-from jiuwenclaw.agentserver.skilldev.utils.upload_file_obs_sandbox import UploadFileByOSMS
 
 
 logger = logging.getLogger(__name__)
 
-UploadFileObsClient: TypeAlias = UploadFileOSMS | UploadFileByOSMS
-
-def _create_upload_file_obs() -> UploadFileObsClient:
+def _create_upload_file_obs() -> any:
     if os.getenv("SANDBOX_ENABLE", "").strip().lower() == "true":
+        from jiuwenclaw.agentserver.skilldev.utils.upload_file_obs_sandbox import UploadFileByOSMS
         return UploadFileByOSMS()
+    from jiuwenclaw.agentserver.skilldev.utils.upload_file_obs import UploadFileOSMS
     return UploadFileOSMS()
 
 # method → handler 映射，避免 if/elif 链
