@@ -51,7 +51,7 @@ import json
 import logging
 import math
 import sys
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
 
@@ -301,7 +301,7 @@ def generate_benchmark(benchmark_dir: Path, skill_name: str = "", skill_path: st
         "metadata": {
             "skill_name": skill_name or "<skill-name>",
             "skill_path": skill_path or "<path/to/skill>",
-            "timestamp": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "timestamp": datetime.now(timezone(timedelta(hours=8))).isoformat(timespec="seconds"),
             "evals_run": eval_ids,
             "runs_per_configuration": max(
                 (len(runs) for runs in results.values()), default=0

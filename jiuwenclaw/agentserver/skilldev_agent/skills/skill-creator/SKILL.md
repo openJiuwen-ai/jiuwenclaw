@@ -93,7 +93,7 @@ A skill executes on the device when:
 - `metadata.clis` is non-empty, OR
 - any entry in `metadata.tools` has `pluginType: Device`.
 
-Device-side skills must not generate `scripts/` by default. If a script is genuinely required after evaluation, call `ask_user_question` to confirm with the user that the skill includes a Python script, running it on the device will be slow, and let them choose to proceed with generation or adjust the feature. Only generate the script after explicit confirmation.
+Device-side skills must not generate `scripts/` by default. If a script is genuinely required after evaluation, call `ask_user_question` to confirm with the user that the skill includes a Python script, which may run slowly, and let them choose to proceed with generation or adjust the feature. Only generate the script after explicit confirmation.
 
 ### Self-check before moving on
 
