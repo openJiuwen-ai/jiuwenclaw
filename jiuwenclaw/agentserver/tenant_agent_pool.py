@@ -236,6 +236,10 @@ class TenantAgentPool:
             try:
                 # 设置工作目录隔离
                 agent_dir_path = get_multi_tenant_user_workspace_dir(service_id, agent_id)
+                if agent_dir_path is None:
+                    raise ValueError(
+                        f"invalid tenant workspace: agent_id={agent_id!r}, service_id={service_id!r}"
+                    )
 
                 from jiuwenclaw.agentserver.agent_manager import AgentManager
 
