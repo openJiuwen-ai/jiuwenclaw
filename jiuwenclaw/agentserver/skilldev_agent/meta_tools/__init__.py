@@ -6,5 +6,16 @@ from jiuwenclaw.agentserver.skilldev_agent.meta_tools.agent_as_a_tool import (
 from jiuwenclaw.agentserver.skilldev_agent.meta_tools.function_call_tool import (
     get_function_call_tool,
 )
+from jiuwenclaw.agentserver.skilldev_agent.meta_tools.skilldev_tool_context import (
+    extract_output_schema,
+    load_agent_output_schema,
+    resolve_session_id,
+)
 
-__all__ = ["get_agent_as_a_tool", "get_function_call_tool"]
+__all__ = [
+    "get_agent_as_a_tool",
+    "get_function_call_tool",
+    "resolve_session_id",
+    "load_agent_output_schema",
+    "extract_output_schema",
+]

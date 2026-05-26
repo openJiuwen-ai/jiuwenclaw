@@ -15,6 +15,10 @@ from openjiuwen.core.foundation.tool.base import Tool, ToolCard
 from jiuwenclaw.agentserver.skilldev_agent.meta_tools.agent_runtime_client import (
     AgentRuntimeClient,
 )
+from jiuwenclaw.agentserver.skilldev_agent.meta_tools.skilldev_tool_context import (
+    load_agent_output_schema,
+    resolve_session_id,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -130,9 +134,22 @@ class AgentAsATool(Tool):
 
     async def invoke(self, inputs: Dict[str, Any], **kwargs) -> Any:
         payload = self._validate_inputs(inputs)
+        session_id = resolve_session_id(kwargs)
+        if session_id:
+            payload["sessionId"] = session_id
+            output_schema = load_agent_output_schema(
+                session_id,
+                payload["agentId"],
+                log_prefix="AgentAsSkillTool",
+            )
+            if output_schema is not None:
+                payload["outputSchema"] = output_schema
         logger.info(
-            "[AgentAsSkillTool] invoking external agent agentId=%s (card_id=%s)",
+            "[AgentAsSkillTool] invoking external agent agentId=%s sessionId=%s "
+            "outputSchema=%s (card_id=%s)",
             payload["agentId"],
+            session_id or "",
+            "set" if payload.get("outputSchema") is not None else "missing",
             self.card.id,
         )
         result = await self._client.run_agent(payload)
