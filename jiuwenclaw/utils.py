@@ -44,7 +44,6 @@ import logging
 from logging.handlers import BaseRotatingHandler
 from ruamel.yaml import YAML
 from ruamel.yaml.comments import CommentedMap
-from jiuwenclaw.agentserver.open_ability_utils import get_oa_auth_headers
 
 _LOG_FILE_MAX_BYTES = 20 * 1024 * 1024
 _LOG_FILE_BACKUP_COUNT = 20
@@ -1836,6 +1835,7 @@ def build_default_headers() -> dict[str, str] | None:
 
     sandbox_enable = os.getenv("SANDBOX_ENABLE", "").strip().lower()
     if sandbox_enable == "true":
+        from jiuwenclaw.agentserver.open_ability_utils import get_oa_auth_headers
         oa_headers = get_oa_auth_headers()
         oa_headers["Accept"] = "text/event-stream"
         if default_headers:
