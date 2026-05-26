@@ -2,12 +2,16 @@
 from __future__ import annotations
 
 import contextvars
+import importlib.util
 import json
+import logging
 
 from openjiuwen.core.foundation.tool import tool
 
-from jiuwenclaw.agentserver.tools.deepresearch_task_manager import DeepResearchTaskManager
 from jiuwenclaw.config import get_config
+
+logger = logging.getLogger(__name__)
+_DEEPRESEARCH_DEPENDENCY = "openjiuwen_deepsearch"
 
 # 使用 contextvars
 _deepresearch_route_ctx: contextvars.ContextVar[dict[str, str] | None] = contextvars.ContextVar(
@@ -53,6 +57,19 @@ def _get_route() -> dict[str, str]:
     return route if route is not None else {"request_id": "", "channel_id": "", "session_id": ""}
 
 
+def _deepresearch_dependency_available() -> bool:
+    """Return whether DeepResearch optional runtime is importable."""
+    return importlib.util.find_spec(_DEEPRESEARCH_DEPENDENCY) is not None
+
+
+def _get_task_manager_cls():
+    """Import DeepResearch implementation lazily so agent startup can skip it."""
+    from jiuwenclaw.agentserver.tools.deepresearch_task_manager import (  # pylint: disable=import-outside-toplevel
+        DeepResearchTaskManager,
+    )
+    return DeepResearchTaskManager
+
+
 @tool(
     name="deepresearch_create_task",
     description=(
@@ -76,7 +93,7 @@ async def deepresearch_create_task(
     Returns:
         任务 ID
     """
-    manager = await DeepResearchTaskManager.get_instance()
+    manager = await _get_task_manager_cls().get_instance()
     route = _get_route()
     task_id = await manager.create_task(
         query=query,
@@ -107,7 +124,7 @@ async def deepresearch_get_status(task_id: str) -> str:
     Returns:
         任务状态信息（JSON 格式字符串）
     """
-    manager = await DeepResearchTaskManager.get_instance()
+    manager = await _get_task_manager_cls().get_instance()
     route = _get_route()
     task_info = await manager.get_task_status(
         task_id,
@@ -138,7 +155,7 @@ async def deepresearch_list_tasks(status: str = "") -> str:
     Returns:
         任务列表（JSON 格式字符串）
     """
-    manager = await DeepResearchTaskManager.get_instance()
+    manager = await _get_task_manager_cls().get_instance()
     route = _get_route()
     status_filter = status if status else None
     tasks = await manager.list_tasks(
@@ -170,7 +187,7 @@ async def deepresearch_cancel_task(task_id: str) -> str:
     Returns:
         操作结果
     """
-    manager = await DeepResearchTaskManager.get_instance()
+    manager = await _get_task_manager_cls().get_instance()
     route = _get_route()
     success = await manager.cancel_task(
         task_id,
@@ -199,7 +216,7 @@ async def deepresearch_get_result(task_id: str) -> str:
     Returns:
         任务结果
     """
-    manager = await DeepResearchTaskManager.get_instance()
+    manager = await _get_task_manager_cls().get_instance()
     route = _get_route()
     result = await manager.get_task_result(
         task_id,
@@ -250,7 +267,7 @@ async def deepresearch_run_task(
     Returns:
         报告保存路径信息字符串
     """
-    manager = await DeepResearchTaskManager.get_instance()
+    manager = await _get_task_manager_cls().get_instance()
     route = _get_route()
     result = await manager.run_task_direct(
         query=query,
@@ -285,6 +302,12 @@ def get_deepresearch_tools() -> list:
         工具列表
     """
     if not enable_deepresearch():
+        return []
+    if not _deepresearch_dependency_available():
+        logger.warning(
+            "DeepResearch tools disabled because optional dependency is missing: %s",
+            _DEEPRESEARCH_DEPENDENCY,
+        )
         return []
     return [
         deepresearch_run_task,

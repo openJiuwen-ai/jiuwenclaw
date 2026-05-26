@@ -7,7 +7,7 @@
 # 注意：
 # - 此文件排除了渠道适配器（飞书、钉钉、Telegram 等）
 # - 排除了向量存储（chromadb, pymilvus, sqlite-vec）
-# - 排除了文档处理（tree-sitter, trafilatura, pdfplumber）
+# - 排除了重型文档处理（tree-sitter, pdfplumber）
 # - 排除了测试依赖（pytest 系列）
 #
 # 如需本地 openjiuwen，设置环境变量：
@@ -96,10 +96,17 @@ beautifulsoup4>=4.12.0
 docx2txt>=0.8
 
 # ============================================================
+# 网页内容抽取（默认 WebFetch 工具依赖）
+# ============================================================
+trafilatura>=1.6.0
+# lxml 5.2+ 将 html.clean 拆出；trafilatura/justext 仍依赖 lxml.html.clean
+lxml_html_clean>=0.4.0
+
+# ============================================================
 # openjiuwen 核心 Agent 运行时
 # ============================================================
 # 方式 1：从 gitcode 安装（需要网络）
-# openjiuwen @ git+https://gitcode.com/openJiuwen/agent-core.git@enterprise-dev
+openjiuwen-harmonyos @ git+https://gitcode.com/openJiuwen/agent-core.git@enterprise-dev#subdirectory=harmonyos
 
 # 方式 2：从本地路径安装（鸿蒙环境推荐）
 # 设置 USE_LOCAL_OPENJIUWEN=1 和 AGENT_CORE_PATH 环境变量
