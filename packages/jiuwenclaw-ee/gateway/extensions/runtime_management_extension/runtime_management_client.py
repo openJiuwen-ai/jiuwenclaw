@@ -200,12 +200,18 @@ class E2aEnvelopResponseParser(IResponseParser):
 class RuntimeManagementAgentClient(AgentServerClient):
     """Runtime Management Agent Client."""
 
+    _POD_LABEL_KEY = "jiuwenclaw-component"
+    _POD_LABEL_VALUE = "agentserver"
+    _POD_LABEL = {_POD_LABEL_KEY: _POD_LABEL_VALUE}
+    _POD_LABEL_SELECTOR = f"{_POD_LABEL_KEY}={_POD_LABEL_VALUE}"
+
     def __init__(self) -> None:
         """初始化 Runtime Management 客户端。"""
 
         agent_image = os.getenv("AGENT_SERVER_IMAGE")
         agent_runtime = os.getenv("AGENT_RUNTIME")
         namespace = os.getenv("AGENT_SERVER_NAMESPACE")
+        self._namespace = os.getenv("AGENT_SERVER_NAMESPACE")
         container_name = os.getenv("AGENT_SERVER_CONTAINER_NAME")
         container_port = int(os.getenv("AGENT_SERVER_PORT"))
         port_name = os.getenv("AGENT_SERVER_PORT_NAME")
@@ -223,6 +229,7 @@ class RuntimeManagementAgentClient(AgentServerClient):
         mode = os.getenv("MODE")
         node_name = os.getenv("NODE_NAME")
         kubeconfig = os.getenv("AGENT_SERVER_KUBECONFIG") or None
+        self._kubeconfig = os.getenv("AGENT_SERVER_KUBECONFIG") or None
         readiness_initial_delay = int(os.getenv("AGENT_SERVER_READINESS_INITIAL_DELAY"))
         readiness_period = int(os.getenv("AGENT_SERVER_READINESS_PERIOD"))
         ready_timeout = int(os.getenv("AGENT_SERVER_READY_TIMEOUT"))
@@ -254,6 +261,7 @@ class RuntimeManagementAgentClient(AgentServerClient):
                     container_port=int(cfg["container_port"]) if "container_port" in cfg else container_port,
                     port_name=cfg["port_name"] if "port_name" in cfg else port_name,
                     image_pull_policy=cfg["image_pull_policy"] if "image_pull_policy" in cfg else image_pull_policy,
+                    extra_labels=dict(RuntimeManagementAgentClient._POD_LABEL),
                     env_vars={
                         "AGENT_SERVER_HOST": "0.0.0.0",
                         "AGENT_RUNTIME": agent_runtime,
@@ -385,19 +393,16 @@ class RuntimeManagementAgentClient(AgentServerClient):
         )
         self._connected = True
 
-    async def purge_all_pods(self) -> None:
-        """主备切换时调用：清空当前进程持有的所有 Pod，但不停 ServiceManager。"""
-        if not self._connected:
-            logger.warning("[RuntimeManagementAgentClient] purge_all_pods skipped: not connected")
-            return
+    async def cleanup_all_pods(self) -> None:
+        """主备切换时调用：清理所有 AgentServer Pod。"""
         try:
-            result = await self._access.purge_all_pods()
-            logger.info(
-                "[RuntimeManagementAgentClient] purge_all_pods done: deleted=%s failed=%s",
-                result.deleted_count, len(result.failed),
+            await self._access.cleanup_all_pods(
+                namespace=self._namespace,
+                kubeconfig=self._kubeconfig,
+                label_selector=self._POD_LABEL_SELECTOR,
             )
         except Exception as exc:
-            logger.exception("[RuntimeManagementAgentClient] purge_all_pods failed: %s", exc)
+            logger.exception("[RuntimeManagementAgentClient] cleanup_all_pods failed: %s", exc)
 
     async def disconnect(self) -> None:
         """断开连接并清理资源。"""
