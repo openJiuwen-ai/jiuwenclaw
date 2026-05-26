@@ -216,6 +216,10 @@ class RuntimeManagementAgentClient(AgentServerClient):
         nfs_server = os.getenv("AGENT_SERVER_NFS_SERVER", "")
         nfs_path = os.getenv("AGENT_SERVER_NFS_PATH", "/")
         nfs_mount_path = os.getenv("AGENT_SERVER_NFS_MOUNT_PATH")
+        host_path = os.getenv("AGENT_SERVER_HOST_PATH")
+        host_mount_path = os.getenv("AGENT_SERVER_HOST_MOUNT_PATH")
+        mode = os.getenv("MODE")
+        node_name = os.getenv("NODE_NAME")
         kubeconfig = os.getenv("AGENT_SERVER_KUBECONFIG") or None
         readiness_initial_delay = int(os.getenv("AGENT_SERVER_READINESS_INITIAL_DELAY"))
         readiness_period = int(os.getenv("AGENT_SERVER_READINESS_PERIOD"))
@@ -267,6 +271,10 @@ class RuntimeManagementAgentClient(AgentServerClient):
                     nfs_server=cfg.get("nfs_server") if "nfs_server" in cfg else nfs_server,
                     nfs_path=cfg.get("nfs_path") if "nfs_path" in cfg else nfs_path,
                     nfs_mount_path=cfg.get("nfs_mount_path") if "nfs_mount_path" in cfg else nfs_mount_path,
+                    host_path=cfg.get("host_path") if "host_path" in cfg else host_path,
+                    host_mount_path=cfg.get("host_mount_path") if "host_mount_path" in cfg else host_mount_path,
+                    mode=cfg.get("mode") if "mode" in cfg else mode,
+                    node_name=cfg.get("node_name") if "node_name" in cfg else node_name,
                     cpu_request=cfg.get("cpu_request") if "cpu_request" in cfg else cpu_request,
                     memory_request=cfg.get("memory_request") if "memory_request" in cfg else memory_request,
                     cpu_limit=cfg.get("cpu_limit") if "cpu_limit" in cfg else cpu_limit,

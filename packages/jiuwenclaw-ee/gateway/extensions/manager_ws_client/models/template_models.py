@@ -201,6 +201,10 @@ class ServiceConfigTemplateInfo(BaseModel):
     nfs_server: str | None
     nfs_path: str
     nfs_mount_path: str | None
+    host_path: str | None
+    host_mount_path: str | None
+    mode: str
+    node_name: str
     cpu_request: str
     memory_request: str
     cpu_limit: str
@@ -258,6 +262,10 @@ SERVICE_CONFIG_TEMPLATE_TABLE_DEF = TableDefinition(
         ColumnDefinition("nfs_server", "string", length=256, nullable=True),
         ColumnDefinition("nfs_path", "string", length=512, nullable=False, default="/"),
         ColumnDefinition("nfs_mount_path", "string", length=512, nullable=True),
+        ColumnDefinition("host_path", "string", length=512, nullable=True),
+        ColumnDefinition("host_mount_path", "string", length=512, nullable=True),
+        ColumnDefinition("mode", "string", length=512, nullable=False, default="product"),
+        ColumnDefinition("node_name", "string", length=512, nullable=False, default=""),
         ColumnDefinition("cpu_request", "string", length=32, nullable=False, default="500m"),
         ColumnDefinition("memory_request", "string", length=32, nullable=False, default="512Mi"),
         ColumnDefinition("cpu_limit", "string", length=32, nullable=False, default="1000m"),
