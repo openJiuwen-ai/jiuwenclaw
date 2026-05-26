@@ -101,12 +101,12 @@ Router 维护的 runtime 信息包括：
 `create_sandbox` 成功后，Router 在 `_register_sandbox_record` 中按顺序完成注册：
 
 1. 向 DCS 写入：`key=jiuwen:sandboxApiKey:{sandbox_id}`，`value=API Key 的 SHA256`（明文 API Key 不落库）。
-2. 向沙箱内上传 `init_data.json`（默认 `/home/sandbox/init_data.json`），payload 为 `{"apiKey": "<Claw API Key>", "sandboxId": "<sandbox_id>"}`；经本地临时文件 + `SandboxClient.upload_file(...)` 写入。调用 `upload_file` 时会去掉 `/home/sandbox/` 前缀（`SandboxClient.upload_file` 的 `remote_path` 相对于沙箱 home 目录），其余前缀按原样下发。
+2. 向沙箱内上传 `init_data.json`（默认 `/opt/huawei/app/jiuwenclaw/init_data.json`），payload 为 `{"apiKey": "<Claw API Key>", "sandboxId": "<sandbox_id>"}`；经本地临时文件 + `SandboxClient.upload_file(...)` 写入。调用 `upload_file` 前会去掉任何目录前缀，只保留 basename 作为 `remote_path` 传入。
 3. 任一步失败则 sandbox 注册失败，后续不会建 OA WebSocket。
 
 实现：`jiuwenclaw/sandbox/sandbox_dcs_store.py`（DCS）、`jiuwenclaw/sandbox/sandbox_init_data.py`（`upload_sandbox_init_data`）；Router 入口：`SandboxRouterAgentClient._register_sandbox_record`。
 
-沙箱内 AgentServer 通过环境变量 `SANDBOX_INIT_DATA_PATH` 指定读取路径（与 Gateway 侧默认路径一致）；未配置时使用 `/home/sandbox/init_data.json`。
+沙箱内 AgentServer 通过环境变量 `SANDBOX_INIT_DATA_PATH` 指定读取路径（与 Gateway 侧默认路径一致）；未配置时使用 `/opt/huawei/app/jiuwenclaw/init_data.json`。
 
 ### 2.7 OpenAbility WebSocket 建链与通信
 
@@ -149,7 +149,7 @@ _disconnect_agent_client(sandbox_id, agent_client) -> None
 
 开启时另需：`SANDBOX_API_BASE`、`SANDBOX_TEMPLATE_ID`、`SANDBOX_DCS_HOST`、`SANDBOX_DCS_PORT`、`SANDBOX_DCS_PASSWORD`、`GATEWAY_TO_OA_WS_PATH`。
 
-可选：`SANDBOX_INIT_DATA_PATH` — 沙箱内 `init_data.json` 上传路径；Gateway 与 AgentServer 均读取此变量，默认 `/home/sandbox/init_data.json`。Gateway 上传时会去掉 `/home/sandbox/` 前缀再传给 `SandboxClient.upload_file`（沙箱 home 目录之外的路径按原值传递）。
+可选：`SANDBOX_INIT_DATA_PATH` — 沙箱内 `init_data.json` 上传路径；Gateway 与 AgentServer 均读取此变量，默认 `/opt/huawei/app/jiuwenclaw/init_data.json`。Gateway 上传时会去掉任何目录前缀，仅以 basename 作为 `SandboxClient.upload_file` 的 `remote_path`。
 
 可选：`SANDBOX_DCS_TTL_SECONDS` — 写入 DCS 的 sandbox API key 哈希记录的过期时间（秒），默认 `86400`（一天）；设置为 `0` 表示不设置过期时间。
 

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import posixpath
 import tempfile
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -12,8 +13,7 @@ if TYPE_CHECKING:
     from jiuwenclaw.sandbox.sandbox_client import SandboxClient
 
 SANDBOX_INIT_DATA_PATH_ENV = "SANDBOX_INIT_DATA_PATH"
-DEFAULT_SANDBOX_INIT_DATA_PATH = "/home/sandbox/init_data.json"
-SANDBOX_REMOTE_PATH_PREFIX = "/home/sandbox/"
+DEFAULT_SANDBOX_INIT_DATA_PATH = "/opt/huawei/app/jiuwenclaw/init_data.json"
 
 
 def get_sandbox_init_data_path() -> str:
@@ -24,17 +24,15 @@ def get_sandbox_init_data_path() -> str:
 
 
 def strip_sandbox_remote_path_prefix(path: str) -> str:
-    """Strip the ``/home/sandbox/`` prefix from a sandbox-side path.
+    """Strip any directory prefix from a sandbox-side path, returning the basename.
 
-    ``SandboxClient.upload_file`` expects ``remote_path`` to be relative to the
-    sandbox's home directory, while ``SANDBOX_INIT_DATA_PATH`` is configured as
-    an absolute path (so AgentServer inside the sandbox can read it directly).
-    Strip the well-known prefix before invoking ``upload_file``.
+    ``SandboxClient.upload_file`` expects ``remote_path`` to be a name relative
+    to the sandbox upload root, while ``SANDBOX_INIT_DATA_PATH`` is configured
+    as an absolute path (so AgentServer inside the sandbox can read it
+    directly). Drop every directory component before invoking ``upload_file``.
     """
 
-    if path.startswith(SANDBOX_REMOTE_PATH_PREFIX):
-        return path[len(SANDBOX_REMOTE_PATH_PREFIX):]
-    return path
+    return posixpath.basename(path.strip())
 
 
 def build_sandbox_init_data_payload(*, api_key: str, sandbox_id: str) -> dict[str, str]:

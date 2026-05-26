@@ -9,7 +9,6 @@ from jiuwenclaw.sandbox.sandbox_dcs_store import SandboxDcsConfig, SandboxDcsRec
 from jiuwenclaw.sandbox.sandbox_init_data import (
     DEFAULT_SANDBOX_INIT_DATA_PATH,
     SANDBOX_INIT_DATA_PATH_ENV,
-    SANDBOX_REMOTE_PATH_PREFIX,
     build_sandbox_init_data_payload,
     get_sandbox_init_data_path,
     serialize_sandbox_init_data,
@@ -23,7 +22,6 @@ __all__ = [
     "OpenAbilityConfig",
     "OpenAbilityEndpoint",
     "SANDBOX_INIT_DATA_PATH_ENV",
-    "SANDBOX_REMOTE_PATH_PREFIX",
     "SandboxDcsConfig",
     "SandboxDcsRecord",
     "SandboxClient",
