@@ -122,13 +122,16 @@ async def generate_skill_name_with_model(
     for attempt in range(1, _MAX_SKILL_NAME_ATTEMPTS + 1):
         user_prompt = _build_skill_name_user_query(user_query=user_query, attempt=attempt)
         try:
-            response = await model.invoke(
+            chunks: list[str] = []
+            async for chunk in model.stream(
                 messages=[
                     SystemMessage(content=_SKILL_NAME_SYSTEM_PROMPT),
                     UserMessage(content=user_prompt),
                 ],
-            )
-            raw_name = _extract_message_content(response)
+            ):
+                if chunk.content:
+                    chunks.append(chunk.content)
+            raw_name = "".join(chunks)
             logger.info(
                 "[session=%s] [skill_naming] 生成 skill_name (尝试 %d/%d): %s",
                 task_id,
