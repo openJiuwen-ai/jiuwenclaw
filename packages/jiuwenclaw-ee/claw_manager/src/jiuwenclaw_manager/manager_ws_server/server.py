@@ -12,7 +12,7 @@ from typing import Any
 
 from jiuwenclaw_manager.infrastructure.db import get_db_handler
 from jiuwenclaw_manager.infrastructure.logger import get_logger
-from jiuwenclaw_manager.core.instance.instance_service import get_jiuwenclaw_id_by_service_id
+from jiuwenclaw_manager.core.instance.instance_service import register_gateway_via_ws
 from jiuwenclaw_manager.manager_ws_server.protocol import (
     FRAME_TYPE_CONFIG_ACK,
     FRAME_TYPE_REGISTER,
@@ -30,7 +30,6 @@ class _ConnectedClient:
     ws: Any
     jiuwenclaw_id: str
     service_type: str
-    service_id: str
     send_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
 
 
@@ -147,9 +146,9 @@ class ManagerWsServer:
                 sent += 1
             except Exception as exc:  # noqa: BLE001
                 logger.warning(
-                    "[ManagerWsServer] push failed jiuwenclaw_id=%s service_id=%s: %s",
+                    "[ManagerWsServer] push failed jiuwenclaw_id=%s service_type=%s: %s",
                     jiuwenclaw_id,
-                    client.service_id,
+                    client.service_type,
                     exc,
                 )
         return sent
@@ -273,29 +272,30 @@ class ManagerWsServer:
             await ws.send(json.dumps(err, ensure_ascii=False))
             return
 
-        service_type = str(payload.get("service_type") or "gateway").strip()
-        service_id = str(payload.get("service_id") or "").strip()
-        if not service_id:
-            err = build_error("register requires service_id")
+        service_type = str(payload.get("service_type") or "").strip().lower()
+        if not service_type:
+            err = build_error("register requires service_type")
+            await ws.send(json.dumps(err, ensure_ascii=False))
+            return
+        if service_type != "gateway":
+            err = build_error("manager ws register only accepts service_type=gateway")
             await ws.send(json.dumps(err, ensure_ascii=False))
             return
 
         try:
             handler = get_db_handler()
-            jiuwenclaw_id = await get_jiuwenclaw_id_by_service_id(
+            jiuwenclaw_id = await register_gateway_via_ws(
                 handler,
-                service_id,
-                service_type=service_type,
+                payload,
+                manager_id=self._manager_id,
             )
         except RuntimeError as exc:
             err = build_error(f"manager database unavailable: {exc}")
             await ws.send(json.dumps(err, ensure_ascii=False))
             return
-        if not jiuwenclaw_id:
-            err = build_error(
-                f"unknown service_id={service_id!r} for service_type={service_type!r}; "
-                "ensure jiuwenclaw instance and service_instance mapping exist"
-            )
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("[ManagerWsServer] register failed: %s", exc)
+            err = build_error(f"register failed: {exc}")
             await ws.send(json.dumps(err, ensure_ascii=False))
             return
 
@@ -303,7 +303,6 @@ class ManagerWsServer:
             ws=ws,
             jiuwenclaw_id=jiuwenclaw_id,
             service_type=service_type,
-            service_id=service_id,
         )
         async with self._clients_lock:
             self._clients[key] = client
@@ -314,11 +313,10 @@ class ManagerWsServer:
             logger.warning("[ManagerWsServer] register.ack failed: %s", exc)
         registered = await self.list_registered_jiuwenclaw_ids()
         logger.info(
-            "[ManagerWsServer] registered jiuwenclaw_id=%s service_type=%s service_id=%s "
+            "[ManagerWsServer] registered jiuwenclaw_id=%s service_type=%s "
             "active_jiuwenclaw_ids=%s pid=%s",
             jiuwenclaw_id,
             service_type,
-            client.service_id,
             registered,
             os.getpid(),
         )

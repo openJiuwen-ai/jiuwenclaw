@@ -9,7 +9,7 @@ import json
 import re
 from typing import Any
 
-from . import gateway_db
+from .gateway_db import GatewayDb
 from .schemas import RoutingContext, TemplateRefSlot
 
 _VAR_PATTERN = re.compile(r"\$\{(\w+)\}")
@@ -18,7 +18,7 @@ _MAPPING_DIM_PATTERN = re.compile(r"^\$\{(user|group)::([^}]+)\}$", re.IGNORECAS
 
 
 async def _list_records(*args: Any, **kwargs: Any) -> list[dict[str, Any]]:
-    return await gateway_db.list_records(*args, **kwargs)
+    return await GatewayDb.current().list_records(*args, **kwargs)
 
 
 async def _lookup_mapping_by_part(

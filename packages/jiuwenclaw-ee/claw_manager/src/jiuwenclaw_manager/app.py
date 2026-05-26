@@ -5,13 +5,11 @@ from __future__ import annotations
 import asyncio
 from contextlib import asynccontextmanager
 
-import httpx
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from jiuwenclaw_manager import __version__
 from jiuwenclaw_manager.infrastructure.config import settings
-from jiuwenclaw_manager.infrastructure.gateway_forward import GatewayHttpClient
 from jiuwenclaw_manager.infrastructure.db import create_db_handler, database_config_summary
 from jiuwenclaw_manager.infrastructure.logger import configure_logging, get_logger
 from jiuwenclaw_manager.core.instance.instance_service import backfill_service_instances
@@ -35,7 +33,6 @@ async def lifespan(application: FastAPI):
         _log.info("backfilled service_instance mappings", instance_count=backfilled)
     stop = asyncio.Event()
     scan_task = asyncio.create_task(run_heartbeat_scan_loop(stop, db_handler))
-    GatewayHttpClient.init(timeout=httpx.Timeout(settings.upstream_http_timeout_seconds))
     manager_ws_server = None
     if settings.manager_ws_enabled:
         from jiuwenclaw_manager.manager_ws_server import ManagerWsServer
@@ -70,7 +67,6 @@ async def lifespan(application: FastAPI):
 
         set_manager_ws_server(None)
         await manager_ws_server.stop()
-    await GatewayHttpClient.close()
     await db_handler.disconnect()
     _log.info("shutdown")
 

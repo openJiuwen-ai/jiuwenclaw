@@ -10,7 +10,8 @@ from collections.abc import Awaitable, Callable
 from typing import Any
 from urllib.parse import urlsplit
 
-from ..infrastructure.utils import set_jiuwenclaw_id
+from ..core.enterprise_config.gateway_db import GatewayDb
+from ..infrastructure.utils import get_jiuwenclaw_id, set_jiuwenclaw_id
 from .protocol import (
     EVENT_CONNECTION_ACK,
     EVENT_REGISTER_ACK,
@@ -44,13 +45,11 @@ class ManagerWsClient:
         self,
         *,
         service_type: str = "gateway",
-        service_id: str,
         ping_interval: float | None = 30.0,
         ping_timeout: float | None = 300.0,
         on_config_push: ManagerWsConfigPushHandler | None = None,
     ) -> None:
-        self._service_type = (service_type or "gateway").strip() or "gateway"
-        self._service_id = (service_id or "").strip() or "gateway-1"
+        self._service_type = service_type
         self._ping_interval = ping_interval
         self._ping_timeout = ping_timeout
         self._on_config_push = on_config_push
@@ -59,6 +58,10 @@ class ManagerWsClient:
         self._running = False
         self._session_task: asyncio.Task[None] | None = None
         self._ready = False
+
+    @property
+    def jiuwenclaw_id(self) -> str | None:
+        return get_jiuwenclaw_id()
 
     @property
     def ready(self) -> bool:
@@ -82,6 +85,7 @@ class ManagerWsClient:
         self._running = False
         self._ready = False
         set_jiuwenclaw_id(None)
+        GatewayDb.bind(None)
         if self._ws is not None:
             try:
                 await self._ws.close()
@@ -105,14 +109,16 @@ class ManagerWsClient:
             except asyncio.CancelledError:
                 raise
             except Exception as exc:  # noqa: BLE001
+                jid_label = get_jiuwenclaw_id() or "unassigned"
                 logger.warning(
-                    "[ManagerWsClient] session ended service_id=%s, retry in %ss: %s",
-                    self._service_id,
+                    "[ManagerWsClient] session ended jiuwenclaw_id=%s, retry in %ss: %s",
+                    jid_label,
                     retry_interval,
                     exc,
                 )
             self._ready = False
             set_jiuwenclaw_id(None)
+            GatewayDb.bind(None)
             if self._ws is not None:
                 try:
                     await self._ws.close()
@@ -134,6 +140,10 @@ class ManagerWsClient:
 
             connect_fn = websockets.connect
 
+        jid = get_jiuwenclaw_id()
+        if jid:
+            GatewayDb.bind(jid)
+
         logger.info("[ManagerWsClient] connecting %s", uri)
         async with connect_fn(
             uri,
@@ -146,8 +156,8 @@ class ManagerWsClient:
             if not await self._handshake(ws):
                 raise RuntimeError("manager ws handshake failed")
             logger.info(
-                "[ManagerWsClient] session active service_id=%s uri=%s",
-                self._service_id,
+                "[ManagerWsClient] session active jiuwenclaw_id=%s uri=%s",
+                get_jiuwenclaw_id(),
                 uri,
             )
             await self._recv_loop(ws)
@@ -167,10 +177,7 @@ class ManagerWsClient:
         else:
             logger.warning("[ManagerWsClient] unexpected first frame: %s", data.get("type"))
 
-        reg = build_register(
-            service_type=self._service_type,
-            service_id=self._service_id,
-        )
+        reg = build_register(service_type=self._service_type)
         await ws.send(json.dumps(reg, ensure_ascii=False))
 
         raw_reg = await asyncio.wait_for(ws.recv(), timeout=10.0)
@@ -191,14 +198,13 @@ class ManagerWsClient:
         if not ack_jiuwenclaw_id:
             raise RuntimeError("manager ws register.ack missing jiuwenclaw_id")
         set_jiuwenclaw_id(ack_jiuwenclaw_id)
+        GatewayDb.bind(ack_jiuwenclaw_id)
 
         self._ready = True
         logger.info(
-            "[ManagerWsClient] registered jiuwenclaw_id=%s service_type=%s service_id=%s "
-            "(register.ack ok)",
+            "[ManagerWsClient] registered jiuwenclaw_id=%s service_type=%s (register.ack ok)",
             ack_jiuwenclaw_id,
             self._service_type,
-            self._service_id,
         )
         return True
 

@@ -34,9 +34,30 @@ from jiuwenclaw.agentserver.enterprise_config.loader import (
 from jiuwenclaw.schema.agent import AgentRequest
 
 _utils = _load_manager_ws_utils()
+_gateway_db_mod = importlib.import_module(
+    f"{_EXT_PKG}.core.enterprise_config.gateway_db"
+)
+GatewayDb = _gateway_db_mod.GatewayDb
 expressions = importlib.import_module(
     f"{_EXT_PKG}.core.enterprise_config.expressions"
 )
+
+
+def _bind_gateway_db(monkeypatch: pytest.MonkeyPatch, jiuwenclaw_id: str) -> GatewayDb:
+    """与生产一致：设置 JIUWENCLAW_ID 并 bind GatewayDb（import 时 bind 的 id 可能为空）。"""
+    monkeypatch.setenv("JIUWENCLAW_ID", jiuwenclaw_id)
+    return GatewayDb.bind(jiuwenclaw_id)
+
+
+def _patch_gateway_queries(
+    monkeypatch: pytest.MonkeyPatch,
+    db: GatewayDb,
+    *,
+    list_records: Any,
+    fetch_template_by_slot: Any,
+) -> None:
+    monkeypatch.setattr(db, "list_records", list_records)
+    monkeypatch.setattr(db, "fetch_template_by_slot", fetch_template_by_slot)
 
 RoutingContext = schemas.RoutingContext
 normalize_template_ref = _utils.normalize_template_ref
@@ -349,14 +370,14 @@ def test_fill_missing_template_ref_slots() -> None:
 async def test_load_effective_config_fills_missing_slots_from_global(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setenv("JIUWENCLAW_PROVISIONED_INSTANCE_ID", "sp-demo")
+    jid = "sp-demo"
+    db = _bind_gateway_db(monkeypatch, jid)
 
     m2 = "22222222-2222-4222-8222-222222222222"
     m5 = "55555555-5555-4555-8555-555555555555"
     m1 = "11111111-1111-4111-8111-111111111111"
     w1, w2, w3 = "w1", "w2", "w3"
     e1, e2, e4 = "e1", "e2", "e4"
-    jid = "sp-demo"
 
     async def _list_records(
         table: str,
@@ -364,7 +385,7 @@ async def test_load_effective_config_fills_missing_slots_from_global(
         filters: dict | None = None,
         order_by: str = "",
     ) -> list[dict]:
-        scoped = gateway_db.apply_instance_scope(table, dict(filters or {}))
+        scoped = db.apply_instance_scope(table, dict(filters or {}))
         if table == "config_effective_service_policy":
             if scoped.get("jiuwenclaw_id") not in (None, jid):
                 return []
@@ -428,8 +449,12 @@ async def test_load_effective_config_fills_missing_slots_from_global(
     async def _fetch_template_by_slot(slot: str, template_id: str) -> dict | None:
         return {"template_id": template_id, "model_id": template_id, "slot": slot}
 
-    monkeypatch.setattr(gateway_db, "list_records", _list_records)
-    monkeypatch.setattr(gateway_db, "fetch_template_by_slot", _fetch_template_by_slot)
+    _patch_gateway_queries(
+        monkeypatch,
+        db,
+        list_records=_list_records,
+        fetch_template_by_slot=_fetch_template_by_slot,
+    )
 
     request = AgentRequest(
         request_id="req-test-bob",
@@ -457,7 +482,7 @@ async def test_load_effective_config_fills_missing_slots_from_global(
 async def test_load_effective_config_scopes_global_policy_by_jiuwenclaw_id(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setenv("JIUWENCLAW_PROVISIONED_INSTANCE_ID", "sp-current")
+    db = _bind_gateway_db(monkeypatch, "sp-current")
     e4 = "44444444-4444-4444-8444-444444444444"
     e3_old = "33333333-3333-4333-8333-333333333333"
     m1 = "11111111-1111-4111-8111-111111111111"
@@ -469,7 +494,7 @@ async def test_load_effective_config_scopes_global_policy_by_jiuwenclaw_id(
         filters: dict | None = None,
         order_by: str = "",
     ) -> list[dict]:
-        scoped = gateway_db.apply_instance_scope(table, dict(filters or {}))
+        scoped = db.apply_instance_scope(table, dict(filters or {}))
         if table == "config_effective_service_policy":
             return []
         if table == "config_effective_global_policy":
@@ -500,8 +525,12 @@ async def test_load_effective_config_scopes_global_policy_by_jiuwenclaw_id(
             "slot": slot,
         }
 
-    monkeypatch.setattr(gateway_db, "list_records", _list_records)
-    monkeypatch.setattr(gateway_db, "fetch_template_by_slot", _fetch_template_by_slot)
+    _patch_gateway_queries(
+        monkeypatch,
+        db,
+        list_records=_list_records,
+        fetch_template_by_slot=_fetch_template_by_slot,
+    )
 
     request = AgentRequest(
         request_id="req-test-unknown",
@@ -526,9 +555,9 @@ async def test_load_effective_config_scopes_global_policy_by_jiuwenclaw_id(
 async def test_load_service_config_returns_resolved_service_and_agent_id(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setenv("JIUWENCLAW_PROVISIONED_INSTANCE_ID", "sp-demo")
-    s1 = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
     jid = "sp-demo"
+    db = _bind_gateway_db(monkeypatch, jid)
+    s1 = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
 
     async def _list_records(
         table: str,
@@ -536,7 +565,7 @@ async def test_load_service_config_returns_resolved_service_and_agent_id(
         filters: dict | None = None,
         order_by: str = "",
     ) -> list[dict]:
-        scoped = gateway_db.apply_instance_scope(table, dict(filters or {}))
+        scoped = db.apply_instance_scope(table, dict(filters or {}))
         if table == "config_effective_service_policy":
             if scoped.get("jiuwenclaw_id") not in (None, jid):
                 return []
@@ -581,8 +610,12 @@ async def test_load_service_config_returns_resolved_service_and_agent_id(
             "max_services": 10,
         }
 
-    monkeypatch.setattr(gateway_db, "list_records", _list_records)
-    monkeypatch.setattr(gateway_db, "fetch_template_by_slot", _fetch_template_by_slot)
+    _patch_gateway_queries(
+        monkeypatch,
+        db,
+        list_records=_list_records,
+        fetch_template_by_slot=_fetch_template_by_slot,
+    )
 
     alice_request = AgentRequest(
         request_id="req-alice",
