@@ -141,7 +141,6 @@ class JiuClawContextEngineeringRail(ContextEngineeringRail):
                 self.sys_operation,
                 self.workspace,
                 lang,
-                skip_files=self._skip_context_files or None,
             )
 
         header = CONTEXT_HEADER.get(lang, CONTEXT_HEADER["cn"])
