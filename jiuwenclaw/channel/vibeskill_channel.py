@@ -3192,6 +3192,9 @@ class VibeSkillChannel(BaseChannel):
 
     async def _handle_http_session_get(self, session_id: str) -> tuple[int, dict, bytes]:
         """GET /api/v1/session/{id} - 查询会话状态。"""
+        # Validate sessionID is not empty
+        if not session_id:
+            return self._json_response(400, {"error": "sessionID cannot be empty"})
         # Validate sessionID format: reject numeric-only IDs (type error)
         if session_id.isdigit():
             return self._json_response(400, {"error": "sessionID cannot be purely numeric"})
@@ -3313,6 +3316,8 @@ class VibeSkillChannel(BaseChannel):
 
     async def _handle_http_session_delete(self, session_id: str) -> tuple[int, dict, bytes]:
         """DELETE /api/v1/session/{id} - 删除会话。"""
+        if not session_id:
+            return self._json_response(400, {"error": "sessionID cannot be empty"})
         session_obj = await self._store.resolve_session(session_id)
         if session_obj:
             await self._store.delete_session(session_obj.session_id)
