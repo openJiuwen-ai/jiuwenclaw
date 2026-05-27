@@ -247,6 +247,8 @@ class SkillDevDeepAdapter:
         self,
         request: AgentRequest,
         inputs: dict[str, Any],
+        *,
+        interactive_ask: bool = True,
     ) -> AsyncIterator[AgentResponseChunk]:
         if self._instance is None:
             await self.create_instance(self._last_config)
@@ -277,7 +279,7 @@ class SkillDevDeepAdapter:
 
         try:
             async with ask_user_question_request_scope(
-                interactive_ask=True,
+                interactive_ask=interactive_ask,
                 session_id=session_id,
                 stream_request_id=rid or "",
                 channel_id=cid or "",
@@ -541,7 +543,6 @@ class SkillDevDeepAdapter:
             task_id=task_id,
             rid=rid,
             cid=cid,
-            auto_package_if_valid=False,
         ):
             yield chunk
 
@@ -613,8 +614,6 @@ class SkillDevDeepAdapter:
             is_complete=False,
         )
 
-        await self.update_workspace(task_workspace)
-
         if valid:
             output_dir = task_workspace / "output"
             packaged = package_validated_skill(skill_root, output_dir)
@@ -643,23 +642,71 @@ class SkillDevDeepAdapter:
                 yield chunk
             return
 
+        await self.update_workspace(task_workspace)
         combined_query = build_direct_import_fix_query(query, validation_message)
         raw_session_id = str(request.session_id or task_id)
         inputs = {
             "conversation_id": self._make_todo_session_id(raw_session_id),
             "query": combined_query,
         }
-        async for chunk in self.process_message_stream_impl(request, inputs):
+        async for chunk in self.process_message_stream_impl(
+            request,
+            inputs,
+            interactive_ask=False,
+        ):
             yield chunk
 
-        async for chunk in self._finalize_skilldev_run(
+        async for chunk in self._finalize_direct_import_run(
             task_workspace=task_workspace,
             task_id=task_id,
             rid=rid,
             cid=cid,
-            auto_package_if_valid=True,
         ):
             yield chunk
+
+    async def _finalize_direct_import_run(
+        self,
+        *,
+        task_workspace: Path,
+        task_id: str,
+        rid: str,
+        cid: str,
+    ) -> AsyncIterator[AgentResponseChunk]:
+        output_dir = task_workspace / "output"
+        skill_files = [
+            f for f in output_dir.iterdir()
+            if f.is_file() and f.suffix in (".skill", ".zip")
+        ] if output_dir.exists() else []
+
+        if skill_files:
+            yield AgentResponseChunk(
+                request_id=rid,
+                channel_id=cid,
+                payload={
+                    "event_type": "skilldev.agent_output",
+                    "delta": "Skill 已修复并打包完成",
+                    "task_id": task_id,
+                },
+                is_complete=False,
+            )
+            async for chunk in self._yield_packaged_skill_completion(
+                task_id=task_id,
+                rid=rid,
+                cid=cid,
+                packaged_files=skill_files,
+            ):
+                yield chunk
+            return
+
+        yield AgentResponseChunk(
+            request_id=rid,
+            channel_id=cid,
+            payload={
+                "event_type": "skilldev.agent_completed",
+                "task_id": task_id,
+            },
+            is_complete=False,
+        )
 
     async def _finalize_skilldev_run(
         self,
@@ -668,7 +715,6 @@ class SkillDevDeepAdapter:
         task_id: str,
         rid: str,
         cid: str,
-        auto_package_if_valid: bool,
     ) -> AsyncIterator[AgentResponseChunk]:
         benchmark, report, iteration = self._get_review_benchmark(task_workspace)
         if benchmark and report and iteration:
@@ -701,15 +747,6 @@ class SkillDevDeepAdapter:
             f for f in output_dir.iterdir()
             if f.is_file() and f.suffix in (".skill", ".zip")
         ] if output_dir.exists() else []
-
-        if not skill_files and auto_package_if_valid:
-            skill_root = find_skill_root(task_workspace / "skill")
-            if skill_root is not None:
-                valid, _ = validate_direct_import_skill(skill_root)
-                if valid:
-                    packaged = package_validated_skill(skill_root, output_dir)
-                    if packaged is not None:
-                        skill_files = [packaged]
 
         if skill_files:
             async for chunk in self._yield_packaged_skill_completion(

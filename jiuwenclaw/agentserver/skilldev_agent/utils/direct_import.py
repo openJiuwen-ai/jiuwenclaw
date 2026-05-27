@@ -167,18 +167,18 @@ def validate_direct_import_skill(skill_root: Path) -> tuple[bool, str]:
 
 
 def build_direct_import_fix_query(user_query: str, validation_message: str) -> str:
-    """校验未通过时，供 Agent 修复 skill 的 combined_query。"""
-    base = (user_query or "").strip() or "请修复并打包该 Skill。"
+    """校验未通过时，触发 skill-standardizer 规范化、校验并打包。"""
     return (
-        f"{base}\n\n"
+        "请立即加载并执行内置技能 skill-standardizer，对 skill/ 下的已上传 skill 做规范化修改，"
+        "然后运行校验与打包脚本输出到 output/。不要询问用户。\n\n"
         "## directImport 校验未通过\n"
         f"{validation_message}\n\n"
-        "请修改工作区 `skill/` 目录下的 SKILL.md 及相关文件，使其满足以下规范后执行打包：\n"
-        "- skill-name（frontmatter name）：匹配 [a-zA-Z0-9_-]{1,64}，不以 '-' 开头/结尾，"
-        "不含连续 '--'，且与 SKILL.md 所在目录名一致\n"
-        "- description：中文 ≤256 字符且 ≤300 token；英文 ≤512 字符且 ≤300 token\n"
-        "- 正文：≤500 行且 ≤5000 token\n"
-        "修复完成后请运行 skill-creator 的 package_skill，将产物输出到 output/ 目录。"
+        "规范：skill-name 匹配 [a-zA-Z0-9_-]{1,64}，不以 '-' 开头/结尾，不含连续 '--'，"
+        "与 SKILL.md 所在目录名一致；description 中文 ≤256 字且 ≤300 token、"
+        "英文 ≤512 字且 ≤300 token；正文 ≤500 行且 ≤5000 token。\n\n"
+        "完成修改后请依次运行：\n"
+        "- python -m scripts.validate <workspace>\n"
+        "- python -m scripts.package <workspace>"
     )
 
 

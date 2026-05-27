@@ -1,0 +1,1 @@
+"""skill-standardizer CLI scripts."""
