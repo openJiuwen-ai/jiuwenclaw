@@ -54,11 +54,11 @@ class Settings(BaseSettings):
         validation_alias="GATEWAY_DB_NAME",
     )
 
-    manager_ws_client_enabled: bool = Field(
+    gateway_manager_ws_client_enabled: bool = Field(
         default=True,
         validation_alias="GATEWAY_MANAGER_WS_CLIENT_ENABLED",
     )
-    manager_ws_url: str = Field(
+    gateway_manager_ws_url: str = Field(
         default="ws://127.0.0.1:8766",
         validation_alias="GATEWAY_MANAGER_WS_URL",
     )
