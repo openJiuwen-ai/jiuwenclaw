@@ -704,6 +704,12 @@ class VibeSkillChannel(BaseChannel):
 
         # 构建 skilldev.chat 格式的 params
         params: dict[str, Any] = {"task_id": session.session_id, **self._extract_parts_to_skilldev_params(parts)}
+        # SkillCreate 与 Standard 一致，按 session 维度做租户隔离
+        self._apply_tenant_service_id(
+            params,
+            session.session_id,
+            client_session_id=session_id or None,
+        )
         if "query" not in params:
             params["query"] = ""
 
@@ -779,12 +785,14 @@ class VibeSkillChannel(BaseChannel):
             return False
 
         skill_package = {"url": url, "filename": filename}
+        parse_params: dict[str, Any] = {"task_id": task_id, "skill_package": skill_package}
+        self._apply_tenant_service_id(parse_params, session_id)
         msg = Message(
             id=f"vibeskill-parse-skill-{int(time.time() * 1000):x}-{secrets.token_hex(3)}",
             type="req",
             channel_id=VIBESKILL_CHANNEL_ID,
             session_id=session_id,
-            params={"task_id": task_id, "skill_package": skill_package},
+            params=parse_params,
             timestamp=time.time(),
             ok=True,
             req_method=ReqMethod.SKILLDEV_PARSE_SKILL,
@@ -1007,6 +1015,7 @@ class VibeSkillChannel(BaseChannel):
             "task_id": task_id,
             "query": self._build_review_replied_skilldev_chat_query(accept, feedback),
         }
+        self._apply_tenant_service_id(params, session_id)
 
         msg = Message(
             id=f"vibeskill-review-{int(time.time() * 1000):x}-{secrets.token_hex(3)}",
@@ -1117,6 +1126,7 @@ class VibeSkillChannel(BaseChannel):
             "task_id": session_id,
             **self._extract_parts_to_skilldev_params(parts),
         }
+        self._apply_tenant_service_id(params, session_id)
         if "query" not in params:
             params["query"] = ""
 
@@ -1762,6 +1772,7 @@ class VibeSkillChannel(BaseChannel):
         session_id: str,
         params: dict[str, Any],
     ) -> bool:
+        self._apply_tenant_service_id(params, session_id)
         msg = Message(
             id=f"vibeskill-respond-{int(time.time() * 1000):x}-{secrets.token_hex(3)}",
             type="req",
@@ -1788,18 +1799,20 @@ class VibeSkillChannel(BaseChannel):
         request_id: str,
         answers: list[dict[str, Any]],
     ) -> bool:
+        answer_params: dict[str, Any] = {
+            "session_id": session_id,
+            "task_id": session_id,
+            "request_id": request_id,
+            "source": "ask_tool",
+            "answers": answers,
+        }
+        self._apply_tenant_service_id(answer_params, session_id)
         msg = Message(
             id=f"vibeskill-user-answer-{int(time.time() * 1000):x}-{secrets.token_hex(3)}",
             type="req",
             channel_id=VIBESKILL_CHANNEL_ID,
             session_id=session_id,
-            params={
-                "session_id": session_id,
-                "task_id": session_id,
-                "request_id": request_id,
-                "source": "ask_tool",
-                "answers": answers,
-            },
+            params=answer_params,
             timestamp=time.time(),
             ok=True,
             req_method=ReqMethod.SKILLDEV_USER_ANSWER,
@@ -1827,16 +1840,18 @@ class VibeSkillChannel(BaseChannel):
         ``{"selected_options": [...]}`` 的结构，与 ask_user_question_tool 在 Registry
         中等待的反序列化格式对齐（同时也是 SkillCreate 路径长期使用的格式）。
         """
+        answer_params: dict[str, Any] = {
+            "session_id": session_id,
+            "request_id": request_id,
+            "answers": answers,
+        }
+        self._apply_tenant_service_id(answer_params, session_id)
         msg = Message(
             id=f"vibeskill-chat-user-answer-{int(time.time() * 1000):x}-{secrets.token_hex(3)}",
             type="req",
             channel_id=VIBESKILL_CHANNEL_ID,
             session_id=session_id,
-            params={
-                "session_id": session_id,
-                "request_id": request_id,
-                "answers": answers,
-            },
+            params=answer_params,
             timestamp=time.time(),
             ok=True,
             req_method=ReqMethod.CHAT_ANSWER,
@@ -2023,10 +2038,12 @@ class VibeSkillChannel(BaseChannel):
         if mode == "Standard":
             req_method = ReqMethod.CHAT_CANCEL
             params: dict[str, Any] = {"intent": "cancel", "session_id": sid}
+            self._apply_tenant_service_id(params, sid)
             cancel_method_label = "chat.interrupt"
         else:
             req_method = ReqMethod.SKILLDEV_CANCEL
             params = {"task_id": sid, "session_id": sid, "intent": "cancel"}
+            self._apply_tenant_service_id(params, sid)
             cancel_method_label = "skilldev.cancel"
 
         try:
@@ -3060,6 +3077,30 @@ class VibeSkillChannel(BaseChannel):
             return None
         return self._store.get_user_id(sid) or sid
 
+    @staticmethod
+    def _session_service_id_for_tenant(
+        session_id: str | None,
+        *,
+        client_session_id: str | None = None,
+    ) -> str:
+        """按 session 维度路由 AgentServer 租户 workspace（与 Standard chat.send 一致）。"""
+        return str(client_session_id or session_id or "").strip()
+
+    @classmethod
+    def _apply_tenant_service_id(
+        cls,
+        params: dict[str, Any],
+        session_id: str | None,
+        *,
+        client_session_id: str | None = None,
+    ) -> None:
+        service_id = cls._session_service_id_for_tenant(
+            session_id,
+            client_session_id=client_session_id,
+        )
+        if service_id:
+            params["service_id"] = service_id
+
     async def _send_agent_request(self, env) -> Any:
         """发送请求到 AgentServer 并返回响应。"""
         return await self._agent_client.send_request(env)
@@ -3259,12 +3300,14 @@ class VibeSkillChannel(BaseChannel):
 
         try:
             request_id = f"vibeskill-session-msg-{int(time.time() * 1000):x}-{secrets.token_hex(3)}"
+            restore_params: dict[str, Any] = {"task_id": session_id}
+            self._apply_tenant_service_id(restore_params, session_id)
             env = e2a_from_agent_fields(
                 request_id=request_id,
                 channel_id=VIBESKILL_CHANNEL_ID,
                 session_id=session_id,
                 req_method=ReqMethod.SKILLDEV_RESTORE,
-                params={"task_id": session_id},
+                params=restore_params,
                 is_stream=False,
                 timestamp=time.time(),
                 user_id=self._session_user_id(session_id),
@@ -3329,12 +3372,14 @@ class VibeSkillChannel(BaseChannel):
     async def _handle_http_file_list(self, session_id: str, headers: dict) -> tuple[int, dict, bytes]:
         """GET /api/v1/.../file — 列目录（skilldev.file.list → FileTreeNode[] 嵌套树）。"""
         request_id = f"vibeskill-file-list-{int(time.time() * 1000):x}-{secrets.token_hex(3)}"
+        file_list_params: dict[str, Any] = {"task_id": session_id, "session_id": session_id}
+        self._apply_tenant_service_id(file_list_params, session_id)
         env = e2a_from_agent_fields(
             request_id=request_id,
             channel_id=VIBESKILL_CHANNEL_ID,
             session_id=session_id,
             req_method=ReqMethod.SKILLDEV_FILE_LIST,
-            params={"task_id": session_id, "session_id": session_id},
+            params=file_list_params,
             is_stream=False,
             timestamp=time.time(),
             user_id=self._session_user_id(session_id),
@@ -3376,12 +3421,18 @@ class VibeSkillChannel(BaseChannel):
             return self._json_response(400, {"error": "path query parameter is required"})
 
         request_id = f"vibeskill-file-read-{int(time.time() * 1000):x}-{secrets.token_hex(3)}"
+        file_read_params: dict[str, Any] = {
+            "task_id": session_id,
+            "path": file_path,
+            "session_id": session_id,
+        }
+        self._apply_tenant_service_id(file_read_params, session_id)
         env = e2a_from_agent_fields(
             request_id=request_id,
             channel_id=VIBESKILL_CHANNEL_ID,
             session_id=session_id,
             req_method=ReqMethod.SKILLDEV_FILE_READ,
-            params={"task_id": session_id, "path": file_path, "session_id": session_id},
+            params=file_read_params,
             is_stream=False,
             timestamp=time.time(),
             user_id=self._session_user_id(session_id),
@@ -3457,17 +3508,19 @@ class VibeSkillChannel(BaseChannel):
             )
 
         request_id = f"vibeskill-file-write-{int(time.time() * 1000):x}-{secrets.token_hex(3)}"
+        file_write_params: dict[str, Any] = {
+            "task_id": session_id,
+            "path": file_path,
+            "content": content,
+            "session_id": session_id,
+        }
+        self._apply_tenant_service_id(file_write_params, session_id)
         env = e2a_from_agent_fields(
             request_id=request_id,
             channel_id=VIBESKILL_CHANNEL_ID,
             session_id=session_id,
             req_method=ReqMethod.SKILLDEV_FILE_WRITE,
-            params={
-                "task_id": session_id,
-                "path": file_path,
-                "content": content,
-                "session_id": session_id,
-            },
+            params=file_write_params,
             is_stream=False,
             timestamp=time.time(),
             user_id=self._session_user_id(session_id),
@@ -3571,12 +3624,14 @@ class VibeSkillChannel(BaseChannel):
         state = await self._store.get_state(session_id)
         if state != VibeSkillSessionState.COMPLETED:
             return self._json_response(400, {"error": "会话未完成，无法导出"})
+        download_params: dict[str, Any] = {"task_id": session_id}
+        self._apply_tenant_service_id(download_params, session_id)
         env = e2a_from_agent_fields(
             request_id=request_id,
             channel_id=VIBESKILL_CHANNEL_ID,
             session_id=session_id,
             req_method=ReqMethod.SKILLDEV_DOWNLOAD,
-            params={"task_id": session_id},
+            params=download_params,
             is_stream=False,
             timestamp=time.time(),
             user_id=self._session_user_id(session_id),
