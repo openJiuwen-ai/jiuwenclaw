@@ -1,6 +1,6 @@
 # AGENT Definition Usage
 
-Translate agentDefinition entries from `<workspace>/resources/agents/available_agents.json` into `agent_as_a_tool(agentId="", query="", filesInfo=[])` calls in the new skill.
+Translate agentDefinition entries from `<workspace>/resources/agents/available_agents.json` into `invoke(funcName:"agent_as_a_tool", params:{...})` calls in the new skill.
 
 ## Metadata Note
 
@@ -16,19 +16,15 @@ Only declare agents the skill actually calls. Do not add empty placeholders. `ag
 
 ## Input shape
 
-`agent_as_a_tool` input is a JSON object with exactly these fields:
+`invoke` always uses the fixed function name `agent_as_a_tool`. Put agent call inputs in `params`:
 
-```json
-{
-  "agentId": "aaabbbccc",
-  "query": "查询北京三日游玩攻略",
-  "filesInfo": []
-}
+```text
+invoke(funcName:"agent_as_a_tool", params:{agentId:"aaabbbccc", query:"查询北京三日游玩攻略"})
 ```
 
-`filesInfo` is an array of file metadata objects. Use `[]` when no files need to be forwarded.
+`params.agentId` comes from `agentDefinition.agentId`. `params.query` is the task query to send to the agent. `params.filesInfo` is built according to `agentDefinition.parameters.properties.filesInfo`.
 
-Build `query` and `filesInfo` from the `agentDefinition.parameters` JSON Schema.
+Build all params from the `agentDefinition.parameters` JSON Schema. Include fields listed in `agentDefinition.parameters.required`. Optional fields, including `filesInfo`, should be omitted unless the task needs them.
 
 ## agentDefinition fields
 
@@ -62,20 +58,21 @@ Field notes:
 
 | Field | Required | How to use it |
 | --- | --- | --- |
-| `agentId` | Yes | Copy exactly into `agent_as_a_tool.agentId`. |
+| `agentId` | Yes | Copy exactly into `invoke.params.agentId`. |
 | `name` | No | Human-readable agent name; do not use as the call identifier. |
 | `description` | Yes | Use to decide when delegation is appropriate. |
 | `parameters` | Yes | JSON Schema used to construct `query`, `filesInfo`, and any required call inputs. |
-| `parameters.properties.query` | Usually | User task content to pass as `agent_as_a_tool.query`. |
-| `parameters.properties.filesInfo` | Usually | File metadata to pass as `agent_as_a_tool.filesInfo`; use `[]` when no files are needed. |
+| `parameters.properties.query` | Usually | User task content to pass as `invoke.params.query`. |
+| `parameters.properties.filesInfo` | Optional unless required | File metadata to pass as `invoke.params.filesInfo`; follow this schema when files must be forwarded. |
 | `parameters.required` | Yes | Required fields that must be present before calling. |
 
 ## Safety
 
 - Copy `agentId` exactly; never use `name` as the call identifier.
+- Use `funcName:"agent_as_a_tool"` exactly; do not replace it with the agent name or agentId.
 - Make `query` self-contained with the user's task, constraints, and expected output.
-- Pass `filesInfo=[]` when no task-relevant files need to be forwarded.
-- Include only task-relevant file metadata in `filesInfo`.
+- Include `filesInfo` only when it is required by `agentDefinition.parameters.required` or when task-relevant files need to be forwarded.
+- When including `filesInfo`, construct it according to `agentDefinition.parameters.properties.filesInfo`; do not assume a fixed shape beyond the schema.
 - Include all required fields from `agentDefinition.parameters.required`.
 - Ask the user when a required value is missing and cannot be safely inferred.
 
@@ -108,9 +105,15 @@ agentDefinition:
 ```
 
 Generated:
-Call the agent_as_a_tool tool to execute:
+Call the platform tool to execute:
 ```
-    agent_as_a_tool(agentId="aaabbbccc", query="查询北京三日游玩攻略", filesInfo=[])
+    invoke(funcName:"agent_as_a_tool", params:{agentId:"aaabbbccc", query:"查询北京三日游玩攻略"})
+```
+
+If `filesInfo` is required or files must be forwarded, include it using the schema from `parameters.properties.filesInfo`, for example:
+
+```text
+invoke(funcName:"agent_as_a_tool", params:{agentId:"aaabbbccc", query:"分析这份行程文件", filesInfo:<value matching parameters.properties.filesInfo>})
 ```
 
 ## Generating the tool-definitions entry
@@ -140,3 +143,4 @@ Example — given the `travelAgent` definition above, generate:
 - **toolName**: aaabbbccc
 - **description**: 查询出行相关资讯与方案
 - **参数**: （由平台自动注入）
+```

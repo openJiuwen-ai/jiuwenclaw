@@ -99,8 +99,8 @@ Device-side skills must not generate `scripts/` by default. If a script is genui
 
 - Create or update the skill under the current workspace's `skill/<skill-name>` directory: `<workspace>/skill/<skill-name>/`.
 - `SKILL.md` exists with valid frontmatter (name matches directory, description within language-specific limits, allowed keys only).
-- If the skill declares `metadata.tools`, read `references/usage_tools.md` and add one example sentence showing the `function_call_tool` call shape.
-- If the skill declares `metadata.agents`, read `references/usage_agents.md` and add one example sentence showing the `agent_as_a_tool` call shape.
+- If the skill declares `metadata.tools`, read `references/usage_tools.md` and add one example sentence showing the `invoke(funcName:"toolName", params:{...})` call shape.
+- If the skill declares `metadata.agents`, read `references/usage_agents.md` and add one example sentence showing the `invoke(funcName:"agent_as_a_tool", params:{...})` call shape.
 - If the skill declares `metadata.clis`, read `references/usage_clis.md` and add one example sentence showing the `exec-cli` call shape.
 - If the skill declares any of `metadata.tools` / `metadata.agents` / `metadata.clis`, the body must include a single **tool definitions** section listing every registered tool.
 - Body is under 500 lines; bulky reference material moved to `references/`.

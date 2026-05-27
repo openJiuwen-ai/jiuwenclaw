@@ -1,6 +1,6 @@
 # TOOL Definition Usage
 
-Translate toolDefinition entries from `<workspace>/resources/available-tools/<pluginId>__<toolName>.json` into `function_call_tool(pluginId="...", toolName="...", arguments={...})` calls in the new skill.
+Translate toolDefinition entries from `<workspace>/resources/available-tools/<pluginId>__<toolName>.json` into `invoke(funcName:"toolName", params:{...})` calls in the new skill.
 
 ## Metadata Note
 
@@ -17,19 +17,13 @@ Only declare tools the skill actually calls. Do not add empty placeholders. `plu
 
 ## Input shape
 
-`function_call_tool` input is a JSON object with exactly these fields:
+`invoke` uses the toolDefinition `toolName` as `funcName` and passes tool arguments through `params`:
 
-```json
-{
-  "pluginId": "plugin_001",
-  "toolName": "weather_query",
-  "arguments": {
-    "<param>": "<value>"
-  }
-}
+```text
+invoke(funcName:"weather_query", params:{city:"北京"})
 ```
 
-`arguments` is the actual argument object passed to the tool. Build it from the `toolDefinition.arguments` JSON Schema.
+`params` is the actual argument object passed to the tool. Build it from the `toolDefinition.arguments` JSON Schema. If `toolDefinition.arguments.required` lists fields, include every required field in `params`.
 
 ## toolDefinition fields
 
@@ -58,21 +52,21 @@ Field notes:
 
 | Field | Required | How to use it |
 | --- | --- | --- |
-| `pluginId` | Yes | Copy exactly into `function_call_tool.pluginId`. |
-| `toolName` | Yes | Copy exactly into `function_call_tool.toolName`. |
+| `pluginId` | Yes | Used in metadata and source filename; do not pass to `invoke`. |
+| `toolName` | Yes | Copy exactly into `invoke.funcName`. |
 | `description` | Yes | Use to decide when the tool should be called. |
-| `arguments` | Yes | JSON Schema used to construct `function_call_tool.arguments`. |
-| `schemaVersion` | Yes | Definition version; do not pass to `function_call_tool`. |
-| `generatedAt` | Yes | Definition timestamp; do not pass to `function_call_tool`. |
-| `toolType` | No | Backend tool type; do not pass to `function_call_tool`. |
-| `pluginType` | Yes | Backend category such as `Cloud`, `Device`, or `MCP`; do not pass to `function_call_tool`. |
-| `protocol` | Cloud/MCP required | Transport detail; do not pass to `function_call_tool`. |
+| `arguments` | Yes | JSON Schema used to construct `invoke.params`. |
+| `schemaVersion` | Yes | Definition version; do not pass to `invoke`. |
+| `generatedAt` | Yes | Definition timestamp; do not pass to `invoke`. |
+| `toolType` | No | Backend tool type; do not pass to `invoke`. |
+| `pluginType` | Yes | Backend category such as `Cloud`, `Device`, or `MCP`; do not pass to `invoke`. |
+| `protocol` | Cloud/MCP required | Transport detail; do not pass to `invoke`. |
 | `deviceCommand` | Device required | Device command template; do not call it directly from the skill. |
 
 ## Safety
 
 - Copy `pluginId` and `toolName` exactly; never invent IDs or names.
-- Build `function_call_tool.arguments` as structured JSON, never as command text.
+- Build `invoke.params` as structured data, never as command text.
 - Include all required fields from `toolDefinition.arguments.required`.
 - Preserve schema value types.
 - Ask the user when a required value is missing and cannot be safely inferred.
@@ -105,9 +99,9 @@ toolDefinition:
 ```
 
 Generated:
-Call the function_call_tool tool to execute:
+Call the platform tool to execute:
 ```
-    function_call_tool(pluginId="plugin_001", toolName="weather_query", arguments={"city": "北京"})
+    invoke(funcName:"weather_query", params:{city:"北京"})
 ```
 
 ## Generating the tool-definitions entry
