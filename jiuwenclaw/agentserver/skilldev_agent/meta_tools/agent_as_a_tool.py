@@ -20,6 +20,8 @@ from jiuwenclaw.agentserver.skilldev_agent.meta_tools.skilldev_tool_context impo
     resolve_session_id,
 )
 
+_MOCK_AGENT_RUNTIME_BASE_URL = "localhost"
+
 logger = logging.getLogger(__name__)
 
 _AGENT_RUNTIME_BASEURL_ENV = "AGENT_RUNTIME_BASEURL"
@@ -104,10 +106,7 @@ class AgentAsATool(Tool):
         super().__init__(card or _build_agent_as_a_tool_card(agent_id=agent_id, language=language))
         base_url = (os.environ.get(_AGENT_RUNTIME_BASEURL_ENV) or "").strip()
         if not base_url:
-            raise ValueError(
-                f"Environment variable {_AGENT_RUNTIME_BASEURL_ENV} is not set; "
-                "AgentAsSkillTool requires it to reach agent-runtime-service."
-            )
+            base_url = _MOCK_AGENT_RUNTIME_BASE_URL
         self._client = AgentRuntimeClient(base_url)
 
     def _validate_inputs(self, inputs: Any) -> dict[str, Any]:

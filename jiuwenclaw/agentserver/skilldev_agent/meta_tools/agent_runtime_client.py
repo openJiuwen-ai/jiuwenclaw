@@ -12,6 +12,7 @@ from typing import Any, AsyncIterator, Callable
 logger = logging.getLogger(__name__)
 
 _BASE_PATH = "/agent-runtime-service/v1"
+_MOCK_AGENT_RUNTIME_BASE_URL = "localhost"
 _WS_MAX_SIZE = 8 * 2**20
 
 
@@ -124,6 +125,8 @@ class AgentRuntimeClient:
         extra_headers: dict[str, str] | None = None,
     ) -> dict[str, Any]:
         """经 WebSocket 调用与 HTTP 路径对应的接口（发送 JSON 请求体，等待单条 JSON 响应）。"""
+        if _MOCK_AGENT_RUNTIME_BASE_URL in self._base_url:
+            raise ValueError("base_url is invalid")
         url = self._build_ws_url(path)
         headers = self._build_headers(extra_headers)
         body = payload if payload is not None else {}
@@ -149,6 +152,8 @@ class AgentRuntimeClient:
 
         生成器在以下情况结束：服务端关闭连接、单帧等待超时、或上游取消。
         """
+        if _MOCK_AGENT_RUNTIME_BASE_URL in self._base_url:
+            raise ValueError("base_url is invalid")
         url = self._build_ws_url(path)
         headers = self._build_headers(extra_headers)
         body = payload if payload is not None else {}
