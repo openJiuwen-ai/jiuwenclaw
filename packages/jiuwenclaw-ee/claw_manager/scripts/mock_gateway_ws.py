@@ -9,7 +9,7 @@
 
 用法：
     python3 scripts/mock_gateway_ws.py
-    MANAGER_WS_URL=ws://127.0.0.1:8766 python3 scripts/mock_gateway_ws.py
+    GATEWAY_MANAGER_WS_URL=ws://127.0.0.1:8766 python3 scripts/mock_gateway_ws.py
     INSTANCE_IDS="sp-aaa,sp-bbb" python3 scripts/mock_gateway_ws.py  # 也可显式指定
 
 依赖：仅 stdlib + websockets（jiuwenclaw_manager 已带）。
@@ -32,7 +32,7 @@ except ImportError:  # pragma: no cover
     sys.exit(1)
 
 MANAGER_REST = os.environ.get("CLAWMANAGER_BASE_URL", "http://127.0.0.1:8765").rstrip("/")
-MANAGER_WS = os.environ.get("MANAGER_WS_URL", "ws://127.0.0.1:8766")
+MANAGER_WS = os.environ.get("GATEWAY_MANAGER_WS_URL", "ws://127.0.0.1:8766")
 EXPLICIT_INSTANCE_IDS = [
     s.strip() for s in os.environ.get("INSTANCE_IDS", "").split(",") if s.strip()
 ]
@@ -82,26 +82,35 @@ def _build_ack_result(config: dict[str, Any], counters: dict[str, int]) -> dict[
     return result
 
 
-async def _run_one(instance_id: str, stop: asyncio.Event) -> None:
-    service_id = f"mock-gateway-{instance_id}"
+async def _handshake(ws: Any, *, reconnect_id: str | None = None) -> str:
+    raw = await ws.recv()
+    msg = json.loads(raw)
+    if msg.get("type") == "event" and msg.get("event") == "connection.ack":
+        pass
+    payload: dict[str, Any] = {"service_type": "gateway"}
+    if reconnect_id:
+        payload["jiuwenclaw_id"] = reconnect_id
+    await ws.send(json.dumps({"type": "register", "payload": payload}))
+    raw_ack = await ws.recv()
+    ack = json.loads(raw_ack)
+    if ack.get("type") == "error":
+        raise RuntimeError(str(ack.get("payload")))
+    ack_payload = ack.get("payload") or {}
+    jid = str(ack_payload.get("jiuwenclaw_id") or "").strip()
+    if not jid:
+        raise RuntimeError("register.ack missing jiuwenclaw_id")
+    return jid
+
+
+async def _run_one(instance_id: str | None, stop: asyncio.Event) -> None:
     counters: dict[str, int] = {}
     backoff = 1.0
+    label = instance_id or "new"
     while not stop.is_set():
         try:
             async with websockets.connect(MANAGER_WS, ping_interval=20, ping_timeout=60) as ws:
-                print(f"[mock-gw] {instance_id}: connected")
-                await ws.send(
-                    json.dumps(
-                        {
-                            "type": "register",
-                            "payload": {
-                                "instance_id": instance_id,
-                                "service_type": "gateway",
-                                "service_id": service_id,
-                            },
-                        }
-                    )
-                )
+                jid = await _handshake(ws, reconnect_id=instance_id)
+                print(f"[mock-gw] {label}: connected jiuwenclaw_id={jid}")
                 async for raw in ws:
                     try:
                         msg = json.loads(raw)
@@ -114,7 +123,7 @@ async def _run_one(instance_id: str, stop: asyncio.Event) -> None:
                         cfg = payload.get("config") or {}
                         result = _build_ack_result(cfg, counters)
                         print(
-                            f"[mock-gw] {instance_id}: config.push rev={revision} "
+                            f"[mock-gw] {jid}: config.push rev={revision} "
                             f"sections={result.get('applied_sections')} ack.result={result}"
                         )
                         await ws.send(
@@ -133,15 +142,15 @@ async def _run_one(instance_id: str, stop: asyncio.Event) -> None:
                         # connection.ack / register.ack — log lightly
                         evt = msg.get("event")
                         if evt == "register.ack":
-                            print(f"[mock-gw] {instance_id}: register.ack")
+                            print(f"[mock-gw] {jid}: register.ack")
                     elif mtype == "error":
-                        print(f"[mock-gw] {instance_id}: error {msg.get('payload')}")
+                        print(f"[mock-gw] {jid}: error {msg.get('payload')}")
                     # 其他帧忽略
             backoff = 1.0
         except Exception as exc:  # noqa: BLE001
             if stop.is_set():
                 return
-            print(f"[mock-gw] {instance_id}: connection error {exc}; retry in {backoff:.1f}s")
+            print(f"[mock-gw] {label}: connection error {exc}; retry in {backoff:.1f}s")
             try:
                 await asyncio.wait_for(stop.wait(), timeout=backoff)
             except asyncio.TimeoutError:
@@ -153,15 +162,13 @@ async def _main() -> None:
     instance_ids = _fetch_instance_ids()
     if not instance_ids:
         print(
-            "[mock-gw] no instances found via "
-            f"{MANAGER_REST}/api/v1/instances; create instances first or "
-            "set INSTANCE_IDS env."
+            "[mock-gw] no instances in DB; starting one mock gateway (manager will assign id)"
         )
-        return
+        instance_ids = [None]
     print(f"[mock-gw] target manager_rest={MANAGER_REST} ws={MANAGER_WS}")
-    print(f"[mock-gw] mocking gateway for {len(instance_ids)} instance(s):")
+    print(f"[mock-gw] mocking {len(instance_ids)} gateway connection(s):")
     for jid in instance_ids:
-        print(f"          - {jid}")
+        print(f"          - {jid or '(new)'}")
 
     stop = asyncio.Event()
     loop = asyncio.get_running_loop()

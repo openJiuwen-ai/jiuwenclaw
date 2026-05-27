@@ -21,17 +21,13 @@ def _load_enterprise_submodule(name: str) -> Any:
     return importlib.import_module(f"{_EXT_PKG}.core.enterprise_config.{name}")
 
 
-def resolve_jiuwenclaw_id() -> str | None:
-    """从环境变量读取当前实例 id；未设置时返回 ``None``（分布式 Gateway 无此变量时不做实例隔离）。"""
-    instance_id = os.getenv("JIUWENCLAW_PROVISIONED_INSTANCE_ID", "").strip()
-    return instance_id or None
-
-
-gateway_db = _load_enterprise_submodule("gateway_db")
+_gateway_db_mod = _load_enterprise_submodule("gateway_db")
+GatewayDb = _gateway_db_mod.GatewayDb
 schemas = _load_enterprise_submodule("schemas")
 loader = _load_enterprise_submodule("loader")
 
-gateway_db.set_resolve_jiuwenclaw_id(resolve_jiuwenclaw_id)
+_jiuwenclaw_id = os.getenv("JIUWENCLAW_ID", "").strip() or None
+gateway_db = GatewayDb.bind(_jiuwenclaw_id)
 
 EffectiveEnterpriseConfig = schemas.EffectiveEnterpriseConfig
 DEFAULT_AGENT_LOAD_SLOTS = schemas.DEFAULT_AGENT_LOAD_SLOTS

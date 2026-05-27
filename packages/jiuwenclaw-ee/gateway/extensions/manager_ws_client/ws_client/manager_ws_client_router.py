@@ -29,6 +29,7 @@ from ..core.template.service_config_template import apply_service_config_templat
 from ..core.template.skill_whitelist_template import (
     apply_skill_whitelist_template_sync,
 )
+from ..core.application_config.channel_config import apply_channel_config_sync
 
 logger = logging.getLogger(__name__)
 
@@ -89,7 +90,7 @@ async def _apply_channel_config(payload: dict[str, Any]) -> dict[str, Any] | Non
     if not op:
         raise ValueError("channel_config.op is required")
 
-    handler = await ensure_db_handler_ready()
+    handler = await _ensure_db_handler()
     result = await apply_channel_config_sync(handler, op, payload)
     logger.info(
         "[ManagerWsClient] channel_config sync op=%s channel_id=%s",
@@ -153,6 +154,30 @@ async def _apply_service_config_templates(
         or payload.get("template_id")
         or (payload.get("template") or {}).get("template_id"),
     )
+    
+    # 触发 Runtime Management Client 配置热更新
+    try:
+        from jiuwenclaw.extensions.registry import ExtensionRegistry
+        
+        registry = ExtensionRegistry.get_instance()
+        if registry is not None:
+            # 查找 RuntimeManagementExtension
+            for ext in registry._agent_server_clients:
+                if hasattr(ext, 'get_client'):
+                    client = ext.get_client()
+                    if hasattr(client, 'set_or_update_server_config'):
+                        client.set_or_update_server_config(config={})
+                        logger.info(
+                            "[ManagerWsClient] triggered runtime management config update after service_config_templates %s",
+                            op,
+                        )
+                        break
+    except Exception as exc:
+        logger.warning(
+            "[ManagerWsClient] failed to trigger runtime management config update: %s",
+            exc,
+        )
+    
     return result
 
 

@@ -315,6 +315,7 @@ def test_interface_deep_skill_rail_uses_multi_tenant_paths():
     assert "service_test" in str(skill_dirs[0])
     assert "agent_test" in str(skill_dirs[0])
     assert "skills" in str(skill_dirs[0])
+    assert "jiuwenclaw_workspace" in str(skill_dirs[0])
     
     # 测试单租户模式（不传参数）
     with patch(
@@ -324,4 +325,4 @@ def test_interface_deep_skill_rail_uses_multi_tenant_paths():
         skill_dirs_single = get_multi_tenant_skill_dirs(None, None)
     
     assert len(skill_dirs_single) == 1
-    assert str(skill_dirs_single[0]) == "/home/user/.jiuwenclaw/skills"
+    assert skill_dirs_single[0].as_posix() == "/home/user/.jiuwenclaw/skills"

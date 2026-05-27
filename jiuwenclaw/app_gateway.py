@@ -1744,14 +1744,60 @@ async def _run(
         leader_election.register_callback(_cron_on_role_change)
 
         # 主备切换回调：升为 PRIMARY 时清理旧主遗留的所有 Pod，再由 autoscale 自动重建
-        if hasattr(client, "purge_all_pods"):
+        if hasattr(client, "cleanup_all_pods"):
             async def _session_on_role_change(role: Role) -> None:
                 if role == Role.PRIMARY:
                     logger.info("[App] 角色切换为 PRIMARY，开始清理旧主遗留的所有 Pod")
-                    await client.purge_all_pods()
+                    await client.cleanup_all_pods()
                 else:
                     logger.info("[App] 角色切换为 STANDBY")
             leader_election.register_callback(_session_on_role_change)
+
+        # 选主感知：ManagerWsClient 仅在 PRIMARY 节点连接 Claw Manager；
+        # STANDBY 不连，避免与 Manager 建立无意义的会话（共享 MySQL 已保证配置一致）。
+        # EE 扩展缺失（OSS 部署）时静默忽略。
+        import importlib
+
+        async def _manager_ws_on_role_change(role: Role) -> None:
+            try:
+                mod = importlib.import_module(
+                    "jiuwenclaw.loaded_extension.manager_ws_client.extension"
+                )
+            except Exception:  # noqa: BLE001
+                return
+            fn_name = (
+                "start_manager_ws_connect"
+                if role == Role.PRIMARY
+                else "stop_manager_ws_connect"
+            )
+            fn = getattr(mod, fn_name, None)
+            if not callable(fn):
+                return
+            try:
+                ret = fn()
+                if asyncio.iscoroutine(ret):
+                    await ret
+            except Exception:  # noqa: BLE001
+                logger.exception("[App] manager_ws_client.%s failed", fn_name)
+
+        leader_election.register_callback(_manager_ws_on_role_change)
+
+        # 选主感知：升为 PRIMARY 时主动从 channel_config DB 重新加载 channels。
+        # STANDBY 期间 ManagerWsClient 未连接 Manager，可能错过 config.push；
+        # 升主时主动 reload 一次，补齐 STANDBY 窗口内的配置变更。
+        # _apply_channel_config 内置基于 dict diff 的幂等保护（_should_restart_channel），
+        # 配置未变化的 channel 不会被重启，因此重复调用安全。
+        # 仅在 channel_config DB overlay 启用时生效（_reload_channels_from_db 此时才存在于闭包）。
+        if _channel_db_overlay:
+            async def _channels_on_role_change(role: Role) -> None:
+                if role == Role.PRIMARY:
+                    logger.info("[App] PRIMARY elected, reload channels from channel_config DB")
+                    try:
+                        await _reload_channels_from_db(None)
+                    except Exception:  # noqa: BLE001
+                        logger.exception("[App] reload channels on promotion failed")
+
+            leader_election.register_callback(_channels_on_role_change)
 
         await leader_election.start()
     else:

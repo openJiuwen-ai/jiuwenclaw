@@ -48,6 +48,62 @@ async def get_instance_row(handler: DBHandler, jiuwenclaw_id: str) -> Any | None
     return await handler.get(_INSTANCE_TABLE, {"jiuwenclaw_id": jiuwenclaw_id})
 
 
+_MAX_JIUWENCLAW_ID_ATTEMPTS = 10
+
+
+async def generate_unique_jiuwenclaw_id(handler: DBHandler) -> str:
+    """生成 ``instance_info`` 中尚未占用的 ``jiuwenclaw_id``。"""
+    for _ in range(_MAX_JIUWENCLAW_ID_ATTEMPTS):
+        jiuwenclaw_id = f"sp-{uuid.uuid4().hex[:12]}"
+        if await get_instance_row(handler, jiuwenclaw_id) is None:
+            return jiuwenclaw_id
+    raise RuntimeError("failed to generate unique jiuwenclaw_id after retries")
+
+
+async def register_gateway_via_ws(
+    handler: DBHandler,
+    payload: dict[str, Any],
+    *,
+    manager_id: str = "default",
+) -> str:
+    """Gateway WS 注册：复用已有 ``jiuwenclaw_id`` 或分配新 id 并写入 ``instance_info``。"""
+    payload_jiuwenclaw_id = str(payload.get("jiuwenclaw_id") or "").strip()
+    now = utc_now()
+
+    if payload_jiuwenclaw_id:
+        existing = await get_instance_row(handler, payload_jiuwenclaw_id)
+        if existing is not None:
+            await handler.update(
+                _INSTANCE_TABLE,
+                {"jiuwenclaw_id": payload_jiuwenclaw_id},
+                {"status": "active", "updated_at": now},
+            )
+            return payload_jiuwenclaw_id
+        jiuwenclaw_id = payload_jiuwenclaw_id
+    else:
+        jiuwenclaw_id = await generate_unique_jiuwenclaw_id(handler)
+
+    await create_instance_row(
+        handler,
+        {
+            "jiuwenclaw_id": jiuwenclaw_id,
+            "jiuwenclaw_name": f"gateway-{jiuwenclaw_id[-8:]}",
+            "creator_id": "manager-ws",
+            "description": None,
+            "k8s_master_host": "manager-ws",
+            "k8s_auth_type": "none",
+            "k8s_auth_config": dumps_auth_config({}),
+            "k8s_namespace": "default",
+            "status": "active",
+            "resource_quota": None,
+            "data": None,
+            "group_id": "default",
+            "space_id": "default",
+        },
+    )
+    return jiuwenclaw_id
+
+
 async def list_instance_rows(
     handler: DBHandler,
     *,
@@ -95,37 +151,6 @@ async def list_instance_services(handler: DBHandler, jiuwenclaw_id: str) -> Sequ
         limit=10_000,
         offset=0,
     )
-
-
-async def get_jiuwenclaw_id_by_service_id(
-    handler: DBHandler,
-    service_id: str,
-    *,
-    service_type: str | None = None,
-) -> str | None:
-    """按 ``service_id`` 从 ``service_instance`` 表解析创建实例时登记的 ``jiuwenclaw_id``。"""
-    sid = str(service_id or "").strip()
-    if not sid:
-        return None
-    rows = await handler.list_records(_SERVICE_TABLE, {"service_id": sid}, limit=10, offset=0)
-    if not rows:
-        return None
-    st_filter = (service_type or "").strip().lower() or None
-    if st_filter:
-        rows = [
-            row
-            for row in rows
-            if str(getattr(row, "service_type", "") or "").strip().lower() == st_filter
-        ]
-    if not rows:
-        return None
-    if len(rows) > 1:
-        return None
-    jid = str(getattr(rows[0], "jiuwenclaw_id", "") or "").strip()
-    if not jid:
-        return None
-    parent = await get_instance_row(handler, jid)
-    return jid if parent is not None else None
 
 
 async def ensure_service_instance(
@@ -319,7 +344,7 @@ class InstanceService:
         self._handler = handler
 
     async def create(self, body: CreateInstanceBody) -> dict:
-        jiuwenclaw_id = f"sp-{uuid.uuid4().hex[:12]}"
+        jiuwenclaw_id = await generate_unique_jiuwenclaw_id(self._handler)
         data_dict: dict | None = None
         if body.management_api_base and str(body.management_api_base).strip():
             data_dict = {"management_api_base": str(body.management_api_base).strip().rstrip("/")}

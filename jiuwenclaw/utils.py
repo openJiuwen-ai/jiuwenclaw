@@ -1128,16 +1128,36 @@ def get_agent_sessions_relative_dir() -> Path:
     return get_agent_root_relative_dir() / "sessions"
 
 
+def _normalize_tenant_id(value: str | None) -> str:
+    return str(value or "").strip()
+
+
+def _require_tenant_ids(service_id: str | None, agent_id: str | None) -> tuple[str, str]:
+    """白名单 / 租户工作区要求 ``service_id`` 与 ``agent_id`` 均非空."""
+    sid = _normalize_tenant_id(service_id)
+    aid = _normalize_tenant_id(agent_id)
+    if not sid or not aid:
+        raise ValueError(
+            f"tenant id required: agent_id={agent_id!r}, service_id={service_id!r}"
+        )
+    return sid, aid
+
+
 def get_multi_tenant_user_workspace_dir(service_id: str | None, agent_id: str | None) -> Path | None:
     """Get multi-tenant user workspace directory path.
 
     Path format: ~/.jiuwenclaw/service_{service_id}/agent_{agent_id}
+
+    二者皆空时返回 ``None``（供单租户分支判断）。仅一侧有值时返回 ``service/.../agents`` 等
+    不完整路径，**不要**用于 Skill 白名单；租户工作区请用 ``get_tenant_agent_*`` 系列（要求双 ID）。
     """
-    if not service_id and not agent_id:
+    sid = _normalize_tenant_id(service_id)
+    aid = _normalize_tenant_id(agent_id)
+    if not sid and not aid:
         return None
     workspace_dir = get_user_workspace_dir()
-    workspace_dir = workspace_dir / f"service_{service_id}" if service_id else workspace_dir / "service"
-    workspace_dir = workspace_dir / f"agent_{agent_id}" if agent_id else workspace_dir / "agents"
+    workspace_dir = workspace_dir / f"service_{sid}" if sid else workspace_dir / "service"
+    workspace_dir = workspace_dir / f"agent_{aid}" if aid else workspace_dir / "agents"
     return workspace_dir
 
 
@@ -1167,19 +1187,46 @@ def get_agent_skills_dir() -> Path:
     return get_agent_workspace_dir() / "skills"
 
 
+def get_tenant_agent_jiuwenclaw_workspace_dir(
+    service_id: str | None, agent_id: str | None,
+) -> Path:
+    """多租户 DeepAgent 工作区：``<tenant>/agent/jiuwenclaw_workspace``.
+
+    ``service_id`` / ``agent_id`` 任一缺失时抛 ``ValueError``（不返回 ``None``）。
+    """
+    sid, aid = _require_tenant_ids(service_id, agent_id)
+    base = get_multi_tenant_user_workspace_dir(sid, aid)
+    if base is None:
+        raise ValueError(
+            f"get_multi_tenant_user_workspace_dir returned None for service_id={sid!r}, agent_id={aid!r}"
+        )
+    return base / get_agent_root_relative_dir() / "jiuwenclaw_workspace"
+
+
+def get_tenant_agent_skills_dirs(
+    service_id: str | None, agent_id: str | None,
+) -> list[Path]:
+    """多租户 skills 目录（与 ``JiuWenClaw`` / ``SkillManager`` 落盘路径一致）.
+
+    要求 ``service_id`` 与 ``agent_id`` 至少一个非空；二者皆空时抛 ``ValueError``（避免
+    静默落到 default 租户目录导致跨租户误读 skill）。单租户请用 ``get_multi_tenant_skill_dirs``
+    或 ``get_agent_skills_dir()``。
+    """
+    workspace = get_tenant_agent_jiuwenclaw_workspace_dir(service_id, agent_id)
+    return [workspace / "skills"]
+
+
 def get_multi_tenant_skill_dirs(
     service_id: str | None, agent_id: str | None,
 ) -> list[Path]:
     """Resolve the skills directory list for multi-tenant / single-tenant mode.
 
     - Multi-tenant (any of ``service_id`` / ``agent_id`` provided): returns
-      ``[<multi-tenant user workspace>/skills]``.
+      ``[<tenant>/agent/jiuwenclaw_workspace/skills]``.
     - Single-tenant (both ``None``): returns ``[get_agent_skills_dir()]``.
     """
     if service_id or agent_id:
-        workspace = get_multi_tenant_user_workspace_dir(service_id, agent_id)
-        if workspace is not None:
-            return [workspace / "skills"]
+        return get_tenant_agent_skills_dirs(service_id, agent_id)
     return [get_agent_skills_dir()]
 
 

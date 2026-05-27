@@ -7,6 +7,7 @@ from fastapi import APIRouter, FastAPI
 from jiuwenclaw_manager.infrastructure.config import settings
 from jiuwenclaw_manager.manager_ws_server import get_manager_ws_server
 
+from .application_config_routers import application_config_router
 from .config_effective_policy_routers import config_effective_policy_router
 from .instance_routers import instance_router
 from .template_routers import templates_router
@@ -24,6 +25,11 @@ def router_register(app: FastAPI) -> None:
         tags=["Instances"],
     )
     v1_router.include_router(templates_router, tags=["Templates"])
+    v1_router.include_router(
+        application_config_router,
+        prefix=INSTANCES_PREFIX,
+        tags=["Application Config"],
+    )
     v1_router.include_router(
         config_effective_policy_router,
         prefix=INSTANCES_PREFIX,

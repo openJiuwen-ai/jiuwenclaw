@@ -21,7 +21,6 @@ from openjiuwen_runtime.foundation.db.table_def import (
 class ModelTemplateInfo(BaseModel):
     id: int
     template_id: str
-    jiuwenclaw_id: str
     template_name: str
     description: str | None
     model_type: Any
@@ -56,7 +55,6 @@ MODEL_TEMPLATE_TABLE_DEF = TableDefinition(
             nullable=False,
         ),
         ColumnDefinition("template_id", "string", length=100, nullable=False),
-        ColumnDefinition("jiuwenclaw_id", "string", length=64, nullable=False),
         ColumnDefinition("template_name", "string", length=128, nullable=False),
         ColumnDefinition("description", "string", length=512, nullable=True),
         ColumnDefinition("model_type", "json", nullable=False),
@@ -78,7 +76,6 @@ MODEL_TEMPLATE_TABLE_DEF = TableDefinition(
     ],
     indexes=[
         IndexDefinition(["template_id"], unique=True),
-        IndexDefinition(["jiuwenclaw_id"], unique=False),
         IndexDefinition(["enabled"], unique=False),
     ],
 )
@@ -201,6 +198,10 @@ class ServiceConfigTemplateInfo(BaseModel):
     nfs_server: str | None
     nfs_path: str
     nfs_mount_path: str | None
+    host_path: str | None
+    host_mount_path: str | None
+    mode: str
+    node_name: str
     cpu_request: str
     memory_request: str
     cpu_limit: str
@@ -258,6 +259,10 @@ SERVICE_CONFIG_TEMPLATE_TABLE_DEF = TableDefinition(
         ColumnDefinition("nfs_server", "string", length=256, nullable=True),
         ColumnDefinition("nfs_path", "string", length=512, nullable=False, default="/"),
         ColumnDefinition("nfs_mount_path", "string", length=512, nullable=True),
+        ColumnDefinition("host_path", "string", length=512, nullable=True),
+        ColumnDefinition("host_mount_path", "string", length=512, nullable=True),
+        ColumnDefinition("mode", "string", length=512, nullable=False, default="product"),
+        ColumnDefinition("node_name", "string", length=512, nullable=False, default=""),
         ColumnDefinition("cpu_request", "string", length=32, nullable=False, default="500m"),
         ColumnDefinition("memory_request", "string", length=32, nullable=False, default="512Mi"),
         ColumnDefinition("cpu_limit", "string", length=32, nullable=False, default="1000m"),

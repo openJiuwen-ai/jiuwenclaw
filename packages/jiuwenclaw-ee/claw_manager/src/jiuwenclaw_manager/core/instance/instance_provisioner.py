@@ -7,7 +7,6 @@ import socket
 import subprocess
 import sys
 import time
-import uuid
 from pathlib import Path
 from typing import Any
 
@@ -18,6 +17,7 @@ from jiuwenclaw_manager.infrastructure.config import Settings
 from jiuwenclaw_manager.core.instance.instance_service import (
     create_instance_row,
     dumps_auth_config,
+    generate_unique_jiuwenclaw_id,
     get_instance_row,
     merge_instance_data,
 )
@@ -128,7 +128,7 @@ def _child_env_common(
     out["JIUWENCLAW_DATA_DIR"] = str(instance_dir.resolve())
     out["JIUWENCLAW_CONFIG_DIR"] = str((instance_dir / "config").resolve())
     out["EXTENSION_DIRS"] = extension_dirs
-    out["JIUWENCLAW_PROVISIONED_INSTANCE_ID"] = jiuwenclaw_id
+    out["JIUWENCLAW_ID"] = jiuwenclaw_id
     out["MANAGEMENT_API_BASE"] = management_api_base
 
     db_type = os.getenv("JIUWENCLAW_GATEWAY_DB_TYPE", "mysql").strip().lower()
@@ -176,7 +176,7 @@ async def provision_local_jiuwenclaw(
         raise FileNotFoundError(f"config template not found: {tpl}")
 
     root = Path(settings.provision_workspace_root).expanduser().resolve()
-    jiuwenclaw_id = f"sp-{uuid.uuid4().hex[:12]}"
+    jiuwenclaw_id = await generate_unique_jiuwenclaw_id(handler)
     instance_dir = root / jiuwenclaw_id
     if instance_dir.exists():
         raise FileExistsError(f"workspace already exists: {instance_dir}")
@@ -195,8 +195,6 @@ async def provision_local_jiuwenclaw(
     )
 
     management_api_base = f"http://127.0.0.1:{rest_port}"
-    gateway_sid = f"gw-{jiuwenclaw_id}"
-    agent_sid = f"as-{jiuwenclaw_id}"
 
     await create_instance_row(
         handler,
@@ -244,7 +242,6 @@ async def provision_local_jiuwenclaw(
     env_as = dict(base_env)
     env_as["AGENT_SERVER_HOST"] = "127.0.0.1"
     env_as["AGENT_SERVER_PORT"] = str(agent_port)
-    env_as["JIUWENCLAW_SERVICE_ID"] = agent_sid
     # 与 Gateway 共用同一 REST 端口时，仅由 Gateway 挂载 agent_client_rest，避免双进程抢端口导致 62160 无监听
     env_as["AGENT_CLIENT_REST_ENABLED"] = "false"
 
@@ -252,7 +249,6 @@ async def provision_local_jiuwenclaw(
     env_gw["AGENT_SERVER_URL"] = f"ws://127.0.0.1:{agent_port}"
     env_gw["WEB_HOST"] = "127.0.0.1"
     env_gw["WEB_PORT"] = str(web_port)
-    env_gw["JIUWENCLAW_SERVICE_ID"] = gateway_sid
     env_gw["AGENT_CLIENT_REST_ENABLED"] = "true"
 
     log_dir = instance_dir / "provision_logs"
