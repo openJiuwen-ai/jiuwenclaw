@@ -410,8 +410,13 @@ class TaskExecutionRail(DeepAgentRail):
         _ACTIVE_TASK_ID.set(None)
         if isinstance(ctx.inputs, InvokeInputs):
             await self._init_task_tracking(ctx.session)
-            parent_request_id = self._extract_request_id(ctx)
-            await self._emit_task_update_event(ctx.session, parent_request_id)
+            has_active_tasks = any(
+                t.get("status") in ("pending", "in_progress")
+                for t in self._todo_map.values()
+            )
+            if has_active_tasks:
+                parent_request_id = self._extract_request_id(ctx)
+                await self._emit_task_update_event(ctx.session, parent_request_id)
 
     async def before_tool_call(self, ctx: AgentCallbackContext) -> None:
         setattr(ctx, '_tool_start_time', time.time())
