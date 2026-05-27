@@ -12,6 +12,7 @@ import importlib
 import json
 import logging
 import os
+import socket
 from typing import Any, AsyncIterator, Callable, Optional
 
 from openjiuwen_runtime.management.session.access import Access
@@ -25,6 +26,10 @@ from openjiuwen_runtime.management.session.interfaces import (
 from openjiuwen_runtime.management.session.k8s_service_handler import (
     K8sDeployController,
     K8sServiceHandler,
+)
+from openjiuwen_runtime.management.session.process_service_handler import (
+    ProcessDeployController,
+    ProcessServiceHandler,
 )
 from openjiuwen_runtime.management.session.models import (
     AccessConfig,
@@ -52,6 +57,12 @@ from jiuwenclaw.schema import AgentRequest
 from jiuwenclaw.schema.agent import AgentResponse, AgentResponseChunk
 
 logger = logging.getLogger(__name__)
+
+
+def _pick_free_port(host: str = "127.0.0.1") -> int:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.bind((host, 0))
+        return int(sock.getsockname()[1])
 
 _load_effective_enterprise_config: Any | None = None
 _service_config_slot: Any | None = None
@@ -254,23 +265,47 @@ class RuntimeManagementAgentClient(AgentServerClient):
         gateway_db_name = os.getenv("GATEWAY_DB_NAME")
         jiuwenclaw_id = os.getenv("JIUWENCLAW_ID")
 
-        agent_server_env = {
-            "AGENT_SERVER_HOST": "0.0.0.0",
-            "AGENT_RUNTIME": agent_runtime,
-            "GATEWAY_DB_TYPE": gateway_db_type,
-            "GATEWAY_SQLITE_PATH": gateway_sqlite_path,
-            "GATEWAY_DB_HOST": gateway_db_host,
-            "GATEWAY_DB_PORT": gateway_db_port,
-            "GATEWAY_DB_USER": gateway_db_user,
-            "GATEWAY_DB_PASSWORD": gateway_db_password,
-            "GATEWAY_DB_NAME": gateway_db_name,
-            "JIUWENCLAW_ID": jiuwenclaw_id,
-        }
-        if api_key:
-            agent_server_env["MODEL_PROVIDER"] = model_provider
-            agent_server_env["MODEL_NAME"] = model_name
-            agent_server_env["API_BASE"] = api_base
-            agent_server_env["API_KEY"] = api_key
+        deploy_mode = (os.getenv("AGENT_SERVER_DEPLOY_MODE") or "k8s").strip().lower()
+
+        def _agent_env_vars() -> dict[str, str]:
+            base: dict[str, str] = {
+                "AGENT_SERVER_HOST": "0.0.0.0",
+                "AGENT_RUNTIME": agent_runtime or "",
+            }
+            for key, value in (
+                ("GATEWAY_DB_TYPE", gateway_db_type),
+                ("GATEWAY_SQLITE_PATH", gateway_sqlite_path),
+                ("GATEWAY_DB_HOST", gateway_db_host),
+                ("GATEWAY_DB_PORT", gateway_db_port),
+                ("GATEWAY_DB_USER", gateway_db_user),
+                ("GATEWAY_DB_PASSWORD", gateway_db_password),
+                ("GATEWAY_DB_NAME", gateway_db_name),
+                ("JIUWENCLAW_ID", jiuwenclaw_id),
+            ):
+                if value is not None:
+                    base[key] = value
+            if api_key:
+                base.update(
+                    {
+                        "MODEL_PROVIDER": model_provider or "",
+                        "MODEL_NAME": model_name or "",
+                        "API_BASE": api_base or "",
+                        "API_KEY": api_key,
+                    }
+                )
+            ssl_verify = os.getenv("LLM_SSL_VERIFY")
+            if ssl_verify is not None:
+                base["LLM_SSL_VERIFY"] = ssl_verify
+            home = os.getenv("AGENT_SERVER_HOME")
+            if home:
+                base["HOME"] = home
+            pythonpath = os.getenv("PYTHONPATH")
+            if pythonpath:
+                base["PYTHONPATH"] = pythonpath
+            log_file = os.getenv("AGENT_SERVER_LOG_FILE")
+            if log_file:
+                base["AGENT_SERVER_LOG_FILE"] = log_file
+            return base
 
         class _Factory(IServiceInstanceFactory):
             async def new_service(
@@ -278,7 +313,28 @@ class RuntimeManagementAgentClient(AgentServerClient):
             ) -> IServiceHandler:
                 cfg = service_template or {}
 
-                k8s = K8sServiceHandler(
+                if deploy_mode == "process":
+                    process_host = "127.0.0.1"
+                    target_port = _pick_free_port(process_host)
+                    launcher_script = os.getenv("AGENT_SERVER_LAUNCHER_SCRIPT") or None
+                    process_handler = ProcessServiceHandler(
+                        host=process_host,
+                        publish_port=target_port,
+                        env_vars=_agent_env_vars(),
+                        launcher_script=launcher_script,
+                        ready_timeout=float(
+                            cfg["ready_timeout"] if "ready_timeout" in cfg else ready_timeout
+                        ),
+                        ready_poll_interval=float(
+                            cfg["ready_poll_interval"]
+                            if "ready_poll_interval" in cfg
+                            else ready_poll_interval
+                        ),
+                    )
+                    deploy_controller: Any = ProcessDeployController(process_handler)
+                else:
+                    target_port = int(cfg["container_port"]) if "container_port" in cfg else container_port
+                    k8s = K8sServiceHandler(
                     cfg["agent_image"] if "agent_image" in cfg else agent_image,
                     name_prefix="jiuwenclaw",
                     namespace=cfg["namespace"] if "namespace" in cfg else namespace,
@@ -288,7 +344,7 @@ class RuntimeManagementAgentClient(AgentServerClient):
                     port_name=cfg["port_name"] if "port_name" in cfg else port_name,
                     image_pull_policy=cfg["image_pull_policy"] if "image_pull_policy" in cfg else image_pull_policy,
                     extra_labels=dict(RuntimeManagementAgentClient._POD_LABEL),
-                    env_vars=agent_server_env,
+                    env_vars=_agent_env_vars(),
                     kubeconfig=kubeconfig,
                     readiness_initial_delay=int(cfg["readiness_initial_delay"]) if "readiness_initial_delay" in cfg else readiness_initial_delay,
                     readiness_period=int(cfg["readiness_period"]) if "readiness_period" in cfg else readiness_period,
@@ -305,9 +361,11 @@ class RuntimeManagementAgentClient(AgentServerClient):
                     memory_request=cfg.get("memory_request") if "memory_request" in cfg else memory_request,
                     cpu_limit=cfg.get("cpu_limit") if "cpu_limit" in cfg else cpu_limit,
                     memory_limit=cfg.get("memory_limit") if "memory_limit" in cfg else memory_limit,
-                )
+                    )
+                    deploy_controller = K8sDeployController(k8s)
+
                 ch = WSServiceMessageChannel(
-                    target_port=int(cfg["container_port"]) if "container_port" in cfg else container_port,
+                    target_port=target_port,
                     invoke_path="",
                     ws_use_tls=False,
                 )
@@ -320,7 +378,7 @@ class RuntimeManagementAgentClient(AgentServerClient):
                     total_concurrency=int(cfg["service_concurrency"]) if "service_concurrency" in cfg else service_concurrency,
                     message_channel=ch,
                     response_parser=response_parser,
-                    deploy_controller=K8sDeployController(k8s),
+                    deploy_controller=deploy_controller,
                     service_template=service_template,
                 )
 
@@ -341,6 +399,11 @@ class RuntimeManagementAgentClient(AgentServerClient):
 
         self._access: Any = Access(create_service_manager)
         self._connected = False
+
+    @property
+    def server_ready(self) -> bool:
+        """WebChannel on_connect 依赖此标志发送 connection.ack。"""
+        return self._connected
 
     def set_or_update_server_config(
         self,

@@ -49,6 +49,7 @@ dependencies = [
     "pytest-asyncio==1.3.0",
     "pytest-mock==3.15.1",
     "pytest-cov==7.1.0",
+    "pytest-timeout==2.4.0",
     "sqlite-vec==0.1.6",
     "openjiuwen_deepsearch @ git+https://gitcode.com/openJiuwen/deepsearch.git@enterprise_dev",
     "pypandoc",
@@ -67,6 +68,7 @@ test = [
     "pytest-html>=4.1.1",
     "pytest-mock>=3.15.1",
     "pytest-cov>=7.1.0",
+    "pytest-timeout>=2.4.0",
     "coverage>=7.7.1",
     "pyyaml>=6.0",
 ]
@@ -130,6 +132,7 @@ test = [
     "pytest-html>=4.1.1",
     "pytest-mock>=3.15.1",
     "pytest-cov>=7.1.0",
+    "pytest-timeout>=2.4.0",
     "coverage>=7.7.1",
     "pyyaml>=6.0",
 ]

@@ -1124,8 +1124,14 @@ async def _run(
     await vibeskill_inbound_server.start()
 
     # VibeSkill 有自己的 HTTP Server 和 WebSocket Server，不再走 GatewayServer
+    vibeskill_enabled = os.getenv("VIBESKILL_ENABLED", "true").lower() not in ("0", "false", "no")
     vibeskill_channel = VibeSkillChannel(
-        config=VibeSkillConfig(channel_id="vibeskill"),
+        config=VibeSkillConfig(
+            channel_id="vibeskill",
+            enabled=vibeskill_enabled,
+            http_port=int(os.getenv("VIBESKILL_HTTP_PORT", "19002")),
+            ws_port=int(os.getenv("VIBESKILL_WS_PORT", "19003")),
+        ),
         router=channel_manager,
         agent_client=client,
     )
@@ -1165,7 +1171,10 @@ async def _run(
     gateway_server.on_message(acp_inbound_server.handle_message)
 
     channel_manager.register_channel(vibeskill_channel)
-    await vibeskill_channel.start()
+    if vibeskill_enabled:
+        await vibeskill_channel.start()
+    else:
+        logger.info("[App] VibeSkill channel disabled by config")
 
     feishu_channel = None
     feishu_task = None
