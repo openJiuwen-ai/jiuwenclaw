@@ -19,8 +19,12 @@ import hashlib
 import base64
 from datetime import datetime
 import logging
+from jiuwenclaw.agentserver.open_ability_utils import get_oa_auth_headers
+from jiuwenclaw.sandbox import sandbox_routing_enabled
+
 
 logger = logging.getLogger(__name__)
+default_headers = get_oa_auth_headers()
 
 
 def generate_auth_headers(env_config):
@@ -64,19 +68,22 @@ def format_skill_data(raw_skills):
 
 
 def search_skills(query):
-    raw = os.getenv("SKILL_SEARCH_ENV_CONFIG", "")
-    if not raw:
-        logger.error("[SkillSearch] 环境变量 SKILL_SEARCH_ENV_CONFIG 未设置")
-        return None, 0
-    try:
-        env_config = json.loads(raw)
-    except json.JSONDecodeError as e:
-        logger.error("[SkillSearch] SKILL_SEARCH_ENV_CONFIG JSON 解析失败: %s", e)
-        return None, 0
-    api_url = env_config["url"]
+    if sandbox_routing_enabled():
+        api_url = os.getenv("SKILL_SEARCH_URL")
+    else:
+        raw = os.getenv("SKILL_SEARCH_ENV_CONFIG", "")
+        if not raw:
+            logger.error("[SkillSearch] 环境变量 SKILL_SEARCH_ENV_CONFIG 未设置")
+            return None, 0
+        try:
+            env_config = json.loads(raw)
+        except json.JSONDecodeError as e:
+            logger.error("[SkillSearch] SKILL_SEARCH_ENV_CONFIG JSON 解析失败: %s", e)
+            return None, 0
+        api_url = env_config["url"]
 
     trace_id = str(uuid.uuid4())
-    auth_headers = generate_auth_headers(env_config)
+    # auth_headers = generate_auth_headers(env_config)
 
     headers = {
         'Content-Type': 'application/json',
@@ -84,7 +91,7 @@ def search_skills(query):
         'x-hag-trace-id': trace_id,
         'x-request-from': 'openclaw',
     }
-    headers.update(auth_headers)
+    headers.update(default_headers)
 
     payload = {
         "query": query,
@@ -92,8 +99,8 @@ def search_skills(query):
     }
 
     try:
-        verify = env_config.get("verify", True)
-        response = requests.post(api_url, headers=headers, json=payload, timeout=30, verify=verify)
+        # verify = env_config.get("verify", True)
+        response = requests.post(api_url, headers=headers, json=payload, timeout=30, verify=False)
         response.raise_for_status()
         try:
             response_data = response.json()
@@ -130,14 +137,13 @@ def parse_args():
     """解析命令行参数"""
     parser = argparse.ArgumentParser(description="查找技能")
     parser.add_argument("--query", required=True, help="查找技能的关键词")
-    parser.add_argument("--env", default="test", choices=["dev", "test", "prod"], help="环境: test 或 prod")
     return parser.parse_args()
 
 
 def main():
     """主函数"""
     args = parse_args()
-    search_skills(query=args.query, env=args.env)
+    search_skills(query=args.query)
 
 
 if __name__ == '__main__':
