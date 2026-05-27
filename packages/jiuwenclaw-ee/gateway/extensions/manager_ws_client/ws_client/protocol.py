@@ -7,6 +7,7 @@ from typing import Any
 
 FRAME_TYPE_EVENT = "event"
 FRAME_TYPE_REGISTER = "register"
+FRAME_TYPE_HEARTBEAT = "heartbeat"
 FRAME_TYPE_CONFIG_PUSH = "config.push"
 FRAME_TYPE_CONFIG_ACK = "config.ack"
 FRAME_TYPE_ERROR = "error"
@@ -36,6 +37,25 @@ def build_register(
         "type": FRAME_TYPE_REGISTER,
         "payload": payload,
     }
+
+
+def build_heartbeat(
+    *,
+    jiuwenclaw_id: str,
+    service_type: str = "gateway",
+    version: str | None = None,
+    endpoint: str | None = None,
+) -> dict[str, Any]:
+    """构建 heartbeat 帧（Gateway → Manager，用于刷新 ``instance_info.status``）。"""
+    payload: dict[str, Any] = {
+        "jiuwenclaw_id": str(jiuwenclaw_id or "").strip(),
+        "service_type": service_type,
+    }
+    if version:
+        payload["version"] = version
+    if endpoint:
+        payload["endpoint"] = endpoint
+    return {"type": FRAME_TYPE_HEARTBEAT, "payload": payload}
 
 
 def build_config_ack(

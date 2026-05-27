@@ -17,10 +17,8 @@ from jiuwenclaw_manager.schemas.instance_schemas import (
     CreateInstanceBody,
     InstanceDetail,
     InstanceSummary,
-    PatchInstanceDataBody,
+    InstanceUpdateBody,
     ProvisionLocalInstanceBody,
-    ServiceStatusItem,
-    ServiceStatusList,
 )
 from jiuwenclaw_manager.schemas.template_schemas import (
     ExtensionConfigTemplateCreateBody,
@@ -34,12 +32,10 @@ from jiuwenclaw_manager.schemas.template_schemas import (
 __all__ = (
     "ResponseModel",
     "CreateInstanceBody",
-    "PatchInstanceDataBody",
+    "InstanceUpdateBody",
     "ProvisionLocalInstanceBody",
     "InstanceSummary",
     "InstanceDetail",
-    "ServiceStatusItem",
-    "ServiceStatusList",
     "ModelTemplateCreateBody",
     "ModelTemplateUpdateBody",
     "ModelTemplateOut",

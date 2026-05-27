@@ -2,10 +2,9 @@
 
 from __future__ import annotations
 
-from typing import Annotated, Any
+from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from pydantic import BaseModel
 from openjiuwen_runtime.foundation.db.handler import DBHandler
 
 from jiuwenclaw_manager.infrastructure.db import get_db_handler
@@ -13,25 +12,12 @@ from jiuwenclaw_manager.infrastructure.config import settings
 from jiuwenclaw_manager.schemas.common_schemas import ResponseModel
 from jiuwenclaw_manager.schemas.instance_schemas import (
     CreateInstanceBody,
-    PatchInstanceDataBody,
+    InstanceUpdateBody,
     ProvisionLocalInstanceBody,
 )
 from jiuwenclaw_manager.core.instance import InstanceService, provision_local_jiuwenclaw
 
 instance_router = APIRouter()
-
-
-class HeartbeatIngestBody(BaseModel):
-    """实例服务心跳上报 REST 入口。"""
-
-    service_id: str
-    service_type: str
-    component_role: str
-    manager_id: str
-    endpoint: str | None = None
-    version: str | None = None
-    capabilities: dict[str, Any] | None = None
-    data: dict[str, Any] | None = None
 
 
 def _svc(handler: DBHandler) -> InstanceService:
@@ -82,14 +68,17 @@ async def list_instances(
     return ResponseModel(code=200, message="success", data=data)
 
 
-@instance_router.patch("/{jiuwenclaw_id}", response_model=ResponseModel)
-async def patch_instance(
+@instance_router.put("/{jiuwenclaw_id}", response_model=ResponseModel)
+async def update_instance(
     jiuwenclaw_id: str,
-    body: PatchInstanceDataBody,
+    body: InstanceUpdateBody,
     handler: Annotated[DBHandler, Depends(get_db_handler)],
 ):
     svc = _svc(handler)
-    row = await svc.patch_instance_data(jiuwenclaw_id, body)
+    try:
+        row = await svc.update(jiuwenclaw_id, body)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     if row is None:
         raise HTTPException(status_code=404, detail="instance not found")
     return ResponseModel(code=200, message="success", data=row.model_dump())
@@ -118,37 +107,3 @@ async def delete_instance(
     if not ok:
         raise HTTPException(status_code=404, detail="instance not found")
     return ResponseModel(code=200, message="success", data={"deleted": True})
-
-
-@instance_router.get("/{jiuwenclaw_id}/services/status", response_model=ResponseModel)
-async def services_status(
-    jiuwenclaw_id: str, handler: Annotated[DBHandler, Depends(get_db_handler)]
-):
-    svc = _svc(handler)
-    data = await svc.services_status(jiuwenclaw_id)
-    if data is None:
-        raise HTTPException(status_code=404, detail="instance not found")
-    return ResponseModel(code=200, message="success", data=data.model_dump())
-
-
-@instance_router.post("/{jiuwenclaw_id}/events/heartbeat", response_model=ResponseModel)
-async def ingest_heartbeat(
-    jiuwenclaw_id: str,
-    body: HeartbeatIngestBody,
-    handler: Annotated[DBHandler, Depends(get_db_handler)],
-):
-    svc = _svc(handler)
-    ok = await svc.apply_heartbeat(
-        jiuwenclaw_id=jiuwenclaw_id,
-        service_id=body.service_id,
-        service_type=body.service_type,
-        component_role=body.component_role,
-        manager_id=body.manager_id,
-        endpoint=body.endpoint,
-        version=body.version,
-        capabilities=body.capabilities,
-        extra=body.data,
-    )
-    if not ok:
-        raise HTTPException(status_code=404, detail="instance not found")
-    return ResponseModel(code=200, message="success", data={"accepted": True})

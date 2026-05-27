@@ -11,7 +11,7 @@ Claw Manager 管理面 Web 前端。技术栈与 `jiuwenclaw/web` 完全对齐�
 ## 功能
 
 1. **总览**：Manager / Manager-WS 健康状态、实例数、在线服务数（来自 `/api/health`、`/api/manager-ws/status`、`/api/v1/instances`）。
-2. **服务组网**：分组卡片展示每个组网实例的 Gateway → AgentServer 拓扑，按服务上报心跳实时刷新（`/api/v1/instances` + `/api/v1/instances/{id}/services/status`）。
+2. **服务组网**：分组卡片展示每个组网实例的 Gateway 在线状态，经 Manager WebSocket 心跳刷新（`/api/v1/instances`）。
 3. **模型模板**：`/api/v1/model-templates` 的全量 CRUD（含 model_type、tags、参数 JSON 编辑）。
 4. **扩展配置模板**：`/api/v1/extension-config-templates` 的全量 CRUD（钩子配置 JSON 编辑）。
 5. **实例策略**：进入某个实例后，对默认模板映射 / 全局 / 服务 / Agent 四级策略做 CRUD。

@@ -12,9 +12,14 @@ from typing import Any
 
 from jiuwenclaw_manager.infrastructure.db import get_db_handler
 from jiuwenclaw_manager.infrastructure.logger import get_logger
-from jiuwenclaw_manager.core.instance.instance_service import register_gateway_via_ws
+from jiuwenclaw_manager.core.instance.instance_service import (
+    apply_gateway_ws_heartbeat,
+    mark_instance_offline,
+    register_gateway_via_ws,
+)
 from jiuwenclaw_manager.manager_ws_server.protocol import (
     FRAME_TYPE_CONFIG_ACK,
+    FRAME_TYPE_HEARTBEAT,
     FRAME_TYPE_REGISTER,
     build_config_push,
     build_connection_ack,
@@ -221,7 +226,21 @@ class ManagerWsServer:
             logger.exception("[ManagerWsServer] handler error (%s): %s", remote, exc)
         finally:
             async with self._clients_lock:
-                self._clients.pop(key, None)
+                client = self._clients.pop(key, None)
+            if client is not None:
+                try:
+                    handler = get_db_handler()
+                    await mark_instance_offline(handler, client.jiuwenclaw_id)
+                    logger.info(
+                        "[ManagerWsServer] gateway disconnected jiuwenclaw_id=%s -> offline",
+                        client.jiuwenclaw_id,
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning(
+                        "[ManagerWsServer] mark offline failed jiuwenclaw_id=%s: %s",
+                        client.jiuwenclaw_id,
+                        exc,
+                    )
 
     async def _handle_frame(self, ws: Any, key: int, raw: str | bytes) -> None:
         try:
@@ -237,6 +256,9 @@ class ManagerWsServer:
             return
         if frame_type == FRAME_TYPE_CONFIG_ACK:
             await self._handle_config_ack(data)
+            return
+        if frame_type == FRAME_TYPE_HEARTBEAT:
+            await self._handle_heartbeat(key, data)
             return
 
         err = build_error(f"unsupported frame type: {frame_type!r}")
@@ -264,6 +286,38 @@ class ManagerWsServer:
         raw_result = payload.get("result")
         pending.result = raw_result if isinstance(raw_result, dict) else None
         pending.event.set()
+
+    async def _handle_heartbeat(self, key: int, data: dict[str, Any]) -> None:
+        payload = data.get("payload")
+        if not isinstance(payload, dict):
+            return
+        async with self._clients_lock:
+            client = self._clients.get(key)
+        if client is None:
+            return
+        jid = str(payload.get("jiuwenclaw_id") or client.jiuwenclaw_id).strip()
+        if jid != client.jiuwenclaw_id:
+            logger.warning(
+                "[ManagerWsServer] heartbeat jiuwenclaw_id mismatch: %s != %s",
+                jid,
+                client.jiuwenclaw_id,
+            )
+            return
+        try:
+            handler = get_db_handler()
+            await apply_gateway_ws_heartbeat(
+                handler,
+                jiuwenclaw_id=jid,
+                manager_id=self._manager_id,
+                endpoint=str(payload.get("endpoint") or "").strip() or None,
+                version=str(payload.get("version") or "").strip() or None,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "[ManagerWsServer] heartbeat failed jiuwenclaw_id=%s: %s",
+                jid,
+                exc,
+            )
 
     async def _handle_register(self, ws: Any, key: int, data: dict[str, Any]) -> None:
         payload = data.get("payload")
@@ -311,6 +365,19 @@ class ManagerWsServer:
             await ws.send(json.dumps(ack, ensure_ascii=False))
         except Exception as exc:  # noqa: BLE001
             logger.warning("[ManagerWsServer] register.ack failed: %s", exc)
+        try:
+            handler = get_db_handler()
+            await apply_gateway_ws_heartbeat(
+                handler,
+                jiuwenclaw_id=jiuwenclaw_id,
+                manager_id=self._manager_id,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "[ManagerWsServer] initial heartbeat on register failed jiuwenclaw_id=%s: %s",
+                jiuwenclaw_id,
+                exc,
+            )
         registered = await self.list_registered_jiuwenclaw_ids()
         logger.info(
             "[ManagerWsServer] registered jiuwenclaw_id=%s service_type=%s "

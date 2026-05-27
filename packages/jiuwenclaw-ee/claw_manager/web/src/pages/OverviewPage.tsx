@@ -29,7 +29,7 @@ export function OverviewPage() {
     const map = { ok: 0, warn: 0, danger: 0, muted: 0 };
     for (const it of items) {
       const s = (it.status ?? '').toLowerCase();
-      if (['active', 'online', 'ready', 'running'].includes(s)) map.ok += 1;
+      if (['online', 'ready', 'running'].includes(s) || s === 'active') map.ok += 1;
       else if (['pending', 'restarting', 'starting'].includes(s)) map.warn += 1;
       else if (['offline', 'failed', 'error'].includes(s)) map.danger += 1;
       else map.muted += 1;
