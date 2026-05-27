@@ -368,8 +368,6 @@ class AgentWebSocketServer:
                     if not t.done():
                         t.cancel()
                 await asyncio.gather(*tasks, return_exceptions=True)
-            # 消息处理头失败不执行重连
-            self._oa_running = False
 
     async def _oa_run_connection(self, ws: Any) -> None:
         """运行单个 OA 连接，并行执行心跳和消息接收。"""
