@@ -63,14 +63,10 @@ render_config_template(){
 enable_dev_mode_if_needed() {
     local mode="${DEPLOY_VARS["MODE"]}"
     local file="$1"
-    local image="$2"
 
     if [ "${mode}" != "dev" ]; then
         return
     fi
-
-    # Override image with dev image
-    yq eval 'select(.kind == "Deployment").spec.template.spec.containers[0].image = "'"${image}"'"' -i "${file}"
 
     # Force pod to be scheduled on current master node
     yq eval 'select(.kind == "Deployment").spec.template.spec.nodeName = "'"${DEPLOY_VARS["MASTER_NODE_NAME"]}"'"' -i "${file}"

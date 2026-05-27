@@ -35,11 +35,11 @@ spec:
     - name: amqp
       port: 5672
       targetPort: 5672
-      nodePort: 30073
+      nodePort: <<RABBITMQ_AMQ_NODE_PORT>>
     - name: management
       port: 15672
       targetPort: 15672
-      nodePort: 30072
+      nodePort: <<RABBITMQ_MGR_NODE_PORT>>
 
 ---
 apiVersion: apps/v1

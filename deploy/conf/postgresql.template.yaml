@@ -22,7 +22,7 @@ spec:
   ports:
     - port: 5432
       targetPort: 5432
-      nodePort: 30432
+      nodePort: <<POSTGRES_NODE_PORT>>
   selector:
     app: <<POSTGRES_NAME>>
 

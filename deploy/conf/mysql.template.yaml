@@ -22,7 +22,7 @@ spec:
   ports:
     - port: 3306       # 集群内部端口
       targetPort: 3306 # 容器端口
-      nodePort: 30036  # 外部访问端口（30000-32767）
+      nodePort: <<MYSQL_NODE_PORT>>  # 外部访问端口（30000-32767）
   selector:
     app: <<MYSQL_NAME>>
 

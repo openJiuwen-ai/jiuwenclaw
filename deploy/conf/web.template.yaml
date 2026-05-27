@@ -15,10 +15,6 @@ spec:
       labels:
         app: <<WEB_NAME>>
     spec:
-      # 固定调度到本master节点（运行部署工具的节点）
-      nodeName: <<MASTER_NODE_NAME>>
-      securityContext:
-        fsGroup: 1000
       containers:
         - name: web
           image: <<WEB_IMAGE>>
@@ -27,7 +23,6 @@ spec:
             - name: http
               containerPort: 5173
               protocol: TCP
-              hostPort: <<WEB_HOST_PORT>>
           env:
             - name: JIUWENCLAW_WEB_HOST
               value: "0.0.0.0"
@@ -35,8 +30,19 @@ spec:
               value: "5173"
             - name: JIUWENCLAW_WEB_PROXY_TARGET
               value: "http://<<GATEWAY_NAME>>:<<GATEWAY_WEBSOCKET_PORT>>"
-          securityContext:
-            allowPrivilegeEscalation: false
-            runAsNonRoot: true
-            runAsUser: 1000
-            runAsGroup: 1000
+
+---
+# NodePort Service：供外连接
+apiVersion: v1
+kind: Service
+metadata:
+  name: <<WEB_NAME>>-nodeport
+  namespace: <<NAMESPACE>>
+spec:
+  type: NodePort
+  ports:
+    - port: 5173                    # 集群内部端口
+      targetPort: 5173              # 容器端口
+      nodePort: <<WEB_NODE_PORT>>   # 外部访问端口（30000-32767）
+  selector:
+    app: <<WEB_NAME>>
