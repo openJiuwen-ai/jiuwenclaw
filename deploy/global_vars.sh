@@ -61,8 +61,9 @@ CMD=""
 
 
 # ==== All available modules ====
-#declare -ga ALL_MODULES=("NFS" "RABBITMQ" "YR_CLAW" "GATEWAY" "WEB" "MANAGER")
-declare -ga ALL_MODULES=("NFS" "RABBITMQ" "MYSQL" "GATEWAY" "WEB" "MANAGER")
+# NOTE: ALL_MODULES is set dynamically by _init_db_type() based on DB_TYPE.
+#       Do not set it here.
+declare -ga ALL_MODULES=()
 
 declare -ga MODULES=()
 
@@ -82,11 +83,11 @@ declare -A DEPLOY_VARS=(
     ["GATEWAY_ENV_FILE_NAME"]="jiuwenclaw-gateway-env"
     ["GATEWAY_WEBSOCKET_PORT"]="19000"
     ["GATEWAY_REST_PORT"]="18080"
-    ["GATEWAY_DB_TYPE"]="mysql"
+    ["GATEWAY_DB_TYPE"]=""         # set by _init_db_type()
     ["GATEWAY_SQLITE_PATH"]="openjiuwen_gateway.db"
-    ["GATEWAY_DB_HOST"]="mysql-headless"
-    ["GATEWAY_DB_PORT"]="3306"
-    ["GATEWAY_DB_USER"]="root"
+    ["GATEWAY_DB_HOST"]=""         # set by _init_db_type()
+    ["GATEWAY_DB_PORT"]=""         # set by _init_db_type()
+    ["GATEWAY_DB_USER"]=""         # set by _init_db_type()
     ["GATEWAY_DB_PASSWORD"]="Root@123456"
     ["GATEWAY_DB_NAME"]="openjiuwen_gateway"
     ["NFS_NAME"]="nfs-server"
@@ -115,14 +116,47 @@ declare -A DEPLOY_VARS=(
     ["MANAGER_NODE_PORT"]="30086"
     ["MANAGER_REST_PORT"]="8765"
     ["MANAGER_WS_PORT"]="8766"
-    ["MANAGER_DB_TYPE"]="mysql"
+    ["MANAGER_DB_TYPE"]=""         # set by _init_db_type()
     ["MANAGER_SQLITE_PATH"]="claw_manager.db"
-    ["MANAGER_DB_HOST"]="mysql-headless"
-    ["MANAGER_DB_PORT"]="3306"
-    ["MANAGER_DB_USER"]="root"
+    ["MANAGER_DB_HOST"]=""         # set by _init_db_type()
+    ["MANAGER_DB_PORT"]=""         # set by _init_db_type()
+    ["MANAGER_DB_USER"]=""         # set by _init_db_type()
     ["MANAGER_DB_PASSWORD"]="Root@123456"
     ["MANAGER_DB_NAME"]="claw_manager"
+    ["DB_TYPE"]="mysql"
 )
+
+# ==== Initialize DB_TYPE and derived variables ====
+init_db_type() {
+    local db_type="${DEPLOY_VARS["DB_TYPE"]:-mysql}"
+
+    DEPLOY_VARS["MANAGER_DB_TYPE"]="${db_type}"
+    DEPLOY_VARS["GATEWAY_DB_TYPE"]="${db_type}"
+
+    # Set default DB connection params based on DB_TYPE
+    if [[ "${db_type}" == "mysql" ]]; then
+        DEPLOY_VARS["MANAGER_DB_HOST"]="mysql-headless"
+        DEPLOY_VARS["MANAGER_DB_PORT"]="3306"
+        DEPLOY_VARS["MANAGER_DB_USER"]="root"
+        DEPLOY_VARS["GATEWAY_DB_HOST"]="mysql-headless"
+        DEPLOY_VARS["GATEWAY_DB_PORT"]="3306"
+        DEPLOY_VARS["GATEWAY_DB_USER"]="root"
+        ALL_MODULES=("NFS" "RABBITMQ" "MYSQL" "GATEWAY" "WEB" "MANAGER")
+    elif [[ "${db_type}" == "postgresql" ]]; then
+        DEPLOY_VARS["MANAGER_DB_HOST"]="postgresql-headless"
+        DEPLOY_VARS["MANAGER_DB_PORT"]="5432"
+        DEPLOY_VARS["MANAGER_DB_USER"]="postgres"
+        DEPLOY_VARS["GATEWAY_DB_HOST"]="postgresql-headless"
+        DEPLOY_VARS["GATEWAY_DB_PORT"]="5432"
+        DEPLOY_VARS["GATEWAY_DB_USER"]="postgres"
+        ALL_MODULES=("NFS" "RABBITMQ" "POSTGRESQL" "GATEWAY" "WEB" "MANAGER")
+    else
+        # sqlite or unknown: no DB module needed
+        ALL_MODULES=("NFS" "RABBITMQ" "GATEWAY" "WEB" "MANAGER")
+    fi
+
+    info "DB_TYPE=${db_type}, ALL_MODULES=${ALL_MODULES[*]}"
+}
 
 declare -A OYR_COMPONENTS=(
         ["frontend"]="deployment"

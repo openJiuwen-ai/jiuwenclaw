@@ -71,6 +71,7 @@ process_restart() {
 # ==================== Main function ====================
 main() {
     read_env_from_file "${CUSTOM_ENV_FILE}" "DEPLOY_VARS"
+    init_db_type
     parse_args "$@"
     process_namespace
     check_dependency

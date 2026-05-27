@@ -150,10 +150,12 @@ check_if_rabbitmq_up() {
 }
 
 check_if_db_up() {
-    local db_type="${DEPLOY_VARS["MANAGER_DB_TYPE"]}"
+    local db_type="${DEPLOY_VARS["DB_TYPE"]}"
 
     if [[ "${db_type}" == "sqlite" ]]; then
         info "DB_TYPE is sqlite, skip DB check"
+        DEPLOY_VARS["MANAGER_DB_TYPE"]="sqlite"
+        DEPLOY_VARS["GATEWAY_DB_TYPE"]="sqlite"
         return
     elif [[ "${db_type}" == "postgresql" ]]; then
         _check_if_postgresql_up
@@ -294,7 +296,7 @@ check_rabbitmq_up_dependency(){
 }
 
 check_db_up_dependency(){
-    local db_type="${DEPLOY_VARS["MANAGER_DB_TYPE"]}"
+    local db_type="${DEPLOY_VARS["DB_TYPE"]}"
 
     if [[ "${db_type}" == "sqlite" ]]; then
         info "DB_TYPE is sqlite, skip DB dependency check"
