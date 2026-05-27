@@ -7,8 +7,6 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import os
-import time
 import uuid
 from typing import Any
 
@@ -23,7 +21,6 @@ from jiuwenclaw.agentserver.deep_agent.ask_user_question_registry import (
 
 logger = logging.getLogger(__name__)
 
-_ASK_TOOL_TIMEOUT = float(os.environ.get("ASK_USER_QUESTION_TIMEOUT", "300"))
 _ASK_TOOL_MAX_QUESTIONS = 4
 _ASK_TOOL_MIN_OPTIONS = 2
 _ASK_TOOL_MAX_OPTIONS = 4
@@ -267,28 +264,7 @@ def _format_questions_as_text(questions: list[dict[str, Any]]) -> str:
     return "\n".join(lines)
 
 
-def _is_preview_markdown_review(questions: list[dict[str, Any]]) -> bool:
-    """True when any question carries preview for outline / markdown review."""
-    for q in questions:
-        preview = q.get("preview")
-        if isinstance(preview, dict) and str(preview.get("text") or "").strip():
-            return True
-    return False
-
-
-def _parse_timeout(timeout: Any) -> float:
-    if timeout is None:
-        return _ASK_TOOL_TIMEOUT
-    try:
-        parsed = float(timeout)
-    except (TypeError, ValueError) as exc:
-        raise ValueError("timeout 必须是数字（秒）") from exc
-    if parsed <= 0:
-        raise ValueError("timeout 必须大于 0")
-    return parsed
-
-
-async def _ask_user_question_impl(questions: Any, timeout: Any = None) -> dict[str, Any]:
+async def _ask_user_question_impl(questions: Any) -> dict[str, Any]:
     interactive, session_id, stream_rid, channel_id = get_ask_request_context()
     reg = AskUserQuestionRegistry.get_instance()
     # 仅按本次流的 stream_request_id 回填（修复 ContextVar 在异步工具内丢失），不按 session 继承以免sticky。
@@ -296,8 +272,6 @@ async def _ask_user_question_impl(questions: Any, timeout: Any = None) -> dict[s
         interactive = reg.stream_interactive_ask_enabled(stream_rid)
     try:
         normalized = _normalize_questions(questions)
-        preview_review = _is_preview_markdown_review(normalized)
-        wait_timeout: float | None = None if preview_review else _parse_timeout(timeout)
     except Exception as exc:
         return {"status": "error", "message": f"参数错误: {exc}", "answers": []}
 
@@ -336,24 +310,12 @@ async def _ask_user_question_impl(questions: Any, timeout: Any = None) -> dict[s
             "stop_agent_turn": True,
         }
     ask_id = f"{ASK_REQUEST_PREFIX}{uuid.uuid4().hex}"
-    # 与 wait_for_answer(timeout) 使用同一截止时刻；网关/前端用 expires_at_ms 展示倒计时或「请于 xx 前完成」
-    if wait_timeout:
-        expires_at_ms = int(time.time() * 1000 + float(wait_timeout) * 1000)
-        payload: dict[str, Any] = {
-            "event_type": "chat.ask_user_question",
-            "request_id": ask_id,
-            "source": "ask_tool",
-            "questions": normalized,
-            "expires_at_ms": expires_at_ms,
-            "timeout_sec": float(wait_timeout),
-        }
-    else:
-        payload: dict[str, Any] = {
-            "event_type": "chat.ask_user_question",
-            "request_id": ask_id,
-            "source": "ask_tool",
-            "questions": normalized
-        }
+    payload: dict[str, Any] = {
+        "event_type": "chat.ask_user_question",
+        "request_id": ask_id,
+        "source": "ask_tool",
+        "questions": normalized
+    }
     if session_id:
         payload["session_id"] = session_id
 
@@ -372,13 +334,7 @@ async def _ask_user_question_impl(questions: Any, timeout: Any = None) -> dict[s
 
     registry = AskUserQuestionRegistry.get_instance()
     try:
-        answers = await registry.wait_for_answer(ask_id, timeout=wait_timeout)
-    except asyncio.TimeoutError:
-        return {
-            "status": "timeout",
-            "message": f"用户在 {int(wait_timeout)} 秒内未回答，请根据上下文自行判断或再次提问。",
-            "answers": [],
-        }
+        answers = await registry.wait_for_answer(ask_id)
     except asyncio.CancelledError:
         return {"status": "cancelled", "message": "会话已取消。", "answers": []}
 
@@ -409,14 +365,7 @@ _ASK_TOOL_CARD = ToolCard(
                 # OpenAI 等校验器要求 array 必须带 items；对 string 实例 items 不适用。
                 "items": {"type": "object"},
                 "description": "问题列表：JSON 数组，或 JSON 数组的字符串形式",
-            },
-            "timeout": {
-                "type": ["number", "integer", "string"],
-                "description": (
-                    "等待用户回答超时秒数（默认 300）；"
-                    "含 preview 的大纲/Markdown 审阅场景不启用超时，忽略本参数"
-                ),
-            },
+            }
         },
         "required": ["questions"],
     },
