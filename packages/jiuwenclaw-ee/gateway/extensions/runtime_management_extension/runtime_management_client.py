@@ -24,6 +24,8 @@ from openjiuwen_runtime.management.session.interfaces import (
     ISessionRequest,
 )
 from openjiuwen_runtime.management.session.k8s_service_handler import (
+    ContainerSpec,
+    HostPathMount,
     K8sDeployController,
     K8sServiceHandler,
 )
@@ -127,6 +129,13 @@ def _resolve_invoke_ids_from_request(msg: AgentRequest) -> tuple[str, str | None
         )
     ag = str(msg.agent_id or "").strip()
     return svc, ag if ag else None
+
+
+def _env_bool(name: str, default: bool = False) -> bool:
+    value = os.getenv(name)
+    if value is None or value.strip() == "":
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "y", "on"}
 
 
 class _SessionRequest(ISessionRequest):
@@ -267,6 +276,64 @@ class RuntimeManagementAgentClient(AgentServerClient):
 
         deploy_mode = (os.getenv("AGENT_SERVER_DEPLOY_MODE") or "k8s").strip().lower()
 
+        # jiuwenbox sidecar: agentserver 与 jiuwenbox 同 Pod，使用 127.0.0.1 访问。
+        jiuwenclaw_sandbox_enabled = _env_bool("JIUWENCLAW_SANDBOX_ENABLED", False)
+        jiuwenclaw_sandbox_image = os.getenv("JIUWENCLAW_SANDBOX_IMAGE", "jiuwenbox:latest")
+        jiuwenclaw_sandbox_port = int(os.getenv("JIUWENCLAW_SANDBOX_PORT", "8321"))
+        jiuwenclaw_sandbox_container_name = os.getenv(
+            "JIUWENCLAW_SANDBOX_CONTAINER_NAME", "jiuwenbox"
+        )
+        jiuwenclaw_sandbox_url = os.getenv(
+            "JIUWENCLAW_SANDBOX_URL",
+            f"http://127.0.0.1:{jiuwenclaw_sandbox_port}",
+        )
+        jiuwenclaw_sandbox_excluded_commands = os.getenv("JIUWENCLAW_SANDBOX_EXCLUDED_COMMANDS", "")
+        jiuwenclaw_sandbox_idle_ttl_seconds = os.getenv("JIUWENCLAW_SANDBOX_IDLE_TTL_SECONDS", "")
+        jiuwenclaw_sandbox_idle_check_interval = os.getenv("JIUWENCLAW_SANDBOX_IDLE_CHECK_INTERVAL", "")
+        jiuwenbox_listen = os.getenv("JIUWENBOX_LISTEN", f"tcp://0.0.0.0:{jiuwenclaw_sandbox_port}")
+        jiuwenbox_policy_path = os.getenv("JIUWENBOX_POLICY_PATH", "/app/configs/enterprise-policy.yaml")
+        jiuwenbox_host_mounts: list[HostPathMount] = []
+        if _env_bool("JIUWENBOX_MOUNT_CGROUP", True):
+            jiuwenbox_host_mounts.append(
+                HostPathMount(
+                    host_path="/sys/fs/cgroup",
+                    mount_path="/sys/fs/cgroup",
+                    read_only=False,
+                    host_path_type="Directory",
+                )
+            )
+
+        agent_server_env = {
+            "AGENT_SERVER_HOST": "0.0.0.0",
+            "AGENT_RUNTIME": agent_runtime,
+            "GATEWAY_DB_TYPE": gateway_db_type,
+            "GATEWAY_SQLITE_PATH": gateway_sqlite_path,
+            "GATEWAY_DB_HOST": gateway_db_host,
+            "GATEWAY_DB_PORT": gateway_db_port,
+            "GATEWAY_DB_USER": gateway_db_user,
+            "GATEWAY_DB_PASSWORD": gateway_db_password,
+            "GATEWAY_DB_NAME": gateway_db_name,
+            "JIUWENCLAW_ID": jiuwenclaw_id,
+        }
+        if jiuwenclaw_sandbox_enabled:
+            agent_server_env.update(
+                {
+                    "JIUWENCLAW_SANDBOX_ENABLED": str(jiuwenclaw_sandbox_enabled).lower(),
+                    "JIUWENCLAW_SANDBOX_URL": jiuwenclaw_sandbox_url,
+                    "JIUWENCLAW_SANDBOX_TYPE": "jiuwenbox",
+                    "JIUWENCLAW_SANDBOX_STARTUP_MODE": "external",
+                    "JIUWENCLAW_SANDBOX_PRESERVE_FILE_SHARING_MODE": "mount",
+                    "JIUWENCLAW_SANDBOX_EXCLUDED_COMMANDS": jiuwenclaw_sandbox_excluded_commands,
+                    "JIUWENCLAW_SANDBOX_IDLE_TTL_SECONDS": jiuwenclaw_sandbox_idle_ttl_seconds,
+                    "JIUWENCLAW_SANDBOX_IDLE_CHECK_INTERVAL": jiuwenclaw_sandbox_idle_check_interval,
+                }
+            )
+        if api_key:
+            agent_server_env["MODEL_PROVIDER"] = model_provider
+            agent_server_env["MODEL_NAME"] = model_name
+            agent_server_env["API_BASE"] = api_base
+            agent_server_env["API_KEY"] = api_key
+
         def _agent_env_vars() -> dict[str, str]:
             base: dict[str, str] = {
                 "AGENT_SERVER_HOST": "0.0.0.0",
@@ -333,16 +400,41 @@ class RuntimeManagementAgentClient(AgentServerClient):
                     )
                     deploy_controller: Any = ProcessDeployController(process_handler)
                 else:
+                    agent_server_container = ContainerSpec(
+                        name=cfg["container_name"] if "container_name" in cfg else container_name,
+                        image=cfg["agent_image"] if "agent_image" in cfg else agent_image,
+                        port_name=cfg["port_name"] if "port_name" in cfg else port_name,
+                        port=int(cfg["container_port"]) if "container_port" in cfg else container_port,
+                        image_pull_policy=cfg["image_pull_policy"] if "image_pull_policy" in cfg else image_pull_policy,
+                        env_vars=agent_server_env,
+                    )
+                    containers = [agent_server_container]
+                    if jiuwenclaw_sandbox_enabled:
+                        jiuwenbox_container = ContainerSpec(
+                            name=jiuwenclaw_sandbox_container_name,
+                            image=jiuwenclaw_sandbox_image,
+                            port=jiuwenclaw_sandbox_port,
+                            image_pull_policy=cfg[
+                                "image_pull_policy"] if "image_pull_policy" in cfg else image_pull_policy,
+                            env_vars={
+                                "JIUWENBOX_LISTEN": jiuwenbox_listen,
+                                "JIUWENBOX_POLICY_PATH": jiuwenbox_policy_path,
+                            },
+                            # K8s 没有 docker `--cgroupns=host` 的直接 Pod 字段。
+                            capabilities_add=["SYS_ADMIN", "NET_ADMIN"],
+                            seccomp_unconfined=True,
+                            apparmor_unconfined=True,
+                            proc_mount_unmasked=True,
+                            allow_privilege_escalation=True,
+                            privileged=True,
+                            host_path_mounts=jiuwenbox_host_mounts,
+                        )
+                        containers.append(jiuwenbox_container)
                     target_port = int(cfg["container_port"]) if "container_port" in cfg else container_port
                     k8s = K8sServiceHandler(
-                    cfg["agent_image"] if "agent_image" in cfg else agent_image,
                     name_prefix="jiuwenclaw",
                     namespace=cfg["namespace"] if "namespace" in cfg else namespace,
                     pod_name=cfg["pod_name"] if "pod_name" in cfg else container_name,
-                    container_name=cfg["container_name"] if "container_name" in cfg else container_name,
-                    container_port=int(cfg["container_port"]) if "container_port" in cfg else container_port,
-                    port_name=cfg["port_name"] if "port_name" in cfg else port_name,
-                    image_pull_policy=cfg["image_pull_policy"] if "image_pull_policy" in cfg else image_pull_policy,
                     extra_labels=dict(RuntimeManagementAgentClient._POD_LABEL),
                     env_vars=_agent_env_vars(),
                     kubeconfig=kubeconfig,
@@ -366,6 +458,7 @@ class RuntimeManagementAgentClient(AgentServerClient):
 
                 ch = WSServiceMessageChannel(
                     target_port=target_port,
+                    target_container=container_name,
                     invoke_path="",
                     ws_use_tls=False,
                 )
