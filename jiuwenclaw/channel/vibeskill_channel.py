@@ -1019,6 +1019,7 @@ class VibeSkillChannel(BaseChannel):
             req_method=ReqMethod.SKILLDEV_CHAT,
             is_stream=True,
             metadata={_VIBESKILL_ORIGINAL_SESSION_ID_KEY: session_id},
+            user_id=self._session_user_id(session_id),
         )
         logger.info(
             "[VibeSkillChannel] skilldev.chat sent (review.replied), session_id=%s accept=%s",
@@ -1139,6 +1140,7 @@ class VibeSkillChannel(BaseChannel):
             req_method=ReqMethod.SKILLDEV_CHAT,
             is_stream=True,
             metadata={_VIBESKILL_ORIGINAL_SESSION_ID_KEY: session_id},
+            user_id=self._session_user_id(session_id),
         )
         logger.info(
             "[VibeSkillChannel] skilldev.chat sent (skillSearch.replied), session_id=%s action=%s",
@@ -2038,6 +2040,7 @@ class VibeSkillChannel(BaseChannel):
                 ok=True,
                 req_method=req_method,
                 is_stream=False,
+                user_id=self._session_user_id(sid),
             )
             logger.info(
                 "[VibeSkillChannel] %s sent, source=%s, session_id=%s, mode=%s",
