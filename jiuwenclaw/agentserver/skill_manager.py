@@ -1475,8 +1475,33 @@ class SkillManager:
         try:
             with tempfile.TemporaryDirectory(prefix="jiuwenclaw_skillnet_") as tmpdir:
                 tmp_path = Path(tmpdir)
-                download_path_str = self._skillnet_download_sync(skill_url, str(tmp_path), mirror_url)
-                download_path = Path(download_path_str).resolve()
+
+                if self._is_github_skill_folder_url(skill_url):
+                    download_path_str = self._skillnet_download_sync(
+                        skill_url, str(tmp_path), mirror_url
+                    )
+                    if not download_path_str:
+                        return {
+                            "ok": False,
+                            "detail": "下载失败，请重试。",
+                            "detail_key": "skills.skillNet.errors.downloadFailed",
+                        }
+                    download_path = Path(download_path_str).resolve()
+                elif self._is_http_download_target(skill_url):
+                    self._assert_skill_download_url_allowed(skill_url)
+                    artifact_bytes = self._download_http_archive_bytes_sync(skill_url)
+                    download_path = tmp_path / "http_download"
+                    download_path.mkdir(parents=True, exist_ok=True)
+                    self._extract_archive_bytes_to_dir(artifact_bytes, download_path)
+                else:
+                    return {
+                        "ok": False,
+                        "detail": (
+                            "不支持的 skill_url：需为 GitHub tree/blob 目录链接，"
+                            "或 HTTPS 直链 zip/tar 归档。"
+                        ),
+                    }
+
                 if not download_path.exists():
                     return {
                         "ok": False,
@@ -1484,7 +1509,7 @@ class SkillManager:
                         "detail_key": "skills.skillNet.errors.downloadFailed",
                     }
 
-                # 库在部分文件下载失败时仍会返回路径，只有找到 SKILL.md 才视为下载完整，才继续后续逻辑
+                # 库在部分文件下载失败时仍会返回路径，只有找到 SKILL.md 才视为下载完整
                 skill_dir = self._locate_skill_dir(download_path)
                 if skill_dir is None:
                     return {
@@ -1551,6 +1576,15 @@ class SkillManager:
             if not raw:
                 extra["detail_key"] = "skills.skillNet.errors.installFailedFallback"
             return {"ok": False, "detail": detail, **extra}
+
+    def install_skill_sync(
+        self, skill_url: str, force: bool = True, mirror_url: str | None = None
+    ) -> dict[str, Any]:
+        """同步安装 skill（线程安全，可在 ``asyncio.to_thread`` 中调用）.
+
+        封装 ``_skillnet_install_files_sync``，供外部模块使用。
+        """
+        return self._skillnet_install_files_sync(skill_url, force, mirror_url)
 
     async def handle_skills_uninstall(self, params: dict) -> dict:
         """卸载已安装的 skill.
@@ -2457,6 +2491,64 @@ class SkillManager:
     def _is_http_download_target(value: str) -> bool:
         parsed = urlparse(str(value or "").strip())
         return parsed.scheme in {"http", "https"} and bool(parsed.netloc)
+
+    @staticmethod
+    def _is_github_skill_folder_url(url: str) -> bool:
+        """GitHub tree/blob 目录链接，走 skillnet-ai 按文件拉取。"""
+        parsed = urlparse(str(url or "").strip())
+        host = (parsed.hostname or "").lower()
+        if host not in ("github.com", "www.github.com"):
+            return False
+        path = (parsed.path or "").lower()
+        return "/tree/" in path or "/blob/" in path
+
+    def _assert_skill_download_url_allowed(self, download_url: str) -> None:
+        """SkillHub / 远程归档下载主机白名单（import_local 与 OpenJiuwen 并集）。"""
+        errors: list[str] = []
+        for checker in (
+            self._assert_import_local_download_url_allowed,
+            self._assert_openjiuwen_download_url_allowed,
+        ):
+            try:
+                checker(download_url)
+                return
+            except RuntimeError as exc:
+                errors.append(str(exc))
+        host = (urlparse(download_url).hostname or "").strip().lower() or "unknown"
+        raise RuntimeError(
+            f"skill 下载 URL 主机不在白名单: {host}"
+            + (f" ({errors[0]})" if errors else "")
+        )
+
+    def _download_http_archive_bytes_sync(self, download_url: str) -> bytes:
+        """同步下载 HTTPS 直链 zip/tar 归档（SkillHub CDN 等）。"""
+        timeout = max(30.0, _IMPORT_LOCAL_REMOTE_TIMEOUT)
+        logger.info("[SkillManager] skill archive download start: url=%s", download_url)
+        with requests.Session() as session:
+            session.mount("https://", _ImportLocalTLSAdapter())
+            with session.get(
+                download_url.strip(),
+                timeout=timeout,
+                stream=True,
+                allow_redirects=True,
+                verify=False,
+            ) as response:
+                response.raise_for_status()
+                chunks: list[bytes] = []
+                for chunk in response.iter_content(chunk_size=8192):
+                    if chunk:
+                        chunks.append(chunk)
+                body = b"".join(chunks)
+        logger.info(
+            "[SkillManager] skill archive download done: url=%s bytes=%s",
+            download_url,
+            len(body),
+        )
+        if not body:
+            raise RuntimeError("下载内容为空")
+        if not self._detect_archive_format(body):
+            raise RuntimeError("下载内容不是受支持的归档格式，目前仅支持 zip/tar/tar.gz/tgz")
+        return body
 
     async def _openjiuwen_http_get_data(
         self,

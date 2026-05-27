@@ -76,6 +76,10 @@ async def update_service_config_template(
         "nfs_server",
         "nfs_path",
         "nfs_mount_path",
+        "host_path",
+        "host_mount_path",
+        "mode",
+        "node_name",
         "cpu_request",
         "memory_request",
         "cpu_limit",
@@ -159,6 +163,18 @@ def _build_row_from_template(template: dict[str, Any], *, now: datetime) -> dict
             if template.get("nfs_mount_path")
             else None
         ),
+        "host_path": (
+            str(template["host_path"]).strip()
+            if template.get("host_path")
+            else None
+        ),
+        "host_mount_path": (
+            str(template["host_mount_path"]).strip()
+            if template.get("host_mount_path")
+            else None
+        ),
+        "mode": str(template.get("mode", "product")).strip(),
+        "node_name": str(template.get("node_name", "")).strip(),
         "cpu_request": str(template.get("cpu_request", "500m")).strip(),
         "memory_request": str(template.get("memory_request", "512Mi")).strip(),
         "cpu_limit": str(template.get("cpu_limit", "1000m")).strip(),

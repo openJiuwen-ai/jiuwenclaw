@@ -9,7 +9,7 @@ from typing import Any
 
 from openjiuwen_runtime.foundation.db.handler import DBHandler
 
-from ...infrastructure.utils import assert_jiuwenclaw_id_matches_payload, require_jiuwenclaw_id, utc_now
+from ...infrastructure.utils import assert_jiuwenclaw_id_matches_payload, utc_now
 from ...models.template_models import MODEL_TEMPLATE_TABLE_DEF
 from ...schemas.template_schemas import ModelTemplateUpdateRequest
 
@@ -45,29 +45,21 @@ def _validate_model_type(value: str | list[str]) -> str | list[str]:
     raise ValueError("model_type must be a string or a list of strings")
 
 
-async def _get_row_for_instance(
-    handler: DBHandler,
-    template_id: str,
-    jiuwenclaw_id: str,
-) -> Any | None:
+async def _get_row(handler: DBHandler, template_id: str) -> Any | None:
     tid = _normalize_template_id(template_id)
-    row = await handler.get(_TABLE, {"template_id": tid})
-    if row is None:
-        return None
-    if getattr(row, "jiuwenclaw_id", None) != jiuwenclaw_id:
-        return None
-    return row
+    return await handler.get(_TABLE, {"template_id": tid})
 
 
 async def update_model_template(
     handler: DBHandler,
     template_id: str,
     request: ModelTemplateUpdateRequest,
+    *,
+    existing: Any | None = None,
 ) -> dict[str, Any] | None:
-    jiuwenclaw_id = require_jiuwenclaw_id()
     tid = _normalize_template_id(template_id)
-    existing = await _get_row_for_instance(handler, tid, jiuwenclaw_id)
-    if existing is None:
+    row = existing if existing is not None else await _get_row(handler, tid)
+    if row is None:
         return None
 
     updates = request.model_dump(exclude_unset=True)
@@ -93,9 +85,8 @@ async def update_model_template(
 
 
 async def delete_model_template(handler: DBHandler, template_id: str) -> bool:
-    jiuwenclaw_id = require_jiuwenclaw_id()
     tid = _normalize_template_id(template_id)
-    existing = await _get_row_for_instance(handler, tid, jiuwenclaw_id)
+    existing = await _get_row(handler, tid)
     if existing is None:
         return False
     return await handler.delete(_TABLE, {"template_id": tid})
@@ -116,7 +107,7 @@ async def apply_model_template_sync(
     payload: dict[str, Any],
 ) -> dict[str, Any] | None:
     """应用 Claw Manager 经 WebSocket 下发的 model_templates 变更。"""
-    jiuwenclaw_id = assert_jiuwenclaw_id_matches_payload(payload)
+    assert_jiuwenclaw_id_matches_payload(payload)
 
     if op == "create":
         template = payload.get("template")
@@ -127,7 +118,6 @@ async def apply_model_template_sync(
         now = utc_now()
         row_data: dict[str, Any] = {
             "template_id": template_uuid,
-            "jiuwenclaw_id": jiuwenclaw_id,
             "template_name": str(template["template_name"]).strip(),
             "description": template.get("description"),
             "model_type": model_type,

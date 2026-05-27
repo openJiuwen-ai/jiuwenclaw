@@ -12,6 +12,7 @@ import ast
 import asyncio
 import json
 import logging
+import importlib
 import os
 from contextvars import ContextVar, Token
 from dataclasses import dataclass
@@ -188,12 +189,15 @@ from jiuwenclaw.agentserver.extensions import get_rail_manager
 from jiuwenclaw.gateway.cron import CronTargetChannel
 from jiuwenclaw.agentserver.team import get_team_manager
 from jiuwenclaw.schema.agent import AgentRequest, AgentResponse, AgentResponseChunk
+from jiuwenclaw.agentserver.skill_whitelist import (is_skill_whitelist_tenant, parse_agent_skill_whitelist,
+                                                    SkillWhitelistSynchronizer)
 from jiuwenclaw.utils import (
     get_agent_registered_skill_dirs,
     get_agent_workspace_dir,
     get_checkpoint_dir,
     get_env_file,
     get_agent_root_dir,
+    get_tenant_agent_skills_dirs,
 )
 from jiuwenclaw.local_env_config import set_local_config
 
@@ -769,10 +773,20 @@ class JiuWenClawDeepAdapter:
         # request_id -> toolkit；session_id -> 关联的 request_id 集合（interrupt 时按会话精确取消）
         self._request_session_toolkits: dict[str, MultiSessionToolkit] = {}
         self._session_toolkit_requests: dict[str, set[str]] = {}
+        self._enabled_skills: list[str] | None = None
 
     def set_skill_manager(self, skill_manager: SkillManager) -> None:
         """Inject shared SkillManager from facade for tool reuse."""
         self._skill_manager = skill_manager
+
+    def _resolve_skill_dirs(self, extra_skill_dir: str | None = None) -> list[str]:
+        if is_skill_whitelist_tenant(self._agent_id, self._service_id):
+            skills_dirs = [str(p) for p in get_tenant_agent_skills_dirs(self._service_id, self._agent_id)]
+        else:
+            skills_dirs = [str(p) for p in get_agent_registered_skill_dirs()]
+        if extra_skill_dir:
+            skills_dirs.append(extra_skill_dir)
+        return skills_dirs
 
     @staticmethod
     def _is_acp_tool_profile(config: dict[str, Any] | None = None) -> bool:
@@ -1548,17 +1562,21 @@ class JiuWenClawDeepAdapter:
                 except (TypeError, ValueError):
                     max_bodies = DEFAULT_MAX_ACTIVE_SKILL_BODIES
             
-            # 合并技能目录：基础目录 + 扩展传入的额外目录
-            skills_dirs = [str(p) for p in get_agent_registered_skill_dirs()]
+            skills_dirs = self._resolve_skill_dirs(extra_skill_dir)
             if extra_skill_dir:
-                skills_dirs.append(extra_skill_dir)
                 logger.info("[JiuWenClawDeepAdapter] extra_skill_dir added: %s", extra_skill_dir)
-            
+
+            enabled_skills = self._enabled_skills
+            if is_skill_whitelist_tenant(self._agent_id, self._service_id) and enabled_skills is None:
+                enabled_skills = []
+
             skill_rail_kwargs: dict[str, Any] = dict(
                 skills_dir=skills_dirs,
                 skill_mode=skill_mode,
                 include_tools=include_tools,
             )
+            if enabled_skills is not None:
+                skill_rail_kwargs["enabled_skills"] = enabled_skills
             if _UPSTREAM_HAS_ACTIVE_SKILL_BODIES:
                 skill_rail_kwargs["include_skill_body_tools"] = include_skill_body_tools
                 skill_rail_kwargs["max_active_skill_bodies"] = max_bodies
@@ -1579,7 +1597,7 @@ class JiuWenClawDeepAdapter:
             else:
                 evolution_auto_scan = config.get("evolution", {}).get("auto_scan", False)
             skill_evolution_rail = SkillEvolutionRail(
-                skills_dir=[str(p) for p in get_agent_registered_skill_dirs()],
+                skills_dir=self._resolve_skill_dirs(),
                 llm=self._model,
                 model=config.get("model_name", "gpt-4"),
                 auto_scan=evolution_auto_scan,
@@ -1624,6 +1642,61 @@ class JiuWenClawDeepAdapter:
             logger.warning("[JiuWenClawDeepAdapter] TelemetryRail create failed: %s", exc)
             rail = None
         return rail
+
+    @staticmethod
+    def _build_extension_config_debug_rail() -> Any | None:
+        """Build ExtensionConfigDebugRail for extension config end-to-end debugging."""
+        try:
+            from jiuwenclaw.agentserver.deep_agent.rails.extension_config_debug_rail import (
+                ExtensionConfigDebugRail,
+            )
+            rail = ExtensionConfigDebugRail()
+            logger.info("[JiuWenClawDeepAdapter] ExtensionConfigDebugRail create success")
+        except Exception as exc:
+            logger.warning("[JiuWenClawDeepAdapter] ExtensionConfigDebugRail create failed: %s", exc)
+            rail = None
+        return rail
+
+    @staticmethod
+    def _load_extra_rails_from_env() -> list[Any]:
+        """Load extra DeepAgentRails from AGENT_EXTRA_RAILS env var.
+
+        Env format (semicolon-separated module paths):
+            AGENT_EXTRA_RAILS=path.to.module1;path.to.module2
+
+        Each module must expose a ``register_rails()`` function that returns
+        a list of DeepAgentRail instances.
+        """
+        env_value = os.getenv("AGENT_EXTRA_RAILS", "").strip()
+        if not env_value:
+            return []
+
+        extra_rails: list[Any] = []
+        for module_path in [p.strip() for p in env_value.split(";") if p.strip()]:
+            try:
+                mod = importlib.import_module(module_path)
+                register_fn = getattr(mod, "register_rails", None)
+                if register_fn is None:
+                    logger.warning(
+                        "[JiuWenClawDeepAdapter] Extra rail module '%s' has no register_rails(), skipping",
+                        module_path,
+                    )
+                    continue
+                rails = register_fn()
+                if rails:
+                    if not isinstance(rails, list):
+                        rails = [rails]
+                    extra_rails.extend(rails)
+                    logger.info(
+                        "[JiuWenClawDeepAdapter] Loaded %d rail(s) from '%s'",
+                        len(rails), module_path,
+                    )
+            except Exception as exc:
+                logger.warning(
+                    "[JiuWenClawDeepAdapter] Failed to load extra rails from '%s': %s",
+                    module_path, exc,
+                )
+        return extra_rails
 
     def _build_task_planning_rail(self) -> TaskPlanningRail | None:
         """Build TaskPlanningRail."""
@@ -1960,6 +2033,14 @@ class JiuWenClawDeepAdapter:
                 logger.warning("[JiuWenClawDeepAdapter] Rail %s build returned None", info.attr_name)
         logger.info("[JiuWenClawDeepAdapter] Total rails built: %d, rail names: %s", len(rails_list),
                     [type(r).__name__ for r in rails_list])
+
+        # 从环境变量加载额外 Rails（非侵入式扩展）
+        extra_rails = self._load_extra_rails_from_env()
+        if extra_rails:
+            rails_list.extend(extra_rails)
+            logger.info("[JiuWenClawDeepAdapter] Extra rails loaded from env: %s",
+                        [type(r).__name__ for r in extra_rails])
+
         if self._task_execution_rail is None:
             logger.warning("[JiuWenClawDeepAdapter] TaskExecutionRail missing after _build_agent_rails")
         else:
@@ -2510,13 +2591,15 @@ class JiuWenClawDeepAdapter:
             config: 可选配置，支持以下字段：
                 - agent_name: Agent 名称，默认 "main_agent"。
                 - workspace_dir: 工作区目录，默认 "workspace/agent"。
+                - enterprise_routing: 企业策略路由上下文（group_id/bot_id/user_id 等）。
+                - enabled_skills: Skill 白名单目录名
                 - request: 可选 AgentRequest（创建时按 ``params`` 加载企业配置并合并模型）。
                 - 其余字段透传给 DeepAgentConfig。
             mode: 实例化模式，支持 "claw"（默认，使用 create_deep_agent）和 "code"（使用 create_code_agent）。
         """
         await self.set_checkpoint()
 
-        self._instance_overrides = dict(config or {}) if isinstance(config, dict) else {}
+        self._instance_overrides = dict(config) if isinstance(config, dict) else {}
         config_base = get_config()
         bootstrap_request = self._instance_overrides.pop("request", None)
         if bootstrap_request is not None:
@@ -2528,6 +2611,23 @@ class JiuWenClawDeepAdapter:
         config = config_base.get('react', {}).copy()
         self._config_cache = config.copy()
         self._agent_name = self._instance_overrides.get("agent_name", config.get("agent_name", "main_agent"))
+
+        if is_skill_whitelist_tenant(self._agent_id, self._service_id):
+            enterprise_skills: list[dict[str, Any]] = []
+            if self._enterprise_config is not None:
+                enterprise_skills = getattr(self._enterprise_config, "skill_whitelist", None)
+            skill_config = parse_agent_skill_whitelist(self._agent_id, self._service_id, enterprise_skills)
+            sync_result = await SkillWhitelistSynchronizer(self._service_id, self._agent_id).sync(skill_config)
+            if sync_result.errors:
+                logger.warning(
+                    "[SkillWhitelist] sync partial errors: agent_id=%s service_id=%s errors=%s",
+                    self._agent_id,
+                    self._service_id,
+                    sync_result.errors,
+                )
+            if sync_result.enabled_skill_dirs is not None:
+                self._enabled_skills = [str(name) for name in sync_result.enabled_skill_dirs if str(name).strip()]
+
         # Keep constructor-injected tenant workspace by default.
         # Only override when request explicitly provides workspace_dir.
         configured_workspace = self._instance_overrides.get("workspace_dir")

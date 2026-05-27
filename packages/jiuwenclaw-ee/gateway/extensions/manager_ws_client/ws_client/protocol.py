@@ -18,15 +18,23 @@ EVENT_REGISTER_ACK = "register.ack"
 def build_register(
     *,
     service_type: str = "gateway",
-    service_id: str,
+    jiuwenclaw_id: str | None = None,
 ) -> dict[str, Any]:
-    sid = str(service_id or "").strip()
+    """构建 register 帧。
+
+    若环境或参数带有 ``jiuwenclaw_id``（如 ``provision-local`` 注入的
+    ``JIUWENCLAW_ID``），则上报给 Manager 复用已有 ``instance_info``；
+    否则由 Manager 分配新 id，并在 ack 中回传。
+    """
+    from ..infrastructure.utils import get_jiuwenclaw_id
+
+    payload: dict[str, Any] = {"service_type": service_type}
+    jid = str(jiuwenclaw_id or "").strip() or get_jiuwenclaw_id()
+    if jid:
+        payload["jiuwenclaw_id"] = jid
     return {
         "type": FRAME_TYPE_REGISTER,
-        "payload": {
-            "service_type": service_type,
-            "service_id": sid,
-        },
+        "payload": payload,
     }
 
 

@@ -9,7 +9,7 @@ from typing import Any
 
 from openjiuwen_runtime.foundation.db.handler import DBHandler
 
-from ...infrastructure.utils import assert_jiuwenclaw_id_matches_payload, require_jiuwenclaw_id, utc_now
+from ...infrastructure.utils import assert_jiuwenclaw_id_matches_payload, get_jiuwenclaw_id, utc_now
 from ...models.config_effective_policy_models import (
     CONFIG_EFFECTIVE_SERVICE_POLICY_TABLE_DEF,
 )
@@ -42,7 +42,7 @@ async def update_config_effective_service_policy_record(
     policy_id: int,
     request: ConfigEffectiveServicePolicyUpdateRequest,
 ) -> dict[str, Any] | None:
-    jiuwenclaw_id = require_jiuwenclaw_id()
+    jiuwenclaw_id = get_jiuwenclaw_id()
     existing = await _get_row_for_instance(handler, policy_id, jiuwenclaw_id)
     if existing is None:
         return None
@@ -68,7 +68,7 @@ async def delete_config_effective_service_policy_record(
     handler: DBHandler,
     policy_id: int,
 ) -> bool:
-    jiuwenclaw_id = require_jiuwenclaw_id()
+    jiuwenclaw_id = get_jiuwenclaw_id()
     existing = await _get_row_for_instance(handler, policy_id, jiuwenclaw_id)
     if existing is None:
         return False

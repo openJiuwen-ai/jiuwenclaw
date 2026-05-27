@@ -43,7 +43,6 @@ gen_gateway_config_file() {
 gen_gateway_file() {
     local client_type="${DEPLOY_VARS["AGENT_RUNTIME"]}"
     local mode="${DEPLOY_VARS["MODE"]}"
-    local master_label=$(kubectl get node ${DEPLOY_VARS["MASTER_NODE_NAME"]} -o jsonpath='{.metadata.labels}' | grep -Eo 'node-role\.kubernetes\.io/(master|control-plane)' | head -1)
 
     # Render base template: adapt for yuanrong product mode
     render_config_template "${GATEWAY_TEMPLATE_FILE}" "${GATEWAY_FILE}" "DEPLOY_VARS"
@@ -86,30 +85,43 @@ gen_gateway_file() {
     success "Gateway file generation completed: ${GATEWAY_FILE}"
 }
 
-deploy_gateway() {
+create_gateway_env_configmap() {
     local client_type="${DEPLOY_VARS["AGENT_RUNTIME"]}"
-    local conf_name="${DEPLOY_VARS["GATEWAY_CONFIG_MAP_NAME"]}"
-    local env_name="${DEPLOY_VARS["GATEWAY_ENV_FILE_NAME"]}"
     local namespace="${DEPLOY_VARS["NAMESPACE"]}"
+    local env_name="${DEPLOY_VARS["GATEWAY_ENV_FILE_NAME"]}"
+    local mode="${DEPLOY_VARS["MODE"]}"
+
+    if [ "${client_type}" != "jiuwen" ]; then
+        return
+    fi
+
+    if [ "${mode}" == "dev" ]; then
+        DEPLOY_VARS["AGENT_SERVER_IMAGE"]="${DEPLOY_VARS["AGENT_SERVER_DEV_IMAGE"]}"
+    else
+        DEPLOY_VARS["AGENT_SERVER_IMAGE"]="${DEPLOY_VARS["AGENT_SERVER_PRODUCT_IMAGE"]}"
+    fi
+    render_config_template "${GATEWAY_ENV_TEMPLATE_FILE}" "${GATEWAY_ENV_FILE}" "DEPLOY_VARS"
+    exec_cmd kubectl create configmap -n ${namespace} ${env_name} --from-env-file=${GATEWAY_ENV_FILE}
+}
+
+deploy_gateway() {
+    local namespace="${DEPLOY_VARS["NAMESPACE"]}"
+    local name="${DEPLOY_VARS["GATEWAY_NAME"]}"
+    local conf_name="${DEPLOY_VARS["GATEWAY_CONFIG_MAP_NAME"]}"
 
     # create configMap from config.yaml
     gen_gateway_config_file
-
     info "Executing: kubectl create configmap -n ${namespace} ${conf_name} --from-file=config.yaml=${GATEWAY_CONFIG_FILE} --dry-run=client -o yaml | kubectl apply -f -"
     kubectl create configmap -n ${namespace} ${conf_name} --from-file=config.yaml=${GATEWAY_CONFIG_FILE} --dry-run=client -o yaml | kubectl apply -f -
 
     # create configMap from gateway.env
-    if [ "${client_type}" == "jiuwen" ]; then
-        render_config_template "${GATEWAY_ENV_TEMPLATE_FILE}" "${GATEWAY_ENV_FILE}" "DEPLOY_VARS"
-        exec_cmd kubectl create configmap -n ${namespace} ${env_name} --from-env-file=${GATEWAY_ENV_FILE}
-    fi
+    create_gateway_env_configmap
 
     # start gateway
     gen_gateway_file
     exec_cmd kubectl apply -f ${GATEWAY_FILE}
-    wait_k8s_resource_ready "deployment" "${DEPLOY_VARS["GATEWAY_NAME"]}" "${namespace}"
+    wait_k8s_resource_ready "deployment" "${name}" "${namespace}"
 }
-
 
 uninstall_gateway() {
     local namespace="${DEPLOY_VARS["NAMESPACE"]}"

@@ -19,7 +19,7 @@ from pathlib import Path
 from collections import OrderedDict
 from pathlib import Path
 from typing import Any, AsyncIterator, Tuple
-
+from contextvars import ContextVar
 from dotenv import load_dotenv
 
 from jiuwenclaw.agentserver.agent_adapters import (
@@ -853,6 +853,10 @@ class JiuWenClaw:
 
         # 传递 files 参数（直接传递，供 Agent 直接访问）
         inputs["files"] = request.params.get("files", [])
+
+        # 传递 extension_config（供 Rails 消费）
+        if request.metadata and "extension_config" in request.metadata:
+            inputs["extension_config"] = request.metadata["extension_config"]
 
         run = request.params.get("run")
         if run:

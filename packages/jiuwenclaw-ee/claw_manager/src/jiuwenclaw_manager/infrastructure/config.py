@@ -41,9 +41,6 @@ class Settings(BaseSettings):
     scan_interval_seconds: int = Field(
         default=30, validation_alias="CLAWMANAGER_SCAN_INTERVAL_SECONDS"
     )
-    upstream_http_timeout_seconds: float = Field(
-        default=60.0, validation_alias="CLAWMANAGER_UPSTREAM_HTTP_TIMEOUT_SECONDS"
-    )
     allow_local_provision: bool = Field(
         default=False, validation_alias="MANAGER_ALLOW_LOCAL_PROVISION"
     )

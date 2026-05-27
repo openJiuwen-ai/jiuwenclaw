@@ -9,7 +9,7 @@ from typing import Any
 
 from openjiuwen_runtime.foundation.db.handler import DBHandler
 
-from ...infrastructure.utils import assert_jiuwenclaw_id_matches_payload, require_jiuwenclaw_id, utc_now
+from ...infrastructure.utils import assert_jiuwenclaw_id_matches_payload, utc_now
 from ...models.template_models import EXTENSION_CONFIG_TEMPLATE_TABLE_DEF
 from ...schemas.template_schemas import ExtensionConfigTemplateUpdateRequest
 

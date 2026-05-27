@@ -81,10 +81,12 @@ def _ensure_enterprise_config_loader() -> tuple[Any, Any]:
 
 
 async def load_effective_service_config_for_request(request: AgentRequest) -> Any | None:
-    """按当前请求路由上下文加载 ``service_config`` 槽位（与 ``send_request`` 入口一致）。"""
+    """按当前请求路由上下文加载 ``service_config`` 与 ``extension_config`` 槽位。"""
     try:
         load_fn, service_config_slot = _ensure_enterprise_config_loader()
-        loaded = await load_fn(request, [service_config_slot])
+        # 同时加载 service_config 和 extension_config
+        from jiuwenclaw.gateway.extensions.manager_ws_client.core.enterprise_config.schemas import TemplateRefSlot
+        loaded = await load_fn(request, [service_config_slot, TemplateRefSlot.EXTENSION_CONFIG])
     except Exception as exc:
         logger.warning(
             "[RuntimeManagementAgentClient] load service_config failed: %s",
@@ -120,9 +122,15 @@ def _resolve_invoke_ids_from_request(msg: AgentRequest) -> tuple[str, str | None
 class _SessionRequest(ISessionRequest):
     """ISessionRequest 实现。"""
 
-    def __init__(self, msg: AgentRequest, envelope: E2AEnvelope) -> None:
+    def __init__(
+        self,
+        msg: AgentRequest,
+        envelope: E2AEnvelope,
+        service_template: Optional[dict[str, Any]] = None,
+    ) -> None:
         self._req = msg
         self._envelope = envelope
+        self._service_template = service_template
         service_id, agent_id = _resolve_invoke_ids_from_request(self._req)
         self._service_id = service_id
         self._req.service_id = service_id
@@ -153,6 +161,10 @@ class _SessionRequest(ISessionRequest):
     @property
     def raw_msg(self) -> Any:
         return json.dumps(self._envelope.to_dict(), ensure_ascii=False)
+
+    @property
+    def service_template(self) -> Optional[dict[str, Any]]:
+        return self._service_template
 
 
 class E2aEnvelopResponseParser(IResponseParser):
@@ -189,12 +201,18 @@ class E2aEnvelopResponseParser(IResponseParser):
 class RuntimeManagementAgentClient(AgentServerClient):
     """Runtime Management Agent Client."""
 
+    _POD_LABEL_KEY = "jiuwenclaw-component"
+    _POD_LABEL_VALUE = "agentserver"
+    _POD_LABEL = {_POD_LABEL_KEY: _POD_LABEL_VALUE}
+    _POD_LABEL_SELECTOR = f"{_POD_LABEL_KEY}={_POD_LABEL_VALUE}"
+
     def __init__(self) -> None:
         """初始化 Runtime Management 客户端。"""
 
         agent_image = os.getenv("AGENT_SERVER_IMAGE")
         agent_runtime = os.getenv("AGENT_RUNTIME")
         namespace = os.getenv("AGENT_SERVER_NAMESPACE")
+        self._namespace = os.getenv("AGENT_SERVER_NAMESPACE")
         container_name = os.getenv("AGENT_SERVER_CONTAINER_NAME")
         container_port = int(os.getenv("AGENT_SERVER_PORT"))
         port_name = os.getenv("AGENT_SERVER_PORT_NAME")
@@ -207,7 +225,12 @@ class RuntimeManagementAgentClient(AgentServerClient):
         nfs_server = os.getenv("AGENT_SERVER_NFS_SERVER", "")
         nfs_path = os.getenv("AGENT_SERVER_NFS_PATH", "/")
         nfs_mount_path = os.getenv("AGENT_SERVER_NFS_MOUNT_PATH")
+        host_path = os.getenv("AGENT_SERVER_HOST_PATH")
+        host_mount_path = os.getenv("AGENT_SERVER_HOST_MOUNT_PATH")
+        mode = os.getenv("MODE")
+        node_name = os.getenv("NODE_NAME")
         kubeconfig = os.getenv("AGENT_SERVER_KUBECONFIG") or None
+        self._kubeconfig = os.getenv("AGENT_SERVER_KUBECONFIG") or None
         readiness_initial_delay = int(os.getenv("AGENT_SERVER_READINESS_INITIAL_DELAY"))
         readiness_period = int(os.getenv("AGENT_SERVER_READINESS_PERIOD"))
         ready_timeout = int(os.getenv("AGENT_SERVER_READY_TIMEOUT"))
@@ -239,6 +262,7 @@ class RuntimeManagementAgentClient(AgentServerClient):
                     container_port=int(cfg["container_port"]) if "container_port" in cfg else container_port,
                     port_name=cfg["port_name"] if "port_name" in cfg else port_name,
                     image_pull_policy=cfg["image_pull_policy"] if "image_pull_policy" in cfg else image_pull_policy,
+                    extra_labels=dict(RuntimeManagementAgentClient._POD_LABEL),
                     env_vars={
                         "AGENT_SERVER_HOST": "0.0.0.0",
                         "AGENT_RUNTIME": agent_runtime,
@@ -258,6 +282,10 @@ class RuntimeManagementAgentClient(AgentServerClient):
                     nfs_server=cfg.get("nfs_server") if "nfs_server" in cfg else nfs_server,
                     nfs_path=cfg.get("nfs_path") if "nfs_path" in cfg else nfs_path,
                     nfs_mount_path=cfg.get("nfs_mount_path") if "nfs_mount_path" in cfg else nfs_mount_path,
+                    host_path=cfg.get("host_path") if "host_path" in cfg else host_path,
+                    host_mount_path=cfg.get("host_mount_path") if "host_mount_path" in cfg else host_mount_path,
+                    mode=cfg.get("mode") if "mode" in cfg else mode,
+                    node_name=cfg.get("node_name") if "node_name" in cfg else node_name,
                     cpu_request=cfg.get("cpu_request") if "cpu_request" in cfg else cpu_request,
                     memory_request=cfg.get("memory_request") if "memory_request" in cfg else memory_request,
                     cpu_limit=cfg.get("cpu_limit") if "cpu_limit" in cfg else cpu_limit,
@@ -268,11 +296,17 @@ class RuntimeManagementAgentClient(AgentServerClient):
                     invoke_path="",
                     ws_use_tls=False,
                 )
+
+                # 从 service_template 中提取 service_id，如果存在则使用，否则让 ServiceHandler 自动生成 UUID
+                handler_service_id = cfg.get("service_id") if isinstance(cfg, dict) else None
+
                 return ServiceHandler(
+                    service_id=handler_service_id,
                     total_concurrency=int(cfg["service_concurrency"]) if "service_concurrency" in cfg else service_concurrency,
                     message_channel=ch,
                     response_parser=response_parser,
                     deploy_controller=K8sDeployController(k8s),
+                    service_template=service_template,
                 )
 
         dual_q: PriorityDualAsyncQueues[QueueItem] = PriorityDualAsyncQueues(1000, 100)
@@ -360,19 +394,16 @@ class RuntimeManagementAgentClient(AgentServerClient):
         )
         self._connected = True
 
-    async def purge_all_pods(self) -> None:
-        """主备切换时调用：清空当前进程持有的所有 Pod，但不停 ServiceManager。"""
-        if not self._connected:
-            logger.warning("[RuntimeManagementAgentClient] purge_all_pods skipped: not connected")
-            return
+    async def cleanup_all_pods(self) -> None:
+        """主备切换时调用：清理所有 AgentServer Pod。"""
         try:
-            result = await self._access.purge_all_pods()
-            logger.info(
-                "[RuntimeManagementAgentClient] purge_all_pods done: deleted=%s failed=%s",
-                result.deleted_count, len(result.failed),
+            await self._access.cleanup_all_pods(
+                namespace=self._namespace,
+                kubeconfig=self._kubeconfig,
+                label_selector=self._POD_LABEL_SELECTOR,
             )
         except Exception as exc:
-            logger.exception("[RuntimeManagementAgentClient] purge_all_pods failed: %s", exc)
+            logger.exception("[RuntimeManagementAgentClient] cleanup_all_pods failed: %s", exc)
 
     async def disconnect(self) -> None:
         """断开连接并清理资源。"""
@@ -392,8 +423,48 @@ class RuntimeManagementAgentClient(AgentServerClient):
         """发送非流式请求。"""
         self._ensure_connected()
         request = e2a_to_agent_request(envelope)
-        await load_effective_service_config_for_request(request)
-        session_request = _SessionRequest(request, envelope)
+
+        # 加载服务配置
+        service_template = None
+        loaded = await load_effective_service_config_for_request(request)
+        if loaded is not None:
+            # 从 loaded 中获取 service_id 和 agent_id
+            service_id = getattr(loaded, "service_id", None)
+            agent_id = getattr(loaded, "agent_id", None)
+            logger.info(
+                "[RuntimeManagementAgentClient] loaded config: service_id=%s agent_id=%s",
+                service_id,
+                agent_id,
+            )
+            
+            entities = loaded.service_config or []
+            if entities:
+                service_template = entities[0]
+                logger.info(
+                    "[RuntimeManagementAgentClient] service_template keys: %s",
+                    list(service_template.keys()) if isinstance(service_template, dict) else None,
+                )
+
+            # 将扩展配置附加到 envelope.channel_context
+            ext_config = getattr(loaded, "extension_config", None)
+            if ext_config:
+                envelope.channel_context = envelope.channel_context or {}
+                envelope.channel_context["extension_config"] = ext_config
+                logger.info(
+                    "[RuntimeManagementAgentClient] extension_config attached: %s",
+                    ext_config,
+                )
+
+
+            # 如果从数据库中匹配到了 service_id 或 agent_id，覆盖 request 中的值
+            if service_id:
+                request.service_id = service_id
+                service_template = service_template or {"service_id": service_id}
+            if agent_id:
+                request.agent_id = agent_id
+                service_template = service_template or {"agent_id": agent_id}
+
+        session_request = _SessionRequest(request, envelope, service_template=service_template)
 
         try:
             async for chunk in self._access.send_message(session_request):
@@ -412,8 +483,46 @@ class RuntimeManagementAgentClient(AgentServerClient):
         """发送流式请求。"""
         self._ensure_connected()
         request = e2a_to_agent_request(envelope)
-        await load_effective_service_config_for_request(request)
-        session_request = _SessionRequest(request, envelope)
+
+        # 加载服务配置
+        service_template = None
+        loaded = await load_effective_service_config_for_request(request)
+        if loaded is not None:
+            # 从 loaded 中获取 service_id 和 agent_id
+            service_id = getattr(loaded, "service_id", None)
+            agent_id = getattr(loaded, "agent_id", None)
+            logger.info(
+                "[RuntimeManagementAgentClient] loaded config: service_id=%s agent_id=%s",
+                service_id,
+                agent_id,
+            )
+            
+            entities = loaded.service_config or []
+            if entities:
+                service_template = entities[0]
+                logger.info(
+                    "[RuntimeManagementAgentClient] service_template keys: %s",
+                    list(service_template.keys()) if isinstance(service_template, dict) else None,
+                )
+
+            # 将扩展配置附加到 envelope.channel_context
+            ext_config = getattr(loaded, "extension_config", None)
+            if ext_config:
+                envelope.channel_context = envelope.channel_context or {}
+                envelope.channel_context["extension_config"] = ext_config
+                logger.info(
+                    "[RuntimeManagementAgentClient] extension_config attached: %s",
+                    ext_config,
+                )
+
+
+            # 如果从配置中获取到了 service_id 或 agent_id，覆盖 request 中的值
+            if service_id:
+                request.service_id = service_id
+            if agent_id:
+                request.agent_id = agent_id
+
+        session_request = _SessionRequest(request, envelope, service_template=service_template)
 
         try:
             async for chunk in self._access.send_message(session_request):
