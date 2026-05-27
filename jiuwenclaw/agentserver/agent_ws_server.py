@@ -346,12 +346,12 @@ class AgentWebSocketServer:
     async def _oa_receive_loop(self, ws: Any, send_lock: asyncio.Lock) -> None:
         """OA 模式：消息接收循环，与心跳并行运行。"""
         import websockets
+        tasks: set[asyncio.Task] = set()
         try:
             async for raw in ws:
-                try:
-                    await self._handle_message(ws, raw, send_lock)
-                except Exception as e:
-                    logger.exception("[AgentWebSocketServer] 处理 OA 消息异常: %s", e)
+                task = asyncio.create_task(self._handle_message(ws, raw, send_lock))
+                tasks.add(task)
+                task.add_done_callback(tasks.discard)
         except websockets.exceptions.ConnectionClosed as e:
             logger.warning("[AgentWebSocketServer] OA 消息接收循环检测到连接关闭: %s", e)
             raise  # 重新抛出以便上层处理
@@ -361,6 +361,15 @@ class AgentWebSocketServer:
         except Exception as e:
             logger.exception("[AgentWebSocketServer] OA 消息接收循环异常: %s", e)
             raise
+        finally:
+            self._clear_ws_acp_client_capabilities(ws)
+            if tasks:
+                for t in tasks:
+                    if not t.done():
+                        t.cancel()
+                await asyncio.gather(*tasks, return_exceptions=True)
+            # 消息处理头失败不执行重连
+            self._oa_running = False
 
     async def _oa_run_connection(self, ws: Any) -> None:
         """运行单个 OA 连接，并行执行心跳和消息接收。"""
@@ -1844,7 +1853,7 @@ class AgentWebSocketServer:
 
         try:
             wire = build_server_push_wire(msg)
-            await self._send_message(self._current_send_lock, wire, self._current_send_lock)
+            await self._send_message(self._current_ws, wire, self._current_send_lock)
             response_kind = str(msg.get("response_kind") or "").strip()
             if response_kind:
                 logger.info(
