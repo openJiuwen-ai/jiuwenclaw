@@ -62,6 +62,11 @@ _SUBAGENT_ABORT_TIMEOUT_SECONDS = 30.0
 EXCLUDED_TOOLS_SPAWN = {
     "spawn_subagent",
     "send_file_to_user",
+    # 父 agent 的 reloader 绑在父 SessionModelContext 的 offload_buffer 上，
+    # 复制给 subagent 后调用会去查父的存储——拿不到子自己 offload 的内容。
+    # subagent 用自己的 reloader（在 ReActAgent._init_context 注册，与本 agent 的
+    # context_engine_config.enable_reload 联动），不要继承父的。
+    "reload_original_context_messages",
     # 主 Agent 级调度与消息（子 Agent 不应触发）
     "office_claw_dispatch_agent_task",
     "office_claw_post_message",
@@ -738,7 +743,10 @@ Approach each task methodically and deliver high-quality results.
         filesystem_rail = self._build_inherited_filesystem_rail()
         # 复用主 Agent 路径：跟随 react.context_engine_config 解析链 A/B 与 yaml 调优值
         # （tool_result_budget / micro_compact / full_compact）；minimal=True 跳过 tools/context 注入。
-        from jiuwenclaw.agentserver.deep_agent.interface_deep import _build_context_engineering_rail
+        from jiuwenclaw.agentserver.deep_agent.interface_deep import (
+            _build_context_engineering_rail,
+            _deep_agent_context_engine_config,
+        )
 
         react_config = (config_base or {}).get("react", {}) or {}
         context_engine_config = react_config.get("context_engine_config", {}) or {}
@@ -771,6 +779,9 @@ Approach each task methodically and deliver high-quality results.
         if ce_rail is not None:
             rails.insert(1 if filesystem_rail is not None else 0, ce_rail)
 
+        # 透传 yaml 顶层开关（含 enable_reload / enable_reload_prompt）到 subagent，
+        # 让 ReActAgent._init_context 注册绑定到 subagent 自己 SessionModelContext 的
+        # reload_original_context_messages 工具——per-message offload 文案里引用的合法出口。
         spawn_agent = create_deep_agent(
             model=self._model,
             card=card,
@@ -780,6 +791,7 @@ Approach each task methodically and deliver high-quality results.
             rails=rails,
             language=language,
             enable_task_loop=False,
+            context_engine_config=_deep_agent_context_engine_config(react_config),
             enable_read_image_multimodal=DEFAULT_ENABLE_READ_IMAGE_MULTIMODAL,
         )
 
@@ -891,7 +903,10 @@ Execute the given task using inherited context and available tools.
         max_iterations = self._resolve_subagent_max_iterations()
         filesystem_rail = self._build_inherited_filesystem_rail()
         # 与 spawn 路径同样跟随 react.context_engine_config 解析链 A/B 与 yaml 调优值。
-        from jiuwenclaw.agentserver.deep_agent.interface_deep import _build_context_engineering_rail
+        from jiuwenclaw.agentserver.deep_agent.interface_deep import (
+            _build_context_engineering_rail,
+            _deep_agent_context_engine_config,
+        )
 
         react_config = (config_base or {}).get("react", {}) or {}
         context_engine_config = react_config.get("context_engine_config", {}) or {}
@@ -923,6 +938,8 @@ Execute the given task using inherited context and available tools.
         if ce_rail is not None:
             rails.insert(2 if filesystem_rail is not None else 1, ce_rail)
 
+        # 同 spawn 路径：透传 enable_reload / enable_reload_prompt 等到 fork agent，
+        # 使 fork 的 SessionModelContext 注册自己的 reload_original_context_messages 工具。
         fork_agent = create_deep_agent(
             model=self._model,
             card=card,
@@ -932,6 +949,7 @@ Execute the given task using inherited context and available tools.
             rails=rails,
             language=language,
             enable_task_loop=False,
+            context_engine_config=_deep_agent_context_engine_config(react_config),
             enable_read_image_multimodal=DEFAULT_ENABLE_READ_IMAGE_MULTIMODAL,
         )
 

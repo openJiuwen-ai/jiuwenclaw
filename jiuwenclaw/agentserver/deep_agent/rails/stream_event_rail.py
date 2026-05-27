@@ -10,6 +10,7 @@ Migrated from JiuClawReActAgent:
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 from typing import Any, List, Optional
 
@@ -86,6 +87,22 @@ def _structured_tool_result_payload(result: Any) -> Any | None:
     if isinstance(result, (dict, list)):
         return result
     return None
+
+
+def _extract_skill_complete_arg(tool_call: Any, key: str) -> str:
+    """Read a string arg from skill_complete tool_call.arguments (dict or JSON string)."""
+    args = getattr(tool_call, "arguments", None)
+    val: Any = ""
+    if isinstance(args, dict):
+        val = args.get(key, "")
+    elif isinstance(args, str):
+        try:
+            parsed = json.loads(args)
+        except json.JSONDecodeError:
+            return ""
+        if isinstance(parsed, dict):
+            val = parsed.get(key, "")
+    return str(val).strip() if val else ""
 
 
 class JiuClawStreamEventRail(DeepAgentRail):
@@ -247,6 +264,27 @@ class JiuClawStreamEventRail(DeepAgentRail):
             return
 
         tool_name = ctx.inputs.tool_name
+        if tool_name == "skill_complete":
+            report = _extract_skill_complete_arg(ctx.inputs.tool_call, "report")
+            if report:
+                await self._emit_user_visible_text(session, report)
+                ctx.request_force_finish(
+                    {
+                        "output": report,
+                        "result_type": "skill_complete_report",
+                        "skill_complete": {
+                            "skill_name": _extract_skill_complete_arg(
+                                ctx.inputs.tool_call, "skill_name",
+                            ),
+                        },
+                    },
+                )
+                logger.info(
+                    "[StreamEventRail] skill_complete carried report: force-finish turn "
+                    "(skipped redundant stop round)",
+                )
+                return
+
         if is_ask_user_question_tool_name(tool_name):
             stop_payload = extract_text_only_stop_payload(ctx.inputs.tool_result)
             if stop_payload is not None:
@@ -571,12 +609,10 @@ class JiuClawStreamEventRail(DeepAgentRail):
             Valid JSON string (e.g., '{"key": "value"}').
         """
         if isinstance(arguments, dict):
-            import json
             return json.dumps(arguments)
         if isinstance(arguments, str):
             repaired = fix_json_arguments(arguments)
             if isinstance(repaired, dict):
-                import json
                 return json.dumps(repaired, ensure_ascii=False)
             logger.warning("Illegal Tool call arguments after repair: %s", arguments)
             return "{}"

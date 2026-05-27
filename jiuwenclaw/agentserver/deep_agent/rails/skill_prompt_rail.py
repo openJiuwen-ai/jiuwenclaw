@@ -28,7 +28,7 @@ def _build_skill_protocol_section_text(language: str) -> str:
 可用技能清单与加载/释放约定见本 prompt 的「技能」段（SkillUseRail 注入），**须与该段一致**。
 
 **加载 SKILL.md 正文（禁止用 bash 执行工具名）：**
-- **必须**且**只能**使用 `skill_tool(skill_name=..., relative_file_path="SKILL.md")` 加载；整段技能执行结束且不再需要正文时调用 `skill_complete(skill_name=...)`。不要把这些名字当作 shell 命令。
+- **必须**且**只能**使用 `skill_tool(skill_name=..., relative_file_path="SKILL.md")` 加载；整段执行结束时调用 `skill_complete(skill_name=..., report="<最终回复>")`。`report` 即给用户的最终回复——**不要**再另写 stop；内容只写结果概要 + 产物路径，禁止复述步骤。不要把这些名字当作 shell 命令。
 - 只有 `skill_tool` 会走系统集成路径（正文入会话、后续上下文中的保护与 [ACTIVE SKILL BODY] 注入），**禁止**用任何其它工具加载或拼凑 SKILL.md。
 - 若你当前可用工具列表中**没有** `skill_tool`：无法按本系统路径加载技能正文，请向用户说明环境未开放该能力；**不得**用其它工具代替。
 - 需要多看或刷新全文时，**只能**再次调用 `skill_tool`。
@@ -54,7 +54,7 @@ def _build_skill_protocol_section_text(language: str) -> str:
 The "Skills" section of this prompt (from SkillUseRail) lists available skills and how to load/release them — **follow that section**.
 
 **Load SKILL.md body (never run tool names as shell/bash commands):**
-- You **must** use **only** `skill_tool(skill_name=..., relative_file_path="SKILL.md")` to load the body; when the whole skill flow is done and you no longer need the body, call `skill_complete(skill_name=...)`.
+- You **must** use **only** `skill_tool(skill_name=..., relative_file_path="SKILL.md")` to load the body; when the whole flow is done, call `skill_complete(skill_name=..., report="<final reply>")`. `report` IS the final reply to the user — do **not** write a separate stop turn; keep it to outcome summary + artifact paths, no step recaps.
 - Only `skill_tool` enters the integrated path (session body copy, message protection, and `[ACTIVE SKILL BODY]` reinjection). **Do not** load or stitch SKILL.md with any other tool.
 - If `skill_tool` is **not** in your available tool list, you cannot load skill bodies on this integration path—tell the user; **do not** substitute another file-reading tool.
 - To see more or refresh the full SKILL.md, you **may only** call `skill_tool` again.
