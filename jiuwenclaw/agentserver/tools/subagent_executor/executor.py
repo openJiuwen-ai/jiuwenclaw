@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import time
 from pathlib import Path
 from typing import Any, TYPE_CHECKING
 
@@ -102,6 +103,7 @@ EXCLUDED_TOOLS_FORK = EXCLUDED_TOOLS_SPAWN | {"fork_agent"}
 
 # Subagent ReAct cap when parent has no usable max_iterations (mirrors interface_deep fallback).
 _DEFAULT_SUBAGENT_MAX_ITERATIONS = 15
+_SUBAGENT_STREAM_FLUSH_INTERVAL_SECONDS = 1.0
 
 
 class ForkAgentExecutor:
@@ -185,6 +187,51 @@ class ForkAgentExecutor:
         final_text = ""
         usage = {}
         has_streamed_content = False
+        pending_event_type: str | None = None
+        pending_parts: list[str] = []
+        pending_since = time.monotonic()
+        emitted_first_model_chunk = False
+
+        async def write_model_stream(event_type: str, content: str) -> None:
+            if session_proxy is None or not content:
+                return
+            output_type = "llm_reasoning" if event_type == "chat.reasoning" else "content_chunk"
+            await session_proxy.write_stream({
+                "type": output_type,
+                "payload": {"content": content},
+            })
+
+        async def flush_pending_model_stream() -> None:
+            nonlocal pending_event_type, pending_parts, pending_since
+            if session_proxy is None or pending_event_type is None or not pending_parts:
+                pending_event_type = None
+                pending_parts = []
+                pending_since = time.monotonic()
+                return
+
+            await write_model_stream(pending_event_type, "".join(pending_parts))
+            pending_event_type = None
+            pending_parts = []
+            pending_since = time.monotonic()
+
+        async def buffer_model_stream(event_type: str, content: str) -> None:
+            nonlocal pending_event_type, pending_since, emitted_first_model_chunk
+            if not content:
+                return
+            if not emitted_first_model_chunk:
+                emitted_first_model_chunk = True
+                await write_model_stream(event_type, content)
+                return
+
+            now = time.monotonic()
+            if pending_event_type is not None and pending_event_type != event_type:
+                await flush_pending_model_stream()
+            if pending_event_type is None:
+                pending_event_type = event_type
+                pending_since = now
+            pending_parts.append(content)
+            if now - pending_since >= _SUBAGENT_STREAM_FLUSH_INTERVAL_SECONDS:
+                await flush_pending_model_stream()
 
         async for chunk in Runner.run_agent_streaming(agent=agent, inputs=inputs):
             parsed = parse_stream_chunk(chunk, _has_streamed_content=has_streamed_content)
@@ -193,7 +240,13 @@ class ForkAgentExecutor:
 
             event_type = parsed.get("event_type")
             if session_proxy is not None and event_type in self._FORWARDED_MODEL_EVENTS:
-                await session_proxy.write_stream(chunk)
+                if event_type in ("chat.delta", "chat.reasoning"):
+                    await buffer_model_stream(event_type, str(parsed.get("content", "") or ""))
+                else:
+                    await flush_pending_model_stream()
+                    await session_proxy.write_stream(chunk)
+            elif event_type not in ("chat.delta", "chat.reasoning"):
+                await flush_pending_model_stream()
 
             if event_type == "chat.delta":
                 content = parsed.get("content", "")
@@ -236,6 +289,7 @@ class ForkAgentExecutor:
                         "total_cost": usage_meta.get("total_cost", 0.0) or 0.0,
                     }
 
+        await flush_pending_model_stream()
         return (final_text or "".join(streamed_parts), usage)
 
     async def abort_active_subagents(
