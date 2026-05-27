@@ -24,6 +24,7 @@ from jiuwenclaw.channel.vibeskill_session import (
     VibeSkillSessionStore,
     _VIBESKILL_ORIGINAL_SESSION_ID_KEY,
 )
+from jiuwenclaw.channel.vibeskill_session_dcs_store import VibeSkillSessionDcsStore
 
 from jiuwenclaw.channel.vibeskill_file_utils import skilldev_tree_to_file_tree_nodes
 from jiuwenclaw.schema.message import Message, ReqMethod
@@ -142,7 +143,17 @@ class VibeSkillChannel(BaseChannel):
         super().__init__(config, router)
         self.config: VibeSkillConfig = config
         self._agent_client = agent_client
-        self._store = VibeSkillSessionStore()
+        self._dcs_store: VibeSkillSessionDcsStore | None = VibeSkillSessionDcsStore.from_env()
+        if self._dcs_store is not None:
+            logger.info(
+                "[VibeSkillChannel] DCS session persistence enabled (host=%s)",
+                self._dcs_store.host,
+            )
+        else:
+            logger.info(
+                "[VibeSkillChannel] DCS session persistence disabled (SANDBOX_DCS_HOST not set)"
+            )
+        self._store = VibeSkillSessionStore(dcs_store=self._dcs_store)
         self._ws_sessions: dict[Any, set[str]] = {}  # ws -> set of session_ids
         self._session_to_ws: dict[str, Any] = {}  # session_id -> ws
         self._ws_sessions_lock = asyncio.Lock()
@@ -223,6 +234,12 @@ class VibeSkillChannel(BaseChannel):
             self._ws_server.close()
             await self._ws_server.wait_closed()
             self._ws_server = None
+        if self._dcs_store is not None:
+            try:
+                await self._dcs_store.close()
+            except Exception:
+                logger.exception("[VibeSkillChannel] DCS close failed")
+            self._dcs_store = None
 
     async def _handle_ws_connection(self, ws: Any) -> None:
         """处理 WebSocket 连接。"""

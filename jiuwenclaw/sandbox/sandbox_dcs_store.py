@@ -1,49 +1,14 @@
 from __future__ import annotations
 
 import hashlib
-import os
 from dataclasses import dataclass
 
-from redis.asyncio.cluster import RedisCluster
-
+from jiuwenclaw.dcs import DcsClusterClient, DcsClusterConfig, load_config_from_env
 from jiuwenclaw.sandbox.open_ability import OpenAbilityEndpoint
 from jiuwenclaw.utils import logger
 
-_DCS_SOCKET_CONNECT_TIMEOUT_SECONDS = 1.0
-_DCS_DEFAULT_TTL_SECONDS = 86400
-_DCS_DEFAULT_PORT = 2881
-
-
-def _env_int(name: str, *, default: int) -> int:
-    raw = os.environ.get(name, "").strip()
-    if not raw:
-        return default
-    return int(raw)
-
-
-@dataclass(frozen=True)
-class SandboxDcsConfig:
-    host: str
-    port: int
-    password: str | None = None
-    ttl_seconds: int = _DCS_DEFAULT_TTL_SECONDS
-
-    @classmethod
-    def from_env(cls) -> SandboxDcsConfig:
-        host = os.environ.get("SANDBOX_DCS_HOST", "").strip()
-        if not host:
-            raise RuntimeError(
-                "SANDBOX_DCS_HOST environment variable is required when sandbox routing is enabled"
-            )
-        password = os.environ.get("SANDBOX_DCS_PASSWORD", "").strip() or None
-        return cls(
-            host=host,
-            port=_env_int("SANDBOX_DCS_PORT", default=_DCS_DEFAULT_PORT),
-            password=password,
-            ttl_seconds=_env_int(
-                "SANDBOX_DCS_TTL_SECONDS", default=_DCS_DEFAULT_TTL_SECONDS
-            ),
-        )
+# Backward-compatible alias for existing imports.
+SandboxDcsConfig = DcsClusterConfig
 
 
 @dataclass(frozen=True)
@@ -57,31 +22,18 @@ class SandboxDcsStore:
 
     def __init__(self, config: SandboxDcsConfig) -> None:
         self._config = config
-        self._client: RedisCluster | None = None
+        self._dcs = DcsClusterClient(config)
 
     @classmethod
     def from_env(cls) -> SandboxDcsStore:
-        return cls(SandboxDcsConfig.from_env())
-
-    def _create_redis_client(self) -> RedisCluster:
-        return RedisCluster(
-            host=self._config.host,
-            port=self._config.port,
-            password=self._config.password,
-            decode_responses=True,
-            require_full_coverage=False,
-            socket_connect_timeout=_DCS_SOCKET_CONNECT_TIMEOUT_SECONDS,
+        config = load_config_from_env(
+            required=True,
+            missing_host_error=(
+                "SANDBOX_DCS_HOST environment variable is required when sandbox routing is enabled"
+            ),
         )
-
-    async def ensure_connected(self) -> RedisCluster:
-        if self._client is None:
-            self._client = self._create_redis_client()
-        return self._client
-
-    async def close(self) -> None:
-        if self._client is not None:
-            await self._client.aclose()
-            self._client = None
+        assert config is not None
+        return cls(config)
 
     @staticmethod
     def _api_key_key(sandbox_id: str) -> str:
@@ -122,36 +74,33 @@ class SandboxDcsStore:
             return None
         return OpenAbilityEndpoint(host=host, port=port)
 
+    async def close(self) -> None:
+        await self._dcs.close()
+
     async def save_sandbox(
         self,
         sandbox_id: str,
         *,
         api_key: str,
     ) -> SandboxDcsRecord:
-        client = await self.ensure_connected()
         api_key_sha256 = self._hash_api_key(api_key)
         record = SandboxDcsRecord(
             sandbox_id=sandbox_id,
             api_key_sha256=api_key_sha256,
         )
         key = self._api_key_key(sandbox_id)
-        await client.set(key, api_key_sha256)
-        ttl_seconds = self._config.ttl_seconds
-        if ttl_seconds > 0:
-            await client.expire(key, ttl_seconds)
+        await self._dcs.set_with_ttl(key, api_key_sha256)
         logger.info("Saved sandbox API key hash to DCS: key=%s", key)
         return record
 
     async def delete_sandbox(self, sandbox_id: str) -> None:
-        client = await self.ensure_connected()
-        await client.delete(
+        await self._dcs.delete(
             self._api_key_key(sandbox_id),
             self._sandbox_to_oa_key(sandbox_id),
         )
 
     async def get_sandbox(self, sandbox_id: str) -> SandboxDcsRecord | None:
-        client = await self.ensure_connected()
-        raw = await client.get(self._api_key_key(sandbox_id))
+        raw = await self._dcs.get(self._api_key_key(sandbox_id))
         if raw is None:
             return None
         api_key_sha256 = self._decode_api_key_value(raw)
@@ -163,8 +112,7 @@ class SandboxDcsStore:
         )
 
     async def get_openability_endpoint(self, sandbox_id: str) -> OpenAbilityEndpoint | None:
-        client = await self.ensure_connected()
-        raw = await client.get(self._sandbox_to_oa_key(sandbox_id))
+        raw = await self._dcs.get(self._sandbox_to_oa_key(sandbox_id))
         if raw is None:
             return None
         return self._parse_sandbox_to_oa_value(raw)

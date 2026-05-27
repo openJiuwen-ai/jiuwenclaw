@@ -69,22 +69,12 @@ flowchart LR
 
 Session Store 由每个 `VibeSkillChannel` 实例独立持有，不是全局单例。
 
-维护两类 ID：
+统一使用单一 `session_id`（前端 `sessionID`、Channel 内存表、MessageHandler、`task_id` / `service_id` 均为此 ID，不再区分 external / internal）。
 
-| ID | 来源 | 用途 |
-|----|------|------|
-| `external_id` | 前端传入的 `sessionID` | 前端可见的会话 ID |
-| `internal_id` | Channel 创建或 MessageHandler 创建 | JiuwenClaw / AgentServer 内部处理用 ID |
+正常建会话流程：
 
-正常 VibeSkill 建会话流程里需要特别注意：
-
-1. `POST /api/v1/session` 创建本地 session 时，Channel 调用 `get_or_create(external_id=None)`，因此刚创建出的 session 只有 `internal_id`，`external_id` 为空。
-2. HTTP 响应给前端的 `sessionID` 使用这个 `internal_id`。
-3. 前端后续用该 `sessionID` 建立 WebSocket 并发送 `message.send`。
-4. Channel 在处理 `message.send` 时发现入站 `external_session_id` 有值、但 session 里还没有 `external_id`，会调用 `bind_external(session.internal_id, external_session_id)`。
-5. 因为正常流程中前端传回来的 `sessionID` 就是第 2 步返回的 `internal_id`，所以最终会形成 `external_id == internal_id` 的绑定。
-
-也就是说，代码结构支持“前端外部 ID”和“内部 ID”两套映射；但 VibeSkill 的正常创建流程不是先由前端提供外部 ID，而是先由 Channel 生成内部 ID，再把它返回给前端，后续再把这个同一个值绑定为 `external_id`。只有前端主动带入已有或自定义 `sessionID` 时，`external_id` 与 `internal_id` 才可能不同。
+1. `POST /api/v1/session` 调用 `get_or_create(session_id=None)`，Channel 生成 `vibeskill_<hex>` 作为 `session_id` 并返回给前端。
+2. 前端用该 `sessionID` 建 WebSocket、发 `message.send`；Channel 用同一 `session_id` 查表并路由到 SkillDev / Standard。
 
 会话状态：
 
@@ -101,6 +91,42 @@ Session Store 由每个 `VibeSkillChannel` 实例独立持有，不是全局单�
 |------|------|--------------------------|
 | `SkillCreate` | 默认模式，用于 Skill 创建/解析/评审/打包 | `ReqMethod.SKILLDEV_CHAT` |
 | `Standard` | 标准 JiuwenClaw 对话模式 | `ReqMethod.CHAT_SEND` |
+
+### 3.3 DCS 持久化（可选）
+
+`VibeSkillSessionStore` 支持可选注入 `VibeSkillSessionDcsStore` 作为远端后端，把 session 元数据持久化到华为 DCS（Redis Cluster 兼容）。开启后，多个 Gateway 实例共享同一份 session 数据，gateway1 创建的 session 可被 gateway2 查到。
+
+启用方式：设置环境变量 `SANDBOX_DCS_HOST`（与 Sandbox 路由共用，未设置则退化为纯内存）。
+
+| 环境变量 | 默认值 | 说明 |
+|----------|--------|------|
+| `SANDBOX_DCS_HOST` | 无 | DCS 主机；**未设置则禁用 VibeSkill DCS 持久化** |
+| `SANDBOX_DCS_PORT` | `2881` | DCS 端口 |
+| `SANDBOX_DCS_PASSWORD` | 无 | DCS 密码（可选） |
+| `SANDBOX_DCS_TTL_SECONDS` | `86400` | key 过期时间（秒）；`0` 表示不过期 |
+
+Redis 连接与 TTL 逻辑由公共模块 `jiuwenclaw/dcs`（`DcsClusterClient`）提供；业务 key 与序列化仍在本模块。
+
+Key 命名（与 `sandbox_dcs_store.py` 同模式，写死常量）：
+
+| Key | 值 |
+|-----|----|
+| `jiuwen:vibeskillSession:<session_id>` | JSON 序列化的 session（含 `state` / `mode` / `metadata` / `created_at` / `updated_at`） |
+
+读写策略：
+
+- **读**：先查本地内存，miss 时查 DCS，命中后回填本地内存并返回。
+- **写**：先 `await dcs.save_session(...)`，成功后再更新本地内存；DCS 写失败 **fail-fast**，本地内存不被污染。
+- `delete_session`：先删 DCS 主 key，再清本地。
+- `get_user_id` 保持同步签名，仅读本机内存；跨 gateway 时调用方应先经 `get_session` / `resolve_session` 触发 DCS read-through 回填。
+- `list_sessions` 仅返回本机视图，不扫描远端 keys。
+- 反序列化兼容旧数据中的 `internal_id` 字段名。
+
+已知边界：
+
+- **WS 出站事件仍 gateway-本地**：DCS 只解决 session 元数据跨机可见；流式响应仍由收到 `message.send` 的 gateway 处理，生产需 LB sticky session（基于 `sessionID` hash）。
+- **`_message_ctx` / `_pending_confirms` 不持久化**：流式上下文仍为 gateway 本地，进程重启或换机器后需前端重连重发。
+- **不做跨 gateway 缓存失效广播**：另一节点删除 session 后，本机缓存待自然驱逐或重启对齐。
 
 ## 4. WebSocket 接口
 
@@ -153,8 +179,8 @@ ws://127.0.0.1:19003/api/v1/messages?sessionID={sessionID}
 |-----------|------|----------|
 | `text` | `text` | 拼接为 `params.query` |
 | `file` | `filename`, `url`, `mime`, `resourceType` | 普通文件进入 `params.files`；`resourceType=skill` 进入 `params.skill_packages` |
-| `toolDefinition` | `bundleName`, `pluginType`, `toolType`, `toolName`, `description`, `arguments`, `outputSchema`, `protocol`, `deviceCommand` | 进入 `params.tool_spec_files`（`bundleName` 兼容旧字段 `pluginId`；`deviceCommand` 原值透传） |
-| `agentDefinition` | `agentId`, `name`, `description`, `parameters`, `outputSchema` | 进入 `params.agent_definitions` |
+| `toolDefinition` | `pluginId`, `pluginType`, `toolType`, `toolName`, `description`, `arguments`, `protocol` | 进入 `params.tool_spec_files` |
+| `agentDefinition` | `agentId`, `name`, `description`, `parameters` | 进入 `params.agent_definitions` |
 | `cliDefinition` | `name`, `version`, `description`, `executeSide`, `requirePermissions`, `inputSchema`, `outputSchema` | 进入 `params.cli_definitions` |
 
 SkillCreate 模式 `message.send` 示例：
@@ -176,8 +202,8 @@ SkillCreate 模式 `message.send` 示例：
 ```text
 channel_id = vibeskill
 req_method = skilldev.chat
-session_id = internal_id
-params.task_id = internal_id
+session_id = 前端 sessionID
+params.task_id = 前端 sessionID
 params.query = parts 中所有 text 拼接
 params.files / skill_packages / tool_spec_files / agent_definitions / cli_definitions = 按 part 类型填充
 params.agent_id = 可选，来自 message 顶层 agent_id 或 agentId
@@ -190,7 +216,7 @@ Standard 模式 `message.send` 转换要点：
 ```text
 req_method = chat.send
 params.query = parts 中所有 text 拼接
-params.service_id = external sessionID 或 internal_id
+params.service_id = sessionID（与 session_id 相同）
 ```
 
 `service_id` 用于按 session 做租户隔离，避免 Standard 模式落到共享默认工作区。

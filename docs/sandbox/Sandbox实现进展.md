@@ -151,7 +151,7 @@ _disconnect_agent_client(sandbox_id, agent_client) -> None
 
 可选：`SANDBOX_INIT_DATA_PATH` — 沙箱内 `init_data.json` 上传路径；Gateway 与 AgentServer 均读取此变量，默认 `/opt/huawei/app/jiuwenclaw/init_data.json`。Gateway 上传时会去掉任何目录前缀，仅以 basename 作为 `SandboxClient.upload_file` 的 `remote_path`。
 
-可选：`SANDBOX_DCS_TTL_SECONDS` — 写入 DCS 的 sandbox API key 哈希记录的过期时间（秒），默认 `86400`（一天）；设置为 `0` 表示不设置过期时间。
+可选：`SANDBOX_DCS_TTL_SECONDS` — 写入 DCS 的 sandbox API key 哈希记录的过期时间（秒），默认 `86400`（一天）；设置为 `0` 表示不设置过期时间。VibeSkill session 持久化共用同一套 `SANDBOX_DCS_*` 环境变量。
 
 SandboxClient 固定：`timeout_seconds=120`，`metadata={}`。
 
