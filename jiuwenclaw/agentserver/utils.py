@@ -1,8 +1,12 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 
-"""AgentServer 工具函数."""
+"""AgentServer 工具函数与共享常量."""
 
 from typing import Any
+
+# harness read_file：False 时不把图片字节注入主模型对话，改走 image_ocr / VQA 等视觉工具。
+# 用于 create_deep_agent(enable_read_image_multimodal=...) 与 ReadFileTool(enable_image_multimodal=...)。
+DEFAULT_ENABLE_READ_IMAGE_MULTIMODAL: bool = False
 
 from jiuwenclaw.schema.agent import AgentRequest
 

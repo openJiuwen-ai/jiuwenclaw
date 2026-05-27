@@ -23,6 +23,7 @@ from openjiuwen.harness.rails import SecurityRail
 from openjiuwen.harness.schema.config import SubAgentConfig
 from openjiuwen.harness.workspace.workspace import Workspace
 
+from jiuwenclaw.agentserver.utils import DEFAULT_ENABLE_READ_IMAGE_MULTIMODAL
 from jiuwenclaw.config import get_config
 from jiuwenclaw.utils import logger
 
@@ -608,6 +609,7 @@ class MemoryWikiManager:
             sys_operation=None,
             language=resolved_language,
             auto_create_workspace=False,
+            enable_read_image_multimodal=DEFAULT_ENABLE_READ_IMAGE_MULTIMODAL,
         )
 
         await self._wiki_agent.ensure_initialized()

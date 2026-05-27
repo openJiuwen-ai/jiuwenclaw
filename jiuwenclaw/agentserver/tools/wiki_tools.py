@@ -24,6 +24,7 @@ from openjiuwen.harness.rails import SecurityRail
 from openjiuwen.harness.schema.config import SubAgentConfig
 from openjiuwen.harness.workspace.workspace import Workspace
 
+from jiuwenclaw.agentserver.utils import DEFAULT_ENABLE_READ_IMAGE_MULTIMODAL
 from jiuwenclaw.config import get_config
 from jiuwenclaw.utils import get_agent_workspace_dir
 
@@ -242,6 +243,7 @@ class LLMWiki:
             language=resolved_language,
             prompt_mode=prompt_mode,
             auto_create_workspace=False,
+            enable_read_image_multimodal=DEFAULT_ENABLE_READ_IMAGE_MULTIMODAL,
             **config_kwargs,
         )
 

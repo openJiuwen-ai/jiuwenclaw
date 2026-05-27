@@ -52,6 +52,7 @@ from jiuwenclaw.agentserver.tools.subagent_executor.rails import (
 from jiuwenclaw.agentserver.tools.subagent_executor.skill_use_rail_subagent import (
     SubagentSkillUseRail,
 )
+from jiuwenclaw.agentserver.utils import DEFAULT_ENABLE_READ_IMAGE_MULTIMODAL
 
 # Default timeout for subagent execution
 _DEFAULT_TIMEOUT_SECONDS = 600.0
@@ -779,6 +780,7 @@ Approach each task methodically and deliver high-quality results.
             rails=rails,
             language=language,
             enable_task_loop=False,
+            enable_read_image_multimodal=DEFAULT_ENABLE_READ_IMAGE_MULTIMODAL,
         )
 
         self._inherit_tools_for_spawn(spawn_agent)
@@ -930,6 +932,7 @@ Execute the given task using inherited context and available tools.
             rails=rails,
             language=language,
             enable_task_loop=False,
+            enable_read_image_multimodal=DEFAULT_ENABLE_READ_IMAGE_MULTIMODAL,
         )
 
         self._inherit_tools_for_fork(fork_agent)

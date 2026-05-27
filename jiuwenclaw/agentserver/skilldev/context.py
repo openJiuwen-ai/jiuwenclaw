@@ -47,6 +47,7 @@ from jiuwenclaw.agentserver.tools.harness_named_web_tools import (
     JiuwenHarnessFetchWebpageTool,
     JiuwenHarnessFreeSearchTool,
 )
+from jiuwenclaw.agentserver.utils import DEFAULT_ENABLE_READ_IMAGE_MULTIMODAL
 from jiuwenclaw.agentserver.skilldev.deps import SkillDevDeps
 from jiuwenclaw.agentserver.skilldev.schema import SkillDevEvent, SkillDevEventType, SkillDevState
 
@@ -648,6 +649,7 @@ class SkillDevContext:
                 language="cn",
             ),
             auto_create_workspace=False,
+            enable_read_image_multimodal=DEFAULT_ENABLE_READ_IMAGE_MULTIMODAL,
         )
 
         if tools:
@@ -751,7 +753,14 @@ class SkillDevContext:
                     else:
                         # 文件系统工具需要 SysOperation
                         sys_op = _get_sys_operation()
-                        harness_tool = tool_cls(sys_op, language="cn")
+                        if tool_cls is ReadFileTool:
+                            harness_tool = tool_cls(
+                                sys_op,
+                                language="cn",
+                                enable_image_multimodal=DEFAULT_ENABLE_READ_IMAGE_MULTIMODAL,
+                            )
+                        else:
+                            harness_tool = tool_cls(sys_op, language="cn")
 
                     # 生成唯一 tool_id
                     tool_id = f"{tool_name}_{self.task_id}_{stage_name}"

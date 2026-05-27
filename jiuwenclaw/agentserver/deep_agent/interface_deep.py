@@ -81,6 +81,7 @@ from openjiuwen.harness.tools import (
 from openjiuwen.harness.tools.todo import TodoStatus, TodoModifyTool
 from openjiuwen.harness.workspace.workspace import Workspace, WorkspaceNode
 
+from jiuwenclaw.agentserver.utils import DEFAULT_ENABLE_READ_IMAGE_MULTIMODAL
 from jiuwenclaw.agentserver.deep_agent.cron_runtime import CronRuntimeBridge
 from jiuwenclaw.agentserver.deep_agent.ask_user_question_registry import (
     ASK_REQUEST_PREFIX,
@@ -2043,6 +2044,7 @@ class JiuWenClawDeepAdapter:
             rails=rails,
             vision_model_config=self._vision_model_config,
             audio_model_config=self._audio_model_config,
+            enable_read_image_multimodal=DEFAULT_ENABLE_READ_IMAGE_MULTIMODAL,
             completion_timeout=config.get("completion_timeout", 21600.0),
         )
 
@@ -2396,6 +2398,7 @@ class JiuWenClawDeepAdapter:
                 context_engine_config=_deep_agent_context_engine_config(ctx.config),
                 vision_model_config=self._vision_model_config,
                 audio_model_config=self._audio_model_config,
+                enable_read_image_multimodal=DEFAULT_ENABLE_READ_IMAGE_MULTIMODAL,
                 completion_timeout=ctx.config.get("completion_timeout", 21600.0),
             )
 
