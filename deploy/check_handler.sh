@@ -158,7 +158,7 @@ check_if_db_up() {
     elif [[ "${db_type}" == "postgresql" ]]; then
         _check_if_postgresql_up
     else
-        _check_if_mysql_up
+        check_if_mysql_up
     fi
 }
 
