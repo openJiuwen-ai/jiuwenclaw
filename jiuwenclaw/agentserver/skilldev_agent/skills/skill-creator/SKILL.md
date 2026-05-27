@@ -69,7 +69,7 @@ description: Imperative description of when to trigger and what to do.
 - `name`: machine-readable ID, not a display title. It must match `^[a-z0-9-]+$`, use lowercase letters / digits / hyphens only, be ≤ 64 chars, not start/end with `-`, not contain `--`, and exactly match the skill directory name. If the user asks for a Chinese name, keep or choose a valid ASCII kebab-case name instead; Chinese belongs in `description` or the body, not `name`.
 - `description`: This is the **only triggering mechanism** — all "when to use" guidance goes here, not the body. Chinese SHOULD be ≤ 256 chars and MUST be ≤ 512 chars; English SHOULD be ≤ 512 chars and MUST be ≤ 1024 chars. Make it slightly pushy: instead of `"Builds dashboards for internal data"`, write `"Builds dashboards for internal data. Use whenever the user mentions dashboards, metrics, or wants to display company data — even if they don't say 'dashboard' explicitly."`
 - Allowed keys only: `name`, `description`, `license`, `allowed-tools`, `metadata`, `compatibility`. No duplicates.
-- External dependencies belong in `metadata`: `metadata.tools` for function tools, `metadata.agents` for agent tools, and `metadata.clis` for CLI tools. Tool entries must include `pluginId` and `toolName`.
+- External dependencies belong in `metadata`: `metadata.tools` for function tools, `metadata.agents` for agent tools, and `metadata.clis` for CLI tools. Function tool entries must include `pluginId` and `toolName`; CLI entries use `name` as described in `references/usage_clis.md`.
 - If the skill uses function tools, agent tools, or CLI tools, read the matching usage reference before writing instructions and include one concrete example instruction sentence in the skill body.
 
 ### Progressive disclosure
@@ -101,7 +101,7 @@ Device-side skills must not generate `scripts/` by default. If a script is genui
 - `SKILL.md` exists with valid frontmatter (name matches directory, description within language-specific limits, allowed keys only).
 - If the skill declares `metadata.tools`, read `references/usage_tools.md` and add one example sentence showing the `function_call_tool` call shape.
 - If the skill declares `metadata.agents`, read `references/usage_agents.md` and add one example sentence showing the `agent_as_a_tool` call shape.
-- If the skill declares `metadata.clis`, read `references/usage_clis.md` and add one example sentence showing the `exec` command shape.
+- If the skill declares `metadata.clis`, read `references/usage_clis.md` and add one example sentence showing the `exec-cli` call shape.
 - If the skill declares any of `metadata.tools` / `metadata.agents` / `metadata.clis`, the body must include a single **tool definitions** section listing every registered tool.
 - Body is under 500 lines; bulky reference material moved to `references/`.
 - Security validation passes: no dangerous commands, hardcoded credentials, or path traversal in the skill body or scripts.
