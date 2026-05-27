@@ -3508,6 +3508,14 @@ class VibeSkillChannel(BaseChannel):
         except json.JSONDecodeError:
             return self._json_response(400, {"error": "Invalid JSON"})
         request_id = f"vibeskill-export-{int(time.time() * 1000):x}-{secrets.token_hex(3)}"
+        session = await self._store.get_session(session_id)
+        if not session:
+            return self._json_response(404, {"error": "Session not found"})
+        if session.mode == "Standard":
+            return self._json_response(400, {"error": "Standard 模式不支持导出"})
+        state = await self._store.get_state(session_id)
+        if state != VibeSkillSessionState.COMPLETED:
+            return self._json_response(400, {"error": "会话未完成，无法导出"})
         env = e2a_from_agent_fields(
             request_id=request_id,
             channel_id=VIBESKILL_CHANNEL_ID,
