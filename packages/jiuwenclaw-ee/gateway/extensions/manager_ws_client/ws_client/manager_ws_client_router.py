@@ -29,6 +29,7 @@ from ..core.template.service_config_template import apply_service_config_templat
 from ..core.template.skill_whitelist_template import (
     apply_skill_whitelist_template_sync,
 )
+from ..core.application_config.channel_config import apply_channel_config_sync
 
 logger = logging.getLogger(__name__)
 
@@ -89,7 +90,7 @@ async def _apply_channel_config(payload: dict[str, Any]) -> dict[str, Any] | Non
     if not op:
         raise ValueError("channel_config.op is required")
 
-    handler = await ensure_db_handler_ready()
+    handler = await _ensure_db_handler()
     result = await apply_channel_config_sync(handler, op, payload)
     logger.info(
         "[ManagerWsClient] channel_config sync op=%s channel_id=%s",
