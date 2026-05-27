@@ -908,6 +908,31 @@ def cleanup_team_files(workspace_dir: Path) -> None:
                 logger.warning(f"[Cleanup] Failed to remove legacy team database file: {e}")
 
 
+def deep_merge_dicts(base: dict, overlay: dict) -> dict:
+    """将 overlay 字典深度合并到 base 字典之上，返回新字典。
+
+    规则（overlay 覆盖 base）：
+    - base 有、overlay 没有 → 保留 base 值
+    - 两边都有且都是 dict → 递归合并
+    - overlay 有值 → overlay 覆盖 base
+
+    Args:
+        base: 基础完整配置（如从 get_config() 读取的完整 config.yaml）。
+        overlay: 增量覆盖配置（如 Gateway 传来的部分配置）。
+
+    Returns:
+        合并后的新字典，不修改 base 和 overlay。
+    """
+    result = dict(base)
+    for key, overlay_val in overlay.items():
+        base_val = result.get(key)
+        if isinstance(base_val, dict) and isinstance(overlay_val, dict):
+            result[key] = deep_merge_dicts(base_val, overlay_val)
+        else:
+            result[key] = overlay_val
+    return result
+
+
 def _deep_merge_from_source(source, user):
     """将 source（源码模板）中的新增字段合并到 user（用户配置）。
 

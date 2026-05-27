@@ -50,6 +50,20 @@ from jiuwenclaw.agentserver.permissions.tiered_policy import (
 logger = logging.getLogger(__name__)
 
 
+def _to_bool(value: Any) -> bool:
+    """将配置值转为布尔；字符串 "false"/"0"/"no" 视为 False。
+
+    ``resolve_env_vars`` 用 ``re.sub`` 替换环境变量，结果始终为字符串，
+    因此 ``${PERMISSIONS_ENABLED:-true}`` 解析后得到 ``"false"`` 而非 ``False``。
+    若不做转换，Python 的 ``bool("false") == True`` 会导致开关失效。
+    """
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value.strip().lower() not in ("false", "0", "no", "off", "")
+    return bool(value)
+
+
 class PermissionEngine:
     """Phase-1 权限引擎。"""
 
@@ -60,7 +74,7 @@ class PermissionEngine:
         model_name: str | None = None,
     ):
         self.config = config or {}
-        self._enabled = self.config.get("enabled", True)
+        self._enabled = _to_bool(self.config.get("enabled", True))
         self._llm = llm
         self._model_name = model_name
         self._file_guard = FileGuardChecker(self.config)
@@ -71,7 +85,7 @@ class PermissionEngine:
     def update_config(self, config: dict):
         """热更新配置。"""
         self.config = config
-        self._enabled = config.get("enabled", True)
+        self._enabled = _to_bool(config.get("enabled", True))
         self._file_guard = FileGuardChecker(config)
         report_legacy_path_rules_at_load(self.config)
 

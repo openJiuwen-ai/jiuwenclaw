@@ -122,13 +122,15 @@ from jiuwenclaw.agentserver.deep_agent.permissions.owner_scopes import (
     setup_permission_context,
     cleanup_permission_context,
 )
-from jiuwenclaw.agentserver.permissions.core import init_permission_engine
+from jiuwenclaw.agentserver.permissions.core import init_permission_engine, get_permission_engine
 from jiuwenclaw.agentserver.memory import clear_memory_manager_cache
 from jiuwenclaw.agentserver.memory.config import (clear_config_cache, get_memory_mode, is_memory_enabled,
                                                   is_proactive_memory)
 from jiuwenclaw.agentserver.permissions.checker import TOOL_PERMISSION_CHANNEL_ID
 from jiuwenclaw.agentserver.cron_config import should_register_cron_tools
-from jiuwenclaw.agentserver.skill_manager import SkillManager, enabled_skills_from_environ
+from jiuwenclaw.agentserver.skill_manager import (
+    SkillManager, enabled_skills_from_environ, resolve_string_or_list_config,
+)
 from jiuwenclaw.agentserver.tools.multimodal_config import (
     apply_audio_model_config_from_yaml,
     apply_image_gen_model_config_from_yaml,
@@ -189,6 +191,7 @@ from jiuwenclaw.gateway.cron import CronTargetChannel
 from jiuwenclaw.agentserver.team import get_team_manager
 from jiuwenclaw.schema.agent import AgentRequest, AgentResponse, AgentResponseChunk
 from jiuwenclaw.utils import (
+    deep_merge_dicts,
     get_agent_registered_skill_dirs,
     get_agent_workspace_dir,
     get_checkpoint_dir,
@@ -1558,6 +1561,13 @@ class JiuWenClawDeepAdapter:
                 skill_rail_kwargs["include_skill_body_tools"] = include_skill_body_tools
                 skill_rail_kwargs["max_active_skill_bodies"] = max_bodies
             skill_rail_kwargs["enabled_skills"] = enabled_skills_from_environ()
+            # disabled_skills: same field accepts YAML list or ${DISABLED_SKILLS:-} string
+            skill_rail_kwargs["disabled_skills"] = resolve_string_or_list_config(config.get("disabled_skills"))
+            if skill_rail_kwargs["disabled_skills"]:
+                logger.info(
+                    "[JiuWenClawDeepAdapter] disabled_skills resolved: %s",
+                    skill_rail_kwargs["disabled_skills"],
+                )
             skill_rail = SkillUseRail(**skill_rail_kwargs)
             logger.info("[JiuWenClawDeepAdapter] SkillUseRail create success",
                        extra={'user_visible': 'progress'})
@@ -1840,9 +1850,15 @@ class JiuWenClawDeepAdapter:
         return rail
 
     def _build_disabled_tools_rail(self, config: dict[str, Any]) -> DisabledToolsRail | None:
-        """Build DisabledToolsRail to filter out disabled tools based on config."""
+        """Build DisabledToolsRail to filter out disabled tools based on config.
+
+        ``react.disabled_tools`` accepts two formats (same field, pick one):
+          - YAML list:      ``disabled_tools: ["bash", "fork_agent"]``
+          - Env var string: ``disabled_tools: ${DISABLED_TOOLS:-}``
+            (set DISABLED_TOOLS=bash,fork_agent in .env)
+        """
         try:
-            disabled_list = config.get("disabled_tools", [])
+            disabled_list = resolve_string_or_list_config(config.get("disabled_tools"))
             rail = DisabledToolsRail(disabled_tools=disabled_list)
             logger.info(
                 "[JiuWenClawDeepAdapter] DisabledToolsRail create success, disabled_tools: %s",
@@ -1881,12 +1897,12 @@ class JiuWenClawDeepAdapter:
     def _build_fast_subagent_disabled_tools_rail(self) -> DisabledToolsRail | None:
         """为 agent.fast 子 ReActAgent 构造 DisabledToolsRail；仅剥离 ability，避免并发踩共享 resource_mgr。"""
         react = self._config_cache or {}
-        disabled_list = react.get("disabled_tools") or []
+        disabled_list = resolve_string_or_list_config(react.get("disabled_tools"))
         if not disabled_list:
             return None
         try:
             return DisabledToolsRail(
-                disabled_tools=list(disabled_list),
+                disabled_tools=disabled_list,
                 touch_shared_resource_mgr=False,
             )
         except Exception as exc:
@@ -2123,7 +2139,7 @@ class JiuWenClawDeepAdapter:
         # Update disabled_tools_rail config in-place (no re-init needed)
         disabled_tools_rail_newly_created = False
         if self._disabled_tools_rail is not None:
-            disabled_list = config.get("disabled_tools", [])
+            disabled_list = resolve_string_or_list_config(config.get("disabled_tools"))
             self._disabled_tools_rail.update_config(disabled_list)
         else:
             # 使用统一的 build 方法创建（与冷启动行为一致）
@@ -2436,7 +2452,8 @@ class JiuWenClawDeepAdapter:
         permissions_cfg = config_base.get("permissions", {})
         init_permission_engine(permissions_cfg)
         logger.info(
-            "[JiuWenClawDeepAdapter] Permission engine initialized: enabled=%s",
+            "[JiuWenClawDeepAdapter] Permission engine initialized: enabled=%s (raw=%s)",
+            get_permission_engine().enabled,
             permissions_cfg.get("enabled", True),
         )
 
@@ -2594,7 +2611,11 @@ class JiuWenClawDeepAdapter:
         elif not isinstance(config_base, dict):
             raise TypeError("config_base must be a dict when provided")
         else:
-            config_base = resolve_env_vars(config_base)
+            # Gateway 可能只传入部分配置（如 logging + preferred_language），
+            # 需要与完整的基础配置合并，否则丢失 react.disabled_tools 等关键字段。
+            full_config = get_config()
+            merged = deep_merge_dicts(full_config, resolve_env_vars(config_base))
+            config_base = merged
 
         # 同步扩展配置到 ExtensionRegistry
          # Gateway 已解密 extension_security_configs，AgentServer 直接使用明文
@@ -2629,11 +2650,18 @@ class JiuWenClawDeepAdapter:
         # 加载用户自定义的 Rail 扩展
         await self.load_user_rails()
 
+        disabled_names = set(
+            resolve_string_or_list_config(config.get("disabled_tools"))
+        )
+        filtered_tool_cards = [
+            card for card in (self._tool_cards or [])
+            if card.name not in disabled_names
+        ]
         deep_cfg = self._make_deep_agent_config(
             model=model,
             config=config,
             agent_card=agent_card,
-            tool_cards=self._tool_cards if self._tool_cards else [],
+            tool_cards=filtered_tool_cards,
             rails=rails_list,
         )
 

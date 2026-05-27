@@ -44,12 +44,47 @@ ENABLED_SKILLS_ENV = "ENABLED_SKILLS"
 
 
 def enabled_skills_from_environ() -> str | None:
+    """Read ENABLED_SKILLS from environment variable (skills allowlist).
+
+    NOTE: This env var is NOT wired through config.yaml ${VAR:-} syntax because
+    SkillUseRail needs the raw comma-separated string for _normalize_name_list.
+    Future refactors may move this into config.yaml as well.
+    """
     raw = os.environ.get(ENABLED_SKILLS_ENV)
     if raw is None:
         return None
     if not raw.strip():
         return None
     return raw
+
+
+def _parse_comma_separated_string(raw: str | None) -> list[str]:
+    """Parse a comma/semicolon-separated string into a list of stripped names.
+
+    Returns empty list if raw is None or empty after stripping.
+    Used for config values resolved from ${VAR:-} syntax.
+    """
+    if raw is None or not raw.strip():
+        return []
+    return [item.strip() for item in raw.replace(";", ",").split(",") if item.strip()]
+
+
+def resolve_string_or_list_config(value: Any) -> list[str]:
+    """Resolve a config field that can be either a YAML list or a ${VAR:-} string.
+
+    Handles three cases:
+      - list   → copy as list[str]
+      - str    → parse comma/semicolon-separated into list[str]
+      - None/other → empty list
+
+    Used for react.disabled_tools / react.disabled_skills which accept
+    both ``["bash", "fork_agent"]`` (YAML list) and ``${DISABLED_TOOLS:-}`` (env string).
+    """
+    if isinstance(value, list):
+        return [str(item).strip() for item in value if str(item).strip()]
+    if isinstance(value, str):
+        return _parse_comma_separated_string(value)
+    return []
 
 
 _SKILLNET_DOWNLOAD_TIMEOUT: int = int(os.environ.get("SKILLNET_DOWNLOAD_TIMEOUT", "60"))

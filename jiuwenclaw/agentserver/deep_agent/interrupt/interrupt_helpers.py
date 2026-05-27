@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from jiuwenclaw.agentserver.permissions.core import get_permission_engine
+from jiuwenclaw.agentserver.permissions.core import get_permission_engine, _to_bool
 from jiuwenclaw.utils import logger
 
 
@@ -31,10 +31,16 @@ def build_permission_rail(
     from jiuwenclaw.agentserver.deep_agent.rails.permission_rail import PermissionInterruptRail
 
     permission_config = config.get("permissions", {})
+    enabled = _to_bool(permission_config.get("enabled", True))
     logger.info(
-        "[InterruptHelpers] build_permission_rail called: enabled=%s",
-        permission_config.get("enabled", False)
+        "[InterruptHelpers] build_permission_rail called: enabled=%s (raw=%s)",
+        enabled,
+        permission_config.get("enabled", True),
     )
+
+    if not enabled:
+        logger.info("[InterruptHelpers] Permission system disabled — skipping rail creation")
+        return None
 
     logger.info(
         "[InterruptHelpers] Building PermissionInterruptRail intercept=all llm=%s model_name=%s",

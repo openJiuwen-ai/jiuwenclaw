@@ -266,7 +266,19 @@ react:
   skill_mode: all
   # 禁用的工具列表，添加 fork_agent 可避免并行调用触发 API 限流
   # 禁用后用户需使用 spawn_subagent 替代
+  # 支持两种配置方式（同一字段，二选一）：
+  #   1) YAML 列表：disabled_tools: ["bash", "fork_agent"]
+  #   2) 环境变量：disabled_tools: ${DISABLED_TOOLS:-}
+  #      在 .env 文件中设置：DISABLED_TOOLS=bash,fork_agent（逗号/分号分隔）
   # disabled_tools: ["fork_agent"]
+  disabled_tools: ${DISABLED_TOOLS:-}
+  # 禁用的技能列表（黑名单）：列表中的技能不会被 Agent 加载或使用
+  # 支持两种配置方式（同一字段，二选一）：
+  #   1) YAML 列表：disabled_skills: ["dangerous_skill"]
+  #   2) 环境变量：disabled_skills: ${DISABLED_SKILLS:-}
+  #      在 .env 文件中设置：DISABLED_SKILLS=dangerous_skill,deprecated_skill（逗号/分号分隔）
+  # disabled_skills: ["dangerous_skill"]
+  disabled_skills: ${DISABLED_SKILLS:-}
   # code_agent / research_agent 默认不启用；只有显式配置 enabled: true 才会显示并可被 task_tool 调用
   # browser_agent 保持原行为，仍由浏览器 runtime 开关决定是否默认注册；这里只支持覆盖其参数
   subagents:
@@ -412,7 +424,7 @@ react:
   # SkillToolkit：search_skill（SkillNet/ClawHub）/ install_skill / uninstall_skill
   skill_toolkit:
     # false = 不向 agent 注册 search_skill（install_skill、uninstall_skill 仍注册）
-    search_skill_enabled: false
+    search_skill_enabled: ${SEARCH_SKILL_ENABLED:-false}
 
   # Skills 在线自演进配置
   evolution:

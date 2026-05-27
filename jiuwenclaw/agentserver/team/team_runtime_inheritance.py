@@ -25,6 +25,8 @@ from jiuwenclaw.agentserver.deep_agent.rails.runtime_prompt_rail import RuntimeP
 from jiuwenclaw.agentserver.deep_agent.rails.skill_compliance_rail import SkillComplianceRail
 from jiuwenclaw.agentserver.deep_agent.rails.skill_prompt_rail import SkillProtocolPromptRail
 from jiuwenclaw.agentserver.deep_agent.rails.stream_event_rail import JiuClawStreamEventRail
+from jiuwenclaw.agentserver.skill_manager import enabled_skills_from_environ, resolve_string_or_list_config
+from jiuwenclaw.config import get_config
 from jiuwenclaw.utils import get_agent_registered_skill_dirs
 
 logger = logging.getLogger(__name__)
@@ -205,14 +207,24 @@ def build_member_rails(config: MemberRailConfig) -> list[Any]:
     # include_skill_body_tools=True：仍注册 skill_tool/skill_complete，与「技能」段及主站行为一致。
     try:
         skill_dirs = [str(p) for p in get_agent_registered_skill_dirs()]
+        # disabled_skills: same field accepts YAML list or ${DISABLED_SKILLS:-} string
+
+        config_base = get_config() or {}
+        react_config = config_base.get("react", {}) or {}
+        disabled_skills_list = resolve_string_or_list_config(react_config.get("disabled_skills"))
         rail = SkillUseRail(
             skills_dir=skill_dirs,
             skill_mode=SkillUseRail.SKILL_MODE_ALL,
             include_tools=False,
             include_skill_body_tools=True,
+            enabled_skills=enabled_skills_from_environ(),
+            disabled_skills=disabled_skills_list if disabled_skills_list else None,
         )
         rails_list.append(rail)
-        logger.info("[TeamRuntime] SkillUseRail created: skills_dir=%s", skill_dirs)
+        logger.info(
+            "[TeamRuntime] SkillUseRail created: skills_dir=%s, disabled_skills=%s",
+            skill_dirs, disabled_skills_list,
+        )
     except Exception as exc:
         logger.warning("[TeamRuntime] SkillUseRail failed: %s", exc)
 
@@ -240,8 +252,6 @@ def build_member_rails(config: MemberRailConfig) -> list[Any]:
             react = react_config
             if react is None:
                 try:
-                    from jiuwenclaw.config import get_config
-
                     react = (get_config() or {}).get("react", {}) or {}
                 except Exception:
                     react = {}
@@ -317,8 +327,8 @@ def get_default_model_name(config: dict[str, Any] | None = None) -> str:
     """
     if config is None:
         try:
-            from jiuwenclaw.agentserver.config import get_config
-            config = get_config()
+            from jiuwenclaw.agentserver.config import get_config as _get_config
+            config = _get_config()
         except Exception as exc:
             logger.warning("[TeamRuntime] Failed to load config for default model: %s", exc)
             return "gpt-4"
