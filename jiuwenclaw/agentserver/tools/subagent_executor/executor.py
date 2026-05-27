@@ -446,6 +446,43 @@ class ForkAgentExecutor:
             logger.warning("[Subagent] FileSystemRail inheritance failed: %s", exc)
             return None
 
+    @staticmethod
+    def _build_subagent_progressive_tool_rail(
+        config_base: dict[str, Any],
+        *,
+        language: str,
+        task_id: str,
+        role_id: str,
+        kind: str,
+    ) -> Any | None:
+        """Build progressive tool visibility rail for a spawn/fork child agent."""
+        try:
+            from jiuwenclaw.agentserver.deep_agent.interface_deep import (
+                build_jiuwen_progressive_tool_rail_from_react_config,
+            )
+
+            react_config = (config_base or {}).get("react", {}) or {}
+            rail = build_jiuwen_progressive_tool_rail_from_react_config(
+                react_config,
+                language=language,
+                profile="subagent",
+                debug_context={
+                    "kind": kind,
+                    "task_id": task_id,
+                    "role_id": role_id,
+                },
+            )
+            return rail
+        except Exception as exc:
+            logger.warning(
+                "[ProgressiveTool] subagent rail build failed kind=%s task_id=%s role_id=%s: %s",
+                kind,
+                task_id,
+                role_id,
+                exc,
+            )
+            return None
+
     def resolve_permission_approval(self, request_id: str, answers: list) -> bool:
         """Resolve permission approval across all active fork agents.
 
@@ -790,6 +827,13 @@ Approach each task methodically and deliver high-quality results.
 
         max_iterations = self._resolve_subagent_max_iterations()
         filesystem_rail = self._build_inherited_filesystem_rail()
+        progressive_tool_rail = ForkAgentExecutor._build_subagent_progressive_tool_rail(
+            config_base,
+            language=language,
+            task_id=task.task_id,
+            role_id=task.role_id,
+            kind="spawn",
+        )
         # 复用主 Agent 路径：跟随 react.context_engine_config 解析链 A/B 与 yaml 调优值
         # （tool_result_budget / micro_compact / full_compact）；minimal=True 跳过 tools/context 注入。
         from jiuwenclaw.agentserver.deep_agent.interface_deep import _build_context_engineering_rail
@@ -824,6 +868,8 @@ Approach each task methodically and deliver high-quality results.
             rails.insert(0, filesystem_rail)
         if ce_rail is not None:
             rails.insert(1 if filesystem_rail is not None else 0, ce_rail)
+        if progressive_tool_rail is not None:
+            rails.append(progressive_tool_rail)
 
         spawn_agent = create_deep_agent(
             model=self._model,
@@ -944,6 +990,13 @@ Execute the given task using inherited context and available tools.
 
         max_iterations = self._resolve_subagent_max_iterations()
         filesystem_rail = self._build_inherited_filesystem_rail()
+        progressive_tool_rail = ForkAgentExecutor._build_subagent_progressive_tool_rail(
+            config_base,
+            language=language,
+            task_id=task.task_id,
+            role_id=task.role_id,
+            kind="fork",
+        )
         # 与 spawn 路径同样跟随 react.context_engine_config 解析链 A/B 与 yaml 调优值。
         from jiuwenclaw.agentserver.deep_agent.interface_deep import _build_context_engineering_rail
 
@@ -976,6 +1029,8 @@ Execute the given task using inherited context and available tools.
             rails.insert(0, filesystem_rail)
         if ce_rail is not None:
             rails.insert(2 if filesystem_rail is not None else 1, ce_rail)
+        if progressive_tool_rail is not None:
+            rails.append(progressive_tool_rail)
 
         fork_agent = create_deep_agent(
             model=self._model,

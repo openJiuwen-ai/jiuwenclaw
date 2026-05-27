@@ -13,6 +13,7 @@
   - [Task planning](TaskPlanning.md)
   - [Memory](Memory.md)
   - [Context compression & offload](ContextCompression.md)
+  - [Progressive tool visibility](ProgressiveToolVisibility.md)
   - [Skills](Skills.md)
   - [Skill self-evolution](SkillSelfEvolution.md)
   - [Agent & workspace](Agent.md)

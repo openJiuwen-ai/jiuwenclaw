@@ -115,6 +115,9 @@ from jiuwenclaw.agentserver.deep_agent.rails.context_engineering_rail_ext import
     normalize_soul_override,
 )
 from jiuwenclaw.agentserver.deep_agent.rails.disabled_tools_rail import DisabledToolsRail
+from jiuwenclaw.agentserver.deep_agent.rails.jiuwen_progressive_tool_rail import (
+    JiuWenProgressiveToolRail,
+)
 from jiuwenclaw.agentserver.deep_agent.rails.permission_rail import clear_session_interrupt_state
 from jiuwenclaw.agentserver.deep_agent.rails.task_execution_rail import get_current_task_id
 from jiuwenclaw.agentserver.deep_agent.permissions.owner_scopes import (
@@ -336,6 +339,128 @@ def _parse_int(value: Any, default: int) -> int:
         return int(value)
     except (TypeError, ValueError):
         return default
+
+
+def _parse_bool_switch(value: Any, default: bool = False) -> bool:
+    """Parse true/false switch config values."""
+    if isinstance(value, bool):
+        return value
+    if value is None or value == "":
+        return default
+    text = str(value).strip().lower()
+    if text in {"true", "1", "yes", "on"}:
+        return True
+    if text in {"false", "0", "no", "off"}:
+        return False
+    return default
+
+
+def _normalize_tool_names(value: Any, default: list[str] | None = None) -> list[str]:
+    """Normalize comma-separated/list tool-name config values."""
+    if isinstance(value, str):
+        return [item.strip() for item in value.split(",") if item.strip()]
+    if isinstance(value, list):
+        return [str(item).strip() for item in value if str(item).strip()]
+    return list(default or [])
+
+
+def build_jiuwen_progressive_tool_rail_from_react_config(
+    react_config: dict[str, Any],
+    *,
+    language: str,
+    profile: str = "main",
+    debug_context: dict[str, Any] | None = None,
+) -> JiuWenProgressiveToolRail | None:
+    """Build JiuWenProgressiveToolRail from react.tool_lazy_load config.
+
+    ``profile='subagent'`` reads optional ``tool_lazy_load.subagents`` overrides
+    while inheriting top-level limits by default.
+    """
+    config = react_config if isinstance(react_config, dict) else {}
+    tool_lazy_cfg = config.get("tool_lazy_load") or {}
+    if not isinstance(tool_lazy_cfg, dict):
+        tool_lazy_cfg = {}
+
+    env_enabled = os.getenv("JIUWENCLAW_TOOL_LAZY_LOAD")
+    raw_enabled = env_enabled if env_enabled is not None else tool_lazy_cfg.get("enabled", "false")
+    enabled = _parse_bool_switch(raw_enabled, default=False)
+    if not enabled:
+        return None
+
+    subagent_cfg = tool_lazy_cfg.get("subagents") if profile == "subagent" else None
+    if not isinstance(subagent_cfg, dict):
+        subagent_cfg = {}
+    if profile == "subagent" and not _parse_bool_switch(subagent_cfg.get("enabled", True), default=True):
+        return None
+
+    default_eager_tools = [
+        "search_and_load_tools",
+        "ask_user_question",
+        "read_file",
+        "write_file",
+        "edit_file",
+        "list_files",
+        "grep",
+        "glob",
+        "bash",
+    ]
+    if profile == "subagent" and not bool(subagent_cfg.get("inherit_parent_eager_tools", False)):
+        eager_source = subagent_cfg.get("eager_tools", ["search_and_load_tools"])
+    elif "eager_tools" in tool_lazy_cfg:
+        eager_source = tool_lazy_cfg.get("eager_tools")
+    else:
+        eager_source = default_eager_tools
+    eager_tools = _normalize_tool_names(eager_source, default_eager_tools)
+
+    env_eager = os.getenv("JIUWENCLAW_TOOL_LAZY_EAGER")
+    if env_eager and profile == "main":
+        eager_tools = _normalize_tool_names(env_eager)
+
+    # search_and_load_tools is the only discovery meta tool; keep it visible even if users
+    # accidentally omit it from the authoritative eager_tools config.
+    always_visible = list(dict.fromkeys(["search_and_load_tools", *eager_tools]))
+
+    default_visible_source = (
+        subagent_cfg.get("default_visible_tools")
+        if profile == "subagent" and "default_visible_tools" in subagent_cfg
+        else tool_lazy_cfg.get("default_visible_tools")
+    )
+    default_visible_tools = _normalize_tool_names(default_visible_source)
+
+    def cfg_value(name: str, default: Any) -> Any:
+        if profile == "subagent" and name in subagent_cfg:
+            return subagent_cfg.get(name)
+        return tool_lazy_cfg.get(name, default)
+
+    search_max_results = _parse_int(cfg_value("search_max_results", 5), 5)
+    default_load_limit = _parse_int(cfg_value("default_load_limit", 3), 3)
+    max_loaded_tools = _parse_int(cfg_value("max_loaded_tools", 12), 12)
+    normalized_language = resolve_language(language)
+    ctx_suffix = ""
+    if debug_context:
+        parts = [f"{key}={value}" for key, value in debug_context.items() if value is not None]
+        if parts:
+            ctx_suffix = f" ({', '.join(parts)})"
+    logger.info(
+        "[ProgressiveTool] enabled profile=%s always_visible=%s max_loaded=%s "
+        "search_max=%s default_load_limit=%s%s",
+        profile,
+        always_visible,
+        max_loaded_tools,
+        search_max_results,
+        default_load_limit,
+        ctx_suffix,
+    )
+    return JiuWenProgressiveToolRail(
+        enabled=True,
+        always_visible_tools=always_visible,
+        default_visible_tools=default_visible_tools,
+        max_loaded_tools=max_loaded_tools,
+        search_max_results=search_max_results,
+        default_load_limit=default_load_limit,
+        language=normalized_language,
+        debug_context={"profile": profile, **(debug_context or {})},
+    )
 
 
 def _extract_iteration_from_obj(value: Any) -> int | None:
@@ -744,6 +869,7 @@ class JiuWenClawDeepAdapter:
         self._skill_evolution_rail: SkillEvolutionRail | None = None
         self._subagent_rail: SubagentRail | None = None
         self._disabled_tools_rail: DisabledToolsRail | None = None
+        self._progressive_tool_rail: JiuWenProgressiveToolRail | None = None
         self._permission_rail: Any = None
         self._avatar_rail: Any = None
         self._tool_cards = None
@@ -1871,6 +1997,17 @@ class JiuWenClawDeepAdapter:
             rail = None
         return rail
 
+    def _build_progressive_tool_rail(self, config: dict[str, Any]) -> JiuWenProgressiveToolRail | None:
+        """Build progressive tool visibility rail from react.tool_lazy_load config."""
+        rail = build_jiuwen_progressive_tool_rail_from_react_config(
+            config,
+            language=self._resolve_runtime_language(),
+            profile="main",
+        )
+        if rail is None:
+            self._progressive_tool_rail = None
+        return rail
+
     def _build_fast_subagent_permission_rail(self) -> Any | None:
         """为 agent.fast 子 ReActAgent 构造独立的 PermissionInterruptRail（每实例新建）。"""
         try:
@@ -1951,6 +2088,7 @@ class JiuWenClawDeepAdapter:
                                                                            "default", {}).get("model_client_config",
                                                                                               {}).get("model_name",
                                                                                                       "gpt-4")}),
+            _RailBuildInfo("_progressive_tool_rail", self._build_progressive_tool_rail, {"config": config}),
             # DisabledToolsRail - highest priority (100), runs last to filter disabled tools
             _RailBuildInfo("_disabled_tools_rail", self._build_disabled_tools_rail, {"config": config}),
         ]
@@ -2136,6 +2274,15 @@ class JiuWenClawDeepAdapter:
 
         self._update_permission_rail(config_base)
 
+        # ProgressiveToolRail 可通过热重载启停；更新时传新对象，关闭时传旧对象仅用于卸载。
+        old_progressive_tool_rail = self._progressive_tool_rail
+        progressive_tool_rail = self._build_progressive_tool_rail(config)
+        progressive_tool_rail_unload_only = (
+            progressive_tool_rail is None and old_progressive_tool_rail is not None
+        )
+        if progressive_tool_rail is not None:
+            self._progressive_tool_rail = progressive_tool_rail
+
         # Update disabled_tools_rail config in-place (no re-init needed)
         disabled_tools_rail_newly_created = False
         if self._disabled_tools_rail is not None:
@@ -2161,6 +2308,10 @@ class JiuWenClawDeepAdapter:
             rails_list.append(self._avatar_rail)
         if self._permission_rail is not None:
             rails_list.append(self._permission_rail)
+        if progressive_tool_rail is not None:
+            rails_list.append(progressive_tool_rail)
+        elif progressive_tool_rail_unload_only and old_progressive_tool_rail is not None:
+            rails_list.append(old_progressive_tool_rail)
         # core会先卸载与rails_list同类的已注册rail，再加载rails_list中的rail。
         # 但需要注意，这里不能传一个与已注册的rail相同的对象。否则core只会进行卸载，不会进行加载。
         # 如果你要更新rail，就传一个新的对象；如果不要更新，就不传；如果需要仅卸载，就传原来的rail对象。

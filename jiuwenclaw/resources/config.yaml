@@ -426,6 +426,42 @@ react:
     # false = 不向 agent 注册 search_skill（install_skill、uninstall_skill 仍注册）
     search_skill_enabled: ${SEARCH_SKILL_ENABLED:-false}
 
+  # 工具渐进可见性：本版只压缩模型侧 tools 列表，不改变 MCP server 启动注册/连接行为
+  tool_lazy_load:
+    enabled: true              # true | false；可用 JIUWENCLAW_TOOL_LAZY_LOAD 覆盖
+    search_max_results: 5      # search_and_load_tools 单次搜索最多返回的候选工具数
+    default_load_limit: 3      # search_and_load_tools 未显式传 limit 时默认加载的 Top N 工具
+    max_loaded_tools: 1024     # 当前 session 中最多保留的按需可见工具数，超过后由 rail 按策略限制
+    defer_mcp: false           # 预留；本版固定不做 MCP catalog-only/首次连接激活
+    defer_builtin: false
+    eager_tools:
+      - search_and_load_tools
+      - free_search
+      - fetch_webpage
+      - ask_user_question
+      - fork_agent
+      - spawn_subagent
+      - send_file_to_user
+      - list_files
+      - read_file
+      - write_file
+      - edit_file
+      - glob
+      - grep
+      - bash
+      - code
+      - skill_tool
+      - skill_complete
+      - todo_create
+      - todo_list
+      - todo_modify
+      - reload_original_context_messages
+    subagents:
+      enabled: false
+      inherit_parent_eager_tools: true
+      eager_tools:
+        - search_and_load_tools
+
   # Skills 在线自演进配置
   evolution:
     enabled: false             # true = 启用在线 Skills 自演进
