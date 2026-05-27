@@ -33,7 +33,6 @@ _ACP_CHANNEL_ID = "acp"
 _ACP_ORIGINAL_SESSION_ID_KEY = "acp_original_session_id"
 _DEFAULT_INLINE_FILE_SIZE_LIMIT = 128 * 1024
 _VIBESKILL_CHANNEL_ID = "vibeskill"
-_VIBESKILL_ORIGINAL_SESSION_ID_KEY = "vibeskill_original_session_id"
 _KNOWN_JIUWENCLAW_SESSION_PREFIXES = (
     "sess_",
     "acp_",
@@ -135,8 +134,6 @@ class MessageHandler(ABC):
         self._session_evolution_in_progress: set[str] = set()
         self._acp_session_aliases: dict[str, str] = {}  # external_session_id -> internal_session_id
         self._acp_session_alias_lock = asyncio.Lock()
-        self._vibeskill_session_aliases: dict[str, str] = {}  # external_session_id -> internal_session_id
-        self._vibeskill_session_alias_lock = asyncio.Lock()
 
         # per-channel 控制状态：支持 \new_session / \mode 指令。
         # 使用 ChannelType 的 value 作为标准键，避免散落的硬编码字符串。
@@ -1131,22 +1128,12 @@ class MessageHandler(ABC):
         if msg.channel_id == _VIBESKILL_CHANNEL_ID:
             if msg.req_method in (ReqMethod.INITIALIZE, ReqMethod.SESSION_CREATE):
                 return msg
-            internal_session_id, aliased = await self._resolve_vibeskill_internal_session_id(
-                msg.session_id, user_id=msg.user_id
-            )
-            if not internal_session_id:
+            session_id = str(msg.session_id or "").strip()
+            if not session_id:
                 return msg
             params = dict(msg.params or {})
-            params["session_id"] = internal_session_id
-            metadata = dict(msg.metadata or {})
-            if aliased:
-                metadata.setdefault(_VIBESKILL_ORIGINAL_SESSION_ID_KEY, str(msg.session_id or ""))
-            return replace(
-                msg,
-                session_id=internal_session_id,
-                params=params,
-                metadata=metadata or None,
-            )
+            params["session_id"] = session_id
+            return replace(msg, session_id=session_id, params=params)
 
         return msg
 
@@ -1388,54 +1375,6 @@ class MessageHandler(ABC):
             payload = dict(resp.payload or {}) if isinstance(resp.payload, dict) else {}
             raise RuntimeError(str(payload.get("error") or payload.get("detail") or "register skill failed"))
         return dict(resp.payload or {}) if isinstance(resp.payload, dict) else {"success": True}
-
-    async def _resolve_vibeskill_internal_session_id(
-        self,
-        external_session_id: str | None,
-        *,
-        user_id: str | None = None,
-    ) -> tuple[str | None, bool]:
-        external = str(external_session_id or "").strip()
-        if not external:
-            return None, False
-
-        cached = self._vibeskill_session_aliases.get(external)
-        if cached:
-            return cached, cached != external
-
-        async with self._vibeskill_session_alias_lock:
-            cached = self._vibeskill_session_aliases.get(external)
-            if cached:
-                return cached, cached != external
-
-            desired = (
-                external
-                if self._is_known_jiuwenclaw_session_id(external)
-                else self._generate_channel_session_id(_VIBESKILL_CHANNEL_ID)
-            )
-            ensured = await self.create_agent_session(desired, user_id=user_id)
-            self._vibeskill_session_aliases[external] = ensured
-            return ensured, ensured != external
-
-    def _resolve_vibeskill_external_session_id(
-        self,
-        session_id: str | None,
-        metadata: dict[str, Any] | None = None,
-    ) -> str | None:
-        sid = str(session_id or "").strip()
-        if not sid:
-            return None
-
-        original = ""
-        if isinstance(metadata, dict):
-            original = str(metadata.get(_VIBESKILL_ORIGINAL_SESSION_ID_KEY) or "").strip()
-        if original:
-            return original
-
-        for external, internal in self._vibeskill_session_aliases.items():
-            if internal == sid:
-                return external
-        return sid
 
     @staticmethod
     def message_to_e2a(msg: "Message") -> "E2AEnvelope":

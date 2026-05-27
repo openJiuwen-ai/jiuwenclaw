@@ -143,8 +143,8 @@ class VibeSkillChannel(BaseChannel):
         self.config: VibeSkillConfig = config
         self._agent_client = agent_client
         self._store = VibeSkillSessionStore()
-        self._ws_sessions: dict[Any, set[str]] = {}  # ws -> set of internal_ids
-        self._session_to_ws: dict[str, Any] = {}  # internal_id -> ws
+        self._ws_sessions: dict[Any, set[str]] = {}  # ws -> set of session_ids
+        self._session_to_ws: dict[str, Any] = {}  # session_id -> ws
         self._ws_sessions_lock = asyncio.Lock()
         self._clients: set[Any] = set()
         self._ws_skip_cancel_on_disconnect: set[Any] = set()
@@ -167,6 +167,10 @@ class VibeSkillChannel(BaseChannel):
     @property
     def channel_id(self) -> str:
         return str(self.config.channel_id or self.name).strip() or self.name
+
+    def _deliver_to_message_handler(self, msg: Message) -> None:
+        channel_manager = cast("ChannelManager", self.bus)
+        channel_manager.deliver_to_message_handler(msg)
 
     async def start(self) -> None:
         if self._running:
@@ -270,12 +274,12 @@ class VibeSkillChannel(BaseChannel):
                     self._clients.discard(ws)
                     await ws.close(code=1008, reason="session_not_found")
                     return
-                internal_id = session.internal_id
+                session_id = session.session_id
                 async with self._ws_sessions_lock:
                     if ws not in self._ws_sessions:
                         self._ws_sessions[ws] = set()
-                    self._ws_sessions[ws].add(internal_id)
-                    self._session_to_ws[internal_id] = ws
+                    self._ws_sessions[ws].add(session_id)
+                    self._session_to_ws[session_id] = ws
 
             await self._emit_ws_event(ws, "server.connected", {})
             logger.info("[VibeSkillChannel] server.connected sent")
@@ -434,13 +438,8 @@ class VibeSkillChannel(BaseChannel):
         # 查找对应的 WebSocket
         ws = self._session_to_ws.get(session_id)
         if ws is None:
-            # session_id 可能是 external ID，尝试解析为 internal ID 后再查找
-            internal_id = await self._store.resolve_internal(session_id)
-            if internal_id:
-                ws = self._session_to_ws.get(internal_id)
-            if ws is None:
-                logger.warning(f"[VibeSkillChannel] send() no ws found for session_id={session_id}")
-                return
+            logger.warning(f"[VibeSkillChannel] send() no ws found for session_id={session_id}")
+            return
         if bool(getattr(ws, "closed", False)):
             logger.warning(f"[VibeSkillChannel] send() ws already closed for session_id={session_id}")
             return
@@ -615,7 +614,7 @@ class VibeSkillChannel(BaseChannel):
 
     async def _handle_message_send(self, ws: Any, data: dict[str, Any]) -> bool:
         """处理 message.send 类型的消息，封装为 skilldev.chat 并发送到 MessageHandler。"""
-        external_session_id = str(data.get("sessionID") or "").strip()
+        session_id = str(data.get("sessionID") or "").strip()
         parts = data.get("parts", []) if isinstance(data.get("parts"), list) else []
         msg_model = data.get("model")
         agent = data.get("agent", "coder")
@@ -623,8 +622,8 @@ class VibeSkillChannel(BaseChannel):
         request_id = f"vibeskill-{int(time.time() * 1000):x}-{secrets.token_hex(3)}"
 
         session: VibeSkillSession | None = None
-        if external_session_id:
-            session = await self._store.resolve_session(external_session_id)
+        if session_id:
+            session = await self._store.resolve_session(session_id)
             if not session:
                 await self._send_ws_res_error(
                     ws, data, "session_not_found", source="message.send.session_not_found"
@@ -633,41 +632,35 @@ class VibeSkillChannel(BaseChannel):
         else:
             bound = self._ws_sessions.get(ws)
             if bound:
-                internal_id = sorted(bound)[0]
-                session = await self._store.get_session(internal_id)
+                session = await self._store.get_session(sorted(bound)[0])
             if not session:
                 await self._send_ws_res_error(
                     ws, data, "missing_session_id", source="message.send.missing_session_id"
                 )
                 return True
 
-        session_user_id = self._session_user_id(session.internal_id)
-        if session_user_id and not self._store.get_user_id(session.internal_id):
-            await self._store.set_metadata(session.internal_id, {"user_id": session_user_id})
-
-        if external_session_id and not session.external_id:
-            await self._store.bind_external(session.internal_id, external_session_id)
-        elif not external_session_id and session.external_id:
-            external_session_id = session.external_id
+        session_user_id = self._session_user_id(session.session_id)
+        if session_user_id and not self._store.get_user_id(session.session_id):
+            await self._store.set_metadata(session.session_id, {"user_id": session_user_id})
 
         # 根据 session mode 路由
         if session.mode == "Standard":
-            return await self._handle_chat_message(ws, data, session, external_session_id)
+            return await self._handle_chat_message(ws, data, session, session_id)
 
         # 新一轮 skilldev 执行使用新的 assistant message_id
-        self._clear_message_context_for_session(session.internal_id)
+        self._clear_message_context_for_session(session.session_id)
 
-        await self._store.set_state(session.internal_id, VibeSkillSessionState.BUSY)
+        await self._store.set_state(session.session_id, VibeSkillSessionState.BUSY)
         logger.info(
             "[VibeSkillChannel] session state -> busy, source=message.send.skillcreate, session_id=%s",
-            session.internal_id,
+            session.session_id,
         )
         await self._emit_session_status(
             ws=ws,
             external_sid=(
-                external_session_id
-                or await self._resolve_external_session_id(session.internal_id)
-                or session.internal_id
+                session_id
+                or await self._resolve_external_session_id(session.session_id)
+                or session.session_id
             ),
             status_type=VibeSkillSessionState.BUSY.value,
         )
@@ -675,11 +668,11 @@ class VibeSkillChannel(BaseChannel):
         async with self._ws_sessions_lock:
             if ws not in self._ws_sessions:
                 self._ws_sessions[ws] = set()
-            self._ws_sessions[ws].add(session.internal_id)
-            self._session_to_ws[session.internal_id] = ws
+            self._ws_sessions[ws].add(session.session_id)
+            self._session_to_ws[session.session_id] = ws
 
         # 构建 skilldev.chat 格式的 params
-        params: dict[str, Any] = {"task_id": session.internal_id, **self._extract_parts_to_skilldev_params(parts)}
+        params: dict[str, Any] = {"task_id": session.session_id, **self._extract_parts_to_skilldev_params(parts)}
         if "query" not in params:
             params["query"] = ""
 
@@ -707,8 +700,8 @@ class VibeSkillChannel(BaseChannel):
             params["system"] = system_prompt
 
         metadata_dict = {}
-        if external_session_id:
-            metadata_dict[_VIBESKILL_ORIGINAL_SESSION_ID_KEY] = external_session_id
+        if session_id:
+            metadata_dict[_VIBESKILL_ORIGINAL_SESSION_ID_KEY] = session_id
         msg_metadata = metadata_dict if metadata_dict else None
 
         # 构建 Message 并直接发送到 MessageHandler
@@ -716,7 +709,7 @@ class VibeSkillChannel(BaseChannel):
             id=request_id,
             type="req",
             channel_id=VIBESKILL_CHANNEL_ID,
-            session_id=session.internal_id,
+            session_id=session.session_id,
             params=params,
             timestamp=time.time(),
             ok=True,
@@ -728,29 +721,27 @@ class VibeSkillChannel(BaseChannel):
 
         logger.info(
             "[VibeSkillChannel] skilldev.chat sent, session_id=%s",
-            session.internal_id,
+            session.session_id,
         )
         # 直接发送到 MessageHandler
-        self.bus.deliver_to_message_handler(msg)
+        self._deliver_to_message_handler(msg)
 
         return True
 
     async def _handle_skill_parse(self, data: dict[str, Any]) -> bool:
         """处理 skill.parse，封装为 skilldev.parse_skill。"""
         properties = data.get("properties") if isinstance(data.get("properties"), dict) else data
+        if not isinstance(properties, dict):
+            return False
         session_id = str(properties.get("sessionID") or data.get("sessionID") or "").strip()
         if not session_id:
             return False
 
-        internal_id = await self._store.resolve_internal(session_id)
-        if not internal_id:
-            internal_id = session_id
-
-        session_obj = await self._store.get_session(internal_id)
+        session_obj = await self._store.get_session(session_id)
         if session_obj and session_obj.mode != "SkillCreate":
             return False
 
-        task_id = str(properties.get("taskId") or properties.get("task_id") or internal_id).strip()
+        task_id = str(properties.get("taskId") or properties.get("task_id") or session_id).strip()
         url = str(properties.get("url") or "").strip()
         filename = str(properties.get("filename") or "").strip()
         if not url or not filename:
@@ -761,20 +752,20 @@ class VibeSkillChannel(BaseChannel):
             id=f"vibeskill-parse-skill-{int(time.time() * 1000):x}-{secrets.token_hex(3)}",
             type="req",
             channel_id=VIBESKILL_CHANNEL_ID,
-            session_id=internal_id,
+            session_id=session_id,
             params={"task_id": task_id, "skill_package": skill_package},
             timestamp=time.time(),
             ok=True,
             req_method=ReqMethod.SKILLDEV_PARSE_SKILL,
             is_stream=True,
             metadata={_VIBESKILL_ORIGINAL_SESSION_ID_KEY: session_id},
-            user_id=self._session_user_id(internal_id),
+            user_id=self._session_user_id(session_id),
         )
         logger.info(
             "[VibeSkillChannel] skilldev.parse_skill sent, session_id=%s",
-            internal_id,
+            session_id,
         )
-        self.bus.deliver_to_message_handler(msg)
+        self._deliver_to_message_handler(msg)
         return True
 
     async def _handle_chat_message(
@@ -782,7 +773,7 @@ class VibeSkillChannel(BaseChannel):
         ws: Any,
         data: dict[str, Any],
         session: VibeSkillSession,
-        external_session_id: str | None,
+        client_session_id: str | None,
     ) -> bool:
         """处理 Standard mode 的 chat 消息，走 jiuwenclaw 标准流程。
 
@@ -801,17 +792,17 @@ class VibeSkillChannel(BaseChannel):
                 query += str(part.get("text") or "")
 
         # 设置 session 状态
-        await self._store.set_state(session.internal_id, VibeSkillSessionState.BUSY)
+        await self._store.set_state(session.session_id, VibeSkillSessionState.BUSY)
         logger.info(
             "[VibeSkillChannel] session state -> busy, source=message.send.standard, session_id=%s",
-            session.internal_id,
+            session.session_id,
         )
         await self._emit_session_status(
             ws=ws,
             external_sid=(
-                external_session_id
-                or await self._resolve_external_session_id(session.internal_id)
-                or session.internal_id
+                client_session_id
+                or await self._resolve_external_session_id(session.session_id)
+                or session.session_id
             ),
             status_type=VibeSkillSessionState.BUSY.value,
         )
@@ -819,15 +810,15 @@ class VibeSkillChannel(BaseChannel):
         async with self._ws_sessions_lock:
             if ws not in self._ws_sessions:
                 self._ws_sessions[ws] = set()
-            self._ws_sessions[ws].add(session.internal_id)
-            self._session_to_ws[session.internal_id] = ws
+            self._ws_sessions[ws].add(session.session_id)
+            self._session_to_ws[session.session_id] = ws
 
         # 构建 chat.send 格式的 params
         params: dict[str, Any] = {
             "query": query,
         }
         # Standard 模式也按 session 维度做租户隔离，避免落到 default_service_id 共享工作区
-        params["service_id"] = str(external_session_id or session.internal_id).strip()
+        params["service_id"] = str(client_session_id or session.session_id).strip()
 
         # model
         if msg_model and isinstance(msg_model, dict):
@@ -839,24 +830,28 @@ class VibeSkillChannel(BaseChannel):
         if agent:
             params["agent"] = agent
 
-        msg_metadata = {_VIBESKILL_ORIGINAL_SESSION_ID_KEY: external_session_id} if external_session_id else None
+        msg_metadata = (
+            {_VIBESKILL_ORIGINAL_SESSION_ID_KEY: client_session_id}
+            if client_session_id
+            else None
+        )
 
         # 构建 Message 并通过 MessageHandler 发送到 AgentServer
         msg = Message(
             id=request_id,
             type="req",
             channel_id=VIBESKILL_CHANNEL_ID,
-            session_id=session.internal_id,
+            session_id=session.session_id,
             params=params,
             timestamp=time.time(),
             ok=True,
             req_method=ReqMethod.CHAT_SEND,
             is_stream=True,
             metadata=msg_metadata,
-            user_id=self._session_user_id(session.internal_id),
+            user_id=self._session_user_id(session.session_id),
         )
 
-        self.bus.deliver_to_message_handler(msg)
+        self._deliver_to_message_handler(msg)
 
         return True
 
@@ -870,20 +865,19 @@ class VibeSkillChannel(BaseChannel):
         登记的 ``dispatch`` 字段必须一致，不一致时记 warning 并以 session.mode 为准。
         """
         properties = data.get("properties") if isinstance(data.get("properties"), dict) else data
+        if not isinstance(properties, dict):
+            return False
         session_id = str(properties.get("sessionID") or "").strip()
         request_id = str(properties.get("requestID") or "").strip()
         raw_answers = properties.get("answers", [])
         if not request_id:
             return False
 
-        internal_id = await self._store.resolve_internal(session_id) if session_id else None
-        if not internal_id and session_id:
-            internal_id = session_id
-        if not internal_id:
+        if not session_id:
             return False
 
         pending = self._pending_confirms.pop(request_id, None)
-        self._clear_message_context_for_session(internal_id)
+        self._clear_message_context_for_session(session_id)
 
         answers: list[dict[str, Any]] = []
         if isinstance(raw_answers, list):
@@ -895,7 +889,7 @@ class VibeSkillChannel(BaseChannel):
                         {"selected_options": [str(item)]} if item not in (None, "") else {"selected_options": []}
                     )
 
-        session_obj = await self._store.get_session(internal_id)
+        session_obj = await self._store.get_session(session_id)
         session_mode = session_obj.mode if session_obj else None
         pending_dispatch = str((pending or {}).get("dispatch") or "").strip() if pending else ""
         if pending_dispatch and session_mode:
@@ -910,17 +904,13 @@ class VibeSkillChannel(BaseChannel):
 
         if session_mode == "Standard":
             return self._dispatch_chat_user_answer(
-                internal_id=internal_id,
-                external_session_id=session_id,
-                sid=session_id,
+                session_id=session_id,
                 request_id=request_id,
                 answers=answers,
             )
 
         return self._dispatch_skilldev_user_answer(
-            internal_id=internal_id,
-            external_session_id=session_id,
-            sid=session_id,
+            session_id=session_id,
             request_id=request_id,
             answers=answers,
         )
@@ -938,139 +928,125 @@ class VibeSkillChannel(BaseChannel):
     async def _handle_review_replied(self, ws: Any, data: dict[str, Any]) -> bool:
         """处理 review.replied，封装为 skilldev.chat。"""
         properties = data.get("properties") if isinstance(data.get("properties"), dict) else data
+        if not isinstance(properties, dict):
+            return False
         session_id = str(properties.get("sessionID") or "").strip()
         request_id = str(properties.get("id") or "").strip()
         if not request_id:
             return False
 
-        internal_id = await self._store.resolve_internal(session_id) if session_id else None
-        if not internal_id and session_id:
-            internal_id = session_id
-        if not internal_id:
+        if not session_id:
             return False
 
         pending = self._pending_confirms.get(request_id, {})
         task_id = (
             str(pending.get("task_id") or "").strip()
             or str(pending.get("session_id") or "").strip()
-            or internal_id
+            or session_id
         )
         accept = bool(properties.get("accept", False))
         feedback = str(properties.get("feedback") or "").strip()
 
         self._pending_confirms.pop(request_id, None)
 
-        session_obj = await self._store.get_session(internal_id)
+        session_obj = await self._store.get_session(session_id)
         if session_obj and session_obj.mode == "Standard":
             return False
 
-        external_session_id = session_id
-        if session_obj and session_obj.external_id:
-            external_session_id = session_obj.external_id
+        self._clear_message_context_for_session(session_id)
 
-        self._clear_message_context_for_session(internal_id)
-
-        await self._store.set_state(internal_id, VibeSkillSessionState.BUSY)
+        await self._store.set_state(session_id, VibeSkillSessionState.BUSY)
         logger.info(
             "[VibeSkillChannel] session state -> busy, source=review.replied, session_id=%s",
-            internal_id,
+            session_id,
         )
         await self._emit_session_status(
             ws=ws,
-            external_sid=external_session_id or internal_id,
+            external_sid=session_id,
             status_type=VibeSkillSessionState.BUSY.value,
         )
 
         async with self._ws_sessions_lock:
             if ws not in self._ws_sessions:
                 self._ws_sessions[ws] = set()
-            self._ws_sessions[ws].add(internal_id)
-            self._session_to_ws[internal_id] = ws
+            self._ws_sessions[ws].add(session_id)
+            self._session_to_ws[session_id] = ws
 
         params: dict[str, Any] = {
             "task_id": task_id,
             "query": self._build_review_replied_skilldev_chat_query(accept, feedback),
         }
 
-        metadata_dict: dict[str, str] = {}
-        if external_session_id:
-            metadata_dict[_VIBESKILL_ORIGINAL_SESSION_ID_KEY] = external_session_id
-
         msg = Message(
             id=f"vibeskill-review-{int(time.time() * 1000):x}-{secrets.token_hex(3)}",
             type="req",
             channel_id=VIBESKILL_CHANNEL_ID,
-            session_id=internal_id,
+            session_id=session_id,
             params=params,
             timestamp=time.time(),
             ok=True,
             req_method=ReqMethod.SKILLDEV_CHAT,
             is_stream=True,
-            metadata=metadata_dict if metadata_dict else None,
+            metadata={_VIBESKILL_ORIGINAL_SESSION_ID_KEY: session_id},
         )
         logger.info(
             "[VibeSkillChannel] skilldev.chat sent (review.replied), session_id=%s accept=%s",
-            internal_id,
+            session_id,
             accept,
         )
-        self.bus.deliver_to_message_handler(msg)
+        self._deliver_to_message_handler(msg)
         return True
 
     async def _handle_desc_optimize_replied(self, data: dict[str, Any]) -> bool:
         """处理 desc_optimize.replied，封装为 skilldev.respond。"""
         properties = data.get("properties") if isinstance(data.get("properties"), dict) else data
+        if not isinstance(properties, dict):
+            return False
         session_id = str(properties.get("sessionID") or "").strip()
         request_id = str(properties.get("id") or "").strip()
         if not request_id:
             return False
 
-        internal_id = await self._store.resolve_internal(session_id) if session_id else None
-        if not internal_id and session_id:
-            internal_id = session_id
-        if not internal_id:
+        if not session_id:
             return False
 
         pending = self._pending_confirms.get(request_id, {})
         task_id = (
             str(pending.get("task_id") or "").strip()
             or str(pending.get("session_id") or "").strip()
-            or internal_id
+            or session_id
         )
         accept = bool(properties.get("accept", False))
         action = "skip" if accept else "optimize"
         self._pending_confirms.pop(request_id, None)
         return self._dispatch_skilldev_respond(
-            internal_id=internal_id,
-            external_session_id=session_id,
+            session_id=session_id,
             params={"task_id": task_id, "action": action},
         )
 
     async def _handle_test_replied(self, data: dict[str, Any]) -> bool:
         """处理 test.replied，封装为 skilldev.respond。"""
         properties = data.get("properties") if isinstance(data.get("properties"), dict) else data
+        if not isinstance(properties, dict):
+            return False
         session_id = str(properties.get("sessionID") or "").strip()
         request_id = str(properties.get("id") or "").strip()
         if not request_id or not session_id:
-            return False
-
-        internal_id = await self._store.resolve_internal(session_id)
-        if not internal_id:
-            internal_id = session_id
-        if not internal_id:
             return False
 
         accept = bool(properties.get("accept", False))
         action = "test_design" if accept else "skip_tests"
         self._pending_confirms.pop(request_id, None)
         return self._dispatch_skilldev_respond(
-            internal_id=internal_id,
-            external_session_id=session_id,
+            session_id=session_id,
             params={"task_id": session_id, "action": action},
         )
 
     async def _handle_skill_search_replied(self, ws: Any, data: dict[str, Any]) -> bool:
         """处理 skillSearch.replied，封装为 skilldev.chat 并发送到 MessageHandler。"""
         properties = data.get("properties") if isinstance(data.get("properties"), dict) else data
+        if not isinstance(properties, dict):
+            return False
         session_id = str(properties.get("sessionID") or "").strip()
         action = str(properties.get("action") or "").strip().lower()
         if action not in ("ignore", "select"):
@@ -1079,41 +1055,34 @@ class VibeSkillChannel(BaseChannel):
         parts = properties.get("parts", []) if isinstance(properties.get("parts"), list) else []
         request_id = f"vibeskill-skill-search-{int(time.time() * 1000):x}-{secrets.token_hex(3)}"
 
-        internal_id = await self._store.resolve_internal(session_id) if session_id else None
-        if not internal_id and session_id:
-            internal_id = session_id
-        if not internal_id:
+        if not session_id:
             return False
 
-        session_obj = await self._store.get_session(internal_id)
+        session_obj = await self._store.get_session(session_id)
         if session_obj and session_obj.mode == "Standard":
             return False
 
-        external_session_id = session_id
-        if session_obj and session_obj.external_id:
-            external_session_id = session_obj.external_id
+        self._clear_message_context_for_session(session_id)
 
-        self._clear_message_context_for_session(internal_id)
-
-        await self._store.set_state(internal_id, VibeSkillSessionState.BUSY)
+        await self._store.set_state(session_id, VibeSkillSessionState.BUSY)
         logger.info(
             "[VibeSkillChannel] session state -> busy, source=skillSearch.replied, session_id=%s",
-            internal_id,
+            session_id,
         )
         await self._emit_session_status(
             ws=ws,
-            external_sid=external_session_id or internal_id,
+            external_sid=session_id,
             status_type=VibeSkillSessionState.BUSY.value,
         )
 
         async with self._ws_sessions_lock:
             if ws not in self._ws_sessions:
                 self._ws_sessions[ws] = set()
-            self._ws_sessions[ws].add(internal_id)
-            self._session_to_ws[internal_id] = ws
+            self._ws_sessions[ws].add(session_id)
+            self._session_to_ws[session_id] = ws
 
         params: dict[str, Any] = {
-            "task_id": internal_id,
+            "task_id": session_id,
             **self._extract_parts_to_skilldev_params(parts),
         }
         if "query" not in params:
@@ -1128,29 +1097,24 @@ class VibeSkillChannel(BaseChannel):
                     "url": str(skill.get("url") or ""),
                 }
 
-        metadata_dict: dict[str, str] = {}
-        if external_session_id:
-            metadata_dict[_VIBESKILL_ORIGINAL_SESSION_ID_KEY] = external_session_id
-        msg_metadata = metadata_dict if metadata_dict else None
-
         msg = Message(
             id=request_id,
             type="req",
             channel_id=VIBESKILL_CHANNEL_ID,
-            session_id=internal_id,
+            session_id=session_id,
             params=params,
             timestamp=time.time(),
             ok=True,
             req_method=ReqMethod.SKILLDEV_CHAT,
             is_stream=True,
-            metadata=msg_metadata,
+            metadata={_VIBESKILL_ORIGINAL_SESSION_ID_KEY: session_id},
         )
         logger.info(
             "[VibeSkillChannel] skilldev.chat sent (skillSearch.replied), session_id=%s action=%s",
-            internal_id,
+            session_id,
             action,
         )
-        self.bus.deliver_to_message_handler(msg)
+        self._deliver_to_message_handler(msg)
         return True
 
     async def outbound_intercept(self, msg: Message, ws: Any) -> bool:
@@ -1762,35 +1726,32 @@ class VibeSkillChannel(BaseChannel):
 
     def _dispatch_skilldev_respond(
         self,
-        internal_id: str,
-        external_session_id: str,
+        session_id: str,
         params: dict[str, Any],
     ) -> bool:
         msg = Message(
             id=f"vibeskill-respond-{int(time.time() * 1000):x}-{secrets.token_hex(3)}",
             type="req",
             channel_id=VIBESKILL_CHANNEL_ID,
-            session_id=internal_id,
+            session_id=session_id,
             params=params,
             timestamp=time.time(),
             ok=True,
             req_method=ReqMethod.SKILLDEV_RESPOND,
             is_stream=True,
-            metadata={_VIBESKILL_ORIGINAL_SESSION_ID_KEY: external_session_id} if external_session_id else None,
-            user_id=self._session_user_id(internal_id),
+            metadata={_VIBESKILL_ORIGINAL_SESSION_ID_KEY: session_id},
+            user_id=self._session_user_id(session_id),
         )
         logger.info(
             "[VibeSkillChannel] skilldev.respond sent, session_id=%s",
-            internal_id,
+            session_id,
         )
-        self.bus.deliver_to_message_handler(msg)
+        self._deliver_to_message_handler(msg)
         return True
 
     def _dispatch_skilldev_user_answer(
         self,
-        internal_id: str,
-        external_session_id: str,
-        sid: str,
+        session_id: str,
         request_id: str,
         answers: list[dict[str, Any]],
     ) -> bool:
@@ -1798,10 +1759,10 @@ class VibeSkillChannel(BaseChannel):
             id=f"vibeskill-user-answer-{int(time.time() * 1000):x}-{secrets.token_hex(3)}",
             type="req",
             channel_id=VIBESKILL_CHANNEL_ID,
-            session_id=internal_id,
+            session_id=session_id,
             params={
-                "session_id": sid,
-                "task_id": sid,
+                "session_id": session_id,
+                "task_id": session_id,
                 "request_id": request_id,
                 "source": "ask_tool",
                 "answers": answers,
@@ -1810,21 +1771,19 @@ class VibeSkillChannel(BaseChannel):
             ok=True,
             req_method=ReqMethod.SKILLDEV_USER_ANSWER,
             is_stream=False,
-            metadata={_VIBESKILL_ORIGINAL_SESSION_ID_KEY: external_session_id} if external_session_id else None,
-            user_id=self._session_user_id(internal_id),
+            metadata={_VIBESKILL_ORIGINAL_SESSION_ID_KEY: session_id},
+            user_id=self._session_user_id(session_id),
         )
         logger.info(
             "[VibeSkillChannel] skilldev.user_answer sent, session_id=%s",
-            internal_id,
+            session_id,
         )
-        self.bus.deliver_to_message_handler(msg)
+        self._deliver_to_message_handler(msg)
         return True
 
     def _dispatch_chat_user_answer(
         self,
-        internal_id: str,
-        external_session_id: str,
-        sid: str,
+        session_id: str,
         request_id: str,
         answers: list[dict[str, Any]],
     ) -> bool:
@@ -1839,9 +1798,9 @@ class VibeSkillChannel(BaseChannel):
             id=f"vibeskill-chat-user-answer-{int(time.time() * 1000):x}-{secrets.token_hex(3)}",
             type="req",
             channel_id=VIBESKILL_CHANNEL_ID,
-            session_id=internal_id,
+            session_id=session_id,
             params={
-                "session_id": sid or internal_id,
+                "session_id": session_id,
                 "request_id": request_id,
                 "answers": answers,
             },
@@ -1849,15 +1808,15 @@ class VibeSkillChannel(BaseChannel):
             ok=True,
             req_method=ReqMethod.CHAT_ANSWER,
             is_stream=False,
-            metadata={_VIBESKILL_ORIGINAL_SESSION_ID_KEY: external_session_id} if external_session_id else None,
-            user_id=self._session_user_id(internal_id),
+            metadata={_VIBESKILL_ORIGINAL_SESSION_ID_KEY: session_id},
+            user_id=self._session_user_id(session_id),
         )
         logger.info(
             "[VibeSkillChannel] chat.user_answer sent, session_id=%s request_id=%s",
-            internal_id,
+            session_id,
             request_id,
         )
-        self.bus.deliver_to_message_handler(msg)
+        self._deliver_to_message_handler(msg)
         return True
 
     async def _handle_skilldev_error(
@@ -1985,8 +1944,8 @@ class VibeSkillChannel(BaseChannel):
                 pass
             except Exception as exc:
                 logger.debug("[VibeSkillChannel] cleanup heartbeat wait failed: %s", exc)
-        internal_ids = self._ws_sessions.pop(ws, set())
-        for sid in internal_ids:
+        session_ids = self._ws_sessions.pop(ws, set())
+        for sid in session_ids:
             self._session_to_ws.pop(sid, None)
             if skip_cancel:
                 continue
@@ -1994,9 +1953,9 @@ class VibeSkillChannel(BaseChannel):
             mode = session_obj.mode if session_obj else "SkillCreate"
             await self._cancel_session_via_message_handler(sid, source="ws.disconnect", mode=mode)
 
-    def _get_active_ws_for_session(self, internal_id: str) -> Any | None:
+    def _get_active_ws_for_session(self, session_id: str) -> Any | None:
         """返回 session 当前绑定的未关闭 WebSocket，不存在则返回 None。"""
-        sid = str(internal_id or "").strip()
+        sid = str(session_id or "").strip()
         if not sid:
             return None
         ws = self._session_to_ws.get(sid)
@@ -2006,13 +1965,13 @@ class VibeSkillChannel(BaseChannel):
 
     async def _cancel_session_via_message_handler(
         self,
-        internal_id: str,
+        session_id: str,
         *,
         source: str,
         mode: str = "SkillCreate",
     ) -> None:
         """清理流式上下文、busy→idle，经 MessageHandler 派发取消（与 message.send 入站 method 对称）。"""
-        sid = str(internal_id or "").strip()
+        sid = str(session_id or "").strip()
         if not sid:
             return
         self._clear_message_context_for_session(sid)
@@ -2056,7 +2015,7 @@ class VibeSkillChannel(BaseChannel):
                 sid,
                 mode,
             )
-            self.bus.deliver_to_message_handler(cancel_msg)
+            self._deliver_to_message_handler(cancel_msg)
         except Exception:
             logger.exception(
                 "[VibeSkillChannel] dispatch %s failed, source=%s, session_id=%s",
@@ -2070,7 +2029,7 @@ class VibeSkillChannel(BaseChannel):
         session_id: str | None,
         metadata: dict[str, Any] | None = None,
     ) -> str | None:
-        """将内部 sessionId 解析为外部 sessionId。"""
+        """兼容接口：统一 ID 模式下直接返回 sessionId。"""
         sid = str(session_id or "").strip()
         if not sid:
             return None
@@ -2081,7 +2040,7 @@ class VibeSkillChannel(BaseChannel):
         if original:
             return original
 
-        return await self._store.resolve_external(sid)
+        return sid
 
     async def _send_ws_res_error(
         self,
@@ -2174,7 +2133,7 @@ class VibeSkillChannel(BaseChannel):
         await self._emit_ws_event(ws, "session.status", {"sessionID": external_sid, "status": status})
 
     def _clear_message_context_for_session(self, session_id: str | None) -> None:
-        """移除某 internal session 下的 assistant message 聚合状态。"""
+        """移除某 session 下的 assistant message 聚合状态。"""
         sid = str(session_id or "").strip()
         if not sid:
             self._message_ctx.pop("_default", None)
@@ -2525,12 +2484,14 @@ class VibeSkillChannel(BaseChannel):
                 merged_events.append(event)
                 continue
 
-            properties = event.get("properties") if isinstance(event.get("properties"), dict) else {}
+            raw_properties = event.get("properties")
+            properties: dict[str, Any] = raw_properties if isinstance(raw_properties, dict) else {}
             event_role = str(event.get("role") or "assistant")
             fallback_sid = str(event.get("sessionID") or "")
 
             if event_type == "message.updated":
-                info = properties.get("info") if isinstance(properties.get("info"), dict) else {}
+                raw_info = properties.get("info")
+                info: dict[str, Any] = raw_info if isinstance(raw_info, dict) else {}
                 message_id = str(info.get("id") or "").strip()
                 if not message_id:
                     merged_events.append(event)
@@ -2544,7 +2505,8 @@ class VibeSkillChannel(BaseChannel):
                 if role:
                     state["role"] = role
 
-                info_parts = info.get("parts") if isinstance(info.get("parts"), list) else []
+                raw_info_parts = info.get("parts")
+                info_parts: list[Any] = raw_info_parts if isinstance(raw_info_parts, list) else []
                 for part in info_parts:
                     if isinstance(part, dict):
                         _upsert_part(state, part, event_type)
@@ -3058,8 +3020,8 @@ class VibeSkillChannel(BaseChannel):
         body = json.dumps(data, ensure_ascii=False)
         return (status, {"Content-Type": "application/json", "Connection": "close"}, body.encode("utf-8"))
 
-    def _session_user_id(self, internal_id: str | None) -> str | None:
-        sid = str(internal_id or "").strip()
+    def _session_user_id(self, session_id: str | None) -> str | None:
+        sid = str(session_id or "").strip()
         if not sid:
             return None
         return self._store.get_user_id(sid) or sid
@@ -3093,8 +3055,8 @@ class VibeSkillChannel(BaseChannel):
             return await self._create_standard_session(requested_user_id)
 
         # 创建 VibeSkill session（SkillCreate 模式）
-        session = await self._store.get_or_create(external_id=None, mode=mode)
-        session_id = session.internal_id
+        session = await self._store.get_or_create(session_id=None, mode=mode)
+        session_id = session.session_id
         user_id = requested_user_id or session_id
         await self._store.set_metadata(session_id, {"user_id": user_id})
 
@@ -3125,15 +3087,15 @@ class VibeSkillChannel(BaseChannel):
 
         # 通过 ChannelManager.create_agent_session 创建 session
         channel_manager = cast("ChannelManager", self.bus)
-        internal_id = await channel_manager.create_agent_session(session_id, user_id=user_id)
+        created_session_id = await channel_manager.create_agent_session(session_id, user_id=user_id)
 
         # 存储到本地 _store，标记为 Standard mode
-        await self._store.get_or_create(external_id=None, internal_id=session_id, mode="Standard")
+        await self._store.get_or_create(session_id=session_id, mode="Standard")
         await self._store.set_metadata(session_id, {"user_id": user_id})
 
         # HTTP 200 返回 response
         response_data = {
-            "sessionID": internal_id,
+            "sessionID": created_session_id,
             "time": {
                 "created": int(time.time() * 1000),
                 "updated": int(time.time() * 1000),
@@ -3161,13 +3123,8 @@ class VibeSkillChannel(BaseChannel):
         if not skills:
             return self._json_response(400, {"error": "Missing skills field or empty list"})
 
-        # 解析 session_id（优先 external -> internal）
-        internal_id = await self._store.resolve_internal(session_id)
-        if not internal_id:
-            internal_id = session_id
-
         # 校验 session 存在
-        session_obj = await self._store.get_session(internal_id)
+        session_obj = await self._store.get_session(session_id)
         if not session_obj:
             return self._json_response(404, {"error": f"Session not found: {session_id}"})
 
@@ -3188,18 +3145,14 @@ class VibeSkillChannel(BaseChannel):
             await channel_manager.register_skill(
                 session_id,
                 skill_url,
-                user_id=self._session_user_id(internal_id),
+                user_id=self._session_user_id(session_id),
             )
 
         return self._json_response(200, {"registered": True})
 
     async def _handle_http_session_get(self, session_id: str) -> tuple[int, dict, bytes]:
         """GET /api/v1/session/{id} - 查询会话状态。"""
-        internal_id = await self._store.resolve_internal(session_id)
-        if not internal_id:
-            internal_id = session_id
-
-        session_obj = await self._store.get_session(internal_id)
+        session_obj = await self._store.get_session(session_id)
         if not session_obj:
             return self._json_response(404, {"error": "session_not_found"})
 
@@ -3226,22 +3179,18 @@ class VibeSkillChannel(BaseChannel):
 
         要求该 session 仍有活跃的北向 WebSocket；取消路径与 WS 断连一致（SKILLDEV_CANCEL + MessageHandler）。
         """
-        internal_id = await self._store.resolve_internal(session_id)
-        if not internal_id:
-            internal_id = session_id
-
-        session_obj = await self._store.get_session(internal_id)
+        session_obj = await self._store.get_session(session_id)
         if not session_obj:
             return self._json_response(404, {"error": "session_not_found"})
 
-        if self._get_active_ws_for_session(internal_id) is None:
+        if self._get_active_ws_for_session(session_id) is None:
             return self._json_response(
                 400,
                 {"error": "websocket_not_connected", "message": "WebSocket connection does not exist"},
             )
 
         await self._cancel_session_via_message_handler(
-            internal_id,
+            session_id,
             source="http.session.abort",
             mode=session_obj.mode,
         )
@@ -3257,19 +3206,15 @@ class VibeSkillChannel(BaseChannel):
 
         try:
             request_id = f"vibeskill-session-msg-{int(time.time() * 1000):x}-{secrets.token_hex(3)}"
-            internal_id = await self._store.resolve_internal(session_id)
-            if not internal_id:
-                internal_id = session_id
-
             env = e2a_from_agent_fields(
                 request_id=request_id,
                 channel_id=VIBESKILL_CHANNEL_ID,
-                session_id=internal_id,
+                session_id=session_id,
                 req_method=ReqMethod.SKILLDEV_RESTORE,
-                params={"task_id": internal_id},
+                params={"task_id": session_id},
                 is_stream=False,
                 timestamp=time.time(),
-                user_id=self._session_user_id(internal_id),
+                user_id=self._session_user_id(session_id),
             )
 
             resp = await self._send_agent_request(env)
@@ -3294,7 +3239,7 @@ class VibeSkillChannel(BaseChannel):
 
             if not payload:
                 # skilldev.restore 返回空，检查 session 是否存在
-                session_exists = await self._store.get_session(internal_id) is not None
+                session_exists = await self._store.get_session(session_id) is not None
                 if not session_exists:
                     return self._json_response(404, {"error": "session_not_found"})
                 # Session 存在但没有历史，返回空列表
@@ -3323,26 +3268,25 @@ class VibeSkillChannel(BaseChannel):
         """DELETE /api/v1/session/{id} - 删除会话。"""
         session_obj = await self._store.resolve_session(session_id)
         if session_obj:
-            await self._store.delete_session(session_obj.internal_id)
+            await self._store.delete_session(session_obj.session_id)
         return self._json_response(200, {"deleted": True})
 
     async def _handle_http_file_list(self, session_id: str, headers: dict) -> tuple[int, dict, bytes]:
         """GET /api/v1/.../file — 列目录（skilldev.file.list → FileTreeNode[] 嵌套树）。"""
-        internal_id = await self._store.resolve_internal(session_id) or session_id
         request_id = f"vibeskill-file-list-{int(time.time() * 1000):x}-{secrets.token_hex(3)}"
         env = e2a_from_agent_fields(
             request_id=request_id,
             channel_id=VIBESKILL_CHANNEL_ID,
-            session_id=internal_id,
+            session_id=session_id,
             req_method=ReqMethod.SKILLDEV_FILE_LIST,
-            params={"task_id": session_id, "session_id": internal_id},
+            params={"task_id": session_id, "session_id": session_id},
             is_stream=False,
             timestamp=time.time(),
-            user_id=self._session_user_id(internal_id),
+            user_id=self._session_user_id(session_id),
         )
         logger.info(
             "[VibeSkillChannel] skilldev.file.list sent, session_id=%s",
-            internal_id,
+            session_id,
         )
         resp = await self._send_agent_request(env)
         if not resp.ok:
@@ -3376,21 +3320,20 @@ class VibeSkillChannel(BaseChannel):
         if not file_path:
             return self._json_response(400, {"error": "path query parameter is required"})
 
-        internal_id = await self._store.resolve_internal(session_id) or session_id
         request_id = f"vibeskill-file-read-{int(time.time() * 1000):x}-{secrets.token_hex(3)}"
         env = e2a_from_agent_fields(
             request_id=request_id,
             channel_id=VIBESKILL_CHANNEL_ID,
-            session_id=internal_id,
+            session_id=session_id,
             req_method=ReqMethod.SKILLDEV_FILE_READ,
-            params={"task_id": session_id, "path": file_path, "session_id": internal_id},
+            params={"task_id": session_id, "path": file_path, "session_id": session_id},
             is_stream=False,
             timestamp=time.time(),
-            user_id=self._session_user_id(internal_id),
+            user_id=self._session_user_id(session_id),
         )
         logger.info(
             "[VibeSkillChannel] skilldev.file.read sent, session_id=%s",
-            internal_id,
+            session_id,
         )
         resp = await self._send_agent_request(env)
         if not resp.ok:
@@ -3458,26 +3401,25 @@ class VibeSkillChannel(BaseChannel):
                 400, {"ok": False, "error": "content must be a string"}
             )
 
-        internal_id = await self._store.resolve_internal(session_id) or session_id
         request_id = f"vibeskill-file-write-{int(time.time() * 1000):x}-{secrets.token_hex(3)}"
         env = e2a_from_agent_fields(
             request_id=request_id,
             channel_id=VIBESKILL_CHANNEL_ID,
-            session_id=internal_id,
+            session_id=session_id,
             req_method=ReqMethod.SKILLDEV_FILE_WRITE,
             params={
                 "task_id": session_id,
                 "path": file_path,
                 "content": content,
-                "session_id": internal_id,
+                "session_id": session_id,
             },
             is_stream=False,
             timestamp=time.time(),
-            user_id=self._session_user_id(internal_id),
+            user_id=self._session_user_id(session_id),
         )
         logger.info(
             "[VibeSkillChannel] skilldev.file.write sent, session_id=%s path=%s size=%d",
-            internal_id,
+            session_id,
             file_path,
             len(content),
         )
@@ -3566,16 +3508,15 @@ class VibeSkillChannel(BaseChannel):
         except json.JSONDecodeError:
             return self._json_response(400, {"error": "Invalid JSON"})
         request_id = f"vibeskill-export-{int(time.time() * 1000):x}-{secrets.token_hex(3)}"
-        internal_id = await self._store.resolve_internal(session_id) or session_id
         env = e2a_from_agent_fields(
             request_id=request_id,
             channel_id=VIBESKILL_CHANNEL_ID,
-            session_id=internal_id,
+            session_id=session_id,
             req_method=ReqMethod.SKILLDEV_DOWNLOAD,
             params={"task_id": session_id},
             is_stream=False,
             timestamp=time.time(),
-            user_id=self._session_user_id(internal_id),
+            user_id=self._session_user_id(session_id),
         )
         logger.info(
             "[VibeSkillChannel] skilldev.download sent, session_id=%s",
