@@ -615,11 +615,25 @@ class VibeSkillChannel(BaseChannel):
     async def _handle_message_send(self, ws: Any, data: dict[str, Any]) -> bool:
         """处理 message.send 类型的消息，封装为 skilldev.chat 并发送到 MessageHandler。"""
         session_id = str(data.get("sessionID") or "").strip()
-        parts = data.get("parts", []) if isinstance(data.get("parts"), list) else []
+        parts = data.get("parts")
         msg_model = data.get("model")
         agent = data.get("agent", "coder")
         system_prompt = data.get("system")
         request_id = f"vibeskill-{int(time.time() * 1000):x}-{secrets.token_hex(3)}"
+
+        # Validate parts must be a list
+        if not isinstance(parts, list):
+            await self._send_ws_res_error(
+                ws, data, "parts must be an array", source="message.send.invalid_parts_type"
+            )
+            return True
+
+        # Validate model must be a dict if provided
+        if msg_model is not None and not isinstance(msg_model, dict):
+            await self._send_ws_res_error(
+                ws, data, "model must be an object", source="message.send.invalid_model_type"
+            )
+            return True
 
         session: VibeSkillSession | None = None
         if session_id:
@@ -3044,7 +3058,7 @@ class VibeSkillChannel(BaseChannel):
                 mode = str(req_body.get("mode", "SkillCreate")).strip()
                 requested_user_id = str(req_body.get("user_id") or req_body.get("userId") or "").strip()
             except (json.JSONDecodeError, UnicodeDecodeError):
-                pass  # 使用默认值
+                return self._json_response(400, {"error": "Invalid JSON format"})
 
         # 验证 mode
         if mode not in ("SkillCreate", "Standard"):
@@ -3152,6 +3166,13 @@ class VibeSkillChannel(BaseChannel):
 
     async def _handle_http_session_get(self, session_id: str) -> tuple[int, dict, bytes]:
         """GET /api/v1/session/{id} - 查询会话状态。"""
+        # Validate sessionID format: reject numeric-only IDs (type error)
+        if session_id.isdigit():
+            return self._json_response(400, {"error": "sessionID cannot be purely numeric"})
+        # Validate sessionID for potentially dangerous characters (XSS prevention)
+        if any(c in session_id for c in '<>"\'&=+'):
+            return self._json_response(400, {"error": "invalid sessionID format"})
+
         session_obj = await self._store.get_session(session_id)
         if not session_obj:
             return self._json_response(404, {"error": "session_not_found"})
