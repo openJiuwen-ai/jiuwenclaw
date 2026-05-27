@@ -50,7 +50,6 @@ LISTENER_FD_ENV = "JIUWENBOX_CONTROL_LISTENER_FD"
 SANDBOX_DAEMON_COMMAND = ["python3", "-S", SANDBOX_DAEMON_SANDBOX_PATH]
 
 # Outgoing request types accepted by the daemon.
-REQUEST_TYPE_PING = "ping"
 REQUEST_TYPE_EXEC = "exec"
 REQUEST_TYPE_SHUTDOWN = "shutdown"
 # File-ops fast paths. Box-server uses these instead of spawning bash/
@@ -121,8 +120,3 @@ def encode_request(
     if payload:
         body.update(payload)
     return json.dumps(body, ensure_ascii=False).encode("utf-8")
-
-
-def decode_request(blob: bytes) -> dict[str, Any]:
-    import json
-    return json.loads(blob.decode("utf-8"))

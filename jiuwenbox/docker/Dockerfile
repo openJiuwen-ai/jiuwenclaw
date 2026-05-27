@@ -39,8 +39,8 @@ RUN ln -s /usr/bin/python3 /usr/bin/python
 EXPOSE 8321
 EXPOSE 8322
 
-# 默认走 TCP, 行为与历史一致; UDS 模式由调用方覆盖 JIUWENBOX_LISTEN, 例如
+# 默认走 HTTP; UDS 模式由调用方覆盖 JIUWENBOX_LISTEN, 例如
 # `docker run -e JIUWENBOX_LISTEN=unix:///run/jiuwenbox/jiuwenbox.sock \
 #             -v /tmp/jiuwenbox-sock:/run/jiuwenbox jiuwenbox`。
-ENV JIUWENBOX_LISTEN=tcp://0.0.0.0:8321
+ENV JIUWENBOX_LISTEN=http://0.0.0.0:8321
 CMD ["python3", "-m", "jiuwenbox.server.launcher"]

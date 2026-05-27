@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
-set -euox pipefail
+set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
@@ -18,9 +18,9 @@ PROXY_PORT="${JIUWENBOX_PROXY_PORT:-8322}"
 # ``JIUWENBOX_LISTEN`` / ``JIUWENBOX_UDS_MODE`` / ``JIUWENBOX_UDS_HOST_DIR`` /
 # ``JIUWENBOX_UDS_CONTAINER_DIR``, 这些才是用户在 README 里设的那一份。
 
-# 管理 API listen URI: 默认与 Dockerfile 一致走 TCP; 设成 unix:///abs/path
+# 管理 API listen URI: 默认与 Dockerfile 一致走 HTTP; 设成 unix:///abs/path
 # 即切到 UDS, 容器内 uvicorn 监听 socket 文件, 由下面 ``-v`` 把宿主目录挂进去。
-LISTEN_URI="${JIUWENBOX_LISTEN:-tcp://0.0.0.0:8321}"
+LISTEN_URI="${JIUWENBOX_LISTEN:-http://0.0.0.0:8321}"
 # UDS chmod (lifespan 会读); 默认 0666 便于宿主非 root 直接访问, 多租户场景
 # 可显式 ``JIUWENBOX_UDS_MODE=0660`` + ``docker run --user`` 收紧。
 UDS_MODE="${JIUWENBOX_UDS_MODE:-}"
@@ -57,7 +57,7 @@ Options:
                         setting JIUWENBOX_SAVE_LOGS_HOST_DIR; the CLI
                         flag wins when both are present.
 
-Examples (TCP, default):
+Examples (HTTP, default):
   scripts/run_docker.sh
   scripts/run_docker.sh configs/default-policy.yaml
   JIUWENBOX_HOST_PORT=18321 scripts/run_docker.sh
@@ -136,19 +136,19 @@ if [[ $# -gt 0 ]]; then
   esac
 fi
 
-# 解析 listen URI: tcp:// 或 unix:///abs/path; 其它形态拒绝。
+# 解析 listen URI: http:// 或 unix:///abs/path; 其它形态拒绝。
 LISTEN_MODE=""
 LISTEN_SOCKET_PATH=""
 case "$LISTEN_URI" in
-  tcp://*)
-    LISTEN_MODE="tcp"
+  http://*)
+    LISTEN_MODE="http"
     ;;
   unix:///*)
     LISTEN_MODE="uds"
     LISTEN_SOCKET_PATH="${LISTEN_URI#unix://}"
     ;;
   *)
-    echo "error: JIUWENBOX_LISTEN must start with tcp:// or unix:///, got '$LISTEN_URI'" >&2
+    echo "error: JIUWENBOX_LISTEN must start with http:// or unix:///, got '$LISTEN_URI'" >&2
     exit 1
     ;;
 esac
@@ -156,8 +156,8 @@ esac
 echo "Starting jiuwenbox container:"
 echo "  image:     $IMAGE_REF"
 echo "  container: $CONTAINER_NAME"
-if [[ "$LISTEN_MODE" = "tcp" ]]; then
-  echo "  listen:    tcp -> http://127.0.0.1:${HOST_PORT}"
+if [[ "$LISTEN_MODE" = "http" ]]; then
+  echo "  listen:    http -> http://127.0.0.1:${HOST_PORT}"
   DOCKER_PORT_ARGS+=(-p "${HOST_PORT}:8321")
 else
   echo "  listen:    uds -> ${UDS_HOST_DIR}/$(basename "$LISTEN_SOCKET_PATH")"
@@ -178,6 +178,7 @@ fi
 # 代理端口在两种模式下都映射: Inference Privacy Proxy 是独立 TCP listener,
 # 与管理 API 传输方式无关; 即便管理面走 UDS, 代理仍可能需要从宿主转出流量。
 DOCKER_PORT_ARGS+=(-p "${PROXY_PORT}:8322")
+echo "  proxy:     http://127.0.0.1:${PROXY_PORT} (inference privacy proxy)"
 
 # 把 listen / uds-mode 显式 -e 给容器, 让容器 entrypoint 拿到一致的视图。
 # 注意: 这里 -e 后面的"键名"必须仍是 JIUWENBOX_LISTEN / JIUWENBOX_UDS_MODE,

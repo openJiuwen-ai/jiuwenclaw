@@ -4,8 +4,9 @@
 agent 工具和代码片段。
 
 它提供一个 FastAPI 服务，用于管理沙箱生命周期、文件传输、文件
-列表/搜索以及命令执行。每个沙箱命令都会通过一个小型 supervisor
-进程启动，由 supervisor 根据配置好的隔离策略应用沙箱限制。
+列表/搜索以及命令执行。服务在自身进程内直接调用 `bubblewrap` 启动
+沙箱进程（每个沙箱一个长寿命 daemon，再加上按需的后台命令），由
+预先解析的策略决定隔离细节。
 
 ## 功能特性
 
@@ -25,14 +26,16 @@ agent 工具和代码片段。
 - `server`
   - FastAPI 应用，负责沙箱生命周期管理、policy 加载、审计日志和 API 路由。
 - `server/runtime`
-  - 运行时适配层，负责为每个沙箱命令启动一个 supervisor 进程。
+  - 进程内运行时适配层，将沙箱 policy 翻译成 `bubblewrap` 命令行后由
+    server 进程直接 spawn（每个沙箱一个长寿命 daemon，再加上按需的
+    后台命令）。
 - `server/proxy_manager`
   - 管理推理隐私代理，用于 LLM API 路由和 API 密钥注入。
 - `server/policy_reader`
   - 共享 policy 文件读取器，供沙箱和代理管理器使用。
 - `supervisor`
-  - 每条命令的启动器，负责将生效的 policy 转换为 `bubblewrap`、Landlock、
-    seccomp 和命名空间配置。
+  - 策略到隔离的翻译辅助库（`bubblewrap` 命令构造、Landlock payload、
+    seccomp 过滤器、cgroup/网络配置），供运行时适配层调用。
 - `proxy`
   - HTTP 推理隐私代理，支持路径路由和 API 密钥注入（支持 OpenAI 和 Anthropic 格式）。
 - `models`
@@ -92,12 +95,6 @@ sudo env \
 JIUWENBOX_POLICY_PATH=/absolute/path/to/policy.yaml
 ```
 
-如果进程管理器会使用环境变量渲染 uvicorn 命令，也可以设置：
-
-```bash
-JIUWENBOX_PORT=9000
-```
-
 ### Docker 启动
 
 构建镜像：
@@ -123,7 +120,7 @@ loopback 端口冲突的场景。上层协议仍是 HTTP/1.1，路由 / 请求�
 监听地址由统一的环境变量 `JIUWENBOX_LISTEN` 控制，取以下两种形式之一：
 
 ```bash
-JIUWENBOX_LISTEN=tcp://0.0.0.0:8321               # 默认, 行为与历史一致
+JIUWENBOX_LISTEN=http://0.0.0.0:8321               # 默认
 JIUWENBOX_LISTEN=unix:///run/jiuwenbox/jiuwenbox.sock  # 切到 UDS, 路径必须绝对
 ```
 
@@ -167,7 +164,7 @@ jiuwenbox --base-url unix:///tmp/jiuwenbox-sock/jiuwenbox.sock health
 JIUWENBOX_URL=unix:///tmp/jiuwenbox-sock/jiuwenbox.sock jiuwenbox sandbox ls
 
 # pytest 双通路 (操作者先各自起好对应的 server)
-pytest tests/integration --server-endpoint=tcp://127.0.0.1:8321
+pytest tests/integration --server-endpoint=http://127.0.0.1:8321
 pytest tests/integration --server-endpoint=unix:///tmp/jiuwenbox-sock/jiuwenbox.sock
 ```
 
@@ -175,7 +172,7 @@ UDS 相关环境变量：
 
 | 变量 | 默认 | 说明 |
 | --- | --- | --- |
-| `JIUWENBOX_LISTEN` | `tcp://0.0.0.0:8321` | 管理 API 监听 URI；接受 `tcp://host:port` 或 `unix:///abs/socket/path`。UDS 模式下 `JIUWENBOX_PORT` 被忽略。 |
+| `JIUWENBOX_LISTEN` | `http://0.0.0.0:8321` | 管理 API 监听 URI；接受 `http://host:port` 或 `unix:///abs/socket/path`。 |
 | `JIUWENBOX_UDS_MODE` | `0666` | UDS socket 文件权限 (八进制字符串)。Docker 场景下宿主与容器内 uvicorn uid 通常不同，默认放开；多租户 / 强隔离场景建议显式 `JIUWENBOX_UDS_MODE=0660` 并 `docker run --user $(id -u):$(id -g)` 收紧。 |
 | `JIUWENBOX_UDS_HOST_DIR` | `/tmp/jiuwenbox-sock` | `run_docker.sh` 把宿主 socket 目录挂载到容器内的位置。 |
 | `JIUWENBOX_UDS_CONTAINER_DIR` | `/run/jiuwenbox` | 容器内挂载点，必须与 `JIUWENBOX_LISTEN` 里 socket 路径所在的目录一致。 |
@@ -493,6 +490,19 @@ sandbox:
 
 **通过 API 创建路由需 `listen_host` 有效且 `listen_port > 0`**，否则返回错误。
 
+### 仅代理模式（proxy-only）
+
+如果 policy YAML 文件**只配置 `inference_privacy_proxies`**（顶层 key 仅允许 `version` / `name` / `inference_privacy_proxies`，且 `listen_port > 0`），jiuwenbox 启动时会自动进入仅代理模式：
+
+- 跳过沙箱子系统的初始化（不创建 `ProcessRuntime`、不注册 zombie reaper、不启动 idle reaper）。
+- `GET /health` 仍可用，`sandboxes_active` 固定为 `0`。
+- 沙箱相关路由（`/api/v1/sandboxes/*`、`/api/v1/policy/*`）返回 `503 Service Unavailable`，提示需要在 policy 里补充沙箱配置才能启用。
+- `/api/v1/proxy/*` 路由及推理代理本身正常工作。
+
+启动日志会打印 `Proxy-only policy detected (no sandbox config); skipping sandbox subsystem startup`，随后再输出 `Inference privacy proxy listening on http://<host>:<port>`，便于运维快速确认监听地址。
+
+参考配置：[`configs/inference-policy.yaml`](configs/inference-policy.yaml)。
+
 ### 代理配置
 
 配置文件yaml文件说明：
@@ -583,7 +593,7 @@ inference_privacy_proxies:
 ```
 
 注意 test.sh 本身**不会**起 server，请按选定通路先手工启动对应的 jiuwenbox
-(TCP 走 `JIUWENBOX_LISTEN=tcp://0.0.0.0:8321` 或自定义端口，UDS 走
+(TCP 走 `JIUWENBOX_LISTEN=http://0.0.0.0:8321` 或自定义端口，UDS 走
 `JIUWENBOX_LISTEN=unix:///...`)。
 
 运行指定测试用例：

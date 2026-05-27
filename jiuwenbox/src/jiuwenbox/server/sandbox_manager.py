@@ -530,7 +530,6 @@ class SandboxManager:
             pid = await self.runtime.create(
                 sandbox_id=sandbox_id,
                 policy_path=policy_path,
-                workdir=None,
                 env=ref.env,
             )
             cleanup_after_create = False
@@ -604,7 +603,6 @@ class SandboxManager:
             pid = await self.runtime.create(
                 sandbox_id=sandbox_id,
                 policy_path=policy_path,
-                workdir=None,
                 env=ref.env,
             )
             ref.phase = SandboxPhase.READY
