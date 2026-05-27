@@ -381,7 +381,8 @@ class CronRuntimeBridge:
             context=context,
             target_channels=[channel.value for channel in CronTargetChannel],
             default_target_channel=None,
-            agent_id=agent_id
+            include_legacy_compat=False,
+            agent_id=agent_id,
         )
         logger.info("[CronRuntimeBridge] Built %d cron tools: %s", 
                     len(tools), 
