@@ -436,10 +436,11 @@ class ToolManager:
             try:
                 await _add_mcp_server_and_ability(agent, mcp_cfg, tag=mcp_cfg.server_name)
             except Exception as exc:
-                logger.error("[ToolManager] 注册工具失败 name=%s: %s", tool_name, exc)
+                logger.error("[ToolManager] 注册工具失败 name=%s: %s", tool_name, exc, extra={'user_visible': 'critical'})
                 raise
             registered.append({"name": mcp_cfg.server_name, "id": mcp_cfg.server_id})
-            logger.info("[ToolManager] 已注册工具 name=%s id=%s", mcp_cfg.server_name, mcp_cfg.server_id)
+            logger.info("[ToolManager] 已注册工具 name=%s id=%s", mcp_cfg.server_name, mcp_cfg.server_id, 
+                        extra={'user_visible': 'critical'})
 
         return {
             "saved": saved,

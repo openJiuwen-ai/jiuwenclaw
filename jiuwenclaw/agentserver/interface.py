@@ -924,7 +924,7 @@ class JiuWenClaw:
             final = chunks[-1] if chunks else None
             payload = final.payload if final else {}
         except Exception as exc:
-            logger.error("[JiuWenClaw] skilldev 请求处理失败: %s", exc)
+            logger.error("[JiuWenClaw] skilldev 请求处理失败: %s", exc, extra={'user_visible': 'critical'})
             return AgentResponse(
                 request_id=request.request_id,
                 channel_id=request.channel_id,
@@ -961,7 +961,7 @@ class JiuWenClaw:
             if _reload_after_skills:
                 await self.create_instance()
         except Exception as exc:
-            logger.error("[JiuWenClaw] skills 请求处理失败: %s", exc)
+            logger.error("[JiuWenClaw] skills 请求处理失败: %s", exc, extra={'user_visible': 'critical'})
             return AgentResponse(
                 request_id=request.request_id,
                 channel_id=request.channel_id,
@@ -988,7 +988,7 @@ class JiuWenClaw:
         try:
             payload = await handler(request.params)
         except Exception as exc:
-            logger.error("[JiuWenClaw] tools 请求处理失败: %s", exc)
+            logger.error("[JiuWenClaw] tools 请求处理失败: %s", exc, extra={'user_visible': 'critical'})
             return AgentResponse(
                 request_id=request.request_id,
                 channel_id=request.channel_id,
@@ -1096,6 +1096,7 @@ class JiuWenClaw:
         logger.info(
             "[JiuWenClaw] 处理请求: request_id=%s channel_id=%s session_id=%s sdk=%s",
             request.request_id, request.channel_id, session_id, self._sdk_name,
+            extra={'user_visible': 'progress'}
         )
 
         inputs, memory_mode, raw_query = self._build_inputs(request)
@@ -1129,7 +1130,7 @@ class JiuWenClaw:
                 try:
                     await self._get_tool_manager().register_request_scoped_office_claw_mcp(office_claw_mcp)
                 except Exception as exc:
-                    logger.warning("[JiuWenClaw] office_claw_mcp 注册失败: %s", exc)
+                    logger.warning("[JiuWenClaw] office_claw_mcp 注册失败: %s", exc, extra={'user_visible': 'progress'})
             return await adapter.process_message_impl(request, inputs)
 
         result = await self._session_manager.submit_and_wait(session_id, run_agent_task)
@@ -1178,8 +1179,12 @@ class JiuWenClaw:
             # 统一提取 chat_id 和 channel_type
             cleaned_chat_id, channel_type = self._extract_chat_id(request)
 
+            logger.info(
+                f"[JiuWenClaw] 开始上传文件: request_id={request.request_id} "
+                f"files_count={len(result.payload.get('files'))} user_id={user_id} chat_id={cleaned_chat_id}",
+                extra={'user_visible': 'critical'}
+            )
             await self.upload_agent_files(result, user_id, cleaned_chat_id, channel_type)
-
         return result
 
     async def _release_text_only_stream_pause(
@@ -1223,7 +1228,7 @@ class JiuWenClaw:
                 async for chunk in service.handle(request):
                     yield chunk
             except Exception as exc:
-                logger.error("[JiuWenClaw] skilldev 流式请求处理失败: %s", exc)
+                logger.error("[JiuWenClaw] skilldev 流式请求处理失败: %s", exc, extra={'user_visible': 'progress'})
                 yield AgentResponseChunk(
                     request_id=request.request_id,
                     channel_id=request.channel_id,
@@ -1286,6 +1291,7 @@ class JiuWenClaw:
             logger.info(
                 "[JiuWenClaw] Team模式使用原始query: %s",
                 raw_query[:100] if raw_query else "",
+                extra={'user_visible': 'progress'}
             )
 
         # cloud memory: before chat hook
@@ -1345,10 +1351,11 @@ class JiuWenClaw:
                 async for chunk in adapter.process_message_stream_impl(request, inputs):
                     await stream_queue.put(("chunk", chunk))
             except asyncio.CancelledError:
-                logger.info("[JiuWenClaw] 流式任务被取消: request_id=%s session_id=%s", rid, session_id)
+                logger.info("[JiuWenClaw] 流式任务被取消: request_id=%s session_id=%s", rid, session_id, 
+                            extra={'user_visible': 'progress'})
                 await stream_queue.put(("error", asyncio.CancelledError()))
             except Exception as exc:
-                logger.exception("[JiuWenClaw] 流式任务异常: %s", exc)
+                logger.exception("[JiuWenClaw] 流式任务异常: %s", exc, extra={'user_visible': 'progress'})
                 await stream_queue.put(("error", exc))
             finally:
                 rail = getattr(adapter, "_stream_event_rail", None)
@@ -1364,17 +1371,17 @@ class JiuWenClaw:
         if is_team_mode and not is_team_first_request:
             logger.info(
                 "[JiuWenClaw] Team模式后续请求，直接执行: request_id=%s session_id=%s",
-                rid, session_id,
+                rid, session_id, extra={'user_visible': 'progress'}
             )
-            logger.info(
-                f"[JiuWenClaw] Team模式后续请求: request_id={rid} session_id={session_id}",
-                extra={'user_visible': 'progress'}
-            )
+            # Team模式后续请求：直接异步执行，不排队。Team 模式支持并发，不需要排队。
             asyncio.create_task(run_stream_task())
         else:
+            # 其他情况：通过 SessionManager 排队执行。同 session 内按 FIFO 顺序执行。
             await self._session_manager.submit_task(session_id, run_stream_task)
-
         try:
+            # 1.生产者-消费者模式：run_stream_task 生产 → 循环消费 → yield 转发
+            # 2.历史记录异步写入：不阻塞流式转发
+            # 3.事件类型过滤：只记录 chat.*、task.*、team.message 类型事件
             while not stream_done.is_set() or not stream_queue.empty():
                 try:
                     item = await asyncio.wait_for(stream_queue.get(), timeout=0.1)
@@ -1385,7 +1392,7 @@ class JiuWenClaw:
 
                 if event_type == "error":
                     if isinstance(data, asyncio.CancelledError):
-                        logger.info("[JiuWenClaw] 流式处理被中断: request_id=%s", rid)
+                        logger.info("[JiuWenClaw] 流式处理被中断: request_id=%s", rid, extra={'user_visible': 'progress'})
                         raise data
                     append_history_record(
                         session_id=session_id,
@@ -1447,7 +1454,8 @@ class JiuWenClaw:
                                 if isinstance(files_list, list):
                                     collected_files.extend(files_list)
                                     logger.info(
-                                        f"[JiuWenClaw] 收集到文件: request_id={rid} files_count={len(files_list)}"
+                                        f"[JiuWenClaw] 收集到文件: request_id={rid} files_count={len(files_list)}",
+                                        extra={'user_visible': 'critical'}
                                     )
                         yield data
                     elif isinstance(data, dict) and isinstance(data.get("event_type"), str):
@@ -1491,7 +1499,8 @@ class JiuWenClaw:
                             if isinstance(files_list, list):
                                 collected_files.extend(files_list)
                                 logger.info(
-                                    f"[JiuWenClaw] 收集到文件: request_id={rid} files_count={len(files_list)}"
+                                    f"[JiuWenClaw] 收集到文件: request_id={rid} files_count={len(files_list)}",
+                                    extra={'user_visible': 'critical'}
                                 )
                         yield AgentResponseChunk(
                             request_id=rid,
@@ -1500,7 +1509,7 @@ class JiuWenClaw:
                             is_complete=False,
                         )
         except asyncio.CancelledError:
-            logger.info("[JiuWenClaw] 流式处理被中断: request_id=%s", rid)
+            logger.info("[JiuWenClaw] 流式处理被中断: request_id=%s", rid, extra={'user_visible': 'progress'})
             raise
 
         # 记录Agent回答到日志（流式delta合并，仅在无chat.final事件时）
@@ -1508,7 +1517,7 @@ class JiuWenClaw:
             delta_content = "".join(final_answer_chunks)
             if delta_content:
                 logger.info(
-                    "[JiuWenClaw] Agent回答: %s",
+                    "[JiuWenClaw] Agent流失回答汇总: %s",
                     _truncate_for_log(delta_content),
                     extra={'user_visible': 'critical'}
                 )
@@ -1547,7 +1556,8 @@ class JiuWenClaw:
 
             logger.info(
                 f"[JiuWenClaw] 开始上传文件: request_id={request.request_id} "
-                f"files_count={len(collected_files)} user_id={user_id} chat_id={cleaned_chat_id}"
+                f"files_count={len(collected_files)} user_id={user_id} chat_id={cleaned_chat_id}",
+                extra={'user_visible': 'critical'}
             )
 
             await self.upload_agent_files(virtual_response, user_id, cleaned_chat_id, channel_type)
@@ -1566,7 +1576,8 @@ class JiuWenClaw:
                 )
                 logger.info(
                     f"[JiuWenClaw] 文件上传完成事件已发送: request_id={request.request_id} "
-                    f"files_count={len(virtual_response.payload['files'])}"
+                    f"files_count={len(virtual_response.payload['files'])}",
+                    extra={'user_visible': 'critical'}
                 )
 
         if not adapter_emitted_terminal_chunk:

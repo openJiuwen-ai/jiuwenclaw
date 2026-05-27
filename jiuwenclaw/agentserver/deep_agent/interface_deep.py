@@ -640,6 +640,7 @@ def _build_context_engineering_rail(config: dict[str, Any],
                 chain,
                 minimal,
                 [p[0] for p in user_processors] if user_processors else "none",
+                extra={'user_visible': 'progress'}
             )
         else:
             context_rail = JiuClawContextEngineeringRail(
@@ -652,10 +653,12 @@ def _build_context_engineering_rail(config: dict[str, Any],
                 "preset=False minimal=%s",
                 mode,
                 minimal,
+                extra={'user_visible': 'progress'}
             )
         return context_rail
     except Exception as exc:
-        logger.warning("[JiuWenClawDeepAdapter] ContextEngineeringRail create failed: %s", exc)
+        logger.warning("[JiuWenClawDeepAdapter] ContextEngineeringRail create failed: %s", exc,
+                      extra={'user_visible': 'progress'})
         return None
 
 
@@ -1307,7 +1310,8 @@ class JiuWenClawDeepAdapter:
             )
             CheckpointerFactory.set_default_checkpointer(checkpointer)
         except Exception as e:
-            logger.error("[JiuWenClawDeepAdapter] fail to setup checkpoint due to: %s", e)
+            logger.error("[JiuWenClawDeepAdapter] fail to setup checkpoint due to: %s", e, 
+                         extra={'user_visible': 'critical'})
 
 
     @staticmethod
@@ -1452,9 +1456,11 @@ class JiuWenClawDeepAdapter:
         """Build ResponsePromptRail so message rules keep priority ordering."""
         try:
             rail = ResponsePromptRail()
-            logger.info("[JiuWenClawDeepAdapter] ResponsePromptRail create success")
+            logger.info("[JiuWenClawDeepAdapter] ResponsePromptRail create success",
+                       extra={'user_visible': 'progress'})
         except Exception as exc:
-            logger.warning("[JiuWenClawDeepAdapter] ResponsePromptRail create failed: %s", exc)
+            logger.warning("[JiuWenClawDeepAdapter] ResponsePromptRail create failed: %s", exc,
+                          extra={'user_visible': 'progress'})
             rail = None
         return rail
 
@@ -1497,9 +1503,11 @@ class JiuWenClawDeepAdapter:
         """Build FileSystemRail."""
         try:
             fs_rail = FileSystemRail()
-            logger.info("[JiuWenClawDeepAdapter] FileSystemRail create success")
+            logger.info("[JiuWenClawDeepAdapter] FileSystemRail create success",
+                       extra={'user_visible': 'progress'})
         except Exception as exc:
-            logger.warning("[JiuWenClawDeepAdapter] FileSystemRail create failed: %s", exc)
+            logger.warning("[JiuWenClawDeepAdapter] FileSystemRail create failed: %s", exc,
+                          extra={'user_visible': 'progress'})
             fs_rail = None
         return fs_rail
 
@@ -1521,7 +1529,8 @@ class JiuWenClawDeepAdapter:
         """
         try:
             skill_mode = self._resolve_skill_mode(config)
-            logger.info("[JiuWenClawDeepAdapter] current skill_mode: %s", skill_mode)
+            logger.info("[JiuWenClawDeepAdapter] current skill_mode: %s", skill_mode,
+                       extra={'user_visible': 'progress'})
             # Must match react.context_engine_config.max_active_skill_bodies (ContextEngineConfig);
             # otherwise SkillUseRail.init overwrites the merged yaml cap with the rail default (1).
             react_cec = (config.get("react") or {}).get("context_engine_config")
@@ -1536,7 +1545,8 @@ class JiuWenClawDeepAdapter:
             skills_dirs = [str(p) for p in get_agent_registered_skill_dirs()]
             if extra_skill_dir:
                 skills_dirs.append(extra_skill_dir)
-                logger.info("[JiuWenClawDeepAdapter] extra_skill_dir added: %s", extra_skill_dir)
+                logger.info("[JiuWenClawDeepAdapter] extra_skill_dir added: %s", extra_skill_dir,
+                       extra={'user_visible': 'progress'})
             
             skill_rail_kwargs: dict[str, Any] = dict(
                 skills_dir=skills_dirs,
@@ -1548,9 +1558,11 @@ class JiuWenClawDeepAdapter:
                 skill_rail_kwargs["max_active_skill_bodies"] = max_bodies
             skill_rail_kwargs["enabled_skills"] = enabled_skills_from_environ()
             skill_rail = SkillUseRail(**skill_rail_kwargs)
-            logger.info("[JiuWenClawDeepAdapter] SkillUseRail create success")
+            logger.info("[JiuWenClawDeepAdapter] SkillUseRail create success",
+                       extra={'user_visible': 'progress'})
         except Exception as exc:
-            logger.warning("[JiuWenClawDeepAdapter] SkillUseRail create failed: %s", exc)
+            logger.warning("[JiuWenClawDeepAdapter] SkillUseRail create failed: %s", exc,
+                          extra={'user_visible': 'progress'})
             skill_rail = None
         return skill_rail
 
@@ -1570,9 +1582,11 @@ class JiuWenClawDeepAdapter:
                 auto_save=False
             )
             self._skill_evolution_rail = skill_evolution_rail
-            logger.info("[JiuWenClaw] SkillEvolutionRail create success")
+            logger.info("[JiuWenClaw] SkillEvolutionRail create success",
+                       extra={'user_visible': 'progress'})
         except Exception as exc:
-            logger.warning("[JiuWenClaw] SkillEvolutionRail create failed: %s", exc)
+            logger.warning("[JiuWenClaw] SkillEvolutionRail create failed: %s", exc,
+                          extra={'user_visible': 'progress'})
             skill_evolution_rail = None
         return skill_evolution_rail
 
@@ -1580,9 +1594,11 @@ class JiuWenClawDeepAdapter:
         """Build JiuClawStreamEventRail."""
         try:
             stream_event_rail = JiuClawStreamEventRail()
-            logger.info("[JiuWenClawDeepAdapter] JiuClawStreamEventRail create success")
+            logger.info("[JiuWenClawDeepAdapter] JiuClawStreamEventRail create success",
+                       extra={'user_visible': 'progress'})
         except Exception as exc:
-            logger.warning("[JiuWenClawDeepAdapter] JiuClawStreamEventRail create failed: %s", exc)
+            logger.warning("[JiuWenClawDeepAdapter] JiuClawStreamEventRail create failed: %s", exc,
+                          extra={'user_visible': 'progress'})
             stream_event_rail = None
         return stream_event_rail
 
@@ -1591,9 +1607,11 @@ class JiuWenClawDeepAdapter:
         """Build TaskExecutionRail."""
         try:
             task_execution_rail = TaskExecutionRail()
-            logger.info("[JiuWenClawDeepAdapter] TaskExecutionRail create success")
+            logger.info("[JiuWenClawDeepAdapter] TaskExecutionRail create success",
+                       extra={'user_visible': 'progress'})
         except Exception as exc:
-            logger.warning("[JiuWenClawDeepAdapter] TaskExecutionRail create failed: %s", exc)
+            logger.warning("[JiuWenClawDeepAdapter] TaskExecutionRail create failed: %s", exc,
+                          extra={'user_visible': 'progress'})
             task_execution_rail = None
         return task_execution_rail
 
@@ -1603,9 +1621,11 @@ class JiuWenClawDeepAdapter:
         try:
             from jiuwenclaw.telemetry.instrumentors.telemetry_rail import TelemetryRail
             rail = TelemetryRail()
-            logger.info("[JiuWenClawDeepAdapter] TelemetryRail create success")
+            logger.info("[JiuWenClawDeepAdapter] TelemetryRail create success",
+                       extra={'user_visible': 'progress'})
         except Exception as exc:
-            logger.warning("[JiuWenClawDeepAdapter] TelemetryRail create failed: %s", exc)
+            logger.warning("[JiuWenClawDeepAdapter] TelemetryRail create failed: %s", exc,
+                          extra={'user_visible': 'progress'})
             rail = None
         return rail
 
@@ -1613,9 +1633,11 @@ class JiuWenClawDeepAdapter:
         """Build TaskPlanningRail."""
         try:
             task_planning_rail = TaskPlanningRail()
-            logger.info("[JiuWenClawDeepAdapter] TaskPlanningRail create success")
+            logger.info("[JiuWenClawDeepAdapter] TaskPlanningRail create success",
+                       extra={'user_visible': 'progress'})
         except Exception as exc:
-            logger.warning("[JiuWenClawDeepAdapter] TaskPlanningRail create failed: %s", exc)
+            logger.warning("[JiuWenClawDeepAdapter] TaskPlanningRail create failed: %s", exc,
+                          extra={'user_visible': 'progress'})
             task_planning_rail = None
         return task_planning_rail
 
@@ -1624,9 +1646,11 @@ class JiuWenClawDeepAdapter:
         """Build SubagentRail for subagent delegation."""
         try:
             subagent_rail = SubagentRail()
-            logger.info("[JiuWenClawDeepAdapter] SubagentRail create success")
+            logger.info("[JiuWenClawDeepAdapter] SubagentRail create success",
+                       extra={'user_visible': 'progress'})
         except Exception as exc:
-            logger.warning("[JiuWenClawDeepAdapter] SubagentRail create failed: %s", exc)
+            logger.warning("[JiuWenClawDeepAdapter] SubagentRail create failed: %s", exc,
+                          extra={'user_visible': 'progress'})
             subagent_rail = None
         return subagent_rail
 
@@ -1634,9 +1658,11 @@ class JiuWenClawDeepAdapter:
         """Build SecurityPromptRail."""
         try:
             security_prompt_rail = SecurityRail()
-            logger.info("[JiuWenClawDeepAdapter] SecurityPromptRail create success")
+            logger.info("[JiuWenClawDeepAdapter] SecurityPromptRail create success",
+                       extra={'user_visible': 'progress'})
         except Exception as exc:
-            logger.warning("[JiuWenClawDeepAdapter] SecurityPromptRail create failed: %s", exc)
+            logger.warning("[JiuWenClawDeepAdapter] SecurityPromptRail create failed: %s", exc,
+                          extra={'user_visible': 'progress'})
             security_prompt_rail = None
         return security_prompt_rail
 
@@ -1648,7 +1674,8 @@ class JiuWenClawDeepAdapter:
             has_base_url = embed_config.get("embed_base_url") if isinstance(embed_config, dict) else None
             has_model = embed_config.get("embed_model") if isinstance(embed_config, dict) else None
             if not all([has_api_key, has_base_url, has_model]):
-                logger.warning("[JiuWenClawDeepAdapter] MemoryRail create failed: No available embedding config")
+                logger.warning("[JiuWenClawDeepAdapter] MemoryRail create failed: No available embedding config",
+                          extra={'user_visible': 'progress'})
                 return None
             self._is_proactive_memory = is_proactive_memory(mode, config)
             memory_rail = MemoryRail(
@@ -1659,9 +1686,11 @@ class JiuWenClawDeepAdapter:
                 ),
                 is_proactive=self._is_proactive_memory
             )
-            logger.info("[JiuWenClawDeepAdapter] MemoryRail create success")
+            logger.info("[JiuWenClawDeepAdapter] MemoryRail create success",
+                       extra={'user_visible': 'progress'})
         except Exception as exc:
-            logger.warning("[JiuWenClawDeepAdapter] MemoryRail create failed: %s", exc)
+            logger.warning("[JiuWenClawDeepAdapter] MemoryRail create failed: %s", exc,
+                          extra={'user_visible': 'progress'})
             memory_rail = None
         return memory_rail
 
@@ -1680,7 +1709,8 @@ class JiuWenClawDeepAdapter:
             has_base_url = embed_config.get("embed_base_url") if isinstance(embed_config, dict) else None
             has_model = embed_config.get("embed_model") if isinstance(embed_config, dict) else None
             if not all([has_api_key, has_base_url, has_model]):
-                logger.warning("[JiuWenClawDeepAdapter] CodingMemoryRail: no embedding config, skipping")
+                logger.warning("[JiuWenClawDeepAdapter] CodingMemoryRail: no embedding config, skipping",
+                          extra={'user_visible': 'progress'})
                 return None
 
             # 获取语言和 workspace 目录
@@ -1700,11 +1730,13 @@ class JiuWenClawDeepAdapter:
                 ),
                 language="cn" if language == "zh" else "en",
             )
-            logger.info("[JiuWenClawDeepAdapter] CodingMemoryRail create success")
+            logger.info("[JiuWenClawDeepAdapter] CodingMemoryRail create success",
+                       extra={'user_visible': 'progress'})
             return coding_memory_rail
 
         except Exception as exc:
-            logger.warning("[JiuWenClawDeepAdapter] CodingMemoryRail create failed: %s", exc)
+            logger.warning("[JiuWenClawDeepAdapter] CodingMemoryRail create failed: %s", exc,
+                          extra={'user_visible': 'progress'})
             return None
 
     @staticmethod
@@ -1712,9 +1744,11 @@ class JiuWenClawDeepAdapter:
         """Build LspRail."""
         try:
             lsp_rail = LspRail()
-            logger.info("[JiuWenClawDeepAdapter] LspRail create success")
+            logger.info("[JiuWenClawDeepAdapter] LspRail create success",
+                       extra={'user_visible': 'progress'})
         except Exception as exc:
-            logger.warning("[JiuWenClawDeepAdapter] LspRail create failed: %s", exc)
+            logger.warning("[JiuWenClawDeepAdapter] LspRail create failed: %s", exc,
+                          extra={'user_visible': 'progress'})
             lsp_rail = None
         return lsp_rail
 
@@ -1722,9 +1756,11 @@ class JiuWenClawDeepAdapter:
         """Build HeartbeatRail."""
         try:
             heartbeat_rail = HeartbeatRail()
-            logger.info("[JiuWenClawDeepAdapter] HeartbeatRail create success")
+            logger.info("[JiuWenClawDeepAdapter] HeartbeatRail create success",
+                       extra={'user_visible': 'progress'})
         except Exception as exc:
-            logger.warning("[JiuWenClawDeepAdapter] HeartbeatRail create failed: %s", exc)
+            logger.warning("[JiuWenClawDeepAdapter] HeartbeatRail create failed: %s", exc,
+                          extra={'user_visible': 'progress'})
             heartbeat_rail = None
         return heartbeat_rail
 
@@ -1734,10 +1770,12 @@ class JiuWenClawDeepAdapter:
         try:
             from jiuwenclaw.agentserver.deep_agent.rails.avatar_rail import AvatarPromptRail
             rail = AvatarPromptRail()
-            logger.info("[JiuWenClawDeepAdapter] AvatarPromptRail create success")
+            logger.info("[JiuWenClawDeepAdapter] AvatarPromptRail create success",
+                       extra={'user_visible': 'progress'})
             return rail
         except Exception as exc:
-            logger.warning("[JiuWenClawDeepAdapter] AvatarPromptRail create failed: %s", exc)
+            logger.warning("[JiuWenClawDeepAdapter] AvatarPromptRail create failed: %s", exc,
+                          extra={'user_visible': 'progress'})
             return None
 
     @staticmethod
@@ -1747,12 +1785,14 @@ class JiuWenClawDeepAdapter:
             rail = SkillProtocolPromptRail()
             logger.info(
                 "[JiuWenClawDeepAdapter] SkillProtocolPromptRail create success "
-                "(skill protocol prompt)"
+                "(skill protocol prompt)",
+                extra={'user_visible': 'progress'}
             )
             return rail
         except Exception as exc:
             logger.warning(
-                "[JiuWenClawDeepAdapter] SkillProtocolPromptRail create failed: %s", exc
+                "[JiuWenClawDeepAdapter] SkillProtocolPromptRail create failed: %s", exc,
+                extra={'user_visible': 'progress'}
             )
             return None
 
@@ -1763,12 +1803,14 @@ class JiuWenClawDeepAdapter:
             rail = SkillComplianceRail()
             logger.info(
                 "[JiuWenClawDeepAdapter] SkillComplianceRail create success "
-                "(skill compliance)"
+                "(skill compliance)",
+                extra={'user_visible': 'progress'}
             )
             return rail
         except Exception as exc:
             logger.warning(
-                "[JiuWenClawDeepAdapter] SkillComplianceRail create failed: %s", exc
+                "[JiuWenClawDeepAdapter] SkillComplianceRail create failed: %s", exc,
+                extra={'user_visible': 'progress'}
             )
             return None
 
@@ -1788,9 +1830,11 @@ class JiuWenClawDeepAdapter:
                 agent_id=self._agent_id,
                 service_id=self._service_id,
             )
-            logger.info("[JiuWenClawDeepAdapter] RuntimePromptRail create success")
+            logger.info("[JiuWenClawDeepAdapter] RuntimePromptRail create success",
+                       extra={'user_visible': 'progress'})
         except Exception as exc:
-            logger.warning("[JiuWenClawDeepAdapter] RuntimePromptRail create failed: %s", exc)
+            logger.warning("[JiuWenClawDeepAdapter] RuntimePromptRail create failed: %s", exc,
+                          extra={'user_visible': 'progress'})
             rail = None
         return rail
 
@@ -1802,9 +1846,11 @@ class JiuWenClawDeepAdapter:
             logger.info(
                 "[JiuWenClawDeepAdapter] DisabledToolsRail create success, disabled_tools: %s",
                 disabled_list,
+                extra={'user_visible': 'progress'}
             )
         except Exception as exc:
-            logger.warning("[JiuWenClawDeepAdapter] DisabledToolsRail create failed: %s", exc)
+            logger.warning("[JiuWenClawDeepAdapter] DisabledToolsRail create failed: %s", exc,
+                          extra={'user_visible': 'progress'})
             rail = None
         return rail
 
@@ -1827,6 +1873,7 @@ class JiuWenClawDeepAdapter:
             logger.warning(
                 "[JiuWenClawDeepAdapter] fast sub-agent PermissionInterruptRail build failed: %s",
                 exc,
+                extra={'user_visible': 'progress'}
             )
             return None
 
@@ -1845,6 +1892,7 @@ class JiuWenClawDeepAdapter:
             logger.warning(
                 "[JiuWenClawDeepAdapter] fast sub-agent DisabledToolsRail build failed: %s",
                 exc,
+                extra={'user_visible': 'progress'}
             )
             return None
 
@@ -4111,7 +4159,7 @@ class JiuWenClawDeepAdapter:
                         session_id)
             raise
         except Exception as e:
-            logger.error("[JiuWenClawDeepAdapter] Agent 任务执行异常: %s", e)
+            logger.error("[JiuWenClawDeepAdapter] Agent 任务执行异常: %s", e, extra={'user_visible': 'critical'})
             raise
         finally:
             TOOL_PERMISSION_CHANNEL_ID.reset(token_cid)

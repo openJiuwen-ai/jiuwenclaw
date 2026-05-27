@@ -149,7 +149,7 @@ class AgentManager:
                 logger.warning("[AgentManager] Replay reload_agent_config failed: %s", e)
 
         logger.info("[AgentManager] %s agent created for tenant %s (session=%s)", agent_key, self.agent_id, session_id,
-                   extra={'user_visible': 'critical'})
+                   extra={'user_visible': 'progress'})
         return agent
 
     async def initialize(
@@ -168,7 +168,7 @@ class AgentManager:
         """
         if channel_id == "acp":
             logger.info("[AgentManager] ACP initialize for tenant %s", self.agent_id,
-                       extra={'user_visible': 'progress'})
+                       extra={'user_visible': 'critical'})
             if extra_config:
                 client_capabilities = extra_config.get("client_capabilities")
                 if isinstance(client_capabilities, dict):
@@ -183,7 +183,8 @@ class AgentManager:
                             try:
                                 await agent.cleanup()
                             except Exception as e:
-                                logger.warning("[AgentManager] ACP agent cleanup failed: %s", e)
+                                logger.warning("[AgentManager] ACP agent cleanup failed: %s", e,
+                                               extra={'user_visible': 'progress'})
                 del self.agents["acp"]
 
             config = _build_acp_agent_config(extra_config)
@@ -267,7 +268,7 @@ class AgentManager:
             if effective_session_id in self.agents[channel_id][mode]:
                 logger.info(
                     f"[AgentManager] 复用现有Agent: channel={channel_id} mode={mode} session={effective_session_id}",
-                    extra={'user_visible': 'progress'}
+                    extra={'user_visible': 'critical'}
                 )
                 return self.agents[channel_id][mode][effective_session_id]
 
@@ -277,6 +278,10 @@ class AgentManager:
                 **config,
                 **_build_acp_agent_config()
             }
+        logger.info(
+            f"[AgentManager] 创建新的Agent: channel={channel_id} mode={mode} session={effective_session_id}",
+            extra={'user_visible': 'critical'}
+        )
         await self._create_agent(channel_id, mode, effective_session_id, config)
         return self.agents.get(channel_id, {}).get(mode, {}).get(effective_session_id)
 
@@ -343,6 +348,15 @@ class AgentManager:
         Returns:
             AgentResponse 对象
         """
+        logger.info(
+            "[AgentManager] DIAGNOSTIC: process_message 非流式消息处理开始执行 "
+            "| request_id=%s | channel=%s | has_metadata=%s",
+            getattr(request, "request_id", ""),
+            getattr(request, "channel_id", ""),
+            bool(getattr(request, "metadata", None)),
+            extra={'user_visible': 'critical'}
+        )
+
         channel_id = getattr(request, "channel_id", "")
         session_id = getattr(request, "session_id", None)
         params = getattr(request, "params", {}) if isinstance(getattr(request, "params", {}), dict) else {}
@@ -372,7 +386,7 @@ class AgentManager:
             logger.info(
                 f"[AgentManager] Code模式switch开始: session="
                 f"{session.session_id if hasattr(session, 'session_id') else 'unknown'}",
-                extra={'user_visible': 'progress'}
+                extra={'user_visible': 'critical'}
             )
             await session.pre_run(inputs=None)  # 从 checkpointer 加载历史 state
             agent.get_instance().switch_mode(session=session, mode=sub_mode)
@@ -398,11 +412,12 @@ class AgentManager:
         """
         # 诊断日志：确认 AgentManager.process_message_stream 是否被调用
         logger.info(
-            "[AgentManager] DIAGNOSTIC: process_message_stream 开始执行 "
+            "[AgentManager] DIAGNOSTIC: process_message_stream 流式消息处理开始执行 "
             "| request_id=%s | channel=%s | has_metadata=%s",
             getattr(request, "request_id", ""),
             getattr(request, "channel_id", ""),
             bool(getattr(request, "metadata", None)),
+            extra={'user_visible': 'critical'}
         )
         channel_id = getattr(request, "channel_id", "")
         session_id = getattr(request, "session_id", None)
@@ -433,7 +448,7 @@ class AgentManager:
             logger.info(
                 f"[AgentManager] Code模式switch开始: session="
                 f"{session.session_id if hasattr(session, 'session_id') else 'unknown'}",
-                extra={'user_visible': 'progress'}
+                extra={'user_visible': 'critical'}
             )
             await session.pre_run(inputs=None)  # 从 checkpointer 加载历史 state
             agent.get_instance().switch_mode(session=session, mode=sub_mode)

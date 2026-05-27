@@ -259,7 +259,7 @@ class AgentWebSocketServer:
             )
         logger.info(
             "[AgentWebSocketServer] 已启动: ws://%s:%s", self._host, self._port,
-            extra={'user_visible': 'progress'},
+            extra={'user_visible': 'critical'},
         )
 
     async def _process_request(self, *args: Any) -> Any:
@@ -307,7 +307,7 @@ class AgentWebSocketServer:
         await self._trigger_agent_server_started_hook()
 
         remote = ws.remote_address
-        logger.info("[AgentWebSocketServer] 新连接: %s", remote, extra={'user_visible': 'progress'})
+        logger.info("[AgentWebSocketServer] 新连接: %s", remote, extra={'user_visible': 'critical'})
 
         send_lock = asyncio.Lock()
         self._current_ws = ws
@@ -323,11 +323,13 @@ class AgentWebSocketServer:
                     identity.user_id,
                     identity.domain_id,
                     identity.app_id,
+                    extra={'user_visible': 'progress'}
                 )
             else:
-                logger.debug("[AgentWebSocketServer] 未获取到身份信息（无 provider 或获取失败）")
+                logger.debug("[AgentWebSocketServer] 未获取到身份信息（无 provider 或获取失败）", 
+                             extra={'user_visible': 'progress'})
         except Exception as e:
-            logger.warning("[AgentWebSocketServer] 身份获取异常: %s", e)
+            logger.warning("[AgentWebSocketServer] 身份获取异常: %s", e, extra={'user_visible': 'progress'})
 
         # 发送 connection.ack 事件，通知 Gateway 服务端已就绪
         try:
@@ -351,9 +353,10 @@ class AgentWebSocketServer:
                 tasks.add(task)
                 task.add_done_callback(tasks.discard)
         except websockets.exceptions.ConnectionClosed:
-            logger.info("[AgentWebSocketServer] 连接关闭: %s", remote)
+            logger.info("[AgentWebSocketServer] 连接关闭: %s", remote, extra={'user_visible': 'critical'})
         except Exception as e:
-            logger.exception("[AgentWebSocketServer] 连接处理异常 (%s): %s", remote, e)
+            logger.exception("[AgentWebSocketServer] 连接处理异常 (%s): %s", remote, e, 
+                             extra={'user_visible': 'critical'})
         finally:
             self._current_ws = None
             self._current_send_lock = None
@@ -365,7 +368,8 @@ class AgentWebSocketServer:
                     reason=f"[gateway ws closed {remote}] ",
                 )
             except Exception:
-                logger.exception("[AgentWebSocketServer] cancel_all_inflight_work failed")
+                logger.exception("[AgentWebSocketServer] cancel_all_inflight_work failed", 
+                                 extra={'user_visible': 'progress'})
             try:
                 from jiuwenclaw.agentserver.team import get_team_manager
 
@@ -373,7 +377,7 @@ class AgentWebSocketServer:
                     reason=f"[gateway ws closed {remote}] ",
                 )
             except Exception:
-                logger.exception("[AgentWebSocketServer] team stream cancel failed")
+                logger.exception("[AgentWebSocketServer] team stream cancel failed", extra={'user_visible': 'progress'})
             if tasks:
                 for t in list(tasks):
                     if not t.done():
@@ -397,22 +401,21 @@ class AgentWebSocketServer:
         try:
             data = json.loads(raw)
             logger.info(
-                "[AgentWebSocketServer] inbound raw payload: %s",
+                "[AgentWebSocketServer] Inbound raw payload: %s",
                 _mask_query_for_log(data),
+                extra={'user_visible': 'critical'}
             )
             logger.info(
-                f"[AgentWebSocketServer] JSON解析成功: request_id={data.get('request_id', '')}",
-                extra={'user_visible': 'progress'}
+                f"[AgentWebSocketServer] Inbound raw payload json 解析成功: request_id={data.get('request_id', '')}"
             )
         except json.JSONDecodeError as e:
             logger.error(
-                f"[AgentWebSocketServer] JSON解析失败: error={str(e)}",
-                extra={'user_visible': 'critical'}
+                f"[AgentWebSocketServer] Inbound raw payload json 解析失败: error={str(e)}"
             )
             wire = encode_json_parse_error_wire(
                 request_id="",
                 channel_id="",
-                message=f"JSON 解析失败: {e}",
+                message=f"Inbound raw payload json 解析失败: {e}",
             )
             async with send_lock:
                 await ws.send(json.dumps(wire, ensure_ascii=False))
@@ -421,12 +424,11 @@ class AgentWebSocketServer:
         try:
             env = E2AEnvelope.from_dict(data)
             logger.info(
-                f"[AgentWebSocketServer] E2A协议解析成功: request_id={env.request_id}",
-                extra={'user_visible': 'progress'}
+                f"[AgentWebSocketServer] Inbound raw payload E2A协议解析成功: request_id={env.request_id}"
             )
         except Exception as parse_err:
             logger.warning(
-                "[AgentWebSocketServer] E2A from_dict 失败，按旧载荷解析: %s",
+                "[AgentWebSocketServer] Inbound raw payload E2A协议解析失败，按旧 payload 解析: %s",
                 parse_err,
             )
             request = _payload_to_request(data)
@@ -492,6 +494,7 @@ class AgentWebSocketServer:
             request.request_id,
             request.channel_id,
             request.is_stream,
+            extra={'user_visible': 'critical'}
         )
 
         from jiuwenclaw.interface_resp import maybe_track_e2a_resp
@@ -540,85 +543,135 @@ class AgentWebSocketServer:
             await self._trigger_before_chat_request_hook(request)
 
             if request.req_method == ReqMethod.SESSION_LIST:
+                logger.info(f"[AgentWebSocketServer] 处理 session.list: request_id={request.request_id}",
+                           extra={'user_visible': 'progress'})
                 await self._handle_session_list(ws, request, send_lock)
                 return
             if request.req_method == ReqMethod.SESSION_RENAME:
+                logger.info(f"[AgentWebSocketServer] 处理 session.rename: request_id={request.request_id}",
+                           extra={'user_visible': 'progress'})
                 await self._handle_session_rename(ws, request, send_lock)
                 return
             if request.req_method in get_permissions_config_req_methods():
+                logger.info(f"[AgentWebSocketServer] 处理 permissions.config: request_id={request.request_id}",
+                           extra={'user_visible': 'progress'})
                 await self._handle_permissions_config(ws, request, send_lock)
                 return
             if request.req_method == ReqMethod.HISTORY_GET:
+                logger.info(f"[AgentWebSocketServer] 处理 history.get: request_id={request.request_id}",
+                           extra={'user_visible': 'progress'})
                 if request.is_stream:
                     await self._handle_history_get_stream(ws, request, send_lock)
                 else:
                     await self._handle_history_get(ws, request, send_lock)
                 return
             if request.req_method == ReqMethod.COMMAND_ADD_DIR:
+                logger.info(f"[AgentWebSocketServer] 处理 command.add_dir: request_id={request.request_id}",
+                           extra={'user_visible': 'progress'})
                 await self._handle_command_add_dir(ws, request, send_lock)
                 return
             if request.req_method == ReqMethod.COMMAND_CHROME:
+                logger.info(f"[AgentWebSocketServer] 处理 command.chrome: request_id={request.request_id}",
+                           extra={'user_visible': 'progress'})
                 await self._handle_command_chrome(ws, request, send_lock)
                 return
             if request.req_method == ReqMethod.COMMAND_COMPACT:
+                logger.info(f"[AgentWebSocketServer] 处理 command.compact: request_id={request.request_id}",
+                           extra={'user_visible': 'progress'})
                 await self._handle_command_compact(ws, request, send_lock)
                 return
             if request.req_method == ReqMethod.COMMAND_DIFF:
+                logger.info(f"[AgentWebSocketServer] 处理 command.diff: request_id={request.request_id}",
+                           extra={'user_visible': 'progress'})
                 await self._handle_command_diff(ws, request, send_lock)
                 return
             if request.req_method == ReqMethod.COMMAND_LS:
+                logger.info(f"[AgentWebSocketServer] 处理 command.ls: request_id={request.request_id}",
+                           extra={'user_visible': 'progress'})
                 await self._handle_command_ls(ws, request, send_lock)
                 return
             if request.req_method == ReqMethod.COMMAND_VIEW:
+                logger.info(f"[AgentWebSocketServer] 处理 command.view: request_id={request.request_id}",
+                           extra={'user_visible': 'progress'})
                 await self._handle_command_view(ws, request, send_lock)
                 return
             if request.req_method == ReqMethod.COMMAND_MODEL:
+                logger.info(f"[AgentWebSocketServer] 处理 command.model: request_id={request.request_id}",
+                           extra={'user_visible': 'progress'})
                 await self._handle_command_model(ws, request, send_lock)
                 return
             if request.req_method == ReqMethod.COMMAND_RESUME:
+                logger.info(f"[AgentWebSocketServer] 处理 command.resume: request_id={request.request_id}",
+                           extra={'user_visible': 'progress'})
                 await self._handle_command_resume(ws, request, send_lock)
                 return
             if request.req_method == ReqMethod.COMMAND_SESSION:
+                logger.info(f"[AgentWebSocketServer] 处理 command.session: request_id={request.request_id}",
+                           extra={'user_visible': 'progress'})
                 await self._handle_command_session(ws, request, send_lock)
                 return
             if request.req_method == ReqMethod.BROWSER_START:
+                logger.info(f"[AgentWebSocketServer] 处理 browser.start: request_id={request.request_id}",
+                           extra={'user_visible': 'progress'})
                 await self._handle_browser_start(ws, request, send_lock)
                 return
             if request.req_method == ReqMethod.BROWSER_RUNTIME_RESTART:
+                logger.info(f"[AgentWebSocketServer] 处理 browser.runtime_restart: request_id={request.request_id}",
+                           extra={'user_visible': 'progress'})
                 await self._handle_browser_runtime_restart(ws, request, send_lock)
                 return
             if request.req_method == ReqMethod.CONFIG_CACHE_CLEAR:
+                logger.info(f"[AgentWebSocketServer] 处理 config.cache_clear: request_id={request.request_id}",
+                           extra={'user_visible': 'progress'})
                 await self._handle_config_cache_clear(ws, request, send_lock)
                 return
             if request.req_method == ReqMethod.AGENT_RELOAD_CONFIG:
+                logger.info(f"[AgentWebSocketServer] 处理 agent.reload_config: request_id={request.request_id}",
+                           extra={'user_visible': 'progress'})
                 await self._handle_agent_reload_config(ws, request, send_lock)
                 return
             if request.req_method == ReqMethod.EXTENSIONS_LIST:
+                logger.info(f"[AgentWebSocketServer] 处理 extensions.list: request_id={request.request_id}",
+                           extra={'user_visible': 'progress'})
                 await self._handle_extensions_list(ws, request, send_lock)
                 return
             if request.req_method == ReqMethod.EXTENSIONS_IMPORT:
+                logger.info(f"[AgentWebSocketServer] 处理 extensions.import: request_id={request.request_id}",
+                           extra={'user_visible': 'progress'})
                 await self._handle_extensions_import(ws, request, send_lock)
                 return
             if request.req_method == ReqMethod.EXTENSIONS_DELETE:
+                logger.info(f"[AgentWebSocketServer] 处理 extensions.delete: request_id={request.request_id}",
+                           extra={'user_visible': 'progress'})
                 await self._handle_extensions_delete(ws, request, send_lock)
                 return
             if request.req_method == ReqMethod.EXTENSIONS_TOGGLE:
+                logger.info(f"[AgentWebSocketServer] 处理 extensions.toggle: request_id={request.request_id}",
+                           extra={'user_visible': 'progress'})
                 await self._handle_extensions_toggle(ws, request, send_lock)
                 return
             # 文件传输处理
             event_type = request.params.get("event_type") if isinstance(request.params, dict) else None
             if event_type in FILE_TRANSFER_EVENT_TYPES:
+                logger.info(f"[AgentWebSocketServer] 处理 file_transfer: event_type={event_type}, \
+                            request_id={request.request_id}",
+                           extra={'user_visible': 'progress'})
                 await self._handle_file_transfer(ws, request, send_lock)
                 return
             if request.is_stream:
+                logger.info(f"[AgentWebSocketServer] 处理 chat 流式请求: request_id={request.request_id}",
+                           extra={'user_visible': 'progress'})
                 await self._handle_stream(ws, request, send_lock)
             else:
+                logger.info(f"[AgentWebSocketServer] 处理 chat 非流式请求: request_id={request.request_id}",
+                           extra={'user_visible': 'progress'})
                 await self._handle_unary(ws, request, send_lock)
         except Exception as e:
             logger.exception(
                 "[AgentWebSocketServer] 处理请求失败: request_id=%s: %s",
                 request.request_id,
                 e,
+                extra={'user_visible': 'critical'}
             )
             error_resp = AgentResponse(
                 request_id=request.request_id,
@@ -726,6 +779,7 @@ class AgentWebSocketServer:
             "[AgentWebSocketServer] 自定义处理器响应已发送: request_id=%s ok=%s",
             request.request_id,
             resp.ok,
+            extra={'user_visible': 'progress'}
         )
 
     async def _handle_unary(self, ws: Any, request: AgentRequest, send_lock: asyncio.Lock) -> None:
@@ -758,6 +812,7 @@ class AgentWebSocketServer:
         logger.info(
             "[AgentWebSocketServer] 非流式响应已发送: request_id=%s",
             request.request_id,
+            extra={'user_visible': 'progress'}
         )
 
     async def _handle_stream(self, ws: Any, request: AgentRequest, send_lock: asyncio.Lock) -> None:
