@@ -24,7 +24,6 @@ from jiuwenclaw.sandbox import sandbox_routing_enabled
 
 
 logger = logging.getLogger(__name__)
-default_headers = get_oa_auth_headers()
 
 
 def generate_auth_headers(env_config):
@@ -70,7 +69,7 @@ def format_skill_data(raw_skills):
 def search_skills(query):
     if sandbox_routing_enabled():
         api_url = os.getenv("SKILL_SEARCH_URL")
-        auth_headers = default_headers
+        auth_headers = get_oa_auth_headers()
     else:
         raw = os.getenv("SKILL_SEARCH_ENV_CONFIG", "")
         if not raw:
