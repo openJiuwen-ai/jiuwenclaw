@@ -98,7 +98,7 @@ EXCLUDED_TOOLS_FORK = EXCLUDED_TOOLS_SPAWN | {"fork_agent"}
 
 # Subagent ReAct cap when parent has no usable max_iterations (mirrors interface_deep fallback).
 _DEFAULT_SUBAGENT_MAX_ITERATIONS = 15
-_SUBAGENT_STREAM_FLUSH_INTERVAL_SECONDS = 1.0
+_SUBAGENT_STREAM_FLUSH_INTERVAL_SECONDS = 60.0
 
 
 class ForkAgentExecutor:
