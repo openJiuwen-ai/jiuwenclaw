@@ -259,9 +259,9 @@ class JiuClawStreamEventRail(DeepAgentRail):
         session = ctx.session
         if session is None or not isinstance(ctx.inputs, ToolCallInputs):
             return
-        await self._emit_tool_result(session, ctx.inputs.tool_call, ctx.inputs.tool_result)
         tool_name = ctx.inputs.tool_name
         if tool_name == "skill_complete":
+            await self._emit_tool_result(session, ctx.inputs.tool_call, ctx.inputs.tool_result)
             report = _extract_skill_complete_arg(ctx.inputs.tool_call, "report")
             if report:
                 await self._emit_user_visible_text(session, report)
@@ -287,10 +287,11 @@ class JiuClawStreamEventRail(DeepAgentRail):
             if stop_payload is not None:
                 formatted = stop_payload["formatted_questions"]
                 await self._emit_user_visible_text(session, formatted)
+                await self._emit_tool_result(session, ctx.inputs.tool_call, ctx.inputs.tool_result)
                 ctx.request_force_finish(
                     {
                         "output": formatted,
-                        "result_type": "answer",
+                        "result_type": "interrupt",
                         "ask_user_question": {
                             "status": stop_payload["status"],
                             "awaiting_user_reply": True,
@@ -303,6 +304,7 @@ class JiuClawStreamEventRail(DeepAgentRail):
                 )
                 return
 
+        await self._emit_tool_result(session, ctx.inputs.tool_call, ctx.inputs.tool_result)
 
         if tool_name in _TODO_TOOL_NAMES and self._conversation_id:
             await self._emit_todo_updated(ctx.agent, session, self._conversation_id)

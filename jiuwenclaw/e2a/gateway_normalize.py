@@ -358,27 +358,21 @@ def e2a_response_from_agent_chunk(
             is_stream=is_stream,
         )
 
-    # Tool / HITL: stream transport closes but invocation is not a successful
-    # terminal (e.g. permission or ask_user_question waiting for chat.user_answer).
-    # Emit in_progress chunk with is_final=False so clients do not treat as "task done".
+    # HITL pauses end the current transport turn even though the logical
+    # invocation is waiting for a later user message. Relay/frontends need a
+    # final frame to clear the active stream and stop queuing user replies.
     if chunk.is_complete and isinstance(pl, dict) and pl.get("awaiting_user_input") is True:
-        body_chunk: dict[str, Any] = {
-            "delta_kind": "custom",
-            "delta": pl,
-            "event_type": "chat.invocation_paused",
-            "awaiting_user_input": True,
-        }
         return E2AResponse(
             protocol_version=E2A_PROTOCOL_VERSION,
             response_id=response_id,
             request_id=chunk.request_id,
             sequence=sequence,
-            is_final=False,
-            status=E2A_RESPONSE_STATUS_IN_PROGRESS,
-            response_kind=E2A_RESPONSE_KIND_E2A_CHUNK,
+            is_final=True,
+            status=E2A_RESPONSE_STATUS_SUCCEEDED,
+            response_kind=E2A_RESPONSE_KIND_E2A_COMPLETE,
             timestamp=ts,
             provenance=prov,
-            body=body_chunk,
+            body={"result": pl},
             channel=chunk.channel_id or None,
             identity_origin=IdentityOrigin.AGENT,
             is_stream=is_stream,

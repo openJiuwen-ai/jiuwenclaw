@@ -9,11 +9,14 @@ from jiuwenclaw.e2a.gateway_normalize import (
     E2A_LEGACY_AGENT_REQUEST_KEY,
     build_fallback_e2a,
     channel_context_for_channel_reply,
+    e2a_response_from_agent_chunk,
     e2a_from_agent_fields,
     message_to_e2a_or_fallback,
     message_to_legacy_agent_dict,
 )
+from jiuwenclaw.e2a.constants import E2A_RESPONSE_KIND_E2A_COMPLETE
 from jiuwenclaw.e2a.models import E2AEnvelope
+from jiuwenclaw.schema.agent import AgentResponseChunk
 from jiuwenclaw.schema.message import Message, ReqMethod
 
 
@@ -107,3 +110,18 @@ def test_build_fallback_and_legacy_keys():
     inner = env.channel_context[E2A_INTERNAL_CONTEXT_KEY]
     assert inner[E2A_FALLBACK_FAILED_KEY] is True
     assert inner[E2A_LEGACY_AGENT_REQUEST_KEY]["req_method"] == "history.get"
+
+
+def test_invocation_paused_chunk_is_final_complete():
+    chunk = AgentResponseChunk(
+        request_id="r-pause",
+        channel_id="web",
+        payload={"event_type": "chat.invocation_paused", "awaiting_user_input": True},
+        is_complete=True,
+    )
+
+    resp = e2a_response_from_agent_chunk(chunk, response_id="r-pause", sequence=9)
+
+    assert resp.is_final is True
+    assert resp.response_kind == E2A_RESPONSE_KIND_E2A_COMPLETE
+    assert resp.body["result"]["awaiting_user_input"] is True
