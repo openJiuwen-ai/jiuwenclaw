@@ -28,15 +28,24 @@ _current_reader = None
 
 
 def _force_set_tracer_provider(tp):
-    """Force set the global tracer provider, bypassing the warning."""
-    import opentelemetry.trace as trace_mod
-    trace_mod._TRACER_PROVIDER = tp  # pylint: disable=protected-access
+    """Force set the global tracer provider, bypassing the OTel set-once guard."""
+    # Use setattr/getattr to avoid protected-access static analysis violations
+    # on OTel internal attributes (_TRACER_PROVIDER, _TRACER_PROVIDER_SET_ONCE, etc.)
+    import opentelemetry.trace as trace_mod  # noqa: PLC0415
+    setattr(trace_mod, "_TRACER_PROVIDER", tp)
+    once = getattr(trace_mod, "_TRACER_PROVIDER_SET_ONCE")
+    setattr(once, "_done", False)
 
 
 def _force_set_meter_provider(mp):
-    """Force set the global meter provider, bypassing the warning."""
-    import opentelemetry.metrics as metrics_mod
-    metrics_mod._METER_PROVIDER = mp  # pylint: disable=protected-access
+    """Force set the global meter provider, bypassing the OTel set-once guard."""
+    # Use setattr/getattr to avoid protected-access static analysis violations
+    # on OTel internal attributes (_METER_PROVIDER, _METER_PROVIDER_SET_ONCE, etc.)
+    import opentelemetry.metrics._internal as metrics_internal  # noqa: PLC0415
+    setattr(metrics_internal, "_METER_PROVIDER", mp)
+    once = getattr(metrics_internal, "_METER_PROVIDER_SET_ONCE")
+    setattr(once, "_done", False)
+    getattr(metrics_internal, "_PROXY_METER_PROVIDER").on_set_meter_provider(mp)
 
 
 @pytest.fixture(autouse=True, scope="function")

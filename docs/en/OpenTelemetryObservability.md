@@ -118,6 +118,56 @@ A full request trace looks like this:
 - `gen_ai.tool.name` — Tool name
 - `gen_ai.tool.call.id` — Call ID
 - `gen_ai.span.type` — `"tool"`
+- `gen_ai.operation.name` — Operation name (not set for regular tools; `load_skill` / `release_skill` for skill tools)
+- `gen_ai.skill.name` — Skill name (set on skill_tool / skill_complete calls)
+- `gen_ai.skill.id` — Unique skill identifier (set when skill_tool loads, derived from skill_name hash)
+
+### Skill trace
+
+Skill observability follows the [OpenTelemetry GenAI #86](https://github.com/open-telemetry/semantic-conventions/issues/86) community consensus: **do not create independent skill spans; instead, set skill attributes on tool execution spans**. Because skill loading (`skill_tool`) and releasing (`skill_complete`) are themselves tool calls, `TelemetryRail` already creates `gen_ai.tool.execute` spans for them.
+
+**Design highlights:**
+- Skill attributes are set directly on the existing `gen_ai.tool.execute: skill_tool` / `gen_ai.tool.execute: skill_complete` spans
+- `gen_ai.operation.name` distinguishes loading (`load_skill`) from releasing (`release_skill`)
+- Span events record key skill lifecycle moments
+- No independent `gen_ai.skill` span is created, consistent with the community consensus
+
+**Trace structure with skill:**
+
+```
+jiuwenclaw.agent.invoke
+├── gen_ai.chat                              ← LLM decides to call skill_tool
+├── gen_ai.tool.execute: skill_tool
+│   ├── gen_ai.operation.name: "load_skill"
+│   ├── gen_ai.skill.name: "data_analysis"
+│   ├── gen_ai.skill.id: "skill_a3f8c2d1"
+│   └── ◆ skill.loaded {skill.name, skill.path}
+├── gen_ai.chat                              ← skill step reasoning
+├── gen_ai.tool.execute: bash                ← tool calls within skill steps
+├── gen_ai.chat
+├── gen_ai.tool.execute: skill_complete
+│   ├── gen_ai.operation.name: "release_skill"
+│   ├── gen_ai.skill.name: "data_analysis"
+│   └── ◆ skill.released {skill.name}
+└── gen_ai.chat                              ← final answer
+```
+
+**Skill span events:**
+
+| Event | Trigger | Attributes |
+|-------|---------|------------|
+| `skill.loaded` | `skill_tool` returns and confirms SKILL.md body was loaded (`is_skill_body` is true) | `skill.name`, `skill.path` |
+| `skill.released` | `skill_complete` call finishes | `skill.name` |
+
+**Alignment with OTel #86:**
+
+| #86 proposal | JiuWenClaw implementation |
+|-------------|--------------------------|
+| No independent skill span | No independent span; attributes on tool spans |
+| `gen_ai.skill.name` — conditionally required | Set on skill_tool / skill_complete |
+| `gen_ai.skill.id` — conditionally required | `skill_<hash(skill_name)>` format |
+| `gen_ai.skill.description` — recommended | Not set (no structured metadata source in SKILL.md) |
+| `gen_ai.skill.version` — recommended | Not set (no version management at this time) |
 
 ## 5. Metrics
 

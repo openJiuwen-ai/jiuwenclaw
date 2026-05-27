@@ -97,3 +97,9 @@ GEN_AI_STREAMING_FIRST_TOKEN = "gen_ai.streaming.first_token"
 # === Tool execution ===
 GEN_AI_TOOL_ARGUMENTS = "gen_ai.tool.arguments"
 GEN_AI_TOOL_RESULT = "gen_ai.tool.result"
+
+# === Skill (OTel GenAI #86) ===
+GEN_AI_SKILL_NAME = "gen_ai.skill.name"
+GEN_AI_SKILL_ID = "gen_ai.skill.id"
+GEN_AI_SKILL_DESCRIPTION = "gen_ai.skill.description"
+GEN_AI_SKILL_VERSION = "gen_ai.skill.version"

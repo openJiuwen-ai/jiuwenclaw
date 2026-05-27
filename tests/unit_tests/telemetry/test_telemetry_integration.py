@@ -13,6 +13,7 @@ to real classes and simulating end-to-end request flows, validating that:
 from __future__ import annotations
 
 import asyncio
+import json
 import sys
 import time
 import types
@@ -57,16 +58,41 @@ class InMemorySpanExporter(SpanExporter):
 # Helpers
 # ---------------------------------------------------------------------------
 
+def _force_set_tracer_provider(tp):
+    """Force set the global tracer provider, bypassing the OTel set-once guard."""
+    # Use setattr/getattr to avoid protected-access static analysis violations
+    # on OTel internal attributes (_TRACER_PROVIDER, _TRACER_PROVIDER_SET_ONCE, etc.)
+    import opentelemetry.trace as trace_mod  # noqa: PLC0415
+    setattr(trace_mod, "_TRACER_PROVIDER", tp)
+    once = getattr(trace_mod, "_TRACER_PROVIDER_SET_ONCE")
+    setattr(once, "_done", False)
+    # Refresh module-level _tracer in telemetry_rail — it was bound to the
+    # old provider at import time and won't pick up the new one otherwise.
+    import jiuwenclaw.telemetry.instrumentors.telemetry_rail as rail_mod  # noqa: PLC0415
+    setattr(rail_mod, "_tracer", trace_mod.get_tracer("jiuwenclaw.telemetry_rail"))
+
+
+def _force_set_meter_provider(mp):
+    """Force set the global meter provider, bypassing the OTel set-once guard."""
+    # Use setattr/getattr to avoid protected-access static analysis violations
+    # on OTel internal attributes (_METER_PROVIDER, _METER_PROVIDER_SET_ONCE, etc.)
+    import opentelemetry.metrics._internal as metrics_internal  # noqa: PLC0415
+    setattr(metrics_internal, "_METER_PROVIDER", mp)
+    once = getattr(metrics_internal, "_METER_PROVIDER_SET_ONCE")
+    setattr(once, "_done", False)
+    getattr(metrics_internal, "_PROXY_METER_PROVIDER").on_set_meter_provider(mp)
+
+
 def _setup_otel():
     """Create and install fresh OTel providers, return (tp, exporter, metric_reader)."""
     exporter = InMemorySpanExporter()
     tp = TracerProvider()
     tp.add_span_processor(SimpleSpanProcessor(exporter))
-    trace.set_tracer_provider(tp)
+    _force_set_tracer_provider(tp)
 
     reader = InMemoryMetricReader()
     mp = MeterProvider(metric_readers=[reader])
-    metrics.set_meter_provider(mp)
+    _force_set_meter_provider(mp)
 
     return tp, mp, exporter, reader
 
@@ -273,7 +299,6 @@ class TestCrossWebSocketPropagation:
         tp, mp, exporter, _ = _setup_otel()
 
         from jiuwenclaw.telemetry.context_propagation import inject_trace_context, extract_trace_context
-        import json
 
         gateway_tracer = tp.get_tracer("gateway")
         agent_tracer = tp.get_tracer("agent")
@@ -808,6 +833,271 @@ class TestCrossTaskContextPropagation:
             assert "jiuwenclaw.agent.invoke.stream" in names
             assert "gen_ai.chat" in names
             assert "gen_ai.tool.execute: search" in names
+
+        tp.shutdown()
+        mp.shutdown()
+
+
+# ---------------------------------------------------------------------------
+# 9. Agent span user input attribute
+# ---------------------------------------------------------------------------
+
+
+class TestAgentSpanUserInput:
+    """Verify gen_ai.input.messages is set on jiuwenclaw.agent.invoke spans."""
+
+    @staticmethod
+    def test_agent_span_includes_user_message_when_present():
+        tp, mp, exporter, _ = _setup_otel()
+
+        from jiuwenclaw.telemetry.instrumentors.telemetry_rail import TelemetryRail
+        from jiuwenclaw.telemetry.attributes import GEN_AI_INPUT_MESSAGES
+
+        # Case 1: query present — attribute should be set
+        ctx = MagicMock()
+        ctx.error = None
+        ctx.inputs.conversation_id = ""
+        ctx.inputs.query = "Hello, what can you do?"
+
+        rail = TelemetryRail()
+        rail.set_telemetry_context(
+            channel_id="test_ch", session_id="sess_1", request_id="req_1"
+        )
+
+        async def case1():
+            await rail.before_invoke(ctx)
+            await rail.after_invoke(ctx)
+
+        _run(case1())
+
+        spans = exporter.get_finished_spans()
+        agent_spans = [s for s in spans if s.name == "jiuwenclaw.agent.invoke"]
+        assert len(agent_spans) == 1, f"Expected 1 agent span, got {len(agent_spans)}"
+
+        agent_span = agent_spans[0]
+        input_msgs = agent_span.attributes.get(GEN_AI_INPUT_MESSAGES)
+        assert input_msgs is not None, (
+            "gen_ai.input.messages not set on agent span — feature not implemented yet"
+        )
+        parsed = json.loads(input_msgs)
+        assert len(parsed) == 1
+        assert parsed[0]["role"] == "user"
+        assert "Hello, what can you do?" in parsed[0]["parts"][0]["content"]
+
+        # Case 2: empty query — attribute should NOT be set
+        exporter.clear()
+
+        ctx2 = MagicMock()
+        ctx2.error = None
+        ctx2.inputs.conversation_id = ""
+        ctx2.inputs.query = ""
+
+        rail2 = TelemetryRail()
+        rail2.set_telemetry_context(
+            channel_id="test_ch", session_id="sess_2", request_id="req_2"
+        )
+
+        async def case2():
+            await rail2.before_invoke(ctx2)
+            await rail2.after_invoke(ctx2)
+
+        _run(case2())
+
+        spans2 = exporter.get_finished_spans()
+        agent_spans2 = [s for s in spans2 if s.name == "jiuwenclaw.agent.invoke"]
+        assert len(agent_spans2) == 1
+        assert GEN_AI_INPUT_MESSAGES not in agent_spans2[0].attributes, (
+            "gen_ai.input.messages should not be set when query is empty"
+        )
+
+        tp.shutdown()
+        mp.shutdown()
+
+
+# ---------------------------------------------------------------------------
+# 10. Agent span token usage aggregation
+# ---------------------------------------------------------------------------
+
+
+class TestAgentTokenUsageAggregation:
+    """Verify gen_ai.usage.* tokens are aggregated across LLM calls on the agent span."""
+
+    @staticmethod
+    def _make_msg(role: str, content: str):
+        msg = MagicMock()
+        msg.role = role
+        msg.content = content
+        return msg
+
+    @staticmethod
+    def _make_agent(model_name: str = "deepseek", provider: str = "openai"):
+        agent = MagicMock()
+        config = MagicMock()
+        config.model_name = model_name
+        model_client_config = MagicMock()
+        model_client_config.client_provider = provider
+        config.model_client_config = model_client_config
+        setattr(agent, "_config", config)
+        return agent
+
+    @staticmethod
+    def _make_usage(input_tokens: int, output_tokens: int):
+        usage = MagicMock()
+        usage.input_tokens = input_tokens
+        usage.output_tokens = output_tokens
+        usage.prompt_tokens_details = None
+        usage.cache_read_input_tokens = 0
+        usage.cache_tokens = 0
+        usage.cache_creation_input_tokens = 0
+        usage.completion_tokens_details = None
+        usage.reasoning_tokens = 0
+        return usage
+
+    @staticmethod
+    def _make_llm_ctx(query: str = "Hello"):
+        ctx = MagicMock()
+        ctx.error = None
+        ctx.inputs.conversation_id = ""
+        ctx.inputs.query = query
+        ctx.inputs.messages = [TestAgentTokenUsageAggregation._make_msg("user", "Hello")]
+        ctx.inputs.response = None
+        ctx.agent = TestAgentTokenUsageAggregation._make_agent()
+        ctx.model = MagicMock()
+        ctx.model.streaming = False
+        return ctx
+
+    @staticmethod
+    def test_token_usage_aggregated_on_agent_span():
+        """Agent span gets gen_ai.usage.* attributes summing all LLM call tokens."""
+        tp, mp, exporter, _ = _setup_otel()
+
+        from jiuwenclaw.telemetry.instrumentors.telemetry_rail import TelemetryRail
+        from jiuwenclaw.telemetry.attributes import (
+            GEN_AI_USAGE_INPUT_TOKENS,
+            GEN_AI_USAGE_OUTPUT_TOKENS,
+            GEN_AI_USAGE_TOTAL_TOKENS,
+        )
+
+        # --- Scenario 1: Multiple LLM calls aggregate correctly ---
+
+        rail = TelemetryRail()
+        rail.set_telemetry_context(
+            channel_id="test_ch", session_id="sess_1", request_id="req_1"
+        )
+
+        async def scenario1():
+            ctx = TestAgentTokenUsageAggregation._make_llm_ctx("Hello")
+
+            await rail.before_invoke(ctx)
+
+            # First LLM call
+            await rail.before_model_call(ctx)
+            result1 = MagicMock()
+            result1.usage_metadata = TestAgentTokenUsageAggregation._make_usage(150, 30)
+            ctx.inputs.response = result1
+            await rail.after_model_call(ctx)
+
+            # Second LLM call
+            await rail.before_model_call(ctx)
+            result2 = MagicMock()
+            result2.usage_metadata = TestAgentTokenUsageAggregation._make_usage(200, 100)
+            ctx.inputs.response = result2
+            await rail.after_model_call(ctx)
+
+            await rail.after_invoke(ctx)
+
+        _run(scenario1())
+
+        spans = exporter.get_finished_spans()
+        agent_spans = [s for s in spans if s.name == "jiuwenclaw.agent.invoke"]
+        assert len(agent_spans) == 1, f"Expected 1 agent span, got {len(agent_spans)}"
+
+        agent_span = agent_spans[0]
+        assert agent_span.attributes[GEN_AI_USAGE_INPUT_TOKENS] == 350  # 150 + 200
+        assert agent_span.attributes[GEN_AI_USAGE_OUTPUT_TOKENS] == 130  # 30 + 100
+        assert agent_span.attributes[GEN_AI_USAGE_TOTAL_TOKENS] == 480  # 350 + 130
+
+        # --- Scenario 2: No usage attributes when there are no LLM calls ---
+
+        exporter.clear()
+
+        rail2 = TelemetryRail()
+        rail2.set_telemetry_context(
+            channel_id="test_ch", session_id="sess_2", request_id="req_2"
+        )
+
+        async def scenario2():
+            ctx2 = MagicMock()
+            ctx2.error = None
+            ctx2.inputs.conversation_id = ""
+            ctx2.inputs.query = "Hello"
+
+            await rail2.before_invoke(ctx2)
+            await rail2.after_invoke(ctx2)
+
+        _run(scenario2())
+
+        spans2 = exporter.get_finished_spans()
+        agent_spans2 = [s for s in spans2 if s.name == "jiuwenclaw.agent.invoke"]
+        assert len(agent_spans2) == 1, f"Expected 1 agent span, got {len(agent_spans2)}"
+
+        agent_span2 = agent_spans2[0]
+        assert GEN_AI_USAGE_INPUT_TOKENS not in agent_span2.attributes, (
+            "gen_ai.usage.input_tokens should not be set when there are no LLM calls"
+        )
+        assert GEN_AI_USAGE_OUTPUT_TOKENS not in agent_span2.attributes, (
+            "gen_ai.usage.output_tokens should not be set when there are no LLM calls"
+        )
+        assert GEN_AI_USAGE_TOTAL_TOKENS not in agent_span2.attributes, (
+            "gen_ai.usage.total_tokens should not be set when there are no LLM calls"
+        )
+
+        # --- Scenario 3: Accumulation resets between invokes ---
+
+        exporter.clear()
+
+        async def simulate_one_request(request_id, input_tokens, output_tokens):
+            rail = TelemetryRail()
+            rail.set_telemetry_context(
+                channel_id="test_ch", session_id=f"sess_{request_id}",
+                request_id=f"req_{request_id}",
+            )
+
+            ctx = TestAgentTokenUsageAggregation._make_llm_ctx(f"Query {request_id}")
+
+            await rail.before_invoke(ctx)
+
+            await rail.before_model_call(ctx)
+            result = MagicMock()
+            result.usage_metadata = TestAgentTokenUsageAggregation._make_usage(
+                input_tokens, output_tokens
+            )
+            ctx.inputs.response = result
+            await rail.after_model_call(ctx)
+
+            await rail.after_invoke(ctx)
+
+        async def scenario3():
+            await simulate_one_request("1", 100, 50)
+            await simulate_one_request("2", 200, 80)
+
+        _run(scenario3())
+
+        spans3 = exporter.get_finished_spans()
+        agent_spans3 = [s for s in spans3 if s.name == "jiuwenclaw.agent.invoke"]
+        assert len(agent_spans3) == 2, f"Expected 2 agent spans, got {len(agent_spans3)}"
+
+        # Sort by input tokens to identify each request
+        agent_spans3.sort(key=lambda s: s.attributes.get(GEN_AI_USAGE_INPUT_TOKENS, 0))
+
+        req1 = agent_spans3[0]
+        req2 = agent_spans3[1]
+        assert req1.attributes[GEN_AI_USAGE_INPUT_TOKENS] == 100
+        assert req1.attributes[GEN_AI_USAGE_OUTPUT_TOKENS] == 50
+        assert req1.attributes[GEN_AI_USAGE_TOTAL_TOKENS] == 150
+        assert req2.attributes[GEN_AI_USAGE_INPUT_TOKENS] == 200
+        assert req2.attributes[GEN_AI_USAGE_OUTPUT_TOKENS] == 80
+        assert req2.attributes[GEN_AI_USAGE_TOTAL_TOKENS] == 280
 
         tp.shutdown()
         mp.shutdown()

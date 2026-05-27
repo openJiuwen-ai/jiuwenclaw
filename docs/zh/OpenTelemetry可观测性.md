@@ -120,6 +120,56 @@ telemetry:
 - `gen_ai.tool.name` — 工具名称
 - `gen_ai.tool.call.id` — 调用 ID
 - `gen_ai.span.type` — `"tool"`
+- `gen_ai.operation.name` — 操作名（普通工具不设置，skill 类工具为 `load_skill` / `release_skill`）
+- `gen_ai.skill.name` — 技能名称（skill_tool / skill_complete 时设置）
+- `gen_ai.skill.id` — 技能唯一标识（skill_tool 加载时设置，基于 skill_name 哈希生成）
+
+### Skill 调用链追踪
+
+Skill（技能）的可观测性遵循 [OpenTelemetry GenAI #86](https://github.com/open-telemetry/semantic-conventions/issues/86) 社区共识：**不为 skill 创建独立 span，而是在工具执行 span 上设置 skill 属性**。因为 skill 的加载（`skill_tool`）和释放（`skill_complete`）本身就是工具调用，`TelemetryRail` 已为其创建 `gen_ai.tool.execute` span。
+
+**设计要点：**
+- Skill 属性直接设置在现有的 `gen_ai.tool.execute: skill_tool` / `gen_ai.tool.execute: skill_complete` span 上
+- 通过 `gen_ai.operation.name` 区分加载（`load_skill`）和释放（`release_skill`）
+- 通过 span event 记录 skill 生命周期关键节点
+- 不创建独立的 `gen_ai.skill` span，与社区共识一致
+
+**包含 Skill 的 Trace 结构：**
+
+```
+jiuwenclaw.agent.invoke
+├── gen_ai.chat                              ← LLM 决策调用 skill_tool
+├── gen_ai.tool.execute: skill_tool
+│   ├── gen_ai.operation.name: "load_skill"
+│   ├── gen_ai.skill.name: "data_analysis"
+│   ├── gen_ai.skill.id: "skill_a3f8c2d1"
+│   └── ◆ skill.loaded {skill.name, skill.path}
+├── gen_ai.chat                              ← skill 步骤推理
+├── gen_ai.tool.execute: bash                ← skill 步骤中的工具调用
+├── gen_ai.chat
+├── gen_ai.tool.execute: skill_complete
+│   ├── gen_ai.operation.name: "release_skill"
+│   ├── gen_ai.skill.name: "data_analysis"
+│   └── ◆ skill.released {skill.name}
+└── gen_ai.chat                              ← 最终回答
+```
+
+**Skill Span Events：**
+
+| Event | 触发时机 | 携带属性 |
+|-------|---------|---------|
+| `skill.loaded` | `skill_tool` 返回且确认加载了 SKILL.md 正文（`is_skill_body` 为真） | `skill.name`、`skill.path` |
+| `skill.released` | `skill_complete` 调用完成 | `skill.name` |
+
+**与 OTel #86 规范对齐：**
+
+| #86 提案要点 | JiuWenClaw 实现 |
+|-------------|----------------|
+| 不创建独立 skill span | 不创建，在 tool span 上设置属性 |
+| `gen_ai.skill.name` 条件必填 | skill_tool / skill_complete 时设置 |
+| `gen_ai.skill.id` 条件必填 | `skill_<hash(skill_name)>` 格式 |
+| `gen_ai.skill.description` 推荐 | 未设置（当前 SKILL.md 无结构化元数据来源） |
+| `gen_ai.skill.version` 推荐 | 未设置（当前无版本管理） |
 
 ## 5. Metric 指标
 

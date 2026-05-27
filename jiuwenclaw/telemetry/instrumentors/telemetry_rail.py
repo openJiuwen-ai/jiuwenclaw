@@ -69,6 +69,8 @@ from jiuwenclaw.telemetry.attributes import (
     GEN_AI_STREAMING_FIRST_TOKEN,
     GEN_AI_TOOL_ARGUMENTS,
     GEN_AI_TOOL_RESULT,
+    GEN_AI_SKILL_NAME,
+    GEN_AI_SKILL_ID,
 )
 from jiuwenclaw.telemetry.metrics import (
     _identity_span_attrs,
@@ -99,6 +101,10 @@ _request_context: ContextVar[Optional[dict]] = ContextVar("telemetry_request_con
 # Stores (span, start_time, context_token) for the active AGENT span
 _agent_span_ctx: ContextVar[Optional[Tuple[trace.Span, float, Optional[Token]]]] = ContextVar(
     "telemetry_agent_span", default=None
+)
+# Accumulates token usage across LLM calls within an agent invoke.
+_agent_token_usage: ContextVar[Optional[dict]] = ContextVar(
+    "telemetry_agent_token_usage", default=None
 )
 
 
@@ -255,6 +261,9 @@ class TelemetryRail(DeepAgentRail):
         req_ctx["iteration"] = 0
         _request_context.set(req_ctx)
 
+        # Reset token accumulation for this agent invoke
+        _agent_token_usage.set({"input_tokens": 0, "output_tokens": 0})
+
         # Get conversation_id from inputs
         conversation_id = ""
         if hasattr(ctx, "inputs"):
@@ -278,6 +287,20 @@ class TelemetryRail(DeepAgentRail):
             JIUWENCLAW_CHANNEL_ID: req_ctx["channel_id"],
             JIUWENCLAW_REQUEST_ID: req_ctx["request_id"],
         }
+
+        # Include user query on the agent span for observability.
+        # At before_invoke, ctx.inputs is InvokeInputs with a .query attribute.
+        user_input = ""
+        if hasattr(ctx, "inputs"):
+            query = getattr(ctx.inputs, "query", "")
+            if isinstance(query, str) and query:
+                user_input = query[:500] if len(query) > 500 else query
+        if user_input:
+            attrs[GEN_AI_INPUT_MESSAGES] = json.dumps(
+                [{"role": "user", "parts": [{"type": "text", "content": user_input}]}],
+                ensure_ascii=False,
+            )
+
         attrs.update(_identity_span_attrs())
 
         # Start span with extracted parent context (for cross-WebSocket propagation)
@@ -330,6 +353,14 @@ class TelemetryRail(DeepAgentRail):
                 JIUWENCLAW_CHANNEL_ID: req_ctx["channel_id"],
             }))
 
+            # Set aggregated token usage on agent span
+            usage_accum = _agent_token_usage.get()
+            if usage_accum and (usage_accum["input_tokens"] > 0 or usage_accum["output_tokens"] > 0):
+                agent_span.set_attribute(GEN_AI_USAGE_INPUT_TOKENS, usage_accum["input_tokens"])
+                agent_span.set_attribute(GEN_AI_USAGE_OUTPUT_TOKENS, usage_accum["output_tokens"])
+                agent_span.set_attribute(GEN_AI_USAGE_TOTAL_TOKENS,
+                                          usage_accum["input_tokens"] + usage_accum["output_tokens"])
+
             agent_span.end()
 
         # Detach context token
@@ -338,6 +369,7 @@ class TelemetryRail(DeepAgentRail):
 
         # Clear the agent span context
         _agent_span_ctx.set(None)
+        _agent_token_usage.set(None)
 
     # ------------------------------------------------------------------
     # Model call hooks — LLM span
@@ -581,6 +613,13 @@ class TelemetryRail(DeepAgentRail):
         # Record arguments as span attribute
         span.set_attribute(GEN_AI_TOOL_ARGUMENTS, str(arguments)[:4096])
 
+        # Enrich skill_complete span with gen_ai.skill.* attributes (OTel GenAI #86)
+        if tool_name == "skill_complete":
+            skill_name = arguments.get("skill_name", "") if isinstance(arguments, dict) else ""
+            if skill_name:
+                span.set_attribute(GEN_AI_OPERATION_NAME, "release_skill")
+                span.set_attribute(GEN_AI_SKILL_NAME, skill_name)
+
         self._tool_spans[span_key] = (span, time.monotonic(), tool_name)
 
         tool_call_count.add(1, _with_resource_labels({
@@ -595,6 +634,7 @@ class TelemetryRail(DeepAgentRail):
     async def after_tool_call(self, ctx: Any) -> None:
         """End TOOL span after tool execution."""
         req_ctx = self._get_request_context()
+        inputs = None
 
         # Retrieve span_key from ctx (set in before_tool_call)
         span_key = getattr(ctx, "_otel_tool_span_key", None)
@@ -630,11 +670,17 @@ class TelemetryRail(DeepAgentRail):
         result_str = str(result)[:4096] if result is not None else ""
         span.set_attribute(GEN_AI_TOOL_RESULT, result_str[:4096] if result_str else "")
 
-        # Error detection
+        # Error detection — check structured error field first to avoid
+        # false positives from "error=None" appearing in str(result).
         is_error = False
-        if result_str:
-            lower = result_str.lower()
-            is_error = "error" in lower or "exception" in lower or "traceback" in lower
+        if result is not None:
+            if hasattr(result, "error"):
+                is_error = bool(getattr(result, "error", None))
+            elif isinstance(result, dict):
+                is_error = bool(result.get("error"))
+            elif result_str:
+                lower = result_str.lower()
+                is_error = "error" in lower or "exception" in lower or "traceback" in lower
 
         if is_error:
             span.set_status(StatusCode.ERROR, result_str[:256])
@@ -651,6 +697,31 @@ class TelemetryRail(DeepAgentRail):
             GEN_AI_TOOL_NAME: span_tool_name,
             JIUWENCLAW_CHANNEL_ID: req_ctx["channel_id"],
         }))
+
+        # Enrich skill_tool / skill_complete spans with gen_ai.skill.* attributes (OTel GenAI #86)
+        if span_tool_name == "skill_tool":
+            tool_msg = getattr(inputs, "tool_msg", None) if inputs else None
+            if tool_msg is not None:
+                meta = getattr(tool_msg, "metadata", None) or {}
+                if isinstance(meta, dict) and (meta.get("is_skill_body") or meta.get("original_is_skill_body")):
+                    skill_name = str(meta.get("skill_name") or "")
+                    if skill_name:
+                        span.set_attribute(GEN_AI_OPERATION_NAME, "load_skill")
+                        span.set_attribute(GEN_AI_SKILL_NAME, skill_name)
+                        span.set_attribute(GEN_AI_SKILL_ID, f"skill_{hash(skill_name) & 0xFFFFFFFF:08x}")
+                        span.add_event("skill.loaded", {
+                            "skill.name": skill_name,
+                            "skill.path": str(meta.get("relative_file_path") or ""),
+                        })
+        elif span_tool_name == "skill_complete":
+            skill_name = ""
+            if inputs is not None:
+                tc = getattr(inputs, "tool_call", None)
+                if tc is not None:
+                    args = getattr(tc, "arguments", None)
+                    if isinstance(args, dict):
+                        skill_name = str(args.get("skill_name", "") or "")
+            span.add_event("skill.released", {"skill.name": skill_name} if skill_name else {})
 
         span.end()
 
@@ -917,6 +988,13 @@ class TelemetryRail(DeepAgentRail):
         # Basic tokens
         input_tokens = getattr(usage, "input_tokens", 0) or 0
         output_tokens = getattr(usage, "output_tokens", 0) or 0
+
+        # Accumulate for agent-level aggregation on jiuwenclaw.agent.invoke span
+        usage_accum = _agent_token_usage.get()
+        if usage_accum is not None:
+            usage_accum["input_tokens"] += input_tokens
+            usage_accum["output_tokens"] += output_tokens
+            _agent_token_usage.set(usage_accum)
 
         # Cache read tokens - try multiple field names from different APIs
         # OpenAI: usage.prompt_tokens_details.cached_tokens
