@@ -26,6 +26,12 @@
     uv run python .../enterprise_config_chat.py \\
         --group-id g_demo_sales --bot-id bot_main --user-id alice \\
         --provision-json provision.json
+
+连接远程 Gateway WebChannel::
+
+    uv run python .../enterprise_config_chat.py \\
+        --group-id g_demo_sales --bot-id bot_main --user-id alice \\
+        --ws-url ws://10.0.0.1:19001/ws
 """
 
 from __future__ import annotations
@@ -38,6 +44,7 @@ import sys
 import uuid
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 logger = logging.getLogger(__name__)
 _stream_logger = logging.getLogger(f"{__name__}.stream")
@@ -150,10 +157,35 @@ def _load_web_port_from_provision(path: Path) -> int:
     return int(web)
 
 
-def _browser_origin_header(host: str) -> dict[str, str]:
-    """WebChannel 默认校验 Origin；Python websockets 客户端需模拟浏览器本机 Origin。"""
-    origin_host = host if host in ("127.0.0.1", "localhost") else "127.0.0.1"
-    return {"Origin": f"http://{origin_host}"}
+def _resolve_ws_url(args: argparse.Namespace) -> str:
+    """解析 WebSocket 目标：--ws-url 优先，否则由 host + web 端口 + path 拼装。"""
+    if args.ws_url:
+        url = str(args.ws_url).strip()
+        parsed = urlparse(url)
+        if parsed.scheme not in ("ws", "wss"):
+            raise ValueError(f"--ws-url 须为 ws:// 或 wss://，当前 scheme={parsed.scheme!r}")
+        if not parsed.netloc:
+            raise ValueError(f"--ws-url 无效（缺少 host）: {url!r}")
+        return url
+    if args.provision_json is not None:
+        web_port = _load_web_port_from_provision(args.provision_json)
+    else:
+        web_port = int(args.web_port)
+    return f"ws://{args.host}:{web_port}{args.ws_path}"
+
+
+def _browser_origin_header(ws_url: str) -> dict[str, str]:
+    """WebChannel 默认校验 Origin；Python websockets 客户端需模拟浏览器 Origin。"""
+    parsed = urlparse(ws_url)
+    host = parsed.hostname or "127.0.0.1"
+    http_scheme = "https" if parsed.scheme == "wss" else "http"
+    port = parsed.port
+    default_port = 443 if http_scheme == "https" else 80
+    if port is not None and port != default_port:
+        origin = f"{http_scheme}://{host}:{port}"
+    else:
+        origin = f"{http_scheme}://{host}"
+    return {"Origin": origin}
 
 
 def _parse_args() -> argparse.Namespace:
@@ -188,6 +220,10 @@ def _parse_args() -> argparse.Namespace:
         type=Path,
         help="provision-local 响应 JSON 文件路径（读取 data.ports.web）",
     )
+    src.add_argument(
+        "--ws-url",
+        help="完整 WebSocket URL（连接远程 Gateway），如 ws://host:19001/ws 或 wss://host/ws",
+    )
     return p.parse_args()
 
 
@@ -202,14 +238,10 @@ async def _recv_json(ws: Any, timeout: float) -> dict[str, Any]:
 async def _run_chat(args: argparse.Namespace) -> int:
     import websockets
 
-    if args.provision_json is not None:
-        web_port = _load_web_port_from_provision(args.provision_json)
-    else:
-        web_port = int(args.web_port)
+    ws_url = _resolve_ws_url(args)
 
     session_id = (args.session_id or "").strip() or f"sess_{uuid.uuid4().hex[:12]}"
     req_id = f"req_{uuid.uuid4().hex[:12]}"
-    ws_url = f"ws://{args.host}:{web_port}{args.ws_path}"
 
     params: dict[str, Any] = {
         "session_id": session_id,
@@ -241,7 +273,7 @@ async def _run_chat(args: argparse.Namespace) -> int:
 
     deadline = asyncio.get_running_loop().time() + args.timeout
 
-    ws_headers = _browser_origin_header(args.host)
+    ws_headers = _browser_origin_header(ws_url)
     async with websockets.connect(
         ws_url,
         open_timeout=15,
@@ -338,7 +370,9 @@ def main() -> int:
         return 130
     except OSError as connect_err:
         logger.error("[connect-failed] %s", connect_err)
-        logger.error("请确认 Gateway 已启动，且 --web-port 与 provision 返回的 ports.web 一致。")
+        logger.error(
+            "请确认 Gateway 已启动，且 --web-port / --provision-json / --ws-url 指向可访问的 WebChannel。"
+        )
         return 1
     except Exception as err:
         logger.error("[failed] %s", err)

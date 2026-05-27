@@ -245,6 +245,32 @@ class RuntimeManagementAgentClient(AgentServerClient):
         model_name = os.getenv("MODEL_NAME")
         api_base = os.getenv("API_BASE")
         api_key = os.getenv("API_KEY")
+        gateway_db_type = os.getenv("GATEWAY_DB_TYPE")
+        gateway_sqlite_path = os.getenv("GATEWAY_SQLITE_PATH")
+        gateway_db_host = os.getenv("GATEWAY_DB_HOST")
+        gateway_db_port = os.getenv("GATEWAY_DB_PORT")
+        gateway_db_user = os.getenv("GATEWAY_DB_USER")
+        gateway_db_password = os.getenv("GATEWAY_DB_PASSWORD")
+        gateway_db_name = os.getenv("GATEWAY_DB_NAME")
+        jiuwenclaw_id = os.getenv("JIUWENCLAW_ID")
+
+        agent_server_env = {
+            "AGENT_SERVER_HOST": "0.0.0.0",
+            "AGENT_RUNTIME": agent_runtime,
+            "GATEWAY_DB_TYPE": gateway_db_type,
+            "GATEWAY_SQLITE_PATH": gateway_sqlite_path,
+            "GATEWAY_DB_HOST": gateway_db_host,
+            "GATEWAY_DB_PORT": gateway_db_port,
+            "GATEWAY_DB_USER": gateway_db_user,
+            "GATEWAY_DB_PASSWORD": gateway_db_password,
+            "GATEWAY_DB_NAME": gateway_db_name,
+            "JIUWENCLAW_ID": jiuwenclaw_id,
+        }
+        if api_key:
+            agent_server_env["MODEL_PROVIDER"] = model_provider
+            agent_server_env["MODEL_NAME"] = model_name
+            agent_server_env["API_BASE"] = api_base
+            agent_server_env["API_KEY"] = api_key
 
         class _Factory(IServiceInstanceFactory):
             async def new_service(
@@ -262,17 +288,7 @@ class RuntimeManagementAgentClient(AgentServerClient):
                     port_name=cfg["port_name"] if "port_name" in cfg else port_name,
                     image_pull_policy=cfg["image_pull_policy"] if "image_pull_policy" in cfg else image_pull_policy,
                     extra_labels=dict(RuntimeManagementAgentClient._POD_LABEL),
-                    env_vars={
-                        "AGENT_SERVER_HOST": "0.0.0.0",
-                        "AGENT_RUNTIME": agent_runtime,
-                        "MODEL_PROVIDER": model_provider,
-                        "MODEL_NAME": model_name,
-                        "API_BASE": api_base,
-                        "API_KEY": api_key,
-                    } if api_key else {
-                        "AGENT_SERVER_HOST": "0.0.0.0",
-                        "AGENT_RUNTIME": agent_runtime,
-                    },
+                    env_vars=agent_server_env,
                     kubeconfig=kubeconfig,
                     readiness_initial_delay=int(cfg["readiness_initial_delay"]) if "readiness_initial_delay" in cfg else readiness_initial_delay,
                     readiness_period=int(cfg["readiness_period"]) if "readiness_period" in cfg else readiness_period,
