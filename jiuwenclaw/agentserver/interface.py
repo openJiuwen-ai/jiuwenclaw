@@ -1187,24 +1187,6 @@ class JiuWenClaw:
             await self.upload_agent_files(result, user_id, cleaned_chat_id, channel_type)
         return result
 
-    async def _release_text_only_stream_pause(
-        self, adapter: AgentAdapter, session_id: str,
-    ) -> None:
-        """ask_user_question text_only 后 rail 处于 pause；续答前须 resume 并清掉未结束的流任务。"""
-        rail = getattr(adapter, "_stream_event_rail", None)
-        if rail is not None and rail.is_paused():
-            rail.resume()
-            rail.reset_abort()
-            logger.info("[JiuWenClaw] text_only 续答: 已 resume stream rail session_id=%s", session_id)
-        stale = self._session_manager.get_current_task(session_id)
-        if stale is not None and not stale.done():
-            logger.info("[JiuWenClaw] text_only 续答: 取消未结束流任务 session_id=%s", session_id)
-            stale.cancel()
-            try:
-                await stale
-            except (asyncio.CancelledError, Exception):
-                pass
-
     async def process_message_stream(
             self, request: AgentRequest
     ) -> AsyncIterator[AgentResponseChunk]:
@@ -1358,12 +1340,7 @@ class JiuWenClaw:
                 logger.exception("[JiuWenClaw] 流式任务异常: %s", exc, extra={'user_visible': 'progress'})
                 await stream_queue.put(("error", exc))
             finally:
-                rail = getattr(adapter, "_stream_event_rail", None)
-                if rail is not None and rail.is_paused():
-                    rail.resume()
                 stream_done.set()
-
-        await self._release_text_only_stream_pause(adapter, session_id)
 
         # Team 模式: 后续请求直接执行，绕过 Session Manager 队列
         # 因为 Team 是长期运行的(persistent)，interact 调用不需要等待前一个任务完成
