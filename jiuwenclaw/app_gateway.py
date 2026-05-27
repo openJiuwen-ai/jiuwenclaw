@@ -1782,6 +1782,23 @@ async def _run(
 
         leader_election.register_callback(_manager_ws_on_role_change)
 
+        # 选主感知：升为 PRIMARY 时主动从 channel_config DB 重新加载 channels。
+        # STANDBY 期间 ManagerWsClient 未连接 Manager，可能错过 config.push；
+        # 升主时主动 reload 一次，补齐 STANDBY 窗口内的配置变更。
+        # _apply_channel_config 内置基于 dict diff 的幂等保护（_should_restart_channel），
+        # 配置未变化的 channel 不会被重启，因此重复调用安全。
+        # 仅在 channel_config DB overlay 启用时生效（_reload_channels_from_db 此时才存在于闭包）。
+        if _channel_db_overlay:
+            async def _channels_on_role_change(role: Role) -> None:
+                if role == Role.PRIMARY:
+                    logger.info("[App] PRIMARY elected, reload channels from channel_config DB")
+                    try:
+                        await _reload_channels_from_db(None)
+                    except Exception:  # noqa: BLE001
+                        logger.exception("[App] reload channels on promotion failed")
+
+            leader_election.register_callback(_channels_on_role_change)
+
         await leader_election.start()
     else:
         logger.info("[App] standalone mode, skip LeaderElection")
