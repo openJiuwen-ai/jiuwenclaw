@@ -4,10 +4,9 @@ import { useAsync } from '../../hooks/useAsync';
 import { useRouter } from '../../router';
 import { InstanceApi, ApiError } from '../../services/api';
 import { StatusBadge } from '../../components/StatusBadge';
-import { Empty } from '../../components/Empty';
 import { Modal } from '../../components/Modal';
 import { JsonField, tryParseJson, useInvalidJsonChecker } from '../../components/JsonField';
-import { formatTime, relativeTime, safeStringify, truncate } from '../../utils/format';
+import { formatTime, relativeTime, safeStringify } from '../../utils/format';
 import { toast } from '../../stores/uiStore';
 
 interface Props {
@@ -18,7 +17,6 @@ export function InstanceDetailPage({ instanceId }: Props) {
   const { t } = useTranslation();
   const { navigate } = useRouter();
   const instance = useAsync(() => InstanceApi.get(instanceId), [instanceId]);
-  const services = useAsync(() => InstanceApi.servicesStatus(instanceId), [instanceId]);
 
   const [editOpen, setEditOpen] = useState(false);
   const [editText, setEditText] = useState('');
@@ -36,7 +34,7 @@ export function InstanceDetailPage({ instanceId }: Props) {
       return;
     }
     try {
-      await InstanceApi.patch(instanceId, tryParseJson(editText, {}));
+      await InstanceApi.update(instanceId, { data: tryParseJson(editText, {}) });
       toast('success', t('success.saved'));
       setEditOpen(false);
       void instance.reload();
@@ -62,13 +60,7 @@ export function InstanceDetailPage({ instanceId }: Props) {
           <button className="btn sm" onClick={() => navigate(`/instances/${instanceId}/policies`)}>
             {t('topology.managePolicies')}
           </button>
-          <button
-            className="btn sm"
-            onClick={() => {
-              void instance.reload();
-              void services.reload();
-            }}
-          >
+          <button className="btn sm" onClick={() => void instance.reload()}>
             {t('common.refresh')}
           </button>
         </div>
@@ -102,6 +94,8 @@ export function InstanceDetailPage({ instanceId }: Props) {
             <div className="mono">{instance.data?.space_id ?? '-'}</div>
             <div className="text-muted">created</div>
             <div className="mono">{formatTime(instance.data?.created_at)}</div>
+            <div className="text-muted">{t('topology.lastHeartbeat')}</div>
+            <div className="mono">{relativeTime(instance.data?.last_heartbeat)}</div>
             <div className="text-muted">description</div>
             <div>{instance.data?.description ?? '-'}</div>
           </div>
@@ -118,46 +112,6 @@ export function InstanceDetailPage({ instanceId }: Props) {
             {safeStringify(instance.data?.data ?? {}, 2) || '-'}
           </pre>
         </div>
-      </div>
-
-      <div className="card">
-        <div className="card-header">
-          <div className="card-title">{t('instanceDetail.services')}</div>
-        </div>
-        {services.loading ? (
-          <div className="text-sm text-muted">{t('common.loading')}</div>
-        ) : services.error ? (
-          <div className="text-sm text-danger">{t('errors.loadFailed', { detail: services.error })}</div>
-        ) : !services.data || services.data.items.length === 0 ? (
-          <Empty text={t('topology.noServices')} />
-        ) : (
-          <table className="table">
-            <thead>
-              <tr>
-                <th>service_id</th>
-                <th>type</th>
-                <th>role</th>
-                <th>{t('topology.instanceStatus')}</th>
-                <th>{t('topology.endpoint')}</th>
-                <th>{t('topology.version')}</th>
-                <th>{t('topology.lastHeartbeat')}</th>
-              </tr>
-            </thead>
-            <tbody>
-              {services.data.items.map((s) => (
-                <tr key={s.service_id}>
-                  <td className="mono text-xs text-text-strong">{s.service_id}</td>
-                  <td><span className={`tag ${(s.service_type ?? '').toLowerCase()}`}>{s.service_type}</span></td>
-                  <td className="mono text-xs">{s.component_role}</td>
-                  <td><StatusBadge status={s.status} /></td>
-                  <td className="mono text-[11px] text-muted" title={s.endpoint ?? ''}>{truncate(s.endpoint ?? '-', 40)}</td>
-                  <td className="mono text-xs">{s.version ?? '-'}</td>
-                  <td className="mono text-xs">{relativeTime(s.last_heartbeat)}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        )}
       </div>
 
       <Modal

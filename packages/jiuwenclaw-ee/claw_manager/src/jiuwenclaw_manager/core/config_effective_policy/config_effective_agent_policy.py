@@ -2,13 +2,13 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime
 from typing import Any
 
 from openjiuwen_runtime.foundation.db.handler import DBHandler
 
 from jiuwenclaw_manager.core.instance.instance_service import get_instance_row
-from jiuwenclaw_manager.infrastructure.utils import utc_now
+from jiuwenclaw_manager.infrastructure.utils import iso_datetime, utc_now
 from jiuwenclaw_manager.manager_ws_server.server import push_config_op
 from jiuwenclaw_manager.models.config_effective_policy_models import (
     CONFIG_EFFECTIVE_AGENT_POLICY_TABLE_DEF,
@@ -59,14 +59,6 @@ def _agent_policy_pk(jiuwenclaw_id: str, policy_id: int) -> dict[str, Any]:
     return {"jiuwenclaw_id": jiuwenclaw_id, "id": policy_id}
 
 
-def _iso(dt: datetime | None) -> str | None:
-    if dt is None:
-        return None
-    if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=timezone.utc)
-    return dt.isoformat().replace("+00:00", "Z")
-
-
 def _row_to_out(row: Any) -> ConfigEffectiveAgentPolicyOut:
     return ConfigEffectiveAgentPolicyOut(
         id=row.id,
@@ -78,8 +70,8 @@ def _row_to_out(row: Any) -> ConfigEffectiveAgentPolicyOut:
         template_ref=read_template_ref_from_row(row),
         enabled=row.enabled,
         data=row.data,
-        created_at=_iso(row.created_at),
-        updated_at=_iso(row.updated_at),
+        created_at=iso_datetime(row.created_at),
+        updated_at=iso_datetime(row.updated_at),
     )
 
 
@@ -120,8 +112,8 @@ class ConfigEffectiveAgentPolicyService:
             "template_ref": normalize_template_ref(row.get("template_ref")),
             "enabled": row.get("enabled", True),
             "data": row.get("data"),
-            "created_at": _iso(row.get("created_at") or now),
-            "updated_at": _iso(row.get("updated_at") or now),
+            "created_at": iso_datetime(row.get("created_at") or now),
+            "updated_at": iso_datetime(row.get("updated_at") or now),
         }
 
     async def create(

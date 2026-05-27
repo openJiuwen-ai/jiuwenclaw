@@ -1,31 +1,24 @@
-"""????????"""
+"""实例纳管与 Gateway WebSocket 心跳。"""
 
 from __future__ import annotations
 
 import json
 import uuid
 from collections.abc import Sequence
-from datetime import datetime, timezone
 from typing import Any
 
 from openjiuwen_runtime.foundation.db.handler import DBHandler
 
-from jiuwenclaw_manager.infrastructure.utils import utc_now
+from jiuwenclaw_manager.infrastructure.utils import iso_datetime, utc_now
 from jiuwenclaw_manager.schemas.instance_schemas import (
     CreateInstanceBody,
     InstanceDetail,
     InstanceSummary,
-    PatchInstanceDataBody,
-    ServiceStatusItem,
-    ServiceStatusList,
+    InstanceUpdateBody,
 )
-from jiuwenclaw_manager.models.instance_models import (
-    INSTANCE_INFO_TABLE_DEF,
-    SERVICE_INSTANCE_TABLE_DEF,
-)
+from jiuwenclaw_manager.models.instance_models import INSTANCE_INFO_TABLE_DEF
 
 _INSTANCE_TABLE = INSTANCE_INFO_TABLE_DEF.table_name
-_SERVICE_TABLE = SERVICE_INSTANCE_TABLE_DEF.table_name
 
 
 def dumps_auth_config(cfg: dict) -> str:
@@ -37,11 +30,8 @@ async def create_instance_row(handler: DBHandler, row_data: dict[str, Any]) -> A
     payload = dict(row_data)
     payload.setdefault("created_at", now)
     payload.setdefault("updated_at", now)
-    row = await handler.create(_INSTANCE_TABLE, payload)
-    jid = str(payload.get("jiuwenclaw_id") or getattr(row, "jiuwenclaw_id", "") or "").strip()
-    if jid:
-        await register_default_service_instances(handler, jid)
-    return row
+    payload.setdefault("last_heartbeat", None)
+    return await handler.create(_INSTANCE_TABLE, payload)
 
 
 async def get_instance_row(handler: DBHandler, jiuwenclaw_id: str) -> Any | None:
@@ -67,6 +57,7 @@ async def register_gateway_via_ws(
     manager_id: str = "default",
 ) -> str:
     """Gateway WS 注册：复用已有 ``jiuwenclaw_id`` 或分配新 id 并写入 ``instance_info``。"""
+    _ = manager_id
     payload_jiuwenclaw_id = str(payload.get("jiuwenclaw_id") or "").strip()
     now = utc_now()
 
@@ -76,7 +67,7 @@ async def register_gateway_via_ws(
             await handler.update(
                 _INSTANCE_TABLE,
                 {"jiuwenclaw_id": payload_jiuwenclaw_id},
-                {"status": "active", "updated_at": now},
+                {"status": "online", "updated_at": now},
             )
             return payload_jiuwenclaw_id
         jiuwenclaw_id = payload_jiuwenclaw_id
@@ -94,7 +85,7 @@ async def register_gateway_via_ws(
             "k8s_auth_type": "none",
             "k8s_auth_config": dumps_auth_config({}),
             "k8s_namespace": "default",
-            "status": "active",
+            "status": "online",
             "resource_quota": None,
             "data": None,
             "group_id": "default",
@@ -102,6 +93,55 @@ async def register_gateway_via_ws(
         },
     )
     return jiuwenclaw_id
+
+
+async def apply_gateway_ws_heartbeat(
+    handler: DBHandler,
+    *,
+    jiuwenclaw_id: str,
+    manager_id: str = "default",
+    endpoint: str | None = None,
+    version: str | None = None,
+) -> bool:
+    """Gateway 经 Manager WebSocket 上报心跳，刷新 ``instance_info.status`` 与 ``last_heartbeat``。"""
+    _ = manager_id
+    jid = str(jiuwenclaw_id or "").strip()
+    if not jid:
+        return False
+    if await get_instance_row(handler, jid) is None:
+        return False
+    now = utc_now()
+    updates: dict[str, Any] = {
+        "status": "online",
+        "last_heartbeat": now,
+        "updated_at": now,
+    }
+    if endpoint or version:
+        row = await get_instance_row(handler, jid)
+        merged = dict(getattr(row, "data", None) or {}) if row is not None else {}
+        if endpoint:
+            merged["gateway_endpoint"] = endpoint
+        if version:
+            merged["gateway_version"] = version
+        updates["data"] = merged
+    await handler.update(_INSTANCE_TABLE, {"jiuwenclaw_id": jid}, updates)
+    return True
+
+
+async def mark_instance_offline(handler: DBHandler, jiuwenclaw_id: str) -> None:
+    """Gateway WS 断开或心跳超时后，将实例标记为 offline。"""
+    jid = str(jiuwenclaw_id or "").strip()
+    if not jid:
+        return
+    row = await get_instance_row(handler, jid)
+    if row is None:
+        return
+    now = utc_now()
+    await handler.update(
+        _INSTANCE_TABLE,
+        {"jiuwenclaw_id": jid},
+        {"status": "offline", "updated_at": now},
+    )
 
 
 async def list_instance_rows(
@@ -120,17 +160,13 @@ async def list_instance_rows(
 
 
 async def delete_instance_row(handler: DBHandler, jiuwenclaw_id: str) -> None:
-    services = await list_instance_services(handler, jiuwenclaw_id)
-    for svc in services:
-        sid = getattr(svc, "id", None)
-        if sid is not None:
-            await handler.delete(_SERVICE_TABLE, {"id": int(sid)})
     await handler.delete(_INSTANCE_TABLE, {"jiuwenclaw_id": jiuwenclaw_id})
 
 
 async def merge_instance_data(
     handler: DBHandler, jiuwenclaw_id: str, patch: dict
 ) -> Any | None:
+    """仅合并写入 ``instance_info.data`` JSON 列（供 provision 等内部调用）。"""
     row = await get_instance_row(handler, jiuwenclaw_id)
     if row is None:
         return None
@@ -142,201 +178,6 @@ async def merge_instance_data(
         {"jiuwenclaw_id": jiuwenclaw_id},
         {"data": merged, "updated_at": now},
     )
-
-
-async def list_instance_services(handler: DBHandler, jiuwenclaw_id: str) -> Sequence[Any]:
-    return await handler.list_records(
-        _SERVICE_TABLE,
-        {"jiuwenclaw_id": jiuwenclaw_id},
-        limit=10_000,
-        offset=0,
-    )
-
-
-async def ensure_service_instance(
-    handler: DBHandler,
-    *,
-    jiuwenclaw_id: str,
-    service_id: str,
-    service_type: str,
-    component_role: str,
-    manager_id: str = "default",
-) -> Any:
-    """创建/更新 ``service_instance`` 行，登记 ``service_id`` ↔ ``jiuwenclaw_id`` 映射。"""
-    jid = str(jiuwenclaw_id or "").strip()
-    sid = str(service_id or "").strip()
-    if not jid or not sid:
-        raise ValueError("jiuwenclaw_id and service_id are required")
-    rows = await handler.list_records(
-        _SERVICE_TABLE,
-        {"jiuwenclaw_id": jid, "service_id": sid},
-        limit=1,
-        offset=0,
-    )
-    now = utc_now()
-    if rows:
-        row_id = int(getattr(rows[0], "id"))
-        return await handler.update(
-            _SERVICE_TABLE,
-            {"id": row_id},
-            {
-                "service_type": service_type,
-                "component_role": component_role,
-                "manager_id": manager_id,
-                "status": "pending",
-                "updated_at": now,
-            },
-        )
-    return await handler.create(
-        _SERVICE_TABLE,
-        {
-            "jiuwenclaw_id": jid,
-            "service_id": sid,
-            "service_type": service_type,
-            "component_role": component_role,
-            "manager_id": manager_id,
-            "endpoint": None,
-            "version": None,
-            "capabilities": None,
-            "data": None,
-            "status": "pending",
-            "last_heartbeat": None,
-            "created_at": now,
-            "updated_at": now,
-        },
-    )
-
-
-async def register_default_service_instances(
-    handler: DBHandler,
-    jiuwenclaw_id: str,
-    *,
-    manager_id: str = "default",
-) -> None:
-    """为实例登记默认 Gateway / AgentServer ``service_id``（与 provision 环境变量一致）。"""
-    jid = str(jiuwenclaw_id or "").strip()
-    if not jid:
-        return
-    await ensure_service_instance(
-        handler,
-        jiuwenclaw_id=jid,
-        service_id=f"gw-{jid}",
-        service_type="gateway",
-        component_role="gateway",
-        manager_id=manager_id,
-    )
-    await ensure_service_instance(
-        handler,
-        jiuwenclaw_id=jid,
-        service_id=f"as-{jid}",
-        service_type="agent_server",
-        component_role="agent_server",
-        manager_id=manager_id,
-    )
-
-
-async def backfill_service_instances(handler: DBHandler) -> int:
-    """为已有 ``instance_info`` 实例补写默认 ``service_instance`` 映射，返回处理实例数。"""
-    rows, _ = await list_instance_rows(handler, status=None, offset=0, limit=10_000)
-    count = 0
-    for row in rows:
-        jid = str(getattr(row, "jiuwenclaw_id", "") or "").strip()
-        if not jid:
-            continue
-        await register_default_service_instances(handler, jid)
-        count += 1
-    return count
-
-
-async def upsert_service_heartbeat(
-    handler: DBHandler,
-    *,
-    jiuwenclaw_id: str,
-    service_id: str,
-    service_type: str,
-    component_role: str,
-    manager_id: str,
-    endpoint: str | None,
-    version: str | None,
-    capabilities: dict | None,
-    extra_data: dict | None,
-) -> Any:
-    rows = await handler.list_records(
-        _SERVICE_TABLE,
-        {"jiuwenclaw_id": jiuwenclaw_id, "service_id": service_id},
-        limit=1,
-        offset=0,
-    )
-    now = utc_now()
-    if not rows:
-        return await handler.create(
-            _SERVICE_TABLE,
-            {
-                "jiuwenclaw_id": jiuwenclaw_id,
-                "service_id": service_id,
-                "service_type": service_type,
-                "component_role": component_role,
-                "manager_id": manager_id,
-                "endpoint": endpoint,
-                "version": version,
-                "capabilities": capabilities,
-                "data": extra_data,
-                "status": "online",
-                "last_heartbeat": now,
-                "created_at": now,
-                "updated_at": now,
-            },
-        )
-
-    existing = rows[0]
-    row_id = int(getattr(existing, "id"))
-    merged_data = dict(getattr(existing, "data", None) or {})
-    if extra_data is not None:
-        merged_data.update(extra_data)
-    updates: dict[str, Any] = {
-        "endpoint": endpoint or getattr(existing, "endpoint", None),
-        "version": version or getattr(existing, "version", None),
-        "last_heartbeat": now,
-        "status": "online",
-        "updated_at": now,
-    }
-    if capabilities is not None:
-        updates["capabilities"] = capabilities
-    if extra_data is not None:
-        updates["data"] = merged_data
-    return await handler.update(_SERVICE_TABLE, {"id": row_id}, updates)
-
-
-async def set_service_status(
-    handler: DBHandler,
-    *,
-    jiuwenclaw_id: str,
-    service_id: str,
-    status: str,
-) -> bool:
-    rows = await handler.list_records(
-        _SERVICE_TABLE,
-        {"jiuwenclaw_id": jiuwenclaw_id, "service_id": service_id},
-        limit=1,
-        offset=0,
-    )
-    if not rows:
-        return False
-    row_id = int(getattr(rows[0], "id"))
-    updated = await handler.update(
-        _SERVICE_TABLE,
-        {"id": row_id},
-        {"status": status, "updated_at": utc_now()},
-    )
-    return updated is not None
-
-
-def _iso(dt: datetime | None) -> str | None:
-    if dt is None:
-        return None
-    if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=timezone.utc)
-    return dt.isoformat().replace("+00:00", "Z")
 
 
 class InstanceService:
@@ -357,14 +198,14 @@ class InstanceService:
             "k8s_auth_type": body.k8s_auth_type,
             "k8s_auth_config": dumps_auth_config(body.k8s_auth_config),
             "k8s_namespace": body.k8s_namespace,
-            "status": "active",
+            "status": "online",
             "resource_quota": body.resource_quota,
             "data": data_dict,
             "group_id": body.group_id,
             "space_id": body.space_id,
         }
         row = await create_instance_row(self._handler, row_data)
-        return {"jiuwenclaw_id": jiuwenclaw_id, "status": getattr(row, "status", "active")}
+        return {"jiuwenclaw_id": jiuwenclaw_id, "status": getattr(row, "status", "online")}
 
     async def list_instances(
         self, *, page: int, page_size: int, status: str | None
@@ -383,7 +224,8 @@ class InstanceService:
                 k8s_namespace=r.k8s_namespace,
                 group_id=r.group_id,
                 space_id=r.space_id,
-                created_at=_iso(r.created_at),
+                created_at=iso_datetime(r.created_at),
+                last_heartbeat=iso_datetime(getattr(r, "last_heartbeat", None)),
             )
             for r in rows
         ]
@@ -405,7 +247,8 @@ class InstanceService:
             k8s_namespace=row.k8s_namespace,
             group_id=row.group_id,
             space_id=row.space_id,
-            created_at=_iso(row.created_at),
+            created_at=iso_datetime(row.created_at),
+            last_heartbeat=iso_datetime(getattr(row, "last_heartbeat", None)),
             description=row.description,
             k8s_master_host=row.k8s_master_host,
             k8s_auth_type=row.k8s_auth_type,
@@ -425,66 +268,38 @@ class InstanceService:
         await delete_instance_row(self._handler, jiuwenclaw_id)
         return True
 
-    async def services_status(self, jiuwenclaw_id: str) -> ServiceStatusList | None:
-        parent = await get_instance_row(self._handler, jiuwenclaw_id)
-        if parent is None:
-            return None
-        rows = await list_instance_services(self._handler, jiuwenclaw_id)
-        items = [
-            ServiceStatusItem(
-                service_id=r.service_id,
-                service_type=r.service_type,
-                component_role=r.component_role,
-                status=r.status,
-                last_heartbeat=_iso(r.last_heartbeat),
-                endpoint=r.endpoint,
-                version=r.version,
-            )
-            for r in rows
-        ]
-        return ServiceStatusList(items=items)
-
-    async def apply_heartbeat(
-        self,
-        *,
-        jiuwenclaw_id: str,
-        service_id: str,
-        service_type: str,
-        component_role: str,
-        manager_id: str,
-        endpoint: str | None,
-        version: str | None,
-        capabilities: dict | None,
-        extra: dict | None,
-    ) -> bool:
-        if await get_instance_row(self._handler, jiuwenclaw_id) is None:
-            return False
-        await upsert_service_heartbeat(
-            self._handler,
-            jiuwenclaw_id=jiuwenclaw_id,
-            service_id=service_id,
-            service_type=service_type,
-            component_role=component_role,
-            manager_id=manager_id,
-            endpoint=endpoint,
-            version=version,
-            capabilities=capabilities,
-            extra_data=extra,
-        )
-        if extra and service_type == "gateway":
-            raw_base = extra.get("management_api_base") or extra.get("agent_client_rest_base")
-            if isinstance(raw_base, str) and raw_base.strip():
-                await merge_instance_data(
-                    self._handler,
-                    jiuwenclaw_id,
-                    {"management_api_base": raw_base.strip().rstrip("/")},
-                )
-        return True
-
-    async def patch_instance_data(
-        self, jiuwenclaw_id: str, body: PatchInstanceDataBody
+    async def update(
+        self, jiuwenclaw_id: str, body: InstanceUpdateBody
     ) -> InstanceDetail | None:
-        row = await merge_instance_data(self._handler, jiuwenclaw_id, body.data)
-        if row is None:
+        jid = str(jiuwenclaw_id or "").strip()
+        if not jid:
+            raise ValueError("jiuwenclaw_id is required")
+        updates = body.model_dump(exclude_unset=True)
+        if not updates:
+            return await self.get(jid)
+        if await get_instance_row(self._handler, jid) is None:
             return None
-        return await self.get(jiuwenclaw_id)
+
+        strip_fields = (
+            "jiuwenclaw_name",
+            "description",
+            "k8s_master_host",
+            "k8s_auth_type",
+            "k8s_namespace",
+            "group_id",
+            "space_id",
+        )
+        for field in strip_fields:
+            if field in updates and updates[field] is not None:
+                updates[field] = str(updates[field]).strip()
+        if "k8s_auth_config" in updates and updates["k8s_auth_config"] is not None:
+            if not isinstance(updates["k8s_auth_config"], dict):
+                raise ValueError("k8s_auth_config must be an object")
+            updates["k8s_auth_config"] = dumps_auth_config(updates["k8s_auth_config"])
+
+        updates["updated_at"] = utc_now()
+        if await self._handler.update(
+            _INSTANCE_TABLE, {"jiuwenclaw_id": jid}, updates
+        ) is None:
+            return None
+        return await self.get(jid)

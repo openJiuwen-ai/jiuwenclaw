@@ -35,11 +35,11 @@ class Settings(BaseSettings):
     db_password: str = Field(default="root", validation_alias="MANAGER_DB_PASSWORD")
     db_name: str = Field(default="claw_manager", validation_alias="MANAGER_DB_NAME")
 
-    heartbeat_timeout_seconds: int = Field(
-        default=30, validation_alias="CLAWMANAGER_HEARTBEAT_TIMEOUT_SECONDS"
+    manager_heartbeat_timeout_seconds: int = Field(
+        default=120, validation_alias="MANAGER_HEARTBEAT_TIMEOUT_SECONDS"
     )
-    scan_interval_seconds: int = Field(
-        default=30, validation_alias="CLAWMANAGER_SCAN_INTERVAL_SECONDS"
+    MANAGER_HEARTBEAT_SCAN_INTERVAL_SECONDS: int = Field(
+        default=60, validation_alias="MANAGER_HEARTBEAT_SCAN_INTERVAL_SECONDS"
     )
     allow_local_provision: bool = Field(
         default=False, validation_alias="MANAGER_ALLOW_LOCAL_PROVISION"

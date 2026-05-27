@@ -62,6 +62,10 @@ class Settings(BaseSettings):
         default="ws://127.0.0.1:8766",
         validation_alias="GATEWAY_MANAGER_WS_URL",
     )
+    gateway_heartbeat_interval_seconds: int = Field(
+        default=30,
+        validation_alias="GATEWAY_HEARTBEAT_INTERVAL_SECONDS",
+    )
 
 
 def get_settings() -> Settings:

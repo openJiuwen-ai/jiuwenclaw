@@ -129,100 +129,6 @@ def _instances() -> list[dict[str, Any]]:
     ]
 
 
-def _heartbeats_for(jid: str, namespace: str, idx: int) -> list[dict[str, Any]]:
-    """idx=0 健康双 gateway 多 agent，idx=1 单 gateway 标准，idx=2 仅 1 gateway 离线状态。"""
-    if idx == 2:
-        return [
-            {
-                "service_id": f"gateway-{namespace}-01",
-                "service_type": "gateway",
-                "component_role": "gateway",
-                "manager_id": "manager-default",
-                "endpoint": f"http://gw-{namespace}-01.svc.cluster.local:18080",
-                "version": "0.2.1-rc1",
-                "capabilities": {"protocols": ["http", "ws"], "channels": ["wecom"]},
-                "data": {"replicas": 1, "region": "cn-south", "health": "degraded"},
-            },
-        ]
-    base: list[dict[str, Any]] = [
-        {
-            "service_id": f"gateway-{namespace}-01",
-            "service_type": "gateway",
-            "component_role": "gateway",
-            "manager_id": "manager-default",
-            "endpoint": f"http://gw-{namespace}-01.svc.cluster.local:18080",
-            "version": "0.3.5",
-            "capabilities": {
-                "protocols": ["http", "ws", "sse"],
-                "channels": ["wecom", "dingtalk", "feishu", "web"],
-            },
-            "data": {
-                "replicas": 2,
-                "management_api_base": f"http://gw-{namespace}-01.svc.cluster.local:18080",
-                "leader": True,
-            },
-        },
-        {
-            "service_id": f"agent-server-{namespace}-01",
-            "service_type": "agent_server",
-            "component_role": "agent_server",
-            "manager_id": "manager-default",
-            "endpoint": f"http://as-{namespace}-01.svc.cluster.local:19000",
-            "version": "0.3.5",
-            "capabilities": {"runtime": "python3.11", "max_sessions": 2000, "gpu": idx == 0},
-            "data": {"role": "primary", "labels": ["chat", "sales"], "model_concurrency": 64},
-        },
-        {
-            "service_id": f"agent-server-{namespace}-02",
-            "service_type": "agent_server",
-            "component_role": "agent_server",
-            "manager_id": "manager-default",
-            "endpoint": f"http://as-{namespace}-02.svc.cluster.local:19000",
-            "version": "0.3.5",
-            "capabilities": {"runtime": "python3.11", "max_sessions": 2000},
-            "data": {"role": "replica", "labels": ["chat", "qa"], "model_concurrency": 64},
-        },
-        {
-            "service_id": f"worker-{namespace}-01",
-            "service_type": "worker",
-            "component_role": "worker",
-            "manager_id": "manager-default",
-            "endpoint": f"http://worker-{namespace}-01.svc.cluster.local:21000",
-            "version": "0.3.5",
-            "capabilities": {"queues": ["session_offload", "scheduled"]},
-            "data": {"queue_depth": 12},
-        },
-    ]
-    if idx == 0:
-        base.append(
-            {
-                "service_id": f"gateway-{namespace}-02",
-                "service_type": "gateway",
-                "component_role": "gateway",
-                "manager_id": "manager-default",
-                "endpoint": f"http://gw-{namespace}-02.svc.cluster.local:18080",
-                "version": "0.3.5",
-                "capabilities": {"protocols": ["http", "ws"], "channels": ["web"]},
-                "data": {"replicas": 1, "leader": False},
-            }
-        )
-        base.append(
-            {
-                "service_id": f"agent-server-{namespace}-03",
-                "service_type": "agent_server",
-                "component_role": "agent_server",
-                "manager_id": "manager-default",
-                "endpoint": f"http://as-{namespace}-03.svc.cluster.local:19000",
-                "version": "0.4.0-beta",
-                "capabilities": {"runtime": "python3.11", "max_sessions": 1000, "gpu": True},
-                "data": {"role": "canary", "labels": ["deep_research", "vision"]},
-            }
-        )
-    # 防止 NameError on jid
-    _ = jid
-    return base
-
-
 def _model_templates() -> list[dict[str, Any]]:
     return [
         {
@@ -467,10 +373,10 @@ def phase_instances() -> list[str]:
 
     existing = _list_instance_ids()
     if existing:
-        print(f"[seed] existing instances detected ({len(existing)}); skip instance/heartbeat phase")
+        print(f"[seed] existing instances detected ({len(existing)}); skip instance phase")
         return existing
 
-    print("\n[1/2] creating 3 instances …")
+    print("\n[1/1] creating 3 instances …")
     instance_ids: list[str] = []
     for spec in _instances():
         body = dict(spec)
@@ -479,13 +385,7 @@ def phase_instances() -> list[str]:
         instance_ids.append(jid)
         print(f"  + {spec['jiuwenclaw_name']:>18}  -> {jid}  ns={spec['k8s_namespace']}")
 
-    print("\n[2/2] ingesting heartbeats per instance …")
-    for idx, jid in enumerate(instance_ids):
-        ns = _instances()[idx]["k8s_namespace"]
-        for hb in _heartbeats_for(jid, ns, idx):
-            post(f"/api/v1/instances/{jid}/events/heartbeat", hb)
-        n = len(_heartbeats_for(jid, ns, idx))
-        print(f"  + {jid}: {n} service heartbeats")
+    print("[seed] gateway online status: run mock_gateway_ws.py or connect real gateways via WS")
 
     return instance_ids
 
@@ -661,7 +561,7 @@ def main() -> None:
         "--phase",
         choices=["1", "2", "all"],
         default="all",
-        help="1=instances+heartbeats; 2=templates+policies (needs mock_gateway_ws.py running); "
+        help="1=instances; 2=templates+policies (needs mock_gateway_ws.py for online status); "
         "all=do both back-to-back",
     )
     args = parser.parse_args()

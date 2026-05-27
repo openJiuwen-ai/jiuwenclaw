@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime
 from typing import Any
 
 from openjiuwen_runtime.foundation.db.handler import DBHandler
@@ -12,7 +12,7 @@ from jiuwenclaw_manager.schemas.template_schemas import (
     ModelTemplateOut,
     ModelTemplateUpdateBody,
 )
-from jiuwenclaw_manager.infrastructure.utils import new_template_id, utc_now
+from jiuwenclaw_manager.infrastructure.utils import iso_datetime, new_template_id, utc_now
 from jiuwenclaw_manager.manager_ws_server.server import push_config_op_to_all
 from jiuwenclaw_manager.models.template_models import MODEL_TEMPLATE_TABLE_DEF
 
@@ -54,14 +54,6 @@ def _normalize_template_id(template_id: str) -> str:
     if len(normalized) > 100:
         raise ValueError("template_id must be at most 100 characters")
     return normalized
-
-
-def _iso(dt: datetime | None) -> str | None:
-    if dt is None:
-        return None
-    if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=timezone.utc)
-    return dt.isoformat().replace("+00:00", "Z")
 
 
 def _validate_model_type(value: str | list[str]) -> str | list[str]:
@@ -117,8 +109,8 @@ def _row_to_out(row: Any) -> ModelTemplateOut:
         verify_ssl=row.verify_ssl,
         enabled=row.enabled,
         data=row.data,
-        created_at=_iso(row.created_at),
-        updated_at=_iso(row.updated_at),
+        created_at=iso_datetime(row.created_at),
+        updated_at=iso_datetime(row.updated_at),
     )
 
 
@@ -164,8 +156,8 @@ class ModelTemplateService:
             "verify_ssl": row.get("verify_ssl"),
             "enabled": row.get("enabled"),
             "data": row.get("data"),
-            "created_at": _iso(row.get("created_at") or now),
-            "updated_at": _iso(row.get("updated_at") or now),
+            "created_at": iso_datetime(row.get("created_at") or now),
+            "updated_at": iso_datetime(row.get("updated_at") or now),
         }
 
     def _build_row_for_create(

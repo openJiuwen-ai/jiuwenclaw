@@ -207,7 +207,8 @@ async def provision_local_jiuwenclaw(
             "k8s_auth_type": "none",
             "k8s_auth_config": dumps_auth_config({}),
             "k8s_namespace": "local",
-            "status": "active",
+            # Gateway 经 Manager WS 注册成功后由 register_gateway_via_ws 置为 online
+            "status": "pending",
             "resource_quota": None,
             "data": {
                 "management_api_base": management_api_base,
@@ -298,7 +299,7 @@ async def provision_local_jiuwenclaw(
 
     return {
         "jiuwenclaw_id": jiuwenclaw_id,
-        "status": "active",
+        "status": "pending",
         "management_api_base": management_api_base,
         "ports": {"agent_server": agent_port, "web": web_port, "agent_client_rest": rest_port},
         "workspace": str(instance_dir),

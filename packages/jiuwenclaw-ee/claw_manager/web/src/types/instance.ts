@@ -6,6 +6,7 @@ export interface InstanceSummary {
   group_id: string;
   space_id: string;
   created_at?: string | null;
+  last_heartbeat?: string | null;
 }
 
 export interface InstanceDetail extends InstanceSummary {
@@ -34,20 +35,6 @@ export interface ProvisionLocalInstanceBody {
   jiuwenclaw_name?: string;
   creator_id?: string;
   description?: string;
-}
-
-export interface ServiceStatusItem {
-  service_id: string;
-  service_type: string;
-  component_role: string;
-  status: string;
-  last_heartbeat?: string | null;
-  endpoint?: string | null;
-  version?: string | null;
-}
-
-export interface ServiceStatusList {
-  items: ServiceStatusItem[];
 }
 
 export interface ManagerWsStatus {
