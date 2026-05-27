@@ -41,7 +41,8 @@ def test_build_identity_prompt_contains_identity_section_only():
 
 
 @pytest.mark.asyncio
-async def test_runtime_time_section_participates_in_priority_order():
+async def test_runtime_time_section_in_ctx_extra_not_in_builder():
+    """Time content is written to ctx.extra['_system_reminders'], not builder."""
     builder = SystemPromptBuilder(language="cn")
     builder.add_section(PromptSection(name="identity", content={"cn": "identity"}, priority=10))
     builder.add_section(PromptSection(name="tools", content={"cn": "# 可用工具"}, priority=30))
@@ -58,13 +59,23 @@ async def test_runtime_time_section_participates_in_priority_order():
     ctx = AgentCallbackContext(agent=None, inputs=None, session=None)
     await runtime_rail.before_model_call(ctx)
 
+    # Time content is in ctx.extra, not in builder
+    assert "_system_reminders" in ctx.extra
+    time_reminder = ctx.extra["_system_reminders"][0]
+    assert time_reminder["source"] == "time_rail"
+    assert "# 当前日期与时间" in time_reminder["content"]
+    assert "频道：web" not in time_reminder["content"]  # channel info is in runtime section
+
+    # Builder output does NOT contain time section
     prompt = builder.build()
+    assert "# 当前日期与时间" not in prompt
+
+    # Runtime and workspace sections still in builder, with priority ordering
     ordered_markers = [
         "identity",
         "# 你的家",
         "# 可用工具",
         "# 中间静态区",
-        "# 当前日期与时间",
         "# 运行时",
     ]
     positions = [prompt.index(marker) for marker in ordered_markers]

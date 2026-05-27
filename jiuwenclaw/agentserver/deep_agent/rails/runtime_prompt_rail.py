@@ -72,7 +72,6 @@ class RuntimePromptRail(DeepAgentRail):
     def uninit(self, agent) -> None:
         """清理注入的 section 并释放引用。"""
         if self.system_prompt_builder is not None:
-            self.system_prompt_builder.remove_section("time")
             self.system_prompt_builder.remove_section("runtime")
             self.system_prompt_builder.remove_section("workspace")
             self.system_prompt_builder.remove_section("request_system_prompt")
@@ -164,11 +163,10 @@ class RuntimePromptRail(DeepAgentRail):
                 "search queries must prefer the current year or date."
             )
 
-        self.system_prompt_builder.add_section(PromptSection(
-            name="time",
-            content={"cn": time_content, "en": time_content},
-            priority=92,
-        ))
+        ctx.extra.setdefault("_system_reminders", []).append({
+            "content": time_content,
+            "source": "time_rail",
+        })
 
         plat = f"{platform.system()} {platform.machine()}"
         python_ver = platform.python_version()
