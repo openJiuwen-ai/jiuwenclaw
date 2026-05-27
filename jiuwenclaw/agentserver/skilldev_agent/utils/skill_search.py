@@ -70,6 +70,7 @@ def format_skill_data(raw_skills):
 def search_skills(query):
     if sandbox_routing_enabled():
         api_url = os.getenv("SKILL_SEARCH_URL")
+        auth_headers = default_headers
     else:
         raw = os.getenv("SKILL_SEARCH_ENV_CONFIG", "")
         if not raw:
@@ -81,9 +82,8 @@ def search_skills(query):
             logger.error("[SkillSearch] SKILL_SEARCH_ENV_CONFIG JSON 解析失败: %s", e)
             return None, 0
         api_url = env_config["url"]
-
+        auth_headers = generate_auth_headers(env_config)
     trace_id = str(uuid.uuid4())
-    # auth_headers = generate_auth_headers(env_config)
 
     headers = {
         'Content-Type': 'application/json',
@@ -91,7 +91,7 @@ def search_skills(query):
         'x-hag-trace-id': trace_id,
         'x-request-from': 'openclaw',
     }
-    headers.update(default_headers)
+    headers.update(auth_headers)
 
     payload = {
         "query": query,
