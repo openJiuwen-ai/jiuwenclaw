@@ -3156,6 +3156,15 @@ class VibeSkillChannel(BaseChannel):
             skill_url = skill.get("url", "").strip()
             if not skill_url:
                 return self._json_response(400, {"error": "Missing url in skills"})
+            # 验证 URL 格式有效性
+            try:
+                parsed = urlparse(skill_url)
+                if not parsed.scheme or not parsed.netloc:
+                    return self._json_response(400, {"error": "Invalid skill URL"})
+            except AttributeError:
+                return self._json_response(400, {"error": "Skill URL must be a string"})
+            except Exception:
+                return self._json_response(400, {"error": "Failed to parse skill URL"})
             await channel_manager.register_skill(
                 session_id,
                 skill_url,
