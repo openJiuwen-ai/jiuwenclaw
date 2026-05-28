@@ -21,6 +21,7 @@ dependencies = [
     "pyyaml>=6.0",
     "openjiuwen_runtime_foundation @ git+https://gitcode.com/openJiuwen/agent-runtime.git@develop#subdirectory=foundation",
     "websockets>=12.0,<16",
+    "asyncpg>=0.29",
 ]
 
 [project.optional-dependencies]

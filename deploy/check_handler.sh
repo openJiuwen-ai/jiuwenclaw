@@ -149,18 +149,6 @@ check_if_rabbitmq_up() {
     DEPLOY_VARS["MANAGER_RABBITMQ_URL"]="amqp://${user}:${encoded_password}@${url}"
 }
 
-check_if_db_up() {
-    local db_type="${DEPLOY_VARS["MANAGER_DB_TYPE"]}"
-
-    if [[ "${db_type}" == "sqlite" ]]; then
-        info "DB_TYPE is sqlite, skip DB check"
-        return
-    elif [[ "${db_type}" == "postgresql" ]]; then
-        _check_if_postgresql_up
-    else
-        check_if_mysql_up
-    fi
-}
 
 check_if_mysql_up() {
     local name="${DEPLOY_VARS["MYSQL_NAME"]}"
@@ -168,79 +156,51 @@ check_if_mysql_up() {
     # Check if external MySQL server
     if [ -n "${DEPLOY_VARS["MYSQL_HOST"]:-}" ]; then
         info "Use external MySQL server"
-        DEPLOY_VARS["MANAGER_DB_HOST"]=${DEPLOY_VARS["MYSQL_HOST"]}
-        DEPLOY_VARS["MANAGER_DB_PORT"]=${DEPLOY_VARS["MYSQL_PORT"]}
-        DEPLOY_VARS["MANAGER_DB_USER"]="root"
-        DEPLOY_VARS["MANAGER_DB_PASSWORD"]=${DEPLOY_VARS["MYSQL_ROOT_PASSWORD"]}
-        DEPLOY_VARS["GATEWAY_DB_HOST"]=${DEPLOY_VARS["MYSQL_HOST"]}
-        DEPLOY_VARS["GATEWAY_DB_PORT"]=${DEPLOY_VARS["MYSQL_PORT"]}
-        DEPLOY_VARS["GATEWAY_DB_USER"]="root"
-        DEPLOY_VARS["GATEWAY_DB_PASSWORD"]=${DEPLOY_VARS["MYSQL_ROOT_PASSWORD"]}
-        return
-    fi
-
-    # No Build-In DB server
-    if ! check_k8s_resource_exists "statefulset" "${name}"; then
-        DEPLOY_VARS["MANAGER_DB_TYPE"]="sqlite"
-        DEPLOY_VARS["GATEWAY_DB_TYPE"]="sqlite"
-        warning "DB is not deployed. Use build-in SQLite"
+        DEPLOY_VARS["DB_HOST"]=${DEPLOY_VARS["MYSQL_HOST"]}
+        DEPLOY_VARS["DB_PORT"]=${DEPLOY_VARS["MYSQL_PORT"]}
+        DEPLOY_VARS["DB_USER"]="root"
+        DEPLOY_VARS["DB_PASSWORD"]=${DEPLOY_VARS["MYSQL_ROOT_PASSWORD"]}=
         return
     fi
 
     info "Use built-in MySQL server"
-    DEPLOY_VARS["MANAGER_DB_HOST"]="${name}-headless.default"
-    DEPLOY_VARS["MANAGER_DB_PORT"]="3306"
-    DEPLOY_VARS["MANAGER_DB_USER"]="root"
-    DEPLOY_VARS["MANAGER_DB_PASSWORD"]=${DEPLOY_VARS["MYSQL_ROOT_PASSWORD"]}
-    DEPLOY_VARS["GATEWAY_DB_HOST"]="${name}-headless.default"
-    DEPLOY_VARS["GATEWAY_DB_PORT"]="3306"
-    DEPLOY_VARS["GATEWAY_DB_USER"]="root"
-    DEPLOY_VARS["GATEWAY_DB_PASSWORD"]=${DEPLOY_VARS["MYSQL_ROOT_PASSWORD"]}
+    DEPLOY_VARS["DB_HOST"]="${name}-headless.default"
+    DEPLOY_VARS["DB_PORT"]="3306"
+    DEPLOY_VARS["DB_USER"]="root"
+    DEPLOY_VARS["DB_PASSWORD"]=${DEPLOY_VARS["MYSQL_ROOT_PASSWORD"]}
 }
 
-_check_if_postgresql_up() {
+check_if_postgresql_up() {
     local name="${DEPLOY_VARS["POSTGRES_NAME"]}"
 
     # Check if external PostgreSQL server
     if [ -n "${DEPLOY_VARS["POSTGRES_HOST"]:-}" ]; then
         info "Use external PostgreSQL server"
-        DEPLOY_VARS["MANAGER_DB_HOST"]=${DEPLOY_VARS["POSTGRES_HOST"]}
-        DEPLOY_VARS["MANAGER_DB_PORT"]=${DEPLOY_VARS["POSTGRES_PORT"]}
-        DEPLOY_VARS["MANAGER_DB_USER"]="postgres"
-        DEPLOY_VARS["MANAGER_DB_PASSWORD"]=${DEPLOY_VARS["POSTGRES_PASSWORD"]}
-        DEPLOY_VARS["GATEWAY_DB_HOST"]=${DEPLOY_VARS["POSTGRES_HOST"]}
-        DEPLOY_VARS["GATEWAY_DB_PORT"]=${DEPLOY_VARS["POSTGRES_PORT"]}
-        DEPLOY_VARS["GATEWAY_DB_USER"]="postgres"
-        DEPLOY_VARS["GATEWAY_DB_PASSWORD"]=${DEPLOY_VARS["POSTGRES_PASSWORD"]}
-        return
-    fi
-
-    # No Build-In DB server
-    if ! check_k8s_resource_exists "statefulset" "${name}"; then
-        DEPLOY_VARS["MANAGER_DB_TYPE"]="sqlite"
-        DEPLOY_VARS["GATEWAY_DB_TYPE"]="sqlite"
-        warning "DB is not deployed. Use build-in SQLite"
+        DEPLOY_VARS["DB_HOST"]=${DEPLOY_VARS["POSTGRES_HOST"]}
+        DEPLOY_VARS["DB_PORT"]=${DEPLOY_VARS["POSTGRES_PORT"]}
+        DEPLOY_VARS["DB_USER"]="postgres"
+        DEPLOY_VARS["DB_PASSWORD"]=${DEPLOY_VARS["POSTGRES_PASSWORD"]}
         return
     fi
 
     info "Use built-in PostgreSQL server"
-    DEPLOY_VARS["MANAGER_DB_HOST"]="${name}-headless.default"
-    DEPLOY_VARS["MANAGER_DB_PORT"]="5432"
-    DEPLOY_VARS["MANAGER_DB_USER"]="postgres"
-    DEPLOY_VARS["MANAGER_DB_PASSWORD"]=${DEPLOY_VARS["POSTGRES_PASSWORD"]}
-    DEPLOY_VARS["GATEWAY_DB_HOST"]="${name}-headless.default"
-    DEPLOY_VARS["GATEWAY_DB_PORT"]="5432"
-    DEPLOY_VARS["GATEWAY_DB_USER"]="postgres"
-    DEPLOY_VARS["GATEWAY_DB_PASSWORD"]=${DEPLOY_VARS["POSTGRES_PASSWORD"]}
+    DEPLOY_VARS["DB_HOST"]="${name}-headless.default"
+    DEPLOY_VARS["DB_PORT"]="5432"
+    DEPLOY_VARS["DB_USER"]="postgres"
+    DEPLOY_VARS["DB_PASSWORD"]=${DEPLOY_VARS["POSTGRES_PASSWORD"]}
 }
 
-check_vars() {
-    local client_type="${DEPLOY_VARS["AGENT_RUNTIME"]}"
 
-    if [[ "${client_type}" != "jiuwen" && "${client_type}" != "yuanrong" ]]; then
-        error "Unsupported AGENT_RUNTIME: ${client_type}"
-    fi
+check_if_db_up() {
+    local db_type="${DEPLOY_VARS["DB_TYPE"]}"
+
+    info "DB_TYPE: ${db_type}"
+    if [[ "${db_type}" == "sqlite" ]]; then
+        return
+    fi 
+    check_if_${db_type}_up
 }
+
 
 check_dependency(){
     detect_os
@@ -249,7 +209,6 @@ check_dependency(){
     check_if_root
     #check_ssh_connectivity
     check_cluster_has_enough_nodes
-    check_vars
 }
 
 check_nfs_up_dependency(){
@@ -293,19 +252,6 @@ check_rabbitmq_up_dependency(){
     success "RabbitMQ directory created successfully in NFS Pod!"
 }
 
-_check_db_up_dependency(){
-    local db_type="${DEPLOY_VARS["MANAGER_DB_TYPE"]}"
-
-    if [[ "${db_type}" == "sqlite" ]]; then
-        info "DB_TYPE is sqlite, skip DB dependency check"
-        return
-    elif [[ "${db_type}" == "postgresql" ]]; then
-        _check_postgresql_up_dependency
-    else
-        check_mysql_up_dependency
-    fi
-}
-
 check_mysql_up_dependency(){
     local mysql_path=${DEPLOY_VARS["MYSQL_PATH"]}
     local nfs_dname=${DEPLOY_VARS["NFS_NAME"]}
@@ -320,7 +266,7 @@ check_mysql_up_dependency(){
     success "MySQL directory created successfully in NFS Pod!"
 }
 
-_check_postgresql_up_dependency(){
+check_postgresql_up_dependency(){
     local pg_path=${DEPLOY_VARS["POSTGRES_PATH"]}
     local nfs_dname=${DEPLOY_VARS["NFS_NAME"]}
 
