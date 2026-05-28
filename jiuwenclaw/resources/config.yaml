@@ -438,6 +438,7 @@ react:
       - search_and_load_tools
       - free_search
       - fetch_webpage
+      - mcp_petal_search
       - ask_user_question
       - fork_agent
       - spawn_subagent
