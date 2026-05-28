@@ -13,6 +13,11 @@ from jiuwenclaw.sandbox.claw_api_key import get_claw_api_key
 from jiuwenclaw.sandbox.sandbox_routing_settings import SandboxRoutingSettings
 from jiuwenclaw.sandbox.sandbox_dcs_store import SandboxDcsStore
 from jiuwenclaw.sandbox.sandbox_init_data import upload_sandbox_init_data
+from jiuwenclaw.sandbox.sandbox_routing_dcs_store import (
+    SandboxRoutingDcsStore,
+    get_gateway_instance_id,
+    sandbox_adopt_existing_enabled,
+)
 from jiuwenclaw.e2a.models import E2AEnvelope
 from jiuwenclaw.gateway.agent_client import AgentServerClient
 from jiuwenclaw.gateway.open_ability_client import OpenAbilityWebSocketClient
@@ -54,10 +59,13 @@ class SandboxRouterAgentClient(AgentServerClient):
         queue_timeout_seconds: float | None = None,
         idle_timeout_seconds: float | None = None,
         idle_check_interval_seconds: float | None = None,
+        adopt_existing: bool | None = None,
+        gateway_instance_id: str | None = None,
     ) -> None:
         settings = SandboxRoutingSettings.from_env()
         self._sandbox_client: SandboxClient | None = None
         self._dcs_store: SandboxDcsStore | None = None
+        self._routing_dcs_store: SandboxRoutingDcsStore | None = None
         self._open_ability_config: OpenAbilityConfig | None = None
         self._max_sandboxes = max(
             1,
@@ -82,6 +90,14 @@ class SandboxRouterAgentClient(AgentServerClient):
             idle_check_interval_seconds
             if idle_check_interval_seconds is not None
             else settings.idle_check_interval_seconds
+        )
+        self._adopt_existing_enabled = (
+            sandbox_adopt_existing_enabled()
+            if adopt_existing is None
+            else bool(adopt_existing)
+        )
+        self._gateway_instance_id = (
+            str(gateway_instance_id or "").strip() or get_gateway_instance_id()
         )
         self._runtimes: dict[str, SandboxRuntime] = {}
         self._locks: dict[str, asyncio.Lock] = {}
@@ -115,6 +131,8 @@ class SandboxRouterAgentClient(AgentServerClient):
             await self._sandbox_client.close()
         if self._dcs_store is not None:
             await self._dcs_store.close()
+        if self._routing_dcs_store is not None:
+            await self._routing_dcs_store.close()
 
     def set_or_update_server_config(
         self,
@@ -217,54 +235,178 @@ class SandboxRouterAgentClient(AgentServerClient):
             await self._wait_for_capacity(routing_key)
             async with self._pool_lock:
                 self._creating_count += 1
-            sandbox_id: str | None = None
-            dcs_registered = False
             try:
-                sandbox_client = self._get_sandbox_client()
-                result = await sandbox_client.create_sandbox()
-                if not result.success:
-                    raise RuntimeError(result.error or "create_sandbox failed")
-                sandbox_id = str(result.output or "").strip()
-                if not sandbox_id:
-                    raise RuntimeError("create_sandbox returned empty sandbox_id")
-                registration = await self._register_sandbox_record(sandbox_id)
-                dcs_registered = bool(registration.get("api_key"))
-                metadata = {
-                    "routing_key": routing_key,
-                    "user_id": user_id,
-                    "session_id": session_id,
-                    **registration,
-                }
-                agent_client = await self._connect_open_ability_client(sandbox_id, routing_key, metadata)
-                if self._server_config:
-                    agent_client.set_or_update_server_config(config=self._server_config, env=self._server_env)
-                runtime = SandboxRuntime(
-                    routing_key=routing_key,
-                    sandbox_id=sandbox_id,
-                    agent_client=agent_client,
-                    status=SandboxStatus.BUSY,
-                    task_count=1,
-                    metadata=metadata,
+                adopted = await self._try_adopt_runtime_from_dcs(
+                    routing_key,
+                    user_id=user_id,
+                    session_id=session_id,
                 )
-                async with self._pool_lock:
-                    self._runtimes[routing_key] = runtime
-                return runtime
-            except Exception:
-                if sandbox_id:
-                    if dcs_registered:
-                        await self._delete_sandbox_dcs_record(sandbox_id)
-                    try:
-                        await self._get_sandbox_client().delete_sandbox(sandbox_id)
-                    except Exception:  # noqa: BLE001
-                        logger.exception(
-                            "Failed to cleanup sandbox after runtime create failure: %s",
-                            sandbox_id,
-                        )
-                raise
+                if adopted is not None:
+                    return adopted
+                return await self._create_and_bind_sandbox(
+                    routing_key,
+                    user_id=user_id,
+                    session_id=session_id,
+                )
             finally:
                 async with self._pool_lock:
                     self._creating_count = max(0, self._creating_count - 1)
                 self._notify_next_waiter()
+
+    async def _try_adopt_runtime_from_dcs(
+        self,
+        routing_key: str,
+        *,
+        user_id: str | None,
+        session_id: str | None,
+    ) -> SandboxRuntime | None:
+        if not self._adopt_existing_enabled:
+            return None
+        record = await self._get_routing_dcs_store().get_routing(routing_key)
+        if record is None:
+            return None
+        endpoint = await self._get_dcs_store().get_openability_endpoint(record.sandbox_id)
+        if endpoint is None:
+            logger.warning(
+                "Stale sandbox routing mapping (no OA endpoint): routing_key=%s sandbox_id=%s",
+                routing_key,
+                record.sandbox_id,
+            )
+            await self._delete_routing_mapping(routing_key)
+            return None
+        logger.info(
+            "Adopting existing sandbox from DCS: routing_key=%s sandbox_id=%s prior_gateway=%s",
+            routing_key,
+            record.sandbox_id,
+            record.gateway_id,
+        )
+        return await self._build_runtime_from_sandbox(
+            routing_key,
+            sandbox_id=record.sandbox_id,
+            user_id=user_id,
+            session_id=session_id,
+            adopted=True,
+        )
+
+    async def _create_and_bind_sandbox(
+        self,
+        routing_key: str,
+        *,
+        user_id: str | None,
+        session_id: str | None,
+    ) -> SandboxRuntime:
+        sandbox_id: str | None = None
+        dcs_registered = False
+        routing_claimed = False
+        try:
+            sandbox_client = self._get_sandbox_client()
+            result = await sandbox_client.create_sandbox()
+            if not result.success:
+                raise RuntimeError(result.error or "create_sandbox failed")
+            sandbox_id = str(result.output or "").strip()
+            if not sandbox_id:
+                raise RuntimeError("create_sandbox returned empty sandbox_id")
+
+            if self._adopt_existing_enabled:
+                routing_claimed = await self._get_routing_dcs_store().set_routing_nx(
+                    routing_key,
+                    sandbox_id=sandbox_id,
+                    gateway_id=self._gateway_instance_id,
+                )
+                if not routing_claimed:
+                    logger.info(
+                        "Lost routing NX race; adopting peer sandbox: routing_key=%s created=%s",
+                        routing_key,
+                        sandbox_id,
+                    )
+                    try:
+                        await sandbox_client.delete_sandbox(sandbox_id)
+                    except Exception:  # noqa: BLE001
+                        logger.exception(
+                            "Failed to delete sandbox after losing routing NX: %s",
+                            sandbox_id,
+                        )
+                    adopted = await self._try_adopt_runtime_from_dcs(
+                        routing_key,
+                        user_id=user_id,
+                        session_id=session_id,
+                    )
+                    if adopted is not None:
+                        return adopted
+                    raise RuntimeError(
+                        f"routing NX lost for {routing_key} but no adoptable sandbox in DCS"
+                    )
+
+            registration = await self._register_sandbox_record(sandbox_id)
+            dcs_registered = bool(registration.get("api_key"))
+            metadata = {
+                "routing_key": routing_key,
+                "user_id": user_id,
+                "session_id": session_id,
+                **registration,
+            }
+            return await self._build_runtime_from_sandbox(
+                routing_key,
+                sandbox_id=sandbox_id,
+                user_id=user_id,
+                session_id=session_id,
+                metadata_extra=metadata,
+                agent_client=await self._connect_open_ability_client(
+                    sandbox_id, routing_key, metadata
+                ),
+            )
+        except Exception:
+            if sandbox_id and routing_claimed:
+                await self._delete_routing_mapping(routing_key)
+            if sandbox_id:
+                if dcs_registered:
+                    await self._delete_sandbox_dcs_record(sandbox_id)
+                try:
+                    await self._get_sandbox_client().delete_sandbox(sandbox_id)
+                except Exception:  # noqa: BLE001
+                    logger.exception(
+                        "Failed to cleanup sandbox after runtime create failure: %s",
+                        sandbox_id,
+                    )
+            raise
+
+    async def _build_runtime_from_sandbox(
+        self,
+        routing_key: str,
+        *,
+        sandbox_id: str,
+        user_id: str | None,
+        session_id: str | None,
+        metadata_extra: dict[str, Any] | None = None,
+        agent_client: AgentServerClient | None = None,
+        adopted: bool = False,
+    ) -> SandboxRuntime:
+        metadata: dict[str, Any] = {
+            "routing_key": routing_key,
+            "user_id": user_id,
+            "session_id": session_id,
+            "sandbox_id": sandbox_id,
+        }
+        if adopted:
+            metadata["adopted"] = True
+        if metadata_extra:
+            metadata.update(metadata_extra)
+        client = agent_client
+        if client is None:
+            client = await self._connect_open_ability_client(sandbox_id, routing_key, metadata)
+        if self._server_config:
+            client.set_or_update_server_config(config=self._server_config, env=self._server_env)
+        runtime = SandboxRuntime(
+            routing_key=routing_key,
+            sandbox_id=sandbox_id,
+            agent_client=client,
+            status=SandboxStatus.BUSY,
+            task_count=1,
+            metadata=metadata,
+        )
+        async with self._pool_lock:
+            self._runtimes[routing_key] = runtime
+        return runtime
 
     async def _wait_for_capacity(self, routing_key: str) -> None:
         while True:
@@ -346,17 +488,42 @@ class SandboxRouterAgentClient(AgentServerClient):
             if runtime is None or runtime.status == SandboxStatus.TERMINATING:
                 return
             runtime.status = SandboxStatus.TERMINATING
+        sandbox_id = runtime.sandbox_id
         try:
-            await self._disconnect_agent_client(runtime.sandbox_id, runtime.agent_client)
+            await self._disconnect_agent_client(sandbox_id, runtime.agent_client)
         finally:
             try:
-                await self._delete_sandbox_dcs_record(runtime.sandbox_id)
-                await self._get_sandbox_client().delete_sandbox(runtime.sandbox_id)
+                if await self._delete_remote_sandbox(sandbox_id):
+                    await self._delete_sandbox_dcs_record(sandbox_id)
+                    await self._delete_routing_mapping(routing_key)
+                else:
+                    logger.warning(
+                        "Skipped DCS/routing cleanup after failed sandbox delete: "
+                        "sandbox_id=%s routing_key=%s",
+                        sandbox_id,
+                        routing_key,
+                    )
             finally:
                 async with self._pool_lock:
                     runtime.status = SandboxStatus.TERMINATED
                     self._runtimes.pop(routing_key, None)
                 self._notify_next_waiter()
+
+    async def _delete_remote_sandbox(self, sandbox_id: str) -> bool:
+        """Delete the remote sandbox. Return False on failure so DCS metadata can be retained."""
+        try:
+            result = await self._get_sandbox_client().delete_sandbox(sandbox_id)
+            if not result.success:
+                logger.error(
+                    "delete_sandbox failed: sandbox_id=%s error=%s",
+                    sandbox_id,
+                    result.error,
+                )
+                return False
+            return True
+        except Exception:  # noqa: BLE001
+            logger.exception("Failed to delete remote sandbox: %s", sandbox_id)
+            return False
 
     async def _register_sandbox_record(self, sandbox_id: str) -> dict[str, str]:
         store = self._get_dcs_store()
@@ -384,10 +551,23 @@ class SandboxRouterAgentClient(AgentServerClient):
         except Exception:  # noqa: BLE001
             logger.exception("Failed to delete sandbox DCS record: %s", sandbox_id)
 
+    async def _delete_routing_mapping(self, routing_key: str) -> None:
+        if not self._adopt_existing_enabled:
+            return
+        try:
+            await self._get_routing_dcs_store().delete_routing(routing_key)
+        except Exception:  # noqa: BLE001
+            logger.exception("Failed to delete sandbox routing mapping: %s", routing_key)
+
     def _get_dcs_store(self) -> SandboxDcsStore:
         if self._dcs_store is None:
             self._dcs_store = SandboxDcsStore.from_env()
         return self._dcs_store
+
+    def _get_routing_dcs_store(self) -> SandboxRoutingDcsStore:
+        if self._routing_dcs_store is None:
+            self._routing_dcs_store = SandboxRoutingDcsStore.from_env()
+        return self._routing_dcs_store
 
     async def _connect_open_ability_client(
         self,

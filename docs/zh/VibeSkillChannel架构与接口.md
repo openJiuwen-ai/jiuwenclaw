@@ -103,7 +103,8 @@ Session Store 由每个 `VibeSkillChannel` 实例独立持有，不是全局单�
 | `SANDBOX_DCS_HOST` | 无 | DCS 主机；**未设置则禁用 VibeSkill DCS 持久化** |
 | `SANDBOX_DCS_PORT` | `2881` | DCS 端口 |
 | `SANDBOX_DCS_PASSWORD` | 无 | DCS 密码（可选） |
-| `SANDBOX_DCS_TTL_SECONDS` | `86400` | key 过期时间（秒）；`0` 表示不过期 |
+| `SANDBOX_DCS_TTL_SECONDS` | 未设 | 显式设置时作为 session DCS TTL（秒）；`0` 表示不过期。**未设时 session 默认不过期** |
+| `SANDBOX_DURATION_SECONDS` | `3600` | 远端沙箱存活时长；`sandboxApiKey` / routing 的 DCS TTL 默认与此相同（见 sandbox 文档） |
 
 Redis 连接与 TTL 逻辑由公共模块 `jiuwenclaw/dcs`（`DcsClusterClient`）提供；业务 key 与序列化仍在本模块。
 
@@ -127,6 +128,14 @@ Key 命名（与 `sandbox_dcs_store.py` 同模式，写死常量）：
 - **WS 出站事件仍 gateway-本地**：DCS 只解决 session 元数据跨机可见；流式响应仍由收到 `message.send` 的 gateway 处理，生产需 LB sticky session（基于 `sessionID` hash）。
 - **`_message_ctx` / `_pending_confirms` 不持久化**：流式上下文仍为 gateway 本地，进程重启或换机器后需前端重连重发。
 - **不做跨 gateway 缓存失效广播**：另一节点删除 session 后，本机缓存待自然驱逐或重启对齐。
+
+**沙箱亲和（Gateway 故障切换）**：在 `SANDBOX_ENABLE=true` 且 `SANDBOX_ADOPT_EXISTING=true` 时，Gateway 将 `routing_key → sandbox_id` 写入 DCS（`jiuwen:sandboxRouting:*`，见 `docs/sandbox/Sandbox实现进展.md` §3.1）。G1 建 session/跑任务后若 G2 接管业务请求，只要：
+
+1. `VIBESKILL_DCS_HOST` 与 `SANDBOX_DCS_HOST` 指向同一 DCS 集群（或等效共享存储）；
+2. G2 能 `resolve_session(sessionID)` 得到与 G1 相同的 `metadata.user_id`（未传时即为 `session_id`）；
+3. 原 sandbox 未被 idle terminate 且 `sandboxToOA` 仍有效；
+
+则 G2 **重连** 同一 `sandbox_id`，不会再次 `create_sandbox`。WS 仍建议粘滞；沙箱状态在沙箱内，与 WS 是否换 Gateway 解耦。
 
 ## 4. WebSocket 接口
 

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 from typing import Any
 
 from jiuwenclaw.channel.vibeskill_session import (
@@ -11,6 +12,7 @@ from jiuwenclaw.channel.vibeskill_session import (
 from jiuwenclaw.dcs import DcsClusterClient, DcsClusterConfig, load_config_from_env
 
 logger = logging.getLogger(__name__)
+_SANDBOX_DCS_TTL_SECONDS_ENV = "SANDBOX_DCS_TTL_SECONDS"
 
 # Backward-compatible alias for tests / future imports.
 VibeSkillSessionDcsConfig = DcsClusterConfig
@@ -25,6 +27,9 @@ class VibeSkillSessionDcsStore:
 
     def __init__(self, config: DcsClusterConfig) -> None:
         self._config = config
+        # Session keys default to no expire unless SANDBOX_DCS_TTL_SECONDS is explicitly set.
+        raw = os.environ.get(_SANDBOX_DCS_TTL_SECONDS_ENV, "").strip()
+        self._ttl_seconds = max(0, int(raw)) if raw else 0
         self._dcs = DcsClusterClient(config)
 
     @classmethod
@@ -103,7 +108,11 @@ class VibeSkillSessionDcsStore:
     async def save_session(self, session: VibeSkillSession) -> None:
         """覆盖写整个 session。失败时透传异常（fail-fast）。"""
         session_key = self._session_key(session.session_id)
-        await self._dcs.set_with_ttl(session_key, self._serialize(session))
+        await self._dcs.set_with_ttl(
+            session_key,
+            self._serialize(session),
+            ttl_seconds=self._ttl_seconds,
+        )
         logger.debug(
             "[VibeSkillSessionDcsStore] saved session: session_id=%s state=%s",
             session.session_id,

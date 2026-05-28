@@ -151,12 +151,52 @@ _disconnect_agent_client(sandbox_id, agent_client) -> None
 
 可选：`SANDBOX_INIT_DATA_PATH` — 沙箱内 `init_data.json` 上传路径；Gateway 与 AgentServer 均读取此变量，默认 `/opt/huawei/app/jiuwenclaw/init_data.json`。Gateway 上传时会去掉任何目录前缀，仅以 basename 作为 `SandboxClient.upload_file` 的 `remote_path`。
 
-可选：`SANDBOX_DCS_TTL_SECONDS` — 写入 DCS 的 sandbox API key 哈希记录的过期时间（秒），默认 `86400`（一天）；设置为 `0` 表示不设置过期时间。VibeSkill session 持久化共用同一套 `SANDBOX_DCS_*` 环境变量。
+DCS TTL（共用 `SANDBOX_DCS_HOST` 等连接配置，**各 key 默认 TTL 不同**）：
+
+| 变量 | 作用 key | 默认 |
+|------|----------|------|
+| （无） | `jiuwen:vibeskillSession:*` | **不过期**（`0`） |
+| `SANDBOX_DURATION_SECONDS` | 远端沙箱存活时长；亦作为下方 DCS 默认 TTL 的基准 | `3600` |
+| `SANDBOX_DCS_TTL_SECONDS` | 显式覆盖 `sandboxApiKey` / `sandboxToOA` / routing / session 的 TTL；`0` 表示不过期 | 未设时：`sandboxApiKey` 与 routing 用 `SANDBOX_DURATION_SECONDS`；session 仍为 `0` |
+
+可选（跨 Gateway failover）：
+
+| 变量 | 说明 | 默认 |
+|------|------|------|
+| `SANDBOX_ADOPT_EXISTING` | 是否从 DCS 读取已有 `routing_key → sandbox_id` 并重连（Gateway 切换时复用沙箱） | `true` |
+| `GATEWAY_INSTANCE_ID` | 写入 routing 映射的 Gateway 实例标识（日志/排障） | `hostname:pid` |
 
 SandboxClient 固定：`timeout_seconds=120`，`metadata={}`。
 
 OpenAbility 固定：`use_tls=false`，`connect_timeout_seconds=10`，`readiness_poll_interval_seconds=0.5`，`readiness_timeout_seconds=60`。
 
+### 3.1 跨 Gateway failover（routing 映射）
+
+当 `SANDBOX_ADOPT_EXISTING=true` 时，`SandboxRouterAgentClient` 在本地 `_runtimes` miss 后会先查 DCS，再决定 **adopt 重连** 或 **create_sandbox**。
+
+DCS Key（`jiuwenclaw/sandbox/sandbox_routing_dcs_store.py`）：
+
+| Key | 值 |
+|-----|----|
+| `jiuwen:sandboxRouting:{routing_key}` | JSON：`sandbox_id`、`gateway_id`、`updated_at` |
+
+`routing_key` 规则不变：`vibeskill:user:{user_id}`（优先）或 `vibeskill:session:{session_id}`。
+
+**Acquire 顺序**（`_acquire_runtime_for_key`）：
+
+1. 本地 `_runtimes` 命中 → 复用（routing 映射写入 TTL 默认与 `SANDBOX_DURATION_SECONDS` 一致，不主动续期）。
+2. DCS `get_routing` 命中且 `jiuwen:sandboxToOA:{sandbox_id}` 可达 → **不** `create_sandbox`，仅建 OA WebSocket。
+3. 映射存在但 OA 不可达 → 删 mapping，走创建。
+4. 无映射 → `create_sandbox` → `SET NX` 写 mapping；NX 失败则删掉本机新建沙箱并 adopt 对端 `sandbox_id`。
+5. 本地 idle/容量 `terminate` → 先删远端沙箱；成功后再删 `sandboxApiKey` / `sandboxToOA` 与 routing mapping（删沙箱失败则保留 DCS，避免映射丢失而沙箱仍存活）。
+
+**运维前置**（与 VibeSkill 文档一致）：
+
+- `VIBESKILL_DCS_HOST`：G2 能读到 session 与 `metadata.user_id`，算出与 G1 相同的 `routing_key`。
+- `SANDBOX_DCS_HOST`：读写 routing 与 `sandboxToOA`。
+- WS 仍建议 LB 粘滞（流式上下文不跨 Gateway）；沙箱状态在沙箱进程内，与 WS 粘滞解耦。
+
+**立即接管**：不等待租约；G1 假死而流量切到 G2 时，可能短暂双 Gateway 连同一 sandbox（需 OA/Agent 容忍重连）。
 
 ## 5. 已覆盖测试
 
@@ -177,6 +217,7 @@ OpenAbility 固定：`use_tls=false`，`connect_timeout_seconds=10`，`readiness
 - idle timeout 只回收 `task_count == 0` 的 runtime。
 - 沙箱注册时 DCS 写入后上传 `init_data.json`（`test_sandbox_router_init_data`）。
 - `init_data.json` 序列化、路径与 `upload_file` 调用（`test_sandbox_init_data`、`test_sandbox_client_upload`）。
+- 跨 Gateway：DCS adopt 不重跑 `create_sandbox`、stale mapping 清理、NX 竞争、terminate 删 mapping（`test_sandbox_router_failover`、`test_sandbox_routing_dcs_store`）。
 
 可运行的目标测试：
 
@@ -184,6 +225,8 @@ OpenAbility 固定：`use_tls=false`，`connect_timeout_seconds=10`，`readiness
 uv run --no-sync pytest -o addopts='' \
   tests/unit_tests/channel/test_vibeskill_session_store.py \
   tests/unit_tests/gateway/test_sandbox_router_init_data.py \
+  tests/unit_tests/gateway/test_sandbox_router_failover.py \
+  tests/unit_tests/sandbox/test_sandbox_routing_dcs_store.py \
   tests/unit_tests/sandbox/test_sandbox_init_data.py \
   tests/unit_tests/sandbox/test_sandbox_client_upload.py \
   tests/unit_tests/gateway/test_open_ability_wire.py \

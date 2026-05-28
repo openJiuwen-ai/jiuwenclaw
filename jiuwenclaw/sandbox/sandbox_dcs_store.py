@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import os
 from dataclasses import dataclass
 
 from jiuwenclaw.dcs import DcsClusterClient, DcsClusterConfig, load_config_from_env
@@ -9,6 +10,19 @@ from jiuwenclaw.utils import logger
 
 # Backward-compatible alias for existing imports.
 SandboxDcsConfig = DcsClusterConfig
+_SANDBOX_DURATION_SECONDS_ENV = "SANDBOX_DURATION_SECONDS"
+_SANDBOX_DCS_TTL_SECONDS_ENV = "SANDBOX_DCS_TTL_SECONDS"
+_SANDBOX_DEFAULT_DURATION_SECONDS = 3600
+
+
+def _metadata_ttl_seconds() -> int:
+    raw_ttl = os.environ.get(_SANDBOX_DCS_TTL_SECONDS_ENV, "").strip()
+    if raw_ttl:
+        return max(0, int(raw_ttl))
+    raw_duration = os.environ.get(_SANDBOX_DURATION_SECONDS_ENV, "").strip()
+    if raw_duration:
+        return max(0, int(raw_duration))
+    return _SANDBOX_DEFAULT_DURATION_SECONDS
 
 
 @dataclass(frozen=True)
@@ -22,6 +36,7 @@ class SandboxDcsStore:
 
     def __init__(self, config: SandboxDcsConfig) -> None:
         self._config = config
+        self._ttl_seconds = _metadata_ttl_seconds()
         self._dcs = DcsClusterClient(config)
 
     @classmethod
@@ -89,7 +104,7 @@ class SandboxDcsStore:
             api_key_sha256=api_key_sha256,
         )
         key = self._api_key_key(sandbox_id)
-        await self._dcs.set_with_ttl(key, api_key_sha256)
+        await self._dcs.set_with_ttl(key, api_key_sha256, ttl_seconds=self._ttl_seconds)
         logger.info("Saved sandbox API key hash to DCS: key=%s", key)
         return record
 

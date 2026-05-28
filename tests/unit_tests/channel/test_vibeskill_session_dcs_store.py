@@ -99,8 +99,11 @@ def _make_session(
 
 
 @pytest.mark.asyncio
-async def test_save_session_writes_main_key_with_ttl() -> None:
-    store, fake = _make_store(ttl=60)
+async def test_save_session_writes_main_key_with_ttl(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("SANDBOX_DCS_TTL_SECONDS", "60")
+    store, fake = _make_store()
     session = _make_session(session_id="vibeskill_a")
 
     await store.save_session(session)
@@ -112,8 +115,9 @@ async def test_save_session_writes_main_key_with_ttl() -> None:
 
 
 @pytest.mark.asyncio
-async def test_save_session_skips_ttl_when_zero() -> None:
-    store, fake = _make_store(ttl=0)
+async def test_save_session_default_no_ttl(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("SANDBOX_DCS_TTL_SECONDS", raising=False)
+    store, fake = _make_store()
     await store.save_session(_make_session(session_id="vibeskill_a"))
 
     assert fake.ttl_sync("jiuwen:vibeskillSession:vibeskill_a") is None
@@ -213,4 +217,4 @@ async def test_from_env_constructs_when_host_present(monkeypatch: pytest.MonkeyP
     assert store is not None
     assert store.host == "dcs.example.com"
     assert store._config.port == 1234
-    assert store._config.ttl_seconds == 60
+    assert store._ttl_seconds == 60

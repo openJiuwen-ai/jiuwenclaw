@@ -55,11 +55,31 @@ class DcsClusterClient:
         client = await self.ensure_connected()
         await client.set(key, value)
 
-    async def set_with_ttl(self, key: str, value: str) -> None:
-        await self.set(key, value)
-        if self._config.ttl_seconds > 0:
-            client = await self.ensure_connected()
-            await client.expire(key, self._config.ttl_seconds)
+    def _resolve_ttl_seconds(self, ttl_seconds: int | None) -> int:
+        if ttl_seconds is not None:
+            return max(0, int(ttl_seconds))
+        return max(0, int(self._config.ttl_seconds))
+
+    async def expire(self, key: str, *, ttl_seconds: int | None = None) -> bool:
+        seconds = self._resolve_ttl_seconds(ttl_seconds)
+        if seconds <= 0:
+            return False
+        client = await self.ensure_connected()
+        return bool(await client.expire(key, seconds))
+
+    async def set_with_ttl(self, key: str, value: str, *, ttl_seconds: int | None = None) -> None:
+        client = await self.ensure_connected()
+        await client.set(key, value)
+        await self.expire(key, ttl_seconds=ttl_seconds)
+
+    async def set_nx_with_ttl(self, key: str, value: str, *, ttl_seconds: int | None = None) -> bool:
+        """SET key value NX; on success apply EXPIRE. Returns True if the key was set."""
+        client = await self.ensure_connected()
+        claimed = await client.set(key, value, nx=True)
+        if not claimed:
+            return False
+        await self.expire(key, ttl_seconds=ttl_seconds)
+        return True
 
     async def delete(self, *keys: str) -> int:
         if not keys:
