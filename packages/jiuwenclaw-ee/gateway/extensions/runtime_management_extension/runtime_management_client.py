@@ -459,7 +459,7 @@ class RuntimeManagementAgentClient(AgentServerClient):
                 )
 
                 # 从 service_template 中提取 service_id，如果存在则使用，否则让 ServiceHandler 自动生成 UUID
-                handler_service_id = cfg.get("service_id") if isinstance(cfg, dict) else None
+                handler_service_id = cfg.get("service_id") if "service_id" in cfg else None
 
                 return ServiceHandler(
                     service_id=handler_service_id,
@@ -500,6 +500,13 @@ class RuntimeManagementAgentClient(AgentServerClient):
         env: dict[str, str] | None = None,
     ) -> None:
         """触发热更新配置。"""
+        # 判断 config 中 service_template 是否为 true，否则不执行更新
+        if not config.get("service_template"):
+            logger.debug(
+                "[RuntimeManagementAgentClient] skip config update: service_template is not true"
+            )
+            return
+
         if not self._connected or not hasattr(self, "_access"):
             logger.warning("[RuntimeManagementAgentClient] not connected, skip config update")
             return
@@ -621,14 +628,17 @@ class RuntimeManagementAgentClient(AgentServerClient):
                     ext_config,
                 )
 
-
-            # 如果从数据库中匹配到了 service_id 或 agent_id，覆盖 request 中的值
+            # 确保 service_template 是字典，并合并 service_id 和 agent_id
+            if service_template is None:
+                service_template = {}
+            
             if service_id:
                 request.service_id = service_id
-                service_template = service_template or {"service_id": service_id}
+                service_template["service_id"] = service_id
+            
             if agent_id:
                 request.agent_id = agent_id
-                service_template = service_template or {"agent_id": agent_id}
+                service_template["agent_id"] = agent_id
 
         session_request = _SessionRequest(request, envelope, service_template=service_template)
 
@@ -681,12 +691,17 @@ class RuntimeManagementAgentClient(AgentServerClient):
                     ext_config,
                 )
 
-
-            # 如果从配置中获取到了 service_id 或 agent_id，覆盖 request 中的值
+            # 确保 service_template 是字典，并合并 service_id 和 agent_id
+            if service_template is None:
+                service_template = {}
+            
             if service_id:
                 request.service_id = service_id
+                service_template["service_id"] = service_id
+            
             if agent_id:
                 request.agent_id = agent_id
+                service_template["agent_id"] = agent_id
 
         session_request = _SessionRequest(request, envelope, service_template=service_template)
 

@@ -166,7 +166,8 @@ async def _apply_service_config_templates(
                 if hasattr(ext, 'get_client'):
                     client = ext.get_client()
                     if hasattr(client, 'set_or_update_server_config'):
-                        client.set_or_update_server_config(config={})
+                        # 构造 config 参数，设置 service_template 为 true 以触发更新
+                        client.set_or_update_server_config(config={"service_template": True})
                         logger.info(
                             "[ManagerWsClient] triggered runtime management config update after service_config_templates %s",
                             op,
