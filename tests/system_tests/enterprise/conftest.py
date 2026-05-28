@@ -14,7 +14,15 @@ from dotenv import load_dotenv
 ENTERPRISE_DIR = Path(__file__).resolve().parent
 REPO_ROOT = ENTERPRISE_DIR.parents[2]
 ENV_FILE = ENTERPRISE_DIR / ".env"
+ENV_EXAMPLE_FILE = ENTERPRISE_DIR / ".env.example"
 RUNS_DIR = ENTERPRISE_DIR / ".runs"
+
+
+def load_enterprise_dotenv_file(*, override: bool = False) -> Path:
+    """Load enterprise/.env, falling back to .env.example when .env is absent."""
+    dotenv_path = ENV_FILE if ENV_FILE.exists() else ENV_EXAMPLE_FILE
+    load_dotenv(dotenv_path=dotenv_path, override=override)
+    return dotenv_path
 
 
 def _make_run_home_dir() -> Path:
@@ -48,4 +56,4 @@ def enterprise_env_file() -> Path:
 
 @pytest.fixture
 def load_enterprise_dotenv(enterprise_env_file: Path) -> None:
-    load_dotenv(dotenv_path=enterprise_env_file, override=False)
+    load_enterprise_dotenv_file()

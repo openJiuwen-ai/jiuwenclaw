@@ -8,9 +8,11 @@ import asyncio
 import hashlib
 import json
 import os
+import signal
 import socket
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -22,23 +24,36 @@ pytestmark = [pytest.mark.integration, pytest.mark.system]
 ENTERPRISE_DIR = Path(__file__).resolve().parent
 REPO_ROOT = ENTERPRISE_DIR.parents[2]
 ENV_FILE = ENTERPRISE_DIR / ".env"
+ENV_EXAMPLE_FILE = ENTERPRISE_DIR / ".env.example"
 MOCK_LLM_SCRIPT = ENTERPRISE_DIR / "mock_llm_server.py"
-MONOREPO_ROOT = REPO_ROOT.parent
-RUNTIME_FOUNDATION = MONOREPO_ROOT / "agent-runtime" / "foundation"
-RUNTIME_MANAGEMENT = MONOREPO_ROOT / "agent-runtime" / "management"
 
 CHAT_ID = "chat_test"
 BOT_ID = "bot_test"
 SERVICE_ID = hashlib.md5(f"{CHAT_ID}::{BOT_ID}".encode("utf-8")).hexdigest()
 SESSION_ID = "enterprise_sess_001"
-ENTERPRISE_E2E_JIUWENCLAW_ID = "enterprise_e2e_001"
 GATEWAY_DB_FILENAME = "jiuwenswarm.db"
+E2E_UT_LOG_FILENAME = "e2e.log"
+
+_UT_LOG_PATH: Path | None = None
+
+
+def _init_ut_log(run_home: Path) -> Path:
+    """Bind structured test diagnostics to ``<run_home>/e2e.log``."""
+    global _UT_LOG_PATH
+    log_path = run_home / E2E_UT_LOG_FILENAME
+    log_path.write_text("", encoding="utf-8")
+    _UT_LOG_PATH = log_path
+    return log_path
 
 
 def _ut_log(stage: str, /, **fields: object) -> None:
     """Print structured test diagnostics (visible with pytest -s / log_cli)."""
     detail = " ".join(f"{key}={value!r}" for key, value in fields.items())
-    print(f"[E2E][{stage}] {detail}", flush=True)
+    line = f"[E2E][{stage}] {detail}"
+    print(line, flush=True)
+    if _UT_LOG_PATH is not None:
+        with _UT_LOG_PATH.open("a", encoding="utf-8") as log_file:
+            log_file.write(f"{line}\n")
 
 
 def _pick_free_port() -> int:
@@ -49,16 +64,28 @@ def _pick_free_port() -> int:
     return port
 
 
-def _start_process(cmd: list[str], *, env: dict[str, str], log_path: Path) -> subprocess.Popen:
+def _start_process(
+    cmd: list[str],
+    *,
+    env: dict[str, str],
+    log_path: Path,
+    new_process_group: bool = False,
+) -> subprocess.Popen:
+    popen_kwargs: dict[str, object] = {
+        "cwd": str(REPO_ROOT),
+        "env": env,
+        "stderr": subprocess.STDOUT,
+        "text": True,
+    }
+    if new_process_group:
+        if sys.platform == "win32":
+            popen_kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
+        else:
+            popen_kwargs["start_new_session"] = True
+
     log_file = log_path.open("w", encoding="utf-8")
-    proc = subprocess.Popen(
-        cmd,
-        cwd=str(REPO_ROOT),
-        env=env,
-        stdout=log_file,
-        stderr=subprocess.STDOUT,
-        text=True,
-    )
+    popen_kwargs["stdout"] = log_file
+    proc = subprocess.Popen(cmd, **popen_kwargs)  # type: ignore[arg-type]
     log_file.close()
     _ut_log(
         "process.start",
@@ -67,6 +94,68 @@ def _start_process(cmd: list[str], *, env: dict[str, str], log_path: Path) -> su
         log_path=log_path,
     )
     return proc
+
+
+def _stop_gateway_gracefully(
+    proc: subprocess.Popen | None,
+    *,
+    gateway_log: Path,
+    runtime_log: Path,
+    timeout: float = 45.0,
+) -> None:
+    """触发 Gateway 优雅退出，使其 ``finally`` 执行 ``client.disconnect()`` 清理 AgentServer。"""
+    if proc is None:
+        return
+    if proc.poll() is not None:
+        _ut_log("process.already_exited", pid=proc.pid, exit_code=proc.returncode)
+        return
+
+    _ut_log("gateway.graceful_stop.begin", pid=proc.pid)
+    try:
+        if sys.platform == "win32":
+            # terminate() 在 Windows 上走 TerminateProcess，不会触发 signal handler。
+            # CREATE_NEW_PROCESS_GROUP + CTRL_BREAK -> SIGBREAK -> shutdown_requested。
+            _ut_log("gateway.graceful_stop.os.kill", pid=proc.pid)
+            os.kill(proc.pid, signal.CTRL_BREAK_EVENT)
+        else:
+            _ut_log("gateway.graceful_stop.proc.send_signal", pid=proc.pid)
+            proc.send_signal(signal.SIGINT)
+    except OSError as exc:
+        _ut_log("gateway.graceful_stop.signal_failed", pid=proc.pid, error=str(exc))
+        _stop_process(proc)
+        return
+
+    shutdown_markers = (
+        "[App] Gateway stopped",
+        "Access 已 shutdown",
+        "Process delete 完成",
+    )
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if proc.poll() is not None:
+            _ut_log(
+                "gateway.graceful_stop.exited",
+                pid=proc.pid,
+                exit_code=proc.returncode,
+            )
+            return
+        for log_path in (gateway_log, runtime_log):
+            if not log_path.exists():
+                continue
+            text = log_path.read_text(encoding="utf-8", errors="ignore")
+            if any(marker in text for marker in shutdown_markers):
+                try:
+                    proc.wait(timeout=10)
+                except subprocess.TimeoutExpired:
+                    pass
+                if proc.poll() is not None:
+                    _ut_log("gateway.graceful_stop.ok", pid=proc.pid)
+                    return
+                break
+        time.sleep(0.3)
+
+    _ut_log("gateway.graceful_stop.timeout", pid=proc.pid)
+    _stop_process(proc)
 
 
 def _stop_process(proc: subprocess.Popen | None) -> None:
@@ -167,19 +256,14 @@ def _subprocess_bootstrap_env() -> dict[str, str]:
 
 
 def _load_gateway_dotenv() -> None:
-    """enterprise/.env 仅供 Gateway 进程使用。"""
-    load_dotenv(dotenv_path=ENV_FILE, override=False)
+    """Load enterprise/.env (or .env.example) into os.environ for Gateway subprocess."""
+    dotenv_path = ENV_FILE if ENV_FILE.exists() else ENV_EXAMPLE_FILE
+    load_dotenv(dotenv_path=dotenv_path, override=False)
 
 
 def _shared_gateway_db_path(run_home: Path) -> Path:
     """Gateway 与 AgentServer 共用的 SQLite 文件（位于本次 run 时间戳目录下）。"""
     return (run_home / GATEWAY_DB_FILENAME).resolve()
-
-
-def _apply_shared_gateway_db_env(env: dict[str, str], run_home: Path) -> None:
-    env["GATEWAY_DB_TYPE"] = "sqlite"
-    env["GATEWAY_SQLITE_PATH"] = str(_shared_gateway_db_path(run_home))
-    env["JIUWENCLAW_ID"] = ENTERPRISE_E2E_JIUWENCLAW_ID
 
 
 def _build_gateway_env(
@@ -192,31 +276,23 @@ def _build_gateway_env(
 ) -> dict[str, str]:
     _load_gateway_dotenv()
     env = os.environ.copy()
-    env["HOME"] = str(gateway_home)
-    env["AGENT_SERVER_HOME"] = str(server_home)
-    env["API_BASE"] = f"http://127.0.0.1:{mock_llm_port}/v1"
-    env["WEB_HOST"] = "127.0.0.1"
-    env["WEB_PORT"] = str(web_port)
-    env["GATEWAY_HOST"] = "127.0.0.1"
-    env["GATEWAY_PORT"] = str(gateway_port)
-    env["EXTENSION_DIRS"] = str(REPO_ROOT / "packages" / "jiuwenclaw-ee" / "gateway" / "extensions")
-    env["GATEWAY_MANAGER_WS_CLIENT_ENABLED"] = "false"
-    env["AGENT_SERVER_DEPLOY_MODE"] = "process"
-    env["LLM_SSL_VERIFY"] = "false"
-    env["IP"] = "127.0.0.1"
-    env["DEPLOY_TYPE"] = "subprocess"
-    env["LOWCODE_IMAGE"] = "local-process"
-    env["PYTHONPATH"] = os.pathsep.join(
-        [
-            str(REPO_ROOT),
-            str(RUNTIME_FOUNDATION),
-            str(RUNTIME_MANAGEMENT),
-        ]
+    env.update(
+        {
+            "HOME": str(gateway_home),
+            "AGENT_SERVER_HOME": str(server_home),
+            "API_BASE": f"http://127.0.0.1:{mock_llm_port}/v1",
+            "WEB_PORT": str(web_port),
+            "GATEWAY_PORT": str(gateway_port),
+            "GATEWAY_SQLITE_PATH": str(_shared_gateway_db_path(run_home)),
+            "EXTENSION_DIRS": str(
+                REPO_ROOT / "packages" / "jiuwenclaw-ee" / "gateway" / "extensions"
+            ),
+            "PYTHONPATH": str(REPO_ROOT),
+            "AGENT_SERVER_LAUNCHER_SCRIPT": str(ENTERPRISE_DIR / "agentserver_launcher.py"),
+            "AGENT_SERVER_LOG_FILE": str(server_home / "agentserver.log"),
+            "OPENJIUWEN_RUNTIME_LOG_FILE": str(gateway_home / "runtime_sdk.log"),
+        }
     )
-    env["AGENT_SERVER_LAUNCHER_SCRIPT"] = str(ENTERPRISE_DIR / "agentserver_launcher.py")
-    env["AGENT_SERVER_LOG_FILE"] = str(server_home / "agentserver.log")
-    env["VIBESKILL_ENABLED"] = "false"
-    _apply_shared_gateway_db_env(env, run_home)
     _ut_log(
         "env.gateway.ready",
         gateway_home=gateway_home,
@@ -361,11 +437,6 @@ async def _run_web_channel_user_request(ws_url: str) -> dict:
             payload = msg.get("payload") or {}
             if event_name:
                 response_events.append(event_name)
-            _ut_log(
-                "web_channel.event",
-                event=event_name,
-                is_complete=payload.get("is_complete"),
-            )
 
             if event_name == "chat.error":
                 raise AssertionError(f"chat.error: {payload}")
@@ -390,12 +461,12 @@ async def _run_web_channel_user_request(ws_url: str) -> dict:
 
 
 @pytest.mark.asyncio
-@pytest.mark.skip(reason="skip ci")
 async def test_gateway_runtime_process_deploy_and_chat(
     enterprise_run_dirs: tuple[Path, Path, Path],
     monkeypatch: pytest.MonkeyPatch,
 ):
     run_home, gateway_home, server_home = enterprise_run_dirs
+    _init_ut_log(run_home)
     mock_llm_port = _pick_free_port()
     web_port = _pick_free_port()
     gateway_port = _pick_free_port()
@@ -449,11 +520,12 @@ async def test_gateway_runtime_process_deploy_and_chat(
     try:
         await _wait_for_http(f"http://127.0.0.1:{mock_llm_port}/health", timeout=30)
         _ut_log("mock_llm.ready", port=mock_llm_port, log_path=mock_log)
-
+        print(f"gateway_env: {gateway_env}")
         gateway_proc = _start_process(
             [sys.executable, "-m", "jiuwenclaw.app_gateway", "--port", str(web_port)],
             env=gateway_env,
             log_path=gateway_log,
+            new_process_group=True,
         )
         _ut_log(
             "gateway.started",
@@ -513,7 +585,12 @@ async def test_gateway_runtime_process_deploy_and_chat(
             agentserver_log=agentserver_log,
         )
     finally:
-        _stop_process(gateway_proc)
+        runtime_log = gateway_home / "runtime_sdk.log"
+        _stop_gateway_gracefully(
+            gateway_proc,
+            gateway_log=gateway_log,
+            runtime_log=runtime_log,
+        )
         _stop_process(mock_proc)
         _ut_log(
             "teardown.keep",
