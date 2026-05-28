@@ -81,8 +81,6 @@ class AskUserQuestionRegistry:
         self._pending: dict[str, asyncio.Future[list[Any]]] = {}
         self._pending_sessions: dict[str, str] = {}
         self._stream_interactive_ask: dict[str, bool] = {}
-        # 与单次 stream_request_id 并行：同一 session 在本次 HTTP 流内是否开启过 interactive_ask。
-        # 部分环境下工具第二次执行时 ContextVar 未继承，仅靠 stream_rid 查表会在 unbind 后失效。
         self._session_interactive_ask: dict[str, bool] = {}
 
     @classmethod
@@ -165,11 +163,8 @@ class AskUserQuestionRegistry:
         self._session_interactive_ask.pop(sid, None)
 
     async def wait_for_answer(self, request_id: str) -> list[Any]:
-        interactive_ask, session_id, _, _ = get_ask_request_context()
-        effective_interactive = interactive_ask
-        if not effective_interactive and session_id:
-            effective_interactive = self.session_interactive_ask_enabled(session_id)
-        fut = self.register(request_id, session_id if effective_interactive else "")
+        _interactive, session_id, _, _ = get_ask_request_context()
+        fut = self.register(request_id, session_id)
         try:
             return await fut
         except asyncio.CancelledError:

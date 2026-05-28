@@ -4375,7 +4375,6 @@ class JiuWenClawDeepAdapter:
         query = request.params.get("query", "")
         mode = request.params.get("mode", "agent.plan")
         raw_interactive = request.params.get("interactive_ask", request.params.get("interactiveAsk"))
-        # 未传参时默认为关闭：否则会沿用 session 内上次绑定的引导状态，导致关闭引导后仍弹结构化选择框。
         interactive_ask = bool(raw_interactive) if raw_interactive is not None else False
         token_trace_sid = _LLM_TRACE_SESSION_ID.set(session_id)
         token_trace_rid = _LLM_TRACE_REQUEST_ID.set(rid or "")
@@ -4449,6 +4448,7 @@ class JiuWenClawDeepAdapter:
             "total_cost": 0.0,
         }
         hitl_pending_stream = False
+        suppress_stream_after_hitl = False
 
         cron_context_tokens = self._bind_runtime_cron_context(
             channel_id=request.channel_id,
@@ -4501,10 +4501,15 @@ class JiuWenClawDeepAdapter:
                                 extra={'user_visible': 'progress'}
                             )
                             last_logged_iteration = chunk_iteration
+                    if suppress_stream_after_hitl:
+                        continue
                     if not (hasattr(chunk, "type") and hasattr(chunk, "payload")):
                         parsed = self._parse_stream_chunk(chunk)
-                        if self._should_pause_for_user_input(parsed):
-                            hitl_pending_stream = True
+                        hitl_pending_stream = self._detect_hitl_pause(
+                            parsed,
+                            hitl_pending_stream=hitl_pending_stream,
+                        )
+                        should_pause_for_user_input = hitl_pending_stream
                         if parsed is not None:
                             # 工具执行日志标记
                             event_type = parsed.get("event_type")
@@ -4554,6 +4559,9 @@ class JiuWenClawDeepAdapter:
                                 payload=parsed,
                                 is_complete=False,
                             )
+                            if should_pause_for_user_input:
+                                suppress_stream_after_hitl = True
+                                continue
                         continue
 
                     chunk_type = chunk.type
@@ -4674,8 +4682,11 @@ class JiuWenClawDeepAdapter:
                             accumulated_reasoning = ""
                         if has_streamed_content:
                             parsed = self._parse_stream_chunk(chunk, _has_streamed_content=True)
-                            if self._should_pause_for_user_input(parsed):
-                                hitl_pending_stream = True
+                            hitl_pending_stream = self._detect_hitl_pause(
+                                parsed,
+                                hitl_pending_stream=hitl_pending_stream,
+                            )
+                            should_pause_for_user_input = hitl_pending_stream
                             if parsed is not None:
                                 yield AgentResponseChunk(
                                     request_id=rid,
@@ -4683,10 +4694,16 @@ class JiuWenClawDeepAdapter:
                                     payload=parsed,
                                     is_complete=False,
                                 )
+                                if should_pause_for_user_input:
+                                    suppress_stream_after_hitl = True
+                                    continue
                             continue
                         parsed = self._parse_stream_chunk(chunk)
-                        if self._should_pause_for_user_input(parsed):
-                            hitl_pending_stream = True
+                        hitl_pending_stream = self._detect_hitl_pause(
+                            parsed,
+                            hitl_pending_stream=hitl_pending_stream,
+                        )
+                        should_pause_for_user_input = hitl_pending_stream
                         if parsed is not None:
                             yield AgentResponseChunk(
                                 request_id=rid,
@@ -4694,6 +4711,9 @@ class JiuWenClawDeepAdapter:
                                 payload=parsed,
                                 is_complete=False,
                             )
+                            if should_pause_for_user_input:
+                                suppress_stream_after_hitl = True
+                                continue
                             continue
 
                     if accumulated_text:
@@ -4724,8 +4744,11 @@ class JiuWenClawDeepAdapter:
                         )
                         accumulated_reasoning = ""
                     parsed = self._parse_stream_chunk(chunk)
-                    if self._should_pause_for_user_input(parsed):
-                        hitl_pending_stream = True
+                    hitl_pending_stream = self._detect_hitl_pause(
+                        parsed,
+                        hitl_pending_stream=hitl_pending_stream,
+                    )
+                    should_pause_for_user_input = hitl_pending_stream
                     if parsed is not None:
                         yield AgentResponseChunk(
                             request_id=rid,
@@ -4733,8 +4756,11 @@ class JiuWenClawDeepAdapter:
                             payload=parsed,
                             is_complete=False,
                         )
+                        if should_pause_for_user_input:
+                            suppress_stream_after_hitl = True
+                            continue
 
-            if accumulated_text:
+            if accumulated_text and not hitl_pending_stream:
                 log_chat_final(
                     session_id=session_id,
                     request_id=rid or "",
@@ -4747,7 +4773,7 @@ class JiuWenClawDeepAdapter:
                     payload={"event_type": "chat.final", "content": accumulated_text},
                     is_complete=False,
                 )
-            if accumulated_reasoning:
+            if accumulated_reasoning and not hitl_pending_stream:
                 reasoning_payload: dict[str, Any] = {"event_type": "chat.reasoning", "content": accumulated_reasoning}
                 task_id = self._get_task_id()
                 if task_id:
@@ -4764,8 +4790,10 @@ class JiuWenClawDeepAdapter:
             if self._skill_evolution_rail is not None:
                 for evt in self._skill_evolution_rail.drain_pending_approval_events():
                     parsed = self._parse_stream_chunk(evt)
-                    if self._should_pause_for_user_input(parsed):
-                        hitl_pending_stream = True
+                    hitl_pending_stream = self._detect_hitl_pause(
+                        parsed,
+                        hitl_pending_stream=hitl_pending_stream,
+                    )
                     if parsed is not None:
                         yield AgentResponseChunk(
                             request_id=rid,
@@ -4872,86 +4900,18 @@ class JiuWenClawDeepAdapter:
     def _is_ask_user_payload(payload: Any) -> bool:
         return isinstance(payload, dict) and payload.get("event_type") == "chat.ask_user_question"
 
-    @staticmethod
-    def _is_ask_user_question_text_only_tool_result(payload: Any) -> bool:
-        """非引导 ask_user_question 返回 status=text_only，需与 chat.ask_user_question 一样触发 invocation_paused。"""
-        if not isinstance(payload, dict) or payload.get("event_type") != "chat.tool_result":
-            return False
-
-        tool_raw = str(
-            payload.get("tool_name")
-            or payload.get("name")
-            or "",
-        ).strip().lower()
-        tool_ok = tool_raw in ("ask_user_question", "jiuwenclaw_ask_user_question")
-
-        def _repr_heuristic_matches_loose_json(rs: str) -> bool:
-            """长字符串启发式：可能是截断或非严格 JSON 的 ask_user text_only 结果。"""
-            if "text_only" not in rs or "formatted_questions" not in rs:
-                return False
-            if tool_ok:
-                return True
-            if "ask_user_question" in rs:
-                return True
-            return "'status'" in rs or '"status"' in rs
-
-        def _body_matches(obj: Any) -> bool:
-            if not isinstance(obj, dict):
-                return False
-            if obj.get("status") != "text_only":
-                return False
-            if tool_ok:
-                return True
-            # SDK 有时不传 tool_name：text_only + formatted_questions 为该工具专有形状
-            return "formatted_questions" in obj
-
-        raw_out = payload.get("raw_output")
-        if raw_out is None:
-            raw_out = payload.get("rawOutput")
-        if _body_matches(raw_out):
-            return True
-        if isinstance(raw_out, str) and raw_out.strip():
-            try:
-                if _body_matches(json.loads(raw_out)):
-                    return True
-            except (json.JSONDecodeError, TypeError):
-                pass
-
-        result_field = payload.get("result")
-        if isinstance(result_field, dict) and _body_matches(result_field):
-            return True
-
-        if isinstance(result_field, str) and result_field.strip():
-            rs = result_field.strip()
-            if rs.startswith("{"):
-                try:
-                    if _body_matches(json.loads(rs)):
-                        return True
-                except (json.JSONDecodeError, TypeError):
-                    pass
-                try:
-                    if _body_matches(ast.literal_eval(rs)):
-                        return True
-                except (SyntaxError, ValueError, TypeError):
-                    pass
-            # result 有时整段为 Python repr 或非严格 JSON
-            if _repr_heuristic_matches_loose_json(rs):
-                try:
-                    if _body_matches(json.loads(rs)):
-                        return True
-                except (json.JSONDecodeError, TypeError):
-                    pass
-                try:
-                    if _body_matches(ast.literal_eval(rs)):
-                        return True
-                except (SyntaxError, ValueError, TypeError):
-                    pass
-        return False
-
     def _should_pause_for_user_input(self, payload: Any) -> bool:
-        return self._is_ask_user_payload(payload) or self._is_ask_user_question_text_only_tool_result(
-            payload,
-        )
+        return self._is_ask_user_payload(payload)
+
+    def _detect_hitl_pause(
+        self,
+        payload: Any,
+        *,
+        hitl_pending_stream: bool,
+    ) -> bool:
+        if not self._should_pause_for_user_input(payload):
+            return hitl_pending_stream
+        return True
 
     def _parse_stream_chunk(self, chunk, *, _has_streamed_content: bool = False) -> dict | None:
         """将 SDK OutputSchema 转为前端可消费的 payload dict.

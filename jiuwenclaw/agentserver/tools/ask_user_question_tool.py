@@ -234,40 +234,17 @@ def _format_answers_for_model(answers: list[Any]) -> str:
         return str(answers)
 
 
-def _format_questions_as_text(questions: list[dict[str, Any]]) -> str:
-    lines = ["## 需要您的确认", ""]
-    for i, q in enumerate(questions):
-        header = str(q.get("header", "") or "").strip() or f"问题 {i + 1}"
-        question_text = str(q.get("question", "") or "").strip()
+def _first_outline_preview(questions: list[dict[str, Any]]) -> dict[str, Any] | None:
+    for q in questions:
         preview = q.get("preview")
-        if isinstance(preview, dict):
-            lines.append(f"**{header}**")
-            lines.append(question_text)
-            preview_text = str(preview.get("text", "") or "").strip()
-            if preview_text:
-                lines.append("")
-                lines.append(preview_text)
-            lines.append("")
-            continue
-        options = q.get("options", [])
-        lines.append(f"**{header}**")
-        lines.append(question_text)
-        for j, opt in enumerate(options):
-            label = str(opt.get("label", "") or "").strip()
-            desc = str(opt.get("description", "") or "").strip()
-            if desc:
-                lines.append(f"{j + 1}. **{label}** — {desc}")
-            else:
-                lines.append(f"{j + 1}. **{label}**")
-        lines.append("")
-    lines.append("请回复您的选择（如直接回复选项名称或描述您的需求）。")
-    return "\n".join(lines)
+        if isinstance(preview, dict) and str(preview.get("text") or "").strip():
+            return preview
+    return None
 
 
 async def _ask_user_question_impl(questions: Any) -> dict[str, Any]:
     interactive, session_id, stream_rid, channel_id = get_ask_request_context()
     reg = AskUserQuestionRegistry.get_instance()
-    # 仅按本次流的 stream_request_id 回填（修复 ContextVar 在异步工具内丢失），不按 session 继承以免sticky。
     if stream_rid and not interactive:
         interactive = reg.stream_interactive_ask_enabled(stream_rid)
     try:
@@ -278,37 +255,17 @@ async def _ask_user_question_impl(questions: Any) -> dict[str, Any]:
     if not stream_rid:
         return {"status": "error", "message": "内部错误：缺少 stream_request_id，无法发送追问。", "answers": []}
 
+    # 大纲预览：仍受引导模式控制；关闭时不弹窗，直接跳过大纲确认继续执行。
     if not interactive:
-        first_preview: dict[str, Any] | None = None
-        for q in normalized:
-            pv = q.get("preview")
-            if isinstance(pv, dict) and str(pv.get("text") or "").strip():
-                first_preview = pv
-                break
+        first_preview = _first_outline_preview(normalized)
         if first_preview is not None:
-            original = str(first_preview.get("text") or "").strip()
-            meta = first_preview.get("meta") if isinstance(first_preview.get("meta"), dict) else {}
-            result: dict[str, Any] = {
+            return {
                 "status": "skipped",
                 "message": "未开启引导式交互，跳过大纲确认，使用生成的大纲继续。",
                 "answers": [],
-                "original_content": original,
+                "original_content": str(first_preview.get("text") or "").strip(),
             }
-            if meta.get("emit_text_fallback"):
-                formatted = _format_questions_as_text(normalized)
-                result["formatted_questions"] = formatted
-            return result
-        formatted = _format_questions_as_text(normalized)
-        return {
-            "status": "text_only",
-            "message": (
-                "当前未开启引导式交互；问题已展示在对话正文中。"
-                "本轮将在此结束，请等待用户在下一条消息中直接回复，勿自行推断或代选答案。"
-            ),
-            "formatted_questions": formatted,
-            "answers": [],
-            "stop_agent_turn": True,
-        }
+
     ask_id = f"{ASK_REQUEST_PREFIX}{uuid.uuid4().hex}"
     payload: dict[str, Any] = {
         "event_type": "chat.ask_user_question",
@@ -349,13 +306,12 @@ _ASK_TOOL_CARD = ToolCard(
     id="jiuwenclaw_ask_user_question",
     name="ask_user_question",
     description=(
-        "向用户展示一组带选项的结构化问题（可多题），并阻塞等待用户选择。"
-        "仅当引导/交互已开启时推送选择 UI；未开启时返回 text_only、将问题写入正文并"
-        "强制结束本轮 agent（禁止继续推理或代选答案），由用户在下一条消息中回复。"
+        "向用户展示一组带选项的结构化问题（可多题），推送选择 UI 并阻塞等待用户作答。"
         "questions 为 JSON 数组，每项含 question、"
         "options[{label, description?, id?}]、可选 header、multi_select；"
         "可选 preview{text,title?,format?,editable?,outline_ref?,meta?} "
-        "用于大纲等 Markdown 审阅（将注入 outline_confirm / outline_use_edited 选项）。"
+        "用于 PPT 大纲 Markdown 审阅（将注入 outline_confirm / outline_use_edited 选项）；"
+        "仅带 preview 的大纲确认受引导模式约束，未开启引导时返回 skipped 不弹窗。"
     ),
     input_params={
         "type": "object",
