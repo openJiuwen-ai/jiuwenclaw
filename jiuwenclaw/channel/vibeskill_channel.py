@@ -3453,7 +3453,7 @@ class VibeSkillChannel(BaseChannel):
         out = {
             "type": "text",
             "content": str(payload.get("content") or ""),
-            "encoding": "utf8",
+            "encoding": "utf-8",
             "mimeType": "text/plain",
         }
         return self._json_response(200, out)
