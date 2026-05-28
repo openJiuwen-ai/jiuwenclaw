@@ -540,6 +540,7 @@ class JiuWenClawDeepAdapter:
         self._auto_harness_service: Optional[AutoHarnessService] = None
         self._dreaming_started = False
         self._dreaming_mode: str = "agent"
+        self._registered_send_file: bool = False
 
     def set_skill_manager(self, skill_manager: SkillManager) -> None:
         """Inject shared SkillManager from facade for tool reuse."""
@@ -2959,11 +2960,7 @@ class JiuWenClawDeepAdapter:
         send_file_enabled = (
             config_base.get("channels", {}).get(channel, {}).get("send_file_allowed", False)
         )
-        if send_file_enabled and request_id and session_id:
-            # 先卸载上一次请求遗留的 send_file 工具
-            for existing in list(self._instance.ability_manager.list() or []):
-                if getattr(existing, "name", "").startswith("send_file_to_user"):
-                    self._instance.ability_manager.remove(existing.name)
+        if send_file_enabled and request_id and session_id and not self._registered_send_file:
             send_file_toolkit = SendFileToolkit(
                 request_id=request_id,
                 session_id=session_id,
@@ -2973,6 +2970,7 @@ class JiuWenClawDeepAdapter:
             for sf_tool in send_file_toolkit.get_tools():
                 Runner.resource_mgr.add_tool(sf_tool)
                 self._instance.ability_manager.add(sf_tool.card)
+            self._registered_send_file = True
 
     def _refresh_acp_runtime_tools(
         self,
