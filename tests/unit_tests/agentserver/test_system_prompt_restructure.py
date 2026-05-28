@@ -203,6 +203,8 @@ async def test_runtime_rail_multi_tenant_workspace_dirs():
     runtime_rail.init(SimpleNamespace(system_prompt_builder=builder))
 
     # Mock get_multi_tenant_user_workspace_dir 返回测试路径
+    # 真实函数返回: ~/.jiuwenclaw/service_{id}/agent_{id}，不含 /agent 后缀
+    # _get_workspace_dirs 会在此基础上追加 "agent"/"jiuwenclaw_workspace"
     expected_base = Path("/tmp/test_jiuwenclaw/service_test_service_001/agent_test_agent_001")
     with patch(
         "jiuwenclaw.agentserver.deep_agent.rails.runtime_prompt_rail.get_multi_tenant_user_workspace_dir",
@@ -224,11 +226,12 @@ async def test_runtime_rail_multi_tenant_workspace_dirs():
     assert "agent_test_agent_001" in prompt
     
     # 验证完整的绝对路径格式（兼容 Windows/Linux 路径分隔符）
+    # config 直接在 base 下，workspace/memory/skills/todo 在 base/agent/jiuwenclaw_workspace 下
     expected_config = str(expected_base / "config")
-    expected_workspace = str(expected_base / "jiuwenclaw_workspace")
-    expected_memory = str(expected_base / "jiuwenclaw_workspace" / "memory")
-    expected_skills = str(expected_base / "jiuwenclaw_workspace" / "skills")
-    expected_todo = str(expected_base / "jiuwenclaw_workspace" / "todo")
+    expected_workspace = str(expected_base / "agent" / "jiuwenclaw_workspace")
+    expected_memory = str(expected_base / "agent" / "jiuwenclaw_workspace" / "memory")
+    expected_skills = str(expected_base / "agent" / "jiuwenclaw_workspace" / "skills")
+    expected_todo = str(expected_base / "agent" / "jiuwenclaw_workspace" / "todo")
     
     # Windows 下 Path 会转换为 \ 分隔符，需要兼容
     expected_config_win = expected_config.replace("/", "\\")

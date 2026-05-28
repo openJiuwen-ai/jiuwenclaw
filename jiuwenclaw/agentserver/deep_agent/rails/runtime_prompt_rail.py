@@ -110,7 +110,7 @@ class RuntimePromptRail(DeepAgentRail):
             # 多租户模式
             base_workspace = get_multi_tenant_user_workspace_dir(self._service_id, self._agent_id)
             if base_workspace:
-                workspace_root = base_workspace / "jiuwenclaw_workspace"
+                workspace_root = base_workspace / "agent" / "jiuwenclaw_workspace"
                 return {
                     "config": str(base_workspace / "config"),
                     "workspace": self._workspace_dir or str(workspace_root), # 优先使用请求中的 workspace_dir
