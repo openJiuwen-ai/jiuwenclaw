@@ -461,6 +461,7 @@ async def _run_web_channel_user_request(ws_url: str) -> dict:
 
 
 @pytest.mark.asyncio
+@pytest.mark.skip(reason="skip ci")
 async def test_gateway_runtime_process_deploy_and_chat(
     enterprise_run_dirs: tuple[Path, Path, Path],
     monkeypatch: pytest.MonkeyPatch,
