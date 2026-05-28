@@ -63,12 +63,12 @@ async def test_runtime_time_section_in_ctx_extra_not_in_builder():
     assert "_system_reminders" in ctx.extra
     time_reminder = ctx.extra["_system_reminders"][0]
     assert time_reminder["source"] == "time_rail"
-    assert "# 当前日期与时间" in time_reminder["content"]
+    assert "# 当前日期" in time_reminder["content"]
     assert "频道：web" not in time_reminder["content"]  # channel info is in runtime section
 
     # Builder output does NOT contain time section
     prompt = builder.build()
-    assert "# 当前日期与时间" not in prompt
+    assert "# 当前日期" not in prompt
 
     # Runtime and workspace sections still in builder, with priority ordering
     ordered_markers = [

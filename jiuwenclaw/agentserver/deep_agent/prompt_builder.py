@@ -242,17 +242,17 @@ Write or save all files under this dir, unless user ask you to operate in other 
 """
 
 
-def _subagent_time_prompt(language: str) -> str:
-    """Current time prompt for subagent."""
+def _subagent_date_prompt(language: str) -> str:
+    """Current date prompt for subagent."""
     beijing_tz = timezone(timedelta(hours=8))
-    now_str = datetime.now(tz=beijing_tz).strftime('%Y-%m-%d %H:%M:%S')
+    now_str = datetime.now(tz=beijing_tz).strftime('%Y-%m-%d')
     if language == "cn" or language == "zh":
-        return f"""# 当前时间
+        return f"""# 当前日期
 
 {now_str}
 """
     else:
-        return f"""# Current Time
+        return f"""# Current Date
 
 {now_str}
 """
@@ -292,7 +292,7 @@ def build_subagent_base_prompt(
 
     # Optional: current time
     if include_time:
-        parts.append(_subagent_time_prompt(language) + '\n')
+        parts.append(_subagent_date_prompt(language) + '\n')
 
     # Optional: workspace
     parts.append(_subagent_workspace_prompt(language, workspace_dir=ws) + '\n')
