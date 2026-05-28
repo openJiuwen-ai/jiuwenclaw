@@ -12,6 +12,7 @@ from typing import Any
 logger = logging.getLogger(__name__)
 
 AVAILABLE_AGENTS_REL = Path("resources") / "agents" / "available_agents.json"
+AVAILABLE_TOOLS_DIR_REL = Path("resources") / "available-tools"
 SKILLDEV_TASK_PREFIX = "todo_"
 
 
@@ -160,8 +161,108 @@ def load_agent_output_schema(
     return schema
 
 
+def resolve_available_tool_spec_path(
+    session_id: str,
+    plugin_id: str,
+    tool_name: str,
+) -> Path | None:
+    """解析 ``.../skilldev/<task_id>/resources/available-tools/<pluginId>__<toolName>.json``。"""
+    from jiuwenclaw.agentserver.skilldev_agent.meta_tools.external_tool_registry import (
+        tool_spec_filename,
+    )
+
+    try:
+        filename = tool_spec_filename(plugin_id, tool_name)
+    except ValueError:
+        return None
+
+    task_id = task_id_from_session_id(session_id)
+    candidates: list[Path] = []
+
+    from jiuwenclaw.agentserver.tools.subagent_executor.context_vars import (
+        get_effective_request_workspace_dir,
+    )
+
+    effective_workspace = get_effective_request_workspace_dir()
+    if effective_workspace:
+        candidates.append(Path(effective_workspace) / AVAILABLE_TOOLS_DIR_REL / filename)
+
+    try:
+        from jiuwenclaw.utils import get_workspace_dir
+
+        base_workspace = get_workspace_dir()
+    except ImportError:
+        base_workspace = None
+
+    if base_workspace is not None:
+        candidates.extend(
+            [
+                base_workspace / "skilldev" / task_id / AVAILABLE_TOOLS_DIR_REL / filename,
+                base_workspace / "skilldev" / session_id.strip() / AVAILABLE_TOOLS_DIR_REL / filename,
+            ]
+        )
+
+    seen: set[str] = set()
+    for path in candidates:
+        key = str(path)
+        if key in seen:
+            continue
+        seen.add(key)
+        if path.is_file():
+            return path
+    return None
+
+
+def load_tool_output_schema(
+    session_id: str,
+    plugin_id: str,
+    tool_name: str,
+    *,
+    log_prefix: str = "skilldev_tool_context",
+) -> Any | None:
+    """读取任务工作区下的 ``<pluginId>__<toolName>.json`` 并返回其 outputSchema 字段。"""
+    path = resolve_available_tool_spec_path(session_id, plugin_id, tool_name)
+    if path is None:
+        logger.warning(
+            "[%s] tool spec not found for session_id=%s pluginId=%s toolName=%s",
+            log_prefix,
+            session_id,
+            plugin_id,
+            tool_name,
+        )
+        return None
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        logger.warning(
+            "[%s] failed to read %s: %s",
+            log_prefix,
+            path,
+            exc,
+        )
+        return None
+    if not isinstance(data, dict):
+        logger.warning(
+            "[%s] tool spec %s is not a JSON object",
+            log_prefix,
+            path,
+        )
+        return None
+    schema = data.get("outputSchema")
+    if schema is None:
+        schema = data.get("output_schema")
+    if schema is None:
+        logger.warning(
+            "[%s] outputSchema not found in %s",
+            log_prefix,
+            path,
+        )
+    return schema
+
+
 __all__ = [
     "AVAILABLE_AGENTS_REL",
+    "AVAILABLE_TOOLS_DIR_REL",
     "SKILLDEV_TASK_PREFIX",
     "resolve_session_id",
     "task_id_from_session_id",
@@ -169,4 +270,6 @@ __all__ = [
     "schema_from_agent_entry",
     "extract_output_schema",
     "load_agent_output_schema",
+    "resolve_available_tool_spec_path",
+    "load_tool_output_schema",
 ]

@@ -32,12 +32,9 @@ from jiuwenclaw.agentserver.tools.harness_named_web_tools import (
     JiuwenHarnessFreeSearchTool,
 )
 from jiuwenclaw.agentserver.tools.subagent_tools import fork_agent, spawn_subagent
-from jiuwenclaw.agentserver.skilldev_agent.meta_tools.agent_as_a_tool import (
-    get_agent_as_a_tool,
-)
 from jiuwenclaw.agentserver.skilldev_agent.meta_tools.exec_tool import get_exec_tool
-from jiuwenclaw.agentserver.skilldev_agent.meta_tools.function_call_tool import (
-    get_function_call_tool,
+from jiuwenclaw.agentserver.skilldev_agent.meta_tools.invoke_tool import (
+    get_invoke_tool,
 )
 
 
@@ -161,5 +158,5 @@ def build_skilldev_tools(
             get_exec_tool(),
         ]
     )
-    tools.extend([get_function_call_tool(), get_agent_as_a_tool(), spawn_subagent])
+    tools.extend([get_invoke_tool(), spawn_subagent])
     return tools

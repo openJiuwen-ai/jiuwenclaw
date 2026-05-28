@@ -21,6 +21,10 @@ from jiuwenclaw.agentserver.skilldev_agent.meta_tools.external_tool_registry imp
     load_external_tools,
     resolve_available_tools_dir,
 )
+from jiuwenclaw.agentserver.skilldev_agent.meta_tools.skilldev_tool_context import (
+    load_tool_output_schema,
+    resolve_session_id,
+)
 from jiuwenclaw.agentserver.tools.subagent_executor.context_vars import (
     get_effective_request_workspace_dir,
 )
@@ -191,7 +195,31 @@ class FunctionCallTool(Tool):
 
     async def invoke(self, inputs: Dict[str, Any], **kwargs) -> Any:
         merged = {**inputs, **kwargs}
-        return await _function_call_tool_impl(**merged)
+        session_id = resolve_session_id(kwargs)
+        output_schema: Any = None
+        if session_id:
+            plugin_id = str(
+                merged.get("pluginId") or merged.get("plugin_id") or ""
+            ).strip()
+            tool_name = str(
+                merged.get("toolName") or merged.get("tool_name") or ""
+            ).strip()
+            if plugin_id and tool_name:
+                output_schema = load_tool_output_schema(
+                    session_id,
+                    plugin_id,
+                    tool_name,
+                    log_prefix="FunctionCallTool",
+                )
+        logger.info(
+            "[FunctionCallTool] sessionId=%s outputSchema=%s",
+            session_id or "",
+            "set" if output_schema is not None else "missing",
+        )
+        result = await _function_call_tool_impl(**merged)
+        if output_schema is not None and isinstance(result, dict):
+            result.setdefault("outputSchema", output_schema)
+        return result
 
     async def stream(self, inputs: Dict[str, Any], **kwargs) -> AsyncIterator[Any]:
         yield "Stream is not supported for this tool."
