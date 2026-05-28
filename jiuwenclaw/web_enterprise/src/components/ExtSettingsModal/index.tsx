@@ -3,7 +3,7 @@
  *
  * 用法：在 InputArea 工具条中放置 <ExtSettingsControl />，本组件自带：
  *   - 一个滑块图标按钮（点击打开 Modal）
- *   - 一个 Modal（编辑 user_id / group_id / 自定义 KV）
+ *   - 一个 Modal（编辑 user_id / group_id / bot_id / 自定义 KV）
  *   - 保存逻辑（写 store + 触发 WS 重连）
  *
  * 所有透传字段最终通过 WS 连接 URL query 发送给后端，由 jiuwenclaw.request_ext
@@ -70,12 +70,14 @@ function ExtSettingsModal({ onClose }: ExtSettingsModalProps) {
   const snapshot = useExtSettingsStore((state) => ({
     userId: state.userId,
     groupId: state.groupId,
+    botId: state.botId,
     customKVs: state.customKVs,
   }));
   const saveAndApply = useExtSettingsStore((state) => state.saveAndApply);
 
   const [userId, setUserId] = useState(snapshot.userId);
   const [groupId, setGroupId] = useState(snapshot.groupId);
+  const [botId, setBotId] = useState(snapshot.botId);
   const [customKVs, setCustomKVs] = useState<ExtCustomKV[]>(snapshot.customKVs);
 
   // Esc 关闭
@@ -113,6 +115,7 @@ function ExtSettingsModal({ onClose }: ExtSettingsModalProps) {
     const next: ExtSettingsSnapshot = {
       userId,
       groupId,
+      botId,
       customKVs,
     };
     saveAndApply(next);
@@ -218,6 +221,26 @@ function ExtSettingsModal({ onClose }: ExtSettingsModalProps) {
                 value={groupId}
                 onChange={(e) => setGroupId(e.target.value)}
                 placeholder={t('extSettings.groupIdPlaceholder')}
+                className="w-full px-3 py-2 rounded-md text-sm outline-none transition-colors"
+                style={{
+                  backgroundColor: 'var(--input-bg)',
+                  border: '1px solid var(--border)',
+                  color: 'var(--fg)',
+                }}
+              />
+            </div>
+            <div>
+              <label
+                className="block text-xs font-medium mb-1.5"
+                style={{ color: 'var(--fg-muted)' }}
+              >
+                {t('extSettings.botIdLabel')}
+              </label>
+              <input
+                type="text"
+                value={botId}
+                onChange={(e) => setBotId(e.target.value)}
+                placeholder={t('extSettings.botIdPlaceholder')}
                 className="w-full px-3 py-2 rounded-md text-sm outline-none transition-colors"
                 style={{
                   backgroundColor: 'var(--input-bg)',

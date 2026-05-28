@@ -29,6 +29,7 @@ import {
   useSessionStore,
   useExtSettingsStore,
   extSettingsToQueryFields,
+  extSettingsToRoutingParams,
 } from '../stores';
 import { webClient } from '../services/webClient';
 import i18n from '../i18n';
@@ -287,11 +288,14 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
       const currentMode = useSessionStore.getState().mode;
       const selectedModel = useSessionStore.getState().selectedModelName;
       try {
+        const ext = useExtSettingsStore.getState();
         await request('chat.send', {
           session_id: sessionId,
           content,
+          query: content,
           mode: currentMode,
           ...(selectedModel ? { model_name: selectedModel } : {}),
+          ...extSettingsToRoutingParams(ext),
         });
       } catch (error) {
         const webError = error as WebError;
@@ -438,6 +442,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
             query: '',
             request_id: requestId,
             answers: answers,
+            ...extSettingsToRoutingParams(useExtSettingsStore.getState()),
           });
         } else {
           // 否则发送 chat.user_answer（自进化确认）
@@ -1081,7 +1086,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
   useEffect(() => {
     const ext = useExtSettingsStore.getState();
     const extQuery = extSettingsToQueryFields(ext);
-    const { user_id: _uid, group_id: _gid, ...extraFields } = extQuery;
+    const { user_id: _uid, group_id: _gid, bot_id: _bid, ...extraFields } = extQuery;
     const connectOptions: WebConnectOptions = {
       provider,
       apiKey,
@@ -1090,6 +1095,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
       projectPath,
       userId: ext.userId || undefined,
       groupId: ext.groupId || undefined,
+      botId: ext.botId || undefined,
       extraFields: Object.keys(extraFields).length > 0 ? extraFields : undefined,
     };
     void webClient.connect(connectOptions).catch((error) => {
@@ -1129,7 +1135,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
       // 重连时从 store 拉最新 ext 设置（保存按钮也会派发本事件触发）。
       const ext = useExtSettingsStore.getState();
       const extQuery = extSettingsToQueryFields(ext);
-      const { user_id: _uid, group_id: _gid, ...extraFields } = extQuery;
+      const { user_id: _uid, group_id: _gid, bot_id: _bid, ...extraFields } = extQuery;
       const connectOptions: WebConnectOptions = {
         provider,
         apiKey,
@@ -1138,6 +1144,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
         projectPath,
         userId: ext.userId || undefined,
         groupId: ext.groupId || undefined,
+        botId: ext.botId || undefined,
         extraFields: Object.keys(extraFields).length > 0 ? extraFields : undefined,
       };
       void webClient.disconnect('ext settings or debug mode changed').then(() => {

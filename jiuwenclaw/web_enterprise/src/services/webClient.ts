@@ -474,6 +474,7 @@ class WebClient {
     // 请求扩展字段：user_id / group_id / 自定义键。
     if (options.userId) params.set('user_id', options.userId);
     if (options.groupId) params.set('group_id', options.groupId);
+    if (options.botId) params.set('bot_id', options.botId);
     if (options.extraFields) {
       for (const [k, v] of Object.entries(options.extraFields)) {
         if (k && v) params.set(k, v);
