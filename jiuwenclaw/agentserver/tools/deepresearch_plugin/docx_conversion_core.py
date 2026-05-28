@@ -6,14 +6,19 @@ import uuid
 from pathlib import Path
 
 import markdown
-import pypandoc
+from docx import Document
 from jiuwenclaw.agentserver.tools.deepresearch_plugin.conversion_utils import (
-    ensure_pandoc,
     make_safe_filename_component,
     normalize_docx_fonts,
+    normalize_docx_tables,
     normalize_headings,
+    postprocess_html,
     preprocess_markdown_text_for_docx,
     read_text_with_fallback,
+)
+from jiuwenclaw.agentserver.tools.deepresearch_plugin.word_utils import (
+    html_to_doc,
+    set_global_styles,
 )
 
 DOCX_HTML_TEMPLATE = """<!DOCTYPE html>
@@ -26,6 +31,20 @@ DOCX_HTML_TEMPLATE = """<!DOCTYPE html>
 </body>
 </html>
 """
+DOCX_STYLE_MAP = {
+    "heading1": "Heading 1",
+    "heading2": "Heading 2",
+    "heading3": "Heading 3",
+    "heading4": "Heading 4",
+    "heading5": "Heading 5",
+    "heading6": "Heading 6",
+    "heading7": "Heading 7",
+    "heading8": "Heading 8",
+    "heading9": "Heading 9",
+    "paragraph": "Normal",
+    "table": "Table Grid",
+    "default": "Normal",
+}
 
 
 def convert_md_to_docx(
@@ -34,9 +53,7 @@ def convert_md_to_docx(
     *,
     logger: logging.Logger,
 ) -> None:
-    """Convert a Markdown file to a DOCX document."""
-    ensure_pandoc()
-
+    """Convert a Markdown file to a DOCX document without pandoc."""
     md_file = Path(md_path).resolve()
     docx_file = Path(docx_path).resolve()
     if not md_file.exists():
@@ -57,23 +74,16 @@ def convert_md_to_docx(
             extensions=["extra", "toc", "md_in_html"],
             output_format="html5",
         )
-        temp_html.write_text(
-            DOCX_HTML_TEMPLATE.format(content=html_body),
-            encoding="utf-8",
-            newline="\n",
-        )
+        html_text = DOCX_HTML_TEMPLATE.format(content=postprocess_html(html_body))
+        temp_html.write_text(html_text, encoding="utf-8", newline="\n")
 
-        pypandoc.convert_file(
-            str(temp_html),
-            "docx",
-            outputfile=str(docx_file),
-            extra_args=[
-                "--from=html",
-                "--resource-path",
-                str(docx_file.parent),
-            ],
-        )
+        document = Document()
+        set_global_styles(document)
+        html_to_doc(document, html_text, DOCX_STYLE_MAP, base_path=docx_file.parent)
+        document.save(docx_file)
+
         normalize_docx_fonts(docx_file)
+        normalize_docx_tables(docx_file)
         logger.info("DOCX generated successfully: %s", docx_file)
     finally:
         temp_html.unlink(missing_ok=True)

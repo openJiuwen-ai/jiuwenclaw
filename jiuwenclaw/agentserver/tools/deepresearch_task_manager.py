@@ -123,10 +123,10 @@ class DeepResearchTaskManager:
     def _resolve_petal_search_url() -> str:
         """Build Petal Search URL from LLM API_BASE: strip trailing /v2, append /v1/ai-tools/web-search."""
         api_base = (
-            os.environ.get("API_BASE")
-            or os.environ.get("OPENAI_BASE_URL")
-            or os.environ.get("OPENAI_API_BASE")
-            or ""
+                os.environ.get("API_BASE")
+                or os.environ.get("OPENAI_BASE_URL")
+                or os.environ.get("OPENAI_API_BASE")
+                or ""
         ).strip()
         if not api_base:
             return ""
@@ -139,12 +139,12 @@ class DeepResearchTaskManager:
     @staticmethod
     def _detect_configured_search_engines() -> Dict[str, str]:
         """自动识别环境变量中已配置的检索引擎.
-        
+
         返回：
             Dict[str, str]: 引擎名字 -> API key 的映射，例如 {"jina": "sk-xxx", "bocha": "sk-yyy"}
         """
         configured_engines = {}
-        
+
         # SerpAPI 搜索引擎
         serper_api_key = os.environ.get("SERPER_API_KEY", "").strip()
         if serper_api_key:
@@ -164,7 +164,7 @@ class DeepResearchTaskManager:
         perplexity_api_key = os.environ.get("PERPLEXITY_API_KEY", "").strip()
         if perplexity_api_key:
             configured_engines[SearchEngine.PERPLEXITY.value] = perplexity_api_key
-        
+
         return configured_engines
 
     @staticmethod
@@ -217,15 +217,34 @@ class DeepResearchTaskManager:
         if not web_search_api_key:
             # Fallback 到 OPENAI_DEFAULT_HEADERS 或 default_headers
             web_search_api_key = (
-                os.environ.get("OPENAI_DEFAULT_HEADERS")
-                or os.environ.get("default_headers", "")
+                    os.environ.get("OPENAI_DEFAULT_HEADERS")
+                    or os.environ.get("default_headers", "")
             ).strip()
-        
+
         web_search_url = os.environ.get("WEB_SEARCH_URL", "").strip()
         if not web_search_url and web_search_engine_name == SearchEngine.PETAL.value:
             web_search_url = DeepResearchTaskManager._resolve_petal_search_url()
 
         execution_method = os.environ.get("EXECUTION_METHOD", "parallel").strip()
+
+        # 检查 VISION 相关配置
+        vision_api_key = os.environ.get("VISION_API_KEY", "").strip()
+        vision_api_base = os.environ.get("VISION_API_BASE", "").strip()
+        vision_provider = os.environ.get("VISION_PROVIDER", "").strip().lower()
+        vision_model_name = os.environ.get("VISION_MODEL_NAME", "").strip()
+
+        # 如果 VISION 相关环境变量已配置，启用 VLM 图表生成器
+        vlm_chart_generator_enable = "False"
+        has_valid_vision_config = all(
+            [
+                vision_api_key,
+                vision_api_base,
+                vision_provider,
+                vision_model_name,
+            ]
+        )
+        if has_valid_vision_config:
+            vlm_chart_generator_enable = "True"
 
         config = {
             "LLM_MODEL_NAME": llm_model_name,
@@ -241,8 +260,12 @@ class DeepResearchTaskManager:
             "WORKFLOW_HUMAN_IN_THE_LOOP": "False",
             "OUTLINE_INTERACTION_ENABLED": "False",
             "SOURCE_TRACER_INFER_SWITCHES": "True",
-            "VLM_CHART_GENERATOR_ENABLE": "False",
-            "VLM_CHART_GENERATOR_MAX_ITERATIONS": 0,
+            "VLM_CHART_GENERATOR_ENABLE": vlm_chart_generator_enable,
+            "VLM_CHART_GENERATOR_MAX_ITERATIONS": 3,
+            "VISION_API_KEY": vision_api_key,
+            "VISION_API_URL": vision_api_base,
+            "VISION_PROVIDER": vision_provider,
+            "VISION_MODEL_NAME": vision_model_name,
         }
         return config
 
@@ -493,12 +516,12 @@ class DeepResearchTaskManager:
 
     @staticmethod
     def _write_report_artifacts(
-        data: Any,
-        file_name: str,
-        output_dir: str = SAVE_REPORT_PATH,
-        *,
-        task_id: str = "",
-        cancel_event: threading.Event | None = None,
+            data: Any,
+            file_name: str,
+            output_dir: str = SAVE_REPORT_PATH,
+            *,
+            task_id: str = "",
+            cancel_event: threading.Event | None = None,
     ) -> dict[str, str]:
         """写出 markdown/html/docx 报告及推理图目录（支持协作取消）."""
         # 检查取消状态
@@ -519,8 +542,7 @@ class DeepResearchTaskManager:
             )
             safe_base_name = f"report_{task_id or 'default'}"
 
-
-        report_file = os.path.join(output_dir, 
+        report_file = os.path.join(output_dir,
                                    f"report_{safe_base_name}_{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S')}")
 
         # 路径 containment 校验
@@ -655,6 +677,15 @@ class DeepResearchTaskManager:
             )
 
             return last_report
+
+        except Exception as e:
+            logger.error(
+                "[DeepResearchTaskManager] Workflow execution failed: %s",
+                str(e),
+                exc_info=True,
+                extra={'user_visible': 'critical'}
+            )
+            raise
 
         finally:
             # === 清理日志捕获 ===
@@ -804,10 +835,10 @@ class DeepResearchTaskManager:
         )
 
     async def _execute_task(
-        self,
-        task_id: str,
-        query: str,
-        file_name: str,
+            self,
+            task_id: str,
+            query: str,
+            file_name: str,
     ) -> None:
         """执行 DeepResearch 任务（后台协程）."""
         task = self._tasks[task_id]
@@ -1002,12 +1033,12 @@ class DeepResearchTaskManager:
             )
 
     async def create_task(
-        self,
-        query: str,
-        file_name: str,
-        session_id: str = "",
-        channel_id: str = "",
-        request_id: str = "",
+            self,
+            query: str,
+            file_name: str,
+            session_id: str = "",
+            channel_id: str = "",
+            request_id: str = "",
     ) -> str:
         """创建并启动 DeepResearch 任务.
 
@@ -1096,10 +1127,10 @@ class DeepResearchTaskManager:
         return task_id
 
     async def get_task_status(
-        self,
-        task_id: str,
-        caller_session_id: str = "",
-        caller_channel_id: str = "",
+            self,
+            task_id: str,
+            caller_session_id: str = "",
+            caller_channel_id: str = "",
     ) -> Dict[str, Any] | None:
         """获取任务状态.
 
@@ -1184,10 +1215,10 @@ class DeepResearchTaskManager:
         return False
 
     async def list_tasks(
-        self,
-        status_filter: str | None = None,
-        caller_session_id: str = "",
-        caller_channel_id: str = "",
+            self,
+            status_filter: str | None = None,
+            caller_session_id: str = "",
+            caller_channel_id: str = "",
     ) -> List[Dict[str, Any]]:
         """列出任务（仅返回调用者拥有的任务）.
 
@@ -1225,10 +1256,10 @@ class DeepResearchTaskManager:
         return tasks
 
     async def cancel_task(
-        self,
-        task_id: str,
-        caller_session_id: str = "",
-        caller_channel_id: str = "",
+            self,
+            task_id: str,
+            caller_session_id: str = "",
+            caller_channel_id: str = "",
     ) -> bool:
         """取消任务（仅允许任务所有者取消）.
 
@@ -1289,10 +1320,10 @@ class DeepResearchTaskManager:
         return True
 
     async def get_task_result(
-        self,
-        task_id: str,
-        caller_session_id: str = "",
-        caller_channel_id: str = "",
+            self,
+            task_id: str,
+            caller_session_id: str = "",
+            caller_channel_id: str = "",
     ) -> str | None:
         """获取任务结果（仅允许任务所有者获取）.
 
@@ -1318,12 +1349,12 @@ class DeepResearchTaskManager:
         return task.result
 
     async def run_task_and_wait(
-        self,
-        query: str,
-        file_name: str,
-        session_id: str = "",
-        channel_id: str = "",
-        request_id: str = "",
+            self,
+            query: str,
+            file_name: str,
+            session_id: str = "",
+            channel_id: str = "",
+            request_id: str = "",
     ) -> Dict[str, Any]:
         """创建任务并等待执行结束，适合 CLI 或脚本入口直接调用."""
         task_id = await self.create_task(
@@ -1344,12 +1375,12 @@ class DeepResearchTaskManager:
         return task_info
 
     async def run_task_direct(
-        self,
-        query: str,
-        file_name: str,
-        session_id: str = "",
-        channel_id: str = "",
-        request_id: str = "",
+            self,
+            query: str,
+            file_name: str,
+            session_id: str = "",
+            channel_id: str = "",
+            request_id: str = "",
     ) -> str:
         """直接执行深度研究任务并阻塞等待完成，不提交到任务池.
 
@@ -1421,7 +1452,7 @@ class DeepResearchTaskManager:
         current_agent_config["llm_config"]["general"]["base_url"] = config["LLM_BASE_URL"]
         current_agent_config["llm_config"]["general"]["extension"] = config_extension
         current_agent_config["llm_config"]["general"]["api_key"] = bytearray(config["LLM_API_KEY"],
-                                                                              encoding="utf-8")
+                                                                             encoding="utf-8")
         current_agent_config["llm_config"]["general"]["verify_ssl"] = False
 
         # 5. 解析搜索引擎配置
@@ -1440,6 +1471,17 @@ class DeepResearchTaskManager:
         current_agent_config["source_tracer_infer_switch"] = config["SOURCE_TRACER_INFER_SWITCHES"]
         current_agent_config["vlm_chart_generator_enable"] = config["VLM_CHART_GENERATOR_ENABLE"]
         current_agent_config["vlm_chart_generator_max_iterations"] = config["VLM_CHART_GENERATOR_MAX_ITERATIONS"]
+
+        # 配置 VLM 图表生成器相关参数
+        if config["VLM_CHART_GENERATOR_ENABLE"] == "True":
+            current_agent_config["llm_config"]["vlm_chart_generating"] = {}
+            current_agent_config["llm_config"]["vlm_chart_generating"]["model_name"] = config["VISION_MODEL_NAME"]
+            current_agent_config["llm_config"]["vlm_chart_generating"]["model_type"] = config["VISION_PROVIDER"]
+            current_agent_config["llm_config"]["vlm_chart_generating"]["base_url"] = config["VISION_API_URL"]
+            current_agent_config["llm_config"]["vlm_chart_generating"]["api_key"] = bytearray(config["VISION_API_KEY"],
+                                                                                              encoding="utf-8")
+            current_agent_config["llm_config"]["vlm_chart_generating"]["verify_ssl"] = False
+
         if config["EXECUTION_METHOD"] == ExecutionMethod.DEPENDENCY_DRIVING.value:
             current_agent_config["execution_method"] = ExecutionMethod.DEPENDENCY_DRIVING.value
         else:

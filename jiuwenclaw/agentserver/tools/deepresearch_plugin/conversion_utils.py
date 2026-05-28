@@ -6,7 +6,6 @@ import logging
 import re
 from pathlib import Path
 
-import pypandoc
 import unicodedata
 
 logger = logging.getLogger(__name__)
@@ -22,6 +21,7 @@ NUMBERED_HEADING_RE = re.compile(
     r"^(?P<indent>\s{0,3})(?P<number>\d+(?:\.\d+)*)(?:\.\s+|\s+)(?P<title>.+?)\s*$"
 )
 LIST_ITEM_RE = re.compile(r"^\s{0,3}(?:[-*+]\s+|\d+\.\s+)")
+INDENTED_LIST_ITEM_RE = re.compile(r"^(?P<indent>[ \t]{4,})(?P<marker>(?:[-*+]\s+|\d+\.\s+).*)$")
 SENTENCE_END_RE = re.compile(r"[。！？?!…]$")
 
 CITATION_RE = re.compile(r"\[\[(\d+)\]\]\((https?://[^\s)]+(?:\([^\s)]+\)[^\s)]*)*)\)")
@@ -66,42 +66,13 @@ except Exception:
 
 try:
     from docx import Document
+    from docx.enum.table import WD_TABLE_ALIGNMENT
     from docx.oxml import OxmlElement
     from docx.oxml.ns import qn
 
     DOCX_STYLE_AVAILABLE = True
 except Exception:
     DOCX_STYLE_AVAILABLE = False
-
-
-def ensure_pandoc() -> None:
-    """Ensure pandoc is available for document conversion.
-    
-    Checks if pandoc is installed locally. If not found, raises an error
-    instead of automatically downloading to prevent supply chain risks.
-    
-    Returns:
-        None
-    
-    Raises:
-        RuntimeError: If pandoc is not found in the system PATH
-        
-    Security Note:
-        Automatic downloading of pandoc via pypandoc.download_pandoc() is disabled
-        to prevent supply chain attacks. Pandoc must be pre-installed by the
-        system administrator or deployment process.
-    """
-    try:
-        pypandoc.get_pandoc_version()
-    except OSError as e:
-        # 安全修复: 禁止自动下载，防止供应链攻击
-        raise RuntimeError(
-            f"Pandoc is not installed. Please install pandoc manually before "
-            f"using document conversion features. Automatic download is disabled "
-            f"for security reasons (supply chain risk mitigation). "
-            f"See: https://pandoc.org/installing.html"
-            f"e"
-        )
 
 
 def read_text_with_fallback(path: Path) -> str:
@@ -416,6 +387,51 @@ def normalize_list_boundaries(text: str) -> str:
     return "\n".join(normalized)
 
 
+def normalize_orphan_indented_list_items(text: str) -> str:
+    """Dedent report-style list items that Markdown would otherwise treat as code."""
+    lines = text.split("\n")
+    normalized: list[str] = []
+    in_fenced_code = False
+    orphan_list_indent: int | None = None
+
+    def _previous_nonempty_line() -> str:
+        for previous in reversed(normalized):
+            if previous.strip():
+                return previous
+        return ""
+
+    def _indent_width(indent: str) -> int:
+        return len(indent.expandtabs(4))
+
+    for line in lines:
+        if line.lstrip().startswith("```"):
+            in_fenced_code = not in_fenced_code
+            normalized.append(line)
+            orphan_list_indent = None
+            continue
+
+        match = INDENTED_LIST_ITEM_RE.match(line)
+        if match and not in_fenced_code:
+            indent_width = _indent_width(match.group("indent"))
+            if orphan_list_indent == indent_width:
+                normalized.append(match.group("marker"))
+                continue
+
+            previous = _previous_nonempty_line()
+            if not LIST_ITEM_RE.match(previous) and not INDENTED_LIST_ITEM_RE.match(previous):
+                orphan_list_indent = indent_width
+                normalized.append(match.group("marker"))
+                continue
+
+            orphan_list_indent = None
+        elif line.strip():
+            orphan_list_indent = None
+
+        normalized.append(line)
+
+    return "\n".join(normalized)
+
+
 def strip_mermaid_blocks(text: str) -> str:
     """Remove Mermaid fenced code blocks and adjacent figure captions.
 
@@ -451,6 +467,7 @@ def preprocess_markdown_text(text: str) -> str:
     text = normalize_reference_lines(text)
     text = fix_center_caption_blocks(text)
     text = normalize_legacy_font_caption_blocks(text)
+    text = normalize_orphan_indented_list_items(text)
     text = normalize_list_boundaries(text)
     return strip_mermaid_blocks(text)
 
@@ -500,6 +517,7 @@ def preprocess_markdown_text_for_docx(text: str) -> str:
     text = _filter_remote_urls_for_ssrf(text)
     text = fix_center_caption_blocks(text)
     text = normalize_legacy_font_caption_blocks(text)
+    text = normalize_orphan_indented_list_items(text)
     text = normalize_list_boundaries(text)
     return strip_mermaid_blocks(text)
 
@@ -848,6 +866,27 @@ def normalize_docx_fonts(docx_path: Path, *, font_name: str = DEFAULT_DOCX_FONT)
             _apply_font_to_table(table, font_name)
 
     document.save(docx_path)
+
+
+def normalize_docx_tables(docx_path: Path) -> None:
+    """Apply simple, readable defaults to generated DOCX tables."""
+    if not DOCX_STYLE_AVAILABLE:
+        logger.warning("python-docx is unavailable, skipping table normalization for %s.", docx_path)
+        return
+
+    document = Document(docx_path)
+    changed = False
+    for table in document.tables:
+        table.alignment = WD_TABLE_ALIGNMENT.CENTER
+        table.autofit = True
+        try:
+            table.style = "Table Grid"
+        except KeyError:
+            pass
+        changed = True
+
+    if changed:
+        document.save(docx_path)
 
 
 def enhance_image(image_path: str) -> None:
