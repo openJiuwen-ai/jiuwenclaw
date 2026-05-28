@@ -2,7 +2,7 @@
  * 请求扩展字段（透传给后端）的设置状态管理。
  *
  * 包含两类：
- *   - 固定字段：user_id / group_id
+ *   - 固定字段：user_id / group_id / bot_id
  *   - 自定义键值对：key 从白名单选择，value 任意
  *
  * 持久化到 localStorage；保存时 dispatch DOM 事件触发 WS 重连，新设置生效。
@@ -23,6 +23,7 @@ export interface ExtCustomKV {
 export interface ExtSettingsSnapshot {
   userId: string;
   groupId: string;
+  botId: string;
   customKVs: ExtCustomKV[];
 }
 
@@ -39,6 +40,7 @@ export type ExtCustomKey = (typeof EXT_CUSTOM_KEY_WHITELIST)[number];
 const EMPTY_SNAPSHOT: ExtSettingsSnapshot = {
   userId: '',
   groupId: '',
+  botId: '',
   customKVs: [],
 };
 
@@ -50,6 +52,7 @@ function loadFromStorage(): ExtSettingsSnapshot {
     return {
       userId: typeof parsed.userId === 'string' ? parsed.userId : '',
       groupId: typeof parsed.groupId === 'string' ? parsed.groupId : '',
+      botId: typeof parsed.botId === 'string' ? parsed.botId : '',
       customKVs: Array.isArray(parsed.customKVs)
         ? parsed.customKVs
             .filter(
@@ -88,6 +91,7 @@ export const useExtSettingsStore = create<ExtSettingsState>((set) => ({
     const sanitized: ExtSettingsSnapshot = {
       userId: next.userId.trim(),
       groupId: next.groupId.trim(),
+      botId: next.botId.trim(),
       customKVs: next.customKVs
         .filter((kv) => kv.key.trim() && kv.value.trim())
         .map((kv) => ({ key: kv.key.trim(), value: kv.value.trim() })),
@@ -102,15 +106,27 @@ export const useExtSettingsStore = create<ExtSettingsState>((set) => ({
 
 /** 把当前快照拍平成 WS query 字段（webClient.buildWsUrl 调用）。 */
 export function extSettingsToQueryFields(
-  snapshot: Pick<ExtSettingsSnapshot, 'userId' | 'groupId' | 'customKVs'>,
+  snapshot: Pick<ExtSettingsSnapshot, 'userId' | 'groupId' | 'botId' | 'customKVs'>,
 ): Record<string, string> {
   const out: Record<string, string> = {};
   if (snapshot.userId) out.user_id = snapshot.userId;
   if (snapshot.groupId) out.group_id = snapshot.groupId;
+  if (snapshot.botId) out.bot_id = snapshot.botId;
   for (const kv of snapshot.customKVs) {
     if (kv.key && kv.value) {
       out[kv.key] = kv.value;
     }
   }
+  return out;
+}
+
+/** 企业策略路由字段（写入 ``chat.send`` params，与 enterprise_config_chat 对齐）。 */
+export function extSettingsToRoutingParams(
+  snapshot: Pick<ExtSettingsSnapshot, 'userId' | 'groupId' | 'botId'>,
+): Record<string, string> {
+  const out: Record<string, string> = {};
+  if (snapshot.userId) out.user_id = snapshot.userId;
+  if (snapshot.groupId) out.group_id = snapshot.groupId;
+  if (snapshot.botId) out.bot_id = snapshot.botId;
   return out;
 }

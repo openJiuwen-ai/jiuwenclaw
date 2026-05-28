@@ -21,6 +21,8 @@
     "userIdPlaceholder": "Optional",
     "groupIdLabel": "Group ID",
     "groupIdPlaceholder": "Optional",
+    "botIdLabel": "Bot ID",
+    "botIdPlaceholder": "Optional, e.g. bot_main",
     "customKvLabel": "Custom Key-Value Pairs",
     "customKvHint": "Key limited to whitelist",
     "customKvEmpty": "No custom key-value pairs yet",

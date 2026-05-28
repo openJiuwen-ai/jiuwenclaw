@@ -50,6 +50,8 @@ export interface WebConnectOptions {
   userId?: string;
   /** 请求扩展字段：group_id（透传，可为空字符串忽略）。 */
   groupId?: string;
+  /** 请求扩展字段：bot_id（透传，可为空字符串忽略）。 */
+  botId?: string;
   /** 自定义请求扩展字段，键名按 forward_headers 白名单与后端约定。 */
   extraFields?: Record<string, string>;
 }

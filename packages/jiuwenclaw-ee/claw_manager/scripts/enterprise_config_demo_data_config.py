@@ -7,16 +7,16 @@
 
 若升级 Manager 后首次双写失败，请删除 ``claw_manager.db`` 后重启 Manager 再执行。
 
-执行顺序（与文档一致，跳过步骤 0 provision）：
+执行顺序（与文档 §2.1–§2.8 一致，跳过步骤 1 provision）：
 
-1. 五条 ``model_template``（M1–M5；每次执行均新建，``template_name`` 可重复）
-2. 四条 ``extension-config-templates``（E1–E4；每次执行均新建）
-3. 三条 ``skill-whitelist-templates``（W1–W3；每次执行均新建）
-4. 两条 ``service-config-templates``（S1–S2；每次执行均新建）
-5. 两条 ``config-effective/service-policies``（``template_ref`` 含模型 / 白名单 / 扩展 / 服务配置槽位）
-6. 两条 ``config-effective/agent-policies``（依赖上一步销售服务策略 id）
-7. ``config-effective/global-policies``（每实例唯一；已存在则 PUT 更新）
-8. 两条 ``config-default-template-mappings``
+1. §2.1 五条 ``model_template``（M1–M5；2.1.1–2.1.5）
+2. §2.2 四条 ``extension-config-templates``（E1–E4；2.2.1–2.2.4）
+3. §2.3 三条 ``skill-whitelist-templates``（W1–W3；2.3.1–2.3.3）
+4. §2.4 两条 ``service-config-templates``（S1–S2；2.4.1–2.4.2）
+5. §2.5 两条 ``config-effective/service-policies``（2.5.1–2.5.2）
+6. §2.6 两条 ``config-effective/agent-policies``（2.6.1–2.6.2；依赖 2.5.1 的 id）
+7. §2.7 ``config-effective/global-policies``（每实例唯一；已存在则 PUT 更新）
+8. §2.8 两条 ``config-default-template-mappings``（2.8.1–2.8.2）
 
 典型用法（PowerShell 一行）::
 
@@ -501,7 +501,7 @@ def seed_demo_config(client: ManagerClient) -> dict[str, Any]:
     sales_id = _require_id(sales, "service-policies/sales")
     result["service_policy_sales_id"] = sales_id
     logger.info(
-        "  [2.1] 销售通道 priority=100 -> id=%s (default_model=%s, skills=%s,%s, ext=%s,%s, service=%s)",
+        "  [2.5.1] 销售通道 priority=100 -> id=%s (default_model=%s, skills=%s,%s, ext=%s,%s, service=%s)",
         sales_id,
         m2,
         w1,
@@ -524,7 +524,7 @@ def seed_demo_config(client: ManagerClient) -> dict[str, Any]:
     )
     fallback_id = _require_id(fallback, "service-policies/fallback")
     result["service_policy_fallback_id"] = fallback_id
-    logger.info("  [2.2] 低优先级兜底 -> id=%s (default_model=%s)", fallback_id, m1)
+    logger.info("  [2.5.2] 低优先级兜底 -> id=%s (default_model=%s)", fallback_id, m1)
 
     logger.info("[6/8] 创建 agent-policies")
     vip = client.post(
@@ -553,7 +553,7 @@ def seed_demo_config(client: ManagerClient) -> dict[str, Any]:
     vip_id = _require_id(vip, "agent-policies/vip")
     result["agent_policy_vip_id"] = vip_id
     logger.info(
-        "  [3.1] VIP alice -> id=%s (default_model=%s, skill=%s, ext=%s)",
+        "  [2.6.1] VIP alice -> id=%s (default_model=%s, skill=%s, ext=%s)",
         vip_id,
         m3,
         w1,
@@ -570,14 +570,14 @@ def seed_demo_config(client: ManagerClient) -> dict[str, Any]:
             "template_ref": {"default_model": [group_map_default_model]},
             "enabled": True,
             "data": {
-                "remark": "固定 agent_id；匹配仅看 match_expr；group:: 查映射 5.2"
+                "remark": "固定 agent_id；匹配仅看 match_expr；group:: 查 2.8.2"
             },
         },
     )
     mapping_id = _require_id(mapping_rule, "agent-policies/mapping")
     result["agent_policy_mapping_id"] = mapping_id
     logger.info(
-        "  [3.2] 组映射表达式 -> id=%s (default_model=%s)",
+        "  [2.6.2] 组映射表达式 -> id=%s (default_model=%s)",
         mapping_id,
         group_map_default_model,
     )
@@ -603,7 +603,7 @@ def seed_demo_config(client: ManagerClient) -> dict[str, Any]:
     global_id = _require_id(global_row, "global-policies")
     result["global_policy_id"] = global_id
     logger.info(
-        "  [4] 全局兜底 -> id=%s (四槽位=%s, skill=%s, ext=%s, service=%s)",
+        "  [2.7] 全局兜底 -> id=%s (四槽位=%s, skill=%s, ext=%s, service=%s)",
         global_id,
         m1,
         w3,
@@ -626,7 +626,7 @@ def seed_demo_config(client: ManagerClient) -> dict[str, Any]:
     )
     carol_map_id = _require_id(carol_map, "mapping/carol")
     result["mapping_carol_id"] = carol_map_id
-    logger.info("  [5.1] user carol -> template_id=%s (id=%s)", m4, carol_map_id)
+    logger.info("  [2.8.1] user carol -> template_id=%s (id=%s)", m4, carol_map_id)
 
     group_map = client.post(
         "/config-default-template-mappings",
@@ -637,12 +637,12 @@ def seed_demo_config(client: ManagerClient) -> dict[str, Any]:
             "template_id": m5,
             "template_type": "default_model",
             "enabled": True,
-            "data": {"remark": "组级 default_model 映射，供 3.2 ${group::g_demo_sales} 解析"},
+            "data": {"remark": "组级 default_model 映射，供 2.6.2 ${group::g_demo_sales} 解析"},
         },
     )
     group_map_id = _require_id(group_map, "mapping/group")
     result["mapping_group_id"] = group_map_id
-    logger.info("  [5.2] group g_demo_sales -> template_id=%s (id=%s)", m5, group_map_id)
+    logger.info("  [2.8.2] group g_demo_sales -> template_id=%s (id=%s)", m5, group_map_id)
 
     result["template_id_literals"] = {"m1": m1, "m2": m2, "m3": m3, "m4": m4, "m5": m5}
     return result
@@ -707,29 +707,29 @@ def main() -> None:
     logger.info("")
     logger.info("[done] 演示配置已写入。预期解析（各模型槽位可不同）：")
     logger.info("  alice + g_demo_sales::bot_main")
-    logger.info("    default/vision -> M3 VIP-加强对话 (Agent 3.1)")
-    logger.info("    video/audio -> M1 全局兜底-经济型 (全局 4 回填)")
+    logger.info("    default/vision -> M3 VIP-加强对话 (2.6.1)")
+    logger.info("    video/audio -> M1 全局兜底-经济型 (2.7 回填)")
     logger.info(
         "    skills=[W1 销售组-天气 Skill]; ext=E3 Agent Server 错误恢复（覆盖服务 E1+E2）"
     )
     logger.info("  bob   + g_demo_sales::bot_main")
-    logger.info("    default -> M5 销售组映射专用 (Agent 3.2 + 映射 5.2)")
-    logger.info("    vision -> M2 销售组-标准型 (继承服务 2.1)")
-    logger.info("    video/audio -> M1 全局兜底-经济型 (全局 4 回填)")
-    logger.info("    skills=[W1 销售组-天气 Skill, W2 销售组-CRM Skill] 继承服务级")
-    logger.info("    ext=E1 Gateway 请求前鉴权 + E2 Gateway 请求后日志（继承服务 2.1）")
+    logger.info("    default -> M5 销售组映射专用 (2.6.2 + 2.8.2)")
+    logger.info("    vision -> M2 销售组-标准型 (继承 2.5.1)")
+    logger.info("    video/audio -> M1 全局兜底-经济型 (2.7 回填)")
+    logger.info("    skills=[W1 销售组-天气 Skill, W2 销售组-CRM Skill] 继承 2.5.1")
+    logger.info("    ext=E1 Gateway 请求前鉴权 + E2 Gateway 请求后日志（继承 2.5.1）")
     logger.info("  g_unknown::bot_main")
     logger.info("    default/vision/video/audio -> M1 全局兜底-经济型 (全局兜底)")
     logger.info("    skill=W3 全局兜底 Skill; ext=E4 Gateway 定时清理")
     logger.info("")
-    logger.info("Gateway Runtime service_config 验证（§7）：")
+    logger.info("Gateway Runtime service_config 验证（§3.2）：")
     logger.info(
         "  uv run python packages/jiuwenclaw-ee/claw_manager/scripts/enterprise_runtime_service_config.py "
         "--all-scenarios %s",
         summary.get("jiuwenclaw_id", "{JIUWENCLAW_ID}"),
     )
     logger.info("")
-    logger.info("AgentServer 聊天联调（§6）：")
+    logger.info("AgentServer 聊天联调（§3.1）：")
     logger.info(
         "  uv run python packages/jiuwenclaw-ee/claw_manager/scripts/enterprise_config_chat.py "
         "--group-id g_demo_sales --bot-id bot_main --user-id alice "

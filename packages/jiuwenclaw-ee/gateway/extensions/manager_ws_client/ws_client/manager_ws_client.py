@@ -74,6 +74,14 @@ class ManagerWsClient:
         self._on_config_push = handler
 
     async def connect(self, uri: str) -> None:
+        # initialize 与 WEB_CHANNEL_CREATED 都会 schedule connect；勿重复 disconnect，
+        # 否则会清空 JIUWENCLAW_ID 并以无 id 的 register 在 Manager 侧再建一条 instance。
+        if (
+            self._uri == uri
+            and self._session_task is not None
+            and not self._session_task.done()
+        ):
+            return
         if self._session_task is not None and not self._session_task.done():
             await self.disconnect()
 
