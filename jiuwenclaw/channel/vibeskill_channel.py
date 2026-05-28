@@ -533,10 +533,6 @@ class VibeSkillChannel(BaseChannel):
             return await self._handle_test_replied(data)
         if msg_type == "skillSearch.replied":
             return await self._handle_skill_search_replied(ws, data)
-        if msg_type == "skilldev.batch_upload":
-            return await self._handle_batch_upload(ws, data)
-        if msg_type == "skilldev.batch_download":
-            return await self._handle_batch_download(ws, data)
 
         return False
 
@@ -1162,98 +1158,6 @@ class VibeSkillChannel(BaseChannel):
             action,
         )
         self._deliver_to_message_handler(msg)
-        return True
-
-    async def _handle_batch_upload(self, ws: Any, data: dict[str, Any]) -> bool:
-        """处理 skilldev.batch_upload，批量打包 workspace 并上传 OBS。"""
-        session_ids = data.get("sessionIDs")
-        if not isinstance(session_ids, list) or not session_ids:
-            await self._send_ws_json(ws, {
-                "type": "skilldev.batch_upload.result",
-                "properties": {"results": [], "error": "sessionIDs must be a non-empty array"},
-            }, source="batch_upload.invalid_params")
-            return True
-
-        request_id = f"vibeskill-batch-upload-{int(time.time() * 1000):x}-{secrets.token_hex(3)}"
-        params: dict[str, Any] = {"session_ids": session_ids}
-
-        env = e2a_from_agent_fields(
-            request_id=request_id,
-            channel_id=VIBESKILL_CHANNEL_ID,
-            session_id="batch",
-            req_method=ReqMethod.SKILLDEV_BATCH_UPLOAD,
-            params=params,
-            is_stream=False,
-            timestamp=time.time(),
-        )
-
-        try:
-            resp = await self._send_agent_request(env)
-            payload = resp.payload if isinstance(resp.payload, dict) else {}
-            if not resp.ok:
-                err = str(payload.get("error") or "batch_upload failed")
-                await self._send_ws_json(ws, {
-                    "type": "skilldev.batch_upload.result",
-                    "properties": {"results": [], "error": err},
-                }, source="batch_upload.error")
-            else:
-                await self._send_ws_json(ws, {
-                    "type": "skilldev.batch_upload.result",
-                    "properties": {"results": payload.get("results", [])},
-                }, source="batch_upload.ok")
-        except Exception as exc:
-            logger.warning("[VibeSkillChannel] batch_upload request failed: %s", exc)
-            await self._send_ws_json(ws, {
-                "type": "skilldev.batch_upload.result",
-                "properties": {"results": [], "error": str(exc)},
-            }, source="batch_upload.exception")
-
-        return True
-
-    async def _handle_batch_download(self, ws: Any, data: dict[str, Any]) -> bool:
-        """处理 skilldev.batch_download，批量下载并解压 workspace。"""
-        items = data.get("items")
-        if not isinstance(items, list) or not items:
-            await self._send_ws_json(ws, {
-                "type": "skilldev.batch_download.result",
-                "properties": {"results": [], "error": "items must be a non-empty array"},
-            }, source="batch_download.invalid_params")
-            return True
-
-        request_id = f"vibeskill-batch-download-{int(time.time() * 1000):x}-{secrets.token_hex(3)}"
-        params: dict[str, Any] = {"items": items}
-
-        env = e2a_from_agent_fields(
-            request_id=request_id,
-            channel_id=VIBESKILL_CHANNEL_ID,
-            session_id="batch",
-            req_method=ReqMethod.SKILLDEV_BATCH_DOWNLOAD,
-            params=params,
-            is_stream=False,
-            timestamp=time.time(),
-        )
-
-        try:
-            resp = await self._send_agent_request(env)
-            payload = resp.payload if isinstance(resp.payload, dict) else {}
-            if not resp.ok:
-                err = str(payload.get("error") or "batch_download failed")
-                await self._send_ws_json(ws, {
-                    "type": "skilldev.batch_download.result",
-                    "properties": {"results": [], "error": err},
-                }, source="batch_download.error")
-            else:
-                await self._send_ws_json(ws, {
-                    "type": "skilldev.batch_download.result",
-                    "properties": {"results": payload.get("results", [])},
-                }, source="batch_download.ok")
-        except Exception as exc:
-            logger.warning("[VibeSkillChannel] batch_download request failed: %s", exc)
-            await self._send_ws_json(ws, {
-                "type": "skilldev.batch_download.result",
-                "properties": {"results": [], "error": str(exc)},
-            }, source="batch_download.exception")
-
         return True
 
     async def outbound_intercept(self, msg: Message, ws: Any) -> bool:
@@ -3602,6 +3506,17 @@ class VibeSkillChannel(BaseChannel):
             return self._json_response(
                 400, {"ok": False, "error": "content must be a string"}
             )
+        # Debug aid for mojibake: inspect what gateway actually receives.
+        preview = content[:120]
+        preview_escaped = preview.encode("unicode_escape").decode("ascii")
+        logger.info(
+            "[VibeSkillChannel] file.write inbound content preview, session_id=%s path=%s chars=%d preview=%s preview_unicode_escape=%s",
+            session_id,
+            file_path,
+            len(content),
+            repr(preview),
+            preview_escaped,
+        )
 
         request_id = f"vibeskill-file-write-{int(time.time() * 1000):x}-{secrets.token_hex(3)}"
         file_write_params: dict[str, Any] = {

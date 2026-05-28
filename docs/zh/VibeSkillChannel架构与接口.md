@@ -1,6 +1,6 @@
 # VibeSkill Channel 架构与接口说明
 
-> 本文基于 `jiuwenclaw/channel/vibeskill_channel.py`、`vibeskill_session.py`、`vibeskill_file_utils.py`、`gateway/channel_manager.py` 与 `gateway/message_handler.py` 梳理，用于测试串讲 VibeSkill Channel 的架构、协议入口、消息转换和关键验证点。
+> 本文基于 `jiuwenclaw/channel/vibeskill_channel.py`、`vibeskill_session.py`、`vibeskill_file_utils.py`、`gateway/channel_manager.py`、`gateway/message_handler.py` 与 `gateway/sandbox_router.py` 梳理，用于测试串讲 VibeSkill Channel 的架构、协议入口、消息转换和关键验证点。
 
 ## 1. 定位
 
@@ -31,7 +31,8 @@ flowchart LR
     STORE["VibeSkillSessionStore<br/>状态与内外 ID 映射"]
     CM["ChannelManager"]
     MH["MessageHandler"]
-    AS["AgentServer<br/>chat / skilldev"]
+    SR["SandboxRouterAgentClient<br/>可选，SANDBOX_ENABLE"]
+    AS["AgentServer / OpenAbility<br/>chat / skilldev"]
 
     FE -->|REST| HTTP
     FE <-->|WebSocket| WS
@@ -40,10 +41,13 @@ flowchart LR
     HTTP -->|send_request / create_agent_session / register_skill| CM
     WS -->|deliver_to_message_handler(Message)| CM
     CM --> MH
-    MH <-->|E2A| AS
+    MH <-->|E2A| SR
+    SR <-->|按 user_id 路由沙箱 OA| AS
     MH -->|robot_messages| CM
     CM -->|Channel.send| WS
 ```
+
+> 未开启沙箱路由时，`MessageHandler` 直连 `WebSocketAgentServerClient`；开启后由 `SandboxRouterAgentClient` 代替默认 Agent 客户端（见 `app_gateway.py`）。
 
 启动链路：
 
@@ -137,6 +141,93 @@ Key 命名（与 `sandbox_dcs_store.py` 同模式，写死常量）：
 
 则 G2 **重连** 同一 `sandbox_id`，不会再次 `create_sandbox`。WS 仍建议粘滞；沙箱状态在沙箱内，与 WS 是否换 Gateway 解耦。
 
+### 3.4 工作区持久化（Sandbox 模式）
+
+在 `SANDBOX_ENABLE=true` 时，SkillDev 任务工作区位于远端沙箱内 AgentServer 的 `get_user_workspace_dir()/service_{session_id}` 目录（与 Channel 侧 `params.service_id` / `task_id` 一致，均为前端 `sessionID`）。沙箱因空闲回收、容量挤占或 Gateway 关闭而被销毁后，磁盘上的 `service_*` 目录会随之丢失。
+
+**编排层在 `SandboxRouterAgentClient`（`gateway/sandbox_router.py`），不在 VibeSkillChannel。** Channel 仍按既有协议把 `message.send` 等转成带 `user_id` 与 `session_id` 的 `Message`；备份与恢复由 Router 在转发 OpenAbility 之前/之后自动完成。打包、上传 OBS、下载解压的具体实现在 AgentServer `SkillDevService` 的 `skilldev.batch_upload` / `skilldev.batch_download`（`agentserver/skilldev/service.py`）。
+
+#### 职责划分
+
+| 组件 | 职责 |
+|------|------|
+| `VibeSkillChannel` | 协议转换、`user_id` 写入 `Message`；**不**暴露 `skilldev.batch_upload` / `skilldev.batch_download` WebSocket 入口 |
+| `SandboxRouterAgentClient` | 按请求累积 `session_id`；销毁前 `batch_upload`；新沙箱首包业务请求前 `batch_download` |
+| `SkillDevService` | 对 `service_{session_id}` 打 zip、上传 OBS、按 URL 下载解压 |
+| `WorkspaceDcsStore` | 将 `session_id → OBS URL` 写入 DCS，供跨沙箱、跨 Gateway 恢复 |
+
+#### DCS Key（工作区快照）
+
+与 session 元数据（`jiuwen:vibeskillSession:*`）、沙箱路由（`jiuwen:sandboxRouting:*`）正交：
+
+| Key | 值 |
+|-----|----|
+| `jiuwen:workspace:{session_id}` | JSON：`url`、`name`、`uploaded_at`、`routing_key`、`sandbox_id` |
+
+| 环境变量 | 默认值 | 说明 |
+|----------|--------|------|
+| `WORKSPACE_DCS_TTL_SECONDS` | 未设 | 工作区快照 TTL；未设时回退 `SANDBOX_DCS_TTL_SECONDS` → `SANDBOX_DURATION_SECONDS` → `3600` |
+
+#### 自动备份（沙箱销毁前）
+
+触发点：`_terminate_runtime`（空闲超时、池满挤占空闲沙箱、Gateway `disconnect` 等），在 **断开 OpenAbility 连接之前**：
+
+1. 读取该沙箱 `runtime.metadata["session_ids"]`（仅包含本 runtime 上曾处理过的 `session_id`，由 `send_request` / `send_request_stream` 按 envelope 累积）。
+2. 若非空，经当前 `runtime.agent_client` 调用 `skilldev.batch_upload`（`params.session_ids`），**不**再走 `_acquire_runtime`，避免 `TERMINATING` 死锁。
+3. 上传成功的项写入 `jiuwen:workspace:{session_id}`；失败仅记日志，默认仍继续销毁沙箱（避免泄漏占满配额）。
+
+#### 自动恢复（新沙箱 / 新请求）
+
+触发点：每次 `send_request` / `send_request_stream` 在 `_acquire_runtime` 之后、转发业务 E2A **之前**：
+
+1. 若 `method` 为 `skilldev.batch_upload` / `skilldev.batch_download` 则跳过（内部调用）。
+2. 若 envelope 带有效 `session_id`，查 DCS 是否有工作区快照。
+3. 若存在且该 runtime 尚未恢复过该 `session_id`（`metadata.restored_session_ids`），调用 `skilldev.batch_download` 解压到 `service_{session_id}`。
+4. 成功后标记已恢复，再转发 `skilldev.chat` 等正常请求。
+
+沙箱路由键仍为 `vibeskill:user:{user_id}`（优先）；同一用户多 session 共享一个沙箱，各 session 工作区目录隔离，销毁时按 session 维度分别打包上传。
+
+#### 与前端协议的关系
+
+- VibeSkill **WebSocket 入站表不包含** `skilldev.batch_upload` / `skilldev.batch_download`；前端无需、也不应直接触发备份/恢复。
+- 前端只需继续 `POST /session`、`message.send` 等；沙箱回收后再次 `message.send` 时，Gateway 在后台完成 download + chat。
+- HTTP/WS 请求中的 `Message.user_id`（或 session metadata 中的 `user_id`）必须正确，以便 Router 路由到对应用户沙箱。
+
+```mermaid
+sequenceDiagram
+    participant FE as VibeSkill 前端
+    participant VC as VibeSkillChannel
+    participant MH as MessageHandler
+    participant SR as SandboxRouter
+    participant OA as OpenAbility AgentServer
+    participant DCS as DCS
+    participant OBS as OBS
+
+    FE->>VC: message.send(sessionID)
+    VC->>MH: Message(user_id, session_id, skilldev.chat)
+    MH->>SR: E2A
+    SR->>SR: session_ids.add(session_id)
+    SR->>OA: skilldev.chat
+
+    Note over SR,OBS: 沙箱 idle 回收
+    SR->>SR: _terminate_runtime
+    SR->>OA: skilldev.batch_upload(session_ids)
+    OA->>OBS: zip
+    SR->>DCS: put jiuwen:workspace:{session_id}
+    SR->>OA: disconnect + delete_sandbox
+
+    Note over FE,OBS: 用户再次 message.send
+    FE->>VC: message.send(same sessionID)
+    VC->>MH: Message
+    MH->>SR: E2A
+    SR->>SR: _acquire_runtime (新沙箱)
+    SR->>DCS: get workspace
+    SR->>OA: skilldev.batch_download
+    SR->>OA: skilldev.chat
+```
+
+更细的沙箱池与 DCS 路由说明见 `docs/sandbox/Sandbox实现进展.md`；`skilldev.batch_*` 请求/响应字段见 `jiuwenclaw/agentserver/skilldev/docs/BATCH_UPLOAD_DOWNLOAD_API.md`（仅供 AgentServer / Gateway 内部，非 VibeSkill 前端协议）。
+
 ## 4. WebSocket 接口
 
 ### 4.1 连接
@@ -181,6 +272,8 @@ ws://127.0.0.1:19003/api/v1/messages?sessionID={sessionID}
 | `review.replied` | `sessionID`, `id`, `accept`, `feedback` | `SKILLDEV_CHAT` | 审阅结果仅写入 `params.query`（通过/反馈文案） |
 | `desc_optimize.replied` | `sessionID`, `id`, `accept` | `SKILLDEV_RESPOND` | 描述优化确认（`action=skip` 或 `optimize`） |
 | `test.replied` | `sessionID`, `id`, `accept` | `SKILLDEV_RESPOND` | 是否进入测试设计（`action=test_design` 或 `skip_tests`） |
+
+> **说明**：`skilldev.batch_upload` / `skilldev.batch_download` 不由 VibeSkill Channel 接收；工作区备份与恢复在开启沙箱时由 `SandboxRouterAgentClient` 自动调用（见 §3.4）。
 
 `message.send` 的 `parts` 支持：
 
@@ -486,6 +579,37 @@ sequenceDiagram
 - `chat.final` 后 session 是否回到 `idle`，前端是否收到 `task.completed`。
 - Standard session 调 `/register-skill` 应成功；SkillCreate session 调用应返回 400。
 
+### 6.3 Sandbox 工作区持久化（SkillCreate）
+
+在 `SANDBOX_ENABLE=true` 且 DCS 可用时，可验证「沙箱销毁后同一 `sessionID` 仍能继续 SkillDev」：
+
+```mermaid
+sequenceDiagram
+    participant FE as VibeSkill 前端
+    participant VC as VibeSkillChannel
+    participant MH as MessageHandler
+    participant SR as SandboxRouter
+    participant AS as AgentServer SkillDev
+
+    FE->>VC: message.send（首轮）
+    VC->>MH: skilldev.chat + user_id
+    MH->>SR: E2A
+    SR->>AS: 写入 service_{sessionID}
+    Note over SR: 等待 idle 或触发沙箱回收
+    SR->>AS: batch_upload → DCS
+    FE->>VC: message.send（同 sessionID）
+    VC->>MH: skilldev.chat
+    SR->>AS: batch_download → skilldev.chat
+    AS-->>VC: 流式事件（工作区应保留上轮产物/文件）
+```
+
+测试关注点：
+
+- `message.send` 携带的 session 在 Store 中有 `metadata.user_id`（或与 `session_id` 一致），保证 Router 使用 `vibeskill:user:{user_id}`。
+- 沙箱销毁后 DCS 存在 `jiuwen:workspace:{sessionID}`，且 `url` 非空。
+- 再次 `message.send` 前 Router 日志可见 workspace restore；Agent 行为与销毁前工作区一致（如 `GET .../file` 仍能看到已有文件）。
+- 未开启沙箱时无上述自动 backup/restore，行为与单机 AgentServer 一致。
+
 ## 7. 鉴权与错误处理
 
 鉴权开关：
@@ -563,6 +687,7 @@ WebSocket 断开时，`cleanup(ws)` 会执行：
 | 文件内容 | `GET /session/{id}/file/content?path=...` | 返回 text content |
 | 导出 | `POST /session/{id}/export` | 返回 `exportId/url/mimeType/exportedAt` |
 | 断连/abort 取消 | busy 时关闭 WS 或 `POST .../abort`（需 WS 在线） | 本地 idle；SkillCreate 派发 `skilldev.cancel`，Standard 派发 `chat.interrupt` |
+| 沙箱回收后恢复 | 同一 `sessionID` 再次 `message.send`（Sandbox 开启） | Router 自动 `batch_download` 后 `skilldev.chat`；DCS 有 `jiuwen:workspace:{sessionID}` |
 | 占位接口 | find/vcs/version/summarize | 返回当前占位结构，不应 500 |
 
 ## 10. 串讲时的关键结论
@@ -573,4 +698,5 @@ WebSocket 断开时，`cleanup(ws)` 会执行：
 - 结构化提问（`question.asked`）对应 `skilldev.user_answer`；评审确认（`review.replied`）对应 `skilldev.chat`；描述优化/测试确认仍走 `skilldev.respond`。
 - 前端只感知 `sessionID`，Channel 与 MessageHandler 共同处理内外 ID 映射。
 - 出站不是简单透传，Channel 会把 `skilldev.*` / `chat.*` 事件聚合成前端需要的 `message.*`、`todo.updated`、`*.asked`、`task.completed` 等事件。
+- 开启沙箱时，SkillDev 工作区持久化由 **SandboxRouter** 在销毁前 `batch_upload`、新请求前 `batch_download` 完成；VibeSkill Channel 不暴露 batch 类 WebSocket 消息，前端协议无变化。
 - 当前部分 REST 是占位实现，测试时应区分“已接 AgentServer”的接口和“固定响应”的接口。
