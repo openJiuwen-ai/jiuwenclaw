@@ -56,12 +56,9 @@ from jiuwenclaw.agentserver.skilldev_agent.meta_tools.external_tool_registry imp
     write_tool_usage_catalog,
 )
 from jiuwenclaw.agentserver.skilldev_agent.utils.direct_import import (
-    build_direct_import_fix_query,
     collect_skill_packages,
     extract_packages_to_skill_dir,
     find_skill_root,
-    package_validated_skill,
-    validate_direct_import_skill,
 )
 from jiuwenclaw.agentserver.skilldev_agent.rails.context_engineering_rail import SkillDevContextEngineeringRail
 from jiuwenclaw.agentserver.skilldev.session_history.service import SkillDevSessionHistoryService
@@ -601,49 +598,16 @@ class SkillDevDeepAdapter:
                 is_complete=False,
             )
 
-        valid, validation_message = validate_direct_import_skill(skill_root)
-        yield AgentResponseChunk(
-            request_id=rid,
-            channel_id=cid,
-            payload={
-                "event_type": "skilldev.validate_result",
-                "valid": valid,
-                "message": validation_message,
-                "task_id": task_id,
-            },
-            is_complete=False,
-        )
-
-        if valid:
-            output_dir = task_workspace / "output"
-            packaged = package_validated_skill(skill_root, output_dir)
-            if packaged is None:
-                async for chunk in self._yield_skilldev_error(
-                    rid, cid, "Skill 打包失败，请检查工作区与依赖引用"
-                ):
-                    yield chunk
-                return
-            yield AgentResponseChunk(
-                request_id=rid,
-                channel_id=cid,
-                payload={
-                    "event_type": "skilldev.agent_output",
-                    "delta": "您上传的skill符合规范，可直接上架使用",
-                    "task_id": task_id,
-                },
-                is_complete=False,
-            )
-            async for chunk in self._yield_packaged_skill_completion(
-                task_id=task_id,
-                rid=rid,
-                cid=cid,
-                packaged_files=[packaged],
-            ):
-                yield chunk
-            return
-
         await self.update_workspace(task_workspace)
-        combined_query = build_direct_import_fix_query(query, validation_message)
+        combined_query = (
+            "请加载并执行内置技能 skill-standardizer，对当前工作区的已导入 skill 进行校验与规范化，并按规则处理：\n"
+            "- 先运行校验（python -m scripts.validate <workspace>）。\n"
+            "- 若校验通过：直接打包（python -m scripts.package <workspace>）。\n"
+            "- 若校验不通过：把不通过的内容输出给用户，并使用 ask_user_question 询问是否需要自动修改；\n"
+            "  用户选择需要修改则按规范修复，修复后再次校验并打包；用户选择不需要修改则停止。\n\n"
+            "用户原始请求：\n"
+            f"{query}"
+        )
         raw_session_id = str(request.session_id or task_id)
         inputs = {
             "conversation_id": self._make_todo_session_id(raw_session_id),
@@ -652,7 +616,7 @@ class SkillDevDeepAdapter:
         async for chunk in self.process_message_stream_impl(
             request,
             inputs,
-            interactive_ask=False,
+            interactive_ask=True,
         ):
             yield chunk
 

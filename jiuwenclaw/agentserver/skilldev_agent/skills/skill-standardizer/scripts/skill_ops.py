@@ -22,6 +22,72 @@ EXCLUDE_GLOBS = {"*.pyc", "*.swp"}
 EXCLUDE_FILES = {".DS_Store"}
 ROOT_EXCLUDE_DIRS = {"evals", "output"}
 
+_DANGEROUS_PATTERNS: list[tuple[str, re.Pattern[str]]] = [
+    ("检测到危险命令：rm -rf /", re.compile(r"\brm\s+-rf\s+/\b")),
+    ("检测到危险命令：chmod 777", re.compile(r"\bchmod\s+777\b")),
+    ("检测到危险命令：curl | bash", re.compile(r"\bcurl\b[^\n|]*\|\s*\bbash\b")),
+    ("检测到危险命令：wget | bash", re.compile(r"\bwget\b[^\n|]*\|\s*\bbash\b")),
+    ("检测到危险命令：eval", re.compile(r"\beval\b")),
+]
+
+_CREDENTIAL_PATTERNS: list[tuple[str, re.Pattern[str]]] = [
+    ("疑似硬编码 OpenAI Key（sk-...）", re.compile(r"\bsk-[A-Za-z0-9]{8,}\b")),
+    ("疑似硬编码 AWS Access Key（AKIA...）", re.compile(r"\bAKIA[0-9A-Z]{16}\b")),
+    ("疑似硬编码 token/api_key/password", re.compile(r"\b(api[_-]?key|token|password|secret)\b\s*[:=]\s*['\"][^'\"]{6,}['\"]", re.IGNORECASE)),
+]
+
+_PROMPT_INJECTION_PATTERNS: list[tuple[str, re.Pattern[str]]] = [
+    ("疑似 Prompt Injection：ignore previous instructions", re.compile(r"ignore\s+previous\s+instructions", re.IGNORECASE)),
+    ("疑似 Prompt Injection：覆盖系统/系统提示词", re.compile(r"(覆盖|忽略).{0,10}(系统|system).{0,10}(指令|prompt)", re.IGNORECASE)),
+    ("疑似 Prompt Injection：你现在是/你必须", re.compile(r"(你现在是|你必须).{0,30}(系统|system)", re.IGNORECASE)),
+]
+
+
+def _iter_text_files(root: Path, *, include: tuple[str, ...]) -> list[Path]:
+    files: list[Path] = []
+    for pat in include:
+        files.extend(root.rglob(pat))
+    return [p for p in files if p.is_file()]
+
+
+def _read_text(path: Path) -> str:
+    try:
+        return path.read_text(encoding="utf-8")
+    except Exception:
+        return path.read_text(encoding="utf-8", errors="ignore")
+
+
+def _scan_patterns(text: str, patterns: list[tuple[str, re.Pattern[str]]]) -> list[str]:
+    hits: list[str] = []
+    for msg, pat in patterns:
+        if pat.search(text):
+            hits.append(msg)
+    return hits
+
+
+def _extract_declared_permissions(frontmatter: dict[str, str]) -> set[str]:
+    raw = str(frontmatter.get("requestPermissions") or frontmatter.get("request_permissions") or "").strip()
+    if not raw:
+        return set()
+    # support simple forms: "a,b" / "[a, b]" / "a"
+    raw = raw.strip().strip("[]")
+    parts = [p.strip().strip("'\"") for p in re.split(r"[,\n]", raw) if p.strip()]
+    return {p for p in parts if p}
+
+
+def _extract_required_permissions_from_body(body: str) -> set[str]:
+    perms: set[str] = set()
+    # Heuristic: find required_permissions: ["x","y"] or required_permissions=['x']
+    for m in re.finditer(r"required_permissions\s*[:=]\s*\[([^\]]*)\]", body, flags=re.IGNORECASE):
+        inner = m.group(1)
+        for token in re.findall(r"['\"]([^'\"]+)['\"]", inner):
+            perms.add(token.strip())
+    return perms
+
+
+def _contains_path_traversal(text: str) -> bool:
+    return ("../" in text) or ("..\\" in text)
+
 
 def estimate_tokens(text: str) -> int:
     """Rough token estimate (~4 characters per token)."""
@@ -167,8 +233,35 @@ def validate_direct_import_skill(skill_root: Path) -> tuple[bool, str]:
                 f"正文 token 数超限（约 {body_tokens} > {BODY_MAX_TOKENS}）"
             )
 
+    # --- Static rule scan (must pass) ---
+    scripts_dir = skill_root / "scripts"
+    script_files = _iter_text_files(scripts_dir, include=("*.py", "*.sh", "*.ps1", "*.bat", "*.cmd")) if scripts_dir.is_dir() else []
+    combined_script_text = "\n\n".join(_read_text(p) for p in script_files)
+    combined_all_text = "\n\n".join([description, body, combined_script_text])
+
+    errors.extend(_scan_patterns(combined_script_text, _DANGEROUS_PATTERNS))
+
+    cred_hits = _scan_patterns(combined_all_text, _CREDENTIAL_PATTERNS)
+    if cred_hits:
+        errors.extend(cred_hits)
+
+    if _contains_path_traversal(combined_script_text):
+        errors.append("检测到路径越界（脚本内容包含 ../ 或 ..\\\\）")
+
+    declared = _extract_declared_permissions(frontmatter)
+    required = _extract_required_permissions_from_body(body)
+    if required and not required.issubset(declared):
+        missing = ", ".join(sorted(required - declared))
+        errors.append(f"权限一致性不通过：requestPermissions 缺少 {missing}")
+
+    # --- LLM semantic audit (must pass) ---
+    errors.extend(_scan_patterns(body, _PROMPT_INJECTION_PATTERNS))
+    if description and re.search(r"(万能|任何|all-in-one|anything|everything)", description, re.IGNORECASE):
+        errors.append("疑似虚假/过度声明：description 可能包含过泛能力描述（需收敛）")
+
     if errors:
         return False, "\n".join(f"- {item}" for item in errors)
+
     return True, "SKILL.md 校验通过"
 
 

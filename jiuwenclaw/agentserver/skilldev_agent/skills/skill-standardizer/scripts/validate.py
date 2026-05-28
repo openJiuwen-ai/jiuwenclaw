@@ -3,7 +3,8 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
-from scripts.skill_ops import find_skill_root, validate_direct_import_skill
+from .quick_validate import validate_skill
+from .skill_ops import find_skill_root
 
 
 def main(argv: list[str]) -> int:
@@ -17,7 +18,7 @@ def main(argv: list[str]) -> int:
         print("Validation failed: cannot find skill root under <workspace>/skill/")
         return 1
 
-    valid, message = validate_direct_import_skill(skill_root)
+    valid, message = validate_skill(skill_root)
     if not valid:
         print("Validation failed:")
         print(message)

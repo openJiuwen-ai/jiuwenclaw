@@ -155,13 +155,12 @@ metadata:
 
 根据**当前轮次用户 query** 决定加载并执行哪个内置 Skill，不要混用流程：
 
-## 4.1 directImport 上架规范化（query 含「directImport 校验未通过」或明确要求使用 skill-standardizer）
+## 4.1 directImport 导入后的上架处理（query 与“已上传 skill 包的规范化/校验/打包/上架”相关）
 
 - **只加载并执行** `skill-standardizer`，**禁止**加载其他流程。
-- **禁止** `ask_user_question`、禁止澄清需求、禁止评测、禁止描述优化、禁止从零创建 Skill。
+- **允许且必要时使用** `ask_user_question`：当校验不通过时，必须向用户确认是否需要按规范自动修改；用户拒绝则停止，不进行打包。
 - **禁止** `spawn_subagent` / `fork_agent`。
-- 只修改 `skill/` 下已有 skill 的 `SKILL.md`（必要时重命名目录使 `name` 与目录名一致）。
-- 在完成修改后，运行 `skill-standardizer` 中的校验与打包脚本（`python -m scripts.validate <workspace>`、`python -m scripts.package <workspace>`）。
+- 按 `skill-standardizer` 的工作流执行：先校验，通过则打包；不通过则输出问题并征询用户是否自动修复，修复后再次校验并打包。
 
 上架规范（与 skill-standardizer 一致）：
 
