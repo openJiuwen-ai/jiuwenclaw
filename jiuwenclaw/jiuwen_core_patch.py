@@ -29,6 +29,7 @@ llm_logger = logging.getLogger("jiuwenclaw.app")
 # Set by react_agent._call_llm_stream before calling llm.stream/invoke.
 _retry_session: ContextVar[Optional[Any]] = ContextVar("retry_session", default=None)
 
+
 _ORIGINAL_BUILD_REQUEST_PARAMS = None
 _ORIGINAL_GENERATE_IMAGE = None
 
@@ -36,15 +37,7 @@ _HUAWEI_MAAS_API_MARKERS = (
     "modelarts-maas.com",
     "modelarts-maas.cn",
 )
-
-_REQUEST_TYPE_LLM = "llm"
-_REQUEST_TYPE_IMAGE = "image"
-
-# Per-task request kind for OpenAIModelClient (invoke/stream vs generate_image).
-# ContextVar avoids races when one client instance serves concurrent calls.
-_openai_request_type: ContextVar[str] = ContextVar(
-    "openai_request_type", default=_REQUEST_TYPE_LLM
-)
+_HUAWEI_MAAS_SESSION_API_KEY = "huawei-maas-session"
 
 
 def _is_huawei_maas_api_base(api_base: str) -> bool:
@@ -71,30 +64,6 @@ def _normalize_huawei_image_size(size: str | None) -> str | None:
     if not text:
         return None
     return text.replace("*", "x").replace("×", "x")
-
-
-async def _trace_openai_http_request(request: httpx.Request) -> None:
-    """Log the actual outgoing OpenAI-compatible HTTP request for image debugging."""
-    url_text = str(request.url)
-    should_trace = (
-        os.getenv("JIUWENCLAW_OPENAI_HTTP_TRACE", "").strip().lower() in {"1", "true", "yes", "on"}
-        or "modelarts-maas" in url_text.lower()
-        or "/images/" in request.url.path
-    )
-    if not should_trace:
-        return
-
-    try:
-        body = request.content.decode("utf-8", errors="replace")
-    except Exception as exc:  # noqa: BLE001
-        body = f"<unavailable: {type(exc).__name__}: {exc}>"
-
-    llm_logger.info(
-        "[OPENAI_HTTP_TRACE] request method=%s url=%s body=%s",
-        request.method,
-        url_text,
-        body[:4000],
-    )
 
 
 def configure_openjiuwen_logging_under_jiuwenclaw(subdir: str = "openjiuwen") -> None:
@@ -502,16 +471,9 @@ class PatchOpenAIModelClient(RetryMixin, OpenAIModelClient):
         proxy_url = UrlUtils.get_global_proxy_url(self.model_client_config.api_base)
         # httpx不接受空字符串proxy，需要处理
         if proxy_url and proxy_url.strip():
-            http_client = httpx.AsyncClient(
-                proxy=proxy_url,
-                verify=verify,
-                event_hooks={"request": [_trace_openai_http_request]},
-            )
+            http_client = httpx.AsyncClient(proxy=proxy_url, verify=verify)
         else:
-            http_client = httpx.AsyncClient(
-                verify=verify,
-                event_hooks={"request": [_trace_openai_http_request]},
-            )
+            http_client = httpx.AsyncClient(verify=verify)
 
         # Use method-level timeout if provided, otherwise use config timeout
         final_timeout = timeout if timeout is not None else self.model_client_config.timeout
@@ -524,14 +486,19 @@ class PatchOpenAIModelClient(RetryMixin, OpenAIModelClient):
         )
         default_headers_raw = os.getenv("default_headers", None)
         try:
-            default_headers = json.loads(default_headers_raw) if default_headers_raw else None
+            parsed_default_headers = (
+                json.loads(default_headers_raw) if default_headers_raw else None
+            )
         except json.decoder.JSONDecodeError as error:
             llm_logger.warning(f"Model default headers parse failed: {error}")
-            default_headers = None
-        request_type = _openai_request_type.get()
-        use_env_default_headers = request_type != _REQUEST_TYPE_IMAGE
-        client_default_headers = default_headers if use_env_default_headers else None
-
+            parsed_default_headers = None
+        # Main MaaS chat uses placeholder api_key + relay-claw Basic headers in default_headers.
+        # Image/other clients use real api_key and Bearer from the SDK only.
+        client_default_headers = (
+            parsed_default_headers
+            if self.model_client_config.api_key == _HUAWEI_MAAS_SESSION_API_KEY
+            else None
+        )
         return AsyncOpenAI(
             api_key=self.model_client_config.api_key,
             base_url=self.model_client_config.api_base,
@@ -706,24 +673,20 @@ class PatchOpenAIModelClient(RetryMixin, OpenAIModelClient):
         timeout=None,
         **kwargs,
     ):
-        token = _openai_request_type.set(_REQUEST_TYPE_LLM)
-        try:
-            return await self._invoke_with_retry(
-                _orig_invoke,
-                self,
-                messages,
-                tools=tools,
-                temperature=temperature,
-                top_p=top_p,
-                model=model,
-                max_tokens=max_tokens,
-                stop=stop,
-                output_parser=output_parser,
-                timeout=timeout,
-                **kwargs,
-            )
-        finally:
-            _openai_request_type.reset(token)
+        return await self._invoke_with_retry(
+            _orig_invoke,
+            self,
+            messages,
+            tools=tools,
+            temperature=temperature,
+            top_p=top_p,
+            model=model,
+            max_tokens=max_tokens,
+            stop=stop,
+            output_parser=output_parser,
+            timeout=timeout,
+            **kwargs,
+        )
 
     async def stream(
         self,
@@ -739,25 +702,21 @@ class PatchOpenAIModelClient(RetryMixin, OpenAIModelClient):
         timeout=None,
         **kwargs,
     ):
-        token = _openai_request_type.set(_REQUEST_TYPE_LLM)
-        try:
-            async for chunk in self._stream_with_retry(
-                _orig_stream,
-                self,
-                messages,
-                tools=tools,
-                temperature=temperature,
-                top_p=top_p,
-                model=model,
-                max_tokens=max_tokens,
-                stop=stop,
-                output_parser=output_parser,
-                timeout=self._resolve_stream_timeout(timeout),
-                **kwargs,
-            ):
-                yield chunk
-        finally:
-            _openai_request_type.reset(token)
+        async for chunk in self._stream_with_retry(
+            _orig_stream,
+            self,
+            messages,
+            tools=tools,
+            temperature=temperature,
+            top_p=top_p,
+            model=model,
+            max_tokens=max_tokens,
+            stop=stop,
+            output_parser=output_parser,
+            timeout=self._resolve_stream_timeout(timeout),
+            **kwargs,
+        ):
+            yield chunk
 
     async def generate_image(
         self,
@@ -792,33 +751,29 @@ class PatchOpenAIModelClient(RetryMixin, OpenAIModelClient):
             if seed:
                 call_kwargs["seed"] = seed
 
-        token = _openai_request_type.set(_REQUEST_TYPE_IMAGE)
-        try:
-            if is_huawei_maas:
-                # Upstream only forwards vendor extras via **kwargs; keep wire params there.
-                result = await _ORIGINAL_GENERATE_IMAGE(
-                    self,
-                    messages,
-                    model=model,
-                    size=call_size,
-                    n=call_n,
-                    **call_kwargs,
-                )
-            else:
-                result = await _ORIGINAL_GENERATE_IMAGE(
-                    self,
-                    messages,
-                    model=model,
-                    size=call_size,
-                    negative_prompt=call_negative_prompt,
-                    n=call_n,
-                    prompt_extend=prompt_extend,
-                    watermark=watermark,
-                    seed=seed,
-                    **call_kwargs,
-                )
-        finally:
-            _openai_request_type.reset(token)
+        if is_huawei_maas:
+            # Upstream only forwards vendor extras via **kwargs; keep wire params there.
+            result = await _ORIGINAL_GENERATE_IMAGE(
+                self,
+                messages,
+                model=model,
+                size=call_size,
+                n=call_n,
+                **call_kwargs,
+            )
+        else:
+            result = await _ORIGINAL_GENERATE_IMAGE(
+                self,
+                messages,
+                model=model,
+                size=call_size,
+                negative_prompt=call_negative_prompt,
+                n=call_n,
+                prompt_extend=prompt_extend,
+                watermark=watermark,
+                seed=seed,
+                **call_kwargs,
+            )
 
         if not is_huawei_maas or not result.images_base64:
             return result
@@ -946,7 +901,7 @@ def apply_openai_model_client_patch() -> None:
 
     OpenAIModelClient.invoke = PatchOpenAIModelClient.invoke
     OpenAIModelClient.stream = PatchOpenAIModelClient.stream
-    OpenAIModelClient.generate_image = PatchOpenAIModelClient.generate_image
+    OpenAIModelClient.generate_image = _impl["generate_image"]
     _patch_railed_model_call_session()
     _static_attrs = ('_extract_error_details', '_extract_retry_after', '_raise_mock_error')
     _instance_attrs = (
