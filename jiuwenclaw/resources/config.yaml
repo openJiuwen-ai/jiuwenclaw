@@ -25,7 +25,7 @@ logging:
   # format: text  # 默认：text（开发环境）
   # format: json  # 生产环境：仅 JSON 格式
   # format: dual  # 混合环境：文本控制台 + 双模式文件
-  format: json
+  format: text
 
   # 日志输出开关（正交控制输出目标）
   console_enabled: true   # 控制台日志开关（true：启用终端输出；false：关闭终端输出）

@@ -195,7 +195,8 @@ class RuntimePromptRail(DeepAgentRail):
                 "| 删除目录 | `rmdir folder` 或 PowerShell `Remove-Item -Recurse folder` | `rm -rf folder` |\n"
                 "| 查找文件 | `dir /s pattern` 或 PowerShell "
                 "`Get-ChildItem -Recurse -Filter pattern` | `find . -name pattern` |\n\n"
-                "**特别注意**：Windows 的 `mkdir` 不支持 `-p` 参数！在 Windows 上使用 `mkdir -p folder` 会错误创建名为 `-p` 的目录。"
+                "**特别注意**：Windows 的 `mkdir` 不支持 `-p` 参数！"
+                "在 Windows 上使用 `mkdir -p folder` 会错误创建名为 `-p` 的目录。"
                 "如需创建嵌套目录，请使用 PowerShell `New-Item -ItemType Directory -Path \"parent/child\" -Force`，"
                 "或使用 cmd 分步创建 `mkdir parent && mkdir parent\\child`。"
             )
@@ -284,105 +285,112 @@ class RuntimePromptRail(DeepAgentRail):
 
         if self._language == "cn":
             workspace_content = f"""# 你的家
+                以下目录信息仅供你执行任务时内部参考。
+                你的默认工作空间和相关配置位于 `.jiuwenclaw` 目录下；除非完成任务确有必要，不要主动向用户展示其中的内部目录名或实现细节。
 
-以下目录信息仅供你执行任务时内部参考。
-你的默认工作空间和相关配置位于 `.jiuwenclaw` 目录下；除非完成任务确有必要，不要主动向用户展示其中的内部目录名或实现细节。
+                | 路径 | 用途 | 操作建议 |
+                |------|------|----------|
+                | `{config_dir}` | 配置信息 | 不要轻易改动，错误配置可能导致异常 |
+                | `{resolved_workspace}` | 身份与任务信息 | 可适当更新，以更好地服务用户 |
+                | `{memory_dir}` | 持久化记忆（含 USER.md、MEMORY.md） | 将其视为你记忆的一部分，随时查阅 |
+                | `{daily_memory_dir}` | 每日记忆文件（YYYY-MM-DD.md） | 每天的记忆记录存放在此，
+                新增/编辑后需调用 memory_index 索引 |
+                | `{skills_dir}` | 技能库 | 可随时翻阅、调用，不可修改 |
+                | `{todo_dir}` | 待办事项 | 记录用户请求的任务，每次请求后会更新 |
 
-| 路径 | 用途 | 操作建议 |
-|------|------|----------|
-| `{config_dir}` | 配置信息 | 不要轻易改动，错误配置可能导致异常 |
-| `{resolved_workspace}` | 身份与任务信息 | 可适当更新，以更好地服务用户 |
-| `{memory_dir}` | 持久化记忆（含 USER.md、MEMORY.md） | 将其视为你记忆的一部分，随时查阅 |
-| `{daily_memory_dir}` | 每日记忆文件（YYYY-MM-DD.md） | 每天的记忆记录存放在此，新增/编辑后需调用 memory_index 索引 |
-| `{skills_dir}` | 技能库 | 可随时翻阅、调用，不可修改 |
-| `{todo_dir}` | 待办事项 | 记录用户请求的任务，每次请求后会更新 |
+                ## 配置信息
 
-## 配置信息
+                谨慎对待你的配置信息，如果用户要求你修改，请在修改后重启自己的服务，以保证改动生效。
 
-谨慎对待你的配置信息，如果用户要求你修改，请在修改后重启自己的服务，以保证改动生效。
+                | 路径 | 用途 |
+                |------|------|
+                | `{config_dir}/config.yaml` | 配置信息 |
+                | `{config_dir}/.env` | 环境变量 |
 
-| 路径 | 用途 |
-|------|------|
-| `{config_dir}/config.yaml` | 配置信息 |
-| `{config_dir}/.env` | 环境变量 |
+                ## 文件输出与发送规范
 
-## 文件输出与发送规范
+                执行用户任务时产生的生成产物（如代码文件、文档、数据文件等），按以下规则选择存放位置：
 
-执行用户任务时产生的生成产物（如代码文件、文档、数据文件等），按以下规则选择存放位置：
+                ### 需要交付给用户的文件
 
-### 需要交付给用户的文件
+                {output_dir_guidance_cn}
 
-{output_dir_guidance_cn}
+                直接使用上述路径创建文件，例如：`{output_dir_example_cn}`
 
-直接使用上述路径创建文件，例如：`{output_dir_example_cn}`
+                ### 项目文件编辑或内部文件
 
-### 项目文件编辑或内部文件
+                使用 resolved_workspace：`{resolved_workspace}`
 
-使用 resolved_workspace：`{resolved_workspace}`
+                **建议**：
+                - 需要交付给用户的文件：使用上述 output_dir 路径
+                - 项目文件编辑或内部文件：使用 resolved_workspace
 
-**建议**：
-- 需要交付给用户的文件：使用上述 output_dir 路径
-- 项目文件编辑或内部文件：使用 resolved_workspace
+                ## 文件发送
 
-## 文件发送
+                当你的工具列表中存在 `send_file_to_user` 工具时，**必须**在以下场景主动调用该工具将文件发送给用户：
+                - 任务完成后产生了需要交付给用户的文件（报告、文档、数据文件、图片等）
+                - 用户明确请求下载、导出、发送文件
+                - 用户询问生成的文件如何获取
 
-当你的工具列表中存在 `send_file_to_user` 工具时，**必须**在以下场景主动调用该工具将文件发送给用户：
-- 任务完成后产生了需要交付给用户的文件（报告、文档、数据文件、图片等）
-- 用户明确请求下载、导出、发送文件
-- 用户询问生成的文件如何获取
-
-**调用方式**：使用文件的绝对路径作为参数调用 `send_file_to_user` 工具。"""
+                **调用方式**：使用文件的绝对路径作为参数调用 `send_file_to_user` 工具。"""
         else:
             workspace_content = f"""# Your Home
+                The following paths are for your internal task execution only.
+                Your default workspace and related configuration live under the `.jiuwenclaw` directory. 
+                Do not proactively expose 
+                internal directory names or implementation details to the user unless necessary for task completion.
 
-The following paths are for your internal task execution only.
-Your default workspace and related configuration live under the `.jiuwenclaw` directory. Do not proactively expose \
-internal directory names or implementation details to the user unless necessary for task completion.
+                | Path | Purpose | Guidelines |
+                |------|---------|------------|
+                | `{config_dir}` | Configuration | Do not modify lightly; bad config can cause failures |
+                | `{resolved_workspace}` | Identity and task info | You may update this to better serve your user |
+                | `{memory_dir}` | Persistent memory (USER.md, MEMORY.md) | Treat it as part of your memory; consult it 
+                anytime |
+                | `{daily_memory_dir}` | Daily memory files (YYYY-MM-DD.md) | Daily memory records; call memory_index 
+                after creating/editing |
+                | `{skills_dir}` | Skill library | Read and invoke freely; do not modify |
+                | `{todo_dir}` | Todo list | Records tasks from user requests; updated after each request |
 
-| Path | Purpose | Guidelines |
-|------|---------|------------|
-| `{config_dir}` | Configuration | Do not modify lightly; bad config can cause failures |
-| `{resolved_workspace}` | Identity and task info | You may update this to better serve your user |
-| `{memory_dir}` | Persistent memory (USER.md, MEMORY.md) | Treat it as part of your memory; consult it anytime |
-| `{daily_memory_dir}` | Daily memory files (YYYY-MM-DD.md) | Daily memory records; call memory_index after creating/editing |
-| `{skills_dir}` | Skill library | Read and invoke freely; do not modify |
-| `{todo_dir}` | Todo list | Records tasks from user requests; updated after each request |
+                ## Configuration
 
-## Configuration
+                Be careful with your configuration. If changes are required, remember to restart your service 
+                afterwards.
 
-Be careful with your configuration. If changes are required, remember to restart your service afterwards.
+                | Path | Purpose |
+                |------|---------|
+                | `{config_dir}/config.yaml` | Config |
+                | `{config_dir}/.env` | Environment Variables |
 
-| Path | Purpose |
-|------|---------|
-| `{config_dir}/config.yaml` | Config |
-| `{config_dir}/.env` | Environment Variables |
+                ## File Output and Sending Guidelines
 
-## File Output and Sending Guidelines
+                Generated artifacts (code files, documents, data files, etc.) produced during user task execution 
+                should be stored according to the following rules:
 
-Generated artifacts (code files, documents, data files, etc.) produced during user task execution should be stored according to the following rules:
+                ### Files to Deliver to User
 
-### Files to Deliver to User
+                {output_dir_guidance_en}
 
-{output_dir_guidance_en}
+                Directly use the above path to create files, e.g.: `{output_dir_example_en}`
 
-Directly use the above path to create files, e.g.: `{output_dir_example_en}`
+                ### Project File Editing or Internal Files
 
-### Project File Editing or Internal Files
+                Use resolved_workspace: `{resolved_workspace}`
 
-Use resolved_workspace: `{resolved_workspace}`
+                **Recommendations**:
+                - Files to deliver to user: Use the output_dir path above
+                - Project file editing or internal files: Use resolved_workspace
 
-**Recommendations**:
-- Files to deliver to user: Use the output_dir path above
-- Project file editing or internal files: Use resolved_workspace
+                ## Sending Files
 
-## Sending Files
+                When the `send_file_to_user` tool is available in your tool list, you **must** proactively invoke it 
+                in these scenarios:
+                - Task completion produces files that need to be delivered to the user (reports, documents, data files, 
+                images, etc.)
+                - User explicitly requests to download, export, or receive files
+                - User asks how to obtain generated files
 
-When the `send_file_to_user` tool is available in your tool list, you **must** proactively invoke it in these scenarios:
-- Task completion produces files that need to be delivered to the user (reports, documents, data files, images, etc.)
-- User explicitly requests to download, export, or receive files
-- User asks how to obtain generated files
-
-**How to call**: Use the absolute file path(s) as the parameter to invoke the `send_file_to_user` tool."""
+                **How to call**: Use the absolute file path(s) as the parameter to invoke the `send_file_to_user` 
+                tool."""
 
         self.system_prompt_builder.add_section(PromptSection(
             name="workspace",
