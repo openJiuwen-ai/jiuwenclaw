@@ -70,6 +70,8 @@ _METHOD_DISPATCH = {
     ReqMethod.SKILLDEV_FILE_LIST: "_handle_file_list",
     ReqMethod.SKILLDEV_FILE_READ: "_handle_file_read",
     ReqMethod.SKILLDEV_FILE_WRITE: "_handle_file_write",
+    ReqMethod.SKILLDEV_BATCH_UPLOAD: "_handle_batch_upload",
+    ReqMethod.SKILLDEV_BATCH_DOWNLOAD: "_handle_batch_download",
 }
 
 
@@ -789,6 +791,169 @@ class SkillDevService:
         if errors:
             return "SKILL.md 校验失败:\n" + "\n".join(f"- {e}" for e in errors)
         return None
+
+    # ------------------------------------------------------------------
+    # skilldev.batch_upload — 批量打包 workspace 并上传 OBS
+    # ------------------------------------------------------------------
+
+    async def _handle_batch_upload(
+        self, params: dict, request_id: str, channel_id: str, session_id: str
+    ) -> AgentResponseChunk:
+        session_ids = params.get("session_ids")
+        if not isinstance(session_ids, list) or not session_ids:
+            return self._error_chunk(request_id, channel_id, "缺少 session_ids 参数或为空")
+
+        import shutil
+        import tempfile
+        from jiuwenclaw.utils import get_user_workspace_dir
+
+        logger.info(
+            "[SkillDevService] batch_upload 开始: request_id=%s, session_ids=%s",
+            request_id, session_ids,
+        )
+
+        results: list[dict] = []
+        upload_file_obs = _create_upload_file_obs()
+
+        for sid in session_ids:
+            sid = str(sid or "").strip()
+            if not sid:
+                results.append({"sessionID": sid, "url": "", "name": "", "status": "error", "error": "session_id 为空"})
+                continue
+
+            service_dir = get_user_workspace_dir() / f"service_{sid}"
+            if not service_dir.is_dir():
+                logger.warning(
+                    "[SkillDevService] batch_upload 目录不存在: session_id=%s, path=%s",
+                    sid, service_dir,
+                )
+                results.append({"sessionID": sid, "url": "", "name": "", "status": "error", "error": "目录不存在"})
+                continue
+
+            try:
+                tmp_dir = Path(tempfile.mkdtemp())
+                zip_name = f"service_{sid}"
+                zip_path = shutil.make_archive(str(tmp_dir / zip_name), "zip", str(service_dir))
+                logger.info(
+                    "[SkillDevService] batch_upload 打包完成: session_id=%s, zip_path=%s",
+                    sid, zip_path,
+                )
+                download_url = await upload_file_obs.upload_file(zip_path)
+                logger.info(
+                    "[SkillDevService] batch_upload 上传成功: session_id=%s, url=%s",
+                    sid, download_url,
+                )
+                results.append({
+                    "sessionID": sid,
+                    "url": download_url,
+                    "name": f"{zip_name}.zip",
+                    "status": "success",
+                })
+            except Exception as exc:
+                logger.warning(
+                    "[SkillDevService] batch_upload failed for session_id=%s: %s", sid, exc,
+                )
+                results.append({"sessionID": sid, "url": "", "name": "", "status": "error", "error": str(exc)})
+            finally:
+                try:
+                    shutil.rmtree(tmp_dir, ignore_errors=True)
+                except Exception:
+                    pass
+
+        success_count = sum(1 for r in results if r.get("status") == "success")
+        logger.info(
+            "[SkillDevService] batch_upload 完成: request_id=%s, total=%d, success=%d, failed=%d",
+            request_id, len(results), success_count, len(results) - success_count,
+        )
+
+        return AgentResponseChunk(
+            request_id=request_id,
+            channel_id=channel_id,
+            payload={"results": results},
+            is_complete=True,
+        )
+
+    # ------------------------------------------------------------------
+    # skilldev.batch_download — 批量下载并解压到 workspace
+    # ------------------------------------------------------------------
+
+    async def _handle_batch_download(
+        self, params: dict, request_id: str, channel_id: str, session_id: str
+    ) -> AgentResponseChunk:
+        items = params.get("items")
+        if not isinstance(items, list) or not items:
+            return self._error_chunk(request_id, channel_id, "缺少 items 参数或为空")
+
+        import shutil
+        import tempfile
+        from jiuwenclaw.utils import get_user_workspace_dir
+
+        logger.info(
+            "[SkillDevService] batch_download 开始: request_id=%s, items_count=%d",
+            request_id, len(items),
+        )
+
+        results: list[dict] = []
+
+        for item in items:
+            if not isinstance(item, dict):
+                results.append({"sessionID": "", "status": "error", "error": "item 格式无效"})
+                continue
+
+            sid = str(item.get("sessionID") or item.get("session_id") or "").strip()
+            url = str(item.get("url") or "").strip()
+
+            if not sid:
+                results.append({"sessionID": sid, "status": "error", "error": "session_id 为空"})
+                continue
+            if not url:
+                results.append({"sessionID": sid, "status": "error", "error": "url 为空"})
+                continue
+
+            try:
+                target_dir = get_user_workspace_dir() / f"service_{sid}"
+                tmp_dir = Path(tempfile.mkdtemp())
+                tmp_zip = tmp_dir / f"service_{sid}.zip"
+
+                logger.info(
+                    "[SkillDevService] batch_download 下载中: session_id=%s, url=%s",
+                    sid, url,
+                )
+                await download_file(url, str(tmp_zip))
+
+                if target_dir.exists():
+                    shutil.rmtree(target_dir)
+                target_dir.mkdir(parents=True, exist_ok=True)
+
+                shutil.unpack_archive(str(tmp_zip), str(target_dir))
+                logger.info(
+                    "[SkillDevService] batch_download 解压成功: session_id=%s, target=%s",
+                    sid, target_dir,
+                )
+                results.append({"sessionID": sid, "status": "success"})
+            except Exception as exc:
+                logger.warning(
+                    "[SkillDevService] batch_download failed for session_id=%s: %s", sid, exc,
+                )
+                results.append({"sessionID": sid, "status": "error", "error": str(exc)})
+            finally:
+                try:
+                    shutil.rmtree(tmp_dir, ignore_errors=True)
+                except Exception:
+                    pass
+
+        success_count = sum(1 for r in results if r.get("status") == "success")
+        logger.info(
+            "[SkillDevService] batch_download 完成: request_id=%s, total=%d, success=%d, failed=%d",
+            request_id, len(results), success_count, len(results) - success_count,
+        )
+
+        return AgentResponseChunk(
+            request_id=request_id,
+            channel_id=channel_id,
+            payload={"results": results},
+            is_complete=True,
+        )
 
     # ------------------------------------------------------------------
     # 工具函数

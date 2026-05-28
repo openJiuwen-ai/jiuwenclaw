@@ -134,6 +134,8 @@ class ReqMethod(Enum):
     SKILLDEV_FILE_LIST = "skilldev.file.list"  # 获取工作区文件树（产物弹窗浏览）
     SKILLDEV_FILE_READ = "skilldev.file.read"  # 读取工作区文件内容
     SKILLDEV_FILE_WRITE = "skilldev.file.write"  # 覆盖写入工作区文本文件
+    SKILLDEV_BATCH_UPLOAD = "skilldev.batch_upload"  # 批量打包上传 workspace 到 OBS
+    SKILLDEV_BATCH_DOWNLOAD = "skilldev.batch_download"  # 批量下载解压 workspace
     SKILLDEV_ANSWER = "skilldev.user_answer"
 
     TOOLS_ADD = "tools.add"
