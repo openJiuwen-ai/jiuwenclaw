@@ -17,6 +17,24 @@ from openjiuwen.core.session.stream.base import OutputSchema
 
 from jiuwenclaw.utils import logger
 
+# Read-only tools return large bodies (file text, listings, search hits). Regex path
+# extraction + sync stat on the event loop can block for minutes.
+READ_ONLY_ARTIFACT_SKIP_TOOLS = frozenset({
+    "read_file",
+    "grep",
+    "glob",
+    "list_files",
+    "skill_tool",
+    "fetch_webpage",
+    "mcp_petal_search",
+    "free_search",
+})
+
+
+def should_skip_artifact_body_scan(tool_name: str | None) -> bool:
+    """True when artifact detection must not scan tool_result body text."""
+    return (tool_name or "").strip() in READ_ONLY_ARTIFACT_SKIP_TOOLS
+
 
 @dataclass
 class ArtifactEmitContext:
@@ -70,10 +88,19 @@ async def emit_artifact_generated(ctx: ArtifactEmitContext) -> bool:
         _is_recently_sent,
         _mark_as_sent,
     )
-    
+
+    tool_name = (ctx.tool_name or "").strip()
+    if should_skip_artifact_body_scan(tool_name):
+        logger.debug(
+            "%s Skip body scan for read-only tool=%s",
+            ctx.log_prefix,
+            tool_name,
+        )
+        return False
+
     session_id = ctx.session.get_session_id()
-    
-    logger.info("%s Processing tool session_id=%s tool='%s'", ctx.log_prefix, session_id, ctx.tool_name)
+
+    logger.info("%s Processing tool session_id=%s tool='%s'", ctx.log_prefix, session_id, tool_name)
     
     # Step 1: Extract artifacts from tool result
     artifacts = _extract_artifact_paths_from_tool_result(
