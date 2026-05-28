@@ -188,7 +188,7 @@ from jiuwenclaw.agentserver.tools.xiaoyi_phone_tools import (
 )
 from jiuwenclaw.config import get_config, get_default_models, resolve_env_vars
 from jiuwenclaw.agentserver.stream_content_sanitize import strip_inline_tool_protocol
-from jiuwenclaw.agentserver.stream_utils import tool_calls_payload_to_json_list
+from jiuwenclaw.agentserver.stream_utils import propagate_stream_source_id, tool_calls_payload_to_json_list
 from jiuwenclaw.agentserver.extensions import get_rail_manager
 from jiuwenclaw.gateway.cron import CronTargetChannel
 from jiuwenclaw.agentserver.team import get_team_manager
@@ -4504,7 +4504,7 @@ class JiuWenClawDeepAdapter:
                     if suppress_stream_after_hitl:
                         continue
                     if not (hasattr(chunk, "type") and hasattr(chunk, "payload")):
-                        parsed = self._parse_stream_chunk(chunk)
+                        parsed = self._parse_stream_chunk_with_source(chunk)
                         hitl_pending_stream = self._detect_hitl_pause(
                             parsed,
                             hitl_pending_stream=hitl_pending_stream,
@@ -4574,11 +4574,15 @@ class JiuWenClawDeepAdapter:
                                 usage_accumulator[token] += usage_meta.get(token, 0) or 0
                             for cost in ("input_cost", "output_cost", "total_cost"):
                                 usage_accumulator[cost] += usage_meta.get(cost, 0.0) or 0.0
+                        usage_payload = propagate_stream_source_id(chunk, {
+                            "event_type": "chat.usage_metadata",
+                            "metadata": chunk.payload,
+                            "session_id": session_id,
+                        })
                         yield AgentResponseChunk(
                             request_id=rid,
                             channel_id=cid,
-                            payload={"event_type": "chat.usage_metadata", "metadata": chunk.payload,
-                                     "session_id": session_id},
+                            payload=usage_payload,
                             is_complete=False,
                         )
                         continue
@@ -4593,6 +4597,7 @@ class JiuWenClawDeepAdapter:
                         task_id = self._get_task_id()
                         if task_id:
                             delta_payload["task_id"] = task_id
+                        propagate_stream_source_id(chunk, delta_payload)
                         yield AgentResponseChunk(
                             request_id=rid,
                             channel_id=cid,
@@ -4627,6 +4632,7 @@ class JiuWenClawDeepAdapter:
                         task_id = self._get_task_id()
                         if task_id:
                             delta_payload["task_id"] = task_id
+                        propagate_stream_source_id(chunk, delta_payload)
                         yield AgentResponseChunk(
                             request_id=rid,
                             channel_id=cid,
@@ -4681,7 +4687,7 @@ class JiuWenClawDeepAdapter:
                             )
                             accumulated_reasoning = ""
                         if has_streamed_content:
-                            parsed = self._parse_stream_chunk(chunk, _has_streamed_content=True)
+                            parsed = self._parse_stream_chunk_with_source(chunk, _has_streamed_content=True)
                             hitl_pending_stream = self._detect_hitl_pause(
                                 parsed,
                                 hitl_pending_stream=hitl_pending_stream,
@@ -4698,7 +4704,7 @@ class JiuWenClawDeepAdapter:
                                     suppress_stream_after_hitl = True
                                     continue
                             continue
-                        parsed = self._parse_stream_chunk(chunk)
+                        parsed = self._parse_stream_chunk_with_source(chunk)
                         hitl_pending_stream = self._detect_hitl_pause(
                             parsed,
                             hitl_pending_stream=hitl_pending_stream,
@@ -4743,7 +4749,7 @@ class JiuWenClawDeepAdapter:
                             is_complete=False,
                         )
                         accumulated_reasoning = ""
-                    parsed = self._parse_stream_chunk(chunk)
+                    parsed = self._parse_stream_chunk_with_source(chunk)
                     hitl_pending_stream = self._detect_hitl_pause(
                         parsed,
                         hitl_pending_stream=hitl_pending_stream,
@@ -4789,7 +4795,7 @@ class JiuWenClawDeepAdapter:
             # session.write_stream 传递，需手动注入到 stream 输出
             if self._skill_evolution_rail is not None:
                 for evt in self._skill_evolution_rail.drain_pending_approval_events():
-                    parsed = self._parse_stream_chunk(evt)
+                    parsed = self._parse_stream_chunk_with_source(evt)
                     hitl_pending_stream = self._detect_hitl_pause(
                         parsed,
                         hitl_pending_stream=hitl_pending_stream,
@@ -4912,6 +4918,10 @@ class JiuWenClawDeepAdapter:
         if not self._should_pause_for_user_input(payload):
             return hitl_pending_stream
         return True
+
+    def _parse_stream_chunk_with_source(self, chunk, *, _has_streamed_content: bool = False) -> dict | None:
+        parsed = self._parse_stream_chunk(chunk, _has_streamed_content=_has_streamed_content)
+        return propagate_stream_source_id(chunk, parsed)
 
     def _parse_stream_chunk(self, chunk, *, _has_streamed_content: bool = False) -> dict | None:
         """将 SDK OutputSchema 转为前端可消费的 payload dict.

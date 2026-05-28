@@ -11,6 +11,8 @@ from jiuwenclaw.agentserver.stream_content_sanitize import strip_inline_tool_pro
 
 logger = logging.getLogger(__name__)
 
+STREAM_SOURCE_ID_FIELD = "stream_source_id"
+
 
 def tool_calls_payload_to_json_list(raw: Any) -> list[Any]:
     """将流式 payload 中的 tool_calls 规范为 list（OpenJiuwen 已产出 dict，此处只做形状收敛）。"""
@@ -21,6 +23,35 @@ def tool_calls_payload_to_json_list(raw: Any) -> list[Any]:
     if isinstance(raw, (list, tuple)):
         return list(raw)
     return []
+
+
+def _extract_stream_source_id(src_payload: Any) -> Any:
+    if isinstance(src_payload, dict):
+        source_id = src_payload.get(STREAM_SOURCE_ID_FIELD)
+        if source_id is not None:
+            return source_id
+        nested_payload = src_payload.get("payload")
+        if isinstance(nested_payload, dict):
+            return nested_payload.get(STREAM_SOURCE_ID_FIELD)
+        return None
+
+    source_id = getattr(src_payload, STREAM_SOURCE_ID_FIELD, None)
+    if source_id is not None:
+        return source_id
+    nested_payload = getattr(src_payload, "payload", None)
+    if isinstance(nested_payload, dict):
+        return nested_payload.get(STREAM_SOURCE_ID_FIELD)
+    return None
+
+
+def propagate_stream_source_id(src_payload: Any, result: dict[str, Any] | None) -> dict[str, Any] | None:
+    """Preserve a source id already attached to an upstream stream payload."""
+    if result is None or not isinstance(result, dict):
+        return result
+    source_id = _extract_stream_source_id(src_payload)
+    if source_id is not None:
+        result.setdefault(STREAM_SOURCE_ID_FIELD, source_id)
+    return result
 
 
 def parse_stream_chunk(chunk: Any, *, _has_streamed_content: bool = False) -> dict[str, Any] | None:
@@ -43,16 +74,19 @@ def parse_stream_chunk(chunk: Any, *, _has_streamed_content: bool = False) -> di
         return None
 
     if isinstance(chunk, dict):
-        return _parse_dict_chunk(chunk, _has_streamed_content)
+        result = _parse_dict_chunk(chunk, _has_streamed_content)
+        return propagate_stream_source_id(chunk, result)
 
     if hasattr(chunk, "type") and hasattr(chunk, "payload"):
-        return _parse_typed_chunk(chunk, _has_streamed_content)
+        result = _parse_typed_chunk(chunk, _has_streamed_content)
+        return propagate_stream_source_id(chunk, result)
 
     if hasattr(chunk, "event_type"):
-        return _parse_event_typed_chunk(chunk)
+        return propagate_stream_source_id(chunk, _parse_event_typed_chunk(chunk))
 
     if hasattr(chunk, "payload") and hasattr(chunk, "request_id"):
-        return _parse_response_chunk(chunk, _has_streamed_content)
+        result = _parse_response_chunk(chunk, _has_streamed_content)
+        return propagate_stream_source_id(chunk, result)
 
     return {
         "event_type": "chat.delta",

@@ -94,9 +94,17 @@ async def test_send_request_stream_keeps_tail_window_for_processing_status(monke
     await injector
 
     assert [chunk.payload for chunk in chunks] == [
-        {"content": "partial", "event_type": "chat.delta"},
+        {
+            "content": "partial",
+            "event_type": "chat.delta",
+            "stream_source_id": "main",
+        },
         {"is_complete": True},
-        {"event_type": "chat.processing_status", "is_processing": False},
+        {
+            "event_type": "chat.processing_status",
+            "is_processing": False,
+            "stream_source_id": "main",
+        },
     ]
     assert client.has_message_queue_for_test("rid-tail") is False
 

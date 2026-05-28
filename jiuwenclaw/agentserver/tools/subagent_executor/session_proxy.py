@@ -78,6 +78,11 @@ class SubagentSessionProxy:
                 payload=payload or {},
             )
 
+        # Mark subagent-origin stream chunks before forwarding them into the
+        # parent stream. Nested proxies preserve the innermost source id.
+        if output_data is not None and isinstance(output_data.payload, dict):
+            output_data.payload.setdefault("stream_source_id", self._subagent_id)
+
         # Forward model/tool/progress events that the parent stream already knows how to render.
         if event_type in self.FORWARD_TYPES:
             await self._parent.write_stream(output_data)
@@ -110,6 +115,8 @@ class SubagentSessionProxy:
 
     async def write_custom_stream(self, data: dict) -> None:
         """Forward custom stream (typically not user-facing, pass through)."""
+        if isinstance(data, dict):
+            data.setdefault("stream_source_id", self._subagent_id)
         await self._parent.write_custom_stream(data)
 
     def __getattr__(self, name: str) -> Any:

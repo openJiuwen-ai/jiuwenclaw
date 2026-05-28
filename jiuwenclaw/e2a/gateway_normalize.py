@@ -39,6 +39,16 @@ E2A_INTERNAL_CONTEXT_KEY = "_jiuwenclaw"
 E2A_FALLBACK_FAILED_KEY = "normalize_failed"
 E2A_LEGACY_AGENT_REQUEST_KEY = "legacy_agent_request"
 MAX_LEGACY_AGENT_REQUEST_JSON_BYTES = 512_000
+DEFAULT_STREAM_SOURCE_ID = "main"
+STREAM_SOURCE_ID_FIELD = "stream_source_id"
+
+
+def _resolve_stream_source_id(payload: dict[str, Any] | None) -> str:
+    source_id = payload.get(STREAM_SOURCE_ID_FIELD) if isinstance(payload, dict) else None
+    if source_id is None:
+        return DEFAULT_STREAM_SOURCE_ID
+    source_id_str = str(source_id).strip()
+    return source_id_str or DEFAULT_STREAM_SOURCE_ID
 
 
 def message_to_legacy_agent_dict(msg: "Message") -> dict[str, Any]:
@@ -319,8 +329,12 @@ def e2a_response_from_agent_chunk(
         details={"kind": "legacy_agent_response_chunk", "is_complete": chunk.is_complete},
     )
     pl = dict(chunk.payload) if chunk.payload else {}
+    is_empty_complete_marker = chunk.is_complete and (not pl or pl == {"is_complete": True})
+    stream_source_id = _resolve_stream_source_id(pl)
+    if not is_empty_complete_marker:
+        pl.setdefault(STREAM_SOURCE_ID_FIELD, stream_source_id)
 
-    if chunk.is_complete and pl == {"is_complete": True}:
+    if is_empty_complete_marker:
         return E2AResponse(
             protocol_version=E2A_PROTOCOL_VERSION,
             response_id=response_id,
@@ -331,7 +345,7 @@ def e2a_response_from_agent_chunk(
             response_kind=E2A_RESPONSE_KIND_E2A_COMPLETE,
             timestamp=ts,
             provenance=prov,
-            body={"result": {}},
+            body={"result": {}, STREAM_SOURCE_ID_FIELD: stream_source_id},
             channel=chunk.channel_id or None,
             identity_origin=IdentityOrigin.AGENT,
             is_stream=is_stream,
@@ -352,6 +366,7 @@ def e2a_response_from_agent_chunk(
                 "code": "chat.error",
                 "message": str(pl.get("error", "")),
                 "details": pl,
+                STREAM_SOURCE_ID_FIELD: stream_source_id,
             },
             channel=chunk.channel_id or None,
             identity_origin=IdentityOrigin.AGENT,
@@ -367,6 +382,7 @@ def e2a_response_from_agent_chunk(
             "delta": pl,
             "event_type": "chat.invocation_paused",
             "awaiting_user_input": True,
+            STREAM_SOURCE_ID_FIELD: stream_source_id,
         }
         return E2AResponse(
             protocol_version=E2A_PROTOCOL_VERSION,
@@ -395,7 +411,7 @@ def e2a_response_from_agent_chunk(
             response_kind=E2A_RESPONSE_KIND_E2A_COMPLETE,
             timestamp=ts,
             provenance=prov,
-            body={"result": pl},
+            body={"result": pl, STREAM_SOURCE_ID_FIELD: stream_source_id},
             channel=chunk.channel_id or None,
             identity_origin=IdentityOrigin.AGENT,
             is_stream=is_stream,
@@ -410,12 +426,14 @@ def e2a_response_from_agent_chunk(
             "delta": pl.get("content", ""),
             "event_type": event_type,
             "source_chunk_type": sct,
+            STREAM_SOURCE_ID_FIELD: stream_source_id,
         }
     else:
         body_chunk = {
             "delta_kind": "custom",
             "delta": pl,
             "event_type": event_type,
+            STREAM_SOURCE_ID_FIELD: stream_source_id,
         }
 
     return E2AResponse(
@@ -499,13 +517,14 @@ def e2a_response_to_agent_chunk(e2a: E2AResponse) -> "AgentResponseChunk":
 
     if kind == E2A_RESPONSE_KIND_E2A_COMPLETE and e2a.is_final:
         res = body.get("result")
+        stream_source_id = body.get(STREAM_SOURCE_ID_FIELD)
 
         def _empty_complete_marker(b: dict[str, Any], r: Any) -> bool:
             if b == {"result": {}}:
                 return True
             if not isinstance(r, dict) or r:
                 return False
-            return list(b.keys()) == ["result"]
+            return set(b.keys()).issubset({"result", STREAM_SOURCE_ID_FIELD})
 
         if _empty_complete_marker(body, res):
             return AgentResponseChunk(
@@ -515,6 +534,8 @@ def e2a_response_to_agent_chunk(e2a: E2AResponse) -> "AgentResponseChunk":
                 is_complete=True,
             )
         pl = dict(res) if isinstance(res, dict) else {}
+        if stream_source_id is not None:
+            pl.setdefault(STREAM_SOURCE_ID_FIELD, stream_source_id)
         return AgentResponseChunk(
             request_id=rid,
             channel_id=ch,
@@ -525,6 +546,9 @@ def e2a_response_to_agent_chunk(e2a: E2AResponse) -> "AgentResponseChunk":
     if kind == E2A_RESPONSE_KIND_E2A_ERROR and e2a.is_final:
         det = body.get("details")
         pl = dict(det) if isinstance(det, dict) else dict(body)
+        stream_source_id = body.get(STREAM_SOURCE_ID_FIELD)
+        if stream_source_id is not None:
+            pl.setdefault(STREAM_SOURCE_ID_FIELD, stream_source_id)
         return AgentResponseChunk(
             request_id=rid,
             channel_id=ch,
@@ -537,6 +561,7 @@ def e2a_response_to_agent_chunk(e2a: E2AResponse) -> "AgentResponseChunk":
         et = body.get("event_type")
         delta = body.get("delta")
         sct_in = body.get("source_chunk_type")
+        stream_source_id = body.get(STREAM_SOURCE_ID_FIELD)
 
         if et == "chat.delta" or dk in ("text", "reasoning"):
             sct = "llm_reasoning" if dk == "reasoning" else sct_in
@@ -546,6 +571,8 @@ def e2a_response_to_agent_chunk(e2a: E2AResponse) -> "AgentResponseChunk":
             }
             if sct is not None:
                 pl["source_chunk_type"] = sct
+            if stream_source_id is not None:
+                pl[STREAM_SOURCE_ID_FIELD] = stream_source_id
             return AgentResponseChunk(
                 request_id=rid,
                 channel_id=ch,
@@ -563,6 +590,8 @@ def e2a_response_to_agent_chunk(e2a: E2AResponse) -> "AgentResponseChunk":
                 pl2["content"] = delta
         if et is not None and "event_type" not in pl2:
             pl2["event_type"] = et
+        if stream_source_id is not None and STREAM_SOURCE_ID_FIELD not in pl2:
+            pl2[STREAM_SOURCE_ID_FIELD] = stream_source_id
         return AgentResponseChunk(
             request_id=rid,
             channel_id=ch,
