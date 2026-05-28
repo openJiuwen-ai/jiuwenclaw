@@ -4,9 +4,10 @@
 
 from __future__ import annotations
 
+import uuid
 from typing import Optional
 
-from openjiuwen.core.foundation.tool import Tool
+from openjiuwen.core.foundation.tool import Tool, ToolCard
 from openjiuwen.core.sys_operation import SysOperation
 from openjiuwen.harness.tools.bash import BashTool
 from openjiuwen.harness.tools.code import CodeTool
@@ -18,7 +19,12 @@ from openjiuwen.harness.tools.filesystem import (
     ReadFileTool,
     WriteFileTool,
 )
-from openjiuwen.harness.tools.web_tools import WebPaidSearchTool
+from openjiuwen.harness.prompts.sections.tools import get_tool_input_params
+from openjiuwen.harness.prompts.sections.tools.filesystem import (
+    get_read_file_input_params,
+    get_edit_file_input_params,
+    get_write_file_input_params,
+)
 
 from jiuwenclaw.agentserver.tools.ask_user_question_tool import get_ask_user_question_tool
 from jiuwenclaw.agentserver.tools.harness_named_web_tools import (
@@ -34,10 +40,96 @@ from jiuwenclaw.agentserver.skilldev_agent.meta_tools.function_call_tool import 
     get_function_call_tool,
 )
 
+
+class ReadTool(ReadFileTool):
+
+    def __init__(self, operation: SysOperation, language: str = "cn", agent_id: Optional[str] = None):
+        super().__init__(operation, language, agent_id)
+        self._card = ToolCard(
+            id=f"read_file_{agent_id}" if agent_id else f"read_file_{uuid.uuid4().hex}",
+            name="Read",
+            description=(
+                "Read a file from the local filesystem."
+            ),
+            input_params=get_read_file_input_params(language),
+        )
+
+
+class WriteTool(WriteFileTool):
+
+    def __init__(self, operation: SysOperation, language: str = "cn", agent_id: Optional[str] = None):
+        super().__init__(operation, language, agent_id)
+        self._card = ToolCard(
+            id=f"write_file_{agent_id}" if agent_id else f"write_file_{uuid.uuid4().hex}",
+            name="Write",
+            description=(
+                "Write a file to the local filesystem."
+            ),
+            input_params=get_write_file_input_params(language),
+        )
+
+
+class EditTool(EditFileTool):
+
+    def __init__(self, operation: SysOperation, language: str = "cn", agent_id: Optional[str] = None):
+        super().__init__(operation, language, agent_id)
+        self._card = ToolCard(
+            id=f"edit_file_{agent_id}" if agent_id else f"edit_file_{uuid.uuid4().hex}",
+            name="Edit",
+            description=(
+                "A tool for editing files."
+            ),
+            input_params=get_edit_file_input_params(language),
+        )
+
+
+class WebSearchTool(JiuwenHarnessFreeSearchTool):
+
+    def __init__(
+        self,
+        language: str = "cn",
+        agent_id: Optional[str] = None,
+        card: Optional[ToolCard] = None,
+    ) -> None:
+        super().__init__(
+            language=language,
+            agent_id=agent_id,
+            card=card or ToolCard(
+                id=f"web_search_{agent_id}" if agent_id else f"web_search_{uuid.uuid4().hex}",
+                name="WebSearch",
+                description=(
+                    "XiaoYi wants to search the web for query of user."
+                ),
+                input_params=get_tool_input_params("free_search"),
+            ),
+        )
+
+
+class WebFetchTool(JiuwenHarnessFetchWebpageTool):
+    def __init__(
+        self,
+        language: str = "cn",
+        agent_id: Optional[str] = None,
+        card: Optional[ToolCard] = None,
+    ) -> None:
+        super().__init__(
+            language=language,
+            agent_id=agent_id,
+            card=card or ToolCard(
+                id=f"web_fetch_{agent_id}" if agent_id else f"web_fetch_{uuid.uuid4().hex}",
+                name="WebFetch",
+                description=(
+                    "XiaoYi wants to fetch content from this URL."
+                ),
+                input_params=get_tool_input_params("fetch_webpage"),
+            ),
+        )
+
+
 HARNESS_TOOL_CLASSES = {
-    "file_read": ReadFileTool,
-    "file_write": WriteFileTool,
-    "file_edit": EditFileTool,
+    "Read": ReadTool,
+    "Write": WriteTool,
+    "Edit": EditTool,
     "file_glob": GlobTool,
     "file_grep": GrepTool,
     "file_listdir": ListDirTool,
@@ -63,8 +155,8 @@ def build_skilldev_tools(
     ]
     tools.extend(
         [
-            JiuwenHarnessFreeSearchTool(language=language, agent_id=agent_id),
-            JiuwenHarnessFetchWebpageTool(language=language, agent_id=agent_id),
+            WebSearchTool(language=language, agent_id=agent_id),
+            WebFetchTool(language=language, agent_id=agent_id),
             get_ask_user_question_tool(),
             get_exec_tool(),
         ]
