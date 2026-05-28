@@ -119,9 +119,6 @@ from jiuwenclaw.agentserver.deep_agent.rails.jiuwen_progressive_tool_rail import
     JiuWenProgressiveToolRail,
 )
 from jiuwenclaw.agentserver.deep_agent.rails.permission_rail import clear_session_interrupt_state
-from jiuwenclaw.agentserver.deep_agent.rails.ask_user_question_resume_rail import (
-    AskUserQuestionResumeRail,
-)
 from jiuwenclaw.agentserver.deep_agent.rails.task_execution_rail import get_current_task_id
 from jiuwenclaw.agentserver.deep_agent.permissions.owner_scopes import (
     TOOL_PERMISSION_CONTEXT,
@@ -149,12 +146,6 @@ from jiuwenclaw.agentserver.tools.video_tools import video_understanding
 from jiuwenclaw.agentserver.tools.harness_named_web_tools import build_jiuwen_harness_named_web_tools
 
 from jiuwenclaw.agentserver.tools import SendFileToolkit, SkillToolkit
-from jiuwenclaw.agentserver.tools.ask_user_question_session_state import (
-    clear_pending_follow_ups,
-    consume_session_awaiting_text_only_ask_reply,
-    mark_session_awaiting_text_only_ask_reply,
-    store_text_only_resume_user_query,
-)
 from jiuwenclaw.agentserver.tools.ask_user_question_tool import get_ask_user_question_tool
 from jiuwenclaw.agentserver.tools.acp_output_tools import get_tools as get_acp_output_tools
 from jiuwenclaw.agentserver.tools.acp_output_tools import get_acp_output_manager
@@ -1762,22 +1753,6 @@ class JiuWenClawDeepAdapter:
         return task_execution_rail
 
     @staticmethod
-    def _build_ask_user_question_resume_rail() -> AskUserQuestionResumeRail | None:
-        try:
-            rail = AskUserQuestionResumeRail()
-            logger.info(
-                "[JiuWenClawDeepAdapter] AskUserQuestionResumeRail create success",
-                extra={'user_visible': 'progress'},
-            )
-        except Exception as exc:
-            logger.warning(
-                "[JiuWenClawDeepAdapter] AskUserQuestionResumeRail create failed: %s",
-                exc,
-            )
-            rail = None
-        return rail
-
-    @staticmethod
     def _build_telemetry_rail() -> Any | None:
         """Build TelemetryRail for OpenTelemetry instrumentation."""
         try:
@@ -2102,7 +2077,6 @@ class JiuWenClawDeepAdapter:
             _RailBuildInfo("_runtime_prompt_rail", self._build_runtime_prompt_rail),
             _RailBuildInfo("_response_prompt_rail", self._build_response_prompt_rail),
             _RailBuildInfo("_task_execution_rail", self._build_task_execution_rail),
-            _RailBuildInfo("_ask_user_question_resume_rail", self._build_ask_user_question_resume_rail),
             _RailBuildInfo("_stream_event_rail", self._build_stream_event_rail),
             _RailBuildInfo("_task_planning_rail", self._build_task_planning_rail),
             _RailBuildInfo("_security_rail", self._build_security_rail),
@@ -3648,50 +3622,6 @@ class JiuWenClawDeepAdapter:
                 exc,
             )
 
-    async def _mark_session_awaiting_text_only_ask_reply(self, session_id: str | None) -> None:
-        if not session_id or self._instance is None:
-            return
-        try:
-            session = create_agent_session(session_id=session_id, card=self._instance.card)
-            await session.pre_run(inputs=None)
-            mark_session_awaiting_text_only_ask_reply(session)
-            await session.post_run()
-        except Exception as exc:
-            logger.warning(
-                "[JiuWenClawDeepAdapter] mark awaiting text_only ask failed session_id=%s error=%s",
-                session_id,
-                exc,
-            )
-
-    async def _prepare_text_only_ask_user_resume(
-        self,
-        session_id: str | None,
-        user_query: str,
-    ) -> None:
-        """Let the user's plain-text reply win over queued follow-ups / TaskPlan stage text."""
-        if not session_id or self._instance is None:
-            return
-        try:
-            session = create_agent_session(session_id=session_id, card=self._instance.card)
-            await session.pre_run(inputs=None)
-            if not consume_session_awaiting_text_only_ask_reply(session):
-                await session.post_run()
-                return
-            cleared = clear_pending_follow_ups(self._instance, session)
-            if not cleared:
-                logger.info(
-                    "[JiuWenClawDeepAdapter] text_only ask resume: no pending_follow_ups to clear session_id=%s",
-                    session_id,
-                )
-            store_text_only_resume_user_query(session, user_query)
-            await session.post_run()
-        except Exception as exc:
-            logger.warning(
-                "[JiuWenClawDeepAdapter] prepare text_only ask resume failed session_id=%s error=%s",
-                session_id,
-                exc,
-            )
-
     async def abort_on_gateway_disconnect(self) -> None:
         """Gateway 与 AgentServer 的 WebSocket 断开时：与 interrupt(cancel) 同样中止 rail 与 DeepAgent 实例。"""
         if self._stream_event_rail is not None:
@@ -4339,7 +4269,6 @@ class JiuWenClawDeepAdapter:
                 session_id,
                 reason="plain_user_message_before_agent_run",
             )
-            await self._prepare_text_only_ask_user_resume(session_id, str(query or ""))
 
         token_trace_sid = _LLM_TRACE_SESSION_ID.set(session_id)
         token_trace_rid = _LLM_TRACE_REQUEST_ID.set(request.request_id or "")
@@ -4504,7 +4433,6 @@ class JiuWenClawDeepAdapter:
                 session_id,
                 reason="plain_user_message_before_agent_run",
             )
-            await self._prepare_text_only_ask_user_resume(session_id, str(query or ""))
 
         has_streamed_content = False
         accumulated_text = ""
@@ -4521,8 +4449,6 @@ class JiuWenClawDeepAdapter:
             "total_cost": 0.0,
         }
         hitl_pending_stream = False
-        hitl_text_only_pause = False
-        suppress_stream_after_hitl = False
 
         cron_context_tokens = self._bind_runtime_cron_context(
             channel_id=request.channel_id,
@@ -4575,16 +4501,10 @@ class JiuWenClawDeepAdapter:
                                 extra={'user_visible': 'progress'}
                             )
                             last_logged_iteration = chunk_iteration
-                    if suppress_stream_after_hitl:
-                        continue
                     if not (hasattr(chunk, "type") and hasattr(chunk, "payload")):
                         parsed = self._parse_stream_chunk(chunk)
-                        hitl_pending_stream, hitl_text_only_pause = self._detect_hitl_pause(
-                            parsed,
-                            hitl_pending_stream=hitl_pending_stream,
-                            hitl_text_only_pause=hitl_text_only_pause,
-                        )
-                        should_pause_for_user_input = hitl_pending_stream
+                        if self._should_pause_for_user_input(parsed):
+                            hitl_pending_stream = True
                         if parsed is not None:
                             # 工具执行日志标记
                             event_type = parsed.get("event_type")
@@ -4634,9 +4554,6 @@ class JiuWenClawDeepAdapter:
                                 payload=parsed,
                                 is_complete=False,
                             )
-                            if should_pause_for_user_input:
-                                suppress_stream_after_hitl = True
-                                continue
                         continue
 
                     chunk_type = chunk.type
@@ -4757,12 +4674,8 @@ class JiuWenClawDeepAdapter:
                             accumulated_reasoning = ""
                         if has_streamed_content:
                             parsed = self._parse_stream_chunk(chunk, _has_streamed_content=True)
-                            hitl_pending_stream, hitl_text_only_pause = self._detect_hitl_pause(
-                                parsed,
-                                hitl_pending_stream=hitl_pending_stream,
-                                hitl_text_only_pause=hitl_text_only_pause,
-                            )
-                            should_pause_for_user_input = hitl_pending_stream
+                            if self._should_pause_for_user_input(parsed):
+                                hitl_pending_stream = True
                             if parsed is not None:
                                 yield AgentResponseChunk(
                                     request_id=rid,
@@ -4770,17 +4683,10 @@ class JiuWenClawDeepAdapter:
                                     payload=parsed,
                                     is_complete=False,
                                 )
-                                if should_pause_for_user_input:
-                                    suppress_stream_after_hitl = True
-                                    continue
                             continue
                         parsed = self._parse_stream_chunk(chunk)
-                        hitl_pending_stream, hitl_text_only_pause = self._detect_hitl_pause(
-                            parsed,
-                            hitl_pending_stream=hitl_pending_stream,
-                            hitl_text_only_pause=hitl_text_only_pause,
-                        )
-                        should_pause_for_user_input = hitl_pending_stream
+                        if self._should_pause_for_user_input(parsed):
+                            hitl_pending_stream = True
                         if parsed is not None:
                             yield AgentResponseChunk(
                                 request_id=rid,
@@ -4788,9 +4694,6 @@ class JiuWenClawDeepAdapter:
                                 payload=parsed,
                                 is_complete=False,
                             )
-                            if should_pause_for_user_input:
-                                suppress_stream_after_hitl = True
-                                continue
                             continue
 
                     if accumulated_text:
@@ -4821,12 +4724,8 @@ class JiuWenClawDeepAdapter:
                         )
                         accumulated_reasoning = ""
                     parsed = self._parse_stream_chunk(chunk)
-                    hitl_pending_stream, hitl_text_only_pause = self._detect_hitl_pause(
-                        parsed,
-                        hitl_pending_stream=hitl_pending_stream,
-                        hitl_text_only_pause=hitl_text_only_pause,
-                    )
-                    should_pause_for_user_input = hitl_pending_stream
+                    if self._should_pause_for_user_input(parsed):
+                        hitl_pending_stream = True
                     if parsed is not None:
                         yield AgentResponseChunk(
                             request_id=rid,
@@ -4834,11 +4733,8 @@ class JiuWenClawDeepAdapter:
                             payload=parsed,
                             is_complete=False,
                         )
-                        if should_pause_for_user_input:
-                            suppress_stream_after_hitl = True
-                            continue
 
-            if accumulated_text and not hitl_pending_stream:
+            if accumulated_text:
                 log_chat_final(
                     session_id=session_id,
                     request_id=rid or "",
@@ -4851,7 +4747,7 @@ class JiuWenClawDeepAdapter:
                     payload={"event_type": "chat.final", "content": accumulated_text},
                     is_complete=False,
                 )
-            if accumulated_reasoning and not hitl_pending_stream:
+            if accumulated_reasoning:
                 reasoning_payload: dict[str, Any] = {"event_type": "chat.reasoning", "content": accumulated_reasoning}
                 task_id = self._get_task_id()
                 if task_id:
@@ -4865,14 +4761,11 @@ class JiuWenClawDeepAdapter:
 
             # after_invoke 在流关闭后触发，其中缓存的审批事件无法通过
             # session.write_stream 传递，需手动注入到 stream 输出
-            if self._skill_evolution_rail is not None and not hitl_pending_stream:
+            if self._skill_evolution_rail is not None:
                 for evt in self._skill_evolution_rail.drain_pending_approval_events():
                     parsed = self._parse_stream_chunk(evt)
-                    hitl_pending_stream, hitl_text_only_pause = self._detect_hitl_pause(
-                        parsed,
-                        hitl_pending_stream=hitl_pending_stream,
-                        hitl_text_only_pause=hitl_text_only_pause,
-                    )
+                    if self._should_pause_for_user_input(parsed):
+                        hitl_pending_stream = True
                     if parsed is not None:
                         yield AgentResponseChunk(
                             request_id=rid,
@@ -4961,8 +4854,6 @@ class JiuWenClawDeepAdapter:
             )
 
         if hitl_pending_stream:
-            if hitl_text_only_pause:
-                await self._mark_session_awaiting_text_only_ask_reply(session_id)
             yield AgentResponseChunk(
                 request_id=rid,
                 channel_id=cid,
@@ -5061,20 +4952,6 @@ class JiuWenClawDeepAdapter:
         return self._is_ask_user_payload(payload) or self._is_ask_user_question_text_only_tool_result(
             payload,
         )
-
-    def _detect_hitl_pause(
-        self,
-        payload: Any,
-        *,
-        hitl_pending_stream: bool,
-        hitl_text_only_pause: bool,
-    ) -> tuple[bool, bool]:
-        if not self._should_pause_for_user_input(payload):
-            return hitl_pending_stream, hitl_text_only_pause
-        hitl_pending_stream = True
-        if self._is_ask_user_question_text_only_tool_result(payload):
-            hitl_text_only_pause = True
-        return hitl_pending_stream, hitl_text_only_pause
 
     def _parse_stream_chunk(self, chunk, *, _has_streamed_content: bool = False) -> dict | None:
         """将 SDK OutputSchema 转为前端可消费的 payload dict.
