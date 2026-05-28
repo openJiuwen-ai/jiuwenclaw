@@ -68,12 +68,17 @@ def _pick_free_port(host: str = "127.0.0.1") -> int:
 
 _load_effective_enterprise_config: Any | None = None
 _service_config_slot: Any | None = None
+_extension_config_slot: Any | None = None
 
 
-def _ensure_enterprise_config_loader() -> tuple[Any, Any]:
-    global _load_effective_enterprise_config, _service_config_slot
-    if _load_effective_enterprise_config is not None and _service_config_slot is not None:
-        return _load_effective_enterprise_config, _service_config_slot
+def _ensure_enterprise_config_loader() -> tuple[Any, Any, Any]:
+    global _load_effective_enterprise_config, _service_config_slot, _extension_config_slot
+    if (
+        _load_effective_enterprise_config is not None
+        and _service_config_slot is not None
+        and _extension_config_slot is not None
+    ):
+        return _load_effective_enterprise_config, _service_config_slot, _extension_config_slot
 
     from jiuwenclaw.gateway.channel_config_db import (
         _EXT_PKG,
@@ -89,16 +94,15 @@ def _ensure_enterprise_config_loader() -> tuple[Any, Any]:
     schemas_mod = importlib.import_module(f"{_EXT_PKG}.core.enterprise_config.schemas")
     _load_effective_enterprise_config = loader_mod.load_effective_enterprise_config
     _service_config_slot = schemas_mod.TemplateRefSlot.SERVICE_CONFIG
-    return _load_effective_enterprise_config, _service_config_slot
+    _extension_config_slot = schemas_mod.TemplateRefSlot.EXTENSION_CONFIG
+    return _load_effective_enterprise_config, _service_config_slot, _extension_config_slot
 
 
 async def load_effective_service_config_for_request(request: AgentRequest) -> Any | None:
     """按当前请求路由上下文加载 ``service_config`` 与 ``extension_config`` 槽位。"""
     try:
-        load_fn, service_config_slot = _ensure_enterprise_config_loader()
-        # 同时加载 service_config 和 extension_config
-        from jiuwenclaw.gateway.extensions.manager_ws_client.core.enterprise_config.schemas import TemplateRefSlot
-        loaded = await load_fn(request, [service_config_slot, TemplateRefSlot.EXTENSION_CONFIG])
+        load_fn, service_config_slot, extension_config_slot = _ensure_enterprise_config_loader()
+        loaded = await load_fn(request, [service_config_slot, extension_config_slot])
     except Exception as exc:
         logger.warning(
             "[RuntimeManagementAgentClient] load service_config failed: %s",
