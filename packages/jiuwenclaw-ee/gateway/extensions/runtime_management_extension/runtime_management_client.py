@@ -8,11 +8,13 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import importlib
 import json
 import logging
 import os
 import socket
+import threading
 from typing import Any, AsyncIterator, Callable, Optional
 
 from openjiuwen_runtime.management.session.access import Access
@@ -55,6 +57,7 @@ from jiuwenclaw.e2a.wire_codec import (
     parse_agent_server_wire_chunk,
 )
 from jiuwenclaw.gateway.agent_client import AgentServerClient, _wire_request_id_key
+from jiuwenclaw.gateway.session_map import load_session_map_scope
 from jiuwenclaw.schema import AgentRequest
 from jiuwenclaw.schema.agent import AgentResponse, AgentResponseChunk
 
@@ -69,6 +72,8 @@ def _pick_free_port(host: str = "127.0.0.1") -> int:
 _load_effective_enterprise_config: Any | None = None
 _service_config_slot: Any | None = None
 _extension_config_slot: Any | None = None
+_session_id_lock = threading.Lock()
+_session_id_to_service_pair: dict[str, tuple[str, str | None]] = {}
 
 
 def _ensure_enterprise_config_loader() -> tuple[Any, Any, Any]:
@@ -124,15 +129,55 @@ async def load_effective_service_config_for_request(request: AgentRequest) -> An
 
 
 def _resolve_invoke_ids_from_request(msg: AgentRequest) -> tuple[str, str | None]:
-    """Require gateway-filled ``service_id`` / ``agent_id`` (no session_id parsing fallback)."""
+    """Resolve invoke ids, fallback to ``session_id`` mapping when service_id is missing."""
     svc = str(msg.service_id or "").strip()
-    if not svc:
-        raise ValueError(
-            "RuntimeManagementAgentClient requires AgentRequest.service_id "
-            "(set gateway-side, e.g. SessionMap path)"
-        )
     ag = str(msg.agent_id or "").strip()
-    return svc, ag if ag else None
+    if svc:
+        return svc, ag if ag else None
+
+    sid = str(msg.session_id or "").strip()
+    if sid:
+        fallback_svc, fallback_ag = _session_id_to_invoke_ids(sid)
+        if not ag and fallback_ag:
+            ag = fallback_ag
+        logger.info(
+            "[RuntimeManagementAgentClient] service_id missing, fallback from session_id: session_id=%s service_id=%s",
+            sid,
+            fallback_svc,
+        )
+        return fallback_svc, ag if ag else None
+
+    raise ValueError(
+        "RuntimeManagementAgentClient requires AgentRequest.service_id "
+        "(set gateway-side, e.g. SessionMap path)"
+    )
+
+
+def _md5_chat_bot_id(chat_id: str, bot_id: str) -> str:
+    return hashlib.md5("::".join((chat_id, bot_id)).encode("utf-8")).hexdigest()
+
+
+def _session_id_to_invoke_ids(session_id: str) -> tuple[str, str | None]:
+    """Map gateway session_id into invoke ``(service_id, agent_id)`` pair."""
+    with _session_id_lock:
+        cached = _session_id_to_service_pair.get(session_id)
+        if cached:
+            return cached
+
+    _ = load_session_map_scope()
+    parts = session_id.split("::")
+    if len(parts) == 6:
+        _provider, chat_id, bot_id, user_id, _ts, _suffix = parts
+        pair = (_md5_chat_bot_id(chat_id, bot_id), user_id)
+    elif len(parts) == 5:
+        _provider, chat_id, bot_id, _ts, _suffix = parts
+        pair = (_md5_chat_bot_id(chat_id, bot_id), None)
+    else:
+        pair = (hashlib.md5(session_id.encode("utf-8")).hexdigest(), None)
+
+    with _session_id_lock:
+        _session_id_to_service_pair.setdefault(session_id, pair)
+        return _session_id_to_service_pair[session_id]
 
 
 def _env_bool(name: str, default: bool = False) -> bool:
