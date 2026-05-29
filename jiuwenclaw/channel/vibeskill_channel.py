@@ -536,6 +536,24 @@ class VibeSkillChannel(BaseChannel):
 
         return False
 
+    @staticmethod
+    def _message_send_file_part(
+        file_info: dict[str, Any],
+        *,
+        resource_type: str | None = None,
+    ) -> dict[str, Any]:
+        """构造 message.send 的 file part（``url`` / ``innerurl`` 同级）。"""
+        part: dict[str, Any] = {
+            "type": "file",
+            "filename": str(file_info.get("filename") or ""),
+            "url": str(file_info.get("url") or ""),
+            "innerurl": str(file_info.get("innerurl") or file_info.get("innerUrl") or ""),
+            "mime": str(file_info.get("mime") or ""),
+        }
+        if resource_type:
+            part["resourceType"] = resource_type
+        return part
+
     def _extract_parts_to_skilldev_params(self, parts: list[Any]) -> dict[str, Any]:
         """从 message.send / skillSearch.replied 的 parts 提取 skilldev.chat params 字段。"""
         query = ""
@@ -552,9 +570,11 @@ class VibeSkillChannel(BaseChannel):
             if part_type == "text":
                 query += str(part.get("text") or "")
             elif part_type == "file":
+                innerurl = str(part.get("innerurl") or part.get("innerUrl") or "")
                 file_info = {
                     "filename": part.get("filename", ""),
                     "url": part.get("url", ""),
+                    "innerurl": innerurl,
                     "mime": part.get("mime", ""),
                 }
                 resource_type = part.get("resourceType", "")
@@ -562,6 +582,7 @@ class VibeSkillChannel(BaseChannel):
                     skill_packages.append({
                         "filename": part.get("filename", ""),
                         "url": part.get("url", ""),
+                        "innerurl": innerurl,
                     })
                 else:
                     files.append(file_info)
@@ -916,7 +937,6 @@ class VibeSkillChannel(BaseChannel):
             return False
 
         pending = self._pending_confirms.pop(request_id, None)
-        self._clear_message_context_for_session(session_id)
 
         answers: list[dict[str, Any]] = []
         if isinstance(raw_answers, list):
@@ -2656,23 +2676,14 @@ class VibeSkillChannel(BaseChannel):
                     for file_info in payload.get("files", []) or []:
                         if not isinstance(file_info, dict):
                             continue
-                        parts.append({
-                            "type": "file",
-                            "filename": str(file_info.get("filename") or ""),
-                            "url": str(file_info.get("url") or ""),
-                            "mime": str(file_info.get("mime") or ""),
-                        })
+                        parts.append(self._message_send_file_part(file_info))
 
                     for skill_pkg in payload.get("skill_packages", []) or []:
                         if not isinstance(skill_pkg, dict):
                             continue
-                        parts.append({
-                            "type": "file",
-                            "filename": str(skill_pkg.get("filename") or ""),
-                            "url": str(skill_pkg.get("url") or ""),
-                            "mime": str(skill_pkg.get("mime") or ""),
-                            "resourceType": "skill",
-                        })
+                        parts.append(
+                            self._message_send_file_part(skill_pkg, resource_type="skill")
+                        )
 
                     for tool_def in payload.get("tool_spec_files", []) or []:
                         if not isinstance(tool_def, dict):
