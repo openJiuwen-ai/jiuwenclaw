@@ -17,23 +17,20 @@ from openjiuwen.core.session.stream.base import OutputSchema
 
 from jiuwenclaw.utils import logger
 
-# Read-only tools return large bodies (file text, listings, search hits). Regex path
-# extraction + sync stat on the event loop can block for minutes.
-READ_ONLY_ARTIFACT_SKIP_TOOLS = frozenset({
-    "read_file",
-    "grep",
-    "glob",
-    "list_files",
-    "skill_tool",
-    "fetch_webpage",
-    "mcp_petal_search",
-    "free_search",
+# Only write/exec tools that create files in tool_result need detection. skip it here.
+ARTIFACT_DETECTION_ALLOWED_TOOLS = frozenset({
+    "mcp_exec_command",
+    "exec_command",
+    "write_text_file",
+    "write_file",
+    "edit_file",
+    "write",
 })
 
 
-def should_skip_artifact_body_scan(tool_name: str | None) -> bool:
-    """True when artifact detection must not scan tool_result body text."""
-    return (tool_name or "").strip() in READ_ONLY_ARTIFACT_SKIP_TOOLS
+def should_detect_artifacts(tool_name: str | None) -> bool:
+    """True when artifact detection should run for this tool."""
+    return (tool_name or "").strip() in ARTIFACT_DETECTION_ALLOWED_TOOLS
 
 
 @dataclass
@@ -90,9 +87,9 @@ async def emit_artifact_generated(ctx: ArtifactEmitContext) -> bool:
     )
 
     tool_name = (ctx.tool_name or "").strip()
-    if should_skip_artifact_body_scan(tool_name):
-        logger.debug(
-            "%s Skip body scan for read-only tool=%s",
+    if not should_detect_artifacts(tool_name):
+        logger.info(
+            "%s Skip artifact detection: tool=%s not in whitelist",
             ctx.log_prefix,
             tool_name,
         )
@@ -104,7 +101,17 @@ async def emit_artifact_generated(ctx: ArtifactEmitContext) -> bool:
     
     # Step 1: Extract artifacts from tool result
     artifacts = _extract_artifact_paths_from_tool_result(
-        ctx.tool_result, ctx.workspace_base, tool_start_time=ctx.tool_start_time
+        ctx.tool_result,
+        ctx.workspace_base,
+        tool_start_time=ctx.tool_start_time,
+        scan_body_text=True,
+    )
+    logger.info(
+        "%s Extraction finished session_id=%s tool=%s artifacts=%d",
+        ctx.log_prefix,
+        session_id,
+        tool_name,
+        len(artifacts),
     )
     
     if not artifacts:

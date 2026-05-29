@@ -214,6 +214,7 @@ class SubagentContextRail(DeepAgentRail):
         if self._parent_session is None or not isinstance(ctx.inputs, ToolCallInputs):
             return
 
+        detect_start = time.perf_counter()
         artifact_ctx = ArtifactEmitContext(
             session=self._parent_session,
             tool_result=ctx.inputs.tool_result,
@@ -224,8 +225,22 @@ class SubagentContextRail(DeepAgentRail):
             subagent_id=self._subagent_id,
             log_prefix="[SubagentArtifact]",
         )
-        
-        await emit_artifact_generated(artifact_ctx)
+        logger.info(
+            "[SubagentArtifact] Detect start: subagent_id=%s tool=%s session_id=%s",
+            self._subagent_id,
+            ctx.inputs.tool_name,
+            self._parent_session.get_session_id(),
+        )
+        emitted = await emit_artifact_generated(artifact_ctx)
+        elapsed_ms = int((time.perf_counter() - detect_start) * 1000)
+        logger.info(
+            "[SubagentArtifact] Detect done: subagent_id=%s tool=%s session_id=%s emitted=%s elapsed_ms=%d",
+            self._subagent_id,
+            ctx.inputs.tool_name,
+            self._parent_session.get_session_id(),
+            emitted,
+            elapsed_ms,
+        )
 
     def _get_workspace_base_path(self) -> Any | None:
         """Get workspace base path for path validation.

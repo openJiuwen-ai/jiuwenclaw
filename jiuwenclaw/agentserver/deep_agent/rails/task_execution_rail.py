@@ -51,18 +51,19 @@ _ARTIFACT_PREVIEW_EXTENSIONS = frozenset({
     ".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg",
 })
 
-# 文件路径检测的正则表达式模式
+# 文件路径检测的正则表达式模式（仅用于正文回退扫描）
 _FILE_PATH_PATTERNS = [
-    # {workspace} 变量模式
-    re.compile(r'\{workspace\}[/\\]?[^\s\]\}\)\,\'\"`<>，。；、：]+', re.IGNORECASE),
-    # Windows绝对路径 (D:\path, D:/path)
-    re.compile(r'[A-Za-z]:[/\\][^\s\]\}\)\,\'\"`<>，。；、：]+'),
-    # Unix绝对路径 (/path/to/file)
-    re.compile(r'/[^\s\]\}\)\,\'\"`<>，。；、：]+'),
-    # 相对路径带有扩展名 (./path, path/file.ext)
+    # 变量路径：{workspace}/... 或 {output_dir}/...
     re.compile(
-        r'(?<![/\\])(?:\.{1,2}[/\\])?(?:[^\s\]\}\)\,\'\"`<>，。；、：]+[/\\])+'
-        r'[^\s\]\}\)\,\'\"`<>，。；、：]+\.[a-zA-Z0-9]{1,10}'
+        r'\{(?:workspace|output_dir)\}[/\\][^\s\]\}\)\,\'\"`<>，。；、：]+\.[a-zA-Z0-9]{1,10}',
+        re.IGNORECASE,
+    ),
+    # 绝对/相对路径：必须包含 workspace 或 output 目录段
+    re.compile(
+        r'(?:(?:[A-Za-z]:)?[/\\]|\.{1,2}[/\\])?[^\s\]\}\)\,\'\"`<>，。；、：]*'
+        r'[/\\](?:workspace|output)[/\\][^\s\]\}\)\,\'\"`<>，。；、：]*'
+        r'[^\s\]\}\)\,\'\"`<>，。；、：]+\.[a-zA-Z0-9]{1,10}',
+        re.IGNORECASE,
     ),
 ]
 
@@ -158,6 +159,8 @@ def _extract_artifact_paths_from_tool_result(
     tool_result: Any,
     workspace_base: str | Path | None = None,
     tool_start_time: float | None = None,
+    *,
+    scan_body_text: bool = False,
 ) -> list[dict[str, Any]]:
     """从工具输出结果中提取文件路径并验证是否为有效的工件。
     
@@ -181,32 +184,30 @@ def _extract_artifact_paths_from_tool_result(
         
     """
     artifacts: list[dict[str, Any]] = []
+    tool_result_type = type(tool_result).__name__
     
-    # 将工具结果转换为字符串进行正则匹配
-    result_text = ""
+    # 先走结构化提取，只有在明确需要时才做正文回退扫描
     result_dict: dict[str, Any] | None = None
     
     if tool_result is None:
         return artifacts
     
-    # 处理字符串结果
-    if isinstance(tool_result, str):
-        result_text = tool_result
     # 处理字典结果
-    elif isinstance(tool_result, dict):
+    if isinstance(tool_result, dict):
         result_dict = tool_result
-        result_text = json.dumps(tool_result, ensure_ascii=False)
     # 处理对象结果
     elif hasattr(tool_result, '__dict__'):
         result_dict = tool_result.__dict__
-        result_text = str(tool_result)
-    else:
-        result_text = str(tool_result)
     
     # 从字典结果中提取常见路径字段
     seen_artifact_paths: set[str] = set()
     if result_dict is not None:
         potential_paths = _iter_structured_path_values(result_dict)
+        logger.info(
+            "[ArtifactDetector] Structured extraction start: tool_result_type=%s candidates=%d",
+            tool_result_type,
+            len(potential_paths),
+        )
 
         for p in potential_paths:
             if not p:
@@ -224,11 +225,41 @@ def _extract_artifact_paths_from_tool_result(
 
             artifacts.append(artifact)
             seen_artifact_paths.add(identity)
-    
+        logger.info(
+            "[ArtifactDetector] Structured extraction done: valid_artifacts=%d",
+            len(artifacts),
+        )
+
+    # 结构化字段命中即返回，不再扫描正文
+    if artifacts:
+        logger.info(
+            "[ArtifactDetector] Structured hit, skip body scan: artifacts=%d",
+            len(artifacts),
+        )
+        return artifacts
+
+    if not scan_body_text:
+        logger.info("[ArtifactDetector] Body scan disabled by caller")
+        return artifacts
+
+    # 回退：使用正则表达式从正文中提取路径
+    if isinstance(tool_result, str):
+        result_text = tool_result
+    elif isinstance(tool_result, dict):
+        result_text = json.dumps(tool_result, ensure_ascii=False)
+    else:
+        result_text = str(tool_result)
+    logger.info(
+        "[ArtifactDetector] Body scan fallback start: text_len=%d",
+        len(result_text),
+    )
+
     # 使用正则表达式从文本中提取路径
     seen_paths: set[str] = set()
+    total_regex_matches = 0
     for pattern in _FILE_PATH_PATTERNS:
         matches = pattern.findall(result_text)
+        total_regex_matches += len(matches)
         for match in matches:
             # 清理路径（去除尾部的非法字符）
             cleaned_path = _clean_path_candidate(match)
@@ -251,6 +282,11 @@ def _extract_artifact_paths_from_tool_result(
             if identity not in seen_artifact_paths:
                 artifacts.append(artifact)
                 seen_artifact_paths.add(identity)
+    logger.info(
+        "[ArtifactDetector] Body scan fallback done: regex_matches=%d artifacts=%d",
+        total_regex_matches,
+        len(artifacts),
+    )
     
     return artifacts
 
@@ -463,6 +499,7 @@ class TaskExecutionRail(DeepAgentRail):
             emit_artifact_generated,
             ArtifactEmitContext,
         )
+        detect_start = time.perf_counter()
         
         session = ctx.session
         if session is None:
@@ -481,8 +518,20 @@ class TaskExecutionRail(DeepAgentRail):
             task_id=self.get_current_task_id() or get_current_task_id(),
             log_prefix="[ArtifactEmitter]",
         )
-        
-        await emit_artifact_generated(artifact_ctx)
+        logger.info(
+            "[ArtifactEmitter] Detect start: tool=%s session_id=%s",
+            ctx.inputs.tool_name,
+            session.get_session_id(),
+        )
+        emitted = await emit_artifact_generated(artifact_ctx)
+        elapsed_ms = int((time.perf_counter() - detect_start) * 1000)
+        logger.info(
+            "[ArtifactEmitter] Detect done: tool=%s session_id=%s emitted=%s elapsed_ms=%d",
+            ctx.inputs.tool_name,
+            session.get_session_id(),
+            emitted,
+            elapsed_ms,
+        )
 
     def _get_workspace_base_path(self) -> Path | None:
         """获取工作空间基准路径。
