@@ -150,7 +150,7 @@ class ReActAgentConfig(BaseModel):
     def configure_context_engine(
             self,
             max_context_message_num: Optional[int] = 200,
-            default_window_round_num: Optional[int] = 10,
+            default_window_round_num: Optional[int] = None,
             enable_reload: bool = False
     ) -> 'ReActAgentConfig':
         """
@@ -162,11 +162,12 @@ class ReActAgentConfig(BaseModel):
         max_context_message_num : int, optional, default 200
             Hard upper bound on the total number of messages kept in the context
             window.  `None` means no hard limit.
-        default_window_round_num : int, optional, default 10
+        default_window_round_num : int, optional, default None
             Number of **most-recent conversation rounds** to retain (a round =
             user message → final assistant reply without tool calls).  When set,
             it takes precedence over `default_window_message_num`.  Must be > 0
-            if given.
+            if given.  `None` means no round-based truncation — context length
+            is managed entirely by the processor chain.
         enable_reload : bool, default False
             Whether the agent is allowed to **automatically reload** messages that
             were previously off-loaded (via hints such as `[[OFFLOAD:...]]`).
