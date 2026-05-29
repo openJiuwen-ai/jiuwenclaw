@@ -47,8 +47,8 @@ def _normalize_skill_source(value: str) -> str:
     normalized = value.strip()
     if not normalized:
         raise ValueError("skill_source is required")
-    if len(normalized) > 512:
-        raise ValueError("skill_source must be at most 512 characters")
+    if len(normalized) > 2048:
+        raise ValueError("skill_source must be at most 2048 characters")
     return normalized
 
 

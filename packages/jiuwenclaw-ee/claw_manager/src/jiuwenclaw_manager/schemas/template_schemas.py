@@ -126,7 +126,7 @@ class SkillWhitelistTemplateCreateBody(BaseModel):
     description: str | None = Field(default=None, max_length=512)
     skill_id: str = Field(..., max_length=512)
     skill_version: str = Field(..., max_length=64)
-    skill_source: str = Field(..., max_length=512)
+    skill_source: str = Field(..., max_length=2048)
     enabled: bool = True
     data: dict[str, Any] | None = None
 
@@ -136,7 +136,7 @@ class SkillWhitelistTemplateUpdateBody(BaseModel):
     description: str | None = Field(default=None, max_length=512)
     skill_id: str | None = Field(default=None, max_length=512)
     skill_version: str | None = Field(default=None, max_length=64)
-    skill_source: str | None = Field(default=None, max_length=512)
+    skill_source: str | None = Field(default=None, max_length=2048)
     enabled: bool | None = None
     data: dict[str, Any] | None = None
 
@@ -146,7 +146,7 @@ class SkillWhitelistTemplateListQuery(BaseModel):
     page_size: int = Field(20, ge=1, le=200)
     enabled: bool | None = None
     skill_id: str | None = Field(default=None, max_length=512)
-    skill_source: str | None = Field(default=None, max_length=512)
+    skill_source: str | None = Field(default=None, max_length=2048)
 
 
 class SkillWhitelistTemplateOut(BaseModel):

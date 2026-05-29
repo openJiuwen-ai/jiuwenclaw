@@ -91,7 +91,7 @@ SKILL_WHITELIST_TEMPLATE_TABLE_DEF = TableDefinition(
         ColumnDefinition("description", "string", length=512, nullable=True),
         ColumnDefinition("skill_id", "string", length=512, nullable=False),
         ColumnDefinition("skill_version", "string", length=64, nullable=False),
-        ColumnDefinition("skill_source", "string", length=512, nullable=False),
+        ColumnDefinition("skill_source", "string", length=2048, nullable=False),
         ColumnDefinition("enabled", "boolean", nullable=False, default=True),
         ColumnDefinition("data", "json", nullable=True),
         ColumnDefinition("created_at", "datetime", nullable=False),
