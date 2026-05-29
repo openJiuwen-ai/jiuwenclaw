@@ -415,6 +415,16 @@ class RuntimeManagementAgentClient(AgentServerClient):
             ) -> IServiceHandler:
                 cfg = service_template or {}
 
+                # 如果配置了 template，打印关键字段
+                if service_template:
+                    logger.info(
+                        "[RuntimeManagementAgentClient] new_service called with service_template, "
+                        "template_id=%s, service_id=%s, agent_id=%s",
+                        service_template.get("template_id"),
+                        service_template.get("service_id"),
+                        service_template.get("agent_id"),
+                    )
+
                 if deploy_mode == "process":
                     process_host = "127.0.0.1"
                     target_port = _pick_free_port(process_host)
@@ -501,7 +511,7 @@ class RuntimeManagementAgentClient(AgentServerClient):
                     k8s = K8sServiceHandler(
                         containers=containers,
                         name_prefix="jiuwenclaw",
-                        namespace=cfg["namespace"] if "namespace" in cfg else namespace,
+                        namespace=namespace,
                         pod_name=cfg["pod_name"] if "pod_name" in cfg else container_name,
                         extra_labels=dict(RuntimeManagementAgentClient._POD_LABEL),
                         kubeconfig=kubeconfig,
