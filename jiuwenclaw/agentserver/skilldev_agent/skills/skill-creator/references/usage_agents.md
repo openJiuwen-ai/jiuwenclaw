@@ -118,13 +118,13 @@ invoke(funcName:"agent_as_a_tool", params:{agentId:"aaabbbccc", query:"分析这
 
 ## Generating the tool-definitions entry
 
-Agent tools sit in the skill body's single **tool definitions** section. Each agent becomes a `### Function: <name>（平台注册）` sub-block.
+Agent tools sit in the skill body's single **tool definitions** section. Each agent becomes a `### Function: <name>` sub-block.
 
 Mapping rules:
 
 | JSON field | Markdown field |
 |------------|----------------|
-| `name` (或缺失时用 `agentId`) | `### Function: <name>（平台注册）` heading |
+| `name` (或缺失时用 `agentId`) | `### Function: <name>` heading |
 | `agentId` | `- **toolName**: <agentId>` |
 | `description` | `- **description**` |
 | `parameters` | `- **参数**: （由平台自动注入）` |
@@ -139,7 +139,7 @@ Mapping rules:
 Example — given the `travelAgent` definition above, generate:
 
 ```markdown
-### Function: travelAgent（平台注册）
+### Function: travelAgent
 - **toolName**: aaabbbccc
 - **description**: 查询出行相关资讯与方案
 - **参数**: （由平台自动注入）

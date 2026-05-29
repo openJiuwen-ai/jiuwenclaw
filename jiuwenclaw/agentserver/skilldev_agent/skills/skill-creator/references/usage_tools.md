@@ -141,7 +141,7 @@ toolDefinition:
 Generated:
 Document the Device tool in the skill body:
 ```markdown
-### Function: set_screen_brightness（平台注册）
+### Function: set_screen_brightness
 - **toolName**: set_screen_brightness
 - **description**: 设置设备屏幕亮度
 - **参数**:
@@ -150,13 +150,13 @@ Document the Device tool in the skill body:
 
 ## Generating the tool-definitions entry
 
-Inside the skill body's single **tool definitions** section (see SKILL.md → Writing principles), each function tool becomes a `### Function: <toolName>（平台注册）` sub-block.
+Inside the skill body's single **tool definitions** section (see SKILL.md → Writing principles), each function tool becomes a `### Function: <toolName>` sub-block.
 
 Mapping rules:
 
 | JSON field | Markdown field |
 |------------|----------------|
-| `toolName` | `### Function: <toolName>（平台注册）` heading + `- **toolName**` |
+| `toolName` | `### Function: <toolName>` heading + `- **toolName**` |
 | `description` | `- **description**` |
 | `arguments` | `- **参数**: （由平台自动注入）` |
 | (n/a) | `- **约束**` |
@@ -170,7 +170,7 @@ Mapping rules:
 Example — given the `weather_query` JSON above, generate:
 
 ```markdown
-### Function: weather_query（平台注册）
+### Function: weather_query
 - **toolName**: weather_query
 - **description**: 查询指定城市的实时天气信息
 - **参数**: （由平台自动注入）
