@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import json
+from datetime import date, datetime
 from pathlib import Path
 from typing import Any, ClassVar
 
@@ -12,6 +13,7 @@ from openjiuwen_runtime.foundation.log import get_logger
 
 from ...infrastructure.config import Settings
 from ...infrastructure.db import Database
+from ...infrastructure.utils import format_ts
 from .schemas import SLOT_ENTITY_TABLE, TemplateRefSlot
 
 logger = get_logger(__name__)
@@ -138,7 +140,9 @@ def _row_to_dict(row: Any) -> dict[str, Any]:
     out = {k: v for k, v in out.items() if not k.startswith("_sa_")}
 
     for key, value in list(out.items()):
-        if isinstance(value, str):
+        if isinstance(value, (datetime, date)):
+            out[key] = format_ts(value)
+        elif isinstance(value, str):
             parsed = _parse_json_string(value)
             if parsed is not value:
                 out[key] = parsed

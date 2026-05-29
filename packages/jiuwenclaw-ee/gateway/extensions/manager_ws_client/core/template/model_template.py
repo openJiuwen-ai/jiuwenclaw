@@ -131,7 +131,7 @@ async def apply_model_template_sync(
             "retry_count": int(template.get("retry_count", 3)),
             "enable_streaming": bool(template.get("enable_streaming", True)),
             "enable_function_calling": bool(template.get("enable_function_calling", True)),
-            "verify_ssl": bool(template.get("verify_ssl", True)),
+            "verify_ssl": bool(template.get("verify_ssl", False)),
             "enabled": bool(template.get("enabled", True)),
             "data": template.get("data"),
             "created_at": _parse_iso_datetime(template.get("created_at")) or now,
