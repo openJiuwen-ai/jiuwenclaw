@@ -41,54 +41,7 @@ SKILLDEV_AGENT_SYSTEM_PROMPT = """
 
 当 Skill 依赖外部 API、规范或实时资料时，使用 web search/fetch 获取信息，并把稳定参考沉淀到 `references/`。
 
-## 1.6 外部工具（用户上传）
-
-当用户在 `resources/available-tools/` 上传了工具定义时，每个工具落盘为 `<pluginId>__<toolName>.json`，并自动生成 `tool_usage.json`。
-
-**开发阶段试调**（`function_call_tool`，三字段均必填；`pluginId`、`toolName`、`arguments` 均从 `tool_usage.json` 读取，勿臆造）：
-```json
-{{"pluginId": "<插件ID>", "toolName": "<工具名>", "arguments": {{}}}}
-```
-无参工具用空对象 `{{}}`；有参时按 `tool_usage.json` 中该工具的 `parameters` 填写键值。
-
-**沉淀到 Skill 包（生成/更新 skill 时必做）**
-
-外部依赖通过 `skill/<skill-name>/SKILL.md` 的 `metadata` 声明；打包器会根据声明自动从 `resources/` 复制依赖定义到 Skill 包的 `references/` 目录。不要手工复制这些依赖 JSON。
-
-- `metadata.tools` 中每一项必须包含真实的 `pluginId`/`toolName`；打包器会从 `resources/available-tools/<pluginId>__<toolName>.json` 复制到 `skill/<skill-name>/references/available-tools/<pluginId>__<toolName>.json`。
-- `metadata.agents` 非空时，打包器会从 `resources/agents/available_agents.json` 复制到 `skill/<skill-name>/references/agents/available_agents.json`。
-- `metadata.clis` 非空时，打包器会从 `resources/clis/available_clis.json` 复制到 `skill/<skill-name>/references/clis/available_clis.json`。
-- 若源文件不存在，先核对 `resources/` 和 `metadata` 是否一致，勿臆造 JSON。
-
-**写入 skill/<skill-name>/SKILL.md 的 frontmatter**
-
-- **无外部依赖**（本 Skill 不依赖外部插件、Agent 或 CLI）：frontmatter **仅** `name`、`description`（及可选 `license`、`compatibility`）。**不得**出现 `allowed-tools` 或 `metadata`；**禁止**空占位（如 `allowed-tools: []`、`metadata: {{tools: []}}`）。
-- **本 Skill 确实需要外部插件时**（且 `metadata.tools` 至少有一项，每项含真实 `pluginId`/`toolName`），才在 frontmatter 追加：
-
-```yaml
-allowed-tools:
-  - function_call_tool(*)
-metadata:
-  tools:
-    - pluginId: <插件ID>
-      toolName: <工具名>
-```
-
-- **本 Skill 确实需要 Agent 或 CLI 时**，在 `metadata` 中追加非空的 `agents` 或 `clis` 列表，并在正文给出对应调用形态示例：
-
-```yaml
-metadata:
-  agents:
-    - agentId: <Agent ID>
-  clis:
-    - cliName: <CLI 名称>
-```
-
-仅上传了依赖定义但 Skill 逻辑不需要调用时，**同样不要**写 `allowed-tools` 或 `metadata`。
-
-正文：仅在使用外部插件时说明如何通过 `function_call_tool` 调用；**不要**写 `python xxx.py` 脚本命令；未使用外部插件时正文也不要提及 `function_call_tool`。
-
-## 1.7 Skill name 硬性约束
+## 1.6 Skill name 硬性约束
 
 `SKILL.md` frontmatter 的 `name` 是机器可读标识，不是展示标题。它必须满足：
 
@@ -99,7 +52,7 @@ metadata:
 
 如果用户要求把 skill name 改成中文或任何不满足上述格式的名称，必须拒绝修改该字段，并简短说明格式限制。可以保留当前合法 name，或在需要改名时给出符合上述格式的 ASCII kebab-case 替代名；不要把中文写入 `name` 或 Skill 目录名。中文可用于 `description` 或正文说明。
 
-## 1.8 运行环境
+## 1.7 运行环境
 
 当前运行平台：`{os_type}`
 

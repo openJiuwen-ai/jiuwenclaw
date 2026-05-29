@@ -1,6 +1,6 @@
 # TOOL Definition Usage
 
-Translate toolDefinition entries from `<workspace>/resources/available-tools/<pluginId>__<toolName>.json` into `invoke(funcName:"toolName", params:{...})` calls in the new skill.
+Translate toolDefinition entries from `<workspace>/resources/available-tools/<bundleName>__<toolName>.json` into `invoke(funcName:"toolName", params:{bundleName:"...", ...})` calls in the new skill.
 
 ## Metadata Note
 
@@ -9,31 +9,31 @@ If the skill uses function tool dependencies, declare each tool in `SKILL.md` fr
 ```yaml
 metadata:
   tools:
-    - pluginId: "plugin_001"
+    - bundleName: "bundle_001"
       toolName: "weather_query"
 ```
 
-Only declare tools the skill actually calls. Do not add empty placeholders. `pluginId` and `toolName` must match the source filename and JSON exactly.
+Only declare tools the skill actually calls. Do not add empty placeholders. `bundleName` and `toolName` must match the source filename and JSON exactly.
 
 ## Input shape
 
 `invoke` uses the toolDefinition `toolName` as `funcName` and passes tool arguments through `params`:
 
 ```text
-invoke(funcName:"weather_query", params:{city:"北京"})
+invoke(funcName:"weather_query", params:{bundleName:"bundle_001", city:"北京"})
 ```
 
-`params` is the actual argument object passed to the tool. Build it from the `toolDefinition.arguments` JSON Schema. If `toolDefinition.arguments.required` lists fields, include every required field in `params`.
+`params.bundleName` is always required and comes from `toolDefinition.bundleName`. The remaining params are the actual argument object passed to the tool. Build them from the `toolDefinition.arguments` JSON Schema. If `toolDefinition.arguments.required` lists fields, include every required field in `params`.
 
 ## toolDefinition fields
 
-Read the source toolDefinition from `<workspace>/resources/available-tools/<pluginId>__<toolName>.json`:
+Read the source toolDefinition from `<workspace>/resources/available-tools/<bundleName>__<toolName>.json`:
 
 ```json
 {
   "schemaVersion": "1.3",
   "generatedAt": "2026-04-30T00:00:00Z",
-  "pluginId": "plugin_001",
+  "bundleName": "bundle_001",
   "toolName": "weather_query",
   "toolType": "XiaoYiPlugin",
   "pluginType": "Cloud",
@@ -52,7 +52,7 @@ Field notes:
 
 | Field | Required | How to use it |
 | --- | --- | --- |
-| `pluginId` | Yes | Used in metadata and source filename; do not pass to `invoke`. |
+| `bundleName` | Yes | Copy exactly into metadata, source filename, and `invoke.params.bundleName`. |
 | `toolName` | Yes | Copy exactly into `invoke.funcName`. |
 | `description` | Yes | Use to decide when the tool should be called. |
 | `arguments` | Yes | JSON Schema used to construct `invoke.params`. |
@@ -65,7 +65,8 @@ Field notes:
 
 ## Safety
 
-- Copy `pluginId` and `toolName` exactly; never invent IDs or names.
+- Copy `bundleName` and `toolName` exactly; never invent IDs or names.
+- Always include `bundleName` in `invoke.params`.
 - Build `invoke.params` as structured data, never as command text.
 - Include all required fields from `toolDefinition.arguments.required`.
 - Preserve schema value types.
@@ -79,7 +80,7 @@ toolDefinition:
 {
   "schemaVersion": "1.3",
   "generatedAt": "2026-04-28T10:00:00Z",
-  "pluginId": "plugin_001",
+  "bundleName": "bundle_001",
   "toolName": "weather_query",
   "toolType": "XiaoYiPlugin",
   "description": "查询指定城市的实时天气信息",
@@ -101,7 +102,7 @@ toolDefinition:
 Generated:
 Call the platform tool to execute:
 ```
-    invoke(funcName:"weather_query", params:{city:"北京"})
+    invoke(funcName:"weather_query", params:{bundleName:"bundle_001", city:"北京"})
 ```
 
 ## Generating the tool-definitions entry

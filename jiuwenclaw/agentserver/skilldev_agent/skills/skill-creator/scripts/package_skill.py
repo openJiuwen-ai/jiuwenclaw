@@ -89,14 +89,14 @@ def collect_tool_sources(metadata: dict, workspace_path: Path) -> tuple[list[tup
                 if not isinstance(tool, dict):
                     errors.append(f"metadata.tools[{index}] must be a mapping")
                     continue
-                plugin_id = str(tool.get("pluginId") or tool.get("plugin_id") or "").strip()
+                bundle_name = str(tool.get("bundleName") or tool.get("bundle_name") or "").strip()
                 tool_name = str(tool.get("toolName") or tool.get("tool_name") or "").strip()
-                if not plugin_id or not tool_name:
+                if not bundle_name or not tool_name:
                     errors.append(
-                        f"metadata.tools[{index}] must include pluginId and toolName"
+                        f"metadata.tools[{index}] must include bundleName and toolName"
                     )
                     continue
-                filename = f"{plugin_id}__{tool_name}.json"
+                filename = f"{bundle_name}__{tool_name}.json"
                 source_pairs.append((
                     workspace_path / "resources" / "available-tools" / filename,
                     reference_path / "tools" / filename,
