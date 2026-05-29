@@ -21,6 +21,8 @@ from jiuwenclaw.agentserver.deep_agent.permissions.owner_scopes import (
     PermissionContext,
 )
 from jiuwenclaw.agentserver.cron_config import should_register_cron_tools
+from jiuwenclaw.agentserver.memory.external_memory_config import is_builtin_memory_allowed
+from jiuwenclaw.config import get_config
 from jiuwenclaw.utils import logger
 
 _MEMORY_WRITE_TOOLS = frozenset({"write_memory", "edit_memory"})
@@ -55,11 +57,35 @@ class AvatarPromptRail(DeepAgentRail):
             builder.remove_section(name)
         self._injected_sections.clear()
 
+        language = getattr(builder, "language", "cn") or "cn"
+
+        # forbidden_memory — engine=none 或自定义 forbidden 配置时注入，不依赖数字分身功能
+        engine_disabled = not is_builtin_memory_allowed(get_config())
+        try:
+            from jiuwenclaw.agentserver.memory.forbidden import get_forbidden_memory_prompt
+            forbidden = get_forbidden_memory_prompt(language) or ""
+        except Exception as e:
+            logger.debug("[AvatarRail] 加载 forbidden_memory 失败: %s", e)
+            forbidden = ""
+
+        if engine_disabled or forbidden:
+            parts = []
+            if engine_disabled:
+                parts.append(_build_memory_disabled_prompt(language))
+            if forbidden:
+                parts.append(forbidden)
+            content = "\n\n".join(parts)
+            section = PromptSection(
+                name="forbidden_memory",
+                content={language: content},
+                priority=_AVATAR_PROMPT_PRIORITY + 3,
+            )
+            builder.add_section(section)
+            self._injected_sections.add("forbidden_memory")
+
         perm_ctx = TOOL_PERMISSION_CONTEXT.get()
         if perm_ctx is None:
             return
-
-        language = getattr(builder, "language", "cn") or "cn"
 
         # 数字分身身份提示词（仅群聊数字分身模式）
         if perm_ctx.group_digital_avatar and perm_ctx.avatar_mode:
@@ -110,20 +136,6 @@ class AvatarPromptRail(DeepAgentRail):
             )
             builder.add_section(section)
             self._injected_sections.add("memory_fully_disabled")
-
-        try:
-            from jiuwenclaw.agentserver.memory.forbidden import get_forbidden_memory_prompt
-            forbidden = get_forbidden_memory_prompt(language)
-            if forbidden:
-                section = PromptSection(
-                    name="forbidden_memory",
-                    content={language: forbidden},
-                    priority=_AVATAR_PROMPT_PRIORITY + 3,
-                )
-                builder.add_section(section)
-                self._injected_sections.add("forbidden_memory")
-        except Exception as e:
-            logger.debug("[AvatarRail] 加载 forbidden_memory 失败: %s", e)
 
     async def before_tool_call(self, ctx: AgentCallbackContext) -> None:
         """拦截记忆工具调用。
@@ -283,6 +295,7 @@ def _build_memory_fully_disabled_prompt(language: str) -> str:
 - If the user asks about historical information or requests to remember something, reply: \
     "The memory system is currently disabled. I cannot access historical records or save new information."
 """
+ 
 
 
 __all__ = [
