@@ -21,7 +21,7 @@ class ModelTemplateCreateBody(BaseModel):
     retry_count: int = Field(default=3, ge=0)
     enable_streaming: bool = True
     enable_function_calling: bool = True
-    verify_ssl: bool = True
+    verify_ssl: bool = False
     enabled: bool = True
     data: dict[str, Any] | None = None
 

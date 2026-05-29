@@ -36,6 +36,33 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
+# 与 Gateway ``AGENT_SERVER_IMAGE`` / ``runtime_management_client`` K8s ``ContainerSpec`` 对齐
+_DEMO_AGENT_SERVER_IMAGE = (
+    "swr.cn-north-4.myhuaweicloud.com/openjiuwen/jiuwenclaw-agentserver-amd64:0.0.45k"
+)
+
+
+def _demo_agent_server_base() -> dict[str, Any]:
+    """``service_config`` 模板公共字段（覆盖 Runtime 中 ``cfg`` 可读的键）。"""
+    return {
+        "agent_image": _DEMO_AGENT_SERVER_IMAGE,
+        "namespace": "jiuwenclaw",
+        "container_name": "agent-server",
+        "container_port": 18092,
+        "port_name": "http1",
+        "image_pull_policy": "IfNotPresent",
+        "readiness_initial_delay": 5,
+        "readiness_period": 10,
+        "ready_timeout": 300,
+        "ready_poll_interval": 2,
+        "service_ttl": 30,
+        "autoscale_interval": 0.2,
+        "message_timeout": 300,
+        "session_concurrency": 10,
+        "session_ttl": 20,
+    }
+
+
 try:
     import httpx
 except ImportError as _httpx_import_error:  # pragma: no cover
@@ -354,16 +381,14 @@ def _skill_whitelist_templates() -> list[tuple[str, dict[str, Any]]]:
 
 
 def _service_config_templates() -> list[tuple[str, dict[str, Any]]]:
+    base = _demo_agent_server_base()
     return [
         (
             "S1 销售组 AgentServer 池",
             {
+                **base,
                 "template_name": "销售组 AgentServer 池",
                 "description": "销售通道 g_demo_sales 使用的 AgentServer 动态池",
-                "agent_image": "jiuwenclaw/agent-server:latest",
-                "namespace": "jiuwenclaw",
-                "container_name": "agent-server",
-                "container_port": 8080,
                 "min_idle_services": 2,
                 "max_services": 10,
                 "service_concurrency": 5,
@@ -374,14 +399,12 @@ def _service_config_templates() -> list[tuple[str, dict[str, Any]]]:
         (
             "S2 全局兜底 AgentServer 池",
             {
+                **base,
                 "template_name": "全局兜底 AgentServer 池",
                 "description": "未命中服务策略时的最小 AgentServer 池",
-                "agent_image": "jiuwenclaw/agent-server:latest",
-                "namespace": "jiuwenclaw",
-                "container_name": "agent-server",
-                "container_port": 8080,
                 "min_idle_services": 1,
                 "max_services": 5,
+                "service_concurrency": 10,
                 "enabled": True,
                 "data": {"demo": "s2"},
             },
@@ -490,7 +513,6 @@ def seed_demo_config(client: ManagerClient) -> dict[str, Any]:
                 "vision_model": [m2],
                 "skill_whitelist": [w1, w2],
                 "extension_config": [e1, e2],
-                "service_config": [s1],
             },
             "enabled": True,
             "data": {
@@ -501,14 +523,13 @@ def seed_demo_config(client: ManagerClient) -> dict[str, Any]:
     sales_id = _require_id(sales, "service-policies/sales")
     result["service_policy_sales_id"] = sales_id
     logger.info(
-        "  [2.5.1] 销售通道 priority=100 -> id=%s (default_model=%s, skills=%s,%s, ext=%s,%s, service=%s)",
+        "  [2.5.1] 销售通道 priority=100 -> id=%s (default_model=%s, skills=%s,%s, ext=%s,%s)",
         sales_id,
         m2,
         w1,
         w2,
         e1,
         e2,
-        s1,
     )
 
     fallback = client.post(
@@ -594,7 +615,6 @@ def seed_demo_config(client: ManagerClient) -> dict[str, Any]:
                 "vision_model": [m1],
                 "skill_whitelist": [w3],
                 "extension_config": [e4],
-                "service_config": [s2],
             },
             "enabled": True,
             "data": {},
@@ -603,12 +623,11 @@ def seed_demo_config(client: ManagerClient) -> dict[str, Any]:
     global_id = _require_id(global_row, "global-policies")
     result["global_policy_id"] = global_id
     logger.info(
-        "  [2.7] 全局兜底 -> id=%s (四槽位=%s, skill=%s, ext=%s, service=%s)",
+        "  [2.7] 全局兜底 -> id=%s (四槽位=%s, skill=%s, ext=%s)",
         global_id,
         m1,
         w3,
         e4,
-        s2,
     )
 
     logger.info("[8/8] 创建 config-default-template-mappings")
