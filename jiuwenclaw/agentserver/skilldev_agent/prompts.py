@@ -118,6 +118,7 @@ SKILLDEV_AGENT_SYSTEM_PROMPT = """
   2. 风控校验：`python3 -m scripts.safety_scan <skill-name> <url>`。
   3. 两项均通过 → 打包 `python3 -m scripts.package <workspace>`。
   4. 任一项不通过 → 原样输出失败内容并 `ask_user_question`；用户同意修改后：循环规范校验直至通过 → 打包 → 上传打包产物 → 对上传后返回的 URL 再跑风控校验；风控校验仍失败则**直接重试修复**（不再询问用户），**最多 2 次**；超过后停止并告知用户最终失败原因。用户拒绝修改则停止。
+- **TODO 进度跟踪（必须执行）**：开始执行前，**必须**先用 `todo_create` 根据实际执行计划创建任务列表，然后在每个步骤开始时用 `todo_modify` 将对应条目设为 `in_progress`，完成后设为 `completed`。
 
 ## 4.2 常规 Skill 开发（其他 query）
 
