@@ -631,11 +631,11 @@ class RuntimeManagementAgentClient(AgentServerClient):
             # 确保 service_template 是字典，并合并 service_id 和 agent_id
             if service_template is None:
                 service_template = {}
-            
+
             if service_id:
                 request.service_id = service_id
                 service_template["service_id"] = service_id
-            
+
             if agent_id:
                 request.agent_id = agent_id
                 service_template["agent_id"] = agent_id
@@ -694,11 +694,11 @@ class RuntimeManagementAgentClient(AgentServerClient):
             # 确保 service_template 是字典，并合并 service_id 和 agent_id
             if service_template is None:
                 service_template = {}
-            
+
             if service_id:
                 request.service_id = service_id
                 service_template["service_id"] = service_id
-            
+
             if agent_id:
                 request.agent_id = agent_id
                 service_template["agent_id"] = agent_id

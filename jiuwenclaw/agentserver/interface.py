@@ -473,8 +473,25 @@ class JiuWenClaw:
         inputs["enable_memory"] = enable_memory
 
         # 传递 extension_config（供 Rails 消费）
+        # 优先从 metadata 读取，fallback 到 params（Gateway WebSocket 请求中放在 params）
+        ext_config = None
         if request.metadata and "extension_config" in request.metadata:
-            inputs["extension_config"] = request.metadata["extension_config"]
+            ext_config = request.metadata["extension_config"]
+        elif "extension_config" in request.params:
+            ext_config = request.params["extension_config"]
+        if ext_config is not None:
+            inputs["extension_config"] = ext_config
+            logger.info("[JiuWenClaw] extension_config added to inputs: %s", ext_config)
+
+        # 将 extension_config 放入 run_context.extra 中，供 Rails 消费
+        # 注意：openjiuwen 框架从 inputs["run"]["context"] 解析 RunContext
+        # _normalize_inputs 会用 RunContext(**context_data) 构造，因此传 dict
+        if ext_config is not None:
+            run_context_dict = {"extra": {"extension_config": ext_config}}
+            if "run" not in inputs or not isinstance(inputs["run"], dict):
+                inputs["run"] = {}
+            inputs["run"]["context"] = run_context_dict
+            logger.info("[JiuWenClaw] run_context added to inputs[run][context]: %s", run_context_dict)
 
         run = request.params.get("run")
         if run:
@@ -487,6 +504,7 @@ class JiuWenClaw:
 
         # 返回原始 query（未经 build_user_prompt 包装）
         # Team 模式需要使用原始 query，而不是 JSON 包装后的 prompt
+        logger.info("[JiuWenClaw] _build_inputs returning inputs keys=%s", list(inputs.keys()))
         return inputs, memory_mode, query
 
     def _build_interactive_input_from_answers(
