@@ -163,7 +163,7 @@ class RuntimePromptRail(DeepAgentRail):
                 "search queries must prefer the current year or date."
             )
 
-        ctx.extra.setdefault("_system_reminders", []).append({
+        ctx.extra.setdefault("environment_context", []).append({
             "content": time_content,
             "source": "time_rail",
         })

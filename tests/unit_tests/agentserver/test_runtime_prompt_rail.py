@@ -3,12 +3,12 @@
 """Full-coverage tests for RuntimePromptRail system-reminder changes.
 
 Verifies that RuntimePromptRail:
-  1. Writes time content to ctx.extra["_system_reminders"] instead of builder
+  1. Writes time content to ctx.extra["environment_context"] instead of builder
   2. Still adds runtime/workspace sections to builder
   3. uninit() removes runtime/workspace/request_system_prompt but NOT time
   4. CN/EN language variants produce correct content
   5. Time refreshes on each model call
-  6. ctx.extra["_system_reminders"] structure is correct
+  6. ctx.extra["environment_context"] structure is correct
 """
 import asyncio
 import unittest
@@ -37,14 +37,14 @@ class TestBeforeModelCallCtxExtraInjection(unittest.TestCase):
         return rail, builder, ctx
 
     def test_writes_time_to_ctx_extra_not_builder(self):
-        """Time content goes to ctx.extra['_system_reminders'], not builder."""
+        """Time content goes to ctx.extra['environment_context'], not builder."""
         rail, builder, ctx = self._make_rail_and_ctx()
         asyncio.run(rail.before_model_call(ctx))
 
-        assert "_system_reminders" in ctx.extra
-        assert len(ctx.extra["_system_reminders"]) == 1
-        assert ctx.extra["_system_reminders"][0]["source"] == "time_rail"
-        assert "当前日期" in ctx.extra["_system_reminders"][0]["content"]
+        assert "environment_context" in ctx.extra
+        assert len(ctx.extra["environment_context"]) == 1
+        assert ctx.extra["environment_context"][0]["source"] == "time_rail"
+        assert "当前日期" in ctx.extra["environment_context"][0]["content"]
 
         # Builder should NOT have a "time" section
         built = builder.build()
@@ -55,7 +55,7 @@ class TestBeforeModelCallCtxExtraInjection(unittest.TestCase):
         rail, builder, ctx = self._make_rail_and_ctx()
         asyncio.run(rail.before_model_call(ctx))
 
-        entry = ctx.extra["_system_reminders"][0]
+        entry = ctx.extra["environment_context"][0]
         assert isinstance(entry["content"], str)
         assert isinstance(entry["source"], str)
         assert entry["source"] == "time_rail"
@@ -65,7 +65,7 @@ class TestBeforeModelCallCtxExtraInjection(unittest.TestCase):
         rail, builder, ctx = self._make_rail_and_ctx(language="cn")
         asyncio.run(rail.before_model_call(ctx))
 
-        content = ctx.extra["_system_reminders"][0]["content"]
+        content = ctx.extra["environment_context"][0]["content"]
         assert "# 当前日期" in content
         assert "- 当前日期：" in content
         assert "- 当前年份：" in content
@@ -76,7 +76,7 @@ class TestBeforeModelCallCtxExtraInjection(unittest.TestCase):
         rail, builder, ctx = self._make_rail_and_ctx(language="en")
         asyncio.run(rail.before_model_call(ctx))
 
-        content = ctx.extra["_system_reminders"][0]["content"]
+        content = ctx.extra["environment_context"][0]["content"]
         assert "# Current Date" in content
         assert "- Current date:" in content
         assert "- Current year:" in content
@@ -89,7 +89,7 @@ class TestBeforeModelCallCtxExtraInjection(unittest.TestCase):
         rail, builder, ctx = self._make_rail_and_ctx()
         asyncio.run(rail.before_model_call(ctx))
 
-        content = ctx.extra["_system_reminders"][0]["content"]
+        content = ctx.extra["environment_context"][0]["content"]
         # Date pattern: YYYY-MM-DD
         import re
         assert re.search(r"\d{4}-\d{2}-\d{2}", content)
@@ -99,7 +99,7 @@ class TestBeforeModelCallCtxExtraInjection(unittest.TestCase):
         rail, builder, ctx = self._make_rail_and_ctx()
         asyncio.run(rail.before_model_call(ctx))
 
-        content = ctx.extra["_system_reminders"][0]["content"]
+        content = ctx.extra["environment_context"][0]["content"]
         import re
         year_match = re.search(r"当前年份：(\d{4})|Current year: (\d{4})", content)
         assert year_match
@@ -112,8 +112,8 @@ class TestBeforeModelCallCtxExtraInjection(unittest.TestCase):
         rail_cn, _, ctx_cn = self._make_rail_and_ctx(timezone_offset=8)
         asyncio.run(rail_cn.before_model_call(ctx_cn))
 
-        utc_time = ctx_utc.extra["_system_reminders"][0]["content"]
-        cn_time = ctx_cn.extra["_system_reminders"][0]["content"]
+        utc_time = ctx_utc.extra["environment_context"][0]["content"]
+        cn_time = ctx_cn.extra["environment_context"][0]["content"]
         # Both should have valid date format
         import re
         utc_dt = re.search(r"\d{4}-\d{2}-\d{2}", utc_time).group()
@@ -367,7 +367,7 @@ class TestEdgeCases(unittest.TestCase):
         asyncio.run(rail.before_model_call(ctx))
 
         # No reminder should be written when builder is None
-        assert "_system_reminders" not in ctx.extra
+        assert "environment_context" not in ctx.extra
 
     def test_request_system_prompt_added_to_builder_when_set(self):
         """request_system_prompt is added to builder when self._request_system_prompt is set."""
