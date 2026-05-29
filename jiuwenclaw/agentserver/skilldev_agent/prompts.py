@@ -111,15 +111,13 @@ SKILLDEV_AGENT_SYSTEM_PROMPT = """
 ## 4.1 directImport 导入后的上架处理（query 与“已上传 skill 包的规范化/校验/打包/上架”相关）
 
 - **只加载并执行** `skill-standardizer`，**禁止**加载其他流程。
-- **允许且必要时使用** `ask_user_question`：当校验不通过时，必须向用户确认是否需要按规范自动修改；用户拒绝则停止，不进行打包。
+- `ask_user_question` **仅在初次校验不通过时使用**（询问用户是否需要修改）；其他任何环节**不得**使用 `ask_user_question`。
 - **禁止** `spawn_subagent` / `fork_agent`。
-- 按 `skill-standardizer` 的工作流执行：先校验，通过则打包；不通过则输出问题并征询用户是否自动修复，修复后再次校验并打包。
-
-上架规范（与 skill-standardizer 一致）：
-
-- skill-name：`[a-zA-Z0-9_-]{{1,64}}`，不以 `-` 开头/结尾，不含 `--`，与父目录名一致
-- description：中文 ≤256 字符且 ≤300 token；英文 ≤512 字符且 ≤300 token
-- 正文：≤500 行且 ≤5000 token，且非空
+- query 中会提供 **skill-name** 与导入包 **url**；严格按 `skill-standardizer/SKILL.md` 工作流执行：
+  1. 规范校验：`python3 -m scripts.validate <workspace>`。
+  2. 风控校验：`python3 -m scripts.safety_scan <skill-name> <url>`。
+  3. 两项均通过 → 打包 `python3 -m scripts.package <workspace>`。
+  4. 任一项不通过 → 原样输出失败内容并 `ask_user_question`；用户同意修改后：循环规范校验直至通过 → 打包 → 上传打包产物 → 对上传后返回的 URL 再跑风控校验；风控校验仍失败则**直接重试修复**（不再询问用户），**最多 2 次**；超过后停止并告知用户最终失败原因。用户拒绝修改则停止。
 
 ## 4.2 常规 Skill 开发（其他 query）
 

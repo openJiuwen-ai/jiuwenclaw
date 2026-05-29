@@ -57,6 +57,7 @@ from jiuwenclaw.agentserver.skilldev_agent.meta_tools.external_tool_registry imp
 )
 from jiuwenclaw.agentserver.skilldev_agent.utils.direct_import import (
     collect_skill_packages,
+    extract_import_url,
     extract_packages_to_skill_dir,
     find_skill_root,
 )
@@ -599,12 +600,22 @@ class SkillDevDeepAdapter:
             )
 
         await self.update_workspace(task_workspace)
+        import_url = extract_import_url(params)
+        import_url_block = (
+            f"导入包 url（风控校验必填，传给 safety_scan.py）：{import_url}\n"
+            if import_url
+            else "导入包 url：未提供（风控校验可能失败，请向用户说明）\n"
+        )
+        skill_name_hint = (
+            f"当前 skill-name（SKILL.md frontmatter name）：{skill_name}\n"
+            if skill_name
+            else ""
+        )
         combined_query = (
-            "请加载并执行内置技能 skill-standardizer，对当前工作区的已导入 skill 进行校验与规范化，并按规则处理：\n"
-            "- 先运行校验（python -m scripts.validate <workspace>）。\n"
-            "- 若校验通过：直接打包（python -m scripts.package <workspace>）。\n"
-            "- 若校验不通过：把不通过的内容输出给用户，并使用 ask_user_question 询问是否需要自动修改；\n"
-            "  用户选择需要修改则按规范修复，修复后再次校验并打包；用户选择不需要修改则停止。\n\n"
+            "请加载并执行内置技能 skill-standardizer，对当前工作区的已导入 skill 进行规范校验与风控校验，"
+            "并按 skill-standardizer/SKILL.md 工作流处理。\n"
+            f"{skill_name_hint}"
+            f"{import_url_block}\n"
             "用户原始请求：\n"
             f"{query}"
         )

@@ -3,9 +3,21 @@
 from pathlib import Path
 
 from jiuwenclaw.agentserver.skilldev_agent.utils.direct_import import (
+    extract_import_url,
     find_skill_root,
     validate_direct_import_skill,
 )
+
+
+def test_extract_import_url_from_files() -> None:
+    assert extract_import_url(
+        {"files": [{"filename": "pkg.zip", "url": "https://example.com/pkg"}]}
+    ) == "https://example.com/pkg"
+    assert extract_import_url(
+        {"files": [{"filename": "pkg.zip", "url": " https://x "}]}
+    ) == "https://x"
+    assert extract_import_url({"files": [{"url": "https://no-suffix"}]}) is None
+    assert extract_import_url({"files": [{}]}) is None
 
 
 def test_validate_direct_import_skill_ok(tmp_path: Path) -> None:

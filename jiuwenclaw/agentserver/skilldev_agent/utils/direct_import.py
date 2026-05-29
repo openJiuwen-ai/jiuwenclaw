@@ -38,6 +38,32 @@ EXCLUDE_FILES = {".DS_Store"}
 ROOT_EXCLUDE_DIRS = {"evals", "output"}
 
 
+def extract_import_url(params: dict[str, Any]) -> str | None:
+    """从 directImport 的 skill 包条目中提取 url（files / skill_packages，用于风控校验）。"""
+
+    def _url_from_package(item: dict[str, Any]) -> str | None:
+        name = str(item.get("filename") or item.get("name") or "").strip()
+        if Path(name).suffix.lower() not in (".zip", ".skill"):
+            return None
+        raw = item.get("url")
+        if raw is None:
+            return None
+        value = str(raw).strip()
+        return value or None
+
+    for item in params.get("skill_packages") or params.get("skillPackages") or []:
+        if isinstance(item, dict):
+            value = _url_from_package(item)
+            if value:
+                return value
+    for item in params.get("files") or []:
+        if isinstance(item, dict):
+            value = _url_from_package(item)
+            if value:
+                return value
+    return None
+
+
 def collect_skill_packages(params: dict[str, Any]) -> list[dict[str, Any]]:
     """收集 directImport 需解压的 skill 压缩包（skill_packages 及 files 中的 zip/.skill）。"""
     packages: list[dict[str, Any]] = []

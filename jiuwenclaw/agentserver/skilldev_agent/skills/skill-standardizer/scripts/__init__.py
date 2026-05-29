@@ -1,1 +1,1 @@
-"""skill-standardizer CLI scripts."""
+# skill-standardizer scripts package

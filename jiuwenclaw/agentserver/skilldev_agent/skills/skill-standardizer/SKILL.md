@@ -1,61 +1,90 @@
 ---
 name: skill-standardizer
-description: Standardize user-uploaded skill packages to conform to the platform's design specifications. Inspect and fix SKILL.md frontmatter, directory structure, naming conventions, and body format. Use when the user uploads an existing skill package and asks to standardize, reformat, adapt, check compliance, or validate it — even if they just say "check this skill" or "make it match the spec."
+description: Use for directImport, compliance check, validate, standardize, or reformat of user-uploaded skill packages. Runs standard validation and risk-control scan; packages to output/ when both pass. On failure, report violations and ask_user_question whether to auto-fix; after upload, risk-control re-check auto-retries up to 2 times.
 ---
 
 # Skill Standardizer
 
-对用户上传到 `<workspace>/skill/` 的 skill 包做**规范化修改**，使其通过校验，并在完成修改后执行校验与打包输出到 `<workspace>/output/`。
+对用户上传到 `<workspace>/skill/` 的 skill 包进行**规范校验**与**风控校验**；两项均通过则打包。不通过则向用户说明问题并征询是否自动修复；修复上传后风控复检不通过时直接重试修复，最多 2 次，仍失败则告知用户原因并停止。
 
-## 规范（必须全部满足）
+## 上下文（query 中提供）
 
-- **skill-name**（`SKILL.md` frontmatter 的 `name`）：必须匹配 `[a-zA-Z0-9_-]{1,64}`；不以 `-` 开头/结尾；不含连续 `--`；必须与 `SKILL.md` 所在父目录名一致
-- **description**（frontmatter 的 `description`）：中文 ≤256 字符且 ≤300 token；英文 ≤512 字符且 ≤300 token
-- **正文**（frontmatter 后的内容）：行数 ≤500；token 数 ≤5000；且非空
+- **skill-name**：`SKILL.md` frontmatter 的 `name`
+- **url**：用户导入 skill 包的访问地址，用于首次风控校验
+
+## 规范校验（必须通过）
+
+运行：`python3 -m scripts.validate <workspace>`
+
+须满足：
+
+- **name**（kebab-case）：仅小写字母、数字、连字符（`^[a-z0-9-]+$`）；不以 `-` 开头/结尾；不含连续 `--`；长度 ≤64；与 `SKILL.md` 所在父目录名一致
+- **description**：非空字符串；不得含 `<` 或 `>`；含 CJK 时 ≤512 字符，否则 ≤1024 字符
+- **正文**（frontmatter 之后）：非空；行数 ≤500
 
 ### 静态规则扫描（必须通过）
 
-- **危险命令**：`scripts/` 中禁止包含高危命令或高危组合（如 `rm -rf /`、`chmod 777`、`curl ... | bash`、`eval`）
-- **硬编码凭据**：正文和脚本中禁止包含硬编码的密钥/token/密码（如 `api_key = "sk-xxx"`）
-- **路径越界**：脚本内容中禁止出现目录穿越（如 `../..`、`..\\..`）
-- **权限一致性**：`requestPermissions` 声明的权限必须与正文中实际工具调用所需权限匹配
+- **危险命令**（`scripts/` 内逐行）：如 `rm -rf /`、`chmod 777`、`curl ... | bash`、`eval(`
+- **硬编码凭据**（`SKILL.md` 与 `scripts/`）：如 `api_key = "..."`、`sk-...` 等模式
+- **路径越界**：skill 包内相对路径的 path 组件不得含 `..`
 
-### LLM 语义审计（应该通过）
+脚本 stdout 为 `Validation passed.`（通过），或以 `Validation failed:` 开头（未通过，其后一行起为具体原因）；失败时把完整输出原样给用户。
 
-- **Prompt Injection**：正文禁止包含试图覆盖 Agent 系统指令的内容
-- **虚假声明**：description 禁止包含误导 Agent 激活决策的能力声明
-- **声明一致性**：description 中声明的能力应在正文的工具定义/经验攻略中有对应支撑
-- **权限提升**：正文禁止诱导 Agent 绕过权限检查执行操作
+## 风控校验（必须通过）
+
+运行：`python3 -m scripts.safety_scan <skill-name> <url>`
+
+- **首次**（规范+风控同时检查时）：`<url>` 使用 query 中提供的导入包 **url**
+- **修复后复检**（已上传打包产物）：`<url>` 使用 `upload_skill.py` 返回的 URL
+
+脚本 stdout 以 `Safety scan passed.` 或 `Safety scan failed:` 开头；失败时把完整输出原样给用户。
+
+## `ask_user_question` 使用限制
+
+**仅在 A.5（初次校验不通过）允许使用 `ask_user_question`**；除此之外整个流程**不得**使用 `ask_user_question`。
 
 ## 工作流
 
-1. 在 `<workspace>/skill/` 下定位 skill 根目录（包含 `SKILL.md` 的目录）。
-2. 按上述“规范”与“修改原则”对 skill 进行修改与规范化（通常改 `SKILL.md`；正文过长时可新增/调整 `references/`；如需满足 `name == 目录名` 可重命名 skill 目录）。
-3. 运行校验脚本（必须通过）：
-   - `python -m scripts.validate <workspace>`
-4. 若校验通过，运行打包脚本生成产物到 `<workspace>/output/`：
-   - `python -m scripts.package <workspace>`
-5. 若校验不通过：
-   - 先把**不通过的内容**原样输出给用户
-   - 使用 `ask_user_question` 询问用户是否需要自动按规范修改
-   - 用户选择需要修改：按规范修复后重新执行第 3 步与第 4 步
-   - 用户选择不需要修改：停止，不打包
+### A. 初次校验
+
+1. 在 `<workspace>/skill/` 下定位 skill 根目录。
+2. 运行规范校验：`python3 -m scripts.validate <workspace>`
+3. 运行风控校验：`python3 -m scripts.safety_scan <skill-name> <url>`
+4. **两项均通过**：运行打包 `python3 -m scripts.package <workspace>`，流程结束。
+5. **任一项不通过**：
+   - 把**不通过的内容**（脚本完整 stdout/stderr）原样输出给用户
+   - 使用 `ask_user_question` 询问用户是否需要修改
+   - 用户选择**不需要修改**：停止，不打包
+   - 用户选择**需要修改**：进入「B. 修复后流程」
+
+### B. 修复后流程（用户同意修改后）
+
+将修复计数 `attempt` 初始化为 0。
+
+1. 根据规范校验与风控校验的失败输出，修改 `<workspace>/skill/` 内原始 skill（遵循下方修改原则）。`attempt += 1`。
+2. 运行规范校验：`python3 -m scripts.validate <workspace>`
+   - 未通过 → 继续修改直到通过（无需询问用户，仍计入当前 attempt）。
+3. 打包：`python3 -m scripts.package <workspace>`。
+4. 上传打包产物：`python3 -m scripts.upload_skill <packaged_path>`，记录返回的 URL。
+5. 对第 4 步返回的 URL 再次进行风控校验：`python3 -m scripts.safety_scan <skill-name> <uploaded_url>`
+   - **通过**：向用户返回成功信息（含上传 URL），流程结束。
+   - **不通过**（无需询问用户，直接重试修复）：
+     - 若 `attempt < 2`：回到 B.1 继续修复。
+     - 若 `attempt >= 2`：向用户输出最终失败原因（含本次风控的完整输出），**停止，不再重试**。
 
 ## 修改原则
 
-- **最小改动**：只做为满足规范所必需的改动；避免无关重写与风格化润色。
-- **优先保持语义**：不改变原 skill 的核心用途与行为；仅修正不合规字段与结构。
-- **目录名与 name 对齐**：若 `name` 不合规或与目录名不一致，优先选择修改 `name` 或重命名目录，使两者严格一致（以最小破坏为准）。
-- **description 处理**：若超长，优先压缩为更短、更具体的一句话；禁止堆砌；必须同时满足字符与 token 限制。
-- **正文处理**：若过长，按以下顺序处理，直至 `SKILL.md` 正文满足行数与 token 限制：
-  1. 删除重复/无效内容（冗余示例、重复段落等）；
-  2. 若仍超限，将大块、按需查阅的内容拆到 `references/` 下的独立文件（如 API 说明、详细步骤、长示例），`SKILL.md` 正文只保留核心流程与必要指引，并用相对路径链接到拆分文件（例如 `详见 [references/xxx.md](references/xxx.md)`）；
-  3. 拆分后再次确认：`SKILL.md` 正文仍非空，且单独计入的正文行数与 token 数均达标；`references/` 中的文件不计入正文限制。
-- 正文必须保留必要的使用说明；不得把全部内容清空后仅靠空目录通过校验。
-- **不可修复时的策略**：如果存在无法在不改变语义的前提下满足限制的问题，优先通过精简表达而非新增内容来解决。
+- **最小改动**：只做为满足规范所必需的改动。
+- **优先保持语义**：不改变原 skill 核心用途与行为。
+- **目录名与 name 对齐**：使 `name` 与目录名严格一致（以最小破坏为准）。
+- **description**：超长则压缩；含中文时控制在 512 字符内，否则 1024 字符内；不得含尖括号。
+- **name**：须改为合法 kebab-case，并与目录名一致。
+- **正文**：先删冗余，仍超过 500 行则拆到 `references/` 并用相对路径引用（仅统计 `SKILL.md` 正文行数）。
+- 正文须保留必要使用说明，不得清空正文仅靠空目录通过校验。
 
 ## Hard rules
 
-1. 不要引入与本 Skill 无关的其他流程或内容。
+1. 不要引入与本 Skill 无关的其他流程。
 2. 只在 `<workspace>/skill/` 与 `<workspace>/output/` 范围内读写。
-3. **校验失败不得打包输出**（只有校验通过才允许运行打包）。
+3. **规范校验未通过不得打包**；**修复后未通过上传 URL 的风控校验不得向用户宣告可以上架**。
+4. 上传后风控复检不通过时**直接重试修复**（不询问用户），**最多 2 次**；超过后必须停止并告知用户失败原因。
