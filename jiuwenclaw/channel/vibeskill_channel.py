@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 import json
 import logging
 import os
@@ -164,6 +165,8 @@ class VibeSkillChannel(BaseChannel):
         self._ws_server: Any | None = None
         self._ws_heartbeat_tasks: dict[Any, asyncio.Task] = {}
         self._message_ctx: dict[str, dict[str, Any]] = {}
+        # question.replied 清空 _message_ctx 后，进行中的 tool 结果仍须落到 tool_call 时的 messageID/partID
+        self._detached_tool_parts: dict[str, dict[str, dict[str, Any]]] = {}
         self._pending_confirms: dict[str, dict[str, Any]] = {}
         self._listen_host = self._get_local_ip()
         
@@ -701,6 +704,7 @@ class VibeSkillChannel(BaseChannel):
 
         # 新一轮 skilldev 执行使用新的 assistant message_id
         self._clear_message_context_for_session(session.session_id)
+        self._clear_detached_tool_parts_for_session(session.session_id)
 
         await self._store.set_state(session.session_id, VibeSkillSessionState.BUSY)
         logger.info(
@@ -937,6 +941,8 @@ class VibeSkillChannel(BaseChannel):
             return False
 
         pending = self._pending_confirms.pop(request_id, None)
+        self._snapshot_detached_tool_parts(session_id)
+        self._clear_message_context_for_session(session_id)
 
         answers: list[dict[str, Any]] = []
         if isinstance(raw_answers, list):
@@ -1452,7 +1458,6 @@ class VibeSkillChannel(BaseChannel):
         """skilldev.tool_result - 工具结果"""
         if not session_id:
             return []
-        ctx = self._ensure_message_context(session_id)
         call_id = str(
             payload.get("tool_call_id")
             or payload.get("toolCallId")
@@ -1463,12 +1468,39 @@ class VibeSkillChannel(BaseChannel):
         tool_name = str(payload.get("tool_name") or payload.get("tool") or "").strip()
         success = bool(payload.get("success", True))
         result = payload.get("result") or payload.get("output") or ""
+        result_input = payload.get("arguments") or payload.get("params") or payload.get("input")
+        now_ms = int(time.time() * 1000)
+
+        detached = self._pop_detached_tool_part(session_id, call_id)
+        if detached is not None:
+            part = detached["part"]
+            message_id = str(detached.get("message_id") or part.get("messageID") or "").strip()
+            if message_id:
+                part["messageID"] = message_id
+            existing_time = part.get("state", {}).get("time", {})
+            existing_start = existing_time.get("start") if isinstance(existing_time, dict) else None
+            existing_input = part.get("state", {}).get("input")
+            part["state"] = {
+                "status": "completed" if success else "error",
+                "input": result_input if result_input is not None else existing_input,
+                "output": result,
+                "title": payload.get("title") or f"{tool_name or call_id} 执行结果",
+                "metadata": payload.get("metadata", {}),
+                "time": {
+                    "start": existing_start if existing_start is not None else now_ms,
+                    "end": now_ms,
+                },
+            }
+            return [{
+                "type": "message.part.updated",
+                "properties": self._serialize_part(part, external_sid),
+            }]
+
+        ctx = self._ensure_message_context(session_id)
         part, _ = self._ensure_tool_part(session_id, call_id, tool_name)
         existing_time = part.get("state", {}).get("time", {})
         existing_start = existing_time.get("start") if existing_time else None
         existing_input = part.get("state", {}).get("input")
-        result_input = payload.get("arguments") or payload.get("params") or payload.get("input")
-        now_ms = int(time.time() * 1000)
         part["state"] = {
             "status": "completed" if success else "error",
             "input": result_input if result_input is not None else existing_input,
@@ -2043,6 +2075,7 @@ class VibeSkillChannel(BaseChannel):
         if not sid:
             return
         self._clear_message_context_for_session(sid)
+        self._clear_detached_tool_parts_for_session(sid)
         try:
             state = await self._store.get_state(sid)
             if state == VibeSkillSessionState.BUSY:
@@ -2210,6 +2243,57 @@ class VibeSkillChannel(BaseChannel):
             self._message_ctx.pop("_default", None)
             return
         self._message_ctx.pop(sid, None)
+
+    def _clear_detached_tool_parts_for_session(self, session_id: str | None) -> None:
+        """移除 question.replied 后暂存的进行中 tool part 快照。"""
+        sid = str(session_id or "").strip()
+        if not sid:
+            self._detached_tool_parts.pop("_default", None)
+            return
+        self._detached_tool_parts.pop(sid, None)
+
+    def _snapshot_detached_tool_parts(self, session_id: str | None) -> None:
+        """在清空 _message_ctx 前，保存仍处 running 的 tool part（供后续 tool_result 复用 ID）。"""
+        sid = str(session_id or "").strip()
+        if not sid:
+            return
+        ctx = self._message_ctx.get(sid)
+        if not isinstance(ctx, dict):
+            return
+        tool_parts = ctx.get("tool_parts")
+        if not isinstance(tool_parts, dict) or not tool_parts:
+            return
+        store = self._detached_tool_parts.setdefault(sid, {})
+        message_id = str(ctx.get("message_id") or "").strip()
+        for call_id, part in tool_parts.items():
+            if not isinstance(part, dict):
+                continue
+            state = part.get("state") if isinstance(part.get("state"), dict) else {}
+            if str(state.get("status") or "") != "running":
+                continue
+            part_copy = copy.deepcopy(part)
+            part_message_id = str(part_copy.get("messageID") or message_id or "").strip()
+            if part_message_id:
+                part_copy["messageID"] = part_message_id
+            store[str(call_id).strip()] = {
+                "message_id": part_message_id,
+                "part": part_copy,
+            }
+
+    def _pop_detached_tool_part(
+        self, session_id: str | None, call_id: str
+    ) -> dict[str, Any] | None:
+        sid = str(session_id or "").strip()
+        cid = str(call_id or "").strip()
+        if not sid or not cid:
+            return None
+        session_store = self._detached_tool_parts.get(sid)
+        if not isinstance(session_store, dict):
+            return None
+        entry = session_store.pop(cid, None)
+        if not session_store:
+            self._detached_tool_parts.pop(sid, None)
+        return entry if isinstance(entry, dict) else None
 
     def _ensure_message_context(self, session_id: str | None) -> dict[str, Any]:
         sid = str(session_id or "").strip()
@@ -2616,8 +2700,10 @@ class VibeSkillChannel(BaseChannel):
         pending_confirms: list[dict[str, Any]] = []
         replay_ctx_backup = self._message_ctx
         replay_pending_backup = self._pending_confirms
+        replay_detached_backup = self._detached_tool_parts
         self._message_ctx = {}
         self._pending_confirms = {}
+        self._detached_tool_parts = {}
 
         # 需要 replay 的事件类型（使用流式处理器处理）
         replayable_event_keys = (
@@ -2951,6 +3037,7 @@ class VibeSkillChannel(BaseChannel):
         finally:
             self._message_ctx = replay_ctx_backup
             self._pending_confirms = replay_pending_backup
+            self._detached_tool_parts = replay_detached_backup
 
     async def http_handler(
         self,
