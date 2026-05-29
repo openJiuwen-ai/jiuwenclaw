@@ -91,7 +91,7 @@ description: Imperative description of when to trigger and what to do.
 
 A skill executes on the device when:
 - `metadata.clis` is non-empty, OR
-- any entry in `metadata.tools` has `pluginType: Device`.
+- any referenced tool definition in `metadata.tools` has `pluginType: Device`.
 
 Device-side skills must not generate `scripts/` by default. If a script is genuinely required after evaluation, call `ask_user_question` to confirm with the user that the skill includes a Python script, which may run slowly, and let them choose to proceed with generation or adjust the feature. Only generate the script after explicit confirmation.
 
@@ -99,7 +99,7 @@ Device-side skills must not generate `scripts/` by default. If a script is genui
 
 - Create or update the skill under the current workspace's `skill/<skill-name>` directory: `<workspace>/skill/<skill-name>/`.
 - `SKILL.md` exists with valid frontmatter (name matches directory, description within language-specific limits, allowed keys only).
-- If the skill declares `metadata.tools`, read `references/usage_tools.md` and add one example sentence showing the `invoke(funcName:"toolName", params:{bundleName:"...", ...})` call shape.
+- If the skill declares `metadata.tools`, read `references/usage_tools.md` and add the correct instructions for each referenced tool definition: Cloud/MCP tools need one example sentence showing `invoke(funcName:"toolName", params:{bundleName:"...", ...})`; Device tools must not use `invoke` or a `toolName(...)` call shape, and instead the skill body must explain that `toolName` is the tool to use and document its inputs from `arguments.properties`.
 - If the skill declares `metadata.agents`, read `references/usage_agents.md` and add one example sentence showing the `invoke(funcName:"agent_as_a_tool", params:{...})` call shape.
 - If the skill declares `metadata.clis`, read `references/usage_clis.md` and add one example sentence showing the `exec-cli` call shape.
 - If the skill declares any of `metadata.tools` / `metadata.agents` / `metadata.clis`, the body must include a single **tool definitions** section listing every registered tool.
