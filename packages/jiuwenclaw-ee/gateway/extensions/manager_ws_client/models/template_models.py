@@ -37,7 +37,7 @@ MODEL_TEMPLATE_TABLE_DEF = TableDefinition(
         ColumnDefinition("retry_count", "integer", nullable=False, default=3),
         ColumnDefinition("enable_streaming", "boolean", nullable=False, default=True),
         ColumnDefinition("enable_function_calling", "boolean", nullable=False, default=True),
-        ColumnDefinition("verify_ssl", "boolean", nullable=False, default=True),
+        ColumnDefinition("verify_ssl", "boolean", nullable=False, default=False),
         ColumnDefinition("enabled", "boolean", nullable=False, default=True),
         ColumnDefinition("data", "json", nullable=True),
         ColumnDefinition("created_at", "datetime", nullable=False),
