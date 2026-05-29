@@ -133,13 +133,17 @@ def _row_to_dict(row: Any) -> dict[str, Any]:
         )
         if not field_names:
             field_names = vars(row)
-        out = {k: getattr(row, k) for k in field_names}
+        out = {k: getattr(row, k) for k in field_names if not k.startswith("_sa_")}
+
+    out = {k: v for k, v in out.items() if not k.startswith("_sa_")}
 
     for key, value in list(out.items()):
         if isinstance(value, str):
             parsed = _parse_json_string(value)
             if parsed is not value:
                 out[key] = parsed
+        elif hasattr(value, "to_dict") and callable(getattr(value, "to_dict")):
+            out[key] = value.to_dict()
     return out
 
 
