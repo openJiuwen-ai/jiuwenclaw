@@ -47,6 +47,20 @@ Surface things the user might not have considered: failure modes, what "done" lo
 
 ## Step 2: Write the skill files
 
+### Pre-write: read dependency references (REQUIRED before writing any file)
+
+Before writing `SKILL.md` or any skill body, determine which of these the skill will use and read the corresponding reference:
+
+| If the skill needs… | Read this file first |
+|---------------------|----------------------|
+| Function tools or MCP tools (`metadata.tools`) | `references/usage_tools.md` |
+| Agent tools (`metadata.agents`) | `references/usage_agents.md` |
+| CLI tools (`metadata.clis`) | `references/usage_clis.md` |
+
+Do this even if you think you know the format. The reference files define the exact metadata shape, call syntax, and tool-definitions block format you must use in the skill body. Writing before reading them is a bug.
+
+---
+
 ###  Skill anatomy
 
 ```text
@@ -99,10 +113,7 @@ Device-side skills must not generate `scripts/` by default. If a script is genui
 
 - Create or update the skill under the current workspace's `skill/<skill-name>` directory: `<workspace>/skill/<skill-name>/`.
 - `SKILL.md` exists with valid frontmatter (name matches directory, description within language-specific limits, allowed keys only).
-- If the skill declares `metadata.tools`, read `references/usage_tools.md` and add the correct instructions for each referenced tool definition: Cloud/MCP tools need one example sentence showing `invoke(funcName:"toolName", params:{bundleName:"...", ...})`; Device tools must not use `invoke` or a `toolName(...)` call shape, and instead the skill body must explain that `toolName` is the tool to use and document its inputs from `arguments.properties`.
-- If the skill declares `metadata.agents`, read `references/usage_agents.md` and add one example sentence showing the `invoke(funcName:"agent_as_a_tool", params:{...})` call shape.
-- If the skill declares `metadata.clis`, read `references/usage_clis.md` and add one example sentence showing the CLI command.
-- If the skill declares any of `metadata.tools` / `metadata.agents` / `metadata.clis`, the body must include a single **tool definitions** section listing every registered tool.
+- If the skill declares `metadata.tools` / `metadata.agents` / `metadata.clis`: confirm you read the matching usage reference(s) in the pre-write step above. The body must include a single **tool definitions** section listing every registered tool, formatted per the reference file.
 - Body is under 500 lines; bulky reference material moved to `references/`.
 - Security validation passes: no dangerous commands, hardcoded credentials, or path traversal in the skill body or scripts.
 - No stray files outside the skill folder.
