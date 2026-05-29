@@ -279,6 +279,11 @@ class RuntimeManagementAgentClient(AgentServerClient):
 
         agent_image = os.getenv("AGENT_SERVER_IMAGE")
         agent_runtime = os.getenv("AGENT_RUNTIME")
+        agent_cpu_request = os.getenv("AGENT_SERVER_CPU_REQUEST")
+        agent_memory_request = os.getenv("AGENT_SERVER_MEMORY_REQUEST")
+        agent_cpu_limit = os.getenv("AGENT_SERVER_CPU_LIMIT")
+        agent_memory_limit = os.getenv("AGENT_SERVER_MEMORY_LIMIT")
+
         namespace = os.getenv("AGENT_SERVER_NAMESPACE")
         self._namespace = os.getenv("AGENT_SERVER_NAMESPACE")
         container_name = os.getenv("AGENT_SERVER_CONTAINER_NAME")
@@ -295,6 +300,19 @@ class RuntimeManagementAgentClient(AgentServerClient):
         nfs_mount_path = os.getenv("AGENT_SERVER_NFS_MOUNT_PATH")
         host_path = os.getenv("AGENT_SERVER_HOST_PATH")
         host_mount_path = os.getenv("AGENT_SERVER_HOST_MOUNT_PATH")
+
+        agentserver_host_mounts: list[HostPathMount] = []
+        # 只有当 host_path 和 host_mount_path 都配置时，才添加挂载
+        if host_path and host_mount_path:
+            agentserver_host_mounts.append(
+                HostPathMount(
+                    host_path=host_path,
+                    mount_path=host_mount_path,
+                    read_only=False,
+                    host_path_type="Directory"
+                )
+            )
+
         mode = os.getenv("MODE")
         node_name = os.getenv("NODE_NAME")
         kubeconfig = os.getenv("AGENT_SERVER_KUBECONFIG") or None
@@ -303,12 +321,6 @@ class RuntimeManagementAgentClient(AgentServerClient):
         readiness_period = int(os.getenv("AGENT_SERVER_READINESS_PERIOD"))
         ready_timeout = int(os.getenv("AGENT_SERVER_READY_TIMEOUT"))
         ready_poll_interval = int(os.getenv("AGENT_SERVER_READY_POLL_INTERVAL"))
-
-        # K8s Resource Configuration
-        cpu_request = os.getenv("CPU_REQUEST")
-        memory_request = os.getenv("MEMORY_REQUEST")
-        cpu_limit = os.getenv("CPU_LIMIT")
-        memory_limit = os.getenv("MEMORY_LIMIT")
 
         model_provider = os.getenv("MODEL_PROVIDER")
         model_name = os.getenv("MODEL_NAME")
@@ -326,20 +338,25 @@ class RuntimeManagementAgentClient(AgentServerClient):
         deploy_mode = (os.getenv("AGENT_SERVER_DEPLOY_MODE") or "k8s").strip().lower()
 
         # jiuwenbox sidecar: agentserver 与 jiuwenbox 同 Pod，使用 127.0.0.1 访问。
-        jiuwenclaw_sandbox_enabled = _env_bool("JIUWENCLAW_SANDBOX_ENABLED", False)
-        jiuwenclaw_sandbox_image = os.getenv("JIUWENCLAW_SANDBOX_IMAGE", "jiuwenbox:latest")
-        jiuwenclaw_sandbox_port = int(os.getenv("JIUWENCLAW_SANDBOX_PORT", "8321"))
-        jiuwenclaw_sandbox_container_name = os.getenv(
-            "JIUWENCLAW_SANDBOX_CONTAINER_NAME", "jiuwenbox"
+        jiuwenbox_enabled = _env_bool("JIUWENBOX_ENABLED", False)
+        jiuwenbox_image = os.getenv("JIUWENBOX_IMAGE", "jiuwenbox:latest")
+        jiuwenbox_port = int(os.getenv("JIUWENBOX_PORT", "8321"))
+        jiuwenbox_cpu_request = os.getenv("JIUWENBOX_CPU_REQUEST")
+        jiuwenbox_memory_request = os.getenv("JIUWENBOX_MEMORY_REQUEST")
+        jiuwenbox_cpu_limit = os.getenv("JIUWENBOX_CPU_LIMIT")
+        jiuwenbox_memory_limit = os.getenv("JIUWENBOX_MEMORY_LIMIT")
+
+        jiuwenbox_container_name = os.getenv(
+            "JIUWENBOX_CONTAINER_NAME", "jiuwenbox"
         )
-        jiuwenclaw_sandbox_url = os.getenv(
-            "JIUWENCLAW_SANDBOX_URL",
-            f"http://127.0.0.1:{jiuwenclaw_sandbox_port}",
+        jiuwenbox_url = os.getenv(
+            "JIUWENBOX_URL",
+            f"http://127.0.0.1:{jiuwenbox_port}",
         )
-        jiuwenclaw_sandbox_excluded_commands = os.getenv("JIUWENCLAW_SANDBOX_EXCLUDED_COMMANDS", "")
-        jiuwenclaw_sandbox_idle_ttl_seconds = os.getenv("JIUWENCLAW_SANDBOX_IDLE_TTL_SECONDS", "")
-        jiuwenclaw_sandbox_idle_check_interval = os.getenv("JIUWENCLAW_SANDBOX_IDLE_CHECK_INTERVAL", "")
-        jiuwenbox_listen = os.getenv("JIUWENBOX_LISTEN", f"tcp://0.0.0.0:{jiuwenclaw_sandbox_port}")
+        jiuwenbox_excluded_commands = os.getenv("JIUWENBOX_EXCLUDED_COMMANDS", "")
+        jiuwenbox_idle_ttl_seconds = os.getenv("JIUWENBOX_IDLE_TTL_SECONDS", "")
+        jiuwenbox_idle_check_interval = os.getenv("JIUWENBOX_IDLE_CHECK_INTERVAL", "")
+        jiuwenbox_listen = os.getenv("JIUWENBOX_LISTEN", f"tcp://0.0.0.0:{jiuwenbox_port}")
         jiuwenbox_policy_path = os.getenv("JIUWENBOX_POLICY_PATH", "/app/configs/enterprise-policy.yaml")
         jiuwenbox_host_mounts: list[HostPathMount] = []
         if _env_bool("JIUWENBOX_MOUNT_CGROUP", True):
@@ -420,21 +437,22 @@ class RuntimeManagementAgentClient(AgentServerClient):
                     deploy_controller: Any = ProcessDeployController(process_handler)
                 else:
                     agent_container_env = _agent_env_vars()
-                    if jiuwenclaw_sandbox_enabled:
+                    if jiuwenbox_enabled:
                         agent_container_env.update(
                             {
-                                "JIUWENCLAW_SANDBOX_ENABLED": str(
-                                    jiuwenclaw_sandbox_enabled
+                                "JIUWENBOX_ENABLED": str(
+                                    jiuwenbox_enabled
                                 ).lower(),
-                                "JIUWENCLAW_SANDBOX_URL": jiuwenclaw_sandbox_url,
-                                "JIUWENCLAW_SANDBOX_TYPE": "jiuwenbox",
-                                "JIUWENCLAW_SANDBOX_STARTUP_MODE": "external",
-                                "JIUWENCLAW_SANDBOX_PRESERVE_FILE_SHARING_MODE": "mount",
-                                "JIUWENCLAW_SANDBOX_EXCLUDED_COMMANDS": jiuwenclaw_sandbox_excluded_commands,
-                                "JIUWENCLAW_SANDBOX_IDLE_TTL_SECONDS": jiuwenclaw_sandbox_idle_ttl_seconds,
-                                "JIUWENCLAW_SANDBOX_IDLE_CHECK_INTERVAL": jiuwenclaw_sandbox_idle_check_interval,
+                                "JIUWENBOX_URL": jiuwenbox_url,
+                                "JIUWENBOX_TYPE": "jiuwenbox",
+                                "JIUWENBOX_STARTUP_MODE": "external",
+                                "JIUWENBOX_PRESERVE_FILE_SHARING_MODE": "mount",
+                                "JIUWENBOX_EXCLUDED_COMMANDS": jiuwenbox_excluded_commands,
+                                "JIUWENBOX_IDLE_TTL_SECONDS": jiuwenbox_idle_ttl_seconds,
+                                "JIUWENBOX_IDLE_CHECK_INTERVAL": jiuwenbox_idle_check_interval,
                             }
                         )
+
                     agent_server_container = ContainerSpec(
                         name=cfg["container_name"] if "container_name" in cfg else container_name,
                         image=cfg["agent_image"] if "agent_image" in cfg else agent_image,
@@ -442,14 +460,23 @@ class RuntimeManagementAgentClient(AgentServerClient):
                         port=int(cfg["container_port"]) if "container_port" in cfg else container_port,
                         image_pull_policy=cfg["image_pull_policy"] if "image_pull_policy" in cfg else image_pull_policy,
                         env_vars=agent_container_env,
+                        host_path_mounts=agentserver_host_mounts,
+                        allow_privilege_escalation=True if mode == "dev" else None,
+                        run_as_non_root=False if mode == "dev" else None,
+                        run_as_user=0 if mode == "dev" else None,
+                        run_as_group=0 if mode == "dev" else None,
+                        cpu_request=agent_cpu_request,
+                        memory_request=agent_memory_request,
+                        cpu_limit=agent_cpu_limit,
+                        memory_limit=agent_memory_limit,
                     )
                     target_container = agent_server_container.name
                     containers = [agent_server_container]
-                    if jiuwenclaw_sandbox_enabled:
+                    if jiuwenbox_enabled:
                         jiuwenbox_container = ContainerSpec(
-                            name=jiuwenclaw_sandbox_container_name,
-                            image=jiuwenclaw_sandbox_image,
-                            port=jiuwenclaw_sandbox_port,
+                            name=jiuwenbox_container_name,
+                            image=jiuwenbox_image,
+                            port=jiuwenbox_port,
                             image_pull_policy=cfg["image_pull_policy"]
                             if "image_pull_policy" in cfg
                             else image_pull_policy,
@@ -464,6 +491,10 @@ class RuntimeManagementAgentClient(AgentServerClient):
                             allow_privilege_escalation=True,
                             privileged=True,
                             host_path_mounts=jiuwenbox_host_mounts,
+                            cpu_request=jiuwenbox_cpu_request,
+                            memory_request=jiuwenbox_memory_request,
+                            cpu_limit=jiuwenbox_cpu_limit,
+                            memory_limit=jiuwenbox_memory_limit,
                         )
                         containers.append(jiuwenbox_container)
                     target_port = int(cfg["container_port"]) if "container_port" in cfg else container_port
@@ -489,10 +520,6 @@ class RuntimeManagementAgentClient(AgentServerClient):
                         host_mount_path=cfg.get("host_mount_path") if "host_mount_path" in cfg else host_mount_path,
                         mode=cfg.get("mode") if "mode" in cfg else mode,
                         node_name=cfg.get("node_name") if "node_name" in cfg else node_name,
-                        cpu_request=cfg.get("cpu_request") if "cpu_request" in cfg else cpu_request,
-                        memory_request=cfg.get("memory_request") if "memory_request" in cfg else memory_request,
-                        cpu_limit=cfg.get("cpu_limit") if "cpu_limit" in cfg else cpu_limit,
-                        memory_limit=cfg.get("memory_limit") if "memory_limit" in cfg else memory_limit,
                     )
                     deploy_controller = K8sDeployController(k8s)
 

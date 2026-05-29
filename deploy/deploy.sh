@@ -72,7 +72,7 @@ process_restart() {
 main() {
     read_env_from_file "${CUSTOM_ENV_FILE}" "DEPLOY_VARS"
     parse_args "$@"
-    process_namespace
+    process_vars
     check_dependency
     process_${CMD}
 }

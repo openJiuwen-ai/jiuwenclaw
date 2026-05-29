@@ -68,6 +68,9 @@ declare -ga OTHER_MASTER_IPS=()
 declare -ga OTHER_NODE_IPS=()
 
 declare -A DEPLOY_VARS=(
+    ["MODE"]=product
+    ["HOST_CODE_PATH"]=""
+    ["POD_CODE_PATH"]=""
     ["NAMESPACE"]="default"
     ["POOL_ID"]="claw"
     ["FUNC_SVC_NAME"]="0@jiuwen@clawtest"

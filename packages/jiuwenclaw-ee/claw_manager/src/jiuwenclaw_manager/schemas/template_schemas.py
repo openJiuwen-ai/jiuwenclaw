@@ -183,10 +183,14 @@ class ServiceConfigTemplateCreateBody(BaseModel):
     nfs_server: str | None = Field(default=None, max_length=256)
     nfs_path: str = Field(default="/", max_length=512)
     nfs_mount_path: str | None = Field(default=None, max_length=512)
-    cpu_request: str | None = Field(default=None, max_length=32)
-    memory_request: str | None = Field(default=None, max_length=32)
-    cpu_limit: str | None = Field(default=None, max_length=32)
-    memory_limit: str | None = Field(default=None, max_length=32)
+    agent_cpu_request: str | None = Field(default=None, max_length=32)
+    agent_memory_request: str | None = Field(default=None, max_length=32)
+    agent_cpu_limit: str | None = Field(default=None, max_length=32)
+    agent_memory_limit: str | None = Field(default=None, max_length=32)
+    jiuwenbox_cpu_request: str | None = Field(default=None, max_length=32)
+    jiuwenbox_memory_request: str | None = Field(default=None, max_length=32)
+    jiuwenbox_cpu_limit: str | None = Field(default=None, max_length=32)
+    jiuwenbox_memory_limit: str | None = Field(default=None, max_length=32)
     min_idle_services: int = Field(default=1, ge=0)
     max_services: int = Field(default=10, ge=1)
     service_concurrency: int = Field(default=10, ge=1)
@@ -219,10 +223,14 @@ class ServiceConfigTemplateUpdateBody(BaseModel):
     nfs_server: str | None = Field(default=None, max_length=256)
     nfs_path: str | None = Field(default=None, max_length=512)
     nfs_mount_path: str | None = Field(default=None, max_length=512)
-    cpu_request: str | None = Field(default=None, max_length=32)
-    memory_request: str | None = Field(default=None, max_length=32)
-    cpu_limit: str | None = Field(default=None, max_length=32)
-    memory_limit: str | None = Field(default=None, max_length=32)
+    agent_cpu_request: str | None = Field(default=None, max_length=32)
+    agent_memory_request: str | None = Field(default=None, max_length=32)
+    agent_cpu_limit: str | None = Field(default=None, max_length=32)
+    agent_memory_limit: str | None = Field(default=None, max_length=32)
+    jiuwenbox_cpu_request: str | None = Field(default=None, max_length=32)
+    jiuwenbox_memory_request: str | None = Field(default=None, max_length=32)
+    jiuwenbox_cpu_limit: str | None = Field(default=None, max_length=32)
+    jiuwenbox_memory_limit: str | None = Field(default=None, max_length=32)
     min_idle_services: int | None = Field(default=None, ge=0)
     max_services: int | None = Field(default=None, ge=1)
     service_concurrency: int | None = Field(default=None, ge=1)
@@ -264,10 +272,14 @@ class ServiceConfigTemplateOut(BaseModel):
     nfs_server: str | None
     nfs_path: str
     nfs_mount_path: str | None
-    cpu_request: str
-    memory_request: str
-    cpu_limit: str
-    memory_limit: str
+    agent_cpu_request: str | None
+    agent_memory_request: str | None
+    agent_cpu_limit: str | None
+    agent_memory_limit: str | None
+    jiuwenbox_cpu_request: str | None
+    jiuwenbox_memory_request: str | None
+    jiuwenbox_cpu_limit: str | None
+    jiuwenbox_memory_limit: str | None
     min_idle_services: int
     max_services: int
     service_concurrency: int

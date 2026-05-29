@@ -92,14 +92,10 @@ EOF
     exit 0
 }
 
-process_namespace() {
-    local namespace=${DEPLOY_VARS["NAMESPACE"]}
-    local client_type="${DEPLOY_VARS["AGENT_RUNTIME"]}"
+process_vars() {
+    local mode="${DEPLOY_VARS["MODE"]}"
 
-    if [ "${client_type}" == "yuanrong" ]; then
-        # Cluster-scoped resources cannot be isolated by namespace;
-        # use name suffixing to achieve resource isolation
-        DEPLOY_VARS["PV_NAME"]="${DEPLOY_VARS["PV_NAME"]}-${namespace}"
-        DEPLOY_VARS["POOL_ID"]="${DEPLOY_VARS["POOL_ID"]}-${namespace}"
+    if [ "${mode}" == "dev" ]; then
+        DEPLOY_VARS["POD_CODE_PATH"]="/app/jiuwenclaw"
     fi
 }

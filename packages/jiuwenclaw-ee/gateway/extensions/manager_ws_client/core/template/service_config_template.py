@@ -76,10 +76,14 @@ async def update_service_config_template(
         "nfs_server",
         "nfs_path",
         "nfs_mount_path",
-        "cpu_request",
-        "memory_request",
-        "cpu_limit",
-        "memory_limit",
+        "agent_cpu_request",
+        "agent_memory_request",
+        "agent_cpu_limit",
+        "agent_memory_limit",
+        "jiuwenbox_cpu_request",
+        "jiuwenbox_memory_request",
+        "jiuwenbox_cpu_limit",
+        "jiuwenbox_memory_limit",
     )
     for field in strip_fields:
         if field in updates and updates[field] is not None:
@@ -159,10 +163,14 @@ def _build_row_from_template(template: dict[str, Any], *, now: datetime) -> dict
             if template.get("nfs_mount_path")
             else None
         ),
-        "cpu_request": str(template.get("cpu_request", "")).strip(),
-        "memory_request": str(template.get("memory_request", "")).strip(),
-        "cpu_limit": str(template.get("cpu_limit", "")).strip(),
-        "memory_limit": str(template.get("memory_limit", "")).strip(),
+        "agent_cpu_request": str(template.get("agent_cpu_request", "")).strip(),
+        "agent_memory_request": str(template.get("agent_memory_request", "")).strip(),
+        "agent_cpu_limit": str(template.get("agent_cpu_limit", "")).strip(),
+        "agent_memory_limit": str(template.get("agent_memory_limit", "")).strip(),
+        "jiuwenbox_cpu_request": str(template.get("jiuwenbox_cpu_request", "")).strip(),
+        "jiuwenbox_memory_request": str(template.get("jiuwenbox_memory_request", "")).strip(),
+        "jiuwenbox_cpu_limit": str(template.get("jiuwenbox_cpu_limit", "")).strip(),
+        "jiuwenbox_memory_limit": str(template.get("jiuwenbox_memory_limit", "")).strip(),
         "min_idle_services": int(template.get("min_idle_services", 1)),
         "max_services": int(template.get("max_services", 10)),
         "service_concurrency": int(template.get("service_concurrency", 10)),

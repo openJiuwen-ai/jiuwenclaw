@@ -75,7 +75,7 @@ enable_dev_mode_if_needed() {
     yq eval '
         select(.kind == "Deployment").spec.template.spec.containers[0].volumeMounts += [{
             "name": "host-code",
-            "mountPath": "/app/jiuwenclaw"
+            "mountPath": "'"${DEPLOY_VARS["POD_CODE_PATH"]}"'"
         }]
     ' -i "${file}"
 
