@@ -33,6 +33,7 @@ class SendFileToolkit:
         channel_id: str,
         *,
         metadata: dict[str, Any] | None = None,
+        tool_id: str | None = None,
     ) -> None:
         """Initialize SendFileToolkit.
 
@@ -41,13 +42,40 @@ class SendFileToolkit:
             session_id: Session identifier for message routing.
             channel_id: Channel identifier for message routing.
             metadata: 与 AgentRequest.metadata 一致（E2A channel_context 映射结果），用于 send_push。
+            tool_id: 可选的固定 ToolCard.id，便于在 resource_mgr 中按稳定 id 查找/更新。
+        """
+        self.request_id = request_id
+        self.session_id = session_id
+        self.channel_id = channel_id
+        self._request_metadata = dict(metadata) if metadata else None
+        self._tool_id = tool_id
+        logger.debug(
+            "[SendFileToolkit] 初始化 request_id=%s session_id=%s channel_id=%s has_metadata=%s",
+            request_id,
+            session_id,
+            channel_id,
+            bool(self._request_metadata),
+        )
+
+    def update_runtime_context(
+        self,
+        *,
+        request_id: str,
+        session_id: str,
+        channel_id: str,
+        metadata: dict[str, Any] | None = None,
+    ) -> None:
+        """Update per-request runtime context without recreating the toolkit/tool.
+
+        允许在不重新注册工具的情况下，复用同一个 SendFileToolkit 实例处理新请求，
+        避免每次请求都 remove/add `ability_manager` 中的工具声明。
         """
         self.request_id = request_id
         self.session_id = session_id
         self.channel_id = channel_id
         self._request_metadata = dict(metadata) if metadata else None
         logger.debug(
-            "[SendFileToolkit] 初始化 request_id=%s session_id=%s channel_id=%s has_metadata=%s",
+            "[SendFileToolkit] update_runtime_context request_id=%s session_id=%s channel_id=%s has_metadata=%s",
             request_id,
             session_id,
             channel_id,
@@ -189,7 +217,6 @@ class SendFileToolkit:
         Returns:
             List of tools for sending files.
         """
-        session_id = self.session_id
 
         def make_tool(
             name: str,
@@ -197,11 +224,14 @@ class SendFileToolkit:
             input_params: dict,
             func,
         ) -> Tool:
-            card = ToolCard(
-                name=name,
-                description=description,
-                input_params=input_params,
-            )
+            card_kwargs = {
+                "name": name,
+                "description": description,
+                "input_params": input_params,
+            }
+            if self._tool_id:
+                card_kwargs["id"] = self._tool_id
+            card = ToolCard(**card_kwargs)
             return LocalFunction(card=card, func=func)
 
         return [
