@@ -1,6 +1,7 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 import json
 import os
+import re
 import asyncio
 import logging
 from typing import Any, AsyncIterator, Optional
@@ -24,6 +25,19 @@ from openjiuwen.core.foundation.llm.model_clients.siliconflow_model_client impor
 from openjiuwen.core.session.stream import OutputSchema
 
 llm_logger = logging.getLogger("jiuwenclaw.app")
+
+_GLM_TOOL_XML_TAG_RE = re.compile(
+    r"</?(?:arg_value|arg_key)(?:\s[^>]*)?>",
+    re.IGNORECASE,
+)
+
+
+def _sanitize_glm_tool_arguments(raw: str) -> str:
+    """Strip GLM native tool-call XML tags leaked into OpenAI-style arguments."""
+    if not raw or "<arg_" not in raw:
+        return raw
+    return _GLM_TOOL_XML_TAG_RE.sub("", raw)
+
 
 # Session context for retry notifications.
 # Set by react_agent._call_llm_stream before calling llm.stream/invoke.
@@ -601,7 +615,9 @@ class PatchOpenAIModelClient(RetryMixin, OpenAIModelClient):
                 if hasattr(tc_delta, 'function') and tc_delta.function:
                     index = getattr(tc_delta, 'index', None)
                     function_name = getattr(tc_delta.function, 'name', None) or ""
-                    function_arguments = getattr(tc_delta.function, 'arguments', None) or ""
+                    function_arguments = _sanitize_glm_tool_arguments(
+                        getattr(tc_delta.function, 'arguments', None) or ""
+                    )
 
                     tool_call = ToolCall(
                         id=getattr(tc_delta, 'id', '') or "",
