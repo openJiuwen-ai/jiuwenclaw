@@ -137,8 +137,8 @@ def tool_spec_payload(raw: dict[str, Any]) -> dict[str, Any]:
 
 def tool_spec_filename(plugin_id: str, tool_name: str) -> str:
     """Canonical on-disk name: ``<pluginId>__<toolName>.json``."""
-    safe_plugin = sanitize_tool_spec_segment(plugin_id)
-    safe_tool = sanitize_tool_spec_segment(tool_name)
+    safe_plugin = plugin_id
+    safe_tool = tool_name
     if not safe_plugin or not safe_tool:
         raise ValueError("pluginId 与 toolName 均不能为空")
     return f"{safe_plugin}__{safe_tool}.json"
