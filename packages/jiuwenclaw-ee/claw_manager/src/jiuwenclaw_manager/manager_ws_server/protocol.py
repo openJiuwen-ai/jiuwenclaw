@@ -6,6 +6,7 @@ from typing import Any
 
 FRAME_TYPE_EVENT = "event"
 FRAME_TYPE_REGISTER = "register"
+FRAME_TYPE_HEARTBEAT = "heartbeat"
 FRAME_TYPE_CONFIG_PUSH = "config.push"
 FRAME_TYPE_CONFIG_ACK = "config.ack"
 FRAME_TYPE_ERROR = "error"

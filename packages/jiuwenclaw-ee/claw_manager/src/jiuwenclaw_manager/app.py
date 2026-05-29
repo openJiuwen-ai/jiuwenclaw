@@ -12,7 +12,6 @@ from jiuwenclaw_manager import __version__
 from jiuwenclaw_manager.infrastructure.config import settings
 from jiuwenclaw_manager.infrastructure.db import create_db_handler, database_config_summary
 from jiuwenclaw_manager.infrastructure.logger import configure_logging, get_logger
-from jiuwenclaw_manager.core.instance.instance_service import backfill_service_instances
 from jiuwenclaw_manager.models.table_init import init_all_tables
 from jiuwenclaw_manager.routers.register import router_register
 from jiuwenclaw_manager.schedulers.heartbeat_scanner import run_heartbeat_scan_loop
@@ -28,9 +27,6 @@ async def lifespan(application: FastAPI):
     await db_handler.init_database()
     await db_handler.connect()
     await init_all_tables(db_handler)
-    backfilled = await backfill_service_instances(db_handler)
-    if backfilled:
-        _log.info("backfilled service_instance mappings", instance_count=backfilled)
     stop = asyncio.Event()
     scan_task = asyncio.create_task(run_heartbeat_scan_loop(stop, db_handler))
     manager_ws_server = None

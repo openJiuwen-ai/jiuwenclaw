@@ -13,7 +13,7 @@ parse_args() {
                 i=$((i+1))
                 ;;
             #nfs|rabbitmq|yr_claw|gateway|web|manager)
-            nfs|rabbitmq|mysql|gateway|web|manager)
+            nfs|rabbitmq|mysql|postgresql|gateway|web|manager)
                 MODULES+=("${args[$i]^^}")
                 i=$((i+1))
                 ;;
@@ -36,7 +36,7 @@ parse_args() {
 
     # Verify that the command must exist
     if [ -z "${CMD:-}" ]; then
-        error "Command not specified! Use 'up' or 'down'"
+        error "Command not specified! Use 'up', 'down' or 'restart'"
         exit 1
     fi
 

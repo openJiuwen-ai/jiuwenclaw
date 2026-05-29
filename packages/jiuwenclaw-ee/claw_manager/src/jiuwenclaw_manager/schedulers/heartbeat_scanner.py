@@ -1,4 +1,4 @@
-"""定时巡检：将超时未上报心跳的 ONLINE 服务标记为 offline（设计文档 5.4）。"""
+"""定时巡检：将超时未上报心跳的 online 实例标记为 offline。"""
 
 from __future__ import annotations
 
@@ -10,15 +10,16 @@ from openjiuwen_runtime.foundation.db.handler import DBHandler
 from jiuwenclaw_manager.infrastructure.config import settings
 from jiuwenclaw_manager.infrastructure.utils import utc_now
 from jiuwenclaw_manager.infrastructure.logger import get_logger
-from jiuwenclaw_manager.models.instance_models import SERVICE_INSTANCE_TABLE_DEF
+from jiuwenclaw_manager.core.instance.instance_service import mark_instance_offline
+from jiuwenclaw_manager.models.instance_models import INSTANCE_INFO_TABLE_DEF
 
 _log = get_logger(__name__)
-_TABLE = SERVICE_INSTANCE_TABLE_DEF.table_name
+_TABLE = INSTANCE_INFO_TABLE_DEF.table_name
 
 
 async def run_heartbeat_scan_loop(stop: asyncio.Event, handler: DBHandler) -> None:
-    interval = max(5, settings.scan_interval_seconds)
-    timeout_sec = max(5, settings.heartbeat_timeout_seconds)
+    interval = max(60, settings.MANAGER_HEARTBEAT_SCAN_INTERVAL_SECONDS)
+    timeout_sec = max(120, settings.manager_heartbeat_timeout_seconds)
     while not stop.is_set():
         try:
             await asyncio.wait_for(stop.wait(), timeout=interval)
@@ -31,7 +32,6 @@ async def run_heartbeat_scan_loop(stop: asyncio.Event, handler: DBHandler) -> No
                 _TABLE, {"status": "online"}, limit=10_000, offset=0
             )
             marked = 0
-            now = utc_now()
             for row in rows:
                 last_hb = getattr(row, "last_heartbeat", None)
                 if last_hb is None:
@@ -41,13 +41,9 @@ async def run_heartbeat_scan_loop(stop: asyncio.Event, handler: DBHandler) -> No
                     hb = hb.replace(tzinfo=timezone.utc)
                 if hb >= cutoff:
                     continue
-                row_id = int(getattr(row, "id"))
-                updated = await handler.update(
-                    _TABLE,
-                    {"id": row_id},
-                    {"status": "offline", "updated_at": now},
-                )
-                if updated is not None:
+                jid = str(getattr(row, "jiuwenclaw_id", "") or "").strip()
+                if jid:
+                    await mark_instance_offline(handler, jid)
                     marked += 1
             if marked:
                 _log.info("heartbeat_scan_marked_offline", count=marked)

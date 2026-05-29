@@ -11,8 +11,6 @@ construction time:
   developers can wire it into stderr if needed) and ``read_logs*``
   returns empty. This keeps a fresh jiuwenbox install from polluting
   the user's home dir; opt in via ``--save-logs DIR``.
-- ``"plain"``: ``{sandbox_id}.log`` (legacy layout, useful for embedders
-  who manage their own retention; not selected by the bundled server).
 - ``"timestamped"``: ``{sandbox_id}-{YYYYMMDDTHHMMSS}.audit.log``. The
   timestamp is captured the **first** time a given sandbox is logged and
   cached for the rest of the process lifetime, so all events for a single

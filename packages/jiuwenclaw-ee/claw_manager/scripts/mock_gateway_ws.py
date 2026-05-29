@@ -18,6 +18,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import os
 import signal
@@ -111,41 +112,61 @@ async def _run_one(instance_id: str | None, stop: asyncio.Event) -> None:
             async with websockets.connect(MANAGER_WS, ping_interval=20, ping_timeout=60) as ws:
                 jid = await _handshake(ws, reconnect_id=instance_id)
                 print(f"[mock-gw] {label}: connected jiuwenclaw_id={jid}")
-                async for raw in ws:
-                    try:
-                        msg = json.loads(raw)
-                    except json.JSONDecodeError:
-                        continue
-                    mtype = msg.get("type")
-                    if mtype == "config.push":
-                        payload = msg.get("payload") or {}
-                        revision = payload.get("revision")
-                        cfg = payload.get("config") or {}
-                        result = _build_ack_result(cfg, counters)
-                        print(
-                            f"[mock-gw] {jid}: config.push rev={revision} "
-                            f"sections={result.get('applied_sections')} ack.result={result}"
-                        )
+
+                async def _mock_heartbeat() -> None:
+                    while True:
+                        await asyncio.sleep(10.0)
                         await ws.send(
                             json.dumps(
                                 {
-                                    "type": "config.ack",
+                                    "type": "heartbeat",
                                     "payload": {
-                                        "revision": revision,
-                                        "ok": True,
-                                        "result": result,
+                                        "jiuwenclaw_id": jid,
+                                        "service_type": "gateway",
                                     },
                                 }
                             )
                         )
-                    elif mtype == "event":
-                        # connection.ack / register.ack — log lightly
-                        evt = msg.get("event")
-                        if evt == "register.ack":
-                            print(f"[mock-gw] {jid}: register.ack")
-                    elif mtype == "error":
-                        print(f"[mock-gw] {jid}: error {msg.get('payload')}")
-                    # 其他帧忽略
+
+                hb_task = asyncio.create_task(_mock_heartbeat())
+                try:
+                    async for raw in ws:
+                        try:
+                            msg = json.loads(raw)
+                        except json.JSONDecodeError:
+                            continue
+                        mtype = msg.get("type")
+                        if mtype == "config.push":
+                            payload = msg.get("payload") or {}
+                            revision = payload.get("revision")
+                            cfg = payload.get("config") or {}
+                            result = _build_ack_result(cfg, counters)
+                            print(
+                                f"[mock-gw] {jid}: config.push rev={revision} "
+                                f"sections={result.get('applied_sections')} ack.result={result}"
+                            )
+                            await ws.send(
+                                json.dumps(
+                                    {
+                                        "type": "config.ack",
+                                        "payload": {
+                                            "revision": revision,
+                                            "ok": True,
+                                            "result": result,
+                                        },
+                                    }
+                                )
+                            )
+                        elif mtype == "event":
+                            evt = msg.get("event")
+                            if evt == "register.ack":
+                                print(f"[mock-gw] {jid}: register.ack")
+                        elif mtype == "error":
+                            print(f"[mock-gw] {jid}: error {msg.get('payload')}")
+                finally:
+                    hb_task.cancel()
+                    with contextlib.suppress(asyncio.CancelledError):
+                        await hb_task
             backoff = 1.0
         except Exception as exc:  # noqa: BLE001
             if stop.is_set():

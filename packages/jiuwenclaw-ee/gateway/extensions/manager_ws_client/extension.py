@@ -127,8 +127,10 @@ async def _on_web_channel_created(ctx: Any) -> None:
 async def register_extensions(registry: ExtensionRegistry) -> list[ManagerWsClientExtension]:
     global _client
 
+    cfg = get_settings()
     _client = ManagerWsClient(
         service_type="gateway",
+        heartbeat_interval_seconds=cfg.gateway_heartbeat_interval_seconds,
         on_config_push=_on_config_push,
     )
     ext = ManagerWsClientExtension(_client)

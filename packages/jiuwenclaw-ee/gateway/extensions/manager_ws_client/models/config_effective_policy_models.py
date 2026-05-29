@@ -5,33 +5,11 @@
 
 from __future__ import annotations
 
-from datetime import datetime
-from typing import Any
-
-from pydantic import BaseModel
 from openjiuwen_runtime.foundation.db.table_def import (
     ColumnDefinition,
     IndexDefinition,
     TableDefinition,
 )
-
-
-class ConfigDefaultTemplateMappingInfo(BaseModel):
-    id: int
-    jiuwenclaw_id: str
-    user_id: str | None
-    group_id: str | None
-    priority: int
-    template_id: str
-    template_type: str
-    enabled: bool
-    data: dict[str, Any] | None
-    created_at: datetime
-    updated_at: datetime
-
-    class Config:
-        from_attributes = True
-
 
 CONFIG_EFFECTIVE_GLOBAL_POLICY_TABLE_DEF = TableDefinition(
     table_name="config_effective_global_policy",

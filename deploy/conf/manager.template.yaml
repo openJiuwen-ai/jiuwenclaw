@@ -63,17 +63,17 @@ spec:
         - name: MANAGER_REST_PORT
           value: "<<MANAGER_REST_PORT>>"
         - name: MANAGER_DB_TYPE
-          value: "<<MANAGER_DB_TYPE>>"
+          value: "<<DB_TYPE>>"
         - name: MANAGER_SQLITE_PATH
           value: "<<MANAGER_SQLITE_PATH>>"
         - name: MANAGER_DB_HOST
-          value: "<<MANAGER_DB_HOST>>"
+          value: "<<DB_HOST>>"
         - name: MANAGER_DB_PORT
-          value: "<<MANAGER_DB_PORT>>"
+          value: "<<DB_PORT>>"
         - name: MANAGER_DB_USER
-          value: "root"
+          value: "<<DB_USER>>"
         - name: MANAGER_DB_PASSWORD
-          value: "<<MANAGER_DB_PASSWORD>>"
+          value: "<<DB_PASSWORD>>"
         - name: MANAGER_DB_NAME
           value: "<<MANAGER_DB_NAME>>"
         - name: MANAGER_WS_ENABLED

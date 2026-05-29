@@ -4,16 +4,21 @@ set -euo >/dev/null 2>&1
 deploy_web() {
     local namespace="${DEPLOY_VARS["NAMESPACE"]}"
     local web_name="${DEPLOY_VARS["WEB_NAME"]}"
+    local template_file="${CONFIG["WEB_TEMPLATE_FILE"]}"
+    local file="${CONFIG["WEB_FILE"]}"
 
-    render_config_template "${WEB_TEMPLATE_FILE}" "${WEB_FILE}" "DEPLOY_VARS"
-    exec_cmd kubectl apply -f ${WEB_FILE}
+    find_available_port "WEB_NODE_PORT"
+    render_config_template "${template_file}" "${file}" "DEPLOY_VARS"
+    exec_cmd kubectl apply -f ${file}
     wait_k8s_resource_ready "deployment" "${web_name}" "${namespace}"
+    success "WEB_NODE_PORT: ${DEPLOY_VARS["WEB_NODE_PORT"]}"
 }
 
 uninstall_web() {
     local namespace="${DEPLOY_VARS["NAMESPACE"]}"
-    local web_name="${DEPLOY_VARS["WEB_NAME"]}"
+    local web_name="${CONFIG["WEB_NAME"]}"
+    local file="${CONFIG["WEB_FILE"]}"
 
-    delete_k8s_resource "deployment" "${web_name}" "${namespace}"
+    exec_cmd kubectl delete -f ${file}
     wait_pod_terminated "${web_name}" "${namespace}"
 }

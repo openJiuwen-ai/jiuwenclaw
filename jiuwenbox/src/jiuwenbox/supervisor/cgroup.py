@@ -28,6 +28,7 @@ import os
 import shutil
 import time
 from dataclasses import dataclass, field
+from functools import lru_cache
 from pathlib import Path
 
 from jiuwenbox.models.policy import CgroupPolicy
@@ -112,6 +113,7 @@ def _v1_available() -> bool:
     return True
 
 
+@lru_cache(maxsize=1)
 def detect_backend() -> CgroupBackend | None:
     """Probe the host for a usable cgroup backend.
 
@@ -119,6 +121,11 @@ def detect_backend() -> CgroupBackend | None:
     controllers exposed, falling back to ``CgroupBackend.V1`` when each
     required controller has its own hierarchy. Returns ``None`` if
     neither is present (the caller decides whether that's fatal).
+
+    Cached because the cgroup hierarchy is fixed for the lifetime of the
+    host kernel: every sandbox creation otherwise re-runs ``read_text``
+    on ``/sys/fs/cgroup/cgroup.controllers`` (or ``is_dir`` for v1
+    controllers) which is wasted work on the hot path.
     """
     if _v2_available():
         return CgroupBackend.V2

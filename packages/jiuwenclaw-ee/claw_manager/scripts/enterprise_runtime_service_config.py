@@ -13,7 +13,7 @@
 
 典型用法（PowerShell，项目根目录；请在仓库根 ``.env`` 中配置与 Gateway 相同的 ``GATEWAY_*``）::
 
-    # 单场景：alice → S1 销售组 AgentServer 池（服务 2.1）
+    # 单场景：alice → S1 销售组 AgentServer 池（2.5.1）
     uv run python packages/jiuwenclaw-ee/claw_manager/scripts/enterprise_runtime_service_config.py \\
         --group-id g_demo_sales --bot-id bot_main --user-id alice sp-xxxxxxxxxxxx
 
@@ -56,7 +56,7 @@ _DEMO_SCENARIOS: dict[tuple[str, str], ServiceConfigExpectation] = {
         template_name="销售组 AgentServer 池",
         min_idle_services=2,
         max_services=10,
-        policy_source="服务 2.1",
+        policy_source="2.5.1",
         service_id="g_demo_sales::bot_main",
         agent_id="alice",
     ),
@@ -65,7 +65,7 @@ _DEMO_SCENARIOS: dict[tuple[str, str], ServiceConfigExpectation] = {
         template_name="销售组 AgentServer 池",
         min_idle_services=2,
         max_services=10,
-        policy_source="继承服务 2.1",
+        policy_source="继承 2.5.1",
         service_id="g_demo_sales::bot_main",
         agent_id="default_agent_id_1",
     ),
@@ -74,7 +74,7 @@ _DEMO_SCENARIOS: dict[tuple[str, str], ServiceConfigExpectation] = {
         template_name="全局兜底 AgentServer 池",
         min_idle_services=1,
         max_services=5,
-        policy_source="全局 4",
+        policy_source="2.7",
         service_id=None,
         agent_id=None,
     ),

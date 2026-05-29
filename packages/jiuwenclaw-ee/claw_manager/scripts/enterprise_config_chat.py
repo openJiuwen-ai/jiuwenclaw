@@ -19,7 +19,7 @@
     uv run python .../enterprise_config_chat.py \\
         --group-id g_unknown --bot-id bot_main --user-id bob --web-port 19234
 
-``service_config`` 由 Gateway Runtime 加载，请用 ``enterprise_runtime_service_config.py`` 验证（见数据模型 §7）。
+``service_config`` 由 Gateway Runtime 加载，请用 ``enterprise_runtime_service_config.py`` 验证（见数据模型 §3.2）。
 
 也可把 provision-local 的 JSON 响应存为文件后自动读端口（同样放末尾）::
 
@@ -93,7 +93,7 @@ _DEMO_ENTERPRISE_EXPECTATIONS: dict[tuple[str, str], dict[str, Any]] = {
         },
         "skill_whitelist": "W1 销售组-天气 Skill",
         "extension_config": "E3 Agent Server 错误恢复（覆盖服务 E1+E2）",
-        "note": "Agent 3.1 覆盖服务 2.1 的 default/vision；video/audio 由全局 4 回填 M1 全局兜底-经济型",
+        "note": "2.6.1 覆盖 2.5.1 的 default/vision；video/audio 由 2.7 回填 M1 全局兜底-经济型",
     },
     ("g_demo_sales", "bob"): {
         "model_slots": {
@@ -102,9 +102,9 @@ _DEMO_ENTERPRISE_EXPECTATIONS: dict[tuple[str, str], dict[str, Any]] = {
             "video_model": "M1 全局兜底-经济型 (gpt-4o-mini)",
             "audio_model": "M1 全局兜底-经济型 (gpt-4o-mini)",
         },
-        "skill_whitelist": "W1 销售组-天气 Skill + W2 销售组-CRM Skill（继承服务级 2.1）",
-        "extension_config": "E1 Gateway 请求前鉴权 + E2 Gateway 请求后日志（继承服务 2.1）",
-        "note": "default=M5 销售组映射专用（Agent 3.2+映射 5.2）；vision=M2 销售组-标准型（继承服务级 2.1）；video/audio=M1 全局兜底-经济型",
+        "skill_whitelist": "W1 销售组-天气 Skill + W2 销售组-CRM Skill（继承 2.5.1）",
+        "extension_config": "E1 Gateway 请求前鉴权 + E2 Gateway 请求后日志（继承 2.5.1）",
+        "note": "default=M5（2.6.2+2.8.2）；vision=M2（继承 2.5.1）；video/audio=M1 全局兜底-经济型（2.7 回填）",
     },
     ("g_unknown", "bob"): {
         "model_slots": {
@@ -115,7 +115,7 @@ _DEMO_ENTERPRISE_EXPECTATIONS: dict[tuple[str, str], dict[str, Any]] = {
         },
         "skill_whitelist": "W3 全局兜底 Skill",
         "extension_config": "E4 Gateway 定时清理",
-        "note": "未命中服务策略，四槽位均走全局兜底 4（M1 全局兜底-经济型）",
+        "note": "未命中服务策略，四槽位均走 2.7 全局兜底（M1 全局兜底-经济型）",
     },
 }
 

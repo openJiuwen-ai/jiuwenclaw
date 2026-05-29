@@ -1375,6 +1375,7 @@ class JiuWenClawDeepAdapter:
                 sysop_card = create_sandbox_sysop_card(
                     sandbox_url,
                     sandbox_type,
+                    workspace_dir=self._workspace_dir,
                     files_runtime=runtime.get("files"),
                     excluded_commands=runtime.get("excluded_commands"),
                     idle_ttl_seconds=runtime.get("idle_ttl_seconds"),

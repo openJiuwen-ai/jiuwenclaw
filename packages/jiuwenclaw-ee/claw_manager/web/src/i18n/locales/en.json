@@ -69,7 +69,7 @@
     "lastHeartbeat": "Last heartbeat",
     "endpoint": "Endpoint",
     "version": "Version",
-    "deleteConfirm": "Delete this instance? All its service_instance rows will be removed.",
+    "deleteConfirm": "Delete this instance?",
     "filterStatus": "Filter by status"
   },
   "instanceForm": {

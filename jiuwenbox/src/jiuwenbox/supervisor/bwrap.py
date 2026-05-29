@@ -1,8 +1,10 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 """Bubblewrap (bwrap) sandbox wrapper.
 
-Translates a SecurityPolicy into bwrap command-line arguments and manages
-the lifecycle of the sandboxed process.
+Translates a :class:`SecurityPolicy` into ``bwrap`` command-line arguments.
+The runtime adapter (``server/runtime/process.py``) spawns ``bwrap`` itself
+because it needs ``pass_fds``/``preexec_fn``/``start_new_session`` knobs
+that a generic process wrapper cannot express.
 """
 
 from __future__ import annotations
@@ -10,12 +12,9 @@ from __future__ import annotations
 import fnmatch
 import logging
 import posixpath
-import signal
 import stat as stat_module
-import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import IO
 
 from jiuwenbox.logging_config import configure_logging
 from jiuwenbox.models.policy import (
@@ -112,7 +111,6 @@ class BwrapConfig:
     die_with_parent: bool = True
 
     # filesystem
-    rootfs: str | None = None
     ro_binds: list[tuple[str, str]] = field(default_factory=list)
     rw_binds: list[tuple[str, str]] = field(default_factory=list)
     device_binds: list[tuple[str, str]] = field(default_factory=list)
@@ -290,9 +288,65 @@ class BwrapConfig:
     def _apply_environment(cfg: BwrapConfig, environment: dict[str, str]) -> None:
         cfg.env.update(environment)
 
+    @staticmethod
+    def _drop_bwrap_managed_binds(
+        binds: list[tuple[str, str]],
+        bwrap_managed: set[str],
+        kind: str,
+    ) -> list[tuple[str, str]]:
+        """Drop bind entries whose target shadows a bwrap-managed mount.
+
+        bwrap always emits a fresh tmpfs at ``--proc`` and ``--dev`` targets
+        and then needs to be able to ``open(..., O_CREAT)`` the per-device
+        bind targets (e.g. ``/dev/null``) inside that tmpfs. If a policy
+        later puts a read-only bind on top of ``/proc`` or ``/dev`` (the
+        common case is ``bind_root_entries: { host_root: "/" }`` which
+        expands into a ``--ro-bind /dev /dev`` child), bwrap fails with
+        ``Can't create file at /dev/null: Permission denied`` because the
+        ``open`` call lands on a read-only mount.
+
+        Filtering here keeps the failure contained to a single ignored
+        bind: the bwrap-owned tmpfs survives intact, ``--dev-bind`` for
+        per-device entries works as designed, and operators get a debug
+        log line that explains the conflict.
+        """
+        kept: list[tuple[str, str]] = []
+        for src, dst in binds:
+            normalized = dst.rstrip("/") or "/"
+            if normalized in bwrap_managed:
+                logger.debug(
+                    "Skipping %s bind %s -> %s; the target shadows the "
+                    "bwrap-managed tmpfs and would make --dev-bind fail "
+                    "with 'Can't create file at <path>: Permission denied'",
+                    kind,
+                    src,
+                    dst,
+                )
+                continue
+            kept.append((src, dst))
+        return kept
+
     def to_args(self) -> list[str]:
-        """Convert this config into a bwrap argument list."""
+        """Convert this config into a bwrap argument list.
+
+        ``to_args`` is side-effect free: ``self.ro_binds`` / ``self.rw_binds``
+        are read-only inside this method so the same ``BwrapConfig`` instance
+        can be serialised multiple times without losing or duplicating
+        entries.
+        """
         args: list[str] = [BWRAP_BINARY]
+        bwrap_managed_mounts: set[str] = {
+            self.proc_path.rstrip("/") or "/",
+            self.dev_path.rstrip("/") or "/",
+        }
+        # Drop any bind that would overlay /dev or /proc; see
+        # ``_drop_bwrap_managed_binds`` for why this is required.
+        ro_binds_in = self._drop_bwrap_managed_binds(
+            self.ro_binds, bwrap_managed_mounts, "read-only",
+        )
+        rw_binds_in = self._drop_bwrap_managed_binds(
+            self.rw_binds, bwrap_managed_mounts, "read-write",
+        )
 
         if self.unshare_user:
             args.append("--unshare-user")
@@ -323,10 +377,10 @@ class BwrapConfig:
         for cap in self.cap_drop:
             args.extend(["--cap-drop", cap])
 
-        root_ro_binds = [(src, dst) for src, dst in self.ro_binds if dst == "/"]
-        root_rw_binds = [(src, dst) for src, dst in self.rw_binds if dst == "/"]
-        ro_binds = [(src, dst) for src, dst in self.ro_binds if dst != "/"]
-        rw_binds = [(src, dst) for src, dst in self.rw_binds if dst != "/"]
+        root_ro_binds = [(src, dst) for src, dst in ro_binds_in if dst == "/"]
+        root_rw_binds = [(src, dst) for src, dst in rw_binds_in if dst == "/"]
+        ro_binds = [(src, dst) for src, dst in ro_binds_in if dst != "/"]
+        rw_binds = [(src, dst) for src, dst in rw_binds_in if dst != "/"]
         if root_rw_binds:
             # A read-write root bind already exposes every absolute child path.
             # Re-binding private children such as /home/<user>/.jiuwenswarm can
@@ -447,73 +501,3 @@ class BwrapConfig:
         return args
 
 
-class BwrapProcess:
-    """Manages a bubblewrap sandboxed process."""
-
-    def __init__(self, config: BwrapConfig) -> None:
-        self._config = config
-        self._process: subprocess.Popen | None = None
-
-    @property
-    def pid(self) -> int | None:
-        return self._process.pid if self._process else None
-
-    @property
-    def returncode(self) -> int | None:
-        if self._process is None:
-            return None
-        return self._process.returncode
-
-    @property
-    def is_running(self) -> bool:
-        if self._process is None:
-            return False
-        return self._process.poll() is None
-
-    def start(
-        self,
-        stdin: int | IO | None = None,
-        stdout: int | IO | None = None,
-        stderr: int | IO | None = None,
-    ) -> None:
-        """Spawn the bwrap process."""
-        if self._process is not None and self.is_running:
-            raise RuntimeError("Process already running")
-
-        args = self._config.to_args()
-        logger.debug("Starting bwrap with args: %s", args)
-        pass_fds = ()
-        if self._config.seccomp_fd is not None:
-            pass_fds = (self._config.seccomp_fd,)
-
-        self._process = subprocess.Popen(
-            args,
-            stdin=stdin,
-            stdout=stdout,
-            stderr=stderr,
-            pass_fds=pass_fds,
-        )
-
-    def wait(self, timeout: float | None = None) -> int:
-        """Wait for the process to exit and return the exit code."""
-        if self._process is None:
-            raise RuntimeError("Process not started")
-        self._process.wait(timeout=timeout)
-        return self._process.returncode
-
-    def stop(self, timeout: float = 10.0) -> int | None:
-        """Gracefully stop: SIGTERM then SIGKILL after timeout."""
-        if self._process is None or not self.is_running:
-            return self.returncode
-
-        logger.info("Sending SIGTERM to bwrap pid %d", self._process.pid)
-        self._process.send_signal(signal.SIGTERM)
-
-        try:
-            self._process.wait(timeout=timeout)
-        except subprocess.TimeoutExpired:
-            logger.warning("SIGTERM timeout, sending SIGKILL to pid %d", self._process.pid)
-            self._process.kill()
-            self._process.wait(timeout=5.0)
-
-        return self._process.returncode

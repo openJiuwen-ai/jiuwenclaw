@@ -21,6 +21,8 @@
     "userIdPlaceholder": "可选",
     "groupIdLabel": "Group ID",
     "groupIdPlaceholder": "可选",
+    "botIdLabel": "Bot ID",
+    "botIdPlaceholder": "可选，如 bot_main",
     "customKvLabel": "自定义键值对",
     "customKvHint": "Key 限制在白名单内",
     "customKvEmpty": "暂无自定义键值对",

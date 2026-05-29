@@ -24,7 +24,6 @@ import type {
   PageResult,
   ProvisionLocalInstanceBody,
   ResponseModel,
-  ServiceStatusList,
 } from '../types';
 
 const API_BASE = (import.meta.env.VITE_API_BASE ?? '/api').replace(/\/$/, '');
@@ -118,15 +117,13 @@ export const InstanceApi = {
   create: (body: CreateInstanceBody) => http<InstanceSummary>('/v1/instances', { method: 'POST', body }),
   provisionLocal: (body: ProvisionLocalInstanceBody) =>
     http<Record<string, unknown>>('/v1/instances/provision-local', { method: 'POST', body }),
-  patch: (id: string, data: Record<string, unknown>) =>
-    http<InstanceDetail>(`/v1/instances/${encodeURIComponent(id)}`, { method: 'PATCH', body: { data } }),
+  update: (id: string, body: { data?: Record<string, unknown> }) =>
+    http<InstanceDetail>(`/v1/instances/${encodeURIComponent(id)}`, { method: 'PUT', body }),
   remove: (id: string, force = false) =>
     http<{ deleted: boolean }>(`/v1/instances/${encodeURIComponent(id)}`, {
       method: 'DELETE',
       query: { force },
     }),
-  servicesStatus: (id: string) =>
-    http<ServiceStatusList>(`/v1/instances/${encodeURIComponent(id)}/services/status`),
 };
 
 // ---------- Templates ----------

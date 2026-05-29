@@ -7,42 +7,11 @@ service_config_template（与 Claw Manager 企业级数据模型对齐）。
 
 from __future__ import annotations
 
-from datetime import datetime
-from typing import Any
-
-from pydantic import BaseModel
 from openjiuwen_runtime.foundation.db.table_def import (
     ColumnDefinition,
     IndexDefinition,
     TableDefinition,
 )
-
-
-class ModelTemplateInfo(BaseModel):
-    id: int
-    template_id: str
-    template_name: str
-    description: str | None
-    model_type: Any
-    model_tags: list[Any] | None
-    api_base: str
-    api_key: str
-    model_id: str
-    model_provider: str
-    parameters: dict[str, Any] | None
-    timeout: int
-    retry_count: int
-    enable_streaming: bool
-    enable_function_calling: bool
-    verify_ssl: bool
-    enabled: bool
-    data: dict[str, Any] | None
-    created_at: datetime
-    updated_at: datetime
-
-    class Config:
-        from_attributes = True
-
 
 MODEL_TEMPLATE_TABLE_DEF = TableDefinition(
     table_name="model_template",
@@ -80,25 +49,6 @@ MODEL_TEMPLATE_TABLE_DEF = TableDefinition(
     ],
 )
 
-
-class ExtensionConfigTemplateInfo(BaseModel):
-    id: int
-    template_id: str
-    template_name: str
-    description: str | None
-    component: str
-    hook_type: str
-    hook_config: dict[str, Any]
-    custom_config: dict[str, Any] | None
-    enabled: bool
-    data: dict[str, Any] | None
-    created_at: datetime
-    updated_at: datetime
-
-    class Config:
-        from_attributes = True
-
-
 EXTENSION_CONFIG_TEMPLATE_TABLE_DEF = TableDefinition(
     table_name="extension_config_template",
     columns=[
@@ -129,24 +79,6 @@ EXTENSION_CONFIG_TEMPLATE_TABLE_DEF = TableDefinition(
     ],
 )
 
-
-class SkillWhitelistTemplateInfo(BaseModel):
-    id: int
-    template_id: str
-    template_name: str
-    description: str | None
-    skill_id: str
-    skill_version: str
-    skill_source: str
-    enabled: bool
-    data: dict[str, Any] | None
-    created_at: datetime
-    updated_at: datetime
-
-    class Config:
-        from_attributes = True
-
-
 SKILL_WHITELIST_TEMPLATE_TABLE_DEF = TableDefinition(
     table_name="skill_whitelist_template",
     columns=[
@@ -174,54 +106,6 @@ SKILL_WHITELIST_TEMPLATE_TABLE_DEF = TableDefinition(
         IndexDefinition(["skill_id"], unique=False),
     ],
 )
-
-
-class ServiceConfigTemplateInfo(BaseModel):
-    id: int
-    template_id: str
-    template_name: str
-    description: str | None
-    agent_image: str
-    namespace: str
-    pod_name: str | None
-    container_name: str
-    container_port: int
-    port_name: str
-    image_pull_policy: str
-    replicas: int
-    kubeconfig: str | None
-    agent_runtime: str | None
-    readiness_initial_delay: int
-    readiness_period: int
-    ready_timeout: int
-    ready_poll_interval: int
-    nfs_server: str | None
-    nfs_path: str
-    nfs_mount_path: str | None
-    host_path: str | None
-    host_mount_path: str | None
-    mode: str
-    node_name: str
-    cpu_request: str
-    memory_request: str
-    cpu_limit: str
-    memory_limit: str
-    min_idle_services: int
-    max_services: int
-    service_concurrency: int
-    service_ttl: int
-    autoscale_interval: str
-    message_timeout: int
-    session_concurrency: int
-    session_ttl: int
-    enabled: bool
-    data: dict[str, Any] | None
-    created_at: datetime
-    updated_at: datetime
-
-    class Config:
-        from_attributes = True
-
 
 SERVICE_CONFIG_TEMPLATE_TABLE_DEF = TableDefinition(
     table_name="service_config_template",
@@ -259,14 +143,10 @@ SERVICE_CONFIG_TEMPLATE_TABLE_DEF = TableDefinition(
         ColumnDefinition("nfs_server", "string", length=256, nullable=True),
         ColumnDefinition("nfs_path", "string", length=512, nullable=False, default="/"),
         ColumnDefinition("nfs_mount_path", "string", length=512, nullable=True),
-        ColumnDefinition("host_path", "string", length=512, nullable=True),
-        ColumnDefinition("host_mount_path", "string", length=512, nullable=True),
-        ColumnDefinition("mode", "string", length=512, nullable=False, default="product"),
-        ColumnDefinition("node_name", "string", length=512, nullable=False, default=""),
-        ColumnDefinition("cpu_request", "string", length=32, nullable=False, default="500m"),
-        ColumnDefinition("memory_request", "string", length=32, nullable=False, default="512Mi"),
-        ColumnDefinition("cpu_limit", "string", length=32, nullable=False, default="1000m"),
-        ColumnDefinition("memory_limit", "string", length=32, nullable=False, default="1Gi"),
+        ColumnDefinition("cpu_request", "string", length=32, nullable=True),
+        ColumnDefinition("memory_request", "string", length=32, nullable=True),
+        ColumnDefinition("cpu_limit", "string", length=32, nullable=True),
+        ColumnDefinition("memory_limit", "string", length=32, nullable=True),
         ColumnDefinition("min_idle_services", "integer", nullable=False, default=1),
         ColumnDefinition("max_services", "integer", nullable=False, default=10),
         ColumnDefinition("service_concurrency", "integer", nullable=False, default=10),

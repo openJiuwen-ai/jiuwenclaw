@@ -12,6 +12,7 @@ import importlib
 import json
 import logging
 import os
+import socket
 from typing import Any, AsyncIterator, Callable, Optional
 
 from openjiuwen_runtime.management.session.access import Access
@@ -23,8 +24,14 @@ from openjiuwen_runtime.management.session.interfaces import (
     ISessionRequest,
 )
 from openjiuwen_runtime.management.session.k8s_service_handler import (
+    ContainerSpec,
+    HostPathMount,
     K8sDeployController,
     K8sServiceHandler,
+)
+from openjiuwen_runtime.management.session.process_service_handler import (
+    ProcessDeployController,
+    ProcessServiceHandler,
 )
 from openjiuwen_runtime.management.session.models import (
     AccessConfig,
@@ -53,14 +60,25 @@ from jiuwenclaw.schema.agent import AgentResponse, AgentResponseChunk
 
 logger = logging.getLogger(__name__)
 
+
+def _pick_free_port(host: str = "127.0.0.1") -> int:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.bind((host, 0))
+        return int(sock.getsockname()[1])
+
 _load_effective_enterprise_config: Any | None = None
 _service_config_slot: Any | None = None
+_extension_config_slot: Any | None = None
 
 
-def _ensure_enterprise_config_loader() -> tuple[Any, Any]:
-    global _load_effective_enterprise_config, _service_config_slot
-    if _load_effective_enterprise_config is not None and _service_config_slot is not None:
-        return _load_effective_enterprise_config, _service_config_slot
+def _ensure_enterprise_config_loader() -> tuple[Any, Any, Any]:
+    global _load_effective_enterprise_config, _service_config_slot, _extension_config_slot
+    if (
+        _load_effective_enterprise_config is not None
+        and _service_config_slot is not None
+        and _extension_config_slot is not None
+    ):
+        return _load_effective_enterprise_config, _service_config_slot, _extension_config_slot
 
     from jiuwenclaw.gateway.channel_config_db import (
         _EXT_PKG,
@@ -76,16 +94,15 @@ def _ensure_enterprise_config_loader() -> tuple[Any, Any]:
     schemas_mod = importlib.import_module(f"{_EXT_PKG}.core.enterprise_config.schemas")
     _load_effective_enterprise_config = loader_mod.load_effective_enterprise_config
     _service_config_slot = schemas_mod.TemplateRefSlot.SERVICE_CONFIG
-    return _load_effective_enterprise_config, _service_config_slot
+    _extension_config_slot = schemas_mod.TemplateRefSlot.EXTENSION_CONFIG
+    return _load_effective_enterprise_config, _service_config_slot, _extension_config_slot
 
 
 async def load_effective_service_config_for_request(request: AgentRequest) -> Any | None:
     """按当前请求路由上下文加载 ``service_config`` 与 ``extension_config`` 槽位。"""
     try:
-        load_fn, service_config_slot = _ensure_enterprise_config_loader()
-        # 同时加载 service_config 和 extension_config
-        from jiuwenclaw.gateway.extensions.manager_ws_client.core.enterprise_config.schemas import TemplateRefSlot
-        loaded = await load_fn(request, [service_config_slot, TemplateRefSlot.EXTENSION_CONFIG])
+        load_fn, service_config_slot, extension_config_slot = _ensure_enterprise_config_loader()
+        loaded = await load_fn(request, [service_config_slot, extension_config_slot])
     except Exception as exc:
         logger.warning(
             "[RuntimeManagementAgentClient] load service_config failed: %s",
@@ -116,6 +133,13 @@ def _resolve_invoke_ids_from_request(msg: AgentRequest) -> tuple[str, str | None
         )
     ag = str(msg.agent_id or "").strip()
     return svc, ag if ag else None
+
+
+def _env_bool(name: str, default: bool = False) -> bool:
+    value = os.getenv(name)
+    if value is None or value.strip() == "":
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "y", "on"}
 
 
 class _SessionRequest(ISessionRequest):
@@ -254,23 +278,74 @@ class RuntimeManagementAgentClient(AgentServerClient):
         gateway_db_name = os.getenv("GATEWAY_DB_NAME")
         jiuwenclaw_id = os.getenv("JIUWENCLAW_ID")
 
-        agent_server_env = {
-            "AGENT_SERVER_HOST": "0.0.0.0",
-            "AGENT_RUNTIME": agent_runtime,
-            "GATEWAY_DB_TYPE": gateway_db_type,
-            "GATEWAY_SQLITE_PATH": gateway_sqlite_path,
-            "GATEWAY_DB_HOST": gateway_db_host,
-            "GATEWAY_DB_PORT": gateway_db_port,
-            "GATEWAY_DB_USER": gateway_db_user,
-            "GATEWAY_DB_PASSWORD": gateway_db_password,
-            "GATEWAY_DB_NAME": gateway_db_name,
-            "JIUWENCLAW_ID": jiuwenclaw_id,
-        }
-        if api_key:
-            agent_server_env["MODEL_PROVIDER"] = model_provider
-            agent_server_env["MODEL_NAME"] = model_name
-            agent_server_env["API_BASE"] = api_base
-            agent_server_env["API_KEY"] = api_key
+        deploy_mode = (os.getenv("AGENT_SERVER_DEPLOY_MODE") or "k8s").strip().lower()
+
+        # jiuwenbox sidecar: agentserver 与 jiuwenbox 同 Pod，使用 127.0.0.1 访问。
+        jiuwenclaw_sandbox_enabled = _env_bool("JIUWENCLAW_SANDBOX_ENABLED", False)
+        jiuwenclaw_sandbox_image = os.getenv("JIUWENCLAW_SANDBOX_IMAGE", "jiuwenbox:latest")
+        jiuwenclaw_sandbox_port = int(os.getenv("JIUWENCLAW_SANDBOX_PORT", "8321"))
+        jiuwenclaw_sandbox_container_name = os.getenv(
+            "JIUWENCLAW_SANDBOX_CONTAINER_NAME", "jiuwenbox"
+        )
+        jiuwenclaw_sandbox_url = os.getenv(
+            "JIUWENCLAW_SANDBOX_URL",
+            f"http://127.0.0.1:{jiuwenclaw_sandbox_port}",
+        )
+        jiuwenclaw_sandbox_excluded_commands = os.getenv("JIUWENCLAW_SANDBOX_EXCLUDED_COMMANDS", "")
+        jiuwenclaw_sandbox_idle_ttl_seconds = os.getenv("JIUWENCLAW_SANDBOX_IDLE_TTL_SECONDS", "")
+        jiuwenclaw_sandbox_idle_check_interval = os.getenv("JIUWENCLAW_SANDBOX_IDLE_CHECK_INTERVAL", "")
+        jiuwenbox_listen = os.getenv("JIUWENBOX_LISTEN", f"tcp://0.0.0.0:{jiuwenclaw_sandbox_port}")
+        jiuwenbox_policy_path = os.getenv("JIUWENBOX_POLICY_PATH", "/app/configs/enterprise-policy.yaml")
+        jiuwenbox_host_mounts: list[HostPathMount] = []
+        if _env_bool("JIUWENBOX_MOUNT_CGROUP", True):
+            jiuwenbox_host_mounts.append(
+                HostPathMount(
+                    host_path="/sys/fs/cgroup",
+                    mount_path="/sys/fs/cgroup",
+                    read_only=False,
+                    host_path_type="Directory",
+                )
+            )
+
+        def _agent_env_vars() -> dict[str, str]:
+            base: dict[str, str] = {
+                "AGENT_SERVER_HOST": "0.0.0.0",
+                "AGENT_RUNTIME": agent_runtime or "",
+            }
+            for key, value in (
+                ("GATEWAY_DB_TYPE", gateway_db_type),
+                ("GATEWAY_SQLITE_PATH", gateway_sqlite_path),
+                ("GATEWAY_DB_HOST", gateway_db_host),
+                ("GATEWAY_DB_PORT", gateway_db_port),
+                ("GATEWAY_DB_USER", gateway_db_user),
+                ("GATEWAY_DB_PASSWORD", gateway_db_password),
+                ("GATEWAY_DB_NAME", gateway_db_name),
+                ("JIUWENCLAW_ID", jiuwenclaw_id),
+            ):
+                if value is not None:
+                    base[key] = value
+            if api_key:
+                base.update(
+                    {
+                        "MODEL_PROVIDER": model_provider or "",
+                        "MODEL_NAME": model_name or "",
+                        "API_BASE": api_base or "",
+                        "API_KEY": api_key,
+                    }
+                )
+            ssl_verify = os.getenv("LLM_SSL_VERIFY")
+            if ssl_verify is not None:
+                base["LLM_SSL_VERIFY"] = ssl_verify
+            home = os.getenv("AGENT_SERVER_HOME")
+            if home:
+                base["HOME"] = home
+            pythonpath = os.getenv("PYTHONPATH")
+            if pythonpath:
+                base["PYTHONPATH"] = pythonpath
+            log_file = os.getenv("AGENT_SERVER_LOG_FILE")
+            if log_file:
+                base["AGENT_SERVER_LOG_FILE"] = log_file
+            return base
 
         class _Factory(IServiceInstanceFactory):
             async def new_service(
@@ -278,49 +353,120 @@ class RuntimeManagementAgentClient(AgentServerClient):
             ) -> IServiceHandler:
                 cfg = service_template or {}
 
-                k8s = K8sServiceHandler(
-                    cfg["agent_image"] if "agent_image" in cfg else agent_image,
-                    name_prefix="jiuwenclaw",
-                    namespace=cfg["namespace"] if "namespace" in cfg else namespace,
-                    pod_name=cfg["pod_name"] if "pod_name" in cfg else container_name,
-                    container_name=cfg["container_name"] if "container_name" in cfg else container_name,
-                    container_port=int(cfg["container_port"]) if "container_port" in cfg else container_port,
-                    port_name=cfg["port_name"] if "port_name" in cfg else port_name,
-                    image_pull_policy=cfg["image_pull_policy"] if "image_pull_policy" in cfg else image_pull_policy,
-                    extra_labels=dict(RuntimeManagementAgentClient._POD_LABEL),
-                    env_vars=agent_server_env,
-                    kubeconfig=kubeconfig,
-                    readiness_initial_delay=int(cfg["readiness_initial_delay"]) if "readiness_initial_delay" in cfg else readiness_initial_delay,
-                    readiness_period=int(cfg["readiness_period"]) if "readiness_period" in cfg else readiness_period,
-                    ready_timeout=int(cfg["ready_timeout"]) if "ready_timeout" in cfg else ready_timeout,
-                    ready_poll_interval=int(cfg["ready_poll_interval"]) if "ready_poll_interval" in cfg else ready_poll_interval,
-                    nfs_server=cfg.get("nfs_server") if "nfs_server" in cfg else nfs_server,
-                    nfs_path=cfg.get("nfs_path") if "nfs_path" in cfg else nfs_path,
-                    nfs_mount_path=cfg.get("nfs_mount_path") if "nfs_mount_path" in cfg else nfs_mount_path,
-                    host_path=cfg.get("host_path") if "host_path" in cfg else host_path,
-                    host_mount_path=cfg.get("host_mount_path") if "host_mount_path" in cfg else host_mount_path,
-                    mode=cfg.get("mode") if "mode" in cfg else mode,
-                    node_name=cfg.get("node_name") if "node_name" in cfg else node_name,
-                    cpu_request=cfg.get("cpu_request") if "cpu_request" in cfg else cpu_request,
-                    memory_request=cfg.get("memory_request") if "memory_request" in cfg else memory_request,
-                    cpu_limit=cfg.get("cpu_limit") if "cpu_limit" in cfg else cpu_limit,
-                    memory_limit=cfg.get("memory_limit") if "memory_limit" in cfg else memory_limit,
-                )
+                if deploy_mode == "process":
+                    process_host = "127.0.0.1"
+                    target_port = _pick_free_port(process_host)
+                    target_container = None
+                    launcher_script = os.getenv("AGENT_SERVER_LAUNCHER_SCRIPT") or None
+                    process_handler = ProcessServiceHandler(
+                        host=process_host,
+                        publish_port=target_port,
+                        env_vars=_agent_env_vars(),
+                        launcher_script=launcher_script,
+                        ready_timeout=float(
+                            cfg["ready_timeout"] if "ready_timeout" in cfg else ready_timeout
+                        ),
+                        ready_poll_interval=float(
+                            cfg["ready_poll_interval"]
+                            if "ready_poll_interval" in cfg
+                            else ready_poll_interval
+                        ),
+                    )
+                    deploy_controller: Any = ProcessDeployController(process_handler)
+                else:
+                    agent_container_env = _agent_env_vars()
+                    if jiuwenclaw_sandbox_enabled:
+                        agent_container_env.update(
+                            {
+                                "JIUWENCLAW_SANDBOX_ENABLED": str(
+                                    jiuwenclaw_sandbox_enabled
+                                ).lower(),
+                                "JIUWENCLAW_SANDBOX_URL": jiuwenclaw_sandbox_url,
+                                "JIUWENCLAW_SANDBOX_TYPE": "jiuwenbox",
+                                "JIUWENCLAW_SANDBOX_STARTUP_MODE": "external",
+                                "JIUWENCLAW_SANDBOX_PRESERVE_FILE_SHARING_MODE": "mount",
+                                "JIUWENCLAW_SANDBOX_EXCLUDED_COMMANDS": jiuwenclaw_sandbox_excluded_commands,
+                                "JIUWENCLAW_SANDBOX_IDLE_TTL_SECONDS": jiuwenclaw_sandbox_idle_ttl_seconds,
+                                "JIUWENCLAW_SANDBOX_IDLE_CHECK_INTERVAL": jiuwenclaw_sandbox_idle_check_interval,
+                            }
+                        )
+                    agent_server_container = ContainerSpec(
+                        name=cfg["container_name"] if "container_name" in cfg else container_name,
+                        image=cfg["agent_image"] if "agent_image" in cfg else agent_image,
+                        port_name=cfg["port_name"] if "port_name" in cfg else port_name,
+                        port=int(cfg["container_port"]) if "container_port" in cfg else container_port,
+                        image_pull_policy=cfg["image_pull_policy"] if "image_pull_policy" in cfg else image_pull_policy,
+                        env_vars=agent_container_env,
+                    )
+                    target_container = agent_server_container.name
+                    containers = [agent_server_container]
+                    if jiuwenclaw_sandbox_enabled:
+                        jiuwenbox_container = ContainerSpec(
+                            name=jiuwenclaw_sandbox_container_name,
+                            image=jiuwenclaw_sandbox_image,
+                            port=jiuwenclaw_sandbox_port,
+                            image_pull_policy=cfg["image_pull_policy"]
+                            if "image_pull_policy" in cfg
+                            else image_pull_policy,
+                            env_vars={
+                                "JIUWENBOX_LISTEN": jiuwenbox_listen,
+                                "JIUWENBOX_POLICY_PATH": jiuwenbox_policy_path,
+                            },
+                            capabilities_add=["SYS_ADMIN", "NET_ADMIN"],
+                            seccomp_unconfined=True,
+                            apparmor_unconfined=True,
+                            proc_mount_unmasked=True,
+                            allow_privilege_escalation=True,
+                            privileged=True,
+                            host_path_mounts=jiuwenbox_host_mounts,
+                        )
+                        containers.append(jiuwenbox_container)
+                    target_port = int(cfg["container_port"]) if "container_port" in cfg else container_port
+                    k8s = K8sServiceHandler(
+                        containers=containers,
+                        name_prefix="jiuwenclaw",
+                        namespace=cfg["namespace"] if "namespace" in cfg else namespace,
+                        pod_name=cfg["pod_name"] if "pod_name" in cfg else container_name,
+                        extra_labels=dict(RuntimeManagementAgentClient._POD_LABEL),
+                        kubeconfig=kubeconfig,
+                        readiness_initial_delay=(int(cfg["readiness_initial_delay"])
+                                                 if "readiness_initial_delay" in cfg else readiness_initial_delay),
+                        readiness_period=(int(cfg["readiness_period"])
+                                          if "readiness_period" in cfg else readiness_period),
+                        ready_timeout=(int(cfg["ready_timeout"])
+                                       if "ready_timeout" in cfg else ready_timeout),
+                        ready_poll_interval=(int(cfg["ready_poll_interval"])
+                                             if "ready_poll_interval" in cfg else ready_poll_interval),
+                        nfs_server=cfg.get("nfs_server") if "nfs_server" in cfg else nfs_server,
+                        nfs_path=cfg.get("nfs_path") if "nfs_path" in cfg else nfs_path,
+                        nfs_mount_path=cfg.get("nfs_mount_path") if "nfs_mount_path" in cfg else nfs_mount_path,
+                        host_path=cfg.get("host_path") if "host_path" in cfg else host_path,
+                        host_mount_path=cfg.get("host_mount_path") if "host_mount_path" in cfg else host_mount_path,
+                        mode=cfg.get("mode") if "mode" in cfg else mode,
+                        node_name=cfg.get("node_name") if "node_name" in cfg else node_name,
+                        cpu_request=cfg.get("cpu_request") if "cpu_request" in cfg else cpu_request,
+                        memory_request=cfg.get("memory_request") if "memory_request" in cfg else memory_request,
+                        cpu_limit=cfg.get("cpu_limit") if "cpu_limit" in cfg else cpu_limit,
+                        memory_limit=cfg.get("memory_limit") if "memory_limit" in cfg else memory_limit,
+                    )
+                    deploy_controller = K8sDeployController(k8s)
+
                 ch = WSServiceMessageChannel(
-                    target_port=int(cfg["container_port"]) if "container_port" in cfg else container_port,
+                    target_port=target_port,
+                    target_container=target_container,
                     invoke_path="",
                     ws_use_tls=False,
                 )
 
                 # 从 service_template 中提取 service_id，如果存在则使用，否则让 ServiceHandler 自动生成 UUID
-                handler_service_id = cfg.get("service_id") if isinstance(cfg, dict) else None
+                handler_service_id = cfg.get("service_id") if "service_id" in cfg else None
 
                 return ServiceHandler(
                     service_id=handler_service_id,
                     total_concurrency=int(cfg["service_concurrency"]) if "service_concurrency" in cfg else service_concurrency,
                     message_channel=ch,
                     response_parser=response_parser,
-                    deploy_controller=K8sDeployController(k8s),
+                    deploy_controller=deploy_controller,
                     service_template=service_template,
                 )
 
@@ -342,6 +488,11 @@ class RuntimeManagementAgentClient(AgentServerClient):
         self._access: Any = Access(create_service_manager)
         self._connected = False
 
+    @property
+    def server_ready(self) -> bool:
+        """WebChannel on_connect 依赖此标志发送 connection.ack。"""
+        return self._connected
+
     def set_or_update_server_config(
         self,
         *,
@@ -349,6 +500,13 @@ class RuntimeManagementAgentClient(AgentServerClient):
         env: dict[str, str] | None = None,
     ) -> None:
         """触发热更新配置。"""
+        # 判断 config 中 service_template 是否为 true，否则不执行更新
+        if not config.get("service_template"):
+            logger.debug(
+                "[RuntimeManagementAgentClient] skip config update: service_template is not true"
+            )
+            return
+
         if not self._connected or not hasattr(self, "_access"):
             logger.warning("[RuntimeManagementAgentClient] not connected, skip config update")
             return
@@ -451,7 +609,7 @@ class RuntimeManagementAgentClient(AgentServerClient):
                 service_id,
                 agent_id,
             )
-            
+
             entities = loaded.service_config or []
             if entities:
                 service_template = entities[0]
@@ -470,14 +628,17 @@ class RuntimeManagementAgentClient(AgentServerClient):
                     ext_config,
                 )
 
+            # 确保 service_template 是字典，并合并 service_id 和 agent_id
+            if service_template is None:
+                service_template = {}
 
-            # 如果从数据库中匹配到了 service_id 或 agent_id，覆盖 request 中的值
             if service_id:
                 request.service_id = service_id
-                service_template = service_template or {"service_id": service_id}
+                service_template["service_id"] = service_id
+
             if agent_id:
                 request.agent_id = agent_id
-                service_template = service_template or {"agent_id": agent_id}
+                service_template["agent_id"] = agent_id
 
         session_request = _SessionRequest(request, envelope, service_template=service_template)
 
@@ -511,7 +672,7 @@ class RuntimeManagementAgentClient(AgentServerClient):
                 service_id,
                 agent_id,
             )
-            
+
             entities = loaded.service_config or []
             if entities:
                 service_template = entities[0]
@@ -530,12 +691,17 @@ class RuntimeManagementAgentClient(AgentServerClient):
                     ext_config,
                 )
 
+            # 确保 service_template 是字典，并合并 service_id 和 agent_id
+            if service_template is None:
+                service_template = {}
 
-            # 如果从配置中获取到了 service_id 或 agent_id，覆盖 request 中的值
             if service_id:
                 request.service_id = service_id
+                service_template["service_id"] = service_id
+
             if agent_id:
                 request.agent_id = agent_id
+                service_template["agent_id"] = agent_id
 
         session_request = _SessionRequest(request, envelope, service_template=service_template)
 

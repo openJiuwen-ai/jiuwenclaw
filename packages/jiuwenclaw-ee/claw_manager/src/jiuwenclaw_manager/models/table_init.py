@@ -10,10 +10,7 @@ from jiuwenclaw_manager.models.config_effective_policy_models import (
     CONFIG_EFFECTIVE_GLOBAL_POLICY_TABLE_DEF,
     CONFIG_EFFECTIVE_SERVICE_POLICY_TABLE_DEF,
 )
-from jiuwenclaw_manager.models.instance_models import (
-    INSTANCE_INFO_TABLE_DEF,
-    SERVICE_INSTANCE_TABLE_DEF,
-)
+from jiuwenclaw_manager.models.instance_models import INSTANCE_INFO_TABLE_DEF
 from jiuwenclaw_manager.models.application_config_models import (
     _CHANNEL_CONFIG_TABLE_DEF,
 )
@@ -26,7 +23,6 @@ from jiuwenclaw_manager.models.template_models import (
 
 ALL_TABLE_DEFINITIONS = (
     INSTANCE_INFO_TABLE_DEF,
-    SERVICE_INSTANCE_TABLE_DEF,
     _CHANNEL_CONFIG_TABLE_DEF,
     MODEL_TEMPLATE_TABLE_DEF,
     EXTENSION_CONFIG_TEMPLATE_TABLE_DEF,

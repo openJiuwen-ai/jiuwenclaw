@@ -22,10 +22,22 @@ class CreateInstanceBody(BaseModel):
     management_api_base: str | None = None
 
 
-class PatchInstanceDataBody(BaseModel):
-    """合并写入 instance_info.data（用于补录 management_api_base 等）。"""
+class InstanceUpdateBody(BaseModel):
+    """更新 instance_info（未传字段不修改）。
 
-    data: dict[str, Any]
+    ``status`` / ``last_heartbeat`` 由 Gateway WebSocket 心跳维护，不可通过本接口修改。
+    """
+
+    jiuwenclaw_name: str | None = Field(default=None, max_length=128)
+    description: str | None = Field(default=None, max_length=4096)
+    k8s_master_host: str | None = Field(default=None, max_length=256)
+    k8s_auth_type: str | None = Field(default=None, max_length=32)
+    k8s_auth_config: dict[str, Any] | None = None
+    k8s_namespace: str | None = Field(default=None, max_length=64)
+    resource_quota: dict[str, Any] | None = None
+    group_id: str | None = Field(default=None, max_length=64)
+    space_id: str | None = Field(default=None, max_length=64)
+    data: dict[str, Any] | None = None
 
 
 class ProvisionLocalInstanceBody(BaseModel):
@@ -44,6 +56,7 @@ class InstanceSummary(BaseModel):
     group_id: str
     space_id: str
     created_at: str | None = None
+    last_heartbeat: str | None = None
 
 
 class InstanceDetail(InstanceSummary):
@@ -52,17 +65,3 @@ class InstanceDetail(InstanceSummary):
     k8s_auth_type: str
     resource_quota: dict[str, Any] | None
     data: dict[str, Any] | None
-
-
-class ServiceStatusItem(BaseModel):
-    service_id: str
-    service_type: str
-    component_role: str
-    status: str
-    last_heartbeat: str | None
-    endpoint: str | None
-    version: str | None
-
-
-class ServiceStatusList(BaseModel):
-    items: list[ServiceStatusItem]

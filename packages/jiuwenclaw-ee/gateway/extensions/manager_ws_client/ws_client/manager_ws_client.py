@@ -19,6 +19,7 @@ from .protocol import (
     FRAME_TYPE_ERROR,
     FRAME_TYPE_EVENT,
     build_config_ack,
+    build_heartbeat,
     build_register,
 )
 
@@ -47,11 +48,13 @@ class ManagerWsClient:
         service_type: str = "gateway",
         ping_interval: float | None = 30.0,
         ping_timeout: float | None = 300.0,
+        heartbeat_interval_seconds: float = 10.0,
         on_config_push: ManagerWsConfigPushHandler | None = None,
     ) -> None:
         self._service_type = service_type
         self._ping_interval = ping_interval
         self._ping_timeout = ping_timeout
+        self._heartbeat_interval_seconds = max(1.0, float(heartbeat_interval_seconds))
         self._on_config_push = on_config_push
         self._uri: str | None = None
         self._ws: Any = None
@@ -71,6 +74,14 @@ class ManagerWsClient:
         self._on_config_push = handler
 
     async def connect(self, uri: str) -> None:
+        # initialize 与 WEB_CHANNEL_CREATED 都会 schedule connect；勿重复 disconnect，
+        # 否则会清空 JIUWENCLAW_ID 并以无 id 的 register 在 Manager 侧再建一条 instance。
+        if (
+            self._uri == uri
+            and self._session_task is not None
+            and not self._session_task.done()
+        ):
+            return
         if self._session_task is not None and not self._session_task.done():
             await self.disconnect()
 
@@ -209,13 +220,41 @@ class ManagerWsClient:
         return True
 
     async def _recv_loop(self, ws: Any) -> None:
-        async for raw in ws:
+        heartbeat_task = asyncio.create_task(
+            self._heartbeat_loop(ws),
+            name="manager-ws-heartbeat",
+        )
+        try:
+            async for raw in ws:
+                try:
+                    data = json.loads(raw)
+                except json.JSONDecodeError as exc:
+                    logger.warning("[ManagerWsClient] invalid json: %s", exc)
+                    continue
+                await self._dispatch(ws, data)
+        finally:
+            heartbeat_task.cancel()
             try:
-                data = json.loads(raw)
-            except json.JSONDecodeError as exc:
-                logger.warning("[ManagerWsClient] invalid json: %s", exc)
+                await heartbeat_task
+            except asyncio.CancelledError:
+                pass
+
+    async def _heartbeat_loop(self, ws: Any) -> None:
+        """周期性发送 heartbeat，供 Manager 刷新 ``instance_info.status``。"""
+        while True:
+            await asyncio.sleep(self._heartbeat_interval_seconds)
+            jid = get_jiuwenclaw_id()
+            if not jid:
                 continue
-            await self._dispatch(ws, data)
+            frame = build_heartbeat(
+                jiuwenclaw_id=jid,
+                service_type=self._service_type,
+            )
+            try:
+                await ws.send(json.dumps(frame, ensure_ascii=False))
+            except Exception as exc:  # noqa: BLE001
+                logger.debug("[ManagerWsClient] heartbeat send failed: %s", exc)
+                return
 
     async def _dispatch(self, ws: Any, data: dict[str, Any]) -> None:
         frame_type = data.get("type")

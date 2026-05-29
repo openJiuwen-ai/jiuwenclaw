@@ -1,10 +1,10 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
-"""jiuwenbox server 启动器 (TCP / UDS 二选一).
+"""jiuwenbox server 启动器 (HTTP / UDS 二选一).
 
 承担两件事:
 
 1. 把 "怎么 listen" 从 ``Dockerfile`` 命令行硬编码解耦, 改由 ``JIUWENBOX_LISTEN``
-   URI 控制 (``tcp://host:port`` 或 ``unix:///abs/socket/path``); 兼容老的
+   URI 控制 (``http://host:port`` 或 ``unix:///abs/socket/path``); 兼容老的
    ``--host/--port`` 用法只能由用户直接调 ``python -m uvicorn ...``。本入口
    不再透出 host/port flag, 仅暴露 ``--listen``。
 2. UDS 模式下做必要的 socket 文件预处理 (清理 stale socket、拒绝普通文件残留),
@@ -35,11 +35,11 @@ ENV_UDS_MODE = "JIUWENBOX_UDS_MODE"
 # anything imports ``jiuwenbox.server.app`` lazily inside ``uvicorn.run``).
 ENV_SAVE_LOGS_DIR = "JIUWENBOX_SAVE_LOGS_DIR"
 
-DEFAULT_LISTEN = "tcp://0.0.0.0:8321"
+DEFAULT_LISTEN = "http://0.0.0.0:8321"
 
-TcpSpec = Tuple[str, str, int]   # ("tcp", host, port)
-UnixSpec = Tuple[str, str]       # ("unix", abs_socket_path)
-ListenSpec = Union[TcpSpec, UnixSpec]
+HttpSpec = Tuple[str, str, int]   # ("http", host, port)
+UnixSpec = Tuple[str, str]        # ("unix", abs_socket_path)
+ListenSpec = Union[HttpSpec, UnixSpec]
 
 
 class ListenURIError(ValueError):
@@ -47,19 +47,19 @@ class ListenURIError(ValueError):
 
 
 def parse_listen(uri: str) -> ListenSpec:
-    """把 ``tcp://host:port`` / ``unix:///abs/path`` 解析成结构化形式.
+    """把 ``http://host:port`` / ``unix:///abs/path`` 解析成结构化形式.
 
     Args:
-        uri: 监听地址 URI. ``scheme`` 必须是 ``tcp`` 或 ``unix``;
+        uri: 监听地址 URI. ``scheme`` 必须是 ``http`` 或 ``unix``;
             ``unix`` 路径必须是绝对路径 (以 ``/`` 起头), 否则不同 cwd 下行为
             不一致, 且 lifespan / Docker volume 一律按绝对路径处理。
 
     Returns:
-        - TCP: ``("tcp", host, port)``;
-        - UDS: ``("unix", absolute_socket_path)``.
+        - HTTP: ``("http", host, port)``;
+        - UDS:  ``("unix", absolute_socket_path)``.
 
     Raises:
-        ListenURIError: scheme 未知 / TCP 缺 host 或 port / UDS 路径相对。
+        ListenURIError: scheme 未知 / HTTP 缺 host 或 port / UDS 路径相对。
     """
     if not uri:
         raise ListenURIError("listen URI is empty")
@@ -67,18 +67,18 @@ def parse_listen(uri: str) -> ListenSpec:
     parsed = urlparse(uri)
     scheme = (parsed.scheme or "").lower()
 
-    if scheme == "tcp":
+    if scheme == "http":
         host = parsed.hostname
         port = parsed.port
         if not host or port is None:
             raise ListenURIError(
-                f"tcp listen URI requires host and port, got {uri!r}"
+                f"http listen URI requires host and port, got {uri!r}"
             )
         if not (1 <= port <= 65535):
             raise ListenURIError(
-                f"tcp port out of range in {uri!r}: {port}"
+                f"http port out of range in {uri!r}: {port}"
             )
-        return ("tcp", host, int(port))
+        return ("http", host, int(port))
 
     if scheme == "unix":
         # 三斜杠 ``unix:///tmp/jw.sock`` -> netloc="", path="/tmp/jw.sock";
@@ -105,7 +105,7 @@ def parse_listen(uri: str) -> ListenSpec:
 
     raise ListenURIError(
         f"unknown listen URI scheme {scheme!r} in {uri!r}; "
-        f"expected 'tcp' or 'unix'"
+        f"expected 'http' or 'unix'"
     )
 
 
@@ -153,14 +153,14 @@ def _build_parser() -> argparse.ArgumentParser:
         description=(
             "Launch the jiuwenbox HTTP management server over TCP or UDS. "
             "Listen address is controlled by --listen or the JIUWENBOX_LISTEN "
-            "environment variable; default is tcp://0.0.0.0:8321."
+            f"environment variable; default is {DEFAULT_LISTEN}."
         ),
     )
     parser.add_argument(
         "--listen",
         default=None,
         help=(
-            "Listen URI: 'tcp://host:port' or 'unix:///abs/socket/path'. "
+            "Listen URI: 'http://host:port' or 'unix:///abs/socket/path'. "
             f"Falls back to ${ENV_LISTEN} env, then {DEFAULT_LISTEN}."
         ),
     )
@@ -253,13 +253,13 @@ def main(argv: list[str] | None = None) -> int:
         return 3
 
     uvicorn_kwargs: dict = {"log_level": args.log_level}
-    if spec[0] == "tcp":
+    if spec[0] == "http":
         _, host, port = spec
         # 清掉残留的 UDS_PATH, 避免多次启动时 lifespan 读到陈旧值
         os.environ.pop(ENV_UDS_PATH, None)
         uvicorn_kwargs["host"] = host
         uvicorn_kwargs["port"] = port
-        logger.info("[launcher] starting jiuwenbox on tcp://%s:%d", host, port)
+        logger.info("[launcher] starting jiuwenbox on http://%s:%d", host, port)
     else:
         _, path = spec
         try:

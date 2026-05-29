@@ -2,12 +2,12 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime
 from typing import Any
 
 from openjiuwen_runtime.foundation.db.handler import DBHandler
 
-from jiuwenclaw_manager.infrastructure.utils import new_template_id, utc_now
+from jiuwenclaw_manager.infrastructure.utils import iso_datetime, new_template_id, utc_now
 from jiuwenclaw_manager.manager_ws_server.server import push_config_op_to_all
 from jiuwenclaw_manager.models.template_models import SERVICE_CONFIG_TEMPLATE_TABLE_DEF
 from jiuwenclaw_manager.schemas.template_schemas import (
@@ -72,14 +72,6 @@ def _autoscale_interval_from_db(value: Any) -> float:
     return float(value)
 
 
-def _iso(dt: datetime | None) -> str | None:
-    if dt is None:
-        return None
-    if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=timezone.utc)
-    return dt.isoformat().replace("+00:00", "Z")
-
-
 def _row_to_out(row: Any) -> ServiceConfigTemplateOut:
     return ServiceConfigTemplateOut(
         id=row.id,
@@ -117,8 +109,8 @@ def _row_to_out(row: Any) -> ServiceConfigTemplateOut:
         session_ttl=int(row.session_ttl),
         enabled=row.enabled,
         data=row.data,
-        created_at=_iso(row.created_at),
-        updated_at=_iso(row.updated_at),
+        created_at=iso_datetime(row.created_at),
+        updated_at=iso_datetime(row.updated_at),
     )
 
 
@@ -163,10 +155,10 @@ class ServiceConfigTemplateService:
             "nfs_server": row.get("nfs_server"),
             "nfs_path": row.get("nfs_path", "/"),
             "nfs_mount_path": row.get("nfs_mount_path"),
-            "cpu_request": row.get("cpu_request", "500m"),
-            "memory_request": row.get("memory_request", "512Mi"),
-            "cpu_limit": row.get("cpu_limit", "1000m"),
-            "memory_limit": row.get("memory_limit", "1Gi"),
+            "cpu_request": row.get("cpu_request", ""),
+            "memory_request": row.get("memory_request", ""),
+            "cpu_limit": row.get("cpu_limit", ""),
+            "memory_limit": row.get("memory_limit", ""),
             "min_idle_services": int(row.get("min_idle_services", 1)),
             "max_services": int(row.get("max_services", 10)),
             "service_concurrency": int(row.get("service_concurrency", 10)),
@@ -179,8 +171,8 @@ class ServiceConfigTemplateService:
             "session_ttl": int(row.get("session_ttl", 20)),
             "enabled": row.get("enabled", True),
             "data": row.get("data"),
-            "created_at": _iso(row.get("created_at") or now),
-            "updated_at": _iso(row.get("updated_at") or now),
+            "created_at": iso_datetime(row.get("created_at") or now),
+            "updated_at": iso_datetime(row.get("updated_at") or now),
         }
 
     @staticmethod

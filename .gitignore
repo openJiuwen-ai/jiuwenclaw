@@ -83,3 +83,6 @@ packages/jiuwenclaw-tui/jiuwenclaw_tui/resources/tui-bin/.worktrees/
 
 # Local test scripts (not for repo)
 scripts/smoke_telemetry.py
+
+# Enterprise E2E test run artifacts
+tests/system_tests/enterprise/.runs/

@@ -6,7 +6,9 @@ interface StatusBadgeProps {
 function statusKind(status?: string | null): 'ok' | 'warn' | 'danger' | 'muted' {
   if (!status) return 'muted';
   const s = status.toLowerCase();
-  if (['active', 'online', 'ready', 'ok', 'running'].includes(s)) return 'ok';
+  if (['online', 'ready', 'ok', 'running'].includes(s)) return 'ok';
+  // 兼容历史库中的 active
+  if (s === 'active') return 'ok';
   if (['pending', 'restarting', 'starting'].includes(s)) return 'warn';
   if (['offline', 'failed', 'error', 'unreachable', 'shutdown'].includes(s)) return 'danger';
   return 'muted';

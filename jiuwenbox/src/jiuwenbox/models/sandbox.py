@@ -24,7 +24,6 @@ class PolicyMode(str, enum.Enum):
 class SandboxSpec(BaseModel):
     """Specification for creating a sandbox."""
 
-    workdir: str | None = None
     env: dict[str, str] = Field(default_factory=dict)
 
 

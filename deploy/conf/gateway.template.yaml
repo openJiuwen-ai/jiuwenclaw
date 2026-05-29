@@ -71,13 +71,6 @@ spec:
               mountPath: /root/.jiuwenclaw/config/config.yaml
               subPath: config.yaml
               readOnly: true
-          resources:
-            requests:
-              cpu: 2
-              memory: <<GATEWAY_MEMORY>>Gi
-            limits:
-              cpu: 2
-              memory: <<GATEWAY_MEMORY>>Gi
       volumes:
         - name: gateway-config
           configMap:

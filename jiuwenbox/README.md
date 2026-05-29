@@ -4,8 +4,9 @@
 code snippets with layered isolation.
 
 It exposes a FastAPI server for sandbox lifecycle management, file transfer,
-file listing/search, and command execution. Each sandbox command is launched
-through a small supervisor process that applies the configured isolation policy.
+file listing/search, and command execution. The server applies the configured
+isolation policy in-process by spawning `bubblewrap` directly for each sandbox
+(long-lived per-sandbox daemon plus on-demand background commands).
 
 ## Features
 
@@ -26,14 +27,17 @@ through a small supervisor process that applies the configured isolation policy.
   - FastAPI app that manages sandbox lifecycle, policy loading, audit logs, and
     API routing.
 - `server/runtime`
-  - Runtime adapter that starts one supervisor process per sandbox command.
+  - In-process runtime adapter that translates each sandbox policy into a
+    `bubblewrap` command line and spawns it directly from the server (one
+    long-lived daemon per sandbox plus per-call background commands).
 - `server/proxy_manager`
   - Manages inference privacy proxies for LLM API routing with API key injection.
 - `server/policy_reader`
   - Shared policy file reader for sandbox and proxy managers.
 - `supervisor`
-  - Per-command launcher that translates the effective policy into
-    `bubblewrap`, Landlock, seccomp, and namespace settings.
+  - Policy-to-isolation translation helpers (`bubblewrap` argv builder,
+    Landlock payload, seccomp filter, cgroup/network setup) consumed by the
+    runtime adapter.
 - `proxy`
   - HTTP-aware inference privacy proxy with path-based routing and API key
     injection (supports OpenAI and Anthropic formats).
@@ -97,13 +101,6 @@ The selected policy path is read from:
 JIUWENBOX_POLICY_PATH=/absolute/path/to/policy.yaml
 ```
 
-The port can also be set through `JIUWENBOX_PORT` when your process manager
-uses it to render the uvicorn command:
-
-```bash
-JIUWENBOX_PORT=9000
-```
-
 ### Docker Start
 
 Build the image:
@@ -130,7 +127,7 @@ conflicts.
 Listen address is controlled by a single env var:
 
 ```bash
-JIUWENBOX_LISTEN=tcp://0.0.0.0:8321               # default, historical behavior
+JIUWENBOX_LISTEN=http://0.0.0.0:8321               # default
 JIUWENBOX_LISTEN=unix:///run/jiuwenbox/jiuwenbox.sock  # switch to UDS (absolute path required)
 ```
 
@@ -172,7 +169,7 @@ jiuwenbox --base-url unix:///tmp/jiuwenbox-sock/jiuwenbox.sock health
 JIUWENBOX_URL=unix:///tmp/jiuwenbox-sock/jiuwenbox.sock jiuwenbox sandbox ls
 
 # pytest in dual transport mode (operator launches the matching server first)
-pytest tests/integration --server-endpoint=tcp://127.0.0.1:8321
+pytest tests/integration --server-endpoint=http://127.0.0.1:8321
 pytest tests/integration --server-endpoint=unix:///tmp/jiuwenbox-sock/jiuwenbox.sock
 ```
 
@@ -180,7 +177,7 @@ UDS-related env vars:
 
 | Variable | Default | Notes |
 | --- | --- | --- |
-| `JIUWENBOX_LISTEN` | `tcp://0.0.0.0:8321` | Management API listen URI; accepts `tcp://host:port` or `unix:///abs/socket/path`. Under UDS mode `JIUWENBOX_PORT` is ignored. |
+| `JIUWENBOX_LISTEN` | `http://0.0.0.0:8321` | Management API listen URI; accepts `http://host:port` or `unix:///abs/socket/path`. |
 | `JIUWENBOX_UDS_MODE` | `0666` | UDS socket file permissions (octal string). The Docker default is permissive so a non-root host user can connect; for multi-tenant / hardened deployments set `0660` and pass `docker run --user $(id -u):$(id -g)`. |
 | `JIUWENBOX_UDS_HOST_DIR` | `/tmp/jiuwenbox-sock` | Host directory bind-mounted by `run_docker.sh` to expose the socket. |
 | `JIUWENBOX_UDS_CONTAINER_DIR` | `/run/jiuwenbox` | Container-side mount point; must match the directory in `JIUWENBOX_LISTEN`'s socket path. |
@@ -513,6 +510,19 @@ Routes are differentiated by `path_prefix` (forwarding rules). Each route has **
 
 **Creating routes via API requires valid `listen_host` and `listen_port > 0`**, otherwise returns an error.
 
+### Proxy-only mode
+
+When the policy YAML file **only configures `inference_privacy_proxies`** (top-level keys limited to `version` / `name` / `inference_privacy_proxies`, and `listen_port > 0`), jiuwenbox automatically enters proxy-only mode on startup:
+
+- The sandbox subsystem is skipped entirely (no `ProcessRuntime`, no zombie reaper, no idle reaper).
+- `GET /health` keeps working and reports `sandboxes_active = 0`.
+- Sandbox-side routes (`/api/v1/sandboxes/*`, `/api/v1/policy/*`) return `503 Service Unavailable` until the policy file adds sandbox configuration.
+- The proxy routes (`/api/v1/proxy/*`) and the inference proxy itself work normally.
+
+The startup log emits `Proxy-only policy detected (no sandbox config); skipping sandbox subsystem startup`, followed by `Inference privacy proxy listening on http://<host>:<port>` so operators can verify the listener address at a glance.
+
+See the reference config at [`configs/inference-policy.yaml`](configs/inference-policy.yaml).
+
 ### Proxy Configuration
 
 Policy YAML configuration schema:
@@ -598,7 +608,7 @@ flag to maintain in sync:
 ```
 
 `test.sh` does **not** start the server; launch jiuwenbox first on the
-selected transport (TCP with `JIUWENBOX_LISTEN=tcp://0.0.0.0:8321` or a
+selected transport (TCP with `JIUWENBOX_LISTEN=http://0.0.0.0:8321` or a
 custom port, UDS with `JIUWENBOX_LISTEN=unix:///...`).
 
 Run specific test-case:

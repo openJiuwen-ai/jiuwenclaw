@@ -69,7 +69,7 @@
     "lastHeartbeat": "最近心跳",
     "endpoint": "Endpoint",
     "version": "版本",
-    "deleteConfirm": "确认删除该组网实例？将一并清理其下所有 service_instance 心跳数据。",
+    "deleteConfirm": "确认删除该组网实例？",
     "filterStatus": "按状态过滤"
   },
   "instanceForm": {

@@ -145,10 +145,6 @@ class InferencePrivacyProxy:
         normalized = path_prefix.rstrip("/")
         return normalized in self._enabled_routes
 
-    def get_enabled_routes(self) -> list[str]:
-        """Get list of enabled route path_prefixes."""
-        return list(self._enabled_routes)
-
     def _log(self, message: str) -> None:
         logger.info(message)
         if self._log_callback:
@@ -445,16 +441,3 @@ class InferencePrivacyProxy:
             self._serve_task = None
 
         self._log("HTTP proxy stopped")
-
-
-def default_proxy_config() -> InferencePrivacyProxyConfig:
-    return InferencePrivacyProxyConfig(
-        listen_port=8080,
-        routes=[
-            ProxyRoute(
-                path_prefix="/openai",
-                target_endpoint="https://api.openai.com",
-                api_key="sk-sandbox-key",
-            ),
-        ],
-    )
