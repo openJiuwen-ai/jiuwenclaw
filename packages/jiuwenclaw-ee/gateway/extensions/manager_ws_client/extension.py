@@ -93,10 +93,10 @@ def _schedule_manager_ws_connect() -> None:
         return
 
     cfg = get_settings()
-    if not cfg.manager_ws_client_enabled:
+    if not cfg.gateway_manager_ws_client_enabled:
         logger.info("[ManagerWsClient] disabled by config")
         return
-    uri = cfg.manager_ws_url.strip()
+    uri = cfg.gateway_manager_ws_url.strip()
     if not uri:
         logger.warning("[ManagerWsClient] ws url empty, skip connect")
         return

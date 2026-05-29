@@ -54,11 +54,9 @@ spec:
       labels:
         app: <<GATEWAY_NAME>>
     spec:
-      securityContext:
-        fsGroup: 1000
       containers:
         - name: gateway
-          image: <<GATEWAY_PRODUCT_IMAGE>>
+          image: <<GATEWAY_IMAGE>>
           imagePullPolicy: IfNotPresent
           # 用于调试模式：启用后容器将保持运行，可进入 Pod 手动调试程序
           # command: ["/bin/sh"]
@@ -67,20 +65,12 @@ spec:
             - name: websocket
               containerPort: <<GATEWAY_WEBSOCKET_PORT>>
               protocol: TCP
-            - name: rest
-              containerPort: <<GATEWAY_REST_PORT>>
-              protocol: TCP
           envFrom: []
           volumeMounts:
             - name: gateway-config
-              mountPath: /home/app/.jiuwenclaw/config/config.yaml
+              mountPath: /root/.jiuwenclaw/config/config.yaml
               subPath: config.yaml
               readOnly: true
-          securityContext:
-            allowPrivilegeEscalation: false
-            runAsNonRoot: true
-            runAsUser: 1000
-            runAsGroup: 1000
           resources:
             requests:
               cpu: 2
@@ -109,7 +99,21 @@ spec:
     - name: websocket
       port: <<GATEWAY_WEBSOCKET_PORT>>         # Service 端口
       targetPort: <<GATEWAY_WEBSOCKET_PORT>>   # 容器端口
-    - name: rest
-      port: <<GATEWAY_REST_PORT>>             # Service 端口
-      targetPort: <<GATEWAY_REST_PORT>>       # 容器端口
   type: ClusterIP                             # 集群内部访问，不需要外网
+
+---
+# NodePort Service：供集群外部连接
+apiVersion: v1
+kind: Service
+metadata:
+  name: <<GATEWAY_NAME>>-nodeport
+  namespace: <<NAMESPACE>>
+spec:
+  type: NodePort
+  ports:
+    - name: websocket
+      port: <<GATEWAY_WEBSOCKET_PORT>>        # 集群内部端口
+      targetPort: <<GATEWAY_WEBSOCKET_PORT>>  # 容器端口
+      nodePort: <<GATEWAY_NODE_PORT>>         # 外部访问端口（30000-32767）
+  selector:
+    app: <<GATEWAY_NAME>>

@@ -44,44 +44,30 @@ gen_gateway_file() {
     local client_type="${DEPLOY_VARS["AGENT_RUNTIME"]}"
     local mode="${DEPLOY_VARS["MODE"]}"
 
-    # Render base template: adapt for yuanrong product mode
     render_config_template "${GATEWAY_TEMPLATE_FILE}" "${GATEWAY_FILE}" "DEPLOY_VARS"
-    enable_dev_mode_if_needed ${GATEWAY_FILE} ${DEPLOY_VARS["GATEWAY_DEV_IMAGE"]}
-
-    if [ "${client_type}" == "jiuwen" ]; then
-        # Bind dedicated ServiceAccount to grant pod creation privileges
-        yq eval 'select(.kind == "Deployment").spec.template.spec.serviceAccountName = "'"${DEPLOY_VARS["GATEWAY_SERVICE_ACCOUNT"]}"'"' -i "${GATEWAY_FILE}"
-
-        # Override image with rt image
-        yq eval 'select(.kind == "Deployment").spec.template.spec.containers[0].image = "'"${DEPLOY_VARS["GATEWAY_RT_IMAGE"]}"'"' -i "${GATEWAY_FILE}"
-
-        # Inject environment variables via ConfigMap binding
-        yq eval '
-            select(.kind == "Deployment").spec.template.spec.containers[0].envFrom += [{
-                "configMapRef": {
-                    "name": "'"${DEPLOY_VARS["GATEWAY_ENV_FILE_NAME"]}"'"
-                }
-            }]
-        ' -i "${GATEWAY_FILE}"
-
-        if [[ "${mode}" != "dev" ]] && if_any_nodes_gateway_label; then
-            # Automatically create nodeSelector and set gateway=enable
-            yq eval 'select(.kind == "Deployment").spec.template.spec.nodeSelector |= {"gateway": "enable"}' -i "${GATEWAY_FILE}"
-        fi
+    if [ "${client_type}" != "jiuwen" ]; then
+        success "Gateway file generation completed: ${GATEWAY_FILE}"
+        return
     fi
 
-    if [ "${mode}" == "dev" ] || [ "${client_type}" == "jiuwen" ]; then
-         # Security context adaptation for root user
-        yq eval 'select(.kind == "Deployment").spec.template.spec.securityContext.fsGroup = 0' -i "${GATEWAY_FILE}"
-        yq eval 'select(.kind == "Deployment").spec.template.spec.containers[0].securityContext.allowPrivilegeEscalation = true' -i "${GATEWAY_FILE}"
-        yq eval 'select(.kind == "Deployment").spec.template.spec.containers[0].securityContext.runAsNonRoot = false' -i "${GATEWAY_FILE}"
-        yq eval 'select(.kind == "Deployment").spec.template.spec.containers[0].securityContext.runAsUser = 0' -i "${GATEWAY_FILE}"
-        yq eval 'select(.kind == "Deployment").spec.template.spec.containers[0].securityContext.runAsGroup = 0' -i "${GATEWAY_FILE}"
+    enable_dev_mode_if_needed ${GATEWAY_FILE}
 
-        # configuration file adaptation for root user
-        yq eval 'select(.kind == "Deployment").spec.template.spec.containers[0].volumeMounts[0].mountPath = "/root/.jiuwenclaw/config/config.yaml"' -i "${GATEWAY_FILE}"
+    # Bind dedicated ServiceAccount to grant pod creation privileges
+    yq eval 'select(.kind == "Deployment").spec.template.spec.serviceAccountName = "'"${DEPLOY_VARS["GATEWAY_SERVICE_ACCOUNT"]}"'"' -i "${GATEWAY_FILE}"
+
+    # Inject environment variables via ConfigMap binding
+    yq eval '
+        select(.kind == "Deployment").spec.template.spec.containers[0].envFrom += [{
+            "configMapRef": {
+                "name": "'"${DEPLOY_VARS["GATEWAY_ENV_FILE_NAME"]}"'"
+            }
+        }]
+    ' -i "${GATEWAY_FILE}"
+
+    if [[ "${mode}" != "dev" ]] && if_any_nodes_gateway_label; then
+        # Automatically create nodeSelector and set gateway=enable
+        yq eval 'select(.kind == "Deployment").spec.template.spec.nodeSelector |= {"gateway": "enable"}' -i "${GATEWAY_FILE}"
     fi
-
     success "Gateway file generation completed: ${GATEWAY_FILE}"
 }
 
@@ -95,11 +81,6 @@ create_gateway_env_configmap() {
         return
     fi
 
-    if [ "${mode}" == "dev" ]; then
-        DEPLOY_VARS["AGENT_SERVER_IMAGE"]="${DEPLOY_VARS["AGENT_SERVER_DEV_IMAGE"]}"
-    else
-        DEPLOY_VARS["AGENT_SERVER_IMAGE"]="${DEPLOY_VARS["AGENT_SERVER_PRODUCT_IMAGE"]}"
-    fi
     render_config_template "${GATEWAY_ENV_TEMPLATE_FILE}" "${GATEWAY_ENV_FILE}" "DEPLOY_VARS"
     exec_cmd kubectl create configmap -n ${namespace} ${env_name} --from-env-file=${GATEWAY_ENV_FILE}
 }

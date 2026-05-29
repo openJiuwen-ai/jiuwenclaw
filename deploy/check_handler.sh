@@ -160,11 +160,11 @@ check_if_db_up() {
     elif [[ "${db_type}" == "postgresql" ]]; then
         _check_if_postgresql_up
     else
-        _check_if_mysql_up
+        check_if_mysql_up
     fi
 }
 
-_check_if_mysql_up() {
+check_if_mysql_up() {
     local name="${DEPLOY_VARS["MYSQL_NAME"]}"
 
     # Check if external MySQL server
@@ -295,7 +295,7 @@ check_rabbitmq_up_dependency(){
     success "RabbitMQ directory created successfully in NFS Pod!"
 }
 
-check_db_up_dependency(){
+_check_db_up_dependency(){
     local db_type="${DEPLOY_VARS["DB_TYPE"]}"
 
     if [[ "${db_type}" == "sqlite" ]]; then
@@ -304,11 +304,11 @@ check_db_up_dependency(){
     elif [[ "${db_type}" == "postgresql" ]]; then
         _check_postgresql_up_dependency
     else
-        _check_mysql_up_dependency
+        check_mysql_up_dependency
     fi
 }
 
-_check_mysql_up_dependency(){
+check_mysql_up_dependency(){
     local mysql_path=${DEPLOY_VARS["MYSQL_PATH"]}
     local nfs_dname=${DEPLOY_VARS["NFS_NAME"]}
 

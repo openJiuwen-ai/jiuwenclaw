@@ -22,7 +22,7 @@ parse_args() {
                 i=$((i+2))
                 ;;
             --web-port)
-                DEPLOY_VARS["WEB_HOST_PORT"]="${args[$((i+1))]}"
+                DEPLOY_VARS["WEB_NODE_PORT"]="${args[$((i+1))]}"
                 i=$((i+2))
                 ;;
             -h|--help)
