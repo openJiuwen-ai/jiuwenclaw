@@ -903,7 +903,7 @@ class SkillDevDeepAdapter:
                         "pluginId/bundleName+toolName: %s",
                         res.get("filename", res),
                     )
-        write_tool_usage_catalog(dest_dir)
+        # write_tool_usage_catalog(dest_dir)
 
     @staticmethod
     async def _write_skill_searched(task_workspace: Path, skill_searched: dict[str, Any]) -> None:
@@ -998,8 +998,8 @@ class SkillDevDeepAdapter:
                 "用户上传资源已写入：\n"
             )
             parts.append(header + "\n".join(resource_lines))
-            if tools:
-                parts.append(format_tool_usage_hint())
+            # if tools:
+            #     parts.append(format_tool_usage_hint())
         if skill_searched:
             skill_name = skill_searched.get("skillId") or skill_searched.get("skillName") or "未知"
             ref_skills_dir = task_workspace / "resources" / "ref-skills"
