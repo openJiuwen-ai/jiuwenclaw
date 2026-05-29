@@ -61,6 +61,7 @@ from openjiuwen.harness import (
 from openjiuwen.harness.factory import create_deep_agent
 from openjiuwen.harness.subagents.code_agent import create_code_agent
 from openjiuwen.harness.prompts import resolve_language
+from openjiuwen.harness.prompts.sections.memory import build_memory_section
 from openjiuwen.harness.rails import SkillUseRail, TaskPlanningRail, SecurityRail, SkillEvolutionRail
 from openjiuwen.harness.rails.subagent_rail import SubagentRail
 from openjiuwen.harness.rails.lsp_rail import LspRail
@@ -133,6 +134,10 @@ from jiuwenclaw.agentserver.permissions.checker import TOOL_PERMISSION_CHANNEL_I
 from jiuwenclaw.agentserver.cron_config import should_register_cron_tools
 from jiuwenclaw.agentserver.skill_manager import (
     SkillManager, enabled_skills_from_environ, resolve_string_or_list_config,
+)
+from jiuwenclaw.agentserver.tools.memory_tools import (
+    init_memory_manager_async,
+    get_decorated_tools,
 )
 from jiuwenclaw.agentserver.tools.multimodal_config import (
     apply_audio_model_config_from_yaml,
@@ -3374,10 +3379,7 @@ class JiuWenClawDeepAdapter:
                     try:
                         _mem_mode = get_memory_mode(get_config())
                         if _mem_mode == "wiki":
-                            from jiuwenclaw.agentserver.tools.memory_tools import (
-                                get_decorated_tools as _get_custom_memory_tools,
-                            )
-                            for tool in _get_custom_memory_tools():
+                            for tool in get_decorated_tools():
                                 name = getattr(getattr(tool, "card", None), "name", "")
                                 if name in ("memory_index", "memory_search"):
                                     Runner.resource_mgr.add_tool(tool)
@@ -5312,41 +5314,7 @@ class JiuWenClawDeepAdapter:
         memory_mode = get_memory_mode(config)
 
         if memory_mode == "wiki":
-            from jiuwenclaw.agentserver.tools.memory_tools import (
-                init_memory_manager_async,
-                get_decorated_tools as _get_wiki_memory_tools,
-            )
-            from openjiuwen.harness.prompts.sections.memory import build_memory_section
-
-            await init_memory_manager_async(
-                workspace_dir=str(get_agent_workspace_dir()),
-                agent_id="default",
-                memory_mode=mode,
-            )
-
-            if self._instance.system_prompt_builder is not None:
-                resolved_language = self._instance.system_prompt_builder.language or "cn"
-                is_proactive = is_proactive_memory(mode, config)
-                memory_section = build_memory_section(
-                    language=resolved_language,
-                    read_only=False,
-                    is_proactive=is_proactive,
-                )
-                if memory_section is not None:
-                    self._instance.system_prompt_builder.remove_section("memory")
-                    self._instance.system_prompt_builder.add_section(memory_section)
-
-            for tool in _get_wiki_memory_tools():
-                tool_card = getattr(tool, "card", None)
-                if tool_card is None:
-                    continue
-                name = getattr(tool_card, "name", "")
-                if name in ("memory_index", "memory_search"):
-                    existing = Runner.resource_mgr.get_tool(tool_card.id)
-                    if existing is None:
-                        Runner.resource_mgr.add_tool(tool)
-                    self._instance.ability_manager.add(tool_card)
-
+            await self._init_builtin_memory_manager(mode, config)
             logger.info("[JiuWenClawDeepAdapter] Wiki memory initialized for %s mode", mode)
             return
 
@@ -5371,7 +5339,13 @@ class JiuWenClawDeepAdapter:
                 else:
                     logger.warning(
                         "[JiuWenClawDeepAdapter] MemoryRail build failed for %s mode, "
-                        "check embed config (embed_api_key/embed_base_url/embed_model)",
+                        "check embed config (embed_api_key/embed_base_url/embed_model). "
+                        "Falling back to FTS-only MemoryIndexManager",
+                        mode,
+                    )
+                    await self._init_builtin_memory_manager(mode, config)
+                    logger.info(
+                        "[JiuWenClawDeepAdapter] MemoryIndexManager (FTS-only) initialized for %s mode",
                         mode,
                     )
             else:
@@ -5393,6 +5367,36 @@ class JiuWenClawDeepAdapter:
                     await self._instance.unregister_rail(self._memory_rail)
                     self._memory_rail = None
                     logger.info(f"[JiuWenClawDeepAdapter] MemoryRail unregistered for {mode} mode")
+
+    async def _init_builtin_memory_manager(self, mode: str,
+        config: dict) -> None:
+        """初始化 MemoryIndexManager/WikiManager + 注册工具 + 注入 memory prompt section。"""
+        await init_memory_manager_async(
+            workspace_dir=str(get_agent_workspace_dir()),
+            agent_id="default",
+            memory_mode=mode,
+        )
+
+        if self._instance.system_prompt_builder is not None:
+            resolved_language = self._instance.system_prompt_builder.language or "cn"
+            is_proactive = is_proactive_memory(mode, config)
+            memory_section = build_memory_section(
+                language=resolved_language,
+                read_only=False,
+                is_proactive=is_proactive,
+            )
+            if memory_section is not None:
+                self._instance.system_prompt_builder.remove_section("memory")
+                self._instance.system_prompt_builder.add_section(memory_section)
+
+        for tool in get_decorated_tools():
+            tool_card = getattr(tool, "card", None)
+            if tool_card is None:
+                continue
+            if getattr(tool_card, "name", "") in ("memory_index", "memory_search"):
+                if Runner.resource_mgr.get_tool(tool_card.id) is None:
+                    Runner.resource_mgr.add_tool(tool)
+                self._instance.ability_manager.add(tool_card)
 
     def _build_external_memory_rail(self):
         from jiuwenclaw.agentserver.memory.external_memory_builder import (

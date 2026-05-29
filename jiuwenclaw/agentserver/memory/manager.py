@@ -13,15 +13,14 @@ from dataclasses import dataclass
 
 from jiuwenclaw.utils import logger
 
-from .types import (
-    MemorySearchResult, MemoryFileEntry, MemoryChunk, MemorySource
-)
+from .types import MemoryChunk
 from .internal import (
     ensure_dir, list_memory_files, build_file_entry, chunk_markdown,
-    hash_text, build_fts_query, bm25_rank_to_score, is_memory_path
+    hash_text, build_fts_query, bm25_rank_to_score, is_memory_path,
+    tokenize_for_fts
 )
 from .embeddings import EmbeddingProvider, create_embedding_provider
-from .config import MemorySettings
+from .config import MemorySettings, get_embed_config
 
 META_KEY = "memory_index_meta_v1"
 SNIPPET_MAX_CHARS = 700
@@ -81,6 +80,17 @@ class MemoryIndexManager:
         self.vector_enabled = settings.store.get("vector", {}).get("enabled", True)
         self.cache_enabled = settings.cache.get("enabled", True)
 
+        # 若无有效 embedding 配置，关闭向量检索，仅保留 FTS
+        if self.vector_enabled:
+            embed_cfg = get_embed_config()
+            if not all([embed_cfg.get("api_key"), embed_cfg.get("base_url"), embed_cfg.get("model")]):
+                self.vector_enabled = False
+                logger.info("Vector search disabled: no valid embedding config, FTS-only mode")
+
+        # FTS-only 模式：降低 minScore，不设阈值，完全依赖 BM25 排序
+        if not self.vector_enabled:
+            self.settings.query["minScore"] = 0.0
+
         self.fts_available = False
         self.fts_error: Optional[str] = None
         self.vector_available = False
@@ -135,7 +145,10 @@ class MemoryIndexManager:
         self.db_path = self._resolve_db_path()
         self.db = await asyncio.to_thread(self._open_database, self.db_path)
         self._ensure_schema()
-        await self._initialize_provider()
+        if self.vector_enabled:
+            await self._initialize_provider()
+        else:
+            logger.info("Vector search disabled, skipping embedding provider init")
         await self._load_vector_extension()
 
         await self.sync(reason="initial")
@@ -505,11 +518,12 @@ class MemoryIndexManager:
 
             meta = json.loads(row["value"])
 
-            if meta.get("provider") != self.provider.id:
-                return True
+            if self.provider:
+                if meta.get("provider") != self.provider.id:
+                    return True
 
-            if meta.get("model") != self.provider.model:
-                return True
+                if meta.get("model") != self.provider.model:
+                    return True
 
             if meta.get("chunkTokens") != self.settings.chunking.get("tokens"):
                 return True
@@ -530,8 +544,8 @@ class MemoryIndexManager:
             await self._sync_session_files()
 
         meta = {
-            "provider": self.provider.id,
-            "model": self.provider.model,
+            "provider": self.provider.id if self.provider else "none",
+            "model": self.provider.model if self.provider else "none",
             "providerKey": self.provider_key,
             "chunkTokens": self.settings.chunking.get("tokens"),
             "chunkOverlap": self.settings.chunking.get("overlap"),
@@ -676,7 +690,9 @@ class MemoryIndexManager:
         chunk_id = f"{file_path}:{chunk.startLine}:{chunk.endLine}"
         chunk_hash = hash_text(chunk.text)
 
-        embedding = await self._get_embedding(chunk.text)
+        embedding = None
+        if self.vector_enabled:
+            embedding = await self._get_embedding(chunk.text)
 
         cursor = self.db.execute("""
             INSERT OR REPLACE INTO chunks
@@ -685,7 +701,8 @@ class MemoryIndexManager:
             RETURNING rowid
         """, (
             chunk_id, file_path, source, chunk.startLine, chunk.endLine,
-            chunk_hash, self.provider.model, chunk.text,
+            chunk_hash, self.provider.model if self.provider else "",
+            chunk.text,
             vector_to_blob(embedding) if embedding else None,
             int(asyncio.get_event_loop().time()) if self._event_loop else 0
         ))
@@ -697,9 +714,10 @@ class MemoryIndexManager:
                 self.db.execute(f"""
                     INSERT OR REPLACE INTO {FTS_TABLE} (rowid, id, path, source, text)
                     VALUES (?, ?, ?, ?, ?)
-                """, (chunk_rowid, chunk_id, file_path, source, chunk.text))
+                """, (chunk_rowid, chunk_id, file_path, source, tokenize_for_fts(chunk.text, True)))
+                logger.debug(f"FTS indexed: rowid={chunk_rowid}, id={chunk_id}")
             except Exception as e:
-                logger.debug(f"Failed to insert into FTS: {e}")
+                logger.info(f"Failed to insert into FTS: {e}")
 
         if self.vector_available and embedding and chunk_rowid:
             try:
@@ -813,15 +831,15 @@ class MemoryIndexManager:
             except Exception as e:
                 logger.debug(f"Keyword search failed: {e}")
 
-        query_vec = await self._embed_query_with_timeout(cleaned)
-        has_vector = any(v != 0 for v in query_vec)
-
         vector_results = []
-        if has_vector:
-            try:
-                vector_results = await self._search_vector(query_vec, candidates)
-            except Exception as e:
-                logger.debug(f"Vector search failed: {e}")
+        if self.vector_enabled:
+            query_vec = await self._embed_query_with_timeout(cleaned)
+            has_vector = any(v != 0 for v in query_vec)
+            if has_vector:
+                try:
+                    vector_results = await self._search_vector(query_vec, candidates)
+                except Exception as e:
+                    logger.debug(f"Vector search failed: {e}")
 
         if not hybrid.get("enabled", True):
             return [
@@ -829,12 +847,17 @@ class MemoryIndexManager:
                 if r["score"] >= min_score
             ][:max_results]
 
-        merged = self._merge_hybrid_results(
-            vector_results,
-            keyword_results,
-            hybrid.get("vectorWeight", 0.7),
-            hybrid.get("textWeight", 0.3)
-        )
+        if self.vector_enabled:
+            merged = self._merge_hybrid_results(
+                vector_results,
+                keyword_results,
+                hybrid.get("vectorWeight", 0.7),
+                hybrid.get("textWeight", 0.3)
+            )
+        else:
+            merged = self._merge_hybrid_results(
+                [], keyword_results, 0.0, 1.0
+            )
 
         return [r for r in merged if r["score"] >= min_score][:max_results]
 

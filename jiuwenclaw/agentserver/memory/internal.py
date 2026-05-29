@@ -2,14 +2,16 @@
 
 """Internal utilities for memory system."""
 
-import os
-import re
 import hashlib
 import math
-from typing import List, Dict, Any, Optional, Tuple
-from pathlib import Path
+import os
+import re
+import unicodedata
+from typing import List, Dict, Any, Optional, Set
 
-from .types import MemoryFileEntry, MemoryChunk, MemorySource
+import jieba
+
+from .types import MemoryChunk
 
 
 def estimate_tokens(text: str) -> int:
@@ -137,6 +139,44 @@ def hash_text(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()[:16]
 
 
+_STOPWORDS: Optional[Set[str]] = None
+
+
+def _load_stopwords() -> Set[str]:
+    """Load stop words from data file (singleton)."""
+    global _STOPWORDS
+    if _STOPWORDS is not None:
+        return _STOPWORDS
+
+    # stopwords file lives in jiuwenclaw/resources/
+    resources_dir = os.path.join(os.path.dirname(__file__), "..", "..", "resources")
+    filepath = os.path.join(resources_dir, "stopwords_zh.txt")
+
+    words: Set[str] = set()
+    try:
+        with open(filepath, "r", encoding="utf-8") as f:
+            for line in f:
+                word = line.strip()
+                if word:
+                    words.add(word)
+    except FileNotFoundError:
+        pass
+
+    _STOPWORDS = words
+    return words
+
+
+def _is_valid_fts_token(token: str) -> bool:
+    """Check if a token is meaningful enough for FTS indexing/searching."""
+    token = token.strip()
+    if not token:
+        return False
+    # Filter stop words (applies to all lengths)
+    if token in _load_stopwords():
+        return False
+    return True
+
+
 def parse_embedding(data: Any) -> Optional[List[float]]:
     """Parse embedding from API response."""
     if isinstance(data, list):
@@ -150,16 +190,26 @@ def parse_embedding(data: Any) -> Optional[List[float]]:
     return None
 
 
+def tokenize_for_fts(text: str, save: bool) -> str:
+    """Tokenize text for FTS5 indexing/searching.
+
+    Uses jieba for Chinese text segmentation, then filters out
+    punctuation, symbols, and stop words.
+    """
+    if save:
+        # 存储时，需要切分的更加精细化，提高搜索的召回率
+        tokens = jieba.cut_for_search(text.strip())
+    else:
+        tokens = jieba.cut(text.strip())
+    return " ".join(t for t in tokens if _is_valid_fts_token(t))
+
+
 def build_fts_query(query: str) -> str:
     """Build FTS5 query from user input."""
-    cleaned = query.strip()
-    if not cleaned:
+    tokenized = tokenize_for_fts(query, False)
+    if not tokenized:
         return ""
-    
-    tokens = re.findall(r'\w+', cleaned)
-    if not tokens:
-        return ""
-    
+    tokens = tokenized.split()
     return " OR ".join(f'"{t}"' for t in tokens[:10])
 
 

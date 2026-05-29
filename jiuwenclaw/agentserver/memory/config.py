@@ -269,20 +269,20 @@ def _is_embed_config_valid(config: Optional[Dict[str, Any]] = None) -> bool:
 
 
 def get_memory_mode(config: Optional[Dict[str, Any]] = None) -> str:
-    """读取 ``memory.mode``：``local`` 或 ``wiki``（默认）。
+    """读取 ``memory.mode``：``local`` 或 ``wiki``（默认 ``local``）。
 
-    local 模式依赖 embedding 配置，若配置不完整则自动回退到 wiki 并输出警告日志。
+    local 模式优先使用 FTS + 向量混合检索；若无有效 embedding 配置则自动降级为纯 FTS。
     """
     cfg = config if config is not None else _load_config()
     memory_cfg = cfg.get("memory", {}) if isinstance(cfg, dict) else {}
-    mode = str(memory_cfg.get("mode") or "wiki").strip().lower()
+    mode = str(memory_cfg.get("mode") or "local").strip().lower()
     if mode == "local":
-        if _is_embed_config_valid(cfg):
-            return "local"
-        logger.warning(
-            "[MemoryConfig] memory.mode 为 local 但 embedding 配置不完整"
-            "（缺少 embed_api_key / embed_base_url / embed_model），"
-            "自动回退到 wiki 模式"
-        )
-        return "wiki"
+        if not _is_embed_config_valid(cfg):
+            logger.info(
+                "[MemoryConfig] embedding 配置不完整"
+                "（缺少 embed_api_key / embed_base_url / embed_model），"
+                "向量检索将被禁用，仅使用 FTS 全文检索"
+            )
+        return "local"
+
     return mode
