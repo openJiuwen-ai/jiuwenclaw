@@ -11,6 +11,7 @@ from typing import Any
 from urllib.parse import urlsplit
 
 from ..core.enterprise_config.gateway_db import GatewayDb
+from ..infrastructure.config import get_settings
 from ..infrastructure.utils import get_jiuwenclaw_id, set_jiuwenclaw_id
 from .protocol import (
     EVENT_CONNECTION_ACK,
@@ -18,6 +19,7 @@ from .protocol import (
     FRAME_TYPE_CONFIG_PUSH,
     FRAME_TYPE_ERROR,
     FRAME_TYPE_EVENT,
+    FRAME_TYPE_HEARTBEAT_ACK,
     build_config_ack,
     build_heartbeat,
     build_register,
@@ -28,19 +30,19 @@ logger = logging.getLogger(__name__)
 ManagerWsConfigPushHandler = Callable[[str, dict[str, Any]], Awaitable[None]]
 
 
-def _build_ws_origin(uri: str) -> str | None:
-    try:
-        parsed = urlsplit(uri)
-    except ValueError:
-        return None
-    if not parsed.netloc:
-        return None
-    scheme = "https" if parsed.scheme == "wss" else "http"
-    return f"{scheme}://{parsed.netloc}"
-
-
 class ManagerWsClient:
     """连接 Claw Manager manager_ws_server，接收 config.push 并回 ack。"""
+
+    @staticmethod
+    def _build_ws_origin(uri: str) -> str | None:
+        try:
+            parsed = urlsplit(uri)
+        except ValueError:
+            return None
+        if not parsed.netloc:
+            return None
+        scheme = "https" if parsed.scheme == "wss" else "http"
+        return f"{scheme}://{parsed.netloc}"
 
     def __init__(
         self,
@@ -48,19 +50,37 @@ class ManagerWsClient:
         service_type: str = "gateway",
         ping_interval: float | None = 30.0,
         ping_timeout: float | None = 300.0,
-        heartbeat_interval_seconds: float = 10.0,
         on_config_push: ManagerWsConfigPushHandler | None = None,
     ) -> None:
+        cfg = get_settings()
         self._service_type = service_type
         self._ping_interval = ping_interval
         self._ping_timeout = ping_timeout
-        self._heartbeat_interval_seconds = max(1.0, float(heartbeat_interval_seconds))
+        self._heartbeat_interval_seconds = max(
+            1.0, float(cfg.gateway_manager_ws_heartbeat_interval_seconds)
+        )
+        self._max_reconnect_attempts = max(
+            0, int(cfg.gateway_manager_ws_max_reconnect_attempts)
+        )
+        self._reconnect_interval_seconds = max(
+            0.1, float(cfg.gateway_manager_ws_reconnect_interval_seconds)
+        )
+        self._probe_interval_seconds = max(
+            self._reconnect_interval_seconds,
+            float(cfg.gateway_manager_ws_probe_interval_seconds),
+        )
         self._on_config_push = on_config_push
         self._uri: str | None = None
         self._ws: Any = None
         self._running = False
         self._session_task: asyncio.Task[None] | None = None
         self._ready = False
+        self._heartbeat_ack_event: asyncio.Event | None = None
+        self._heartbeat_seq = 0
+        self._heartbeat_ack_timeout_seconds = max(
+            3.0,
+            min(self._heartbeat_interval_seconds * 0.8, self._heartbeat_interval_seconds - 1.0),
+        )
 
     @property
     def jiuwenclaw_id(self) -> str | None:
@@ -112,24 +132,85 @@ class ManagerWsClient:
             self._session_task = None
         logger.info("[ManagerWsClient] disconnected")
 
+    def _compute_reconnect_delay(self, consecutive_failures: int) -> float:
+        """根据连续失败次数计算下次重连等待时间（秒）。
+
+        - 有 fast 阶段（max_reconnect_attempts > 0）：前 N 次用短间隔，之后进入 probe 模式。
+        - 无 fast 阶段（max_reconnect_attempts == 0）：指数退避，上限为 probe 间隔。
+        """
+        if consecutive_failures <= 0:
+            return self._reconnect_interval_seconds
+        if self._max_reconnect_attempts == 0:
+            backoff = self._reconnect_interval_seconds * (2 ** (consecutive_failures - 1))
+            return min(backoff, self._probe_interval_seconds)
+        if consecutive_failures <= self._max_reconnect_attempts:
+            return self._reconnect_interval_seconds
+        return self._probe_interval_seconds
+
+    def _in_probe_mode(self, consecutive_failures: int) -> bool:
+        if consecutive_failures <= 0:
+            return False
+        if self._max_reconnect_attempts == 0:
+            delay = self._compute_reconnect_delay(consecutive_failures)
+            return delay >= self._probe_interval_seconds
+        return consecutive_failures > self._max_reconnect_attempts
+
     async def _session_loop(self, uri: str) -> None:
-        retry_interval = 3.0
+        consecutive_failures = 0
+        probe_mode_logged = False
         while self._running:
+            reconnect_delay = self._reconnect_interval_seconds
             try:
                 await self._connect_once(uri)
+                consecutive_failures = 0
+                probe_mode_logged = False
             except asyncio.CancelledError:
                 raise
             except Exception as exc:  # noqa: BLE001
+                consecutive_failures += 1
+                reconnect_delay = self._compute_reconnect_delay(consecutive_failures)
                 jid_label = get_jiuwenclaw_id() or "unassigned"
-                logger.warning(
-                    "[ManagerWsClient] session ended jiuwenclaw_id=%s, retry in %ss: %s",
-                    jid_label,
-                    retry_interval,
-                    exc,
-                )
+                in_probe = self._in_probe_mode(consecutive_failures)
+                if in_probe and not probe_mode_logged:
+                    probe_mode_logged = True
+                    if self._max_reconnect_attempts > 0:
+                        logger.warning(
+                            "[ManagerWsClient] Manager unavailable after %s fast attempts; "
+                            "entering probe mode (retry every %ss) jiuwenclaw_id=%s "
+                            "last_error=%s",
+                            self._max_reconnect_attempts,
+                            self._probe_interval_seconds,
+                            jid_label,
+                            exc,
+                        )
+                    else:
+                        logger.warning(
+                            "[ManagerWsClient] Manager unavailable; "
+                            "entering probe mode (retry every %ss) jiuwenclaw_id=%s "
+                            "last_error=%s",
+                            self._probe_interval_seconds,
+                            jid_label,
+                            exc,
+                        )
+                elif in_probe:
+                    logger.info(
+                        "[ManagerWsClient] probe reconnect failed jiuwenclaw_id=%s "
+                        "next in %ss: %s",
+                        jid_label,
+                        reconnect_delay,
+                        exc,
+                    )
+                else:
+                    logger.warning(
+                        "[ManagerWsClient] session failed jiuwenclaw_id=%s "
+                        "attempt=%s/%s retry in %ss: %s",
+                        jid_label,
+                        consecutive_failures,
+                        self._max_reconnect_attempts or "∞",
+                        reconnect_delay,
+                        exc,
+                    )
             self._ready = False
-            set_jiuwenclaw_id(None)
-            GatewayDb.bind(None)
             if self._ws is not None:
                 try:
                     await self._ws.close()
@@ -138,10 +219,10 @@ class ManagerWsClient:
                 self._ws = None
             if not self._running:
                 break
-            await asyncio.sleep(retry_interval)
+            await asyncio.sleep(reconnect_delay)
 
     async def _connect_once(self, uri: str) -> None:
-        origin = _build_ws_origin(uri)
+        origin = self._build_ws_origin(uri)
         try:
             from websockets.legacy.client import connect as legacy_connect
 
@@ -150,10 +231,6 @@ class ManagerWsClient:
             import websockets
 
             connect_fn = websockets.connect
-
-        jid = get_jiuwenclaw_id()
-        if jid:
-            GatewayDb.bind(jid)
 
         logger.info("[ManagerWsClient] connecting %s", uri)
         async with connect_fn(
@@ -220,6 +297,7 @@ class ManagerWsClient:
         return True
 
     async def _recv_loop(self, ws: Any) -> None:
+        self._heartbeat_ack_event = asyncio.Event()
         heartbeat_task = asyncio.create_task(
             self._heartbeat_loop(ws),
             name="manager-ws-heartbeat",
@@ -238,26 +316,71 @@ class ManagerWsClient:
                 await heartbeat_task
             except asyncio.CancelledError:
                 pass
+            self._heartbeat_ack_event = None
 
     async def _heartbeat_loop(self, ws: Any) -> None:
-        """周期性发送 heartbeat，供 Manager 刷新 ``instance_info.status``。"""
+        """周期性发送 heartbeat，等待 Manager ``heartbeat.ack``，超时则断开以触发重连。"""
+        ack_event = self._heartbeat_ack_event
         while True:
             await asyncio.sleep(self._heartbeat_interval_seconds)
             jid = get_jiuwenclaw_id()
-            if not jid:
+            if not jid or ack_event is None:
                 continue
+            self._heartbeat_seq += 1
+            seq = self._heartbeat_seq
+            ack_event.clear()
             frame = build_heartbeat(
                 jiuwenclaw_id=jid,
                 service_type=self._service_type,
+                seq=seq,
             )
             try:
                 await ws.send(json.dumps(frame, ensure_ascii=False))
             except Exception as exc:  # noqa: BLE001
                 logger.debug("[ManagerWsClient] heartbeat send failed: %s", exc)
                 return
+            try:
+                await asyncio.wait_for(
+                    ack_event.wait(),
+                    timeout=self._heartbeat_ack_timeout_seconds,
+                )
+            except asyncio.TimeoutError:
+                logger.warning(
+                    "[ManagerWsClient] heartbeat.ack timeout jiuwenclaw_id=%s "
+                    "seq=%s after %ss; reconnecting",
+                    jid,
+                    seq,
+                    self._heartbeat_ack_timeout_seconds,
+                )
+                try:
+                    await ws.close()
+                except Exception:  # noqa: BLE001
+                    pass
+                return
+
+    def _notify_heartbeat_ack(self, data: dict[str, Any]) -> None:
+        ack_event = self._heartbeat_ack_event
+        if ack_event is None:
+            return
+        payload = data.get("payload")
+        if not isinstance(payload, dict):
+            return
+        if str(payload.get("status") or "").strip().lower() != "ok":
+            return
+        jid = get_jiuwenclaw_id()
+        ack_jid = str(payload.get("jiuwenclaw_id") or "").strip()
+        if jid and ack_jid and ack_jid != jid:
+            return
+        raw_seq = payload.get("seq")
+        if isinstance(raw_seq, int) and raw_seq != self._heartbeat_seq:
+            return
+        ack_event.set()
 
     async def _dispatch(self, ws: Any, data: dict[str, Any]) -> None:
         frame_type = data.get("type")
+        if frame_type == FRAME_TYPE_HEARTBEAT_ACK:
+            self._notify_heartbeat_ack(data)
+            return
         if frame_type == FRAME_TYPE_CONFIG_PUSH:
             await self._handle_config_push(ws, data)
             return
@@ -272,23 +395,37 @@ class ManagerWsClient:
         if not isinstance(payload, dict):
             return
         revision = str(payload.get("revision") or "")
+        jiuwenclaw_id = payload.get("jiuwenclaw_id")
+        if not isinstance(jiuwenclaw_id, str) or not jiuwenclaw_id:
+            raise ValueError("config.push payload requires jiuwenclaw_id")
         config = payload.get("config")
         if not isinstance(config, dict):
             config = {}
 
-        ok = True
+        success_flag = True
         err_msg: str | None = None
         sync_result: dict[str, Any] | None = None
         if self._on_config_push is not None:
             try:
-                sync_result = await self._on_config_push(revision, config)
+                sync_result = await self._on_config_push(
+                    revision,
+                    jiuwenclaw_id,
+                    config,
+                )
             except Exception as exc:  # noqa: BLE001
-                ok = False
+                success_flag = False
                 err_msg = str(exc)
                 logger.exception("[ManagerWsClient] on_config_push failed: %s", exc)
 
         ack = build_config_ack(
-            revision=revision, ok=ok, error=err_msg, result=sync_result
+            revision=revision,
+            success_flag=success_flag,
+            error_message=err_msg,
+            result=sync_result,
         )
         await ws.send(json.dumps(ack, ensure_ascii=False))
-        logger.info("[ManagerWsClient] config.ack revision=%s ok=%s", revision, ok)
+        logger.info(
+            "[ManagerWsClient] config.ack revision=%s success_flag=%s",
+            revision,
+            success_flag,
+        )

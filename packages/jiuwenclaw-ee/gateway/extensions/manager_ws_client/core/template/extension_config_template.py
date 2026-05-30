@@ -4,18 +4,22 @@
 
 from __future__ import annotations
 
+import logging
 from datetime import datetime
 from typing import Any
 
 from openjiuwen_runtime.foundation.db.handler import DBHandler
 
-from ...infrastructure.utils import assert_jiuwenclaw_id_matches_payload, utc_now
+from ...infrastructure.db import ensure_db_handler
+
+from ...infrastructure.utils import utc_now
 from ...models.template_models import EXTENSION_CONFIG_TEMPLATE_TABLE_DEF
 from ...schemas.template_schemas import ExtensionConfigTemplateUpdateRequest
 
 _TABLE = EXTENSION_CONFIG_TEMPLATE_TABLE_DEF.table_name
 _ALLOWED_COMPONENTS = frozenset({"gateway", "agent_server"})
 _ALLOWED_HOOK_TYPES = frozenset({"pre_request", "post_request", "error", "schedule"})
+logger = logging.getLogger(__name__)
 
 
 def _normalize_template_id(template_id: Any) -> str:
@@ -117,13 +121,15 @@ def _parse_iso_datetime(value: Any) -> Any:
     return value
 
 
-async def apply_extension_config_template_sync(
-    handler: DBHandler,
-    op: str,
+async def apply_extension_config_template(
     payload: dict[str, Any],
 ) -> dict[str, Any] | None:
     """应用 Claw Manager 经 WebSocket 下发的 extension_config_templates 变更。"""
-    assert_jiuwenclaw_id_matches_payload(payload)
+    op = str(payload.get("op") or "").strip()
+    if not op:
+        raise ValueError("extension_config_templates.op is required")
+
+    handler = await ensure_db_handler()
 
     if op == "create":
         template = payload.get("template")
@@ -151,9 +157,9 @@ async def apply_extension_config_template_sync(
             "updated_at": _parse_iso_datetime(template.get("updated_at")) or now,
         }
         await handler.create(_TABLE, row_data)
-        return {"template_id": template_uuid}
+        result: dict[str, Any] | None = {"template_id": template_uuid}
 
-    if op == "update":
+    elif op == "update":
         template_id = payload.get("template_id")
         updates = payload.get("updates")
         if template_id is None:
@@ -168,9 +174,9 @@ async def apply_extension_config_template_sync(
         )
         if row is None:
             raise ValueError(f"extension config template template_id={tid!r} not found")
-        return None
+        result = None
 
-    if op == "delete":
+    elif op == "delete":
         template_id = payload.get("template_id")
         if template_id is None:
             raise ValueError("extension_config_templates.delete requires template_id")
@@ -178,6 +184,16 @@ async def apply_extension_config_template_sync(
         deleted = await delete_extension_config_template(handler, tid)
         if not deleted:
             raise ValueError(f"extension config template template_id={tid!r} not found")
-        return None
+        result = None
 
-    raise ValueError(f"unsupported extension_config_templates.op: {op!r}")
+    else:
+        raise ValueError(f"unsupported extension_config_templates.op: {op!r}")
+
+    logger.info(
+        "[ManagerWsClient] extension_config_templates sync op=%s template_id=%s",
+        op,
+        (result or {}).get("template_id")
+        or payload.get("template_id")
+        or (payload.get("template") or {}).get("template_id"),
+    )
+    return result

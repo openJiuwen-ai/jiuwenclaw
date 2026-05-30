@@ -4,16 +4,14 @@
 
 from __future__ import annotations
 
+import logging
 from datetime import datetime
 from typing import Any
 
 from openjiuwen_runtime.foundation.db.handler import DBHandler
 
-from ...infrastructure.utils import (
-    assert_jiuwenclaw_id_matches_payload,
-    get_jiuwenclaw_id,
-    utc_now,
-)
+from ...infrastructure.db import ensure_db_handler
+from ...infrastructure.utils import get_jiuwenclaw_id, utc_now
 from ...models.config_effective_policy_models import (
     CONFIG_DEFAULT_TEMPLATE_MAPPING_TABLE_DEF,
 )
@@ -22,6 +20,7 @@ from ...schemas.config_effective_policy_schemas import (
 )
 
 _TABLE = CONFIG_DEFAULT_TEMPLATE_MAPPING_TABLE_DEF.table_name
+logger = logging.getLogger(__name__)
 
 _ALLOWED_TEMPLATE_TYPES = frozenset({
     "default_model",
@@ -128,13 +127,18 @@ def _parse_iso_datetime(value: Any) -> Any:
     return value
 
 
-async def apply_config_default_template_mapping_sync(
-    handler: DBHandler,
-    op: str,
+async def apply_config_default_template_mapping(
     payload: dict[str, Any],
 ) -> dict[str, Any] | None:
     """应用 Claw Manager 经 WebSocket 下发的 config_default_template_mappings 变更。"""
-    jiuwenclaw_id = assert_jiuwenclaw_id_matches_payload(payload)
+    op = str(payload.get("op") or "").strip()
+    if not op:
+        raise ValueError("config_default_template_mappings.op is required")
+
+    jiuwenclaw_id = get_jiuwenclaw_id()
+    if not jiuwenclaw_id:
+        raise ValueError("jiuwenclaw_id is not set")
+    handler = await ensure_db_handler()
 
     if op == "create":
         mapping = payload.get("mapping")
@@ -169,9 +173,9 @@ async def apply_config_default_template_mapping_sync(
             raise ValueError(
                 "config_default_template_mappings.create: database did not return mapping id"
             )
-        return {"mapping_id": new_id}
+        result: dict[str, Any] | None = {"mapping_id": new_id}
 
-    if op == "update":
+    elif op == "update":
         mapping_id = payload.get("mapping_id")
         updates = payload.get("updates")
         if mapping_id is None:
@@ -188,9 +192,9 @@ async def apply_config_default_template_mapping_sync(
         )
         if row is None:
             raise ValueError(f"config default template mapping id={mapping_id} not found")
-        return None
+        result = None
 
-    if op == "delete":
+    elif op == "delete":
         mapping_id = payload.get("mapping_id")
         if mapping_id is None:
             raise ValueError(
@@ -201,6 +205,16 @@ async def apply_config_default_template_mapping_sync(
         )
         if not deleted:
             raise ValueError(f"config default template mapping id={mapping_id} not found")
-        return None
+        result = None
 
-    raise ValueError(f"unsupported config_default_template_mappings.op: {op!r}")
+    else:
+        raise ValueError(f"unsupported config_default_template_mappings.op: {op!r}")
+
+    logger.info(
+        "[ManagerWsClient] config_default_template_mappings sync op=%s mapping_id=%s",
+        op,
+        (result or {}).get("mapping_id")
+        or payload.get("mapping_id")
+        or (payload.get("mapping") or {}).get("id"),
+    )
+    return result
