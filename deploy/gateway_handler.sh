@@ -136,8 +136,16 @@ uninstall_gateway() {
     local env_name="${DEPLOY_VARS["GATEWAY_ENV_FILE_NAME"]}"
     local gateway_file="${CONFIG["GATEWAY_FILE"]}"
 
-    exec_cmd kubectl delete -f ${gateway_file}
+    # 先优雅停 Pod，再清理周边资源
+    # gateway.yaml 含 ServiceAccount / Role / Deployment 等同文件资源。
+    # 不可 kubectl delete -f 一次性删掉：SA 被删后 Pod 仍在 Terminating 窗口内，
+    # in-cluster token 立即失效 → Gateway shutdown 删 Agent Pod 会 401。
+    info "Deleting Gateway Deployment first (keep ServiceAccount for graceful shutdown)"
+    exec_cmd kubectl delete deployment "${gateway_name}" -n "${namespace}"
     wait_pod_terminated "${gateway_name}" "${namespace}"
+
+    info "Deleting remaining Gateway resources (ServiceAccount, Role, Service, ...)"
+    exec_cmd kubectl delete -f "${gateway_file}" --ignore-not-found=true
     delete_k8s_resource "configmap" "${conf_name}" "${namespace}"
 
     if [ "${DEPLOY_VARS["AGENT_RUNTIME"]}" == "jiuwen" ]; then
