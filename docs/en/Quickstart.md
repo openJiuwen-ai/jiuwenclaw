@@ -120,20 +120,12 @@ Page display after clearing:
 
 **When to clear a session?**
 
-<<<<<<< HEAD
-  Navigate to the frontend directory `jiuwenswarm/channels/web/frontend` and install dependencies:
-  ```bash
-  cd jiuwenswarm/channels/web/frontend
-  npm install
-  ```
-=======
 | Scenario | Description |
 |----------|-------------|
 | **Topic Switch** | Current conversation is complete, want to start a completely new topic |
 | **Context Confusion** | Too much content in current session, model understanding deviates |
 | **Repeated/Wrong Response** | Model falls into loop response or gives irrelevant answers |
 | **Privacy/Sensitive Info** | Current session contains temporary sensitive information that needs immediate clearing |
->>>>>>> 6e8b643 (docs(Quickstart): 同步中英文版本，补充环境要求)
 
 **Comparison: Clear vs Not Clear Session:**
 
