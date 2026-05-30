@@ -1494,7 +1494,7 @@ class JiuWenClaw:
             delta_content = "".join(final_answer_chunks)
             if delta_content:
                 logger.info(
-                    "[JiuWenClaw] Agent流失回答汇总: %s",
+                    "[JiuWenClaw] Agent流式回答汇总: %s",
                     _truncate_for_log(delta_content),
                     extra={'user_visible': 'critical'}
                 )

@@ -400,6 +400,8 @@ def _log_component_from_logger_name(name: str) -> str:
         return "permissions"
     if name.startswith("jiuwenclaw.agentserver"):
         return "agent_server"
+    if name.startswith("jiuwenclaw.utils"): 
+        return "agent_server"
     return name
 
 

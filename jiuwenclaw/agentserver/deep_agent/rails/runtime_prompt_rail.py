@@ -293,8 +293,7 @@ class RuntimePromptRail(DeepAgentRail):
                 | `{config_dir}` | 配置信息 | 不要轻易改动，错误配置可能导致异常 |
                 | `{resolved_workspace}` | 身份与任务信息 | 可适当更新，以更好地服务用户 |
                 | `{memory_dir}` | 持久化记忆（含 USER.md、MEMORY.md） | 将其视为你记忆的一部分，随时查阅 |
-                | `{daily_memory_dir}` | 每日记忆文件（YYYY-MM-DD.md） | 每天的记忆记录存放在此，
-                新增/编辑后需调用 memory_index 索引 |
+| `{daily_memory_dir}` | 每日记忆文件（YYYY-MM-DD.md） | 每天的记忆记录存放在此，新增/编辑后需调用 memory_index 索引 |
                 | `{skills_dir}` | 技能库 | 可随时翻阅、调用，不可修改 |
                 | `{todo_dir}` | 待办事项 | 记录用户请求的任务，每次请求后会更新 |
 
@@ -336,18 +335,17 @@ class RuntimePromptRail(DeepAgentRail):
         else:
             workspace_content = f"""# Your Home
                 The following paths are for your internal task execution only.
-                Your default workspace and related configuration live under the `.jiuwenclaw` directory. 
-                Do not proactively expose 
+Your default workspace and related configuration live under the `.jiuwenclaw` directory. Do not proactively expose
                 internal directory names or implementation details to the user unless necessary for task completion.
 
                 | Path | Purpose | Guidelines |
                 |------|---------|------------|
                 | `{config_dir}` | Configuration | Do not modify lightly; bad config can cause failures |
                 | `{resolved_workspace}` | Identity and task info | You may update this to better serve your user |
-                | `{memory_dir}` | Persistent memory (USER.md, MEMORY.md) | Treat it as part of your memory; consult it 
-                anytime |
-                | `{daily_memory_dir}` | Daily memory files (YYYY-MM-DD.md) | Daily memory records; call memory_index 
-                after creating/editing |
+                | `{memory_dir}` | Persistent memory (USER.md, MEMORY.md) | Treat it as part of your memory; 
+                consult it anytime |
+                | `{daily_memory_dir}` | Daily memory files (YYYY-MM-DD.md) | Daily memory records; 
+                call memory_index after creating/editing |
                 | `{skills_dir}` | Skill library | Read and invoke freely; do not modify |
                 | `{todo_dir}` | Todo list | Records tasks from user requests; updated after each request |
 
@@ -384,8 +382,8 @@ class RuntimePromptRail(DeepAgentRail):
 
                 When the `send_file_to_user` tool is available in your tool list, you **must** proactively invoke it 
                 in these scenarios:
-                - Task completion produces files that need to be delivered to the user (reports, documents, data files, 
-                images, etc.)
+                - Task completion produces files that need to be delivered to the user (reports, documents, 
+                data files, images, etc.)
                 - User explicitly requests to download, export, or receive files
                 - User asks how to obtain generated files
 

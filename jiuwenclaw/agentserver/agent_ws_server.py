@@ -882,8 +882,7 @@ class AgentWebSocketServer:
                 # 流式响应进度标记（每10个chunk）
                 elif chunk_count % 10 == 0:
                     logger.info(
-                        f"[AgentWebSocketServer] 流式响应进度: request_id={request.request_id} chunk_count={chunk_count}",
-                        extra={'user_visible': 'progress'}
+                        f"[AgentWebSocketServer] 流式响应进度: request_id={request.request_id} chunk_count={chunk_count}"
                     )
 
                 # 通知心跳任务有真实 chunk 发送，重置心跳计时

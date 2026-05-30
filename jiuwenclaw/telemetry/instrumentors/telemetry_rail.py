@@ -278,6 +278,15 @@ class TelemetryRail(DeepAgentRail):
         if self._agent and hasattr(self._agent, "card"):
             agent_name = getattr(self._agent.card, "id", "")
 
+        # 用户可见日志：Agent 开始处理
+        logger.info(
+            "[TelemetryRail] Agent 开始处理: agent=%s, session_id=%s, channel_id=%s",
+            agent_name,
+            req_ctx["session_id"],
+            req_ctx["channel_id"],
+            extra={'user_visible': 'critical'}
+        )
+
         attrs = {
             GEN_AI_AGENT_NAME: agent_name,
             GEN_AI_CONVERSATION_ID: conversation_id,
@@ -329,6 +338,26 @@ class TelemetryRail(DeepAgentRail):
 
         agent_span, agent_start_time, ctx_token = entry
         req_ctx = self._get_request_context()
+
+        # 用户可见日志：Agent 处理完成
+        agent_name = ""
+        if self._agent and hasattr(self._agent, "card"):
+            agent_name = getattr(self._agent.card, "id", "")
+        usage_accum = _agent_token_usage.get()
+        usage_info = ""
+        if usage_accum and (usage_accum["input_tokens"] > 0 or usage_accum["output_tokens"] > 0):
+            usage_info = f"input_tokens={usage_accum['input_tokens']}, output_tokens={usage_accum['output_tokens']}"
+        duration = time.monotonic() - agent_start_time
+        err = getattr(ctx, "error", None)
+        status = "error" if err else "success"
+        logger.info(
+            "[TelemetryRail] Agent 处理完成: agent=%s, status=%s, duration=%.2fs, %s",
+            agent_name,
+            status,
+            duration,
+            usage_info,
+            extra={'user_visible': 'critical'}
+        )
 
         if agent_span:
             # Check for errors
@@ -395,6 +424,19 @@ class TelemetryRail(DeepAgentRail):
         if model_cfg is not None:
             temperature = getattr(model_cfg, "temperature", None)
             top_p = getattr(model_cfg, "top_p", None)
+
+        # 用户可见日志：模型调用开始
+        streaming = False
+        if hasattr(ctx, "model"):
+            streaming = bool(getattr(ctx.model, "streaming", False))
+        logger.info(
+            "[TelemetryRail] 模型调用开始: model=%s, system=%s, iteration=%d, streaming=%s",
+            model_name,
+            system,
+            req_ctx["iteration"] + 1,
+            streaming,
+            extra={'user_visible': 'critical'}
+        )
 
         # Generate unique span key
         call_id = str(time.monotonic_ns())
@@ -503,6 +545,27 @@ class TelemetryRail(DeepAgentRail):
         if result is None:
             result = getattr(ctx, "result", None)
 
+        # 用户可见日志：模型调用完成
+        duration = time.monotonic() - start_time
+        usage_info = ""
+        if result is not None:
+            usage = getattr(result, "usage_metadata", None)
+            if usage is not None:
+                input_tokens = getattr(usage, "input_tokens", 0) or 0
+                output_tokens = getattr(usage, "output_tokens", 0) or 0
+                usage_info = f"input_tokens={input_tokens}, output_tokens={output_tokens}"
+        err = getattr(ctx, "error", None)
+        status = "error" if err else "success"
+        logger.info(
+            "[TelemetryRail] 模型调用完成: model=%s, system=%s, status=%s, duration=%.2fs, %s",
+            model_name,
+            system,
+            status,
+            duration,
+            usage_info,
+            extra={'user_visible': 'critical'}
+        )
+
         if result is not None:
             self._record_token_usage(span, result, model_name, system, channel_id)
 
@@ -590,6 +653,14 @@ class TelemetryRail(DeepAgentRail):
             elif hasattr(inputs, "tool_name"):
                 tool_name = inputs.tool_name
 
+        # 用户可见日志：工具调用开始
+        logger.info(
+            "[TelemetryRail] 工具调用开始: tool=%s, tool_call_id=%s",
+            tool_name,
+            tool_call_id,
+            extra={'user_visible': 'critical'}
+        )
+
         # Fix: Generate unique key when tool_call_id is empty to prevent span overwrite
         span_key = tool_call_id if tool_call_id else f"__no_id__{tool_name}_{time.monotonic_ns()}"
 
@@ -658,6 +729,15 @@ class TelemetryRail(DeepAgentRail):
             return
 
         span, start_time, span_tool_name = entry
+
+        # 用户可见日志：工具调用完成
+        duration = time.monotonic() - start_time
+        logger.info(
+            "[TelemetryRail] 工具调用完成: tool=%s, duration=%.2fs",
+            span_tool_name,
+            duration,
+            extra={'user_visible': 'critical'}
+        )
 
         # Get result
         result = None
