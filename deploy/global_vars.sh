@@ -26,6 +26,9 @@ declare -A CONFIG=(
     ["MYSQL_TEMPLATE_FILE"]="${SCRIPT_DIR}/conf/mysql.template.yaml"
     ["MYSQL_FILE"]="${SCRIPT_DIR}/conf/mysql.yaml"
 
+    ["REDIS_TEMPLATE_FILE"]="${SCRIPT_DIR}/conf/redis.template.yaml"
+    ["REDIS_FILE"]="${SCRIPT_DIR}/conf/redis.yaml"
+
     ["POSTGRES_TEMPLATE_FILE"]="${SCRIPT_DIR}/conf/postgresql.template.yaml"
     ["POSTGRES_FILE"]="${SCRIPT_DIR}/conf/postgresql.yaml"
 
@@ -57,7 +60,7 @@ declare -A ARGS=(
 
 # ==== All available modules ====
 #declare -ga ALL_MODULES=("NFS" "RABBITMQ" "YR_CLAW" "GATEWAY" "WEB" "MANAGER")
-declare -ga ALL_MODULES=("NFS" "RABBITMQ" "MYSQL" "POSTGRESQL" "GATEWAY" "WEB" "MANAGER")
+declare -ga ALL_MODULES=("NFS" "RABBITMQ" "MYSQL" "REDIS" "POSTGRESQL" "GATEWAY" "WEB" "MANAGER")
 
 declare -ga MODULES=()
 
@@ -97,6 +100,15 @@ declare -A DEPLOY_VARS=(
     ["MYSQL_IMAGE"]="mysql:8.0"
     ["MYSQL_PATH"]="/exports/mysql"
     ["MYSQL_ROOT_PASSWORD"]="Root@123456"
+    ["REDIS_NAME"]="redis"
+    ["REDIS_IMAGE"]="redis:7-alpine"
+    ["REDIS_PORT"]="6379"
+    ["REDIS_PASSWORD"]=""
+    ["REDIS_DB"]="0"
+    ["REDIS_KEY_PREFIX"]="jiuwenclaw:"
+    ["DEPLOYMENT_MODE"]="standalone"
+    ["GATEWAY_INSTANCE_ID"]=""
+    ["REDIS_HOST"]=""
     ["POSTGRES_NAME"]="postgresql"
     ["POSTGRES_IMAGE"]="postgres:16"
     ["POSTGRES_PATH"]="/exports/postgresql"

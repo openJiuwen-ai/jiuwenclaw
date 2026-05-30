@@ -227,6 +227,28 @@ check_yr_claw_up_dependency(){
     check_if_yr_exist
 }
 
+check_if_redis_up() {
+    local mode="${DEPLOY_VARS["DEPLOYMENT_MODE"]:-standalone}"
+    if [[ "${mode}" != "distributed" ]]; then
+        info "DEPLOYMENT_MODE=${mode}, skip Redis check"
+        return
+    fi
+
+    if [ -n "${DEPLOY_VARS["REDIS_HOST"]:-}" ]; then
+        info "Use configured Redis: ${DEPLOY_VARS["REDIS_HOST"]}"
+        return
+    fi
+
+    local name="${DEPLOY_VARS["REDIS_NAME"]}"
+    if check_k8s_resource_exists "deployment" "${name}" "default"; then
+        DEPLOY_VARS["REDIS_HOST"]="${name}.default.svc.cluster.local"
+        info "Use built-in Redis: ${DEPLOY_VARS["REDIS_HOST"]}"
+        return
+    fi
+
+    warning "DEPLOYMENT_MODE=distributed but Redis is not ready. Deploy with: ./deploy.sh up redis"
+}
+
 check_gateway_up_dependency(){
     local jiuwenclaw_path=${DEPLOY_VARS["JIUWENCLAW_PATH"]}
     local nfs_dname=${DEPLOY_VARS["NFS_NAME"]}
@@ -241,6 +263,11 @@ check_gateway_up_dependency(){
     success "JiuwenClaw directory created successfully in NFS Pod!"
 
     check_if_db_up
+    check_if_redis_up
+}
+
+check_redis_up_dependency() {
+    info "Redis module has no extra prerequisites (deploys to default namespace)"
 }
 
 check_web_up_dependency(){

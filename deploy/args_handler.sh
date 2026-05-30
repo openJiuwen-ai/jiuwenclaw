@@ -13,7 +13,7 @@ parse_args() {
                 i=$((i+1))
                 ;;
             #nfs|rabbitmq|yr_claw|gateway|web|manager)
-            nfs|rabbitmq|mysql|postgresql|gateway|web|manager)
+            nfs|rabbitmq|mysql|redis|postgresql|gateway|web|manager)
                 MODULES+=("${args[$i]^^}")
                 i=$((i+1))
                 ;;
@@ -72,6 +72,7 @@ Modules (Optional):
   nfs       NFS service module (deploys to default namespace, ignores -n parameter)
   rabbitmq  RabbitMQ module (deploys to default namespace, ignores -n parameter)
   mysql     MySQL module (deploys to default namespace, ignores -n parameter)
+  redis     Redis module (deploys to default namespace, ignores -n parameter)
   gateway   Gateway service module
   web       Web frontend module
   manager   CLAW Manager module

@@ -1,0 +1,58 @@
+# Redis：Gateway distributed 模式（固定部署在 default 命名空间，与 MySQL 一致）
+apiVersion: v1
+kind: Service
+metadata:
+  name: <<REDIS_NAME>>
+  namespace: default
+spec:
+  selector:
+    app: <<REDIS_NAME>>
+  ports:
+    - name: redis
+      port: <<REDIS_PORT>>
+      targetPort: <<REDIS_PORT>>
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: <<REDIS_NAME>>
+  namespace: default
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: <<REDIS_NAME>>
+  template:
+    metadata:
+      labels:
+        app: <<REDIS_NAME>>
+    spec:
+      containers:
+        - name: redis
+          image: <<REDIS_IMAGE>>
+          ports:
+            - containerPort: <<REDIS_PORT>>
+              name: redis
+          args:
+            - redis-server
+            - --appendonly
+            - "yes"
+          livenessProbe:
+            tcpSocket:
+              port: <<REDIS_PORT>>
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          readinessProbe:
+            exec:
+              command:
+                - redis-cli
+                - ping
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              memory: 512Mi
