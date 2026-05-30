@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import time
 from typing import Any, List, Optional
 
 import tiktoken
@@ -85,6 +86,19 @@ def _structured_tool_result_payload(result: Any) -> Any | None:
     return None
 
 
+def _session_id_from_ctx(ctx: AgentCallbackContext) -> str:
+    session = ctx.session
+    if session is None:
+        return ""
+    getter = getattr(session, "get_session_id", None)
+    if callable(getter):
+        try:
+            return str(getter() or "")
+        except Exception:
+            return ""
+    return ""
+
+
 def _extract_skill_complete_arg(tool_call: Any, key: str) -> str:
     """Read a string arg from skill_complete tool_call.arguments (dict or JSON string)."""
     args = getattr(tool_call, "arguments", None)
@@ -152,18 +166,49 @@ class JiuClawStreamEventRail(DeepAgentRail):
     # ------------------------------------------------------------------
 
     async def before_model_call(self, ctx: AgentCallbackContext) -> None:
+        diag_start = time.perf_counter()
+        session_id = _session_id_from_ctx(ctx)
+        msg_count = len(ctx.context.get_messages()) if ctx.context is not None else 0
+        logger.debug(
+            "[StreamEventRail] before_model_call start session_id=%s messages=%s",
+            session_id,
+            msg_count,
+        )
+
         await self._pause_event.wait()
         if self._abort_requested:
             raise asyncio.CancelledError("Agent abort requested")
 
         if not ctx.extra.get("_context_fixed") and ctx.context is not None:
+            t_fix = time.perf_counter()
             await self._fix_incomplete_tool_context(ctx.context)
             ctx.extra["_context_fixed"] = True
+            logger.debug(
+                "[StreamEventRail] before_model_call fix_incomplete_tool_context "
+                "session_id=%s elapsed_ms=%.1f",
+                session_id,
+                (time.perf_counter() - t_fix) * 1000,
+            )
 
+        t_emit = time.perf_counter()
         await self._emit_context_compression(ctx)
         await self._emit_context_usage(ctx)
+        logger.debug(
+            "[StreamEventRail] before_model_call context_stats emitted "
+            "session_id=%s elapsed_ms=%.1f",
+            session_id,
+            (time.perf_counter() - t_emit) * 1000,
+        )
 
+        t_ckpt = time.perf_counter()
         await self._maybe_early_checkpoint(ctx)
+        logger.debug(
+            "[StreamEventRail] before_model_call done session_id=%s total_elapsed_ms=%.1f "
+            "checkpoint_elapsed_ms=%.1f",
+            session_id,
+            (time.perf_counter() - diag_start) * 1000,
+            (time.perf_counter() - t_ckpt) * 1000,
+        )
 
     async def _maybe_early_checkpoint(self, ctx: AgentCallbackContext) -> None:
         """Persist context + agent state once per invoke before the first LLM call.
@@ -248,14 +293,39 @@ class JiuClawStreamEventRail(DeepAgentRail):
     # ------------------------------------------------------------------
 
     async def after_tool_call(self, ctx: AgentCallbackContext) -> None:
+        diag_start = time.perf_counter()
+        tool_name = (
+            ctx.inputs.tool_name
+            if isinstance(ctx.inputs, ToolCallInputs)
+            else ""
+        )
+        session_id = _session_id_from_ctx(ctx)
+        logger.debug(
+            "[StreamEventRail] after_tool_call start session_id=%s tool=%s",
+            session_id,
+            tool_name,
+        )
+
         # Clear context after tool execution
         set_current_agent_context(None)
         set_subagent_parent_session(None)
 
         session = ctx.session
         if session is None or not isinstance(ctx.inputs, ToolCallInputs):
+            logger.debug(
+                "[StreamEventRail] after_tool_call skip session_id=%s tool=%s reason=no_session_or_inputs",
+                session_id,
+                tool_name,
+            )
             return
+        t_result = time.perf_counter()
         await self._emit_tool_result(session, ctx.inputs.tool_call, ctx.inputs.tool_result)
+        logger.debug(
+            "[StreamEventRail] after_tool_call tool_result emitted session_id=%s tool=%s elapsed_ms=%.1f",
+            session_id,
+            tool_name,
+            (time.perf_counter() - t_result) * 1000,
+        )
         tool_name = ctx.inputs.tool_name
         if tool_name == "skill_complete":
             report = _extract_skill_complete_arg(ctx.inputs.tool_call, "report")
@@ -279,7 +349,22 @@ class JiuClawStreamEventRail(DeepAgentRail):
                 return
 
         if tool_name in _TODO_TOOL_NAMES and self._conversation_id:
+            t_todo = time.perf_counter()
             await self._emit_todo_updated(ctx.agent, session, self._conversation_id)
+            logger.debug(
+                "[StreamEventRail] after_tool_call todo.updated emitted session_id=%s tool=%s "
+                "elapsed_ms=%.1f",
+                session_id,
+                tool_name,
+                (time.perf_counter() - t_todo) * 1000,
+            )
+
+        logger.debug(
+            "[StreamEventRail] after_tool_call done session_id=%s tool=%s total_elapsed_ms=%.1f",
+            session_id,
+            tool_name,
+            (time.perf_counter() - diag_start) * 1000,
+        )
 
     # ------------------------------------------------------------------
     # on_model_exception: attempt context repair + clear context
