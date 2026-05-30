@@ -1209,13 +1209,13 @@ class JiuWenClawDeepAdapter:
             config_base: dict[str, Any],
     ) -> bool:
         """Build DeepAgent video config from service config/env mapping."""
-        apply_video_model_config_from_yaml(config_base)
         if not dedicated_multimodal_model_configured(config_base, "video"):
             logger.info(
                 "[JiuWenClawDeepAdapter] skip video_understanding: models.video has no "
                 "dedicated api_key in config.yaml"
             )
             return False
+        apply_video_model_config_from_yaml(config_base)
         if not os.getenv("VIDEO_API_KEY"):
             logger.info(
                 "[JiuWenClawDeepAdapter] video tools skipped: incomplete config"
@@ -1226,13 +1226,13 @@ class JiuWenClawDeepAdapter:
     @staticmethod
     def _build_image_gen_enabled(config_base: dict[str, Any]) -> bool:
         """Whether text_to_image should be registered for this runtime."""
-        apply_image_gen_model_config_from_yaml(config_base)
         if not dedicated_multimodal_model_configured(config_base, "image_gen"):
             logger.info(
                 "[JiuWenClawDeepAdapter] skip text_to_image: models.image_gen has no "
                 "dedicated api_key in config.yaml"
             )
             return False
+        apply_image_gen_model_config_from_yaml(config_base)
         api_key = str(os.getenv("IMAGE_GEN_API_KEY", "")).strip()
         api_base = str(os.getenv("IMAGE_GEN_API_BASE", "")).strip()
         model_name = str(os.getenv("IMAGE_GEN_MODEL_NAME", "")).strip()
