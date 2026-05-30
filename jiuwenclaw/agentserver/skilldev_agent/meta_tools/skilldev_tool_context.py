@@ -87,10 +87,7 @@ def resolve_available_agents_path(session_id: str) -> Path | None:
 
 
 def schema_from_agent_entry(entry: dict[str, Any]) -> Any | None:
-    schema = entry.get("outputSchema") or entry.get("output_schema")
-    if schema is None:
-        schema = entry.get("llmOutputSchema")
-    return schema
+    return entry
 
 
 def extract_output_schema(data: Any, agent_id: str) -> Any | None:
@@ -248,16 +245,8 @@ def load_tool_output_schema(
             path,
         )
         return None
-    schema = data.get("outputSchema")
-    if schema is None:
-        schema = data.get("output_schema")
-    if schema is None:
-        logger.warning(
-            "[%s] outputSchema not found in %s",
-            log_prefix,
-            path,
-        )
-    return schema
+
+    return data
 
 
 __all__ = [
