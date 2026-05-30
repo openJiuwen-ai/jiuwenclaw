@@ -452,16 +452,16 @@ class RuntimeManagementAgentClient(AgentServerClient):
                     if jiuwenbox_enabled:
                         agent_container_env.update(
                             {
-                                "JIUWENBOX_ENABLED": str(
+                                "JIUWENCLAW_SANDBOX_ENABLED": str(
                                     jiuwenbox_enabled
                                 ).lower(),
-                                "JIUWENBOX_URL": jiuwenbox_url,
-                                "JIUWENBOX_TYPE": "jiuwenbox",
-                                "JIUWENBOX_STARTUP_MODE": "external",
-                                "JIUWENBOX_PRESERVE_FILE_SHARING_MODE": "mount",
-                                "JIUWENBOX_EXCLUDED_COMMANDS": jiuwenbox_excluded_commands,
-                                "JIUWENBOX_IDLE_TTL_SECONDS": jiuwenbox_idle_ttl_seconds,
-                                "JIUWENBOX_IDLE_CHECK_INTERVAL": jiuwenbox_idle_check_interval,
+                                "JIUWENCLAW_SANDBOX_URL": jiuwenbox_url,
+                                "JIUWENCLAW_SANDBOX_TYPE": "jiuwenbox",
+                                "JIUWENCLAW_SANDBOX_STARTUP_MODE": "external",
+                                "JIUWENCLAW_SANDBOX_PRESERVE_FILE_SHARING_MODE": "mount",
+                                "JIUWENCLAW_SANDBOX_EXCLUDED_COMMANDS": jiuwenbox_excluded_commands,
+                                "JIUWENCLAW_SANDBOX_IDLE_TTL_SECONDS": jiuwenbox_idle_ttl_seconds,
+                                "JIUWENCLAW_SANDBOX_IDLE_CHECK_INTERVAL": jiuwenbox_idle_check_interval,
                             }
                         )
 
