@@ -229,6 +229,8 @@ check_yr_claw_up_dependency(){
 
 check_if_redis_up() {
     local mode="${DEPLOY_VARS["DEPLOYMENT_MODE"]:-standalone}"
+    local name="${DEPLOY_VARS["REDIS_NAME"]}"
+
     if [[ "${mode}" != "distributed" ]]; then
         info "DEPLOYMENT_MODE=${mode}, skip Redis check"
         return
@@ -239,14 +241,14 @@ check_if_redis_up() {
         return
     fi
 
-    local name="${DEPLOY_VARS["REDIS_NAME"]}"
     if check_k8s_resource_exists "deployment" "${name}" "default"; then
         DEPLOY_VARS["REDIS_HOST"]="${name}.default.svc.cluster.local"
+        DEPLOY_VARS["REDIS_PORT"]="6379"
         info "Use built-in Redis: ${DEPLOY_VARS["REDIS_HOST"]}"
         return
     fi
 
-    warning "DEPLOYMENT_MODE=distributed but Redis is not ready. Deploy with: ./deploy.sh up redis"
+    error "DEPLOYMENT_MODE=distributed but Redis is not ready. Deploy with: ./deploy.sh up redis"
 }
 
 check_gateway_up_dependency(){

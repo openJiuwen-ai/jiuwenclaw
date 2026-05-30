@@ -1,4 +1,4 @@
-# Redis：Gateway distributed 模式（固定部署在 default 命名空间，与 MySQL 一致）
+# 集群内访问
 apiVersion: v1
 kind: Service
 metadata:
@@ -11,6 +11,20 @@ spec:
     - name: redis
       port: <<REDIS_PORT>>
       targetPort: <<REDIS_PORT>>
+---
+# NodePort Service：供集群外访问 Redis
+apiVersion: v1
+kind: Service
+metadata:
+  name: <<REDIS_NAME>>-nodeport
+spec:
+  type: NodePort
+  ports:
+    - port: <<REDIS_PORT>>           # 集群内部端口
+      targetPort: <<REDIS_PORT>>     # 容器端口
+      nodePort: <<REDIS_NODE_PORT>>  # 外部访问端口（30000-32767）
+  selector:
+    app: <<REDIS_NAME>>
 
 ---
 apiVersion: apps/v1
