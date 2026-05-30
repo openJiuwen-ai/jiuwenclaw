@@ -42,6 +42,7 @@ class JiuWenProgressiveToolRail(ProgressiveToolRail):
         search_max_results: int = 5,
         default_load_limit: int = 3,
         language: str = "cn",
+        enable_for_models: list[str] | None = None,
         debug_context: dict[str, Any] | None = None,
     ) -> None:
         config = SimpleNamespace(
@@ -56,6 +57,80 @@ class JiuWenProgressiveToolRail(ProgressiveToolRail):
         self.default_load_limit = max(1, int(default_load_limit or 3))
         self._active_for_invoke = False
         self._debug_context = dict(debug_context or {})
+        self._enable_for_models = [
+            str(item).strip().lower()
+            for item in (enable_for_models or [])
+            if str(item).strip()
+        ]
+        self._cached_model_name: str = ""
+
+    @staticmethod
+    def _resolve_model_name_from_ctx(ctx: AgentCallbackContext | None) -> str:
+        """Read the effective model name for the current invoke."""
+        if ctx is None:
+            return ""
+        agent = getattr(ctx, "agent", None)
+        if agent is None:
+            return ""
+
+        direct_name = str(getattr(agent, "model_name", "") or "").strip()
+        if direct_name:
+            return direct_name
+
+        config = getattr(agent, "_config", None)
+        if config is not None:
+            name = str(getattr(config, "model_name", "") or "").strip()
+            if name:
+                return name
+
+        react_agent = getattr(agent, "_react_agent", None) or getattr(agent, "react_agent", None)
+        if react_agent is not None:
+            react_config = getattr(react_agent, "_config", None)
+            if react_config is not None:
+                name = str(getattr(react_config, "model_name", "") or "").strip()
+                if name:
+                    return name
+
+        deep_config = getattr(agent, "deep_config", None)
+        if deep_config is not None:
+            model = getattr(deep_config, "model", None)
+            model_config = getattr(model, "model_config", None) if model is not None else None
+            name = str(getattr(model_config, "model_name", "") or "").strip()
+            if name:
+                return name
+        return ""
+
+    def _resolve_model_name_for_ctx(self, ctx: AgentCallbackContext | None) -> str:
+        """Resolve model name from ctx, falling back to the cached invoke-time name."""
+        name = self._resolve_model_name_from_ctx(ctx)
+        if name:
+            self._cached_model_name = name
+            return name
+        return self._cached_model_name
+
+    def _is_lazy_load_enabled_for_model(self, model_name: str) -> bool:
+        """When whitelist is empty, all models use lazy load; otherwise only matched models."""
+        if not self._enable_for_models:
+            return True
+        if not model_name:
+            return False
+        lowered = model_name.lower()
+        return any(pattern in lowered for pattern in self._enable_for_models)
+
+    def _lazy_load_active_for_ctx(self, ctx: AgentCallbackContext | None) -> bool:
+        if not self.enabled:
+            return False
+        model_name = self._resolve_model_name_for_ctx(ctx)
+        if not self._is_lazy_load_enabled_for_model(model_name):
+            logger.info(
+                "%s lazy load bypassed for model=%s enable_for_models=%s%s",
+                _LOG_PREFIX,
+                model_name,
+                self._enable_for_models,
+                self._log_ctx_suffix(),
+            )
+            return False
+        return True
 
     def _log_ctx_suffix(self) -> str:
         if not self._debug_context:
@@ -101,7 +176,7 @@ class JiuWenProgressiveToolRail(ProgressiveToolRail):
                 )
 
     async def before_invoke(self, ctx: AgentCallbackContext) -> None:
-        if not self.enabled:
+        if not self._lazy_load_active_for_ctx(ctx):
             self._active_for_invoke = False
             return
         await super().before_invoke(ctx)
@@ -120,7 +195,10 @@ class JiuWenProgressiveToolRail(ProgressiveToolRail):
         )
 
     async def before_model_call(self, ctx: AgentCallbackContext) -> None:
-        if not self.enabled or not self._active_for_invoke:
+        if not self._lazy_load_active_for_ctx(ctx):
+            self._active_for_invoke = False
+            return
+        if not self._active_for_invoke:
             return
         inputs = getattr(ctx, "inputs", None)
         before_tools = getattr(inputs, "tools", None)
@@ -152,16 +230,18 @@ class JiuWenProgressiveToolRail(ProgressiveToolRail):
         session: Any,
         params: SearchAndLoadToolsInput,
     ) -> dict[str, Any]:
-        """Search registered tools and mark top matches visible for this session."""
-        query = params.query
-        source = params.source
-        detail_level = params.detail_level
-        replace = params.replace
+        """Load registered tools by exact names into the current session."""
+        requested = list(
+            dict.fromkeys(
+                name.strip()
+                for name in (params.tool_names or [])
+                if str(name).strip()
+            )
+        )
         if not self.enabled:
             return {
                 "success": False,
-                "query": query,
-                "source": source,
+                "tool_names": requested,
                 "matches": [],
                 "loaded_tools": [],
                 "visible_tools": [],
@@ -169,28 +249,41 @@ class JiuWenProgressiveToolRail(ProgressiveToolRail):
                 "message": "progressive tool loading is disabled",
             }
 
-        effective_limit = max(
-            1,
-            min(int(params.limit or self.default_load_limit), self.search_max_results),
-        )
-        matches = await super()._search_tools(
-            query=query,
-            limit=effective_limit,
-            detail_level=detail_level,
-        )
-        loaded_names = [str(item.get("name", "") or "") for item in matches]
+        if not requested:
+            return {
+                "success": False,
+                "tool_names": requested,
+                "matches": [],
+                "loaded_tools": [],
+                "visible_tools": self._get_visible_tools(session),
+                "skipped_tools": [],
+                "message": "tool_names is required and must contain at least one exact registered tool name",
+            }
+
+        all_tools = await self._get_real_tool_infos()
+        tools_by_name = {
+            str(getattr(tool, "name", "") or ""): tool
+            for tool in all_tools
+            if str(getattr(tool, "name", "") or "")
+        }
+        unknown_names = [name for name in requested if name not in tools_by_name]
+        matches = [
+            self._build_tool_summary(tools_by_name[name], detail_level=1)
+            for name in requested
+            if name in tools_by_name
+        ]
         load_result = await super()._load_tools(
             session=session,
-            tool_names=loaded_names,
-            replace=replace,
+            tool_names=requested,
+            replace=False,
         )
+        skipped_tools = list(load_result.get("skipped_tools", []) or [])
         logger.info(
-            "%s search_and_load query=%r matched=%s loaded=%s skipped=%s visible=%s%s",
+            "%s search_and_load tool_names=%r loaded=%s skipped=%s visible=%s%s",
             _LOG_PREFIX,
-            query,
-            loaded_names,
+            requested,
             load_result.get("loaded_tools", []),
-            load_result.get("skipped_tools", []),
+            skipped_tools,
             load_result.get("visible_tools", []),
             self._log_ctx_suffix(),
         )
@@ -198,33 +291,41 @@ class JiuWenProgressiveToolRail(ProgressiveToolRail):
             session,
             {
                 "action": "search_and_load_tools",
-                "query": query,
-                "source": source,
-                "limit": effective_limit,
-                "detail_level": detail_level,
-                "matches": loaded_names,
+                "tool_names": requested,
+                "unknown": unknown_names,
                 "loaded": load_result.get("loaded_tools", []),
-                "skipped": load_result.get("skipped_tools", []),
-                "replace": replace,
+                "skipped": skipped_tools,
             },
         )
 
         loaded_tools = load_result.get("loaded_tools", [])
         success = bool(loaded_tools)
+        if success:
+            message = (
+                f"Loaded {len(loaded_tools)} tool(s). "
+                "They will be callable in the next model step."
+            )
+        elif unknown_names and len(unknown_names) == len(requested):
+            message = (
+                "No requested tools are registered. "
+                "Use exact names from the tool navigation section."
+            )
+        else:
+            message = (
+                "No tools were loaded. Check skipped_tools, unknown tool names, "
+                "or max_loaded_tools limit."
+            )
         return {
             "success": success,
-            "query": query,
-            "source": source,
+            "tool_names": requested,
+            "unknown_tool_names": unknown_names,
             "matches": matches,
             "count": len(matches),
             **load_result,
-            "message": (
-                f"Loaded {len(loaded_tools)} tool(s). "
-                "They will be callable in the next model step."
-                if success
-                else "No matching registered tools were loaded. Try broader keywords or use visible tools."
-            ),
+            "skipped_tools": skipped_tools,
+            "message": message,
         }
+
 
     def _build_progressive_tool_rules_section(self):
         """Replace parent dual-tool prompt with single-tool instructions."""
@@ -233,15 +334,17 @@ class JiuWenProgressiveToolRail(ProgressiveToolRail):
             content={
                 "cn": (
                     "## 渐进式工具使用规则\n\n"
-                    "- 你当前只能调用 tools 列表中可见的工具。\n"
-                    "- 如果需要当前不可见的能力，先调用 `search_and_load_tools` 搜索并加载工具。\n"
-                    "- `search_and_load_tools` 返回已加载工具后，下一轮模型调用应直接调用真实工具。"
+                    "- 你只能调用当前 tools 列表中的可见工具。\n"
+                    "- 作答前先查看「工具导航」；若所需工具标记为「仅导航」，"
+                    "先调用 `search_and_load_tools`，传入精确 `tool_names`（可多个）。\n"
+                    "- 加载成功后，下一轮再调用对应的真实工具。"
                 ),
                 "en": (
                     "## Progressive Tool Usage Rules\n\n"
                     "- You can only call tools currently visible in the tools list.\n"
-                    "- If you need a hidden capability, call `search_and_load_tools` first.\n"
-                    "- After it reports loaded tools, call the real tool in the next model step."
+                    "- Before answering, check Tool Navigation; for navigation-only tools, "
+                    "call `search_and_load_tools` with exact `tool_names` (multiple allowed).\n"
+                    "- After loading, call the real tools in the next model step."
                 ),
             },
             priority=75,
@@ -306,18 +409,16 @@ class JiuWenProgressiveToolRail(ProgressiveToolRail):
                 "The entries below help you understand tools registered for this session.\n"
                 "This section is a navigation map, not the complete callable tools list.\n"
                 "Only tools already visible in the model tools list are callable now.\n"
-                "For a navigation-only or hidden capability, call `search_and_load_tools`; "
-                "matched tools become callable in the next model step.\n"
+                "For a navigation-only or hidden capability, call `search_and_load_tools` with exact "
+                "`tool_names` from this section; loaded tools become callable in the next model step.\n"
             )
             empty = "- (no navigation entries available)"
         else:
             header = (
                 "## 工具导航\n"
-                "以下条目用于帮助你理解当前 session 下已注册的工具生态。\n"
-                "请注意：这里展示的是“工具地图”，不是“全部可立即调用的工具清单”。\n"
-                "只有已经出现在当前模型 tools 列表中的工具，才可以直接调用。\n"
-                "如果需要“仅导航”或当前不可见的能力，请调用 `search_and_load_tools`；"
-                "命中的工具会在下一轮模型调用中变为可调用。\n"
+                "以下条目用于帮助你理解当前 session 下已注册的工具生态（工具地图，非全部可调用清单）。\n"
+                "标记为「可调用」的工具已在当前 tools 列表中；「仅导航」的工具需先调用 "
+                "`search_and_load_tools`，传入精确 `tool_names` 后再使用。\n"
             )
             empty = "- （当前无可展示的导航条目）"
         return header + "\n" + ("\n".join(items) if items else empty)

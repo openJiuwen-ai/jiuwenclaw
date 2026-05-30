@@ -24,16 +24,10 @@ def _model_schema(model: type[BaseModel]) -> dict[str, Any]:
 class SearchAndLoadToolsInput(BaseModel):
     """Input schema for the progressive search-and-load meta tool."""
 
-    query: str = Field(..., description="Search query for finding relevant registered tools")
-    source: str = Field(default="all", description="Optional source/category filter. Use 'all' by default.")
-    limit: int = Field(default=3, description="Maximum tools to load from search results")
-    detail_level: int = Field(
-        default=1,
-        description="1=name+description, 2=+parameter summary, 3=+full parameters",
-    )
-    replace: bool = Field(
-        default=False,
-        description="If true, replace current session-visible tools instead of merging",
+    tool_names: list[str] = Field(
+        ...,
+        min_length=1,
+        description="要加载的已注册工具名列表，每个名称必须与工具导航中的名称完全一致",
     )
 
 
@@ -60,9 +54,9 @@ class SearchAndLoadToolsTool(Tool):
                 id=tool_id,
                 name=self.TOOL_NAME,
                 description=(
-                    "搜索已注册但当前不可见的工具，并把最相关的候选工具加载到当前 session 的可调用工具集。"
-                    "当你需要使用当前 tools 列表里没有出现的能力时，先调用本工具；"
-                    "本工具会返回已加载工具名，下一轮模型调用即可直接调用这些真实工具。"
+                    "按工具名批量加载已注册但当前不可见的工具到 session 可调用工具集。"
+                    "入参 tool_names 必须是工具导航中出现的精确工具名列表，不支持模糊搜索。"
+                    "加载成功后，下一轮模型调用即可直接调用这些真实工具。"
                 ),
                 input_params=_model_schema(SearchAndLoadToolsInput),
             )
@@ -73,14 +67,7 @@ class SearchAndLoadToolsTool(Tool):
         session = kwargs.get("session")
         try:
             parsed = SearchAndLoadToolsInput(**(inputs or {}))
-            limit = max(1, min(int(parsed.limit or 3), 20))
-            detail_level = max(1, min(int(parsed.detail_level or 1), 3))
-            return await self._search_and_load_tools(
-                session,
-                parsed.model_copy(
-                    update={"limit": limit, "detail_level": detail_level},
-                ),
-            )
+            return await self._search_and_load_tools(session, parsed)
         except Exception as exc:
             logger.warning("[ProgressiveTool] search_and_load_tools invoke failed: %s", exc)
             return {

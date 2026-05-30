@@ -440,6 +440,10 @@ def build_jiuwen_progressive_tool_rail_from_react_config(
     search_max_results = _parse_int(cfg_value("search_max_results", 5), 5)
     default_load_limit = _parse_int(cfg_value("default_load_limit", 3), 3)
     max_loaded_tools = _parse_int(cfg_value("max_loaded_tools", 12), 12)
+    enable_for_models = _normalize_tool_names(
+        cfg_value("enable_for_models", []),
+    )
+
     normalized_language = resolve_language(language)
     ctx_suffix = ""
     if debug_context:
@@ -448,12 +452,13 @@ def build_jiuwen_progressive_tool_rail_from_react_config(
             ctx_suffix = f" ({', '.join(parts)})"
     logger.info(
         "[ProgressiveTool] enabled profile=%s always_visible=%s max_loaded=%s "
-        "search_max=%s default_load_limit=%s%s",
+        "search_max=%s default_load_limit=%s enable_for_models=%s%s",
         profile,
         always_visible,
         max_loaded_tools,
         search_max_results,
         default_load_limit,
+        enable_for_models,
         ctx_suffix,
     )
     return JiuWenProgressiveToolRail(
@@ -464,6 +469,7 @@ def build_jiuwen_progressive_tool_rail_from_react_config(
         search_max_results=search_max_results,
         default_load_limit=default_load_limit,
         language=normalized_language,
+        enable_for_models=enable_for_models,
         debug_context={"profile": profile, **(debug_context or {})},
     )
 

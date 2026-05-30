@@ -434,6 +434,9 @@ react:
   # 工具渐进可见性：本版只压缩模型侧 tools 列表，不改变 MCP server 启动注册/连接行为
   tool_lazy_load:
     enabled: true              # true | false；可用 JIUWENCLAW_TOOL_LAZY_LOAD 覆盖
+    # 仅对白名单内 model_name 子串匹配启用懒加载（如 glm-5）；未命中则 tools 全量可见
+    enable_for_models:
+      - glm
     search_max_results: 5      # search_and_load_tools 单次搜索最多返回的候选工具数
     default_load_limit: 3      # search_and_load_tools 未显式传 limit 时默认加载的 Top N 工具
     max_loaded_tools: 1024     # 当前 session 中最多保留的按需可见工具数，超过后由 rail 按策略限制
