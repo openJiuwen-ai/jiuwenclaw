@@ -470,17 +470,60 @@ class TaskExecutionRail(DeepAgentRail):
         if not isinstance(ctx.inputs, ToolCallInputs):
             return
         tool_name = ctx.inputs.tool_name
+        session_id = ""
+        if ctx.session is not None:
+            getter = getattr(ctx.session, "get_session_id", None)
+            if callable(getter):
+                try:
+                    session_id = str(getter() or "")
+                except Exception:
+                    session_id = ""
+        diag_start = time.perf_counter()
+        logger.debug(
+            "[TaskExecutionRail] after_tool_call start session_id=%s tool=%s",
+            session_id,
+            tool_name,
+        )
 
+        t_artifact = time.perf_counter()
         await self._detect_and_emit_artifact_generated(ctx)
+        logger.debug(
+            "[TaskExecutionRail] after_tool_call artifact phase session_id=%s tool=%s elapsed_ms=%.1f",
+            session_id,
+            tool_name,
+            (time.perf_counter() - t_artifact) * 1000,
+        )
 
         if tool_name in self.TODO_TOOLS:
+            t_sync = time.perf_counter()
             await self._sync_todo_and_emit_transitions(ctx)
+            logger.debug(
+                "[TaskExecutionRail] after_tool_call done session_id=%s tool=%s "
+                "sync_todo_elapsed_ms=%.1f total_elapsed_ms=%.1f",
+                session_id,
+                tool_name,
+                (time.perf_counter() - t_sync) * 1000,
+                (time.perf_counter() - diag_start) * 1000,
+            )
             return
 
         if tool_name in self.SKILL_COMPLETE_TOOLS:
             parent_request_id = self._extract_request_id(ctx)
             await self._emit_task_update_event(ctx.session, parent_request_id)
+            logger.debug(
+                "[TaskExecutionRail] after_tool_call done session_id=%s tool=%s total_elapsed_ms=%.1f",
+                session_id,
+                tool_name,
+                (time.perf_counter() - diag_start) * 1000,
+            )
             return
+
+        logger.debug(
+            "[TaskExecutionRail] after_tool_call done session_id=%s tool=%s total_elapsed_ms=%.1f",
+            session_id,
+            tool_name,
+            (time.perf_counter() - diag_start) * 1000,
+        )
 
     async def after_invoke(self, ctx: AgentCallbackContext) -> None:
         self._todo_map_before_tool = {}
