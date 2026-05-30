@@ -57,7 +57,14 @@ class SandboxRuntime:
     task_count: int = 0
     created_at: float = field(default_factory=time.time)
     last_active_at: float = field(default_factory=time.time)
+    expires_at: float = field(default_factory=time.time)
     metadata: dict[str, Any] = field(default_factory=dict)
+    _duration_refresh_lock: asyncio.Lock | None = field(default=None, repr=False, compare=False)
+
+    def duration_refresh_lock(self) -> asyncio.Lock:
+        if self._duration_refresh_lock is None:
+            self._duration_refresh_lock = asyncio.Lock()
+        return self._duration_refresh_lock
 
 
 class SandboxRouterAgentClient(AgentServerClient):
@@ -298,13 +305,16 @@ class SandboxRouterAgentClient(AgentServerClient):
             record.sandbox_id,
             record.gateway_id,
         )
-        return await self._build_runtime_from_sandbox(
+        runtime = await self._build_runtime_from_sandbox(
             routing_key,
             sandbox_id=record.sandbox_id,
             user_id=user_id,
             session_id=session_id,
             adopted=True,
+            duration_anchor_at=record.updated_at,
         )
+        await self._maybe_refresh_sandbox_duration(runtime)
+        return runtime
 
     async def _create_and_bind_sandbox(
         self,
@@ -398,6 +408,7 @@ class SandboxRouterAgentClient(AgentServerClient):
         metadata_extra: dict[str, Any] | None = None,
         agent_client: AgentServerClient | None = None,
         adopted: bool = False,
+        duration_anchor_at: float | None = None,
     ) -> SandboxRuntime:
         metadata: dict[str, Any] = {
             "routing_key": routing_key,
@@ -414,12 +425,16 @@ class SandboxRouterAgentClient(AgentServerClient):
             client = await self._connect_open_ability_client(sandbox_id, routing_key, metadata)
         if self._server_config:
             client.set_or_update_server_config(config=self._server_config, env=self._server_env)
+        now = time.time()
         runtime = SandboxRuntime(
             routing_key=routing_key,
             sandbox_id=sandbox_id,
             agent_client=client,
             status=SandboxStatus.BUSY,
             task_count=1,
+            created_at=now,
+            last_active_at=now,
+            expires_at=self._compute_expires_at(anchor_at=duration_anchor_at),
             metadata=metadata,
         )
         async with self._pool_lock:
@@ -497,6 +512,9 @@ class SandboxRouterAgentClient(AgentServerClient):
             await asyncio.sleep(self._idle_check_interval_seconds)
             now = time.time()
             for routing_key, runtime in list(self._runtimes.items()):
+                if runtime.status == SandboxStatus.TERMINATING:
+                    continue
+                await self._maybe_refresh_sandbox_duration(runtime)
                 if runtime.task_count == 0 and now - runtime.last_active_at >= self._idle_timeout_seconds:
                     await self._terminate_runtime(routing_key)
 
@@ -857,6 +875,87 @@ class SandboxRouterAgentClient(AgentServerClient):
         if self._sandbox_client is None:
             self._sandbox_client = SandboxClient(SandboxConfig.from_env())
         return self._sandbox_client
+
+    def _get_duration_seconds(self) -> int:
+        return max(1, int(self._get_sandbox_client().get_config.duration_seconds))
+
+    def _compute_expires_at(self, *, anchor_at: float | None = None) -> float:
+        anchor = time.time() if anchor_at is None else float(anchor_at)
+        return anchor + self._get_duration_seconds()
+
+    def _sandbox_remaining_seconds(self, runtime: SandboxRuntime) -> float:
+        return runtime.expires_at - time.time()
+
+    def _should_refresh_sandbox_duration(self, runtime: SandboxRuntime) -> bool:
+        if runtime.status in {SandboxStatus.TERMINATING, SandboxStatus.TERMINATED}:
+            return False
+        return self._sandbox_remaining_seconds(runtime) < self._idle_timeout_seconds
+
+    async def _maybe_refresh_sandbox_duration(self, runtime: SandboxRuntime) -> None:
+        if not self._should_refresh_sandbox_duration(runtime):
+            return
+        async with runtime.duration_refresh_lock():
+            if not self._should_refresh_sandbox_duration(runtime):
+                return
+            duration_seconds = self._get_duration_seconds()
+            remaining_before = self._sandbox_remaining_seconds(runtime)
+            try:
+                result = await self._get_sandbox_client().refresh_duration(
+                    runtime.sandbox_id,
+                    duration_seconds=duration_seconds,
+                )
+            except Exception:  # noqa: BLE001
+                logger.exception(
+                    "Sandbox duration refresh failed: sandbox_id=%s routing_key=%s",
+                    runtime.sandbox_id,
+                    runtime.routing_key,
+                )
+                return
+            if not result.success:
+                logger.warning(
+                    "Sandbox duration refresh rejected: sandbox_id=%s routing_key=%s "
+                    "remaining_seconds=%.1f error=%s",
+                    runtime.sandbox_id,
+                    runtime.routing_key,
+                    remaining_before,
+                    result.error,
+                )
+                return
+            runtime.expires_at = time.time() + duration_seconds
+            logger.info(
+                "Sandbox duration refreshed: sandbox_id=%s routing_key=%s "
+                "remaining_before_seconds=%.1f new_duration_seconds=%d",
+                runtime.sandbox_id,
+                runtime.routing_key,
+                remaining_before,
+                duration_seconds,
+            )
+            await self._refresh_sandbox_dcs_ttl(runtime)
+
+    async def _refresh_sandbox_dcs_ttl(self, runtime: SandboxRuntime) -> None:
+        sandbox_id = runtime.sandbox_id
+        try:
+            await self._get_dcs_store().refresh_sandbox_ttl(sandbox_id)
+        except Exception:  # noqa: BLE001
+            logger.exception(
+                "Failed to refresh sandbox metadata DCS TTL: sandbox_id=%s routing_key=%s",
+                sandbox_id,
+                runtime.routing_key,
+            )
+
+        if self._adopt_existing_enabled:
+            try:
+                await self._get_routing_dcs_store().refresh_routing_ttl(
+                    runtime.routing_key,
+                    sandbox_id=sandbox_id,
+                    gateway_id=self._gateway_instance_id,
+                )
+            except Exception:  # noqa: BLE001
+                logger.exception(
+                    "Failed to refresh sandbox routing DCS TTL: sandbox_id=%s routing_key=%s",
+                    sandbox_id,
+                    runtime.routing_key,
+                )
 
     def _notify_next_waiter(self) -> None:
         while self._waiters:

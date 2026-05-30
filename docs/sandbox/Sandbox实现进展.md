@@ -2,6 +2,8 @@
 
 本文记录当前代码中已经落地的 Sandbox 相关改造进展，便于和目标设计文档、SandboxClient 接口文档对照。
 
+> **DCS Key 速查**（含 Gateway 读写关系）：[DCS 项速查表](./DCS项速查表.md)
+
 ## 1. 当前结论
 
 目前已经完成了不依赖沙箱反向建链细节的网关侧路由骨架：
@@ -10,6 +12,7 @@
 - VibeSkill 后续转发给 Gateway / MessageHandler 的消息会携带 `user_id`。
 - Gateway 在配置开启后直接使用 `SandboxRouterAgentClient` 作为 MessageHandler 的 agent client，不再创建默认 `WebSocketAgentServerClient`。
 - Router 已按 `user_id` 维护 sandbox runtime、并实现并发创建保护、实例上限、FIFO 等待队列和 idle 回收。
+- Router 本地维护远端沙箱 `expires_at`，在剩余时间低于 idle 阈值时自动 `refresh_duration`（§2.8）。
 - 真实“沙箱内 Agent 主动连回 Gateway”的连接协议尚未实现，目前在 Router 的创建/删除流程中通过内部方法保留扩展点。
 
 因此，当前阶段可以验证“identity 透传、session 映射、router 调度逻辑、明确失败路径”；还不能验证真实 sandbox agent 与 Gateway 建链后的端到端执行。
@@ -71,6 +74,7 @@ Router 维护的 runtime 信息包括：
 - `task_count`
 - `created_at`
 - `last_active_at`
+- `expires_at`（Gateway 本地维护的远端沙箱到期时刻，见 §2.8）
 - `metadata`
 
 当前 Router 负责：
@@ -81,18 +85,20 @@ Router 维护的 runtime 信息包括：
 - `max_sandboxes` 上限控制。
 - FIFO 等待队列和 queue timeout。
 - idle timeout 回收空闲 runtime。
+- 远端沙箱存活续期（§2.8）：剩余时间低于 idle 阈值时调用 `refresh_duration`。
 - 当容量已满且存在 IDLE 的沙箱 runtime 时，新请求会先触发 IDLE runtime 清理，再创建新 runtime。
 - 当 runtime 结束任务进入 IDLE 且等待队列非空时，会立即清理该 runtime 并唤醒等待者。
 
 ### 2.5 SandboxClient 职责收敛
 
-当前 Gateway 侧只依赖 SandboxClient 的生命周期能力：
+当前 Gateway 侧依赖 SandboxClient 的生命周期能力：
 
 - `create_sandbox`
 - `delete_sandbox`
+- `refresh_duration`（续期远端存活，由 Router §2.8 调用）
 - `close`
 
-队列、上限、identity、runtime 复用等逻辑都放在 Router 中，不放进 SandboxClient。
+队列、上限、identity、runtime 复用、存活续期调度等逻辑都放在 Router 中，不放进 SandboxClient。
 
 ### 2.6 沙箱注册（DCS + init_data.json）
 
@@ -130,6 +136,40 @@ _connect_open_ability_client(sandbox_id, routing_key, metadata) -> OpenAbilityWe
 _disconnect_agent_client(sandbox_id, agent_client) -> None
 ```
 
+### 2.8 远端沙箱存活续期
+
+沙箱管理服务为每个实例设定 `SANDBOX_DURATION_SECONDS`（默认 3600s）存活上限，到期自动释放。为避免长会话（持续有任务、未达到 idle 回收）在 Duration 到期时被远端回收，Router 在 Gateway 侧本地维护剩余时间并主动续期。
+
+**剩余时间维护（不 HTTP 查询）**
+
+| 来源 | `expires_at` 计算 |
+|------|-------------------|
+| 本机 `create_sandbox` | `now + SANDBOX_DURATION_SECONDS` |
+| DCS adopt | `routing.updated_at + SANDBOX_DURATION_SECONDS`（以 routing 写入时刻为创建锚点） |
+
+续期成功后更新：`expires_at = now + SANDBOX_DURATION_SECONDS`。
+
+**续期条件**
+
+本地估算 `expires_at - now < SANDBOX_IDLE_TIMEOUT_SECONDS`（默认 600s）时，调用：
+
+```text
+refresh_duration(sandbox_id, duration_seconds=SANDBOX_DURATION_SECONDS)
+```
+
+每个 runtime 有独立 `asyncio.Lock`，避免并发重复续期。`TERMINATING` / `TERMINATED` 状态不续期。续期失败（异常或 API 拒绝）仅记日志，不阻断业务请求。
+
+**触发时机**
+
+| 时机 | 说明 |
+|------|------|
+| DCS adopt 完成后 | 新 Gateway 接管时，若估算剩余已低于阈值则立即续期 |
+| `_idle_cleanup_loop` | 约每 `idle_check_interval_seconds`（30s）扫描所有非 TERMINATING runtime；**续期与 idle 回收独立**，续期不要求 `task_count == 0` |
+
+**与 DCS TTL 的关系**：远端续期**成功**后，Gateway 同步刷新 `sandboxApiKey`、`sandboxToOA` 及（在 `SANDBOX_ADOPT_EXISTING=true` 时）`sandboxRouting` 的 TTL，并重写 routing 的 `updated_at`。`jiuwen:workspace:*` 与 `jiuwen:vibeskillSession:*` **不**随沙箱续期刷新。详见 [DCS 项速查表](./DCS项速查表.md)。
+
+实现：`SandboxRouterAgentClient._maybe_refresh_sandbox_duration`、`_refresh_sandbox_dcs_ttl`（`jiuwenclaw/gateway/sandbox_router.py`）。
+
 ## 3. 配置与运行状态
 
 通过环境变量 `SANDBOX_ENABLE=true/false` 开关沙箱路由。默认关闭，Gateway 使用原有 `WebSocketAgentServerClient`；开启时使用 `SandboxRouterAgentClient`。
@@ -141,7 +181,7 @@ _disconnect_agent_client(sandbox_id, agent_client) -> None
 | `SANDBOX_ENABLE` | 是否开启沙箱路由 | `false` |
 | `SANDBOX_MAX_NUM` | 同时存在的沙箱 runtime 上限 | `10` |
 | `SANDBOX_MAX_QUEUE_SIZE` | 达上限时 FIFO 等待队列长度 | `100` |
-| `SANDBOX_IDLE_TIMEOUT_SECONDS` | 空闲沙箱自动回收时间（秒） | `600` |
+| `SANDBOX_IDLE_TIMEOUT_SECONDS` | 空闲沙箱自动回收时间（秒）；**同时**作为远端存活续期触发阈值（剩余 `<` 此值时续期，见 §2.8） | `600` |
 | `SANDBOX_DURATION_SECONDS` | 沙箱在远端的存活时长（秒），创建/续期时传给沙箱服务 | `3600` |
 | `SANDBOX_TO_OA_REQUEST_TIMEOUT_SECONDS` | Gateway → OpenAbility 单次（非流式）请求应答超时（秒） | `600` |
 
@@ -151,13 +191,13 @@ _disconnect_agent_client(sandbox_id, agent_client) -> None
 
 可选：`SANDBOX_INIT_DATA_PATH` — 沙箱内 `init_data.json` 上传路径；Gateway 与 AgentServer 均读取此变量，默认 `/opt/huawei/app/jiuwenclaw/init_data.json`。Gateway 上传时会去掉任何目录前缀，仅以 basename 作为 `SandboxClient.upload_file` 的 `remote_path`。
 
-DCS TTL（共用 `SANDBOX_DCS_HOST` 等连接配置，**各 key 默认 TTL 不同**）：
+DCS TTL（共用 `SANDBOX_DCS_HOST` 等连接配置，**各 key 默认 TTL 不同**）。完整 Key / Gateway 读写关系见 [DCS 项速查表](./DCS项速查表.md)。
 
 | 变量 | 作用 key | 默认 |
 |------|----------|------|
-| （无） | `jiuwen:vibeskillSession:*` | **不过期**（`0`） |
+| `SESSION_DCS_TTL_SECONDS` | `jiuwen:vibeskillSession:*`、`jiuwen:workspace:*` | `0`（不过期） |
 | `SANDBOX_DURATION_SECONDS` | 远端沙箱存活时长；亦作为下方 DCS 默认 TTL 的基准 | `3600` |
-| `SANDBOX_DCS_TTL_SECONDS` | 显式覆盖 `sandboxApiKey` / `sandboxToOA` / routing / session 的 TTL；`0` 表示不过期 | 未设时：`sandboxApiKey` 与 routing 用 `SANDBOX_DURATION_SECONDS`；session 仍为 `0` |
+| `SANDBOX_DCS_TTL_SECONDS` | 显式覆盖 `sandboxApiKey` / `sandboxToOA` / routing 的 TTL；`0` 表示不过期 | 未设时：`sandboxApiKey` 与 routing 用 `SANDBOX_DURATION_SECONDS` |
 
 可选（跨 Gateway failover）：
 
@@ -184,16 +224,15 @@ DCS Key（`jiuwenclaw/sandbox/sandbox_routing_dcs_store.py`）：
 
 **Acquire 顺序**（`_acquire_runtime_for_key`）：
 
-1. 本地 `_runtimes` 命中 → 复用（routing 映射写入 TTL 默认与 `SANDBOX_DURATION_SECONDS` 一致，不主动续期）。
-2. DCS `get_routing` 命中且 `jiuwen:sandboxToOA:{sandbox_id}` 可达 → **不** `create_sandbox`，仅建 OA WebSocket。
+1. 本地 `_runtimes` 命中 → 复用。
+2. DCS `get_routing` 命中且 `jiuwen:sandboxToOA:{sandbox_id}` 可达 → **不** `create_sandbox`，仅建 OA WebSocket；若估算剩余低于 idle 阈值则续期（§2.8，含 DCS TTL 刷新）。
 3. 映射存在但 OA 不可达 → 删 mapping，走创建。
 4. 无映射 → `create_sandbox` → `SET NX` 写 mapping；NX 失败则删掉本机新建沙箱并 adopt 对端 `sandbox_id`。
 5. 本地 idle/容量 `terminate` → 先删远端沙箱；成功后再删 `sandboxApiKey` / `sandboxToOA` 与 routing mapping（删沙箱失败则保留 DCS，避免映射丢失而沙箱仍存活）。
 
 **运维前置**（与 VibeSkill 文档一致）：
 
-- `VIBESKILL_DCS_HOST`：G2 能读到 session 与 `metadata.user_id`，算出与 G1 相同的 `routing_key`。
-- `SANDBOX_DCS_HOST`：读写 routing 与 `sandboxToOA`。
+- `SANDBOX_DCS_HOST`：读写 routing、`sandboxToOA`、`sandboxApiKey`、`workspace` 等（见 [DCS 项速查表](./DCS项速查表.md)）。
 - WS 仍建议 LB 粘滞（流式上下文不跨 Gateway）；沙箱状态在沙箱进程内，与 WS 粘滞解耦。
 
 **立即接管**：不等待租约；G1 假死而流量切到 G2 时，可能短暂双 Gateway 连同一 sandbox（需 OA/Agent 容忍重连）。
@@ -215,6 +254,7 @@ DCS Key（`jiuwenclaw/sandbox/sandbox_routing_dcs_store.py`）：
 - runtime 进入 IDLE 且等待队列非空时立即清理。
 - `task_count` 在成功、异常、流式取消路径回落。
 - idle timeout 只回收 `task_count == 0` 的 runtime。
+- 远端存活续期：剩余低于 idle 阈值时调用 `refresh_duration`；adopt 与 idle 巡检触发（`test_sandbox_router_duration_refresh`）。
 - 沙箱注册时 DCS 写入后上传 `init_data.json`（`test_sandbox_router_init_data`）。
 - `init_data.json` 序列化、路径与 `upload_file` 调用（`test_sandbox_init_data`、`test_sandbox_client_upload`）。
 - 跨 Gateway：DCS adopt 不重跑 `create_sandbox`、stale mapping 清理、NX 竞争、terminate 删 mapping（`test_sandbox_router_failover`、`test_sandbox_routing_dcs_store`）。
@@ -225,6 +265,7 @@ DCS Key（`jiuwenclaw/sandbox/sandbox_routing_dcs_store.py`）：
 uv run --no-sync pytest -o addopts='' \
   tests/unit_tests/channel/test_vibeskill_session_store.py \
   tests/unit_tests/gateway/test_sandbox_router_init_data.py \
+  tests/unit_tests/gateway/test_sandbox_router_duration_refresh.py \
   tests/unit_tests/gateway/test_sandbox_router_failover.py \
   tests/unit_tests/sandbox/test_sandbox_routing_dcs_store.py \
   tests/unit_tests/sandbox/test_sandbox_init_data.py \

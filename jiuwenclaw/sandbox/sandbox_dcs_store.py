@@ -108,6 +108,18 @@ class SandboxDcsStore:
         logger.info("Saved sandbox API key hash to DCS: key=%s", key)
         return record
 
+    async def refresh_sandbox_ttl(self, sandbox_id: str) -> None:
+        sid = str(sandbox_id or "").strip()
+        if not sid or self._ttl_seconds <= 0:
+            return
+        for key in (self._api_key_key(sid), self._sandbox_to_oa_key(sid)):
+            if await self._dcs.expire(key, ttl_seconds=self._ttl_seconds):
+                logger.debug(
+                    "Refreshed sandbox DCS TTL: key=%s ttl_seconds=%d",
+                    key,
+                    self._ttl_seconds,
+                )
+
     async def delete_sandbox(self, sandbox_id: str) -> None:
         await self._dcs.delete(
             self._api_key_key(sandbox_id),

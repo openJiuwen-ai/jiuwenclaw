@@ -2,17 +2,15 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 from typing import Any
 
 from jiuwenclaw.channel.vibeskill_session import (
     VibeSkillSession,
     VibeSkillSessionState,
 )
-from jiuwenclaw.dcs import DcsClusterClient, DcsClusterConfig, load_config_from_env
+from jiuwenclaw.dcs import DcsClusterClient, DcsClusterConfig, load_config_from_env, session_dcs_ttl_seconds
 
 logger = logging.getLogger(__name__)
-_SANDBOX_DCS_TTL_SECONDS_ENV = "SANDBOX_DCS_TTL_SECONDS"
 
 # Backward-compatible alias for tests / future imports.
 VibeSkillSessionDcsConfig = DcsClusterConfig
@@ -27,9 +25,7 @@ class VibeSkillSessionDcsStore:
 
     def __init__(self, config: DcsClusterConfig) -> None:
         self._config = config
-        # Session keys default to no expire unless SANDBOX_DCS_TTL_SECONDS is explicitly set.
-        raw = os.environ.get(_SANDBOX_DCS_TTL_SECONDS_ENV, "").strip()
-        self._ttl_seconds = max(0, int(raw)) if raw else 0
+        self._ttl_seconds = session_dcs_ttl_seconds()
         self._dcs = DcsClusterClient(config)
 
     @classmethod

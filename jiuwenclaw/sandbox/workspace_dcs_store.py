@@ -1,27 +1,13 @@
 from __future__ import annotations
 
 import json
-import os
 import time
 from dataclasses import dataclass
 
-from jiuwenclaw.dcs import DcsClusterClient, DcsClusterConfig, load_config_from_env
+from jiuwenclaw.dcs import DcsClusterClient, DcsClusterConfig, load_config_from_env, session_dcs_ttl_seconds
 from jiuwenclaw.utils import logger
 
 WorkspaceDcsConfig = DcsClusterConfig
-
-
-def _workspace_ttl_seconds() -> int:
-    raw = os.environ.get("WORKSPACE_DCS_TTL_SECONDS", "").strip()
-    if raw:
-        return max(0, int(raw))
-    raw = os.environ.get("SANDBOX_DCS_TTL_SECONDS", "").strip()
-    if raw:
-        return max(0, int(raw))
-    raw = os.environ.get("SANDBOX_DURATION_SECONDS", "").strip()
-    if raw:
-        return max(0, int(raw))
-    return 3600
 
 
 @dataclass(frozen=True)
@@ -39,7 +25,7 @@ class WorkspaceDcsStore:
 
     def __init__(self, config: DcsClusterConfig) -> None:
         self._config = config
-        self._ttl_seconds = _workspace_ttl_seconds()
+        self._ttl_seconds = session_dcs_ttl_seconds()
         self._dcs = DcsClusterClient(config)
 
     @classmethod

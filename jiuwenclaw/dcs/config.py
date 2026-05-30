@@ -12,6 +12,7 @@ SANDBOX_DCS_HOST_ENV = "SANDBOX_DCS_HOST"
 SANDBOX_DCS_PORT_ENV = "SANDBOX_DCS_PORT"
 SANDBOX_DCS_PASSWORD_ENV = "SANDBOX_DCS_PASSWORD"
 SANDBOX_DCS_TTL_SECONDS_ENV = "SANDBOX_DCS_TTL_SECONDS"
+SESSION_DCS_TTL_SECONDS_ENV = "SESSION_DCS_TTL_SECONDS"
 
 
 def env_int(name: str, *, default: int) -> int:
@@ -22,6 +23,14 @@ def env_int(name: str, *, default: int) -> int:
         return int(raw)
     except ValueError:
         return default
+
+
+def session_dcs_ttl_seconds() -> int:
+    """TTL for vibeskillSession and workspace DCS keys; default 0 (no expire)."""
+    raw = os.environ.get(SESSION_DCS_TTL_SECONDS_ENV, "").strip()
+    if not raw:
+        return 0
+    return max(0, env_int(SESSION_DCS_TTL_SECONDS_ENV, default=0))
 
 
 @dataclass(frozen=True)

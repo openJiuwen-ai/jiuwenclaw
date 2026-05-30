@@ -100,19 +100,21 @@ Session Store 由每个 `VibeSkillChannel` 实例独立持有，不是全局单�
 
 `VibeSkillSessionStore` 支持可选注入 `VibeSkillSessionDcsStore` 作为远端后端，把 session 元数据持久化到华为 DCS（Redis Cluster 兼容）。开启后，多个 Gateway 实例共享同一份 session 数据，gateway1 创建的 session 可被 gateway2 查到。
 
-启用方式：设置环境变量 `SANDBOX_DCS_HOST`（与 Sandbox 路由共用，未设置则退化为纯内存）。
+启用方式：设置环境变量 `SANDBOX_DCS_HOST`（与 Sandbox 路由共用，未设置则退化为纯内存）。全部 DCS Key 与 Gateway 读写关系见 [DCS 项速查表](../sandbox/DCS项速查表.md)。
 
 | 环境变量 | 默认值 | 说明 |
 |----------|--------|------|
 | `SANDBOX_DCS_HOST` | 无 | DCS 主机；**未设置则禁用 VibeSkill DCS 持久化** |
 | `SANDBOX_DCS_PORT` | `2881` | DCS 端口 |
 | `SANDBOX_DCS_PASSWORD` | 无 | DCS 密码（可选） |
-| `SANDBOX_DCS_TTL_SECONDS` | 未设 | 显式设置时作为 session DCS TTL（秒）；`0` 表示不过期。**未设时 session 默认不过期** |
-| `SANDBOX_DURATION_SECONDS` | `3600` | 远端沙箱存活时长；`sandboxApiKey` / routing 的 DCS TTL 默认与此相同（见 sandbox 文档） |
+| `SANDBOX_DCS_TTL_SECONDS` | 未设 | 显式覆盖 `sandboxApiKey` / `sandboxToOA` / routing 的 DCS TTL（秒）；`0` 表示不过期 |
+| `SESSION_DCS_TTL_SECONDS` | `0` | `vibeskillSession` 与 `workspace` 的 DCS TTL（秒）；`0` 表示不过期 |
+| `SANDBOX_DURATION_SECONDS` | `3600` | 远端沙箱存活时长（创建/续期时传给沙箱服务）；亦作为 `sandboxApiKey` / routing 的 DCS TTL 默认基准（见 sandbox 文档） |
+| `SANDBOX_IDLE_TIMEOUT_SECONDS` | `600` | 空闲沙箱自动回收阈值（秒）；**同时**作为远端存活续期的触发阈值（见下文「沙箱存活续期」） |
 
 Redis 连接与 TTL 逻辑由公共模块 `jiuwenclaw/dcs`（`DcsClusterClient`）提供；业务 key 与序列化仍在本模块。
 
-Key 命名（与 `sandbox_dcs_store.py` 同模式，写死常量）：
+Key 命名（与 `sandbox_dcs_store.py` 同模式，写死常量）。完整速查见 [DCS 项速查表](../sandbox/DCS项速查表.md#jiuwenvibeskillsessionsession_id)。
 
 | Key | 值 |
 |-----|----|
@@ -135,11 +137,22 @@ Key 命名（与 `sandbox_dcs_store.py` 同模式，写死常量）：
 
 **沙箱亲和（Gateway 故障切换）**：在 `SANDBOX_ENABLE=true` 且 `SANDBOX_ADOPT_EXISTING=true` 时，Gateway 将 `routing_key → sandbox_id` 写入 DCS（`jiuwen:sandboxRouting:*`，见 `docs/sandbox/Sandbox实现进展.md` §3.1）。G1 建 session/跑任务后若 G2 接管业务请求，只要：
 
-1. `VIBESKILL_DCS_HOST` 与 `SANDBOX_DCS_HOST` 指向同一 DCS 集群（或等效共享存储）；
+1. `SANDBOX_DCS_HOST` 指向同一 DCS 集群（Session 与 Sandbox 共用）；
 2. G2 能 `resolve_session(sessionID)` 得到与 G1 相同的 `metadata.user_id`（未传时即为 `session_id`）；
 3. 原 sandbox 未被 idle terminate 且 `sandboxToOA` 仍有效；
 
 则 G2 **重连** 同一 `sandbox_id`，不会再次 `create_sandbox`。WS 仍建议粘滞；沙箱状态在沙箱内，与 WS 是否换 Gateway 解耦。
+
+**沙箱存活续期**：远端沙箱实例有 `SANDBOX_DURATION_SECONDS`（默认 3600s）硬上限，到期后由沙箱管理服务自动释放。Gateway 在 `SandboxRouterAgentClient` 内**本地维护**每个 runtime 的 `expires_at`（不向沙箱服务 HTTP 查询剩余时间），并在剩余时间 **小于** `SANDBOX_IDLE_TIMEOUT_SECONDS`（默认 600s）时调用 `SandboxClient.refresh_duration`，将远端存活续期为 `SANDBOX_DURATION_SECONDS`。
+
+| 场景 | `expires_at` 估算 |
+|------|-------------------|
+| 本机 `create_sandbox` | `now + SANDBOX_DURATION_SECONDS` |
+| DCS adopt | `routing.updated_at + SANDBOX_DURATION_SECONDS` |
+
+续期检查触发点：**DCS adopt 完成后**、**空闲巡检**（约每 30s，与 idle 回收同循环；续期不要求 `task_count == 0`）。**不在** `_acquire_runtime_for_key` 本地复用路径触发。续期失败仅记日志，不阻断当前请求。续期成功后会同步刷新 `sandboxApiKey` / `sandboxToOA` / routing 的 DCS TTL（**不含** `workspace` 与 session）。
+
+详见 [Sandbox 实现进展](../sandbox/Sandbox实现进展.md) §2.8、[DCS 项速查表](../sandbox/DCS项速查表.md#沙箱续期与-dcs-ttl)。
 
 ### 3.4 工作区持久化（Sandbox 模式）
 
@@ -152,13 +165,13 @@ Key 命名（与 `sandbox_dcs_store.py` 同模式，写死常量）：
 | 组件 | 职责 |
 |------|------|
 | `VibeSkillChannel` | 协议转换、`user_id` 写入 `Message`；**不**暴露 `skilldev.batch_upload` / `skilldev.batch_download` WebSocket 入口 |
-| `SandboxRouterAgentClient` | 按请求累积 `session_id`；销毁前 `batch_upload`；新沙箱首包业务请求前 `batch_download` |
+| `SandboxRouterAgentClient` | 按请求累积 `session_id`；销毁前 `batch_upload`；新沙箱首包业务请求前 `batch_download`；空闲巡检/DCS adopt 时远端沙箱存活续期（§2.8） |
 | `SkillDevService` | 对 `service_{session_id}` 打 zip、上传 OBS、按 URL 下载解压 |
 | `WorkspaceDcsStore` | 将 `session_id → OBS URL` 写入 DCS，供跨沙箱、跨 Gateway 恢复 |
 
 #### DCS Key（工作区快照）
 
-与 session 元数据（`jiuwen:vibeskillSession:*`）、沙箱路由（`jiuwen:sandboxRouting:*`）正交：
+与 session 元数据（`jiuwen:vibeskillSession:*`）、沙箱路由（`jiuwen:sandboxRouting:*`）正交。Gateway 读写明细见 [DCS 项速查表](../sandbox/DCS项速查表.md#jiuwenworkspacesession_id)。
 
 | Key | 值 |
 |-----|----|
@@ -166,7 +179,7 @@ Key 命名（与 `sandbox_dcs_store.py` 同模式，写死常量）：
 
 | 环境变量 | 默认值 | 说明 |
 |----------|--------|------|
-| `WORKSPACE_DCS_TTL_SECONDS` | 未设 | 工作区快照 TTL；未设时回退 `SANDBOX_DCS_TTL_SECONDS` → `SANDBOX_DURATION_SECONDS` → `3600` |
+| `SESSION_DCS_TTL_SECONDS` | `0` | 工作区快照 TTL（秒）；`0` 表示不过期 |
 
 #### 自动备份（沙箱销毁前）
 
@@ -226,7 +239,7 @@ sequenceDiagram
     SR->>OA: skilldev.chat
 ```
 
-更细的沙箱池与 DCS 路由说明见 `docs/sandbox/Sandbox实现进展.md`；`skilldev.batch_*` 请求/响应字段见 `jiuwenclaw/agentserver/skilldev/docs/BATCH_UPLOAD_DOWNLOAD_API.md`（仅供 AgentServer / Gateway 内部，非 VibeSkill 前端协议）。
+更细的沙箱池与 DCS 路由说明见 [Sandbox 实现进展](../sandbox/Sandbox实现进展.md)、[DCS 项速查表](../sandbox/DCS项速查表.md)；`skilldev.batch_*` 请求/响应字段见 `jiuwenclaw/agentserver/skilldev/docs/BATCH_UPLOAD_DOWNLOAD_API.md`（仅供 AgentServer / Gateway 内部，非 VibeSkill 前端协议）。
 
 ## 4. WebSocket 接口
 

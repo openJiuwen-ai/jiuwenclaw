@@ -181,6 +181,25 @@ class SandboxRoutingDcsStore:
         )
         return True
 
+    async def refresh_routing_ttl(
+        self,
+        routing_key: str,
+        *,
+        sandbox_id: str,
+        gateway_id: str,
+    ) -> bool:
+        """Refresh routing TTL and updated_at when the sandbox is renewed."""
+        key = str(routing_key or "").strip()
+        sid = str(sandbox_id or "").strip()
+        gid = str(gateway_id or "").strip()
+        if not key or not sid or self._ttl_seconds <= 0:
+            return False
+        existing = await self.get_routing(key)
+        if existing is None or existing.sandbox_id != sid:
+            return False
+        await self.save_routing(key, sandbox_id=sid, gateway_id=gid or existing.gateway_id)
+        return True
+
     async def delete_routing(self, routing_key: str) -> None:
         key = str(routing_key or "").strip()
         if not key:
