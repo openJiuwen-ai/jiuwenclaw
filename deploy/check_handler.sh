@@ -159,7 +159,7 @@ check_if_mysql_up() {
         DEPLOY_VARS["DB_HOST"]=${DEPLOY_VARS["MYSQL_HOST"]}
         DEPLOY_VARS["DB_PORT"]=${DEPLOY_VARS["MYSQL_PORT"]}
         DEPLOY_VARS["DB_USER"]="root"
-        DEPLOY_VARS["DB_PASSWORD"]=${DEPLOY_VARS["MYSQL_ROOT_PASSWORD"]}=
+        DEPLOY_VARS["DB_PASSWORD"]=${DEPLOY_VARS["MYSQL_ROOT_PASSWORD"]}
         return
     fi
 
@@ -228,7 +228,18 @@ check_yr_claw_up_dependency(){
 }
 
 check_gateway_up_dependency(){
+    local jiuwenclaw_path=${DEPLOY_VARS["JIUWENCLAW_PATH"]}
+    local nfs_dname=${DEPLOY_VARS["NFS_NAME"]}
+
     check_if_nfs_up
+
+    info "Preparing JiuwenClaw data directory: ${jiuwenclaw_path}"
+    local nfs_pod=$(kubectl get pods -n default -l app=${nfs_dname} -o jsonpath='{.items[0].metadata.name}')
+    info "Executing: kubectl exec ${nfs_pod} -- sh -c \"mkdir -p ${jiuwenclaw_path} && chown 1000:1000 ${jiuwenclaw_path} && chmod 777 ${jiuwenclaw_path}\""
+    kubectl exec ${nfs_pod} -- sh -c "mkdir -p ${jiuwenclaw_path} && chown 1000:1000 ${jiuwenclaw_path} && chmod 777 ${jiuwenclaw_path}"
+
+    success "JiuwenClaw directory created successfully in NFS Pod!"
+
     check_if_db_up
 }
 
