@@ -15,13 +15,15 @@ from dataclasses import dataclass, replace
 from enum import Enum
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Dict
-from jiuwenswarm.gateway.channel_manager.base import ChannelType
+
 from jiuwenswarm.common.e2a.constants import E2A_WIRE_INTERNAL_METADATA_KEYS
-from jiuwenswarm.gateway.routing.session_map import SessionMap
+from jiuwenswarm.common.think_tags import ThinkTagPart, ThinkTagStreamParser
+from jiuwenswarm.gateway.channel_manager.base import ChannelType
 from jiuwenswarm.gateway.message_handler.command_parser.slash_command import (
     ParsedControlAction,
     parse_channel_control_text,
 )
+from jiuwenswarm.gateway.routing.session_map import SessionMap
 from jiuwenswarm.extensions.hook_event import GatewayHookEvents
 from jiuwenswarm.extensions.hooks_context import GatewayChatHookContext
 from jiuwenswarm.common.hooks_config import load_hooks_config
@@ -130,6 +132,7 @@ class MessageHandler(ABC):
         self._stream_metadata: dict[str, dict[str, Any] | None] = {}  # request_id -> request metadata
         self._stream_modes: dict[str, str] = {}  # request_id -> mode
         self._stream_emits_processing_status: dict[str, bool] = {}  # request_id -> emits chat.processing_status
+        self._think_tag_parsers: dict[str, ThinkTagStreamParser] = {}
         self._pending_evolution_approval: dict[str, str] = {}  # session_id -> approval_request_id
         self._queued_supplement_input: dict[str, dict[str, Any]] = {}  # session_id -> queued supplement payload
         self._session_last_user_query: dict[str, str] = {}
@@ -1192,6 +1195,11 @@ class MessageHandler(ABC):
 
     async def publish_robot_messages(self, msg: "Message") -> None:
         """将 Agent 响应放入 robot_messages 队列."""
+        for split_msg in self._split_think_tag_message(msg):
+            await self._enqueue_robot_message(split_msg)
+
+    async def _enqueue_robot_message(self, msg: "Message") -> None:
+        """Queue a robot message after outbound pipeline processing."""
         # Outbound Pipeline（数字分身出站路由）— 在入队前运行
         if self._outbound_pipeline is not None:
             try:
@@ -1200,9 +1208,144 @@ class MessageHandler(ABC):
                 logger.exception("Outbound pipeline error, message queued without routing")
         await self._robot_messages.put(msg)
 
+    @staticmethod
+    def _think_tag_parser_key(msg: "Message") -> str:
+        return "\x1f".join((str(msg.channel_id or ""), str(msg.session_id or ""), str(msg.id or "")))
+
+    @staticmethod
+    def _message_event_type(msg: "Message"):
+        from jiuwenswarm.common.schema.message import EventType
+
+        if msg.event_type is not None:
+            return msg.event_type
+        payload = msg.payload if isinstance(msg.payload, dict) else {}
+        event_type_raw = payload.get("event_type")
+        if isinstance(event_type_raw, str):
+            try:
+                return EventType(event_type_raw)
+            except ValueError:
+                return None
+        return None
+
+    @staticmethod
+    def _message_from_think_part(
+        msg: "Message",
+        part: ThinkTagPart,
+        *,
+        text_event_type,
+    ) -> "Message":
+        from jiuwenswarm.common.schema.message import EventType
+
+        if part.kind == "reasoning":
+            event_type = EventType.CHAT_REASONING
+            payload = {
+                "event_type": event_type.value,
+                "content": part.content,
+                "source_chunk_type": "llm_reasoning",
+            }
+            if msg.session_id:
+                payload["session_id"] = msg.session_id
+        else:
+            event_type = text_event_type
+            payload = dict(msg.payload or {})
+            payload["event_type"] = event_type.value
+            payload["content"] = part.content
+        return replace(msg, type="event", payload=payload, event_type=event_type)
+
+    def _split_think_tag_message(self, msg: "Message") -> list["Message"]:
+        """Split MiniMax-style ``<think>`` blocks out of visible chat text."""
+        from jiuwenswarm.common.schema.message import EventType
+
+        event_type = self._message_event_type(msg)
+        payload = msg.payload if isinstance(msg.payload, dict) else {}
+        source_chunk_type = str(payload.get("source_chunk_type") or "").strip().lower()
+
+        if event_type in (EventType.CHAT_ERROR, EventType.CHAT_PROCESSING_STATUS):
+            if event_type == EventType.CHAT_ERROR or payload.get("is_processing") is False:
+                self._think_tag_parsers.pop(self._think_tag_parser_key(msg), None)
+            return [msg]
+
+        if (
+            event_type not in (EventType.CHAT_DELTA, EventType.CHAT_FINAL)
+            or source_chunk_type == "llm_reasoning"
+        ):
+            return [msg]
+
+        content = payload.get("content")
+        if not isinstance(content, str) or not content:
+            if event_type == EventType.CHAT_FINAL:
+                parser = self._think_tag_parsers.pop(self._think_tag_parser_key(msg), None)
+                if parser is not None:
+                    flushed = [
+                        self._message_from_think_part(msg, part, text_event_type=EventType.CHAT_DELTA)
+                        for part in parser.flush()
+                        if part.content
+                    ]
+                    return [*flushed, msg]
+            return [msg]
+
+        key = self._think_tag_parser_key(msg)
+        parser = self._think_tag_parsers.get(key)
+        if parser is None and "<" not in content:
+            return [msg]
+        if parser is None:
+            parser = ThinkTagStreamParser()
+            self._think_tag_parsers[key] = parser
+
+        parts = parser.feed(content)
+        if event_type == EventType.CHAT_FINAL:
+            parts.extend(parser.flush())
+            self._think_tag_parsers.pop(key, None)
+        elif not parser.has_pending:
+            self._think_tag_parsers.pop(key, None)
+
+        if not parts:
+            return []
+
+        return [
+            self._message_from_think_part(msg, part, text_event_type=event_type)
+            for part in parts
+            if part.content
+        ]
+
+    async def _flush_think_tag_parser(
+        self,
+        *,
+        request_id: str,
+        channel_id: str,
+        session_id: str | None,
+        metadata: dict[str, Any] | None,
+    ) -> None:
+        from jiuwenswarm.common.schema.message import EventType, Message
+
+        key = "\x1f".join((str(channel_id or ""), str(session_id or ""), str(request_id or "")))
+        parser = self._think_tag_parsers.pop(key, None)
+        if parser is None:
+            return
+        parts = parser.flush()
+        if not parts:
+            return
+        base_msg = Message(
+            id=request_id,
+            type="event",
+            channel_id=channel_id,
+            session_id=session_id,
+            params={},
+            timestamp=time.time(),
+            ok=True,
+            payload={},
+            event_type=EventType.CHAT_DELTA,
+            metadata=metadata,
+        )
+        for part in parts:
+            await self._enqueue_robot_message(
+                self._message_from_think_part(base_msg, part, text_event_type=EventType.CHAT_DELTA)
+            )
+
     def publish_robot_messages_nowait(self, msg: "Message") -> None:
         """将 Agent 响应放入 robot_messages 队列（同步）."""
-        self._robot_messages.put_nowait(msg)
+        for split_msg in self._split_think_tag_message(msg):
+            self._robot_messages.put_nowait(split_msg)
 
     async def consume_robot_messages(self, timeout: float | None = None) -> "Message | None":
         """消费一条 robot_messages；timeout 为 None 则阻塞，否则超时返回 None."""
@@ -1655,6 +1798,12 @@ class MessageHandler(ABC):
             logger.debug(
                 "[MessageHandler] 忽略 server_push 终止 chunk: request_id=%s",
                 chunk.request_id,
+            )
+            await self._flush_think_tag_parser(
+                request_id=rid,
+                channel_id=chunk.channel_id,
+                session_id=session_id,
+                metadata=bus_metadata,
             )
             return
 
@@ -2601,6 +2750,12 @@ class MessageHandler(ABC):
                     "[MessageHandler] Stream chunk 已写入 robot_messages: request_id=%s event_type=%s",
                     chunk.request_id, out.event_type,
                 )
+            await self._flush_think_tag_parser(
+                request_id=rid,
+                channel_id=channel_id,
+                session_id=session_id,
+                metadata=request_metadata,
+            )
             logger.info(
                 "[MessageHandler] Stream 正常完成: request_id=%s",
                 rid,
@@ -2622,6 +2777,7 @@ class MessageHandler(ABC):
             self._stream_metadata.pop(rid, None)
             self._stream_emits_processing_status.pop(rid, None)
             self._stream_modes.pop(rid, None)
+            self._think_tag_parsers.pop("\x1f".join((channel_id, str(session_id or ""), rid)), None)
             if session_id is not None and session_id not in self._stream_sessions.values():
                 # Fallback cleanup when stream exits unexpectedly without evolution end signal.
                 self._clear_session_evolution_in_progress(session_id)
