@@ -109,6 +109,7 @@ declare -A DEPLOY_VARS=(
     ["GATEWAY_DB_NAME"]="openjiuwen_gateway"
     ["MANAGER_SQLITE_PATH"]="claw_manager.db"
     ["GATEWAY_SQLITE_PATH"]="openjiuwen_gateway.db"
+    ["CHECKPOINTER_DB_NAME"]="jiuwenclawee"
 )
 
 
@@ -125,4 +126,3 @@ declare -A OYR_COMPONENTS=(
         ["etcd"]="statefulset"
         ["minio"]="statefulset"
     )
-
