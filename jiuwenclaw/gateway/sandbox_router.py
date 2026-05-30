@@ -40,6 +40,12 @@ _WORKSPACE_SKIP_METHODS = frozenset({
 _VIBESKILL_CHANNEL_ID = "vibeskill"
 
 
+def _create_query_url_obs() -> Any:
+    from jiuwenclaw.gateway.query_url_obs import QueryUrlOSMS
+
+    return QueryUrlOSMS()
+
+
 class SandboxStatus(str, Enum):
     INITIALIZING = "initializing"
     BUSY = "busy"
@@ -676,6 +682,8 @@ class SandboxRouterAgentClient(AgentServerClient):
         request_id = (
             f"sandbox-restore-{int(time.time() * 1000):x}-{secrets.token_hex(3)}"
         )
+        query_url_obs = _create_query_url_obs()
+        latest_url = await query_url_obs.get_latest_obs_url(record.url)
         restore_env = e2a_from_agent_fields(
             request_id=request_id,
             channel_id=str(envelope.channel or "") or _VIBESKILL_CHANNEL_ID,
@@ -686,7 +694,7 @@ class SandboxRouterAgentClient(AgentServerClient):
                 "items": [
                     {
                         "sessionID": session_id,
-                        "url": record.url,
+                        "url": latest_url,
                         "name": record.name,
                     }
                 ]
