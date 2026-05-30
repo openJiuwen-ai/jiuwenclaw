@@ -18,6 +18,7 @@ import json
 import logging
 import os
 import inspect
+import signal
 import time
 import uuid as uuid_module
 from dataclasses import dataclass, field
@@ -1641,12 +1642,39 @@ async def _run(
             agent_server_url,
         )
 
+    stop_event = asyncio.Event()
+
+    def _request_shutdown() -> None:
+        if not stop_event.is_set():
+            logger.info("[App] shutdown signal received, draining...")
+            stop_event.set()
+
+    loop = asyncio.get_running_loop()
+    try:
+        loop.add_signal_handler(signal.SIGINT, _request_shutdown)
+        loop.add_signal_handler(signal.SIGTERM, _request_shutdown)
+    except (NotImplementedError, RuntimeError, OSError, ValueError):
+        pass
+
     try:
         tasks_to_wait = [task for task in (gateway_server_task, web_task) if task is not None]
         if tasks_to_wait:
-            await asyncio.gather(*tasks_to_wait)
+            stop_waiter = asyncio.create_task(stop_event.wait(), name="gateway-shutdown")
+            _done, pending = await asyncio.wait(
+                set(tasks_to_wait) | {stop_waiter},
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            for task in pending:
+                task.cancel()
+            for task in pending:
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
+        else:
+            await stop_event.wait()
     except KeyboardInterrupt:
-        logger.info("received Ctrl+C, shutting down...")
+        logger.info("[App] received Ctrl+C, shutting down...")
     except asyncio.CancelledError:
         pass
     finally:
