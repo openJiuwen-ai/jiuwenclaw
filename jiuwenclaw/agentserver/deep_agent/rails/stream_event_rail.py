@@ -257,26 +257,6 @@ class JiuClawStreamEventRail(DeepAgentRail):
             return
         await self._emit_tool_result(session, ctx.inputs.tool_call, ctx.inputs.tool_result)
         tool_name = ctx.inputs.tool_name
-        if tool_name == "skill_complete":
-            report = _extract_skill_complete_arg(ctx.inputs.tool_call, "report")
-            if report:
-                await self._emit_user_visible_text(session, report)
-                ctx.request_force_finish(
-                    {
-                        "output": report,
-                        "result_type": "skill_complete_report",
-                        "skill_complete": {
-                            "skill_name": _extract_skill_complete_arg(
-                                ctx.inputs.tool_call, "skill_name",
-                            ),
-                        },
-                    },
-                )
-                logger.info(
-                    "[StreamEventRail] skill_complete carried report: force-finish turn "
-                    "(skipped redundant stop round)",
-                )
-                return
 
         if tool_name in _TODO_TOOL_NAMES and self._conversation_id:
             await self._emit_todo_updated(ctx.agent, session, self._conversation_id)
