@@ -2679,13 +2679,25 @@ def setup_logger(log_level: Optional[str] = None) -> logging.Logger:
 
 
 class AsyncLRUCache:
-    """带过期时间的 LRU 缓存（异步并发安全）."""
+    """带可选过期时间与容量上限的 LRU 缓存（异步并发安全）.
 
-    def __init__(self, max_size: int = 100, ttl_seconds: int = 600) -> None:
+    ``max_size=None`` / ``ttl_seconds=None`` 表示不启用对应限制。
+    """
+
+    def __init__(
+        self,
+        max_size: int | None = None,
+        ttl_seconds: int | None = None,
+    ) -> None:
         self._cache: OrderedDict[str, tuple[Any, float]] = OrderedDict()
         self._max_size = max_size
         self._ttl = ttl_seconds
         self._lock = asyncio.Lock()
+
+    def _is_expired(self, timestamp: float) -> bool:
+        if self._ttl is None:
+            return False
+        return time.time() - timestamp > self._ttl
 
     async def get(self, key: str) -> Any | None:
         """获取缓存值，如果不存在或已过期则返回 None.
@@ -2697,7 +2709,7 @@ class AsyncLRUCache:
                 return None
 
             value, timestamp = self._cache[key]
-            if time.time() - timestamp > self._ttl:
+            if self._is_expired(timestamp):
                 self._cache.pop(key, None)
                 return None
 
@@ -2711,7 +2723,7 @@ class AsyncLRUCache:
         async with self._lock:
             if key in self._cache:
                 self._cache.pop(key)
-            elif len(self._cache) >= self._max_size:
+            elif self._max_size is not None and len(self._cache) >= self._max_size:
                 # 淘汰最久未使用的（头部）
                 self._cache.popitem(last=False)
 
@@ -2750,13 +2762,14 @@ class AsyncLRUCache:
 
     async def keys(self) -> list[str]:
         async with self._lock:
-            now = time.time()
-            expired_keys = [
-                key for key, (_, timestamp) in self._cache.items()
-                if now - timestamp > self._ttl
-            ]
-            for key in expired_keys:
-                del self._cache[key]
+            if self._ttl is not None:
+                expired_keys = [
+                    key
+                    for key, (_, timestamp) in self._cache.items()
+                    if self._is_expired(timestamp)
+                ]
+                for key in expired_keys:
+                    del self._cache[key]
             return list(self._cache.keys())
 
 setup_logger()

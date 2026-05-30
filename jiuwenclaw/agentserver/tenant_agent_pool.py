@@ -21,9 +21,17 @@ class TenantAgentPool:
 
     _instance: ClassVar[TenantAgentPool | None] = None
 
-    def __init__(self, cache_max_size: int = 100, cache_ttl: int = 600) -> None:
+    def __init__(
+        self,
+        cache_max_size: int | None = None,
+        cache_ttl: int | None = None,
+    ) -> None:
         # LRU 缓存: key=agent_id+service_id, value=AgentManager 实例
-        self._agent_wrappers = AsyncLRUCache(max_size=cache_max_size, ttl_seconds=cache_ttl)
+        # 默认 None：不限制容量与 TTL，避免长阻塞（如 ask_user_question）期间误淘汰 AgentManager
+        self._agent_wrappers = AsyncLRUCache(
+            max_size=cache_max_size,
+            ttl_seconds=cache_ttl,
+        )
         self._locks: dict[str, asyncio.Lock] = {}
         self._lock_loops: dict[str, asyncio.AbstractEventLoop] = {}
         self._global_lock = asyncio.Lock()
