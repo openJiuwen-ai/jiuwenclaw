@@ -37,7 +37,7 @@ async def push_extension_config_templates_to_all_gateways(
         payload["template_id"] = template_id
     if updates is not None:
         payload["updates"] = updates
-    return await push_config_op_to_all(_CONFIG_SECTION, payload)
+    return await push_config_op_to_all({_CONFIG_SECTION: payload})
 
 
 def _template_pk(template_id: str) -> dict[str, Any]:

@@ -5,7 +5,7 @@
 启动后会：
   1. 拉取 Manager 所有现存 instance；
   2. 为每个 instance 起一条 WebSocket 连接，register 自己为 service_type=gateway；
-  3. 收到 config.push 立刻回 config.ack(ok=True)。
+  3. 收到 config.push 立刻回 config.ack(success_flag=True)。
 
 用法：
     python3 scripts/mock_gateway_ws.py
@@ -151,7 +151,7 @@ async def _run_one(instance_id: str | None, stop: asyncio.Event) -> None:
                                         "type": "config.ack",
                                         "payload": {
                                             "revision": revision,
-                                            "ok": True,
+                                            "success_flag": True,
                                             "result": result,
                                         },
                                     }

@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 from openjiuwen_runtime.foundation.db.handler import DBHandler
@@ -17,8 +18,10 @@ from jiuwenclaw.gateway.channel_config_overlay import ChannelConfigChange
 from ...infrastructure.utils import format_ts, utc_now
 from ...models.application_config_models import CHANNEL_CONFIG_TABLE_DEF
 from ...schemas.application_config_schemas import ChannelConfigCreateRequest
+from ...infrastructure.db import ensure_db_handler
 
 _TABLE = CHANNEL_CONFIG_TABLE_DEF.table_name
+logger = logging.getLogger(__name__)
 
 
 def _channel_row_to_dict(obj: Any) -> dict[str, Any]:
@@ -106,12 +109,14 @@ async def list_active_channel_config_rows(handler: DBHandler) -> list[dict[str, 
     return result
 
 
-async def apply_channel_config_sync(
-    handler: DBHandler,
-    op: str,
-    payload: dict[str, Any],
-) -> dict[str, Any] | None:
+async def apply_channel_config(payload: dict[str, Any]) -> dict[str, Any] | None:
     """应用 Claw Manager 经 WebSocket 下发的 channel_config 变更。"""
+    op = str(payload.get("op") or "").strip()
+    if not op:
+        raise ValueError("channel_config.op is required")
+
+    handler = await ensure_db_handler()
+
     if op == "create":
         channel = payload.get("channel")
         if not isinstance(channel, dict):
@@ -121,9 +126,9 @@ async def apply_channel_config_sync(
         await maybe_trigger_channel_config_reload(
             channel_config_reload_change_for_row(row)
         )
-        return {"channel_id": row["channel_id"]}
+        result: dict[str, Any] | None = {"channel_id": row["channel_id"]}
 
-    if op == "activate":
+    elif op == "activate":
         channel_id = str(payload.get("channel_id") or "").strip()
         if not channel_id:
             raise ValueError("channel_config.activate requires channel_id")
@@ -131,9 +136,9 @@ async def apply_channel_config_sync(
         if row is None:
             raise ValueError(f"channel id={channel_id!r} not found")
         await maybe_trigger_channel_config_reload(ChannelConfigChange.upsert(row))
-        return {"channel_id": row["channel_id"], "status": row["status"]}
+        result = {"channel_id": row["channel_id"], "status": row["status"]}
 
-    if op == "deactivate":
+    elif op == "deactivate":
         channel_id = str(payload.get("channel_id") or "").strip()
         if not channel_id:
             raise ValueError("channel_config.deactivate requires channel_id")
@@ -141,9 +146,9 @@ async def apply_channel_config_sync(
         if row is None:
             raise ValueError(f"channel id={channel_id!r} not found")
         await maybe_trigger_channel_config_reload(ChannelConfigChange.remove(row))
-        return {"channel_id": row["channel_id"], "status": row["status"]}
+        result = {"channel_id": row["channel_id"], "status": row["status"]}
 
-    if op == "delete":
+    elif op == "delete":
         channel_id = str(payload.get("channel_id") or "").strip()
         if not channel_id:
             raise ValueError("channel_config.delete requires channel_id")
@@ -153,6 +158,14 @@ async def apply_channel_config_sync(
             raise ValueError(f"channel id={channel_id!r} not found")
         if row is not None:
             await maybe_trigger_channel_config_reload(ChannelConfigChange.remove(row))
-        return None
+        result = None
 
-    raise ValueError(f"unsupported channel_config.op: {op!r}")
+    else:
+        raise ValueError(f"unsupported channel_config.op: {op!r}")
+
+    logger.info(
+        "[ManagerWsClient] channel_config sync op=%s channel_id=%s",
+        op,
+        (result or {}).get("channel_id") or payload.get("channel_id"),
+    )
+    return result

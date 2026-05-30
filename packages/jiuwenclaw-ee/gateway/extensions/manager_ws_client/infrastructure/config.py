@@ -58,9 +58,31 @@ class Settings(BaseSettings):
         default="ws://127.0.0.1:8766",
         validation_alias="GATEWAY_MANAGER_WS_URL",
     )
-    gateway_heartbeat_interval_seconds: int = Field(
-        default=30,
-        validation_alias="GATEWAY_HEARTBEAT_INTERVAL_SECONDS",
+    gateway_manager_ws_max_reconnect_attempts: int = Field(
+        default=3,
+        validation_alias="GATEWAY_MANAGER_WS_MAX_RECONNECT_ATTEMPTS",
+        description=(
+            "Fast-retry phase length before switching to probe mode; "
+            "0 = use exponential backoff only (no separate fast phase)"
+        ),
+    )
+    gateway_manager_ws_reconnect_interval_seconds: float = Field(
+        default=3.0,
+        validation_alias="GATEWAY_MANAGER_WS_RECONNECT_INTERVAL_SECONDS",
+        description="Delay between fast-phase Manager WebSocket reconnect attempts (seconds)",
+    )
+    gateway_manager_ws_probe_interval_seconds: float = Field(
+        default=120.0,
+        validation_alias="GATEWAY_MANAGER_WS_PROBE_INTERVAL_SECONDS",
+        description=(
+            "Interval for probe-mode reconnect when Manager is unavailable "
+            "(seconds); also caps exponential backoff when max attempts is 0"
+        ),
+    )
+    gateway_manager_ws_heartbeat_interval_seconds: int = Field(
+        default=60,
+        validation_alias="GATEWAY_MANAGER_WS_HEARTBEAT_INTERVAL_SECONDS",
+        description="Interval for Gateway → Manager WebSocket heartbeats (seconds)",
     )
 
     # 在验证之前就把空字符串变成 None

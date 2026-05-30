@@ -159,3 +159,11 @@ class Database:
             logger.warning("database disconnect error: %s", exc)
         finally:
             self._handler = None
+
+
+_GATEWAY_DB = Database(relative_root=Path(__file__).resolve().parents[1])
+
+
+async def ensure_db_handler(*, log_prefix: str = "manager_ws_client") -> DBHandler:
+    """获取 Gateway 本地库 ``DBHandler``（进程内幂等）。"""
+    return await _GATEWAY_DB.ensure_ready(log_prefix=log_prefix)

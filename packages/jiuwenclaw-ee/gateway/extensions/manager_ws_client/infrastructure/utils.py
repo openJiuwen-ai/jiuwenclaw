@@ -37,19 +37,19 @@ def get_jiuwenclaw_id() -> str | None:
     return val or None
 
 
-def assert_jiuwenclaw_id_matches_payload(payload: dict[str, Any]) -> str:
-    """校验 push payload 与已注册 ``jiuwenclaw_id`` 一致，并返回有效 id。"""
+def assert_jiuwenclaw_id_matches(jiuwenclaw_id: str) -> str:
+    """校验 config.push 顶层 ``jiuwenclaw_id`` 与已注册实例一致，并返回有效 id。"""
+    if not jiuwenclaw_id:
+        raise ValueError("config.push payload requires jiuwenclaw_id")
     registered = get_jiuwenclaw_id()
-    payload_jid = str(payload.get("jiuwenclaw_id") or "").strip()
-    if registered and payload_jid and payload_jid != registered:
+    if registered and jiuwenclaw_id != registered:
         raise ValueError(
-            f"jiuwenclaw_id mismatch: push={payload_jid!r} registered={registered!r}"
+            f"jiuwenclaw_id mismatch: push={jiuwenclaw_id!r} registered={registered!r}"
         )
-    jid = registered or payload_jid
+    jid = registered or jiuwenclaw_id
     if not jid:
         raise ValueError(
-            "jiuwenclaw_id is not set; manager ws register.ack required "
-            "or provide jiuwenclaw_id in payload"
+            "jiuwenclaw_id is not set; manager ws register.ack required"
         )
     return jid
 

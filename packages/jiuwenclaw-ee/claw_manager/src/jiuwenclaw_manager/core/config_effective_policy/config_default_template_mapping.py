@@ -40,10 +40,7 @@ async def push_config_default_template_mapping_op(
     updates: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """推送默认模板映射变更（``config.config_default_template_mappings``），返回 config.ack payload。"""
-    payload: dict[str, Any] = {
-        "op": op,
-        "jiuwenclaw_id": jiuwenclaw_id,
-    }
+    payload: dict[str, Any] = {"op": op}
     if mapping is not None:
         payload["mapping"] = mapping
     if mapping_id is not None:
@@ -52,8 +49,7 @@ async def push_config_default_template_mapping_op(
         payload["updates"] = updates
     return await push_config_op(
         jiuwenclaw_id,
-        "config_default_template_mappings",
-        payload,
+        {"config_default_template_mappings": payload},
     )
 
 

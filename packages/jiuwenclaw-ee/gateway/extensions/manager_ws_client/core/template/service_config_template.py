@@ -4,17 +4,20 @@
 
 from __future__ import annotations
 
+import logging
 from datetime import datetime
 from typing import Any
 
 from openjiuwen_runtime.foundation.db.handler import DBHandler
 
-from ...infrastructure.utils import assert_jiuwenclaw_id_matches_payload, utc_now
+from ...infrastructure.db import ensure_db_handler
+from ...infrastructure.utils import utc_now
 from ...models.template_models import SERVICE_CONFIG_TEMPLATE_TABLE_DEF
 from ...schemas.template_schemas import ServiceConfigTemplateUpdateRequest
 
 _TABLE = SERVICE_CONFIG_TEMPLATE_TABLE_DEF.table_name
 _ALLOWED_IMAGE_PULL_POLICIES = frozenset({"Always", "IfNotPresent", "Never"})
+logger = logging.getLogger(__name__)
 
 
 def _normalize_template_id(template_id: Any) -> str:
@@ -188,13 +191,15 @@ def _build_row_from_template(template: dict[str, Any], *, now: datetime) -> dict
     }
 
 
-async def apply_service_config_template_sync(
-    handler: DBHandler,
-    op: str,
+async def apply_service_config_template(
     payload: dict[str, Any],
 ) -> dict[str, Any] | None:
     """应用 Claw Manager 经 WebSocket 下发的 service_config_templates 变更。"""
-    assert_jiuwenclaw_id_matches_payload(payload)
+    op = str(payload.get("op") or "").strip()
+    if not op:
+        raise ValueError("service_config_templates.op is required")
+
+    handler = await ensure_db_handler()
 
     if op == "create":
         template = payload.get("template")
@@ -203,9 +208,9 @@ async def apply_service_config_template_sync(
         now = utc_now()
         row_data = _build_row_from_template(template, now=now)
         await handler.create(_TABLE, row_data)
-        return {"template_id": row_data["template_id"]}
+        result: dict[str, Any] | None = {"template_id": row_data["template_id"]}
 
-    if op == "update":
+    elif op == "update":
         template_id = payload.get("template_id")
         updates = payload.get("updates")
         if template_id is None:
@@ -220,9 +225,9 @@ async def apply_service_config_template_sync(
         )
         if row is None:
             raise ValueError(f"service config template template_id={tid!r} not found")
-        return None
+        result = None
 
-    if op == "delete":
+    elif op == "delete":
         template_id = payload.get("template_id")
         if template_id is None:
             raise ValueError("service_config_templates.delete requires template_id")
@@ -230,6 +235,41 @@ async def apply_service_config_template_sync(
         deleted = await delete_service_config_template(handler, tid)
         if not deleted:
             raise ValueError(f"service config template template_id={tid!r} not found")
-        return None
+        result = None
 
-    raise ValueError(f"unsupported service_config_templates.op: {op!r}")
+    else:
+        raise ValueError(f"unsupported service_config_templates.op: {op!r}")
+
+    logger.info(
+        "[ManagerWsClient] service_config_templates sync op=%s template_id=%s",
+        op,
+        (result or {}).get("template_id")
+        or payload.get("template_id")
+        or (payload.get("template") or {}).get("template_id"),
+    )
+    _trigger_runtime_management_config_update(op)
+    return result
+
+
+def _trigger_runtime_management_config_update(op: str) -> None:
+    try:
+        from jiuwenclaw.extensions.registry import ExtensionRegistry
+
+        registry = ExtensionRegistry.get_instance()
+        ext = registry.get_agent_server_client_extension()
+        if ext is None or not hasattr(ext, "get_client"):
+            return
+        client = ext.get_client()
+        if client is None or not hasattr(client, "set_or_update_server_config"):
+            return
+        client.set_or_update_server_config(config={"service_template": True})
+        logger.info(
+            "[ManagerWsClient] triggered runtime management config update "
+            "after service_config_templates %s",
+            op,
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "[ManagerWsClient] failed to trigger runtime management config update: %s",
+            exc,
+        )

@@ -28,12 +28,12 @@ class Settings(BaseSettings):
     rest_port: int = Field(default=8765, validation_alias="MANAGER_REST_PORT")
 
     db_type: str = Field(default="sqlite", validation_alias="MANAGER_DB_TYPE")
-    sqlite_path: str = Field(default="claw_manager.db", validation_alias="MANAGER_SQLITE_PATH")
+    sqlite_path: str = Field(default="manager.db", validation_alias="MANAGER_SQLITE_PATH")
     db_host: str = Field(default="127.0.0.1", validation_alias="MANAGER_DB_HOST")
     db_port: int = Field(default=3306, validation_alias="MANAGER_DB_PORT")
     db_user: str = Field(default="root", validation_alias="MANAGER_DB_USER")
     db_password: str = Field(default="root", validation_alias="MANAGER_DB_PASSWORD")
-    db_name: str = Field(default="claw_manager", validation_alias="MANAGER_DB_NAME")
+    db_name: str = Field(default="manager", validation_alias="MANAGER_DB_NAME")
 
     manager_heartbeat_timeout_seconds: int = Field(
         default=120, validation_alias="MANAGER_HEARTBEAT_TIMEOUT_SECONDS"

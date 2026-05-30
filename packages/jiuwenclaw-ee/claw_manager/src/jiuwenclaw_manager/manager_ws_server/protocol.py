@@ -7,6 +7,7 @@ from typing import Any
 FRAME_TYPE_EVENT = "event"
 FRAME_TYPE_REGISTER = "register"
 FRAME_TYPE_HEARTBEAT = "heartbeat"
+FRAME_TYPE_HEARTBEAT_ACK = "heartbeat.ack"
 FRAME_TYPE_CONFIG_PUSH = "config.push"
 FRAME_TYPE_CONFIG_ACK = "config.ack"
 FRAME_TYPE_ERROR = "error"
@@ -32,23 +33,46 @@ def build_connection_ack(*, manager_id: str) -> dict[str, Any]:
     }
 
 
-def build_config_push(*, revision: str, config: dict[str, Any]) -> dict[str, Any]:
+def build_heartbeat_ack(
+    *,
+    jiuwenclaw_id: str,
+    seq: int | None = None,
+) -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "status": "ok",
+        "jiuwenclaw_id": str(jiuwenclaw_id or "").strip(),
+    }
+    if seq is not None:
+        payload["seq"] = seq
+    return {"type": FRAME_TYPE_HEARTBEAT_ACK, "payload": payload}
+
+
+def build_config_push(
+    *,
+    revision: str,
+    jiuwenclaw_id: str,
+    config: dict[str, Any],
+) -> dict[str, Any]:
     return {
         "type": FRAME_TYPE_CONFIG_PUSH,
-        "payload": {"revision": revision, "config": config},
+        "payload": {
+            "revision": revision,
+            "jiuwenclaw_id": jiuwenclaw_id,
+            "config": config,
+        },
     }
 
 
 def build_config_ack(
     *,
     revision: str,
-    ok: bool = True,
-    error: str | None = None,
+    success_flag: bool = True,
+    error_message: str | None = None,
     result: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    payload: dict[str, Any] = {"revision": revision, "ok": ok}
-    if error:
-        payload["error"] = error
+    payload: dict[str, Any] = {"revision": revision, "success_flag": success_flag}
+    if error_message:
+        payload["error_message"] = error_message
     if result:
         payload["result"] = result
     return {"type": FRAME_TYPE_CONFIG_ACK, "payload": payload}

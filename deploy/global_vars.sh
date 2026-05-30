@@ -105,10 +105,10 @@ declare -A DEPLOY_VARS=(
     ["MANAGER_REST_PORT"]="8765"
     ["MANAGER_WS_PORT"]="8766"
     ["DB_TYPE"]="sqlite"
-    ["MANAGER_DB_NAME"]="claw_manager"
-    ["GATEWAY_DB_NAME"]="openjiuwen_gateway"
-    ["MANAGER_SQLITE_PATH"]="claw_manager.db"
-    ["GATEWAY_SQLITE_PATH"]="openjiuwen_gateway.db"
+    ["MANAGER_DB_NAME"]="manager"
+    ["GATEWAY_DB_NAME"]="gateway"
+    ["MANAGER_SQLITE_PATH"]="manager.db"
+    ["GATEWAY_SQLITE_PATH"]="gateway.db"
     ["CHECKPOINTER_DB_NAME"]="jiuwenclawee"
 )
 

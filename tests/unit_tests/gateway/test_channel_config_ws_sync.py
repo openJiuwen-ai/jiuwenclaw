@@ -1,6 +1,6 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2026-2026. All rights reserved
 
-"""Channel 配置 WS 同步单元测试（manager_ws_client apply_channel_config_sync）。"""
+"""Channel 配置 WS 同步单元测试（manager_ws_client apply_channel_config）。"""
 
 from __future__ import annotations
 
@@ -80,16 +80,22 @@ def _row_obj(**kwargs: object) -> SimpleNamespace:
 
 @pytest.mark.asyncio
 async def test_ws_sync_create_triggers_active_reload(channel_config_sync_module):
-    apply_channel_config_sync = channel_config_sync_module.apply_channel_config_sync
+    apply_channel_config = channel_config_sync_module.apply_channel_config
     created = _row_obj()
     handler = _make_handler(get_row=None, create_row=created)
     reload = AsyncMock()
 
-    with patch.object(channel_config_sync_module, "maybe_trigger_channel_config_reload", reload):
-        result = await apply_channel_config_sync(
-            handler,
-            "create",
+    with (
+        patch.object(
+            channel_config_sync_module,
+            "ensure_db_handler",
+            AsyncMock(return_value=handler),
+        ),
+        patch.object(channel_config_sync_module, "maybe_trigger_channel_config_reload", reload),
+    ):
+        result = await apply_channel_config(
             {
+                "op": "create",
                 "channel": {
                     "channel_id": "feishu-1",
                     "channel_name": "Feishu",
@@ -97,7 +103,7 @@ async def test_ws_sync_create_triggers_active_reload(channel_config_sync_module)
                     "bot_id": "feishu",
                     "config": {"app_id": "a", "app_secret": "s"},
                     "status": "active",
-                }
+                },
             },
         )
 
@@ -110,17 +116,22 @@ async def test_ws_sync_create_triggers_active_reload(channel_config_sync_module)
 
 @pytest.mark.asyncio
 async def test_ws_sync_deactivate_triggers_remove_reload(channel_config_sync_module):
-    apply_channel_config_sync = channel_config_sync_module.apply_channel_config_sync
+    apply_channel_config = channel_config_sync_module.apply_channel_config
     existing = _row_obj(status="active")
     updated = _row_obj(status="inactive")
     handler = _make_handler(get_row=existing, update_row=updated)
     reload = AsyncMock()
 
-    with patch.object(channel_config_sync_module, "maybe_trigger_channel_config_reload", reload):
-        result = await apply_channel_config_sync(
-            handler,
-            "deactivate",
-            {"channel_id": "feishu-1"},
+    with (
+        patch.object(
+            channel_config_sync_module,
+            "ensure_db_handler",
+            AsyncMock(return_value=handler),
+        ),
+        patch.object(channel_config_sync_module, "maybe_trigger_channel_config_reload", reload),
+    ):
+        result = await apply_channel_config(
+            {"op": "deactivate", "channel_id": "feishu-1"},
         )
 
     assert result == {"channel_id": "feishu-1", "status": "inactive"}
@@ -130,16 +141,21 @@ async def test_ws_sync_deactivate_triggers_remove_reload(channel_config_sync_mod
 
 @pytest.mark.asyncio
 async def test_ws_sync_delete_triggers_remove_reload(channel_config_sync_module):
-    apply_channel_config_sync = channel_config_sync_module.apply_channel_config_sync
+    apply_channel_config = channel_config_sync_module.apply_channel_config
     existing = _row_obj()
     handler = _make_handler(get_row=existing, delete_ok=True)
     reload = AsyncMock()
 
-    with patch.object(channel_config_sync_module, "maybe_trigger_channel_config_reload", reload):
-        result = await apply_channel_config_sync(
-            handler,
-            "delete",
-            {"channel_id": "feishu-1"},
+    with (
+        patch.object(
+            channel_config_sync_module,
+            "ensure_db_handler",
+            AsyncMock(return_value=handler),
+        ),
+        patch.object(channel_config_sync_module, "maybe_trigger_channel_config_reload", reload),
+    ):
+        result = await apply_channel_config(
+            {"op": "delete", "channel_id": "feishu-1"},
         )
 
     assert result is None

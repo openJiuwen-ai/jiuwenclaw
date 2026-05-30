@@ -36,10 +36,7 @@ async def push_config_effective_service_policy_op(
     updates: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """推送 Service 层级配置生效策略变更（``config.config_effective_service_policies``），返回 config.ack payload。"""
-    payload: dict[str, Any] = {
-        "op": op,
-        "jiuwenclaw_id": jiuwenclaw_id,
-    }
+    payload: dict[str, Any] = {"op": op}
     if policy is not None:
         payload["policy"] = policy
     if policy_id is not None:
@@ -48,8 +45,7 @@ async def push_config_effective_service_policy_op(
         payload["updates"] = updates
     return await push_config_op(
         jiuwenclaw_id,
-        "config_effective_service_policies",
-        payload,
+        {"config_effective_service_policies": payload},
     )
 
 

@@ -8,6 +8,7 @@ from typing import Any
 FRAME_TYPE_EVENT = "event"
 FRAME_TYPE_REGISTER = "register"
 FRAME_TYPE_HEARTBEAT = "heartbeat"
+FRAME_TYPE_HEARTBEAT_ACK = "heartbeat.ack"
 FRAME_TYPE_CONFIG_PUSH = "config.push"
 FRAME_TYPE_CONFIG_ACK = "config.ack"
 FRAME_TYPE_ERROR = "error"
@@ -45,6 +46,7 @@ def build_heartbeat(
     service_type: str = "gateway",
     version: str | None = None,
     endpoint: str | None = None,
+    seq: int | None = None,
 ) -> dict[str, Any]:
     """构建 heartbeat 帧（Gateway → Manager，用于刷新 ``instance_info.status``）。"""
     payload: dict[str, Any] = {
@@ -55,19 +57,36 @@ def build_heartbeat(
         payload["version"] = version
     if endpoint:
         payload["endpoint"] = endpoint
+    if seq is not None:
+        payload["seq"] = seq
     return {"type": FRAME_TYPE_HEARTBEAT, "payload": payload}
+
+
+def build_heartbeat_ack(
+    *,
+    jiuwenclaw_id: str,
+    seq: int | None = None,
+) -> dict[str, Any]:
+    """构建 heartbeat.ack 帧（Manager → Gateway）。"""
+    payload: dict[str, Any] = {
+        "status": "ok",
+        "jiuwenclaw_id": str(jiuwenclaw_id or "").strip(),
+    }
+    if seq is not None:
+        payload["seq"] = seq
+    return {"type": FRAME_TYPE_HEARTBEAT_ACK, "payload": payload}
 
 
 def build_config_ack(
     *,
     revision: str,
-    ok: bool = True,
-    error: str | None = None,
+    success_flag: bool = True,
+    error_message: str | None = None,
     result: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    payload: dict[str, Any] = {"revision": revision, "ok": ok}
-    if error:
-        payload["error"] = error
+    payload: dict[str, Any] = {"revision": revision, "success_flag": success_flag}
+    if error_message:
+        payload["error_message"] = error_message
     if result:
         payload["result"] = result
     return {"type": FRAME_TYPE_CONFIG_ACK, "payload": payload}
