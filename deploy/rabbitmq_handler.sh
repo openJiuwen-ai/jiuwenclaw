@@ -4,7 +4,7 @@ set -euo >/dev/null 2>&1
 process_rabbitmq_vars() {
     DEPLOY_VARS["RABBITMQ_USER"]=$(echo -n "${DEPLOY_VARS["RABBITMQ_USER"]}" | base64)
     DEPLOY_VARS["RABBITMQ_PASSWORD"]=$(echo -n "${DEPLOY_VARS["RABBITMQ_PASSWORD"]}" | base64)
-    find_available_port "RABBITMQ_AMQ_NODE_PORT" "RABBITMQ_MGR_NODE_PORT"
+    ensure_available_port "RABBITMQ_AMQ_NODE_PORT" "RABBITMQ_MGR_NODE_PORT"
 }
 
 deploy_rabbitmq() {

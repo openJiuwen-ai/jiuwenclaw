@@ -6,7 +6,7 @@ deploy_postgresql() {
     local template_file="${CONFIG["POSTGRES_TEMPLATE_FILE"]}"
     local file="${CONFIG["POSTGRES_FILE"]}"
 
-    find_available_port "POSTGRES_NODE_PORT"
+    ensure_available_port "POSTGRES_NODE_PORT"
     render_config_template "${template_file}" "${file}" "DEPLOY_VARS"
     exec_cmd kubectl apply -f ${file}
     wait_k8s_resource_ready "statefulset" "${pg_name}"

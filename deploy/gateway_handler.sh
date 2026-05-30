@@ -102,6 +102,12 @@ create_gateway_env_configmap() {
         return
     fi
 
+    if [ "${mode}" == "dev" ]; then
+        DEPLOY_VARS["AGENT_SERVER_NFS_MOUNT_PATH"]="/root/.jiuwenclaw"
+    else
+        DEPLOY_VARS["AGENT_SERVER_NFS_MOUNT_PATH"]="/home/app/.jiuwenclaw"
+    fi
+
     render_config_template "${env_template_file}" "${env_file}" "DEPLOY_VARS"
     exec_cmd kubectl create configmap -n ${namespace} ${env_name} --from-env-file=${env_file}
 }
@@ -122,7 +128,9 @@ deploy_gateway() {
     create_gateway_env_configmap
 
     # start gateway
-    find_available_port "GATEWAY_NODE_PORT"
+
+    ensure_available_port "GATEWAY_NODE_PORT"
+    
     gen_gateway_file
     exec_cmd kubectl apply -f ${gateway_file}
     wait_k8s_resource_ready "deployment" "${name}" "${namespace}"

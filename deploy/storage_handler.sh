@@ -27,8 +27,8 @@ uninstall_pv_pvc() {
 deploy_nfs() {
     local nfs_path=${DEPLOY_VARS["NFS_HOST_PATH"]}
     local nfs_dname=${DEPLOY_VARS["NFS_NAME"]}
-    local template_file=${DEPLOY_VARS["NFS_TEMPLATE_FILE"]}
-    local file=${DEPLOY_VARS["NFS_FILE"]}
+    local template_file=${CONFIG["NFS_TEMPLATE_FILE"]}
+    local file=${CONFIG["NFS_FILE"]}
 
     render_config_template ${template_file} ${file} "DEPLOY_VARS"
     exec_cmd mkdir -p ${nfs_path}

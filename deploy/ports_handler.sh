@@ -37,14 +37,27 @@ is_port_occupied() {
 }
 
 # =========== Allocate multiple available ports at once ==============
-# Usage: find_available_port "PORT_NAME_1" ["PORT_NAME_2" ...]
-# Finds and assigns an available port for each provided port name
-find_available_port() {
+# Usage: ensure_available_port "PORT_NAME_1" ["PORT_NAME_2" ...]
+# Function:
+#   1. If port is already configured in DEPLOY_VARS, check if it's available
+#   2. If no port configured, auto-allocate from START_PORT ~ END_PORT
+ensure_available_port() {
     local start_port=${CONFIG["START_PORT"]}
     local end_port=${CONFIG["END_PORT"]}
 
     # Iterate over all passed port name arguments
     for port_name in "$@"; do
+        # If port is already set in config, validate it
+        if [ -n "${DEPLOY_VARS["${port_name}"]:-}" ]; then
+            local port=${DEPLOY_VARS["${port_name}"]}
+            if is_port_occupied "${port}"; then
+                error "[${port_name}] Port ${port} is occupied, please choose another one."
+            fi
+            info "Using pre-configured port ${port} for ${port_name}"
+            continue
+        fi
+
+        # Auto allocate available port from range
         for port in $(seq "$start_port" "$end_port"); do
             if ! is_port_occupied "$port"; then
                 DEPLOY_VARS["${port_name}"]="$port"

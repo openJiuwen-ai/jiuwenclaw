@@ -7,7 +7,7 @@ deploy_manager() {
     local template_file="${CONFIG["MANAGER_TEMPLATE_FILE"]}"
     local file="${CONFIG["MANAGER_FILE"]}"
 
-    find_available_port "MANAGER_NODE_PORT"
+    ensure_available_port "MANAGER_NODE_PORT"
     render_config_template "${template_file}" "${file}" "DEPLOY_VARS"
     enable_dev_mode_if_needed ${file}
     exec_cmd kubectl apply -f ${file}
