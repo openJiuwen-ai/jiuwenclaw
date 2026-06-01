@@ -78,6 +78,9 @@ _ALWAYS_EXCLUDED_PATH_PATTERNS = [
     re.compile(r'[/\\]\.jiuwenclaw[/\\]', re.IGNORECASE),
     re.compile(r'^\./[^/\\]+[/\\]SKILL\.md$', re.IGNORECASE),  # skill 子目录引用
     re.compile(r'^\./[^/\\]+[/\\]AGENT\.md$', re.IGNORECASE),  # skill 子目录引用
+    # bash/powershell 大输出落盘目录（供模型查阅，非用户产物）
+    re.compile(r'[/\\][^/\\]*bash_outputs[/\\]', re.IGNORECASE),
+    re.compile(r'[/\\][^/\\]*powershell_outputs[/\\]', re.IGNORECASE),
 ]
 
 _STRUCTURED_PATH_FIELD_KEYWORDS = frozenset({
@@ -161,6 +164,7 @@ def _extract_artifact_paths_from_tool_result(
     tool_start_time: float | None = None,
     *,
     scan_body_text: bool = False,
+    skip_mtime_check: bool = False,
 ) -> list[dict[str, Any]]:
     """从工具输出结果中提取文件路径并验证是否为有效的工件。
     
@@ -215,7 +219,12 @@ def _extract_artifact_paths_from_tool_result(
             if _is_excluded_path(p):
                 continue
 
-            artifact = _validate_and_build_artifact(p, workspace_base, tool_start_time=tool_start_time)
+            artifact = _validate_and_build_artifact(
+                p,
+                workspace_base,
+                tool_start_time=tool_start_time,
+                skip_mtime_check=skip_mtime_check,
+            )
             if not artifact:
                 continue
 
@@ -274,7 +283,12 @@ def _extract_artifact_paths_from_tool_result(
             if _is_excluded_path(cleaned_path):
                 continue
 
-            artifact = _validate_and_build_artifact(cleaned_path, workspace_base, tool_start_time=tool_start_time)
+            artifact = _validate_and_build_artifact(
+                cleaned_path,
+                workspace_base,
+                tool_start_time=tool_start_time,
+                skip_mtime_check=skip_mtime_check,
+            )
             if not artifact:
                 continue
 
@@ -295,6 +309,8 @@ def _validate_and_build_artifact(
     path_str: str,
     workspace_base: str | Path | None = None,
     tool_start_time: float | None = None,
+    *,
+    skip_mtime_check: bool = False,
 ) -> dict[str, Any] | None:
     """验证路径并构建工件信息字典。
     
@@ -358,7 +374,7 @@ def _validate_and_build_artifact(
                 stat_result = target_path.stat()
                 
                 # 时间戳校验逻辑
-                if tool_start_time is not None:
+                if (not skip_mtime_check) and tool_start_time is not None:
                     if stat_result.st_mtime < (tool_start_time - _ARTIFACT_MTIME_BUFFER):
                         return None
                 
@@ -383,6 +399,35 @@ def _validate_and_build_artifact(
         "size": size,
         "exists": exists,
     }
+
+
+def _build_artifacts_from_explicit_paths(
+    paths: list[str],
+    workspace_base: str | Path | None = None,
+    tool_start_time: float | None = None,
+    *,
+    skip_mtime_check: bool = False,
+) -> list[dict[str, Any]]:
+    """Build artifact dicts from explicit paths (used by send_file tool_args detection)."""
+    artifacts: list[dict[str, Any]] = []
+    seen_paths: set[str] = set()
+    for path_str in paths:
+        if not path_str:
+            continue
+        artifact = _validate_and_build_artifact(
+            path_str,
+            workspace_base,
+            tool_start_time=tool_start_time,
+            skip_mtime_check=skip_mtime_check,
+        )
+        if not artifact or not artifact.get("exists"):
+            continue
+        identity = _path_identity(artifact.get("path", path_str))
+        if identity in seen_paths:
+            continue
+        seen_paths.add(identity)
+        artifacts.append(artifact)
+    return artifacts
 
 
 _ACTIVE_TASK_ID: ContextVar[str | None] = ContextVar("active_task_id", default=None)
@@ -559,6 +604,7 @@ class TaskExecutionRail(DeepAgentRail):
             workspace_base=self._get_workspace_base_path(),
             tool_start_time=getattr(ctx, '_tool_start_time', None),
             task_id=self.get_current_task_id() or get_current_task_id(),
+            tool_args=ctx.inputs.tool_args,
             log_prefix="[ArtifactEmitter]",
         )
         logger.info(
