@@ -31,6 +31,15 @@ from jiuwenclaw.config import get_file_transfer_config
 logger = logging.getLogger(__name__)
 
 
+def _append_sent_file_paths(result_parts: list[str], sent_paths: list[str]) -> None:
+    """Append absolute paths for artifact detection (plain str tool_result)."""
+    if not sent_paths:
+        return
+    result_parts.append("已发送文件路径：")
+    for file_path in sent_paths:
+        result_parts.append(f"  - {file_path}")
+
+
 def _build_files_payload(valid_files: list[str]) -> list[dict[str, str]]:
     return [
         {
@@ -198,6 +207,7 @@ class SendFileToolkit:
         try:
             await self._emit_chat_file(valid_files)
             result_parts = [f"成功发送 {len(valid_files)} 个文件"]
+            _append_sent_file_paths(result_parts, valid_files)
             if missing_files:
                 result_parts.append("以下文件不存在，未发送：")
                 for mf in missing_files:
@@ -229,6 +239,7 @@ class SendFileToolkit:
         results = []
         success_count = 0
         failed_files = []
+        sent_paths: list[str] = []
 
         for file_path in valid_files:
             try:
@@ -261,6 +272,7 @@ class SendFileToolkit:
 
                 if result.get("success"):
                     success_count += 1
+                    sent_paths.append(file_path)
                     logger.info(
                         "[SendFileToolkit] 分布式发送成功: file=%s transfer_id=%s",
                         file_path,
@@ -291,6 +303,7 @@ class SendFileToolkit:
         result_parts = []
         if success_count > 0:
             result_parts.append(f"成功发送 {success_count} 个文件")
+            _append_sent_file_paths(result_parts, sent_paths)
         if failed_files:
             result_parts.append(f"发送失败 {len(failed_files)} 个文件：")
             for ff in failed_files:

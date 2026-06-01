@@ -223,6 +223,7 @@ class SubagentContextRail(DeepAgentRail):
             tool_start_time=getattr(ctx, '_tool_start_time', None),
             task_id=self._subagent_id or get_global_task_id(),
             subagent_id=self._subagent_id,
+            tool_args=ctx.inputs.tool_args,
             log_prefix="[SubagentArtifact]",
         )
         logger.info(
