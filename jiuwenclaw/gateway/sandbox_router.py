@@ -686,6 +686,26 @@ class SandboxRouterAgentClient(AgentServerClient):
             return uid or None
         return None
 
+    @staticmethod
+    def _restored_session_ids(runtime: SandboxRuntime) -> set[str]:
+        restored_ids = runtime.metadata.get("restored_session_ids")
+        if not isinstance(restored_ids, set):
+            restored_ids = set()
+            runtime.metadata["restored_session_ids"] = restored_ids
+        return restored_ids
+
+    @staticmethod
+    def _workspace_restore_lock(runtime: SandboxRuntime, session_id: str) -> asyncio.Lock:
+        locks = runtime.metadata.get("workspace_restore_locks")
+        if not isinstance(locks, dict):
+            locks = {}
+            runtime.metadata["workspace_restore_locks"] = locks
+        lock = locks.get(session_id)
+        if lock is None:
+            lock = asyncio.Lock()
+            locks[session_id] = lock
+        return lock
+
     def _track_session_for_runtime(
         self,
         runtime: SandboxRuntime,
@@ -717,90 +737,92 @@ class SandboxRouterAgentClient(AgentServerClient):
         session_id = str(envelope.session_id or "").strip()
         if not session_id or session_id == "batch":
             return
-        restored_ids = runtime.metadata.get("restored_session_ids")
-        if not isinstance(restored_ids, set):
-            restored_ids = set()
-            runtime.metadata["restored_session_ids"] = restored_ids
-        if session_id in restored_ids:
+        if session_id in self._restored_session_ids(runtime):
             return
 
-        record = await self._get_workspace_dcs_store().get_workspace(session_id)
-        if record is None:
-            return
+        lock = self._workspace_restore_lock(runtime, session_id)
+        async with lock:
+            restored_ids = self._restored_session_ids(runtime)
+            if session_id in restored_ids:
+                return
 
-        user_id = str(envelope.user_id or runtime.metadata.get("user_id") or "").strip()
-        if not user_id:
-            user_id = self._user_id_from_routing_key(runtime.routing_key) or ""
+            record = await self._get_workspace_dcs_store().get_workspace(session_id)
+            if record is None:
+                return
 
-        request_id = (
-            f"sandbox-restore-{int(time.time() * 1000):x}-{secrets.token_hex(3)}"
-        )
-        query_url_obs = _create_query_url_obs()
-        latest_url = await query_url_obs.get_latest_obs_url(record.url)
-        restore_env = e2a_from_agent_fields(
-            request_id=request_id,
-            channel_id=str(envelope.channel or "") or _VIBESKILL_CHANNEL_ID,
-            session_id=session_id,
-            user_id=user_id or None,
-            req_method=ReqMethod.SKILLDEV_BATCH_DOWNLOAD,
-            params={
-                "items": [
-                    {
-                        "sessionID": session_id,
-                        "url": latest_url,
-                        "name": record.name,
-                    }
-                ]
-            },
-            is_stream=False,
-            timestamp=time.time(),
-        )
-        try:
-            resp = await runtime.agent_client.send_request(restore_env)
-        except Exception:  # noqa: BLE001
-            logger.exception(
-                "Workspace restore request failed: session_id=%s sandbox_id=%s",
-                session_id,
-                runtime.sandbox_id,
+            user_id = str(envelope.user_id or runtime.metadata.get("user_id") or "").strip()
+            if not user_id:
+                user_id = self._user_id_from_routing_key(runtime.routing_key) or ""
+
+            request_id = (
+                f"sandbox-restore-{int(time.time() * 1000):x}-{secrets.token_hex(3)}"
             )
-            return
-
-        if not resp.ok:
-            payload = resp.payload if isinstance(resp.payload, dict) else {}
-            logger.warning(
-                "Workspace restore failed: session_id=%s error=%s",
-                session_id,
-                payload.get("error"),
+            query_url_obs = _create_query_url_obs()
+            latest_url = await query_url_obs.get_latest_obs_url(record.url)
+            restore_env = e2a_from_agent_fields(
+                request_id=request_id,
+                channel_id=str(envelope.channel or "") or _VIBESKILL_CHANNEL_ID,
+                session_id=session_id,
+                user_id=user_id or None,
+                req_method=ReqMethod.SKILLDEV_BATCH_DOWNLOAD,
+                params={
+                    "items": [
+                        {
+                            "sessionID": session_id,
+                            "url": latest_url,
+                            "name": record.name,
+                        }
+                    ]
+                },
+                is_stream=False,
+                timestamp=time.time(),
             )
-            return
-
-        payload = resp.payload if isinstance(resp.payload, dict) else {}
-        results = payload.get("results")
-        if not isinstance(results, list):
-            logger.warning(
-                "Workspace restore returned no results: session_id=%s",
-                session_id,
-            )
-            return
-        for item in results:
-            if not isinstance(item, dict):
-                continue
-            sid = str(item.get("sessionID") or item.get("session_id") or "").strip()
-            if sid != session_id:
-                continue
-            if str(item.get("status") or "").strip().lower() == "success":
-                restored_ids.add(session_id)
-                logger.info(
-                    "Workspace restored from DCS: session_id=%s sandbox_id=%s",
+            try:
+                resp = await runtime.agent_client.send_request(restore_env)
+            except Exception:  # noqa: BLE001
+                logger.exception(
+                    "Workspace restore request failed: session_id=%s sandbox_id=%s",
                     session_id,
                     runtime.sandbox_id,
                 )
                 return
-        logger.warning(
-            "Workspace restore did not succeed for session_id=%s results=%s",
-            session_id,
-            results,
-        )
+
+            if not resp.ok:
+                payload = resp.payload if isinstance(resp.payload, dict) else {}
+                logger.warning(
+                    "Workspace restore failed: session_id=%s error=%s",
+                    session_id,
+                    payload.get("error"),
+                )
+                return
+
+            payload = resp.payload if isinstance(resp.payload, dict) else {}
+            results = payload.get("results")
+            if not isinstance(results, list):
+                logger.warning(
+                    "Workspace restore returned no results: session_id=%s",
+                    session_id,
+                )
+                return
+            for item in results:
+                if not isinstance(item, dict):
+                    continue
+                sid = str(item.get("sessionID") or item.get("session_id") or "").strip()
+                if sid != session_id:
+                    continue
+                if str(item.get("status") or "").strip().lower() == "success":
+                    restored_ids.add(session_id)
+                    logger.info(
+                        "Workspace restored from DCS: session_id=%s sandbox_id=%s",
+                        session_id,
+                        runtime.sandbox_id,
+                    )
+                    return
+            logger.warning(
+                "Workspace restore did not succeed for session_id=%s results=%s",
+                session_id,
+                results,
+            )
 
     async def _backup_workspaces_before_terminate(self, runtime: SandboxRuntime) -> None:
         raw_session_ids = runtime.metadata.get("session_ids")
