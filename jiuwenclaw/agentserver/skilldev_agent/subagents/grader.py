@@ -299,6 +299,6 @@ def build_grader_config(
         system_prompt=SYSTEM_PROMPT_CN if is_cn else SYSTEM_PROMPT_EN,
         tools=tools,
         model=model,
-        max_iterations=15,
+        max_iterations=30,
         language=language,
     )

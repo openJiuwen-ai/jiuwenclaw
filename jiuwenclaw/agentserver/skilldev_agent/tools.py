@@ -156,7 +156,8 @@ def build_skilldev_tools(
             WebFetchTool(language=language, agent_id=agent_id),
             get_ask_user_question_tool(),
             get_exec_tool(),
+            get_invoke_tool(),
+            spawn_subagent
         ]
     )
-    tools.extend([get_invoke_tool(), spawn_subagent])
     return tools

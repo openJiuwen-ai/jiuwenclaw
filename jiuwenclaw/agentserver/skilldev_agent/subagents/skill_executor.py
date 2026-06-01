@@ -21,14 +21,11 @@ from openjiuwen.harness.tools.filesystem import (
     ReadFileTool,
     WriteFileTool,
 )
-from openjiuwen.harness.tools.web_tools import WebPaidSearchTool
-from jiuwenclaw.agentserver.tools.harness_named_web_tools import (
-    JiuwenHarnessFetchWebpageTool,
-    JiuwenHarnessFreeSearchTool,
-)
 from jiuwenclaw.agentserver.skilldev_agent.meta_tools.invoke_tool import (
     get_invoke_tool,
 )
+from jiuwenclaw.agentserver.skilldev_agent.meta_tools.exec_tool import get_exec_tool
+from jiuwenclaw.agentserver.skilldev_agent.tools import WebSearchTool, WebFetchTool
 
 
 DESCRIPTION_CN = (
@@ -214,15 +211,15 @@ def _build_executor_tools(
         ]
         tools = [cls(sys_operation, language=language) for cls in tool_classes]
 
-    # Pass ToolCards (not Tool instances) for web tools to reuse the parent's
-    # already-registered instances and avoid "Tool id already registered" conflicts.
+    # Pass ToolCards (not Tool instances) to reuse the parent's already-registered
+    # instances in Runner.resource_mgr, avoiding "Tool id already registered" conflicts.
+    # IMPORTANT: use the same wrapper classes (WebSearchTool/WebFetchTool) as the
+    # parent agent (tools.py) so that the ToolCard.id matches the registered Tool.
     tools.extend([
-        JiuwenHarnessFreeSearchTool(language=language, agent_id=agent_id).card,
-        WebPaidSearchTool(language=language, agent_id=agent_id).card,
-        JiuwenHarnessFetchWebpageTool(language=language, agent_id=agent_id).card,
-        # Reuse parent's registered tool implementation to avoid
-        # "Tool id already registered" conflicts.
+        WebSearchTool(language=language, agent_id=agent_id).card,
+        WebFetchTool(language=language, agent_id=agent_id).card,
         get_invoke_tool().card,
+        get_exec_tool().card,
     ])
     return tools
 
@@ -255,6 +252,6 @@ def build_skill_executor_config(
         system_prompt=SYSTEM_PROMPT_CN if is_cn else SYSTEM_PROMPT_EN,
         tools=tools,
         model=model,
-        max_iterations=30,
+        max_iterations=50,
         language=language,
     )
