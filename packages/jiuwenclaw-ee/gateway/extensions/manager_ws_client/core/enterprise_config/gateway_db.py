@@ -105,9 +105,9 @@ class GatewayDb(Database):
 
         try:
             handler = await self.ensure_ready(log_prefix="enterprise_config")
-            rows = await handler.list_records(table, query, limit=10_000, offset=0)
+            rows = await handler.list_records(table, query, limit=10_000, offset=0, order_by=order_by)
             result = [_row_to_dict(r) for r in rows]
-            return _sort_by_order(result, order_by) if order_by else result
+            return result
         except Exception as exc:
             logger.warning("[enterprise_config] query %s failed: %s", table, exc)
             return []
@@ -149,35 +149,5 @@ def _row_to_dict(row: Any) -> dict[str, Any]:
         elif hasattr(value, "to_dict") and callable(getattr(value, "to_dict")):
             out[key] = value.to_dict()
     return out
-
-
-def _sort_by_order(rows: list[dict[str, Any]], order_by: str) -> list[dict[str, Any]]:
-    """支持 ``priority DESC`` / ``priority ASC`` 或 ``-priority``。"""
-    text = order_by.strip()
-    if not text:
-        return rows
-
-    parts = text.split(None, 1)
-    field = parts[0].strip()
-    reverse = False
-    if len(parts) > 1:
-        reverse = parts[1].strip().upper() == "DESC"
-    elif field.startswith("-"):
-        reverse = True
-        field = field[1:].strip()
-    if not field:
-        return rows
-
-    def _key(row: dict[str, Any]) -> Any:
-        value = row.get(field)
-        if value is None:
-            return 0
-        try:
-            return int(value)
-        except (TypeError, ValueError):
-            return value
-
-    return sorted(rows, key=_key, reverse=reverse)
-
 
 __all__ = ("GatewayDb",)
