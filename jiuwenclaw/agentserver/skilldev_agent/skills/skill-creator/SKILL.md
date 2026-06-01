@@ -9,27 +9,29 @@ A skill for creating new skills and iteratively improving them.
 
 The default flow:
 
-1. **Talk to the user first** - understand what they want before writing anything.
-2. **Write or update the skill files** - keep the skill focused, safe, and consistent with the workspace.
-3. **Package the skill** - always execute once the skill files are ready.
+1. **Talk to the user first** — understand what they want before writing anything.
+2. **Write or update the skill files** — keep the skill focused, safe, and consistent with the workspace.
+3. **Run the verification gate** — always run once the skill files are ready (see Step 3).
 
-Optional branches:
+Optional branches (run between Step 2 and the final gate):
 
 - **Evaluations are opt-in only.** If the user explicitly asks to test, evaluate, benchmark, compare, or iterate using eval results, read `references/evaluation.md` and follow it exactly.
-- **Description optimization is opt-in only.** If the user explicitly asks to optimize the skill description or improve triggering accuracy, read `references/description-optimization.md` and follow it exactly.
-- If an optional branch changes the skill files, package the skill again before ending.
+- **Description optimization is opt-in only.** If the user explicitly asks to optimize the skill description or improve triggering accuracy, read `references/description-optimization.md` and follow it exactly. Description candidates must obey the description limits defined above in "Frontmatter — hard constraints".
+- **Order when both are requested:** evaluation first (stabilizes behavior), then description optimization (describes final behavior).
+- After all optional branches complete, run the **full verification gate** once as the final step.
 
 Your TODO plan should mirror the active workflow:
 
-- Default work: capture intent, write or update skill files, package.
+- Default work: capture intent, write or update skill files, run verification gate.
 - Add evaluation tasks only when the user explicitly requested evals or benchmark-style testing.
 - Add description-optimization tasks only when the user explicitly requested trigger or description optimization.
 
 **Hard rules — violating any of these is a bug:**
 1. Don't write before talking to the user.
 2. Don't ignore security red lines: no dangerous commands, hardcoded credentials, or path traversal in the skill body or scripts.
-3. Don't skip packaging.
+3. Don't skip the verification gate before delivering a skill.
 4. Don't write a Chinese or otherwise invalid value to the skill `name`, even if the user asks for it. Refuse that specific rename and offer a valid ASCII kebab-case alternative.
+5. Any file change after a passed gate **invalidates** it — you must re-run the full gate before delivering again.
 
 ---
 
@@ -120,28 +122,44 @@ Device-side skills must not generate `scripts/` by default. If a script is genui
 
 ---
 
-## Step 3: Packaging
+## Step 3: Verification gate
 
-Run Bash:
+Run the **full gate** from the `skill-verifier` skill. It short-circuits: if local validation fails, it returns immediately without packaging, uploading, or scanning.
 
 ```bash
-cd "<skill-creator-dir>" && python3 -m scripts.package_skill <workspace>/skill/<skill-name> <workspace>/output
+cd "<skill-verifier-dir>" && python3 -m scripts.gate <workspace>
 ```
 
-If a declared dependency source file is missing, packaging fails. Fix the metadata or source JSON instead of inventing replacement files.
+The gate pipeline: `validate → package (with dependency references) → upload → safety_scan`.
+
+- If validate fails: fix the reported issue and re-run the gate.
+- If safety_scan fails: fix the flagged content and re-run the gate.
+- If a declared dependency source file is missing, packaging fails. Fix the metadata or source JSON instead of inventing replacement files.
+
+For **rapid iteration** (fixing validate failures), you can run validate-only to avoid the expensive upload + scan cycle:
+
+```bash
+cd "<skill-verifier-dir>" && python3 -m scripts.validate <workspace>
+```
+
+Once validate passes consistently, run the full gate to get the final packaged + scanned deliverable.
 
 If you have access to `present_files`, also present the packaged output from the workspace `output/` folder.
 
-Self-check before ending the conversation: did `scripts/package_skill.py` run? If not, run it now.
+Self-check before ending the conversation: did the full gate pass? If not, run it now.
 
 ---
 
 ## Optional Workflows
 
-- `references/evaluation.md` - full opt-in evaluation and benchmark process.
-- `references/description-optimization.md` - full opt-in description optimization process.
-- `references/schemas.md` - JSON schemas for evals.json, grading.json, etc.
+- `references/evaluation.md` — full opt-in evaluation and benchmark process.
+- `references/description-optimization.md` — full opt-in description optimization process.
+- `references/schemas.md` — JSON schemas for evals.json, grading.json, etc.
 
-If the user explicitly requested evals, run the evaluation workflow after drafting and before final packaging. If eval-driven iteration changes files, repeat evaluation steps as needed and package after the last change.
+**Integration with the verification gate:**
 
-If the user explicitly requested description optimization, run the description-optimization workflow after the skill draft is coherent and before final packaging. Package after any description change.
+- Do not run the full gate during evaluation or description-optimization iterations — run it **once** after all optional branches finish.
+- During description optimization, never run the gate while the description is temporarily patched (teardown window). Wait until teardown completes and the winning description is applied.
+- Description optimization candidates must obey the description limits defined in "Frontmatter — hard constraints" above.
+- **Order when both are requested:** evaluation first (stabilizes skill behavior), then description optimization (describes final behavior).
+- After all optional branches finish, run the **full verification gate exactly once** as the final step before delivery.

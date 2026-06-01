@@ -601,21 +601,30 @@ class SkillDevDeepAdapter:
 
         await self.update_workspace(task_workspace)
         import_url = extract_import_url(params)
-        import_url_block = (
-            f"导入包 url（风控校验必填，传给 safety_scan.py）：{import_url}\n"
-            if import_url
-            else "导入包 url：未提供（风控校验可能失败，请向用户说明）\n"
-        )
+        import_url_block = f"导入包 url（安全扫描用）：{import_url}\n"
         skill_name_hint = (
             f"当前 skill-name（SKILL.md frontmatter name）：{skill_name}\n"
             if skill_name
             else ""
         )
         combined_query = (
-            "请加载并执行内置技能 skill-standardizer，对当前工作区的已导入 skill 进行规范校验与风控校验，"
-            "并按 skill-standardizer/SKILL.md 工作流处理。\n"
+            "请使用 skill-verifier 技能对当前工作区的已导入 skill 进行规范校验与安全扫描。\n"
             f"{skill_name_hint}"
             f"{import_url_block}\n"
+            "## 执行步骤\n"
+            "1. 运行规范校验：cd \"<skill-verifier-dir>\" && python3 -m scripts.validate <workspace>\n"
+            "2. 运行安全扫描：cd \"<skill-verifier-dir>\" && python3 -m scripts.safety_scan <skill-name> <url>\n"
+            "3. 两项均通过 → 运行完整闸门打包：cd \"<skill-verifier-dir>\" && python3 -m scripts.gate <workspace>\n"
+            "4. 任一项不通过 → 按以下修复策略做最小改动修复后重新校验。\n\n"
+            "## 导入修复策略（非交互、最小改动）\n"
+            "- **首次校验不通过时，必须用 ask_user_question 询问用户是否需要修改；用户同意后再执行修复。此后的所有修复重试均不再询问用户。**\n"
+            "- 只做满足规范所必需的改动，不改变原 skill 核心用途与行为。\n"
+            "- name 须为合法 kebab-case 且与目录名一致。\n"
+            "- description 超长则压缩（中文 ≤512 字符且 ≤300 token，英文 ≤1024 字符且 ≤300 token）；不含尖括号。\n"
+            "- 正文 ≤500 行且 ≤5000 token；超长则拆到 references/ 并用相对路径引用。\n"
+            "- 修复后重新运行完整闸门（cd \"<skill-verifier-dir>\" && python3 -m scripts.gate <workspace>）。\n"
+            "- 安全扫描失败时直接重试修复（不询问用户），最多 2 次；超过后停止并告知用户最终失败原因。\n"
+            "- 禁止 spawn_subagent / fork_agent。\n\n"
             "用户原始请求：\n"
             f"{query}"
         )

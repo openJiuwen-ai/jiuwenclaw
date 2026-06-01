@@ -1,1 +1,0 @@
-# skill-standardizer scripts package

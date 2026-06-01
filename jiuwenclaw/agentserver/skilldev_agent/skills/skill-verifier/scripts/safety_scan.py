@@ -42,7 +42,6 @@ def get_requests():
 
 
 def _post_request(skill_id, payload, sandbox_id="rytest", trace_id="rytest001"):
-    """发送 POST 请求到扫描服务，统一处理异常。"""
     req = get_requests()
     headers = {
         **COMMON_HEADERS,
@@ -71,7 +70,6 @@ def _post_request(skill_id, payload, sandbox_id="rytest", trace_id="rytest001"):
 
 
 def _get_conclusion(raw_result):
-    """从扫描结果中提取 conclusion 字段。"""
     if not isinstance(raw_result, dict):
         return None
     if "conclusion" in raw_result:
@@ -83,7 +81,6 @@ def _get_conclusion(raw_result):
 
 
 def _format_failure(raw_result):
-    """格式化失败原因，支持超时和扫描失败两种场景。"""
     if not isinstance(raw_result, dict):
         return json.dumps(raw_result, indent=2, ensure_ascii=False)
 
@@ -127,7 +124,7 @@ def _format_failure(raw_result):
 
 
 def scan_url(skill_name, url, max_attempts=10, interval=2):
-    """完整扫描流程：提交任务 -> 轮询状态 -> 返回结果。"""
+    """Submit scan task, poll for status, return result dict."""
     req_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
 
     try:
@@ -177,7 +174,6 @@ def scan_url(skill_name, url, max_attempts=10, interval=2):
 
 
 def main(argv):
-    """CLI 入口：解析参数，执行扫描，输出结果。"""
     if len(argv) != 3:
         print("Safety scan failed:")
         print("Usage: python3 -m scripts.safety_scan <skill-name> <url>")

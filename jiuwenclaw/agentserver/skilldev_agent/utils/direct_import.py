@@ -25,12 +25,12 @@ from jiuwenclaw.agentserver.skilldev.utils.skill_description_fix import (
 
 logger = logging.getLogger(__name__)
 
-SKILL_NAME_PATTERN = re.compile(r"^[a-zA-Z0-9_-]{1,64}$")
+SKILL_NAME_PATTERN = re.compile(r"^[a-z0-9-]{1,64}$")
 DESCRIPTION_MAX_TOKENS = 300
 BODY_MAX_TOKENS = 5000
 BODY_MAX_LINES = 500
-DESCRIPTION_MAX_CHARS_CJK = 256
-DESCRIPTION_MAX_CHARS_EN = 512
+DESCRIPTION_MAX_CHARS_CJK = 512
+DESCRIPTION_MAX_CHARS_EN = 1024
 
 EXCLUDE_DIRS = {"__pycache__", "node_modules"}
 EXCLUDE_GLOBS = {"*.pyc", "*.swp"}
@@ -39,7 +39,7 @@ ROOT_EXCLUDE_DIRS = {"evals", "output"}
 
 
 def extract_import_url(params: dict[str, Any]) -> str | None:
-    """从 directImport 的 skill 包条目中提取 url（files / skill_packages，用于风控校验）。"""
+    """从 directImport 的 skill 包条目中提取 url（files / skill_packages，用于安全扫描）。"""
 
     def _url_from_package(item: dict[str, Any]) -> str | None:
         name = str(item.get("filename") or item.get("name") or "").strip()
@@ -147,7 +147,7 @@ def validate_direct_import_skill(skill_root: Path) -> tuple[bool, str]:
     else:
         if not SKILL_NAME_PATTERN.match(name):
             errors.append(
-                f"skill-name '{name}' 不符合规范：仅允许 [a-zA-Z0-9_-]，长度 1-64"
+                f"skill-name '{name}' 不符合规范：仅允许小写字母、数字、连字符 [a-z0-9-]，长度 1-64"
             )
         if name.startswith("-") or name.endswith("-") or "--" in name:
             errors.append(
@@ -193,18 +193,19 @@ def validate_direct_import_skill(skill_root: Path) -> tuple[bool, str]:
 
 
 def build_direct_import_fix_query(user_query: str, validation_message: str) -> str:
-    """校验未通过时，触发 skill-standardizer 规范化、校验并打包。"""
+    """校验未通过时，引导 Agent 做最小改动修复并通过 skill-verifier 闸门。"""
     return (
-        "请立即加载并执行内置技能 skill-standardizer，对 skill/ 下的已上传 skill 做规范化修改，"
-        "然后运行校验与打包脚本输出到 output/。不要询问用户。\n\n"
+        "请对 skill/ 下的已上传 skill 做**最小改动**规范化修改（保持原 skill 核心语义不变），"
+        "然后通过 skill-verifier 闸门脚本完成校验与打包。不要询问用户。\n\n"
         "## directImport 校验未通过\n"
         f"{validation_message}\n\n"
-        "规范：skill-name 匹配 [a-zA-Z0-9_-]{1,64}，不以 '-' 开头/结尾，不含连续 '--'，"
-        "与 SKILL.md 所在目录名一致；description 中文 ≤256 字且 ≤300 token、"
-        "英文 ≤512 字且 ≤300 token；正文 ≤500 行且 ≤5000 token。\n\n"
-        "完成修改后请依次运行：\n"
-        "- python -m scripts.validate <workspace>\n"
-        "- python -m scripts.package <workspace>"
+        "## 修改原则\n"
+        "- 最小改动：只做满足规范所必需的修改，不改变原 skill 用途与行为。\n"
+        "- name 须为合法 kebab-case 且与目录名一致。\n"
+        "- description 超长则压缩（中文 ≤512 字符且 ≤300 token，英文 ≤1024 字符且 ≤300 token）；不含尖括号。\n"
+        "- 正文 ≤500 行且 ≤5000 token；超长则拆到 references/ 并用相对路径引用。\n\n"
+        "完成修改后运行完整闸门：\n"
+        '- cd "<skill-verifier-dir>" && python3 -m scripts.gate <workspace>'
     )
 
 

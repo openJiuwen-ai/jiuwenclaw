@@ -6,7 +6,6 @@ import logging
 import os
 import sys
 import time
-import uuid
 
 import aiohttp
 import requests
@@ -150,7 +149,7 @@ async def _invoking_osms_complete_and_query(file_info: dict, use_edge: bool = Fa
 
 
 async def upload_file(file_path: str) -> str | None:
-    """上传文件到 OBS 并返回 CDN URL，失败返回 None。"""
+    """Upload file to OBS and return CDN URL; None on failure."""
     if not file_path:
         logger.error("文件路径为空，无法上传")
         return None
