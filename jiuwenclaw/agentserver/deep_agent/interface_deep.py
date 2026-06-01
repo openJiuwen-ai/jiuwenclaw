@@ -101,6 +101,19 @@ from jiuwenclaw.agentserver.deep_agent.interrupt.interrupt_helpers import (
     build_permission_rail,
     convert_interactions_to_ask_user_question,
 )
+from jiuwenclaw.agentserver.deep_agent.plan_pause_helpers import (
+    build_paused_plan_decision_prompt_from_session_snapshot,
+    cancel_todos_via_modify_tool,
+    clear_plan_pause_on_session,
+    clear_task_plan_on_state,
+    merge_supplementary_into_request_params,
+    snapshot_and_isolate_unfinished_todos,
+    persist_checkpoint_for_session,
+    post_agent_execute_for_session,
+    read_plan_pause_from_session,
+    repair_task_plan_after_pause,
+    write_plan_pause_to_session,
+)
 from jiuwenclaw.agentserver.deep_agent.prompt_builder import build_identity_prompt
 from jiuwenclaw.agentserver.deep_agent.rails import (
     JiuClawContextEngineeringRail,
@@ -3495,7 +3508,18 @@ class JiuWenClawDeepAdapter:
             message = "任务已切换"
 
         else:
-            # cancel（默认）：停止所有执行 + 清理 todo
+            # cancel（默认）：停止所有执行
+            session_id = str(request.session_id or "").strip()
+            is_plan_mode = self._task_planning_rail is not None
+
+            # plan 模式：abort 前落盘，保留 cancel 前 tool/assistant 上下文
+            if is_plan_mode and session_id and self._instance is not None:
+                await persist_checkpoint_for_session(
+                    self._instance,
+                    session_id,
+                    card=self._instance.card,
+                )
+
             # 1. 通过 rail abort 在 checkpoint 抛 CancelledError，打断当前内层执行
             if self._stream_event_rail is not None:
                 self._stream_event_rail.abort()
@@ -3514,13 +3538,16 @@ class JiuWenClawDeepAdapter:
                 request.session_id,
                 reason="interrupt(cancel)",
             )
-            # 5. 将未完成的 todo 项标记为 cancelled，并获取更新后的 todo 列表
+            # 5. plan：pause todo + repair task_plan + 持久化 plan_paused；其它模式标 cancelled
             updated_todos = None
-            if request.session_id:
+            if session_id:
                 try:
-                    updated_todos = await self._cancel_pending_todos(request.session_id)
+                    if is_plan_mode:
+                        updated_todos = await self._finalize_plan_pause_after_cancel(session_id)
+                    else:
+                        updated_todos = await self._cancel_pending_todos(session_id)
                 except Exception as exc:
-                    logger.warning("[JiuWenClawDeepAdapter] 标记 todo cancelled 失败: %s", exc)
+                    logger.warning("[JiuWenClawDeepAdapter] 处理 cancel 后 todo 失败: %s", exc)
 
             logger.info(
                 "[JiuWenClawDeepAdapter] interrupt(cancel): 已停止执行 request_id=%s",
@@ -4184,24 +4211,21 @@ class JiuWenClawDeepAdapter:
 
         return None
 
-    async def _cancel_pending_todos(self, session_id: str) -> list[dict] | None:
-        """将未完成的 todo 项标记为 cancelled.
-
-        Returns:
-            更新后的 todo 列表（前端格式），用于附加到 interrupt_result 事件通知前端刷新。
-            如果没有 todo 或操作失败，返回 None。
-        """
+    def _get_todo_modify_tool(self, session_id: str) -> TodoModifyTool | None:
+        """Return a session-scoped TodoModifyTool, or None if DeepAgent is unavailable."""
         if self._instance is None:
             return None
 
-        modify_tool = None
-        try:
-            tool_card = self._instance.ability_manager.get("todo_modify")
-            registered_tool = Runner.resource_mgr.get_tool(tool_card.id)
-            if registered_tool is not None:
-                modify_tool = registered_tool
-        except Exception:
-            pass
+        modify_tool: TodoModifyTool | None = None
+        ability_manager = getattr(self._instance, "ability_manager", None)
+        if ability_manager is not None:
+            try:
+                tool_card = ability_manager.get("todo_modify")
+                registered_tool = Runner.resource_mgr.get_tool(tool_card.id)
+                if registered_tool is not None:
+                    modify_tool = registered_tool
+            except Exception:
+                pass
 
         if modify_tool is None:
             deep_config = self._instance.deep_config
@@ -4212,6 +4236,106 @@ class JiuWenClawDeepAdapter:
             )
 
         modify_tool.set_file(session_id)
+        return modify_tool
+
+    async def _finalize_plan_pause_after_cancel(self, session_id: str) -> list[dict] | None:
+        """agent.plan cancel: snapshot todos, isolate unfinished from file, persist plan_paused."""
+        if self._instance is None:
+            return None
+
+        modify_tool = self._get_todo_modify_tool(session_id)
+        session = create_agent_session(session_id=session_id, card=self._instance.card)
+        await session.pre_run(inputs=None)
+        try:
+            snapshot: dict[str, Any] | None = None
+            if modify_tool is not None:
+                snapshot = await snapshot_and_isolate_unfinished_todos(modify_tool)
+
+            state = self._instance.load_state(session)
+            repair_task_plan_after_pause(state)
+            self._instance.save_state(session, state)
+            write_plan_pause_to_session(session, paused=True, snapshot=snapshot)
+            await post_agent_execute_for_session(session)
+
+            logger.info(
+                "[JiuWenClawDeepAdapter] plan pause persisted session=%s",
+                session_id,
+            )
+
+            if modify_tool is None:
+                return None
+            updated_todos = await modify_tool.load_todos()
+            if updated_todos and self._stream_event_rail is not None:
+                return self._stream_event_rail.format_todos_for_frontend(updated_todos)
+            return None
+        except Exception as exc:
+            logger.warning(
+                "[JiuWenClawDeepAdapter] finalize plan pause after cancel failed: %s",
+                exc,
+            )
+            return None
+        finally:
+            await session.post_run()
+
+    async def prepare_plan_pause_for_request(self, request: AgentRequest) -> None:
+        """On next agent.plan message after cancel: clear task_plan, inject decision prompt, clear flag."""
+        if self._instance is None:
+            return
+
+        session_id = str(request.session_id or "").strip()
+        if not session_id:
+            return
+
+        params = request.params if isinstance(getattr(request, "params", None), dict) else None
+        if params is None:
+            return
+
+        mode = str(params.get("mode", "agent.plan") or "agent.plan").strip()
+        if mode != "agent.plan":
+            return
+
+        session = create_agent_session(session_id=session_id, card=self._instance.card)
+        await session.pre_run(inputs=None)
+        try:
+            paused, snapshot = read_plan_pause_from_session(session)
+            if not paused:
+                return
+
+            state = self._instance.load_state(session)
+            if clear_task_plan_on_state(state):
+                self._instance.save_state(session, state)
+
+            decision = build_paused_plan_decision_prompt_from_session_snapshot(
+                self._resolve_runtime_language(),
+                snapshot,
+            )
+            merge_supplementary_into_request_params(params, decision)
+            clear_plan_pause_on_session(session)
+            await post_agent_execute_for_session(session)
+
+            logger.info(
+                "[JiuWenClawDeepAdapter] plan pause decision prompt injected session=%s",
+                session_id,
+            )
+        except Exception as exc:
+            logger.warning(
+                "[JiuWenClawDeepAdapter] prepare_plan_pause_for_request failed session_id=%s: %s",
+                session_id,
+                exc,
+            )
+        finally:
+            await session.post_run()
+
+    async def _cancel_pending_todos(self, session_id: str) -> list[dict] | None:
+        """将未完成的 todo 项标记为 cancelled.
+
+        Returns:
+            更新后的 todo 列表（前端格式），用于附加到 interrupt_result 事件通知前端刷新。
+            如果没有 todo 或操作失败，返回 None。
+        """
+        modify_tool = self._get_todo_modify_tool(session_id)
+        if modify_tool is None:
+            return None
 
         try:
             todos = await modify_tool.load_todos()
@@ -4229,7 +4353,7 @@ class JiuWenClawDeepAdapter:
                     ids_to_cancel.append(todo.id)
 
             if ids_to_cancel:
-                await modify_tool._cancel_todos(ids_to_cancel, todos)
+                await cancel_todos_via_modify_tool(modify_tool, ids_to_cancel)
                 logger.info(
                     "[JiuWenClawDeepAdapter] 已将 session %s 的未完成任务标记为 cancelled",
                     session_id,
@@ -4238,7 +4362,7 @@ class JiuWenClawDeepAdapter:
             # 重新加载并返回前端格式的 todo 列表
             updated_todos = await modify_tool.load_todos()
             if updated_todos and self._stream_event_rail is not None:
-                return self._stream_event_rail._format_todos_for_frontend(updated_todos)
+                return self._stream_event_rail.format_todos_for_frontend(updated_todos)
             return None
         except Exception as exc:
             logger.warning("[JiuWenClawDeepAdapter] 标记 todo cancelled 失败: %s", exc)

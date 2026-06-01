@@ -472,7 +472,7 @@ class JiuClawStreamEventRail(DeepAgentRail):
         if not todos_data:
             return
 
-        todos = self._format_todos_for_frontend(todos_data)
+        todos = self.format_todos_for_frontend(todos_data)
 
         try:
             await session.write_stream(
@@ -527,7 +527,7 @@ class JiuClawStreamEventRail(DeepAgentRail):
             return None
 
     @staticmethod
-    def _format_todos_for_frontend(
+    def format_todos_for_frontend(
         todos_data: List[Any],
     ) -> List[dict[str, Any]]:
         """Format todo items for frontend compatibility.

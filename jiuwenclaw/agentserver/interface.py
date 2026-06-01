@@ -1099,6 +1099,10 @@ class JiuWenClaw:
             extra={'user_visible': 'progress'}
         )
 
+        prepare_plan_pause = getattr(adapter, "prepare_plan_pause_for_request", None)
+        if callable(prepare_plan_pause):
+            await prepare_plan_pause(request)
+
         inputs, memory_mode, raw_query = self._build_inputs(request)
         self._apply_effective_project_dir_to_request(request, session_id, inputs)
 
@@ -1254,6 +1258,10 @@ class JiuWenClaw:
             "[JiuWenClaw] 处理流式请求: request_id=%s channel_id=%s session_id=%s sdk=%s",
             request.request_id, request.channel_id, session_id, self._sdk_name,
         )
+
+        prepare_plan_pause = getattr(adapter, "prepare_plan_pause_for_request", None)
+        if callable(prepare_plan_pause):
+            await prepare_plan_pause(request)
 
         inputs, memory_mode, raw_query = self._build_inputs(request)
         logger.info(
