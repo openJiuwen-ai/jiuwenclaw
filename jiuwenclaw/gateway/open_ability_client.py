@@ -11,6 +11,11 @@ from collections.abc import AsyncIterator, Awaitable, Callable
 from typing import Any
 from urllib.parse import urlsplit
 
+try:
+    from websockets.exceptions import ConnectionClosed
+except ImportError:  # pragma: no cover - compatibility fallback
+    ConnectionClosed = Exception  # type: ignore[assignment]
+
 from jiuwenclaw.e2a.constants import E2A_WIRE_SERVER_PUSH_KEY
 from jiuwenclaw.e2a.models import E2AEnvelope
 from jiuwenclaw.e2a.wire_codec import (
@@ -99,6 +104,7 @@ class OpenAbilityWebSocketClient(AgentServerClient):
         self._receiver_task: asyncio.Task | None = None
         self._running = False
         self._on_server_push: Callable[[dict[str, Any]], Awaitable[None]] | None = None
+        self._on_connection_lost: Callable[[dict[str, Any]], Awaitable[None]] | None = None
 
     @property
     def sandbox_id(self) -> str:
@@ -112,6 +118,11 @@ class OpenAbilityWebSocketClient(AgentServerClient):
         self, handler: Callable[[dict[str, Any]], Awaitable[None]] | None
     ) -> None:
         self._on_server_push = handler
+
+    def set_connection_lost_handler(
+        self, handler: Callable[[dict[str, Any]], Awaitable[None]] | None
+    ) -> None:
+        self._on_connection_lost = handler
 
     def set_or_update_server_config(
         self,
@@ -182,6 +193,8 @@ class OpenAbilityWebSocketClient(AgentServerClient):
         logger.info("%s 已断开", _LOG_LABEL)
 
     async def _message_receiver_loop(self) -> None:
+        disconnect_payload: dict[str, Any] | None = None
+        cleanup_connection_state = False
         try:
             while self._running and self._ws is not None:
                 try:
@@ -234,10 +247,45 @@ class OpenAbilityWebSocketClient(AgentServerClient):
                             )
                 except asyncio.CancelledError:
                     break
+                except ConnectionClosed as exc:
+                    logger.warning(
+                        "%s 与 OA 的 WebSocket 物理断链: sandbox_id=%s code=%s reason=%s",
+                        _LOG_LABEL,
+                        self._sandbox_id,
+                        getattr(exc, "code", None),
+                        getattr(exc, "reason", None),
+                    )
+                    disconnect_payload = {
+                        "event": "openability.connection_lost",
+                        "sandbox_id": self._sandbox_id,
+                        "uri": self._uri,
+                        "code": getattr(exc, "code", None),
+                        "reason": getattr(exc, "reason", None),
+                    }
+                    cleanup_connection_state = True
+                    break
                 except Exception as e:
-                    logger.exception("%s 消息接收循环异常: %s", _LOG_LABEL, e)
-                    await asyncio.sleep(0.1)
+                    logger.exception("%s 与 OA 的消息接收循环异常退出: %s", _LOG_LABEL, e)
+                    cleanup_connection_state = True
+                    break
         finally:
+            if cleanup_connection_state:
+                self._running = False
+                self._server_ready = False
+                ws = self._ws
+                self._ws = None
+                self._uri = None
+                if ws is not None:
+                    try:
+                        await ws.close()
+                    except Exception as close_err:
+                        logger.warning(
+                            "%s 接收循环退出后关闭 WebSocket 失败: %s",
+                            _LOG_LABEL,
+                            close_err,
+                        )
+            if disconnect_payload is not None and self._on_connection_lost is not None:
+                asyncio.create_task(self._on_connection_lost(disconnect_payload))
             logger.info("%s 消息接收任务已停止", _LOG_LABEL)
 
     def _ensure_connected(self) -> None:

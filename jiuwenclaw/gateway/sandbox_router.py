@@ -128,6 +128,7 @@ class SandboxRouterAgentClient(AgentServerClient):
         self._locks: dict[str, asyncio.Lock] = {}
         self._pool_lock = asyncio.Lock()
         self._waiters: deque[asyncio.Future[None]] = deque()
+        self._reconnect_waiters: dict[str, deque[asyncio.Future[None]]] = {}
         self._creating_count = 0
         self._server_config: dict[str, Any] = {}
         self._server_env: dict[str, str] | None = None
@@ -187,6 +188,7 @@ class SandboxRouterAgentClient(AgentServerClient):
 
     async def send_request(self, envelope: E2AEnvelope) -> AgentResponse:
         try:
+            await self._wait_for_openability_reconnect_buffer(envelope)
             runtime = await self._acquire_runtime(envelope)
         except ValueError as exc:
             return self._routing_error_response(envelope, str(exc))
@@ -199,6 +201,7 @@ class SandboxRouterAgentClient(AgentServerClient):
 
     async def send_request_stream(self, envelope: E2AEnvelope) -> AsyncIterator[AgentResponseChunk]:
         try:
+            await self._wait_for_openability_reconnect_buffer(envelope)
             runtime = await self._acquire_runtime(envelope)
         except ValueError as exc:
             yield self._routing_error_chunk(envelope, str(exc))
@@ -244,6 +247,44 @@ class SandboxRouterAgentClient(AgentServerClient):
             session_id=envelope.session_id,
         )
 
+    async def _wait_for_openability_reconnect_buffer(self, envelope: E2AEnvelope) -> None:
+        routing_key = self._routing_key(envelope.user_id, envelope.session_id)
+        while True:
+            waiter: asyncio.Future[None] | None = None
+            async with self._pool_lock:
+                runtime = self._runtimes.get(routing_key)
+                if runtime is None or not self._runtime_needs_openability_refresh(runtime):
+                    return
+                waiters = self._reconnect_waiters.setdefault(routing_key, deque())
+                if len(waiters) >= self._queue_max_size:
+                    raise RuntimeError("sandbox reconnect buffer is full")
+                waiter = asyncio.get_running_loop().create_future()
+                waiters.append(waiter)
+            try:
+                assert waiter is not None
+                await asyncio.wait_for(waiter, timeout=self._queue_timeout_seconds)
+                return
+            except asyncio.TimeoutError as exc:
+                async with self._pool_lock:
+                    waiters = self._reconnect_waiters.get(routing_key)
+                    if waiters is not None:
+                        try:
+                            assert waiter is not None
+                            waiters.remove(waiter)
+                        except ValueError:
+                            pass
+                        if not waiters:
+                            self._reconnect_waiters.pop(routing_key, None)
+                raise RuntimeError("sandbox reconnect wait timed out") from exc
+
+    async def _flush_reconnect_waiters(self, routing_key: str) -> None:
+        async with self._pool_lock:
+            waiters = self._reconnect_waiters.pop(routing_key, deque())
+        while waiters:
+            waiter = waiters.popleft()
+            if not waiter.done():
+                waiter.set_result(None)
+
     async def _acquire_runtime_for_key(
         self,
         routing_key: str,
@@ -255,13 +296,25 @@ class SandboxRouterAgentClient(AgentServerClient):
         lock = self._locks.setdefault(routing_key, asyncio.Lock())
         async with lock:
             while True:
+                runtime_to_refresh: SandboxRuntime | None = None
                 async with self._pool_lock:
                     runtime = self._runtimes.get(routing_key)
                     if runtime is None:
                         break
-                    if runtime.status != SandboxStatus.TERMINATING:
+                    if runtime.status != SandboxStatus.TERMINATING and not self._runtime_needs_openability_refresh(runtime):
                         self._mark_task_start_unlocked(runtime)
                         return runtime
+                    if runtime.status != SandboxStatus.TERMINATING:
+                        runtime_to_refresh = runtime
+                if runtime_to_refresh is not None:
+                    refreshed = await self._refresh_runtime_open_ability(
+                        runtime_to_refresh,
+                        reason="acquire",
+                    )
+                    if refreshed:
+                        continue
+                    await self._drop_runtime_for_reconnect(runtime_to_refresh)
+                    continue
                 await asyncio.sleep(0.01)
             await self._wait_for_capacity(routing_key)
             async with self._pool_lock:
@@ -834,7 +887,11 @@ class SandboxRouterAgentClient(AgentServerClient):
     ) -> AgentServerClient:
         store = self._get_dcs_store()
         open_ability_cfg = self._get_open_ability_config()
-        endpoint = await self._wait_openability_endpoint(store, sandbox_id, open_ability_cfg)
+        endpoint = await self._wait_openability_endpoint(
+            store,
+            sandbox_id,
+            open_ability_cfg,
+        )
         ws_uri = build_openability_ws_uri(endpoint, ws_path=open_ability_cfg.ws_path)
         client = OpenAbilityWebSocketClient(
             sandbox_id=sandbox_id,
@@ -842,6 +899,15 @@ class SandboxRouterAgentClient(AgentServerClient):
         )
         if self._on_server_push is not None:
             client.set_server_push_handler(self._on_server_push)
+        if hasattr(client, "set_connection_lost_handler"):
+            client.set_connection_lost_handler(
+                lambda payload, _sandbox_id=sandbox_id, _routing_key=routing_key, _client=client: self._handle_open_ability_connection_lost(
+                    sandbox_id=_sandbox_id,
+                    routing_key=_routing_key,
+                    agent_client=_client,
+                    payload=payload,
+                )
+            )
         logger.info(
             "Connecting OpenAbility WebSocket for sandbox_id=%s routing_key=%s uri=%s",
             sandbox_id,
@@ -852,6 +918,8 @@ class SandboxRouterAgentClient(AgentServerClient):
             client.connect(ws_uri),
             timeout=open_ability_cfg.connect_timeout_seconds,
         )
+        metadata["openability_endpoint"] = endpoint
+        metadata["openability_ws_uri"] = ws_uri
         return client
 
     async def _wait_openability_endpoint(
@@ -867,7 +935,7 @@ class SandboxRouterAgentClient(AgentServerClient):
                 return endpoint
             await asyncio.sleep(open_ability_config.readiness_poll_interval_seconds)
         raise RuntimeError(
-            f"OpenAbility endpoint not found in DCS for sandbox_id={sandbox_id}"
+            f"OpenAbility endpoint not ready in DCS for sandbox_id={sandbox_id}"
         )
 
     def _get_open_ability_config(self) -> OpenAbilityConfig:
@@ -878,6 +946,111 @@ class SandboxRouterAgentClient(AgentServerClient):
     async def _disconnect_agent_client(self, sandbox_id: str, agent_client: AgentServerClient | None) -> None:
         if agent_client is not None:
             await agent_client.disconnect()
+
+    @staticmethod
+    def _runtime_needs_openability_refresh(runtime: SandboxRuntime) -> bool:
+        return bool(runtime.metadata.get("openability_reconnect_required"))
+
+    async def _handle_open_ability_connection_lost(
+        self,
+        *,
+        sandbox_id: str,
+        routing_key: str,
+        agent_client: AgentServerClient,
+        payload: dict[str, Any],
+    ) -> None:
+        lock = self._locks.setdefault(routing_key, asyncio.Lock())
+        async with lock:
+            runtime = self._runtimes.get(routing_key)
+            if runtime is None:
+                return
+            if runtime.sandbox_id != sandbox_id or runtime.agent_client is not agent_client:
+                return
+            runtime.metadata["openability_reconnect_required"] = True
+            runtime.metadata["openability_connection_lost"] = dict(payload)
+            runtime.metadata["openability_disconnect_at"] = time.time()
+            logger.warning(
+                "Detected OA physical disconnect: routing_key=%s sandbox_id=%s",
+                routing_key,
+                sandbox_id,
+            )
+            refreshed = await self._refresh_runtime_open_ability(
+                runtime,
+                reason="physical-disconnect",
+            )
+            if refreshed:
+                return
+            await self._drop_runtime_for_reconnect(runtime)
+
+    async def _refresh_runtime_open_ability(
+        self,
+        runtime: SandboxRuntime,
+        *,
+        reason: str,
+    ) -> bool:
+        old_client = runtime.agent_client
+        runtime.metadata["openability_reconnect_required"] = True
+        try:
+            new_client = await self._connect_open_ability_client(
+                runtime.sandbox_id,
+                runtime.routing_key,
+                runtime.metadata,
+            )
+        except Exception:  # noqa: BLE001
+            logger.exception(
+                "Failed to refresh OA client: routing_key=%s sandbox_id=%s reason=%s",
+                runtime.routing_key,
+                runtime.sandbox_id,
+                reason,
+            )
+            return False
+
+        if self._server_config:
+            new_client.set_or_update_server_config(
+                config=self._server_config,
+                env=self._server_env,
+            )
+        runtime.agent_client = new_client
+        runtime.metadata["openability_reconnect_required"] = False
+        runtime.metadata["openability_reconnected_at"] = time.time()
+        await self._flush_reconnect_waiters(runtime.routing_key)
+        try:
+            await self._disconnect_agent_client(runtime.sandbox_id, old_client)
+        except Exception:  # noqa: BLE001
+            logger.exception(
+                "Failed to disconnect stale OA client: routing_key=%s sandbox_id=%s",
+                runtime.routing_key,
+                runtime.sandbox_id,
+            )
+        logger.info(
+            "Refreshed OA client: routing_key=%s sandbox_id=%s reason=%s",
+            runtime.routing_key,
+            runtime.sandbox_id,
+            reason,
+        )
+        return True
+
+    async def _drop_runtime_for_reconnect(self, runtime: SandboxRuntime) -> None:
+        async with self._pool_lock:
+            current = self._runtimes.get(runtime.routing_key)
+            if current is runtime:
+                self._runtimes.pop(runtime.routing_key, None)
+            runtime.status = SandboxStatus.TERMINATED
+        await self._flush_reconnect_waiters(runtime.routing_key)
+        try:
+            await self._disconnect_agent_client(runtime.sandbox_id, runtime.agent_client)
+        except Exception:  # noqa: BLE001
+            logger.exception(
+                "Failed to disconnect dropped OA client: routing_key=%s sandbox_id=%s",
+                runtime.routing_key,
+                runtime.sandbox_id,
+            )
+        self._notify_next_waiter()
+        logger.warning(
+            "Dropped runtime after OA disconnect; next request will re-adopt from DCS: routing_key=%s sandbox_id=%s",
+            runtime.routing_key,
+            runtime.sandbox_id,
+        )
 
     def _get_sandbox_client(self) -> SandboxClient:
         if self._sandbox_client is None:
