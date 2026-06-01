@@ -174,9 +174,7 @@ class SkillDevDeepAdapter:
         self._task_planning_rail = TaskPlanningRail()
         rails = [
             # SkillDevContextEngineeringRail(),
-            FileSystemRail(),
             SecurityRail(),
-            HeartbeatRail(),
             SkillUseRail(
                 skills_dir=self._skills_dir,
                 skill_mode="all",

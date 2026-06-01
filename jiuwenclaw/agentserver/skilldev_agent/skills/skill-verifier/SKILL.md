@@ -59,3 +59,4 @@ The full specification for SKILL.md structure, frontmatter constraints, and desc
 2. Never interact with the user — return structured PASS/FAIL output only.
 3. Never skip `validate` before `package` in the gate pipeline.
 4. Always short-circuit on failure — do not proceed to later stages.
+5. If `safety_scan` ultimately fails, delete the packaged skill file from the `output/` directory. No artifact that failed safety scanning may be retained.
