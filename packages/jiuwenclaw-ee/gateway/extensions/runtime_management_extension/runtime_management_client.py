@@ -128,6 +128,20 @@ async def load_effective_service_config_for_request(request: AgentRequest) -> An
     return loaded
 
 
+async def load_all_service_configs() -> list[dict[str, Any]]:
+    """查询全量 service_config_template（enabled=True）。"""
+    try:
+        from ...manager_ws_client.core.enterprise_config.gateway_db import GatewayDb
+
+        db = GatewayDb.current()
+        rows = await db.list_records("service_config_template", filters={"enabled": True})
+        logger.info("[RuntimeManagementAgentClient] load_all_service_configs: count=%s", len(rows))
+        return rows
+    except Exception as exc:
+        logger.warning("[RuntimeManagementAgentClient] load_all_service_configs failed: %s", exc)
+        return []
+
+
 def _resolve_invoke_ids_from_request(msg: AgentRequest) -> tuple[str, str | None]:
     """Resolve invoke ids, fallback to ``session_id`` mapping when service_id is missing."""
     svc = str(msg.service_id or "").strip()
@@ -644,10 +658,12 @@ class RuntimeManagementAgentClient(AgentServerClient):
             ttl=session_ttl,
         )
 
+        service_configs = await load_all_service_configs()
         await self._access.init(
             response_parser=E2aEnvelopResponseParser(),
             config=acc_cfg,
             session_config=session_cfg,
+            service_configs=service_configs or None,
         )
         self._connected = True
 
