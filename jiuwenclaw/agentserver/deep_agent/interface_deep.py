@@ -12,6 +12,7 @@ import asyncio
 import logging
 import importlib
 import os
+from urllib.parse import quote_plus
 from contextvars import ContextVar, Token
 from dataclasses import dataclass
 
@@ -605,6 +606,36 @@ def _build_context_engineering_rail(config: dict[str, Any],
         return None
 
 
+def _patch_mysql_compiler_for_on_conflict():
+    """使 MySQL SQLAlchemy 编译器支持 SQLite 的 ON CONFLICT DO UPDATE.
+
+    openjiuwen SDK 的 DbBasedKVStore 硬编码了 SQLite upsert 语法.
+    此 patch 在 SQL 编译阶段将 ON CONFLICT ... DO UPDATE 翻译为 MySQL 的
+    ON DUPLICATE KEY UPDATE, 使 checkpoint 可以正常写入 MySQL.
+    """
+    try:
+        from sqlalchemy.ext.compiler import compiles
+        from sqlalchemy.dialects.sqlite.dml import OnConflictDoUpdate
+
+        @compiles(OnConflictDoUpdate, "mysql")
+        def _mysql_on_conflict_do_update(element, compiler, **kw):
+            values = getattr(element, "_update_values", None)
+            set_pairs = []
+            if isinstance(values, dict):
+                for col_key in values:
+                    col_name = compiler.preparer.format_column(col_key)
+                    set_pairs.append(f"{col_name} = VALUES({col_name})")
+            if not set_pairs:
+                # SDK 未传 set_ 时 _update_values 为空, 兜底更新 value 列
+                set_pairs.append("value = VALUES(value)")
+            return f"\nON DUPLICATE KEY UPDATE {', '.join(set_pairs)}"
+    except Exception:
+        pass
+
+
+_patch_mysql_compiler_for_on_conflict()
+
+
 async def _build_mysql_async_engine():
     """构建 checkpoint MySQL AsyncEngine。
 
@@ -624,9 +655,12 @@ async def _build_mysql_async_engine():
         db_user = os.getenv("GATEWAY_DB_USER", "root").strip()
         db_password = os.getenv("GATEWAY_DB_PASSWORD", "").strip()
         db_name = os.getenv("GATEWAY_DB_NAME", "openjiuwen_gateway").strip()
+        # URL-encode 用户名/密码，避免特殊字符（如 @ : / # %）破坏连接串解析
+        _encoded_user = quote_plus(db_user)
+        _encoded_password = quote_plus(db_password)
         # 先连接不指定库，自动建库
         server_url = (
-            f"mysql+aiomysql://{db_user}:{db_password}"
+            f"mysql+aiomysql://{_encoded_user}:{_encoded_password}"
             f"@{db_host}:{db_port}?charset=utf8mb4"
         )
         temp_engine = create_async_engine(server_url, echo=False)
@@ -639,7 +673,7 @@ async def _build_mysql_async_engine():
 
         # 再连接目标库
         db_url = (
-            f"mysql+aiomysql://{db_user}:{db_password}"
+            f"mysql+aiomysql://{_encoded_user}:{_encoded_password}"
             f"@{db_host}:{db_port}/{db_name}?charset=utf8mb4"
         )
         engine = create_async_engine(
@@ -1286,7 +1320,7 @@ class JiuWenClawDeepAdapter:
             conf = {"db_type": "sqlite", "db_path": f"{checkpoint_path}/checkpoint"}
 
             checkpoint_db_type = os.getenv("CHECKPOINT_DB_TYPE", "").strip().lower()
-            if checkpoint_db_type == "true":
+            if checkpoint_db_type == "mysql":
                 mysql_engine = await _build_mysql_async_engine()
                 if mysql_engine is not None:
                     conf["db_client"] = mysql_engine
