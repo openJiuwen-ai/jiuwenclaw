@@ -126,8 +126,8 @@ class SkillDevTestRunner:
                 stage_name=f"test_run_{eval_id}_ws",
                 whitelist_key="test_run",
                 system_prompt=self._build_system_prompt_with_skill(self.skill_dir, variant_dir),
-                tools=["file_read", "file_write", "shell", "code_execute", "file_glob", 
-                    "shell", "web_search_free", "web_search_paid"],
+                tools=["file_read", "file_write", "shell", "code_execute", "file_glob",
+                    "web_search"],
                 max_iterations=30,
             )
 
@@ -195,8 +195,8 @@ class SkillDevTestRunner:
                 stage_name=f"test_run_{eval_id}_bl",
                 whitelist_key="test_run",
                 system_prompt=baseline_prompt,
-                tools=["file_read", "shell", "code_execute", "file_glob", 
-                    "shell", "web_search_free", "web_search_paid", "web_fetch"],
+                tools=["file_read", "shell", "code_execute", "file_glob",
+                    "web_search", "web_fetch"],
                 max_iterations=30,
             )
             

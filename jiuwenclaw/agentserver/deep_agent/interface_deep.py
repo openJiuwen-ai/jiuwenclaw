@@ -75,7 +75,6 @@ from openjiuwen.harness.subagents.browser_agent import build_browser_agent_confi
 from openjiuwen.harness.subagents.code_agent import build_code_agent_config
 from openjiuwen.harness.subagents.research_agent import build_research_agent_config
 from openjiuwen.harness.tools import (
-    WebPaidSearchTool,
     create_audio_tools,
     create_vision_tools,
 )
@@ -159,7 +158,6 @@ from jiuwenclaw.agentserver.tools.deepresearch_tools import (
     reset_deepresearch_route,
     get_deepresearch_tools,
 )
-from jiuwenclaw.agentserver.tools.petal_search_tools import enable_petal_search, mcp_petal_search
 from jiuwenclaw.agentserver.tools.multi_session_toolkits import MultiSessionToolkit
 from jiuwenclaw.agentserver.memory.external_memory_config import is_builtin_memory_allowed
 from jiuwenclaw.agentserver.tools.xiaoyi_phone_tools import (
@@ -893,10 +891,6 @@ class JiuWenClawDeepAdapter:
         self._audio_tools: list[Any] = []
         self._instance_overrides: dict[str, Any] = {}
         self._xiaoyi_phone_tools_registered: bool = False
-        self._paid_search_registered: bool = False
-        self._paid_search_tool: WebPaidSearchTool | None = None
-        self._petal_search_tools: list[Any] = []
-        self._petal_search_registered: bool = False
         self._skill_manager: SkillManager | None = None
         self._cron_runtime = CronRuntimeBridge()
         self._runtime_cron_tool_context = _RuntimeCronToolContext(
@@ -1411,31 +1405,6 @@ class JiuWenClawDeepAdapter:
             enabled=bool(self._image_gen_enabled),
             create_fn=lambda: [text_to_image],
             warn_label="text_to_image tool",
-        )
-
-    def _sync_paid_search_tool_for_runtime(self) -> None:
-        """Sync paid-search tool registration after config reload."""
-        agent_id = self._instance.card.id if self._instance else None
-        tools, self._paid_search_registered = self._sync_tool_group(
-            current_tools=[self._paid_search_tool] if self._paid_search_tool else [],
-            registered=self._paid_search_registered,
-            enabled=any(
-                os.environ.get(key)
-                for key in ("BOCHA_API_KEY", "PERPLEXITY_API_KEY", "SERPER_API_KEY", "JINA_API_KEY")
-            ),
-            create_fn=lambda: [WebPaidSearchTool(language=self._resolve_runtime_language(), agent_id=agent_id)],
-            warn_label="paid search tool",
-        )
-        self._paid_search_tool = tools[0] if tools else None
-
-    def _sync_petal_search_tool_for_runtime(self) -> None:
-        """热更新后同步 Petal 搜索工具注册状态。"""
-        self._petal_search_tools, self._petal_search_registered = self._sync_tool_group(
-            current_tools=self._petal_search_tools,
-            registered=self._petal_search_registered,
-            enabled=enable_petal_search(),
-            create_fn=lambda: [mcp_petal_search],
-            warn_label="petal search tool",
         )
 
     @staticmethod
@@ -2353,31 +2322,6 @@ class JiuWenClawDeepAdapter:
             Runner.resource_mgr.add_tool(tool)
             tool_cards.append(tool.card)
 
-        # 付费搜索工具：有任意一个付费 key 就注册
-        if any(
-                os.environ.get(key)
-                for key in ("BOCHA_API_KEY", "PERPLEXITY_API_KEY", "SERPER_API_KEY", "JINA_API_KEY")
-        ):
-            self._paid_search_tool = WebPaidSearchTool(language=self._resolve_runtime_language(), agent_id=agent_id)
-            Runner.resource_mgr.add_tool(self._paid_search_tool)
-            tool_cards.append(self._paid_search_tool.card)
-            self._paid_search_registered = True
-
-        self._petal_search_tools = []
-        self._petal_search_registered = False
-        if enable_petal_search():
-            try:
-                if not Runner.resource_mgr.get_tool(mcp_petal_search.card.id):
-                    Runner.resource_mgr.add_tool(mcp_petal_search)
-                tool_cards.append(mcp_petal_search.card)
-                self._petal_search_tools = [mcp_petal_search]
-                self._petal_search_registered = True
-            except Exception as exc:
-                logger.warning(
-                    "[JiuWenClawDeepAdapter] petal search tool registration failed: %s",
-                    exc,
-                )
-
         self._vision_tools = []
         self._vision_tools_registered = False
         if self._vision_model_config is not None:
@@ -2797,8 +2741,6 @@ class JiuWenClawDeepAdapter:
         self._agent_name = self._instance_overrides.get("agent_name", config.get("agent_name", "main_agent"))
         agent_card = AgentCard(name=self._agent_name, id='jiuwenclaw')
         self._sync_multimodal_tools_for_runtime()
-        self._sync_paid_search_tool_for_runtime()
-        self._sync_petal_search_tool_for_runtime()
 
         if not self._filesystem_rail_enabled_for_profile() and self._filesystem_rail is not None:
             try:

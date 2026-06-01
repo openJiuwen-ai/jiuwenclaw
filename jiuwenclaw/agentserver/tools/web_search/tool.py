@@ -1,0 +1,152 @@
+# Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
+
+from __future__ import annotations
+
+import logging
+import uuid
+from typing import Any
+
+from openjiuwen.core.foundation.tool import tool
+from openjiuwen.core.foundation.tool.base import ToolCard
+
+from jiuwenclaw.agentserver.tools.web_search.orchestrator import (
+    is_valid_search_mode,
+    normalize_search_mode,
+    run_web_search,
+)
+
+logger = logging.getLogger(__name__)
+
+_WEB_SEARCH_HARNESS_METADATA_REGISTERED = False
+
+_HARNESS_STRIP_PARAMS = frozenset({
+    "timeout_seconds",
+    "overall_timeout",
+    "mode",
+    "search_tool",
+    "provider",
+})
+
+
+@tool(
+    name="web_search",
+    description=(
+        "网页搜索统一入口。search_mode=default（默认）先付费后免费；"
+        "search_mode=paid 仅付费，失败报错；search_mode=free 仅免费且不调用付费。"
+        "max_results 可选，限制单个 query 的最大返回条数。"
+    ),
+)
+async def web_search(
+    query: str,
+    search_mode: str = "default",
+    max_results: int | None = None,
+) -> str:
+    query = (query or "").strip()
+    if not query:
+        logger.warning("[web_search] invoke rejected: empty query")
+        return "[ERROR]: query cannot be empty."
+
+    mode = normalize_search_mode(search_mode)
+    if not is_valid_search_mode(mode):
+        logger.warning(
+            "[web_search] rejected invalid search_mode=%r query=%r",
+            search_mode,
+            query[:120],
+        )
+        return "[ERROR]: search_mode must be default, paid, or free."
+
+    return await run_web_search(query, search_mode=mode, max_results=max_results)
+
+
+def _fallback_web_search_input_params(language: str) -> dict[str, Any]:
+    try:
+        from openjiuwen.harness.prompts import resolve_language
+        from openjiuwen.harness.prompts.sections.tools.web_tools import _schema_free_search
+
+        lang = resolve_language(language or "cn")
+        schema = dict(_schema_free_search(lang))
+        props = dict(schema.get("properties") or {})
+        for key in _HARNESS_STRIP_PARAMS:
+            props.pop(key, None)
+        props["search_mode"] = {
+            "type": "string",
+            "description": "default | paid | free",
+            "default": "default",
+        }
+        if "max_results" in props:
+            props["max_results"]["description"] = (
+                "Optional result count; defaults to web_search.max_results in config."
+            )
+        schema["properties"] = props
+        return schema
+    except Exception as exc:
+        logger.warning(
+            "[web_search] harness schema fallback failed: %s", exc, exc_info=True
+        )
+        return {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "Search query."},
+                "search_mode": {"type": "string", "default": "default"},
+                "max_results": {"type": "integer", "description": "Optional."},
+            },
+            "required": ["query"],
+        }
+
+
+def ensure_web_search_harness_metadata() -> None:
+    global _WEB_SEARCH_HARNESS_METADATA_REGISTERED
+    if _WEB_SEARCH_HARNESS_METADATA_REGISTERED:
+        return
+    try:
+        from openjiuwen.harness.prompts.sections.tools import register_tool_provider
+        from openjiuwen.harness.prompts.sections.tools.base import ToolMetadataProvider
+    except ImportError as exc:
+        logger.debug("[web_search] harness metadata registration skipped: %s", exc)
+        return
+
+    class _WebSearchMetadataProvider(ToolMetadataProvider):
+        def get_name(self) -> str:
+            return "web_search"
+
+        def get_description(self, language: str = "cn") -> str:
+            desc = (web_search.card.description or "").strip()
+            if desc:
+                return desc
+            return {
+                "cn": "网页搜索唯一入口。",
+                "en": "Unified web search entry point.",
+            }.get(language, desc or "Unified web search entry point.")
+
+        def get_input_params(self, language: str = "cn") -> dict[str, Any]:
+            params = web_search.card.input_params
+            if isinstance(params, dict) and params:
+                return dict(params)
+            return _fallback_web_search_input_params(language)
+
+    register_tool_provider(_WebSearchMetadataProvider())
+    _WEB_SEARCH_HARNESS_METADATA_REGISTERED = True
+
+
+def build_web_search_tool_card(
+    *,
+    agent_id: str | None = None,
+    language: str = "cn",
+    id_prefix: str = "JiuwenHarnessWebSearch",
+) -> ToolCard:
+    ensure_web_search_harness_metadata()
+    base_card = web_search.card
+    if base_card is None:
+        raise RuntimeError("web_search @tool card is missing")
+
+    suffix = (agent_id or "").strip() or uuid.uuid4().hex
+    input_params = base_card.input_params
+    if not isinstance(input_params, dict) or not input_params:
+        input_params = _fallback_web_search_input_params(language)
+
+    return ToolCard(
+        id=f"{id_prefix}_{suffix}",
+        name="web_search",
+        description=(base_card.description or "").strip(),
+        input_params=dict(input_params),
+    )

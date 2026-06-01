@@ -8,8 +8,12 @@ from jiuwenclaw.utils import fix_json_arguments
 
 
 _TOOL_NAME_ALIASES = {
-    "free_search": "mcp_free_search",
-    "paid_search": "mcp_paid_search",
+    "free_search": "web_search",
+    "mcp_free_search": "web_search",
+    "paid_search": "web_search",
+    "mcp_paid_search": "web_search",
+    "mcp_petal_search": "web_search",
+    "petal_search": "web_search",
     "fetch_webpage": "mcp_fetch_webpage",
     "exec_command": "mcp_exec_command",
 }
@@ -32,8 +36,7 @@ _SEARCH_TOOL_NAMES = frozenset(
         "grep",
         "glob",
         "glob_file_search",
-        "mcp_free_search",
-        "mcp_paid_search",
+        "web_search",
         "search",
     }
 )

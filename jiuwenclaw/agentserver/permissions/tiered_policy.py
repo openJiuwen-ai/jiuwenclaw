@@ -58,7 +58,15 @@ _PATH_TOOLS = frozenset({
     "glob_file_search", "glob", "list_dir", "list_files",
     "grep", "search_replace",
 })
-_NETWORK_TOOLS = frozenset({"mcp_fetch_webpage", "mcp_free_search", "mcp_paid_search", "mcp_petal_search"})
+_NETWORK_TOOLS = frozenset({
+    "mcp_fetch_webpage",
+    "web_search",
+    "free_search",
+    "paid_search",
+    "mcp_free_search",
+    "mcp_paid_search",
+    "mcp_petal_search",
+})
 
 _PATH_ARG_KEYS = frozenset({
     "path", "file_path", "target_file", "file", "old_path", "new_path",

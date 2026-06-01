@@ -320,7 +320,7 @@ class GenerateStageHandler(StageHandler):
             stage_name="generate",
             system_prompt=system_prompt,
             tools=["file_read", "file_write", "file_edit", "file_glob", "file_grep", 
-            "file_listdir", "web_search_free", "web_fetch", "shell", "code_execute"],
+            "file_listdir", "web_search", "web_fetch", "shell", "code_execute"],
             max_iterations=50,
         )
         query = self._build_user_query(ctx)

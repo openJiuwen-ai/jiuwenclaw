@@ -38,15 +38,11 @@ from openjiuwen.harness.tools.filesystem import (
     ListDirTool,
 )
 from openjiuwen.harness.tools.bash import BashTool
-from openjiuwen.harness.tools.web_tools import WebPaidSearchTool
-
 from openjiuwen.core.single_agent.rail.base import AgentRail
 
 from jiuwenclaw.agentserver.deep_agent.rails import JiuClawStreamEventRail
-from jiuwenclaw.agentserver.tools.harness_named_web_tools import (
-    JiuwenHarnessFetchWebpageTool,
-    JiuwenHarnessFreeSearchTool,
-)
+from jiuwenclaw.agentserver.tools.harness_named_web_tools import JiuwenHarnessFetchWebpageTool
+from jiuwenclaw.agentserver.tools.web_search import JiuwenHarnessWebSearchTool
 from jiuwenclaw.agentserver.utils import DEFAULT_ENABLE_READ_IMAGE_MULTIMODAL
 from jiuwenclaw.agentserver.skilldev.deps import SkillDevDeps
 from jiuwenclaw.agentserver.skilldev.schema import SkillDevEvent, SkillDevEventType, SkillDevState
@@ -66,8 +62,7 @@ HARNESS_TOOL_CLASSES: Dict[str, Type] = {
     "file_listdir": ListDirTool,
     "shell": BashTool,
     "code_execute": CodeTool,
-    "web_search_free": JiuwenHarnessFreeSearchTool,
-    "web_search_paid": WebPaidSearchTool,
+    "web_search": JiuwenHarnessWebSearchTool,
     "web_fetch": JiuwenHarnessFetchWebpageTool,
 }
 
@@ -77,18 +72,17 @@ STAGE_TOOL_WHITELIST: Dict[str, list[str]] = {
     # Clarification phase: read-only workspace awareness
     "CLARIFY": ["file_read", "file_glob", "file_listdir"],
     # Planning phase: read-only search tools only
-    "PLAN": ["file_read", "file_glob", "file_listdir", "web_search_free", "web_fetch"],
+    "PLAN": ["file_read", "file_glob", "file_listdir", "web_search", "web_fetch"],
     # Generation phase: file read/write, no shell
-    "GENERATE": ["file_read", "file_write", "file_edit", "file_glob", "file_grep", 
-        "file_listdir", "web_search_free", "web_fetch", "shell", "code_execute"],
+    "GENERATE": ["file_read", "file_write", "file_edit", "file_glob", "file_grep",
+        "file_listdir", "web_search", "web_fetch", "shell", "code_execute"],
     # Validation phase: read-only
     "VALIDATE": ["file_read", "file_glob", "file_grep", "shell"],
     # Test design phase: read skill files + search for best practices
-    "TEST_DESIGN": ["file_read", "file_glob", "file_listdir", "web_search_free",
-        "web_search_paid", "shell", "file_write"],
+    "TEST_DESIGN": ["file_read", "file_glob", "file_listdir", "web_search",
+        "shell", "file_write"],
     # Test run phase: can execute code and shell commands
-    "TEST_RUN": ["file_read", "file_write", "shell", "code_execute", "file_glob",
-        "shell", "web_search_free", "web_search_paid"],
+    "TEST_RUN": ["file_read", "file_write", "shell", "code_execute", "file_glob", "web_search"],
     # Evaluation phase: read-only
     "EVALUATE": ["file_read", "file_grep", "file_listdir", "file_glob", "shell"],
     # Improvement phase: file modifications allowed
@@ -747,7 +741,7 @@ class SkillDevContext:
                     tool_cls = HARNESS_TOOL_CLASSES[tool_name]
 
                     # 实例化工具
-                    if tool_name in ("web_search_free", "web_search_paid", "web_fetch"):
+                    if tool_name in ("web_search", "web_fetch"):
                         # Web 工具不需要 SysOperation
                         harness_tool = tool_cls(language="cn")
                     else:

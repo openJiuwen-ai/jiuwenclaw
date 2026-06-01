@@ -77,7 +77,7 @@ def dedicated_multimodal_model_configured(
     Used to gate image / video / **audio** tools (含 ``audio_metadata`` 与 LLM 音频能力)，在未配置
     ``models.{type}.model_config`` 独立 ``api_key`` 时不挂载，避免仅存在主对话 ``API_KEY`` 时误注册。
     （``apply_*_model_config_from_yaml`` 仍可能回落到 embed / 主 API 写环境变量，与是否注册工具无关。）
-    与 ``get_mcp_tools`` 在无付费搜索 key 时不注册 ``mcp_paid_search`` 同理。
+    与 ``get_mcp_tools`` 仅注册 ``web_search`` 作为搜索入口同理。
     """
     if model_type not in ("audio", "vision", "video", "image_gen"):
         return False

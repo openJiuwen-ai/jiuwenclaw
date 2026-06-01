@@ -44,8 +44,12 @@ from jiuwenclaw.utils import logger
 
 
 TOOL_NAME_ALIASES = {
-    "free_search": "mcp_free_search",
-    "paid_search": "mcp_paid_search",
+    "free_search": "web_search",
+    "mcp_free_search": "web_search",
+    "paid_search": "web_search",
+    "mcp_paid_search": "web_search",
+    "mcp_petal_search": "web_search",
+    "petal_search": "web_search",
     "fetch_webpage": "mcp_fetch_webpage",
     "exec_command": "mcp_exec_command",
 }
@@ -1140,7 +1144,7 @@ class PermissionInterruptRail(ConfirmInterruptRail):
             return "read"
         if tool_name in {"write_file", "write_text_file", "edit_file", "write"}:
             return "edit"
-        if tool_name in {"grep", "glob_file_search", "mcp_free_search", "mcp_paid_search", "mcp_petal_search"}:
+        if tool_name in {"grep", "glob_file_search", "web_search"}:
             return "search"
         if tool_name in {"fetch_webpage", "mcp_fetch_webpage"}:
             return "fetch"

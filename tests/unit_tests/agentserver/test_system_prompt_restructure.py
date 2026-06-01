@@ -17,7 +17,7 @@ from jiuwenclaw.agentserver.deep_agent.prompt_builder import build_identity_prom
 from jiuwenclaw.agentserver.deep_agent.rails.runtime_prompt_rail import RuntimePromptRail
 from jiuwenclaw.agentserver.tools.harness_named_web_tools import (
     JiuwenHarnessFetchWebpageTool,
-    JiuwenHarnessFreeSearchTool,
+    JiuwenHarnessWebSearchTool,
 )
 
 
@@ -144,7 +144,7 @@ def test_build_configured_subagents_includes_optional_browser_and_configured_cod
     )
     research_tools = mock_research.call_args.kwargs["tools"]
     assert len(research_tools) == 2
-    assert isinstance(research_tools[0], JiuwenHarnessFreeSearchTool)
+    assert isinstance(research_tools[0], JiuwenHarnessWebSearchTool)
     assert isinstance(research_tools[1], JiuwenHarnessFetchWebpageTool)
     mock_browser.assert_called_once_with(
         model,

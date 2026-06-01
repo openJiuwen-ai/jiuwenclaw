@@ -355,8 +355,8 @@ class TestDesignStageHandler(StageHandler):
                 stage_name=f"test_design/{attempt}",
                 whitelist_key="test_design",
                 system_prompt=system_prompt,
-                tools=["file_read", "file_glob", "file_listdir", "web_search_free", 
-                    "web_search_paid", "shell", "file_write"],
+                tools=["file_read", "file_glob", "file_listdir", "web_search",
+                    "shell", "file_write"],
                 max_iterations=30,
             )
             prompt = (

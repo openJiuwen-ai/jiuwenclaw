@@ -48,9 +48,8 @@ RAIL_WHITELIST = frozenset({
 })
 
 TOOL_WHITELIST = frozenset({
-    "free_search",
+    "web_search",
     "fetch_webpage",
-    "paid_search",
     "vision",
     "audio",
     "image_ocr",
