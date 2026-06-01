@@ -63,7 +63,7 @@ def _ensure_extension_package(ext_root: Path) -> None:
     sys.modules[_EXT_PKG] = ext_pkg
 
 
-def _load_manager_ws_client_modules() -> tuple[Any, Any]:
+def _load_manager_ws_client_modules() -> tuple[Path, Any, Any]:
     ext_root = _resolve_manager_ws_client_root()
     if ext_root is None:
         raise ImportError("manager_ws_client extension not found")
@@ -73,14 +73,15 @@ def _load_manager_ws_client_modules() -> tuple[Any, Any]:
     channel_mod = importlib.import_module(
         f"{_EXT_PKG}.core.application_config.channel_config"
     )
-    return db_mod.ensure_db_handler_ready, channel_mod.list_active_channel_config_rows
+    return ext_root, db_mod.Database, channel_mod.list_active_channel_config_rows
 
 
 async def load_active_channel_config_rows() -> list[dict[str, Any]]:
     """连接 manager_ws_client 库并列出 active ``channel_config`` 行；失败时返回空列表。"""
     try:
-        ensure_db_handler_ready, list_active = _load_manager_ws_client_modules()
-        handler = await ensure_db_handler_ready()
+        ext_root, database_cls, list_active = _load_manager_ws_client_modules()
+        db = database_cls(relative_root=ext_root)
+        handler = await db.ensure_ready(log_prefix="channel_config_db")
         return await list_active(handler)
     except Exception as exc:  # noqa: BLE001
         logger.warning("%s channel_config read failed: %s", _LOG, exc, exc_info=True)
