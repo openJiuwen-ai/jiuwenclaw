@@ -426,7 +426,7 @@ class AgentWebSocketServer:
         from websockets.legacy.client import connect as legacy_connect
 
         retry_count = 0
-        first_connect = True
+
 
         while self._oa_running:
             ws = None
@@ -456,25 +456,22 @@ class AgentWebSocketServer:
                 )
                 retry_count = 0  # 重置重试计数
 
-                # 首次连接时触发启动钩子
-                if first_connect:
-                    logger.info("[AgentWebSocketServer] WebSocket 连接已建立，等待 OpenAbility 建连确认...")
-                    await self._trigger_agent_server_started_hook()
-                    # 发送 INIT 消息，携带 apiKey 和 sandboxId
-                    try:
-                        init_msg = init_oa_message("INIT")
-                        await ws.send(json.dumps(init_msg, ensure_ascii=False))
-                        logger.info("[AgentWebSocketServer] 已发送 INIT 消息到 OpenAbility")
-                        # 等待 OA 返回第一条建连成功消息
-                        if not await oa_wait_connection_ack(ws, timeout=10.0):
-                            await ws.close()
-                            raise RuntimeError("OpenAbility 建连确认失败")
-                        logger.info("[AgentWebSocketServer] OpenAbility 连接已确认，开始业务处理")
-                        first_connect = False
-                    except Exception as e:
-                        logger.warning("[AgentWebSocketServer] 发送 INIT 消息失败: %s", e)
-                else:
-                    # 重连成功后记录恢复日志
+
+                logger.info("[AgentWebSocketServer] WebSocket 连接已建立，等待 OpenAbility 建连确认...")
+                await self._trigger_agent_server_started_hook()
+                # 发送 INIT 消息，携带 apiKey 和 sandboxId
+                try:
+                    init_msg = init_oa_message("INIT")
+                    await ws.send(json.dumps(init_msg, ensure_ascii=False))
+                    logger.info("[AgentWebSocketServer] 已发送 INIT 消息到 OpenAbility")
+                    # 等待 OA 返回第一条建连成功消息
+                    if not await oa_wait_connection_ack(ws, timeout=10.0):
+                        await ws.close()
+                        raise RuntimeError("OpenAbility 建连确认失败")
+                    logger.info("[AgentWebSocketServer] OpenAbility 连接已确认，开始业务处理")
+                except Exception as e:
+                    logger.warning("[AgentWebSocketServer] 发送 INIT 消息失败: %s", e)
+                if retry_count != 0:
                     logger.info("[AgentWebSocketServer] OpenAbility 连接已恢复，模型服务继续运行")
 
                 # 运行连接（心跳 + 消息接收）
