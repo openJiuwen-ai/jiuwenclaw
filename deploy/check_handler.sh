@@ -112,6 +112,7 @@ check_if_nfs_up() {
     # Check if external NFS server
     if [ -n "${DEPLOY_VARS["NFS_SERVER_ADDR"]:-}" ]; then
         info "Use external NFS server"
+        DEPLOY_VARS["ENABLE_EXTERNAL_NFS"]="true"
         return
     fi
 
@@ -136,6 +137,7 @@ check_if_rabbitmq_up() {
         info "Use external RABBITMQ server"
         url="${DEPLOY_VARS["RABBITMQ_URL"]}"
         DEPLOY_VARS["MANAGER_RABBITMQ_URL"]="amqp://${user}:${encoded_password}@${url}"
+        DEPLOY_VARS["ENABLE_EXTERNAL_RABBITMQ"]="true"
         return
     fi
 
@@ -160,6 +162,7 @@ check_if_mysql_up() {
         DEPLOY_VARS["DB_PORT"]=${DEPLOY_VARS["MYSQL_PORT"]}
         DEPLOY_VARS["DB_USER"]="root"
         DEPLOY_VARS["DB_PASSWORD"]=${DEPLOY_VARS["MYSQL_ROOT_PASSWORD"]}
+        DEPLOY_VARS["ENABLE_EXTERNAL_MYSQL"]="true"
         return
     fi
 
@@ -180,6 +183,7 @@ check_if_postgresql_up() {
         DEPLOY_VARS["DB_PORT"]=${DEPLOY_VARS["POSTGRES_PORT"]}
         DEPLOY_VARS["DB_USER"]="postgres"
         DEPLOY_VARS["DB_PASSWORD"]=${DEPLOY_VARS["POSTGRES_PASSWORD"]}
+        DEPLOY_VARS["ENABLE_EXTERNAL_POSTGRES"]="true"
         return
     fi
 
@@ -201,6 +205,31 @@ check_if_db_up() {
     check_if_${db_type}_up
 }
 
+
+check_if_redis_up() {
+    local mode="${DEPLOY_VARS["DEPLOYMENT_MODE"]:-standalone}"
+    local name="${DEPLOY_VARS["REDIS_NAME"]}"
+
+    if [[ "${mode}" != "distributed" ]]; then
+        info "DEPLOYMENT_MODE=${mode}, skip Redis check"
+        return
+    fi
+
+    if [ -n "${DEPLOY_VARS["REDIS_HOST"]:-}" ]; then
+        info "Use configured Redis: ${DEPLOY_VARS["REDIS_HOST"]}"
+        DEPLOY_VARS["ENABLE_EXTERNAL_REDIS"]="true"
+        return
+    fi
+
+    if check_k8s_resource_exists "deployment" "${name}" "default"; then
+        DEPLOY_VARS["REDIS_HOST"]="${name}.default.svc.cluster.local"
+        DEPLOY_VARS["REDIS_PORT"]="6379"
+        info "Use built-in Redis: ${DEPLOY_VARS["REDIS_HOST"]}"
+        return
+    fi
+
+    error "DEPLOYMENT_MODE=distributed but Redis is not ready. Deploy with: ./deploy.sh up redis"
+}
 
 check_dependency(){
     detect_os
@@ -227,42 +256,19 @@ check_yr_claw_up_dependency(){
     check_if_yr_exist
 }
 
-check_if_redis_up() {
-    local mode="${DEPLOY_VARS["DEPLOYMENT_MODE"]:-standalone}"
-    local name="${DEPLOY_VARS["REDIS_NAME"]}"
-
-    if [[ "${mode}" != "active-standby" ]]; then
-        info "DEPLOYMENT_MODE=${mode}, skip Redis check"
-        return
-    fi
-
-    if [ -n "${DEPLOY_VARS["REDIS_HOST"]:-}" ]; then
-        info "Use configured Redis: ${DEPLOY_VARS["REDIS_HOST"]}"
-        return
-    fi
-
-    if check_k8s_resource_exists "deployment" "${name}" "default"; then
-        DEPLOY_VARS["REDIS_HOST"]="${name}.default.svc.cluster.local"
-        DEPLOY_VARS["REDIS_PORT"]="6379"
-        info "Use built-in Redis: ${DEPLOY_VARS["REDIS_HOST"]}"
-        return
-    fi
-
-    error "DEPLOYMENT_MODE=active-standby but Redis is not ready. Deploy with: ./deploy.sh up redis"
-}
-
 check_gateway_up_dependency(){
     local jiuwenclaw_path=${DEPLOY_VARS["JIUWENCLAW_PATH"]}
     local nfs_dname=${DEPLOY_VARS["NFS_NAME"]}
 
     check_if_nfs_up
 
-    info "Preparing JiuwenClaw data directory: ${jiuwenclaw_path}"
-    local nfs_pod=$(kubectl get pods -n default -l app=${nfs_dname} -o jsonpath='{.items[0].metadata.name}')
-    info "Executing: kubectl exec ${nfs_pod} -- sh -c \"mkdir -p ${jiuwenclaw_path} && chown 1000:1000 ${jiuwenclaw_path} && chmod 777 ${jiuwenclaw_path}\""
-    kubectl exec ${nfs_pod} -- sh -c "mkdir -p ${jiuwenclaw_path} && chown 1000:1000 ${jiuwenclaw_path} && chmod 777 ${jiuwenclaw_path}"
-
-    success "JiuwenClaw directory created successfully in NFS Pod!"
+    if [ "${DEPLOY_VARS["ENABLE_EXTERNAL_NFS"]}" == "false" ]; then
+        info "Preparing JiuwenClaw data directory: ${jiuwenclaw_path}"
+        local nfs_pod=$(kubectl get pods -n default -l app=${nfs_dname} -o jsonpath='{.items[0].metadata.name}')
+        info "Executing: kubectl exec ${nfs_pod} -- sh -c \"mkdir -p ${jiuwenclaw_path} && chown 1000:1000 ${jiuwenclaw_path} && chmod 777 ${jiuwenclaw_path}\""
+        kubectl exec ${nfs_pod} -- sh -c "mkdir -p ${jiuwenclaw_path} && chown 1000:1000 ${jiuwenclaw_path} && chmod 777 ${jiuwenclaw_path}"
+        success "JiuwenClaw directory created successfully in NFS Pod!"
+    fi
 
     check_if_db_up
     check_if_redis_up
@@ -284,12 +290,14 @@ check_rabbitmq_up_dependency(){
 
     check_if_nfs_up
 
-    info "Preparing RabbitMQ data directory: ${rabbit_path}"
-    local nfs_pod=$(kubectl get pods -n default -l app=${nfs_dname} -o jsonpath='{.items[0].metadata.name}')
+    if [ "${DEPLOY_VARS["ENABLE_EXTERNAL_NFS"]}" == "false" ]; then
+        info "Preparing RabbitMQ data directory: ${rabbit_path}"
+        local nfs_pod=$(kubectl get pods -n default -l app=${nfs_dname} -o jsonpath='{.items[0].metadata.name}')
 
-    info "Executing: kubectl exec ${nfs_pod} -- sh -c \"mkdir -p ${rabbit_path}\""
-    kubectl exec ${nfs_pod} -- sh -c "mkdir -p ${rabbit_path}"
-    success "RabbitMQ directory created successfully in NFS Pod!"
+        info "Executing: kubectl exec ${nfs_pod} -- sh -c \"mkdir -p ${rabbit_path}\""
+        kubectl exec ${nfs_pod} -- sh -c "mkdir -p ${rabbit_path}"
+        success "RabbitMQ directory created successfully in NFS Pod!"
+    fi
 }
 
 check_mysql_up_dependency(){
@@ -298,12 +306,14 @@ check_mysql_up_dependency(){
 
     check_if_nfs_up
 
-    info "Preparing MySQL data directory: ${mysql_path}"
-    local nfs_pod=$(kubectl get pods -n default -l app=${nfs_dname} -o jsonpath='{.items[0].metadata.name}')
+    if [ "${DEPLOY_VARS["ENABLE_EXTERNAL_NFS"]}" == "false" ]; then
+        info "Preparing MySQL data directory: ${mysql_path}"
+        local nfs_pod=$(kubectl get pods -n default -l app=${nfs_dname} -o jsonpath='{.items[0].metadata.name}')
 
-    info "Executing: kubectl exec ${nfs_pod} -- sh -c \"mkdir -p ${mysql_path}\""
-    kubectl exec ${nfs_pod} -- sh -c "mkdir -p ${mysql_path}"
-    success "MySQL directory created successfully in NFS Pod!"
+        info "Executing: kubectl exec ${nfs_pod} -- sh -c \"mkdir -p ${mysql_path}\""
+        kubectl exec ${nfs_pod} -- sh -c "mkdir -p ${mysql_path}"
+        success "MySQL directory created successfully in NFS Pod!"
+    fi
 }
 
 check_postgresql_up_dependency(){
@@ -312,12 +322,14 @@ check_postgresql_up_dependency(){
 
     check_if_nfs_up
 
-    info "Preparing PostgreSQL data directory: ${pg_path}"
-    local nfs_pod=$(kubectl get pods -n default -l app=${nfs_dname} -o jsonpath='{.items[0].metadata.name}')
+    if [ "${DEPLOY_VARS["ENABLE_EXTERNAL_NFS"]}" == "false" ]; then
+        info "Preparing PostgreSQL data directory: ${pg_path}"
+        local nfs_pod=$(kubectl get pods -n default -l app=${nfs_dname} -o jsonpath='{.items[0].metadata.name}')
 
-    info "Executing: kubectl exec ${nfs_pod} -- sh -c \"mkdir -p ${pg_path}\""
-    kubectl exec ${nfs_pod} -- sh -c "mkdir -p ${pg_path}"
-    success "PostgreSQL directory created successfully in NFS Pod!"
+        info "Executing: kubectl exec ${nfs_pod} -- sh -c \"mkdir -p ${pg_path}\""
+        kubectl exec ${nfs_pod} -- sh -c "mkdir -p ${pg_path}"
+        success "PostgreSQL directory created successfully in NFS Pod!"
+    fi
 }
 
 check_manager_up_dependency(){

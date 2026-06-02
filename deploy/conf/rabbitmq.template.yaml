@@ -92,18 +92,20 @@ metadata:
     app: <<RABBITMQ_NAME>>
 spec:
   capacity:
-    storage: 100Gi
+    storage: 4Gi
   accessModes:
     - ReadWriteOnce                       
   persistentVolumeReclaimPolicy: Retain   
   storageClassName: ""                    # 不使用 StorageClass
   nfs:
     server: <<NFS_SERVER_ADDR>>           # NFS 服务器地址
-    path: /rabbitmq                       # NFS 共享路径
+    path: <<RABBITMQ_NFS_PATH>>                       # NFS 共享路径
     readOnly: false
   mountOptions:
     - nfsvers=4
-    - hard
+    - soft        # 改成 soft！防止节点卡死
+    - timeo=600   # 超时时间：60秒
+    - retrans=2   # 重试2次
     - noatime
 ---
 apiVersion: v1
@@ -115,7 +117,7 @@ spec:
     - ReadWriteOnce
   resources:
     requests:
-      storage: 10Gi
+      storage: 2Gi
   storageClassName: ""        # 不使用 StorageClass
   selector:
     matchLabels:
