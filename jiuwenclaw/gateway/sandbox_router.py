@@ -19,7 +19,7 @@ from jiuwenclaw.sandbox.sandbox_routing_dcs_store import (
     get_gateway_instance_id,
     sandbox_adopt_existing_enabled,
 )
-from jiuwenclaw.sandbox.workspace_dcs_store import WorkspaceDcsStore
+from jiuwenclaw.sandbox.workspace_dcs_store import WorkspaceDcsStore, WorkspaceRecord
 from jiuwenclaw.e2a.gateway_normalize import e2a_from_agent_fields
 from jiuwenclaw.e2a.models import E2AEnvelope
 from jiuwenclaw.gateway.agent_client import AgentServerClient
@@ -930,6 +930,22 @@ class SandboxRouterAgentClient(AgentServerClient):
         return restored_ids
 
     @staticmethod
+    def _should_skip_workspace_restore_for_live_sandbox(
+        runtime: SandboxRuntime,
+        record: WorkspaceRecord,
+    ) -> bool:
+        """Skip batch_download when reusing a live sandbox whose disk already holds workspace."""
+        if runtime.metadata.get("adopted"):
+            return True
+        record_sandbox_id = str(record.sandbox_id or "").strip()
+        runtime_sandbox_id = str(runtime.sandbox_id or "").strip()
+        return bool(
+            record_sandbox_id
+            and runtime_sandbox_id
+            and record_sandbox_id == runtime_sandbox_id
+        )
+
+    @staticmethod
     def _workspace_restore_lock(runtime: SandboxRuntime, session_id: str) -> asyncio.Lock:
         locks = runtime.metadata.get("workspace_restore_locks")
         if not isinstance(locks, dict):
@@ -983,6 +999,18 @@ class SandboxRouterAgentClient(AgentServerClient):
 
             record = await self._get_workspace_dcs_store().get_workspace(session_id)
             if record is None:
+                return
+
+            if self._should_skip_workspace_restore_for_live_sandbox(runtime, record):
+                restored_ids.add(session_id)
+                logger.info(
+                    "Skipped workspace restore for live sandbox: session_id=%s "
+                    "sandbox_id=%s adopted=%s workspace_sandbox_id=%s",
+                    session_id,
+                    runtime.sandbox_id,
+                    bool(runtime.metadata.get("adopted")),
+                    str(record.sandbox_id or "").strip(),
+                )
                 return
 
             user_id = str(envelope.user_id or runtime.metadata.get("user_id") or "").strip()
