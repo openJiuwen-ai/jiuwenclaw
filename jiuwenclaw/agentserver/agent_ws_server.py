@@ -136,8 +136,6 @@ class AgentWebSocketServer:
         self._oa_receiver_task: asyncio.Task | None = None
         self._oa_running: bool = False
         self._oa_heartbeat_interval: float = float(os.getenv("AGENTSERVER_TO_OA_HB_INTERVAL", "30.0"))  # 应用层心跳间隔
-        self._oa_heartbeat_task: asyncio.Task | None = None
-        self._oa_message_task: asyncio.Task | None = None  # 消息接收任务
         self._oa_connection_active: asyncio.Event = asyncio.Event()  # 连接状态事件
 
         get_acp_output_manager().set_send_push_callback(
@@ -517,7 +515,6 @@ class AgentWebSocketServer:
 
         retry_count = 0
 
-
         while self._oa_running:
             ws = None
             try:
@@ -546,24 +543,21 @@ class AgentWebSocketServer:
                 )
                 retry_count = 0  # 重置重试计数
 
-
                 logger.info("[AgentWebSocketServer] WebSocket 连接已建立，等待 OpenAbility 建连确认...")
-                await self._trigger_agent_server_started_hook()
                 # 发送 INIT 消息，携带 apiKey 和 sandboxId
-                try:
-                    init_msg = init_oa_message("INIT")
-                    await ws.send(json.dumps(init_msg, ensure_ascii=False))
-                    logger.info("[AgentWebSocketServer] 已发送 INIT 消息到 OpenAbility")
-                    # 等待 OA 返回第一条建连成功消息
-                    if not await oa_wait_connection_ack(ws, timeout=10.0):
-                        await ws.close()
-                        raise RuntimeError("OpenAbility 建连确认失败")
-                    logger.info("[AgentWebSocketServer] OpenAbility 连接已确认，开始业务处理")
-                except Exception as e:
-                    logger.warning("[AgentWebSocketServer] 发送 INIT 消息失败: %s", e)
-                if retry_count != 0:
+                init_msg = init_oa_message("INIT")
+                await ws.send(json.dumps(init_msg, ensure_ascii=False))
+                logger.info("[AgentWebSocketServer] 已发送 INIT 消息到 OpenAbility")
+                # 等待 OA 返回第一条建连成功消息
+                if not await oa_wait_connection_ack(ws, timeout=10.0):
+                    await ws.close()
+                    raise RuntimeError("OpenAbility 建连确认失败")
+                logger.info("[AgentWebSocketServer] OpenAbility 连接已确认，开始业务处理")
+                if retry_count:
                     logger.info("[AgentWebSocketServer] OpenAbility 连接已恢复，模型服务继续运行")
 
+                retry_count = 0
+                await self._trigger_agent_server_started_hook()
                 # 运行连接（心跳 + 消息接收）
                 await self._oa_run_connection(ws)
 
@@ -1053,7 +1047,7 @@ class AgentWebSocketServer:
     async def _handle_stream(self, ws: Any, request: AgentRequest, send_lock: asyncio.Lock) -> None:
         """流式处理：调用 process_message_stream，逐条发送 E2AResponse 线 JSON。"""
         channel_id = request.channel_id or "default"
-
+        session_id = request.session_id
         chunk_count = 0
         # 心跳控制：当有真实 chunk 发送时重置，空闲时发送心跳
         heartbeat_event = asyncio.Event()
@@ -1106,6 +1100,13 @@ class AgentWebSocketServer:
                     chunk,
                     response_id=request.request_id,
                     sequence=chunk_count - 1,
+                )
+                logger.info(
+                    "[AgentWebSocketServer] [%s] send stream chunk request_id=%s response_id=%s seq=%s",
+                    str(session_id or "default").strip(),
+                    chunk.request_id,
+                    request.request_id,
+                    chunk_count - 1
                 )
                 await self._send_message(ws, wire, send_lock)
                 # 清除 event，让心跳任务重新开始计时

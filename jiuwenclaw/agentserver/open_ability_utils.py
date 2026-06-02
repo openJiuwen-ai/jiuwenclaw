@@ -78,7 +78,7 @@ def init_oa_message(msg_type, data=None):
 
 
 def get_oa_auth_headers(
-    retry_interval: float = 3.0,
+    retry_interval: float = 3.0, session_id: str = ""
 ) -> dict[str, str]:
     """从环境变量获取 OA 鉴权 headers，无限轮询直到获取全。
 
@@ -92,6 +92,7 @@ def get_oa_auth_headers(
 
     Args:
         retry_interval: 重试间隔秒数，默认3秒
+        session_id: 默认 default
 
     Returns:
         包含鉴权信息的 headers 字典
@@ -108,7 +109,7 @@ def get_oa_auth_headers(
             headers["x-api-key"] = api_key
             headers["x-sandbox-id"] = sandbox_id
             headers["x-request-from"] = "jiuwenclaw"
-            headers["x-hag-trace-id"] = "rytest001"
+            headers["x-hag-trace-id"] = session_id if session_id else "default"
             if attempt > 0:
                 logger.info(
                     "[AgentWebSocketServer] 成功获取 OpenAbility 鉴权 headers (等待 %d 秒)",
