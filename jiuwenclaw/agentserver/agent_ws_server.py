@@ -343,6 +343,92 @@ class AgentWebSocketServer:
         except Exception as e:
             logger.exception("[AgentWebSocketServer] -> OpenAbility 心跳循环异常: %s", e)
 
+    async def _handle_link_ping(
+        self,
+        ws: Any,
+        env: E2AEnvelope,
+        send_lock: asyncio.Lock,
+    ) -> None:
+        """Gateway 经 OA 发来的链路 ping：立即 pong 并主动发一帧 link heartbeat。"""
+        from jiuwenclaw.agentserver.open_ability_utils import get_sandbox_id
+        from jiuwenclaw.e2a.constants import (
+            AGENTSERVER_LINK_HEARTBEAT_CHANNEL,
+            AGENTSERVER_LINK_PONG_EVENT,
+        )
+        from jiuwenclaw.e2a.link_heartbeat import build_link_heartbeat_wire
+
+        params = dict(env.params or {})
+        sid = str(params.get("sandbox_id") or get_sandbox_id() or "").strip()
+        request_id = str(env.request_id or "")
+        resp = AgentResponse(
+            request_id=request_id,
+            channel_id=str(env.channel or AGENTSERVER_LINK_HEARTBEAT_CHANNEL),
+            ok=True,
+            payload={
+                "event_type": AGENTSERVER_LINK_PONG_EVENT,
+                "sandbox_id": sid,
+            },
+        )
+        wire = encode_agent_response_for_wire(resp, response_id=request_id)
+        await self._send_message(ws, wire, send_lock)
+        logger.info(
+            "[AgentWebSocketServer] link ping -> pong: sandbox_id=%s request_id=%s",
+            sid,
+            request_id,
+        )
+        if self._oa_mode and sid and self._current_ws is ws:
+            hb_wire = build_link_heartbeat_wire(sandbox_id=sid)
+            await self._send_message(ws, hb_wire, send_lock)
+            logger.info(
+                "[AgentWebSocketServer] link ping triggered immediate link heartbeat: sandbox_id=%s",
+                sid,
+            )
+
+    async def _oa_link_heartbeat_loop(self, send_lock: asyncio.Lock) -> None:
+        """OA 模式：向 Gateway 发送链路探活（经 OA 转发的标准 E2A 响应帧）。"""
+        from jiuwenclaw.agentserver.link_heartbeat import LinkHeartbeatConfig
+        from jiuwenclaw.e2a.link_heartbeat import build_link_heartbeat_wire
+        from jiuwenclaw.agentserver.open_ability_utils import get_sandbox_id
+
+        cfg = LinkHeartbeatConfig.from_env()
+        if not cfg.enabled:
+            logger.info("[AgentWebSocketServer] AgentServer link heartbeat disabled")
+            return
+
+        try:
+            while self._oa_running and self._oa_connection_active.is_set():
+                sandbox_id = get_sandbox_id()
+                if sandbox_id and self._current_ws is not None and self._current_send_lock is not None:
+                    try:
+                        wire = build_link_heartbeat_wire(sandbox_id=str(sandbox_id))
+                        await self._send_message(self._current_ws, wire, send_lock)
+                        logger.info(
+                            "[AgentWebSocketServer] -> Gateway link heartbeat sent: sandbox_id=%s request_id=%s",
+                            sandbox_id,
+                            wire.get("request_id"),
+                        )
+                    except Exception as e:  # noqa: BLE001
+                        logger.warning(
+                            "[AgentWebSocketServer] -> Gateway link heartbeat failed: %s",
+                            e,
+                        )
+                elif not sandbox_id:
+                    logger.info(
+                        "[AgentWebSocketServer] skip link heartbeat: sandbox_id unavailable"
+                    )
+
+                await asyncio.sleep(cfg.interval_seconds)
+                if not self._oa_running or not self._oa_connection_active.is_set():
+                    break
+        except asyncio.CancelledError:
+            logger.debug("[AgentWebSocketServer] -> Gateway link heartbeat task cancelled")
+            raise
+        except Exception as e:
+            logger.exception(
+                "[AgentWebSocketServer] -> Gateway link heartbeat loop error: %s",
+                e,
+            )
+
     async def _oa_receive_loop(self, ws: Any, send_lock: asyncio.Lock) -> None:
         """OA 模式：消息接收循环，与心跳并行运行。"""
         import websockets
@@ -386,11 +472,15 @@ class AgentWebSocketServer:
             self._oa_receive_loop(ws, send_lock),
             name="oa-receive"
         )
+        link_heartbeat_task = asyncio.create_task(
+            self._oa_link_heartbeat_loop(send_lock),
+            name="oa-link-heartbeat",
+        )
 
         try:
             # 等待任一任务完成（通常是接收任务因连接断开而结束）
             done, pending = await asyncio.wait(
-                [heartbeat_task, receive_task],
+                [heartbeat_task, receive_task, link_heartbeat_task],
                 return_when=asyncio.FIRST_COMPLETED
             )
 
@@ -720,6 +810,11 @@ class AgentWebSocketServer:
             )
             request = _payload_to_request(data)
         else:
+            from jiuwenclaw.e2a.constants import AGENTSERVER_LINK_PING_METHOD
+
+            if env.method == AGENTSERVER_LINK_PING_METHOD:
+                await self._handle_link_ping(ws, env, send_lock)
+                return
             jw = (env.channel_context or {}).get(E2A_INTERNAL_CONTEXT_KEY)
             if isinstance(jw, dict) and jw.get(E2A_FALLBACK_FAILED_KEY):
                 legacy = jw.get(E2A_LEGACY_AGENT_REQUEST_KEY)

@@ -94,6 +94,12 @@ E2A_WIRE_LEGACY_AGENT_CHUNK_KEY = "_e2a_wire_legacy_agent_chunk"
 # AgentServer send_push：与 RPC 响应共用 WebSocket，须标出以免抢占 unary/stream 等待队列
 E2A_WIRE_SERVER_PUSH_KEY = "_jiuwenclaw_server_push"
 
+# AgentServer → Gateway 链路探活（经 OA 转发的标准 E2A 响应帧，Sandbox 模式）
+AGENTSERVER_LINK_HEARTBEAT_EVENT = "agentserver.link.heartbeat"
+AGENTSERVER_LINK_HEARTBEAT_CHANNEL = "__agentserver_link__"
+AGENTSERVER_LINK_PING_METHOD = "agentserver.link.ping"
+AGENTSERVER_LINK_PONG_EVENT = "agentserver.link.pong"
+
 # 仅用于编解码 / 队列语义，不得随业务 channel metadata 下发给 Message.metadata
 E2A_WIRE_INTERNAL_METADATA_KEYS: frozenset[str] = frozenset(
     {

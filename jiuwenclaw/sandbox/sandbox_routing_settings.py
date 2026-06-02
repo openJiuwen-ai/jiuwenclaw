@@ -8,6 +8,8 @@ _IDLE_CHECK_INTERVAL_SECONDS = 30.0
 _DEFAULT_IDLE_TIMEOUT_SECONDS = 600.0
 _DEFAULT_MAX_SANDBOXES = 10
 _DEFAULT_QUEUE_MAX_SIZE = 100
+_DEFAULT_LINK_HEARTBEAT_TIMEOUT_SECONDS = 15.0
+_DEFAULT_LINK_HEARTBEAT_CHECK_INTERVAL_SECONDS = 5.0
 
 
 def sandbox_routing_enabled() -> bool:
@@ -21,6 +23,9 @@ class SandboxRoutingSettings:
     queue_timeout_seconds: float = _QUEUE_TIMEOUT_SECONDS
     idle_timeout_seconds: float = _DEFAULT_IDLE_TIMEOUT_SECONDS
     idle_check_interval_seconds: float = _IDLE_CHECK_INTERVAL_SECONDS
+    link_heartbeat_enabled: bool = True
+    link_heartbeat_timeout_seconds: float = _DEFAULT_LINK_HEARTBEAT_TIMEOUT_SECONDS
+    link_heartbeat_check_interval_seconds: float = _DEFAULT_LINK_HEARTBEAT_CHECK_INTERVAL_SECONDS
 
     @classmethod
     def from_env(cls) -> SandboxRoutingSettings:
@@ -30,12 +35,26 @@ class SandboxRoutingSettings:
             "SANDBOX_IDLE_TIMEOUT_SECONDS",
             default=_DEFAULT_IDLE_TIMEOUT_SECONDS,
         )
+        link_heartbeat_timeout_seconds = _env_float(
+            "SANDBOX_LINK_HEARTBEAT_TIMEOUT_SECONDS",
+            default=_DEFAULT_LINK_HEARTBEAT_TIMEOUT_SECONDS,
+        )
+        link_heartbeat_check_interval_seconds = _env_float(
+            "SANDBOX_LINK_HEARTBEAT_CHECK_INTERVAL_SECONDS",
+            default=_DEFAULT_LINK_HEARTBEAT_CHECK_INTERVAL_SECONDS,
+        )
         return cls(
             max_sandboxes=max(1, max_sandboxes),
             queue_max_size=max(1, queue_max_size),
             queue_timeout_seconds=_QUEUE_TIMEOUT_SECONDS,
             idle_timeout_seconds=max(0.0, idle_timeout_seconds),
             idle_check_interval_seconds=_IDLE_CHECK_INTERVAL_SECONDS,
+            link_heartbeat_enabled=_env_bool("SANDBOX_LINK_HEARTBEAT_ENABLED", default=True),
+            link_heartbeat_timeout_seconds=max(1.0, link_heartbeat_timeout_seconds),
+            link_heartbeat_check_interval_seconds=max(
+                1.0,
+                link_heartbeat_check_interval_seconds,
+            ),
         )
 
 

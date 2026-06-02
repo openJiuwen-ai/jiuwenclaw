@@ -116,6 +116,14 @@ class SandboxRouterAgentClient(AgentServerClient):
             if idle_check_interval_seconds is not None
             else settings.idle_check_interval_seconds
         )
+        self._link_heartbeat_enabled = settings.link_heartbeat_enabled
+        self._link_heartbeat_timeout_seconds = float(
+            settings.link_heartbeat_timeout_seconds
+        )
+        self._link_heartbeat_check_interval_seconds = float(
+            settings.link_heartbeat_check_interval_seconds
+        )
+        self._link_heartbeat_task: asyncio.Task | None = None
         self._adopt_existing_enabled = (
             sandbox_adopt_existing_enabled()
             if adopt_existing is None
@@ -145,6 +153,13 @@ class SandboxRouterAgentClient(AgentServerClient):
 
     async def disconnect(self) -> None:
         self._closed = True
+        if self._link_heartbeat_task is not None:
+            self._link_heartbeat_task.cancel()
+            try:
+                await self._link_heartbeat_task
+            except asyncio.CancelledError:
+                pass
+            self._link_heartbeat_task = None
         if self._idle_task is not None:
             self._idle_task.cancel()
             try:
@@ -185,6 +200,111 @@ class SandboxRouterAgentClient(AgentServerClient):
             ac = runtime.agent_client
             if hasattr(ac, "set_server_push_handler"):
                 ac.set_server_push_handler(handler)
+
+    async def record_link_heartbeat(
+        self,
+        sandbox_id: str,
+        payload: dict[str, Any] | None = None,
+    ) -> None:
+        """AgentServer 经 OA 上报链路探活；更新对应 runtime 的最后心跳时间。"""
+        sid = str(sandbox_id or "").strip()
+        if not sid:
+            return
+        now = time.time()
+        async with self._pool_lock:
+            for runtime in self._runtimes.values():
+                if runtime.sandbox_id != sid:
+                    continue
+                runtime.metadata["last_link_heartbeat_at"] = now
+                if payload:
+                    runtime.metadata["last_link_heartbeat_payload"] = dict(payload)
+                logger.info(
+                    "Recorded AgentServer link heartbeat: sandbox_id=%s routing_key=%s",
+                    sid,
+                    runtime.routing_key,
+                )
+                return
+        logger.info(
+            "Ignored AgentServer link heartbeat for unknown sandbox_id=%s",
+            sid,
+        )
+
+    async def _handle_inbound_link_heartbeat(self, wire: dict[str, Any]) -> None:
+        from jiuwenclaw.e2a.link_heartbeat import (
+            extract_link_heartbeat_payload,
+            extract_link_heartbeat_sandbox_id,
+        )
+
+        sandbox_id = extract_link_heartbeat_sandbox_id(wire)
+        if not sandbox_id:
+            return
+        await self.record_link_heartbeat(
+            sandbox_id,
+            extract_link_heartbeat_payload(wire),
+        )
+
+    async def _probe_link_return_path(self, runtime: SandboxRuntime) -> bool:
+        return await self._probe_link_return_path_for_client(
+            runtime.sandbox_id,
+            runtime.routing_key,
+            runtime.agent_client,
+            runtime.metadata,
+        )
+
+    async def _probe_link_return_path_for_client(
+        self,
+        sandbox_id: str,
+        routing_key: str,
+        agent_client: AgentServerClient,
+        metadata: dict[str, Any] | None = None,
+    ) -> bool:
+        """Gateway→OA→AgentServer 轻量 ping，激活 OA 反向路由以接收 link heartbeat。"""
+        from jiuwenclaw.e2a.constants import (
+            AGENTSERVER_LINK_HEARTBEAT_CHANNEL,
+            AGENTSERVER_LINK_PING_METHOD,
+        )
+
+        request_id = f"link-ping-{format(int(time.time() * 1000), 'x')}_{secrets.token_hex(3)}"
+        envelope = e2a_from_agent_fields(
+            request_id=request_id,
+            channel_id=AGENTSERVER_LINK_HEARTBEAT_CHANNEL,
+            session_id=AGENTSERVER_LINK_HEARTBEAT_CHANNEL,
+            req_method=AGENTSERVER_LINK_PING_METHOD,
+            params={"sandbox_id": sandbox_id},
+        )
+        try:
+            resp = await asyncio.wait_for(
+                agent_client.send_request(envelope),
+                timeout=5.0,
+            )
+            ok = bool(resp.ok)
+            if ok:
+                logger.info(
+                    "Link return path probe OK: sandbox_id=%s routing_key=%s request_id=%s",
+                    sandbox_id,
+                    routing_key,
+                    request_id,
+                )
+                if metadata is not None:
+                    metadata["last_link_probe_at"] = time.time()
+            else:
+                logger.warning(
+                    "Link return path probe rejected: sandbox_id=%s routing_key=%s request_id=%s payload=%s",
+                    sandbox_id,
+                    routing_key,
+                    request_id,
+                    resp.payload,
+                )
+            return ok
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "Link return path probe failed: sandbox_id=%s routing_key=%s request_id=%s error=%s",
+                sandbox_id,
+                routing_key,
+                request_id,
+                exc,
+            )
+            return False
 
     async def send_request(self, envelope: E2AEnvelope) -> AgentResponse:
         try:
@@ -558,13 +678,79 @@ class SandboxRouterAgentClient(AgentServerClient):
         return None
 
     def _ensure_idle_task(self) -> None:
-        if self._idle_task is not None or self._closed:
+        if self._closed:
             return
         try:
             loop = asyncio.get_running_loop()
         except RuntimeError:
             return
-        self._idle_task = loop.create_task(self._idle_cleanup_loop(), name="sandbox-router-idle-cleanup")
+        if self._idle_task is None:
+            self._idle_task = loop.create_task(
+                self._idle_cleanup_loop(),
+                name="sandbox-router-idle-cleanup",
+            )
+        if self._link_heartbeat_enabled and self._link_heartbeat_task is None:
+            self._link_heartbeat_task = loop.create_task(
+                self._link_heartbeat_watch_loop(),
+                name="sandbox-router-link-heartbeat-watch",
+            )
+
+    async def _link_heartbeat_watch_loop(self) -> None:
+        while not self._closed:
+            await asyncio.sleep(self._link_heartbeat_check_interval_seconds)
+            for routing_key, runtime in list(self._runtimes.items()):
+                if runtime.status in {
+                    SandboxStatus.TERMINATING,
+                    SandboxStatus.TERMINATED,
+                }:
+                    continue
+                if await self._is_link_heartbeat_stale(runtime):
+                    await self._handle_stale_link_heartbeat(runtime)
+
+    async def _is_link_heartbeat_stale(self, runtime: SandboxRuntime) -> bool:
+        if not self._link_heartbeat_enabled:
+            return False
+        if self._runtime_needs_openability_refresh(runtime):
+            return False
+        now = time.time()
+        last = runtime.metadata.get("last_link_heartbeat_at")
+        if last is not None:
+            return now - float(last) >= self._link_heartbeat_timeout_seconds
+        anchor = runtime.metadata.get("openability_connected_at")
+        if anchor is None:
+            anchor = runtime.created_at
+        return now - float(anchor) >= self._link_heartbeat_timeout_seconds
+
+    async def _handle_stale_link_heartbeat(self, runtime: SandboxRuntime) -> None:
+        logger.warning(
+            "AgentServer link heartbeat timeout: routing_key=%s sandbox_id=%s "
+            "timeout=%.1fs last=%s",
+            runtime.routing_key,
+            runtime.sandbox_id,
+            self._link_heartbeat_timeout_seconds,
+            runtime.metadata.get("last_link_heartbeat_at"),
+        )
+        if await self._probe_link_return_path(runtime):
+            runtime.metadata["openability_connected_at"] = time.time()
+            logger.info(
+                "Recovered link return path via probe after heartbeat timeout: "
+                "routing_key=%s sandbox_id=%s",
+                runtime.routing_key,
+                runtime.sandbox_id,
+            )
+            return
+        await self._handle_open_ability_connection_lost(
+            sandbox_id=runtime.sandbox_id,
+            routing_key=runtime.routing_key,
+            agent_client=runtime.agent_client,
+            payload={
+                "event": "agentserver.link.heartbeat.timeout",
+                "sandbox_id": runtime.sandbox_id,
+                "routing_key": runtime.routing_key,
+                "timeout_seconds": self._link_heartbeat_timeout_seconds,
+                "last_link_heartbeat_at": runtime.metadata.get("last_link_heartbeat_at"),
+            },
+        )
 
     async def _idle_cleanup_loop(self) -> None:
         while not self._closed:
@@ -930,6 +1116,8 @@ class SandboxRouterAgentClient(AgentServerClient):
                     payload=payload,
                 )
             )
+        if hasattr(client, "set_link_heartbeat_handler"):
+            client.set_link_heartbeat_handler(self._handle_inbound_link_heartbeat)
         logger.info(
             "Connecting OpenAbility WebSocket for sandbox_id=%s routing_key=%s uri=%s",
             sandbox_id,
@@ -942,6 +1130,14 @@ class SandboxRouterAgentClient(AgentServerClient):
         )
         metadata["openability_endpoint"] = endpoint
         metadata["openability_ws_uri"] = ws_uri
+        metadata["openability_connected_at"] = time.time()
+        metadata.pop("last_link_heartbeat_at", None)
+        await self._probe_link_return_path_for_client(
+            sandbox_id,
+            routing_key,
+            client,
+            metadata,
+        )
         return client
 
     async def _wait_openability_endpoint(

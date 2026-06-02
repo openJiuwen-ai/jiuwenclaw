@@ -105,6 +105,7 @@ class OpenAbilityWebSocketClient(AgentServerClient):
         self._running = False
         self._on_server_push: Callable[[dict[str, Any]], Awaitable[None]] | None = None
         self._on_connection_lost: Callable[[dict[str, Any]], Awaitable[None]] | None = None
+        self._on_link_heartbeat: Callable[[dict[str, Any]], Awaitable[None]] | None = None
 
     @property
     def sandbox_id(self) -> str:
@@ -123,6 +124,11 @@ class OpenAbilityWebSocketClient(AgentServerClient):
         self, handler: Callable[[dict[str, Any]], Awaitable[None]] | None
     ) -> None:
         self._on_connection_lost = handler
+
+    def set_link_heartbeat_handler(
+        self, handler: Callable[[dict[str, Any]], Awaitable[None]] | None
+    ) -> None:
+        self._on_link_heartbeat = handler
 
     def set_or_update_server_config(
         self,
@@ -228,6 +234,8 @@ class OpenAbilityWebSocketClient(AgentServerClient):
                                 data.get("request_id"),
                             )
                         continue
+                    if self._dispatch_link_heartbeat(data):
+                        continue
                     request_id = _wire_request_id_key(data.get("request_id"))
                     async with self._queue_lock:
                         if request_id in self._cancelled_request_ids:
@@ -287,6 +295,27 @@ class OpenAbilityWebSocketClient(AgentServerClient):
             if disconnect_payload is not None and self._on_connection_lost is not None:
                 asyncio.create_task(self._on_connection_lost(disconnect_payload))
             logger.info("%s 消息接收任务已停止", _LOG_LABEL)
+
+    def _dispatch_link_heartbeat(self, data: dict[str, Any]) -> bool:
+        from jiuwenclaw.e2a.link_heartbeat import is_link_heartbeat_wire
+
+        if not is_link_heartbeat_wire(data):
+            return False
+        if self._on_link_heartbeat is not None:
+            logger.info(
+                "%s 收到 AgentServer link heartbeat: sandbox_id=%s request_id=%s",
+                _LOG_LABEL,
+                self._sandbox_id,
+                data.get("request_id"),
+            )
+            asyncio.create_task(self._on_link_heartbeat(data))
+        else:
+            logger.info(
+                "%s 收到 link heartbeat 但未注册 handler: request_id=%s",
+                _LOG_LABEL,
+                data.get("request_id"),
+            )
+        return True
 
     def _ensure_connected(self) -> None:
         if self._ws is None:

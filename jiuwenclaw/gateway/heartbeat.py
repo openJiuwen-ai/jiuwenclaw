@@ -171,7 +171,7 @@ class GatewayHeartbeatService(IHeartbeat):
 
         # 若当前时间不在 active_hours 配置范围内，则跳过本次心跳
         if not self._is_active_now():
-            logger.debug(
+            logger.info(
                 "Gateway heartbeat skipped due to inactive hours: %r",
                 self._config.active_hours,
             )
@@ -240,7 +240,7 @@ class GatewayHeartbeatService(IHeartbeat):
                     event_type=EventType.HEARTBEAT_RELAY,
                 )
                 await self._message_handler.publish_robot_messages(relay_msg)
-                logger.debug("Gateway heartbeat relay to channel %s", self._config.relay_channel_id)
+                logger.info("Gateway heartbeat relay to channel %s", self._config.relay_channel_id)
 
         except asyncio.TimeoutError:
             self._last_tick_ok = False
