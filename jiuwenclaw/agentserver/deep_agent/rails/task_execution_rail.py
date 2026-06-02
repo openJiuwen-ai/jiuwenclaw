@@ -45,12 +45,6 @@ def _mark_as_sent(path: str) -> None:
     for k in expired_keys:
         _ARTIFACT_SEND_CACHE.pop(k, None)
 
-_ARTIFACT_PREVIEW_EXTENSIONS = frozenset({
-    ".md", ".html", ".pptx", ".docx", ".xlsx", ".xlsm", ".csv", ".tsv",
-    ".pdf", ".txt", ".json", ".yaml", ".yml", ".xml",
-    ".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg",
-})
-
 # 文件路径检测的正则表达式模式（仅用于正文回退扫描）
 _FILE_PATH_PATTERNS = [
     # 变量路径：{workspace}/... 或 {output_dir}/...
@@ -99,29 +93,13 @@ _PATH_TRAILING_CHARS = "'\"`\\]\\}\\),.;:，。；、："
 
 
 def _is_excluded_path(path_str: str) -> bool:
-    """检查路径是否应该被排除（非产物文件）。
-
-    1. 无条件排除规则（SKILL.md, node_modules 等）
-    2. 扩展名不在支持列表中 → 排除
-    
-    Args:
-        path_str: 待检查的路径字符串
-    
-    Returns:
-        True 如果是排除的路径，False 否则
+    """检查路径是否应排除（非产物）
+    正文回退扫描另由 _FILE_PATH_PATTERNS 限定 workspace/output 路径。
     """
-    # Step 1: 无条件排除规则
     for pattern in _ALWAYS_EXCLUDED_PATH_PATTERNS:
         if pattern.search(path_str):
             return True
-    
-    # Step 2: 扩展名检查
-    path_lower = path_str.lower()
-    for ext in _ARTIFACT_PREVIEW_EXTENSIONS:
-        if path_lower.endswith(ext):
-            return False
-
-    return True
+    return False
 
 
 def _clean_path_candidate(path_str: str) -> str:
@@ -170,9 +148,7 @@ def _extract_artifact_paths_from_tool_result(
     
     检测逻辑：
     1. 从工具输出字符串或字典中提取文件路径
-    2. 检查路径是否在workspace目录下（或{workspace}变量）
-    3. 验证文件扩展名是否支持预览
-    4. 返回工件信息列表（路径、文件名、扩展名、文件大小等）
+    2. 返回工件信息列表（路径、文件名、扩展名、文件大小等）
     
     Args:
         tool_result: 工具执行结果（字符串、字典或对象）
@@ -342,13 +318,11 @@ def _validate_and_build_artifact(
     except Exception:
         return None
     
-    # 获取扩展名
     extension = path_obj.suffix.lower()
-    
-    # 检查是否支持预览
-    if extension not in _ARTIFACT_PREVIEW_EXTENSIONS:
+
+    if _is_excluded_path(path_str):
         return None
-    
+
     # 检查文件是否存在
     exists = False
     size: int | None = None
@@ -412,7 +386,7 @@ def _build_artifacts_from_explicit_paths(
     artifacts: list[dict[str, Any]] = []
     seen_paths: set[str] = set()
     for path_str in paths:
-        if not path_str:
+        if not path_str or _is_excluded_path(path_str):
             continue
         artifact = _validate_and_build_artifact(
             path_str,
