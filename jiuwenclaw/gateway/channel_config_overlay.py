@@ -94,13 +94,13 @@ async def trigger_channel_config_reload(
 
 def _deployment_mode_from_env() -> str | None:
     raw = os.getenv("DEPLOYMENT_MODE", "").strip().lower()
-    if raw in ("standalone", "distributed"):
+    if raw in ("standalone", "active-standby"):
         return raw
     return None
 
 
 def _gateway_deployment_mode() -> str:
-    """读取 ``gateway.deployment_mode``（``standalone`` | ``distributed``）。"""
+    """读取 ``gateway.deployment_mode``（``standalone`` | ``active-standby``）。"""
     mode = ""
     try:
         from jiuwenclaw.config import get_config
@@ -126,7 +126,7 @@ def _gateway_deployment_mode() -> str:
 
     if not mode:
         mode = _deployment_mode_from_env() or "standalone"
-    if mode not in ("standalone", "distributed"):
+    if mode not in ("standalone", "active-standby"):
         logger.warning(
             "[channel_config_overlay] invalid gateway.deployment_mode=%r; defaulting to standalone",
             mode,
@@ -140,9 +140,9 @@ def channel_config_overlay_enabled() -> bool:
 
     与 ``gateway.deployment_mode`` 对齐：
     - ``standalone``：仅 ``config.yaml`` 的 ``channels``；
-    - ``distributed``：企业/K8s 部署，仅 DB（``channel_config`` active 行）。
+    - ``active-standby``：企业/K8s 部署，仅 DB（``channel_config`` active 行）。
     """
-    return _gateway_deployment_mode() == "distributed"
+    return _gateway_deployment_mode() == "active-standby"
 
 
 async def fetch_active_channel_config_rows() -> list[dict[str, Any]]:

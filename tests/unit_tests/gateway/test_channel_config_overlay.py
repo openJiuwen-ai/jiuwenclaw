@@ -27,13 +27,13 @@ def test_overlay_enabled_standalone():
 
 
 def test_deployment_mode_env_fallback_when_config_raises(monkeypatch: pytest.MonkeyPatch):
-    monkeypatch.setenv("DEPLOYMENT_MODE", "distributed")
+    monkeypatch.setenv("DEPLOYMENT_MODE", "active-standby")
 
     def _boom() -> dict:
         raise RuntimeError("config unavailable")
 
     with patch("jiuwenclaw.config.get_config", side_effect=_boom):
-        assert _gateway_deployment_mode() == "distributed"
+        assert _gateway_deployment_mode() == "active-standby"
 
 
 def test_deployment_mode_invalid_value_defaults_standalone():
@@ -44,10 +44,10 @@ def test_deployment_mode_invalid_value_defaults_standalone():
         assert _gateway_deployment_mode() == "standalone"
 
 
-def test_overlay_enabled_distributed():
+def test_overlay_enabled_active_standby():
     with patch(
         "jiuwenclaw.gateway.channel_config_overlay._gateway_deployment_mode",
-        return_value="distributed",
+        return_value="active-standby",
     ):
         assert channel_config_overlay_enabled() is True
 

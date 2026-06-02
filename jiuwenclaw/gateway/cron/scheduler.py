@@ -97,7 +97,7 @@ class CronSchedulerService:
         self._run_tasks: dict[str, asyncio.Task] = {}
         self._last_store_revision: int = 0
         self._store_poll_interval: float = 5.0  # seconds
-        # 分布式部署下由 LeaderElection 控制：STANDBY 期间 loop 自旋但不消费事件
+        # active-standby 下由 LeaderElection 控制：STANDBY 期间 loop 自旋但不消费事件
         self._active: bool = True
 
     async def _get_store_revision(self) -> int:

@@ -112,12 +112,12 @@ async def test_factory_standalone_returns_file_store(tmp_path, monkeypatch) -> N
 
 
 @pytest.mark.asyncio
-async def test_factory_distributed_without_redis_raises(monkeypatch) -> None:
+async def test_factory_active_standby_without_redis_raises(monkeypatch) -> None:
     from jiuwenclaw.gateway.cron.factory import create_gateway_cron_store
 
     monkeypatch.setattr(
         "jiuwenclaw.gateway.cron.factory.get_declared_deployment_mode",
-        lambda: "distributed",
+        lambda: "active-standby",
     )
     monkeypatch.setattr(
         "jiuwenclaw.gateway.cron.factory.get_effective_distributed_redis_active",
@@ -128,12 +128,12 @@ async def test_factory_distributed_without_redis_raises(monkeypatch) -> None:
 
 
 @pytest.mark.asyncio
-async def test_factory_distributed_requires_instance_id(monkeypatch) -> None:
+async def test_factory_active_standby_requires_instance_id(monkeypatch) -> None:
     from jiuwenclaw.gateway.cron.factory import create_gateway_cron_store
 
     monkeypatch.setattr(
         "jiuwenclaw.gateway.cron.factory.get_declared_deployment_mode",
-        lambda: "distributed",
+        lambda: "active-standby",
     )
     monkeypatch.setattr(
         "jiuwenclaw.gateway.cron.factory.get_effective_distributed_redis_active",

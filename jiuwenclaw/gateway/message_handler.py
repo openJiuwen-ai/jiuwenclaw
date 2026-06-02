@@ -185,7 +185,7 @@ class MessageHandler(ABC):
         self._outbound_pipeline = pipeline
 
     def reload_session_map(self) -> None:
-        """Reload distributed SessionMap cache after leader switchover."""
+        """Reload Redis-backed SessionMap cache after leader switchover (active-standby)."""
         self._session_map.reload()
 
     @classmethod

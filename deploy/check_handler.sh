@@ -231,7 +231,7 @@ check_if_redis_up() {
     local mode="${DEPLOY_VARS["DEPLOYMENT_MODE"]:-standalone}"
     local name="${DEPLOY_VARS["REDIS_NAME"]}"
 
-    if [[ "${mode}" != "distributed" ]]; then
+    if [[ "${mode}" != "active-standby" ]]; then
         info "DEPLOYMENT_MODE=${mode}, skip Redis check"
         return
     fi
@@ -248,7 +248,7 @@ check_if_redis_up() {
         return
     fi
 
-    error "DEPLOYMENT_MODE=distributed but Redis is not ready. Deploy with: ./deploy.sh up redis"
+    error "DEPLOYMENT_MODE=active-standby but Redis is not ready. Deploy with: ./deploy.sh up redis"
 }
 
 check_gateway_up_dependency(){

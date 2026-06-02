@@ -957,7 +957,7 @@ async def _run(
     from jiuwenclaw.gateway.channel_config_overlay import channel_config_overlay_enabled
 
     _channel_db_overlay = channel_config_overlay_enabled()
-    # distributed：channel_config DB；standalone：yaml 直传。
+    # active-standby：channel_config DB；standalone：yaml 直传。
     if _channel_db_overlay:
         channel_manager = ChannelManager(message_handler, config={})
     else:
@@ -1723,7 +1723,7 @@ async def _run(
     leader_election = None
     config = get_config()
     deployment_mode = str((config.get("gateway") or {}).get("deployment_mode", "standalone")).strip().lower()
-    if deployment_mode != "standalone":
+    if deployment_mode == "active-standby":
         from jiuwenclaw.gateway.leader_election import LeaderElection, Role
         
         leader_election = LeaderElection.get_instance()

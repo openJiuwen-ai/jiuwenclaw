@@ -86,7 +86,7 @@ FEISHU_BOTS="
 ./deploy.sh up nfs          # 部署 NFS 存储模块（基础依赖，只需也只能一次）
 ./deploy.sh up rabbitmq     # 部署 RabbitMQ 存储模块（基础依赖，只需也只能一次）
 ./deploy.sh up mysql        # 部署 MySQL 存储模块（基础依赖，只需也只能一次）
-./deploy.sh up redis        # 部署 Redis（Gateway distributed 模式时需要，只需也只能一次）
+./deploy.sh up redis        # 部署 Redis（Gateway active-standby 模式时需要，只需也只能一次）
 ./deploy.sh up postgresql   # 部署 PostgreSQL 存储模块（基础依赖，只需也只能一次）
 ./deploy.sh up              # 部署核心服务模块
 ./deploy.sh up web          # 部署 Web 前端模块（可选部署）
@@ -144,7 +144,7 @@ FEISHU_BOTS="
 - `nfs`：NFS 存储服务模块（NFS 模块只能部署一次，且固定部署在 default 默认命名空间，自动忽略-n命名空间配置参数）
 - `rabbitmq`：RabbitMQ 存储服务模块（RabbitMQ 模块只能部署一次，且固定部署在 default 默认命名空间，自动忽略-n命名空间配置参数）
 - `mysql`：MySQL 存储服务模块（MySQL 模块只能部署一次，且固定部署在 default 默认命名空间，自动忽略-n命名空间配置参数）
-- `redis`：Redis 服务模块（Redis 模块只能部署一次，且固定部署在 default 默认命名空间，自动忽略-n命名空间配置参数；Gateway `DEPLOYMENT_MODE=distributed` 时使用）
+- `redis`：Redis 服务模块（Redis 模块只能部署一次，且固定部署在 default 默认命名空间，自动忽略-n命名空间配置参数；Gateway `DEPLOYMENT_MODE=active-standby` 时使用）
 - `postgresql`：PostgreSQL 存储服务模块（PostgreSQL 模块只能部署一次，且固定部署在 default 默认命名空间，自动忽略-n命名空间配置参数）
 - `gateway`：Gateway 模块
 - `web`：Web 前端页面服务模块

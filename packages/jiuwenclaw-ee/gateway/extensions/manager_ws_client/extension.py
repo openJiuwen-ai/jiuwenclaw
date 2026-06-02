@@ -33,14 +33,14 @@ class ManagerWsClientExtension(BaseExtension):
     def _is_distributed_deployment() -> bool:
         gw_cfg = get_config().get("gateway") or {}
         mode = str(gw_cfg.get("deployment_mode", "standalone")).strip().lower()
-        return mode != "standalone"
+        return mode == "active-standby"
 
     async def initialize(self, config: ExtensionConfig) -> None:
-        # distributed 模式：STANDBY 默认不连 Manager；由 app_gateway 在选主成功后
+        # active-standby 模式：STANDBY 默认不连 Manager；由 app_gateway 在选主成功后
         # 通过 start_manager_ws_connect() 触发连接，避免备实例与 Manager 建立无意义会话。
         if self._is_distributed_deployment():
             logger.info(
-                "[ManagerWsClient] distributed deployment: defer connect until elected PRIMARY"
+                "[ManagerWsClient] active-standby deployment: defer connect until elected PRIMARY"
             )
             return
         self.start_manager_ws_connect()
@@ -52,7 +52,7 @@ class ManagerWsClientExtension(BaseExtension):
         return self._client
 
     async def stop_manager_ws_connect(self) -> None:
-        """取消连接任务并断开 client（幂等）。distributed 模式失主时调用。"""
+        """取消连接任务并断开 client（幂等）。active-standby 模式失主时调用。"""
         task = self._connect_task
         if task is not None:
             if not task.done():
