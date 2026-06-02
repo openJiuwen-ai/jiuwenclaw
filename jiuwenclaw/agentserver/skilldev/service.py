@@ -866,10 +866,30 @@ class SkillDevService:
             request_id, len(results), success_count, len(results) - success_count,
         )
 
+        log_result = None
+        if os.getenv("ENVIRONMENT") == "dev":
+            log_dir = Path("/opt/huawei/logs/run")
+            if log_dir.is_dir():
+                tmp_log_dir = None
+                try:
+                    tmp_log_dir = Path(tempfile.mkdtemp())
+                    log_zip_path = shutil.make_archive(str(tmp_log_dir / "run_logs"), "zip", str(log_dir))
+                    log_url = await upload_file_obs.upload_file(log_zip_path)
+                    log_result = {"url": log_url, "name": "run_logs.zip", "status": "success"}
+                    logger.info("[SkillDevService] batch_upload dev日志上传成功: url=%s", log_url)
+                except Exception as exc:
+                    logger.warning("[SkillDevService] batch_upload dev日志上传失败: %s", exc)
+                    log_result = {"url": "", "name": "run_logs.zip", "status": "error", "error": str(exc)}
+                finally:
+                    if tmp_log_dir:
+                        shutil.rmtree(tmp_log_dir, ignore_errors=True)
+            else:
+                logger.info("[SkillDevService] batch_upload dev日志目录不存在: %s", log_dir)
+
         return AgentResponseChunk(
             request_id=request_id,
             channel_id=channel_id,
-            payload={"results": results},
+            payload={"results": results, "log_result": log_result},
             is_complete=True,
         )
 
