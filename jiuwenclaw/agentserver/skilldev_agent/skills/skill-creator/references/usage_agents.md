@@ -118,19 +118,20 @@ invoke(funcName:"agent_as_a_tool", params:{agentId:"aaabbbccc", query:"分析这
 
 ## Generating the tool-definitions entry
 
-Agent tools sit in the skill body's single **tool definitions** section. Each agent becomes a `### Function: <name>` sub-block.
+Agent tools sit in the skill body's single **tool definitions** section. Each agent becomes a `### Function: agent_as_a_tool` sub-block.
 
 Mapping rules:
 
 | JSON field | Markdown field |
 |------------|----------------|
-| `name` (或缺失时用 `agentId`) | `### Function: <name>` heading |
+| (固定) | `### Function: agent_as_a_tool` heading（恒为此字符串，不用 `name`/`agentId`） |
 | `agentId` | `- **toolName**: <agentId>` |
 | `description` | `- **description**` |
 | `parameters` | `- **参数**: （由平台自动注入）` |
 | (n/a) | `- **约束**` |
 | (n/a) | `- **语义**` |
 
+- `### Function:` 标题恒为 `agent_as_a_tool`。
 - `- **toolName**` 必须填 `agentId`，运行时按它路由。
 - `- **参数**` 不要内联 JSON schema。
 - `- **约束**` 仅在有顺序或前置条件时写。
@@ -139,7 +140,7 @@ Mapping rules:
 Example — given the `travelAgent` definition above, generate:
 
 ```markdown
-### Function: travelAgent
+### Function: agent_as_a_tool
 - **toolName**: aaabbbccc
 - **description**: 查询出行相关资讯与方案
 - **参数**: （由平台自动注入）
