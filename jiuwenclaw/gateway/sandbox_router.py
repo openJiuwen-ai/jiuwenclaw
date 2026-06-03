@@ -1482,6 +1482,58 @@ class SandboxRouterAgentClient(AgentServerClient):
                     runtime.routing_key,
                 )
 
+    async def release_session(
+        self,
+        session_id: str,
+        *,
+        user_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Drop session tracking and purge its workspace snapshot from DCS.
+
+        Does not terminate the sandbox runtime (other sessions may share it).
+        """
+        sid = str(session_id or "").strip()
+        if not sid:
+            return {"ok": False, "error": "session_id is required"}
+
+        uid = str(user_id or "").strip() or sid
+        routing_key = self._routing_key(uid, sid)
+
+        workspace_purged = False
+        try:
+            await self._get_workspace_dcs_store().delete_workspace(sid)
+            workspace_purged = True
+        except Exception:  # noqa: BLE001
+            logger.exception(
+                "Failed to purge workspace snapshot on session release: session_id=%s",
+                sid,
+            )
+
+        untracked = False
+        sandbox_id: str | None = None
+        remaining_session_ids: list[str] = []
+        async with self._pool_lock:
+            runtime = self._runtimes.get(routing_key)
+            if runtime is not None:
+                sandbox_id = runtime.sandbox_id
+                session_ids = runtime.metadata.get("session_ids")
+                if isinstance(session_ids, set):
+                    untracked = sid in session_ids
+                    session_ids.discard(sid)
+                self._restored_session_ids(runtime).discard(sid)
+                remaining_session_ids = _tracked_session_ids_from_metadata(runtime.metadata)
+
+        return {
+            "ok": True,
+            "session_id": sid,
+            "routing_key": routing_key,
+            "sandbox_id": sandbox_id,
+            "workspace_purged": workspace_purged,
+            "untracked": untracked,
+            "remaining_session_ids": remaining_session_ids,
+            "sandbox": "unchanged",
+        }
+
     def _notify_next_waiter(self) -> None:
         while self._waiters:
             waiter = self._waiters.popleft()

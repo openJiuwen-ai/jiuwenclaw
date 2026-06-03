@@ -2063,6 +2063,101 @@ class VibeSkillChannel(BaseChannel):
             return None
         return ws
 
+    def _clear_pending_confirms_for_session(self, session_id: str) -> None:
+        """Remove pending confirm/review state for a session."""
+        sid = str(session_id or "").strip()
+        if not sid:
+            return
+        stale_request_ids = [
+            request_id
+            for request_id, pending in self._pending_confirms.items()
+            if str((pending or {}).get("session_id") or "").strip() == sid
+        ]
+        for request_id in stale_request_ids:
+            self._pending_confirms.pop(request_id, None)
+
+    async def _close_northbound_ws_for_session(
+        self,
+        session_id: str,
+        *,
+        reason: str = "session_deleted",
+    ) -> bool:
+        """Close the northbound WS bound to session_id without duplicate cancel."""
+        ws = self._get_active_ws_for_session(session_id)
+        if ws is None:
+            return False
+
+        self._ws_skip_cancel_on_disconnect.add(ws)
+        async with self._ws_sessions_lock:
+            self._session_to_ws.pop(session_id, None)
+            bound_sessions = self._ws_sessions.get(ws)
+            if bound_sessions is not None:
+                bound_sessions.discard(session_id)
+                if not bound_sessions:
+                    self._ws_sessions.pop(ws, None)
+
+        logger.info(
+            "[VibeSkillChannel] closing northbound WS on session delete, session_id=%s",
+            str(session_id or "").strip() or "n/a",
+        )
+        try:
+            await ws.close(code=1000, reason=reason)
+        except Exception:
+            logger.exception(
+                "[VibeSkillChannel] close WS on session delete failed, session_id=%s",
+                str(session_id or "").strip() or "n/a",
+            )
+        return True
+
+    async def _teardown_session(
+        self,
+        session_id: str,
+        *,
+        source: str = "http.session.delete",
+    ) -> dict[str, Any]:
+        """Cancel work, close WS, release sandbox tracking, then delete session metadata."""
+        sid = str(session_id or "").strip()
+        session_obj = await self._store.resolve_session(sid)
+        if session_obj is None:
+            return {"deleted": False, "sessionID": sid, "error": "session_not_found"}
+
+        mode = session_obj.mode
+        was_busy = session_obj.state == VibeSkillSessionState.BUSY
+
+        await self._cancel_session_via_message_handler(sid, source=source, mode=mode)
+        self._clear_pending_confirms_for_session(sid)
+        websocket_closed = await self._close_northbound_ws_for_session(sid)
+
+        workspace_purged = False
+        sandbox_untracked = False
+        release_fn = getattr(self._agent_client, "release_session", None)
+        if callable(release_fn):
+            try:
+                release_result = await release_fn(
+                    sid,
+                    user_id=self._session_user_id(sid),
+                )
+                if isinstance(release_result, dict):
+                    workspace_purged = bool(release_result.get("workspace_purged"))
+                    sandbox_untracked = bool(release_result.get("untracked"))
+            except Exception:
+                logger.exception(
+                    "[VibeSkillChannel] release_session failed, session_id=%s",
+                    sid,
+                )
+
+        await self._store.delete_session(sid)
+
+        return {
+            "deleted": True,
+            "sessionID": sid,
+            "cancelled": True,
+            "wasBusy": was_busy,
+            "websocketClosed": websocket_closed,
+            "workspacePurged": workspace_purged,
+            "sandboxUntracked": sandbox_untracked,
+        }
+
     async def _cancel_session_via_message_handler(
         self,
         session_id: str,
@@ -3460,12 +3555,17 @@ class VibeSkillChannel(BaseChannel):
 
     async def _handle_http_session_delete(self, session_id: str) -> tuple[int, dict, bytes]:
         """DELETE /api/v1/session/{id} - 删除会话。"""
-        if not session_id:
+        sid = str(session_id or "").strip().strip("/")
+        if not sid:
             return self._json_response(400, {"error": "sessionID cannot be empty"})
-        session_obj = await self._store.resolve_session(session_id)
-        if session_obj:
-            await self._store.delete_session(session_obj.session_id)
-        return self._json_response(200, {"deleted": True})
+        session_obj = await self._store.resolve_session(sid)
+        if session_obj is None:
+            return self._json_response(404, {"error": "session_not_found"})
+        result = await self._teardown_session(
+            session_obj.session_id,
+            source="http.session.delete",
+        )
+        return self._json_response(200, result)
 
     async def _handle_http_file_list(self, session_id: str, headers: dict) -> tuple[int, dict, bytes]:
         """GET /api/v1/.../file — 列目录（skilldev.file.list → FileTreeNode[] 嵌套树）。"""
