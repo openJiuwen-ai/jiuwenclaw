@@ -87,7 +87,7 @@ metadata:
     app: <<POSTGRES_NAME>>
 spec:
   capacity:
-    storage: 4Gi
+    storage: <<POSTGRES_STORAGE_SIZE>>
   accessModes:
     - ReadWriteOnce
   persistentVolumeReclaimPolicy: Retain
@@ -113,7 +113,7 @@ spec:
     - ReadWriteOnce
   resources:
     requests:
-      storage: 2Gi
+      storage: <<POSTGRES_STORAGE_SIZE>>
   storageClassName: ""
   selector:
     matchLabels:

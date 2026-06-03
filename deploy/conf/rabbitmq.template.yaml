@@ -92,7 +92,7 @@ metadata:
     app: <<RABBITMQ_NAME>>
 spec:
   capacity:
-    storage: 4Gi
+    storage: <<RABBITMQ_STORAGE_SIZE>>
   accessModes:
     - ReadWriteOnce                       
   persistentVolumeReclaimPolicy: Retain   
@@ -117,7 +117,7 @@ spec:
     - ReadWriteOnce
   resources:
     requests:
-      storage: 2Gi
+      storage: <<RABBITMQ_STORAGE_SIZE>>
   storageClassName: ""        # 不使用 StorageClass
   selector:
     matchLabels:

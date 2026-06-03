@@ -86,7 +86,7 @@ metadata:
     app: <<MYSQL_NAME>>
 spec:
   capacity:
-    storage: 6Gi
+    storage: <<MYSQL_STORAGE_SIZE>>
   accessModes:
     - ReadWriteOnce                       # RWX: 多个 Pod 可同时读写
   persistentVolumeReclaimPolicy: Retain   # 删除 PVC 时保留数据
@@ -113,7 +113,7 @@ spec:
     - ReadWriteOnce
   resources:
     requests:
-      storage: 3Gi
+      storage: <<MYSQL_STORAGE_SIZE>>
   storageClassName: ""       # 不使用 StorageClass
   selector:
     matchLabels:
