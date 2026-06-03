@@ -347,7 +347,7 @@ def _patched_build_request_params(self, *, stream: bool, **kwargs) -> dict:
             try:
                 params["max_tokens"] = int(env_max_tokens)
             except ValueError:
-                logger.warning(
+                llm_logger.warning(
                     f"Invalid LLM_MAX_TOKENS env value: '{env_max_tokens}' (not an integer), ignoring"
                 )
     return params
@@ -389,7 +389,8 @@ class PatchOpenAIModelClient(RetryMixin, OpenAIModelClient):
             final_timeout,
             self.model_client_config.max_retries
         )
-        default_headers = build_default_headers()
+        session_id = self.model_client_config.model_extra.get("session", "default")
+        default_headers = build_default_headers(session_id)
         return AsyncOpenAI(
             api_key=self.model_client_config.api_key,
             base_url=self.model_client_config.api_base,
@@ -593,6 +594,8 @@ class PatchOpenAIModelClient(RetryMixin, OpenAIModelClient):
         timeout=None,
         **kwargs,
     ):
+        session_id = self.model_client_config.model_extra.get("session", "default")
+        chunk_counter = 0
         async for chunk in self._stream_with_retry(
             _orig_stream,
             self,
@@ -607,6 +610,14 @@ class PatchOpenAIModelClient(RetryMixin, OpenAIModelClient):
             timeout=timeout,
             **kwargs,
         ):
+            chunk_counter += 1
+            if chunk_counter % 50 == 0:
+                llm_logger.info(
+                    "[LLM] [session_id=%s] chunk #%d: %s...",
+                    session_id,
+                    chunk_counter,
+                    str(chunk)[:200]
+                )
             yield chunk
 
 

@@ -1297,6 +1297,8 @@ class SkillDevDeepAdapter:
         self._model_cache.clear()
         for entry in get_default_models(config):
             mcc = dict(entry.get("model_client_config") or {})
+            # 注入session id
+            mcc.setdefault("session", self._service_id)
             if not mcc.get("model_name"):
                 continue
             mcc["claw_config"] = config

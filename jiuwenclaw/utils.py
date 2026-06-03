@@ -1821,7 +1821,7 @@ def guess_mime_type(filename: str) -> str:
     return mime_type or "application/octet-stream"
 
 
-def build_default_headers() -> dict[str, str] | None:
+def build_default_headers(session_id="") -> dict[str, str] | None:
     """构建 HTTP 请求的默认头。
 
     从环境变量 ``default_headers`` 读取 JSON 对象作为基础头；
@@ -1836,7 +1836,7 @@ def build_default_headers() -> dict[str, str] | None:
     sandbox_enable = os.getenv("SANDBOX_ENABLE", "").strip().lower()
     if sandbox_enable == "true":
         from jiuwenclaw.agentserver.open_ability_utils import get_oa_auth_headers
-        oa_headers = get_oa_auth_headers()
+        oa_headers = get_oa_auth_headers(session_id=session_id)
         oa_headers["Accept"] = "text/event-stream"
         if default_headers:
             default_headers.update(oa_headers)
