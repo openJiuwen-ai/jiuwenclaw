@@ -302,11 +302,12 @@ class RetryMixin:
                 return  # 流式成功完成
             except Exception as e:
                 last_error = e
-                if not self._is_retryable_error(e, cfg):
-                    reason = self._classify_error(e, cfg)
-                    details = self._extract_error_details(e)
-                    llm_logger.info(f"LLM stream 不可重试 [{reason}] [{details}], details: {e}")
-                    raise
+                # if not self._is_retryable_error(e, cfg):
+                #     reason = self._classify_error(e, cfg)
+                #     details = self._extract_error_details(e)
+                #     llm_logger.info(f"LLM stream 不可重试 [{reason}] [{details}], details: {e}")
+                #     raise
+                llm_logger.info(f"LLM stream 开始重试, details: {e}")
                 reason = self._classify_error(e, cfg)
                 details = self._extract_error_details(e)
                 backoff = self._calculate_backoff(attempt, e, cfg)
