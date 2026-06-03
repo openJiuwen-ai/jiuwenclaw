@@ -318,7 +318,7 @@ class MemoryIndexManager:
             if self.vector_dims is not None and self.vector_dims != dims:
                 try:
                     self.db.execute(f"DROP TABLE IF EXISTS {VECTOR_TABLE}")
-                except:
+                except Exception:
                     pass
 
             self.db.execute(f"""
@@ -650,7 +650,7 @@ class MemoryIndexManager:
             if self.fts_available:
                 try:
                     self.db.execute(f"DELETE FROM {FTS_TABLE} WHERE path = ?", (entry["path"],))
-                except:
+                except Exception:
                     pass
 
             for chunk in chunks:
@@ -722,7 +722,7 @@ class MemoryIndexManager:
                 for row in cursor.fetchall():
                     try:
                         self.db.execute(f"DELETE FROM {VECTOR_TABLE} WHERE rowid = ?", (row["rowid"],))
-                    except:
+                    except Exception:
                         pass
 
             if self.fts_available:
@@ -730,7 +730,7 @@ class MemoryIndexManager:
                 for row in cursor.fetchall():
                     try:
                         self.db.execute(f"DELETE FROM {FTS_TABLE} WHERE rowid = ?", (row["rowid"],))
-                    except:
+                    except Exception:
                         pass
 
             self.db.execute("DELETE FROM chunks WHERE path = ?", (file_path,))
@@ -1175,7 +1175,7 @@ class MemoryIndexManager:
         try:
             cursor = self.db.execute(f"SELECT COUNT(*) as count FROM {EMBEDDING_CACHE_TABLE}")
             return cursor.fetchone()["count"]
-        except:
+        except Exception:
             return 0
 
     async def close(self) -> None:
@@ -1196,7 +1196,7 @@ class MemoryIndexManager:
             try:
                 self._file_observer.stop()
                 self._file_observer.join()
-            except:
+            except Exception:
                 pass
 
         if self.db:
