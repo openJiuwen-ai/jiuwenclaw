@@ -33,3 +33,40 @@ CHANNEL_CONFIG_TABLE_DEF = TableDefinition(
         IndexDefinition(["status"], unique=False),
     ],
 )
+
+LOG_MASKING_RULE_TABLE_DEF = TableDefinition(
+    table_name="log_masking_rule",
+    columns=[
+        ColumnDefinition(
+            "id",
+            "integer",
+            primary_key=True,
+            autoincrement=True,
+            nullable=False,
+        ),
+        ColumnDefinition("jiuwenclaw_id", "string", length=64, nullable=False),
+        ColumnDefinition("rule_id", "string", length=64, nullable=False),
+        ColumnDefinition("rule_name", "string", length=128, nullable=False),
+        ColumnDefinition("description", "string", length=512, nullable=True),
+        ColumnDefinition("pattern", "string", length=512, nullable=False),
+        ColumnDefinition(
+            "replacement",
+            "string",
+            length=64,
+            nullable=False,
+            default="******",
+        ),
+        ColumnDefinition("priority", "integer", nullable=False),
+        ColumnDefinition("source", "string", length=16, nullable=False),
+        ColumnDefinition("enabled", "boolean", nullable=False, default=True),
+        ColumnDefinition("data", "json", nullable=True),
+        ColumnDefinition("created_at", "datetime", nullable=False),
+        ColumnDefinition("updated_at", "datetime", nullable=False),
+    ],
+    indexes=[
+        IndexDefinition(["jiuwenclaw_id", "rule_id"], unique=True),
+        IndexDefinition(["jiuwenclaw_id"], unique=False),
+        IndexDefinition(["enabled"], unique=False),
+        IndexDefinition(["priority"], unique=False),
+    ],
+)

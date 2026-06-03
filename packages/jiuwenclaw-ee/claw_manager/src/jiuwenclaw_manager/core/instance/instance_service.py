@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import uuid
 from collections.abc import Sequence
 from typing import Any
@@ -18,7 +19,24 @@ from jiuwenclaw_manager.schemas.instance_schemas import (
 )
 from jiuwenclaw_manager.models.instance_models import INSTANCE_INFO_TABLE_DEF
 
+logger = logging.getLogger(__name__)
+
 _INSTANCE_TABLE = INSTANCE_INFO_TABLE_DEF.table_name
+_LOG_MASKING_SEEDED_KEY = "log_masking_seeded"
+
+
+def _instance_data_dict(row: Any | None) -> dict[str, Any]:
+    data = getattr(row, "data", None) if row is not None else None
+    return dict(data) if isinstance(data, dict) else {}
+
+
+async def is_log_masking_seeded(handler: DBHandler, jiuwenclaw_id: str) -> bool:
+    """``instance_info.data.log_masking_seeded`` 为真时表示 builtin 种子已执行过。"""
+    jid = str(jiuwenclaw_id or "").strip()
+    if not jid:
+        return False
+    row = await get_instance_row(handler, jid)
+    return bool(_instance_data_dict(row).get(_LOG_MASKING_SEEDED_KEY))
 
 
 def dumps_auth_config(cfg: dict) -> str:
@@ -48,6 +66,49 @@ async def generate_unique_jiuwenclaw_id(handler: DBHandler) -> str:
         if await get_instance_row(handler, jiuwenclaw_id) is None:
             return jiuwenclaw_id
     raise RuntimeError("failed to generate unique jiuwenclaw_id after retries")
+
+
+async def bootstrap_gateway_log_masking(
+    handler: DBHandler,
+    jiuwenclaw_id: str,
+) -> None:
+    """Gateway WS 注册：首次 MDB builtin 种子 + bulk push 到 GDB（``op=sync``）。"""
+    jid = str(jiuwenclaw_id or "").strip()
+    if not jid:
+        return
+    try:
+        from jiuwenclaw_manager.core.application_config.log_masking_rule import (
+            push_log_masking_rules_sync_to_gateway,
+            seed_builtin_log_masking_rules,
+        )
+
+        if not await is_log_masking_seeded(handler, jid):
+            seeded = await seed_builtin_log_masking_rules(handler, jid)
+            await merge_instance_data(handler, jid, {_LOG_MASKING_SEEDED_KEY: True})
+            if seeded:
+                logger.info(
+                    "[Instance] seeded %d builtin log_masking_rule row(s) for %s",
+                    seeded,
+                    jid,
+                )
+            else:
+                logger.info(
+                    "[Instance] log_masking builtin seed completed for %s (no new rows)",
+                    jid,
+                )
+        sync_ack = await push_log_masking_rules_sync_to_gateway(handler, jid)
+        logger.info(
+            "[Instance] log_masking_rule sync on gateway register jiuwenclaw_id=%s "
+            "revision=%s",
+            jid,
+            sync_ack.get("revision"),
+        )
+    except Exception:
+        logger.warning(
+            "[Instance] log_masking_rule bootstrap failed for %s",
+            jid,
+            exc_info=True,
+        )
 
 
 async def register_gateway_via_ws(

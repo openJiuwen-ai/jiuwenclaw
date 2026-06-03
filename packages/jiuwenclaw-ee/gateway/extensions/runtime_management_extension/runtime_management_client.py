@@ -85,18 +85,12 @@ def _ensure_enterprise_config_loader() -> tuple[Any, Any, Any]:
     ):
         return _load_effective_enterprise_config, _service_config_slot, _extension_config_slot
 
-    from jiuwenclaw.gateway.channel_config_db import (
-        _EXT_PKG,
-        _ensure_extension_package,
-        _resolve_manager_ws_client_root,
+    from jiuwenclaw.infrastructure.module_importer import (
+        import_manager_ws_client_module,
     )
 
-    ext_root = _resolve_manager_ws_client_root()
-    if ext_root is None:
-        raise ImportError("manager_ws_client extension not found")
-    _ensure_extension_package(ext_root)
-    loader_mod = importlib.import_module(f"{_EXT_PKG}.core.enterprise_config.loader")
-    schemas_mod = importlib.import_module(f"{_EXT_PKG}.core.enterprise_config.schemas")
+    loader_mod = import_manager_ws_client_module("core.enterprise_config.loader")
+    schemas_mod = import_manager_ws_client_module("core.enterprise_config.schemas")
     _load_effective_enterprise_config = loader_mod.load_effective_enterprise_config
     _service_config_slot = schemas_mod.TemplateRefSlot.SERVICE_CONFIG
     _extension_config_slot = schemas_mod.TemplateRefSlot.EXTENSION_CONFIG
@@ -347,7 +341,6 @@ class RuntimeManagementAgentClient(AgentServerClient):
         gateway_db_user = os.getenv("GATEWAY_DB_USER")
         gateway_db_password = os.getenv("GATEWAY_DB_PASSWORD")
         gateway_db_name = os.getenv("GATEWAY_DB_NAME")
-        jiuwenclaw_id = os.getenv("JIUWENCLAW_ID")
 
         deploy_mode = (os.getenv("AGENT_SERVER_DEPLOY_MODE") or "k8s").strip().lower()
 
@@ -396,7 +389,7 @@ class RuntimeManagementAgentClient(AgentServerClient):
                 ("GATEWAY_DB_USER", gateway_db_user),
                 ("GATEWAY_DB_PASSWORD", gateway_db_password),
                 ("GATEWAY_DB_NAME", gateway_db_name),
-                ("JIUWENCLAW_ID", jiuwenclaw_id),
+                ("JIUWENCLAW_ID", os.getenv("JIUWENCLAW_ID")),
             ):
                 if value is not None:
                     base[key] = value

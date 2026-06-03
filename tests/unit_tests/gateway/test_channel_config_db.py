@@ -2,8 +2,7 @@
 
 from __future__ import annotations
 
-from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
@@ -13,15 +12,14 @@ from jiuwenclaw.gateway.channel_config_db import (
 )
 
 
-def test_load_manager_ws_client_modules_returns_database_and_list_fn():
-    ext_root, database_cls, list_fn = _load_manager_ws_client_modules()
-    assert isinstance(ext_root, Path)
-    assert database_cls.__name__ == "Database"
+def test_load_manager_ws_client_modules_returns_ensure_db_and_list_fn():
+    ensure_db_handler, list_fn = _load_manager_ws_client_modules()
+    assert callable(ensure_db_handler)
     assert callable(list_fn)
 
 
 @pytest.mark.asyncio
-async def test_load_active_channel_config_rows_uses_database_ensure_ready():
+async def test_load_active_channel_config_rows_uses_ensure_db_handler():
     rows = [
         {
             "channel_id": "feishu-bot-1",
@@ -32,19 +30,15 @@ async def test_load_active_channel_config_rows_uses_database_ensure_ready():
         }
     ]
     handler = object()
-    db = MagicMock()
-    db.ensure_ready = AsyncMock(return_value=handler)
-    database_cls = MagicMock(return_value=db)
+    ensure_db_handler = AsyncMock(return_value=handler)
     list_active = AsyncMock(return_value=rows)
-    ext_root = Path("/tmp/manager_ws_client")
 
     with patch(
         "jiuwenclaw.gateway.channel_config_db._load_manager_ws_client_modules",
-        return_value=(ext_root, database_cls, list_active),
+        return_value=(ensure_db_handler, list_active),
     ):
         result = await load_active_channel_config_rows()
 
     assert result == rows
-    database_cls.assert_called_once_with(relative_root=ext_root)
-    db.ensure_ready.assert_awaited_once_with(log_prefix="channel_config_db")
+    ensure_db_handler.assert_awaited_once_with(log_prefix="channel_config_db")
     list_active.assert_awaited_once_with(handler)

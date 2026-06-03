@@ -7,6 +7,7 @@ import logging
 from typing import Any
 
 from ..core.application_config.channel_config import apply_channel_config
+from ..core.application_config.log_masking_rule import apply_log_masking_rule
 from ..infrastructure.utils import assert_jiuwenclaw_id_matches
 from ..core.config_effective_policy.config_default_template_mapping import (
     apply_config_default_template_mapping,
@@ -45,6 +46,10 @@ async def apply_config_push(
     channel_config = config.get("channel_config")
     if isinstance(channel_config, dict) and channel_config.get("op"):
         return await apply_channel_config(channel_config)
+
+    log_masking_rule = config.get("log_masking_rule")
+    if isinstance(log_masking_rule, dict) and log_masking_rule.get("op"):
+        return await apply_log_masking_rule(log_masking_rule)
 
     extension_config_templates = config.get("extension_config_templates")
     if isinstance(extension_config_templates, dict) and extension_config_templates.get(

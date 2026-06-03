@@ -8,7 +8,10 @@ from __future__ import annotations
 from openjiuwen_runtime.foundation.db.handler import DBHandler
 from openjiuwen_runtime.foundation.db.table_def import TableDefinition
 
-from .application_config_models import CHANNEL_CONFIG_TABLE_DEF
+from .application_config_models import (
+    CHANNEL_CONFIG_TABLE_DEF,
+    LOG_MASKING_RULE_TABLE_DEF,
+)
 from .config_effective_policy_models import (
     CONFIG_DEFAULT_TEMPLATE_MAPPING_TABLE_DEF,
     CONFIG_EFFECTIVE_AGENT_POLICY_TABLE_DEF,
@@ -28,6 +31,7 @@ ALL_TABLE_DEFINITIONS: tuple[TableDefinition, ...] = (
     SKILL_WHITELIST_TEMPLATE_TABLE_DEF,
     SERVICE_CONFIG_TEMPLATE_TABLE_DEF,
     CHANNEL_CONFIG_TABLE_DEF,
+    LOG_MASKING_RULE_TABLE_DEF,
     CONFIG_DEFAULT_TEMPLATE_MAPPING_TABLE_DEF,
     CONFIG_EFFECTIVE_GLOBAL_POLICY_TABLE_DEF,
     CONFIG_EFFECTIVE_SERVICE_POLICY_TABLE_DEF,

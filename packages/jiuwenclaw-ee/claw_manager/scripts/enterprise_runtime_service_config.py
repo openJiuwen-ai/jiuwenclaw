@@ -114,21 +114,17 @@ def _load_jiuwenclaw_id_from_provision(path: Path) -> str:
 
 
 def _bootstrap_modules() -> tuple[Any, Any, Any, Any, Any]:
-    from jiuwenclaw.gateway.channel_config_db import (
-        _EXT_PKG,
-        _ensure_extension_package,
-        _resolve_manager_ws_client_root,
+    from jiuwenclaw.infrastructure.module_importer import (
+        ensure_manager_ws_client_package,
+        import_manager_ws_client_module,
     )
 
-    ext_root = _resolve_manager_ws_client_root()
-    if ext_root is None:
-        raise ImportError("manager_ws_client extension not found")
-    _ensure_extension_package(ext_root)
-    loader_mod = importlib.import_module(f"{_EXT_PKG}.core.enterprise_config.loader")
-    schemas_mod = importlib.import_module(f"{_EXT_PKG}.core.enterprise_config.schemas")
-    utils_mod = importlib.import_module(f"{_EXT_PKG}.infrastructure.utils")
-    db_mod = importlib.import_module(f"{_EXT_PKG}.infrastructure.db")
-    gateway_db_mod = importlib.import_module(f"{_EXT_PKG}.core.enterprise_config.gateway_db")
+    ext_root = ensure_manager_ws_client_package()
+    loader_mod = import_manager_ws_client_module("core.enterprise_config.loader")
+    schemas_mod = import_manager_ws_client_module("core.enterprise_config.schemas")
+    utils_mod = import_manager_ws_client_module("infrastructure.utils")
+    db_mod = import_manager_ws_client_module("infrastructure.db")
+    gateway_db_mod = import_manager_ws_client_module("core.enterprise_config.gateway_db")
     database = db_mod.Database(relative_root=ext_root)
     return (
         loader_mod.load_effective_enterprise_config,

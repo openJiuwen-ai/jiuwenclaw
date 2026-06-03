@@ -2,29 +2,16 @@
 
 from __future__ import annotations
 
-import importlib
 import os
-from typing import Any
 
-from jiuwenclaw.gateway.channel_config_db import (
-    _EXT_PKG,
-    _ensure_extension_package,
-    _resolve_manager_ws_client_root,
+from jiuwenclaw.infrastructure.module_importer import (
+    import_manager_ws_client_module,
 )
 
-
-def _load_enterprise_submodule(name: str) -> Any:
-    ext_root = _resolve_manager_ws_client_root()
-    if ext_root is None:
-        raise ImportError("manager_ws_client extension not found")
-    _ensure_extension_package(ext_root)
-    return importlib.import_module(f"{_EXT_PKG}.core.enterprise_config.{name}")
-
-
-_gateway_db_mod = _load_enterprise_submodule("gateway_db")
+_gateway_db_mod = import_manager_ws_client_module("core.enterprise_config.gateway_db")
 GatewayDb = _gateway_db_mod.GatewayDb
-schemas = _load_enterprise_submodule("schemas")
-loader = _load_enterprise_submodule("loader")
+schemas = import_manager_ws_client_module("core.enterprise_config.schemas")
+loader = import_manager_ws_client_module("core.enterprise_config.loader")
 
 _jiuwenclaw_id = os.getenv("JIUWENCLAW_ID", "").strip() or None
 gateway_db = GatewayDb.bind(_jiuwenclaw_id)

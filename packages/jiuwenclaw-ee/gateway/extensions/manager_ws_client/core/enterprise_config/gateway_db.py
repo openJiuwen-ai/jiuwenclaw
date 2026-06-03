@@ -23,6 +23,7 @@ _INSTANCE_SCOPED_TABLES = frozenset({
     "config_effective_agent_policy",
     "config_effective_global_policy",
     "config_default_template_mapping",
+    "log_masking_rule",
 })
 
 _DEFAULT_RELATIVE_ROOT = Path(__file__).resolve().parents[2]

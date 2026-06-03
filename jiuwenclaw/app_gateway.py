@@ -1719,6 +1719,14 @@ async def _run(
     await channel_manager.start_dispatch()
     await cron_scheduler.start()
 
+    try:
+        from jiuwenclaw.infrastructure.log_masking.engine import LogMaskingEngine
+
+        await LogMaskingEngine.reload_log_masking_from_gateway_db()
+        logger.info("[App] log masking rules loaded from Gateway DB (if any)")
+    except Exception:  # noqa: BLE001
+        logger.warning("[App] log_masking_rule cold load skipped", exc_info=True)
+
     # ---------- LeaderElection 初始化 ----------
     leader_election = None
     config = get_config()

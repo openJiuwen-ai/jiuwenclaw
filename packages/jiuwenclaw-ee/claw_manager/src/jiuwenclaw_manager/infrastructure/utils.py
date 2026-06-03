@@ -20,8 +20,8 @@ def iso_datetime(dt: datetime | None) -> str | None:
     return dt.isoformat().replace("+00:00", "Z")
 
 
-def new_template_id() -> str:
-    """生成模板对外引用 UUID（v4）。"""
+def new_uuid4() -> str:
+    """生成 UUID v4 字符串。"""
     return str(uuid.uuid4())
 
 
