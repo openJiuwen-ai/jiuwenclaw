@@ -432,6 +432,9 @@ class TaskExecutionRail(DeepAgentRail):
     - BUSINESS_TOOLS: all other tools - binds current in-progress todo task
     """
 
+    _BINDING_IN_PROGRESS = frozenset({"in_progress"})
+    _BINDING_PENDING = frozenset({"pending", "waiting"})
+
     priority = 85
 
     TODO_TOOLS = frozenset({
@@ -698,6 +701,7 @@ class TaskExecutionRail(DeepAgentRail):
         current_map = self._build_map_from_todo_items(todo_items)
         previous_map = self._todo_map_before_tool or self._todo_map
 
+        completed_in_batch: list[str] = []
         for task_id, current in current_map.items():
             prev = previous_map.get(task_id)
             prev_status = prev.get("status", "") if prev else ""
@@ -709,12 +713,14 @@ class TaskExecutionRail(DeepAgentRail):
                         ctx.session, task_id, current, parent_request_id, source="todo"
                     )
                     self._todo_started.add(task_id)
-            elif prev_status == "in_progress" and curr_status == "completed":
-                await self._emit_task_complete_event(ctx.session, task_id, current, status="succeeded")
+            elif curr_status == "completed" and prev_status != "completed":
+                completed_in_batch.append(task_id)
+                if prev_status == "in_progress":
+                    await self._emit_task_complete_event(ctx.session, task_id, current, status="succeeded")
 
         self._todo_map = current_map
         self._todo_map_before_tool = {}
-        self._bind_context_to_in_progress_task()
+        self._bind_context_after_todo_sync(completed_in_batch, current_map)
 
         await self._emit_task_update_event(ctx.session, parent_request_id)
 
@@ -731,6 +737,7 @@ class TaskExecutionRail(DeepAgentRail):
 
         if full_task_id in self._active_tasks:
             _ACTIVE_TASK_ID.set(full_task_id)
+            self._current_task_id = full_task_id
             return
 
         context = TaskExecutionContext(
@@ -904,16 +911,77 @@ class TaskExecutionRail(DeepAgentRail):
 
         return formatted
 
-    def _bind_context_to_in_progress_task(self) -> None:
+    def _task_candidates_by_status(self, allowed: frozenset[str]) -> list[tuple[int, str]]:
+        candidates: list[tuple[int, str]] = []
         for task_id, task in self._todo_map.items():
-            if task.get("status") == "in_progress":
-                full_task_id = f"todo:{task_id}"
-                _ACTIVE_TASK_ID.set(full_task_id)
-                self._current_task_id = full_task_id
-                return
+            if str(task.get("status", "")).lower() in allowed:
+                candidates.append((int(task.get("index", 0)), task_id))
+        candidates.sort(key=lambda item: (item[0], item[1]))
+        return candidates
 
+    def _pick_task_id_for_binding(self) -> str | None:
+        active = self._task_candidates_by_status(self._BINDING_IN_PROGRESS)
+        if active:
+            return active[0][1]
+        pending = self._task_candidates_by_status(self._BINDING_PENDING)
+        if pending:
+            return pending[0][1]
+        return None
+
+    def _pick_next_pending_after(self, completed_task_id: str) -> str | None:
+        completed = self._todo_map.get(completed_task_id)
+        if not completed:
+            return self._pick_task_id_for_binding()
+        completed_index = int(completed.get("index", 0))
+        pending: list[tuple[int, str]] = []
+        for task_id, task in self._todo_map.items():
+            if str(task.get("status", "")).lower() in self._BINDING_PENDING:
+                task_index = int(task.get("index", 0))
+                if task_index > completed_index:
+                    pending.append((task_index, task_id))
+        if not pending:
+            return None
+        pending.sort(key=lambda item: (item[0], item[1]))
+        return pending[0][1]
+
+    def _set_active_task_binding(self, raw_task_id: str | None) -> None:
+        if raw_task_id:
+            full_task_id = f"todo:{raw_task_id}"
+            _ACTIVE_TASK_ID.set(full_task_id)
+            self._current_task_id = full_task_id
+            logger.debug("[TaskExecutionRail] task_id binding: %s", full_task_id)
+            return
         _ACTIVE_TASK_ID.set(None)
         self._current_task_id = None
+
+    def _bind_context_after_todo_sync(
+        self,
+        completed_in_batch: list[str],
+        current_map: dict[str, dict[str, Any]],
+    ) -> None:
+        """Re-bind task_id after todo.json changed.
+
+        in_progress wins over \"next pending after completed\" so S3 in_progress + S4 pending
+        does not bind to S4 when S1/S2 complete in the same batch.
+        """
+        in_progress = self._task_candidates_by_status(self._BINDING_IN_PROGRESS)
+        if in_progress:
+            self._set_active_task_binding(in_progress[0][1])
+            return
+        if completed_in_batch:
+            anchor_id = max(
+                completed_in_batch,
+                key=lambda tid: int(current_map.get(tid, {}).get("index", 0)),
+            )
+            next_id = self._pick_next_pending_after(anchor_id)
+            if next_id:
+                self._set_active_task_binding(next_id)
+                return
+        self._bind_context_to_in_progress_task()
+
+    def _bind_context_to_in_progress_task(self) -> None:
+        """Bind stream/artifact task_id to in_progress, else first pending (Rail fallback)."""
+        self._set_active_task_binding(self._pick_task_id_for_binding())
 
     def _get_todo_workspace_path(self, session_id: str) -> Path:
         if self.workspace is not None:
