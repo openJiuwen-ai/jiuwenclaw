@@ -455,6 +455,13 @@ class VibeSkillChannel(BaseChannel):
             logger.warning("[VibeSkillChannel] send() called with empty session_id")
             return
 
+        if msg.type == "event" and isinstance(msg.payload, dict):
+            event_type = str(msg.payload.get("event_type") or "").strip()
+            # Gateway MessageHandler 流结束时会补发 chat.processing_status；VibeSkill
+            # 协议以 session.status(busy/idle/completed) 表达状态，此处直接丢弃。
+            if event_type == "chat.processing_status":
+                return
+
         # 查找对应的 WebSocket
         ws = self._session_to_ws.get(session_id)
         if ws is None:
@@ -2046,7 +2053,10 @@ class VibeSkillChannel(BaseChannel):
                 logger.debug("[VibeSkillChannel] cleanup heartbeat wait failed: %s", exc)
         session_ids = self._ws_sessions.pop(ws, set())
         for sid in session_ids:
-            self._session_to_ws.pop(sid, None)
+            # 仅当该 session 仍绑定在当前 ws 上时才移除映射，避免 agent_completed
+            # 主动断连后客户端已重连、新 ws 接管 session 时被旧 ws cleanup 误删。
+            if self._session_to_ws.get(sid) is ws:
+                self._session_to_ws.pop(sid, None)
             if skip_cancel:
                 continue
             session_obj = await self._store.get_session(sid)
