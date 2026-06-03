@@ -687,6 +687,32 @@ async def _build_mysql_async_engine():
             "[JiuWenClawDeepAdapter] checkpoint MySQL engine created: %s:%s/%s",
             db_host, db_port, db_name,
         )
+
+        # 确保 kv_store.value 列为 LONGTEXT，避免 checkpoint 序列化数据被截断
+        async with engine.begin() as conn:
+            result = await conn.execute(text(
+                "SELECT COLUMN_TYPE FROM INFORMATION_SCHEMA.COLUMNS "
+                "WHERE TABLE_SCHEMA = :db AND TABLE_NAME = 'kv_store' AND COLUMN_NAME = 'value'"
+            ), {"db": db_name})
+            row = result.fetchone()
+            if row is None:
+                await conn.execute(text(
+                    "CREATE TABLE IF NOT EXISTS kv_store ("
+                    "`key` VARCHAR(512) PRIMARY KEY,"
+                    "`value` LONGTEXT NOT NULL"
+                    ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4"
+                ))
+                logger.info(
+                    "[JiuWenClawDeepAdapter] kv_store table created with value LONGTEXT"
+                )
+            elif row[0].upper() != "LONGTEXT":
+                await conn.execute(text(
+                    "ALTER TABLE kv_store MODIFY COLUMN `value` LONGTEXT NOT NULL"
+                ))
+                logger.info(
+                    "[JiuWenClawDeepAdapter] kv_store.value altered to LONGTEXT"
+                )
+
         return engine
     except Exception as exc:
         logger.error(
