@@ -421,6 +421,10 @@ class RuntimeManagementAgentClient(AgentServerClient):
             log_file = os.getenv("AGENT_SERVER_LOG_FILE")
             if log_file:
                 base["AGENT_SERVER_LOG_FILE"] = log_file
+            if mode == "dev":
+                base["LOG_ROOT_PATH"] = "/root/.logs"
+            else:
+                base["LOG_ROOT_PATH"] = "/home/app/.logs"
             return base
 
         class _Factory(IServiceInstanceFactory):
