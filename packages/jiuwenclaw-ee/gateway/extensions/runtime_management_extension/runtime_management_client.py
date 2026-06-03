@@ -348,7 +348,6 @@ class RuntimeManagementAgentClient(AgentServerClient):
         gateway_db_password = os.getenv("GATEWAY_DB_PASSWORD")
         gateway_db_name = os.getenv("GATEWAY_DB_NAME")
         jiuwenclaw_id = os.getenv("JIUWENCLAW_ID")
-        checkpoint_db_type = os.getenv("CHECKPOINT_DB_TYPE")
 
         deploy_mode = (os.getenv("AGENT_SERVER_DEPLOY_MODE") or "k8s").strip().lower()
 
@@ -398,7 +397,6 @@ class RuntimeManagementAgentClient(AgentServerClient):
                 ("GATEWAY_DB_PASSWORD", gateway_db_password),
                 ("GATEWAY_DB_NAME", gateway_db_name),
                 ("JIUWENCLAW_ID", jiuwenclaw_id),
-                ("CHECKPOINT_DB_TYPE", checkpoint_db_type),
             ):
                 if value is not None:
                     base[key] = value

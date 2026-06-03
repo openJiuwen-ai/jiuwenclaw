@@ -696,6 +696,80 @@ async def _build_mysql_async_engine():
         return None
 
 
+async def _build_postgresql_async_engine():
+    """构建 checkpoint PostgreSQL AsyncEngine.
+
+    连接参数从 DB_HOST/PORT/USER/PASSWORD/NAME 环境变量读取，
+    与 runtime 共用同一 PostgreSQL 实例。
+    未配置 DB_HOST 时返回 None，checkpoint 回退到 SQLite。
+    如果目标库不存在，会自动创建。
+    """
+    db_host = os.getenv("GATEWAY_DB_HOST", "").strip()
+    if not db_host:
+        return None
+    try:
+        from sqlalchemy import text
+        from sqlalchemy.ext.asyncio import create_async_engine
+
+        db_port = os.getenv("GATEWAY_DB_PORT", "5432").strip()
+        db_user = os.getenv("GATEWAY_DB_USER", "postgres").strip()
+        db_password = os.getenv("GATEWAY_DB_PASSWORD", "").strip()
+        db_name = os.getenv("GATEWAY_DB_NAME", "openjiuwen_gateway").strip()
+        _encoded_user = quote_plus(db_user)
+        _encoded_password = quote_plus(db_password)
+        server_url = (
+            f"postgresql+asyncpg://{_encoded_user}:{_encoded_password}"
+            f"@{db_host}:{db_port}/postgres"
+        )
+        temp_engine = create_async_engine(
+            server_url,
+            echo=False,
+            isolation_level="AUTOCOMMIT",
+        )
+
+        async with temp_engine.connect() as conn:
+            result = await conn.execute(
+                text("SELECT 1 FROM pg_database WHERE datname = :name"),
+                {"name": db_name},
+            )
+            if result.scalar() is None:
+                quoted = db_name.replace('"', '""')
+                await conn.execute(text(f'CREATE DATABASE "{quoted}"'))
+                logger.info(
+                    "[JiuWenClawDeepAdapter] PostgreSQL database created: %s",
+                    db_name,
+                )
+            else:
+                logger.debug(
+                    "[JiuWenClawDeepAdapter] PostgreSQL database already exists: %s",
+                    db_name,
+                )
+        await temp_engine.dispose()
+
+        db_url = (
+            f"postgresql+asyncpg://{_encoded_user}:{_encoded_password}"
+            f"@{db_host}:{db_port}/{db_name}"
+        )
+        engine = create_async_engine(
+            db_url,
+            pool_size=5,
+            max_overflow=10,
+            pool_recycle=3600,
+            pool_pre_ping=True,
+        )
+        logger.info(
+            "[JiuWenClawDeepAdapter] checkpoint PostgreSQL engine created: %s:%s/%s",
+            db_host, db_port, db_name,
+        )
+        return engine
+    except Exception as exc:
+        logger.error(
+            "[JiuWenClawDeepAdapter] failed to create checkpoint PostgreSQL engine: %s",
+            exc,
+        )
+        return None
+
+
 class _RuntimeCronToolContext:
     """Stable cron tool context proxy backed by per-task contextvars."""
 
@@ -1319,12 +1393,17 @@ class JiuWenClawDeepAdapter:
             checkpoint_path = get_checkpoint_dir()
             conf = {"db_type": "sqlite", "db_path": f"{checkpoint_path}/checkpoint"}
 
-            checkpoint_db_type = os.getenv("CHECKPOINT_DB_TYPE", "").strip().lower()
-            if checkpoint_db_type == "mysql":
+            db_type = os.getenv("GATEWAY_DB_TYPE", "").strip().lower()
+            if db_type == "mysql":
                 mysql_engine = await _build_mysql_async_engine()
                 if mysql_engine is not None:
                     conf["db_client"] = mysql_engine
                     logger.info("[JiuWenClawDeepAdapter] use mysql db_client")
+            elif db_type == "postgresql":
+                postgresql_engine = await _build_postgresql_async_engine()
+                if postgresql_engine is not None:
+                    conf["db_client"] = postgresql_engine
+                    logger.info("[JiuWenClawDeepAdapter] use postgresql db_client")
             checkpointer = await CheckpointerFactory.create(
                 CheckpointerConfig(type="persistence", conf=conf)
             )
