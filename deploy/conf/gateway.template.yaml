@@ -45,7 +45,7 @@ metadata:
   labels:
     app: <<GATEWAY_NAME>>
 spec:
-  replicas: 1
+  replicas: <<GATEWAY_REPLICAS>>
   selector:
     matchLabels:
       app: <<GATEWAY_NAME>>

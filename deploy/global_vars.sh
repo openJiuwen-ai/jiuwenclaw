@@ -82,6 +82,7 @@ declare -A DEPLOY_VARS=(
     ["GATEWAY_CONFIG_MAP_NAME"]="jiuwenclaw-gateway-config"
     ["GATEWAY_ENV_FILE_NAME"]="jiuwenclaw-gateway-env"
     ["GATEWAY_WEBSOCKET_PORT"]="19000"
+    ["GATEWAY_REPLICAS"]="1"
     ["JIUWENCLAW_PATH"]="/exports/jiuwenclaw"
     ["JIUWENCLAW_NFS_PATH"]="/jiuwenclaw"
     ["NFS_NAME"]="nfs-server"
