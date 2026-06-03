@@ -152,20 +152,6 @@ async def _run_one_client(session_id: str, agent_id: str, query: str, timeout_se
                         await ws.send_str(json.dumps(reply_msg, ensure_ascii=False))
                         logger.info("[client %s] review.replied sent id=%s accept=true", agent_id, rid)
                         continue
-
-                    if msg_type == "desc_optimize.asked":
-                        did = str(props.get("id") or "")
-                        reply_msg = {
-                            "type": "desc_optimize.replied",
-                            "properties": {
-                                "id": did,
-                                "sessionID": session_id,
-                                "accept": False,
-                            },
-                        }
-                        await ws.send_str(json.dumps(reply_msg, ensure_ascii=False))
-                        logger.info("[client %s] desc_optimize.replied sent id=%s accept=false", agent_id, did)
-                        continue
     except Exception as exc:
         return ClientResult(
             session_id=session_id,

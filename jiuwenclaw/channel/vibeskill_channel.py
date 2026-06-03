@@ -531,16 +531,10 @@ class VibeSkillChannel(BaseChannel):
 
         if msg_type == "message.send":
             return await self._handle_message_send(ws, data)
-        if msg_type == "skill.parse":
-            return await self._handle_skill_parse(data)
         if msg_type == "question.replied":
             return await self._handle_question_replied(data)
         if msg_type == "review.replied":
             return await self._handle_review_replied(ws, data)
-        if msg_type == "desc_optimize.replied":
-            return await self._handle_desc_optimize_replied(data)
-        if msg_type == "test.replied":
-            return await self._handle_test_replied(data)
         if msg_type == "skillSearch.replied":
             return await self._handle_skill_search_replied(ws, data)
 
@@ -797,48 +791,6 @@ class VibeSkillChannel(BaseChannel):
 
         return True
 
-    async def _handle_skill_parse(self, data: dict[str, Any]) -> bool:
-        """处理 skill.parse，封装为 skilldev.parse_skill。"""
-        properties = data.get("properties") if isinstance(data.get("properties"), dict) else data
-        if not isinstance(properties, dict):
-            return False
-        session_id = str(properties.get("sessionID") or data.get("sessionID") or "").strip()
-        if not session_id:
-            return False
-
-        session_obj = await self._store.get_session(session_id)
-        if session_obj and session_obj.mode != "SkillCreate":
-            return False
-
-        task_id = str(properties.get("taskId") or properties.get("task_id") or session_id).strip()
-        url = str(properties.get("url") or "").strip()
-        filename = str(properties.get("filename") or "").strip()
-        if not url or not filename:
-            return False
-
-        skill_package = {"url": url, "filename": filename}
-        parse_params: dict[str, Any] = {"task_id": task_id, "skill_package": skill_package}
-        self._apply_tenant_service_id(parse_params, session_id)
-        msg = Message(
-            id=f"vibeskill-parse-skill-{int(time.time() * 1000):x}-{secrets.token_hex(3)}",
-            type="req",
-            channel_id=VIBESKILL_CHANNEL_ID,
-            session_id=session_id,
-            params=parse_params,
-            timestamp=time.time(),
-            ok=True,
-            req_method=ReqMethod.SKILLDEV_PARSE_SKILL,
-            is_stream=True,
-            metadata={_VIBESKILL_ORIGINAL_SESSION_ID_KEY: session_id},
-            user_id=self._session_user_id(session_id),
-        )
-        logger.info(
-            "[VibeSkillChannel] skilldev.parse_skill sent, session_id=%s",
-            session_id,
-        )
-        self._deliver_to_message_handler(msg)
-        return True
-
     async def _handle_chat_message(
         self,
         ws: Any,
@@ -1070,51 +1022,6 @@ class VibeSkillChannel(BaseChannel):
         )
         self._deliver_to_message_handler(msg)
         return True
-
-    async def _handle_desc_optimize_replied(self, data: dict[str, Any]) -> bool:
-        """处理 desc_optimize.replied，封装为 skilldev.respond。"""
-        properties = data.get("properties") if isinstance(data.get("properties"), dict) else data
-        if not isinstance(properties, dict):
-            return False
-        session_id = str(properties.get("sessionID") or "").strip()
-        request_id = str(properties.get("id") or "").strip()
-        if not request_id:
-            return False
-
-        if not session_id:
-            return False
-
-        pending = self._pending_confirms.get(request_id, {})
-        task_id = (
-            str(pending.get("task_id") or "").strip()
-            or str(pending.get("session_id") or "").strip()
-            or session_id
-        )
-        accept = bool(properties.get("accept", False))
-        action = "skip" if accept else "optimize"
-        self._pending_confirms.pop(request_id, None)
-        return self._dispatch_skilldev_respond(
-            session_id=session_id,
-            params={"task_id": task_id, "action": action},
-        )
-
-    async def _handle_test_replied(self, data: dict[str, Any]) -> bool:
-        """处理 test.replied，封装为 skilldev.respond。"""
-        properties = data.get("properties") if isinstance(data.get("properties"), dict) else data
-        if not isinstance(properties, dict):
-            return False
-        session_id = str(properties.get("sessionID") or "").strip()
-        request_id = str(properties.get("id") or "").strip()
-        if not request_id or not session_id:
-            return False
-
-        accept = bool(properties.get("accept", False))
-        action = "test_design" if accept else "skip_tests"
-        self._pending_confirms.pop(request_id, None)
-        return self._dispatch_skilldev_respond(
-            session_id=session_id,
-            params={"task_id": session_id, "action": action},
-        )
 
     async def _handle_skill_search_replied(self, ws: Any, data: dict[str, Any]) -> bool:
         """处理 skillSearch.replied，封装为 skilldev.chat 并发送到 MessageHandler。"""
@@ -1573,35 +1480,6 @@ class VibeSkillChannel(BaseChannel):
                     "iteration": data.get("iteration"),
                 },
             }]
-        if confirm_type == "desc_optimize_confirm":
-            self._pending_confirms[request_id] = {
-                "task_id": task_id,
-                "session_id": session_id or "",
-                "confirm_type": confirm_type,
-            }
-            data = payload.get("data", {}) if isinstance(payload.get("data"), dict) else {}
-            return [{
-                "type": "desc_optimize.asked",
-                "properties": {
-                    "id": request_id,
-                    "sessionID": external_sid or session_id,
-                    "current_description": str(data.get("current_description") or ""),
-                },
-            }]
-        if confirm_type == "skip_tests_confirm":
-            self._pending_confirms[request_id] = {
-                "task_id": task_id,
-                "session_id": session_id or "",
-                "confirm_type": confirm_type,
-            }
-            return [{
-                "type": "test.asked",
-                "properties": {
-                    "id": request_id,
-                    "sessionID": task_id,
-                    "message": str(payload.get("message") or ""),
-                },
-            }]
 
         return []
 
@@ -1825,32 +1703,6 @@ class VibeSkillChannel(BaseChannel):
                 "total": total,
             },
         }]
-
-    def _dispatch_skilldev_respond(
-        self,
-        session_id: str,
-        params: dict[str, Any],
-    ) -> bool:
-        self._apply_tenant_service_id(params, session_id)
-        msg = Message(
-            id=f"vibeskill-respond-{int(time.time() * 1000):x}-{secrets.token_hex(3)}",
-            type="req",
-            channel_id=VIBESKILL_CHANNEL_ID,
-            session_id=session_id,
-            params=params,
-            timestamp=time.time(),
-            ok=True,
-            req_method=ReqMethod.SKILLDEV_RESPOND,
-            is_stream=True,
-            metadata={_VIBESKILL_ORIGINAL_SESSION_ID_KEY: session_id},
-            user_id=self._session_user_id(session_id),
-        )
-        logger.info(
-            "[VibeSkillChannel] skilldev.respond sent, session_id=%s",
-            session_id,
-        )
-        self._deliver_to_message_handler(msg)
-        return True
 
     def _dispatch_skilldev_user_answer(
         self,
@@ -3026,32 +2878,6 @@ class VibeSkillChannel(BaseChannel):
                                 "sessionID": session_id,
                                 "accept": str(action).strip() == "accept",
                                 "feedback": feedback,
-                            },
-                        })
-                        continue
-
-                    if confirm_type == "desc_optimize_confirm":
-                        messages.append({
-                            "role": role,
-                            "sessionID": session_id,
-                            "type": "desc_optimize.replied",
-                            "properties": {
-                                "id": request_id,
-                                "sessionID": session_id,
-                                "accept": str(action).strip() == "skip",
-                            },
-                        })
-                        continue
-
-                    if confirm_type == "skip_tests_confirm":
-                        messages.append({
-                            "role": role,
-                            "sessionID": session_id,
-                            "type": "test.replied",
-                            "properties": {
-                                "id": request_id,
-                                "sessionID": session_id,
-                                "accept": str(action).strip() in ("run_tests", "test_design"),
                             },
                         })
                         continue

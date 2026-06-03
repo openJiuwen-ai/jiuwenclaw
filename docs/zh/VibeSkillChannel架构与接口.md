@@ -280,11 +280,8 @@ ws://127.0.0.1:19003/api/v1/messages?sessionID={sessionID}
 | 前端消息类型 | 主要字段 | 内部转换 | 说明 |
 |--------------|----------|----------|------|
 | `message.send` | `sessionID`, `parts`, `model`, `agent`, `agent_id`/`agentId`, `system` | `SKILLDEV_CHAT` 或 `CHAT_SEND` | 核心发送入口，按 session mode 分流；SkillCreate 每轮会先清空 `_message_ctx` |
-| `skill.parse` | `sessionID`, `url`, `filename`（可包在 `properties` 内） | `SKILLDEV_PARSE_SKILL` | 导入 skill 压缩包到任务工作区，仅 SkillCreate 模式 |
 | `question.replied` | `sessionID`, `requestID`, `answers`（可包在 `properties` 内） | `SKILLDEV_USER_ANSWER` | 回答结构化提问（`skilldev.ask_user_question`） |
 | `review.replied` | `sessionID`, `id`, `accept`, `feedback` | `SKILLDEV_CHAT` | 审阅结果仅写入 `params.query`（通过/反馈文案） |
-| `desc_optimize.replied` | `sessionID`, `id`, `accept` | `SKILLDEV_RESPOND` | 描述优化确认（`action=skip` 或 `optimize`） |
-| `test.replied` | `sessionID`, `id`, `accept` | `SKILLDEV_RESPOND` | 是否进入测试设计（`action=test_design` 或 `skip_tests`） |
 
 > **说明**：`skilldev.batch_upload` / `skilldev.batch_download` 不由 VibeSkill Channel 接收；工作区备份与恢复在开启沙箱时由 `SandboxRouterAgentClient` 自动调用（见 §3.4）。
 
@@ -351,7 +348,7 @@ SkillDev 事件映射：
 | `skilldev.tool_result` | `message.part.updated` | 工具调用结束，写入 `state.output`（即使 part 已存在也会推送） |
 | `skilldev.todos_update` | `todo.updated` | Todo 列表更新 |
 | `skilldev.ask_user_question` | `question.asked` | 结构化澄清提问（`questions` 列表） |
-| `skilldev.confirm_request` | `review.asked` / `desc_optimize.asked` / `test.asked` | 按 `confirm_type` 分流：`review` / `desc_optimize_confirm` / `skip_tests_confirm` |
+| `skilldev.confirm_request` | `review.asked` | 按 `confirm_type` 分流：`review` |
 | `skilldev.agent_completed` | `session.status` | 单轮 Agent 结束、等待用户确认，状态置为 idle，随后关闭北向 WS |
 | `skilldev.error` | `message.*` + `task.error` + `session.status` | 输出错误文本 part，状态置为 idle |
 | `skilldev.completed` | `task.completed` + `session.status` | 状态置为 completed |
@@ -548,8 +545,8 @@ sequenceDiagram
     AS-->>MH: skilldev.agent_output / tool_call / confirm_request / ...
     MH-->>VC: Message(type=event)
     VC-->>FE: message.* / todo.updated / question.asked / review.asked
-    FE->>VC: question.replied / review.replied / test.replied
-    VC->>MH: Message(req_method=skilldev.user_answer 或 skilldev.chat/respond)
+    FE->>VC: question.replied / review.replied
+    VC->>MH: Message(req_method=skilldev.user_answer 或 skilldev.chat)
     AS-->>MH: skilldev.completed
     VC-->>FE: task.completed + session.status completed
 ```
@@ -558,7 +555,7 @@ sequenceDiagram
 
 - `message.send` 后是否先收到 `session.status busy`。
 - 流式输出是否包含 `message.updated` 和后续 part 事件；多轮 `message.send` 是否使用不同的 `messageID`。
-- `question.asked`（来自 `skilldev.ask_user_question`）回填 `question.replied` 是否走 `skilldev.user_answer`；`review.replied` 是否走 `skilldev.chat`（审阅结果写入 `query`）；其它确认是否仍走 `skilldev.respond`。
+- `question.asked`（来自 `skilldev.ask_user_question`）回填 `question.replied` 是否走 `skilldev.user_answer`；`review.replied` 是否走 `skilldev.chat`（审阅结果写入 `query`）。
 - `skilldev.completed` 是否转换为 `task.completed` 与 `session.status completed`。
 - WebSocket 断开时，busy session 是否会恢复 idle，并发送 `skilldev.cancel`。
 
@@ -694,7 +691,7 @@ WebSocket 断开时，`cleanup(ws)` 会执行：
 | WS 建连 | 连接 `/api/v1/messages?sessionID=...` | 收到 `server.connected` 与周期 heartbeat |
 | SkillCreate 发送 | WS 发 `message.send` | 内部走 `skilldev.chat`，前端收到 busy、message/todo/confirm 事件 |
 | Standard 发送 | Standard session 发 `message.send` | 内部走 `chat.send`，前端收到 chat 流式与 `task.completed` |
-| 确认回填 | 收到 `question.asked` 后发 `question.replied` | `question` 走 `skilldev.user_answer`；`review` 走 `skilldev.chat`；desc/test 走 `skilldev.respond` |
+| 确认回填 | 收到 `question.asked` 后发 `question.replied` | `question` 走 `skilldev.user_answer`；`review` 走 `skilldev.chat` |
 | 历史消息 | `GET /session/{id}/messages` | 经 `skilldev.restore` 返回可回放的前端消息列表 |
 | 文件树 | `GET /session/{id}/file` | 返回 `FileTreeNode[]`，目录和文件结构正确 |
 | 文件内容 | `GET /session/{id}/file/content?path=...` | 返回 text content |
@@ -708,7 +705,7 @@ WebSocket 断开时，`cleanup(ws)` 会执行：
 - VibeSkill Channel 是独立 HTTP + WebSocket 服务，不走 `GatewayServer` 的 `/tui` 或 `/acp` 路由。
 - REST 主要处理会话、文件、导出等同步操作；WebSocket 处理对话和流式事件。
 - `SkillCreate` 和 `Standard` 是两套不同后端路径（`skilldev.chat` vs `chat.send`），分流点在 session 的 `mode`。
-- 结构化提问（`question.asked`）对应 `skilldev.user_answer`；评审确认（`review.replied`）对应 `skilldev.chat`；描述优化/测试确认仍走 `skilldev.respond`。
+- 结构化提问（`question.asked`）对应 `skilldev.user_answer`；评审确认（`review.replied`）对应 `skilldev.chat`。
 - 前端只感知 `sessionID`，Channel 与 MessageHandler 共同处理内外 ID 映射。
 - 出站不是简单透传，Channel 会把 `skilldev.*` / `chat.*` 事件聚合成前端需要的 `message.*`、`todo.updated`、`*.asked`、`task.completed` 等事件。
 - 开启沙箱时，SkillDev 工作区持久化由 **SandboxRouter** 在销毁前 `batch_upload`、新请求前 `batch_download` 完成；VibeSkill Channel 不暴露 batch 类 WebSocket 消息，前端协议无变化。

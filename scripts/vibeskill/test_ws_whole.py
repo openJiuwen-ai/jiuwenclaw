@@ -5,13 +5,18 @@
 - 通过 ``message.send`` 触发 ``skilldev.chat``；
 - 实时在终端展示 agent 流式输出 / 工具调用 / Todo / 阶段进度；
 - 遇到需要用户决策的事件（``question.asked`` / ``review.asked`` /
-  ``desc_optimize.asked`` / ``test.asked`` / ``skillSearch.asked``）时，
+  ``skillSearch.asked``）时，
   在命令行交互提示，由用户输入决定回复内容，再发送对应的 ``*.replied``；
 - 收到 ``task.completed`` 时调用 ``POST /api/v1/session/{id}/export`` 触发导出；
 - 收到 ``session.status`` 且 ``status.type == completed`` 时正常退出。
 
-当 ``skilldev.agent_completed`` 触发后服务端会主动断开北向 WebSocket，本脚本会自动
-重连，并把用户尚未发送的回复在重连后投递到新连接。
+与 VibeSkill Channel 断连行为的配合：
+
+- ``skilldev.agent_completed`` 会先推送 ``session.status idle``，随后服务端主动关闭北向
+  WebSocket（code=1000, reason=``agent_completed``）；
+- 本脚本在收到 ``session.status idle`` 时标记「预期断连」，收到 ``*.asked`` 后在后台
+  协程里等待用户输入，**不阻塞** WS 接收循环，以便及时感知断连；
+- 用户回复若发生在断连之后，会进入出站队列，并在重连 ``server.connected`` 后自动补发。
 
 用法::
 
@@ -199,14 +204,6 @@ async def _prompt_review(report: str, iteration: Any) -> tuple[bool, str]:
     return False, feedback
 
 
-async def _prompt_yes_no(prompt: str, default_yes: bool = True) -> bool:
-    suffix = " [Y/n]: " if default_yes else " [y/N]: "
-    raw = (await _ainput(prompt + suffix)).strip().lower()
-    if not raw:
-        return default_yes
-    return raw in ("y", "yes", "是", "1", "true")
-
-
 async def _prompt_skill_search(skill_list: list[Any]) -> tuple[str, dict[str, Any] | None]:
     print("\n>>> Agent 搜索到以下可参考 skill：", flush=True)
     for idx, sk in enumerate(skill_list):
@@ -254,20 +251,6 @@ def _build_review_reply(session_id: str, request_id: str, accept: bool, feedback
     return {"type": "review.replied", "properties": props}
 
 
-def _build_desc_optimize_reply(session_id: str, request_id: str, accept: bool) -> dict[str, Any]:
-    return {
-        "type": "desc_optimize.replied",
-        "properties": {"id": request_id, "sessionID": session_id, "accept": accept},
-    }
-
-
-def _build_test_reply(session_id: str, request_id: str, accept: bool) -> dict[str, Any]:
-    return {
-        "type": "test.replied",
-        "properties": {"id": request_id, "sessionID": session_id, "accept": accept},
-    }
-
-
 def _build_skill_search_reply(
     session_id: str,
     action: str,
@@ -301,8 +284,11 @@ class SessionRunner:
         self.export_done = False
         self.session_completed = False
         self._initial_sent = False
-        self._pending_reply: dict[str, Any] | None = None
+        self._pending_outbound: list[dict[str, Any]] = []
         self._tool_logged: dict[str, str] = {}
+        self._expect_server_disconnect = False
+        self._interactive_tasks: set[asyncio.Task[Any]] = set()
+        self._active_ws: aiohttp.ClientWebSocketResponse | None = None
 
     # ----------------- WS connection lifecycle -----------------
 
@@ -317,7 +303,7 @@ class SessionRunner:
                 async with http.ws_connect(uri, heartbeat=30) as ws:
                     reconnect_attempt = 0
                     await self._on_connected(ws)
-                    await self._receive_loop(ws, http)
+                    await self._session_loop(ws, http)
             except aiohttp.ClientError as exc:
                 logger.warning("ws connect error: %s", exc)
 
@@ -329,9 +315,43 @@ class SessionRunner:
                 raise AssertionError(
                     f"WS reconnect exceeded {max_reconnect} attempts before completion"
                 )
-            backoff = min(1.0 * reconnect_attempt, 5.0)
-            self.printer.line(f"[ws] disconnected, reconnecting in {backoff:.1f}s...")
-            await asyncio.sleep(backoff)
+            if self._expect_server_disconnect:
+                self._expect_server_disconnect = False
+                self.printer.line(
+                    "[ws] server closed after agent round (expected); reconnecting..."
+                )
+                backoff = 0.0
+            else:
+                backoff = min(1.0 * reconnect_attempt, 5.0)
+                self.printer.line(f"[ws] disconnected, reconnecting in {backoff:.1f}s...")
+            if backoff > 0:
+                await asyncio.sleep(backoff)
+
+    async def _session_loop(
+        self, ws: aiohttp.ClientWebSocketResponse, http: aiohttp.ClientSession
+    ) -> None:
+        """单条 WS 连接的生命周期：接收循环与后台交互任务并行。"""
+        self._active_ws = ws
+        recv_task = asyncio.create_task(self._receive_loop(ws, http), name="skilldev-recv")
+        try:
+            await recv_task
+        finally:
+            self._active_ws = None
+            await self._drain_interactive_tasks()
+
+    async def _drain_interactive_tasks(self) -> None:
+        if not self._interactive_tasks:
+            return
+        pending = list(self._interactive_tasks)
+        results = await asyncio.gather(*pending, return_exceptions=True)
+        for result in results:
+            if isinstance(result, Exception) and not isinstance(result, asyncio.CancelledError):
+                raise result
+
+    def _spawn_interactive(self, coro: Any) -> None:
+        task = asyncio.create_task(coro)
+        self._interactive_tasks.add(task)
+        task.add_done_callback(self._interactive_tasks.discard)
 
     async def _on_connected(self, ws: aiohttp.ClientWebSocketResponse) -> None:
         ack = await ws.receive()
@@ -351,10 +371,7 @@ class SessionRunner:
             logger.info("sent message.send query=%r", self.initial_query)
             self.printer.line(f"[you] {self.initial_query}")
 
-        if self._pending_reply is not None:
-            await ws.send_str(json.dumps(self._pending_reply, ensure_ascii=False))
-            logger.info("re-sent pending reply: %s", self._pending_reply.get("type"))
-            self._pending_reply = None
+        await self._flush_pending_outbound(ws)
 
     async def _receive_loop(
         self, ws: aiohttp.ClientWebSocketResponse, http: aiohttp.ClientSession
@@ -381,7 +398,10 @@ class SessionRunner:
                 aiohttp.WSMsgType.CLOSING,
                 aiohttp.WSMsgType.CLOSE,
             ):
-                logger.info("ws closed by server (code=%s)", msg.data)
+                if self._expect_server_disconnect:
+                    logger.info("ws closed by server after agent round (code=%s)", msg.data)
+                else:
+                    logger.info("ws closed by server (code=%s)", msg.data)
                 return
             if msg.type == aiohttp.WSMsgType.ERROR:
                 logger.warning("ws error frame: %s", ws.exception())
@@ -425,7 +445,11 @@ class SessionRunner:
             elif stype == "busy":
                 logger.debug("session.status busy")
             elif stype == "idle":
-                logger.debug("session.status idle (agent paused, awaiting user)")
+                self._expect_server_disconnect = True
+                self.printer.line(
+                    "[session.status] idle — agent round ended; "
+                    "server will close WS, replies queue until reconnect"
+                )
             return
 
         if mtype == "task.error":
@@ -457,23 +481,15 @@ class SessionRunner:
             return
 
         if mtype == "question.asked":
-            await self._handle_question_asked(ws, props)
+            self._spawn_interactive(self._handle_question_asked(props))
             return
 
         if mtype == "review.asked":
-            await self._handle_review_asked(ws, props)
-            return
-
-        if mtype == "desc_optimize.asked":
-            await self._handle_desc_optimize_asked(ws, props)
-            return
-
-        if mtype == "test.asked":
-            await self._handle_test_asked(ws, props)
+            self._spawn_interactive(self._handle_review_asked(props))
             return
 
         if mtype == "skillSearch.asked":
-            await self._handle_skill_search_asked(ws, props)
+            self._spawn_interactive(self._handle_skill_search_asked(props))
             return
 
         logger.debug("unhandled type=%s", mtype)
@@ -541,84 +557,65 @@ class SessionRunner:
 
     # ----------------- interactive replies -----------------
 
-    async def _send_or_queue(
-        self, ws: aiohttp.ClientWebSocketResponse, reply: dict[str, Any]
-    ) -> None:
-        try:
-            if ws.closed:
-                raise aiohttp.ClientError("ws already closed before send")
-            await ws.send_str(json.dumps(reply, ensure_ascii=False))
-            logger.info("sent %s", reply.get("type"))
-        except (aiohttp.ClientError, ConnectionResetError, RuntimeError) as exc:
-            logger.warning(
-                "send %s failed (%s); queueing for reconnect",
-                reply.get("type"),
-                exc,
-            )
-            self._pending_reply = reply
+    async def _flush_pending_outbound(self, ws: aiohttp.ClientWebSocketResponse) -> None:
+        while self._pending_outbound:
+            reply = self._pending_outbound.pop(0)
+            try:
+                if ws.closed:
+                    raise aiohttp.ClientError("ws already closed before flush")
+                await ws.send_str(json.dumps(reply, ensure_ascii=False))
+                logger.info("sent queued %s", reply.get("type"))
+            except (aiohttp.ClientError, ConnectionResetError, RuntimeError) as exc:
+                self._pending_outbound.insert(0, reply)
+                logger.warning(
+                    "flush queued %s failed (%s); will retry on next reconnect",
+                    reply.get("type"),
+                    exc,
+                )
+                return
 
-    async def _handle_question_asked(
-        self, ws: aiohttp.ClientWebSocketResponse, props: dict[str, Any]
-    ) -> None:
+    async def _send_outbound(self, reply: dict[str, Any]) -> None:
+        ws = self._active_ws
+        if ws is not None and not ws.closed:
+            try:
+                await ws.send_str(json.dumps(reply, ensure_ascii=False))
+                logger.info("sent %s", reply.get("type"))
+                return
+            except (aiohttp.ClientError, ConnectionResetError, RuntimeError) as exc:
+                logger.info(
+                    "send %s failed (%s); queueing for reconnect",
+                    reply.get("type"),
+                    exc,
+                )
+        self._pending_outbound.append(reply)
+        logger.info("queued %s for reconnect", reply.get("type"))
+
+    async def _handle_question_asked(self, props: dict[str, Any]) -> None:
         request_id = str(props.get("id") or "")
         questions = props.get("questions", []) if isinstance(props.get("questions"), list) else []
         self.printer.line()
         answers = await _prompt_question_answers(questions)
-        await self._send_or_queue(
-            ws, _build_question_reply(self.session_id, request_id, answers)
+        await self._send_outbound(
+            _build_question_reply(self.session_id, request_id, answers)
         )
 
-    async def _handle_review_asked(
-        self, ws: aiohttp.ClientWebSocketResponse, props: dict[str, Any]
-    ) -> None:
+    async def _handle_review_asked(self, props: dict[str, Any]) -> None:
         request_id = str(props.get("id") or "")
         report = str(props.get("report") or "").strip()
         iteration = props.get("iteration")
         self.printer.line()
         accept, feedback = await _prompt_review(report, iteration)
-        await self._send_or_queue(
-            ws,
+        await self._send_outbound(
             _build_review_reply(self.session_id, request_id, accept, feedback),
         )
 
-    async def _handle_desc_optimize_asked(
-        self, ws: aiohttp.ClientWebSocketResponse, props: dict[str, Any]
-    ) -> None:
-        request_id = str(props.get("id") or "")
-        current = str(props.get("current_description") or "").strip()
-        self.printer.line()
-        print(">>> 是否跳过对描述的进一步优化？", flush=True)
-        if current:
-            print(f"  当前描述：{current}", flush=True)
-        accept = await _prompt_yes_no("  跳过描述优化", default_yes=True)
-        await self._send_or_queue(
-            ws, _build_desc_optimize_reply(self.session_id, request_id, accept)
-        )
-
-    async def _handle_test_asked(
-        self, ws: aiohttp.ClientWebSocketResponse, props: dict[str, Any]
-    ) -> None:
-        request_id = str(props.get("id") or "")
-        info = str(props.get("message") or "").strip()
-        self.printer.line()
-        print(">>> 是否进入评估测试设计阶段？", flush=True)
-        if info:
-            print(f"  {info}", flush=True)
-        accept = await _prompt_yes_no("  进行评估测试", default_yes=True)
-        await self._send_or_queue(
-            ws, _build_test_reply(self.session_id, request_id, accept)
-        )
-
-    async def _handle_skill_search_asked(
-        self, ws: aiohttp.ClientWebSocketResponse, props: dict[str, Any]
-    ) -> None:
+    async def _handle_skill_search_asked(self, props: dict[str, Any]) -> None:
         skill_list = props.get("skillList") or props.get("skill_list") or []
         if not isinstance(skill_list, list):
             skill_list = []
         self.printer.line()
         action, skill = await _prompt_skill_search(skill_list)
-        await self._send_or_queue(
-            ws,
+        await self._send_outbound(
             _build_skill_search_reply(
                 self.session_id, action, skill, self.initial_query
             ),
