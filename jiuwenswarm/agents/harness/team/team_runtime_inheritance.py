@@ -468,6 +468,9 @@ def build_evolution_llm(
 
     model_client_config, model_config_obj, model_name = resolve_model_config(config)
 
+    from jiuwenswarm.common.openrouter_attribution import inject_attribution_headers
+    inject_attribution_headers(model_client_config)
+
     request_config = ModelRequestConfig(
         model=model_name,
         temperature=model_config_obj.get("temperature", 0.95),

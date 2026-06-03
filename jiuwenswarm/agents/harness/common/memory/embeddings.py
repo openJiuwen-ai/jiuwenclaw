@@ -62,6 +62,19 @@ class OpenAICompatibleEmbeddingProvider(EmbeddingProvider):
             self._client = httpx.AsyncClient(timeout=60.0)
         return self._client
 
+    def _is_openrouter_endpoint(self) -> bool:
+        return bool(self.base_url and "openrouter.ai" in self.base_url.lower())
+
+    def _build_request_headers(self) -> dict[str, str]:
+        headers = {
+            "Authorization": f"Bearer {self.api_key}",
+            "Content-Type": "application/json",
+        }
+        if self._is_openrouter_endpoint():
+            from jiuwenswarm.common.openrouter_attribution import OPENROUTER_ATTRIBUTION_HEADERS
+            headers.update(OPENROUTER_ATTRIBUTION_HEADERS)
+        return headers
+
     async def embed_query(self, text: str) -> List[float]:
         """Generate embedding for a query."""
         embeddings = await self.embed_documents([text])
@@ -78,10 +91,7 @@ class OpenAICompatibleEmbeddingProvider(EmbeddingProvider):
 
         response = await client.post(
             f"{self.base_url}/embeddings",
-            headers={
-                "Authorization": f"Bearer {self.api_key}",
-                "Content-Type": "application/json"
-            },
+            headers=self._build_request_headers(),
             json={
                 "model": self.model,
                 "input": texts,

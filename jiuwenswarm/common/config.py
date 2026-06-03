@@ -597,15 +597,19 @@ def _normalize_rule_severity_action(rule: dict[str, Any]) -> None:
         rule["action"] = act
 
 
-def _parse_custom_headers(value: str | None) -> dict[str, Any] | None:
-    """解析 custom_headers 配置，支持 JSON 字符串格式。
+def _parse_custom_headers(value: str | dict | None) -> dict[str, Any] | None:
+    """解析 custom_headers 配置，支持 JSON 字符串格式或已解析的字典。
 
     Args:
-        value: 环境变量值，可以是 None、空字符串或 JSON 字符串
+        value: 环境变量值，可以是 None、空字符串、JSON 字符串或已解析的字典
 
     Returns:
         解析后的字典，如果输入为空或解析失败则返回 None
     """
+    if value is None:
+        return None
+    if isinstance(value, dict):
+        return value
     if not value or value.strip() == "":
         return None
     try:

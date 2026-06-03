@@ -1580,8 +1580,15 @@ class JiuWenClawDeepAdapter:
                 model_name, exc,
             )
 
+    @staticmethod
+    def _inject_attribution_to_config(config: dict) -> None:
+        """Inject OpenRouter attribution headers into all model_client_config entries in-place."""
+        from jiuwenswarm.common.openrouter_attribution import inject_attribution_to_config
+        inject_attribution_to_config(config)
+
     def _create_model(self, config: dict) -> Model:
         self._model_cache.clear()
+        self._inject_attribution_to_config(config)
         self._build_model_cache_from_defaults(config)
         if not self._model_cache:
             self._build_model_cache_legacy(config)
