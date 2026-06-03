@@ -606,12 +606,12 @@ def _build_context_engineering_rail(config: dict[str, Any],
         return None
 
 
-def _patch_mysql_compiler_for_on_conflict():
-    """使 MySQL SQLAlchemy 编译器支持 SQLite 的 ON CONFLICT DO UPDATE.
+def _patch_compiler_for_on_conflict():
+    """使 MySQL 和 PostgreSQL SQLAlchemy 编译器支持 SQLite 的 ON CONFLICT DO UPDATE.
 
     openjiuwen SDK 的 DbBasedKVStore 硬编码了 SQLite upsert 语法.
-    此 patch 在 SQL 编译阶段将 ON CONFLICT ... DO UPDATE 翻译为 MySQL 的
-    ON DUPLICATE KEY UPDATE, 使 checkpoint 可以正常写入 MySQL.
+    此 patch 在 SQL 编译阶段将 ON CONFLICT ... DO UPDATE 翻译为对应数据库的语法,
+    使 checkpoint 可以正常写入 MySQL/PostgreSQL.
     """
     try:
         from sqlalchemy.ext.compiler import compiles
@@ -626,14 +626,25 @@ def _patch_mysql_compiler_for_on_conflict():
                     col_name = compiler.preparer.format_column(col_key)
                     set_pairs.append(f"{col_name} = VALUES({col_name})")
             if not set_pairs:
-                # SDK 未传 set_ 时 _update_values 为空, 兜底更新 value 列
                 set_pairs.append("value = VALUES(value)")
             return f"\nON DUPLICATE KEY UPDATE {', '.join(set_pairs)}"
+
+        @compiles(OnConflictDoUpdate, "postgresql")
+        def _postgresql_on_conflict_do_update(element, compiler, **kw):
+            values = getattr(element, "_update_values", None)
+            set_pairs = []
+            if isinstance(values, dict):
+                for col_key in values:
+                    col_name = compiler.preparer.format_column(col_key)
+                    set_pairs.append(f"{col_name} = EXCLUDED.{col_name}")
+            if not set_pairs:
+                set_pairs.append("value = EXCLUDED.value")
+            return f" ON CONFLICT (key) DO UPDATE SET {', '.join(set_pairs)}"
     except Exception:
         pass
 
 
-_patch_mysql_compiler_for_on_conflict()
+_patch_compiler_for_on_conflict()
 
 
 async def _build_mysql_async_engine():
