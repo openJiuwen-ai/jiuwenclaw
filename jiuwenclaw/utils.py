@@ -1462,82 +1462,6 @@ def is_package_installation() -> bool:
     return _detect_installation_mode()
 
 
-# 统一敏感信息掩码值。
-_SENSITIVE_MASK = "******"
-# 匹配常见敏感字段键值对（不要求值必须带引号），用于覆盖:
-# - token=abc
-# - api_key: sk-xxx
-# - authorization = Bearer ...
-# 分组说明：
-# 1) 敏感键名；2) 分隔符及两侧空白（: 或 =）；3/4) 可选引号（当前替换逻辑未直接使用）
-_KV_SENSITIVE_PATTERN = re.compile(
-    r"(?i)(?<![A-Za-z0-9])"
-    r"(password|passwd|pwd|secret|token|api[_-]?key|access[_-]?token|"
-    r"refresh[_-]?token|authorization|user[_-]?id|userid)"
-    r"(?![A-Za-z0-9])(\s*[:=]\s*)([\"']?)[^,\s\"'\]\}]+([\"']?)"
-)
-# 匹配“键名包含敏感关键词”且“值被引号包裹”的场景，覆盖:
-# - 'CAT_CAFE_CALLBACK_TOKEN': 'xxxx'
-# - 'CAT_CAFE_USER_ID': 'CSDN-weixin'
-# - "my_private_key"="xxxx"
-# 分组说明：
-# 1) 完整的 key + 分隔符（含可选引号）
-# 2) 值的起始引号（' 或 "）
-# 3) 值内容（非贪婪）
-# 4) 结束引号（通过 (\2) 强制与起始引号一致）
-_NAMED_SENSITIVE_KV_PATTERN = re.compile(
-    r"(?i)([\"']?[A-Za-z0-9_.-]*"
-    r"(?:token|secret|password|passwd|pwd|api[_-]?key|authorization|"
-    r"credential|private[_-]?key|user[_-]?id|userid)"
-    r"[A-Za-z0-9_.-]*[\"']?\s*[:=]\s*)([\"'])(.*?)(\2)"
-)
-# 匹配 Authorization Bearer 令牌，保留 "Bearer " 前缀，仅掩码后面的令牌值。
-_BEARER_SENSITIVE_PATTERN = re.compile(r"(?i)\b(Bearer\s+)[A-Za-z0-9\-._~+/]+=*")
-_SENSITIVE_PATTERNS: list[re.Pattern[str]] = [
-    # 匹配 JWT（header.payload.signature 三段式，常见以 eyJ 开头）。
-    re.compile(r"\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b"),
-    # 匹配 OpenAI 风格 key（sk- 前缀）。
-    re.compile(r"\bsk-[A-Za-z0-9]{8,}\b"),
-    # 匹配 GitHub Personal Access Token（ghp_ 前缀）。
-    re.compile(r"\bghp_[A-Za-z0-9]{20,}\b"),
-    # 匹配 GitLab Personal Access Token（glpat- 前缀）。
-    re.compile(r"\bglpat-[A-Za-z0-9_-]{20,}\b"),
-    # 匹配邮箱地址（避免日志中泄露个人身份信息）。
-    re.compile(r"\b[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[A-Za-z]{2,}\b"),
-    # 匹配中国大陆手机号（可带 +86 或 86 前缀，支持空格/短横线分隔）。
-    re.compile(r"(?<!\d)(?:\+?86[-\s]?)?1[3-9]\d{9}(?!\d)"),
-    # 匹配中国身份证号（18 位，最后一位可为 X/x）。
-    re.compile(r"(?<!\d)\d{17}[\dXx](?!\d)"),
-]
-
-
-def _sanitize_log_text(text: str) -> str:
-    if not text:
-        return text
-
-    masked = text
-    masked = _KV_SENSITIVE_PATTERN.sub(r"\1\2" f"{_SENSITIVE_MASK}", masked)
-    masked = _NAMED_SENSITIVE_KV_PATTERN.sub(r"\1\2" f"{_SENSITIVE_MASK}" r"\2", masked)
-    masked = _BEARER_SENSITIVE_PATTERN.sub(r"\1" f"{_SENSITIVE_MASK}", masked)
-    for pattern in _SENSITIVE_PATTERNS:
-        masked = pattern.sub(_SENSITIVE_MASK, masked)
-    return masked
-
-
-class SensitiveDataFilter(logging.Filter):
-    """Mask sensitive data in all log messages."""
-
-    def filter(self, record: logging.LogRecord) -> bool:
-        try:
-            message = record.getMessage()
-            record.msg = _sanitize_log_text(message)
-            record.args = ()
-        except Exception:
-            # Never block logging because of desensitization failure.
-            pass
-        return True
-
-
 class JsonOnlyFormatter(logging.Formatter):
     """只输出message内容，不添加任何前缀（时间戳、级别、logger名）"""
 
@@ -1558,6 +1482,8 @@ def setup_logger(log_level: Optional[str] = None) -> logging.Logger:
     级别由 ``config.yaml`` 的 ``logging`` 段控制；环境变量 ``LOG_LEVEL`` 仅覆盖**控制台**级别
     （``log_level`` 参数为 ``None`` 时）。若传入 ``log_level``（如单测），则控制台与各文件级别均为该值。
     """
+    from jiuwenclaw.infrastructure.log_masking import SensitiveDataFilter
+
     log_root_path = os.getenv("LOG_ROOT_PATH", "").strip()
     logs_root = Path(log_root_path).expanduser().resolve() if log_root_path else get_logs_dir()
     logs_root.mkdir(parents=True, exist_ok=True)

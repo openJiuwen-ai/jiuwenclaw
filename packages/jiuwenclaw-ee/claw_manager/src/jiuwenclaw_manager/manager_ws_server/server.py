@@ -12,6 +12,7 @@ from typing import Any, ClassVar
 from jiuwenclaw_manager.infrastructure.db import get_db_handler
 from jiuwenclaw_manager.infrastructure.logger import get_logger
 from jiuwenclaw_manager.core.instance.instance_service import (
+    bootstrap_gateway_log_masking,
     apply_gateway_ws_heartbeat,
     mark_instance_offline,
     register_gateway_via_ws,
@@ -515,6 +516,11 @@ class ManagerWsServer:
             service_type,
             registered,
             os.getpid(),
+        )
+        # 勿在 register 帧处理栈内 await push/ack：会阻塞同连接读循环，导致 config.ack 假超时。
+        asyncio.create_task(
+            bootstrap_gateway_log_masking(get_db_handler(), jiuwenclaw_id),
+            name=f"log_masking_bootstrap:{jiuwenclaw_id}",
         )
 
 

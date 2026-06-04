@@ -12,7 +12,7 @@ from jiuwenclaw_manager.schemas.template_schemas import (
     ModelTemplateOut,
     ModelTemplateUpdateBody,
 )
-from jiuwenclaw_manager.infrastructure.utils import iso_datetime, new_template_id, utc_now
+from jiuwenclaw_manager.infrastructure.utils import iso_datetime, new_uuid4, utc_now
 from jiuwenclaw_manager.manager_ws_server.server import push_config_op_to_all
 from jiuwenclaw_manager.models.template_models import MODEL_TEMPLATE_TABLE_DEF
 
@@ -185,7 +185,7 @@ class ModelTemplateService:
         self,
         body: ModelTemplateCreateBody,
     ) -> ModelTemplateOut:
-        template_uuid = new_template_id()
+        template_uuid = new_uuid4()
         row = self._build_row_for_create(body, template_id=template_uuid)
         now = utc_now()
         payload = dict(row)

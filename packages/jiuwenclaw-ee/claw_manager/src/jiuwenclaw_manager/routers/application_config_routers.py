@@ -9,6 +9,13 @@ from openjiuwen_runtime.foundation.db.handler import DBHandler
 from pydantic import BaseModel, Field
 
 from jiuwenclaw_manager.core.application_config.channel_config import ChannelConfigService
+from jiuwenclaw_manager.core.application_config.log_masking_rule import (
+    LogMaskingRuleService,
+)
+from jiuwenclaw_manager.schemas.application_config_schemas import (
+    LogMaskingRuleCreateBody,
+    LogMaskingRuleUpdateBody,
+)
 from jiuwenclaw_manager.infrastructure.db import get_db_handler
 from jiuwenclaw_manager.schemas.common_schemas import ResponseModel
 
@@ -17,6 +24,10 @@ application_config_router = APIRouter()
 
 def _channel_config_svc(handler: DBHandler) -> ChannelConfigService:
     return ChannelConfigService(handler)
+
+
+def _log_masking_rule_svc(handler: DBHandler) -> LogMaskingRuleService:
+    return LogMaskingRuleService(handler)
 
 
 class ChannelRegisterRequest(BaseModel):
@@ -133,6 +144,98 @@ async def delete_channel(
     svc = _channel_config_svc(handler)
     try:
         await svc.delete(jiuwenclaw_id=jiuwenclaw_id, channel_id=channel_id)
+    except ValueError as exc:
+        if "not found" in str(exc):
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return ResponseModel(code=200, message="success")
+
+
+@application_config_router.get(
+    "/{jiuwenclaw_id}/log-masking-rules",
+    response_model=ResponseModel,
+)
+async def list_log_masking_rules(
+    jiuwenclaw_id: str,
+    handler: Annotated[DBHandler, Depends(get_db_handler)],
+    enabled: bool | None = Query(default=None),
+):
+    svc = _log_masking_rule_svc(handler)
+    try:
+        data = await svc.list(jiuwenclaw_id, enabled=enabled)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return ResponseModel(code=200, message="success", data=data)
+
+
+@application_config_router.get(
+    "/{jiuwenclaw_id}/log-masking-rules/{rule_id}",
+    response_model=ResponseModel,
+)
+async def get_log_masking_rule(
+    jiuwenclaw_id: str,
+    rule_id: str,
+    handler: Annotated[DBHandler, Depends(get_db_handler)],
+):
+    svc = _log_masking_rule_svc(handler)
+    try:
+        row = await svc.get(jiuwenclaw_id, rule_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if row is None:
+        raise HTTPException(status_code=404, detail="log masking rule not found")
+    return ResponseModel(code=200, message="success", data=row.model_dump(mode="json"))
+
+
+@application_config_router.post(
+    "/{jiuwenclaw_id}/log-masking-rules",
+    response_model=ResponseModel,
+)
+async def create_log_masking_rule(
+    jiuwenclaw_id: str,
+    body: LogMaskingRuleCreateBody,
+    handler: Annotated[DBHandler, Depends(get_db_handler)],
+):
+    svc = _log_masking_rule_svc(handler)
+    try:
+        row = await svc.create(jiuwenclaw_id, body)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return ResponseModel(code=200, message="success", data=row.model_dump(mode="json"))
+
+
+@application_config_router.patch(
+    "/{jiuwenclaw_id}/log-masking-rules/{rule_id}",
+    response_model=ResponseModel,
+)
+async def patch_log_masking_rule(
+    jiuwenclaw_id: str,
+    rule_id: str,
+    body: LogMaskingRuleUpdateBody,
+    handler: Annotated[DBHandler, Depends(get_db_handler)],
+):
+    svc = _log_masking_rule_svc(handler)
+    try:
+        row = await svc.update(jiuwenclaw_id, rule_id, body)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if row is None:
+        raise HTTPException(status_code=404, detail="log masking rule not found")
+    return ResponseModel(code=200, message="success", data=row.model_dump(mode="json"))
+
+
+@application_config_router.delete(
+    "/{jiuwenclaw_id}/log-masking-rules/{rule_id}",
+    response_model=ResponseModel,
+)
+async def delete_log_masking_rule(
+    jiuwenclaw_id: str,
+    rule_id: str,
+    handler: Annotated[DBHandler, Depends(get_db_handler)],
+):
+    svc = _log_masking_rule_svc(handler)
+    try:
+        await svc.delete(jiuwenclaw_id, rule_id)
     except ValueError as exc:
         if "not found" in str(exc):
             raise HTTPException(status_code=404, detail=str(exc)) from exc

@@ -5,23 +5,15 @@ from __future__ import annotations
 from dataclasses import replace
 from typing import Any
 
-import importlib
-
 import pytest
 
-from jiuwenclaw.gateway.channel_config_db import (
-    _EXT_PKG,
-    _ensure_extension_package,
-    _resolve_manager_ws_client_root,
+from jiuwenclaw.infrastructure.module_importer import (
+    import_manager_ws_client_module,
 )
 
 
 def _load_manager_ws_utils() -> Any:
-    ext_root = _resolve_manager_ws_client_root()
-    if ext_root is None:
-        raise ImportError("manager_ws_client extension not found")
-    _ensure_extension_package(ext_root)
-    return importlib.import_module(f"{_EXT_PKG}.infrastructure.utils")
+    return import_manager_ws_client_module("infrastructure.utils")
 
 
 from jiuwenclaw.agentserver.enterprise_config.loader import (
@@ -34,13 +26,9 @@ from jiuwenclaw.agentserver.enterprise_config.loader import (
 from jiuwenclaw.schema.agent import AgentRequest
 
 _utils = _load_manager_ws_utils()
-_gateway_db_mod = importlib.import_module(
-    f"{_EXT_PKG}.core.enterprise_config.gateway_db"
-)
+_gateway_db_mod = import_manager_ws_client_module("core.enterprise_config.gateway_db")
 GatewayDb = _gateway_db_mod.GatewayDb
-expressions = importlib.import_module(
-    f"{_EXT_PKG}.core.enterprise_config.expressions"
-)
+expressions = import_manager_ws_client_module("core.enterprise_config.expressions")
 
 
 def _bind_gateway_db(monkeypatch: pytest.MonkeyPatch, jiuwenclaw_id: str) -> GatewayDb:

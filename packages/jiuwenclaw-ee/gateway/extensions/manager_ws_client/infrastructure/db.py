@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import os
 from pathlib import Path
 from typing import Any
@@ -33,6 +34,7 @@ class Database:
         self._relative_root = relative_root
         self._handler: DBHandler | None = None
         self.tables_registered = False
+        self._ready_lock = asyncio.Lock()
 
     @property
     def settings(self) -> Settings:
@@ -133,21 +135,25 @@ class Database:
         *,
         log_prefix: str = "",
     ) -> DBHandler:
-        """连接数据库并注册 Gateway 表定义（进程内幂等）。"""
-        if self._handler is not None:
+        """连接数据库并注册 Gateway 表定义（进程内幂等、并发安全）。"""
+        if self.tables_registered and self._handler is not None:
             return self._handler
 
-        handler = self.create_handler()
-        await handler.init_database()
-        await handler.connect()
+        async with self._ready_lock:
+            if self.tables_registered and self._handler is not None:
+                return self._handler
 
-        if not self.tables_registered:
-            await init_all_tables(handler)
-            self.tables_registered = True
+            handler = self.create_handler()
+            await handler.init_database()
+            await handler.connect()
 
-        prefix = f"[{log_prefix}] " if log_prefix else ""
-        logger.info("%sdatabase handler ready: %s", prefix, self.config_summary())
-        return handler
+            if not self.tables_registered:
+                await init_all_tables(handler)
+                self.tables_registered = True
+
+            prefix = f"[{log_prefix}] " if log_prefix else ""
+            logger.info("%sdatabase handler ready: %s", prefix, self.config_summary())
+            return handler
 
     async def close(self) -> None:
         """断开连接并释放 handler（CLI / 短生命周期脚本应在 event loop 关闭前调用）。"""
@@ -159,6 +165,7 @@ class Database:
             logger.warning("database disconnect error: %s", exc)
         finally:
             self._handler = None
+            self.tables_registered = False
 
 
 _GATEWAY_DB = Database(relative_root=Path(__file__).resolve().parents[1])
