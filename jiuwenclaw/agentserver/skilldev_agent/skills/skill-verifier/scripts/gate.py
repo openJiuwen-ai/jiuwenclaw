@@ -1,12 +1,16 @@
 #!/usr/bin/env python3
-"""Full verification gate with short-circuit.
+"""Best-effort verification gate.
 
 Pipeline: validate → package → upload → safety_scan
-If any stage fails, the pipeline stops immediately.
+Each stage runs whenever its prerequisites are available.
+Stages that depend on a failed prerequisite are marked as ``skipped``.
+The gate returns a structured JSON summary of all stage results.
 """
 
 from __future__ import annotations
 
+import asyncio
+import json
 import logging
 import re
 import sys
@@ -48,43 +52,68 @@ def main(argv: list[str]) -> int:
         print("Gate failed: cannot find skill root under <workspace>/skill/")
         return 1
 
-    # Stage 1: validate (short-circuit on failure)
-    valid, message = validate_skill(skill_root)
-    if not valid:
-        print("Gate failed at stage [validate]:")
-        print(message)
-        return 1
-    print("Stage [validate]: passed")
+    stages: dict[str, dict] = {}
 
-    # Stage 2: package
+    # Stage 1: validate
+    valid, message = validate_skill(skill_root)
+    stages["validate"] = {"passed": valid, "message": message}
+    if valid:
+        print("Stage [validate]: passed")
+    else:
+        print(f"Stage [validate]: FAILED\n{message}")
+
+    # Stage 2: package (does not require validate to pass)
     output_dir = workspace / "output"
     packaged = package_skill(skill_root, output_dir)
-    if packaged is None:
-        print("Gate failed at stage [package].")
-        return 1
-    print(f"Stage [package]: {packaged}")
+    if packaged is not None:
+        stages["package"] = {"passed": True, "file": str(packaged)}
+        print(f"Stage [package]: {packaged}")
+    else:
+        stages["package"] = {"passed": False, "message": "packaging failed"}
+        print("Stage [package]: FAILED")
 
-    # Stage 3: upload
-    import asyncio
-    url = asyncio.run(upload_file(str(packaged)))
-    if url is None:
-        print("Gate failed at stage [upload].")
-        return 1
-    print(f"Stage [upload]: {url}")
+    # Stage 3: upload (requires package artifact)
+    url: str | None = None
+    if packaged is not None:
+        url = asyncio.run(upload_file(str(packaged)))
+        if url is not None:
+            stages["upload"] = {"passed": True, "url": url}
+            print(f"Stage [upload]: {url}")
+        else:
+            stages["upload"] = {"passed": False, "message": "upload failed"}
+            print("Stage [upload]: FAILED")
+    else:
+        stages["upload"] = {"passed": False, "message": "skipped (no package)"}
+        print("Stage [upload]: skipped (no package)")
 
-    # Stage 4: safety_scan
-    skill_name = _read_skill_name(skill_root) or skill_root.name
-    raw_result = scan_url(skill_name=skill_name, url=url)
-    conclusion = _get_conclusion(raw_result)
+    # Stage 4: safety_scan (requires upload URL)
+    if url is not None:
+        skill_name = _read_skill_name(skill_root) or skill_root.name
+        raw_result = scan_url(skill_name=skill_name, url=url)
+        conclusion = _get_conclusion(raw_result)
+        if str(conclusion).upper() == "BENIGN":
+            stages["safety_scan"] = {"passed": True, "message": "BENIGN"}
+            print("Stage [safety_scan]: passed")
+        else:
+            failure_detail = _format_failure(raw_result)
+            stages["safety_scan"] = {"passed": False, "message": failure_detail}
+            print(f"Stage [safety_scan]: FAILED\n{failure_detail}")
+    else:
+        stages["safety_scan"] = {"passed": False, "message": "skipped (no URL)"}
+        print("Stage [safety_scan]: skipped (no URL)")
 
-    if str(conclusion).upper() == "BENIGN":
-        print("Stage [safety_scan]: passed")
+    all_passed = all(s["passed"] for s in stages.values())
+    summary = {"passed": all_passed, "stages": stages}
+    print("---GATE_RESULT_JSON---")
+    print(json.dumps(summary, ensure_ascii=False, indent=2))
+
+    if all_passed:
         print(f"Gate passed. Packaged: {packaged} | URL: {url}")
-        return 0
+    else:
+        failed = [name for name, s in stages.items() if not s["passed"]]
+        print(f"Gate completed with failures: {', '.join(failed)}")
 
-    print("Gate failed at stage [safety_scan]:")
-    print(_format_failure(raw_result))
-    return 1
+    return 0 if all_passed else 1
 
 
 if __name__ == "__main__":

@@ -175,6 +175,11 @@ def package_skill(skill_root: Path, output_dir: Path) -> Path | None:
         return None
 
     output_dir.mkdir(parents=True, exist_ok=True)
+    for existing in output_dir.iterdir():
+        if existing.is_file():
+            existing.unlink()
+            logger.info("removed stale output file: %s", existing.name)
+
     skill_name = skill_root.name
     skill_filename = output_dir / f"{skill_name}.zip"
 

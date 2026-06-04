@@ -123,7 +123,7 @@ def _format_failure(raw_result):
     return json.dumps(raw_result, indent=2, ensure_ascii=False)
 
 
-def scan_url(skill_name, url, max_attempts=10, interval=2):
+def scan_url(skill_name, url, max_attempts=20, interval=2):
     """Submit scan task, poll for status, return result dict."""
     req_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
 

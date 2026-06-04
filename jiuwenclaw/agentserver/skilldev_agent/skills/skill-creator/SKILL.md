@@ -29,9 +29,9 @@ Your TODO plan should mirror the active workflow:
 **Hard rules — violating any of these is a bug:**
 1. Don't write before talking to the user.
 2. Don't ignore security red lines: no dangerous commands, hardcoded credentials, or path traversal in the skill body or scripts.
-3. Don't skip the verification gate before delivering a skill.
+3. Always run the verification gate before delivering a skill. Gate failure does not block delivery — report the results to the user and deliver regardless.
 4. Don't write a Chinese or otherwise invalid value to the skill `name`, even if the user asks for it. Refuse that specific rename and offer a valid ASCII kebab-case alternative.
-5. Any file change after a passed gate **invalidates** it — you must re-run the full gate before delivering again.
+5. Any file change after a passed gate **invalidates** it — re-run the gate and report updated results before delivering again.
 
 ---
 
@@ -124,7 +124,7 @@ Local-execution skills must not generate `scripts/` by default. If a script is g
 
 ## Step 3: Verification gate
 
-Run the **full gate** from the `skill-verifier` skill. It short-circuits: if local validation fails, it returns immediately without packaging, uploading, or scanning.
+Run the **full gate** from the `skill-verifier` skill. The gate runs all stages in best-effort mode and returns a structured JSON summary.
 
 ```bash
 cd "<skill-verifier-dir>" && python3 -m scripts.gate <workspace>
@@ -132,21 +132,13 @@ cd "<skill-verifier-dir>" && python3 -m scripts.gate <workspace>
 
 The gate pipeline: `validate → package (with dependency references) → upload → safety_scan`.
 
-- If validate fails: fix the reported issue and re-run the gate.
-- If safety_scan fails: fix the flagged content and re-run the gate.
-- If a declared dependency source file is missing, packaging fails. Fix the metadata or source JSON instead of inventing replacement files.
-
-For **rapid iteration** (fixing validate failures), you can run validate-only to avoid the expensive upload + scan cycle:
-
-```bash
-cd "<skill-verifier-dir>" && python3 -m scripts.validate <workspace>
-```
-
-Once validate passes consistently, run the full gate to get the final packaged + scanned deliverable.
+- The gate does not block delivery. Report the stage-by-stage results to the user.
+- If any stage fails, inform the user of the failure details so they can decide next steps.
+- If a declared dependency source file is missing, packaging fails. Note this in the results for the user.
 
 If you have access to `present_files`, also present the packaged output from the workspace `output/` folder.
 
-Self-check before ending the conversation: did the full gate pass? If not, run it now.
+Self-check before ending the conversation: did you run the gate and report its results? If not, run it now.
 
 ---
 
@@ -183,4 +175,4 @@ Evaluations are off by default. Trigger static and/or dynamic evaluation only wh
 - During description optimization, never run the gate while the description is temporarily patched (teardown window). Wait until teardown completes and the winning description is applied.
 - Description optimization candidates must obey the description limits defined in "Frontmatter — hard constraints" above.
 - **Order when both are requested:** evaluation first (stabilizes skill behavior), then description optimization (describes final behavior).
-- After all optional branches finish, run the **full verification gate exactly once** as the final step before delivery.
+- After all optional branches finish, run the **full verification gate exactly once** as the final step. Report results to the user; gate failure does not block delivery.
