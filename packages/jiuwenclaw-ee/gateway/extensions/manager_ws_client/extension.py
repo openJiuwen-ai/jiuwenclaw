@@ -11,7 +11,6 @@ from jiuwenclaw.config import get_config
 from jiuwenclaw.extensions.registry import ExtensionRegistry
 from jiuwenclaw.extensions.sdk.base import BaseExtension
 from jiuwenclaw.extensions.types import ExtensionConfig
-from jiuwenclaw.schema.hook_event import GatewayHookEvents
 
 from .infrastructure.config import get_settings
 from .routers.manager_ws_client_router import apply_config_push
@@ -70,7 +69,7 @@ class ManagerWsClientExtension(BaseExtension):
         await self._client.disconnect()
 
     def start_manager_ws_connect(self, _ctx: object = None) -> None:
-        """触发连接 Manager（幂等）。standalone 启动 / WEB_CHANNEL_CREATED / 选主成功后调用。"""
+        """触发连接 Manager（幂等）。standalone 在 initialize 时调用；active-standby 在选主成功后调用。"""
         cfg = get_settings()
         if not cfg.gateway_manager_ws_client_enabled:
             logger.info("[ManagerWsClient] disabled by config")
@@ -99,7 +98,7 @@ class ManagerWsClientExtension(BaseExtension):
 
 
 def start_manager_ws_connect(_ctx: object = None) -> None:
-    """模块入口：供 app_gateway 选主回调与 WEB_CHANNEL_CREATED 钩子调用。"""
+    """模块入口：供 app_gateway 选主回调调用。"""
     if _extension is not None:
         _extension.start_manager_ws_connect(_ctx)
 
@@ -120,10 +119,4 @@ async def register_extensions(registry: ExtensionRegistry) -> list[ManagerWsClie
     ext = ManagerWsClientExtension(client)
     _extension = ext
     await ext.initialize(registry.config)
-
-    registry.register(
-        GatewayHookEvents.WEB_CHANNEL_CREATED,
-        start_manager_ws_connect,
-        priority=400,
-    )
     return [ext]
