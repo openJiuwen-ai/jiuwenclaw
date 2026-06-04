@@ -103,13 +103,13 @@ description: Imperative description of when to trigger and what to do.
 - Include examples where they clarify behavior.
 - Body structure can reference these sections as needed: domain knowledge, tool definitions, exemplar playbook, SOP, safety red lines, and human collaboration.
 
-### Device-side `scripts/` generation gate
+### Local-execution `scripts/` generation gate
 
-A skill executes on the device when:
-- `metadata.clis` is non-empty, OR
-- any referenced tool definition in `metadata.tools` has `pluginType: Device`.
+A skill executes locally when `metadata.clis` is non-empty.
 
-Device-side skills must not generate `scripts/` by default. If a script is genuinely required after evaluation, call `ask_user_question` to confirm with the user that the skill includes a Python script, which may run slowly, and let them choose to proceed with generation or adjust the feature. Only generate the script after explicit confirmation.
+Plugin tools in `metadata.tools` use the unified `invoke` pattern and do not by themselves trigger this local-execution gate.
+
+Local-execution skills must not generate `scripts/` by default. If a script is genuinely required after evaluation, call `ask_user_question` to confirm with the user that the skill includes a Python script, which may run slowly, and let them choose to proceed with generation or adjust the feature. Only generate the script after explicit confirmation.
 
 ### Self-check before moving on
 
