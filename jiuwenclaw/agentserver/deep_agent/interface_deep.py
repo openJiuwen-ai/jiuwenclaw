@@ -3575,6 +3575,7 @@ class JiuWenClawDeepAdapter:
                 )
         for sid in list(self._session_toolkit_requests.keys()):
             await self._cancel_session_toolkits(sid, "gateway_disconnect: ")
+            AskUserQuestionRegistry.get_instance().cancel_for_session(sid)
         await self._abort_active_subagents("gateway_disconnect")
 
     def _track_session_toolkit(
