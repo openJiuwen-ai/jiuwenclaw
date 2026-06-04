@@ -7,12 +7,13 @@ Provides context isolation and state passing between parent agent and subagents.
 
 from __future__ import annotations
 
-from contextvars import ContextVar
+from contextvars import ContextVar, Token
 from typing import TYPE_CHECKING, Optional
 
 if TYPE_CHECKING:
     from openjiuwen.core.session.agent import Session
     from openjiuwen.core.context_engine.base import ModelContext
+    from jiuwenclaw.agentserver.tools.subagent_executor.executor import ForkAgentExecutor
 
 
 # Context variable to pass parent session from tool execution to executor
@@ -44,6 +45,11 @@ _effective_request_workspace_dir: ContextVar[Optional[str]] = ContextVar(
 # Used by send_file_to_user tool and agent to know where to save output files.
 _effective_request_output_dir: ContextVar[Optional[str]] = ContextVar(
     "effective_request_output_dir", default=None
+)
+
+# Per-adapter ForkAgentExecutor for spawn/fork tools (set by StreamEventRail or execute_spawn/fork).
+_current_fork_agent_executor: ContextVar[Optional["ForkAgentExecutor"]] = ContextVar(
+    "current_fork_agent_executor", default=None
 )
 
 
@@ -117,6 +123,23 @@ def set_effective_request_output_dir(output_dir: Optional[str]) -> None:
 def get_effective_request_output_dir() -> Optional[str]:
     """Output dir for the current request, or None if not set."""
     return _effective_request_output_dir.get()
+
+
+def set_current_fork_agent_executor(
+    executor: Optional["ForkAgentExecutor"],
+) -> Token:
+    """Bind the local ForkAgentExecutor for the current async context."""
+    return _current_fork_agent_executor.set(executor)
+
+
+def get_current_fork_agent_executor() -> Optional["ForkAgentExecutor"]:
+    """Return the ForkAgentExecutor for the current tool execution context."""
+    return _current_fork_agent_executor.get()
+
+
+def reset_current_fork_agent_executor(token: Token) -> None:
+    """Restore the previous ForkAgentExecutor binding."""
+    _current_fork_agent_executor.reset(token)
 
 
 def _get_llm_trace_session_id_var() -> ContextVar[str]:

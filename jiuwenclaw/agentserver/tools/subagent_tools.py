@@ -12,10 +12,9 @@ from openjiuwen.core.foundation.tool import tool
 from openjiuwen.core.session.agent import Session
 
 from jiuwenclaw.agentserver.tools.subagent_executor import (
-    ForkAgentExecutor,
     get_subagent_parent_session,
     get_current_agent_context,
-    get_fork_agent_executor,
+    get_current_fork_agent_executor,
 )
 from jiuwenclaw.agentserver.tools.subagent_models import (
     ForkAgentTaskSpec,
@@ -86,7 +85,7 @@ async def fork_agent(
     Returns:
         {"success": bool, "task_id": str, "role_id": str, "result": str, "error": str, "usage": dict}
     """
-    executor = get_fork_agent_executor()
+    executor = get_current_fork_agent_executor()
     if executor is None:
         return _wrap_subagent_result({"success": False, "error": "Fork agent tools not initialized"})
 
@@ -145,7 +144,7 @@ async def spawn_subagent(
     Returns:
         {"success": bool, "task_id": str, "role_id": str, "result": str, "error": str, "usage": dict}
     """
-    executor = get_fork_agent_executor()
+    executor = get_current_fork_agent_executor()
     if executor is None:
         return _wrap_subagent_result({"success": False, "error": "Subagent tools not initialized"})
 

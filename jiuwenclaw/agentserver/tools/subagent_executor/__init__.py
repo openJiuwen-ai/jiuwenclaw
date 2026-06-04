@@ -16,6 +16,9 @@ from .context_vars import (
     get_current_agent_context,
     set_current_agent_subagent_id,
     get_current_agent_subagent_id,
+    set_current_fork_agent_executor,
+    get_current_fork_agent_executor,
+    reset_current_fork_agent_executor,
     _get_llm_trace_session_id_var,
 )
 
@@ -35,10 +38,9 @@ from .executor import (
     ForkAgentExecutor,
 )
 
-# Global instance management
+# Local executor factory (no process-global singleton)
 from .globals import (
-    get_fork_agent_executor,
-    init_subagent_executor,
+    create_fork_agent_executor,
 )
 
 
@@ -50,6 +52,9 @@ __all__ = [
     "get_current_agent_context",
     "set_current_agent_subagent_id",
     "get_current_agent_subagent_id",
+    "set_current_fork_agent_executor",
+    "get_current_fork_agent_executor",
+    "reset_current_fork_agent_executor",
     "_get_llm_trace_session_id_var",
     # Rails
     "ForkMessageInjectionRail",
@@ -58,7 +63,6 @@ __all__ = [
     "SubagentSessionProxy",
     # Executor
     "ForkAgentExecutor",
-    # Global instance management
-    "get_fork_agent_executor",
-    "init_subagent_executor",
+    # Factory
+    "create_fork_agent_executor",
 ]

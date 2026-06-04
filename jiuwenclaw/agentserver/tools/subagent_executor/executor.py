@@ -18,7 +18,6 @@ from openjiuwen.core.session.agent import Session
 from openjiuwen.core.single_agent import AgentCard
 from openjiuwen.harness import DeepAgent
 from openjiuwen.harness.factory import create_deep_agent
-from openjiuwen.harness.rails.filesystem_rail import FileSystemRail
 from openjiuwen.harness.rails.skill_use_rail import SkillUseRail
 from openjiuwen.harness.workspace.workspace import Workspace
 from openjiuwen.core.foundation.llm import Model
@@ -42,6 +41,8 @@ from jiuwenclaw.config import get_config
 from jiuwenclaw.agentserver.tools.subagent_executor.context_vars import (
     get_effective_request_workspace_dir,
     get_subagent_parent_session,
+    reset_current_fork_agent_executor,
+    set_current_fork_agent_executor,
     _get_llm_trace_session_id_var,
 )
 
@@ -418,35 +419,6 @@ class ForkAgentExecutor:
 
         return _DEFAULT_SUBAGENT_MAX_ITERATIONS
 
-    def _parent_has_filesystem_rail(self) -> bool:
-        """Return whether the parent agent exposes local file tools through FileSystemRail."""
-        parent_config = getattr(self._parent_agent, "deep_config", None)
-        candidate_rails = []
-        for source in (
-            getattr(parent_config, "rails", None),
-            getattr(self._parent_agent, "rails", None),
-            getattr(self._parent_agent, "_rails", None),
-        ):
-            if source:
-                candidate_rails.extend(source)
-
-        return any(type(rail).__name__ == "FileSystemRail" for rail in candidate_rails)
-
-    def _build_inherited_filesystem_rail(self) -> FileSystemRail | None:
-        """Create a child FileSystemRail when the parent had one.
-
-        FileSystemRail tools are not necessarily present in ability_manager, so spawn/fork must
-        mount their own rail instead of relying only on ToolCard inheritance.
-        """
-        if not self._parent_has_filesystem_rail():
-            return None
-
-        try:
-            return FileSystemRail()
-        except Exception as exc:
-            logger.warning("[Subagent] FileSystemRail inheritance failed: %s", exc)
-            return None
-
     @staticmethod
     def _build_subagent_progressive_tool_rail(
         config_base: dict[str, Any],
@@ -589,6 +561,7 @@ Approach each task methodically and deliver high-quality results.
         if parent_session is None:
             parent_session = get_subagent_parent_session()
 
+        executor_token = set_current_fork_agent_executor(self)
         try:
             # 1. Create session proxy FIRST (needed for SubagentContextRail to emit events)
             session_proxy: SubagentSessionProxy | None = None
@@ -670,6 +643,8 @@ Approach each task methodically and deliver high-quality results.
                 role_id=task.role_id,
                 error=str(e),
             )
+        finally:
+            reset_current_fork_agent_executor(executor_token)
 
     async def execute_spawn(
         self,
@@ -690,6 +665,7 @@ Approach each task methodically and deliver high-quality results.
         if parent_session is None:
             parent_session = get_subagent_parent_session()
 
+        executor_token = set_current_fork_agent_executor(self)
         try:
             # 1. Get role definition
             role_def = self._get_role_definition(task.role_id)
@@ -780,6 +756,8 @@ Approach each task methodically and deliver high-quality results.
                 role_id=task.role_id,
                 error=str(e),
             )
+        finally:
+            reset_current_fork_agent_executor(executor_token)
 
     async def _create_spawn_agent(
         self,
@@ -827,7 +805,6 @@ Approach each task methodically and deliver high-quality results.
         )
 
         max_iterations = self._resolve_subagent_max_iterations()
-        filesystem_rail = self._build_inherited_filesystem_rail()
         progressive_tool_rail = ForkAgentExecutor._build_subagent_progressive_tool_rail(
             config_base,
             language=language,
@@ -865,10 +842,8 @@ Approach each task methodically and deliver high-quality results.
                 include_skill_body_tools=False,
             ),
         ]
-        if filesystem_rail is not None:
-            rails.insert(0, filesystem_rail)
         if ce_rail is not None:
-            rails.insert(1 if filesystem_rail is not None else 0, ce_rail)
+            rails.insert(0, ce_rail)
         if progressive_tool_rail is not None:
             rails.append(progressive_tool_rail)
 
@@ -993,7 +968,6 @@ Execute the given task using inherited context and available tools.
         )
 
         max_iterations = self._resolve_subagent_max_iterations()
-        filesystem_rail = self._build_inherited_filesystem_rail()
         progressive_tool_rail = ForkAgentExecutor._build_subagent_progressive_tool_rail(
             config_base,
             language=language,
@@ -1029,10 +1003,8 @@ Execute the given task using inherited context and available tools.
                 include_skill_body_tools=False,
             ),
         ]
-        if filesystem_rail is not None:
-            rails.insert(0, filesystem_rail)
         if ce_rail is not None:
-            rails.insert(2 if filesystem_rail is not None else 1, ce_rail)
+            rails.insert(1, ce_rail)
         if progressive_tool_rail is not None:
             rails.append(progressive_tool_rail)
 

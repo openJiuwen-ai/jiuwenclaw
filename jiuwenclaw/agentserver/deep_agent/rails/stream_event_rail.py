@@ -13,7 +13,7 @@ import asyncio
 import json
 import os
 import time
-from typing import Any, List, Optional
+from typing import Any, List, Optional, TYPE_CHECKING
 
 import tiktoken
 from openjiuwen.core.context_engine.schema.messages import OffloadMixin
@@ -42,7 +42,12 @@ from jiuwenclaw.utils import fix_json_arguments, logger
 from jiuwenclaw.agentserver.tools.subagent_executor import (
     set_subagent_parent_session,
     set_current_agent_context,
+    set_current_fork_agent_executor,
+    reset_current_fork_agent_executor,
 )
+
+if TYPE_CHECKING:
+    from jiuwenclaw.agentserver.tools.subagent_executor.executor import ForkAgentExecutor
 
 _TODO_TOOL_NAMES = frozenset([
     "todo_create", "todo_start", "todo_complete", "todo_complete_batch",
@@ -50,7 +55,15 @@ _TODO_TOOL_NAMES = frozenset([
 ])
 _DEFAULT_CONTEXT_WINDOW_LIMIT_TOKENS = 128000
 _EARLY_CHECKPOINT_EXTRA_KEY = "_jiuwenclaw_early_checkpoint_done"
+_FORK_EXECUTOR_TOKEN_EXTRA_KEY = "_jiuwenclaw_fork_executor_token"
 _EARLY_CHECKPOINT_ENV = "JIUWENCLAW_EARLY_CHECKPOINT"
+
+
+def _reset_fork_executor_token(ctx: AgentCallbackContext) -> None:
+    """Restore ForkAgentExecutor ContextVar binding for this tool call."""
+    token = ctx.extra.pop(_FORK_EXECUTOR_TOKEN_EXTRA_KEY, None)
+    if token is not None:
+        reset_current_fork_agent_executor(token)
 
 
 def _early_checkpoint_disabled_by_env() -> bool:
@@ -128,11 +141,19 @@ class JiuClawStreamEventRail(DeepAgentRail):
     def __init__(self) -> None:
         super().__init__()
         self._deep_agent: Optional[Any] = None
+        self._fork_agent_executor: Optional["ForkAgentExecutor"] = None
         self._pause_event = asyncio.Event()
         self._pause_event.set()
         self._abort_requested = False
         self._conversation_id: str = ""
         self._stream_tasks: set[asyncio.Task] = set()
+
+    def set_fork_agent_executor(
+        self,
+        executor: Optional["ForkAgentExecutor"],
+    ) -> None:
+        """Bind the adapter-local ForkAgentExecutor for main-agent tool calls."""
+        self._fork_agent_executor = executor
 
     def init(self, agent: Any) -> None:
         self._deep_agent = agent
@@ -275,6 +296,11 @@ class JiuClawStreamEventRail(DeepAgentRail):
         if ctx.context is not None:
             set_current_agent_context(ctx.context)
 
+        if self._fork_agent_executor is not None:
+            ctx.extra[_FORK_EXECUTOR_TOKEN_EXTRA_KEY] = set_current_fork_agent_executor(
+                self._fork_agent_executor
+            )
+
         # Set parent session for subagent tools
         # Use parent session if session is a proxy (SubagentSessionProxy)
         # This ensures tools get the actual parent session, not the proxy wrapper
@@ -309,6 +335,7 @@ class JiuClawStreamEventRail(DeepAgentRail):
         # Clear context after tool execution
         set_current_agent_context(None)
         set_subagent_parent_session(None)
+        _reset_fork_executor_token(ctx)
 
         session = ctx.session
         if session is None or not isinstance(ctx.inputs, ToolCallInputs):
@@ -354,6 +381,7 @@ class JiuClawStreamEventRail(DeepAgentRail):
         # Clear context on exception
         set_current_agent_context(None)
         set_subagent_parent_session(None)
+        _reset_fork_executor_token(ctx)
 
         if ctx.context is not None:
             logger.info("[StreamEventRail] Attempting context repair after model exception")

@@ -2601,6 +2601,8 @@ class JiuWenClawDeepAdapter:
         # 动态加载用户自定义的 Rail 扩展
         await self.load_user_rails()
 
+        await self._abort_active_subagents("adapter_create_instance")
+
         # Initialize fork_agent tools
         await loop.run_in_executor(None, self._init_subagent_tools)
 
@@ -2608,15 +2610,16 @@ class JiuWenClawDeepAdapter:
         """Initialize fork_agent and spawn_subagent tools for creating subagents."""
         try:
             from openjiuwen.core.runner import Runner as RunnerClass
-            from jiuwenclaw.agentserver.tools.subagent_executor import init_subagent_executor
+            from jiuwenclaw.agentserver.tools.subagent_executor import create_fork_agent_executor
             from jiuwenclaw.agentserver.tools.subagent_tools import fork_agent, spawn_subagent
 
-            # Initialize the subagent executor with parent agent and model
-            self._fork_agent_executor = init_subagent_executor(
+            self._fork_agent_executor = create_fork_agent_executor(
                 self._instance,
-                model=self._model,  # Pass the model instance
-                default_role_prompts=None,  # Can be customized later
+                model=self._model,
+                default_role_prompts=None,
             )
+            if self._stream_event_rail is not None:
+                self._stream_event_rail.set_fork_agent_executor(self._fork_agent_executor)
 
             # Register fork_agent tool (ignore if already exists)
             try:
@@ -2639,29 +2642,15 @@ class JiuWenClawDeepAdapter:
             logger.warning("[JiuWenClawDeepAdapter] Failed to initialize subagent tools: %s", exc)
 
     def _get_fork_agent_executor(self) -> Any | None:
-        """Return this adapter's subagent executor without crossing agent instances."""
-        executor = getattr(self, "_fork_agent_executor", None)
-        if executor is not None:
-            return executor
+        """Return this adapter's local subagent executor."""
+        return getattr(self, "_fork_agent_executor", None)
 
-        try:
-            from jiuwenclaw.agentserver.tools.subagent_executor import get_fork_agent_executor
-
-            executor = get_fork_agent_executor()
-        except Exception as exc:
-            logger.debug("[JiuWenClawDeepAdapter] get fork agent executor failed: %s", exc)
-            return None
-
-        if executor is None:
-            return None
-        parent_agent = getattr(executor, "_parent_agent", None)
-        if self._instance is not None and parent_agent is not self._instance:
-            logger.debug(
-                "[JiuWenClawDeepAdapter] Skip fork executor from another parent agent during interrupt"
-            )
-            return None
-        self._fork_agent_executor = executor
-        return executor
+    async def cleanup(self) -> None:
+        """Abort active subagents and release the local executor."""
+        await self._abort_active_subagents("adapter_cleanup")
+        self._fork_agent_executor = None
+        if self._stream_event_rail is not None:
+            self._stream_event_rail.set_fork_agent_executor(None)
 
     async def load_user_rails(self) -> None:
         """动态加载用户自定义的 Rail 扩展."""
