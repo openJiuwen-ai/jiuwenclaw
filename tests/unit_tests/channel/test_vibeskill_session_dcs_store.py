@@ -132,6 +132,7 @@ async def test_load_session_roundtrip() -> None:
         mode="Standard",
         metadata={"user_id": "u9"},
     )
+    saved.exportable = True
 
     await store.save_session(saved)
     loaded = await store.load_session("vibeskill_a")
@@ -141,6 +142,20 @@ async def test_load_session_roundtrip() -> None:
     assert loaded.state is VibeSkillSessionState.BUSY
     assert loaded.mode == "Standard"
     assert loaded.metadata == {"user_id": "u9"}
+    assert loaded.exportable is True
+
+
+@pytest.mark.asyncio
+async def test_load_session_missing_exportable_defaults_false() -> None:
+    store, fake = _make_store()
+    fake._data["jiuwen:vibeskillSession:vibeskill_a"] = (
+        '{"session_id":"vibeskill_a","state":"completed","mode":"SkillCreate",'
+        '"created_at":1.0,"updated_at":1.0,"metadata":{}}'
+    )
+
+    loaded = await store.load_session("vibeskill_a")
+    assert loaded is not None
+    assert loaded.exportable is False
 
 
 @pytest.mark.asyncio

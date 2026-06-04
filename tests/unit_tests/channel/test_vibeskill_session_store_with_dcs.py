@@ -141,6 +141,20 @@ async def test_store_without_dcs_behaves_as_before() -> None:
 
 
 @pytest.mark.asyncio
+async def test_gw2_observes_exportable_change_from_gw1(shared_redis: InMemoryFakeRedis) -> None:
+    store1 = VibeSkillSessionStore(dcs_store=_make_dcs(shared_redis))
+    store2 = VibeSkillSessionStore(dcs_store=_make_dcs(shared_redis))
+
+    session = await store1.get_or_create(session_id=None, mode="SkillCreate")
+    sid = session.session_id
+    await store1.set_exportable(sid, True)
+
+    loaded = await store2.get_session(sid)
+    assert loaded is not None
+    assert loaded.exportable is True
+
+
+@pytest.mark.asyncio
 async def test_list_sessions_returns_only_local_view(shared_redis: InMemoryFakeRedis) -> None:
     store1 = VibeSkillSessionStore(dcs_store=_make_dcs(shared_redis))
     store2 = VibeSkillSessionStore(dcs_store=_make_dcs(shared_redis))

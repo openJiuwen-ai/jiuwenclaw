@@ -56,6 +56,7 @@ class VibeSkillSessionDcsStore:
         payload: dict[str, Any] = {
             "session_id": session.session_id,
             "state": state_value,
+            "exportable": bool(session.exportable),
             "mode": session.mode,
             "created_at": session.created_at,
             "updated_at": session.updated_at,
@@ -92,9 +93,11 @@ class VibeSkillSessionDcsStore:
             updated_at = float(data.get("updated_at") or 0.0)
         except (TypeError, ValueError):
             updated_at = 0.0
+        exportable = bool(data.get("exportable", False))
         return VibeSkillSession(
             session_id=session_id,
             state=state,
+            exportable=exportable,
             created_at=created_at,
             updated_at=updated_at,
             metadata=metadata,

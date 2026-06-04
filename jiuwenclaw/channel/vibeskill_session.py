@@ -32,6 +32,7 @@ class VibeSkillSession:
 
     session_id: str = ""
     state: VibeSkillSessionState = VibeSkillSessionState.IDLE
+    exportable: bool = False
     created_at: float = field(default_factory=time.time)
     updated_at: float = field(default_factory=time.time)
     metadata: dict[str, Any] = field(default_factory=dict)
@@ -92,10 +93,11 @@ class VibeSkillSessionStore:
         )
         logger.info(
             "[VibeSkillSessionStore] Loaded session metadata from DCS: session_id=%s "
-            "mode=%s state=%s user_id=%s",
+            "mode=%s state=%s exportable=%s user_id=%s",
             session_id,
             session.mode,
             state_value,
+            session.exportable,
             str((session.metadata or {}).get("user_id") or "").strip() or "n/a",
         )
         return session
@@ -149,6 +151,29 @@ class VibeSkillSessionStore:
                 except Exception:
                     logger.exception(
                         "[VibeSkillSessionStore] DCS save_session failed in set_state, session_id=%s",
+                        session_id,
+                    )
+                    raise
+
+    async def set_exportable(self, session_id: str, exportable: bool) -> None:
+        """更新 session 是否可导出。"""
+        session = self._sessions.get(session_id)
+        if session is None:
+            session = await self._load_from_dcs(session_id)
+            if session is None:
+                return
+        async with self._lock:
+            current = self._sessions.get(session_id)
+            if current is None:
+                return
+            current.exportable = exportable
+            current.updated_at = time.time()
+            if self._dcs is not None:
+                try:
+                    await self._dcs.save_session(current)
+                except Exception:
+                    logger.exception(
+                        "[VibeSkillSessionStore] DCS save_session failed in set_exportable, session_id=%s",
                         session_id,
                     )
                     raise

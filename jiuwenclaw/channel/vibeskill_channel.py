@@ -1840,6 +1840,7 @@ class VibeSkillChannel(BaseChannel):
         if session_id:
             try:
                 await self._store.set_state(session_id, VibeSkillSessionState.IDLE)
+                await self._store.set_exportable(session_id, False)
                 logger.info(
                     "[VibeSkillChannel] session state -> idle, source=skilldev.agent_completed, session_id=%s",
                     session_id,
@@ -1883,6 +1884,7 @@ class VibeSkillChannel(BaseChannel):
         if session_id:
             try:
                 await self._store.set_state(session_id, VibeSkillSessionState.COMPLETED)
+                await self._store.set_exportable(session_id, True)
                 logger.info(
                     "[VibeSkillChannel] session state -> completed, source=skilldev.completed, session_id=%s",
                     session_id,
@@ -3166,6 +3168,16 @@ class VibeSkillChannel(BaseChannel):
         """发送请求到 AgentServer 并返回响应。"""
         return await self._agent_client.send_request(env)
 
+    async def _ensure_session_restored(self, session_id: str) -> VibeSkillSession | None:
+        """从 DCS 恢复本 gateway 陌生的 session 元数据。
+
+        工作区由 SandboxRouter 在后续 ``send_request`` 时按 session_id 自动从 DCS 恢复。
+        """
+        sid = str(session_id or "").strip()
+        if not sid:
+            return None
+        return await self._store.resolve_session(sid)
+
     async def _handle_http_session_create(self, headers: dict, body: bytes) -> tuple[int, dict, bytes]:
         """POST /api/v1/session - 创建会话。
 
@@ -3693,14 +3705,13 @@ class VibeSkillChannel(BaseChannel):
         except json.JSONDecodeError:
             return self._json_response(400, {"error": "Invalid JSON"})
         request_id = f"vibeskill-export-{int(time.time() * 1000):x}-{secrets.token_hex(3)}"
-        session = await self._store.get_session(session_id)
+        session = await self._ensure_session_restored(session_id)
         if not session:
             return self._json_response(404, {"error": "Session not found"})
         if session.mode == "Standard":
             return self._json_response(400, {"error": "Standard 模式不支持导出"})
-        state = await self._store.get_state(session_id)
-        if state != VibeSkillSessionState.COMPLETED:
-            return self._json_response(400, {"error": "会话未完成，无法导出"})
+        if not session.exportable:
+            return self._json_response(400, {"error": "会话暂不可导出"})
         download_params: dict[str, Any] = {"task_id": session_id}
         self._apply_tenant_service_id(download_params, session_id)
         env = e2a_from_agent_fields(
