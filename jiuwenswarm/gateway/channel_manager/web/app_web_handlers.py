@@ -2438,18 +2438,19 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
             try:
                 if req_method == ReqMethod.HARNESS_PACKAGES_GET:
                     packages_file = Path(_HARNESS_PACKAGES_FILE)
-                    if packages_file.exists():
-                        data = json.loads(packages_file.read_text(encoding="utf-8"))
+                    if await asyncio.to_thread(packages_file.exists):
+                        raw_text = await asyncio.to_thread(packages_file.read_text, encoding="utf-8")
+                        data = await asyncio.to_thread(json.loads, raw_text)
                     else:
                         service = AutoHarnessService(rail=None, agent=None)
-                        data = service.scan_runtime_extensions()
-                        service.save_packages(data)
+                        data = await asyncio.to_thread(service.scan_runtime_extensions)
+                        await asyncio.to_thread(service.save_packages, data)
                     await channel.send_response(ws, req_id, ok=True, payload=data)
                     return
                 elif req_method == ReqMethod.HARNESS_PACKAGES_SCAN:
                     service = AutoHarnessService(rail=None, agent=None)
-                    data = service.scan_runtime_extensions()
-                    service.save_packages(data)
+                    data = await asyncio.to_thread(service.scan_runtime_extensions)
+                    await asyncio.to_thread(service.save_packages, data)
                     await channel.send_response(ws, req_id, ok=True, payload=data)
                     return
                 elif req_method == ReqMethod.HARNESS_PACKAGES_DELETE:
@@ -2459,7 +2460,7 @@ def _register_web_handlers(bind: WebHandlersBindParams) -> None:
                             ws, req_id, ok=False, error="Cannot delete native agent version", code="BAD_REQUEST")
                         return
                     service = AutoHarnessService(rail=None, agent=None)
-                    payload = service.delete_package(package_id)
+                    payload = await asyncio.to_thread(service.delete_package, package_id)
                     await channel.send_response(ws, req_id, ok=True, payload=payload)
                     return
                 else:

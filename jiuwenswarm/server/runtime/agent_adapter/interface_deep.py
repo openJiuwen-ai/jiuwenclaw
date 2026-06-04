@@ -18,6 +18,7 @@ import time
 from collections import Counter
 from contextvars import ContextVar, Token
 from dataclasses import dataclass
+from pathlib import Path
 from shutil import which
 from typing import TYPE_CHECKING, Any, AsyncIterator, Callable, List, Optional, Tuple
 
@@ -206,6 +207,7 @@ from jiuwenswarm.server.runtime.agent_adapter.sysop_builder import (
     create_local_sysop_card,
     create_sandbox_sysop_card,
 )
+from jiuwenswarm.agents.harness.common.auto_harness.service import _HARNESS_PACKAGES_FILE
 from jiuwenswarm.agents.harness.common.plugins.rail_manager import get_rail_manager
 from jiuwenswarm.gateway.cron import CronTargetChannel
 from jiuwenswarm.common.schema.agent import AgentRequest, AgentResponse, AgentResponseChunk
@@ -1943,6 +1945,84 @@ class JiuWenClawDeepAdapter:
             fs_rail = None
         return fs_rail
 
+    @staticmethod
+    def _get_active_package_config_paths() -> list[str]:
+        """Read harness-packages.json to get config_path from active packages.
+
+        Returns:
+            List of harness_config.yaml paths from active packages.
+        """
+        config_paths: list[str] = []
+        try:
+            if not _HARNESS_PACKAGES_FILE.exists():
+                return config_paths
+
+            data = json.loads(_HARNESS_PACKAGES_FILE.read_text(encoding="utf-8"))
+            active_ids = data.get("active_package_ids", [])
+            if not active_ids:
+                return config_paths
+
+            for pkg in data.get("packages", []):
+                pkg_id = pkg.get("id", "")
+                if pkg_id not in active_ids:
+                    continue
+
+                config_path = pkg.get("config_path", "")
+                if not config_path:
+                    continue
+
+                config_file = Path(config_path)
+                if config_file.exists():
+                    config_paths.append(str(config_file))
+                    logger.info(
+                        "[JiuWenClawDeepAdapter] Found active package config: %s (package=%s)",
+                        config_path,
+                        pkg_id,
+                    )
+        except Exception as exc:
+            logger.warning(
+                "[JiuWenClawDeepAdapter] Failed to read active packages config paths: %s",
+                exc,
+            )
+
+        return config_paths
+
+    async def _load_active_packages(self) -> list[str]:
+        """Load all active packages via load_harness_config.
+
+        Called after agent instance is created to restore previously activated
+        packages (skills, rails, tools) from harness-packages.json.
+
+        Returns:
+            List of loaded resource names.
+        """
+        if self._instance is None:
+            return []
+
+        config_paths = self._get_active_package_config_paths()
+        if not config_paths:
+            return []
+
+        loaded: list[str] = []
+        for config_path in config_paths:
+            try:
+                resources = await self._instance.load_harness_config(config_path)
+                if resources:
+                    loaded.extend(resources)
+                    logger.info(
+                        "[JiuWenClawDeepAdapter] Loaded active package from %s: %s",
+                        config_path,
+                        resources,
+                    )
+            except Exception as exc:
+                logger.warning(
+                    "[JiuWenClawDeepAdapter] Failed to load active package %s: %s",
+                    config_path,
+                    exc,
+                )
+
+        return loaded
+
     def _build_skill_rail(
         self, config: dict[str, Any], include_tools: bool = False
     ) -> SkillUseRail | None:
@@ -2344,10 +2424,22 @@ class JiuWenClawDeepAdapter:
                     False,
                 )
 
-        self._skill_rail = self._build_skill_rail(
-            config,
-            include_tools=self._skill_include_tools_for_profile(),
-        )
+        # Reuse existing SkillUseRail to preserve dynamically loaded skills
+        # from activate_package() / load_harness_config()
+        if self._skill_rail is None:
+            self._skill_rail = self._build_skill_rail(
+                config,
+                include_tools=self._skill_include_tools_for_profile(),
+            )
+        else:
+            # Update existing rail's skill_mode if changed
+            new_skill_mode = self._resolve_skill_mode(config)
+            if self._skill_rail.skill_mode != new_skill_mode:
+                self._skill_rail.skill_mode = new_skill_mode
+            # Update disabled_skills
+            new_disabled = self._skill_manager.list_execution_disabled_skills()
+            if self._skill_rail.disabled_skills != new_disabled:
+                self._skill_rail.disabled_skills = new_disabled
 
         if not self._filesystem_rail_enabled_for_profile():
             self._filesystem_rail = None
@@ -2632,6 +2724,9 @@ class JiuWenClawDeepAdapter:
         logger.info(
             "[JiuWenClawDeepAdapter] 初始化完成: agent_name=%s, mode=%s, sub_mode=%s", self._agent_name, mode, sub_mode
         )
+
+        # 加载已激活的 packages（skills, rails, tools）
+        await self._load_active_packages()
 
         # 动态加载用户自定义的 Rail 扩展
         await self.load_user_rails()

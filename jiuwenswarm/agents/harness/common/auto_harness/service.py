@@ -1854,44 +1854,131 @@ class AutoHarnessService:
         except Exception:
             return datetime.now(timezone.utc).isoformat()
 
-    def scan_runtime_extensions(self) -> dict[str, Any]:
-        """Scan runtime_extensions directory and generate packages info."""
+    def scan_runtime_extensions(self, skip_load: bool = False) -> dict[str, Any]:
+        """Scan runtime_extensions directory and sync packages info with existing state.
+
+        This method:
+        1. Preserves existing package metadata (ID, is_active, activated_at, etc.)
+        2. Adds newly discovered packages from filesystem
+        3. Removes packages that no longer exist in filesystem
+        4. Preserves active_package_ids state
+
+        Args:
+            skip_load: If True, skip loading existing data (used to prevent recursion
+                       when called from load_packages fallback).
+        """
         runtime_root = self.data_dir / "runtime_extensions"
+
+        # Load existing data to preserve state (skip to prevent recursion)
+        if skip_load:
+            existing_data: dict[str, Any] = {
+                "packages": [],
+                "active_package_ids": [],
+                "native_version": {
+                    "id": "native",
+                    "extension_name": "Native Agent",
+                    "is_active": True,
+                },
+            }
+        else:
+            existing_data = self._load_packages_no_fallback()
+            if existing_data is None:
+                existing_data = {
+                    "packages": [],
+                    "active_package_ids": [],
+                    "native_version": {
+                        "id": "native",
+                        "extension_name": "Native Agent",
+                        "is_active": True,
+                    },
+                }
+
+        existing_packages = existing_data.get("packages", [])
+        active_package_ids = existing_data.get("active_package_ids", [])
+
+        # Build lookup by runtime_path for efficient matching
+        # Use copy to avoid modifying original dict
+        existing_by_path: dict[str, dict[str, Any]] = {}
+        for pkg in existing_packages:
+            path_key = pkg.get("runtime_path", "")
+            if path_key:
+                existing_by_path[path_key] = copy(pkg)
+
         packages: list[dict[str, Any]] = []
+        discovered_paths: set[str] = set()
 
         try:
             for path in runtime_root.glob("*/*"):
                 if path.is_dir() and (path / "harness_config.yaml").is_file():
-                    package = {
-                        "id": self.generate_package_id(path),
-                        "extension_name": path.name,
-                        "runtime_path": str(path.resolve()),
-                        "config_path": str((path / "harness_config.yaml").resolve()),
-                        "created_at": self._get_created_time(path),
-                        "is_active": False,
-                        "version_label": "",
-                        "description": "",
-                    }
-                    packages.append(package)
+                    resolved_path = str(path.resolve())
+                    discovered_paths.add(resolved_path)
+
+                    # Check if package already exists (preserve all metadata)
+                    existing_pkg = existing_by_path.get(resolved_path)
+                    if existing_pkg:
+                        # Package already tracked - preserve all existing metadata unchanged
+                        packages.append(existing_pkg)
+                    else:
+                        # New package discovered - create fresh entry (inactive by default)
+                        package = {
+                            "id": self.generate_package_id(path),
+                            "extension_name": path.name,
+                            "runtime_path": resolved_path,
+                            "config_path": str((path / "harness_config.yaml").resolve()),
+                            "created_at": self._get_created_time(path),
+                            "is_active": False,
+                            "version_label": "",
+                            "description": "",
+                        }
+                        packages.append(package)
+                        logger.info(
+                            "[AutoHarnessService] Discovered new package: %s",
+                            package["extension_name"],
+                        )
         except Exception as exc:
             logger.warning("[AutoHarnessService] Failed to scan runtime_extensions: %s", exc)
 
+        # Filter active_package_ids: keep only those that still exist on disk
+        valid_active_ids = [
+            pkg_id for pkg_id in active_package_ids
+            if any(pkg.get("id") == pkg_id for pkg in packages)
+        ]
+
+        # Log removed packages (no longer on disk)
+        for old_pkg in existing_packages:
+            old_path = old_pkg.get("runtime_path", "")
+            if old_path and old_path not in discovered_paths:
+                logger.info(
+                    "[AutoHarnessService] Package removed from filesystem: %s",
+                    old_pkg.get("extension_name", "unknown"),
+                )
+                if old_pkg.get("id") in active_package_ids:
+                    logger.info(
+                        "[AutoHarnessService] Active package deleted, deactivated: %s",
+                        old_pkg.get("id"),
+                    )
+
+        # Determine native_version active status
+        native_is_active = len(valid_active_ids) == 0
+        native_version = {
+            "id": "native",
+            "extension_name": "Native Agent",
+            "is_active": native_is_active,
+        }
+
         return {
             "packages": packages,
-            "native_version": {
-                "id": "native",
-                "extension_name": "Native Agent",
-                "is_active": True,
-            },
-            "active_package_ids": [],
+            "native_version": native_version,
+            "active_package_ids": valid_active_ids,
             "last_updated": datetime.now(timezone.utc).isoformat(),
         }
 
-    def load_packages(self) -> dict[str, Any]:
-        """Load packages metadata from harness-packages.json.
+    @staticmethod
+    def _load_packages_no_fallback() -> dict[str, Any] | None:
+        """Load packages metadata from harness-packages.json without fallback scan.
 
-        If the file doesn't exist, scan runtime_extensions directory,
-        save the result to the file, and return the data.
+        Returns None if file doesn't exist or loading fails.
+        This prevents recursion when called from scan_runtime_extensions.
         """
         try:
             if _HARNESS_PACKAGES_FILE.exists():
@@ -1899,9 +1986,20 @@ class AutoHarnessService:
                 return data
         except Exception as exc:
             logger.warning("[AutoHarnessService] Failed to load packages file: %s", exc)
+        return None
 
-        # Fallback: scan directory and save result
-        data = self.scan_runtime_extensions()
+    def load_packages(self) -> dict[str, Any]:
+        """Load packages metadata from harness-packages.json.
+
+        If the file doesn't exist, scan runtime_extensions directory,
+        save the result to the file, and return the data.
+        """
+        data = self._load_packages_no_fallback()
+        if data is not None:
+            return data
+
+        # Fallback: scan directory and save result (skip_load=True prevents recursion)
+        data = self.scan_runtime_extensions(skip_load=True)
         self.save_packages(data)
         logger.info("[AutoHarnessService] Created packages metadata from scan")
         return data

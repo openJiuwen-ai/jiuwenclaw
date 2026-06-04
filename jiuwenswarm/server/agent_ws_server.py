@@ -4712,7 +4712,7 @@ class AgentWebSocketServer:
         """Handle harness.packages.get request - retrieve packages info."""
         try:
             service = AutoHarnessService(rail=None, agent=None)
-            payload = service.get_packages_info()
+            payload = await asyncio.to_thread(service.get_packages_info)
             resp = AgentResponse(
                 request_id=request.request_id,
                 channel_id=request.channel_id,
@@ -4738,8 +4738,8 @@ class AgentWebSocketServer:
         """Handle harness.packages.scan request - scan runtime extensions."""
         try:
             service = AutoHarnessService(rail=None, agent=None)
-            payload = service.scan_runtime_extensions()
-            service.save_packages(payload)
+            payload = await asyncio.to_thread(service.scan_runtime_extensions)
+            await asyncio.to_thread(service.save_packages, payload)
             resp = AgentResponse(
                 request_id=request.request_id,
                 channel_id=request.channel_id,
@@ -4923,7 +4923,7 @@ class AgentWebSocketServer:
 
         try:
             service = AutoHarnessService(rail=None, agent=None)
-            payload = service.delete_package(package_id)
+            payload = await asyncio.to_thread(service.delete_package, package_id)
             resp = AgentResponse(
                 request_id=request.request_id,
                 channel_id=request.channel_id,

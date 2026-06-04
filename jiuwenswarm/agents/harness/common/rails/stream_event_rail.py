@@ -388,7 +388,7 @@ class JiuClawStreamEventRail(DeepAgentRail):
             raise asyncio.CancelledError("Agent abort requested")
 
         if ctx.context is not None:
-            await self._fix_incomplete_tool_context(ctx.context)
+            await self._fix_incomplete_tool_context(ctx)
 
     async def after_model_call(self, ctx: AgentCallbackContext) -> None:
         await self._emit_context_usage(ctx)
@@ -460,7 +460,7 @@ class JiuClawStreamEventRail(DeepAgentRail):
     async def on_model_exception(self, ctx: AgentCallbackContext) -> None:
         if ctx.context is not None:
             logger.info("[StreamEventRail] Attempting context repair after model exception")
-            await self._fix_incomplete_tool_context(ctx.context)
+            await self._fix_incomplete_tool_context(ctx)
 
     # ------------------------------------------------------------------
     # Private helpers (migrated from JiuClawReActAgent)
@@ -825,10 +825,23 @@ class JiuClawStreamEventRail(DeepAgentRail):
 
         return s
 
-    async def _fix_incomplete_tool_context(self, context: Any) -> None:
+    async def _fix_incomplete_tool_context(self, ctx: AgentCallbackContext) -> None:
         """Fix incomplete context: ensure assistant messages with tool_calls have matching tool messages."""
         try:
+            context = ctx.context
+            if context is None:
+                return
             messages = context.get_messages()
+            tools = getattr(ctx.inputs, "tools", None) or []
+            # fix tool parameter validation
+            for tool in tools:
+                if not tool.parameters:
+                    tool.parameters = {
+                        "type": "object",
+                        "properties": {}
+                    }
+                if tool.parameters.get("type") is None:
+                    tool.parameters["type"] = "object"
             len_messages = len(messages)
             if len_messages == 0:
                 return
