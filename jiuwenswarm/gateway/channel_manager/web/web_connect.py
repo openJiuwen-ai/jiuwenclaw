@@ -361,7 +361,8 @@ class WebChannel(BaseChannel):
                               "chat.ask_user_question", "chat.subtask_update",
                               "history.message",
                               "chat.session_result", "chat.usage_metadata",
-                              "chat.usage_summary", "chat.file") \
+                              "chat.usage_summary", "chat.file",
+                              "chat.retract", "security.alert") \
                                 or event_name.startswith("team.") \
                                 or event_name.startswith("harness."):
                 # 传递完整 payload，保留所有字段

@@ -27,6 +27,7 @@ import {
   FileDownloadItem,
   ContextCompressionRuntime,
   ContextCompressionSummary,
+  WsEvent,
 } from '../types';
 import { useChatStore, useTodoStore, useSessionStore, useHarnessStore } from '../stores';
 import type { TeamTask, TeamTaskStatus } from '../stores/sessionStore';
@@ -404,6 +405,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
   // 必须在渲染阶段同步更新，否则 effect 执行之前收到的事件会被错误过滤
   const userInputVersionRef = useRef(0);
   const activeSessionIdRef = useRef(activeSessionId);
+  const activeRequestIdRef = useRef<string | undefined>(undefined);
   // 立即同步更新，不等待 effect
   activeSessionIdRef.current = activeSessionId;
 
@@ -1491,8 +1493,8 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
         addToolCall(
           toolCall,
           currentStreamMessage?.timestamp
-            ? { startedAt: currentStreamMessage.timestamp }
-            : undefined
+            ? { startedAt: currentStreamMessage.timestamp, requestId: activeRequestIdRef.current }
+            : { requestId: activeRequestIdRef.current }
         );
         if (currentMode === 'team' && !isTeamPanelClearedForPayload(payload)) {
           applyTeamTaskToolCall(toolCall);
@@ -1674,6 +1676,72 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
           content: t('network.errorPrefix', { message: errorMsg }),
           timestamp: new Date().toISOString(),
         });
+      }),
+      webClient.on('security.alert', ({ payload }) => {
+        if (!shouldHandleSessionEvent(payload)) return;
+
+        const alertMsg =
+          typeof payload.message === 'string'
+            ? payload.message
+            : '安全警告';
+
+        window.dispatchEvent(new CustomEvent('security-alert', {
+          detail: {
+            message: alertMsg,
+            message_id: payload.message_id || '',
+            tool_call_id: payload.tool_call_id || '',
+            alert_type: payload.alert_type || 'security',
+            tool_name: payload.tool_name || '',
+          }
+        }));
+      }),
+      webClient.on('chat.retract', (event: WsEvent) => {
+        if (!shouldHandleSessionEvent(event.payload)) return;
+
+        const retractMsg =
+          typeof event.payload.message === 'string'
+            ? event.payload.message
+            : '内容已因安全原因撤回';
+
+        const { currentStreamId, messages } = useChatStore.getState();
+
+        // Replace current streaming message first
+        if (currentStreamId) {
+          updateMessage(currentStreamId, {
+            content: retractMsg,
+            isStreaming: false,
+          });
+          stopStreaming();
+        }
+
+        // Replace ALL assistant messages after the last user message
+        let lastUserIdx = -1;
+        for (let i = messages.length - 1; i >= 0; i -= 1) {
+          if (messages[i].role === 'user') {
+            lastUserIdx = i;
+            break;
+          }
+        }
+        if (lastUserIdx >= 0) {
+          for (let i = lastUserIdx + 1; i < messages.length; i++) {
+            if (messages[i].role === 'assistant') {
+              updateMessage(messages[i].id, { content: retractMsg });
+            }
+          }
+        } else {
+          for (const msg of messages) {
+            if (msg.role === 'assistant') {
+              updateMessage(msg.id, { content: retractMsg });
+            }
+          }
+        }
+
+        setProcessing(false);
+        setThinking(false);
+        activeRequestIdRef.current = undefined;
+
+        const retractRequestId = typeof event.payload.request_id === 'string' ? event.payload.request_id : undefined;
+        useChatStore.getState().clearCurrentTurnData(retractRequestId);
       }),
       webClient.on('chat.interrupt_result', ({ payload }) => {
         if (!shouldHandleSessionEvent(payload)) return;
@@ -1972,14 +2040,6 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
         if (!shouldHandleSessionEvent(payload)) return;
         const content = typeof payload.content === 'string' ? payload.content : '';
         const stage = typeof payload.stage === 'string' ? payload.stage : undefined;
-
-        // Check for security alert
-        const metadata = (payload as { metadata?: { is_security_alert?: boolean } }).metadata;
-        if (metadata?.is_security_alert) {
-          window.dispatchEvent(new CustomEvent('security-alert', {
-            detail: { message: content }
-          }));
-        }
 
         useHarnessStore.getState().addHarnessMessage(content, stage);
 

@@ -4,6 +4,8 @@
 
 from types import SimpleNamespace
 
+import pytest
+
 from openjiuwen.core.foundation.tool import LocalFunction, ToolCard
 from openjiuwen.core.single_agent.ability_manager import AbilityManager
 
@@ -120,3 +122,45 @@ def test_team_member_skill_toolkit_rail_uninit_cleans_up_registered_tools(monkey
         "install_skill_member-agent-2",
         "uninstall_skill_member-agent-2",
     ]
+
+
+@pytest.mark.asyncio
+async def test_team_member_skill_toolkit_rail_refreshes_links_after_install(monkeypatch, tmp_path):
+    """Rail should refresh linked skill views after a successful install."""
+    resource_mgr = _FakeResourceManager()
+    rail_module = "jiuwenswarm.agents.harness.team.rails.team_member_skill_toolkit_rail"
+    refresh_calls = []
+    shared_manager = object()
+    toolkit_managers = []
+
+    class _InstallSkillToolkit(_FakeSkillToolkit):
+        async def install_skill(self, **_):
+            return {"success": True, "skill": {"name": "new-skill"}}
+
+        def get_tools(self):
+            card = ToolCard(
+                id="install_skill",
+                name="install_skill",
+                description="install_skill desc",
+                input_params={"type": "object", "properties": {}},
+            )
+            return [LocalFunction(card=card, func=self.install_skill)]
+
+    monkeypatch.setattr(f"{rail_module}.Runner", SimpleNamespace(resource_mgr=resource_mgr))
+    monkeypatch.setattr(f"{rail_module}.SkillToolkit", _InstallSkillToolkit)
+    monkeypatch.setattr(_InstallSkillToolkit, "__init__", lambda self, manager: toolkit_managers.append(manager))
+
+    agent = _make_agent("member-agent-3")
+    rail = MemberSkillToolkitRail(
+        workspace_dir=str(tmp_path),
+        manager=shared_manager,
+        refresh_links=lambda result: refresh_calls.append(result),
+    )
+
+    rail.init(agent)
+    install_tool = resource_mgr.tools["install_skill_member-agent-3"]
+    result = await install_tool.invoke({})
+
+    assert result["success"] is True
+    assert toolkit_managers == [shared_manager]
+    assert refresh_calls == [result]

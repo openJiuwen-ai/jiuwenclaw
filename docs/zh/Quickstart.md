@@ -58,8 +58,7 @@ jiuwenswarm-start
 
 当看到类似上述提示时，表示服务已启动，在浏览器中访问 `http://localhost:5173` 即可使用。
 
-<<<<<<< HEAD
-​适合基于JiuwenSwarm进行二次开发适配的用户。
+适合基于JiuwenSwarm进行二次开发适配的用户。
 
 ### `uv`方式安装
 - 使用`uv`新建虚拟环境

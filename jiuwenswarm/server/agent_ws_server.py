@@ -84,6 +84,7 @@ logger = logging.getLogger(__name__)
 # 流式处理心跳间隔：当 Agent 处理时间超过此阈值时，发送心跳 chunk 保持 WebSocket 连接活跃
 # 避免 ping_timeout 导致连接关闭。默认 10 秒，小于服务端 ping_timeout=20s。
 _STREAM_HEARTBEAT_INTERVAL_SECONDS = 10.0
+_HEALTH_MONITOR_INTERVAL_SECONDS = 60.0
 _HISTORY_PAGE_SIZE = 20
 
 _HISTORY_RESTORABLE_ASSISTANT_EVENT_TYPES = frozenset(
@@ -392,6 +393,9 @@ class AgentWebSocketServer:
         self._ping_interval = ping_interval
         self._ping_timeout = ping_timeout
         self._server: Any = None
+        self._health_monitor_task: asyncio.Task | None = None
+        self._prev_health: dict | None = None
+        self._prev_tracemalloc_snapshot: Any = None
         # 当前 Gateway 连接，用于 send_push 主动推送
         self._current_ws: Any = None
         self._current_send_lock: asyncio.Lock | None = None
@@ -507,6 +511,7 @@ class AgentWebSocketServer:
         logger.info(
             "[AgentWebSocketServer] 已启动: ws://%s:%s", self._host, self._port
         )
+        self._health_monitor_task = asyncio.create_task(self._health_monitor_loop())
         # WS 监听已经开放, 现在按 config.yaml::sandbox 的 runtime.enabled +
         # startup_mode 决定要不要自动把 jiuwenbox 子进程也拉起来。失败不阻塞
         # 启动 (用户依然可以在 TUI 里跑 /sandbox enable 重试)。
@@ -706,6 +711,13 @@ class AgentWebSocketServer:
 
     async def stop(self) -> None:
         """停止 WebSocket 服务端."""
+        if self._health_monitor_task is not None:
+            self._health_monitor_task.cancel()
+            try:
+                await self._health_monitor_task
+            except asyncio.CancelledError:
+                pass
+            self._health_monitor_task = None
         if self._server is None:
             return
         self._server.close()
@@ -716,6 +728,314 @@ class AgentWebSocketServer:
         except Exception as exc:  # noqa: BLE001
             logger.warning("[AgentWebSocketServer] jiuwenbox_runner.stop failed: %s", exc)
         logger.info("[AgentWebSocketServer] 已停止")
+
+    # ---------- 健康监控 ----------
+
+    async def _health_monitor_loop(self) -> None:
+        """定期记录进程健康指标，带 delta 趋势和 tracemalloc 增量定位."""
+        import os
+        import gc as _gc
+        import threading as _threading
+
+        _resource = None
+        try:
+            import resource as _resource_mod
+            _resource = _resource_mod
+        except ImportError:
+            pass
+
+        _tracemalloc_started = False
+        try:
+            import tracemalloc
+            tracemalloc.start()
+            _tracemalloc_started = True
+        except Exception:
+            pass
+
+        def _fmt_delta(cur: float, prev_val: float | None, unit: str = "", fmt: str = ".1f") -> str:
+            """格式化带趋势: '520MB(411→520 +109↑)' 或首次 '520MB'."""
+            if prev_val is None:
+                return f"{cur:{fmt}}{unit}"
+            d = cur - prev_val
+            arrow = "↑" if d > 0.5 else ("↓" if d < -0.5 else "→")
+            sign = "+" if d >= 0 else ""
+            return f"{cur:{fmt}}{unit}(prev={prev_val:{fmt}}{unit} {sign}{d:{fmt}}{unit}{arrow})"
+
+        while True:
+            try:
+                await asyncio.sleep(_HEALTH_MONITOR_INTERVAL_SECONDS)
+            except asyncio.CancelledError:
+                break
+
+            try:
+                prev = self._prev_health or {}
+
+                # — 进程内存 —
+                peak_mb = 0.0
+                if _resource is not None:
+                    try:
+                        raw_rss = _resource.getrusage(_resource.RUSAGE_SELF).ru_maxrss
+                        import sys as _sys
+                        if _sys.platform == "darwin":
+                            peak_mb = raw_rss / 1024.0 / 1024.0
+                        else:
+                            peak_mb = raw_rss / 1024.0
+                    except (AttributeError, OSError):
+                        pass
+
+                rss_mb = 0.0
+                vms_mb = 0.0
+                cur_mem_pct = 0.0
+                fd_count_str = "n/a"
+                try:
+                    import psutil
+                    proc = psutil.Process(os.getpid())
+                    rss_mb = proc.memory_info().rss / 1024.0 / 1024.0
+                    vms_mb = proc.memory_info().vms / 1024.0 / 1024.0
+                    cur_mem_pct = proc.memory_percent()
+                    fd_count_str = str(proc.num_fds()) if os.name != "nt" else "n/a"
+                    # Windows 上用 psutil 的 peak_wset 补充 peak; Linux 用 resource.ru_maxrss
+                    if peak_mb == 0.0 and os.name == "nt":
+                        mi = proc.memory_info()
+                        peak_mb = getattr(mi, "peak_wset", 0) / 1024.0 / 1024.0
+                except ImportError:
+                    pass
+
+                # — 事件循环延迟 —
+                loop = asyncio.get_running_loop()
+                t0 = loop.time()
+                await asyncio.sleep(0)
+                loop_latency_ms = (loop.time() - t0) * 1000
+
+                # — agent 实例数 & channel 分布 —
+                agent_count = 0
+                channel_summary: dict[str, int] = {}
+                for ch, agents in self._agent_manager.agents.items():
+                    agent_count += len(agents)
+                    channel_summary[ch] = len(agents)
+
+                # — 并发请求数 —
+                inflight = len(self._session_stream_tasks)
+
+                # — 线程数 —
+                thread_count = _threading.active_count()
+
+                # — GC 统计（增量） —
+                gc_stats = _gc.get_stats()
+                prev_gc = prev.get("gc_stats", None)
+                gc_lines = []
+                for i, s in enumerate(gc_stats):
+                    coll = s["collections"]
+                    uncoll = s["uncollectable"]
+                    coll_delta = ""
+                    uncoll_delta = ""
+                    if prev_gc and i < len(prev_gc):
+                        dc = coll - prev_gc[i]["collections"]
+                        du = uncoll - prev_gc[i]["uncollectable"]
+                        coll_delta = f" +{dc}"
+                        if du:
+                            uncoll_delta = f" +{du}"
+                    gc_lines.append(f"  gen{i}: collections={coll}{coll_delta} uncollectable={uncoll}{uncoll_delta}")
+
+                # — 对象计数 —
+                obj_counts: dict[str, int] = {}
+                for obj in _gc.get_objects():
+                    tname = type(obj).__name__
+                    obj_counts[tname] = obj_counts.get(tname, 0) + 1
+                total_objects = sum(obj_counts.values())
+                prev_obj_counts = prev.get("obj_counts", {})
+                # 增长最快的 top 5
+                obj_deltas = []
+                for name, cnt in obj_counts.items():
+                    prev_cnt = prev_obj_counts.get(name, 0)
+                    delta = cnt - prev_cnt
+                    if delta != 0 and abs(delta) >= 50:
+                        obj_deltas.append((name, cnt, delta))
+                obj_deltas.sort(key=lambda x: abs(x[2]), reverse=True)
+                growing_top5 = obj_deltas[:5]
+                # 总量 top 5
+                total_top5 = sorted(obj_counts.items(), key=lambda x: -x[1])[:5]
+
+                # — tracemalloc 增量对比（定位哪行代码在吃内存） —
+                tmalloc_lines = []
+                if _tracemalloc_started:
+                    try:
+                        import tracemalloc
+                        cur_snapshot = tracemalloc.take_snapshot()
+                        prev_snapshot = self._prev_tracemalloc_snapshot
+                        if prev_snapshot is not None:
+                            diff_stats = cur_snapshot.compare_to(prev_snapshot, "lineno")
+                            # 只输出内存增长 >10KB 的 top 10（忽略减少的）
+                            growing = [s for s in diff_stats if s.size_diff > 10240]
+                            growing.sort(key=lambda s: s.size_diff, reverse=True)
+                            for stat in growing[:10]:
+                                tmalloc_lines.append(
+                                    f"  {stat.traceback}: +{stat.size_diff / 1024:.1f}KB"
+                                    f" (total={stat.size / 1024:.1f}KB, +{stat.count_diff}blocks)"
+                                )
+                        self._prev_tracemalloc_snapshot = cur_snapshot
+                    except Exception:
+                        pass
+
+                # === 输出 ===
+
+                # 第1行: 内存趋势（核心）
+                logger.info(
+                    "[HealthMonitor] 内存: rss=%s peak=%s vms=%s pct=%s fds=%s",
+                    _fmt_delta(rss_mb, prev.get("rss_mb"), "MB"),
+                    _fmt_delta(peak_mb, prev.get("peak_mb"), "MB"),
+                    _fmt_delta(vms_mb, prev.get("vms_mb"), "MB"),
+                    _fmt_delta(cur_mem_pct, prev.get("mem_pct"), "%"),
+                    fd_count_str,
+                )
+
+                # 第2行: 运行状态
+                logger.info(
+                    "[HealthMonitor] 运行: loop_latency=%s agents=%d channels=%s inflight=%d threads=%d",
+                    _fmt_delta(loop_latency_ms, prev.get("loop_latency_ms"), "ms"),
+                    agent_count, channel_summary, inflight, thread_count,
+                )
+
+                # 第3行: 对象增长趋势
+                grow_str = " ".join(
+                    f"{n}:{c}(+{d})" for n, c, d in growing_top5
+                ) or "(无显著变化)"
+                total_str = " ".join(f"{n}={c}" for n, c in total_top5)
+                logger.info(
+                    "[HealthMonitor] 对象: total=%s 总量top5=[%s] 增长top5=[%s]",
+                    _fmt_delta(total_objects, prev.get("total_objects"), "", ".0f"),
+                    total_str, grow_str,
+                )
+
+                # GC 增量
+                for line in gc_lines:
+                    logger.info("[HealthMonitor] GC %s", line)
+
+                # tracemalloc 增量（最关键：定位哪行代码在吃内存）
+                if tmalloc_lines:
+                    logger.warning("[HealthMonitor] tracemalloc 内存增长 top:")
+                    for line in tmalloc_lines:
+                        logger.warning("[HealthMonitor] %s", line)
+                elif _tracemalloc_started and prev.get("mem_pct") is not None:
+                    logger.info("[HealthMonitor] tracemalloc: 本轮无 >10KB 增量")
+
+                # — 告警 —
+                # 内存 >70%
+                if cur_mem_pct > 70:
+                    logger.warning(
+                        "[HealthMonitor] !!! 内存告警 %.1f%% 超阈值70%% !!!", cur_mem_pct,
+                    )
+                    # dump agent 详情
+                    for ch, agents in self._agent_manager.agents.items():
+                        for cache_key, agent in agents.items():
+                            self._log_agent_detail(ch, cache_key, agent)
+
+                # 内存飙升 >10%/周期
+                prev_pct = prev.get("mem_pct")
+                if prev_pct is not None and cur_mem_pct - prev_pct > 10:
+                    logger.warning(
+                        "[HealthMonitor] !!! 内存飙升 %s%% → %s%% (+%s%% / %ds) !!!",
+                        f"{prev_pct:.1f}", f"{cur_mem_pct:.1f}",
+                        f"{cur_mem_pct - prev_pct:.1f}",
+                        _HEALTH_MONITOR_INTERVAL_SECONDS,
+                    )
+
+                # 事件循环阻塞 >500ms
+                if loop_latency_ms > 500:
+                    logger.warning(
+                        "[HealthMonitor] !!! 事件循环阻塞 %.1fms 超阈值500ms !!!", loop_latency_ms,
+                    )
+
+                # 线程泄漏 >20
+                if thread_count > 20:
+                    thread_names = [t.name for t in _threading.enumerate()]
+                    logger.warning(
+                        "[HealthMonitor] !!! 线程泄漏 %d 超阈值20, names=%s !!!",
+                        thread_count, thread_names[:20],
+                    )
+
+                # 对象堆积 >500k
+                if total_objects > 500_000:
+                    logger.warning(
+                        "[HealthMonitor] !!! 对象堆积 %d 超阈值500k !!!", total_objects,
+                    )
+
+                # 对象快速增长 >50k/周期
+                prev_total = prev.get("total_objects")
+                if prev_total is not None and total_objects - prev_total > 50_000:
+                    logger.warning(
+                        "[HealthMonitor] !!! 对象快速增长 %d → %d (+%d / %ds) !!!",
+                        prev_total, total_objects, total_objects - prev_total,
+                        _HEALTH_MONITOR_INTERVAL_SECONDS,
+                    )
+
+                # 保存本次采样值
+                self._prev_health = {
+                    "rss_mb": rss_mb, "peak_mb": peak_mb, "vms_mb": vms_mb,
+                    "mem_pct": cur_mem_pct, "loop_latency_ms": loop_latency_ms,
+                    "total_objects": total_objects, "obj_counts": obj_counts,
+                    "gc_stats": gc_stats,
+                }
+
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.warning("[HealthMonitor] 监控异常: %s", e)
+
+    def _log_agent_detail(self, channel: str, cache_key: str, agent: Any) -> None:
+        """记录单个 agent 实例的内部状态详情（仅在内存告警时触发）."""
+        try:
+            adapter = getattr(agent, "_adapter", None)
+            session_mgr = getattr(agent, "_session_manager", None)
+            skill_mgr = getattr(agent, "_skill_manager", None)
+
+            # SessionManager 状态
+            sm_info = ""
+            if session_mgr is not None:
+                queues = getattr(session_mgr, "_session_queues", {})
+                processors = getattr(session_mgr, "_session_processors", {})
+                tasks = getattr(session_mgr, "_session_tasks", {})
+                active_sessions = sum(1 for t in tasks.values() if t is not None and not t.done())
+                queue_depths = {sid: q.qsize() for sid, q in queues.items() if q.qsize() > 0}
+                sm_info = (
+                    f" sm_queues={len(queues)} sm_processors={len(processors)}"
+                    f" sm_active={active_sessions} sm_depths={queue_depths or '{}'}"
+                )
+
+            # SkillManager 状态
+            sk_info = ""
+            if skill_mgr is not None:
+                sk_info = f" skills={len(getattr(skill_mgr, '_skills', []) or [])}"
+
+            # DeepAgent 实例内部状态（openjiuwen）
+            deep_info = ""
+            inner = getattr(adapter, "_instance", None) if adapter else None
+            if inner is not None:
+                ce = getattr(inner, "context_engine", None)
+                if ce is not None:
+                    pool_size = len(getattr(ce, "_context_pool", {}))
+                    pool_msg_counts = {}
+                    for cid, ctx in getattr(ce, "_context_pool", {}).items():
+                        msgs = getattr(ctx, "_messages", None)
+                        pool_msg_counts[cid] = len(msgs) if msgs else 0
+                    deep_info += f" ctx_pool={pool_size} ctx_msgs={pool_msg_counts or '{}'}"
+
+                am = getattr(inner, "_ability_manager", None)
+                if am is not None:
+                    tool_count = len(am.list_abilities()) if hasattr(am, "list_abilities") else 0
+                    deep_info += f" tools={tool_count}"
+
+                pb = getattr(inner, "prompt_builder", None) or getattr(inner, "system_prompt_builder", None)
+                if pb is not None:
+                    sections = getattr(pb, "_sections", {}) or getattr(pb, "sections", {})
+                    deep_info += f" prompt_sections={len(sections)}"
+
+            logger.warning(
+                "[HealthMonitor][agent] channel=%s cache_key=%s%s%s%s",
+                channel, cache_key, sm_info, sk_info, deep_info,
+            )
+        except Exception as e:
+            logger.warning("[HealthMonitor][agent] 记录异常: channel=%s %s", channel, e)
 
     # ---------- 连接处理 ----------
 
@@ -787,6 +1107,8 @@ class AgentWebSocketServer:
 
     async def _handle_message(self, ws: Any, raw: str | bytes, send_lock: asyncio.Lock) -> None:
         """解析一条 JSON 请求并分发到 IAgentServer 处理."""
+        import time as _time
+        t_msg_enter = _time.monotonic()
         try:
             data = json.loads(raw)
         except json.JSONDecodeError as e:
@@ -1066,6 +1388,13 @@ class AgentWebSocketServer:
             )
             async with send_lock:
                 await ws.send(json.dumps(wire, ensure_ascii=False))
+        finally:
+            elapsed_ms = (_time.monotonic() - t_msg_enter) * 1000
+            logger.info(
+                "[AgentWebSocketServer] _handle_message 完成: request_id=%s elapsed=%.0fms",
+                getattr(request, "request_id", "?"),
+                elapsed_ms,
+            )
 
     @staticmethod
     def _should_trigger_before_chat_request_hook(request: AgentRequest) -> bool:
@@ -1193,7 +1522,9 @@ class AgentWebSocketServer:
     async def _handle_unary(self, ws: Any, request: AgentRequest, send_lock: asyncio.Lock) -> None:
         """非流式处理：调用 process_message，返回一条 E2AResponse 线 JSON。"""
         from jiuwenswarm.common.schema.message import ReqMethod
+        import time as _time
 
+        t_enter = _time.monotonic()
         channel_id = request.channel_id or "default"
 
         if request.req_method == ReqMethod.INITIALIZE:
@@ -1214,29 +1545,42 @@ class AgentWebSocketServer:
 
         mode, sub_mode = _apply_resolved_mode_to_request(request)
         agent_mode = "agent" if mode == "auto_harness" else mode
+        t_before_get_agent = _time.monotonic()
         agent = await self._agent_manager.get_agent(
             channel_id=channel_id,
             mode=agent_mode,
             project_dir=resolve_request_project_dir(request),
             sub_mode=sub_mode,
         )
+        t_after_get_agent = _time.monotonic()
         if agent is None:
             raise ValueError("Failed to get agent")
 
         await self._ensure_code_mode_state(request, mode, sub_mode, agent)
 
+        t_before_process = _time.monotonic()
         resp = await agent.process_message(request)
+        t_after_process = _time.monotonic()
 
         wire = encode_agent_response_for_wire(resp, response_id=request.request_id)
         async with send_lock:
             await ws.send(json.dumps(wire, ensure_ascii=False))
+        t_after_send = _time.monotonic()
+
+        total_ms = (t_after_send - t_enter) * 1000
+        get_agent_ms = (t_after_get_agent - t_before_get_agent) * 1000
+        process_ms = (t_after_process - t_before_process) * 1000
+        send_ms = (t_after_send - t_after_process) * 1000
         logger.info(
-            "[AgentWebSocketServer] 非流式响应已发送: request_id=%s",
-            request.request_id,
+            "[AgentWebSocketServer] 非流式响应已发送: request_id=%s"
+            " total=%.0fms get_agent=%.0fms process=%.0fms send=%.0fms",
+            request.request_id, total_ms, get_agent_ms, process_ms, send_ms,
         )
 
     async def _handle_stream(self, ws: Any, request: AgentRequest, send_lock: asyncio.Lock) -> None:
         """流式处理：调用 process_message_stream，逐条发送 E2AResponse 线 JSON。"""
+        import time as _time
+        t_stream_enter = _time.monotonic()
         channel_id = request.channel_id or "default"
         session_id = request.session_id or "default"
         current_task = asyncio.current_task()
@@ -1324,9 +1668,10 @@ class AgentWebSocketServer:
                 self._session_stream_tasks.pop(session_id, None)
 
         logger.info(
-            "[AgentWebSocketServer] 流式响应已发送: request_id=%s 共 %s 个 chunk",
+            "[AgentWebSocketServer] 流式响应已发送: request_id=%s 共 %s 个 chunk elapsed=%.0fms",
             request.request_id,
             chunk_count,
+            (_time.monotonic() - t_stream_enter) * 1000,
         )
 
     async def _handle_session_list(self, ws: Any, request: AgentRequest, send_lock: asyncio.Lock) -> None:

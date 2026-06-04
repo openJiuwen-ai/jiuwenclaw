@@ -39,6 +39,8 @@ export function MemberListItem({
   const circumference = 2 * Math.PI * radius;
   const strokeDashoffset = circumference - (progressPercent / 100) * circumference;
 
+  const isRunning = statusKey === 'running';
+
   return (
     <button
       type="button"
@@ -58,7 +60,9 @@ export function MemberListItem({
           className={`${compact ? 'h-8 w-8' : 'h-10 w-10'} rounded-full`}
           imageClassName="rounded-full"
         />
-        <span className={`absolute -bottom-0.5 -right-0.5 h-3 w-3 rounded-full border-2 border-card ${getMemberStatusDotClass(member)}`} />
+        {!compact && (
+          <span className={`absolute -bottom-0.5 -right-0.5 h-3 w-3 rounded-full border-2 border-card ${getMemberStatusDotClass(member)}`} />
+        )}
       </div>
       <div className="min-w-0 flex-1">
         <div className="flex items-center gap-2">
@@ -72,7 +76,24 @@ export function MemberListItem({
           </div>
         )}
       </div>
-      {taskProgress && taskProgress.total > 0 ? (
+      {compact ? (
+        isRunning ? (
+          <svg className="w-4 h-4 text-info animate-spin" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 2v4" />
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="m16.2 7.8 2.9-2.9" />
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M18 12h4" />
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="m16.2 16.2 2.9 2.9" />
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 18v4" />
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="m4.9 19.1 2.9-2.9" />
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M2 12h4" />
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="m4.9 4.9 2.9 2.9" />
+          </svg>
+        ) : (
+          <svg className="w-4 h-4 text-text-muted" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />
+          </svg>
+        )
+      ) : taskProgress && taskProgress.total > 0 ? (
         <div className="shrink-0 relative">
           <svg width="32" height="32" className="shrink-0">
             <circle

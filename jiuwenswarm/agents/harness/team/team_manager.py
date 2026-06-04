@@ -1,4 +1,4 @@
-# Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
+# Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 
 """Team lifecycle manager."""
 
@@ -6,10 +6,8 @@ from __future__ import annotations
 
 import asyncio
 import copy
-import json
 import logging
 import re
-import shutil
 from dataclasses import dataclass
 from pathlib import Path
 from types import SimpleNamespace
@@ -30,6 +28,9 @@ from openjiuwen.harness.rails import (
 from jiuwenswarm.agents.harness.common.plugins.rail_manager import get_rail_manager
 from jiuwenswarm.agents.harness.team.rails.team_member_skill_toolkit_rail import (
     MemberSkillToolkitRail,
+)
+from jiuwenswarm.agents.harness.team.rails.team_shared_skill_link_refresh_rail import (
+    TeamSharedSkillLinkRefreshRail,
 )
 from jiuwenswarm.server.runtime.skill.skill_manager import SkillManager
 
@@ -57,6 +58,14 @@ from jiuwenswarm.agents.harness.team.distributed_runtime import (
 )
 from jiuwenswarm.agents.harness.team.monitor_handler import TeamMonitorHandler
 from jiuwenswarm.agents.harness.team.remote_member_bootstrap import release_a2x_reservations_for_session
+from jiuwenswarm.agents.harness.team.team_skill_links import (
+    is_valid_skill_dir,
+    link_skill_dir,
+    path_exists_or_link,
+    prune_skill_dir_links,
+    remove_skill_dir_link,
+    sync_skill_dir_links,
+)
 from jiuwenswarm.common.config import get_config, get_default_models
 from jiuwenswarm.agents.harness.team.team_runtime_inheritance import (
     MemberInfo,
@@ -69,7 +78,7 @@ from jiuwenswarm.agents.harness.team.team_runtime_inheritance import (
     filter_inheritable_ability_cards,
     get_default_model_name,
 )
-from jiuwenswarm.common.utils import get_agent_skills_dir
+from jiuwenswarm.common.utils import get_agent_skills_dir, get_agent_workspace_dir
 from jiuwenswarm.server.runtime.session.session_metadata import get_session_metadata
 
 logger = logging.getLogger(__name__)
@@ -82,29 +91,6 @@ _PG_POST_START_READY_INIT_SLEEP = 0.4
 _PG_POST_START_READY_MAX_SLEEP = 2.0
 _PG_POST_START_READY_BACKOFF = 1.45
 _PG_POST_START_LOG_EVERY_SEC = 5.0
-
-
-def _sync_skills_dir(source: Path, target: Path) -> None:
-    """Copy every valid skill directory from *source* into *target*.
-
-    A valid skill is a sub-directory containing a ``SKILL.md`` file.
-    Existing skills in *target* are overwritten so the latest version
-    always wins.
-    """
-    if not source.is_dir():
-        return
-    target.mkdir(parents=True, exist_ok=True)
-    synced = 0
-    for skill_dir in source.iterdir():
-        if not skill_dir.is_dir() or not (skill_dir / "SKILL.md").is_file():
-            continue
-        dest = target / skill_dir.name
-        if dest.exists():
-            shutil.rmtree(dest)
-        shutil.copytree(skill_dir, dest)
-        synced += 1
-    if synced:
-        logger.info("[TeamManager] synced %d skills: %s -> %s", synced, source, target)
 
 
 @dataclass
@@ -166,10 +152,10 @@ class TeamManager:
         self._team_rail_contexts: dict[str, TeamRailMountContext] = {}
         # session_id → live rails and owning DeepAgent, for hot-unregister
         self._team_live_rails: dict[str, list[tuple[Any, Any]]] = {}
-        # session_id → (workspace_skills_dir, global_team_skills_dir)
-        self._team_skill_sync_targets: dict[str, tuple[Path, Path]] = {}
         # session_id → evolution watcher task
         self._team_evolution_watchers: dict[str, asyncio.Task] = {}
+        # session_id -> team workspace skills directory used as the shared link view.
+        self._team_shared_skill_link_targets: dict[str, Path] = {}
 
     def has_stream_task(self, session_id: str) -> bool:
         return session_id in self._stream_tasks
@@ -565,7 +551,6 @@ class TeamManager:
         request_metadata: dict[str, Any] | None = None,
     ) -> Callable[..., None]:
         global_skills_dir = get_agent_skills_dir()
-        global_skills_state_path = global_skills_dir / "skills_state.json"
         resolved_channel = channel_id or "default"
         resolved_model_name = get_default_model_name()
 
@@ -602,127 +587,48 @@ class TeamManager:
 
             return True, [str(skill).strip() for skill in skills if str(skill).strip()]
 
-        def copy_member_configured_skills(
+        def link_member_configured_skills(
             member_skills_dir: Path,
             selected_skills: list[str],
         ) -> None:
-            """Copy member-configured skills to member's own skills directory."""
+            """Synchronize member-configured skills into the member's skills directory."""
             if not global_skills_dir.exists():
                 logger.warning("[TeamManager] global_skills_dir does not exist: %s", global_skills_dir)
                 return
 
             selected_skill_set = set(selected_skills)
             member_skills_dir.mkdir(parents=True, exist_ok=True)
-            copied_count = 0
+            prune_skill_dir_links(global_skills_dir, member_skills_dir, selected_skill_set)
+            linked_count = 0
             for skill_dir in global_skills_dir.iterdir():
-                if not skill_dir.is_dir():
-                    continue
-                if not (skill_dir / "SKILL.md").is_file():
+                if not is_valid_skill_dir(skill_dir):
                     continue
                 if skill_dir.name not in selected_skill_set:
                     continue
                 dest = member_skills_dir / skill_dir.name
-                if dest.exists():
+                if path_exists_or_link(dest):
                     continue
-                shutil.copytree(skill_dir, dest)
-                copied_count += 1
-                logger.info("[TeamManager] Copied skill '%s' to member workspace", skill_dir.name)
+                link_skill_dir(skill_dir, dest)
+                linked_count += 1
+                logger.info("[TeamManager] Linked skill '%s' to member workspace", skill_dir.name)
 
             existing_skill_names = {
-                path.name for path in member_skills_dir.iterdir() if path.is_dir()
+                path.name for path in member_skills_dir.iterdir() if path_exists_or_link(path)
             }
             missing = sorted(selected_skill_set - existing_skill_names)
             if missing:
                 logger.warning("[TeamManager] configured skills not found in global dir: %s", missing)
 
-            logger.info("[TeamManager] Total configured skills copied to member: %d", copied_count)
+            logger.info("[TeamManager] Total configured skills linked to member: %d", linked_count)
 
-        def build_member_skill_state(member_skills_dir: Path) -> dict[str, Any]:
-            state: dict[str, Any] = {
-                "marketplaces": [],
-                "installed_plugins": [],
-                "local_skills": [],
-            }
-            if global_skills_state_path.is_file():
-                try:
-                    loaded_state = json.loads(global_skills_state_path.read_text(encoding="utf-8"))
-                    if isinstance(loaded_state, dict):
-                        state.update(loaded_state)
-                except Exception as exc:
-                    logger.warning("[TeamManager] failed to load global skills_state.json: %s", exc)
-
-            state["marketplaces"] = SkillManager.normalize_marketplaces(
-                state.get("marketplaces")
-            )
-
-            actual_skill_names = sorted(
-                path.name
-                for path in member_skills_dir.iterdir()
-                if path.is_dir() and (path / "SKILL.md").is_file()
-            )
-            actual_skill_set = set(actual_skill_names)
-
-            installed_plugins = []
-            for plugin in state.get("installed_plugins", []):
-                if not isinstance(plugin, dict):
-                    continue
-                plugin_name = str(plugin.get("name", "")).strip()
-                if not plugin_name or plugin_name not in actual_skill_set:
-                    continue
-                installed_plugins.append(plugin)
-
-            local_skills = []
-            for local_skill in state.get("local_skills", []):
-                if not isinstance(local_skill, dict):
-                    continue
-                skill_name = str(local_skill.get("name", "")).strip()
-                if not skill_name or skill_name not in actual_skill_set:
-                    continue
-                local_skills.append(local_skill)
-
-            existing_plugin_names = {
-                str(plugin.get("name", "")).strip()
-                for plugin in installed_plugins
-                if isinstance(plugin, dict)
-            }
-            existing_local_names = {
-                str(local_skill.get("name", "")).strip()
-                for local_skill in local_skills
-                if isinstance(local_skill, dict)
-            }
-            for skill_name in actual_skill_names:
-                if skill_name not in existing_plugin_names:
-                    installed_plugins.append(
-                        {
-                            "name": skill_name,
-                            "marketplace": "",
-                            "version": "",
-                            "commit": "",
-                            "source": "project",
-                            "installed_at": "",
-                        }
-                    )
-                if skill_name not in existing_local_names:
-                    local_skills.append(
-                        {
-                            "name": skill_name,
-                            "origin": str(member_skills_dir / skill_name),
-                            "source": "project",
-                        }
-                    )
-
-            state["installed_plugins"] = installed_plugins
-            state["local_skills"] = local_skills
-            return state
-
-        def write_member_skill_state(member_skills_dir: Path) -> None:
-            state_file = member_skills_dir / "skills_state.json"
-            state = build_member_skill_state(member_skills_dir)
-            state_file.write_text(
-                json.dumps(state, ensure_ascii=False, indent=2),
-                encoding="utf-8",
-            )
-            logger.info("[TeamManager] Wrote member skills_state.json: %s", state_file)
+        def extract_skill_name_from_tool_result(result: dict[str, object]) -> str:
+            """Extract a skill name from a skill tool result."""
+            skill = result.get("skill")
+            if isinstance(skill, dict):
+                skill_name = str(skill.get("name", "")).strip()
+                if skill_name:
+                    return skill_name
+            return str(result.get("skill_name", "") or result.get("name", "")).strip()
 
         def customizer(
             agent: DeepAgent,
@@ -787,41 +693,48 @@ class TeamManager:
 
             member_workspace = agent_ws
             member_workspace_root = getattr(member_workspace, "root_path", None)
-            member_skills_dir_resolved: Path | None = None
             member_skill_manager: Any | None = None
             if member_workspace and member_workspace_root:
+                agent_workspace_dir = get_agent_workspace_dir()
                 member_skills_dir = Path(member_workspace_root) / "skills"
-                member_skills_dir_resolved = member_skills_dir
                 skills_configured, selected_skills = resolve_member_skills(member_name, role)
 
-                # Copy member-configured skills, then mirror team-shared skills so
-                # SkillManager / skills_state on the member workspace can discover them.
+                def refresh_member_skill_links(result: dict[str, object]) -> None:
+                    """Refresh linked skill views after a member skill tool mutation."""
+                    if result.get("skill_removed") or result.get("removed"):
+                        skill_name = extract_skill_name_from_tool_result(result)
+                        if skill_name:
+                            remove_skill_dir_link(member_skills_dir / skill_name)
+                        get_team_manager(resolved_channel).refresh_team_shared_skill_links(session_id)
+                        return
+                    get_team_manager(resolved_channel).refresh_team_shared_skill_links(session_id)
+
+                # Link member-configured skills so the member workspace exposes
+                # only that member's skill view.
                 try:
-                    # Ensure member skills directory exists
                     member_skills_dir.mkdir(parents=True, exist_ok=True)
                     if skills_configured and selected_skills:
-                        copy_member_configured_skills(member_skills_dir, selected_skills)
-                    _sync_skills_dir(team_ws_skills_dir, member_skills_dir)
-                    # Member directory always needs skills_state.json
-                    write_member_skill_state(member_skills_dir)
+                        link_member_configured_skills(member_skills_dir, selected_skills)
                 except Exception as exc:
-                    logger.warning("[TeamManager] skill copy failed: %s", exc)
+                    logger.warning("[TeamManager] skill link refresh failed: %s", exc)
 
                 try:
-                    member_skill_manager = SkillManager(workspace_dir=str(member_workspace_root))
+                    member_skill_manager = SkillManager(workspace_dir=str(agent_workspace_dir))
                 except Exception as exc:
                     logger.warning("[TeamManager] member SkillManager setup failed: %s", exc)
 
-                # Create independent SkillManager and SkillToolkit for member
+                # Create shared SkillManager and SkillToolkit for member installs.
                 try:
                     agent.add_rail(
                         MemberSkillToolkitRail(
-                            workspace_dir=str(member_workspace_root),
+                            workspace_dir=str(agent_workspace_dir),
+                            manager=member_skill_manager,
+                            refresh_links=refresh_member_skill_links,
                         )
                     )
                     logger.info(
-                        "[TeamManager] MemberSkillToolkitRail queued for member workspace: %s",
-                        member_workspace_root,
+                        "[TeamManager] MemberSkillToolkitRail queued for skill workspace: %s",
+                        agent_workspace_dir,
                     )
                 except Exception as exc:
                     logger.warning("[TeamManager] MemberSkillToolkitRail setup failed: %s", exc)
@@ -870,10 +783,26 @@ class TeamManager:
             # Build all member rails (common + skill rails via role).
             team_workspace = TeamWorkspaceInfo(
                 root_dir=str(Path(team_ws_root)),
-                skills_dir=str(team_ws_skills_dir),
+                skills_dir=str(global_skills_dir),
                 team_id=spec.team_name,
                 config=get_config(),
                 trajectory_registry=team_trajectory_registry,
+            )
+            team_manager = get_team_manager(resolved_channel)
+            team_manager.register_team_shared_skill_link_target(
+                session_id,
+                team_ws_skills_dir,
+            )
+
+            def refresh_team_shared_skill_links() -> None:
+                """Refresh this session's team shared skill links."""
+                team_manager.refresh_team_shared_skill_links(session_id)
+
+            agent.add_rail(
+                TeamSharedSkillLinkRefreshRail(
+                    global_skills_dir=global_skills_dir,
+                    refresh_links=refresh_team_shared_skill_links,
+                )
             )
 
             try:
@@ -909,20 +838,13 @@ class TeamManager:
                     elif isinstance(rail, TeamSkillCreateRail):
                         team_skill_create_rail = rail
                 logger.info("[TeamManager] Added %d rails for team member", len(member_rails))
-                # Register TeamSkillEvolutionRail with TeamManager for approval/sync.
+                # Register TeamSkillEvolutionRail with TeamManager for approval.
                 if team_skill_rail is not None:
                     tm = get_team_manager(resolved_channel)
                     tm.register_team_skill_rail(session_id, team_skill_rail)
-                    tm.register_team_skill_sync_target(
-                        session_id,
-                        team_ws_skills_dir,
-                        get_agent_skills_dir(),
-                    )
                     logger.info(
-                        "[TeamManager] TeamSkillEvolutionRail mounted on leader "
-                        "(skills_dir=%s, sync_target=%s)",
+                        "[TeamManager] TeamSkillEvolutionRail mounted on leader (skills_dir=%s)",
                         team_ws_skills_dir,
-                        get_agent_skills_dir(),
                     )
                 if team_skill_create_rail is not None:
                     get_team_manager(resolved_channel).register_team_skill_create_rail(
@@ -996,8 +918,8 @@ class TeamManager:
         )
 
     @staticmethod
-    def _copy_global_skills_to_team_shared_dir(spec: TeamAgentSpec) -> None:
-        """Copy global skills to team shared directory (executed once after team build)."""
+    def _initialize_team_shared_skill_links(spec: TeamAgentSpec) -> None:
+        """Initialize team shared skill links from the global skill root."""
         global_skills_dir = get_agent_skills_dir()
         if not global_skills_dir.exists():
             logger.warning("[TeamManager] global_skills_dir does not exist: %s", global_skills_dir)
@@ -1011,19 +933,10 @@ class TeamManager:
 
         team_shared_skills_dir = Path(ws_path) / "skills"
 
-        # Check if already copied (via marker file)
-        copied_marker = team_shared_skills_dir / ".team_skills_copied"
-        if copied_marker.exists():
-            logger.info("[TeamManager] Team shared skills already copied, skipping")
-            return
+        team_shared_skills_dir.mkdir(parents=True, exist_ok=True)
+        sync_skill_dir_links(global_skills_dir, team_shared_skills_dir)
 
-        # Copy entire skills directory (including skills_state.json)
-        team_shared_skills_dir.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copytree(global_skills_dir, team_shared_skills_dir, dirs_exist_ok=True)
-
-        # Write marker file to indicate copy completed
-        copied_marker.write_text("", encoding="utf-8")
-        logger.info("[TeamManager] Copied global skills dir to team shared: %s", team_shared_skills_dir)
+        logger.info("[TeamManager] Initialized team shared skill links: %s", team_shared_skills_dir)
 
     @staticmethod
     def _resolve_team_shared_skills_dir(spec: TeamAgentSpec) -> Path:
@@ -1034,17 +947,35 @@ class TeamManager:
         return Path(ws_path) / "skills"
 
     @staticmethod
-    def _sync_team_shared_skills_to_agent_global(spec: TeamAgentSpec) -> None:
-        """Mirror team-shared skills into the local agent skills dir for SkillUseRail."""
-        team_shared_skills_dir = TeamManager._resolve_team_shared_skills_dir(spec)
-        global_skills_dir = get_agent_skills_dir()
-        _sync_skills_dir(team_shared_skills_dir, global_skills_dir)
-
-    @staticmethod
     def ensure_team_shared_skills_initialized(spec: TeamAgentSpec) -> None:
         """Ensure team shared skills are available in the team workspace."""
-        TeamManager._copy_global_skills_to_team_shared_dir(spec)
-        TeamManager._sync_team_shared_skills_to_agent_global(spec)
+        TeamManager._initialize_team_shared_skill_links(spec)
+
+    def register_team_shared_skill_link_target(self, session_id: str, target: Path) -> None:
+        """Register the team shared skills directory for link refresh."""
+        self._team_shared_skill_link_targets[session_id] = target
+
+    def refresh_team_shared_skill_links(self, session_id: str) -> bool:
+        """Refresh team shared skill links from global skills."""
+        target = self._team_shared_skill_link_targets.get(session_id)
+        if target is None:
+            logger.debug("[TeamManager] no team shared skill link target for session_id=%s", session_id)
+            return False
+        global_skills_dir = get_agent_skills_dir()
+        if not global_skills_dir.exists():
+            logger.warning("[TeamManager] global_skills_dir does not exist: %s", global_skills_dir)
+            return False
+        sync_skill_dir_links(global_skills_dir, target)
+        logger.info("[TeamManager] Refreshed team shared skill links: session_id=%s target=%s", session_id, target)
+        return True
+
+    def refresh_all_team_shared_skill_links(self) -> int:
+        """Refresh every registered team shared skill link view."""
+        refreshed = 0
+        for session_id in list(self._team_shared_skill_link_targets):
+            if self.refresh_team_shared_skill_links(session_id):
+                refreshed += 1
+        return refreshed
 
     async def create_team(
         self,
@@ -1079,8 +1010,12 @@ class TeamManager:
             logger.info("[TeamManager] creating TeamAgent from spec")
             team_agent = spec.build()
             self._team_agents[session_id] = team_agent
-            # After build, copy global skills to team shared directory (only once)
+            # After build, initialize team shared skill links.
             self.ensure_team_shared_skills_initialized(spec)
+            self.register_team_shared_skill_link_target(
+                session_id,
+                self._resolve_team_shared_skills_dir(spec),
+            )
 
             if self._is_distributed_mode(config_base):
                 try:
@@ -1247,7 +1182,7 @@ class TeamManager:
         self._team_skill_create_rails.pop(session_id, None)
         self._team_rail_contexts.pop(session_id, None)
         self._team_live_rails.pop(session_id, None)
-        self._team_skill_sync_targets.pop(session_id, None)
+        self._team_shared_skill_link_targets.pop(session_id, None)
 
     async def _cancel_team_evolution_watcher(self, session_id: str) -> None:
         watcher_task = self._team_evolution_watchers.pop(session_id, None)
@@ -1323,12 +1258,6 @@ class TeamManager:
 
         if team_skill_rail is not None:
             self.register_team_skill_rail(session_id, team_skill_rail)
-            if context.team_workspace.skills_dir:
-                self.register_team_skill_sync_target(
-                    session_id,
-                    Path(context.team_workspace.skills_dir),
-                    get_agent_skills_dir(),
-                )
         if team_skill_create_rail is not None:
             self.register_team_skill_create_rail(session_id, team_skill_create_rail)
         return team_skill_rail, team_skill_create_rail
@@ -1373,27 +1302,6 @@ class TeamManager:
                 mount_team_skill_create_rail=True,
                 mount_skill_evolution_rail=False,
             )
-
-    def register_team_skill_sync_target(
-        self, session_id: str, source: Path, target: Path,
-    ) -> None:
-        """Register skill sync directories for the given session."""
-        self._team_skill_sync_targets[session_id] = (source, target)
-
-    def has_team_skill_sync_target(self, session_id: str) -> bool:
-        """Return whether the session has a registered team skill sync target."""
-        return session_id in self._team_skill_sync_targets
-
-    # Skill sync helpers.
-
-    def sync_team_skills(self, session_id: str) -> None:
-        """Sync team skills from workspace dir to global team_skills dir after approval."""
-        sync_info = self._team_skill_sync_targets.get(session_id)
-        if sync_info is None:
-            logger.debug("[TeamManager] no sync target for session_id=%s", session_id)
-            return
-        source, target = sync_info
-        _sync_skills_dir(source, target)
 
     async def destroy_team(self, session_id: str) -> bool:
         async with self._lock:
@@ -2012,13 +1920,15 @@ def find_team_skill_rail_across_managers(request_id: str) -> Any | None:
     return None
 
 
-def sync_team_skills_across_managers(session_id: str) -> bool:
-    """Sync team skills for the given session across all channel managers."""
+def refresh_team_shared_skill_links_across_managers(session_id: str | None = None) -> bool:
+    """Refresh team shared skill links across channel managers."""
+    refreshed = 0
     for manager in _team_managers.values():
-        if manager.has_team_skill_sync_target(session_id):
-            manager.sync_team_skills(session_id)
-            return True
-    return False
+        if session_id is None:
+            refreshed += manager.refresh_all_team_shared_skill_links()
+        elif manager.refresh_team_shared_skill_links(session_id):
+            refreshed += 1
+    return refreshed > 0
 
 
 async def cancel_all_team_stream_tasks_across_managers(reason: str = "") -> None:

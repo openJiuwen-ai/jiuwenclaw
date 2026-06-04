@@ -463,11 +463,6 @@ async def test_team_skill_evolve_approval_keeps_legacy_whole_request_without_rec
         "find_team_skill_rail",
         staticmethod(lambda request_id, channel_id=None: rail),
     )
-    monkeypatch.setattr(
-        "jiuwenswarm.agents.harness.team.sync_team_skills_across_managers",
-        lambda session_id: None,
-    )
-
     handled = await adapter.handle_team_skill_evolve_approval(
         "team_skill_evolve_req1",
         [{"selected_options": ["accept"]}],
@@ -493,7 +488,7 @@ async def test_team_skill_evolve_approval_passes_selected_record_ids(monkeypatch
         staticmethod(lambda request_id, channel_id=None: rail),
     )
     monkeypatch.setattr(
-        "jiuwenswarm.agents.harness.team.sync_team_skills_across_managers",
+        "jiuwenswarm.agents.harness.team.refresh_team_shared_skill_links_across_managers",
         lambda session_id: None,
     )
 
@@ -521,10 +516,6 @@ async def test_team_skill_evolve_approval_pushes_terminal_status(monkeypatch):
         JiuWenClawDeepAdapter,
         "find_team_skill_rail",
         staticmethod(lambda request_id, channel_id=None: _FakeApprovalRail()),
-    )
-    monkeypatch.setattr(
-        "jiuwenswarm.agents.harness.team.sync_team_skills_across_managers",
-        lambda session_id: None,
     )
     monkeypatch.setattr(
         "jiuwenswarm.server.gateway_push.WebSocketGatewayPushTransport",

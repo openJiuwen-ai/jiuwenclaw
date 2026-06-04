@@ -1,6 +1,6 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 
-"""Unit tests for team member skill state generation."""
+"""Unit tests for team member skill views."""
 
 import json
 from pathlib import Path
@@ -11,8 +11,8 @@ from openjiuwen.agent_teams.schema.blueprint import TeamAgentSpec
 from jiuwenswarm.agents.harness.team.team_manager import TeamManager
 
 
-def test_member_skill_state_inherits_marketplaces_and_rebuilds_installed_skills(monkeypatch, tmp_path):
-    """Member workspace state should keep marketplaces but only include copied skills."""
+def test_member_skill_view_links_configured_skills_without_state_file(monkeypatch, tmp_path):
+    """Member workspace should expose configured skill links without local state."""
     global_skills_dir = tmp_path / "global_skills"
     global_skills_dir.mkdir(parents=True)
     for skill_name in ("skill-a", "skill-b"):
@@ -40,6 +40,10 @@ def test_member_skill_state_inherits_marketplaces_and_rebuilds_installed_skills(
     monkeypatch.setattr(
         "jiuwenswarm.agents.harness.team.team_manager.get_agent_skills_dir",
         lambda: global_skills_dir,
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.agents.harness.team.team_manager.get_agent_workspace_dir",
+        lambda: tmp_path / "global_workspace",
     )
     monkeypatch.setattr(
         "jiuwenswarm.agents.harness.team.team_runtime_inheritance.build_member_rails",
@@ -107,16 +111,10 @@ def test_member_skill_state_inherits_marketplaces_and_rebuilds_installed_skills(
 
     customizer(agent, member_name="member_a", role="teammate")
 
-    state_path = member_root / "skills" / "skills_state.json"
-    assert state_path.is_file()
-
-    state = json.loads(state_path.read_text(encoding="utf-8"))
-    assert state["marketplaces"] == [
-        {"name": "demo", "url": "https://example.com/demo.git", "enabled": True}
-    ]
-    assert [plugin["name"] for plugin in state["installed_plugins"]] == ["skill-a"]
-    assert [skill["name"] for skill in state["local_skills"]] == ["skill-a"]
-    assert Path(state["local_skills"][0]["origin"]).name == "skill-a"
+    member_skills_dir = member_root / "skills"
+    assert (member_skills_dir / "skill-a").resolve() == (global_skills_dir / "skill-a").resolve()
+    assert not (member_skills_dir / "skill-b").exists()
+    assert not (member_skills_dir / "skills_state.json").exists()
 
 
 def test_code_team_customizer_applies_code_profile_to_member(monkeypatch, tmp_path):
@@ -130,6 +128,10 @@ def test_code_team_customizer_applies_code_profile_to_member(monkeypatch, tmp_pa
     monkeypatch.setattr(
         "jiuwenswarm.agents.harness.team.team_manager.get_agent_skills_dir",
         lambda: global_skills_dir,
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.agents.harness.team.team_manager.get_agent_workspace_dir",
+        lambda: tmp_path / "global_workspace",
     )
     monkeypatch.setattr(
         "jiuwenswarm.agents.harness.team.team_manager.build_member_rails",
@@ -242,6 +244,10 @@ def test_team_plan_leader_uses_preferred_language_for_code_profile(monkeypatch, 
     monkeypatch.setattr(
         "jiuwenswarm.agents.harness.team.team_manager.get_agent_skills_dir",
         lambda: global_skills_dir,
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.agents.harness.team.team_manager.get_agent_workspace_dir",
+        lambda: tmp_path / "global_workspace",
     )
     monkeypatch.setattr(
         "jiuwenswarm.agents.harness.team.team_manager.build_member_rails",

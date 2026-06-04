@@ -4024,11 +4024,11 @@ class JiuWenClawDeepAdapter:
             await approve_evolution_records(rail, request_id, approved_record_ids)
             # Sync updated team skill from workspace to global team_skills dir.
             try:
-                from jiuwenswarm.agents.harness.team import sync_team_skills_across_managers
-                if session_id:
-                    sync_team_skills_across_managers(session_id)
+                from jiuwenswarm.agents.harness.team import refresh_team_shared_skill_links_across_managers
+
+                refresh_team_shared_skill_links_across_managers(session_id)
             except Exception as exc:
-                logger.warning("[JiuWenClaw] team skill sync after patch failed: %s", exc)
+                logger.warning("[JiuWenClaw] team shared skill link refresh after approval failed: %s", exc)
             logger.info("[JiuWenClaw] team skill evolve accepted: request_id=%s", request_id)
         else:
             await reject_evolution_records(rail, request_id)
@@ -4058,11 +4058,12 @@ class JiuWenClawDeepAdapter:
         if accepted:
             await rail.on_approve_simplify(request_id)
             try:
-                from jiuwenswarm.agents.harness.team import sync_team_skills_across_managers
+                from jiuwenswarm.agents.harness.team import refresh_team_shared_skill_links_across_managers
+
                 if session_id:
-                    sync_team_skills_across_managers(session_id)
+                    refresh_team_shared_skill_links_across_managers(session_id)
             except Exception as exc:
-                logger.warning("[JiuWenClaw] team skill sync after simplify failed: %s", exc)
+                logger.warning("[JiuWenClaw] team shared skill link refresh after simplify failed: %s", exc)
             logger.info("[JiuWenClaw] team simplify accepted: request_id=%s", request_id)
         else:
             await rail.on_reject_simplify(request_id)
@@ -5547,6 +5548,22 @@ class JiuWenClawDeepAdapter:
                         else str(payload)
                     )
                     return {"event_type": "chat.error", "error": error_msg}
+
+                if chunk_type == "security.alert":
+                    if isinstance(payload, dict):
+                        return {
+                            "event_type": "security.alert",
+                            **payload,
+                        }
+                    return None
+
+                if chunk_type == "chat.retract":
+                    if isinstance(payload, dict):
+                        return {
+                            "event_type": "chat.retract",
+                            **payload,
+                        }
+                    return None
 
                 if chunk_type == "thinking":
                     return {

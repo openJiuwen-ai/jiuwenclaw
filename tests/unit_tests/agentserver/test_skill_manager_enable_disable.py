@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+
 from jiuwenswarm.server.runtime.skill.skilldev.state_utils import (
     get_registered_skill_names,
     get_skill_enabled,
@@ -9,6 +11,27 @@ from jiuwenswarm.server.runtime.skill.skilldev.state_utils import (
     normalize_skill_configs,
     set_skill_enabled,
 )
+from jiuwenswarm.server.runtime.skill.skill_manager import SkillManager
+
+
+def test_skill_manager_default_initialization_uses_global_state_file(monkeypatch, tmp_path):
+    """Default SkillManager initialization should resolve the global state file."""
+    skills_dir = tmp_path / "skills"
+    monkeypatch.setattr(
+        "jiuwenswarm.server.runtime.skill.skill_manager.get_agent_skills_dir",
+        lambda: skills_dir,
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.server.runtime.skill.skilldev.state_utils.get_agent_skills_dir",
+        lambda: skills_dir,
+    )
+
+    manager = SkillManager()
+    manager.set_skill_enabled("global-state-skill", False)
+    state = json.loads((skills_dir / "skills_state.json").read_text(encoding="utf-8"))
+
+    assert get_skill_enabled(state, "global-state-skill") is False
+    assert skills_dir.is_dir()
 
 
 def test_normalize_skill_configs_defaults_enabled_true():

@@ -574,6 +574,9 @@ function filterConfigItems(
   return items;
 }
 
+/** Last selected memory file path — restores cursor position within the same session. */
+let lastMemorySelection: string | null = null;
+
 export class AppScreen implements Component, Focusable {
   private readonly editor: Editor;
   private readonly unsubscribe: () => void;
@@ -3793,7 +3796,11 @@ export class AppScreen implements Component, Focusable {
     list.onSelectionChange = () => {
       this.invalidate();
     };
-    const selectedValue = this.pendingQuestionAnswers.get(this.activeQuestionIndex);
+    let selectedValue = this.pendingQuestionAnswers.get(this.activeQuestionIndex);
+    // For memory edit, restore cursor to the last selected file within this session
+    if (!selectedValue && pendingQuestion.source === "local_command_memory_edit" && lastMemorySelection) {
+      selectedValue = lastMemorySelection;
+    }
     const selectedIndex = selectedValue
       ? items.findIndex((item) => item.value === selectedValue)
       : 0;
@@ -3823,6 +3830,11 @@ export class AppScreen implements Component, Focusable {
       this.syncQuestionList(this.state.getSnapshot());
       this.tui.requestRender();
       return;
+    }
+
+    // Remember memory edit selection so cursor restores to the same file within this session
+    if (pendingQuestion.source === "local_command_memory_edit") {
+      lastMemorySelection = label;
     }
 
     const answers = pendingQuestion.questions.map((question, index) => {

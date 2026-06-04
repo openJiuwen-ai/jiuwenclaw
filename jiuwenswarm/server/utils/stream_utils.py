@@ -321,6 +321,14 @@ def _parse_typed_chunk(chunk: Any, _has_streamed_content: bool) -> dict[str, Any
                     usage_payload[key] = value
             return usage_payload
 
+    if chunk_type == "chat.retract":
+        if isinstance(payload, dict):
+            return {
+                "event_type": "chat.retract",
+                **{k: v for k, v in payload.items()},
+            }
+        return None
+
     if chunk_type == "__interaction__":
         return _parse_interaction_payload(payload)
 
