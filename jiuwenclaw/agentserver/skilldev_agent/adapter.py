@@ -265,6 +265,29 @@ class SkillDevDeepAdapter:
                 payload["task_id"] = task_id
             return payload
 
+        def _maybe_file_ready(parsed: dict[str, Any] | None) -> dict[str, Any] | None:
+            if not parsed or parsed.get("event_type") != "skilldev.tool_result":
+                return None
+            if parsed.get("tool_name") != "upload_file" or not parsed.get("success", False):
+                return None
+            raw = parsed.get("raw_output")
+            if not isinstance(raw, dict):
+                return None
+            url = raw.get("url") or raw.get("obsUrl")
+            if not url:
+                return None
+            return _add_task_id(
+                {
+                    "event_type": "skilldev.file_ready",
+                    "file": {
+                        "url": url,
+                        "name": raw.get("name"),
+                        "size_bytes": raw.get("size_bytes"),
+                        "mime": raw.get("mime"),
+                    },
+                }
+            )
+
         def _make_chunk(payload: dict[str, Any] | None, *, is_complete: bool = False) -> AgentResponseChunk:
             return AgentResponseChunk(
                 request_id=rid,
@@ -360,6 +383,9 @@ class SkillDevDeepAdapter:
                         if parsed.get("event_type") == "skilldev.agent_output":
                             has_streamed_content = True
                         yield _make_chunk(parsed)
+                        file_ready = _maybe_file_ready(parsed)
+                        if file_ready is not None:
+                            yield _make_chunk(file_ready)
 
                 if accumulated_text:
                     yield _make_chunk(
