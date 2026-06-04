@@ -348,7 +348,7 @@ SkillDev 事件映射：
 | `skilldev.tool_result` | `message.part.updated` | 工具调用结束，写入 `state.output`（即使 part 已存在也会推送） |
 | `skilldev.todos_update` | `todo.updated` | Todo 列表更新 |
 | `skilldev.ask_user_question` | `question.asked` | 结构化澄清提问（`questions` 列表） |
-| `skilldev.confirm_request` | `review.asked` | 按 `confirm_type` 分流：`review` |
+| `skilldev.confirm_request` | `review.asked` | 按 `confirm_type` 分流：`review` / `static_review` / `combined_review`；`properties.type` 与 `confirm_type` 一致，其余字段来自 `data` |
 | `skilldev.agent_completed` | `session.status` | 单轮 Agent 结束、等待用户确认，状态置为 idle，随后关闭北向 WS |
 | `skilldev.error` | `message.*` + `task.error` + `session.status` | 输出错误文本 part，状态置为 idle |
 | `skilldev.completed` | `task.completed` + `session.status` | 状态置为 completed |

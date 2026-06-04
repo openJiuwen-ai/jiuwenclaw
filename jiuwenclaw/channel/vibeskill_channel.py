@@ -96,6 +96,9 @@ _CHAT_ERROR_TRUNCATION_SUFFIX = "...(truncated)"
 # 行为悄悄退化，这里把两种命名都视为同一事件并集中处理。
 _CHAT_INTERRUPT_RESULT_EVENT_TYPES = frozenset({"chat.interrupt_result", "chat.cancel"})
 
+# skilldev.confirm_request 中映射为 review.asked 的 confirm_type 集合
+_SKILLDEV_REVIEW_CONFIRM_TYPES = frozenset({"review", "static_review", "combined_review"})
+
 
 def _resolve_message_send_import_type(data: dict[str, Any]) -> str:
     """message.send 的 importType，默认 vibeImport。"""
@@ -1453,6 +1456,35 @@ class VibeSkillChannel(BaseChannel):
             },
         }]
 
+    @staticmethod
+    def _build_review_asked_properties(
+        confirm_type: str,
+        *,
+        request_id: str,
+        session_id: str | None,
+        external_sid: str | None,
+        data: dict[str, Any],
+    ) -> dict[str, Any]:
+        """根据 skilldev.confirm_request 构造 review.asked 的 properties。"""
+        properties: dict[str, Any] = {
+            "id": request_id,
+            "sessionID": external_sid or session_id,
+            "type": confirm_type,
+        }
+        if confirm_type == "static_review":
+            properties["benchmark"] = data.get("benchmark")
+            properties["report"] = str(data.get("report") or "")
+        elif confirm_type == "combined_review":
+            properties["static_benchmark"] = data.get("static_benchmark")
+            properties["dyn_benchmark"] = data.get("dyn_benchmark")
+            properties["report"] = str(data.get("report") or "")
+            properties["iteration"] = data.get("iteration")
+        else:
+            properties["benchmark"] = data.get("benchmark")
+            properties["report"] = str(data.get("report") or "")
+            properties["iteration"] = data.get("iteration")
+        return properties
+
     async def _handle_skilldev_confirm_request(
         self,
         payload: dict,
@@ -1463,25 +1495,25 @@ class VibeSkillChannel(BaseChannel):
         confirm_type = str(payload.get("confirm_type") or "").strip()
         request_id = str(payload.get("request_id") or f"req_{secrets.token_hex(4)}")
         task_id = str(payload.get("task_id") or "")
-        if confirm_type == "review":
-            self._pending_confirms[request_id] = {
-                "task_id": task_id,
-                "session_id": session_id or "",
-                "confirm_type": confirm_type,
-            }
-            data = payload.get("data", {}) if isinstance(payload.get("data"), dict) else {}
-            return [{
-                "type": "review.asked",
-                "properties": {
-                    "id": request_id,
-                    "sessionID": external_sid or session_id,
-                    "benchmark": data.get("benchmark"),
-                    "report": str(data.get("report") or ""),
-                    "iteration": data.get("iteration"),
-                },
-            }]
+        if confirm_type not in _SKILLDEV_REVIEW_CONFIRM_TYPES:
+            return []
 
-        return []
+        self._pending_confirms[request_id] = {
+            "task_id": task_id,
+            "session_id": session_id or "",
+            "confirm_type": confirm_type,
+        }
+        data = payload.get("data", {}) if isinstance(payload.get("data"), dict) else {}
+        return [{
+            "type": "review.asked",
+            "properties": self._build_review_asked_properties(
+                confirm_type,
+                request_id=request_id,
+                session_id=session_id,
+                external_sid=external_sid,
+                data=data,
+            ),
+        }]
 
     async def _handle_skilldev_ask_user_question(
         self,
@@ -2868,7 +2900,7 @@ class VibeSkillChannel(BaseChannel):
                     )
                     request_id = str((pending or {}).get("request_id") or "")
 
-                    if confirm_type == "review":
+                    if confirm_type in _SKILLDEV_REVIEW_CONFIRM_TYPES:
                         messages.append({
                             "role": role,
                             "sessionID": session_id,
