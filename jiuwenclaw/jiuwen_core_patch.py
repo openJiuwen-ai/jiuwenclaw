@@ -615,6 +615,11 @@ class PatchOpenAIModelClient(RetryMixin, OpenAIModelClient):
         **kwargs,
     ):
         session_id = self.model_client_config.model_extra.get("session", "default")
+        llm_logger.info(
+            "[LLM] [session_id=%s] Input messages: %s",
+            session_id,
+            str(messages)
+        )
         chunk_counter = 0
         async for chunk in self._stream_with_retry(
             _orig_stream,
@@ -631,9 +636,9 @@ class PatchOpenAIModelClient(RetryMixin, OpenAIModelClient):
             **kwargs,
         ):
             chunk_counter += 1
-            if chunk_counter % 50 == 0:
+            if chunk_counter % 10 == 0:
                 llm_logger.info(
-                    "[LLM] [session_id=%s] chunk #%d: %s...",
+                    "[LLM] [session_id=%s] Output chunk #%d: %s...",
                     session_id,
                     chunk_counter,
                     str(chunk)[:200]
