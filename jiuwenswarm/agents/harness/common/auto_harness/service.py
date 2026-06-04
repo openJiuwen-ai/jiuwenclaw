@@ -173,10 +173,20 @@ class AutoHarnessService:
     Instantiated as member variable of JiuWenClawDeepAdapter for proper lifecycle management.
     """
 
-    def __init__(self, rail: Any, agent: Any | None = None) -> None:
+    def __init__(
+        self,
+        rail: Any,
+        agent: Any | None = None,
+        agent_manager: Any | None = None,
+    ) -> None:
         """Initialize service - load base config, create data directories.
 
         Per §5.6.2: config.yaml is bootstrapped if not exists.
+
+        Args:
+            rail: Stream event rail for output.
+            agent: DeepAgent instance for load/unload harness config.
+            agent_manager: AgentManager for broadcasting package changes to all agent instances.
         """
         # Directory paths (per §5.6.4)
         self.data_dir = _AUTO_HARNESS_DATA_DIR
@@ -187,6 +197,7 @@ class AutoHarnessService:
 
         self._stream_event_rail = rail
         self._agent = agent
+        self._agent_manager = agent_manager
 
         # Active runs tracked by session_id (per §5.2)
         self._active_runs: dict[str, ActiveAutoHarnessRun] = {}
@@ -2105,15 +2116,21 @@ class AutoHarnessService:
         """Get packages info for frontend API."""
         return self.load_packages()
 
-    async def activate_package(self, package_id: str) -> dict[str, Any]:
+    async def activate_package(
+        self,
+        package_id: str,
+        channel_id: str | None = None,
+    ) -> dict[str, Any]:
         """Activate a harness package by loading its config (stacking on existing).
 
         Stacked activation flow:
         1. Load the new package config (stack on any existing active packages)
         2. Update metadata: add package_id to active_package_ids list
+        3. Broadcast to all agent.fast/agent.plan instances in the channel
 
         Args:
             package_id: The package ID to activate
+            channel_id: Optional channel ID to limit broadcast scope
 
         Returns:
             Payload for frontend response with activation details
@@ -2165,6 +2182,17 @@ class AutoHarnessService:
         try:
             loaded_resources = await self._agent.load_harness_config(config_path)
             self.update_active_status(package_id, "add")
+
+            # Broadcast to all agent.fast/agent.plan instances (skip current, already loaded)
+            if self._agent_manager:
+                await self._agent_manager.broadcast_package_change_to_single_agents(
+                    package_id,
+                    config_path,
+                    "activate",
+                    channel_id=channel_id,
+                    skip_instance=self._agent,
+                )
+
             logger.info(
                 "[AutoHarnessService] Activated package %s, loaded resources: %s",
                 package_id,
@@ -2176,7 +2204,7 @@ class AutoHarnessService:
                 "runtime_path": package.get("runtime_path", ""),
                 "config_path": config_path,
                 "loaded_resources": loaded_resources,
-                "message": f"扩展已热生效，加载资源: {len(loaded_resources)} 项",
+                "message": f"扩展已热生效（规划与性能模式），加载资源: {len(loaded_resources)} 项",
             }
         except FileNotFoundError as exc:
             raise ValueError(f"配置文件不存在: {exc}") from exc
@@ -2186,11 +2214,21 @@ class AutoHarnessService:
             logger.exception("[AutoHarnessService] Activate package %s failed: %s", package_id, exc)
             raise ValueError(f"激活扩展失败: {exc}") from exc
 
-    async def deactivate_package(self, package_id: str) -> dict[str, Any]:
+    async def deactivate_package(
+        self,
+        package_id: str,
+        channel_id: str | None = None,
+    ) -> dict[str, Any]:
         """Deactivate a harness package by unloading its config.
+
+        Deactivation flow:
+        1. Unload from current agent instance
+        2. Broadcast to all agent.fast/agent.plan instances in the channel
+        3. Update metadata: remove package_id from active_package_ids list
 
         Args:
             package_id: The package ID to deactivate
+            channel_id: Optional channel ID to limit broadcast scope
 
         Returns:
             Payload for frontend response with deactivation details
@@ -2242,13 +2280,23 @@ class AutoHarnessService:
                     exc,
                 )
 
+        # Broadcast to all agent.fast/agent.plan instances before updating status
+        if self._agent_manager and config_path and Path(config_path).exists():
+            await self._agent_manager.broadcast_package_change_to_single_agents(
+                package_id,
+                config_path,
+                "deactivate",
+                channel_id=channel_id,
+                skip_instance=self._agent,
+            )
+
         self.update_active_status(package_id, "remove")
         logger.info("[AutoHarnessService] Package %s deactivated", package_id)
 
         return {
             "deactivated_package_id": package_id,
             "extension_name": extension_name,
-            "message": f"扩展 {extension_name} 已去激活",
+            "message": f"扩展 {extension_name} 已取消激活",
         }
 
     def delete_package(self, package_id: str) -> dict[str, Any]:

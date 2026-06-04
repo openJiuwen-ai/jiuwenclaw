@@ -4798,8 +4798,12 @@ class AgentWebSocketServer:
                     hasattr(agent_instance, "load_harness_config") if agent_instance else False,
                 )
 
-            service = AutoHarnessService(rail=None, agent=agent_instance)
-            payload = await service.activate_package(package_id)
+            service = AutoHarnessService(
+                rail=None,
+                agent=agent_instance,
+                agent_manager=self._agent_manager,
+            )
+            payload = await service.activate_package(package_id, channel_id=channel_id)
             resp = AgentResponse(
                 request_id=request.request_id,
                 channel_id=request.channel_id,
@@ -4848,7 +4852,7 @@ class AgentWebSocketServer:
 
         try:
             # Get or create the agent instance (auto-create if not exists)
-            channel_id = request.channel_id or "default"
+            channel_id = request.channel_id or "web"
             mode, sub_mode = _apply_resolved_mode_to_request(request)
             agent_mode = "agent" if mode == "auto_harness" else mode
             agent = await self._agent_manager.get_agent(
@@ -4861,8 +4865,12 @@ class AgentWebSocketServer:
             if agent is not None:
                 agent_instance = agent.get_instance()
 
-            service = AutoHarnessService(rail=None, agent=agent_instance)
-            payload = await service.deactivate_package(package_id)
+            service = AutoHarnessService(
+                rail=None,
+                agent=agent_instance,
+                agent_manager=self._agent_manager,
+            )
+            payload = await service.deactivate_package(package_id, channel_id=channel_id)
             resp = AgentResponse(
                 request_id=request.request_id,
                 channel_id=request.channel_id,

@@ -335,12 +335,12 @@
     "invalidZipFormat": "无效的 zip 文件格式",
     "missingHarnessConfig": "Zip 文件必须包含 harness_config.yaml",
     "selectZipFile": "选择 .zip 文件导入",
-    "deactivate": "去激活",
-    "deactivating": "正在去激活...",
-    "deactivateFailed": "去激活失败",
-    "deactivateSuccess": "去激活成功",
-    "deactivateAll": "全部去激活",
-    "allDeactivated": "所有扩展已去激活",
+    "deactivate": "取消激活",
+    "deactivating": "正在取消激活...",
+    "deactivateFailed": "取消激活失败",
+    "deactivateSuccess": "取消激活成功",
+    "deactivateAll": "全部取消激活",
+    "allDeactivated": "所有扩展已取消激活",
     "activePackages": "已激活扩展"
   },
   "todoList": {

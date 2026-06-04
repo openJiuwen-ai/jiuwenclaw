@@ -305,6 +305,78 @@ class AgentManager:
             return next(iter(channel_agents.values()), None)
         return None
 
+    async def broadcast_package_change_to_single_agents(
+        self,
+        package_id: str,
+        config_path: str,
+        operation: str,
+        channel_id: str | None = None,
+        skip_instance: Any | None = None,
+    ) -> None:
+        """Broadcast package change to agent.fast and agent.plan instances only.
+
+        This ensures deactivation affects all relevant agent instances, not just the current one.
+        Does NOT affect team mode agents.
+
+        Args:
+            package_id: The package ID being activated/deactivated.
+            config_path: Absolute path to harness_config.yaml.
+            operation: "activate" or "deactivate".
+            channel_id: Optional channel ID to limit broadcast scope.
+            skip_instance: Optional agent instance to skip (already processed by caller).
+        """
+        target_modes = {"agent", "agent.fast", "agent.plan"}
+
+        for channel_key, channel_agents in self.agents.items():
+            # Limit to specific channel if provided
+            if channel_id and channel_key != _normalize_channel_id(channel_id):
+                continue
+
+            for cache_key, agent in channel_agents.items():
+                # Parse mode from cache_key: "mode:sub_mode:project"
+                mode = cache_key.split(":")[0] if ":" in cache_key else ""
+                if mode not in target_modes:
+                    continue  # Skip team and other modes
+
+                instance = agent.get_instance()
+                if instance is None:
+                    continue
+
+                # Skip the instance that was already processed by the caller
+                if skip_instance is not None and instance is skip_instance:
+                    logger.debug(
+                        "[AgentManager] Skipping already processed agent %s for package %s",
+                        cache_key,
+                        package_id,
+                    )
+                    continue
+
+                try:
+                    if operation == "deactivate":
+                        await instance.unload_harness_config(config_path)
+                        logger.info(
+                            "[AgentManager] Unloaded package %s from agent %s (channel=%s)",
+                            package_id,
+                            cache_key,
+                            channel_key,
+                        )
+                    elif operation == "activate":
+                        await instance.load_harness_config(config_path)
+                        logger.info(
+                            "[AgentManager] Loaded package %s to agent %s (channel=%s)",
+                            package_id,
+                            cache_key,
+                            channel_key,
+                        )
+                except Exception as exc:
+                    logger.warning(
+                        "[AgentManager] Failed to %s package %s on agent %s: %s",
+                        operation,
+                        package_id,
+                        cache_key,
+                        exc,
+                    )
+
     async def reload_agents_config(self, config, env) -> None:
         """reload agent config"""
         self._latest_env_overrides = dict(env) if isinstance(env, dict) else {}
