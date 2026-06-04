@@ -1041,7 +1041,70 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketReturn {
           useChatStore.getState().setUsageSummary(targetId, usage);
         }
       }),
-}),
+      webClient.on('security.alert', ({ payload }) => {
+        if (!shouldHandleSessionEvent(payload)) return;
+
+        const alertMsg =
+          typeof payload.message === 'string'
+            ? payload.message
+            : '安全警告';
+
+        window.dispatchEvent(new CustomEvent('security-alert', {
+          detail: {
+            message: alertMsg,
+            message_id: payload.message_id || '',
+            tool_call_id: payload.tool_call_id || '',
+            alert_type: payload.alert_type || 'security',
+            tool_name: payload.tool_name || '',
+          }
+        }));
+      }),
+      webClient.on('chat.retract', (event) => {
+        if (!shouldHandleSessionEvent(event.payload)) return;
+
+        const retractMsg =
+          typeof event.payload.message === 'string'
+            ? event.payload.message
+            : '内容已因安全原因撤回';
+
+        const { currentStreamId, messages } = useChatStore.getState();
+
+        if (currentStreamId) {
+          updateMessage(currentStreamId, {
+            content: retractMsg,
+            isStreaming: false,
+          });
+          stopStreaming();
+        }
+
+        let lastUserIdx = -1;
+        for (let i = messages.length - 1; i >= 0; i -= 1) {
+          if (messages[i].role === 'user') {
+            lastUserIdx = i;
+            break;
+          }
+        }
+        if (lastUserIdx >= 0) {
+          for (let i = lastUserIdx + 1; i < messages.length; i++) {
+            if (messages[i].role === 'assistant') {
+              updateMessage(messages[i].id, { content: retractMsg });
+            }
+          }
+        } else {
+          for (const msg of messages) {
+            if (msg.role === 'assistant') {
+              updateMessage(msg.id, { content: retractMsg });
+            }
+          }
+        }
+
+        setProcessing(false);
+        setThinking(false);
+        activeRequestIdRef.current = undefined;
+
+        const retractRequestId = typeof event.payload.request_id === 'string' ? event.payload.request_id : undefined;
+        useChatStore.getState().clearCurrentTurnData(retractRequestId);
+      }),
       webClient.on('harness.message', ({ payload }) => {
         if (!shouldHandleSessionEvent(payload)) return;
         const content = typeof payload.content === 'string' ? payload.content : '';

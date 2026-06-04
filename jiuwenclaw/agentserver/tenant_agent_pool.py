@@ -135,6 +135,17 @@ class TenantAgentPool:
             return {}
         return agent_manager.get_client_capabilities(channel_id)
 
+    def get_agent_nowait(self) -> Any | None:
+        """获取默认 Agent 实例（同步，不自动创建）.
+
+        Returns:
+            JiuWenClaw 实例或 None
+        """
+        agent_manager = self._get_agent_manager_nowait("acp", "global_acp")
+        if agent_manager is None:
+            return None
+        return agent_manager.get_agent_nowait()
+
     async def create_session(self, channel_id: str = "", session_id: str | None = None) -> str:
         """创建会话.
 
