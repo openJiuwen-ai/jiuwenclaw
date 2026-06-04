@@ -1,7 +1,7 @@
 import { useMemo, useState } from 'react';
 import type { ReactNode } from 'react';
 import { useTranslation } from 'react-i18next';
-import { CircleCheck, Clock3, File, Loader2, Puzzle, XCircle } from 'lucide-react';
+import { CircleCheck, File, Puzzle, XCircle } from 'lucide-react';
 import { TeamMemberAvatar } from '../TeamMemberAvatar';
 import type { TeamTask as SessionTeamTask } from '../../stores/sessionStore';
 import teamProcessIcon from '../../assets/team-process.svg';
@@ -142,8 +142,21 @@ export function TaskPlanningPanel({
                     )}
                     <span className="flex-1 text-sm text-text truncate">{title}</span>
                     {columnKey === 'completed' && <CircleCheck className="w-4 h-4 text-ok shrink-0" />}
-                    {columnKey === 'running' && <Loader2 className="w-4 h-4 text-accent shrink-0 animate-spin" />}
-                    {columnKey === 'waiting' && <Clock3 className="w-4 h-4 text-warn shrink-0" />}
+                    {columnKey === 'running' && (
+                      <svg width="16" height="16" className="w-4 h-4 text-info animate-spin flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 2v4" />
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="m16.2 7.8 2.9-2.9" />
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M18 12h4" />
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="m16.2 16.2 2.9 2.9" />
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 18v4" />
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="m4.9 19.1 2.9-2.9" />
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M2 12h4" />
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="m4.9 4.9 2.9 2.9" />
+                      </svg>
+                    )}
+                    {columnKey === 'waiting' && (
+                      <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" className="lucide lucide-clock4-icon lucide-clock-4"><circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/></svg>
+                    )}
                     {columnKey === 'cancelled' && <XCircle className="w-4 h-4 text-danger shrink-0" />}
                   </div>
                 );

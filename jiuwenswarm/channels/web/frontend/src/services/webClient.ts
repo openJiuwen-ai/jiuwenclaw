@@ -40,6 +40,8 @@ const LEGACY_EVENT_MAP: Record<string, string> = {
   session_update: 'session.updated',
   processing_status: 'chat.processing_status',
   heartbeat: 'connection.heartbeat',
+  security_alert: 'security.alert',
+  chat_retract: 'chat.retract',
 };
 
 interface DevWsLogEntry {

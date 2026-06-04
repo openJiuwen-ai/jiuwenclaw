@@ -1,4 +1,4 @@
-# Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
+# Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 
 """Team configuration loader."""
 
@@ -12,7 +12,6 @@ from typing import Any
 from openjiuwen.agent_teams.paths import get_agent_teams_home
 
 from jiuwenswarm.common.config import get_config
-from jiuwenswarm.common.utils import get_agent_skills_dir
 
 logger = logging.getLogger(__name__)
 
@@ -202,8 +201,8 @@ def _build_agents_config(team_raw: dict[str, Any], config_base: dict[str, Any]) 
         else:
             agent_config = dict(raw_agent_config) if isinstance(raw_agent_config, dict) else {}
         # No longer auto-fill all skills from global into each member by default.
-        # On spawn, team-shared skills are synced into member workspace/skills/.
-        # ensure_team_shared_skills_initialized also mirrors team-shared skills to agent global.
+        # On spawn, each member workspace exposes only its configured skill links.
+        # Team-shared skills are maintained in the team workspace skill view.
         agent_spec = _build_agent_spec_dict(
             agent_config,
             default_model=default_model,

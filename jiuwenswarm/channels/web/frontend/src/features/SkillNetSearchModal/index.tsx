@@ -214,7 +214,7 @@ export function SkillNetSearchModal({
             detail_key?: string;
             detail_params?: Record<string, unknown>;
             skills?: SkillNetItem[];
-          }>("skills.skillnet.search", withSession({ q, limit: 50 }));
+          }>("skills.skillnet.search", withSession({ q, limit: 20 }));
           if (!data.success) {
             const message = data.detail_key
               ? t(data.detail_key, data.detail_params as Record<string, string> | undefined)
@@ -286,7 +286,7 @@ export function SkillNetSearchModal({
         detail_key?: string;
         detail_params?: Record<string, unknown>;
         skills?: SkillNetItem[];
-      }>("skills.skillnet.search", withSession({ q, limit: 50 }));
+      }>("skills.skillnet.search", withSession({ q, limit: 20 }));
       if (!data.success) {
         const message = data.detail_key
           ? t(data.detail_key, data.detail_params as Record<string, string> | undefined)

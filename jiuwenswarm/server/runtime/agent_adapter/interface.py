@@ -1,4 +1,4 @@
-# Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
+# Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 
 """JiuWenClaw Facade - 统一入口与 SDK 适配层.
 
@@ -286,7 +286,7 @@ class JiuWenClaw:
             if hasattr(self._adapter, "set_skill_manager"):
                 self._adapter.set_skill_manager(self._skill_manager)
             self._skill_manager.set_skillnet_install_complete_hook(
-                self.create_instance
+                self._on_skillnet_install_complete
             )
             logger.info("[JiuWenClaw] Initialized adapter: sdk=%s, mode=%s", self._sdk_name, mode)
         return self._adapter
@@ -320,6 +320,21 @@ class JiuWenClaw:
         if hasattr(adapter, "try_start_dreaming"):
             asyncio.create_task(adapter.try_start_dreaming(
                 busy_checker=lambda: sm.has_active_tasks(),))
+
+    async def _on_skillnet_install_complete(self) -> None:
+        """Reload the agent and refresh active team shared skill links after async install."""
+        await self.create_instance()
+        self._refresh_team_shared_skill_links()
+
+    @staticmethod
+    def _refresh_team_shared_skill_links(session_id: str | None = None) -> None:
+        """Refresh team shared skill links after the global skill root changes."""
+        try:
+            from jiuwenswarm.agents.harness.team import refresh_team_shared_skill_links_across_managers
+
+            refresh_team_shared_skill_links_across_managers(session_id)
+        except Exception as exc:
+            logger.warning("[JiuWenClaw] team shared skill link refresh failed: %s", exc)
 
     async def reload_agent_config(
             self,
@@ -567,6 +582,7 @@ class JiuWenClaw:
                 _reload_after_skills = False
             if _reload_after_skills:
                 await self.create_instance()
+                self._refresh_team_shared_skill_links(request.session_id)
         except Exception as exc:
             logger.error("[JiuWenClaw] skills 请求处理失败: %s", exc)
             return AgentResponse(

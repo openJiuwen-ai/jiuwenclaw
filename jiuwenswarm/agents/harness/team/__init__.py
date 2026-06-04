@@ -17,9 +17,9 @@ from jiuwenswarm.agents.harness.team.team_manager import (
     find_team_skill_rail_across_managers,
     get_all_team_managers,
     get_team_manager,
+    refresh_team_shared_skill_links_across_managers,
     reset_team_manager,
     stop_team_session_runtime_across_managers,
-    sync_team_skills_across_managers,
 )
 from jiuwenswarm.agents.harness.team.monitor_handler import TeamMonitorHandler
 
@@ -30,8 +30,8 @@ __all__ = [
     "find_team_skill_rail_across_managers",
     "get_all_team_managers",
     "get_team_manager",
+    "refresh_team_shared_skill_links_across_managers",
     "reset_team_manager",
     "stop_team_session_runtime_across_managers",
-    "sync_team_skills_across_managers",
     "TeamMonitorHandler",
 ]

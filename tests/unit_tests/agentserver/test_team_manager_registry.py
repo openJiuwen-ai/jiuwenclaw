@@ -5,7 +5,6 @@
 from __future__ import annotations
 
 import asyncio
-from pathlib import Path
 
 import pytest
 
@@ -16,8 +15,8 @@ from jiuwenswarm.agents.harness.team.team_manager import (
     RuntimeInfo,
     TeamWorkspaceInfo,
     get_team_manager,
+    refresh_team_shared_skill_links_across_managers,
     reset_team_manager,
-    sync_team_skills_across_managers,
 )
 
 
@@ -207,6 +206,32 @@ def test_find_team_skill_rail_for_request_uses_pending_governance() -> None:
     assert manager.find_team_skill_rail_for_request("missing") is None
 
 
+def test_refresh_team_shared_skill_links_across_managers_uses_registered_session(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    global_skills_dir = tmp_path / "global-skills"
+    skill_dir = global_skills_dir / "skill-a"
+    skill_dir.mkdir(parents=True)
+    (skill_dir / "SKILL.md").write_text("---\nname: skill-a\n---\n", encoding="utf-8")
+    team_shared_skills = tmp_path / "team-workspace" / "skills"
+
+    monkeypatch.setattr(
+        "jiuwenswarm.agents.harness.team.team_manager.get_agent_skills_dir",
+        lambda: global_skills_dir,
+    )
+    monkeypatch.setattr(
+        "jiuwenswarm.agents.harness.team.team_manager.get_agent_workspace_dir",
+        lambda: tmp_path / "global-workspace",
+    )
+
+    manager = get_team_manager("web")
+    manager.register_team_shared_skill_link_target("sess-1", team_shared_skills)
+
+    assert refresh_team_shared_skill_links_across_managers("sess-1")
+    assert (team_shared_skills / "skill-a").resolve() == skill_dir.resolve()
+
+
 @pytest.mark.asyncio
 async def test_update_evolution_config_disables_team_skill_create_rail() -> None:
     manager = TeamManager()
@@ -346,12 +371,16 @@ def test_build_agent_customizer_shares_one_trajectory_registry_per_runtime(
         lambda: global_skills_dir,
     )
     monkeypatch.setattr(
+        "jiuwenswarm.agents.harness.team.team_manager.get_agent_workspace_dir",
+        lambda: tmp_path / "global-workspace",
+    )
+    monkeypatch.setattr(
         "jiuwenswarm.agents.harness.team.team_manager.SkillManager",
         lambda workspace_dir: object(),
     )
     monkeypatch.setattr(
         "jiuwenswarm.agents.harness.team.team_manager.MemberSkillToolkitRail",
-        lambda workspace_dir: object(),
+        lambda workspace_dir, **kwargs: object(),
     )
 
     def _fake_build_member_rails(**kwargs):
@@ -436,7 +465,6 @@ async def test_destroy_team_cleans_registered_evolution_rails(
     manager.register_team_member_skill_evolution_rail("sess-1", rail)
     manager.register_team_skill_create_rail("sess-1", rail)
     manager.register_team_live_rail("sess-1", agent, rail)
-    manager.register_team_skill_sync_target("sess-1", Path("/tmp/src"), Path("/tmp/dst"))
     manager.commit_runtime_ready("sess-1", "demo-team")
 
     cleaned = await manager.destroy_team("sess-1")
@@ -444,7 +472,6 @@ async def test_destroy_team_cleans_registered_evolution_rails(
     assert cleaned is False
     assert manager.get_team_skill_rail("sess-1") is None
     assert manager.get_team_skill_create_rail("sess-1") is None
-    assert not manager.has_team_skill_sync_target("sess-1")
 
 
 @pytest.mark.asyncio
@@ -491,10 +518,10 @@ async def test_team_manager_keeps_single_session_per_channel(monkeypatch: pytest
         return _Spec()
 
     monkeypatch.setattr(TeamManager, "_load_team_spec", staticmethod(fake_load_team_spec))
-    # Mock _copy_global_skills_to_team_shared_dir to avoid file operations
+    # Mock _initialize_team_shared_skill_links to avoid file operations
     monkeypatch.setattr(
         TeamManager,
-        "_copy_global_skills_to_team_shared_dir",
+        "_initialize_team_shared_skill_links",
         staticmethod(lambda spec: None),
     )
 
@@ -531,10 +558,10 @@ async def test_create_team_does_not_run_global_runtime_cleanup(monkeypatch: pyte
         return _Spec()
 
     monkeypatch.setattr(TeamManager, "_load_team_spec", staticmethod(fake_load_team_spec))
-    # Mock _copy_global_skills_to_team_shared_dir to avoid file operations
+    # Mock _initialize_team_shared_skill_links to avoid file operations
     monkeypatch.setattr(
         TeamManager,
-        "_copy_global_skills_to_team_shared_dir",
+        "_initialize_team_shared_skill_links",
         staticmethod(lambda spec: None),
     )
     manager = TeamManager()
@@ -565,7 +592,7 @@ async def test_create_team_appends_session_id_to_team_name(monkeypatch: pytest.M
     monkeypatch.setattr(TeamManager, "_load_team_spec", staticmethod(lambda _session_id: _Spec()))
     monkeypatch.setattr(
         TeamManager,
-        "_copy_global_skills_to_team_shared_dir",
+        "_initialize_team_shared_skill_links",
         staticmethod(lambda spec: None),
     )
     manager = TeamManager()
@@ -596,7 +623,7 @@ async def test_create_team_appends_session_id_to_web_team_name(monkeypatch: pyte
     monkeypatch.setattr(TeamManager, "_load_team_spec", staticmethod(lambda _session_id: _Spec()))
     monkeypatch.setattr(
         TeamManager,
-        "_copy_global_skills_to_team_shared_dir",
+        "_initialize_team_shared_skill_links",
         staticmethod(lambda spec: None),
     )
     manager = TeamManager()
@@ -959,24 +986,6 @@ async def test_delete_session_runtime_falls_back_to_release_without_team_name(
     assert deleted is True
     assert stop_calls == [("sess-1", "session.delete: ")]
     assert released == ["sess-1"]
-
-
-def test_sync_team_skills_across_managers_uses_public_lookup(monkeypatch: pytest.MonkeyPatch) -> None:
-    manager = get_team_manager("web")
-    source = Path("/tmp/team-source")
-    target = Path("/tmp/team-target")
-    manager.register_team_skill_sync_target("sess-1", source, target)
-
-    called = {"count": 0}
-
-    def fake_sync(session_id: str) -> None:
-        called["count"] += 1
-        assert session_id == "sess-1"
-
-    monkeypatch.setattr(manager, "sync_team_skills", fake_sync)
-
-    assert sync_team_skills_across_managers("sess-1") is True
-    assert called["count"] == 1
 
 
 def test_resolve_session_team_name_returns_none_when_metadata_missing(

@@ -5,9 +5,9 @@
 from __future__ import annotations
 
 import logging
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any, Callable
 
-from openjiuwen.core.foundation.tool import ToolCard
+from openjiuwen.core.foundation.tool import LocalFunction, Tool, ToolCard
 from openjiuwen.core.runner import Runner
 from openjiuwen.harness.rails.base import DeepAgentRail
 
@@ -25,11 +25,18 @@ class MemberSkillToolkitRail(DeepAgentRail):
 
     priority = 95
 
-    def __init__(self, workspace_dir: str) -> None:
+    def __init__(
+        self,
+        workspace_dir: str,
+        *,
+        manager: Any | None = None,
+        refresh_links: Callable[[dict[str, object]], None] | None = None,
+    ) -> None:
         super().__init__()
         self._workspace_dir = workspace_dir
+        self._manager = manager
+        self._refresh_links = refresh_links
         self._tools = None
-        self._manager = None
 
     def init(self, agent: "DeepAgent") -> None:
         """Register member-scoped skill tools on the agent."""
@@ -37,9 +44,10 @@ class MemberSkillToolkitRail(DeepAgentRail):
             return
 
         agent_id = str(agent.card.id or agent.card.name)
-        self._manager = SkillManager(workspace_dir=self._workspace_dir)
+        if self._manager is None:
+            self._manager = SkillManager(workspace_dir=self._workspace_dir)
         toolkit = SkillToolkit(manager=self._manager)
-        tools = toolkit.get_tools()
+        tools = self._wrap_skill_tools(toolkit.get_tools())
 
         for tool in tools:
             tool.card.id = self._qualify_tool_id(tool.card.id, agent_id)
@@ -76,11 +84,30 @@ class MemberSkillToolkitRail(DeepAgentRail):
             self._workspace_dir,
         )
         self._tools = None
-        self._manager = None
 
     @staticmethod
     def _qualify_tool_id(tool_id: str, agent_id: str) -> str:
         return f"{tool_id}_{agent_id}"
+
+    def _wrap_skill_tools(self, tools: list[Tool]) -> list[Tool]:
+        """Refresh linked skill views after mutating skill operations."""
+        if self._refresh_links is None:
+            return tools
+
+        wrapped: list[Tool] = []
+        for tool in tools:
+            if tool.card.name not in {"install_skill", "uninstall_skill"}:
+                wrapped.append(tool)
+                continue
+
+            async def refresh_after_call(_tool: Tool = tool, **kwargs):
+                result = await _tool.invoke(kwargs, skip_inputs_validate=True)
+                if isinstance(result, dict) and result.get("success"):
+                    self._refresh_links(result)
+                return result
+
+            wrapped.append(LocalFunction(card=tool.card, func=refresh_after_call))
+        return wrapped
 
 
 __all__ = ["MemberSkillToolkitRail"]

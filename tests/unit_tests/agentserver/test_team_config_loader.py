@@ -479,10 +479,6 @@ def test_load_team_spec_dict_no_auto_fill_skills_when_missing(monkeypatch, tmp_p
         "jiuwenswarm.agents.harness.team.config_loader.get_agent_teams_home",
         lambda: tmp_path / ".agent_teams",
     )
-    monkeypatch.setattr(
-        "jiuwenswarm.agents.harness.team.config_loader.get_agent_skills_dir",
-        lambda: global_skills_dir,
-    )
 
     spec = load_team_spec_dict()
 

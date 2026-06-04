@@ -98,12 +98,13 @@ interface ChatState {
   setInterruptResult: (result: InterruptResultPayload | null) => void;
   setSwitchingMode: (switching: boolean) => void;
   setNewSession: (isNew: boolean) => void;
-  addToolCall: (toolCall: ToolCall, options?: { startedAt?: string }) => void;
+  addToolCall: (toolCall: ToolCall, options?: { startedAt?: string; requestId?: string }) => void;
   addToolResult: (toolResult: ToolResult, options?: { updatedAt?: string }) => void;
   markTimedOutExecutions: () => void;
   updateSubtask: (payload: SubtaskUpdatePayload) => void;
   clearSubtasks: () => void;
   clearMessages: () => void;
+  clearCurrentTurnData: (requestId?: string) => void;
   /** 在列表头部插入更早的历史消息（数组内建议时间升序） */
   prependMessages: (olderFirst: Message[]) => void;
   // 任务队列相关
@@ -331,6 +332,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
         startedAt,
         updatedAt: startedAt,
         timeoutAt,
+        requestId: options?.requestId,
       });
 
       const nextOrder = [...state.toolExecutionOrder, toolCall.id];
@@ -528,6 +530,48 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
   clearSubtasks: () => {
     set({ activeSubtasks: new Map() });
+  },
+
+  clearCurrentTurnData: (requestId) => {
+    set((state) => {
+      if (requestId) {
+        const nextExecutions = new Map(state.toolExecutions);
+        const nextOrder: string[] = [];
+        for (const id of state.toolExecutionOrder) {
+          const exec = nextExecutions.get(id);
+          if (exec && exec.requestId === requestId) {
+            nextExecutions.delete(id);
+          } else {
+            nextOrder.push(id);
+          }
+        }
+        return {
+          toolExecutions: nextExecutions,
+          toolExecutionOrder: nextOrder,
+          orphanResults: new Map(),
+          activeSubtasks: new Map(),
+          interruptResult: null,
+          pendingQuestion: null,
+          toolMetrics: {
+            toolCallDedupDropped: 0,
+            toolResultDedupDropped: 0,
+          },
+        };
+      }
+      return {
+        toolExecutions: new Map(),
+        toolExecutionOrder: [],
+        orphanResults: new Map(),
+        activeSubtasks: new Map(),
+        interruptResult: null,
+        pendingQuestion: null,
+        toolMetrics: {
+          toolCallDedupDropped: 0,
+          toolResultDedupDropped: 0,
+        },
+      };
+    });
+    useTodoStore.getState().setTodos([]);
   },
 
   prependMessages: (olderFirst) => {
