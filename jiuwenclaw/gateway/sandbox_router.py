@@ -27,7 +27,9 @@ from jiuwenclaw.gateway.open_ability_client import OpenAbilityWebSocketClient
 from jiuwenclaw.sandbox.open_ability import (
     OpenAbilityConfig,
     OpenAbilityEndpoint,
+    OpenAbilityReconnectTimeoutError,
     build_openability_ws_uri,
+    format_openability_endpoint,
 )
 from jiuwenclaw.schema.agent import AgentResponse, AgentResponseChunk
 from jiuwenclaw.schema.message import ReqMethod
@@ -382,8 +384,15 @@ class SandboxRouterAgentClient(AgentServerClient):
             session_id=envelope.session_id,
         )
 
+    def _openability_reconnect_buffer_timeout_seconds(self) -> float:
+        return max(
+            self._queue_timeout_seconds,
+            self._get_open_ability_config().reconnect_timeout_seconds,
+        )
+
     async def _wait_for_openability_reconnect_buffer(self, envelope: E2AEnvelope) -> None:
         routing_key = self._routing_key(envelope.user_id, envelope.session_id)
+        buffer_timeout = self._openability_reconnect_buffer_timeout_seconds()
         while True:
             waiter: asyncio.Future[None] | None = None
             async with self._pool_lock:
@@ -397,7 +406,7 @@ class SandboxRouterAgentClient(AgentServerClient):
                 waiters.append(waiter)
             try:
                 assert waiter is not None
-                await asyncio.wait_for(waiter, timeout=self._queue_timeout_seconds)
+                await asyncio.wait_for(waiter, timeout=buffer_timeout)
                 return
             except asyncio.TimeoutError as exc:
                 async with self._pool_lock:
@@ -444,7 +453,7 @@ class SandboxRouterAgentClient(AgentServerClient):
                 if runtime_to_refresh is not None:
                     refreshed = await self._refresh_runtime_open_ability(
                         runtime_to_refresh,
-                        reason="acquire",
+                        reason="acquire-refresh",
                     )
                     if refreshed:
                         continue
@@ -702,6 +711,8 @@ class SandboxRouterAgentClient(AgentServerClient):
 
     def _first_idle_runtime_key_unlocked(self) -> str | None:
         for routing_key, runtime in self._runtimes.items():
+            if self._runtime_needs_openability_refresh(runtime):
+                continue
             if runtime.status == SandboxStatus.IDLE and runtime.task_count == 0:
                 return routing_key
         return None
@@ -787,6 +798,14 @@ class SandboxRouterAgentClient(AgentServerClient):
             now = time.time()
             for routing_key, runtime in list(self._runtimes.items()):
                 if runtime.status == SandboxStatus.TERMINATING:
+                    continue
+                if self._runtime_needs_openability_refresh(runtime):
+                    logger.debug(
+                        "Skipping idle sandbox reclaim during OA reconnect: "
+                        "routing_key=%s sandbox_id=%s",
+                        routing_key,
+                        runtime.sandbox_id,
+                    )
                     continue
                 await self._maybe_refresh_sandbox_duration(runtime)
                 if runtime.task_count == 0 and now - runtime.last_active_at >= self._idle_timeout_seconds:
@@ -1236,20 +1255,12 @@ class SandboxRouterAgentClient(AgentServerClient):
                     sandbox_id,
                 )
 
-    async def _connect_open_ability_client(
+    def _new_open_ability_ws_client(
         self,
         sandbox_id: str,
         routing_key: str,
-        metadata: dict[str, Any],
-    ) -> AgentServerClient:
-        store = self._get_dcs_store()
+    ) -> OpenAbilityWebSocketClient:
         open_ability_cfg = self._get_open_ability_config()
-        endpoint = await self._wait_openability_endpoint(
-            store,
-            sandbox_id,
-            open_ability_cfg,
-        )
-        ws_uri = build_openability_ws_uri(endpoint, ws_path=open_ability_cfg.ws_path)
         client = OpenAbilityWebSocketClient(
             sandbox_id=sandbox_id,
             request_timeout_seconds=open_ability_cfg.request_timeout_seconds,
@@ -1267,45 +1278,191 @@ class SandboxRouterAgentClient(AgentServerClient):
             )
         if hasattr(client, "set_link_heartbeat_handler"):
             client.set_link_heartbeat_handler(self._handle_inbound_link_heartbeat)
+        return client
+
+    @staticmethod
+    async def _sleep_openability_reconnect_poll(
+        deadline: float,
+        poll_interval_seconds: float,
+    ) -> None:
+        remaining = deadline - time.time()
+        if remaining <= 0:
+            return
+        await asyncio.sleep(min(poll_interval_seconds, remaining))
+
+    async def _connect_open_ability_client(
+        self,
+        sandbox_id: str,
+        routing_key: str,
+        metadata: dict[str, Any],
+        *,
+        connect_reason: str = "initial",
+    ) -> AgentServerClient:
+        store = self._get_dcs_store()
+        open_ability_cfg = self._get_open_ability_config()
+        deadline = time.time() + open_ability_cfg.reconnect_timeout_seconds
+        attempt = 0
+        last_failure = "none"
         trigger_session_id = str(metadata.get("session_id") or "").strip()
         logger.info(
-            "Connecting OpenAbility WebSocket: sandbox_id=%s routing_key=%s "
-            "session_id=%s uri=%s",
+            "Beginning OpenAbility reconnect window: sandbox_id=%s routing_key=%s "
+            "session_id=%s reason=%s timeout_seconds=%.1f poll_interval_seconds=%.1f",
             sandbox_id,
             routing_key,
             trigger_session_id,
-            ws_uri,
+            connect_reason,
+            open_ability_cfg.reconnect_timeout_seconds,
+            open_ability_cfg.readiness_poll_interval_seconds,
         )
-        await asyncio.wait_for(
-            client.connect(ws_uri),
-            timeout=open_ability_cfg.connect_timeout_seconds,
-        )
-        metadata["openability_endpoint"] = endpoint
-        metadata["openability_ws_uri"] = ws_uri
-        metadata["openability_connected_at"] = time.time()
-        metadata.pop("last_link_heartbeat_at", None)
-        await self._probe_link_return_path_for_client(
+        while time.time() < deadline:
+            attempt += 1
+            remaining_seconds = max(0.0, deadline - time.time())
+            endpoint: OpenAbilityEndpoint | None
+            try:
+                endpoint = await store.get_openability_endpoint(sandbox_id)
+            except Exception as exc:  # noqa: BLE001
+                last_failure = f"dcs-read-error:{exc}"
+                logger.warning(
+                    "OpenAbility reconnect attempt %s: DCS endpoint read failed, "
+                    "will retry: sandbox_id=%s routing_key=%s reason=%s "
+                    "remaining_seconds=%.1f error=%s",
+                    attempt,
+                    sandbox_id,
+                    routing_key,
+                    connect_reason,
+                    remaining_seconds,
+                    exc,
+                )
+                await self._sleep_openability_reconnect_poll(
+                    deadline,
+                    open_ability_cfg.readiness_poll_interval_seconds,
+                )
+                continue
+
+            if endpoint is None:
+                last_failure = "endpoint-missing-in-dcs"
+                logger.info(
+                    "OpenAbility reconnect attempt %s: endpoint not in DCS yet, "
+                    "will retry: sandbox_id=%s routing_key=%s reason=%s "
+                    "remaining_seconds=%.1f",
+                    attempt,
+                    sandbox_id,
+                    routing_key,
+                    connect_reason,
+                    remaining_seconds,
+                )
+                await self._sleep_openability_reconnect_poll(
+                    deadline,
+                    open_ability_cfg.readiness_poll_interval_seconds,
+                )
+                continue
+
+            endpoint_label = format_openability_endpoint(endpoint)
+            ws_uri = build_openability_ws_uri(
+                endpoint,
+                ws_path=open_ability_cfg.ws_path,
+            )
+            client = self._new_open_ability_ws_client(sandbox_id, routing_key)
+            logger.info(
+                "OpenAbility reconnect attempt %s: connecting WebSocket: "
+                "sandbox_id=%s routing_key=%s session_id=%s reason=%s "
+                "endpoint=%s uri=%s remaining_seconds=%.1f",
+                attempt,
+                sandbox_id,
+                routing_key,
+                trigger_session_id,
+                connect_reason,
+                endpoint_label,
+                ws_uri,
+                remaining_seconds,
+            )
+            try:
+                await asyncio.wait_for(
+                    client.connect(ws_uri),
+                    timeout=open_ability_cfg.connect_timeout_seconds,
+                )
+            except Exception as exc:  # noqa: BLE001
+                last_failure = f"connect-failed:{exc}"
+                logger.warning(
+                    "OpenAbility reconnect attempt %s: WebSocket connect failed, "
+                    "will retry: sandbox_id=%s routing_key=%s reason=%s "
+                    "endpoint=%s uri=%s remaining_seconds=%.1f error=%s",
+                    attempt,
+                    sandbox_id,
+                    routing_key,
+                    connect_reason,
+                    endpoint_label,
+                    ws_uri,
+                    remaining_seconds,
+                    exc,
+                )
+                await self._disconnect_agent_client(sandbox_id, client)
+                await self._sleep_openability_reconnect_poll(
+                    deadline,
+                    open_ability_cfg.readiness_poll_interval_seconds,
+                )
+                continue
+
+            probe_ok = await self._probe_link_return_path_for_client(
+                sandbox_id,
+                routing_key,
+                client,
+                metadata,
+            )
+            if not probe_ok:
+                last_failure = "link-probe-failed"
+                logger.warning(
+                    "OpenAbility reconnect attempt %s: link probe failed, will retry: "
+                    "sandbox_id=%s routing_key=%s reason=%s endpoint=%s uri=%s "
+                    "remaining_seconds=%.1f",
+                    attempt,
+                    sandbox_id,
+                    routing_key,
+                    connect_reason,
+                    endpoint_label,
+                    ws_uri,
+                    remaining_seconds,
+                )
+                await self._disconnect_agent_client(sandbox_id, client)
+                await self._sleep_openability_reconnect_poll(
+                    deadline,
+                    open_ability_cfg.readiness_poll_interval_seconds,
+                )
+                continue
+
+            metadata["openability_endpoint"] = endpoint
+            metadata["openability_ws_uri"] = ws_uri
+            metadata["openability_connected_at"] = time.time()
+            metadata.pop("last_link_heartbeat_at", None)
+            logger.info(
+                "OpenAbility reconnect window succeeded: sandbox_id=%s routing_key=%s "
+                "session_id=%s reason=%s endpoint=%s uri=%s attempts=%s",
+                sandbox_id,
+                routing_key,
+                trigger_session_id,
+                connect_reason,
+                endpoint_label,
+                ws_uri,
+                attempt,
+            )
+            return client
+
+        logger.error(
+            "OpenAbility reconnect window exhausted: sandbox_id=%s routing_key=%s "
+            "session_id=%s reason=%s timeout_seconds=%.1f attempts=%s last_failure=%s",
             sandbox_id,
             routing_key,
-            client,
-            metadata,
+            trigger_session_id,
+            connect_reason,
+            open_ability_cfg.reconnect_timeout_seconds,
+            attempt,
+            last_failure,
         )
-        return client
-
-    async def _wait_openability_endpoint(
-        self,
-        store: SandboxDcsStore,
-        sandbox_id: str,
-        open_ability_config: OpenAbilityConfig,
-    ) -> OpenAbilityEndpoint:
-        deadline = time.time() + open_ability_config.readiness_timeout_seconds
-        while time.time() < deadline:
-            endpoint = await store.get_openability_endpoint(sandbox_id)
-            if endpoint is not None:
-                return endpoint
-            await asyncio.sleep(open_ability_config.readiness_poll_interval_seconds)
-        raise RuntimeError(
-            f"OpenAbility endpoint not ready in DCS for sandbox_id={sandbox_id}"
+        raise OpenAbilityReconnectTimeoutError(
+            f"OpenAbility reconnect window exhausted for sandbox_id={sandbox_id} "
+            f"routing_key={routing_key} reason={connect_reason} "
+            f"timeout_seconds={open_ability_cfg.reconnect_timeout_seconds} "
+            f"attempts={attempt} last_failure={last_failure}"
         )
 
     def _get_open_ability_config(self) -> OpenAbilityConfig:
@@ -1339,13 +1496,16 @@ class SandboxRouterAgentClient(AgentServerClient):
             runtime.metadata["openability_reconnect_required"] = True
             runtime.metadata["openability_connection_lost"] = dict(payload)
             runtime.metadata["openability_disconnect_at"] = time.time()
+            runtime.last_active_at = time.time()
             session_ids = _tracked_session_ids_from_metadata(runtime.metadata)
+            open_ability_cfg = self._get_open_ability_config()
             logger.warning(
                 "Detected OA physical disconnect: routing_key=%s sandbox_id=%s "
-                "session_ids=%s",
+                "session_ids=%s reconnect_timeout_seconds=%.1f",
                 routing_key,
                 sandbox_id,
                 session_ids,
+                open_ability_cfg.reconnect_timeout_seconds,
             )
             refreshed = await self._refresh_runtime_open_ability(
                 runtime,
@@ -1363,19 +1523,33 @@ class SandboxRouterAgentClient(AgentServerClient):
     ) -> bool:
         old_client = runtime.agent_client
         runtime.metadata["openability_reconnect_required"] = True
+        runtime.last_active_at = time.time()
+        session_ids = _tracked_session_ids_from_metadata(runtime.metadata)
         try:
             new_client = await self._connect_open_ability_client(
                 runtime.sandbox_id,
                 runtime.routing_key,
                 runtime.metadata,
+                connect_reason=reason,
             )
+        except OpenAbilityReconnectTimeoutError as exc:
+            logger.error(
+                "Failed to refresh OA client after reconnect window: routing_key=%s "
+                "sandbox_id=%s session_ids=%s reason=%s error=%s",
+                runtime.routing_key,
+                runtime.sandbox_id,
+                session_ids,
+                reason,
+                exc,
+            )
+            return False
         except Exception:  # noqa: BLE001
             logger.exception(
                 "Failed to refresh OA client: routing_key=%s sandbox_id=%s "
                 "session_ids=%s reason=%s",
                 runtime.routing_key,
                 runtime.sandbox_id,
-                _tracked_session_ids_from_metadata(runtime.metadata),
+                session_ids,
                 reason,
             )
             return False
@@ -1423,12 +1597,15 @@ class SandboxRouterAgentClient(AgentServerClient):
             )
         self._notify_next_waiter()
         session_ids = _tracked_session_ids_from_metadata(runtime.metadata)
+        reconnect_timeout = self._get_open_ability_config().reconnect_timeout_seconds
         logger.warning(
-            "Dropped runtime after OA disconnect; next request will re-adopt from DCS: "
-            "routing_key=%s sandbox_id=%s session_ids=%s",
+            "Dropped runtime after OA reconnect window exhausted; next request will "
+            "re-adopt from DCS: routing_key=%s sandbox_id=%s session_ids=%s "
+            "reconnect_timeout_seconds=%.1f",
             runtime.routing_key,
             runtime.sandbox_id,
             session_ids,
+            reconnect_timeout,
         )
 
     def _get_sandbox_client(self) -> SandboxClient:

@@ -208,7 +208,7 @@ DCS TTL（共用 `SANDBOX_DCS_HOST` 等连接配置，**各 key 默认 TTL 不�
 
 SandboxClient 固定：`timeout_seconds=120`，`metadata={}`。
 
-OpenAbility 固定：`use_tls=false`，`connect_timeout_seconds=10`，`readiness_poll_interval_seconds=0.5`，`readiness_timeout_seconds=60`。
+OpenAbility 固定：`use_tls=false`，`connect_timeout_seconds=10`，`readiness_poll_interval_seconds=0.5`；reconnect 窗口默认 `reconnect_timeout_seconds=600`（`SANDBOX_OA_RECONNECT_TIMEOUT_SECONDS`），窗口内轮询 DCS + 重试 connect/probe。
 
 ### 3.1 跨 Gateway failover（routing 映射）
 

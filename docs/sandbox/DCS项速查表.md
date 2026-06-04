@@ -83,7 +83,7 @@
 | 操作 | 触发场景 |
 |------|----------|
 | **写** | **非 Gateway**；沙箱启动后由沙箱平台 / 沙箱内 OpenAbility 写入 |
-| **读** | `_connect_open_ability_client` → `_wait_openability_endpoint` 轮询；adopt 时校验 OA 是否仍可达 |
+| **读** | `_connect_open_ability_client` 在 reconnect 窗口内轮询（默认 600s）；adopt 时校验 OA 是否仍可达 |
 | **删** | 同 `sandboxApiKey`（terminate 且远端删除成功） |
 | **续 TTL** | 同 `sandboxApiKey`（`refresh_sandbox_ttl`） |
 
